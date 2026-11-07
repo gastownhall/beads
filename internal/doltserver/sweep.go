@@ -155,11 +155,20 @@ func tempDirRoots() []string {
 	if err != nil {
 		home = ""
 	}
+	suiteHome := home != "" && homeIsSuiteRoot(home)
 	account := accountHomeDir()
+	if account != "" && isEchoedAccountHome(canonicalRoots([]string{account}), home, suiteHome) {
+		// Not the account's home but a CGO-free user.Current() echoing $HOME
+		// (see accountHomeDir). Trusting it would refuse every root that holds
+		// it, /tmp or the suite's own TMPDIR included, so judge the roots
+		// without it, as before the account home bounded them.
+		account = ""
+	}
 	tmpdir := os.TempDir()
+	tmpdirs := canonicalRoots([]string{tmpdir})
 	var roots []string
 	for _, root := range canonicalRoots([]string{tmpdir, os.Getenv("GOTMPDIR"), "/tmp"}) {
-		if !isCredibleTempRoot(root, home, account, tmpdir) {
+		if !isCredibleTempRoot(root, home, account, suiteHome, tmpdirs) {
 			continue
 		}
 		roots = append(roots, root)
@@ -167,12 +176,31 @@ func tempDirRoots() []string {
 	return roots
 }
 
+// homeIsSuiteRoot reports whether home is the temp root this process claimed
+// with WriteSuiteOwnerMarker: the tree a TestMain makes with os.MkdirTemp,
+// points HOME at, and removes when the run ends, as this package's own
+// testmain_test.go does. The marker names this very process, so it is
+// positive evidence that HOME is throwaway, and no persistent home carries
+// it. A package variable so tests can pin it.
+var homeIsSuiteRoot = func(home string) bool {
+	pid, ok := readSuiteOwnerMarker(home)
+	return ok && pid == os.Getpid()
+}
+
 // accountHomeDir is the home directory the account database (/etc/passwd,
 // Directory Services) records for the current user, or "" when it cannot be
-// determined. Unlike $HOME it is not an environment variable, so a test
-// harness that re-points HOME at a throwaway directory cannot move it — which
-// is what lets isSandboxHome tell that throwaway HOME apart from a real one
-// (see isCredibleTempRoot). A package variable so tests can pin it.
+// determined. A test harness that re-points HOME at a throwaway directory does
+// not move the account record, so it still names where the user's real
+// workspaces live, and isCredibleTempRoot never credits a root that is or
+// holds it.
+//
+// It is a preference over $HOME, not a guarantee of independence from it (the
+// caveat cmd/bd/init.go's resolveUserHomeDir records too): in a CGO-free
+// Linux build, a uid with no /etc/passwd entry makes user.Current() fall back
+// to os.UserHomeDir(), $HOME itself, whenever $USER is set, and Current caches
+// that first answer for the life of the process. tempDirRoots discards such an
+// echo wherever a real account home cannot be (isEchoedAccountHome). A
+// package variable so tests can pin it.
 var accountHomeDir = func() string {
 	u, err := user.Current()
 	if err != nil || u.HomeDir == "" || !filepath.IsAbs(u.HomeDir) {
@@ -185,6 +213,26 @@ var accountHomeDir = func() string {
 		return ""
 	}
 	return h
+}
+
+// isEchoedAccountHome reports whether the account home, in every form
+// canonicalRoots gives it, lies where a real account home cannot: in a fixed
+// temp location, where a home would be a temp directory itself, or inside the
+// suite root this process claimed as HOME (suiteHome), which os.MkdirTemp
+// created for this run. Such an answer is a CGO-free user.Current() echoing
+// $HOME (see accountHomeDir). Every form counts, so a home that reaches /tmp
+// through a symlink is recognized under its resolved name.
+func isEchoedAccountHome(accountForms []string, home string, suiteHome bool) bool {
+	homeForms := canonicalRoots([]string{home})
+	for _, a := range accountForms {
+		if isUnderFixedTempRoots(a, runtime.GOOS) {
+			return true
+		}
+		if suiteHome && underAnyRoot(a, homeForms) {
+			return true
+		}
+	}
+	return false
 }
 
 // isCredibleTempRoot reports whether root is narrow enough to bound the
@@ -213,18 +261,24 @@ var accountHomeDir = func() string {
 // the sandbox home directly under the shared root — would hand back all of
 // /var/tmp, and with it every other user's workspace there.
 //
+// suiteHome reports that HOME is the temp root this process claimed
+// (homeIsSuiteRoot), and tmpdirs is os.TempDir() in every form canonicalRoots
+// gives it. Together they are the second witness that lets a sandbox HOME live
+// under a TMPDIR outside the fixed temp locations: a gate host with
+// TMPDIR=/data/tmp, where this package's TestMain makes its root under
+// /data/tmp and points HOME at it. That witness only ever rescues the root
+// that IS a nested TMPDIR (suiteHomeWitness). TMPDIR is the operator's
+// declared temp location, while GOTMPDIR and every other candidate get no such
+// benefit of the doubt (GOTMPDIR=/home stays out even around a HOME this suite
+// claimed: TestSandboxHomeUnderNonStandardTMPDIR, "GOTMPDIR containing a
+// fixture HOME is still dropped"), and neither does a top-level TMPDIR such as
+// /home.
+//
 // accountHome is the account database's home for the current user
-// (accountHomeDir), or "" when unknown, and tmpdir is os.TempDir(). Together
-// they are the second witness that lets a sandbox HOME live under a TMPDIR
-// outside the fixed temp locations — a gate host with TMPDIR=/data/tmp, where
-// test-env.sh mktemp -ds the sandbox HOME under /data/tmp. That witness only ever rescues the root that IS
-// tmpdir: TMPDIR is the operator's declared temp location, while GOTMPDIR
-// and every other candidate get no such benefit of the doubt (a HOME under
-// GOTMPDIR=/home is still a real-looking home, TestTempDirRootsCoverGOTMPDIR).
-// accountHome also adds one rejection of its own: a root that IS or contains
-// the account home is never credible, whatever HOME says, because that is
-// where the user's real workspaces live.
-func isCredibleTempRoot(root, home, accountHome, tmpdir string) bool {
+// (accountHomeDir), or "" when unknown. It only ever rejects: a root that IS
+// or contains the account home is never credible, whatever HOME says, because
+// that is where the user's real workspaces live.
+func isCredibleTempRoot(root, home, accountHome string, suiteHome bool, tmpdirs []string) bool {
 	cleaned := filepath.Clean(root)
 	if cleaned == "" || cleaned == "." || cleaned == string(filepath.Separator) {
 		return false
@@ -232,28 +286,15 @@ func isCredibleTempRoot(root, home, accountHome, tmpdir string) bool {
 	if !filepath.IsAbs(cleaned) {
 		return false
 	}
-	accountHomes := canonicalRoots([]string{accountHome})
-	for _, a := range accountHomes {
+	for _, a := range canonicalRoots([]string{accountHome}) {
 		if isUnderDir(filepath.Clean(a), cleaned) {
 			return false
 		}
 	}
-	// The account-home witness is scoped to TMPDIR's own root.
-	isTMPDIR := false
-	if tmpdir != "" {
-		for _, t := range canonicalRoots([]string{tmpdir}) {
-			if filepath.Clean(t) == cleaned {
-				isTMPDIR = true
-			}
-		}
-	}
-	witnessHomes := accountHomes
-	if !isTMPDIR {
-		witnessHomes = nil
-	}
 	if home == "" {
 		return true
 	}
+	vouched := suiteHomeWitness(cleaned, suiteHome, tmpdirs)
 	for _, h := range canonicalRoots([]string{home}) {
 		h = filepath.Clean(h)
 		if h == cleaned {
@@ -262,44 +303,64 @@ func isCredibleTempRoot(root, home, accountHome, tmpdir string) bool {
 		if !isUnderDir(h, cleaned) {
 			continue
 		}
-		if !isSandboxHome(h, witnessHomes) || isSharedTempRoot(cleaned, runtime.GOOS) {
+		if !isSandboxHome(h, vouched) || isSharedTempRoot(cleaned, runtime.GOOS) {
 			return false
 		}
 	}
 	return true
 }
 
+// suiteHomeWitness reports whether isSandboxHome may take suiteHome, HOME
+// being this suite's claimed root, as its second witness when judging root.
+// Only TMPDIR's own root qualifies (root is one of tmpdirs), and only while no
+// form of TMPDIR is a top-level directory: /home, /Users, /srv or /data holds
+// homes and persistent data for the whole box, never one run's scratch space,
+// however throwaway the HOME inside it. Every form is checked so that a
+// TMPDIR=/home which resolves to /data/home is refused under both names.
+func suiteHomeWitness(root string, suiteHome bool, tmpdirs []string) bool {
+	if !suiteHome {
+		return false
+	}
+	isTMPDIR := false
+	for _, t := range tmpdirs {
+		t = filepath.Clean(t)
+		if isTopLevelDir(t) {
+			return false
+		}
+		if t == root {
+			isTMPDIR = true
+		}
+	}
+	return isTMPDIR
+}
+
+// isTopLevelDir reports whether path is the filesystem root or a directory
+// directly under it.
+func isTopLevelDir(path string) bool {
+	return filepath.Dir(filepath.Clean(path)) == string(filepath.Separator)
+}
+
 // isSandboxHome reports whether home is a test harness's throwaway HOME
 // rather than a real one. Two independent witnesses qualify it:
 //
 //   - home lives inside a FIXED system temp location (isUnderFixedTempRoots);
-//   - the account database knows the user's real home (accountHomes is
-//     non-empty) and home is neither that directory nor inside it — HOME was
-//     re-pointed away from the account's home, which is exactly what
-//     scripts/ci/lib/test-env.sh and the HOME-pinning suites do. The caller
-//     passes accountHomes only when judging TMPDIR's own root, so this
-//     witness never rescues GOTMPDIR or any other candidate.
+//   - suiteHome is true: home is the temp root this very process claimed with
+//     its owner marker and pointed HOME at (homeIsSuiteRoot). The caller
+//     passes it only when judging a nested TMPDIR's own root
+//     (suiteHomeWitness), so this witness never rescues GOTMPDIR, /tmp, or a
+//     top-level directory.
 //
-// Neither witness is os.TempDir(), so TMPDIR still cannot vote on its own
-// credibility: TMPDIR=/home with HOME=/home/runner reads as a real home under
-// an overbroad root (TestTempDirRootsRejectsOverbroadTMPDIR), because
-// /home/runner IS the account home — and isCredibleTempRoot independently
-// refuses any root containing the account home. With no account home known,
-// only the fixed-location witness applies, which is the conservative
-// earlier behavior.
-func isSandboxHome(home string, accountHomes []string) bool {
-	if isUnderFixedTempRoots(home, runtime.GOOS) {
-		return true
-	}
-	if len(accountHomes) == 0 {
-		return false
-	}
-	for _, a := range accountHomes {
-		if isUnderDir(home, filepath.Clean(a)) {
-			return false
-		}
-	}
-	return true
+// The second witness is positive evidence on purpose. A HOME that merely
+// points away from the account database's home proves nothing: the root user
+// running with HOME=/home/runner, sudo keeping the caller's HOME, and a
+// service account whose passwd home is a placeholder all look like that. They
+// do under a nested TMPDIR=/srv/apps with HOME=/srv/apps/svc as much as under
+// TMPDIR=/home, and a dolt server whose workspace there was deleted must stay
+// out of the kill arm (TestSandboxHomeUnderNonStandardTMPDIR). No persistent
+// home carries a marker naming this process. Without one, only the
+// fixed-location witness applies, which is the conservative earlier behavior.
+func isSandboxHome(home string, suiteHome bool) bool {
+	return suiteHome || isUnderFixedTempRoots(home, runtime.GOOS)
 }
 
 // isUnderFixedTempRoots reports whether path lies under one of the temp
