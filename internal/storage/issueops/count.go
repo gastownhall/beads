@@ -58,7 +58,7 @@ func CountIssuesInTx(ctx context.Context, tx DBTX, query string, filter types.Is
 	// holding one dual-resident id counts it TWICE here while the listing shows
 	// it once. `bd doctor`'s Cross-Table Duplicates check is the detector, and
 	// `--check=validate --fix` the repair. (There is no `--check=cross-table`
-	// selector: the four the flag accepts are artifacts, conventions, pollution
+	// selector: the flag accepts artifacts, conventions, export, pollution
 	// and validate, and the cross-table check runs in the default sweep.)
 	wispCount, wispErr := countTableInTx(ctx, tx, query, filter, WispsFilterTables)
 	if wispErr != nil && !missingOptionalWispTable(wispErr) {

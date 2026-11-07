@@ -234,8 +234,7 @@ func (s *DoltStore) GetCurrentCommit(ctx context.Context) (string, error) {
 // writes land in the working set and HEAD does not advance).
 // Implements storage.StateHasher.
 func (s *DoltStore) GetStateHash(ctx context.Context) (string, error) {
-	var hash string
-	if err := s.db.QueryRowContext(ctx, "SELECT DOLT_HASHOF_DB()").Scan(&hash); err == nil {
+	if hash, err := versioncontrolops.StateHash(ctx, s.db); err == nil {
 		return hash, nil
 	}
 	// Older servers predate DOLT_HASHOF_DB; degrade to HEAD-based detection.

@@ -423,6 +423,7 @@
 40 22 TestLargeBatchApplyStatementCounts356_Embedded
 40 22 TestLeaseLifecycleEmbedded
 40 22 TestPolicyBlockingAnnotatorForeignOpensAreSublinear
+40 22 TestStateHasherContract
 
 40 23 TestAsOfReadContract
 40 23 TestEmbeddedBatchCloserBackendFailureReturnsNoOutcomes

@@ -251,6 +251,7 @@ go_test(
         "role_test_helpers_test.go",
         "schema_test.go",
         "search_missing_table_test.go",
+        "state_hasher_contract_test.go",
         "stats_reporter_contract_test.go",
         "sweeper_contract_test.go",
         "test_fixture_test.go",
