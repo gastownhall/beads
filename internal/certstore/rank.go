@@ -1,6 +1,7 @@
 package certstore
 
 import (
+	"cmp"
 	"crypto/ecdsa"
 	"crypto/rsa"
 	"crypto/sha1" // #nosec G505 -- the Windows thumbprint is defined as SHA-1; it identifies, it does not authenticate
@@ -133,15 +134,13 @@ func supportedKey(cert *x509.Certificate) bool {
 // passed over as ineligible. accept, when non-nil, is an additional filter
 // (for example the server's acceptable CAs) given the store and the
 // certificate; a certificate it returns an error for is rejected with that
-// error. An invalid thumbprint is an error, not a selector that matches every
-// certificate.
+// error, even one with an empty message. A selector that Validate would reject
+// for its subject or thumbprint (neither set, both set, or a malformed
+// thumbprint) is an error, not a selector that matches every certificate.
 func (s Selector) choose(store StorePath, cands []Candidate, now time.Time, accept func(StorePath, Candidate) error) (Candidate, bool, []Rejection, error) {
-	thumb := ""
-	if strings.TrimSpace(s.Thumbprint) != "" {
-		var err error
-		if thumb, err = normalizeThumbprint(s.Thumbprint); err != nil {
-			return Candidate{}, false, nil, err
-		}
+	thumb, err := s.normalizedThumbprint()
+	if err != nil {
+		return Candidate{}, false, nil, err
 	}
 	var eligible []Candidate
 	var rejected []Rejection
@@ -153,7 +152,7 @@ func (s Selector) choose(store StorePath, cands []Candidate, now time.Time, acce
 		var err error
 		if reason == "" && accept != nil {
 			if err = accept(store, c); err != nil {
-				reason = err.Error()
+				reason = cmp.Or(err.Error(), "not accepted (no reason given)")
 			}
 		}
 		if reason != "" {
