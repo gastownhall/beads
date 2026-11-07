@@ -476,15 +476,22 @@ func TestUnsetRemovesADottedKeyInEveryShape(t *testing.T) {
 			key:  "dolt.host",
 		},
 		{
-			name: "tag alone on the line under the section",
-			seed: "dolt:\n  !!map\n    host: kill-me\n",
-			key:  "dolt.host",
+			// The mapping a tag decorates keeps a second key. With the target
+			// its only key, commenting it out leaves the tag on an empty node,
+			// which yaml.v3 reads as an empty string tagged !!map rather than
+			// as an empty section, so that unset is refused
+			// (TestUnsetRefusesShapesItCannotEdit).
+			name:      "tag alone on the line under the section",
+			seed:      "dolt:\n  !!map\n    host: kill-me\n    port: 3307\n",
+			key:       "dolt.host",
+			survivors: map[string]string{"dolt.port": "3307"},
 		},
 		{
 			// A node may carry an anchor and a tag at once.
-			name: "anchor and tag together on the line under the section",
-			seed: "dolt:\n  &a !!map\n    host: kill-me\n",
-			key:  "dolt.host",
+			name:      "anchor and tag together on the line under the section",
+			seed:      "dolt:\n  &a !!map\n    host: kill-me\n    port: 3307\n",
+			key:       "dolt.host",
+			survivors: map[string]string{"dolt.port": "3307"},
 		},
 		{
 			// A tab sets a comment off as well as a space does.
@@ -499,6 +506,110 @@ func TestUnsetRemovesADottedKeyInEveryShape(t *testing.T) {
 			seed:      "dolt:\n  note: \"line one\nline two\"\n  host: kill-me\n",
 			key:       "dolt.host",
 			survivors: map[string]string{"dolt.note": "line one line two"},
+		},
+		{
+			// A flow collection that opens and closes on the key's own line is
+			// a whole entry on that line, so commenting the line out removes
+			// it cleanly. TestUnsetRefusesShapesItCannotEdit refuses the same
+			// collection wrapped onto the next line; that refusal is decided by
+			// where the entry ends, not by its style, and must not reach this.
+			name:      "flow mapping leaf on one line",
+			seed:      "sync:\n  remote: {url: a, branch: b}\nnode_id: mini\n",
+			key:       "sync.remote",
+			survivors: map[string]string{"node_id": "mini"},
+		},
+		{
+			// An alias resolves only against an anchor defined above it, so
+			// the key's line parsed on its own fails on `*r` even though the
+			// entry ends right there. The refusal must judge the line with the
+			// anchor in scope, or it refuses a value it can remove cleanly.
+			name:      "alias to an anchor above",
+			seed:      "sync:\n  remote: &r file:///a\nbackup:\n  remote: *r\n",
+			key:       "backup.remote",
+			survivors: map[string]string{"sync.remote": "file:///a"},
+		},
+		{
+			// The same holds for an alias inside a one-line collection, which an
+			// exception for a value that is a bare alias would not cover.
+			name:      "alias inside a one-line collection",
+			seed:      "sync:\n  remote: &r file:///a\nbackup:\n  remotes: [*r, file:///b]\n",
+			key:       "backup.remotes",
+			survivors: map[string]string{"sync.remote": "file:///a"},
+		},
+		{
+			// yaml.v3 ends a line at a Unicode line separator or a lone carriage
+			// return as well as at LF, even inside a quoted string, so either
+			// one above the key numbers its line one past the line a "\n" split
+			// finds it on. Cut by "\n", the probe ended inside the collection
+			// below and refused a value that ends on its own line.
+			name:      "one-line value below a line separator",
+			seed:      "notes: \"a\u2028b\"\nremote: x\nother: {a: 1,\n  b: 2}\n",
+			key:       "remote",
+			survivors: map[string]string{"other.b": "2"},
+		},
+		{
+			name:      "one-line value below a lone carriage return",
+			seed:      "notes: \"a\rb\"\nremote: x\nother: {a: 1,\n  b: 2}\n",
+			key:       "remote",
+			survivors: map[string]string{"other.b": "2"},
+		},
+		{
+			// With no newline after it, the key's line is the last one, which a
+			// "\n" split counts one short of yaml.v3: nothing follows it for the
+			// value to wrap onto.
+			name:      "last line with no newline, below a line separator",
+			seed:      "notes: \"a\u2028b\"\nremote: x",
+			key:       "remote",
+			survivors: map[string]string{"notes": "a\u2028b"},
+		},
+		{
+			// A flat key under a flow-style top level is refused, but only when
+			// it is there: an unset with nothing to remove still succeeds.
+			name:      "absent from a flow-style top level",
+			seed:      "{node_id: mini}\n",
+			key:       "sync.remote",
+			survivors: map[string]string{"node_id": "mini"},
+		},
+		{
+			// A plain scalar that ends on its line reads the same cut after it
+			// as in the whole file, and a comment below it is not a
+			// continuation, however deep.
+			name:      "plain scalar with a deeper comment below it",
+			seed:      "sync:\n  remote: file:///a\n    # the shared remote\n  branch: b\n",
+			key:       "sync.remote",
+			survivors: map[string]string{"sync.branch": "b"},
+		},
+		{
+			// Later documents are checked as well, but an edit to the first one
+			// leaves them as they were.
+			name:      "key in the first of two documents",
+			seed:      "sync:\n  remote: x\nnode_id: mini\n---\nother: y\n",
+			key:       "sync.remote",
+			survivors: map[string]string{"node_id": "mini"},
+		},
+		{
+			// Opened by its own ---, the first document stays a document, if an
+			// empty one, after its only key is commented out, so the second
+			// document does not move up into its place.
+			name: "only key of a first document that --- opens",
+			seed: "---\nremote: x\n---\nnode_id: mini\n",
+			key:  "remote",
+		},
+		{
+			// A later document that does not parse leaves the first one
+			// readable, and the edit there is checked and made all the same.
+			name:      "key above a document that does not parse",
+			seed:      "sync:\n  remote: x\nnode_id: mini\n---\nother: [unclosed\n",
+			key:       "sync.remote",
+			survivors: map[string]string{"node_id": "mini"},
+		},
+		{
+			// The check of the edit reads 64 keys and list items deep, which is
+			// as deep as this sibling goes.
+			name:      "beside a value nested 64 deep",
+			seed:      "sync:\n  remote: x\nnode_id: mini\ndeep: " + strings.Repeat("[", 63) + "x" + strings.Repeat("]", 63) + "\n",
+			key:       "sync.remote",
+			survivors: map[string]string{"node_id": "mini"},
 		},
 	}
 	for _, tc := range cases {
@@ -571,6 +682,21 @@ func TestUnsetRefusesShapesItCannotEdit(t *testing.T) {
 	}{
 		{name: "flow style section", seed: "sync: {remote: \"file:///origin.git\"}\n", key: "sync.remote", want: "flow style"},
 		{name: "flow style nested deeper", seed: "dolt:\n    limits: {host: mini}\n", key: "dolt.limits.host", want: "flow style"},
+		// A flow-style top level spread over lines is still named for its
+		// style. The key's own value ends on its line; only the mapping
+		// around it goes on.
+		{name: "flow style top level spread over lines", seed: "{notes: x,\n  node_id: mini}\n", key: "notes", want: "flow style"},
+		// A flat key is a key of the top level, so a flow-style top level holds
+		// it in a flow-style mapping too. The line matcher never finds it on
+		// the opening line, takes the closing brace with it, or leaves the rest
+		// of a wrapped value behind, so it gets the same refusal, even for a
+		// value on a line of its own.
+		{name: "flat key on the opening line of a flow-style top level", seed: "{sync.remote: a, node_id: b}\n", key: "sync.remote", want: "the top level of this config file is written in flow style"},
+		{name: "flat key wrapped from the opening line of a flow-style top level", seed: "{sync.remote: {url: a,\n  branch: b}}\n", key: "sync.remote", want: "the top level of this config file is written in flow style"},
+		{name: "flat key whose flow value wraps in a flow-style top level", seed: "{\n  sync.remote: {url: a,\n    branch: b},\n  node_id: mini\n}\n", key: "sync.remote", want: "the top level of this config file is written in flow style"},
+		{name: "flat key whose quoted value wraps in a flow-style top level", seed: "{\n  sync.remote: \"file:///a\n    /b\",\n  node_id: mini\n}\n", key: "sync.remote", want: "the top level of this config file is written in flow style"},
+		{name: "flat key on the line that closes a flow-style top level", seed: "{\n  node_id: mini,\n  sync.remote: x}\n", key: "sync.remote", want: "the top level of this config file is written in flow style"},
+		{name: "flat key on a line of its own in a flow-style top level", seed: "{\n  sync.remote: file:///a,\n  node_id: mini\n}\n", key: "sync.remote", want: "the top level of this config file is written in flow style"},
 		{name: "literal block scalar", seed: "sync:\n    remote: |\n        line1\n        line2\n", key: "sync.remote", want: "block scalar"},
 		{name: "folded block scalar", seed: "sync:\n    remote: >\n        line1\n", key: "sync.remote", want: "block scalar"},
 		// The flat spelling reaches the same body-left-behind outcome by the
@@ -607,6 +733,91 @@ func TestUnsetRefusesShapesItCannotEdit(t *testing.T) {
 		{name: "plain scalar on the next line", seed: "dolt.mode:\n  server\n", key: "dolt.mode", want: "lines beneath it"},
 		// A CRLF blank line is a lone carriage return, not content at column 0.
 		{name: "mapping behind a CRLF blank line", seed: "backup:\r\n\r\n  enabled: false\r\n", key: "backup", want: "lines beneath it"},
+		// A value that starts on the key's line and wraps onto the next one:
+		// commenting the key line out leaves the rest of the value behind
+		// without its opening bracket or quote, as a line that re-reads as a
+		// key of the section (`sync.branch: "b}"`) or one that stops the file
+		// from parsing. The same value written on one line still comments out
+		// cleanly.
+		{name: "flow mapping wrapped onto the next line", seed: "sync:\n    remote: {url: a,\n        branch: b}\nnode_id: mini\n", key: "sync.remote", want: "spans more than one line"},
+		// Under the flat spelling the rest lands at the top level, where the
+		// indented `branch: b}` parses as the whole document and the keys
+		// after it (`node_id`) stop reading at all.
+		{name: "flow mapping wrapped under the flat spelling", seed: "sync.remote: {url: a,\n  branch: b}\nnode_id: mini\n", key: "sync.remote", want: "spans more than one line"},
+		// The rest can sit at the key's own indentation, where it reads as a
+		// sibling key rather than as lines beneath this one, so no indentation
+		// rule sees it; only where the entry ends does.
+		{name: "flow mapping that closes at the key's own indentation", seed: "sync:\n  remote: {url: a,\n  branch: b}\nnode_id: mini\n", key: "sync.remote", want: "spans more than one line"},
+		{name: "flow sequence wrapped onto the next line", seed: "types.custom: [step,\n  slot]\nnode_id: mini\n", key: "types.custom", want: "spans more than one line"},
+		// A quoted string can wrap as well; YAML folds the break into a space.
+		// Left behind, `line two"` stops the file from parsing.
+		{name: "double-quoted string wrapped onto the next line", seed: "notes: \"line one\n  line two\"\nnode_id: mini\n", key: "notes", want: "spans more than one line"},
+		{name: "single-quoted string wrapped under the flat spelling", seed: "dolt.host: '10.0.0.1\n  more'\nnode_id: mini\n", key: "dolt.host", want: "spans more than one line"},
+		// The probe reads the file after CRLF is normalized to LF, and a
+		// refusal writes nothing, so a CRLF file keeps its line endings too.
+		{name: "flow mapping wrapped in a CRLF file", seed: "sync:\r\n    remote: {url: a,\r\n        branch: b}\r\nnode_id: mini\r\n", key: "sync.remote", want: "spans more than one line"},
+		// yaml.v3 ends a line at a Unicode line separator or a lone carriage
+		// return too, even inside a quoted string. Above the key, either one
+		// numbers the key's line one past the line a "\n" split finds it on,
+		// so a probe cut by "\n" took in the whole wrapped value and let it
+		// through.
+		{name: "wrapped value below a line separator", seed: "notes: \"a\u2028b\"\nsync:\n  remote: {url: a,\n    branch: b}\nnode_id: mini\n", key: "sync.remote", want: "spans more than one line"},
+		{name: "wrapped value below a lone carriage return", seed: "notes: \"a\rb\"\nsync:\n  remote: {url: a,\n    branch: b}\nnode_id: mini\n", key: "sync.remote", want: "spans more than one line"},
+		// In the key's own value, the separator is a wrap: the commented-out
+		// line ends at it, and `b"` is left behind to stop the file from
+		// parsing.
+		{name: "quoted value holding a line separator", seed: "remote: \"a\u2028b\"\nnode_id: mini\n", key: "remote", want: "spans more than one line"},
+		// A plain scalar continued onto a deeper line wraps too. Cut after the
+		// key's line it still parses, as a shorter value, so the probe compares
+		// the two. Left behind, the rest re-reads as the value of the enclosing
+		// key (`sync: /b`), or stops the file from parsing.
+		{name: "plain scalar continued onto a deeper line", seed: "sync:\n  remote: file:///a\n    /b\nnode_id: mini\n", key: "sync.remote", want: "spans more than one line"},
+		{name: "plain scalar continued past a blank line", seed: "sync:\n  remote: file:///a\n\n    /b\nnode_id: mini\n", key: "sync.remote", want: "spans more than one line"},
+		{name: "plain scalar continued under the flat spelling", seed: "dolt.host: 10.0.0.1\n  more\nnode_id: mini\n", key: "dolt.host", want: "spans more than one line"},
+		{name: "single-segment plain scalar continued", seed: "notes: a long note that the\n  editor wrapped\nnode_id: mini\n", key: "notes", want: "spans more than one line"},
+		// The refusals above judge the first document's parse before anything
+		// is edited. What gets past them is refused by what the edit would do:
+		// the file read back has to say what it said before, less the key.
+		// The probe sees the first of two duplicates, and the line matcher
+		// comments out both, leaving `line two"` behind.
+		{name: "later duplicate whose value wraps", seed: "notes: ok\nnotes: \"line one\n  line two\"\nnode_id: mini\n", key: "notes", want: "more of this file than the key"},
+		// A section the file writes twice holds the key in its second copy,
+		// which the refusals before the edit, reading the first, never see.
+		{name: "wrapped value under the second copy of its section", seed: "sync:\n  branch: b\nsync:\n  remote: \"x\n    y\"\nnode_id: mini\n", key: "sync.remote", want: "more of this file than the key"},
+		// A later document is not in the first document's parse at all.
+		{name: "wrapped value in a later document", seed: "node_id: mini\n---\nnotes: \"line one\n  line two\"\n", key: "notes", want: "more of this file than the key"},
+		// The anchor goes with the key's line, and the alias below it then
+		// names nothing, so the file stops parsing.
+		{name: "anchor on the key's line used further down", seed: "sync:\n  remote: &r file:///a\nbackup:\n  remote: *r\n", key: "sync.remote", want: "more of this file than the key"},
+		// YAML lets a later anchor reuse a name. With the key's line commented
+		// out, the alias below resolves to the anchor above it instead, so the
+		// file still parses, but backup.remote reads keep rather than a.
+		{name: "anchor on the key's line reusing the name of one above", seed: "x: &r keep\nsync:\n  remote: &r a\nbackup:\n  remote: *r\n", key: "sync.remote", want: "more of this file than the key"},
+		// A tag alone on its line decorates the section's mapping, and the key
+		// under it is the target (TestUnsetRemovesADottedKeyInEveryShape). As
+		// that mapping's only key, commenting it out leaves the tag on an empty
+		// node, which yaml.v3 reads as an empty string tagged !!map: dolt reads
+		// as "" where it held a mapping, and a typed read of the section fails.
+		{name: "only key under a tag alone on its line", seed: "dolt:\n  !!map\n    host: kill-me\n", key: "dolt.host", want: "more of this file than the key"},
+		{name: "only key under an anchor and a tag on their line", seed: "dolt:\n  &a !!map\n    host: kill-me\n", key: "dolt.host", want: "more of this file than the key"},
+		// A line that only looks like the key is someone else's even when the
+		// key is set too: the line matcher comments out both lines, and notes
+		// would change. TestUnsetOfAnAbsentKeyStillSucceeds has the same line
+		// in a file that does not hold the key.
+		{name: "the key beside a line inside another value that looks like it", seed: "notes: \"see\njira.url: https://x\"\njira.url: https://y\n", key: "jira.url", want: "more of this file than the key"},
+		// bd reads only the first document. With its only key commented out,
+		// that document is gone, and node_id would be read in its place.
+		{name: "only key of the first document", seed: "remote: x\n---\nnode_id: mini\n", key: "remote", want: "more of this file than the key"},
+		// A later document that does not parse leaves the ones before it
+		// readable, so an edit to them is checked as in any other file. Here
+		// notes would change, and with the first document gone, the one that
+		// does not parse would be read in its place.
+		{name: "the key beside a line that looks like it, above a document that does not parse", seed: "notes: \"see\njira.url: https://x\"\njira.url: https://y\n---\nother: [unclosed\n", key: "jira.url", want: "more of this file than the key"},
+		{name: "only key of the first document, above one that does not parse", seed: "remote: x\n---\nother: [unclosed\n", key: "remote", want: "more of this file than the key"},
+		// Each leaf the check compares carries its whole path, so a file
+		// nested past 64 keys and list items deep costs too much to compare,
+		// and yaml.v3 lets one nest 10000 deep.
+		{name: "beside a value nested 65 deep", seed: "sync:\n  remote: x\ndeep: " + strings.Repeat("[", 64) + "x" + strings.Repeat("]", 64) + "\n", key: "sync.remote", want: "nests more than 64 levels deep"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -639,11 +850,70 @@ func TestUnsetRefusesShapesItCannotEdit(t *testing.T) {
 
 // A shape bd cannot edit is only worth refusing when the key is actually there.
 // Unsetting a key that was never set has always been a successful no-op, and a
-// flow-style mapping elsewhere in the file is not the operator's problem.
+// flow-style mapping elsewhere in the file is not the operator's problem. Nor
+// is a line that only looks like the key: the line matcher reads lines, and
+// commenting such a line out edits a value nobody named, while refusing it
+// fails an unset with nothing to remove. Either way the file stays as it was.
 func TestUnsetOfAnAbsentKeyStillSucceeds(t *testing.T) {
+	cases := []struct {
+		name string
+		seed string
+		key  string
+	}{
+		{name: "flow-style mapping elsewhere", seed: "sync: {branch: beads-sync}\ndolt:\n    port: 3307\n", key: "sync.remote"},
+		// The matching line is the second line of notes, in either spelling.
+		{name: "line inside another value that looks like the key", seed: "sync:\n  notes: \"x\n  remote: y\"\n", key: "sync.remote"},
+		{name: "line inside another value that looks like the flat key", seed: "notes: \"see\njira.url: https://x\"\n", key: "jira.url"},
+		// sync is a list, so sync.remote is not set, but the nested walk
+		// matches the key of its item. An alias there is a value like any
+		// other, though it is not expanded. The matcher refused the same key
+		// with a mapping beneath it as a value that goes on below, and
+		// commented it out with no value at all, which left nothing to compare.
+		{name: "key inside a list item", seed: "base: &r file:///a\nsync:\n  -\n    remote: *r\n", key: "sync.remote"},
+		{name: "key with a mapping beneath it inside a list item", seed: "sync:\n  -\n    remote:\n      url: a\n", key: "sync.remote"},
+		{name: "key with no value inside a list item", seed: "sync:\n  -\n    remote:\n", key: "sync.remote"},
+		// A later document that does not parse leaves the first one readable,
+		// and that one does not hold the key either.
+		{name: "line that looks like the key, above a document that does not parse", seed: "notes: \"see\njira.url: https://x\"\n---\nother: [unclosed\n", key: "jira.url"},
+		// Nobody reads a document that does not parse, so a key there is not
+		// set.
+		{name: "key only in a document that does not parse", seed: "node_id: mini\n---\nsync:\n  remote: x\nother: [unclosed\n", key: "sync.remote"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(path, []byte(tc.seed), 0o600); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+
+			t.Setenv("BEADS_DIR", dir)
+			changed, err := UnsetYamlConfig(tc.key)
+			if err != nil {
+				t.Fatalf("UnsetYamlConfig on an unset key: %v", err)
+			}
+			if changed {
+				t.Error("UnsetYamlConfig on an unset key reported a write")
+			}
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			if string(body) != tc.seed {
+				t.Errorf("the no-op unset changed the file:\n%s", body)
+			}
+		})
+	}
+}
+
+// A file whose first document yaml.v3 cannot parse has no reading to check an
+// edit against, so the line matcher's best effort stands there, as it always
+// has: the key's line is commented out and the rest of the file is left as it
+// was.
+func TestUnsetInAFileThatDoesNotParseStillCommentsTheKeyOut(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	seed := "sync: {branch: beads-sync}\ndolt:\n    port: 3307\n"
+	seed := "sync:\n  remote: x\nother: [unclosed\n"
 	if err := os.WriteFile(path, []byte(seed), 0o600); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -651,17 +921,17 @@ func TestUnsetOfAnAbsentKeyStillSucceeds(t *testing.T) {
 	t.Setenv("BEADS_DIR", dir)
 	changed, err := UnsetYamlConfig("sync.remote")
 	if err != nil {
-		t.Fatalf("UnsetYamlConfig on an unset key: %v", err)
+		t.Fatalf("UnsetYamlConfig in a file that does not parse: %v", err)
 	}
-	if changed {
-		t.Error("UnsetYamlConfig on an unset key reported a write")
+	if !changed {
+		t.Error("UnsetYamlConfig reported no write for a key it commented out")
 	}
 	body, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	if got := GetStringFromDir(dir, "sync.branch"); got != "beads-sync" {
-		t.Errorf("the no-op unset changed sync.branch to %q:\n%s", got, body)
+	if want := "sync:\n  # remote: x\nother: [unclosed\n"; string(body) != want {
+		t.Errorf("the unset left\n%q\nwant\n%q", body, want)
 	}
 }
 

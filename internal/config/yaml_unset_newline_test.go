@@ -1,10 +1,13 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Neither an unset nor a set may also rewrite the end of the file.
@@ -255,6 +258,121 @@ func TestUnsetOfAPresentKeyInACRLFFileReportsTheWrite(t *testing.T) {
 	})
 }
 
+// The user-global config.yaml goes through the same line matcher, so a value
+// that wraps onto the next line is refused there as well, with nothing written
+// and no change reported. node_id has a single segment, so this is the
+// top-level half of the refusal.
+func TestUnsetUserYamlConfigRefusesAValueThatSpansLines(t *testing.T) {
+	const body = "node_id: \"mini\n  box\"\n"
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	path, err := UserConfigYamlPath()
+	if err != nil {
+		t.Fatalf("UserConfigYamlPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := UnsetUserYamlConfig("node_id")
+	if err == nil {
+		after, _ := os.ReadFile(path) //nolint:gosec,errcheck // test-owned temp path; diagnostic
+		t.Fatalf("UnsetUserYamlConfig reported success on a value that spans two lines:\n%q", string(after))
+	}
+	if !strings.Contains(err.Error(), "node_id") || !strings.Contains(err.Error(), "spans more than one line") {
+		t.Errorf("the error names neither the key nor the shape: %v", err)
+	}
+	if changed {
+		t.Error("UnsetUserYamlConfig() changed = true for an unset it refused")
+	}
+	after, err := os.ReadFile(path) //nolint:gosec // test-owned temp path
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != body {
+		t.Errorf("a refused unset still changed the file:\ngot:  %q\nwant: %q", string(after), body)
+	}
+}
+
+// The user-global unset checks the edit by its effect too, before it writes.
+// node_id is not in the first document, so no refusal before the edit looks
+// at it, but the line matcher still finds it in the second, where commenting
+// out its first line would leave `box"` behind.
+func TestUnsetUserYamlConfigRefusesAnEditThatChangesMoreThanTheKey(t *testing.T) {
+	const body = "metrics:\n  disabled: true\n---\nnode_id: \"mini\n  box\"\n"
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	path, err := UserConfigYamlPath()
+	if err != nil {
+		t.Fatalf("UserConfigYamlPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := UnsetUserYamlConfig("node_id")
+	if err == nil {
+		after, _ := os.ReadFile(path) //nolint:gosec,errcheck // test-owned temp path; diagnostic
+		t.Fatalf("UnsetUserYamlConfig reported success on an edit that breaks the second document:\n%q", string(after))
+	}
+	if !strings.Contains(err.Error(), "node_id") || !strings.Contains(err.Error(), "more of this file than the key") {
+		t.Errorf("the error names neither the key nor the reason: %v", err)
+	}
+	if changed {
+		t.Error("UnsetUserYamlConfig() changed = true for an unset it refused")
+	}
+	after, err := os.ReadFile(path) //nolint:gosec // test-owned temp path
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != body {
+		t.Errorf("a refused unset still changed the file:\ngot:  %q\nwant: %q", string(after), body)
+	}
+}
+
+// The user-global unset of a key the file does not hold is the same no-op as
+// the project one, though a line inside another value looks like the key:
+// (false, nil) and the file as it was, not a refusal to edit notes.
+func TestUnsetUserYamlConfigOfAnAbsentKeyLeavesTheFileAlone(t *testing.T) {
+	const body = "metrics:\n  disabled: true\nnotes: \"see\nnode_id: mini\"\n"
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	path, err := UserConfigYamlPath()
+	if err != nil {
+		t.Fatalf("UserConfigYamlPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := UnsetUserYamlConfig("node_id")
+	if err != nil {
+		t.Fatalf("UnsetUserYamlConfig on a key the file does not hold: %v", err)
+	}
+	if changed {
+		t.Error("UnsetUserYamlConfig() changed = true for a key the file does not hold")
+	}
+	after, err := os.ReadFile(path) //nolint:gosec // test-owned temp path
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != body {
+		t.Errorf("the no-op unset changed the file:\ngot:  %q\nwant: %q", string(after), body)
+	}
+}
+
 // The set twin of TestCommentOutYamlKeyPreservesTheTrailingNewline.
 // updateYamlKey's flat-key path read the document with bufio.Scanner and joined
 // the lines back with "\n" — the shape commentOutYamlKey used to have — so it
@@ -466,5 +584,53 @@ func TestUpdateYamlKeyLeavesTheNestedPathAlone(t *testing.T) {
 				t.Errorf("updateYamlKey and updateNestedYamlKey differ on %q:\nset:    %q\nnested: %q", tc.content, got, want)
 			}
 		})
+	}
+}
+
+// The span refusal cuts the document after the key's line as yaml.v3 numbers
+// it, and yaml.v3 ends a line at more than LF: at a CR, at a CRLF (once), at a
+// NEL, and at the Unicode line and paragraph separators. Counting any of them
+// differently moves the cut onto another line, which refuses a value that ends
+// on its own line or misses one that wraps. An unset normalizes CRLF before the
+// probe runs, so a CRLF reaches the count only as what is left of a CR CR LF;
+// the count has to get it right all the same. Each break is also tried as the
+// file's first byte, a blank first line, where the look back for a CR before
+// an LF has nothing to look at.
+func TestYamlLineEndCutsWhereYamlV3EndsALine(t *testing.T) {
+	lineBreaks := map[string]string{
+		"LF": "\n", "CR": "\r", "CRLF": "\r\n", "CR CRLF": "\r\r\n",
+		"NEL": "\u0085", "LS": "\u2028", "PS": "\u2029",
+	}
+	for name, lineBreak := range lineBreaks {
+		for _, lead := range []string{"", lineBreak} {
+			t.Run(fmt.Sprintf("%s lead %q", name, lead), func(t *testing.T) {
+				testYamlLineEndCuts(t, lead+"a: 1"+lineBreak+"b: 2"+lineBreak+"c: 3")
+			})
+		}
+	}
+	// Out of range, before line 1 or past the last line, there is no cut.
+	for _, line := range []int{0, 4} {
+		if end, ok := yamlLineEnd("a: 1\nb: 2\nc: 3\n", line); ok {
+			t.Errorf("yamlLineEnd(line %d of 3) = %d, true; want ok = false", line, end)
+		}
+	}
+}
+
+func testYamlLineEndCuts(t *testing.T, content string) {
+	t.Helper()
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(content), &root); err != nil {
+		t.Fatalf("parse %q: %v", content, err)
+	}
+	top := root.Content[0]
+	for i := 0; i < len(top.Content); i += 2 {
+		key, value := top.Content[i], top.Content[i+1]
+		end, ok := yamlLineEnd(content, key.Line)
+		if last := i == len(top.Content)-2; ok == last {
+			t.Fatalf("yamlLineEnd(%q, %d) ok = %v for key %s", content, key.Line, ok, key.Value)
+		}
+		if entry := key.Value + ": " + value.Value; ok && !strings.HasSuffix(content[:end], entry) {
+			t.Errorf("the cut after line %d (key %s) is %q, want it to end with %q", key.Line, key.Value, content[:end], entry)
+		}
 	}
 }
