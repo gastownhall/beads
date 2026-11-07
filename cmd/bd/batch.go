@@ -509,7 +509,10 @@ func parseUpdateKVs(kvs []string) (map[string]interface{}, error) {
 			}
 			updates["title"] = value
 		case "assignee":
-			updates["assignee"] = value
+			// Same hidden-empty fold as the flag/positional ingests: batch is
+			// the script-driven surface, so it must not re-mint the literal
+			// '-'/' ' unassigned spellings (sys-iagxd9).
+			updates["assignee"] = normalizeAssigneeInput(value)
 		case "force":
 			// Not a field: the override for close policy on a status that
 			// crosses into done, spelled as a token because a batch script has
