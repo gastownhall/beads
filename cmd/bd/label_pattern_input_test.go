@@ -153,3 +153,91 @@ func TestGatherReadyInputRejectsEmptyLabelPatterns(t *testing.T) {
 		})
 	}
 }
+
+// usableLabelPatternCases is the acceptance half of GH#6636's pattern fix: the
+// spellings that must keep working exactly as before. Omitting both flags
+// still means no pattern filter; every usable value — padded globs, anchored
+// regexes, regexes made entirely of whitespace, regexes that do not even
+// compile — passes through byte-for-byte. The malformed regex is here to pin
+// that the new input check adds no syntax validation: the pattern reaches the
+// engine unvalidated today (an unanchored SQL REGEXP), and refusing it here
+// would be a new behavior nobody asked for.
+var usableLabelPatternCases = []struct {
+	name      string
+	args      []string
+	wantGlob  string
+	wantRegex string
+}{
+	{"omitted", nil, "", ""},
+	{"glob", []string{"--label-pattern", "tech-*"}, "tech-*", ""},
+	{"anchored regex", []string{"--label-regex", "^tech-(debt|legacy)$"}, "", "^tech-(debt|legacy)$"},
+	{"literal space regex", []string{"--label-regex", " "}, "", " "},
+	{"literal tab regex", []string{"--label-regex", "\t"}, "", "\t"},
+	{"padded glob", []string{"--label-pattern", " tech-* "}, " tech-* ", ""},
+	{"padded regex", []string{"--label-regex", " tech "}, "", " tech "},
+	{"malformed regex", []string{"--label-regex", "["}, "", "["},
+}
+
+// TestGatherInputsKeepUsableLabelPatterns is the negative control for the
+// refusals above: the fix must refuse only unusable input, never rewrite or
+// drop a usable pattern. A whitespace-only regex is the row that draws the
+// line — labels may contain spaces (label_whitespace_warn.go), so it is a
+// real substring predicate, while the same value as a glob is refused because
+// normalized labels are trimmed and it could never match one.
+func TestGatherInputsKeepUsableLabelPatterns(t *testing.T) {
+	t.Run("list", func(t *testing.T) {
+		for _, tc := range usableLabelPatternCases {
+			t.Run(tc.name, func(t *testing.T) {
+				pinJSONOutput(t, false)
+				in, err := gatherListInput(newListFlagsCommand(t, tc.args...))
+				if err != nil {
+					t.Fatalf("gatherListInput(%v) = %v, want no error", tc.args, err)
+				}
+				if in.LabelPattern != tc.wantGlob {
+					t.Errorf("LabelPattern = %q, want %q (byte-for-byte)", in.LabelPattern, tc.wantGlob)
+				}
+				if in.LabelRegex != tc.wantRegex {
+					t.Errorf("LabelRegex = %q, want %q (byte-for-byte)", in.LabelRegex, tc.wantRegex)
+				}
+			})
+		}
+	})
+
+	t.Run("ready", func(t *testing.T) {
+		// Both resolver shapes the gatherer is called with: the direct
+		// route's resolveMaxRows and the proxied route's nil.
+		for _, resolver := range []struct {
+			name string
+			f    func(*cobra.Command) (int, string, error)
+		}{
+			{"nil resolver", nil},
+			{"direct route resolver", resolveMaxRows},
+		} {
+			t.Run(resolver.name, func(t *testing.T) {
+				for _, tc := range usableLabelPatternCases {
+					t.Run(tc.name, func(t *testing.T) {
+						pinJSONOutput(t, false)
+						got := runGatherReadyInput(t, newReadyFlagsCommand(t, tc.args...), resolver.f)
+						if got.err != nil {
+							t.Fatalf("gatherReadyInput(%v) = %v, want no error", tc.args, got.err)
+						}
+						if got.in.LabelPattern != tc.wantGlob {
+							t.Errorf("request LabelPattern = %q, want %q (byte-for-byte)", got.in.LabelPattern, tc.wantGlob)
+						}
+						if got.in.LabelRegex != tc.wantRegex {
+							t.Errorf("request LabelRegex = %q, want %q (byte-for-byte)", got.in.LabelRegex, tc.wantRegex)
+						}
+						// The filter is what the query consumes; it must
+						// carry the same pattern the request does.
+						if got.in.filter.LabelPattern != tc.wantGlob {
+							t.Errorf("filter LabelPattern = %q, want %q", got.in.filter.LabelPattern, tc.wantGlob)
+						}
+						if got.in.filter.LabelRegex != tc.wantRegex {
+							t.Errorf("filter LabelRegex = %q, want %q", got.in.filter.LabelRegex, tc.wantRegex)
+						}
+					})
+				}
+			})
+		}
+	})
+}
