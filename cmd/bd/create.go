@@ -1268,9 +1268,13 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore s
 //     that file. A config it cannot read is refused too, since it may say
 //     the same; a null left by commenting a key out reads as unset, as bd
 //     reads it there;
-//   - one bd's own command admission refuses there (admitForeignWorkspace),
-//     such as a SQLite-era repo or a legacy Dolt root: a fresh database
-//     beside it would hide its data and silence that refusal;
+//   - one bd's own command admission refuses there
+//     (admitForeignWorkspaceForEmbeddedInit), such as a SQLite-era repo or a
+//     legacy Dolt root: a fresh database beside it would hide its data and
+//     silence that refusal. So is a current-era Dolt root nothing in it
+//     selects a server for, whatever server mode or dolt.shared-server the
+//     launcher's configuration selects: the database written here is
+//     embedded;
 //   - one whose legacy config.json does not load (malformed, not a JSON
 //     object, or unreadable), with admission's "loading config: ..." error:
 //     bd run there refuses it, and the metadata.json written here would
@@ -1351,7 +1355,7 @@ func refuseUninitializableTarget(beadsDir string) error {
 	if _, err := loadAndCheckWorkspaceFormat(beadsDir); err != nil {
 		return err
 	}
-	if _, err := admitForeignWorkspace(beadsDir); err != nil {
+	if _, err := admitForeignWorkspaceForEmbeddedInit(beadsDir); err != nil {
 		return err
 	}
 	// A legacy config.json beside nothing discovery treats as a workspace

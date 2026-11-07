@@ -645,6 +645,110 @@ func TestLegacyGuardAdmitsConfigYamlServerWorkspace(t *testing.T) {
 	}
 }
 
+// TestLegacyGuardRefusesUnownedCurrentEraDoltRoot runs the real binary against
+// GH#6259's repro: a populated .beads/dolt root, a current-era version witness,
+// no embedded repository, and nothing selecting a server this run. The witness
+// used to admit it in every mode, and the embedded open that followed created a
+// fresh .beads/embeddeddolt beside the root and printed an empty list, exit 0
+// (GH#3817's false-empty). bd must refuse before writing anything, and restoring
+// the server selection must route it to the server again.
+func TestLegacyGuardRefusesUnownedCurrentEraDoltRoot(t *testing.T) {
+	bd := buildBDUnderTest(t)
+	unowned := legacyworkspace.LegacyDoltRefusal("Dolt data root .beads/dolt without a server selection")
+
+	setup := func(t *testing.T) (string, string) {
+		t.Helper()
+		repoDir := t.TempDir()
+		initGitRepo(t, repoDir)
+		beadsDir := filepath.Join(repoDir, ".beads")
+		if err := os.MkdirAll(filepath.Join(beadsDir, "dolt", "hq", ".dolt", "noms"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(beadsDir, "dolt", "hq", ".dolt", "noms", "manifest"), []byte("current manifest"))
+		writeFile(t, filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt","dolt_database":"hq"}`))
+		writeFile(t, filepath.Join(beadsDir, localVersionFile), []byte("1.3.0\n"))
+		return repoDir, beadsDir
+	}
+	// Every server selector is pinned off, so a developer's shell or this
+	// package's shared test server cannot decide the mode.
+	port := strconv.Itoa(closedLoopbackPort(t))
+	run := func(t *testing.T, repoDir string, extraEnv []string, args ...string) (string, string, error) {
+		t.Helper()
+		commandCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(commandCtx, bd, args...)
+		cmd.Dir = repoDir
+		cmd.Env = append(envWithoutBeadsStorageSettings(),
+			"BD_DISABLE_METRICS=1",
+			"DO_NOT_TRACK=1",
+			"BD_DISABLE_EVENT_FLUSH=1",
+			"BEADS_DOLT_AUTO_START=0",
+			"BEADS_DOLT_SERVER_MODE=0",
+			"BEADS_DOLT_SHARED_SERVER=0",
+			"BEADS_DOLT_SERVER_HOST=",
+			"BEADS_DOLT_SERVER_PORT="+port,
+			"HOME="+t.TempDir(),
+			"XDG_CONFIG_HOME="+t.TempDir(),
+		)
+		cmd.Env = append(cmd.Env, extraEnv...)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		if commandCtx.Err() != nil {
+			t.Fatalf("bd %s did not finish before the deadline:\n%s%s", strings.Join(args, " "), stdout.String(), stderr.String())
+		}
+		return stdout.String(), stderr.String(), err
+	}
+	list := []string{"list", "--json", "--limit", "0", "--all"}
+
+	t.Run("refused without a server selection", func(t *testing.T) {
+		repoDir, beadsDir := setup(t)
+		before := legacyworkspace.TreeDigest(t, beadsDir)
+
+		stdout, stderr, err := run(t, repoDir, nil, list...)
+		assertNoPhantomEmbeddedDatabase(t, beadsDir)
+		if err == nil {
+			t.Fatalf("bd list exited 0 over a .beads/dolt root nothing owns:\n%s%s", stdout, stderr)
+		}
+		if !strings.Contains(stderr, unowned) {
+			t.Fatalf("bd list stderr does not carry %q:\n%s", unowned, stderr)
+		}
+		if after := legacyworkspace.TreeDigest(t, beadsDir); !maps.Equal(before, after) {
+			t.Fatalf("bd list changed the refused workspace:\nbefore: %v\nafter:  %v", before, after)
+		}
+	})
+
+	t.Run("server mode from the environment reaches the server", func(t *testing.T) {
+		repoDir, beadsDir := setup(t)
+
+		stdout, stderr, err := run(t, repoDir, []string{"BEADS_DOLT_SERVER_MODE=1"}, list...)
+		assertNoPhantomEmbeddedDatabase(t, beadsDir)
+		if err == nil {
+			t.Fatalf("bd list succeeded against an unreachable server:\n%s%s", stdout, stderr)
+		}
+		if strings.Contains(stderr, unowned) || !strings.Contains(stdout+stderr, "Dolt server") {
+			t.Fatalf("bd list did not route the workspace to its Dolt server:\n%s%s", stdout, stderr)
+		}
+	})
+
+	t.Run("persisting the server selection is the remedy", func(t *testing.T) {
+		repoDir, beadsDir := setup(t)
+		// `bd config set` opens the store, so it cannot persist the selection
+		// while the server is down; the documented remedy is this edit.
+		writeFile(t, filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  mode: server\n"))
+
+		stdout, stderr, err := run(t, repoDir, nil, list...)
+		assertNoPhantomEmbeddedDatabase(t, beadsDir)
+		if err == nil {
+			t.Fatalf("bd list succeeded against an unreachable server:\n%s%s", stdout, stderr)
+		}
+		if strings.Contains(stderr, unowned) || !strings.Contains(stdout+stderr, "Dolt server") {
+			t.Fatalf("bd list did not route the persisted server workspace to its Dolt server:\n%s%s", stdout, stderr)
+		}
+	})
+}
+
 func legacyUpgradeTreeDigest(t *testing.T, root string) string {
 	t.Helper()
 	var entries []string

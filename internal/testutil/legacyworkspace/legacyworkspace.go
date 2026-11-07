@@ -130,16 +130,25 @@ func LegacyDoltRefusal(reason string) string {
 type LegacyDoltLayout struct {
 	Layout
 	Reason string
+	// ServerLauncherAdmits marks a layout refused only because the open that
+	// follows would be embedded, so an open of it from a launcher whose merged
+	// config selects server mode is admitted.
+	ServerLauncherAdmits bool
 }
 
-// LegacyDoltLayouts lists legacy Dolt layouts command admission refuses when
-// bd runs inside them, whatever the launching workspace's dolt.mode (a
-// launcher whose merged config enables dolt.shared-server admits the first
-// two, whose config.yaml sets no dolt.shared-server): a non-empty .beads/dolt
-// root with no embedded repository and no current-era version witness, whose
-// metadata names no dolt_mode; the same where the
-// workspace's own config.yaml selects server mode; and a server workspace
-// whose version witness names bd 0.62.0.
+// LegacyDoltLayouts lists Dolt layouts command admission refuses when bd runs
+// inside them, whatever the launching workspace's dolt.mode, except where
+// noted: a launcher whose merged config enables dolt.shared-server admits the
+// first, second and fourth, whose config.yaml sets no dolt.shared-server, and
+// one whose merged config selects server mode admits the fourth
+// (ServerLauncherAdmits). They are a non-empty .beads/dolt root with no
+// embedded repository and no current-era version witness, whose metadata
+// names no dolt_mode; the same where the workspace's own config.yaml selects
+// server mode; a server workspace whose version witness names bd 0.62.0; and
+// a non-empty .beads/dolt root with no embedded repository and a current-era
+// version witness, whose metadata names no dolt_mode and which nothing
+// selects a server for (GH#6259), so that only an empty embedded database
+// beside the root could open it.
 func LegacyDoltLayouts() []LegacyDoltLayout {
 	manifest := "legacy manifest"
 	return []LegacyDoltLayout{
@@ -157,6 +166,11 @@ func LegacyDoltLayouts() []LegacyDoltLayout {
 			".local_version":                  "0.62.0\n",
 			"dolt/herald/.dolt/noms/manifest": manifest,
 		}}, Reason: "legacy Dolt server workspace from bd 0.62.0"},
+		{Layout: Layout{Name: "current-era Dolt root without a server selection", Files: map[string]string{
+			"metadata.json":               `{"backend":"dolt","dolt_database":"hq"}`,
+			".local_version":              "1.3.0\n",
+			"dolt/hq/.dolt/noms/manifest": manifest,
+		}}, Reason: "Dolt data root .beads/dolt without a server selection", ServerLauncherAdmits: true},
 	}
 }
 

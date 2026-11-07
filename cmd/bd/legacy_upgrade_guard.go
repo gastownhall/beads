@@ -35,11 +35,12 @@ func guardLegacyUpgradeWorkspace(beadsDir string) error {
 // that has already resolved server intent from a source the workspace does not
 // yet record: `bd init --server`, whose flag is the only place that choice lives
 // until init has written it. The guard cannot see the flag, so initSelectsServer
-// carries it in. It is consulted for exactly one thing, the empty-root admission
-// below, and is deliberately not folded into the workspace's own server mode:
-// that would also move a non-empty root with an unreadable witness onto the
-// warn-and-open arm, and an embedded repository beside a non-empty .beads/dolt
-// onto the refusing one.
+// carries it in. It is consulted for exactly two things: the empty-root
+// admission below, and the server selection a populated current-era root needs
+// (unownedDoltRoot). It is deliberately not folded into the workspace's own
+// server mode: that would also move a non-empty root with an unreadable witness
+// onto the warn-and-open arm, and an embedded repository beside a non-empty
+// .beads/dolt onto the refusing one.
 func guardLegacyUpgradeWorkspaceForInit(beadsDir string, initSelectsServer bool) error {
 	if beadsDir == "" {
 		return nil
@@ -73,8 +74,11 @@ func guardLegacyUpgradeWorkspaceForInit(beadsDir string, initSelectsServer bool)
 // workspace's legacy Dolt layouts under. Admission resolves it from the
 // process's bound configuration (guardLegacyUpgradeWorkspaceForInit); a path
 // that classifies a workspace bd was not launched in resolves serverMode from
-// that workspace's own configuration, and sharedServer from it with the
-// launcher's as fallback (guardForeignLegacyDoltWorkspace).
+// that workspace's own configuration, sharedServer from it with the
+// launcher's as fallback, and openSelectsServer from the store open that
+// follows, or, when it writes an embedded database there, sharedServer
+// without that fallback and no openSelectsServer
+// (guardForeignLegacyDoltWorkspace).
 type legacyDoltModes struct {
 	// serverMode reports whether the workspace opens through a Dolt
 	// sql-server (workspaceSelectsServerMode).
@@ -85,6 +89,20 @@ type legacyDoltModes struct {
 	// initSelectsServer is `bd init --server`'s flag
 	// (guardLegacyUpgradeWorkspaceForInit).
 	initSelectsServer bool
+	// openSelectsServer reports whether this process's store open of a
+	// workspace bd was not launched in goes through a Dolt sql-server
+	// (effectiveServerMode, which the store factories dispatch on). It
+	// merges the launcher's layers that serverMode does not resolve for the
+	// workspace: the launcher's dolt.mode, the user-level config.yaml and the
+	// BD_ environment. It is false for a caller that initializes the
+	// workspace with an embedded database whatever those layers select
+	// (admitForeignWorkspaceForEmbeddedInit). Only unownedDoltRoot consults
+	// it, because a server open cannot create the embedded database that
+	// refusal exists to stop. The legacy arms keep the workspace's own server
+	// intent. Admission leaves it false: there the process's configuration is
+	// the workspace's own, so serverMode and sharedServer already make the
+	// open's choice.
+	openSelectsServer bool
 }
 
 // classifyLegacyDoltWorkspace is the legacy Dolt half of
@@ -117,6 +135,17 @@ func classifyLegacyDoltWorkspace(beadsDir string, cfg *configfile.Config, modes 
 		// release could have produced it. Reading it as proof only in server
 		// mode left the escape hatch unreachable for a workspace the running
 		// binary demonstrably created itself.
+		//
+		// The witness dates the workspace; it does not say what owns .beads/dolt.
+		// bd writes it for server workspaces too, and their sql-server owns that
+		// root. When nothing selects a server this run and metadata leaves the open
+		// to the embedded store, opening would create an empty embedded database
+		// beside the root and hide its data (GH#3817, GH#6259), so a root holding
+		// anything is refused (unownedDoltRoot). An empty root has nothing to hide
+		// and is admitted, as the server arm below admits it.
+		if unownedDoltRoot(beadsDir, cfg, modes) {
+			return legacyUpgradeRefusal(unownedDoltRootReason)
+		}
 		return nil
 	}
 	if modes.sharedServer && !(present && legacyServerVersion(version)) {
@@ -178,6 +207,51 @@ func classifyLegacyDoltWorkspace(beadsDir string, cfg *configfile.Config, modes 
 		return legacyUpgradeRefusal(reason)
 	}
 	return nil
+}
+
+// unownedDoltRootReason names a current-era workspace whose non-empty
+// .beads/dolt root nothing selected this run would open.
+const unownedDoltRootReason = "Dolt data root .beads/dolt without a server selection"
+
+// unownedDoltRoot reports whether beadsDir's .beads/dolt root holds anything
+// while nothing selects the sql-server that owns it this run and metadata cfg
+// leaves the open to the embedded store, which would create an empty database
+// beside the root and hide its data. A root the guard cannot list counts as
+// holding something. `bd init --server` counts as a selection
+// (modes.initSelectsServer): it is the command that records one, and it opens
+// the server, never the embedded store, so refusing it for want of a selection
+// would leave a provisioner's server root with no bd command to select one. So
+// does a foreign open that goes through a server (modes.openSelectsServer),
+// whatever selects that server: it creates no embedded database to hide the
+// root behind, and bd run inside the target admits it under the same
+// user-level or BD_ selection.
+func unownedDoltRoot(beadsDir string, cfg *configfile.Config, modes legacyDoltModes) bool {
+	return !modes.serverMode && !modes.sharedServer && !modes.initSelectsServer &&
+		!modes.openSelectsServer &&
+		metadataSelectsEmbeddedDolt(cfg) &&
+		!isEmptyDirectory(filepath.Join(beadsDir, "dolt"))
+}
+
+// metadataSelectsEmbeddedDolt reports whether metadata cfg (nil for none)
+// leaves the open to the embedded store when no server mode is selected: a
+// Dolt workspace that is not a proxied-server one. A registered backend or a
+// proxied-server workspace never opens embedded. Nothing validates
+// dolt_mode, so the store opens a value it does not recognize (a typo, or
+// the shared-server setting written as a mode) embedded, as it opens a blank
+// or embedded one; a server dolt_mode is the server half's to decide. It is
+// the metadata half of selectsEmbeddedStore; the server half comes from
+// modes, which each caller already resolves (admission:
+// workspaceSelectsServerMode and doltserver.IsSharedServerMode; foreign:
+// targetSelectsServerMode and sharedServerModeForWorkspace, plus
+// effectiveServerMode for the open).
+func metadataSelectsEmbeddedDolt(cfg *configfile.Config) bool {
+	if cfg == nil {
+		return true
+	}
+	if cfg.GetBackend() != configfile.BackendDolt {
+		return false
+	}
+	return !cfg.IsDoltProxiedServerMode()
 }
 
 // workspaceSelectsServerMode reports whether bd will open beadsDir through a
