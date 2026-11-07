@@ -2110,3 +2110,191 @@ func TestPushPullAtAHostBdDoesNotRunMoveTheServersData(t *testing.T) {
 		t.Fatalf("the server lacks the remote's lo-third after Pull: %v", err)
 	}
 }
+
+// TestGitProtocolPullDeclinedConflictAbortsMerge is the regression test for
+// #7839: a CLI `dolt pull` over a git-protocol remote (git+file://) that hits
+// a conflict the auto-resolver declines must abort the merge and restore the
+// working set — exactly like the SQL DOLT_PULL route already does via
+// versioncontrolops.SettleMerge — instead of leaving
+// dolt_merge_status.is_merging=1 open on the server, which then fails every
+// later write and pull until an operator aborts it by hand.
+//
+// The conflict is forced via an add/add collision: two independent clones
+// each create an issue with the SAME id but different content, with no
+// shared base row. mergesettle.go documents add/add (unlike a same-cell
+// modify/modify, which resolves last-write-wins by updated_at) as always
+// left for the operator — the one deterministic way to force
+// TryAutoResolveMergeConflicts to decline without racing on timestamps.
+func TestGitProtocolPullDeclinedConflictAbortsMerge(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+	skipIfNoGit(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+
+	// writer-a's sql-server at 127.0.0.1 is a host bd runs its own server
+	// at, but under the shared-container test harness BEADS_DOLT_SERVER_PORT
+	// (or the legacy BEADS_DOLT_PORT) names the suite's own shared container,
+	// not this test's standalone server (GH#7870: cliDirServesServer now
+	// requires that port proof — sharedServerDatabase — once either var is
+	// set, and this store has no BeadsDir/state files to provide it). Clear
+	// both so the host-only check in cliDirServesServer applies, exactly as
+	// the sibling TestPushPullAtAHostBdDoesNotRunMoveTheServersData already
+	// does for the same reason.
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
+
+	baseDir := t.TempDir()
+
+	// Bare git repo, seeded (dolt requires at least one branch to push to).
+	remoteDir := filepath.Join(baseDir, "remote.git")
+	runCmd(t, baseDir, "git", "init", "--bare", "-b", "main", remoteDir)
+	seedDir := filepath.Join(baseDir, "seed")
+	if err := os.MkdirAll(seedDir, 0o755); err != nil {
+		t.Fatalf("mkdir seed: %v", err)
+	}
+	runCmd(t, seedDir, "git", "init", "-b", "main")
+	runCmd(t, seedDir, "git", "commit", "--allow-empty", "-m", "init")
+	runCmd(t, seedDir, "git", "remote", "add", "origin", remoteDir)
+	runCmd(t, seedDir, "git", "push", "-u", "origin", "main")
+
+	// Writer A: a DoltStore served by its own local sql-server, with the
+	// remote added as git+file:// so Pull routes through finishCLIPull (the
+	// CLI path under test) rather than the SQL DOLT_PULL path.
+	doltDir := filepath.Join(baseDir, "writer-a")
+	if err := os.MkdirAll(doltDir, 0o755); err != nil {
+		t.Fatalf("mkdir writer-a: %v", err)
+	}
+	serverPort, stopServer := startLocalDoltServer(t, doltDir)
+	defer stopServer()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	dbName := uniqueTestDBName(t)
+	store, err := New(ctx, &Config{
+		Path:            doltDir,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      serverPort,
+		ServerUser:      "root",
+		AutoStart:       false,
+		CommitterName:   "writer-a",
+		CommitterEmail:  "writer-a@example.com",
+		Database:        dbName,
+		CreateIfMissing: true,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.SetConfig(ctx, "issue_prefix", "cf"); err != nil {
+		t.Fatalf("SetConfig issue_prefix: %v", err)
+	}
+	if _, err := store.CommitAll(ctx, "Genesis: schema and config"); err != nil {
+		t.Fatalf("genesis commit: %v", err)
+	}
+
+	gitRemoteURL := "git+file://" + remoteDir
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_REMOTE('add', 'origin', ?)", gitRemoteURL); err != nil {
+		t.Fatalf("add git-protocol remote: %v", err)
+	}
+	store.remote = "origin"
+	store.branch = "main"
+
+	if !store.isGitProtocolRemote(ctx, store.remote) {
+		t.Fatalf("precondition: remote %q should route via CLI", gitRemoteURL)
+	}
+
+	if err := store.Push(ctx); err != nil {
+		t.Fatalf("writer-a Push (genesis): %v", err)
+	}
+
+	// Writer B: an independent clone of the same bare repo via raw CLI. It
+	// never pulls from writer A again, so the same-id issue it creates below
+	// shares no base row with writer A's — the add/add setup.
+	cloneDir := filepath.Join(baseDir, "writer-b")
+	doltClone(t, "file://"+remoteDir, cloneDir)
+	sourceInsertIssue(t, cloneDir, "cf-conflict", "Writer B's version")
+	sourceCommitAndPush(t, cloneDir, "writer B creates cf-conflict")
+
+	// Writer A creates the SAME issue id independently, with different
+	// content, and commits locally WITHOUT pulling first.
+	if err := store.CreateIssue(ctx, &types.Issue{
+		ID:        "cf-conflict",
+		Title:     "Writer A's version",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  2,
+	}, "writer-a"); err != nil {
+		t.Fatalf("writer-a CreateIssue cf-conflict: %v", err)
+	}
+	if err := store.Commit(ctx, "writer A creates cf-conflict"); err != nil {
+		t.Fatalf("writer-a commit cf-conflict: %v", err)
+	}
+
+	preHash, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit before pull: %v", err)
+	}
+
+	waitOutGitRemoteReadCache()
+
+	// The code path under test: CLI pull over git+file:// hits the add/add
+	// conflict, the resolver declines it, and (pre-fix) finishCLIPull left
+	// the merge open on the server from here on.
+	pullErr := store.Pull(ctx)
+	if pullErr == nil {
+		t.Fatalf("Pull should report the declined conflict as an error, not silent success")
+	}
+	var mce *versioncontrolops.MergeConflictsError
+	if !errors.As(pullErr, &mce) {
+		t.Fatalf("Pull error should be a *versioncontrolops.MergeConflictsError, got %T: %v", pullErr, pullErr)
+	}
+
+	// The core #7839 assertion: the merge must be ABORTED, not left open.
+	var isMerging int
+	if err := store.db.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&isMerging); err != nil {
+		t.Fatalf("query dolt_merge_status: %v", err)
+	}
+	if isMerging != 0 {
+		t.Fatalf("#7839 regression: declined conflict left the merge open (is_merging=%d); want 0 (aborted)", isMerging)
+	}
+
+	postHash, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after pull: %v", err)
+	}
+	if postHash != preHash {
+		t.Fatalf("#7839 regression: branch hash moved from %s to %s; an aborted merge must leave the branch unchanged", preHash, postHash)
+	}
+
+	// The real-world symptom: every later write must still succeed.
+	if err := store.CreateIssue(ctx, &types.Issue{
+		ID:        "cf-after-conflict",
+		Title:     "write after declined conflict",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  2,
+	}, "writer-a"); err != nil {
+		t.Fatalf("#7839 regression: write after a declined-conflict pull failed: %v", err)
+	}
+	if err := store.Commit(ctx, "write after declined conflict"); err != nil {
+		t.Fatalf("#7839 regression: commit after a declined-conflict pull failed: %v", err)
+	}
+
+	// Writer B's conflicting commit is still unresolved on the remote, so a
+	// repeat pull must fail again — but cleanly, with the same typed
+	// MergeConflictsError, not #7839's stuck-merge autocommit-rollback error
+	// ("Merge conflict detected, @autocommit transaction rolled back").
+	// That distinction IS the regression: before the fix, the first pull's
+	// failure to abort left every subsequent operation failing a different,
+	// infrastructure-flavored way.
+	repeatErr := store.Pull(ctx)
+	if repeatErr == nil {
+		t.Fatalf("#7839 regression: a repeat pull against the still-unresolved conflict should fail again, not silently succeed")
+	}
+	var mce2 *versioncontrolops.MergeConflictsError
+	if !errors.As(repeatErr, &mce2) {
+		t.Fatalf("#7839 regression: repeat pull should fail with the same clean MergeConflictsError, not a stuck-merge error; got %T: %v", repeatErr, repeatErr)
+	}
+}

@@ -109,7 +109,10 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 		return nil, routeErr
 	} else if useCLI {
 		err = s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
-			pullErr := s.finishCLIPull(ctx, s.doltCLIPullFromPeer(ctx, peer, creds))
+			// preMergeClean must be read before the CLI subprocess runs — it
+			// gates the merge-abort fallback on a declined conflict (#7839).
+			preMergeClean := s.workingSetCleanBeforeCLIPull(ctx)
+			pullErr := s.finishCLIPull(ctx, s.doltCLIPullFromPeer(ctx, peer, creds), preMergeClean)
 			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
 		})
 		return s.finishPeerPull(ctx, conflicts, err, preHead)
@@ -119,7 +122,8 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 		if useCLI, err := s.prepareCLIRouteForPeerCredentials(ctx, peer, creds); err != nil {
 			return err
 		} else if useCLI {
-			pullErr := s.finishCLIPull(ctx, s.doltCLIPullFromPeer(ctx, peer, creds))
+			preMergeClean := s.workingSetCleanBeforeCLIPull(ctx)
+			pullErr := s.finishCLIPull(ctx, s.doltCLIPullFromPeer(ctx, peer, creds), preMergeClean)
 			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
 		}
 		return withEnvCredentials(creds, func() error {
