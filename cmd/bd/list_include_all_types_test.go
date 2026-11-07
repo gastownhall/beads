@@ -119,6 +119,7 @@ func newIncludeAllTypesInputCmd(t *testing.T, args ...string) *cobra.Command {
 	f.Bool("all", false, "")
 	f.IntP("limit", "n", workapi.DefaultListLimit, "")
 	f.StringP("type", "t", "", "")
+	f.String("wisp-type", "", "")
 	if err := cmd.ParseFlags(args); err != nil {
 		t.Fatalf("parse %v: %v", args, err)
 	}
@@ -310,4 +311,25 @@ func TestGatherListInput_IncludeAllTypesReachesTheFilter(t *testing.T) {
 			t.Errorf("the explicit type must be preserved, got %v", filter.IssueType)
 		}
 	})
+}
+
+// TestGatherListInput_WispTypeWithIncludeAllTypesIsAccepted covers the last
+// seam the union flag had to cross: --wisp-type is a predicate, not a plane
+// selector, and the CLI guard admits it only when the request already admits
+// the wisp plane. --include-all-types IS a plane selector — it skips the plane
+// suppression in applyTypeSuppressions — so the refusal must not fire for it.
+// The negative case (--wisp-type alone, still refused with the hint naming
+// --include-ephemeral) is TestGatherListInput_WispTypeWithoutAPlaneIsRefused,
+// which runs unchanged beside this.
+func TestGatherListInput_WispTypeWithIncludeAllTypesIsAccepted(t *testing.T) {
+	in, err := gatherIncludeAllTypesInput(t, "--wisp-type", "heartbeat", "--include-all-types")
+	if err != nil {
+		t.Fatalf("--wisp-type with --include-all-types must be accepted (the union admits the plane), got: %v", err)
+	}
+	if in.WispType == nil || string(*in.WispType) != "heartbeat" {
+		t.Errorf("WispType must survive onto the request, got %v", in.WispType)
+	}
+	if !in.IncludeAllTypes {
+		t.Error("IncludeAllTypes must survive onto the request alongside the predicate")
+	}
 }

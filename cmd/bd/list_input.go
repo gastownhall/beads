@@ -195,7 +195,12 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 		// by itself, so the request may be satisfiable and this cannot tell
 		// without the workspace's infra vocabulary, which this layer does not
 		// load.
-		if !in.IncludeEphemeral && !in.IncludeInfra && in.IssueType == "" {
+		//
+		// --include-all-types admits the plane too: it is the union of the
+		// knobs above and skips the plane suppression in
+		// applyTypeSuppressions, so a wisp_type predicate under it matches
+		// rows rather than composing to empty.
+		if !in.IncludeEphemeral && !in.IncludeInfra && !in.IncludeAllTypes && in.IssueType == "" {
 			return in, HandleErrorWithHint(
 				fmt.Sprintf("--wisp-type %s cannot match anything here: it filters the wisp_type column, and this listing admits only durable rows, which never carry one", s),
 				"add --include-ephemeral to admit the ephemeral plane (or --include-infra, which admits it as part of a wider bundle)")
