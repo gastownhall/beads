@@ -15,12 +15,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 
 	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 // Credential storage and encryption for federation peers.
@@ -879,39 +881,99 @@ func (s *DoltStore) shouldUseCLIForCloudAuthWithError(ctx context.Context, remot
 	return s.prepareCLIRouteForCloudAuth(ctx, remote)
 }
 
-// serverEnvCredentialsNote completes the error of a push that failed on the
-// SQL route when this bd holds the remote's credentials. In server mode CALL
-// DOLT_PUSH runs in the Dolt server's process, which takes DOLT_REMOTE_PASSWORD
-// (for the remote user bd passes) and the cloud-storage variables of the
-// remote URL's scheme (cloudAuthSchemeMap) from its own environment: bd sets
-// them only in its own process (withRemoteOperationEnv), which a server bd
-// does not run never sees. The note names the ones bd holds, so a push that a
-// server without them refuses says where they must be set. It is empty when
-// bd holds none, and in embedded mode, where the push runs in this process.
-func (s *DoltStore) serverEnvCredentialsNote(ctx context.Context, remote string, creds *remoteCredentials) string {
-	if !s.serverMode {
-		return ""
+// remoteTransferError marks the failure of a remote transfer itself: the CALL
+// DOLT_PUSH/PULL/FETCH statement, or the dolt CLI push/pull/fetch subprocess.
+// Failures before the transfer (routing, fsck, binary checks, CLI remote
+// setup) and after it (merge, recompute) are not marked, so only a transfer
+// failure gets the server-environment note (withServerEnvNote).
+type remoteTransferError struct {
+	err   error
+	noted bool
+}
+
+func (e *remoteTransferError) Error() string { return e.err.Error() }
+func (e *remoteTransferError) Unwrap() error { return e.err }
+
+// remoteTransferFailure marks err as a transfer failure; nil stays nil.
+func remoteTransferFailure(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &remoteTransferError{err: err}
+}
+
+// withServerEnvNote completes the error of a failed server-mode transfer to
+// remote with serverEnvNote. In server mode the transfer runs in the Dolt
+// server's process on both routes: CALL DOLT_* directly, and the dolt CLI
+// because bd runs it only in a directory that server serves, which hands the
+// operation to it. sent is what the operation passed with --user. The error
+// is returned unchanged when it is not a transfer failure, already carries
+// the note, carries merge conflicts, or the remote's URL cannot be read, and
+// in embedded mode, where the transfer runs in this process.
+func (s *DoltStore) withServerEnvNote(ctx context.Context, procedure, remote string, sent *remoteCredentials, err error) error {
+	if err == nil || !s.serverMode {
+		return err
+	}
+	var transfer *remoteTransferError
+	if !errors.As(err, &transfer) || transfer.noted {
+		return err
+	}
+	var mce *versioncontrolops.MergeConflictsError
+	if errors.As(err, &mce) {
+		return err
+	}
+	remotes, listErr := s.ListRemotes(ctx)
+	if listErr != nil {
+		return err
+	}
+	var remoteURL string
+	for _, r := range remotes {
+		if r.Name == remote {
+			remoteURL = r.URL
+			break
+		}
+	}
+	note := serverEnvNote(procedure, remoteURL, sent, os.Environ())
+	if note == "" {
+		return err
+	}
+	transfer.noted = true
+	return fmt.Errorf("%w%s", err, note)
+}
+
+// serverEnvNote is the note for a failed CALL procedure to remoteURL that ran
+// in the Dolt server's process: it names the credential variables bd holds
+// that the server takes from its own environment instead, and the remedy. bd
+// sets them only in its own process (withRemoteOperationEnv, applyToCmd),
+// which the server never sees. The cloud families are those of the URL's
+// scheme (cloudAuthSchemeMap) present in environ; DOLT_REMOTE_PASSWORD is
+// named only for a remotesapi URL (dolthub, http, https) when the operation
+// sent a user (sent) and holds its password. The note carries no URL or
+// value. It is empty when bd holds none of them.
+func serverEnvNote(procedure, remoteURL string, sent *remoteCredentials, environ []string) string {
+	prefixes := envPrefixesForRemoteURL(remoteURL)
+	// bd sets AWS_RESPONSE_CHECKSUM_VALIDATION itself; it is not a credential.
+	env := make([]string, 0, len(environ))
+	for _, kv := range environ {
+		if !strings.HasPrefix(kv, awsResponseChecksumValidationEnv+"=") {
+			env = append(env, kv)
+		}
 	}
 	var held []string
-	if creds != nil && creds.username != "" && creds.password != "" {
+	if sent != nil && sent.username != "" && sent.password != "" && slices.Contains(prefixes, "DOLT_REMOTE_") {
 		held = append(held, "DOLT_REMOTE_PASSWORD")
 	}
-	if remotes, err := s.ListRemotes(ctx); err == nil {
-		for _, r := range remotes {
-			if r.Name != remote {
-				continue
-			}
-			for _, prefix := range envPrefixesForRemoteURL(r.URL) {
-				// DOLT_REMOTE_ is the credential pair itself, named above
-				// when the push passes its user.
-				if prefix != "DOLT_REMOTE_" && execenv.ContainsKeyWithPrefix(os.Environ(), prefix) {
-					held = append(held, prefix+"*")
-				}
-			}
+	for _, prefix := range prefixes {
+		// DOLT_REMOTE_ is the credential pair itself, named above when the
+		// operation sends its user.
+		if prefix != "DOLT_REMOTE_" && execenv.ContainsKeyWithPrefix(env, prefix) {
+			held = append(held, prefix+"*")
 		}
 	}
 	if len(held) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("; CALL DOLT_PUSH runs in the Dolt server's process, which takes %s from its own environment, not from bd's", strings.Join(held, " and "))
+	return fmt.Sprintf("; CALL %s runs in the Dolt server's process, which takes %s from its own environment, not from bd's; "+
+		"if the server lacks current credentials, set them in the environment the server starts from and restart it",
+		procedure, strings.Join(held, " and "))
 }

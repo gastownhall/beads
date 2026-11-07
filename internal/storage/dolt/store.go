@@ -5367,35 +5367,30 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
 	logRouteDecision("push", remote, false)
-	defer func() {
-		if retErr != nil {
-			if note := s.serverEnvCredentialsNote(ctx, remote, creds); note != "" {
-				retErr = fmt.Errorf("%w%s", retErr, note)
-			}
-		}
-	}()
 	if s.remoteUser != "" && remote == s.remote {
+		defer func() { retErr = s.withServerEnvNote(ctx, "DOLT_PUSH", remote, creds, retErr) }()
 		return withRemoteOperationEnv(creds, s.isS3Remote(ctx, remote), func() error {
 			if force {
 				if err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH('--force', '--user', ?, ?, ?)", s.remoteUser, remote, s.branch); err != nil {
-					return fmt.Errorf("failed to force push to %s/%s: %w", remote, s.branch, err)
+					return fmt.Errorf("failed to force push to %s/%s: %w", remote, s.branch, remoteTransferFailure(err))
 				}
 			} else {
 				if err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH('--user', ?, ?, ?)", s.remoteUser, remote, s.branch); err != nil {
-					return fmt.Errorf("failed to push to %s/%s: %w", remote, s.branch, err)
+					return fmt.Errorf("failed to push to %s/%s: %w", remote, s.branch, remoteTransferFailure(err))
 				}
 			}
 			return nil
 		})
 	}
+	defer func() { retErr = s.withServerEnvNote(ctx, "DOLT_PUSH", remote, nil, retErr) }()
 	return withRemoteOperationEnv(nil, s.isS3Remote(ctx, remote), func() error {
 		if force {
 			if err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH('--force', ?, ?)", remote, s.branch); err != nil {
-				return fmt.Errorf("failed to force push to %s/%s: %w", remote, s.branch, err)
+				return fmt.Errorf("failed to force push to %s/%s: %w", remote, s.branch, remoteTransferFailure(err))
 			}
 		} else {
 			if err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH(?, ?)", remote, s.branch); err != nil {
-				return fmt.Errorf("failed to push to %s/%s: %w", remote, s.branch, err)
+				return fmt.Errorf("failed to push to %s/%s: %w", remote, s.branch, remoteTransferFailure(err))
 			}
 		}
 		return nil
