@@ -5367,11 +5367,12 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
 	logRouteDecision("push", remote, false)
+	// The env snapshot precedes withRemoteOperationEnv below, which briefly
+	// sets the credential pair and the S3 checksum override process-wide.
+	plan := serverEnvNotePlan{procedure: "CALL DOLT_PUSH", remote: remote, creds: creds, env: os.Environ()}
 	defer func() {
 		if retErr != nil {
-			if note := s.serverEnvCredentialsNote(ctx, remote, creds); note != "" {
-				retErr = fmt.Errorf("%w%s", retErr, note)
-			}
+			retErr = s.annotateServerEnvTransferError(ctx, plan, retErr)
 		}
 	}()
 	if s.remoteUser != "" && remote == s.remote {

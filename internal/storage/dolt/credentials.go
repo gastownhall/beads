@@ -879,39 +879,103 @@ func (s *DoltStore) shouldUseCLIForCloudAuthWithError(ctx context.Context, remot
 	return s.prepareCLIRouteForCloudAuth(ctx, remote)
 }
 
-// serverEnvCredentialsNote completes the error of a push that failed on the
-// SQL route when this bd holds the remote's credentials. In server mode CALL
-// DOLT_PUSH runs in the Dolt server's process, which takes DOLT_REMOTE_PASSWORD
-// (for the remote user bd passes) and the cloud-storage variables of the
-// remote URL's scheme (cloudAuthSchemeMap) from its own environment: bd sets
-// them only in its own process (withRemoteOperationEnv), which a server bd
-// does not run never sees. The note names the ones bd holds, so a push that a
-// server without them refuses says where they must be set. It is empty when
-// bd holds none, and in embedded mode, where the push runs in this process.
-func (s *DoltStore) serverEnvCredentialsNote(ctx context.Context, remote string, creds *remoteCredentials) string {
-	if !s.serverMode {
-		return ""
-	}
+// serverEnvNoteRemedy completes a server-environment note with what to do
+// when the variables it names are why the transfer failed. It names fixed
+// commands and no variable values, and it avoids the phrases "no backup" and
+// "not found", which the backup command handlers read as a missing
+// destination rather than diagnostics.
+const serverEnvNoteRemedy = "; if the server's credentials are missing or stale, set current credentials in its startup environment and restart it (for a server bd manages: bd dolt stop, then bd dolt start from the environment that holds them)"
+
+// buildServerEnvCredentialsNote is the pure form of the server-environment
+// note. In server mode the named procedure — a SQL CALL, or a dolt CLI verb
+// whose binary hands the transfer to the live server over the served database
+// directory — runs the transfer in the Dolt server's process, which takes its
+// credentials from the server's own environment. Given the destination URL,
+// the credentials the operation itself sends (nil when it sends no user), and
+// a snapshot of bd's environment taken before any process-wide credential
+// mutation, it names the variables of that destination's scheme (see
+// cloudAuthSchemeMap) that bd holds here, so a server without them says where
+// they must be set. The note carries fixed variable names and prefixes only:
+// never the destination URL, a username, a file path or a credential value.
+// It is empty when bd holds none of them.
+func buildServerEnvCredentialsNote(procedure, destURL string, creds *remoteCredentials, env []string) string {
 	var held []string
 	if creds != nil && creds.username != "" && creds.password != "" {
 		held = append(held, "DOLT_REMOTE_PASSWORD")
 	}
-	if remotes, err := s.ListRemotes(ctx); err == nil {
-		for _, r := range remotes {
-			if r.Name != remote {
-				continue
-			}
-			for _, prefix := range envPrefixesForRemoteURL(r.URL) {
-				// DOLT_REMOTE_ is the credential pair itself, named above
-				// when the push passes its user.
-				if prefix != "DOLT_REMOTE_" && execenv.ContainsKeyWithPrefix(os.Environ(), prefix) {
-					held = append(held, prefix+"*")
-				}
-			}
+	for _, prefix := range envPrefixesForRemoteURL(destURL) {
+		// DOLT_REMOTE_ is the credential pair itself, named above when the
+		// transfer passes its user.
+		if prefix != "DOLT_REMOTE_" && execenv.ContainsKeyWithPrefix(env, prefix) {
+			held = append(held, prefix+"*")
 		}
 	}
 	if len(held) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("; CALL DOLT_PUSH runs in the Dolt server's process, which takes %s from its own environment, not from bd's", strings.Join(held, " and "))
+	return fmt.Sprintf("; %s runs in the Dolt server's process, which takes %s from its own environment, not from bd's%s",
+		procedure, strings.Join(held, " and "), serverEnvNoteRemedy)
+}
+
+// serverEnvCredentialsNote builds the server-environment note for a transfer
+// to remote that failed. buildServerEnvCredentialsNote explains the rest; this
+// wrapper adds the two store facts the pure form cannot know. It returns ""
+// outside server mode, where the transfer runs in this process, and resolves
+// the destination URL through ListRemotes only now, after the transfer failed:
+// an unknown remote or a failed lookup yields no note rather than an error
+// that could replace the transfer's own. env is the snapshot taken before the
+// transfer — withRemoteOperationEnv temporarily sets
+// AWS_RESPONSE_CHECKSUM_VALIDATION process-wide, which must not read as a
+// held AWS_* credential.
+func (s *DoltStore) serverEnvCredentialsNote(ctx context.Context, procedure, remote string, creds *remoteCredentials, env []string) string {
+	if !s.serverMode {
+		return ""
+	}
+	var destURL string
+	if remotes, err := s.ListRemotes(ctx); err == nil {
+		for _, r := range remotes {
+			if r.Name == remote {
+				destURL = r.URL
+				break
+			}
+		}
+	}
+	if destURL == "" {
+		return ""
+	}
+	return buildServerEnvCredentialsNote(procedure, destURL, creds, env)
+}
+
+// serverEnvNotePlan is what a transfer site captures before the transfer
+// runs, so the note can be built only if the transfer fails: the procedure
+// name the note names ("CALL DOLT_PUSH", "dolt push", ...), the remote whose
+// URL selects the variable families, the credentials the transfer itself
+// sends (nil when it sends no user — a SQL statement without --user must not
+// promise that setting DOLT_REMOTE_PASSWORD fixes it), and bd's environment
+// snapshotted before withRemoteOperationEnv/withEnvCredentials mutate
+// anything process-wide. An empty procedure or remote disables the note.
+type serverEnvNotePlan struct {
+	procedure string
+	remote    string
+	creds     *remoteCredentials
+	env       []string
+}
+
+func (p serverEnvNotePlan) empty() bool { return p.procedure == "" || p.remote == "" }
+
+// annotateServerEnvTransferError appends the server-environment note to a
+// failed transfer's error. err comes back unchanged when no note applies —
+// embedded mode, nothing held, an unknown remote, a failed lookup — and is
+// wrapped with %w otherwise, so errors.Is and errors.As keep identifying the
+// original error. Sites call this once, on the transfer's own error, never on
+// routing, version, fsck or connection-setup failures around it.
+func (s *DoltStore) annotateServerEnvTransferError(ctx context.Context, plan serverEnvNotePlan, err error) error {
+	if err == nil || plan.empty() {
+		return err
+	}
+	note := s.serverEnvCredentialsNote(ctx, plan.procedure, plan.remote, plan.creds, plan.env)
+	if note == "" {
+		return err
+	}
+	return fmt.Errorf("%w%s", err, note)
 }

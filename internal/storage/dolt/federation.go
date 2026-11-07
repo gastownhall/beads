@@ -53,9 +53,12 @@ func (s *DoltStore) pushRefToPeer(ctx context.Context, peer string, refspec stri
 		} else if useCLI {
 			return s.doltCLIPushRefToPeer(ctx, peer, refspec, creds)
 		}
+		// The env snapshot must precede withEnvCredentials, which sets the
+		// credential pair process-wide for the server to (not) read.
+		plan := serverEnvNotePlan{procedure: "CALL DOLT_PUSH", remote: peer, creds: creds, env: os.Environ()}
 		return withEnvCredentials(creds, func() error {
 			if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH(?, ?)", peer, refspec); err != nil {
-				return fmt.Errorf("failed to push to peer %s: %w", peer, err)
+				return s.annotateServerEnvTransferError(ctx, plan, fmt.Errorf("failed to push to peer %s: %w", peer, err))
 			}
 			return nil
 		})
@@ -185,9 +188,11 @@ func (s *DoltStore) Fetch(ctx context.Context, peer string) error {
 		} else if useCLI {
 			return s.doltCLIFetchFromPeer(ctx, peer, creds)
 		}
+		// Same snapshot rule as the push above: before withEnvCredentials.
+		plan := serverEnvNotePlan{procedure: "CALL DOLT_FETCH", remote: peer, creds: creds, env: os.Environ()}
 		return withEnvCredentials(creds, func() error {
 			if err := s.execWithLongTimeout(ctx, "CALL DOLT_FETCH(?)", peer); err != nil {
-				return fmt.Errorf("failed to fetch from peer %s: %w", peer, err)
+				return s.annotateServerEnvTransferError(ctx, plan, fmt.Errorf("failed to fetch from peer %s: %w", peer, err))
 			}
 			return nil
 		})
@@ -717,7 +722,11 @@ func (s *DoltStore) doltCLIPushRefToPeer(ctx context.Context, peer string, refsp
 	applyNoGitHooksToCmd(cmd) // GH#3724
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return cliTransferError(fmt.Sprintf("push to peer %s", peer), peer, transferCtx, out, err)
+		// The served-database handoff means this CLI verb still executes in
+		// the server's process, so the credentials it takes come from the
+		// server's environment even here (GH#5953).
+		plan := serverEnvNotePlan{procedure: "dolt push", remote: peer, creds: creds, env: os.Environ()}
+		return s.annotateServerEnvTransferError(ctx, plan, cliTransferError(fmt.Sprintf("push to peer %s", peer), peer, transferCtx, out, err))
 	}
 	return nil
 }
@@ -749,7 +758,10 @@ func (s *DoltStore) doltCLIFetchFromPeer(ctx context.Context, peer string, creds
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return cliTransferError(fmt.Sprintf("fetch from peer %s", peer), peer, transferCtx, out, err)
+		// Same as doltCLIPushRefToPeer: the served-database handoff keeps the
+		// transfer in the server's process (GH#5953).
+		plan := serverEnvNotePlan{procedure: "dolt fetch", remote: peer, creds: creds, env: os.Environ()}
+		return s.annotateServerEnvTransferError(ctx, plan, cliTransferError(fmt.Sprintf("fetch from peer %s", peer), peer, transferCtx, out, err))
 	}
 	return nil
 }
