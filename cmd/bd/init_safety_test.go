@@ -221,6 +221,86 @@ func TestInitReinitLocalWithUnreachableGitOriginRefusesUnverified(t *testing.T) 
 	}
 }
 
+// TestInitReinitLocalUnverifiedOriginRemoteOptOutSucceeds follows the
+// unverified-remote refusal's own remedy: the refusal must advertise the
+// explicit empty --remote opt-out, and re-running with it must initialize a
+// local-only database without probing or wiring the unreadable remote,
+// whether that remote is the git origin or a configured sync.remote.
+func TestInitReinitLocalUnverifiedOriginRemoteOptOutSucceeds(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	for _, source := range []string{"origin", "configured"} {
+		t.Run(source, func(t *testing.T) {
+			unreachable := filepath.Join(t.TempDir(), "does-not-exist.git")
+			workDir := t.TempDir()
+			runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+			runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+			var extra []string
+			if source == "origin" {
+				runGitForBootstrapTest(t, workDir, "remote", "add", "origin", unreachable)
+			} else {
+				extra = append(extra, "BD_SYNC_REMOTE="+unreachable)
+			}
+			homeDir := t.TempDir()
+			run := func(args ...string) (string, error) {
+				args = append([]string{"init", "--reinit-local"}, args...)
+				args = append(args, "--prefix", "org", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+				cmd := exec.Command(bdBin, args...)
+				cmd.Dir = workDir
+				cmd.Env = hermeticInitEnv(homeDir, extra...)
+				var out bytes.Buffer
+				cmd.Stdout = &out
+				cmd.Stderr = &out
+				err := cmd.Run()
+				return out.String(), err
+			}
+
+			refusal, err := run()
+			if err == nil {
+				t.Fatalf("bd init --reinit-local succeeded against an unreadable remote; expected a refusal:\n%s", refusal)
+			}
+			const remedy = `add --remote "" to this bd init command`
+			if !strings.Contains(refusal, remedy) {
+				t.Fatalf("refusal does not advertise the explicit empty-remote opt-out %q:\n%s", remedy, refusal)
+			}
+
+			out, err := run("--remote", "")
+			if err != nil {
+				t.Fatalf("bd init --reinit-local --remote \"\" failed: %v\noutput:\n%s", err, out)
+			}
+			if strings.Contains(out, "could not verify refs/dolt/data") {
+				t.Errorf("opt-out init still probed the unreadable remote:\n%s", out)
+			}
+			beadsDir := filepath.Join(workDir, ".beads")
+			if _, err := os.Stat(beadsDir); err != nil {
+				t.Fatalf(".beads should have been created by a successful init: %v", err)
+			}
+			// Neither sync.remote nor a Dolt remote may name the unreadable
+			// remote: both are plain text under .beads (config.yaml and
+			// Dolt's repo_state.json).
+			err = filepath.WalkDir(beadsDir, func(path string, d os.DirEntry, err error) error {
+				if err != nil || d.IsDir() {
+					return err
+				}
+				if info, err := d.Info(); err != nil || info.Size() > 1<<20 {
+					return err
+				}
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				if bytes.Contains(data, []byte(unreachable)) {
+					t.Errorf("%s configures the opted-out remote %s:\n%s", path, unreachable, data)
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 // TestInitReinitLocalConfiguredRemoteWithDoltDataRefuses is the sibling case:
 // sync.remote (again via BD_SYNC_REMOTE, not --remote) points at a bare repo
 // that DOES have refs/dolt/data pushed to it. `bd init --reinit-local` must

@@ -271,6 +271,9 @@ func refusalMessageUnverified() string {
     Fix access to the remote, then check it:
       git ls-remote <remote-url> refs/dolt/data
 
+    Initialize without connecting that remote:
+      add --remote "" to this bd init command
+
     Once the remote is readable, adopt its history:
       bd bootstrap
 
