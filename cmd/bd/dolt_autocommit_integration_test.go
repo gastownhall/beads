@@ -4,7 +4,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -134,7 +133,13 @@ func TestDoltAutoCommit_On_WritesAdvanceHead(t *testing.T) {
 	tmpDir := createTempDirWithCleanup(t)
 	setupGitRepoForIntegration(t, tmpDir)
 
+	// An embedded commit's author is GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL, else
+	// bd's actor and git user.email (GH#7628). Drop the inherited author
+	// sources so the identity setupGitRepoForIntegration configured names it.
 	env := append(os.Environ(), "BEADS_TEST_MODE=1")
+	for _, name := range []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "BEADS_ACTOR", "BD_ACTOR"} {
+		env = envWithout(env, name)
+	}
 
 	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
 	if initErr != nil {
@@ -158,17 +163,8 @@ func TestDoltAutoCommit_On_WritesAdvanceHead(t *testing.T) {
 	}
 
 	// Commit author should be deterministic (not the authenticated SQL user like root@%).
-	expectedName := os.Getenv("GIT_AUTHOR_NAME")
-	if expectedName == "" {
-		expectedName = "beads"
-	}
-	expectedEmail := os.Getenv("GIT_AUTHOR_EMAIL")
-	if expectedEmail == "" {
-		expectedEmail = "beads@local"
-	}
-	expectedAuthor := fmt.Sprintf("%s <%s>", expectedName, expectedEmail)
-	if got := doltHeadAuthor(t, tmpDir); got != expectedAuthor {
-		t.Fatalf("expected Dolt commit author %q, got %q", expectedAuthor, got)
+	if got, want := doltHeadAuthor(t, tmpDir), "Test User <test@example.com>"; got != want {
+		t.Fatalf("expected Dolt commit author %q, got %q", want, got)
 	}
 
 	// A read-only command should not create another commit.

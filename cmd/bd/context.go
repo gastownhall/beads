@@ -132,6 +132,7 @@ func setActor(a string) {
 	}
 	actor = a
 	actorGitFallbackPending = false
+	actorIsLastResort = false
 }
 
 // isJSONOutput returns true if JSON output mode is enabled.
