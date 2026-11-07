@@ -6,6 +6,7 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -87,8 +88,8 @@ func (e *restoreErrorWithheld) Unwrap() error { return e.err }
 // username alone, and so does a query or fragment, which sanitizeURL drops.
 //
 // A file URL without userinfo, the form DirToFileURL builds, names a local
-// directory and comes back as is, even where net/url rejects it (Windows'
-// file://C:\..., a '%' in a directory name). Any other URL is named without
+// directory and comes back as is, even where net/url rejects it (a
+// hand-written Windows file://c:\..., a '%' in a directory name). Any other URL is named without
 // its userinfo, query and fragment, unless net/url cannot parse it (a base64
 // secret holding '/', a password holding '#' or '?'), leaves an '@' outside
 // the userinfo (the same secrets where the part before the '/', '?' or '#'
@@ -221,7 +222,31 @@ func DirToFileURL(dir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve absolute path: %w", err)
 	}
-	return "file://" + abs, nil
+	return FileURL(abs), nil
+}
+
+// FileURL formats abs, an already-resolved local path, as the file:// URL
+// Dolt stores for a file remote: "file://" and the path, unescaped. On
+// Windows the path takes forward slashes and an uppercase drive letter,
+// "file://C:/Users/me/backup": Dolt's URL parser recognizes only an uppercase
+// drive, so "file://c:\Users\..." fell through to net/url and failed with
+// `invalid port ":\Users\..." after host` (GH#6019), and one spelling per
+// directory keeps the address the same whichever form the shell handed bd.
+func FileURL(abs string) string {
+	return fileURLForOS(abs, runtime.GOOS)
+}
+
+// fileURLForOS is FileURL for the named GOOS, so the Windows form is
+// testable anywhere. Other systems get the path byte for byte: a backslash is
+// a legal POSIX filename character, not a separator.
+func fileURLForOS(abs, goos string) string {
+	if goos == "windows" {
+		abs = strings.ReplaceAll(abs, `\`, "/")
+		if len(abs) >= 2 && abs[1] == ':' && 'a' <= abs[0] && abs[0] <= 'z' {
+			abs = string(abs[0]-'a'+'A') + abs[1:]
+		}
+	}
+	return "file://" + abs
 }
 
 // ExtractAddressConflictName parses the conflicting remote name from a Dolt
