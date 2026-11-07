@@ -349,6 +349,75 @@ func TestCodexHookRefreshMarkerEdgeCases(t *testing.T) {
 	})
 }
 
+func TestCodexHookUserPromptRefreshRearmsAfterFailure(t *testing.T) {
+	dir := t.TempDir()
+	codexHookMarkerDirOverride = dir
+	t.Cleanup(func() { codexHookMarkerDirOverride = "" })
+
+	calls := 0
+	stubCodexHookPrime(t, func(memoriesOnly bool) (string, error) {
+		calls++
+		if memoriesOnly {
+			t.Fatal("UserPromptSubmit refresh should request full prime output")
+		}
+		if calls == 1 {
+			return "", errors.New("workspace unavailable")
+		}
+		return "REARMED BEADS CONTEXT\n", nil
+	})
+
+	postJSON, _ := json.Marshal(codexHookInput{SessionID: "s1", CWD: "repo", HookEventName: codexHookPostCompact})
+	promptJSON, _ := json.Marshal(codexHookInput{SessionID: "s1", CWD: "repo", HookEventName: codexHookUserPromptSubmit})
+
+	if err := runCodexHook(context.Background(), codexHookPostCompact, bytes.NewReader(postJSON), ioDiscard{}); err != nil {
+		t.Fatalf("PostCompact hook: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runCodexHook(context.Background(), codexHookUserPromptSubmit, bytes.NewReader(promptJSON), &out); err != nil {
+		t.Fatalf("first UserPromptSubmit hook: %v", err)
+	}
+	raw := decodeCodexHookObject(t, out.Bytes())
+	assertCodexHookOmitsHookSpecificOutput(t, raw)
+	var msg string
+	if err := json.Unmarshal(raw["systemMessage"], &msg); err != nil || !strings.Contains(msg, "refresh after compaction failed") {
+		t.Fatalf("expected refresh failure warning, got %s", out.String())
+	}
+
+	out.Reset()
+	if err := runCodexHook(context.Background(), codexHookUserPromptSubmit, bytes.NewReader(promptJSON), &out); err != nil {
+		t.Fatalf("second UserPromptSubmit hook: %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("ordinary prompt after a failed refresh must stay silent, got %s", out.String())
+	}
+	if calls != 1 {
+		t.Fatalf("failed refresh must not be retried without a new PostCompact, prime calls = %d, want 1", calls)
+	}
+
+	if err := runCodexHook(context.Background(), codexHookPostCompact, bytes.NewReader(postJSON), ioDiscard{}); err != nil {
+		t.Fatalf("re-arming PostCompact hook: %v", err)
+	}
+	out.Reset()
+	if err := runCodexHook(context.Background(), codexHookUserPromptSubmit, bytes.NewReader(promptJSON), &out); err != nil {
+		t.Fatalf("third UserPromptSubmit hook: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("re-armed refresh must run prime exactly once, prime calls = %d, want 2", calls)
+	}
+	raw = decodeCodexHookObject(t, out.Bytes())
+	if _, ok := raw["hookSpecificOutput"]; !ok {
+		t.Fatalf("re-armed refresh success must inject context, got %s", out.String())
+	}
+	var got codexHookResponse
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("parse output: %v\n%s", err, out.String())
+	}
+	if got.HookSpecificOutput.HookEventName != codexHookUserPromptSubmit || !strings.Contains(got.HookSpecificOutput.AdditionalContext, "REARMED BEADS CONTEXT") {
+		t.Fatalf("expected re-armed context injection, got %s", out.String())
+	}
+}
+
 type ioDiscard struct{}
 
 func (ioDiscard) Write(p []byte) (int, error) { return len(p), nil }
