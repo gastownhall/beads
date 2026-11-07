@@ -279,6 +279,14 @@ func runRecipe(name string) error {
 		return HandleErrorWithHint(fmt.Sprintf("%v", err), "Use 'bd setup --list' to see available recipes.")
 	}
 
+	// The built-in copilot recipe's instructions file is the repository's,
+	// so bd manages a section in it rather than the whole file (GH#7431). A
+	// [recipes.copilot] of .beads/recipes.toml replaces the built-in and
+	// runs as any other file recipe below.
+	if !recipe.Workspace && strings.ToLower(strings.Trim(name, "-")) == "copilot" {
+		return runCopilotRecipe(*recipe)
+	}
+
 	// A user recipe's key, name, type and paths come from .beads/recipes.toml,
 	// which a repository can commit: each is spelled by the remedy printer
 	// (remedy.PrintedValue), so none can redraw or forge the line that tells
@@ -397,6 +405,22 @@ func translateSetupError(err error) error {
 		return nil
 	}
 	return SilentExit()
+}
+
+// runCopilotRecipe runs the built-in copilot recipe, whose plugin manifest
+// comes from recipe.
+func runCopilotRecipe(recipe recipes.Recipe) error {
+	switch {
+	case setupCheck:
+		return translateSetupError(setup.CheckCopilot())
+	case setupRemove:
+		return translateSetupError(setup.RemoveCopilot())
+	}
+	manifest, err := recipes.ContentForPath(recipe, setup.CopilotManifestPath)
+	if err != nil {
+		return HandleError("%v", err)
+	}
+	return translateSetupError(setup.InstallCopilot(manifest))
 }
 
 func runCursorRecipe() error {

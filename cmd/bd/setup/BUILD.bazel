@@ -9,6 +9,7 @@ go_library(
         "claude.go",
         "codex.go",
         "constants.go",
+        "copilot.go",
         "cursor.go",
         "exit.go",
         "factory.go",
@@ -27,9 +28,13 @@ go_library(
         "//internal/config",
         "//internal/git",
         "//internal/recipes",
+        "//internal/remedy",
         "//internal/templates",
         "//internal/templates/agents",
         "//internal/utils",
+        "@com_github_yuin_goldmark//:goldmark",
+        "@com_github_yuin_goldmark//ast",
+        "@com_github_yuin_goldmark//text",
     ],
 )
 
@@ -41,6 +46,7 @@ go_test(
         "claude_artifacts_golden_test.go",
         "claude_test.go",
         "codex_test.go",
+        "copilot_test.go",
         "cursor_test.go",
         "factory_test.go",
         "gemini_test.go",
@@ -58,6 +64,7 @@ go_test(
     embed = [":setup"],
     deps = [
         "//internal/git",
+        "//internal/recipes",
         "//internal/templates",
         "//internal/templates/agents",
         "@in_gopkg_yaml_v3//:yaml_v3",
