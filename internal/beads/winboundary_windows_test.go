@@ -3,6 +3,7 @@
 package beads
 
 import (
+	"os/user"
 	"path/filepath"
 	"testing"
 
@@ -58,5 +59,31 @@ func TestWindowsBoundarySpellingRegression(t *testing.T) {
 		if isPathInSafeBoundary(path) {
 			t.Errorf("isPathInSafeBoundary(%q) = true, want false (ambiguous spelling)", path)
 		}
+	}
+}
+
+// TestWindowsBoundaryProfileRegression drives the real isPathInSafeBoundary
+// against the host's profile parent: another user's profile is denied, as
+// /home/<other> is on POSIX, while the current user's home stays admitted.
+func TestWindowsBoundaryProfileRegression(t *testing.T) {
+	// The suite's TestMain points USERPROFILE at a scratch home; the policy
+	// reads the account database, so the test must too.
+	u, err := user.Current()
+	if err != nil || u.HomeDir == "" {
+		t.Skipf("no account home directory: %v", err)
+	}
+	home := u.HomeDir
+	parent := filepath.Dir(home)
+	peer := filepath.Join(parent, "some-other-nonexistent-user", ".beads")
+	if isPathInSafeBoundary(peer) {
+		t.Errorf("isPathInSafeBoundary(%q) = true, want false (peer profile)", peer)
+	}
+	sibling := filepath.Join(parent, filepath.Base(home)+"2", ".beads")
+	if isPathInSafeBoundary(sibling) {
+		t.Errorf("isPathInSafeBoundary(%q) = true, want false (peer profile sharing the home's prefix)", sibling)
+	}
+	own := filepath.Join(home, "src", ".beads")
+	if !isPathInSafeBoundary(own) {
+		t.Errorf("isPathInSafeBoundary(%q) = false, want true (current user's home)", own)
 	}
 }
