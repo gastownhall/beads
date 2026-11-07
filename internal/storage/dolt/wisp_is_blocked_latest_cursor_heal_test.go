@@ -285,3 +285,43 @@ func TestDoltNew_WispIsBlockedRecomputeAtIgnoredCursor_RealDolt(t *testing.T) {
 		}
 	}
 }
+
+// TestDoltNew_EphemeralCreateAfterWispHeal_RealDolt covers AC-3's server-mode
+// half: after the heal the wisps plane is not a museum piece -- an ephemeral
+// create on the healed clone succeeds and lands with its maintained flag.
+// Before the fix this is the reported symptom itself: every ephemeral create
+// on a drifted clone failed on the missing column.
+func TestDoltNew_EphemeralCreateAfterWispHeal_RealDolt(t *testing.T) {
+	env := newWispHealEnv(t)
+
+	store, err := env.open()
+	if err != nil {
+		t.Fatalf("New (fresh): %v", err)
+	}
+	if err := setConfigWithOwnBudget(t, store, "issue_prefix", "wh"); err != nil {
+		store.Close()
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	driftWispIsBlockedForHeal(t, store)
+	rewindIgnoredCursor(t, store, 32)
+	if err := store.Close(); err != nil {
+		t.Fatalf("close drifted store: %v", err)
+	}
+
+	healed, err := env.open()
+	if err != nil {
+		t.Fatalf("New on the drifted clone: %v", err)
+	}
+	defer func() { _ = healed.Close() }()
+	env.requireWispIsBlockedShape(healed)
+	ctx, cancel := testContext(t)
+	defer cancel()
+	is := &types.Issue{ID: "wh-e", Title: "created after heal", Status: types.StatusOpen,
+		Priority: 2, IssueType: types.TypeTask, Ephemeral: true}
+	if err := healed.CreateIssue(ctx, is, "tester"); err != nil {
+		t.Fatalf("CreateIssue ephemeral on the healed clone: %v (the reported symptom: every ephemeral create failed on the missing column)", err)
+	}
+	if got, ok := env.wispFlags(healed)["wh-e"]; !ok || got {
+		t.Fatalf("created wisp wh-e flag = %v (present=%v), want present and false", got, ok)
+	}
+}
