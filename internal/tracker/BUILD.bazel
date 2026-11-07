@@ -5,6 +5,7 @@ go_library(
     name = "tracker",
     srcs = [
         "engine.go",
+        "engine_unaddressable.go",
         "errors.go",
         "multiproject.go",
         "registry.go",
@@ -35,6 +36,7 @@ go_test(
         "engine_close_policy_test.go",
         "engine_create_only_test.go",
         "engine_create_warnings_test.go",
+        "engine_dry_run_unaddressable_test.go",
         "engine_external_ref_history_test.go",
         "engine_history_gate_cgo_test.go",
         "engine_match_key_test.go",
@@ -44,6 +46,7 @@ go_test(
         "engine_ratelimit_test.go",
         "engine_selective_test.go",
         "engine_test.go",
+        "engine_unaddressable_test.go",
         "multiproject_test.go",
         "registry_test.go",
         "store_test.go",

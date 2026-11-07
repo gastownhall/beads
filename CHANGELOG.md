@@ -1300,6 +1300,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports beads linked elsewhere as skipped, and `bd github pull <bead-id>`
   says their link is not an issue the tracker can address (#7781, reported
   and first fixed by @NahumLitvin in #7794).
+- GitHub sync leaves an issue transferred out of the configured repository
+  alone. GitHub follows the transfer, so fetching the bead's issue returned it
+  under the other repository's URL: conflict detection compared the bead with
+  it, a push could write the bead over it, and a pull by bead ID imported it
+  as a new bead or wrote it over a bead linked to its new URL. Pull, push and
+  the conflict check now skip it, with a warning naming the configured
+  repository; push and the conflict check do so once sync has read the
+  repository's current name from GitHub. A push also says when it skips a
+  bead linked outside the configured repository, in one line for a bulk push
+  and once per bead for a push by ID, and a pull says when an issue came back
+  under a URL outside it. A ref still names the configured repository when
+  it spells the host with a `www.` prefix, without `https://`, with an
+  explicit default port or with a trailing dot, and the host of the
+  repository's own URL counts as its host too, so an API proxy in front of
+  `github.com` keeps syncing (#7948).
+- `bd github push` and `bd github sync` on a GitHub Enterprise host whose
+  name does not contain `github.com` no longer take a bead linked to an
+  issue on that host for an unlinked one: a push updates the linked issue
+  instead of creating a second issue and relinking the bead to it. An issue
+  URL now counts as GitHub's when it contains `github.com`, in any letter
+  case, or sits on the host of `github.url` (#7948).
 - `bd compact` no longer discards writes that reach `main` while it runs. It
   finished by hard-resetting `main` onto the rebuilt history, which dropped
   changes in `main`'s working set that no Dolt commit held yet (a batch under

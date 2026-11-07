@@ -380,7 +380,13 @@ under the new one stay matched to their issues, and a pull relinks them to the
 current URL. If that request fails, or the old name now belongs to another
 repository, beads still linked under it count as another repository's: relink
 them (`bd update <id> --external-ref <new-url>`), or the next pull imports
-their issues again as new beads.
+their issues again as new beads. An issue transferred to another repository
+counts as that repository's: pull, push and conflict detection leave it and
+its bead alone, with a warning, as a push does for any bead linked outside the
+configured repository. Telling it from an issue of a renamed repository takes
+the repository's current name, which sync reads from GitHub first: if that
+request fails, push and conflict detection handle the issue as the configured
+repository's.
 
 ## 🌐 Community Tools
 

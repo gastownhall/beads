@@ -34,11 +34,12 @@ type Tracker struct {
 	client *Client
 	config *MappingConfig
 	store  tracker.Store
-	// currentName is the repository's owner/repo as GitHub reported it at
-	// Init, and formerNames are the other names local refs use that GitHub
-	// resolved to the same repository (see resolveRepositoryNames). Both are
-	// empty when unknown.
+	// currentName and htmlURL are the repository's owner/repo and html_url
+	// as GitHub reported them at Init, and formerNames are the other names
+	// local refs use that GitHub resolved to the same repository (see
+	// resolveRepositoryNames). All are empty when unknown.
 	currentName string
+	htmlURL     string
 	formerNames []string
 }
 
@@ -118,7 +119,9 @@ func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 // push and conflict detection would skip their beads without a warning, and a
 // pull would import their issues again as new beads.
 //
-// The current name is the configured repository's full_name. A former name
+// The current name is the configured repository's full_name, and the host of
+// its html_url counts as the configured host too, so an API proxy in front of
+// github.com addresses the github.com issue URLs it returns. A former name
 // can only be recognized by asking GitHub, so each other repository that a
 // local ref names on the configured host is read once, and its name counts
 // when GitHub answers with the configured repository's ID; another
@@ -131,6 +134,7 @@ func (t *Tracker) resolveRepositoryNames(ctx context.Context) {
 		return
 	}
 	t.currentName = repo.FullName
+	t.htmlURL = repo.HTMLURL
 	if repo.ID == 0 || t.store == nil {
 		return
 	}
@@ -323,12 +327,20 @@ func canonicalGitHubBaseURL(raw string) string {
 
 // IsExternalRef checks if a ref belongs to this GitHub tracker.
 // It recognizes both full GitHub URLs and the "github:{id}" shorthand format
-// produced by BuildExternalRef when a URL is unavailable.
+// produced by BuildExternalRef when a URL is unavailable. An issue URL is
+// GitHub's when it contains github.com, in any letter case, or, once the
+// tracker is initialized, sits on a host of the configured repository (see
+// RefScope), so a GitHub Enterprise host whose name lacks "github.com" counts
+// too. Recognition covers any repository's issue URL; whether the configured
+// repository can address the ref is ExtractIdentifier's call.
 func (t *Tracker) IsExternalRef(ref string) bool {
 	if ghShorthandPattern.MatchString(ref) {
 		return true
 	}
-	return strings.Contains(ref, "github.com") && issueNumberPattern.MatchString(ref)
+	if !issueNumberPattern.MatchString(ref) {
+		return false
+	}
+	return strings.Contains(strings.ToLower(ref), "github.com") || t.RefScope().onHost(ref)
 }
 
 // ExtractIdentifier extracts the issue number from a GitHub URL or shorthand ref.
@@ -365,7 +377,26 @@ func (t *Tracker) RefScope() RefScope {
 		return RefScope{}
 	}
 	return NewRefScope(t.client.BaseURL, t.client.Owner, t.client.Repo).
-		withNames(append([]string{t.currentName}, t.formerNames...)...)
+		withNames(append([]string{t.currentName}, t.formerNames...)...).
+		withIssueHost(t.htmlURL)
+}
+
+// DescribeTarget implements tracker.TargetDescriber: it names the repository
+// ExtractIdentifier addresses.
+func (t *Tracker) DescribeTarget() string {
+	if t.client == nil {
+		return ""
+	}
+	return "repository " + t.client.Owner + "/" + t.client.Repo
+}
+
+// TargetNamesKnown implements tracker.TargetNamesReporter: it reports whether
+// Init read the repository's current name, which every issue GitHub returns
+// carries (see resolveRepositoryNames). Without it an issue of a renamed
+// repository, served under the new name, looks like one transferred to
+// another repository.
+func (t *Tracker) TargetNamesKnown() bool {
+	return t.currentName != ""
 }
 
 func (t *Tracker) BuildExternalRef(issue *tracker.TrackerIssue) string {
