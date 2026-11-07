@@ -214,6 +214,98 @@ func TestPeerTransferFailureNamesServerEnvironment(t *testing.T) {
 	})
 }
 
+// serverEnvDefaultRemoteStore builds a server-mode store whose default
+// remote "origin" sits at remoteURL. With withCLIDir, the CLI directory is
+// materialized so credential and cloud-auth routing can take push/pull
+// through the CLI; without it, every CLI gate is false and the SQL route
+// runs, whose unroutable connection makes CALL DOLT_PUSH fail at once.
+func serverEnvDefaultRemoteStore(t *testing.T, remoteURL string, withCLIDir bool) *DoltStore {
+	t.Helper()
+	clearPredicateEnv(t)
+	clearCloudAuthEnv(t)
+
+	beadsDir := unmanagedWorkspace(t)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.MatchExpectationsInOrder(false)
+	for i := 0; i < 8; i++ {
+		mock.ExpectQuery("SELECT name, url, params FROM dolt_remotes").
+			WillReturnRows(sqlmock.NewRows([]string{"name", "url", "params"}).AddRow("origin", remoteURL, nil))
+	}
+
+	store := &DoltStore{
+		serverMode: true,
+		readOnly:   true,
+		beadsDir:   beadsDir,
+		dbPath:     filepath.Join(beadsDir, "dolt"),
+		database:   "beads",
+		remote:     "origin",
+		branch:     "main",
+		db:         db,
+		cfg:        &Config{ServerHost: "127.0.0.1", ServerPort: 3310},
+		connStr:    unroutableConnStr,
+	}
+	if withCLIDir {
+		// The served database and its .dolt directory are what make the CLI
+		// handoff routes available; without them every CLI gate is false and
+		// the store stays on the SQL route.
+		serveDoltDatabase(t, store, store.dbPath, 3310)
+		if err := os.MkdirAll(filepath.Join(store.CLIDir(), ".dolt", "noms"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return store
+}
+
+// TestDefaultRemoteTransferFailureNamesServerEnvironment pins the
+// server-environment note on default-remote transfers (GH#5953): the SQL
+// push's CALL DOLT_PUSH failure carries exactly one note, and the CLI routes
+// cloud-auth routing selects carry the same note with the CLI verb named —
+// the served-database handoff keeps those transfers in the server's process
+// too.
+func TestDefaultRemoteTransferFailureNamesServerEnvironment(t *testing.T) {
+	const azURL = "az://bucket/beads"
+	ctx := context.Background()
+
+	t.Run("SQL push names the server environment once", func(t *testing.T) {
+		store := serverEnvDefaultRemoteStore(t, azURL, false) // no CLI dir: every CLI gate is false
+		t.Setenv("AZURE_STORAGE_ACCOUNT", "bdenvacct")
+
+		err := store.Push(ctx)
+
+		assertServerEnvNote(t, err, "failed to push to origin/main", []string{
+			"; CALL DOLT_PUSH runs in the Dolt server's process, which takes", "AZURE_STORAGE_*",
+		}, nil)
+	})
+
+	t.Run("cloud-auth CLI push keeps the note", func(t *testing.T) {
+		fakeDoltOnPathFailingTransfers(t, "origin "+azURL)
+		store := serverEnvDefaultRemoteStore(t, azURL, true)
+		t.Setenv("AZURE_STORAGE_ACCOUNT", "bdenvacct")
+
+		err := store.Push(ctx)
+
+		assertServerEnvNote(t, err, "dolt push failed", []string{
+			"; dolt push runs in the Dolt server's process, which takes", "AZURE_STORAGE_*",
+		}, nil)
+	})
+
+	t.Run("cloud-auth CLI pull keeps the note", func(t *testing.T) {
+		fakeDoltOnPathFailingTransfers(t, "origin "+azURL)
+		store := serverEnvDefaultRemoteStore(t, azURL, true)
+		t.Setenv("AZURE_STORAGE_ACCOUNT", "bdenvacct")
+
+		err := store.Pull(ctx)
+
+		assertServerEnvNote(t, err, "dolt pull failed", []string{
+			"; dolt pull runs in the Dolt server's process, which takes", "AZURE_STORAGE_*",
+		}, nil)
+	})
+}
+
 // TestSettleMergeInTxNamesServerEnvironment pins where the SQL pull's
 // server-environment note attaches inside the settle machinery (GH#5953): to
 // the pull statement's own error wherever settlement surfaces it, and never

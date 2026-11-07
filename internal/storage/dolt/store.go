@@ -5235,7 +5235,10 @@ func (s *DoltStore) doltCLIPush(ctx context.Context, remote string, force bool, 
 	applyNoGitHooksToCmd(cmd) // GH#3724
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return cliTransferError("dolt push", remote, transferCtx, out, err)
+		// The served-database handoff keeps the transfer in the server's
+		// process even on this route (GH#5953).
+		plan := serverEnvNotePlan{procedure: "dolt push", remote: remote, creds: creds, env: os.Environ()}
+		return s.annotateServerEnvTransferError(ctx, plan, cliTransferError("dolt push", remote, transferCtx, out, err))
 	}
 	return nil
 }
@@ -5262,7 +5265,10 @@ func (s *DoltStore) doltCLIPull(ctx context.Context, remote string, creds *remot
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return cliTransferError("dolt pull", remote, transferCtx, out, err)
+		// The served-database handoff keeps the transfer in the server's
+		// process even on this route (GH#5953).
+		plan := serverEnvNotePlan{procedure: "dolt pull", remote: remote, creds: creds, env: os.Environ()}
+		return s.annotateServerEnvTransferError(ctx, plan, cliTransferError("dolt pull", remote, transferCtx, out, err))
 	}
 	return nil
 }
@@ -5351,9 +5357,12 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
 	// Cloud auth CLI routing: when cloud storage env vars (AZURE_*, AWS_*,
-	// etc.) are set and we're in server mode, route through CLI so the dolt
-	// subprocess inherits the current env. The SQL server may not have these
-	// vars if it was started in a different context (GH#6).
+	// etc.) are set and we're in server mode, route through the CLI
+	// subprocess (GH#6). Route selection is unchanged by GH#5953; note that
+	// when the database directory is served by a live dolt sql-server, the
+	// CLI hands the transfer to that server process, which reads these vars
+	// from its own startup environment — the transfer failure's note names
+	// them there.
 	if useCLI, err := s.prepareCLIRouteForCloudAuth(ctx, remote); err != nil {
 		return err
 	} else if useCLI {
