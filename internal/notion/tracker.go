@@ -139,14 +139,18 @@ var _ itracker.SinceGranularityProvider = (*Tracker)(nil)
 func (t *Tracker) SinceGranularity() time.Duration { return fetchSinceGranularity }
 
 func (t *Tracker) FetchIssues(ctx context.Context, opts itracker.FetchOptions) ([]itracker.TrackerIssue, error) {
-	if err := t.ensureRemoteIndex(ctx); err != nil {
+	pages, err := t.client.QueryDataSource(ctx, t.dataSourceID)
+	if err != nil {
 		return nil, err
 	}
-	t.cacheMu.RLock()
+	live, err := t.liveIssues(pages)
+	if err != nil {
+		return nil, err
+	}
 
-	result := make([]itracker.TrackerIssue, 0, len(t.issueCache))
-	for _, issue := range t.issueCache {
-		candidate := cloneTrackerIssue(issue)
+	result := make([]itracker.TrackerIssue, 0, len(live))
+	for i := range live {
+		candidate := live[i]
 		if !matchesFetchState(&candidate, opts.State) {
 			continue
 		}
@@ -158,14 +162,28 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts itracker.FetchOptions) (
 			break
 		}
 	}
-	queried := len(t.issueCache)
-	candidates := len(result)
-	t.cacheMu.RUnlock()
 	t.cacheMu.Lock()
-	t.lastQueried = queried
-	t.lastCandidates = candidates
+	t.lastQueried = len(live)
+	t.lastCandidates = len(result)
 	t.cacheMu.Unlock()
 	return result, nil
+}
+
+// liveIssues maps the rows a query returned, skipping archived and trashed
+// pages.
+func (t *Tracker) liveIssues(pages []Page) ([]itracker.TrackerIssue, error) {
+	issues := make([]itracker.TrackerIssue, 0, len(pages))
+	for _, page := range pages {
+		if page.InTrash || page.Archived {
+			continue
+		}
+		issue, err := TrackerIssueFromPullIssue(PulledIssueFromPage(page), t.config)
+		if err != nil {
+			return nil, err
+		}
+		issues = append(issues, *issue)
+	}
+	return issues, nil
 }
 
 func (t *Tracker) LastPullStats() (queried int, candidates int) {

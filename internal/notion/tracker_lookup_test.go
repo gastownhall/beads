@@ -15,6 +15,7 @@ import (
 	"time"
 
 	itracker "github.com/steveyegge/beads/internal/tracker"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // testDataSourceID is the data source the fake Notion serves as the tracker's
@@ -382,4 +383,88 @@ func TestTrackerIncrementalPullDoesNotDiscoverOldUnlinkedPages(t *testing.T) {
 	if fetched == nil || fetched.ID != old.ID {
 		t.Fatalf("FetchIssue(%s) = %+v, want page %s", old.URL, fetched, old.ID)
 	}
+}
+
+// A cursor-less pull always runs its own unfiltered query. A targeted read, an
+// incremental pull or a write on the same tracker must not leave behind a
+// partial result that a later full pull reports as the whole source.
+func TestTrackerFullFetchAfterTargetedOperations(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	edited := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+
+	t.Run("returns every live row", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeNotion(t)
+		open := fakeRow(1, "bd-1", edited)
+		closed := fakeRow(2, "bd-2", edited)
+		closed.Properties[PropertyStatus] = PageProperty{Select: &SelectOption{Name: "Closed"}}
+		archived := fakeRow(3, "bd-3", edited)
+		archived.Archived = true
+		f.addPages(open, closed, archived)
+		tr := f.tracker()
+
+		created, err := tr.CreateIssue(ctx, &types.Issue{ID: "bd-new", Title: "New", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask})
+		if err != nil {
+			t.Fatalf("CreateIssue: %v", err)
+		}
+		if _, err := tr.UpdateIssue(ctx, open.URL, &types.Issue{ID: "bd-1", Title: "Edited", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}); err != nil {
+			t.Fatalf("UpdateIssue: %v", err)
+		}
+		if _, err := tr.FetchIssue(ctx, created.URL); err != nil {
+			t.Fatalf("FetchIssue: %v", err)
+		}
+		since := time.Now().UTC().Add(-time.Hour)
+		if _, err := tr.FetchIssues(ctx, itracker.FetchOptions{Since: &since}); err != nil {
+			t.Fatalf("incremental FetchIssues: %v", err)
+		}
+
+		f.resetRequests()
+		all, err := tr.FetchIssues(ctx, itracker.FetchOptions{})
+		if err != nil {
+			t.Fatalf("full FetchIssues: %v", err)
+		}
+		if got := strings.Join(beadsIDs(all), ","); got != "bd-1,bd-2,bd-new" {
+			t.Fatalf("full pull returned %q, want bd-1,bd-2,bd-new", got)
+		}
+		if reqs := f.requests(); reqs.unfilteredQueries == 0 || len(reqs.filters) != 0 {
+			t.Fatalf("full pull sent %d unfiltered and %d filtered queries, want an unfiltered query only",
+				reqs.unfilteredQueries, len(reqs.filters))
+		}
+		if queried, candidates := tr.LastPullStats(); queried != 3 || candidates != 3 {
+			t.Fatalf("LastPullStats = (%d, %d), want (3, 3)", queried, candidates)
+		}
+
+		openOnly, err := tr.FetchIssues(ctx, itracker.FetchOptions{State: "open", Limit: 1})
+		if err != nil {
+			t.Fatalf("full open FetchIssues: %v", err)
+		}
+		if len(openOnly) != 1 || beadsIDs(openOnly)[0] == "bd-2" {
+			t.Fatalf("open pull with limit 1 returned %v", beadsIDs(openOnly))
+		}
+		if queried, candidates := tr.LastPullStats(); queried != 3 || candidates != 1 {
+			t.Fatalf("LastPullStats = (%d, %d), want (3, 1)", queried, candidates)
+		}
+	})
+
+	t.Run("fails beyond the bound without partial rows", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeNotion(t)
+		f.hugeSource = true
+		tr := f.tracker()
+
+		if _, err := tr.CreateIssue(ctx, &types.Issue{ID: "bd-new", Title: "New", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}); err != nil {
+			t.Fatalf("CreateIssue: %v", err)
+		}
+		issues, err := tr.FetchIssues(ctx, itracker.FetchOptions{})
+		if err == nil {
+			t.Fatalf("full FetchIssues beyond the bound returned %v, want the bound error", beadsIDs(issues))
+		}
+		if issues != nil {
+			t.Fatalf("full FetchIssues returned partial rows %v with its error", beadsIDs(issues))
+		}
+		if !strings.Contains(err.Error(), "notion.max_query_pages") || !strings.Contains(err.Error(), "NOTION_MAX_QUERY_PAGES") {
+			t.Fatalf("bound error should name both levers, got: %v", err)
+		}
+	})
 }
