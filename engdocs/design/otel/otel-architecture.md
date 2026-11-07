@@ -518,7 +518,7 @@ Every factual claim in this document is backed by a specific source location. Th
 | Traces: stdout only when `BD_OTEL_STDOUT=true` | `telemetry.go:84-93` |
 | Metrics: HTTP OTLP when `BD_OTEL_METRICS_URL` set | `telemetry.go:131-139` |
 | Resource: `service.name`, `service.version` | `telemetry.go:73-75` |
-| Resource: `WithHost()`, `WithProcess()` | `telemetry.go:76-77` |
+| Resource: `WithHost()` and the bounded `WithProcess*` detectors (no `process.command_args`) | `telemetry.go` `buildResource` |
 | `Shutdown(ctx)` signature | `telemetry.go:162` |
 | `Init` called in `PersistentPreRun` | `main.go:256` |
 | Command span started with `bd.command`, `bd.version`, `bd.args` | `main.go:262-266` |
