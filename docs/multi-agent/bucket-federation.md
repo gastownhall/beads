@@ -193,14 +193,23 @@ dolt config --global --add user.email "you@example.com"
 
 ### Auth works in the shell but sync fails in server mode
 
-With an external Dolt SQL server, `CALL DOLT_PUSH/PULL` runs *inside the
-server process*, which only has the environment it inherited at startup.
-Credentials exported afterwards never reach it. bd detects cloud credentials
-matching the remote's scheme (`GOOGLE_*`/`GCS_*` for `gs://`, `AWS_*` for
-`s3://`/`aws://`, `AZURE_STORAGE_*` for `az://`) and routes push/pull through
-a `dolt` CLI subprocess, which inherits the current environment. If sync still
-cannot authenticate, restart the server with the credentials in its
-environment.
+With an external Dolt SQL server, the transfer runs in the server's process
+on both routes: `CALL DOLT_PUSH/PULL` executes inside the server, and when bd
+routes push/pull through a `dolt` CLI subprocess the served database hands
+the operation to the same live server. Either way the transfer authenticates
+with the environment the server inherited at startup — credentials exported
+in your shell afterwards never reach it, and the CLI route does not deliver
+them either (GH#5953). When a transfer fails because of it, bd's error says
+so and names the variable family the destination reads (`GOOGLE_*`/`GCS_*`
+for `gs://`, `AWS_*` for `s3://`/`aws://`, `AZURE_STORAGE_*` for `az://`,
+`DOLT_REMOTE_USER`/`DOLT_REMOTE_PASSWORD` for DoltHub and Hosted Dolt).
+
+To fix it, put current credentials in the server's startup environment and
+restart it: for a server bd manages, `bd dolt stop`, then `bd dolt start`
+from the environment that holds them. A server someone else started — a
+service unit, a scheduled job, a shared box's default — gets its environment
+from whatever starts it, so the credentials belong in that starter's
+configuration; restarting it affects everyone the server shares.
 
 ### The remote is named something other than `origin`
 

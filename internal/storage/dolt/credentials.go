@@ -770,9 +770,12 @@ func (s *DoltStore) shouldUseCLIForLocalRemoteWithError(ctx context.Context, rem
 // relevant to the remote's scheme are checked, preventing misrouting when
 // multiple remotes use different cloud providers (e.g., DoltHub + Azure).
 //
-// The CLI subprocess inherits the current process env, so these env vars
-// reach the dolt binary. The SQL server process may not have them if it was
-// started in a different context (GH#6).
+// In server mode the transfer runs in the Dolt server's process whichever
+// route bd picks — a SQL call executes in the server, and the CLI route
+// hands the operation to the same live server — so the environment that
+// matters is the one the server inherited at startup, not bd's (GH#5953).
+// The server-environment note names these prefixes when bd holds them, and
+// the cloud-auth route check below reads the same map.
 var cloudAuthSchemeMap = map[string][]string{
 	"az://":      {"AZURE_STORAGE_"},  // Azure Blob Storage
 	"aws://":     {"AWS_"},            // Dolt AWS remotes (S3 + DynamoDB)
@@ -836,12 +839,15 @@ func envPrefixesForRemoteURL(url string) []string {
 // present, bd materializes the same remote into the local CLI directory before
 // routing to the CLI subprocess.
 //
-// When bd connects to an external dolt-sql-server (server mode), CALL
-// DOLT_PUSH/PULL executes inside the server process. That process only has
-// the env vars it inherited at startup. If cloud credentials were set (or
-// changed) after the server started, the SQL path silently fails to
-// authenticate. Routing through a CLI subprocess (dolt push/pull) ensures
-// the child process inherits the current environment (GH#6).
+// When bd connects to an external dolt-sql-server (server mode), the
+// transfer runs in the server's process on both routes: the SQL CALL
+// executes inside the server, and the CLI subprocess operates the server's
+// served database, which hands the operation to the same live server. The
+// credentials that matter are therefore the ones in the server's startup
+// environment — routing through the CLI does not deliver bd's current
+// environment to the transfer (GH#5953; the route itself dates to GH#6 and
+// is unchanged). Failed transfers on either route carry the
+// server-environment note naming the family this check matched.
 func (s *DoltStore) shouldUseCLIForCloudAuth(ctx context.Context, remote string) bool {
 	ok, err := s.prepareCLIRouteForCloudAuth(ctx, remote)
 	if err != nil {
