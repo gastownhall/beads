@@ -388,6 +388,16 @@ func restoreWispIsBlocked(ctx context.Context, db DBConn) error {
 		return nil
 	}
 	if !hasColumn {
+		// An index under this name without the column is not ignored/0006's.
+		// Kept, it would make a pass that fails after the ALTER look converged
+		// to the next one, which would record 32 over DEFAULT 0 flags, so it
+		// goes first and the index is created last, after the recompute.
+		if hasIndex {
+			if _, err := db.ExecContext(ctx, "DROP INDEX idx_wisps_is_blocked ON wisps"); err != nil {
+				return fmt.Errorf("dropping idx_wisps_is_blocked without its column: %w", err)
+			}
+			hasIndex = false
+		}
 		if _, err := db.ExecContext(ctx, "ALTER TABLE wisps ADD COLUMN is_blocked TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
 			return fmt.Errorf("adding wisps.is_blocked: %w", err)
 		}
