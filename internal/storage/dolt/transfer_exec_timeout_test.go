@@ -498,3 +498,44 @@ func TestTransferReadDeadlineBoundsTransfer(t *testing.T) {
 		}
 	}
 }
+
+// TestLongTimeoutConnIgnoresTransferTimeout pins the knob's scope: the
+// non-transfer callers of openLongTimeoutConn keep their fixed 5m read budget
+// and backup's oneShotConn(0) keeps no deadline at all, so a short
+// BEADS_DOLT_TRANSFER_TIMEOUT must not end their silent statements early —
+// only the caller's context does.
+func TestLongTimeoutConnIgnoresTransferTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		open func(s *DoltStore) (*sql.DB, error)
+	}{
+		{name: "openLongTimeoutConn", open: func(s *DoltStore) (*sql.DB, error) { return s.openLongTimeoutConn() }},
+		{name: "backup oneShotConn(0)", open: func(s *DoltStore) (*sql.DB, error) { return s.oneShotConn(0) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(transferExecTimeoutEnv, "1s")
+			f := newFakeTransferServer(t, silentOn("DOLT_BACKUP", nil))
+			s := newFakeTransferStore(t, f, false)
+			db, err := tt.open(s)
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			defer db.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_, err = db.ExecContext(ctx, "CALL DOLT_BACKUP('sync', 'remote')")
+
+			if got := f.silentStatement(); got == "" {
+				t.Fatalf("the statement never reached the server; err: %v", err)
+			}
+			if errors.Is(err, mysql.ErrInvalidConn) {
+				t.Fatalf("err = %v: the connection's read deadline fired before the caller's context, so %s=1s leaked into it", err, transferExecTimeoutEnv)
+			}
+			if ctx.Err() == nil || !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("err = %v (ctx err %v), want the caller's context deadline to end the call", err, ctx.Err())
+			}
+		})
+	}
+}
