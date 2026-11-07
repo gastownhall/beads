@@ -1208,6 +1208,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Windows: `bd backup init` and the auto-backup path no longer register a
+  backup destination URL that Dolt rejects as `invalid port` (GH#6019).**
+  Both URL builders glued the native absolute path onto `file://`, so a
+  Windows path became `file://c:\Users\me\.beads\backup`, whose lowercase
+  drive letter parses as a host and whose separators read as a malformed
+  port — the source of the `auto-backup failed: register backup remote:
+  ... invalid port` warning on every command from PowerShell-style
+  contexts. Both now share one formatter that writes forward slashes and an
+  uppercase drive letter (`file://C:/Users/me/.beads/backup`), the spelling
+  Dolt itself uses for file remotes, so the registered URL is identical
+  regardless of how the invoking shell spells the path. Paths on Linux and
+  macOS are formatted exactly as before, and URLs handed to `bd backup
+  init` with a scheme are still passed through verbatim.
+
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

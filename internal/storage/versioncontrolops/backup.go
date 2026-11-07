@@ -6,6 +6,7 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -87,8 +88,10 @@ func (e *restoreErrorWithheld) Unwrap() error { return e.err }
 // username alone, and so does a query or fragment, which sanitizeURL drops.
 //
 // A file URL without userinfo, the form DirToFileURL builds, names a local
-// directory and comes back as is, even where net/url rejects it (Windows'
-// file://C:\..., a '%' in a directory name). Any other URL is named without
+// directory and comes back as is, even where net/url rejects it (a '%' in a
+// directory name, or a caller-supplied native Windows spelling like
+// file://C:\..., which DirToFileURL itself no longer generates). Any other
+// URL is named without
 // its userinfo, query and fragment, unless net/url cannot parse it (a base64
 // secret holding '/', a password holding '#' or '?'), leaves an '@' outside
 // the userinfo (the same secrets where the part before the '/', '?' or '#'
@@ -202,6 +205,34 @@ func BackupToDir(ctx context.Context, register, sync DBConn, dir string) error {
 	return nil
 }
 
+// FileURL formats an already-resolved absolute local directory path as the
+// file:// URL Dolt backup remotes use: forward slashes, and on Windows an
+// uppercase drive letter (file://C:/Users/me/backup) — the spelling Dolt
+// itself serializes for file remotes. It does not resolve, escape, or clean
+// abs; callers resolve it with filepath.Abs on the host first.
+func FileURL(abs string) string {
+	return fileURLForOS(abs, runtime.GOOS)
+}
+
+// fileURLForOS is FileURL with the target operating system named explicitly,
+// so Windows URL formatting is testable from any host (#6019). Paths for
+// other systems are returned byte-identical to the historical
+// "file://" + abs concatenation, backslashes included.
+func fileURLForOS(abs, goos string) string {
+	if goos != "windows" {
+		return "file://" + abs
+	}
+	p := strings.ReplaceAll(abs, `\`, "/")
+	// Uppercase an initial ASCII drive letter: Dolt's volume handling
+	// recognizes only uppercase drives, and a lowercase "c:" is read by
+	// ordinary URL parsing as a host, with the rest of the path rejected
+	// as an invalid port (#6019).
+	if len(p) >= 2 && p[1] == ':' && 'a' <= p[0] && p[0] <= 'z' {
+		p = string(p[0]-'a'+'A') + p[1:]
+	}
+	return "file://" + p
+}
+
 // DirToFileURL resolves dir to an absolute path and returns a file:// URL.
 //
 // An input that already carries a scheme is rejected rather than prefixed.
@@ -221,7 +252,7 @@ func DirToFileURL(dir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve absolute path: %w", err)
 	}
-	return "file://" + abs, nil
+	return FileURL(abs), nil
 }
 
 // ExtractAddressConflictName parses the conflicting remote name from a Dolt

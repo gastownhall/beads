@@ -40,6 +40,53 @@ func TestDirToFileURLRejectsSchemes(t *testing.T) {
 	}
 }
 
+// TestFileURLForOS pins the shared local-path formatter behind DirToFileURL
+// and resolveDoltBackupURL (#6019). On Windows the native absolute path —
+// backslashes, and a drive letter whose case depends on the invoking shell —
+// must become the uppercase-drive, forward-slash URL Dolt's own file remotes
+// serialize, or URL parsing reads the drive as a host and rejects the rest of
+// the path as an invalid port. Every other system keeps the historical
+// byte-exact "file://" + abs concatenation, backslashes included.
+func TestFileURLForOS(t *testing.T) {
+	tests := []struct {
+		name     string
+		abs      string
+		goos     string
+		want     string
+		wantHost string // when set, the URL must also parse with this host…
+		wantPath string // …and this path (ordinary drive rows only)
+	}{
+		{
+			name: "reported path from #6019",
+			goos: "windows",
+			abs:  `c:\Users\alxta\atl-logs-parser\.beads\backup`,
+			want: "file://C:/Users/alxta/atl-logs-parser/.beads/backup",
+			wantHost: "C:",
+			wantPath: "/Users/alxta/atl-logs-parser/.beads/backup",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := fileURLForOS(tc.abs, tc.goos)
+			if got != tc.want {
+				t.Errorf("fileURLForOS(%q, %q) = %q, want %q", tc.abs, tc.goos, got, tc.want)
+			}
+			if tc.goos == "windows" && strings.Contains(got, `\`) {
+				t.Errorf("fileURLForOS(%q, %q) = %q, want no backslash in a Windows file URL", tc.abs, tc.goos, got)
+			}
+			if tc.wantHost != "" {
+				u, err := neturl.Parse(got)
+				if err != nil {
+					t.Errorf("fileURLForOS(%q, %q) = %q, which does not parse as a URL: %v", tc.abs, tc.goos, got, err)
+				} else if u.Host != tc.wantHost || u.Path != tc.wantPath {
+					t.Errorf("fileURLForOS(%q, %q) = %q, parsed host %q path %q, want host %q path %q",
+						tc.abs, tc.goos, got, u.Host, u.Path, tc.wantHost, tc.wantPath)
+				}
+			}
+		})
+	}
+}
+
 func TestExtractAddressConflictName(t *testing.T) {
 	tests := []struct {
 		name string
