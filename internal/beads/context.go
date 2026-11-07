@@ -603,7 +603,7 @@ func isPathInSafeBoundary(path string) bool {
 	// Windows paths need their own policy (GH#6101): nothing below matches a
 	// drive- or UNC-rooted, backslashed path. See winboundary.go.
 	if runtime.GOOS == "windows" {
-		return windowsPathInSafeBoundary(absPath)
+		return windowsPathInSafeBoundary(path, absPath)
 	}
 
 	// Allow OS-designated temp directories (e.g., /var/folders on macOS, which

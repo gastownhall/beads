@@ -14,7 +14,7 @@ func winEnv(kv map[string]string) func(string) string {
 func winBoundaryCheck(t *testing.T, b *windowsBoundary, cases map[string]bool) {
 	t.Helper()
 	for path, want := range cases {
-		if got := b.allows(path); got != want {
+		if got := b.allows(path, path); got != want {
 			t.Errorf("allows(%q) = %v, want %v", path, got, want)
 		}
 	}
@@ -111,4 +111,59 @@ func TestWindowsPathInSafeBoundary_SystemRoots(t *testing.T) {
 		`E:\WINNT-old\.beads`:         true,
 		`D:\Programs2\.beads`:         true,
 	})
+}
+
+// AC-8: spellings Windows does not name unambiguously are rejected, whatever
+// they would resolve to.
+func TestWindowsPathInSafeBoundary_Spelling(t *testing.T) {
+	b := newWindowsBoundary(windowsFacts{})
+	winBoundaryCheck(t, b, map[string]bool{
+		// Device, Volume GUID and GLOBALROOT forms.
+		`\\.\C:`:             false,
+		`\\.\pipe\beads`:     false,
+		`\\.\PhysicalDrive0`: false,
+		`\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\beads`: false,
+		`\\?\GLOBALROOT\Device\HarddiskVolume1\beads`:            false,
+		// Alternate data streams: a directory's $INDEX_ALLOCATION stream opens
+		// the directory itself.
+		`C:\Windows::$INDEX_ALLOCATION\System32`: false,
+		`D:\work\.beads:stream`:                  false,
+		`D:\work::$DATA`:                         false,
+		// Invalid file-name and control characters.
+		`D:\work\be<ads`:      false,
+		`D:\work\be>ads`:      false,
+		`D:\work\be"ads`:      false,
+		`D:\work\be|ads`:      false,
+		`D:\work\be*ads`:      false,
+		`D:\work\be?ads`:      false,
+		"D:\\work\\be\x01ads": false,
+		"D:\\work\\be\xffads": false,
+		// Trailing dots and spaces, which Win32 strips when opening.
+		`C:\Windows.\System32`: false,
+		`C:\Windows \System32`: false,
+		`D:\work.\.beads`:      false,
+		`D:\work\.beads `:      false,
+		// Dot segments and ordinary names stay valid.
+		`D:\work\.\.beads`:          true,
+		`D:\work\sub\..\.beads`:     true,
+		`D:\work\my.project\.beads`: true,
+		`D:\work\with space\.beads`: true,
+		"D:\\work\\café\\.beads":    true,
+	})
+
+	// The input as the caller gave it is checked too: filepath.Abs on Windows
+	// strips the trailing dot that the absolute form no longer shows.
+	for _, tc := range []struct{ input, abs string }{
+		{`D:\work.\.beads`, `D:\work\.beads`},
+		{`work \.beads`, `D:\cwd\work\.beads`},
+		{`D:work.\x`, `D:\cwd\work\x`},
+		{`.beads:evil`, `D:\cwd\.beads:evil`},
+	} {
+		if b.allows(tc.input, tc.abs) {
+			t.Errorf("allows(%q, %q) = true, want false (ambiguous input spelling)", tc.input, tc.abs)
+		}
+	}
+	if !b.allows(`work\.beads`, `D:\cwd\work\.beads`) {
+		t.Errorf("allows(relative work\\.beads) = false, want true")
+	}
 }

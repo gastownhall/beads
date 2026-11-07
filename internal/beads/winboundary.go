@@ -2,6 +2,7 @@ package beads
 
 import (
 	"strings"
+	"unicode/utf8"
 )
 
 // Windows SEC-003 boundary (GH#6101).
@@ -75,11 +76,54 @@ func isDriveLetter(c byte) bool {
 	return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z')
 }
 
+// winValidComponent reports whether c is a path component Windows names
+// unambiguously. A colon names an alternate data stream (or is invalid), and
+// the other reserved characters, control characters and invalid UTF-8 are not
+// valid file-name characters. Win32 silently strips trailing dots and spaces,
+// so "Windows." and "Windows " can open C:\Windows: such a component is
+// rejected rather than guessed at. "." and ".." are segments, not names.
+func winValidComponent(c string) bool {
+	if c == "." || c == ".." {
+		return true
+	}
+	if !utf8.ValidString(c) || strings.HasSuffix(c, ".") || strings.HasSuffix(c, " ") {
+		return false
+	}
+	for _, r := range c {
+		if r < 0x20 || strings.ContainsRune(`<>:"|?*`, r) {
+			return false
+		}
+	}
+	return true
+}
+
+// winInputSpellingOK validates the guard input as the caller gave it, before
+// filepath.Abs (GetFullPathName) can strip trailing dots and spaces from it.
+// Relative inputs are checked component by component.
+func winInputSpellingOK(input string) bool {
+	s := strings.ReplaceAll(input, "/", `\`)
+	if strings.HasPrefix(s, `\\`) {
+		_, ok := winCleanPath(s)
+		return ok
+	}
+	if len(s) >= 2 && isDriveLetter(s[0]) && s[1] == ':' {
+		s = s[2:]
+	}
+	for _, c := range strings.Split(s, `\`) {
+		if c != "" && !winValidComponent(c) {
+			return false
+		}
+	}
+	return true
+}
+
 // winCleanPath parses an absolute Windows path into comparison form. Both
 // separators are accepted, repeated separators collapse, and "." / ".." are
 // removed without escaping the volume root (as Windows itself does). The
 // extended forms \\?\C:\ and \\.\C:\ map to the same representation as C:\.
-// Anything else (relative or drive-relative paths) is rejected.
+// Anything else is rejected: relative or drive-relative paths, device paths
+// (\\.\pipe\x, \\.\C: itself), Volume GUID and GLOBALROOT forms, and any
+// component winValidComponent refuses.
 func winCleanPath(s string) (winPath, bool) {
 	s = strings.ReplaceAll(s, "/", `\`)
 	var vol, rest string
@@ -97,6 +141,9 @@ func winCleanPath(s string) (winPath, bool) {
 	}
 	p := winPath{vol: strings.ToUpper(vol)}
 	for _, c := range strings.Split(rest, `\`) {
+		if !winValidComponent(c) {
+			return winPath{}, false
+		}
 		switch c {
 		case "", ".":
 		case "..":
@@ -138,9 +185,12 @@ func newWindowsBoundary(f windowsFacts) *windowsBoundary {
 	return b
 }
 
-// allows reports whether an absolute guard input lies outside every denied
-// Windows location.
-func (b *windowsBoundary) allows(abs string) bool {
+// allows reports whether a guard input (as given, and its absolute form) lies
+// outside every denied Windows location.
+func (b *windowsBoundary) allows(input, abs string) bool {
+	if !winInputSpellingOK(input) {
+		return false
+	}
 	p, ok := winCleanPath(abs)
 	if !ok {
 		return false
@@ -154,6 +204,6 @@ func (b *windowsBoundary) allows(abs string) bool {
 }
 
 // windowsPathInSafeBoundary is isPathInSafeBoundary on Windows.
-func windowsPathInSafeBoundary(abs string) bool {
-	return newWindowsBoundary(hostWindowsFacts()).allows(abs)
+func windowsPathInSafeBoundary(input, abs string) bool {
+	return newWindowsBoundary(hostWindowsFacts()).allows(input, abs)
 }
