@@ -117,3 +117,24 @@ func TestResolveWindowsFinalPath(t *testing.T) {
 		}
 	})
 }
+
+// TestWindowsProfilesDirectory pins the userenv.dll wrapper's buffer
+// handling: when the API answers, the result must be a usable directory
+// path (never a volume root), and a lookup failure must report unavailable
+// rather than garbage.
+func TestWindowsProfilesDirectory(t *testing.T) {
+	got, ok := windowsProfilesDirectory()
+	if !ok {
+		t.Skip("GetProfilesDirectoryW unavailable on this host")
+	}
+	canon, valid := winCleanPath(got)
+	if !valid {
+		t.Fatalf("profiles directory %q is not a valid path", got)
+	}
+	if winIsVolumeRoot(canon) {
+		t.Errorf("profiles directory %q is a volume root", got)
+	}
+	if parent, base := splitWinPath(canon); base == "" || parent == canon {
+		t.Errorf("profiles directory %q has no parent component", got)
+	}
+}

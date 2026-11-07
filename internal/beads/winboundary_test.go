@@ -84,6 +84,75 @@ func TestNewWindowsBoundary(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("profile parents validated", func(t *testing.T) {
+		b := newWindowsBoundary(windowsBoundaryInput{
+			profileParentValues: []string{
+				`C:\Users`,    // default
+				`D:\Profiles`, // relocated profile tree
+				`E:\`,         // volume root: dropped
+				`nope`,        // malformed: dropped
+			},
+		})
+		if len(b.profileParents) != 2 {
+			t.Fatalf("profileParents = %v, want 2 entries", b.profileParents)
+		}
+		for _, pp := range []string{`C:\Users`, `D:\Profiles`} {
+			if !containsWinPath(b.profileParents, pp) {
+				t.Errorf("profileParents %v missing %q", b.profileParents, pp)
+			}
+		}
+	})
+
+	t.Run("home parent named Users adds a profile parent", func(t *testing.T) {
+		b := newWindowsBoundary(windowsBoundaryInput{
+			profileParentValues: []string{`C:\Users`},
+			homeValue:           `D:\Users\kim`,
+		})
+		if b.home != `D:\Users\kim` {
+			t.Errorf("home = %q, want D:\\Users\\kim", b.home)
+		}
+		if !containsWinPath(b.profileParents, `D:\Users`) {
+			t.Errorf("profileParents %v missing derived D:\\Users", b.profileParents)
+		}
+	})
+
+	t.Run("home at a profile parent is unknown", func(t *testing.T) {
+		b := newWindowsBoundary(windowsBoundaryInput{
+			profileParentValues: []string{`C:\Users`},
+			homeValue:           `C:\Users`,
+		})
+		if b.home != "" {
+			t.Errorf("home = %q, want unknown (\"\")", b.home)
+		}
+	})
+
+	t.Run("home above a profile parent is unknown", func(t *testing.T) {
+		b := newWindowsBoundary(windowsBoundaryInput{
+			profileParentValues: []string{`C:\Users`},
+			homeValue:           `C:\`,
+		})
+		if b.home != "" {
+			t.Errorf("home = %q, want unknown (\"\")", b.home)
+		}
+	})
+
+	t.Run("volume-root home is unknown", func(t *testing.T) {
+		b := newWindowsBoundary(windowsBoundaryInput{homeValue: `D:\`})
+		if b.home != "" {
+			t.Errorf("home = %q, want unknown (\"\")", b.home)
+		}
+	})
+
+	t.Run("ordinary home below a parent is known", func(t *testing.T) {
+		b := newWindowsBoundary(windowsBoundaryInput{
+			profileParentValues: []string{`C:\Users`},
+			homeValue:           `C:\Users\alice`,
+		})
+		if b.home != `C:\Users\alice` {
+			t.Errorf("home = %q, want C:\\Users\\alice", b.home)
+		}
+	})
 }
 
 func containsWinPath(paths []string, want string) bool {
@@ -185,10 +254,76 @@ func TestWindowsPathInSafeBoundary(t *testing.T) {
 	t.Run("ordinary path with unresolved physical form stays admitted", func(t *testing.T) {
 		b := newWindowsBoundary(windowsBoundaryInput{
 			systemRootValues: []string{`C:\Windows`},
-			resolve: func(string) (string, bool) { return "", false },
+			resolve:          func(string) (string, bool) { return "", false },
 		})
 		if !b.inSafeBoundary(`C:\work\proj\.beads`, `C:\work\proj\.beads`) {
 			t.Error("inSafeBoundary(ordinary unresolved path) = false, want true")
+		}
+	})
+
+	// Private profiles: ordinary paths in the current home are admitted;
+	// peer profiles are rejected, including sibling names that merely share
+	// the home's prefix, under every known profile parent (a relocated tree
+	// included). An alias into the current home is the user's own directory;
+	// an alias into a peer profile is denied on physical location.
+	t.Run("private profiles", func(t *testing.T) {
+		profiles := func(home string) windowsBoundaryInput {
+			return windowsBoundaryInput{
+				profileParentValues: []string{`C:\Users`, `D:\Profiles`},
+				homeValue:           home,
+				resolve: func(p string) (string, bool) {
+					switch p {
+					case `C:\Users\alice`:
+						return `C:\Users\alice`, true
+					case `C:\links\home`:
+						return `C:\Users\alice`, true
+					case `C:\links\evil`:
+						return `C:\Users\bob`, true
+					}
+					return "", false
+				},
+			}
+		}
+		rows := []struct {
+			name  string
+			home  string
+			input string
+			safe  bool
+		}{
+			{"current home admitted", `C:\Users\alice`, `C:\Users\alice`, true},
+			{"current home descendant admitted", `C:\Users\alice`, `C:\Users\alice\proj\.beads`, true},
+			{"peer profile rejected", `C:\Users\alice`, `C:\Users\bob\.beads`, false},
+			{"peer profile case-folded", `C:\Users\alice`, `c:\USERS\Bob\x`, false},
+			{"relocated peer rejected", `C:\Users\alice`, `D:\Profiles\bob\proj`, false},
+			{"profile parent root admitted", `C:\Users\alice`, `C:\Users`, true},
+			{"relocated parent root admitted", `C:\Users\alice`, `D:\Profiles`, true},
+			{"alias into current home admitted", `C:\Users\alice`, `C:\links\home`, true},
+			{"alias into peer rejected", `C:\Users\alice`, `C:\links\evil`, false},
+			{"unknown home rejects private profiles", `C:\`, `C:\Users\alice\proj`, false},
+			{"unknown home keeps parent root", `C:\`, `C:\Users`, true},
+		}
+		for _, tt := range rows {
+			t.Run(tt.name, func(t *testing.T) {
+				b := newWindowsBoundary(profiles(tt.home))
+				if got := b.inSafeBoundary(tt.input, tt.input); got != tt.safe {
+					t.Errorf("inSafeBoundary(%q) = %v, want %v", tt.input, got, tt.safe)
+				}
+			})
+		}
+	})
+
+	// A sibling that shares the home's name prefix is a different user:
+	// comparison must happen on component boundaries.
+	t.Run("sibling sharing home prefix rejected", func(t *testing.T) {
+		b := newWindowsBoundary(windowsBoundaryInput{
+			profileParentValues: []string{`C:\Users`},
+			homeValue:           `C:\Users\al`,
+		})
+		if b.inSafeBoundary(`C:\Users\alice\.beads`, `C:\Users\alice\.beads`) {
+			t.Error("inSafeBoundary(C:\\Users\\alice with home C:\\Users\\al) = true, want false")
+		}
+		if !b.inSafeBoundary(`C:\Users\al\.beads`, `C:\Users\al\.beads`) {
+			t.Error("inSafeBoundary(home itself) = false, want true")
 		}
 	})
 }

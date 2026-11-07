@@ -5,7 +5,9 @@ package beads
 import (
 	"errors"
 	"os"
+	"os/user"
 	"strings"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -51,10 +53,72 @@ func collectWindowsBoundaryInput() windowsBoundaryInput {
 			values = append(values, v)
 		}
 	}
-	return windowsBoundaryInput{
-		systemRootValues: values,
-		resolve:          resolveWindowsFinalPath,
+
+	// Profile parents: fixed default, the OS-reported profiles directory,
+	// and the SystemDrive spelling of the default. The current home adds its
+	// own parent in newWindowsBoundary when it lives under a "Users"
+	// directory.
+	profileParents := []string{`C:\Users`}
+	if profiles, ok := windowsProfilesDirectory(); ok && profiles != "" {
+		profileParents = append(profileParents, profiles)
 	}
+	if sd := strings.TrimSpace(os.Getenv("SystemDrive")); len(sd) == 2 && isWinDrivePath(sd) {
+		profileParents = append(profileParents, sd+`\Users`)
+	}
+	home := ""
+	if u, err := user.Current(); err == nil && u.HomeDir != "" {
+		home = u.HomeDir
+	}
+	if home == "" {
+		home, _ = os.UserHomeDir()
+	}
+
+	return windowsBoundaryInput{
+		systemRootValues:    values,
+		profileParentValues: profileParents,
+		homeValue:           home,
+		resolve:             resolveWindowsFinalPath,
+	}
+}
+
+// procGetProfilesDirectoryW binds userenv.dll's GetProfilesDirectoryW.
+// golang.org/x/sys v0.49.0 does not export GetProfilesDirectory, so the
+// call is bound directly; any lookup failure leaves the fallback
+// profile-parent sources in force.
+var procGetProfilesDirectoryW = windows.NewLazySystemDLL("userenv.dll").NewProc("GetProfilesDirectoryW")
+
+// windowsProfilesDirectory returns the machine's profile directory (the
+// parent of the per-user profile directories, e.g. C:\Users). Buffer
+// contract: an undersized call reports the required size including the
+// terminator, so it is retried grown; success is read as a NUL-terminated
+// UTF-16 string. Other failures report unavailable.
+func windowsProfilesDirectory() (string, bool) {
+	if err := procGetProfilesDirectoryW.Find(); err != nil {
+		return "", false
+	}
+	n := uint32(264)
+	for i := 0; i < 4; i++ {
+		buf := make([]uint16, n)
+		size := n
+		// GetProfilesDirectoryW has no typed wrapper in x/sys: it takes the
+		// buffer and its character count by pointer, per its documented
+		// contract.
+		//nolint:gosec // G103: buf and size are live locals matching the API's buffer contract.
+		ret, _, _ := procGetProfilesDirectoryW.Call(
+			uintptr(unsafe.Pointer(&buf[0])),
+			uintptr(unsafe.Pointer(&size)),
+		)
+		if ret != 0 {
+			return windows.UTF16ToString(buf), true
+		}
+		// ret == 0: grow once per reported size, within a sane cap.
+		if size > n && size <= 1<<15 {
+			n = size
+			continue
+		}
+		return "", false
+	}
+	return "", false
 }
 
 // resolveWindowsFinalPath physically resolves path the way the kernel sees
@@ -171,21 +235,4 @@ func winExtendedPath(canon string) string {
 		return `\\?\UNC\` + canon[2:]
 	}
 	return `\\?\` + canon
-}
-
-// splitWinPath splits a canonical path into its parent and final component.
-// Volume roots are their own parent, which stops the ascent above a volume.
-func splitWinPath(p string) (parent, base string) {
-	if winIsVolumeRoot(p) {
-		return p, ""
-	}
-	i := strings.LastIndexByte(p, '\\')
-	if i < 0 {
-		return p, p
-	}
-	parent = p[:i]
-	if len(parent) == 2 && isWinDrivePath(parent) {
-		parent += `\`
-	}
-	return parent, p[i+1:]
 }

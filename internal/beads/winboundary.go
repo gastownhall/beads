@@ -113,13 +113,34 @@ func winIsVolumeRoot(p string) bool {
 	return strings.HasPrefix(p, `\\`) && strings.Count(p, `\`) == 3
 }
 
+// splitWinPath splits a canonical path into its parent and final component.
+// Volume roots are their own parent, which stops walks above a volume.
+func splitWinPath(p string) (parent, base string) {
+	if winIsVolumeRoot(p) {
+		return p, ""
+	}
+	i := strings.LastIndexByte(p, '\\')
+	if i < 0 {
+		return p, p
+	}
+	parent = p[:i]
+	if len(parent) == 2 && isWinDrivePath(parent) {
+		parent += `\`
+	}
+	return parent, p[i+1:]
+}
+
 // windowsBoundaryInput carries the host-reported facts the Windows boundary
 // policy needs. The Windows build fills it from the OS
 // (winboundary_windows.go); tests inject synthetic values so the policy
 // itself stays verifiable on Linux. Values are raw spellings; normalization
 // and validation happen in newWindowsBoundary.
 type windowsBoundaryInput struct {
-	systemRootValues []string
+	systemRootValues    []string
+	profileParentValues []string
+	// homeValue is the current user's home directory; invalid, volume-root,
+	// or profile-parent-level values leave the home unknown.
+	homeValue string
 	// resolve physically resolves a path (following junctions and symlinks)
 	// to its final spelling; ok=false means unresolved. nil means no
 	// resolution is available.
@@ -130,21 +151,50 @@ type windowsBoundaryInput struct {
 // Fields hold winCleanPath forms; an empty optional field means the fact is
 // unavailable and the corresponding rule contributes nothing.
 type windowsBoundary struct {
-	systemRoots []string
-	resolve     func(path string) (string, bool)
+	systemRoots    []string
+	profileParents []string
+	home           string
+	resolve        func(path string) (string, bool)
 }
 
 // newWindowsBoundary validates and normalizes the host facts. Malformed and
 // volume-root values are dropped rather than trusted: system sources only
 // ever add denials, so a bad value must not deny a whole drive.
 func newWindowsBoundary(in windowsBoundaryInput) windowsBoundary {
-	var b windowsBoundary
+	b := windowsBoundary{resolve: in.resolve}
 	for _, v := range in.systemRootValues {
 		if canon, ok := winCleanPath(v); ok && !winIsVolumeRoot(canon) {
 			b.systemRoots = append(b.systemRoots, canon)
 		}
 	}
-	b.resolve = in.resolve
+	for _, v := range in.profileParentValues {
+		if canon, ok := winCleanPath(v); ok && !winIsVolumeRoot(canon) {
+			b.profileParents = append(b.profileParents, canon)
+		}
+	}
+	if home, ok := winCleanPath(in.homeValue); ok && !winIsVolumeRoot(home) {
+		// A home at or above a profile parent cannot separate self from
+		// peers, so it stays unknown and admits no private-profile
+		// exception.
+		aboveParent := false
+		for _, pp := range b.profileParents {
+			if winWithin(home, pp) {
+				aboveParent = true
+				break
+			}
+		}
+		if !aboveParent {
+			b.home = home
+			// A home directly under a "Users" directory names one more
+			// profile parent (a relocated or second profile tree on
+			// another drive).
+			if parent, _ := splitWinPath(home); !winIsVolumeRoot(parent) {
+				if _, pbase := splitWinPath(parent); strings.EqualFold(pbase, "Users") {
+					b.profileParents = append(b.profileParents, parent)
+				}
+			}
+		}
+	}
 	return b
 }
 
@@ -197,6 +247,32 @@ func (b windowsBoundary) inSafeBoundary(input, abs string) bool {
 		}
 		if winWithin(rootPhys, lexInput) || winWithin(rootPhys, lexAbs) ||
 			(phys != "" && winWithin(rootPhys, phys)) {
+			return false
+		}
+	}
+
+	// Private profiles: another user's home directory is off limits the way
+	// /home/<other> is on POSIX. The profile parents themselves stay
+	// admitted, as /home is today. Below a parent, only the current home is
+	// allowed — spelled directly, or reached through an alias that resolves
+	// into it. An unknown home admits no exception.
+	for _, pp := range b.profileParents {
+		if lexInput == pp || lexAbs == pp {
+			continue // the parent root itself
+		}
+		if !winWithin(pp, lexInput) && !winWithin(pp, lexAbs) &&
+			!(phys != "" && winWithin(pp, phys)) {
+			continue
+		}
+		selfLexical := b.home != "" &&
+			(winWithin(b.home, lexInput) || winWithin(b.home, lexAbs))
+		selfPhysical := false
+		if b.home != "" && phys != "" {
+			if homePhys := b.resolvePath(b.home); homePhys != "" {
+				selfPhysical = winWithin(homePhys, phys)
+			}
+		}
+		if !selfLexical && !selfPhysical {
 			return false
 		}
 	}
