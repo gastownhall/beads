@@ -361,6 +361,36 @@ func TestEmbeddedIfRevisionPreflightGoneIsPreconditionFailedOnEveryVerb(t *testi
 				t.Errorf("preflight-gone %s leaked the raw, unclassified resolution error instead of the guard envelope:\n%s", tc.verb, out)
 			}
 		})
+
+		// A parent deleted while two of its children survive is gone the same
+		// way, but the abbreviating resolution the other four verbs share
+		// refuses its id as ambiguous, since it is the start of both
+		// children's ids, rather than reporting it missing. bd delete resolves
+		// exactly; its shape is
+		// TestEmbeddedIfRevisionDeletePreflightGoneParentIsPreconditionFailed.
+		if strings.HasPrefix(tc.verb, "delete") {
+			continue
+		}
+		t.Run(tc.verb+"_parent_with_surviving_children", func(t *testing.T) {
+			parent := bdCreate(t, bd, dir, "Gone parent "+tc.verb, "--type", "task")
+			for range 2 {
+				bdCreate(t, bd, dir, "Surviving child "+tc.verb, "--type", "task", "--parent", parent.ID)
+			}
+			rev0 := bdShowRevision(t, bd, dir, parent.ID)
+
+			bdDelete(t, bd, dir, parent.ID, "--force")
+
+			out, code := bdRunFailCode(t, bd, dir, tc.args(parent.ID, revStr(rev0))...)
+			if code != ExitGuardMismatch {
+				t.Errorf("--if-revision %s of a deleted parent exit code = %d, want %d\n%s", tc.verb, code, ExitGuardMismatch, out)
+			}
+			if !strings.Contains(out, "precondition failed: issue no longer exists") {
+				t.Errorf("--if-revision %s of a deleted parent should say \"precondition failed: issue no longer exists\", got:\n%s", tc.verb, out)
+			}
+			if strings.Contains(out, "ambiguous") {
+				t.Errorf("--if-revision %s of a deleted parent leaked the unclassified ambiguity refusal instead of the guard envelope:\n%s", tc.verb, out)
+			}
+		})
 	}
 
 	// Without --if-revision there is no guard to report through: a missing
@@ -398,7 +428,7 @@ func TestEmbeddedIfRevisionPreflightGoneIsPreconditionFailedOnEveryVerb(t *testi
 // way a single-id --if-revision request ever reaches deleteBatch's own
 // ExpectedVersion wiring (requireSingleIfRevisionID refuses a guard beside
 // more than one explicit id, so a literal multi-id request can never get
-// here). A stale guard must refuse the WHOLE cascade — the dependent survives
+// here). A stale guard must refuse the WHOLE cascade — the child survives
 // right alongside the named parent — on both the real run and the unconfirmed
 // --dry-run preview, which reports the same conditional-write envelope rather
 // than falling through to the generic preview-with-error path. A target that a
@@ -416,7 +446,9 @@ func TestEmbeddedIfRevisionCascadeDelete(t *testing.T) {
 
 	parent := bdCreate(t, bd, dir, "Cascade parent", "--type", "task")
 	child := bdCreate(t, bd, dir, "Cascade child", "--type", "task")
-	bdDepAdd(t, bd, dir, child.ID, parent.ID)
+	// A parent-child child, not a blocks edge: a cascade follows containment
+	// only (GH#6301).
+	bdDepAdd(t, bd, dir, child.ID, parent.ID, "--type", "parent-child")
 
 	rev0 := bdShowRevision(t, bd, dir, parent.ID)
 	bdUpdate(t, bd, dir, parent.ID, "--notes", "bump")
@@ -442,7 +474,7 @@ func TestEmbeddedIfRevisionCascadeDelete(t *testing.T) {
 	bdShow(t, bd, dir, child.ID)
 
 	// A stale guard refuses the real cascade entirely -- neither the named
-	// parent nor the dependent cascade pulled in alongside it is deleted.
+	// parent nor the child cascade pulled in alongside it is deleted.
 	out, code = bdRunFailCode(t, bd, dir, "delete", parent.ID, "--cascade", "--force", "--if-revision", revStr(rev0))
 	if code != ExitGuardMismatch {
 		t.Errorf("stale --if-revision cascade delete exit code = %d, want %d\n%s", code, ExitGuardMismatch, out)

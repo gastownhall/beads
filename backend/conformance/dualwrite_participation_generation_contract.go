@@ -2,6 +2,8 @@ package conformance
 
 import (
 	"context"
+	"reflect"
+	"sort"
 	"testing"
 )
 
@@ -45,11 +47,13 @@ import (
 //     access problem dualwrite_history_contract.go's FR-6 note describes, and
 //     the same resolution applies: pinned per leg, dolt-only, alongside
 //     TestDualWriteStampsTheCurrentStoreEpochOnEachVersionRow.
-//   - wisps.participation_generation. FR-8 (carried by dualwrite_history_contract.go's
-//     exclusion list) applies here too: this fixture's Mutate front door is
-//     CreateIssue against the issues table, the wisp-arrival cases read only
-//     the issues row a wisp becomes, and no phase reads or writes the wisps
-//     column regardless.
+//   - wisps.participation_generation ITSELF. With history on, a demotion
+//     records there the participation the issues row had, and the move back
+//     out restores it (issueops.carryParticipationInTx); nothing else reads
+//     or writes it. The round-trip cases below pin that through the issues
+//     row the wisp becomes again, the observable surface; the encoding on
+//     the wisps row is pinned per leg, on dolt
+//     (TestPlaneRoundTripKeepsTheGenerationItCarried).
 type ParticipationGenerationFixture struct {
 	// IssuePrefix namespaces the id each case mints, the same discipline
 	// DualWriteFixture uses and for the same reason.
@@ -67,8 +71,9 @@ type ParticipationGenerationFixture struct {
 	MutateExisting func(ctx context.Context, id string) error
 	// CreateWisp creates a new wisp-plane (ephemeral) issue with the given
 	// id: the starting point for the two ways a record reaches the issues
-	// plane without being created there. A wisp is never versioned (FR-8)
-	// and never carries a participation declaration, in either flag state.
+	// plane without being created there. A wisp is never versioned (FR-8),
+	// and one created as a wisp carries no participation, in either flag
+	// state.
 	CreateWisp func(ctx context.Context, id string) error
 	// PromoteWisp promotes the wisp id onto the issues plane
 	// (PromoteFromEphemeral, or the unit-of-work leg's PromoteWisp).
@@ -82,6 +87,13 @@ type ParticipationGenerationFixture struct {
 	// CreateNoHistoryIssue) the same update repairs the flags in place, a
 	// same-plane normalize, rather than moving the row.
 	MovePersistent func(ctx context.Context, id string) error
+	// MoveEphemeral moves the issues-plane row id into the wisps table
+	// through a persistence-mode update (bd update --ephemeral): the guarded
+	// update on dolt and embeddeddolt, MovePersistence on uow, the client's
+	// persistence-mode Lifecycle.Update on http. It is how a row that already
+	// lived on the issues plane becomes a wisp, the first half of the
+	// round-trip cases; PromoteWisp or MovePersistent is the second.
+	MoveEphemeral func(ctx context.Context, id string) error
 	// ClearWispFlag clears the wisp id's ephemeral flag IN PLACE: the untyped
 	// UpdateIssue of {"wisp": false} bd mol squash makes on a squashed root
 	// (UpdateWisp on the unit-of-work leg, the way its molecule writer routes
@@ -115,6 +127,12 @@ type ParticipationGenerationFixture struct {
 	// precondition the wisps-table cases check, so they cannot pass on a row
 	// that a step moved to the issues table.
 	InWispsTable func(ctx context.Context, id string) (bool, error)
+	// ParticipatingIssueIDs is the leg's production participation read, the
+	// one `bd config set versioned-history.enabled true` narrows its offenders
+	// with: storage.HistoryParticipation on the store legs, the unit of work's
+	// IssueUseCase on uow. Unlike ParticipationGeneration it is not white-box
+	// test access; it is the read under test.
+	ParticipatingIssueIDs func(ctx context.Context, ids []string) (map[string]struct{}, error)
 }
 
 // RunParticipationGenerationCreateWithFlagOnStampsAValue pins design
@@ -331,8 +349,9 @@ func RunParticipationGenerationFlagOffSkipsUpdateOnParticipatingRecord(t *testin
 // is wisp promotion, PromoteFromEphemeral: not R2.3's promotion of a legacy
 // record, which is what ProceedsForPromotedRecord's name refers to.) The
 // issues row a promotion inserts is brand new on that plane, and the wisp
-// behind it was never versioned and never declared participation (FR-8), so
-// there is no legacy state to preserve: with the flag on, the promotion stamps
+// behind it, created as a wisp, was never versioned and never declared
+// participation (FR-8), so there is no legacy state to preserve (a row that
+// was demoted is the round-trip cases' subject): with the flag on, the promotion stamps
 // participation_generation and mints the record's first version, as a create
 // there would. Treated as UPDATE-shaped, the fence finds the new row NULL and
 // skips, and because nothing stamps the column afterwards every later update
@@ -399,6 +418,197 @@ func runWispArrivalBeginsHistory(t *testing.T, ctx context.Context, fixture Part
 		t.Errorf("version row count for %s went from %d to %d across an update-shaped mutation after the "+
 			"wisp reached the issues plane (%s), want exactly +1: a record that arrived with the flag on is "+
 			"not legacy, so the fence must let its updates mint", id, arrivedCount, afterCount, how)
+	}
+}
+
+// RunParticipationGenerationDemotedLegacyRowStaysLegacyAcrossPromotion pins
+// R2.3 across a plane round trip: a legacy row (created with the flag off)
+// that is made a wisp with the flag on and then promoted back onto the
+// issues plane is still legacy. Its new issues row carries the participation
+// it had before the demotion, so the promotion and every later update are
+// update-shaped and fenced. Read off the new row alone, the arrival looks like
+// a wisp's (RunParticipationGenerationWispPromotionBeginsHistory), mints
+// create-shaped, and starts versioning a legacy row through two ordinary
+// writes.
+func RunParticipationGenerationDemotedLegacyRowStaysLegacyAcrossPromotion(t *testing.T, ctx context.Context, fixture ParticipationGenerationFixture) {
+	t.Helper()
+	runDemotedLegacyRowStaysLegacy(t, ctx, fixture, "legacy-promote", fixture.PromoteWisp)
+}
+
+// RunParticipationGenerationDemotedLegacyRowStaysLegacyAcrossPersistenceMove
+// is RunParticipationGenerationDemotedLegacyRowStaysLegacyAcrossPromotion for
+// a move back out through a persistence-mode update (bd update --persistent),
+// which mints at a different site than promotion on every leg (see
+// MovePersistent).
+func RunParticipationGenerationDemotedLegacyRowStaysLegacyAcrossPersistenceMove(t *testing.T, ctx context.Context, fixture ParticipationGenerationFixture) {
+	t.Helper()
+	runDemotedLegacyRowStaysLegacy(t, ctx, fixture, "legacy-move-persistent", fixture.MovePersistent)
+}
+
+// runDemotedLegacyRowStaysLegacy is the body the two legacy round-trip cases
+// share: a row created with the flag off, demoted with it on and brought back
+// through arrive, ends with participation_generation NULL, no version rows and
+// current_revision unchanged, and so does the update after it.
+func runDemotedLegacyRowStaysLegacy(t *testing.T, ctx context.Context, fixture ParticipationGenerationFixture, how string, arrive func(context.Context, string) error) {
+	t.Helper()
+	if err := fixture.SetFlag(ctx, false); err != nil {
+		t.Fatalf("disabling versioned history: %v", err)
+	}
+	id := fixture.IssuePrefix + "-demoted-" + how
+	if err := fixture.Mutate(ctx, id); err != nil {
+		t.Fatalf("creating legacy %s with the flag off: %v", id, err)
+	}
+	if err := fixture.SetFlag(ctx, true); err != nil {
+		t.Fatalf("enabling versioned history: %v", err)
+	}
+	if gen, err := fixture.ParticipationGeneration(ctx, id); err != nil {
+		t.Fatalf("reading participation_generation for %s: %v", id, err)
+	} else if gen != nil {
+		t.Fatalf("participation_generation for %s = %d before the round trip, want NULL — this case "+
+			"cannot test that a legacy row stays legacy against a row that was never legacy", id, *gen)
+	}
+	beforeRevision, err := fixture.CurrentRevision(ctx, id)
+	if err != nil {
+		t.Fatalf("reading current_revision for %s: %v", id, err)
+	}
+
+	if err := fixture.MoveEphemeral(ctx, id); err != nil {
+		t.Fatalf("demoting %s to the wisps table: %v", id, err)
+	}
+	// The precondition, checked rather than assumed: a demotion that left the
+	// row on the issues plane would make the arrival below a same-plane write,
+	// and the legacy result would say nothing about a round trip.
+	if inWisps, err := fixture.InWispsTable(ctx, id); err != nil {
+		t.Fatalf("checking whether the wisps table holds %s: %v", id, err)
+	} else if !inWisps {
+		t.Fatalf("%s is not in the wisps table after its demotion — this case pins a round trip through "+
+			"the wisps table, and the row never made it", id)
+	}
+	if err := arrive(ctx, id); err != nil {
+		t.Fatalf("moving %s back onto the issues plane (%s): %v", id, how, err)
+	}
+
+	assertStillLegacy := func(after string) {
+		t.Helper()
+		if gen, err := fixture.ParticipationGeneration(ctx, id); err != nil {
+			t.Fatalf("reading participation_generation for %s: %v", id, err)
+		} else if gen != nil {
+			t.Errorf("participation_generation for %s = %d after %s with the flag on, want NULL: the row "+
+				"was legacy when it was made a wisp, and moving it back is an ordinary write, which must "+
+				"not promote a legacy record (R2.3)", id, *gen, after)
+		}
+		if count, err := fixture.VersionRowCount(ctx, id); err != nil {
+			t.Fatalf("counting version rows for %s: %v", id, err)
+		} else if count != 0 {
+			t.Errorf("version row count for %s = %d after %s with the flag on, want 0: a legacy row's "+
+				"mints are fenced (design §16.2b), across a plane round trip too", id, count, after)
+		}
+		if revision, err := fixture.CurrentRevision(ctx, id); err != nil {
+			t.Fatalf("reading current_revision for %s: %v", id, err)
+		} else if revision != beforeRevision {
+			t.Errorf("current_revision for %s went from %d to %d after %s, want unchanged: a fenced mint "+
+				"runs neither half of the seam's write", id, beforeRevision, revision, after)
+		}
+	}
+	assertStillLegacy("the round trip (" + how + ")")
+
+	if err := fixture.MutateExisting(ctx, id); err != nil {
+		t.Fatalf("mutating existing %s: %v", id, err)
+	}
+	assertStillLegacy("an update-shaped mutation after the round trip")
+}
+
+// RunParticipationGenerationDemotedParticipatingRowKeepsItsHistoryAcrossPromotion
+// is the legacy round trip's positive twin, so that an implementation that
+// fences every arrival cannot pass it: a row created with the flag on, made a
+// wisp and promoted back, keeps the participation_generation it had and its
+// history continues. The arrival mints exactly one version (its next, not a
+// second first one) and the update after it one more.
+func RunParticipationGenerationDemotedParticipatingRowKeepsItsHistoryAcrossPromotion(t *testing.T, ctx context.Context, fixture ParticipationGenerationFixture) {
+	t.Helper()
+	runDemotedParticipatingRowKeepsItsHistory(t, ctx, fixture, "participating-promote", fixture.PromoteWisp)
+}
+
+// RunParticipationGenerationDemotedParticipatingRowKeepsItsHistoryAcrossPersistenceMove
+// is RunParticipationGenerationDemotedParticipatingRowKeepsItsHistoryAcrossPromotion
+// for the move back out through a persistence-mode update.
+func RunParticipationGenerationDemotedParticipatingRowKeepsItsHistoryAcrossPersistenceMove(t *testing.T, ctx context.Context, fixture ParticipationGenerationFixture) {
+	t.Helper()
+	runDemotedParticipatingRowKeepsItsHistory(t, ctx, fixture, "participating-move-persistent", fixture.MovePersistent)
+}
+
+// runDemotedParticipatingRowKeepsItsHistory is the body the two participating
+// round-trip cases share.
+func runDemotedParticipatingRowKeepsItsHistory(t *testing.T, ctx context.Context, fixture ParticipationGenerationFixture, how string, arrive func(context.Context, string) error) {
+	t.Helper()
+	if err := fixture.SetFlag(ctx, true); err != nil {
+		t.Fatalf("enabling versioned history: %v", err)
+	}
+	id := fixture.IssuePrefix + "-demoted-" + how
+	if err := fixture.Mutate(ctx, id); err != nil {
+		t.Fatalf("creating %s with the flag on: %v", id, err)
+	}
+	before, err := fixture.ParticipationGeneration(ctx, id)
+	if err != nil {
+		t.Fatalf("reading participation_generation for %s: %v", id, err)
+	}
+	if before == nil {
+		t.Fatalf("participation_generation for %s is NULL right after a create with the flag on — this case "+
+			"needs a participating row to start from", id)
+	}
+	beforeCount, err := fixture.VersionRowCount(ctx, id)
+	if err != nil {
+		t.Fatalf("counting version rows for %s: %v", id, err)
+	}
+
+	if err := fixture.MoveEphemeral(ctx, id); err != nil {
+		t.Fatalf("demoting %s to the wisps table: %v", id, err)
+	}
+	if inWisps, err := fixture.InWispsTable(ctx, id); err != nil {
+		t.Fatalf("checking whether the wisps table holds %s: %v", id, err)
+	} else if !inWisps {
+		t.Fatalf("%s is not in the wisps table after its demotion — this case pins a round trip through "+
+			"the wisps table, and the row never made it", id)
+	}
+	if count, err := fixture.VersionRowCount(ctx, id); err != nil {
+		t.Fatalf("counting version rows for %s: %v", id, err)
+	} else if count != beforeCount {
+		t.Errorf("version row count for %s went from %d to %d across its demotion, want unchanged: a wisp is "+
+			"never versioned (FR-8)", id, beforeCount, count)
+	}
+	if err := arrive(ctx, id); err != nil {
+		t.Fatalf("moving %s back onto the issues plane (%s): %v", id, how, err)
+	}
+
+	after, err := fixture.ParticipationGeneration(ctx, id)
+	if err != nil {
+		t.Fatalf("reading participation_generation for %s: %v", id, err)
+	}
+	if after == nil {
+		t.Errorf("participation_generation for %s is NULL after the round trip (%s), want %d: the row "+
+			"participated when it was made a wisp, and a NULL here fences it as legacy for good", id, how, *before)
+	} else if *after != *before {
+		t.Errorf("participation_generation for %s = %d after the round trip (%s), want %d: the row keeps "+
+			"the participation it carried, it does not declare a new one", id, *after, how, *before)
+	}
+	arrivedCount, err := fixture.VersionRowCount(ctx, id)
+	if err != nil {
+		t.Fatalf("counting version rows for %s: %v", id, err)
+	}
+	if arrivedCount != beforeCount+1 {
+		t.Errorf("version row count for %s went from %d to %d across the round trip (%s), want exactly +1: "+
+			"the arrival is an accepted change to a participating row, so it mints its next version",
+			id, beforeCount, arrivedCount, how)
+	}
+
+	if err := fixture.MutateExisting(ctx, id); err != nil {
+		t.Fatalf("mutating existing %s: %v", id, err)
+	}
+	if afterCount, err := fixture.VersionRowCount(ctx, id); err != nil {
+		t.Fatalf("counting version rows for %s: %v", id, err)
+	} else if afterCount != arrivedCount+1 {
+		t.Errorf("version row count for %s went from %d to %d across an update-shaped mutation after the "+
+			"round trip (%s), want exactly +1", id, arrivedCount, afterCount, how)
 	}
 }
 
@@ -641,4 +851,102 @@ func RunParticipationGenerationFenceIgnoresSchemaSkewHatch(t *testing.T, ctx con
 			"key on different planes (migration cursor vs. real column data) — so a write admitted "+
 			"through the hatch against a legacy record must still be skipped", id, beforeCount, afterCount)
 	}
+}
+
+// RunParticipationGenerationReadReportsExactlyTheParticipatingRows pins the
+// read the pre-enable scan narrows its offenders with
+// (issueops.ParticipatingIssueIDsInTx): asked about a mix of rows, it reports
+// exactly the ones whose issues-table participation_generation is set (the
+// column the write fence reads; with FindUnversionable's IsWisp filter, the rows
+// an update-shaped mint versions), and it agrees with the column on
+// every issues-table row it is asked about:
+//   - a row created with the flag on, and one that kept its participation
+//     across a round trip through the wisps table, are reported;
+//   - a legacy row, one that stayed legacy across the same round trip, a wisp,
+//     a row demoted to the wisps table (it has no issues row now), an id that
+//     names no row and an empty id are not.
+//
+// It answers whatever the flag is, because the switch asks before it turns
+// history on, and it reads nothing for no ids. A read that reported a legacy
+// row would let a value the write fence never looks at refuse the switch; one
+// that missed a participating row would clear the switch over a row the mint
+// then refuses every write to.
+func RunParticipationGenerationReadReportsExactlyTheParticipatingRows(t *testing.T, ctx context.Context, fixture ParticipationGenerationFixture) {
+	t.Helper()
+	prefix := fixture.IssuePrefix + "-pread"
+	legacy, legacyRoundTrip := prefix+"-legacy", prefix+"-legacy-rt"
+	participating, participatingRoundTrip := prefix+"-part", prefix+"-part-rt"
+	wisp, demoted, missing := prefix+"-wisp", prefix+"-demoted", prefix+"-missing"
+
+	if err := fixture.SetFlag(ctx, false); err != nil {
+		t.Fatalf("disabling versioned history: %v", err)
+	}
+	for _, id := range []string{legacy, legacyRoundTrip} {
+		if err := fixture.Mutate(ctx, id); err != nil {
+			t.Fatalf("creating legacy %s with the flag off: %v", id, err)
+		}
+	}
+	if err := fixture.SetFlag(ctx, true); err != nil {
+		t.Fatalf("enabling versioned history: %v", err)
+	}
+	for _, id := range []string{participating, participatingRoundTrip, demoted} {
+		if err := fixture.Mutate(ctx, id); err != nil {
+			t.Fatalf("creating %s with the flag on: %v", id, err)
+		}
+	}
+	if err := fixture.CreateWisp(ctx, wisp); err != nil {
+		t.Fatalf("creating wisp %s: %v", wisp, err)
+	}
+	for _, id := range []string{legacyRoundTrip, participatingRoundTrip} {
+		if err := fixture.MoveEphemeral(ctx, id); err != nil {
+			t.Fatalf("demoting %s to the wisps table: %v", id, err)
+		}
+		if err := fixture.PromoteWisp(ctx, id); err != nil {
+			t.Fatalf("promoting %s back onto the issues plane: %v", id, err)
+		}
+	}
+	if err := fixture.MoveEphemeral(ctx, demoted); err != nil {
+		t.Fatalf("demoting %s to the wisps table: %v", demoted, err)
+	}
+	if inWisps, err := fixture.InWispsTable(ctx, demoted); err != nil {
+		t.Fatalf("checking whether the wisps table holds %s: %v", demoted, err)
+	} else if !inWisps {
+		t.Fatalf("%s is not in the wisps table after its demotion, so it cannot stand for a demoted row", demoted)
+	}
+
+	asked := []string{legacy, legacyRoundTrip, participating, participatingRoundTrip, wisp, demoted, missing, "", participating}
+	want := []string{participating, participatingRoundTrip}
+	for _, flag := range []bool{true, false} {
+		if err := fixture.SetFlag(ctx, flag); err != nil {
+			t.Fatalf("setting versioned history to %v: %v", flag, err)
+		}
+		got, err := fixture.ParticipatingIssueIDs(ctx, asked)
+		if err != nil {
+			t.Fatalf("reading participation with the flag %v: %v", flag, err)
+		}
+		if ids := sortedSetIDs(got); !reflect.DeepEqual(ids, want) {
+			t.Errorf("with the flag %v the participation read reported %v, want exactly the participating rows %v", flag, ids, want)
+		}
+		for _, id := range []string{legacy, legacyRoundTrip, participating, participatingRoundTrip} {
+			gen, err := fixture.ParticipationGeneration(ctx, id)
+			if err != nil {
+				t.Fatalf("reading participation_generation for %s: %v", id, err)
+			}
+			if _, reported := got[id]; reported != (gen != nil) {
+				t.Errorf("the participation read says %s participates = %v, but its participation_generation is %v", id, reported, gen)
+			}
+		}
+	}
+	if got, err := fixture.ParticipatingIssueIDs(ctx, nil); err != nil || len(got) != 0 {
+		t.Errorf("the participation read for no ids = %v, %v; want an empty set and no error", got, err)
+	}
+}
+
+func sortedSetIDs(set map[string]struct{}) []string {
+	ids := make([]string, 0, len(set))
+	for id := range set {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }

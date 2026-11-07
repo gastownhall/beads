@@ -3,6 +3,8 @@ package gitlab
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -62,6 +64,69 @@ func NewLinkResolver(client *Client) *LinkResolver {
 	return &LinkResolver{Client: client}
 }
 
+// matchKeyIssuePathPattern and matchKeyMilestonePathPattern split a
+// canonical GitLab URL path into its project path and IID. Issues and work
+// items share a project's IID space, and GitLab still serves the legacy
+// issue path without "/-/". A group milestone's project path is
+// "groups/{group}".
+var (
+	matchKeyIssuePathPattern     = regexp.MustCompile(`^/(.+?)(?:/-)?/(?:issues|work_items)/([1-9]\d*)$`)
+	matchKeyMilestonePathPattern = regexp.MustCompile(`^/(.+?)/-/milestones/([1-9]\d*)$`)
+)
+
+// matchKeyFromURL returns the project-qualified pull match key for a GitLab
+// issue, work-item or milestone URL, or "" when ref is not one. IIDs are only
+// unique within a project, so the key carries the host and full project path:
+// gl://{host}/{project}#{iid} for issues and work items and
+// gl://{host}/{project}#milestone:{iid} for milestones.
+func matchKeyFromURL(ref string) string {
+	host, path, ok := canonicalGitLabURL(ref)
+	if !ok {
+		return ""
+	}
+	if m := matchKeyMilestonePathPattern.FindStringSubmatch(path); m != nil && validMatchKeyProject(m[1]) {
+		return "gl://" + host + "/" + m[1] + "#" + gitLabMilestoneIdentifierPrefix + m[2]
+	}
+	if m := matchKeyIssuePathPattern.FindStringSubmatch(path); m != nil && validMatchKeyProject(m[1]) {
+		return "gl://" + host + "/" + m[1] + "#" + m[2]
+	}
+	return ""
+}
+
+// canonicalGitLabURL reduces a GitLab URL to the parts that identify a
+// resource: the lowercased host without a default port, and the lowercased
+// path without repeated or trailing slashes (GitLab routes are
+// case-insensitive). Scheme, query and fragment are ignored.
+func canonicalGitLabURL(raw string) (host, path string, ok bool) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Hostname() == "" {
+		return "", "", false
+	}
+	host = strings.ToLower(u.Hostname())
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	if port := u.Port(); port != "" && port != "80" && port != "443" {
+		host += ":" + port
+	}
+	path = strings.ToLower(u.Path)
+	for strings.Contains(path, "//") {
+		path = strings.ReplaceAll(path, "//", "/")
+	}
+	return host, strings.TrimSuffix(path, "/"), true
+}
+
+// validMatchKeyProject rejects project paths with an empty or "-" segment,
+// which no GitLab project has.
+func validMatchKeyProject(project string) bool {
+	for _, seg := range strings.Split(project, "/") {
+		if seg == "" || seg == "-" {
+			return false
+		}
+	}
+	return true
+}
+
 // IssueIIDFromRef extracts a GitLab issue/work-item IID from a local external
 // ref. Milestone refs are intentionally rejected because epics map to
 // milestones, not issue-link endpoints.
@@ -114,6 +179,98 @@ func LinkFromBeadsDependency(issue *types.Issue, dep *types.IssueWithDependencyM
 		return DependencyLink{}, false
 	}
 	return link, true
+}
+
+// ProjectScope decides which beads stand for issues of the configured project
+// (gitlab.project_id, or gitlab.default_project_id in group mode), the one
+// project PushLinks lists and creates links in, addressing issues by IID. A
+// group pull stores dependencies between other projects' issues: pushed by
+// IID, such a dependency would link the configured project's unrelated issues
+// that have those IIDs.
+type ProjectScope struct {
+	tracker *Tracker
+	project *Project // the configured project as GitLab reported it
+	err     error    // why GitLab did not report it
+	fetched bool
+}
+
+// ProjectScope returns the scope of the configured project. It asks GitLab
+// for the project at most once, and only for what the configuration does not
+// say: the project's path when it is configured by numeric ID, or its ID when
+// it is configured by path.
+func (t *Tracker) ProjectScope() *ProjectScope {
+	return &ProjectScope{tracker: t}
+}
+
+// Contains reports whether issue's external_ref names an issue of the
+// configured project: the "gitlab:{iid}" shorthand, which names that
+// project's issue; a ref whose bead holds an identity (LocalIdentityKey) in
+// that project, which a project rename leaves alone; or, for a bead without
+// one, a URL in that project's path. A ref the scope cannot place in it, as
+// when GitLab did not report the project, is outside it, and so is every ref
+// when no project is configured (group mode without
+// gitlab.default_project_id).
+func (s *ProjectScope) Contains(ctx context.Context, issue *types.Issue) bool {
+	if issue == nil || issue.ExternalRef == nil || s.tracker.client == nil || s.tracker.client.ProjectID == "" {
+		return false
+	}
+	ref := strings.TrimSpace(*issue.ExternalRef)
+	if glShorthandPattern.MatchString(ref) {
+		return true
+	}
+	project, iid, ok := strings.Cut(matchKeyFromURL(ref), "#")
+	if !ok || strings.HasPrefix(iid, gitLabMilestoneIdentifierPrefix) {
+		return false
+	}
+	if m := sourceSystemPattern.FindStringSubmatch(s.tracker.LocalIdentityKey(issue)); m != nil {
+		id := s.projectID(ctx)
+		return id > 0 && m[1] == strconv.Itoa(id)
+	}
+	key := s.projectKey(ctx)
+	return key != "" && project == key
+}
+
+// Err returns the error that kept GitLab from reporting the configured
+// project when Contains asked for it, or nil.
+func (s *ProjectScope) Err() error {
+	return s.err
+}
+
+// projectID returns the configured project's ID, or 0 when it is unknown.
+func (s *ProjectScope) projectID(ctx context.Context) int {
+	if id, err := strconv.Atoi(s.tracker.client.ProjectID); err == nil && id > 0 {
+		return id
+	}
+	if p := s.fetch(ctx); p != nil {
+		return p.ID
+	}
+	return 0
+}
+
+// projectKey returns the configured project keyed as MatchKey keys a ref's
+// project, "gl://{host}/{path}", or "" when it is unknown.
+func (s *ProjectScope) projectKey(ctx context.Context) string {
+	if key := s.tracker.configuredMatchKeyProject(); key != "" {
+		return key
+	}
+	p := s.fetch(ctx)
+	if p == nil {
+		return ""
+	}
+	host, path, ok := canonicalGitLabURL(p.WebURL)
+	if !ok || !validMatchKeyProject(strings.TrimPrefix(path, "/")) {
+		return ""
+	}
+	return "gl://" + host + path
+}
+
+// fetch returns the configured project as GitLab reports it, asking once.
+func (s *ProjectScope) fetch(ctx context.Context) *Project {
+	if !s.fetched {
+		s.fetched = true
+		s.project, s.err = s.tracker.client.GetProject(ctx)
+	}
+	return s.project
 }
 
 // DeduplicateLinks removes duplicate desired GitLab links, including reciprocal
@@ -283,10 +440,12 @@ func (t *Tracker) PushEpicMilestones(ctx context.Context, issues []*types.Issue,
 
 // issueLinksToDependencies converts GitLab issue links to normalized beads
 // dependencies. Both "B blocks A" and "A is_blocked_by B" become A -> B blocks.
-func issueLinksToDependencies(sourceIID int, links []IssueLink, _ *MappingConfig) []DependencyInfo {
+// listed is the issue the links were listed for.
+func issueLinksToDependencies(listed *Issue, links []IssueLink, _ *MappingConfig) []DependencyInfo {
+	current := issueEndpoint(listed)
 	var deps []DependencyInfo
 	for _, link := range links {
-		dep, ok := dependencyFromIssueLink(sourceIID, link)
+		dep, ok := dependencyFromIssueLink(current, link)
 		if ok {
 			deps = append(deps, dep)
 		}
@@ -294,37 +453,40 @@ func issueLinksToDependencies(sourceIID int, links []IssueLink, _ *MappingConfig
 	return deps
 }
 
-func dependencyFromIssueLink(currentIID int, link IssueLink) (DependencyInfo, bool) {
-	sourceIID, targetIID, ok := issueLinkIIDs(currentIID, link)
-	if !ok || (currentIID != sourceIID && currentIID != targetIID) {
+func dependencyFromIssueLink(current issueLinkEndpoint, link IssueLink) (DependencyInfo, bool) {
+	source, target, ok := issueLinkEndpoints(current, link)
+	if !ok {
+		return DependencyInfo{}, false
+	}
+	isSource, isTarget := current.sameIssue(source), current.sameIssue(target)
+	if !isSource && !isTarget {
 		return DependencyInfo{}, false
 	}
 
 	switch link.LinkType {
 	case gitLabLinkBlocks:
-		return DependencyInfo{
-			FromGitLabIID: targetIID,
-			ToGitLabIID:   sourceIID,
-			Type:          string(types.DepBlocks),
-		}, true
+		return newDependencyInfo(target, source, types.DepBlocks), true
 	case gitLabLinkIsBlockedBy:
-		return DependencyInfo{
-			FromGitLabIID: sourceIID,
-			ToGitLabIID:   targetIID,
-			Type:          string(types.DepBlocks),
-		}, true
+		return newDependencyInfo(source, target, types.DepBlocks), true
 	case gitLabLinkRelatesTo:
-		otherIID := targetIID
-		if currentIID == targetIID {
-			otherIID = sourceIID
+		if isTarget {
+			return newDependencyInfo(target, source, types.DepRelated), true
 		}
-		return DependencyInfo{
-			FromGitLabIID: currentIID,
-			ToGitLabIID:   otherIID,
-			Type:          string(types.DepRelated),
-		}, true
+		return newDependencyInfo(source, target, types.DepRelated), true
 	default:
 		return DependencyInfo{}, false
+	}
+}
+
+func newDependencyInfo(from, to issueLinkEndpoint, depType types.DependencyType) DependencyInfo {
+	return DependencyInfo{
+		FromGitLabIID: from.iid,
+		ToGitLabIID:   to.iid,
+		FromProjectID: from.projectID,
+		ToProjectID:   to.projectID,
+		FromRef:       from.ref,
+		ToRef:         to.ref,
+		Type:          string(depType),
 	}
 }
 
@@ -371,19 +533,50 @@ func currentIssueLinkKeys(currentIID int, link IssueLink) []gitLabLinkKey {
 }
 
 func issueLinkIIDs(currentIID int, link IssueLink) (int, int, bool) {
-	if link.SourceIssue != nil && link.TargetIssue != nil {
-		sourceIID := link.SourceIssue.IID
-		targetIID := link.TargetIssue.IID
-		if sourceIID <= 0 || targetIID <= 0 || sourceIID == targetIID {
-			return 0, 0, false
-		}
-		return sourceIID, targetIID, true
-	}
+	source, target, ok := issueLinkEndpoints(issueLinkEndpoint{iid: currentIID}, link)
+	return source.iid, target.iid, ok
+}
 
-	if currentIID <= 0 || link.IID <= 0 || currentIID == link.IID {
-		return 0, 0, false
+// issueLinkEndpoint is one issue of a GitLab issue link: its project-scoped
+// IID and, when GitLab sent them, its project ID and its web_url, which names
+// its project's current path.
+type issueLinkEndpoint struct {
+	iid       int
+	projectID int
+	ref       string
+}
+
+// issueEndpoint returns gl as an issue link endpoint.
+func issueEndpoint(gl *Issue) issueLinkEndpoint {
+	return issueLinkEndpoint{iid: gl.IID, projectID: gl.ProjectID, ref: gl.WebURL}
+}
+
+// sameIssue reports whether e and o are one issue: the same IID, in the same
+// project when both refs name one. Without a ref the IID is taken to be in the
+// project the links were listed in.
+func (e issueLinkEndpoint) sameIssue(o issueLinkEndpoint) bool {
+	if e.iid != o.iid {
+		return false
 	}
-	return currentIID, link.IID, true
+	a, b := matchKeyFromURL(e.ref), matchKeyFromURL(o.ref)
+	return a == "" || b == "" || a == b
+}
+
+// issueLinkEndpoints returns the source and target of a link listed for
+// current: a single-link response names both, while a list entry is the
+// linked issue, the target of a link from current. ok is false for a
+// malformed link or one whose two ends are the same issue; a link between two
+// projects' issues with the same IID is kept.
+func issueLinkEndpoints(current issueLinkEndpoint, link IssueLink) (source, target issueLinkEndpoint, ok bool) {
+	if link.SourceIssue != nil && link.TargetIssue != nil {
+		source, target = issueEndpoint(link.SourceIssue), issueEndpoint(link.TargetIssue)
+	} else {
+		source, target = current, issueLinkEndpoint{iid: link.IID, projectID: link.ProjectID, ref: link.WebURL}
+	}
+	if source.iid <= 0 || target.iid <= 0 || source.sameIssue(target) {
+		return issueLinkEndpoint{}, issueLinkEndpoint{}, false
+	}
+	return source, target, true
 }
 
 func orderedIIDs(a, b int) (int, int) {
@@ -393,11 +586,28 @@ func orderedIIDs(a, b int) (int, int) {
 	return b, a
 }
 
+// trackerDependencyFromGitLab names each endpoint by its ref and by its
+// identity key, which still finds the bead of an issue whose project was
+// renamed since the bead was last pulled.
 func trackerDependencyFromGitLab(dep DependencyInfo) tracker.DependencyInfo {
 	return tracker.DependencyInfo{
-		FromExternalID: fmt.Sprintf("%d", dep.FromGitLabIID),
-		ToExternalID:   fmt.Sprintf("%d", dep.ToGitLabIID),
-		Type:           dep.Type,
-		Source:         tracker.DependencySourceRelation,
+		FromExternalID:  dependencyEndpointRef(dep.FromGitLabIID, dep.FromRef),
+		ToExternalID:    dependencyEndpointRef(dep.ToGitLabIID, dep.ToRef),
+		FromIdentityKey: gitLabIdentityKey(dep.FromProjectID, dep.FromGitLabIID),
+		ToIdentityKey:   gitLabIdentityKey(dep.ToProjectID, dep.ToGitLabIID),
+		Type:            dep.Type,
+		Source:          tracker.DependencySourceRelation,
 	}
+}
+
+// dependencyEndpointRef names a link endpoint for the engine's dependency
+// resolver, which matches a ref exactly or by MatchKey: by its web_url, which
+// carries its project, or, when GitLab sent none, by the "gitlab:{iid}"
+// shorthand, which MatchKey keys as the configured project's issue. A bare IID
+// would match that IID's bead in any project.
+func dependencyEndpointRef(iid int, ref string) string {
+	if ref = strings.TrimSpace(ref); ref != "" {
+		return ref
+	}
+	return fmt.Sprintf("gitlab:%d", iid)
 }

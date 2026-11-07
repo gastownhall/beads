@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -12,6 +13,21 @@ func formatFeedbackID(id, title string) string {
 		return id
 	}
 	return id + " — " + title
+}
+
+// printedFeedbackID is formatFeedbackID for the lines bd close prints above
+// its --continue hint (the issue it closed, the molecule that completed and
+// the issues it unblocked), which a user can paste with the hint: the ID is
+// spelled by printedIssueID and the title by remedy.PrintedValue, as the
+// lines around the other store-read ID hints are, so pasting them runs no
+// part of the ID and neither can redraw the hint. An ID bd mints is a plain
+// word and prints as formatFeedbackID prints it.
+func printedFeedbackID(id, title string) string {
+	title = applyTitleConfig(title)
+	if title == "" {
+		return printedIssueID(id)
+	}
+	return printedIssueID(id) + " — " + remedy.PrintedValue(title)
 }
 
 // formatFeedbackIDParen returns "id (title)" for multi-ID messages (dep commands).

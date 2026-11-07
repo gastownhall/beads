@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +19,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/beads/internal/testutil/legacyworkspace"
 )
 
 func TestLegacyUpgradeGuardRefusesBeforeMutatingHistoricalWorkspace(t *testing.T) {
@@ -359,6 +362,91 @@ func TestBootstrapRefusesLegacyAncestorConfigWithoutMigratingIt(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(ancestorBeadsDir, "metadata.json")); !os.IsNotExist(statErr) {
 		t.Fatalf("bd bootstrap created ancestor metadata.json: %v", statErr)
+	}
+}
+
+// TestBootstrapRefusesHistoricalSQLiteAncestorAsAdmissionDoes pins that bd
+// bootstrap, walking up from a workspace with no metadata to an ancestor's,
+// refuses a historical SQLite ancestor with the refusal admission prints there
+// and leaves it byte-identical, rather than as a metadata load failure to "fix
+// or restore". A metadata-less SQLite ancestor names no metadata for the walk
+// to use, so it is passed over, also unchanged.
+func TestBootstrapRefusesHistoricalSQLiteAncestorAsAdmissionDoes(t *testing.T) {
+	bd := buildBDUnderTest(t)
+	for _, layout := range legacyworkspace.HistoricalSQLiteLayouts() {
+		t.Run(layout.Name, func(t *testing.T) {
+			root := t.TempDir()
+			ancestorBeadsDir := filepath.Join(root, ".beads")
+			layout.Write(t, ancestorBeadsDir)
+			selectedBeadsDir := filepath.Join(root, "rig", ".beads")
+			if err := os.MkdirAll(filepath.Join(selectedBeadsDir, "dolt"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			before := legacyworkspace.TreeDigest(t, ancestorBeadsDir)
+			cmd := exec.Command(bd, "bootstrap", "--dry-run", "--yes")
+			cmd.Dir = root
+			cmd.Env = append(os.Environ(),
+				"BD_DISABLE_METRICS=1",
+				"BEADS_DOLT_AUTO_START=0",
+				"BEADS_DOLT_SHARED_SERVER=1",
+				"BEADS_DIR="+selectedBeadsDir,
+			)
+			output, err := cmd.CombinedOutput()
+			if after := legacyworkspace.TreeDigest(t, ancestorBeadsDir); !maps.Equal(after, before) {
+				t.Fatalf("bd bootstrap changed the ancestor: before %v, after %v\n%s", before, after, output)
+			}
+			if _, metadataLess := layout.Files["vc.db"]; metadataLess {
+				return
+			}
+			canonicalRoot, evalErr := filepath.EvalSymlinks(root)
+			if evalErr != nil {
+				t.Fatal(evalErr)
+			}
+			want := "Error: ancestor workspace " + filepath.Join(canonicalRoot, ".beads") + ": " + legacyworkspace.HistoricalSQLiteRefusal
+			if err == nil || !strings.Contains(string(output), want) ||
+				strings.Contains(string(output), "fix or restore metadata.json") {
+				t.Fatalf("bd bootstrap did not refuse the ancestor as admission does, naming it (err %v), want %q:\n%s", err, want, output)
+			}
+		})
+	}
+}
+
+// TestBootstrapRefusesUndiscoveredHistoricalSQLiteWorkspace pins that bd
+// bootstrap, finding no workspace discovery accepts, refuses a historical
+// SQLite .beads it passed over (v0.9.1's sole vc.db) with the refusal
+// admission prints for it, and leaves it byte-identical, rather than reporting
+// that no workspace was found.
+func TestBootstrapRefusesUndiscoveredHistoricalSQLiteWorkspace(t *testing.T) {
+	bd := buildBDUnderTest(t)
+	for _, layout := range legacyworkspace.HistoricalSQLiteLayouts() {
+		if _, metadataLess := layout.Files["vc.db"]; !metadataLess {
+			continue
+		}
+		t.Run(layout.Name, func(t *testing.T) {
+			root := t.TempDir()
+			if out, err := exec.Command("git", "-C", root, "init", "-q").CombinedOutput(); err != nil {
+				t.Fatalf("git init: %v\n%s", err, out)
+			}
+			beadsDir := filepath.Join(root, ".beads")
+			layout.Write(t, beadsDir)
+			before := legacyworkspace.TreeDigest(t, beadsDir)
+			cmd := exec.Command(bd, "bootstrap", "--dry-run", "--yes")
+			cmd.Dir = root
+			env := []string{}
+			for _, e := range os.Environ() {
+				if !strings.HasPrefix(e, "BEADS_") {
+					env = append(env, e)
+				}
+			}
+			cmd.Env = append(env, "HOME="+t.TempDir(), "BD_DISABLE_METRICS=1", "BEADS_DOLT_AUTO_START=0")
+			output, err := cmd.CombinedOutput()
+			if after := legacyworkspace.TreeDigest(t, beadsDir); !maps.Equal(after, before) {
+				t.Fatalf("bd bootstrap changed the workspace: before %v, after %v\n%s", before, after, output)
+			}
+			if err == nil || !strings.Contains(string(output), "Error: "+legacyworkspace.HistoricalSQLiteRefusal) {
+				t.Fatalf("bd bootstrap did not refuse the undiscovered workspace as admission does (err %v):\n%s", err, output)
+			}
+		})
 	}
 }
 

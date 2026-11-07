@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/memoryapi"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
 	"github.com/steveyegge/beads/internal/storage/uow"
@@ -231,17 +233,19 @@ func rememberBareKeyPath(key, insight, existing string, found bool) error {
 				"action": "recalled",
 			})
 		}
+		keyArg, keyNote := remedy.CommandArg(runtime.GOOS, key, "<key>")
 		fmt.Fprintf(os.Stderr,
-			"(recalled %q -- a bare existing key READS. To overwrite: `bd remember \"<new content>\" --key %s`)\n",
-			key, key)
+			"(recalled %q -- a bare existing key READS. To overwrite: bd remember \"<new content>\" --key %s%s)\n",
+			key, keyArg, keyNote)
 		fmt.Printf("%s\n", existing)
 		return nil
 	}
+	keyArg, keyNote := remedy.CommandArg(runtime.GOOS, key, "<key>")
 	return HandleErrorRespectJSON(
 		"no memory named %q to recall -- and refusing to store a bare key-like token as its own content. "+
-			"`bd remember` WRITES (its positional arg is CONTENT, not a key). "+
-			"To store it anyway: `bd remember %q --key %s`. To browse keys: `bd memories`",
-		key, insight, key)
+			"bd remember WRITES (its positional arg is CONTENT, not a key). "+
+			"To browse keys: bd memories. To store it anyway, run: bd remember %q --key %s%s",
+		key, insight, keyArg, keyNote)
 }
 
 // printRememberResult renders the `bd remember` success output. commitErr is

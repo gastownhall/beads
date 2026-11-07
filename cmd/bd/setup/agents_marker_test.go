@@ -533,8 +533,7 @@ func TestLegacyToNewMigrationViaInstall(t *testing.T) {
 
 // seedAgentsFileWithOldMtime writes content to path with mode 0600 and
 // backdates it, so a test can tell whether installAgents rewrote it:
-// atomicWriteFile replaces the file with a new one (new inode, fresh mtime,
-// mode 0644).
+// atomicWriteFile replaces the file with a new one (new inode, fresh mtime).
 func seedAgentsFileWithOldMtime(t *testing.T, path, content string) os.FileInfo {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {

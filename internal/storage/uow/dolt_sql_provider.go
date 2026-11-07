@@ -18,12 +18,15 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/doltversion"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 	db "github.com/steveyegge/beads/internal/storage/domain/db"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
@@ -39,6 +42,10 @@ type doltSQLProvider struct {
 	// connection. Fresh-bootstrap reset authority is bound to it together with
 	// the Dolt server UUID, database name, and initial HEAD.
 	serverEndpoint string
+	// endpointResolver re-resolves the proxy endpoint for new physical
+	// connections of db once the provider is handed out; nil when the
+	// provider's pool keeps a fixed address. See proxyEndpointResolver.
+	endpointResolver *proxyEndpointResolver
 	// teamServer: schema is owned by beads-team-server (bts) — bd never
 	// creates the database or migrates, only verifies the schema version.
 	teamServer bool
@@ -62,9 +69,21 @@ type doltSQLProvider struct {
 	// eventsJournalEnabled activates the durable events journal for THIS
 	// provider instance only. See SetEventsJournalEnabled.
 	eventsJournalEnabled atomic.Bool
-	// versionedHistoryEnabled activates dual-write issue-version history for
-	// THIS provider instance only. See SetVersionedHistoryEnabled.
-	versionedHistoryEnabled atomic.Bool
+	// journalShape caches the ONE INFORMATION_SCHEMA probe SetEventsJournalEnabled
+	// runs on activation (issueops.ProbeJournalShape, PR A1). Nil means the
+	// journal is disabled or the probe produced no shape; transactions then get
+	// the canonical column list — see journalActivationErr.
+	journalShape atomic.Pointer[issueops.JournalShape]
+	// journalActivationErr holds the probe's *issueops.JournalShapeError when
+	// SetEventsJournalEnabled(true) found a table shape the journal cannot run
+	// against (a missing required column, or a missing table). Nil otherwise,
+	// including when the probe could not run at all
+	// (issueops.JournalActivationError). See storage.EventsJournalShapeChecker.
+	journalActivationErr atomic.Pointer[error]
+	// versionedHistory activates dual-write issue-version history for THIS
+	// provider instance only. See SetVersionedHistoryEnabled and
+	// DeferVersionedHistory.
+	versionedHistory issueops.VersionedHistorySwitch
 }
 
 // SetEventsJournalEnabled activates the durable events journal for every unit
@@ -77,15 +96,58 @@ type doltSQLProvider struct {
 // BeginTx). Without that binding the uow plumbing writes mutations while
 // journaling nothing — the failure is invisible, because the code runs and the
 // write lands and the journal is simply empty.
+//
+// Activating also probes bd_events_journal's actual shape ONCE
+// (issueops.ProbeJournalShape, PR A1), bounded by
+// issueops.JournalShapeProbeTimeout, and caches the result for this
+// instance's lifetime; EventsJournalActivationError reports whether that
+// probe found a shape the journal cannot run against. A probe that could not
+// run degrades to the canonical shape (issueops.JournalActivationError).
+// Deactivating clears both and skips the probe entirely — a disabled provider
+// accepts any shape.
 func (p *doltSQLProvider) SetEventsJournalEnabled(enabled bool) {
 	p.eventsJournalEnabled.Store(enabled)
+	if !enabled {
+		p.journalShape.Store(nil)
+		p.journalActivationErr.Store(nil)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), issueops.JournalShapeProbeTimeout)
+	defer cancel()
+	shape, err := issueops.ProbeJournalShape(ctx, p.db)
+	p.journalShape.Store(shape)
+	if activationErr := issueops.JournalActivationError(err); activationErr != nil {
+		p.journalActivationErr.Store(&activationErr)
+		return
+	}
+	p.journalActivationErr.Store(nil)
+}
+
+// EventsJournalActivationError implements storage.EventsJournalShapeChecker:
+// nil unless the last SetEventsJournalEnabled(true) call found a table shape
+// the journal cannot run against (PR A1).
+func (p *doltSQLProvider) EventsJournalActivationError() error {
+	if ptr := p.journalActivationErr.Load(); ptr != nil {
+		return *ptr
+	}
+	return nil
 }
 
 // SetVersionedHistoryEnabled activates dual-write issue-version history for
 // every unit of work this provider begins from now on. Per instance, never
 // process-global — see SetEventsJournalEnabled.
 func (p *doltSQLProvider) SetVersionedHistoryEnabled(enabled bool) {
-	p.versionedHistoryEnabled.Store(enabled)
+	p.versionedHistory.Set(enabled)
+}
+
+// DeferVersionedHistory leaves this provider's switch to resolve
+// (storage.VersionedHistoryDeferrer). BeginTx answers it inside the first
+// unit of work, after START TRANSACTION: one SELECT on a session that is
+// pinned anyway, rather than a unit of work of its own at construction. A
+// unit of work does not say whether it will write, so that first one may be a
+// read.
+func (p *doltSQLProvider) DeferVersionedHistory(resolve storage.VersionedHistoryResolver) {
+	p.versionedHistory.Defer(resolve)
 }
 
 type bootstrapPreparationError struct {
@@ -139,6 +201,12 @@ type providerOptions struct {
 	// working through the upgrade window. That is the same warn-and-continue
 	// contract embeddeddolt gives its read-only-command intent.
 	readOnly bool
+	// workingSetReconcile opens for a command that commits the working set
+	// rather than writing beads (bd dolt commit; the provider-side
+	// counterpart of dolt.Config.LenientOpen's commands). It changes nothing
+	// about the open itself. It exists so OpensForBeadWrites can tell such an
+	// open from one that writes beads.
+	workingSetReconcile bool
 	// proxiedServerMode records that the WORKSPACE is in proxied-server mode,
 	// which this provider cannot infer: it is the single funnel for the
 	// proxied CLI and for `bd serve`'s own provider on a SERVER-mode
@@ -150,6 +218,11 @@ type providerOptions struct {
 	// same command works, and saying otherwise would be the same class of
 	// wrong guidance in the other direction.
 	proxiedServerMode bool
+	// rotateServerLog lets the proxy start rotate the server log
+	// (proxy.OpenOpts.RotateLogFile). Only the caller knows whether bd owns
+	// that file: bd sets it for its default server.log, never for a log path
+	// the operator chose.
+	rotateServerLog bool
 }
 
 // WithPreview opens the provider for a non-mutating preview command.
@@ -162,11 +235,32 @@ func WithReadOnly() ProviderOption {
 	return func(o *providerOptions) { o.readOnly = true }
 }
 
+// WithWorkingSetReconcile marks the provider as opened for a command that
+// commits the working set rather than writing beads.
+func WithWorkingSetReconcile() ProviderOption {
+	return func(o *providerOptions) { o.workingSetReconcile = true }
+}
+
+// OpensForBeadWrites reports whether a provider opened with opts is going to
+// write beads: false for a preview, a read-only open, or a working-set
+// reconcile. Events-journal activation reads it to decide whether a journal
+// table the journal cannot run against refuses the open (eventsjournal.Apply).
+func OpensForBeadWrites(opts ...ProviderOption) bool {
+	resolved := applyProviderOptions(opts)
+	return !resolved.preview && !resolved.readOnly && !resolved.workingSetReconcile
+}
+
 // WithProxiedServerMode marks the open as belonging to a proxied-server-mode
 // workspace. See providerOptions.proxiedServerMode: only the refusal guidance
 // depends on it, and only the proxied CLI open may set it.
 func WithProxiedServerMode() ProviderOption {
 	return func(o *providerOptions) { o.proxiedServerMode = true }
+}
+
+// WithServerLogRotation lets the proxy start rotate an oversized server log.
+// See providerOptions.rotateServerLog: pass it only for a log bd owns.
+func WithServerLogRotation() ProviderOption {
+	return func(o *providerOptions) { o.rotateServerLog = true }
 }
 
 func applyProviderOptions(opts []ProviderOption) providerOptions {
@@ -183,7 +277,9 @@ var (
 	_ UnitOfWorkProvider                 = (*doltSQLProvider)(nil)
 	_ TxProvider                         = (*doltSQLProvider)(nil)
 	_ storage.EventsJournalConfigurer    = (*doltSQLProvider)(nil)
+	_ storage.EventsJournalShapeChecker  = (*doltSQLProvider)(nil)
 	_ storage.VersionedHistoryConfigurer = (*doltSQLProvider)(nil)
+	_ storage.VersionedHistoryDeferrer   = (*doltSQLProvider)(nil)
 )
 
 func (p *doltSQLProvider) NewUOW(ctx context.Context) (UnitOfWork, error) {
@@ -191,6 +287,10 @@ func (p *doltSQLProvider) NewUOW(ctx context.Context) (UnitOfWork, error) {
 }
 
 func (p *doltSQLProvider) Close(ctx context.Context) error {
+	// Stop rediscovery first, so no discovery worker outlives the provider.
+	if p.endpointResolver != nil {
+		p.endpointResolver.close()
+	}
 	if p.db == nil {
 		return nil
 	}
@@ -211,6 +311,14 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 		return nil, fmt.Errorf("uow: failed to start transaction: %w", err)
 	}
 
+	// A pending versioned-history switch is answered inside this transaction.
+	// When that read fails the unit of work does not begin: it would otherwise
+	// run scoped off (issueops.VersionedHistorySwitch.ResolveIn).
+	versioned, err := p.versionedHistory.ResolveIn(ctx, conn)
+	if err != nil {
+		return nil, (&doltServerTx{conn: conn}).closeOpenTxAfterFailure(ctx, fmt.Errorf("uow: %w", err))
+	}
+
 	// Bind journal and versioned-history activation to the connection this unit
 	// of work is pinned to, AFTER START TRANSACTION so the seq allocation's
 	// UPDATE and the SELECT that must observe it are inside one transaction on
@@ -218,10 +326,19 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 	// (doltServerTx.releaseConn / poisonConn), so an entry cannot outlive its
 	// transaction. The blocked-recheck scope is bound and released the same
 	// way; Commit takes what it recorded once the transaction has committed.
+	// The shape scope carries the probe SetEventsJournalEnabled cached. The
+	// activation switch deliberately does NOT depend on it: an enabled provider
+	// whose probe produced no shape writes with the canonical column list, so a
+	// table the journal cannot run against fails the write loudly instead of
+	// letting the mutation commit with no journal row
+	// (storage.EventsJournalShapeChecker). Reads share this same BeginTx, and
+	// are never gated by the activation switch — only by the shape — since
+	// EventsJournalCursor has no enabled/disabled concept of its own.
 	return &doltServerTx{
 		conn:              conn,
 		clearJournalScope: issueops.ScopeEventsJournalTransaction(conn, p.eventsJournalEnabled.Load()),
-		clearVersionScope: issueops.ScopeVersionedHistoryTransaction(conn, p.versionedHistoryEnabled.Load()),
+		clearJournalShape: issueops.ScopeEventsJournalShape(conn, p.journalShape.Load()),
+		clearVersionScope: issueops.ScopeVersionedHistoryTransaction(conn, versioned),
 		clearRecheckScope: issueops.ScopeBlockedRecheckTransaction(conn),
 	}, nil
 }
@@ -372,8 +489,11 @@ func dataBehindAdopter(readOnly bool) *schema.FastForwardAdopter {
 // database cannot be quietly written at a schema this binary believes is
 // behind.
 //
-// This mirrors what embedded mode has done since bd-578h9.5 for its
-// read-only-command intent. Without it, extending the gate to the proxied path
+// This mirrors embedded mode's read-only-command intent (bd-578h9.5), and the
+// warning keeps the body-then-mode-line shape of embeddeddolt's
+// lenientGateWarning: a refusal the smart gate shaped leads with its own
+// UserMessage body, and only the blunt fallback leads with the one-line
+// summary. Without the read-through, extending the gate to the proxied path
 // would newly brick every read on a workspace waiting for its operator to
 // consent — which is the opposite of the contract the gate's own message
 // promises ("read commands keep working against the current schema").
@@ -391,12 +511,28 @@ func readThroughRefusedMigration(ctx context.Context, conn *sql.Conn, database s
 		// the refusal, which is the actionable half.
 		return backoff.Permanent(gateErr)
 	}
-	// #6575: the data-behind stop's remedy is the pull, and the consent verb
-	// this template names does not unlock a remote-backed shared store at all
-	// (schema.SharedConsentCommandForced). Print that stop's own block, which
-	// REPLACES the migrate-or-adopt framing rather than decorating it, and say
-	// only what read-through adds on top.
-	if gateErr.IsDataBehind() {
+	// Reading on at the current schema works only while this binary's issue
+	// reads can query it. A schema that lacks a column the shared projection
+	// selects would answer every one of them with an unknown-column error, so
+	// it is refused here as server mode's read-only open refuses it
+	// (dolt.Config.RequireReadableSchema).
+	if err := schema.CheckReadableDrift(ctx, conn, "issues", sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)); err != nil {
+		if isSerializationError(err) {
+			return err
+		}
+		return backoff.Permanent(err)
+	}
+	// A refusal the smart gate shaped — any Decision, or the #6575 data-behind
+	// stop — carries its own per-decision body in UserMessage. Print that
+	// block, which REPLACES the template below rather than decorating it, and
+	// say only what read-through adds on top. It keys on the same predicate as
+	// embeddeddolt's lenientGateWarningBody (bd-mfsky, #6660). The template's
+	// consent sentence would contradict each of those bodies: the data-behind
+	// remedy is the pull, adopt and fork-skew say not to migrate here at all,
+	// and on those remote-backed arms the bare verb's consent is never read
+	// (schema.SharedConsentCommandForced). shared-no-remote's body already
+	// prescribes that verb itself.
+	if gateErr.Decision != "" || gateErr.IsDataBehind() {
 		fmt.Fprintf(os.Stderr,
 			"Warning: %[1]s"+
 				"  Read-only command: continuing on schema v%[2]d without migrating.\n"+
@@ -648,8 +784,12 @@ func (b *bootstrapPreparer) prepare(ctx context.Context, conn *sql.Conn) (*schem
 	return b.heal, nil
 }
 
-func buildDSN(ep proxy.Endpoint, database, user, password, tlsConfigName string) string {
+// buildDSN renders the MySQL DSN for a proxy endpoint over the given dial
+// network: proxy.DataNetwork for managed connections (the bdproxy dialer
+// sends the BDPROXY1 handshake) or "tcp" for a raw server in tests.
+func buildDSN(network string, ep proxy.Endpoint, database, user, password, tlsConfigName string) string {
 	return util.DoltServerDSN{
+		Net:             network,
 		Host:            ep.Host,
 		Port:            ep.Port,
 		User:            user,
@@ -731,18 +871,24 @@ func isTransientPingError(err error) bool {
 // upstream. A var so tests can shorten it.
 var upstreamOutageRetryWindow = time.Second
 
-// outageWindowBackOff clamps the wrapped backoff so that, once the first
-// upstream-outage report has been seen, no wait runs past the end of
-// upstreamOutageRetryWindow: the last attempt lands at the window's end
-// rather than up to one backoff interval after it.
+// outageWindowBackOff clamps the wait after an upstream-outage report so it
+// does not run past the end of upstreamOutageRetryWindow, measured from the
+// first report: the last attempt lands at the window's end rather than up to
+// one backoff interval after it. Only the wait that follows an outage report
+// is clamped. A wait after any other transient error keeps the wrapped
+// backoff's own interval; clamping it to a deadline that has already passed
+// would make it zero and spin the retry loop at CPU rate (#7183).
 type outageWindowBackOff struct {
 	backoff.BackOff
 	deadline time.Time // zero until the first upstream-outage report
+	armClamp bool      // the failure this wait follows was an outage report
 }
 
 func (b *outageWindowBackOff) NextBackOff() time.Duration {
 	d := b.BackOff.NextBackOff()
-	if d == backoff.Stop || b.deadline.IsZero() {
+	clamp := b.armClamp
+	b.armClamp = false
+	if d == backoff.Stop || b.deadline.IsZero() || !clamp {
 		return d
 	}
 	if remaining := time.Until(b.deadline); remaining < d {
@@ -752,12 +898,15 @@ func (b *outageWindowBackOff) NextBackOff() time.Duration {
 }
 
 // pingWithRetry pings until the server answers, the error proves durable, or
-// bo's MaxElapsedTime is spent. Each attempt gets its own deadline:
-// backoff.Retry bounds the gap between attempts but cannot interrupt one
-// already in flight, so without this cap a server that accepts TCP and then
-// stalls blocks for the caller's entire context. The db proxy's
+// the wrapped backoff's budget stops fitting another wait — an upper bound,
+// not a promise to keep retrying for all of MaxElapsedTime. Each attempt gets
+// its own deadline: backoff.Retry bounds the gap between attempts but cannot
+// interrupt one already in flight, so without this cap a server that accepts
+// TCP and then stalls blocks for the caller's entire context. The db proxy's
 // upstream-outage report is retried only for upstreamOutageRetryWindow from
-// the first time it is seen.
+// the first time it is seen, and only the wait right after such a report is
+// clamped to that window; waits after ordinary transient errors keep the
+// wrapped backoff's own intervals.
 func pingWithRetry(ctx context.Context, p pinger, bo *backoff.ExponentialBackOff, attemptTimeout time.Duration) error {
 	window := &outageWindowBackOff{BackOff: bo}
 	return backoff.Retry(func() error {
@@ -782,6 +931,7 @@ func pingWithRetry(ctx context.Context, p pinger, bo *backoff.ExponentialBackOff
 			if !time.Now().Before(window.deadline) {
 				return backoff.Permanent(err)
 			}
+			window.armClamp = true
 			return err
 		}
 		if isTransientPingError(err) {
@@ -804,11 +954,12 @@ func assertSessionDatabaseOnPool(ctx context.Context, pool *sql.DB, want string)
 }
 
 // openDB opens dsn and waits out a server that is still coming up, retrying
-// transient ping failures for up to 30s (#6003).
-func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
+// transient ping failures for up to 30s (#6003). resolver is optional; see
+// openPool.
+func openDB(ctx context.Context, dsn string, resolver *proxyEndpointResolver) (*sql.DB, error) {
 	bo := backoff.NewExponentialBackOff()
 	bo.MaxElapsedTime = 30 * time.Second
-	return openPool(dsn, func(conn *sql.DB) error {
+	return openPool(dsn, resolver, func(conn *sql.DB) error {
 		return pingWithRetry(ctx, conn, bo, pingAttemptTimeout)
 	})
 }
@@ -827,8 +978,8 @@ func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
 // pingWithRetry caps its own attempts: the DSN sets no ReadTimeout, so a server
 // that accepts TCP and then stalls mid-handshake is otherwise bounded only by
 // the caller's context.
-func openDBProbe(ctx context.Context, dsn string) (*sql.DB, error) {
-	return openPool(dsn, func(conn *sql.DB) error {
+func openDBProbe(ctx context.Context, dsn string, resolver *proxyEndpointResolver) (*sql.DB, error) {
+	return openPool(dsn, resolver, func(conn *sql.DB) error {
 		pingCtx, cancel := context.WithTimeout(ctx, pingAttemptTimeout)
 		defer cancel()
 		return conn.PingContext(pingCtx)
@@ -839,18 +990,65 @@ func openDBProbe(ctx context.Context, dsn string) (*sql.DB, error) {
 // the server answers on it. The error texts are load-bearing — callers match
 // on "uow: open db" and "uow: ping db" — and a pool whose prove fails is
 // closed here rather than leaked to a caller that only sees an error.
-func openPool(dsn string, prove func(*sql.DB) error) (*sql.DB, error) {
-	conn, err := sql.Open("mysql", dsn)
+//
+// A non-nil resolver is installed as the driver's BeforeConnect hook, so every
+// new physical connection of the pool resolves the proxy endpoint afresh; nil
+// opens the same static pool sql.Open would.
+func openPool(dsn string, resolver *proxyEndpointResolver, prove func(*sql.DB) error) (*sql.DB, error) {
+	cfg, err := mysql.ParseDSN(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("uow: open db: %w", err)
 	}
+	if resolver != nil {
+		if err := cfg.Apply(mysql.BeforeConnect(resolver.beforeConnect)); err != nil {
+			return nil, fmt.Errorf("uow: open db: %w", err)
+		}
+	}
+	connector, err := mysql.NewConnector(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("uow: open db: %w", err)
+	}
+	conn := sql.OpenDB(connector)
 	if err := prove(conn); err != nil {
 		return nil, errors.Join(fmt.Errorf("uow: ping db: %w", err), conn.Close())
 	}
 	return conn, nil
 }
 
-func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUser, rootPassword, tlsConfigName string, teamServer bool, expectedProjectID string, opts providerOptions) (UnitOfWorkProvider, error) {
+// requireServerDoltVersion refuses a dolt sql-server older than
+// doltversion.RequiredMin before the provider runs schema work through q:
+// one SELECT dolt_version() on the pool the open already proved. It covers
+// managed proxied-server mode (whose binary resolveAndProbeDolt already
+// checked; this checks the server it actually reached), external
+// proxied-server mode, team-server opens and bd serve alike. A version that
+// cannot be determined is not refused (see doltversion.CheckServer); it is
+// logged under BD_DEBUG.
+//
+// backend names the server behind the proxy when bd does not run it
+// (external proxied-server mode): the server the operator has to upgrade,
+// which the proxy's loopback address ep does not name. It is empty when the
+// proxy runs its own server.
+func requireServerDoltVersion(ctx context.Context, q doltversion.RowQuerier, ep proxy.Endpoint, backend string) error {
+	// Both addresses are configuration, so they are printed the way every
+	// other remedy value is (internal/remedy).
+	subject := "the dolt sql-server behind the bd proxy at " + remedy.PrintedValue(ep.Address())
+	if backend != "" {
+		subject = "the dolt sql-server at " + remedy.PrintedValue(backend) + " (behind the bd proxy at " + remedy.PrintedValue(ep.Address()) + ")"
+	}
+	return doltversion.CheckServer(ctx, q, subject, func(err error) {
+		debug.Logf("uow: could not determine the version of %s; not checking it against the required minimum %s: %v\n",
+			subject, doltversion.RequiredMin, remedy.PrintedError(err))
+	})
+}
+
+// openAndInitSchema opens the provider through the endpoint ep over the
+// given MySQL dial network — proxy.DataNetwork for a bd-managed proxy
+// (which requires the BDPROXY1 handshake) or "tcp" for a raw server.
+// backend names the server behind it when bd does not run that server
+// (see requireServerDoltVersion), and is empty otherwise. resolver, when
+// non-nil, re-resolves the proxy endpoint for each new physical connection
+// of the pool handed to the provider (see proxyEndpointResolver).
+func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, backend, database, rootUser, rootPassword, tlsConfigName string, teamServer bool, expectedProjectID string, opts providerOptions, resolver *proxyEndpointResolver) (UnitOfWorkProvider, error) {
 	newProvider := func(pool *sql.DB) *doltSQLProvider {
 		return &doltSQLProvider{
 			defaultBranch:     defaultBranch,
@@ -862,6 +1060,16 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 			readOnly:          opts.readOnly,
 			proxiedServerMode: opts.proxiedServerMode,
 		}
+	}
+	// handOut gives the provider its resolver and arms it. It runs only once
+	// the open has proven the pool it returns, so every bootstrap connection
+	// used ep.
+	handOut := func(provider *doltSQLProvider) UnitOfWorkProvider {
+		if resolver != nil {
+			provider.endpointResolver = resolver
+			resolver.arm()
+		}
+		return provider
 	}
 
 	// Fast path (wy-s8ytnw): connect straight to the target database. A
@@ -905,14 +1113,17 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 	// signal, and every error message callers already match on. The probe is
 	// single-shot (openDBProbe) precisely so that fall-through cannot cost a
 	// second full retry budget.
-	probeConn, probeErr := openDBProbe(ctx, buildDSN(ep, database, rootUser, rootPassword, tlsConfigName))
+	probeConn, probeErr := openDBProbe(ctx, buildDSN(network, ep, database, rootUser, rootPassword, tlsConfigName), resolver)
 	if probeErr == nil {
+		if err := requireServerDoltVersion(ctx, probeConn, ep, backend); err != nil {
+			return nil, errors.Join(err, probeConn.Close())
+		}
 		provider := newProvider(probeConn)
 		if err := provider.initSchema(ctx, database); err != nil {
 			_ = probeConn.Close()
 			return nil, fmt.Errorf("uow: init schema: %w", err)
 		}
-		return provider, nil
+		return handOut(provider), nil
 	}
 
 	// Advisory only: the fall-through below is the historical open, so this is
@@ -924,9 +1135,16 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 	debug.Logf("uow: single-session open unavailable for %q, using the no-database init connection: %v\n",
 		database, probeErr)
 
-	initDB, err := openDB(ctx, buildDSN(ep, "", rootUser, rootPassword, tlsConfigName))
+	// The no-database init pool is closed below and never handed out, so it
+	// gets no resolver.
+	initDB, err := openDB(ctx, buildDSN(network, ep, "", rootUser, rootPassword, tlsConfigName), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	// Refuse an old server before initSchema can CREATE DATABASE on it.
+	if err := requireServerDoltVersion(ctx, initDB, ep, backend); err != nil {
+		return nil, errors.Join(err, initDB.Close())
 	}
 
 	initProvider := newProvider(initDB)
@@ -940,7 +1158,7 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 		return nil, fmt.Errorf("uow: close init db: %w", err)
 	}
 
-	dbConn, err := openDB(ctx, buildDSN(ep, database, rootUser, rootPassword, tlsConfigName))
+	dbConn, err := openDB(ctx, buildDSN(network, ep, database, rootUser, rootPassword, tlsConfigName), resolver)
 	if err != nil {
 		return nil, err
 	}
@@ -954,5 +1172,5 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 		return nil, errors.Join(err, dbConn.Close())
 	}
 
-	return newProvider(dbConn), nil
+	return handOut(newProvider(dbConn)), nil
 }

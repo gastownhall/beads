@@ -23,6 +23,35 @@ const (
 	SettingKeyTypesCustom  = "types.custom"
 )
 
+// SettingKeyTypesRetained names the issue types whose closed rows only a
+// RETAINING sweep may delete (SweepRequest.RetainIDs) among the retention
+// doors: a sweep without RetainIDs, `bd gc`'s decay, `bd admin cleanup` and
+// the stale-closed-issues doctor fix hold every closed row of a listed type
+// back and count it (SweepSkips.RetentionRequired, retention_required). The
+// scope, the semantics and what is deliberately out of scope are stated once,
+// on SweepRequest.RetainIDs.
+//
+// Its value is a list of type names, in the JSON-array or comma-separated
+// form types.custom takes. Every reader matches rows through one
+// canonicalizing read (workapi.RetainedTypesFromSetting), so an alias or a
+// case variant of a built-in type protects the type rows carry; a write is
+// checked for syntax only (workapi.ValidateRetainedTypesValue). Unknown type
+// names are accepted and match nothing, so an orchestrator can name a type
+// before it registers it. The setting is read from the workspace
+// database only — never from config.yaml — because the rule it states must be
+// the same for every client of a shared workspace, and a client's file is not
+// visible to a server sweeping on its behalf.
+//
+// AN OLDER BD IGNORES IT. A bd from before this setting that runs prune,
+// purge, gc or admin cleanup on the direct, embedded or proxied route holds
+// nothing back and deletes those rows with no tombstone, and a `bd dolt push`
+// carries the deletes to every clone. So the guard holds only while every bd
+// that runs a retention door against the workspace is at the release that
+// introduced it or later. (The reverse case is guarded: a current client
+// refuses a plain sweep against an older http server, one that lacks
+// issues.sweep.retainedTypes.)
+const SettingKeyTypesRetained = "types.retained"
+
 // GetSettingRequest names one stored setting.
 type GetSettingRequest struct {
 	// Key is the setting's name, used verbatim: there is no namespace

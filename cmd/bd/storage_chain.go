@@ -69,7 +69,7 @@ func wireExternalDependencyPolicy(store storage.DoltStorage) storage.DoltStorage
 			return path, path != ""
 		},
 		func(ctx context.Context, projectRoot string) (storage.DoltStorage, error) {
-			return newReadOnlyStoreFromConfig(ctx, filepath.Join(projectRoot, ".beads"))
+			return openForeignStore(ctx, filepath.Join(projectRoot, ".beads"), foreignRead)
 		},
 	)
 }
@@ -113,7 +113,7 @@ func wireExternalDependencyUOWProvider(provider uow.UnitOfWorkProvider) uow.Unit
 			return path, path != ""
 		},
 		func(ctx context.Context, projectRoot string) (storage.DoltStorage, error) {
-			return newReadOnlyStoreFromConfig(ctx, filepath.Join(projectRoot, ".beads"))
+			return openForeignStore(ctx, filepath.Join(projectRoot, ".beads"), foreignRead)
 		},
 	)
 }

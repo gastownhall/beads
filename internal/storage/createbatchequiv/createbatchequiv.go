@@ -1,8 +1,9 @@
 // Package createbatchequiv checks that the batch-create fast paths in
 // internal/storage/issueops (the createBatchCache, the dependency pass's batch
-// lookups and in-memory graph, and the blocked-state no-edge shortcut) store
-// exactly what the per-row bodies store. Each backend's test package runs Run
-// against its own engine; the scenario and the comparison live here once.
+// lookups and in-memory graph, and the blocked-state recompute's no-edge and
+// settled-row shortcuts) store exactly what the per-row bodies store. Each
+// backend's test package runs Run against its own engine; the scenario and the
+// comparison live here once.
 package createbatchequiv
 
 import (
@@ -56,11 +57,18 @@ type scenario struct {
 	opts      storage.BatchCreateOptions
 	apply     func() publicops.ApplyBatchRequest
 	// run, when set, replaces the batch: it drives tx itself and returns
-	// the lines to compare (kept in Outcome.Skipped). The create fast paths
-	// do not gate anything a run drives, so a run scenario is applied once
-	// and checked against its golden digest only — the pre-change code's
-	// answers — not fast against per-row.
+	// the lines to compare (kept in Outcome.Skipped). A run scenario is
+	// checked against its golden digest — the pre-change code's answers —
+	// and, when compare is set, also fast against per-row.
 	run func(ctx context.Context, tx *sql.Tx) ([]string, error)
+	// compare applies the run per-row as well and compares the two
+	// outcomes. A run's closes and status changes to closed or pinned take
+	// the settled-row shortcut the fast-path switch gates, so for the run
+	// that targets that shortcut (settled) the comparison names the rows a
+	// regression changes, on top of the golden digest. waitsfor's closes
+	// are held to their pre-change golden only, and depadd drives no gated
+	// path.
+	compare bool
 }
 
 // scenarios are the light ones Run drives on every lane.
@@ -73,6 +81,11 @@ func scenarios() []scenario {
 			stampParticipation(t, db)
 		}, run: runDepAdd},
 		{name: "waitsfor", seed: seedWaitsFor, afterSeed: stampParticipation, run: runWaitsFor},
+		{name: "settled", seed: seedSettled, afterSeed: afterSeedSettled, run: runSettled, compare: true},
+		{name: "retired", seed: seedRetired, afterSeed: func(t *testing.T, db *sql.DB) {
+			plantTombstones(t, db)
+			stampParticipation(t, db)
+		}, batch: batchRetired},
 	}
 }
 
@@ -92,7 +105,7 @@ func largeScenarios() []scenario {
 // recorded from the code BEFORE the batch-create fast paths existed
 // (ebe3b6bcb), so the check holds the current code — fast and per-row
 // bodies alike, including changes the fast-path switch does not gate — to
-// what that code stored, apart from three deliberate behavior changes since.
+// what that code stored, apart from four deliberate behavior changes since.
 //
 // First, the create role defaults an empty created_by to the request's actor
 // (issueops.PreparePublicCreateRequest), so apply.json's issues, wisps and
@@ -106,7 +119,9 @@ func largeScenarios() []scenario {
 // mint; that is the fenced outcome they now pin. depadd and waitsfor stamp
 // their seeded rows instead (stampParticipation), so their dependency adds,
 // closes and reopens mint as they did before the fence, and their digests
-// did not move.
+// did not move. So does retired, recorded before the fence from the code
+// that added it: its batch's upsert of the live and tombstoned eq-rl mints
+// as it did then.
 //
 // Third, the issues_updated_at digests of small, depadd, import458 and
 // import458-reject-stale were re-recorded when the update-shaped version
@@ -118,6 +133,21 @@ func largeScenarios() []scenario {
 // import source's for the in-batch duplicates eq-n2 (small) and eq-b3 and
 // eq-b250 (both import458 scenarios). apply and waitsfor did not move: their
 // re-minted rows take the wall clock from their other writes anyway.
+//
+// Fourth, settled.json's issues, wisps and bd_events_journal digests and its
+// step I and J lines were re-recorded when the should-be-blocked union's
+// parent-child legs stopped reading the stored is_blocked of a closed or
+// pinned parent (gastownhall/beads#7626). Step I closes eq-zI-a above a stale
+// cross-plane cycle. The legs used to read the closed row's pre-pass flag,
+// which kept its child eq-zI-b dark and so held the cycle up; now the cycle
+// comes bright, and the I and J lines read eq-zI-b=open/0 eq-zI-c@w=open/0
+// where they read /1. That is what BlockedStateInvariant asks once nothing
+// outside the cycle blocks it. No row count moved.
+//
+// settled.json is younger than the rest: it was recorded from the code before
+// the blocked-state settled-row shortcut (fd54802bc8), on the embedded and the
+// server engine alike (byte-identical), so it holds the shortcut to that
+// code's answers.
 const GoldenDirEnv = "CREATEBATCHEQUIV_GOLDEN_DIR"
 
 // Run seeds fresh databases, applies each scenario's batch through the fast
@@ -185,6 +215,9 @@ func runScenarios(t *testing.T, open Open, list []scenario) {
 				if len(fast.Skipped) == 0 || len(fast.Tables["issue_versions"]) == 0 {
 					t.Fatalf("%s: run exercised nothing: lines=%d versions=%d", sc.name,
 						len(fast.Skipped), len(fast.Tables["issue_versions"]))
+				}
+				if sc.compare {
+					compareOutcomes(t, fast, applyScenario(t, open, sc, true))
 				}
 				checkGolden(t, sc.name, fast)
 				return
@@ -485,6 +518,7 @@ func applyScenario(t *testing.T, open Open, sc scenario, perRow bool) Outcome {
 			out.Skipped = append(out.Skipped, issueID+" -> "+dependsOnID+": "+reason)
 		}
 		opts.OnStaleRejected = func(issueID string) { out.Stale = append(out.Stale, issueID) }
+		opts.OnRetiredID = func(issueID string) { out.Skipped = append(out.Skipped, "retired "+issueID) }
 		result, err := issueops.CreateIssuesInTxWithResult(ctx, tx, sc.batch(), "importer", opts)
 		if err != nil {
 			_ = tx.Rollback()

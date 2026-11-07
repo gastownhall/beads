@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,9 +12,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // CheckStaleClosedIssues detects closed issues that could be cleaned up.
@@ -91,36 +95,87 @@ func checkStaleClosedIssuesDB(db *sql.DB, thresholdDays int) DoctorCheck {
 		}
 	}
 
-	// Find closed issues older than configured threshold, excluding pinned
+	// Find closed issues older than configured threshold, excluding pinned,
+	// counted by type so the retained types can be set apart.
 	cutoff := time.Now().AddDate(0, 0, -thresholdDays).Format(time.RFC3339)
-	var cleanable int
-	err := db.QueryRow(
-		"SELECT COUNT(*) FROM issues WHERE status = 'closed' AND closed_at < ? AND (pinned = 0 OR pinned IS NULL)",
+	queryFailed := DoctorCheck{
+		Name:     "Stale Closed Issues",
+		Status:   StatusOK,
+		Message:  "N/A (query failed)",
+		Category: CategoryMaintenance,
+	}
+	var retainedSetting string
+	err := db.QueryRow("SELECT `value` FROM config WHERE `key` = ?", issueops.SettingKeyTypesRetained).Scan(&retainedSetting)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return queryFailed
+	}
+	rows, err := db.Query(
+		"SELECT issue_type, COUNT(*) FROM issues WHERE status = 'closed' AND closed_at < ? AND (pinned = 0 OR pinned IS NULL) GROUP BY issue_type",
 		cutoff,
-	).Scan(&cleanable)
+	)
 	if err != nil {
-		return DoctorCheck{
-			Name:     "Stale Closed Issues",
-			Status:   StatusOK,
-			Message:  "N/A (query failed)",
-			Category: CategoryMaintenance,
+		return queryFailed
+	}
+	defer func() { _ = rows.Close() }()
+	byType := map[string]int{}
+	for rows.Next() {
+		var issueType string
+		var n int
+		if err := rows.Scan(&issueType, &n); err != nil {
+			return queryFailed
 		}
+		byType[issueType] += n
+	}
+	if err := rows.Err(); err != nil {
+		return queryFailed
 	}
 
+	cleanable, retained := countStaleCleanable(byType, retainedSetting)
+	return staleClosedCheckResult(cleanable, retained, thresholdDays)
+}
+
+// countStaleCleanable splits the stale closed rows, counted by issue type,
+// into the ones the fix may delete and the ones of a type the workspace
+// retains (retainedSetting is the stored value of types.retained), which the
+// fix holds back (fix.StaleClosedIssues).
+func countStaleCleanable(byType map[string]int, retainedSetting string) (cleanable, retained int) {
+	retainedTypes := workapi.RetainedTypesFromSetting(retainedSetting)
+	for issueType, n := range byType {
+		if retainedTypes[issueType] {
+			retained += n
+		} else {
+			cleanable += n
+		}
+	}
+	return cleanable, retained
+}
+
+// staleClosedCheckResult is the check's answer for cleanable rows and
+// retained ones. Only cleanable rows warn: the fix never deletes a retained
+// row, so warning about one would never clear.
+func staleClosedCheckResult(cleanable, retained, thresholdDays int) DoctorCheck {
+	retainedDetail := ""
+	if retained > 0 {
+		retainedDetail = fmt.Sprintf("%d more of a retained type (types.retained) are kept; only bd prune/purge --retain-ids deletes them", retained)
+	}
 	if cleanable == 0 {
 		return DoctorCheck{
 			Name:     "Stale Closed Issues",
 			Status:   StatusOK,
 			Message:  "No stale closed issues",
+			Detail:   retainedDetail,
 			Category: CategoryMaintenance,
 		}
 	}
-
+	detail := "These issues can be cleaned up to reduce database size"
+	if retainedDetail != "" {
+		detail += "; " + retainedDetail
+	}
 	return DoctorCheck{
 		Name:     "Stale Closed Issues",
 		Status:   StatusWarning,
 		Message:  fmt.Sprintf("%d closed issue(s) older than %d days", cleanable, thresholdDays),
-		Detail:   "These issues can be cleaned up to reduce database size",
+		Detail:   detail,
 		Fix:      "Run 'bd doctor --fix' to cleanup, or 'bd admin cleanup --force' for more options",
 		Category: CategoryMaintenance,
 	}
@@ -262,20 +317,8 @@ func checkPersistentMolIssuesForIssues(issues []*types.Issue) DoctorCheck {
 // entries from the old mrqueue implementation. They are safe to delete since
 // gt done already creates merge-request wisps in beads.
 func CheckStaleMQFiles(path string) DoctorCheck {
-	beadsDir := ResolveBeadsDirForRepo(path)
-	mqDir := filepath.Join(beadsDir, "mq")
-
-	if _, err := os.Stat(mqDir); os.IsNotExist(err) {
-		return DoctorCheck{
-			Name:     "Legacy MQ Files",
-			Status:   StatusOK,
-			Message:  "No legacy merge queue files",
-			Category: CategoryMaintenance,
-		}
-	}
-
-	files, err := filepath.Glob(filepath.Join(mqDir, "*.json"))
-	if err != nil || len(files) == 0 {
+	files := legacyMQFiles(filepath.Join(ResolveBeadsDirForRepo(path), "mq"))
+	if len(files) == 0 {
 		return DoctorCheck{
 			Name:     "Legacy MQ Files",
 			Status:   StatusOK,
@@ -289,24 +332,57 @@ func CheckStaleMQFiles(path string) DoctorCheck {
 		Status:   StatusWarning,
 		Message:  fmt.Sprintf("%d stale .beads/mq/*.json file(s)", len(files)),
 		Detail:   "Legacy orchestrator merge queue files (local only, safe to delete)",
-		Fix:      "Run 'bd doctor --fix' to delete, or 'rm -rf .beads/mq/'",
+		Fix:      "Run 'bd doctor --fix' to delete, or 'rm .beads/mq/*.json'",
 		Category: CategoryMaintenance,
 	}
 }
 
-// FixStaleMQFiles removes the legacy .beads/mq/ directory and all its contents.
+// legacyMQFiles returns what CheckStaleMQFiles reports and FixStaleMQFiles
+// removes: the regular *.json files directly in mqDir. A .beads/mq that is a
+// symlink, or not a directory, is not the orchestrator's local queue and is
+// neither reported nor followed.
+func legacyMQFiles(mqDir string) []string {
+	if !isRealDir(mqDir) {
+		return nil
+	}
+	entries, err := os.ReadDir(mqDir)
+	if err != nil {
+		return nil
+	}
+	var files []string
+	for _, entry := range entries {
+		if entry.Type().IsRegular() && strings.HasSuffix(entry.Name(), ".json") {
+			files = append(files, filepath.Join(mqDir, entry.Name()))
+		}
+	}
+	return files
+}
+
+// isRealDir reports whether path is a directory itself, not a symlink to one.
+func isRealDir(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.IsDir()
+}
+
+// FixStaleMQFiles removes the legacy merge queue files CheckStaleMQFiles
+// reports, and .beads/mq itself once nothing else is left in it.
 func FixStaleMQFiles(path string) error {
-	beadsDir := ResolveBeadsDirForRepo(path)
-	mqDir := filepath.Join(beadsDir, "mq")
-
-	if _, err := os.Stat(mqDir); os.IsNotExist(err) {
-		return nil // Nothing to do
+	mqDir := filepath.Join(ResolveBeadsDirForRepo(path), "mq")
+	for _, file := range legacyMQFiles(mqDir) {
+		if err := fix.RemoveDisposable(file); err != nil {
+			return fmt.Errorf("failed to remove %s: %w", file, err)
+		}
 	}
-
-	if err := os.RemoveAll(mqDir); err != nil {
-		return fmt.Errorf("failed to remove %s: %w", mqDir, err)
+	if !isRealDir(mqDir) {
+		return nil
 	}
-
+	if entries, err := os.ReadDir(mqDir); err == nil && len(entries) == 0 {
+		if err := fix.RemoveDisposable(mqDir); err != nil {
+			return fmt.Errorf("failed to remove %s: %w", mqDir, err)
+		}
+	} else if err == nil {
+		fmt.Printf("  Kept %s: it holds files other than legacy merge queue entries\n", mqDir)
+	}
 	return nil
 }
 

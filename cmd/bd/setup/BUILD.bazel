@@ -25,6 +25,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//internal/config",
+        "//internal/git",
         "//internal/recipes",
         "//internal/templates",
         "//internal/templates/agents",
@@ -56,6 +57,7 @@ go_test(
     ],
     embed = [":setup"],
     deps = [
+        "//internal/git",
         "//internal/templates",
         "//internal/templates/agents",
         "@in_gopkg_yaml_v3//:yaml_v3",

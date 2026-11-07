@@ -79,6 +79,12 @@ var sqlWriteKeywordRe = regexp.MustCompile(`(?i)\b(?:SET|VALUES|SELECT)\b`)
 //   - "SET id = ?": rename (updateIssueIDInTx/updateWispIDInTx) is the only
 //     writer of the primary key, exempted by name in the freshRowLock
 //     invariant.
+//   - "SET arrival_seq = ?": the journal's create seam stamping a wisps row
+//     with its create record's seq (stampArrivalSeqInTx). arrival_seq is a
+//     store-assigned cell orthogonal to the status/assignee races, and it MUST
+//     NOT remint row_lock: the revision a caller reads right after its create
+//     has to keep passing that caller's compare-and-set ("Touches nothing
+//     else" in docs/reference/events-journal.md).
 //   - "SELECT %s FROM": the persistence move's fully-templated aux-table copy
 //     (INSERT INTO %s (%s) SELECT %s FROM %s ...) — it copies snapshot/event
 //     side tables verbatim; the issues/wisps row itself is re-inserted through
@@ -104,6 +110,7 @@ var auxOrExemptMarkers = []string{
 	"is_blocked",          // is_blocked recompute (exempt by design)
 	"compaction_level = ", // compaction bookkeeping/restore (exempt by design)
 	"SET id = ?",          // rename: primary-key rewrite (exempt by design)
+	"SET arrival_seq = ?", // journal create seam's stamp (exempt by design)
 	"SELECT %s FROM",      // persistence move's verbatim aux-table copy
 	"issue_id",            // events / dependencies / comments / snapshots FK
 	"depends_on",          // dependency edge + retarget writes
@@ -167,6 +174,15 @@ var funcNameExemptions = map[string]string{
 	// cause a legitimate subsequent CAS check to fail as a spurious lost
 	// update.
 	"recordVersionAtInTx": "runs after the primary mutation (or, for RecordVersionAtInTx's fixture-only callers, a bare-create) already minted a fresh row_lock in the same transaction; reminting here would double-bump the token and invalidate the RowVersion/CAS value already returned to that mutation's caller — covers all three of its UPDATE issues statements (the update-shaped and create-shaped current_revision advances and the no-history participation_generation stamp), since all three public entry points delegate to this one shared body",
+
+	// carryParticipationInTx (version_history.go) carries a row's
+	// versioned-history participation across a plane move: it writes only the
+	// participation_generation bookkeeping column, of the wisps row a demotion
+	// just inserted or the issues row a move back out just inserted, both with
+	// a fresh row_lock in the same transaction. Reminting here would bump the
+	// token a second time within one transaction for no content change, the
+	// same reason recordVersionAtInTx above leaves it alone.
+	"carryParticipationInTx": "writes only participation_generation on a row the same plane move just inserted with a fresh row_lock in this transaction; reminting would double-bump the token for no content change",
 }
 
 // TestAllIssueRowWritesStampRowLock is the load-bearing completeness guard for

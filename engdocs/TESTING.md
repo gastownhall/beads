@@ -83,6 +83,44 @@ This link check is separate from full macOS gate portability: the Linux-only
 timeout test backends remain tracked in upstream issue #7362. Run the full
 `make test` gate on its supported Linux platform as well.
 
+### Flame Graphs of a CI Lane
+
+Every `bazel.yml` lane job except `bazel-dolt-int` uploads its Bazel JSON
+trace profiles (`--profile`), gzipped, as the artifact
+`bazel-profile-<lane>-<attempt>`, kept 7 days. The lane name is the CI
+analytics `LANE` (`test`, `pure`, `embedded`, ...). `bazel-pure` has one file
+per invocation (`bazel-profile-pure-build-wasm.json.gz`, `-build-pure`,
+`-test-pure`, `-test-bd`). `bazel-dolt-int` has no room left in its job
+timeout. To see where a slow lane spent its time:
+
+```bash
+gh run download <run-id> -R gastownhall/beads -p 'bazel-profile-*' -D /tmp/prof
+```
+
+Open a `.json.gz` in <https://ui.perfetto.dev> ("Open trace file"; it reads
+gzip directly and parses in the browser, nothing is uploaded) or in
+`chrome://tracing` ("Load"). For text, run
+`python3 tools/bazel/critpath.py <(zcat /tmp/prof/bazel-profile-test-1/bazel-profile-test.json.gz)`
+(one file: the `test` lane's attempt 1; critpath.py reads one profile) or
+`bazel analyze-profile`. Locally, Bazel already keeps the last five
+profiles of each output base as `$(bazel info output_base)/command-<id>.profile.gz`.
+
+These artifacts are public, like every artifact of this repo. A profile
+holds timings, mnemonics, target labels and the runner's output base path,
+and also external fetch URLs and the command line of each repository rule's
+command, with any environment a rule passes on it
+(`tools/bazel/go_repository_tools.bzl` runs go as `env -i KEY=value … go …`,
+`PATH` and `GOPROXY` among the keys). So the prepare step's scan, not the
+profile format, keeps secrets out: it refuses a profile with anything
+secret-shaped (credentials in a URL, a PEM block,
+`token=`/`secret=`/`password=`/`api_key=` in any case, a GitHub
+(`ghs_`/`ghp_`/`gho_`/`ghu_`/`ghr_`/`github_pat_`), AWS (`AKIA…`) or Slack
+(`xox[abp]-`) token, a JWT, an `ops.gascity.com` host). Keep credentials off
+repository rules' command lines: the scan is the only check between them and
+a public artifact. The step also caps a lane at 20 MB gzipped, with a
+warning. The upload never fails or holds up a lane (`continue-on-error`,
+1-minute bounds); `TestBazelProfileArtifactStepsAreSafeAndBounded` pins that.
+
 ## Choose the Smallest Useful Test
 
 Test at the lowest seam that can fail for the user-visible reason. Add a
@@ -166,7 +204,11 @@ Lane targets that are `sh_test`s run the test binary through a wrapper or
 shard script, which can pass its own `-test.run` and so override
 `--test_filter`. Select the test with a trailing
 `--test_arg='-test.run=^TestExactName$'` instead (the last one wins), with
-`--test_sharding_strategy=disabled` so that it runs once.
+`--test_sharding_strategy=disabled` so that it runs once. The exception is
+`//cmd/bd:bd_managed_local_test`: `cmd/bd/managed_local_shards.txt` is its
+whole selection, and its wrapper (`tools/bazel/go_test_offline.sh
+--shard-manifest`) refuses a `-test.run`; narrow it with
+`--test_arg='-test.skip=...'`.
 
 A test can need more than one of these (a `-short`-gated Dolt test needs the
 Dolt flags and `--test_arg=-test.short=false`); combine them and check the
@@ -262,6 +304,17 @@ test environment adds `dolt` to `BEADS_TEST_SKIP`; set
 and its prerequisites are available. Do not make ordinary tests depend on a
 developer's database, daemon, global Git configuration, or filesystem state.
 
+System-wide files are not isolated. `bd setup claude`, the `bd init` that runs
+it, `bd doctor`'s Claude Integration check and the `bd setup claude` tip read
+Claude Code's managed settings from `/etc/claude-code`
+(`/Library/Application Support/ClaudeCode` on macOS). On a host whose managed
+settings enable or turn off the beads plugin, the tests that run `bd init`,
+`bd setup claude` or `bd doctor` there, such as the
+`cmd/bd/testdata/agent_artifacts/` goldens, see that policy. The
+`cmd/bd/setup` unit tests are unaffected: they read no managed settings, or a
+managed directory of their own. Tests in other packages that check the plugin
+give themselves one with `setup.SetClaudeManagedSettingsDirForTest`.
+
 To skip an optional service explicitly, use the existing skip mechanism:
 
 ```bash
@@ -281,6 +334,13 @@ sit behind that API, selected by `BEADS_TEST_DOLT_SERVER`:
   `go test` and `bazel test` alike (a Bazel target's `env`, or
   `--test_env=BEADS_TEST_DOLT_SERVER=local`); unset means `container`, which
   in a Bazel action without docker keeps the usual skip.
+
+bd refuses a Dolt older than `doltversion.RequiredMin` (2.6.0) outside
+embedded mode, so the server version these backends provide, and the `dolt`
+that proxied-server tests launch (`BEADS_DOLT_BIN`, else `dolt` on `PATH`),
+must be 2.6.0 or newer. With an older `dolt` on `PATH`, every proxied and
+server-mode test fails fast with the `bd requires dolt 2.6.0 or newer`
+refusal. The Bazel lanes use the pinned hermetic Dolt and are not affected.
 
 `BEADS_TEST_REQUIRE_DOLT_CONTAINER=1` turns an unavailable backend into a
 failure (per test and in every `TestMain`) instead of a skip; lanes that
@@ -305,7 +365,9 @@ folded with `bazel-cmd-dolt` into `bazel-dolt-int`):
 proxied-server cmd/bd tier ("Test (Proxied Dolt Cmd N/15)",
 `//cmd/bd:bd_proxied_test`), and `--config=doltserver-integration` the
 server-Dolt storage tier ("Test (Server Dolt Conformance)", "Test (Server
-Dolt Full Suite N/16)", `//internal/storage/dolt:dolt_server_*_test`), which
+Dolt Full Suite N/16)", `//internal/storage/dolt:dolt_server_*_test`, plus
+the `versioncontrolops` tests on the `local` backend,
+`//internal/storage/versioncontrolops:versioncontrolops_dolt_test`), which
 builds with the integration tag like `--config=integration`. Each shard runs
 its CI job's shard script, so for `--config=doltserver-integration` Bazel
 shard k runs the tests of job k+1 (both split the manifest's 16-shard block
@@ -333,6 +395,18 @@ also passes bazel.yml `cmd-dolt-required: true`, and the PR's
 integration-build test runs once (push, nightly and bazel-farm runs keep
 `bd_test` in the integration lane). Locally:
 `bazel test //cmd/bd:bd_dolt_server_test --config=doltserver-cmd`.
+
+A pinned-shard manifest written with `pin_shards.py --record-measured`
+(`backend/http/served_pinned_shards.txt`) also lists every other test it
+measured, as `rr <TestName>`, so `//scripts:go_test_sources_test` can tell
+the tests added since: they all land in the round-robin shards, and once
+there are more than 2 per round-robin shard the test fails and prints the
+regeneration command (for `http_served_test`, one `pin_shards.py` run over
+the CI test.xml `tools/bazel/fetch_served_testxml.sh` downloads, with
+`--tests-in` keeping only the tests the checkout defines). An rr name that is
+no longer a test is only logged. Every
+pinned-shard target but `corpus_served_test` keeps at least 3 round-robin
+shards.
 
 An ambient `BEADS_DOLT_SERVER_PORT` or `BEADS_DOLT_PORT` is never honored by
 the suites that call `testutil.EnsureDoltContainerForTestMain`. When a test

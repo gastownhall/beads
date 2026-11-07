@@ -2,9 +2,14 @@ package github
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +17,68 @@ import (
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+type endpointTestStore struct {
+	tracker.Store
+	endpoint string
+}
+
+func (s endpointTestStore) GetConfig(_ context.Context, key string) (string, error) {
+	if key == "github.url" {
+		return s.endpoint, nil
+	}
+	return "", nil
+}
+
+func TestInitRejectsChangedEndpointBeforeRequest(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("GITHUB_API_URL", "")
+	t.Setenv("GITHUB_TOKEN", "tracker-secret")
+	t.Setenv("GITHUB_OWNER", "owner")
+	t.Setenv("GITHUB_REPO", "repo")
+	t.Setenv("BEADS_DIR", "")
+	work := t.TempDir()
+	beadsDir := filepath.Join(work, ".beads")
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(work)
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+
+	var secondRequests int
+	serverA := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer serverA.Close()
+	serverB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondRequests++
+		if r.Header.Get("Authorization") != "" {
+			t.Errorf("changed endpoint received Authorization header")
+		}
+	}))
+	defer serverB.Close()
+	// The store-config github.url is shared; private confirmation comes from
+	// the environment. The second Init's store endpoint does not match the
+	// env, so it reaches the gate as an unconfirmed change.
+	t.Setenv("GITHUB_API_URL", serverA.URL)
+	if err := (&Tracker{}).Init(context.Background(), endpointTestStore{endpoint: serverA.URL}); err != nil {
+		t.Fatal(err)
+	}
+	err := (&Tracker{}).Init(context.Background(), endpointTestStore{endpoint: serverB.URL})
+	if err == nil || !strings.Contains(err.Error(), "credential was not sent") {
+		t.Fatalf("changed endpoint Init error = %v", err)
+	}
+	if secondRequests != 0 {
+		t.Fatalf("changed endpoint received %d requests", secondRequests)
+	}
+}
 
 func TestRegistered(t *testing.T) {
 	factory := tracker.Get("github")
@@ -107,6 +174,69 @@ func TestExtractIdentifier(t *testing.T) {
 			t.Errorf("ExtractIdentifier(%q) = %q, want %q", tt.ref, got, tt.want)
 		}
 	}
+}
+
+// A pull whose exact external_ref lookup misses falls back to
+// ExtractIdentifier; an initialized tracker must not hand back the number of
+// an issue in another repository, or it matches (and overwrites) a bead
+// linked to that other repository's issue with the same number (GH#7781).
+func TestExtractIdentifierScopedToRepository(t *testing.T) {
+	tr := &Tracker{client: NewClient("token", "acme", "repo-b")}
+	tests := []struct {
+		ref  string
+		want string
+	}{
+		{"https://github.com/acme/repo-b/issues/42", "42"},
+		{"https://github.com/ACME/Repo-B/issues/42", "42"},
+		{"github:42", "42"},
+		{"https://github.com/acme/repo-a/issues/42", ""},
+		{"https://github.com/other/repo-b/issues/42", ""},
+		// Other spellings RefScope accepts for the configured repository.
+		{"https://api.github.com/repos/acme/repo-b/issues/42", "42"},
+		{"https://GitHub.com/acme/repo-b/issues/42", "42"},
+		// Foreign hosts and malformed paths.
+		{"https://ghe.example.com/acme/repo-b/issues/42", ""},
+		{"https://gitlab.com/acme/repo-b/-/issues/42", ""},
+		{"https://github.com/acme/repo-b/issues/42/comments", ""},
+		{"https://github.com/acme/repo-b/issues/abc", ""},
+		{"https://github.com/acme/repo-b/pull/42", ""},
+		{"https://github.com/acme/repo-b/issues/0", ""},
+		{"not-a-url", ""},
+		{"", ""},
+		// The shorthand arm is unchanged (leading zeros are rejected by the
+		// shorthand pattern itself, as before).
+		{"github:681509", "681509"},
+		{"github:0", ""},
+		{"github:01313", ""},
+	}
+	for _, tt := range tests {
+		if got := tr.ExtractIdentifier(tt.ref); got != tt.want {
+			t.Errorf("ExtractIdentifier(%q) = %q, want %q", tt.ref, got, tt.want)
+		}
+	}
+
+	// A GitHub Enterprise client's API and HTML URLs share one host;
+	// github.com is the host of another installation.
+	t.Run("enterprise", func(t *testing.T) {
+		ghes := &Tracker{client: &Client{BaseURL: "https://ghe.example.com/api/v3", Owner: "acme", Repo: "repo-b"}}
+		tests := []struct {
+			ref  string
+			want string
+		}{
+			{"https://ghe.example.com/acme/repo-b/issues/42", "42"},
+			{"https://ghe.example.com/api/v3/repos/acme/repo-b/issues/42", "42"},
+			{"https://GHE.example.com/ACME/repo-b/issues/42", "42"},
+			{"https://github.com/acme/repo-b/issues/42", ""},
+			{"https://ghe.example.com/acme/other/issues/42", ""},
+			{"https://ghe2.example.com/acme/repo-b/issues/42", ""},
+			{"github:42", "42"},
+		}
+		for _, tt := range tests {
+			if got := ghes.ExtractIdentifier(tt.ref); got != tt.want {
+				t.Errorf("ExtractIdentifier(%q) = %q, want %q", tt.ref, got, tt.want)
+			}
+		}
+	})
 }
 
 func TestBuildExternalRef(t *testing.T) {
@@ -375,5 +505,150 @@ func TestValidate(t *testing.T) {
 	tr.client = &Client{} // Set client
 	if err := tr.Validate(); err != nil {
 		t.Errorf("Validate() on initialized tracker returned error: %v", err)
+	}
+}
+
+// createStateServer is a recording GitHub API stub for the create path. POST
+// /repos/o/r/issues answers an open issue #42; PATCH /repos/o/r/issues/42
+// answers closeStatus with the issue closed (or an error body when
+// closeStatus is not 200). Each request is recorded as "METHOD path" with its
+// decoded JSON body.
+type createStateServer struct {
+	closeStatus int
+	calls       []string
+	bodies      []map[string]interface{}
+}
+
+func newCreateStateServer(t *testing.T, closeStatus int) (*createStateServer, *Tracker) {
+	t.Helper()
+	rec := &createStateServer{closeStatus: closeStatus}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		rec.calls = append(rec.calls, r.Method+" "+r.URL.Path)
+		rec.bodies = append(rec.bodies, body)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues":
+			// GitHub's create-issue API ignores state: new issues are open.
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": 100, "number": 42, "state": "open",
+				"html_url": "https://github.com/o/r/issues/42",
+			})
+		case r.Method == http.MethodPatch && r.URL.Path == "/repos/o/r/issues/42":
+			if rec.closeStatus != http.StatusOK {
+				w.WriteHeader(rec.closeStatus)
+				_, _ = w.Write([]byte(`{"message":"Validation Failed"}`))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": 100, "number": 42, "state": "closed",
+				"closed_at": "2026-01-02T03:04:05Z",
+				"html_url":  "https://github.com/o/r/issues/42",
+			})
+		default:
+			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return rec, &Tracker{
+		client: NewClient("tok", "o", "r").WithBaseURL(server.URL),
+		config: DefaultMappingConfig(),
+	}
+}
+
+// TestCreateIssue_ClosedLocalIssueLandsClosed reproduces gastownhall/beads#5486:
+// pushing a locally closed issue that has never been synced creates it on
+// GitHub, but the create POST cannot carry a state, so the issue lands OPEN.
+// The engine then records the push hash of the closed local issue, so later
+// --push-only runs skip it as already in sync and the drift is never repaired.
+// Creating a closed issue must leave the GitHub issue closed.
+func TestCreateIssue_ClosedLocalIssueLandsClosed(t *testing.T) {
+	rec, tr := newCreateStateServer(t, http.StatusOK)
+	closedAt := time.Now()
+	issue := &types.Issue{
+		ID: "bd-1", Title: "Done already", Description: "body",
+		IssueType: types.TypeTask, Priority: 2,
+		Status: types.StatusClosed, ClosedAt: &closedAt, CloseReason: "done",
+	}
+
+	got, err := tr.CreateIssue(context.Background(), issue)
+	if err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	want := []string{"POST /repos/o/r/issues", "PATCH /repos/o/r/issues/42"}
+	if !slices.Equal(rec.calls, want) {
+		t.Fatalf("requests = %v, want %v", rec.calls, want)
+	}
+	if st, _ := rec.bodies[1]["state"].(string); st != "closed" {
+		t.Errorf("follow-up PATCH state = %q, want %q (body %v)", st, "closed", rec.bodies[1])
+	}
+	if got.State != "closed" {
+		t.Errorf("returned State = %q, want %q", got.State, "closed")
+	}
+	if len(got.Warnings) != 0 {
+		t.Errorf("returned Warnings = %v, want none", got.Warnings)
+	}
+}
+
+// TestCreateIssue_NonClosedSkipsClose guards the follow-up close against
+// over-closing: only a closed bead gets the state PATCH after create.
+func TestCreateIssue_NonClosedSkipsClose(t *testing.T) {
+	for _, status := range []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusBlocked, types.StatusDeferred} {
+		t.Run(string(status), func(t *testing.T) {
+			rec, tr := newCreateStateServer(t, http.StatusOK)
+			issue := &types.Issue{
+				ID: "bd-1", Title: "Still going", Description: "body",
+				IssueType: types.TypeTask, Priority: 2, Status: status,
+			}
+
+			got, err := tr.CreateIssue(context.Background(), issue)
+			if err != nil {
+				t.Fatalf("CreateIssue: %v", err)
+			}
+			want := []string{"POST /repos/o/r/issues"}
+			if !slices.Equal(rec.calls, want) {
+				t.Fatalf("requests = %v, want %v", rec.calls, want)
+			}
+			if got.State != "open" {
+				t.Errorf("returned State = %q, want %q", got.State, "open")
+			}
+		})
+	}
+}
+
+// TestCreateIssue_FailedCloseSurfacesWarning pins the partial-success
+// contract: when the follow-up close fails, CreateIssue still returns the
+// created issue (so the bead keeps its external_ref and no duplicate is made
+// on the next push) and reports the failed close as a warning.
+func TestCreateIssue_FailedCloseSurfacesWarning(t *testing.T) {
+	// 422 is not retried by the client, unlike 5xx.
+	rec, tr := newCreateStateServer(t, http.StatusUnprocessableEntity)
+	closedAt := time.Now()
+	issue := &types.Issue{
+		ID: "bd-1", Title: "Done already", Description: "body",
+		IssueType: types.TypeTask, Priority: 2,
+		Status: types.StatusClosed, ClosedAt: &closedAt, CloseReason: "done",
+	}
+
+	got, err := tr.CreateIssue(context.Background(), issue)
+	if err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	want := []string{"POST /repos/o/r/issues", "PATCH /repos/o/r/issues/42"}
+	if !slices.Equal(rec.calls, want) {
+		t.Fatalf("requests = %v, want %v", rec.calls, want)
+	}
+	if got.Identifier != "42" || got.URL != "https://github.com/o/r/issues/42" {
+		t.Errorf("returned Identifier/URL = %q/%q, want the created issue #42", got.Identifier, got.URL)
+	}
+	if got.State != "open" {
+		t.Errorf("returned State = %q, want %q", got.State, "open")
+	}
+	if len(got.Warnings) != 1 {
+		t.Fatalf("returned Warnings = %v, want exactly one", got.Warnings)
+	}
+	if w := got.Warnings[0]; !strings.Contains(w, "#42") || !strings.Contains(w, "failed to close") {
+		t.Errorf("warning = %q, want it to name #42 and the failed close", w)
 	}
 }
