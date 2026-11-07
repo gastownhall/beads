@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/remedy"
@@ -202,15 +203,34 @@ func openAutoRoutedStore(ctx context.Context, store storage.DoltStorage, writabl
 	// report a historical SQLite or legacy Dolt target as a missing
 	// dolt_database field.
 	if _, err := admitForeignWorkspace(targetBeadsDir); err != nil {
-		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: %w", remedy.PrintedValue(targetRepoPath), err)
+		return nil, false, rule, routedTargetOpenError(fmt.Errorf("failed to open routed store at %s: %w", remedy.PrintedValue(targetRepoPath), err), rule, targetBeadsDir)
 	}
 	database, err := autoRouteTargetDatabase(targetBeadsDir, writable)
 	if err != nil {
-		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: target has no dolt_database configured: %w", remedy.PrintedValue(targetRepoPath), err)
+		return nil, false, rule, routedTargetOpenError(fmt.Errorf("failed to open routed store at %s: target has no dolt_database configured: %w", remedy.PrintedValue(targetRepoPath), err), rule, targetBeadsDir)
 	}
 	targetStore, err := openRoutedTargetStore(ctx, targetBeadsDir, database, writable)
 	if err != nil {
-		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: %w", remedy.PrintedValue(targetRepoPath), err)
+		return nil, false, rule, routedTargetOpenError(fmt.Errorf("failed to open routed store at %s: %w", remedy.PrintedValue(targetRepoPath), err), rule, targetBeadsDir)
 	}
 	return wireExternalDependencyPolicy(targetStore), true, rule, nil
+}
+
+// routedTargetOpenError adds to a failed auto-routed open the remediation a
+// contributor needs when their planning repository cannot be opened: the
+// error names the target already, but without the routing context a deleted
+// or uncloned planning repo reads as an unexplained internal failure, and
+// every command that touches it fails the same way (GH#5957). The guidance
+// names the rule that matched — a maintainer or default route keeps its
+// error untouched, as printContributorRoutingNotice branches on rule — and
+// the opt-out it offers is the one bd init announces
+// (autoConfigureForkContributor): git config beads.role maintainer.
+func routedTargetOpenError(err error, rule routing.RoutingRule, targetBeadsDir string) error {
+	if err == nil || rule != routing.RuleContributor {
+		return err
+	}
+	if !beads.HasProjectFiles(targetBeadsDir) {
+		return fmt.Errorf("%w: contributor routing selected this planning repository; restore the planning repository to recover its issues (a later bd create initializes an empty planning store there and does not restore the lost ones); to disable contributor-role routing: git config beads.role maintainer", err)
+	}
+	return fmt.Errorf("%w: contributor routing selected this planning repository; to disable contributor-role routing: git config beads.role maintainer", err)
 }

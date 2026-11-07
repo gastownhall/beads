@@ -4,9 +4,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/beads"
@@ -253,6 +255,136 @@ func TestOpenRoutedReadStore_ContributorRouting(t *testing.T) {
 	}
 	if prefix != "plan" {
 		t.Fatalf("routed store prefix = %q, want %q", prefix, "plan")
+	}
+}
+
+// TestOpenAutoRoutedStoreMissingPlanningRepoNamesRouting pins the error a
+// contributor gets when the planning repository routing selected no longer
+// exists (deleted, never cloned to this machine): every routed read and
+// write must fail naming the target and how to recover, keeping the
+// ErrNoBeadsDatabase identity callers match on, and must not recreate the
+// target. A maintainer route to a missing target fails the same way but
+// without contributor remediation — the guidance names the rule that
+// matched, or it misattributes the failure to beads.role=contributor
+// (GH#5957).
+func TestOpenAutoRoutedStoreMissingPlanningRepoNamesRouting(t *testing.T) {
+	initConfigForTest(t)
+
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo")
+	planningDir := filepath.Join(tmpDir, "planning")
+
+	runCmd(t, tmpDir, "git", "init", repoDir)
+	runCmd(t, repoDir, "git", "config", "beads.role", "contributor")
+
+	sourceStore := newTestStoreIsolatedDB(t, filepath.Join(repoDir, ".beads", "beads.db"), "src")
+	targetStore := newTestStoreIsolatedDB(t, filepath.Join(planningDir, ".beads", "beads.db"), "plan")
+	if err := targetStore.Close(); err != nil {
+		t.Fatalf("failed to close planning store: %v", err)
+	}
+
+	if err := sourceStore.SetConfig(ctx, "routing.mode", "auto"); err != nil {
+		t.Fatalf("failed to set routing.mode: %v", err)
+	}
+	if err := sourceStore.SetConfig(ctx, "routing.contributor", planningDir); err != nil {
+		t.Fatalf("failed to set routing.contributor: %v", err)
+	}
+
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd failed: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+	if err := os.Chdir(repoDir); err != nil {
+		t.Fatalf("chdir repoDir: %v", err)
+	}
+	// Role detection reads the process-wide RepoContext cache, which an
+	// earlier test in this binary may have built for its own, now-deleted
+	// repo. Rebuild it from repoDir.
+	resetRepoContextCachesForTest(t)
+
+	// The planning repository is gone: every routed read and write now
+	// fails at the open.
+	if err := os.RemoveAll(planningDir); err != nil {
+		t.Fatalf("RemoveAll(planningDir): %v", err)
+	}
+
+	for _, writable := range []bool{false, true} {
+		routedStore, routed, rule, err := openAutoRoutedStore(ctx, sourceStore, writable)
+		if err == nil {
+			t.Fatalf("openAutoRoutedStore(writable=%v) succeeded (routed=%v); want failure naming the missing planning repo", writable, routed)
+		}
+		if routed {
+			t.Fatalf("openAutoRoutedStore(writable=%v) routed = true, want false", writable)
+		}
+		if routedStore != nil {
+			t.Fatalf("openAutoRoutedStore(writable=%v) returned a store, want nil", writable)
+		}
+		if rule != routing.RuleContributor {
+			t.Fatalf("openAutoRoutedStore(writable=%v) rule = %v, want %v", writable, rule, routing.RuleContributor)
+		}
+		if !errors.Is(err, ErrNoBeadsDatabase) {
+			t.Errorf("openAutoRoutedStore(writable=%v) error = %v; want errors.Is ErrNoBeadsDatabase", writable, err)
+		}
+		msg := err.Error()
+		for _, want := range []string{
+			planningDir,
+			ErrNoBeadsDatabase.Error(),
+			"contributor routing selected this planning repository",
+			"restore the planning repository to recover",
+			"git config beads.role maintainer",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("openAutoRoutedStore(writable=%v) error %q does not name %q", writable, msg, want)
+			}
+		}
+		if _, statErr := os.Stat(planningDir); !os.IsNotExist(statErr) {
+			t.Errorf("planning repo at %s was recreated by the failed open (stat err = %v)", planningDir, statErr)
+		}
+	}
+
+	// Maintainer route to a missing target: same open failure, no
+	// contributor remediation.
+	maintTmp := t.TempDir()
+	maintRepo := filepath.Join(maintTmp, "repo")
+	maintTarget := filepath.Join(maintTmp, "planning")
+
+	runCmd(t, maintTmp, "git", "init", maintRepo)
+	runCmd(t, maintRepo, "git", "config", "beads.role", "maintainer")
+
+	maintStore := newTestStoreIsolatedDB(t, filepath.Join(maintRepo, ".beads", "beads.db"), "mrm")
+	if err := maintStore.SetConfig(ctx, "routing.mode", "auto"); err != nil {
+		t.Fatalf("failed to set routing.mode: %v", err)
+	}
+	if err := maintStore.SetConfig(ctx, "routing.maintainer", maintTarget); err != nil {
+		t.Fatalf("failed to set routing.maintainer: %v", err)
+	}
+
+	if err := os.Chdir(maintRepo); err != nil {
+		t.Fatalf("chdir maintRepo: %v", err)
+	}
+	resetRepoContextCachesForTest(t)
+
+	_, routed, rule, err := openAutoRoutedStore(ctx, maintStore, false)
+	if err == nil {
+		t.Fatalf("openAutoRoutedStore(maintainer, missing target) succeeded (routed=%v); want failure", routed)
+	}
+	if rule != routing.RuleMaintainer {
+		t.Fatalf("openAutoRoutedStore(maintainer) rule = %v, want %v", rule, routing.RuleMaintainer)
+	}
+	if !errors.Is(err, ErrNoBeadsDatabase) {
+		t.Errorf("maintainer route error = %v; want errors.Is ErrNoBeadsDatabase", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, maintTarget) {
+		t.Errorf("maintainer route error %q does not name the missing target %q", msg, maintTarget)
+	}
+	if strings.Contains(msg, "contributor routing selected") || strings.Contains(msg, "git config beads.role maintainer") {
+		t.Errorf("maintainer route error %q carries contributor remediation", msg)
 	}
 }
 
