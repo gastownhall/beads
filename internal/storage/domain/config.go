@@ -19,6 +19,15 @@ type ConfigPrefixReader interface {
 	GetConfigByPrefix(ctx context.Context, prefix string) (map[string]string, error)
 }
 
+// ConfigKeysReader is the optional fast path for reading a known set of config
+// keys in one statement. The config table also holds kv.* rows, memories among
+// them, which can make a whole-table read megabytes. Like ConfigPrefixReader it
+// is discovered by type assertion, with GetAllConfig as the fallback. Keys with
+// no row are absent from the result.
+type ConfigKeysReader interface {
+	GetConfigKeys(ctx context.Context, keys ...string) (map[string]string, error)
+}
+
 type ConfigSQLRepository interface {
 	GetMetadata(ctx context.Context, key string) (string, error)
 	SetMetadata(ctx context.Context, key, value string) error

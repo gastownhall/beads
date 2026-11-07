@@ -72,6 +72,24 @@ func TestSingleStatementReadsOpenNoTransaction(t *testing.T) {
 			},
 		},
 		{
+			name: "GetConfigKeys",
+			expect: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(regexp.QuoteMeta("SELECT `key`, value FROM config WHERE `key` IN (?,?)")).
+					WithArgs("a.b", "absent").
+					WillReturnRows(sqlmock.NewRows([]string{"key", "value"}).AddRow("a.b", "1"))
+			},
+			read: func(s *DoltStore) error {
+				got, err := s.GetConfigKeys(context.Background(), "a.b", "absent")
+				if err != nil {
+					return err
+				}
+				if _, present := got["absent"]; present || got["a.b"] != "1" || len(got) != 1 {
+					return errors.New("GetConfigKeys returned the wrong rows")
+				}
+				return nil
+			},
+		},
+		{
 			name: "GetMetadata",
 			expect: func(m sqlmock.Sqlmock) {
 				m.ExpectQuery(regexp.QuoteMeta("SELECT value FROM metadata WHERE `key` = ?")).
@@ -131,6 +149,25 @@ func TestSingleStatementReadsOpenNoTransaction(t *testing.T) {
 				t.Errorf("read sent %d statements, want the mode read and the read: %+v", got.Total(), got)
 			}
 		})
+	}
+}
+
+// TestGetConfigKeysReportsTheSpellingAskedFor: on a case-insensitive collation the
+// IN query can return ROUTING.MODE for routing.mode, as a read of that key would.
+// A caller looks it up by the key it asked for, so routing must not lose it.
+func TestGetConfigKeysReportsTheSpellingAskedFor(t *testing.T) {
+	store, mock, _ := vhCountedStore(t)
+	expectAutocommit(mock, 1)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT `key`, value FROM config WHERE `key` IN (?,?)")).
+		WithArgs("routing.mode", "routing.default").
+		WillReturnRows(sqlmock.NewRows([]string{"key", "value"}).AddRow("ROUTING.MODE", "auto").AddRow("routing.default", "x"))
+
+	got, err := store.GetConfigKeys(context.Background(), "routing.mode", "routing.default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["routing.mode"] != "auto" || got["routing.default"] != "x" || len(got) != 2 {
+		t.Fatalf("GetConfigKeys = %v", got)
 	}
 }
 

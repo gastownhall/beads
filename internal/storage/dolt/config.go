@@ -93,6 +93,20 @@ func (s *DoltStore) GetConfigByPrefix(ctx context.Context, prefix string) (map[s
 	return result, err
 }
 
+var _ domain.ConfigKeysReader = (*DoltStore)(nil)
+
+// GetConfigKeys retrieves the named configuration values in one statement (the
+// domain.ConfigKeysReader optional fast path).
+func (s *DoltStore) GetConfigKeys(ctx context.Context, keys ...string) (map[string]string, error) {
+	var result map[string]string
+	err := s.withSingleRead(ctx, func(q issueops.DBTX) error {
+		var err error
+		result, err = issueops.GetConfigKeysInTx(ctx, q, keys...)
+		return err
+	})
+	return result, err
+}
+
 // DeleteConfig removes a configuration value
 func (s *DoltStore) DeleteConfig(ctx context.Context, key string) error {
 	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
