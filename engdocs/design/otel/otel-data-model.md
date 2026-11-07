@@ -94,6 +94,8 @@ Emitted once per `bd` subcommand execution. Anchors all subsequent events for th
 
 Every `storage.DoltStorage` method AND every issueops role method is instrumented: the facade wave's role decorators in `internal/telemetry/` emit `storage.<Method>` and `storage.<Role>.<Method>` spans (e.g. `storage.IssueReader.Ready`, `storage.ReadyClaimer.ClaimNext`, `storage.Sweeper.Sweep`), all feeding the same `bd.storage.*` metrics with `db.operation` as the label. The tables below are representative examples, not an exhaustive enumeration.
 
+**Metric labels.** The span carries `db.operation` plus the method's request attributes (`bd.issue.id`, `bd.actor`, `bd.query`, `db.commit_msg`, ...). The three `bd.storage.*` metrics (`operations`, `operation.duration`, `errors`) carry `db.operation` and nothing else (`InstrumentedStorage.op` / `done`). Request attributes are per-request values: as metric labels they would make one series per value, run into the SDK's per-metric cardinality limit (2000 attribute sets, the rest folded into `otel.metric.overflow`) and send search text, commit messages and actor names to the metrics receiver. The attribute tables below describe the spans.
+
 ### `storage.CreateIssue`
 
 Emitted when an issue is created.
@@ -400,6 +402,8 @@ One span per Anthropic API call. The `bd.ai.operation` attribute distinguishes t
 | `bd.ai.input_tokens` | Counter | `bd.ai.model` | ✅ Implemented (compact only) |
 | `bd.ai.output_tokens` | Counter | `bd.ai.model` | ✅ Implemented (compact only) |
 | `bd.ai.request.duration` | Histogram (ms) | `bd.ai.model` | ✅ Implemented (compact only) |
+
+The `bd.storage.*` metrics carry `db.operation` only, never the span's request attributes (§3; pinned by `TestStorageMetricsCarryOnlyTheOperation`).
 
 ---
 
