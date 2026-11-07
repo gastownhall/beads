@@ -333,8 +333,8 @@ func TestRenameRewritesCloseReasonAndOwnText(t *testing.T) {
 	if err := renameIssueKeepingBeadGates(ctx, testStore, a, "test-z", nil, "test"); err != nil {
 		t.Fatalf("rename failed: %v", err)
 	}
-	if _, err := updateReferencesInAllIssues(ctx, testStore, "test-a", "test-z", "test"); err != nil {
-		t.Fatalf("reference update failed: %v", err)
+	if report := updateReferencesInAllIssues(ctx, testStore, "test-a", "test-z", "test"); len(report.failed)+len(report.unchecked) > 0 {
+		t.Fatalf("reference update failed: %+v", report)
 	}
 
 	z, err := testStore.GetIssue(ctx, "test-z")
@@ -366,6 +366,20 @@ func TestRenameRewritesCloseReasonAndOwnText(t *testing.T) {
 	if b.ClosedAt == nil || !b.ClosedAt.Equal(*closedB.ClosedAt) {
 		t.Errorf("test-b closed_at = %v, want it unchanged at %v", b.ClosedAt, *closedB.ClosedAt)
 	}
+}
+
+// failingUpdateStore applies the UpdateIssue of failID and then fails it, like
+// a commit whose response was lost.
+type failingUpdateStore struct {
+	storage.DoltStorage
+	failID string
+}
+
+func (s *failingUpdateStore) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
+	if err := s.DoltStorage.UpdateIssue(ctx, id, updates, actor); err != nil || id != s.failID {
+		return err
+	}
+	return errors.New("injected UpdateIssue failure")
 }
 
 // runRenameOutput runs bd rename old new against st and returns the lines it
@@ -421,6 +435,25 @@ func TestRenameReportsReferencesItLeft(t *testing.T) {
 			"  test-b: title, description",
 			"  test-z: notes",
 		})
+	})
+
+	t.Run("failed update", func(t *testing.T) {
+		// The update of test-b lands but reports an error. bd rename still
+		// succeeds, rewrites test-c after it, and does not count test-b as
+		// rewritten.
+		st := &failingUpdateStore{DoltStorage: newStore(t,
+			&types.Issue{ID: "test-a", Title: "A"},
+			&types.Issue{ID: "test-b", Title: "B", Description: "after test-a"},
+			&types.Issue{ID: "test-c", Title: "C", Notes: "see test-a"},
+		), failID: "test-b"}
+		wantLines(t, runRenameOutput(t, st, "test-a", "test-z"), []string{
+			"Rewrote test-a to test-z in:",
+			"  test-c: notes",
+			"Warning: failed to update references in test-b (description); the update may or may not have landed: injected UpdateIssue failure",
+		})
+		if _, err := st.GetIssue(ctx, "test-z"); err != nil {
+			t.Errorf("renamed issue after a failed reference update: %v, want it kept", err)
+		}
 	})
 
 	t.Run("quiet", func(t *testing.T) {
