@@ -633,6 +633,29 @@ const cliExecTimeout = 5 * time.Minute
 // cliExecTimeoutEnv is the environment variable that overrides cliExecTimeout.
 const cliExecTimeoutEnv = "BEADS_CLI_TRANSFER_TIMEOUT"
 
+// transferExecTimeout is the default per-read deadline on the one-shot SQL
+// connections that run server-side transfers: CALL DOLT_PUSH / DOLT_FETCH /
+// DOLT_PULL, and the pull fallback's DOLT_MERGE (GH#6375). The pool's 10s
+// ReadTimeout kills any procedure that performs sustained network I/O, so
+// these statements get their own budget; a store large enough to need longer
+// than the default can raise it with BEADS_DOLT_TRANSFER_TIMEOUT. It is a
+// per-read deadline, not a total budget: the caller's context still applies.
+// The dolt-CLI transfer path is bounded separately by cliExecTimeout.
+const transferExecTimeout = 5 * time.Minute
+
+// transferExecTimeoutEnv is the environment variable that overrides
+// transferExecTimeout.
+const transferExecTimeoutEnv = "BEADS_DOLT_TRANSFER_TIMEOUT"
+
+// transferExecTimeoutDuration returns the configured server-side transfer read
+// deadline. The env var BEADS_DOLT_TRANSFER_TIMEOUT overrides the compiled-in
+// transferExecTimeout const; valid time.ParseDuration strings (e.g. "20m",
+// "90s") or bare numbers treated as seconds (e.g. "90") are accepted. Unset,
+// invalid, or non-positive values fall back to transferExecTimeout.
+func transferExecTimeoutDuration() time.Duration {
+	return timeoutFromEnv(transferExecTimeoutEnv, transferExecTimeout)
+}
+
 // cliExecWaitDelay bounds how long Wait/CombinedOutput may keep waiting after
 // the transfer context expires. CommandContext kills only the direct dolt
 // child; a grandchild (e.g. a cloud credential helper) that inherited the
