@@ -941,3 +941,71 @@ func TestTrackerPushStaleReferenceFallsBack(t *testing.T) {
 		})
 	}
 }
+
+// A lookup that fails is not a missing page. FetchIssue returns the error, and
+// push reports it for that issue without creating or updating anything.
+func TestTrackerLookupErrorsPropagate(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	edited := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	newer := edited.Add(30 * time.Minute)
+
+	for _, tc := range []struct {
+		name string
+		// refused sets which request fails; ref is the pushed issue's
+		// external_ref and fetch the identifier FetchIssue resolves.
+		refused func(f *fakeNotion, row fakePage)
+		ref     func(row fakePage) string
+		fetch   func(row fakePage) string
+	}{
+		{
+			name: "direct read refused",
+			refused: func(f *fakeNotion, row fakePage) {
+				f.getStatus = map[string]int{compactID(row.ID): http.StatusForbidden}
+			},
+			ref:   func(row fakePage) string { return row.URL },
+			fetch: func(row fakePage) string { return row.URL },
+		},
+		{
+			name:    "Beads ID query refused",
+			refused: func(f *fakeNotion, _ fakePage) { f.filteredQueryStatus = http.StatusForbidden },
+			ref:     func(fakePage) string { return "" },
+			fetch:   func(fakePage) string { return "bd-1" },
+		},
+		{
+			name:    "Beads ID query refused after a stale reference",
+			refused: func(f *fakeNotion, _ fakePage) { f.filteredQueryStatus = http.StatusForbidden },
+			ref:     func(fakePage) string { return "https://www.notion.so/Gone-bbbbbbbb000040008000000000000001" },
+			fetch:   func(fakePage) string { return "bd-1" },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeNotion(t)
+			row := fakeRow(1, "bd-1", edited)
+			f.addPages(row)
+			tc.refused(f, row)
+			ref := tc.ref(row)
+			tr := f.tracker()
+
+			identifier := tc.fetch(row)
+			if got, err := tr.FetchIssue(ctx, identifier); err == nil || !strings.Contains(err.Error(), "(403)") {
+				t.Fatalf("FetchIssue(%s) = (%+v, %v), want the 403", identifier, got, err)
+			}
+
+			result, err := tr.BatchPush(ctx, []*types.Issue{localTask("bd-1", "Changed", newer, ref)}, map[string]bool{"bd-1": true})
+			if err != nil {
+				t.Fatalf("BatchPush: %v", err)
+			}
+			if len(result.Errors) != 1 || result.Errors[0].LocalID != "bd-1" || !strings.Contains(result.Errors[0].Message, "(403)") {
+				t.Fatalf("errors = %+v, want the 403 for bd-1", result.Errors)
+			}
+			if len(result.Created) != 0 || len(result.Updated) != 0 || len(result.Skipped) != 0 || len(result.Warnings) != 0 {
+				t.Fatalf("result = %+v, want only the error", result)
+			}
+			if reqs := f.requests(); len(reqs.created) != 0 || len(reqs.updated) != 0 {
+				t.Fatalf("writes = created %v, updated %v; want none", reqs.created, reqs.updated)
+			}
+		})
+	}
+}
