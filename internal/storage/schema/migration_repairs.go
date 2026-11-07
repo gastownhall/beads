@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/storage/depid"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 // Pre-migration repairs run immediately before a specific pending migration
@@ -395,13 +396,17 @@ func fireWispIsBlockedRestoreFault(stage string) error {
 // idx_wisps_is_blocked first -- an index by that name over other columns
 // (allowed by ignored/0001's rename branch, which leaves a pre-existing wisps
 // untouched) would make the index step below no-op and silently keep the
-// wrong shape -- then re-adds the column with ignored/0006's definition and
-// re-creates the index last. Every step is guarded and idempotent, so a pass
-// that dies between steps leaves the marker pending and the next open resumes
-// rather than duplicates.
+// wrong shape -- then re-adds the column with ignored/0006's definition,
+// recomputes every wisp's flag from the live graph (the column returns with
+// DEFAULT 0, which is not a computed answer: a wisp blocked under a live edge
+// would surface as ready), and re-creates the index last. Every step is
+// guarded and idempotent, so a pass that dies between steps leaves the marker
+// pending and the next open resumes rather than duplicates.
 //
-// It writes only the clone-local wisps plane: no row of issues, dependencies
-// or wisp_dependencies is touched, no staging, no Dolt commit.
+// It writes only the clone-local wisps plane: the recompute is the
+// wisps-only half of the full is_blocked repair (no issues row is read or
+// rewritten), no dependencies or wisp_dependencies row is touched, no
+// staging, no Dolt commit.
 func restoreWispIsBlocked(ctx context.Context, db DBConn) error {
 	hasWisps, err := schemaTableExists(ctx, db, "wisps")
 	if err != nil {
@@ -430,6 +435,18 @@ func restoreWispIsBlocked(ctx context.Context, db DBConn) error {
 		return err
 	}
 	if err := fireWispIsBlockedRestoreFault(wispIsBlockedRestoreAfterColumn); err != nil {
+		return err
+	}
+	// The column returns with ignored/0006's DEFAULT 0, but a restored-to-zero
+	// flag is not a computed one: a wisp blocked under a live edge would
+	// surface as ready until something touched it again, and nothing else is
+	// guaranteed to. Recompute every flag from the live graph — the
+	// wisps-only half, so the durable issues plane is never rewritten —
+	// before the index makes the healed shape visible to ready queries.
+	if _, err := issueops.RecomputeAllWispIsBlockedInTx(ctx, db); err != nil {
+		return err
+	}
+	if err := fireWispIsBlockedRestoreFault(wispIsBlockedRestoreAfterRecompute); err != nil {
 		return err
 	}
 	if err := ensureWispIsBlockedIndex(ctx, db); err != nil {

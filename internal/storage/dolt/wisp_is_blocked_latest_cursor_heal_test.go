@@ -3,6 +3,8 @@ package dolt
 import (
 	"path/filepath"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // This file covers the wisps.is_blocked restore that ignored migration 0032's
@@ -158,5 +160,128 @@ func TestDoltNew_WispIsBlockedSelfHealAtLatestIgnoredCursor_RealDolt(t *testing.
 	env.requireWispIsBlockedShape(healed)
 	if n := env.scalarInt(healed, "SELECT COUNT(*) FROM ignored_schema_migrations WHERE version = 32"); n != 1 {
 		t.Fatalf("healed open recorded ignored 0032 %d times, want exactly 1", n)
+	}
+}
+
+// seedWispBlockedGraph writes the dependency shape whose flags only a live
+// recompute can restore: durable open blocker A; wisp B blocked by A; wisp C,
+// a child of B, blocked through its parent; and independent wisp D. The
+// create/dep-add paths maintain the flags until the drift wipes the column.
+func seedWispBlockedGraph(t *testing.T, store *DoltStore) {
+	t.Helper()
+	// The batch context reads issue_prefix from the config table even when
+	// every ID is explicit (SkipPrefixValidation skips matching, not the
+	// read); the fresh database has no row until bd init writes one.
+	if err := setConfigWithOwnBudget(t, store, "issue_prefix", "wh"); err != nil {
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	ctx, cancel := testContext(t)
+	defer cancel()
+	newIssue := func(id string, ephemeral bool) *types.Issue {
+		return &types.Issue{ID: id, Title: "wisp heal " + id, Status: types.StatusOpen,
+			Priority: 2, IssueType: types.TypeTask, Ephemeral: ephemeral}
+	}
+	for _, is := range []*types.Issue{newIssue("wh-a", false), newIssue("wh-b", true), newIssue("wh-c", true), newIssue("wh-d", true)} {
+		if err := store.CreateIssue(ctx, is, "tester"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", is.ID, err)
+		}
+	}
+	deps := []types.Dependency{
+		{IssueID: "wh-b", DependsOnID: "wh-a", Type: types.DepBlocks},
+		{IssueID: "wh-c", DependsOnID: "wh-b", Type: types.DepParentChild},
+	}
+	for i := range deps {
+		if err := store.AddDependency(ctx, &deps[i], "tester"); err != nil {
+			t.Fatalf("AddDependency %s -> %s: %v", deps[i].IssueID, deps[i].DependsOnID, err)
+		}
+	}
+}
+
+// wispFlags reads every seeded wisp's flag as id->blocked.
+func (e *wispHealEnv) wispFlags(store *DoltStore) map[string]bool {
+	e.t.Helper()
+	rows := map[string]bool{}
+	ctx, cancel := testContext(e.t)
+	defer cancel()
+	r, err := store.db.QueryContext(ctx, "SELECT id, is_blocked FROM wisps")
+	if err != nil {
+		e.t.Fatalf("read wisp flags: %v", err)
+	}
+	defer r.Close()
+	for r.Next() {
+		var id string
+		var blocked bool
+		if err := r.Scan(&id, &blocked); err != nil {
+			e.t.Fatalf("scan wisp flag: %v", err)
+		}
+		rows[id] = blocked
+	}
+	if err := r.Err(); err != nil {
+		e.t.Fatalf("read wisp flags: %v", err)
+	}
+	return rows
+}
+
+// TestDoltNew_WispIsBlockedRecomputeAtIgnoredCursor_RealDolt covers AC-2: the
+// restore must recompute every wisp's is_blocked from the live dependency
+// graph, not merely return the column with its DEFAULT 0 -- a shape-only
+// restore would surface blocked wisps as ready, because restored-to-zero
+// flags with own ready-affecting edges are not read around. B (blocked by an
+// open issue) and C (blocked through its parent) come back flagged; A and D
+// stay clear; ready work includes exactly the unblocked ones.
+func TestDoltNew_WispIsBlockedRecomputeAtIgnoredCursor_RealDolt(t *testing.T) {
+	env := newWispHealEnv(t)
+
+	store, err := env.open()
+	if err != nil {
+		t.Fatalf("New (fresh): %v", err)
+	}
+	seedWispBlockedGraph(t, store)
+	for id, want := range map[string]bool{"wh-b": true, "wh-c": true, "wh-d": false} {
+		if got := env.wispFlags(store)[id]; got != want {
+			store.Close()
+			t.Fatalf("pre-drift flag for %s = %v, want %v (the live paths maintain it)", id, got, want)
+		}
+	}
+	driftWispIsBlockedForHeal(t, store)
+	rewindIgnoredCursor(t, store, 32)
+	if err := store.Close(); err != nil {
+		t.Fatalf("close drifted store: %v", err)
+	}
+
+	healed, err := env.open()
+	if err != nil {
+		t.Fatalf("New on the drifted clone: %v", err)
+	}
+	defer func() { _ = healed.Close() }()
+	env.requireWispIsBlockedShape(healed)
+	flags := env.wispFlags(healed)
+	for id, want := range map[string]bool{"wh-b": true, "wh-c": true, "wh-d": false} {
+		if got := flags[id]; got != want {
+			t.Fatalf("healed flag for %s = %v, want %v: the restore must recompute, not default to 0", id, got, want)
+		}
+	}
+	var issueBlocked bool
+	ctx, cancel := testContext(t)
+	defer cancel()
+	if err := healed.db.QueryRowContext(ctx, "SELECT is_blocked FROM issues WHERE id = 'wh-a'").Scan(&issueBlocked); err != nil {
+		t.Fatalf("read durable blocker flag: %v", err)
+	}
+	if issueBlocked {
+		t.Fatal("the durable blocker wh-a was flagged; the restore must not touch the durable plane")
+	}
+
+	ready, err := healed.GetReadyWork(ctx, types.WorkFilter{IncludeEphemeral: true})
+	if err != nil {
+		t.Fatalf("GetReadyWork on the healed clone: %v", err)
+	}
+	readyIDs := map[string]bool{}
+	for _, is := range ready {
+		readyIDs[is.ID] = true
+	}
+	for id, want := range map[string]bool{"wh-a": true, "wh-d": true, "wh-b": false, "wh-c": false} {
+		if readyIDs[id] != want {
+			t.Fatalf("ready work holds %s=%v, want %v (ready set: %v)", id, readyIDs[id], want, readyIDs)
+		}
 	}
 }

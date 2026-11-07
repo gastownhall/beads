@@ -70,8 +70,10 @@ func TestIgnored32AbsentWispsTableIsANoOp(t *testing.T) {
 
 // TestIgnored32DropsStaleIndexBeforeRestore pins the drifted shape's write
 // order: a surviving idx_wisps_is_blocked over the dropped column's table
-// goes first, then the column returns with ignored/0006's definition, and
-// the index is re-created only after both, over (is_blocked, status).
+// goes first, then the column returns with ignored/0006's definition, then
+// every wisp's flag is recomputed from the live graph (the column returns
+// with DEFAULT 0, which is not a computed answer), and the index is
+// re-created only after all of that, over (is_blocked, status).
 func TestIgnored32DropsStaleIndexBeforeRestore(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -86,6 +88,20 @@ func TestIgnored32DropsStaleIndexBeforeRestore(t *testing.T) {
 	expectWispShapeProbe(mock, wispColumnProbe, []driver.Value{"wisps", "is_blocked"}, 0)
 	mock.ExpectExec("ALTER TABLE wisps ADD COLUMN is_blocked TINYINT\\(1\\) NOT NULL DEFAULT 0").
 		WillReturnResult(sqlmock.NewResult(0, 0))
+	// The recompute: list every wisp (non-empty, so a pass runs), read both
+	// explained-parent sets (empty here -- nothing to prune, no climb), then
+	// one mark and one unmark over wisps. RowsAffected 0 on both means a
+	// consistent plane: the fixpoint loop exits after the single pass.
+	mock.ExpectQuery("SELECT id FROM wisps").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("wh-b").AddRow("wh-c").AddRow("wh-d"))
+	mock.ExpectQuery(`(?s)WITH\s+cand\(pid\) AS \(.*JOIN issues pp`).
+		WillReturnRows(sqlmock.NewRows([]string{"pid"}))
+	mock.ExpectQuery(`(?s)WITH\s+cand\(pid\) AS \(.*JOIN wisps pp`).
+		WillReturnRows(sqlmock.NewRows([]string{"pid"}))
+	mock.ExpectExec(`UPDATE wisps w SET w\.is_blocked = 1`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`UPDATE wisps w SET w\.is_blocked = 0`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	expectWispShapeProbe(mock, wispIndexProbe, []driver.Value{"wisps", "idx_wisps_is_blocked"}, 0)
 	mock.ExpectExec("CREATE INDEX idx_wisps_is_blocked ON wisps\\(is_blocked, status\\)").
 		WillReturnResult(sqlmock.NewResult(0, 0))
@@ -94,6 +110,6 @@ func TestIgnored32DropsStaleIndexBeforeRestore(t *testing.T) {
 		t.Fatalf("restoreWispIsBlocked on a column-drifted clone: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("the restore must drop the stale index, add the column, then re-create the index last: %v", err)
+		t.Fatalf("the restore must drop the stale index, add the column, recompute the flags, then re-create the index last: %v", err)
 	}
 }

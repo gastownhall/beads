@@ -19,9 +19,12 @@
 -- idx_wisps_is_blocked; a healthy clone pays exactly those three probes and
 -- nothing else. On drift it drops a surviving idx_wisps_is_blocked (a stale
 -- name that would short-circuit the restore), restores the column with
--- ignored/0006's definition, and creates the index last, so a failure at any
--- step leaves the marker pending and the next open retries. Every step
--- re-probes the live schema, so a retry adds nothing twice.
+-- ignored/0006's definition, recomputes every wisp's flag from the live
+-- graph (the column returns with DEFAULT 0, which is not a computed answer:
+-- a wisp blocked under a live edge would surface as ready), and creates the
+-- index last, so a failure at any step leaves the marker pending and the
+-- next open retries. Every step re-probes the live schema, so a retry adds
+-- nothing twice.
 --
 -- The ALTER TABLE wisps and UPDATE wisps writes are stated in this header on
 -- purpose: MigrateUp's pending-migration dirty-table guard scans the raw text
