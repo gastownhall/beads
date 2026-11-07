@@ -122,6 +122,13 @@ func TestEmbeddedIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary(
 	conformance.RunIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "typevocab"))
 }
 
+func TestEmbeddedIssueOperationsUpdateRejectsATitleOverTheLengthLimit(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "titlelen")
+	ctx := t.Context()
+	conformance.RunIssueOperationsUpdateRejectsATitleOverTheLengthLimit(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "titlelen"))
+}
+
 func TestEmbeddedIssueOperationsUpdateStatusCrossingSettlesDependers(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	te := newTestEnv(t, "bsupd")

@@ -177,6 +177,10 @@ func TestServedIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary(t 
 	conformance.RunIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary(t, t.Context(), newServedIssueOperationsFixture(t, "hiob"))
 }
 
+func TestServedIssueOperationsUpdateRejectsATitleOverTheLengthLimit(t *testing.T) {
+	conformance.RunIssueOperationsUpdateRejectsATitleOverTheLengthLimit(t, t.Context(), newServedIssueOperationsFixture(t, "hiod"))
+}
+
 // The two STATUS-CROSSING settlement cases. They are the update's half of what
 // the close cases assert next door, and they are the pair the blocked-state kit
 // calls two genuine votes: issueops update.go and domain/db issue.go each decide

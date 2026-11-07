@@ -103,6 +103,12 @@ func TestIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary(t *testi
 	conformance.RunIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary(t, ctx, fixture)
 }
 
+func TestIssueOperationsUpdateRejectsATitleOverTheLengthLimit(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsUpdateRejectsATitleOverTheLengthLimit(t, ctx, fixture)
+}
+
 func TestIssueOperationsUpdateStatusCrossingSettlesDependers(t *testing.T) {
 	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
 	defer cleanup()
