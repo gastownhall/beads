@@ -4,8 +4,10 @@ package beads
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"os/user"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -13,7 +15,7 @@ import (
 
 // hostWindowsFacts gathers the live host inputs to the Windows boundary.
 func hostWindowsFacts() windowsFacts {
-	f := windowsFacts{Getenv: os.Getenv}
+	f := windowsFacts{Getenv: os.Getenv, Resolve: resolveWindowsFinalPath}
 	if dir, err := windows.GetSystemWindowsDirectory(); err == nil {
 		f.WindowsDir = dir
 	}
@@ -56,5 +58,72 @@ func getProfilesDirectory() (string, error) {
 			continue
 		}
 		return "", err
+	}
+}
+
+// GetFinalPathNameByHandle flags, not exported by the pinned x/sys/windows.
+const (
+	winFileNameNormalized = 0x0
+	winVolumeNameDOS      = 0x0
+)
+
+// errWinDanglingLink reports a link whose target does not exist. Opening it
+// fails like a missing entry, but the entry is there, so it must not be
+// mistaken for an absent path the walk may climb past.
+var errWinDanglingLink = errors.New("dangling link")
+
+// winExtendedSpelling returns the \\?\ form of a cleaned absolute path, which
+// the OS opens without re-normalizing it: \\?\C:\x or \\?\UNC\server\share\x.
+func winExtendedSpelling(path string) string {
+	if strings.HasPrefix(path, `\\`) {
+		return `\\?\UNC\` + path[2:]
+	}
+	return `\\?\` + path
+}
+
+// resolveWindowsFinalPath is the host winResolver: it opens path (a cleaned
+// absolute path) following links and asks the OS for the handle's normalized
+// DOS path, which resolves junctions, symlinks, subst drives and short
+// names alike.
+func resolveWindowsFinalPath(path string) (string, bool, error) {
+	ext := winExtendedSpelling(path)
+	name, err := windows.UTF16PtrFromString(ext)
+	if err != nil {
+		return "", false, err
+	}
+	// Access 0 needs no rights on the object; BACKUP_SEMANTICS opens
+	// directories; omitting OPEN_REPARSE_POINT makes the OS follow links.
+	h, err := windows.CreateFile(name, 0,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			if _, lerr := os.Lstat(ext); lerr == nil {
+				return "", false, errWinDanglingLink
+			}
+		}
+		return "", false, err
+	}
+	defer func() { _ = windows.CloseHandle(h) }()
+
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
+		return "", false, err
+	}
+	isDir := info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
+
+	n := uint32(windows.MAX_PATH)
+	for {
+		buf := make([]uint16, n)
+		got, err := windows.GetFinalPathNameByHandle(h, &buf[0], n, winFileNameNormalized|winVolumeNameDOS)
+		if err != nil {
+			return "", false, err
+		}
+		// On success got excludes the NUL; when buf is too small it is the
+		// size needed, including the NUL.
+		if got < n {
+			return windows.UTF16ToString(buf[:got]), isDir, nil
+		}
+		n = got + 1
 	}
 }
