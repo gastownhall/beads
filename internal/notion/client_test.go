@@ -175,6 +175,214 @@ func TestClientRetrieveDatabase(t *testing.T) {
 	}
 }
 
+func TestClientRetrievePage(t *testing.T) {
+	t.Parallel()
+
+	t.Run("decodes the page and its parent", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				t.Fatalf("method = %q, want GET", r.Method)
+			}
+			if r.URL.Path != "/pages/329e5bf9-7fae-8080-bb4a-d94e1387655d" {
+				t.Fatalf("path = %q", r.URL.Path)
+			}
+			_, _ = io.WriteString(w, `{
+				"object":"page",
+				"id":"329e5bf9-7fae-8080-bb4a-d94e1387655d",
+				"archived":false,
+				"parent":{"type":"data_source_id","data_source_id":"ds_123","database_id":"db_123"},
+				"properties":{"Name":{"title":[{"plain_text":"Page One"}]}}
+			}`)
+		}))
+		defer server.Close()
+
+		client := NewClient("secret-token").WithBaseURL(server.URL)
+		page, err := client.RetrievePage(context.Background(), "329e5bf9-7fae-8080-bb4a-d94e1387655d")
+		if err != nil {
+			t.Fatalf("RetrievePage returned error: %v", err)
+		}
+		if page.ID != "329e5bf9-7fae-8080-bb4a-d94e1387655d" {
+			t.Fatalf("id = %q", page.ID)
+		}
+		if page.Parent == nil || page.Parent.DataSourceID != "ds_123" || page.Parent.DatabaseID != "db_123" {
+			t.Fatalf("parent = %+v, want the data source membership block", page.Parent)
+		}
+		if DataSourceTitle(page.Properties[PropertyTitle].Title) != "Page One" {
+			t.Fatalf("title = %q", DataSourceTitle(page.Properties[PropertyTitle].Title))
+		}
+	})
+
+	t.Run("typed 404 keeps the API's message", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"code":"object_not_found","message":"Could not find page with ID: deadbeef"}`)
+		}))
+		defer server.Close()
+
+		client := NewClient("secret-token").WithBaseURL(server.URL)
+		_, err := client.RetrievePage(context.Background(), "deadbeef")
+		if err == nil {
+			t.Fatal("RetrievePage succeeded, want 404 error")
+		}
+		want := "Notion API error object_not_found (404): Could not find page with ID: deadbeef"
+		if err.Error() != want {
+			t.Fatalf("error = %q, want %q", err.Error(), want)
+		}
+		if !isNotFound(err) {
+			t.Fatal("a decoded 404 must satisfy isNotFound")
+		}
+	})
+
+	t.Run("undecodable error body falls back to raw text", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, "gateway said no")
+		}))
+		defer server.Close()
+
+		client := NewClient("secret-token").WithBaseURL(server.URL)
+		_, err := client.RetrievePage(context.Background(), "deadbeef")
+		if err == nil {
+			t.Fatal("RetrievePage succeeded, want 404 error")
+		}
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) {
+			t.Fatalf("error = %T (%v), want *APIError", err, err)
+		}
+		if apiErr.Status != http.StatusNotFound || apiErr.Body != "gateway said no" {
+			t.Fatalf("apiErr = %+v, want raw body on the 404", apiErr)
+		}
+	})
+
+	t.Run("other statuses fail once and never mean missing", func(t *testing.T) {
+		t.Parallel()
+		var calls atomic.Int64
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"code":"restricted_resource","message":"no access"}`)
+		}))
+		defer server.Close()
+
+		client := NewClient("secret-token").WithBaseURL(server.URL)
+		_, err := client.RetrievePage(context.Background(), "329e5bf9-7fae-8080-bb4a-d94e1387655d")
+		if err == nil || isNotFound(err) {
+			t.Fatalf("RetrievePage(403) = (%v), want a non-missing error", err)
+		}
+		if !strings.Contains(err.Error(), "no access") {
+			t.Fatalf("error = %q, want the API message", err.Error())
+		}
+		if calls.Load() != 1 {
+			t.Fatalf("requests = %d, want 1 (403 is not retryable)", calls.Load())
+		}
+	})
+
+	t.Run("rate limited GET retries and succeeds", func(t *testing.T) {
+		t.Parallel()
+		var calls atomic.Int64
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if calls.Add(1) == 1 {
+				w.Header().Set("Retry-After", "1")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = io.WriteString(w, `{"code":"rate_limited","message":"Rate limited."}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"object":"page","id":"329e5bf9-7fae-8080-bb4a-d94e1387655d"}`)
+		}))
+		defer server.Close()
+
+		var slept []time.Duration
+		client := NewClient("secret-token").WithBaseURL(server.URL)
+		client.after = firesImmediately(&slept)
+
+		page, err := client.RetrievePage(context.Background(), "329e5bf9-7fae-8080-bb4a-d94e1387655d")
+		if err != nil {
+			t.Fatalf("RetrievePage after 429 returned error: %v", err)
+		}
+		if page.ID != "329e5bf9-7fae-8080-bb4a-d94e1387655d" {
+			t.Fatalf("id = %q", page.ID)
+		}
+		if calls.Load() != 2 {
+			t.Fatalf("requests = %d, want 2", calls.Load())
+		}
+		if len(slept) != 1 || slept[0] != time.Second {
+			t.Fatalf("waits = %v, want exactly Retry-After 1s", slept)
+		}
+	})
+
+	t.Run("overloaded GET retries", func(t *testing.T) {
+		t.Parallel()
+		var calls atomic.Int64
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if calls.Add(1) == 1 {
+				w.WriteHeader(statusNotionOverloaded)
+				return
+			}
+			_, _ = io.WriteString(w, `{"object":"page","id":"329e5bf9-7fae-8080-bb4a-d94e1387655d"}`)
+		}))
+		defer server.Close()
+
+		var slept []time.Duration
+		client := NewClient("secret-token").WithBaseURL(server.URL)
+		client.after = firesImmediately(&slept)
+
+		if _, err := client.RetrievePage(context.Background(), "329e5bf9-7fae-8080-bb4a-d94e1387655d"); err != nil {
+			t.Fatalf("RetrievePage after 529 returned error: %v", err)
+		}
+		if calls.Load() != 2 {
+			t.Fatalf("requests = %d, want 2 (a GET retries on 529)", calls.Load())
+		}
+	})
+
+	t.Run("transport failure is an error, not missing", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		server.Close() // refused connection
+
+		client := NewClient("secret-token").WithBaseURL(server.URL)
+		_, err := client.RetrievePage(context.Background(), "329e5bf9-7fae-8080-bb4a-d94e1387655d")
+		if err == nil || isNotFound(err) {
+			t.Fatalf("RetrievePage on a closed server = (%v), want a non-missing error", err)
+		}
+	})
+
+	t.Run("canceled context is an error, not missing", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, `{"object":"page","id":"329e5bf9-7fae-8080-bb4a-d94e1387655d"}`)
+		}))
+		defer server.Close()
+
+		client := NewClient("secret-token").WithBaseURL(server.URL)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := client.RetrievePage(ctx, "329e5bf9-7fae-8080-bb4a-d94e1387655d")
+		if err == nil || isNotFound(err) {
+			t.Fatalf("RetrievePage(canceled) = (%v), want a non-missing error", err)
+		}
+	})
+
+	t.Run("malformed page payload is a parse error", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, `{"id":42}`)
+		}))
+		defer server.Close()
+
+		client := NewClient("secret-token").WithBaseURL(server.URL)
+		_, err := client.RetrievePage(context.Background(), "329e5bf9-7fae-8080-bb4a-d94e1387655d")
+		if err == nil || isNotFound(err) {
+			t.Fatalf("RetrievePage(malformed) = (%v), want a non-missing error", err)
+		}
+		if !strings.Contains(err.Error(), "parse page response") {
+			t.Fatalf("error = %q, want the parse-failure wrap", err.Error())
+		}
+	})
+}
+
 func TestResolveDataSourceReferencePrefersDataSource(t *testing.T) {
 	t.Parallel()
 

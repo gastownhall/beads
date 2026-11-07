@@ -3,6 +3,7 @@ package notion
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -59,6 +60,19 @@ func (f *fakeAPI) QueryDataSource(_ context.Context, _ string, filter map[string
 }
 func (f *fakeAPI) ArchivePage(context.Context, string, bool) (*Page, error) {
 	return f.archivePage, nil
+}
+func (f *fakeAPI) RetrievePage(_ context.Context, pageID string) (*Page, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.getCalls++
+	f.retrievedIDs = append(f.retrievedIDs, pageID)
+	for i := range f.pages {
+		if f.pages[i].ID == pageID {
+			clone := f.pages[i]
+			return &clone, nil
+		}
+	}
+	return nil, &APIError{Status: http.StatusNotFound, Code: "object_not_found", Message: "Could not find page with ID: " + pageID}
 }
 func (f *fakeAPI) CreatePage(_ context.Context, dataSourceID string, properties map[string]interface{}) (*Page, error) {
 	f.mu.Lock()
@@ -270,6 +284,189 @@ func TestTrackerFetchIssuesIncludesFloorOfLastSyncMinute(t *testing.T) {
 	if queried != 2 || candidates != 2 {
 		t.Fatalf("LastPullStats = (%d, %d), want (2, 2)", queried, candidates)
 	}
+}
+
+// TestTrackerFetchIssueTargeted covers the resolution rules of a single
+// fetch: page references become direct reads, Beads IDs become source-scoped
+// equality queries, only live members of the configured source count, and
+// none of it narrows a later full pull.
+func TestTrackerFetchIssueTargeted(t *testing.T) {
+	t.Parallel()
+
+	member := func(id, beadsID, title string) Page {
+		return Page{
+			Object:         "page",
+			ID:             id,
+			URL:            "https://www.notion.so/x-" + strings.ReplaceAll(id, "-", ""),
+			CreatedTime:    time.Date(2026, 3, 19, 14, 0, 0, 0, time.UTC),
+			LastEditedTime: time.Date(2026, 3, 19, 14, 5, 0, 0, time.UTC),
+			Parent:         &PageParent{Type: "data_source_id", DataSourceID: "ds_123", DatabaseID: "db_1"},
+			Properties: map[string]PageProperty{
+				PropertyTitle:    {Title: []RichText{{PlainText: title}}},
+				PropertyBeadsID:  {RichText: []RichText{{PlainText: beadsID}}},
+				PropertyStatus:   {Select: &SelectOption{Name: "Open"}},
+				PropertyPriority: {Select: &SelectOption{Name: "Medium"}},
+				PropertyType:     {Select: &SelectOption{Name: "Task"}},
+			},
+		}
+	}
+
+	t.Run("page URL and bare ID use a direct GET", func(t *testing.T) {
+		t.Parallel()
+		api := &fakeAPI{pages: []Page{member("01234567-89ab-cdef-0123-456789abcdef", "bd-1", "Page One")}}
+		tracker := &Tracker{client: api, config: DefaultMappingConfig(), dataSourceID: "ds_123"}
+
+		for _, ref := range []string{
+			"https://www.notion.so/Page-One-0123456789abcdef0123456789abcdef",
+			"0123456789abcdef0123456789abcdef",
+			"01234567-89ab-cdef-0123-456789abcdef",
+		} {
+			issue, err := tracker.FetchIssue(context.Background(), ref)
+			if err != nil {
+				t.Fatalf("FetchIssue(%q) returned error: %v", ref, err)
+			}
+			if issue == nil || issue.Title != "Page One" {
+				t.Fatalf("FetchIssue(%q) = %+v, want Page One", ref, issue)
+			}
+		}
+		if api.getCalls != 3 || api.queryCalls != 0 {
+			t.Fatalf("gets = %d, queries = %d, want 3 direct GETs and no query", api.getCalls, api.queryCalls)
+		}
+	})
+
+	t.Run("Beads ID uses a source-scoped equality query", func(t *testing.T) {
+		t.Parallel()
+		api := &fakeAPI{pages: []Page{member("01234567-89ab-cdef-0123-456789abcdef", "bd-1", "Page One")}}
+		tracker := &Tracker{client: api, config: DefaultMappingConfig(), dataSourceID: "ds_123"}
+
+		issue, err := tracker.FetchIssue(context.Background(), "bd-1")
+		if err != nil {
+			t.Fatalf("FetchIssue(bd-1) returned error: %v", err)
+		}
+		if issue == nil || issue.Title != "Page One" {
+			t.Fatalf("FetchIssue(bd-1) = %+v, want Page One", issue)
+		}
+		if api.getCalls != 0 || api.queryCalls != 1 {
+			t.Fatalf("gets = %d, queries = %d, want one equality query and no GET", api.getCalls, api.queryCalls)
+		}
+		filter := api.queryFilters[0]
+		if filter["property"] != PropertyBeadsID {
+			t.Fatalf("filter property = %v, want %q", filter["property"], PropertyBeadsID)
+		}
+		condition, ok := filter["rich_text"].(map[string]interface{})
+		if !ok || condition["equals"] != "bd-1" {
+			t.Fatalf("filter condition = %v, want equals bd-1", filter["rich_text"])
+		}
+	})
+
+	t.Run("blank identifier issues no request", func(t *testing.T) {
+		t.Parallel()
+		api := &fakeAPI{pages: []Page{member("01234567-89ab-cdef-0123-456789abcdef", "bd-1", "Page One")}}
+		tracker := &Tracker{client: api, config: DefaultMappingConfig(), dataSourceID: "ds_123"}
+
+		issue, err := tracker.FetchIssue(context.Background(), "   ")
+		if err != nil || issue != nil {
+			t.Fatalf("FetchIssue(blank) = (%v, %v), want (nil, nil)", issue, err)
+		}
+		if api.getCalls+api.queryCalls != 0 {
+			t.Fatalf("a blank identifier issued %d requests, want none", api.getCalls+api.queryCalls)
+		}
+	})
+
+	t.Run("missing, archived, trashed, and non-member pages are no result", func(t *testing.T) {
+		t.Parallel()
+		archived := member("11111111-0000-0000-0000-000000000001", "bd-arch", "Archived")
+		archived.Archived = true
+		trashed := member("22222222-0000-0000-0000-000000000002", "bd-trash", "Trashed")
+		trashed.InTrash = true
+		foreign := member("33333333-0000-0000-0000-000000000003", "bd-foreign", "Foreign source")
+		foreign.Parent = &PageParent{Type: "data_source_id", DataSourceID: "ds_other", DatabaseID: "db_1"}
+		databaseOnly := member("44444444-0000-0000-0000-000000000004", "bd-db", "Database parent")
+		databaseOnly.Parent = &PageParent{Type: "database_id", DatabaseID: "db_1"}
+		noParent := member("55555555-0000-0000-0000-000000000005", "bd-noparent", "No parent")
+		noParent.Parent = nil
+		api := &fakeAPI{pages: []Page{archived, trashed, foreign, databaseOnly, noParent}}
+		tracker := &Tracker{client: api, config: DefaultMappingConfig(), dataSourceID: "ds_123"}
+
+		for _, page := range api.pages {
+			issue, err := tracker.FetchIssue(context.Background(), page.ID)
+			if err != nil {
+				t.Fatalf("FetchIssue(%s) returned error: %v", page.ID, err)
+			}
+			if issue != nil {
+				t.Fatalf("FetchIssue(%s) = %q, want (nil, nil)", page.ID, issue.Title)
+			}
+		}
+
+		missing, err := tracker.FetchIssue(context.Background(), "99999999-0000-0000-0000-000000000009")
+		if err != nil || missing != nil {
+			t.Fatalf("FetchIssue(missing) = (%v, %v), want (nil, nil)", missing, err)
+		}
+	})
+
+	t.Run("data source id spelling is normalized", func(t *testing.T) {
+		t.Parallel()
+		hyphenated := member("01234567-89ab-cdef-0123-456789abcdef", "bd-1", "Hyphenated")
+		hyphenated.Parent = &PageParent{Type: "data_source_id", DataSourceID: "329e5bf9-7fae-8080-bb4a-d94e1387655d", DatabaseID: "db_1"}
+		upper := member("fedcba98-7654-3210-fedc-ba9876543210", "bd-2", "Uppercase")
+		upper.Parent = &PageParent{Type: "data_source_id", DataSourceID: "329E5BF9-7FAE-8080-BB4A-D94E1387655D", DatabaseID: "db_1"}
+		api := &fakeAPI{pages: []Page{hyphenated, upper}}
+		tracker := &Tracker{client: api, config: DefaultMappingConfig(), dataSourceID: "329e5bf97fae8080bb4ad94e1387655d"}
+
+		// The configured id is compact while one parent carries hyphens and
+		// the other differs only in case; all three spell the same source.
+		issue, err := tracker.FetchIssue(context.Background(), "01234567-89ab-cdef-0123-456789abcdef")
+		if err != nil || issue == nil || issue.Title != "Hyphenated" {
+			t.Fatalf("FetchIssue(hyphenated parent) = (%v, %v), want Hyphenated", issue, err)
+		}
+		issue, err = tracker.FetchIssue(context.Background(), "fedcba98-7654-3210-fedc-ba9876543210")
+		if err != nil || issue == nil || issue.Title != "Uppercase" {
+			t.Fatalf("FetchIssue(uppercase parent) = (%v, %v), want Uppercase", issue, err)
+		}
+	})
+
+	t.Run("duplicate Beads IDs: the last live match wins", func(t *testing.T) {
+		t.Parallel()
+		archived := member("22222222-0000-0000-0000-000000000002", "bd-1", "Archived twin")
+		archived.Archived = true
+		api := &fakeAPI{pages: []Page{
+			member("11111111-0000-0000-0000-000000000001", "bd-1", "First"),
+			archived,
+			member("33333333-0000-0000-0000-000000000003", "bd-1", "Last"),
+		}}
+		tracker := &Tracker{client: api, config: DefaultMappingConfig(), dataSourceID: "ds_123"}
+
+		issue, err := tracker.FetchIssue(context.Background(), "bd-1")
+		if err != nil {
+			t.Fatalf("FetchIssue(bd-1) returned error: %v", err)
+		}
+		if issue == nil || issue.Title != "Last" {
+			t.Fatalf("FetchIssue(bd-1) = %+v, want the last live match", issue)
+		}
+	})
+
+	t.Run("targeted reads do not restrict a later full pull", func(t *testing.T) {
+		t.Parallel()
+		api := &fakeAPI{pages: []Page{
+			member("01234567-89ab-cdef-0123-456789abcdef", "bd-1", "Page One"),
+			member("fedcba98-7654-3210-fedc-ba9876543210", "bd-2", "Page Two"),
+		}}
+		tracker := &Tracker{client: api, config: DefaultMappingConfig(), dataSourceID: "ds_123"}
+
+		if _, err := tracker.FetchIssue(context.Background(), "bd-1"); err != nil {
+			t.Fatalf("FetchIssue returned error: %v", err)
+		}
+		issues, err := tracker.FetchIssues(context.Background(), itracker.FetchOptions{})
+		if err != nil {
+			t.Fatalf("FetchIssues returned error: %v", err)
+		}
+		if len(issues) != 2 {
+			t.Fatalf("full pull after a targeted read returned %d issues, want 2", len(issues))
+		}
+		if api.queryFilters[len(api.queryFilters)-1] != nil {
+			t.Fatalf("full pull sent a filter: %v", api.queryFilters[len(api.queryFilters)-1])
+		}
+	})
 }
 
 func TestTrackerCreateAndUpdateIssue(t *testing.T) {

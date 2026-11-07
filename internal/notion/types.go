@@ -208,6 +208,17 @@ type QueryDataSourceResponse struct {
 	NextCursor string `json:"next_cursor,omitempty"`
 }
 
+// PageParent identifies what a page belongs to. A data-source member page
+// carries both a data_source_id and the database_id of the database that
+// contains it; the two name different scopes, and only the data source is
+// the membership a direct page read must verify.
+type PageParent struct {
+	Type         string `json:"type,omitempty"`
+	PageID       string `json:"page_id,omitempty"`
+	DataSourceID string `json:"data_source_id,omitempty"`
+	DatabaseID   string `json:"database_id,omitempty"`
+}
+
 type Page struct {
 	Object         string                  `json:"object,omitempty"`
 	ID             string                  `json:"id,omitempty"`
@@ -216,6 +227,7 @@ type Page struct {
 	Archived       bool                    `json:"archived,omitempty"`
 	CreatedTime    time.Time               `json:"created_time,omitempty"`
 	LastEditedTime time.Time               `json:"last_edited_time,omitempty"`
+	Parent         *PageParent             `json:"parent,omitempty"`
 	Properties     map[string]PageProperty `json:"properties,omitempty"`
 }
 

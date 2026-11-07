@@ -483,6 +483,61 @@ func TestTrackerFullFetchBeyondBoundReturnsErrorNotPartialRows(t *testing.T) {
 	}
 }
 
+// TestTrackerFetchIssueTargetedBeyondQueryBound pins AC-3: a single fetch
+// resolves page references by direct reads and Beads IDs by a source-scoped
+// equality query, without enumerating a data source larger than the bound.
+func TestTrackerFetchIssueTargetedBeyondQueryBound(t *testing.T) {
+	edited := time.Now().UTC().Add(-2 * time.Hour)
+	server := newTestNotionServer(t,
+		memberPage("aaaaaaaa-0000-0000-0000-000000000001", "bd-a", "Page A", edited),
+		memberPage("aaaaaaaa-0000-0000-0000-000000000002", "bd-b", "Page B", edited),
+	)
+	server.failUnfiltered = true
+	tracker := server.tracker()
+
+	for _, ref := range []string{
+		"https://www.notion.so/Page-A-aaaaaaaa000000000000000000000001",
+		"aaaaaaaa000000000000000000000001",
+		"aaaaaaaa-0000-0000-0000-000000000001",
+	} {
+		issue, err := tracker.FetchIssue(context.Background(), ref)
+		if err != nil {
+			t.Fatalf("FetchIssue(%q) returned error: %v", ref, err)
+		}
+		if issue == nil || issue.Title != "Page A" {
+			t.Fatalf("FetchIssue(%q) = %+v, want Page A", ref, issue)
+		}
+	}
+
+	issue, err := tracker.FetchIssue(context.Background(), "bd-b")
+	if err != nil {
+		t.Fatalf("FetchIssue(bd-b) returned error: %v", err)
+	}
+	if issue == nil || issue.Title != "Page B" {
+		t.Fatalf("FetchIssue(bd-b) = %+v, want Page B", issue)
+	}
+
+	missing, err := tracker.FetchIssue(context.Background(), "bbbbbbbb-0000-0000-0000-000000000009")
+	if err != nil {
+		t.Fatalf("FetchIssue(missing page) returned error: %v", err)
+	}
+	if missing != nil {
+		t.Fatalf("FetchIssue(missing page) = %+v, want (nil, nil)", missing)
+	}
+
+	before := server.requestCount()
+	issue, err = tracker.FetchIssue(context.Background(), "   ")
+	if err != nil || issue != nil {
+		t.Fatalf("FetchIssue(blank) = (%v, %v), want (nil, nil)", issue, err)
+	}
+	if after := server.requestCount(); after != before {
+		t.Fatalf("a blank identifier issued %d requests, want none", after-before)
+	}
+	if server.unfilteredQueries() != 0 {
+		t.Fatalf("FetchIssue issued %d unfiltered queries, want none", server.unfilteredQueries())
+	}
+}
+
 func titles(issues []itracker.TrackerIssue) []string {
 	result := make([]string, 0, len(issues))
 	for _, issue := range issues {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -239,6 +240,23 @@ func (c *Client) QueryDataSource(ctx context.Context, dataSourceID string, filte
 			"'bd config set notion.max_query_pages <n>' or the NOTION_MAX_QUERY_PAGES "+
 			"environment variable, or reduce the number of rows the query matches",
 		limit, limit*maxPageSize)
+}
+
+// RetrievePage fetches one page by ID, parent block included. A GET applies
+// nothing server-side, so it rides the same retry policy as every other
+// read. Failure to find the page is reported by status on the returned
+// *APIError (see isNotFound); every other failure — auth, rate-limit
+// exhaustion, transport, context, decoding — stays an ordinary error.
+func (c *Client) RetrievePage(ctx context.Context, pageID string) (*Page, error) {
+	body, err := c.doRequest(ctx, http.MethodGet, "/pages/"+url.PathEscape(pageID), nil, retrySafe)
+	if err != nil {
+		return nil, err
+	}
+	var page Page
+	if err := json.Unmarshal(body, &page); err != nil {
+		return nil, fmt.Errorf("parse page response: %w", err)
+	}
+	return &page, nil
 }
 
 func (c *Client) CreatePage(ctx context.Context, dataSourceID string, properties map[string]interface{}) (*Page, error) {
@@ -538,13 +556,40 @@ func parseRetryAfter(value string) (time.Duration, bool) {
 	return 0, false
 }
 
+// APIError is a Notion API response the client could not act on. Status and
+// code are machine-readable so callers can branch — a 404 on a direct page
+// read is a missing page; a 429 or a 403 is not — while Error preserves the
+// two message forms doRequest has always produced.
+type APIError struct {
+	Status  int
+	Code    string
+	Message string
+	Body    string
+}
+
+func (e *APIError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("Notion API error %s (%d): %s", e.Code, e.Status, e.Message)
+	}
+	return fmt.Sprintf("Notion API error (%d): %s", e.Status, e.Body)
+}
+
+// isNotFound reports whether err is the API's answer to a missing object
+// rather than a failure to ask. Only a decoded 404 counts: collapsing
+// authentication, rate-limit exhaustion, transport, context, or decoding
+// failures into "missing" is how an outage turns into a duplicate page.
+func isNotFound(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound
+}
+
 func notionAPIError(status int, body []byte) error {
 	var apiErr struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
 	}
 	if err := json.Unmarshal(body, &apiErr); err == nil && apiErr.Message != "" {
-		return fmt.Errorf("Notion API error %s (%d): %s", apiErr.Code, status, apiErr.Message)
+		return &APIError{Status: status, Code: apiErr.Code, Message: apiErr.Message}
 	}
-	return fmt.Errorf("Notion API error (%d): %s", status, strings.TrimSpace(string(body)))
+	return &APIError{Status: status, Body: strings.TrimSpace(string(body))}
 }

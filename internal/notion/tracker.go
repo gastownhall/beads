@@ -31,6 +31,7 @@ type notionAPI interface {
 	GetCurrentUser(ctx context.Context) (*User, error)
 	RetrieveDataSource(ctx context.Context, dataSourceID string) (*DataSource, error)
 	QueryDataSource(ctx context.Context, dataSourceID string, filter map[string]interface{}) ([]Page, error)
+	RetrievePage(ctx context.Context, pageID string) (*Page, error)
 	CreatePage(ctx context.Context, dataSourceID string, properties map[string]interface{}) (*Page, error)
 	UpdatePage(ctx context.Context, pageID string, properties map[string]interface{}) (*Page, error)
 	ArchivePage(ctx context.Context, pageID string, inTrash bool) (*Page, error)
@@ -206,33 +207,100 @@ func fetchSinceFilter(since *time.Time) map[string]interface{} {
 	}
 }
 
+// FetchIssue resolves one remote issue without enumerating the data source.
+// A page reference (URL, hyphenated or compact ID) is answered by one direct
+// page read; any other identifier is a Beads ID, answered by a source-scoped
+// equality query. A missing, archived, trashed, or foreign page is no result
+// rather than an error; a blank identifier issues no request at all.
 func (t *Tracker) FetchIssue(ctx context.Context, identifier string) (*itracker.TrackerIssue, error) {
-	if err := t.ensureRemoteIndex(ctx); err != nil {
+	if pageID := ExtractNotionIdentifier(identifier); pageID != "" {
+		page, err := t.fetchMemberPage(ctx, pageID)
+		if err != nil {
+			return nil, err
+		}
+		if page == nil {
+			return nil, nil
+		}
+		return TrackerIssueFromPullIssue(PulledIssueFromPage(*page), t.config)
+	}
+	if strings.TrimSpace(identifier) == "" {
+		return nil, nil
+	}
+	return t.fetchRemoteByLocalID(ctx, identifier)
+}
+
+// fetchMemberPage retrieves one page by ID and returns it only when it is
+// live and a member of the configured data source. The membership check is
+// what keeps a stale external_ref from reading — let alone writing — a page
+// the source query could never have returned.
+func (t *Tracker) fetchMemberPage(ctx context.Context, pageID string) (*Page, error) {
+	page, err := t.client.RetrievePage(ctx, pageID)
+	if err != nil {
+		if isNotFound(err) {
+			return nil, nil
+		}
 		return nil, err
 	}
-	want := ExtractNotionIdentifier(identifier)
-	if want == "" {
-		want = strings.TrimSpace(identifier)
+	if page == nil || page.InTrash || page.Archived {
+		return nil, nil
 	}
+	if !sameDataSource(page.Parent, t.dataSourceID) {
+		return nil, nil
+	}
+	return page, nil
+}
 
-	t.cacheMu.RLock()
-	defer t.cacheMu.RUnlock()
-
-	if issue, ok := t.remoteByPageID[want]; ok {
-		cloned := cloneTrackerIssue(issue)
-		return &cloned, nil
+// fetchRemoteByLocalID answers "which page carries this Beads ID" with an
+// equality query scoped to the configured data source. Archived and trashed
+// results are skipped and the last live match wins, as the whole-source
+// index's map did.
+func (t *Tracker) fetchRemoteByLocalID(ctx context.Context, localID string) (*itracker.TrackerIssue, error) {
+	localID = strings.TrimSpace(localID)
+	if localID == "" {
+		return nil, nil
 	}
-	if issue, ok := t.remoteByLocalID[want]; ok {
-		cloned := cloneTrackerIssue(issue)
-		return &cloned, nil
+	pages, err := t.client.QueryDataSource(ctx, t.dataSourceID, beadsIDFilter(localID))
+	if err != nil {
+		return nil, err
 	}
-	for _, candidate := range t.issueCache {
-		if candidate.Identifier == want {
-			cloned := cloneTrackerIssue(candidate)
-			return &cloned, nil
+	var match *itracker.TrackerIssue
+	for _, page := range pages {
+		if page.InTrash || page.Archived {
+			continue
 		}
+		issue, err := TrackerIssueFromPullIssue(PulledIssueFromPage(page), t.config)
+		if err != nil {
+			return nil, err
+		}
+		match = issue
 	}
-	return nil, nil
+	return match, nil
+}
+
+// beadsIDFilter is the source-scoped equality query for a Beads ID.
+func beadsIDFilter(localID string) map[string]interface{} {
+	return map[string]interface{}{
+		"property":  PropertyBeadsID,
+		"rich_text": map[string]interface{}{"equals": localID},
+	}
+}
+
+// sameDataSource reports whether parent identifies membership in
+// dataSourceID. Hyphens and case are ignored: the API returns the same data
+// source id in more than one spelling. A missing parent, a database-only
+// parent, or any mismatch is not a member — the database containing the
+// data source names a different scope than the data source itself.
+func sameDataSource(parent *PageParent, dataSourceID string) bool {
+	if parent == nil {
+		return false
+	}
+	got := normalizeSourceID(parent.DataSourceID)
+	want := normalizeSourceID(dataSourceID)
+	return got != "" && got == want
+}
+
+func normalizeSourceID(id string) string {
+	return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(id), "-", ""))
 }
 
 func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*itracker.TrackerIssue, error) {
