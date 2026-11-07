@@ -703,6 +703,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd create` reads its settings in one statement inside its write
+  transaction.** `bd create` read up to nine config keys one at a time while its
+  transaction was open, which at 100 ms round-trip time held it open up to 0.8 s
+  longer than needed. It now reads those keys together, for each item of a batch
+  apply as well. A failed read falls back to reading each key, and a config write
+  in the same scope is seen by the next read. `bd q`, the create form, and creates
+  on the proxied route read as before.
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add

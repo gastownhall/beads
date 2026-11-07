@@ -33,12 +33,20 @@ func HistoryEntry(provenance, fallback string) string {
 	return fallback
 }
 
+// createConfigKeys are the settings a guarded create reads in its transaction. A
+// key missing here still works, at the cost of its own round trip.
+var createConfigKeys = []string{
+	"status.custom", "types.custom", "issue_prefix", "allowed_prefixes", "types.infra",
+	"issue_id_mode", "max_collision_prob", "min_hash_length", "max_hash_length",
+}
+
 // ExecuteCreate applies a guarded create in tx and reports durable tables changed.
 func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequest) (publicops.CreateResult, ChangedTables, error) {
 	attempt := CloneCreateRequest(request)
 	if err := ValidatePublicCreateRequest(attempt); err != nil {
 		return publicops.CreateResult{}, nil, err
 	}
+	ctx = withConfigSnapshot(ctx, createConfigKeys...)
 	batch, err := NewBatchContext(ctx, tx, storage.BatchCreateOptions{CreateOnly: true, SkipPrefixValidation: attempt.ForceIDPrefix})
 	if err != nil {
 		return publicops.CreateResult{}, nil, err

@@ -364,9 +364,8 @@ func nextUnretiredCounterIDTx(ctx context.Context, tx DBTX, prefix string, claim
 
 // IsCounterModeTx checks whether issue_id_mode=counter is configured.
 func IsCounterModeTx(ctx context.Context, tx DBTX) (bool, error) {
-	var idMode string
-	err := tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "issue_id_mode").Scan(&idMode)
-	if err != nil && err != sql.ErrNoRows {
+	idMode, err := GetConfigInTx(ctx, tx, "issue_id_mode")
+	if err != nil {
 		return false, fmt.Errorf("failed to read issue_id_mode config: %w", err)
 	}
 	return idMode == "counter", nil
@@ -498,24 +497,21 @@ func DefaultAdaptiveConfig() AdaptiveIDConfig {
 func GetAdaptiveConfigTx(ctx context.Context, tx DBTX) AdaptiveIDConfig {
 	cfg := DefaultAdaptiveConfig()
 
-	var probStr string
-	err := tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "max_collision_prob").Scan(&probStr)
+	probStr, err := GetConfigInTx(ctx, tx, "max_collision_prob")
 	if err == nil && probStr != "" {
 		if prob, err := strconv.ParseFloat(probStr, 64); err == nil {
 			cfg.MaxCollisionProbability = prob
 		}
 	}
 
-	var minLenStr string
-	err = tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "min_hash_length").Scan(&minLenStr)
+	minLenStr, err := GetConfigInTx(ctx, tx, "min_hash_length")
 	if err == nil && minLenStr != "" {
 		if minLen, err := strconv.Atoi(minLenStr); err == nil {
 			cfg.MinLength = minLen
 		}
 	}
 
-	var maxLenStr string
-	err = tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "max_hash_length").Scan(&maxLenStr)
+	maxLenStr, err := GetConfigInTx(ctx, tx, "max_hash_length")
 	if err == nil && maxLenStr != "" {
 		if maxLen, err := strconv.Atoi(maxLenStr); err == nil {
 			cfg.MaxLength = maxLen
@@ -663,16 +659,13 @@ func IsDoltNothingToCommit(err error) bool {
 
 // ReadConfigPrefix reads and normalizes issue_prefix from the config table.
 func ReadConfigPrefix(ctx context.Context, tx DBTX) (string, error) {
-	var configPrefix string
-	err := tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "issue_prefix").Scan(&configPrefix)
-	if err == sql.ErrNoRows || configPrefix == "" {
+	configPrefix, err := GetConfigInTx(ctx, tx, "issue_prefix")
+	if configPrefix == "" {
 		yamlPrefix := strings.TrimSpace(config.GetString("issue-prefix"))
 		underscoreYamlPrefix := strings.TrimSpace(config.GetString("issue_prefix"))
 		debug.Logf("Debug: missing config.issue_prefix in database (err=%v, db value=%q, yaml issue-prefix=%q, yaml issue_prefix=%q)\n",
 			err, configPrefix, yamlPrefix, underscoreYamlPrefix)
 		return "", fmt.Errorf("%w: issue_prefix config is missing (run 'bd init --prefix <prefix>' for a new project, or 'bd bootstrap' to clone an existing remote; this check reads the database's config table, so adding 'issue-prefix' to config.yaml does not satisfy it)", storage.ErrNotInitialized)
-	} else if err != nil {
-		return "", fmt.Errorf("failed to get config: %w", err)
 	}
 	return strings.TrimSuffix(configPrefix, "-"), nil
 }
