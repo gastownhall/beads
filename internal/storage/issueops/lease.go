@@ -24,7 +24,8 @@ import (
 // so a live claim's lease_expires_at always sits in the future. A worker that
 // dies stops heartbeating, its lease_expires_at goes stale, and bd reclaim
 // reverts the issue to ready. Tunable per-claim via WithLeaseTTL on the
-// context, falling back to this default.
+// context, then per-deployment via claim.lease-ttl, falling back to this
+// default.
 const DefaultLeaseTTL = 5 * time.Minute
 
 // leaseTTLContextKey overrides DefaultLeaseTTL for a single claim. Used by tests
@@ -39,6 +40,9 @@ func WithLeaseTTL(ctx context.Context, ttl time.Duration) context.Context {
 // leaseTTL resolves the lease TTL for the current claim/heartbeat.
 func leaseTTL(ctx context.Context) time.Duration {
 	if ttl, ok := ctx.Value(leaseTTLContextKey{}).(time.Duration); ok && ttl > 0 {
+		return ttl
+	}
+	if ttl := config.ClaimLeaseTTL(); ttl > 0 {
 		return ttl
 	}
 	return DefaultLeaseTTL
@@ -126,8 +130,8 @@ func FreshRowLock() int64 {
 }
 
 // LeaseTTL is the exported form of leaseTTL: it resolves the lease TTL for the
-// current claim from the context (WithLeaseTTL) or falls back to
-// DefaultLeaseTTL.
+// current claim from the context (WithLeaseTTL), then claim.lease-ttl, or
+// falls back to DefaultLeaseTTL.
 func LeaseTTL(ctx context.Context) time.Duration {
 	return leaseTTL(ctx)
 }
