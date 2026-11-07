@@ -3,15 +3,18 @@ package schema
 import (
 	"context"
 	"database/sql/driver"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
 // The tests here drive restoreWispIsBlocked itself over sqlmock, pinning its
-// probe count and its write order statement by statement. They reference the
-// repair directly, so they exist only from the fix on; the marker-level pins
-// that compile against the shipped tree live in wisp_is_blocked_restore_test.go.
+// probe count, its write order statement by statement, and the errors its
+// probes surface. They reference the repair directly, so they exist only from
+// the fix on; the marker-level pins that compile against the shipped tree
+// live in wisp_is_blocked_restore_test.go.
 
 const (
 	wispTableProbe  = `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`
@@ -111,5 +114,48 @@ func TestIgnored32DropsStaleIndexBeforeRestore(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("the restore must drop the stale index, add the column, recompute the flags, then re-create the index last: %v", err)
+	}
+}
+
+// TestIgnored32PropagatesProbeErrors pins that a failing existence probe
+// surfaces as the repair's own contextual error rather than being swallowed
+// into a wrong branch (a probe error is not a count of zero).
+func TestIgnored32PropagatesProbeErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pattern string
+		args    []driver.Value
+		wrap    string
+	}{
+		{"wisps table probe", wispTableProbe, []driver.Value{"wisps"}, "checking wisps table"},
+		{"column probe", wispColumnProbe, []driver.Value{"wisps", "is_blocked"}, "checking wisps.is_blocked column"},
+		{"index probe", wispIndexProbe, []driver.Value{"wisps", "idx_wisps_is_blocked"}, "checking idx_wisps_is_blocked index"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			// The probes before the failing one succeed: table and column
+			// present, so the order reaches the case's own probe.
+			switch tc.name {
+			case "column probe":
+				expectWispShapeProbe(mock, wispTableProbe, []driver.Value{"wisps"}, 1)
+			case "index probe":
+				expectWispShapeProbe(mock, wispTableProbe, []driver.Value{"wisps"}, 1)
+				expectWispShapeProbe(mock, wispColumnProbe, []driver.Value{"wisps", "is_blocked"}, 1)
+			}
+			mock.ExpectQuery(tc.pattern).WithArgs(tc.args...).
+				WillReturnError(errors.New("probe dropped"))
+
+			err = restoreWispIsBlocked(context.Background(), db)
+			if err == nil {
+				t.Fatal("restoreWispIsBlocked swallowed the probe error")
+			}
+			if !strings.Contains(err.Error(), tc.wrap) || !strings.Contains(err.Error(), "probe dropped") {
+				t.Fatalf("restoreWispIsBlocked err = %v, want %q wrapping the probe error", err, tc.wrap)
+			}
+		})
 	}
 }
