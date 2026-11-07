@@ -83,6 +83,67 @@ func TestCheckBlockedStatus(t *testing.T) {
 			requireStatus(t, store, id, types.StatusBlocked)
 		}
 	})
+
+	// graph_held_and_ordinary_rows_are_ok: with consistent flags, every
+	// status-blocked row the graph holds (an open blocks or conditional-blocks
+	// target, a blocked parent) and the ordinary open, closed and pinned rows
+	// beside them report nothing, and keep their statuses.
+	t.Run("graph_held_and_ordinary_rows_are_ok", func(t *testing.T) {
+		store := newTestDoltStore(t, "bso")
+		blocker := createBlockedStatusIssue(t, store, &types.Issue{Title: "open blocker", Status: types.StatusOpen})
+		heldByBlocks := createBlockedStatusIssue(t, store, &types.Issue{Title: "held by blocks", Status: types.StatusBlocked})
+		addBlockedStatusDep(t, store, heldByBlocks.ID, blocker.ID, types.DepBlocks)
+		heldByConditional := createBlockedStatusIssue(t, store, &types.Issue{Title: "held by conditional-blocks", Status: types.StatusBlocked})
+		addBlockedStatusDep(t, store, heldByConditional.ID, blocker.ID, types.DepConditionalBlocks)
+		parent := createBlockedStatusIssue(t, store, &types.Issue{Title: "blocked parent", Status: types.StatusOpen, IssueType: types.TypeEpic})
+		addBlockedStatusDep(t, store, parent.ID, blocker.ID, types.DepBlocks)
+		heldByParent := createBlockedStatusIssue(t, store, &types.Issue{Title: "held by its parent", Status: types.StatusBlocked})
+		addBlockedStatusDep(t, store, heldByParent.ID, parent.ID, types.DepParentChild)
+		open := createBlockedStatusIssue(t, store, &types.Issue{Title: "ordinary open", Status: types.StatusOpen})
+		closed := createBlockedStatusIssue(t, store, &types.Issue{Title: "ordinary closed", Status: types.StatusOpen})
+		if err := store.CloseIssue(ctx, closed.ID, "done", "test", ""); err != nil {
+			t.Fatal(err)
+		}
+		pinned := createBlockedStatusIssue(t, store, &types.Issue{Title: "ordinary pinned", Status: types.StatusPinned})
+
+		check := CheckBlockedStatus(ctx, store)
+		if check.Status != StatusOK {
+			t.Errorf("check = %s %q (%s), want ok: every status-blocked row here is held by the graph", check.Status, check.Message, check.Detail)
+		}
+		for id, want := range map[string]types.Status{
+			heldByBlocks.ID: types.StatusBlocked, heldByConditional.ID: types.StatusBlocked, heldByParent.ID: types.StatusBlocked,
+			blocker.ID: types.StatusOpen, parent.ID: types.StatusOpen, open.ID: types.StatusOpen,
+			closed.ID: types.StatusClosed, pinned.ID: types.StatusPinned,
+		} {
+			requireStatus(t, store, id, want)
+		}
+	})
+
+	// stale_flag_reports_the_stored_state: the check reads the stored flag,
+	// so a held row whose is_blocked was left clear is named (and kept as it
+	// is) until the existing recompute repairs the flag; rerun, it is ok.
+	t.Run("stale_flag_reports_the_stored_state", func(t *testing.T) {
+		store := newTestDoltStore(t, "bsf")
+		blocker := createBlockedStatusIssue(t, store, &types.Issue{Title: "open blocker", Status: types.StatusOpen})
+		held := createBlockedStatusIssue(t, store, &types.Issue{Title: "held", Status: types.StatusBlocked})
+		addBlockedStatusDep(t, store, held.ID, blocker.ID, types.DepBlocks)
+		if _, err := store.DB().ExecContext(ctx, "UPDATE issues SET is_blocked = 0 WHERE id = ?", held.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Commit(ctx, "test: leave a stale is_blocked flag"); err != nil {
+			t.Fatal(err)
+		}
+		requireBlockedStatusWarning(t, CheckBlockedStatus(ctx, store), 1, []string{held.ID}, 0)
+		requireStatus(t, store, held.ID, types.StatusBlocked)
+
+		if _, err := store.RecomputeAllBlocked(ctx); err != nil {
+			t.Fatalf("RecomputeAllBlocked: %v", err)
+		}
+		if check := CheckBlockedStatus(ctx, store); check.Status != StatusOK {
+			t.Errorf("after the recompute the check = %s %q (%s), want ok", check.Status, check.Message, check.Detail)
+		}
+		requireStatus(t, store, held.ID, types.StatusBlocked)
+	})
 }
 
 // requireBlockedStatusWarning asserts check warns of count issues, naming
@@ -114,7 +175,9 @@ func requireBlockedStatusWarning(t *testing.T, check DoctorCheck, count int, exa
 func createBlockedStatusIssue(t *testing.T, store *dolt.DoltStore, issue *types.Issue) *types.Issue {
 	t.Helper()
 	issue.Priority = 2
-	issue.IssueType = types.TypeTask
+	if issue.IssueType == "" {
+		issue.IssueType = types.TypeTask
+	}
 	if err := store.CreateIssue(context.Background(), issue, "test"); err != nil {
 		t.Fatalf("create %q: %v", issue.Title, err)
 	}
