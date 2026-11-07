@@ -3046,6 +3046,11 @@ func buildServerDSN(cfg *Config, database string) string {
 // autocommit=1. Without this, Dolt rejects merges under autocommit because
 // it cannot expose conflict-resolution tables to the caller.
 //
+// Only the statement's own failure is marked as a transfer failure
+// (remoteTransferError): DSN parse, dial and BEGIN fail before the server ran
+// anything, and a COMMIT failure follows a transfer that ran, so neither gets
+// the server-environment note.
+//
 // Audited for be-b0am's fresh-connection branch hazard: safe — but the two
 // callers are safe for different reasons, so the annotation names both.
 // federation.go's CALL DOLT_PUSH(?, ?) names the refspec explicitly. Its
@@ -3072,7 +3077,7 @@ func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args 
 	}
 	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 		_ = tx.Rollback()
-		return err
+		return remoteTransferFailure(err)
 	}
 	return tx.Commit()
 }
@@ -3081,6 +3086,10 @@ func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args 
 // an explicit transaction. Push operations do not need the pull/merge conflict
 // handling above, and DOLT_PUSH has diverged from direct `dolt push` behavior
 // when wrapped in a SQL transaction.
+//
+// The connection is acquired before the statement runs, so only the
+// statement's own failure is marked as a transfer failure
+// (remoteTransferError); DSN parse and dial failures are not.
 //
 // Audited for be-b0am's fresh-connection branch hazard: safe. Every caller
 // passes s.branch explicitly as a CALL DOLT_PUSH(...) arg, so this fresh
@@ -3091,8 +3100,13 @@ func (s *DoltStore) execWithLongTimeoutNoTx(ctx context.Context, query string, a
 		return err
 	}
 	defer db.Close()
-	_, err = db.ExecContext(ctx, query, args...)
-	return err
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_, err = conn.ExecContext(ctx, query, args...)
+	return remoteTransferFailure(err)
 }
 
 // oneShotConn opens a one-shot connection with the given read deadline
@@ -5423,7 +5437,9 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 	// note on a failed transfer: the CLI routes pass creds' user, the SQL
 	// route only the default remote's user.
 	var sent *remoteCredentials
-	defer func() { retErr = s.withServerEnvNote(ctx, "DOLT_PUSH", remote, sent, retErr) }()
+	// env is bd's environment before withRemoteOperationEnv sets anything.
+	env := os.Environ()
+	defer func() { retErr = s.withServerEnvNote(ctx, "DOLT_PUSH", remote, sent, env, retErr) }()
 	// Git-protocol remotes: use CLI to avoid MySQL connection timeout during transfer.
 	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
 	// but still need CLI to avoid SQL connection timeout.
@@ -5473,11 +5489,11 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 		return withRemoteOperationEnv(creds, s.isS3Remote(ctx, remote), func() error {
 			if force {
 				if err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH('--force', '--user', ?, ?, ?)", s.remoteUser, remote, s.branch); err != nil {
-					return fmt.Errorf("failed to force push to %s/%s: %w", remote, s.branch, remoteTransferFailure(err))
+					return fmt.Errorf("failed to force push to %s/%s: %w", remote, s.branch, err)
 				}
 			} else {
 				if err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH('--user', ?, ?, ?)", s.remoteUser, remote, s.branch); err != nil {
-					return fmt.Errorf("failed to push to %s/%s: %w", remote, s.branch, remoteTransferFailure(err))
+					return fmt.Errorf("failed to push to %s/%s: %w", remote, s.branch, err)
 				}
 			}
 			return nil
@@ -5486,11 +5502,11 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 	return withRemoteOperationEnv(nil, s.isS3Remote(ctx, remote), func() error {
 		if force {
 			if err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH('--force', ?, ?)", remote, s.branch); err != nil {
-				return fmt.Errorf("failed to force push to %s/%s: %w", remote, s.branch, remoteTransferFailure(err))
+				return fmt.Errorf("failed to force push to %s/%s: %w", remote, s.branch, err)
 			}
 		} else {
 			if err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH(?, ?)", remote, s.branch); err != nil {
-				return fmt.Errorf("failed to push to %s/%s: %w", remote, s.branch, remoteTransferFailure(err))
+				return fmt.Errorf("failed to push to %s/%s: %w", remote, s.branch, err)
 			}
 		}
 		return nil
@@ -5801,7 +5817,8 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 	creds := s.credentialsForRemote(remote)
 	// sent is what the route passes with --user (see pushToRemote).
 	var sent *remoteCredentials
-	defer func() { retErr = s.withServerEnvNote(ctx, "DOLT_PULL", remote, sent, retErr) }()
+	env := os.Environ()
+	defer func() { retErr = s.withServerEnvNote(ctx, "DOLT_PULL", remote, sent, env, retErr) }()
 	// Git-protocol remotes: use CLI to avoid MySQL connection timeout during transfer.
 	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
 	// but still need CLI to avoid SQL connection timeout.

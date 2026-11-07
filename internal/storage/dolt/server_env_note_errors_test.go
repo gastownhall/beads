@@ -3,10 +3,11 @@ package dolt
 import (
 	"context"
 	"errors"
-	"net"
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 // TestServerEnvNoteLeavesOtherFailuresUnchanged pins that the
@@ -14,8 +15,9 @@ import (
 // business in: a peer fetch that fails in embedded mode, without matching
 // variables, for a scheme with no credential family, or whose destination bd
 // cannot look up returns exactly the error it returns with no cloud variables
-// set. Where the note is added it is appended to the unchanged message, and
-// errors.Is / errors.As still reach the underlying failure.
+// set. A failure to reach the server at all ran no transfer, so it gets no
+// note either. Where the note is added it is appended to the unchanged
+// message, and errors.Is / errors.As still reach the underlying failure.
 func TestServerEnvNoteLeavesOtherFailuresUnchanged(t *testing.T) {
 	const s3URL = "s3://bucket/beads"
 	fetch := func(t *testing.T, url string, o envNoteOpts, env map[string]string) error {
@@ -45,6 +47,7 @@ func TestServerEnvNoteLeavesOtherFailuresUnchanged(t *testing.T) {
 		{name: "scheme with no credential family", url: "file:///tmp/remote", env: aws},
 		{name: "git protocol on the SQL route", url: "git+https://example.com/org/repo.git", env: aws},
 		{name: "destination unavailable", url: s3URL, o: envNoteOpts{remotesErr: true}, env: aws},
+		{name: "server unreachable", url: s3URL, o: envNoteOpts{unreachable: true}, env: aws},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			want := fetch(t, tc.url, tc.o, nil).Error()
@@ -62,12 +65,20 @@ func TestServerEnvNoteLeavesOtherFailuresUnchanged(t *testing.T) {
 		if !strings.HasPrefix(err.Error(), bare+"; ") {
 			t.Fatalf("Fetch error = %q, want the unnoted error %q with the note appended", err, bare)
 		}
-		var opErr *net.OpError
-		if !errors.As(err, &opErr) {
-			t.Fatalf("errors.As(%v, *net.OpError) = false, want the dial failure reachable through the note", err)
+		var mysqlErr *mysql.MySQLError
+		if !errors.As(err, &mysqlErr) || mysqlErr.Number != 1105 || mysqlErr.Message != refusedCallMessage {
+			t.Fatalf("errors.As(%v, *mysql.MySQLError) = %v, want the refused CALL reachable through the note", err, mysqlErr)
 		}
+		if !errors.Is(err, mysqlErr) {
+			t.Fatalf("errors.Is(%v, the refused CALL's error) = false, want it reachable through the note", err)
+		}
+	})
+
+	t.Run("unreachable server keeps the dial failure unnoted", func(t *testing.T) {
+		err := fetch(t, s3URL, envNoteOpts{unreachable: true}, aws)
+		checkServerEnvNote(t, err, "DOLT_FETCH", "", s3URL)
 		if !errors.Is(err, syscall.ECONNREFUSED) {
-			t.Fatalf("errors.Is(%v, ECONNREFUSED) = false, want the dial failure reachable through the note", err)
+			t.Fatalf("errors.Is(%v, ECONNREFUSED) = false, want the dial failure reachable", err)
 		}
 	})
 }

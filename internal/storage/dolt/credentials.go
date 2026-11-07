@@ -913,11 +913,13 @@ func remoteTransferFailure(err error) error {
 // remote with serverEnvNote. In server mode the transfer runs in the Dolt
 // server's process on both routes: CALL DOLT_* directly, and the dolt CLI
 // because bd runs it only in a directory that server serves, which hands the
-// operation to it. sent is what the operation passed with --user. The error
-// is returned unchanged when it is not a transfer failure, already carries
-// the note, carries merge conflicts, or the remote's URL cannot be read, and
-// in embedded mode, where the transfer runs in this process.
-func (s *DoltStore) withServerEnvNote(ctx context.Context, procedure, remote string, sent *remoteCredentials, err error) error {
+// operation to it. sent is what the operation passed with --user, and
+// environ is bd's environment, snapshotted before withRemoteOperationEnv set
+// anything process-wide. The error is returned unchanged when it is not a
+// transfer failure, already carries the note, carries merge conflicts, or the
+// remote's URL cannot be read, and in embedded mode, where the transfer runs
+// in this process.
+func (s *DoltStore) withServerEnvNote(ctx context.Context, procedure, remote string, sent *remoteCredentials, environ []string, err error) error {
 	if err == nil || !s.serverMode {
 		return err
 	}
@@ -940,7 +942,7 @@ func (s *DoltStore) withServerEnvNote(ctx context.Context, procedure, remote str
 			break
 		}
 	}
-	note := serverEnvNote(procedure, remoteURL, sent, os.Environ())
+	note := serverEnvNote(procedure, remoteURL, sent, environ)
 	if note == "" {
 		return err
 	}

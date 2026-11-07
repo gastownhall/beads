@@ -42,11 +42,15 @@ type envNoteOpts struct {
 	remoteUser, remotePassword string
 	// remotesErr makes the dolt_remotes listing fail.
 	remotesErr bool
+	// unreachable makes the SQL routes fail to reach the server at all
+	// (unroutableConnStr), before any transfer statement runs.
+	unreachable bool
 }
 
-// envNoteStore is a store with one remote, name at url, whose SQL routes fail
-// at once (unroutableConnStr) and whose dolt_remotes and federation_peers
-// rows sqlmock serves. The returned mock takes further expectations.
+// envNoteStore is a store with one remote, name at url, whose SQL routes reach
+// a server that refuses every transfer statement (refusingSQLServer), or none
+// at all with o.unreachable, and whose dolt_remotes and federation_peers rows
+// sqlmock serves. The returned mock takes further expectations.
 func envNoteStore(t *testing.T, name, url string, o envNoteOpts) (*DoltStore, sqlmock.Sqlmock) {
 	t.Helper()
 	db, mock, err := sqlmock.New()
@@ -68,6 +72,10 @@ func envNoteStore(t *testing.T, name, url string, o envNoteOpts) (*DoltStore, sq
 		}
 		mock.ExpectQuery("FROM federation_peers WHERE name").WillReturnRows(peers)
 	}
+	connStr := unroutableConnStr
+	if !o.unreachable {
+		connStr = refusingSQLServer(t)
+	}
 	beadsDir := unmanagedWorkspace(t)
 	store := &DoltStore{
 		serverMode:     !o.embedded,
@@ -81,7 +89,7 @@ func envNoteStore(t *testing.T, name, url string, o envNoteOpts) (*DoltStore, sq
 		remotePassword: o.remotePassword,
 		db:             db,
 		cfg:            &Config{ServerHost: "127.0.0.1", ServerPort: 3310},
-		connStr:        unroutableConnStr,
+		connStr:        connStr,
 	}
 	if o.cli {
 		serveDoltDatabase(t, store, store.dbPath, 3310)
