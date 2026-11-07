@@ -154,9 +154,8 @@ rebuild a damaged store. Follow
 the damaged store and its configuration first, then recover into a fresh store
 from a Dolt remote, a Dolt-native backup, or a JSONL export.
 
-In releases after v1.3.2, the `bd doctor --fix` repairs that replace a
-database (automatic integrity recovery and the repo fingerprint fix's
-"Reinitialize database" choice) accept only a database path from
+In releases after v1.3.2, automatic integrity recovery (the `bd doctor --fix`
+repair that replaces a database) accepts only a database path from
 `metadata.json` that lies under the workspace's `.beads` directory as written,
 or the location `BEADS_DOLT_DATA_DIR` selects. A `dolt_data_dir` or `database`
 outside `.beads`, at `.beads` itself, a symlinked database, or a path that
