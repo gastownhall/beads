@@ -703,6 +703,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd create` and the routing lookup read only the routing settings, in one
+  query.** `bd create` read up to six `routing.*` and `contributor.*` keys one at
+  a time, and `bd list` and `bd ready` read the whole config table for those same
+  keys, including `kv.*` rows such as memories, which can reach megabytes. Both now
+  read just those keys. Precedence is unchanged: `config.yaml` first, then the
+  database, with the legacy `contributor.*` keys filling only what the `routing.*`
+  keys leave empty.
 - **Server mode: one-statement settings reads no longer open a transaction.**
   `GetConfig`, `GetAllConfig`, `GetConfigByPrefix`, `GetMetadata`,
   `GetLocalMetadata` and `GetInfraTypes` sent `START TRANSACTION` and `ROLLBACK`
