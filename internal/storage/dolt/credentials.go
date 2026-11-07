@@ -11,10 +11,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -958,6 +960,7 @@ func (s *DoltStore) withServerCredentialsNote(ctx context.Context, remote, op st
 // when bd cannot list the remote. It names variables, never their values,
 // and does not say they caused the failure, which may be a network or
 // permission error, unless the server's own missing-password error is there.
+// It ends with how to restart the server with them (serverRestartGuidance).
 func (s *DoltStore) serverCredentialsNote(ctx context.Context, remote, op string, peer bool, creds *remoteCredentials, cause error) string {
 	if !s.serverMode {
 		return ""
@@ -1004,7 +1007,26 @@ func (s *DoltStore) serverCredentialsNote(ctx context.Context, remote, op string
 			b.WriteString("; one server-wide DOLT_REMOTE_PASSWORD goes with every user bd passes, so it cannot supply different passwords for different peers")
 		}
 	}
+	b.WriteString("; ")
+	b.WriteString(s.serverRestartGuidance(names))
 	return b.String()
+}
+
+// serverRestartGuidance tells the operator how to give the server names (the
+// variables it needs) in its startup environment. Only a server
+// ManagedServerDir proves bd started for this workspace is one bd can stop
+// and start; a database directory the server holds (cliDirServesServer) does
+// not show who started it. For any other server it points at that server's
+// own environment and offers no bd command.
+func (s *DoltStore) serverRestartGuidance(names string) string {
+	if _, managed := s.ManagedServerDir(); managed {
+		return fmt.Sprintf("to give the server bd started for this workspace %s, run `bd dolt stop`, then `bd dolt start` from a shell that exports %s, then retry", names, names)
+	}
+	addr := "the Dolt server"
+	if s.cfg != nil && s.cfg.ServerHost != "" && s.cfg.ServerPort > 0 {
+		addr = fmt.Sprintf("the Dolt server at %s", net.JoinHostPort(s.cfg.ServerHost, strconv.Itoa(s.cfg.ServerPort)))
+	}
+	return fmt.Sprintf("bd cannot show that it started this server, so set %s in the environment of %s and restart that server, then retry", names, addr)
 }
 
 // sqlRemoteURL returns the URL the server lists for remote, or "" when it

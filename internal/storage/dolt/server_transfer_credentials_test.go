@@ -368,3 +368,77 @@ func TestServerRunPeerTransferFailureNamesThePeersServerEnvironment(t *testing.T
 		})
 	}
 }
+
+// TestServerRunTransferFailureGuidesByServerOwnership pins the remedy the
+// note ends with (AC-3): only a server ManagedServerDir proves bd started
+// for this workspace gets the operator-run `bd dolt stop` and `bd dolt
+// start` from a shell exporting what the server needs; a server bd cannot
+// show it started (none recorded, or a recorded process that is not a dolt
+// sql-server although the database directory is served) gets directions to
+// that server's own environment and no bd restart commands.
+func TestServerRunTransferFailureGuidesByServerOwnership(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fake")
+	}
+	clearPredicateEnv(t)
+	clearCloudAuthEnv(t)
+	const hostedURL = "https://doltremoteapi.dolthub.com/org/repo"
+	const azURL = "az://account.blob.core.windows.net/container/beads"
+	const refused = "could not access dolt url: connection refused"
+	const external = "in the environment of the Dolt server at 127.0.0.1:3310"
+
+	for _, tc := range []struct {
+		name      string
+		workspace func(t *testing.T) string
+		url       string
+		served    bool
+		cloud     bool
+		failure   string
+		want      []string
+		notWant   []string
+	}{
+		{
+			name: "server bd manages, CLI route", workspace: func(t *testing.T) string { return doltManagedWorkspace(t, 3310) },
+			url: hostedURL, served: true, failure: refused,
+			want:    []string{"run `bd dolt stop`, then `bd dolt start` from a shell that exports DOLT_REMOTE_PASSWORD, then retry"},
+			notWant: []string{external},
+		},
+		{
+			name: "server bd manages, SQL route, cloud remote", workspace: func(t *testing.T) string { return doltManagedWorkspace(t, 3310) },
+			url: azURL, cloud: true, failure: "failed to push to origin/main",
+			want:    []string{"`bd dolt start` from a shell that exports AZURE_STORAGE_*"},
+			notWant: []string{external},
+		},
+		{
+			name: "no server recorded, SQL route", workspace: unmanagedWorkspace,
+			url: hostedURL, failure: "failed to push to origin/main",
+			want:    []string{"set DOLT_REMOTE_PASSWORD " + external + " and restart that server, then retry"},
+			notWant: []string{"bd dolt stop", "bd dolt start"},
+		},
+		{
+			name: "served directory, recorded process not a dolt sql-server", workspace: func(t *testing.T) string { return managedWorkspace(t, 3310) },
+			url: hostedURL, served: true, failure: refused,
+			want:    []string{external},
+			notWant: []string{"bd dolt stop", "bd dolt start"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			failingDoltOnPath(t, tc.failure, "origin "+tc.url)
+			if tc.cloud {
+				t.Setenv("AZURE_STORAGE_KEY", "cloud-secret")
+			}
+			user, pass := "admin", "client-secret"
+			if tc.cloud {
+				user, pass = "", ""
+			}
+			store, _ := serverTransferStore(t, tc.workspace(t), 3310, tc.served, user, pass, [2]string{"origin", tc.url})
+			err := store.Push(context.Background())
+			requireServerNote(t, err, tc.failure, tc.want, "client-secret", "cloud-secret")
+			for _, nw := range tc.notWant {
+				if strings.Contains(err.Error(), nw) {
+					t.Errorf("error %q says %q", err, nw)
+				}
+			}
+		})
+	}
+}
