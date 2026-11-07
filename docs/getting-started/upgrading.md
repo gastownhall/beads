@@ -826,8 +826,10 @@ refused), bd keeps the old version in `.beads/.local_version`, so the next
 command that runs version maintenance tries again instead of skipping the
 upgrade. Two outcomes settle the upgrade without migrating: a migration-gate
 or consent refusal (the gate's own notice names the decision; an explicit
-`bd migrate schema` or `bd adopt` carries it out), and a performed pre-0.56
-database recovery, which is not repeated.
+`bd migrate schema`, or adopting the migrated database as
+[Remote-backed databases and multiple clones](#remote-backed-databases-and-multiple-clones)
+describes, carries it out), and a performed pre-0.56 database recovery, which
+is not repeated.
 
 When the refusal is because a pending migration alters a table with
 uncommitted changes, bd prints which tables and which workspace:
@@ -845,10 +847,14 @@ bd dolt commit
 bd migrate schema
 ```
 
-`bd migrate schema` is the explicit consent that the automatic path does not
-have. Remote-backed and shared databases still follow the migrator and adopt
-rules in [Database Migrations](#database-migrations). Under `--json` this
-notice is not printed; `bd upgrade status --json` shows the pending upgrade.
+bd reaches this refusal only with migration consent in effect
+(`BD_ALLOW_MIGRATE=1` or `BD_ALLOW_REMOTE_MIGRATE=1` in the environment, or
+`bd migrate schema` itself); without consent the upgrade stops earlier, at the
+consent refusal. If that variable is still exported after the commit, the
+next bd command that opens the database applies the migration by itself.
+Remote-backed and shared databases still follow the migrator and adopt rules
+in [Database Migrations](#database-migrations). Under `--json` this notice is
+not printed.
 
 ### Recovery after upgrade
 

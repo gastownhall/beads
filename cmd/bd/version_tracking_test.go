@@ -906,13 +906,32 @@ func TestVersionBump_DirtyTablesNotice(t *testing.T) {
 }
 
 // TestNoticeDirtyTablesRefusal pins that the dirty-table notice fires only for
-// a dirty-table refusal: any other maintenance failure stays on BD_DEBUG.
+// a dirty-table refusal: any other maintenance failure stays on BD_DEBUG. It
+// also pins how the notice names the workspace.
 func TestNoticeDirtyTablesRefusal(t *testing.T) {
 	pinJSONOutput(t, false) // a json leak from another test must not read as silence
 	t.Run("untyped error prints nothing", func(t *testing.T) {
 		out := captureNoticeStderr(t, func() { noticeDirtyTablesRefusal(errors.New("connection refused"), "/ws/.beads") })
 		if out != "" {
 			t.Errorf("only a dirty-table refusal should produce a notice, got:\n%s", out)
+		}
+	})
+
+	// The path comes from the filesystem, so it is spelled as remedy.PrintedValue
+	// spells it, and it is named rather than pasted into a BEADS_DIR prefix,
+	// which has no per-command form on Windows (where #6929 was reported).
+	t.Run("names the workspace escaped, outside any command", func(t *testing.T) {
+		out := captureNoticeStderr(t, func() {
+			noticeDirtyTablesRefusal(&schema.DirtyTablesError{Tables: []string{"issues"}}, "/ws/a\r\x1b[2Kb/.beads")
+		})
+		if strings.ContainsAny(out, "\r\x1b") {
+			t.Errorf("notice printed the workspace path's control characters raw:\n%q", out)
+		}
+		if want := `"/ws/a\r\x1b[2Kb/.beads"`; !strings.Contains(out, want) {
+			t.Errorf("notice does not name the workspace escaped as %s:\n%q", want, out)
+		}
+		if strings.Contains(out, "BEADS_DIR") {
+			t.Errorf("notice pastes the workspace into a BEADS_DIR form:\n%s", out)
 		}
 	})
 }

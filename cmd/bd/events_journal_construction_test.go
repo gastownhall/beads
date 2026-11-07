@@ -134,7 +134,7 @@ var constructionExemptions = map[string]string{
 	// It writes only local_metadata, which is dolt-ignored working-set state and
 	// not a bead mutation. Journaling it would record a row for something a
 	// replay consumer has no bead to apply it to.
-	"version_tracking.go:autoMigrateOnVersionBump": "store-open-time version reconciliation: writes only dolt-ignored local_metadata, never a bead, and runs before the command's own store is configured",
+	"version_tracking.go:reconcileVersionBumpStore": "store-open-time version reconciliation: writes only dolt-ignored local_metadata, never a bead, and runs before the command's own store is configured",
 
 	// Config reads through a throwaway store. GetConfig only; nothing here
 	// mutates a bead.

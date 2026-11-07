@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/schema"
@@ -487,26 +488,26 @@ func noticeSharedMigrateRefusal(err error) {
 	if globalFlag {
 		consent = schema.SharedConsentCommandGlobal
 	}
-	var remedy string
+	var advice string
 	switch gateErr.Decision {
 	case "shared-no-remote":
-		remedy = fmt.Sprintf("Run '%s' once every client of this server is upgraded; reads keep working meanwhile.", consent)
+		advice = fmt.Sprintf("Run '%s' once every client of this server is upgraded; reads keep working meanwhile.", consent)
 	case "adopt", "adopt-ff":
 		// The remote is already migrated: migrating here would fork it, and
 		// the verb consent deliberately does not unlock this arm.
-		remedy = "Another clone has already migrated this database — adopt it with 'bd bootstrap' rather than migrating here; reads keep working meanwhile."
+		advice = "Another clone has already migrated this database — adopt it with 'bd bootstrap' rather than migrating here; reads keep working meanwhile."
 	case "fork-skew":
-		remedy = "This database and its remote already applied different content for the same migration (#4259) — run 'bd doctor' and follow its migration-content-skew guidance; do not migrate."
+		advice = "This database and its remote already applied different content for the same migration (#4259) — run 'bd doctor' and follow its migration-content-skew guidance; do not migrate."
 	default:
 		// The blunt remote-backed stop, including the shared-store
 		// first-mover suppression. Its full block names the designated-
 		// migrator and adopt paths with their preconditions, and picking one
 		// here would be guessing.
-		remedy = "This database has a remote — run 'bd migrate' to see the migrate-or-adopt options before choosing; reads keep working meanwhile."
+		advice = "This database has a remote — run 'bd migrate' to see the migrate-or-adopt options before choosing; reads keep working meanwhile."
 	}
 	fmt.Fprintf(os.Stderr,
 		"bd upgraded to %s: %d schema migration(s) pending on this database — not auto-applying (#5920).\n%s\n",
-		displayVersion(Version), gateErr.Pending, remedy)
+		displayVersion(Version), gateErr.Pending, advice)
 }
 
 // noticeDirtyTablesRefusal reports a version-bump migration refused by the
@@ -518,13 +519,22 @@ func noticeSharedMigrateRefusal(err error) {
 // own database — the pre-run opens it with NewFromConfig(beadsDir) before any
 // --global override of the command's store, and doctor runs it against its
 // target — so the notice prescribes the commit and the migration there rather
-// than guessing at the command's later selection. It does not promise that
-// some next command applies the migration: that needs consent, which
-// 'bd migrate schema' carries and an ordinary command does not.
+// than guessing at the command's later selection. It names the workspace
+// (remedy.PrintedValue) instead of pasting it into the commands: a BEADS_DIR
+// prefix has no per-command form on Windows, and an exported BEADS_DIR would
+// send every later command, in every project, to this workspace.
+//
+// The refusal is only reached with migration consent in effect
+// (schema.MigrateUp checks consent before the dirty-table guard; without it
+// the bump settles on the consent refusal instead). The notice still
+// prescribes 'bd migrate schema' rather than the next command: an exported
+// consent variable (BD_ALLOW_MIGRATE, BD_ALLOW_REMOTE_MIGRATE) applies the
+// migration on the first command after the commit, but consent given for one
+// command does not carry over.
 //
 // Under --json it writes nothing: the command's own output (or its own
-// refusal) is the machine-readable result on these streams, and the marker
-// stays pending, so `bd upgrade status --json` still shows the bump.
+// refusal) is the machine-readable result on these streams. The marker stays
+// pending either way, so the next command retries the maintenance.
 func noticeDirtyTablesRefusal(err error, beadsDir string) {
 	var dirtyErr *schema.DirtyTablesError
 	if !errors.As(err, &dirtyErr) || jsonOutput {
@@ -532,8 +542,8 @@ func noticeDirtyTablesRefusal(err error, beadsDir string) {
 	}
 	fmt.Fprintf(os.Stderr,
 		"bd upgraded to %s: schema migration of %s refused — uncommitted changes in table(s) %s (#4566).\n"+
-			"Commit them, then migrate that workspace: run 'bd dolt commit', then 'bd migrate schema' (with BEADS_DIR=%s). The upgrade stays pending until then.\n",
-		displayVersion(Version), beadsDir, strings.Join(dirtyErr.Tables, ", "), beadsDir)
+			"Commit them, then migrate: run 'bd dolt commit', then 'bd migrate schema', in that workspace. The upgrade stays pending until then.\n",
+		displayVersion(Version), remedy.PrintedValue(beadsDir), remedy.PrintedList(dirtyErr.Tables, ", "))
 }
 
 // recordedWorkspaceVersion reads the marker through the role's accessor on a
