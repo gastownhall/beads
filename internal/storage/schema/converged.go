@@ -55,6 +55,11 @@ func alreadyConverged(ctx context.Context, db DBConn, databaseName string, selec
 		return false, nil
 	}
 
+	// This probe writes nothing, so its table lookups share one listing instead
+	// of sending a dozen. tableListingUnchanged below re-reads it before the lock
+	// term, so the listing is no older than the lookups' last answer used to be.
+	ctx = withTableListing(ctx)
+
 	// Exactly MigrateUp's own gate, and it runs first: on a fresh or
 	// mid-upgrade database it reports work needed from the cursor probe alone,
 	// before any statement that could fail against a missing table.
@@ -99,14 +104,26 @@ func alreadyConverged(ctx context.Context, db DBConn, databaseName string, selec
 	// deliberately non-ignored table that the next pull's auto-commit puts
 	// into HEAD and push replicates fleet-wide.
 	//
-	// Two SHOW TABLES listings on the hot path, safe to issue because
-	// selectTargetDatabase has put the session on the target (see
+	// A SHOW TABLES listing at HEAD plus the working-set listing already held,
+	// safe because selectTargetDatabase has put the session on the target (see
 	// readIgnoredCursorState).
 	state, err := readIgnoredCursorState(ctx, db, qualifier)
 	if err != nil {
 		return false, err
 	}
 	if state.reconcileNeeded() {
+		return false, nil
+	}
+
+	// Every table lookup above answered from the first listing. A peer that
+	// dropped a sentinel or left a scratch table since then and has already
+	// released the lock would pass the lock term below, so see the tables again
+	// first. A different answer for any of them declines onto the locked path.
+	unchanged, err := tableListingUnchanged(ctx, db)
+	if err != nil {
+		return false, err
+	}
+	if !unchanged {
 		return false, nil
 	}
 

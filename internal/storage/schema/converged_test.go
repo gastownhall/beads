@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -102,6 +103,63 @@ func expectNoMigrationWorkNeededAtVersion(mock sqlmock.Sqlmock, mainVersion int)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
 }
 
+// expectProbeFindsNoWork mocks migrationWorkNeeded as alreadyConverged runs it,
+// on one table listing: the first cursor probe's schemata read and SHOW TABLES,
+// which every later table lookup in the probe answers from, so a second listing
+// is an unexpected statement. extraTables join the listing.
+func expectProbeFindsNoWork(mock sqlmock.Sqlmock, extraTables ...string) {
+	expectProbeFindsNoWorkAtVersion(mock, LatestVersion(), extraTables...)
+}
+
+// expectProbeFindsNoWorkAtVersion is the same, with the main cursor reporting
+// mainVersion (which may be ahead of this binary's latest).
+func expectProbeFindsNoWorkAtVersion(mock sqlmock.Sqlmock, mainVersion int, extraTables ...string) {
+	expectProbeListing(mock, append(probeTables(), extraTables...))
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", mainVersion)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+	for _, sc := range ignoredSource.sentinelColumns {
+		expectSentinelColumnRead(mock, sc)
+	}
+	expectContentHashColumnExists(mock)
+	expectContentHashColumnExists(mock)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+}
+
+// probeTables is every table the probe looks up on a healthy database.
+func probeTables() []string {
+	tables := []string{"schema_migrations", "ignored_schema_migrations"}
+	tables = append(tables, ignoredSource.sentinelTables...)
+	for _, st := range ignoredSource.sentinelFlooredTables {
+		tables = append(tables, st.table)
+	}
+	for _, sc := range ignoredSource.sentinelColumns {
+		tables = append(tables, sc.table)
+	}
+	return tables
+}
+
+// expectProbeListing mocks the probe's one listing. It always carries an
+// unrelated table, as expectShowTable's does.
+func expectProbeListing(mock sqlmock.Sqlmock, tables []string) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = DATABASE()")).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	rows := sqlmock.NewRows([]string{"Tables_in_testdb"}).AddRow("issues")
+	for _, table := range tables {
+		rows.AddRow(table)
+	}
+	mock.ExpectQuery("^SHOW TABLES$").WillReturnRows(rows)
+}
+
+// expectSentinelColumnRead mocks a sentinel column's SHOW COLUMNS read, its
+// carrier table already answered by the listing.
+func expectSentinelColumnRead(mock sqlmock.Sqlmock, sc schemaSentinelColumn) {
+	rows := sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"}).
+		AddRow(sc.column, "varchar(255)", "YES", "", nil, "")
+	mock.ExpectQuery(regexp.QuoteMeta("SHOW COLUMNS FROM " + sc.table + " LIKE '" + sc.column + "'")).
+		WillReturnRows(rows)
+}
+
 // expectDoltIgnoreRead mocks the read-only dolt_ignore probe, returning
 // exactly the patterns given. The read is schema-qualified (dolt_ignore is a
 // Dolt system table and is not listed in information_schema.tables, so it
@@ -117,9 +175,24 @@ func expectDoltIgnoreRead(mock sqlmock.Sqlmock, table string, patterns []string)
 		WillReturnRows(rows)
 }
 
-// expectMigrationLockProbe mocks the fast path's LAST predicate: is anyone
-// holding the database-scoped migration lock right now?
+// expectProbeRelisting mocks the table listing the probe re-reads before its lock
+// term, holding exactly the tables expectProbeFindsNoWork listed.
+func expectProbeRelisting(mock sqlmock.Sqlmock, tables ...string) {
+	if len(tables) == 0 {
+		tables = probeTables()
+	}
+	rows := sqlmock.NewRows([]string{"Tables_in_testdb"}).AddRow("issues")
+	for _, table := range tables {
+		rows.AddRow(table)
+	}
+	mock.ExpectQuery("^SHOW TABLES$").WillReturnRows(rows)
+}
+
+// expectMigrationLockProbe mocks the fast path's LAST predicates: the tables are
+// the ones it started from, and is anyone holding the database-scoped migration
+// lock right now?
 func expectMigrationLockProbe(mock sqlmock.Sqlmock, database string, free any) {
+	expectProbeRelisting(mock)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT IS_FREE_LOCK(?)")).
 		WithArgs(MigrationLockName(database)).
 		WillReturnRows(sqlmock.NewRows([]string{"free"}).AddRow(free))
@@ -142,9 +215,9 @@ func seededIgnorePatterns(mainVersion int) []string {
 // unqualified against the session database DATABASE() just confirmed.
 func expectConvergedProbe(mock sqlmock.Sqlmock, database string) {
 	expectCurrentDatabase(mock, database)
-	expectNoMigrationWorkNeeded(mock)
+	expectProbeFindsNoWork(mock)
 	expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
-	expectIgnoredCursorGate(mock, "", false, nil, false)
+	expectHeadTableProbe(mock, "", ignoredSource.cursorTable, false)
 	expectMigrationLockProbe(mock, database, 1)
 }
 
@@ -227,9 +300,9 @@ func TestMigrateUpWithLockSkipsLockOnAnUnselectedSession(t *testing.T) {
 	defer cleanup()
 
 	expectSessionPutOnDatabase(mock, "testdb")
-	expectNoMigrationWorkNeeded(mock)
+	expectProbeFindsNoWork(mock)
 	expectDoltIgnoreRead(mock, qualifiedDoltIgnore("testdb"), seededIgnorePatterns(LatestVersion()))
-	expectIgnoredCursorGate(mock, "`testdb`", false, nil, false)
+	expectHeadTableProbe(mock, "`testdb`", ignoredSource.cursorTable, false)
 	expectMigrationLockProbe(mock, "testdb", 1)
 
 	prepared := 0
@@ -498,9 +571,9 @@ func TestAlreadyConvergedDeclinesWhileTheMigrationLockIsHeld(t *testing.T) {
 			db, mock := newMockDB(t)
 
 			expectCurrentDatabase(mock, "testdb")
-			expectNoMigrationWorkNeeded(mock)
+			expectProbeFindsNoWork(mock)
 			expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
-			expectIgnoredCursorGate(mock, "", false, nil, false)
+			expectHeadTableProbe(mock, "", ignoredSource.cursorTable, false)
 			expectMigrationLockProbe(mock, "testdb", tt.free)
 
 			converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
@@ -557,7 +630,7 @@ func TestAlreadyConvergedRejectsUnderSeededDoltIgnore(t *testing.T) {
 				}
 			}
 			expectCurrentDatabase(mock, "testdb")
-			expectNoMigrationWorkNeeded(mock)
+			expectProbeFindsNoWork(mock)
 			expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, present)
 
 			converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
@@ -656,11 +729,11 @@ func TestAlreadyConvergedAcceptsOverriddenIgnorePattern(t *testing.T) {
 	db, mock := newMockDB(t)
 
 	expectCurrentDatabase(mock, "testdb")
-	expectNoMigrationWorkNeeded(mock)
+	expectProbeFindsNoWork(mock)
 	// The probe selects patterns only; the mock never offers the ignored
 	// column, so a query that filtered on it would not match this expectation.
 	expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
-	expectIgnoredCursorGate(mock, "", false, nil, false)
+	expectHeadTableProbe(mock, "", ignoredSource.cursorTable, false)
 	expectMigrationLockProbe(mock, "testdb", 1)
 
 	converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
@@ -688,9 +761,9 @@ func TestAlreadyConvergedOnForwardSkew(t *testing.T) {
 
 	ahead := LatestVersion() + 5
 	expectCurrentDatabase(mock, "testdb")
-	expectNoMigrationWorkNeededAtVersion(mock, ahead)
+	expectProbeFindsNoWorkAtVersion(mock, ahead)
 	expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(ahead))
-	expectIgnoredCursorGate(mock, "", false, nil, false)
+	expectHeadTableProbe(mock, "", ignoredSource.cursorTable, false)
 	expectMigrationLockProbe(mock, "testdb", 1)
 
 	converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
@@ -731,7 +804,7 @@ func TestAlreadyConvergedFailsClosedOnUnreadableState(t *testing.T) {
 		db, mock := newMockDB(t)
 
 		expectCurrentDatabase(mock, "testdb")
-		expectNoMigrationWorkNeeded(mock)
+		expectProbeFindsNoWork(mock)
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT pattern FROM dolt_ignore")).
 			WillReturnError(sql.ErrConnDone)
 
@@ -748,9 +821,10 @@ func TestAlreadyConvergedFailsClosedOnUnreadableState(t *testing.T) {
 		db, mock := newMockDB(t)
 
 		expectCurrentDatabase(mock, "testdb")
-		expectNoMigrationWorkNeeded(mock)
+		expectProbeFindsNoWork(mock)
 		expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
-		expectIgnoredCursorGate(mock, "", false, nil, false)
+		expectHeadTableProbe(mock, "", ignoredSource.cursorTable, false)
+		expectProbeRelisting(mock)
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT IS_FREE_LOCK(?)")).
 			WillReturnError(sql.ErrConnDone)
 
@@ -831,4 +905,217 @@ func captureStderr(t *testing.T, fn func()) string {
 		fn()
 	}()
 	return <-done
+}
+
+// TestAlreadyConvergedDeclinesOnATableMissingFromTheListing: sharing one listing
+// must not cost the probe its answer about any table in it. Each sentinel the
+// cursor is checked against, gone from the listing, still means work is needed.
+func TestAlreadyConvergedDeclinesOnATableMissingFromTheListing(t *testing.T) {
+	floored := make([]string, 0, len(ignoredSource.sentinelFlooredTables))
+	for _, st := range ignoredSource.sentinelFlooredTables {
+		floored = append(floored, st.table)
+	}
+	for _, missing := range append(append([]string(nil), ignoredSource.sentinelTables...), floored...) {
+		t.Run(missing, func(t *testing.T) {
+			db, mock := newMockDB(t)
+
+			var present []string
+			for _, table := range probeTables() {
+				if table != missing {
+					present = append(present, table)
+				}
+			}
+			expectCurrentDatabase(mock, "testdb")
+			expectProbeListing(mock, present)
+			expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+			expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+			if slices.Contains(floored, missing) {
+				for _, sc := range ignoredSource.sentinelColumns {
+					if sc.table != missing {
+						expectSentinelColumnRead(mock, sc)
+					}
+				}
+			}
+
+			converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
+			if err != nil {
+				t.Fatalf("alreadyConverged() error = %v", err)
+			}
+			if converged {
+				t.Fatalf("alreadyConverged() = true with %s missing, want false", missing)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+		})
+	}
+}
+
+// TestAlreadyConvergedDeclinesWhenTheTablesChangedUnderIt closes what sharing one
+// listing would otherwise open. A peer can drop a sentinel or leave a scratch table
+// after the probe's listing and release the lock before its last term, which then
+// reads free. The re-read sees the difference, so the probe declines onto the
+// locked path, and never reaches the lock term.
+func TestAlreadyConvergedDeclinesWhenTheTablesChangedUnderIt(t *testing.T) {
+	without := func(drop string) []string {
+		var tables []string
+		for _, table := range probeTables() {
+			if table != drop {
+				tables = append(tables, table)
+			}
+		}
+		return tables
+	}
+	for _, tc := range []struct {
+		name  string
+		after []string
+	}{
+		{name: "a sentinel was dropped", after: without(ignoredSource.sentinelTables[0])},
+		{name: "a scratch table appeared", after: append(probeTables(), ignoredCursorUntrackTempTable)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock := newMockDB(t)
+
+			expectCurrentDatabase(mock, "testdb")
+			expectProbeFindsNoWork(mock)
+			expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
+			expectHeadTableProbe(mock, "", ignoredSource.cursorTable, false)
+			expectProbeRelisting(mock, tc.after...)
+
+			converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
+			if err != nil {
+				t.Fatalf("alreadyConverged() error = %v", err)
+			}
+			if converged {
+				t.Fatal("alreadyConverged() = true after the tables changed, want false")
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+		})
+	}
+
+	t.Run("a table the probe never asked about changes nothing", func(t *testing.T) {
+		db, mock := newMockDB(t)
+
+		expectCurrentDatabase(mock, "testdb")
+		expectProbeFindsNoWork(mock)
+		expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
+		expectHeadTableProbe(mock, "", ignoredSource.cursorTable, false)
+		expectProbeRelisting(mock, append(probeTables(), "some_other_clients_table")...)
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT IS_FREE_LOCK(?)")).
+			WithArgs(MigrationLockName("testdb")).
+			WillReturnRows(sqlmock.NewRows([]string{"free"}).AddRow(1))
+
+		converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
+		if err != nil {
+			t.Fatalf("alreadyConverged() error = %v", err)
+		}
+		if !converged {
+			t.Fatal("alreadyConverged() = false over an unrelated table, want true: declining takes the migration lock")
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	t.Run("a failed re-read fails closed", func(t *testing.T) {
+		db, mock := newMockDB(t)
+
+		expectCurrentDatabase(mock, "testdb")
+		expectProbeFindsNoWork(mock)
+		expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
+		expectHeadTableProbe(mock, "", ignoredSource.cursorTable, false)
+		mock.ExpectQuery("^SHOW TABLES$").WillReturnError(sql.ErrConnDone)
+
+		converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
+		if err == nil {
+			t.Fatal("alreadyConverged() error = nil, want the re-read's failure")
+		}
+		if converged {
+			t.Fatal("alreadyConverged() = true on a failed re-read, want false")
+		}
+	})
+}
+
+// TestTableListingIsSharedOnlyWhereTheContextSaysSo pins the listing's scope. A
+// probe outside withTableListing reads its own listing, which is what MigrateUp
+// relies on while it creates and drops tables. A probe inside shares one, folds
+// case the way the unshared probe does, and never remembers a failed read.
+func TestTableListingIsSharedOnlyWhereTheContextSaysSo(t *testing.T) {
+	listing := func(names ...string) *sqlmock.Rows {
+		rows := sqlmock.NewRows([]string{"Tables_in_testdb"})
+		for _, name := range names {
+			rows.AddRow(name)
+		}
+		return rows
+	}
+	probe := func(t *testing.T, ctx context.Context, db DBConn, table string, want bool) {
+		t.Helper()
+		got, err := showTableExists(ctx, db, table)
+		if err != nil {
+			t.Fatalf("showTableExists(%s): %v", table, err)
+		}
+		if got != want {
+			t.Fatalf("showTableExists(%s) = %v, want %v", table, got, want)
+		}
+	}
+
+	t.Run("no listing on the context lists every time", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectQuery("^SHOW TABLES$").WillReturnRows(listing("a"))
+		mock.ExpectQuery("^SHOW TABLES$").WillReturnRows(listing("a", "b"))
+		probe(t, context.Background(), db, "a", true)
+		probe(t, context.Background(), db, "b", true)
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("a shared listing answers later probes", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectQuery("^SHOW TABLES$").WillReturnRows(listing("BD_Events_Seq", "a"))
+		ctx := withTableListing(context.Background())
+		probe(t, ctx, db, "bd_events_seq", true)
+		probe(t, ctx, db, "a", true)
+		probe(t, ctx, db, "absent", false)
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("a failed listing is not remembered", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectQuery("^SHOW TABLES$").WillReturnError(sql.ErrConnDone)
+		mock.ExpectQuery("^SHOW TABLES$").WillReturnRows(listing("a"))
+		ctx := withTableListing(context.Background())
+		if _, err := showTableExists(ctx, db, "a"); !errors.Is(err, sql.ErrConnDone) {
+			t.Fatalf("showTableExists on a failed listing = %v, want the read's error", err)
+		}
+		probe(t, ctx, db, "a", true)
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("tableInCurrentDatabase asks about the database until a listing proves it", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		schemata := regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = DATABASE()")
+		mock.ExpectQuery(schemata).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+		mock.ExpectQuery(schemata).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+		mock.ExpectQuery("^SHOW TABLES$").WillReturnRows(listing("a"))
+		ctx := withTableListing(context.Background())
+		for _, want := range []bool{false, true, true} {
+			got, err := tableInCurrentDatabase(ctx, db, "a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != want {
+				t.Fatalf("tableInCurrentDatabase = %v, want %v", got, want)
+			}
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
 }

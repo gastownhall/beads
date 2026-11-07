@@ -703,6 +703,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Server mode: a write's schema convergence check lists the tables once.**
+  The check that lets a write skip the migration lock read `SHOW TABLES` ten times
+  and the `information_schema.schemata` probe twice, one per table it asks about.
+  It writes nothing, so its lookups now share one listing, which it reads once more
+  before the lock check to see that no table it asked about changed. Every write
+  command sends 9 fewer statements, about 0.9 s at 100 ms round-trip time.
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add
