@@ -1157,7 +1157,7 @@ func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) e
 }
 
 // execer is satisfied by both *sql.DB and *sql.Conn, letting pinStoreBranch
-// share one implementation between withReadTxLongTimeout's one-shot *sql.DB
+// share one implementation between readTxOnLongTimeoutConn's one-shot *sql.DB
 // and a single pinned *sql.Conn (see recomputeAllBlocked/recomputeBlockedTx).
 type execer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
@@ -1250,24 +1250,54 @@ func (s *DoltStore) withReadTxLongTimeout(ctx context.Context, fn func(tx *sql.T
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.withRetry(ctx, func() error {
-		db, err := s.openLongTimeoutConn()
-		if err != nil {
-			return err
-		}
-		defer db.Close()
-		// The fresh one-shot connection defaults to the default branch, not
-		// whatever branch the store's pooled session (s.db) is actually
-		// checked out to — reproduce it before starting the read tx.
-		if err := s.pinStoreBranch(ctx, db); err != nil {
-			return err
-		}
-		tx, err := db.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("begin read tx: %w", err)
-		}
-		defer func() { _ = tx.Rollback() }()
-		return fn(tx)
+		return s.readTxOnLongTimeoutConn(ctx, fn)
 	})
+}
+
+// withReadTxLongTimeoutOnce is withReadTxLongTimeout without withRetry: one
+// attempt on a dedicated connection, whose error is returned as it is and is
+// not counted toward the circuit breaker. It is for a read whose caller falls
+// back to pooled reads when it fails, as the tracker pull does after
+// PreviousExternalRefs. Those pooled reads retry and count connection
+// failures themselves, so retrying here would only delay the fallback, and
+// counting here would let failed fresh dials open the breaker that then
+// refuses it. A fresh dial can fail while the pool's open connections still
+// work: Dolt accepts and then closes new connections once max_connections and
+// back_log are full.
+func (s *DoltStore) withReadTxLongTimeoutOnce(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	if s.closed.Load() {
+		return ErrStoreClosed
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.breaker != nil && !s.breaker.Allow() {
+		doltMetrics.circuitRejected.Add(ctx, 1)
+		return ErrCircuitOpen
+	}
+	return s.readTxOnLongTimeoutConn(ctx, fn)
+}
+
+// readTxOnLongTimeoutConn is one attempt of the long-timeout read helpers: it
+// runs fn in a read transaction on a fresh connection from
+// openLongTimeoutConn, checked out to the store's branch.
+func (s *DoltStore) readTxOnLongTimeoutConn(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	db, err := s.openLongTimeoutConn()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	// The fresh one-shot connection defaults to the default branch, not
+	// whatever branch the store's pooled session (s.db) is actually
+	// checked out to — reproduce it before starting the read tx.
+	if err := s.pinStoreBranch(ctx, db); err != nil {
+		return err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin read tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	return fn(tx)
 }
 
 // withRetryTx runs fn in a write transaction, replaying the WHOLE body on

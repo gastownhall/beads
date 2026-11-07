@@ -1357,6 +1357,24 @@ func (s *EmbeddedDoltStore) PreviousExternalRef(ctx context.Context, issueID str
 	return ref, found, err
 }
 
+// PreviousExternalRefs returns the external_ref value recorded for each of
+// issueIDs as of the most recent commit at or before asOf, in one read
+// transaction. Implements storage.ExternalRefHistoryBatchQuerier.
+func (s *EmbeddedDoltStore) PreviousExternalRefs(ctx context.Context, issueIDs []string, asOf time.Time) (map[string]string, error) {
+	var refs map[string]string
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		refs, err = issueops.PreviousExternalRefsInTx(ctx, tx, issueIDs, asOf)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return refs, nil
+}
+
+var _ storage.ExternalRefHistoryBatchQuerier = (*EmbeddedDoltStore)(nil)
+
 // ---------------------------------------------------------------------------
 // storage.RemoteStore
 // ---------------------------------------------------------------------------
