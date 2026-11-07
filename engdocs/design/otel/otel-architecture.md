@@ -163,8 +163,10 @@ defer telemetry.Shutdown(ctx)
 **Resource attributes** (set at init time):
 - `service.name`: "bd"
 - `service.version`: bd binary version
-- `host`: system hostname
-- `os`: system OS info
+- `host.name`: system hostname
+- `process.pid`, `process.executable.name`, `process.runtime.*`
+- never `process.command_args`, `process.executable.path` or `process.owner`
+  (the raw argv can hold secrets; see `buildResource`)
 
 **Custom resource attributes** (via `OTEL_RESOURCE_ATTRIBUTES` env var or `BEADS_ACTOR`):
 - `bd.actor`: Actor identity (from git config or env) — set after actor resolution
@@ -518,7 +520,7 @@ Every factual claim in this document is backed by a specific source location. Th
 | Traces: stdout only when `BD_OTEL_STDOUT=true` | `telemetry.go:84-93` |
 | Metrics: HTTP OTLP when `BD_OTEL_METRICS_URL` set | `telemetry.go:131-139` |
 | Resource: `service.name`, `service.version` | `telemetry.go:73-75` |
-| Resource: `WithHost()`, `WithProcess()` | `telemetry.go:76-77` |
+| Resource: `WithHost()` plus explicit process detectors (no command args, path or owner) | `telemetry.go` `buildResource` |
 | `Shutdown(ctx)` signature | `telemetry.go:162` |
 | `Init` called in `PersistentPreRun` | `main.go:256` |
 | Command span started with `bd.command`, `bd.version`, `bd.args` | `main.go:262-266` |
