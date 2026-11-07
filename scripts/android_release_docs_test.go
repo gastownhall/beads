@@ -55,18 +55,3 @@ func TestAndroidCGOReleaseIsDocumented(t *testing.T) {
 		t.Error("scripts/ci/bazel-release-cross-compile.sh's coverage comment must list android/arm64 among the CGO_ENABLED=1 builds")
 	}
 }
-
-// changelogFixedMentions reports whether a ### Fixed section of any release in
-// changelog mentions ref.
-func changelogFixedMentions(changelog, ref string) bool {
-	inFixed := false
-	for _, line := range strings.Split(changelog, "\n") {
-		switch {
-		case strings.HasPrefix(line, "## ") || strings.HasPrefix(line, "### "):
-			inFixed = strings.TrimSpace(line) == "### Fixed"
-		case inFixed && strings.Contains(line, ref):
-			return true
-		}
-	}
-	return false
-}

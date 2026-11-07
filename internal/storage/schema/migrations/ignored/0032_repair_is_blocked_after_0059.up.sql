@@ -1,0 +1,24 @@
+-- Ignored migration 0032: clone-local marker for the is_blocked repair main
+-- 0075 owes (gastownhall/beads#7037).
+--
+-- The work happens in code, not here: repairIsBlockedFlags
+-- (internal/storage/schema/is_blocked_repair.go) is registered in
+-- preMigrationRepairs for this version, so it runs immediately before this
+-- marker is recorded. When the owed-repair key main 0075 records is committed
+-- at HEAD, it recomputes is_blocked for every issue and wisp, removes the key,
+-- and commits the tracked half under its own label, returning only once that
+-- commit succeeded; a failure leaves this marker pending and the key
+-- committed, so the next pass retries. Without the key (a clone that adopted
+-- 0075 by pull, after the migrating clone already repaired and committed the
+-- tracked half) it recomputes only this clone's wisps, which never replicate.
+--
+-- Main 0075 re-arms this marker on the clone that runs it, and MigrateUp
+-- re-arms it when the key arrives on a clone whose cursors are already
+-- current, so every clone repairs its own wisps exactly once per key.
+--
+-- This header deliberately names no table write: the ignored-series dirty
+-- guard scans it, and the tracked tables the repair commits are guarded by
+-- the main-series check instead.
+--
+-- The marker itself changes nothing.
+SELECT 1;

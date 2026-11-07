@@ -208,6 +208,16 @@ var schemaAdditions = []schemaAddition{{
 	Migrations: map[string][]string{
 		"ignored_schema_migrations": {"31"},
 	},
+}, {
+	By: "the is_blocked repair after 0059 (#7037)",
+	// Main 0075 and ignored/0032 add no schema. On the scenario's fresh
+	// store 0075 finds no issues, so it records no owed repair and metadata
+	// stays empty, and 0032 has no owed repair to commit and no wisps to
+	// recompute: each marker adds only its bookkeeping row.
+	Migrations: map[string][]string{
+		"schema_migrations":         {"75"},
+		"ignored_schema_migrations": {"32"},
+	},
 }}
 
 // runWindow widens the span of the run on each side to bound the wall-clock

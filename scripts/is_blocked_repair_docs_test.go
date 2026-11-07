@@ -1,0 +1,75 @@
+package scripts_test
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// TestIsBlockedRepairIsDocumented pins the upgrade notes for #7037, the
+// is_blocked repair of migrations 0075 and ignored 0032: the upgrading guide's
+// one section on it must tell apart the automatic repair, its continuation on
+// an ordinary open (one that migrates, which a server-mode read does not), the
+// `bd dolt commit` a pass killed during the recompute needs first, the manual
+// remedy on older releases, the clone-local wisp limitation, the journal
+// exemption, and what the printed count means, and the guide must no longer
+// present the manual remedy as the only one or read a nonzero count as proof
+// 0059 hit the database; the changelog must carry a Fixed entry.
+func TestIsBlockedRepairIsDocumented(t *testing.T) {
+	read := func(rel string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(sourceRepoRoot(t), filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+
+	const heading = "\n#### Repair blocked flags after migrating\n"
+	upgrading := read("docs/getting-started/upgrading.md")
+	start := strings.Index(upgrading, heading)
+	if start < 0 {
+		t.Fatalf("docs/getting-started/upgrading.md has no %q section", strings.TrimSpace(heading))
+	}
+	section := upgrading[start+len(heading):]
+	if end := strings.Index(section, "\n#"); end >= 0 {
+		section = section[:end]
+	}
+	if strings.Count(upgrading, "#7037") != strings.Count(section, "#7037") {
+		t.Error("upgrading guide covers #7037 outside its one is_blocked repair section")
+	}
+	// Whitespace-normalized, so reflowing a paragraph keeps the check.
+	section = strings.Join(strings.Fields(section), " ")
+	for _, want := range []string{
+		"repair them automatically",              // the consented migration
+		"including a read",                       // continuation on an ordinary open
+		"without a prompt or `BD_ALLOW_MIGRATE`", // ...with no fresh consent
+		"in server mode a read does not migrate", // ...which a server-mode read never runs
+		"killed during the recompute",            // its own uncommitted flags need one bd dolt commit
+		"v1.3.4 or earlier",                      // the older-release remedy
+		"bd recompute-blocked",
+		"Wisps are clone-local", // the local-wisp limitation
+		"mutation journal",      // the journal exemption
+		"refresh their readiness snapshot",
+		"not a count of rows 0059 broke", // fixpoint flips, not attribution
+	} {
+		if !strings.Contains(section, want) {
+			t.Errorf("upgrading guide's is_blocked section does not contain %q", want)
+		}
+	}
+
+	normalized := strings.Join(strings.Fields(upgrading), " ")
+	for _, stale := range []string{
+		"means the database was hit",             // a count is not attribution to 0059
+		"Once a database has migrated, run this", // the manual-only guidance
+	} {
+		if strings.Contains(normalized, stale) {
+			t.Errorf("upgrading guide still says %q", stale)
+		}
+	}
+
+	if !changelogFixedMentions(read("CHANGELOG.md"), "#7037") {
+		t.Error("CHANGELOG.md has no ### Fixed entry for #7037 (is_blocked repair after 0059)")
+	}
+}

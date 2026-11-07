@@ -419,7 +419,10 @@ var upMigrations embed.FS
 var upIgnoredMigrations embed.FS
 
 type migrationSource struct {
-	files       embed.FS
+	// files is an fs.FS rather than the embed.FS behind it so a test can
+	// append a synthetic later step to the ignored series
+	// (SetIgnoredMigrationFilesForTest); production uses the embedded bundles.
+	files       fs.FS
 	dir         string
 	cursorTable string
 	// sentinelTables are tables this series is responsible for creating. A
@@ -852,7 +855,7 @@ func AllMigrationsSQL() string {
 	b.WriteString(mainSource.bootstrapSQL())
 	b.WriteString(";\n")
 	for _, f := range mainSource.list() {
-		data, err := mainSource.files.ReadFile(mainSource.dir + "/" + f.name)
+		data, err := fs.ReadFile(mainSource.files, mainSource.dir+"/"+f.name)
 		if err != nil {
 			continue
 		}
@@ -877,7 +880,7 @@ func AllMigrationsSQL() string {
 // Read-only; callers cannot use it to mutate or bypass the frozen-file
 // hygiene guard (scripts/check-migration-hygiene.sh).
 func MigrationSQL(name string) (string, error) {
-	data, err := mainSource.files.ReadFile(mainSource.dir + "/" + name)
+	data, err := fs.ReadFile(mainSource.files, mainSource.dir+"/"+name)
 	if err != nil {
 		return "", err
 	}
@@ -888,7 +891,7 @@ func MigrationSQL(name string) (string, error) {
 // bytes of an ignored-source migration file (e.g. "0019_create_events.up.sql"),
 // for engine-based frozen-guard tests of clone-local DDL.
 func IgnoredMigrationSQL(name string) (string, error) {
-	data, err := ignoredSource.files.ReadFile(ignoredSource.dir + "/" + name)
+	data, err := fs.ReadFile(ignoredSource.files, ignoredSource.dir+"/"+name)
 	if err != nil {
 		return "", err
 	}
@@ -1086,6 +1089,11 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	if len(touchedDirtyTables) > 0 {
 		return 0, &DirtyTablesError{Tables: touchedDirtyTables}
 	}
+	// gastownhall/beads#7037: the is_blocked repair commits issues,
+	// dependencies and metadata, so none may carry user changes into it.
+	if err := refuseDirtyIsBlockedRepairInputs(ctx, db, mainVersionBefore, dirtyBefore); err != nil {
+		return 0, err
+	}
 	dirtyBeforeSignatures, err := dirtyTableSignatures(ctx, db, dirtyBefore)
 	if err != nil {
 		return 0, fmt.Errorf("reading pre-migration dirty table diffs: %w", err)
@@ -1150,6 +1158,13 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	}
 	backfilled = backfilled || auxRekeyed
 
+	// gastownhall/beads#7037: an owed repair committed at HEAD re-arms ignored
+	// 0032 even when this clone's cursor already records it.
+	repairOwed, err := rearmOwedIsBlockedRepair(ctx, db)
+	if err != nil {
+		return applied, err
+	}
+
 	touchedIgnoredDirtyTables, err := ignoredSource.pendingMigrationDirtyTables(ctx, db, dirtyBeforeAll)
 	if err != nil {
 		return applied, fmt.Errorf("checking dirty tables against pending ignored migrations: %w", err)
@@ -1169,6 +1184,9 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	}
 
 	appliedIgnored, ignoredColumnAdded, err := ignoredSource.migrate(ctx, db, 0)
+	// The owed repair commits inside the ignored pass, so every return from
+	// here on reports it, a failed one included.
+	applied += committedIsBlockedRepair(ctx, db, repairOwed)
 	if err != nil {
 		return applied, fmt.Errorf("ignored migrations: %w", err)
 	}
@@ -1235,7 +1253,14 @@ func migrationWorkNeeded(ctx context.Context, db DBConn) (bool, error) {
 	if !hasIgnoredHash {
 		return true, nil
 	}
-	return needsBackfilledCustomStatusesCustomTypes(ctx, db)
+	backfillNeeded, err := needsBackfilledCustomStatusesCustomTypes(ctx, db)
+	if err != nil || backfillNeeded {
+		return backfillNeeded, err
+	}
+	// gastownhall/beads#7037: an owed is_blocked repair committed at HEAD
+	// (pulled from a peer, or left on this branch by an interrupted pass)
+	// still needs the ignored 0032 pass at current cursors.
+	return isBlockedRepairOwedAtHead(ctx, db)
 }
 
 func committableDirtyTables(ctx context.Context, db DBConn) (map[string]dirtyTableState, error) {
@@ -1971,7 +1996,7 @@ func (m migrationSource) pendingMigrationDirtyTables(ctx context.Context, db DBC
 		if mf.version <= current {
 			continue
 		}
-		data, err := m.files.ReadFile(m.dir + "/" + mf.name)
+		data, err := fs.ReadFile(m.files, m.dir+"/"+mf.name)
 		if err != nil {
 			return nil, fmt.Errorf("reading migration %s: %w", mf.name, err)
 		}
@@ -2285,7 +2310,7 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		if mf.version <= minVersion || mf.version > upTo {
 			continue
 		}
-		data, err := src.files.ReadFile(src.dir + "/" + mf.name)
+		data, err := fs.ReadFile(src.files, src.dir+"/"+mf.name)
 		if err != nil {
 			return count, fmt.Errorf("reading migration %s: %w", mf.name, err)
 		}
@@ -2398,6 +2423,19 @@ func SetMigrateStepFaultHookForTest(fn func(ctx context.Context, db DBConn, vers
 	prev := migrateStepFaultHook
 	migrateStepFaultHook = fn
 	return func() { migrateStepFaultHook = prev }
+}
+
+// SetIgnoredMigrationFilesForTest replaces the ignored series' migration
+// files with wrap(embedded files) and returns a function that restores them.
+// It exists so a test can append a later ignored step and drive the real pass
+// through it (gastownhall/beads#7037's re-armed suffix replays every step
+// above 0032, including ones not written yet). LatestIgnoredVersion keeps
+// reporting the shipped series. Test-only.
+func SetIgnoredMigrationFilesForTest(wrap func(fs.FS) fs.FS) func() {
+	LatestIgnoredVersion()
+	prev := ignoredSource.files
+	ignoredSource.files = wrap(prev)
+	return func() { ignoredSource.files = prev }
 }
 
 // commitMigrationStep commits one numbered migration atomically: the tables it

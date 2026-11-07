@@ -2,6 +2,7 @@ package schema
 
 import (
 	"fmt"
+	"io/fs"
 	"strings"
 	"testing"
 )
@@ -15,7 +16,7 @@ import (
 // upgrade cannot mask it.
 func TestBundleMigrationsWithPreparedALTERAreOverriddenOrJustified(t *testing.T) {
 	for _, f := range mainSource.list() {
-		data, err := mainSource.files.ReadFile(mainSource.dir + "/" + f.name)
+		data, err := fs.ReadFile(mainSource.files, mainSource.dir+"/"+f.name)
 		if err != nil {
 			t.Fatalf("read %s: %v", f.name, err)
 		}
@@ -50,7 +51,7 @@ database -- add an entry to preparedALTERSafeOnFreshBundle saying why.`,
 func TestPreparedALTERSafeOnFreshBundleHasNoStaleEntries(t *testing.T) {
 	live := make(map[string]bool)
 	for _, f := range mainSource.list() {
-		data, err := mainSource.files.ReadFile(mainSource.dir + "/" + f.name)
+		data, err := fs.ReadFile(mainSource.files, mainSource.dir+"/"+f.name)
 		if err != nil {
 			t.Fatalf("read %s: %v", f.name, err)
 		}
