@@ -835,3 +835,55 @@ func TestIgnoredCursorScratchPendingDeletionIsSweptOnOpen(t *testing.T) {
 		}
 	})
 }
+
+// TestIgnoredCursorScratchPendingDeletionWithCursorMissingSweepsOnly is the
+// restore guard. With the cursor table also gone, the resume must not treat a
+// scratch that exists only at HEAD as its row source — the working-set column
+// read finds no such table and every writable open would fail. The sweep
+// commits the deletion, and the ordinary migration pass recreates the cursor.
+func TestIgnoredCursorScratchPendingDeletionWithCursorMissingSweepsOnly(t *testing.T) {
+	ctx := t.Context()
+	f := newScratchPendingDeletionFixture(t, "scratchheadnocursor")
+
+	f.withRawConn(t, func(conn *sql.Conn) {
+		mustExecOn(t, ctx, conn, "DROP TABLE ignored_schema_migrations")
+		if tablePresent(t, ctx, conn, "ignored_schema_migrations") {
+			t.Fatal("fixture left ignored_schema_migrations in the working set")
+		}
+	})
+
+	f.reopenAndClose(t)
+
+	var commits int
+	f.withRawConn(t, func(conn *sql.Conn) {
+		if trackedAtHead(t, ctx, conn, untrackScratchTable) {
+			t.Errorf("%s is still committed at HEAD", untrackScratchTable)
+		}
+		if tablePresent(t, ctx, conn, untrackScratchTable) {
+			t.Errorf("%s is back in the working set", untrackScratchTable)
+		}
+		if !tablePresent(t, ctx, conn, "ignored_schema_migrations") {
+			t.Fatal("ignored_schema_migrations was not recreated by the migration pass")
+		}
+		if got := cursorRows(t, ctx, conn); len(got) == 0 {
+			t.Error("the recreated cursor has no rows; the ignored series did not re-run")
+		}
+		if trackedAtHead(t, ctx, conn, "ignored_schema_migrations") {
+			t.Error("the recreated ignored_schema_migrations was committed into HEAD")
+		}
+		if dirty := dirtyTableNames(t, ctx, conn); len(dirty) > 0 {
+			t.Errorf("working set is dirty after the reopen: %v", dirty)
+		}
+		if n := len(sweepCommits(t, ctx, conn)); n != 1 {
+			t.Errorf("sweep commits = %d, want exactly 1", n)
+		}
+		commits = commitCount(t, ctx, conn)
+	})
+
+	f.reopenAndClose(t)
+	f.withRawConn(t, func(conn *sql.Conn) {
+		if got := commitCount(t, ctx, conn); got != commits {
+			t.Errorf("commits after a second open = %d, want %d (nothing left to do)", got, commits)
+		}
+	})
+}
