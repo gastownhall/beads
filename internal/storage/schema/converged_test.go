@@ -99,8 +99,7 @@ func expectNoMigrationWorkNeededAtVersion(mock sqlmock.Sqlmock, mainVersion int)
 	expectIgnoredSentinelProbes(mock, true)
 	expectContentHashColumnExists(mock)
 	expectContentHashColumnExists(mock)
-	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
-	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+	expectCustomTablesPopulated(mock)
 }
 
 // expectProbeFindsNoWork mocks migrationWorkNeeded as alreadyConverged runs it,
@@ -122,8 +121,7 @@ func expectProbeFindsNoWorkAtVersion(mock sqlmock.Sqlmock, mainVersion int, extr
 	}
 	expectContentHashColumnExists(mock)
 	expectContentHashColumnExists(mock)
-	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
-	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+	expectCustomTablesPopulated(mock)
 }
 
 // probeTables is every table the probe looks up on a healthy database.

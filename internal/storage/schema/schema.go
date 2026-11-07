@@ -2022,14 +2022,27 @@ func (m migrationSource) pendingVersions(ctx context.Context, db DBConn) ([]int,
 	if err != nil {
 		return nil, err
 	}
-	files := m.list()
+	return m.pendingAbove(current), nil
+}
+
+// pendingAbove is pendingVersions for a cursor the caller has already read: the
+// versions in this series' embedded list above current. It sends no statement.
+func (m migrationSource) pendingAbove(current int) []int {
+	return versionsAbove(m.list(), current)
+}
+
+// versionsAbove returns the version of every file in files (sorted ascending,
+// as migrationSource.list returns them) that is strictly greater than current.
+// A cursor that no listed file carries, between two listed versions or past
+// the last one, still gets exactly the listed versions above it.
+func versionsAbove(files []migrationFile, current int) []int {
 	pending := make([]int, 0, len(files))
 	for _, mf := range files {
 		if mf.version > current {
 			pending = append(pending, mf.version)
 		}
 	}
-	return pending, nil
+	return pending
 }
 
 func (m migrationSource) pendingMigrationDirtyTables(ctx context.Context, db DBConn, dirtyBefore map[string]dirtyTableState) ([]string, error) {

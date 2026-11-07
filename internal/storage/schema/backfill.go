@@ -7,6 +7,7 @@ import (
 	"log"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -23,7 +24,47 @@ func ensureBackfilledCustomStatusesCustomTypes(ctx context.Context, db DBConn) (
 	return typesWrote || statusesWrote, nil
 }
 
+// customTableBackfillProbeQuery reads in one statement everything
+// needsBackfilledCustomStatusesCustomTypes decides on: the row count of each
+// custom table and the config value each one is backfilled from. config.value
+// is NOT NULL (main migration 0006), so a NULL from a value subquery means the
+// key has no row. The four values used to be four autocommit reads; one
+// statement reads them from a single snapshot, which is at least as consistent.
+const customTableBackfillProbeQuery = "SELECT " +
+	"(SELECT COUNT(*) FROM custom_types), " +
+	"(SELECT `value` FROM config WHERE `key` = 'types.custom'), " +
+	"(SELECT COUNT(*) FROM custom_statuses), " +
+	"(SELECT `value` FROM config WHERE `key` = 'status.custom')"
+
+// needsBackfilledCustomStatusesCustomTypes reports whether custom_types or
+// custom_statuses is empty while its config key holds values that the backfill
+// would insert. It is the last question migrationWorkNeeded asks of a database
+// that is otherwise current, so it sends one statement. Parsing, the
+// empty and malformed fallbacks, and the error on a failed read stay here.
 func needsBackfilledCustomStatusesCustomTypes(ctx context.Context, db DBConn) (bool, error) {
+	var typesCount, statusesCount int
+	var typesValue, statusesValue sql.NullString
+	err := db.QueryRowContext(ctx, customTableBackfillProbeQuery).
+		Scan(&typesCount, &typesValue, &statusesCount, &statusesValue)
+	if err != nil {
+		if dberrors.IsTableNotExist(err) {
+			// The cursor says config and both custom tables exist, but one is
+			// gone. One statement cannot say which, so ask the separate reads,
+			// which give the answer they always gave: a missing custom table is
+			// an error, and config is not read while the custom tables hold rows.
+			return needsBackfilledCustomStatusesCustomTypesSeparately(ctx, db)
+		}
+		return false, fmt.Errorf("custom_types/custom_statuses backfill probe: %w", err)
+	}
+	typesNeed := typesCount == 0 && typesValue.Valid && customTypesConfigNeedsBackfill(typesValue.String)
+	statusesNeed := statusesCount == 0 && statusesValue.Valid && customStatusesConfigNeedsBackfill(statusesValue.String)
+	return typesNeed || statusesNeed, nil
+}
+
+// needsBackfilledCustomStatusesCustomTypesSeparately is the backfill decision
+// made with one read per table and per config key. It serves only the case
+// where the one-statement probe failed on a missing table.
+func needsBackfilledCustomStatusesCustomTypesSeparately(ctx context.Context, db DBConn) (bool, error) {
 	typesNeed, err := needsCustomTypesBackfill(ctx, db)
 	if err != nil {
 		return false, fmt.Errorf("custom_types: %w", err)
@@ -52,7 +93,27 @@ func needsCustomTypesBackfill(ctx context.Context, db DBConn) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return len(issueops.ParseTypesConfigValue(value)) > 0, nil
+	return customTypesConfigNeedsBackfill(value), nil
+}
+
+// customTypesConfigNeedsBackfill reports whether a types.custom config value
+// names at least one type.
+func customTypesConfigNeedsBackfill(value string) bool {
+	return len(issueops.ParseTypesConfigValue(value)) > 0
+}
+
+// customStatusesConfigNeedsBackfill reports whether a status.custom config
+// value names at least one valid status. An empty or malformed value needs no
+// backfill: backfillCustomStatuses logs and skips it.
+func customStatusesConfigNeedsBackfill(value string) bool {
+	if strings.TrimSpace(value) == "" {
+		return false
+	}
+	parsed, parseErr := types.ParseCustomStatusConfig(value)
+	if parseErr != nil {
+		return false
+	}
+	return len(parsed) > 0
 }
 
 func needsCustomStatusesBackfill(ctx context.Context, db DBConn) (bool, error) {
@@ -72,15 +133,7 @@ func needsCustomStatusesBackfill(ctx context.Context, db DBConn) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if strings.TrimSpace(value) == "" {
-		return false, nil
-	}
-
-	parsed, parseErr := types.ParseCustomStatusConfig(value)
-	if parseErr != nil {
-		return false, nil
-	}
-	return len(parsed) > 0, nil
+	return customStatusesConfigNeedsBackfill(value), nil
 }
 
 func backfillCustomTypes(ctx context.Context, db DBConn) (bool, error) {
