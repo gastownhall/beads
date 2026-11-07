@@ -8,6 +8,34 @@ pass before any higher version runs. The escape hatch is a **pre-migration
 repair** in Go, keyed to the pending version — see the header of
 `../migration_repairs.go` and the `preMigrationRepairs` registry.
 
+## Execution plans: fixing a slow body without touching its bytes
+
+A migration whose *body* is correct but too slow has a second, narrower escape
+hatch: a **body execution plan** (`../migration_body_plans.go`), registered per
+source and version and pinned to the exact directory, filename and SHA-256 of
+the frozen file. A plan preserves the frozen prefix (everything through the
+zeroing UPDATE, up to the body's single `\nWITH RECURSIVE\n`) and the frozen
+suffix (from the final `\nUPDATE <table>\n` anchor to the end, including the
+stand-in DROPs) byte-for-byte, and substitutes only the segment between:
+optional deterministic index DDL followed by an equivalent `WITH RECURSIVE`
+CTE list. The runner resolves the body through the plan before any step
+mutation and **fails closed** on any drift — hash, identity or anchor layout —
+and the cursor still records the frozen file's hash, so a plan changes what
+runs, never a migration's identity. `AllMigrationsSQL` and the CLI bundle are
+unaffected: plans apply only to the runtime designated-migrator path.
+
+This is not a general rewrite mechanism. It exists because 0059's frozen
+recompute (and its ignored/0015 twin) probes an unindexed stand-in with
+correlated EXISTS predicates and did not finish on a restored 14k-wisp-
+dependency clone within two hours
+([#6520](https://github.com/gastownhall/beads/issues/6520)); the registered
+plans swap in the set-based equivalent of the same fixed point plus stand-in
+indexes that die with the stand-ins in the frozen DROPs. A new plan needs the
+same bar: a frozen body that cannot meet its maintenance window, an equivalent
+replacement provable against the frozen predicate on real Dolt (see
+`internal/storage/dolt/migration_body_plan_*_test.go`), and nothing persistent
+left behind.
+
 ## Measured Dolt behaviours
 
 These were measured against real Dolt (2.1.2 and 2.2.3) and confirmed against

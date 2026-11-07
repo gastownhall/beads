@@ -685,6 +685,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Migration 0059 (and ignored 0015) now complete in seconds on large
+  wisp-dependency graphs.** The frozen recompute bodies probe an unindexed
+  stand-in copy of `wisp_dependencies` with correlated EXISTS predicates, so
+  a restored production-shaped clone (14k wisp dependencies) did not finish
+  the step within two hours
+  ([#6520](https://github.com/gastownhall/beads/issues/6520)). The runner now
+  executes a registered, hash-gated **body execution plan** for these two
+  steps: the frozen prefix (stand-in creation, guarded copies, the zeroing
+  UPDATE) and suffix (final assignments, stand-in DROPs) run byte-for-byte,
+  with deterministic stand-in indexes (0059) and an equivalent set-based
+  rewrite of the recompute CTEs in between. The frozen files, their recorded
+  content hashes, the CLI fresh-schema bundle, and every other migration are
+  unchanged: a plan changes what runs, never a migration's identity, and any
+  drift between a plan and the shipped bytes fails the migration pass closed
+  before the step mutates anything. The bounded step (measured 82ms on a
+  1/8-scale reproduction graph, where the frozen body was still running at
+  45s) computes exactly the frozen predicate's blocked state, and an
+  interrupted step still replays to the same result.
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add
