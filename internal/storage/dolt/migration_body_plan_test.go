@@ -548,3 +548,39 @@ func TestMigrationBodyPlanScaledGraphMain59(t *testing.T) {
 		t.Errorf("schema_migrations row 59 content_hash = %q, want the frozen file's %q", got, main59Hash)
 	}
 }
+
+// TestMigrationBodyPlanScaledGraphIgnored15 is #6520 AC-2: the runtime runner
+// applies ignored/0015, the wisps twin of 0059 over the real wisp tables, to
+// the same graph within 30 seconds with the frozen predicate's wisp blocked
+// state and the frozen file's hash.
+func TestMigrationBodyPlanScaledGraphIgnored15(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	t.Cleanup(cancel)
+
+	g := scaledPlanGraph()
+	d := newPlanTestDB(t, ctx)
+	d.migrateToV58I14()
+	d.load(g)
+	_, wantWisps := blockedModel(g)
+
+	const bound = 30 * time.Second
+	elapsed, err := d.bounded(bound, func() error {
+		_, err := schema.MigrateIgnoredUpTo(ctx, d.conn, 15)
+		return err
+	})
+	t.Logf("ignored 0015 over %d issues/%d deps, %d wisps/%d wisp deps: %s (%d wisps blocked)",
+		len(g.issues), g.count(false), len(g.wisps), g.count(true), elapsed.Round(time.Millisecond), len(wantWisps))
+	if elapsed > bound {
+		t.Fatalf("ignored 0015 did not finish within %s (stopped at %s; #6520)", bound, elapsed.Round(time.Millisecond))
+	}
+	if err != nil {
+		t.Fatalf("migrate ignored to 15: %v", err)
+	}
+	requireSameIDs(t, "blocked wisps after ignored 0015", d.blockedIDs("wisps"), wantWisps)
+	if got := d.cursorHash("ignored_schema_migrations", 15); got != ignored15Hash {
+		t.Errorf("ignored_schema_migrations row 15 content_hash = %q, want the frozen file's %q", got, ignored15Hash)
+	}
+}
