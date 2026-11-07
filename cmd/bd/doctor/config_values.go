@@ -14,7 +14,9 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/utils"
 	"gopkg.in/yaml.v3"
 )
 
@@ -243,7 +245,7 @@ func checkYAMLConfigValues(repoPath string) []string {
 					// Check if routing targets are in hydration list
 					additionalSet := make(map[string]bool)
 					for _, path := range additional {
-						additionalSet[expandPath(path)] = true
+						additionalSet[hydrationMembershipKey(path)] = true
 					}
 
 					// A routing repo comes from the committed config.yaml,
@@ -251,8 +253,7 @@ func checkYAMLConfigValues(repoPath string) []string {
 					// remedy printer: one shell word, or a <path>
 					// placeholder with the value named escaped beside it.
 					if contributorRepo != "" {
-						expandedContributor := expandPath(contributorRepo)
-						if !additionalSet[expandedContributor] {
+						if !additionalSet[hydrationMembershipKey(contributorRepo)] {
 							arg, note := remedy.CommandArg(runtime.GOOS, contributorRepo, "<path>")
 							issues = append(issues, fmt.Sprintf(
 								"routing.contributor=%s is not in repos.additional. "+
@@ -262,8 +263,7 @@ func checkYAMLConfigValues(repoPath string) []string {
 					}
 
 					if maintainerRepo != "" && maintainerRepo != "." {
-						expandedMaintainer := expandPath(maintainerRepo)
-						if !additionalSet[expandedMaintainer] {
+						if !additionalSet[hydrationMembershipKey(maintainerRepo)] {
 							arg, note := remedy.CommandArg(runtime.GOOS, maintainerRepo, "<path>")
 							issues = append(issues, fmt.Sprintf(
 								"routing.maintainer=%s is not in repos.additional. "+
@@ -381,6 +381,18 @@ func expandPath(path string) string {
 		}
 	}
 	return path
+}
+
+// hydrationMembershipKey is the form routing targets and repos.additional
+// entries are compared in: a remote URL as written, a local path expanded,
+// made absolute against the process cwd and symlink-resolved. bd repo add
+// stores a relative target as an absolute path, so a relative routing target
+// must still match it.
+func hydrationMembershipKey(path string) string {
+	if path == "" || remotecache.IsRemoteURL(path) {
+		return path
+	}
+	return utils.CanonicalizePath(expandPath(path))
 }
 
 // checkMetadataConfigValues validates values in metadata.json

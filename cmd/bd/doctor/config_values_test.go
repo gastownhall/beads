@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -668,4 +669,86 @@ repos:
 			t.Errorf("expected ok status, got %s: %s", check.Status, check.Detail)
 		}
 	})
+}
+
+// TestRoutingHydrationCanonicalMembership checks that doctor compares routing
+// targets with repos.additional entries by the directory they name from the
+// invocation cwd: bd repo add stores a relative target as an absolute path,
+// and a relative routing target must not then be reported as missing.
+func TestRoutingHydrationCanonicalMembership(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(root, "ws")
+	planning := filepath.Join(root, "planning")
+	other := filepath.Join(root, "other")
+	for _, dir := range []string{filepath.Join(workspace, ".beads"), planning, other} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(root, "planning-link")
+	haveLink := os.Symlink(planning, link) == nil
+	t.Setenv("HOME", root)
+	t.Chdir(workspace)
+
+	const url = "https://github.com/example/planning.git"
+	for _, tc := range []struct {
+		name        string
+		contributor string
+		maintainer  string
+		additional  []string
+		needsLink   bool
+		// warns names the routing key that must be reported missing, or "".
+		warns string
+	}{
+		{name: "relative contributor, absolute entry", contributor: "../planning", additional: []string{planning}},
+		{name: "relative maintainer, absolute entry", maintainer: "../planning", additional: []string{planning}},
+		{name: "relative target with dot segments", contributor: "./../planning/", additional: []string{planning}},
+		{name: "tilde contributor, absolute entry", contributor: "~/planning", additional: []string{planning}},
+		{name: "absolute contributor, tilde entry", contributor: planning, additional: []string{"~/planning"}},
+		{name: "relative entry, absolute maintainer", maintainer: planning, additional: []string{"../planning"}},
+		{name: "symlink alias", contributor: link, additional: []string{planning}, needsLink: true},
+		{name: "exact url", contributor: url, additional: []string{url}},
+		{name: "different url", contributor: url, additional: []string{"https://github.com/example/planning"}, warns: "routing.contributor"},
+		{name: "relative contributor, distinct directory", contributor: "../planning", additional: []string{other}, warns: "routing.contributor"},
+		{name: "relative maintainer, distinct directory", maintainer: "../planning", additional: []string{other}, warns: "routing.maintainer"},
+		{name: "url contributor, local entry", contributor: url, additional: []string{planning}, warns: "routing.contributor"},
+		{name: "current-repo handling is unchanged", contributor: ".", maintainer: "../planning", additional: []string{planning}, warns: "routing.contributor"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.needsLink && !haveLink {
+				t.Skip("symlinks unavailable")
+			}
+			var b strings.Builder
+			b.WriteString("routing:\n  mode: auto\n")
+			if tc.contributor != "" {
+				fmt.Fprintf(&b, "  contributor: %q\n", tc.contributor)
+			}
+			if tc.maintainer != "" {
+				fmt.Fprintf(&b, "  maintainer: %q\n", tc.maintainer)
+			}
+			b.WriteString("repos:\n  primary: \".\"\n  additional:\n")
+			for _, entry := range tc.additional {
+				fmt.Fprintf(&b, "    - %q\n", entry)
+			}
+			if err := os.WriteFile(filepath.Join(workspace, ".beads", "config.yaml"), []byte(b.String()), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			var missing []string
+			for _, issue := range checkYAMLConfigValues(workspace) {
+				if strings.Contains(issue, "is not in repos.additional") {
+					missing = append(missing, issue)
+				}
+			}
+			switch {
+			case tc.warns == "" && len(missing) != 0:
+				t.Fatalf("unexpected missing-hydration warning: %q", missing)
+			case tc.warns != "" && (len(missing) != 1 || !strings.HasPrefix(missing[0], tc.warns+"=")):
+				t.Fatalf("missing-hydration warnings = %q, want one for %s", missing, tc.warns)
+			}
+		})
+	}
 }
