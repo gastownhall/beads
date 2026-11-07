@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/uimd"
@@ -440,8 +441,8 @@ func formatIssueCustomMetadata(issue *types.Issue) string {
 		return ""
 	}
 
-	var data map[string]any
-	if err := json.Unmarshal(issue.Metadata, &data); err != nil {
+	data, err := storage.DecodeMetadataObject(issue.Metadata)
+	if err != nil {
 		// Not a JSON object — show raw value
 		return fmt.Sprintf("%s\n  %s", ui.RenderBold("METADATA"), trimmed)
 	}
@@ -593,16 +594,14 @@ func formatIssueLongExtras(issue *types.Issue, formatTime func(time.Time) string
 
 // formatMetadataValue formats a single metadata value for display.
 // Strings are shown unquoted, numbers/bools as-is, objects/arrays as compact JSON.
+// Numbers arrive as json.Number and print their stored literal, so an integer
+// past 2^53 keeps every digit (GH#6330).
 func formatMetadataValue(v any) string {
 	switch val := v.(type) {
 	case string:
 		return val
-	case float64:
-		// JSON numbers unmarshal as float64; show integers without decimal
-		if val == float64(int64(val)) {
-			return fmt.Sprintf("%d", int64(val))
-		}
-		return fmt.Sprintf("%g", val)
+	case json.Number:
+		return val.String()
 	case bool:
 		return fmt.Sprintf("%t", val)
 	case nil:

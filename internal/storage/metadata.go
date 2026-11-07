@@ -2,6 +2,7 @@
 package storage
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -33,6 +34,24 @@ func NormalizeMetadataValue(value interface{}) (string, error) {
 	}
 
 	return jsonStr, nil
+}
+
+// DecodeMetadataObject decodes a metadata JSON object for callers that walk
+// its keys as untyped values. Numbers decode as json.Number holding the stored
+// literal, so an integer past 2^53 keeps every digit (GH#6330) and re-marshals
+// unchanged, nested values included. JSON null yields a nil map; anything that
+// is not one complete JSON object is an error.
+func DecodeMetadataObject(raw []byte) (map[string]any, error) {
+	if !json.Valid(raw) {
+		return nil, fmt.Errorf("metadata is not valid JSON")
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var obj map[string]any
+	if err := dec.Decode(&obj); err != nil {
+		return nil, fmt.Errorf("metadata is not a JSON object: %w", err)
+	}
+	return obj, nil
 }
 
 // MetadataFieldType defines the type of a metadata field for schema validation.
