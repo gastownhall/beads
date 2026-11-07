@@ -1221,6 +1221,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   symlinked `config.yaml` is written through to its target, the file keeps
   its own permissions, and a read-only `config.yaml` is still refused. The
   user-global `config.yaml` gets the same treatment.
+- **Concurrent creates on a Dolt sql-server no longer overwrite each other's
+  issues in counter-ID mode.** A create that lost a commit-time write
+  conflict was replayed with the ID its rolled-back attempt had minted, so the
+  replay took the explicit-ID upsert path and replaced the issue the winning
+  writer had just created under the same number (30 concurrent creates could
+  land on 14 IDs, each writer told it owned its ID). In hash mode the replay
+  kept the rolled-back attempt's derived comment IDs. Every replayed attempt of
+  `CreateIssue`/`CreateIssues` now starts from the caller's request: the issue
+  fields, the source of each inline dependency and the ID of each inline
+  comment are restored before the attempt runs. Reachable from `bd todo`,
+  `bd swarm`, `bd import`, repo and Linear sync, and the `bd create --form` /
+  `bd q` fast path.
+- **A lost response to the `CALL DOLT_COMMIT` inside a delete or a sweep is no
+  longer replayed.** That call commits the delete's (`bd delete`) or sweep's
+  (`bd prune`, `bd purge`) SQL transaction, so a connection lost while waiting
+  for its answer may mean the work landed. It was reported as an ordinary
+  pre-commit failure, and the retry loop replayed the body against the
+  already-deleted rows (answering "not found" for them). It now fails with the
+  indeterminate-commit error and is never replayed.
+
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

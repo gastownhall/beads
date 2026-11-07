@@ -103,7 +103,12 @@ func (s *deleter) Delete(ctx context.Context, req issueops.DeleteRequest) (issue
 		msg := fmt.Sprintf("bd: delete %d issue(s)", result.Deleted)
 		if err := schema.DrainCall(ctx, tx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
 			msg, s.store.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-			return fmt.Errorf("dolt commit: %w", err)
+			// DOLT_COMMIT commits this SQL transaction: it is the delete's
+			// commit point. A response lost there may mean the delete landed,
+			// so it is classified indeterminate and never replayed — as a
+			// plain error it read as a pre-commit connection failure, and the
+			// replay then reported the just-deleted ids as not found.
+			return wrapSQLCommitError("dolt commit", err)
 		}
 		return nil
 	}
