@@ -106,7 +106,15 @@ func (c *Counts) Total() int64 { return c.Snapshot().Total() }
 
 // options carries WrapConnector's optional behavior.
 type options struct {
-	latency time.Duration
+	latency  time.Duration
+	observer func(kind, query string)
+}
+
+// observe reports one counted round trip to the observer, when there is one.
+func (o *options) observe(kind, query string) {
+	if o.observer != nil {
+		o.observer(kind, query)
+	}
 }
 
 // Option configures WrapConnector.
@@ -120,6 +128,17 @@ type Option func(*options)
 // context's error rather than padding out a call that is already doomed.
 func WithLatency(d time.Duration) Option {
 	return func(o *options) { o.latency = d }
+}
+
+// WithObserver calls fn with every counted round trip, in the order the
+// wrapper sees them: kind is "prepare", "exec" or "query" for a round trip
+// issued on the connection, and "stmt-exec" or "stmt-query" for one issued
+// against a prepared statement (query is then the text that statement was
+// prepared with). A measurement that wants to know WHICH statements a code
+// path issues, not only how many, reads them here. fn runs on the calling
+// goroutine, under no lock of the wrapper's.
+func WithObserver(fn func(kind, query string)) Option {
+	return func(o *options) { o.observer = fn }
 }
 
 // WrapConnector wraps inner so every statement-shaped call on the
@@ -212,11 +231,12 @@ type wrappedConn struct {
 
 func (c *wrappedConn) Prepare(query string) (driver.Stmt, error) {
 	atomic.AddInt64(&c.counts.prepare, 1)
+	c.opts.observe("prepare", query)
 	inner, err := c.inner.Prepare(query)
 	if err != nil {
 		return nil, err
 	}
-	return &wrappedStmt{inner: inner, counts: c.counts, opts: c.opts}, nil
+	return &wrappedStmt{inner: inner, counts: c.counts, opts: c.opts, query: query}, nil
 }
 
 func (c *wrappedConn) Close() error { return c.inner.Close() }
@@ -240,11 +260,12 @@ func (c *wrappedConn) PrepareContext(ctx context.Context, query string) (driver.
 		return nil, err
 	}
 	atomic.AddInt64(&c.counts.prepare, 1)
+	c.opts.observe("prepare", query)
 	inner, err := pc.PrepareContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
-	return &wrappedStmt{inner: inner, counts: c.counts, opts: c.opts}, nil
+	return &wrappedStmt{inner: inner, counts: c.counts, opts: c.opts, query: query}, nil
 }
 
 func (c *wrappedConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
@@ -256,6 +277,7 @@ func (c *wrappedConn) ExecContext(ctx context.Context, query string, args []driv
 		return nil, err
 	}
 	atomic.AddInt64(&c.counts.exec, 1)
+	c.opts.observe("exec", query)
 	return execer.ExecContext(ctx, query, args)
 }
 
@@ -268,6 +290,7 @@ func (c *wrappedConn) QueryContext(ctx context.Context, query string, args []dri
 		return nil, err
 	}
 	atomic.AddInt64(&c.counts.query, 1)
+	c.opts.observe("query", query)
 	return queryer.QueryContext(ctx, query, args)
 }
 
@@ -323,6 +346,7 @@ type wrappedStmt struct {
 	inner  driver.Stmt
 	counts *Counts
 	opts   *options
+	query  string
 }
 
 func (s *wrappedStmt) Close() error  { return s.inner.Close() }
@@ -331,12 +355,14 @@ func (s *wrappedStmt) NumInput() int { return s.inner.NumInput() }
 //nolint:staticcheck // legacy driver.Stmt.Exec, required by the interface and used as the ExecContext fallback below.
 func (s *wrappedStmt) Exec(args []driver.Value) (driver.Result, error) {
 	atomic.AddInt64(&s.counts.stmtExec, 1)
+	s.opts.observe("stmt-exec", s.query)
 	return s.inner.Exec(args) //nolint:staticcheck
 }
 
 //nolint:staticcheck // legacy driver.Stmt.Query, required by the interface and used as the QueryContext fallback below.
 func (s *wrappedStmt) Query(args []driver.Value) (driver.Rows, error) {
 	atomic.AddInt64(&s.counts.stmtQuery, 1)
+	s.opts.observe("stmt-query", s.query)
 	return s.inner.Query(args) //nolint:staticcheck
 }
 
@@ -346,6 +372,7 @@ func (s *wrappedStmt) ExecContext(ctx context.Context, args []driver.NamedValue)
 	}
 	if se, ok := s.inner.(driver.StmtExecContext); ok {
 		atomic.AddInt64(&s.counts.stmtExec, 1)
+		s.opts.observe("stmt-exec", s.query)
 		return se.ExecContext(ctx, args)
 	}
 	dargs, err := namedToOrdinal(args)
@@ -353,6 +380,7 @@ func (s *wrappedStmt) ExecContext(ctx context.Context, args []driver.NamedValue)
 		return nil, err
 	}
 	atomic.AddInt64(&s.counts.stmtExec, 1)
+	s.opts.observe("stmt-exec", s.query)
 	return s.inner.Exec(dargs) //nolint:staticcheck
 }
 
@@ -362,6 +390,7 @@ func (s *wrappedStmt) QueryContext(ctx context.Context, args []driver.NamedValue
 	}
 	if sq, ok := s.inner.(driver.StmtQueryContext); ok {
 		atomic.AddInt64(&s.counts.stmtQuery, 1)
+		s.opts.observe("stmt-query", s.query)
 		return sq.QueryContext(ctx, args)
 	}
 	dargs, err := namedToOrdinal(args)
@@ -369,6 +398,7 @@ func (s *wrappedStmt) QueryContext(ctx context.Context, args []driver.NamedValue
 		return nil, err
 	}
 	atomic.AddInt64(&s.counts.stmtQuery, 1)
+	s.opts.observe("stmt-query", s.query)
 	return s.inner.Query(dargs) //nolint:staticcheck
 }
 

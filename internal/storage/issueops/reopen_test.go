@@ -29,7 +29,9 @@ func TestReopenIssueInTxRetriesConditionalUpdateWhenLatestStatusIsCustomDone(t *
 			WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow(string(status)))
 	}
 	expectAffectedQueries := func() {
-		for range 9 {
+		// The affected-set read: one neighborhood statement for a row with no
+		// edges (affectedByStatusChangeInTx).
+		for range 1 {
 			mock.ExpectQuery("(?s).*").WillReturnRows(emptyRows())
 		}
 	}
@@ -125,7 +127,9 @@ func TestReopenIssueInTxConditionalMissToCustomNonDoneIsNotAlreadyOpen(t *testin
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT status FROM issues WHERE id = ?")).
 		WithArgs(id).
 		WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow(string(types.StatusClosed)))
-	for range 9 {
+	// The affected-set read: one neighborhood statement for a row with no
+	// edges (affectedByStatusChangeInTx).
+	for range 1 {
 		mock.ExpectQuery("(?s).*").WillReturnRows(emptyRows())
 	}
 	mock.ExpectExec(`(?s)UPDATE issues\s+SET status`).WillReturnResult(sqlmock.NewResult(0, 0))
@@ -170,7 +174,9 @@ func TestReopenIssueInTxReportsConcurrentChangeAfterRetryExhaustion(t *testing.T
 			WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow(string(types.StatusClosed)))
 	}
 	expectAffectedQueries := func() {
-		for range 9 {
+		// The affected-set read: one neighborhood statement for a row with no
+		// edges (affectedByStatusChangeInTx).
+		for range 1 {
 			mock.ExpectQuery("(?s).*").WillReturnRows(emptyRows())
 		}
 	}

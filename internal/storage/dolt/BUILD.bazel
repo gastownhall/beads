@@ -313,6 +313,7 @@ go_test(
         "mixed_table_lifecycle_test.go",
         "molecule_contract_test.go",
         "multistore_multiprocess_test.go",
+        "op_write_measure_test.go",
         "open_test.go",
         "pool_gauges_test.go",
         "pool_timeouts_test.go",

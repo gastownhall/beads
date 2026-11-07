@@ -754,6 +754,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A create and a status change spend fewer statements on blocked state.**
+  Measured on a Dolt server with the events journal on, the way Gas City's
+  op journal writes one request (a no-history wisp created at a pinned id,
+  then closed through a fenced apply batch): the create went from 33 SQL
+  statements to 27 and the close from 46 to 32. A row a create inserts new
+  with no edge of its own is no longer recomputed at all (its flag lands at
+  0 and nothing can mark it: four statements per create, two with the
+  journal off). The rows a status change can affect are now read in one
+  statement, a `UNION ALL` of the index lookups the walk made one leg at a
+  time (nine round trips for a row with no edges at all), which also returns
+  the row's own flag, so a close or a move to `pinned` of
+  a row whose flag is already 0 skips the settled unmark too; a reopen and
+  the other status moves get the one-statement read as well. A guarded
+  create's and update's result snapshot no longer re-reads labels its row
+  read already fetched, and a wisp close or update no longer deletes a lease
+  row a wisp never has. The per-leg walk stays as the reference body the
+  fast-vs-per-row equivalence tests compare against. Outcomes are unchanged.
+
 - **`bd dolt pull` on an embedded rig with no remote exits 0 (bd-e2q8zs).**
   It prints `No remote is configured — skipping.` and the setup guidance,
   as server mode already did; in embedded mode it used to exit 1. A pull
