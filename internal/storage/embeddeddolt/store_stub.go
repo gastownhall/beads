@@ -32,7 +32,7 @@ func OpenForPreviewCommand(_ context.Context, _, _, _ string) (*EmbeddedDoltStor
 }
 
 // OpenForReadOnlyCommand returns an error when CGO is not enabled.
-func OpenForReadOnlyCommand(_ context.Context, _, _, _ string) (*EmbeddedDoltStore, error) {
+func OpenForReadOnlyCommand(_ context.Context, _, _, _ string, _ bool) (*EmbeddedDoltStore, error) {
 	return nil, errNoCGO
 }
 
@@ -45,3 +45,7 @@ func OpenForWorkingSetReconcile(_ context.Context, _, _, _ string) (*EmbeddedDol
 func OpenForRemoteSync(_ context.Context, _, _, _ string) (*EmbeddedDoltStore, error) {
 	return nil, errNoCGO
 }
+
+// SetCommitIdentity is a no-op when CGO is not enabled: there is no embedded
+// store to author commits for.
+func SetCommitIdentity(_, _ string) {}

@@ -31,6 +31,17 @@ func setupGitRepoForIntegration(t *testing.T, dir string) {
 	}
 }
 
+// gitConfigValue reads a git config key scoped to dir, returning "" if unset
+// or on error (matching cmd/bd's own fail-open git-config lookups).
+func gitConfigValue(t *testing.T, dir, key string) string {
+	t.Helper()
+	out, err := gitCommand("-C", dir, "config", key).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
 func isDoltBackendUnavailable(output string) bool {
 	return strings.Contains(output, "dolt backend") ||
 		strings.Contains(output, "server not available") ||
@@ -157,12 +168,26 @@ func TestDoltAutoCommit_On_WritesAdvanceHead(t *testing.T) {
 		t.Fatalf("expected Dolt HEAD to change after write; before=%s after=%s", before, after)
 	}
 
-	// Commit author should be deterministic (not the authenticated SQL user like root@%).
+	// Commit author should be the resolved actor (GH#7628), not the
+	// authenticated SQL user like root@%, and not the historical hardcoded
+	// beads/beads@local placeholder. Mirror cmd/bd's own resolution chain
+	// here (resolvedCommitAuthorName/getOwner): GIT_AUTHOR_NAME/EMAIL env
+	// first, else `git config user.name`/`user.email` read from this test's
+	// own tmpDir (setupGitRepoForIntegration sets both there), else the
+	// beads/beads@local fallback. setupGitRepoForIntegration always sets
+	// both config values, so the git-config tier is exercised here, not the
+	// final fallback.
 	expectedName := os.Getenv("GIT_AUTHOR_NAME")
+	if expectedName == "" {
+		expectedName = gitConfigValue(t, tmpDir, "user.name")
+	}
 	if expectedName == "" {
 		expectedName = "beads"
 	}
 	expectedEmail := os.Getenv("GIT_AUTHOR_EMAIL")
+	if expectedEmail == "" {
+		expectedEmail = gitConfigValue(t, tmpDir, "user.email")
+	}
 	if expectedEmail == "" {
 		expectedEmail = "beads@local"
 	}
