@@ -1229,13 +1229,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `git@alias-a:org/repo.git` and `git@alias-b:org/repo.git` match
   `git@github.com:org/repo.git` and HTTPS; a database this checkout stamped
   before the upgrade still verifies. Canonical hosts such as `github.com`,
-  custom SSH transports and failed lookups keep the previous fingerprint. A
-  mismatch is still an error, now reported as "Database fingerprint does not
-  match this repository's remote", with the shared-ledger sequence: upgrade
-  every clone, then run `bd migrate --update-repo-id` once. The interactive
-  `bd doctor --fix` fingerprint repair offers only update and skip; its
-  reinitialize choice, which deleted the database, is gone (entering `2`
-  now skips). See troubleshooting.
+  aliases configured with a port other than 22, aliases under a custom SSH
+  transport, failed lookups and bare hosts that `ssh -G` maps to themselves
+  keep the previous fingerprint. A mismatch is still an error, now reported
+  as "Database fingerprint does not match this repository's remote", with
+  the shared-ledger sequence: upgrade every clone, then run
+  `bd migrate --update-repo-id` once. When this session could not resolve
+  the alias (custom transport or failed lookup), or `ssh -G` maps a bare host
+  to itself (as it does for an alias this machine's SSH config lacks), the
+  mismatch is a warning naming the reason, and `bd doctor --fix --yes` and
+  `bd migrate --update-repo-id --yes`/`--json` refuse to overwrite the stored
+  fingerprint with this one. The interactive `bd doctor --fix`
+  fingerprint repair offers only update and skip; its reinitialize choice,
+  which deleted the database, is gone (entering `2` now skips). See
+  troubleshooting.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

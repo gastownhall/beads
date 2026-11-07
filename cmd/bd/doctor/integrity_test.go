@@ -296,6 +296,74 @@ func TestClassifyRepoFingerprint(t *testing.T) {
 		assertNoDestructiveAdvice(t, check)
 	})
 
+	// Review (#8212): a session that could not resolve its SSH host alias
+	// computes the alias-as-written id, which is no evidence against a
+	// stored id that resolving clones converged on. Warn, name the reason,
+	// and never steer this session toward rewriting the shared id.
+	t.Run("mismatch with an unresolved alias warns and names the reason", func(t *testing.T) {
+		current := beads.RepoFingerprint{
+			ID:                 "cccc3333dddd4444",
+			Source:             beads.RepoIDSourceRemote,
+			SSHAlias:           "alias-a",
+			SSHAliasUnresolved: "GIT_SSH_COMMAND selects a custom SSH transport",
+		}
+		check := classifyRepoFingerprint("aaaa1111bbbb2222", current)
+		if check.Status != StatusWarning {
+			t.Fatalf("Status = %q, want %q (message=%q)", check.Status, StatusWarning, check.Message)
+		}
+		for _, want := range []string{"aaaa1111", "cccc3333", `"alias-a"`, "GIT_SSH_COMMAND selects a custom SSH transport"} {
+			if !strings.Contains(check.Detail, want) {
+				t.Fatalf("Detail = %q, want %q named", check.Detail, want)
+			}
+		}
+		if !strings.Contains(check.Message, "could not resolve the SSH host alias") {
+			t.Fatalf("Message = %q, want the unresolved alias named", check.Message)
+		}
+		if !strings.Contains(check.Fix, "Rerun 'bd doctor'") || !strings.Contains(check.Fix, "Do not run 'bd migrate --update-repo-id' from this session") {
+			t.Fatalf("Fix = %q, want a rerun where the alias resolves, and no update from here", check.Fix)
+		}
+		assertNoDestructiveAdvice(t, check)
+
+		if ok := classifyRepoFingerprint(current.ID, current); ok.Status != StatusOK {
+			t.Fatalf("unresolved id equal to the stored one: %q %q, want OK", ok.Status, ok.Message)
+		}
+	})
+
+	// Review (#8212): ssh -G maps a bare host to itself both when it is the
+	// server's own name and when it is an alias this machine's SSH config
+	// lacks. Warn and name both readings; leave the update to a person, who
+	// may confirm it if the host is the server's own name.
+	t.Run("mismatch with an unmapped bare host warns and leaves the update to a person", func(t *testing.T) {
+		current := beads.RepoFingerprint{
+			ID:               "cccc3333dddd4444",
+			Source:           beads.RepoIDSourceRemote,
+			SSHAlias:         "gitserver",
+			SSHAliasUnmapped: true,
+		}
+		check := classifyRepoFingerprint("aaaa1111bbbb2222", current)
+		if check.Status != StatusWarning {
+			t.Fatalf("Status = %q, want %q (message=%q)", check.Status, StatusWarning, check.Message)
+		}
+		for _, want := range []string{"aaaa1111", "cccc3333", `"gitserver"`, "no other HostName"} {
+			if !strings.Contains(check.Detail, want) {
+				t.Fatalf("Detail = %q, want %q named", check.Detail, want)
+			}
+		}
+		if !strings.Contains(check.Message, "may be an alias") {
+			t.Fatalf("Message = %q, want the possible alias named", check.Message)
+		}
+		for _, want := range []string{"Host entry", "server's own name", "bd migrate --update-repo-id' without --yes or --json"} {
+			if !strings.Contains(check.Fix, want) {
+				t.Fatalf("Fix = %q, want %q", check.Fix, want)
+			}
+		}
+		assertNoDestructiveAdvice(t, check)
+
+		if ok := classifyRepoFingerprint(current.ID, current); ok.Status != StatusOK {
+			t.Fatalf("unmapped id equal to the stored one: %q %q, want OK", ok.Status, ok.Message)
+		}
+	})
+
 	t.Run("short ids are shown safely", func(t *testing.T) {
 		check := classifyRepoFingerprint("abc", beads.RepoFingerprint{ID: "cccc3333dddd4444", Source: beads.RepoIDSourceRemote})
 		if check.Status != StatusError || !strings.Contains(check.Detail, "stored: abc,") {
@@ -333,14 +401,29 @@ func useFakeAliasSSH(t *testing.T) {
 	t.Setenv("GIT_SSH_COMMAND", "")
 	t.Setenv("GIT_SSH_VARIANT", "")
 
-	sshDir := t.TempDir()
-	script := `#!/bin/sh
+	installFakeSSH(t, `#!/bin/sh
 for dest; do :; done
 case "${dest#*@}" in
 alias-a|alias-b) echo "hostname github.com" ;;
 *) echo "hostname ${dest#*@}" ;;
 esac
+echo "port 22"
+`)
+}
+
+// unconfiguredSSHScript answers ssh -G like OpenSSH with no Host entries:
+// every host, an alias other machines configure included, maps to itself.
+const unconfiguredSSHScript = `#!/bin/sh
+for dest; do :; done
+echo "hostname ${dest#*@}"
+echo "port 22"
 `
+
+// installFakeSSH puts an ssh running script first on PATH, ahead of any
+// installed earlier in the test.
+func installFakeSSH(t *testing.T, script string) {
+	t.Helper()
+	sshDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(sshDir, "ssh"), []byte(script), 0o700); err != nil { // #nosec G306 -- test executable
 		t.Fatal(err)
 	}
@@ -474,5 +557,94 @@ func TestRepoFingerprint_SharedLedgerConvergesAfterExplicitUpdate(t *testing.T) 
 	}
 	if len(store.writes) != 0 {
 		t.Fatalf("doctor reads rewrote metadata keys %v; reads must not write", store.writes)
+	}
+}
+
+// Review (#8212): once a shared ledger has converged on the resolved id, a
+// session that cannot resolve the alias (here GIT_SSH_COMMAND, common in
+// agent and CI shells) computes the alias-as-written hash. Doctor must warn
+// and name why, not report a different repository, and the check must still
+// write nothing.
+func TestCheckRepoFingerprint_UnresolvedAliasOnConvergedLedgerWarns(t *testing.T) {
+	useFakeAliasSSH(t)
+	repo := newFingerprintClone(t, "git@alias-a:org/repo.git")
+
+	resolved, err := beads.ComputeRepoFingerprintForPath(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resolved.AliasResolved() {
+		t.Fatalf("test precondition: alias-a must resolve, got %+v", resolved)
+	}
+	store := &fakeRepoMetadataStore{values: map[string]string{"repo_id": resolved.ID}}
+
+	t.Setenv("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+	check := checkRepoFingerprintWithStore(store, repo)
+	if check.Status != StatusWarning {
+		t.Fatalf("Status = %q, want %q (message=%q, detail=%q)", check.Status, StatusWarning, check.Message, check.Detail)
+	}
+	for _, want := range []string{truncateID(resolved.ID), truncateID(resolved.LegacyID), "alias-a", "GIT_SSH_COMMAND"} {
+		if !strings.Contains(check.Detail, want) {
+			t.Fatalf("Detail = %q, want %q named", check.Detail, want)
+		}
+	}
+	if len(store.writes) != 0 {
+		t.Fatalf("doctor read rewrote metadata keys %v; the check must not write", store.writes)
+	}
+}
+
+// Review (#8212): OpenSSH does not fail on an alias its configuration lacks;
+// ssh -G echoes it back. A clone without the Host entry the shared ledger
+// converged through (a fresh agent environment, a second machine) therefore
+// computes the alias as written with no lookup failure. Doctor must warn,
+// not report a different repository, and the check must still write nothing.
+func TestCheckRepoFingerprint_UnconfiguredAliasOnConvergedLedgerWarns(t *testing.T) {
+	useFakeAliasSSH(t)
+	repo := newFingerprintClone(t, "git@alias-a:org/repo.git")
+
+	resolved, err := beads.ComputeRepoFingerprintForPath(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resolved.AliasResolved() {
+		t.Fatalf("test precondition: alias-a must resolve, got %+v", resolved)
+	}
+	store := &fakeRepoMetadataStore{values: map[string]string{"repo_id": resolved.ID}}
+
+	installFakeSSH(t, unconfiguredSSHScript)
+	check := checkRepoFingerprintWithStore(store, repo)
+	if check.Status != StatusWarning {
+		t.Fatalf("Status = %q, want %q (message=%q, detail=%q)", check.Status, StatusWarning, check.Message, check.Detail)
+	}
+	for _, want := range []string{truncateID(resolved.ID), truncateID(resolved.LegacyID), `"alias-a"`} {
+		if !strings.Contains(check.Detail, want) {
+			t.Fatalf("Detail = %q, want %q named", check.Detail, want)
+		}
+	}
+	if len(store.writes) != 0 {
+		t.Fatalf("doctor read rewrote metadata keys %v; the check must not write", store.writes)
+	}
+}
+
+// Review (#8212): a custom SSH transport (GIT_SSH_COMMAND, common in CI and
+// agent shells) does not make a forge's own host session-dependent: ssh -G
+// maps gitlab.example.com to itself in every session, so a stored id from
+// another repository stays an error.
+func TestCheckRepoFingerprint_CustomTransportKeepsForgeMismatchAnError(t *testing.T) {
+	useFakeAliasSSH(t)
+	repo := newFingerprintClone(t, "git@gitlab.example.com:org/repo.git")
+	other, err := beads.ComputeRepoIDForPath(newFingerprintClone(t, "git@gitlab.example.com:other/project.git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &fakeRepoMetadataStore{values: map[string]string{"repo_id": other}}
+
+	t.Setenv("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+	check := checkRepoFingerprintWithStore(store, repo)
+	if check.Status != StatusError {
+		t.Fatalf("Status = %q, want %q (message=%q, detail=%q)", check.Status, StatusError, check.Message, check.Detail)
+	}
+	if len(store.writes) != 0 {
+		t.Fatalf("doctor read rewrote metadata keys %v; the check must not write", store.writes)
 	}
 }

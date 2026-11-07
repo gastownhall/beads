@@ -52,10 +52,11 @@ func updateRepoIDInProcess(path string, beadsDir string, autoYes bool) error {
 	ctx := context.Background()
 
 	// Compute new repo ID
-	newRepoID, err := beads.ComputeRepoIDForPath(path)
+	current, err := beads.ComputeRepoFingerprintForPath(path)
 	if err != nil {
 		return fmt.Errorf("failed to compute repository ID: %w", err)
 	}
+	newRepoID := current.ID
 
 	// Open database
 	store, err := newRepoFingerprintStore(ctx, beadsDir)
@@ -76,9 +77,25 @@ func updateRepoIDInProcess(path string, beadsDir string, autoYes bool) error {
 		newDisplay = newDisplay[:8]
 	}
 
+	// GH#5990: an id that hashes the remote's SSH host as written, though
+	// another session or machine may resolve it to a HostName (this session
+	// could not resolve the alias, or this machine maps a bare host to
+	// itself), depends on where it was computed. Written over a different
+	// stored id, which resolving clones may have converged on, it splits them
+	// again, so --yes never writes it and the prompt says why.
+	uncertainty := current.AliasUncertainty()
+	if uncertainty != "" && autoYes && oldRepoID != "" && oldRepoID != newRepoID {
+		return skipFix(fmt.Errorf("not replacing repo_id %s with %s, which %s; rerun where ssh -G resolves the alias and no GIT_SSH, GIT_SSH_COMMAND or core.sshCommand is set, or confirm by hand with 'bd doctor --fix' without --yes",
+			oldDisplay, newDisplay, uncertainty))
+	}
+
 	// Prompt for confirmation if repo_id exists and differs
 	if oldRepoID != "" && oldRepoID != newRepoID && !autoYes {
 		fmt.Printf("  WARNING: Changing repository ID can break sync if other clones exist.\n\n")
+		if uncertainty != "" {
+			fmt.Printf("  The new ID %s.\n", uncertainty)
+			fmt.Printf("  Clones that resolve it to a HostName compute a different ID; writing this one splits them.\n\n")
+		}
 		fmt.Printf("  Current repo ID: %s\n", oldDisplay)
 		fmt.Printf("  New repo ID:     %s\n\n", newDisplay)
 		// GH#5990: repo_id lives in the versioned metadata table, so this
@@ -116,7 +133,10 @@ func updateRepoIDInProcess(path string, beadsDir string, autoYes bool) error {
 // GH#5990: there is no reinitialize choice. A fingerprint mismatch is no
 // evidence the database is disposable, and in a shared-ledger deployment
 // deleting it destroys real state; the former choice "2" now skips like any
-// unrecognized input.
+// unrecognized input. With autoYes, an id that hashes the remote's SSH host
+// as written though another session or machine may resolve it
+// (beads.RepoFingerprint.AliasUncertainty) never replaces a different stored
+// id: the fix reports itself skipped (ErrSkipped).
 //
 // All operations are performed in-process to avoid Dolt lock contention
 // that occurs when spawning bd subcommands. (GH#1805)

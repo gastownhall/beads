@@ -528,21 +528,29 @@ func isolateFingerprintGitEnv(t *testing.T) {
 	t.Setenv("GIT_SSH_VARIANT", "")
 }
 
-// fakeSSHAliasScript answers `ssh -G [opts] -- [user@]host` like OpenSSH
+// fakeSSHAliasScript answers `ssh -G [-p port] -- [user@]host` like OpenSSH
 // with a config mapping the aliases alias-a, alias-b and github.com-work to
-// HostName github.com, and every other host to itself. Like OpenSSH it
-// lowercases the host before matching.
+// HostName github.com, alias-2222 and alias-2223 to HostName
+// git.example.com on ports 2222 and 2223, alias-22 to git.example.com on the
+// default port, and every other host to itself. Like OpenSSH it lowercases
+// the host before matching, and a -p port overrides the configured one.
 const fakeSSHAliasScript = `#!/bin/sh
 [ "$1" = "-G" ] || exit 2
+flag_port=""
+[ "$2" = "-p" ] && flag_port=$3
 for dest; do :; done
 host=$(printf '%s' "${dest#*@}" | tr 'A-Z' 'a-z')
 echo "host $host"
 echo "user git"
+port=22
 case "$host" in
 alias-a|alias-b|github.com-work) echo "hostname github.com" ;;
+alias-2222) echo "hostname git.example.com"; port=2222 ;;
+alias-2223) echo "hostname git.example.com"; port=2223 ;;
+alias-22) echo "hostname git.example.com" ;;
 *) echo "hostname $host" ;;
 esac
-echo "port 22"
+echo "port ${flag_port:-$port}"
 `
 
 // installFakeSSH puts an ssh executable running script first on PATH.
@@ -607,20 +615,24 @@ func TestComputeRepoIDForPath_SSHAliasesOfSameRepoAgree(t *testing.T) {
 	}
 }
 
-// stubSSHResolver replaces the ssh -G lookup with a fixed alias map and
-// counts calls. Tests using it must not run in parallel.
+// stubSSHResolver replaces the ssh -G lookup with a fixed alias map on the
+// default port (or the port handed to it) and counts calls. Tests using it
+// must not run in parallel.
 func stubSSHResolver(t *testing.T, hostNames map[string]string) *int {
 	t.Helper()
 	calls := 0
-	old := resolveSSHHostName
-	resolveSSHHostName = func(_ context.Context, _, host, _ string) (string, error) {
+	old := resolveSSHEndpoint
+	resolveSSHEndpoint = func(_ context.Context, _, host, port string) (sshEndpoint, error) {
 		calls++
-		if hostName, ok := hostNames[host]; ok {
-			return hostName, nil
+		if port == "" {
+			port = "22"
 		}
-		return host, nil
+		if hostName, ok := hostNames[host]; ok {
+			return sshEndpoint{hostName: hostName, port: port}, nil
+		}
+		return sshEndpoint{hostName: host, port: port}, nil
 	}
-	t.Cleanup(func() { resolveSSHHostName = old })
+	t.Cleanup(func() { resolveSSHEndpoint = old })
 	return &calls
 }
 
@@ -700,8 +712,9 @@ func TestComputeRepoFingerprint_AliasResolution(t *testing.T) {
 	})
 }
 
-// assertUnresolvedFingerprint checks that remote kept its pre-change id and
-// no alias was marked resolved.
+// assertUnresolvedFingerprint checks that remote kept its pre-change id, no
+// alias was marked resolved, and nothing says resolution was blocked: the
+// remote is never looked up, or ssh's answer leaves its identity unchanged.
 func assertUnresolvedFingerprint(t *testing.T, remote string, fp RepoFingerprint) {
 	t.Helper()
 	canonical, err := canonicalizeGitURL(remote)
@@ -712,13 +725,31 @@ func assertUnresolvedFingerprint(t *testing.T, remote string, fp RepoFingerprint
 	if fp != want {
 		t.Fatalf("fingerprint of %s = %+v, want the pre-change id %+v", remote, fp, want)
 	}
-	if fp.AliasResolved() {
-		t.Fatalf("AliasResolved() = true for %s, want false", remote)
+	if fp.AliasResolved() || fp.AliasUnresolved() {
+		t.Fatalf("AliasResolved() = %v, AliasUnresolved() = %v for %s, want both false", fp.AliasResolved(), fp.AliasUnresolved(), remote)
 	}
 }
 
-// Any failure of the real ssh -G lookup keeps the pre-change id, and the
-// lookup stays bounded even when ssh hangs or leaks its output pipe.
+// assertAliasUnresolved checks that remote kept its pre-change id because
+// this session could not resolve its alias host, with a reason containing
+// wantReason (any reason when wantReason is empty).
+func assertAliasUnresolved(t *testing.T, remote, host, wantReason string, fp RepoFingerprint) {
+	t.Helper()
+	canonical, err := canonicalizeGitURL(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fp.ID != hashRepoIdentity(canonical) || fp.Source != RepoIDSourceRemote || fp.LegacyID != "" || fp.AliasResolved() {
+		t.Fatalf("fingerprint of %s = %+v, want the pre-change id %s, unresolved", remote, fp, hashRepoIdentity(canonical))
+	}
+	if fp.SSHAlias != host || !fp.AliasUnresolved() || !strings.Contains(fp.SSHAliasUnresolved, wantReason) {
+		t.Fatalf("fingerprint of %s = %+v, want alias %q unresolved for a reason containing %q", remote, fp, host, wantReason)
+	}
+}
+
+// Any failure of the real ssh -G lookup keeps the pre-change id and records
+// why, and the lookup stays bounded even when ssh hangs or leaks its output
+// pipe.
 func TestComputeRepoFingerprint_Fallbacks(t *testing.T) {
 	isolateFingerprintGitEnv(t)
 	const remote = "git@alias-a:org/repo.git"
@@ -727,32 +758,36 @@ func TestComputeRepoFingerprint_Fallbacks(t *testing.T) {
 	sshResolveTimeout, sshResolveWaitDelay = 300*time.Millisecond, 200*time.Millisecond
 	t.Cleanup(func() { sshResolveTimeout, sshResolveWaitDelay = oldTimeout, oldWaitDelay })
 
-	scripts := map[string]string{
-		"nonzero exit":       "#!/bin/sh\necho 'hostname github.com'\nexit 1\n",
-		"unsupported -G":     "#!/bin/sh\necho 'unknown option -- G' >&2\nexit 255\n",
-		"absent hostname":    "#!/bin/sh\necho 'user git'\necho 'port 22'\n",
-		"empty hostname":     "#!/bin/sh\necho 'hostname'\n",
-		"two-value hostname": "#!/bin/sh\necho 'hostname github.com evil.example'\n",
-		"option-like":        "#!/bin/sh\necho 'hostname -oProxyCommand=evil'\n",
-		"path-like":          "#!/bin/sh\necho 'hostname github.com/evil'\n",
-		"invalid hostname":   "#!/bin/sh\necho 'hostname _bad_.example'\n",
-		"deadline":           "#!/bin/sh\nexec sleep 10\n",
-		"inherited pipe":     "#!/bin/sh\nsleep 10 &\necho 'hostname github.com'\n",
+	scripts := map[string]struct{ script, reason string }{
+		"nonzero exit":       {"#!/bin/sh\necho 'hostname github.com'\necho 'port 22'\nexit 1\n", "ssh -G failed"},
+		"unsupported -G":     {"#!/bin/sh\necho 'unknown option -- G' >&2\nexit 255\n", "ssh -G failed"},
+		"absent hostname":    {"#!/bin/sh\necho 'user git'\necho 'port 22'\n", "no hostname"},
+		"absent port":        {"#!/bin/sh\necho 'user git'\necho 'hostname github.com'\n", "no port"},
+		"empty hostname":     {"#!/bin/sh\necho 'hostname'\necho 'port 22'\n", "malformed hostname line"},
+		"two-value hostname": {"#!/bin/sh\necho 'hostname github.com evil.example'\necho 'port 22'\n", "malformed hostname line"},
+		"two-value port":     {"#!/bin/sh\necho 'hostname github.com'\necho 'port 22 2222'\n", "malformed port line"},
+		"option-like":        {"#!/bin/sh\necho 'hostname -oProxyCommand=evil'\necho 'port 22'\n", "unusable hostname"},
+		"path-like":          {"#!/bin/sh\necho 'hostname github.com/evil'\necho 'port 22'\n", "unusable hostname"},
+		"invalid hostname":   {"#!/bin/sh\necho 'hostname _bad_.example'\necho 'port 22'\n", "unusable hostname"},
+		"deadline":           {"#!/bin/sh\nexec sleep 10\n", "did not answer within"},
+		// Ends at WaitDelay or at the deadline, whichever the scheduler
+		// reaches first; either way with a reason.
+		"inherited pipe": {"#!/bin/sh\nsleep 10 &\necho 'hostname github.com'\necho 'port 22'\n", ""},
 	}
-	for name, script := range scripts {
+	for name, tc := range scripts {
 		t.Run(name, func(t *testing.T) {
-			installFakeSSH(t, script)
+			installFakeSSH(t, tc.script)
 			start := time.Now()
 			fp := fingerprintForRemote(t, remote)
 			if elapsed := time.Since(start); elapsed > 5*time.Second {
 				t.Fatalf("fingerprint took %v, want a bounded lookup", elapsed)
 			}
-			assertUnresolvedFingerprint(t, remote, fp)
+			assertAliasUnresolved(t, remote, "alias-a", tc.reason, fp)
 		})
 	}
 
 	t.Run("CRLF output still resolves", func(t *testing.T) {
-		installFakeSSH(t, "#!/bin/sh\nprintf 'user git\\r\\nHostName github.com\\r\\n'\n")
+		installFakeSSH(t, "#!/bin/sh\nprintf 'user git\\r\\nHostName github.com\\r\\nPort 22\\r\\n'\n")
 		fp := fingerprintForRemote(t, remote)
 		if fp.ID != hashRepoIdentity("github.com/org/repo") {
 			t.Fatalf("fingerprint = %+v, want the CRLF hostname adopted", fp)
@@ -763,7 +798,7 @@ func TestComputeRepoFingerprint_Fallbacks(t *testing.T) {
 		old := sshLookPath
 		sshLookPath = func(string) (string, error) { return "", exec.ErrNotFound }
 		t.Cleanup(func() { sshLookPath = old })
-		assertUnresolvedFingerprint(t, remote, fingerprintForRemote(t, remote))
+		assertAliasUnresolved(t, remote, "alias-a", "ssh was not found", fingerprintForRemote(t, remote))
 	})
 
 	t.Run("ssh only on a current-directory PATH entry", func(t *testing.T) {
@@ -789,58 +824,67 @@ func TestComputeRepoFingerprint_Fallbacks(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		assertUnresolvedFingerprint(t, remote, fp)
+		assertAliasUnresolved(t, remote, "alias-a", "", fp)
 	})
 }
 
-// The resolver adopts only the first hostname line of ssh -G output, and
-// only when it is a DNS hostname or IP literal.
-func TestParseSSHConfigHostName(t *testing.T) {
+// The resolver adopts only the first hostname and port lines of ssh -G
+// output, needs both, and adopts the hostname only when it is a DNS
+// hostname or IP literal.
+func TestParseSSHConfigEndpoint(t *testing.T) {
 	cases := []struct {
-		name string
-		out  string
-		want string
-		ok   bool
+		name     string
+		out      string
+		want     string
+		wantPort string
+		ok       bool
 	}{
-		{name: "plain", out: "user git\nhostname github.com\nport 22\n", want: "github.com", ok: true},
-		{name: "uppercase key", out: "HOSTNAME github.com\n", want: "github.com", ok: true},
-		{name: "mixed case key", out: "HostName github.com\n", want: "github.com", ok: true},
-		{name: "crlf", out: "hostname github.com\r\nport 22\r\n", want: "github.com", ok: true},
-		{name: "first hostname wins", out: "hostname github.com\nhostname evil.example\n", want: "github.com", ok: true},
-		{name: "tab separated", out: "hostname\tgithub.com\n", want: "github.com", ok: true},
-		{name: "uppercase value and trailing dot", out: "hostname GitHub.COM.\n", want: "github.com", ok: true},
-		{name: "ipv4", out: "hostname 192.0.2.10\n", want: "192.0.2.10", ok: true},
-		{name: "ipv6", out: "hostname 2001:db8::1\n", want: "2001:db8::1", ok: true},
+		{name: "plain", out: "user git\nhostname github.com\nport 22\n", want: "github.com", wantPort: "22", ok: true},
+		{name: "uppercase key", out: "HOSTNAME github.com\nPORT 22\n", want: "github.com", wantPort: "22", ok: true},
+		{name: "mixed case key", out: "HostName github.com\nPort 22\n", want: "github.com", wantPort: "22", ok: true},
+		{name: "crlf", out: "hostname github.com\r\nport 22\r\n", want: "github.com", wantPort: "22", ok: true},
+		{name: "port before hostname", out: "port 2222\nhostname github.com\n", want: "github.com", wantPort: "2222", ok: true},
+		{name: "first hostname wins", out: "hostname github.com\nhostname evil.example\nport 22\n", want: "github.com", wantPort: "22", ok: true},
+		{name: "first port wins", out: "hostname github.com\nport 2222\nport 22\n", want: "github.com", wantPort: "2222", ok: true},
+		{name: "tab separated", out: "hostname\tgithub.com\nport\t22\n", want: "github.com", wantPort: "22", ok: true},
+		{name: "uppercase value and trailing dot", out: "hostname GitHub.COM.\nport 22\n", want: "github.com", wantPort: "22", ok: true},
+		{name: "ipv4", out: "hostname 192.0.2.10\nport 22\n", want: "192.0.2.10", wantPort: "22", ok: true},
+		{name: "ipv6", out: "hostname 2001:db8::1\nport 22\n", want: "2001:db8::1", wantPort: "22", ok: true},
 		{name: "absent", out: "user git\nport 22\n"},
+		{name: "absent port", out: "user git\nhostname github.com\n"},
 		{name: "empty output", out: ""},
-		{name: "empty value", out: "hostname \n"},
-		{name: "bare key line", out: "hostname\n"},
-		{name: "value with space", out: "hostname two words\n"},
-		{name: "malformed first hostname before a valid one", out: "hostname\nhostname github.com\n"},
-		{name: "two-value first hostname before a valid one", out: "hostname a b\nhostname github.com\n"},
-		{name: "option-like value", out: "hostname -oProxyCommand=evil\n"},
-		{name: "underscore label", out: "hostname _bad_.example\n"},
-		{name: "label ends in hyphen", out: "hostname bad-.example\n"},
-		{name: "empty label", out: "hostname github..com\n"},
-		{name: "too long", out: "hostname " + strings.Repeat("a.", 127) + "com\n"},
+		{name: "empty value", out: "hostname \nport 22\n"},
+		{name: "bare key line", out: "hostname\nport 22\n"},
+		{name: "bare port line", out: "hostname github.com\nport\n"},
+		{name: "value with space", out: "hostname two words\nport 22\n"},
+		{name: "malformed first hostname before a valid one", out: "hostname\nhostname github.com\nport 22\n"},
+		{name: "two-value first hostname before a valid one", out: "hostname a b\nhostname github.com\nport 22\n"},
+		{name: "two-value first port before a valid one", out: "hostname github.com\nport 22 2222\nport 22\n"},
+		{name: "option-like value", out: "hostname -oProxyCommand=evil\nport 22\n"},
+		{name: "underscore label", out: "hostname _bad_.example\nport 22\n"},
+		{name: "label ends in hyphen", out: "hostname bad-.example\nport 22\n"},
+		{name: "empty label", out: "hostname github..com\nport 22\n"},
+		{name: "too long", out: "hostname " + strings.Repeat("a.", 127) + "com\nport 22\n"},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseSSHConfigHostName([]byte(tt.out))
-			ok := err == nil
+			endpoint, err := parseSSHConfigEndpoint([]byte(tt.out))
+			got, ok := endpoint.hostName, err == nil
 			if ok {
 				got, ok = normalizeSSHHostName(got)
 			}
-			if ok != tt.ok || (ok && got != tt.want) {
-				t.Errorf("parse+normalize(%q) = (%q, %v), want (%q, %v)", tt.out, got, ok, tt.want, tt.ok)
+			if ok != tt.ok || (ok && (got != tt.want || endpoint.port != tt.wantPort)) {
+				t.Errorf("parse+normalize(%q) = (%q, port %q, %v), want (%q, port %q, %v)", tt.out, got, endpoint.port, ok, tt.want, tt.wantPort, tt.ok)
 			}
 		})
 	}
 }
 
-// Remotes that are not plain SSH destinations, or whose SSH transport Git
-// would not run through the default ssh configuration, are never handed to
-// the resolver.
+// Remotes that are not plain SSH destinations are never handed to the
+// resolver. When Git would not run the default ssh configuration, the
+// resolver still says whether the host is an alias, but the HostName it
+// names is not adopted: that transport is recorded as the reason the alias
+// stayed unresolved.
 func TestComputeRepoFingerprint_NeverResolved(t *testing.T) {
 	isolateFingerprintGitEnv(t)
 	calls := stubSSHResolver(t, map[string]string{"alias-a": "github.com"})
@@ -869,17 +913,28 @@ func TestComputeRepoFingerprint_NeverResolved(t *testing.T) {
 		})
 	}
 
-	for _, env := range []string{"GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT"} {
+	for _, env := range []string{"GIT_SSH", "GIT_SSH_COMMAND"} {
 		t.Run(env, func(t *testing.T) {
 			t.Setenv(env, "ssh")
 			*calls = 0
 			const remote = "git@alias-a:org/repo.git"
-			assertUnresolvedFingerprint(t, remote, fingerprintForRemote(t, remote))
-			if *calls != 0 {
-				t.Fatalf("resolver called %d times with %s set, want 0", *calls, env)
+			assertAliasUnresolved(t, remote, "alias-a", env+" selects a custom SSH transport", fingerprintForRemote(t, remote))
+			if *calls != 1 {
+				t.Fatalf("resolver called %d times with %s set, want 1: the lookup shows the host is an alias", *calls, env)
 			}
 		})
 	}
+
+	// GIT_SSH_VARIANT only changes how Git passes options to the plain ssh
+	// it still runs, so ssh -G still speaks for its HostName mapping.
+	t.Run("GIT_SSH_VARIANT alone still resolves", func(t *testing.T) {
+		t.Setenv("GIT_SSH_VARIANT", "ssh")
+		*calls = 0
+		fp := fingerprintForRemote(t, "git@alias-a:org/repo.git")
+		if fp.ID != hashRepoIdentity("github.com/org/repo") || !fp.AliasResolved() || *calls != 1 {
+			t.Fatalf("fingerprint = %+v after %d lookups, want alias-a resolved to github.com", fp, *calls)
+		}
+	})
 
 	t.Run("core.sshCommand", func(t *testing.T) {
 		const remote = "git@alias-a:org/repo.git"
@@ -895,21 +950,61 @@ func TestComputeRepoFingerprint_NeverResolved(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		assertUnresolvedFingerprint(t, remote, fp)
-		if *calls != 0 {
-			t.Fatalf("resolver called %d times with core.sshCommand set, want 0", *calls)
+		assertAliasUnresolved(t, remote, "alias-a", "core.sshCommand selects a custom SSH transport", fp)
+		if *calls != 1 {
+			t.Fatalf("resolver called %d times with core.sshCommand set, want 1: the lookup shows the host is an alias", *calls)
 		}
 	})
 
 	t.Run("resolver error", func(t *testing.T) {
-		old := resolveSSHHostName
-		resolveSSHHostName = func(context.Context, string, string, string) (string, error) {
-			return "", errors.New("boom")
+		old := resolveSSHEndpoint
+		resolveSSHEndpoint = func(context.Context, string, string, string) (sshEndpoint, error) {
+			return sshEndpoint{}, errors.New("boom")
 		}
-		t.Cleanup(func() { resolveSSHHostName = old })
+		t.Cleanup(func() { resolveSSHEndpoint = old })
 		const remote = "git@alias-a:org/repo.git"
-		assertUnresolvedFingerprint(t, remote, fingerprintForRemote(t, remote))
+		assertAliasUnresolved(t, remote, "alias-a", "boom", fingerprintForRemote(t, remote))
 	})
+}
+
+// Codex review (#8212): ssh -G also reports the port, and two aliases with
+// one HostName but different configured ports can be different servers. An
+// alias whose configuration selects a port other than 22 keeps its literal
+// identity; a port written in the URL still overrides the configured one and
+// stays in the resolved identity.
+func TestComputeRepoFingerprint_ConfiguredPort(t *testing.T) {
+	isolateFingerprintGitEnv(t)
+	installFakeSSH(t, fakeSSHAliasScript)
+
+	a := fingerprintForRemote(t, "git@alias-2222:org/repo.git")
+	b := fingerprintForRemote(t, "git@alias-2223:org/repo.git")
+	if a.ID == b.ID {
+		t.Fatalf("aliases of git.example.com on ports 2222 and 2223 share fingerprint %s; they can be different servers", a.ID)
+	}
+	assertUnresolvedFingerprint(t, "git@alias-2222:org/repo.git", a)
+	assertUnresolvedFingerprint(t, "git@alias-2223:org/repo.git", b)
+
+	tests := []struct {
+		remote, resolved string
+	}{
+		// The default port is the endpoint a default-port URL names.
+		{"git@alias-22:org/repo.git", "git.example.com/org/repo"},
+		// A port written in the URL wins over the configured one, as it does
+		// for ssh itself, and keeps its existing hashing.
+		{"ssh://git@alias-2222:2222/org/repo.git", "git.example.com:2222/org/repo"},
+		{"ssh://git@alias-2223:22/org/repo.git", "git.example.com/org/repo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.remote, func(t *testing.T) {
+			fp := fingerprintForRemote(t, tt.remote)
+			if fp.ID != hashRepoIdentity(tt.resolved) || !fp.AliasResolved() {
+				t.Fatalf("fingerprint = %+v, want the id of %s", fp, tt.resolved)
+			}
+		})
+	}
+	if got, want := fingerprintForRemote(t, "ssh://git@alias-2222:2222/org/repo.git").ID, repoIDForRemote(t, "ssh://git@git.example.com:2222/org/repo.git"); got != want {
+		t.Fatalf("alias with an explicit URL port = %s, want the explicit-port URL's id %s", got, want)
+	}
 }
 
 // An ordinary forge host keeps its pre-change id even when the local SSH
@@ -971,5 +1066,99 @@ func TestComputeRepoFingerprint_CanonicalHostPolicy(t *testing.T) {
 				t.Fatalf("fingerprint = %+v, want id of %s", fp, tt.resolved)
 			}
 		})
+	}
+}
+
+// Review (#8212): a custom SSH transport keeps the pre-change id with a
+// reason only for a host ssh -G shows is an alias whose resolution would
+// change the identity. A host ssh maps to itself, to a HostName it may not
+// adopt or to another port names the same endpoint in every session, so it
+// keeps the pre-change id with no reason, as without the transport.
+func TestComputeRepoFingerprint_CustomTransportFlagsOnlyAliases(t *testing.T) {
+	isolateFingerprintGitEnv(t)
+	t.Setenv("GIT_SSH_COMMAND", "ssh -i /dev/null")
+
+	t.Run("through ssh -G", func(t *testing.T) {
+		installFakeSSH(t, fakeSSHAliasScript)
+		for _, remote := range []string{
+			"git@gitlab.example.com:org/repo.git",
+			"git@ssh.dev.azure.com:v3/org/project/repo",
+			"ssh://git@gitlab.example.com:2222/org/repo.git",
+			"git@alias-2222:org/repo.git",
+		} {
+			assertUnresolvedFingerprint(t, remote, fingerprintForRemote(t, remote))
+		}
+		const alias = "git@alias-a:org/repo.git"
+		assertAliasUnresolved(t, alias, "alias-a", "GIT_SSH_COMMAND selects a custom SSH transport", fingerprintForRemote(t, alias))
+	})
+
+	t.Run("HostName it may not adopt", func(t *testing.T) {
+		calls := stubSSHResolver(t, map[string]string{"gitlab.example.com": "altssh.gitlab.example.com"})
+		const remote = "git@gitlab.example.com:org/repo.git"
+		assertUnresolvedFingerprint(t, remote, fingerprintForRemote(t, remote))
+		if *calls != 1 {
+			t.Fatalf("resolver called %d times, want 1", *calls)
+		}
+	})
+}
+
+// Review (#8212): OpenSSH echoes a host its configuration does not know, so
+// a bare host ssh -G maps to itself may be an alias this machine's SSH
+// config lacks while other machines resolve it. It keeps the pre-change id,
+// marked unmapped, in every session; a domain name ssh maps to itself is
+// taken as the server's own name.
+func TestComputeRepoFingerprint_BareHostMappedToItself(t *testing.T) {
+	isolateFingerprintGitEnv(t)
+	installFakeSSH(t, fakeSSHAliasScript)
+
+	tests := []struct{ remote, host string }{
+		{"git@gitserver:org/repo.git", "gitserver"},
+		{"ssh://git@GitServer/org/repo.git", "gitserver"},
+		{"ssh://git@gitserver:2222/org/repo.git", "gitserver"},
+		{"git@build.lan2:org/repo.git", "build.lan2"},
+	}
+	for _, session := range []struct{ name, sshCommand string }{
+		{"default transport", ""},
+		{"custom transport", "ssh -i /dev/null"},
+	} {
+		t.Run(session.name, func(t *testing.T) {
+			t.Setenv("GIT_SSH_COMMAND", session.sshCommand)
+			for _, tt := range tests {
+				canonical, err := canonicalizeGitURL(tt.remote)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := RepoFingerprint{ID: hashRepoIdentity(canonical), Source: RepoIDSourceRemote, SSHAlias: tt.host, SSHAliasUnmapped: true}
+				fp := fingerprintForRemote(t, tt.remote)
+				if fp != want || !fp.AliasUnmapped() || fp.AliasUnresolved() || fp.AliasResolved() {
+					t.Fatalf("fingerprint of %s = %+v, want the pre-change id marked unmapped: %+v", tt.remote, fp, want)
+				}
+			}
+			const forge = "git@gitlab.example.com:org/repo.git"
+			assertUnresolvedFingerprint(t, forge, fingerprintForRemote(t, forge))
+		})
+	}
+}
+
+// AliasUncertainty names the host and why another session or machine may
+// compute a different id, and is empty for an id every session computes
+// alike.
+func TestRepoFingerprint_AliasUncertainty(t *testing.T) {
+	unresolved := RepoFingerprint{ID: "aaaa", Source: RepoIDSourceRemote, SSHAlias: "alias-a", SSHAliasUnresolved: "GIT_SSH selects a custom SSH transport"}
+	if got, want := unresolved.AliasUncertainty(), `hashes the SSH host alias "alias-a" as written because GIT_SSH selects a custom SSH transport`; got != want {
+		t.Fatalf("unresolved AliasUncertainty() = %q, want %q", got, want)
+	}
+	unmapped := RepoFingerprint{ID: "aaaa", Source: RepoIDSourceRemote, SSHAlias: "gitserver", SSHAliasUnmapped: true}
+	if got, want := unmapped.AliasUncertainty(), `hashes the bare SSH host "gitserver" as written because this machine's SSH config maps it to no other HostName`; got != want {
+		t.Fatalf("unmapped AliasUncertainty() = %q, want %q", got, want)
+	}
+	for _, fp := range []RepoFingerprint{
+		{ID: "aaaa", Source: RepoIDSourceRemote},
+		{ID: "aaaa", Source: RepoIDSourceRemote, LegacyID: "bbbb", SSHAlias: "alias-a", SSHHostName: "github.com"},
+		{ID: "aaaa", Source: RepoIDSourcePath},
+	} {
+		if got := fp.AliasUncertainty(); got != "" {
+			t.Fatalf("AliasUncertainty() of %+v = %q, want none", fp, got)
+		}
 	}
 }

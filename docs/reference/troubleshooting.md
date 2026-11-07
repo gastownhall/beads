@@ -154,7 +154,7 @@ rebuild a damaged store. Follow
 the damaged store and its configuration first, then recover into a fresh store
 from a Dolt remote, a Dolt-native backup, or a JSONL export.
 
-In releases after v1.3.2, automatic integrity recovery (the `bd doctor --fix`
+In releases after v1.3.4, automatic integrity recovery (the `bd doctor --fix`
 repair that replaces a database) accepts only a database path from
 `metadata.json` that lies under the workspace's `.beads` directory as written,
 or the location `BEADS_DOLT_DATA_DIR` selects. A `dolt_data_dir` or `database`
@@ -379,10 +379,34 @@ fingerprint whenever it does not apply:
   parent domain (`work.github.com` to `github.com`). A two-label name such as
   `github.com` is never rewritten, even if its SSH transport is configured to
   `ssh.github.com`; two-label and unrelated dotted aliases are not supported.
-- `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_SSH_VARIANT` or `core.sshCommand` select
-  a custom transport, so resolution is skipped.
+- An alias whose SSH config sets a `Port` other than 22 is not resolved: the
+  same `HostName` on another port can be a different server. A port written in
+  the remote URL (`ssh://git@alias-a:2222/org/repo.git`) overrides the config
+  and is hashed as before.
+- `GIT_SSH`, `GIT_SSH_COMMAND` or `core.sshCommand` select a custom transport
+  whose host mapping `ssh -G` cannot speak for. bd still asks `ssh -G` whether
+  the host is an alias, and keeps the previous fingerprint of one that is. A
+  host that is not an alias, such as `gitlab.example.com` mapped to itself, is
+  unaffected.
 - A missing `ssh`, a failing or slow (over two seconds) `ssh -G`, or output
-  without a usable `hostname` keeps the previous fingerprint.
+  without a usable `hostname` and `port` keeps the previous fingerprint.
+- A bare host that `ssh -G` maps to itself keeps the previous fingerprint. It
+  may be the server's own name (`gitserver`), or an alias that other machines
+  configure but this machine's SSH config lacks: `ssh -G` echoes an unknown
+  host back.
+
+In those last three cases the fingerprint may differ from the one a session
+or machine that resolves the alias computes. `bd doctor` therefore reports a
+different stored value as a warning that names the reason, and
+`bd doctor --fix --yes` and `bd migrate --update-repo-id --yes` (or `--json`)
+refuse to replace it; the interactive update warns before it asks. Run them
+where `ssh -G` resolves the alias and no custom transport is set. If a bare
+host is the server's own name, run `bd migrate --update-repo-id` without
+`--yes` and confirm the update.
+
+The fingerprint follows each machine's own SSH config, so clones that map one
+alias to different `HostName`s (`ssh.github.com` on one machine, `github.com`
+on another) compute different fingerprints.
 
 `ssh -G` evaluates your SSH configuration without connecting, but it runs any
 `Match exec` commands and may use DNS if `CanonicalizeHostname` is set.

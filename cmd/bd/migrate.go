@@ -315,38 +315,110 @@ func pathHashRepoIDStampNotice(oldRepoID, newRepoID string, source beads.RepoIDS
 		"On a synced clone, keep the stored ID instead (see 'bd doctor').\n"
 }
 
+// unresolvedAliasRepoIDNotice says why the new repository ID must not replace
+// a different stored one unasked (GH#5990): it hashes the remote's SSH host
+// as written, though another session or machine may resolve it to a HostName
+// (this session could not resolve the alias, or this machine maps a bare
+// host to itself), and clones that resolve it, which a shared ledger
+// converges on, compute another ID. It returns "" when none of that applies
+// (no stored ID, no change, or an alias that resolved or was never looked
+// up).
+func unresolvedAliasRepoIDNotice(oldRepoID string, newFingerprint beads.RepoFingerprint) string {
+	uncertainty := newFingerprint.AliasUncertainty()
+	if oldRepoID == "" || oldRepoID == newFingerprint.ID || uncertainty == "" {
+		return ""
+	}
+	return "the new repository ID " + uncertainty + "; " +
+		"clones that resolve it to a HostName compute a different ID, so writing it would split them"
+}
+
+// repoIDUpdateFailure reports a failed repository-ID update: under --json as
+// {"error": code, "message": message} on stdout, otherwise through text.
+func repoIDUpdateFailure(code, message string, text func() error) error {
+	if !jsonOutput {
+		return text()
+	}
+	if jerr := outputJSON(map[string]interface{}{
+		"error":   code,
+		"message": message,
+	}); jerr != nil {
+		return jerr
+	}
+	return SilentExit()
+}
+
+// refuseUnresolvedAliasRepoID refuses a scripted update (--yes or --json)
+// whose new ID hashes an SSH host another session or machine may resolve
+// and would replace a different stored ID (GH#5990): that ID depends on
+// where it was computed. The interactive prompt warns instead
+// (confirmRepoIDUpdate).
+func refuseUnresolvedAliasRepoID(oldRepoID string, newFingerprint beads.RepoFingerprint, autoYes bool) error {
+	notice := unresolvedAliasRepoIDNotice(oldRepoID, newFingerprint)
+	if notice == "" || (!autoYes && !jsonOutput) {
+		return nil
+	}
+	const hint = "rerun where ssh -G resolves the alias and no GIT_SSH, GIT_SSH_COMMAND or core.sshCommand is set, or run without --yes and --json to confirm by hand"
+	if jsonOutput {
+		if jerr := outputJSON(map[string]interface{}{
+			"error":   "unresolved_ssh_alias",
+			"message": "not updating repo_id: " + notice,
+			"hint":    hint,
+		}); jerr != nil {
+			return jerr
+		}
+		return SilentExit()
+	}
+	return HandleErrorWithHint("not updating repo_id: "+notice, hint)
+}
+
+// confirmRepoIDUpdate asks before an interactive update replaces a different
+// stored repository ID, and reports whether to go on. --yes and --json never
+// ask.
+func confirmRepoIDUpdate(oldRepoID, oldDisplay string, newFingerprint beads.RepoFingerprint, autoYes bool) bool {
+	if oldRepoID == "" || oldRepoID == newFingerprint.ID || autoYes || jsonOutput {
+		return true
+	}
+	fmt.Printf("WARNING: Changing repository ID can break sync if other clones exist.\n")
+	// bd-46vla: repo_id lives in the versioned metadata table, so the new
+	// value propagates to every clone on the next sync. A path-fallback id
+	// (no origin remote here) is host-local — stamping it into shared
+	// state is almost never right on a synced clone.
+	if newFingerprint.Source == beads.RepoIDSourcePath {
+		fmt.Printf("The new ID is a path hash (this checkout has no origin remote); it is\n")
+		fmt.Printf("local to this host but will propagate to every clone on the next sync.\n")
+		fmt.Printf("On a synced clone, keep the stored ID instead (see 'bd doctor').\n")
+	}
+	if notice := unresolvedAliasRepoIDNotice(oldRepoID, newFingerprint); notice != "" {
+		fmt.Printf("Warning: %s.\n", notice)
+	}
+	fmt.Printf("\n")
+	fmt.Printf("Current repo ID: %s\n", oldDisplay)
+	fmt.Printf("New repo ID:     %s\n\n", truncateID(newFingerprint.ID, 8))
+	fmt.Printf("Continue? [y/N] ")
+	var response string
+	_, _ = fmt.Scanln(&response)
+	return strings.ToLower(response) == "y" || strings.ToLower(response) == "yes"
+}
+
 func handleUpdateRepoID(dryRun bool, autoYes bool) error {
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
-		if jsonOutput {
-			if jerr := outputJSON(map[string]interface{}{
-				"error":   "no_database",
-				"message": "No beads database found. " + diagHint() + ".",
-			}); jerr != nil {
-				return jerr
-			}
-			return SilentExit()
-		}
-		return HandleErrorWithHint("no beads database found", diagHint())
+		return repoIDUpdateFailure("no_database", "No beads database found. "+diagHint()+".", func() error {
+			return HandleErrorWithHint("no beads database found", diagHint())
+		})
 	}
 
 	// Compute new repo ID from the resolved .beads directory (honoring -C),
 	// not the process cwd. Otherwise `bd -C <dir> migrate --update-repo-id`
 	// stamps the target DB with the caller repo's fingerprint and the bad
 	// value propagates to every clone on the next sync (GH#4361).
-	newRepoID, newRepoIDSource, err := beads.ComputeRepoIDForPathWithSource(beadsDir)
+	newFingerprint, err := beads.ComputeRepoFingerprintForPath(beadsDir)
 	if err != nil {
-		if jsonOutput {
-			if jerr := outputJSON(map[string]interface{}{
-				"error":   "compute_failed",
-				"message": err.Error(),
-			}); jerr != nil {
-				return jerr
-			}
-			return SilentExit()
-		}
-		return HandleError("failed to compute repository ID: %v", err)
+		return repoIDUpdateFailure("compute_failed", err.Error(), func() error {
+			return HandleError("failed to compute repository ID: %v", err)
+		})
 	}
+	newRepoID, newRepoIDSource := newFingerprint.ID, newFingerprint.Source
 
 	store := getStore()
 	if store == nil {
@@ -356,16 +428,9 @@ func handleUpdateRepoID(dryRun bool, autoYes bool) error {
 	ctx := rootCtx
 	oldRepoID, err := store.GetMetadata(ctx, "repo_id")
 	if err != nil && err.Error() != "metadata key not found: repo_id" {
-		if jsonOutput {
-			if jerr := outputJSON(map[string]interface{}{
-				"error":   "read_failed",
-				"message": err.Error(),
-			}); jerr != nil {
-				return jerr
-			}
-			return SilentExit()
-		}
-		return HandleError("failed to read repo_id: %v", err)
+		return repoIDUpdateFailure("read_failed", err.Error(), func() error {
+			return HandleError("failed to read repo_id: %v", err)
+		})
 	}
 
 	oldDisplay := "none"
@@ -388,30 +453,15 @@ func handleUpdateRepoID(dryRun bool, autoYes bool) error {
 		return nil
 	}
 
-	if oldRepoID != "" && oldRepoID != newRepoID && !autoYes && !jsonOutput {
-		fmt.Printf("WARNING: Changing repository ID can break sync if other clones exist.\n")
-		// bd-46vla: repo_id lives in the versioned metadata table, so the new
-		// value propagates to every clone on the next sync. A path-fallback id
-		// (no origin remote here) is host-local — stamping it into shared
-		// state is almost never right on a synced clone.
-		if newRepoIDSource == beads.RepoIDSourcePath {
-			fmt.Printf("The new ID is a path hash (this checkout has no origin remote); it is\n")
-			fmt.Printf("local to this host but will propagate to every clone on the next sync.\n")
-			fmt.Printf("On a synced clone, keep the stored ID instead (see 'bd doctor').\n")
-		}
-		fmt.Printf("\n")
-		fmt.Printf("Current repo ID: %s\n", oldDisplay)
-		fmt.Printf("New repo ID:     %s\n\n", truncateID(newRepoID, 8))
-		fmt.Printf("Continue? [y/N] ")
-		var response string
-		_, _ = fmt.Scanln(&response)
-		if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
-			fmt.Println("Canceled")
-			return nil
-		}
+	if err := refuseUnresolvedAliasRepoID(oldRepoID, newFingerprint, autoYes); err != nil {
+		return err
+	}
+	if !confirmRepoIDUpdate(oldRepoID, oldDisplay, newFingerprint, autoYes) {
+		fmt.Println("Canceled")
+		return nil
 	}
 
-	// bd-ek28z: --yes and --json skip the confirm block above, so scripted
+	// bd-ek28z: --yes and --json skip the confirm prompt above, so scripted
 	// callers stamped a host-local path hash with no warning at all — the
 	// GH#4361 recurrence hole. Print the notice (not the prompt) on those
 	// paths too.
@@ -421,16 +471,9 @@ func handleUpdateRepoID(dryRun bool, autoYes bool) error {
 	}
 
 	if err := store.SetMetadata(ctx, "repo_id", newRepoID); err != nil {
-		if jsonOutput {
-			if jerr := outputJSON(map[string]interface{}{
-				"error":   "update_failed",
-				"message": err.Error(),
-			}); jerr != nil {
-				return jerr
-			}
-			return SilentExit()
-		}
-		return HandleError("failed to update repo_id: %v", err)
+		return repoIDUpdateFailure("update_failed", err.Error(), func() error {
+			return HandleError("failed to update repo_id: %v", err)
+		})
 	}
 
 	commandDidWrite.Store(true)

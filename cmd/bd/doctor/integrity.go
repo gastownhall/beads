@@ -662,6 +662,41 @@ func classifyRepoFingerprint(storedRepoID string, current beads.RepoFingerprint)
 				Fix:     "On a synced clone, leave it (or add the canonical origin remote). Only run 'bd migrate --update-repo-id' if this checkout is the canonical repository — the new id propagates to every clone on the next sync",
 			}
 		}
+		// GH#5990: this session could not resolve the remote's SSH host
+		// alias (a custom SSH transport, or no usable answer from ssh -G),
+		// so the current id hashes the alias as written. A session that
+		// resolves it, as the shared-ledger sequence below converges on,
+		// computes another id: the mismatch is no evidence against the
+		// stored id, and updating it from here would split the clones again.
+		if current.AliasUnresolved() {
+			return DoctorCheck{
+				Name:    "Repo Fingerprint",
+				Status:  StatusWarning,
+				Message: "Fingerprint differs, but this session could not resolve the SSH host alias",
+				Detail: fmt.Sprintf("stored: %s, current: %s — the current id hashes the SSH host alias %q as written because %s; a session that resolves the alias may compute the stored id",
+					truncateID(storedRepoID), truncateID(currentRepoID), current.SSHAlias, current.SSHAliasUnresolved),
+				Fix: "Rerun 'bd doctor' where ssh -G can resolve the alias (no GIT_SSH, GIT_SSH_COMMAND or core.sshCommand) to check the stored id. " +
+					"Do not run 'bd migrate --update-repo-id' from this session: it would replace the shared id with this unresolved one for every clone",
+			}
+		}
+		// Review (#8212): ssh -G echoes a host its configuration does not
+		// know, so this machine cannot tell a bare host that is the server's
+		// own name from an alias configured only on other machines, which
+		// compute its HostName's id. The mismatch is no proof of another
+		// repository either way: warn, and leave the update to a person who
+		// knows which it is.
+		if current.AliasUnmapped() {
+			return DoctorCheck{
+				Name:    "Repo Fingerprint",
+				Status:  StatusWarning,
+				Message: "Fingerprint differs, but the SSH host may be an alias this machine does not configure",
+				Detail: fmt.Sprintf("stored: %s, current: %s — this machine's SSH config maps the bare SSH host %q to no other HostName, so the current id hashes it as written; a clone whose SSH config maps it to a HostName computes a different id",
+					truncateID(storedRepoID), truncateID(currentRepoID), current.SSHAlias),
+				Fix: fmt.Sprintf("If %q is an SSH host alias, add its Host entry to this machine's SSH config and rerun 'bd doctor'. ", current.SSHAlias) +
+					"If it is the server's own name and every clone using this database points to this repository, run 'bd migrate --update-repo-id' without --yes or --json: " +
+					"it asks before it rewrites the shared id for every clone",
+			}
+		}
 		// GH#5990: a stored hash cannot say which repository produced it, so
 		// a mismatch is not proof of a different repository: clones of one
 		// repository through different SSH aliases, or a bd upgrade, also

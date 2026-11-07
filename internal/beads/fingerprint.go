@@ -51,11 +51,25 @@ type RepoFingerprint struct {
 	// LegacyID is the pre-GH#5990 fingerprint of this checkout, which hashed
 	// the written SSH alias, when it differs from ID; empty otherwise.
 	LegacyID string
-	// SSHAlias is the written SSH host when it was resolved to SSHHostName
-	// through the local SSH configuration (GH#5990); empty otherwise.
+	// SSHAlias is the written SSH host when it was looked up as an alias
+	// (GH#5990): resolved to SSHHostName through the local SSH configuration,
+	// left unresolved for the reason in SSHAliasUnresolved, or a bare host
+	// the configuration maps to itself (SSHAliasUnmapped). Empty otherwise.
 	SSHAlias string
 	// SSHHostName is the HostName the SSH alias resolved to; empty otherwise.
 	SSHHostName string
+	// SSHAliasUnresolved says why this session could not resolve SSHAlias:
+	// ssh -G is missing, failed, timed out or printed no usable answer, or it
+	// named a HostName for the alias but Git would use a custom SSH
+	// transport. ID then hashes the alias as written, and a session that
+	// resolves it computes a different ID. Empty otherwise.
+	SSHAliasUnresolved string
+	// SSHAliasUnmapped reports that SSHAlias is a bare host (no domain name)
+	// that ssh -G maps to no other HostName, as it does both for the server's
+	// own name and for an alias this machine's SSH config lacks. ID hashes it
+	// as written; a machine whose config maps it to a HostName computes a
+	// different ID.
+	SSHAliasUnmapped bool
 }
 
 // Matches reports whether a stored repo_id identifies this checkout: its
@@ -73,6 +87,38 @@ func (f RepoFingerprint) Matches(stored string) bool {
 // its configured HostName.
 func (f RepoFingerprint) AliasResolved() bool {
 	return f.SSHHostName != ""
+}
+
+// AliasUnresolved reports whether ID hashes an SSH host alias as written
+// because this session could not resolve it; SSHAliasUnresolved says why.
+// Such an ID depends on the session's environment, so it is no evidence
+// against a different stored ID and must not replace one unasked.
+func (f RepoFingerprint) AliasUnresolved() bool {
+	return f.SSHAliasUnresolved != ""
+}
+
+// AliasUnmapped reports whether ID hashes a bare SSH host that this
+// machine's SSH config maps to no other HostName (SSHAliasUnmapped). It may
+// be the server's own name or an alias configured only on other machines, so
+// a different stored ID is no proof of another repository, and ID must not
+// replace one unasked.
+func (f RepoFingerprint) AliasUnmapped() bool {
+	return f.SSHAliasUnmapped
+}
+
+// AliasUncertainty says why another session or machine may compute a
+// different ID for this checkout's remote, as a clause that follows "the
+// ID": ID hashes an SSH host alias this session could not resolve
+// (AliasUnresolved), or a bare host this machine maps to no other HostName
+// (AliasUnmapped). It returns "" when neither applies.
+func (f RepoFingerprint) AliasUncertainty() string {
+	switch {
+	case f.AliasUnresolved():
+		return fmt.Sprintf("hashes the SSH host alias %q as written because %s", f.SSHAlias, f.SSHAliasUnresolved)
+	case f.AliasUnmapped():
+		return fmt.Sprintf("hashes the bare SSH host %q as written because this machine's SSH config maps it to no other HostName", f.SSHAlias)
+	}
+	return ""
 }
 
 // ComputeRepoIDForPathWithSource is ComputeRepoIDForPath plus which derivation
@@ -101,7 +147,11 @@ func ComputeRepoIDForPathWithSource(repoPath string) (string, RepoIDSource, erro
 //
 // GH#5990: an SSH remote written through a host alias (git@alias-a:org/repo)
 // hashes the HostName the local SSH configuration maps the alias to, so
-// clones reaching one repository through different aliases agree.
+// clones reaching one repository through different aliases agree. An alias
+// configured with a port other than 22 keeps its literal identity, and so
+// does one this session cannot resolve, as SSHAliasUnresolved then records.
+// A bare host the SSH configuration maps to itself keeps it too, marked
+// SSHAliasUnmapped: it may be an alias configured only on other machines.
 func ComputeRepoFingerprintForPath(repoPath string) (RepoFingerprint, error) {
 	output, err := runGitInRepo(repoPath, "config", "--get", "remote.origin.url")
 	if err != nil {
@@ -123,11 +173,19 @@ func ComputeRepoFingerprintForPath(repoPath string) (RepoFingerprint, error) {
 	}
 
 	fp := RepoFingerprint{ID: hashRepoIdentity(canonical), Source: RepoIDSourceRemote}
-	if resolved, alias, hostName, ok := resolveSSHAliasCanonical(repoPath, repoURL, canonical); ok {
+	alias := resolveSSHAlias(repoPath, repoURL, canonical)
+	switch {
+	case alias.canonical != "":
 		fp.LegacyID = fp.ID
-		fp.ID = hashRepoIdentity(resolved)
-		fp.SSHAlias = alias
-		fp.SSHHostName = hostName
+		fp.ID = hashRepoIdentity(alias.canonical)
+		fp.SSHAlias = alias.host
+		fp.SSHHostName = alias.hostName
+	case alias.unresolved != "":
+		fp.SSHAlias = alias.host
+		fp.SSHAliasUnresolved = alias.unresolved
+	case alias.unmapped:
+		fp.SSHAlias = alias.host
+		fp.SSHAliasUnmapped = true
 	}
 	return fp, nil
 }
@@ -142,8 +200,14 @@ var (
 	sshLookPath         = exec.LookPath
 	sshResolveTimeout   = 2 * time.Second
 	sshResolveWaitDelay = 500 * time.Millisecond
-	resolveSSHHostName  = sshConfigHostName
+	resolveSSHEndpoint  = sshConfigEndpoint
 )
+
+// sshEndpoint is the HostName and port ssh -G reports for a destination.
+type sshEndpoint struct {
+	hostName string
+	port     string
+}
 
 // sshRemote is the destination part of an SSH remote URL.
 type sshRemote struct {
@@ -197,44 +261,95 @@ func parseSSHRemote(rawURL string) (sshRemote, bool) {
 	return remote, true
 }
 
-// resolveSSHAliasCanonical returns the canonical identity of an SSH remote
-// with its written host replaced by the HostName the local SSH configuration
-// maps it to. It reports false, leaving the legacy identity in force,
-// whenever the remote is not SSH, Git would use a custom SSH transport, or
-// the alias cannot be resolved.
-func resolveSSHAliasCanonical(repoPath, rawURL, legacyCanonical string) (canonical, alias, hostName string, ok bool) {
-	remote, ok := parseSSHRemote(rawURL)
+// sshAlias is what resolving the written host of an SSH remote found.
+type sshAlias struct {
+	// host is the written host, lowercased, when it was looked up.
+	host string
+	// canonical is the remote's identity with host replaced by hostName;
+	// empty when the legacy identity stays in force.
+	canonical string
+	hostName  string
+	// unresolved says why this session could not resolve host.
+	unresolved string
+	// unmapped reports that host is a bare host ssh maps to itself.
+	unmapped bool
+}
+
+// resolveSSHAlias resolves the written host of an SSH remote through the
+// local SSH configuration. The legacy identity stays in force, with no
+// reason given, when the remote is not SSH, its host is never looked up, or
+// ssh maps a domain name to itself, or the host to a HostName it may not
+// adopt or to a port other than 22: such a host names the same endpoint in
+// every session. A bare host ssh maps to itself keeps the legacy identity
+// and is marked unmapped, since it may be an alias this machine does not
+// configure. When ssh -G gives no usable answer (ssh is missing, fails,
+// times out or prints none), or names a HostName for the alias while Git
+// would use a custom SSH transport that answer cannot speak for, the legacy
+// identity stays in force and unresolved says why.
+func resolveSSHAlias(repoPath, rawURL, legacyCanonical string) sshAlias {
+	remote, host, tail, ok := sshAliasCandidate(rawURL, legacyCanonical)
 	if !ok {
-		return "", "", "", false
-	}
-	host := strings.ToLower(remote.host)
-	if !strings.HasPrefix(legacyCanonical, host) {
-		return "", "", "", false
-	}
-	tail := legacyCanonical[len(host):]
-	if !sshAliasLookupAllowed(host) {
-		return "", "", "", false
-	}
-	// An unsafe user would be skipped rather than dropped: ssh applies
-	// Match user rules, so a different user could select a different host.
-	if remote.user != "" && !safeSSHToken.MatchString(remote.user) {
-		return "", "", "", false
-	}
-	if customSSHTransport(repoPath) {
-		return "", "", "", false
+		return sshAlias{}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), sshResolveTimeout)
 	defer cancel()
-	out, err := resolveSSHHostName(ctx, remote.user, remote.host, remote.port)
+	endpoint, err := resolveSSHEndpoint(ctx, remote.user, remote.host, remote.port)
 	if err != nil {
-		return "", "", "", false
+		if ctx.Err() != nil {
+			return sshAlias{host: host, unresolved: fmt.Sprintf("ssh -G did not answer within %v", sshResolveTimeout)}
+		}
+		return sshAlias{host: host, unresolved: err.Error()}
 	}
-	resolved, ok := normalizeSSHHostName(out)
-	if !ok || resolved == strings.TrimSuffix(host, ".") || !sshHostNameAdoptable(host, resolved) {
-		return "", "", "", false
+	resolved, ok := normalizeSSHHostName(endpoint.hostName)
+	if !ok {
+		return sshAlias{host: host, unresolved: fmt.Sprintf("ssh -G printed an unusable hostname %q", endpoint.hostName)}
 	}
-	return resolved + tail, host, resolved, true
+	if resolved == strings.TrimSuffix(host, ".") {
+		// Review (#8212): OpenSSH echoes a host its configuration does not
+		// know. A domain name is taken as the server's own name, but a bare
+		// host may as well be an alias configured only on other machines,
+		// which compute its HostName's identity instead.
+		return sshAlias{host: host, unmapped: !isDomainNameShaped(strings.Split(resolved, "."))}
+	}
+	if !sshHostNameAdoptable(host, resolved) {
+		return sshAlias{}
+	}
+	// A port written in the URL was handed to ssh -G and is already in tail.
+	// Without one, an alias whose configuration selects another port names
+	// an endpoint its HostName alone does not: the same HostName on another
+	// port can be a different server.
+	if remote.port == "" && endpoint.port != "22" {
+		return sshAlias{}
+	}
+	// The answer changes the identity, which holds only for the ssh Git runs
+	// with its default configuration. Review (#8212): checked only here, so
+	// every outcome above is the same with or without a custom transport.
+	if setting := customSSHTransport(repoPath); setting != "" {
+		return sshAlias{host: host, unresolved: setting + " selects a custom SSH transport"}
+	}
+	return sshAlias{host: host, canonical: resolved + tail, hostName: resolved}
+}
+
+// sshAliasCandidate returns the destination of an SSH remote whose written
+// host may be an alias, that host lowercased, and the rest of the legacy
+// canonical identity after it. Remotes that are not SSH, and hosts or users
+// that are never looked up, report false.
+func sshAliasCandidate(rawURL, legacyCanonical string) (remote sshRemote, host, tail string, ok bool) {
+	remote, ok = parseSSHRemote(rawURL)
+	if !ok {
+		return sshRemote{}, "", "", false
+	}
+	host = strings.ToLower(remote.host)
+	if !strings.HasPrefix(legacyCanonical, host) || !sshAliasLookupAllowed(host) {
+		return sshRemote{}, "", "", false
+	}
+	// An unsafe user would be skipped rather than dropped: ssh applies
+	// Match user rules, so a different user could select a different host.
+	if remote.user != "" && !safeSSHToken.MatchString(remote.user) {
+		return sshRemote{}, "", "", false
+	}
+	return remote, host, legacyCanonical[len(host):], true
 }
 
 // sshAliasLookupAllowed decides whether a written (lowercased) host may be
@@ -288,17 +403,22 @@ func isDomainNameShaped(labels []string) bool {
 	return true
 }
 
-// customSSHTransport reports whether Git would reach the remote through an
-// SSH command other than ssh with its default configuration, whose HostName
-// mapping ssh -G cannot speak for.
-func customSSHTransport(repoPath string) bool {
-	for _, key := range []string{"GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT"} {
-		if strings.TrimSpace(os.Getenv(key)) != "" {
-			return true
-		}
+// customSSHTransport names the setting that makes Git reach the remote
+// through an SSH command other than ssh with its default configuration,
+// whose HostName mapping ssh -G cannot speak for, in Git's order of
+// precedence; "" when there is none. GIT_SSH_VARIANT alone does not count:
+// it changes only how Git passes options to the plain ssh it still runs.
+func customSSHTransport(repoPath string) string {
+	if strings.TrimSpace(os.Getenv("GIT_SSH_COMMAND")) != "" {
+		return "GIT_SSH_COMMAND"
 	}
-	out, err := runGitInRepo(repoPath, "config", "--get", "core.sshCommand")
-	return err == nil && strings.TrimSpace(string(out)) != ""
+	if out, err := runGitInRepo(repoPath, "config", "--get", "core.sshCommand"); err == nil && strings.TrimSpace(string(out)) != "" {
+		return "core.sshCommand"
+	}
+	if strings.TrimSpace(os.Getenv("GIT_SSH")) != "" {
+		return "GIT_SSH"
+	}
+	return ""
 }
 
 // normalizeSSHHostName validates a HostName printed by ssh -G and returns it
@@ -318,19 +438,19 @@ func normalizeSSHHostName(hostName string) (string, bool) {
 // that start and end alphanumerically and contain no underscores.
 var validSSHHostName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
 
-// sshConfigHostName asks ssh which HostName its configuration gives the
-// destination. ssh -G evaluates the configuration without connecting, but it
-// is local policy, not a pure function: Match exec runs programs and
+// sshConfigEndpoint asks ssh which HostName and port its configuration gives
+// the destination. ssh -G evaluates the configuration without connecting,
+// but it is local policy, not a pure function: Match exec runs programs and
 // CanonicalizeHostname may consult DNS. The lookup is bounded by ctx and
 // WaitDelay; stdin and stderr are not connected, and an ssh found only
 // through a relative PATH entry is refused.
-func sshConfigHostName(ctx context.Context, user, host, port string) (string, error) {
+func sshConfigEndpoint(ctx context.Context, user, host, port string) (sshEndpoint, error) {
 	sshPath, err := sshLookPath("ssh")
 	if err != nil {
-		return "", err
+		return sshEndpoint{}, fmt.Errorf("ssh was not found: %w", err)
 	}
 	if !filepath.IsAbs(sshPath) {
-		return "", fmt.Errorf("ssh resolved to relative path %q", sshPath)
+		return sshEndpoint{}, fmt.Errorf("ssh resolved to relative path %q", sshPath)
 	}
 
 	dest := host
@@ -347,25 +467,44 @@ func sshConfigHostName(ctx context.Context, user, host, port string) (string, er
 	cmd.WaitDelay = sshResolveWaitDelay
 	out, err := cmd.Output()
 	if err != nil {
-		return "", err
+		return sshEndpoint{}, fmt.Errorf("ssh -G failed: %w", err)
 	}
-	return parseSSHConfigHostName(out)
+	return parseSSHConfigEndpoint(out)
 }
 
-// parseSSHConfigHostName returns the value of the first hostname line of
-// ssh -G output.
-func parseSSHConfigHostName(out []byte) (string, error) {
+// parseSSHConfigEndpoint returns the values of the first hostname line and
+// the first port line of ssh -G output, which OpenSSH always prints.
+func parseSSHConfigEndpoint(out []byte) (sshEndpoint, error) {
+	var endpoint sshEndpoint
 	for _, line := range strings.Split(string(out), "\n") {
 		fields := strings.Fields(strings.TrimRight(line, "\r"))
-		if len(fields) == 0 || !strings.EqualFold(fields[0], "hostname") {
+		if len(fields) == 0 {
+			continue
+		}
+		var value *string
+		switch strings.ToLower(fields[0]) {
+		case "hostname":
+			value = &endpoint.hostName
+		case "port":
+			value = &endpoint.port
+		default:
+			continue
+		}
+		if *value != "" {
 			continue
 		}
 		if len(fields) != 2 {
-			return "", fmt.Errorf("malformed hostname line %q", line)
+			return sshEndpoint{}, fmt.Errorf("ssh -G printed a malformed %s line %q", strings.ToLower(fields[0]), line)
 		}
-		return fields[1], nil
+		*value = fields[1]
 	}
-	return "", errors.New("no hostname in ssh -G output")
+	if endpoint.hostName == "" {
+		return sshEndpoint{}, errors.New("ssh -G printed no hostname")
+	}
+	if endpoint.port == "" {
+		return sshEndpoint{}, errors.New("ssh -G printed no port")
+	}
+	return endpoint, nil
 }
 
 func canonicalizeGitURL(rawURL string) (string, error) {
