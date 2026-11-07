@@ -1,0 +1,36 @@
+-- Ignored migration 0032: clone-local marker for restoring wisps.is_blocked
+-- and idx_wisps_is_blocked on a clone whose ignored cursor already sits past
+-- the repairs that used to cover it (gastownhall/beads#4468, #5257).
+--
+-- The is_blocked repairs registered at ignored 7 and 15 run only while one of
+-- those versions is pending. A clone that reaches the top of the series with
+-- a wisps table lacking is_blocked -- ignored/0001's CREATE-then-RENAME leaves
+-- a pre-existing wisps untouched, and the main-side 47 repair creates wisps
+-- without the column -- never runs either repair again: pending means version
+-- > MAX(cursor), so rewinding a lower cursor row re-pends nothing. On such a
+-- clone every ready query and every ephemeral create fails with "table does
+-- not have column is_blocked" (or its recompute twin), and no in-band path
+-- exists to heal it.
+--
+-- The work happens in code, not here: restoreWispIsBlocked
+-- (internal/storage/schema/migration_repairs.go) is registered in
+-- preMigrationRepairs for this version, so it runs immediately before this
+-- marker is recorded. It probes wisps, wisps.is_blocked and
+-- idx_wisps_is_blocked; a healthy clone pays exactly those three probes and
+-- nothing else. On drift it drops a surviving idx_wisps_is_blocked (a stale
+-- name that would short-circuit the restore), restores the column with
+-- ignored/0006's definition, and creates the index last, so a failure at any
+-- step leaves the marker pending and the next open retries. Every step
+-- re-probes the live schema, so a retry adds nothing twice.
+--
+-- The ALTER TABLE wisps and UPDATE wisps writes are stated in this header on
+-- purpose: MigrateUp's pending-migration dirty-table guard scans the raw text
+-- of pending files, and this marker must be seen as touching wisps. It writes
+-- no issues, dependencies or wisp_dependencies rows: the flags are recomputed
+-- from the graph in code, which reads those tables but never rewrites them.
+--
+-- The cursor table is dolt-ignored, so the marker is clone-local: every clone
+-- heals its own wisps plane exactly once.
+--
+-- The marker itself changes nothing.
+SELECT 1;

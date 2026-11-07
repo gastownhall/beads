@@ -1208,6 +1208,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A clone whose wisps table lost `is_blocked` while its ignored migration
+  cursor already sat past the repair that used to cover it now heals itself on
+  the next open (GH#4468, GH#5257). The column and its index vanish on clones
+  that reached a recent beads without ever running ignored/0006's shape (a
+  pre-existing wisps table survives ignored/0001's guarded create untouched),
+  and the repairs at ignored 7 and 15 only fire while one of those versions is
+  still pending -- so such a clone failed every `bd ready` and every
+  `bd create --ephemeral` with "table does not have column is_blocked" (or its
+  recompute twin) and had no in-band recovery: rewinding a lower cursor row
+  re-pends nothing. Ignored migration 0032 is a clone-local marker whose Go
+  repair restores the column with ignored/0006's definition, recomputes every
+  wisp's flag from the live dependency graph, and re-creates
+  `idx_wisps_is_blocked` last. A healthy clone pays three schema probes and
+  nothing else; a failed repair leaves the marker pending and the next open
+  retries, so nothing is added twice. If you hit this before upgrading, the
+  limit of the repair is the same as `bd doctor`'s: it restores wisp flags
+  only -- a durable issue whose `is_blocked` drifted needs an explicit
+  `bd doctor --fix` recompute.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

@@ -2545,18 +2545,20 @@ func (m *mockDB) QueryRowContext(_ context.Context, _ string, _ ...any) *sql.Row
 }
 
 // wispsAbsentDB extends mockDB's blind-success ExecContext / panicking
-// QueryContext with TWO answerable QueryRowContext queries, same pattern:
+// QueryContext with answerable QueryRowContext queries, same pattern:
 // the ignored/7 and ignored/15 pre-migration repairs (both dispatch to
 // ensureWispIsBlockedForRecompute) each probe whether wisps exists before
 // touching it, and *sql.Row has no public constructor outside a real
 // database/sql driver -- mockDB itself cannot fake a scan result. A small
-// embedded sqlmock answers exactly those two queries with "table absent"
-// (0), so the repair takes its early no-op branch on both firings; any
-// OTHER QueryRowContext this pass might issue still surfaces loudly, via
-// sqlmock's own unmet/unexpected-call error rather than a silent success.
-// QueryContext answers the {ignored_schema_migrations, 31} repair's lookup of
-// main 0062's drop commit the same way: no such commit, so the pre-upgrade
-// events restore finds no source and changes nothing.
+// embedded sqlmock answers exactly those queries with "table absent" (0), so
+// each repair takes its early no-op branch on every firing; any OTHER
+// QueryRowContext this pass might issue still surfaces loudly, via sqlmock's
+// own unmet/unexpected-call error rather than a silent success. QueryContext
+// answers the {ignored_schema_migrations, 31} repair's lookup of main 0062's
+// drop commit the same way: no such commit, so the pre-upgrade events restore
+// finds no source and changes nothing. The {ignored_schema_migrations, 32}
+// repair (restoreWispIsBlocked) probes wisps after 31's repair has run, so
+// its TABLES probe is expected after the dolt_log lookup.
 type wispsAbsentDB struct {
 	mockDB
 	real *sql.DB
@@ -2582,6 +2584,11 @@ func newWispsAbsentDB(t *testing.T) *wispsAbsentDB {
 	mock.ExpectQuery(`SELECT commit_hash FROM dolt_log WHERE message = \?`).
 		WithArgs(eventsFlipDropCommitMessage).
 		WillReturnRows(sqlmock.NewRows([]string{"commit_hash"}))
+	// The {ignored_schema_migrations, 32} repair's own wisps probe, same
+	// absent answer: restoreWispIsBlocked stops at its first probe too.
+	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`).
+		WithArgs("wisps").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 	t.Cleanup(func() {
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("wispsAbsentDB: unmet sql expectations: %v", err)

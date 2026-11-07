@@ -39,6 +39,7 @@ var preMigrationRepairs = map[repairKey]func(context.Context, DBConn) error{
 	{"ignored_schema_migrations", 7}:  ensureWispIsBlockedForRecompute,
 	{"ignored_schema_migrations", 15}: ensureWispIsBlockedForRecompute,
 	{"ignored_schema_migrations", 31}: seedEventsFromPreflipHistory,
+	{"ignored_schema_migrations", 32}: restoreWispIsBlocked,
 }
 
 // preMigrationRepair dispatches any repair registered for (source, version).
@@ -298,7 +299,9 @@ func ensureWispTablesForMixedBlockedRecompute(ctx context.Context, db DBConn) er
 // 0015) or on a later already-healed pass merely re-confirms the column and
 // index are present rather than re-adding them. It mirrors ignored/0006's
 // own two statements so a clone that never ran 0006 to completion still
-// ends up in the shape 0006 would have produced.
+// ends up in the shape 0006 would have produced. A clone whose ignored
+// cursor already sits past 0015 can reach neither firing;
+// restoreWispIsBlocked (ignored 0032's repair, below) covers that shape.
 func ensureWispIsBlockedForRecompute(ctx context.Context, db DBConn) error {
 	hasWisps, err := schemaTableExists(ctx, db, "wisps")
 	if err != nil {
@@ -343,6 +346,96 @@ func ensureWispIsBlockedIndex(ctx context.Context, db DBConn) error {
 		return fmt.Errorf("creating idx_wisps_is_blocked: %w", err)
 	}
 	return nil
+}
+
+// Stages of restoreWispIsBlocked a test can inject a failure at, so a fault
+// after any of them is observable leaving ignored 0032 pending (the cursor row
+// records only once the repair and the marker body both succeed).
+const (
+	wispIsBlockedRestoreAfterColumn    = "after_column"
+	wispIsBlockedRestoreAfterRecompute = "after_recompute"
+	wispIsBlockedRestoreAfterIndex     = "after_index"
+)
+
+// wispIsBlockedRestoreFaultHook, when set by a test, runs at each stage named
+// by the constants above; an error aborts the restore there, emulating a live
+// failure at that point. Production leaves it nil.
+var wispIsBlockedRestoreFaultHook func(stage string) error
+
+// SetWispIsBlockedRestoreFaultHookForTest installs fn as the wisps.is_blocked
+// restore's fault hook and returns a function that restores the previous
+// value. Test-only.
+func SetWispIsBlockedRestoreFaultHookForTest(fn func(stage string) error) func() {
+	prev := wispIsBlockedRestoreFaultHook
+	wispIsBlockedRestoreFaultHook = fn
+	return func() { wispIsBlockedRestoreFaultHook = prev }
+}
+
+func fireWispIsBlockedRestoreFault(stage string) error {
+	if wispIsBlockedRestoreFaultHook == nil {
+		return nil
+	}
+	if err := wispIsBlockedRestoreFaultHook(stage); err != nil {
+		return fmt.Errorf("wisp is_blocked restore fault at %s: %w", stage, err)
+	}
+	return nil
+}
+
+// restoreWispIsBlocked is the pre-migration repair for ignored migration 0032:
+// it restores wisps.is_blocked and idx_wisps_is_blocked on a clone whose
+// ignored cursor already sits past ignored/0015, where the
+// {ignored_schema_migrations, 7} and {..., 15} repairs above can never fire
+// again (gastownhall/beads#4468, #5257). Such a clone permanently lacks the
+// column -- every ready query and every ephemeral create fails on it -- and no
+// cursor rewind re-pends a version below the high-water mark, so the only
+// in-band heal is a repair keyed to a version the clone has not recorded yet.
+//
+// A healthy clone (column and index both present) pays exactly the three
+// probes and writes nothing. On drift the restore drops a surviving
+// idx_wisps_is_blocked first -- an index by that name over other columns
+// (allowed by ignored/0001's rename branch, which leaves a pre-existing wisps
+// untouched) would make the index step below no-op and silently keep the
+// wrong shape -- then re-adds the column with ignored/0006's definition and
+// re-creates the index last. Every step is guarded and idempotent, so a pass
+// that dies between steps leaves the marker pending and the next open resumes
+// rather than duplicates.
+//
+// It writes only the clone-local wisps plane: no row of issues, dependencies
+// or wisp_dependencies is touched, no staging, no Dolt commit.
+func restoreWispIsBlocked(ctx context.Context, db DBConn) error {
+	hasWisps, err := schemaTableExists(ctx, db, "wisps")
+	if err != nil {
+		return fmt.Errorf("checking wisps table: %w", err)
+	}
+	if !hasWisps {
+		return nil
+	}
+	hasColumn, err := schemaColumnExists(ctx, db, "wisps", "is_blocked")
+	if err != nil {
+		return fmt.Errorf("checking wisps.is_blocked column: %w", err)
+	}
+	hasIndex, err := schemaIndexExists(ctx, db, "wisps", "idx_wisps_is_blocked")
+	if err != nil {
+		return fmt.Errorf("checking idx_wisps_is_blocked index: %w", err)
+	}
+	if hasColumn && hasIndex {
+		return nil
+	}
+	if !hasColumn && hasIndex {
+		if _, err := db.ExecContext(ctx, "DROP INDEX idx_wisps_is_blocked ON wisps"); err != nil {
+			return fmt.Errorf("dropping stale idx_wisps_is_blocked: %w", err)
+		}
+	}
+	if err := ensureWispIsBlockedColumn(ctx, db); err != nil {
+		return err
+	}
+	if err := fireWispIsBlockedRestoreFault(wispIsBlockedRestoreAfterColumn); err != nil {
+		return err
+	}
+	if err := ensureWispIsBlockedIndex(ctx, db); err != nil {
+		return err
+	}
+	return fireWispIsBlockedRestoreFault(wispIsBlockedRestoreAfterIndex)
 }
 
 // wispsTableDDLForMigration0047 is 0020_create_wisps.up.sql's shape plus every
