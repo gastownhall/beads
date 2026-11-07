@@ -1411,6 +1411,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before it checks the rest for dependents, and a dry run, which deletes
   nothing, counted those children as dependents left outside the request
   and refused. The embedded store was already right.
+- `bd federation sync` no longer fails on every run with "local changes would
+  be stomped by merge: federation_peers" (#3547). Fetching from a peer,
+  including the `bd federation status` probe, no longer writes
+  `federation_peers`; the peer's `last_sync` is stamped after the merge.
 - A server-mode open from a `dolt.Config` that sets only `Path` (no
   `BeadsDir`), such as the public `beads.Open`, now runs the project-identity
   check against the `.beads` directory above `Path`, and refuses a database
