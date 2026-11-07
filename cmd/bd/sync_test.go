@@ -1448,6 +1448,18 @@ type fakeSyncStore struct {
 	pushCalls       int
 	pushRemoteCalls int
 	lastRemoteArg   string
+
+	// heads controls GetCurrentCommit: calls return heads[0], heads[1], ... in
+	// order, then "" once exhausted — nil means every call returns "", matching
+	// GetCurrentCommit's own best-effort-empty-on-failure contract and leaving
+	// the currency signal (LocalHeadMoved) false by default for every pre-existing
+	// case here that does not set it.
+	heads     []string
+	headCalls int
+	// commitPendingErr makes CommitPending fail, which is what Dolt does on a
+	// database holding live conflict rows. Zero value keeps the old
+	// always-succeeds behavior for every other case here.
+	commitPendingErr error
 }
 
 func (f *fakeSyncStore) Pull(context.Context) error { f.pullCalls++; return f.pullErr }
@@ -1470,6 +1482,16 @@ func (f *fakeSyncStore) RecomputeAllBlocked(context.Context) (int, error) {
 }
 func (f *fakeSyncStore) ListRemotes(context.Context) ([]storage.RemoteInfo, error) {
 	return f.remotes, nil
+}
+func (f *fakeSyncStore) CommitPending(context.Context, string) (bool, error) {
+	return false, f.commitPendingErr
+}
+func (f *fakeSyncStore) GetCurrentCommit(context.Context) (string, error) {
+	defer func() { f.headCalls++ }()
+	if f.headCalls < len(f.heads) {
+		return f.heads[f.headCalls], nil
+	}
+	return "", nil
 }
 
 // setupSyncCommandTest wires the fake store, resets the sync command's flags
@@ -1714,6 +1736,126 @@ func TestRunSyncCommandJSONEnvelopePerStatus(t *testing.T) {
 				t.Errorf("Pushed = %v, want %v", got.Pushed, tt.wantPushed)
 			}
 		})
+	}
+}
+
+// TestRunSyncCommandReportsPullCurrency covers GH#6671 / GH#4068: bd sync's
+// --json must say what the pull actually did, not just that the step ran, so
+// a supervising loop can tell a silent catch-up from a healthy no-op without
+// parsing output.
+func TestRunSyncCommandReportsPullCurrency(t *testing.T) {
+	tests := []struct {
+		name         string
+		heads        []string
+		wantAdvanced bool
+	}{
+		{
+			name:         "already current: HEAD unchanged",
+			heads:        []string{"abc123", "abc123"},
+			wantAdvanced: false,
+		},
+		{
+			name:         "caught up: HEAD moved",
+			heads:        []string{"abc123", "def456"},
+			wantAdvanced: true,
+		},
+		{
+			name:         "hash unavailable: never claims advancement",
+			heads:        nil,
+			wantAdvanced: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &fakeSyncStore{recomputed: 1, heads: tt.heads}
+			setupSyncCommandTest(t, fake)
+			jsonOutput = true
+
+			out := captureStdout(t, func() error { return runSyncCommand(syncCmd, nil) })
+			var got syncOutcome
+			if err := json.Unmarshal([]byte(out), &got); err != nil {
+				t.Fatalf("json.Unmarshal(%q): %v", out, err)
+			}
+			if got.LocalHeadMoved != tt.wantAdvanced {
+				t.Errorf("LocalHeadMoved = %v, want %v", got.LocalHeadMoved, tt.wantAdvanced)
+			}
+			if len(tt.heads) == 2 {
+				if got.PullHeadBefore != tt.heads[0] {
+					t.Errorf("PullHeadBefore = %q, want %q", got.PullHeadBefore, tt.heads[0])
+				}
+				if got.PullHeadAfter != tt.heads[1] {
+					t.Errorf("PullHeadAfter = %q, want %q", got.PullHeadAfter, tt.heads[1])
+				}
+			}
+		})
+	}
+}
+
+// TestRunSyncConflictSurvivesAnUncommittableSnapshot pins the fix for the
+// blocking review finding on GH#7262.
+//
+// The currency snapshot commits pending work before the loop so the "before"
+// hash is taken after any purely local write. But Dolt refuses to commit over
+// live conflict rows, so on a database a halted sync left conflicted that
+// commit fails — and failing the command there pre-empted runSyncLoop's
+// conflict pre-flight, which exists precisely to classify that state. The
+// measured regression was exit 1 with an opaque "committing pending changes"
+// error where the unmodified command gave exit 2 and "status": "conflict",
+// so a supervising timer branching on exit 2 lost the conflict on every tick
+// after the first.
+//
+// The snapshot is therefore best-effort: the currency signal is dropped, the
+// classification is not. This asserts both halves — the conflict still exits
+// 2 and still says "conflict", AND no currency is claimed, since with no
+// readable "before" hash there is no evidence either way.
+func TestRunSyncConflictSurvivesAnUncommittableSnapshot(t *testing.T) {
+	fake := &fakeSyncStore{
+		conflicts:        []storage.Conflict{{Field: "issues"}},
+		commitPendingErr: errors.New("dolt commit: Error 1105: error: the table(s) issues are in conflict"),
+		// Two distinct hashes: if the snapshot were still taken despite the
+		// failed commit, LocalHeadMoved would read true and this test would
+		// catch that too.
+		heads: []string{"abc123", "def456"},
+	}
+	setupSyncCommandTest(t, fake)
+	jsonOutput = true
+
+	// captureStdout fails the test on a non-nil error, and the conflict exit
+	// IS the expected result here, so the error is carried out of the closure
+	// and asserted below instead.
+	var runErr error
+	out := captureStdout(t, func() error {
+		runErr = runSyncCommand(syncCmd, nil)
+		return nil
+	})
+
+	if runErr == nil {
+		t.Fatal("runSyncCommand() error = nil, want the conflict exit")
+	}
+	code, ok := exitCodeFromError(runErr)
+	if !ok {
+		t.Fatalf("exitCodeFromError(%v) ok = false, want true", runErr)
+	}
+	if code != ExitSyncConflict {
+		t.Errorf("exit code = %d, want %d (ExitSyncConflict): the uncommittable snapshot pre-empted the conflict pre-flight", code, ExitSyncConflict)
+	}
+
+	var got syncOutcome
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("json.Unmarshal(%q): %v", out, err)
+	}
+	if got.Status != syncStatusConflict {
+		t.Errorf("status = %q, want %q", got.Status, syncStatusConflict)
+	}
+	if !got.ConflictsPreexisting || !got.ConflictsLive {
+		t.Errorf("conflicts_preexisting = %v, conflicts_live = %v, want both true", got.ConflictsPreexisting, got.ConflictsLive)
+	}
+	// No snapshot was taken, so nothing may be claimed about currency.
+	if got.LocalHeadMoved {
+		t.Error("local_head_moved = true, want false: no before-hash was read, so movement cannot be claimed")
+	}
+	if got.PullHeadBefore != "" {
+		t.Errorf("pull_head_before = %q, want empty: the commit failed, so no snapshot was taken", got.PullHeadBefore)
 	}
 }
 

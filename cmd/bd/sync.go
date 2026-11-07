@@ -128,6 +128,34 @@ type syncOutcome struct {
 	// syncStuckTicks. Empty means this run's dirty-stuck status, if any, came
 	// from the tick-count inference instead (wy-mhouc).
 	ConstraintViolations []storage.ConstraintViolation `json:"constraint_violations,omitempty"`
+	// PullHeadBefore and PullHeadAfter are the local branch's commit hash
+	// immediately before and after this run's pull(s) — the currency signal
+	// GH#6671 asks for. Without them, "pulled": true/"status": "ok" reports
+	// only that the pull step ran, not that anything moved, so a replica that
+	// silently drifted for days reads identically to a healthy no-op (a real
+	// incident: pa-ost1p). Both are best-effort and empty when the hash could
+	// not be read, matching GetCurrentCommit's own contract.
+	PullHeadBefore string `json:"pull_head_before,omitempty"`
+	PullHeadAfter  string `json:"pull_head_after,omitempty"`
+	// LocalHeadMoved reports exactly what its name says: local HEAD was at a
+	// different commit after this run than before it. It is deliberately NOT
+	// called "pulled changes", because HEAD cannot support that claim in
+	// either direction, and runSyncLoop's own bd-6dnrw.39 comment names both
+	// failures: an auto-resolved or cascade-repaired merge can land in the
+	// working set without moving HEAD at all (a run that did pull, reported
+	// as unmoved), and the dirty-graph retry's auto-commit commits another
+	// writer's rows, which moves HEAD with nothing pulled (a run that pulled
+	// nothing, reported as moved — reachable on a shared sql-server with
+	// concurrent writers). Neither has been reproduced here; both come from
+	// that comment. Treat this as a cheap, honest liveness signal — a replica
+	// whose HEAD never moves across many runs is worth looking at — and not
+	// as proof of what the remote sent.
+	//
+	// Always present, including on conflict and retries-exhausted outcomes
+	// where it is false because no pull completed; read it with Status rather
+	// than alone. False also when either hash could not be read, which is why
+	// the two hashes are reported beside it.
+	LocalHeadMoved bool `json:"local_head_moved"`
 }
 
 // syncTransient is one attempt's transient failure.
@@ -811,6 +839,33 @@ func runSyncCommand(cmd *cobra.Command, _ []string) error {
 	// local-only mirror look broken.
 	noPush := config.GetBool("no-push")
 
+	// Currency signal (GH#6671, GH#4068): snapshot local HEAD before the loop
+	// runs so it can be compared against HEAD once the loop finishes. Commit
+	// pending changes first, mirroring the first step every Pull/PullRemote
+	// variant takes internally (GH#2474) — without this, a locally pending
+	// write unrelated to the remote would fold into the pre-loop snapshot
+	// instead of landing before it, and LocalHeadMoved below would read true
+	// for a purely local commit that pulled nothing. The repeat call inside
+	// the loop's own pull is then a no-op, same as it already is on every
+	// attempt after the first.
+	//
+	// BEST-EFFORT, AND IT MUST STAY THAT WAY. This commit exists only to make
+	// the snapshot honest; the sync itself does not need it, because every
+	// Pull/PullRemote variant commits pending work internally anyway. Dolt
+	// refuses to commit over live conflict rows, so a database a halted sync
+	// left conflicted fails here — and returning that error would pre-empt
+	// runSyncLoop's pre-flight, which exists precisely to report that state
+	// as a conflict (exit 2, "status": "conflict") instead of an opaque pull
+	// failure (exit 1). Losing the currency signal is the lesser harm: leave
+	// the snapshot empty, let the loop classify the database, and report no
+	// currency rather than a wrong one — a supervising timer branching on
+	// exit 2 keeps working. Pinned by
+	// TestRunSyncConflictSurvivesAnUncommittableSnapshot.
+	headBefore := ""
+	if _, err := st.CommitPending(rootCtx, "beads"); err == nil {
+		headBefore, _ = st.GetCurrentCommit(rootCtx)
+	}
+
 	ops := syncOps{
 		pull: func(ctx context.Context) ([]string, error) {
 			var err error
@@ -855,6 +910,9 @@ func runSyncCommand(cmd *cobra.Command, _ []string) error {
 	}
 
 	out, err := runSyncLoop(rootCtx, ops, attempts)
+	out.PullHeadBefore = headBefore
+	out.PullHeadAfter, _ = st.GetCurrentCommit(rootCtx)
+	out.LocalHeadMoved = headBefore != "" && out.PullHeadAfter != "" && headBefore != out.PullHeadAfter
 	if noPush && out.Status == syncStatusOK {
 		out.Pushed = false
 		out.PushSkipped = true
@@ -1299,10 +1357,28 @@ func printSyncOutcome(out *syncOutcome, noPush bool) {
 		if out.RowsCorrected > 0 {
 			fmt.Printf("Recomputed is_blocked: %d row(s) corrected.\n", out.RowsCorrected)
 		}
-		if noPush {
-			fmt.Println("Sync complete (push skipped: rig is local-only, no-push: true).")
-			return
+		// GH#6671: say what moved, so a healthy no-op and a silent catch-up no
+		// longer print the same line — but only when there is evidence. Both
+		// hashes have to be readable to say anything at all: with either one
+		// empty this run has no currency evidence, and printing "unchanged"
+		// would assert the local HEAD stood still when we simply could not
+		// see it. Fall back to the bare line in that case.
+		currency := ""
+		if out.PullHeadBefore != "" && out.PullHeadAfter != "" {
+			currency = "local HEAD unchanged"
+			if out.LocalHeadMoved {
+				currency = "local HEAD moved"
+			}
 		}
-		fmt.Println("Sync complete.")
+		switch {
+		case noPush && currency != "":
+			fmt.Printf("Sync complete (%s; push skipped: rig is local-only, no-push: true).\n", currency)
+		case noPush:
+			fmt.Println("Sync complete (push skipped: rig is local-only, no-push: true).")
+		case currency != "":
+			fmt.Printf("Sync complete (%s).\n", currency)
+		default:
+			fmt.Println("Sync complete.")
+		}
 	}
 }
