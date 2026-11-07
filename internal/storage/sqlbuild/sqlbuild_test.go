@@ -580,8 +580,9 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	}
 
 	// By-IDs form: driver and every subquery are constrained to the ids, and the
-	// arg count matches the placeholder injection points (labels, dc, rc-deps,
-	// rc-wisp, cc, pc, d, driver = 8 for the wisp family with labels).
+	// arg count matches the placeholder injection points (labels, dc, the rc
+	// guarded branches — three per plane —, cc, pc, d, driver = 12 for the wisp
+	// family with labels).
 	byIDs, idArgs := SearchCountsSQL(WispsFilterTables, []string{"a", "b"}, "", "", "", true, CountsHydration{})
 	if !strings.Contains(byIDs, "WHERE i.id IN (?,?)") {
 		t.Errorf("by-IDs counts SQL missing driver id filter:\n%s", byIDs)
@@ -595,15 +596,43 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	if strings.Contains(byIDs, "ORDER BY") || strings.Contains(byIDs, "LIMIT") {
 		t.Error("by-IDs counts SQL must not carry ORDER BY / LIMIT (order restored in Go)")
 	}
-	if len(idArgs) != 8*2 {
-		t.Errorf("by-IDs args = %d, want %d", len(idArgs), 8*2)
+	if len(idArgs) != 12*2 {
+		t.Errorf("by-IDs args = %d, want %d", len(idArgs), 12*2)
+	}
+
+	// The by-IDs reverse-blocker subquery is the guarded per-column union on
+	// both planes: every branch matches a bare indexed target column for the
+	// page's ids and carries the blocks filter itself, where the old
+	// COALESCE(...) IN (...) predicate matched no index at all and re-scanned
+	// the table per evaluation (gascity#7666).
+	rcStart := strings.Index(byIDs, "SELECT dep_id, COUNT(*) AS cnt FROM (")
+	rcEnd := strings.Index(byIDs, ") all_blockers")
+	if rcStart < 0 || rcEnd <= rcStart {
+		t.Fatalf("by-IDs counts SQL missing the reverse-blocker aggregate:\n%s", byIDs)
+	}
+	rc := byIDs[rcStart:rcEnd]
+	if strings.Contains(rc, "COALESCE(") {
+		t.Errorf("by-IDs reverse-blocker still filters through a COALESCE expression no index can match:\n%s", rc)
+	}
+	if got := strings.Count(rc, "UNION ALL"); got != 5 {
+		t.Errorf("by-IDs reverse-blocker has %d UNION ALL separators, want 5 (three guarded branches per plane):\n%s", got, rc)
+	}
+	for _, branch := range []string{
+		"depends_on_issue_id IN (?,?) AND type = 'blocks'",
+		"depends_on_wisp_id IN (?,?) AND depends_on_issue_id IS NULL AND type = 'blocks'",
+		"depends_on_external IN (?,?) AND depends_on_issue_id IS NULL AND depends_on_wisp_id IS NULL AND type = 'blocks'",
+	} {
+		if !strings.Contains(rc, branch) {
+			t.Errorf("by-IDs reverse-blocker is missing the guarded branch %q:\n%s", branch, rc)
+		}
 	}
 
 	// skipLabels drops the labels point and !includeWispReverseDeps drops the
-	// rc-wisp point, leaving 6 injection points (dc, rc-deps, cc, pc, d, driver).
+	// rc wisp plane's three branches, leaving 8 injection points (dc, rc-deps
+	// ×3, cc, pc, d, driver).
 	_, idArgsNoLabels := SearchCountsSQL(IssuesFilterTables, []string{"a", "b"}, "", "", "", false, CountsHydration{SkipLabels: true})
-	if len(idArgsNoLabels) != 6*2 {
-		t.Errorf("by-IDs args (skipLabels, no wisp deps) = %d, want %d", len(idArgsNoLabels), 6*2)
+	if len(idArgsNoLabels) != 8*2 {
+		t.Errorf("by-IDs args (skipLabels, no wisp deps) = %d, want %d", len(idArgsNoLabels), 8*2)
 	}
 
 	// SkipCounts drops the three cardinality joins and projects constants in

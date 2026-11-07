@@ -39,6 +39,23 @@ func DepTargetUnion(colPrefix, from, projection, predicate, extra string) string
 	return strings.Join(branches, "\nUNION ALL ")
 }
 
+// DepTargetUnionProjecting renders DepTargetUnion with each branch projecting
+// its own target column AS alias: the by-IDs reverse-blocker shape of the
+// counts mega-query (gascity#7666), whose old form filtered through
+// COALESCE(...) IN (...), an expression no index can match, so the
+// mega-query's rc subquery re-scanned its whole materialization once per
+// driver row. Each branch matches a bare indexed target column instead.
+// Bind the ids once per branch, in the branch order built here.
+func DepTargetUnionProjecting(from, alias, predicate, extra string) string {
+	branches := make([]string, len(depTargetCols))
+	for i, col := range depTargetCols {
+		branches[i] = fmt.Sprintf("SELECT %s AS %s FROM %s WHERE %s %s%s%s",
+			col, alias, from, col, predicate,
+			nullGuards("", depTargetCols[:i]), extra)
+	}
+	return strings.Join(branches, "\nUNION ALL ")
+}
+
 // DepTargetUnionArgs assembles the bindings for a DepTargetUnion query:
 // perBranch is called once per branch to append that branch's placeholders
 // in SQL text order — the branch's target keys first, then its extra

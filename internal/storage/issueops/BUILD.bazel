@@ -196,6 +196,7 @@ go_test(
         "public_create_test.go",
         "public_hydration_test.go",
         "public_snapshot_test.go",
+        "ready_counts_byids_binding_test.go",
         "ready_work_missing_table_test.go",
         "ready_work_test.go",
         "reopen_test.go",
