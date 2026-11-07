@@ -5352,9 +5352,10 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
 	// Credential CLI routing: when credentials are set and server is external,
-	// route through CLI subprocess so credentials reach the dolt process via
-	// cmd.Env (applyToCmd). The SQL path's withEnvCredentials sets process-wide
-	// env vars that an external server cannot see.
+	// route through CLI subprocess, which passes the user with --user and the
+	// password via cmd.Env (applyToCmd). In server mode the CLI hands the
+	// transfer to the server serving its directory, which reads
+	// DOLT_REMOTE_PASSWORD from its own environment (serverEnvNote).
 	if useCLI, err := s.prepareCLIRouteForCredentials(ctx, remote, creds); err != nil {
 		return err
 	} else if useCLI {
@@ -5363,9 +5364,10 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
 	// Cloud auth CLI routing: when cloud storage env vars (AZURE_*, AWS_*,
-	// etc.) are set and we're in server mode, route through CLI so the dolt
-	// subprocess inherits the current env. The SQL server may not have these
-	// vars if it was started in a different context (GH#6).
+	// etc.) are set and we're in server mode, route through CLI. This does not
+	// give the server those vars: the CLI hands the transfer to the server
+	// serving its directory, which reads its own environment (GH#6,
+	// serverEnvNote).
 	if useCLI, err := s.prepareCLIRouteForCloudAuth(ctx, remote); err != nil {
 		return err
 	} else if useCLI {

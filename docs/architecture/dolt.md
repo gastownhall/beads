@@ -538,6 +538,7 @@ database backup.
 - Data locations differ between modes: `.beads/embeddeddolt/` (embedded) vs `.beads/dolt/` (server)
 - The backup directory is a full Dolt backup, not an `issues.jsonl` export — it can be on a local drive, NAS, or DoltHub
 - You can also migrate via Dolt remotes (`bd dolt push` / `bd dolt pull`) if both projects share a remote
+- In server mode `bd backup sync` runs in the Dolt server's process, so a cloud destination (`s3://`, `gs://`, `az://`, ...) uses the credentials in the server's environment, not your shell's. Set them where the server starts and restart it (for a bd-managed server, `bd dolt stop`, then `bd dolt start` from the shell that has them); see [Auth works in the shell but sync fails in server mode](/multi-agent/bucket-federation#auth-works-in-the-shell-but-sync-fails-in-server-mode)
 
 The sections below are the canonical backend migration reference.
 
