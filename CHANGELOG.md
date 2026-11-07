@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Telemetry no longer exports the raw command line.** With telemetry on
+  (`BD_OTEL_ENABLED=true`), the OTel resource attached to every exported
+  metric and span carried `process.command_args`, the unscrubbed `os.Args`,
+  so a `--password=...` flag, search text or an issue title reached the
+  metrics receiver even though the `bd.args` span attribute is scrubbed. The
+  resource also carried `process.executable.path` and `process.owner` (the OS
+  user name). bd now builds the resource from explicit detectors and keeps
+  only `host.name`, `process.pid`, `process.executable.name` and the Go
+  runtime attributes.
+
 - **Telemetry metrics no longer carry actor names, search text or commit
   messages.** With telemetry on (`BD_OTEL_ENABLED=true`), the
   `bd.storage.operations` counter was labelled with each storage call's
@@ -1227,9 +1237,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keyed by request values. Request attributes stay on the spans.
   **Breaking for dashboards:** the old series are replaced. Queries keyed on
   `bd_actor`, `bd_issue_id`, `bd_issue_type`, `bd_query`, `db_commit_msg`,
-  `bd_dep_*`, `bd_config_*`, `slot_*` or `bd_since` on these three metrics
-  lose those labels; `bd_storage_operation_duration` and `bd_storage_errors`
-  gain `db_operation`.
+  `bd_dep_*`, `bd_config_*`, `slot_*`, `bd_since` and the other request
+  labels on these three metrics lose those labels;
+  `bd_storage_operation_duration_ms` and `bd_storage_errors_total` gain
+  `db_operation`.
 
 - `bd config set`, `bd config unset`, `bd repo add` and `bd repo remove` now
   replace an existing `config.yaml` in one step (temp file in the same
