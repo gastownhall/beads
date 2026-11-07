@@ -281,6 +281,7 @@
 40 12 TestHistoryPresenceContract
 40 12 TestLifecycleUpdateContract
 40 12 TestReaderListExcludeStatusAcceptsAWorkspaceCustomStatus
+40 12 TestScratchHeadProbeSucceedsOnABrandNewDatabase
 
 40 13 TestEmbeddedActivationDoesNotOpenTheEngine
 40 13 TestEmbeddedDepRekeyConvergesRenameChain
@@ -293,6 +294,7 @@
 40 13 TestEmbeddedPre0058RepairMarchesDriftedWispDependenciesToFinalShape
 40 13 TestEmbeddedRelationsDirectionSelectsTheInverseGraph
 40 13 TestGraphWalkPlansHonorJoinHints
+40 13 TestIgnoredCursorScratchPendingDeletionWithCursorMissingSweepsOnly
 
 40 14 TestArrivalSeq_EmbeddedReplayedCounterSeedClearsTheStamps
 40 14 TestBatchCreatorContract
@@ -565,6 +567,7 @@
 40 32 TestEmbeddedRecomputeAllBlockedWiring
 40 32 TestEventsJournal_EmbeddedConcurrentGaplessNoDup
 40 32 TestGetNextChildID
+40 32 TestIgnoredCursorScratchPendingDeletionIsSweptOnOpen
 40 32 TestRemoteVerbPlainRemoteKeepsAmbientEnv
 40 32 TestWithPeerAuth_MissingRemoteFailsClosed
 
@@ -579,6 +582,7 @@
 40 33 TestEventsAutoPruneThrottleSkipsTheSecondPass
 40 33 TestFirstMintLeavesTheEpochTablesCommitted
 40 33 TestGetDependentRecordsEmbedded
+40 33 TestIgnoredCursorScratchTrackedAtHeadIsSweptOnOpen
 40 33 TestPruneEventsBatchDeletesTheLowestSeqsOnly
 40 33 TestTreeWalkerContract
 
