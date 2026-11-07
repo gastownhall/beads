@@ -101,11 +101,28 @@ func runRename(cmd *cobra.Command, args []string) error {
 	// The identity rename has committed, so the reference scan is
 	// best-effort: its outcome prints after the Renamed line and never
 	// fails the command.
-	printRenameReferenceReport(os.Stdout, scanRenameReferences(ctx, store, store, oldID, newID, actor))
+	dbPrefix, allowedPrefixes := loadEmbeddedIDPrefixes()
+	printRenameReferenceReport(os.Stdout, scanRenameReferences(ctx, store, store, oldID, newID, actor,
+		renameKnownPrefixes(dbPrefix, allowedPrefixes)))
 
 	commandDidWrite.Store(true)
 
 	return nil
+}
+
+// renameKnownPrefixes assembles the prefix list the short-form report uses:
+// the configured issue prefix plus allowed_prefixes, spelled the way the ID
+// resolver spells them.
+func renameKnownPrefixes(dbPrefix, allowedPrefixes string) []string {
+	known := []string{strings.TrimSuffix(dbPrefix, "-")}
+	for _, p := range strings.Split(allowedPrefixes, ",") {
+		p = strings.TrimSpace(p)
+		p = strings.TrimSuffix(p, "-")
+		if p != "" {
+			known = append(known, p)
+		}
+	}
+	return known
 }
 
 // issueRefStore is the store surface the reference scan's field rewrite
@@ -122,7 +139,7 @@ type issueRefStore interface {
 // (scanRenameReferences), kept as its own entry so the rewrite can be driven
 // against a store that cannot read comments.
 func updateReferencesInAllIssues(ctx context.Context, store storage.DoltStorage, oldID, newID, actor string) error {
-	rep := scanRenameReferences(ctx, store, commentRefStore(nil), oldID, newID, actor)
+	rep := scanRenameReferences(ctx, store, commentRefStore(nil), oldID, newID, actor, nil)
 	if rep.issuesErr != nil {
 		return rep.issuesErr
 	}
@@ -135,10 +152,12 @@ func updateReferencesInAllIssues(ctx context.Context, store storage.DoltStorage,
 
 // scanRenameReferences rewrites references to oldID across every issue's
 // prose fields and collects what it did, left and could not check into one
-// report. comments supplies the comment half of the report when non-nil.
-// Nothing here fails the command: the identity rename has already committed,
-// so every outcome lands in the report instead.
-func scanRenameReferences(ctx context.Context, fields issueRefStore, comments commentRefStore, oldID, newID, actor string) *renameReferenceReport {
+// report. comments supplies the comment half of the report when non-nil;
+// knownPrefixes (the configured issue prefix plus allowed prefixes) selects
+// the parent-relative short form worth reporting, and nil disables that
+// report. Nothing here fails the command: the identity rename has already
+// committed, so every outcome lands in the report instead.
+func scanRenameReferences(ctx context.Context, fields issueRefStore, comments commentRefStore, oldID, newID, actor string, knownPrefixes []string) *renameReferenceReport {
 	rep := &renameReferenceReport{oldID: oldID, newID: newID}
 	issues, err := fields.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
@@ -146,28 +165,42 @@ func scanRenameReferences(ctx context.Context, fields issueRefStore, comments co
 		return rep
 	}
 	ids := make([]string, 0, len(issues))
+	short := shortFormSuffix(oldID, knownPrefixes)
 
 	for _, issue := range issues {
 		ids = append(ids, issue.ID)
 		updates := make(map[string]interface{})
 		var changed []string
+		resulting := make(map[string]string, len(renameRefFields))
 		for _, field := range renameRefFields {
 			text := field.value(issue)
-			if rewritten := replaceIDReferences(text, oldID, newID); rewritten != text {
+			rewritten := replaceIDReferences(text, oldID, newID)
+			resulting[field.name] = rewritten
+			if rewritten != text {
 				updates[field.name] = rewritten
 				changed = append(changed, field.name)
 			}
 		}
 		if len(updates) == 0 {
+			// Nothing to rewrite; short forms are still worth reporting
+			// against the text as it stands.
+			rep.addShortForms(issue.ID, resulting, short)
 			continue
 		}
 		if err := fields.UpdateIssue(ctx, issue.ID, updates, actor); err != nil {
 			// The write may still have landed, so its fields are
-			// unconfirmed, never unchanged; keep scanning the rest.
+			// unconfirmed, never unchanged; report short forms against the
+			// observed text and keep scanning the rest.
 			rep.failed = append(rep.failed, renameRefFailed{issueID: issue.ID, fields: changed, err: err})
+			observed := make(map[string]string, len(renameRefFields))
+			for _, field := range renameRefFields {
+				observed[field.name] = field.value(issue)
+			}
+			rep.addShortForms(issue.ID, observed, short)
 			continue
 		}
 		rep.updated = append(rep.updated, renameRefUpdated{issueID: issue.ID, fields: changed})
+		rep.addShortForms(issue.ID, resulting, short)
 	}
 
 	// Comment text is history: it is listed, never rewritten. Comments on the
@@ -190,6 +223,14 @@ func scanRenameReferences(ctx context.Context, fields issueRefStore, comments co
 					issueID: issueID, field: commentField, commentID: c.ID,
 					spelling: spelling, reason: reasonComment,
 				})
+			}
+			if short != "" {
+				if spelling := idRefMention(c.Text, short); spelling != "" {
+					rep.left = append(rep.left, renameRefLeft{
+						issueID: issueID, field: commentField, commentID: c.ID,
+						spelling: spelling, reason: reasonShortForm,
+					})
+				}
 			}
 		}
 	}

@@ -111,6 +111,23 @@ var renameRefFields = []struct {
 	{"close_reason", func(i *types.Issue) string { return i.CloseReason }},
 }
 
+// addShortForms records, for each issue field, a possible short-form
+// reference the rewrite deliberately left. texts holds the field text as it
+// now stands: rewritten where the update landed, observed where it did not.
+func (r *renameReferenceReport) addShortForms(issueID string, texts map[string]string, short string) {
+	if short == "" {
+		return
+	}
+	for _, field := range renameRefFields {
+		if spelling := idRefMention(texts[field.name], short); spelling != "" {
+			r.left = append(r.left, renameRefLeft{
+				issueID: issueID, field: field.name,
+				spelling: spelling, reason: reasonShortForm,
+			})
+		}
+	}
+}
+
 // commentRefStore reads comments for the reference report. It is narrow on
 // purpose: the field rewrite (issueRefStore, cmd/bd/rename.go) and this half
 // are fakeable without each other.
@@ -124,6 +141,41 @@ const commentField = "comment"
 
 // reasonComment is why a comment's reference was deliberately left unrewritten.
 const reasonComment = "comment text is not rewritten"
+
+// reasonShortForm is why a possible short-form reference was left unrewritten.
+const reasonShortForm = "possible short-form reference"
+
+// shortFormSuffix returns the parent-relative short form of oldID under the
+// known prefixes (the configured issue prefix plus allowed prefixes), or ""
+// when there is none worth reporting. Hierarchical children are written
+// shortly by dropping the prefix (abc-12x.39 becomes 12x.39), so only a
+// dotted remainder whose first segment is not all digits qualifies: a bare
+// remainder (a3f) names the bead itself, a numeric root (1.2) is an ordinal,
+// and neither is a child spelling a rename could sensibly flag.
+func shortFormSuffix(oldID string, knownPrefixes []string) string {
+	prefix := utils.ExtractIssuePrefixKnown(oldID, knownPrefixes)
+	if prefix == "" || !strings.HasPrefix(oldID, prefix+"-") {
+		return ""
+	}
+	suffix := oldID[len(prefix)+1:]
+	root, _, dotted := strings.Cut(suffix, ".")
+	if !dotted || root == "" || allDigits(root) {
+		return ""
+	}
+	return suffix
+}
+
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
 
 // renameReferenceReport is what the reference scan after a rename did and
 // found. It is printed whole (printRenameReferenceReport); an empty report

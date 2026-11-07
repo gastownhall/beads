@@ -216,16 +216,22 @@ func (s *failingRenameStore) UpdateIssueID(ctx context.Context, oldID, newID str
 	return errors.New("injected UpdateIssueID failure")
 }
 
-// withRenameStore points the store and actor globals at st while run runs.
+// withRenameStore points the store and actor globals at st while run runs,
+// and rootCtx at a live context: the CLI's persistent pre-run owns rootCtx,
+// which loadEmbeddedIDPrefixes (reached through runRename) reads config
+// through.
 func withRenameStore(st storage.DoltStorage, run func() error) error {
 	oldStore, oldActor := store, actor
 	store, actor = st, "test"
+	oldRootCtx := rootCtx
+	rootCtx = context.Background()
 	storeMutex.Lock()
 	oldActive := storeActive
 	storeActive = true
 	storeMutex.Unlock()
 	defer func() {
 		store, actor = oldStore, oldActor
+		rootCtx = oldRootCtx
 		storeMutex.Lock()
 		storeActive = oldActive
 		storeMutex.Unlock()
@@ -419,6 +425,46 @@ func TestRenameReportsReferencesItLeft(t *testing.T) {
 				!list[0].CreatedAt.Equal(tt.comment.CreatedAt) {
 				t.Errorf("comment under %s = %+v, want %s unchanged", tt.key, list, tt.comment.ID)
 			}
+		}
+	})
+
+	t.Run("short-form mentions are flagged, never rewritten", func(t *testing.T) {
+		// The renamed issue's own ID is dotted; its children are written
+		// shortly by dropping the prefix, so those spellings dangle after
+		// the rename. The scan reports them without rewriting them.
+		testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+		for _, issue := range []*types.Issue{
+			{ID: "test-12x.39", Title: "Child issue", Description: "parent sees 12x.39", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+			{ID: "test-c", Title: "C", Description: "see test-12x.39 (the 12x.39 child)", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		} {
+			if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
+				t.Fatalf("failed to create issue %s: %v", issue.ID, err)
+			}
+		}
+
+		out := captureStdout(t, func() error {
+			return withRenameStore(testStore, func() error {
+				return runRename(renameCmd, []string{"test-12x.39", "test-tc"})
+			})
+		})
+		for _, want := range []string{
+			"Updated references:",
+			"  test-c: description",
+			"Warning: references left in place:",
+			"  test-c description: 12x.39 (possible short-form reference)",
+			"  test-tc description: 12x.39 (possible short-form reference)",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("rename output %q does not contain %q", out, want)
+			}
+		}
+
+		c, err := testStore.GetIssue(ctx, "test-c")
+		if err != nil {
+			t.Fatalf("failed to get test-c: %v", err)
+		}
+		if want := "see test-tc (the 12x.39 child)"; c.Description != want {
+			t.Errorf("test-c description = %q, want %q", c.Description, want)
 		}
 	})
 

@@ -164,7 +164,7 @@ func TestUpdateReferencesInAllIssues(t *testing.T) {
 				{ID: "bd-new", Notes: "was bd-old"},
 			},
 		}
-		rep := scanRenameReferences(context.Background(), s, commentRefStore(nil), "bd-old", "bd-new", "test")
+		rep := scanRenameReferences(context.Background(), s, commentRefStore(nil), "bd-old", "bd-new", "test", nil)
 		if len(rep.updated) != 3 {
 			t.Fatalf("updated = %+v, want three issues", rep.updated)
 		}
@@ -234,7 +234,7 @@ func TestPrintRenameReferenceReport(t *testing.T) {
 			},
 			failUpdate: map[string]error{"bd-a": injected},
 		}
-		rep := scanRenameReferences(context.Background(), s, commentRefStore(nil), "bd-old", "bd-new", "test")
+		rep := scanRenameReferences(context.Background(), s, commentRefStore(nil), "bd-old", "bd-new", "test", nil)
 
 		// The later issue is still updated: one failure must not stop
 		// the independent updates.
@@ -271,7 +271,7 @@ func TestPrintRenameReferenceReport(t *testing.T) {
 
 	t.Run("reports an unchecked scan when listing fails", func(t *testing.T) {
 		s := &renameRefsFakeStore{listErr: errors.New("injected listing failure")}
-		rep := scanRenameReferences(context.Background(), s, commentRefStore(nil), "bd-old", "bd-new", "test")
+		rep := scanRenameReferences(context.Background(), s, commentRefStore(nil), "bd-old", "bd-new", "test", nil)
 		if rep.issuesErr == nil {
 			t.Fatalf("issuesErr = nil, want the listing failure recorded")
 		}
@@ -334,7 +334,7 @@ func TestRenameReferenceComments(t *testing.T) {
 			"bd-other": {{ID: "c1", Text: "tracked by bd-old."}},
 			"bd-new":   {{ID: "c2", Text: "was bd-old and bd-old again"}},
 		}}
-		rep := scanRenameReferences(context.Background(), s, c, "bd-old", "bd-new", "test")
+		rep := scanRenameReferences(context.Background(), s, c, "bd-old", "bd-new", "test", nil)
 
 		// The comment pass runs after the rename, so it asks for the listed
 		// IDs: the renamed issue under its new ID, never the old one.
@@ -369,7 +369,7 @@ func TestRenameReferenceComments(t *testing.T) {
 			issues: []*types.Issue{{ID: "bd-a", Description: "refs bd-old"}},
 		}
 		c := &renameRefsFakeComments{err: errors.New("injected comment read failure")}
-		rep := scanRenameReferences(context.Background(), s, c, "bd-old", "bd-new", "test")
+		rep := scanRenameReferences(context.Background(), s, c, "bd-old", "bd-new", "test", nil)
 		if rep.commentsErr == nil {
 			t.Fatalf("commentsErr = nil, want the read failure recorded")
 		}
@@ -381,6 +381,72 @@ func TestRenameReferenceComments(t *testing.T) {
 		want := "Warning: comments could not be checked: failed to read comments: injected comment read failure"
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("report %q does not contain %q", buf.String(), want)
+		}
+	})
+}
+
+func TestRenameShortForm(t *testing.T) {
+	t.Run("derives the parent-relative short form", func(t *testing.T) {
+		for _, tt := range []struct {
+			name  string
+			oldID string
+			known []string
+			want  string
+		}{
+			{name: "dotted child", oldID: "abc-12x.39", known: []string{"abc"}, want: "12x.39"},
+			{name: "nested child", oldID: "abc-12x.3.1", known: []string{"abc"}, want: "12x.3.1"},
+			{name: "bare suffix names the bead itself", oldID: "abc-a3f", known: []string{"abc"}, want: ""},
+			{name: "numeric root is an ordinal", oldID: "abc-1.2", known: []string{"abc"}, want: ""},
+			{name: "prefix match requires the hyphen", oldID: "ab-c12.4", known: []string{"ab", "ab-c"}, want: "c12.4"},
+			{name: "unknown prefix falls back to the heuristic", oldID: "xyz-9q.4", known: []string{"bd"}, want: "9q.4"},
+			{name: "no known prefixes falls back too", oldID: "xyz-9q.4", known: nil, want: "9q.4"},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				if got := shortFormSuffix(tt.oldID, tt.known); got != tt.want {
+					t.Errorf("shortFormSuffix(%q, %v) = %q, want %q", tt.oldID, tt.known, got, tt.want)
+				}
+			})
+		}
+	})
+
+	t.Run("reports short-form mentions without rewriting them", func(t *testing.T) {
+		// Children of a dotted issue are written shortly by dropping the
+		// prefix; renaming the issue leaves those spellings dangling, so the
+		// scan flags them - but never rewrites them.
+		s := &renameRefsFakeStore{
+			issues: []*types.Issue{
+				{ID: "abc-new", Description: "was abc-12x.39, still known as 12x.39"},
+				{ID: "abc-b", Notes: "see abc-12x.39 (the 12x.39 child; 12x.390 is another)"},
+			},
+		}
+		c := &renameRefsFakeComments{byIssue: map[string][]*types.Comment{
+			"abc-b": {{ID: "c1", Text: "moved from 12x.39"}},
+		}}
+		rep := scanRenameReferences(context.Background(), s, c, "abc-12x.39", "abc-new", "test", []string{"abc"})
+
+		// Full-ID rewrites landed; the short form survives them verbatim, and
+		// 12x.390 (a longer token containing it) is never matched.
+		if got := s.update("abc-b", "notes"); got != "see abc-new (the 12x.39 child; 12x.390 is another)" {
+			t.Errorf("notes update = %v, want the short form left as written", got)
+		}
+		if len(rep.updated) != 2 {
+			t.Fatalf("updated = %+v, want both issues rewritten for the full ID", rep.updated)
+		}
+
+		var leftLines []string
+		for _, l := range rep.left {
+			if l.reason != reasonShortForm {
+				t.Errorf("left = %+v, want only short-form entries", rep.left)
+			}
+			leftLines = append(leftLines, l.issueID+" "+l.field+" "+l.commentID+" "+l.spelling)
+		}
+		want := []string{
+			"abc-b notes  12x.39",
+			"abc-b comment c1 12x.39",
+			"abc-new description  12x.39",
+		}
+		if strings.Join(leftLines, "|") != strings.Join(want, "|") {
+			t.Errorf("left lines = %q, want %q", leftLines, want)
 		}
 	})
 }
