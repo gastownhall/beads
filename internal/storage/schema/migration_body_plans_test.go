@@ -2,7 +2,11 @@ package schema
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -174,4 +178,143 @@ func TestMigrationBodyPlanUnregisteredIsByteIdentical(t *testing.T) {
 	if planned != len(migrationBodyPlans) || planned != 2 {
 		t.Errorf("resolved %d planned files for %d registered plans; want main 59 and ignored 15", planned, len(migrationBodyPlans))
 	}
+}
+
+// TestMigrationBodyPlansPreserveFrozenContract is #6520 AC-5: the plans keep
+// the frozen files' identity (pinned hashes, AllMigrationsSQL output), keep
+// the text around the replaced CTE list byte for byte, change no persistent
+// table or index, write nothing nondeterministic, and the updated_at census
+// covers the SQL the runner actually executes.
+func TestMigrationBodyPlansPreserveFrozenContract(t *testing.T) {
+	frozenPins := map[string]map[string]string{
+		mainSource.dir:    frozenMigrationHashes,
+		ignoredSource.dir: frozenIgnoredMigrationHashes,
+	}
+	createTable := regexp.MustCompile(`(?m)^CREATE TABLE (\w+) \(`)
+	dropTable := regexp.MustCompile(`(?m)^DROP TABLE (\w+);`)
+	createIndex := regexp.MustCompile(`^CREATE INDEX \w+ ON (\w+) \([\w, ]+\)$`)
+	writes := regexp.MustCompile(`(?i)\b(CREATE|ALTER|DROP|INSERT|UPDATE|DELETE|REPLACE|TRUNCATE|SET|CALL|PREPARE|EXECUTE)\b`)
+	nondeterministic := regexp.MustCompile(`(?i)\b(UUID|UUID_SHORT|NOW|RAND|SYSDATE|CURRENT_TIMESTAMP|UTC_TIMESTAMP|CURDATE|CURTIME|CONNECTION_ID|LAST_INSERT_ID)\b`)
+
+	all := AllMigrationsSQL()
+	for key, plan := range migrationBodyPlans {
+		src := mainSource
+		if key.cursorTable == ignoredSource.cursorTable {
+			src = ignoredSource
+		}
+		t.Run(plan.dir+"/"+plan.name, func(t *testing.T) {
+			data, err := src.files.ReadFile(src.dir + "/" + plan.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			frozen := string(data)
+			sum := sha256.Sum256(data)
+			if got := hex.EncodeToString(sum[:]); got != plan.sha256 || frozenPins[plan.dir][plan.name] != plan.sha256 {
+				t.Errorf("plan hash %s, embedded file %s, freeze pin %s: all three must agree",
+					plan.sha256, got, frozenPins[plan.dir][plan.name])
+			}
+			body, err := src.plannedMigrationBody(key.version, plan.name, data)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Prefix through WITH RECURSIVE's preceding newline and suffix
+			// from the final UPDATE on are the frozen bytes.
+			prefix := frozen[:strings.Index(frozen, plan.head)+1]
+			suffix := frozen[strings.Index(frozen, plan.finalUpdate):]
+			if !strings.HasPrefix(body, prefix) || !strings.HasSuffix(body, suffix) {
+				t.Fatalf("planned body does not keep the frozen prefix and suffix")
+			}
+			var want strings.Builder
+			for _, ddl := range plan.indexDDL {
+				want.WriteString(ddl + ";\n")
+			}
+			want.WriteString(plan.cte)
+			if inserted := body[len(prefix) : len(body)-len(suffix)]; inserted != want.String() {
+				t.Fatalf("planned body replaces the CTE list with more than the plan's index DDL and CTE list")
+			}
+
+			// Index DDL may only touch tables the frozen body itself creates
+			// in its prefix and drops in its suffix.
+			created := map[string]bool{}
+			for _, m := range createTable.FindAllStringSubmatch(prefix, -1) {
+				created[m[1]] = true
+			}
+			dropped := map[string]bool{}
+			for _, m := range dropTable.FindAllStringSubmatch(suffix, -1) {
+				dropped[m[1]] = true
+			}
+			for _, ddl := range plan.indexDDL {
+				m := createIndex.FindStringSubmatch(ddl)
+				if m == nil {
+					t.Errorf("index DDL %q is not a plain CREATE INDEX", ddl)
+					continue
+				}
+				if !created[m[1]] || !dropped[m[1]] {
+					t.Errorf("index DDL %q targets %s, which the frozen body does not both create and drop (created %v, dropped %v)",
+						ddl, m[1], created, dropped)
+				}
+				if nondeterministic.MatchString(ddl) {
+					t.Errorf("index DDL %q is nondeterministic", ddl)
+				}
+			}
+
+			// The replacement is a read-only CTE list.
+			if !strings.HasPrefix(plan.cte, "WITH RECURSIVE\n") {
+				t.Errorf("replacement does not open with WITH RECURSIVE")
+			}
+			if m := writes.FindString(plan.cte); m != "" {
+				t.Errorf("replacement CTE list contains %q; it must only read", m)
+			}
+			if m := nondeterministic.FindString(plan.cte); m != "" {
+				t.Errorf("replacement CTE list calls %s", m)
+			}
+
+			// AllMigrationsSQL (the fresh-bundle / CLI path) keeps executing
+			// the frozen file and recording its hash.
+			if src.cursorTable == mainSource.cursorTable {
+				if !strings.Contains(all, cliCompatibleMigrationSQL(plan.name, frozen)) || !strings.Contains(all, plan.sha256) {
+					t.Errorf("AllMigrationsSQL no longer carries the frozen %s and its hash", plan.name)
+				}
+			}
+			for _, marker := range append([]string{plan.cte}, plan.indexDDL...) {
+				if strings.Contains(all, marker) {
+					t.Errorf("AllMigrationsSQL carries planned text %.80q", marker)
+				}
+			}
+		})
+	}
+
+	t.Run("updated_at census covers executed bodies", func(t *testing.T) {
+		series := shippedCensusSeries(t)
+		stamped, err := censusAutoStampedTables(series)
+		if err != nil {
+			t.Fatal(err)
+		}
+		replaced := 0
+		for si, s := range series {
+			src := mainSource
+			if s.cursorTable == ignoredSource.cursorTable {
+				src = ignoredSource
+			}
+			files := slices.Clone(s.files)
+			for fi, f := range files {
+				body, err := src.plannedMigrationBody(f.version, f.name, []byte(f.sql))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if body != f.sql {
+					files[fi].sql = body
+					replaced++
+				}
+			}
+			series[si].files = files
+		}
+		if replaced != len(migrationBodyPlans) {
+			t.Fatalf("substituted %d planned bodies for %d plans", replaced, len(migrationBodyPlans))
+		}
+		for _, p := range censusUpdatedAtCoverage(series, stamped, updatedAtGuards) {
+			t.Error(p)
+		}
+	})
 }

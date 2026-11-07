@@ -1208,6 +1208,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Migration 0059 (and its wisp twin, ignored migration 0015) no longer runs
+  for hours on clones with many wisp dependencies** (#6520). Their
+  `is_blocked` recompute probed the wisp dependency graph with correlated
+  subqueries over an unindexed copy; a clone with ~14k wisp dependencies did
+  not finish 0059 in two hours. The runner now executes both through a
+  hash-gated, equivalent set-based plan (under a second on a 1/8-scale graph
+  in the server-lane tests).
+  The migration files and the content hashes recorded for them are
+  unchanged.
+
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In
