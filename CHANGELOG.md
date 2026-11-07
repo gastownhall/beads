@@ -1208,6 +1208,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **On Windows, auto-backup no longer fails on every command with
+  `register backup remote: ... invalid port ":\Users\..." after host`**
+  (GH#6019). bd built the backup's `file://` URL from the native path, so a
+  lowercase drive with backslashes (`file://c:\Users\...`) slipped past
+  Dolt's Windows path check and failed URL parsing. The URL bd builds for a
+  local backup directory, for auto-backup, `bd backup init` and restore, is
+  now `file://C:/Users/...`: forward slashes and an uppercase drive letter,
+  whichever form the shell gave bd. URLs you pass in yourself are kept as
+  written.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

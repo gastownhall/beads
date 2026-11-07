@@ -8,8 +8,11 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/dolthub/dolt/go/libraries/utils/earl"
 )
 
 // TestDirToFileURLRejectsSchemes pins the guard that stops a URL being turned
@@ -23,6 +26,8 @@ func TestDirToFileURLRejectsSchemes(t *testing.T) {
 	for _, dir := range []string{
 		"https://doltremoteapi.dolthub.com/user/repo",
 		"file:///already/a/url",
+		"file:///C:/already/a/url",
+		`file://c:\already\a\url`,
 		"aws://bucket/key",
 		"gs://bucket/key",
 	} {
@@ -104,6 +109,40 @@ func TestBackupToDirRefusesMissingOrFileDestination(t *testing.T) {
 				t.Fatalf("BackupToDir(%q) error = %v, want one containing %q", tc.dir, err, tc.want)
 			}
 		})
+	}
+}
+
+// TestBackupToDirRegistersFileURL pins that auto-backup registers the
+// directory under ExportBackupName with the same file:// URL DirToFileURL
+// builds, the one `bd backup init` builds too (GH#6019).
+func TestBackupToDirRegistersFileURL(t *testing.T) {
+	dir := t.TempDir()
+	want := "file://" + dir
+	if runtime.GOOS == "windows" {
+		want = "file://" + strings.ToUpper(dir[:1]) + filepath.ToSlash(dir[1:])
+	}
+	if got, err := DirToFileURL(dir); err != nil || got != want {
+		t.Fatalf("DirToFileURL(%q) = %q, %v; want %q", dir, got, err, want)
+	}
+
+	conn := &restoreConn{}
+	if err := BackupToDir(context.Background(), conn, conn, dir); err != nil {
+		t.Fatalf("BackupToDir(%q): %v", dir, err)
+	}
+	// remove, add, sync: the add binds the name and the URL, and the remove
+	// and sync name the same backup.
+	if len(conn.args) != 3 {
+		t.Fatalf("BackupToDir issued %d statements %v, want remove, add, sync", len(conn.args), conn.args)
+	}
+	rm, add, sync := conn.args[0], conn.args[1], conn.args[2]
+	if len(rm) != 1 || rm[0] != ExportBackupName {
+		t.Errorf("backup remove bound %v, want [%s]", rm, ExportBackupName)
+	}
+	if len(add) != 2 || add[0] != ExportBackupName || add[1] != want {
+		t.Errorf("backup add bound %v, want [%s %s]", add, ExportBackupName, want)
+	}
+	if len(sync) != 1 || sync[0] != ExportBackupName {
+		t.Errorf("backup sync bound %v, want [%s]", sync, ExportBackupName)
 	}
 }
 
@@ -204,6 +243,8 @@ func TestBackupRestoreSanitizesURLOnError(t *testing.T) {
 			want: "file:///var/backups/x"},
 		{name: "windows file URL", url: `file://C:\Users\me\backup`,
 			want: `file://C:\Users\me\backup`},
+		{name: "windows drive file URL", url: "file:///C:/Users/John Doe/backup",
+			want: "file:///C:/Users/John Doe/backup"},
 		{name: "percent in file path", url: "file:///var/backups/100%done",
 			want: "file:///var/backups/100%done"},
 		{name: "hash in file path", url: "file:///var/backups/my#dir",
@@ -258,5 +299,92 @@ func TestBackupRestorePassesURLVerbatim(t *testing.T) {
 				t.Errorf("force=%v: restore args = %q, want [%q %q]", force, got, url, "beads")
 			}
 		}
+	}
+}
+
+// TestFileURLForOS pins the file:// URL bd generates for a local backup
+// directory (GH#6019). On Windows filepath.Abs can return a lowercase drive
+// and backslashes, "c:\Users\...": glued onto "file://", Dolt's URL parser
+// only special-cases uppercase drive letters, so it fell through to net/url
+// and failed with `invalid port ":\Users\..." after host`. Every Windows
+// spelling of a directory must now come out as one uppercase-drive,
+// forward-slash URL, and POSIX paths, where a backslash is a legal filename
+// byte, must come out exactly as before.
+func TestFileURLForOS(t *testing.T) {
+	for _, tc := range []struct {
+		name, goos, abs, want string
+		parses                bool   // net/url.Parse must succeed with Host+Path == want's path
+		earlPath              string // the path Dolt's earl.Parse must read back, host-free; "" skips it
+	}{
+		{name: "AC-1 reported path", goos: "windows",
+			abs:  `c:\Users\alxta\atl-logs-parser\.beads\backup`,
+			want: "file://C:/Users/alxta/atl-logs-parser/.beads/backup", parses: true},
+
+		{name: "AC-2 lowercase backslash", goos: "windows", abs: `c:\Users\me\b`, want: "file://C:/Users/me/b", parses: true, earlPath: "C:/Users/me/b"},
+		{name: "AC-2 uppercase backslash", goos: "windows", abs: `C:\Users\me\b`, want: "file://C:/Users/me/b", parses: true, earlPath: "C:/Users/me/b"},
+		{name: "AC-2 lowercase slash", goos: "windows", abs: `c:/Users/me/b`, want: "file://C:/Users/me/b", parses: true, earlPath: "C:/Users/me/b"},
+		{name: "AC-2 uppercase slash", goos: "windows", abs: `C:/Users/me/b`, want: "file://C:/Users/me/b", parses: true, earlPath: "C:/Users/me/b"},
+		{name: "AC-2 drive root", goos: "windows", abs: `z:\`, want: "file://Z:/", parses: true, earlPath: "Z:/"},
+		{name: "AC-2 UNC share", goos: "windows", abs: `\\nas\share\beads`, want: "file:////nas/share/beads"},
+		{name: "AC-2 space and percent", goos: "windows", abs: `C:\Users\my dir\100%done`, want: "file://C:/Users/my dir/100%done"},
+		{name: "AC-2 space, percent and hash stay literal", goos: "windows",
+			abs: `c:\Users\John Doe\100%\a#b`, want: "file://C:/Users/John Doe/100%/a#b", earlPath: "C:/Users/John Doe/100%/a#b"},
+
+		{name: "AC-3 linux plain", goos: "linux", abs: "/home/me/backup", want: "file:///home/me/backup"},
+		{name: "AC-3 linux backslash", goos: "linux", abs: `/tmp/we\ird`, want: `file:///tmp/we\ird`},
+		{name: "AC-3 linux space and percent", goos: "linux", abs: "/tmp/my dir/100%done", want: "file:///tmp/my dir/100%done"},
+		{name: "AC-3 linux root", goos: "linux", abs: "/", want: "file:///"},
+		{name: "AC-3 linux drive-like component", goos: "linux", abs: "/srv/c:/x", want: "file:///srv/c:/x"},
+		{name: "AC-3 darwin plain", goos: "darwin", abs: "/Users/me/backup", want: "file:///Users/me/backup"},
+		{name: "AC-3 darwin backslash", goos: "darwin", abs: `/tmp/we\ird`, want: `file:///tmp/we\ird`},
+		{name: "AC-3 darwin space and percent", goos: "darwin", abs: "/tmp/my dir/100%done", want: "file:///tmp/my dir/100%done"},
+		{name: "AC-3 darwin root", goos: "darwin", abs: "/", want: "file:///"},
+		{name: "AC-3 darwin drive-like component", goos: "darwin", abs: "/srv/c:/x", want: "file:///srv/c:/x"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := fileURLForOS(tc.abs, tc.goos)
+			if got != tc.want {
+				t.Fatalf("fileURLForOS(%q, %q) = %q, want %q", tc.abs, tc.goos, got, tc.want)
+			}
+			if tc.goos == "windows" && strings.Contains(got, `\`) {
+				t.Errorf("fileURLForOS(%q, windows) = %q, which still holds a backslash", tc.abs, got)
+			}
+			if tc.earlPath != "" {
+				// Dolt's own parser, which DOLT_BACKUP('add') uses, must read
+				// the drive path back. This pins parsing only, not that a
+				// backup into such a directory succeeds.
+				e, err := earl.Parse(got)
+				if err != nil {
+					t.Fatalf("earl.Parse(%q): %v", got, err)
+				}
+				if e.Host != "" || e.Path != tc.earlPath {
+					t.Errorf("earl.Parse(%q) = host %q, path %q, want host \"\", path %q", got, e.Host, e.Path, tc.earlPath)
+				}
+			}
+			if !tc.parses {
+				return
+			}
+			u, err := neturl.Parse(got)
+			if err != nil {
+				t.Fatalf("net/url.Parse(%q): %v", got, err)
+			}
+			if path := strings.TrimPrefix(tc.want, "file://"); u.Host+u.Path != path {
+				t.Errorf("net/url.Parse(%q) Host+Path = %q, want %q", got, u.Host+u.Path, path)
+			}
+		})
+	}
+
+	// Registrations written by earlier releases spelled an uppercase drive
+	// "file://C:\work\..."; earl reads that legacy spelling and the one bd
+	// builds now as the same host-free drive path, so those stored backup
+	// addresses need no migration.
+	legacy, legacyErr := earl.Parse(`file://C:\work\.beads\backup`)
+	current, currentErr := earl.Parse("file://C:/work/.beads/backup")
+	if legacyErr != nil || currentErr != nil {
+		t.Fatalf("earl.Parse: legacy %v, current %v", legacyErr, currentErr)
+	}
+	if legacy.Host != current.Host || legacy.Path != current.Path {
+		t.Fatalf("legacy spelling parses as host %q path %q; current as host %q path %q",
+			legacy.Host, legacy.Path, current.Host, current.Path)
 	}
 }
