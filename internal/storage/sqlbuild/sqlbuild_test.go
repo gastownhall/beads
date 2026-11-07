@@ -580,9 +580,21 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	}
 
 	// By-IDs form: driver and every subquery are constrained to the ids, and the
-	// arg count matches the placeholder injection points (labels, dc, rc-deps,
-	// rc-wisp, cc, pc, d, driver = 8 for the wisp family with labels).
+	// arg count matches the placeholder injection points (labels, dc, three
+	// rc-deps branches, three rc-wisp branches, cc, pc, d, driver = 12 for the
+	// wisp family with labels).
 	byIDs, idArgs := SearchCountsSQL(WispsFilterTables, []string{"a", "b"}, "", "", "", true, CountsHydration{})
+	if strings.Count(byIDs, "?") != len(idArgs) {
+		t.Errorf("by-IDs placeholders = %d, args = %d", strings.Count(byIDs, "?"), len(idArgs))
+	}
+	if strings.Contains(byIDs, DepTargetExpr+" IN") {
+		t.Errorf("by-IDs reverse-blocker filter must use per-column branches, not COALESCE:\n%s", byIDs)
+	}
+	for _, branch := range []string{"depends_on_issue_id IN (?,?) AND type = 'blocks'", "depends_on_wisp_id IN (?,?) AND COALESCE(depends_on_issue_id) IS NULL", "depends_on_external IN (?,?) AND COALESCE(depends_on_issue_id, depends_on_wisp_id) IS NULL"} {
+		if strings.Count(byIDs, branch) != 2 {
+			t.Errorf("by-IDs reverse blockers need %q once per dependency table:\n%s", branch, byIDs)
+		}
+	}
 	if !strings.Contains(byIDs, "WHERE i.id IN (?,?)") {
 		t.Errorf("by-IDs counts SQL missing driver id filter:\n%s", byIDs)
 	}
@@ -595,15 +607,16 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	if strings.Contains(byIDs, "ORDER BY") || strings.Contains(byIDs, "LIMIT") {
 		t.Error("by-IDs counts SQL must not carry ORDER BY / LIMIT (order restored in Go)")
 	}
-	if len(idArgs) != 8*2 {
-		t.Errorf("by-IDs args = %d, want %d", len(idArgs), 8*2)
+	if len(idArgs) != 12*2 {
+		t.Errorf("by-IDs args = %d, want %d", len(idArgs), 12*2)
 	}
 
 	// skipLabels drops the labels point and !includeWispReverseDeps drops the
-	// rc-wisp point, leaving 6 injection points (dc, rc-deps, cc, pc, d, driver).
-	_, idArgsNoLabels := SearchCountsSQL(IssuesFilterTables, []string{"a", "b"}, "", "", "", false, CountsHydration{SkipLabels: true})
-	if len(idArgsNoLabels) != 6*2 {
-		t.Errorf("by-IDs args (skipLabels, no wisp deps) = %d, want %d", len(idArgsNoLabels), 6*2)
+	// rc-wisp branches, leaving 8 injection points (dc, three rc-deps
+	// branches, cc, pc, d, driver).
+	noLabelsSQL, idArgsNoLabels := SearchCountsSQL(IssuesFilterTables, []string{"a", "b"}, "", "", "", false, CountsHydration{SkipLabels: true})
+	if len(idArgsNoLabels) != 8*2 || strings.Count(noLabelsSQL, "?") != len(idArgsNoLabels) {
+		t.Errorf("by-IDs args (skipLabels, no wisp deps) = %d, want %d", len(idArgsNoLabels), 8*2)
 	}
 
 	// SkipCounts drops the three cardinality joins and projects constants in
@@ -635,6 +648,94 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	_, idArgsNeither := SearchCountsSQL(WispsFilterTables, []string{"a", "b"}, "", "", "", true, CountsHydration{SkipLabels: true, SkipCounts: true})
 	if len(idArgsNeither) != 3*2 {
 		t.Errorf("by-IDs args (skipLabels+skipCounts) = %d, want %d", len(idArgsNeither), 3*2)
+	}
+}
+
+func TestSearchCountsSQLScoped(t *testing.T) {
+	t.Parallel()
+
+	// A scoped predicate form keeps the derived driver, its caller predicate
+	// (parenthesized, so a top-level OR cannot escape the scope), ORDER BY and
+	// LIMIT, bounds the driver by the scope, and constrains every aggregate.
+	sql, args := SearchCountsSQLScoped(IssuesFilterTables, nil, []string{"a", "b"}, "WHERE x = ? OR z = ?", "ORDER BY y", "LIMIT 5", true, CountsHydration{})
+	if !strings.Contains(sql, "WHERE (x = ? OR z = ?) AND i.id IN (?,?)") {
+		t.Errorf("scoped driver must AND the scope onto the parenthesized predicate:\n%s", sql)
+	}
+	// The caller binds its two whereSQL args first, then the returned ones.
+	if strings.Count(sql, "?") != 2+len(args) {
+		t.Errorf("scoped placeholders = %d, caller args + returned args = %d", strings.Count(sql, "?"), 2+len(args))
+	}
+	// driver, labels, dc, 3 rc-deps, 3 rc-wisp, cc, pc, d.
+	if len(args) != 12*2 {
+		t.Errorf("scoped args = %d, want %d", len(args), 12*2)
+	}
+	// deps_json reads its scoped rows in primary-key order, the unscoped scan's order.
+	for _, want := range []string{"FROM labels\n\t\t\tWHERE issue_id IN (?,?)", "WHERE type = 'blocks' AND issue_id IN (?,?)", "FROM comments\n\t\t\tWHERE issue_id IN (?,?)", "WHERE type = 'parent-child' AND issue_id IN (?,?)", "(SELECT * FROM dependencies WHERE issue_id IN (?,?) ORDER BY 1) scoped_deps", "ORDER BY y", "LIMIT 5"} {
+		if !strings.Contains(sql, want) {
+			t.Errorf("scoped counts SQL missing %q:\n%s", want, sql)
+		}
+	}
+	if strings.Contains(sql, DepTargetExpr+" IN") {
+		t.Errorf("scoped reverse blockers must use per-column branches:\n%s", sql)
+	}
+
+	// An empty predicate gains a derived driver bounded by the scope alone.
+	emptyWhere, emptyArgs := SearchCountsSQLScoped(IssuesFilterTables, nil, []string{"a"}, "", "", "", false, CountsHydration{})
+	if !strings.Contains(emptyWhere, "WHERE i.id IN (?)") || strings.Count(emptyWhere, "?") != len(emptyArgs) {
+		t.Errorf("scoped empty predicate must bound the driver by the scope:\n%s", emptyWhere)
+	}
+
+	// No scope, an oversized scope, or an unrecognized predicate shape renders
+	// exactly the unscoped predicate form.
+	plain, plainArgs := SearchCountsSQL(IssuesFilterTables, nil, "WHERE x = ?", "", "", true, CountsHydration{})
+	big := make([]string, MaxCountsScope+1)
+	for i := range big {
+		big[i] = "x"
+	}
+	for name, scope := range map[string][]string{"nil": nil, "oversized": big} {
+		got, gotArgs := SearchCountsSQLScoped(IssuesFilterTables, nil, scope, "WHERE x = ?", "", "", true, CountsHydration{})
+		if got != plain || gotArgs != nil || plainArgs != nil {
+			t.Errorf("%s scope must render the unscoped predicate form", name)
+		}
+	}
+	odd, oddArgs := SearchCountsSQLScoped(IssuesFilterTables, nil, []string{"a"}, "x = ?", "", "", true, CountsHydration{})
+	if oddArgs != nil || strings.Contains(odd, "i.id IN") {
+		t.Errorf("a predicate without a WHERE prefix must not be scoped:\n%s", odd)
+	}
+
+	// The by-IDs form ignores the scope.
+	byIDs, byArgs := SearchCountsSQL(IssuesFilterTables, []string{"a"}, "", "", "", false, CountsHydration{})
+	scopedByIDs, scopedArgs := SearchCountsSQLScoped(IssuesFilterTables, []string{"a"}, []string{"b", "c"}, "", "", "", false, CountsHydration{})
+	if byIDs != scopedByIDs || len(byArgs) != len(scopedArgs) {
+		t.Error("by-IDs form must ignore the scope")
+	}
+}
+
+func TestDepTargetUnion(t *testing.T) {
+	t.Parallel()
+
+	sql := DepTargetUnion("dependencies", "", func(col string) string { return "issue_id, " + col + " AS dep_id" }, "= ?", " AND type IN (?,?)")
+	args := DepTargetUnionArgs([]any{"t"}, []any{"blocks", "related"})
+	want := "SELECT issue_id, depends_on_issue_id AS dep_id FROM dependencies WHERE depends_on_issue_id = ? AND type IN (?,?) UNION ALL " +
+		"SELECT issue_id, depends_on_wisp_id AS dep_id FROM dependencies WHERE depends_on_wisp_id = ? AND COALESCE(depends_on_issue_id) IS NULL AND type IN (?,?) UNION ALL " +
+		"SELECT issue_id, depends_on_external AS dep_id FROM dependencies WHERE depends_on_external = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id) IS NULL AND type IN (?,?)"
+	if sql != want {
+		t.Errorf("DepTargetUnion =\n%s\nwant\n%s", sql, want)
+	}
+	wantArgs := []any{"t", "blocks", "related", "t", "blocks", "related", "t", "blocks", "related"}
+	if len(args) != len(wantArgs) {
+		t.Fatalf("args = %v, want %v", args, wantArgs)
+	}
+	for i := range args {
+		if args[i] != wantArgs[i] {
+			t.Fatalf("args = %v, want %v", args, wantArgs)
+		}
+	}
+
+	bare := DepTargetUnion("wisp_dependencies", "", func(string) string { return "1 AS one" }, "IN (?)", "")
+	bareArgs := DepTargetUnionArgs([]any{"t"}, nil)
+	if strings.Count(bare, "?") != len(bareArgs) || !strings.HasPrefix(bare, "SELECT 1 AS one FROM wisp_dependencies WHERE depends_on_issue_id IN (?)") {
+		t.Errorf("DepTargetUnion without extraWhere =\n%s", bare)
 	}
 }
 

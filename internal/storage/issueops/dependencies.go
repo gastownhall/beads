@@ -1463,7 +1463,14 @@ func anchorEdgesInTx(ctx context.Context, tx DBTX, anchor string, inbound, withT
 	var edges []anchorEdge
 	seen := make(map[string]struct{})
 	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`SELECT %s FROM %s WHERE %s`, cols, depTable, where), anchor)
+		query := fmt.Sprintf(`SELECT %s FROM %s WHERE %s`, cols, depTable, where)
+		args := []any{anchor}
+		if inbound {
+			branches := sqlbuild.DepTargetUnion(depTable, "", func(string) string { return "*" }, "= ?", "")
+			query = fmt.Sprintf(`SELECT %s FROM (SELECT * FROM (%s) edges ORDER BY 1) dependents`, cols, branches)
+			args = sqlbuild.DepTargetUnionArgs(args, nil)
+		}
+		rows, err := tx.QueryContext(ctx, query, args...)
 		if err != nil {
 			if optionalBlockedTable(depTable) && dberrors.IsMissingTable(err, depTable) {
 				continue
