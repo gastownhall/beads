@@ -31,6 +31,7 @@ type notionAPI interface {
 	GetCurrentUser(ctx context.Context) (*User, error)
 	RetrieveDataSource(ctx context.Context, dataSourceID string) (*DataSource, error)
 	QueryDataSource(ctx context.Context, dataSourceID string, filter map[string]interface{}) ([]Page, error)
+	RetrievePage(ctx context.Context, pageID string) (*Page, error)
 	CreatePage(ctx context.Context, dataSourceID string, properties map[string]interface{}) (*Page, error)
 	UpdatePage(ctx context.Context, pageID string, properties map[string]interface{}) (*Page, error)
 	ArchivePage(ctx context.Context, pageID string, inTrash bool) (*Page, error)
@@ -201,33 +202,80 @@ func (t *Tracker) LastPullStats() (queried int, candidates int) {
 	return t.lastQueried, t.lastCandidates
 }
 
+// FetchIssue resolves one identifier without enumerating the data source: a
+// page URL or ID is one direct page read, anything else one Beads ID query
+// scoped to the configured source. A page that is missing, archived, trashed
+// or not a row of the configured source yields (nil, nil); any other failure
+// is returned.
 func (t *Tracker) FetchIssue(ctx context.Context, identifier string) (*itracker.TrackerIssue, error) {
-	if err := t.ensureRemoteIndex(ctx); err != nil {
+	if pageID := ExtractNotionIdentifier(identifier); pageID != "" {
+		return t.retrieveMemberIssue(ctx, pageID)
+	}
+	return t.queryIssueByLocalID(ctx, identifier)
+}
+
+// retrieveMemberIssue reads a page directly and reports it only if it is a
+// live row of the configured data source. A source query supplied that
+// isolation for free; a direct read reaches any page shared with the
+// integration, so membership is checked before anything acts on the page.
+func (t *Tracker) retrieveMemberIssue(ctx context.Context, pageID string) (*itracker.TrackerIssue, error) {
+	page, err := t.client.RetrievePage(ctx, pageID)
+	if err != nil {
+		if isNotFound(err) {
+			return nil, nil
+		}
 		return nil, err
 	}
-	want := ExtractNotionIdentifier(identifier)
-	if want == "" {
-		want = strings.TrimSpace(identifier)
+	if page == nil || page.InTrash || page.Archived || !t.ownsPage(page) {
+		return nil, nil
 	}
+	return TrackerIssueFromPullIssue(PulledIssueFromPage(*page), t.config)
+}
 
-	t.cacheMu.RLock()
-	defer t.cacheMu.RUnlock()
-
-	if issue, ok := t.remoteByPageID[want]; ok {
-		cloned := cloneTrackerIssue(issue)
-		return &cloned, nil
+// queryIssueByLocalID finds the live row of the configured data source that
+// carries a Beads ID. When several do, the last one wins.
+func (t *Tracker) queryIssueByLocalID(ctx context.Context, localID string) (*itracker.TrackerIssue, error) {
+	localID = strings.TrimSpace(localID)
+	if localID == "" {
+		return nil, nil
 	}
-	if issue, ok := t.remoteByLocalID[want]; ok {
-		cloned := cloneTrackerIssue(issue)
-		return &cloned, nil
+	pages, err := t.client.QueryDataSource(ctx, t.dataSourceID, beadsIDFilter(localID))
+	if err != nil {
+		return nil, err
 	}
-	for _, candidate := range t.issueCache {
-		if candidate.Identifier == want {
-			cloned := cloneTrackerIssue(candidate)
-			return &cloned, nil
+	live, err := t.liveIssues(pages)
+	if err != nil {
+		return nil, err
+	}
+	var match *itracker.TrackerIssue
+	for i := range live {
+		if raw, ok := live[i].Raw.(*PulledIssue); ok && raw != nil && raw.ID == localID {
+			match = &live[i]
 		}
 	}
-	return nil, nil
+	return match, nil
+}
+
+// ownsPage reports whether page is a row of the configured data source. Only a
+// data_source_id parent naming that source counts, compared without hyphens or
+// case; a database parent does not, since a database can hold several sources.
+func (t *Tracker) ownsPage(page *Page) bool {
+	if page.Parent == nil || page.Parent.Type != "data_source_id" {
+		return false
+	}
+	want := normalizeNotionObjectID(t.dataSourceID)
+	return want != "" && normalizeNotionObjectID(page.Parent.DataSourceID) == want
+}
+
+func normalizeNotionObjectID(id string) string {
+	return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(id), "-", ""))
+}
+
+func beadsIDFilter(localID string) map[string]interface{} {
+	return map[string]interface{}{
+		"property":  PropertyBeadsID,
+		"rich_text": map[string]interface{}{"equals": localID},
+	}
 }
 
 func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*itracker.TrackerIssue, error) {

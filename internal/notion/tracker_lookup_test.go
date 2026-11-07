@@ -580,3 +580,115 @@ func TestTrackerIncrementalBoundary(t *testing.T) {
 		t.Fatalf("LastPullStats = (%d, %d), want (3, 1)", queried, candidates)
 	}
 }
+
+// A single fetch resolves a page reference with one direct read and a Beads ID
+// with one equality query scoped to the configured source, so it works on a
+// source that cannot be enumerated within the bound. A direct read reaches any
+// page shared with the integration, so only a live row whose data_source_id
+// parent names the configured source counts.
+func TestTrackerFetchIssueTargeted(t *testing.T) {
+	t.Parallel()
+
+	edited := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	f := newFakeNotion(t)
+	f.hugeSource = true
+	member := fakeRow(1, "bd-1", edited)
+	archived := fakeRow(2, "bd-archived", edited)
+	archived.Archived = true
+	trashed := fakeRow(3, "bd-trashed", edited)
+	trashed.InTrash = true
+	foreign := fakeRow(4, "bd-foreign", edited)
+	foreign.Parent = sourceParent("11111111-2222-4333-8444-555555555555")
+	noParent := fakeRow(5, "bd-no-parent", edited)
+	noParent.Parent = nil
+	databaseOnly := fakeRow(6, "bd-database-only", edited)
+	databaseOnly.Parent = map[string]interface{}{"type": "database_id", "database_id": testDataSourceID}
+	dupFirst := fakeRow(7, "bd-dup", edited)
+	dupLast := fakeRow(8, "bd-dup", edited)
+	dupArchived := fakeRow(9, "bd-dup", edited)
+	dupArchived.Archived = true
+	f.addPages(member, archived, trashed, foreign, noParent, databaseOnly, dupFirst, dupLast, dupArchived)
+	missingID := "bbbbbbbb-0000-4000-8000-000000000001"
+	ctx := context.Background()
+
+	for _, ref := range []string{member.URL, member.ID, compactID(member.ID), strings.ToUpper(compactID(member.ID))} {
+		f.resetRequests()
+		got, err := f.tracker().FetchIssue(ctx, ref)
+		if err != nil {
+			t.Fatalf("FetchIssue(%q): %v", ref, err)
+		}
+		if got == nil || got.ID != member.ID {
+			t.Fatalf("FetchIssue(%q) = %+v, want page %s", ref, got, member.ID)
+		}
+		reqs := f.requests()
+		if len(reqs.gets) != 1 || reqs.gets[0] != compactID(member.ID) || reqs.unfilteredQueries != 0 || len(reqs.filters) != 0 {
+			t.Fatalf("FetchIssue(%q) requests = %+v, want one direct read of %s", ref, reqs, member.ID)
+		}
+	}
+
+	f.resetRequests()
+	got, err := f.tracker().FetchIssue(ctx, "bd-1")
+	if err != nil {
+		t.Fatalf("FetchIssue(bd-1): %v", err)
+	}
+	if got == nil || got.ID != member.ID {
+		t.Fatalf("FetchIssue(bd-1) = %+v, want page %s", got, member.ID)
+	}
+	reqs := f.requests()
+	if reqs.unfilteredQueries != 0 || len(reqs.gets) != 0 || len(reqs.filters) != 1 {
+		t.Fatalf("FetchIssue(bd-1) requests = %+v, want one filtered query", reqs)
+	}
+	if got, want := filterJSON(t, reqs.filters[0]), `{"property":"Beads ID","rich_text":{"equals":"bd-1"}}`; got != want {
+		t.Fatalf("Beads ID filter = %s, want %s", got, want)
+	}
+
+	got, err = f.tracker().FetchIssue(ctx, "bd-dup")
+	if err != nil {
+		t.Fatalf("FetchIssue(bd-dup): %v", err)
+	}
+	if got == nil || got.ID != dupLast.ID {
+		t.Fatalf("FetchIssue(bd-dup) = %+v, want the last live match %s", got, dupLast.ID)
+	}
+
+	f.resetRequests()
+	for _, empty := range []string{"", "   "} {
+		if got, err := f.tracker().FetchIssue(ctx, empty); got != nil || err != nil {
+			t.Fatalf("FetchIssue(%q) = (%+v, %v), want (nil, nil)", empty, got, err)
+		}
+	}
+	if reqs := f.requests(); reqs.unfilteredQueries != 0 || len(reqs.filters) != 0 || len(reqs.gets) != 0 {
+		t.Fatalf("empty identifiers sent requests %+v", reqs)
+	}
+
+	for name, ref := range map[string]string{
+		"missing":       missingID,
+		"archived":      archived.URL,
+		"trashed":       trashed.URL,
+		"foreign":       foreign.URL,
+		"no parent":     noParent.URL,
+		"database only": databaseOnly.URL,
+	} {
+		got, err := f.tracker().FetchIssue(ctx, ref)
+		if err != nil || got != nil {
+			t.Fatalf("FetchIssue(%s page) = (%+v, %v), want (nil, nil)", name, got, err)
+		}
+	}
+	for _, beadsID := range []string{"bd-archived", "bd-foreign", "bd-missing"} {
+		got, err := f.tracker().FetchIssue(ctx, beadsID)
+		if err != nil || got != nil {
+			t.Fatalf("FetchIssue(%s) = (%+v, %v), want (nil, nil)", beadsID, got, err)
+		}
+	}
+
+	variant := f.trackerFor(strings.ToUpper(compactID(testDataSourceID)))
+	if got, err := variant.FetchIssue(ctx, member.URL); err != nil || got == nil || got.ID != member.ID {
+		t.Fatalf("FetchIssue via a case/hyphen variant of the source ID = (%+v, %v), want page %s", got, err, member.ID)
+	}
+	if got, err := variant.FetchIssue(ctx, "bd-1"); err != nil || got == nil || got.ID != member.ID {
+		t.Fatalf("FetchIssue(bd-1) via a case/hyphen variant of the source ID = (%+v, %v), want page %s", got, err, member.ID)
+	}
+
+	if reqs := f.requests(); reqs.unfilteredQueries != 0 {
+		t.Fatalf("single fetches sent %d unfiltered queries, want none", reqs.unfilteredQueries)
+	}
+}

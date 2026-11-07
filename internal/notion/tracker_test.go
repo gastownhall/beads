@@ -3,6 +3,7 @@ package notion
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -41,6 +42,20 @@ func (f *fakeAPI) QueryDataSource(_ context.Context, _ string, filter map[string
 		}
 	}
 	return pages, nil
+}
+
+// RetrievePage serves f.pages by ID. They are rows of the configured source,
+// so a fixture without a parent is given that source as its parent.
+func (f *fakeAPI) RetrievePage(_ context.Context, pageID string) (*Page, error) {
+	for _, page := range f.pages {
+		if ExtractNotionIdentifier(page.ID) == ExtractNotionIdentifier(pageID) {
+			if page.Parent == nil {
+				page.Parent = &PageParent{Type: "data_source_id", DataSourceID: "ds_123"}
+			}
+			return &page, nil
+		}
+	}
+	return nil, &APIError{StatusCode: http.StatusNotFound, Code: "object_not_found", Message: "Could not find page"}
 }
 
 func fakeFilterMatches(page Page, filter map[string]interface{}) bool {
