@@ -73,6 +73,13 @@ beads_test_env_enter() {
     unset BEADS_DOLT_SERVER_DATABASE
     unset BEADS_DOLT_SERVER_SOCKET
     unset BEADS_DOLT_PASSWORD
+    # A shell pointed at a shared Dolt server, or running bd in agent mode,
+    # must not hand its credentials or agent settings to the tests.
+    unset BEADS_DOLT_SERVER_USER
+    unset BEADS_DOLT_SERVER_PASSWORD
+    unset BD_AGENT_MODE
+    unset BD_NON_INTERACTIVE
+    unset BEADS_MAIL_DELEGATE
     # bazeltest debug override: never let an exported value point source-scan
     # guards at another checkout.
     unset BEADS_TEST_REPO_ROOT
