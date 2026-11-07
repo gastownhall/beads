@@ -2,11 +2,13 @@ package beads
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
 
 func initFingerprintGitRepo(t *testing.T, dir string, remote string) {
@@ -694,5 +696,171 @@ func TestComputeRepoFingerprint_AliasResolution(t *testing.T) {
 		if fp.Matches("") || !fp.Matches(fp.ID) {
 			t.Fatalf("Matches on an unresolved fingerprint must accept only ID: %+v", fp)
 		}
+	})
+}
+
+// assertUnresolvedFingerprint checks that remote kept its pre-change id and
+// no alias was marked resolved.
+func assertUnresolvedFingerprint(t *testing.T, remote string, fp RepoFingerprint) {
+	t.Helper()
+	canonical, err := canonicalizeGitURL(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := RepoFingerprint{ID: hashRepoIdentity(canonical), Source: RepoIDSourceRemote}
+	if fp != want {
+		t.Fatalf("fingerprint of %s = %+v, want the pre-change id %+v", remote, fp, want)
+	}
+	if fp.AliasResolved() {
+		t.Fatalf("AliasResolved() = true for %s, want false", remote)
+	}
+}
+
+// Any failure of the real ssh -G lookup keeps the pre-change id, and the
+// lookup stays bounded even when ssh hangs or leaks its output pipe.
+func TestComputeRepoFingerprint_Fallbacks(t *testing.T) {
+	isolateFingerprintGitEnv(t)
+	const remote = "git@alias-a:org/repo.git"
+
+	oldTimeout, oldWaitDelay := sshResolveTimeout, sshResolveWaitDelay
+	sshResolveTimeout, sshResolveWaitDelay = 300*time.Millisecond, 200*time.Millisecond
+	t.Cleanup(func() { sshResolveTimeout, sshResolveWaitDelay = oldTimeout, oldWaitDelay })
+
+	scripts := map[string]string{
+		"nonzero exit":       "#!/bin/sh\necho 'hostname github.com'\nexit 1\n",
+		"unsupported -G":     "#!/bin/sh\necho 'unknown option -- G' >&2\nexit 255\n",
+		"absent hostname":    "#!/bin/sh\necho 'user git'\necho 'port 22'\n",
+		"empty hostname":     "#!/bin/sh\necho 'hostname'\n",
+		"two-value hostname": "#!/bin/sh\necho 'hostname github.com evil.example'\n",
+		"option-like":        "#!/bin/sh\necho 'hostname -oProxyCommand=evil'\n",
+		"path-like":          "#!/bin/sh\necho 'hostname github.com/evil'\n",
+		"deadline":           "#!/bin/sh\nexec sleep 10\n",
+		"inherited pipe":     "#!/bin/sh\nsleep 10 &\necho 'hostname github.com'\n",
+	}
+	for name, script := range scripts {
+		t.Run(name, func(t *testing.T) {
+			installFakeSSH(t, script)
+			start := time.Now()
+			fp := fingerprintForRemote(t, remote)
+			if elapsed := time.Since(start); elapsed > 5*time.Second {
+				t.Fatalf("fingerprint took %v, want a bounded lookup", elapsed)
+			}
+			assertUnresolvedFingerprint(t, remote, fp)
+		})
+	}
+
+	t.Run("CRLF output still resolves", func(t *testing.T) {
+		installFakeSSH(t, "#!/bin/sh\nprintf 'user git\\r\\nHostName github.com\\r\\n'\n")
+		fp := fingerprintForRemote(t, remote)
+		if fp.ID != hashRepoIdentity("github.com/org/repo") {
+			t.Fatalf("fingerprint = %+v, want the CRLF hostname adopted", fp)
+		}
+	})
+
+	t.Run("missing ssh executable", func(t *testing.T) {
+		old := sshLookPath
+		sshLookPath = func(string) (string, error) { return "", exec.ErrNotFound }
+		t.Cleanup(func() { sshLookPath = old })
+		assertUnresolvedFingerprint(t, remote, fingerprintForRemote(t, remote))
+	})
+
+	t.Run("ssh only on a current-directory PATH entry", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("fake ssh is a shell script")
+		}
+		work := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(work, "bin"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(work, "bin", "ssh"), []byte(fakeSSHAliasScript), 0o700); err != nil { // #nosec G306 -- test executable
+			t.Fatal(err)
+		}
+		gitPath, err := exec.LookPath("git")
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		initFingerprintGitRepo(t, dir, remote)
+		t.Setenv("PATH", "bin"+string(os.PathListSeparator)+filepath.Dir(gitPath))
+		t.Chdir(work)
+		fp, err := ComputeRepoFingerprintForPath(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertUnresolvedFingerprint(t, remote, fp)
+	})
+}
+
+// Remotes that are not plain SSH destinations, or whose SSH transport Git
+// would not run through the default ssh configuration, are never handed to
+// the resolver.
+func TestComputeRepoFingerprint_NeverResolved(t *testing.T) {
+	isolateFingerprintGitEnv(t)
+	calls := stubSSHResolver(t, map[string]string{"alias-a": "github.com"})
+
+	remotes := []string{
+		"git@-oProxyCommand=evil:org/repo.git",
+		"ev;l@alias-a:org/repo.git",
+		"ssh://-oProxyCommand=evil@alias-a/org/repo.git",
+		"git@192.0.2.1:org/repo.git",
+		"ssh://git@192.0.2.1:2222/org/repo.git",
+		"https://alias-a/org/repo.git",
+		"git://alias-a/org/repo.git",
+		"file:///srv/git/repo.git",
+		"/srv/git/repo.git",
+		"C:/src/repo",
+		"c:org/repo",
+	}
+	for _, remote := range remotes {
+		t.Run(remote, func(t *testing.T) {
+			*calls = 0
+			fp := fingerprintForRemote(t, remote)
+			assertUnresolvedFingerprint(t, remote, fp)
+			if *calls != 0 {
+				t.Fatalf("resolver called %d times for %s, want 0", *calls, remote)
+			}
+		})
+	}
+
+	for _, env := range []string{"GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT"} {
+		t.Run(env, func(t *testing.T) {
+			t.Setenv(env, "ssh")
+			*calls = 0
+			const remote = "git@alias-a:org/repo.git"
+			assertUnresolvedFingerprint(t, remote, fingerprintForRemote(t, remote))
+			if *calls != 0 {
+				t.Fatalf("resolver called %d times with %s set, want 0", *calls, env)
+			}
+		})
+	}
+
+	t.Run("core.sshCommand", func(t *testing.T) {
+		const remote = "git@alias-a:org/repo.git"
+		dir := t.TempDir()
+		initFingerprintGitRepo(t, dir, remote)
+		cmd := exec.Command("git", "config", "core.sshCommand", "ssh -F /dev/null")
+		cmd.Dir = dir
+		if err := cmd.Run(); err != nil {
+			t.Fatal(err)
+		}
+		*calls = 0
+		fp, err := ComputeRepoFingerprintForPath(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertUnresolvedFingerprint(t, remote, fp)
+		if *calls != 0 {
+			t.Fatalf("resolver called %d times with core.sshCommand set, want 0", *calls)
+		}
+	})
+
+	t.Run("resolver error", func(t *testing.T) {
+		old := resolveSSHHostName
+		resolveSSHHostName = func(context.Context, string, string, string) (string, error) {
+			return "", errors.New("boom")
+		}
+		t.Cleanup(func() { resolveSSHHostName = old })
+		const remote = "git@alias-a:org/repo.git"
+		assertUnresolvedFingerprint(t, remote, fingerprintForRemote(t, remote))
 	})
 }
