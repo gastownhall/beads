@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/atomicfile"
 	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/remedy"
@@ -722,10 +723,10 @@ func UnsetUserYamlConfig(key string) (bool, error) {
 		return false, nil
 	}
 
-	// Preserve the owner-private 0600 posture every other user-global writer
-	// uses (SetUserYamlConfig, setYamlConfigAtPath, the metrics bootstrap);
-	// rewriting at 0644 would relax this shared user config to world-readable.
-	if err := os.WriteFile(configPath, []byte(newContent), 0o600); err != nil { //nolint:gosec // configPath is from UserConfigYamlPath
+	// replaceConfigYaml keeps the file's own mode, so the owner-private 0600
+	// posture every user-global writer creates it with (SetUserYamlConfig, the
+	// metrics bootstrap) survives the rewrite.
+	if err := replaceConfigYaml(configPath, []byte(newContent)); err != nil {
 		return false, fmt.Errorf("failed to write user config.yaml: %w", err)
 	}
 
@@ -766,12 +767,49 @@ func setYamlConfigAtPath(configPath, key, value string) error {
 		return err
 	}
 
-	// Write back
-	if err := os.WriteFile(configPath, []byte(newContent), 0600); err != nil { //nolint:gosec // configPath is validated
+	if err := replaceConfigYaml(configPath, []byte(newContent)); err != nil {
 		return fmt.Errorf("failed to write config.yaml: %w", err)
 	}
 
 	return nil
+}
+
+// replaceConfigYaml replaces an existing config.yaml's content in one step:
+// temp file, then rename. Other bd processes read this file while bd writes
+// it: every command loads it at startup and reads events-journal activation
+// from it when it opens its store, and `bd serve` resolves that activation
+// once, at startup, for the life of the server. An in-place rewrite (truncate,
+// then write) hands a reader that lands in between an empty or partial file,
+// which parses as "key absent" and resolves to the key's default.
+//
+// On POSIX a reader sees the whole old file or the whole new one. Windows
+// refuses to rename over a file another handle holds open, so there the
+// replace waits for the reader to close it (internal/atomicfile retries for
+// about two seconds) and otherwise fails with the old file intact.
+//
+// A symlinked config.yaml is written through to its target rather than
+// replaced by a regular file, and the file keeps its own permissions. A
+// rename needs write permission on the directory only, so the file's own is
+// checked first: a config.yaml its owner made read-only is refused, as the
+// in-place write refused it, rather than rewritten.
+func replaceConfigYaml(configPath string, content []byte) error {
+	target, err := filepath.EvalSymlinks(configPath)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return err
+	}
+	// Opened without O_TRUNC, so the probe changes nothing.
+	f, err := os.OpenFile(target, os.O_WRONLY, 0) //nolint:gosec // target is the resolved config.yaml path
+	if err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return atomicfile.WriteFile(target, content, info.Mode().Perm())
 }
 
 // GetYamlConfig gets a configuration value from config.yaml.
@@ -828,7 +866,7 @@ func UnsetYamlConfig(key string) (bool, error) {
 		return false, nil
 	}
 
-	if err := os.WriteFile(configPath, []byte(newContent), 0600); err != nil { //nolint:gosec // configPath is validated
+	if err := replaceConfigYaml(configPath, []byte(newContent)); err != nil {
 		return false, fmt.Errorf("failed to write config.yaml: %w", err)
 	}
 
