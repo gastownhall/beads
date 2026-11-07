@@ -177,7 +177,7 @@ func healTrackedIgnoredCursorTable(ctx context.Context, db DBConn) (bool, error)
 		return false, nil
 	}
 	if !state.needsUntrack {
-		return resumeIgnoredCursorUntrack(ctx, db)
+		return resumeIgnoredCursorUntrack(ctx, db, state.strayScratch)
 	}
 
 	// Advisory zone. Nothing here is destructive: a partial scratch table is
@@ -211,18 +211,30 @@ func healTrackedIgnoredCursorTable(ctx context.Context, db DBConn) (bool, error)
 
 // resumeIgnoredCursorUntrack finishes a repair some earlier open started and
 // did not complete. The cursor table is not in the legacy shape — it may be
-// healthy, or missing entirely — and a scratch table survives.
+// healthy, or missing entirely — and a scratch table survives, either in the
+// working set or only as a pending deletion at HEAD.
 //
-// It deliberately does NOT trust that scratch as a source of rows unless the
-// cursor table is actually absent. The restore's union semantics exist so no
-// recorded migration version is lost across a crash, but pointed at a LIVE
-// cursor table they invert the sanctioned bad-release recovery, which is a
-// cursor ROLLBACK: the operator deletes cursor rows so a corrected migration
-// series re-applies (docs/recovery). Re-inserting exactly those versions, with
-// their old applied_at, would silently skip the corrected migrations. When the
-// cursor table is present the scratch is stale bookkeeping and the only
-// correct action is to remove it.
-func resumeIgnoredCursorUntrack(ctx context.Context, db DBConn) (bool, error) {
+// It deliberately does NOT trust that scratch as a source of rows unless it
+// is present in the working set AND the cursor table is actually absent. The
+// restore's union semantics exist so no recorded migration version is lost
+// across a crash, but pointed at a LIVE cursor table they invert the
+// sanctioned bad-release recovery, which is a cursor ROLLBACK: the operator
+// deletes cursor rows so a corrected migration series re-applies
+// (docs/recovery). Re-inserting exactly those versions, with their old
+// applied_at, would silently skip the corrected migrations. When the cursor
+// table is present the scratch is stale bookkeeping and the only correct
+// action is to remove it.
+//
+// scratchInWorkingSet is the gate's observation, passed rather than re-read:
+// a scratch that survives only at HEAD cannot be a row source at all — its
+// rows are not readable from the working set, and restoreIgnoredCursorRows'
+// column discovery would fail every writable open on "carries none of the
+// cursor columns", minting exactly the new class of un-openable database the
+// #5816 lesson forbids. Such a scratch is residue to sweep, and a missing
+// cursor is left to the ordinary migration pass, which recreates the table
+// and reruns the ignored series against existing objects; historical cursor
+// rows are not recovered from HEAD.
+func resumeIgnoredCursorUntrack(ctx context.Context, db DBConn, scratchInWorkingSet bool) (bool, error) {
 	// The operator veto is re-read here, not inherited: an operator who
 	// resolved a crashed repair by deliberately versioning the cursor table
 	// must not have stale rows pushed back into it on the next open.
@@ -242,7 +254,10 @@ func resumeIgnoredCursorUntrack(ctx context.Context, db DBConn) (bool, error) {
 	log.Printf("schema: cleaning up after an interrupted %s untrack (gastownhall/beads#4356)",
 		ignoredSource.cursorTable)
 
-	restore := !cursorPresent && ignored
+	// The working-set term is the guard the HEAD-only state forces: without
+	// it, a store whose cursor table is also missing would aim the restore
+	// at a scratch that is not there to be read.
+	restore := scratchInWorkingSet && !cursorPresent && ignored
 	if restore {
 		err = restoreIgnoredCursorRows(ctx, db)
 	} else {

@@ -14,6 +14,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // These tests cover gastownhall/beads#4356 against the real engine: a database
@@ -774,6 +775,65 @@ func TestIgnoredCursorScratchPendingDeletionIsSweptOnOpen(t *testing.T) {
 		}
 		if got := commitCount(t, ctx, conn); got != afterSweep {
 			t.Errorf("commits after a second open = %d, want %d (a healthy database must produce no commit)", got, afterSweep)
+		}
+	})
+}
+
+// TestIgnoredCursorScratchPendingDeletionWithCursorMissingSweepsOnly is the
+// same HEAD-only scratch on a store whose ignored cursor table is also gone
+// (AC-2): the open must succeed — the scratch is swept, never used as a row
+// source — and the ordinary migration pass recreates the cursor and reruns
+// the ignored series against the existing objects, leaving an unfiltered-clean
+// working set. A resume that tried to restore from a scratch that is not in
+// the working set would instead fail every writable open ("carries none of
+// the cursor columns"), the #5816 failure class.
+func TestIgnoredCursorScratchPendingDeletionWithCursorMissingSweepsOnly(t *testing.T) {
+	ctx := t.Context()
+	f := newLegacyTrackedFixture(t, "scratchnocursor")
+
+	f.withRawConn(t, func(conn *sql.Conn) {
+		commitScratchPendingDeletionAtHead(t, ctx, conn)
+		mustExecOn(t, ctx, conn, "DROP TABLE ignored_schema_migrations")
+		if tablePresent(t, ctx, conn, "ignored_schema_migrations") {
+			t.Fatal("fixture did not drop the cursor table")
+		}
+	})
+
+	f.reopenAndClose(t)
+
+	var afterFirst int
+	f.withRawConn(t, func(conn *sql.Conn) {
+		if trackedAtHead(t, ctx, conn, untrackScratchTable) {
+			t.Errorf("%s is still committed at HEAD; the tracked deletion was not swept", untrackScratchTable)
+		}
+		if tablePresent(t, ctx, conn, untrackScratchTable) {
+			t.Errorf("%s survived in the working set", untrackScratchTable)
+		}
+		if dirty := dirtyTableNames(t, ctx, conn); len(dirty) > 0 {
+			t.Errorf("working set is dirty after the reopen: %v", dirty)
+		}
+		if !tablePresent(t, ctx, conn, "ignored_schema_migrations") {
+			t.Fatal("the cursor table was not recreated by the migration pass")
+		}
+		var version int
+		if err := conn.QueryRowContext(ctx,
+			"SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations").Scan(&version); err != nil {
+			t.Fatalf("reading the recreated cursor: %v", err)
+		}
+		if version != schema.LatestIgnoredVersion() {
+			t.Errorf("recreated cursor high-water mark = %d, want %d (normal migration, not a restore)", version, schema.LatestIgnoredVersion())
+		}
+		afterFirst = commitCount(t, ctx, conn)
+	})
+
+	f.reopenAndClose(t)
+
+	f.withRawConn(t, func(conn *sql.Conn) {
+		if got := commitCount(t, ctx, conn); got != afterFirst {
+			t.Errorf("commits after a second open = %d, want %d (a healthy database must produce no commit)", got, afterFirst)
+		}
+		if dirty := dirtyTableNames(t, ctx, conn); len(dirty) > 0 {
+			t.Errorf("working set is dirty after the second open: %v", dirty)
 		}
 	})
 }

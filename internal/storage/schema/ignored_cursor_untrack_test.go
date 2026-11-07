@@ -1030,3 +1030,35 @@ func TestHealDeclinesOnAnUnreadableScratchHeadProbe(t *testing.T) {
 		t.Fatalf("unmet SQL expectations: %v", err)
 	}
 }
+
+// TestHealSweepsAHeadOnlyScratchWithoutRestoringFromIt is the guard the gate
+// change forces (AC-2): a store whose ignored cursor table is ALSO missing
+// would route restoreIgnoredCursorRows at a scratch that is not in the
+// working set, and its column discovery would fail every writable open with
+// "carries none of the cursor columns" — a brand-new class of un-openable
+// database, the one thing #5816 says a heal must never mint. The scratch is
+// swept, never sourced; the missing cursor is left for the ordinary
+// migration pass to recreate.
+func TestHealSweepsAHeadOnlyScratchWithoutRestoringFromIt(t *testing.T) {
+	db, mock := newMockDB(t)
+
+	expectHeadTableProbe(mock, "", ignoredSource.cursorTable, false)
+	expectScratchProbes(mock, "", false, true)
+	expectIgnoreResolution(mock, "", ignoredSource.cursorTable, exactlyIgnored(true))
+	expectSchemaTableExists(mock, ignoredSource.cursorTable, false)
+	// Sweep only. No CREATE TABLE ignored_schema_migrations and no INSERT
+	// from the scratch: either would surface as an unexpected statement.
+	expectIgnoredCursorScratchDrop(mock, true)
+
+	healed, err := healTrackedIgnoredCursorTable(context.Background(), db)
+	if err != nil {
+		t.Fatalf("healTrackedIgnoredCursorTable() error = %v, want nil", err)
+	}
+	if !healed {
+		t.Fatal("healTrackedIgnoredCursorTable() = false with a scratch deletion pending at HEAD and no cursor, want true")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+
+}
