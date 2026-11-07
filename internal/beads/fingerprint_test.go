@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -601,4 +602,97 @@ func TestComputeRepoIDForPath_SSHAliasesOfSameRepoAgree(t *testing.T) {
 	if repoIDForRemote(t, groups["default port"][0]) == repoIDForRemote(t, groups["explicit port"][0]) {
 		t.Error("explicit port 2222 must keep hashing differently from the default port")
 	}
+}
+
+// stubSSHResolver replaces the ssh -G lookup with a fixed alias map and
+// counts calls. Tests using it must not run in parallel.
+func stubSSHResolver(t *testing.T, hostNames map[string]string) *int {
+	t.Helper()
+	calls := 0
+	old := resolveSSHHostName
+	resolveSSHHostName = func(_ context.Context, _, host, _ string) (string, error) {
+		calls++
+		if hostName, ok := hostNames[host]; ok {
+			return hostName, nil
+		}
+		return host, nil
+	}
+	t.Cleanup(func() { resolveSSHHostName = old })
+	return &calls
+}
+
+func fingerprintForRemote(t *testing.T, remote string) RepoFingerprint {
+	t.Helper()
+	dir := t.TempDir()
+	initFingerprintGitRepo(t, dir, remote)
+	fp, err := ComputeRepoFingerprintForPath(dir)
+	if err != nil {
+		t.Fatalf("ComputeRepoFingerprintForPath(%s) error: %v", remote, err)
+	}
+	return fp
+}
+
+// A resolved alias keeps the pre-change literal-host hash as LegacyID, so a
+// database stamped by this checkout before the upgrade still matches.
+func TestComputeRepoFingerprint_AliasResolution(t *testing.T) {
+	isolateFingerprintGitEnv(t)
+	stubSSHResolver(t, map[string]string{
+		"alias-a":      "github.com",
+		"Alias-A":      "github.com",
+		"alias-dot":    "GitHub.com.",
+		"alias-ip":     "192.0.2.10",
+		"alias-scheme": "github.com",
+	})
+
+	tests := []struct {
+		remote, legacy, resolved, alias, hostName string
+	}{
+		{"git@alias-a:org/repo.git", "alias-a/org/repo", "github.com/org/repo", "alias-a", "github.com"},
+		{"Alias-A:org/repo/", "alias-a/org/repo", "github.com/org/repo", "alias-a", "github.com"},
+		{"ssh://git@alias-scheme/org/repo.git", "alias-scheme/org/repo", "github.com/org/repo", "alias-scheme", "github.com"},
+		{"git+ssh://alias-a:2222/org/repo.git", "alias-a:2222/org/repo", "github.com:2222/org/repo", "alias-a", "github.com"},
+		{"ssh+git://git@alias-a:22/org/repo", "alias-a/org/repo", "github.com/org/repo", "alias-a", "github.com"},
+		{"git@alias-dot:org/repo.git", "alias-dot/org/repo", "github.com/org/repo", "alias-dot", "github.com"},
+		{"git@alias-ip:org/repo.git", "alias-ip/org/repo", "192.0.2.10/org/repo", "alias-ip", "192.0.2.10"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.remote, func(t *testing.T) {
+			fp := fingerprintForRemote(t, tt.remote)
+			want := RepoFingerprint{
+				ID:          hashRepoIdentity(tt.resolved),
+				Source:      RepoIDSourceRemote,
+				LegacyID:    hashRepoIdentity(tt.legacy),
+				SSHAlias:    tt.alias,
+				SSHHostName: tt.hostName,
+			}
+			if fp != want {
+				t.Fatalf("fingerprint = %+v, want %+v", fp, want)
+			}
+			if !fp.AliasResolved() {
+				t.Fatal("AliasResolved() = false, want true")
+			}
+			if !fp.Matches(fp.ID) || !fp.Matches(fp.LegacyID) {
+				t.Fatalf("Matches must accept both the resolved and the legacy id: %+v", fp)
+			}
+			if fp.Matches("") || fp.Matches(hashRepoIdentity("other/repo")) {
+				t.Fatal("Matches must reject empty and unrelated ids")
+			}
+		})
+	}
+
+	t.Run("path fallback is unchanged", func(t *testing.T) {
+		dir := t.TempDir()
+		initFingerprintGitRepo(t, dir, "")
+		fp, err := ComputeRepoFingerprintForPath(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := RepoFingerprint{ID: hashRepoIdentity(normalizedRepoPath(dir)), Source: RepoIDSourcePath}
+		if fp != want {
+			t.Fatalf("fingerprint = %+v, want %+v", fp, want)
+		}
+		if fp.Matches("") || !fp.Matches(fp.ID) {
+			t.Fatalf("Matches on an unresolved fingerprint must accept only ID: %+v", fp)
+		}
+	})
 }

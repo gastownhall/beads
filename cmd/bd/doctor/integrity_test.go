@@ -1,8 +1,10 @@
 package doctor
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -224,14 +226,33 @@ func TestClassifyRepoFingerprint(t *testing.T) {
 	}
 
 	t.Run("match is OK regardless of source", func(t *testing.T) {
-		check := classifyRepoFingerprint("aaaa1111bbbb2222", "aaaa1111bbbb2222", beads.RepoIDSourcePath)
+		check := classifyRepoFingerprint("aaaa1111bbbb2222", beads.RepoFingerprint{ID: "aaaa1111bbbb2222", Source: beads.RepoIDSourcePath})
 		if check.Status != StatusOK {
 			t.Fatalf("Status = %q, want %q (message=%q)", check.Status, StatusOK, check.Message)
 		}
 	})
 
+	// GH#5990: a database stamped before the upgrade holds this checkout's
+	// literal-alias hash; after alias resolution it is the LegacyID.
+	t.Run("legacy alias id of this checkout is OK", func(t *testing.T) {
+		current := beads.RepoFingerprint{
+			ID:          "cccc3333dddd4444",
+			Source:      beads.RepoIDSourceRemote,
+			LegacyID:    "aaaa1111bbbb2222",
+			SSHAlias:    "alias-a",
+			SSHHostName: "github.com",
+		}
+		check := classifyRepoFingerprint("aaaa1111bbbb2222", current)
+		if check.Status != StatusOK {
+			t.Fatalf("Status = %q, want %q (message=%q)", check.Status, StatusOK, check.Message)
+		}
+		if check.Message != "Verified (aaaa1111)" {
+			t.Fatalf("Message = %q, want the matched legacy id shown", check.Message)
+		}
+	})
+
 	t.Run("mismatch with remote-derived current id is an error", func(t *testing.T) {
-		check := classifyRepoFingerprint("aaaa1111bbbb2222", "cccc3333dddd4444", beads.RepoIDSourceRemote)
+		check := classifyRepoFingerprint("aaaa1111bbbb2222", beads.RepoFingerprint{ID: "cccc3333dddd4444", Source: beads.RepoIDSourceRemote})
 		if check.Status != StatusError {
 			t.Fatalf("Status = %q, want %q (message=%q)", check.Status, StatusError, check.Message)
 		}
@@ -284,7 +305,7 @@ func TestClassifyRepoFingerprint(t *testing.T) {
 	})
 
 	t.Run("mismatch with path-fallback current id warns and advises leaving it", func(t *testing.T) {
-		check := classifyRepoFingerprint("aaaa1111bbbb2222", "cccc3333dddd4444", beads.RepoIDSourcePath)
+		check := classifyRepoFingerprint("aaaa1111bbbb2222", beads.RepoFingerprint{ID: "cccc3333dddd4444", Source: beads.RepoIDSourcePath})
 		if check.Status != StatusWarning {
 			t.Fatalf("Status = %q, want %q (message=%q)", check.Status, StatusWarning, check.Message)
 		}
@@ -296,4 +317,100 @@ func TestClassifyRepoFingerprint(t *testing.T) {
 		}
 		assertNoDestructiveAdvice(t, check)
 	})
+}
+
+// useFakeAliasSSH isolates git and SSH configuration and puts first on PATH an
+// ssh whose config maps alias-a and alias-b to HostName github.com, so alias
+// resolution is deterministic without the host's real ssh configuration.
+func useFakeAliasSSH(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake ssh is a shell script")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_SSH", "")
+	t.Setenv("GIT_SSH_COMMAND", "")
+	t.Setenv("GIT_SSH_VARIANT", "")
+
+	sshDir := t.TempDir()
+	script := `#!/bin/sh
+for dest; do :; done
+case "${dest#*@}" in
+alias-a|alias-b) echo "hostname github.com" ;;
+*) echo "hostname ${dest#*@}" ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(sshDir, "ssh"), []byte(script), 0o700); err != nil { // #nosec G306 -- test executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", sshDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// newFingerprintClone creates a git checkout whose origin is remote, with a
+// repo-local hooks directory so no host hook runs.
+func newFingerprintClone(t *testing.T, remote string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"config", "core.hooksPath", t.TempDir()},
+		{"remote", "add", "origin", remote},
+	} {
+		cmd := gitCommand(args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	return dir
+}
+
+// fakeRepoMetadataStore stands in for a Dolt store in fingerprint tests. It
+// records writes so tests can assert doctor never rewrites shared metadata.
+type fakeRepoMetadataStore struct {
+	values map[string]string
+	writes []string
+}
+
+func (f *fakeRepoMetadataStore) GetMetadata(_ context.Context, key string) (string, error) {
+	return f.values[key], nil
+}
+
+func (f *fakeRepoMetadataStore) SetMetadata(_ context.Context, key, value string) error {
+	f.writes = append(f.writes, key)
+	f.values[key] = value
+	return nil
+}
+
+// TestCheckRepoFingerprint_LegacyAliasHashMatches covers the GH#5990
+// upgrade path at the store seam: a ledger storing a checkout's
+// pre-resolution alias hash keeps verifying once that checkout resolves the
+// alias, and the read-only check never rewrites the stored metadata.
+func TestCheckRepoFingerprint_LegacyAliasHashMatches(t *testing.T) {
+	useFakeAliasSSH(t)
+	repo := newFingerprintClone(t, "git@alias-a:org/repo.git")
+
+	fp, err := beads.ComputeRepoFingerprintForPath(repo)
+	if err != nil {
+		t.Fatalf("ComputeRepoFingerprintForPath: %v", err)
+	}
+	if !fp.AliasResolved() || fp.LegacyID == "" || fp.LegacyID == fp.ID {
+		t.Fatalf("test precondition: alias-a must resolve to a new id, got %+v", fp)
+	}
+
+	store := &fakeRepoMetadataStore{values: map[string]string{"repo_id": fp.LegacyID}}
+	check := checkRepoFingerprintWithStore(store, repo)
+	if check.Status != StatusOK {
+		t.Fatalf("Status = %q, want %q (message=%q, detail=%q)", check.Status, StatusOK, check.Message, check.Detail)
+	}
+	if want := "Verified (" + truncateID(fp.LegacyID) + ")"; check.Message != want {
+		t.Fatalf("Message = %q, want %q", check.Message, want)
+	}
+	if len(store.writes) != 0 {
+		t.Fatalf("doctor read rewrote metadata keys %v; the check must not write", store.writes)
+	}
+	if got := store.values["repo_id"]; got != fp.LegacyID {
+		t.Fatalf("stored repo_id changed from %s to %s", fp.LegacyID, got)
+	}
 }
