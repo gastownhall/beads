@@ -6,9 +6,9 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
 dependencies = [
-    "fastmcp==4.1.2",
-    "pydantic==2.13.5",
-    "pydantic-settings==2.15.0",
+    "fastmcp==4.1.6",
+    "pydantic==2.14.2",
+    "pydantic-settings==2.16.2",
 ]
 authors = [
     {name = "Beads Contributors"}
