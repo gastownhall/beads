@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
+
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -29,6 +31,57 @@ func openPeerStore(t *testing.T, ctx context.Context, store *DoltStore) *DoltSto
 	t.Cleanup(func() { _ = peer.Close() })
 	return peer
 }
+
+// TestWriteTxRetryScheduleKeepsRetryingAcrossItsBudget pins the replay
+// schedule withRetryTx uses for a writer that keeps losing commit-time
+// conflicts. Uncapped, the exponential waits stretch to several seconds each
+// and a loser gets at most 16 attempts in the server budget (14-15 typically)
+// — measured against five concurrent journaled writers, 1-5% of
+// `bd create --parent` runs exhausted it. Capping each wait at a second keeps
+// attempts arriving through the whole budget: even with every wait jittered to
+// its longest, the capped schedule makes 18.
+func TestWriteTxRetryScheduleKeepsRetryingAcrossItsBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		serverMode bool
+		budget     time.Duration
+		minTries   int
+	}{
+		{name: "server", serverMode: true, budget: 15 * time.Second, minTries: 17},
+		{name: "embedded", serverMode: false, budget: 5 * time.Second, minTries: 8},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for run := 0; run < 20; run++ {
+				clock := &steppingClock{now: time.Unix(0, 0)}
+				bo := newWriteTxRetryBackOff(tc.serverMode)
+				bo.Clock = clock
+				bo.Reset()
+				tries := 1
+				for {
+					next := bo.NextBackOff()
+					if next == backoff.Stop {
+						break
+					}
+					if next > writeTxRetryMaxInterval*3/2 {
+						t.Fatalf("wait %v exceeds the jittered cap of %v", next, writeTxRetryMaxInterval*3/2)
+					}
+					clock.now = clock.now.Add(next)
+					tries++
+				}
+				if tries < tc.minTries {
+					t.Fatalf("a writer that keeps losing gets %d attempts in %v, want at least %d", tries, tc.budget, tc.minTries)
+				}
+				if elapsed := clock.now.Sub(time.Unix(0, 0)); elapsed > tc.budget {
+					t.Fatalf("schedule ran %v, past its %v budget", elapsed, tc.budget)
+				}
+			}
+		})
+	}
+}
+
+type steppingClock struct{ now time.Time }
+
+func (c *steppingClock) Now() time.Time { return c.now }
 
 // TestConcurrentCounterModeCreatesNeverShareAnID: in counter mode the ID is
 // minted from the issue_counter row inside the create transaction, so two

@@ -6,6 +6,7 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain/db"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	publicops "github.com/steveyegge/beads/issueops"
@@ -23,7 +24,9 @@ type TxProvider interface {
 }
 
 const (
-	txRetryInitialInterval = 25 * time.Millisecond
+	// txRetryInitialInterval is the first wait of the conflict-replay
+	// schedule every whole-transaction replay loop shares.
+	txRetryInitialInterval = storage.TxConflictReplayInitialInterval
 	// txCloseTimeout bounds the detached per-attempt close below.
 	txCloseTimeout = 5 * time.Second
 )
@@ -31,8 +34,10 @@ const (
 // DefaultTxRetryMaxElapsed is how long the retry loop keeps redoing an attempt
 // that loses Dolt's commit-time merge before giving up. Exported so callers
 // that pass their own budget to RunTxResultWithin can derive it from this one
-// instead of restating the number and drifting from it.
-const DefaultTxRetryMaxElapsed = 15 * time.Second
+// instead of restating the number and drifting from it. It IS
+// storage.TxConflictReplayMaxElapsed: the proxied routes replay within the
+// same budget as the direct routes' storage.RunReplayableTransaction.
+const DefaultTxRetryMaxElapsed = storage.TxConflictReplayMaxElapsed
 
 // closeAttempt rolls an attempt's unit of work back on a context that outlives
 // the caller's.

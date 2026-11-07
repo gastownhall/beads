@@ -262,6 +262,32 @@ func TestLostCommitResponseIsNeverReplayed(t *testing.T) {
 	for _, journal := range []bool{false, true} {
 		via.SetEventsJournalEnabled(journal)
 
+		t.Run(fmt.Sprintf("RunReplayableTransaction/journal=%v", journal), func(t *testing.T) {
+			title := fmt.Sprintf("replayable-lost-commit-%v", journal)
+			var calls atomic.Int32
+			proxy.armed.Store(true)
+			err := storage.RunReplayableTransaction(ctx, via, "bd: lost commit", func(tx storage.Transaction) error {
+				calls.Add(1)
+				return tx.CreateIssue(ctx, &types.Issue{Title: title, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "tester")
+			})
+			if proxy.tripped.Load() == 0 {
+				t.Fatalf("proxy never saw the COMMIT")
+			}
+			proxy.tripped.Store(0)
+			if err == nil {
+				t.Fatalf("lost commit response reported success")
+			}
+			if !errors.Is(err, ErrCommitIndeterminate) || errors.Is(err, storage.ErrTransactionConflict) {
+				t.Fatalf("err = %v; want indeterminate and not a replayable conflict", err)
+			}
+			if c := calls.Load(); c != 1 {
+				t.Fatalf("callback ran %d times; a lost commit response must never be replayed", c)
+			}
+			if n := countByTitle(t, ctx, base, "issues", title); n != 1 {
+				t.Fatalf("rows = %d, want exactly 1 (the server committed it once)", n)
+			}
+		})
+
 		t.Run(fmt.Sprintf("withRetryTx-CreateIssue/journal=%v", journal), func(t *testing.T) {
 			title := fmt.Sprintf("retrytx-lost-commit-%v", journal)
 			proxy.armed.Store(true)
@@ -300,6 +326,138 @@ func TestLostCommitResponseIsNeverReplayed(t *testing.T) {
 				t.Fatalf("wisp = %s/%s; the server committed the claim once", got.Assignee, got.Status)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// R4/R5: journal OFF, the split regular + ignored (wisp) transactions of #207.
+// ---------------------------------------------------------------------------
+
+// R4: the REGULAR commit loses. Both planes must roll back, and the replay must
+// write each plane exactly once (no wisp from the lost attempt survives).
+func TestSplitTxRegularConflictRollsBackBothPlanesAndReplaysOnce(t *testing.T) {
+	base, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := concurrentTestContext(t)
+	defer cancel()
+	peer := openPeerStore(t, ctx, base)
+	if err := base.CreateIssue(ctx, &types.Issue{ID: "test-shared", Title: "orig", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "seed"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	prepared := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
+	release := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
+	done := [2]chan error{make(chan error, 1), make(chan error, 1)}
+	var loserCalls atomic.Int32
+	go func() {
+		done[0] <- peer.RunInTransaction(ctx, "winner", func(tx storage.Transaction) error {
+			if err := tx.UpdateIssue(ctx, "test-shared", map[string]interface{}{"title": "winner"}, "w"); err != nil {
+				return err
+			}
+			close(prepared[0])
+			return waitForTransactionRelease(ctx, release[0])
+		})
+	}()
+	go func() {
+		done[1] <- storage.RunReplayableTransaction(ctx, base, "loser", func(tx storage.Transaction) error {
+			attempt := loserCalls.Add(1)
+			if err := tx.UpdateIssue(ctx, "test-shared", map[string]interface{}{"title": "loser"}, "l"); err != nil {
+				return err
+			}
+			if err := tx.CreateIssue(ctx, &types.Issue{Title: "split-wisp", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true}, "l"); err != nil {
+				return err
+			}
+			if attempt == 1 {
+				close(prepared[1])
+				return waitForTransactionRelease(ctx, release[1])
+			}
+			return nil
+		})
+	}()
+	waitForTransactionPrepared(t, ctx, prepared[0], "winner")
+	waitForTransactionPrepared(t, ctx, prepared[1], "loser")
+	close(release[0])
+	if err := <-done[0]; err != nil {
+		t.Fatalf("winner: %v", err)
+	}
+	close(release[1])
+	if err := <-done[1]; err != nil {
+		t.Fatalf("loser: %v", err)
+	}
+	if c := loserCalls.Load(); c != 2 {
+		t.Fatalf("loser attempts = %d, want 2", c)
+	}
+	if n := countByTitle(t, ctx, base, "wisps", "split-wisp"); n != 1 {
+		t.Fatalf("wisp rows = %d, want 1: the lost attempt's ignored-plane write leaked", n)
+	}
+	got, err := base.GetIssue(ctx, "test-shared")
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got.Title != "loser" {
+		t.Fatalf("title = %q, want the replayed loser's", got.Title)
+	}
+}
+
+// R5: the IGNORED commit loses after the regular commit landed. That outcome
+// is partial and must be indeterminate, never a replayable conflict.
+func TestSplitTxIgnoredConflictAfterRegularCommitIsNotReplayed(t *testing.T) {
+	base, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := concurrentTestContext(t)
+	defer cancel()
+	peer := openPeerStore(t, ctx, base)
+	if err := base.CreateIssue(ctx, &types.Issue{ID: "test-wisp-shared", Title: "orig", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true}, "seed"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	prepared := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
+	release := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
+	done := [2]chan error{make(chan error, 1), make(chan error, 1)}
+	var loserCalls atomic.Int32
+	go func() {
+		done[0] <- peer.RunInTransaction(ctx, "winner", func(tx storage.Transaction) error {
+			if err := tx.UpdateIssue(ctx, "test-wisp-shared", map[string]interface{}{"title": "winner"}, "w"); err != nil {
+				return err
+			}
+			close(prepared[0])
+			return waitForTransactionRelease(ctx, release[0])
+		})
+	}()
+	go func() {
+		done[1] <- storage.RunReplayableTransaction(ctx, base, "loser", func(tx storage.Transaction) error {
+			attempt := loserCalls.Add(1)
+			if err := tx.CreateIssue(ctx, &types.Issue{Title: "split-durable", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "l"); err != nil {
+				return err
+			}
+			if err := tx.UpdateIssue(ctx, "test-wisp-shared", map[string]interface{}{"title": "loser"}, "l"); err != nil {
+				return err
+			}
+			if attempt == 1 {
+				close(prepared[1])
+				return waitForTransactionRelease(ctx, release[1])
+			}
+			return nil
+		})
+	}()
+	waitForTransactionPrepared(t, ctx, prepared[0], "winner")
+	waitForTransactionPrepared(t, ctx, prepared[1], "loser")
+	close(release[0])
+	if err := <-done[0]; err != nil {
+		t.Fatalf("winner: %v", err)
+	}
+	close(release[1])
+	lerr := <-done[1]
+	t.Logf("loser err: %v", lerr)
+	if lerr == nil {
+		t.Fatalf("loser succeeded; the ignored-plane overlap did not conflict")
+	}
+	if errors.Is(lerr, storage.ErrTransactionConflict) || !errors.Is(lerr, ErrCommitIndeterminate) {
+		t.Fatalf("err = %v; want indeterminate, not a replayable conflict", lerr)
+	}
+	if c := loserCalls.Load(); c != 1 {
+		t.Fatalf("loser attempts = %d, want 1 (no replay after the regular commit landed)", c)
+	}
+	if n := countByTitle(t, ctx, base, "issues", "split-durable"); n != 1 {
+		t.Fatalf("durable rows = %d, want 1", n)
 	}
 }
 

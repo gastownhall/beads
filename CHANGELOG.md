@@ -685,6 +685,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A Dolt sql-server transaction that loses a commit-time write conflict
+  now says so, and a caller whose work is safe to repeat can replay it.**
+  `RunInTransaction` marks a failure that proves the server rolled the whole
+  transaction back (MySQL 1213 serialization failure or deadlock, which is how
+  Dolt's commit-time merge reports a lost race, and 1205 lock-wait timeout) as
+  `storage.ErrTransactionConflict`, keeping its message. It never marks 1105
+  or a commit whose outcome is indeterminate. The new
+  `storage.RunReplayableTransaction` replays such a transaction from a fresh
+  `BEGIN`, within the same 15s budget the proxied routes' unit-of-work loop
+  uses (one constant, `storage.TxConflictReplayMaxElapsed`), and counts each
+  replay on `bd.tx_replays_total{outcome=replayed|exhausted}`. The direct-route
+  commands adopt it in a follow-up. Waits between `withRetryTx` attempts, and
+  between replays, are now capped at 1s: a writer that keeps losing makes
+  about 20 attempts in the 15s budget instead of about 14. This also changes
+  `bd serve`'s retry cadence for served writes on a Dolt backend.
+
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add
