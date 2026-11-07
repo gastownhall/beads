@@ -73,6 +73,16 @@ Examples:
 			return HandleErrorRespectJSON("--from and --to must be different repositories")
 		}
 
+		// Refused here, before the IDs file is read and before any store
+		// query, plan, confirmation or write: pflag parses `--label ""` to an
+		// empty slice, which findCandidateIssues would read as "no label
+		// filter" and widen the candidate set to every matching issue
+		// (GH#6636). Returned directly, not through executeMigrateIssues,
+		// whose wrapper would print it a second time.
+		if err := rejectEmptyLabelFilter(cmd, "label", labels); err != nil {
+			return err
+		}
+
 		if idsFile != "" {
 			fileIDs, err := loadIDsFromFile(idsFile)
 			if err != nil {
