@@ -89,9 +89,13 @@ func TestPoolGaugesReportEveryOpenStore(t *testing.T) {
 	}
 
 	// The next open drops the closed pools again.
-	pools.track(openUnconnectedDB(t, 7))
+	untrackThird := pools.track(openUnconnectedDB(t, 7))
 	if got, _ := poolMaxOpen(t, reader); got != 7 {
 		t.Fatalf("pool_max_open after a new open = %d, want 7", got)
+	}
+	untrackThird()
+	if got, _ := poolMaxOpen(t, reader); got != 7 {
+		t.Fatalf("pool_max_open after the third store closed = %d, want 7 (the open dropped the earlier closed pools)", got)
 	}
 }
 

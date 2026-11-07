@@ -146,6 +146,8 @@ present, the storage decorator is not in the chain — check
 | `bd_db_retry_count_total` | Counter | — | SQL retries in server mode |
 | `bd_db_lock_wait_ms` | Histogram | `dolt_lock_exclusive` | Wait time to acquire database locks |
 
+The connection-pool gauges (`bd_db_pool_open`, `bd_db_pool_in_use`, `bd_db_pool_idle`, `bd_db_pool_max_open`) sum the pools of the stores open in the process. With no store open they report the last-known values of the stores that closed since the last open, not live ones; a short command closes its store before its final export.
+
 ### Issues (`bd_issue_*`)
 
 | Metric | Type | Attributes | Description |
