@@ -1208,6 +1208,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd config set` and `bd config unset` now replace `config.yaml` in one
+  step (temp file in the same directory, fsync, rename) instead of truncating
+  and rewriting it in place. A process reading the file mid-write, such as a
+  running `bd serve` that re-reads it on a timer, could see an empty or
+  partial file, which parses as "key absent" and resolves to the key's
+  default. A symlinked `config.yaml` is written through to its target, and the
+  file keeps its own permissions. The user-global `config.yaml` unset path
+  gets the same treatment.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In
