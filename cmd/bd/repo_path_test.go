@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // repoPathTestWorkspace creates a primary workspace (with a config.yaml the
@@ -377,4 +379,149 @@ func TestRepoPathAddDuplicateSpellings(t *testing.T) {
 	if len(entries) != 2 || entries[0] != want || entries[1] != trailing {
 		t.Fatalf("repos.additional = %v, want [%s %s]", entries, want, trailing)
 	}
+}
+
+// recordingRepoStore records the repo remove command's destructive calls so
+// tests can prove which source key was deleted and that failed validation
+// made no calls at all.
+type recordingRepoStore struct {
+	storage.DoltStorage
+	deleted []string
+	cleared []string
+}
+
+func (s *recordingRepoStore) DeleteIssuesBySourceRepo(_ context.Context, sourceRepo string) (int, error) {
+	s.deleted = append(s.deleted, sourceRepo)
+	return 2, nil
+}
+
+func (s *recordingRepoStore) ClearRepoMtime(_ context.Context, repoPath string) error {
+	s.cleared = append(s.cleared, repoPath)
+	return nil
+}
+
+func useRecordingRepoStore(t *testing.T) *recordingRepoStore {
+	t.Helper()
+	saveAndRestoreGlobals(t)
+	fake := &recordingRepoStore{}
+	storeMutex.Lock()
+	store = fake
+	storeActive = true
+	storeMutex.Unlock()
+	return fake
+}
+
+func TestRepoPathRemoval(t *testing.T) {
+	t.Run("relative argument removes the absolute entry add wrote", func(t *testing.T) {
+		_, primary, other := repoPathTestWorkspace(t)
+		stored := filepath.Clean(other)
+		writeRepoConfigEntries(t, primary, stored)
+		fake := useRecordingRepoStore(t)
+		t.Chdir(primary)
+
+		out, err := captureRepoCommandOutput(t, func() error {
+			return repoRemoveCmd.RunE(repoRemoveCmd, []string{"../other"})
+		})
+		if err != nil {
+			t.Fatalf("repo remove: %v", err)
+		}
+		if len(fake.deleted) != 1 || fake.deleted[0] != stored {
+			t.Fatalf("deleted source keys %v, want exactly [%s]", fake.deleted, stored)
+		}
+		// The cache key must be the one bd repo sync records (abs of the
+		// tilde-expanded entry), so a later re-add imports again.
+		syncKey, err := filepath.Abs(expandRepoTilde(stored))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(fake.cleared) != 1 || fake.cleared[0] != syncKey {
+			t.Fatalf("cleared mtime keys %v, want exactly [%s]", fake.cleared, syncKey)
+		}
+		if entries := readRepoConfigEntries(t, primary); len(entries) != 0 {
+			t.Fatalf("repos.additional = %v, want empty", entries)
+		}
+		if !strings.Contains(out, "Removed repository: "+stored) {
+			t.Fatalf("output %q does not report the stored entry %q", out, stored)
+		}
+	})
+
+	t.Run("legacy relative entry is removed by exact match from another cwd", func(t *testing.T) {
+		root, primary, _ := repoPathTestWorkspace(t)
+		writeRepoConfigEntries(t, primary, "../other")
+		fake := useRecordingRepoStore(t)
+		elsewhere := filepath.Join(root, "elsewhere")
+		if err := os.MkdirAll(elsewhere, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(elsewhere)
+
+		out, err := captureRepoCommandOutput(t, func() error {
+			return repoRemoveCmd.RunE(repoRemoveCmd, []string{"../other"})
+		})
+		if err != nil {
+			t.Fatalf("repo remove: %v", err)
+		}
+		if len(fake.deleted) != 1 || fake.deleted[0] != "../other" {
+			t.Fatalf("deleted source keys %v, want exactly [../other]", fake.deleted)
+		}
+		if len(fake.cleared) != 1 || fake.cleared[0] != "../other" {
+			t.Fatalf("cleared mtime keys %v, want exactly [../other]", fake.cleared)
+		}
+		if entries := readRepoConfigEntries(t, primary); len(entries) != 0 {
+			t.Fatalf("repos.additional = %v, want empty", entries)
+		}
+		if !strings.Contains(out, "Removed repository: ../other") {
+			t.Fatalf("output %q does not report the stored entry", out)
+		}
+	})
+
+	t.Run("exact stored spelling wins over the canonical match", func(t *testing.T) {
+		_, primary, other := repoPathTestWorkspace(t)
+		stored := filepath.Clean(other)
+		writeRepoConfigEntries(t, primary, "../other", stored)
+		fake := useRecordingRepoStore(t)
+		t.Chdir(primary)
+
+		if _, err := captureRepoCommandOutput(t, func() error {
+			return repoRemoveCmd.RunE(repoRemoveCmd, []string{"../other"})
+		}); err != nil {
+			t.Fatalf("repo remove: %v", err)
+		}
+		if len(fake.deleted) != 1 || fake.deleted[0] != "../other" {
+			t.Fatalf("deleted source keys %v, want the exact entry [../other]", fake.deleted)
+		}
+		entries := readRepoConfigEntries(t, primary)
+		if len(entries) != 1 || entries[0] != stored {
+			t.Fatalf("repos.additional = %v, want the absolute entry to remain", entries)
+		}
+	})
+
+	t.Run("remove reports the stored entry in JSON", func(t *testing.T) {
+		_, primary, other := repoPathTestWorkspace(t)
+		stored := filepath.Clean(other)
+		writeRepoConfigEntries(t, primary, stored)
+		useRecordingRepoStore(t)
+		t.Chdir(primary)
+		oldJSON := jsonOutput
+		jsonOutput = true
+		t.Cleanup(func() { jsonOutput = oldJSON })
+
+		out, err := captureRepoCommandOutput(t, func() error {
+			return repoRemoveCmd.RunE(repoRemoveCmd, []string{"../other"})
+		})
+		if err != nil {
+			t.Fatalf("repo remove: %v", err)
+		}
+		var result struct {
+			Removed       bool   `json:"removed"`
+			Path          string `json:"path"`
+			IssuesDeleted int    `json:"issues_deleted"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &result); err != nil {
+			t.Fatalf("parse json output %q: %v", out, err)
+		}
+		if !result.Removed || result.Path != stored || result.IssuesDeleted != 2 {
+			t.Fatalf("json output = %+v, want removed path %s with 2 issues deleted", result, stored)
+		}
+	})
 }

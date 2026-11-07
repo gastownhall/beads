@@ -119,8 +119,12 @@ var repoRemoveCmd = &cobra.Command{
 	Short: "Remove a repository from sync configuration",
 	Long: `Remove a repository path from the repos.additional list in config.yaml.
 
-The path must exactly match what was added (e.g., if you added "~/foo",
-you must remove "~/foo", not "/home/user/foo").
+An argument that exactly matches a configured entry removes that entry,
+so entries written by older versions — including relative ones — stay
+removable from any directory. Otherwise a relative argument is resolved
+against the current directory the way bd repo add resolves it, and the
+absolute entry it names is removed. Nothing is deleted unless a
+configured entry matches.
 
 This command also removes any previously-hydrated issues from the database
 that came from the removed repository.`,
@@ -138,36 +142,52 @@ that came from the removed repository.`,
 			}
 		}()
 
-		repoPath := args[0]
+		repoArg := args[0]
 
 		if err := ensureDirectMode("repo remove requires direct database access"); err != nil {
 			return HandleError("%v", err)
 		}
 
-		ctx := rootCtx
-
-		deletedCount, err := store.DeleteIssuesBySourceRepo(ctx, repoPath)
-		if err != nil {
-			return HandleError("failed to delete issues from repo: %v", err)
-		}
-
-		if err := store.ClearRepoMtime(ctx, repoPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to clear mtime cache: %v\n", err)
-		}
-
+		// Find the configured entry before touching the database or the
+		// config: an argument that matches nothing must delete no issue and
+		// clear no mtime row (bd-59llyl).
 		configPath, err := config.FindConfigYAMLPath()
 		if err != nil {
 			return HandleError("failed to find config.yaml: %v", err)
 		}
 
-		if err := config.RemoveRepo(configPath, repoPath); err != nil {
+		repos, err := config.ListRepos(configPath)
+		if err != nil {
+			return HandleError("failed to load repo config: %v", err)
+		}
+
+		storedPath := findConfiguredRepoEntry(repos.Additional, repoArg)
+		if storedPath == "" {
+			return HandleError("repository not found: %s", repoArg)
+		}
+
+		ctx := rootCtx
+
+		// Every consumer — deletion, mtime cache, config, remote eviction
+		// and output — works on the stored entry, so the source key remove
+		// deletes is the key bd repo sync recorded.
+		deletedCount, err := store.DeleteIssuesBySourceRepo(ctx, storedPath)
+		if err != nil {
+			return HandleError("failed to delete issues from repo: %v", err)
+		}
+
+		if err := store.ClearRepoMtime(ctx, storedPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to clear mtime cache: %v\n", err)
+		}
+
+		if err := config.RemoveRepo(configPath, storedPath); err != nil {
 			return HandleError("failed to remove repository: %v", err)
 		}
 
 		// Evict remote cache if applicable
-		if remotecache.IsRemoteURL(repoPath) {
+		if remotecache.IsRemoteURL(storedPath) {
 			if cache, err := remotecache.DefaultCache(); err == nil {
-				_ = cache.Evict(repoPath)
+				_ = cache.Evict(storedPath)
 			}
 		}
 
@@ -176,13 +196,13 @@ that came from the removed repository.`,
 		if jsonOutput {
 			result := map[string]interface{}{
 				"removed":        true,
-				"path":           repoPath,
+				"path":           storedPath,
 				"issues_deleted": deletedCount,
 			}
 			return json.NewEncoder(os.Stdout).Encode(result)
 		}
 
-		fmt.Printf("Removed repository: %s\n", repoPath)
+		fmt.Printf("Removed repository: %s\n", storedPath)
 		if deletedCount > 0 {
 			fmt.Printf("Deleted %d issue(s) from the database\n", deletedCount)
 		}
@@ -462,6 +482,31 @@ func normalizeRepoPathForStorage(arg string) (string, error) {
 		return arg, nil
 	}
 	return filepath.Abs(arg)
+}
+
+// findConfiguredRepoEntry returns the configured repos.additional entry that
+// repoArg removes, or "" when none matches. An exact string match wins, so
+// entries written by older versions — including relative ones — stay
+// removable from any directory; otherwise repoArg is resolved the way
+// `bd repo add` resolves it and matched against the stored entries, so a
+// relative argument still finds the absolute entry add wrote from that
+// directory.
+func findConfiguredRepoEntry(entries []string, repoArg string) string {
+	for _, entry := range entries {
+		if entry == repoArg {
+			return entry
+		}
+	}
+	normalized, err := normalizeRepoPathForStorage(repoArg)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		if entry == normalized {
+			return entry
+		}
+	}
+	return ""
 }
 
 // parseIssuesFromJSONL reads and parses issues from a JSONL file.
