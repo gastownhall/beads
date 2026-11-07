@@ -610,6 +610,10 @@ func TestHealSweepsAScratchPendingDeletionAtHead(t *testing.T) {
 		cursorPresent bool
 	}{
 		{name: "cursor present", ignored: true, cursorPresent: true},
+		// The scratch is not in the working set, so it is no row source:
+		// restoring from it would fail every writable open on a table that
+		// is not there. Normal migration recreates the missing cursor.
+		{name: "cursor absent", ignored: true, cursorPresent: false},
 		// The operator veto suppresses any restore on its own; the sweep is
 		// bd's own cleanup and still runs.
 		{name: "operator veto", ignored: false, cursorPresent: false},

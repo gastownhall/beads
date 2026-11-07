@@ -171,7 +171,7 @@ func healTrackedIgnoredCursorTable(ctx context.Context, db DBConn) (bool, error)
 		return false, nil
 	}
 	if !state.needsUntrack {
-		return resumeIgnoredCursorUntrack(ctx, db)
+		return resumeIgnoredCursorUntrack(ctx, db, state.strayScratch)
 	}
 
 	// Advisory zone. Nothing here is destructive: a partial scratch table is
@@ -205,7 +205,15 @@ func healTrackedIgnoredCursorTable(ctx context.Context, db DBConn) (bool, error)
 
 // resumeIgnoredCursorUntrack finishes a repair some earlier open started and
 // did not complete. The cursor table is not in the legacy shape — it may be
-// healthy, or missing entirely — and a scratch table survives.
+// healthy, or missing entirely — and a scratch table survives, in the working
+// set (scratchInWorkingSet) or only as a deletion still pending against HEAD.
+//
+// Only a working-set scratch is ever a row source. One that exists only at
+// HEAD is swept, never restored from: restoreIgnoredCursorRows reads the
+// working set and would fail every writable open on a table that is not
+// there. A cursor table missing alongside it is then left to the ordinary
+// migration pass that follows this heal, which recreates it and re-runs the
+// ignored series against the existing objects.
 //
 // It deliberately does NOT trust that scratch as a source of rows unless the
 // cursor table is actually absent. The restore's union semantics exist so no
@@ -216,7 +224,7 @@ func healTrackedIgnoredCursorTable(ctx context.Context, db DBConn) (bool, error)
 // their old applied_at, would silently skip the corrected migrations. When the
 // cursor table is present the scratch is stale bookkeeping and the only
 // correct action is to remove it.
-func resumeIgnoredCursorUntrack(ctx context.Context, db DBConn) (bool, error) {
+func resumeIgnoredCursorUntrack(ctx context.Context, db DBConn, scratchInWorkingSet bool) (bool, error) {
 	// The operator veto is re-read here, not inherited: an operator who
 	// resolved a crashed repair by deliberately versioning the cursor table
 	// must not have stale rows pushed back into it on the next open.
@@ -236,7 +244,7 @@ func resumeIgnoredCursorUntrack(ctx context.Context, db DBConn) (bool, error) {
 	log.Printf("schema: cleaning up after an interrupted %s untrack (gastownhall/beads#4356)",
 		ignoredSource.cursorTable)
 
-	restore := !cursorPresent && ignored
+	restore := scratchInWorkingSet && !cursorPresent && ignored
 	if restore {
 		err = restoreIgnoredCursorRows(ctx, db)
 	} else {

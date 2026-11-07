@@ -294,6 +294,7 @@
 40 13 TestEmbeddedPre0058RepairMarchesDriftedWispDependenciesToFinalShape
 40 13 TestEmbeddedRelationsDirectionSelectsTheInverseGraph
 40 13 TestGraphWalkPlansHonorJoinHints
+40 13 TestIgnoredCursorScratchPendingDeletionWithCursorMissingSweepsOnly
 
 40 14 TestArrivalSeq_EmbeddedReplayedCounterSeedClearsTheStamps
 40 14 TestBatchCreatorContract
