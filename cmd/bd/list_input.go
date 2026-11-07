@@ -192,6 +192,10 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 		// by itself, so the request may be satisfiable and this cannot tell
 		// without the workspace's infra vocabulary, which this layer does not
 		// load.
+		//
+		// --include-all-types is the union of the plane knobs (workapi skips every
+		// default suppression for it, the plane decision included), so it
+		// admits the ephemeral plane too.
 		if !in.IncludeEphemeral && !in.IncludeInfra && !in.IncludeAllTypes && in.IssueType == "" {
 			return in, HandleErrorWithHint(
 				fmt.Sprintf("--wisp-type %s cannot match anything here: it filters the wisp_type column, and this listing admits only durable rows, which never carry one", s),

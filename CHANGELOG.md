@@ -82,6 +82,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd list --include-all-types`: one flag for every hidden kind of row.**
+  `ListRequest.IncludeAllTypes` — the union that lifts every default type or
+  plane suppression (templates, gates, infra types, the ephemeral wisp plane,
+  and any suppression added later) — is now reachable from `bd list`, which
+  previously exposed only the four narrow `--include-*` flags. It says nothing
+  about status: the default done/frozen and pinned exclusions still apply, as
+  does the default page limit. `--all` is unchanged and its help now says what
+  it actually does — lift the default status and pinned exclusions and the
+  default limit — while pointing at the new flag for the type/plane axis;
+  passing both lifts both sets of default exclusions, which is not the same as
+  an unfiltered listing (explicit filters, `--exclude-type` and an explicit
+  `--limit` still apply). `--wisp-type` accepts the new flag as a plane
+  selector. The current `bd serve` HTTP transport refuses the flag with its
+  existing typed error, as it already does for every other caller of that
+  field (GH#5694, first fixed by @kyoto-bonsai in #8191).
+
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same
@@ -1224,15 +1240,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against Bionic with 16 KB-aligned segments; release builds check both.
   Building that release target (`goreleaser --id bd-android-arm64`) now needs
   a Linux x86_64 host; see RELEASING.md.
-
-- **`bd list --include-all-types` reaches every bead hidden for what it is
-  (GH#5694).** `ListRequest.IncludeAllTypes`, the switch that lifts the gate,
-  template, infra and wisp-plane suppressions together and any added later,
-  had no `bd list` flag, so a script's widest `bd list` request was
-  the hand-kept `--include-gates --include-templates --include-infra` list,
-  which narrows silently when a suppression is added. `bd list` now registers
-  the flag; status defaults still apply, so `--all --include-all-types` lists
-  every row. `--all`'s help text now says it lifts the status filter only.
 
 - With `export.git-add` on, the pre-commit export now lands in commits made
   with `git commit -- <paths>`, `-a`, `-i` or `-p`. It used to stage into
