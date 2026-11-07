@@ -177,7 +177,10 @@ Configure the project path under `external_projects`, then label a target
 project issue `provides:checkout-ready`. The dependency blocks until an issue
 with that label is closed. `bd ready`, `bd blocked`, and `bd dep tree` resolve
 the capability at query time; an unconfigured or unavailable project remains
-blocking.
+blocking. A target project in proxied-server mode is read only when its
+`proxied_server_client_info.json` names an external Dolt server, which bd
+reads directly and read-only; a project whose server bd manages cannot be
+opened from another workspace, so its dependencies stay blocking.
 
 A bare ID whose prefix names another rig (`bd dep add bd-abc gt-123`) is
 stored even when bd cannot find it in this database or through routes. `bd dep

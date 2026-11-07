@@ -342,6 +342,14 @@ func TestProxiedServerDepAddRoutedExternalTarget(t *testing.T) {
 		t.Errorf("an absent external target was not reported unresolved:\n%s", stderr)
 	}
 	assertProxiedDepExists(t, db, absent.ID, missingID)
+	// The warning's remedy names the bd dep remove that deletes the stored row.
+	remove := "bd dep remove " + absent.ID + " " + missingID
+	if !strings.Contains(stderr, remove) {
+		t.Fatalf("the unresolved-target warning does not name %q:\n%s", remove, stderr)
+	}
+	if out := bdProxiedDep(t, bd, a.dir, "remove", absent.ID, missingID); !strings.Contains(out, "Removed dependency") {
+		t.Fatalf("the printed remedy did not remove the edge: %s", out)
+	}
 }
 
 // directTownStore opens a direct (non-proxied) launcher's town store on the

@@ -828,6 +828,7 @@ go_test(
         "export_source_role_test.go",
         "export_source_wisp_subset_test.go",
         "export_test.go",
+        "external_dependency_policy_proxied_test.go",
         "external_policy_direct_integration_test.go",
         "external_policy_embedded_test.go",
         "external_ref_test.go",
