@@ -148,6 +148,12 @@ that came from the removed repository.`,
 			return HandleError("%v", err)
 		}
 
+		// An empty argument would otherwise match an empty configured entry
+		// and delete every local issue (source_repo defaults to "").
+		if repoArg == "" {
+			return HandleError("repository path must not be empty")
+		}
+
 		// Find the configured entry before touching the database or the
 		// config: an argument that matches nothing must delete no issue and
 		// clear no mtime row (bd-59llyl).

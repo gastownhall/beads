@@ -525,3 +525,98 @@ func TestRepoPathRemoval(t *testing.T) {
 		}
 	})
 }
+
+func TestRepoPathRemovalValidation(t *testing.T) {
+	assertNoDestructiveCalls := func(t *testing.T, fake *recordingRepoStore) {
+		t.Helper()
+		if len(fake.deleted) != 0 {
+			t.Fatalf("deleted source keys %v, want none", fake.deleted)
+		}
+		if len(fake.cleared) != 0 {
+			t.Fatalf("cleared mtime keys %v, want none", fake.cleared)
+		}
+	}
+
+	t.Run("argument with no configured match deletes nothing", func(t *testing.T) {
+		_, primary, other := repoPathTestWorkspace(t)
+		writeRepoConfigEntries(t, primary, filepath.Clean(other))
+		fake := useRecordingRepoStore(t)
+		t.Chdir(primary)
+
+		var err error
+		stderr := captureStderr(t, func() {
+			err = repoRemoveCmd.RunE(repoRemoveCmd, []string{"/nowhere/other"})
+		})
+		if err == nil {
+			t.Fatal("expected an error for an unconfigured repository")
+		}
+		if !strings.Contains(stderr, "repository not found") {
+			t.Fatalf("stderr %q does not name the failure", stderr)
+		}
+		assertNoDestructiveCalls(t, fake)
+		if entries := readRepoConfigEntries(t, primary); len(entries) != 1 {
+			t.Fatalf("repos.additional = %v, want unchanged", entries)
+		}
+	})
+
+	t.Run("empty argument is rejected even with an empty configured entry", func(t *testing.T) {
+		_, primary, _ := repoPathTestWorkspace(t)
+		writeRepoConfigEntries(t, primary, "")
+		fake := useRecordingRepoStore(t)
+		t.Chdir(primary)
+
+		var err error
+		stderr := captureStderr(t, func() {
+			err = repoRemoveCmd.RunE(repoRemoveCmd, []string{""})
+		})
+		if err == nil || !strings.Contains(stderr, "must not be empty") {
+			t.Fatalf("expected an empty-argument rejection, got: %v (stderr %q)", err, stderr)
+		}
+		assertNoDestructiveCalls(t, fake)
+		if entries := readRepoConfigEntries(t, primary); len(entries) != 1 || entries[0] != "" {
+			t.Fatalf("repos.additional = %v, want the empty entry untouched", entries)
+		}
+	})
+
+	t.Run("missing config errors before any deletion", func(t *testing.T) {
+		root := t.TempDir()
+		primary := filepath.Join(root, "primary")
+		if err := os.MkdirAll(filepath.Join(primary, ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// BEADS_DIR names a workspace whose config.yaml does not exist.
+		t.Setenv("BEADS_DIR", filepath.Join(primary, ".beads"))
+		fake := useRecordingRepoStore(t)
+		t.Chdir(t.TempDir())
+
+		var err error
+		_ = captureStderr(t, func() {
+			err = repoRemoveCmd.RunE(repoRemoveCmd, []string{"../other"})
+		})
+		if err == nil {
+			t.Fatal("expected an error with no config.yaml")
+		}
+		assertNoDestructiveCalls(t, fake)
+	})
+
+	t.Run("unparseable config errors before any deletion", func(t *testing.T) {
+		_, primary, _ := repoPathTestWorkspace(t)
+		if err := os.WriteFile(filepath.Join(primary, ".beads", "config.yaml"), []byte("repos: {{{\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		fake := useRecordingRepoStore(t)
+		t.Chdir(primary)
+
+		var err error
+		stderr := captureStderr(t, func() {
+			err = repoRemoveCmd.RunE(repoRemoveCmd, []string{"../other"})
+		})
+		if err == nil {
+			t.Fatal("expected an error for an unparseable config")
+		}
+		if !strings.Contains(stderr, "failed to load repo config") {
+			t.Fatalf("stderr %q does not name the failure", stderr)
+		}
+		assertNoDestructiveCalls(t, fake)
+	})
+}
