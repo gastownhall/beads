@@ -202,7 +202,8 @@ versions are removed by their stored spelling.
 imports the beads with their original prefixes and `source_repo` set,
 skipping repos whose export hasn't changed. `bd init --contributor` wires
 hydration up automatically; `bd doctor` warns when routing targets are
-missing from `repos.additional`.
+missing from `repos.additional`. It compares routing targets and hydration
+entries canonically, so equivalent spellings of one directory do not warn.
 
 Once hydrated, beads from other repos are ordinary rows in your database —
 filter by provenance or link them with normal dependencies:
