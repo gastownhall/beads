@@ -8,6 +8,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 func (s *testSuite) TestIssueSQLRepository() {
@@ -57,6 +58,7 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("UnconfiguredAliasStillProtected", s.issueClaimPoolUnconfiguredAlias)
 		s.Run("PoolStatusConflictFlagsPoolAssignee", s.issueClaimPoolStatusConflict)
 		s.Run("CustomActiveStatusClaimable", s.issueClaimCustomActiveStatus)
+		s.Run("HolderCanReclaimAfterBlock", s.issueClaimHolderCanReclaimAfterBlock)
 	})
 	s.Run("Get", func() {
 		s.Run("MissingIDReturnsErrNoRows", s.issueGetMissing)
@@ -92,6 +94,26 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("IgnoresChildIDsWhenSeeding", s.issueNextCounterIDSeedSkipsChildren)
 		s.Run("EmptyPrefixReturnsError", s.issueNextCounterIDEmptyPrefix)
 	})
+}
+
+func (s *testSuite) issueClaimHolderCanReclaimAfterBlock() {
+	r := s.issueRepo()
+	deps := NewDependencySQLRepository(s.Runner())
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-claim-reclaim-blocker", "blocker"), "tester", domain.InsertIssueOpts{}))
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-claim-reclaim-blocked", "blocked"), "tester", domain.InsertIssueOpts{}))
+	_, err := r.Claim(s.Ctx(), "bd-claim-reclaim-blocked", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Require().NoError(deps.Insert(s.Ctx(), &types.Dependency{IssueID: "bd-claim-reclaim-blocked", DependsOnID: "bd-claim-reclaim-blocker", Type: types.DepBlocks}, "tester", domain.DepInsertOpts{}))
+	before, err := r.Get(s.Ctx(), "bd-claim-reclaim-blocked", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	res, err := r.Claim(s.Ctx(), "bd-claim-reclaim-blocked", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.False(res.Updated)
+	after, err := r.Get(s.Ctx(), "bd-claim-reclaim-blocked", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal(*before, *after)
+	_, err = r.Claim(s.Ctx(), "bd-claim-reclaim-blocked", "bob", domain.IssueTableOpts{})
+	s.Require().ErrorIs(err, publicops.ErrClaimBlocked)
 }
 
 func (s *testSuite) issueRepo() domain.IssueSQLRepository {

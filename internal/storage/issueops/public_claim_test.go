@@ -76,6 +76,10 @@ func expectClaimBlockedFlagRead(mock sqlmock.Sqlmock, id string, isBlocked int) 
 func expectClaimableRead(mock sqlmock.Sqlmock, id, assignee string, status types.Status) {
 	expectClaimPreImageRead(mock, id, assignee, status)
 	expectClaimBlockedFlagRead(mock, id, 0)
+	expectClaimPolicyRead(mock)
+}
+
+func expectClaimPolicyRead(mock sqlmock.Sqlmock) {
 	// One row is enough to make custom-status resolution authoritative, so it
 	// never falls through to the legacy config string.
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT name, category FROM custom_statuses ORDER BY name")).
@@ -192,7 +196,8 @@ func TestExecuteClaimIdempotentReclaimStagesNothing(t *testing.T) {
 	_, mock, tx := beginMockTx(t)
 
 	const id = "bd-1"
-	expectClaimableRead(mock, id, claimActor, types.StatusInProgress)
+	expectClaimPreImageRead(mock, id, claimActor, types.StatusInProgress)
+	expectClaimPolicyRead(mock)
 	mock.ExpectExec(`(?s)UPDATE issues\s+SET assignee`).WillReturnResult(sqlmock.NewResult(0, 0))
 	expectClaimStateRead(mock, id, claimActor, types.StatusInProgress)
 	// The post-state snapshot the result carries.
@@ -233,7 +238,8 @@ func TestExecuteClaimIdempotentReclaimAcrossSpellingStagesNothing(t *testing.T) 
 	const id = "bd-1"
 	const storedAssignee = "gastown__mayor" // sanitized form, as persisted
 	const actor = "gastown.mayor"           // dotted form, as this caller spells itself
-	expectClaimableRead(mock, id, storedAssignee, types.StatusInProgress)
+	expectClaimPreImageRead(mock, id, storedAssignee, types.StatusInProgress)
+	expectClaimPolicyRead(mock)
 	mock.ExpectExec(`(?s)UPDATE issues\s+SET assignee`).WillReturnResult(sqlmock.NewResult(0, 0))
 	expectClaimStateRead(mock, id, storedAssignee, types.StatusInProgress)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT " + IssueSelectColumns + " FROM issues " + sqlbuild.LeaseJoin("issues") + " WHERE id = ?")).

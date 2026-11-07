@@ -66,7 +66,8 @@ func claimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, mintV
 	if err != nil {
 		return nil, fmt.Errorf("failed to get issue for claim: %w", err)
 	}
-	if !force {
+	idempotentReclaim := oldIssue.Status == types.StatusInProgress && actorMatches(oldIssue.Assignee, actor)
+	if !force && !idempotentReclaim {
 		blocked, blockers, err := isBlockedByInTx(ctx, tx, id)
 		if err != nil {
 			return nil, err
@@ -319,7 +320,7 @@ func ClaimReadyIssueInTx(
 	}
 	for _, issue := range readyIssues {
 		if _, err := ClaimIssueInTx(ctx, tx, issue.ID, actor, false); err != nil {
-			if errors.Is(err, storage.ErrAlreadyClaimed) || errors.Is(err, storage.ErrNotClaimable) {
+			if errors.Is(err, storage.ErrAlreadyClaimed) || errors.Is(err, storage.ErrNotClaimable) || errors.Is(err, storage.ErrClaimBlocked) {
 				continue
 			}
 			return nil, err

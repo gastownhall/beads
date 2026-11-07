@@ -4,6 +4,7 @@ package embeddeddolt_test
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -118,4 +119,46 @@ func TestEmbeddedClaimRefusesAnOpenBlockerOnEveryDoor(t *testing.T) {
 			t.Errorf("claim did not land: status=%q assignee=%q", status, assignee)
 		}
 	})
+}
+
+func TestEmbeddedClaimHolderCanReclaimAfterBlock(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "clblkreclaim")
+	ctx := t.Context()
+	for _, id := range []string{"clblkreclaim-blocker", "clblkreclaim-blocked"} {
+		if err := te.store.CreateIssue(ctx, &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "tester"); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	claimer, err := te.store.IssueClaimer()
+	if err != nil {
+		t.Fatalf("IssueClaimer(): %v", err)
+	}
+	if _, err := claimer.Claim(ctx, issueops.ClaimRequest{Actor: "holder", IssueID: "clblkreclaim-blocked"}); err != nil {
+		t.Fatalf("initial claim: %v", err)
+	}
+	if err := te.store.AddDependency(ctx, &types.Dependency{IssueID: "clblkreclaim-blocked", DependsOnID: "clblkreclaim-blocker", Type: types.DepBlocks}, "tester"); err != nil {
+		t.Fatalf("add blocker: %v", err)
+	}
+	before, err := te.store.GetIssue(ctx, "clblkreclaim-blocked")
+	if err != nil {
+		t.Fatalf("read before reclaim: %v", err)
+	}
+	result, err := claimer.Claim(ctx, issueops.ClaimRequest{Actor: "holder", IssueID: "clblkreclaim-blocked"})
+	if err != nil {
+		t.Fatalf("holder reclaim: %v", err)
+	}
+	if result.Changed {
+		t.Fatal("holder reclaim reported Changed=true")
+	}
+	after, err := te.store.GetIssue(ctx, "clblkreclaim-blocked")
+	if err != nil {
+		t.Fatalf("read after reclaim: %v", err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("holder reclaim mutated issue: before=%+v after=%+v", before, after)
+	}
+	if _, err := claimer.Claim(ctx, issueops.ClaimRequest{Actor: "other", IssueID: "clblkreclaim-blocked"}); !errors.Is(err, issueops.ErrClaimBlocked) {
+		t.Fatalf("foreign reclaim error = %v, want ErrClaimBlocked", err)
+	}
 }
