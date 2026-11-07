@@ -408,6 +408,7 @@ go_test(
         "wisp_gc_test.go",
         "wisp_infra_dep_test.go",
         "wisp_is_blocked_latest_cursor_heal_test.go",
+        "wisp_is_blocked_repair_fault_test.go",
         "wisp_partition_test.go",
         "wisp_plane_states_test.go",
         "wisp_row_lock_heal_test.go",

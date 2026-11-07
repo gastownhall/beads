@@ -3,6 +3,7 @@ package schema
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"reflect"
 	"slices"
@@ -369,4 +370,51 @@ func TestIgnored32FailedStrayIndexDropStaysPending(t *testing.T) {
 	applied, err := d.migrate()
 	d.requireFailedPass(applied, err, cause, "dropping idx_wisps_is_blocked")
 	d.requireSteps(wispDropIndexDDL)
+}
+
+// TestIgnored32PropagatesProbeErrors pins that a failing existence probe
+// surfaces as the repair's own contextual error rather than being swallowed
+// into a wrong branch (a probe error is not a count of zero).
+func TestIgnored32PropagatesProbeErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		query string
+		args  []driver.Value
+		wrap  string
+	}{
+		{"wisps table probe", wispRestoreTableQuery, []driver.Value{"wisps"}, "checking wisps table"},
+		{"column probe", wispRestoreColumnQuery, []driver.Value{"wisps", "is_blocked"}, "checking wisps.is_blocked column"},
+		{"index probe", wispRestoreIndexQuery, []driver.Value{"wisps", "idx_wisps_is_blocked"}, "checking idx_wisps_is_blocked index"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			// The probes before the failing one succeed (table and column
+			// present), so the pass reaches the case's own probe.
+			present := sqlmock.NewRows([]string{"c"}).AddRow(1)
+			switch tc.query {
+			case wispRestoreColumnQuery:
+				mock.ExpectQuery(wispRestoreTableQuery).WithArgs("wisps").WillReturnRows(present)
+			case wispRestoreIndexQuery:
+				mock.ExpectQuery(wispRestoreTableQuery).WithArgs("wisps").WillReturnRows(present)
+				mock.ExpectQuery(wispRestoreColumnQuery).WithArgs("wisps", "is_blocked").
+					WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+			}
+			mock.ExpectQuery(tc.query).WithArgs(tc.args...).WillReturnError(errors.New("probe dropped"))
+
+			err = restoreWispIsBlocked(context.Background(), db)
+			if err == nil {
+				t.Fatal("restoreWispIsBlocked swallowed the probe error")
+			}
+			if !strings.Contains(err.Error(), tc.wrap) || !strings.Contains(err.Error(), "probe dropped") {
+				t.Fatalf("restoreWispIsBlocked err = %v, want %q wrapping the probe error", err, tc.wrap)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet probe expectations: %v", err)
+			}
+		})
+	}
 }
