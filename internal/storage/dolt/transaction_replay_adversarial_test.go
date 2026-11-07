@@ -1,9 +1,9 @@
 package dolt
 
-// Adversarial tests for whole-transaction replay, contributed in review: a
-// replay must start from the caller's request (inline edges included), a lost
-// commit response must never be replayed, and the split regular/ignored
-// transactions must roll back and replay as one.
+// Adversarial tests for whole-transaction replay: a replay must start from
+// the caller's request (inline edges included), a lost commit response must
+// never be replayed, and the split regular/ignored transactions must roll back
+// and replay as one.
 
 import (
 	"context"
@@ -23,7 +23,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// R1/R2: a replayed store-level batch create whose issue carries an inline
+// A replayed store-level batch create whose issue carries an inline
 // dependency with no IssueID. Attempt 1 writes the minted ID into the shared
 // *types.Dependency (PersistDependencies: dep.IssueID = issue.ID);
 // restoring only the Issue struct would let attempt 2 mint a new ID while the
@@ -118,6 +118,12 @@ func TestReplayedCounterModeBatchCreateKeepsInlineEdgeOnItsOwnIssue(t *testing.T
 	if len(got) != 1 || got[0] != loser.ID {
 		t.Fatalf("edge into test-anchor is from %v, want exactly [%s] (the loser's own issue); competitor is %s", got, loser.ID, competitorID)
 	}
+	if loser.ID == competitorID {
+		t.Fatalf("loser and competitor both hold %s", loser.ID)
+	}
+	if competitor, err := base.GetIssue(ctx, competitorID); err != nil || competitor.Title != "competitor" {
+		t.Fatalf("competitor %s = %+v, %v; the replay overwrote it", competitorID, competitor, err)
+	}
 }
 
 func TestReplayedHashModeBatchCreateKeepsInlineEdgeOnItsOwnIssue(t *testing.T) {
@@ -136,7 +142,7 @@ func TestReplayedHashModeBatchCreateKeepsInlineEdgeOnItsOwnIssue(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// R3: a COMMIT whose response is lost (connection dropped after the server
+// A COMMIT whose response is lost (connection dropped after the server
 // processed it) must surface as indeterminate and never be replayed.
 // ---------------------------------------------------------------------------
 
@@ -330,10 +336,11 @@ func TestLostCommitResponseIsNeverReplayed(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// R4/R5: journal OFF, the split regular + ignored (wisp) transactions of #207.
+// Journal OFF: the split regular + ignored (wisp) transactions, which commit
+// the durable plane and the dolt_ignore'd wisp plane separately.
 // ---------------------------------------------------------------------------
 
-// R4: the REGULAR commit loses. Both planes must roll back, and the replay must
+// The REGULAR commit loses. Both planes must roll back, and the replay must
 // write each plane exactly once (no wisp from the lost attempt survives).
 func TestSplitTxRegularConflictRollsBackBothPlanesAndReplaysOnce(t *testing.T) {
 	base, cleanup := setupConcurrentTestStore(t)
@@ -398,7 +405,7 @@ func TestSplitTxRegularConflictRollsBackBothPlanesAndReplaysOnce(t *testing.T) {
 	}
 }
 
-// R5: the IGNORED commit loses after the regular commit landed. That outcome
+// The IGNORED commit loses after the regular commit landed. That outcome
 // is partial and must be indeterminate, never a replayable conflict.
 func TestSplitTxIgnoredConflictAfterRegularCommitIsNotReplayed(t *testing.T) {
 	base, cleanup := setupConcurrentTestStore(t)
@@ -461,7 +468,7 @@ func TestSplitTxIgnoredConflictAfterRegularCommitIsNotReplayed(t *testing.T) {
 	}
 }
 
-// R6: the Deleter's commit point is the CALL DOLT_COMMIT inside its
+// The Deleter's commit point is the CALL DOLT_COMMIT inside its
 // transaction (Dolt commits the SQL transaction there). A lost response to it
 // must be indeterminate and never replayed; withRetryTx treats a connection
 // error raised inside the body as "pre-commit" and replays it.
@@ -504,7 +511,7 @@ func TestDeleterLostDoltCommitResponseIsNotReplayed(t *testing.T) {
 	}
 }
 
-// R6b: the sweeper twin of R6. The sweep's CALL DOLT_COMMIT commits its SQL
+// The sweeper twin of the Deleter test. The sweep's CALL DOLT_COMMIT commits its SQL
 // transaction, so a lost response there may mean the sweep landed: it must be
 // indeterminate, never replayed by withRetryTx as a pre-commit failure.
 func TestSweeperLostDoltCommitResponseIsNotReplayed(t *testing.T) {

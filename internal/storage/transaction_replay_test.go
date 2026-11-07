@@ -50,6 +50,8 @@ type instantTimer struct {
 	c      chan time.Time
 	delays []time.Duration
 	clock  *steppingClock
+	// onStart, when set, runs as each wait begins (before the timer fires).
+	onStart func()
 }
 
 func newInstantTimer() *instantTimer {
@@ -59,6 +61,9 @@ func newInstantTimer() *instantTimer {
 func (t *instantTimer) Start(d time.Duration) {
 	t.delays = append(t.delays, d)
 	t.clock.advance(d)
+	if t.onStart != nil {
+		t.onStart()
+	}
 	t.c <- time.Now()
 }
 func (t *instantTimer) Stop()               {}
@@ -286,13 +291,29 @@ func TestRunReplayableTransactionCountsReplays(t *testing.T) {
 	if err := RunReplayableTransaction(context.Background(), &scriptedTransactor{outcomes: []error{conflict(1), permanent}}, "bd: permanent", noop); !errors.Is(err, permanent) {
 		t.Fatalf("err = %v, want the non-conflict failure", err)
 	}
-	// The context ends while the loop waits to replay: not exhausted.
+	// The context ends during the attempt: not exhausted, never replayed.
 	ctx, cancel := context.WithCancel(context.Background())
 	if err := RunReplayableTransaction(ctx, &scriptedTransactor{outcomes: []error{conflict(1), nil}}, "bd: canceled", func(Transaction) error {
 		cancel()
 		return nil
 	}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want the cancellation", err)
+	}
+	// The context ends while the loop WAITS to replay: the timer still fires
+	// (the backoff library selects between the two at random), but no replay
+	// starts and none is counted.
+	for run := 0; run < 16; run++ {
+		waitCtx, waitCancel := context.WithCancel(context.Background())
+		timer := useInstantReplayTimer(t)
+		timer.onStart = waitCancel
+		tr := &scriptedTransactor{outcomes: []error{conflict(1), nil}}
+		err := RunReplayableTransaction(waitCtx, tr, "bd: canceled in wait", noop)
+		if !errors.Is(err, context.Canceled) || !errors.Is(err, ErrTransactionConflict) {
+			t.Fatalf("err = %v, want the cancellation and the conflict being retried", err)
+		}
+		if tr.calls != 1 {
+			t.Fatalf("transactions = %d, want 1: no replay may start after the context ended in the wait", tr.calls)
+		}
 	}
 
 	var rm metricdata.ResourceMetrics
@@ -315,7 +336,7 @@ func TestRunReplayableTransactionCountsReplays(t *testing.T) {
 			}
 		}
 	}
-	// 2 + (attempts-1) + 1; the canceled loop never reached its replay.
+	// 2 + (attempts-1) + 1; neither canceled loop started a replay.
 	if want := int64(2 + exhausted.calls - 1 + 1); got["replayed"] != want {
 		t.Fatalf("replayed count = %d, want %d", got["replayed"], want)
 	}
@@ -329,8 +350,7 @@ func TestRunReplayableTransactionCountsReplays(t *testing.T) {
 // ends in an indeterminate commit (its COMMIT cut by the context, so the write
 // may have landed) or in a plain failure is returned unchanged even when the
 // context ended during it — never replaced by the earlier, rolled-back
-// conflict, which would tell the caller nothing was written. Contributed in
-// review.
+// conflict, which would tell the caller nothing was written.
 func TestRunReplayableTransactionKeepsTheLastAttemptsOwnOutcome(t *testing.T) {
 	for name, last := range map[string]error{
 		"indeterminate commit": fmt.Errorf("sql commit (regular): %w: %w", context.Canceled, ErrCommitIndeterminate),

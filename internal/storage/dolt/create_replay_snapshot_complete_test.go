@@ -4,9 +4,8 @@ package dolt
 // caller-owned state — struct fields AND pointees. This runs the real issueops
 // create path against a real Dolt server (the store-internal path and the
 // transaction path cmd/bd replays), rolls the SQL back, restores, and
-// deep-compares with a deep copy taken before the create. Contributed in
-// review; it fails the day the create path starts writing somewhere the
-// snapshot does not restore.
+// deep-compares with a deep copy taken before the create. It fails the day
+// the create path starts writing somewhere the snapshot does not restore.
 
 import (
 	"encoding/json"

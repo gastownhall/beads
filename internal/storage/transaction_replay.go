@@ -49,12 +49,17 @@ type Transactor interface {
 	RunInTransaction(ctx context.Context, commitMsg string, fn func(tx Transaction) error) error
 }
 
-// The conflict-replay budget. ONE budget governs every loop that replays a
-// whole transaction after it lost a write conflict: the proxied routes'
+// The conflict-replay budget. The TOTAL time a loop keeps replaying a
+// transaction that lost a write conflict is shared: the proxied routes'
 // unit-of-work loop (uow.RunTx*, whose DefaultTxRetryMaxElapsed is
 // TxConflictReplayMaxElapsed), RunReplayableTransaction on the direct routes,
-// and withRetryTx on a Dolt sql-server. A command therefore waits the same
-// time for its conflicts to clear whichever route reached the database.
+// and withRetryTx on a Dolt sql-server all stop after it, so a command waits
+// the same total time for its conflicts to clear whichever route reached the
+// database. The schedule inside the budget is not shared: RunReplayableTransaction
+// and withRetryTx cap each wait at one second, while uow.RunTx leaves its
+// exponential waits uncapped. A backend that replays inside its own
+// RunInTransaction keeps its own loop and never marks ErrTransactionConflict,
+// so RunReplayableTransaction runs it once.
 const (
 	// TxConflictReplayMaxElapsed bounds how long a loop keeps replaying a
 	// transaction that keeps losing write conflicts before it gives up.
@@ -113,13 +118,19 @@ func newTxReplaysCounter(meter metric.Meter) metric.Int64Counter {
 // Use it only for a callback that touches the database exclusively through tx,
 // re-derives every value it hands back on each invocation (plain assignment or
 // an explicit reset at its top, never an append into captured state), and has
-// no other side effects. Any other failure — a callback error, a non-conflict
-// database error, or an ErrCommitIndeterminate outcome that may already have
-// landed — is returned after the single attempt that produced it.
+// no other side effects. A callback error that wraps a rollback-guaranteed
+// conflict (a statement inside the transaction that lost with 1213 or 1205) is
+// marked by the backend and replayed like a conflict at commit, by design: the
+// failed callback rolls the whole transaction back. Any other failure — a
+// callback error of its own, a non-conflict database error, or an
+// ErrCommitIndeterminate outcome that may already have landed — is returned
+// after the single attempt that produced it.
 //
-// The loop is bounded by TxConflictReplayMaxElapsed, the budget the proxied
-// routes' uow.RunTx shares. When it gives up it returns the last conflict, which still matches ErrTransactionConflict,
-// annotated with the number of attempts made.
+// The loop is bounded by TxConflictReplayMaxElapsed, the total budget the
+// proxied routes' uow.RunTx shares. When it gives up it returns the last
+// conflict, which still matches ErrTransactionConflict, annotated with the
+// number of attempts made. A replay is counted when it starts, so a loop whose
+// context ends while it waits counts none.
 func RunReplayableTransaction(ctx context.Context, s Transactor, commitMsg string, fn func(tx Transaction) error) error {
 	bo := backoff.NewExponentialBackOff()
 	bo.InitialInterval = TxConflictReplayInitialInterval
@@ -134,10 +145,18 @@ func RunReplayableTransaction(ctx context.Context, s Transactor, commitMsg strin
 	attempts := 0
 	var lastConflict, lastAttempt error
 	notify := func(err error, wait time.Duration) {
-		txReplays.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "replayed")))
 		debug.Logf("transaction %q lost a write conflict on attempt %d; replaying in %v: %v\n", commitMsg, attempts, wait, err)
 	}
 	err := backoff.RetryNotifyWithTimer(func() error {
+		if attempts > 0 {
+			// The backoff library may still fire the timer after the
+			// context ended during the wait; such a loop stops here, before
+			// starting (or counting) a replay.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return backoff.Permanent(ctxErr)
+			}
+			txReplays.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "replayed")))
+		}
 		attempts++
 		err := s.RunInTransaction(ctx, commitMsg, fn)
 		lastAttempt = err

@@ -392,6 +392,7 @@ One span per Anthropic API call. The `bd.ai.operation` attribute distinguishes t
 | `bd.db.circuit_rejected` | Counter | — | ✅ Implemented |
 | `bd.db.serialization_errors` | Counter | — | ✅ Implemented |
 | `bd.write_retries_total` | Counter | `type` (`serialization` \| `connection`) | ✅ Implemented |
+| `bd.tx_replays_total` | Counter | `outcome` (`replayed` \| `exhausted`) | ✅ Implemented (whole-transaction replays by `storage.RunReplayableTransaction` after a lost write conflict; `exhausted` once per loop whose budget ran out) |
 | `bd.db.conn_acquire_ms` | Histogram | — | ✅ Implemented |
 | `bd.db.pool_wait_count` | Counter | — | ✅ Implemented |
 | `bd.db.pool_wait_ms` | Histogram | — | ✅ Implemented |
@@ -440,6 +441,7 @@ Every metric name, span name, and attribute listed in this document is backed by
 | `bd.db.circuit_rejected` | Counter | `store.go:884` — `m.Int64Counter("bd.db.circuit_rejected")` |
 | `bd.db.serialization_errors` | Counter | `store.go:888` — registered; recorded at `store.go:1103,1116` |
 | `bd.write_retries_total` | Counter | `store.go:892` — registered; recorded at `store.go:1104,1117,1124` (`type=serialization\|connection`) |
+| `bd.tx_replays_total` | Counter | `internal/storage/transaction_replay.go` — `newTxReplaysCounter`; recorded in `RunReplayableTransaction` (`outcome=replayed\|exhausted`; added after the audited commit) |
 | `bd.db.conn_acquire_ms` | Histogram | `store.go:896` — registered; recorded at `transaction.go:167` |
 | `bd.db.pool_wait_count` | Counter | `store.go:900` — registered; recorded at `transaction.go:174` |
 | `bd.db.pool_wait_ms` | Histogram | `store.go:904` — registered; recorded at `transaction.go:176` |

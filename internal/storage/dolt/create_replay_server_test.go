@@ -26,6 +26,9 @@ type commitGateProxy struct {
 	armed   atomic.Bool
 	held    chan struct{}
 	release chan struct{}
+	// commits counts every COMMIT forwarded, so a test can tell the held
+	// attempt was really replayed.
+	commits atomic.Int32
 }
 
 func startCommitGateProxy(t *testing.T, target string) *commitGateProxy {
@@ -76,6 +79,9 @@ func (p *commitGateProxy) handle(client net.Conn) {
 		}
 		isCommit := hdr[3] == 0 && n > 1 && payload[0] == 0x03 &&
 			strings.EqualFold(strings.TrimSpace(string(payload[1:])), "COMMIT")
+		if isCommit {
+			p.commits.Add(1)
+		}
 		if isCommit && p.armed.CompareAndSwap(true, false) {
 			close(p.held)
 			<-p.release
@@ -122,6 +128,7 @@ func singleCreateReplay(t *testing.T, counterMode bool) (base *DoltStore, loser,
 		Title: "loser", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
 		Comments: []*types.Comment{{Author: "loser", Text: "filed with the issue"}},
 	}
+	proxy.commits.Store(0) // count only the loser's own COMMITs
 	proxy.armed.Store(true)
 	done := make(chan error, 1)
 	go func() { done <- via.CreateIssue(ctx, loser, "loser") }()
@@ -140,6 +147,9 @@ func singleCreateReplay(t *testing.T, counterMode bool) (base *DoltStore, loser,
 	close(proxy.release)
 	if err := <-done; err != nil {
 		t.Fatalf("loser create was not replayed to success: %v", err)
+	}
+	if n := proxy.commits.Load(); n < 2 {
+		t.Fatalf("loser sent %d COMMIT(s), want at least 2: the held attempt did not lose, so nothing was replayed", n)
 	}
 	return base, loser, competitor
 }
