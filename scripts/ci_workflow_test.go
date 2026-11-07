@@ -743,6 +743,43 @@ func TestPRCIGateRequiresWindowsGlobalPrimeOverride(t *testing.T) {
 	}
 }
 
+// GH#6101: worktree-remove-windows is the only native run of the Windows
+// SEC-003 boundary tests in internal/beads, and ci-gate requires it, so a
+// Windows regression of the boundary fails the merge. The step must run even
+// after the worktree removal tests fail, and fail the job itself. Its link
+// regressions must fail rather than skip when the runner cannot create a
+// junction or symlink, and its selector must keep the native resolver,
+// profile and context regressions.
+func TestPRCIGateRequiresWindowsBeadsBoundaryTests(t *testing.T) {
+	workflow := readCIWorkflow(t, "pr.yml")
+	job := workflow.job(t, "worktree-remove-windows")
+	step := job.step(t, "Run beads boundary tests on Windows")
+	if job.If != ciScopePlatformsIf || job.ContinueOnError || !strings.Contains(step.If, "!cancelled()") || stepContinueOnError(step) {
+		t.Errorf("beads boundary step must run on the platforms switch, also after a worktree removal failure, and fail its job: job if=%q continue-on-error=%v, step if=%q continue-on-error=%v",
+			job.If, job.ContinueOnError, step.If, step.ContinueOnError)
+	}
+	for key, want := range map[string]string{"CGO_ENABLED": "0", "BEADS_TEST_REQUIRE_WINDOWS_LINKS": "1"} {
+		if got := step.Env[key]; got != want {
+			t.Errorf("beads boundary step env %s = %q, want %q", key, got, want)
+		}
+	}
+	for _, want := range []string{
+		"go test -tags gms_pure_go -count=1 -v -run '^(", ")$' ./internal/beads/",
+		"|TestWin.*|", "|TestIsPathInSafeBoundary_TempDirSymlinkEscape|",
+		"|TestResolveWindowsFinalPath|", "|TestGetProfilesDirectory)",
+	} {
+		if !strings.Contains(step.Run, want) {
+			t.Errorf("beads boundary step run = %q, want it to contain %q", step.Run, want)
+		}
+	}
+	gate := workflow.job(t, "ci-gate")
+	env := gate.step(t, "Evaluate CI gate").Env
+	if !contains(gate.Needs, "worktree-remove-windows") || env["WORKTREE_REMOVE_WINDOWS"] != "${{ needs.worktree-remove-windows.result }}" ||
+		!contains(strings.Fields(env["CI_GATE_REQUIRED"]), "WORKTREE_REMOVE_WINDOWS") {
+		t.Error("CI gate must require worktree-remove-windows (WORKTREE_REMOVE_WINDOWS), the job that runs the beads boundary tests")
+	}
+}
+
 func TestPRCIGateRequiresGeneratedHookTimeoutProcessBoundary(t *testing.T) {
 	const (
 		jobName     = "pr-preflight-platforms"
@@ -1104,7 +1141,7 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertStepsBefore(t, mainWindows, []string{"Build (pure Go regex)", "Smoke test - version", "Smoke test - help"}, []string{"Save Go module cache", "Save non-race Go build cache"})
 
 	assertStepsBefore(t, workflows["pr.yml"].job(t, "worktree-remove-windows"),
-		[]string{"Restore Go module cache", "Restore non-race Go build cache"}, []string{"Run native Windows worktree removal boundary tests"})
+		[]string{"Restore Go module cache", "Restore non-race Go build cache"}, []string{"Run native Windows worktree removal boundary tests", "Run beads boundary tests on Windows"})
 	assertStepsBefore(t, workflows["pr.yml"].job(t, "check-doc-freshness-platforms"),
 		[]string{"Restore Go module cache"}, []string{"Exercise native date and Bash process boundary"})
 	assertStepsBefore(t, workflows["pr.yml"].job(t, "pr-preflight-platforms"),
@@ -1116,6 +1153,7 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test"), "Test", "race")
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test-windows"), "Build (pure Go regex)", "non-race")
 	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "worktree-remove-windows"), "Run native Windows worktree removal boundary tests", "non-race")
+	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "worktree-remove-windows"), "Run beads boundary tests on Windows", "non-race")
 	for _, workflowName := range []string{"pr.yml", "pr-risk.yml"} {
 		for jobName, job := range workflows[workflowName].Jobs {
 			for _, step := range job.Steps {

@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -598,6 +599,11 @@ func isPathInSafeBoundary(path string) bool {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
 		return false
+	}
+	// Windows paths need their own policy (GH#6101): nothing below matches a
+	// drive- or UNC-rooted, backslashed path. See winboundary.go.
+	if runtime.GOOS == "windows" {
+		return windowsPathInSafeBoundary(path, absPath)
 	}
 
 	// Allow OS-designated temp directories (e.g., /var/folders on macOS, which

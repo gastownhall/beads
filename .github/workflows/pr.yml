@@ -413,6 +413,29 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test -tags gms_pure_go -count=1 -run '^TestWorktreeRemove' ./cmd/bd
 
+      # internal/beads carries the Windows SEC-003 boundary (GH#6101): its
+      # native resolver (CreateFile + GetFinalPathNameByHandle), the profiles
+      # directory lookup, and the junction, symlink, short-name and
+      # repository-context regressions are //go:build windows, so no Linux
+      # lane executes them. This step runs them with the portable policy
+      # tests and the isPathInSafeBoundary tests the POSIX lanes share, which
+      # take the Windows policy here. It sits in this job because ci-gate
+      # requires the job (WORKTREE_REMOVE_WINDOWS), so a Windows regression of
+      # the boundary fails the merge; `if: ${{ !cancelled() }}` runs it after
+      # a worktree removal failure too. The selector is deliberate: other
+      # internal/beads tests still fail on Windows (GH#6101 lists them).
+      # BEADS_TEST_REQUIRE_WINDOWS_LINKS turns a junction or symlink the runner
+      # cannot create into a failure, so the alias regressions cannot pass by
+      # skipping; the short-name subtests still skip on a volume that
+      # generates no 8.3 names.
+      - name: Run beads boundary tests on Windows
+        if: ${{ !cancelled() }}
+        env:
+          CGO_ENABLED: "0"
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
+          BEADS_TEST_REQUIRE_WINDOWS_LINKS: "1"
+        run: go test -tags gms_pure_go -count=1 -v -run '^(TestIsPathInSafeBoundary|TestIsPathInSafeBoundary_WindowsSystemDirs|TestIsPathInSafeBoundary_TempDirSymlinkEscape|TestWin.*|TestNewWindowsBoundary.*|TestResolveWindowsFinalPath|TestGetProfilesDirectory)$' ./internal/beads/
+
   # Check documentation references match actual CLI flags
   #
   # Stays a job: the generated CLI docs describe the release pinned in

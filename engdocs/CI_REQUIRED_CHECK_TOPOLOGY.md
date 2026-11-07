@@ -1742,7 +1742,10 @@ Windows test binaries (`windows-test-binaries`, its "-prebuilt" twins,
 main.yml's `windows-test-binaries-cache` and the `WINDOWS_PREBUILT_REQUIRED`
 flag) are retired: Bazel runs the Linux leg's tests, and the native Windows
 pair (`test-windows-liveness`, `worktree-remove-windows`) is the required
-run of the twins' tests.
+run of the twins' tests. `worktree-remove-windows` is also the required
+native run of the `internal/beads` Windows SEC-003 boundary tests (GH#6101):
+the boundary's resolver, profiles-directory and link regressions are
+`//go:build windows`, so no Linux lane executes them.
 macOS jobs; `release.yml` stays on `macos-latest`.
 
 - **Label.** Pinned to `macos-26` because GitHub's `macos-latest` resolves to

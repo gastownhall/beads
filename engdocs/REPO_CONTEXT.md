@@ -224,6 +224,48 @@ system directories:
 Temporary directories (e.g., `/var/folders` on macOS) are explicitly allowed
 for test environments.
 
+On Windows (GH#6101) the same check uses a Windows policy in
+`internal/beads/winboundary.go`:
+
+- **Spelling**: drive (`C:\`) and UNC (`\\server\share`) paths, including
+  their `\\?\` and `\\.\` forms, are compared case-insensitively on
+  whole components. Device, Volume-GUID and GLOBALROOT forms, alternate data
+  streams, invalid filename characters and components ending in `.` or a
+  space are rejected.
+- **System roots** are denied: `C:\Windows`, `C:\Program Files`,
+  `C:\Program Files (x86)`, the reported Windows directory, and `SystemRoot`,
+  `windir`, `ProgramFiles`, `ProgramFiles(x86)`, `ProgramW6432` and
+  `ProgramFiles(Arm)`. Values that are malformed or name a volume root are
+  ignored.
+- **Profiles**: under `C:\Users`, the reported profiles directory,
+  `%SystemDrive%\Users` and the home's parent when it is named `Users`, only
+  the current user's home is allowed. With no known home, no private profile
+  is allowed. A home that resolves to a volume root (a profile junctioned to
+  `E:\`) counts by its spelled form only, so it cannot exempt that volume.
+- **Physical location**: the longest existing ancestor is resolved with
+  `GetFinalPathNameByHandle`, so junctions, symlinks, short names and `subst`
+  drives into a denied location are denied, including for missing
+  descendants. When the path does not resolve (access denied, a dangling
+  link, a volume with no drive letter), its spelled form decides.
+- **Carve-outs**: the temp directory (`os.TempDir()`, ignored when it is a
+  volume root or at or above a system or profile root) and
+  `<profile parent>\Public` (never `%PUBLIC%`) are allowed only when the path
+  resolves physically inside them. Temp is checked before system roots so the
+  SYSTEM account's `C:\Windows\Temp` works.
+
+Limitations: the check is best-effort, lexical plus one resolution at call
+time; it does not hold a handle, so a link retargeted afterwards is not
+caught. Administrative shares (`\\host\C$\Windows`) are not treated as
+equivalent to the local path they expose, and an alias outside the
+carve-outs that cannot be resolved (access denied) is judged by its spelled
+form. Other volumes and shares are not denied as a whole, and Windows ACLs
+are not consulted.
+
+On Windows, `isPathInSafeBoundary` returns the Windows policy's answer
+before its POSIX body runs, so the POSIX rules below the dispatch never
+apply to Windows paths: change them for POSIX alone, and change the Windows
+policy in `winboundary.go`.
+
 ## Server Mode Handling
 
 ### CLI vs Server Context

@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **On Windows, `BEADS_DIR` or a `.beads/redirect` can no longer point bd into
+  a system directory or another user's profile (GH#6101).** The SEC-003
+  location check compared paths with POSIX prefixes such as `/etc` and
+  `/home/`, which no drive- or UNC-rooted Windows path matches, so on Windows
+  it accepted every location. It now refuses, as `BEADS_DIR points to unsafe
+  location: <path>`, a beads directory under the Windows directory,
+  `Program Files` or `Program Files (x86)` (and wherever `SystemRoot`,
+  `windir`, `ProgramFiles`, `ProgramFiles(x86)`, `ProgramW6432` or
+  `ProgramFiles(Arm)` point), or inside another user's profile. Junctions,
+  symlinks, 8.3 short names and `subst` drives are judged by where they lead;
+  the temp directory and `C:\Users\Public` are accepted only for a path that
+  resolves inside them; device, Volume-GUID and GLOBALROOT paths, alternate
+  data streams, and names ending in a dot or a space are refused. Your own
+  profile, other drives and drive roots, network shares and `ProgramData`
+  are unaffected.
+
 - **A committed `.beads/.env` can no longer copy your environment into bd's
   settings, set a command or bearer token by a name the deny list missed, or
   pick a file for bd to overwrite.**
