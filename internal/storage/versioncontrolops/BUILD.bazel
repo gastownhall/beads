@@ -45,6 +45,7 @@ go_test(
         "clone_test.go",
         "commit_empty_test.go",
         "compact_softreset_dolt_test.go",
+        "compact_test.go",
         "compact_verify_test.go",
         "conflicts_test.go",
         "excluded_history_warning_test.go",

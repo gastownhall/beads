@@ -251,3 +251,101 @@ func TestAutoResolveConflictsAfterCLIPull_DependencyAuditOnly(t *testing.T) {
 		t.Errorf("expected 1 dependency row after resolve, got %d", count)
 	}
 }
+
+// TestSettleMergeInTxKeepsCleanMergedTables (bd-cdo628, GH#7811) is the
+// server-mode counterpart of the embedded auto-resolve regression: a forced
+// merge whose only conflict is an auto-resolvable metadata modify/modify
+// rides together with the peer's cleanly merged label swap, and
+// settleMergeInTx must conclude the merge with BOTH — CommitResolvedConflicts
+// stages the merge's clean output before committing, or the settlement
+// commit reverts the peer's label change while the working set keeps it as
+// an unstaged divergence. Deliberately no trailing DOLT_COMMIT('-Am') sweep,
+// which would mask the drop by committing the working set afterwards.
+func TestSettleMergeInTxKeepsCleanMergedTables(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	db := store.db
+
+	var currentBranch string
+	if err := db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&currentBranch); err != nil {
+		t.Fatalf("failed to get current branch: %v", err)
+	}
+
+	peerBranch := currentBranch + "_labelspeer"
+	t.Cleanup(func() {
+		db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", currentBranch)
+		db.ExecContext(ctx, "CALL DOLT_BRANCH('-Df', ?)", peerBranch)
+	})
+
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx, q, args...); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	// Base: the annotated issue and a metadata row both branches will modify.
+	exec("INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES ('sltx-1', 'X', '', '', '', '', 'open', 3, 'bug')")
+	exec("INSERT INTO labels (issue_id, label) VALUES ('sltx-1', 'needs-triage')")
+	exec("INSERT INTO metadata (`key`, value) VALUES ('dolt_auto_push_commit', 'base')")
+	exec("CALL DOLT_COMMIT('-Am', 'seed issue + label + metadata')")
+	exec("CALL DOLT_BRANCH(?, 'HEAD')", peerBranch)
+	// Main modifies the metadata key; peer modifies it differently and swaps
+	// the label — a metadata modify/modify (auto-resolved theirs) riding
+	// with a cleanly merged labels change.
+	exec("UPDATE metadata SET value = 'aaa' WHERE `key` = 'dolt_auto_push_commit'")
+	exec("CALL DOLT_COMMIT('-Am', 'main metadata aaa')")
+	exec("CALL DOLT_CHECKOUT(?)", peerBranch)
+	exec("UPDATE metadata SET value = 'bbb' WHERE `key` = 'dolt_auto_push_commit'")
+	exec("DELETE FROM labels WHERE issue_id = 'sltx-1' AND label = 'needs-triage'")
+	exec("INSERT INTO labels (issue_id, label) VALUES ('sltx-1', 'ready-for-agent')")
+	exec("CALL DOLT_COMMIT('-Am', 'peer metadata bbb + relabel')")
+	exec("CALL DOLT_CHECKOUT(?)", currentBranch)
+
+	if err := settleForcedMerge(ctx, t, store, peerBranch); err != nil {
+		t.Fatalf("settling merge with clean label ride-along: %v", err)
+	}
+
+	labelsAt := func(q string) []string {
+		t.Helper()
+		rows, err := db.QueryContext(ctx, q)
+		if err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		defer rows.Close()
+		var got []string
+		for rows.Next() {
+			var l string
+			if err := rows.Scan(&l); err != nil {
+				t.Fatalf("scan label: %v", err)
+			}
+			got = append(got, l)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("iterate labels: %v", err)
+		}
+		return got
+	}
+	committed := labelsAt("SELECT label FROM labels AS OF 'HEAD' WHERE issue_id = 'sltx-1' ORDER BY label")
+	if len(committed) != 1 || committed[0] != "ready-for-agent" {
+		t.Errorf("HEAD labels = %v, want [ready-for-agent]: the settlement commit did not carry the peer's label swap", committed)
+	}
+	var value string
+	if err := db.QueryRowContext(ctx,
+		"SELECT value FROM metadata AS OF 'HEAD' WHERE `key` = 'dolt_auto_push_commit'").Scan(&value); err != nil {
+		t.Fatalf("read resolved metadata: %v", err)
+	}
+	if value != "bbb" {
+		t.Errorf("metadata value = %q, want %q (theirs)", value, "bbb")
+	}
+	var dirty int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_status").Scan(&dirty); err != nil {
+		t.Fatalf("count dolt_status: %v", err)
+	}
+	if dirty != 0 {
+		t.Errorf("%d table(s) left uncommitted after the settlement", dirty)
+	}
+}

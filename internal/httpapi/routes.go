@@ -211,6 +211,16 @@ const CapDependenciesBlockingIsBlocked = "dependencies.blocking.isBlocked"
 // events_journal_disabled when the journal is off.
 const CapIssuesArrivalSeq = "issues.arrivalSeq"
 
+// CapIssuesDeleteContainmentCascade is the behavior capability announcing
+// that issues:delete's `cascade` follows PARENT-CHILD edges only (GH#6301):
+// the closure is the named beads' containment tree, and a bead joined to it by
+// any other edge survives and comes back in `orphaned`. It names no new
+// request member — an older server accepts the same `cascade` and deletes
+// every transitive dependent — so the token is how a client learns which
+// meaning it will get. bd's client refuses a cascade (preview included)
+// against a server that does not advertise it (wire.CapDeleteContainmentCascade).
+const CapIssuesDeleteContainmentCascade = "issues.delete.containmentCascade"
+
 // CapIssuesSweepWispsPlane is the behavior capability that advertises the
 // `wisps-plane` value of SweepRequest.tier (sweep.go, spec SweepRequest.tier):
 // a third, wider tier that clears the whole wisps table plus any durable bead
@@ -1181,7 +1191,7 @@ var behaviorCapabilities = []string{
 	CapIssuesCloseAutoCloseMolecule, CapIssuesListSearch,
 	CapIssuesListNoAssignee, CapIssuesListTitle, CapListIDs, CapIssuesUpdatePersistence, CapDependenciesBlockingIsBlocked, CapIssuesUpdateClaim,
 	CapIssuesCreateGates, CapIssuesUpdateGates, CapIssuesListFilters,
-	CapIssuesArrivalSeq,
+	CapIssuesArrivalSeq, CapIssuesDeleteContainmentCascade,
 }
 
 // Capabilities lists what this build advertises in ContextResponse.capabilities:

@@ -68,6 +68,17 @@ exports_files(
     ],
 )
 
+# //scripts:android_release_docs_test: the docs describing the android/arm64
+# cgo release build.
+exports_files(
+    [
+        "CHANGELOG.md",
+        "RELEASING.md",
+        "docs/getting-started/installation.md",
+    ],
+    visibility = ["//scripts:__pkg__"],
+)
+
 # //scripts:shell_scripts_test: scripts/test.sh's skip list.
 exports_files(
     [".test-skip"],
@@ -343,6 +354,7 @@ filegroup(
         "//internal/doltremote:repo_doc_files",
         "//internal/doltserver:repo_doc_files",
         "//internal/doltversion:repo_doc_files",
+        "//internal/endpointtrust:repo_doc_files",
         "//internal/eventsjournal:repo_doc_files",
         "//internal/execenv:repo_doc_files",
         "//internal/fdhygiene:repo_doc_files",
@@ -583,6 +595,7 @@ filegroup(
         "//internal/doltremote:repo_go_srcs",
         "//internal/doltserver:repo_go_srcs",
         "//internal/doltversion:repo_go_srcs",
+        "//internal/endpointtrust:repo_go_srcs",
         "//internal/eventsjournal:repo_go_srcs",
         "//internal/execenv:repo_go_srcs",
         "//internal/fdhygiene:repo_go_srcs",
@@ -808,6 +821,7 @@ filegroup(
         "//internal/doltremote:repo_go_test_srcs",
         "//internal/doltserver:repo_go_test_srcs",
         "//internal/doltversion:repo_go_test_srcs",
+        "//internal/endpointtrust:repo_go_test_srcs",
         "//internal/eventsjournal:repo_go_test_srcs",
         "//internal/execenv:repo_go_test_srcs",
         "//internal/fdhygiene:repo_go_test_srcs",
@@ -1042,6 +1056,7 @@ filegroup(
         "//internal/doltremote:repo_other_files",
         "//internal/doltserver:repo_other_files",
         "//internal/doltversion:repo_other_files",
+        "//internal/endpointtrust:repo_other_files",
         "//internal/eventsjournal:repo_other_files",
         "//internal/execenv:repo_other_files",
         "//internal/fdhygiene:repo_other_files",

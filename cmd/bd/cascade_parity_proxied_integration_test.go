@@ -125,6 +125,44 @@ func runWispDecay(t *testing.T, r cascadeRunner) wispDecayOutcome {
 	}
 }
 
+// containmentOutcome is the observable result of a --cascade delete over
+// issue #6301's shape: the parent-child closure goes, and the epic joined to
+// it only by an association edge survives WITH its own child.
+type containmentOutcome struct {
+	rootGone           bool
+	childGone          bool
+	assocSurvives      bool
+	assocChildSurvives bool
+}
+
+// runContainmentCascade replays the containment rule's dangerous shape
+// (issue #6301): one epic whose --cascade delete must take its own subtree,
+// and a second epic joined to the first only by a --deps blocks edge — the
+// edge type the old "cascade follows all dependencies" rule swept the
+// bystander subtree away over.
+func runContainmentCascade(t *testing.T, r cascadeRunner) containmentOutcome {
+	t.Helper()
+
+	root := parseIssueJSON(t, []byte(r.run(t, "create", "--json", "Containment epic")))
+	child := parseIssueJSON(t, []byte(r.run(t, "create", "--json", "Containment child",
+		"--parent", root.ID)))
+	// The association edge: --deps depends-on seeds a blocks edge, which a
+	// cascade must NOT follow.
+	assoc := parseIssueJSON(t, []byte(r.run(t, "create", "--json", "Associated epic",
+		"--deps", "depends-on:"+root.ID)))
+	assocChild := parseIssueJSON(t, []byte(r.run(t, "create", "--json", "Associated epic child",
+		"--parent", assoc.ID)))
+
+	r.run(t, "delete", root.ID, "--cascade", "--force")
+
+	return containmentOutcome{
+		rootGone:           !r.exists(t, root.ID),
+		childGone:          !r.exists(t, child.ID),
+		assocSurvives:      r.exists(t, assoc.ID),
+		assocChildSurvives: r.exists(t, assocChild.ID),
+	}
+}
+
 // pruneSweepOutcome is the observable result of `bd prune --pattern '*'
 // --force`, the durable-plane sibling of the wisp purge.
 type pruneSweepOutcome struct {
@@ -231,6 +269,32 @@ func TestProxiedServerCascadeParity(t *testing.T) {
 		}
 		if !proxied.openWispSurvives {
 			t.Errorf("proxied: purge deleted an OPEN wisp — purge is closed-only")
+		}
+	})
+
+	t.Run("containment_cascade", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ccp")
+		proxied := runContainmentCascade(t, proxiedCascadeRunner(t, bd, p))
+
+		classicDir, _, _ := bdInit(t, bd, "--prefix", "ccc")
+		classic := runContainmentCascade(t, classicCascadeRunner(t, bd, classicDir))
+
+		if proxied != classic {
+			t.Errorf("containment cascade differs across modes:\n  proxied: %#v\n  classic: %#v",
+				proxied, classic)
+		}
+		// One expectation, both modes (issue #6301): a cascade follows
+		// parent-child edges only, so the association must not carry the
+		// bystander subtree away with it.
+		want := containmentOutcome{
+			rootGone: true, childGone: true,
+			assocSurvives: true, assocChildSurvives: true,
+		}
+		if proxied != want {
+			t.Errorf("proxied containment cascade: got %#v, want %#v "+
+				"(issue #6301: --cascade follows parent-child edges only; the associated epic and its child must survive)",
+				proxied, want)
 		}
 	})
 

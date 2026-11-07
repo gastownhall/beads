@@ -65,9 +65,10 @@ func (t *DirtyTableTracker) DirtyTables() map[string]bool {
 // commit helpers already skip an empty staged set, so the false-positive side
 // is free; tracking real mints would mean threading state back out of the seam
 // for no behavioral gain. The one thing it does widen is `issues` on the
-// dependency paths, which stage only {dependencies, events} today -- and that
-// widening is exactly what the current_revision advance requires, gated on
-// history being on, so no flag-off commit changes shape.
+// dependency paths, which stage it only when the edge flipped a durable
+// is_blocked (GH#6647) -- and that widening is exactly what the
+// current_revision advance requires, gated on history being on, so no
+// flag-off commit changes shape.
 func (t *DirtyTableTracker) MarkVersionedHistoryDirty(enabled bool) {
 	if !enabled || len(t.tables) == 0 {
 		return
@@ -96,14 +97,8 @@ func (t *DirtyTableTracker) MarkVersionedHistoryDirty(enabled bool) {
 // unauthored, and passing an empty --author would be a malformed commit rather
 // than an unattributed one.
 func StageAndCommit(ctx context.Context, conn DBConn, dirtyTables map[string]bool, commitMsg, author string) error {
-	_, err := stageAndCommit(ctx, conn, dirtyTables, commitMsg, author)
-	return err
-}
-
-// stageAndCommit is StageAndCommit, reporting whether it made a commit.
-func stageAndCommit(ctx context.Context, conn DBConn, dirtyTables map[string]bool, commitMsg, author string) (bool, error) {
 	if commitMsg == "" || len(dirtyTables) == 0 {
-		return false, nil
+		return nil
 	}
 
 	// dirtyTables tracks tables touched by a write statement, but a statement
@@ -122,15 +117,15 @@ func stageAndCommit(ctx context.Context, conn DBConn, dirtyTables map[string]boo
 	// captures that correctly where a rows-affected check would not.
 	pending, err := issueops.HasPendingChanges(ctx, conn)
 	if err != nil {
-		return false, fmt.Errorf("check pending changes before commit: %w", err)
+		return fmt.Errorf("check pending changes before commit: %w", err)
 	}
 	if !pending {
-		return false, nil
+		return nil
 	}
 
 	for table := range dirtyTables {
 		if err := schema.DrainCall(ctx, conn, "CALL DOLT_ADD(?)", table); err != nil {
-			return false, fmt.Errorf("dolt add %s: %w", table, err)
+			return fmt.Errorf("dolt add %s: %w", table, err)
 		}
 	}
 
@@ -142,22 +137,19 @@ func stageAndCommit(ctx context.Context, conn DBConn, dirtyTables map[string]boo
 	// will commit) and skip the empty commit.
 	staged, err := issueops.HasStagedChanges(ctx, conn)
 	if err != nil {
-		return false, fmt.Errorf("check staged changes before commit: %w", err)
+		return fmt.Errorf("check staged changes before commit: %w", err)
 	}
 	if !staged {
-		return false, nil
+		return nil
 	}
 	if author == "" {
 		err = schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-m', ?)", commitMsg)
 	} else {
 		err = schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", commitMsg, author)
 	}
-	if err != nil {
-		if issueops.IsNothingToCommitError(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("dolt commit: %w", err)
+	if err != nil && !issueops.IsNothingToCommitError(err) {
+		return fmt.Errorf("dolt commit: %w", err)
 	}
 
-	return true, nil
+	return nil
 }

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# The CC of .goreleaser.yml's bd-android-arm64 build: the pinned Android NDK's
+# API-21 clang (see lib/android-ndk-clang.sh; android-arm64-cxx is its twin).
+set -euo pipefail
+# shellcheck source=lib/android-ndk-clang.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/android-ndk-clang.sh"
+android_ndk_exec_clang "" "$@"

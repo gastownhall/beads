@@ -626,13 +626,17 @@ var doltIgnorePatterns = []string{
 	// excludeIgnored, existingCommittableTables), so no migration commit
 	// stages it, and dolt pull refuses the uncommitted non-add delta until
 	// the store is repaired by hand. And it must be asserted before the
-	// ignored series runs: on a
-	// @@dolt_transaction_commit=1 server an unignored CREATE __temp__X
-	// auto-commits a real table at HEAD, and the rename to the ignored final
-	// name then leaves an unstageable "__temp__X -> X" rename half in
-	// dolt_status that wedges the store for every open behind the
-	// dirty-table guard. dolt matches ignore patterns with ? * % only —
-	// underscores are literal — so this covers exactly the __temp__ prefix.
+	// ignored series runs: under @@dolt_transaction_commit=1 an unignored
+	// CREATE __temp__X auto-commits a real table at HEAD, and the rename to
+	// the ignored final name then leaves an unstageable "__temp__X -> X"
+	// rename half in dolt_status that wedges the store for every open behind
+	// the dirty-table guard. This binary's own pass turns that setting off
+	// for its session (suspendTransactionCommit, GH#4470), so the pattern
+	// now guards the passes of binaries without the suspension, and keeps
+	// another auto-commit session on a shared server from sweeping an
+	// intermediate into its commit. dolt matches ignore patterns with ? * %
+	// only — underscores are literal — so this covers exactly the __temp__
+	// prefix.
 	"__temp__%",
 	// The events journal tables (bd-opisf) are seeded here rather than
 	// version-gated: they have never existed on the versioned plane, so
@@ -911,6 +915,13 @@ func MigrateUpTo(ctx context.Context, db DBConn, maxVersion int) (int, error) {
 	return applied, err
 }
 
+// MigrateUp brings both migration sources (main and dolt-ignored) to the
+// binary's latest versions, with all open-time reconciles, guards, backfills
+// and rekeys. db must be a single session held for the whole call — pin a
+// connection (database/sql *sql.Conn) the way the production callers do: the
+// pass suspends and restores @@SESSION.dolt_transaction_commit on it
+// (suspendTransactionCommit), and a pooled *sql.DB would let the SET land on
+// one connection while the migrations run on another.
 func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 	// Consent gate first, before ANY write — dolt_ignore seeding included: an
 	// existing database with pending main-sequence migrations must stay
@@ -973,7 +984,7 @@ func migrateUpConsented(ctx context.Context, db DBConn) (int, error) {
 // migrateUpAfterReconcile is MigrateUp's migration pass proper, split out so
 // the open-time reconciles above it have exactly one place to contribute to
 // the reported total.
-func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (int, error) {
+func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (applied int, err error) {
 	needed, err := migrationWorkNeeded(ctx, db)
 	if err != nil {
 		return 0, fmt.Errorf("checking schema migration work: %w", err)
@@ -991,6 +1002,16 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 		}
 		return 0, nil
 	}
+
+	// Past the converged early return so a no-work open issues no extra
+	// statements; ahead of every write the pass makes. Restored on every
+	// return below; a failed restore is joined to, never replaces, the
+	// pass's own result.
+	restoreTransactionCommit, err := suspendTransactionCommit(ctx, db)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { err = joinRestoreError(err, restoreTransactionCommit()) }()
 
 	dirtyBeforeAll, err := dirtyTables(ctx, db, false)
 	if err != nil {
