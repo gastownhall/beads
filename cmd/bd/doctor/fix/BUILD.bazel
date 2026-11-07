@@ -98,6 +98,7 @@ go_test(
     data = ["store.go"],
     embed = [":fix"],
     deps = [
+        "//internal/beads",
         "//internal/config",
         "//internal/configfile",
         "//internal/doltserver",
