@@ -4,6 +4,7 @@ package beads
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -79,6 +80,41 @@ func TestWindowsBoundaryContextRegression(t *testing.T) {
 		_, err := GetRepoContext()
 		if err == nil || !strings.Contains(err.Error(), "BEADS_DIR points to unsafe location") {
 			t.Errorf("GetRepoContext() from %s redirecting to %s: err = %v, want the unsafe-location error", ws, denied, err)
+		}
+	})
+
+	// GetRepoContextForWorkspace takes the workspace from its argument and
+	// finds .beads through git, so the redirect is read from a scratch repo.
+	t.Run("workspace redirect", func(t *testing.T) {
+		if _, err := exec.LookPath("git"); err != nil {
+			t.Fatalf("git is required to resolve the workspace: %v", err)
+		}
+		repo := filepath.Join(root, "repo")
+		noHooks := filepath.Join(root, "no-hooks")
+		if err := os.MkdirAll(noHooks, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		// No template hooks are copied, and an empty hooks path keeps any
+		// global hooks out of the git calls context construction makes.
+		for _, args := range [][]string{
+			{"init", "--template=", repo},
+			{"-C", repo, "config", "core.hooksPath", noHooks},
+		} {
+			if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+				t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
+			}
+		}
+		if err := os.MkdirAll(filepath.Join(repo, ".beads"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, ".beads", RedirectFileName), []byte(denied+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DIR", "")
+		reset()
+		_, err := GetRepoContextForWorkspace(repo)
+		if err == nil || !strings.Contains(err.Error(), "beads directory in unsafe location") {
+			t.Errorf("GetRepoContextForWorkspace(%s) redirecting to %s: err = %v, want the unsafe-location error", repo, denied, err)
 		}
 	})
 }
