@@ -1287,6 +1287,9 @@ type IssueDetails struct {
 	// Cardinality fields — emitted by default (count-only mode).
 	// Slice fields (Dependents, Comments) are nil when count-only is active.
 	// Use --include-dependents / --include-comments to populate the slices.
+	// A count whose query failed is left nil (key absent) and the view is
+	// still returned: absent means unknown, a present 0 means counted none
+	// (GH#7563).
 	DependentCount  *int64 `json:"dependent_count,omitempty"`
 	DependencyCount *int64 `json:"dependency_count,omitempty"`
 	CommentCount    *int64 `json:"comment_count,omitempty"`
@@ -1297,6 +1300,8 @@ type IssueDetails struct {
 	// and a caller checking only `.comments` sees `null`/absent and concludes
 	// "no comments" — both wrong (ga-clgh). Never set alongside a populated
 	// Comments slice or a zero count: a true empty stays plain omission.
+	// Nor when the comment count failed (CommentCount nil): an unknown count
+	// supports no claim that comments were left out (GH#7563).
 	CommentsOmitted *bool `json:"comments_omitted,omitempty"`
 
 	// GatedBy names the gates actively blocking this issue — the derived
