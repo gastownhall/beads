@@ -461,6 +461,98 @@ func TestValidateCountGroupClosesTheDimensionSet(t *testing.T) {
 	}
 }
 
+// TestCountNeedsConfig pins the one trigger set both counters share for the
+// config load: a request loads the workspace's ListConfig exactly when the
+// builder reads it — IncludeInfra (the infra vocabulary), a named IssueType
+// (the plane decision reads the workspace's infra set, GH#6258), or a
+// non-empty ExcludeStatus (custom status validation, PR #7199). A bare count
+// and IncludeEphemeral alone still skip the load: the plane bit itself needs
+// no vocabulary.
+func TestCountNeedsConfig(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		req  issueops.CountRequest
+		want bool
+	}{
+		{"bare request", issueops.CountRequest{}, false},
+		{"include-ephemeral alone", issueops.CountRequest{IncludeEphemeral: true}, false},
+		{"include-infra", issueops.CountRequest{IncludeInfra: true}, true},
+		{"a named type", issueops.CountRequest{IssueType: "task"}, true},
+		{"exclude-status", issueops.CountRequest{ExcludeStatus: []string{"closed"}}, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CountNeedsConfig(tt.req); got != tt.want {
+				t.Errorf("CountNeedsConfig(%+v) = %v, want %v", tt.req, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildCountFilterIgnoresConfigWhenCountNeedsConfigIsFalse is the other
+// half of TestCountNeedsConfig: that table pins the predicate, and this pins
+// the builder to it. For a request the predicate skips, both counters hand
+// BuildCountFilter the zero ListConfig, so the filter must not change when
+// the workspace config differs in every field the builder could read. A cfg
+// read added to the builder without a matching trigger — the #7199 and #6258
+// bug class — fails here rather than only in a backend contract test seeded
+// for that exact field.
+func TestBuildCountFilterIgnoresConfigWhenCountNeedsConfigIsFalse(t *testing.T) {
+	// Every field differs from the zero config's fallbacks: a custom status
+	// the built-in set lacks, and an infra set under which "agent" is no
+	// longer infra and "robot" is.
+	workspace := ListConfig{
+		CustomStatuses: []types.CustomStatus{{Name: "triage", Category: types.CategoryActive}},
+		CustomTypes:    []string{"robot"},
+		InfraSet:       map[string]bool{"robot": true},
+	}
+	priority := 1
+	for _, tt := range []struct {
+		name string
+		req  issueops.CountRequest
+	}{
+		{"bare request", issueops.CountRequest{}},
+		{"include-ephemeral alone", issueops.CountRequest{IncludeEphemeral: true}},
+		{"a custom status", issueops.CountRequest{Status: "triage"}},
+		{"excluded infra types", issueops.CountRequest{ExcludeTypes: []string{"agent,robot"}}},
+		{"scoped", issueops.CountRequest{Assignee: "alice", Labels: []string{"x"}, ParentID: "bd-1", Priority: &priority}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if CountNeedsConfig(tt.req) {
+				t.Fatalf("CountNeedsConfig(%+v) = true; this table holds only requests that skip the load", tt.req)
+			}
+			zero, err := BuildCountFilter(tt.req, ListConfig{})
+			if err != nil {
+				t.Fatalf("BuildCountFilter(zero config): %v", err)
+			}
+			loaded, err := BuildCountFilter(tt.req, workspace)
+			if err != nil {
+				t.Fatalf("BuildCountFilter(workspace config): %v", err)
+			}
+			if !reflect.DeepEqual(zero, loaded) {
+				t.Errorf("BuildCountFilter read the config for a request CountNeedsConfig skips:\nzero config: %+v\nworkspace:   %+v", zero, loaded)
+			}
+		})
+	}
+
+	// The control: where the predicate does trigger, the two configs build
+	// different filters, so the table above compares configs that would
+	// expose a read rather than two that happen to agree.
+	for _, issueType := range []string{"agent", "robot"} {
+		req := issueops.CountRequest{IssueType: issueType}
+		zero, err := BuildCountFilter(req, ListConfig{})
+		if err != nil {
+			t.Fatalf("BuildCountFilter(%s, zero config): %v", issueType, err)
+		}
+		loaded, err := BuildCountFilter(req, workspace)
+		if err != nil {
+			t.Fatalf("BuildCountFilter(%s, workspace config): %v", issueType, err)
+		}
+		if reflect.DeepEqual(zero, loaded) {
+			t.Errorf("type=%s: the zero and workspace configs built the same filter %+v; the workspace config no longer probes the infra set", issueType, zero)
+		}
+	}
+}
+
 func countPtrStr[T any](p *T) string {
 	if p == nil {
 		return "<nil>"

@@ -222,13 +222,15 @@ func countFilters(q *query) issueops.CountRequest {
 
 		// The plane switches, each forwarded as the boolean the caller sent.
 		// What include_infra MEANS — merge the wisps tier, drop templates, drop
-		// gates, and route an infra type to the ephemeral tier — is four
-		// decisions the role makes from the WORKSPACE's own infra vocabulary,
-		// which is a config load this handler must never perform.
+		// gates — is decided by the role from the WORKSPACE's own infra
+		// vocabulary, which is a config load this handler must never perform.
+		// So is the narrowing of a named infra type to its ephemeral rows,
+		// which holds with or without include_infra (GH#6258).
 		IncludeInfra: q.boolean("include_infra"),
-		// include_ephemeral is the first of those four and none of the rest, so
-		// it reaches the role as its own field and never as IncludeInfra: folded
-		// into it, a plane-only count would also lose its templates and gates.
+		// include_ephemeral merges the wisps tier and drops nothing, and it is
+		// the one switch that lifts that narrowing. So it reaches the role as
+		// its own field and never as IncludeInfra: folded into it, a plane-only
+		// count would also lose its templates and gates.
 		IncludeEphemeral: q.boolean("include_ephemeral"),
 
 		// The four scope fields behind `issues.count.scope` (S8), each read

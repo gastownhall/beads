@@ -282,6 +282,7 @@
 40 12 TestLifecycleUpdateContract
 40 12 TestReaderListExcludeStatusAcceptsAWorkspaceCustomStatus
 
+40 13 TestCounterInfraTypeCountMatchesList
 40 13 TestEmbeddedActivationDoesNotOpenTheEngine
 40 13 TestEmbeddedDepRekeyConvergesRenameChain
 40 13 TestEmbeddedDependencyEditorAppliesParentChildBeforeBlockingEdges

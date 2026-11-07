@@ -1308,6 +1308,12 @@ bd count
     | By default, returns the total count of issues matching the filters.
     | Use --by-* flags to group counts by different attributes.
     |
+    | By default a count reads durable rows only, but --type naming an infra
+    | type (types.infra; agent, role and message unless configured) counts
+    | only that type's ephemeral rows, as 'bd list --type' does. An infra
+    | type's --by-type bucket and its --type count are therefore different
+    | rows; with --include-ephemeral both count durable and ephemeral rows.
+    |
     | Examples:
     |   bd count                          # Count all issues
     |   bd count --status open            # Count open issues
@@ -1336,7 +1342,7 @@ bd count
   flag --exclude-type type=stringSlice default="[]" usage="Exclude issue types from the count (comma-separated or repeatable)"
   flag --has-metadata-key type=string default="" usage="Filter issues that have this metadata key set"
   flag --id type=string default="" usage="Filter by specific issue IDs (comma-separated)"
-  flag --include-ephemeral type=bool default="false" usage="Include ephemeral wisp-plane rows in the count (normally hidden), without lifting type exclusions"
+  flag --include-ephemeral type=bool default="false" usage="Count durable and ephemeral wisp-plane rows together, without lifting type exclusions (default: durable rows only, or an infra --type's ephemeral rows only)"
   flag --include-infra type=bool default="false" usage="Include infrastructure beads and the wisps tier (matches 'bd list --include-infra --all' cardinality)"
   flag --label -l type=stringSlice default="[]" usage="Filter by labels (AND: must have ALL)"
   flag --label-any type=stringSlice default="[]" usage="Filter by labels (OR: must have AT LEAST ONE)"

@@ -73,7 +73,8 @@ type CounterFixture struct {
 }
 
 // RunCounterCountsTheDurablePlaneByDefault pins counter.go:123-126 from the
-// unset side: without IncludeInfra a count answers for the durable plane only.
+// unset side: without IncludeInfra, IncludeEphemeral or a type the workspace
+// calls infra (GH#6258), a count answers for the durable plane only.
 //
 // The wisp seeded here catches a body that dropped the SkipWisps default: the
 // merge is the storage seam's DEFAULT, so "durable only" is an active decision
