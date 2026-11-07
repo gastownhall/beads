@@ -785,6 +785,35 @@ func TestProxiedServerClose2B(t *testing.T) {
 		}
 	})
 
+	// TestEmbeddedCloseSuggestNextBlockedStatus's proxied twin: on the
+	// proxied-server route too, a dependent whose own status is still
+	// 'blocked' carries the reviewed-release hint, an open dependent stays
+	// bare, and the stored status survives the close.
+	t.Run("close_suggest_next_blocked_status_hint", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "csbs")
+		a := bdProxiedCreate(t, bd, p.dir, "Blocked-status blocker")
+		b := bdProxiedCreate(t, bd, p.dir, "Blocked-status held dependent", "--deps", "depends-on:"+a.ID)
+		c := bdProxiedCreate(t, bd, p.dir, "Blocked-status open dependent", "--deps", "depends-on:"+a.ID)
+		if out, err := bdProxiedRun(t, bd, p.dir, "update", b.ID, "--status", "blocked"); err != nil {
+			t.Fatalf("bd update %s --status blocked failed: %v\n%s", b.ID, err, out)
+		}
+
+		out := bdProxiedClose(t, bd, p.dir, a.ID, "--suggest-next")
+
+		hint := "→ still status 'blocked' (bd close leaves it). If ready to release: bd update " + b.ID + " --status open"
+		if !strings.Contains(out, hint) {
+			t.Errorf("held dependent %s must carry the release hint, got:\n%s", b.ID, out)
+		}
+		if strings.Contains(out, "bd update "+c.ID+" --status open") {
+			t.Errorf("open dependent %s must stay bare (no release hint):\n%s", c.ID, out)
+		}
+		db := openProxiedDB(t, p)
+		if got := readStatus(t, db, b.ID); got != types.StatusBlocked {
+			t.Errorf("close must leave %s status 'blocked' for review, got %q", b.ID, got)
+		}
+	})
+
 	t.Run("single_transaction_dolt_commit", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "stdc")

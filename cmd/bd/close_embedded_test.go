@@ -927,3 +927,55 @@ func TestEmbeddedCloseConcurrent(t *testing.T) {
 	t.Logf("created and closed %d issues across %d concurrent workers, %d in DB",
 		len(allIDs), numWorkers, stats.TotalIssues)
 }
+
+// TestEmbeddedCloseSuggestNextBlockedStatus pins, on the direct route, what
+// `bd close --suggest-next` says about a dependent whose own status is still
+// 'blocked' when its last blocker closes: the text names the reviewed release
+// (bd update <id> --status open) and the stored status survives the close —
+// bd close deliberately never rewrites it. TestProxiedServerClose2B's
+// close_suggest_next_blocked_status subtest is its proxied twin.
+func TestEmbeddedCloseSuggestNextBlockedStatus(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	// fixture builds blocker A, held dependent B (manual status 'blocked',
+	// depending only on A) and open dependent C (depending only on A): the
+	// exact rows whose close output must differ.
+	fixture := func(t *testing.T) (dir, a, b, c string) {
+		dir, _, _ = bdInit(t, bd, "--prefix", "sb")
+		a = bdCreate(t, bd, dir, "Blocked-status blocker").ID
+		b = bdCreate(t, bd, dir, "Blocked-status held dependent", "--deps", "depends-on:"+a).ID
+		c = bdCreate(t, bd, dir, "Blocked-status open dependent", "--deps", "depends-on:"+a).ID
+		if out, err := bdRunWithFlockRetry(t, bd, dir, "update", b, "--status", "blocked"); err != nil {
+			t.Fatalf("bd update %s --status blocked failed: %v\n%s", b, err, out)
+		}
+		return dir, a, b, c
+	}
+
+	t.Run("text_names_reviewed_release_and_leaves_status", func(t *testing.T) {
+		dir, a, b, c := fixture(t)
+
+		out := bdClose(t, bd, dir, a, "--suggest-next")
+
+		if !strings.Contains(out, "Newly unblocked:") {
+			t.Fatalf("expected the newly-unblocked list, got:\n%s", out)
+		}
+		hint := "→ still status 'blocked' (bd close leaves it). If ready to release: bd update " + b + " --status open"
+		if !strings.Contains(out, hint) {
+			t.Errorf("held dependent %s must carry the release hint, got:\n%s", b, out)
+		}
+		if strings.Contains(out, "bd update "+c+" --status open") {
+			t.Errorf("open dependent %s must stay bare (no release hint):\n%s", c, out)
+		}
+		if got := bdShow(t, bd, dir, b); got.Status != types.StatusBlocked {
+			t.Errorf("close must leave %s status 'blocked' for review, got %s", b, got.Status)
+		}
+		if got := bdShow(t, bd, dir, c); got.Status != types.StatusOpen {
+			t.Errorf("close must leave %s open, got %s", c, got.Status)
+		}
+	})
+}

@@ -984,6 +984,51 @@ func TestStoreReadHintsNameTitlesEscaped(t *testing.T) {
 	})
 }
 
+// TestPrintNewlyUnblockedFlagsBlockedStatus pins bd close --suggest-next's
+// advisory for a newly-unblocked row whose own status is still 'blocked':
+// closing the last blocker clears the dependency block, but the status a
+// hand or a tracker set stays, and the row is invisible to 'bd ready' until
+// someone reviews it. The hint names the reviewed release (bd update
+// <id> --status open), spells the id the way every pasted command does
+// (remedy.CommandArg), and leaves the stored status alone — --json keeps
+// its shape, which the embedded and proxied close tests pin end to end.
+func TestPrintNewlyUnblockedFlagsBlockedStatus(t *testing.T) {
+	initConfigForTest(t)
+
+	t.Run("blocked row carries the release hint, open row stays bare", func(t *testing.T) {
+		out := captureStdout(t, func() error {
+			printNewlyUnblocked([]*types.Issue{
+				{ID: "bd-open", Title: "Open dependent", Status: types.StatusOpen, Priority: 2},
+				{ID: "bd-held", Title: "Held dependent", Status: types.StatusBlocked, Priority: 1},
+			})
+			return nil
+		})
+		want := "\nNewly unblocked:\n" +
+			"  • bd-open — Open dependent (P2)\n" +
+			"  • bd-held — Held dependent (P1)\n" +
+			"       → still status 'blocked' (bd close leaves it). If ready to release: bd update bd-held --status open\n"
+		if out != want {
+			t.Errorf("bd close --suggest-next prints\n%q\nwant\n%q", out, want)
+		}
+		requireNoTerminalControl(t, "bd close --suggest-next's blocked-status hint", out)
+	})
+
+	t.Run("hostile id takes the placeholder and its note", func(t *testing.T) {
+		out := captureStdout(t, func() error {
+			printNewlyUnblocked([]*types.Issue{{ID: hostileName, Title: "Step", Status: types.StatusBlocked, Priority: 1}})
+			return nil
+		})
+		if !strings.Contains(out, "bd update <issue-id> --status open") {
+			t.Errorf("hint must paste the placeholder for an id that is not a plain word:\n%q", out)
+		}
+		if !strings.Contains(out, "(<issue-id>: ") {
+			t.Errorf("hint must name the escaped id in the command's note:\n%q", out)
+		}
+		requireNoTerminalControl(t, "bd close --suggest-next's blocked-status hint", out)
+		requireNamesHostileValue(t, "bd close --suggest-next's blocked-status hint", out)
+	})
+}
+
 // TestRemedyPrintersKeepBdsOwnLines pins the routed open and create
 // refusals that wrap an error bd composed (a server-mode open's auto-start
 // failure, with its advice on lines of its own): the wrapped error is

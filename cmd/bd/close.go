@@ -799,10 +799,23 @@ func warnMoleculeAutoCloseRefusal(refusal string) {
 // printNewlyUnblocked prints bd close --suggest-next's list of the issues the
 // close unblocked, on both routes. The --continue hint follows it, so each
 // issue is named by printedFeedbackID.
+//
+// A row whose own status is still 'blocked' carries an advisory: closing the
+// last blocker clears the dependency block, not a status a hand or a tracker
+// set (a manual 'blocked' survives the close, and the row stays out of
+// 'bd ready' until it is reviewed). bd close deliberately never rewrites that
+// status — 'bd doctor' reports such rows, and the release is the reviewer's
+// call — so the hint names the command instead. Text-only: --json keeps its
+// closed/unblocked shape, status included.
 func printNewlyUnblocked(unblocked []*types.Issue) {
 	fmt.Printf("\nNewly unblocked:\n")
 	for _, issue := range unblocked {
 		fmt.Printf("  • %s (P%d)\n", printedFeedbackID(issue.ID, issue.Title), issue.Priority)
+		if issue.Status != types.StatusBlocked {
+			continue
+		}
+		id, note := remedy.CommandArg(runtime.GOOS, issue.ID, "<issue-id>")
+		fmt.Printf("       → still status 'blocked' (bd close leaves it). If ready to release: bd update %s --status open%s\n", id, note)
 	}
 }
 
