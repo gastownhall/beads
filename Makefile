@@ -452,9 +452,30 @@ install: check-up-to-date
 # Through the go.mod-pinned gofmt, never a bare PATH one: a newer local Go
 # formats differently from CI, so a bare gofmt -w here rewrites files into a
 # form CI's gofmt then rejects. See scripts/ci/gofmt-bin.sh.
+#
+# Over the Git source inventory, never the working tree: ignored Go artifacts
+# (scratch snapshots, generated backups) are outside the reviewed source and
+# must keep their bytes. This is the same inventory fmt-check.sh judges:
+# tracked files (--cached, keeping tracked files under ignored paths) plus
+# nonignored untracked ones (--others --exclude-standard), NUL-delimited so
+# file names with spaces or newlines survive; `--` guards option-like names,
+# and xargs bounds each exec against ARG_MAX. Entries that are no longer
+# regular files on disk -- paths deleted but not yet staged, symlinks -- are
+# filtered out by the sh pass between the two xargs runs, exactly what
+# fmt-check.sh skips: `git ls-files --cached` lists the index, not the disk,
+# and gofmt lstat-fails a whole batch on one missing path. That pass always
+# exits 0 so a fully-filtered batch cannot stop BSD xargs from feeding the
+# rest. An empty result is a no-op: BSD xargs would skip it anyway, and GNU
+# xargs would otherwise run gofmt -w against standard input, which gofmt
+# rejects. A git failure stays fatal.
 fmt:
 	@echo "Formatting Go files..."
-	@gofmt_bin="$$(./scripts/ci/gofmt-bin.sh)" && "$$gofmt_bin" -w .
+	@gofmt_bin="$$(./scripts/ci/gofmt-bin.sh)" && inventory="$$(mktemp)" && filtered="$$(mktemp)" && \
+		trap 'rm -f "$$inventory" "$$filtered"' EXIT INT TERM && \
+		git ls-files -z --cached --others --exclude-standard -- '*.go' >"$$inventory" && \
+		xargs -0 sh -c 'for f do if [ -f "$$f" ] && [ ! -L "$$f" ]; then printf "%s\0" "$$f"; fi; done; exit 0' sh \
+			<"$$inventory" >"$$filtered" && \
+		if [ -s "$$filtered" ]; then xargs -0 "$$gofmt_bin" -w -- <"$$filtered"; fi
 	@echo "Done"
 
 # Check that all Go files are properly formatted (for CI)
