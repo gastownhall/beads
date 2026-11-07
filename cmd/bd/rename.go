@@ -147,6 +147,13 @@ func updateReferencesInAllIssues(ctx context.Context, store storage.DoltStorage,
 			updates["acceptance_criteria"] = oldPattern.ReplaceAllString(issue.AcceptanceCriteria, newID)
 			updated = true
 		}
+		// close_reason rides along: UpdateIssue writes it without a status
+		// change, and a closed issue's "duplicate of <id>" reason is a
+		// reference like any other (GH#7040).
+		if oldPattern.MatchString(issue.CloseReason) {
+			updates["close_reason"] = oldPattern.ReplaceAllString(issue.CloseReason, newID)
+			updated = true
+		}
 
 		if updated {
 			if err := store.UpdateIssue(ctx, issue.ID, updates, actor); err != nil {

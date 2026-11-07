@@ -1172,6 +1172,7 @@ go_test(
         "rename_prefix_rewrite_test.go",
         "rename_prefix_test.go",
         "rename_prefix_worktree_test.go",
+        "rename_references_test.go",
         "reopen_defer_test.go",
         "reopen_embedded_test.go",
         "reopen_proxied_integration_test.go",
