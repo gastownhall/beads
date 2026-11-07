@@ -3,7 +3,25 @@ title: Issue Metadata
 description: Storing arbitrary JSON on issues as the extension point for integrations and execution hints
 ---
 
-The `metadata` field on issues accepts arbitrary JSON. Any valid JSON value is stored as-is.
+The `metadata` field on issues accepts arbitrary JSON.
+
+## Number fidelity
+
+Integer literals are stored and read back exactly through the full 64-bit
+range: a 19-digit external id such as `1546130668394913822` round-trips digit
+for digit on `bd create`, `bd update --metadata`, slot merges and
+`bd show --json`. Decimal and exponent forms (`0.1`, `1.0`, `1e3`), and
+integer literals wider than 64 bits, are held at float64 precision, so past
+2^53 (9007199254740992) such values read back rounded
+([#6330](https://github.com/gastownhall/beads/issues/6330)). A server-backed
+store's numeric fidelity is its server engine's; embedded stores use the
+engine version bd pins. When a value must stay exact everywhere, store it as
+a JSON string — `"thread_id": "1546130668394913822"` loses nothing.
+
+Turning on [versioned history](/reference/configuration) adds a stricter
+rule for history-participating rows: values outside the I-JSON exact-integer
+range (magnitude above 2^53-1, whatever their spelling) are refused when
+history is switched on and on later writes to rows that participate.
 
 Metadata is the preferred extension point for data that is specific to an
 integration, orchestrator, team workflow, or experimental automation. Before

@@ -1208,6 +1208,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Integers past 2^53 in issue metadata no longer round silently in bd's own
+  decode paths** (GH#6330). The storage column keeps integer literals exact
+  through the full 64-bit range (pinned engine), but three consumers decoded
+  the JSON through float64 and re-encoded what they read: `bd show`'s human
+  METADATA block printed `1546130668394913822` as `1546130668394913792`,
+  `SlotGet` returned rounded JSON for non-string slots (both Dolt and embedded
+  stores), and a Linear milestone sync rewrote unrelated numeric metadata
+  siblings rounded through `UpdateIssue`. All three now decode with
+  `json.Number` via `storage.DecodeMetadataObject`, rendering stored literals
+  digit for digit, nested values included (a stored `0.0000001` now displays
+  as written instead of `1e-07`). `bd show --json` was already exact. Decimal
+  and exponent forms stay float64-precision; store ids as strings for
+  portability across engine versions (see the issue-metadata number-fidelity
+  notes in the docs).
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In
