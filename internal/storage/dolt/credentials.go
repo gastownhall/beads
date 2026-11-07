@@ -691,6 +691,21 @@ func (s *DoltStore) prepareCLIRouteForPeerCredentials(ctx context.Context, peer 
 	return false, nil
 }
 
+// prepareCLIRouteForPeer reports whether a federation peer transfer (push,
+// pull, fetch) runs through the dolt CLI on account of the credentials it
+// needs, in the default remote's order: the peer's stored credentials first,
+// then cloud credentials for the peer URL's scheme in bd's environment
+// (prepareCLIRouteForCloudAuth). In server mode CALL DOLT_PUSH/PULL/FETCH run
+// in the server's process, which only has the environment it started with;
+// the dolt child inherits bd's (GH#6). Both checks route only where the CLI
+// directory is the database the connected server serves (hasCLIDatabase).
+func (s *DoltStore) prepareCLIRouteForPeer(ctx context.Context, peer string, creds *remoteCredentials) (bool, error) {
+	if useCLI, err := s.prepareCLIRouteForPeerCredentials(ctx, peer, creds); err != nil || useCLI {
+		return useCLI, err
+	}
+	return s.prepareCLIRouteForCloudAuth(ctx, peer)
+}
+
 func (s *DoltStore) shouldUseCLIForPeerCredentialsWithError(ctx context.Context, peer string, creds *remoteCredentials) (bool, error) {
 	return s.prepareCLIRouteForPeerCredentials(ctx, peer, creds)
 }

@@ -33,6 +33,9 @@ const federationStagingCleanupTimeout = 30 * time.Second
 // PushTo pushes commits to a specific peer remote.
 // If credentials are stored for this peer, they are used automatically.
 // For git-protocol remotes, uses CLI `dolt push` to avoid MySQL connection timeouts.
+// Stored credentials, or cloud credentials for the peer URL's scheme in bd's
+// environment, also route through CLI `dolt push` in server mode where the CLI
+// directory is the served database (prepareCLIRouteForPeer).
 func (s *DoltStore) PushTo(ctx context.Context, peer string) error {
 	return s.pushRefToPeer(ctx, peer, s.branch)
 }
@@ -48,7 +51,7 @@ func (s *DoltStore) pushRefToPeer(ctx context.Context, peer string, refspec stri
 		})
 	}
 	return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
-		if useCLI, err := s.prepareCLIRouteForPeerCredentials(ctx, peer, creds); err != nil {
+		if useCLI, err := s.prepareCLIRouteForPeer(ctx, peer, creds); err != nil {
 			return err
 		} else if useCLI {
 			return s.doltCLIPushRefToPeer(ctx, peer, refspec, creds)
