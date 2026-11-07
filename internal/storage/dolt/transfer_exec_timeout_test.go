@@ -389,6 +389,60 @@ func TestAnnotateTransferTimeout(t *testing.T) {
 	})
 }
 
+// TestLongTimeoutConnIgnoresTransferTimeout pins the scope boundary of
+// BEADS_DOLT_TRANSFER_TIMEOUT (GH#6375): the knob must not reach the
+// non-transfer openers. openLongTimeoutConn serves history reads,
+// blocked-state recomputation and federation staging and keeps its fixed 5m
+// read deadline; oneShotConn(0) is backup sync/restore's no-deadline
+// connection — a first sync to a cloud destination can exceed any fixed
+// budget. With the knob set to 1s and a server that goes silent on the
+// statement, a leaked deadline would kill the read at ~1s with the driver's
+// invalid-connection sentinel; here the caller's 4s context must be what
+// expires instead. This is a preservation guard: it passes on the base's
+// hardcoded budgets and fails only if the knob is wired into these openers.
+func TestLongTimeoutConnIgnoresTransferTimeout(t *testing.T) {
+	t.Setenv(transferExecTimeoutEnv, "1s")
+	const ctxBudget = 4 * time.Second
+	cases := []struct {
+		name string
+		open func(s *DoltStore) (*sql.DB, error)
+	}{
+		{"openLongTimeoutConn keeps its fixed 5m", func(s *DoltStore) (*sql.DB, error) {
+			return s.openLongTimeoutConn()
+		}},
+		{"backup oneShotConn(0) keeps no deadline", func(s *DoltStore) (*sql.DB, error) {
+			return s.oneShotConn(0)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakeTransferServer(t, "SELECT 1", nil)
+			s := &DoltStore{connStr: fake.dsn()}
+			db, err := tc.open(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+
+			ctx, cancel := context.WithTimeout(context.Background(), ctxBudget)
+			defer cancel()
+			start := time.Now()
+			_, err = db.ExecContext(ctx, "SELECT 1")
+			elapsed := time.Since(start)
+
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("error = %v, want the caller's context to expire (the connection has no 1s deadline)", err)
+			}
+			if errors.Is(err, mysql.ErrInvalidConn) {
+				t.Fatalf("error = %v, want no driver read-deadline failure", err)
+			}
+			if elapsed < 3*time.Second {
+				t.Fatalf("returned after %v; the read died before the 4s context, so the 1s transfer knob leaked into this opener", elapsed.Round(time.Millisecond))
+			}
+		})
+	}
+}
+
 // TestTransferReadDeadlineBoundsTransfer proves the transfer read deadline
 // knob reaches the connections that actually run server-side transfers
 // (GH#6375). With BEADS_DOLT_TRANSFER_TIMEOUT=1s and a server that completes
