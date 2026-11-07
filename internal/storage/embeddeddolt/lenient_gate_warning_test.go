@@ -98,6 +98,27 @@ func TestLenientGateWarningBody_BluntRefusalKeepsSharedGuidance(t *testing.T) {
 	if !strings.Contains(warning, "designated migrator") {
 		t.Fatalf("blunt refusal lost shared migrate-or-adopt guidance:\n%s", warning)
 	}
+	// gastownhall/beads#6687: bare `bd bootstrap` no-ops on this existing
+	// database, so the adopt bullet links the adoption procedure instead.
+	if strings.Contains(warning, "every other clone (another already migrated): bd bootstrap\n") {
+		t.Errorf("blunt refusal still prescribes bare bd bootstrap for adoption:\n%s", warning)
+	}
+	flat := strings.Join(strings.Fields(warning), " ")
+	for _, want := range []string{
+		schema.AdoptionGuideURL,
+		`"Nothing to do."`,
+		"no other bd process",
+		"previous-version export",
+	} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("blunt refusal adopt bullet is missing %q:\n%s", want, warning)
+		}
+	}
+	for _, gone := range []string{"mv .beads", "mkdir -p"} {
+		if strings.Contains(warning, gone) {
+			t.Errorf("blunt refusal prints a filesystem command %q:\n%s", gone, warning)
+		}
+	}
 }
 
 // TestLenientGateWarning_ComposedOutput pins the COMPOSED warning — body plus
