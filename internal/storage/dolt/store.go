@@ -656,6 +656,23 @@ func transferExecTimeoutDuration() time.Duration {
 	return timeoutFromEnv(transferExecTimeoutEnv, transferExecTimeout)
 }
 
+// annotateTransferTimeout names the read deadline when a server-side transfer
+// statement lost its connection after running at least that long. When a
+// read deadline fires, the driver logs the network timeout and returns only
+// ErrInvalidConn ("invalid connection"), which names neither the deadline nor
+// the knob that raises it (GH#6375). The elapsed time makes the deadline a
+// plausible cause but cannot prove it — a reset after that long looks the
+// same — so the hint is conditional advice. Every other error (an earlier
+// disconnect, a SQL error, a canceled or expired context) and success pass
+// through unchanged; the original error stays reachable with errors.Is.
+func annotateTransferTimeout(err error, elapsed, deadline time.Duration) error {
+	if err == nil || elapsed < deadline || !errors.Is(err, mysql.ErrInvalidConn) {
+		return err
+	}
+	return fmt.Errorf("server-side transfer connection lost; the read deadline (%s) may have expired; for a slow transfer raise %s=<duration> (e.g. 20m): %w",
+		deadline, transferExecTimeoutEnv, err)
+}
+
 // cliExecWaitDelay bounds how long Wait/CombinedOutput may keep waiting after
 // the transfer context expires. CommandContext kills only the direct dolt
 // child; a grandchild (e.g. a cloud credential helper) that inherited the
