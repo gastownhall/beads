@@ -394,3 +394,78 @@ func TestCheckRepoFingerprint_LegacyAliasHashMatches(t *testing.T) {
 		t.Fatalf("stored repo_id changed from %s to %s", fp.LegacyID, got)
 	}
 }
+
+// TestRepoFingerprintSharedLedgerAliasScenario drives the GH#5990 story
+// across two checkouts sharing one ledger: machine A reaches the remote
+// through alias-a, machine B through alias-b, both resolving to the same
+// canonical host. A ledger initialized by A before alias resolution (storing
+// A's legacy alias hash) verifies on A and errors on B; once the repair
+// stores the resolved id, both machines verify — and the read-only check
+// never writes metadata on any read.
+func TestRepoFingerprintSharedLedgerAliasScenario(t *testing.T) {
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Skip("no ssh binary on PATH; alias resolution cannot run")
+	}
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sshConfig := "Host alias-a\n  HostName github.com\n  User git\n\nHost alias-b\n  HostName github.com\n  User git\n"
+	if err := os.WriteFile(filepath.Join(sshDir, "config"), []byte(sshConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+
+	fingerprintRepo := func(t *testing.T, remote string) (string, beads.RepoFingerprint) {
+		t.Helper()
+		repo := t.TempDir()
+		if out, err := runGitCmd(repo, "init"); err != nil {
+			t.Fatalf("git init: %v\n%s", err, out)
+		}
+		cmd := gitCommand("remote", "add", "origin", remote)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git remote add %s: %v\n%s", remote, err, out)
+		}
+		fp, err := beads.ComputeRepoFingerprintForPath(repo)
+		if err != nil {
+			t.Fatalf("ComputeRepoFingerprintForPath(%s): %v", remote, err)
+		}
+		if fp.SSHAlias == "" {
+			t.Fatalf("test precondition: %s must resolve in this environment", remote)
+		}
+		return repo, fp
+	}
+
+	repoA, fpA := fingerprintRepo(t, "git@alias-a:org/repo.git")
+	repoB, fpB := fingerprintRepo(t, "git@alias-b:org/repo.git")
+	if fpA.ID != fpB.ID {
+		t.Fatalf("resolved ids differ (%s vs %s); both aliases must hash the canonical host", fpA.ID, fpB.ID)
+	}
+	if fpA.LegacyID == fpB.LegacyID {
+		t.Fatal("legacy ids unexpectedly equal; each alias spelling must have its own legacy hash")
+	}
+
+	store := &fakeRepoMetadataStore{values: map[string]string{"repo_id": fpA.LegacyID}}
+	if check := checkRepoFingerprintWithStore(store, repoA); check.Status != StatusOK {
+		t.Fatalf("A reading A-initialized ledger: Status = %q, want %q (message=%q, detail=%q)", check.Status, StatusOK, check.Message, check.Detail)
+	}
+	if check := checkRepoFingerprintWithStore(store, repoB); check.Status != StatusError {
+		t.Fatalf("B reading A-initialized ledger: Status = %q, want %q (message=%q)", check.Status, StatusError, check.Message)
+	}
+	if len(store.writes) != 0 {
+		t.Fatalf("doctor reads rewrote metadata keys %v; reads must not write", store.writes)
+	}
+
+	// The repair stores the resolved id; both machines now verify.
+	store.values["repo_id"] = fpB.ID
+	for _, repo := range []string{repoA, repoB} {
+		if check := checkRepoFingerprintWithStore(store, repo); check.Status != StatusOK {
+			t.Fatalf("post-repair read on %s: Status = %q, want %q (message=%q, detail=%q)", repo, check.Status, StatusOK, check.Message, check.Detail)
+		}
+	}
+	if len(store.writes) != 0 {
+		t.Fatalf("doctor reads rewrote metadata keys %v; reads must not write", store.writes)
+	}
+}
