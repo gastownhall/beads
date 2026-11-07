@@ -273,6 +273,20 @@ bd list --label backend --label-any urgent,release-blocker
 bd list --label needs-review,needs-tests --label-any frontend,ui,mobile
 ```
 
+### Pattern Filtering (--label-pattern, --label-regex)
+`bd list` and `bd ready` also match labels by glob or regular expression:
+
+```bash
+bd list --label-pattern 'tech-*'
+bd ready --label-regex '^tech-(debt|legacy)$'
+```
+
+A supplied flag must carry a pattern. `--label-pattern ""` (or a glob of only
+whitespace) and `--label-regex ""` exit with an error instead of being read as
+"no label filter" ([#6636](https://github.com/gastownhall/beads/issues/6636)).
+A regex of only whitespace is still accepted as written: it matches labels
+that contain a space.
+
 ## Workflow Examples
 
 ### Triage Workflow
