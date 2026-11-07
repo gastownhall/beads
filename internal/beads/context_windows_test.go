@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/git"
 )
 
 // TestIsPathInSafeBoundary_WindowsSystemDirs pins the SEC-003 boundary on
@@ -116,4 +118,69 @@ func TestWindowsBoundaryRegression(t *testing.T) {
 	if !isPathInSafeBoundary(base) {
 		t.Errorf("isPathInSafeBoundary(%q) = false, want true (temp fixture root)", base)
 	}
+}
+
+// TestWindowsBoundaryContextRegression pins the context-construction arms of
+// the Windows SEC-003 boundary (GH#6101): a BEADS_DIR that resolves into a
+// denied system directory, and an existing workspace redirect into one, must
+// both fail with their unsafe-location errors instead of silently binding the
+// store. The denied tree is a fixture made deny-able through an additive
+// SystemRoot environment value — the fixed literals and the OS-reported
+// directory stay in force — and the ambient temp carve-out is placed in a
+// distinct sibling so it cannot swallow the denial. No real system directory
+// is written.
+func TestWindowsBoundaryContextRegression(t *testing.T) {
+	base := t.TempDir()
+	deniedRoot := filepath.Join(base, "fake-system-root")
+	deniedDir := filepath.Join(deniedRoot, "beads")
+	if err := os.MkdirAll(deniedDir, 0o750); err != nil {
+		t.Fatalf("mkdir denied beads dir: %v", err)
+	}
+	// A database marker so the directory is a discoverable beads workspace
+	// and a followable redirect target; the boundary must still reject it.
+	if err := os.WriteFile(filepath.Join(deniedDir, "beads.db"), nil, 0o640); err != nil {
+		t.Fatalf("write beads.db marker: %v", err)
+	}
+	t.Setenv("SystemRoot", deniedRoot)
+	siblingTemp := filepath.Join(base, "ambient-temp")
+	t.Setenv("TMP", siblingTemp)
+	t.Setenv("TEMP", siblingTemp)
+	t.Cleanup(func() {
+		ResetCaches()
+		git.ResetCaches()
+	})
+
+	t.Run("BEADS_DIR into a denied directory", func(t *testing.T) {
+		t.Setenv("BEADS_DIR", deniedDir)
+		ResetCaches()
+		// The denial fires before any git involvement, so this arm needs no
+		// git binary (it runs under wine).
+		_, err := GetRepoContext()
+		if err == nil || !strings.Contains(err.Error(), "BEADS_DIR points to unsafe location") {
+			t.Errorf("GetRepoContext() error = %v, want BEADS_DIR unsafe-location rejection", err)
+		}
+	})
+
+	t.Run("redirect into a denied directory", func(t *testing.T) {
+		if _, err := exec.LookPath("git"); err != nil {
+			t.Skip("workspace redirect resolution needs git; not available under wine")
+		}
+		repoDir := filepath.Join(base, "repo")
+		if out, err := exec.Command("git", "init", repoDir).CombinedOutput(); err != nil {
+			t.Skipf("git init failed: %v: %s", err, strings.TrimSpace(string(out)))
+		}
+		sourceBeads := filepath.Join(repoDir, ".beads")
+		if err := os.MkdirAll(sourceBeads, 0o750); err != nil {
+			t.Fatalf("mkdir source .beads: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(sourceBeads, RedirectFileName), []byte(deniedDir), 0o640); err != nil {
+			t.Fatalf("write redirect: %v", err)
+		}
+		ResetCaches()
+		git.ResetCaches()
+		_, err := GetRepoContextForWorkspace(repoDir)
+		if err == nil || !strings.Contains(err.Error(), "beads directory in unsafe location") {
+			t.Errorf("GetRepoContextForWorkspace() error = %v, want unsafe-location rejection", err)
+		}
+	})
 }
