@@ -42,9 +42,11 @@ type ExternalReadConfig struct {
 // runs no migration, and writes no file in the target workspace, the
 // database missing included. The endpoint, user and password are rc's alone;
 // nothing of the launcher's connection settings fills them in. A password is
-// presented only to an endpoint the workspace's trust pins admit (New's
-// doltserver.CheckEndpointTrust), and every TLS setting the sidecar names
-// reaches the connection.
+// presented only to a socket the user owns, bd's own loopback server, or an
+// endpoint already pinned for the target workspace
+// (doltserver.CheckExternalReadTrust, which New runs), never on the strength
+// of the launcher's own host settings, and every TLS setting the sidecar
+// names reaches the connection.
 func NewExternalReadOnly(ctx context.Context, rc ExternalReadConfig) (*DoltStore, error) {
 	if rc.BeadsDir == "" {
 		return nil, errors.New("external read: target workspace directory is required")

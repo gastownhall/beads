@@ -90,7 +90,10 @@ topology. Two limitations to expect, both tracked in
   bd connects to that server directly and read-only, as the user the file
   names, to the rig's own `dolt_database`, with the password in
   `BEADS_PROXIED_SERVER_EXTERNAL_PASSWORD` (none when it is unset), and
-  writes nothing into the rig. A rig whose server bd manages (no external
+  writes nothing into the rig. A password goes to a server other than bd's
+  local one, or a socket you own, only once that server is pinned for the
+  rig ([endpoint pins](/reference/configuration)); until then the gate stays
+  pending. A rig whose server bd manages (no external
   server in that file) can be reached only through its own proxy, so a
   routed read into it fails with `this command has no proxied-server route`,
   and a gate awaiting one of its beads stays pending as `cannot confirm the

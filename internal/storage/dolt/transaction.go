@@ -101,6 +101,9 @@ func (t *doltTransaction) CreateIssueImport(ctx context.Context, issue *types.Is
 // Wisp routing is handled by individual transaction methods based on
 // ID/Ephemeral.
 func (s *DoltStore) RunInTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {
+	if err := s.refuseExternalReadWrite(); err != nil {
+		return err
+	}
 	return s.runInTransaction(ctx, commitMsg, fn, s.runDoltTransaction)
 }
 

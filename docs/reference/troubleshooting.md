@@ -505,6 +505,12 @@ owning rig's own workspace, where the ID resolves locally rather than through
 a route. Tracked in
 [#5861](https://github.com/gastownhall/beads/issues/5861).
 
+bd sends `BEADS_PROXIED_SERVER_EXTERNAL_PASSWORD` only to its own local
+server, a socket you own, or a server already pinned for the rig's `.beads`
+directory ([endpoint pins](/reference/configuration)); a routed read never pins
+one. Any other server is refused with an error that names the rig's sidecar and
+the pin to set if that server is intended.
+
 ## Sync Issues
 
 ### Changes not syncing

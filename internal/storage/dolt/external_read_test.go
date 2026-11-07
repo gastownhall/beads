@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/endpointtrust"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -215,23 +216,48 @@ func TestExternalReadOnlyConnection(t *testing.T) {
 	})
 
 	t.Run("writes are refused", func(t *testing.T) {
+		ctx := context.Background()
 		store := f.openExternal(t, f.database, "", f.external)
-		err := store.CreateIssue(context.Background(), &types.Issue{
-			Title:     "must not land",
-			IssueType: types.TypeTask,
-			Priority:  2,
-			Status:    types.StatusOpen,
-		}, "tester")
-		if !errors.Is(err, ErrExternalReadOnlyWrite) {
-			t.Fatalf("write through the external store must fail with ErrExternalReadOnlyWrite, got: %v", err)
+		count := func(table string) int {
+			t.Helper()
+			var n int
+			if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&n); err != nil {
+				t.Fatalf("count %s: %v", table, err)
+			}
+			return n
 		}
-		// Nothing landed: the issues table still holds exactly the seed.
-		var n int
-		if err := store.db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM issues").Scan(&n); err != nil {
-			t.Fatalf("count issues after refused write: %v", err)
+		commitsBefore := count("dolt_log")
+		newIssue := func() *types.Issue {
+			return &types.Issue{Title: "must not land", IssueType: types.TypeTask, Priority: 2, Status: types.StatusOpen}
 		}
-		if n != 1 {
-			t.Fatalf("refused write must leave exactly the seeded issue, found %d", n)
+		callbackRan := false
+		for _, w := range []struct {
+			name  string
+			write func() error
+		}{
+			{"CreateIssue", func() error { return store.CreateIssue(ctx, newIssue(), "tester") }},
+			{"RunInTransaction", func() error {
+				return store.RunInTransaction(ctx, "must not land", func(tx storage.Transaction) error {
+					callbackRan = true
+					return tx.CreateIssue(ctx, newIssue(), "tester")
+				})
+			}},
+			{"Commit", func() error { return store.Commit(ctx, "must not land") }},
+		} {
+			if err := w.write(); !errors.Is(err, ErrExternalReadOnlyWrite) {
+				t.Errorf("%s through the external store must fail with ErrExternalReadOnlyWrite, got: %v", w.name, err)
+			}
+		}
+		if callbackRan {
+			t.Error("RunInTransaction ran its callback on the external store")
+		}
+		// Nothing landed: the issues table still holds exactly the seed, and
+		// the target's history has no new commit.
+		if n := count("issues"); n != 1 {
+			t.Errorf("refused writes must leave exactly the seeded issue, found %d", n)
+		}
+		if n := count("dolt_log"); n != commitsBefore {
+			t.Errorf("refused writes minted Dolt commits: %d -> %d", commitsBefore, n)
 		}
 	})
 }
@@ -394,20 +420,23 @@ func boundedExternalCtx(t *testing.T) context.Context {
 
 // TestExternalReadOnlyTrustFailClosed pins AC-6's credential rule: the
 // external password is never sent to an untrusted destination. The endpoint
-// trust check runs unchanged inside New — a workspace whose shared
-// configuration names a server (metadata.json dolt_server_host) that has
-// never pinned the sidecar's non-loopback endpoint refuses with
-// endpointtrust.FirstUseError before any dial, while loopback is bd's own
-// trusted origin and proceeds to the connection. Pins are isolated per test
-// through XDG_CONFIG_HOME.
+// comes from the target's sidecar, so only the target workspace's own pins
+// admit a non-loopback one (doltserver.CheckExternalReadTrust, run inside
+// New): an unpinned endpoint is refused with endpointtrust.FirstUseError and
+// a changed one with MismatchError, before any dial, whatever the launcher's
+// own host settings or the target's metadata.json name, and the refused read
+// pins nothing. Loopback is bd's own trusted origin and proceeds to the
+// connection. Pins are isolated per test through XDG_CONFIG_HOME.
 func TestExternalReadOnlyTrustFailClosed(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 
-	// The target workspace's shared configuration names a server: the
-	// sidecar's endpoint is shared configuration too, so it is not treated as
-	// privately confirmed.
-	newTarget := func(t *testing.T) string {
+	// newTarget lays out a proxied-server target workspace whose
+	// metadata.json names metadataHost as dolt_server_host ("" for none, as a
+	// workspace whose only endpoint is its sidecar's has).
+	newTarget := func(t *testing.T, metadataHost string) string {
 		t.Helper()
 		beadsDir := filepath.Join(t.TempDir(), ".beads")
 		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -417,29 +446,119 @@ func TestExternalReadOnlyTrustFailClosed(t *testing.T) {
 			ProjectID:      "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
 			DoltMode:       configfile.DoltModeProxiedServer,
 			DoltDatabase:   "gtdb",
-			DoltServerHost: "192.0.2.9",
+			DoltServerHost: metadataHost,
 		}
 		if err := meta.Save(beadsDir); err != nil {
 			t.Fatalf("save target metadata.json: %v", err)
 		}
 		return beadsDir
 	}
-
-	t.Run("non-loopback endpoint with a password is refused before dialing", func(t *testing.T) {
-		beadsDir := newTarget(t)
-		_, err := externalReadOnly(boundedExternalCtx(t), beadsDir, "gtdb",
-			configfile.ExternalDoltConfig{Host: "203.0.2.10", Port: 3306}, "secret") // #nolint:gosec // test fixture, never a real credential
+	// pinnedTo reports whether beadsDir's Dolt server pin is endpoint. The
+	// probe never pins: endpointtrust.Check writes only for a trusted source.
+	pinnedTo := func(beadsDir, endpoint string) bool {
+		return endpointtrust.Check(beadsDir, "dolt-server", endpoint, false) == nil
+	}
+	// pin records endpoint as beadsDir's Dolt server, as a private
+	// confirmation of it does.
+	pin := func(t *testing.T, beadsDir, endpoint string) {
+		t.Helper()
+		if err := endpointtrust.Check(beadsDir, "dolt-server", endpoint, true); err != nil {
+			t.Fatalf("pin %s for %s: %v", endpoint, beadsDir, err)
+		}
+	}
+	// assertRefused checks that err is the pin refusal want points to, worded
+	// for the sidecar: it names that file, the pin to set and the password it
+	// withheld, never the launcher's own endpoint settings, whose remedy
+	// would move the launcher's connection.
+	assertRefused := func(t *testing.T, err error, want any) {
+		t.Helper()
 		if err == nil {
 			t.Fatal("expected a trust refusal, got nil")
 		}
+		if !errors.As(err, want) {
+			t.Fatalf("want %T before any dial, got: %v", want, err)
+		}
+		msg := err.Error()
+		for _, part := range []string{configfile.ProxiedServerClientInfoFileName, `["dolt-server"]`, configfile.ExternalDoltPasswordEnvVar + " was not sent"} {
+			if !strings.Contains(msg, part) {
+				t.Errorf("refusal should name %q, got: %s", part, msg)
+			}
+		}
+		for _, part := range []string{"BEADS_DOLT_SERVER_HOST", "config.yaml"} {
+			if strings.Contains(msg, part) {
+				t.Errorf("refusal must not point at the launcher's %s, got: %s", part, msg)
+			}
+		}
+	}
+	const endpoint = "mysql://192.0.2.10:3306"
+	external := configfile.ExternalDoltConfig{Host: "192.0.2.10", Port: 3306}
+
+	t.Run("non-loopback endpoint with a password is refused before dialing", func(t *testing.T) {
+		beadsDir := newTarget(t, "192.0.2.9")
+		_, err := externalReadOnly(boundedExternalCtx(t), beadsDir, "gtdb",
+			configfile.ExternalDoltConfig{Host: "203.0.2.10", Port: 3306}, "secret") // #nolint:gosec // test fixture, never a real credential
 		var firstUse *endpointtrust.FirstUseError
-		if !errors.As(err, &firstUse) {
-			t.Fatalf("an unpinned non-loopback endpoint must refuse with FirstUseError before any dial, got: %v", err)
+		assertRefused(t, err, &firstUse)
+	})
+
+	t.Run("the launcher's own host setting does not vouch for the sidecar's endpoint", func(t *testing.T) {
+		// BEADS_DOLT_SERVER_HOST names the launcher's own server. Naming
+		// another host, or even the sidecar's, it confirms nothing the target
+		// pins, and the refused read pins nothing either.
+		for _, launcherHost := range []string{"launcher.example", "192.0.2.10"} {
+			t.Run(launcherHost, func(t *testing.T) {
+				t.Setenv("BEADS_DOLT_SERVER_HOST", launcherHost)
+				t.Setenv("BEADS_DOLT_SERVER_PORT", "3306")
+				beadsDir := newTarget(t, "192.0.2.9")
+				_, err := externalReadOnly(boundedExternalCtx(t), beadsDir, "gtdb", external, "secret") // #nolint:gosec // test fixture, never a real credential
+				var firstUse *endpointtrust.FirstUseError
+				assertRefused(t, err, &firstUse)
+				if pinnedTo(beadsDir, endpoint) {
+					t.Errorf("the refused read pinned %s for the target", endpoint)
+				}
+			})
+		}
+	})
+
+	t.Run("metadata without dolt_server_host does not make the sidecar's host private", func(t *testing.T) {
+		beadsDir := newTarget(t, "")
+		_, err := externalReadOnly(boundedExternalCtx(t), beadsDir, "gtdb", external, "secret") // #nolint:gosec // test fixture, never a real credential
+		var firstUse *endpointtrust.FirstUseError
+		assertRefused(t, err, &firstUse)
+		if pinnedTo(beadsDir, endpoint) {
+			t.Errorf("the refused read pinned %s for the target", endpoint)
+		}
+	})
+
+	t.Run("an endpoint pinned for the target proceeds to the connection", func(t *testing.T) {
+		beadsDir := newTarget(t, "")
+		pin(t, beadsDir, endpoint)
+		_, err := externalReadOnly(boundedExternalCtx(t), beadsDir, "gtdb", external, "secret") // #nolint:gosec // test fixture, never a real credential
+		if err == nil {
+			t.Fatal("expected a dial error for an address nothing answers on, got nil")
+		}
+		var firstUse *endpointtrust.FirstUseError
+		var mismatch *endpointtrust.MismatchError
+		if errors.As(err, &firstUse) || errors.As(err, &mismatch) {
+			t.Fatalf("the target pins %s, so the read must pass the trust check, got: %v", endpoint, err)
+		}
+	})
+
+	t.Run("a pin for another endpoint is neither bypassed nor replaced", func(t *testing.T) {
+		const pinned = "mysql://192.0.2.20:3306"
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "launcher.example")
+		beadsDir := newTarget(t, "")
+		pin(t, beadsDir, pinned)
+		_, err := externalReadOnly(boundedExternalCtx(t), beadsDir, "gtdb", external, "secret") // #nolint:gosec // test fixture, never a real credential
+		var mismatch *endpointtrust.MismatchError
+		assertRefused(t, err, &mismatch)
+		if !pinnedTo(beadsDir, pinned) {
+			t.Errorf("the refused read replaced the target's pin %s", pinned)
 		}
 	})
 
 	t.Run("loopback endpoint with a password proceeds to the connection", func(t *testing.T) {
-		beadsDir := newTarget(t)
+		beadsDir := newTarget(t, "192.0.2.9")
 		_, err := externalReadOnly(context.Background(), beadsDir, "gtdb",
 			configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: 1}, "secret") // #nolint:gosec // test fixture, never a real credential
 		if err == nil {
@@ -452,7 +571,7 @@ func TestExternalReadOnlyTrustFailClosed(t *testing.T) {
 	})
 
 	t.Run("no password sends no credential anywhere", func(t *testing.T) {
-		beadsDir := newTarget(t)
+		beadsDir := newTarget(t, "192.0.2.9")
 		_, err := externalReadOnly(boundedExternalCtx(t), beadsDir, "gtdb",
 			configfile.ExternalDoltConfig{Host: "203.0.2.10", Port: 3306}, "")
 		if err == nil {

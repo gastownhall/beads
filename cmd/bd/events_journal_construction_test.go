@@ -131,8 +131,9 @@ var constructionExemptions = map[string]string{
 	"store_factory_nocgo.go:openNonMutatingStoreFromConfig": "read-only/preview open: built-in arms refuse writes and the http arm's writes are journaled by its server, so no mutation can go unrecorded",
 	// A foreign read of a proxied-server workspace's external server
 	// (gastownhall/beads#5861): dolt.NewExternalReadOnly is a ReadOnly server
-	// open that never migrates, starts nothing and refuses writes.
-	"foreign_proxied_external_read.go:newExternalReadStore": "strict non-mutating external read: a ReadOnly server open that refuses writes, so no mutation can go unrecorded",
+	// open that never migrates and starts nothing, and its write entry points
+	// refuse (dolt.ErrExternalReadOnlyWrite names them).
+	"foreign_proxied_external_read.go:newExternalReadStore": "strict non-mutating external read: only foreign reads open it, and its write entry points refuse, so no mutation can go unrecorded",
 
 	// Store-open-time reconciliation, which runs BEFORE the command's own store
 	// exists and therefore before any workspace config could be applied to it.

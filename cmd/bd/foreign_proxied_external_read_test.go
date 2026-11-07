@@ -178,7 +178,9 @@ func TestForeignProxiedExternalReadGateStaysUnconfirmed(t *testing.T) {
 			name: "unreachable_server",
 			setup: func(t *testing.T) string {
 				externalReadTown(t, &configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: closedTCPPort(t)})
-				return "unreachable"
+				// The advice names the sidecar that declares the rig's
+				// server externally managed.
+				return configfile.ProxiedServerClientInfoFileName
 			},
 		},
 		{
@@ -243,6 +245,11 @@ func TestForeignProxiedExternalReadGateStaysUnconfirmed(t *testing.T) {
 			}
 			if want != "" && !strings.Contains(err.Error(), want) {
 				t.Errorf("err = %v, want it to name %q", err, want)
+			}
+			// Run in the launcher, bd dolt start starts the launcher's own
+			// server, never the rig's external one.
+			if strings.Contains(err.Error(), "bd dolt start") {
+				t.Errorf("err = %v, must not advise bd dolt start for the rig's external server", err)
 			}
 			assertBeadGatePendingUnconfirmed(t, err)
 		})
