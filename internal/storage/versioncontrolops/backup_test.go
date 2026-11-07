@@ -8,6 +8,7 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -109,6 +110,40 @@ func TestBackupToDirRefusesMissingOrFileDestination(t *testing.T) {
 	}
 }
 
+// TestBackupToDirRegistersFileURL pins that auto-backup registers the
+// directory under ExportBackupName with the same file:// URL DirToFileURL
+// builds, the one `bd backup init` builds too (GH#6019).
+func TestBackupToDirRegistersFileURL(t *testing.T) {
+	dir := t.TempDir()
+	want := "file://" + dir
+	if runtime.GOOS == "windows" {
+		want = "file://" + strings.ToUpper(dir[:1]) + filepath.ToSlash(dir[1:])
+	}
+	if got, err := DirToFileURL(dir); err != nil || got != want {
+		t.Fatalf("DirToFileURL(%q) = %q, %v; want %q", dir, got, err, want)
+	}
+
+	conn := &restoreConn{}
+	if err := BackupToDir(context.Background(), conn, conn, dir); err != nil {
+		t.Fatalf("BackupToDir(%q): %v", dir, err)
+	}
+	// remove, add, sync: the add binds the name and the URL, and the remove
+	// and sync name the same backup.
+	if len(conn.args) != 3 {
+		t.Fatalf("BackupToDir issued %d statements %v, want remove, add, sync", len(conn.args), conn.args)
+	}
+	rm, add, sync := conn.args[0], conn.args[1], conn.args[2]
+	if len(rm) != 1 || rm[0] != ExportBackupName {
+		t.Errorf("backup remove bound %v, want [%s]", rm, ExportBackupName)
+	}
+	if len(add) != 2 || add[0] != ExportBackupName || add[1] != want {
+		t.Errorf("backup add bound %v, want [%s %s]", add, ExportBackupName, want)
+	}
+	if len(sync) != 1 || sync[0] != ExportBackupName {
+		t.Errorf("backup sync bound %v, want [%s]", sync, ExportBackupName)
+	}
+}
+
 // restoreConn is a DBConn stub for BackupRestore: ExecContext records each
 // statement's bind args and returns execErr.
 type restoreConn struct {
@@ -206,6 +241,8 @@ func TestBackupRestoreSanitizesURLOnError(t *testing.T) {
 			want: "file:///var/backups/x"},
 		{name: "windows file URL", url: `file://C:\Users\me\backup`,
 			want: `file://C:\Users\me\backup`},
+		{name: "windows drive file URL", url: "file:///C:/Users/John Doe/backup",
+			want: "file:///C:/Users/John Doe/backup"},
 		{name: "percent in file path", url: "file:///var/backups/100%done",
 			want: "file:///var/backups/100%done"},
 		{name: "hash in file path", url: "file:///var/backups/my#dir",
