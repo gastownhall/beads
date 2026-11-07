@@ -193,7 +193,7 @@ func claimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, mintV
 				// This copy deliberately omits the parseable " by <assignee>"
 				// tail, so ParseClaimConflict recovers the holder from the
 				// typed field rather than the prose (bd-at6rc).
-				refusal = fmt.Errorf("%w: already assigned to %q — coordinate with the holder; if their claim is abandoned (crashed agent), lease expiry will surface it for bd reclaim", storage.ErrAlreadyClaimed, assignee)
+				refusal = storage.ClaimHolderSteeringRefusal(assignee, HeartbeatEnabled(ctx))
 			default:
 				refusal = fmt.Errorf("%w%s%s", storage.ErrAlreadyClaimed, storage.ClaimedByFragment, assignee)
 			}
@@ -210,7 +210,10 @@ func claimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, mintV
 	// stops heartbeating and bd reclaim later reverts the issue. Lease rows
 	// live in the ephemeral leases table (no Dolt commit, node-local). Wisps
 	// are never leased (they are ephemeral, not reclaimable work).
-	if !isWisp {
+	// Skipped entirely while heartbeat.enabled is false
+	// (gastownhall/beads#7506): the claim is still durable assignee/status, it
+	// just carries no lease to heartbeat or reap.
+	if !isWisp && HeartbeatEnabled(ctx) {
 		if err := UpsertLeaseInTx(ctx, tx, id, actor, now, leaseTTL(ctx)); err != nil {
 			return nil, err
 		}

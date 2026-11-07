@@ -44,6 +44,33 @@ func leaseTTL(ctx context.Context) time.Duration {
 	return DefaultLeaseTTL
 }
 
+// heartbeatEnabledContextKey overrides the heartbeat.enabled configuration
+// for a single call chain. Set by tests that exercise lease semantics and by
+// embedders that manage their own liveness protocol; unset in normal use.
+type heartbeatEnabledContextKey struct{}
+
+// WithHeartbeatEnabled returns a context whose lease machinery obeys enabled
+// instead of the heartbeat.enabled configuration default. Tests that pin the
+// disabled path use it to turn the machinery off without mutating global
+// config; embedders that run their own liveness protocol use it the other
+// way. It wins over the configuration for the whole call chain.
+func WithHeartbeatEnabled(ctx context.Context, enabled bool) context.Context {
+	return context.WithValue(ctx, heartbeatEnabledContextKey{}, enabled)
+}
+
+// HeartbeatEnabled reports whether lease heartbeat behavior is active for the
+// current call: the context override (WithHeartbeatEnabled) if present, else
+// the heartbeat.enabled configuration, which is on by default
+// (gastownhall/beads#7506). While disabled no lease is ever armed on claim, a
+// heartbeat keeps its holder validation but refreshes nothing, and reclaim
+// reverts nothing.
+func HeartbeatEnabled(ctx context.Context) bool {
+	if enabled, ok := ctx.Value(heartbeatEnabledContextKey{}).(bool); ok {
+		return enabled
+	}
+	return config.HeartbeatEnabled()
+}
+
 // freshRowLock returns a random non-zero int64 for the row_lock cell.
 //
 // row_lock is the keystone of dead-worker recovery on Dolt. Dolt has no real
@@ -409,6 +436,12 @@ func RenewLeaseInTx(ctx context.Context, tx DBTX, id, actor string) (LeaseRenewa
 	now := time.Now().UTC()
 	reported := now.Round(time.Second)
 	ttl := leaseTTL(ctx)
+	// heartbeat.enabled=false (gastownhall/beads#7506): a disabled deployment
+	// arms NO lease on claim (see ClaimIssueInTx), so there is nothing here to
+	// refresh. Only the WRITES below are gated; every read still runs, because
+	// the reads are what tell a caller the issue is gone or no longer theirs,
+	// and the verb keeps that error contract either way.
+	enabled := HeartbeatEnabled(ctx)
 	// granted_node is backfilled, never overwritten: a lease row whose
 	// provenance is unknown (granted before ignored migration 0016, or before
 	// this replica was named) is being kept alive through THIS node's store,
@@ -482,17 +515,23 @@ func RenewLeaseInTx(ctx context.Context, tx DBTX, id, actor string) (LeaseRenewa
 	// to the same issue (the holder's own edits racing its heartbeat), so
 	// expect more serialization failures on this statement, and keep it inside
 	// the retrying write transaction.
-	result, err := tx.ExecContext(ctx, `
+	var rows int64
+	if enabled {
+		// THE STATEMENT'S TEXT IS BYTE-IDENTICAL EITHER WAY, deliberately: the
+		// Postgres dialect keys its rewrite on this statement's `update leases
+		// set` prefix, so the disabled path must not fork the text it matches.
+		result, err := tx.ExecContext(ctx, `
 		UPDATE leases SET lease_expires_at = ?, heartbeat_at = ?,
 			granted_node = IF(COALESCE(granted_node, '') = '', ?, granted_node)
 		WHERE issue_id = ? AND holder = ?
 	`, now.Add(ttl), now, NodeID(ctx), id, actor)
-	if err != nil {
-		return LeaseRenewal{}, fmt.Errorf("failed to heartbeat issue: %w", err)
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return LeaseRenewal{}, fmt.Errorf("failed to get rows affected: %w", err)
+		if err != nil {
+			return LeaseRenewal{}, fmt.Errorf("failed to heartbeat issue: %w", err)
+		}
+		rows, err = result.RowsAffected()
+		if err != nil {
+			return LeaseRenewal{}, fmt.Errorf("failed to get rows affected: %w", err)
+		}
 	}
 	if rows > 0 {
 		// The live-claim check, in the same transaction as the UPDATE (so on
@@ -513,9 +552,10 @@ func RenewLeaseInTx(ctx context.Context, tx DBTX, id, actor string) (LeaseRenewa
 		}
 	}
 	if rows == 0 {
-		// No lease row. Disambiguate from the issue row: gone
-		// (closed/reopened/reclaimed), not-found, owned by someone else, or a
-		// wisp (never leased).
+		// No lease row refreshed: the UPDATE matched none, or the heartbeat
+		// machinery is off (heartbeat.enabled=false, gastownhall/beads#7506).
+		// Disambiguate from the issue row: gone (closed/reopened/reclaimed),
+		// not-found, owned by someone else, or a wisp (never leased).
 		isWisp := IsActiveWispInTx(ctx, tx, id)
 		issueTable, _, _, _ := WispTableRouting(isWisp)
 		var assignee, status string
@@ -579,6 +619,22 @@ func RenewLeaseInTx(ctx context.Context, tx DBTX, id, actor string) (LeaseRenewa
 			return LeaseRenewal{}, refused(fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, assignee))
 		}
 		if !isWisp && actorMatches(assignee, actor) && status == string(types.StatusInProgress) {
+			if !enabled {
+				// THE MACHINERY IS OFF AND THE CALLER IS A LIVE HOLDER — that is
+				// the whole of a disabled heartbeat: nothing to refresh, and
+				// deliberately nothing minted (UpsertLeaseInTx below is the one
+				// write "disabled" forbids, and the in-place refresh above is
+				// another lease write, so neither runs). This sits INSIDE the
+				// holder test on purpose: the reads above have already resolved
+				// the issue and judged the holder, so every other state
+				// (missing, unassigned, closed, reclaimed, someone else's, a
+				// wisp) fails exactly as it does with the machinery on, and a
+				// worker whose unit died stops instead of looping on success
+				// forever. A zero LeaseRenewal is reported rather than a
+				// plausible-looking timestamp, because nothing was written for
+				// the caller to read back.
+				return LeaseRenewal{}, nil
+			}
 			// The caller genuinely holds the claim but has no lease row — e.g.
 			// the claim was hand-doled through a generic update (which never
 			// arms a lease, bd-9hpgf), the worker is now opting into lease
@@ -935,6 +991,16 @@ func reclaimReplicaSQL(filter types.ReclaimFilter, localNode string) (string, []
 // label removed mid-reclaim cannot smuggle an out-of-scope issue into the
 // revert.
 func ReclaimExpiredLeasesInTx(ctx context.Context, tx DBTX, cutoff time.Time, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error) {
+
+	// heartbeat.enabled=false (gastownhall/beads#7506): no lease is armed, so
+	// there is nothing stale to reap. Return the empty result rather than
+	// erroring so `bd reclaim` on a supervisor timer exits 0 with "No stale
+	// leases to reclaim". A deployment that flips the flag off mid-flight
+	// leaves any previously armed lease un-reaped BY DESIGN; bd unclaim
+	// --force is the manual escape hatch for those rows.
+	if !HeartbeatEnabled(ctx) {
+		return nil, nil
+	}
 	// Snapshot the stale set first so we can report exactly which issues we
 	// reverted and record per-issue recovery events. The DELETE below repeats
 	// the expiry predicate, so an issue that a concurrent heartbeat rescued
