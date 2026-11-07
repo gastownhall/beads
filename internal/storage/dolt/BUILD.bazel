@@ -196,6 +196,7 @@ go_test(
         "crosstier_dep_test.go",
         "custom_status_test.go",
         "cycle_detector_contract_test.go",
+        "default_remote_env_note_test.go",
         "deleter_contract_test.go",
         "demote_coordination_test.go",
         "demote_to_wisp_test.go",

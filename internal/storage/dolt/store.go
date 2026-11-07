@@ -5330,6 +5330,11 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 	)
 	defer func() { endSpan(span, retErr) }()
 	creds := s.credentialsForRemote(remote)
+	// sent is what the route passes with --user, for the server-environment
+	// note on a failed transfer: the CLI routes pass creds' user, the SQL
+	// route only the default remote's user.
+	var sent *remoteCredentials
+	defer func() { retErr = s.withServerEnvNote(ctx, "DOLT_PUSH", remote, sent, retErr) }()
 	// Git-protocol remotes: use CLI to avoid MySQL connection timeout during transfer.
 	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
 	// but still need CLI to avoid SQL connection timeout.
@@ -5339,6 +5344,7 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 		return err
 	} else if useCLI {
 		logRouteDecision("push", remote, true)
+		sent = creds
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
 	// Credential CLI routing: when credentials are set and server is external,
@@ -5349,6 +5355,7 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 		return err
 	} else if useCLI {
 		logRouteDecision("push", remote, true)
+		sent = creds
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
 	// Cloud auth CLI routing: when cloud storage env vars (AZURE_*, AWS_*,
@@ -5359,17 +5366,19 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 		return err
 	} else if useCLI {
 		logRouteDecision("push", remote, true)
+		sent = creds
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
 	if useCLI, err := s.shouldUseCLIForLocalRemoteWithError(ctx, remote); err != nil {
 		return err
 	} else if useCLI {
 		logRouteDecision("push", remote, true)
+		sent = creds
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
 	logRouteDecision("push", remote, false)
 	if s.remoteUser != "" && remote == s.remote {
-		defer func() { retErr = s.withServerEnvNote(ctx, "DOLT_PUSH", remote, creds, retErr) }()
+		sent = creds
 		return withRemoteOperationEnv(creds, s.isS3Remote(ctx, remote), func() error {
 			if force {
 				if err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH('--force', '--user', ?, ?, ?)", s.remoteUser, remote, s.branch); err != nil {
@@ -5383,7 +5392,6 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 			return nil
 		})
 	}
-	defer func() { retErr = s.withServerEnvNote(ctx, "DOLT_PUSH", remote, nil, retErr) }()
 	return withRemoteOperationEnv(nil, s.isS3Remote(ctx, remote), func() error {
 		if force {
 			if err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH('--force', ?, ?)", remote, s.branch); err != nil {
@@ -5698,8 +5706,11 @@ func (s *DoltStore) pullTransport(ctx context.Context, remote string) error {
 // it merged or was already up to date, and its stdout is discarded — so they
 // report nothing; the SQL routes return what CALL DOLT_PULL (or the fallback's
 // CALL DOLT_MERGE) said. See pullReport for what that does and does not prove.
-func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (pullReport, error) {
+func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (_ pullReport, retErr error) {
 	creds := s.credentialsForRemote(remote)
+	// sent is what the route passes with --user (see pushToRemote).
+	var sent *remoteCredentials
+	defer func() { retErr = s.withServerEnvNote(ctx, "DOLT_PULL", remote, sent, retErr) }()
 	// Git-protocol remotes: use CLI to avoid MySQL connection timeout during transfer.
 	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
 	// but still need CLI to avoid SQL connection timeout.
@@ -5708,6 +5719,7 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 		return pullReport{}, err
 	} else if useCLI {
 		logRouteDecision("pull", remote, true)
+		sent = creds
 		// CLI pull leaves any conflicts in the working set; run the auto-resolver so
 		// git-protocol remotes get the same audit-only dependency / metadata repair
 		// as the SQL DOLT_PULL path (#4259).
@@ -5719,6 +5731,7 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 		return pullReport{}, err
 	} else if useCLI {
 		logRouteDecision("pull", remote, true)
+		sent = creds
 		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
 	}
 	// Cloud auth CLI routing (GH#6), including post-pull auto-resolution.
@@ -5726,6 +5739,7 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 		return pullReport{}, err
 	} else if useCLI {
 		logRouteDecision("pull", remote, true)
+		sent = creds
 		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
 	}
 	// Local file:// pulls intentionally stay on the SQL path. The matching CLI
@@ -5734,6 +5748,7 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 	logRouteDecision("pull", remote, false)
 	var report pullReport
 	if s.remoteUser != "" && remote == s.remote {
+		sent = creds
 		err := withRemoteOperationEnv(creds, s.isS3Remote(ctx, remote), func() error {
 			var err error
 			report, err = s.pullWithAutoResolveReporting(ctx, remote, "CALL DOLT_PULL('--user', ?, ?, ?)", s.remoteUser, remote, s.branch)
