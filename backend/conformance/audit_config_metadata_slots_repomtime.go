@@ -253,12 +253,14 @@ func testAuditRepoMtimeClearKeyAsymmetry(t *testing.T, f Factory) {
 // testAuditSlotGetNonStringValues pins SlotGet's json.Marshal fall-through: only
 // string metadata values return raw; every other JSON type is re-marshaled to text.
 // Numbers/bools/arrays render as JSON scalars/lists and object keys come back sorted
-// (Go's json.Marshal of map[string]interface{}). Reachable only via seeded metadata,
-// since SlotSet only ever stores strings.
+// (Go's json.Marshal of map[string]interface{}). Numbers keep their stored digits, so
+// an integer past 2^53 is not rounded through float64 (GH#6330). Reachable only via
+// seeded metadata, since SlotSet only ever stores strings.
 func testAuditSlotGetNonStringValues(t *testing.T, f Factory) {
 	s := f(t)
 	c := ctx()
-	meta := `{"n":5,"b":true,"arr":[1,2],"obj":{"y":2,"x":1},"s":"str"}`
+	meta := `{"n":5,"b":true,"arr":[1,2],"obj":{"y":2,"x":1},"s":"str",` +
+		`"big":1546130668394913822,"bigobj":{"z":9007199254740993,"a":[1546130668394913822]}}`
 	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-slotmeta", Title: "T", Metadata: []byte(meta)}), "a"))
 
 	cases := []struct{ key, want string }{
@@ -267,6 +269,8 @@ func testAuditSlotGetNonStringValues(t *testing.T, f Factory) {
 		{"arr", "[1,2]"},
 		{"obj", `{"x":1,"y":2}`}, // Go json.Marshal sorts object keys.
 		{"s", "str"},             // string branch: raw, no quotes.
+		{"big", "1546130668394913822"},
+		{"bigobj", `{"a":[1546130668394913822],"z":9007199254740993}`},
 	}
 	for _, tc := range cases {
 		v, err := s.SlotGet(c, "test-slotmeta", tc.key)
