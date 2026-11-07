@@ -126,6 +126,13 @@ func newTxReplaysCounter(meter metric.Meter) metric.Int64Counter {
 // ErrCommitIndeterminate outcome that may already have landed — is returned
 // after the single attempt that produced it.
 //
+// A create through tx writes what it mints (the ID, defaulted timestamps,
+// inline edge sources and comment IDs) back into the caller's issues, so a
+// callback that creates issues built outside it must restore them at its top
+// (issueops.SnapshotCreateInputs, taken before this call). Otherwise a replay
+// takes the rolled-back attempt's ID as one the caller named, and in counter
+// mode upserts over the issue the winning writer committed under that number.
+//
 // The loop is bounded by TxConflictReplayMaxElapsed, the total budget the
 // proxied routes' uow.RunTx shares. When it gives up it returns the last
 // conflict, which still matches ErrTransactionConflict, annotated with the

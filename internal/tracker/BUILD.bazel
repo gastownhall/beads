@@ -61,6 +61,7 @@ go_test(
         "//internal/storage/uow",
         "//internal/testutil",
         "//internal/types",
+        "@com_github_go_sql_driver_mysql//:mysql",
     ],
 )
 

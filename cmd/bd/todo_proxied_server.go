@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -53,7 +54,15 @@ func runTodoAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 		CreatedBy:   getActorWithGit(),
 	}
 
+	// The create writes its minted ID (and defaulted timestamps) back into
+	// issue, and RunTxResult replays this body after a lost commit-time
+	// conflict. Each attempt starts from the request built above: the
+	// rolled-back attempt's ID would read as one the caller named and, in
+	// counter mode, upsert over the issue the winning writer committed under
+	// that number.
+	restore := storageissueops.SnapshotCreateInputs([]*types.Issue{issue})
 	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (*types.Issue, string, error) {
+		restore()
 		result, err := uw.IssueUseCase().CreateIssue(ctx, domain.CreateIssueParams{Issue: issue}, getActorWithGit())
 		if err != nil {
 			return nil, "", err
