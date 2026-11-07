@@ -1208,6 +1208,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The Codex `UserPromptSubmit` hook no longer fails every prompt with
+  "hook returned invalid user prompt submit JSON output" after a
+  post-compaction refresh fails (GH#6039). Warning responses emitted an
+  empty `hookSpecificOutput` object, which Codex rejects without a
+  `hookEventName`; they now carry only `continue` and `systemMessage`. The
+  refresh marker is now cleared before `bd prime` runs, so a refresh that
+  fails or exceeds the hook deadline shows one warning instead of re-running
+  on every later prompt; run `bd prime` by hand, or let the next compaction
+  schedule another refresh. Warnings quote the first line of the failure (or
+  say the hook deadline passed) instead of the child's full output. The
+  repeated embedded-Dolt conjoin that can trigger the timeout is a separate
+  storage-layer investigation.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In
