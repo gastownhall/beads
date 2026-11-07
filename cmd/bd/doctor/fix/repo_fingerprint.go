@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -91,11 +90,14 @@ func updateRepoIDInProcess(path string, beadsDir string, autoYes bool) error {
 }
 
 // RepoFingerprint fixes repo fingerprint mismatches by prompting the user
-// for which action to take. This is interactive because the consequences
-// differ significantly between options:
+// for which action to take:
 //  1. Update repo ID (if URL changed or bd upgraded)
-//  2. Reinitialize database (if wrong database was copied)
-//  3. Skip (do nothing)
+//  2. Skip (do nothing)
+//
+// GH#5990: there is no reinitialize choice. A fingerprint mismatch is no
+// evidence the database is disposable, and in a shared-ledger deployment
+// deleting it destroys real state; the former choice "2" now skips like any
+// unrecognized input.
 //
 // All operations are performed in-process to avoid Dolt lock contention
 // that occurs when spawning bd subcommands. (GH#1805)
@@ -115,10 +117,11 @@ func RepoFingerprint(path string, autoYes bool) error {
 	fmt.Println("\n  Repo fingerprint mismatch detected. Choose an action:")
 	fmt.Println()
 	fmt.Println("    [1] Update repo ID (if git remote URL changed or bd was upgraded)")
-	fmt.Println("    [2] Reinitialize database (if wrong .beads was copied here)")
+	fmt.Println("        The repo ID is shared: the new value applies to every clone using")
+	fmt.Println("        this database, so update only if they all point to this repository.")
 	fmt.Println("    [s] Skip (do nothing)")
 	fmt.Println()
-	fmt.Print("  Choice [1/2/s]: ")
+	fmt.Print("  Choice [1/s]: ")
 
 	// Read single character without buffering to avoid consuming input meant for subprocesses
 	response, err := repoFingerprintReadLine()
@@ -131,56 +134,6 @@ func RepoFingerprint(path string, autoYes bool) error {
 	switch response {
 	case "1":
 		return updateRepoIDInProcess(path, beadsDir, false)
-
-	case "2":
-		// Detect backend to determine what to remove
-		cfg, cfgErr := configfile.Load(beadsDir)
-		if cfgErr != nil || cfg == nil {
-			cfg = configfile.DefaultConfig()
-		}
-		dbPath, err := confinedDatabasePath(beadsDir, cfg.DatabasePath(beadsDir))
-		if err != nil {
-			return err
-		}
-		isDolt := cfg.GetBackend() == configfile.BackendDolt
-
-		// Confirm before destructive action
-		fmt.Printf("  ⚠️  This will DELETE %s. Continue? [y/N]: ", dbPath)
-		confirm, err := repoFingerprintReadLine()
-		if err != nil {
-			return fmt.Errorf("failed to read confirmation: %w", err)
-		}
-		confirm = strings.TrimSpace(strings.ToLower(confirm))
-		if confirm != "y" && confirm != "yes" {
-			fmt.Println("  → Skipped (canceled)")
-			return nil
-		}
-
-		// Remove database and reinitialize in-process
-		fmt.Printf("  → Removing %s...\n", dbPath)
-		if isDolt {
-			if err := os.RemoveAll(dbPath); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("failed to remove Dolt database: %w", err)
-			}
-		} else {
-			if err := os.Remove(dbPath); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("failed to remove database: %w", err)
-			}
-			_ = os.Remove(dbPath + "-wal")
-			_ = os.Remove(dbPath + "-shm")
-		}
-
-		// Reinitialize by creating a new store (auto-bootstraps from JSONL)
-		fmt.Println("  → Reinitializing database from JSONL...")
-		ctx := context.Background()
-		store, err := dolt.NewFromConfig(ctx, beadsDir)
-		if err != nil {
-			return fmt.Errorf("failed to initialize database: %w", err)
-		}
-		defer func() { _ = store.Close() }()
-
-		fmt.Println("  ✓ Database reinitialized")
-		return nil
 
 	case "s", "":
 		fmt.Println("  → Skipped")
