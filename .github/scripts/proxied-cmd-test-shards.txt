@@ -276,6 +276,7 @@
 
 34 32 TestProxiedServerCleanDatabasesPurgeDropped
 34 32 TestProxiedServerConfigConcurrent
+34 32 TestProxiedServerDepAddRoutedExternalTarget
 34 32 TestProxiedServerDepB
 34 32 TestProxiedServerServeStreamsTheJournalItIsWriting
 34 32 TestProxiedServerServeUpdateClaim

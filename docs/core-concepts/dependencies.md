@@ -184,8 +184,10 @@ stored even when bd cannot find it in this database or through routes. `bd dep
 add` then warns on stderr that the ID was not found, or says why it could not
 be verified (the lookup itself failed, or the routed rig matches it only to
 other IDs), and prints the `bd dep remove` command that deletes the edge if the
-ID was a typo (`--quiet` silences the warning). Prefix routing cannot open a
-rig in proxied-server mode yet
+ID was a typo (`--quiet` silences the warning). An ID routed to a rig in
+proxied-server mode is checked only when that rig's
+`proxied_server_client_info.json` names an external Dolt server, which bd
+reads directly; a rig whose server bd manages cannot be opened through a route
 ([#5861](https://github.com/gastownhall/beads/issues/5861)), so bd cannot check
 an ID routed to such a rig and stores it without a warning.
 
