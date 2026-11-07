@@ -1208,6 +1208,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The Codex `UserPromptSubmit` hook no longer emits output Codex rejects, and
+  a failed post-compaction context refresh no longer repeats on every prompt
+  (#6039). Warning responses serialized an empty `hookSpecificOutput` object
+  (Go's `omitempty` never omits a struct value), which Codex rejects for
+  `UserPromptSubmit` because it lacks `hookEventName`; system-message-only
+  responses now omit the key. The refresh marker is also consumed before
+  `bd prime` runs instead of after it succeeds, so a prime that fails or hits
+  the hook's 30-second deadline produces one bounded warning ("Run bd prime
+  to reload context; automatic refresh will retry after the next compaction")
+  rather than a per-prompt retry loop; the next compaction re-arms the
+  automatic refresh. The repeated embedded-Dolt conjoin that can trigger the
+  timeout is a separate storage-layer investigation.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

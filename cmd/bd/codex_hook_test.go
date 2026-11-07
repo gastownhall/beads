@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func stubCodexHookPrime(t *testing.T, fn func(memoriesOnly bool) (string, error)) {
@@ -443,6 +444,112 @@ func TestCodexHookUserPromptRefreshRearmsAfterFailure(t *testing.T) {
 	}
 	if got.HookSpecificOutput.HookEventName != codexHookUserPromptSubmit || !strings.Contains(got.HookSpecificOutput.AdditionalContext, "REARMED BEADS CONTEXT") {
 		t.Fatalf("expected re-armed context injection, got %s", out.String())
+	}
+}
+
+func TestCodexHookFailureMessagesAreBounded(t *testing.T) {
+	const secondLine = "SECOND LINE DIAGNOSTIC MUST NOT LEAK"
+	longFirstLine := strings.Repeat("é", 300)
+	const recovery = "Run bd prime to reload context; automatic refresh will retry after the next compaction"
+
+	cases := []struct {
+		name          string
+		refresh       bool // false: PreCompact check; true: marked UserPromptSubmit refresh
+		expiredParent bool
+		primeErr      error // used when expiredParent is false
+		wantContains  []string
+	}{
+		{
+			name:         "precompact multiline error collapses to first line",
+			primeErr:     errors.New("workspace unavailable\n" + secondLine + "\nthird line"),
+			wantContains: []string{"Beads context check failed before compaction: workspace unavailable"},
+		},
+		{
+			name:         "precompact long unicode first line is capped",
+			primeErr:     errors.New(longFirstLine + "\n" + secondLine),
+			wantContains: []string{"Beads context check failed before compaction: "},
+		},
+		{
+			name:          "precompact deadline explains the hook deadline",
+			expiredParent: true,
+			wantContains:  []string{"Beads context check failed before compaction: bd prime exceeded the hook deadline"},
+		},
+		{
+			name:         "refresh multiline error collapses and names recovery",
+			refresh:      true,
+			primeErr:     errors.New("prime failed\n" + secondLine),
+			wantContains: []string{"Beads context refresh after compaction failed: prime failed", recovery},
+		},
+		{
+			name:          "refresh deadline explains the hook deadline and names recovery",
+			refresh:       true,
+			expiredParent: true,
+			wantContains:  []string{"Beads context refresh after compaction failed: bd prime exceeded the hook deadline", recovery},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			codexHookMarkerDirOverride = t.TempDir()
+			t.Cleanup(func() { codexHookMarkerDirOverride = "" })
+
+			if tc.expiredParent {
+				orig := codexHookExecPrime
+				codexHookExecPrime = func(ctx context.Context, memoriesOnly bool) (string, error) {
+					<-ctx.Done()
+					return "", ctx.Err()
+				}
+				t.Cleanup(func() { codexHookExecPrime = orig })
+			} else {
+				stubCodexHookPrime(t, func(memoriesOnly bool) (string, error) {
+					return "", tc.primeErr
+				})
+			}
+
+			event := codexHookPreCompact
+			if tc.refresh {
+				seed, _ := json.Marshal(codexHookInput{SessionID: "s1", CWD: "repo", HookEventName: codexHookPostCompact})
+				if err := runCodexHook(context.Background(), codexHookPostCompact, bytes.NewReader(seed), ioDiscard{}); err != nil {
+					t.Fatalf("PostCompact hook: %v", err)
+				}
+				event = codexHookUserPromptSubmit
+			}
+			parent := context.Background()
+			if tc.expiredParent {
+				expired, cancel := context.WithDeadline(parent, time.Now().Add(-time.Second))
+				defer cancel()
+				parent = expired
+			}
+			in, _ := json.Marshal(codexHookInput{SessionID: "s1", CWD: "repo", HookEventName: event})
+
+			var out bytes.Buffer
+			if err := runCodexHook(parent, event, bytes.NewReader(in), &out); err != nil {
+				t.Fatalf("%s hook: %v", event, err)
+			}
+			raw := decodeCodexHookObject(t, out.Bytes())
+			assertCodexHookOmitsHookSpecificOutput(t, raw)
+			var msg string
+			if err := json.Unmarshal(raw["systemMessage"], &msg); err != nil || msg == "" {
+				t.Fatalf("systemMessage = %s, want nonempty", raw["systemMessage"])
+			}
+			for _, want := range tc.wantContains {
+				if !strings.Contains(msg, want) {
+					t.Errorf("systemMessage missing %q: %s", want, msg)
+				}
+			}
+			if strings.Contains(msg, secondLine) {
+				t.Errorf("systemMessage leaked later error lines: %s", msg)
+			}
+			if strings.ContainsAny(msg, "\n\r") {
+				t.Errorf("systemMessage must be a single line: %q", msg)
+			}
+			if utf8.RuneCountInString(msg) > 600 {
+				t.Errorf("systemMessage is not bounded: %d runes", utf8.RuneCountInString(msg))
+			}
+			if !tc.refresh && strings.Contains(msg, "Run bd prime") {
+				t.Errorf("precompact warning should not carry refresh recovery instructions: %s", msg)
+			}
+		})
 	}
 }
 
