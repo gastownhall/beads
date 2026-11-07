@@ -2,7 +2,9 @@ package doctor
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -315,4 +317,85 @@ func TestClassifyRepoFingerprint(t *testing.T) {
 		}
 		assertNoDestructiveAdvice(t, check)
 	})
+}
+
+// GH#5990: a shared ledger initialized by one clone's old alias hash. Before
+// the explicit update only that clone verifies (through its LegacyID); after
+// one explicit update writes the newly computed id, every clone reaching the
+// repository through a supported alias, and the canonical HTTPS clone,
+// verifies.
+func TestRepoFingerprint_SharedLedgerConvergesAfterExplicitUpdate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake ssh is a shell script")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_SSH", "")
+	t.Setenv("GIT_SSH_COMMAND", "")
+	t.Setenv("GIT_SSH_VARIANT", "")
+
+	// An ssh whose config maps alias-a and alias-b to HostName github.com.
+	sshDir := t.TempDir()
+	script := `#!/bin/sh
+for dest; do :; done
+case "${dest#*@}" in
+alias-a|alias-b) echo "hostname github.com" ;;
+*) echo "hostname ${dest#*@}" ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(sshDir, "ssh"), []byte(script), 0o700); err != nil { // #nosec G306 -- test executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", sshDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	clone := func(remote string) string {
+		dir := t.TempDir()
+		for _, args := range [][]string{{"init", "-q"}, {"remote", "add", "origin", remote}} {
+			cmd := exec.Command("git", args...)
+			cmd.Dir = dir
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git %v: %v\n%s", args, err, out)
+			}
+		}
+		return dir
+	}
+	fingerprint := func(dir string) beads.RepoFingerprint {
+		fp, err := beads.ComputeRepoFingerprintForPath(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fp
+	}
+
+	cloneA := clone("git@alias-a:org/repo.git")
+	cloneB := clone("git@alias-b:org/repo.git")
+	cloneHTTPS := clone("https://github.com/org/repo.git")
+	fpA, fpB, fpHTTPS := fingerprint(cloneA), fingerprint(cloneB), fingerprint(cloneHTTPS)
+	if !fpA.AliasResolved() || !fpB.AliasResolved() {
+		t.Fatalf("aliases not resolved: A=%+v B=%+v", fpA, fpB)
+	}
+
+	// The ledger as bd init stamped it on clone A before the upgrade.
+	stored := fpA.LegacyID
+	if check := classifyRepoFingerprint(stored, fpA); check.Status != StatusOK {
+		t.Fatalf("clone A before update: %q %q, want OK through its legacy id", check.Status, check.Message)
+	}
+	if check := classifyRepoFingerprint(stored, fpB); check.Status != StatusError {
+		t.Fatalf("clone B before update: %q %q, want an error until the explicit update", check.Status, check.Message)
+	}
+
+	// The explicit update ('bd migrate --update-repo-id', or the doctor
+	// repair's update choice) records what ComputeRepoIDForPath returns.
+	updated, err := beads.ComputeRepoIDForPath(cloneB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated == stored {
+		t.Fatal("explicit update recorded the old alias hash")
+	}
+	for name, fp := range map[string]beads.RepoFingerprint{"A": fpA, "B": fpB, "https": fpHTTPS} {
+		if check := classifyRepoFingerprint(updated, fp); check.Status != StatusOK {
+			t.Errorf("clone %s after update: %q %q, want OK", name, check.Status, check.Message)
+		}
+	}
 }
