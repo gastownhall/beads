@@ -60,8 +60,9 @@ will work normally afterwards.
    ```
 
 4. Roll the cursor back with the [Dolt CLI](https://docs.dolthub.com/cli-reference/cli)
-   (any recent `dolt` release works; no `dolt config` setup is needed —
-   the command carries its own author). The database directory is
+   (this guide's commands were checked with `dolt` 2.6.0, so use that
+   release or a later one; no `dolt config` setup is needed — every
+   commit carries its own author). The database directory is
    `.beads/embeddeddolt/<db>` (embedded mode, the default) or
    `.beads/dolt/<db>` (server mode):
 
@@ -77,7 +78,7 @@ will work normally afterwards.
    of `events` from versioned history and kept the table only on this
    machine, which v1.2.2 cannot do for a clone. From the same database
    directory, run this batch; it puts back the table v1.2.1 removed, with
-   its original schema, and fills it with this machine's audit rows:
+   its original schema and rows, and adds this machine's audit rows:
 
    ```sh
    dolt sql <<'SQL'
@@ -95,28 +96,49 @@ will work normally afterwards.
    INSERT INTO recovery_check_staged SELECT IF(COUNT(*) = 0, 1, NULL) FROM dolt_status WHERE staged = 1;
    CREATE TEMPORARY TABLE recovery_check_empty (local_events_not_empty INT NOT NULL);
    INSERT INTO recovery_check_empty SELECT IF(COUNT(*) = 0 AND (SELECT COUNT(*) FROM events AS OF @preflip) > 0, NULL, 1) FROM events;
-   CREATE TEMPORARY TABLE recovery_check_carried (local_events_carry_history INT NOT NULL);
-   INSERT INTO recovery_check_carried SELECT IF(COUNT(*) = 0, 1, NULL) FROM events AS OF @preflip AS h
-     WHERE h.issue_id IN (SELECT id FROM issues) AND h.id NOT IN (SELECT id FROM events);
+   -- Rows are matched by content, not id: v1.2.1 gave the rows here new
+   -- ids. SHA2(JSON_ARRAY(...)) is a row's content as one value, NULLs
+   -- included, and CONCAT('', ...) has Dolt read text it keeps outside the
+   -- row. Identical rows are counted, not only matched.
+   CREATE TEMPORARY TABLE events_recovery_history (content CHAR(64) NOT NULL, copies INT NOT NULL);
+   INSERT INTO events_recovery_history
+     SELECT SHA2(JSON_ARRAY(issue_id, event_type, actor, CONCAT('', old_value), CONCAT('', new_value), CONCAT('', comment), created_at), 256) AS content, COUNT(*)
+     FROM events AS OF @preflip GROUP BY content;
    -- Restore: keep this machine's rows, put the historical table back.
    CREATE TABLE events_recovery_local AS
-     SELECT issue_id, event_type, actor, old_value, new_value, comment, created_at, id FROM events;
+     SELECT l.issue_id, l.event_type, l.actor, l.old_value, l.new_value, l.comment, l.created_at, l.id,
+       SHA2(JSON_ARRAY(l.issue_id, l.event_type, l.actor, CONCAT('', l.old_value), CONCAT('', l.new_value), CONCAT('', l.comment), l.created_at), 256) AS content,
+       h.id IS NOT NULL AS held
+     FROM events AS l LEFT JOIN events AS OF @preflip AS h ON h.id = l.id;
    DROP TABLE events;
    DELETE FROM dolt_ignore WHERE pattern = 'events';
    CALL DOLT_ADD('dolt_ignore');
    CALL DOLT_CHECKOUT(@preflip, '--', 'events');
-   DELETE FROM events WHERE id NOT IN (SELECT id FROM events_recovery_local);
+   -- Historical rows keep their ids, except the events of deleted issues.
+   DELETE FROM events WHERE issue_id NOT IN (SELECT id FROM issues);
+   -- Rows the history does not have are added: rows written since the
+   -- upgrade, and copies of a row beyond the history's count of it. A row
+   -- whose id the history has is counted first.
    INSERT IGNORE INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, id)
-     SELECT issue_id, event_type, actor, old_value, new_value, comment, created_at, id FROM events_recovery_local;
+     SELECT issue_id, event_type, actor, old_value, new_value, comment, created_at, id FROM
+       (SELECT l.*, ROW_NUMBER() OVER (PARTITION BY l.content ORDER BY l.held DESC, l.id) AS nth, COALESCE(h.copies, 0) AS history_copies
+        FROM events_recovery_local AS l LEFT JOIN events_recovery_history AS h ON h.content = l.content) AS local_rows
+     WHERE nth > history_copies AND issue_id IN (SELECT id FROM issues);
    DROP TABLE events_recovery_local;
    CALL DOLT_ADD('events');
    CALL DOLT_COMMIT('-m', 'recovery: restore versioned events table', '--author', 'bd recovery <recovery@beads.invalid>');
    SQL
    ```
 
-   Afterwards `events` holds exactly this machine's audit rows. Historical
-   rows this machine no longer has, the events of issues deleted since the
-   upgrade, are deleted, not recovered.
+   Afterwards `events` holds the history's audit rows and this machine's.
+   Because v1.2.1 gave this machine's copies of the rows new ids, the
+   batch matches rows by content: a row the history has keeps its
+   historical id, which every other machine has for it too, and a row only
+   this machine has, such as one written since the upgrade, keeps this
+   machine's id. Identical rows are separate events, so the batch counts
+   them: each comes back as many times as the history or this machine has
+   it, whichever is more. The events of issues deleted since the upgrade
+   are deleted, not recovered.
 
    If a check fails, the batch stops with an error naming it, before any
    change:
@@ -132,12 +154,6 @@ will work normally afterwards.
    - `local_events_not_empty` or `table not found: events`: this machine
      has no audit rows to keep. See
      [If `events` is missing or empty](#if-events-is-missing-or-empty).
-   - `local_events_carry_history`: this machine's `events` table lacks
-     audit rows that the history still has for existing issues, so it was not
-     carried over by the migration (for example, it was recreated by hand).
-     The batch cannot tell which rows were meant to go, so it stops rather
-     than delete them. Keep the backup and
-     [open an issue](https://github.com/gastownhall/beads/issues).
 
    The batch is not a transaction. An error after the checks (a crash, a
    full disk, a Dolt error from the restore itself) can leave the database
@@ -186,8 +202,12 @@ machines:
    its local `events` table or because its schema is ahead.
 3. Machines that never ran v1.2.1 just `bd dolt pull`.
 
-A machine that got the migration only by pulling it has no local `events`
-table; follow [If `events` is missing or empty](#if-events-is-missing-or-empty).
+A machine that got the migration by pulling it with the 1.1 line has no
+local `events` table; follow [If `events` is missing or empty](#if-events-is-missing-or-empty).
+A machine that got it by cloning with v1.2.1, as v1.2.1's `bd bootstrap`
+does, has an `events` table of its own: once that table holds audit rows,
+recover the machine with steps 2 to 7 like the others; while it is empty,
+follow the same section.
 
 ### If `events` is missing or empty
 
@@ -198,13 +218,16 @@ issues to it until it is fixed. There are two ways:
 
 - **Another machine still has the audit rows.** Recover that machine first
   (steps 2 to 7) and push. On this machine, take the backup (step 3), run
-  step 4 if `bd` still reports a schema mismatch, then `bd dolt pull`
-  before any issue write.
+  step 4 if `bd` still reports a schema mismatch, run the batch in
+  [Before a machine pulls the restored table](#before-a-machine-pulls-the-restored-table),
+  then `bd dolt pull` before any issue write.
 - **No machine has them** (every copy lacks the table, or has an empty one,
   such as the empty table the issue report's workaround creates). Restore
   the table from history on **one** machine with this batch, from the
-  database directory after steps 2 to 4, then push; every other machine
-  pulls.
+  database directory after steps 2 to 4, then push. Every other machine
+  runs the batch in
+  [Before a machine pulls the restored table](#before-a-machine-pulls-the-restored-table),
+  then pulls.
 
   ```sh
   dolt sql <<'SQL'
@@ -256,6 +279,44 @@ issues to it until it is fixed. There are two ways:
 Newer bd releases recreate a missing `events` table on their own. Do not
 run one briefly to fix a clone and then go back to v1.2.2: it migrates the
 database again.
+
+#### Before a machine pulls the restored table
+
+A pull cannot bring the restored `events` table to a machine that has an
+`events` table of its own, even an empty one: it fails with
+`local changes would be stomped by merge`, naming `events`, and committing
+first, as the message suggests, does not help. So after the backup
+(step 3), and before the pull, run this batch from the database directory
+of each machine that pulls the restored table. It drops the machine's
+`events` table only if that table is empty and still unversioned, and
+changes nothing on a machine that has no `events` table:
+
+```sh
+dolt sql <<'SQL'
+SET @flip = (SELECT commit_hash FROM dolt_log
+  WHERE message = 'schema: drop versioned events table for ignored-plane flip (bd-red8u)'
+    AND EXISTS (SELECT 1 FROM dolt_ignore WHERE pattern = 'events')
+    AND NOT EXISTS (SELECT 1 FROM dolt_log WHERE message = 'recovery: re-track events table')
+  ORDER BY date LIMIT 1);
+-- Checks. Each one stops the batch before anything changes.
+CREATE TEMPORARY TABLE recovery_check_history (events_history_found VARCHAR(64) NOT NULL);
+INSERT INTO recovery_check_history VALUES (@flip);
+SET @present = (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'events');
+SET @probe = IF(@present = 0, 'SET @local_rows = 0', 'SET @local_rows = (SELECT COUNT(*) FROM events)');
+PREPARE probe FROM @probe;
+EXECUTE probe;
+DEALLOCATE PREPARE probe;
+CREATE TEMPORARY TABLE recovery_check_local (local_events_absent_or_empty INT NOT NULL);
+INSERT INTO recovery_check_local VALUES (IF(@local_rows = 0, 1, NULL));
+-- The empty table the pull would refuse to replace.
+DROP TABLE IF EXISTS events;
+SQL
+```
+
+`local_events_absent_or_empty` means this machine has audit rows of its
+own: recover it with steps 2 to 7 instead, before it pulls.
+`events_history_found` means the same as in step 5; on a machine that
+already pulled the restored table, it means there is nothing left to do.
 
 ### If you already ran the old re-track command
 
