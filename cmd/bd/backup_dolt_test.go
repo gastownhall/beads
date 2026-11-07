@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 func TestResolveDoltBackupURL(t *testing.T) {
@@ -18,7 +19,7 @@ func TestResolveDoltBackupURL(t *testing.T) {
 	// Build the absolute-path fixture with platform-native semantics.
 	// A hard-coded POSIX literal like "/mnt/usb/beads-backup" is not absolute
 	// on Windows (no volume name), so resolveDoltBackupURL would resolve it
-	// against the current drive and return "file://C:\\mnt\\usb\\...".
+	// against the current drive and return "file:///C:/mnt/usb/...".
 	// t.TempDir() is absolute and already cleaned on every platform.
 	absBackup := filepath.Join(t.TempDir(), "beads-backup")
 
@@ -44,6 +45,16 @@ func TestResolveDoltBackupURL(t *testing.T) {
 			wantExact: "file:///tmp/backup",
 		},
 		{
+			name:      "windows drive file:// URL passes through",
+			input:     "file:///C:/backups/beads",
+			wantExact: "file:///C:/backups/beads",
+		},
+		{
+			name:      "lower-case drive file:// URL passes through unrepaired",
+			input:     `file://c:\backups\beads`,
+			wantExact: `file://c:\backups\beads`,
+		},
+		{
 			name:      "aws:// URL passes through",
 			input:     "aws://[key:secret@]bucket/path",
 			wantExact: "aws://[key:secret@]bucket/path",
@@ -56,7 +67,7 @@ func TestResolveDoltBackupURL(t *testing.T) {
 		{
 			name:      "absolute path gets file:// prefix",
 			input:     absBackup,
-			wantExact: "file://" + absBackup,
+			wantExact: versioncontrolops.PathToFileURL(absBackup),
 		},
 		{
 			name:    "relative path gets resolved and prefixed",
@@ -86,7 +97,7 @@ func TestResolveDoltBackupURL_HomeTilde(t *testing.T) {
 	t.Parallel()
 	got := resolveDoltBackupURL("~/backups/beads")
 	home, _ := os.UserHomeDir()
-	want := "file://" + filepath.Join(home, "backups/beads")
+	want := versioncontrolops.PathToFileURL(filepath.Join(home, "backups/beads"))
 	if got != want {
 		t.Errorf("resolveDoltBackupURL(~/backups/beads) = %q, want %q", got, want)
 	}
