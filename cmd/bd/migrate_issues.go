@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 var migrateIssuesCmd = &cobra.Command{
@@ -78,6 +79,7 @@ Examples:
 		if err := rejectEmptyLabelFilter(cmd, "label", labels); err != nil {
 			return err
 		}
+		labels = utils.NormalizeLabels(labels)
 
 		if idsFile != "" {
 			fileIDs, err := loadIDsFromFile(idsFile)
