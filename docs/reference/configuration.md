@@ -518,11 +518,11 @@ export NOTION_TOKEN="ntn_YOUR_TOKEN"        # or: bd config set notion.token ...
 bd config set notion.max_query_pages 100    # or NOTION_MAX_QUERY_PAGES; default 50
 ```
 
-How `bd notion sync` reads the data source:
+How `bd notion sync` reads the data source. Every query it sends, filtered or not, is bounded by `notion.max_query_pages` (or `NOTION_MAX_QUERY_PAGES`); a query that needs more pages fails with an error naming both settings and returns no partial rows.
 
 - **Incremental pull.** Once `notion.last_sync` is recorded, a pull asks Notion only for pages edited since that cursor (minus a short overlap). Notion applies the filter on its side, so the cost tracks recent edits, not the size of the data source.
-- **Full pull.** A pull with no recorded cursor, such as the first sync in a workspace, lists every row. It is bounded by `notion.max_query_pages` (or `NOTION_MAX_QUERY_PAGES`): each page of results holds up to 100 rows, so the default of 50 covers about 5,000. A query that needs more pages fails with an error naming both settings and imports nothing; raise the bound and run it again.
-- **Push and single-issue fetch.** Every push, whatever its size, looks up each issue on its own: a direct read of its linked page, or a query for its Beads ID when it has no link or the linked page is gone, archived, trashed, or in another data source. Push never lists the whole data source, so it is not limited by `notion.max_query_pages`.
+- **Full pull.** A pull with no recorded cursor, such as the first sync in a workspace, lists every row. Each page of results holds up to 100 rows, so the default bound of 50 covers about 5,000; a larger source fails the pull and imports nothing until you raise the bound and run it again.
+- **Push and single-issue fetch.** Every push, whatever its size, looks up each issue on its own: a direct read of its linked page, or a query for its Beads ID when it has no link or the linked page is gone, archived, trashed, or in another data source. Push never lists the whole data source, so its cost tracks the issues pushed, not the size of the source. Each Beads ID query is still bounded by `notion.max_query_pages`, but it only has to page through the rows matching that ID.
 
 An incremental pull does not discover an old page that was never linked to a bead: a page whose last edit predates the cursor stays unseen until it changes. To bring one in, edit the page in Notion so the next incremental pull sees it, or pull it directly:
 
