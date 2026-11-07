@@ -24,6 +24,7 @@ go_library(
         "gates.go",
         "graphcounter.go",
         "heartbeater.go",
+        "image.go",
         "importer.go",
         "initverifier.go",
         "issueops.go",

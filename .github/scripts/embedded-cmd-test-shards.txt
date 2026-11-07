@@ -189,6 +189,7 @@
 100 44 TestEmbeddedCompactKeepsCommitDates
 100 44 TestEmbeddedCompactRecentAncestorOfBoundary
 100 44 TestEmbeddedIfRevisionComposesWithIfAssigneeIfStatus
+100 44 TestEmbeddedImage
 100 44 TestEmbeddedReadyStaleBlockedFlagOnEdgelessIssue
 100 44 TestEmbeddedStaleConcurrent
 
