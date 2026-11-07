@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"errors"
 	"io"
 	"os"
@@ -14,6 +15,8 @@ import (
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 // fakeDoltOnPathFailingTransfers puts a dolt on PATH that appends
@@ -184,6 +187,22 @@ func TestPeerTransferFailureNamesServerEnvironment(t *testing.T) {
 		}, nil)
 	})
 
+	t.Run("pull from a credentialed s3 peer with ambient AWS credentials", func(t *testing.T) {
+		fakeDoltOnPathFailingTransfers(t, "peer "+s3URL)
+		store, _ := serverEnvPeerStore(t, s3URL)
+		t.Setenv("AWS_ACCESS_KEY_ID", "AKIAFRESH")
+		t.Setenv("AWS_SECRET_ACCESS_KEY", "fresh-secret")
+
+		conflicts, err := store.PullFrom(ctx, "peer")
+
+		if len(conflicts) != 0 {
+			t.Fatalf("PullFrom returned conflicts %v, want none", conflicts)
+		}
+		assertServerEnvNote(t, err, "failed to pull from peer peer", []string{
+			"; dolt pull runs in the Dolt server's process, which takes", "AWS_*",
+		}, nil)
+	})
+
 	t.Run("sync surfaces the fetch note through its own wrap", func(t *testing.T) {
 		fakeDoltOnPathFailingTransfers(t, "peer "+s3URL)
 		store, _ := serverEnvPeerStore(t, s3URL)
@@ -193,4 +212,105 @@ func TestPeerTransferFailureNamesServerEnvironment(t *testing.T) {
 
 		assertServerEnvNote(t, err, "fetch failed", []string{"AWS_*"}, nil)
 	})
+}
+
+// TestSettleMergeInTxNamesServerEnvironment pins where the SQL pull's
+// server-environment note attaches inside the settle machinery (GH#5953): to
+// the pull statement's own error wherever settlement surfaces it, and never
+// through the conflicts-as-data contract — a declined table's conflicts are
+// data for the operator, and MergeErr keeps the pull's own error unannotated
+// so PullFrom's conflict reporting is unchanged.
+func TestSettleMergeInTxNamesServerEnvironment(t *testing.T) {
+	ctx := context.Background()
+	const s3URL = "s3://bucket/beads"
+	pullFailed := errors.New("error 1105: pull failed mid-transfer")
+	plan := serverEnvNotePlan{
+		procedure: "CALL DOLT_PULL",
+		remote:    "peer",
+		env:       []string{"AWS_ACCESS_KEY_ID=AKIAFRESH", "AWS_SECRET_ACCESS_KEY=fresh"},
+	}
+
+	// newSettleCase builds a server-mode store around a fresh sqlmock and a
+	// begun tx the settle queries run on; the dolt_remotes row names an s3
+	// peer so the note names AWS_*.
+	newSettleCase := func(t *testing.T) (*DoltStore, sqlmock.Sqlmock, *sql.Tx) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		mock.MatchExpectationsInOrder(false)
+		mock.ExpectQuery("SELECT name, url, params FROM dolt_remotes").
+			WillReturnRows(sqlmock.NewRows([]string{"name", "url", "params"}).AddRow("peer", s3URL, nil))
+		store := &DoltStore{serverMode: true, db: db}
+		mock.ExpectBegin()
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("BeginTx: %v", err)
+		}
+		return store, mock, tx
+	}
+
+	t.Run("plain transfer failure carries one note", func(t *testing.T) {
+		store, mock, tx := newSettleCase(t)
+		mock.ExpectQuery("FROM dolt_conflicts").WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"})) // resolver pre-screen
+		mock.ExpectQuery("FROM dolt_conflicts").WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"})) // declined-set capture
+		mock.ExpectQuery("FROM dolt_constraint_violations").WillReturnRows(sqlmock.NewRows([]string{"table", "num_violations"}))
+		mock.ExpectRollback()
+
+		err := store.settleMergeInTx(ctx, tx, pullFailed, plan)
+
+		assertServerEnvNote(t, err, "error 1105: pull failed mid-transfer", []string{
+			"; CALL DOLT_PULL runs in the Dolt server's process, which takes", "AWS_*",
+		}, nil)
+	})
+
+	t.Run("operator conflicts stay data with no note", func(t *testing.T) {
+		store, mock, tx := newSettleCase(t)
+		mock.ExpectQuery("FROM dolt_conflicts").WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}).AddRow("roadmaps", 3)) // resolver pre-screen declines roadmaps
+		mock.ExpectQuery("FROM dolt_conflicts").WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}).AddRow("roadmaps", 3)) // captured before the rollback
+		mock.ExpectRollback()
+
+		err := store.settleMergeInTx(ctx, tx, pullFailed, plan)
+
+		var mce *versioncontrolops.MergeConflictsError
+		if !errors.As(err, &mce) {
+			t.Fatalf("settle = %v, want MergeConflictsError", err)
+		}
+		if len(mce.Conflicts) != 1 || mce.Conflicts[0].Field != "roadmaps" || mce.Conflicts[0].Count != 3 {
+			t.Fatalf("conflicts = %+v, want the roadmaps row", mce.Conflicts)
+		}
+		if mce.MergeErr != pullFailed {
+			t.Fatalf("MergeErr = %v, want the pull's own error unannotated", mce.MergeErr)
+		}
+		if strings.Contains(err.Error(), "server's process") {
+			t.Fatalf("conflicts-as-data error %q must not carry the credential note", err)
+		}
+	})
+}
+
+// TestFinishPeerPullFailureCarriesNoCredentialNote pins that a peer pull whose
+// transfer succeeded but whose post-merge is_blocked recompute failed keeps
+// the recompute's error clean (GH#5953): the note explains transfer
+// credentials, not derived-state recomputes. The unroutable connStr makes the
+// recompute's long-timeout connection fail at once.
+func TestFinishPeerPullFailureCarriesNoCredentialNote(t *testing.T) {
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := &DoltStore{serverMode: true, readOnly: false, db: db, connStr: unroutableConnStr}
+
+	conflicts, err := store.finishPeerPull(context.Background(), nil, nil, "")
+
+	if len(conflicts) != 0 {
+		t.Fatalf("conflicts = %v, want none", conflicts)
+	}
+	if err == nil || !strings.Contains(err.Error(), "pull succeeded but is_blocked recompute failed") {
+		t.Fatalf("err = %v, want the recompute failure", err)
+	}
+	if strings.Contains(err.Error(), "server's process") {
+		t.Fatalf("recompute error %q must not carry the credential note", err)
+	}
 }

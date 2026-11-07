@@ -33,7 +33,7 @@ func TestServerSettlementSQLCommitResponseLossIsIndeterminate(t *testing.T) {
 		mock.ExpectCommit().WillReturnError(responseLoss)
 
 		store := &DoltStore{db: db}
-		err = store.settleMergeInTx(t.Context(), tx, nil)
+		err = store.settleMergeInTx(t.Context(), tx, nil, serverEnvNotePlan{})
 		assertPublicCommitIndeterminate(t, err, responseLoss)
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("unmet sqlmock expectations: %v", err)

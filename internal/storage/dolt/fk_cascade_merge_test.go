@@ -153,7 +153,7 @@ func settleForcedMerge(ctx context.Context, t *testing.T, store *DoltStore, peer
 		}
 	}
 	_, mergeErr := tx.ExecContext(ctx, "CALL DOLT_MERGE(?)", peerBranch)
-	return store.settleMergeInTx(ctx, tx, mergeErr)
+	return store.settleMergeInTx(ctx, tx, mergeErr, serverEnvNotePlan{})
 }
 
 // TestFKCascadeViolationRepairOnSQLPull drives the production settle path

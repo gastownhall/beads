@@ -125,8 +125,14 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 			pullErr := s.finishCLIPull(ctx, s.doltCLIPullFromPeer(ctx, peer, creds))
 			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
 		}
+		// The env snapshot precedes withEnvCredentials, which sets the
+		// credential pair process-wide for the server to (not) read. The
+		// peer pull sends no --user, so the plan carries no creds: the note
+		// must not promise DOLT_REMOTE_PASSWORD fixes a credential this
+		// statement never passes.
+		plan := serverEnvNotePlan{procedure: "CALL DOLT_PULL", remote: peer, env: os.Environ()}
 		return withEnvCredentials(creds, func() error {
-			pullErr := s.pullWithAutoResolve(ctx, peer, "CALL DOLT_PULL(?)", peer)
+			pullErr := s.pullWithAutoResolve(ctx, plan, peer, "CALL DOLT_PULL(?)", peer)
 			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
 		})
 	})
@@ -742,7 +748,10 @@ func (s *DoltStore) doltCLIPullFromPeer(ctx context.Context, peer string, creds 
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return cliTransferError(fmt.Sprintf("pull from peer %s", peer), peer, transferCtx, out, err)
+		// Same as doltCLIFetchFromPeer: the served-database handoff keeps
+		// the transfer in the server's process (GH#5953).
+		plan := serverEnvNotePlan{procedure: "dolt pull", remote: peer, creds: creds, env: os.Environ()}
+		return s.annotateServerEnvTransferError(ctx, plan, cliTransferError(fmt.Sprintf("pull from peer %s", peer), peer, transferCtx, out, err))
 	}
 	return nil
 }

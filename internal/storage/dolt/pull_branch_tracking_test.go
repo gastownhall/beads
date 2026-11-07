@@ -48,7 +48,9 @@ func TestPullWithAutoResolve_BranchTrackingFallback(t *testing.T) {
 	// DOLT_FETCH(remote, s.branch). The test store's s.remote is "" (no
 	// remote configured), so DOLT_FETCH immediately fails, producing the
 	// "fetch from /" error that confirms the fallback was entered.
-	err := store.pullWithAutoResolve(ctx, store.remote, "CALL inject_tracking_error()")
+	// The empty note plan keeps this test's errors free of the
+	// server-environment note, which is not what it asserts.
+	err := store.pullWithAutoResolve(ctx, serverEnvNotePlan{}, store.remote, "CALL inject_tracking_error()")
 
 	// The error must come from the DOLT_FETCH attempt, not from the original
 	// DOLT_PULL proxy. If the fallback was not triggered, the error would
@@ -112,7 +114,7 @@ func TestPullWithAutoResolve_BranchTrackingFallbackSuccess(t *testing.T) {
 		t.Skipf("DOLT_PULL failed with an unexpected non-tracking error: %v", rawPullErr)
 	}
 
-	if err := store.pullWithAutoResolve(ctx, "origin", "CALL DOLT_PULL(?, ?)", "origin", "main"); err != nil {
+	if err := store.pullWithAutoResolve(ctx, serverEnvNotePlan{}, "origin", "CALL DOLT_PULL(?, ?)", "origin", "main"); err != nil {
 		t.Fatalf("pullWithAutoResolve fallback failed: %v", err)
 	}
 

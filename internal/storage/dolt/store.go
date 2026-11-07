@@ -5739,9 +5739,12 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 	logRouteDecision("pull", remote, false)
 	var report pullReport
 	if s.remoteUser != "" && remote == s.remote {
+		// The env snapshot must precede withRemoteOperationEnv, which sets
+		// the credential pair and the S3 checksum override process-wide.
+		plan := serverEnvNotePlan{procedure: "CALL DOLT_PULL", remote: remote, creds: creds, env: os.Environ()}
 		err := withRemoteOperationEnv(creds, s.isS3Remote(ctx, remote), func() error {
 			var err error
-			report, err = s.pullWithAutoResolveReporting(ctx, remote, "CALL DOLT_PULL('--user', ?, ?, ?)", s.remoteUser, remote, s.branch)
+			report, err = s.pullWithAutoResolveReporting(ctx, plan, remote, "CALL DOLT_PULL('--user', ?, ?, ?)", s.remoteUser, remote, s.branch)
 			if err != nil {
 				return fmt.Errorf("failed to pull from %s/%s: %w", remote, s.branch, err)
 			}
@@ -5749,9 +5752,10 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 		})
 		return report, err
 	}
+	plan := serverEnvNotePlan{procedure: "CALL DOLT_PULL", remote: remote, env: os.Environ()}
 	err := withRemoteOperationEnv(nil, s.isS3Remote(ctx, remote), func() error {
 		var err error
-		report, err = s.pullWithAutoResolveReporting(ctx, remote, "CALL DOLT_PULL(?, ?)", remote, s.branch)
+		report, err = s.pullWithAutoResolveReporting(ctx, plan, remote, "CALL DOLT_PULL(?, ?)", remote, s.branch)
 		if err != nil {
 			return fmt.Errorf("failed to pull from %s/%s: %w", remote, s.branch, err)
 		}
@@ -5790,26 +5794,28 @@ func (s *DoltStore) openLongTimeoutConn() (*sql.DB, error) {
 
 // remote names the remote the query pulls from; the GH#3144 fetch+merge
 // fallback targets it directly, so pulls from non-default remotes (PullRemote,
-// federation peers) no longer fall back to s.remote.
-func (s *DoltStore) pullWithAutoResolve(ctx context.Context, remote string, query string, args ...any) error {
-	_, err := s.pullWithAutoResolveReporting(ctx, remote, query, args...)
+// federation peers) no longer fall back to s.remote. plan is the
+// server-environment note plan for the pull statement's own error; it is empty
+// for callers whose pull is not a remote transfer.
+func (s *DoltStore) pullWithAutoResolve(ctx context.Context, plan serverEnvNotePlan, remote string, query string, args ...any) error {
+	_, err := s.pullWithAutoResolveReporting(ctx, plan, remote, query, args...)
 	return err
 }
 
 // pullWithAutoResolveReporting is pullWithAutoResolve plus the row the pull (or
 // the fetch+merge fallback) returned — the engine's own account of whether
 // anything merged. See pullReport.
-func (s *DoltStore) pullWithAutoResolveReporting(ctx context.Context, remote string, query string, args ...any) (pullReport, error) {
+func (s *DoltStore) pullWithAutoResolveReporting(ctx context.Context, plan serverEnvNotePlan, remote string, query string, args ...any) (pullReport, error) {
 	var report pullReport
 	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		var err error
-		report, err = s.pullWithAutoResolveUnchecked(ctx, remote, query, args...)
+		report, err = s.pullWithAutoResolveUnchecked(ctx, plan, remote, query, args...)
 		return err
 	})
 	return report, err
 }
 
-func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote string, query string, args ...any) (pullReport, error) {
+func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, plan serverEnvNotePlan, remote string, query string, args ...any) (pullReport, error) {
 	// Audited for be-b0am's fresh-connection branch hazard: NOT safe, and all
 	// three callers share it. Passing a branch argument does not avoid it.
 	//
@@ -5890,25 +5896,32 @@ func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote str
 		pullErr = mergeErr
 	}
 
-	return report, s.settleMergeInTx(ctx, tx, pullErr)
+	return report, s.settleMergeInTx(ctx, tx, pullErr, plan)
 }
 
 // settleMergeInTx finishes a pull/merge that ran in tx: it auto-resolves the
 // safe conflict classes, repairs FK cascade violations (bd-6dnrw.4), and
 // commits — or rolls back when anything needs the operator. pullErr is the
 // pull/merge statement's own error; it is surfaced whenever nothing was
-// resolved or repaired. The tx must have been opened with
+// resolved or repaired, and plan annotates it with the server-environment
+// note wherever it surfaces (GH#5953) — except through
+// MergeConflictsError, whose conflicts are data for the caller and whose
+// MergeErr keeps the pull's own error unannotated so the conflicts contract
+// is unchanged. Settlement failures of a transfer that succeeded (resolveErr,
+// violErr, commit errors with pullErr == nil) stay unannotated: the note
+// explains transfer credentials, not settlement machinery. The tx must have
+// been opened with
 // dolt_allow_commit_conflicts and dolt_force_transaction_commit set, which is
 // why the violation gate here is mandatory: with the force flag on, committing
 // without it would persist a violated working set.
-func (s *DoltStore) settleMergeInTx(ctx context.Context, tx *sql.Tx, pullErr error) error {
+func (s *DoltStore) settleMergeInTx(ctx context.Context, tx *sql.Tx, pullErr error, plan serverEnvNotePlan) error {
 	// Check for merge conflicts regardless of whether DOLT_PULL errored.
 	// Some Dolt versions error on conflicts, others leave them in the working set.
 	resolved, resolveErr := s.tryAutoResolveMergeConflicts(ctx, tx)
 	if resolveErr != nil {
 		_ = tx.Rollback()
 		if pullErr != nil {
-			return pullErr
+			return s.annotateServerEnvTransferError(ctx, plan, pullErr)
 		}
 		return resolveErr
 	}
@@ -5933,14 +5946,14 @@ func (s *DoltStore) settleMergeInTx(ctx context.Context, tx *sql.Tx, pullErr err
 	if violErr != nil {
 		_ = tx.Rollback()
 		if pullErr != nil {
-			return pullErr
+			return s.annotateServerEnvTransferError(ctx, plan, pullErr)
 		}
 		return violErr
 	}
 	if hadViol && !repairedViol {
 		_ = tx.Rollback()
 		if pullErr != nil {
-			return pullErr
+			return s.annotateServerEnvTransferError(ctx, plan, pullErr)
 		}
 		return fmt.Errorf("pull merge left constraint violations bd cannot auto-repair; inspect dolt_constraint_violations and resolve before retrying")
 	}
@@ -5948,7 +5961,7 @@ func (s *DoltStore) settleMergeInTx(ctx context.Context, tx *sql.Tx, pullErr err
 	if pullErr != nil && !resolved && !repairedViol {
 		// Pull failed for a non-conflict reason, or conflicts include non-metadata tables.
 		_ = tx.Rollback()
-		return pullErr
+		return s.annotateServerEnvTransferError(ctx, plan, pullErr)
 	}
 
 	// Conclude the merge only now, after the FK repair: DOLT_COMMIT refuses a
@@ -5960,7 +5973,7 @@ func (s *DoltStore) settleMergeInTx(ctx context.Context, tx *sql.Tx, pullErr err
 	if err := versioncontrolops.CommitSettledMerge(ctx, tx, resolved, repairedViol); err != nil {
 		_ = tx.Rollback()
 		if pullErr != nil {
-			return pullErr
+			return s.annotateServerEnvTransferError(ctx, plan, pullErr)
 		}
 		return err
 	}
