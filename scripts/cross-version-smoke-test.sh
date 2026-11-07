@@ -19,7 +19,8 @@ set -uo pipefail
 #   ./scripts/cross-version-smoke-test.sh --local               # candidate only
 #   ./scripts/cross-version-smoke-test.sh --from v0.30.0        # all tags from v0.30.0
 #   ./scripts/cross-version-smoke-test.sh v0.63.3 v1.0.0        # specific versions
-#   CANDIDATE_BIN=./bd ./scripts/cross-version-smoke-test.sh    # prebuilt candidate
+#   make BUILD_DIR=out build
+#   CANDIDATE_BIN="./out/bd" ./scripts/cross-version-smoke-test.sh  # use "./out/bd.exe" on Windows
 #
 # Environment:
 #   CANDIDATE_BIN    Path to prebuilt candidate binary (skip build)
