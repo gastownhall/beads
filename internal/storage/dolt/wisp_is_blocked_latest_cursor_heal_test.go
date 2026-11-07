@@ -221,3 +221,32 @@ func TestDoltNew_WispIsBlockedSelfHealAtLatestIgnoredCursor_RealDolt(t *testing.
 		t.Fatalf("ignored cursor after the heal = %d, want 32", got)
 	}
 }
+
+// TestDoltNew_WispIsBlockedRestoreRecomputesFlags_RealDolt is AC-2: the
+// restored column is not left at its DEFAULT 0. Ready work reads around stale
+// flags set to 1, never around zeros, so a shape-only heal would show the
+// blocked wisps B and C as ready.
+func TestDoltNew_WispIsBlockedRestoreRecomputesFlags_RealDolt(t *testing.T) {
+	c := newWispIsBlockedClone(t)
+	g := c.seedGraph()
+	c.breakShape()
+	c.reopen()
+
+	if got := c.blockedFlags("wisps", g.b, g.c, g.d); !slices.Equal(got, []int{1, 1, 0}) {
+		t.Fatalf("restored wisp is_blocked (b, c, d) = %v, want [1 1 0]", got)
+	}
+	if got := c.blockedFlags("issues", g.a); !slices.Equal(got, []int{0}) {
+		t.Fatalf("blocker a is_blocked = %v, want [0]", got)
+	}
+	ready := c.readyIDs()
+	for _, id := range []string{g.a, g.d} {
+		if !ready[id] {
+			t.Errorf("ready work misses %s after the heal", id)
+		}
+	}
+	for _, id := range []string{g.b, g.c} {
+		if ready[id] {
+			t.Errorf("ready work includes blocked wisp %s after the heal", id)
+		}
+	}
+}

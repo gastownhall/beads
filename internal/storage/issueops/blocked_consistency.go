@@ -259,6 +259,25 @@ func RecomputeAllIsBlockedInTx(ctx context.Context, tx DBTX) (int64, error) {
 	return recomputeIsBlockedCounting(ctx, tx, issueIDs, wispIDs)
 }
 
+// RecomputeAllWispIsBlockedInTx is RecomputeAllIsBlockedInTx for the wisps
+// table alone: the same fixpoint, reading blockers from issues and wisps
+// alike, but it never writes an issues row. It exists for the ignored/0032
+// schema repair, which restores a lost wisps.is_blocked column at its
+// DEFAULT 0 and must then derive the real flags before ready work reads
+// them (ready reads around stale 1s, never around stale 0s), without
+// touching durable rows from a clone-local repair; a durable is_blocked
+// drift stays with the explicit full repair. Like the full repair it keeps
+// updated_at, and it reads only columns present since ignored/0031's schema,
+// so a migration pass can call it before later versions run. It returns the
+// number of wisp rows it corrected.
+func RecomputeAllWispIsBlockedInTx(ctx context.Context, tx DBTX) (int64, error) {
+	wispIDs, err := allIDs(ctx, tx, "wisps")
+	if err != nil {
+		return 0, fmt.Errorf("recompute wisp is_blocked: list wisps: %w", err)
+	}
+	return recomputeIsBlockedCounting(ctx, tx, nil, wispIDs)
+}
+
 // recomputeIsBlockedCounting is RecomputeIsBlockedInTx with a corrected-row
 // count: it sums the rows flipped across every fixpoint pass. A parent flip in
 // one pass can cascade to its children in the next, and each correction counts.

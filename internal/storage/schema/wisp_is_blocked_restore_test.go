@@ -83,8 +83,9 @@ const (
 	wispRestoreColumnQuery = `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME = \? AND COLUMN_NAME = \?`
 	wispRestoreIndexQuery  = `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.STATISTICS.*TABLE_NAME = \? AND INDEX_NAME = \?`
 
-	wispRestoreStepBody   = "marker body"
-	wispRestoreStepCursor = "cursor 32"
+	wispRestoreStepBody      = "marker body"
+	wispRestoreStepCursor    = "cursor 32"
+	wispRestoreStepRecompute = "recompute wisps.is_blocked"
 )
 
 func newWispRestoreDB(t *testing.T) *wispRestoreDB {
@@ -100,7 +101,18 @@ func newWispRestoreDB(t *testing.T) *wispRestoreDB {
 	if err != nil {
 		t.Fatalf("IgnoredMigrationSQL(%s): %v", ignoredMigration0032Up, err)
 	}
-	return &wispRestoreDB{t: t, real: db, mock: mock, body: body}
+	d := &wispRestoreDB{t: t, real: db, mock: mock, body: body}
+	// The live recompute is issueops' to test; here it is one recorded step.
+	prev := recomputeWispIsBlocked
+	recomputeWispIsBlocked = func(ctx context.Context, conn DBConn) error {
+		if conn != DBConn(d) {
+			t.Errorf("recompute ran on %T, not the migration connection", conn)
+		}
+		d.steps = append(d.steps, wispRestoreStepRecompute)
+		return nil
+	}
+	t.Cleanup(func() { recomputeWispIsBlocked = prev })
+	return d
 }
 
 // expectProbes scripts the repair's probes for one pass. A pass on a clone
@@ -164,9 +176,10 @@ func (d *wispRestoreDB) requireSteps(want ...string) {
 	}
 }
 
-// TestIgnored32RestoresColumn is AC-1 at the runner: with the column and its
-// index gone at cursor 31, the pass restores both at ignored/0006's shape
-// before the marker and its cursor row.
+// TestIgnored32RestoresColumn is AC-1 and AC-2 at the runner: with the
+// column and its index gone at cursor 31, the pass restores the column at
+// ignored/0006's shape, derives the wisp flags, and only then creates the
+// index, all before the marker and its cursor row.
 func TestIgnored32RestoresColumn(t *testing.T) {
 	d := newWispRestoreDB(t)
 	d.expectProbes(true, false, false)
@@ -177,18 +190,20 @@ func TestIgnored32RestoresColumn(t *testing.T) {
 	if applied != 1 {
 		t.Fatalf("applied = %d, want 1", applied)
 	}
-	d.requireSteps(wispIsBlockedColumnDDL, wispIsBlockedIndexDDL, wispRestoreStepBody, wispRestoreStepCursor)
+	d.requireSteps(wispIsBlockedColumnDDL, wispRestoreStepRecompute, wispIsBlockedIndexDDL,
+		wispRestoreStepBody, wispRestoreStepCursor)
 }
 
-// TestIgnored32RestoresIndexOnly covers index-only loss: the column stays
-// and only the index is created.
+// TestIgnored32RestoresIndexOnly covers index-only loss: the column stays,
+// its flags are recomputed anyway (nothing says they are current), and the
+// index is created.
 func TestIgnored32RestoresIndexOnly(t *testing.T) {
 	d := newWispRestoreDB(t)
 	d.expectProbes(true, true, false)
 	if _, err := d.migrate(); err != nil {
 		t.Fatalf("runMigrations(ignored 31..32): %v", err)
 	}
-	d.requireSteps(wispIsBlockedIndexDDL, wispRestoreStepBody, wispRestoreStepCursor)
+	d.requireSteps(wispRestoreStepRecompute, wispIsBlockedIndexDDL, wispRestoreStepBody, wispRestoreStepCursor)
 }
 
 // TestIgnored32WithoutWispsIsANoOp leaves an absent wisps table to
