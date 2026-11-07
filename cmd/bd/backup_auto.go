@@ -128,6 +128,12 @@ func autoBackupBackendForCommand() (localBackupBackend, bool) {
 	if store == nil {
 		return nil, false
 	}
+	// bd prime's embedded store refuses writes, and a Dolt backup is one. The
+	// attempt would fail and still record its time in the backup state, which
+	// holds off the next command's real backup for a whole interval.
+	if activeStoreRefusesWrites(store) {
+		return nil, false
+	}
 	if lm, ok := storage.UnwrapStore(store).(storage.LifecycleManager); ok && lm.IsClosed() {
 		return nil, false
 	}

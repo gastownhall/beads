@@ -703,6 +703,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **More read commands open the database read-only.** `bd status` (and its
+  alias `bd stats`), `stale`, `children`, `dep tree`, `statuses`, `types`,
+  `info`, `kv get`, `memories`, `history` and `epic status` now take the same
+  read-only open as `bd list`, and skip the post-command auto-export,
+  auto-push and events-journal prune. Against a Dolt server whose schema is
+  current, each sends 42 fewer SQL statements and opens 3 fewer connections
+  (`bd status`: 55 statements and 5 connections before, 13 and 2 after).
+  Like `bd list`, they no longer import `.beads/issues.jsonl` into an empty
+  embedded database first; a write command or `bd import` still does.
+  `bd prime` opens its store read-only too (42 statements and 3 connections
+  before, 10 and 2 after). On embedded Dolt that store refuses writes, so
+  `bd prime` no longer attempts the post-command auto-backup, and in a
+  workspace whose database has not been created yet it reports the memory
+  section as unavailable instead of creating an empty database. `bd info
+  --thanks`, `bd info --whats-new` and `bd types --sections` no longer open
+  the database at all (49 statements before, none after), so they work while
+  it is unreachable. In direct server mode the read-only open does not
+  migrate, so on a database whose schema is behind the binary these commands
+  fail with a schema error when a column they read is missing, as `bd list`
+  does. For the eleven commands above, the migration that runs after a `bd`
+  upgrade still runs before them.
+
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add
