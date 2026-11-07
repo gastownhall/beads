@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -341,4 +342,94 @@ func TestProxiedServerDepAddRoutedExternalTarget(t *testing.T) {
 		t.Errorf("an absent external target was not reported unresolved:\n%s", stderr)
 	}
 	assertProxiedDepExists(t, db, absent.ID, missingID)
+}
+
+// directTownStore opens a direct (non-proxied) launcher's town store on the
+// shared container, the way newTestStoreIsolatedDB does in the non-proxied
+// lane. In the proxied lane startTestDoltServer never sets
+// testDoltServerPort, so that helper would skip; the town needs no isolation
+// machinery beyond its own database, since only the routed rig is reopened by
+// path. The database is left for container teardown, like the harness's
+// bdtest ones (dropping databases live on the shared container crashes it).
+func directTownStore(t *testing.T, dbPath string) *dolt.DoltStore {
+	t.Helper()
+	ensureTestMode(t)
+	cfg := &dolt.Config{
+		Path:            dbPath,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      sharedProxiedServerPort(t),
+		Database:        uniqueTestDBName(t),
+		CommitterName:   "test",
+		CommitterEmail:  "test@test.com",
+		CreateIfMissing: true,
+	}
+	doltNewMutex.Lock()
+	s, err := dolt.New(context.Background(), cfg)
+	doltNewMutex.Unlock()
+	if err != nil {
+		t.Fatalf("create direct town store: %v", err)
+	}
+	if err := s.SetConfig(context.Background(), "issue_prefix", "hq"); err != nil {
+		s.Close()
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+// TestProxiedServerDirectGateGetterRoutedExternalTarget is AC-2's direct
+// launcher half: an ordinary direct-mode town routing into external
+// proxied-server rig B reads B's bead through routedBeadGateGetter, so
+// checkBeadGate resolves a closed target and reports an open one's status
+// instead of an unconfirmed absence. Not parallel: it pins dbPath and the
+// working directory.
+func TestProxiedServerDirectGateGetterRoutedExternalTarget(t *testing.T) {
+	requireSharedProxiedServer(t)
+	bd := buildEmbeddedBD(t)
+
+	b := newSharedProxiedProject(t, bd, "gxd")
+	rigClosed := bdProxiedCreate(t, bd, b.dir, "Routed target that closes")
+	bdProxiedClose(t, bd, b.dir, rigClosed.ID)
+	rigOpen := bdProxiedCreate(t, bd, b.dir, "Routed target that stays open")
+
+	ctx := context.Background()
+	townRoot := t.TempDir()
+	townBeadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(townBeadsDir, 0o755); err != nil {
+		t.Fatalf("create direct town .beads: %v", err)
+	}
+	townDB := filepath.Join(townBeadsDir, "dolt")
+	townStore := directTownStore(t, townDB)
+	routeExternalRig(t, townRoot, b.dir, "gxd")
+
+	oldDBPath := dbPath
+	dbPath = townDB
+	t.Cleanup(func() { dbPath = oldDBPath })
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get working directory: %v", err)
+	}
+	if err := os.Chdir(townRoot); err != nil {
+		t.Fatalf("change to direct town root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+
+	getter := routedBeadGateGetter{localStore: townStore}
+	resolved, _, err := checkBeadGate(ctx, getter, rigClosed.ID)
+	if err != nil {
+		t.Fatalf("direct getter failed on the closed routed external target: %v", err)
+	}
+	if !resolved {
+		t.Error("direct getter must resolve a closed routed external target")
+	}
+	resolved, reason, err := checkBeadGate(ctx, getter, rigOpen.ID)
+	if err != nil {
+		t.Fatalf("direct getter failed on the open routed external target: %v", err)
+	}
+	if resolved {
+		t.Error("direct getter must not resolve an open routed external target")
+	}
+	if !gateTestContainsIgnoreCase(reason, "open") {
+		t.Errorf("pending reason %q does not report the target's status", reason)
+	}
 }
