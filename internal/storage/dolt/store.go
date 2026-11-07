@@ -555,6 +555,11 @@ type Config struct {
 	// defaults would enable it. Diagnostic paths use this to stay read-only.
 	DisableAutoStart bool
 
+	// DisableAutoRestart keeps the open from replacing a tracked server that
+	// runs a dolt since replaced (GH#6064) even where it could auto-start
+	// one: it warns instead. A command frozen by a pending migration sets it.
+	DisableAutoRestart bool
+
 	// MaxOpenConns overrides the connection pool size (0 = default 10).
 	// Set to 1 for branch isolation in tests (DOLT_CHECKOUT is session-level).
 	MaxOpenConns int
@@ -2411,6 +2416,21 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// TCP dial succeeded — record success to reset the breaker
 	if breaker != nil {
 		breaker.RecordSuccess()
+	}
+
+	// A tracked server still running a dolt that has since been replaced is
+	// replaced before the first application query (GH#6064). The replacement
+	// is not autoStartedDir's: Close leaves it running.
+	port, reconcileErr := reconcileServerBinary(cfg, resolvedBeadsDir, serverDir)
+	if reconcileErr != nil {
+		if autoStartedDir != "" {
+			_ = autoStartRelease(autoStartedDir)
+		}
+		return nil, reconcileErr
+	}
+	if port != cfg.ServerPort {
+		fmt.Fprintf(os.Stderr, "Warning: Dolt server endpoint changed: port %d → %d (dolt upgrade restart)\n", cfg.ServerPort, port)
+		cfg.ServerPort = port
 	}
 
 	// Server mode: connect via MySQL protocol to dolt sql-server

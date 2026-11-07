@@ -74,8 +74,11 @@ ephemeral.sqlite3-shm
 # Dolt server management (auto-started by bd)
 dolt-server.pid
 dolt-server.log
+dolt-server.log.1
 dolt-server.lock
 dolt-server.port
+dolt-server.binary
+.dolt-server.binary-*
 dolt-server.activity
 dolt-server-config.yaml
 
@@ -139,8 +142,11 @@ var requiredPatterns = []string{
 	"ephemeral.sqlite3",
 	"dolt-server.pid",
 	"dolt-server.log",
+	"dolt-server.log.1",
 	"dolt-server.lock",
 	"dolt-server.port",
+	"dolt-server.binary",
+	".dolt-server.binary-*",
 	"dolt-server.activity",
 	"dolt-server-config.yaml",
 	"daemon.*",
