@@ -92,6 +92,12 @@ func TestFileURLForOS(t *testing.T) {
 		// that net/url would reject still formats, and is not a parse promise.
 		{name: "unc share", goos: "windows", abs: `\\nas\share\beads`, want: "file:////nas/share/beads"},
 		{name: "spaces and percent", goos: "windows", abs: `C:\Users\my dir\100%done`, want: "file://C:/Users/my dir/100%done"},
+		// Non-Windows rows pin the byte-identical legacy output: a backslash is
+		// a legal POSIX filename character, not a separator to normalize.
+		{name: "posix path", goos: "linux", abs: "/home/user/backup", want: "file:///home/user/backup"},
+		{name: "posix path on darwin", goos: "darwin", abs: "/home/user/backup", want: "file:///home/user/backup"},
+		{name: "posix backslash filename", goos: "linux", abs: `/tmp/we\ird`, want: `file:///tmp/we\ird`},
+		{name: "posix spaces and percent", goos: "linux", abs: "/tmp/my dir/100%done", want: "file:///tmp/my dir/100%done"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
