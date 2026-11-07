@@ -38,6 +38,7 @@ var preMigrationRepairs = map[repairKey]func(context.Context, DBConn) error{
 	{"schema_migrations", 58}:         repairWispDependenciesForwardShape,
 	{"ignored_schema_migrations", 7}:  ensureWispIsBlockedForRecompute,
 	{"ignored_schema_migrations", 15}: ensureWispIsBlockedForRecompute,
+	{"ignored_schema_migrations", 31}: seedEventsFromPreflipHistory,
 }
 
 // preMigrationRepair dispatches any repair registered for (source, version).
@@ -706,11 +707,17 @@ func wispDependenciesSplitTargetColumns() []struct{ name, definition string } {
 	}
 }
 
+// wispDependenciesSplitTargetBackfillSQL classifies each legacy
+// depends_on_id as an external, wisp or issue target. The wisp and issue
+// cases test the target with IN (SELECT id ...) rather than joining wisps or
+// issues: go-mysql-server applies the ON UPDATE CURRENT_TIMESTAMP of every
+// table a multi-table UPDATE joins, so a join here would stamp every wisp
+// and issue a wisp dependency points at (gastownhall/beads#5981).
 func wispDependenciesSplitTargetBackfillSQL() []string {
 	return []string{
 		"UPDATE wisp_dependencies SET depends_on_external = depends_on_id WHERE depends_on_external IS NULL AND depends_on_id LIKE 'external:%'",
-		"UPDATE wisp_dependencies wd JOIN wisps w ON w.id = wd.depends_on_id SET wd.depends_on_wisp_id = wd.depends_on_id WHERE wd.depends_on_wisp_id IS NULL AND wd.depends_on_external IS NULL",
-		"UPDATE wisp_dependencies wd JOIN issues i ON i.id = wd.depends_on_id SET wd.depends_on_issue_id = wd.depends_on_id WHERE wd.depends_on_issue_id IS NULL AND wd.depends_on_external IS NULL AND wd.depends_on_wisp_id IS NULL",
+		"UPDATE wisp_dependencies SET depends_on_wisp_id = depends_on_id WHERE depends_on_wisp_id IS NULL AND depends_on_external IS NULL AND depends_on_id IN (SELECT id FROM wisps)",
+		"UPDATE wisp_dependencies SET depends_on_issue_id = depends_on_id WHERE depends_on_issue_id IS NULL AND depends_on_external IS NULL AND depends_on_wisp_id IS NULL AND depends_on_id IN (SELECT id FROM issues)",
 		"UPDATE wisp_dependencies SET depends_on_external = depends_on_id WHERE depends_on_external IS NULL AND depends_on_wisp_id IS NULL AND depends_on_issue_id IS NULL",
 	}
 }

@@ -4,11 +4,13 @@ package doltserver
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeProc builds a /proc tree with one listener (inode 4242) on port and a
@@ -45,6 +47,13 @@ func withProcRoot(t *testing.T, root string) {
 	t.Cleanup(func() { procRoot = orig })
 }
 
+func withListenerOwnershipProvable(t *testing.T, provable bool) {
+	t.Helper()
+	orig := listenerOwnershipProvable
+	listenerOwnershipProvable = func() bool { return provable }
+	t.Cleanup(func() { listenerOwnershipProvable = orig })
+}
+
 func TestListenerOwnership_FakeProc(t *testing.T) {
 	const port, pid = 41234, 777
 	for _, tc := range []struct {
@@ -54,6 +63,7 @@ func TestListenerOwnership_FakeProc(t *testing.T) {
 		pid          int
 		unreadableFD bool
 		noNetTCP     bool
+		provable     bool
 		ownership    Ownership
 		owned, known bool
 	}{
@@ -62,11 +72,14 @@ func TestListenerOwnership_FakeProc(t *testing.T) {
 		// A child that has exited (and been reaped) owns nothing; this must
 		// not read as "unknown", which would accept a foreign greeting.
 		{name: "child gone from /proc", rows: true, pid: pid + 1, ownership: OwnershipForeign, known: true},
-		// Something answered but /proc lists no listener: /proc is not
-		// telling the whole story, so server mode falls back rather than
-		// call it foreign, and the proxied launcher asks
-		// ListenerOwnershipProvable whether this /proc lists sockets at all.
-		{name: "no listener row", rows: false, inodes: []string{"4242"}, pid: pid, ownership: OwnershipUnlisted},
+		// Something answered but /proc lists no listener. Where this /proc
+		// lists no sockets at all (WSL1, some sandboxes) it is not telling
+		// the whole story, so server mode falls back rather than call it
+		// foreign; where it provably lists this user's own listeners, what
+		// answered is out of its sight (a forward, or on darwin another
+		// user's socket) and so not the child's.
+		{name: "no listener row, host lists no sockets", rows: false, inodes: []string{"4242"}, pid: pid, ownership: OwnershipUnlisted},
+		{name: "no listener row, ownership provable", rows: false, inodes: []string{"4242"}, pid: pid, provable: true, ownership: OwnershipUnlisted, known: true},
 		{name: "fd table unreadable", rows: true, inodes: []string{"4242"}, pid: pid, unreadableFD: true, ownership: OwnershipUnknown},
 		// A listener table that cannot be read is not an empty one.
 		{name: "no /proc/net/tcp", rows: true, inodes: []string{"4242"}, pid: pid, noNetTCP: true, ownership: OwnershipUnknown},
@@ -89,6 +102,7 @@ func TestListenerOwnership_FakeProc(t *testing.T) {
 				t.Cleanup(func() { _ = os.Chmod(fd, 0o750) })
 			}
 			withProcRoot(t, root)
+			withListenerOwnershipProvable(t, tc.provable)
 			if got := classifyListener(tc.pid, port); got != tc.ownership {
 				t.Errorf("classifyListener = %d, want %d", got, tc.ownership)
 			}
@@ -97,6 +111,27 @@ func TestListenerOwnership_FakeProc(t *testing.T) {
 				t.Errorf("listenerOwnership = (%v, %v), want (%v, %v)", owned, known, tc.owned, tc.known)
 			}
 		})
+	}
+}
+
+// TestAwaitOwnedListener_UnlistedListenerOnProvableHostIsForeign pins server
+// mode against another account's listener on the port it picked. darwin's
+// lsof cannot see another user's socket, so classifyListener reports such a
+// listener unlisted (simulated here by a /proc that lists none); where the
+// host provably lists this process's own listeners it is not the child's,
+// and at the default warning level, with no ready line to wait for, startup
+// must end with ErrPortInUse instead of accepting its greeting.
+func TestAwaitOwnedListener_UnlistedListenerOnProvableHostIsForeign(t *testing.T) {
+	port := foreignGreeter(t)
+	logPath := filepath.Join(t.TempDir(), "dolt-server.log")
+	srv, off := startFakeSQLServerDelay(t, port, logPath, "10s")
+	withProcRoot(t, fakeProc(t, port, srv.pid, false))
+	withListenerOwnershipProvable(t, true)
+	err := awaitOwnedListener(srv, startupProbe{
+		host: "127.0.0.1", port: port, logPath: logPath, logOffset: off, timeout: 5 * time.Second,
+	})
+	if !errors.Is(err, ErrPortInUse) {
+		t.Fatalf("awaitOwnedListener = %v, want ErrPortInUse for another account's listener", err)
 	}
 }
 

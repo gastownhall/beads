@@ -34,6 +34,7 @@ var derivedReadinessEmitters = map[string]bool{
 	"recomputeIsBlockedAfterMergeScoped": true,
 	"recomputeIsBlockedForAll":           true,
 	"MarkIsBlockedInTx":                  true,
+	"MarkIsBlockedInTxWithResult":        true,
 	"recordBlockedJournalChanges":        true,
 }
 
@@ -88,6 +89,7 @@ var mutationEntryPoints = []string{
 	"ReopenIssueInTx",
 	// delete, including the role body and the resolved-set worker
 	"DeleteIssueInTx",
+	"DeleteIssueInTxWithResult",
 	"DeleteIssuesInTx",
 	"DeleteIssuesBesideWispsInTx",
 	"DeleteResolvedSetInTx",
@@ -127,6 +129,7 @@ var mutationEntryPoints = []string{
 	"RecomputeIsBlockedForWispIDsInTx",
 	"RecomputeIsBlockedAfterMergeInTx",
 	"MarkIsBlockedInTx",
+	"MarkIsBlockedInTxWithResult",
 	"RecomputeAllIsBlockedInTx",
 	"WakeExpiredDefersInTx",
 	"SweepInTx",

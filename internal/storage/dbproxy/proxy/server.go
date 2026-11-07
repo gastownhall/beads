@@ -71,6 +71,9 @@ type proxyServer struct {
 	stopEpoch   string
 
 	traceConnections bool
+	// data authenticates every data-port connection (data_auth.go); its
+	// zero value admits none.
+	data dataAuth
 
 	serverLogPath        string
 	logSizeCheckInterval time.Duration
@@ -279,9 +282,11 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 		return fmt.Errorf("proxy: unexpected data listener address %T", ln.Addr())
 	}
 
-	if _, err := identity.WriteSecret(p.rootDir); err != nil {
+	secret, err := identity.WriteSecret(p.rootDir)
+	if err != nil {
 		return fmt.Errorf("write proxy secret: %w", err)
 	}
+	p.data = newDataAuth(secret, dataPort.Port)
 
 	var identMu sync.RWMutex
 	identReply := identity.IdentReply{
@@ -358,14 +363,15 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	}
 
 	if err := pidfile.Write(p.rootDir, PIDFileName, pidfile.PidFile{
-		Pid:         os.Getpid(),
-		Port:        dataPort.Port,
-		UpstreamID:  upstreamID,
-		Schema:      pidfile.SchemaV2,
-		Kind:        pidfile.KindProxy,
-		Birth:       string(birth),
-		RootID:      rootID,
-		ControlPort: control.Port(),
+		Pid:          os.Getpid(),
+		Port:         dataPort.Port,
+		UpstreamID:   upstreamID,
+		Schema:       pidfile.SchemaV2,
+		Kind:         pidfile.KindProxy,
+		Birth:        string(birth),
+		RootID:       rootID,
+		ControlPort:  control.Port(),
+		ControlProto: pidfile.ControlProtoIdentMAC,
 	}); err != nil {
 		p.stats.IncBackendStop()
 		_ = stopBackendBounded(p.server)
@@ -376,6 +382,7 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		<-gctx.Done()
+		_ = pidfile.Remove(p.rootDir, PIDFileName)
 		_ = p.listener.Close()
 		_ = control.Close()
 		return nil
@@ -489,6 +496,16 @@ func (p *proxyServer) acceptLoop(ctx context.Context) error {
 func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 	addr := client.RemoteAddr()
 	p.connTracef("handleConn(%s) start", addr)
+
+	// Authenticate before counting the connection or dialing the backend:
+	// an unauthenticated connection must neither hold the idle watcher off
+	// nor cost the backend a session.
+	if ok, err := p.data.accept(client); !ok || err != nil {
+		p.connTracef("handleConn(%s) data authentication failed", addr)
+		_ = client.Close()
+		return err
+	}
+
 	p.activeConns.Add(1)
 	defer func() {
 		p.activeConns.Add(-1)

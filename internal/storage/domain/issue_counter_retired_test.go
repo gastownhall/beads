@@ -33,7 +33,7 @@ func (r *counterRetiredIssueRepo) Retired(_ context.Context, id string) (bool, e
 func TestCounterModeMintWalksPastRetiredValues(t *testing.T) {
 	repo := &counterRetiredIssueRepo{next: 4, retired: map[string]bool{"bd-5": true, "bd-6": true}}
 	u := &issueUseCaseImpl{issueRepo: repo}
-	id, err := u.nextUnretiredCounterID(t.Context(), "bd")
+	id, err := u.nextUnretiredCounterID(t.Context(), "bd", nil)
 	if err != nil {
 		t.Fatalf("nextUnretiredCounterID() = %v", err)
 	}
@@ -53,7 +53,25 @@ func TestCounterModeMintGivesUpAfterTheSkipBound(t *testing.T) {
 		repo.retired[fmt.Sprintf("bd-%d", n)] = true
 	}
 	u := &issueUseCaseImpl{issueRepo: repo}
-	if id, err := u.nextUnretiredCounterID(t.Context(), "bd"); err == nil {
+	if id, err := u.nextUnretiredCounterID(t.Context(), "bd", nil); err == nil {
 		t.Fatalf("nextUnretiredCounterID() = %q, nil; want the skip-bound error", id)
+	}
+}
+
+// TestCounterModeMintWalksPastClaimedValues pins the batch half of the
+// counter-mode mint: a value the caller's batch claimed (an explicit id a
+// later item names) is skipped like a retired one, without the tombstone read.
+func TestCounterModeMintWalksPastClaimedValues(t *testing.T) {
+	repo := &counterRetiredIssueRepo{next: 4, retired: map[string]bool{}}
+	u := &issueUseCaseImpl{issueRepo: repo}
+	id, err := u.nextUnretiredCounterID(t.Context(), "bd", map[string]bool{"bd-5": true})
+	if err != nil {
+		t.Fatalf("nextUnretiredCounterID() = %v", err)
+	}
+	if id != "bd-6" {
+		t.Fatalf("nextUnretiredCounterID() = %q, want bd-6 past the claimed bd-5", id)
+	}
+	if got := strings.Join(repo.probed, ","); got != "bd-6" {
+		t.Fatalf("probed %s, want only bd-6: a claimed value costs no tombstone read", got)
 	}
 }

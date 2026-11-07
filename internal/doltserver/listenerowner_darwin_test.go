@@ -27,6 +27,7 @@ func TestListenerOwnership_FakeReads(t *testing.T) {
 		pidsErr    error
 		parents    map[int]int
 		parentsErr error
+		provable   bool
 		ownership  Ownership
 		owned      bool
 		known      bool
@@ -38,9 +39,11 @@ func TestListenerOwnership_FakeReads(t *testing.T) {
 		{name: "holder missing from the snapshot", pids: []int{999}, parents: tree, ownership: OwnershipForeign, owned: false, known: true},
 		{name: "cyclic snapshot does not loop", pids: []int{700}, parents: tree, ownership: OwnershipForeign, owned: false, known: true},
 		// lsof lists no listener although one answered: another user's
-		// socket, or a forwarded one. Server mode falls back; the proxied
-		// launcher asks ListenerOwnershipProvable.
-		{name: "no listener listed", pids: nil, parents: tree, ownership: OwnershipUnlisted, owned: false, known: false},
+		// socket, or a forwarded one. Where lsof provably lists this user's
+		// own listeners that is not the child's; where it cannot (no
+		// working lsof) server mode falls back.
+		{name: "no listener listed, ownership provable", pids: nil, parents: tree, provable: true, ownership: OwnershipUnlisted, owned: false, known: true},
+		{name: "no listener listed, ownership not provable", pids: nil, parents: tree, ownership: OwnershipUnlisted, owned: false, known: false},
 		{name: "lsof fails", pidsErr: errors.New("lsof: not found"), parents: tree, ownership: OwnershipUnknown, owned: false, known: false},
 		{name: "ps fails", pids: []int{self}, parentsErr: errors.New("ps: not found"), ownership: OwnershipUnknown, owned: false, known: false},
 		{name: "empty snapshot", pids: []int{self}, parents: map[int]int{}, ownership: OwnershipUnknown, owned: false, known: false},
@@ -51,6 +54,9 @@ func TestListenerOwnership_FakeReads(t *testing.T) {
 				func(int) ([]int, error) { return tc.pids, tc.pidsErr },
 				func() (map[int]int, error) { return tc.parents, tc.parentsErr },
 			)
+			origProvable := listenerOwnershipProvable
+			listenerOwnershipProvable = func() bool { return tc.provable }
+			t.Cleanup(func() { listenerOwnershipProvable = origProvable })
 			if got := classifyListener(self, 1); got != tc.ownership {
 				t.Errorf("classifyListener = %d, want %d", got, tc.ownership)
 			}

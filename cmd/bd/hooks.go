@@ -1869,8 +1869,9 @@ func exportJSONLForCommit() {
 	fullPath := filepath.Join(hookJSONLDir(beadsDir), exportPath)
 
 	// If the export file is staged for deletion (user ran `git rm`), do not
-	// re-export or re-stage it. GIT_INDEX_FILE is set during an actual commit,
-	// so git-diff-index reads the pending index — where the deletion lives.
+	// re-export or re-stage it. The guard reads every index gitAddFile would
+	// stage into: the pending index (GIT_INDEX_FILE during an actual commit)
+	// and, for `git commit -- <paths>`, the index git installs after it.
 	// Without this guard, git add fullPath would convert the staged deletion
 	// back to a modification and the file would never be removed from the
 	// repo. Reimplements gastownhall/beads#3838 (ckumar1).
@@ -1931,12 +1932,13 @@ func exportJSONLForCommit() {
 
 	// Stage the exported file if configured. Skip when no-git-ops is set
 	// (GH#3314). gitAddFile scrubs the inherited git hook env vars so git
-	// rediscovers the repo from cwd, and silently skips when fullPath is
-	// outside the hook's worktree. That guard still matters here: hookJSONLDir
-	// only retargets the cross-worktree case it can fix, so a .beads/redirect
-	// to a shared out-of-repo store, a BEADS_DIR override, or a beads dir
-	// above the repository root all still resolve outside this worktree and
-	// must not be dropped into the index. See GH#3311.
+	// rediscovers the repo from cwd, keeping only a GIT_INDEX_FILE that names
+	// this repository's commit index (GH#4080), and silently skips when
+	// fullPath is outside the hook's worktree. That guard still matters here:
+	// hookJSONLDir only retargets the cross-worktree case it can fix, so a
+	// .beads/redirect to a shared out-of-repo store, a BEADS_DIR override, or
+	// a beads dir above the repository root all still resolve outside this
+	// worktree and must not be dropped into the index. See GH#3311.
 	if config.GetBool("export.git-add") && !config.GetBool("no-git-ops") {
 		if err := gitAddFile(fullPath); err != nil {
 			debug.Logf("pre-commit: git add failed: %v\n", err)
@@ -2128,12 +2130,16 @@ func hookSubprocessEnv(env []string) []string {
 // back into a modification, silently reviving a file the user intentionally
 // removed.
 //
-// Unlike preCommitHasStagedBeadsFiles and gitAddFile, this deliberately runs
-// git with the hook's inherited environment intact rather than scrubbing
-// GIT_* vars. GIT_INDEX_FILE is set during an actual commit and points at
-// the pending index — where the staged deletion lives — so scrubbing it
-// here would make git fall back to the on-disk index and miss the
-// deletion. Reimplements gastownhall/beads#3838 (ckumar1).
+// Like preCommitHasStagedBeadsFiles and gitAddFile, this runs git with the
+// environment gitIndexEnv builds: GIT_* routing vars scrubbed, so git
+// discovers the repository from dir even when a linked-worktree hook
+// inherited GIT_DIR (which would make dir the work-tree top and the
+// pathspec miss), and the hook's GIT_INDEX_FILE kept, because it points at
+// the pending index where the staged deletion lives (GH#4080). It asks every
+// index gitAddFile stages into (stagingIndexes): a `git commit -- <paths>`
+// that leaves the export out keeps its deletion only in index.lock, the index
+// git installs after the commit. Reimplements gastownhall/beads#3838
+// (ckumar1).
 //
 // #nosec G702 -- no shell is involved: the binary is the literal "git" and
 // every argument is its own argv element. The only variable argument is the
@@ -2157,10 +2163,19 @@ func isExportFileStagedForDeletion(fullPath string) bool {
 	if err != nil {
 		return false
 	}
-	checkCmd := exec.Command("git", "diff", "--cached", "--diff-filter=D", "--name-only", "--", rel)
-	checkCmd.Dir = dir
-	out, _ := checkCmd.Output()
-	return len(out) > 0
+	env, indexFile, err := gitIndexEnv(dir)
+	if err != nil {
+		debug.Logf("pre-commit: failed to resolve the commit index: %v\n", err)
+	}
+	for _, index := range stagingIndexes(indexFile) {
+		checkCmd := exec.Command("git", "diff", "--cached", "--diff-filter=D", "--name-only", "--", rel)
+		checkCmd.Dir = dir
+		checkCmd.Env = envForIndex(env, indexFile, index)
+		if out, _ := checkCmd.Output(); len(out) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // nearestExistingDir walks up from dir to the first existing directory,
@@ -2183,9 +2198,15 @@ func preCommitHasStagedBeadsFiles(beadsDir string) bool {
 	if hookRoot := hookWorkTreeRoot(); hookRoot != "" {
 		cmdDir = hookRoot
 	}
+	// Ask the index the commit is built from: during `git commit -- <paths>`
+	// that is the hook's GIT_INDEX_FILE, not the on-disk index (GH#4080).
+	env, _, err := gitIndexEnv(cmdDir)
+	if err != nil {
+		debug.Logf("pre-commit: failed to resolve the commit index: %v\n", err)
+	}
 	cmd := exec.Command("git", "diff", "--cached", "--name-only", "--", ".beads")
 	cmd.Dir = cmdDir
-	cmd.Env = scrubGitHookEnv(os.Environ())
+	cmd.Env = env
 	out, err := cmd.Output()
 	if err != nil {
 		debug.Logf("pre-commit: failed to inspect staged .beads paths: %v\n", err)

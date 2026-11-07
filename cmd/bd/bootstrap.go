@@ -149,6 +149,11 @@ Bootstrap auto-detects the right action:
 If sync.remote points at a git repository, bootstrap verifies refs/dolt/data
 before cloning. Bootstrap exits non-zero when it cannot set up a database.
 
+Values starting with - in sync.remote or sync.git-remote are refused as invalid
+remote URLs: bd init returns an error naming the key; bd bootstrap restores a
+local backup or issues.jsonl when available, otherwise reports a blocked plan
+without contacting the remote.
+
 This is the recommended command for:
   • Setting up beads on a fresh clone
   • Recovering after moving to a new machine
@@ -533,17 +538,22 @@ func detectBootstrapPlan(beadsDir string, cfg *configfile.Config) BootstrapPlan 
 	// remember why so an unverifiable remote can become fatal only after local
 	// recovery is exhausted. With no sync.remote, auto-detect Dolt data on git
 	// origin instead.
-	syncRemote := resolveSyncRemote()
+	syncRemote, syncRemoteErr := resolveSyncRemoteChecked()
 	unusableRemoteReason, unusableRemoteURL := "", ""
-	if syncRemote != "" {
+	switch {
+	case syncRemoteErr != nil:
+		unusableRemoteReason = syncRemoteErr.Error()
+	case syncRemote != "":
 		done, reason, url := planConfiguredSyncRemote(&plan, syncRemote)
 		if done {
 			return plan
 		}
 		// Cloning is off the table; purely local recovery is not.
 		unusableRemoteReason, unusableRemoteURL = reason, url
-	} else if originPlan, ok := gitOriginSyncPlan(plan); ok {
-		return originPlan
+	default:
+		if originPlan, ok := gitOriginSyncPlan(plan); ok {
+			return originPlan
+		}
 	}
 
 	// On-disk recovery sources: a non-empty backup JSONL, then a git-tracked
@@ -1620,6 +1630,27 @@ func printBootstrapRemoteBehindGuidance(w io.Writer, e *schema.RemoteMigrateGate
 			"      re-run `bd bootstrap`, or keep using a bd version that matches the remote.\n\n")
 }
 
+// doctorEnsureGitignoreForBeadsDir is the seam tests use to make the
+// .beads/.gitignore ensure step fail without a hostile mount (mirrors
+// doctorFindOrphanedIssues in orphans.go).
+var doctorEnsureGitignoreForBeadsDir = doctor.EnsureGitignoreForBeadsDir
+
+// ensureBeadsGitignore runs the .beads/.gitignore ensure step shared by
+// bootstrap and connect. A permission-only failure downgrades to a warning:
+// ErrGitignorePermissions means every required pattern is already in place
+// and only the 0600 tightening failed (chmod-hostile mount, file owned by
+// another user), which is not worth aborting over (#6225) — bd init already
+// treats this step as non-fatal. Any other failure — patterns that could
+// not be written, an unreadable file — is returned unchanged.
+func ensureBeadsGitignore(beadsDir string) error {
+	err := doctorEnsureGitignoreForBeadsDir(beadsDir)
+	if errors.Is(err, doctor.ErrGitignorePermissions) {
+		WarnError("%v", err)
+		return nil
+	}
+	return err
+}
+
 // finalizeSyncedBootstrap writes metadata.json and config.yaml after a
 // successful sync clone, matching the on-disk layout that bd init produces.
 // It is idempotent: re-running over an already-finalized workspace leaves
@@ -1653,7 +1684,7 @@ func finalizeSyncedBootstrap(beadsDir, syncRemote string, cfg *configfile.Config
 	if err := createConfigYaml(beadsDir, false, ""); err != nil {
 		return fmt.Errorf("create config.yaml: %w", err)
 	}
-	if err := doctor.EnsureGitignoreForBeadsDir(beadsDir); err != nil {
+	if err := ensureBeadsGitignore(beadsDir); err != nil {
 		return fmt.Errorf("ensure .beads/.gitignore: %w", err)
 	}
 

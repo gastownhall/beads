@@ -13,6 +13,14 @@ import (
 	"github.com/steveyegge/beads/issueops"
 )
 
+func TestSetSettingRefusesCommandSetting(t *testing.T) {
+	ts := newSettingsServer(t, &roleSettings{validateWrite: true})
+	resp := ts.setSetting(t, "/v0/beads/config/mail.delegate", `{"value":"gt mail"}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
+	}
+}
+
 // The wire edge of the two settings WRITES, on a fake role.
 //
 // Which keys the plane refuses, what the projection of status.custom does, and

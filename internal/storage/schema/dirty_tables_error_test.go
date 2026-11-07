@@ -68,6 +68,8 @@ func TestMigrateUpDirtyTablesErrorUnversionedAtCursorZero(t *testing.T) {
 			// migrationWorkNeeded: cursor 0 is behind LatestVersion(), so the
 			// || short-circuits before the ignored-source probes.
 			expectUnversionedCursorRead(mock, tc.cursorTable)
+			// The pass reads @@dolt_transaction_commit before its first write (#4470).
+			expectTransactionCommitRead(mock, 0)
 			// dirtyBeforeAll: the residue table is dirty in the working set.
 			expectDirtyDoltStatusRow(mock, dirtyTable, false)
 			// The seed changed rows, so it is committed scoped+labeled before
