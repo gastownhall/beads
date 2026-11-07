@@ -144,6 +144,33 @@ func TestNormalizeRepoPathForStorage(t *testing.T) {
 			t.Fatal("expected an error resolving a relative path with no working directory")
 		}
 	})
+
+	absPath := filepath.Join(t.TempDir(), "work", "other")
+	verbatim := []struct {
+		name string
+		path string
+	}{
+		{"absolute path", absPath},
+		{"absolute path with trailing separator", absPath + string(filepath.Separator)},
+		{"home-relative path", "~/planning"},
+		{"bare tilde", "~"},
+		{"tilde with user prefix is not expanded", "~user/planning"},
+		{"https URL", "https://dolthub.com/org/planning"},
+		{"ssh URL", "git@github.com:org/beads-planning.git"},
+		{"dolthub URL", "dolthub://org/planning"},
+		{"empty string", ""},
+	}
+	for _, tt := range verbatim {
+		t.Run(tt.name+" stays verbatim", func(t *testing.T) {
+			got, err := normalizeRepoPathForStorage(tt.path)
+			if err != nil {
+				t.Fatalf("normalizeRepoPathForStorage(%q): %v", tt.path, err)
+			}
+			if got != tt.path {
+				t.Fatalf("normalizeRepoPathForStorage(%q) = %q, want it verbatim", tt.path, got)
+			}
+		})
+	}
 }
 
 func TestRepoPathAddFromNestedCwdStoresWorkspaceIdentity(t *testing.T) {
@@ -205,5 +232,149 @@ func TestRepoPathAddReportsStoredPathInJSON(t *testing.T) {
 	want := filepath.Clean(other)
 	if !result.Added || result.Path != want {
 		t.Fatalf("json output = %+v, want added path %q", result, want)
+	}
+}
+
+func TestRepoPathAddKeepsVerbatimTargets(t *testing.T) {
+	t.Run("absolute target", func(t *testing.T) {
+		_, primary, other := repoPathTestWorkspace(t)
+		t.Chdir(t.TempDir()) // any cwd: an absolute target carries its own
+		out, err := captureRepoCommandOutput(t, func() error {
+			return repoAddCmd.RunE(repoAddCmd, []string{other})
+		})
+		if err != nil {
+			t.Fatalf("repo add: %v", err)
+		}
+		if entries := readRepoConfigEntries(t, primary); len(entries) != 1 || entries[0] != other {
+			t.Fatalf("repos.additional = %v, want [%s]", entries, other)
+		}
+		if !strings.Contains(out, "Added repository: "+other) {
+			t.Fatalf("output %q does not report the stored path %q", out, other)
+		}
+	})
+
+	t.Run("absolute target with trailing separator", func(t *testing.T) {
+		_, primary, other := repoPathTestWorkspace(t)
+		target := other + string(filepath.Separator)
+		t.Chdir(t.TempDir())
+		if _, err := captureRepoCommandOutput(t, func() error {
+			return repoAddCmd.RunE(repoAddCmd, []string{target})
+		}); err != nil {
+			t.Fatalf("repo add: %v", err)
+		}
+		if entries := readRepoConfigEntries(t, primary); len(entries) != 1 || entries[0] != target {
+			t.Fatalf("repos.additional = %v, want [%s] verbatim", entries, target)
+		}
+	})
+
+	t.Run("home-relative target", func(t *testing.T) {
+		_, primary, _ := repoPathTestWorkspace(t)
+		home := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(home, "planning", ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("HOME", home)
+		t.Chdir(t.TempDir())
+		out, err := captureRepoCommandOutput(t, func() error {
+			return repoAddCmd.RunE(repoAddCmd, []string{"~/planning"})
+		})
+		if err != nil {
+			t.Fatalf("repo add: %v", err)
+		}
+		if entries := readRepoConfigEntries(t, primary); len(entries) != 1 || entries[0] != "~/planning" {
+			t.Fatalf("repos.additional = %v, want [~/planning]", entries)
+		}
+		if !strings.Contains(out, "Added repository: ~/planning") {
+			t.Fatalf("output %q does not report the stored ~/planning entry", out)
+		}
+	})
+
+	t.Run("home lookup failure leaves the target unchanged", func(t *testing.T) {
+		// With no home directory to expand, add still validates the literal
+		// path, so a directory literally named '~' works. The stored entry is
+		// the raw string either way.
+		root, primary, _ := repoPathTestWorkspace(t)
+		literal := filepath.Join(root, "~literal", ".beads")
+		if err := os.MkdirAll(literal, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("HOME", "")
+		t.Chdir(root)
+		target := filepath.Join(root, "~literal")
+		if _, err := captureRepoCommandOutput(t, func() error {
+			return repoAddCmd.RunE(repoAddCmd, []string{target})
+		}); err != nil {
+			t.Fatalf("repo add: %v", err)
+		}
+		if entries := readRepoConfigEntries(t, primary); len(entries) != 1 || entries[0] != target {
+			t.Fatalf("repos.additional = %v, want [%s]", entries, target)
+		}
+	})
+
+	t.Run("remote URLs", func(t *testing.T) {
+		_, primary, _ := repoPathTestWorkspace(t)
+		t.Chdir(t.TempDir())
+		for _, url := range []string{
+			"https://dolthub.com/org/planning",
+			"git@github.com:org/beads-planning.git",
+		} {
+			if _, err := captureRepoCommandOutput(t, func() error {
+				return repoAddCmd.RunE(repoAddCmd, []string{url})
+			}); err != nil {
+				t.Fatalf("repo add %s: %v", url, err)
+			}
+		}
+		entries := readRepoConfigEntries(t, primary)
+		if len(entries) != 2 || entries[0] != "https://dolthub.com/org/planning" || entries[1] != "git@github.com:org/beads-planning.git" {
+			t.Fatalf("repos.additional = %v, want both URLs verbatim", entries)
+		}
+	})
+}
+
+func TestRepoPathAddDuplicateSpellings(t *testing.T) {
+	_, primary, other := repoPathTestWorkspace(t)
+	t.Chdir(primary)
+
+	if _, err := captureRepoCommandOutput(t, func() error {
+		return repoAddCmd.RunE(repoAddCmd, []string{"../other"})
+	}); err != nil {
+		t.Fatalf("first repo add: %v", err)
+	}
+	want := filepath.Clean(other)
+	if entries := readRepoConfigEntries(t, primary); len(entries) != 1 || entries[0] != want {
+		t.Fatalf("repos.additional = %v, want [%s]", entries, want)
+	}
+
+	// The same relative spelling resolves to the stored absolute entry, so
+	// the existing string-level duplicate detection still catches it.
+	var addErr error
+	stderr := captureStderr(t, func() {
+		addErr = repoAddCmd.RunE(repoAddCmd, []string{"../other"})
+	})
+	if addErr == nil || !strings.Contains(stderr, "already configured") {
+		t.Fatalf("second add of the same target should be rejected, got: %v (stderr %q)", addErr, stderr)
+	}
+
+	// The absolute spelling of the same target now normalizes to the stored
+	// entry, so it is caught too: only byte-distinct spellings are distinct
+	// entries, the duplicate check stays string-level.
+	var absErr error
+	stderr = captureStderr(t, func() {
+		absErr = repoAddCmd.RunE(repoAddCmd, []string{want})
+	})
+	if absErr == nil || !strings.Contains(stderr, "already configured") {
+		t.Fatalf("add by the stored absolute spelling should be rejected, got: %v (stderr %q)", absErr, stderr)
+	}
+
+	// A byte-distinct spelling (trailing separator) is a separate entry.
+	trailing := want + string(filepath.Separator)
+	if _, err := captureRepoCommandOutput(t, func() error {
+		return repoAddCmd.RunE(repoAddCmd, []string{trailing})
+	}); err != nil {
+		t.Fatalf("repo add by trailing-separator spelling: %v", err)
+	}
+	entries := readRepoConfigEntries(t, primary)
+	if len(entries) != 2 || entries[0] != want || entries[1] != trailing {
+		t.Fatalf("repos.additional = %v, want [%s %s]", entries, want, trailing)
 	}
 }

@@ -50,6 +50,10 @@ A relative path is resolved to an absolute path at add time, so the
 stored entry names the same workspace no matter which directory later
 commands run from.
 
+Absolute paths, remote URLs and ~/-prefixed paths are stored verbatim;
+~/ stays home-relative rather than baking one machine's home directory
+into the shared config.
+
 This modifies .beads/config.yaml, which is version-controlled and
 shared across all clones of this repository.`,
 	Args:          cobra.ExactArgs(1),
@@ -447,7 +451,16 @@ func expandRepoTilde(path string) string {
 // arg. A relative target is resolved against the working directory once, at
 // add time: every consumer re-resolves a stored relative string against its
 // own cwd, so it would name a different repository per directory (bd-59llyl).
+// Remote URLs, `~`-prefixed paths and absolute paths are stored verbatim: a
+// `~/` entry is already cwd-independent, and absolutizing it would bake one
+// machine's home directory into a config.yaml shared across clones.
 func normalizeRepoPathForStorage(arg string) (string, error) {
+	if remotecache.IsRemoteURL(arg) {
+		return arg, nil
+	}
+	if arg == "" || arg[0] == '~' || filepath.IsAbs(arg) {
+		return arg, nil
+	}
 	return filepath.Abs(arg)
 }
 

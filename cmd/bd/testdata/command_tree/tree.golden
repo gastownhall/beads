@@ -6320,6 +6320,10 @@ bd repo add
     | stored entry names the same workspace no matter which directory later
     | commands run from.
     |
+    | Absolute paths, remote URLs and ~/-prefixed paths are stored verbatim;
+    | ~/ stays home-relative rather than baking one machine's home directory
+    | into the shared config.
+    |
     | This modifies .beads/config.yaml, which is version-controlled and
     | shared across all clones of this repository.
 
