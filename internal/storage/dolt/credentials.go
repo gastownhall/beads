@@ -21,6 +21,8 @@ import (
 	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 // Credential storage and encryption for federation peers.
@@ -879,39 +881,140 @@ func (s *DoltStore) shouldUseCLIForCloudAuthWithError(ctx context.Context, remot
 	return s.prepareCLIRouteForCloudAuth(ctx, remote)
 }
 
-// serverEnvCredentialsNote completes the error of a push that failed on the
-// SQL route when this bd holds the remote's credentials. In server mode CALL
-// DOLT_PUSH runs in the Dolt server's process, which takes DOLT_REMOTE_PASSWORD
-// (for the remote user bd passes) and the cloud-storage variables of the
-// remote URL's scheme (cloudAuthSchemeMap) from its own environment: bd sets
-// them only in its own process (withRemoteOperationEnv), which a server bd
-// does not run never sees. The note names the ones bd holds, so a push that a
-// server without them refuses says where they must be set. It is empty when
-// bd holds none, and in embedded mode, where the push runs in this process.
-func (s *DoltStore) serverEnvCredentialsNote(ctx context.Context, remote string, creds *remoteCredentials) string {
+// remoteTransferError marks the error of a transfer itself: a dolt push,
+// pull or fetch subprocess that failed on its own (not on its timeout), or a
+// CALL DOLT_PUSH/PULL/FETCH statement that failed. Only these carry the
+// server-environment note (withServerCredentialsNote): a refused dolt binary,
+// the CLI remote's materialization, the pre-push fsck, a credential lookup,
+// a cancellation or deadline, and what a pull does after its transfer (the
+// merge, its conflicts, the check that it landed) are not the transfer, and
+// a note about where a server takes its credentials would mislead there.
+type remoteTransferError struct{ err error }
+
+func (e *remoteTransferError) Error() string { return e.err.Error() }
+func (e *remoteTransferError) Unwrap() error { return e.err }
+
+// markTransferFailure marks err as a transfer's own failure
+// (remoteTransferError), leaving nil, cancellations and deadlines as they are.
+func markTransferFailure(err error) error {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return &remoteTransferError{err: err}
+}
+
+// serverCredentialsNoteError is a transfer failure completed by the
+// server-environment note, kept as a type so that a failure already noted
+// is not noted again on its way out.
+type serverCredentialsNoteError struct {
+	err  error
+	note string
+}
+
+func (e *serverCredentialsNoteError) Error() string { return e.err.Error() + "; " + e.note }
+func (e *serverCredentialsNoteError) Unwrap() error { return e.err }
+
+// doltMissingPasswordError is the start of the error dolt gives for a
+// transfer that passes --user in a process without DOLT_REMOTE_PASSWORD.
+const doltMissingPasswordError = "must set DOLT_REMOTE_PASSWORD" //nolint:gosec // G101: an error message, not a credential
+
+// withServerCredentialsNote completes err, the result of a push, pull or
+// fetch (op) to remote, with serverCredentialsNote when err is a transfer's
+// own failure (remoteTransferError) that ctx did not end and that is not a
+// pull's merge conflicts. The cause stays wrapped. creds are the credentials
+// bd holds for that remote, peer whether it is a federation peer.
+func (s *DoltStore) withServerCredentialsNote(ctx context.Context, remote, op string, peer bool, creds *remoteCredentials, err error) error {
+	var transfer *remoteTransferError
+	if err == nil || ctx.Err() != nil || !errors.As(err, &transfer) {
+		return err
+	}
+	var noted *serverCredentialsNoteError
+	var conflicts *versioncontrolops.MergeConflictsError
+	if errors.As(err, &noted) || errors.As(err, &conflicts) {
+		return err
+	}
+	note := s.serverCredentialsNote(ctx, remote, op, peer, creds, err)
+	if note == "" {
+		return err
+	}
+	return &serverCredentialsNoteError{err: err, note: note}
+}
+
+// serverCredentialsNote says where the process that runs a server-mode
+// transfer takes its remote credentials from. With a Dolt sql-server, CALL
+// DOLT_PUSH/PULL/FETCH runs in the server's process, and so does the dolt CLI
+// bd runs in a database directory the server holds (cliDirServesServer): the
+// CLI hands the transfer to the server. That process reads
+// DOLT_REMOTE_PASSWORD (for the user bd passes with --user) and the
+// cloud-storage variables of the remote URL's scheme (cloudAuthSchemeMap)
+// from the environment it was started with: what bd sets on its own process
+// (withRemoteOperationEnv) or on a dolt child (remoteCredentials.applyToCmd)
+// never reaches it.
+//
+// The note is for a remote bd holds a user for, or whose scheme's cloud
+// variables bd's environment has; a password alone is not one (dolt reads
+// it only with --user). It is empty in embedded mode, where the transfer runs
+// in this process, for git-protocol and file remotes, which use neither, and
+// when bd cannot list the remote. It names variables, never their values,
+// and does not say they caused the failure, which may be a network or
+// permission error, unless the server's own missing-password error is there.
+func (s *DoltStore) serverCredentialsNote(ctx context.Context, remote, op string, peer bool, creds *remoteCredentials, cause error) string {
 	if !s.serverMode {
 		return ""
 	}
-	var held []string
-	if creds != nil && creds.username != "" && creds.password != "" {
-		held = append(held, "DOLT_REMOTE_PASSWORD")
-	}
-	if remotes, err := s.ListRemotes(ctx); err == nil {
-		for _, r := range remotes {
-			if r.Name != remote {
-				continue
-			}
-			for _, prefix := range envPrefixesForRemoteURL(r.URL) {
-				// DOLT_REMOTE_ is the credential pair itself, named above
-				// when the push passes its user.
-				if prefix != "DOLT_REMOTE_" && execenv.ContainsKeyWithPrefix(os.Environ(), prefix) {
-					held = append(held, prefix+"*")
-				}
-			}
-		}
-	}
-	if len(held) == 0 {
+	url := s.sqlRemoteURL(ctx, remote)
+	if url == "" || doltutil.IsGitProtocolURL(url) || strings.HasPrefix(url, "file://") {
 		return ""
 	}
-	return fmt.Sprintf("; CALL DOLT_PUSH runs in the Dolt server's process, which takes %s from its own environment, not from bd's", strings.Join(held, " and "))
+	var username, password string
+	if creds != nil {
+		username, password = creds.username, creds.password
+	}
+	var sources []string
+	if username != "" {
+		sources = append(sources, "DOLT_REMOTE_PASSWORD")
+	}
+	for _, prefix := range envPrefixesForRemoteURL(url) {
+		// DOLT_REMOTE_ is the user's password, named above when bd passes
+		// a user.
+		if prefix != "DOLT_REMOTE_" && execenv.ContainsKeyWithPrefix(os.Environ(), prefix) {
+			sources = append(sources, prefix+"*")
+		}
+	}
+	if len(sources) == 0 {
+		return ""
+	}
+	target := fmt.Sprintf("remote %q", remote)
+	if peer {
+		target = fmt.Sprintf("peer %q", remote)
+	}
+	names := strings.Join(sources, " and ")
+	var b strings.Builder
+	if strings.Contains(cause.Error(), doltMissingPasswordError) {
+		b.WriteString("the process that ran this transfer has no DOLT_REMOTE_PASSWORD: ")
+	}
+	fmt.Fprintf(&b, "with a Dolt sql-server, a %s for %s runs in the server's process (the dolt CLI in a database directory the server holds hands it to the server), which takes %s from the environment it was started with, never from bd's", op, target, names)
+	if username != "" {
+		if password != "" {
+			fmt.Fprintf(&b, "; bd passes the user (--user), but the password it holds for %s is not forwarded to the server", target)
+		} else {
+			fmt.Fprintf(&b, "; bd passes the user (--user), and server-mode %s uses the Dolt server's startup environment for DOLT_REMOTE_PASSWORD", op)
+		}
+	}
+	return b.String()
+}
+
+// sqlRemoteURL returns the URL the server lists for remote, or "" when it
+// lists none or cannot be read.
+func (s *DoltStore) sqlRemoteURL(ctx context.Context, remote string) string {
+	remotes, err := s.ListRemotes(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, r := range remotes {
+		if r.Name == remote {
+			return r.URL
+		}
+	}
+	return ""
 }

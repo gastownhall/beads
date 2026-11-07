@@ -672,7 +672,7 @@ func TestCredentialPushOnAnEnvNamedPortKeepsTheCLIOnlyForBdsOwnServer(t *testing
 				if calls != "" {
 					t.Fatalf("push to a server the variable names ran dolt in the leftover database:\n%s", calls)
 				}
-				const note = "CALL DOLT_PUSH runs in the Dolt server's process, which takes DOLT_REMOTE_PASSWORD from its own environment, not from bd's"
+				const note = "runs in the server's process (the dolt CLI in a database directory the server holds hands it to the server), which takes DOLT_REMOTE_PASSWORD from the environment it was started with, never from bd's"
 				if pushErr == nil || !strings.Contains(pushErr.Error(), "push to origin/main") || !strings.Contains(pushErr.Error(), note) {
 					t.Fatalf("push = %v, want the SQL route's CALL DOLT_PUSH failure naming where the server takes the password from (%q)", pushErr, note)
 				}

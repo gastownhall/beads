@@ -5243,12 +5243,18 @@ func (s *DoltStore) doltCLIPush(ctx context.Context, remote string, force bool, 
 // cliTransferError wraps a failed CLI transfer, distinguishing a transfer that
 // hit the bounded timeout (actionable: raise BEADS_CLI_TRANSFER_TIMEOUT, or
 // check what holds the database directory busy) from an ordinary failure.
+// Only an ordinary failure, one no deadline or cancellation ended, is marked
+// as the transfer's own (markTransferFailure).
 func cliTransferError(op, remote string, transferCtx context.Context, out []byte, err error) error {
 	if errors.Is(transferCtx.Err(), context.DeadlineExceeded) {
 		return fmt.Errorf("%s to %q timed out after %s (override with %s=<duration>; large transfers to cloud remotes can run long, and a busy dolt sql-server serving the database directory can stall CLI transfers): %s: %w",
 			op, remote, cliExecTimeoutDuration(), cliExecTimeoutEnv, strings.TrimSpace(string(out)), err)
 	}
-	return fmt.Errorf("%s failed: %s: %w", op, strings.TrimSpace(string(out)), err)
+	failed := fmt.Errorf("%s failed: %s: %w", op, strings.TrimSpace(string(out)), err)
+	if transferCtx.Err() != nil {
+		return failed
+	}
+	return markTransferFailure(failed)
 }
 
 // doltCLIPull shells out to `dolt pull` from the database directory.
@@ -5329,6 +5335,9 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 	)
 	defer func() { endSpan(span, retErr) }()
 	creds := s.credentialsForRemote(remote)
+	// A transfer that failed on either route says where the process that ran
+	// it takes the remote's credentials from (serverCredentialsNote).
+	defer func() { retErr = s.withServerCredentialsNote(ctx, remote, "push", false, creds, retErr) }()
 	// Git-protocol remotes: use CLI to avoid MySQL connection timeout during transfer.
 	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
 	// but still need CLI to avoid SQL connection timeout.
@@ -5367,22 +5376,15 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
 	logRouteDecision("push", remote, false)
-	defer func() {
-		if retErr != nil {
-			if note := s.serverEnvCredentialsNote(ctx, remote, creds); note != "" {
-				retErr = fmt.Errorf("%w%s", retErr, note)
-			}
-		}
-	}()
 	if s.remoteUser != "" && remote == s.remote {
 		return withRemoteOperationEnv(creds, s.isS3Remote(ctx, remote), func() error {
 			if force {
 				if err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH('--force', '--user', ?, ?, ?)", s.remoteUser, remote, s.branch); err != nil {
-					return fmt.Errorf("failed to force push to %s/%s: %w", remote, s.branch, err)
+					return markTransferFailure(fmt.Errorf("failed to force push to %s/%s: %w", remote, s.branch, err))
 				}
 			} else {
 				if err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH('--user', ?, ?, ?)", s.remoteUser, remote, s.branch); err != nil {
-					return fmt.Errorf("failed to push to %s/%s: %w", remote, s.branch, err)
+					return markTransferFailure(fmt.Errorf("failed to push to %s/%s: %w", remote, s.branch, err))
 				}
 			}
 			return nil
@@ -5391,11 +5393,11 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 	return withRemoteOperationEnv(nil, s.isS3Remote(ctx, remote), func() error {
 		if force {
 			if err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH('--force', ?, ?)", remote, s.branch); err != nil {
-				return fmt.Errorf("failed to force push to %s/%s: %w", remote, s.branch, err)
+				return markTransferFailure(fmt.Errorf("failed to force push to %s/%s: %w", remote, s.branch, err))
 			}
 		} else {
 			if err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH(?, ?)", remote, s.branch); err != nil {
-				return fmt.Errorf("failed to push to %s/%s: %w", remote, s.branch, err)
+				return markTransferFailure(fmt.Errorf("failed to push to %s/%s: %w", remote, s.branch, err))
 			}
 		}
 		return nil
@@ -5702,8 +5704,11 @@ func (s *DoltStore) pullTransport(ctx context.Context, remote string) error {
 // it merged or was already up to date, and its stdout is discarded — so they
 // report nothing; the SQL routes return what CALL DOLT_PULL (or the fallback's
 // CALL DOLT_MERGE) said. See pullReport for what that does and does not prove.
-func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (pullReport, error) {
+func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (report pullReport, retErr error) {
 	creds := s.credentialsForRemote(remote)
+	// A transfer that failed on either route says where the process that ran
+	// it takes the remote's credentials from (serverCredentialsNote).
+	defer func() { retErr = s.withServerCredentialsNote(ctx, remote, "pull", false, creds, retErr) }()
 	// Git-protocol remotes: use CLI to avoid MySQL connection timeout during transfer.
 	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
 	// but still need CLI to avoid SQL connection timeout.
@@ -5736,7 +5741,6 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 	// guard is a push-only optimization; SQL pull keeps pullWithAutoResolve in
 	// charge of metadata-only conflict repair.
 	logRouteDecision("pull", remote, false)
-	var report pullReport
 	if s.remoteUser != "" && remote == s.remote {
 		err := withRemoteOperationEnv(creds, s.isS3Remote(ctx, remote), func() error {
 			var err error
@@ -5863,6 +5867,7 @@ func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote str
 	// nothing arrived and one that only knows no error occurred (ga-bq9zd).
 	pullRow, pullErr := schema.CallReturningRow(ctx, tx, query, args...)
 	report := parseMergeReport(pullRow)
+	pullErr = markTransferFailure(pullErr)
 
 	// GH#3144: When DOLT_PULL fails because upstream branch tracking is not
 	// configured in repo_state.json (common when remote was added via
@@ -5871,7 +5876,7 @@ func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote str
 	if pullErr != nil && isBranchTrackingError(pullErr) {
 		if err := schema.DrainCall(ctx, tx, "CALL DOLT_FETCH(?, ?)", remote, s.branch); err != nil {
 			_ = tx.Rollback()
-			return pullReport{}, fmt.Errorf("fetch from %s/%s: %w", remote, s.branch, err)
+			return pullReport{}, markTransferFailure(fmt.Errorf("fetch from %s/%s: %w", remote, s.branch, err))
 		}
 		trackingRef := remote + "/" + s.branch
 		// The merge, not the pull, is now what happened — so its row replaces
