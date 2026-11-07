@@ -91,7 +91,7 @@ func helperArgIndex() int {
 //   - Each returns a *distinct* command string, which is load-bearing: the
 //     production credential cache is keyed by command text, so identical
 //     fixtures would otherwise hit a 60s cross-test cache.
-//
+
 // Cleanup removes the package process's suite-scoped transport artifacts after
 // all tests have completed.
 func Cleanup() error {
