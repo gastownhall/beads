@@ -15,7 +15,7 @@ import (
 
 // hostWindowsFacts gathers the live host inputs to the Windows boundary.
 func hostWindowsFacts() windowsFacts {
-	f := windowsFacts{Getenv: os.Getenv, Resolve: resolveWindowsFinalPath}
+	f := windowsFacts{Getenv: os.Getenv, TempDir: os.TempDir(), Resolve: resolveWindowsFinalPath}
 	if dir, err := windows.GetSystemWindowsDirectory(); err == nil {
 		f.WindowsDir = dir
 	}
