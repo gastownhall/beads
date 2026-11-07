@@ -53,12 +53,13 @@ func (s *DoltStore) pushRefToPeer(ctx context.Context, peer string, refspec stri
 		} else if useCLI {
 			return s.doltCLIPushRefToPeer(ctx, peer, refspec, creds)
 		}
-		return withEnvCredentials(creds, func() error {
+		sqlErr := withEnvCredentials(creds, func() error {
 			if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH(?, ?)", peer, refspec); err != nil {
 				return fmt.Errorf("failed to push to peer %s: %w", peer, err)
 			}
 			return nil
 		})
+		return s.notePeerServerEnvCredentials(ctx, "CALL DOLT_PUSH", peer, sqlErr)
 	})
 }
 
@@ -122,10 +123,11 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 			pullErr := s.finishCLIPull(ctx, s.doltCLIPullFromPeer(ctx, peer, creds))
 			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
 		}
-		return withEnvCredentials(creds, func() error {
+		sqlErr := withEnvCredentials(creds, func() error {
 			pullErr := s.pullWithAutoResolve(ctx, peer, "CALL DOLT_PULL(?)", peer)
 			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
 		})
+		return s.notePeerServerEnvCredentials(ctx, "CALL DOLT_PULL", peer, sqlErr)
 	})
 	return s.finishPeerPull(ctx, conflicts, err, preHead)
 }
@@ -185,12 +187,13 @@ func (s *DoltStore) Fetch(ctx context.Context, peer string) error {
 		} else if useCLI {
 			return s.doltCLIFetchFromPeer(ctx, peer, creds)
 		}
-		return withEnvCredentials(creds, func() error {
+		sqlErr := withEnvCredentials(creds, func() error {
 			if err := s.execWithLongTimeout(ctx, "CALL DOLT_FETCH(?)", peer); err != nil {
 				return fmt.Errorf("failed to fetch from peer %s: %w", peer, err)
 			}
 			return nil
 		})
+		return s.notePeerServerEnvCredentials(ctx, "CALL DOLT_FETCH", peer, sqlErr)
 	})
 }
 

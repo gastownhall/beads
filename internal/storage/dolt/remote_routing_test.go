@@ -12,6 +12,7 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil"
 )
@@ -689,5 +690,137 @@ func TestCredentialPushOnAnEnvNamedPortKeepsTheCLIOnlyForBdsOwnServer(t *testing
 				t.Fatalf("dolt calls %q lack the credential push %q", calls, want)
 			}
 		})
+	}
+}
+
+// TestPeerTransfersRunOnTheServerAndNameTheCloudCredentialsBdHolds pins where
+// a federation peer push, pull and fetch run in server mode, and what their
+// failure says (#5953). A server-mode store whose .beads/dolt/<db> is the
+// database bd's own server serves has a peer with no federation_peers row, so
+// no stored credentials. Cloud credentials for the peer URL's scheme in bd's
+// environment do not move the transfer to the dolt CLI: run in that
+// directory, dolt would hand it to the server, which takes them from its own
+// environment either way. So each runs CALL DOLT_PUSH, DOLT_PULL or
+// DOLT_FETCH, runs no dolt, and its failure names the variables of the
+// peer's scheme that bd holds. Another scheme's variable adds no note, nor
+// does DOLT_REMOTE_PASSWORD for an HTTPS peer: the peer's call passes no
+// --user, so the server would not read it.
+func TestPeerTransfersRunOnTheServerAndNameTheCloudCredentialsBdHolds(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fake")
+	}
+	clearPredicateEnv(t)
+	clearCloudAuthEnv(t)
+	const peer = "peer"
+
+	ops := []struct {
+		name string
+		// run returns the conflicts a pull reports; push and fetch report none.
+		run func(context.Context, *DoltStore) ([]storage.Conflict, error)
+		// call is the SQL call the transfer runs on the server.
+		call string
+		// sqlErr is how that call's failure reads.
+		sqlErr string
+	}{
+		{
+			name:   "push",
+			run:    func(ctx context.Context, s *DoltStore) ([]storage.Conflict, error) { return nil, s.PushTo(ctx, peer) },
+			call:   "CALL DOLT_PUSH",
+			sqlErr: "failed to push to peer " + peer,
+		},
+		{
+			name:   "pull",
+			run:    func(ctx context.Context, s *DoltStore) ([]storage.Conflict, error) { return s.PullFrom(ctx, peer) },
+			call:   "CALL DOLT_PULL",
+			sqlErr: "failed to pull from peer " + peer,
+		},
+		{
+			name:   "fetch",
+			run:    func(ctx context.Context, s *DoltStore) ([]storage.Conflict, error) { return nil, s.Fetch(ctx, peer) },
+			call:   "CALL DOLT_FETCH",
+			sqlErr: "failed to fetch from peer " + peer,
+		},
+	}
+	envs := []struct {
+		name, peerURL, key, value string
+		// held is what the note names; empty means no note.
+		held string
+	}{
+		{"AWS_PROFILE for an s3 peer", "s3://bucket/beads", "AWS_PROFILE", "sync", "AWS_*"},
+		{"only AZURE_STORAGE_ACCOUNT for an s3 peer", "s3://bucket/beads", "AZURE_STORAGE_ACCOUNT", "account", ""},
+		{"DOLT_REMOTE_PASSWORD for an https peer", "https://doltremoteapi.dolthub.com/org/peer", "DOLT_REMOTE_PASSWORD", "client-secret", ""},
+	}
+
+	for _, op := range ops {
+		for _, env := range envs {
+			t.Run(op.name+"/"+env.name, func(t *testing.T) {
+				t.Setenv(env.key, env.value)
+				callLog := fakeDoltOnPath(t, env.peerURL)
+				db, mock, err := sqlmock.New()
+				if err != nil {
+					t.Fatalf("sqlmock: %v", err)
+				}
+				t.Cleanup(func() { _ = db.Close() })
+				mock.MatchExpectationsInOrder(false)
+				for i := 0; i < 8; i++ {
+					mock.ExpectQuery("SELECT name, url, params FROM dolt_remotes").
+						WillReturnRows(sqlmock.NewRows([]string{"name", "url", "params"}).AddRow(peer, env.peerURL, nil))
+				}
+				// No federation_peers row: the peer has no stored credentials.
+				mock.ExpectQuery("FROM federation_peers WHERE name = ").
+					WithArgs(peer).
+					WillReturnRows(sqlmock.NewRows([]string{"name", "remote_url", "username", "password_encrypted", "sovereignty", "last_sync", "created_at", "updated_at"}))
+				// A failed SQL pull asks for conflicts; none, so the pull's own
+				// error surfaces.
+				mock.ExpectQuery("SELECT `table`, num_conflicts FROM dolt_conflicts").
+					WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}))
+				beadsDir := unmanagedWorkspace(t)
+				store := &DoltStore{
+					serverMode: true,
+					beadsDir:   beadsDir,
+					dbPath:     filepath.Join(beadsDir, "dolt"),
+					database:   "beads",
+					remote:     "origin",
+					branch:     "main",
+					// Read-only keeps pull to the transfer: no auto-commit,
+					// conflict resolution or is_blocked recompute.
+					readOnly: true,
+					db:       db,
+					cfg:      &Config{ServerHost: "127.0.0.1", ServerPort: 3310},
+					// The SQL call's own connection fails at once.
+					connStr: unroutableConnStr,
+				}
+				serveDoltDatabase(t, store, store.dbPath, 3310)
+				if err := os.MkdirAll(filepath.Join(store.CLIDir(), ".dolt", "noms"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+
+				conflicts, opErr := op.run(context.Background(), store)
+
+				raw, err := os.ReadFile(callLog)
+				if err != nil && !os.IsNotExist(err) {
+					t.Fatal(err)
+				}
+				if calls := strings.TrimSpace(string(raw)); calls != "" {
+					t.Fatalf("%s with %s set ran dolt in the served database:\n%s", op.name, env.key, calls)
+				}
+				if len(conflicts) != 0 {
+					t.Fatalf("%s: conflicts = %v, want none", op.name, conflicts)
+				}
+				if opErr == nil || !strings.Contains(opErr.Error(), op.sqlErr) || !strings.Contains(opErr.Error(), "127.0.0.1:1") {
+					t.Fatalf("%s = %v, want the failure of %s on its unroutable connection (%q)", op.name, opErr, op.call, op.sqlErr)
+				}
+				if env.held == "" {
+					if strings.Contains(opErr.Error(), "runs in the Dolt server's process") {
+						t.Fatalf("%s with only %s set = %v, want no note on the server's environment", op.name, env.key, opErr)
+					}
+					return
+				}
+				note := op.call + " runs in the Dolt server's process, which takes " + env.held + " from its own environment, not from bd's"
+				if !strings.Contains(opErr.Error(), note) {
+					t.Fatalf("%s = %v, want it to name where the server takes %s from (%q)", op.name, opErr, env.key, note)
+				}
+			})
+		}
 	}
 }

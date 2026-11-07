@@ -1208,6 +1208,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- In server mode, a federation peer push, pull or fetch (`bd federation
+  sync`, `bd federation status`) that fails as `CALL DOLT_PUSH`,
+  `DOLT_PULL` or `DOLT_FETCH` on the Dolt server now names the cloud
+  credential variables bd holds for the peer URL's scheme (`AWS_*`,
+  `AZURE_STORAGE_*`, `GOOGLE_*`, `GCS_*`, `OCI_*`), which the server reads
+  from the environment it started with, not from bd's, as a failed push to
+  the workspace's own remote already does. The federation docs say to set
+  them where the server starts. Routing the transfer through the `dolt` CLI
+  would not bring them along: a `dolt` command run in the database directory
+  the server serves hands the transfer to that server (refs #5953).
 - `bd config set`, `bd config unset`, `bd repo add` and `bd repo remove` now
   replace an existing `config.yaml` in one step (temp file in the same
   directory, fsync, rename) instead of truncating and rewriting it in place.

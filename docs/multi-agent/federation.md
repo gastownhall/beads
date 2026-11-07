@@ -109,6 +109,21 @@ Stored credentials are used automatically during sync:
 bd federation add-peer town-gamma 192.168.1.100:3306/beads --user sync-bot
 ```
 
+In server mode the Dolt server runs federation pushes, pulls and fetches, so
+it reads cloud credentials for the peer URL's scheme, such as `AWS_*` for an
+`s3://` peer or `GOOGLE_*` for a `gs://` peer, from the environment it
+started with, not from the shell running `bd`. Set them where the server
+starts. For the server `bd` runs for the workspace, restart it from a shell
+that holds them:
+
+```bash
+export AWS_PROFILE=beads-sync
+bd dolt stop
+bd dolt start
+```
+
+In embedded mode the transfer runs inside `bd` and uses its environment.
+
 ### JSON Output
 
 For scripting, use the `--json` flag:
