@@ -72,7 +72,12 @@ function downloadFile(url, dest) {
             reject(closeErr);
             return;
           }
-          fs.unlink(dest, () => {});
+          // No unlink here: the response body is never piped to `dest` on a
+          // redirect (the pipe below is unreachable for 301/302), so `dest`
+          // holds no real data at this point. The recursive downloadFile
+          // call below reopens `dest` with createWriteStream's default 'w'
+          // flag, which truncates it on open - an explicit unlink first
+          // only raced that reopen without adding anything.
           downloadFile(redirectUrl, dest).then(resolve).catch(reject);
         });
         return;
