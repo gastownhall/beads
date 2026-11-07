@@ -277,6 +277,14 @@ func TestFileURLForOS(t *testing.T) {
 		{name: "AC-1 reported path", goos: "windows",
 			abs:  `c:\Users\alxta\atl-logs-parser\.beads\backup`,
 			want: "file://C:/Users/alxta/atl-logs-parser/.beads/backup", parses: true},
+
+		{name: "AC-2 lowercase backslash", goos: "windows", abs: `c:\Users\me\b`, want: "file://C:/Users/me/b", parses: true},
+		{name: "AC-2 uppercase backslash", goos: "windows", abs: `C:\Users\me\b`, want: "file://C:/Users/me/b", parses: true},
+		{name: "AC-2 lowercase slash", goos: "windows", abs: `c:/Users/me/b`, want: "file://C:/Users/me/b", parses: true},
+		{name: "AC-2 uppercase slash", goos: "windows", abs: `C:/Users/me/b`, want: "file://C:/Users/me/b", parses: true},
+		{name: "AC-2 drive root", goos: "windows", abs: `z:\`, want: "file://Z:/", parses: true},
+		{name: "AC-2 UNC share", goos: "windows", abs: `\\nas\share\beads`, want: "file:////nas/share/beads"},
+		{name: "AC-2 space and percent", goos: "windows", abs: `C:\Users\my dir\100%done`, want: "file://C:/Users/my dir/100%done"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := fileURLForOS(tc.abs, tc.goos)
