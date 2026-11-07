@@ -4,6 +4,7 @@ go_library(
     name = "sqlbuild",
     srcs = [
         "counts.go",
+        "dep_union.go",
         "descendants.go",
         "filter.go",
         "labels.go",

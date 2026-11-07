@@ -5,9 +5,11 @@ import (
 	"strings"
 )
 
-// descendantWalkTargetCols are the three mutually-exclusive dependency target
-// columns, in the precedence order DepTargetExpr resolves them.
-var descendantWalkTargetCols = []string{"depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"}
+// depTargetCols are the three mutually-exclusive dependency target columns,
+// in the precedence order DepTargetExpr resolves them. Shared by
+// DescendantWalkQuery and DepTargetUnion, whose guards must keep resolving
+// targets in this same order.
+var depTargetCols = []string{"depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"}
 
 func descendantWalkTables(includeWisps bool) []string {
 	if includeWisps {
@@ -44,12 +46,12 @@ func descendantWalkTables(includeWisps bool) []string {
 func DescendantWalkQuery(includeWisps bool) string {
 	var anchors, recursive []string
 	for _, table := range descendantWalkTables(includeWisps) {
-		for i, col := range descendantWalkTargetCols {
+		for i, col := range depTargetCols {
 			anchors = append(anchors, fmt.Sprintf(`
 				SELECT issue_id, 1, CONCAT(',', ?, ',', issue_id, ',')
 				FROM %s
 				WHERE type = 'parent-child' AND %s = ?%s`,
-				table, col, nullGuards("", descendantWalkTargetCols[:i])))
+				table, col, nullGuards("", depTargetCols[:i])))
 
 			recursive = append(recursive, fmt.Sprintf(`
 				SELECT /*+ JOIN_ORDER(d,e) LOOKUP_JOIN(d,e) */ e.issue_id, d.depth + 1, CONCAT(d.path, e.issue_id, ',')
@@ -57,7 +59,7 @@ func DescendantWalkQuery(includeWisps bool) string {
 				JOIN %s e ON e.%s = d.id AND e.type = 'parent-child'
 				WHERE (? <= 0 OR d.depth < ?)%s
 				  AND LOCATE(CONCAT(',', e.issue_id, ','), d.path) = 0`,
-				table, col, nullGuards("e.", descendantWalkTargetCols[:i])))
+				table, col, nullGuards("e.", depTargetCols[:i])))
 		}
 	}
 
@@ -73,7 +75,7 @@ func DescendantWalkQuery(includeWisps bool) string {
 // DescendantWalkArgs binds DescendantWalkQuery(includeWisps): rootID twice per
 // anchor, maxDepth twice per recursive member, then rootID for the tail filter.
 func DescendantWalkArgs(rootID string, maxDepth int, includeWisps bool) []interface{} {
-	members := len(descendantWalkTables(includeWisps)) * len(descendantWalkTargetCols)
+	members := len(descendantWalkTables(includeWisps)) * len(depTargetCols)
 	args := make([]interface{}, 0, 4*members+1)
 	for i := 0; i < members; i++ {
 		args = append(args, rootID, rootID)

@@ -104,30 +104,15 @@ func (s *EmbeddedDoltStore) CountEvents(ctx context.Context, issueID string, lim
 // CountDependentsByStatus counts both dependency tables, joining each to its
 // home issue table (dependencies→issues, wisp_dependencies→wisps), so wisp
 // dependents are included the same way GetDependentsWithMetadata includes them.
-// Counted as two separate queries summed in Go. Each matches the target on the
-// split physical columns (a COALESCE, as sqlbuild.DepTargetExpr) rather than
-// the STORED generated depends_on_id, which a count(*) can fail to resolve
-// under the pure-Go GMS analyzer.
+// The body is the shared issueops.CountDependentsByStatusInTx (guarded
+// per-column unions so the target predicate can use the target indexes, not
+// the COALESCE scan of gascity#7666).
 func (s *EmbeddedDoltStore) CountDependentsByStatus(ctx context.Context, issueID string, status types.Status) (int64, error) {
 	var n int64
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
-		var perm, wisp int64
-		if err := tx.QueryRowContext(ctx,
-			`SELECT count(*) FROM dependencies d
-			 JOIN issues i ON i.id = d.issue_id
-			 WHERE COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external) = ? AND i.status = ?`,
-			issueID, string(status)).Scan(&perm); err != nil {
-			return err
-		}
-		if err := tx.QueryRowContext(ctx,
-			`SELECT count(*) FROM wisp_dependencies d
-			 JOIN wisps w ON w.id = d.issue_id
-			 WHERE COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external) = ? AND w.status = ?`,
-			issueID, string(status)).Scan(&wisp); err != nil {
-			return err
-		}
-		n = perm + wisp
-		return nil
+		var err error
+		n, err = issueops.CountDependentsByStatusInTx(ctx, tx, issueID, status)
+		return err
 	})
 	return n, err
 }
