@@ -125,6 +125,102 @@ func TestInitFreshWithUnreachableGitOriginSucceeds(t *testing.T) {
 	}
 }
 
+// unverifiedRemoteRefusalPhrase is the What line of the refusal init prints
+// when the refs/dolt/data probe failed: it must say the history could not be
+// verified, never that the remote already has it (gascity#7665).
+const unverifiedRemoteRefusalPhrase = "could not verify whether the remote has Dolt history"
+
+// TestInitReinitLocalWithUnreachableGitOriginRefusesUnverified is the
+// override-path twin of TestInitFreshWithUnreachableGitOriginSucceeds
+// (gascity#7665). A remote the probe cannot read is UNKNOWN, and ADR-0002
+// keeps an unknown remote fail-closed for local-source overrides, so init
+// still refuses with ExitRemoteDivergenceRefused before creating anything.
+// What changed is the diagnosis: nothing confirmed history, so the refusal
+// must say the history is unverified rather than "already has Dolt history".
+func TestInitReinitLocalWithUnreachableGitOriginRefusesUnverified(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	cases := []struct {
+		name      string
+		origin    bool // add an unreachable git origin
+		syncEnv   bool // configure an unreachable sync.remote via BD_SYNC_REMOTE
+		args      []string
+		fromJSONL bool
+	}{
+		{name: "origin/reinit-local", origin: true, args: []string{"--reinit-local"}},
+		{name: "origin/force", origin: true, args: []string{"--force"}},
+		{name: "origin/from-jsonl", origin: true, args: []string{"--from-jsonl"}, fromJSONL: true},
+		{name: "configured/reinit-local", syncEnv: true, args: []string{"--reinit-local"}},
+		{name: "configured/force", syncEnv: true, args: []string{"--force"}},
+		{name: "explicit-remote/from-jsonl", args: []string{"--from-jsonl", "--remote", "UNREACHABLE"}, fromJSONL: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			unreachable := filepath.Join(t.TempDir(), "does-not-exist.git")
+			workDir := t.TempDir()
+			runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+			runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+			if tc.origin {
+				runGitForBootstrapTest(t, workDir, "remote", "add", "origin", unreachable)
+			}
+			beadsDir := filepath.Join(workDir, ".beads")
+			if tc.fromJSONL {
+				if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(`{"id":"org-abc123","title":"Local JSONL","type":"task","status":"open","priority":2}`+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			args := []string{"init"}
+			for _, a := range tc.args {
+				if a == "UNREACHABLE" {
+					a = unreachable
+				}
+				args = append(args, a)
+			}
+			args = append(args, "--prefix", "org", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+			var extra []string
+			if tc.syncEnv {
+				extra = append(extra, "BD_SYNC_REMOTE="+unreachable)
+			}
+			cmd := exec.Command(bdBin, args...)
+			cmd.Dir = workDir
+			cmd.Env = hermeticInitEnv(t.TempDir(), extra...)
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+			if err == nil {
+				t.Fatalf("bd %v succeeded; expected an unverified-remote refusal. stderr:\n%s", args, stderr.String())
+			}
+			exitErr, ok := err.(*exec.ExitError)
+			if !ok {
+				t.Fatalf("non-exec-exit error: %v\nstderr:\n%s", err, stderr.String())
+			}
+			if code := exitErr.ExitCode(); code != ExitRemoteDivergenceRefused {
+				t.Errorf("exit code = %d, want %d (ExitRemoteDivergenceRefused)\nstderr:\n%s", code, ExitRemoteDivergenceRefused, stderr.String())
+			}
+			out := stderr.String()
+			if !strings.Contains(out, unverifiedRemoteRefusalPhrase) {
+				t.Errorf("refusal does not say the remote history is unverified (%q):\n%s", unverifiedRemoteRefusalPhrase, out)
+			}
+			if strings.Contains(out, "already has Dolt history") {
+				t.Errorf("refusal claims confirmed history for a remote the probe could not read:\n%s", out)
+			}
+			if tc.fromJSONL {
+				for _, sub := range []string{"embeddeddolt", "dolt", "metadata.json"} {
+					if _, err := os.Stat(filepath.Join(beadsDir, sub)); err == nil {
+						t.Errorf("refusal should not have created %s", filepath.Join(beadsDir, sub))
+					}
+				}
+			} else if _, err := os.Stat(beadsDir); err == nil {
+				t.Errorf("refusal should not have created %s", beadsDir)
+			}
+		})
+	}
+}
+
 // TestInitReinitLocalConfiguredRemoteWithDoltDataRefuses is the sibling case:
 // sync.remote (again via BD_SYNC_REMOTE, not --remote) points at a bare repo
 // that DOES have refs/dolt/data pushed to it. `bd init --reinit-local` must
