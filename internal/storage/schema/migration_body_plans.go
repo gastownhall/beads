@@ -368,3 +368,37 @@ func resolveMigrationBody(src migrationSource, mf migrationFile, data []byte) (s
 	b.WriteString(body[j:]) // frozen suffix: final assignments, stand-in DROPs
 	return b.String(), nil
 }
+
+// PlannedMigrationSQL returns the SQL body the runtime designated migrator
+// executes for a main-source migration version: the frozen file's bytes
+// verbatim when no execution plan is registered for it, or the registered
+// plan's replacement body. It resolves through the same
+// resolveMigrationBody runMigrations uses and fails closed on any drift, so
+// what a caller executes through it is byte-exact what a migration run
+// would execute. Like MigrationSQL, it exists for tests outside this
+// package (internal/storage/dolt's differential and replay tests,
+// gastownhall/beads#6520) that must run the planned body through real Dolt
+// SQL-server connections; it is read-only.
+func PlannedMigrationSQL(version int) (string, error) {
+	return plannedBodySQL(mainSource, version)
+}
+
+// PlannedIgnoredMigrationSQL is PlannedMigrationSQL's ignored-lane
+// counterpart.
+func PlannedIgnoredMigrationSQL(version int) (string, error) {
+	return plannedBodySQL(ignoredSource, version)
+}
+
+func plannedBodySQL(src migrationSource, version int) (string, error) {
+	for _, f := range src.list() {
+		if f.version != version {
+			continue
+		}
+		data, err := src.files.ReadFile(src.dir + "/" + f.name)
+		if err != nil {
+			return "", err
+		}
+		return resolveMigrationBody(src, f, data)
+	}
+	return "", fmt.Errorf("migration body plan: %s has no version %d", src.cursorTable, version)
+}

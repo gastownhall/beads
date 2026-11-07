@@ -307,6 +307,7 @@ go_test(
         "migrate_updated_at_preservation_test.go",
         "migration_0052_test.go",
         "migration_0073_rollback_test.go",
+        "migration_body_plan_differential_test.go",
         "migration_body_plan_fixture_test.go",
         "migration_body_plan_scaled_test.go",
         "mixed_table_lifecycle_test.go",
