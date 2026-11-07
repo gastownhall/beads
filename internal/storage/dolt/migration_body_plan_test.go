@@ -102,7 +102,7 @@ func genPlanGraph(name string, seed int64, nIssues, issueDeps, nWisps, wispDeps 
 	}
 
 	type key struct {
-		wisp           bool
+		wisp            bool
 		src, on, onKind string
 	}
 	seen := map[key]bool{}
@@ -582,5 +582,246 @@ func TestMigrationBodyPlanScaledGraphIgnored15(t *testing.T) {
 	requireSameIDs(t, "blocked wisps after ignored 0015", d.blockedIDs("wisps"), wantWisps)
 	if got := d.cursorHash("ignored_schema_migrations", 15); got != ignored15Hash {
 		t.Errorf("ignored_schema_migrations row 15 content_hash = %q, want the frozen file's %q", got, ignored15Hash)
+	}
+}
+
+// snapshotRows renders every row of table, ordered by id, column by column.
+func (d *planTestDB) snapshotRows(table string) []string {
+	d.t.Helper()
+	rows, err := d.conn.QueryContext(d.ctx, "SELECT * FROM "+table+" ORDER BY id")
+	if err != nil {
+		d.t.Fatalf("snapshot %s: %v", table, err)
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		d.t.Fatalf("snapshot %s columns: %v", table, err)
+	}
+	var out []string
+	for rows.Next() {
+		vals := make([]sql.RawBytes, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			d.t.Fatalf("snapshot %s scan: %v", table, err)
+		}
+		var b strings.Builder
+		for i, v := range vals {
+			if v == nil {
+				fmt.Fprintf(&b, "%s=NULL ", cols[i])
+			} else {
+				fmt.Fprintf(&b, "%s=%q ", cols[i], v)
+			}
+		}
+		out = append(out, b.String())
+	}
+	if err := rows.Err(); err != nil {
+		d.t.Fatalf("snapshot %s: %v", table, err)
+	}
+	return out
+}
+
+func (d *planTestDB) standIns() []string {
+	d.t.Helper()
+	rows, err := d.conn.QueryContext(d.ctx,
+		"SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME LIKE '\\_\\_bd\\_0059%' ORDER BY TABLE_NAME")
+	if err != nil {
+		d.t.Fatalf("list stand-ins: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			d.t.Fatalf("scan stand-in: %v", err)
+		}
+		out = append(out, name)
+	}
+	return out
+}
+
+func (d *planTestDB) clearGraph() {
+	d.t.Helper()
+	for _, table := range []string{"wisp_dependencies", "dependencies", "wisps", "issues"} {
+		d.exec("DELETE FROM " + table)
+	}
+}
+
+// explicitPlanGraph builds a hand-written planGraph. Ids are given without
+// the graph-name prefix; entities get fixed old timestamps in list order.
+func explicitPlanGraph(name string, issues, wisps [][2]string, edges []planEdge) *planGraph {
+	g := &planGraph{name: name}
+	base := time.Date(2024, time.June, 1, 12, 0, 0, 0, time.UTC)
+	for i, e := range issues {
+		g.issues = append(g.issues, planEntity{id: name + "-" + e[0], status: e[1], updated: base.Add(time.Duration(i) * time.Minute)})
+	}
+	for i, e := range wisps {
+		g.wisps = append(g.wisps, planEntity{id: name + "-" + e[0], status: e[1], updated: base.Add(time.Duration(i) * time.Minute).Add(time.Hour)})
+	}
+	for _, e := range edges {
+		e.src = name + "-" + e.src
+		if e.onIssue != "" {
+			e.onIssue = name + "-" + e.onIssue
+		}
+		if e.onWisp != "" {
+			e.onWisp = name + "-" + e.onWisp
+		}
+		g.edges = append(g.edges, e)
+	}
+	return g
+}
+
+const anyChildren = `{"gate":"any-children"}`
+
+// gatePlanGraph exercises every clause of the frozen predicate by hand:
+// open/closed/pinned children in both kinds, waits-for with NULL metadata
+// and any-children against issue, wisp, closed and childless targets,
+// blocks against open, closed and pinned targets, a conditional-block, and
+// a cross-kind parent-child chain.
+func gatePlanGraph() *planGraph {
+	return explicitPlanGraph("gates",
+		[][2]string{
+			{"i000", "open"}, {"i001", "open"}, {"i002", "closed"}, {"i003", "open"},
+			{"i004", "open"}, {"i005", "open"}, {"i006", "open"}, {"i007", "open"},
+			{"i008", "open"}, {"i009", "open"}, {"i010", "open"}, {"i011", "open"},
+			{"i012", "closed"}, {"i013", "pinned"}, {"i014", "open"},
+		},
+		[][2]string{
+			{"w000", "open"}, {"w001", "open"}, {"w002", "closed"}, {"w003", "open"},
+			{"w004", "open"}, {"w005", "pinned"},
+		},
+		[]planEdge{
+			// i000 has open child i001 and closed child i002.
+			{src: "i001", onIssue: "i000", typ: "parent-child", metadata: "{}"},
+			{src: "i002", onIssue: "i000", typ: "parent-child", metadata: "{}"},
+			// waits-for on the mixed hub under each gate, on a closed target
+			// and on a childless one.
+			{src: "i003", onIssue: "i000", typ: "waits-for"},
+			{src: "i004", onIssue: "i000", typ: "waits-for", metadata: anyChildren},
+			{src: "i005", onIssue: "i002", typ: "waits-for", metadata: anyChildren},
+			{src: "i006", onIssue: "i012", typ: "waits-for"},
+			// blocks: an open target blocks, closed and pinned ones do not.
+			{src: "i007", onIssue: "i000", typ: "blocks", metadata: "{}"},
+			{src: "i008", onIssue: "i012", typ: "blocks", metadata: "{}"},
+			{src: "i009", onIssue: "i013", typ: "blocks", metadata: "{}"},
+			{src: "i010", onIssue: "i000", typ: "conditional-blocks", metadata: "{}"},
+			// a waiter on an issue that is itself only transitively blocked.
+			{src: "i011", onIssue: "i003", typ: "waits-for"},
+			// wisp parent-child into an open issue, and into w000, which
+			// collects open, closed and pinned wisp children.
+			{wisp: true, src: "w001", onIssue: "i014", typ: "parent-child", metadata: "{}"},
+			{wisp: true, src: "w002", onWisp: "w000", typ: "parent-child", metadata: "{}"},
+			{wisp: true, src: "w003", onWisp: "w000", typ: "parent-child", metadata: "{}"},
+			{wisp: true, src: "w005", onWisp: "w000", typ: "parent-child", metadata: "{}"},
+			// waits-for onto the mixed wisp hub under each gate, and onto a
+			// childless wisp.
+			{wisp: true, src: "w001", onWisp: "w000", typ: "waits-for", metadata: anyChildren},
+			{wisp: true, src: "w004", onWisp: "w000", typ: "waits-for"},
+			{wisp: true, src: "w003", onWisp: "w004", typ: "waits-for"},
+			// blocks across kinds: an open issue target blocks, a pinned wisp
+			// target does not.
+			{wisp: true, src: "w004", onIssue: "i014", typ: "blocks", metadata: "{}"},
+			{wisp: true, src: "w001", onWisp: "w005", typ: "blocks", metadata: "{}"},
+			// a pinned wisp child of the waiting issue i003.
+			{wisp: true, src: "w005", onIssue: "i003", typ: "parent-child", metadata: "{}"},
+		})
+}
+
+// cyclePlanGraph is a mixed-kind parent-child cycle (issue i015 is a child
+// of wisp w015, which is a child of i015) with a blocking seed on i015, so
+// the recursive UNION DISTINCT must reach a fixed point across both kinds.
+func cyclePlanGraph() *planGraph {
+	return explicitPlanGraph("cycle",
+		[][2]string{{"i001", "open"}, {"i015", "open"}},
+		[][2]string{{"w015", "open"}},
+		[]planEdge{
+			{src: "i015", onWisp: "w015", typ: "parent-child", metadata: "{}"},
+			{src: "i015", onIssue: "i001", typ: "blocks", metadata: "{}"},
+			{wisp: true, src: "w015", onIssue: "i015", typ: "parent-child", metadata: "{}"},
+		})
+}
+
+// TestMigrationBodyPlanMatchesFrozenBody is #6520 AC-3: on small mixed graphs
+// (both target kinds, waits-for with every gate shape, NULL metadata,
+// dangling targets, cross-kind parent-child trees and a cross-kind cycle)
+// with scrambled is_blocked and fixed old timestamps, the frozen and planned
+// body of main 0059, and separately of ignored/0015, each run alone from the
+// same reset graph, leave identical issues and wisps rows, and the planned
+// 0059 leaves no stand-in behind.
+func TestMigrationBodyPlanMatchesFrozenBody(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	t.Cleanup(cancel)
+
+	frozen59, err := schema.MigrationSQL(main59File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen15, err := schema.IgnoredMigrationSQL(ignored15File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned59, err := schema.PlannedMigrationSQL(main59File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned15, err := schema.PlannedIgnoredMigrationSQL(ignored15File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planned59 == frozen59 || planned15 == frozen15 {
+		t.Fatal("no execution plan is registered for main 0059 or ignored/0015; nothing to compare")
+	}
+
+	d := newPlanTestDB(t, ctx)
+	d.migrateToV58I14()
+
+	// run resets the graph and executes one body alone, so a body that
+	// touched the other entity table shows up in the comparison.
+	run := func(g *planGraph, body string) (issues, wisps []string) {
+		d.clearGraph()
+		d.load(g)
+		d.exec(body)
+		if left := d.standIns(); len(left) > 0 {
+			t.Fatalf("%s: stand-ins left behind: %v", g.name, left)
+		}
+		return d.snapshotRows("issues"), d.snapshotRows("wisps")
+	}
+
+	graphs := []*planGraph{gatePlanGraph(), cyclePlanGraph()}
+	for seed := int64(1); seed <= 40; seed++ {
+		rng := rand.New(rand.NewSource(seed))
+		nIssues, nWisps := 4+rng.Intn(12), 4+rng.Intn(12)
+		graphs = append(graphs, genPlanGraph(fmt.Sprintf("diff%02d", seed), seed, nIssues, nIssues+rng.Intn(2*nIssues), nWisps, nWisps+rng.Intn(2*nWisps)))
+	}
+
+	blockedSeen := 0
+	for _, g := range graphs {
+		wantIssues, wantWisps := blockedModel(g)
+		blockedSeen += len(wantIssues) + len(wantWisps)
+		for _, step := range []struct {
+			name, frozen, planned, table string
+			want                         map[string]bool
+		}{
+			{"main 0059", frozen59, planned59, "issues", wantIssues},
+			{"ignored 0015", frozen15, planned15, "wisps", wantWisps},
+		} {
+			frozenIssues, frozenWisps := run(g, step.frozen)
+			plannedIssues, plannedWisps := run(g, step.planned)
+			if !slices.Equal(frozenIssues, plannedIssues) {
+				t.Errorf("%s %s: issues differ between frozen and planned bodies:\nfrozen:  %v\nplanned: %v", g.name, step.name, frozenIssues, plannedIssues)
+			}
+			if !slices.Equal(frozenWisps, plannedWisps) {
+				t.Errorf("%s %s: wisps differ between frozen and planned bodies:\nfrozen:  %v\nplanned: %v", g.name, step.name, frozenWisps, plannedWisps)
+			}
+			requireSameIDs(t, g.name+" blocked "+step.table+" after "+step.name, d.blockedIDs(step.table), step.want)
+		}
+	}
+	if blockedSeen == 0 {
+		t.Fatalf("no graph blocked anything; the differential compared only no-ops")
 	}
 }
