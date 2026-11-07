@@ -856,6 +856,7 @@ go_test(
         "gate_frontdoor_parity_integration_test.go",
         "gate_inherit_embedded_test.go",
         "gate_lifecycle_proxied_integration_test.go",
+        "gate_proxied_external_routing_test.go",
         "gate_routing_test.go",
         "gate_test.go",
         "gated_format_test.go",
