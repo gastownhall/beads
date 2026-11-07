@@ -37,8 +37,9 @@ const accidentalReleaseGuide = "docs/recovery/accidental-1-2-1-release.md"
 // next heading of any level, so the numbered procedure under
 // guideRequiredSection does not pick up a subsection's commands.
 const (
-	guideRequiredSection = "## Recommended fix: roll the schema cursor back"
-	guideMissingSection  = "### If `events` is missing or empty"
+	guideRequiredSection   = "## Recommended fix: roll the schema cursor back"
+	guideMissingSection    = "### If `events` is missing or empty"
+	guideOldRetrackSection = "### If you already ran the old re-track command"
 )
 
 // handMadeEventsTable is the empty events table the issue report's
@@ -60,6 +61,10 @@ CREATE TABLE events (
 // of the guide required: a database recovered with it alone keeps events
 // out of versioned history.
 const guideCursorRollback = "DELETE FROM schema_migrations WHERE version > 53; CALL DOLT_ADD('schema_migrations'); CALL DOLT_COMMIT('-m', 'recovery: roll schema cursor back to v53 (accidental v1.2.1)', '--author', 'bd recovery <recovery@beads.invalid>')"
+
+// guideOldRetrack is the optional step an earlier version of the guide ended
+// with. It never stages the dolt_ignore change.
+const guideOldRetrack = "DELETE FROM dolt_ignore WHERE pattern = 'events'; CALL DOLT_ADD('-f', 'events'); CALL DOLT_COMMIT('-m', 'recovery: re-track events table', '--author', 'bd recovery <recovery@beads.invalid>')"
 
 func readAccidentalReleaseGuide(t *testing.T) string {
 	t.Helper()
@@ -605,5 +610,95 @@ func TestEmbeddedAccidentalReleaseMissingEventsClone(t *testing.T) {
 			}
 			requireNothingPending(t, ctx, conn)
 		})
+	})
+}
+
+// TestEmbeddedAccidentalReleaseFinishOldRetrack is AC-5: a source and a
+// clone left tracked-but-ignored by the earlier guide's optional command run
+// the documented finish command and synchronize; afterwards writes leave
+// nothing pending and merges complete in both directions. Step 5 refuses
+// such a history, and the clone cannot pull until it has finished too.
+func TestEmbeddedAccidentalReleaseFinishOldRetrack(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	guide := readAccidentalReleaseGuide(t)
+
+	source := seedMigratedMachine(t, ctx)
+	mustOK(t, "cursor rollback", runGuideBatch(t, source, guideCursorRollback))
+	mustOK(t, "the old re-track command", runGuideBatch(t, source, guideOldRetrack))
+
+	// Step 5 refuses this history and leaves events as it was.
+	var before []string
+	withRawConn(t, source, preflipDatabase, func(conn *sql.Conn) {
+		before = eventTags(t, ctx, conn, "")
+	})
+	if err := runGuideSection(t, source, guide, guideRequiredSection); err == nil || !strings.Contains(err.Error(), "events_history_found") {
+		t.Fatalf("required steps after the old re-track: err = %v, want the events_history_found check", err)
+	}
+	withRawConn(t, source, preflipDatabase, func(conn *sql.Conn) {
+		if head := scalarString(t, ctx, conn, "SELECT message FROM dolt_log LIMIT 1"); head != "recovery: re-track events table" {
+			t.Fatalf("HEAD is %q, want the old re-track: the refused step committed", head)
+		}
+		requireEventTags(t, ctx, conn, "", before...)
+	})
+
+	remoteURL := publishToNewRemote(t, ctx, source)
+	_, clone := cloneLineage(t, ctx, remoteURL)
+
+	withRawConn(t, clone, preflipDatabase, func(conn *sql.Conn) {
+		mustOK(t, "clone write", oldLineCreate(ctx, conn, "clone-1", "clone-before"))
+		mustOK(t, "clone commit", oldLineCommit(ctx, conn))
+		pending, err := statusTables(ctx, conn)
+		mustOK(t, "read dolt_status", err)
+		if !slices.Contains(pending, "events") {
+			t.Fatalf("pending %v after a clone write, want events: the tracked-but-ignored shape is not reproduced", pending)
+		}
+	})
+	// A source write left pending too; the finish command commits it, so
+	// origin gets an events change for the clone's pull to meet.
+	withRawConn(t, source, preflipDatabase, func(conn *sql.Conn) {
+		mustOK(t, "source write", oldLineCreate(ctx, conn, "source-0", "source-before"))
+		mustOK(t, "source commit", oldLineCommit(ctx, conn))
+	})
+
+	finish := guideSQLBatches(t, guide, guideOldRetrackSection)
+	if len(finish) != 1 {
+		t.Fatalf("%q has %d dolt sql commands, want the one finish command", guideOldRetrackSection, len(finish))
+	}
+	mustOK(t, "source: finish command", runGuideBatch(t, source, finish[0]))
+	withRawConn(t, source, preflipDatabase, func(conn *sql.Conn) {
+		requireNothingPending(t, ctx, conn)
+		mustExecOn(t, ctx, conn, "CALL DOLT_PUSH('origin', 'main')")
+	})
+
+	// Until the clone finishes too, its pending events change blocks the pull.
+	withRawConn(t, clone, preflipDatabase, func(conn *sql.Conn) {
+		if err := oldLinePull(ctx, conn); err == nil {
+			t.Fatal("the clone pulled with its events change still pending; the tracked-but-ignored shape is not reproduced")
+		}
+		if n := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM dolt_merge_status WHERE is_merging"); n != 0 {
+			t.Fatal("the refused pull left a merge open")
+		}
+	})
+
+	mustOK(t, "clone: finish command", runGuideBatch(t, clone, finish[0]))
+	withRawConn(t, clone, preflipDatabase, func(conn *sql.Conn) {
+		requireNothingPending(t, ctx, conn)
+		mustOK(t, "clone: pull", oldLinePull(ctx, conn))
+		requireCleanMerge(t, ctx, conn)
+		if eventsIgnoreRuleAtHead(t, ctx, conn) {
+			t.Fatal("the events ignore rule is still in the clone's HEAD")
+		}
+		requireWritableLikeOldLine(t, ctx, conn, "clone-2", "clone-after")
+		mustExecOn(t, ctx, conn, "CALL DOLT_PUSH('origin', 'main')")
+	})
+	withRawConn(t, source, preflipDatabase, func(conn *sql.Conn) {
+		if eventsIgnoreRuleAtHead(t, ctx, conn) {
+			t.Fatal("the events ignore rule is still in the source's HEAD")
+		}
+		requireWritableLikeOldLine(t, ctx, conn, "source-1", "source-after")
+		mustOK(t, "source: pull", oldLinePull(ctx, conn))
+		requireCleanMerge(t, ctx, conn)
+		requireEventTags(t, ctx, conn, "HEAD", "clone-after", "clone-before", "post-keep", "pre-keep", "source-after", "source-before")
 	})
 }
