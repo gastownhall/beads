@@ -224,35 +224,35 @@ beads issue status.
 
 ### Creating Gates
 
+`bd gate create` makes the gate and blocks an existing issue on it. Name the
+waiting issue with `--blocks`:
+
 ```bash
-# Wait for PR #42 to merge
-bd create --type=gate --title="Wait for PR #42" \
-  --await-type=gh:pr --await-id=42
+# issue-2 waits for PR #42 to merge
+bd gate create --type=gh:pr --blocks issue-2 --await-id=42 \
+  --title="Wait for PR #42"
 
-# Wait for CI run
-bd create --type=gate --title="Wait for CI" \
-  --await-type=gh:run --await-id=12345
+# issue-2 waits for CI run 12345
+bd gate create --type=gh:run --blocks issue-2 --await-id=12345 \
+  --title="Wait for CI"
 
-# Wait 30 minutes
-bd create --type=gate --title="Cooldown" \
-  --await-type=timer --await-id=30m
+# issue-2 waits 30 minutes
+bd gate create --type=timer --blocks issue-2 --timeout=30m \
+  --title="Cooldown"
 
-# Wait for a cross-rig bead to close
-bd create --type=gate --title="Wait for upstream fix" \
-  --await-type=bead --await-id=other-rig:issue-id
+# issue-2 waits for a cross-rig bead to close
+bd gate create --type=bead --blocks issue-2 --await-id=other-rig:issue-id \
+  --title="Wait for upstream fix"
 
-# Manual approval gate
-bd create --type=gate --title="Deploy approval"
+# issue-2 waits for manual approval
+bd gate create --type=human --blocks issue-2 --reason="Deploy approval"
 ```
 
 ### Wiring Gates into Dependencies
 
-A gate is an issue. Wire it into the dependency graph like any other:
-
-```bash
-# issue-2 waits for the gate (which waits for PR #42)
-bd dep add issue-2 <gate-id>
-```
+A gate is an issue. `--blocks` already wires it into the dependency graph:
+the blocked issue depends on the gate, so it leaves `bd ready` until the gate
+closes. No separate `bd dep add` is needed.
 
 ### Checking Gates
 
@@ -316,9 +316,8 @@ Agent A finishes work, opens PR, creates a gate so Agent B waits for merge:
 # Agent A
 bd update issue-1 --status=in_progress
 # ... write code, open PR #42 ...
-bd create --type=gate --title="Wait for PR #42" \
-  --await-type=gh:pr --await-id=42
-bd dep add issue-2 <gate-id>
+bd gate create --type=gh:pr --blocks issue-2 --await-id=42 \
+  --title="Wait for PR #42"
 bd close issue-1
 
 # Agent B
@@ -331,9 +330,8 @@ bd ready                         # issue-2 appears
 ### CI Gate Before Deploy
 
 ```bash
-bd create --type=gate --title="CI green on main" \
-  --await-type=gh:run --await-id=<run-id>
-bd dep add deploy-task <gate-id>
+bd gate create --type=gh:run --blocks deploy-task --await-id=<run-id> \
+  --title="CI green on main"
 ```
 
 ### Epic with Ordered Phases
