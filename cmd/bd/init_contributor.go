@@ -373,7 +373,7 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 		if createdPlanning {
 			fmt.Printf("  %s Added .beads/ to planning repo\n", ui.RenderPass("✓"))
 		}
-		fmt.Printf("\n  To use maintainer mode instead: bd init --role=maintainer\n")
+		fmt.Printf("\n  To disable contributor-role routing: git config beads.role maintainer\n")
 	}
 	return nil
 }
