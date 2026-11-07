@@ -1,8 +1,15 @@
 package main
 
 import (
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 // This file pins `bd list --include-all-types` (bd-2lwkfd): the CLI knob for
@@ -92,4 +99,215 @@ func TestListHelpIsByteIdenticalOutsideIncludeAllTypes(t *testing.T) {
 	if got, want := strings.Join(kept, "\n"), withoutFlag; got != want {
 		t.Errorf("help outside the --include-all-types row must be byte-identical to help with the flag hidden.\nwith flag, its row removed:\n%s\nwith flag hidden:\n%s", got, want)
 	}
+}
+
+// newIncludeAllTypesInputCmd carries the flags the include-all-types wiring
+// reads, with listCmd's own --limit default so the limit policy resolves the
+// way it does on the real command. gatherListInput reads many other flags,
+// but GetString / GetBool on an unregistered flag return zero values, so this
+// stays minimal — the same shape as newWispTypeInputCmd.
+func newIncludeAllTypesInputCmd(t *testing.T, args ...string) *cobra.Command {
+	t.Helper()
+	cmd := &cobra.Command{Use: "list"}
+	f := cmd.Flags()
+	f.Bool("include-all-types", false, "")
+	f.Bool("include-templates", false, "")
+	f.Bool("include-gates", false, "")
+	f.Bool("include-infra", false, "")
+	f.Bool("include-ephemeral", false, "")
+	f.StringSlice("exclude-type", nil, "")
+	f.Bool("all", false, "")
+	f.IntP("limit", "n", workapi.DefaultListLimit, "")
+	f.StringP("type", "t", "", "")
+	if err := cmd.ParseFlags(args); err != nil {
+		t.Fatalf("parse %v: %v", args, err)
+	}
+	return cmd
+}
+
+// gatherIncludeAllTypesInput runs gatherListInput on a controlled config so
+// the limit policy below is the real one, not whatever another test left in
+// the process (the same setup as TestListLimitPolicyIsResolvedBeforeTheRequest).
+func gatherIncludeAllTypesInput(t *testing.T, args ...string) (listInput, error) {
+	t.Helper()
+	defer func(prev bool) { jsonOutput = prev }(jsonOutput)
+	jsonOutput = false
+	t.Chdir(t.TempDir())
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	return gatherListInput(newIncludeAllTypesInputCmd(t, args...))
+}
+
+// TestGatherListInput_IncludeAllTypesReachesTheFilter pins the wiring, not
+// just the registration: a flag that parses but is never read would leave the
+// union exactly as unreachable as before. The flag must set ONLY
+// ListRequest.IncludeAllTypes, and the resolved request must do what the
+// backend pins for that field (TestIncludeAllTypesLiftsEverySuppression):
+// no default type exclusions, templates admitted, the wisp plane read — while
+// the status/pinned axis and the page limit stay exactly what the same
+// command without the flag resolves to.
+func TestGatherListInput_IncludeAllTypesReachesTheFilter(t *testing.T) {
+	baseline, err := gatherIncludeAllTypesInput(t)
+	if err != nil {
+		t.Fatalf("gatherListInput (baseline): %v", err)
+	}
+	union, err := gatherIncludeAllTypesInput(t, "--include-all-types")
+	if err != nil {
+		t.Fatalf("gatherListInput (--include-all-types): %v", err)
+	}
+
+	if !union.IncludeAllTypes {
+		t.Error("--include-all-types must set ListRequest.IncludeAllTypes, got false")
+	}
+	if union.IncludeTemplates || union.IncludeGates || union.IncludeInfra || union.IncludeEphemeral {
+		t.Errorf("the union flag must set only IncludeAllTypes, not the narrow knobs: templates=%v gates=%v infra=%v ephemeral=%v",
+			union.IncludeTemplates, union.IncludeGates, union.IncludeInfra, union.IncludeEphemeral)
+	}
+	if baseline.IncludeAllTypes {
+		t.Error("IncludeAllTypes must default to false; the default listing keeps every suppression")
+	}
+
+	cfg := workapi.ListConfig{}
+	fUnion, err := workapi.BuildListFilter(union.ListRequest, cfg)
+	if err != nil {
+		t.Fatalf("BuildListFilter (union): %v", err)
+	}
+	if len(fUnion.ExcludeTypes) != 0 {
+		t.Errorf("the union lifts every default type exclusion, got ExcludeTypes %v", fUnion.ExcludeTypes)
+	}
+	if fUnion.IsTemplate != nil {
+		t.Errorf("templates must not be hidden, got IsTemplate %v", *fUnion.IsTemplate)
+	}
+	if fUnion.SkipWisps {
+		t.Error("the union must admit the ephemeral wisp plane, got SkipWisps=true")
+	}
+
+	// The status axis and the page limit are a different knob: identical to
+	// the same command without the flag, whatever that command resolves to.
+	fBaseline, err := workapi.BuildListFilter(baseline.ListRequest, cfg)
+	if err != nil {
+		t.Fatalf("BuildListFilter (baseline): %v", err)
+	}
+	if !reflect.DeepEqual(fUnion.ExcludeStatus, fBaseline.ExcludeStatus) {
+		t.Errorf("default status exclusions must be untouched: union %v, baseline %v", fUnion.ExcludeStatus, fBaseline.ExcludeStatus)
+	}
+	if len(fUnion.ExcludeStatus) == 0 {
+		t.Error("the union must NOT lift the default status exclusions; that is --all's axis")
+	}
+	if !reflect.DeepEqual(fUnion.Pinned, fBaseline.Pinned) {
+		t.Errorf("the pinned default must be untouched: union %v, baseline %v", fUnion.Pinned, fBaseline.Pinned)
+	}
+	if union.effectiveLimit != baseline.effectiveLimit {
+		t.Errorf("the union must not change the limit policy: effectiveLimit %d, want the baseline %d", union.effectiveLimit, baseline.effectiveLimit)
+	}
+	if union.Limit == nil || baseline.Limit == nil || *union.Limit != *baseline.Limit {
+		t.Errorf("the request limit must match the baseline: union %v, baseline %v", union.Limit, baseline.Limit)
+	}
+
+	t.Run("an explicit --exclude-type still applies", func(t *testing.T) {
+		in, err := gatherIncludeAllTypesInput(t, "--include-all-types", "--exclude-type=gate")
+		if err != nil {
+			t.Fatalf("gatherListInput: %v", err)
+		}
+		filter, err := workapi.BuildListFilter(in.ListRequest, cfg)
+		if err != nil {
+			t.Fatalf("BuildListFilter: %v", err)
+		}
+		// The caller's own exclusion is appended after the suppression
+		// function, so the union cannot swallow it.
+		if len(filter.ExcludeTypes) != 1 || filter.ExcludeTypes[0] != types.IssueType("gate") {
+			t.Errorf("ExcludeTypes = %v, want [gate]: an explicit exclusion outlives the union", filter.ExcludeTypes)
+		}
+	})
+
+	t.Run("a narrow include flag adds nothing the union lacks", func(t *testing.T) {
+		in, err := gatherIncludeAllTypesInput(t, "--include-all-types", "--include-ephemeral")
+		if err != nil {
+			t.Fatalf("gatherListInput: %v", err)
+		}
+		if !in.IncludeEphemeral {
+			t.Error("--include-ephemeral must still set its own field beside the union")
+		}
+		filter, err := workapi.BuildListFilter(in.ListRequest, cfg)
+		if err != nil {
+			t.Fatalf("BuildListFilter: %v", err)
+		}
+		if !reflect.DeepEqual(filter, fUnion) {
+			t.Errorf("union + narrow include must resolve to the union's filter:\n%#v\nwant:\n%#v", filter, fUnion)
+		}
+	})
+
+	t.Run("--all clears the status axis the union leaves alone", func(t *testing.T) {
+		in, err := gatherIncludeAllTypesInput(t, "--include-all-types", "--all")
+		if err != nil {
+			t.Fatalf("gatherListInput: %v", err)
+		}
+		if !in.AllFlag || !in.IncludeAllTypes {
+			t.Errorf("both flags must survive onto the request: all=%v includeAllTypes=%v", in.AllFlag, in.IncludeAllTypes)
+		}
+		filter, err := workapi.BuildListFilter(in.ListRequest, cfg)
+		if err != nil {
+			t.Fatalf("BuildListFilter: %v", err)
+		}
+		if len(filter.ExcludeStatus) != 0 {
+			t.Errorf("--all must lift the default status exclusions, got %v", filter.ExcludeStatus)
+		}
+		if filter.Pinned != nil {
+			t.Errorf("--all must lift the default pinned exclusion, got Pinned %v", *filter.Pinned)
+		}
+		if len(filter.ExcludeTypes) != 0 || filter.IsTemplate != nil || filter.SkipWisps {
+			t.Errorf("the union's type/plane lift must survive --all: ExcludeTypes %v IsTemplate %v SkipWisps %v",
+				filter.ExcludeTypes, filter.IsTemplate, filter.SkipWisps)
+		}
+		if in.effectiveLimit != 0 {
+			t.Errorf("--all is unlimited unless --limit is explicit, got effectiveLimit %d", in.effectiveLimit)
+		}
+	})
+
+	t.Run("a configured done status stays excluded", func(t *testing.T) {
+		custom := workapi.ListConfig{CustomStatuses: []types.CustomStatus{
+			{Name: "archived", Category: types.CategoryDone},
+		}}
+		filter, err := workapi.BuildListFilter(union.ListRequest, custom)
+		if err != nil {
+			t.Fatalf("BuildListFilter: %v", err)
+		}
+		found := false
+		for _, s := range filter.ExcludeStatus {
+			if s == types.Status("archived") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("a configured done-category status must stay excluded beside the union, got %v", filter.ExcludeStatus)
+		}
+	})
+
+	t.Run("an explicit infra type keeps the type and both planes", func(t *testing.T) {
+		in, err := gatherIncludeAllTypesInput(t, "--include-all-types", "--type", "agent")
+		if err != nil {
+			t.Fatalf("gatherListInput: %v", err)
+		}
+		// An infra type reaches validation as a workspace custom type; the
+		// default InfraSet already classifies it for the plane decision.
+		infra := workapi.ListConfig{CustomTypes: []string{"agent"}}
+		filter, err := workapi.BuildListFilter(in.ListRequest, infra)
+		if err != nil {
+			t.Fatalf("BuildListFilter: %v", err)
+		}
+		// Without the union, naming an infra type narrows to its EPHEMERAL
+		// rows alone; the union lifts that narrowing, so both planes are read.
+		if filter.Ephemeral != nil {
+			t.Errorf("the union must remove the ephemeral-only narrowing, got Ephemeral %v", *filter.Ephemeral)
+		}
+		if filter.SkipWisps {
+			t.Error("the union must keep the wisp plane admitted beside an explicit type")
+		}
+		if filter.IssueType == nil || string(*filter.IssueType) != "agent" {
+			t.Errorf("the explicit type must be preserved, got %v", filter.IssueType)
+		}
+	})
 }

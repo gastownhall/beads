@@ -150,6 +150,10 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in.IncludeGates, _ = cmd.Flags().GetBool("include-gates")
 	in.IncludeInfra, _ = cmd.Flags().GetBool("include-infra")
 	in.IncludeEphemeral, _ = cmd.Flags().GetBool("include-ephemeral")
+	// The union knob sets only its own field: the four narrow flags above
+	// stay as the caller set them, and workapi's applyTypeSuppressions is the
+	// single place that turns any of them into filter terms.
+	in.IncludeAllTypes, _ = cmd.Flags().GetBool("include-all-types")
 	in.ExcludeTypes, _ = cmd.Flags().GetStringSlice("exclude-type")
 
 	in.ParentID, _ = cmd.Flags().GetString("parent")
