@@ -3,7 +3,7 @@ title: Azure DevOps (ADO) Integration Configuration
 description: Configuration reference for bd ado sync, which bidirectionally syncs beads issues with Azure DevOps work items
 ---
 
-Last reviewed: 2026-08-07
+Last reviewed: 2026-11-07
 
 Freshness source: `cmd/bd/ado*.go` and `internal/ado/`.
 
@@ -11,7 +11,7 @@ This guide covers all configuration options for the `bd ado sync` command, which
 
 **Proxied-server mode:** `bd ado sync`, `bd ado status`, and `bd ado projects`
 are not supported when bd is connected to a proxied server (error:
-`ado sync is not supported in proxied-server mode`); run them from a
+`ado <command> is not supported in proxied-server mode`); run them from a
 workspace with direct database access.
 
 ## Quick Start
@@ -52,9 +52,12 @@ bd ado sync --dry-run
 
 ¹ Either `ado.org` or `ado.url` must be set. Use `ado.url` for on-premises Azure DevOps Server.
 
-² At least one project must be configured via `ado.project` or `ado.projects`.
+² At least one project must be configured via `ado.project` or `ado.projects`. When both are set, `ado.projects` wins.
 
 **Config vs env var precedence:** Config keys (set via `bd config set`) take priority over environment variables.
+
+`ado.url` must use `https://`; plain `http://` is accepted only for
+`localhost`, `127.0.0.1` and `::1` (error: `HTTPS required for ADO connections`).
 
 `ado.pat` is a secret key stored in `config.yaml` (per-repo or user-global),
 never the shared database, so the PAT cannot leak via `dolt push`.
@@ -67,6 +70,23 @@ For Azure DevOps Server (on-prem), use `ado.url` instead of `ado.org`:
 bd config set ado.url "https://tfs.company.com/DefaultCollection"
 bd config set ado.project "MyProject"
 ```
+
+### Endpoint Trust
+
+bd pins the endpoint each workspace sends the PAT to (see
+[Configuration](/reference/configuration) for the pin store). The default
+`https://dev.azure.com` endpoint pins on first use. A custom `ado.url` that
+comes from shared configuration (`bd config set` writes it to the synced
+database) is refused until a private source confirms it:
+
+```
+ado.url for this workspace is https://tfs.company.com/DefaultCollection, which no private source has confirmed. Your ado credential was not sent. ...
+```
+
+Confirm it once by setting the same URL in `AZURE_DEVOPS_URL` in your shell
+(not in `.beads/.env`) or as `ado.url` in `~/.config/bd/config.yaml`; the
+confirmation pins it. A later change to the shared `ado.url` is refused the
+same way until it is confirmed again.
 
 ### Multi-Project Sync
 
@@ -85,11 +105,13 @@ Filters control which ADO work items are included in sync operations.
 | Config Key | CLI Flag | Description | Example |
 |---|---|---|---|
 | `ado.filter.area_path` | `--area-path` | Area path (uses UNDER) | `Project\Team` |
-| `ado.filter.iteration_path` | `--iteration-path` | Sprint/iteration path | `Project\Sprint 1` |
+| `ado.filter.iteration_path` | `--iteration-path` | Sprint/iteration path (uses UNDER) | `Project\Sprint 1` |
 | `ado.filter.types` | `--types` | Work item types (comma-separated) | `Bug,Task,User Story` |
 | `ado.filter.states` | `--states` | ADO states (comma-separated) | `New,Active,Resolved` |
 
-CLI flags override config values for that sync run.
+CLI flags override config values for that sync run. On pull, the filters
+narrow the WIQL query; on push, `--types` and `--states` also filter which
+local beads are pushed.
 
 **WIQL query example** (generated from filters):
 
@@ -102,6 +124,10 @@ SELECT [System.Id] FROM WorkItems WHERE
   AND [System.State] IN ('New', 'Active')
   ORDER BY [System.ChangedDate] ASC
 ```
+
+An incremental pull also adds `[System.ChangedDate] >= 'YYYY-MM-DD'`. WIQL
+compares that field with a date-only literal, so the window is the whole UTC
+day of the last sync, and items changed earlier that day are fetched again.
 
 ## Default Mappings
 
@@ -117,7 +143,7 @@ Priority mapping is bidirectional but **lossy for P3/P4**:
 | 3 (Low) | 4 | → | |
 | 4 (Backlog) | 4 | → | **Lossy**: becomes P3 on pull |
 
-> **Note:** Beads P3 and P4 both map to ADO priority 4. On a fresh pull into an empty database, ADO 4 maps back to beads P3. The original priority is not preserved across a full round-trip for P4 issues.
+> **Note:** Beads P3 and P4 both map to ADO priority 4. On push, beads records the original priority in the issue's local `beads_priority` metadata, so a pull back into the same database restores P4. On a fresh pull into an empty database there is no such metadata, and ADO 4 maps back to beads P3.
 
 For Bug-type work items, ADO also requires a Severity field:
 
@@ -137,6 +163,10 @@ For Bug-type work items, ADO also requires a Severity field:
 | `blocked` | `Active` + `beads:blocked` tag | `ado.state_map.blocked` |
 | `deferred` | `Removed` | `ado.state_map.deferred` |
 | `closed` | `Closed` | `ado.state_map.closed` |
+
+On pull, the default reverse mapping also maps `Resolved` → `closed`; unknown
+states map to `open`. A custom `ado.state_map.*` value is matched
+case-insensitively before the defaults.
 
 **Blocked status:** ADO has no native blocked state. beads maps blocked to `Active` and adds a `beads:blocked` tag. On pull, `Active` + `beads:blocked` tag restores `StatusBlocked`.
 
@@ -162,6 +192,8 @@ bd config set ado.state_map.closed "Done"
 Reverse mapping (ADO → beads) also recognizes:
 - `Product Backlog Item` → `feature` (Scrum template)
 - `Issue` → `task`
+
+Any other ADO type (and any type a custom `ado.type_map.*` does not name) maps to `task`.
 
 Override for your process template:
 
@@ -220,13 +252,21 @@ Bug:         Proposed → Active → Resolved → Closed
 
 ### State Transition Handling
 
-When creating a work item in a non-initial state (e.g., pushing a closed issue), beads:
+When creating a work item whose target state is not an initial state
+(`New`, `To Do` or `Proposed`; e.g., pushing a closed issue), beads:
 
-1. Creates the item in the initial state (e.g., `New`)
-2. Transitions through intermediate states to reach the target
-3. Example: Creating a closed Bug → `New → Active → Resolved → Closed`
+1. Creates the item without a state, so ADO puts it in the type's initial state
+2. Tries a direct update to the target state
+3. If ADO rejects that with a 400, walks the known transition path for the work item type
+4. Example: Creating a closed Bug → `New → Active → Resolved → Closed`
 
-If a direct transition fails (ADO returns 400), beads automatically walks the known transition path for the work item type and process template.
+The known paths are the Agile ones listed above (plus `Feature` and `Issue`),
+Scrum `Product Backlog Item` from `New`, `Task` from `To Do` (via
+`In Progress`), `Issue` and `Epic` from `To Do` (via `Doing`), and CMMI `Bug`,
+`Task` and `Requirement` from `Proposed`. There is no known path for other
+type/state pairs (for example a Scrum `Bug`); a rejected direct update then
+fails with `no known transition path`, and the work item is left created in
+its initial state. Updates to existing work items set the state directly.
 
 ## Sync Options
 
@@ -253,14 +293,20 @@ When the same issue has been modified both locally and in ADO:
 | Flag | Description |
 |---|---|
 | `--dry-run` | Preview sync without making changes |
-| `--no-create` | Only update existing items, never create new ones |
+| `--no-create` | Never create new items in either direction (pull or push); only update linked ones |
 | `--bootstrap-match` | Enable heuristic title matching for first sync |
 | `--reconcile` | Force reconciliation scan for deleted items (see Reconciliation below) |
 | `--issues` | Sync specific issues by bead ID or ADO work item ID |
 | `--parent` | Push only a bead and its descendants (push mode only; mutually exclusive with `--issues`) |
+| `--area-path` | Filter by area path (see Filter Configuration) |
+| `--iteration-path` | Filter by iteration path (see Filter Configuration) |
 | `--project` | Project name(s) for this run, repeatable — overrides `ado.project`/`ado.projects` |
 | `--states` | Filter by work item states (comma-separated) |
 | `--types` | Filter by work item types (comma-separated) |
+
+`--issues` and `--parent` narrow the work items and beads synced, but not the
+dependency-to-relation pass that runs after a push: it still writes ADO
+relations for every linked bead.
 
 ### Reconciliation
 
@@ -283,6 +329,7 @@ The Personal Access Token needs these scopes:
 | Scope | Access | Required For |
 |---|---|---|
 | Work Items | Read & Write | Creating and updating work items |
+| Project and Team | Read | `bd ado projects` |
 
 Generate a PAT at: `https://dev.azure.com/{org}/_usersettings/tokens`
 
@@ -298,6 +345,7 @@ beads stores ADO-specific metadata for round-trip fidelity:
 | `ado.story_points` | Story points estimate |
 | `ado.remaining_work` | Remaining work hours |
 | `ado.severity` | Bug severity value |
+| `beads_priority` | Original beads priority for P3/P4 (lossy ADO mapping) |
 
 ## Description Conversion
 
@@ -317,8 +365,10 @@ beads stores ADO-specific metadata for round-trip fidelity:
 | Max batch size | 200 work items per GET request |
 | Max response size | 50 MB |
 | Request timeout | 30 seconds |
-| Max retries | 3 (GET and WIQL only) |
-| Retry backoff | Exponential with jitter, respects `Retry-After` header |
+| Max retries | 3 (GET and WIQL only), on network errors, 429 and 5xx |
+| Retry backoff | Exponential from 1s with jitter; a numeric `Retry-After` header replaces it |
+
+400, 401, 403 and 404 responses are never retried.
 
 ## Troubleshooting
 
@@ -337,6 +387,9 @@ bd config set ado.org "your-org"
 # or for on-prem:
 bd config set ado.url "https://tfs.company.com/DefaultCollection"
 ```
+
+**`ado.url for this workspace is ..., which no private source has confirmed`**
+The custom endpoint came from shared configuration; see [Endpoint Trust](#endpoint-trust).
 
 **State transition errors (400 Bad Request)**
 This usually means the process template doesn't support a direct state change. Check your `ado.state_map.*` config matches your actual process template.
