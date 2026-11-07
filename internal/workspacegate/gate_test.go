@@ -142,9 +142,9 @@ func TestGateFileLocation(t *testing.T) {
 
 func mustEval(t *testing.T, p string) string {
 	t.Helper()
-	out, err := filepath.EvalSymlinks(p)
+	out, err := canonicalParent(p)
 	if err != nil {
-		t.Fatalf("EvalSymlinks(%s): %v", p, err)
+		t.Fatalf("canonicalParent(%s): %v", p, err)
 	}
 	return out
 }
