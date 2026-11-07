@@ -831,6 +831,15 @@ func runDiagnostics(path string) doctorResult {
 	labelWhitespaceCheck := convertWithCategory(doctor.CheckLabelWhitespaceWithStore(sharedStore), doctor.CategoryData)
 	result.Checks = append(result.Checks, labelWhitespaceCheck)
 
+	// Check 10e: status='blocked' holds the dependency graph no longer
+	// shares (GH#6565) — a manual or tracker-imported status that outlived
+	// its blocker, invisible to both 'bd ready' and 'bd blocked'. Warn-only
+	// (does not fail OverallOK): the hold may be intentional and bd doctor
+	// --fix deliberately never rewrites the status, so this surfaces rows
+	// for review rather than failing the installation.
+	blockedStatusCheck := convertWithCategory(doctor.CheckBlockedStatusWithStore(sharedStore), doctor.CategoryData)
+	result.Checks = append(result.Checks, blockedStatusCheck)
+
 	// Check 11: Claude integration
 	claudeCheck := convertWithCategory(doctor.CheckClaude(path), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, claudeCheck)

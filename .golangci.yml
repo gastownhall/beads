@@ -505,8 +505,13 @@ linters:
         text: 'do not write a filter here'
         linters:
           - forbidigo
-      # doctor's diagnostics and the fixes that follow them.
-      - path: '^cmd/bd/doctor_(conventions|pollution)\.go$|^cmd/bd/doctor/(maintenance|fix/maintenance|fix/migrate)\.go$'
+      # doctor's diagnostics and the fixes that follow them. blocked_status
+      # builds the Blocked Status advisory's two-field filter (status
+      # 'blocked', stored is_blocked clear) itself: the stored-flag pair IS
+      # the diagnostic's question, and the check runs on whatever
+      # SearchIssues-bearing store it is handed, so there is no command
+      # request for a builder to shape.
+      - path: '^cmd/bd/doctor_(conventions|pollution)\.go$|^cmd/bd/doctor/(maintenance|fix/maintenance|fix/migrate|blocked_status)\.go$'
         text: 'do not write a filter here'
         linters:
           - forbidigo
