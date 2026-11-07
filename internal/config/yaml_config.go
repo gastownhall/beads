@@ -775,14 +775,23 @@ func setYamlConfigAtPath(configPath, key, value string) error {
 }
 
 // replaceConfigYaml replaces an existing config.yaml's content in one step:
-// temp file, then rename. Other processes read this file while bd writes it — a
-// running `bd serve` re-reads events-journal activation about once a second —
-// and an in-place rewrite (truncate, then write) hands a reader that lands in
-// between an empty or partial file, which parses as "key absent" and resolves
-// to the key's default.
+// temp file, then rename. Other bd processes read this file while bd writes
+// it: every command loads it at startup and reads events-journal activation
+// from it when it opens its store, and `bd serve` resolves that activation
+// once, at startup, for the life of the server. An in-place rewrite (truncate,
+// then write) hands a reader that lands in between an empty or partial file,
+// which parses as "key absent" and resolves to the key's default.
+//
+// On POSIX a reader sees the whole old file or the whole new one. Windows
+// refuses to rename over a file another handle holds open, so there the
+// replace waits for the reader to close it (internal/atomicfile retries for
+// about two seconds) and otherwise fails with the old file intact.
 //
 // A symlinked config.yaml is written through to its target rather than
-// replaced by a regular file, and the file keeps its own permissions.
+// replaced by a regular file, and the file keeps its own permissions. A
+// rename needs write permission on the directory only, so the file's own is
+// checked first: a config.yaml its owner made read-only is refused, as the
+// in-place write refused it, rather than rewritten.
 func replaceConfigYaml(configPath string, content []byte) error {
 	target, err := filepath.EvalSymlinks(configPath)
 	if err != nil {
@@ -790,6 +799,14 @@ func replaceConfigYaml(configPath string, content []byte) error {
 	}
 	info, err := os.Stat(target)
 	if err != nil {
+		return err
+	}
+	// Opened without O_TRUNC, so the probe changes nothing.
+	f, err := os.OpenFile(target, os.O_WRONLY, 0) //nolint:gosec // target is the resolved config.yaml path
+	if err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	return atomicfile.WriteFile(target, content, info.Mode().Perm())
