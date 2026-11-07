@@ -22,6 +22,7 @@ func savePersistentPreRunState(t *testing.T) {
 	}
 
 	oldServerMode := serverMode
+	oldProxiedServerMode := proxiedServerMode
 	oldCmdCtx := cmdCtx
 	oldDBPath := dbPath
 	oldActor := actor
@@ -31,6 +32,7 @@ func savePersistentPreRunState(t *testing.T) {
 	flagState := snapshotRootFlagState()
 	t.Cleanup(func() {
 		serverMode = oldServerMode
+		proxiedServerMode = oldProxiedServerMode
 		cmdCtx = oldCmdCtx
 		dbPath = oldDBPath
 		actor = oldActor
@@ -41,12 +43,61 @@ func savePersistentPreRunState(t *testing.T) {
 	})
 
 	serverMode = false
+	proxiedServerMode = false
 	cmdCtx = nil
 	dbPath = ""
 	actor = ""
 	jsonOutput = false
 	readonlyMode = false
 	doltAutoCommit = ""
+}
+
+// The child drives real command binding; its mode choices must not outlive it.
+func TestSavePersistentPreRunStateRestoresModes(t *testing.T) {
+	oldServerMode, oldProxiedServerMode := serverMode, proxiedServerMode
+	t.Cleanup(func() {
+		serverMode, proxiedServerMode = oldServerMode, oldProxiedServerMode
+	})
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+
+	for _, tc := range []struct {
+		name        string
+		server      bool
+		proxied     bool
+		fixtureMode string
+	}{
+		{"neither", false, false, configfile.DoltModeProxiedServer},
+		{"server", true, false, configfile.DoltModeProxiedServer},
+		{"proxied", false, true, configfile.DoltModeServer},
+		{"both", true, true, configfile.DoltModeServer},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			serverMode, proxiedServerMode = tc.server, tc.proxied
+			t.Run("command", func(t *testing.T) {
+				savePersistentPreRunState(t)
+				beadsDir := filepath.Join(t.TempDir(), ".beads")
+				writeTestConfigYAML(t, beadsDir, "")
+				writeMetadataConfig(t, beadsDir, tc.fixtureMode, "mode_cleanup_test")
+				config.ResetForTesting()
+				t.Cleanup(config.ResetForTesting)
+
+				prepareSelectedCommandContext(beadsDir, false)
+				wantServer := tc.fixtureMode == configfile.DoltModeServer
+				wantProxied := tc.fixtureMode == configfile.DoltModeProxiedServer
+				if serverMode != wantServer || proxiedServerMode != wantProxied {
+					t.Fatalf("bound modes = (%v, %v), want (%v, %v)",
+						serverMode, proxiedServerMode, wantServer, wantProxied)
+				}
+			})
+
+			if serverMode != tc.server || proxiedServerMode != tc.proxied {
+				t.Fatalf("modes after cleanup = (%v, %v), want (%v, %v)",
+					serverMode, proxiedServerMode, tc.server, tc.proxied)
+			}
+		})
+	}
 }
 
 func writeMetadataConfig(t *testing.T, beadsDir string, doltMode string, database string) {
