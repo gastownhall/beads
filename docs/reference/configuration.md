@@ -511,6 +511,20 @@ See [bd github](/cli-reference/github).
 
 Connection keys (`ado.pat`, `ado.org`, `ado.project`, `ado.projects`, `ado.url`) each have an `AZURE_DEVOPS_*` environment variable equivalent; config keys take priority over env vars. When `ado.projects` is set, `bd ado sync` fetches work items from all listed projects in a single query. State maps default to the Agile process template (override with `ado.state_map.*` / `ado.type_map.*` for Scrum or CMMI), and priority mapping (ADO 1–4 ↔ beads 0–4, with backlog collapsing to low) is automatic and not configurable. Full setup, mapping tables, and sync commands: [Azure DevOps integration](/integrations/azure-devops) and [bd ado](/cli-reference/ado).
 
+### Notion
+
+```bash
+bd config set notion.data_source_id "<data-source-uuid>"
+export NOTION_TOKEN="secret_..."                 # or: bd config set notion.token ...
+bd config set notion.max_query_pages 100         # raise the query bound (or NOTION_MAX_QUERY_PAGES)
+```
+
+No Notion query reads past the pagination bound — 50 pages of 100 rows (5,000) by default. Incremental pulls send a server-side `last_edited_time` filter, so a large data source syncs as long as the edited window fits under the bound; a cursor-less full pull must enumerate everything and fails outright rather than returning partial rows. If a full pull reports the bound, raise `notion.max_query_pages` (or export `NOTION_MAX_QUERY_PAGES`) or reduce what the query matches. Single fetches and pushes — of any size — resolve per issue: the referenced page by a direct read, otherwise a query scoped to the `Beads ID` property, so their cost does not grow with the data source.
+
+One behavior follows from the filtered window: an old page no local row links to is no longer discovered by an incremental pull. A cursor-less full pull still finds it, `bd notion sync --pull --issues <page-url-or-id>` retrieves a specific page whatever its age, and editing the remote page returns it to the incremental window. Pull stats count the query actually issued: `queried` is the live rows the query returned (not the whole source), `candidates` those surviving the state and window filters.
+
+Setup and commands: [bd notion](/cli-reference/notion).
+
 ## Environment Variables
 
 The Viper env prefix is `BD_`. Config keys map to env vars by upper-casing and replacing `.` and `-` with `_` (e.g. `dolt.auto-commit` → `BD_DOLT_AUTO_COMMIT`, `validation.on-create` → `BD_VALIDATION_ON_CREATE`).
