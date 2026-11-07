@@ -1180,6 +1180,7 @@ go_test(
         "reparent_test.go",
         "repo_add_relative_path_test.go",
         "repo_path_test.go",
+        "repo_stored_path_embedded_test.go",
         "reset_global_guard_test.go",
         "reset_hook_ownership_test.go",
         "reset_worktree_test.go",

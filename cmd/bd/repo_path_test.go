@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // repoPathWorkspace is a primary workspace whose config.yaml bd repo add and
@@ -269,5 +271,177 @@ func TestNormalizeRepoPathForStorageVerbatim(t *testing.T) {
 		if got != in {
 			t.Errorf("normalizeRepoPathForStorage(%q) = %q, want it verbatim", in, got)
 		}
+	}
+}
+
+// repoRemoveRecordingStore records the destructive calls bd repo remove makes.
+type repoRemoveRecordingStore struct {
+	storage.DoltStorage
+	deleted []string
+	cleared []string
+}
+
+func (s *repoRemoveRecordingStore) DeleteIssuesBySourceRepo(_ context.Context, sourceRepo string) (int, error) {
+	s.deleted = append(s.deleted, sourceRepo)
+	return 2, nil
+}
+
+func (s *repoRemoveRecordingStore) ClearRepoMtime(_ context.Context, repoPath string) error {
+	s.cleared = append(s.cleared, repoPath)
+	return nil
+}
+
+// installRepoRemoveStore makes a recording store the active store for
+// bd repo remove.
+func installRepoRemoveStore(t *testing.T) *repoRemoveRecordingStore {
+	t.Helper()
+	saveAndRestoreGlobals(t)
+	saveStorageMode(t)
+	fake := &repoRemoveRecordingStore{}
+	store = fake
+	setStoreActive(true)
+	return fake
+}
+
+func (w repoPathWorkspace) writeAdditional(t *testing.T, entries ...string) {
+	t.Helper()
+	if err := config.SetReposInYAML(w.configPath, &config.ReposConfig{Primary: ".", Additional: entries}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// runRepoRemove runs bd repo remove and returns its stdout.
+func runRepoRemove(t *testing.T, arg string) (string, error) {
+	t.Helper()
+	return captureStdoutWithError(t, func() error {
+		return repoRemoveCmd.RunE(repoRemoveCmd, []string{arg})
+	})
+}
+
+func TestRepoPathRemovalMatchesStoredEntry(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// entries is the configured repos.additional list.
+		entries func(w repoPathWorkspace) []string
+		cwd     func(w repoPathWorkspace) string
+		arg     func(w repoPathWorkspace) string
+		// want is the entry that must be removed and used as the issue key.
+		want func(w repoPathWorkspace) string
+	}{
+		{
+			name:    "relative argument matches add-time absolute entry",
+			entries: func(w repoPathWorkspace) []string { return []string{w.other} },
+			cwd:     func(w repoPathWorkspace) string { return w.primary },
+			arg:     func(repoPathWorkspace) string { return "../other" },
+			want:    func(w repoPathWorkspace) string { return w.other },
+		},
+		{
+			name:    "relative argument from nested cwd",
+			entries: func(w repoPathWorkspace) []string { return []string{w.other} },
+			cwd:     func(w repoPathWorkspace) string { return filepath.Join(w.primary, "nested", "deep") },
+			arg:     func(repoPathWorkspace) string { return "../../../other" },
+			want:    func(w repoPathWorkspace) string { return w.other },
+		},
+		{
+			name:    "stored absolute entry from another cwd",
+			entries: func(w repoPathWorkspace) []string { return []string{w.other} },
+			cwd:     func(w repoPathWorkspace) string { return filepath.Join(w.root, "elsewhere") },
+			arg:     func(w repoPathWorkspace) string { return w.other },
+			want:    func(w repoPathWorkspace) string { return w.other },
+		},
+		{
+			name:    "legacy relative entry from another cwd",
+			entries: func(repoPathWorkspace) []string { return []string{"../other"} },
+			cwd:     func(w repoPathWorkspace) string { return filepath.Join(w.root, "elsewhere") },
+			arg:     func(repoPathWorkspace) string { return "../other" },
+			want:    func(repoPathWorkspace) string { return "../other" },
+		},
+		{
+			name:    "exact legacy entry wins over its absolute counterpart",
+			entries: func(w repoPathWorkspace) []string { return []string{w.other, "../other"} },
+			cwd:     func(w repoPathWorkspace) string { return w.primary },
+			arg:     func(repoPathWorkspace) string { return "../other" },
+			want:    func(repoPathWorkspace) string { return "../other" },
+		},
+		{
+			name:    "missing target directory by relative argument",
+			entries: func(w repoPathWorkspace) []string { return []string{filepath.Join(w.root, "gone")} },
+			cwd:     func(w repoPathWorkspace) string { return w.primary },
+			arg:     func(repoPathWorkspace) string { return "../gone" },
+			want:    func(w repoPathWorkspace) string { return filepath.Join(w.root, "gone") },
+		},
+		{
+			name:    "tilde entry by its tilde spelling",
+			entries: func(repoPathWorkspace) []string { return []string{"~/other"} },
+			cwd:     func(w repoPathWorkspace) string { return w.primary },
+			arg:     func(repoPathWorkspace) string { return "~/other" },
+			want:    func(repoPathWorkspace) string { return "~/other" },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newRepoPathWorkspace(t)
+			t.Setenv("HOME", w.root)
+			fake := installRepoRemoveStore(t)
+			entries := tc.entries(w)
+			w.writeAdditional(t, entries...)
+			t.Chdir(tc.cwd(w))
+			want := tc.want(w)
+
+			out, err := runRepoRemove(t, tc.arg(w))
+			if err != nil {
+				t.Fatalf("repo remove %q: %v", tc.arg(w), err)
+			}
+			if len(fake.deleted) != 1 || fake.deleted[0] != want {
+				t.Fatalf("deleted source repos %q, want only [%q]", fake.deleted, want)
+			}
+			if len(fake.cleared) != 1 || fake.cleared[0] != want {
+				t.Fatalf("cleared mtime keys %q, want only [%q]", fake.cleared, want)
+			}
+			var remaining []string
+			for _, e := range entries {
+				if e != want {
+					remaining = append(remaining, e)
+				}
+			}
+			got := w.additional(t)
+			if strings.Join(got, "\n") != strings.Join(remaining, "\n") {
+				t.Fatalf("repos.additional after remove = %q, want %q", got, remaining)
+			}
+			if !strings.Contains(out, "Removed repository: "+want+"\n") {
+				t.Fatalf("output %q does not report the removed entry %q", out, want)
+			}
+		})
+	}
+}
+
+// TestRepoPathAddThenRemoveByAddSpelling removes, by the relative spelling it
+// was added with, an entry bd repo add stored as an absolute path.
+func TestRepoPathAddThenRemoveByAddSpelling(t *testing.T) {
+	w := newRepoPathWorkspace(t)
+	fake := installRepoRemoveStore(t)
+	t.Chdir(w.primary)
+	if _, err := runRepoAdd(t, "../other"); err != nil {
+		t.Fatalf("repo add: %v", err)
+	}
+	jsonOutput = true
+	out, err := runRepoRemove(t, "../other")
+	if err != nil {
+		t.Fatalf("repo remove: %v", err)
+	}
+	if len(fake.deleted) != 1 || fake.deleted[0] != w.other {
+		t.Fatalf("deleted source repos %q, want [%q]", fake.deleted, w.other)
+	}
+	if len(fake.cleared) != 1 || fake.cleared[0] != w.other {
+		t.Fatalf("cleared mtime keys %q, want [%q]", fake.cleared, w.other)
+	}
+	if got := w.additional(t); len(got) != 0 {
+		t.Fatalf("repos.additional after remove = %q, want empty", got)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+	if result["path"] != w.other {
+		t.Fatalf("json path = %v, want %q", result["path"], w.other)
 	}
 }

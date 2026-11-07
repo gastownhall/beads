@@ -116,8 +116,10 @@ var repoRemoveCmd = &cobra.Command{
 	Short: "Remove a repository from sync configuration",
 	Long: `Remove a repository path from the repos.additional list in config.yaml.
 
-The path must exactly match what was added (e.g., if you added "~/foo",
-you must remove "~/foo", not "/home/user/foo").
+The path is first matched against the configured entries exactly as typed.
+A relative path that matches no entry is then resolved against the current
+directory, the way 'bd repo add' stores it. A ~ entry is removed by its ~
+spelling (if you added "~/foo", remove "~/foo", not "/home/user/foo").
 
 This command also removes any previously-hydrated issues from the database
 that came from the removed repository.`,
@@ -135,13 +137,26 @@ that came from the removed repository.`,
 			}
 		}()
 
-		repoPath := args[0]
-
 		if err := ensureDirectMode("repo remove requires direct database access"); err != nil {
 			return HandleError("%v", err)
 		}
 
 		ctx := rootCtx
+
+		// Find the configured entry before touching the database, and use its
+		// stored spelling from here on: hydrated issues are keyed by it.
+		configPath, err := config.FindConfigYAMLPath()
+		if err != nil {
+			return HandleError("failed to find config.yaml: %v", err)
+		}
+		repos, err := config.ListRepos(configPath)
+		if err != nil {
+			return HandleError("failed to load config: %v", err)
+		}
+		repoPath, err := findConfiguredRepo(repos.Additional, args[0])
+		if err != nil {
+			return HandleError("%v", err)
+		}
 
 		deletedCount, err := store.DeleteIssuesBySourceRepo(ctx, repoPath)
 		if err != nil {
@@ -150,11 +165,6 @@ that came from the removed repository.`,
 
 		if err := store.ClearRepoMtime(ctx, repoPath); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to clear mtime cache: %v\n", err)
-		}
-
-		configPath, err := config.FindConfigYAMLPath()
-		if err != nil {
-			return HandleError("failed to find config.yaml: %v", err)
 		}
 
 		if err := config.RemoveRepo(configPath, repoPath); err != nil {
@@ -451,6 +461,28 @@ func normalizeRepoPathForStorage(repoPath string) (string, error) {
 		return repoPath, nil
 	}
 	return filepath.Abs(repoPath)
+}
+
+// findConfiguredRepo returns the repos.additional entry that a bd repo remove
+// argument names: an entry equal to the argument, else one equal to the
+// spelling bd repo add stores for it. Exact matches win so entries written
+// verbatim by older versions, relative ones included, stay removable.
+func findConfiguredRepo(additional []string, arg string) (string, error) {
+	for _, existing := range additional {
+		if existing == arg {
+			return existing, nil
+		}
+	}
+	normalized, err := normalizeRepoPathForStorage(arg)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve repository path: %w", err)
+	}
+	for _, existing := range additional {
+		if existing == normalized {
+			return existing, nil
+		}
+	}
+	return "", fmt.Errorf("repository not found: %s", arg)
 }
 
 // parseIssuesFromJSONL reads and parses issues from a JSONL file.
