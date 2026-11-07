@@ -14,7 +14,9 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/utils"
 	"gopkg.in/yaml.v3"
 )
 
@@ -240,10 +242,14 @@ func checkYAMLConfigValues(repoPath string) []string {
 							"Issues created via routing will not be visible in bd list. "+
 							"Run 'bd repo add <routing-target>' to enable hydration.")
 				} else {
-					// Check if routing targets are in hydration list
+					// Check if routing targets are in hydration list, compared
+					// canonically: `bd repo add` stores a relative target's
+					// absolute path, and ~/ or symlink spellings of the same
+					// directory must satisfy the check too, or the printed
+					// `bd repo add` remedy could never clear the warning.
 					additionalSet := make(map[string]bool)
 					for _, path := range additional {
-						additionalSet[expandPath(path)] = true
+						additionalSet[routingHydrationKey(path)] = true
 					}
 
 					// A routing repo comes from the committed config.yaml,
@@ -251,8 +257,7 @@ func checkYAMLConfigValues(repoPath string) []string {
 					// remedy printer: one shell word, or a <path>
 					// placeholder with the value named escaped beside it.
 					if contributorRepo != "" {
-						expandedContributor := expandPath(contributorRepo)
-						if !additionalSet[expandedContributor] {
+						if !additionalSet[routingHydrationKey(contributorRepo)] {
 							arg, note := remedy.CommandArg(runtime.GOOS, contributorRepo, "<path>")
 							issues = append(issues, fmt.Sprintf(
 								"routing.contributor=%s is not in repos.additional. "+
@@ -262,8 +267,7 @@ func checkYAMLConfigValues(repoPath string) []string {
 					}
 
 					if maintainerRepo != "" && maintainerRepo != "." {
-						expandedMaintainer := expandPath(maintainerRepo)
-						if !additionalSet[expandedMaintainer] {
+						if !additionalSet[routingHydrationKey(maintainerRepo)] {
 							arg, note := remedy.CommandArg(runtime.GOOS, maintainerRepo, "<path>")
 							issues = append(issues, fmt.Sprintf(
 								"routing.maintainer=%s is not in repos.additional. "+
@@ -381,6 +385,20 @@ func expandPath(path string) string {
 		}
 	}
 	return path
+}
+
+// routingHydrationKey reduces a configured routing target or hydration entry
+// to the key the routing/hydration membership comparison uses: local paths
+// are tilde-expanded and canonicalized, so relative, absolute, ~/ and symlink
+// spellings of one directory compare equal from the invoking cwd (bd-59llyl
+// stores the absolute form of a relative `bd repo add` target). Remote URLs
+// compare as their exact strings; they never reach filesystem
+// canonicalization.
+func routingHydrationKey(path string) string {
+	if remotecache.IsRemoteURL(path) {
+		return path
+	}
+	return utils.CanonicalizePath(expandPath(path))
 }
 
 // checkMetadataConfigValues validates values in metadata.json

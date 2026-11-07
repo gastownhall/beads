@@ -1,8 +1,10 @@
 package doctor
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -666,6 +668,132 @@ repos:
 		// Should be OK because maintainer="." doesn't need hydration
 		if check.Status != "ok" {
 			t.Errorf("expected ok status, got %s: %s", check.Status, check.Detail)
+		}
+	})
+}
+
+func TestRoutingHydrationCanonicalMembership(t *testing.T) {
+	// bd repo add now stores a relative target's absolute path, so the
+	// routing/hydration membership check must recognize equivalent local
+	// spellings of one directory, or the `bd repo add` remedy it prints can
+	// never clear the warning (bd-59llyl).
+	tmp := t.TempDir()
+	primary := filepath.Join(tmp, "primary")
+	planning := filepath.Join(tmp, "planning")
+	if err := os.MkdirAll(filepath.Join(primary, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(planning, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(primary)
+
+	writeConfig := func(t *testing.T, routing map[string]string, additional ...string) []string {
+		t.Helper()
+		var b strings.Builder
+		b.WriteString("routing:\n  mode: \"auto\"\n")
+		for _, key := range []string{"contributor", "maintainer"} {
+			if v, ok := routing[key]; ok {
+				fmt.Fprintf(&b, "  %s: %q\n", key, v)
+			}
+		}
+		b.WriteString("repos:\n  primary: \".\"\n")
+		if len(additional) > 0 {
+			b.WriteString("  additional:\n")
+			for _, entry := range additional {
+				fmt.Fprintf(&b, "    - %q\n", entry)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(primary, ".beads", "config.yaml"), []byte(b.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return checkYAMLConfigValues(primary)
+	}
+
+	membershipWarnings := func(issues []string) []string {
+		var found []string
+		for _, issue := range issues {
+			if strings.Contains(issue, "is not in repos.additional") {
+				found = append(found, issue)
+			}
+		}
+		return found
+	}
+
+	t.Run("relative contributor target matches its absolute hydration entry", func(t *testing.T) {
+		issues := writeConfig(t, map[string]string{"contributor": "../planning"}, planning)
+		if warnings := membershipWarnings(issues); len(warnings) != 0 {
+			t.Fatalf("equivalent spellings must not warn: %v", warnings)
+		}
+		if len(issues) != 0 {
+			t.Fatalf("expected a clean check, got: %v", issues)
+		}
+	})
+
+	t.Run("relative maintainer target matches its absolute hydration entry", func(t *testing.T) {
+		issues := writeConfig(t, map[string]string{"maintainer": "../planning"}, planning)
+		if warnings := membershipWarnings(issues); len(warnings) != 0 {
+			t.Fatalf("equivalent spellings must not warn: %v", warnings)
+		}
+	})
+
+	t.Run("tilde hydration entry matches absolute routing target", func(t *testing.T) {
+		home := t.TempDir()
+		homePlanning := filepath.Join(home, "planning")
+		if err := os.MkdirAll(homePlanning, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("HOME", home)
+		issues := writeConfig(t, map[string]string{"contributor": homePlanning}, "~/planning")
+		if warnings := membershipWarnings(issues); len(warnings) != 0 {
+			t.Fatalf("equivalent spellings must not warn: %v", warnings)
+		}
+	})
+
+	t.Run("symlink alias matches the real path", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("creating symlinks on windows needs privileges")
+		}
+		alias := filepath.Join(t.TempDir(), "planning-alias")
+		if err := os.Symlink(planning, alias); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		issues := writeConfig(t, map[string]string{"contributor": "../planning"}, alias)
+		if warnings := membershipWarnings(issues); len(warnings) != 0 {
+			t.Fatalf("equivalent spellings must not warn: %v", warnings)
+		}
+	})
+
+	t.Run("remote URL target compares by exact string", func(t *testing.T) {
+		url := "https://dolthub.com/org/planning"
+		if issues := writeConfig(t, map[string]string{"contributor": url}, url); len(membershipWarnings(issues)) != 0 {
+			t.Fatalf("an identical URL entry must satisfy the check: %v", issues)
+		}
+		issues := writeConfig(t, map[string]string{"contributor": url}, "https://dolthub.com/org/other")
+		if warnings := membershipWarnings(issues); len(warnings) != 1 {
+			t.Fatalf("a different URL must still warn, got: %v", warnings)
+		}
+	})
+
+	t.Run("distinct directories still warn", func(t *testing.T) {
+		other := filepath.Join(t.TempDir(), "other-planning")
+		if err := os.MkdirAll(other, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		issues := writeConfig(t, map[string]string{"contributor": "../planning"}, other)
+		if warnings := membershipWarnings(issues); len(warnings) != 1 || !strings.Contains(warnings[0], "routing.contributor") {
+			t.Fatalf("distinct directories must keep warning, got: %v", warnings)
+		}
+	})
+
+	t.Run("current-repo handling is unchanged", func(t *testing.T) {
+		// A "." contributor alongside a hydrated maintainer target keeps its
+		// existing treatment: the current-repo target is warned about exactly
+		// as before.
+		issues := writeConfig(t, map[string]string{"contributor": ".", "maintainer": "../planning"}, planning)
+		warnings := membershipWarnings(issues)
+		if len(warnings) != 1 || !strings.Contains(warnings[0], "routing.contributor=") {
+			t.Fatalf("current-repo contributor handling changed, warnings: %v", warnings)
 		}
 	})
 }

@@ -195,6 +195,14 @@ skipping repos whose export hasn't changed. `bd init --contributor` wires
 hydration up automatically; `bd doctor` warns when routing targets are
 missing from `repos.additional`.
 
+A relative `bd repo add` target is stored as the absolute path it resolves
+to at add time, so the entry names the same workspace no matter which
+directory later commands run from; absolute paths, remote URLs and
+`~/`-prefixed paths are stored verbatim. `bd repo remove` matches the exact
+configured entry first and otherwise resolves a relative argument the way
+add did. `bd doctor` compares routing targets and hydration entries
+canonically, so equivalent spellings of one directory do not warn.
+
 Once hydrated, beads from other repos are ordinary rows in your database —
 filter by provenance or link them with normal dependencies:
 
