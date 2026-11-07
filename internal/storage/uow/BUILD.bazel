@@ -135,6 +135,7 @@ go_test(
         "history_off_differential_test.go",
         "id_retention_contract_test.go",
         "importer_contract_test.go",
+        "importer_replay_test.go",
         "importer_uow_test.go",
         "issue_claimer_test.go",
         "issue_operations_claim_contract_test.go",

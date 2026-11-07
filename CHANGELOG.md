@@ -1248,7 +1248,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fields, the source of each inline dependency and the ID of each inline
   comment are restored before the attempt runs. Reachable from `bd todo`,
   `bd swarm`, `bd import`, repo and Linear sync, and the `bd create --form` /
-  `bd q` fast path.
+  `bd q` fast path. The proxied-server `bd import` (the unit-of-work importer)
+  had the same replay bug for rows without an ID and restores them the same
+  way.
 - **A lost response to the `CALL DOLT_COMMIT` inside a delete or a sweep is no
   longer replayed.** That call commits the delete's (`bd delete`) or sweep's
   (`bd prune`, `bd purge`) SQL transaction, so a connection lost while waiting
