@@ -93,6 +93,22 @@ the already-committed chunks are durable and the command exits nonzero;
 re-running the same import is safe and converges (rows upsert,
 labels/comments/dependencies deduplicate).
 
+A dependency edge is skipped when its target is neither in the database
+nor in the same input, or when validation refuses it (a cycle or an invalid
+hierarchy). Text output prints one "Skipped dependency" line per edge on
+stderr, then a count and a recovery hint; --json lists the same edges in
+skipped_dependencies instead. The import still exits 0.
+A restore split into several imports skips every edge whose target only a
+later part carries: once those targets are imported, correct any edge
+validation refused, then re-run the import that reported the edges. Its rows
+upsert and each valid edge is added once, but only for rows the re-run
+writes: a row skipped as stale (stale_skipped_ids), as a duplicate title
+under --dedup, or as retired by a retention sweep (retired_ids) keeps its
+edges out and does not report them. Pass --strict-deps to exit 1 when any
+edge was reported skipped, so a script can gate on it; a pass is not an
+audit of the whole graph. The check runs after the import committed, so the
+imported rows stay; --strict-deps cannot be combined with --dry-run.
+
 EXAMPLES:
   bd import                        # Import from configured import.path
   bd import backup.jsonl           # Import from a specific file
@@ -102,6 +118,7 @@ EXAMPLES:
   bd import --dry-run              # Show what would be imported
   bd import --dedup                # Skip issues with duplicate titles
   bd import --allow-stale old.jsonl # Restore an older snapshot (overwrites newer local rows)
+  bd import --strict-deps part1.jsonl # Exit 1 if a dependency edge was skipped
   bd import --json                 # Structured output with created and skipped IDs`,
 	GroupID:       "sync",
 	SilenceUsage:  true,
@@ -113,6 +130,7 @@ var (
 	importDryRun     bool
 	importDedup      bool
 	importAllowStale bool
+	importStrictDeps bool
 	importInput      string
 )
 
@@ -121,6 +139,10 @@ func init() {
 	importCmd.Flags().BoolVar(&importDryRun, "dry-run", false, "Show what would be imported without importing")
 	importCmd.Flags().BoolVar(&importDedup, "dedup", false, "Skip lines whose title matches an existing open issue")
 	importCmd.Flags().BoolVar(&importAllowStale, "allow-stale", false, "Import rows even when older than the local issue (required to restore an older snapshot)")
+	importCmd.Flags().BoolVar(&importStrictDeps, "strict-deps", false, "Exit nonzero if any dependency edge is reported skipped; imported rows stay committed")
+	// A dry run writes no dependency edge, so it has no skipped edge to gate
+	// on: accepting both would report a strict pass it never checked.
+	importCmd.MarkFlagsMutuallyExclusive("dry-run", "strict-deps")
 	rootCmd.AddCommand(importCmd)
 }
 
@@ -553,7 +575,10 @@ func renderImportDryRun(result importResultJSON, memoriesCount int, source strin
 // identically in both modes.
 func renderImportOutcome(result importResultJSON, source string, dedupHits int) error {
 	if jsonOutput {
-		return outputJSON(result)
+		if err := outputJSON(result); err != nil {
+			return err
+		}
+		return importStrictDepsVerdict(result)
 	}
 
 	fmt.Fprintf(os.Stderr, "Imported %d issues", result.Created)
@@ -587,8 +612,38 @@ func renderImportOutcome(result importResultJSON, source string, dedupHits int) 
 	for _, skipped := range result.SkippedDependencies {
 		fmt.Fprintf(os.Stderr, "Skipped dependency: %s\n", skipped)
 	}
-	return nil
+	// GH#6113: one line per edge scrolls past unread on a large restore, so
+	// close with the count. The edges stay reported in skipped_dependencies;
+	// --json keeps its single result object and adds nothing here. Under
+	// --strict-deps the verdict below reports the count as its error instead.
+	if n := len(result.SkippedDependencies); n > 0 && !importStrictDeps {
+		WarnError("%d dependency edge(s) were reported skipped", n)
+		fmt.Fprintf(os.Stderr, "Hint: %s; pass --strict-deps to exit nonzero when edges are skipped\n", importSkippedDepsHint)
+	}
+	return importStrictDepsVerdict(result)
 }
+
+// importStrictDepsVerdict fails a completed import under --strict-deps when
+// it reported any skipped dependency edge, whatever the reason (missing
+// target or validation refusal). It runs after the import committed, so the
+// error says the rows stay. The error goes to stderr in both modes
+// (HandleErrorWithHint), which keeps --json stdout the one result object
+// already written; the returned exitError passes through runImport as exit 1.
+func importStrictDepsVerdict(result importResultJSON) error {
+	n := len(result.SkippedDependencies)
+	if !importStrictDeps || n == 0 {
+		return nil
+	}
+	return HandleErrorWithHint(
+		fmt.Sprintf("--strict-deps: %d dependency edge(s) were reported skipped; imported rows remain committed", n),
+		importSkippedDepsHint)
+}
+
+// importSkippedDepsHint is the recovery a skipped dependency edge needs: a
+// missing target lands with a later import (a split restore's later part),
+// after which re-running the import that carried the edge wires it; an edge
+// refused by validation has to be corrected first.
+const importSkippedDepsHint = "import the missing targets, then re-run the import that carried the skipped edges; correct edges refused by validation before re-running"
 
 // importTitleSearcher is the read seam the --dedup filter needs. It lives in
 // THIS file because naming types.IssueFilter is denied by default under
