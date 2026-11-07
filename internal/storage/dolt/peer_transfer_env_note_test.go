@@ -2,7 +2,9 @@ package dolt
 
 import (
 	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -14,11 +16,13 @@ import (
 // server that serves its directory. So when such a transfer fails while bd
 // holds the peer scheme's credential variables, the error keeps its context
 // and gains one note saying the server reads those from its own environment,
-// and how to give it current ones. A failure before the transfer (fsck) or
-// after it (the merge Sync runs once the fetch landed) gets none.
+// and how to give it current ones. A failure before the transfer (fsck, or a
+// SQL connection that never reached the server) or after it (the merge Sync
+// runs once the fetch landed) gets none.
 func TestPeerTransferFailureNamesServerEnvironment(t *testing.T) {
 	const s3URL = "s3://bucket/beads"
 	const gsURL = "gs://bucket/beads"
+	const hostedURL = "https://doltremoteapi.dolthub.com/org/repo"
 	aws := map[string]string{"AWS_ACCESS_KEY_ID": "sentinel-key", "AWS_SECRET_ACCESS_KEY": "sentinel-secret"}
 	google := map[string]string{"GOOGLE_APPLICATION_CREDENTIALS": "/sentinel/key.json"}
 
@@ -35,6 +39,9 @@ func TestPeerTransferFailureNamesServerEnvironment(t *testing.T) {
 		procedure     string
 		vars          string
 		wantCLICallIn string
+		// wantExitErr requires the dolt subprocess failure to stay
+		// identifiable through the note.
+		wantExitErr bool
 	}{
 		{
 			name: "SQL push", url: s3URL, env: aws,
@@ -45,6 +52,16 @@ func TestPeerTransferFailureNamesServerEnvironment(t *testing.T) {
 			name: "SQL fetch", url: s3URL, env: aws,
 			run:         func(ctx context.Context, s *DoltStore) error { return s.Fetch(ctx, "peer") },
 			wantContext: "failed to fetch from peer peer", procedure: "DOLT_FETCH", vars: "AWS_*",
+		},
+		{
+			name: "SQL push the server never took", url: s3URL, env: aws, o: envNoteOpts{unreachable: true},
+			run:         func(ctx context.Context, s *DoltStore) error { return s.PushTo(ctx, "peer") },
+			wantContext: "failed to push to peer peer",
+		},
+		{
+			name: "SQL fetch the server never took", url: s3URL, env: aws, o: envNoteOpts{unreachable: true},
+			run:         func(ctx context.Context, s *DoltStore) error { return s.Fetch(ctx, "peer") },
+			wantContext: "failed to fetch from peer peer",
 		},
 		{
 			name: "Sync's fetch", url: s3URL, env: aws, o: envNoteOpts{readOnly: true},
@@ -63,6 +80,16 @@ func TestPeerTransferFailureNamesServerEnvironment(t *testing.T) {
 			// destination, so the server never reads DOLT_REMOTE_PASSWORD for it.
 			wantContext: "push to peer peer failed", procedure: "DOLT_PUSH", vars: "GOOGLE_*",
 			wantCLICallIn: "push --user peer-user peer main",
+		},
+		{
+			name: "CLI push to a hosted peer with a stored password", url: hostedURL,
+			o:      envNoteOpts{cli: true, peerUser: "peer-user", peerPassword: "sentinel-peer-secret"},
+			refuse: []string{"push"},
+			run:    func(ctx context.Context, s *DoltStore) error { return s.PushTo(ctx, "peer") },
+			// The user went with --user to a remotesapi destination, so the
+			// server reads the stored password as DOLT_REMOTE_PASSWORD.
+			wantContext: "push to peer peer failed", procedure: "DOLT_PUSH", vars: "DOLT_REMOTE_PASSWORD",
+			wantCLICallIn: "push --user peer-user peer main", wantExitErr: true,
 		},
 		{
 			name: "CLI fetch with stored credentials", url: s3URL, env: aws,
@@ -106,6 +133,10 @@ func TestPeerTransferFailureNamesServerEnvironment(t *testing.T) {
 				t.Fatalf("error = %v, want it to keep %q", err, tc.wantContext)
 			}
 			checkServerEnvNote(t, err, tc.procedure, tc.vars, tc.url)
+			var exitErr *exec.ExitError
+			if tc.wantExitErr && !errors.As(err, &exitErr) {
+				t.Fatalf("error %q no longer unwraps to the dolt subprocess exit error", err)
+			}
 			if tc.wantCLICallIn != "" {
 				raw, _ := os.ReadFile(callLog)
 				if !strings.Contains(string(raw), tc.wantCLICallIn) {

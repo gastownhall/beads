@@ -2,7 +2,9 @@ package dolt
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -36,8 +38,10 @@ type envNoteOpts struct {
 	cli bool
 	// readOnly skips the pre-pull commit and post-pull settlement writes.
 	readOnly bool
-	// peerUser stores a federation_peers row with this user (no password).
+	// peerUser stores a federation_peers row with this user.
 	peerUser string
+	// peerPassword gives that row a password the store's key file decrypts.
+	peerPassword string
 	// remoteUser and remotePassword are the default remote's credentials.
 	remoteUser, remotePassword string
 	// remotesErr makes the dolt_remotes listing fail.
@@ -53,6 +57,21 @@ type envNoteOpts struct {
 // sqlmock serves. The returned mock takes further expectations.
 func envNoteStore(t *testing.T, name, url string, o envNoteOpts) (*DoltStore, sqlmock.Sqlmock) {
 	t.Helper()
+	beadsDir := unmanagedWorkspace(t)
+	var encPeerPassword []byte
+	if o.peerPassword != "" {
+		key := make([]byte, 32)
+		if _, err := io.ReadFull(rand.Reader, key); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, credentialKeyFile), key, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		if encPeerPassword, err = encryptWithKey(o.peerPassword, key); err != nil {
+			t.Fatal(err)
+		}
+	}
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
@@ -68,7 +87,7 @@ func envNoteStore(t *testing.T, name, url string, o envNoteOpts) (*DoltStore, sq
 		}
 		peers := sqlmock.NewRows([]string{"name", "remote_url", "username", "password_encrypted", "sovereignty", "last_sync", "created_at", "updated_at"})
 		if o.peerUser != "" {
-			peers.AddRow(name, url, o.peerUser, nil, "", nil, time.Now(), time.Now())
+			peers.AddRow(name, url, o.peerUser, encPeerPassword, "", nil, time.Now(), time.Now())
 		}
 		mock.ExpectQuery("FROM federation_peers WHERE name").WillReturnRows(peers)
 	}
@@ -76,7 +95,6 @@ func envNoteStore(t *testing.T, name, url string, o envNoteOpts) (*DoltStore, sq
 	if !o.unreachable {
 		connStr = refusingSQLServer(t)
 	}
-	beadsDir := unmanagedWorkspace(t)
 	store := &DoltStore{
 		serverMode:     !o.embedded,
 		readOnly:       o.readOnly,
