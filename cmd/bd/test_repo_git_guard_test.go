@@ -11,20 +11,21 @@ import (
 
 // These tests drive the TestMain git-state guard in
 // test_repo_beads_guard_test.go against throwaway clones, never this checkout.
-// Each fixture is a main checkout plus one linked worktree, the layout the
+// Most fixtures are a main checkout plus one linked worktree, the layout the
 // r880 clobber broke (wy-qlvlmf): the guard reads the clone's shared common
 // dir through the linked worktree, as it does when the suite runs from one.
+// A clone with no linked worktree, such as a CI checkout, gets the stricter
+// check.
 
 // guardFixtureHost appears in every remote URL the fixtures write. No guard
 // report may contain it: configs carry remote URLs and can carry credentials.
 const guardFixtureHost = "guard-fixture.invalid"
 
-// newGitGuardFixture returns a main checkout with an origin remote and an
-// origin/main tracking ref, and a detached linked worktree of it.
-func newGitGuardFixture(t *testing.T) (mainDir, linkedDir string) {
+// newGitGuardClone returns a checkout with an origin remote and an origin/main
+// tracking ref, and no linked worktree.
+func newGitGuardClone(t *testing.T) string {
 	t.Helper()
-	root := t.TempDir()
-	mainDir = filepath.Join(root, "main")
+	mainDir := filepath.Join(t.TempDir(), "main")
 	if err := os.Mkdir(mainDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +33,15 @@ func newGitGuardFixture(t *testing.T) (mainDir, linkedDir string) {
 	runGitForBootstrapTest(t, mainDir, "commit", "--allow-empty", "-m", "init")
 	runGitForBootstrapTest(t, mainDir, "remote", "add", "origin", "https://"+guardFixtureHost+"/upstream.git")
 	runGitForBootstrapTest(t, mainDir, "update-ref", "refs/remotes/origin/main", "HEAD")
-	linkedDir = filepath.Join(root, "linked")
+	return mainDir
+}
+
+// newGitGuardFixture returns a newGitGuardClone checkout and a detached linked
+// worktree of it.
+func newGitGuardFixture(t *testing.T) (mainDir, linkedDir string) {
+	t.Helper()
+	mainDir = newGitGuardClone(t)
+	linkedDir = filepath.Join(filepath.Dir(mainDir), "linked")
 	runGitForBootstrapTest(t, mainDir, "worktree", "add", "--detach", linkedDir)
 	return mainDir, linkedDir
 }
@@ -74,6 +83,9 @@ func TestLocateRepoGitDirs(t *testing.T) {
 		if got, want := dirs.worktreeConfig(), filepath.Join(dirs.gitDir, "config.worktree"); got != want {
 			t.Errorf("worktreeConfig() = %q, want %q", got, want)
 		}
+		if !dirs.shared {
+			t.Error("shared = false for a main checkout with a linked worktree registered")
+		}
 	})
 
 	t.Run("linked worktree", func(t *testing.T) {
@@ -86,6 +98,16 @@ func TestLocateRepoGitDirs(t *testing.T) {
 		}
 		if got, want := dirs.worktreeConfig(), filepath.Join(dirs.gitDir, "config.worktree"); got != want {
 			t.Errorf("worktreeConfig() = %q, want %q", got, want)
+		}
+		if !dirs.shared {
+			t.Error("shared = false for a linked worktree")
+		}
+	})
+
+	t.Run("clone with no linked worktree", func(t *testing.T) {
+		dirs := locateGitGuardFixture(t, newGitGuardClone(t))
+		if dirs.shared {
+			t.Error("shared = true for a clone no other checkout uses; the guard would let a test's identity or role write through")
 		}
 	})
 
@@ -113,7 +135,8 @@ func TestLocateRepoGitDirs(t *testing.T) {
 
 // TestDiffRepoGitStateClassifiesGitWrites runs the git commands that other
 // worktrees of a shared clone run routinely, and the writes the r880 clobber
-// made, and checks which ones the guard lets through.
+// made, and checks which ones the guard lets through, in a shared clone and
+// in one no other checkout uses.
 func TestDiffRepoGitStateClassifiesGitWrites(t *testing.T) {
 	type fixture struct {
 		mainDir, linkedDir string
@@ -148,6 +171,7 @@ func TestDiffRepoGitStateClassifiesGitWrites(t *testing.T) {
 	tests := []struct {
 		name      string
 		guardMain bool                      // guard the main checkout instead of the linked worktree
+		soleClone bool                      // a clone with no linked worktree; guard its main checkout
 		setup     func(*testing.T, fixture) // before the first snapshot
 		act       func(*testing.T, fixture) // between the snapshots
 		routine   bool
@@ -212,9 +236,50 @@ func TestDiffRepoGitStateClassifiesGitWrites(t *testing.T) {
 			want: []string{"extensions.worktreeconfig added"},
 		},
 		{
-			name: "identity rewritten",
-			act:  git(inLinked, "config", "user.email", "fixture@"+guardFixtureHost),
-			want: []string{"user.email changed"},
+			name: "worktree path set",
+			act:  git(inLinked, "config", "core.worktree", "elsewhere"),
+			want: []string{"core.worktree added"},
+		},
+		{
+			// Other worktrees of a shared clone set these while the suite
+			// runs; the guard cannot tell their writes from a test's.
+			name:    "identity rewritten by another worktree",
+			act:     git(inMain, "config", "user.email", "fixture@"+guardFixtureHost),
+			routine: true,
+			want:    []string{"user.email changed"},
+		},
+		{
+			name:    "bd role set by another worktree",
+			act:     git(inMain, "config", "beads.role", "maintainer"),
+			routine: true,
+			want:    []string{"beads.role added"},
+		},
+		{
+			// With no other checkout to blame, a top-level key change
+			// is a test running git against this one.
+			name:      "identity rewritten in a clone no other checkout uses",
+			soleClone: true,
+			act:       git(inMain, "config", "user.email", "fixture@"+guardFixtureHost),
+			want:      []string{"user.email changed"},
+		},
+		{
+			name:      "bd role set in a clone no other checkout uses",
+			soleClone: true,
+			act:       git(inMain, "config", "beads.role", "maintainer"),
+			want:      []string{"beads.role added"},
+		},
+		{
+			name:      "branch tracking set up in a clone no other checkout uses",
+			soleClone: true,
+			act:       git(inMain, "branch", "--track", "feature", "origin/main"),
+			routine:   true,
+			want:      []string{"branch.feature.remote added", "branch.feature.merge added"},
+		},
+		{
+			name:      "origin removed in a clone no other checkout uses",
+			soleClone: true,
+			act:       git(inMain, "remote", "remove", "origin"),
+			want:      []string{"remote.origin.url removed", "remote.origin.fetch removed"},
 		},
 		{
 			name: "hooks path rewritten",
@@ -227,7 +292,15 @@ func TestDiffRepoGitStateClassifiesGitWrites(t *testing.T) {
 				git(inMain, "branch", "--track", "feature", "origin/main"),
 				git(inLinked, "config", "core.bare", "true"),
 			),
-			want: []string{"core.bare changed", "also 2 branch/remote key change(s)"},
+			want: []string{"core.bare changed", "also 2 routine key change(s)"},
+		},
+		{
+			name: "clobber next to another worktree's identity change",
+			act: both(
+				git(inMain, "config", "user.email", "fixture@"+guardFixtureHost),
+				git(inLinked, "config", "extensions.worktreeConfig", "true"),
+			),
+			want: []string{"extensions.worktreeconfig added", "also 1 routine key change(s)"},
 		},
 		{
 			name: "hook written",
@@ -276,12 +349,20 @@ func TestDiffRepoGitStateClassifiesGitWrites(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mainDir, linkedDir := newGitGuardFixture(t)
+			var mainDir, linkedDir string
+			if tt.soleClone {
+				mainDir = newGitGuardClone(t)
+			} else {
+				mainDir, linkedDir = newGitGuardFixture(t)
+			}
 			guarded := linkedDir
-			if tt.guardMain {
+			if tt.guardMain || tt.soleClone {
 				guarded = mainDir
 			}
 			f := fixture{mainDir: mainDir, linkedDir: linkedDir, dirs: locateGitGuardFixture(t, guarded)}
+			if f.dirs.shared == tt.soleClone {
+				t.Fatalf("fixture shared = %v, want %v", f.dirs.shared, !tt.soleClone)
+			}
 			if tt.setup != nil {
 				tt.setup(t, f)
 			}
@@ -322,7 +403,7 @@ func TestDiffGitConfigText(t *testing.T) {
 	tests := []struct {
 		name    string
 		after   string
-		shared  bool
+		scope   gitConfigScope
 		routine bool
 		want    string
 	}{
@@ -330,46 +411,59 @@ func TestDiffGitConfigText(t *testing.T) {
 			name: "comments and layout only",
 			after: "# reformatted\n[core]\nbare=false\n[remote \"origin\"]\n" +
 				"url = https://" + guardFixtureHost + "/upstream.git\nfetch = +refs/heads/*:refs/remotes/origin/*\n",
-			shared:  true,
+			scope:   soleCloneConfig,
 			routine: true,
 			want:    "rewritten with no key or value change",
 		},
 		{
 			name:    "empty section left behind by a removal",
 			after:   base + "[branch \"gone\"]\n",
-			shared:  true,
+			scope:   soleCloneConfig,
 			routine: true,
 			want:    "rewritten with no key or value change",
 		},
 		{
-			name:   "not parseable",
-			after:  "[core\n\tbare = true\n",
-			shared: true,
-			want:   "not parseable as git config",
+			name:  "not parseable",
+			after: "[core\n\tbare = true\n",
+			scope: sharedCloneConfig,
+			want:  "not parseable as git config",
 		},
 		{
-			name:   "existing remote gains a fetch refspec",
-			after:  base + "[remote \"origin\"]\n\tfetch = +refs/pull/*/head:refs/remotes/origin/pr/*\n",
-			shared: true,
-			want:   "remote.origin.fetch changed",
+			name:  "existing remote gains a fetch refspec",
+			after: base + "[remote \"origin\"]\n\tfetch = +refs/pull/*/head:refs/remotes/origin/pr/*\n",
+			scope: sharedCloneConfig,
+			want:  "remote.origin.fetch changed",
 		},
 		{
 			name:    "remote with a dotted name added",
 			after:   base + "[remote \"my.fork\"]\n\turl = https://" + guardFixtureHost + "/fork.git\n",
-			shared:  true,
+			scope:   soleCloneConfig,
 			routine: true,
 			want:    "remote.my.fork.url added",
 		},
 		{
-			name:   "branch key outside the shared config",
-			after:  base + "[branch \"feature\"]\n\tremote = origin\n",
-			shared: false,
-			want:   "branch.feature.remote added",
+			name:    "top-level key in a shared clone's config",
+			after:   base + "[merge]\n\tconflictStyle = zdiff3\n",
+			scope:   sharedCloneConfig,
+			routine: true,
+			want:    "merge.conflictstyle added",
+		},
+		{
+			name:  "top-level key in a sole clone's config",
+			after: base + "[merge]\n\tconflictStyle = zdiff3\n",
+			scope: soleCloneConfig,
+			want:  "merge.conflictstyle added",
+		},
+		{
+			name:  "branch key outside the common config",
+			after: base + "[branch \"feature\"]\n\tremote = origin\n",
+			scope: checkoutConfig,
+			want:  "branch.feature.remote added",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := diffGitConfig("config", base, tt.after, tt.shared)
+			c := diffGitConfig("config", base, tt.after, tt.scope)
 			if c.routine != tt.routine {
 				t.Errorf("routine = %v, want %v (detail %q)", c.routine, tt.routine, c.detail)
 			}
@@ -388,7 +482,7 @@ func TestDiffGitConfigText(t *testing.T) {
 		for i := range 20 {
 			fmt.Fprintf(&after, "[branch \"b%02d\"]\n\tremote = origin\n", i)
 		}
-		c := diffGitConfig("config", base, after.String(), true)
+		c := diffGitConfig("config", base, after.String(), soleCloneConfig)
 		if !c.routine || !strings.HasSuffix(c.detail, ", and 8 more") {
 			t.Errorf("got routine=%v detail %q, want a routine change listing 12 keys and 8 more", c.routine, c.detail)
 		}
@@ -439,8 +533,10 @@ func TestReportGitStateChanges(t *testing.T) {
 		if failed {
 			t.Error("a routine shared-clone change failed the run")
 		}
-		if !strings.HasPrefix(report, "NOTE: ") || !strings.Contains(report, routine.detail) || strings.Contains(report, "ERROR") {
-			t.Errorf("report %q, want a NOTE naming %q and no ERROR", report, routine.detail)
+		// The likely writer of a routine change is another process, so the
+		// note says that before it says this suite could have.
+		if !strings.HasPrefix(report, "NOTE: another process") || !strings.Contains(report, routine.detail) || strings.Contains(report, "ERROR") {
+			t.Errorf("report %q, want a NOTE that names another process first, names %q, and has no ERROR", report, routine.detail)
 		}
 		if entries, err := os.ReadDir(saveDir); err != nil || len(entries) != 0 {
 			t.Errorf("save dir holds %v (err %v), want nothing saved for routine changes", entries, err)
