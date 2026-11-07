@@ -13,6 +13,7 @@ import (
 	"time"
 
 	itracker "github.com/steveyegge/beads/internal/tracker"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // This file covers the #6004 behaviors: incremental pulls filtered
@@ -406,6 +407,79 @@ func TestTrackerIncrementalFetchDoesNotEnumerateWholeDataSource(t *testing.T) {
 	}
 	if unfiltered != 0 {
 		t.Fatalf("incremental fetch issued %d unfiltered queries; the window query must be the only one", unfiltered)
+	}
+}
+
+// TestTrackerFullFetchAfterTargetedOperations pins AC-2's first clause:
+// after targeted writes and an incremental pull, a cursor-less fetch must
+// still enumerate the whole data source. The whole-source index it used to
+// consult was exactly what a single write could leave partial.
+func TestTrackerFullFetchAfterTargetedOperations(t *testing.T) {
+	edited := time.Now().UTC().Add(-2 * time.Hour)
+	server := newTestNotionServer(t,
+		memberPage("aaaaaaaa-0000-0000-0000-000000000001", "bd-a", "Page A", edited),
+		memberPage("aaaaaaaa-0000-0000-0000-000000000002", "bd-b", "Page B", edited),
+		memberPage("aaaaaaaa-0000-0000-0000-000000000003", "bd-c", "Page C", edited),
+	)
+	tracker := server.tracker()
+
+	if _, err := tracker.CreateIssue(context.Background(), &types.Issue{
+		ID:        "bd-new",
+		Title:     "Created",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}); err != nil {
+		t.Fatalf("CreateIssue returned error: %v", err)
+	}
+	if _, err := tracker.UpdateIssue(context.Background(),
+		"https://www.notion.so/aaaaaaaa000000000000000000000001",
+		&types.Issue{ID: "bd-a", Title: "Page A, edited", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	); err != nil {
+		t.Fatalf("UpdateIssue returned error: %v", err)
+	}
+	since := time.Now().UTC().Add(-5 * time.Minute)
+	if _, err := tracker.FetchIssues(context.Background(), itracker.FetchOptions{Since: &since}); err != nil {
+		t.Fatalf("incremental FetchIssues returned error: %v", err)
+	}
+
+	issues, err := tracker.FetchIssues(context.Background(), itracker.FetchOptions{})
+	if err != nil {
+		t.Fatalf("full FetchIssues returned error: %v", err)
+	}
+	got := map[string]bool{}
+	for _, issue := range issues {
+		got[issue.Title] = true
+	}
+	for _, want := range []string{"Page A, edited", "Page B", "Page C", "Created"} {
+		if !got[want] {
+			t.Fatalf("full fetch after targeted writes missed %q; got %v", want, got)
+		}
+	}
+	queried, candidates := tracker.LastPullStats()
+	if queried != 4 || candidates != 4 {
+		t.Fatalf("LastPullStats = (%d, %d), want (4, 4) — the live rows the query returned", queried, candidates)
+	}
+}
+
+// TestTrackerFullFetchBeyondBoundReturnsErrorNotPartialRows pins AC-2's
+// second clause: a cursor-less fetch over a source larger than the configured
+// bound fails outright; partial rows are not a success.
+func TestTrackerFullFetchBeyondBoundReturnsErrorNotPartialRows(t *testing.T) {
+	edited := time.Now().UTC().Add(-2 * time.Hour)
+	server := newTestNotionServer(t,
+		memberPage("aaaaaaaa-0000-0000-0000-000000000001", "bd-a", "Page A", edited),
+		memberPage("aaaaaaaa-0000-0000-0000-000000000002", "bd-b", "Page B", edited),
+	)
+	server.failUnfiltered = true
+	tracker := server.tracker()
+
+	issues, err := tracker.FetchIssues(context.Background(), itracker.FetchOptions{})
+	if err == nil {
+		t.Fatalf("full fetch beyond the bound succeeded with %d issues, want the pagination-bound error", len(issues))
+	}
+	if issues != nil {
+		t.Fatalf("full fetch beyond the bound returned %d rows alongside its error; partial success is not a success", len(issues))
 	}
 }
 
