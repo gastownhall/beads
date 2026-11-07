@@ -262,12 +262,30 @@ func adoptResolvedHost(written, resolved string, policy sshHostLookupPolicy) (st
 	return "", false
 }
 
+// sshTransportOverridden reports whether the environment or the repository
+// config selects a custom SSH transport for git (GIT_SSH, GIT_SSH_COMMAND,
+// GIT_SSH_VARIANT, or core.sshCommand). Resolution evaluates the standard
+// OpenSSH client's view of the config; it must not second-guess a transport
+// it cannot see.
+func sshTransportOverridden(repoPath string) bool {
+	for _, key := range []string{"GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT"} {
+		if os.Getenv(key) != "" {
+			return true
+		}
+	}
+	out, err := runGitInRepo(repoPath, "config", "--get", "core.sshcommand")
+	if err == nil && strings.TrimSpace(string(out)) != "" {
+		return true
+	}
+	return false
+}
+
 // resolveSSHAliasHost returns the canonical HostName to hash for an SSH
 // remote when the local SSH configuration maps its written host somewhere
-// else. On any failure — no policy for the host, an unsafe username, no ssh
-// binary, a timeout, unusable output — it keeps the legacy literal-host
-// fingerprint and reports no alias.
-func resolveSSHAliasHost(split sshRemoteSplit) (string, bool) {
+// else. On any failure — no policy for the host, an unsafe username, a
+// custom SSH transport, no ssh binary, a timeout, unusable output — it keeps
+// the legacy literal-host fingerprint and reports no alias.
+func resolveSSHAliasHost(repoPath string, split sshRemoteSplit) (string, bool) {
 	policy := sshHostLookupPolicyFor(split.host)
 	if policy == sshLookupNone {
 		return "", false
@@ -275,6 +293,9 @@ func resolveSSHAliasHost(split sshRemoteSplit) (string, bool) {
 	if split.user != "" && !safeSSHHostToken.MatchString(split.user) {
 		// An unsafe username would evaluate different ssh config rules;
 		// skip resolution entirely rather than hash a mis-evaluated host.
+		return "", false
+	}
+	if sshTransportOverridden(repoPath) {
 		return "", false
 	}
 	raw, err := sshGResolveHost(split.user, split.host, split.port)

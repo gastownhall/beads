@@ -127,7 +127,7 @@ func ComputeRepoFingerprintForPath(repoPath string) (RepoFingerprint, error) {
 	legacy := repoIDHash(canonical)
 	fp := RepoFingerprint{ID: legacy, LegacyID: legacy, Source: RepoIDSourceRemote}
 	if split, ok := splitSSHRemote(repoURL); ok {
-		if host, resolved := resolveSSHAliasHost(split); resolved {
+		if host, resolved := resolveSSHAliasHost(repoPath, split); resolved {
 			fp.ID = repoIDHash(host + split.portSuffix + split.tail)
 			fp.SSHAlias = strings.ToLower(split.host)
 			fp.SSHHostName = host

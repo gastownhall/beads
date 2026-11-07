@@ -6,8 +6,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // withSSHConfigHome points HOME at a temporary home whose .ssh/config maps
@@ -304,6 +306,200 @@ func TestParseSSHConfigHostName(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestComputeRepoFingerprint_NeverResolved covers the cases where SSH alias
+// resolution must not run at all: a custom SSH transport selected through
+// the environment or git config, non-SSH transports, local paths, and
+// written hosts or usernames unsafe to pass to a subprocess. Each case
+// asserts the resolver seam was never invoked and the legacy fingerprint
+// stands.
+func TestComputeRepoFingerprint_NeverResolved(t *testing.T) {
+	cases := []struct {
+		name   string
+		remote string
+		env    map[string]string
+		sshCfg string // core.sshCommand value to set in the repo
+	}{
+		{
+			name:   "GIT_SSH_COMMAND selects a custom transport",
+			remote: "git@alias-a:org/repo.git",
+			env:    map[string]string{"GIT_SSH_COMMAND": "/opt/company-ssh"},
+		},
+		{
+			name:   "GIT_SSH selects a custom transport",
+			remote: "git@alias-a:org/repo.git",
+			env:    map[string]string{"GIT_SSH": "/opt/company-ssh"},
+		},
+		{
+			name:   "GIT_SSH_VARIANT selects a transport variant",
+			remote: "git@alias-a:org/repo.git",
+			env:    map[string]string{"GIT_SSH_VARIANT": "plink"},
+		},
+		{
+			name:   "core.sshCommand selects a custom transport",
+			remote: "git@alias-a:org/repo.git",
+			sshCfg: "/opt/company-ssh -F /opt/ssh-config",
+		},
+		{
+			name:   "https remote",
+			remote: "https://github.com/org/repo.git",
+		},
+		{
+			name:   "git protocol remote",
+			remote: "git://github.com/org/repo.git",
+		},
+		{
+			name:   "file remote",
+			remote: "file:///srv/git/repo.git",
+		},
+		{
+			name:   "local path remote",
+			remote: "/srv/git/repo.git",
+		},
+		{
+			name:   "windows path remote",
+			remote: "C:/Users/me/repo",
+		},
+		{
+			name:   "host with whitespace",
+			remote: "git@bad host:org/repo.git",
+		},
+		{
+			name:   "host with leading dash",
+			remote: "git@-evil:org/repo.git",
+		},
+		{
+			name:   "IP literal host",
+			remote: "git@10.1.2.3:org/repo.git",
+		},
+		{
+			name:   "unsafe username skips resolution entirely",
+			remote: "ev%il@alias-a:org/repo.git",
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+			called := false
+			injectSSHResolver(t, func(user, host, port string) (string, error) {
+				called = true
+				return "github.com", nil
+			})
+			dir := fingerprintRepoForRemote(t, tt.remote)
+			if tt.sshCfg != "" {
+				cmd := exec.Command("git", "config", "core.sshCommand", tt.sshCfg)
+				cmd.Dir = dir
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("git config core.sshCommand: %v\n%s", err, out)
+				}
+			}
+			fp, err := ComputeRepoFingerprintForPath(dir)
+			if err != nil {
+				t.Fatalf("ComputeRepoFingerprintForPath: %v", err)
+			}
+			if called {
+				t.Fatal("resolver ran; this case must bypass SSH lookup entirely")
+			}
+			if fp.ID != fp.LegacyID || fp.ID == "" {
+				t.Fatalf("ID = %q, LegacyID = %q; resolution must retain the legacy value", fp.ID, fp.LegacyID)
+			}
+			if fp.SSHAlias != "" || fp.SSHHostName != "" {
+				t.Fatalf("alias fields set (%q, %q); this case must not mark an alias resolved", fp.SSHAlias, fp.SSHHostName)
+			}
+		})
+	}
+}
+
+// fakeSSHDir writes an executable ssh script into a fresh directory and
+// returns the directory.
+func fakeSSHDir(t *testing.T, script string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestComputeRepoFingerprint_Fallbacks runs the real ssh -G code path
+// against fake ssh binaries and asserts every failure mode — missing
+// binary, nonzero exit, unusable output, deadline, an output pipe held open
+// past the deadline, and an ssh found relative to the current directory —
+// keeps the exact legacy fingerprint and marks nothing resolved.
+func TestComputeRepoFingerprint_Fallbacks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("writes POSIX shell fake ssh binaries")
+	}
+
+	legacy := func(t *testing.T) (string, RepoFingerprint) {
+		t.Helper()
+		fp, err := ComputeRepoFingerprintForPath(fingerprintRepoForRemote(t, "git@alias-a:org/repo.git"))
+		if err != nil {
+			t.Fatalf("ComputeRepoFingerprintForPath: %v", err)
+		}
+		if fp.ID != fp.LegacyID || fp.ID == "" {
+			t.Fatalf("fingerprint must be the legacy value, got ID=%q LegacyID=%q", fp.ID, fp.LegacyID)
+		}
+		if fp.SSHAlias != "" || fp.SSHHostName != "" {
+			t.Fatalf("no alias may be reported, got (%q, %q)", fp.SSHAlias, fp.SSHHostName)
+		}
+		return fp.ID, fp
+	}
+
+	t.Run("missing binary", func(t *testing.T) {
+		dir := t.TempDir()
+		gitPath, err := exec.LookPath("git")
+		if err != nil {
+			t.Skip("no git on PATH to link")
+		}
+		if err := os.Symlink(gitPath, filepath.Join(dir, "git")); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", dir)
+		legacy(t)
+	})
+
+	t.Run("ssh found relative to the current directory", func(t *testing.T) {
+		dir := fakeSSHDir(t, "#!/bin/sh\necho 'hostname github.com'\n")
+		t.Chdir(dir)
+		t.Setenv("PATH", "."+string(os.PathListSeparator)+os.Getenv("PATH"))
+		legacy(t)
+	})
+
+	scripts := []struct {
+		name         string
+		script       string
+		shortTimeout bool
+	}{
+		{name: "nonzero exit", script: "#!/bin/sh\nexit 1\n"},
+		{name: "no hostname key", script: "#!/bin/sh\necho 'user git'\necho 'port 22'\n"},
+		{name: "option-like hostname", script: "#!/bin/sh\necho 'hostname -oProxyCommand=evil'\n"},
+		{name: "whitespace in hostname", script: "#!/bin/sh\necho 'hostname two words'\n"},
+		{name: "invalid hostname syntax", script: "#!/bin/sh\necho 'hostname _bad_.example'\n"},
+		{name: "times out", script: "#!/bin/sh\nsleep 5\n", shortTimeout: true},
+		{name: "output pipe held open", script: "#!/bin/sh\necho 'hostname github.com'\nsleep 5\n", shortTimeout: true},
+	}
+	for _, tt := range scripts {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.shortTimeout {
+				shortenSSHGLookupTimeout(t, 300*time.Millisecond)
+			}
+			fakeDir := fakeSSHDir(t, tt.script)
+			t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			legacy(t)
+		})
+	}
+}
+
+func shortenSSHGLookupTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := sshGLookupTimeout
+	sshGLookupTimeout = d
+	t.Cleanup(func() { sshGLookupTimeout = old })
 }
 
 // TestSplitSSHRemoteMatchesCanonicalize guards the parity the resolution
