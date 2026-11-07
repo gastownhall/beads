@@ -356,10 +356,27 @@ func (s *DoltStore) GetAllDependencyRecords(ctx context.Context) (map[string][]*
 }
 
 // GetExternalBlockingDependencyRecords returns explicit external blockers
-// without scanning unrelated graph edges.
+// without scanning unrelated graph edges. The read is one statement over both
+// dependency tables, which reads one snapshot by itself, so it runs without a
+// transaction where the server autocommits.
+//
+// When that statement fails because wisp_dependencies is missing, nothing from
+// it is kept: both planes are read again inside one read transaction, which
+// either finds the table (a peer restored it) and reads both, or finds it
+// missing and reads the durable table in the same snapshot. A second bare
+// statement could see durable edges from a later state than the one in which
+// the table was missing. A missing dependencies table is returned as an error.
 func (s *DoltStore) GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
 	var result map[string][]*types.Dependency
-	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+	err := s.withSingleRead(ctx, func(q issueops.DBTX) error {
+		var err error
+		result, err = issueops.ExternalBlockingDependencyRecordsOneStatement(ctx, q)
+		return err
+	})
+	if !issueops.IsMissingWispDependencies(err) {
+		return result, err
+	}
+	err = s.withReadTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		result, err = issueops.GetExternalBlockingDependencyRecordsInTx(ctx, tx)
 		return err

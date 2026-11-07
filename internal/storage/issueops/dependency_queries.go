@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -30,18 +31,76 @@ func GetAllDependencyRecordsInTx(ctx context.Context, tx DBTX) (map[string][]*ty
 // GetExternalBlockingDependencyRecordsInTx returns explicit external: edges
 // whose dependency type can block ready work. Cross-prefix issue IDs may share
 // depends_on_external storage, so the external: prefix check is intentional.
+//
+// tx must be a transaction (or another single-snapshot runner): when
+// wisp_dependencies is missing, the durable table is read in a second
+// statement, and that statement must see the same snapshot in which the table
+// was found missing. wisp_dependencies is optional (dolt_ignore'd, dropped when
+// the server's working set is replaced); a missing dependencies table, or any
+// other failure, is returned. A caller without a transaction reads with
+// ExternalBlockingDependencyRecordsOneStatement instead.
 func GetExternalBlockingDependencyRecordsInTx(ctx context.Context, tx DBTX) (map[string][]*types.Dependency, error) {
-	result := make(map[string][]*types.Dependency)
-	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-		if err := getExternalBlockingDependencyRecordsIntoFromTable(ctx, tx, depTable, result); err != nil {
-			if optionalBlockedTable(depTable) && isTableNotExistError(err) {
-				continue
-			}
-			return nil, err
-		}
+	result, err := ExternalBlockingDependencyRecordsOneStatement(ctx, tx)
+	if err == nil || !IsMissingWispDependencies(err) {
+		return result, err
+	}
+	result = make(map[string][]*types.Dependency)
+	if err := getExternalBlockingDependencyRecordsIntoFromTable(ctx, tx, "dependencies", result); err != nil {
+		return nil, err
 	}
 	return result, nil
 }
+
+// IsMissingWispDependencies reports whether err is a statement's failure on
+// the optional wisp_dependencies table being absent. A missing dependencies
+// table, or a table-not-found error that names no table, does not match.
+func IsMissingWispDependencies(err error) bool {
+	return dberrors.IsMissingTable(err, "wisp_dependencies")
+}
+
+// ExternalBlockingDependencyRecordsOneStatement reads the external blockers of
+// both dependency tables in one statement, so the two sets come from one
+// snapshot and the caller needs no transaction. Rows are returned as stored,
+// duplicates included, and an issue's durable edges come before its wisp edges.
+// It does not tolerate a missing wisp_dependencies: it returns that error
+// (IsMissingWispDependencies) and the caller re-reads both planes in one
+// transaction with GetExternalBlockingDependencyRecordsInTx, because a second
+// bare statement could see a later state than the one that failed.
+func ExternalBlockingDependencyRecordsOneStatement(ctx context.Context, q DBTX) (map[string][]*types.Dependency, error) {
+	result := make(map[string][]*types.Dependency)
+	rows, err := q.QueryContext(ctx, externalBlockingDependenciesUnionSQL)
+	if err != nil {
+		return nil, fmt.Errorf("get external blocking dependency records: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var plane int
+		dep, scanErr := scanDependencyRow(rows, &plane)
+		if scanErr != nil {
+			return nil, fmt.Errorf("get external blocking dependency records: %w", scanErr)
+		}
+		result[dep.IssueID] = append(result[dep.IssueID], dep)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("get external blocking dependency records: %w", err)
+	}
+	return result, nil
+}
+
+// externalBlockingDependencyLegSQL selects one dependency table's external
+// blockers, tagged with plane so the union can keep an issue's durable edges
+// ahead of its wisp edges.
+const externalBlockingDependencyLegSQL = `
+		SELECT issue_id, ` + DepTargetExpr + ` AS depends_on_id, type, created_at, created_by, metadata, thread_id, %d AS plane
+		FROM %s
+		WHERE depends_on_external LIKE 'external:%%'
+		  AND type IN ('blocks', 'conditional-blocks', 'waits-for')`
+
+//nolint:gosec // G201: the table names and plane numbers are hardcoded here.
+var externalBlockingDependenciesUnionSQL = fmt.Sprintf(externalBlockingDependencyLegSQL, 0, "dependencies") +
+	"\n\t\tUNION ALL" +
+	fmt.Sprintf(externalBlockingDependencyLegSQL, 1, "wisp_dependencies") +
+	"\n\t\tORDER BY issue_id, plane\n\t"
 
 //nolint:gosec // G201: depTable is "dependencies" or "wisp_dependencies" (hardcoded by caller).
 func getExternalBlockingDependencyRecordsIntoFromTable(ctx context.Context, tx DBTX, depTable string, result map[string][]*types.Dependency) error {
@@ -1226,13 +1285,15 @@ func readIsBlockedIntoFromTable(ctx context.Context, tx DBTX, table string, ids 
 	return nil
 }
 
-// scanDependencyRow scans a single dependency row from a *sql.Rows.
-func scanDependencyRow(rows *sql.Rows) (*types.Dependency, error) {
+// scanDependencyRow scans a single dependency row from a *sql.Rows: the seven
+// dependency columns, then into extra any columns a query projects after them.
+func scanDependencyRow(rows *sql.Rows, extra ...any) (*types.Dependency, error) {
 	var dep types.Dependency
 	var createdAt sql.NullTime
 	var metadata, threadID sql.NullString
 
-	if err := rows.Scan(&dep.IssueID, &dep.DependsOnID, &dep.Type, &createdAt, &dep.CreatedBy, &metadata, &threadID); err != nil {
+	dest := append([]any{&dep.IssueID, &dep.DependsOnID, &dep.Type, &createdAt, &dep.CreatedBy, &metadata, &threadID}, extra...)
+	if err := rows.Scan(dest...); err != nil {
 		return nil, fmt.Errorf("scan dependency: %w", err)
 	}
 

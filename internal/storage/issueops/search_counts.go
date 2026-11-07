@@ -2,7 +2,6 @@ package issueops
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"sort"
 
@@ -10,7 +9,29 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-func SearchIssuesWithCountsInTx(ctx context.Context, tx *sql.Tx, query string, filter types.IssueFilter) ([]*types.IssueWithCounts, error) {
+// SearchIssuesWithCountsIsOneStatement reports whether SearchIssuesWithCountsInTx
+// sends exactly one statement for filter: the durable page with no dependency
+// counts, no wisp merge and no explicit ephemeral arm. The wisp_dependencies
+// probe only decides whether the reverse-blocker count unions that table and
+// whether the wisp arms may run, and this page has none of them.
+func SearchIssuesWithCountsIsOneStatement(filter types.IssueFilter) bool {
+	return filter.SkipCounts && filter.SkipWisps && (filter.Ephemeral == nil || !*filter.Ephemeral)
+}
+
+// SearchIssuesWithCountsInTx reads a page of issues with their counts. tx is a
+// read transaction, or the store's database handle when
+// SearchIssuesWithCountsIsOneStatement says the page is one statement.
+func SearchIssuesWithCountsInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter) ([]*types.IssueWithCounts, error) {
+	if SearchIssuesWithCountsIsOneStatement(filter) {
+		// Under SkipCounts the reverse-blocker count is not in the SQL, so the
+		// probe's answer would change nothing (sqlbuild.SearchCountsSQL).
+		out, err := runFilterSearchQueryInTx(ctx, tx, query, filter, IssuesFilterTables, false)
+		if err != nil {
+			return nil, err
+		}
+		return finishSearchIssuesWithCounts(out, filter)
+	}
+
 	wispDepsExist, err := optionalTableExistsInTx(ctx, tx, "wisp_dependencies")
 	if err != nil {
 		return nil, fmt.Errorf("search issues with counts: wisp dependency probe: %w", err)
@@ -103,7 +124,7 @@ func hydrationFor(filter types.IssueFilter) sqlbuild.CountsHydration {
 	return sqlbuild.CountsHydration{SkipLabels: filter.SkipLabels, SkipCounts: filter.SkipCounts, Lite: filter.Lite}
 }
 
-func runFilterSearchQueryInTx(ctx context.Context, tx *sql.Tx, query string, filter types.IssueFilter, tables FilterTables, includeWispReverseDeps bool) ([]*types.IssueWithCounts, error) {
+func runFilterSearchQueryInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter, tables FilterTables, includeWispReverseDeps bool) ([]*types.IssueWithCounts, error) {
 	whereClauses, args, err := BuildIssueFilterClauses(query, filter, tables)
 	if err != nil {
 		return nil, err
