@@ -37,9 +37,6 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
   Skips all interactive prompts, using sensible defaults:
   • Role defaults to "maintainer" (override with --role)
   • Fork exclude auto-configured when fork detected
-  • On a fresh fork (upstream remote, no routing yet), contributor routing to
-    ~/.beads-planning is configured and reported (silence it with --quiet)
-    unless beads.role=maintainer was already set or --role=maintainer is given
   • Auto-export left at default (disabled)
   • --contributor and --team flags are rejected (wizards require interaction)
   Also auto-detected when stdin is not a terminal or CI=true is set.
