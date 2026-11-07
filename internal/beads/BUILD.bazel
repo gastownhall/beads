@@ -6,6 +6,9 @@ go_library(
         "beads.go",
         "context.go",
         "fingerprint.go",
+        "winboundary.go",
+        "winboundary_other.go",
+        "winboundary_windows.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/beads",
     visibility = ["//:__subpackages__"],
@@ -17,7 +20,12 @@ go_library(
         "//internal/storage",
         "//internal/storage/backends",
         "//internal/utils",
-    ],
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 go_test(
@@ -31,6 +39,7 @@ go_test(
         "beads_symlink_test.go",
         "beads_test.go",
         "context_test.go",
+        "context_windows_test.go",
         "cwd_priority_test.go",
         "explicit_beads_dir_test.go",
         "fingerprint_test.go",
@@ -42,6 +51,8 @@ go_test(
         "testmain_integration_test.go",
         "testmain_test.go",
         "user_global_beads_test.go",
+        "winboundary_test.go",
+        "winboundary_windows_test.go",
     ],
     embed = [":beads"],
     deps = [
@@ -56,7 +67,12 @@ go_test(
         "//internal/testutil/bazeltest",
         "//internal/types",
         "//internal/utils",
-    ],
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
