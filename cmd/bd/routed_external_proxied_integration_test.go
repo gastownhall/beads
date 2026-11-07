@@ -304,3 +304,41 @@ func TestProxiedServerGateRoutedExternalTarget(t *testing.T) {
 		}
 	})
 }
+
+// TestProxiedServerDepAddRoutedExternalTarget is AC-8: bd dep add in
+// proxied-server rig A verifies a target in external proxied-server rig B
+// through A's route, so an existing target is stored without the
+// unresolved-target warning and an absent one is stored with it.
+func TestProxiedServerDepAddRoutedExternalTarget(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	a := newSharedProxiedProject(t, bd, "rda")
+	b := newSharedProxiedProject(t, bd, "rdb")
+	routeExternalRig(t, a.dir, b.dir, "rdb")
+	target := bdProxiedCreate(t, bd, b.dir, "External dependency target")
+	existing := bdProxiedCreate(t, bd, a.dir, "Depends on an existing external bead")
+	absent := bdProxiedCreate(t, bd, a.dir, "Depends on an absent external bead")
+	db := openProxiedDB(t, a)
+	const warning = "warning: dependency target"
+
+	_, stderr, err := bdProxiedRunBuffers(t, bd, a.dir, "dep", "add", existing.ID, target.ID)
+	if err != nil {
+		t.Fatalf("dep add %s -> %s failed: %v\nstderr:\n%s", existing.ID, target.ID, err, stderr)
+	}
+	if strings.Contains(stderr, warning) {
+		t.Errorf("an existing external target was reported unresolved:\n%s", stderr)
+	}
+	assertProxiedDepExists(t, db, existing.ID, target.ID)
+
+	const missingID = "rdb-nosuchbead"
+	_, stderr, err = bdProxiedRunBuffers(t, bd, a.dir, "dep", "add", absent.ID, missingID)
+	if err != nil {
+		t.Fatalf("dep add %s -> %s failed: %v\nstderr:\n%s", absent.ID, missingID, err, stderr)
+	}
+	if !strings.Contains(stderr, warning) || !strings.Contains(stderr, "was not found in this database or through routing") {
+		t.Errorf("an absent external target was not reported unresolved:\n%s", stderr)
+	}
+	assertProxiedDepExists(t, db, absent.ID, missingID)
+}
