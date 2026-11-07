@@ -1444,6 +1444,9 @@ var recognizedConfigKeys = map[string]bool{
 	// deleting records.
 	"events-journal": true, "events-journal-auto-prune": true,
 	"events-journal-retain-days": true, "events-journal-retain-rows": true,
+	// History-events retention for `bd gc` (gc_events.go); yaml-only for the
+	// same reason as the journal family.
+	"events-retain-days": true,
 }
 
 func isRecognizedConfigKey(key string) bool {
