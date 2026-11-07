@@ -185,3 +185,45 @@ func TestDirectGateGetterRoutedExternalTarget(t *testing.T) {
 		t.Errorf("pending reason %q does not report the target's status", reason)
 	}
 }
+
+// TestProxiedServerCloseBeadGateRoutedExternalTarget is the bd close side of
+// the same topology (#5861 item 2): the close pre-check reads the awaited
+// bead through the routed external connection, so a closed target permits the
+// gate's close and an open one refuses it with the target's status.
+func TestProxiedServerCloseBeadGateRoutedExternalTarget(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	pair := newRoutedProxiedPair(t, bd, "gxa", "gxb")
+	rigClosed := bdProxiedCreate(t, bd, pair.rig.dir, "Routed close target")
+	bdProxiedClose(t, bd, pair.rig.dir, rigClosed.ID)
+	rigOpen := bdProxiedCreate(t, bd, pair.rig.dir, "Routed open close target")
+
+	t.Run("closed awaited target permits the close", func(t *testing.T) {
+		t.Parallel()
+		gateID, db := routedBeadGate(t, bd, pair, rigClosed.ID)
+		bdProxiedClose(t, bd, pair.town.dir, gateID, "-r", "routed target closed")
+		if got := readStatus(t, db, gateID); got != types.StatusClosed {
+			t.Errorf("gate must close once its routed external target is closed, got %q", got)
+		}
+		if got := readCloseReason(t, db, gateID); got != "routed target closed" {
+			t.Errorf("close_reason: got %q, want %q", got, "routed target closed")
+		}
+	})
+
+	t.Run("open awaited target refuses the close", func(t *testing.T) {
+		t.Parallel()
+		gateID, db := routedBeadGate(t, bd, pair, rigOpen.ID)
+		out := bdProxiedCloseFail(t, bd, pair.town.dir, gateID)
+		if !strings.Contains(out, "gate condition not satisfied") || !strings.Contains(out, "bead "+rigOpen.ID+" is open") {
+			t.Errorf("refusal must name the routed target and its status, got:\n%s", out)
+		}
+		if strings.Contains(out, "cannot confirm") {
+			t.Errorf("a readable routed target must report its status, not an unconfirmed absence, got:\n%s", out)
+		}
+		if got := readStatus(t, db, gateID); got != types.StatusOpen {
+			t.Errorf("refused gate should stay open, got %q", got)
+		}
+	})
+}
