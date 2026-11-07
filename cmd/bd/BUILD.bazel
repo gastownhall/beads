@@ -1223,6 +1223,7 @@ go_test(
         "serve_inprocess_test.go",
         "serve_list_sort_proxied_integration_test.go",
         "serve_proxied_integration_test.go",
+        "serve_proxied_local_recovery_linux_test.go",
         "serve_read_revision_proxied_integration_test.go",
         "serve_reads_parity_integration_test.go",
         "serve_registered_backend_test.go",

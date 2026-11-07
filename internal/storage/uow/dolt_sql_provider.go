@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -37,10 +38,19 @@ const (
 
 type doltSQLProvider struct {
 	defaultBranch string
-	db            *sql.DB
+	// db stays set after Close (closeDB makes the close itself happen once),
+	// so a reader racing Close sees a closed pool, never a nil one.
+	db      *sql.DB
+	closeDB sync.Once
+	// resolver, when set, dials db's connections and rediscovers the
+	// workspace proxy after it has gone away (GH#7295). Nil for a raw
+	// server, whose connections dial the DSN's address.
+	resolver *proxy.EndpointResolver
 	// serverEndpoint is the exact transport endpoint used by the migration
 	// connection. Fresh-bootstrap reset authority is bound to it together with
-	// the Dolt server UUID, database name, and initial HEAD.
+	// the Dolt server UUID, database name, and initial HEAD. It stays the
+	// construction endpoint even after resolver has moved on: construction
+	// never rediscovers, so the authority cannot cross endpoints.
 	serverEndpoint string
 	// teamServer: schema is owned by beads-team-server (bts) — bd never
 	// creates the database or migrates, only verifies the schema version.
@@ -282,13 +292,24 @@ func (p *doltSQLProvider) NewUOW(ctx context.Context) (UnitOfWork, error) {
 	return NewUOW(ctx, p)
 }
 
+// Close disables proxy rediscovery first, so closing the pool cannot set off
+// a recovery, then closes the pool, and then waits within ctx for a discovery
+// flight already running. A nil return means no flight remains; after a
+// timeout a later Close finishes the wait. The shared proxy is left running.
 func (p *doltSQLProvider) Close(ctx context.Context) error {
-	if p.db == nil {
-		return nil
+	if p.resolver != nil {
+		p.resolver.Disable()
 	}
-	db := p.db
-	p.db = nil
-	return db.Close()
+	var dbErr error
+	p.closeDB.Do(func() {
+		if p.db != nil {
+			dbErr = p.db.Close()
+		}
+	})
+	if p.resolver == nil {
+		return dbErr
+	}
+	return errors.Join(dbErr, p.resolver.Close(ctx))
 }
 
 func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
@@ -947,10 +968,13 @@ func assertSessionDatabaseOnPool(ctx context.Context, pool *sql.DB, want string)
 
 // openDB opens dsn and waits out a server that is still coming up, retrying
 // transient ping failures for up to 30s (#6003).
-func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
+//
+// dial, when non-nil, replaces the dialer the DSN's network names (see
+// openPool).
+func openDB(ctx context.Context, dsn string, dial mysqlDialFunc) (*sql.DB, error) {
 	bo := backoff.NewExponentialBackOff()
 	bo.MaxElapsedTime = 30 * time.Second
-	return openPool(dsn, func(conn *sql.DB) error {
+	return openPool(dsn, dial, func(conn *sql.DB) error {
 		return pingWithRetry(ctx, conn, bo, pingAttemptTimeout)
 	})
 }
@@ -969,8 +993,8 @@ func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
 // pingWithRetry caps its own attempts: the DSN sets no ReadTimeout, so a server
 // that accepts TCP and then stalls mid-handshake is otherwise bounded only by
 // the caller's context.
-func openDBProbe(ctx context.Context, dsn string) (*sql.DB, error) {
-	return openPool(dsn, func(conn *sql.DB) error {
+func openDBProbe(ctx context.Context, dsn string, dial mysqlDialFunc) (*sql.DB, error) {
+	return openPool(dsn, dial, func(conn *sql.DB) error {
 		pingCtx, cancel := context.WithTimeout(ctx, pingAttemptTimeout)
 		defer cancel()
 		return conn.PingContext(pingCtx)
@@ -981,8 +1005,13 @@ func openDBProbe(ctx context.Context, dsn string) (*sql.DB, error) {
 // the server answers on it. The error texts are load-bearing — callers match
 // on "uow: open db" and "uow: ping db" — and a pool whose prove fails is
 // closed here rather than leaked to a caller that only sees an error.
-func openPool(dsn string, prove func(*sql.DB) error) (*sql.DB, error) {
-	conn, err := sql.Open("mysql", dsn)
+//
+// dial, when non-nil, becomes the connector's DialFunc: every connection the
+// pool opens is dialed by it instead of by the dialer registered for the
+// DSN's network. Everything else the DSN says — credentials, database, TLS,
+// timeouts — applies as it would through sql.Open.
+func openPool(dsn string, dial mysqlDialFunc, prove func(*sql.DB) error) (*sql.DB, error) {
+	conn, err := openSQLDB(dsn, dial)
 	if err != nil {
 		return nil, fmt.Errorf("uow: open db: %w", err)
 	}
@@ -990,6 +1019,25 @@ func openPool(dsn string, prove func(*sql.DB) error) (*sql.DB, error) {
 		return nil, errors.Join(fmt.Errorf("uow: ping db: %w", err), conn.Close())
 	}
 	return conn, nil
+}
+
+// mysqlDialFunc is the shape of mysql.Config.DialFunc.
+type mysqlDialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
+
+func openSQLDB(dsn string, dial mysqlDialFunc) (*sql.DB, error) {
+	if dial == nil {
+		return sql.Open("mysql", dsn)
+	}
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		return nil, err
+	}
+	cfg.DialFunc = dial
+	connector, err := mysql.NewConnector(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return sql.OpenDB(connector), nil
 }
 
 // requireServerDoltVersion refuses a dolt sql-server older than
@@ -1023,11 +1071,22 @@ func requireServerDoltVersion(ctx context.Context, q doltversion.RowQuerier, ep 
 // (which requires the BDPROXY1 handshake) or "tcp" for a raw server.
 // backend names the server behind it when bd does not run that server
 // (see requireServerDoltVersion), and is empty otherwise.
-func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, backend, database, rootUser, rootPassword, tlsConfigName string, teamServer bool, expectedProjectID string, opts providerOptions) (UnitOfWorkProvider, error) {
+//
+// resolver, when non-nil, dials every pool this open makes (probe, schema
+// init and final) at ep, and the provider keeps it. The open never arms it:
+// a dial failure during construction keeps the errors and retries it has
+// always had, and the caller arms recovery only once the provider is built
+// (openWithResolver).
+func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, resolver *proxy.EndpointResolver, backend, database, rootUser, rootPassword, tlsConfigName string, teamServer bool, expectedProjectID string, opts providerOptions) (UnitOfWorkProvider, error) {
+	var dial mysqlDialFunc
+	if resolver != nil {
+		dial = resolver.DialContext
+	}
 	newProvider := func(pool *sql.DB) *doltSQLProvider {
 		return &doltSQLProvider{
 			defaultBranch:     defaultBranch,
 			db:                pool,
+			resolver:          resolver,
 			serverEndpoint:    "tcp:" + ep.Address(),
 			teamServer:        teamServer,
 			expectedProjectID: expectedProjectID,
@@ -1078,7 +1137,7 @@ func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, b
 	// signal, and every error message callers already match on. The probe is
 	// single-shot (openDBProbe) precisely so that fall-through cannot cost a
 	// second full retry budget.
-	probeConn, probeErr := openDBProbe(ctx, buildDSN(network, ep, database, rootUser, rootPassword, tlsConfigName))
+	probeConn, probeErr := openDBProbe(ctx, buildDSN(network, ep, database, rootUser, rootPassword, tlsConfigName), dial)
 	if probeErr == nil {
 		if err := requireServerDoltVersion(ctx, probeConn, ep, backend); err != nil {
 			return nil, errors.Join(err, probeConn.Close())
@@ -1100,7 +1159,7 @@ func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, b
 	debug.Logf("uow: single-session open unavailable for %q, using the no-database init connection: %v\n",
 		database, probeErr)
 
-	initDB, err := openDB(ctx, buildDSN(network, ep, "", rootUser, rootPassword, tlsConfigName))
+	initDB, err := openDB(ctx, buildDSN(network, ep, "", rootUser, rootPassword, tlsConfigName), dial)
 	if err != nil {
 		return nil, err
 	}
@@ -1121,7 +1180,7 @@ func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, b
 		return nil, fmt.Errorf("uow: close init db: %w", err)
 	}
 
-	dbConn, err := openDB(ctx, buildDSN(network, ep, database, rootUser, rootPassword, tlsConfigName))
+	dbConn, err := openDB(ctx, buildDSN(network, ep, database, rootUser, rootPassword, tlsConfigName), dial)
 	if err != nil {
 		return nil, err
 	}
@@ -1136,4 +1195,19 @@ func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, b
 	}
 
 	return newProvider(dbConn), nil
+}
+
+// openWithResolver runs open, an openAndInitSchema through resolver, and arms
+// resolver's proxy rediscovery once it has succeeded. On failure no
+// rediscovery has run and none can start.
+func openWithResolver(ctx context.Context, resolver *proxy.EndpointResolver, open func() (UnitOfWorkProvider, error)) (UnitOfWorkProvider, error) {
+	provider, err := open()
+	if err != nil {
+		if closeErr := resolver.Close(ctx); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+		return nil, err
+	}
+	resolver.Arm()
+	return provider, nil
 }

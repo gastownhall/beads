@@ -36,8 +36,9 @@ const DataNetwork = "bdproxy"
 // address it dials was verified when it was registered, but the proxy there
 // can exit (idle timeout, crash, bd dolt stop, an upgrade replacing it), and
 // another local user can then bind the freed port. A long-lived client (bd
-// serve never re-resolves its endpoint) would otherwise run its whole MySQL
-// session, every write and every result it trusts, against that listener.
+// serve keeps dialing its endpoint until a dial fails; see EndpointResolver)
+// would otherwise run its whole MySQL session, every write and every result
+// it trusts, against that listener.
 //
 // Version note: a proxy started by an older bd does not accept this
 // handshake, and a client older than it does not send it, so a
@@ -197,17 +198,41 @@ func dialData(ctx context.Context, addr string) (net.Conn, error) {
 	// refusal. What the registration cannot vouch for is the process that
 	// listens there now, so every connection makes it prove the secret
 	// (clientDataHandshake) before the driver sends it anything.
+	conn, _, err := dialAuthenticated(ctx, rootDir, addr, port)
+	return conn, err
+}
+
+// dataDialStage names the step of dialAuthenticated that failed, which is
+// what EndpointResolver needs to tell a proxy that has gone away from a
+// failure rediscovering it cannot fix.
+type dataDialStage uint8
+
+const (
+	// dataDialSecret: reading the workspace's proxy.secret.
+	dataDialSecret dataDialStage = iota + 1
+	// dataDialConnect: the TCP connect to the data port.
+	dataDialConnect
+	// dataDialProof: the BDPROXY1 exchange, after the connect and before
+	// the driver has sent or read a single MySQL byte.
+	dataDialProof
+)
+
+// dialAuthenticated connects to the proxy data port addr (whose port is
+// port) and returns the connection only once the listener there has proved
+// it holds rootDir's current proxy secret. On failure it reports the stage
+// that failed; the connection, if any, is already closed.
+func dialAuthenticated(ctx context.Context, rootDir, addr string, port int) (net.Conn, dataDialStage, error) {
 	secret, err := identity.ReadSecret(rootDir)
 	if err != nil {
-		return nil, fmt.Errorf("dbproxy: read data authentication secret: %w", err)
+		return nil, dataDialSecret, fmt.Errorf("dbproxy: read data authentication secret: %w", err)
 	}
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return nil, err
+		return nil, dataDialConnect, err
 	}
 	if err := clientDataHandshake(ctx, conn, secret, port); err != nil {
 		_ = conn.Close()
-		return nil, err
+		return nil, dataDialProof, err
 	}
-	return conn, nil
+	return conn, 0, nil
 }

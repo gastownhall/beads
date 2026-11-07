@@ -2735,6 +2735,19 @@ func TestPRWindowsSmallDbproxyServerIsCGODisabled(t *testing.T) {
 	}
 }
 
+// test-windows-small's endpoint resolver leg runs the resolver's tests on
+// Windows, whose sockets report WSA errnos the unix classifier never matched
+// (GH#7295 recovery; internal/storage/dbproxy/proxy/endpoint_resolver_windows.go),
+// CGO-disabled like the dbproxy-server leg.
+func TestPRWindowsSmallRunsEndpointResolverTests(t *testing.T) {
+	pr := readCIWorkflow(t, "pr.yml")
+	job := pr.job(t, "test-windows-small")
+	const stepName = "Run dbproxy endpoint resolver tests on Windows"
+	assertStepRunsExactly(t, job, stepName,
+		"go test -tags gms_pure_go -count=1 -v -run '^TestEndpointResolver_' ./internal/storage/dbproxy/proxy/")
+	assertStepEnvValue(t, job, stepName, "CGO_ENABLED", "0")
+}
+
 // stepContinueOnError reports whether a step's continue-on-error is truthy
 // (the field unmarshals as `any` because the YAML schema also allows an
 // expression string, which GitHub itself treats as whatever it evaluates to
@@ -2776,6 +2789,7 @@ func TestPRWindowsMakeShellLegsFailTheJob(t *testing.T) {
 		},
 		"test-windows-small": {
 			"Run doltversion package tests on Windows", "Run dbproxy server package tests on Windows",
+			"Run dbproxy endpoint resolver tests on Windows",
 		},
 	}
 	for jobName, names := range legSteps {

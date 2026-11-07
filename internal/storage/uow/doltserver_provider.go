@@ -59,7 +59,7 @@ func NewDoltServerUOWProvider(
 	}
 
 	resolved := applyProviderOptions(opts)
-	ep, err := proxy.GetCreateDatabaseProxyServerEndpoint(absServerRootDir, proxy.OpenOpts{
+	openOpts := proxy.OpenOpts{
 		Backend:        backend,
 		ConfigFilePath: serverConfigFilePath,
 		LogFilePath:    serverLogFilePath,
@@ -68,10 +68,16 @@ func NewDoltServerUOWProvider(
 		Database:       database,
 		IdleTimeout:    idleTimeout,
 		Port:           proxyPort,
-	})
+	}
+	ep, err := proxy.GetCreateDatabaseProxyServerEndpoint(absServerRootDir, openOpts)
 	if err != nil {
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)
 	}
 
-	return openAndInitSchema(ctx, proxy.DataNetwork, ep, "", database, rootUser, rootPassword, "", teamServer, expectedProjectID, resolved)
+	// The proxy at ep can exit later (its idle timeout, bd dolt stop); the
+	// resolver finds the workspace's proxy again with these same options.
+	resolver := proxy.NewEndpointResolver(absServerRootDir, openOpts, ep)
+	return openWithResolver(ctx, resolver, func() (UnitOfWorkProvider, error) {
+		return openAndInitSchema(ctx, proxy.DataNetwork, ep, resolver, "", database, rootUser, rootPassword, "", teamServer, expectedProjectID, resolved)
+	})
 }

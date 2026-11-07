@@ -189,6 +189,18 @@ ready; 503 means live but not ready, and its `code` says which kind:
 saturation. Both carry `Retry-After`; a probe should treat either as not-ready
 and retry, not as a hard failure.
 
+**In a proxied-server workspace, an idle `bd serve` lets the workspace proxy
+exit, and the next request brings it back.** The pool retires idle connections
+after 20s and the proxy exits after its own idle timeout (30s by default), so a
+quiet server routinely has no proxy. The first request after the gap fails to
+dial, rediscovers the proxy (adopting one another `bd` process started, or
+starting it under the workspace's idle policy) and redials once. A request whose
+5s dial budget ends before the proxy is back answers 503 `db_unavailable` with
+`Retry-After`, and a later request picks the proxy up; nothing is replayed.
+Expect such 503s during a cold start, not only during an outage. To keep the
+proxy down — `bd dolt stop`, a migration — stop `bd serve` first: a running
+server starts it again on its next request.
+
 Suggested probe settings: the readiness probe inherits the server's 60s
 whole-request deadline as its worst case, so give it a timeout well under that
 (2–5s) and let the probe's own failure threshold do the smoothing.

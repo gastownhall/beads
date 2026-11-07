@@ -53,6 +53,20 @@ func verifiedShutdownCleanup(t *testing.T, storeRootDir string) {
 	})
 }
 
+// verifiedShutdown stops the proxy under storeRootDir now, in the middle of a
+// test (the way bd dolt stop or a crash takes a workspace's proxy away), and
+// asserts that the stop reported clean and that the `dolt sql-server` it
+// managed is gone. The fixture's verifiedShutdownCleanup still stops whatever
+// the test leaves running.
+func verifiedShutdown(t *testing.T, storeRootDir string) {
+	t.Helper()
+	record := backendServerRecord(t, storeRootDir)
+	if err := proxy.Shutdown(storeRootDir); err != nil {
+		t.Fatalf("proxy.Shutdown(%s): %v", storeRootDir, err)
+	}
+	requireBackendExited(t, record)
+}
+
 const (
 	// backendExitTimeout is how long a test waits for the dolt sql-server to
 	// leave the process table after proxy.Shutdown failed. It is generous on
