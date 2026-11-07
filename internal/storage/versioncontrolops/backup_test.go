@@ -64,6 +64,34 @@ func TestFileURLForOS(t *testing.T) {
 			wantHost: "C:",
 			wantPath: "/Users/alxta/atl-logs-parser/.beads/backup",
 		},
+		// Every way a shell can spell the same Windows directory converges on
+		// one URL, so registration from any of them is idempotent.
+		{
+			name: "lowercase drive, backslashes", goos: "windows",
+			abs: `c:\Users\me\b`, want: "file://C:/Users/me/b",
+			wantHost: "C:", wantPath: "/Users/me/b",
+		},
+		{
+			name: "uppercase drive, backslashes", goos: "windows",
+			abs: `C:\Users\me\b`, want: "file://C:/Users/me/b",
+			wantHost: "C:", wantPath: "/Users/me/b",
+		},
+		{
+			name: "lowercase drive, forward slashes", goos: "windows",
+			abs: `c:/Users/me/b`, want: "file://C:/Users/me/b",
+			wantHost: "C:", wantPath: "/Users/me/b",
+		},
+		{
+			name: "uppercase drive, forward slashes", goos: "windows",
+			abs: `C:/Users/me/b`, want: "file://C:/Users/me/b",
+			wantHost: "C:", wantPath: "/Users/me/b",
+		},
+		{name: "bare drive", goos: "windows", abs: `z:\`, want: "file://Z:/",
+			wantHost: "Z:", wantPath: "/"},
+		// UNC and reserved-character rows pin formatting only: a percent escape
+		// that net/url would reject still formats, and is not a parse promise.
+		{name: "unc share", goos: "windows", abs: `\\nas\share\beads`, want: "file:////nas/share/beads"},
+		{name: "spaces and percent", goos: "windows", abs: `C:\Users\my dir\100%done`, want: "file://C:/Users/my dir/100%done"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
