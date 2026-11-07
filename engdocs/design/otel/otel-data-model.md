@@ -21,9 +21,9 @@ All command spans automatically carry `bd.command`, `bd.version`, `bd.args` from
 
 ## Metric Naming Convention
 
-OTel SDK names use **dot notation** internally. Prometheus-compatible backends (VictoriaMetrics, Prometheus) translate them to **underscore-separated** names. The exact name depends on the backend's OTLP translation settings, so treat the table below as the typical result rather than a contract: with unit and type suffixes enabled, counters gain `_total` (not doubled when the name already ends in `_total`), a `ms` unit becomes `_milliseconds`, a `{…}` annotation unit adds no suffix, and each histogram is exposed as `_bucket`, `_sum` and `_count` series. With suffixes disabled, only the dot-to-underscore rewrite applies.
+OTel SDK names use **dot notation** internally. The name a backend stores depends on its OTLP translation settings, so treat the table below as the Prometheus-style result rather than a contract. Prometheus' OTLP receiver produces it by default, and VictoriaMetrics produces it when started with `-opentelemetry.usePrometheusNaming`: dots become underscores, counters gain `_total` (not doubled when the name already ends in `_total`), a `ms` unit becomes `_milliseconds`, a `{…}` annotation unit adds no suffix, and each histogram is exposed as `_bucket`, `_sum` and `_count` series. By default VictoriaMetrics stores the OTLP names as is (`bd.storage.operations`, queried as `{__name__="bd.storage.operations"}`); with `-usePromCompatibleNaming` it only replaces the dots with underscores.
 
-| Code name (SDK) | Exported name (Prometheus/VM) |
+| Code name (SDK) | Prometheus-style name |
 |-----------------|-------------------------------|
 | `bd.storage.operations` | `bd_storage_operations_total` |
 | `bd.storage.operation.duration` | `bd_storage_operation_duration_milliseconds_{bucket,sum,count}` |
@@ -414,7 +414,7 @@ Emitted by the external-tracker sync engine (`internal/tracker/engine.go`, used 
 |---|---|
 | `tracker.sync` | `sync.tracker` (string), `sync.pull`, `sync.push`, `sync.dry_run` (bool); on completion `sync.pulled`, `sync.pushed`, `sync.conflicts`, `sync.created`, `sync.updated`, `sync.skipped`, `sync.errors` (int) |
 | `tracker.pull` | `sync.tracker`, `sync.dry_run`; on completion `sync.created`, `sync.updated`, `sync.skipped` |
-| `tracker.push` | `sync.tracker`, `sync.dry_run`; on completion `sync.created`, `sync.updated`, `sync.skipped`, `sync.errors` |
+| `tracker.push` | `sync.tracker`, `sync.dry_run`; on completion of a per-issue push `sync.created`, `sync.updated`, `sync.skipped`, `sync.errors`. A batch push (`bd notion`, and `bd linear` except under `--dry-run`) returns before setting them |
 | `tracker.detect_conflicts` | `sync.tracker`; `sync.conflicts` |
 
 ---
@@ -471,7 +471,7 @@ Key variables: `BD_OTEL_ENABLED=true` (master switch) plus the standard SDK vars
 
 ## Appendix: Source Reference Audit
 
-Audited against **`main` @ `087a4ec58`** (2026-11-07). All line numbers below refer to that commit.
+Audited against **`main` @ `3a068dbef8`** (2026-11-07). All line numbers below refer to that commit.
 
 Every metric name, span name, and attribute listed in this document is backed by a specific source location. This table exists to prevent documentation drift and to make re-verification straightforward after code changes. Paths are relative to the directory in the section heading unless given in full.
 

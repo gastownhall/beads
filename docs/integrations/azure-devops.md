@@ -71,23 +71,6 @@ bd config set ado.url "https://tfs.company.com/DefaultCollection"
 bd config set ado.project "MyProject"
 ```
 
-### Endpoint Trust
-
-bd pins the endpoint each workspace sends the PAT to (see
-[Configuration](/reference/configuration) for the pin store). The default
-`https://dev.azure.com` endpoint pins on first use. A custom `ado.url` that
-comes from shared configuration (`bd config set` writes it to the synced
-database) is refused until a private source confirms it:
-
-```
-ado.url for this workspace is https://tfs.company.com/DefaultCollection, which no private source has confirmed. Your ado credential was not sent. ...
-```
-
-Confirm it once by setting the same URL in `AZURE_DEVOPS_URL` in your shell
-(not in `.beads/.env`) or as `ado.url` in `~/.config/bd/config.yaml`; the
-confirmation pins it. A later change to the shared `ado.url` is refused the
-same way until it is confirmed again.
-
 ### Multi-Project Sync
 
 Sync across multiple projects in a single command:
@@ -110,8 +93,8 @@ Filters control which ADO work items are included in sync operations.
 | `ado.filter.states` | `--states` | ADO states (comma-separated) | `New,Active,Resolved` |
 
 CLI flags override config values for that sync run. On pull, the filters
-narrow the WIQL query; on push, `--types` and `--states` also filter which
-local beads are pushed.
+narrow the WIQL query; on push, the type and state filters (from the flags or
+from config) also filter which local beads are pushed.
 
 **WIQL query example** (generated from filters):
 
@@ -143,7 +126,7 @@ Priority mapping is bidirectional but **lossy for P3/P4**:
 | 3 (Low) | 4 | → | |
 | 4 (Backlog) | 4 | → | **Lossy**: becomes P3 on pull |
 
-> **Note:** Beads P3 and P4 both map to ADO priority 4. On push, beads records the original priority in the issue's local `beads_priority` metadata, so a pull back into the same database restores P4. On a fresh pull into an empty database there is no such metadata, and ADO 4 maps back to beads P3.
+> **Note:** Beads P3 and P4 both map to ADO priority 4, and a pull always maps ADO 4 back to beads P3, even in the database that pushed it. Nothing stores the original priority, so a P4 bead that has been pushed becomes P3 the next time a pull reads its work item back. That is usually the first pull after the push, even when nothing changed in ADO.
 
 For Bug-type work items, ADO also requires a Severity field:
 
@@ -193,7 +176,9 @@ Reverse mapping (ADO → beads) also recognizes:
 - `Product Backlog Item` → `feature` (Scrum template)
 - `Issue` → `task`
 
-Any other ADO type (and any type a custom `ado.type_map.*` does not name) maps to `task`.
+A custom `ado.type_map.*` value is matched case-insensitively first; the
+defaults still apply to the types it does not name, and any other ADO type
+maps to `task`.
 
 Override for your process template:
 
@@ -231,7 +216,6 @@ State transitions:
 ```
 Product Backlog Item: New → Approved → Committed → Done
 Task:                 To Do → In Progress → Done
-Bug:                  New → Approved → Committed → Done
 ```
 
 ### CMMI
@@ -265,8 +249,16 @@ Scrum `Product Backlog Item` from `New`, `Task` from `To Do` (via
 `In Progress`), `Issue` and `Epic` from `To Do` (via `Doing`), and CMMI `Bug`,
 `Task` and `Requirement` from `Proposed`. There is no known path for other
 type/state pairs (for example a Scrum `Bug`); a rejected direct update then
-fails with `no known transition path`, and the work item is left created in
-its initial state. Updates to existing work items set the state directly.
+fails with `no known transition path`. Updates to existing work items set the
+state directly.
+
+When the transition fails, the new work item stays short of its target state
+(in its initial state when no path is known), and the push reports an error
+that names the work item but does not link the bead to it. Each later push of
+the bead creates another such work item, and a pull can import each one as a
+new bead. To clean up, delete the extra work items in ADO and any beads a pull
+created for them, and keep the bead out of the push until its status maps
+(`ado.state_map.*`) to a state ADO can reach from the item's initial state.
 
 ## Sync Options
 
@@ -335,7 +327,8 @@ Generate a PAT at: `https://dev.azure.com/{org}/_usersettings/tokens`
 
 ## Metadata Preserved
 
-beads stores ADO-specific metadata for round-trip fidelity:
+A pull stores this ADO metadata on each bead it creates or updates, for
+round-trip fidelity:
 
 | Metadata Key | Description |
 |---|---|
@@ -343,9 +336,6 @@ beads stores ADO-specific metadata for round-trip fidelity:
 | `ado.area_path` | Area path |
 | `ado.iteration_path` | Iteration/sprint path |
 | `ado.story_points` | Story points estimate |
-| `ado.remaining_work` | Remaining work hours |
-| `ado.severity` | Bug severity value |
-| `beads_priority` | Original beads priority for P3/P4 (lossy ADO mapping) |
 
 ## Description Conversion
 
@@ -387,9 +377,6 @@ bd config set ado.org "your-org"
 # or for on-prem:
 bd config set ado.url "https://tfs.company.com/DefaultCollection"
 ```
-
-**`ado.url for this workspace is ..., which no private source has confirmed`**
-The custom endpoint came from shared configuration; see [Endpoint Trust](#endpoint-trust).
 
 **State transition errors (400 Bad Request)**
 This usually means the process template doesn't support a direct state change. Check your `ado.state_map.*` config matches your actual process template.

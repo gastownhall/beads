@@ -139,9 +139,9 @@ Array output carries no top-level `schema_version` field:
 
 ### Error output
 
-Errors with `--json` active emit JSON. Which stream carries it depends on the
-error path: the hinted and coded handlers write to stderr, while the
-`RespectJSON` command-result handlers write the same shape to stdout:
+With `--json` active, a failing command reports its error either as JSON or
+as plain text, depending on the command and the failure. JSON errors go to
+stderr from some commands and to stdout from others, in this shape:
 
 ```json
 {
@@ -155,7 +155,13 @@ error path: the hinted and coded handlers write to stderr, while the
 `error` and `schema_version` are always present. In envelope mode
 (`BD_JSON_ENVELOPE=1`) the error payload moves inside the envelope:
 `{"schema_version": 1, "data": {"error": ..., "code": ..., "hint": ...}}`.
-JSON-mode errors from these handlers exit with code 1.
+
+Many failures stay plain text on stderr even with `--json`, usually as
+`Error: <message>`. Flag-parsing errors, `--readonly` refusals and the
+migration freeze (below) are examples. A failure exits with code 1 unless its
+command documents another code; for example, `bd update` exits 13 when every
+failure is a stale `--if-assignee`/`--if-status` guard. Branch on the exit
+code, not on whether JSON appeared.
 
 A command refused by the proxied-server capability gate (for example
 `bd branch` on a proxied-server workspace) emits a typed refusal on stdout
@@ -173,10 +179,12 @@ contract:
 ```
 
 `code` is stable and safe to branch on; `error` is informative prose.
-`mutates` says whether the refused command would have written. `reason`
-(`design` for a deliberate refusal, `unimplemented` for one not routed yet) is
-additive and present only on refusals from the capability registry. Envelope
-mode moves the same members under `data`.
+`mutates` is always `false` on a refusal. `reason` (`design` for a deliberate
+refusal, `unimplemented` for one not routed yet) is additive: every refusal
+from the capability registry carries it, as do `proxy.store.unrouted` and
+`proxy.migrate.external_endpoint`, while runtime-state refusals such as
+`proxy.migrate.invalid_state` omit it. Envelope mode moves the same members
+under `data`.
 
 A write refused because a migration freeze marker is active exits with code
 **14** and prints a plain-text refusal (naming the marker's path) to stderr,
@@ -288,8 +296,6 @@ empty or false:
 - `updated_issues` (object[], optional): Per-issue summary of what an update changed
 - `tie_kept_local_ids` (string[], optional): Equal-`updated_at` rows where local state won
 - `stale_skipped_ids` (string[], optional): Rows older than the local issue, skipped
-- `retired_ids` (string[], optional): Rows a retention sweep already retired,
-  not re-created
 - `skipped_dependencies` (string[], optional): Dependency edges whose target id was absent
 - `dry_run` (boolean, optional): Present (`true`) only when `--dry-run` was active
 
