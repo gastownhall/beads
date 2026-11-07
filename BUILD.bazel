@@ -265,6 +265,14 @@ exports_files(
     visibility = ["//internal/httpclient/encode:__pkg__"],
 )
 
+# //cmd/bd:bd_test's TestDependenciesDocGateExamplesUseRegisteredFlags reads
+# the dependencies guide to keep its gate examples on registered gate-create
+# flags; same data-visibility need as the ledger doc above.
+exports_files(
+    ["docs/core-concepts/dependencies.md"],
+    visibility = ["//cmd/bd:__pkg__"],
+)
+
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(

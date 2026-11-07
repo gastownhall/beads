@@ -728,6 +728,7 @@ go_test(
         "dep_relation_test.go",
         "dep_test.go",
         "dep_warning_test.go",
+        "dependencies_doc_test.go",
         "dependency_hierarchy_embedded_test.go",
         "diff_embedded_test.go",
         "directory_flag_test.go",
@@ -1403,6 +1404,9 @@ go_test(
         ":compact_gc_fixture",
         ":go_srcs",
         ":preflight_go_fixture",
+        # docs/core-concepts/dependencies.md: TestDependenciesDocGateExamplesUseRegisteredFlags
+        # keeps the guide's gate examples on registered gate-create flags.
+        "//:docs/core-concepts/dependencies.md",
         "//:bd_test_files",
         "//:go_srcs",
         "//cmd/bd/doctor:go_srcs",
