@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/schema"
@@ -539,13 +540,22 @@ func noticeSharedMigrateRefusal(err error) {
 // own database — the pre-run opens it with NewFromConfig(beadsDir) before any
 // --global override of the command's store, and doctor runs it against its
 // target — so the notice prescribes the commit and the migration there rather
-// than guessing at the command's later selection. It does not promise that
-// some next command applies the migration: that needs consent, which
-// 'bd migrate schema' carries and an ordinary command does not.
+// than guessing at the command's later selection. It names the workspace
+// (remedy.PrintedValue) instead of pasting it into the commands: a BEADS_DIR
+// prefix has no per-command form on Windows, and an exported BEADS_DIR would
+// send every later command, in every project, to this workspace.
+//
+// The refusal is only reached with migration consent in effect
+// (schema.MigrateUp checks consent before the dirty-table guard; without it
+// the bump settles on the consent refusal instead). The notice still
+// prescribes 'bd migrate schema' rather than the next command: an exported
+// consent variable (BD_ALLOW_MIGRATE, BD_ALLOW_REMOTE_MIGRATE) applies the
+// migration on the first command after the commit, but consent given for one
+// command does not carry over.
 //
 // Under --json it writes nothing: the command's own output (or its own
-// refusal) is the machine-readable result on these streams, and the marker
-// stays pending, so `bd upgrade status --json` still shows the bump.
+// refusal) is the machine-readable result on these streams. The marker stays
+// pending either way, so the next command retries the maintenance.
 func noticeDirtyTablesRefusal(err error, beadsDir string) {
 	var dirtyErr *schema.DirtyTablesError
 	if !errors.As(err, &dirtyErr) || jsonOutput {
@@ -553,8 +563,8 @@ func noticeDirtyTablesRefusal(err error, beadsDir string) {
 	}
 	fmt.Fprintf(os.Stderr,
 		"bd upgraded to %s: schema migration of %s refused — uncommitted changes in table(s) %s (#4566).\n"+
-			"Commit them, then migrate that workspace: run 'bd dolt commit', then 'bd migrate schema' (with BEADS_DIR=%s). The upgrade stays pending until then.\n",
-		displayVersion(Version), beadsDir, strings.Join(dirtyErr.Tables, ", "), beadsDir)
+			"Commit them, then migrate: run 'bd dolt commit', then 'bd migrate schema', in that workspace. The upgrade stays pending until then.\n",
+		displayVersion(Version), remedy.PrintedValue(beadsDir), remedy.PrintedList(dirtyErr.Tables, ", "))
 }
 
 // recordedWorkspaceVersion reads the marker through the role's accessor on a
