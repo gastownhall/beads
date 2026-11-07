@@ -30,6 +30,7 @@ func TestExternalDoltConfig_ResolvedUser(t *testing.T) {
 
 func TestExternalDoltConfig_Validate_TLS(t *testing.T) {
 	certPath, keyPath := writeSelfSignedPair(t)
+	socketPath := filepath.Join(t.TempDir(), "dolt.sock")
 
 	t.Run("ca cert must be absolute", func(t *testing.T) {
 		err := ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true, TLSCACert: "relative/ca.pem"}.Validate()
@@ -45,20 +46,20 @@ func TestExternalDoltConfig_Validate_TLS(t *testing.T) {
 	})
 
 	t.Run("socket with tls needs server name", func(t *testing.T) {
-		err := ExternalDoltConfig{Socket: "/var/run/dolt.sock", TLSRequired: true}.Validate()
+		err := ExternalDoltConfig{Socket: socketPath, TLSRequired: true}.Validate()
 		if err == nil {
 			t.Fatal("expected error for socket+tls without server name")
 		}
 	})
 
 	t.Run("socket with tls and server name ok", func(t *testing.T) {
-		if err := (ExternalDoltConfig{Socket: "/var/run/dolt.sock", TLSRequired: true, TLSServerName: "db"}).Validate(); err != nil {
+		if err := (ExternalDoltConfig{Socket: socketPath, TLSRequired: true, TLSServerName: "db"}).Validate(); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
 
 	t.Run("socket with tls and skip verify ok", func(t *testing.T) {
-		if err := (ExternalDoltConfig{Socket: "/var/run/dolt.sock", TLSRequired: true, TLSSkipVerify: true}).Validate(); err != nil {
+		if err := (ExternalDoltConfig{Socket: socketPath, TLSRequired: true, TLSSkipVerify: true}).Validate(); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
