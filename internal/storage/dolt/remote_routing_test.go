@@ -738,6 +738,12 @@ func TestPeerCloudAuthRoutesThroughTheDoltCLI(t *testing.T) {
 			transfer: "push " + peer + " main",
 			sqlErr:   "failed to push to peer " + peer,
 		},
+		{
+			name:     "pull",
+			run:      func(ctx context.Context, s *DoltStore) ([]storage.Conflict, error) { return s.PullFrom(ctx, peer) },
+			transfer: "pull " + peer + " main",
+			sqlErr:   "failed to pull from peer " + peer,
+		},
 	}
 	envs := []struct {
 		name, key, value string
