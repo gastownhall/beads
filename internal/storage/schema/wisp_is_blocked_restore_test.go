@@ -3,6 +3,7 @@ package schema
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"reflect"
 	"slices"
 	"strings"
@@ -76,6 +77,10 @@ type wispRestoreDB struct {
 	// steps is every ExecContext the pass made, the marker body and cursor
 	// row named rather than spelled out.
 	steps []string
+	// failOn fails the step it names once, after recording it.
+	failOn map[string]error
+	// recomputeErr, when set, is the recompute step's failure.
+	recomputeErr error
 }
 
 const (
@@ -109,7 +114,9 @@ func newWispRestoreDB(t *testing.T) *wispRestoreDB {
 			t.Errorf("recompute ran on %T, not the migration connection", conn)
 		}
 		d.steps = append(d.steps, wispRestoreStepRecompute)
-		return nil
+		err := d.recomputeErr
+		d.recomputeErr = nil
+		return err
 	}
 	t.Cleanup(func() { recomputeWispIsBlocked = prev })
 	return d
@@ -146,16 +153,20 @@ func (d *wispRestoreDB) QueryContext(context.Context, string, ...any) (*sql.Rows
 
 func (d *wispRestoreDB) ExecContext(_ context.Context, query string, args ...any) (sql.Result, error) {
 	d.t.Helper()
+	step := query
 	switch {
 	case query == d.body:
-		d.steps = append(d.steps, wispRestoreStepBody)
+		step = wispRestoreStepBody
 	case query == "INSERT IGNORE INTO "+ignoredSource.cursorTable+" (version, content_hash) VALUES (?, ?)":
 		if len(args) == 0 || args[0] != 32 {
 			d.t.Fatalf("wispRestoreDB: cursor INSERT args %v, want version 32", args)
 		}
-		d.steps = append(d.steps, wispRestoreStepCursor)
-	default:
-		d.steps = append(d.steps, query)
+		step = wispRestoreStepCursor
+	}
+	d.steps = append(d.steps, step)
+	if err, ok := d.failOn[step]; ok {
+		delete(d.failOn, step)
+		return nil, err
 	}
 	return execOK{}, nil
 }
@@ -234,4 +245,115 @@ func TestIgnored32HealthyCloneOnlyProbes(t *testing.T) {
 		t.Fatalf("converged runMigrations(ignored 32..32) = (%d, %v), want (0, nil)", applied, err)
 	}
 	d.requireSteps()
+}
+
+// wispDropIndexDDL drops a stray idx_wisps_is_blocked left on a clone whose
+// column is gone.
+const wispDropIndexDDL = "DROP INDEX idx_wisps_is_blocked ON wisps"
+
+// requireFailedPass asserts one pass that stopped on cause: the error carries
+// the migration and step context, and no cursor row was written for 32.
+func (d *wispRestoreDB) requireFailedPass(applied int, err, cause error, stepContext string) {
+	d.t.Helper()
+	if !errors.Is(err, cause) {
+		d.t.Fatalf("runMigrations error = %v, want it to wrap %v", err, cause)
+	}
+	for _, want := range []string{ignoredMigration0032Up, stepContext} {
+		if !strings.Contains(err.Error(), want) {
+			d.t.Errorf("runMigrations error %q lacks context %q", err, want)
+		}
+	}
+	if applied != 0 {
+		d.t.Errorf("applied = %d after a failed repair, want 0", applied)
+	}
+}
+
+// AC-7: every failing step of the repair fails the pass with context and
+// leaves 32 unrecorded, and the next pass, seeing whatever the failed one
+// left, completes both the shape and the recompute.
+
+func TestIgnored32FailedRecomputeStaysPending(t *testing.T) {
+	d := newWispRestoreDB(t)
+	cause := errors.New("recompute fault")
+	d.recomputeErr = cause
+	d.expectProbes(true, false, false)
+	applied, err := d.migrate()
+	d.requireFailedPass(applied, err, cause, "recomputing wisps.is_blocked")
+	d.requireSteps(wispIsBlockedColumnDDL, wispRestoreStepRecompute)
+
+	// The ALTER committed; the index is still missing, so the retry recomputes.
+	d.steps = nil
+	d.expectProbes(true, true, false)
+	if _, err := d.migrate(); err != nil {
+		t.Fatalf("retry runMigrations(ignored 31..32): %v", err)
+	}
+	d.requireSteps(wispRestoreStepRecompute, wispIsBlockedIndexDDL, wispRestoreStepBody, wispRestoreStepCursor)
+}
+
+func TestIgnored32FailedIndexCreateStaysPending(t *testing.T) {
+	d := newWispRestoreDB(t)
+	cause := errors.New("index fault")
+	d.failOn = map[string]error{wispIsBlockedIndexDDL: cause}
+	d.expectProbes(true, false, false)
+	applied, err := d.migrate()
+	d.requireFailedPass(applied, err, cause, "creating idx_wisps_is_blocked")
+	d.requireSteps(wispIsBlockedColumnDDL, wispRestoreStepRecompute, wispIsBlockedIndexDDL)
+
+	d.steps = nil
+	d.expectProbes(true, true, false)
+	if _, err := d.migrate(); err != nil {
+		t.Fatalf("retry runMigrations(ignored 31..32): %v", err)
+	}
+	d.requireSteps(wispRestoreStepRecompute, wispIsBlockedIndexDDL, wispRestoreStepBody, wispRestoreStepCursor)
+}
+
+func TestIgnored32FailedCursorRecordStaysPending(t *testing.T) {
+	d := newWispRestoreDB(t)
+	cause := errors.New("cursor fault")
+	d.failOn = map[string]error{wispRestoreStepCursor: cause}
+	d.expectProbes(true, false, false)
+	applied, err := d.migrate()
+	d.requireFailedPass(applied, err, cause, "recording")
+	d.requireSteps(wispIsBlockedColumnDDL, wispRestoreStepRecompute, wispIsBlockedIndexDDL,
+		wispRestoreStepBody, wispRestoreStepCursor)
+
+	// The repair finished, so the retry finds the clone healthy.
+	d.steps = nil
+	d.expectProbes(true, true, true)
+	if _, err := d.migrate(); err != nil {
+		t.Fatalf("retry runMigrations(ignored 31..32): %v", err)
+	}
+	d.requireSteps(wispRestoreStepBody, wispRestoreStepCursor)
+}
+
+// TestIgnored32StrayIndexWithoutColumnIsDroppedFirst covers a clone left with
+// an idx_wisps_is_blocked but no column (a status-only index under the
+// canonical name). Kept, it would make a pass that fails after the ALTER
+// look converged to the retry, which would record 32 over DEFAULT 0 flags;
+// dropped first, the retry still sees the index missing and recomputes.
+func TestIgnored32StrayIndexWithoutColumnIsDroppedFirst(t *testing.T) {
+	d := newWispRestoreDB(t)
+	cause := errors.New("recompute fault")
+	d.recomputeErr = cause
+	d.expectProbes(true, false, true)
+	applied, err := d.migrate()
+	d.requireFailedPass(applied, err, cause, "recomputing wisps.is_blocked")
+	d.requireSteps(wispDropIndexDDL, wispIsBlockedColumnDDL, wispRestoreStepRecompute)
+
+	d.steps = nil
+	d.expectProbes(true, true, false)
+	if _, err := d.migrate(); err != nil {
+		t.Fatalf("retry runMigrations(ignored 31..32): %v", err)
+	}
+	d.requireSteps(wispRestoreStepRecompute, wispIsBlockedIndexDDL, wispRestoreStepBody, wispRestoreStepCursor)
+}
+
+func TestIgnored32FailedStrayIndexDropStaysPending(t *testing.T) {
+	d := newWispRestoreDB(t)
+	cause := errors.New("drop fault")
+	d.failOn = map[string]error{wispDropIndexDDL: cause}
+	d.expectProbes(true, false, true)
+	applied, err := d.migrate()
+	d.requireFailedPass(applied, err, cause, "dropping idx_wisps_is_blocked")
+	d.requireSteps(wispDropIndexDDL)
 }
