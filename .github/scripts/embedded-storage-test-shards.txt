@@ -192,6 +192,7 @@
 40 5 TestEmbeddedIssueOperationsCloseAndReopenAWisp
 40 5 TestEmbeddedMergeAfterEventsFlipOrdinary
 40 5 TestEmbeddedMergeAndSettleCommitsPeerTableChanges
+40 5 TestEmbeddedMigration0075WidensResidualContentColumns
 40 5 TestEmbeddedReaderListKeysetPositionResumesTheCreatedDescIDAscOrder
 40 5 TestRecordVersionKeepsSubSecondChangeAt
 40 5 TestWithPeerAuth
@@ -367,6 +368,7 @@
 40 19 TestEmbeddedMergeAcrossEventsFlipWithoutBridge
 40 19 TestEmbeddedMergeAndSettleAutoResolveKeepsCleanMergedTables
 40 19 TestEmbeddedMigration0062FlipsEventsToIgnoredPlane
+40 19 TestEmbeddedMigration0075ConvergesFromPartialWidening
 40 19 TestEmbeddedReaderListMaxRowsIsHonored
 40 19 TestEmbeddedRelationsAnswersInThePinnedOrder
 40 19 TestEmbeddedTransactionDependencyPersistsIsBlocked

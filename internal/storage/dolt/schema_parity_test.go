@@ -168,6 +168,27 @@ func TestSchemaParityAuxiliaryTables(t *testing.T) {
 			}
 		})
 	}
+
+	// Promotion and demotion copy event rows between the planes with INSERT
+	// IGNORE ... SELECT, which fails on the pinned engine (and would truncate
+	// under MySQL's IGNORE semantics) when the destination is too narrow for
+	// a value, so the content columns must have the same width on both, and
+	// that width is LONGTEXT (GH#3925).
+	t.Run("events_vs_wisp_events_content_types", func(t *testing.T) {
+		columnTypes := func(table string) map[string]string {
+			m := map[string]string{}
+			for _, c := range queryColumns(t, store, table) {
+				m[c.Name] = c.ColumnType
+			}
+			return m
+		}
+		events, wispEvents := columnTypes("events"), columnTypes("wisp_events")
+		for _, column := range []string{"old_value", "new_value", "comment"} {
+			if events[column] != "longtext" || wispEvents[column] != "longtext" {
+				t.Errorf("%s type: events=%q, wisp_events=%q, want longtext on both", column, events[column], wispEvents[column])
+			}
+		}
+	})
 }
 
 // TestMigrations004And005Together verifies that migrations 004 (wisps table)

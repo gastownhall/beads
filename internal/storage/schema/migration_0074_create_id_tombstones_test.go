@@ -21,20 +21,10 @@ const wispIDTombstonesDDL = `CREATE TABLE IF NOT EXISTS wisp_id_tombstones (
     PRIMARY KEY (id)
 );`
 
-// TestLatestVersionIncludesMigration0074 pins the main slot this migration
-// claims, 0074, superseding 0073's own version of this test. The slot sits
-// directly above arrival_seq's (0073). A hardcoded literal for the reason the
-// earlier ones were: a drift to 74 for the wrong reason is caught by the shape
-// test below failing to explain why 74 is tombstone-shaped. Its ignored twin,
-// 0030, is no longer the top of the ignored series: that pin moved to
-// TestLatestIgnoredVersionIncludesMigration0031 when ignored 0031 claimed the
-// next slot.
-func TestLatestVersionIncludesMigration0074(t *testing.T) {
-	const want = 74
-	if got := LatestVersion(); got != want {
-		t.Fatalf("LatestVersion() = %d, want %d (id tombstone tables)", got, want)
-	}
-}
+// TestLatestVersionIncludesMigration0074 (pinning LatestVersion() == 74) is
+// superseded by TestLatestVersionIncludesMigration0075
+// (migration_0075_widen_residual_content_columns_test.go) now that 0075 claims
+// the next free main slot -- only one such pin lives at a time.
 
 // TestMigration0074CreatesBothTombstoneTables is a DB-independent check of the
 // frozen bytes: both tables created with plain IF NOT EXISTS (so the CLI

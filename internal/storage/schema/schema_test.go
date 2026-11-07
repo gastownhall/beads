@@ -2104,6 +2104,13 @@ func TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities(t *testing.T)
 		"ALTER TABLE issues ADD COLUMN arrival_seq BIGINT;",
 		"ALTER TABLE wisps ADD COLUMN arrival_seq BIGINT;",
 		"CREATE UNIQUE INDEX uk_wisps_arrival_seq ON wisps (arrival_seq);",
+		// 0075: one prepared MODIFY COLUMN per widened column, same shape as
+		// 0065.
+		"ALTER TABLE events MODIFY COLUMN comment LONGTEXT;",
+		"ALTER TABLE wisp_events MODIFY COLUMN comment LONGTEXT DEFAULT '';",
+		"ALTER TABLE issue_snapshots MODIFY COLUMN original_content LONGTEXT NOT NULL;",
+		"ALTER TABLE issue_snapshots MODIFY COLUMN archived_events LONGTEXT;",
+		"ALTER TABLE compaction_snapshots MODIFY COLUMN snapshot_json LONGBLOB NOT NULL;",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("AllMigrationsSQL missing direct CLI DDL %q", want)
@@ -2148,6 +2155,13 @@ func TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities(t *testing.T)
 		// ignored twin) carries them.
 		"COLUMN_NAME = 'arrival_seq'",
 		"INDEX_NAME = 'uk_wisps_arrival_seq'",
+		// 0075 guards each MODIFY with its own probe; only its source text
+		// (and its unbundled ignored twin) carries these.
+		"@events_comment_needs_widen",
+		"@wisp_events_comment_needs_widen",
+		"@issue_snapshots_original_content_needs_widen",
+		"@issue_snapshots_archived_events_needs_widen",
+		"@compaction_snapshot_json_needs_widen",
 	} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("AllMigrationsSQL contains source prepared-DDL guard %q", forbidden)
