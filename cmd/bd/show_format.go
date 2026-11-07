@@ -594,13 +594,13 @@ func formatIssueLongExtras(issue *types.Issue, formatTime func(time.Time) string
 
 // formatMetadataValue formats a single metadata value for display.
 // Strings are shown unquoted, numbers/bools as-is, objects/arrays as compact JSON.
-// Numbers arrive as json.Number and print their stored literal, so an integer
-// past 2^53 keeps every digit (GH#6330).
 func formatMetadataValue(v any) string {
 	switch val := v.(type) {
 	case string:
 		return val
 	case json.Number:
+		// Numbers arrive as json.Number holding their stored literal, so an
+		// integer past 2^53 keeps every digit (GH#6330).
 		return val.String()
 	case bool:
 		return fmt.Sprintf("%t", val)

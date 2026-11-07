@@ -92,8 +92,9 @@ follows:
 
 - An integer that fits a signed or unsigned 64-bit integer (from
   `-9223372036854775808` to `18446744073709551615`) keeps every digit, including
-  19-digit ids past 2^53 (`9007199254740992`). `bd show`, `bd show --json` and
-  slot reads print those digits.
+  integers past 2^53 (`9007199254740992`) such as 19-digit ids. `bd show`,
+  `bd show --json`, `bd create --json` and the Go `SlotGet` API return those
+  digits.
 - A number with a decimal point or an exponent, and an integer outside that
   range, is stored as a 64-bit float: about 15 to 17 significant digits survive,
   and the spelling can change (`1.0` reads back as `1`).

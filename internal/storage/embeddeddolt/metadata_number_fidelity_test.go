@@ -298,6 +298,25 @@ func TestEmbeddedMetadataLargeIntegerRoundTrips(t *testing.T) {
 	const justOver = "9007199254740993"
 
 	const id = "bi-1"
+	// Read back after every write: UpdateIssue replaces the whole document, so
+	// one read at the end could not see a loss on the create path.
+	expectDigits := func(step string, want map[string]string) {
+		t.Helper()
+		got, err := te.store.GetIssue(ctx, id)
+		if err != nil {
+			t.Fatalf("after %s: GetIssue: %v", step, err)
+		}
+		m := map[string]json.RawMessage{}
+		if err := json.Unmarshal(got.Metadata, &m); err != nil {
+			t.Fatalf("after %s: unmarshal metadata %s: %v", step, got.Metadata, err)
+		}
+		for key, w := range want {
+			if string(m[key]) != w {
+				t.Errorf("after %s: metadata[%q] = %s, want %s (integer past 2^53 lost precision)", step, key, m[key], w)
+			}
+		}
+	}
+
 	issue := &types.Issue{
 		ID: id, Title: "precision", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
 		Metadata: json.RawMessage(`{"created":` + big + `}`),
@@ -305,26 +324,15 @@ func TestEmbeddedMetadataLargeIntegerRoundTrips(t *testing.T) {
 	if err := te.store.CreateIssue(ctx, issue, "tester"); err != nil {
 		t.Fatalf("CreateIssue: %v", err)
 	}
+	expectDigits("CreateIssue", map[string]string{"created": big})
 	if err := te.store.UpdateIssue(ctx, id, map[string]any{
 		"metadata": json.RawMessage(`{"created":` + big + `,"num":` + big + `,"just_over":` + justOver + `}`),
 	}, "tester"); err != nil {
 		t.Fatalf("UpdateIssue metadata: %v", err)
 	}
+	expectDigits("UpdateIssue", map[string]string{"created": big, "num": big, "just_over": justOver})
 	if err := te.store.MergeMetadata(ctx, id, "merged", json.RawMessage(big), "tester"); err != nil {
 		t.Fatalf("MergeMetadata: %v", err)
 	}
-
-	got, err := te.store.GetIssue(ctx, id)
-	if err != nil {
-		t.Fatalf("GetIssue: %v", err)
-	}
-	m := map[string]json.RawMessage{}
-	if err := json.Unmarshal(got.Metadata, &m); err != nil {
-		t.Fatalf("unmarshal metadata %s: %v", got.Metadata, err)
-	}
-	for key, want := range map[string]string{"created": big, "num": big, "just_over": justOver, "merged": big} {
-		if string(m[key]) != want {
-			t.Errorf("metadata[%q] = %s, want %s (integer past 2^53 lost precision)", key, m[key], want)
-		}
-	}
+	expectDigits("MergeMetadata", map[string]string{"created": big, "num": big, "just_over": justOver, "merged": big})
 }

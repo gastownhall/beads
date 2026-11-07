@@ -429,6 +429,18 @@ func TestMetadataLargeIntegerRoundTrips(t *testing.T) {
 	const justOver = "9007199254740993"
 
 	const id = "mm-bigint"
+	// Read back after every write: UpdateIssue replaces the whole document, so
+	// one read at the end could not see a loss on the create path.
+	expectDigits := func(step string, want map[string]string) {
+		t.Helper()
+		m := getMetadataMap(t, ctx, store, id)
+		for key, w := range want {
+			if got := string(m[key]); got != w {
+				t.Errorf("after %s: metadata[%q] = %s, want %s (integer past 2^53 lost precision)", step, key, got, w)
+			}
+		}
+	}
+
 	issue := &types.Issue{
 		ID: id, Title: "precision", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
 		Metadata: json.RawMessage(`{"created":` + big + `}`),
@@ -436,19 +448,15 @@ func TestMetadataLargeIntegerRoundTrips(t *testing.T) {
 	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
 		t.Fatalf("CreateIssue: %v", err)
 	}
+	expectDigits("CreateIssue", map[string]string{"created": big})
 	if err := store.UpdateIssue(ctx, id, map[string]any{
 		"metadata": json.RawMessage(`{"created":` + big + `,"num":` + big + `,"just_over":` + justOver + `}`),
 	}, "tester"); err != nil {
 		t.Fatalf("UpdateIssue metadata: %v", err)
 	}
+	expectDigits("UpdateIssue", map[string]string{"created": big, "num": big, "just_over": justOver})
 	if err := store.MergeMetadata(ctx, id, "merged", json.RawMessage(big), "tester"); err != nil {
 		t.Fatalf("MergeMetadata: %v", err)
 	}
-
-	m := getMetadataMap(t, ctx, store, id)
-	for key, want := range map[string]string{"created": big, "num": big, "just_over": justOver, "merged": big} {
-		if got := string(m[key]); got != want {
-			t.Errorf("metadata[%q] = %s, want %s (integer past 2^53 lost precision)", key, got, want)
-		}
-	}
+	expectDigits("MergeMetadata", map[string]string{"created": big, "num": big, "just_over": justOver, "merged": big})
 }
