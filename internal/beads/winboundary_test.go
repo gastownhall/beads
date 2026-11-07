@@ -491,4 +491,39 @@ func TestWindowsPathInSafeBoundary(t *testing.T) {
 			t.Error("inSafeBoundary(C:\\Windows\\beads with discarded temp) = true, want false")
 		}
 	})
+
+	// Ordinary locations outside the denied roots and the carve-outs stay
+	// admitted under the complete policy: drive-root workspaces, UNC
+	// workspaces, ProgramData. A relocated install on a drive or a
+	// workspace on one share never denies the whole drive or server.
+	t.Run("ordinary locations admitted under full policy", func(t *testing.T) {
+		b := newWindowsBoundary(windowsBoundaryInput{
+			systemRootValues:    []string{`C:\Windows`, `C:\Program Files`, `C:\Program Files (x86)`, `D:\Win`},
+			profileParentValues: []string{`C:\Users`},
+			homeValue:           `C:\Users\alice`,
+			tempValue:           `C:\Users\alice\AppData\Local\Temp`,
+		})
+		rows := []struct {
+			name  string
+			input string
+		}{
+			{"drive root", `D:\`},
+			{"drive-root workspace", `D:\beads`},
+			{"same drive as relocated install", `D:\elsewhere\proj\.beads`},
+			{"C drive workspace", `C:\beads`},
+			{"ProgramData", `C:\ProgramData\beads`},
+			{"UNC share root", `\\server\share`},
+			{"UNC workspace", `\\server\share\proj\.beads`},
+			{"second share on same server", `\\server\other\proj\.beads`},
+			{"extended spelling of ordinary path", `\\?\C:\beads`},
+			{"home project", `C:\Users\alice\projects\beads`},
+		}
+		for _, tt := range rows {
+			t.Run(tt.name, func(t *testing.T) {
+				if !b.inSafeBoundary(tt.input, tt.input) {
+					t.Errorf("inSafeBoundary(%q) = false, want true", tt.input)
+				}
+			})
+		}
+	})
 }
