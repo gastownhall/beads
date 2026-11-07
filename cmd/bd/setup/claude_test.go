@@ -588,6 +588,20 @@ func TestCheckClaudeWarnsOfRemovedSyncHooks(t *testing.T) {
 	}
 }
 
+// GH#7894: a hand-written hook that omits memories is still a bd prime hook.
+func TestHasBeadsHooksWithNoMemories(t *testing.T) {
+	for _, command := range []string{"bd prime --no-memories", "bd prime --no-memories --hook-json"} {
+		settingsPath := filepath.Join(t.TempDir(), "settings.json")
+		settings := fmt.Sprintf(`{"hooks": {"SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": %q}]}]}}`, command)
+		if err := os.WriteFile(settingsPath, []byte(settings), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if !hasBeadsHooks(settingsPath) {
+			t.Errorf("hasBeadsHooks with %q = false, want true", command)
+		}
+	}
+}
+
 func TestHasBeadsHooks(t *testing.T) {
 	tmpDir := t.TempDir()
 

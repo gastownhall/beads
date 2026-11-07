@@ -576,6 +576,25 @@ func TestHasBeadsHooksWithStealthMode(t *testing.T) {
 	}
 }
 
+// GH#7894: a hand-written hook that omits memories is still a bd prime hook.
+func TestHasBeadsHooksWithNoMemories(t *testing.T) {
+	for _, command := range []string{"bd prime --no-memories", "bd prime --no-memories --hook-json"} {
+		settingsPath := filepath.Join(t.TempDir(), "settings.json")
+		hook := `[{"matcher": "", "hooks": [{"type": "command", "command": "CMD"}]}]`
+		settingsContent := strings.ReplaceAll(`{"hooks": {"SessionStart": HOOK, "PreCompact": HOOK}}`, "HOOK", strings.ReplaceAll(hook, "CMD", command))
+		if err := os.WriteFile(settingsPath, []byte(settingsContent), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		if !hasBeadsHooks(settingsPath) {
+			t.Errorf("hasBeadsHooks with %q = false, want true", command)
+		}
+		if ss, pc := checkHookEvents(settingsPath); !ss || !pc {
+			t.Errorf("checkHookEvents with %q = (%v, %v), want (true, true)", command, ss, pc)
+		}
+	}
+}
+
 func TestCheckClaudeSettingsHealth(t *testing.T) {
 	setTempHome := func(t *testing.T, dir string) {
 		t.Helper()
