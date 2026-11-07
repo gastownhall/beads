@@ -695,6 +695,23 @@ func (s *DoltStore) shouldUseCLIForPeerCredentialsWithError(ctx context.Context,
 	return s.prepareCLIRouteForPeerCredentials(ctx, peer, creds)
 }
 
+// prepareCLIRouteForPeer is the peer counterpart of the default remote's
+// credential routing: the stored-credential check first, then the cloud-auth
+// check, in the same order store.go's push and pull apply them. A server-mode
+// store runs CALL DOLT_PUSH/PULL/FETCH inside the sql-server process, which
+// only has its startup environment, so credentials held in bd's environment —
+// stored for no peer — must reach the transfer through a dolt subprocess that
+// inherits them (GH#6, #5953). The cloud-auth check stays keyed to the peer
+// URL's scheme and behind the local-database guard (hasCLIDatabase), so an
+// unrelated scheme's variables, or a CLI directory the connected server does
+// not serve, keeps the SQL route.
+func (s *DoltStore) prepareCLIRouteForPeer(ctx context.Context, peer string, creds *remoteCredentials) (bool, error) {
+	if useCLI, err := s.prepareCLIRouteForPeerCredentials(ctx, peer, creds); err != nil || useCLI {
+		return useCLI, err
+	}
+	return s.prepareCLIRouteForCloudAuth(ctx, peer)
+}
+
 // shouldUseCLIForCredentials returns true when CLI subprocess routing should
 // be used instead of SQL path for credential-bearing push/pull operations.
 //

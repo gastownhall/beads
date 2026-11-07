@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil"
 )
@@ -445,10 +447,18 @@ func TestCLIRoutesUseALeftoverDatabaseOnlyWhereBdRunsTheServer(t *testing.T) {
 // DOLT_REMOTE_PASSWORD it got>" to the returned log for every call, and
 // answers `dolt remote -v` with origin at remoteURL.
 func fakeDoltOnPath(t *testing.T, remoteURL string) string {
+	return fakeDoltOnPathAnswering(t, "origin", remoteURL)
+}
+
+// fakeDoltOnPathAnswering is fakeDoltOnPath for a remote of any name, and the
+// fake also answers `dolt version`: the CLI routes refuse a dolt on PATH
+// older than doltversion.RequiredMin, so a transfer-taking test must not rely
+// on an unverifiable version being tolerated.
+func fakeDoltOnPathAnswering(t *testing.T, remoteName, remoteURL string) string {
 	t.Helper()
 	binDir := t.TempDir()
 	callLog := filepath.Join(binDir, "calls.log")
-	script := fmt.Sprintf("#!/bin/sh\necho \"$(pwd -P)|$*|DOLT_REMOTE_PASSWORD=${DOLT_REMOTE_PASSWORD:-}\" >> '%s'\nif [ \"$1 $2\" = \"remote -v\" ]; then echo 'origin %s'; fi\nexit 0\n", callLog, remoteURL)
+	script := fmt.Sprintf("#!/bin/sh\necho \"$(pwd -P)|$*|DOLT_REMOTE_PASSWORD=${DOLT_REMOTE_PASSWORD:-}\" >> '%s'\nif [ \"$1 $2\" = \"remote -v\" ]; then echo '%s %s'; fi\nif [ \"$1\" = \"version\" ]; then echo 'dolt version 2.6.0'; fi\nexit 0\n", callLog, remoteName, remoteURL)
 	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(script), 0o755); err != nil { // #nosec G306 -- test fixture must be executable
 		t.Fatal(err)
 	}
@@ -687,6 +697,152 @@ func TestCredentialPushOnAnEnvNamedPortKeepsTheCLIOnlyForBdsOwnServer(t *testing
 			}
 			if want := cliDir + "|push --user user origin main|DOLT_REMOTE_PASSWORD=client-secret"; !strings.Contains(calls, want) {
 				t.Fatalf("dolt calls %q lack the credential push %q", calls, want)
+			}
+		})
+	}
+}
+
+// TestPeerCloudAuthRoutesThroughTheDoltCLI pins the federation peer
+// counterparts of the default remote's cloud-auth route (GH#6, #5953): a
+// server-mode store whose environment holds a credential for the peer URL's
+// scheme must run peer push, pull and fetch as a dolt subprocess in the
+// served CLI directory — a child that inherits bd's environment — instead of
+// CALL DOLT_PUSH/PULL/FETCH inside the sql-server process, which kept only
+// its startup environment. The peer carries no stored credentials, so the
+// stored-credential route declines and the cloud-auth check decides, exactly
+// as for the default remote. With only another scheme's variable set the
+// transfer stays on SQL, whose unroutable connStr fails at once — that
+// failure, never a route-preparation one, is how the negative cases prove no
+// CLI transfer ran. Remote and version probes are not transfer evidence:
+// each case asserts the exact logged transfer line (working directory,
+// arguments, inherited password).
+func TestPeerCloudAuthRoutesThroughTheDoltCLI(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fake")
+	}
+	clearPredicateEnv(t)
+	clearCloudAuthEnv(t)
+	const peer = "mirror"
+	const hostedURL = "https://doltremoteapi.dolthub.com/org/beads"
+	callLog := fakeDoltOnPathAnswering(t, peer, hostedURL)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "3310")
+
+	// transferArgs is the dolt command line each op must run through the CLI.
+	transferArgs := map[string]string{
+		"push":  "push " + peer + " main",
+		"pull":  "pull " + peer + " main",
+		"fetch": "fetch " + peer,
+	}
+	// sqlRouteWrap is the wrap each op puts around the SQL route's failure.
+	sqlRouteWrap := map[string]string{
+		"push":  "failed to push to peer " + peer,
+		"pull":  "failed to pull from peer " + peer,
+		"fetch": "failed to fetch from peer " + peer,
+	}
+	for _, tc := range []struct {
+		name    string
+		op      string
+		env     func(*testing.T)
+		wantCLI bool
+	}{
+		{"push with the peer scheme's password", "push", func(t *testing.T) {
+			t.Setenv("DOLT_REMOTE_PASSWORD", "client-secret")
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.env(t)
+			beadsDir := doltManagedWorkspace(t, 3310)
+			_ = os.Remove(callLog)
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock: %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			mock.MatchExpectationsInOrder(false)
+			// Every routing check lists the SQL remotes, and the transfer prep
+			// lists them again for the S3 probe; extra expectations are
+			// harmless, only an unmatched query fails.
+			for i := 0; i < 8; i++ {
+				mock.ExpectQuery(regexp.QuoteMeta("FROM dolt_remotes")).
+					WillReturnRows(sqlmock.NewRows([]string{"name", "url", "params"}).AddRow(peer, hostedURL, nil))
+			}
+			// No federation_peers row: the peer is credential-free, so the
+			// stored-credential route declines and the cloud-auth check
+			// decides.
+			mock.ExpectQuery(regexp.QuoteMeta("FROM federation_peers WHERE name = ?")).
+				WithArgs(peer).
+				WillReturnRows(sqlmock.NewRows([]string{"name", "remote_url", "username", "password_encrypted", "sovereignty", "last_sync", "created_at", "updated_at"}))
+			// A failed SQL pull reports through GetConflicts before wrapping;
+			// empty, so a negative pull fails with the transfer error alone.
+			mock.ExpectQuery(regexp.QuoteMeta("FROM dolt_conflicts")).
+				WillReturnRows(sqlmock.NewRows([]string{"`table`", "num_conflicts"}))
+			store := &DoltStore{
+				serverMode: true,
+				// Transport only: the pull route must not auto-commit before
+				// or settle after the transfer in this fixture.
+				readOnly: true,
+				beadsDir: beadsDir,
+				dbPath:   filepath.Join(beadsDir, "dolt"),
+				database: "beads",
+				remote:   "origin",
+				branch:   "main",
+				db:       db,
+				cfg:      &Config{ServerHost: "127.0.0.1", ServerPort: 3310, BeadsDir: beadsDir},
+				// The SQL route's own connection fails at once, which is how
+				// the negative cases tell it was taken.
+				connStr: unroutableConnStr,
+			}
+			serveDoltDatabase(t, store, store.dbPath, 3310)
+			if err := os.MkdirAll(filepath.Join(store.CLIDir(), ".dolt", "noms"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			var opErr error
+			var conflicts []storage.Conflict
+			switch tc.op {
+			case "push":
+				opErr = store.PushTo(context.Background(), peer)
+			case "pull":
+				conflicts, opErr = store.PullFrom(context.Background(), peer)
+			case "fetch":
+				opErr = store.Fetch(context.Background(), peer)
+			}
+
+			raw, err := os.ReadFile(callLog)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			calls := strings.TrimSpace(string(raw))
+			cliDir, err := filepath.EvalSymlinks(store.CLIDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantCLI {
+				if opErr != nil {
+					t.Fatalf("%s: %v", tc.name, opErr)
+				}
+				if len(conflicts) != 0 {
+					t.Fatalf("%s: conflicts = %v, want none", tc.name, conflicts)
+				}
+				want := cliDir + "|" + transferArgs[tc.op] + "|DOLT_REMOTE_PASSWORD=client-secret"
+				if !strings.Contains(calls, want) {
+					t.Fatalf("%s: dolt calls %q lack the transfer %q", tc.name, calls, want)
+				}
+				return
+			}
+			// The SQL route was taken: its own unroutable connection failed,
+			// wrapped by the op — never a route-preparation or credential
+			// lookup failure, which would say the route never decided.
+			if opErr == nil || !strings.Contains(opErr.Error(), sqlRouteWrap[tc.op]) || !strings.Contains(opErr.Error(), "127.0.0.1:1") {
+				t.Fatalf("%s = %v, want the SQL route's connection failure wrapped by %q", tc.name, opErr, sqlRouteWrap[tc.op])
+			}
+			if len(conflicts) != 0 {
+				t.Fatalf("%s: conflicts = %v, want none alongside the failure", tc.name, conflicts)
+			}
+			for _, op := range []string{"push", "pull", "fetch"} {
+				if strings.Contains(calls, "|"+op+" ") {
+					t.Fatalf("%s ran a dolt transfer on the SQL route:\n%s", tc.name, calls)
+				}
 			}
 		})
 	}
