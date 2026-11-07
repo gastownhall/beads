@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -322,6 +323,72 @@ func xferReadPacket(conn net.Conn) (payload []byte, seq byte, err error) {
 	return payload, header[3], nil
 }
 
+// TestAnnotateTransferTimeout pins the diagnostic helper's classification
+// (GH#6375): the cautious deadline hint is added only for the driver's
+// invalid-connection sentinel and only once at least the captured deadline
+// has elapsed — an immediate server reset produces the same sentinel and must
+// not be mislabeled. Everything else passes through by identity: nil, SQL
+// errors, cancellation errors, and any error that arrived too early.
+func TestAnnotateTransferTimeout(t *testing.T) {
+	const deadline = 5 * time.Minute
+	sqlErr := &mysql.MySQLError{Number: 1105, Message: "push failed"}
+	wrappedSentinel := fmt.Errorf("transfer: %w", mysql.ErrInvalidConn)
+
+	t.Run("nil passes through", func(t *testing.T) {
+		if got := annotateTransferTimeout(nil, 2*deadline, deadline); got != nil {
+			t.Fatalf("annotateTransferTimeout(nil) = %v, want nil", got)
+		}
+	})
+	t.Run("sql error unchanged", func(t *testing.T) {
+		if got := annotateTransferTimeout(sqlErr, 2*deadline, deadline); got != sqlErr {
+			t.Fatalf("annotateTransferTimeout(sqlErr) = %v, want the identical error", got)
+		}
+	})
+	t.Run("canceled context unchanged", func(t *testing.T) {
+		if got := annotateTransferTimeout(context.Canceled, 2*deadline, deadline); got != context.Canceled {
+			t.Fatalf("annotateTransferTimeout(Canceled) = %v, want the identical error", got)
+		}
+	})
+	t.Run("expired context unchanged", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+		defer cancel()
+		<-ctx.Done()
+		if got := annotateTransferTimeout(ctx.Err(), 2*deadline, deadline); got != ctx.Err() {
+			t.Fatalf("annotateTransferTimeout(DeadlineExceeded) = %v, want the identical error", got)
+		}
+	})
+	t.Run("sentinel before the deadline unchanged", func(t *testing.T) {
+		if got := annotateTransferTimeout(mysql.ErrInvalidConn, deadline-time.Second, deadline); got != mysql.ErrInvalidConn {
+			t.Fatalf("annotateTransferTimeout(sentinel, elapsed<deadline) = %v, want the identical error", got)
+		}
+	})
+	t.Run("sentinel at the deadline is annotated", func(t *testing.T) {
+		got := annotateTransferTimeout(mysql.ErrInvalidConn, deadline, deadline)
+		if got == mysql.ErrInvalidConn {
+			t.Fatal("annotateTransferTimeout(sentinel, elapsed=deadline) left the error unchanged")
+		}
+		if !errors.Is(got, mysql.ErrInvalidConn) {
+			t.Fatalf("annotated error = %v, want mysql.ErrInvalidConn still reachable through the %%w chain", got)
+		}
+	})
+	t.Run("wrapped sentinel after the deadline is annotated with cautious wording", func(t *testing.T) {
+		got := annotateTransferTimeout(wrappedSentinel, 2*deadline, deadline)
+		if !errors.Is(got, mysql.ErrInvalidConn) {
+			t.Fatalf("annotated error = %v, want mysql.ErrInvalidConn still reachable", got)
+		}
+		msg := got.Error()
+		for _, want := range []string{
+			"read deadline (5m0s)",
+			"may have expired",
+			transferExecTimeoutEnv + "=<duration>",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("annotated error %q does not name %q", msg, want)
+			}
+		}
+	})
+}
+
 // TestTransferReadDeadlineBoundsTransfer proves the transfer read deadline
 // knob reaches the connections that actually run server-side transfers
 // (GH#6375). With BEADS_DOLT_TRANSFER_TIMEOUT=1s and a server that completes
@@ -389,6 +456,9 @@ func TestTransferReadDeadlineBoundsTransfer(t *testing.T) {
 			}
 			if !errors.Is(err, mysql.ErrInvalidConn) {
 				t.Fatalf("error = %v, want mysql.ErrInvalidConn in the chain (the read deadline firing)", err)
+			}
+			if msg := err.Error(); !strings.Contains(msg, "read deadline (1s)") || !strings.Contains(msg, transferExecTimeoutEnv) {
+				t.Fatalf("error = %v, want the deadline hint naming the 1s read deadline and the %s override", err, transferExecTimeoutEnv)
 			}
 			if ctx.Err() != nil {
 				t.Fatalf("safety context expired after %v; the 1s transfer deadline did not bound the read", elapsed.Round(time.Millisecond))
