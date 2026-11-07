@@ -476,6 +476,12 @@ func TestIsPathInSafeBoundary_OwnServiceHome(t *testing.T) {
 		{"existing release .beads", accountHome, filepath.Join(releaseDir, ".beads"), true},
 		{"not-yet-created release .beads", accountHome, filepath.Join(home, "releases", "r2", ".beads"), true},
 
+		{"service root itself is never a home", accountHome, serviceRoot, false},
+		{"sibling service home", accountHome, filepath.Join(serviceRoot, "some-other-service", ".beads"), false},
+		{"name-prefix sibling of the home", accountHome, filepath.Join(serviceRoot, "flow-estate-mirror", ".beads"), false},
+		{"release symlink escaping the home", accountHome, filepath.Join(home, "releases", "r3", ".beads"), false},
+		{"unrelated path in the blocked area", accountHome, filepath.Join(fixtureBase, "elsewhere", ".beads"), false},
+
 		{"no account home configured", func() string { return "" }, filepath.Join(home, ".beads"), false},
 		{"account home missing from disk", func() string { return filepath.Join(serviceRoot, "no-such-service") }, filepath.Join(serviceRoot, "no-such-service", ".beads"), false},
 	}
@@ -512,10 +518,6 @@ func TestInOwnServiceHome(t *testing.T) {
 		t.Fatalf("write afile: %v", err)
 	}
 	outsideRoot := t.TempDir() // a second temp dir, genuinely outside root
-	outsideHome := filepath.Join(root, "outside-home")
-	if err := os.MkdirAll(outsideHome, 0o755); err != nil {
-		t.Fatalf("mkdir outsideHome: %v", err)
-	}
 	// Aliases and escape hatches, all with existing targets so
 	// resolveLongestExistingAncestor follows them rather than falling back to
 	// the lexical spelling.
@@ -571,6 +573,14 @@ func TestInOwnServiceHome(t *testing.T) {
 		{"home nominated through an alias", filepath.Join(home, ".beads"), root, func() string { return aliasToHome }, euid, true},
 		{"symlinked root, request via the link", filepath.Join(rootLink, "svc", ".beads"), rootLink, func() string { return filepath.Join(rootLink, "svc") }, euid, true},
 		{"symlinked root, request in physical form", filepath.Join(rootPhys, "svc", ".beads"), rootLink, func() string { return filepath.Join(rootLink, "svc") }, euid, true},
+
+		{"the service root itself", root, root, accountHome, euid, false},
+		{"sibling service home", filepath.Join(root, "othersvc", ".beads"), root, accountHome, euid, false},
+		{"name-prefix sibling of the home", filepath.Join(root, "svc2", ".beads"), root, accountHome, euid, false},
+		{"request outside the service root", filepath.Join(outsideRoot, ".beads"), root, accountHome, euid, false},
+		{"symlink escaping the home to a sibling", filepath.Join(escapeToSibling, ".beads"), root, accountHome, euid, false},
+		{"symlink escaping the service root", filepath.Join(escapeOut, ".beads"), root, accountHome, euid, false},
+		{"home alias resolving to the root itself", filepath.Join(home, ".beads"), root, func() string { return aliasToRoot }, euid, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
