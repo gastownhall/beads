@@ -102,7 +102,9 @@ func runRename(cmd *cobra.Command, args []string) error {
 
 	// The rename has committed: a failed reference update is reported, not
 	// returned as the command's error.
-	report := updateReferencesInAllIssues(ctx, store, oldID, newID, actor)
+	dbPrefix, allowedPrefixes := loadEmbeddedIDPrefixes()
+	shortForm := renameShortForm(oldID, append([]string{dbPrefix}, strings.Split(allowedPrefixes, ",")...))
+	report := updateReferencesInAllIssues(ctx, store, oldID, newID, shortForm, actor)
 
 	fmt.Printf("Renamed %s -> %s\n", ui.RenderWarn(oldID), ui.RenderAccent(newID))
 	report.write(os.Stdout, oldID, newID)
@@ -165,8 +167,11 @@ func (l renameLeftRef) location() (int, string) {
 //
 // Comment text is never rewritten: a comment is a record of what was said,
 // and editing one would need its own journaled write. Each comment that
-// mentions oldID is listed for review instead.
-func updateReferencesInAllIssues(ctx context.Context, st renameReferenceStore, oldID, newID, actor string) renameReport {
+// mentions oldID is listed for review instead, and so is each field or
+// comment with shortForm (see renameShortForm) when it is not "". A short
+// form is never rewritten: it may name another bead, such as the one
+// renumbered into oldID's place.
+func updateReferencesInAllIssues(ctx context.Context, st renameReferenceStore, oldID, newID, shortForm, actor string) renameReport {
 	var report renameReport
 	issues, err := st.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
@@ -182,6 +187,11 @@ func updateReferencesInAllIssues(ctx context.Context, st renameReferenceStore, o
 			if rewritten := replaceIDRefs(text, oldID, newID); rewritten != text {
 				updates[f.name] = rewritten
 				fields = append(fields, f.name)
+			}
+			// Rewriting oldID leaves short forms as they were, so whether
+			// or not the update lands they are those of text.
+			if shortForm != "" && hasIDRef(text, shortForm) {
+				report.left = append(report.left, renameLeftRef{issueID: issue.ID, field: f.name, mention: shortForm, note: "possible short form of " + oldID})
 			}
 		}
 
@@ -207,6 +217,9 @@ func updateReferencesInAllIssues(ctx context.Context, st renameReferenceStore, o
 		for _, c := range list {
 			if hasIDRef(c.Text, oldID) {
 				report.left = append(report.left, renameLeftRef{issueID: issueID, commentID: c.ID, mention: oldID, note: "comment text is not rewritten"})
+			}
+			if shortForm != "" && hasIDRef(c.Text, shortForm) {
+				report.left = append(report.left, renameLeftRef{issueID: issueID, commentID: c.ID, mention: shortForm, note: "possible short form of " + oldID})
 			}
 		}
 	}
@@ -260,6 +273,24 @@ var renameRefFields = []struct {
 	{"notes", func(i *types.Issue) string { return i.Notes }},
 	{"acceptance_criteria", func(i *types.Issue) string { return i.AcceptanceCriteria }},
 	{"close_reason", func(i *types.Issue) string { return i.CloseReason }},
+}
+
+// renameShortForm returns the prefix-relative spelling of a hierarchical id,
+// as siblings under an epic are often written ("12x.39" for "abc-12x.39"), or
+// "" when id has none worth reporting: a top-level id, or one whose root is
+// all digits ("1.2" reads as a version number). knownPrefixes are the
+// configured issue prefixes; the split falls back as the ID resolver's does.
+func renameShortForm(id string, knownPrefixes []string) string {
+	prefix := utils.ExtractIssuePrefixKnown(id, knownPrefixes)
+	if prefix == "" || !strings.HasPrefix(id, prefix+"-") {
+		return ""
+	}
+	suffix := id[len(prefix)+1:]
+	root, child, hierarchical := strings.Cut(suffix, ".")
+	if !hierarchical || root == "" || child == "" || strings.Trim(root, "0123456789") == "" {
+		return ""
+	}
+	return suffix
 }
 
 // replaceIDRefs replaces each mention of oldID in text with newID (see

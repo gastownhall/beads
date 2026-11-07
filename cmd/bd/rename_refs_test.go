@@ -109,7 +109,7 @@ func TestUpdateReferencesInAllIssues(t *testing.T) {
 			{ID: "test-9", AcceptanceCriteria: "test-a done", Design: "after test-a"},
 			{ID: "test-c", Title: "C", Description: "about test-a.1"},
 		}}
-		report := updateReferencesInAllIssues(ctx, st, "test-a", "test-z", "test")
+		report := updateReferencesInAllIssues(ctx, st, "test-a", "test-z", "", "test")
 		wantUpdates := map[string]map[string]interface{}{
 			"test-10": {"close_reason": "duplicate of test-z"},
 			"test-z":  {"title": "renamed test-z", "description": "test-z, test-z and test-z."},
@@ -130,7 +130,7 @@ func TestUpdateReferencesInAllIssues(t *testing.T) {
 	t.Run("nothing to report", func(t *testing.T) {
 		t.Parallel()
 		st := &fakeRenameReferenceStore{issues: []*types.Issue{{ID: "test-z", Title: "renamed"}, {ID: "test-b", Notes: "test-a.1"}}}
-		report := updateReferencesInAllIssues(ctx, st, "test-a", "test-z", "test")
+		report := updateReferencesInAllIssues(ctx, st, "test-a", "test-z", "", "test")
 		if len(st.updates) != 0 {
 			t.Errorf("updates = %v, want none", st.updates)
 		}
@@ -145,7 +145,7 @@ func TestUpdateReferencesInAllIssues(t *testing.T) {
 		for i := 1; i <= 25; i++ {
 			st.issues = append(st.issues, &types.Issue{ID: fmt.Sprintf("test-%d", i), Notes: "see test-a"})
 		}
-		report := updateReferencesInAllIssues(ctx, st, "test-a", "test-z", "test")
+		report := updateReferencesInAllIssues(ctx, st, "test-a", "test-z", "", "test")
 		got := renameReportText(report, "test-a", "test-z")
 		for i := 1; i <= 25; i++ {
 			if line := fmt.Sprintf("  test-%d: notes\n", i); !strings.Contains(got, line) {
@@ -167,7 +167,7 @@ func TestUpdateReferencesInAllIssues(t *testing.T) {
 			},
 			failIDs: map[string]bool{"test-b": true},
 		}
-		report := updateReferencesInAllIssues(ctx, st, "test-a", "test-z", "test")
+		report := updateReferencesInAllIssues(ctx, st, "test-a", "test-z", "", "test")
 		for _, id := range []string{"test-c", "test-z"} {
 			if st.updates[id] == nil {
 				t.Errorf("%s was not updated after the failed update of test-b", id)
@@ -185,7 +185,7 @@ func TestUpdateReferencesInAllIssues(t *testing.T) {
 	t.Run("list failure", func(t *testing.T) {
 		t.Parallel()
 		st := &fakeRenameReferenceStore{listErr: errors.New("injected SearchIssues failure")}
-		report := updateReferencesInAllIssues(ctx, st, "test-a", "test-z", "test")
+		report := updateReferencesInAllIssues(ctx, st, "test-a", "test-z", "", "test")
 		want := "Warning: references to test-a were not checked: failed to list issues: injected SearchIssues failure\n"
 		if got := renameReportText(report, "test-a", "test-z"); got != want {
 			t.Errorf("report:\n%s\nwant:\n%s", got, want)
@@ -204,7 +204,7 @@ func TestUpdateReferencesInAllIssues(t *testing.T) {
 				"test-z":  {{ID: "c4", Text: "test-a is done"}},
 			},
 		}
-		report := updateReferencesInAllIssues(ctx, st, "test-a", "test-z", "test")
+		report := updateReferencesInAllIssues(ctx, st, "test-a", "test-z", "", "test")
 		if len(st.updates) != 0 {
 			t.Errorf("updates = %v, want none: comment text is not rewritten", st.updates)
 		}
@@ -224,7 +224,7 @@ func TestUpdateReferencesInAllIssues(t *testing.T) {
 			issues:      []*types.Issue{{ID: "test-b", Notes: "see test-a"}},
 			commentsErr: errors.New("injected GetCommentsForIssues failure"),
 		}
-		report := updateReferencesInAllIssues(ctx, st, "test-a", "test-z", "test")
+		report := updateReferencesInAllIssues(ctx, st, "test-a", "test-z", "", "test")
 		want := "Rewrote test-a to test-z in:\n" +
 			"  test-b: notes\n" +
 			"Warning: comments were not checked for references to test-a: injected GetCommentsForIssues failure\n"
@@ -232,4 +232,55 @@ func TestUpdateReferencesInAllIssues(t *testing.T) {
 			t.Errorf("report:\n%s\nwant:\n%s", got, want)
 		}
 	})
+
+	t.Run("short forms", func(t *testing.T) {
+		t.Parallel()
+		// A short form is listed once per field or comment and never
+		// rewritten; the same spelling inside a longer token is no mention.
+		st := &fakeRenameReferenceStore{
+			issues: []*types.Issue{
+				{ID: "abc-b", Notes: "after 12x.39, 12x.39 and abc-12x.39", Description: "abc-12x.390 x12x.39 12x.39.1"},
+				{ID: "abc-12x.47", Title: "renamed", CloseReason: "12x.39."},
+			},
+			comments: map[string][]*types.Comment{"abc-b": {{ID: "c1", Text: "12x.39 and abc-12x.39"}}},
+		}
+		report := updateReferencesInAllIssues(ctx, st, "abc-12x.39", "abc-12x.47", "12x.39", "test")
+		wantUpdates := map[string]map[string]interface{}{"abc-b": {"notes": "after 12x.39, 12x.39 and abc-12x.47"}}
+		if fmt.Sprint(st.updates) != fmt.Sprint(wantUpdates) {
+			t.Errorf("updates = %v, want %v", st.updates, wantUpdates)
+		}
+		want := "Rewrote abc-12x.39 to abc-12x.47 in:\n" +
+			"  abc-b: notes\n" +
+			"References left unchanged:\n" +
+			"  abc-12x.47 close_reason: 12x.39 (possible short form of abc-12x.39)\n" +
+			"  abc-b notes: 12x.39 (possible short form of abc-12x.39)\n" +
+			"  abc-b comment c1: 12x.39 (possible short form of abc-12x.39)\n" +
+			"  abc-b comment c1: abc-12x.39 (comment text is not rewritten)\n"
+		if got := renameReportText(report, "abc-12x.39", "abc-12x.47"); got != want {
+			t.Errorf("report:\n%s\nwant:\n%s", got, want)
+		}
+	})
+}
+
+func TestRenameShortForm(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		id       string
+		prefixes []string
+		want     string
+	}{
+		{"abc-12x.39", []string{"abc"}, "12x.39"},
+		{"abc-12x.3.1", []string{"abc"}, "12x.3.1"},
+		{"my-proj-12x.39", []string{"other", " my-proj- "}, "12x.39"},
+		{"bd-auth.1", []string{"bd"}, "auth.1"},
+		{"web-app-a3f.2", nil, "a3f.2"}, // no prefix configured: the resolver's heuristic split
+		{"abc-12x", []string{"abc"}, ""},
+		{"abc-1.2", []string{"abc"}, ""},
+		{"abc-12x.", []string{"abc"}, ""},
+		{"nohyphen.1", nil, ""},
+	} {
+		if got := renameShortForm(tt.id, tt.prefixes); got != tt.want {
+			t.Errorf("renameShortForm(%q, %q) = %q, want %q", tt.id, tt.prefixes, got, tt.want)
+		}
+	}
 }
