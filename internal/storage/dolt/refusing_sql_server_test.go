@@ -19,8 +19,17 @@ const refusedCallMessage = "fake dolt server: transfer refused: AccessDenied"
 // every other statement (and every prepare) with error 1105
 // refusedCallMessage. It stands in for a reachable Dolt server whose transfer
 // fails after the connection was set up, so a test can tell the transfer's
-// own failure from a failure to reach the server. It returns a DSN for it.
+// own failure from a failure to reach the server. It returns a DSN for it,
+// which interpolates arguments so every statement arrives as text.
 func refusingSQLServer(t *testing.T) string {
+	t.Helper()
+	return refusingSQLServerReplying(t, nil)
+}
+
+// refusingSQLServerReplying is refusingSQLServer with replies overriding the
+// reply to each statement that starts with a key (upper case): "" acknowledges
+// it, and any other value fails it with error 1105 carrying that message.
+func refusingSQLServerReplying(t *testing.T, replies map[string]string) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -33,13 +42,13 @@ func refusingSQLServer(t *testing.T) string {
 			if err != nil {
 				return
 			}
-			go serveRefusingSQLConn(c)
+			go serveRefusingSQLConn(c, replies)
 		}
 	}()
-	return "root@tcp(" + ln.Addr().String() + ")/beads"
+	return "root@tcp(" + ln.Addr().String() + ")/beads?interpolateParams=true"
 }
 
-func serveRefusingSQLConn(c net.Conn) {
+func serveRefusingSQLConn(c net.Conn, replies map[string]string) {
 	defer c.Close()
 	r := bufio.NewReader(c)
 	const (
@@ -81,10 +90,13 @@ func serveRefusingSQLConn(c net.Conn) {
 	if writeSQLPacket(c, 2, ok) != nil {
 		return
 	}
-	refuse := []byte{0xff}
-	refuse = binary.LittleEndian.AppendUint16(refuse, 1105)
-	refuse = append(refuse, "#HY000"...)
-	refuse = append(refuse, refusedCallMessage...)
+	fail := func(msg string) []byte {
+		e := []byte{0xff}
+		e = binary.LittleEndian.AppendUint16(e, 1105)
+		e = append(e, "#HY000"...)
+		return append(e, msg...)
+	}
+	refuse := fail(refusedCallMessage)
 	for {
 		seq, body, err := readSQLPacket(r)
 		if err != nil || len(body) == 0 {
@@ -104,6 +116,14 @@ func serveRefusingSQLConn(c net.Conn) {
 				reply = ok
 			default:
 				reply = refuse
+				for prefix, msg := range replies {
+					if strings.HasPrefix(q, prefix) {
+						reply = ok
+						if msg != "" {
+							reply = fail(msg)
+						}
+					}
+				}
 			}
 		default: // COM_STMT_PREPARE and anything else
 			reply = refuse

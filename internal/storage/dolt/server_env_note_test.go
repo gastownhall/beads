@@ -49,6 +49,9 @@ type envNoteOpts struct {
 	// unreachable makes the SQL routes fail to reach the server at all
 	// (unroutableConnStr), before any transfer statement runs.
 	unreachable bool
+	// replies overrides the reachable server's replies by statement prefix
+	// (refusingSQLServerReplying).
+	replies map[string]string
 }
 
 // envNoteStore is a store with one remote, name at url, whose SQL routes reach
@@ -93,7 +96,7 @@ func envNoteStore(t *testing.T, name, url string, o envNoteOpts) (*DoltStore, sq
 	}
 	connStr := unroutableConnStr
 	if !o.unreachable {
-		connStr = refusingSQLServer(t)
+		connStr = refusingSQLServerReplying(t, o.replies)
 	}
 	store := &DoltStore{
 		serverMode:     !o.embedded,
