@@ -737,6 +737,7 @@ go_test(
         "discovery_refusal_pins_test.go",
         "doctor_artifacts_embedded_test.go",
         "doctor_backend_guard_test.go",
+        "doctor_blocked_status_test.go",
         "doctor_check_gate_test.go",
         "doctor_cleanup_entry_test.go",
         "doctor_context_test.go",
