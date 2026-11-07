@@ -311,6 +311,7 @@ go_test(
         "molecule_contract_test.go",
         "multistore_multiprocess_test.go",
         "open_test.go",
+        "peer_transfer_env_note_test.go",
         "pool_gauges_test.go",
         "pool_timeouts_test.go",
         "port_provenance_test.go",
