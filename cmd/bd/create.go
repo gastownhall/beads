@@ -45,7 +45,7 @@ func validateCreateArgs(cmd *cobra.Command, args []string) error {
 	graphFile, _ := cmd.Flags().GetString("graph")
 	titleFlag, _ := cmd.Flags().GetString("title")
 
-	_, err := resolveTitle(args, titleFlag, markdownFile, graphFile)
+	_, err := resolveTitle(args, titleFlag, markdownFile, graphFile, createTypeFlag(cmd))
 	return err
 }
 
@@ -106,7 +106,7 @@ var createCmd = &cobra.Command{
 		}
 
 		titleFlag, _ := cmd.Flags().GetString("title")
-		title, err := resolveTitle(args, titleFlag, "", "")
+		title, err := resolveTitle(args, titleFlag, "", "", createTypeFlag(cmd))
 		if err != nil {
 			return err
 		}
@@ -339,6 +339,13 @@ var createCmd = &cobra.Command{
 		}
 
 		renderDryRun := func() error {
+			// A --repo target keeps its own custom types, and this preview
+			// opens no store for it, so only the local target is checked.
+			if repoPath == "." {
+				if err := checkDryRunIssueType(rootCtx, issueType); err != nil {
+					return HandleErrorRespectJSON("%v", err)
+				}
+			}
 			previewIssue := buildCreateIssue(createIssueParams{
 				ID:                 explicitID,
 				Title:              title,
@@ -705,6 +712,21 @@ type createIssueParams struct {
 	DueAt              *time.Time
 	DeferUntil         *time.Time
 	Metadata           json.RawMessage
+}
+
+// checkDryRunIssueType applies the issue-type rule the store applies when it
+// creates the issue (Issue.ValidateWithCustom), so a --dry-run refuses the
+// type the create it previews would refuse instead of previewing it
+// (GH#5787).
+func checkDryRunIssueType(ctx context.Context, issueType string) error {
+	customTypes, err := resolveWorkspaceCustomTypes(ctx)
+	if err != nil {
+		return err
+	}
+	if !types.IssueType(issueType).Normalize().IsValidWithCustom(customTypes) {
+		return fmt.Errorf("invalid issue type: %s", issueType)
+	}
+	return nil
 }
 
 // resolveStorageClass resolves the requested storage class at create time

@@ -60,6 +60,9 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 		if uowProvider == nil {
 			return HandleError("proxied-server UOW provider not initialized")
 		}
+		if err := checkDryRunIssueType(ctx, in.issueType); err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
 		previewLabels := in.labels
 		if in.parentID != "" {
 			dryUW, err := uowProvider.NewUOW(ctx)
