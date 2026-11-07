@@ -9,8 +9,10 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/endpointtrust"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -402,5 +404,120 @@ func TestExternalReadOnlyNoMutation(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("a failed external read must leave the workspace empty, found %v", entries)
+	}
+}
+
+// boundedExternalCtx bounds a test's external open, so a TEST-NET dial that
+// unexpectedly hangs fails fast instead of waiting out the test timeout.
+func boundedExternalCtx(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+// TestExternalReadOnlyTrustFailClosed pins AC-6's credential rule: the
+// external password is never sent to an untrusted destination. The endpoint
+// trust check runs unchanged inside New — a workspace whose shared
+// configuration names a server (metadata.json dolt_server_host) that has
+// never pinned the sidecar's non-loopback endpoint refuses with
+// endpointtrust.FirstUseError before any dial, while loopback is bd's own
+// trusted origin and proceeds to the connection. Pins are isolated per test
+// through XDG_CONFIG_HOME.
+func TestExternalReadOnlyTrustFailClosed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+
+	// The target workspace's shared configuration names a server: the
+	// sidecar's endpoint is shared configuration too, so it is not treated as
+	// privately confirmed.
+	newTarget := func(t *testing.T) string {
+		t.Helper()
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatalf("create target .beads: %v", err)
+		}
+		meta := configfile.Config{
+			ProjectID:      "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+			DoltMode:       configfile.DoltModeProxiedServer,
+			DoltDatabase:   "gtdb",
+			DoltServerHost: "192.0.2.9",
+		}
+		if err := meta.Save(beadsDir); err != nil {
+			t.Fatalf("save target metadata.json: %v", err)
+		}
+		return beadsDir
+	}
+
+	t.Run("non-loopback endpoint with a password is refused before dialing", func(t *testing.T) {
+		beadsDir := newTarget(t)
+		_, err := NewExternalReadOnly(boundedExternalCtx(t), beadsDir, "gtdb",
+			configfile.ExternalDoltConfig{Host: "203.0.2.10", Port: 3306}, "secret") // #nolint:gosec // test fixture, never a real credential
+		if err == nil {
+			t.Fatal("expected a trust refusal, got nil")
+		}
+		var firstUse *endpointtrust.FirstUseError
+		if !errors.As(err, &firstUse) {
+			t.Fatalf("an unpinned non-loopback endpoint must refuse with FirstUseError before any dial, got: %v", err)
+		}
+	})
+
+	t.Run("loopback endpoint with a password proceeds to the connection", func(t *testing.T) {
+		beadsDir := newTarget(t)
+		_, err := NewExternalReadOnly(context.Background(), beadsDir, "gtdb",
+			configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: 1}, "secret") // #nolint:gosec // test fixture, never a real credential
+		if err == nil {
+			t.Fatal("expected a dial error for a port nothing listens on, got nil")
+		}
+		var firstUse *endpointtrust.FirstUseError
+		if errors.As(err, &firstUse) {
+			t.Fatalf("loopback is bd's own trusted origin, got FirstUseError: %v", err)
+		}
+	})
+
+	t.Run("no password sends no credential anywhere", func(t *testing.T) {
+		beadsDir := newTarget(t)
+		_, err := NewExternalReadOnly(boundedExternalCtx(t), beadsDir, "gtdb",
+			configfile.ExternalDoltConfig{Host: "203.0.2.10", Port: 3306}, "")
+		if err == nil {
+			t.Fatal("expected a dial error, got nil")
+		}
+		var firstUse *endpointtrust.FirstUseError
+		if errors.As(err, &firstUse) {
+			t.Fatalf("an empty password must not trip the credential trust check, got: %v", err)
+		}
+	})
+}
+
+// TestExternalReadOnlyTLSRegistration pins AC-6's TLS half at the storage
+// layer: a sidecar requiring TLS registers its full configuration under the
+// beads-external- name and builds a connection that carries it, and a DSN
+// built from the registered store names it (TestExternalReadOnlyDSNTLSConfigName
+// pins the spelling). The dial here is to a port nothing listens on, so the
+// open stops at TCP — proof the TLS path built without refusing or falling
+// back to plaintext configuration.
+func TestExternalReadOnlyTLSRegistration(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("create target .beads: %v", err)
+	}
+	external := configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: 1, TLSRequired: true}
+	_, err := NewExternalReadOnly(context.Background(), beadsDir, "gtdb", external, "")
+	if err == nil {
+		t.Fatal("expected a dial error for a port nothing listens on, got nil")
+	}
+	if strings.Contains(err.Error(), "proxied-server route") {
+		t.Fatalf("a TLS-requiring sidecar must be attempted, not refused: %v", err)
+	}
+	var firstUse *endpointtrust.FirstUseError
+	if errors.As(err, &firstUse) {
+		t.Fatalf("no password is sent, so the trust check must not refuse: %v", err)
+	}
+	// The registered name is deterministic from the endpoint, so a second
+	// open re-registers the same name without error.
+	if _, err := NewExternalReadOnly(context.Background(), beadsDir, "gtdb", external, ""); err == nil {
+		t.Fatal("expected a dial error, got nil")
 	}
 }
