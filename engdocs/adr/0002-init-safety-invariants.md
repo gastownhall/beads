@@ -53,6 +53,15 @@ data-safety guard only. It never authorizes silent divergence of remote
 history. When origin advertises `refs/dolt/data`, `bd init --force`
 refuses unless `--discard-remote` is also passed.
 
+> Note (2026-11, gascity#7665): a probe that cannot reach origin at all
+> resolves fail-closed, as if origin advertised `refs/dolt/data`, so this
+> refusal fires on an unreachable remote exactly as on a confirmed one —
+> the policy is unchanged. The only refinement: that case's refusal text
+> reports an *unverified* remote rather than confirmed history, and names
+> `--remote ""` as the local-only opt-out. `RemoteProbeUnknown` in
+> `cmd/bd/init_safety.go` carries the distinction; it selects the
+> wording, never the decision.
+
 ### Invariant 3 — central chokepoint (executable, not advisory)
 
 Every flag on `bd init` that can interact with remote history routes

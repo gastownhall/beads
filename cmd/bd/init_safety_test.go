@@ -310,44 +310,118 @@ func TestInitReinitLocalConfiguredRemoteWithDoltDataRefuses(t *testing.T) {
 
 func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 	cases := []struct {
-		name     string
-		in       RemoteSafetyInput
-		want     RemoteSafetyAction
-		wantExit int // 0 when not a refusal
+		name       string
+		in         RemoteSafetyInput
+		want       RemoteSafetyAction
+		wantExit   int    // 0 when not a refusal
+		wantReason string // "" skips the reason check
 	}{
 		// No-remote-data column: nothing to refuse, regardless of flags.
-		{"fresh/no-flags", RemoteSafetyInput{}, ActionNoRemoteData, 0},
-		{"fresh/force", RemoteSafetyInput{Force: true}, ActionNoRemoteData, 0},
-		{"fresh/reinit-local", RemoteSafetyInput{ReinitLocal: true}, ActionNoRemoteData, 0},
-		{"fresh/from-jsonl", RemoteSafetyInput{FromJSONL: true}, ActionNoRemoteData, 0},
-		{"fresh/discard-remote", RemoteSafetyInput{DiscardRemote: true}, ActionNoRemoteData, 0},
-		{"fresh/force+discard", RemoteSafetyInput{Force: true, DiscardRemote: true}, ActionNoRemoteData, 0},
+		{"fresh/no-flags", RemoteSafetyInput{}, ActionNoRemoteData, 0, ""},
+		{"fresh/force", RemoteSafetyInput{Force: true}, ActionNoRemoteData, 0, ""},
+		{"fresh/reinit-local", RemoteSafetyInput{ReinitLocal: true}, ActionNoRemoteData, 0, ""},
+		{"fresh/from-jsonl", RemoteSafetyInput{FromJSONL: true}, ActionNoRemoteData, 0, ""},
+		{"fresh/discard-remote", RemoteSafetyInput{DiscardRemote: true}, ActionNoRemoteData, 0, ""},
+		{"fresh/force+discard", RemoteSafetyInput{Force: true, DiscardRemote: true}, ActionNoRemoteData, 0, ""},
 
 		// Remote-has-data column, user did NOT force: bootstrap is the
 		// adoption path. This is the existing correct behavior.
-		{"remote/no-flags", RemoteSafetyInput{RemoteHasDoltData: true}, ActionBootstrap, 0},
+		{"remote/no-flags", RemoteSafetyInput{RemoteHasDoltData: true}, ActionBootstrap, 0, ""},
 
 		// Remote-has-data column, user forced WITHOUT discard-remote: the
 		// bd-q83 bug. Must refuse with ExitRemoteDivergenceRefused.
 		{
 			"remote/force",
 			RemoteSafetyInput{RemoteHasDoltData: true, Force: true},
-			ActionRefuseDivergence, ExitRemoteDivergenceRefused,
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused, "force-without-discard-remote",
 		},
 		{
 			"remote/reinit-local",
 			RemoteSafetyInput{RemoteHasDoltData: true, ReinitLocal: true},
-			ActionRefuseDivergence, ExitRemoteDivergenceRefused,
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused, "force-without-discard-remote",
 		},
 		{
 			"remote/force+reinit-local",
 			RemoteSafetyInput{RemoteHasDoltData: true, Force: true, ReinitLocal: true},
-			ActionRefuseDivergence, ExitRemoteDivergenceRefused,
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused, "force-without-discard-remote",
 		},
 		{
 			"remote/from-jsonl",
 			RemoteSafetyInput{RemoteHasDoltData: true, FromJSONL: true},
-			ActionRefuseDivergence, ExitRemoteDivergenceRefused,
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused, "force-without-discard-remote",
+		},
+
+		// Unknown-probe column (gascity#7665): the resolver reports a probe
+		// failure fail-closed as RemoteHasDoltData=true, so every decision
+		// matches the confirmed-history column — including these token arms.
+		// Only the refusal's REASON and text differ; the policy does not.
+		{
+			"unknown/no-flags",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true},
+			ActionBootstrap, 0, "",
+		},
+		{
+			"unknown/force",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, Force: true},
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused, "remote-unverified-without-discard-remote",
+		},
+		{
+			"unknown/reinit-local",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, ReinitLocal: true},
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused, "remote-unverified-without-discard-remote",
+		},
+		{
+			"unknown/from-jsonl",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, FromJSONL: true},
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused, "remote-unverified-without-discard-remote",
+		},
+		{
+			// Unknown + discard keeps the token flow: fail-closed means the
+			// destroy-token requirements are evaluated exactly as with
+			// confirmed history.
+			"unknown/force+discard/non-interactive/no-token",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, Force: true, DiscardRemote: true, ExpectedToken: "DESTROY-bd"},
+			ActionRequireDestroyToken, ExitDestroyTokenMissing, "",
+		},
+		{
+			"unknown/force+discard/non-interactive/wrong-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, RemoteProbeUnknown: true, Force: true, DiscardRemote: true,
+				DestroyToken: "DESTROY-wrong", ExpectedToken: "DESTROY-bd",
+			},
+			ActionRequireDestroyToken, ExitDestroyTokenMissing, "",
+		},
+		{
+			"unknown/force+discard/non-interactive/matching-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, RemoteProbeUnknown: true, Force: true, DiscardRemote: true,
+				DestroyToken: "DESTROY-bd", ExpectedToken: "DESTROY-bd",
+			},
+			ActionProceedWithDivergence, 0, "",
+		},
+		{
+			"unknown/force+discard/interactive",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, RemoteProbeUnknown: true, Force: true, DiscardRemote: true,
+				IsInteractive: true,
+			},
+			ActionProceedWithDivergence, 0, "",
+		},
+
+		// Unknown contradicting has-data=false: DEFENSIVE arm, unreachable
+		// from current callers (the resolver returns true on any probe
+		// error). NoRemoteData requires BOTH false, so a contradictory
+		// input stays fail-closed rather than silently initializing under
+		// an unreadable remote.
+		{
+			"unknown+has-data-false/no-flags",
+			RemoteSafetyInput{RemoteProbeUnknown: true},
+			ActionBootstrap, 0, "",
+		},
+		{
+			"unknown+has-data-false/force",
+			RemoteSafetyInput{RemoteProbeUnknown: true, Force: true},
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused, "remote-unverified-without-discard-remote",
 		},
 
 		// Remote-has-data, user forced WITH discard-remote, non-interactive,
@@ -355,12 +429,12 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 		{
 			"remote/force+discard/non-interactive/no-token",
 			RemoteSafetyInput{RemoteHasDoltData: true, Force: true, DiscardRemote: true, ExpectedToken: "DESTROY-bd"},
-			ActionRequireDestroyToken, ExitDestroyTokenMissing,
+			ActionRequireDestroyToken, ExitDestroyTokenMissing, "",
 		},
 		{
 			"remote/from-jsonl+discard/non-interactive/no-token",
 			RemoteSafetyInput{RemoteHasDoltData: true, FromJSONL: true, DiscardRemote: true, ExpectedToken: "DESTROY-bd"},
-			ActionRequireDestroyToken, ExitDestroyTokenMissing,
+			ActionRequireDestroyToken, ExitDestroyTokenMissing, "",
 		},
 
 		// Remote-has-data, user forced WITH discard-remote, non-interactive,
@@ -371,7 +445,7 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 				RemoteHasDoltData: true, Force: true, DiscardRemote: true,
 				DestroyToken: "DESTROY-wrong", ExpectedToken: "DESTROY-bd",
 			},
-			ActionRequireDestroyToken, ExitDestroyTokenMissing,
+			ActionRequireDestroyToken, ExitDestroyTokenMissing, "",
 		},
 
 		// Remote-has-data, user forced WITH discard-remote, non-interactive,
@@ -382,7 +456,7 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 				RemoteHasDoltData: true, Force: true, DiscardRemote: true,
 				DestroyToken: "DESTROY-bd", ExpectedToken: "DESTROY-bd",
 			},
-			ActionProceedWithDivergence, 0,
+			ActionProceedWithDivergence, 0, "",
 		},
 		{
 			"remote/from-jsonl+discard/non-interactive/matching-token",
@@ -390,7 +464,7 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 				RemoteHasDoltData: true, FromJSONL: true, DiscardRemote: true,
 				DestroyToken: "DESTROY-bd", ExpectedToken: "DESTROY-bd",
 			},
-			ActionProceedWithDivergence, 0,
+			ActionProceedWithDivergence, 0, "",
 		},
 
 		// Remote-has-data, user forced WITH discard-remote, INTERACTIVE:
@@ -401,7 +475,7 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 				RemoteHasDoltData: true, Force: true, DiscardRemote: true,
 				IsInteractive: true,
 			},
-			ActionProceedWithDivergence, 0,
+			ActionProceedWithDivergence, 0, "",
 		},
 
 		// Remote-has-data, DISCARD without FORCE: also authorized since
@@ -413,7 +487,7 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 		{
 			"remote/discard-remote-only/interactive",
 			RemoteSafetyInput{RemoteHasDoltData: true, DiscardRemote: true, IsInteractive: true},
-			ActionProceedWithDivergence, 0,
+			ActionProceedWithDivergence, 0, "",
 		},
 
 		// INTERACTIVE with a supplied-but-WRONG token (#6480): the token must
@@ -426,7 +500,7 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 				RemoteHasDoltData: true, DiscardRemote: true, IsInteractive: true,
 				DestroyToken: "WRONG", ExpectedToken: "DESTROY-bd",
 			},
-			ActionRequireDestroyToken, ExitDestroyTokenMissing,
+			ActionRequireDestroyToken, ExitDestroyTokenMissing, "",
 		},
 		// INTERACTIVE with a token but no expected token to compare against:
 		// nothing can validate it, so refuse rather than fall to the prompt.
@@ -440,7 +514,7 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 				RemoteHasDoltData: true, DiscardRemote: true, IsInteractive: true,
 				DestroyToken: "WRONG",
 			},
-			ActionRequireDestroyToken, ExitDestroyTokenMissing,
+			ActionRequireDestroyToken, ExitDestroyTokenMissing, "",
 		},
 		// INTERACTIVE with a MATCHING token: the token is the authorization.
 		{
@@ -449,7 +523,7 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 				RemoteHasDoltData: true, DiscardRemote: true, IsInteractive: true,
 				DestroyToken: "DESTROY-bd", ExpectedToken: "DESTROY-bd",
 			},
-			ActionProceedWithDivergence, 0,
+			ActionProceedWithDivergence, 0, "",
 		},
 		// INTERACTIVE with NO token supplied (expected token known): unchanged
 		// — the decision defers to the TTY typed-confirmation prompt.
@@ -459,7 +533,7 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 				RemoteHasDoltData: true, DiscardRemote: true, IsInteractive: true,
 				ExpectedToken: "DESTROY-bd",
 			},
-			ActionProceedWithDivergence, 0,
+			ActionProceedWithDivergence, 0, "",
 		},
 	}
 
@@ -471,6 +545,9 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 			}
 			if tc.wantExit != 0 && got.ExitCode != tc.wantExit {
 				t.Errorf("ExitCode = %d, want %d", got.ExitCode, tc.wantExit)
+			}
+			if tc.wantReason != "" && got.Reason != tc.wantReason {
+				t.Errorf("Reason = %q, want %q", got.Reason, tc.wantReason)
 			}
 			// Refusal actions must populate UserMessage (per ADR text contract).
 			if (tc.want == ActionRefuseDivergence || tc.want == ActionRequireDestroyToken) && got.UserMessage == "" {
@@ -705,6 +782,37 @@ func TestCheckRemoteSafety_RefusalTextNoEcho(t *testing.T) {
 	}
 	if !strings.Contains(msg, "--from-jsonl") {
 		t.Errorf("refusal text does not name the JSONL local-source flag:\n%s", msg)
+	}
+
+	// The unverified-remote refusal carries the same no-echo contract, plus
+	// its own: report an unverified remote (never confirmed history) and
+	// advertise the non-destructive --remote "" opt-out (gascity#7665).
+	unverifiedIn := RemoteSafetyInput{
+		RemoteHasDoltData: true, RemoteProbeUnknown: true, Force: true,
+	}
+	unverified := CheckRemoteSafety(unverifiedIn).UserMessage
+	for _, banned := range bannedEchoes {
+		if strings.Contains(unverified, banned) {
+			t.Errorf("unverified-remote refusal contains destructive one-liner %q:\n%s", banned, unverified)
+		}
+	}
+	for _, must := range []string{
+		"bd bootstrap",
+		"bd help init-safety",
+		"--from-jsonl",
+		"could not verify whether the remote has Dolt history",
+		`--remote ""`,
+		"git ls-remote",
+	} {
+		if !strings.Contains(unverified, must) {
+			t.Errorf("unverified-remote refusal missing %q:\n%s", must, unverified)
+		}
+	}
+	if strings.Contains(unverified, "already has Dolt history") {
+		t.Errorf("unverified-remote refusal claims confirmed history:\n%s", unverified)
+	}
+	if refusalMessageDivergence() == refusalMessageDivergenceUnverified() {
+		t.Error("confirmed and unverified divergence refusals are identical, so probe confidence is not actually carried")
 	}
 }
 

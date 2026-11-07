@@ -31,9 +31,16 @@ FLAG SURFACE
                                 local data. Does NOT authorize discarding
                                 remote history. If origin has Dolt data
                                 this will refuse — pair with
-                                --discard-remote to override. Nor does it
-                                authorize recreating a missing server-mode
-                                database; that takes --recreate-missing.
+                                --discard-remote to override. An origin
+                                whose refs/dolt/data probe cannot reach bd
+                                refuses the same way (fail-closed: an
+                                access failure cannot prove the remote
+                                empty) but the message says the remote is
+                                unverified, not that it has history, and
+                                names --remote "" as the local-only opt-out.
+                                Nor does it authorize recreating a
+                                missing server-mode database; that takes
+                                --recreate-missing.
 
   bd init --reinit-local \      Discard the remote's Dolt history and
       --discard-remote          replace it with the local reinit. First
@@ -93,8 +100,10 @@ DESTROY-TOKEN (non-interactive only)
 
 EXIT CODES
 
-  10    refused: remote has Dolt history and you selected local history
-        without --discard-remote
+  10    refused: remote has Dolt history (or it could not be verified —
+        unreachable remote) and you selected local history without
+        --discard-remote. The two wordings differ; the refusal and the
+        exit code do not.
   11    refused: existing local data and you declined the destroy confirm
         (interactive mode only)
   12    refused: destructive re-init (--discard-remote, or --reinit-local
