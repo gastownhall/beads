@@ -8,6 +8,7 @@ go_library(
         "container_provider_windows.go",
         "dockercontext.go",
         "doltlock.go",
+        "externalrefhistory.go",
         "git_env.go",
         "git_test_hooks.go",
         "localdoltserver.go",

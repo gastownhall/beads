@@ -944,18 +944,52 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		}
 	}
 
+	// A store that can read many issues' external_ref history at once
+	// answers every eligible local in one call; otherwise each local is read
+	// on its own below.
+	var previousRefs map[string]string
+	batched := false
+	if querier, ok := externalRefHistoryBatchQuerier(e.Store); ok {
+		var candidates []string
+		for _, local := range localIssues {
+			if _, ok := e.prelinkedRef(local); ok {
+				candidates = append(candidates, local.ID)
+			}
+		}
+		if len(candidates) > 0 {
+			refs, err := querier.PreviousExternalRefs(ctx, candidates, *lastSync)
+			if err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					// The pull is over; per-issue reads would only fail the
+					// same way, once per issue.
+					return nil, hydratedLocalIDs, fmt.Errorf("checking pre-linked local issues: %w", ctxErr)
+				}
+				// The per-issue reads below still answer exactly; a map
+				// returned beside the error is not trusted.
+				e.warn("Batch external_ref history read failed, checking %d pre-linked issues one by one: %v", len(candidates), err)
+			} else {
+				previousRefs, batched = refs, true
+			}
+		}
+	}
+
 	var hydrated []TrackerIssue
 	for _, local := range localIssues {
-		if local == nil || local.ExternalRef == nil {
+		ref, ok := e.prelinkedRef(local)
+		if !ok {
 			continue
 		}
-		ref := strings.TrimSpace(*local.ExternalRef)
-		if ref == "" || !e.Tracker.IsExternalRef(ref) {
-			continue
-		}
-		changedAfterLastSync, err := e.externalRefChangedAfter(ctx, local, ref, *lastSync)
-		if err != nil {
-			return hydrated, hydratedLocalIDs, fmt.Errorf("checking pre-linked local issue %s: %w", local.ID, err)
+		var changedAfterLastSync bool
+		if batched {
+			// The same decision externalRefChangedAfter makes per issue.
+			previousRef, found := previousRefs[local.ID]
+			changedAfterLastSync = !found || strings.TrimSpace(previousRef) != ref
+		} else {
+			changed, err := e.externalRefChangedAfter(ctx, local, ref, *lastSync)
+			if err != nil {
+				return hydrated, hydratedLocalIDs, fmt.Errorf("checking pre-linked local issue %s: %w", local.ID, err)
+			}
+			changedAfterLastSync = changed
 		}
 		if !changedAfterLastSync {
 			continue
@@ -996,6 +1030,19 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		seen[strings.ToLower(identifier)] = struct{}{}
 	}
 	return hydrated, hydratedLocalIDs, nil
+}
+
+// prelinkedRef returns local's trimmed external_ref when it names an issue
+// in this tracker, the locals fetchPrelinkedIssues checks.
+func (e *Engine) prelinkedRef(local *types.Issue) (string, bool) {
+	if local == nil || local.ExternalRef == nil {
+		return "", false
+	}
+	ref := strings.TrimSpace(*local.ExternalRef)
+	if ref == "" || !e.Tracker.IsExternalRef(ref) {
+		return "", false
+	}
+	return ref, true
 }
 
 // externalRefChangedAfter reports whether local's external_ref differed
@@ -1056,6 +1103,28 @@ func externalRefHistoryQuerier(store Store) (ExternalRefHistoryStore, bool) {
 	}
 	if dolt, ok := store.(storage.DoltStorage); ok {
 		q, ok := storage.UnwrapStore(dolt).(storage.ExternalRefHistoryQuerier)
+		return q, ok
+	}
+	return nil, false
+}
+
+// externalRefHistoryBatchQuerier finds the batch external_ref history
+// capability the way externalRefHistoryQuerier finds the per-issue one: on
+// the store itself, on the classic store inside the NewStore adapter, and
+// beneath storage decorators, which promote only storage.DoltStorage.
+func externalRefHistoryBatchQuerier(store Store) (ExternalRefHistoryBatchStore, bool) {
+	if q, ok := store.(ExternalRefHistoryBatchStore); ok {
+		return q, true
+	}
+	var inner interface{} = store
+	if direct, ok := store.(*directStore); ok {
+		if q, ok := direct.Storage.(ExternalRefHistoryBatchStore); ok {
+			return q, true
+		}
+		inner = direct.Storage
+	}
+	if dolt, ok := inner.(storage.DoltStorage); ok {
+		q, ok := storage.UnwrapStore(dolt).(ExternalRefHistoryBatchStore)
 		return q, ok
 	}
 	return nil, false

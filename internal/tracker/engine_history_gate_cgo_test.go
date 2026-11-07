@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -171,4 +172,82 @@ func TestDoltStoreExternalRefChangedAfterUsesHistoryFastPath(t *testing.T) {
 	if !changed {
 		t.Fatal("expected changed=true via the (behaviorally unchanged) Dolt server fast path")
 	}
+}
+
+// assertBatchHistoryReachesConcreteStore covers AC-6: whether the engine is
+// handed the concrete store, the NewStore adapter around it, or a storage
+// decorator (as bd's tracker commands hand it a HookFiringStore), capability
+// discovery must arrive at the concrete store's PreviousExternalRefs. A
+// decorator promotes only storage.DoltStorage, so a plain type assertion on
+// it would miss the batch method and silently fall back to one history query
+// per issue.
+func assertBatchHistoryReachesConcreteStore(t *testing.T, concrete storage.DoltStorage, issueID, wantRef string, asOf time.Time) {
+	t.Helper()
+	decorated := storage.NewHookFiringStore(concrete, nil)
+	if _, ok := storage.DoltStorage(decorated).(storage.ExternalRefHistoryBatchQuerier); ok {
+		t.Fatal("test setup invalid: the decorator itself exposes PreviousExternalRefs")
+	}
+	for name, store := range map[string]Store{
+		"direct":              concrete,
+		"NewStore":            NewStore(concrete),
+		"decorator":           decorated,
+		"NewStore(decorator)": NewStore(decorated),
+	} {
+		q, ok := externalRefHistoryBatchQuerier(store)
+		if !ok {
+			t.Errorf("%s: no batch external_ref history capability found", name)
+			continue
+		}
+		if concreteQ, _ := concrete.(ExternalRefHistoryBatchStore); q != concreteQ {
+			t.Errorf("%s: capability resolved to %T, want the concrete %T", name, q, concrete)
+		}
+		refs, err := q.PreviousExternalRefs(context.Background(), []string{issueID}, asOf)
+		if err != nil {
+			t.Fatalf("%s: PreviousExternalRefs: %v", name, err)
+		}
+		if got, ok := refs[issueID]; !ok || got != wantRef {
+			t.Errorf("%s: PreviousExternalRefs[%s] = (%q, %t), want (%q, true)", name, issueID, got, ok, wantRef)
+		}
+	}
+}
+
+func TestEmbeddedDoltPreviousExternalRefsCapabilityReachesConcreteStore(t *testing.T) {
+	ctx := context.Background()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	store, err := embeddeddolt.Open(ctx, beadsDir, "batchcap", "main")
+	if err != nil {
+		t.Fatalf("Open embedded store: %v", err)
+	}
+	defer store.Close()
+	if err := store.SetConfig(ctx, "issue_prefix", "batchcap"); err != nil {
+		t.Fatalf("SetConfig(issue_prefix): %v", err)
+	}
+	issue := &types.Issue{ID: "batchcap-1", Title: "batch capability", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{"external_ref": "batch-ref"}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue: %v", err)
+	}
+	if err := store.Commit(ctx, "set external_ref"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	assertBatchHistoryReachesConcreteStore(t, store, issue.ID, "batch-ref", time.Now().Add(time.Hour))
+}
+
+func TestDoltStorePreviousExternalRefsCapabilityReachesConcreteStore(t *testing.T) {
+	store := newTestStore(t) // skips if the shared test Dolt server isn't available
+	defer store.Close()
+	ctx := context.Background()
+	issue := &types.Issue{ID: "batch-cap-1", Title: "batch capability", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{"external_ref": "batch-ref"}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue: %v", err)
+	}
+	if err := store.Commit(ctx, "set external_ref"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	assertBatchHistoryReachesConcreteStore(t, store, issue.ID, "batch-ref", time.Now().Add(time.Hour))
 }
