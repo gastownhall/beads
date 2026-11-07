@@ -8,6 +8,7 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -104,6 +105,32 @@ func TestBackupToDirRefusesMissingOrFileDestination(t *testing.T) {
 				t.Fatalf("BackupToDir(%q) error = %v, want one containing %q", tc.dir, err, tc.want)
 			}
 		})
+	}
+}
+
+// TestBackupToDirRegistersFileURL pins that auto-backup registers the
+// directory under ExportBackupName with the same file:// URL DirToFileURL
+// builds, the one `bd backup init` builds too (GH#6019).
+func TestBackupToDirRegistersFileURL(t *testing.T) {
+	dir := t.TempDir()
+	want := "file://" + dir
+	if runtime.GOOS == "windows" {
+		want = "file://" + strings.ToUpper(dir[:1]) + filepath.ToSlash(dir[1:])
+	}
+	if got, err := DirToFileURL(dir); err != nil || got != want {
+		t.Fatalf("DirToFileURL(%q) = %q, %v; want %q", dir, got, err, want)
+	}
+
+	conn := &restoreConn{}
+	if err := BackupToDir(context.Background(), conn, conn, dir); err != nil {
+		t.Fatalf("BackupToDir(%q): %v", dir, err)
+	}
+	// remove, add, sync: the add binds the name and the URL.
+	if len(conn.args) != 3 {
+		t.Fatalf("BackupToDir issued %d statements %v, want remove, add, sync", len(conn.args), conn.args)
+	}
+	if add := conn.args[1]; len(add) != 2 || add[0] != ExportBackupName || add[1] != want {
+		t.Errorf("backup add bound %v, want [%s %s]", add, ExportBackupName, want)
 	}
 }
 

@@ -6,10 +6,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 func TestResolveDoltBackupURL(t *testing.T) {
@@ -18,7 +21,7 @@ func TestResolveDoltBackupURL(t *testing.T) {
 	// Build the absolute-path fixture with platform-native semantics.
 	// A hard-coded POSIX literal like "/mnt/usb/beads-backup" is not absolute
 	// on Windows (no volume name), so resolveDoltBackupURL would resolve it
-	// against the current drive and return "file://C:\\mnt\\usb\\...".
+	// against the current drive and return "file://C:/mnt/usb/...".
 	// t.TempDir() is absolute and already cleaned on every platform.
 	absBackup := filepath.Join(t.TempDir(), "beads-backup")
 
@@ -56,7 +59,7 @@ func TestResolveDoltBackupURL(t *testing.T) {
 		{
 			name:      "absolute path gets file:// prefix",
 			input:     absBackup,
-			wantExact: "file://" + absBackup,
+			wantExact: wantBackupFileURL(absBackup),
 		},
 		{
 			name:    "relative path gets resolved and prefixed",
@@ -86,9 +89,46 @@ func TestResolveDoltBackupURL_HomeTilde(t *testing.T) {
 	t.Parallel()
 	got := resolveDoltBackupURL("~/backups/beads")
 	home, _ := os.UserHomeDir()
-	want := "file://" + filepath.Join(home, "backups/beads")
+	want := wantBackupFileURL(filepath.Join(home, "backups/beads"))
 	if got != want {
 		t.Errorf("resolveDoltBackupURL(~/backups/beads) = %q, want %q", got, want)
+	}
+}
+
+// wantBackupFileURL is the file:// URL bd should build for abs on this host,
+// written out independently of versioncontrolops.FileURL: on Windows forward
+// slashes and an uppercase drive letter (GH#6019), elsewhere abs as is.
+func wantBackupFileURL(abs string) string {
+	if runtime.GOOS == "windows" {
+		abs = filepath.ToSlash(abs)
+		if vol := filepath.VolumeName(abs); len(vol) == 2 && vol[1] == ':' {
+			abs = strings.ToUpper(vol) + abs[2:]
+		}
+	}
+	return "file://" + abs
+}
+
+// TestResolveDoltBackupURLMatchesDirToFileURL pins that `bd backup init` and
+// auto-backup/restore build the same URL for a local directory, so Dolt sees
+// one address for it rather than two spellings (GH#6019).
+func TestResolveDoltBackupURLMatchesDirToFileURL(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "beads-backup")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{dir, "my-backup"} {
+		cli := resolveDoltBackupURL(path)
+		storage, err := versioncontrolops.DirToFileURL(path)
+		if err != nil {
+			t.Fatalf("DirToFileURL(%q): %v", path, err)
+		}
+		if cli != storage {
+			t.Errorf("resolveDoltBackupURL(%q) = %q, DirToFileURL = %q; want them equal", path, cli, storage)
+		}
+	}
+	if got, want := resolveDoltBackupURL(dir), wantBackupFileURL(dir); got != want {
+		t.Errorf("resolveDoltBackupURL(%q) = %q, want %q", dir, got, want)
 	}
 }
 
