@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -200,5 +201,98 @@ func TestWindowsPathInSafeBoundary_OrdinaryLocations(t *testing.T) {
 		`\\?\D:\src\project\.beads`:           true,
 		// The system roots are still denied alongside.
 		`C:\Windows\.beads`: false,
+	})
+}
+
+func TestNewWindowsBoundary_Profiles(t *testing.T) {
+	b := newWindowsBoundary(windowsFacts{
+		ProfilesDir: `E:\Profiles`,
+		Home:        `F:\Users\alice`,
+		Getenv:      winEnv(map[string]string{"SystemDrive": `D:`}),
+	})
+	var got []string
+	for _, r := range b.profiles {
+		got = append(got, r.String())
+	}
+	want := `[C:\Users E:\Profiles D:\Users F:\Users]`
+	if fmt.Sprint(got) != want {
+		t.Errorf("profile parents = %v, want %s", got, want)
+	}
+	if b.home == nil || b.home.String() != `F:\Users\alice` {
+		t.Errorf("home = %v, want F:\\Users\\alice", b.home)
+	}
+
+	// Malformed SystemDrive values add nothing; a home whose parent is not
+	// named Users does not make that parent a profile parent.
+	for _, drive := range []string{`D:\`, `DD`, `1:`, `\\server\share`} {
+		b := newWindowsBoundary(windowsFacts{
+			Home:   `D:\home\alice`,
+			Getenv: winEnv(map[string]string{"SystemDrive": drive}),
+		})
+		if len(b.profiles) != 1 || b.profiles[0].String() != `C:\Users` {
+			t.Errorf("SystemDrive %q: profile parents = %v, want only C:\\Users", drive, b.profiles)
+		}
+	}
+
+	// A home that is invalid, a volume root, or at or above a profile parent
+	// is unknown.
+	for _, home := range []string{"", `relative\alice`, `C:\`, `C:\Users`, `C:\Users\.`, `E:\`, `E:\Profiles`} {
+		b := newWindowsBoundary(windowsFacts{ProfilesDir: `E:\Profiles\All`, Home: home})
+		if b.home != nil {
+			t.Errorf("home %q: got known home %v, want unknown", home, b.home)
+		}
+	}
+}
+
+// AC-3: the current user's profile is admitted; peer profiles, including
+// siblings whose names extend the home's name, are rejected.
+func TestWindowsPathInSafeBoundary_Profiles(t *testing.T) {
+	b := newWindowsBoundary(windowsFacts{
+		ProfilesDir: `C:\Users`,
+		Home:        `C:\Users\alice`,
+		Getenv:      winEnv(map[string]string{"SystemDrive": `C:`}),
+	})
+	winBoundaryCheck(t, b, map[string]bool{
+		`C:\Users`:                    true, // the parent itself, like /home
+		`C:\Users\alice`:              true,
+		`C:\Users\alice\src\.beads`:   true,
+		`c:\users\ALICE\src\.beads`:   true,
+		`\\?\C:\Users\alice\.beads`:   true,
+		`C:\Users\bob`:                false,
+		`C:\Users\bob\.beads`:         false,
+		`c:/users/BOB/src/.beads`:     false,
+		`C:\Users\alice2\.beads`:      false,
+		`C:\Users\alice.old\.beads`:   false,
+		`C:\Users\alice-work\.beads`:  false,
+		`C:\Users\alic\.beads`:        false,
+		`C:\Users\alice\..\bob\x`:     false,
+		`D:\Users\bob\.beads`:         true, // not a known profile parent
+		`D:\src\alice-and-bob\.beads`: true,
+	})
+
+	// Relocated profiles: the OS-reported parent and the home's Users parent
+	// both count, and the C:\Users floor stays.
+	b = newWindowsBoundary(windowsFacts{
+		ProfilesDir: `E:\Profiles`,
+		Home:        `E:\Profiles\alice`,
+	})
+	winBoundaryCheck(t, b, map[string]bool{
+		`E:\Profiles\alice\.beads`: true,
+		`E:\Profiles\bob\.beads`:   false,
+		`C:\Users\bob\.beads`:      false,
+		`C:\Users\alice\.beads`:    false, // not this user's home here
+	})
+	b = newWindowsBoundary(windowsFacts{Home: `F:\Users\alice`})
+	winBoundaryCheck(t, b, map[string]bool{
+		`F:\Users\alice\.beads`: true,
+		`F:\Users\bob\.beads`:   false,
+	})
+
+	// An unknown home admits no private profile.
+	b = newWindowsBoundary(windowsFacts{ProfilesDir: `C:\Users`})
+	winBoundaryCheck(t, b, map[string]bool{
+		`C:\Users`:              true,
+		`C:\Users\alice\.beads`: false,
+		`D:\beads`:              true,
 	})
 }

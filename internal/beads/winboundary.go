@@ -39,6 +39,11 @@ type windowsFacts struct {
 	Getenv func(string) string
 	// WindowsDir is the OS-reported Windows directory, "" when unavailable.
 	WindowsDir string
+	// ProfilesDir is the OS-reported parent of user profiles, "" when
+	// unavailable.
+	ProfilesDir string
+	// Home is the current user's home directory, "" when unknown.
+	Home string
 }
 
 // winPath is a cleaned absolute Windows path in comparison form: vol is a
@@ -184,7 +189,11 @@ func winUNCVolume(s string) (vol, rest string, ok bool) {
 
 // windowsBoundary is the Windows policy built from one set of host facts.
 type windowsBoundary struct {
-	system []winPath
+	system   []winPath
+	profiles []winPath
+	// home is the current user's home, nil when unknown. An unknown home
+	// admits no private profile at all.
+	home *winPath
 }
 
 func newWindowsBoundary(f windowsFacts) *windowsBoundary {
@@ -207,7 +216,51 @@ func newWindowsBoundary(f windowsFacts) *windowsBoundary {
 	for _, k := range winSystemRootEnv {
 		addSystem(getenv(k))
 	}
+
+	// Profile parents hold every user's private profile. The fixed floor and
+	// the OS report are joined by SystemDrive\Users and by the home's parent,
+	// the latter only when it is named Users: inferring a parent from an
+	// arbitrary home would turn sibling projects into "peer profiles".
+	addProfile := func(s string) {
+		if p, ok := winCleanPath(s); ok && !p.isVolumeRoot() {
+			b.profiles = append(b.profiles, p)
+		}
+	}
+	addProfile(`C:\Users`)
+	addProfile(f.ProfilesDir)
+	if d := getenv("SystemDrive"); len(d) == 2 && isDriveLetter(d[0]) && d[1] == ':' {
+		addProfile(d + `\Users`)
+	}
+	home, homeOK := winCleanPath(f.Home)
+	if homeOK && len(home.comps) >= 2 && strings.EqualFold(home.comps[len(home.comps)-2], "Users") {
+		addProfile(winPath{vol: home.vol, comps: home.comps[:len(home.comps)-1]}.String())
+	}
+	// A home that is a volume root or sits at or above a profile parent
+	// would exempt every profile below it, so it counts as unknown.
+	if homeOK && !home.isVolumeRoot() {
+		for _, r := range b.profiles {
+			if r.within(home) {
+				homeOK = false
+				break
+			}
+		}
+		if homeOK {
+			b.home = &home
+		}
+	}
 	return b
+}
+
+// inPeerProfile reports whether p lies inside a user profile other than the
+// current user's: strictly below a profile parent (the parent itself stays
+// admitted, as /home is on POSIX) and outside the current home.
+func (b *windowsBoundary) inPeerProfile(p winPath) bool {
+	for _, r := range b.profiles {
+		if p.within(r) && len(p.comps) > len(r.comps) && (b.home == nil || !p.within(*b.home)) {
+			return true
+		}
+	}
+	return false
 }
 
 // allows reports whether a guard input (as given, and its absolute form) lies
@@ -225,7 +278,7 @@ func (b *windowsBoundary) allows(input, abs string) bool {
 			return false
 		}
 	}
-	return true
+	return !b.inPeerProfile(p)
 }
 
 // windowsPathInSafeBoundary is isPathInSafeBoundary on Windows.
