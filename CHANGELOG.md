@@ -2010,6 +2010,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   symlinked `config.yaml` is written through to its target, the file keeps
   its own permissions, and a read-only `config.yaml` is still refused. The
   user-global `config.yaml` gets the same treatment.
+- `bd federation` push, pull and fetch against an external Dolt server now
+  take the cloud-auth CLI route the default remote already takes (GH#6):
+  when this bd's environment holds credentials for the peer URL's scheme
+  (`AWS_*` for `s3://`/`aws://`, `AZURE_STORAGE_*`, `GOOGLE_*`/`GCS_*`,
+  `OCI_*`, `DOLT_REMOTE_*`), the transfer runs through a `dolt` subprocess
+  instead of `CALL DOLT_PUSH`/`DOLT_PULL`/`DOLT_FETCH` in a server that kept
+  the environment it started with (#5953). Backups are unchanged.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In
