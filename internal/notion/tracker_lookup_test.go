@@ -1009,3 +1009,43 @@ func TestTrackerLookupErrorsPropagate(t *testing.T) {
 		})
 	}
 }
+
+// TestTrackerPushLookupErrorIsolation covers the rest of a batch when one
+// issue's lookup fails: the refused issue carries the error and is never
+// written, while an unrelated issue in the same batch is still created.
+func TestTrackerPushLookupErrorIsolation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	edited := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	newer := edited.Add(30 * time.Minute)
+
+	f := newFakeNotion(t)
+	f.hugeSource = true
+	row := fakeRow(1, "bd-a", edited)
+	f.addPages(row)
+	f.getStatus = map[string]int{compactID(row.ID): http.StatusForbidden}
+
+	result, err := f.tracker().BatchPush(ctx, []*types.Issue{
+		localTask("bd-a", "Whose lookup fails", newer, row.URL),
+		localTask("bd-b", "Unrelated create", newer, ""),
+	}, map[string]bool{})
+	if err != nil {
+		t.Fatalf("BatchPush: %v", err)
+	}
+	if len(result.Errors) != 1 || result.Errors[0].LocalID != "bd-a" || !strings.Contains(result.Errors[0].Message, "(403)") {
+		t.Fatalf("errors = %+v, want exactly bd-a's 403", result.Errors)
+	}
+	if got := pushedIDs(result.Created); len(got) != 1 || got[0] != "bd-b" {
+		t.Fatalf("created = %v, want the unrelated bd-b create to proceed", got)
+	}
+	if len(result.Updated) != 0 || len(result.Skipped) != 0 {
+		t.Fatalf("result = %+v, want no update or skip for the refused lookup", result)
+	}
+	reqs := f.requests()
+	if len(reqs.created) != 1 || reqs.created[0] != "bd-b" || len(reqs.updated) != 0 {
+		t.Fatalf("writes = created %v, updated %v; want only bd-b created", reqs.created, reqs.updated)
+	}
+	if reqs.unfilteredQueries != 0 {
+		t.Fatalf("unfiltered queries = %d, want none", reqs.unfilteredQueries)
+	}
+}
