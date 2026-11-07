@@ -21,21 +21,21 @@ All command spans automatically carry `bd.command`, `bd.version`, `bd.args` from
 
 ## Metric Naming Convention
 
-OTel SDK names use **dot notation** internally. Prometheus-compatible backends (VictoriaMetrics, Prometheus) export these as **underscore-separated** names, appending type suffixes:
+OTel SDK names use **dot notation** internally. Prometheus-compatible backends (VictoriaMetrics, Prometheus) translate them to **underscore-separated** names. The exact name depends on the backend's OTLP translation settings, so treat the table below as the typical result rather than a contract: with unit and type suffixes enabled, counters gain `_total` (not doubled when the name already ends in `_total`), a `ms` unit becomes `_milliseconds`, a `{…}` annotation unit adds no suffix, and each histogram is exposed as `_bucket`, `_sum` and `_count` series. With suffixes disabled, only the dot-to-underscore rewrite applies.
 
 | Code name (SDK) | Exported name (Prometheus/VM) |
 |-----------------|-------------------------------|
 | `bd.storage.operations` | `bd_storage_operations_total` |
-| `bd.storage.operation.duration` | `bd_storage_operation_duration_ms` |
+| `bd.storage.operation.duration` | `bd_storage_operation_duration_milliseconds_{bucket,sum,count}` |
 | `bd.storage.errors` | `bd_storage_errors_total` |
 | `bd.issue.count` | `bd_issue_count` |
 | `bd.db.retry_count` | `bd_db_retry_count_total` |
-| `bd.db.lock_wait_ms` | `bd_db_lock_wait_ms` |
+| `bd.db.lock_wait_ms` | `bd_db_lock_wait_ms_milliseconds_{bucket,sum,count}` |
 | `bd.db.circuit_trips` | `bd_db_circuit_trips_total` |
 | `bd.db.circuit_rejected` | `bd_db_circuit_rejected_total` |
 | `bd.ai.input_tokens` | `bd_ai_input_tokens_total` |
 | `bd.ai.output_tokens` | `bd_ai_output_tokens_total` |
-| `bd.ai.request.duration` | `bd_ai_request_duration_ms` |
+| `bd.ai.request.duration` | `bd_ai_request_duration_milliseconds_{bucket,sum,count}` |
 
 ---
 
@@ -43,7 +43,7 @@ OTel SDK names use **dot notation** internally. Prometheus-compatible backends (
 
 | Event | Category | Status |
 |-------|----------|--------|
-| `bd.command` | CLI | ✅ Implemented |
+| `bd.command.<name>` | CLI | ✅ Implemented |
 | `storage.<Method>` | Storage (direct) | ✅ Implemented |
 | `storage.<Role>.<Method>` | Storage (issueops surface) | ✅ Implemented |
 | `dolt.*` | Dolt Backend | ✅ Implemented |
@@ -65,10 +65,12 @@ The outermost grouping: the OTel **resource** attached to every span and metric,
 | `service.name` | string | `"bd"` (overridable with `OTEL_SERVICE_NAME`) |
 | `service.version` | string | Current bd version string |
 | `host.name` | string | System hostname (`resource.WithHost`) |
-| `process.*` | various | SDK process detector (`resource.WithProcess`): pid, executable, command line, runtime, owner |
+| `process.*` | various | SDK process detector (`resource.WithProcess`): pid, executable, command line (`process.command_args`), runtime, owner |
 | *(any)* | string | Extra `key=value` pairs from `OTEL_RESOURCE_ATTRIBUTES` (`resource.WithFromEnv`), which can also override the above |
 
 No `os.*` detector is installed.
+
+**Raw command line on the resource (fix pending).** `resource.WithProcess()` (`internal/telemetry/telemetry.go:145`) includes the SDK's command-args detector, so `process.command_args` is the raw, unscrubbed `os.Args`. The resource is attached to every metric export (`sdkmetric.WithResource`, `telemetry.go:209`), so every OTLP metric export carries the full command line, including any secret-flag values and DSN userinfo that `scrubArgsForTelemetry` removes from the `bd.args` span attribute (§2). (Traces are console-only, so this affects the OTLP metrics path.) A code fix is being prepared separately; until it lands, treat the metrics backend as receiving raw arguments.
 
 ### 1.2 Command
 
@@ -93,7 +95,7 @@ Emitted once per `bd` subcommand execution. Anchors all subsequent events for th
 |---|---|---|
 | `bd.command` | string | Subcommand name |
 | `bd.version` | string | bd version |
-| `bd.args` | string | Full arguments passed to command, scrubbed via `scrubArgsForTelemetry` (secret-flag values and DSN userinfo redacted) |
+| `bd.args` | string | Full arguments passed to command, scrubbed via `scrubArgsForTelemetry` (secret-flag values and DSN userinfo redacted). The scrub applies to this attribute only: the resource's `process.command_args` still carries the raw arguments (§1.1, fix pending) |
 | `bd.actor` | string | Actor identity (set after actor resolution) |
 
 ---
@@ -102,7 +104,7 @@ Emitted once per `bd` subcommand execution. Anchors all subsequent events for th
 
 `telemetry.WrapStorage` (`InstrumentedStorage`) instruments the methods of the core storage interface and every issueops role accessor: it emits `storage.<Method>` spans and, through the role decorators in `internal/telemetry/`, `storage.<Role>.<Method>` spans (e.g. `storage.IssueReader.Ready`, `storage.ReadyClaimer.ClaimNext`, `storage.Sweeper.Sweep`). The `DoltStorage` capability sub-interfaces (version control, history, sync, and so on) pass through unwrapped; they are covered by the `dolt.*` spans in §4 instead. The tables below are representative examples; the complete list is the inventory at the end of this section.
 
-**Metric labels.** `InstrumentedStorage.op` puts `db.operation` plus the method's start attributes on the span and on the `bd.storage.operations` counter. `InstrumentedStorage.done` records `bd.storage.operation.duration` and `bd.storage.errors` with the method's start attributes only, **without** `db.operation`; role spans and the methods that pass no start attributes therefore record those two instruments with no attributes at all. Start attributes such as `bd.issue.id`, `bd.actor`, `bd.query` and `db.commit_msg` are per-request values, so the series they produce are high-cardinality. Result attributes set later on the span (`bd.result.count`, etc.) are never metric labels.
+**Metric labels.** `InstrumentedStorage.op` puts `db.operation` plus the method's start attributes on the span and on the `bd.storage.operations` counter. `InstrumentedStorage.done` records `bd.storage.operation.duration` and `bd.storage.errors` with only the attributes each method passes to `done` itself, **never** `db.operation`. Most methods pass their start attributes again, but not all: of the 125 storage span names (77 direct, 48 role), 48 direct operations pass their start attributes to `done`, and the other 29 direct operations plus all 48 role operations (77 of 125) pass none and record those two instruments with no attributes at all. Twelve of those 29 do have start attributes that reach only the span and the counter: `RunInTransaction`, `RunInIssueLifecycleTransaction`, `CountDependencies`, `CountDependents`, `CountIssueComments`, `CountEvents`, `MergeSlotAcquire`, `MergeSlotRelease`, `SlotSet`, `SlotGet`, `SlotClear` and `MergeMetadata` (for example `db.commit_msg` on `RunInTransaction`, `internal/telemetry/storage.go:674-676`). (`AddDependencyWithOptions` and `RemoveDependencyWithOptions` reuse the `AddDependency` / `RemoveDependency` names, so 79 methods emit the 77 direct names.) Start attributes such as `bd.issue.id`, `bd.actor`, `bd.query` and `db.commit_msg` are per-request values, so the series they produce are high-cardinality. Result attributes set later on the span (`bd.result.count`, etc.) are never metric labels.
 
 ### `storage.CreateIssue`
 
@@ -388,7 +390,7 @@ Emitted by the compaction engine (`bd compact`) via `internal/compact/haiku.go`,
 
 ### `anthropic.messages.new`
 
-One span per Anthropic API call. The `bd.ai.operation` attribute distinguishes the two callers.
+One span per bd AI request. The `bd.ai.operation` attribute distinguishes the two callers. In `compact` the span covers bd's whole retry loop (`internal/compact/haiku.go:161`), not a single attempt; in `find_duplicates` it covers one `Messages.New` call.
 
 | Attribute | Type | Description |
 |---|---|---|
@@ -400,7 +402,7 @@ One span per Anthropic API call. The `bd.ai.operation` attribute distinguishes t
 | `bd.ai.batch_size` | int | Candidate pairs evaluated (`find_duplicates` only) |
 | `bd.ai.duration_ms` | float | Request duration in ms (`find_duplicates` only; `compact` records the `bd.ai.request.duration` metric instead) |
 
-**Retry policy** (compact only; `find_duplicates` makes a single unretried call): exponential backoff from 1 s (1 s, 2 s, 4 s), up to 4 attempts (1 initial + up to 3 retries, `maxRetries = 3`), on HTTP 429, 5xx, and network timeout errors. Context cancellation and deadline expiry are not retried.
+**Retry policy.** bd's own loop (compact only): exponential backoff from 1 s (1 s, 2 s, 4 s), up to 4 attempts (1 initial + up to 3 retries, `maxRetries = 3`), on HTTP 429, 5xx, and network timeout errors. Context cancellation and deadline expiry are not retried. Below that, neither caller sets `option.WithMaxRetries`, so the Anthropic SDK's default (`MaxRetries = 2`) also retries each `Messages.New` internally: a compact request can make up to 12 HTTP requests under one span, and `find_duplicates`, which has no bd-level loop, up to 3. SDK-internal retries are invisible to bd's telemetry.
 
 ---
 
@@ -419,33 +421,33 @@ Emitted by the external-tracker sync engine (`internal/tracker/engine.go`, used 
 
 ## 8. Metrics Reference
 
-| Metric (code name) | Type | Labels | Status |
-|--------|------|--------|--------|
-| `bd.storage.operations` | Counter | `db.operation` + method start attributes | ✅ Implemented |
-| `bd.storage.operation.duration` | Histogram (ms) | method start attributes; no `db.operation` (§3) | ✅ Implemented |
-| `bd.storage.errors` | Counter | method start attributes; no `db.operation` (§3) | ✅ Implemented |
-| `bd.issue.count` | Gauge | `status` | ✅ Implemented (recorded on `GetStatistics`) |
-| `bd.db.retry_count` | Counter | — | ✅ Implemented |
-| `bd.db.lock_wait_ms` | Histogram (ms) | — | 🔲 Registered, not recorded |
-| `bd.db.circuit_trips` | Counter | — | ✅ Implemented |
-| `bd.db.circuit_rejected` | Counter | — | ✅ Implemented |
-| `bd.db.serialization_errors` | Counter | — | ✅ Implemented |
-| `bd.write_retries_total` | Counter | `type` (`serialization` \| `connection`) | ✅ Implemented |
-| `bd.db.post_tx_commit_dropped` | Counter | — | ✅ Implemented |
-| `bd.db.blocked_recheck_dropped` | Counter | — | ✅ Implemented |
-| `bd.db.ignored_tx_fresh_pool` | Counter | — | ✅ Implemented |
-| `bd.db.conn_acquire_ms` | Histogram (ms) | — | ✅ Implemented |
-| `bd.db.pool_wait_count` | Counter | — | ✅ Implemented |
-| `bd.db.pool_wait_ms` | Histogram (ms) | — | ✅ Implemented |
-| `bd.db.pool_open` | Observable gauge | — | ✅ Implemented |
-| `bd.db.pool_in_use` | Observable gauge | — | ✅ Implemented |
-| `bd.db.pool_idle` | Observable gauge | — | ✅ Implemented |
-| `bd.db.pool_max_open` | Observable gauge | — | ✅ Implemented |
-| `bd.claim_verify_lost_total` | Counter | `op` (`claim` \| `unclaim` \| `guarded-update` \| `ready-claim`) | ✅ Implemented |
-| `bd.claim_verify_recovered_total` | Counter | `op`, `outcome` | 🔲 Registered, not recorded |
-| `bd.ai.input_tokens` | Counter | `bd.ai.model` | ✅ Implemented (compact only) |
-| `bd.ai.output_tokens` | Counter | `bd.ai.model` | ✅ Implemented (compact only) |
-| `bd.ai.request.duration` | Histogram (ms) | `bd.ai.model` | ✅ Implemented (compact only) |
+| Metric (code name) | Type | Unit | Labels | Status |
+|--------|------|------|--------|--------|
+| `bd.storage.operations` | Counter | — | `db.operation` + method start attributes | ✅ Implemented |
+| `bd.storage.operation.duration` | Histogram | `ms` | only what the method passes to `done` (start attributes on 48 direct operations, none elsewhere); never `db.operation` (§3) | ✅ Implemented |
+| `bd.storage.errors` | Counter | — | only what the method passes to `done` (start attributes on 48 direct operations, none elsewhere); never `db.operation` (§3) | ✅ Implemented |
+| `bd.issue.count` | Gauge | — | `status` | ✅ Implemented (recorded on `GetStatistics`) |
+| `bd.db.retry_count` | Counter | `{retry}` | — | ✅ Implemented |
+| `bd.db.lock_wait_ms` | Histogram | `ms` | — | 🔲 Registered, not recorded |
+| `bd.db.circuit_trips` | Counter | `{trip}` | — | ✅ Implemented |
+| `bd.db.circuit_rejected` | Counter | `{request}` | — | ✅ Implemented |
+| `bd.db.serialization_errors` | Counter | `{error}` | — | ✅ Implemented |
+| `bd.write_retries_total` | Counter | `{retry}` | `type` (`serialization` \| `connection`) | ✅ Implemented |
+| `bd.db.post_tx_commit_dropped` | Counter | `{commit}` | — | ✅ Implemented |
+| `bd.db.blocked_recheck_dropped` | Counter | `{recheck}` | — | ✅ Implemented |
+| `bd.db.ignored_tx_fresh_pool` | Counter | `{tx}` | — | ✅ Implemented |
+| `bd.db.conn_acquire_ms` | Histogram | `ms` | — | ✅ Implemented |
+| `bd.db.pool_wait_count` | Counter | `{wait}` | — | ✅ Implemented |
+| `bd.db.pool_wait_ms` | Histogram | `ms` | — | ✅ Implemented |
+| `bd.db.pool_open` | Observable gauge | `{connection}` | — | ✅ Implemented |
+| `bd.db.pool_in_use` | Observable gauge | `{connection}` | — | ✅ Implemented |
+| `bd.db.pool_idle` | Observable gauge | `{connection}` | — | ✅ Implemented |
+| `bd.db.pool_max_open` | Observable gauge | `{connection}` | — | ✅ Implemented |
+| `bd.claim_verify_lost_total` | Counter | `{write}` | `op` (`claim` \| `unclaim` \| `guarded-update` \| `ready-claim`) | ✅ Implemented |
+| `bd.claim_verify_recovered_total` | Counter | `{write}` | `op`, `outcome` | 🔲 Registered, not recorded |
+| `bd.ai.input_tokens` | Counter | `{token}` | `bd.ai.model` | ✅ Implemented (compact only) |
+| `bd.ai.output_tokens` | Counter | `{token}` | `bd.ai.model` | ✅ Implemented (compact only) |
+| `bd.ai.request.duration` | Histogram | `ms` | `bd.ai.model` | ✅ Implemented (compact only) |
 
 ---
 
