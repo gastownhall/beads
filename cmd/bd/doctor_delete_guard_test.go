@@ -60,10 +60,6 @@ var doctorDeleteExemptions = map[string]doctorDeleteExemption{
 		calls:  []string{"os.Remove", "os.Remove", "os.Remove"},
 		reason: "bd's own lock files in the admitted workspace, by fixed name and age, never data; the Lock Files check reports the same names and thresholds",
 	},
-	"doctor/fix/repo_fingerprint.go:RepoFingerprint": {
-		calls:  []string{"os.RemoveAll", "os.Remove", "os.Remove", "os.Remove"},
-		reason: "the interactive Reinitialize database choice, confirmed a second time with the path named; --yes never takes it",
-	},
 	"doctor/fix/database_integrity.go:doltIntegrityRecovery": {
 		calls:  []string{"os.RemoveAll"},
 		reason: "removes only what its own bd init --force created after renaming the original database aside, then restores the original",

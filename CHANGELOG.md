@@ -1219,8 +1219,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   custom SSH transports and failed lookups keep the previous fingerprint. A
   mismatch is still an error, now reported as "Database fingerprint does not
   match this repository's remote", with the shared-ledger sequence: upgrade
-  every clone, then run `bd migrate --update-repo-id` once. See
-  troubleshooting.
+  every clone, then run `bd migrate --update-repo-id` once. The interactive
+  `bd doctor --fix` fingerprint repair offers only update and skip; its
+  reinitialize choice, which deleted the database, is gone (entering `2`
+  now skips). See troubleshooting.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In
