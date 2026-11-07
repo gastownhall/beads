@@ -16,12 +16,25 @@ const ignoredMigration0032Up = "0032_wisp_is_blocked_restore_marker.up.sql"
 
 // TestLatestIgnoredVersionIncludesMigration0032 pins the ignored slot the
 // wisps.is_blocked restore claims, directly above the pre-upgrade events
-// restore (ignored 0031), and that the slot carries restoreWispIsBlocked
-// while the earlier is_blocked and events repairs keep theirs.
+// restore (ignored 0031); that the slot is unique and holds this marker
+// alone; and that the slot carries restoreWispIsBlocked while the earlier
+// is_blocked and events repairs keep theirs.
 func TestLatestIgnoredVersionIncludesMigration0032(t *testing.T) {
 	const wantIgnored = 32
 	if got := LatestIgnoredVersion(); got != wantIgnored {
 		t.Fatalf("LatestIgnoredVersion() = %d, want %d (wisps.is_blocked restore)", got, wantIgnored)
+	}
+	atSlot := 0
+	for _, mf := range ignoredSource.list() {
+		if mf.version == wantIgnored {
+			atSlot++
+			if mf.name != ignoredMigration0032Up {
+				t.Fatalf("ignored slot 32 is held by %s, want %s", mf.name, ignoredMigration0032Up)
+			}
+		}
+	}
+	if atSlot != 1 {
+		t.Fatalf("ignored 32 has %d files at its slot, want exactly 1", atSlot)
 	}
 	same := func(a, b func(context.Context, DBConn) error) bool {
 		return reflect.ValueOf(a).Pointer() == reflect.ValueOf(b).Pointer()
