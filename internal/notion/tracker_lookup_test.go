@@ -1,0 +1,385 @@
+package notion
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	itracker "github.com/steveyegge/beads/internal/tracker"
+)
+
+// testDataSourceID is the data source the fake Notion serves as the tracker's
+// configured target.
+const testDataSourceID = "0f0e0d0c-0b0a-4908-8706-050403020100"
+
+// fakeNotion is an httptest Notion API. It applies the query filters the
+// tracker sends, serves direct page reads, scopes queries to the data source
+// in the request path, and records every request, so a test can tell a
+// targeted lookup from a whole-source enumeration by what reached the server.
+type fakeNotion struct {
+	t            *testing.T
+	server       *httptest.Server
+	dataSourceID string
+
+	mu    sync.Mutex
+	pages []fakePage
+	// hugeSource makes every unfiltered query answer with another page of rows,
+	// so enumerating the whole source always runs into the client's bound.
+	hugeSource bool
+	// chunk is how many matching rows one filtered response carries; zero
+	// returns them all in one response.
+	chunk int
+	// getStatus fails direct reads of a page (keyed by compact page ID) with
+	// the given status.
+	getStatus map[string]int
+	// filteredQueryStatus, when nonzero, fails every filtered query with it.
+	filteredQueryStatus int
+	nextID              int
+
+	unfilteredQueries int
+	filters           []map[string]interface{}
+	gets              []string
+	created           []string
+	updated           []string
+}
+
+// fakePage is a page as the fake serves it. Parent is carried here rather than
+// on Page so the fixtures do not depend on how the client decodes it.
+type fakePage struct {
+	Page
+	Parent map[string]interface{} `json:"parent,omitempty"`
+}
+
+func newFakeNotion(t *testing.T) *fakeNotion {
+	t.Helper()
+	f := &fakeNotion{t: t, dataSourceID: testDataSourceID}
+	f.server = httptest.NewServer(f)
+	t.Cleanup(f.server.Close)
+	return f
+}
+
+// tracker returns a tracker on the fake whose client stops whole-source
+// enumeration after three response pages.
+func (f *fakeNotion) tracker() *Tracker {
+	return f.trackerFor(f.dataSourceID)
+}
+
+func (f *fakeNotion) trackerFor(dataSourceID string) *Tracker {
+	client := NewClient("secret-token").
+		WithBaseURL(f.server.URL).
+		WithHTTPClient(f.server.Client()).
+		WithMaxQueryPages(3)
+	return &Tracker{client: client, config: DefaultMappingConfig(), dataSourceID: dataSourceID}
+}
+
+func (f *fakeNotion) addPages(pages ...fakePage) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pages = append(f.pages, pages...)
+}
+
+func (f *fakeNotion) setPage(page fakePage) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.pages {
+		if compactID(f.pages[i].ID) == compactID(page.ID) {
+			f.pages[i] = page
+			return
+		}
+	}
+	f.pages = append(f.pages, page)
+}
+
+type fakeNotionRequests struct {
+	unfilteredQueries int
+	filters           []map[string]interface{}
+	gets              []string
+	created           []string
+	updated           []string
+}
+
+func (f *fakeNotion) requests() fakeNotionRequests {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return fakeNotionRequests{
+		unfilteredQueries: f.unfilteredQueries,
+		filters:           append([]map[string]interface{}(nil), f.filters...),
+		gets:              append([]string(nil), f.gets...),
+		created:           append([]string(nil), f.created...),
+		updated:           append([]string(nil), f.updated...),
+	}
+}
+
+func (f *fakeNotion) resetRequests() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.unfilteredQueries = 0
+	f.filters = nil
+	f.gets = nil
+	f.created = nil
+	f.updated = nil
+}
+
+func compactID(id string) string {
+	return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(id), "-", ""))
+}
+
+func sourceParent(dataSourceID string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":           "data_source_id",
+		"data_source_id": dataSourceID,
+		"database_id":    "d0d0d0d0-d0d0-4d0d-8d0d-d0d0d0d0d0d0",
+	}
+}
+
+// fakeRow is a live open task in the configured data source.
+func fakeRow(n int, beadsID string, edited time.Time) fakePage {
+	id := fmt.Sprintf("aaaaaaaa-0000-4000-8000-%012d", n)
+	return fakePage{
+		Page: Page{
+			Object:         "page",
+			ID:             id,
+			URL:            "https://www.notion.so/Task-" + compactID(id),
+			CreatedTime:    edited.Add(-time.Hour),
+			LastEditedTime: edited,
+			Properties: map[string]PageProperty{
+				PropertyTitle:    {Title: []RichText{{PlainText: "Task " + beadsID}}},
+				PropertyBeadsID:  {RichText: []RichText{{PlainText: beadsID}}},
+				PropertyStatus:   {Select: &SelectOption{Name: "Open"}},
+				PropertyPriority: {Select: &SelectOption{Name: "Medium"}},
+				PropertyType:     {Select: &SelectOption{Name: "Task"}},
+			},
+		},
+		Parent: sourceParent(testDataSourceID),
+	}
+}
+
+func (f *fakeNotion) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	path, err := url.PathUnescape(r.URL.EscapedPath())
+	if err != nil {
+		f.t.Errorf("unescape path %q: %v", r.URL.EscapedPath(), err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	switch {
+	case r.Method == http.MethodPost && strings.HasPrefix(path, "/data_sources/") && strings.HasSuffix(path, "/query"):
+		sourceID := strings.TrimSuffix(strings.TrimPrefix(path, "/data_sources/"), "/query")
+		f.serveQuery(w, r, sourceID)
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/pages/"):
+		f.serveGet(w, strings.TrimPrefix(path, "/pages/"))
+	case r.Method == http.MethodPost && path == "/pages":
+		f.serveCreate(w, r)
+	case r.Method == http.MethodPatch && strings.HasPrefix(path, "/pages/"):
+		f.serveUpdate(w, r, strings.TrimPrefix(path, "/pages/"))
+	default:
+		f.t.Errorf("unexpected request %s %s", r.Method, path)
+		writeFakeError(w, http.StatusNotFound, "invalid_request_url", "unexpected request")
+	}
+}
+
+func writeFakeError(w http.ResponseWriter, status int, code, message string) {
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"object": "error", "status": status, "code": code, "message": message,
+	})
+}
+
+func (f *fakeNotion) serveQuery(w http.ResponseWriter, r *http.Request, sourceID string) {
+	var req struct {
+		StartCursor string                 `json:"start_cursor"`
+		Filter      map[string]interface{} `json:"filter"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		f.t.Errorf("decode query body: %v", err)
+	}
+	if compactID(sourceID) != compactID(f.dataSourceID) {
+		writeFakeError(w, http.StatusNotFound, "object_not_found", "Could not find data source")
+		return
+	}
+	if req.Filter == nil {
+		f.unfilteredQueries++
+		if f.hugeSource {
+			filler := fakeRow(900000+f.unfilteredQueries, fmt.Sprintf("bd-filler-%d", f.unfilteredQueries), time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"results": []fakePage{filler}, "has_more": true, "next_cursor": "more",
+			})
+			return
+		}
+	} else {
+		f.filters = append(f.filters, req.Filter)
+		if f.filteredQueryStatus != 0 {
+			writeFakeError(w, f.filteredQueryStatus, "restricted_resource", "query refused")
+			return
+		}
+	}
+
+	var matches []fakePage
+	for _, page := range f.pages {
+		if compactID(fmt.Sprint(page.Parent["data_source_id"])) != compactID(f.dataSourceID) {
+			continue
+		}
+		if req.Filter != nil && !f.matches(page, req.Filter) {
+			continue
+		}
+		matches = append(matches, page)
+	}
+
+	offset := 0
+	if req.StartCursor != "" {
+		offset, _ = strconv.Atoi(strings.TrimPrefix(req.StartCursor, "o"))
+	}
+	end := len(matches)
+	if f.chunk > 0 && offset+f.chunk < end {
+		end = offset + f.chunk
+	}
+	resp := map[string]interface{}{"results": matches[offset:end], "has_more": end < len(matches)}
+	if end < len(matches) {
+		resp["next_cursor"] = fmt.Sprintf("o%d", end)
+	}
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// matches applies the two filter shapes Notion sync may send. Anything else is
+// a test failure, so a filter the fake does not understand cannot pass as a
+// match-all.
+func (f *fakeNotion) matches(page fakePage, filter map[string]interface{}) bool {
+	if timestamp, _ := filter["timestamp"].(string); timestamp != "" {
+		cond, _ := filter[timestamp].(map[string]interface{})
+		raw, _ := cond["on_or_after"].(string)
+		cutoff, err := time.Parse(time.RFC3339, raw)
+		if timestamp != "last_edited_time" || len(filter) != 2 || len(cond) != 1 || err != nil {
+			f.t.Errorf("unsupported timestamp filter %v", filter)
+			return false
+		}
+		return !page.LastEditedTime.Before(cutoff)
+	}
+	if property, _ := filter["property"].(string); property != "" {
+		cond, _ := filter["rich_text"].(map[string]interface{})
+		want, ok := cond["equals"].(string)
+		if property != PropertyBeadsID || len(filter) != 2 || len(cond) != 1 || !ok {
+			f.t.Errorf("unsupported property filter %v", filter)
+			return false
+		}
+		return DataSourceTitle(page.Properties[PropertyBeadsID].RichText) == want
+	}
+	f.t.Errorf("unsupported filter %v", filter)
+	return false
+}
+
+func (f *fakeNotion) serveGet(w http.ResponseWriter, pageID string) {
+	f.gets = append(f.gets, compactID(pageID))
+	if status := f.getStatus[compactID(pageID)]; status != 0 {
+		writeFakeError(w, status, "restricted_resource", "read refused")
+		return
+	}
+	for _, page := range f.pages {
+		if compactID(page.ID) == compactID(pageID) {
+			_ = json.NewEncoder(w).Encode(page)
+			return
+		}
+	}
+	writeFakeError(w, http.StatusNotFound, "object_not_found", "Could not find page with ID: "+pageID)
+}
+
+func (f *fakeNotion) serveCreate(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Parent     map[string]interface{}  `json:"parent"`
+		Properties map[string]PageProperty `json:"properties"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		f.t.Errorf("decode create body: %v", err)
+	}
+	if compactID(fmt.Sprint(req.Parent["data_source_id"])) != compactID(f.dataSourceID) {
+		f.t.Errorf("create targeted parent %v, want data source %s", req.Parent, f.dataSourceID)
+	}
+	f.nextID++
+	page := fakeRow(500000+f.nextID, "", time.Now().UTC().Truncate(time.Minute))
+	page.Properties = req.Properties
+	f.pages = append(f.pages, page)
+	f.created = append(f.created, DataSourceTitle(req.Properties[PropertyBeadsID].RichText))
+	_ = json.NewEncoder(w).Encode(page)
+}
+
+func (f *fakeNotion) serveUpdate(w http.ResponseWriter, r *http.Request, pageID string) {
+	var req struct {
+		Properties map[string]PageProperty `json:"properties"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		f.t.Errorf("decode update body: %v", err)
+	}
+	f.updated = append(f.updated, compactID(pageID))
+	for i := range f.pages {
+		if compactID(f.pages[i].ID) == compactID(pageID) {
+			f.pages[i].Properties = req.Properties
+			f.pages[i].LastEditedTime = time.Now().UTC().Truncate(time.Minute)
+			_ = json.NewEncoder(w).Encode(f.pages[i])
+			return
+		}
+	}
+	writeFakeError(w, http.StatusNotFound, "object_not_found", "Could not find page with ID: "+pageID)
+}
+
+func beadsIDs(issues []itracker.TrackerIssue) []string {
+	ids := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		raw, _ := issue.Raw.(*PulledIssue)
+		if raw == nil {
+			ids = append(ids, "<no raw>")
+			continue
+		}
+		ids = append(ids, raw.ID)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// An incremental pull narrows the query by last_edited_time, so it no longer
+// rediscovers an old page that carries a Beads ID bd has never seen. A
+// cursor-less pull still enumerates it, and an explicit fetch reaches it at any
+// age; those are the recovery paths.
+func TestTrackerIncrementalPullDoesNotDiscoverOldUnlinkedPages(t *testing.T) {
+	t.Parallel()
+
+	since := time.Date(2026, 11, 1, 12, 0, 30, 0, time.UTC)
+	f := newFakeNotion(t)
+	old := fakeRow(1, "bd-old", since.Add(-48*time.Hour))
+	recent := fakeRow(2, "bd-recent", since.Add(time.Hour))
+	f.addPages(old, recent)
+	ctx := context.Background()
+
+	incremental, err := f.tracker().FetchIssues(ctx, itracker.FetchOptions{Since: &since})
+	if err != nil {
+		t.Fatalf("incremental FetchIssues: %v", err)
+	}
+	if got := strings.Join(beadsIDs(incremental), ","); got != "bd-recent" {
+		t.Fatalf("incremental pull returned %q, want only bd-recent", got)
+	}
+
+	full, err := f.tracker().FetchIssues(ctx, itracker.FetchOptions{})
+	if err != nil {
+		t.Fatalf("full FetchIssues: %v", err)
+	}
+	if got := strings.Join(beadsIDs(full), ","); got != "bd-old,bd-recent" {
+		t.Fatalf("full pull returned %q, want bd-old,bd-recent", got)
+	}
+
+	fetched, err := f.tracker().FetchIssue(ctx, old.URL)
+	if err != nil {
+		t.Fatalf("FetchIssue(%s): %v", old.URL, err)
+	}
+	if fetched == nil || fetched.ID != old.ID {
+		t.Fatalf("FetchIssue(%s) = %+v, want page %s", old.URL, fetched, old.ID)
+	}
+}
