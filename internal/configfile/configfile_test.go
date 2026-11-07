@@ -2,6 +2,7 @@ package configfile
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -869,6 +870,31 @@ func TestProxiedServerClientInfo_RoundTrip(t *testing.T) {
 		}
 		if got.RootPath != "/var/lib/beads/proxieddb" {
 			t.Errorf("RootPath = %q, want /var/lib/beads/proxieddb", got.RootPath)
+		}
+	})
+}
+
+func TestSaveProxiedServerClientInfo_WriteFailures(t *testing.T) {
+	t.Run("missing parent", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "missing")
+		if err := SaveProxiedServerClientInfo(dir, &ProxiedServerClientInfo{}); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Save: got %v, want missing-directory error", err)
+		}
+	})
+	t.Run("directory destination", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Mkdir(ProxiedServerClientInfoPath(dir), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := SaveProxiedServerClientInfo(dir, &ProxiedServerClientInfo{}); err == nil {
+			t.Fatal("Save with directory destination succeeded")
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || entries[0].Name() != ProxiedServerClientInfoFileName || !entries[0].IsDir() {
+			t.Fatalf("failed save changed destination or leaked temp files: %v", entries)
 		}
 	})
 }
