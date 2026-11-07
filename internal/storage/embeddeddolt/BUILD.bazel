@@ -145,6 +145,7 @@ go_test(
         "cross_table_id_collision_test.go",
         "cycle_detector_contract_test.go",
         "deleter_contract_test.go",
+        "dep_count_oracle_test.go",
         "dep_count_plan_test.go",
         "dependencies_test.go",
         "dependency_editor_contract_test.go",
