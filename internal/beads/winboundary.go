@@ -42,8 +42,8 @@ type windowsFacts struct {
 }
 
 // winPath is a cleaned absolute Windows path in comparison form: vol is a
-// drive ("C:") and comps are its components below the volume root, with dot
-// segments removed.
+// drive ("C:") or a UNC share (\\server\share), and comps are its components
+// below the volume root, with dot segments removed.
 type winPath struct {
 	vol   string
 	comps []string
@@ -120,7 +120,8 @@ func winInputSpellingOK(input string) bool {
 // winCleanPath parses an absolute Windows path into comparison form. Both
 // separators are accepted, repeated separators collapse, and "." / ".." are
 // removed without escaping the volume root (as Windows itself does). The
-// extended forms \\?\C:\ and \\.\C:\ map to the same representation as C:\.
+// extended forms \\?\C:\ and \\.\C:\ map to the same representation as C:\,
+// and \\?\UNC\server\share (or \\.\UNC\...) to \\server\share.
 // Anything else is rejected: relative or drive-relative paths, device paths
 // (\\.\pipe\x, \\.\C: itself), Volume GUID and GLOBALROOT forms, and any
 // component winValidComponent refuses.
@@ -130,16 +131,28 @@ func winCleanPath(s string) (winPath, bool) {
 	switch {
 	case strings.HasPrefix(s, `\\?\`) || strings.HasPrefix(s, `\\.\`):
 		first, tail, found := strings.Cut(s[4:], `\`)
-		if !found || len(first) != 2 || !isDriveLetter(first[0]) || first[1] != ':' {
+		switch {
+		case found && strings.EqualFold(first, "UNC"):
+			var ok bool
+			if vol, rest, ok = winUNCVolume(tail); !ok {
+				return winPath{}, false
+			}
+		case found && len(first) == 2 && isDriveLetter(first[0]) && first[1] == ':':
+			vol, rest = strings.ToUpper(first), tail
+		default:
 			return winPath{}, false
 		}
-		vol, rest = first, tail
+	case strings.HasPrefix(s, `\\`):
+		var ok bool
+		if vol, rest, ok = winUNCVolume(s[2:]); !ok {
+			return winPath{}, false
+		}
 	case len(s) >= 3 && isDriveLetter(s[0]) && s[1] == ':' && s[2] == '\\':
-		vol, rest = s[:2], s[3:]
+		vol, rest = strings.ToUpper(s[:2]), s[3:]
 	default:
 		return winPath{}, false
 	}
-	p := winPath{vol: strings.ToUpper(vol)}
+	p := winPath{vol: vol}
 	for _, c := range strings.Split(rest, `\`) {
 		if !winValidComponent(c) {
 			return winPath{}, false
@@ -155,6 +168,18 @@ func winCleanPath(s string) (winPath, bool) {
 		}
 	}
 	return p, true
+}
+
+// winUNCVolume splits "server\share\rest" into the UNC volume
+// \\server\share and the rest. Both names must be present and valid.
+func winUNCVolume(s string) (vol, rest string, ok bool) {
+	server, tail, _ := strings.Cut(s, `\`)
+	share, rest, _ := strings.Cut(tail, `\`)
+	if server == "" || share == "" || server == "." || server == ".." ||
+		share == "." || share == ".." || !winValidComponent(server) || !winValidComponent(share) {
+		return "", "", false
+	}
+	return `\\` + server + `\` + share, rest, true
 }
 
 // windowsBoundary is the Windows policy built from one set of host facts.

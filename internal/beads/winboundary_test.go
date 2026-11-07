@@ -33,6 +33,11 @@ func TestWinCleanPath(t *testing.T) {
 		`\\.\c:\Windows`:              `C:\Windows`,
 		`//?/C:/Program Files/beads`:  `C:\Program Files\beads`,
 		`C:\Program Files (x86)\b\..`: `C:\Program Files (x86)`,
+		`\\server\share`:              `\\server\share\`,
+		`\\server\share\proj\..\..\x`: `\\server\share\x`,
+		`//server/share/proj`:         `\\server\share\proj`,
+		`\\?\UNC\server\share\proj`:   `\\server\share\proj`,
+		`\\.\unc\server\share\proj`:   `\\server\share\proj`,
 	} {
 		got, ok := winCleanPath(in)
 		if !ok || got.String() != want {
@@ -41,6 +46,7 @@ func TestWinCleanPath(t *testing.T) {
 	}
 	for _, in := range []string{
 		``, `beads`, `.\beads`, `C:`, `C:beads`, `\Windows`, `\\?\C:`, `\\.\C:`,
+		`\\server`, `\\server\`, `\\\share`, `\\?\UNC\server`, `\\..\share\x`,
 	} {
 		if got, ok := winCleanPath(in); ok {
 			t.Errorf("winCleanPath(%q) = %q, true; want rejection", in, got.String())
@@ -166,4 +172,33 @@ func TestWindowsPathInSafeBoundary_Spelling(t *testing.T) {
 	if !b.allows(`work\.beads`, `D:\cwd\work\.beads`) {
 		t.Errorf("allows(relative work\\.beads) = false, want true")
 	}
+}
+
+// AC-5: ordinary locations outside the denied roots stay admitted. Neither a
+// whole drive nor a whole share is denied, and ProgramData is not a system
+// root.
+func TestWindowsPathInSafeBoundary_OrdinaryLocations(t *testing.T) {
+	b := newWindowsBoundary(windowsFacts{
+		WindowsDir: `C:\Windows`,
+		Getenv: winEnv(map[string]string{
+			"SystemRoot":   `C:\Windows`,
+			"ProgramFiles": `C:\Program Files`,
+		}),
+	})
+	winBoundaryCheck(t, b, map[string]bool{
+		`C:\`:                                 true,
+		`C:\beads`:                            true,
+		`C:\beads\.beads`:                     true,
+		`D:\`:                                 true,
+		`D:\beads`:                            true,
+		`D:\src\project\.beads`:               true,
+		`C:\ProgramData\beads\.beads`:         true,
+		`\\fileserver\team`:                   true,
+		`\\fileserver\team\proj\.beads`:       true,
+		`//fileserver/team/proj/.beads`:       true,
+		`\\?\UNC\fileserver\team\proj\.beads`: true,
+		`\\?\D:\src\project\.beads`:           true,
+		// The system roots are still denied alongside.
+		`C:\Windows\.beads`: false,
+	})
 }
