@@ -2106,6 +2106,30 @@ func TestNativeConfigPath_NotProbedWhenDocumentedExists(t *testing.T) {
 	}
 }
 
+// TestNativeConfigPath_FallbackWhenDocumentedMissing verifies the native
+// os.UserConfigDir()/bd/config.yaml location still loads as a fallback when
+// the documented ~/.config/bd/config.yaml does not exist. This is the
+// existing-behavior half of the #8113 regression test: the fix must only skip
+// the native probe when the documented file is present, never remove the
+// fallback outright.
+func TestNativeConfigPath_FallbackWhenDocumentedMissing(t *testing.T) {
+	candidates, _ := isolateUserConfigRoots(t)
+
+	// No ~/.config/bd/config.yaml is created: the documented path is absent.
+
+	// Native path: os.UserConfigDir()/bd/config.yaml, present with a
+	// distinctive value.
+	writeConfigActor(t, candidates.native, "native-fallback-user")
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+
+	if got := GetString("actor"); got != "native-fallback-user" {
+		t.Errorf("GetString(actor) = %q, want %q (from native os.UserConfigDir() fallback)", got, "native-fallback-user")
+	}
+}
+
 func TestInitialize_ExternalBEADSDirDoesNotMergeCallerProjectConfig(t *testing.T) {
 	restore := envSnapshot(t)
 	defer restore()
