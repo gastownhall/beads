@@ -125,6 +125,142 @@ func TestInitFreshWithUnreachableGitOriginSucceeds(t *testing.T) {
 	}
 }
 
+// TestInitReinitLocalWithUnreachableGitOriginRefusesUnverified is the
+// override-path twin of TestInitFreshWithUnreachableGitOriginSucceeds
+// (gascity#7665). A remote the probe cannot reach never confirmed any Dolt
+// history, so the override refusal must say so — "could not verify", not
+// "already has Dolt history" — while still refusing (fail-closed per
+// ADR-0002: an access failure cannot establish absence) and still exiting
+// ExitRemoteDivergenceRefused before creating .beads.
+func TestInitReinitLocalWithUnreachableGitOriginRefusesUnverified(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	unreachableRemote := filepath.Join(t.TempDir(), "does-not-exist.git")
+
+	// newUnreachableWorkDir returns a fresh git repo whose origin is the
+	// unreachable remote (the credential-less private-remote shape).
+	newUnreachableWorkDir := func(t *testing.T) string {
+		t.Helper()
+		workDir := t.TempDir()
+		runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+		runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+		runGitForBootstrapTest(t, workDir, "remote", "add", "origin", unreachableRemote)
+		return workDir
+	}
+
+	cases := []struct {
+		name    string
+		args    []string
+		workDir func(t *testing.T) string
+		env     []string
+		jsonl   bool
+	}{
+		{
+			name:    "reinit-local/unreachable-origin",
+			args:    []string{"init", "--reinit-local"},
+			workDir: newUnreachableWorkDir,
+		},
+		{
+			name:    "force/unreachable-origin",
+			args:    []string{"init", "--force"},
+			workDir: newUnreachableWorkDir,
+		},
+		{
+			name:    "from-jsonl/unreachable-origin",
+			args:    []string{"init", "--from-jsonl"},
+			workDir: newUnreachableWorkDir,
+			jsonl:   true,
+		},
+		{
+			name: "reinit-local/unreachable-configured-remote",
+			args: []string{"init", "--reinit-local"},
+			workDir: func(t *testing.T) string {
+				t.Helper()
+				workDir := t.TempDir()
+				runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+				runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+				return workDir
+			},
+			env: []string{"BD_SYNC_REMOTE=" + unreachableRemote},
+		},
+		{
+			name: "from-jsonl/unreachable-explicit-remote",
+			args: []string{"init", "--from-jsonl", "--remote", unreachableRemote},
+			workDir: func(t *testing.T) string {
+				t.Helper()
+				workDir := t.TempDir()
+				runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+				runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+				return workDir
+			},
+			jsonl: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			workDir := tc.workDir(t)
+			if tc.jsonl {
+				beadsDir := filepath.Join(workDir, ".beads")
+				if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"),
+					[]byte(`{"id":"uv-abc123","title":"Local JSONL","type":"task","status":"open","priority":2}`+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			args := appendArgs(tc.args, "--prefix", "uv", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+			cmd := exec.Command(bdBin, args...)
+			cmd.Dir = workDir
+			cmd.Env = hermeticInitEnv(t.TempDir(), tc.env...)
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+
+			if err == nil {
+				t.Fatalf("bd init succeeded; expected unverified-remote refusal. stderr:\n%s", stderr.String())
+			}
+			exitErr, ok := err.(*exec.ExitError)
+			if !ok {
+				t.Fatalf("non-exec-exit error: %v\nstderr:\n%s", err, stderr.String())
+			}
+			if code := exitErr.ExitCode(); code != ExitRemoteDivergenceRefused {
+				t.Errorf("exit code = %d, want %d (ExitRemoteDivergenceRefused)", code, ExitRemoteDivergenceRefused)
+			}
+
+			stderrStr := stderr.String()
+			// The load-bearing assertion: the refusal reports an UNVERIFIED
+			// remote, never confirmed history it never observed.
+			for _, must := range []string{"could not verify whether the remote has Dolt history", `--remote ""`} {
+				if !strings.Contains(stderrStr, must) {
+					t.Errorf("unverified-remote refusal missing %q:\n%s", must, stderrStr)
+				}
+			}
+			if strings.Contains(stderrStr, "already has Dolt history") {
+				t.Errorf("refusal claims confirmed history for a remote the probe could not reach:\n%s", stderrStr)
+			}
+			// The refusal precedes every filesystem side effect.
+			if !tc.jsonl {
+				if _, err := os.Stat(filepath.Join(workDir, ".beads")); !os.IsNotExist(err) {
+					t.Errorf("refusal should not have created .beads (err=%v)", err)
+				}
+			}
+			for _, storage := range []string{"dolt", "embeddeddolt"} {
+				if _, err := os.Stat(filepath.Join(workDir, ".beads", storage)); !os.IsNotExist(err) {
+					t.Errorf("refusal should not have created .beads/%s (err=%v)", storage, err)
+				}
+			}
+		})
+	}
+}
+
+// appendArgs appends extra args to a base slice without aliasing it.
+func appendArgs(base []string, extra ...string) []string {
+	return append(append([]string{}, base...), extra...)
+}
+
 // TestInitReinitLocalConfiguredRemoteWithDoltDataRefuses is the sibling case:
 // sync.remote (again via BD_SYNC_REMOTE, not --remote) points at a bare repo
 // that DOES have refs/dolt/data pushed to it. `bd init --reinit-local` must

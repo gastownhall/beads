@@ -126,6 +126,15 @@ type RemoteSafetyInput struct {
 	// Observed state.
 	RemoteHasDoltData bool
 
+	// RemoteProbeUnknown is true when the refs/dolt/data probe could not
+	// observe the remote at all (network, credentials, missing path). The
+	// fail-closed resolver reports that as RemoteHasDoltData=true —
+	// ADR-0002 treats unknown as has-data — so this field never changes the
+	// DECISION; it only selects the truthful refusal text. A remote the
+	// probe cannot reach has no confirmed history, and the refusal must not
+	// claim otherwise (gascity#7665).
+	RemoteProbeUnknown bool
+
 	// IsInteractive is true when the caller is attached to a TTY.
 	// Interactive callers can prompt for destroy-token confirmation, so the
 	// decision returned for an interactive caller that supplied NO token
@@ -151,8 +160,11 @@ type RemoteSafetyDecision struct {
 // function — never add a new `&& !someFlag` at the call site. See the
 // guard matrix test in init_safety_test.go.
 func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
-	// No remote data → no cross-boundary concern. Proceed.
-	if !in.RemoteHasDoltData {
+	// No remote data → no cross-boundary concern. Proceed. An unknown probe
+	// must NOT take this arm even if a caller passed RemoteHasDoltData=false
+	// alongside it: unknown is fail-closed, so only BOTH fields false prove
+	// an observed empty remote.
+	if !in.RemoteHasDoltData && !in.RemoteProbeUnknown {
 		return RemoteSafetyDecision{Action: ActionNoRemoteData, Reason: "no-remote-data"}
 	}
 
@@ -164,7 +176,10 @@ func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
 	userOverride := in.Force || in.ReinitLocal || in.FromJSONL || in.DiscardRemote
 
 	// Remote has data, user did not override anything. Bootstrap is the
-	// safe adoption path — this is the existing correct behavior.
+	// safe adoption path — this is the existing correct behavior. An
+	// unknown probe lands here too (fail-closed): a plain init's caller
+	// then falls back to a fresh local database rather than cloning an
+	// unreachable remote (init.go's narrow no-override exception).
 	if !userOverride {
 		return RemoteSafetyDecision{Action: ActionBootstrap, Reason: "bootstrap-from-remote"}
 	}
@@ -172,13 +187,19 @@ func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
 	// User wanted to override but did NOT authorize the cross-boundary
 	// operation. This is the bd-q83 bug class: a local-source init flag
 	// (`--force`, `--reinit-local`, or `--from-jsonl`) without
-	// `--discard-remote`. Refuse with structured message.
+	// `--discard-remote`. Refuse with structured message. An unknown probe
+	// refuses identically — the fail-closed policy stands — but its text
+	// must not claim history the probe never observed.
 	if !in.DiscardRemote {
+		reason, message := "force-without-discard-remote", refusalMessageDivergence()
+		if in.RemoteProbeUnknown {
+			reason, message = "remote-unverified-without-discard-remote", refusalMessageDivergenceUnverified()
+		}
 		return RemoteSafetyDecision{
 			Action:      ActionRefuseDivergence,
-			Reason:      "force-without-discard-remote",
+			Reason:      reason,
 			ExitCode:    ExitRemoteDivergenceRefused,
-			UserMessage: refusalMessageDivergence(),
+			UserMessage: message,
 		}
 	}
 
@@ -232,6 +253,45 @@ func refusalMessageDivergence() string {
       bd doctor
 
     Overwrite the remote intentionally (destructive):
+      See 'bd help init-safety' for the --discard-remote workflow.`
+}
+
+// refusalMessageDivergenceUnverified returns the What/Why/Next refusal text
+// for a local-source override without `--discard-remote` when the
+// refs/dolt/data probe could not observe the remote at all. The refusal
+// stands — an access failure cannot establish that the remote has no
+// history, and ADR-0002 resolves unknown fail-closed — but the text reports
+// an unverified remote, never the confirmed history the probe never saw
+// (gascity#7665). Same no-echo invariant as refusalMessageDivergence: no
+// complete destructive invocation. `--remote ""` is named deliberately; it
+// is the non-destructive opt-out that initializes without connecting the
+// remote, not an override of it.
+func refusalMessageDivergenceUnverified() string {
+	return `bd init refuses: could not verify whether the remote has Dolt history
+(refs/dolt/data). The remote was unreachable, so this reports an
+unverified remote, not confirmed history.
+
+  Why: an access failure cannot establish that the remote has no Dolt
+       history, and this init mode would create or reuse local history
+       instead of adopting whatever the remote holds. --force /
+       --reinit-local bypasses only the LOCAL data-safety guard;
+       --from-jsonl selects JSONL as the local source. Neither
+       authorizes silent divergence of history bd cannot see.
+
+  Next:
+    Fix access to the remote, then adopt its history once readable:
+      bd bootstrap
+
+    Check the ref yourself:
+      git ls-remote <remote-url> refs/dolt/data
+
+    Or initialize without connecting that remote (local-only):
+      add --remote "" to this init invocation
+
+    Diagnose first:
+      bd doctor
+
+    Intentionally overwrite the remote's history (destructive):
       See 'bd help init-safety' for the --discard-remote workflow.`
 }
 
