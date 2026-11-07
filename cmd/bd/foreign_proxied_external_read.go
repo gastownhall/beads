@@ -16,9 +16,14 @@ import (
 // what a foreign read of a proxied-server workspace dials without a server.
 var openExternalReadStore = newExternalReadStore
 
-// newExternalReadStore opens rc read-only (dolt.NewExternalReadOnly).
+// newExternalReadStore opens rc read-only (dolt.NewExternalReadOnly). A
+// failed open returns a nil interface, not one holding a nil *DoltStore.
 func newExternalReadStore(ctx context.Context, rc dolt.ExternalReadConfig) (storage.DoltStorage, error) {
-	return dolt.NewExternalReadOnly(ctx, rc)
+	store, err := dolt.NewExternalReadOnly(ctx, rc)
+	if err != nil {
+		return nil, err
+	}
+	return store, nil
 }
 
 // openForeignProxiedExternalRead is openForeignStore's foreignRead arm for a
