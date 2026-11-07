@@ -190,7 +190,7 @@ Examples:
   bd doctor --output diagnostics.json  # Export diagnostics to file
   bd doctor --check=artifacts           # Show classic artifacts (JSONL, SQLite, cruft dirs)
   bd doctor --check=artifacts --clean  # Delete safe-to-delete artifacts (with confirmation)
-  bd doctor --check=conventions        # Convention drift check (lint, stale, orphans)
+  bd doctor --check=conventions        # Convention drift check (lint, stale, orphans, blocked status)
   bd doctor --check=pollution          # Show potential test issues
   bd doctor --check=pollution --clean  # Delete test issues (with confirmation)
   bd doctor --check=validate         # Data-integrity checks only
