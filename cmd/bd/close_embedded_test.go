@@ -932,8 +932,10 @@ func TestEmbeddedCloseConcurrent(t *testing.T) {
 // `bd close --suggest-next` says about a dependent whose own status is still
 // 'blocked' when its last blocker closes: the text names the reviewed release
 // (bd update <id> --status open) and the stored status survives the close —
-// bd close deliberately never rewrites it. TestProxiedServerClose2B's
-// close_suggest_next_blocked_status subtest is its proxied twin.
+// bd close deliberately never rewrites it — while `--json` keeps its
+// closed/unblocked shape, the blocked status included, with no text hint.
+// TestProxiedServerClose2B's close_suggest_next_blocked_status subtest is
+// its proxied twin.
 func TestEmbeddedCloseSuggestNextBlockedStatus(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
@@ -976,6 +978,43 @@ func TestEmbeddedCloseSuggestNextBlockedStatus(t *testing.T) {
 		}
 		if got := bdShow(t, bd, dir, c); got.Status != types.StatusOpen {
 			t.Errorf("close must leave %s open, got %s", c, got.Status)
+		}
+	})
+
+	t.Run("json_keeps_shape_and_status_without_text_hints", func(t *testing.T) {
+		dir, a, b, c := fixture(t)
+
+		out := bdClose(t, bd, dir, "--json", "--suggest-next", a)
+
+		start := strings.Index(out, "{")
+		if start < 0 {
+			t.Fatalf("no JSON object in bd close --json --suggest-next output:\n%s", out)
+		}
+		var env struct {
+			Closed    []closeJSONEntry `json:"closed"`
+			Unblocked []*types.Issue   `json:"unblocked"`
+		}
+		if err := json.Unmarshal([]byte(out[start:]), &env); err != nil {
+			t.Fatalf("parse bd close --json --suggest-next: %v\n%s", err, out[start:])
+		}
+		if len(env.Closed) != 1 || env.Closed[0].ID != a {
+			t.Errorf("closed = %+v, want exactly [%s]", env.Closed, a)
+		}
+		statusByID := map[string]types.Status{}
+		for _, issue := range env.Unblocked {
+			statusByID[issue.ID] = issue.Status
+		}
+		if statusByID[b] != types.StatusBlocked {
+			t.Errorf("unblocked %s status = %q, want \"blocked\" reported as it is stored", b, statusByID[b])
+		}
+		if statusByID[c] != types.StatusOpen {
+			t.Errorf("unblocked %s status = %q, want \"open\"", c, statusByID[c])
+		}
+		if strings.Contains(out, "still status") {
+			t.Errorf("--json must carry no text hint, got:\n%s", out)
+		}
+		if got := bdShow(t, bd, dir, b); got.Status != types.StatusBlocked {
+			t.Errorf("close must leave %s status 'blocked', got %s", b, got.Status)
 		}
 	})
 }
