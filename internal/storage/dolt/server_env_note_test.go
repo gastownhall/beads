@@ -212,6 +212,95 @@ func TestPeerTransferFailureNamesServerEnvironment(t *testing.T) {
 
 		assertServerEnvNote(t, err, "fetch failed", []string{"AWS_*"}, nil)
 	})
+
+	t.Run("s3 peer push with no ambient credentials stays unexplained", func(t *testing.T) {
+		fakeDoltOnPathFailingTransfers(t, "peer "+s3URL)
+		store, _ := serverEnvPeerStore(t, s3URL)
+
+		err := store.PushTo(ctx, "peer")
+
+		if err == nil {
+			t.Fatal("expected the transfer to fail")
+		}
+		if strings.Contains(err.Error(), "server's process") {
+			t.Fatalf("s3 push with no held AWS variables %q must not claim the server takes a DOLT_REMOTE_PASSWORD it does not read for s3", err)
+		}
+	})
+}
+
+// TestServerEnvNoteNamesWhatTheServerReads pins which variables the note may
+// name for a destination (GH#5953): the DOLT_REMOTE_PASSWORD pair only
+// authenticates remotesapi destinations (DoltHub, Hosted Dolt), so a cloud
+// object-store destination never has the pair named for it — its scheme's
+// provider variables are all the server can read there.
+func TestServerEnvNoteNamesWhatTheServerReads(t *testing.T) {
+	peerCreds := &remoteCredentials{username: "peeruser", password: "peer-secret"}
+	cases := []struct {
+		name      string
+		procedure string
+		destURL   string
+		creds     *remoteCredentials
+		env       []string
+		want      string
+		unwant    string
+	}{
+		{
+			name:      "hosted remotesapi with sent credentials",
+			procedure: "dolt push",
+			destURL:   "https://doltremoteapi.dolthub.com/org/repo",
+			creds:     peerCreds,
+			want:      "DOLT_REMOTE_PASSWORD",
+		},
+		{
+			name:      "dolthub remotesapi with sent credentials",
+			procedure: "CALL DOLT_PUSH",
+			destURL:   "dolthub://org/repo",
+			creds:     peerCreds,
+			want:      "DOLT_REMOTE_PASSWORD",
+		},
+		{
+			name:      "s3 destination with sent credentials names no password",
+			procedure: "dolt push",
+			destURL:   "s3://bucket/beads",
+			creds:     peerCreds,
+			want:      "",
+		},
+		{
+			name:      "s3 destination with ambient AWS credentials",
+			procedure: "dolt fetch",
+			destURL:   "aws://bucket/beads",
+			env:       []string{"AWS_ACCESS_KEY_ID=AKIAFRESH"},
+			want:      "AWS_*",
+			unwant:    "DOLT_REMOTE_PASSWORD",
+		},
+		{
+			name:      "azure destination with ambient storage variables",
+			procedure: "dolt pull",
+			destURL:   "az://container/beads",
+			env:       []string{"AZURE_STORAGE_ACCOUNT=bdenvacct"},
+			want:      "AZURE_STORAGE_*",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			note := buildServerEnvCredentialsNote(tc.procedure, tc.destURL, tc.creds, tc.env)
+			if tc.want == "" {
+				if note != "" {
+					t.Fatalf("note %q should be empty: nothing the server reads is held", note)
+				}
+				return
+			}
+			if !strings.Contains(note, tc.want) {
+				t.Fatalf("note %q should name %q", note, tc.want)
+			}
+			if tc.unwant != "" && strings.Contains(note, tc.unwant) {
+				t.Fatalf("note %q should not name %q", note, tc.unwant)
+			}
+			if !strings.Contains(note, tc.procedure) {
+				t.Fatalf("note %q should name the procedure %q", note, tc.procedure)
+			}
+		})
+	}
 }
 
 // serverEnvDefaultRemoteStore builds a server-mode store whose default

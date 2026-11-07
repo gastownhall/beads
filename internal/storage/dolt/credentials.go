@@ -788,6 +788,16 @@ func isS3RemoteURL(url string) bool {
 	return strings.HasPrefix(url, "aws://") || strings.HasPrefix(url, "s3://")
 }
 
+// isRemotesAPIRemoteURL reports whether url addresses a remotesapi
+// destination (DoltHub or Hosted Dolt over HTTP) — the one family whose
+// credentials the DOLT_REMOTE_USER/DOLT_REMOTE_PASSWORD pair carries. Cloud
+// object-store destinations (aws://, s3://, ...) authenticate with their
+// provider's variables instead, so their notes never name the pair even when
+// the transfer sends a stored username and password (GH#5953).
+func isRemotesAPIRemoteURL(url string) bool {
+	return strings.HasPrefix(url, "dolthub://") || strings.HasPrefix(url, "https://") || strings.HasPrefix(url, "http://")
+}
+
 func (s *DoltStore) isS3Remote(ctx context.Context, remote string) bool {
 	remotes, err := s.ListRemotes(ctx)
 	if err != nil {
@@ -901,7 +911,7 @@ const serverEnvNoteRemedy = "; if the server's credentials are missing or stale,
 // It is empty when bd holds none of them.
 func buildServerEnvCredentialsNote(procedure, destURL string, creds *remoteCredentials, env []string) string {
 	var held []string
-	if creds != nil && creds.username != "" && creds.password != "" {
+	if creds != nil && creds.username != "" && creds.password != "" && isRemotesAPIRemoteURL(destURL) {
 		held = append(held, "DOLT_REMOTE_PASSWORD")
 	}
 	for _, prefix := range envPrefixesForRemoteURL(destURL) {
