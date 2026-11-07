@@ -1,14 +1,19 @@
 package beads
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
 )
 
 // RepoIDSource identifies how a repo fingerprint was derived.
@@ -36,19 +41,54 @@ func ComputeRepoIDForPath(repoPath string) (string, error) {
 	return id, err
 }
 
+// RepoFingerprint is the repository identity bd stamps into repo_id, plus
+// how it was derived.
+type RepoFingerprint struct {
+	// ID is the fingerprint to store and compare.
+	ID string
+	// Source says whether ID hashes the remote URL or the local repo path.
+	Source RepoIDSource
+	// SSHAlias is the written SSH host when it was resolved to SSHHostName
+	// through the local SSH configuration (GH#5990); empty otherwise.
+	SSHAlias string
+	// SSHHostName is the HostName the SSH alias resolved to; empty otherwise.
+	SSHHostName string
+}
+
+// AliasResolved reports whether the remote's SSH host alias was replaced by
+// its configured HostName.
+func (f RepoFingerprint) AliasResolved() bool {
+	return f.SSHHostName != ""
+}
+
 // ComputeRepoIDForPathWithSource is ComputeRepoIDForPath plus which derivation
 // produced the fingerprint, so callers (bd doctor, bd migrate --update-repo-id)
 // can tell a canonical remote-derived fingerprint from the path fallback
 // (bd-46vla: on a synced clone without the canonical origin remote, a
 // path-fallback mismatch against the stored id is cosmetic, and stamping the
 // local value into the versioned metadata table propagates it to every clone).
+func ComputeRepoIDForPathWithSource(repoPath string) (string, RepoIDSource, error) {
+	fp, err := ComputeRepoFingerprintForPath(repoPath)
+	if err != nil {
+		return "", "", err
+	}
+	return fp.ID, fp.Source, nil
+}
+
+// ComputeRepoFingerprintForPath computes the repository fingerprint for the
+// git repository rooted at or containing repoPath. An empty repoPath uses
+// the current cwd.
 //
 // GH#2867: When running from a git worktree, the path-based fallback (no remote)
 // uses the main repository root instead of the worktree root. This ensures all
 // worktrees sharing a database produce the same fingerprint. Without this,
 // worktree operations would compute a different repo_id and bd doctor would
 // report a fingerprint mismatch.
-func ComputeRepoIDForPathWithSource(repoPath string) (string, RepoIDSource, error) {
+//
+// GH#5990: an SSH remote written through a host alias (git@alias-a:org/repo)
+// hashes the HostName the local SSH configuration maps the alias to, so
+// clones reaching one repository through different aliases agree.
+func ComputeRepoFingerprintForPath(repoPath string) (RepoFingerprint, error) {
 	output, err := runGitInRepo(repoPath, "config", "--get", "remote.origin.url")
 	if err != nil {
 		// No remote configured — fall back to path-based fingerprint.
@@ -56,22 +96,177 @@ func ComputeRepoIDForPathWithSource(repoPath string) (string, RepoIDSource, erro
 		// worktrees produce the same fingerprint as the main checkout.
 		repoRoot, rootErr := mainRepoRootForPath(repoPath)
 		if rootErr != nil {
-			return "", "", fmt.Errorf("not a git repository")
+			return RepoFingerprint{}, fmt.Errorf("not a git repository")
 		}
 
-		normalized := normalizedRepoPath(repoRoot)
-		hash := sha256.Sum256([]byte(normalized))
-		return hex.EncodeToString(hash[:16]), RepoIDSourcePath, nil
+		return RepoFingerprint{ID: hashRepoIdentity(normalizedRepoPath(repoRoot)), Source: RepoIDSourcePath}, nil
 	}
 
 	repoURL := strings.TrimSpace(string(output))
 	canonical, err := canonicalizeGitURL(repoURL)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to canonicalize URL: %w", err)
+		return RepoFingerprint{}, fmt.Errorf("failed to canonicalize URL: %w", err)
 	}
 
+	fp := RepoFingerprint{ID: hashRepoIdentity(canonical), Source: RepoIDSourceRemote}
+	if resolved, alias, hostName, ok := resolveSSHAliasCanonical(repoURL, canonical); ok {
+		fp.ID = hashRepoIdentity(resolved)
+		fp.SSHAlias = alias
+		fp.SSHHostName = hostName
+	}
+	return fp, nil
+}
+
+func hashRepoIdentity(canonical string) string {
 	hash := sha256.Sum256([]byte(canonical))
-	return hex.EncodeToString(hash[:16]), RepoIDSourceRemote, nil
+	return hex.EncodeToString(hash[:16])
+}
+
+// Seams for SSH alias resolution, replaced by tests.
+var (
+	sshLookPath         = exec.LookPath
+	sshResolveTimeout   = 2 * time.Second
+	sshResolveWaitDelay = 500 * time.Millisecond
+	resolveSSHHostName  = sshConfigHostName
+)
+
+// sshRemote is the destination part of an SSH remote URL.
+type sshRemote struct {
+	user string
+	host string
+	port string
+}
+
+// safeSSHToken matches the host and user tokens handed to ssh.
+var safeSSHToken = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// parseSSHRemote splits an SSH remote (scp-style [user@]host:path, or an
+// ssh://, git+ssh:// or ssh+git:// URL) into its destination. Other
+// transports and local paths report false. Host detection mirrors
+// canonicalizeGitURL so the written host is a prefix of its output.
+func parseSSHRemote(rawURL string) (sshRemote, bool) {
+	rawURL = strings.TrimSpace(rawURL)
+
+	if i := strings.Index(rawURL, "://"); i >= 0 {
+		switch strings.ToLower(rawURL[:i]) {
+		case "ssh", "git+ssh", "ssh+git":
+		default:
+			return sshRemote{}, false
+		}
+		u, err := url.Parse(rawURL)
+		if err != nil || u.Hostname() == "" {
+			return sshRemote{}, false
+		}
+		remote := sshRemote{host: u.Hostname(), port: u.Port()}
+		if u.User != nil {
+			remote.user = u.User.Username()
+		}
+		return remote, true
+	}
+
+	colonIdx := strings.Index(rawURL, ":")
+	slashIdx := strings.Index(rawURL, "/")
+	if colonIdx <= 0 || (slashIdx != -1 && slashIdx < colonIdx) {
+		return sshRemote{}, false
+	}
+	if colonIdx == 1 {
+		// A one-letter host is indistinguishable from a Windows drive (C:...).
+		return sshRemote{}, false
+	}
+	hostPart := rawURL[:colonIdx]
+	remote := sshRemote{host: hostPart}
+	if atIdx := strings.LastIndex(hostPart, "@"); atIdx >= 0 {
+		remote.user = hostPart[:atIdx]
+		remote.host = hostPart[atIdx+1:]
+	}
+	return remote, true
+}
+
+// resolveSSHAliasCanonical returns the canonical identity of an SSH remote
+// with its written host replaced by the HostName the local SSH configuration
+// maps it to. It reports false, leaving the legacy identity in force,
+// whenever the remote is not SSH or the alias cannot be resolved.
+func resolveSSHAliasCanonical(rawURL, legacyCanonical string) (canonical, alias, hostName string, ok bool) {
+	remote, ok := parseSSHRemote(rawURL)
+	if !ok {
+		return "", "", "", false
+	}
+	host := strings.ToLower(remote.host)
+	if !strings.HasPrefix(legacyCanonical, host) {
+		return "", "", "", false
+	}
+	tail := legacyCanonical[len(host):]
+	if !safeSSHToken.MatchString(host) || net.ParseIP(host) != nil {
+		return "", "", "", false
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), sshResolveTimeout)
+	defer cancel()
+	out, err := resolveSSHHostName(ctx, remote.user, remote.host, remote.port)
+	if err != nil {
+		return "", "", "", false
+	}
+	resolved, ok := normalizeSSHHostName(out)
+	if !ok || resolved == strings.TrimSuffix(host, ".") {
+		return "", "", "", false
+	}
+	return resolved + tail, host, resolved, true
+}
+
+// normalizeSSHHostName validates a HostName printed by ssh -G and returns it
+// lowercased without a trailing dot.
+func normalizeSSHHostName(hostName string) (string, bool) {
+	hostName = strings.TrimSuffix(strings.ToLower(hostName), ".")
+	if net.ParseIP(hostName) != nil {
+		return hostName, true
+	}
+	return hostName, safeSSHToken.MatchString(hostName)
+}
+
+// sshConfigHostName asks ssh which HostName its configuration gives the
+// destination. ssh -G evaluates the configuration without connecting.
+func sshConfigHostName(ctx context.Context, user, host, port string) (string, error) {
+	sshPath, err := sshLookPath("ssh")
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(sshPath) {
+		return "", fmt.Errorf("ssh resolved to relative path %q", sshPath)
+	}
+
+	dest := host
+	if user != "" {
+		dest = user + "@" + host
+	}
+	args := []string{"-G"}
+	if port != "" {
+		args = append(args, "-p", port)
+	}
+	args = append(args, "--", dest)
+
+	cmd := exec.CommandContext(ctx, sshPath, args...)
+	cmd.WaitDelay = sshResolveWaitDelay
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return parseSSHConfigHostName(out)
+}
+
+// parseSSHConfigHostName returns the value of the first hostname line of
+// ssh -G output.
+func parseSSHConfigHostName(out []byte) (string, error) {
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(strings.TrimRight(line, "\r"))
+		if len(fields) == 0 || !strings.EqualFold(fields[0], "hostname") {
+			continue
+		}
+		if len(fields) != 2 {
+			return "", fmt.Errorf("malformed hostname line %q", line)
+		}
+		return fields[1], nil
+	}
+	return "", errors.New("no hostname in ssh -G output")
 }
 
 func canonicalizeGitURL(rawURL string) (string, error) {

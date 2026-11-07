@@ -3,6 +3,8 @@ package beads
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -509,4 +511,94 @@ func TestComputeRepoIDForPathWithSource(t *testing.T) {
 			t.Fatal("empty id")
 		}
 	})
+}
+
+// isolateFingerprintGitEnv keeps the developer's git config and SSH
+// transport overrides out of the fingerprint tests.
+func isolateFingerprintGitEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_SSH", "")
+	t.Setenv("GIT_SSH_COMMAND", "")
+	t.Setenv("GIT_SSH_VARIANT", "")
+}
+
+// fakeSSHAliasScript answers `ssh -G [opts] -- [user@]host` like OpenSSH
+// with a config mapping the aliases alias-a, alias-b and github.com-work to
+// HostName github.com, and every other host to itself. Like OpenSSH it
+// lowercases the host before matching.
+const fakeSSHAliasScript = `#!/bin/sh
+[ "$1" = "-G" ] || exit 2
+for dest; do :; done
+host=$(printf '%s' "${dest#*@}" | tr 'A-Z' 'a-z')
+echo "host $host"
+echo "user git"
+case "$host" in
+alias-a|alias-b|github.com-work) echo "hostname github.com" ;;
+*) echo "hostname $host" ;;
+esac
+echo "port 22"
+`
+
+// installFakeSSH puts an ssh executable running script first on PATH.
+func installFakeSSH(t *testing.T, script string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake ssh is a shell script")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o700); err != nil { // #nosec G306 -- test executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func repoIDForRemote(t *testing.T, remote string) string {
+	t.Helper()
+	dir := t.TempDir()
+	initFingerprintGitRepo(t, dir, remote)
+	id, err := ComputeRepoIDForPath(dir)
+	if err != nil {
+		t.Fatalf("ComputeRepoIDForPath(%s) error: %v", remote, err)
+	}
+	return id
+}
+
+// GH#5990: clones reaching one repository through different SSH host
+// aliases must share one fingerprint, equal to the canonical-host SSH and
+// HTTPS fingerprints (explicit ports keep their existing hashing).
+func TestComputeRepoIDForPath_SSHAliasesOfSameRepoAgree(t *testing.T) {
+	isolateFingerprintGitEnv(t)
+	installFakeSSH(t, fakeSSHAliasScript)
+
+	groups := map[string][]string{
+		"default port": {
+			"git@github.com:org/repo.git",
+			"https://github.com/org/repo.git",
+			"git@alias-a:org/repo.git",
+			"git@alias-b:org/repo.git",
+			"git@github.com-work:org/repo.git",
+			"ssh://git@alias-a/org/repo.git",
+			"git+ssh://git@ALIAS-B/org/repo",
+			"ssh+git://alias-a:22/org/repo.git",
+		},
+		"explicit port": {
+			"ssh://git@github.com:2222/org/repo.git",
+			"https://github.com:2222/org/repo.git",
+			"ssh://git@alias-a:2222/org/repo.git",
+			"ssh://alias-b:2222/org/repo",
+		},
+	}
+	for name, remotes := range groups {
+		want := repoIDForRemote(t, remotes[0])
+		for _, remote := range remotes[1:] {
+			if got := repoIDForRemote(t, remote); got != want {
+				t.Errorf("%s: repo id of %s = %s, want %s (same repo as %s)", name, remote, got, want, remotes[0])
+			}
+		}
+	}
+	if repoIDForRemote(t, groups["default port"][0]) == repoIDForRemote(t, groups["explicit port"][0]) {
+		t.Error("explicit port 2222 must keep hashing differently from the default port")
+	}
 }
