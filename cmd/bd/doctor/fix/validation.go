@@ -46,14 +46,20 @@ func OrphanedDependencies(path string, verbose bool) error {
 		return err
 	}
 
-	// Find orphaned dependencies (exclude external: cross-rig tracking refs, #1593)
+	held, err := HeldPrefixes(db)
+	if err != nil {
+		return fmt.Errorf("failed to read held prefixes: %w", err)
+	}
+
+	// Find orphaned dependencies. A target this database cannot hold a row
+	// for is not one: an external: cross-rig tracking ref (#1593) or another
+	// repository's issue (#4647); see IsUnverifiableDepTarget.
 	//nolint:gosec // G202: fixDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
 		SELECT d.dep_table, d.issue_id, d.depends_on_id
 		FROM (` + fixDependencyUnionSQL() + `) d
 		WHERE NOT EXISTS (SELECT 1 FROM issues i WHERE i.id = d.depends_on_id)
 		  AND NOT EXISTS (SELECT 1 FROM wisps w WHERE w.id = d.depends_on_id)
-		  AND d.depends_on_id NOT LIKE 'external:%'
 	`
 	rows, err := db.Query(query)
 	if err != nil {
@@ -70,7 +76,8 @@ func OrphanedDependencies(path string, verbose bool) error {
 
 	for rows.Next() {
 		var o orphan
-		if err := rows.Scan(&o.depTable, &o.issueID, &o.dependsOnID); err == nil {
+		if err := rows.Scan(&o.depTable, &o.issueID, &o.dependsOnID); err == nil &&
+			!IsUnverifiableDepTarget(o.issueID, o.dependsOnID, held) {
 			orphans = append(orphans, o)
 		}
 	}

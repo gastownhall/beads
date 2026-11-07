@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 )
@@ -190,21 +191,33 @@ func checkDependencyIntegrity(db *sql.DB) DoctorCheck {
 		Category: CategoryMetadata,
 	}
 
-	// Find any deps where either side is missing
+	held, err := fix.HeldPrefixes(db)
+	if err != nil {
+		check.Status = StatusWarning
+		check.Message = "Unable to check dependency integrity"
+		check.Detail = err.Error()
+		return check
+	}
+
+	// Find any deps where either side is missing. A missing target this
+	// database cannot hold a row for is not broken (the orphan check's rule,
+	// fix.IsUnverifiableDepTarget); a missing source always is.
 	//nolint:gosec // G202: doctorDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
-		SELECT d.issue_id, d.depends_on_id, d.type
-		FROM (` + doctorDependencyUnionSQL() + `) d
-		WHERE (
-		    (d.dep_table = 'dependencies' AND NOT EXISTS (SELECT 1 FROM issues WHERE id = d.issue_id))
-		    OR (d.dep_table = 'wisp_dependencies' AND NOT EXISTS (SELECT 1 FROM wisps WHERE id = d.issue_id))
-		    OR (
-		      d.depends_on_id NOT LIKE 'external:%'
-		      AND NOT EXISTS (SELECT 1 FROM issues WHERE id = d.depends_on_id)
+		SELECT x.issue_id, x.depends_on_id, x.type, x.source_missing
+		FROM (
+		  SELECT d.issue_id, d.depends_on_id, d.type,
+		    (
+		      (d.dep_table = 'dependencies' AND NOT EXISTS (SELECT 1 FROM issues WHERE id = d.issue_id))
+		      OR (d.dep_table = 'wisp_dependencies' AND NOT EXISTS (SELECT 1 FROM wisps WHERE id = d.issue_id))
+		    ) AS source_missing,
+		    (
+		      NOT EXISTS (SELECT 1 FROM issues WHERE id = d.depends_on_id)
 		      AND NOT EXISTS (SELECT 1 FROM wisps WHERE id = d.depends_on_id)
-		    )
-		  )
-		LIMIT 10`
+		    ) AS target_missing
+		  FROM (` + doctorDependencyUnionSQL() + `) d
+		) x
+		WHERE x.source_missing OR x.target_missing`
 
 	rows, err := db.Query(query)
 	if err != nil {
@@ -216,11 +229,16 @@ func checkDependencyIntegrity(db *sql.DB) DoctorCheck {
 	defer rows.Close()
 
 	var brokenDeps []string
-	for rows.Next() {
+	for len(brokenDeps) < 10 && rows.Next() {
 		var issueID, dependsOnID, depType string
-		if err := rows.Scan(&issueID, &dependsOnID, &depType); err == nil {
-			brokenDeps = append(brokenDeps, fmt.Sprintf("%s→%s (%s)", issueID, dependsOnID, depType))
+		var sourceMissing bool
+		if err := rows.Scan(&issueID, &dependsOnID, &depType, &sourceMissing); err != nil {
+			continue
 		}
+		if !sourceMissing && fix.IsUnverifiableDepTarget(issueID, dependsOnID, held) {
+			continue
+		}
+		brokenDeps = append(brokenDeps, fmt.Sprintf("%s→%s (%s)", issueID, dependsOnID, depType))
 	}
 	if err := rows.Err(); err != nil {
 		check.Status = StatusWarning

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -662,6 +663,326 @@ func TestCheckOrphanedDependenciesDB_IssueToWispTargetIsNotOrphan(t *testing.T) 
 	check := checkOrphanedDependenciesDB(store.DB())
 	if check.Status != StatusOK {
 		t.Fatalf("Status = %q, want %q; detail=%s", check.Status, StatusOK, check.Detail)
+	}
+}
+
+// TestCheckOrphanedDependenciesDB_CrossPrefixTargetIsNotOrphan pins #4647: a
+// target whose prefix names another repository is stored in
+// depends_on_external and lives in that rig's database, so a missing local row
+// is expected and the edge is not reported as an orphan.
+func TestCheckOrphanedDependenciesDB_CrossPrefixTargetIsNotOrphan(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+
+	issue := &types.Issue{ID: "test-cross-source", Title: "Source", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatalf("CreateIssue source: %v", err)
+	}
+
+	dep := &types.Dependency{
+		IssueID:     issue.ID,
+		DependsOnID: "other-target",
+		Type:        types.DepBlocks,
+		CreatedAt:   time.Now(),
+		CreatedBy:   "test",
+	}
+	if err := store.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatalf("AddDependency cross-prefix: %v", err)
+	}
+
+	var external sql.NullString
+	if err := store.DB().QueryRowContext(ctx,
+		"SELECT depends_on_external FROM dependencies WHERE issue_id = ?", issue.ID).Scan(&external); err != nil {
+		t.Fatalf("read dependency row: %v", err)
+	}
+	if external.String != "other-target" {
+		t.Fatalf("depends_on_external = %q, want %q", external.String, "other-target")
+	}
+
+	check := checkOrphanedDependenciesDB(store.DB())
+	if check.Status != StatusOK {
+		t.Fatalf("Status = %q, want %q; detail=%s", check.Status, StatusOK, check.Detail)
+	}
+}
+
+// insertDepOnExternalColumn stores issueID -> target in depends_on_external,
+// the column that carries no foreign key, as migrations 0041 and 0047 do for
+// a target that was already missing whatever its prefix.
+func insertDepOnExternalColumn(t *testing.T, db *sql.DB, issueID, target string) {
+	t.Helper()
+	if _, err := db.Exec(
+		`INSERT INTO dependencies (id, issue_id, depends_on_external, type, created_at, created_by)
+		 VALUES (UUID(), ?, ?, 'blocks', NOW(), 'test')`, issueID, target); err != nil {
+		t.Fatalf("insert %s -> %s: %v", issueID, target, err)
+	}
+}
+
+// TestCheckOrphanedDependenciesDB_SamePrefixExternalColumnTargetIsOrphan pins
+// that the storage column does not decide #4647's exemption: a same-prefix
+// target with no row, stored in depends_on_external, is still an orphan.
+func TestCheckOrphanedDependenciesDB_SamePrefixExternalColumnTargetIsOrphan(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+
+	issue := &types.Issue{ID: "test-src", Title: "Source", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatalf("CreateIssue source: %v", err)
+	}
+	insertDepOnExternalColumn(t, store.DB(), issue.ID, "test-gone")
+
+	check := checkOrphanedDependenciesDB(store.DB())
+	if check.Status != StatusWarning {
+		t.Fatalf("Status = %q, want %q; message=%s", check.Status, StatusWarning, check.Message)
+	}
+	if !strings.Contains(check.Detail, "test-src→test-gone") {
+		t.Fatalf("Detail = %q, want test-src→test-gone", check.Detail)
+	}
+}
+
+// TestCheckOrphanedDependenciesDB_DeletedHeldPrefixTargetIsOrphan pins the
+// mixed-prefix case: with zz in allowed_prefixes, test-a -> zz-b is stored in
+// depends_on_external, and deleting zz-b leaves an edge to a row this
+// database held, so it is an orphan.
+func TestCheckOrphanedDependenciesDB_DeletedHeldPrefixTargetIsOrphan(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+
+	if err := store.SetConfig(ctx, "allowed_prefixes", "zz"); err != nil {
+		t.Fatalf("SetConfig allowed_prefixes: %v", err)
+	}
+	for _, id := range []string{"test-a", "zz-b"} {
+		issue := &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", id, err)
+		}
+	}
+	dep := &types.Dependency{IssueID: "test-a", DependsOnID: "zz-b", Type: types.DepBlocks, CreatedAt: time.Now(), CreatedBy: "test"}
+	if err := store.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+	if check := checkOrphanedDependenciesDB(store.DB()); check.Status != StatusOK {
+		t.Fatalf("before delete: Status = %q, want %q; detail=%s", check.Status, StatusOK, check.Detail)
+	}
+	if err := store.DeleteIssue(ctx, "zz-b"); err != nil {
+		t.Fatalf("DeleteIssue zz-b: %v", err)
+	}
+
+	var external sql.NullString
+	if err := store.DB().QueryRowContext(ctx,
+		"SELECT depends_on_external FROM dependencies WHERE issue_id = 'test-a'").Scan(&external); err != nil {
+		t.Fatalf("read dangling edge: %v", err)
+	}
+	if external.String != "zz-b" {
+		t.Fatalf("depends_on_external = %q, want zz-b", external.String)
+	}
+
+	check := checkOrphanedDependenciesDB(store.DB())
+	if check.Status != StatusWarning {
+		t.Fatalf("Status = %q, want %q; message=%s", check.Status, StatusWarning, check.Message)
+	}
+	if !strings.Contains(check.Detail, "test-a→zz-b") {
+		t.Fatalf("Detail = %q, want test-a→zz-b", check.Detail)
+	}
+}
+
+// TestCheckOrphanedDependenciesDB_CountsUnverifiableTargets pins the
+// non-deleting line: an external: ref and another repository's target are
+// counted, not reported, and a target with no hyphen is still an orphan.
+func TestCheckOrphanedDependenciesDB_CountsUnverifiableTargets(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+
+	issue := &types.Issue{ID: "test-src", Title: "Source", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatalf("CreateIssue source: %v", err)
+	}
+	dep := &types.Dependency{IssueID: issue.ID, DependsOnID: "other-target", Type: types.DepBlocks, CreatedAt: time.Now(), CreatedBy: "test"}
+	if err := store.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatalf("AddDependency cross-prefix: %v", err)
+	}
+	insertDepOnExternalColumn(t, store.DB(), issue.ID, "external:proj:cap")
+
+	check := checkOrphanedDependenciesDB(store.DB())
+	if check.Status != StatusOK {
+		t.Fatalf("Status = %q, want %q; detail=%s", check.Status, StatusOK, check.Detail)
+	}
+	if want := "(2 cross-repository edge(s) not verifiable here)"; !strings.Contains(check.Message, want) {
+		t.Fatalf("Message = %q, want it to contain %q", check.Message, want)
+	}
+
+	insertDepOnExternalColumn(t, store.DB(), issue.ID, "gone")
+	check = checkOrphanedDependenciesDB(store.DB())
+	if check.Status != StatusWarning {
+		t.Fatalf("with no-hyphen target: Status = %q, want %q", check.Status, StatusWarning)
+	}
+	if check.Detail != "test-src→gone" {
+		t.Fatalf("Detail = %q, want only test-src→gone", check.Detail)
+	}
+	if want := "1 orphaned dependency reference(s) (2 cross-repository edge(s) not verifiable here)"; check.Message != want {
+		t.Fatalf("Message = %q, want %q", check.Message, want)
+	}
+}
+
+// orphanCheckFingerprint is the sha256 of the check as bd doctor renders it:
+// the --json bytes, then each field the text printer shows. Equal
+// fingerprints mean byte-identical output on both paths.
+func orphanCheckFingerprint(t *testing.T, c DoctorCheck) string {
+	t.Helper()
+	js, err := json.Marshal(c)
+	if err != nil {
+		t.Fatalf("marshal check: %v", err)
+	}
+	p := c.Printed()
+	sum := sha256.Sum256([]byte(strings.Join([]string{string(js), p.Name, p.Status, p.Message, p.Detail, p.Fix, p.Category}, "\x00")))
+	return hex.EncodeToString(sum[:])
+}
+
+// dependencyRowsFingerprint is the sha256 of every dependency and wisp
+// dependency row, in a fixed order, so an equal fingerprint means no edge
+// was added, changed or deleted.
+func dependencyRowsFingerprint(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	//nolint:gosec // G202: doctorDependencyUnionSQL returns a fixed internal SELECT fragment.
+	rows, err := db.Query(`SELECT d.dep_table, d.issue_id, COALESCE(d.depends_on_id, ''), d.type
+		FROM (` + doctorDependencyUnionSQL() + `) d ORDER BY 1, 2, 3, 4`)
+	if err != nil {
+		t.Fatalf("read dependency rows: %v", err)
+	}
+	defer rows.Close()
+	h := sha256.New()
+	for rows.Next() {
+		var table, issueID, target, depType string
+		if err := rows.Scan(&table, &issueID, &target, &depType); err != nil {
+			t.Fatalf("scan dependency row: %v", err)
+		}
+		fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\n", table, issueID, target, depType)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate dependency rows: %v", err)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// insertWispOrphan stores a wisp dependency of source on a target with no row.
+func insertWispOrphan(t *testing.T, db *sql.DB, source, target string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO wisp_dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by)
+		 VALUES (UUID(), ?, ?, 'blocks', NOW(), 'test')`, source, target); err != nil {
+		t.Fatalf("insert wisp orphan %s -> %s: %v", source, target, err)
+	}
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 1"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCheckOrphanedDependenciesDB_OutputUnchangedWithoutUnverifiableTargets
+// pins the path the count does not touch: with no cross-repository edge the
+// check's output is byte-identical to the output before the count existed
+// (these literals pass unchanged at the PR's previous head and at its base),
+// both clean and with one orphan.
+func TestCheckOrphanedDependenciesDB_OutputUnchangedWithoutUnverifiableTargets(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+
+	for _, id := range []string{"test-a", "test-b"} {
+		issue := &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", id, err)
+		}
+	}
+	dep := &types.Dependency{IssueID: "test-a", DependsOnID: "test-b", Type: types.DepBlocks, CreatedAt: time.Now(), CreatedBy: "test"}
+	if err := store.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+	clean := DoctorCheck{Name: "Orphaned Dependencies", Status: "ok", Message: "No orphaned dependencies"}
+	if got := checkOrphanedDependenciesDB(store.DB()); orphanCheckFingerprint(t, got) != orphanCheckFingerprint(t, clean) {
+		t.Fatalf("clean: got %#v, want byte-identical %#v", got, clean)
+	}
+
+	wisp := &types.Issue{ID: "test-wisp-src", Title: "Source wisp", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, NoHistory: true}
+	if err := store.CreateIssue(ctx, wisp, "test"); err != nil {
+		t.Fatalf("CreateIssue wisp: %v", err)
+	}
+	insertWispOrphan(t, store.DB(), wisp.ID, "test-missing")
+	orphaned := DoctorCheck{
+		Name:    "Orphaned Dependencies",
+		Status:  "warning",
+		Message: "1 orphaned dependency reference(s)",
+		Detail:  "test-wisp-src→test-missing",
+		Fix:     "Run 'bd doctor --fix' to remove orphaned dependencies",
+	}
+	if got := checkOrphanedDependenciesDB(store.DB()); orphanCheckFingerprint(t, got) != orphanCheckFingerprint(t, orphaned) {
+		t.Fatalf("one orphan: got %#v, want byte-identical %#v", got, orphaned)
+	}
+}
+
+// TestCheckOrphanedDependenciesDB_CountNoteIdentity pins what the count may
+// change: adding cross-repository edges leaves the rendered check identical
+// to the one without them except for the appended note, clean and with an
+// orphan, and the check leaves the dependency rows' fingerprint as it was
+// (it counts those edges, it never deletes them).
+func TestCheckOrphanedDependenciesDB_CountNoteIdentity(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+	db := store.DB()
+	const note = " (2 cross-repository edge(s) not verifiable here)"
+
+	issue := &types.Issue{ID: "test-src", Title: "Source", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatalf("CreateIssue source: %v", err)
+	}
+	addCrossRepositoryEdges := func() {
+		t.Helper()
+		dep := &types.Dependency{IssueID: issue.ID, DependsOnID: "other-target", Type: types.DepBlocks, CreatedAt: time.Now(), CreatedBy: "test"}
+		if err := store.AddDependency(ctx, dep, "test"); err != nil {
+			t.Fatalf("AddDependency cross-prefix: %v", err)
+		}
+		insertDepOnExternalColumn(t, db, issue.ID, "external:proj:cap")
+	}
+	removeCrossRepositoryEdges := func() {
+		t.Helper()
+		if _, err := db.ExecContext(ctx, "DELETE FROM dependencies WHERE issue_id = ?", issue.ID); err != nil {
+			t.Fatalf("delete cross-repository edges: %v", err)
+		}
+	}
+	checkKeepsRows := func(stage string) DoctorCheck {
+		t.Helper()
+		before := dependencyRowsFingerprint(t, db)
+		check := checkOrphanedDependenciesDB(db)
+		if after := dependencyRowsFingerprint(t, db); after != before {
+			t.Fatalf("%s: dependency rows fingerprint %s after the check, want %s", stage, after, before)
+		}
+		return check
+	}
+
+	for _, stage := range []string{"clean", "with orphan"} {
+		if stage == "with orphan" {
+			wisp := &types.Issue{ID: "test-wisp-src", Title: "Source wisp", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, NoHistory: true}
+			if err := store.CreateIssue(ctx, wisp, "test"); err != nil {
+				t.Fatalf("CreateIssue wisp: %v", err)
+			}
+			insertWispOrphan(t, db, wisp.ID, "test-missing")
+		}
+		without := checkKeepsRows(stage + ", no cross-repository edge")
+		if strings.Contains(without.Message, "cross-repository") {
+			t.Fatalf("%s: Message = %q, want no note without cross-repository edges", stage, without.Message)
+		}
+		addCrossRepositoryEdges()
+		with := checkKeepsRows(stage + ", two cross-repository edges")
+		want := without
+		want.Message += note
+		if orphanCheckFingerprint(t, with) != orphanCheckFingerprint(t, want) {
+			t.Fatalf("%s: got %#v, want identity with %#v plus the note", stage, with, without)
+		}
+		if again := checkKeepsRows(stage + ", rerun"); orphanCheckFingerprint(t, again) != orphanCheckFingerprint(t, with) {
+			t.Fatalf("%s: rerun rendered %#v, want the identical %#v", stage, again, with)
+		}
+		removeCrossRepositoryEdges()
 	}
 }
 

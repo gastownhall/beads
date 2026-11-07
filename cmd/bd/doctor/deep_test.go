@@ -107,6 +107,54 @@ func TestCheckParentConsistency_OrphanedDeps(t *testing.T) {
 	}
 }
 
+// TestCheckDependencyIntegrity_UnverifiableTargetRule pins the --deep
+// integrity check to the orphan check's rule (#4647): an external: ref and
+// another repository's target are not broken, a same-prefix target with no
+// row stored in depends_on_external is, and a missing source always is.
+func TestCheckDependencyIntegrity_UnverifiableTargetRule(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+	db := store.DB()
+
+	issue := &types.Issue{ID: "test-src", Title: "Source", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatalf("CreateIssue source: %v", err)
+	}
+	dep := &types.Dependency{IssueID: issue.ID, DependsOnID: "other-x", Type: types.DepBlocks, CreatedAt: time.Now(), CreatedBy: "test"}
+	if err := store.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatalf("AddDependency cross-prefix: %v", err)
+	}
+	insertDepOnExternalColumn(t, db, issue.ID, "external:proj:cap")
+
+	if check := checkDependencyIntegrity(db); check.Status != StatusOK {
+		t.Fatalf("cross-repository targets only: Status = %q, want %q; detail=%s", check.Status, StatusOK, check.Detail)
+	}
+
+	insertDepOnExternalColumn(t, db, issue.ID, "test-gone")
+	check := checkDependencyIntegrity(db)
+	if check.Status != StatusError {
+		t.Fatalf("same-prefix missing target: Status = %q, want %q", check.Status, StatusError)
+	}
+	if check.Detail != "Examples: test-src→test-gone (blocks)" {
+		t.Fatalf("Detail = %q, want only test-src→test-gone", check.Detail)
+	}
+
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+		t.Fatal(err)
+	}
+	insertDepOnExternalColumn(t, db, "test-ghost", "other-y")
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 1"); err != nil {
+		t.Fatal(err)
+	}
+	check = checkDependencyIntegrity(db)
+	if check.Message != "Found 2 broken dependencies" {
+		t.Fatalf("missing source: Message = %q, want 2 broken", check.Message)
+	}
+	if !strings.Contains(check.Detail, "test-ghost→other-y (blocks)") {
+		t.Fatalf("Detail = %q, want the missing-source edge test-ghost→other-y", check.Detail)
+	}
+}
+
 // TestCheckEpicCompleteness_CompletedEpic verifies detection of closeable epics
 func TestCheckEpicCompleteness_CompletedEpic(t *testing.T) {
 	store := newTestDoltStore(t, "epic")
