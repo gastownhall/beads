@@ -1,0 +1,203 @@
+package schema
+
+import (
+	"context"
+	"database/sql"
+	"reflect"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/DATA-DOG/go-sqlmock"
+)
+
+const ignoredMigration0032Up = "0032_wisp_is_blocked_restore_marker.up.sql"
+
+// TestLatestIgnoredVersionIncludesMigration0032 pins the ignored slot the
+// wisps.is_blocked restore claims, directly above the pre-upgrade events
+// restore (ignored 0031), and that the slot carries restoreWispIsBlocked
+// while the earlier is_blocked and events repairs keep theirs.
+func TestLatestIgnoredVersionIncludesMigration0032(t *testing.T) {
+	const wantIgnored = 32
+	if got := LatestIgnoredVersion(); got != wantIgnored {
+		t.Fatalf("LatestIgnoredVersion() = %d, want %d (wisps.is_blocked restore)", got, wantIgnored)
+	}
+	same := func(a, b func(context.Context, DBConn) error) bool {
+		return reflect.ValueOf(a).Pointer() == reflect.ValueOf(b).Pointer()
+	}
+	for version, want := range map[int]func(context.Context, DBConn) error{
+		7:  ensureWispIsBlockedForRecompute,
+		15: ensureWispIsBlockedForRecompute,
+		31: seedEventsFromPreflipHistory,
+		32: restoreWispIsBlocked,
+	} {
+		got, ok := preMigrationRepairs[repairKey{ignoredSource.cursorTable, version}]
+		if !ok || !same(got, want) {
+			t.Errorf("ignored %04d: pre-migration repair is not the expected function", version)
+		}
+	}
+}
+
+// TestIgnored32MarkerIsInert pins the marker body: its only statement is
+// SELECT 1, and its header declares the wisps writes its repair makes (for
+// the pending-migration dirty-table guard) and no durable-table write.
+func TestIgnored32MarkerIsInert(t *testing.T) {
+	markerSQL, err := IgnoredMigrationSQL(ignoredMigration0032Up)
+	if err != nil {
+		t.Fatalf("IgnoredMigrationSQL(%s) = %v", ignoredMigration0032Up, err)
+	}
+	var statements []string
+	for _, line := range strings.Split(markerSQL, "\n") {
+		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "--") {
+			statements = append(statements, line)
+		}
+	}
+	if !slices.Equal(statements, []string{"SELECT 1;"}) {
+		t.Fatalf("ignored 0032 executes %q, want only SELECT 1; the work belongs to its repair", statements)
+	}
+	if !migrationSQLTouchesTable(markerSQL, "wisps") {
+		t.Fatal("ignored 0032 does not declare its wisps writes; the dirty-table guard would not see them")
+	}
+	for _, table := range []string{"issues", "dependencies", "wisp_dependencies", "events"} {
+		if migrationSQLTouchesTable(markerSQL, table) {
+			t.Errorf("ignored 0032 declares a write to %s, which its repair never touches", table)
+		}
+	}
+}
+
+// wispRestoreDB runs ignored 0032 through the real runner. It answers the
+// repair's INFORMATION_SCHEMA probes from an ordered sqlmock and records
+// every statement the pass executes, so a test asserts the exact sequence.
+type wispRestoreDB struct {
+	t    *testing.T
+	real *sql.DB
+	mock sqlmock.Sqlmock
+	body string
+	// steps is every ExecContext the pass made, the marker body and cursor
+	// row named rather than spelled out.
+	steps []string
+}
+
+const (
+	wispRestoreTableQuery  = `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`
+	wispRestoreColumnQuery = `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME = \? AND COLUMN_NAME = \?`
+	wispRestoreIndexQuery  = `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.STATISTICS.*TABLE_NAME = \? AND INDEX_NAME = \?`
+
+	wispRestoreStepBody   = "marker body"
+	wispRestoreStepCursor = "cursor 32"
+)
+
+func newWispRestoreDB(t *testing.T) *wispRestoreDB {
+	t.Helper()
+	failOnSwallowedAdvisory(t)
+	quietStderr(t)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	body, err := IgnoredMigrationSQL(ignoredMigration0032Up)
+	if err != nil {
+		t.Fatalf("IgnoredMigrationSQL(%s): %v", ignoredMigration0032Up, err)
+	}
+	return &wispRestoreDB{t: t, real: db, mock: mock, body: body}
+}
+
+// expectProbes scripts the repair's probes for one pass. A pass on a clone
+// without wisps stops after the first.
+func (d *wispRestoreDB) expectProbes(hasWisps, hasColumn, hasIndex bool) {
+	n := func(b bool) int {
+		if b {
+			return 1
+		}
+		return 0
+	}
+	d.mock.ExpectQuery(wispRestoreTableQuery).WithArgs("wisps").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(n(hasWisps)))
+	if !hasWisps {
+		return
+	}
+	d.mock.ExpectQuery(wispRestoreColumnQuery).WithArgs("wisps", "is_blocked").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(n(hasColumn)))
+	d.mock.ExpectQuery(wispRestoreIndexQuery).WithArgs("wisps", "idx_wisps_is_blocked").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(n(hasIndex)))
+}
+
+func (d *wispRestoreDB) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	return d.real.QueryRowContext(ctx, query, args...)
+}
+
+func (d *wispRestoreDB) QueryContext(context.Context, string, ...any) (*sql.Rows, error) {
+	d.t.Fatal("wispRestoreDB: QueryContext not expected on the ignored 0032 path")
+	return nil, nil
+}
+
+func (d *wispRestoreDB) ExecContext(_ context.Context, query string, args ...any) (sql.Result, error) {
+	d.t.Helper()
+	switch {
+	case query == d.body:
+		d.steps = append(d.steps, wispRestoreStepBody)
+	case query == "INSERT IGNORE INTO "+ignoredSource.cursorTable+" (version, content_hash) VALUES (?, ?)":
+		if len(args) == 0 || args[0] != 32 {
+			d.t.Fatalf("wispRestoreDB: cursor INSERT args %v, want version 32", args)
+		}
+		d.steps = append(d.steps, wispRestoreStepCursor)
+	default:
+		d.steps = append(d.steps, query)
+	}
+	return execOK{}, nil
+}
+
+// migrate runs one pass with ignored 0032 the only pending version.
+func (d *wispRestoreDB) migrate() (int, error) {
+	return runMigrations(context.Background(), d, ignoredSource, 31, 32, false)
+}
+
+func (d *wispRestoreDB) requireSteps(want ...string) {
+	d.t.Helper()
+	if err := d.mock.ExpectationsWereMet(); err != nil {
+		d.t.Fatalf("unmet probe expectations: %v", err)
+	}
+	if !slices.Equal(d.steps, want) {
+		d.t.Fatalf("ignored 0032 pass executed:\n  %s\nwant:\n  %s",
+			strings.Join(d.steps, "\n  "), strings.Join(want, "\n  "))
+	}
+}
+
+// TestIgnored32RestoresColumn is AC-1 at the runner: with the column and its
+// index gone at cursor 31, the pass restores both at ignored/0006's shape
+// before the marker and its cursor row.
+func TestIgnored32RestoresColumn(t *testing.T) {
+	d := newWispRestoreDB(t)
+	d.expectProbes(true, false, false)
+	applied, err := d.migrate()
+	if err != nil {
+		t.Fatalf("runMigrations(ignored 31..32): %v", err)
+	}
+	if applied != 1 {
+		t.Fatalf("applied = %d, want 1", applied)
+	}
+	d.requireSteps(wispIsBlockedColumnDDL, wispIsBlockedIndexDDL, wispRestoreStepBody, wispRestoreStepCursor)
+}
+
+// TestIgnored32RestoresIndexOnly covers index-only loss: the column stays
+// and only the index is created.
+func TestIgnored32RestoresIndexOnly(t *testing.T) {
+	d := newWispRestoreDB(t)
+	d.expectProbes(true, true, false)
+	if _, err := d.migrate(); err != nil {
+		t.Fatalf("runMigrations(ignored 31..32): %v", err)
+	}
+	d.requireSteps(wispIsBlockedIndexDDL, wispRestoreStepBody, wispRestoreStepCursor)
+}
+
+// TestIgnored32WithoutWispsIsANoOp leaves an absent wisps table to
+// ignored/0001 and the cursor-reality repair, as the 7/15 repair does.
+func TestIgnored32WithoutWispsIsANoOp(t *testing.T) {
+	d := newWispRestoreDB(t)
+	d.expectProbes(false, false, false)
+	if _, err := d.migrate(); err != nil {
+		t.Fatalf("runMigrations(ignored 31..32): %v", err)
+	}
+	d.requireSteps(wispRestoreStepBody, wispRestoreStepCursor)
+}
