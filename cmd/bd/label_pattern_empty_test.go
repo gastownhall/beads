@@ -173,3 +173,60 @@ func TestGatherReadyInputRejectsEmptyLabelPatterns(t *testing.T) {
 		}
 	}
 }
+
+// TestGatherInputsKeepUsableLabelPatterns is the other side of the GH#6636
+// refusal: omitted pattern flags still mean no pattern, and every usable value
+// passes through byte-for-byte - including a regex of only whitespace (labels
+// may contain spaces, and the regex is matched unanchored), a glob with
+// surrounding whitespace, and a malformed regex (this check validates presence,
+// not syntax).
+func TestGatherInputsKeepUsableLabelPatterns(t *testing.T) {
+	cases := []struct {
+		name      string
+		args      []string
+		wantGlob  string
+		wantRegex string
+	}{
+		{"omitted", nil, "", ""},
+		{"glob", []string{"--label-pattern", "tech-*"}, "tech-*", ""},
+		{"glob-padded", []string{"--label-pattern", " tech-* "}, " tech-* ", ""},
+		{"regex", []string{"--label-regex", "^tech-(debt|legacy)$"}, "", "^tech-(debt|legacy)$"},
+		{"regex-space", []string{"--label-regex", " "}, "", " "},
+		{"regex-tabs", []string{"--label-regex", "\t\t"}, "", "\t\t"},
+		{"regex-padded", []string{"--label-regex", "  a b  "}, "", "  a b  "},
+		{"regex-malformed", []string{"--label-regex", "("}, "", "("},
+		{"both", []string{"--label-pattern", "tech-*", "--label-regex", " "}, "tech-*", " "},
+	}
+	for _, c := range cases {
+		t.Run("list/"+c.name, func(t *testing.T) {
+			pinJSONOutput(t, false)
+			got := runGatherListInputStreams(t, newListFlagsCommand(t, c.args...))
+			if got.err != nil {
+				t.Fatalf("gatherListInput(%q) = %v (stderr %q), want no error", c.args, got.err, got.stderr)
+			}
+			if got.in.LabelPattern != c.wantGlob || got.in.LabelRegex != c.wantRegex {
+				t.Errorf("LabelPattern=%q LabelRegex=%q, want %q and %q unchanged",
+					got.in.LabelPattern, got.in.LabelRegex, c.wantGlob, c.wantRegex)
+			}
+		})
+		for _, r := range []struct {
+			name    string
+			resolve func(*cobra.Command) (int, string, error)
+		}{
+			{"direct", resolveMaxRows},
+			{"proxied", nil},
+		} {
+			t.Run("ready/"+r.name+"/"+c.name, func(t *testing.T) {
+				pinJSONOutput(t, false)
+				got := runGatherReadyInput(t, newReadyFlagsCommand(t, c.args...), r.resolve)
+				if got.err != nil {
+					t.Fatalf("gatherReadyInput(%q) = %v (stderr %q), want no error", c.args, got.err, got.stderr)
+				}
+				if got.in.LabelPattern != c.wantGlob || got.in.LabelRegex != c.wantRegex {
+					t.Errorf("LabelPattern=%q LabelRegex=%q, want %q and %q unchanged",
+						got.in.LabelPattern, got.in.LabelRegex, c.wantGlob, c.wantRegex)
+				}
+			})
+		}
+	}
+}
