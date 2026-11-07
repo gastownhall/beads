@@ -100,12 +100,18 @@ type MergeConflictsError struct {
 }
 
 func (e *MergeConflictsError) Error() string {
-	tables := make([]string, len(e.Conflicts))
-	for i, c := range e.Conflicts {
+	return fmt.Sprintf("merge conflicts in %s require operator resolution; merge aborted and working set restored",
+		ConflictTables(e.Conflicts))
+}
+
+// ConflictTables lists the tables of table-level conflicts (the shape
+// GetConflicts returns), comma-separated, for an error message.
+func ConflictTables(conflicts []storage.Conflict) string {
+	tables := make([]string, len(conflicts))
+	for i, c := range conflicts {
 		tables[i] = c.Field
 	}
-	return fmt.Sprintf("merge conflicts in %s require operator resolution; merge aborted and working set restored",
-		strings.Join(tables, ", "))
+	return strings.Join(tables, ", ")
 }
 
 func (e *MergeConflictsError) Unwrap() error { return e.MergeErr }
@@ -549,7 +555,9 @@ func workingSetClean(ctx context.Context, db DBConn) bool {
 //     the semantic fields are disjoint, so the conflict rate is far higher
 //     than the semantic-conflict rate. add/add (no base row), delete/modify
 //     (one side removed it), and a contested cell whose two sides carry equal
-//     or unparseable updated_at values are left for the operator.
+//     or unparseable updated_at values are left for the operator, except a
+//     delete on their side against our change to derived is_blocked only,
+//     which resolves to the delete.
 //
 //   - labels: set-union. The table is all key columns, so two sides adding
 //     DIFFERENT labels are disjoint rows dolt already unions and a conflict
@@ -707,6 +715,17 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 		//nolint:gosec // G201: table is one of the hardcoded constants above.
 		if err := schema.DrainCall(ctx, db, "CALL DOLT_ADD('"+table+"')"); err != nil {
 			return false, fmt.Errorf("failed to stage %s: %w", table, err)
+		}
+	}
+
+	// Once every conflict is settled, stage what a settled issue delete
+	// cascaded into (a child table may itself have been in conflict above).
+	for _, m := range issuesPlan {
+		if m.deleteRow {
+			if err := stageCascadedChildTables(ctx, db); err != nil {
+				return false, err
+			}
+			break
 		}
 	}
 
@@ -979,8 +998,9 @@ func resolveConflictDepTarget(issueTarget, wispTarget, external sql.NullString) 
 
 // fkCascadeRepairDeletes maps each synced child table holding a FOREIGN KEY to
 // issues(id) (migrations 0041/0042 added ON DELETE/UPDATE CASCADE; ignored
-// migration 0002 covers child_counters) to the DELETE that applies the FK's
-// cascade semantics by hand after a merge (bd-6dnrw.4).
+// migration 0002 covers child_counters; 0063 created provenance_events with
+// it) to the DELETE that applies the FK's cascade semantics by hand after a
+// merge (bd-6dnrw.4).
 //
 // Dolt merges each table row-wise and never re-executes cascades, so "clone A
 // deletes issue X" merged with "clone B inserts a child row referencing X"
@@ -999,6 +1019,7 @@ var fkCascadeRepairDeletes = map[string]string{
 	"issue_snapshots":      `DELETE FROM issue_snapshots WHERE issue_id NOT IN (SELECT id FROM issues)`,
 	"compaction_snapshots": `DELETE FROM compaction_snapshots WHERE issue_id NOT IN (SELECT id FROM issues)`,
 	"child_counters":       `DELETE FROM child_counters WHERE parent_id NOT IN (SELECT id FROM issues)`,
+	"provenance_events":    `DELETE FROM provenance_events WHERE issue_id NOT IN (SELECT id FROM issues)`,
 }
 
 // TryRepairFKCascadeViolations repairs the post-merge foreign-key constraint

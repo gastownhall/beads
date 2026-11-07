@@ -17,6 +17,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/peercred"
 )
 
 func newPeerAuthTestStore(t *testing.T) *EmbeddedDoltStore {
@@ -469,7 +470,7 @@ func TestDecryptPassword_KeyMismatchNamesTheLocalKey(t *testing.T) {
 func TestDecryptPassword_ShortCiphertextClassifiesAsKeyMismatch(t *testing.T) {
 	store := newPeerAuthTestStore(t)
 
-	_, err := store.decryptPassword([]byte("short"))
+	_, err := store.decryptPassword(peercred.Identity{Name: "team"}, []byte("v2:short"))
 	if err == nil {
 		t.Fatal("decryptPassword succeeded, want short-ciphertext failure")
 	}

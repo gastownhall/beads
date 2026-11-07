@@ -109,6 +109,20 @@ Stored credentials are used automatically during sync:
 bd federation add-peer town-gamma 192.168.1.100:3306/beads --user sync-bot
 ```
 
+In releases after v1.3.2, a stored password is bound to the peer it was
+entered for: its name, endpoint URL and username. Peer rows replicate between
+towns, so this stops a partner from copying your password into a row that
+names their own remote. Before using a password, bd also checks that the
+peer's live remote is still that endpoint. A password whose peer row was
+changed, or whose remote now points somewhere else, is refused, and nothing
+is sent.
+
+Passwords stored by v1.3.2 and earlier are not bound, so newer releases leave
+them unchanged on disk but refuse to authenticate with them. Re-enter each one
+with `bd federation add-peer <name> <url> --user <user>` (you are prompted for
+the password). If a peer row may have been copied before you upgraded, treat
+that password as exposed and rotate it on the peer's server as well.
+
 ### JSON Output
 
 For scripting, use the `--json` flag:
@@ -146,8 +160,50 @@ bd federation status
 bd federation status --peer town-beta
 ```
 
-Without `--strategy`, a sync that hits merge conflicts pauses and reports the
-conflicting tables for manual resolution instead of auto-resolving.
+Without `--strategy`, a sync that hits merge conflicts stops and reports the
+conflicting tables instead of resolving them. In releases after v1.3.2, sync
+first settles conflicts the way `bd dolt pull` does, such as edits to
+different fields of one issue, and stops only on the ones it cannot settle,
+leaving your database as it was. `--strategy ours` or `--strategy theirs`
+then resolves every conflicting table that way.
+
+### Excluded Issue Types
+
+`federation.exclude_types` (default `[wisp]`) lists issue types that sync
+keeps local. `wisp` matches ephemeral issues. Each push publishes a commit
+with these issues removed, along with their labels, comments and
+dependencies. The issues stay in your own database, and later syncs keep
+them while merging the peer's changes.
+
+In releases after v1.3.2, an excluded issue that any peer held at your last
+fetch from it is not removed, whichever peer you sync with: for example one
+the peer created, or one it received before you excluded its type. Removing
+it from the tip would delete it from that peer once the tip reaches it,
+directly or through another peer. It syncs like any other issue, so your
+edits to it reach your peers. Every remote except `origin` counts as a peer
+here, as it does for `bd federation sync` without `--peer`: `bd dolt push`
+sends `origin` every issue, so what `origin` holds counts only when you sync
+with `origin` itself. Each sync that removes issues also adds two commits to
+your local history: the filtered commit it publishes and the commit that
+restores the issues locally.
+
+```yaml
+# .beads/config.yaml
+federation:
+  exclude_types: [wisp, chore]
+```
+
+In releases after v1.3.2, the embedded backend honors this setting too.
+v1.3.2 and earlier push embedded workspaces unfiltered. If a push fails or is
+canceled partway, sync reports the error, sends no filtered commit, keeps
+local data and removes its temporary branches.
+
+Filtering removes rows from the published tip, not from history. A peer
+receives earlier commits, which still hold any excluded issue that existed
+when those commits were made, including issues pushed before the type was
+excluded. Rewriting history is the only way to withdraw them. In releases
+after v1.3.2, sync warns about this once per process the first time a push
+filters issues out.
 
 ### Topologies
 
