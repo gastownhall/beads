@@ -402,13 +402,52 @@ func restoreWispIsBlocked(ctx context.Context, db DBConn) error {
 			return fmt.Errorf("adding wisps.is_blocked: %w", err)
 		}
 	}
+	if err := fireWispIsBlockedRestoreFault(wispIsBlockedRestoreAfterColumn); err != nil {
+		return err
+	}
 	if err := recomputeWispIsBlocked(ctx, db); err != nil {
 		return fmt.Errorf("recomputing wisps.is_blocked: %w", err)
+	}
+	if err := fireWispIsBlockedRestoreFault(wispIsBlockedRestoreAfterRecompute); err != nil {
+		return err
 	}
 	if !hasIndex {
 		if _, err := db.ExecContext(ctx, "CREATE INDEX idx_wisps_is_blocked ON wisps(is_blocked, status)"); err != nil {
 			return fmt.Errorf("creating idx_wisps_is_blocked: %w", err)
 		}
+	}
+	return fireWispIsBlockedRestoreFault(wispIsBlockedRestoreAfterIndex)
+}
+
+// Stages of restoreWispIsBlocked a test can inject a failure at, so a fault
+// after any of them is observable leaving ignored 0032 pending (the cursor row
+// records only once the repair and the marker body both succeed).
+const (
+	wispIsBlockedRestoreAfterColumn    = "after_column"
+	wispIsBlockedRestoreAfterRecompute = "after_recompute"
+	wispIsBlockedRestoreAfterIndex     = "after_index"
+)
+
+// wispIsBlockedRestoreFaultHook, when set by a test, runs at each stage named
+// by the constants above; an error aborts the restore there, emulating a live
+// failure at that point. Production leaves it nil.
+var wispIsBlockedRestoreFaultHook func(stage string) error
+
+// SetWispIsBlockedRestoreFaultHookForTest installs fn as the wisps.is_blocked
+// restore's fault hook and returns a function that restores the previous
+// value. Test-only; callers must not run in parallel.
+func SetWispIsBlockedRestoreFaultHookForTest(fn func(stage string) error) func() {
+	prev := wispIsBlockedRestoreFaultHook
+	wispIsBlockedRestoreFaultHook = fn
+	return func() { wispIsBlockedRestoreFaultHook = prev }
+}
+
+func fireWispIsBlockedRestoreFault(stage string) error {
+	if wispIsBlockedRestoreFaultHook == nil {
+		return nil
+	}
+	if err := wispIsBlockedRestoreFaultHook(stage); err != nil {
+		return fmt.Errorf("wisp is_blocked restore fault at %s: %w", stage, err)
 	}
 	return nil
 }
