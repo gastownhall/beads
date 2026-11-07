@@ -296,3 +296,51 @@ func TestRenameFailureLeavesBeadGatesPending(t *testing.T) {
 		}
 	}
 }
+
+func TestRenameRewritesCloseReasonAndOwnText(t *testing.T) {
+	// GH#7040: bd rename left other issues' close_reason naming the old ID.
+	// Rewriting it must leave the closed issue closed, at its old closed_at.
+	ctx := context.Background()
+	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+
+	for _, issue := range []*types.Issue{
+		{ID: "test-a", Title: "A", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "test-b", Title: "B", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	} {
+		if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("failed to create issue %s: %v", issue.ID, err)
+		}
+	}
+	if err := testStore.CloseIssue(ctx, "test-b", "duplicate of test-a", "test", ""); err != nil {
+		t.Fatalf("failed to close test-b: %v", err)
+	}
+	closedB, err := testStore.GetIssue(ctx, "test-b")
+	if err != nil || closedB.ClosedAt == nil {
+		t.Fatalf("test-b after close: %+v, %v; want a closed_at", closedB, err)
+	}
+
+	a, err := testStore.GetIssue(ctx, "test-a")
+	if err != nil {
+		t.Fatalf("failed to get test-a: %v", err)
+	}
+	if err := renameIssueKeepingBeadGates(ctx, testStore, a, "test-z", nil, "test"); err != nil {
+		t.Fatalf("rename failed: %v", err)
+	}
+	if err := updateReferencesInAllIssues(ctx, testStore, "test-a", "test-z", "test"); err != nil {
+		t.Fatalf("reference update failed: %v", err)
+	}
+
+	b, err := testStore.GetIssue(ctx, "test-b")
+	if err != nil {
+		t.Fatalf("failed to get test-b: %v", err)
+	}
+	if want := "duplicate of test-z"; b.CloseReason != want {
+		t.Errorf("test-b close_reason = %q, want %q", b.CloseReason, want)
+	}
+	if b.Status != types.StatusClosed {
+		t.Errorf("test-b status = %q, want closed", b.Status)
+	}
+	if b.ClosedAt == nil || !b.ClosedAt.Equal(*closedB.ClosedAt) {
+		t.Errorf("test-b closed_at = %v, want it unchanged at %v", b.ClosedAt, *closedB.ClosedAt)
+	}
+}
