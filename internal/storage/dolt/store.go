@@ -1141,6 +1141,12 @@ func endSpan(span trace.Span, err error) {
 // ErrStoreClosed is returned when an operation is attempted on a closed store.
 var ErrStoreClosed = errors.New("store is closed")
 
+// ErrExternalReadOnlyWrite is returned by every write on a store
+// NewExternalReadOnly opened (Config.ExternalRead): a routed foreign read
+// must never mutate the target workspace's database, whatever method reaches
+// a write through the store it returned.
+var ErrExternalReadOnlyWrite = errors.New("write refused: external-read store is a read-only connection to another workspace")
+
 // withReadTx runs fn inside a transaction while holding the store's read-lock.
 // Used for read operations that need a *sql.Tx to share issueops functions.
 //
@@ -1396,6 +1402,12 @@ func (s *DoltStore) commitWriteTx(ctx context.Context, fn func(tx *sql.Tx) error
 func (s *DoltStore) commitWriteTxOn(ctx context.Context, beginner txBeginner, fn func(tx *sql.Tx) error) (issueops.BlockedRecheck, error) {
 	if s.closed.Load() {
 		return issueops.BlockedRecheck{}, ErrStoreClosed
+	}
+	if s.cfg != nil && s.cfg.ExternalRead {
+		// The external-read open already pins ReadOnly and never migrates,
+		// creates or starts anything; this backstops any write that still
+		// reaches the choke point every write transaction funnels through.
+		return issueops.BlockedRecheck{}, ErrExternalReadOnlyWrite
 	}
 	tx, err := beginner.BeginTx(ctx, nil)
 	if err != nil {
