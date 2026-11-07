@@ -123,11 +123,16 @@ func reportOrphans(orphans []orphanIssueOutput, fix, details bool) error {
 
 // orphanIssueOutput is the JSON output format for orphaned issues
 type orphanIssueOutput struct {
-	IssueID             string `json:"issue_id"`
-	Title               string `json:"title"`
-	Status              string `json:"status"`
-	LatestCommit        string `json:"latest_commit,omitempty"`
-	LatestCommitMessage string `json:"latest_commit_message,omitempty"`
+	// ID is the issue identifier under the key every other bd --json surface
+	// uses. IssueID carries the same value under the original `issue_id` key so
+	// existing consumers keep working; prefer `id` in new code.
+	ID                  string   `json:"id"`
+	IssueID             string   `json:"issue_id"`
+	Title               string   `json:"title"`
+	Status              string   `json:"status"`
+	Labels              []string `json:"labels"`
+	LatestCommit        string   `json:"latest_commit,omitempty"`
+	LatestCommitMessage string   `json:"latest_commit_message,omitempty"`
 }
 
 // doltStoreProvider wraps storage.DoltStorage to implement types.IssueProvider.
@@ -206,12 +211,21 @@ func findOrphanedIssuesWithProvider(path string, provider types.IssueProvider) (
 		return nil, fmt.Errorf("unable to find orphaned issues: %w", err)
 	}
 
-	var output []orphanIssueOutput
+	// Non-nil even when empty: `bd orphans --json` must emit [] rather than the
+	// JSON literal null, so a caller can iterate or length-check the result
+	// without special-casing the no-orphans case.
+	output := make([]orphanIssueOutput, 0, len(orphans))
 	for _, orphan := range orphans {
+		labels := orphan.Labels
+		if labels == nil {
+			labels = []string{}
+		}
 		output = append(output, orphanIssueOutput{
+			ID:                  orphan.IssueID,
 			IssueID:             orphan.IssueID,
 			Title:               orphan.Title,
 			Status:              orphan.Status,
+			Labels:              labels,
 			LatestCommit:        orphan.LatestCommit,
 			LatestCommitMessage: orphan.LatestCommitMessage,
 		})
