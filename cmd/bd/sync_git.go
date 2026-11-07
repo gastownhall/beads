@@ -119,7 +119,8 @@ func gitOriginHasDoltDataRefStatus() (bool, error) {
 // and the ref twice ("...on sync.remote \"X\": probe refs/dolt/data on X: exit
 // status 128").
 func gitRemoteHasDoltDataRefStatus(remote string) (bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), gitDoltDataProbeTimeout)
+	timeout := gitDoltDataProbeTimeoutDuration()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	// #nosec G702 -- no shell is involved: the binary is the literal "git", the
 	// remote URL is its own argv element after "--", and a leading "-" is
@@ -136,21 +137,47 @@ func gitRemoteHasDoltDataRefStatus(remote string) (bool, error) {
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	output, err := cmd.Output()
 	if err != nil {
-		return false, gitLsRemoteProbeError(ctx, err)
+		return false, gitLsRemoteProbeError(ctx, timeout, err)
 	}
 	return strings.TrimSpace(string(output)) != "", nil
 }
 
-const gitDoltDataProbeTimeout = 10 * time.Second
+const gitDoltDataProbeTimeoutDefault = 10 * time.Second
+
+// gitDoltDataProbeTimeoutEnv overrides gitDoltDataProbeTimeoutDefault for the
+// `git ls-remote` probe bootstrap uses to verify refs/dolt/data on a
+// sync.remote. Same BEADS_*_TIMEOUT syntax as BEADS_INIT_GATE_TIMEOUT (a Go
+// duration like "30s", or bare whole seconds). Added for GH#8107: slow
+// networks/SSH hosts can take longer than 10s to answer ls-remote even though
+// the remote is reachable.
+const gitDoltDataProbeTimeoutEnv = "BEADS_LSREMOTE_TIMEOUT"
+
+// gitDoltDataProbeTimeoutDuration returns the configured timeout for the
+// refs/dolt/data ls-remote probe, falling back to gitDoltDataProbeTimeoutDefault
+// when BEADS_LSREMOTE_TIMEOUT is unset, malformed, or not a positive duration
+// (mirrors initGateWait's handling of BEADS_INIT_GATE_TIMEOUT).
+func gitDoltDataProbeTimeoutDuration() time.Duration {
+	d, ok := parseGateTimeoutEnv(gitDoltDataProbeTimeoutEnv, gitDoltDataProbeTimeoutDefault)
+	if !ok {
+		return gitDoltDataProbeTimeoutDefault
+	}
+	if d <= 0 {
+		if !quietFlag {
+			fmt.Fprintf(os.Stderr, "warning: %s=%s is not a positive duration; using default %s\n", gitDoltDataProbeTimeoutEnv, d, gitDoltDataProbeTimeoutDefault)
+		}
+		return gitDoltDataProbeTimeoutDefault
+	}
+	return d
+}
 
 // gitLsRemoteProbeError turns a failed `git ls-remote` into something a user
 // can act on. exec.ExitError.Error() is only "exit status 128" — git's actual
 // complaint (auth vs. DNS vs. deleted repo) sits unread in ExitError.Stderr
 // because cmd.Output() captures it there, and a context timeout surfaces as
 // the equally opaque "signal: killed".
-func gitLsRemoteProbeError(ctx context.Context, err error) error {
+func gitLsRemoteProbeError(ctx context.Context, timeout time.Duration, err error) error {
 	if ctx.Err() == context.DeadlineExceeded {
-		return fmt.Errorf("git ls-remote did not answer within %s (network, or an SSH key that wants a passphrase)", gitDoltDataProbeTimeout)
+		return fmt.Errorf("git ls-remote did not answer within %s (network, or an SSH key that wants a passphrase; override with %s)", timeout, gitDoltDataProbeTimeoutEnv)
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {

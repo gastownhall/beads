@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestIsBareGitRepo(t *testing.T) {
@@ -240,4 +242,90 @@ func TestGitRemoteHasDoltDataRefStatusRejectsOptionRemote(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestGitDoltDataProbeTimeoutEnv proves BEADS_LSREMOTE_TIMEOUT follows the
+// same BEADS_*_TIMEOUT parsing rules as BEADS_INIT_GATE_TIMEOUT (GH#8107):
+// unset/zero/negative/malformed all fall back to the 10s default.
+func TestGitDoltDataProbeTimeoutEnv(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want time.Duration
+	}{
+		{"", gitDoltDataProbeTimeoutDefault},
+		{"30", 30 * time.Second},
+		{"2m", 2 * time.Minute},
+		{"1500ms", 1500 * time.Millisecond},
+		{"0", gitDoltDataProbeTimeoutDefault},
+		{"-5s", gitDoltDataProbeTimeoutDefault},
+		{"soon", gitDoltDataProbeTimeoutDefault},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			t.Setenv(gitDoltDataProbeTimeoutEnv, tc.raw)
+			oldQuiet := quietFlag
+			quietFlag = true
+			t.Cleanup(func() { quietFlag = oldQuiet })
+			if got := gitDoltDataProbeTimeoutDuration(); got != tc.want {
+				t.Fatalf("gitDoltDataProbeTimeoutDuration() with %q = %s, want %s", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGitRemoteHasDoltDataRefStatusSlowLsRemote simulates GH#8107: a reachable
+// remote whose `git ls-remote` just answers slowly. With the default-length
+// timeout the probe times out even though the remote is fine; raising
+// BEADS_LSREMOTE_TIMEOUT past the simulated delay lets the same probe
+// succeed. The real git binary is never invoked slowly over a network here —
+// a fake "git" shell script ahead on PATH stands in for it and sleeps before
+// answering, so the test stays hermetic and fast.
+func TestGitRemoteHasDoltDataRefStatusSlowLsRemote(t *testing.T) {
+	const simulatedDelay = 300 * time.Millisecond
+	fakeGitDir := writeFakeSlowGitLsRemote(t, simulatedDelay)
+	t.Setenv("PATH", fakeGitDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	t.Run("default timeout is too short for a slow remote", func(t *testing.T) {
+		t.Setenv(gitDoltDataProbeTimeoutEnv, "50ms")
+
+		_, err := gitRemoteHasDoltDataRefStatus("https://example.invalid/repo.git")
+
+		if err == nil || !strings.Contains(err.Error(), "did not answer within") {
+			t.Fatalf("gitRemoteHasDoltDataRefStatus() err = %v, want a ls-remote timeout error", err)
+		}
+	})
+
+	t.Run("overridden timeout tolerates the same slow remote", func(t *testing.T) {
+		t.Setenv(gitDoltDataProbeTimeoutEnv, "2s")
+
+		hasData, err := gitRemoteHasDoltDataRefStatus("https://example.invalid/repo.git")
+
+		if err != nil {
+			t.Fatalf("gitRemoteHasDoltDataRefStatus() unexpected error: %v", err)
+		}
+		if !hasData {
+			t.Fatalf("gitRemoteHasDoltDataRefStatus() hasData = false, want true")
+		}
+	})
+}
+
+// writeFakeSlowGitLsRemote writes a fake "git" executable to a fresh
+// directory that sleeps for delay before answering `ls-remote` with a fake
+// refs/dolt/data ref, and returns that directory so it can be prepended to
+// PATH. Any other git subcommand fails immediately — this test only needs to
+// stand in for the ls-remote probe.
+func writeFakeSlowGitLsRemote(t *testing.T, delay time.Duration) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"ls-remote\" ]; then\n" +
+		"  sleep " + fmt.Sprintf("%g", delay.Seconds()) + "\n" +
+		"  echo \"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\trefs/dolt/data\"\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"exit 1\n"
+	path := filepath.Join(dir, "git")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("failed to write fake git: %v", err)
+	}
+	return dir
 }
