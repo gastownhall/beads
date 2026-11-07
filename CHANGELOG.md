@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Telemetry no longer exports the raw command line.** With telemetry on
+  (`BD_OTEL_ENABLED=true`), the OTel resource attached to every exported
+  metric and span carried `process.command_args`, the unscrubbed `os.Args`,
+  so a `--password=...` flag, search text or an issue title reached the
+  metrics receiver even though the `bd.args` span attribute is scrubbed. The
+  resource also carried `process.executable.path` and `process.owner` (the OS
+  user name). bd now builds the resource from explicit detectors and keeps
+  only `host.name`, `process.pid`, `process.executable.name` and the Go
+  runtime attributes.
+
 - **A committed `.beads/.env` can no longer copy your environment into bd's
   settings, set a command or bearer token by a name the deny list missed, or
   pick a file for bd to overwrite.**
