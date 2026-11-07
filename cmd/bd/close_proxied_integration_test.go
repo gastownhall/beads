@@ -810,6 +810,23 @@ func TestProxiedServerClose2B(t *testing.T) {
 		}
 	})
 
+	t.Run("close_suggest_next_blocked_status_json", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "csbj")
+		a := bdProxiedCreate(t, bd, p.dir, "Blocker A")
+		b := bdProxiedCreate(t, bd, p.dir, "Held B", "--deps", "depends-on:"+a.ID)
+		c := bdProxiedCreate(t, bd, p.dir, "Waiting C", "--deps", "depends-on:"+a.ID)
+		bdProxiedUpdate(t, bd, p.dir, b.ID, "--status", "blocked")
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "close", a.ID, "--suggest-next", "--json")
+		if err != nil {
+			t.Fatalf("bd close --suggest-next --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		requireSuggestNextJSONKeepsBlockedStatus(t, stdout, a.ID, b.ID, c.ID)
+		if got := readStatus(t, openProxiedDB(t, p), b.ID); got != types.StatusBlocked {
+			t.Errorf("bd close --json changed %s's explicit status to %q, want it left blocked", b.ID, got)
+		}
+	})
+
 	t.Run("single_transaction_dolt_commit", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "stdc")
