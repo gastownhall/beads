@@ -207,6 +207,36 @@ func TestWindowsPathInSafeBoundary_OrdinaryLocations(t *testing.T) {
 	})
 }
 
+// AC-5 under the full policy: with system, profile and temp facts all in
+// force, ordinary locations stay admitted. A relocated install on a drive
+// denies neither the drive nor its other directories, and a workspace on one
+// share leaves the server's other shares alone.
+func TestWindowsPathInSafeBoundary_OrdinaryLocationsFullPolicy(t *testing.T) {
+	b := newWindowsBoundary(windowsFacts{
+		WindowsDir:  `D:\Win`,
+		ProfilesDir: `C:\Users`,
+		Home:        `C:\Users\alice`,
+		TempDir:     `C:\Users\alice\AppData\Local\Temp`,
+	})
+	winBoundaryCheck(t, b, map[string]bool{
+		`D:\`:                           true,
+		`D:\beads`:                      true,
+		`D:\elsewhere\proj\.beads`:      true,
+		`C:\beads`:                      true,
+		`C:\ProgramData\beads`:          true,
+		`\\server\share`:                true,
+		`\\server\share\proj\.beads`:    true,
+		`\\server\other\proj\.beads`:    true,
+		`\\?\C:\beads`:                  true,
+		`C:\Users\alice\projects\beads`: true,
+		// The denials hold alongside.
+		`D:\Win\.beads`:          false,
+		`C:\Windows\.beads`:      false,
+		`C:\Users\bob\.beads`:    false,
+		`C:\Program Files\beads`: false,
+	})
+}
+
 func TestNewWindowsBoundary_Profiles(t *testing.T) {
 	b := newWindowsBoundary(windowsFacts{
 		ProfilesDir: `E:\Profiles`,
