@@ -5859,6 +5859,7 @@ func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote str
 	// nothing arrived and one that only knows no error occurred (ga-bq9zd).
 	pullRow, pullErr := schema.CallReturningRow(ctx, tx, query, args...)
 	report := parseMergeReport(pullRow)
+	pullErr = remoteTransferFailure(pullErr)
 
 	// GH#3144: When DOLT_PULL fails because upstream branch tracking is not
 	// configured in repo_state.json (common when remote was added via
@@ -5867,7 +5868,7 @@ func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote str
 	if pullErr != nil && isBranchTrackingError(pullErr) {
 		if err := schema.DrainCall(ctx, tx, "CALL DOLT_FETCH(?, ?)", remote, s.branch); err != nil {
 			_ = tx.Rollback()
-			return pullReport{}, fmt.Errorf("fetch from %s/%s: %w", remote, s.branch, err)
+			return pullReport{}, fmt.Errorf("fetch from %s/%s: %w", remote, s.branch, remoteTransferFailure(err))
 		}
 		trackingRef := remote + "/" + s.branch
 		// The merge, not the pull, is now what happened — so its row replaces
