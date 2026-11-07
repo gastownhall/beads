@@ -213,6 +213,7 @@ func TestInitSchemaSharedStoreGate(t *testing.T) {
 
 		lockName := expectBehindDatabaseThroughPreparation(mock, "beads", 1)
 		expectSharedGateProbe(mock, 1, 0)
+		expectVersionQuery(mock, 1) // the forward-drift check: behind passes
 		mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
 			WithArgs(sqlmock.AnyArg()).
 			WillReturnError(errors.New("reached the first migration statement"))

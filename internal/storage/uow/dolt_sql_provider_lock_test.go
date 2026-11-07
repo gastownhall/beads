@@ -194,6 +194,7 @@ func TestInitSchemaConvergenceProbeRunsWithNoSessionDatabase(t *testing.T) {
 	// consent below keeps this test about the lock/probe ordering it exists to
 	// pin. See TestInitSchemaSharedStoreGate for the gate's own behavior.
 	expectSharedGateProbe(mock, 1, 0)
+	expectVersionQuery(mock, 1) // the forward-drift check: behind passes
 	mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
 		WithArgs(sqlmock.AnyArg()).
 		WillReturnError(errors.New("first migration statement failed"))
