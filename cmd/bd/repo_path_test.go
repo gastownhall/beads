@@ -134,6 +134,56 @@ func TestRepoPathDuplicateRelativeSpellingIsRejected(t *testing.T) {
 	}
 }
 
+// TestRepoPathAddRejectsConfiguredLegacySpelling pins that add refuses an
+// argument bd repo remove would match: re-adding a relative entry an older
+// version stored as typed must not append its absolute twin.
+func TestRepoPathAddRejectsConfiguredLegacySpelling(t *testing.T) {
+	w := newRepoPathWorkspace(t)
+	w.writeAdditional(t, "../other")
+	t.Chdir(w.primary)
+
+	var err error
+	stderr := captureStderr(t, func() {
+		err = repoAddCmd.RunE(repoAddCmd, []string{"../other"})
+	})
+	if err == nil || !strings.Contains(stderr, "repository already configured: ../other") {
+		t.Fatalf("re-adding legacy entry ../other: err %v, stderr %q; want an already-configured error", err, stderr)
+	}
+	if got := w.additional(t); len(got) != 1 || got[0] != "../other" {
+		t.Fatalf("repos.additional = %q, want only the legacy entry ../other", got)
+	}
+}
+
+// TestRepoPathAddChecksStoredPathFromSymlinkedCwd pins that add looks for
+// .beads at the path it stores. From a cwd entered through a symlink, the
+// kernel resolves the argument's ".." physically while the stored absolute
+// path drops it lexically, so the two can name different directories.
+func TestRepoPathAddChecksStoredPathFromSymlinkedCwd(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows resolves .. lexically, so the argument and the stored path agree")
+	}
+	w := newRepoPathWorkspace(t)
+	link := filepath.Join(w.root, "elsewhere", "primary")
+	if err := os.Symlink(w.primary, link); err != nil {
+		t.Fatal(err)
+	}
+	// t.Chdir sets PWD to the link: "../other" opens root/other, a workspace,
+	// but filepath.Abs makes it root/elsewhere/other, which does not exist.
+	t.Chdir(link)
+
+	var err error
+	stderr := captureStderr(t, func() {
+		err = repoAddCmd.RunE(repoAddCmd, []string{"../other"})
+	})
+	missing := filepath.Join(w.root, "elsewhere", "other")
+	if err == nil || !strings.Contains(stderr, "no beads workspace found at "+missing) {
+		t.Fatalf("repo add ../other from a symlinked cwd: err %v, stderr %q; want no workspace found at %s", err, stderr, missing)
+	}
+	if got := w.additional(t); len(got) != 0 {
+		t.Fatalf("repos.additional = %q, want it unchanged", got)
+	}
+}
+
 func TestNormalizeRepoPathForStorageRelative(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -200,7 +250,9 @@ func TestRepoPathOutputPreservesVerbatimArguments(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				w := newRepoPathWorkspace(t)
 				if tc.home != nil {
+					// os.UserHomeDir reads USERPROFILE on Windows and HOME elsewhere.
 					t.Setenv("HOME", tc.home(w))
+					t.Setenv("USERPROFILE", tc.home(w))
 				}
 				jsonOutput = asJSON
 				t.Chdir(filepath.Join(w.primary, "nested"))
@@ -231,7 +283,9 @@ func TestRepoPathOutputPreservesVerbatimArguments(t *testing.T) {
 
 func TestExpandRepoTilde(t *testing.T) {
 	home := t.TempDir()
+	// os.UserHomeDir reads USERPROFILE on Windows and HOME elsewhere.
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	for _, tc := range []struct{ in, want string }{
 		{"~", home},
 		{"~/planning", filepath.Join(home, "planning")},

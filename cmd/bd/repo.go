@@ -68,11 +68,19 @@ shared across all clones of this repository.`,
 			}
 		}()
 
-		repoPath := args[0]
+		// Later commands resolve the entry from their own cwd, so a relative
+		// path is stored as the absolute path it names here.
+		repoPath, err := normalizeRepoPathForStorage(args[0])
+		if err != nil {
+			return HandleError("failed to resolve repository path: %v", err)
+		}
 
 		if remotecache.IsRemoteURL(repoPath) {
 			fmt.Fprintf(os.Stderr, "Adding remote repository: %s\n", repoPath)
 		} else {
+			// Check the path that is stored, not the argument: from a cwd
+			// entered through a symlink, the kernel resolves the argument's
+			// ".." physically, while the stored path drops it lexically.
 			expandedPath := expandRepoTilde(repoPath)
 
 			beadsDir := filepath.Join(expandedPath, ".beads")
@@ -81,16 +89,20 @@ shared across all clones of this repository.`,
 			}
 		}
 
-		// Later commands resolve the entry from their own cwd, so a relative
-		// path is stored as the absolute path it names here.
-		repoPath, err := normalizeRepoPathForStorage(repoPath)
-		if err != nil {
-			return HandleError("failed to resolve repository path: %v", err)
-		}
-
 		configPath, err := config.FindConfigYAMLPath()
 		if err != nil {
 			return HandleError("failed to find config.yaml: %v", err)
+		}
+
+		// Refuse an argument bd repo remove would match: a relative entry an
+		// older version stored as typed names this repository but differs
+		// from repoPath, so AddRepo's own check would let a twin in.
+		repos, err := config.ListRepos(configPath)
+		if err != nil {
+			return HandleError("failed to load config: %v", err)
+		}
+		if existing, err := findConfiguredRepo(repos.Additional, args[0]); err == nil {
+			return HandleError("failed to add repository: repository already configured: %s", existing)
 		}
 
 		if err := config.AddRepo(configPath, repoPath); err != nil {
@@ -464,9 +476,10 @@ func normalizeRepoPathForStorage(repoPath string) (string, error) {
 }
 
 // findConfiguredRepo returns the repos.additional entry that a bd repo remove
-// argument names: an entry equal to the argument, else one equal to the
-// spelling bd repo add stores for it. Exact matches win so entries written
-// verbatim by older versions, relative ones included, stay removable.
+// (or bd repo add) argument names: an entry equal to the argument, else one
+// equal to the spelling bd repo add stores for it. Exact matches win so
+// entries written verbatim by older versions, relative ones included, stay
+// removable and are not added a second time.
 func findConfiguredRepo(additional []string, arg string) (string, error) {
 	// Issues of the primary repository have an empty source_repo, so an empty
 	// argument must never reach DeleteIssuesBySourceRepo.
