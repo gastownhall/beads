@@ -2964,8 +2964,8 @@ func buildServerDSN(cfg *Config, database string) string {
 //
 // Audited for be-b0am's fresh-connection branch hazard: safe — but the two
 // callers are safe for different reasons, so the annotation names both.
-// federation.go's CALL DOLT_PUSH(?, ?) names the refspec explicitly. Its
-// CALL DOLT_FETCH(?) passes only the remote: with no refspec argument dolt
+// federation.go's CALL DOLT_PUSH names the refspec explicitly. Its
+// CALL DOLT_FETCH passes only the remote (and --user): with no refspec argument dolt
 // falls back to the remote's configured refspecs (ParseRefSpecs ->
 // GetRefSpecs), which are remote config rather than session state, and a
 // fetch writes only remote-tracking refs, never the working branch. Neither
@@ -5685,8 +5685,10 @@ func (s *DoltStore) refreshTrackingRef(ctx context.Context, remote string) error
 		return err
 	}
 	defer db.Close()
-	return withRemoteOperationEnv(s.credentialsForRemote(remote), s.isS3Remote(ctx, remote), func() error {
-		return schema.DrainCall(ctx, db, "CALL DOLT_FETCH(?, ?)", remote, s.branch)
+	creds := s.credentialsForRemote(remote)
+	return withRemoteOperationEnv(creds, s.isS3Remote(ctx, remote), func() error {
+		query, args := fetchStatement(creds.user(), remote, s.branch)
+		return schema.DrainCall(ctx, db, query, args...)
 	})
 }
 
@@ -5744,7 +5746,7 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 	if s.remoteUser != "" && remote == s.remote {
 		err := withRemoteOperationEnv(creds, s.isS3Remote(ctx, remote), func() error {
 			var err error
-			report, err = s.pullWithAutoResolveReporting(ctx, remote, "CALL DOLT_PULL('--user', ?, ?, ?)", s.remoteUser, remote, s.branch)
+			report, err = s.pullWithAutoResolveReporting(ctx, remote, s.remoteUser, "CALL DOLT_PULL('--user', ?, ?, ?)", s.remoteUser, remote, s.branch)
 			if err != nil {
 				return fmt.Errorf("failed to pull from %s/%s: %w", remote, s.branch, err)
 			}
@@ -5754,7 +5756,7 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 	}
 	err := withRemoteOperationEnv(nil, s.isS3Remote(ctx, remote), func() error {
 		var err error
-		report, err = s.pullWithAutoResolveReporting(ctx, remote, "CALL DOLT_PULL(?, ?)", remote, s.branch)
+		report, err = s.pullWithAutoResolveReporting(ctx, remote, "", "CALL DOLT_PULL(?, ?)", remote, s.branch)
 		if err != nil {
 			return fmt.Errorf("failed to pull from %s/%s: %w", remote, s.branch, err)
 		}
@@ -5795,24 +5797,30 @@ func (s *DoltStore) openLongTimeoutConn() (*sql.DB, error) {
 // fallback targets it directly, so pulls from non-default remotes (PullRemote,
 // federation peers) no longer fall back to s.remote.
 func (s *DoltStore) pullWithAutoResolve(ctx context.Context, remote string, query string, args ...any) error {
-	_, err := s.pullWithAutoResolveReporting(ctx, remote, query, args...)
+	return s.pullWithAutoResolveAs(ctx, remote, "", query, args...)
+}
+
+// pullWithAutoResolveAs is pullWithAutoResolve for a query that passes user
+// with --user: the fallback's DOLT_FETCH passes it too.
+func (s *DoltStore) pullWithAutoResolveAs(ctx context.Context, remote, user string, query string, args ...any) error {
+	_, err := s.pullWithAutoResolveReporting(ctx, remote, user, query, args...)
 	return err
 }
 
-// pullWithAutoResolveReporting is pullWithAutoResolve plus the row the pull (or
-// the fetch+merge fallback) returned — the engine's own account of whether
+// pullWithAutoResolveReporting is pullWithAutoResolveAs plus the row the pull
+// (or the fetch+merge fallback) returned — the engine's own account of whether
 // anything merged. See pullReport.
-func (s *DoltStore) pullWithAutoResolveReporting(ctx context.Context, remote string, query string, args ...any) (pullReport, error) {
+func (s *DoltStore) pullWithAutoResolveReporting(ctx context.Context, remote, user string, query string, args ...any) (pullReport, error) {
 	var report pullReport
 	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		var err error
-		report, err = s.pullWithAutoResolveUnchecked(ctx, remote, query, args...)
+		report, err = s.pullWithAutoResolveUnchecked(ctx, remote, user, query, args...)
 		return err
 	})
 	return report, err
 }
 
-func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote string, query string, args ...any) (pullReport, error) {
+func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote, user string, query string, args ...any) (pullReport, error) {
 	// Audited for be-b0am's fresh-connection branch hazard: NOT safe, and all
 	// three callers share it. Passing a branch argument does not avoid it.
 	//
@@ -5874,7 +5882,8 @@ func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote str
 	// bd dolt remote add rather than bd bootstrap/dolt clone), fall back to
 	// DOLT_FETCH + DOLT_MERGE which does not require tracking config.
 	if pullErr != nil && isBranchTrackingError(pullErr) {
-		if err := schema.DrainCall(ctx, tx, "CALL DOLT_FETCH(?, ?)", remote, s.branch); err != nil {
+		query, args := fetchStatement(user, remote, s.branch)
+		if err := schema.DrainCall(ctx, tx, query, args...); err != nil {
 			_ = tx.Rollback()
 			return pullReport{}, markTransferFailure(fmt.Errorf("fetch from %s/%s: %w", remote, s.branch, err))
 		}

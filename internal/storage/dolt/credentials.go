@@ -467,6 +467,23 @@ type remoteCredentials struct {
 	password string
 }
 
+// user returns the username to pass with --user, or "" when there is none.
+func (c *remoteCredentials) user() string {
+	if c == nil {
+		return ""
+	}
+	return c.username
+}
+
+// fetchStatement is the CALL DOLT_FETCH of branch from remote, passing user
+// with --user when there is one, as the push and pull of that remote do.
+func fetchStatement(user, remote, branch string) (string, []any) {
+	if user != "" {
+		return "CALL DOLT_FETCH('--user', ?, ?, ?)", []any{user, remote, branch}
+	}
+	return "CALL DOLT_FETCH(?, ?)", []any{remote, branch}
+}
+
 // empty returns true if no credentials are set.
 func (c *remoteCredentials) empty() bool {
 	return c == nil || (c.username == "" && c.password == "")

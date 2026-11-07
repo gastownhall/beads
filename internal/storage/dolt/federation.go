@@ -54,7 +54,11 @@ func (s *DoltStore) pushRefToPeer(ctx context.Context, peer string, refspec stri
 			return s.withServerCredentialsNote(ctx, peer, "push", true, creds, s.doltCLIPushRefToPeer(ctx, peer, refspec, creds))
 		}
 		return s.withServerCredentialsNote(ctx, peer, "push", true, creds, withEnvCredentials(creds, func() error {
-			if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH(?, ?)", peer, refspec); err != nil {
+			query, args := "CALL DOLT_PUSH(?, ?)", []any{peer, refspec}
+			if user := creds.user(); user != "" {
+				query, args = "CALL DOLT_PUSH('--user', ?, ?, ?)", []any{user, peer, refspec}
+			}
+			if err := s.execWithLongTimeout(ctx, query, args...); err != nil {
 				return markTransferFailure(fmt.Errorf("failed to push to peer %s: %w", peer, err))
 			}
 			return nil
@@ -123,7 +127,12 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 			return s.withServerCredentialsNote(ctx, peer, "pull", true, creds, s.peerPullOutcome(ctx, peer, pullErr, &conflicts))
 		}
 		return s.withServerCredentialsNote(ctx, peer, "pull", true, creds, withEnvCredentials(creds, func() error {
-			pullErr := s.pullWithAutoResolve(ctx, peer, "CALL DOLT_PULL(?)", peer)
+			var pullErr error
+			if user := creds.user(); user != "" {
+				pullErr = s.pullWithAutoResolveAs(ctx, peer, user, "CALL DOLT_PULL('--user', ?, ?)", user, peer)
+			} else {
+				pullErr = s.pullWithAutoResolve(ctx, peer, "CALL DOLT_PULL(?)", peer)
+			}
 			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
 		}))
 	})
@@ -186,7 +195,11 @@ func (s *DoltStore) Fetch(ctx context.Context, peer string) error {
 			return s.withServerCredentialsNote(ctx, peer, "fetch", true, creds, s.doltCLIFetchFromPeer(ctx, peer, creds))
 		}
 		return s.withServerCredentialsNote(ctx, peer, "fetch", true, creds, withEnvCredentials(creds, func() error {
-			if err := s.execWithLongTimeout(ctx, "CALL DOLT_FETCH(?)", peer); err != nil {
+			query, args := "CALL DOLT_FETCH(?)", []any{peer}
+			if user := creds.user(); user != "" {
+				query, args = "CALL DOLT_FETCH('--user', ?, ?)", []any{user, peer}
+			}
+			if err := s.execWithLongTimeout(ctx, query, args...); err != nil {
 				return markTransferFailure(fmt.Errorf("failed to fetch from peer %s: %w", peer, err))
 			}
 			return nil

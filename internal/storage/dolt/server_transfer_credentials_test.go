@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // The tests in this file pin the note a server-mode push, pull or fetch adds
@@ -26,6 +28,10 @@ import (
 
 // serverNoteRule is the part of the note that states the execution rule.
 const serverNoteRule = "from the environment it was started with, never from bd's"
+
+// missingPasswordRefusal is how a dolt process without DOLT_REMOTE_PASSWORD
+// refuses a transfer that passes --user.
+const missingPasswordRefusal = "must set DOLT_REMOTE_PASSWORD"
 
 // failingDoltOnPath puts a dolt on PATH that logs every call like
 // fakeDoltOnPath, answers `dolt remote -v` with remotes ("name url" lines),
@@ -440,5 +446,78 @@ func TestServerRunTransferFailureGuidesByServerOwnership(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestTransferStatementsPassTheUserBdHolds pins the SQL route's identity
+// (AC-4): a push, pull or fetch to a peer bd holds a user for, and the fetch
+// of the default pull's tracking-error fallback and of its landed-check
+// refresh, pass that user with --user, as the default remote's push and pull
+// already do. The test server is started without DOLT_REMOTE_PASSWORD, so a
+// statement that passes --user is refused for it before any network, and one
+// that does not fails at the closed port instead.
+func TestTransferStatementsPassTheUserBdHolds(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	const closedPort = "http://127.0.0.1:1/org/"
+	// Settle the store's own setup so the pull has no pending changes to refuse.
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'settle setup')"); err != nil && !strings.Contains(err.Error(), "nothing to commit") {
+		t.Fatalf("commit setup: %v", err)
+	}
+
+	if err := store.AddFederationPeer(ctx, &storage.FederationPeer{
+		Name: "peer1", RemoteURL: closedPort + "peer", Username: "peer-user", Sovereignty: "T2",
+	}); err != nil {
+		t.Fatalf("AddFederationPeer: %v", err)
+	}
+	if err := store.AddRemote(ctx, "origin", closedPort+"origin"); err != nil {
+		t.Fatalf("AddRemote: %v", err)
+	}
+	store.remote, store.remoteUser = "origin", "admin"
+
+	for _, tc := range []struct {
+		name string
+		run  func() error
+	}{
+		{"peer push", func() error { return store.PushTo(ctx, "peer1") }},
+		{"peer filtered push", func() error { return store.pushRefToPeer(ctx, "peer1", "main:main") }},
+		{"peer pull", func() error { _, err := store.PullFrom(ctx, "peer1"); return err }},
+		{"peer fetch", func() error { return store.Fetch(ctx, "peer1") }},
+		{"landed-check refresh", func() error { return store.refreshTrackingRef(ctx, "origin") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run()
+			if err == nil || !strings.Contains(err.Error(), missingPasswordRefusal) {
+				t.Fatalf("error = %v, want the server's refusal %q for the user bd passes", err, missingPasswordRefusal)
+			}
+		})
+	}
+}
+
+// TestPullFallbackFetchPassesTheUserBdHolds is the GH#3144 fallback leg of
+// TestTransferStatementsPassTheUserBdHolds: when the pull fails for missing
+// branch tracking, its DOLT_FETCH passes the user the pull ran as.
+func TestPullFallbackFetchPassesTheUserBdHolds(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	if err := store.AddRemote(ctx, "origin", "http://127.0.0.1:1/org/origin"); err != nil {
+		t.Fatalf("AddRemote: %v", err)
+	}
+	const createSP = `
+		CREATE PROCEDURE inject_tracking_error()
+		BEGIN
+			SIGNAL SQLSTATE 'HY000'
+			SET MESSAGE_TEXT = 'You asked to pull from the remote origin, but did not specify a branch.';
+		END`
+	if _, err := store.execContext(ctx, createSP); err != nil {
+		t.Fatalf("create inject_tracking_error: %v", err)
+	}
+	err := store.pullWithAutoResolveAs(ctx, "origin", "admin", "CALL inject_tracking_error()")
+	if err == nil || !strings.Contains(err.Error(), "fetch from origin/main") || !strings.Contains(err.Error(), missingPasswordRefusal) {
+		t.Fatalf("error = %v, want the fallback fetch refused for the user bd passes (%q)", err, missingPasswordRefusal)
 	}
 }
