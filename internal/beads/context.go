@@ -639,9 +639,12 @@ func isPathInSafeBoundary(path string) bool {
 	// Allow a service account's own home below /var/lib (GH#6323): accounts
 	// such as /var/lib/<service> keep their workspace there, which the /var
 	// entry below would otherwise reject. Only the current account's home
-	// qualifies; anything that does not falls through to the blocklist.
-	if home, euid := serviceHomeAccount(); inOwnServiceHome(absPath, serviceHomeRoot, home, euid) {
-		return true
+	// qualifies; anything that does not falls through to the blocklist. Only
+	// paths under the service root pay for the account lookup.
+	if serviceHomeCandidate(absPath, serviceHomeRoot) {
+		if home, euid := serviceHomeAccount(); inOwnServiceHome(absPath, serviceHomeRoot, home, euid) {
+			return true
+		}
 	}
 
 	for _, prefix := range unsafePrefixes {
@@ -727,10 +730,18 @@ func inOwnServiceHome(path, root, home string, euid int) bool {
 	// The request itself must be spelled under the root (either spelling), so
 	// a link elsewhere in a blocked directory cannot borrow the home's
 	// admission by resolving into it.
-	if !pathBelow(path, filepath.Clean(root)) && !pathBelow(path, physRoot) {
+	if !serviceHomeCandidate(path, root) {
 		return false
 	}
 	return resolvedPathWithinRoot(path, physHome)
+}
+
+// serviceHomeCandidate reports whether path is spelled strictly below root,
+// in its lexical or its physical (symlink-resolved) form, as the temp-dir
+// carve-out accepts both spellings of its root.
+func serviceHomeCandidate(path, root string) bool {
+	root = filepath.Clean(root)
+	return pathBelow(path, root) || pathBelow(path, resolveLongestExistingAncestor(root))
 }
 
 // pathBelow reports whether path lies strictly below dir, comparing on a
