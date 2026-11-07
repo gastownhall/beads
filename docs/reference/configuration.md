@@ -511,6 +511,29 @@ See [bd github](/cli-reference/github).
 
 Connection keys (`ado.pat`, `ado.org`, `ado.project`, `ado.projects`, `ado.url`) each have an `AZURE_DEVOPS_*` environment variable equivalent; config keys take priority over env vars. When `ado.projects` is set, `bd ado sync` fetches work items from all listed projects in a single query. State maps default to the Agile process template (override with `ado.state_map.*` / `ado.type_map.*` for Scrum or CMMI), and priority mapping (ADO 1–4 ↔ beads 0–4, with backlog collapsing to low) is automatic and not configurable. Full setup, mapping tables, and sync commands: [Azure DevOps integration](/integrations/azure-devops) and [bd ado](/cli-reference/ado).
 
+### Notion
+
+```bash
+export NOTION_TOKEN="ntn_YOUR_TOKEN"        # or: bd config set notion.token ...
+bd config set notion.max_query_pages 100    # or NOTION_MAX_QUERY_PAGES; default 50
+```
+
+How `bd notion sync` reads the data source. Every query it sends, filtered or not, is bounded by `notion.max_query_pages` (or `NOTION_MAX_QUERY_PAGES`); a query that needs more pages fails with an error naming both settings and returns no partial rows.
+
+- **Incremental pull.** Once `notion.last_sync` is recorded, a pull asks Notion only for pages edited since that cursor (minus a short overlap). Notion applies the filter on its side, so the cost tracks recent edits, not the size of the data source.
+- **Full pull.** A pull with no recorded cursor, such as the first sync in a workspace, lists every row. Each page of results holds up to 100 rows, so the default bound of 50 covers about 5,000; a larger source fails the pull and imports nothing until you raise the bound and run it again.
+- **Push and single-issue fetch.** Every push, whatever its size, looks up each issue on its own: a direct read of its linked page, or a query for its Beads ID when it has no link or the linked page is gone, archived, trashed, or in another data source. Push never lists the whole data source, so its cost tracks the issues pushed, not the size of the source. Each Beads ID query is still bounded by `notion.max_query_pages`, but it only has to page through the rows matching that ID.
+
+An incremental pull does not discover an old page that was never linked to a bead: a page whose last edit predates the cursor stays unseen until it changes. To bring one in, edit the page in Notion so the next incremental pull sees it, or pull it directly:
+
+```bash
+bd notion sync --pull --issues <page-url-or-id>
+```
+
+Use the Notion page URL or ID there, not a Beads ID that does not exist locally yet. Reconciling the whole data source takes a pull with no cursor, which can require raising `notion.max_query_pages`.
+
+The pull summary line `Queried N pages from Notion (M pull candidates)` counts the live rows that pull's own query returned (N) and those left after the state, `since`, and limit filters (M). On an incremental pull, N counts only the recently edited pages Notion returned, not the whole data source. See [bd notion](/cli-reference/notion).
+
 ## Environment Variables
 
 The Viper env prefix is `BD_`. Config keys map to env vars by upper-casing and replacing `.` and `-` with `_` (e.g. `dolt.auto-commit` → `BD_DOLT_AUTO_COMMIT`, `validation.on-create` → `BD_VALIDATION_ON_CREATE`).
