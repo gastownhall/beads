@@ -446,6 +446,8 @@ func (s *testSuite) requireScopedCommitRefused(ref string) {
 		s.Equal(head, s.output("rev-parse", "HEAD"))
 		s.Equal(inProgress, s.output("rev-parse", "--verify", ref))
 		s.Equal(index, s.output("ls-files", "--stage"))
+		s.Contains(err.Error(), "left staged: once it is finished, commit them with git commit -- .beads/")
+		s.NotContains(err.Error(), "abort")
 	}
 }
 
@@ -481,6 +483,119 @@ func (s *testSuite) TestCommit_PathsRefusesDuringRevert() {
 
 	s.requireScopedCommitRefused("REVERT_HEAD")
 	s.run("git", "revert", "--abort")
+}
+
+// gitIn runs git in dir and returns its trimmed output; wantErr requires a
+// nonzero exit instead, such as a rebase that stops on a conflict.
+func (s *testSuite) gitIn(dir string, wantErr bool, args ...string) string {
+	s.T().Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if wantErr {
+		s.Require().Error(err, "git %v", args)
+	} else {
+		s.Require().NoError(err, "git %v", args)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// requireScopedCommitRefusedIn requires a Paths commit made in dir to refuse
+// with reason, first with nothing staged under Paths and then with
+// .beads/config.yaml staged, each time without moving HEAD or changing the
+// index, and, when stateDir is set, leaving that state directory of the
+// stopped rebase or git am in place.
+func (s *testSuite) requireScopedCommitRefusedIn(dir, reason, stateDir string) {
+	s.T().Helper()
+	repo := NewGitRepository(dir)
+	head := s.gitIn(dir, false, "rev-parse", "HEAD")
+	for _, staged := range []bool{false, true} {
+		if staged {
+			s.Require().NoError(os.MkdirAll(filepath.Join(dir, ".beads"), 0750))
+			s.Require().NoError(os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("x"), 0600))
+			s.Require().NoError(repo.Add(s.Ctx(), ".beads/"))
+		}
+		index := s.gitIn(dir, false, "ls-files", "--stage")
+
+		result, err := repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "init", Paths: []string{".beads/"}})
+		s.Require().Error(err)
+		s.Contains(err.Error(), reason)
+		s.Contains(err.Error(), "left staged: once it is finished, commit them with git commit -- .beads/")
+		s.False(result.DidCommit)
+		s.Equal(head, s.gitIn(dir, false, "rev-parse", "HEAD"))
+		s.Equal(index, s.gitIn(dir, false, "ls-files", "--stage"))
+		if stateDir != "" {
+			s.DirExists(s.gitIn(dir, false, "rev-parse", "--path-format=absolute", "--git-path", stateDir))
+		}
+	}
+}
+
+// rebaseSideOntoStart checks out side in dir and rebases it onto the branch
+// commitBaseAndSide(true) left checked out, which stops on a.txt.
+func (s *testSuite) rebaseSideOntoStart(dir, backend string) {
+	s.T().Helper()
+	s.gitIn(dir, false, "checkout", "-q", "side")
+	s.gitIn(dir, true, "rebase", backend, "@{-1}")
+	s.Equal("UU a.txt", s.gitIn(dir, false, "status", "--porcelain", "--", "a.txt"))
+}
+
+func (s *testSuite) TestCommit_PathsRefusesDuringConflictedRebaseMerge() {
+	s.commitBaseAndSide(true)
+	s.rebaseSideOntoStart(s.tmpDir, "--merge")
+
+	s.requireScopedCommitRefusedIn(s.tmpDir, "rebase-merge exists", "rebase-merge")
+	s.run("git", "rebase", "--abort")
+}
+
+func (s *testSuite) TestCommit_PathsRefusesDuringConflictedRebaseApply() {
+	s.commitBaseAndSide(true)
+	s.rebaseSideOntoStart(s.tmpDir, "--apply")
+
+	s.requireScopedCommitRefusedIn(s.tmpDir, "rebase-apply exists", "rebase-apply")
+	s.run("git", "rebase", "--abort")
+}
+
+// A git am that stops without a three-way merge leaves no unmerged entry, so
+// only its state directory shows it is in progress.
+func (s *testSuite) TestCommit_PathsRefusesDuringStoppedAm() {
+	s.commitBaseAndSide(true)
+	patch := filepath.Join(s.T().TempDir(), "side.patch")
+	s.Require().NoError(os.WriteFile(patch, []byte(s.output("format-patch", "-1", "--stdout", "side")+"\n"), 0600))
+	s.runFails("am", patch)
+	s.Empty(s.output("ls-files", "-u"))
+
+	s.requireScopedCommitRefusedIn(s.tmpDir, "rebase-apply exists", "rebase-apply")
+	s.run("git", "am", "--abort")
+}
+
+// In a linked worktree the rebase state lives under the main repository's
+// .git/worktrees/<name>/, and the worktree's .git is a file.
+func (s *testSuite) TestCommit_PathsRefusesDuringLinkedWorktreeRebase() {
+	s.commitBaseAndSide(true)
+	wt := filepath.Join(s.T().TempDir(), "wt")
+	s.run("git", "worktree", "add", "-q", "--detach", wt, "HEAD")
+	s.gitIn(wt, false, "checkout", "-q", "-B", "start")
+	s.rebaseSideOntoStart(wt, "--merge")
+
+	s.requireScopedCommitRefusedIn(wt, "rebase-merge exists", "rebase-merge")
+	s.gitIn(wt, false, "rebase", "--abort")
+}
+
+// An unmerged path outside Paths is refused when no ref or state directory
+// marks an operation, as after a conflicted git stash pop.
+func (s *testSuite) TestCommit_PathsRefusesUnmergedOutsidePaths() {
+	s.gitInit()
+	s.writeFile("a.txt", "base\n")
+	s.run("git", "add", "a.txt")
+	s.run("git", "commit", "-q", "-m", "base")
+	s.writeFile("a.txt", "stashed\n")
+	s.run("git", "stash", "-q")
+	s.writeFile("a.txt", "ours\n")
+	s.run("git", "commit", "-q", "-am", "ours")
+	s.runFails("stash", "pop")
+	s.Equal("UU a.txt", s.output("status", "--porcelain", "--", "a.txt"))
+
+	s.requireScopedCommitRefusedIn(s.tmpDir, "a.txt is unmerged", "")
 }
 
 // An unmerged entry under Paths is refused even with no merge, cherry-pick

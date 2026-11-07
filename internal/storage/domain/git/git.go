@@ -282,18 +282,56 @@ func (r *gitRepositoryImpl) stagedIndexInfo(ctx context.Context, paths []string)
 // longer be aborted.
 var inProgressRefs = []string{"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"}
 
+// inProgressDirs are the state directories git keeps while a rebase (either
+// backend) or a git am is stopped. None of them sets a ref above, and a git am
+// stopped without a three-way merge leaves no unmerged entry either.
+var inProgressDirs = []string{"rebase-merge", "rebase-apply"}
+
+// refuseInProgress is commitStaged's refusal while another operation is in
+// progress. Nothing is committed and the real index is not touched, so the
+// changes under paths are still staged when that operation is finished.
+func refuseInProgress(paths []string, format string, a ...any) error {
+	p := strings.Join(paths, " ")
+	return fmt.Errorf("git: Commit: %s; nothing was committed and %s are left staged: once it is finished, commit them with git commit -- %s", fmt.Sprintf(format, a...), p, p)
+}
+
 // commitStaged commits only the staged changes under paths. It builds a
 // temporary index from HEAD plus exactly those staged entries and commits
 // that, so the staged content is what lands (not the working tree's), a
 // staged removal is committed, and the rest of the index stays staged.
 //
-// It refuses while a merge, cherry-pick or revert is in progress: a commit of
-// the temporary index would conclude that operation without its changes.
+// It refuses while a merge, cherry-pick, revert, rebase or git am is in
+// progress, or while any path is unmerged: a commit of the temporary index
+// would conclude the operation without its changes or write into the branch
+// being rebased, where a plain git commit refuses.
 func (r *gitRepositoryImpl) commitStaged(ctx context.Context, args, paths []string) ([]byte, bool, error) {
 	for _, ref := range inProgressRefs {
 		if r.gitCmd(ctx, "rev-parse", "-q", "--verify", ref).Run() == nil {
-			return nil, false, fmt.Errorf("git: Commit: %s exists: conclude or abort the merge, cherry-pick or revert in progress first", ref)
+			return nil, false, refuseInProgress(paths, "%s exists: a merge, cherry-pick or revert is in progress", ref)
 		}
+	}
+	for _, dir := range inProgressDirs {
+		out, err := r.gitCmd(ctx, "rev-parse", "--git-path", dir).Output()
+		if err != nil {
+			return nil, false, fmt.Errorf("git: Commit: locate %s: %w", dir, err)
+		}
+		state := strings.TrimSpace(string(out))
+		if !filepath.IsAbs(state) && r.workDir != "" {
+			state = filepath.Join(r.workDir, state)
+		}
+		if _, err := os.Stat(state); err == nil {
+			return nil, false, refuseInProgress(paths, "%s exists: a rebase or git am is in progress", dir)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, false, fmt.Errorf("git: Commit: %s: %w", dir, err)
+		}
+	}
+	unmerged, err := r.gitCmd(ctx, "ls-files", "-u", "-z").Output()
+	if err != nil {
+		return nil, false, fmt.Errorf("git: Commit: list unmerged paths: %w", err)
+	}
+	if entry, _, _ := bytes.Cut(unmerged, []byte{0}); len(entry) > 0 {
+		_, name, _ := bytes.Cut(entry, []byte{'\t'})
+		return nil, false, refuseInProgress(paths, "%s is unmerged", name)
 	}
 	info, err := r.stagedIndexInfo(ctx, paths)
 	if err != nil || len(info) == 0 {
