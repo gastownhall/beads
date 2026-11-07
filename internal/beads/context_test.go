@@ -1933,6 +1933,59 @@ func TestIsPathInSafeBoundary_ServiceHomeNeedsQualifyingAccount(t *testing.T) {
 	}
 }
 
+// TestIsPathInSafeBoundary_ServiceHomeLookupScoped proves the boundary check
+// consults the service-home account lookup only for paths under the service
+// root: system directories, a name-prefix sibling of the root, and paths
+// other rules already decide never trigger it.
+func TestIsPathInSafeBoundary_ServiceHomeLookupScoped(t *testing.T) {
+	calls := 0
+	var f serviceHomeFixture
+	f = useServiceHomeFixture(t, func() (string, int) {
+		calls++
+		return f.home, f.uid
+	})
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+
+	check := func(root string, paths map[string]string, wantLookup bool) {
+		t.Helper()
+		serviceHomeRoot = root
+		for name, path := range paths {
+			calls = 0
+			isPathInSafeBoundary(path)
+			if got := calls > 0; got != wantLookup {
+				t.Errorf("%s: isPathInSafeBoundary(%q) with service root %q consulted the account lookup %d times, want lookup=%v", name, path, root, calls, wantLookup)
+			}
+		}
+	}
+
+	check(f.root, map[string]string{
+		"/etc":               "/etc/beads",
+		"/usr":               "/usr/local/beads",
+		"root name-prefix":   filepath.Join(f.root+"x", "svc", ".beads"),
+		"service root":       f.root,
+		"user home":          filepath.Join(homeDir, "projects", ".beads"),
+		"temp dir":           filepath.Join(os.TempDir(), "proj", ".beads"),
+		"/var/tmp":           "/var/tmp/proj/.beads",
+		"real /var/lib path": "/var/lib/svc/.beads",
+	}, false)
+	check(f.root, map[string]string{
+		"fixture service home": filepath.Join(f.home, ".beads"),
+		"fixture sibling":      filepath.Join(f.root, "other-service", ".beads"),
+	}, true)
+
+	check("/var/lib", map[string]string{
+		"/var/libx": "/var/libx/svc/.beads",
+		"/var":      "/var/log/svc",
+		"/var/lib":  "/var/lib",
+	}, false)
+	check("/var/lib", map[string]string{
+		"/var/lib service": "/var/lib/svc/.beads",
+	}, true)
+}
+
 // TestInOwnServiceHome table-tests the service-home exception helper against
 // real temporary directories and symlinks.
 func TestInOwnServiceHome(t *testing.T) {
