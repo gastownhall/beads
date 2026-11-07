@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"errors"
+	"math"
 	"sort"
 	"strings"
 	"testing"
@@ -166,22 +167,18 @@ func TestMillisecondsKeepsTheFraction(t *testing.T) {
 	}
 }
 
-// slowGetStore answers GetIssue after a sub-millisecond pause.
-type slowGetStore struct{ storage.DoltStorage }
-
-func (slowGetStore) GetIssue(_ context.Context, id string) (*types.Issue, error) {
-	time.Sleep(300 * time.Microsecond)
-	return &types.Issue{ID: id}, nil
-}
-
-// TestStorageDurationRecordsSubMillisecondCalls pins that a storage call
-// shorter than a millisecond records its real duration, not 0.
+// TestStorageDurationRecordsSubMillisecondCalls pins that a storage call's
+// duration keeps its fraction: a 1.5 ms call records 1.5, not 1. The start
+// time is moved back instead of sleeping, so the duration is never a whole
+// number of milliseconds by accident.
 func TestStorageDurationRecordsSubMillisecondCalls(t *testing.T) {
 	clearTelemetryEnv(t)
 	t.Setenv("BD_OTEL_STDOUT", "true")
 	reader := withManualMeter(t)
-	s := WrapStorage(slowGetStore{}).(*InstrumentedStorage)
-	_, _ = s.GetIssue(context.Background(), "bd-1")
+	s := WrapStorage(metricAttrStore{}).(*InstrumentedStorage)
+	ctx, span, started := s.op(context.Background(), "GetIssue")
+	started.at = started.at.Add(-1500 * time.Microsecond)
+	s.done(ctx, span, started, nil)
 
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &rm); err != nil {
@@ -199,7 +196,7 @@ func TestStorageDurationRecordsSubMillisecondCalls(t *testing.T) {
 			}
 		}
 	}
-	if !found || sum < 0.3 {
-		t.Fatalf("bd.storage.operation.duration sum = %v ms (found=%v), want >= 0.3", sum, found)
+	if !found || sum < 1.5 || sum == math.Trunc(sum) {
+		t.Fatalf("bd.storage.operation.duration sum = %v ms (found=%v), want a fractional value >= 1.5", sum, found)
 	}
 }

@@ -8,7 +8,7 @@ code under `internal/hooks/`.
 
 Complete schema of all telemetry events emitted by Beads. Each event consists of:
 
-1. **Span** (→ stdout/console only, when `OTEL_TRACES_EXPORTER=console`; the legacy `BD_OTEL_STDOUT=true` translates to that — no remote/OTLP trace backend is wired) with full structured attributes
+1. **Span** (→ console (stderr) only, when `OTEL_TRACES_EXPORTER=console`; the legacy `BD_OTEL_STDOUT=true` translates to that — no remote/OTLP trace backend is wired) with full structured attributes
 2. **Metric counter/histogram** (→ any OTLP v1.x+ backend, defaults to VictoriaMetrics) for aggregation
 
 Telemetry is hard opt-in: nothing is emitted unless `BD_OTEL_ENABLED=true` is set (a legacy `BD_OTEL_*` variable also activates it); standard `OTEL_*` variables on their own do not.
@@ -404,6 +404,8 @@ One span per Anthropic API call. The `bd.ai.operation` attribute distinguishes t
 | `bd.ai.request.duration` | Histogram (ms) | `bd.ai.model` | ✅ Implemented (compact only) |
 
 The `bd.storage.*` metrics carry `db.operation` only, never the span's request attributes (§3; pinned by `TestStorageMetricsCarryOnlyTheOperation`).
+
+The four `bd.db.pool_*` gauges are registered once per process (`poolSet` in `internal/storage/dolt/store.go`): a store's pool joins the set on open and leaves it in `Close`. With stores open they report the sum over the open pools; with none open, the pools closed since the last open, at their stats when they closed, so a short command, which closes its store before `telemetry.Shutdown` exports, still reports its pool. Pinned by `TestPoolGaugesReportEveryOpenStore` and `TestRegisterPoolGaugesTracksEachStoreUntilClose`. Duration histograms and `*_ms` attributes are fractional milliseconds (`telemetry.Milliseconds`).
 
 ---
 

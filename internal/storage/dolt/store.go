@@ -1053,44 +1053,65 @@ func init() {
 // on open and removes it on Close. Registering them per store with an inline
 // callback does not work: the SDK keeps only the first callback of an
 // instrument, so a process that opened a second store reported the first
-// store's pool forever, closed or not, and kept it reachable.
+// store's pool forever, closed or not, and kept its database handle
+// reachable.
 //
 // With several stores open the gauges report the sum over their pools: the
-// connections this process holds against its servers.
+// connections this process holds against its servers. With none open they
+// report the stats each pool had when its store closed, summed over the
+// stores closed since the last open. A short command closes its store before
+// telemetry.Shutdown exports the final collection, so without that the
+// command's only export would read zero.
 type poolSet struct {
 	mu  sync.Mutex
 	dbs map[*sql.DB]struct{}
+	// closed holds the stats of pools closed since the last track, read
+	// only while dbs is empty.
+	closed []sql.DBStats
 }
 
-// track adds db to the set and returns a func that removes it. The returned
-// func is idempotent.
+// track adds db to the set and returns a func that removes it, keeping the
+// pool's stats at that moment for the gauges (call it before db.Close). The
+// returned func is idempotent.
 func (p *poolSet) track(db *sql.DB) (untrack func()) {
 	p.mu.Lock()
 	if p.dbs == nil {
 		p.dbs = make(map[*sql.DB]struct{})
 	}
 	p.dbs[db] = struct{}{}
+	p.closed = nil
 	p.mu.Unlock()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
+			last := db.Stats()
 			p.mu.Lock()
 			delete(p.dbs, db)
+			p.closed = append(p.closed, last)
 			p.mu.Unlock()
 		})
 	}
 }
 
-// stats returns the summed pool stats of the open stores.
+// stats returns the summed pool stats of the open stores or, with none
+// open, of the stores closed since the last open.
 func (p *poolSet) stats() (open, inUse, idle, maxOpen int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for db := range p.dbs {
-		st := db.Stats()
+	add := func(st sql.DBStats) {
 		open += int64(st.OpenConnections)
 		inUse += int64(st.InUse)
 		idle += int64(st.Idle)
 		maxOpen += int64(st.MaxOpenConnections)
+	}
+	if len(p.dbs) == 0 {
+		for _, st := range p.closed {
+			add(st)
+		}
+		return open, inUse, idle, maxOpen
+	}
+	for db := range p.dbs {
+		add(db.Stats())
 	}
 	return open, inUse, idle, maxOpen
 }

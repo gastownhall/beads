@@ -1221,7 +1221,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of the stores open now, summed. Each store registered the gauges with its
   own callback, and the OTel SDK keeps only the first callback of an
   instrument, so the gauges reported the first store's pool forever, even
-  after it closed.
+  after it closed. With no store open (a short command closes its store
+  before the final export) they report the pools as they were at close.
 - The console trace and metric exporters (`OTEL_TRACES_EXPORTER=console`,
   `OTEL_METRICS_EXPORTER=console`, legacy `BD_OTEL_STDOUT=true`) write to
   stderr, as documented. They wrote to stdout, where their JSON mixed into
