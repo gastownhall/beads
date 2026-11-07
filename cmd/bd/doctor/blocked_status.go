@@ -18,6 +18,11 @@ const BlockedStatusCheckName = "Blocked Status"
 // database with many of them stays readable.
 const maxBlockedStatusExamples = 5
 
+// blockedStatusSearchFailed is the message of the warning the check reports
+// when its search fails; the agent enricher tells it from the advisory list,
+// which has holds to review.
+const blockedStatusSearchFailed = "Unable to check blocked statuses"
+
 // IssueSearcher is the one store method CheckBlockedStatus reads. The shared
 // store's *dolt.DoltStore and the embedded store bd doctor --check=conventions
 // opens both satisfy it.
@@ -40,8 +45,11 @@ func CheckBlockedStatusWithStore(ss *SharedStore) DoctorCheck {
 // when its last blocker closes, but a close never changes a dependent's own
 // status, and an issue can be set blocked with no dependency at all (bd
 // update --status blocked, or a tracker sync mapping its own blocked status).
-// bd ready leaves out every status-blocked issue and bd blocked selects only
+// bd ready leaves out every status-blocked issue and bd blocked selects
 // is_blocked=1, so such an issue is in neither view and only bd list finds it.
+// The exception is an issue a cross-repo dependency (external:<project>:
+// <capability>) still holds: is_blocked never records those, and bd blocked
+// adds them at query time, so the detail line says so.
 //
 // It is advisory and never repaired: nothing in the dependency graph tells a
 // hold that is still meant (waiting on a person, a decision or a tracker) from
@@ -64,7 +72,7 @@ func CheckBlockedStatus(ctx context.Context, searcher IssueSearcher) DoctorCheck
 		return DoctorCheck{
 			Name:    BlockedStatusCheckName,
 			Status:  StatusWarning,
-			Message: "Unable to check blocked statuses",
+			Message: blockedStatusSearchFailed,
 			Detail:  err.Error(),
 		}
 	}
@@ -92,7 +100,7 @@ func CheckBlockedStatus(ctx context.Context, searcher IssueSearcher) DoctorCheck
 	if len(ids) > len(examples) {
 		detail += fmt.Sprintf(" (+%d more)", len(ids)-len(examples))
 	}
-	detail += ". They appear in neither 'bd ready' nor 'bd blocked'; a status set on purpose (a hold waiting on a person, a decision or a tracker) is left as it is"
+	detail += ". They appear in neither 'bd ready' nor 'bd blocked', except an issue a cross-repo dependency (external:<project>:<capability>) still holds, which 'bd blocked' lists; a status set on purpose (a hold waiting on a person, a decision or a tracker) is left as it is"
 
 	return DoctorCheck{
 		Name:    BlockedStatusCheckName,

@@ -220,6 +220,25 @@ func TestCheckBlockedStatus(t *testing.T) {
 		requireBlockedStatusWarning(t, CheckBlockedStatus(ctx, store), 1, []string{held.ID}, 0)
 		requireStatus(t, store, held.ID, types.StatusBlocked)
 	})
+
+	// cross_repo_hold_is_named_as_the_exception: is_blocked never records an
+	// external:<project>:<capability> blocker (bd blocked adds those at query
+	// time), so a status-blocked row only such a blocker holds keeps a clear
+	// stored flag and is listed. Its detail names that exception instead of
+	// claiming bd blocked misses the row.
+	t.Run("cross_repo_hold_is_named_as_the_exception", func(t *testing.T) {
+		store := newTestDoltStore(t, "bsx")
+		held := createBlockedStatusIssue(t, store, &types.Issue{Title: "held by another project's capability", Status: types.StatusBlocked})
+		addBlockedStatusDep(t, store, held.ID, "external:otherproj:payments", types.DepBlocks)
+		requireStoredIsBlocked(t, store, held.ID, false)
+
+		check := CheckBlockedStatus(ctx, store)
+		requireBlockedStatusWarning(t, check, 1, []string{held.ID}, 0)
+		if want := "except an issue a cross-repo dependency (external:<project>:<capability>) still holds, which 'bd blocked' lists"; !strings.Contains(check.Detail, want) {
+			t.Errorf("detail = %q, want it to name the cross-repo exception: %q", check.Detail, want)
+		}
+		requireStatus(t, store, held.ID, types.StatusBlocked)
+	})
 }
 
 // requireBlockedStatusWarning asserts check warns of count issues, naming

@@ -148,13 +148,16 @@ bd update <id> --status open
 If a blocker is missing instead, record it with `bd dep add <id> <blocker-id>`.
 
 An issue in status `blocked` whose stored dependency-blocked flag is clear
-appears in neither `bd ready` nor `bd blocked`. `bd doctor` lists these
-issues in its Blocked Status check, and `bd doctor --check=conventions` lists
-them as `conventions.blocked-status` (the form embedded workspaces support).
-Both are advisory and change no status. They read the stored
-dependency-blocked flag rather than walking the graph, so their list is not
-proof that nothing holds an issue; if `bd doctor` also reports stale Blocked
-State flags, run `bd recompute-blocked` first, then rerun the check.
+appears in neither `bd ready` nor `bd blocked`, unless a
+[cross-repo dependency](#cross-repo-dependencies) still holds it: the stored
+flag does not record those, and `bd blocked` lists the issue. `bd doctor`
+lists these issues in its Blocked Status check, and
+`bd doctor --check=conventions` lists them as `conventions.blocked-status`
+(the form embedded workspaces support). Both are advisory and change no
+status. They read the stored dependency-blocked flag rather than walking the
+graph, so their list is not proof that nothing holds an issue (a cross-repo
+dependency may); if `bd doctor` also reports stale Blocked State flags, run
+`bd recompute-blocked` first, then rerun the check.
 
 ## Visualizing Dependencies
 
