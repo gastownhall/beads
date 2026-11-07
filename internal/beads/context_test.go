@@ -1870,6 +1870,46 @@ func TestIsPathInSafeBoundary_OwnServiceHome(t *testing.T) {
 	}
 }
 
+// TestIsPathInSafeBoundary_OwnServiceHomeStaysNarrow proves the service-home
+// exception admits nothing beyond the account's home: the service root itself,
+// a sibling service, a path that resolves out of the home, and a blocked path
+// outside the root that links into the home all stay rejected.
+func TestIsPathInSafeBoundary_OwnServiceHomeStaysNarrow(t *testing.T) {
+	f := useServiceHomeFixture(t, nil)
+	base := filepath.Dir(f.root)
+
+	sibling := filepath.Join(f.root, "other-service")
+	if err := os.MkdirAll(sibling, 0o755); err != nil {
+		t.Fatalf("mkdir sibling: %v", err)
+	}
+	outside := filepath.Join(base, "outside")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	toSibling := filepath.Join(f.home, "to-sibling")
+	mustSymlink(t, sibling, toSibling)
+	toOutside := filepath.Join(f.home, "to-outside")
+	mustSymlink(t, outside, toOutside)
+	// A link in a blocked directory outside the service root (an /etc/x ->
+	// /var/lib/<service> stand-in) must not borrow the home's admission.
+	intoHome := filepath.Join(base, "into-home")
+	mustSymlink(t, f.home, intoHome)
+
+	for name, path := range map[string]string{
+		"service root":              f.root,
+		"sibling service":           filepath.Join(sibling, ".beads"),
+		"name-prefix sibling":       f.home + "x",
+		"link out to sibling":       filepath.Join(toSibling, ".beads"),
+		"link out of root":          filepath.Join(toOutside, ".beads"),
+		"outside link into home":    filepath.Join(intoHome, ".beads"),
+		"outside link to home root": intoHome,
+	} {
+		if isPathInSafeBoundary(path) {
+			t.Errorf("%s: isPathInSafeBoundary(%q) = true, want false (outside the account's service home)", name, path)
+		}
+	}
+}
+
 // TestInOwnServiceHome table-tests the service-home exception helper against
 // real temporary directories and symlinks.
 func TestInOwnServiceHome(t *testing.T) {
@@ -1896,6 +1936,15 @@ func TestInOwnServiceHome(t *testing.T) {
 	// aliasIntoHome is a link inside the root that resolves into the home.
 	aliasIntoHome := filepath.Join(root, "alias")
 	mustSymlink(t, filepath.Join(home, "releases"), aliasIntoHome)
+	if err := os.MkdirAll(filepath.Join(root, "other-service"), 0o755); err != nil {
+		t.Fatalf("mkdir sibling: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(base, "outside"), 0o755); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	mustSymlink(t, filepath.Join(root, "other-service"), filepath.Join(home, "to-sibling"))
+	mustSymlink(t, filepath.Join(base, "outside"), filepath.Join(home, "to-outside"))
+	mustSymlink(t, home, filepath.Join(base, "into-home"))
 
 	tests := []struct {
 		name string
@@ -1913,6 +1962,15 @@ func TestInOwnServiceHome(t *testing.T) {
 		{"alias inside root into home", filepath.Join(aliasIntoHome, "r1"), root, home, uid, true},
 		{"symlinked root, lexical request", filepath.Join(rootLink, "flow-estate", ".beads"), rootLink, filepath.Join(rootLink, "flow-estate"), uid, true},
 		{"symlinked root, physical request", filepath.Join(physHome, ".beads"), rootLink, filepath.Join(rootLink, "flow-estate"), uid, true},
+
+		{"service root itself", root, root, home, uid, false},
+		{"physical service root", physRoot, root, home, uid, false},
+		{"sibling", filepath.Join(root, "other-service", ".beads"), root, home, uid, false},
+		{"name-prefix sibling", home + "x", root, home, uid, false},
+		{"root name-prefix", filepath.Join(root+"x", "flow-estate"), root, home, uid, false},
+		{"link out of home within root", filepath.Join(home, "to-sibling", ".beads"), root, home, uid, false},
+		{"link out of root", filepath.Join(home, "to-outside", ".beads"), root, home, uid, false},
+		{"link outside root into home", filepath.Join(base, "into-home", ".beads"), root, home, uid, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
