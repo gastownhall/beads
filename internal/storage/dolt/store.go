@@ -546,6 +546,22 @@ type Config struct {
 	// ApplyGatewayCredential, never by hand.
 	Gateway bool
 
+	// ExternalRead marks the strict non-mutating open of another workspace's
+	// external Dolt endpoint that only NewExternalReadOnly builds, from that
+	// workspace's proxied-server sidecar (gastownhall/beads#5861). Its
+	// endpoint, user and password are already resolved, an empty password
+	// or socket included: applyConfigDefaults reads none of the ambient
+	// host, port, socket or password sources for it, the socket-first TCP
+	// fallback does not apply, and the store owns no local storage (no data
+	// directory, port file or managed server), whatever host it dials.
+	ExternalRead bool
+
+	// ServerTLSConfigName names a go-sql-driver TLS configuration registered
+	// with mysql.RegisterTLSConfig, which the connection uses in place of
+	// ServerTLS's default one. NewExternalReadOnly sets it from the sidecar's
+	// TLS settings (configfile.ExternalDoltConfig.TLSClientConfig).
+	ServerTLSConfigName string
+
 	// AutoStart enables transparent server auto-start when connection fails.
 	// When true and the host is localhost, bd will start a dolt sql-server
 	// automatically if one isn't running. Disabled under orchestrator (GT_ROOT set).
@@ -1801,7 +1817,35 @@ func applyConfigDefaults(cfg *Config) {
 		cfg.Remote = "origin"
 	}
 
-	// Server connection defaults (applied in server mode; embedded mode bypasses TCP)
+	if cfg.ExternalRead {
+		// NewExternalReadOnly resolved the endpoint and credential from the
+		// target's sidecar; none of the launcher's sources may fill a field
+		// it left empty. A socket-only endpoint dials no port, so the test
+		// guard has nothing to rewrite there.
+		if cfg.ServerSocket == "" {
+			applyTestModePortGuard(cfg)
+		}
+	} else {
+		applyServerConnectionDefaults(cfg)
+	}
+
+	// Remote credentials for Hosted Dolt push/pull (env vars take precedence)
+	if cfg.RemoteUser == "" {
+		cfg.RemoteUser = os.Getenv("DOLT_REMOTE_USER")
+	}
+	if cfg.RemotePassword == "" {
+		cfg.RemotePassword = os.Getenv("DOLT_REMOTE_PASSWORD")
+	}
+	// Pool knobs last: every DoltStore open (the CLI's store and library
+	// callers of New/NewFromConfig*) reaches New, so the knob ladders hold
+	// here regardless of how cfg was built.
+	applyPoolKnobs(cfg)
+}
+
+// applyServerConnectionDefaults fills the server endpoint and credential
+// fields a caller left empty from the environment and the workspace's port
+// chain (applied in server mode; embedded mode bypasses TCP).
+func applyServerConnectionDefaults(cfg *Config) {
 	if cfg.ServerSocket == "" {
 		cfg.ServerSocket = os.Getenv("BEADS_DOLT_SERVER_SOCKET")
 	}
@@ -1822,18 +1866,6 @@ func applyConfigDefaults(cfg *Config) {
 	if cfg.ServerPassword == "" {
 		cfg.ServerPassword = os.Getenv("BEADS_DOLT_PASSWORD")
 	}
-
-	// Remote credentials for Hosted Dolt push/pull (env vars take precedence)
-	if cfg.RemoteUser == "" {
-		cfg.RemoteUser = os.Getenv("DOLT_REMOTE_USER")
-	}
-	if cfg.RemotePassword == "" {
-		cfg.RemotePassword = os.Getenv("DOLT_REMOTE_PASSWORD")
-	}
-	// Pool knobs last: every DoltStore open (the CLI's store and library
-	// callers of New/NewFromConfig*) reaches New, so the knob ladders hold
-	// here regardless of how cfg was built.
-	applyPoolKnobs(cfg)
 }
 
 // ResolveServerPort applies the store's port rule to cfg, as New does before
@@ -1997,7 +2029,7 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 // own server, shared or not, listens on 127.0.0.1 only.
 func resolveLocalActiveDatabaseDir(cfg *Config) string {
 	if cfg == nil || cfg.BeadsDir == "" || cfg.Database == "" ||
-		cfg.Gateway || cfg.ProxiedServer || cfg.ServerSocket != "" ||
+		cfg.Gateway || cfg.ProxiedServer || cfg.ExternalRead || cfg.ServerSocket != "" ||
 		cfg.ServerTLS || !configfile.BdRunsServerAt(cfg.ServerHost) {
 		return ""
 	}
@@ -2194,7 +2226,11 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// isn't currently connectable must not block operations when the server is
 	// reachable over TCP. Normalizing here means the fail-fast dial below and
 	// the DSN built in openServerConnection agree on the transport.
-	cfg.ServerSocket = ResolveSocketTransport(cfg.ServerSocket, cfg.ServerHost, cfg.ServerPort, 500*time.Millisecond)
+	// An external read dials the sidecar's endpoint as written: socket-only
+	// stays socket-only.
+	if !cfg.ExternalRead {
+		cfg.ServerSocket = ResolveSocketTransport(cfg.ServerSocket, cfg.ServerHost, cfg.ServerPort, 500*time.Millisecond)
+	}
 
 	// Port 0 means "not yet resolved", and only auto-start resolves it. An
 	// open that will not start a server must not dial 127.0.0.1:0 and then
@@ -2933,6 +2969,8 @@ func buildServerDSN(cfg *Config, database string) string {
 		Password: cfg.ServerPassword,
 		Database: database,
 		TLS:      cfg.ServerTLS,
+		// A registered TLS configuration outranks TLS's default one.
+		TLSConfigName: cfg.ServerTLSConfigName,
 	}
 	// Parse the base DSN and add pool-specific timeouts.
 	parsed, err := mysql.ParseDSN(base.String())
@@ -3596,7 +3634,7 @@ func initSchemaOnDBWithRetryAndGateBootstrapHeal(
 func sharedServerDatabase(cfg *Config) bool {
 	// No workspace to prove ownership from — a bare dolt.New pointed at some
 	// endpoint. Fail closed.
-	if cfg == nil || cfg.BeadsDir == "" {
+	if cfg == nil || cfg.BeadsDir == "" || cfg.ExternalRead {
 		return true
 	}
 	// Somebody else's server by construction: a host bd does not run its
@@ -4757,7 +4795,7 @@ func (s *DoltStore) cliDirServesServer() bool {
 	if cfg == nil {
 		cfg = &Config{}
 	}
-	if cfg.Gateway || cfg.ServerTLS || cfg.ServerSocket != "" || !configfile.BdRunsServerAt(cfg.ServerHost) {
+	if cfg.Gateway || cfg.ExternalRead || cfg.ServerTLS || cfg.ServerSocket != "" || !configfile.BdRunsServerAt(cfg.ServerHost) {
 		return false
 	}
 	if !servesDatabaseDirOnPort(s.CLIDir(), cfg.ServerPort) {
@@ -4792,7 +4830,7 @@ func (s *DoltStore) ManagedServerDir() (string, bool) {
 	if cfg == nil || s.beadsDir == "" {
 		return "", false
 	}
-	if cfg.Gateway || cfg.ServerTLS || cfg.ServerSocket != "" || !configfile.BdRunsServerAt(cfg.ServerHost) {
+	if cfg.Gateway || cfg.ExternalRead || cfg.ServerTLS || cfg.ServerSocket != "" || !configfile.BdRunsServerAt(cfg.ServerHost) {
 		return "", false
 	}
 	serverDir := doltserver.ResolveServerDir(s.beadsDir)
