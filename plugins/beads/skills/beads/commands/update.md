@@ -14,7 +14,7 @@ If arguments are missing, ask the user for:
 2. What to update (status, priority, assignee, title, description)
 3. New value
 
-Use the beads MCP `update` tool to apply the changes. Show the updated issue to confirm the change.
+Run `bd update <id> [flags]` to apply the changes. Show the updated issue to confirm the change.
 
 **Note:** Comments are managed separately with `bd comments add`. The `update` command is for singular, versioned properties (title, status, priority, etc.), while comments form a discussion thread that's appended to, not updated.
 
