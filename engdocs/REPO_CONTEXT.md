@@ -224,6 +224,29 @@ system directories:
 Temporary directories (e.g., `/var/folders` on macOS) are explicitly allowed
 for test environments.
 
+On Windows the same check routes to a separate policy
+(`internal/beads/winboundary.go`, GH#6101): the POSIX prefixes never match
+backslashed paths, so the boundary would otherwise admit everything. The
+Windows policy denies the Windows directory and Program Files variants
+(fixed literals plus `%SystemRoot%`-style environment values and the
+OS-reported directory) and other users' profiles below each profile parent
+(`C:\Users`, the OS profiles directory, `SystemDrive\Users`), admitting only
+the current user's home and the OS shared `Public` directory. It compares
+case-insensitively on component boundaries, accepts equivalent spellings
+(separators, case, `\\?\` extended forms), and rejects forms it cannot
+compare meaningfully (device paths, Volume GUIDs, alternate data streams,
+invalid filename characters, trailing-dot/space components). Junctions and
+symlinks are resolved through the filesystem (`GetFinalPathNameByHandle`),
+so an alias is judged by where it lands; the temp directory and `Public`
+carve-outs require successful physical containment and fail closed, while
+ordinary paths keep a lexical answer when resolution is unavailable.
+
+Limitations: the guard is best-effort — it does not prevent alias
+retargeting races, administrative-share equivalence, or inaccessible
+aliases outside carve-outs. The POSIX body in `context.go` is deliberately
+left byte-identical below the dispatch; keep it that way when rebasing
+POSIX boundary changes (e.g. PR #6326).
+
 ## Server Mode Handling
 
 ### CLI vs Server Context
