@@ -357,3 +357,56 @@ func TestForeignProxiedExternalReadWritesNothingInTarget(t *testing.T) {
 		assertForeignTreeUnchanged(t, rigRoot, before)
 	})
 }
+
+// TestForeignProxiedExternalReadKeepsRefusals is AC-7's unit test: only a
+// foreign read of a proxied-server workspace whose sidecar names an external
+// server is dispatched to it. A managed-local workspace (no sidecar, or one
+// without an external server), a routed write, and both generic metadata
+// store factories keep the typed proxy.store.unrouted refusal. The dispatch
+// lives in an untagged file, so the cgo and nocgo builds share it.
+func TestForeignProxiedExternalReadKeepsRefusals(t *testing.T) {
+	t.Run("external_sidecar_is_read", func(t *testing.T) {
+		externalReadTown(t, &configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: closedTCPPort(t)})
+		if _, err := resolveViaPrefixRouting(context.Background(), "gt-target1"); isProxiedStoreUnrouted(err) {
+			t.Fatalf("routed read refused the external proxied-server rig: %v", err)
+		}
+	})
+
+	t.Run("no_sidecar", func(t *testing.T) {
+		externalReadTown(t, nil)
+		if _, err := resolveViaPrefixRouting(context.Background(), "gt-target1"); !isProxiedStoreUnrouted(err) {
+			t.Fatalf("err = %v, want proxy.store.unrouted for a managed-local rig", err)
+		}
+	})
+
+	t.Run("sidecar_without_external", func(t *testing.T) {
+		rig := externalReadTown(t, nil)
+		if err := configfile.SaveProxiedServerClientInfo(rig, &configfile.ProxiedServerClientInfo{Port: closedTCPPort(t)}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := resolveViaPrefixRouting(context.Background(), "gt-target1"); !isProxiedStoreUnrouted(err) {
+			t.Fatalf("err = %v, want proxy.store.unrouted for a managed-local rig", err)
+		}
+	})
+
+	t.Run("routed_write", func(t *testing.T) {
+		externalReadTown(t, &configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: closedTCPPort(t)})
+		if _, err := resolveViaPrefixRoutingWithAccess(context.Background(), "gt-target1", true, false); !isProxiedStoreUnrouted(err) {
+			t.Fatalf("err = %v, want proxy.store.unrouted for a routed write", err)
+		}
+	})
+
+	t.Run("generic_factories", func(t *testing.T) {
+		rig := externalReadTown(t, &configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: closedTCPPort(t)})
+		ctx := context.Background()
+		if _, err := newReadOnlyStoreFromConfig(ctx, rig); !isProxiedStoreUnrouted(err) {
+			t.Errorf("newReadOnlyStoreFromConfig: err = %v, want proxy.store.unrouted", err)
+		}
+		if _, err := newPreviewStoreFromConfig(ctx, rig); !isProxiedStoreUnrouted(err) {
+			t.Errorf("newPreviewStoreFromConfig: err = %v, want proxy.store.unrouted", err)
+		}
+		if _, err := openForeignStore(ctx, rig, foreignWrite); !isProxiedStoreUnrouted(err) {
+			t.Errorf("openForeignStore(foreignWrite): err = %v, want proxy.store.unrouted", err)
+		}
+	})
+}
