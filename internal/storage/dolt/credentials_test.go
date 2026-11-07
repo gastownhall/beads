@@ -1251,6 +1251,58 @@ func TestPerRemoteCloudAuthHybrid(t *testing.T) {
 	}
 }
 
+// TestPeerCloudAuthCLIRouting verifies that federation peers take the
+// cloud-auth CLI route the default remote takes (GH#6): with cloud credentials
+// of the peer URL's scheme in bd's environment, push, pull and fetch to the
+// peer materialize it as a local CLI remote and run through the dolt CLI, so
+// an external server's startup environment is not used. The peer points at a
+// closed local port, so every transfer fails; the route is read from the CLI
+// directory, which only the CLI route writes.
+func TestPeerCloudAuthCLIRouting(t *testing.T) {
+	if realDoltTestServerRequired() && testServerPort == 0 {
+		t.Fatal("Dolt server required for peer cloud-auth routing coverage")
+	}
+	skipIfNoServer(t)
+	clearCloudAuthEnv(t)
+
+	store := openCloudAuthTestStore(t, "peer_route")
+	ensureCloudAuthCLIDatabase(t, store)
+	const peerURL = "http://127.0.0.1:1/org/beads"
+
+	tests := []struct {
+		name    string
+		peer    string
+		envKey  string
+		wantCLI bool
+		run     func(ctx context.Context, peer string) error
+	}{
+		{"push, other scheme's env", "peer_push_sql", "AZURE_STORAGE_ACCOUNT", false, store.PushTo},
+		{"push", "peer_push", "DOLT_REMOTE_USER", true, store.PushTo},
+		{"fetch", "peer_fetch", "DOLT_REMOTE_USER", true, store.Fetch},
+		{"pull", "peer_pull", "DOLT_REMOTE_USER", true, func(ctx context.Context, peer string) error {
+			_, err := store.PullFrom(ctx, peer)
+			return err
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			if err := store.AddRemote(ctx, tt.peer, peerURL); err != nil {
+				t.Fatalf("AddRemote: %v", err)
+			}
+			t.Setenv(tt.envKey, "admin")
+			if err := tt.run(ctx, tt.peer); err == nil {
+				t.Fatalf("%s to a closed port succeeded", tt.name)
+			}
+			got := doltutil.FindCLIRemote(store.CLIDir(), tt.peer)
+			if gotCLI := doltutil.RemoteURLsMatch(got, peerURL); gotCLI != tt.wantCLI {
+				t.Errorf("CLI route = %v (local CLI remote %q), want %v", gotCLI, got, tt.wantCLI)
+			}
+		})
+	}
+}
+
 // TestEnvPrefixesForRemoteURL verifies the scheme-to-env-prefix mapping.
 func TestEnvPrefixesForRemoteURL(t *testing.T) {
 	tests := []struct {
