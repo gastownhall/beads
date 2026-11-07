@@ -1074,7 +1074,7 @@ func resolveStandaloneHooksContext() (*initHooksContext, error) {
 		fmt.Fprintf(os.Stderr, "Warning: inherited Git config makes %s the effective hooks directory; "+
 			"operating on the selected repository's %s instead\n", effective, paths.HooksDir)
 	}
-	return &initHooksContext{workDir: paths.RepoRoot, paths: paths, env: clean, inheritedEnv: inherited}, nil
+	return &initHooksContext{workDir: paths.RepoRoot, paths: paths, env: clean, inheritedEnv: inherited, pinnedEnv: pinned}, nil
 }
 
 func installStandaloneHooks(hookNames []string, force, shared, chain, beadsHooks bool) error {
@@ -1590,13 +1590,48 @@ func uninstallStandaloneHooks() error {
 	if err != nil {
 		return err
 	}
-	return uninstallHooksAt(selected.paths.HooksDir, func() error {
+
+	var hooksPathWasUnset bool
+	if err := uninstallHooksAt(selected.paths.HooksDir, func() error {
 		if selected.paths.CommonDir == "" {
 			return nil // Absolute-path fallback has no repository config authority.
 		}
-		return resetHooksPathAt(selected.paths.MainRepoRoot, selected.paths.CommonDir,
+		unset, err := resetHooksPathAt(selected.paths.MainRepoRoot, selected.paths.CommonDir,
 			doctor.BeadsManagedStorageHooksDir(), selected.env)
-	})
+		hooksPathWasUnset = unset
+		return err
+	}); err != nil {
+		return err
+	}
+
+	// A repo can have bd's shims installed in both places at once: a plain
+	// `bd hooks install` writes them to the default .git/hooks, and a later
+	// `bd hooks install --beads` points core.hooksPath elsewhere without
+	// touching .git/hooks. Clearing core.hooksPath above makes .git/hooks
+	// effective again, and if that is a different directory from the one
+	// just cleaned, its shims are still active and would keep running on
+	// every commit, push and checkout even though uninstall reported
+	// success (GH#7531).
+	//
+	// Re-resolve through selected's own pinned context, not git.GetGitHooksDir()
+	// (ambient, cwd/os.Environ()-scoped resolution): that is exactly the kind of
+	// inherited-config read resolveStandaloneHooksContext's own pinning exists to
+	// avoid, and can name a different repository's cached hooks directory.
+	if !hooksPathWasUnset {
+		return nil
+	}
+	nowEffective, err := selected.resolveEffectiveHooksDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not re-resolve the effective Git hooks directory to check for leftover shims: %v\n", err)
+		return nil
+	}
+	if nowEffective == "" || utils.PathsEqual(nowEffective, selected.paths.HooksDir) {
+		return nil
+	}
+	if err := removeHookShimsAt(nowEffective); err != nil {
+		return fmt.Errorf("beads-managed core.hooksPath cleared, but failed to remove leftover shims from the now-effective %s: %w", nowEffective, err)
+	}
+	return nil
 }
 
 func uninstallHooks() error {
@@ -1609,6 +1644,29 @@ func uninstallHooks() error {
 }
 
 func uninstallHooksAt(hooksDir string, reset func() error) error {
+	if err := removeHookShimsAt(hooksDir); err != nil {
+		return err
+	}
+
+	// Reset beads-managed git config (core.hooksPath, beads.role) now that the
+	// hook files themselves are removed. A failure here must not be a
+	// scrolling stderr warning — bd hooks uninstall must not report success
+	// while beads-managed config is still left behind (GH#4440).
+	if err := reset(); err != nil {
+		return fmt.Errorf("hook files removed, but failed to reset beads-managed git config: %w", err)
+	}
+
+	return nil
+}
+
+// removeHookShimsAt removes bd's hook shims (or, for a legacy bd hook with no
+// section markers, the entire file) from hooksDir, leaving anything that
+// isn't a bd hook alone. It does not touch git config — callers that reset
+// core.hooksPath/beads.role do so separately, since a hooksDir can be
+// cleaned more than once per uninstall (GH#7531: a repo with shims in both
+// .git/hooks and a beads-managed core.hooksPath target needs both cleaned,
+// but the config reset only ever runs once).
+func removeHookShimsAt(hooksDir string) error {
 	hookNames := []string{"pre-commit", "post-merge", "pre-push", "post-checkout", "prepare-commit-msg"}
 
 	for _, hookName := range hookNames {
@@ -1658,14 +1716,6 @@ func uninstallHooksAt(hooksDir string, reset func() error) error {
 		// Not a bd hook at all — leave it alone
 	}
 
-	// Reset beads-managed git config (core.hooksPath, beads.role) now that the
-	// hook files themselves are removed. A failure here must not be a
-	// scrolling stderr warning — bd hooks uninstall must not report success
-	// while beads-managed config is still left behind (GH#4440).
-	if err := reset(); err != nil {
-		return fmt.Errorf("hook files removed, but failed to reset beads-managed git config: %w", err)
-	}
-
 	return nil
 }
 
@@ -1698,11 +1748,17 @@ func resetHooksPathIfBeadsManaged() error {
 	if commonDir == "" {
 		return fmt.Errorf("empty Git common directory for role reset")
 	}
-	return resetHooksPathAt(repoRoot, commonDir, doctor.BeadsManagedStorageHooksDir(),
+	_, err = resetHooksPathAt(repoRoot, commonDir, doctor.BeadsManagedStorageHooksDir(),
 		gitenv.ScrubRouting(os.Environ()))
+	return err
 }
 
-func resetHooksPathAt(repoRoot, commonDir, storageHooksDir string, configEnv []string) error {
+// resetHooksPathAt reports whether core.hooksPath was found to be
+// beads-managed (and so its unset was attempted), alongside any error. A
+// caller that cleaned hooksPath's target directory needs this to know
+// whether Git's default hooks directory (.git/hooks) becomes effective as a
+// result and may itself need cleaning (GH#7531).
+func resetHooksPathAt(repoRoot, commonDir, storageHooksDir string, configEnv []string) (bool, error) {
 	// beads.role is an authority value, unlike core.hooksPath, so its own
 	// commands drop inherited suppression too (see the role pair below).
 	// Scrubbing suppression from configEnv rather than os.Environ() leaves a
@@ -1711,6 +1767,7 @@ func resetHooksPathAt(repoRoot, commonDir, storageHooksDir string, configEnv []s
 	// produced the two spellings drop exactly the same entries.
 	roleConfigEnv := gitenv.ScrubRoutingAndSuppression(configEnv)
 	var failures []string
+	var hooksPathWasBeadsManaged bool
 
 	cmd := exec.Command("git", "--git-dir", commonDir, "config", "--local", "--get", "core.hooksPath")
 	cmd.Dir = repoRoot
@@ -1723,6 +1780,7 @@ func resetHooksPathAt(repoRoot, commonDir, storageHooksDir string, configEnv []s
 		// forms. Shared with doctor.CheckHooksPath/FixHooksPath so uninstall and
 		// `bd doctor --fix` cannot disagree about what "beads-managed" means.
 		if doctor.IsBeadsManagedHooksPath(repoRoot, storageHooksDir, hooksPath) {
+			hooksPathWasBeadsManaged = true
 			unsetCmd := exec.Command("git", "--git-dir", commonDir, "config", "--local", "--unset", "core.hooksPath")
 			unsetCmd.Dir = repoRoot
 			unsetCmd.Env = configEnv
@@ -1767,10 +1825,10 @@ func resetHooksPathAt(repoRoot, commonDir, storageHooksDir string, configEnv []s
 	}
 
 	if len(failures) > 0 {
-		return fmt.Errorf("%s", strings.Join(failures, "; "))
+		return hooksPathWasBeadsManaged, fmt.Errorf("%s", strings.Join(failures, "; "))
 	}
 
-	return nil
+	return hooksPathWasBeadsManaged, nil
 }
 
 // =============================================================================
