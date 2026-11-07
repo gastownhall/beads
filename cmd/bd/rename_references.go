@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 
@@ -109,6 +111,20 @@ var renameRefFields = []struct {
 	{"close_reason", func(i *types.Issue) string { return i.CloseReason }},
 }
 
+// commentRefStore reads comments for the reference report. It is narrow on
+// purpose: the field rewrite (issueRefStore, cmd/bd/rename.go) and this half
+// are fakeable without each other.
+type commentRefStore interface {
+	GetCommentsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Comment, error)
+}
+
+// commentField names a comment's text as a report location, beside the issue
+// prose fields.
+const commentField = "comment"
+
+// reasonComment is why a comment's reference was deliberately left unrewritten.
+const reasonComment = "comment text is not rewritten"
+
 // renameReferenceReport is what the reference scan after a rename did and
 // found. It is printed whole (printRenameReferenceReport); an empty report
 // prints nothing.
@@ -116,9 +132,20 @@ type renameReferenceReport struct {
 	oldID string
 	newID string
 
-	updated   []renameRefUpdated // rewrites that landed, by issue
-	failed    []renameRefFailed  // updates that failed; unconfirmed, never "unchanged"
-	issuesErr error              // the issue listing failed: nothing was checked
+	updated     []renameRefUpdated // rewrites that landed, by issue
+	failed      []renameRefFailed  // updates that failed; unconfirmed, never "unchanged"
+	left        []renameRefLeft    // references deliberately left in place, deduplicated
+	issuesErr   error              // the issue listing failed: nothing was checked
+	commentsErr error              // comments could not be read: fields stand, comments unchecked
+}
+
+// renameRefLeft is one reference location the scan did not rewrite on purpose.
+type renameRefLeft struct {
+	issueID   string
+	field     string // issue prose field, or commentField for a comment
+	commentID string // comment ID when field is commentField
+	spelling  string // the matched spelling, reported as written
+	reason    string // why it was left
 }
 
 // renameRefFailed is one issue whose reference update failed after the
@@ -137,11 +164,14 @@ type renameRefUpdated struct {
 }
 
 func (r *renameReferenceReport) empty() bool {
-	return len(r.updated) == 0 && len(r.failed) == 0 && r.issuesErr == nil
+	return len(r.updated) == 0 && len(r.failed) == 0 && len(r.left) == 0 &&
+		r.issuesErr == nil && r.commentsErr == nil
 }
 
 // sortReports orders the report deterministically: issues in natural ID
-// order.
+// order, fields in renameRefFields order with comments after fields, and
+// comments by ID. Left locations are deduplicated to one entry per location
+// and reason, however often the reference occurs there.
 func (r *renameReferenceReport) sortReports() {
 	sort.Slice(r.updated, func(a, b int) bool {
 		return utils.NaturalCompareIDs(r.updated[a].issueID, r.updated[b].issueID) < 0
@@ -149,11 +179,37 @@ func (r *renameReferenceReport) sortReports() {
 	sort.Slice(r.failed, func(a, b int) bool {
 		return utils.NaturalCompareIDs(r.failed[a].issueID, r.failed[b].issueID) < 0
 	})
+
+	fieldRank := func(field string) int {
+		if field == commentField {
+			return len(renameRefFields)
+		}
+		for i, f := range renameRefFields {
+			if f.name == field {
+				return i
+			}
+		}
+		return len(renameRefFields) + 1
+	}
+	sort.SliceStable(r.left, func(a, b int) bool {
+		x, y := r.left[a], r.left[b]
+		if c := utils.NaturalCompareIDs(x.issueID, y.issueID); c != 0 {
+			return c < 0
+		}
+		if rx, ry := fieldRank(x.field), fieldRank(y.field); rx != ry {
+			return rx < ry
+		}
+		return utils.NaturalCompareIDs(x.commentID, y.commentID) < 0
+	})
+	r.left = slices.CompactFunc(r.left, func(x, y renameRefLeft) bool {
+		return x.issueID == y.issueID && x.field == y.field &&
+			x.commentID == y.commentID && x.reason == y.reason
+	})
 }
 
 // printRenameReferenceReport writes the reference report to w, after the
 // "Renamed <old> -> <new>" line. Sections print only when they have content;
-// an empty report prints nothing.
+// an empty report prints nothing. Comment bodies are never printed.
 func printRenameReferenceReport(w io.Writer, rep *renameReferenceReport) {
 	if rep.empty() {
 		return
@@ -164,6 +220,16 @@ func printRenameReferenceReport(w io.Writer, rep *renameReferenceReport) {
 			fmt.Fprintf(w, "  %s: %s\n", u.issueID, strings.Join(u.fields, ", "))
 		}
 	}
+	if len(rep.left) > 0 {
+		fmt.Fprintln(w, "Warning: references left in place:")
+		for _, l := range rep.left {
+			location := l.field
+			if l.field == commentField {
+				location = "comment " + l.commentID
+			}
+			fmt.Fprintf(w, "  %s %s: %s (%s)\n", l.issueID, location, l.spelling, l.reason)
+		}
+	}
 	if len(rep.failed) > 0 {
 		fmt.Fprintln(w, "Warning: could not rewrite some references (the rename itself succeeded):")
 		for _, f := range rep.failed {
@@ -172,5 +238,8 @@ func printRenameReferenceReport(w io.Writer, rep *renameReferenceReport) {
 	}
 	if rep.issuesErr != nil {
 		fmt.Fprintf(w, "Warning: references could not be checked: %v\n", rep.issuesErr)
+	}
+	if rep.commentsErr != nil {
+		fmt.Fprintf(w, "Warning: comments could not be checked: %v\n", rep.commentsErr)
 	}
 }

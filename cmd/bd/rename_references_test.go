@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -56,6 +57,22 @@ func (s *renameRefsFakeStore) update(id, field string) interface{} {
 		}
 	}
 	return nil
+}
+
+// renameRefsFakeComments serves comments by issue and records the ID batches
+// it was asked for; err fails the read outright.
+type renameRefsFakeComments struct {
+	byIssue map[string][]*types.Comment
+	asked   []string
+	err     error
+}
+
+func (c *renameRefsFakeComments) GetCommentsForIssues(_ context.Context, issueIDs []string) (map[string][]*types.Comment, error) {
+	c.asked = append(c.asked, issueIDs...)
+	if c.err != nil {
+		return nil, c.err
+	}
+	return c.byIssue, nil
 }
 
 func TestUpdateReferencesInAllIssues(t *testing.T) {
@@ -147,7 +164,7 @@ func TestUpdateReferencesInAllIssues(t *testing.T) {
 				{ID: "bd-new", Notes: "was bd-old"},
 			},
 		}
-		rep := scanRenameReferences(context.Background(), s, "bd-old", "bd-new", "test")
+		rep := scanRenameReferences(context.Background(), s, commentRefStore(nil), "bd-old", "bd-new", "test")
 		if len(rep.updated) != 3 {
 			t.Fatalf("updated = %+v, want three issues", rep.updated)
 		}
@@ -217,7 +234,7 @@ func TestPrintRenameReferenceReport(t *testing.T) {
 			},
 			failUpdate: map[string]error{"bd-a": injected},
 		}
-		rep := scanRenameReferences(context.Background(), s, "bd-old", "bd-new", "test")
+		rep := scanRenameReferences(context.Background(), s, commentRefStore(nil), "bd-old", "bd-new", "test")
 
 		// The later issue is still updated: one failure must not stop
 		// the independent updates.
@@ -254,13 +271,114 @@ func TestPrintRenameReferenceReport(t *testing.T) {
 
 	t.Run("reports an unchecked scan when listing fails", func(t *testing.T) {
 		s := &renameRefsFakeStore{listErr: errors.New("injected listing failure")}
-		rep := scanRenameReferences(context.Background(), s, "bd-old", "bd-new", "test")
+		rep := scanRenameReferences(context.Background(), s, commentRefStore(nil), "bd-old", "bd-new", "test")
 		if rep.issuesErr == nil {
 			t.Fatalf("issuesErr = nil, want the listing failure recorded")
 		}
 		var buf bytes.Buffer
 		printRenameReferenceReport(&buf, rep)
 		want := "Warning: references could not be checked: failed to list issues: injected listing failure"
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("report %q does not contain %q", buf.String(), want)
+		}
+	})
+
+	t.Run("prints every comment location past twenty", func(t *testing.T) {
+		var left []renameRefLeft
+		for i := 0; i < 25; i++ {
+			left = append(left, renameRefLeft{
+				issueID:   "bd-x",
+				field:     commentField,
+				commentID: fmt.Sprintf("c%02d", i),
+				spelling:  "bd-old",
+				reason:    reasonComment,
+			})
+		}
+		rep := &renameReferenceReport{left: left}
+		rep.sortReports()
+		var buf bytes.Buffer
+		printRenameReferenceReport(&buf, rep)
+		if got := strings.Count(buf.String(), "comment c"); got != 25 {
+			t.Errorf("printed %d comment locations, want all 25", got)
+		}
+	})
+
+	t.Run("collapses repeated locations to one line", func(t *testing.T) {
+		rep := &renameReferenceReport{left: []renameRefLeft{
+			{issueID: "bd-x", field: commentField, commentID: "c1", spelling: "bd-old", reason: reasonComment},
+			{issueID: "bd-x", field: commentField, commentID: "c1", spelling: "bd-old.", reason: reasonComment},
+			{issueID: "bd-x", field: commentField, commentID: "c2", spelling: "bd-old", reason: reasonComment},
+		}}
+		rep.sortReports()
+		if len(rep.left) != 2 {
+			t.Fatalf("left = %+v, want c1's repeats collapsed to one entry", rep.left)
+		}
+		var buf bytes.Buffer
+		printRenameReferenceReport(&buf, rep)
+		if got := strings.Count(buf.String(), "bd-x comment"); got != 2 {
+			t.Errorf("printed %d bd-x locations, want one per comment", got)
+		}
+	})
+}
+
+func TestRenameReferenceComments(t *testing.T) {
+	t.Run("reports comment mentions without rewriting them", func(t *testing.T) {
+		// Comment text is history: the scan lists it, never rewrites it.
+		s := &renameRefsFakeStore{
+			issues: []*types.Issue{
+				{ID: "bd-other", Description: "refs bd-old"},
+				{ID: "bd-new", Notes: "was bd-old"},
+			},
+		}
+		c := &renameRefsFakeComments{byIssue: map[string][]*types.Comment{
+			"bd-other": {{ID: "c1", Text: "tracked by bd-old."}},
+			"bd-new":   {{ID: "c2", Text: "was bd-old and bd-old again"}},
+		}}
+		rep := scanRenameReferences(context.Background(), s, c, "bd-old", "bd-new", "test")
+
+		// The comment pass runs after the rename, so it asks for the listed
+		// IDs: the renamed issue under its new ID, never the old one.
+		if strings.Join(c.asked, ",") != "bd-other,bd-new" {
+			t.Errorf("comment read asked for %v, want the listed IDs bd-other,bd-new", c.asked)
+		}
+
+		if len(rep.left) != 2 {
+			t.Fatalf("left = %+v, want one entry per mentioning comment", rep.left)
+		}
+		// sortReports ran: issues in natural ID order, bd-new first.
+		for i, want := range []struct{ issue, comment, spelling string }{
+			{"bd-new", "c2", "bd-old"},
+			{"bd-other", "c1", "bd-old."},
+		} {
+			got := rep.left[i]
+			if got.issueID != want.issue || got.commentID != want.comment ||
+				got.spelling != want.spelling || got.field != commentField || got.reason != reasonComment {
+				t.Errorf("left[%d] = %+v, want %s comment %s spelling %q", i, got, want.issue, want.comment, want.spelling)
+			}
+		}
+
+		for _, u := range s.updates {
+			if _, ok := u.updates[commentField]; ok {
+				t.Errorf("update of %s wrote a comment field: %v", u.id, u.updates)
+			}
+		}
+	})
+
+	t.Run("a failed comment read keeps the field rewrites", func(t *testing.T) {
+		s := &renameRefsFakeStore{
+			issues: []*types.Issue{{ID: "bd-a", Description: "refs bd-old"}},
+		}
+		c := &renameRefsFakeComments{err: errors.New("injected comment read failure")}
+		rep := scanRenameReferences(context.Background(), s, c, "bd-old", "bd-new", "test")
+		if rep.commentsErr == nil {
+			t.Fatalf("commentsErr = nil, want the read failure recorded")
+		}
+		if len(rep.updated) != 1 || rep.updated[0].issueID != "bd-a" {
+			t.Errorf("updated = %+v, want bd-a's rewrite to have landed", rep.updated)
+		}
+		var buf bytes.Buffer
+		printRenameReferenceReport(&buf, rep)
+		want := "Warning: comments could not be checked: failed to read comments: injected comment read failure"
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("report %q does not contain %q", buf.String(), want)
 		}

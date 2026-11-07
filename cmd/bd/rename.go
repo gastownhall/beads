@@ -101,7 +101,7 @@ func runRename(cmd *cobra.Command, args []string) error {
 	// The identity rename has committed, so the reference scan is
 	// best-effort: its outcome prints after the Renamed line and never
 	// fails the command.
-	printRenameReferenceReport(os.Stdout, scanRenameReferences(ctx, store, oldID, newID, actor))
+	printRenameReferenceReport(os.Stdout, scanRenameReferences(ctx, store, store, oldID, newID, actor))
 
 	commandDidWrite.Store(true)
 
@@ -122,7 +122,7 @@ type issueRefStore interface {
 // (scanRenameReferences), kept as its own entry so the rewrite can be driven
 // against a store that cannot read comments.
 func updateReferencesInAllIssues(ctx context.Context, store storage.DoltStorage, oldID, newID, actor string) error {
-	rep := scanRenameReferences(ctx, store, oldID, newID, actor)
+	rep := scanRenameReferences(ctx, store, commentRefStore(nil), oldID, newID, actor)
 	if rep.issuesErr != nil {
 		return rep.issuesErr
 	}
@@ -134,18 +134,21 @@ func updateReferencesInAllIssues(ctx context.Context, store storage.DoltStorage,
 }
 
 // scanRenameReferences rewrites references to oldID across every issue's
-// prose fields and collects what it did into one report. Nothing here fails
-// the command: the identity rename has already committed, so the outcome
-// lands in the report instead.
-func scanRenameReferences(ctx context.Context, fields issueRefStore, oldID, newID, actor string) *renameReferenceReport {
+// prose fields and collects what it did, left and could not check into one
+// report. comments supplies the comment half of the report when non-nil.
+// Nothing here fails the command: the identity rename has already committed,
+// so every outcome lands in the report instead.
+func scanRenameReferences(ctx context.Context, fields issueRefStore, comments commentRefStore, oldID, newID, actor string) *renameReferenceReport {
 	rep := &renameReferenceReport{oldID: oldID, newID: newID}
 	issues, err := fields.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
 		rep.issuesErr = fmt.Errorf("failed to list issues: %w", err)
 		return rep
 	}
+	ids := make([]string, 0, len(issues))
 
 	for _, issue := range issues {
+		ids = append(ids, issue.ID)
 		updates := make(map[string]interface{})
 		var changed []string
 		for _, field := range renameRefFields {
@@ -165,6 +168,30 @@ func scanRenameReferences(ctx context.Context, fields issueRefStore, oldID, newI
 			continue
 		}
 		rep.updated = append(rep.updated, renameRefUpdated{issueID: issue.ID, fields: changed})
+	}
+
+	// Comment text is history: it is listed, never rewritten. Comments on the
+	// renamed issue follow it to the new ID (FK cascade), so reading them for
+	// the listed IDs - the new ID included - covers both sides.
+	if comments == nil {
+		rep.sortReports()
+		return rep
+	}
+	byIssue, err := comments.GetCommentsForIssues(ctx, ids)
+	if err != nil {
+		rep.commentsErr = fmt.Errorf("failed to read comments: %w", err)
+		rep.sortReports()
+		return rep
+	}
+	for issueID, list := range byIssue {
+		for _, c := range list {
+			if spelling := idRefMention(c.Text, oldID); spelling != "" {
+				rep.left = append(rep.left, renameRefLeft{
+					issueID: issueID, field: commentField, commentID: c.ID,
+					spelling: spelling, reason: reasonComment,
+				})
+			}
+		}
 	}
 	rep.sortReports()
 	return rep

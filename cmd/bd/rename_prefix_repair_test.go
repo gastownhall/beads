@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -305,6 +307,185 @@ func TestRenameRewritesCloseReasonAndOwnText(t *testing.T) {
 	if b.Status != types.StatusClosed {
 		t.Errorf("test-b status = %q, want closed", b.Status)
 	}
+}
+
+// failingRefUpdateStore fails UpdateIssue for failID: the identity rename
+// commits, but that issue's reference rewrite does not.
+type failingRefUpdateStore struct {
+	storage.DoltStorage
+	failID string
+}
+
+func (s *failingRefUpdateStore) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
+	if id == s.failID {
+		return errors.New("injected reference update failure")
+	}
+	return s.DoltStorage.UpdateIssue(ctx, id, updates, actor)
+}
+
+// TestRenameReportsReferencesItLeft runs the whole rename on a real store:
+// field references are rewritten and listed, comment text is left alone and
+// listed as such (a wisp comment included), a comment on the renamed issue
+// follows it to the new ID, and nothing the reference scan finds fails the
+// command.
+func TestRenameReportsReferencesItLeft(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("comments follow the rename and are reported as left", func(t *testing.T) {
+		testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+
+		for _, issue := range []*types.Issue{
+			{ID: "test-a", Title: "A mentions test-a", Description: "see test-a.", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+			{ID: "test-b", Title: "B", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+			{ID: "test-w", Title: "W", Ephemeral: true, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		} {
+			if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
+				t.Fatalf("failed to create issue %s: %v", issue.ID, err)
+			}
+		}
+		if err := testStore.CloseIssue(ctx, "test-b", "duplicate of test-a", "test", ""); err != nil {
+			t.Fatalf("failed to close test-b: %v", err)
+		}
+		createdAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+		onA, err := testStore.ImportIssueComment(ctx, "test-a", "commenter", "was test-a and test-a again", createdAt)
+		if err != nil {
+			t.Fatalf("failed to comment on test-a: %v", err)
+		}
+		onB, err := testStore.ImportIssueComment(ctx, "test-b", "commenter", "tracked by test-a.", createdAt)
+		if err != nil {
+			t.Fatalf("failed to comment on test-b: %v", err)
+		}
+		onW, err := testStore.ImportIssueComment(ctx, "test-w", "commenter", "wisp sees test-a", createdAt)
+		if err != nil {
+			t.Fatalf("failed to comment on test-w: %v", err)
+		}
+
+		out := captureStdout(t, func() error {
+			return withRenameStore(testStore, func() error {
+				return runRename(renameCmd, []string{"test-a", "test-z"})
+			})
+		})
+		for _, want := range []string{
+			"Renamed",
+			"Updated references:",
+			"  test-b: close_reason",
+			"  test-z: title, description",
+			"Warning: references left in place:",
+			fmt.Sprintf("  test-b comment %s: test-a. (comment text is not rewritten)", onB.ID),
+			fmt.Sprintf("  test-w comment %s: test-a (comment text is not rewritten)", onW.ID),
+			fmt.Sprintf("  test-z comment %s: test-a (comment text is not rewritten)", onA.ID),
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("rename output %q does not contain %q", out, want)
+			}
+		}
+
+		z, err := testStore.GetIssue(ctx, "test-z")
+		if err != nil {
+			t.Fatalf("failed to get test-z: %v", err)
+		}
+		if z.Title != "A mentions test-z" || z.Description != "see test-z." {
+			t.Errorf("test-z title/description = %q/%q, want the references rewritten", z.Title, z.Description)
+		}
+		b, err := testStore.GetIssue(ctx, "test-b")
+		if err != nil {
+			t.Fatalf("failed to get test-b: %v", err)
+		}
+		if b.CloseReason != "duplicate of test-z" {
+			t.Errorf("test-b close_reason = %q, want %q", b.CloseReason, "duplicate of test-z")
+		}
+
+		// Comments are never rewritten, and the renamed issue's comment
+		// followed it to the new ID (FK cascade) with everything but its
+		// issue_id unchanged.
+		after, err := testStore.GetCommentsForIssues(ctx, []string{"test-a", "test-z", "test-b", "test-w"})
+		if err != nil {
+			t.Fatalf("failed to read comments: %v", err)
+		}
+		if _, ok := after["test-a"]; ok {
+			t.Errorf("comments still keyed under test-a: %v", after["test-a"])
+		}
+		for _, tt := range []struct {
+			key     string
+			comment *types.Comment
+		}{
+			{"test-z", onA},
+			{"test-b", onB},
+			{"test-w", onW},
+		} {
+			list := after[tt.key]
+			if len(list) != 1 || list[0].ID != tt.comment.ID ||
+				list[0].Author != tt.comment.Author || list[0].Text != tt.comment.Text ||
+				!list[0].CreatedAt.Equal(tt.comment.CreatedAt) {
+				t.Errorf("comment under %s = %+v, want %s unchanged", tt.key, list, tt.comment.ID)
+			}
+		}
+	})
+
+	t.Run("a rename with no references prints only the Renamed line", func(t *testing.T) {
+		testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+		if err := testStore.CreateIssue(ctx, &types.Issue{ID: "test-q", Title: "Q", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "test"); err != nil {
+			t.Fatalf("failed to create issue test-q: %v", err)
+		}
+		out := captureStdout(t, func() error {
+			return withRenameStore(testStore, func() error {
+				return runRename(renameCmd, []string{"test-q", "test-r"})
+			})
+		})
+		if !strings.Contains(out, "Renamed") {
+			t.Fatalf("rename output %q does not name the rename", out)
+		}
+		if strings.Contains(out, "Updated references:") || strings.Contains(out, "Warning") {
+			t.Errorf("quiet rename printed %q, want only the Renamed line", out)
+		}
+	})
+
+	t.Run("a failed reference update is reported, and the command succeeds", func(t *testing.T) {
+		testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+		for _, issue := range []*types.Issue{
+			{ID: "test-f1", Title: "F1", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+			{ID: "test-f2", Title: "F2", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		} {
+			if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
+				t.Fatalf("failed to create issue %s: %v", issue.ID, err)
+			}
+		}
+		if err := testStore.CloseIssue(ctx, "test-f2", "duplicate of test-f1", "test", ""); err != nil {
+			t.Fatalf("failed to close test-f2: %v", err)
+		}
+		onF2, err := testStore.ImportIssueComment(ctx, "test-f2", "commenter", "refs test-f1", time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))
+		if err != nil {
+			t.Fatalf("failed to comment on test-f2: %v", err)
+		}
+
+		st := &failingRefUpdateStore{DoltStorage: testStore, failID: "test-f2"}
+		out := captureStdout(t, func() error {
+			return withRenameStore(st, func() error {
+				return runRename(renameCmd, []string{"test-f1", "test-f9"})
+			})
+		})
+		for _, want := range []string{
+			"Warning: could not rewrite some references (the rename itself succeeded):",
+			"  test-f2 (close_reason): injected reference update failure",
+			fmt.Sprintf("  test-f2 comment %s: test-f1 (comment text is not rewritten)", onF2.ID),
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("rename output %q does not contain %q", out, want)
+			}
+		}
+
+		// The identity rename landed; the failed rewrite did not.
+		if _, err := testStore.GetIssue(ctx, "test-f9"); err != nil {
+			t.Errorf("test-f9: %v, want the rename committed", err)
+		}
+		f2, err := testStore.GetIssue(ctx, "test-f2")
+		if err != nil {
+			t.Fatalf("failed to get test-f2: %v", err)
+		}
+		if f2.CloseReason != "duplicate of test-f1" {
+			t.Errorf("test-f2 close_reason = %q, want the failed rewrite not applied", f2.CloseReason)
+		}
+	})
 }
 
 func TestRenameFailureLeavesBeadGatesPending(t *testing.T) {
