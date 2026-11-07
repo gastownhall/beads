@@ -305,6 +305,7 @@ go_library(
         "remote_migrate_gate.go",
         "rename.go",
         "rename_prefix.go",
+        "rename_references.go",
         "reopen.go",
         "reopen_proxied_server.go",
         "repo.go",

@@ -117,40 +117,19 @@ func updateReferencesInAllIssues(ctx context.Context, store storage.DoltStorage,
 		return fmt.Errorf("failed to list issues: %w", err)
 	}
 
-	// Pattern to match the old ID as a word boundary
-	oldPattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(oldID) + `\b`)
-
 	for _, issue := range issues {
 		updated := false
 		updates := make(map[string]interface{})
 
-		// Check and update each text field
-		if oldPattern.MatchString(issue.Title) {
-			updates["title"] = oldPattern.ReplaceAllString(issue.Title, newID)
-			updated = true
-		}
-		if oldPattern.MatchString(issue.Description) {
-			updates["description"] = oldPattern.ReplaceAllString(issue.Description, newID)
-			updated = true
-		}
-		if oldPattern.MatchString(issue.Design) {
-			updates["design"] = oldPattern.ReplaceAllString(issue.Design, newID)
-			updated = true
-		}
-		if oldPattern.MatchString(issue.Notes) {
-			updates["notes"] = oldPattern.ReplaceAllString(issue.Notes, newID)
-			updated = true
-		}
-		if oldPattern.MatchString(issue.AcceptanceCriteria) {
-			updates["acceptance_criteria"] = oldPattern.ReplaceAllString(issue.AcceptanceCriteria, newID)
-			updated = true
-		}
-		// close_reason rides along: UpdateIssue writes it without a status
-		// change, and a closed issue's "duplicate of <id>" reason is a
-		// reference like any other (GH#7040).
-		if oldPattern.MatchString(issue.CloseReason) {
-			updates["close_reason"] = oldPattern.ReplaceAllString(issue.CloseReason, newID)
-			updated = true
+		// Rewrite each text field; replaceIDReferences leaves longer IDs
+		// that contain the old one alone.
+		for _, field := range renameRefFields {
+			if text := field.value(issue); text != "" {
+				if rewritten := replaceIDReferences(text, oldID, newID); rewritten != text {
+					updates[field.name] = rewritten
+					updated = true
+				}
+			}
 		}
 
 		if updated {

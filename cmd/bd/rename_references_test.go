@@ -93,4 +93,59 @@ func TestUpdateReferencesInAllIssues(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("preserves longer IDs that contain the old one", func(t *testing.T) {
+		// \b word boundaries do not fall at ID boundaries: renaming bd-old
+		// used to corrupt bd-old-v2 and rewrite inside dotted children.
+		s := &renameRefsFakeStore{
+			issues: []*types.Issue{
+				{ID: "bd-x", Description: "bd-old-v2 and pre-bd-old and bd-old.1 track bd-old"},
+			},
+		}
+		if err := updateReferencesInAllIssues(context.Background(), s, "bd-old", "bd-new", "test"); err != nil {
+			t.Fatalf("updateReferencesInAllIssues: %v", err)
+		}
+		const want = "bd-old-v2 and pre-bd-old and bd-old.1 track bd-new"
+		if got := s.update("bd-x", "description"); got != want {
+			t.Errorf("description update = %v, want %q", got, want)
+		}
+	})
+}
+
+func TestRenameIDReferences(t *testing.T) {
+	renames := []struct {
+		name   string
+		oldID  string
+		newID  string
+		input  string
+		output string
+	}{
+		{name: "standalone", oldID: "bd-old", newID: "bd-new", input: "see bd-old here", output: "see bd-new here"},
+		{name: "repeated and adjacent", oldID: "bd-old", newID: "bd-new", input: "bd-old,bd-old; bd-old bd-old", output: "bd-new,bd-new; bd-new bd-new"},
+		{name: "parentheses and backticks", oldID: "bd-old", newID: "bd-new", input: "(bd-old) and `bd-old`", output: "(bd-new) and `bd-new`"},
+		{name: "possessive", oldID: "bd-old", newID: "bd-new", input: "bd-old's design", output: "bd-new's design"},
+		{name: "url path segment", oldID: "bd-old", newID: "bd-new", input: "https://host/bd-old/path", output: "https://host/bd-new/path"},
+		{name: "colon-qualified", oldID: "bd-old", newID: "bd-new", input: "ref:bd-old:", output: "ref:bd-new:"},
+		{name: "sentence period kept", oldID: "bd-old", newID: "bd-new", input: "see bd-old.", output: "see bd-new."},
+		{name: "ellipsis kept", oldID: "bd-old", newID: "bd-new", input: "bd-old... done", output: "bd-new... done"},
+		{name: "dotted child preserved", oldID: "bd-old", newID: "bd-new", input: "bd-old.1 is a child", output: "bd-old.1 is a child"},
+		{name: "nested dotted child preserved", oldID: "bd-old", newID: "bd-new", input: "bd-old.1.2 nested", output: "bd-old.1.2 nested"},
+		{name: "hyphenated superstring preserved", oldID: "bd-old", newID: "bd-new", input: "bd-old-v2 upgraded", output: "bd-old-v2 upgraded"},
+		{name: "leading prefix preserved", oldID: "bd-old", newID: "bd-new", input: "pre-bd-old mentioned", output: "pre-bd-old mentioned"},
+		{name: "underscore adjacency preserved", oldID: "bd-old", newID: "bd-new", input: "bd-old_x literal", output: "bd-old_x literal"},
+		{name: "trailing hyphen is part of the ID", oldID: "bd-old", newID: "bd-new", input: "bd-old- literal", output: "bd-old- literal"},
+		{name: "case-sensitive", oldID: "bd-old", newID: "bd-new", input: "BD-OLD stays", output: "BD-OLD stays"},
+		{name: "no match", oldID: "bd-old", newID: "bd-new", input: "nothing here", output: "nothing here"},
+		{name: "empty text", oldID: "bd-old", newID: "bd-new", input: "", output: ""},
+		{name: "hyphenated superstring with interior match", oldID: "bd-auth", newID: "bd-login", input: "bd-auth-v2 grew out of bd-auth", output: "bd-auth-v2 grew out of bd-login"},
+		{name: "leading prefix with interior match", oldID: "vscode-1", newID: "vscode-2", input: "beads-vscode-1 wraps vscode-1", output: "beads-vscode-1 wraps vscode-2"},
+		{name: "new ID containing the old one", oldID: "bd-old", newID: "bd-old-2", input: "bd-old and bd-old-2", output: "bd-old-2 and bd-old-2"},
+	}
+	for _, tt := range renames {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := replaceIDReferences(tt.input, tt.oldID, tt.newID); got != tt.output {
+				t.Errorf("replaceIDReferences(%q, %q, %q) = %q, want %q", tt.input, tt.oldID, tt.newID, got, tt.output)
+			}
+		})
+	}
 }

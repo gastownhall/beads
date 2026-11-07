@@ -231,6 +231,82 @@ func withRenameStore(st storage.DoltStorage, run func() error) error {
 	return run()
 }
 
+// TestRenameRewritesCloseReasonAndOwnText is #7399's regression for GH#7040,
+// kept and extended: a rename must rewrite the old ID in other issues'
+// close_reason and in the renamed issue's own six prose fields, leave
+// closed_at and status alone, and preserve dotted-child and adjacent
+// spellings while doing it.
+func TestRenameRewritesCloseReasonAndOwnText(t *testing.T) {
+	ctx := context.Background()
+	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+
+	for _, issue := range []*types.Issue{
+		{ID: "test-a", Title: "A tracks test-a", Description: "test-a tracks test-a.1; test-a,test-a; see test-a.", Design: "per test-a's design", Notes: "test-a history here", AcceptanceCriteria: "test-a behavior kept", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "test-b", Title: "B", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	} {
+		if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("failed to create issue %s: %v", issue.ID, err)
+		}
+	}
+	if err := testStore.CloseIssue(ctx, "test-b", "duplicate of test-a", "test", ""); err != nil {
+		t.Fatalf("failed to close test-b: %v", err)
+	}
+	if err := testStore.CloseIssue(ctx, "test-a", "superseded by test-a cleanup", "test", ""); err != nil {
+		t.Fatalf("failed to close test-a: %v", err)
+	}
+
+	a, err := testStore.GetIssue(ctx, "test-a")
+	if err != nil {
+		t.Fatalf("failed to get test-a: %v", err)
+	}
+	if err := renameIssueKeepingBeadGates(ctx, testStore, a, "test-z", nil, "test"); err != nil {
+		t.Fatalf("rename failed: %v", err)
+	}
+	if err := updateReferencesInAllIssues(ctx, testStore, "test-a", "test-z", "test"); err != nil {
+		t.Fatalf("reference update failed: %v", err)
+	}
+
+	z, err := testStore.GetIssue(ctx, "test-z")
+	if err != nil {
+		t.Fatalf("failed to get test-z: %v", err)
+	}
+	for field, want := range map[string]string{
+		"title":               "A tracks test-z",
+		"description":         "test-z tracks test-a.1; test-z,test-z; see test-z.",
+		"design":              "per test-z's design",
+		"notes":               "test-z history here",
+		"acceptance_criteria": "test-z behavior kept",
+		"close_reason":        "superseded by test-z cleanup",
+	} {
+		if got := map[string]string{
+			"title":               z.Title,
+			"description":         z.Description,
+			"design":              z.Design,
+			"notes":               z.Notes,
+			"acceptance_criteria": z.AcceptanceCriteria,
+			"close_reason":        z.CloseReason,
+		}[field]; got != want {
+			t.Errorf("renamed issue %s = %q, want %q", field, got, want)
+		}
+	}
+	if z.Status != types.StatusClosed {
+		t.Errorf("renamed issue status = %q, want closed", z.Status)
+	}
+	if !z.ClosedAt.Equal(*a.ClosedAt) {
+		t.Errorf("renamed issue closed_at = %v, want %v unchanged by the reference rewrite", z.ClosedAt, a.ClosedAt)
+	}
+	b, err := testStore.GetIssue(ctx, "test-b")
+	if err != nil {
+		t.Fatalf("failed to get test-b: %v", err)
+	}
+	if want := "duplicate of test-z"; b.CloseReason != want {
+		t.Errorf("test-b close_reason = %q, want %q", b.CloseReason, want)
+	}
+	if b.Status != types.StatusClosed {
+		t.Errorf("test-b status = %q, want closed", b.Status)
+	}
+}
+
 func TestRenameFailureLeavesBeadGatesPending(t *testing.T) {
 	// When renaming the awaited bead fails, whether or not that rename
 	// landed, its gate is pointed back at the bead's old ID without a
