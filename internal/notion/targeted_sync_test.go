@@ -745,6 +745,56 @@ func TestTrackerPushStaleRefFallback(t *testing.T) {
 	})
 }
 
+// TestTrackerPushLookupErrorIsolation pins AC-6: a lookup that fails for a
+// reason other than a missing page — a 403 here — becomes that issue's
+// BatchPushError and prohibits writing it, while the rest of the batch
+// proceeds. Single fetch propagates the same failure instead of reporting a
+// miss.
+func TestTrackerPushLookupErrorIsolation(t *testing.T) {
+	edited := time.Now().UTC().Add(-2 * time.Hour)
+	server := newTestNotionServer(t,
+		memberPage("aaaaaaaa-0000-0000-0000-000000000001", "bd-a", "Page A", edited),
+	)
+	server.failUnfiltered = true
+	server.failGetFor["aaaaaaaa-0000-0000-0000-000000000001"] = http.StatusForbidden
+	tracker := server.tracker()
+	pageRef := "https://www.notion.so/Page-A-aaaaaaaa000000000000000000000001"
+
+	if _, err := tracker.FetchIssue(context.Background(), pageRef); err == nil {
+		t.Fatal("FetchIssue succeeded, want the 403 to propagate")
+	} else if !strings.Contains(err.Error(), "get 403") {
+		t.Fatalf("FetchIssue error = %q, want the server's 403 message", err.Error())
+	}
+
+	result, err := tracker.BatchPush(context.Background(), []*types.Issue{
+		{
+			ID: "bd-a", Title: "Whose lookup fails", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+			ExternalRef: &pageRef, UpdatedAt: time.Now().UTC(),
+		},
+		{
+			ID: "bd-b", Title: "Unrelated create", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+			UpdatedAt: time.Now().UTC(),
+		},
+	}, map[string]bool{})
+	if err != nil {
+		t.Fatalf("BatchPush returned error: %v", err)
+	}
+	if len(result.Errors) != 1 || result.Errors[0].LocalID != "bd-a" {
+		t.Fatalf("errors = %+v, want exactly bd-a's lookup failure", result.Errors)
+	}
+	if len(result.Created) != 1 || result.Created[0].LocalID != "bd-b" {
+		t.Fatalf("created = %+v, want the unrelated create to proceed", result.Created)
+	}
+	if len(result.Updated) != 0 || len(result.Skipped) != 0 {
+		t.Fatalf("result = %+v, want no update or skip for the failed lookup", result)
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if len(server.patches) != 0 {
+		t.Fatalf("patches = %v, want none — an error must never fall through into a write", server.patches)
+	}
+}
+
 func titles(issues []itracker.TrackerIssue) []string {
 	result := make([]string, 0, len(issues))
 	for _, issue := range issues {
