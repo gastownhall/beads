@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -18,6 +19,11 @@ const (
 	codexHookPostCompact      = "PostCompact"
 	codexHookUserPromptSubmit = "UserPromptSubmit"
 )
+
+// codexHookRefreshRecovery ends a failed post-compaction refresh warning: the
+// marker is consumed before the attempt, so nothing retries until the next
+// compaction re-arms it.
+const codexHookRefreshRecovery = "Run bd prime to reload context; automatic refresh will retry after the next compaction."
 
 var codexHookMarkerDirOverride string
 
@@ -101,7 +107,7 @@ func codexHookInjectPrime(ctx context.Context, stdout io.Writer, event string) e
 
 func codexHookPreCompactCheck(ctx context.Context, stdout io.Writer) error {
 	if _, err := codexHookExecPrime(ctx, true); err != nil {
-		return writeCodexHookSystemMessage(stdout, fmt.Sprintf("Beads context check failed before compaction: %v", err))
+		return writeCodexHookSystemMessage(stdout, "Beads context check failed before compaction: "+codexHookFailureReason(ctx, err))
 	}
 	return nil
 }
@@ -120,12 +126,24 @@ func codexHookMaybeRefresh(ctx context.Context, input codexHookInput, stdout io.
 	}
 	out, err := codexHookExecPrime(ctx, false)
 	if err != nil {
-		return writeCodexHookSystemMessage(stdout, fmt.Sprintf("Beads context refresh after compaction failed: %v", err))
+		return writeCodexHookSystemMessage(stdout, fmt.Sprintf("Beads context refresh after compaction failed: %s. %s", codexHookFailureReason(ctx, err), codexHookRefreshRecovery))
 	}
 	if strings.TrimSpace(out) == "" {
 		return nil
 	}
 	return writeCodexHookAdditionalContext(stdout, codexHookUserPromptSubmit, out)
+}
+
+// codexHookFailureReason is the one-line reason a warning quotes. A prime
+// killed at the hook deadline gets a plain explanation; any other error is
+// reduced to its first line, since runBdPrime appends the child's combined
+// output. The deadline wording names no duration: a parent context can expire
+// before the hook's own timeout.
+func codexHookFailureReason(ctx context.Context, err error) string {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return "bd prime exceeded the hook deadline"
+	}
+	return primeErrorSummary(err)
 }
 
 func codexHookRefreshMarkerPath(input codexHookInput) string {

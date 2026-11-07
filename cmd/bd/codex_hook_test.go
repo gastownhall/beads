@@ -446,3 +446,79 @@ func TestCodexHookUserPromptRefreshRearmsAfterFailure(t *testing.T) {
 		t.Fatalf("prime calls = %d, want 2", calls)
 	}
 }
+
+func TestCodexHookFailureMessagesAreBounded(t *testing.T) {
+	const recovery = "Run bd prime to reload context; automatic refresh will retry after the next compaction."
+	longFirstLine := strings.Repeat("é", 400)
+	cases := []struct {
+		name    string
+		err     error
+		expired bool
+		want    []string
+		reject  []string
+	}{
+		{name: "ordinary", err: errors.New("workspace unavailable"), want: []string{"workspace unavailable"}},
+		{
+			name:   "multiline",
+			err:    errors.New("bd prime: exit status 1: first   line\nLEAKED second line\r\nthird"),
+			want:   []string{"bd prime: exit status 1: first line"},
+			reject: []string{"LEAKED", "third"},
+		},
+		{
+			name:   "long unicode first line",
+			err:    errors.New(longFirstLine + "\nLEAKED"),
+			want:   []string{strings.Repeat("é", primeMemoryErrorMaxLen) + "…"},
+			reject: []string{strings.Repeat("é", primeMemoryErrorMaxLen+1), "LEAKED"},
+		},
+		{
+			name:    "expired context",
+			err:     errors.New("bd prime: signal: killed: BEADS PRIME\nLEAKED partial output"),
+			expired: true,
+			want:    []string{"bd prime exceeded the hook deadline"},
+			reject:  []string{"signal: killed", "LEAKED"},
+		},
+	}
+	for _, tc := range cases {
+		for _, event := range []string{codexHookPreCompact, codexHookUserPromptSubmit} {
+			t.Run(tc.name+"/"+event, func(t *testing.T) {
+				_, postJSON, promptJSON := codexHookRefreshSession(t)
+				stubCodexHookPrimeCtx(t, func(ctx context.Context, _ bool) (string, error) {
+					if tc.expired {
+						<-ctx.Done()
+					}
+					return "", tc.err
+				})
+				ctx := context.Background()
+				if tc.expired {
+					expired, cancel := context.WithDeadline(ctx, time.Now().Add(-time.Second))
+					defer cancel()
+					ctx = expired
+				}
+
+				payload := []byte(`{"session_id":"s1","cwd":"/repo","hook_event_name":"PreCompact"}`)
+				if event == codexHookUserPromptSubmit {
+					runCodexHookPayload(t, context.Background(), codexHookPostCompact, postJSON)
+					payload = promptJSON
+				}
+				msg := requireCodexHookSystemMessage(t, runCodexHookPayload(t, ctx, event, payload))
+
+				if strings.ContainsAny(msg, "\r\n") {
+					t.Fatalf("warning must be one line, got %q", msg)
+				}
+				for _, w := range tc.want {
+					if !strings.Contains(msg, w) {
+						t.Errorf("warning %q missing %q", msg, w)
+					}
+				}
+				for _, r := range tc.reject {
+					if strings.Contains(msg, r) {
+						t.Errorf("warning %q must not contain %q", msg, r)
+					}
+				}
+				if event == codexHookUserPromptSubmit && !strings.HasSuffix(msg, recovery) {
+					t.Errorf("refresh warning %q must end with recovery instruction %q", msg, recovery)
+				}
+			})
+		}
+	}
+}
