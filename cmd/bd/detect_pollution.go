@@ -3,10 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"regexp"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/atomicfile"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -97,25 +97,28 @@ func detectTestPollution(issues []*types.Issue) []pollutionResult {
 }
 
 func backupPollutedIssues(polluted []pollutionResult, path string) error {
-	// Create backup file
-	// nolint:gosec // G304: path is provided by user as explicit backup location
-	file, err := os.Create(path)
+	w, err := atomicfile.WriterNoFollow(path, 0600)
 	if err != nil {
-		return fmt.Errorf("failed to create backup file: %w", err)
+		return fmt.Errorf("failed to write backup file: %w", err)
 	}
-	defer file.Close()
-
 	// Write each issue as JSONL
 	for _, p := range polluted {
 		data, err := json.Marshal(p.issue)
 		if err != nil {
+			_ = w.Abort()
 			return fmt.Errorf("failed to marshal issue %s: %w", p.issue.ID, err)
 		}
-
-		if _, err := file.WriteString(string(data) + "\n"); err != nil {
-			return fmt.Errorf("failed to write issue %s: %w", p.issue.ID, err)
+		if _, err := w.Write(data); err != nil {
+			_ = w.Abort()
+			return fmt.Errorf("failed to write backup file: %w", err)
+		}
+		if _, err := w.Write([]byte{'\n'}); err != nil {
+			_ = w.Abort()
+			return fmt.Errorf("failed to write backup file: %w", err)
 		}
 	}
-
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("failed to write backup file: %w", err)
+	}
 	return nil
 }

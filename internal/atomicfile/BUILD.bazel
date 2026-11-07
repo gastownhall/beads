@@ -2,14 +2,22 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "atomicfile",
-    srcs = ["atomicfile.go"],
+    srcs = [
+        "atomicfile.go",
+        "nofollow.go",
+        "nofollow_other.go",
+        "nofollow_unix.go",
+    ],
     importpath = "github.com/steveyegge/beads/internal/atomicfile",
     visibility = ["//:__subpackages__"],
 )
 
 go_test(
     name = "atomicfile_test",
-    srcs = ["atomicfile_test.go"],
+    srcs = [
+        "atomicfile_test.go",
+        "nofollow_test.go",
+    ],
     embed = [":atomicfile"],
 )
 

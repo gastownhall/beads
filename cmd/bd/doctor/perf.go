@@ -3,8 +3,10 @@ package doctor
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"strings"
 )
 
 // RunPerformanceDiagnostics runs performance diagnostics.
@@ -40,13 +42,13 @@ func CollectPlatformInfo(path string) map[string]string {
 }
 
 func startCPUProfile(path string) (*os.File, error) {
-	// #nosec G304 -- profile path supplied by CLI flag in trusted environment
-	f, err := os.Create(path)
+	f, err := os.CreateTemp(filepath.Dir(path), strings.TrimSuffix(filepath.Base(path), ".prof")+"-*.prof")
 	if err != nil {
 		return nil, err
 	}
 	if err := pprof.StartCPUProfile(f); err != nil {
 		_ = f.Close()
+		_ = os.Remove(f.Name())
 		return nil, err
 	}
 	return f, nil

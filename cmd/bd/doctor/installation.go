@@ -43,14 +43,27 @@ func CheckInstallation(path string) DoctorCheck {
 	}
 }
 
+func probeDirectoryWrite(dir string) error {
+	f, err := os.CreateTemp(dir, ".doctor-test-write-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(f.Name()) }()
+	_, writeErr := f.WriteString("test")
+	closeErr := f.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	return closeErr
+}
+
 // CheckPermissions verifies that .beads directory and database are readable/writable.
 // Opens its own store; prefer CheckPermissionsWithStore when a shared store is available.
 func CheckPermissions(path string) DoctorCheck {
 	beadsDir := ResolveBeadsDirForRepo(path)
 
 	// Check if .beads/ is writable
-	testFile := filepath.Join(beadsDir, ".doctor-test-write")
-	if err := os.WriteFile(testFile, []byte("test"), 0600); err != nil {
+	if err := probeDirectoryWrite(beadsDir); err != nil {
 		return DoctorCheck{
 			Name:    "Permissions",
 			Status:  StatusError,
@@ -58,7 +71,6 @@ func CheckPermissions(path string) DoctorCheck {
 			Fix:     "Run 'bd doctor --fix' to fix permissions",
 		}
 	}
-	_ = os.Remove(testFile) // Clean up test file (intentionally ignore error)
 
 	// Check Dolt database directory permissions
 	cfg, err := configfile.Load(beadsDir)
@@ -103,8 +115,7 @@ func CheckPermissionsWithStore(path string, ss *SharedStore) DoctorCheck {
 	store := ss.Store()
 
 	// Check if .beads/ is writable
-	testFile := filepath.Join(beadsDir, ".doctor-test-write")
-	if err := os.WriteFile(testFile, []byte("test"), 0600); err != nil {
+	if err := probeDirectoryWrite(beadsDir); err != nil {
 		return DoctorCheck{
 			Name:    "Permissions",
 			Status:  StatusError,
@@ -112,7 +123,6 @@ func CheckPermissionsWithStore(path string, ss *SharedStore) DoctorCheck {
 			Fix:     "Run 'bd doctor --fix' to fix permissions",
 		}
 	}
-	_ = os.Remove(testFile)
 
 	// Check Dolt database directory permissions
 	cfg, err := configfile.Load(beadsDir)
