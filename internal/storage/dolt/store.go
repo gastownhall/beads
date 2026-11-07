@@ -652,6 +652,29 @@ func withCLIExecTimeout(ctx context.Context) (context.Context, context.CancelFun
 	return context.WithTimeout(ctx, cliExecTimeoutDuration())
 }
 
+// transferExecTimeout is the default per-read deadline on the one-shot
+// connections that run server-side transfers (CALL DOLT_PUSH / DOLT_FETCH /
+// DOLT_PULL and the fetch+merge fallback). The statement runs while the
+// server performs network I/O to the git remote, so the pool's short
+// ReadTimeout cannot cover it — but a store whose transfer needs longer than
+// this cannot be pushed or pulled at all, and the driver surfaces the expired
+// deadline only as an unhelpful "invalid connection". Set
+// BEADS_DOLT_TRANSFER_TIMEOUT to override.
+const transferExecTimeout = 5 * time.Minute
+
+// transferExecTimeoutEnv is the environment variable that overrides
+// transferExecTimeout.
+const transferExecTimeoutEnv = "BEADS_DOLT_TRANSFER_TIMEOUT"
+
+// transferExecTimeoutDuration returns the configured server-side transfer
+// read deadline. The env var BEADS_DOLT_TRANSFER_TIMEOUT overrides the
+// compiled-in transferExecTimeout const; valid time.ParseDuration strings
+// (e.g. "20m", "90s") or bare numbers treated as seconds (e.g. "90") are
+// accepted. Unset or invalid values fall back to transferExecTimeout.
+func transferExecTimeoutDuration() time.Duration {
+	return timeoutFromEnv(transferExecTimeoutEnv, transferExecTimeout)
+}
+
 // timeoutFromEnv returns the duration configured in the named env var, falling
 // back to fallback when the var is unset, unparsable, or non-positive. Valid
 // time.ParseDuration strings (e.g. "2m", "90s") or bare numbers treated as
