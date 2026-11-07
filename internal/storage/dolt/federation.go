@@ -57,8 +57,11 @@ func (s *DoltStore) pushRefToPeer(ctx context.Context, peer string, refspec stri
 		// credential pair process-wide for the server to (not) read.
 		plan := serverEnvNotePlan{procedure: "CALL DOLT_PUSH", remote: peer, creds: creds, env: os.Environ()}
 		return withEnvCredentials(creds, func() error {
-			if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH(?, ?)", peer, refspec); err != nil {
-				return s.annotateServerEnvTransferError(ctx, plan, fmt.Errorf("failed to push to peer %s: %w", peer, err))
+			// execRemoteTransfer annotates the transfer statement's own
+			// failure with the plan; a setup failure of its one-shot
+			// connection never reaches the server and stays unexplained.
+			if err := s.execRemoteTransfer(ctx, plan, "CALL DOLT_PUSH(?, ?)", peer, refspec); err != nil {
+				return fmt.Errorf("failed to push to peer %s: %w", peer, err)
 			}
 			return nil
 		})
@@ -197,8 +200,10 @@ func (s *DoltStore) Fetch(ctx context.Context, peer string) error {
 		// Same snapshot rule as the push above: before withEnvCredentials.
 		plan := serverEnvNotePlan{procedure: "CALL DOLT_FETCH", remote: peer, creds: creds, env: os.Environ()}
 		return withEnvCredentials(creds, func() error {
-			if err := s.execWithLongTimeout(ctx, "CALL DOLT_FETCH(?)", peer); err != nil {
-				return s.annotateServerEnvTransferError(ctx, plan, fmt.Errorf("failed to fetch from peer %s: %w", peer, err))
+			// Same annotation boundary as the push above: the statement's
+			// own failure only, never the connection's setup.
+			if err := s.execRemoteTransfer(ctx, plan, "CALL DOLT_FETCH(?)", peer); err != nil {
+				return fmt.Errorf("failed to fetch from peer %s: %w", peer, err)
 			}
 			return nil
 		})

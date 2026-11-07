@@ -132,7 +132,7 @@ func init() {
 // stock dolt sql-server's auto_gc took 16.5s mid-import in the wy-9we0jf
 // rollback drill, and every such pause surfaced as "i/o timeout" followed by
 // "write commit result indeterminate" (wy-sbgucn). 5m matches the repo's
-// other known-long operations (execWithLongTimeout, withReadTxLongTimeout).
+// other known-long operations (execRemoteTransfer, withReadTxLongTimeout).
 const importPoolReadTimeout = 5 * time.Minute
 
 // bulkLoadPoolReadTimeout returns the pool read-timeout fallback for cmd: the

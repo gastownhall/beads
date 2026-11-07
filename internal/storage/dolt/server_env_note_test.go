@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -53,13 +54,15 @@ func fakeDoltOnPathFailingTransfers(t *testing.T, remoteLines ...string) string 
 }
 
 // serverEnvPeerStore builds a server-mode store with one federation peer at
-// peerURL whose stored credentials (user peeruser) take push/pull/fetch
-// through the CLI route: the store's CLI database stands in for one bd's own
-// server serves, the SQL remotes table lists the peer, and the peer row holds
-// a password this test's key file can decrypt. The SQL route's connection is
-// unroutable, so any query that slips through fails at once instead of
-// reaching a server.
-func serverEnvPeerStore(t *testing.T, peerURL string) (*DoltStore, sqlmock.Sqlmock) {
+// peerURL whose stored credentials (user peeruser) are decryptable. With
+// withCLIDir, the store's CLI database stands in for one bd's own server
+// serves and the stored credentials take push/pull/fetch through the CLI
+// route; without it, every CLI gate is false and transfers stay on the SQL
+// route. The SQL remotes table lists the peer either way, and the peer row
+// holds a password this test's key file can decrypt. The SQL route's
+// connection is unroutable, so any statement that slips through fails at
+// once instead of reaching a server.
+func serverEnvPeerStore(t *testing.T, peerURL string, withCLIDir bool) (*DoltStore, sqlmock.Sqlmock) {
 	t.Helper()
 	clearPredicateEnv(t)
 	clearCloudAuthEnv(t)
@@ -104,9 +107,11 @@ func serverEnvPeerStore(t *testing.T, peerURL string) (*DoltStore, sqlmock.Sqlmo
 		cfg:        &Config{ServerHost: "127.0.0.1", ServerPort: 3310},
 		connStr:    unroutableConnStr,
 	}
-	serveDoltDatabase(t, store, store.dbPath, 3310)
-	if err := os.MkdirAll(filepath.Join(store.CLIDir(), ".dolt", "noms"), 0o755); err != nil {
-		t.Fatal(err)
+	if withCLIDir {
+		serveDoltDatabase(t, store, store.dbPath, 3310)
+		if err := os.MkdirAll(filepath.Join(store.CLIDir(), ".dolt", "noms"), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return store, mock
 }
@@ -159,7 +164,7 @@ func TestPeerTransferFailureNamesServerEnvironment(t *testing.T) {
 
 	t.Run("push to a credentialed hosted peer", func(t *testing.T) {
 		fakeDoltOnPathFailingTransfers(t, "peer "+hostedURL)
-		store, _ := serverEnvPeerStore(t, hostedURL)
+		store, _ := serverEnvPeerStore(t, hostedURL, true)
 
 		err := store.PushTo(ctx, "peer")
 
@@ -176,7 +181,7 @@ func TestPeerTransferFailureNamesServerEnvironment(t *testing.T) {
 
 	t.Run("fetch from a credentialed s3 peer with ambient AWS credentials", func(t *testing.T) {
 		fakeDoltOnPathFailingTransfers(t, "peer "+s3URL)
-		store, _ := serverEnvPeerStore(t, s3URL)
+		store, _ := serverEnvPeerStore(t, s3URL, true)
 		t.Setenv("AWS_ACCESS_KEY_ID", "AKIAFRESH")
 		t.Setenv("AWS_SECRET_ACCESS_KEY", "fresh-secret")
 
@@ -189,7 +194,7 @@ func TestPeerTransferFailureNamesServerEnvironment(t *testing.T) {
 
 	t.Run("pull from a credentialed s3 peer with ambient AWS credentials", func(t *testing.T) {
 		fakeDoltOnPathFailingTransfers(t, "peer "+s3URL)
-		store, _ := serverEnvPeerStore(t, s3URL)
+		store, _ := serverEnvPeerStore(t, s3URL, true)
 		t.Setenv("AWS_ACCESS_KEY_ID", "AKIAFRESH")
 		t.Setenv("AWS_SECRET_ACCESS_KEY", "fresh-secret")
 
@@ -205,7 +210,7 @@ func TestPeerTransferFailureNamesServerEnvironment(t *testing.T) {
 
 	t.Run("sync surfaces the fetch note through its own wrap", func(t *testing.T) {
 		fakeDoltOnPathFailingTransfers(t, "peer "+s3URL)
-		store, _ := serverEnvPeerStore(t, s3URL)
+		store, _ := serverEnvPeerStore(t, s3URL, true)
 		t.Setenv("AWS_ACCESS_KEY_ID", "AKIAFRESH")
 
 		_, err := store.Sync(ctx, "peer", "")
@@ -215,7 +220,7 @@ func TestPeerTransferFailureNamesServerEnvironment(t *testing.T) {
 
 	t.Run("s3 peer push with no ambient credentials stays unexplained", func(t *testing.T) {
 		fakeDoltOnPathFailingTransfers(t, "peer "+s3URL)
-		store, _ := serverEnvPeerStore(t, s3URL)
+		store, _ := serverEnvPeerStore(t, s3URL, true)
 
 		err := store.PushTo(ctx, "peer")
 
@@ -565,4 +570,168 @@ func TestFinishPeerPullFailureCarriesNoCredentialNote(t *testing.T) {
 	if strings.Contains(err.Error(), "server's process") {
 		t.Fatalf("recompute error %q must not carry the credential note", err)
 	}
+}
+
+// TestPeerTransferSetupFailuresStayUnexplained pins where the peer SQL
+// route's note attaches (GH#5953): only to the transfer statement's own
+// failure. The SQL route's CALL runs on a one-shot connection, and that
+// connection's setup — DSN parse, dial, BEGIN — happens before the server
+// has run anything, so a setup failure carries no credential explanation:
+// no statement ever executed in the server's environment. The fixture's
+// unroutable connection string makes the setup fail at the dial, with bd
+// holding the AWS variables an aws:// peer's note would otherwise name.
+func TestPeerTransferSetupFailuresStayUnexplained(t *testing.T) {
+	const awsURL = "aws://bucket/beads"
+	ctx := context.Background()
+
+	assertNoNote := func(t *testing.T, err error, wantContext string) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("expected the transfer to fail")
+		}
+		if !strings.Contains(err.Error(), wantContext) {
+			t.Fatalf("error %q should keep its own context %q", err, wantContext)
+		}
+		if strings.Contains(err.Error(), "server's process") {
+			t.Fatalf("connection setup never reached the server, so error %q must not carry a credential note", err)
+		}
+	}
+
+	t.Run("push to an unreachable server", func(t *testing.T) {
+		store, _ := serverEnvPeerStore(t, awsURL, false) // no CLI dir: SQL route
+		t.Setenv("AWS_ACCESS_KEY_ID", "AKIAFRESH")
+		t.Setenv("AWS_SECRET_ACCESS_KEY", "fresh-secret")
+
+		err := store.PushTo(ctx, "peer")
+
+		assertNoNote(t, err, "failed to push to peer peer")
+	})
+
+	t.Run("fetch from an unreachable server", func(t *testing.T) {
+		store, _ := serverEnvPeerStore(t, awsURL, false)
+		t.Setenv("AWS_ACCESS_KEY_ID", "AKIAFRESH")
+		t.Setenv("AWS_SECRET_ACCESS_KEY", "fresh-secret")
+
+		err := store.Fetch(ctx, "peer")
+
+		assertNoNote(t, err, "failed to fetch from peer peer")
+	})
+}
+
+// TestServerEnvNoteLeavesUnrelatedFailuresUnchanged pins the note's guard
+// rails (GH#5953): embedded mode, destinations whose scheme names no variable
+// family bd can hold, and destinations the server cannot report all leave the
+// error untouched, and an annotated error still unwraps to the original —
+// the note is appended, never a replacement.
+func TestServerEnvNoteLeavesUnrelatedFailuresUnchanged(t *testing.T) {
+	ctx := context.Background()
+	transferFailed := errors.New("error 1105: transfer failed mid-push")
+	peerCreds := &remoteCredentials{username: "peeruser", password: "peer-secret"}
+	awsEnv := []string{"PATH=/usr/bin", "AWS_ACCESS_KEY_ID=AKIAFRESH", "AWS_SECRET_ACCESS_KEY=fresh"}
+
+	// newGuardStore returns a server-mode store whose dolt_remotes row lists
+	// the peer at remoteURL (lookup fails when remoteErr is non-nil).
+	newGuardStore := func(t *testing.T, remoteURL string, remoteErr error) *DoltStore {
+		t.Helper()
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		mock.MatchExpectationsInOrder(false)
+		q := mock.ExpectQuery("SELECT name, url, params FROM dolt_remotes")
+		if remoteErr != nil {
+			q.WillReturnError(remoteErr)
+		} else {
+			q.WillReturnRows(sqlmock.NewRows([]string{"name", "url", "params"}).AddRow("peer", remoteURL, nil))
+		}
+		return &DoltStore{serverMode: true, db: db}
+	}
+
+	// unchanged asserts err came back exactly as it went in.
+	unchanged := func(t *testing.T, err error) {
+		t.Helper()
+		if err != transferFailed {
+			t.Fatalf("error should be returned unchanged, got %q", err)
+		}
+	}
+
+	t.Run("embedded mode adds no note", func(t *testing.T) {
+		// The git-protocol peer routes through the CLI subprocess even in
+		// embedded mode, and the fake dolt fails the transfer itself — so a
+		// missing note here is the embedded suppression, not a setup skip.
+		gitURL := "git@github.com:example/beads-peer.git"
+		callLog := fakeDoltOnPathFailingTransfers(t, "peer "+gitURL)
+		store, _ := serverEnvPeerStore(t, gitURL, true)
+		store.serverMode = false
+
+		err := store.PushTo(ctx, "peer")
+
+		if err == nil {
+			t.Fatal("expected the transfer to fail")
+		}
+		calls, readErr := os.ReadFile(callLog)
+		if readErr != nil {
+			t.Fatalf("read fake dolt call log: %v", readErr)
+		}
+		if !strings.Contains(string(calls), "push") {
+			t.Fatalf("expected the CLI route to run dolt push, log says %q", calls)
+		}
+		if strings.Contains(err.Error(), "server's process") {
+			t.Fatalf("embedded bd runs the subprocess itself; error %q must not explain a server environment it does not have", err)
+		}
+	})
+
+	t.Run("unavailable destination metadata leaves the error unchanged", func(t *testing.T) {
+		store := newGuardStore(t, "", errors.New("dolt_remotes: server gone away"))
+
+		out := store.annotateServerEnvTransferError(ctx, serverEnvNotePlan{
+			procedure: "CALL DOLT_PUSH", remote: "peer", creds: peerCreds, env: awsEnv,
+		}, transferFailed)
+
+		unchanged(t, out)
+	})
+
+	t.Run("unsupported scheme leaves the error unchanged", func(t *testing.T) {
+		store := newGuardStore(t, "file:///srv/beads-remote", nil)
+
+		out := store.annotateServerEnvTransferError(ctx, serverEnvNotePlan{
+			procedure: "CALL DOLT_PUSH", remote: "peer", creds: peerCreds, env: awsEnv,
+		}, transferFailed)
+
+		unchanged(t, out)
+	})
+
+	t.Run("no relevant credentials leave the error unchanged", func(t *testing.T) {
+		store := newGuardStore(t, "s3://bucket/beads", nil)
+
+		out := store.annotateServerEnvTransferError(ctx, serverEnvNotePlan{
+			procedure: "CALL DOLT_PUSH", remote: "peer", creds: peerCreds,
+			env: []string{"PATH=/usr/bin", "HOME=/tmp"},
+		}, transferFailed)
+
+		unchanged(t, out)
+	})
+
+	t.Run("annotated errors keep errors.Is and errors.As", func(t *testing.T) {
+		store := newGuardStore(t, "s3://bucket/beads", nil)
+		type authFailure struct{ error }
+		target := authFailure{errors.New("error 1105: auth handler failed")}
+		wrapped := fmt.Errorf("push to peer peer: %w", target)
+
+		out := store.annotateServerEnvTransferError(ctx, serverEnvNotePlan{
+			procedure: "CALL DOLT_PUSH", remote: "peer", creds: peerCreds, env: awsEnv,
+		}, wrapped)
+
+		if !errors.Is(out, target) {
+			t.Fatalf("errors.Is must see the original through the note: %q", out)
+		}
+		var got authFailure
+		if !errors.As(out, &got) {
+			t.Fatalf("errors.As must see the original through the note: %q", out)
+		}
+		if !strings.HasPrefix(out.Error(), wrapped.Error()+"; ") || strings.Count(out.Error(), "server's process") != 1 {
+			t.Fatalf("annotated error %q should be the original %q with the note appended once", out, wrapped)
+		}
+	})
 }

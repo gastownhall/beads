@@ -1513,7 +1513,7 @@ func setupIncrementalExportTest(t *testing.T) (*testHarness, context.Context) {
 // runs at 269.44s/316.35s/67.80s wall-clock (release-gates/be-uoat-dolt-diff-
 // export-gate.md), evidence of real contention, not a hung process. 5m
 // reuses the same tier already established in this codebase for this exact
-// class of host-contention stall (execWithLongTimeout's push/pull deadline,
+// class of host-contention stall (execRemoteTransfer's push/pull deadline,
 // and testStoreOpenTimeout's 300s in test_helpers_test.go) rather than a
 // guessed value — comfortably above any observed run, while still bounded
 // so a genuine hang still fails.

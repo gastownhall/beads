@@ -536,10 +536,10 @@ func TestBuildServerDSN_WithoutSocket(t *testing.T) {
 	}
 }
 
-// TestExecWithLongTimeoutDSNRewrite verifies that execWithLongTimeout's
+// TestExecRemoteTransferDSNRewrite verifies that execRemoteTransfer's
 // ParseDSN/FormatDSN rewrite produces a valid DSN with readTimeout=5m
 // given a DSN from buildServerDSN.
-func TestExecWithLongTimeoutDSNRewrite(t *testing.T) {
+func TestExecRemoteTransferDSNRewrite(t *testing.T) {
 	cfg := &Config{
 		ServerUser: "root",
 		ServerHost: "127.0.0.1",
@@ -550,7 +550,7 @@ func TestExecWithLongTimeoutDSNRewrite(t *testing.T) {
 
 	original := buildServerDSN(cfg, cfg.Database)
 
-	// Simulate the same rewrite that execWithLongTimeout performs.
+	// Simulate the same rewrite that execRemoteTransfer performs.
 	parsed, err := mysql.ParseDSN(original)
 	if err != nil {
 		t.Fatalf("failed to parse original DSN: %v", err)

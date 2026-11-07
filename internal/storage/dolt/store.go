@@ -585,7 +585,7 @@ type Config struct {
 	// mid-flight ("client connection went away", wy-b72dj/bd-vz0y9); raising
 	// it is the intended relief valve for such deployments. Known-long
 	// operations should not lean on this — route them through
-	// execWithLongTimeout/openLongTimeoutConn instead.
+	// execRemoteTransfer/openLongTimeoutConn instead.
 	PoolReadTimeout  time.Duration
 	PoolWriteTimeout time.Duration
 
@@ -2963,14 +2963,23 @@ func buildServerDSN(cfg *Config, database string) string {
 	return parsed.FormatDSN()
 }
 
-// execWithLongTimeout opens a one-shot database connection with readTimeout=5m
-// and executes the given query. Push/pull operations can exceed the default
-// readTimeout when the server performs network I/O to git remotes.
+// execRemoteTransfer opens a one-shot database connection with readTimeout=5m
+// and executes a remote-transfer stored procedure (CALL DOLT_PUSH /
+// DOLT_FETCH). Push/pull operations can exceed the default readTimeout when
+// the server performs network I/O to git remotes.
 //
 // The query is wrapped in an explicit transaction (BEGIN/COMMIT) so that
 // DOLT_PULL merge operations succeed even when the server runs with
 // autocommit=1. Without this, Dolt rejects merges under autocommit because
 // it cannot expose conflict-resolution tables to the caller.
+//
+// plan adds the server-environment note (GH#5953) to the transfer
+// statement's own failure only: everything before it — DSN parse, dial,
+// BEGIN — fails without the server having run anything, so a setup failure
+// never gets explained as the server reading credentials from the wrong
+// environment. A COMMIT failure after a successful statement stays
+// unannotated too: the transfer itself ran, so the note would explain the
+// wrong failure. Callers that want no note pass an empty plan.
 //
 // Audited for be-b0am's fresh-connection branch hazard: safe — but the two
 // callers are safe for different reasons, so the annotation names both.
@@ -2980,7 +2989,7 @@ func buildServerDSN(cfg *Config, database string) string {
 // GetRefSpecs), which are remote config rather than session state, and a
 // fetch writes only remote-tracking refs, never the working branch. Neither
 // depends on this fresh connection's default checkout.
-func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args ...any) error {
+func (s *DoltStore) execRemoteTransfer(ctx context.Context, plan serverEnvNotePlan, query string, args ...any) error {
 	cfg, err := mysql.ParseDSN(s.connStr)
 	if err != nil {
 		return fmt.Errorf("failed to parse DSN for long-timeout connection: %w", err)
@@ -2998,7 +3007,7 @@ func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args 
 	}
 	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 		_ = tx.Rollback()
-		return err
+		return s.annotateServerEnvTransferError(ctx, plan, err)
 	}
 	return tx.Commit()
 }
