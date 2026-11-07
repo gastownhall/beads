@@ -1,7 +1,9 @@
 package doctor
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -210,14 +212,41 @@ func TestCheckDependencyCycles_NoDatabase(t *testing.T) {
 // must warn-and-advise-leaving-it, not present as "wrong database".
 func TestClassifyRepoFingerprint(t *testing.T) {
 	t.Run("match is OK regardless of source", func(t *testing.T) {
-		check := classifyRepoFingerprint("aaaa1111bbbb2222", "aaaa1111bbbb2222", beads.RepoIDSourcePath)
+		fp := beads.RepoFingerprint{ID: "aaaa1111bbbb2222", LegacyID: "aaaa1111bbbb2222", Source: beads.RepoIDSourcePath}
+		check := classifyRepoFingerprint("aaaa1111bbbb2222", fp)
 		if check.Status != StatusOK {
 			t.Fatalf("Status = %q, want %q (message=%q)", check.Status, StatusOK, check.Message)
 		}
 	})
 
+	// GH#5990: a shared ledger initialized before alias resolution stores the
+	// literal-host hash this same checkout computed; doctor must keep
+	// verifying it once the checkout resolves its alias to a canonical host.
+	t.Run("legacy id of this checkout's alias spelling matches", func(t *testing.T) {
+		fp := beads.RepoFingerprint{ID: "cccc3333dddd4444", LegacyID: "aaaa1111bbbb2222", Source: beads.RepoIDSourceRemote, SSHAlias: "alias-a", SSHHostName: "github.com"}
+		check := classifyRepoFingerprint("aaaa1111bbbb2222", fp)
+		if check.Status != StatusOK {
+			t.Fatalf("Status = %q, want %q (message=%q, fix=%q)", check.Status, StatusOK, check.Message, check.Fix)
+		}
+		if !strings.Contains(check.Message, "Verified") {
+			t.Fatalf("Message = %q, want the Verified framing", check.Message)
+		}
+	})
+
+	t.Run("another machine's alias spelling does not match", func(t *testing.T) {
+		// The legacy allowance only recognizes THIS checkout's own old
+		// spelling; a stored id from some other machine's alias must not
+		// match a checkout whose legacy hash differs.
+		fp := beads.RepoFingerprint{ID: "cccc3333dddd4444", LegacyID: "eeee5555ffff6666", Source: beads.RepoIDSourceRemote}
+		check := classifyRepoFingerprint("aaaa1111bbbb2222", fp)
+		if check.Status != StatusError {
+			t.Fatalf("Status = %q, want %q (message=%q)", check.Status, StatusError, check.Message)
+		}
+	})
+
 	t.Run("mismatch with remote-derived current id is an error", func(t *testing.T) {
-		check := classifyRepoFingerprint("aaaa1111bbbb2222", "cccc3333dddd4444", beads.RepoIDSourceRemote)
+		fp := beads.RepoFingerprint{ID: "cccc3333dddd4444", LegacyID: "cccc3333dddd4444", Source: beads.RepoIDSourceRemote}
+		check := classifyRepoFingerprint("aaaa1111bbbb2222", fp)
 		if check.Status != StatusError {
 			t.Fatalf("Status = %q, want %q (message=%q)", check.Status, StatusError, check.Message)
 		}
@@ -227,7 +256,8 @@ func TestClassifyRepoFingerprint(t *testing.T) {
 	})
 
 	t.Run("mismatch with path-fallback current id warns and advises leaving it", func(t *testing.T) {
-		check := classifyRepoFingerprint("aaaa1111bbbb2222", "cccc3333dddd4444", beads.RepoIDSourcePath)
+		fp := beads.RepoFingerprint{ID: "cccc3333dddd4444", LegacyID: "cccc3333dddd4444", Source: beads.RepoIDSourcePath}
+		check := classifyRepoFingerprint("aaaa1111bbbb2222", fp)
 		if check.Status != StatusWarning {
 			t.Fatalf("Status = %q, want %q (message=%q)", check.Status, StatusWarning, check.Message)
 		}
@@ -238,4 +268,89 @@ func TestClassifyRepoFingerprint(t *testing.T) {
 			t.Fatalf("Fix = %q, want the propagation named", check.Fix)
 		}
 	})
+
+	t.Run("empty or short stored ids mismatch without panicking", func(t *testing.T) {
+		fp := beads.RepoFingerprint{ID: "cccc3333dddd4444", LegacyID: "cccc3333dddd4444", Source: beads.RepoIDSourceRemote}
+		for _, stored := range []string{"", "abc"} {
+			check := classifyRepoFingerprint(stored, fp)
+			if check.Status != StatusError {
+				t.Errorf("stored %q: Status = %q, want %q", stored, check.Status, StatusError)
+			}
+		}
+	})
+}
+
+// fakeRepoMetadataStore stands in for a Dolt store in fingerprint tests. It
+// records writes so tests can assert doctor never rewrites shared metadata.
+type fakeRepoMetadataStore struct {
+	values map[string]string
+	writes []string
+}
+
+func (f *fakeRepoMetadataStore) GetMetadata(_ context.Context, key string) (string, error) {
+	return f.values[key], nil
+}
+
+func (f *fakeRepoMetadataStore) SetMetadata(_ context.Context, key, value string) error {
+	f.writes = append(f.writes, key)
+	f.values[key] = value
+	return nil
+}
+
+// runGitCmd runs git in dir and returns combined output.
+func runGitCmd(dir string, args ...string) (string, error) {
+	cmd := gitCommand(args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// TestCheckRepoFingerprint_LegacyAliasHashMatches covers the GH#5990
+// upgrade path end to end at the store seam: a ledger storing a checkout's
+// pre-resolution alias hash keeps verifying once that checkout resolves the
+// alias, and the read-only check never rewrites the stored metadata.
+func TestCheckRepoFingerprint_LegacyAliasHashMatches(t *testing.T) {
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Skip("no ssh binary on PATH; alias resolution cannot run")
+	}
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := "Host alias-a\n  HostName github.com\n  User git\n"
+	if err := os.WriteFile(filepath.Join(sshDir, "config"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+
+	repo := t.TempDir()
+	if out, err := runGitCmd(repo, "init"); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	cmd := gitCommand("remote", "add", "origin", "git@alias-a:org/repo.git")
+	cmd.Dir = repo
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git remote add: %v", err)
+	}
+
+	fp, err := beads.ComputeRepoFingerprintForPath(repo)
+	if err != nil {
+		t.Fatalf("ComputeRepoFingerprintForPath: %v", err)
+	}
+	if fp.SSHAlias == "" {
+		t.Fatal("test precondition: alias-a must resolve in this environment")
+	}
+
+	store := &fakeRepoMetadataStore{values: map[string]string{"repo_id": fp.LegacyID}}
+	check := checkRepoFingerprintWithStore(store, repo)
+	if check.Status != StatusOK {
+		t.Fatalf("Status = %q, want %q (message=%q, detail=%q)", check.Status, StatusOK, check.Message, check.Detail)
+	}
+	if len(store.writes) != 0 {
+		t.Fatalf("doctor read rewrote metadata keys %v; the check must not write", store.writes)
+	}
+	if got := store.values["repo_id"]; got != fp.LegacyID {
+		t.Fatalf("stored repo_id changed from %s to %s", fp.LegacyID, got)
+	}
 }
