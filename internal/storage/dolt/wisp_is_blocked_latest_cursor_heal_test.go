@@ -287,3 +287,44 @@ func TestDoltNew_WispIsBlockedRestoreHealthyCloneConverges_RealDolt(t *testing.T
 		t.Fatalf("ignored cursor rows for 32 after a converged reopen = %d, want 1", got)
 	}
 }
+
+// TestDoltNew_WispIsBlockedRestoreKeepsHistoryAndTimestamps_RealDolt is AC-5:
+// the heal writes only the clone-local wisps flags. Wisp timestamps, durable
+// rows, HEAD and the dirty table set stay as they were.
+func TestDoltNew_WispIsBlockedRestoreKeepsHistoryAndTimestamps_RealDolt(t *testing.T) {
+	c := newWispIsBlockedClone(t)
+	c.seedGraph()
+	// Established timestamps: far from "now", so a restamp cannot hide.
+	c.exec("pin wisp timestamps", "UPDATE wisps SET updated_at = '2001-02-03 04:05:06', created_at = '2001-02-03 04:05:06'")
+
+	wispStamps := func() string {
+		return c.scalar("wisp timestamps", `SELECT GROUP_CONCAT(CONCAT(id, '@', created_at, '@', updated_at) ORDER BY id) FROM wisps`)
+	}
+	durable := func() string {
+		return c.scalar("durable rows", `SELECT CONCAT(DOLT_HASHOF_TABLE('issues'), '/', DOLT_HASHOF_TABLE('dependencies'))`)
+	}
+	head := func() string { return c.scalar("HEAD", "SELECT HASHOF('HEAD')") }
+	dirty := func() string {
+		return c.scalar("dirty tables", "SELECT COALESCE(GROUP_CONCAT(table_name ORDER BY table_name), '') FROM dolt_status")
+	}
+
+	c.breakShape()
+	stampsBefore, durableBefore, headBefore, dirtyBefore := wispStamps(), durable(), head(), dirty()
+	c.reopen()
+
+	if c.count("after reopen column probe", wispIsBlockedColumnProbe) != 1 {
+		t.Fatal("wisps.is_blocked not restored on reopen")
+	}
+	if got := wispStamps(); got != stampsBefore {
+		t.Errorf("wisp timestamps changed by the heal:\n got %s\nwant %s", got, stampsBefore)
+	}
+	if got := durable(); got != durableBefore {
+		t.Errorf("durable issues/dependencies changed by the heal: %s -> %s", durableBefore, got)
+	}
+	if got := head(); got != headBefore {
+		t.Errorf("HEAD moved during the heal: %s -> %s", headBefore, got)
+	}
+	if got := dirty(); got != dirtyBefore {
+		t.Errorf("dirty tables after the heal = %q, want %q", got, dirtyBefore)
+	}
+}
