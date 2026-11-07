@@ -36,7 +36,25 @@ const accidentalReleaseGuide = "docs/recovery/accidental-1-2-1-release.md"
 // The guide's sections whose commands the tests run. A section ends at the
 // next heading of any level, so the numbered procedure under
 // guideRequiredSection does not pick up a subsection's commands.
-const guideRequiredSection = "## Recommended fix: roll the schema cursor back"
+const (
+	guideRequiredSection = "## Recommended fix: roll the schema cursor back"
+	guideMissingSection  = "### If `events` is missing or empty"
+)
+
+// handMadeEventsTable is the empty events table the issue report's
+// workaround creates by hand on a clone that has none.
+const handMadeEventsTable = `
+CREATE TABLE events (
+    issue_id VARCHAR(255) NOT NULL,
+    event_type VARCHAR(32) NOT NULL,
+    actor VARCHAR(255) NOT NULL,
+    old_value LONGTEXT,
+    new_value LONGTEXT,
+    comment TEXT,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    id CHAR(36) NOT NULL,
+    PRIMARY KEY (id)
+)`
 
 // guideCursorRollback is the guide's step 4, which is all an earlier version
 // of the guide required: a database recovered with it alone keeps events
@@ -471,5 +489,121 @@ func TestEmbeddedAccidentalReleaseRecoveryDivergentPeers(t *testing.T) {
 		if v := currentMainVersion(t, ctx, conn); v != 53 {
 			t.Fatalf("schema cursor = %d after the pull, want 53", v)
 		}
+	})
+}
+
+// TestEmbeddedAccidentalReleaseMissingEventsClone is AC-4: a clone of a
+// database published after the cursor rollback alone has no events table.
+// Its first issue write fails with the reported error; either documented
+// repair, pulling a recovered source or the history-only batch, makes its
+// next issue-plus-event write commit cleanly; and the history-only batch
+// stops before any change when the history cannot supply the table.
+func TestEmbeddedAccidentalReleaseMissingEventsClone(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	guide := readAccidentalReleaseGuide(t)
+
+	publishedWithoutEvents := func(t *testing.T) (source, clone string) {
+		t.Helper()
+		source = seedMigratedMachine(t, ctx)
+		mustOK(t, "cursor rollback alone", runGuideBatch(t, source, guideCursorRollback))
+		remoteURL := publishToNewRemote(t, ctx, source)
+		_, clone = cloneLineage(t, ctx, remoteURL)
+		withRawConn(t, clone, preflipDatabase, func(conn *sql.Conn) {
+			if eventsTablePresent(t, ctx, conn) {
+				t.Fatal("the clone has an events table; the reported shape is not reproduced")
+			}
+		})
+		return source, clone
+	}
+
+	t.Run("first issue write fails before the repair", func(t *testing.T) {
+		_, clone := publishedWithoutEvents(t)
+		withRawConn(t, clone, preflipDatabase, func(conn *sql.Conn) {
+			err := oldLineEvent(ctx, conn, "keep-1", "clone-before-repair")
+			if err == nil || !strings.Contains(err.Error(), "table not found: events") {
+				t.Fatalf("the clone's event write: err = %v, want the reported table not found: events", err)
+			}
+		})
+	})
+
+	t.Run("pull from a recovered source", func(t *testing.T) {
+		source, clone := publishedWithoutEvents(t)
+		// Step 5 on the clone stops early: there is no local table.
+		if err := runGuideSection(t, clone, guide, guideRequiredSection); err == nil || !strings.Contains(err.Error(), "table not found") {
+			t.Fatalf("required steps on the clone: err = %v, want table not found", err)
+		}
+		mustOK(t, "source: the guide's required steps", runGuideSection(t, source, guide, guideRequiredSection))
+		withRawConn(t, source, preflipDatabase, func(conn *sql.Conn) {
+			mustExecOn(t, ctx, conn, "CALL DOLT_PUSH('origin', 'main')")
+		})
+		withRawConn(t, clone, preflipDatabase, func(conn *sql.Conn) {
+			mustOK(t, "clone: pull", oldLinePull(ctx, conn))
+			requireCleanMerge(t, ctx, conn)
+			requireWritableLikeOldLine(t, ctx, conn, "clone-1", "clone-create")
+			requireEventTags(t, ctx, conn, "HEAD", "clone-create", "post-keep", "pre-keep")
+		})
+	})
+
+	t.Run("history-only batch", func(t *testing.T) {
+		_, clone := publishedWithoutEvents(t)
+		mustOK(t, "the history-only batch", runGuideSection(t, clone, guide, guideMissingSection))
+		withRawConn(t, clone, preflipDatabase, func(conn *sql.Conn) {
+			// Pre-upgrade rows of surviving issues; post-keep never reached
+			// history and gone-1 was deleted.
+			requireEventTags(t, ctx, conn, "HEAD", "pre-keep")
+			if eventsIgnoreRuleAtHead(t, ctx, conn) {
+				t.Fatal("the events ignore rule is still in HEAD")
+			}
+			requireWritableLikeOldLine(t, ctx, conn, "clone-1", "clone-create")
+		})
+	})
+
+	t.Run("history-only batch over an empty hand-made table", func(t *testing.T) {
+		_, clone := publishedWithoutEvents(t)
+		withRawConn(t, clone, preflipDatabase, func(conn *sql.Conn) {
+			mustExecOn(t, ctx, conn, handMadeEventsTable)
+		})
+		mustOK(t, "the history-only batch", runGuideSection(t, clone, guide, guideMissingSection))
+		withRawConn(t, clone, preflipDatabase, func(conn *sql.Conn) {
+			requireEventTags(t, ctx, conn, "HEAD", "pre-keep")
+			requireWritableLikeOldLine(t, ctx, conn, "clone-1", "clone-create")
+		})
+	})
+
+	t.Run("history-only batch without a usable history source stops before any change", func(t *testing.T) {
+		// A drop commit whose first parent has no events table, under a
+		// hand-made empty local table.
+		dataDir := seedMainSchemaAt(t, ctx, 53)
+		var head string
+		withRawConn(t, dataDir, preflipDatabase, func(conn *sql.Conn) {
+			mustExecOn(t, ctx, conn, "DROP TABLE events")
+			mustDrain(t, ctx, conn, "CALL DOLT_ADD('-A')")
+			mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-m', 'test: history without events')")
+			mustExecOn(t, ctx, conn, "INSERT INTO dolt_ignore VALUES ('events', 1)")
+			mustDrain(t, ctx, conn, "CALL DOLT_ADD('dolt_ignore')")
+			mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-m', 'schema: drop versioned events table for ignored-plane flip (bd-red8u)')")
+			mustExecOn(t, ctx, conn, handMadeEventsTable)
+			requireNothingPending(t, ctx, conn)
+			head = scalarString(t, ctx, conn, "SELECT commit_hash FROM dolt_log LIMIT 1")
+		})
+
+		err := runGuideSection(t, dataDir, guide, guideMissingSection)
+		if err == nil || !strings.Contains(err.Error(), "events AS OF @preflip") {
+			t.Fatalf("history-only batch without a history source: err = %v, want the history probe to stop it", err)
+		}
+
+		withRawConn(t, dataDir, preflipDatabase, func(conn *sql.Conn) {
+			if got := scalarString(t, ctx, conn, "SELECT commit_hash FROM dolt_log LIMIT 1"); got != head {
+				t.Fatalf("HEAD moved to %s, want %s: the stopped batch committed", got, head)
+			}
+			if !eventsTablePresent(t, ctx, conn) || trackedAtHead(t, ctx, conn, "events") {
+				t.Fatal("the stopped batch changed the local events table")
+			}
+			if n := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM dolt_ignore WHERE pattern = 'events'"); n != 1 || !eventsIgnoreRuleAtHead(t, ctx, conn) {
+				t.Fatal("the stopped batch removed the events ignore rule")
+			}
+			requireNothingPending(t, ctx, conn)
+		})
 	})
 }
