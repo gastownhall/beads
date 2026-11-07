@@ -21,8 +21,10 @@ This is essential for large issue databases with many similar reports.
 
 Examples:
   bd duplicate bd-abc --of bd-xyz    # Mark bd-abc as duplicate of bd-xyz`,
-	Args: cobra.ExactArgs(1),
-	RunE: runDuplicate,
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runDuplicate,
 }
 
 var supersedeCmd = &cobra.Command{
@@ -36,8 +38,10 @@ Useful for design docs, specs, and evolving artifacts.
 
 Examples:
   bd supersede bd-old --with bd-new    # Mark bd-old as superseded by bd-new`,
-	Args: cobra.ExactArgs(1),
-	RunE: runSupersede,
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runSupersede,
 }
 
 var (
@@ -59,7 +63,7 @@ func init() {
 
 func runDuplicate(cmd *cobra.Command, args []string) error {
 	if usesProxiedServer() {
-		return HandleErrorRespectJSON("duplicate is not supported in proxied-server mode")
+		return runDuplicateProxiedServer(cmd, args)
 	}
 	CheckReadonly("duplicate")
 
@@ -129,7 +133,7 @@ func runDuplicate(cmd *cobra.Command, args []string) error {
 
 func runSupersede(cmd *cobra.Command, args []string) error {
 	if usesProxiedServer() {
-		return HandleErrorRespectJSON("supersede is not supported in proxied-server mode")
+		return runSupersedeProxiedServer(cmd, args)
 	}
 	CheckReadonly("supersede")
 
