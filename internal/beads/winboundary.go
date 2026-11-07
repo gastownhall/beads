@@ -141,6 +141,10 @@ type windowsBoundaryInput struct {
 	// homeValue is the current user's home directory; invalid, volume-root,
 	// or profile-parent-level values leave the home unknown.
 	homeValue string
+	// tempValue is the OS temp directory; invalid values, volume roots, and
+	// temp locations at or above a system or profile root are discarded as
+	// carve-outs (proper descendants such as C:\Windows\Temp are kept).
+	tempValue string
 	// resolve physically resolves a path (following junctions and symlinks)
 	// to its final spelling; ok=false means unresolved. nil means no
 	// resolution is available.
@@ -153,7 +157,9 @@ type windowsBoundaryInput struct {
 type windowsBoundary struct {
 	systemRoots    []string
 	profileParents []string
+	publicRoots    []string
 	home           string
+	tempRoot       string
 	resolve        func(path string) (string, bool)
 }
 
@@ -195,7 +201,46 @@ func newWindowsBoundary(in windowsBoundaryInput) windowsBoundary {
 			}
 		}
 	}
+	// The temp carve-out must not swallow a deny rule: a temp location at or
+	// above a system or profile root — lexically or physically — is
+	// discarded. Proper descendants such as C:\Windows\Temp are kept, and
+	// the temp rule runs before system denial so a SYSTEM-account temp keeps
+	// working.
+	if temp, ok := winCleanPath(in.tempValue); ok && !winIsVolumeRoot(temp) {
+		if !b.winAtOrAboveAnyRoot(temp) {
+			b.tempRoot = temp
+		}
+	}
+	// Public is derived from the profile parents — never from the mutable
+	// PUBLIC variable — mirroring /Users/Shared on macOS.
+	for _, pp := range b.profileParents {
+		if pub, ok := winCleanPath(pp + `\Public`); ok {
+			b.publicRoots = append(b.publicRoots, pub)
+		}
+	}
 	return b
+}
+
+// winAtOrAboveAnyRoot reports whether p is equal to or above any system or
+// profile root, considering the successfully resolved physical forms on both
+// sides.
+func (b windowsBoundary) winAtOrAboveAnyRoot(p string) bool {
+	phys := b.resolvePath(p)
+	for _, group := range [][]string{b.systemRoots, b.profileParents} {
+		for _, root := range group {
+			rootPhys := b.resolvePath(root)
+			if winWithin(p, root) {
+				return true
+			}
+			if phys != "" && winWithin(phys, root) {
+				return true
+			}
+			if rootPhys != "" && (winWithin(p, rootPhys) || (phys != "" && winWithin(phys, rootPhys))) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // resolvePath returns the physical form of a canonical path, or "" when it
@@ -226,6 +271,26 @@ func (b windowsBoundary) inSafeBoundary(input, abs string) bool {
 		return false
 	}
 	phys := b.resolvePath(lexAbs)
+
+	// Temp carve-out, ahead of system denial so a SYSTEM-account temp under
+	// C:\Windows\Temp still works. The temp tree is world-writable, so
+	// admission requires physical containment within the resolved temp
+	// root: a link planted under it that escapes is rejected, and an
+	// unresolved path inside it fails closed.
+	if b.tempRoot != "" {
+		if winWithin(b.tempRoot, lexInput) || winWithin(b.tempRoot, lexAbs) ||
+			(phys != "" && winWithin(b.tempRoot, phys)) {
+			if phys == "" {
+				return false
+			}
+			tempPhys := b.resolvePath(b.tempRoot)
+			if tempPhys == "" {
+				return false
+			}
+			return winWithin(tempPhys, phys)
+		}
+	}
+
 	for _, root := range b.systemRoots {
 		if winWithin(root, lexInput) || winWithin(root, lexAbs) {
 			return false
@@ -248,6 +313,21 @@ func (b windowsBoundary) inSafeBoundary(input, abs string) bool {
 		if winWithin(rootPhys, lexInput) || winWithin(rootPhys, lexAbs) ||
 			(phys != "" && winWithin(rootPhys, phys)) {
 			return false
+		}
+	}
+
+	// Public carve-out: the OS-designated shared directory below a profile
+	// parent, not a peer profile. Same fail-closed containment as temp.
+	for _, pub := range b.publicRoots {
+		if lexInput == pub || lexAbs == pub || winWithin(pub, lexInput) || winWithin(pub, lexAbs) {
+			if phys == "" {
+				return false
+			}
+			pubPhys := b.resolvePath(pub)
+			if pubPhys == "" {
+				return false
+			}
+			return winWithin(pubPhys, phys)
 		}
 	}
 

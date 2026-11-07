@@ -117,4 +117,3 @@ func TestWindowsBoundaryRegression(t *testing.T) {
 		t.Errorf("isPathInSafeBoundary(%q) = false, want true (temp fixture root)", base)
 	}
 }
-

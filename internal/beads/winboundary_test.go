@@ -153,6 +153,59 @@ func TestNewWindowsBoundary(t *testing.T) {
 			t.Errorf("home = %q, want C:\\Users\\alice", b.home)
 		}
 	})
+
+	t.Run("temp carve-out validated", func(t *testing.T) {
+		base := windowsBoundaryInput{
+			systemRootValues: []string{`C:\Windows`},
+			resolve: func(p string) (string, bool) {
+				if p == `C:\Linked` {
+					return `C:\Windows`, true // a temp that physically IS a system root
+				}
+				return "", false
+			},
+		}
+		kept := base
+		kept.tempValue = `C:\Users\kim\AppData\Local\Temp`
+		if got := newWindowsBoundary(kept).tempRoot; got != kept.tempValue {
+			t.Errorf("tempRoot = %q, want kept %q", got, kept.tempValue)
+		}
+		dropped := base
+		dropped.tempValue = `C:\Windows` // equal to a system root
+		if got := newWindowsBoundary(dropped).tempRoot; got != "" {
+			t.Errorf("tempRoot = %q, want discarded", got)
+		}
+		volumeRoot := base
+		volumeRoot.tempValue = `C:\`
+		if got := newWindowsBoundary(volumeRoot).tempRoot; got != "" {
+			t.Errorf("tempRoot = %q, want discarded (volume root)", got)
+		}
+		physical := base
+		physical.tempValue = `C:\Linked`
+		if got := newWindowsBoundary(physical).tempRoot; got != "" {
+			t.Errorf("tempRoot = %q, want discarded (physically a system root)", got)
+		}
+		descendant := windowsBoundaryInput{
+			systemRootValues: []string{`C:\Windows`},
+			tempValue:        `C:\Windows\Temp`, // SYSTEM-account temp: a proper descendant
+		}
+		if got := newWindowsBoundary(descendant).tempRoot; got != `C:\Windows\Temp` {
+			t.Errorf("tempRoot = %q, want kept C:\\Windows\\Temp", got)
+		}
+	})
+
+	t.Run("public roots derived from profile parents", func(t *testing.T) {
+		b := newWindowsBoundary(windowsBoundaryInput{
+			profileParentValues: []string{`C:\Users`, `D:\Profiles`},
+		})
+		if len(b.publicRoots) != 2 {
+			t.Fatalf("publicRoots = %v, want 2 entries", b.publicRoots)
+		}
+		for _, pub := range []string{`C:\Users\Public`, `D:\Profiles\Public`} {
+			if !containsWinPath(b.publicRoots, pub) {
+				t.Errorf("publicRoots %v missing %q", b.publicRoots, pub)
+			}
+		}
+	})
 }
 
 func containsWinPath(paths []string, want string) bool {
@@ -324,6 +377,118 @@ func TestWindowsPathInSafeBoundary(t *testing.T) {
 		}
 		if !b.inSafeBoundary(`C:\Users\al\.beads`, `C:\Users\al\.beads`) {
 			t.Error("inSafeBoundary(home itself) = false, want true")
+		}
+	})
+
+	// The Public carve-out: C:\Users\<parent>\Public is the OS-designated
+	// shared directory, not a peer profile. Admission needs physical
+	// containment, so escapes through links and unresolved paths inside it
+	// are rejected.
+	t.Run("public carve-out", func(t *testing.T) {
+		const pub = `C:\Users\Public`
+		b := newWindowsBoundary(windowsBoundaryInput{
+			profileParentValues: []string{`C:\Users`},
+			homeValue:           `C:\Users\alice`,
+			resolve: func(p string) (string, bool) {
+				switch p {
+				case pub:
+					return pub, true
+				case pub + `\proj\.beads`:
+					return pub + `\proj\.beads`, true
+				case pub + `\esc`:
+					return `C:\Windows\System32`, true
+				}
+				return "", false
+			},
+		})
+		if !b.inSafeBoundary(pub+`\proj\.beads`, pub+`\proj\.beads`) {
+			t.Error("inSafeBoundary(missing Public descendant) = false, want true")
+		}
+		if !b.inSafeBoundary(pub, pub) {
+			t.Error("inSafeBoundary(Public root) = false, want true")
+		}
+		if b.inSafeBoundary(pub+`\esc`, pub+`\esc`) {
+			t.Error("inSafeBoundary(escape from Public) = true, want false")
+		}
+		if b.inSafeBoundary(pub+`\unres`, pub+`\unres`) {
+			t.Error("inSafeBoundary(unresolved path in Public) = true, want false")
+		}
+		if b.inSafeBoundary(`C:\Users\bob\.beads`, `C:\Users\bob\.beads`) {
+			t.Error("inSafeBoundary(peer profile) = true, want false")
+		}
+	})
+
+	// The temp carve-out: missing descendants whose longest existing
+	// ancestor resolves inside the temp root are admitted; escapes and
+	// unresolved paths inside it are rejected (fail closed, the tree is
+	// world-writable). Temp runs before system denial so a SYSTEM-account
+	// temp under C:\Windows\Temp keeps working without opening C:\Windows
+	// itself.
+	t.Run("temp carve-out", func(t *testing.T) {
+		const temp = `C:\Users\alice\AppData\Local\Temp`
+		b := newWindowsBoundary(windowsBoundaryInput{
+			systemRootValues:    []string{`C:\Windows`},
+			profileParentValues: []string{`C:\Users`},
+			homeValue:           `C:\Users\alice`,
+			tempValue:           temp,
+			resolve: func(p string) (string, bool) {
+				switch p {
+				case temp, temp + `\proj\.beads`:
+					return p, true
+				case temp + `\esc`:
+					return `C:\Windows\System32`, true
+				}
+				return "", false
+			},
+		})
+		if !b.inSafeBoundary(temp+`\proj\.beads`, temp+`\proj\.beads`) {
+			t.Error("inSafeBoundary(missing temp descendant) = false, want true")
+		}
+		if !b.inSafeBoundary(temp, temp) {
+			t.Error("inSafeBoundary(temp root) = false, want true")
+		}
+		if b.inSafeBoundary(temp+`\esc`, temp+`\esc`) {
+			t.Error("inSafeBoundary(escape from temp) = true, want false")
+		}
+		if b.inSafeBoundary(temp+`\unres`, temp+`\unres`) {
+			t.Error("inSafeBoundary(unresolved path in temp) = true, want false")
+		}
+	})
+
+	t.Run("SYSTEM temp below a system root", func(t *testing.T) {
+		const sysTemp = `C:\Windows\Temp`
+		b := newWindowsBoundary(windowsBoundaryInput{
+			systemRootValues: []string{`C:\Windows`},
+			tempValue:        sysTemp,
+			resolve: func(p string) (string, bool) {
+				if p == sysTemp || p == sysTemp+`\beads` {
+					return p, true
+				}
+				return "", false
+			},
+		})
+		if !b.inSafeBoundary(sysTemp+`\beads`, sysTemp+`\beads`) {
+			t.Error("inSafeBoundary(SYSTEM temp workspace) = false, want true")
+		}
+		if !b.inSafeBoundary(sysTemp, sysTemp) {
+			t.Error("inSafeBoundary(SYSTEM temp root) = false, want true")
+		}
+		if b.inSafeBoundary(sysTemp+`\unres`, sysTemp+`\unres`) {
+			t.Error("inSafeBoundary(unresolved in SYSTEM temp) = true, want false")
+		}
+		if b.inSafeBoundary(`C:\Windows\System32`, `C:\Windows\System32`) {
+			t.Error("inSafeBoundary(system dir) = true, want false")
+		}
+	})
+
+	// A discarded temp value must not blunt the deny rules.
+	t.Run("invalid temp does not swallow system denial", func(t *testing.T) {
+		b := newWindowsBoundary(windowsBoundaryInput{
+			systemRootValues: []string{`C:\Windows`},
+			tempValue:        `C:\Windows`,
+		})
+		if b.inSafeBoundary(`C:\Windows\beads`, `C:\Windows\beads`) {
+			t.Error("inSafeBoundary(C:\\Windows\\beads with discarded temp) = true, want false")
 		}
 	})
 }
