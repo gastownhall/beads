@@ -549,13 +549,20 @@ cat .git/hooks/pre-commit
 
 ### Hook timeout kills chained pre-commit hooks
 
-**Symptom:** After `bd hooks install`, chained pre-commit hooks (eslint,
-prettier, ruff, etc.) stop running, with:
-`beads: hook 'pre-commit' timed out after 300s -- continuing without beads`.
+**Symptom:** After `bd hooks install`, a commit or push with chained hooks
+(eslint, prettier, ruff, etc.) fails with:
+`beads: hook 'pre-commit' timed out after 300s; chained hook <path> is not known to have passed, so the hook refuses`.
+Hooks without a gate to protect (`post-merge`, `post-checkout`,
+`prepare-commit-msg`, or a gate hook with no chained hook) instead warn
+`timed out after 300s — continuing without beads` and let git proceed.
 
 **Cause:** The beads hook shim wraps `bd hooks run` with an OS-level timeout.
 Since `bd hooks run` chains to your original hook internally, the timeout
-covers both beads' own work and your entire hook pipeline.
+covers both beads' own work and your entire hook pipeline. When the deadline
+expires on a `pre-commit` or `pre-push` hook with a chained hook, the chained
+hook's result is unknown (it may already have passed before beads hung), so the
+hook exits with the timeout helper's status (124 or 142) rather than letting an
+unchecked commit or push through.
 
 **Fix:** Increase the timeout (default 300 seconds):
 
@@ -563,6 +570,9 @@ covers both beads' own work and your entire hook pipeline.
 # Add to ~/.bashrc or ~/.zshrc
 export BEADS_HOOK_TIMEOUT=600  # 10 minutes (in seconds)
 ```
+
+To skip hooks for one operation on purpose, use `git commit --no-verify` or
+`git push --no-verify`.
 
 The value must be a positive whole number of seconds. Invalid values and zero
 warn and fall back to 300 seconds. Beads accepts `timeout` or `gtimeout` only

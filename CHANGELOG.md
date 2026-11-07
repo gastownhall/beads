@@ -1208,6 +1208,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A `pre-commit` or `pre-push` hook that hits `BEADS_HOOK_TIMEOUT` now
+  refuses when a chained `<hook>.old` gate sits beside it. `bd` runs that
+  chain and was stopped mid-wait, so the chain's result is unknown (it may
+  already have passed before beads hung), yet the hook warned and let the
+  commit or push through. It now exits with the timeout
+  helper's status (124 or 142) and says the chained hook is not known to have
+  passed; raise `BEADS_HOOK_TIMEOUT` or use `--no-verify`. Other hooks, and
+  gate hooks with no chained hook, still warn and continue. Run
+  `bd hooks install` to update installed hooks.
+- A chained `<hook>.old` gate now runs when `bd` is not on the hook's `PATH`
+  (GH#6751). The managed hook section ran everything, the chain included,
+  only when `bd` was found, so a commit from a GUI client, cron or a minimal
+  shell skipped a refusing pre-commit or pre-push gate and went through. The
+  section now runs the `.old` beside the hook itself in that case and fails
+  only when it fails. Run `bd hooks install` to update installed hooks.
+- A managed git hook now fails when its chained `<hook>.old` exits 3, as it
+  does for every other status. The hook section read a 3 from `bd hooks run`
+  as "database not initialized" and let the git operation through, but
+  `bd hooks run` never opens the database, so that 3 was always the chained
+  hook's own refusal. Run `bd hooks install` to update installed hooks.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

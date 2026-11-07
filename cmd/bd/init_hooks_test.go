@@ -344,22 +344,31 @@ func TestTrackedManagedHookSectionsMatchGenerator(t *testing.T) {
 	}
 }
 
-// TestGenerateHookSection_DBNotInitialized verifies exit code 3 handling (GH#2449).
-func TestGenerateHookSection_DBNotInitialized(t *testing.T) {
-	section := generateHookSection("pre-commit")
-
-	// Exit code 3 = beads database not initialized; hook must continue gracefully
-	if !strings.Contains(section, `"$_bd_exit" -eq 3`) {
-		t.Error("section missing exit code 3 (DB not initialized) handling")
+// TestGenerateHookSection_PropagatesExitThree pins that a status 3 from bd
+// hooks run fails the hook like any other status. bd hooks run never opens a
+// store (hooks is in noDbCommands), so a 3 there is the chained hook's own
+// status, which runChainedHook passes through verbatim; the section once
+// rewrote it into success with a "database not initialized" warning (GH#2449),
+// the same fail-open class as a skipped chain (GH#6751).
+func TestGenerateHookSection_PropagatesExitThree(t *testing.T) {
+	for _, hookName := range managedHookNames {
+		section := generateHookSection(hookName)
+		if strings.Contains(section, `"$_bd_exit" -eq 3`) {
+			t.Errorf("%s: section still special-cases exit code 3; a chained hook's real exit(3) must propagate, not be swallowed as a DB-not-initialized warning", hookName)
+		}
+		if strings.Contains(section, "database not initialized") {
+			t.Errorf("%s: section still contains the stale DB-not-initialized warning", hookName)
+		}
 	}
-	if !strings.Contains(section, "database not initialized") {
-		t.Error("section missing DB-not-initialized warning message")
+	result := runGeneratedHookProcess(t, hookProcessCase{
+		fixtures: []hookProcessFixture{{name: "timeout", body: hookProcessGNUTimeoutStub}},
+		bdExit:   3,
+	})
+	if result.exitCode != 3 {
+		t.Fatalf("generated hook exit = %d, want bd's status 3\n%s", result.exitCode, result.output)
 	}
-
-	// After handling exit code 3, the effective exit must be 0 (success)
-	// Verify the pattern: set _bd_exit=0 after detecting code 3
-	if !strings.Contains(section, `if [ "$_bd_exit" -eq 3 ]; then`) {
-		t.Error("section missing exit code 3 conditional")
+	if strings.Contains(result.output, "database not initialized") {
+		t.Errorf("generated hook still warns that the database is not initialized\n%s", result.output)
 	}
 }
 
@@ -367,10 +376,98 @@ func TestGenerateHookSection_DBNotInitialized(t *testing.T) {
 func TestGenerateHookSection_HookNameInMessages(t *testing.T) {
 	for _, hook := range managedHookNames {
 		section := generateHookSection(hook)
-		// Each hook's timeout and DB-missing messages should include the hook name
+		// Each hook's timeout messages should include the hook name
 		if !strings.Contains(section, "hook '"+hook+"'") {
 			t.Errorf("section for %q missing hook name in warning messages", hook)
 		}
+	}
+}
+
+// TestGenerateHookSectionHasNoForeignMarkers pins the marker invariants the
+// chain classifier must keep: it splits every marker literal it matches on,
+// so each section still holds exactly one BEGIN and one END marker for the
+// injection, removal and doctor scanners, and none of the legacy markers
+// that make a hook look like a shim. Custom content around the section must
+// survive re-injection and removal.
+func TestGenerateHookSectionHasNoForeignMarkers(t *testing.T) {
+	for _, hookName := range managedHookNames {
+		t.Run(hookName, func(t *testing.T) {
+			section := generateHookSection(hookName)
+			// The first two are doctor's detectHookMarkerState tags.
+			for _, marker := range []string{"BEGIN BEADS INTEGRATION", "END BEADS INTEGRATION", hookSectionBeginPrefix, hookSectionEndPrefix} {
+				if got := strings.Count(section, marker); got != 1 {
+					t.Errorf("section holds %q %d times, want once", marker, got)
+				}
+			}
+			if strings.Index(section, hookSectionBeginPrefix) > strings.Index(section, hookSectionEndPrefix) {
+				t.Errorf("END marker precedes BEGIN marker")
+			}
+			for _, marker := range []string{"# bd-shim", "bd-hooks-version:", "# bd (beads)"} {
+				if strings.Contains(section, marker) {
+					t.Errorf("section holds legacy marker %q", marker)
+				}
+			}
+
+			hookPath := filepath.Join(t.TempDir(), hookName)
+			before := "#!/bin/sh\necho custom-before\n\n"
+			after := "echo custom-after\n"
+			hook := before + section + after
+			if err := os.WriteFile(hookPath, []byte(hook), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			info, err := getHookVersion(hookPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !info.IsBdHook || info.Version != Version {
+				t.Errorf("getHookVersion = %+v, want a bd hook at version %s", info, Version)
+			}
+
+			if got := injectHookSection(hook, section); got != hook {
+				t.Errorf("re-injecting the section changed the hook:\n%s", got)
+			}
+			removed, found := removeHookSection(hook)
+			if !found {
+				t.Fatalf("removeHookSection did not find the section")
+			}
+			if removed != "#!/bin/sh\necho custom-before\n"+after {
+				t.Errorf("removing the section left:\n%s", removed)
+			}
+			reinjected := injectHookSection(removed, section)
+			if strings.Count(reinjected, section) != 1 || !strings.Contains(reinjected, "echo custom-before\n") || !strings.Contains(reinjected, after) {
+				t.Errorf("re-injecting after removal lost content:\n%s", reinjected)
+			}
+		})
+	}
+}
+
+// TestInjectRemoveHookSectionRoundTrip pins user-content survival across the
+// inject → re-inject → remove cycle on composed content: injecting the
+// current section over user content keeps the user content, a second
+// injection over content that already carries the current section is a
+// byte-identical no-op, and removing the section restores the original user
+// content exactly.
+func TestInjectRemoveHookSectionRoundTrip(t *testing.T) {
+	for _, hookName := range managedHookNames {
+		hookName := hookName
+		t.Run(hookName, func(t *testing.T) {
+			section := generateHookSection(hookName)
+			original := "#!/bin/sh\n# team lint gate\n./run-linters.sh \"$@\"\n"
+			composed := injectHookSection(original, section)
+			if !strings.Contains(composed, "./run-linters.sh \"$@\"") {
+				t.Fatalf("composed hook lost user content:\n%s", composed)
+			}
+			if again := injectHookSection(composed, section); again != composed {
+				t.Errorf("re-injecting the current section is not a no-op")
+			}
+			content, found := removeHookSection(composed)
+			if !found {
+				t.Fatalf("removeHookSection did not find the section:\n%s", composed)
+			}
+			if content != original {
+				t.Errorf("remove did not restore the original user content:\ngot:\n%s\nwant:\n%s", content, original)
+			}
+		})
 	}
 }
 

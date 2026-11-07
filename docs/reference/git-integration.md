@@ -65,6 +65,16 @@ bd hooks install --shared   # Install to .beads-hooks/ (versioned, shareable wit
 bd hooks install --chain    # Run existing hooks before bd hooks
 ```
 
+When `bd` is not on the hook's `PATH` (a GUI git client, cron, or a minimal
+shell), the hook section still runs the chained `<hook-name>.old` next to the
+hook, which `bd hooks run` would otherwise have run, and fails the git
+operation only when that chained hook fails. As in `bd hooks run`, a
+`<hook-name>.old` that is itself a beads hook (a managed section, a shim, an
+inline hook, or a hook that calls `bd hooks run`) is skipped, as is one that
+is missing or not an executable file. Hook sections installed before
+this behavior skip the chained hook when `bd` is missing; run
+`bd hooks install` once to refresh them.
+
 Hook installation is worktree-aware: `bd` resolves the shared git directory,
 so installing from a linked worktree works.
 
@@ -171,7 +181,16 @@ already-installed canonical hook sections. Automatic generated-policy adoption i
 tracked separately.
 
 When the timeout is reached, beads prints a warning and lets the git
-operation proceed — the commit or push is not blocked.
+operation proceed, unless the deadline may have cut short a chained gate. For
+`pre-commit` and `pre-push`, when an executable `<hook-name>.old` that is not
+itself a beads hook sits next to the hook, the chained hook's result is not
+known: `bd` runs that chain and was stopped mid-wait, so the chain may have
+passed before beads' own work hung, been cut short, or never started. The hook
+therefore refuses: it exits with
+the timeout helper's status (124 for coreutils, 142 for Perl) and says the
+chained hook is not known to have passed. Raise `BEADS_HOOK_TIMEOUT`, or use
+`--no-verify` to skip hooks on purpose. The other hooks, and gate hooks with
+no chained hook, keep warning and continuing.
 
 ## Conflict Resolution
 

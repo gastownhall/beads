@@ -228,6 +228,85 @@ func TestApplyHookMigrationExecution_Idempotent(t *testing.T) {
 	}
 }
 
+// TestApplyHookMigrationExecution_PreservesCustomContentAllHooks migrates a
+// legacy shim with a custom .old for every managed hook: each result holds the
+// current generated section and the custom body, doctor reads it as a valid
+// managed section, and a second migration is a no-op.
+func TestApplyHookMigrationExecution_PreservesCustomContentAllHooks(t *testing.T) {
+	repoDir, hooksDir := setupHookMigrationRepo(t)
+	for _, hookName := range managedHookNames {
+		hookPath := filepath.Join(hooksDir, hookName)
+		writeHookMigrationFile(t, hookPath, "#!/usr/bin/env sh\n# bd-shim v2\n# bd-hooks-version: 0.56.1\nexec bd hooks run "+hookName+" \"$@\"\n")
+		writeHookMigrationFile(t, hookPath+".old", "#!/usr/bin/env sh\necho old-custom-"+hookName+"\n")
+	}
+
+	plan, err := doctor.PlanHookMigration(repoDir)
+	if err != nil {
+		t.Fatalf("PlanHookMigration failed: %v", err)
+	}
+	if _, err := applyHookMigrationExecution(buildHookMigrationExecutionPlan(plan)); err != nil {
+		t.Fatalf("first apply failed: %v", err)
+	}
+
+	for _, hookName := range managedHookNames {
+		rendered := mustReadHookMigrationFile(t, filepath.Join(hooksDir, hookName))
+		if !strings.Contains(rendered, "echo old-custom-"+hookName+"\n") {
+			t.Errorf("%s lost its custom body:\n%s", hookName, rendered)
+		}
+		if strings.Count(rendered, generateHookSection(hookName)) != 1 {
+			t.Errorf("%s does not hold the current generated section once:\n%s", hookName, rendered)
+		}
+	}
+
+	secondPlan, err := doctor.PlanHookMigration(repoDir)
+	if err != nil {
+		t.Fatalf("second PlanHookMigration failed: %v", err)
+	}
+	for _, hook := range secondPlan.Hooks {
+		if hook.State != "marker_managed" || hook.NeedsMigration {
+			t.Errorf("%s after migration: state %q, needs migration %v; want marker_managed", hook.Name, hook.State, hook.NeedsMigration)
+		}
+	}
+	secondExec := buildHookMigrationExecutionPlan(secondPlan)
+	if secondExec.operationCount() != 0 {
+		t.Fatalf("expected second execution to be no-op, got %d operations", secondExec.operationCount())
+	}
+}
+
+// TestPlanHookMigration_CurrentSectionNeedsNone guards the generator against
+// its own marker consumers: a hook file that already carries the current
+// generated section — composed with user content, as `bd hooks install`
+// writes it — must classify as marker_managed and need no migration. An
+// intact legacy marker embedded in the section, or an unbalanced marker the
+// classifier literals leaked, would turn this into a migration instead.
+func TestPlanHookMigration_CurrentSectionNeedsNone(t *testing.T) {
+	repoDir, hooksDir := setupHookMigrationRepo(t)
+	preCommitPath := filepath.Join(hooksDir, "pre-commit")
+
+	writeHookMigrationFile(t, preCommitPath, "#!/bin/sh\n# team lint gate\n./run-linters.sh \"$@\"\n"+generateHookSection("pre-commit"))
+
+	plan, err := doctor.PlanHookMigration(repoDir)
+	if err != nil {
+		t.Fatalf("PlanHookMigration failed: %v", err)
+	}
+	for _, hook := range plan.Hooks {
+		if hook.Name != "pre-commit" {
+			continue
+		}
+		if !hook.Exists {
+			t.Fatalf("plan did not see the hook file")
+		}
+		if hook.MarkerState != "valid" || hook.State != "marker_managed" {
+			t.Fatalf("current generated section not recognized as managed: marker_state=%q state=%q", hook.MarkerState, hook.State)
+		}
+		if hook.NeedsMigration {
+			t.Fatalf("current generated section must not need migration: %+v", hook)
+		}
+		return
+	}
+	t.Fatal("plan did not include pre-commit")
+}
+
 func TestApplyHookMigrationExecution_RetireCollisionFailsBeforeWrites(t *testing.T) {
 	repoDir, hooksDir := setupHookMigrationRepo(t)
 	preCommitPath := filepath.Join(hooksDir, "pre-commit")

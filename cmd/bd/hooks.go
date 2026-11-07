@@ -77,6 +77,15 @@ const hookTimeoutKillAfterSeconds = 2
 // via 'bd hooks run', and propagates exit codes — without preventing any user
 // content after the section from executing on success.
 //
+// Missing bd (GH#6751): bd hooks run is what runs the chained <hook>.old
+// (runChainedHook), so with bd off PATH (a GUI client, cron, a minimal shell)
+// the section runs that chain itself, found beside the hook through $0, with
+// the hook's own argv and stdin and BD_GIT_HOOK=1, as runChainedHook would,
+// and fails only when the chain fails. A chain that is absent, not a regular
+// executable file, or a beads callback (hookChainClassifier) is skipped. It
+// uses shell builtins alone and no shell function, since zsh rebinds $0
+// inside one.
+//
 // Resilience (GH#2453, GH#2449):
 //   - A compatible timeout helper applies a best-effort soft deadline.
 //   - BEADS_HOOK_TIMEOUT accepts positive whole seconds only.
@@ -99,11 +108,39 @@ const hookTimeoutKillAfterSeconds = 2
 //     status. SIGHUP, SIGINT and SIGTERM that reach the supervisor are passed
 //     on to the group: a Ctrl-C signals the terminal's process group, which no
 //     longer holds bd.
-//   - If the beads database is not initialized (exit code 3), the hook exits
-//     successfully with a warning so that git operations are not blocked.
+//   - A deadline the selected backend reports (coreutils 124, the Perl
+//     supervisor's 142) warns and continues, except on pre-commit and
+//     pre-push with a runnable foreign <hook>.old: bd runs that chain, so
+//     its verdict is unknown and the hook refuses with the backend's status.
+//     The chain may have passed before bd's own work hung; the message says
+//     the result is unknown rather than that the chain timed out, and the
+//     chain is not run again.
+//   - Every other status from bd hooks run, 3 included, fails the hook. The
+//     hooks command never opens a store (noDbCommands), so a 3 is the chained
+//     hook's own status, which runChainedHook passes through verbatim; the
+//     section no longer rewrites it into a "database not initialized" success.
 func generateHookSection(hookName string) string {
+	// pre-commit and pre-push are the gates a chained hook can refuse with.
+	gate := hookName == "pre-commit" || hookName == "pre-push"
+	chainNeeded := "[ \"$_bd_missing\" -eq 1 ]"
+	continueWarning := "echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n"
+	timedOut := "  " + continueWarning + "  _bd_exit=0\n"
+	if gate {
+		chainNeeded += " || [ \"$_bd_timed_out\" -eq 1 ]"
+		timedOut = "  if [ -n \"$_bd_chain\" ]; then\n" +
+			"    echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s; chained hook $_bd_chain is not known to have passed, so the hook refuses\"\n" +
+			"    echo >&2 \"beads: raise BEADS_HOOK_TIMEOUT, or use --no-verify to skip hooks on purpose\"\n" +
+			"  else\n" +
+			"    " + continueWarning +
+			"    _bd_exit=0\n" +
+			"  fi\n"
+	}
 	return hookSectionBeginLine() + "\n" +
 		"# This section is managed by beads. Do not remove these markers.\n" +
+		"_bd_exit=0\n" +
+		"_bd_missing=0\n" +
+		"_bd_timed_out=0\n" +
+		"_bd_chain=\n" +
 		"if command -v bd >/dev/null 2>&1; then\n" +
 		"  export BD_GIT_HOOK=1\n" +
 		"  _bd_timeout=${BEADS_HOOK_TIMEOUT:-" + fmt.Sprintf("%d", hookTimeoutSeconds) + "}\n" +
@@ -163,16 +200,78 @@ func generateHookSection(hookName string) string {
 		"    fi\n" +
 		"  fi\n" +
 		"  if { [ \"$_bd_timeout_backend\" = coreutils ] && [ \"$_bd_exit\" -eq 124 ]; } || { [ \"$_bd_timeout_backend\" = perl ] && [ \"$_bd_exit\" -eq 142 ]; }; then\n" +
-		"    echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n" +
-		"    _bd_exit=0\n" +
+		"    _bd_timed_out=1\n" +
 		"  fi\n" +
-		"  if [ \"$_bd_exit\" -eq 3 ]; then\n" +
-		"    echo >&2 \"beads: database not initialized — skipping hook '" + hookName + "'\"\n" +
-		"    _bd_exit=0\n" +
-		"  fi\n" +
-		"  if [ \"$_bd_exit\" -ne 0 ]; then exit \"$_bd_exit\"; fi\n" +
+		"else\n" +
+		"  _bd_missing=1\n" +
 		"fi\n" +
+		"if " + chainNeeded + "; then\n" +
+		"  case \"$0\" in\n" +
+		"    */*) _bd_chain=\"${0%/*}/" + hookName + ".old\" ;;\n" +
+		"    *) _bd_chain=\"./" + hookName + ".old\" ;;\n" +
+		"  esac\n" +
+		"  if [ -f \"$_bd_chain\" ] && [ -x \"$_bd_chain\" ]; then\n" +
+		"    if [ -r \"$_bd_chain\" ]; then\n" +
+		hookChainClassifier("      ") +
+		"    fi\n" +
+		"  else\n" +
+		"    _bd_chain=\n" +
+		"  fi\n" +
+		"  if [ \"$_bd_missing\" -eq 1 ] && [ -n \"$_bd_chain\" ]; then\n" +
+		"    export BD_GIT_HOOK=1\n" +
+		"    if \"$_bd_chain\" \"$@\"; then\n" +
+		"      _bd_exit=0\n" +
+		"    else\n" +
+		"      _bd_exit=$?\n" +
+		"    fi\n" +
+		"  fi\n" +
+		"fi\n" +
+		"if [ \"$_bd_timed_out\" -eq 1 ]; then\n" +
+		timedOut +
+		"fi\n" +
+		"if [ \"$_bd_exit\" -ne 0 ]; then exit \"$_bd_exit\"; fi\n" +
 		hookSectionEndLine() + "\n"
+}
+
+// hookShellWordChars is the ASCII word class of Go's regexp \b, spelled out
+// so a shell bracket expression does not depend on the locale's ranges.
+const hookShellWordChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
+
+// hookChainClassifier returns the shell that clears $_bd_chain when the chain
+// file is a beads callback: running it would re-enter bd (or, for a renamed
+// generated section, the same fallback) instead of a gate of the user's
+// (GH#843, GH#1120). It mirrors runChainedHook's getHookVersion predicate,
+// IsBdHook or IsExternalIntegration, on the supported text shapes: the BEGIN
+// marker or a shim or inline marker anywhere, the legacy version marker at
+// column zero, and the bd hooks run delegation between ASCII word boundaries.
+// Unfamiliar spellings of the delegation, such as two spaces between words,
+// run instead (bd is missing, so they cannot recurse), and no claim is made
+// for lines past bufio.Scanner's limit. Each marker is assembled from split
+// quoted strings so the section never carries a second intact copy that
+// injectHookSection, removeHookSection, shouldPreserveHookContent or
+// doctor's marker count would read as a marker. The read is redirected from
+// the chain, so pre-push stdin reaches the chain untouched.
+func hookChainClassifier(indent string) string {
+	nonWord := "[!" + hookShellWordChars + "]"
+	lines := []string{
+		"_bd_p_begin='# --- BEGIN BEADS'' INTEGRATION'",
+		"_bd_p_shim='# bd''-shim'",
+		"_bd_p_version='# bd-hooks''-version: '",
+		"_bd_p_inline='# bd ''(beads)'",
+		"_bd_p_run='bd hooks'' run'",
+		"_bd_line=",
+		"while IFS= read -r _bd_line || [ -n \"$_bd_line\" ]; do",
+		"  case \"$_bd_line\" in",
+		"    \"$_bd_p_version\"*|*\"$_bd_p_begin\"*|*\"$_bd_p_shim\"*|*\"$_bd_p_inline\"*) _bd_chain=; break ;;",
+		"    \"$_bd_p_run\"|\"$_bd_p_run\"" + nonWord + "*|*" + nonWord + "\"$_bd_p_run\"|*" + nonWord + "\"$_bd_p_run\"" + nonWord + "*) _bd_chain=; break ;;",
+		"  esac",
+		"done < \"$_bd_chain\"",
+	}
+	var b strings.Builder
+	for _, line := range lines {
+		b.WriteString(indent + line + "\n")
+	}
+	return b.String()
 }
 
 // injectHookSection merges the beads section into existing hook file content.
