@@ -51,6 +51,51 @@ func TestServerSpawnEnvIsGuarded(t *testing.T) {
 	}
 }
 
+// TestServerSpawnEnvPreservesCredentialEnvironment pins what a server bd
+// starts takes its remote credentials from (GH#8210): the server runs CALL
+// DOLT_PUSH/PULL/FETCH, and the dolt CLI in a database directory it holds
+// hands transfers to it, so DOLT_REMOTE_USER, DOLT_REMOTE_PASSWORD and the
+// cloud variables of every remote scheme in bd's startup environment must
+// reach it unchanged, alongside the tracing and hooks guards.
+func TestServerSpawnEnvPreservesCredentialEnvironment(t *testing.T) {
+	credentials := map[string]string{
+		"DOLT_REMOTE_USER":               "spawn-user",
+		"DOLT_REMOTE_PASSWORD":           "spawn-password",
+		"AZURE_STORAGE_ACCOUNT_KEY":      "azure-key",
+		"AWS_SECRET_ACCESS_KEY":          "aws-secret",
+		"GOOGLE_APPLICATION_CREDENTIALS": "/tmp/gcp.json",
+		"GCS_BUCKET_TOKEN":               "gcs-token",
+		"OCI_CLI_KEY_FILE":               "/tmp/oci.pem",
+	}
+	for name, value := range credentials {
+		t.Setenv(name, value)
+	}
+	t.Setenv("GIT_TRACE", "1")
+
+	env := ServerSpawnEnv()
+	got := map[string]int{}
+	for _, kv := range env {
+		name, value, _ := strings.Cut(kv, "=")
+		if want, ok := credentials[name]; ok {
+			got[name]++
+			if value != want {
+				t.Errorf("ServerSpawnEnv() has %s=%q, want %q", name, value, want)
+			}
+		}
+		if name == "GIT_TRACE" {
+			t.Errorf("ServerSpawnEnv() kept %q; stderr-directed git tracing must be scrubbed", kv)
+		}
+	}
+	for name := range credentials {
+		if got[name] != 1 {
+			t.Errorf("ServerSpawnEnv() carries %s %d times, want once", name, got[name])
+		}
+	}
+	if hooks := githooksenv.Extract(env); !strings.Contains(hooks, githooksenv.NoHooksParam) {
+		t.Errorf("ServerSpawnEnv() effective %s = %q, want the no-hooks override (GH#4272)", githooksenv.ParametersEnv, hooks)
+	}
+}
+
 func TestAllocateEphemeralPort(t *testing.T) {
 	// Should return a valid port in the ephemeral range
 	port, err := allocateEphemeralPort("127.0.0.1")
