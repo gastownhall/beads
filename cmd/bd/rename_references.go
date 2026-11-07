@@ -1,9 +1,13 @@
 package main
 
 import (
+	"fmt"
+	"io"
+	"sort"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // The reference scan's matching rule. Rename admits ASCII letters, digits,
@@ -103,4 +107,48 @@ var renameRefFields = []struct {
 	{"notes", func(i *types.Issue) string { return i.Notes }},
 	{"acceptance_criteria", func(i *types.Issue) string { return i.AcceptanceCriteria }},
 	{"close_reason", func(i *types.Issue) string { return i.CloseReason }},
+}
+
+// renameReferenceReport is what the reference scan after a rename did and
+// found. It is printed whole (printRenameReferenceReport); an empty report
+// prints nothing.
+type renameReferenceReport struct {
+	oldID string
+	newID string
+
+	updated   []renameRefUpdated // rewrites that landed, by issue
+	issuesErr error              // the issue listing failed: nothing was checked
+}
+
+// renameRefUpdated is one issue whose references were rewritten.
+type renameRefUpdated struct {
+	issueID string
+	fields  []string // changed fields, in renameRefFields order
+}
+
+func (r *renameReferenceReport) empty() bool {
+	return len(r.updated) == 0
+}
+
+// sortReports orders the report deterministically: issues in natural ID
+// order.
+func (r *renameReferenceReport) sortReports() {
+	sort.Slice(r.updated, func(a, b int) bool {
+		return utils.NaturalCompareIDs(r.updated[a].issueID, r.updated[b].issueID) < 0
+	})
+}
+
+// printRenameReferenceReport writes the reference report to w, after the
+// "Renamed <old> -> <new>" line. Sections print only when they have content;
+// an empty report prints nothing.
+func printRenameReferenceReport(w io.Writer, rep *renameReferenceReport) {
+	if rep.empty() {
+		return
+	}
+	if len(rep.updated) > 0 {
+		fmt.Fprintln(w, "Updated references:")
+		for _, u := range rep.updated {
+			fmt.Fprintf(w, "  %s: %s\n", u.issueID, strings.Join(u.fields, ", "))
+		}
+	}
 }

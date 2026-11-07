@@ -96,50 +96,72 @@ func runRename(cmd *cobra.Command, args []string) error {
 		return HandleError("failed to rename issue: %v", err)
 	}
 
-	if err := updateReferencesInAllIssues(ctx, store, oldID, newID, actor); err != nil {
-		fmt.Printf("Warning: failed to update some references: %v\n", err)
-	}
-
 	fmt.Printf("Renamed %s -> %s\n", ui.RenderWarn(oldID), ui.RenderAccent(newID))
+
+	// The identity rename has committed, so the reference scan is
+	// best-effort: its outcome prints after the Renamed line and never
+	// fails the command.
+	printRenameReferenceReport(os.Stdout, scanRenameReferences(ctx, store, oldID, newID, actor))
 
 	commandDidWrite.Store(true)
 
 	return nil
 }
 
-// updateReferencesInAllIssues updates text references to the old ID in all
-// issues, the renamed one included: it runs after the rename, so that issue
-// is listed once, under newID, its text still naming oldID.
+// issueRefStore is the store surface the reference scan's field rewrite
+// needs.
+type issueRefStore interface {
+	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
+	UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error
+}
+
+// updateReferencesInAllIssues rewrites text references to oldID in every
+// issue's six prose fields, the renamed issue included: it runs after the
+// rename, so that issue is listed once, under newID, its text still naming
+// oldID. It is the field half of the rename reference scan
+// (scanRenameReferences), kept as its own entry so the rewrite can be driven
+// against a store that cannot read comments.
 func updateReferencesInAllIssues(ctx context.Context, store storage.DoltStorage, oldID, newID, actor string) error {
-	// Get all issues
-	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	rep := scanRenameReferences(ctx, store, oldID, newID, actor)
+	if rep.issuesErr != nil {
+		return rep.issuesErr
+	}
+	return nil
+}
+
+// scanRenameReferences rewrites references to oldID across every issue's
+// prose fields and collects what it did into one report. Nothing here fails
+// the command: the identity rename has already committed, so the outcome
+// lands in the report instead.
+func scanRenameReferences(ctx context.Context, fields issueRefStore, oldID, newID, actor string) *renameReferenceReport {
+	rep := &renameReferenceReport{oldID: oldID, newID: newID}
+	issues, err := fields.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
-		return fmt.Errorf("failed to list issues: %w", err)
+		rep.issuesErr = fmt.Errorf("failed to list issues: %w", err)
+		return rep
 	}
 
 	for _, issue := range issues {
-		updated := false
 		updates := make(map[string]interface{})
-
-		// Rewrite each text field; replaceIDReferences leaves longer IDs
-		// that contain the old one alone.
+		var changed []string
 		for _, field := range renameRefFields {
-			if text := field.value(issue); text != "" {
-				if rewritten := replaceIDReferences(text, oldID, newID); rewritten != text {
-					updates[field.name] = rewritten
-					updated = true
-				}
+			text := field.value(issue)
+			if rewritten := replaceIDReferences(text, oldID, newID); rewritten != text {
+				updates[field.name] = rewritten
+				changed = append(changed, field.name)
 			}
 		}
-
-		if updated {
-			if err := store.UpdateIssue(ctx, issue.ID, updates, actor); err != nil {
-				return fmt.Errorf("failed to update references in %s: %w", issue.ID, err)
-			}
+		if len(updates) == 0 {
+			continue
 		}
+		if err := fields.UpdateIssue(ctx, issue.ID, updates, actor); err != nil {
+			// The write may still have landed; keep scanning the rest.
+			continue
+		}
+		rep.updated = append(rep.updated, renameRefUpdated{issueID: issue.ID, fields: changed})
 	}
-
-	return nil
+	rep.sortReports()
+	return rep
 }
 
 // beadGateRenameStore is the part of the store a rename writes through.

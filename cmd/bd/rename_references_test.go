@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -108,6 +110,72 @@ func TestUpdateReferencesInAllIssues(t *testing.T) {
 		const want = "bd-old-v2 and pre-bd-old and bd-old.1 track bd-new"
 		if got := s.update("bd-x", "description"); got != want {
 			t.Errorf("description update = %v, want %q", got, want)
+		}
+	})
+
+	t.Run("makes no update call for fields without matches", func(t *testing.T) {
+		s := &renameRefsFakeStore{
+			issues: []*types.Issue{
+				{ID: "bd-clean", Title: "No references", Description: "at all"},
+			},
+		}
+		if err := updateReferencesInAllIssues(context.Background(), s, "bd-old", "bd-new", "test"); err != nil {
+			t.Fatalf("updateReferencesInAllIssues: %v", err)
+		}
+		if len(s.updates) != 0 {
+			t.Errorf("UpdateIssue calls = %v, want none", s.updates)
+		}
+	})
+
+	t.Run("report lists updated issues and fields in order", func(t *testing.T) {
+		s := &renameRefsFakeStore{
+			issues: []*types.Issue{
+				{ID: "bd-b", Description: "refs bd-old", CloseReason: "dup of bd-old"},
+				{ID: "bd-a", Title: "bd-old again"},
+				{ID: "bd-new", Notes: "was bd-old"},
+			},
+		}
+		rep := scanRenameReferences(context.Background(), s, "bd-old", "bd-new", "test")
+		if len(rep.updated) != 3 {
+			t.Fatalf("updated = %+v, want three issues", rep.updated)
+		}
+		want := []struct{ id, fields string }{
+			{"bd-a", "title"},
+			{"bd-b", "description, close_reason"},
+			{"bd-new", "notes"},
+		}
+		for i, w := range want {
+			if rep.updated[i].issueID != w.id {
+				t.Errorf("updated[%d] = %s, want %s", i, rep.updated[i].issueID, w.id)
+			}
+			if got := strings.Join(rep.updated[i].fields, ", "); got != w.fields {
+				t.Errorf("updated[%d] fields = %q, want %q", i, got, w.fields)
+			}
+		}
+	})
+}
+
+func TestPrintRenameReferenceReport(t *testing.T) {
+	t.Run("lists updated issues and fields", func(t *testing.T) {
+		rep := &renameReferenceReport{
+			updated: []renameRefUpdated{
+				{issueID: "bd-a", fields: []string{"title"}},
+				{issueID: "bd-b", fields: []string{"description", "close_reason"}},
+			},
+		}
+		var buf bytes.Buffer
+		printRenameReferenceReport(&buf, rep)
+		want := "Updated references:\n  bd-a: title\n  bd-b: description, close_reason\n"
+		if buf.String() != want {
+			t.Errorf("report = %q, want %q", buf.String(), want)
+		}
+	})
+
+	t.Run("empty report prints nothing", func(t *testing.T) {
+		var buf bytes.Buffer
+		printRenameReferenceReport(&buf, &renameReferenceReport{})
+		if buf.Len() != 0 {
+			t.Errorf("empty report printed %q, want nothing", buf.String())
 		}
 	})
 }
