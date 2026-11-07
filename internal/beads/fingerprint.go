@@ -48,11 +48,25 @@ type RepoFingerprint struct {
 	ID string
 	// Source says whether ID hashes the remote URL or the local repo path.
 	Source RepoIDSource
+	// LegacyID is the pre-GH#5990 fingerprint of this checkout, which hashed
+	// the written SSH alias, when it differs from ID; empty otherwise.
+	LegacyID string
 	// SSHAlias is the written SSH host when it was resolved to SSHHostName
 	// through the local SSH configuration (GH#5990); empty otherwise.
 	SSHAlias string
 	// SSHHostName is the HostName the SSH alias resolved to; empty otherwise.
 	SSHHostName string
+}
+
+// Matches reports whether a stored repo_id identifies this checkout: its
+// current fingerprint, or the legacy literal-alias fingerprint a database
+// stamped by this checkout before alias resolution still holds. It cannot
+// recognize the legacy fingerprint of another clone's alias.
+func (f RepoFingerprint) Matches(stored string) bool {
+	if stored == "" {
+		return false
+	}
+	return stored == f.ID || (f.LegacyID != "" && stored == f.LegacyID)
 }
 
 // AliasResolved reports whether the remote's SSH host alias was replaced by
@@ -110,6 +124,7 @@ func ComputeRepoFingerprintForPath(repoPath string) (RepoFingerprint, error) {
 
 	fp := RepoFingerprint{ID: hashRepoIdentity(canonical), Source: RepoIDSourceRemote}
 	if resolved, alias, hostName, ok := resolveSSHAliasCanonical(repoURL, canonical); ok {
+		fp.LegacyID = fp.ID
 		fp.ID = hashRepoIdentity(resolved)
 		fp.SSHAlias = alias
 		fp.SSHHostName = hostName

@@ -210,14 +210,33 @@ func TestCheckDependencyCycles_NoDatabase(t *testing.T) {
 // must warn-and-advise-leaving-it, not present as "wrong database".
 func TestClassifyRepoFingerprint(t *testing.T) {
 	t.Run("match is OK regardless of source", func(t *testing.T) {
-		check := classifyRepoFingerprint("aaaa1111bbbb2222", "aaaa1111bbbb2222", beads.RepoIDSourcePath)
+		check := classifyRepoFingerprint("aaaa1111bbbb2222", beads.RepoFingerprint{ID: "aaaa1111bbbb2222", Source: beads.RepoIDSourcePath})
 		if check.Status != StatusOK {
 			t.Fatalf("Status = %q, want %q (message=%q)", check.Status, StatusOK, check.Message)
 		}
 	})
 
+	// GH#5990: a database stamped before the upgrade holds this checkout's
+	// literal-alias hash; after alias resolution it is the LegacyID.
+	t.Run("legacy alias id of this checkout is OK", func(t *testing.T) {
+		current := beads.RepoFingerprint{
+			ID:          "cccc3333dddd4444",
+			Source:      beads.RepoIDSourceRemote,
+			LegacyID:    "aaaa1111bbbb2222",
+			SSHAlias:    "alias-a",
+			SSHHostName: "github.com",
+		}
+		check := classifyRepoFingerprint("aaaa1111bbbb2222", current)
+		if check.Status != StatusOK {
+			t.Fatalf("Status = %q, want %q (message=%q)", check.Status, StatusOK, check.Message)
+		}
+		if check.Message != "Verified (aaaa1111)" {
+			t.Fatalf("Message = %q, want the matched legacy id shown", check.Message)
+		}
+	})
+
 	t.Run("mismatch with remote-derived current id is an error", func(t *testing.T) {
-		check := classifyRepoFingerprint("aaaa1111bbbb2222", "cccc3333dddd4444", beads.RepoIDSourceRemote)
+		check := classifyRepoFingerprint("aaaa1111bbbb2222", beads.RepoFingerprint{ID: "cccc3333dddd4444", Source: beads.RepoIDSourceRemote})
 		if check.Status != StatusError {
 			t.Fatalf("Status = %q, want %q (message=%q)", check.Status, StatusError, check.Message)
 		}
@@ -227,7 +246,7 @@ func TestClassifyRepoFingerprint(t *testing.T) {
 	})
 
 	t.Run("mismatch with path-fallback current id warns and advises leaving it", func(t *testing.T) {
-		check := classifyRepoFingerprint("aaaa1111bbbb2222", "cccc3333dddd4444", beads.RepoIDSourcePath)
+		check := classifyRepoFingerprint("aaaa1111bbbb2222", beads.RepoFingerprint{ID: "cccc3333dddd4444", Source: beads.RepoIDSourcePath})
 		if check.Status != StatusWarning {
 			t.Fatalf("Status = %q, want %q (message=%q)", check.Status, StatusWarning, check.Message)
 		}

@@ -613,7 +613,7 @@ func checkRepoFingerprintWithStore(store *dolt.DoltStore, path string) DoctorChe
 		}
 	}
 
-	currentRepoID, currentSource, err := beads.ComputeRepoIDForPathWithSource(path)
+	current, err := beads.ComputeRepoFingerprintForPath(path)
 	if err != nil {
 		if strings.Contains(err.Error(), "not a git repository") {
 			return DoctorCheck{
@@ -630,14 +630,15 @@ func checkRepoFingerprintWithStore(store *dolt.DoltStore, path string) DoctorChe
 		}
 	}
 
-	return classifyRepoFingerprint(storedRepoID, currentRepoID, currentSource)
+	return classifyRepoFingerprint(storedRepoID, current)
 }
 
 // classifyRepoFingerprint turns a stored-vs-current fingerprint comparison into
 // a doctor check. Pure so the mismatch branches are unit-testable without a
 // store.
-func classifyRepoFingerprint(storedRepoID, currentRepoID string, currentSource beads.RepoIDSource) DoctorCheck {
-	if storedRepoID != currentRepoID {
+func classifyRepoFingerprint(storedRepoID string, current beads.RepoFingerprint) DoctorCheck {
+	currentRepoID := current.ID
+	if !current.Matches(storedRepoID) {
 		// bd-46vla: with no origin remote here, the local fingerprint is a
 		// path hash that can never match a remote-derived stored id — the
 		// signature of a synced clone on a host without the canonical remote.
@@ -645,7 +646,7 @@ func classifyRepoFingerprint(storedRepoID, currentRepoID string, currentSource b
 		// metadata table, so 'bd migrate --update-repo-id' would stamp this
 		// host's path hash into shared state and propagate it to every clone
 		// on the next sync (the GH#4361 class).
-		if currentSource == beads.RepoIDSourcePath {
+		if current.Source == beads.RepoIDSourcePath {
 			return DoctorCheck{
 				Name:    "Repo Fingerprint",
 				Status:  StatusWarning,
@@ -663,10 +664,12 @@ func classifyRepoFingerprint(storedRepoID, currentRepoID string, currentSource b
 		}
 	}
 
+	// GH#5990: a stored id may be this checkout's legacy literal-alias
+	// fingerprint; show the id that matched.
 	return DoctorCheck{
 		Name:    "Repo Fingerprint",
 		Status:  StatusOK,
-		Message: fmt.Sprintf("Verified (%s)", truncateID(currentRepoID)),
+		Message: fmt.Sprintf("Verified (%s)", truncateID(storedRepoID)),
 	}
 }
 
