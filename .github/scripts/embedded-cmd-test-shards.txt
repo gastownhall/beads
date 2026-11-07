@@ -74,6 +74,7 @@
 100 19 TestEmbeddedLabelConcurrent
 100 19 TestEmbeddedNewDoltStore_StrictReadOnlyRefusesWritesOnFreshDatabase
 
+100 20 TestEmbeddedDoctorConventionsBlockedStatus
 100 20 TestEmbeddedInitRoleRoutingRetainedFork
 100 20 TestEmbeddedMigrateSchema_IdentityMismatchRefusesBeforeApplying
 

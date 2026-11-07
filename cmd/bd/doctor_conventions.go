@@ -3,13 +3,15 @@ package main
 import (
 	"fmt"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/validation"
 )
 
-// runConventionsCheck runs a composite conventions check: lint, stale, and orphans.
-// All findings are advisory (warning, never error) - conventions are a choice.
+// runConventionsCheck runs a composite conventions check: lint, stale, orphans,
+// and blocked-status holds. All findings are advisory (warning, never error) -
+// conventions are a choice.
 func runConventionsCheck(path string) error {
 	// doctor opts out of PersistentPreRun DB init via skipStoreAnnotation, so
 	// PersistentPreRun doesn't open the store.
@@ -29,6 +31,7 @@ func runConventionsCheck(path string) error {
 	checks = append(checks, lintChecks...)
 	checks = append(checks, runConventionsStale()...)
 	checks = append(checks, runConventionsOrphans(path)...)
+	checks = append(checks, runConventionsBlockedStatus()...)
 
 	if jsonOutput {
 		overallOK := true
@@ -194,6 +197,26 @@ func runConventionsStale() []doctorCheck {
 		Fix:      "bd stale",
 		Category: "Conventions",
 	}}
+}
+
+// runConventionsBlockedStatus surfaces the GH#6565 drift rows through the
+// embedded-capable conventions lane: a status='blocked' hold whose stored
+// dependency-blocked flag is clear. The same advisory the full doctor
+// reports as "Blocked Status", renamed to the lane's dotted convention.
+// Like its siblings it only reads; the composite's rule stands — any
+// warning turns overall_ok false.
+func runConventionsBlockedStatus() []doctorCheck {
+	if store == nil {
+		return []doctorCheck{{
+			Name:     "conventions.blocked-status",
+			Status:   statusWarning,
+			Message:  "database not available",
+			Category: "Conventions",
+		}}
+	}
+	check := convertWithCategory(doctor.CheckBlockedStatus(rootCtx, store), "Conventions")
+	check.Name = "conventions.blocked-status"
+	return []doctorCheck{check}
 }
 
 // runConventionsOrphans checks for issues referenced in commits but still open.
