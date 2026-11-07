@@ -54,8 +54,9 @@ func (e errorSearcher) SearchIssues(context.Context, string, types.IssueFilter) 
 
 // TestCheckBlockedStatus pins the Blocked Status advisory: a status='blocked'
 // row whose stored dependency-blocked flag is clear is reported for review
-// with count, bounded deterministic examples and manual guidance, and no
-// status or flag is ever changed by the check itself.
+// with count, bounded deterministic examples and manual guidance, a
+// consistent database (graph-held holds included) is OK, and no status or
+// flag is ever changed by the check itself.
 func TestCheckBlockedStatus(t *testing.T) {
 	ctx := context.Background()
 
@@ -115,6 +116,64 @@ func TestCheckBlockedStatus(t *testing.T) {
 		check := CheckBlockedStatus(ctx, store)
 		if check.Status != StatusWarning || !strings.Contains(check.Detail, "bstat-held") {
 			t.Fatalf("check = %q (%s / %s), want a warning naming bstat-held", check.Status, check.Message, check.Detail)
+		}
+	})
+
+	t.Run("consistent_database_is_ok_and_changes_nothing", func(t *testing.T) {
+		store := newTestDoltStore(t, "bstat")
+		rows := []string{
+			"bstat-plain", "bstat-closed", "bstat-pinned",
+			"bstat-blocker",
+			"bstat-held-blocks", "bstat-held-conditional",
+			"bstat-parent-blocker", "bstat-child",
+			"bstat-gate", "bstat-gate-child", "bstat-held-waits",
+		}
+		for _, id := range rows {
+			if err := store.CreateIssue(ctx, newTestIssue(id), "test"); err != nil {
+				t.Fatalf("CreateIssue(%s): %v", id, err)
+			}
+		}
+		if err := store.CloseIssue(ctx, "bstat-closed", "done", "test", ""); err != nil {
+			t.Fatalf("CloseIssue: %v", err)
+		}
+		if err := store.UpdateIssue(ctx, "bstat-pinned", map[string]interface{}{"status": string(types.StatusPinned)}, "test"); err != nil {
+			t.Fatalf("pin bstat-pinned: %v", err)
+		}
+
+		// Graph-held blocked-status rows: an open blocks edge, an open
+		// conditional-blocks edge, a blocked parent, and a held waits-for
+		// gate (its spawner still has an open child) each keep is_blocked
+		// set, so the stored flags agree with the statuses.
+		deps := []*types.Dependency{
+			{IssueID: "bstat-held-blocks", DependsOnID: "bstat-blocker", Type: types.DepBlocks},
+			{IssueID: "bstat-held-conditional", DependsOnID: "bstat-blocker", Type: types.DepConditionalBlocks},
+			{IssueID: "bstat-parent-blocker", DependsOnID: "bstat-blocker", Type: types.DepBlocks},
+			{IssueID: "bstat-child", DependsOnID: "bstat-parent-blocker", Type: types.DepParentChild},
+			{IssueID: "bstat-gate-child", DependsOnID: "bstat-gate", Type: types.DepParentChild},
+			{IssueID: "bstat-held-waits", DependsOnID: "bstat-gate", Type: types.DepWaitsFor},
+		}
+		for _, dep := range deps {
+			if err := store.AddDependency(ctx, dep, "test"); err != nil {
+				t.Fatalf("AddDependency(%s -> %s, %s): %v", dep.IssueID, dep.DependsOnID, dep.Type, err)
+			}
+		}
+		for _, id := range []string{"bstat-held-blocks", "bstat-held-conditional", "bstat-child", "bstat-held-waits"} {
+			blockedStatusHold(t, store, id)
+			requireStoredIsBlocked(t, store, id, true)
+		}
+
+		check := CheckBlockedStatus(ctx, store)
+		if check.Status != StatusOK {
+			t.Fatalf("Status = %q (%s / %s), want %q: graph-held holds are not drift", check.Status, check.Message, check.Detail, StatusOK)
+		}
+		for _, id := range []string{"bstat-held-blocks", "bstat-held-conditional", "bstat-child", "bstat-held-waits"} {
+			issue, err := store.GetIssue(ctx, id)
+			if err != nil {
+				t.Fatalf("GetIssue(%s): %v", id, err)
+			}
+			if issue.Status != types.StatusBlocked {
+				t.Errorf("%s status = %q after the check, want 'blocked' untouched", id, issue.Status)
+			}
 		}
 	})
 
