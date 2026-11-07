@@ -298,13 +298,15 @@ func TestRenameFailureLeavesBeadGatesPending(t *testing.T) {
 }
 
 func TestRenameRewritesCloseReasonAndOwnText(t *testing.T) {
-	// GH#7040: bd rename left other issues' close_reason naming the old ID.
-	// Rewriting it must leave the closed issue closed, at its old closed_at.
+	// GH#7040: bd rename left other issues' close_reason and the renamed
+	// issue's own text naming the old ID. Rewriting a close_reason must leave
+	// the closed issue closed, at its old closed_at.
 	ctx := context.Background()
 	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
 
 	for _, issue := range []*types.Issue{
-		{ID: "test-a", Title: "A", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "test-a", Title: "A (test-a)", Description: "test-a tracks this", Design: "test-a design",
+			Notes: "notes on test-a", AcceptanceCriteria: "test-a done", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
 		{ID: "test-b", Title: "B", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
 	} {
 		if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
@@ -313,6 +315,9 @@ func TestRenameRewritesCloseReasonAndOwnText(t *testing.T) {
 	}
 	if err := testStore.CloseIssue(ctx, "test-b", "duplicate of test-a", "test", ""); err != nil {
 		t.Fatalf("failed to close test-b: %v", err)
+	}
+	if err := testStore.CloseIssue(ctx, "test-a", "test-a is done", "test", ""); err != nil {
+		t.Fatalf("failed to close test-a: %v", err)
 	}
 	closedB, err := testStore.GetIssue(ctx, "test-b")
 	if err != nil || closedB.ClosedAt == nil {
@@ -330,6 +335,22 @@ func TestRenameRewritesCloseReasonAndOwnText(t *testing.T) {
 		t.Fatalf("reference update failed: %v", err)
 	}
 
+	z, err := testStore.GetIssue(ctx, "test-z")
+	if err != nil {
+		t.Fatalf("failed to get test-z: %v", err)
+	}
+	for _, f := range []struct{ field, got, want string }{
+		{"title", z.Title, "A (test-z)"},
+		{"description", z.Description, "test-z tracks this"},
+		{"design", z.Design, "test-z design"},
+		{"notes", z.Notes, "notes on test-z"},
+		{"acceptance_criteria", z.AcceptanceCriteria, "test-z done"},
+		{"close_reason", z.CloseReason, "test-z is done"},
+	} {
+		if f.got != f.want {
+			t.Errorf("renamed issue %s = %q, want %q", f.field, f.got, f.want)
+		}
+	}
 	b, err := testStore.GetIssue(ctx, "test-b")
 	if err != nil {
 		t.Fatalf("failed to get test-b: %v", err)
