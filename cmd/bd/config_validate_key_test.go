@@ -14,6 +14,8 @@ func TestIsRecognizedConfigKey(t *testing.T) {
 		"status.custom", "types.custom", "types.infra", "ai.model",
 		"backup.enabled", "import.path", "dolt.local-only", "agent.profile",
 		"claim.pools",
+		// Registered as an exact key, not a wisp.* namespace (GH#6266).
+		"wisp.protected_labels",
 		// Tracker namespaces are derived from the registry (GH#4427); cover
 		// ado (the original bug) plus the others removed from the static list.
 		"ado.org", "ado.project", "github.token", "linear.api-key",
@@ -27,6 +29,7 @@ func TestIsRecognizedConfigKey(t *testing.T) {
 
 	unrecognized := []string{
 		"totally.bogus", "exprot.auto", "xport.path", "nodb",
+		"wisp.protected_label", "wisp.anything",
 	}
 	for _, key := range unrecognized {
 		if isRecognizedConfigKey(key) {

@@ -15,6 +15,12 @@ type cascadeAgeReader struct {
 	molReader
 	issues   []*types.Issue
 	children map[string]bool
+	// config answers GetConfig; an absent key reads as unset.
+	config map[string]string
+}
+
+func (r *cascadeAgeReader) GetConfig(_ context.Context, key string) (string, error) {
+	return r.config[key], nil
 }
 
 func (r *cascadeAgeReader) SearchIssues(context.Context, string, types.IssueFilter) ([]*types.Issue, error) {
