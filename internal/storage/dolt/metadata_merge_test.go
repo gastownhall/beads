@@ -414,3 +414,49 @@ func TestSlotClearConcurrentNoClobber(t *testing.T) {
 		}
 	}
 }
+
+// TestMetadataLargeIntegerRoundTrips (bd-emny2t, GH#6330): an integer past 2^53 written into
+// issue metadata must read back with every digit, on the create, update and merge paths.
+// Adopted from the c0_c1 repro lane (98776a66b1); passes at base with the pinned
+// engine, pinning the storage-side fidelity the application decoders rely on.
+func TestMetadataLargeIntegerRoundTrips(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	const big = "1546130668394913822"
+	const justOver = "9007199254740993"
+
+	const id = "mm-bigint"
+	// Read back after every write: UpdateIssue replaces the whole document, so
+	// one read at the end could not see a loss on the create path.
+	expectDigits := func(step string, want map[string]string) {
+		t.Helper()
+		m := getMetadataMap(t, ctx, store, id)
+		for key, w := range want {
+			if got := string(m[key]); got != w {
+				t.Errorf("after %s: metadata[%q] = %s, want %s (integer past 2^53 lost precision)", step, key, got, w)
+			}
+		}
+	}
+
+	issue := &types.Issue{
+		ID: id, Title: "precision", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		Metadata: json.RawMessage(`{"created":` + big + `}`),
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	expectDigits("CreateIssue", map[string]string{"created": big})
+	if err := store.UpdateIssue(ctx, id, map[string]any{
+		"metadata": json.RawMessage(`{"created":` + big + `,"num":` + big + `,"just_over":` + justOver + `}`),
+	}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue metadata: %v", err)
+	}
+	expectDigits("UpdateIssue", map[string]string{"created": big, "num": big, "just_over": justOver})
+	if err := store.MergeMetadata(ctx, id, "merged", json.RawMessage(big), "tester"); err != nil {
+		t.Fatalf("MergeMetadata: %v", err)
+	}
+	expectDigits("MergeMetadata", map[string]string{"created": big, "num": big, "just_over": justOver, "merged": big})
+}

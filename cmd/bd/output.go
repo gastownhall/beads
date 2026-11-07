@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -90,8 +91,12 @@ func wrapWithSchemaVersion(v interface{}) interface{} {
 	if err != nil {
 		return v
 	}
+	// UseNumber keeps each number's literal through the round trip, so an
+	// integer past 2^53 in metadata keeps every digit (GH#6330).
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
 	var m map[string]interface{}
-	if err := json.Unmarshal(data, &m); err != nil {
+	if err := dec.Decode(&m); err != nil {
 		return v
 	}
 	m["schema_version"] = JSONSchemaVersion

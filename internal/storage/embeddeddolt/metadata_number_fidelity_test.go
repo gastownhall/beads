@@ -284,3 +284,55 @@ func sameNumber(a, b string) bool {
 	y, okB := new(big.Rat).SetString(b)
 	return okA && okB && x.Cmp(y) == 0
 }
+
+// TestEmbeddedMetadataLargeIntegerRoundTrips (bd-emny2t, GH#6330): an integer past 2^53 written
+// into issue metadata must read back with every digit, on the create, update and merge paths.
+// Adopted from the c0_c1 repro lane (b30313784a98); passes at base with the pinned
+// engine, pinning the storage-side fidelity the application decoders rely on.
+func TestEmbeddedMetadataLargeIntegerRoundTrips(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "bi")
+	ctx := t.Context()
+
+	const big = "1546130668394913822"
+	const justOver = "9007199254740993"
+
+	const id = "bi-1"
+	// Read back after every write: UpdateIssue replaces the whole document, so
+	// one read at the end could not see a loss on the create path.
+	expectDigits := func(step string, want map[string]string) {
+		t.Helper()
+		got, err := te.store.GetIssue(ctx, id)
+		if err != nil {
+			t.Fatalf("after %s: GetIssue: %v", step, err)
+		}
+		m := map[string]json.RawMessage{}
+		if err := json.Unmarshal(got.Metadata, &m); err != nil {
+			t.Fatalf("after %s: unmarshal metadata %s: %v", step, got.Metadata, err)
+		}
+		for key, w := range want {
+			if string(m[key]) != w {
+				t.Errorf("after %s: metadata[%q] = %s, want %s (integer past 2^53 lost precision)", step, key, m[key], w)
+			}
+		}
+	}
+
+	issue := &types.Issue{
+		ID: id, Title: "precision", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		Metadata: json.RawMessage(`{"created":` + big + `}`),
+	}
+	if err := te.store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	expectDigits("CreateIssue", map[string]string{"created": big})
+	if err := te.store.UpdateIssue(ctx, id, map[string]any{
+		"metadata": json.RawMessage(`{"created":` + big + `,"num":` + big + `,"just_over":` + justOver + `}`),
+	}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue metadata: %v", err)
+	}
+	expectDigits("UpdateIssue", map[string]string{"created": big, "num": big, "just_over": justOver})
+	if err := te.store.MergeMetadata(ctx, id, "merged", json.RawMessage(big), "tester"); err != nil {
+		t.Fatalf("MergeMetadata: %v", err)
+	}
+	expectDigits("MergeMetadata", map[string]string{"created": big, "num": big, "just_over": justOver, "merged": big})
+}

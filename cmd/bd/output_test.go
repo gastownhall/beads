@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func TestWrapWithSchemaVersion_Legacy_Object(t *testing.T) {
@@ -201,5 +203,45 @@ func TestOutputJSONWithPagination_EnvelopeNotTruncated(t *testing.T) {
 	}
 	if _, ok := m["pagination"]; ok {
 		t.Error("unexpected 'pagination' key when not truncated")
+	}
+}
+
+// TestOutputJSON_LegacyObjectKeepsLargeIntegers pins GH#6330 on the
+// single-object --json path (bd create --json and the other outputJSON
+// callers): the legacy wrapper round-trips a non-slice through a map, and a
+// metadata integer past 2^53 must come out with the digits it went in with,
+// nested ones and the 64-bit extremes included.
+func TestOutputJSON_LegacyObjectKeepsLargeIntegers(t *testing.T) {
+	issue := &types.Issue{
+		ID:    "bd-big",
+		Title: "precision",
+		Metadata: json.RawMessage(`{"thread_id":1546130668394913822,"just_over":9007199254740993,` +
+			`"nested":{"ids":[18446744073709551615,-9223372036854775808]}}`),
+	}
+	out := captureStdout(t, func() error {
+		return outputJSON(issue)
+	})
+
+	var got struct {
+		ID            string          `json:"id"`
+		SchemaVersion int             `json:"schema_version"`
+		Metadata      json.RawMessage `json:"metadata"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("unmarshal: %v\noutput: %s", err, out)
+	}
+	if got.ID != "bd-big" || got.SchemaVersion != JSONSchemaVersion {
+		t.Fatalf("id = %q, schema_version = %d; want the legacy object with schema_version %d\noutput: %s",
+			got.ID, got.SchemaVersion, JSONSchemaVersion, out)
+	}
+	var metadata bytes.Buffer
+	if err := json.Compact(&metadata, got.Metadata); err != nil {
+		t.Fatalf("compact metadata %s: %v", got.Metadata, err)
+	}
+	// The map round trip sorts object keys; the digits must not change.
+	const want = `{"just_over":9007199254740993,` +
+		`"nested":{"ids":[18446744073709551615,-9223372036854775808]},"thread_id":1546130668394913822}`
+	if metadata.String() != want {
+		t.Errorf("metadata = %s\nwant       %s (integer past 2^53 lost precision)", metadata.String(), want)
 	}
 }

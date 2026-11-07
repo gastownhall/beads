@@ -91,12 +91,15 @@ func PlanCompareAndSetKey(in issueops.CompareAndSetKeyRequest) (CompareAndSetKey
 // reader in this tree already does with them.
 //
 // NUMBERS KEEP THEIR SOURCE LITERAL, so 1 and 1.0 canonicalize differently and
-// do not match. This function does not round-trip a number through float64, and
-// the reason is NOT that doing so would lose precision the store keeps: the
-// metadata column loses it first. go-mysql-server decodes JSON numbers into
-// float64 and re-emits them, measured — 9007199254740993 is stored as
-// ...992, 1.0 as 1, -0.0 as 0, 1e300 as three hundred and one digits. So the
-// substrate's own fidelity, not this rule, is what bounds a numeric value.
+// do not match. This function does not round-trip a number through float64.
+// The pinned engine (go-mysql-server 38a1fb50b434, sql/types/json.go) parses
+// JSON with UseNumber and already keeps integer literals exact — float64 only
+// below 2^53, where that is exact, int64/uint64 beyond — so 9007199254740993
+// survives the column with every digit. Decimal and exponent literals still
+// normalize through float64 (measured: 1.0 as 1, -0.0 as 0, 1e300 as three
+// hundred and one digits), and a store served by an older engine may
+// normalize more. So the substrate's version and the literal's shape, not
+// this rule, bound a numeric value's fidelity.
 //
 // What the literal rule buys is that this function stays a pure statement about
 // JSON rather than a copy of one engine's number handling — a copy that would

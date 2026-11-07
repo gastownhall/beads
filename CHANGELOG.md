@@ -1208,6 +1208,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd show`, `bd create --json` and the other single-object `--json`
+  outputs, the Go `SlotGet` API and the Linear milestone sync no longer round
+  integer metadata past 2^53 (GH#6330). Each decoded metadata through
+  float64, so `1546130668394913822` printed as `1546130668394913792` in
+  `bd show` and as `1546130668394913800` in `bd create --json` and a numeric
+  slot, and a Linear milestone sync rewrote an unrelated numeric key with the
+  rounded value. They now keep the stored digits. The metadata docs now say
+  which numbers the storage engine keeps exactly and recommend storing ids as
+  strings.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

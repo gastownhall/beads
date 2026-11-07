@@ -680,9 +680,12 @@ func mergedLinearMilestoneMetadata(existing json.RawMessage, ms *linear.ProjectM
 	if len(existing) > 0 {
 		trimmed := strings.TrimSpace(string(existing))
 		if trimmed != "" && trimmed != "null" {
-			if err := json.Unmarshal(existing, &data); err != nil {
+			// UseNumber keeps unrelated numeric metadata exact through the re-marshal.
+			decoded, err := storage.DecodeMetadataObject(existing)
+			if err != nil {
 				return nil, fmt.Errorf("existing milestone metadata is not a JSON object: %w", err)
 			}
+			data = decoded
 		}
 	}
 
