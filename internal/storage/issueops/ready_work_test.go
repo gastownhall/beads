@@ -5,15 +5,23 @@ import (
 	"database/sql"
 	"errors"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// deferredParentProbeRegex matches the classic deferred-parent gate for
+// issueTable as it first goes out, asking both dependency tables for a child.
 func deferredParentProbeRegex(issueTable string) string {
-	return `SELECT 1 FROM ` + issueTable + `\s+WHERE defer_until IS NOT NULL\s+AND defer_until > UTC_TIMESTAMP\(\)\s+LIMIT 1`
+	return deferredParentGateRegex(issueTable, deferredChildDepTables)
+}
+
+func deferredParentGateRegex(issueTable string, depTables []string) string {
+	return `^SELECT ` + regexp.QuoteMeta(sqlbuild.DeferredParentExistsSQL(issueTable, depTables)) + `$`
 }
 
 // staleBlockedQueryRegex matches sqlbuild.StaleBlockedIDsSQL for one table
@@ -27,7 +35,7 @@ func deferredChildrenQueryRegex(depTable, issueTable string) string {
 	if issueTable == "wisps" {
 		targetCol = "depends_on_wisp_id"
 	}
-	return `SELECT dep\.issue_id\s+FROM ` + depTable + ` dep\s+JOIN ` + issueTable + ` parent ON parent\.id = dep\.` + targetCol + `\s+WHERE dep\.type = 'parent-child'\s+AND parent\.defer_until IS NOT NULL\s+AND parent\.defer_until > UTC_TIMESTAMP\(\)`
+	return `SELECT dep\.issue_id\s+FROM ` + depTable + ` dep\s+JOIN ` + issueTable + ` parent ON parent\.id = dep\.` + targetCol + `\s+WHERE dep\.type = 'parent-child'\s+AND ` + regexp.QuoteMeta(sqlbuild.DeferredParentPredicate("parent"))
 }
 
 func beginMockTx(t *testing.T) (*sql.DB, sqlmock.Sqlmock, *sql.Tx) {
@@ -224,6 +232,63 @@ func TestGetChildrenOfDeferredParentsInTx_NoDeferredParentsExitsAfterProbe(t *te
 	}
 }
 
+// TestGetChildrenOfDeferredParentsInTx_FalseProbeExitsAfterProbe: the gate is
+// a SELECT of an EXISTS expression, which always returns one row. A false
+// value must be read as "no deferred parent here", not as a row having come
+// back, or every ready read would pay for the four child scans.
+func TestGetChildrenOfDeferredParentsInTx_FalseProbeExitsAfterProbe(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+	mock.ExpectQuery(deferredParentProbeRegex("issues")).
+		WillReturnRows(sqlmock.NewRows([]string{"deferred"}).AddRow(false))
+	mock.ExpectQuery(deferredParentProbeRegex("wisps")).
+		WillReturnRows(sqlmock.NewRows([]string{"deferred"}).AddRow(false))
+
+	got, err := getChildrenOfDeferredParentsInTx(context.Background(), tx)
+	if err != nil {
+		t.Fatalf("getChildrenOfDeferredParentsInTx: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("children = %v, want empty", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestGetChildrenOfDeferredParentsInTx_WispProbeOpensTheGate: a deferred
+// parent only in wisps still sends out the child scans.
+func TestGetChildrenOfDeferredParentsInTx_WispProbeOpensTheGate(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+	mock.ExpectQuery(deferredParentProbeRegex("issues")).
+		WillReturnRows(sqlmock.NewRows([]string{"deferred"}).AddRow(false))
+	mock.ExpectQuery(deferredParentProbeRegex("wisps")).
+		WillReturnRows(sqlmock.NewRows([]string{"deferred"}).AddRow(true))
+	for _, depTable := range deferredChildDepTables {
+		for _, issueTable := range deferredChildIssueTables {
+			rows := sqlmock.NewRows([]string{"issue_id"})
+			if depTable == "wisp_dependencies" && issueTable == "wisps" {
+				rows.AddRow("wisp-child")
+			}
+			mock.ExpectQuery(deferredChildrenQueryRegex(depTable, issueTable)).WillReturnRows(rows)
+		}
+	}
+
+	got, err := getChildrenOfDeferredParentsInTx(context.Background(), tx)
+	if err != nil {
+		t.Fatalf("getChildrenOfDeferredParentsInTx: %v", err)
+	}
+	if want := []string{"wisp-child"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("children = %v, want %v", got, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
 func TestGetChildrenOfDeferredParentsInTx_IgnoresMissingWispDependenciesTable(t *testing.T) {
 	t.Parallel()
 
@@ -314,5 +379,39 @@ func TestReadyWorkWispIssueFilterPropagatesStatuses(t *testing.T) {
 	want := []types.Status{"open", "blocked"}
 	if !reflect.DeepEqual(filter.Statuses, want) {
 		t.Fatalf("wisp filter Statuses = %v, want %v", filter.Statuses, want)
+	}
+}
+
+// TestProbeReadyWorkInTx_UndatedDeferredParentOpensTheChildScan: the
+// one-statement probe that the counts readers and the in-band total take
+// carries its own deferred-parent facts. They must be the shared EXISTS
+// expressions, so an undated deferred parent turns the fact true and sends the
+// child scan out as one UNION ALL statement whose IDs become the exclusions.
+// Adapted from @drakeo338's #7304.
+func TestProbeReadyWorkInTx_UndatedDeferredParentOpensTheChildScan(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+	mock.ExpectQuery(readyProbeSQL + `.*, ` + regexp.QuoteMeta(sqlbuild.DeferredParentExistsSQL("issues", deferredChildDepTables)) +
+		`, ` + regexp.QuoteMeta(sqlbuild.DeferredParentExistsSQL("wisps", deferredChildDepTables)) + `$`).
+		WillReturnRows(readyProbeRows(true, true, false, false, true, false))
+	var legs []string
+	for _, depTable := range deferredChildDepTables {
+		for _, issueTable := range deferredChildIssueTables {
+			legs = append(legs, deferredChildrenQueryRegex(depTable, issueTable))
+		}
+	}
+	mock.ExpectQuery(strings.Join(legs, `\s+UNION ALL\s+`)).
+		WillReturnRows(sqlmock.NewRows([]string{"issue_id"}).AddRow("child-of-undated-deferred"))
+
+	p, err := probeReadyWorkInTx(context.Background(), tx, types.WorkFilter{}, false)
+	if err != nil {
+		t.Fatalf("probeReadyWorkInTx: %v", err)
+	}
+	if want := []string{"child-of-undated-deferred"}; !reflect.DeepEqual(p.inputs.DeferredChildIDs, want) {
+		t.Fatalf("DeferredChildIDs = %v, want %v", p.inputs.DeferredChildIDs, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
 	}
 }

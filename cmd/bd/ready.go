@@ -854,7 +854,7 @@ func init() {
 	readyCmd.Flags().Bool("pretty", true, "Display issues in a tree format with status/priority symbols")
 	readyCmd.Flags().Bool("plain", false, "Display issues as a plain numbered list")
 	readyCmd.Flags().Bool("flat", false, "Alias for --plain, spelled the way bd list spells it")
-	readyCmd.Flags().Bool("include-deferred", false, "Include issues with future defer_until timestamps")
+	readyCmd.Flags().Bool("include-deferred", false, "Include issues with future defer_until timestamps and children of deferred parents (dated snoozes and undated iceboxes)")
 	readyCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral issues (wisps) in results")
 	readyCmd.Flags().Bool("gated", false, "Find molecules ready for gate-resume dispatch")
 	readyCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")
@@ -1019,8 +1019,9 @@ const (
 // assignee's is no reason for this listing to be empty. bd blocked applies the
 // label sets exactly as the listing does, but its --parent is one hop plus the
 // dotted ids under the parent where ready's is transitive, so under --parent an
-// empty answer proves nothing. A blocked child of a future-deferred parent,
-// which the listing leaves out, still counts: the issue alone cannot tell.
+// empty answer proves nothing. A blocked child of a deferred parent (dated or
+// undated), which the listing leaves out, still counts: the issue alone cannot
+// tell.
 func readyEmptyStateVerdict(f types.WorkFilter, blocked []*types.BlockedIssue, now time.Time) readyEmptyVerdict {
 	verdict := readyEmptyNoneBlocked
 	if f.ParentID != nil {

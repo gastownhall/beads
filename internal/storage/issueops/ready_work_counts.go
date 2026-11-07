@@ -297,7 +297,8 @@ func queryReadyIDPageWithTotal(ctx context.Context, tx DBTX, query string, args 
 // the mega-query, so a single wisp no longer disables the fast path.
 //
 // Statement budget: the shared probe (one statement; plus one for the
-// deferred-parent children when a future-deferred parent exists), then both
+// deferred-parent children when sqlbuild.DeferredParentExistsSQL finds a
+// deferred parent to read them for), then both
 // family counts in ONE statement of scalar subqueries, then the overlap only
 // when the probe saw an ID present in both tables. `bd ready` itself sizes a
 // capped --json page in-band (GetReadyWorkWithCountsAndTotalInTx); this backs

@@ -750,3 +750,51 @@ func TestColumnNames(t *testing.T) {
 		t.Errorf("QualifyColumns = %q, want %q", got, want)
 	}
 }
+
+func TestDeferredParentPredicate(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		alias string
+		want  string
+	}{
+		{"", "((defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP()) OR (status = 'deferred' AND defer_until IS NULL))"},
+		{"parent", "((parent.defer_until IS NOT NULL AND parent.defer_until > UTC_TIMESTAMP()) OR (parent.status = 'deferred' AND parent.defer_until IS NULL))"},
+	}
+	for _, tc := range cases {
+		if got := DeferredParentPredicate(tc.alias); got != tc.want {
+			t.Errorf("DeferredParentPredicate(%q) =\n  %s\nwant\n  %s", tc.alias, got, tc.want)
+		}
+	}
+}
+
+func TestDeferredParentExistsSQL(t *testing.T) {
+	t.Parallel()
+
+	// One EXISTS for the dated condition, then one per dependency table for
+	// the undated one, which only counts a row some parent-child edge names
+	// as its parent (through the column that names a row of that table), and
+	// the whole OR parenthesized so it stays one scalar when composed into a
+	// SELECT list or a WHERE.
+	cases := []struct {
+		table     string
+		depTables []string
+		want      string
+	}{
+		{"issues", []string{"dependencies", "wisp_dependencies"},
+			"(EXISTS (SELECT 1 FROM issues WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP())" +
+				" OR EXISTS (SELECT 1 FROM issues p WHERE p.status = 'deferred' AND p.defer_until IS NULL" +
+				" AND EXISTS (SELECT 1 FROM dependencies d WHERE d.type = 'parent-child' AND d.depends_on_issue_id = p.id))" +
+				" OR EXISTS (SELECT 1 FROM issues p WHERE p.status = 'deferred' AND p.defer_until IS NULL" +
+				" AND EXISTS (SELECT 1 FROM wisp_dependencies d WHERE d.type = 'parent-child' AND d.depends_on_issue_id = p.id)))"},
+		{"wisps", []string{"dependencies"},
+			"(EXISTS (SELECT 1 FROM wisps WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP())" +
+				" OR EXISTS (SELECT 1 FROM wisps p WHERE p.status = 'deferred' AND p.defer_until IS NULL" +
+				" AND EXISTS (SELECT 1 FROM dependencies d WHERE d.type = 'parent-child' AND d.depends_on_wisp_id = p.id)))"},
+	}
+	for _, tc := range cases {
+		if got := DeferredParentExistsSQL(tc.table, tc.depTables); got != tc.want {
+			t.Errorf("DeferredParentExistsSQL(%s, %v) =\n  %s\nwant\n  %s", tc.table, tc.depTables, got, tc.want)
+		}
+	}
+}
