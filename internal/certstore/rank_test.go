@@ -5,16 +5,22 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
 	"math/big"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 var testNow = time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+
+// testRSAKey is generated once per test binary, because generating a
+// 2048-bit key is slow.
+var testRSAKey = sync.OnceValues(func() (*rsa.PrivateKey, error) { return rsa.GenerateKey(rand.Reader, 2048) })
 
 type certSpec struct {
 	cn        string
@@ -23,6 +29,7 @@ type certSpec struct {
 	eku       []x509.ExtKeyUsage
 	keyUsage  x509.KeyUsage
 	ed25519   bool
+	rsa       bool
 	noKey     bool
 	serial    int64
 }
@@ -50,13 +57,20 @@ func newCandidate(t *testing.T, s certSpec) Candidate {
 		KeyUsage:     s.keyUsage,
 	}
 	var pub, priv any
-	if s.ed25519 {
+	switch {
+	case s.ed25519:
 		pk, sk, err := ed25519.GenerateKey(rand.Reader)
 		if err != nil {
 			t.Fatal(err)
 		}
 		pub, priv = pk, sk
-	} else {
+	case s.rsa:
+		k, err := testRSAKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		pub, priv = &k.PublicKey, k
+	default:
 		k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
 			t.Fatal(err)
@@ -146,6 +160,7 @@ func TestChooseEligibility(t *testing.T) {
 		{"any EKU only", certSpec{cn: "Jane", eku: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}}, "client authentication"},
 		{"key usage without digital signature", certSpec{cn: "Jane", keyUsage: x509.KeyUsageKeyEncipherment}, "digital signature"},
 		{"key usage with digital signature", certSpec{cn: "Jane", keyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment}, ""},
+		{"RSA key", certSpec{cn: "Jane", rsa: true}, ""},
 		{"ed25519 key", certSpec{cn: "Jane", ed25519: true}, "unsupported public key type"},
 		{"no private key", certSpec{cn: "Jane", noKey: true}, "no private key"},
 	}
@@ -231,6 +246,31 @@ func TestChooseRanking(t *testing.T) {
 			t.Fatalf("rejections = %+v", rejected)
 		}
 	})
+
+	t.Run("accept filter rejects even when its error has no message", func(t *testing.T) {
+		silent := errors.New("")
+		deny := func(_ StorePath, c Candidate) error {
+			if c.Cert == newer.Cert {
+				return silent
+			}
+			return nil
+		}
+		got, ok, rejected, _ := Selector{Subject: "Jane Doe"}.choose(store, []Candidate{older, newer}, testNow, deny)
+		if !ok || got.Cert != older.Cert {
+			t.Fatal("want the older certificate once the newer one is filtered out")
+		}
+		if len(rejected) != 1 || rejected[0].Reason == "" || !errors.Is(rejected[0].Err, silent) {
+			t.Fatalf("rejections = %+v, want one with a reason and the filter's error", rejected)
+		}
+	})
+
+	t.Run("accept filter can reject every certificate", func(t *testing.T) {
+		denyAll := func(StorePath, Candidate) error { return errors.New("issuer is not acceptable to the server") }
+		got, ok, rejected, err := Selector{Subject: "Jane Doe"}.choose(store, []Candidate{older, newer}, testNow, denyAll)
+		if err != nil || ok || got.Cert != nil || len(rejected) != 2 {
+			t.Fatalf("ok=%v rejected=%+v err=%v; want nothing chosen and both certificates rejected", ok, rejected, err)
+		}
+	})
 }
 
 func TestSearchOrder(t *testing.T) {
@@ -314,5 +354,33 @@ func TestNoEligibleErrorUnwrapsRejectionErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "key is gone") {
 		t.Errorf("listing %q does not carry the reason", err)
+	}
+}
+
+func TestChooseRefusesWhatValidateRejects(t *testing.T) {
+	store := StorePath{CurrentUser, "My"}
+	cand := newCandidate(t, certSpec{cn: "Jane"})
+	open := func(StorePath) ([]Candidate, error) { return []Candidate{cand}, nil }
+	cases := []struct {
+		name string
+		sel  Selector
+	}{
+		{"neither", Selector{}},
+		{"blank subject and thumbprint", Selector{Subject: " ", Thumbprint: "\t"}},
+		{"both", Selector{Subject: "Jane", Thumbprint: cand.Thumbprint()}},
+	}
+	for _, c := range cases {
+		want := c.sel.Validate()
+		if want == nil {
+			t.Fatalf("%s: Validate() accepted the selector", c.name)
+		}
+		got, ok, rejected, err := c.sel.choose(store, []Candidate{cand}, testNow, nil)
+		if err == nil || err.Error() != want.Error() || ok || got.Cert != nil || len(rejected) != 0 {
+			t.Errorf("%s: choose: ok=%v rejected=%v err=%v; want Validate's error %q and no match", c.name, ok, rejected, err, want)
+		}
+		got, _, err = c.sel.search(open, testNow, nil)
+		if err == nil || err.Error() != want.Error() || got.Cert != nil {
+			t.Errorf("%s: search chose %q, err=%v; want Validate's error %q", c.name, got.Subject, err, want)
+		}
 	}
 }
