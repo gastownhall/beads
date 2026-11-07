@@ -11,6 +11,8 @@ Flags:
       --closed-before string         Filter issues closed before date (YYYY-MM-DD or RFC3339)
       --created-after string         Filter issues created after date (YYYY-MM-DD or RFC3339)
       --created-before string        Filter issues created before date (YYYY-MM-DD or RFC3339)
+      --ctx strings                  Declare your execution context as k or k=v tokens (repeatable or comma-separated). Hides issues whose requires:<token> labels this context does not satisfy; --ctx '' declares an empty context. Omitted: no hiding
+      --ctx-file string              Read context tokens from a file, one per line (# comments allowed); combines with --ctx
       --defer-after string           Filter issues deferred after date (supports relative: +6h, tomorrow)
       --defer-before string          Filter issues deferred before date (supports relative: +6h, tomorrow)
       --deferred                     Show only issues with defer_until set
@@ -58,7 +60,7 @@ Flags:
       --priority-min string          Filter by minimum priority (inclusive, 0-4 or P0-P4)
       --ready                        Show only ready issues (no active blockers, same semantics as bd ready)
   -r, --reverse                      Invert the sort field's default direction (created/updated/closed default to newest-first, so --sort updated --reverse is oldest-first)
-      --skip-labels                  Skip label hydration. The labels field in output will be empty regardless of actual labels. Use only when the caller does not depend on label data. Cannot combine with --label, --label-any, --label-pattern, --label-regex, --exclude-label, or --no-labels.
+      --skip-labels                  Skip label hydration. The labels field in output will be empty regardless of actual labels. Use only when the caller does not depend on label data. Cannot combine with --label, --label-any, --label-pattern, --label-regex, --exclude-label, --no-labels, or --ctx.
       --sort string                  Sort by field: priority, created, updated, closed, status, id, title, type, assignee
       --spec string                  Filter by spec_id prefix
   -s, --status string                Filter by stored status (open, in_progress, blocked, deferred, closed). Comma-separated or repeated for multiple: --status open,in_progress

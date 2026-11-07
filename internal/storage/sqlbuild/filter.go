@@ -222,6 +222,10 @@ func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables Filt
 		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label REGEXP ?)", tables.Labels))
 		args = append(args, filter.LabelRegex)
 	}
+	if clause, ctxArgs, ok := RequiresClause("id", tables, filter.Ctx); ok {
+		whereClauses = append(whereClauses, clause)
+		args = append(args, ctxArgs...)
+	}
 
 	if filter.Pinned != nil {
 		if *filter.Pinned {

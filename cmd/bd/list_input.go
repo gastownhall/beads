@@ -87,6 +87,11 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in.ExcludeLabels, _ = cmd.Flags().GetStringSlice("exclude-label")
 	in.LabelPattern, _ = cmd.Flags().GetString("label-pattern")
 	in.LabelRegex, _ = cmd.Flags().GetString("label-regex")
+	ctxTokens, ctxErr := ctxFromFlags(cmd)
+	if ctxErr != nil {
+		return in, HandleErrorRespectJSON("%v", ctxErr)
+	}
+	in.Ctx = ctxTokens
 	in.TitleSearch, _ = cmd.Flags().GetString("title")
 	in.SpecPrefix, _ = cmd.Flags().GetString("spec")
 	in.IDFilter, _ = cmd.Flags().GetString("id")
@@ -108,7 +113,7 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in.IncludeComments, _ = cmd.Flags().GetBool("include-comments")
 	in.SkipLabels, _ = cmd.Flags().GetBool("skip-labels")
 	if in.SkipLabels {
-		conflicts := skipLabelsConflicts(in.Labels, in.LabelsAny, in.LabelPattern, in.LabelRegex, in.ExcludeLabels, in.NoLabels)
+		conflicts := skipLabelsConflicts(in.Labels, in.LabelsAny, in.LabelPattern, in.LabelRegex, in.ExcludeLabels, in.NoLabels, in.Ctx)
 		if len(conflicts) > 0 {
 			fmt.Fprint(os.Stderr, formatSkipLabelsConflictError(conflicts))
 			return in, &exitError{Code: 2}

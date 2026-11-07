@@ -76,3 +76,46 @@ func TestBuildReadyFilterRejectsSortPolicy(t *testing.T) {
 		t.Errorf("BuildReadyFilter with no sort policy: %v", err)
 	}
 }
+
+// TestBuildReadyFilterCtxKeepsNilAndEmptyApart pins the one subtlety the
+// declared-context predicate rests on: an undeclared context (nil) reaches the
+// filter as nil and switches the predicate off, while a declared-but-empty one
+// (`bd ready --ctx ”`) reaches it as a non-nil empty slice and hides every
+// requiring issue. Routing the slice through utils.NormalizeLabels would merge
+// the two, which is why BuildReadyFilter must not.
+func TestBuildReadyFilterCtxKeepsNilAndEmptyApart(t *testing.T) {
+	t.Parallel()
+
+	undeclared, err := BuildReadyFilter(issueops.ReadyRequest{})
+	if err != nil {
+		t.Fatalf("BuildReadyFilter: %v", err)
+	}
+	if undeclared.Ctx != nil {
+		t.Fatalf("undeclared context must stay nil, got %#v", undeclared.Ctx)
+	}
+
+	empty, err := BuildReadyFilter(issueops.ReadyRequest{Ctx: []string{""}})
+	if err != nil {
+		t.Fatalf("BuildReadyFilter: %v", err)
+	}
+	if empty.Ctx == nil || len(empty.Ctx) != 0 {
+		t.Fatalf("declared-empty context must be a non-nil empty slice, got %#v", empty.Ctx)
+	}
+
+	tokens, err := BuildReadyFilter(issueops.ReadyRequest{Ctx: []string{" host=studio ", "gpu", "gpu"}})
+	if err != nil {
+		t.Fatalf("BuildReadyFilter: %v", err)
+	}
+	if got, want := tokens.Ctx, []string{"host=studio", "gpu"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Ctx = %q, want %q", got, want)
+	}
+
+	// `bd list --ready --ctx` reaches the ready query through the IssueFilter
+	// bridge, so the field must cross it unchanged — including the nil case.
+	if got := ReadyFilterFromIssueFilter(types.IssueFilter{Ctx: []string{}}).Ctx; got == nil || len(got) != 0 {
+		t.Fatalf("bridge dropped a declared-empty context: %#v", got)
+	}
+	if got := ReadyFilterFromIssueFilter(types.IssueFilter{}).Ctx; got != nil {
+		t.Fatalf("bridge invented a context: %#v", got)
+	}
+}
