@@ -92,9 +92,9 @@ Emitted once per `bd` subcommand execution. Anchors all subsequent events for th
 
 ## 3. Storage Events
 
-Every `storage.DoltStorage` method AND every issueops role method is instrumented: the facade wave's role decorators in `internal/telemetry/` emit `storage.<Method>` and `storage.<Role>.<Method>` spans (e.g. `storage.IssueReader.Ready`, `storage.ReadyClaimer.ClaimNext`, `storage.Sweeper.Sweep`), all feeding the same `bd.storage.*` metrics with `db.operation` as the label. The tables below are representative examples, not an exhaustive enumeration.
+Every `storage.DoltStorage` method AND every issueops role method is instrumented: the facade wave's role decorators in `internal/telemetry/` emit `storage.<Method>` and `storage.<Role>.<Method>` spans (e.g. `storage.IssueReader.Ready`, `storage.ReadyClaimer.ClaimNext`, `storage.Sweeper.Sweep`), all feeding the same `bd.storage.*` metrics with `db.operation` as their only label (see *Metric labels* below). The tables below are representative examples, not an exhaustive enumeration.
 
-**Metric labels.** The span carries `db.operation` plus the method's request attributes (`bd.issue.id`, `bd.actor`, `bd.query`, `db.commit_msg`, ...). The three `bd.storage.*` metrics (`operations`, `operation.duration`, `errors`) carry `db.operation` and nothing else (`InstrumentedStorage.op` / `done`). Request attributes are per-request values: as metric labels they would make one series per value, run into the SDK's per-metric cardinality limit (2000 attribute sets, the rest folded into `otel.metric.overflow`) and send search text, commit messages and actor names to the metrics receiver. The attribute tables below describe the spans.
+**Metric labels.** The span carries `db.operation` plus the method's request attributes (`bd.issue.id`, `bd.actor`, `bd.query`, `db.commit_msg`, ...). The three `bd.storage.*` metrics (`operations`, `operation.duration`, `errors`) carry `db.operation` and nothing else (`InstrumentedStorage.op` / `done`). Request attributes are per-request values: as metric labels they would make one series per value, run into the SDK's per-metric cardinality limit (2000 attribute sets, the rest folded into `otel.metric.overflow`) and send search text, commit messages and actor names to the metrics receiver. Result attributes set later on the span (`bd.result.count`, etc.) are not metric labels either. The attribute tables below describe the spans.
 
 ### `storage.CreateIssue`
 
@@ -223,8 +223,8 @@ The two families do **not** double-count. The role decorators wrap the
 before wrapping), so one logical operation through the issueops front door emits
 its role span only — not a second `storage.<Method>` span beneath it. A create
 via issueops is one `storage.IssueOperations.Create`; a create via direct
-storage is one `storage.CreateIssue`. Counters and duration histograms are
-therefore comparable across both paths.
+storage is one `storage.CreateIssue`. Operation counts, durations and errors
+are therefore comparable across both paths, per `db.operation`.
 
 ---
 
@@ -261,7 +261,7 @@ Emitted for single-row queries via `queryRowContext()`.
 
 ### `dolt.commit`
 
-Emitted for DOLT_COMMIT operations. Carries only the shared `doltSpanAttrs()` (see the note at the top of this section) — the commit message no longer appears on this span. It survives only as `db.commit_msg` on the `storage.RunInTransaction` / `storage.RunInIssueLifecycleTransaction` spans (`internal/telemetry/storage.go:556,564`).
+Emitted for DOLT_COMMIT operations. Carries only the shared `doltSpanAttrs()` (see the note at the top of this section) — the commit message no longer appears on this span. It survives only as `db.commit_msg` on the `storage.RunInTransaction` / `storage.RunInIssueLifecycleTransaction` spans (`internal/telemetry/storage.go:691,699`).
 
 ### `dolt.push`
 
@@ -384,9 +384,9 @@ One span per Anthropic API call. The `bd.ai.operation` attribute distinguishes t
 
 | Metric (code name) | Type | Labels | Status |
 |--------|------|--------|--------|
-| `bd.storage.operations` | Counter | `db.operation` | ✅ Implemented |
-| `bd.storage.operation.duration` | Histogram (ms) | `db.operation` | ✅ Implemented |
-| `bd.storage.errors` | Counter | `db.operation` | ✅ Implemented |
+| `bd.storage.operations` | Counter | `db.operation` only | ✅ Implemented |
+| `bd.storage.operation.duration` | Histogram (ms) | `db.operation` only | ✅ Implemented |
+| `bd.storage.errors` | Counter | `db.operation` only | ✅ Implemented |
 | `bd.issue.count` | Gauge | `status` | ✅ Implemented |
 | `bd.db.retry_count` | Counter | — | ✅ Implemented |
 | `bd.db.lock_wait_ms` | Histogram | — | 🔲 Registered, not recorded |

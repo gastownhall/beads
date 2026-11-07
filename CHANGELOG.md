@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Telemetry metrics no longer carry actor names, search text or commit
+  messages.** With telemetry on (`BD_OTEL_ENABLED=true`), the
+  `bd.storage.operations` counter was labelled with each storage call's
+  request attributes, so actor identities (`bd.actor`), `bd search` text
+  (`bd.query`), commit messages (`db.commit_msg`), issue ids and config keys
+  reached the OTLP metrics receiver. The storage metrics are now labelled by
+  `db.operation` only (see Fixed below for the dashboard impact).
+
 - **A committed `.beads/.env` can no longer copy your environment into bd's
   settings, set a command or bearer token by a name the deny list missed, or
   pick a file for bd to overwrite.**
@@ -1232,6 +1240,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The duration and error metrics never carried `db.operation`: 77 of the 125
   storage operations recorded into one unlabeled series and the rest were
   keyed by request values. Request attributes stay on the spans.
+  **Breaking for dashboards:** the old series are replaced. Queries keyed on
+  `bd_actor`, `bd_issue_id`, `bd_issue_type`, `bd_query`, `db_commit_msg`,
+  `bd_dep_*`, `bd_config_*`, `slot_*` or `bd_since` on these three metrics
+  lose those labels; `bd_storage_operation_duration` and `bd_storage_errors`
+  gain `db_operation`.
 
 - `bd config set`, `bd config unset`, `bd repo add` and `bd repo remove` now
   replace an existing `config.yaml` in one step (temp file in the same

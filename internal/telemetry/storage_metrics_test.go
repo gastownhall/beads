@@ -15,6 +15,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // metricAttrStore answers the handful of storage calls the metric-attribute
@@ -98,7 +99,8 @@ func metricAttrSets(t *testing.T, reader *sdkmetric.ManualReader) map[string][]s
 // metric at 2000 sets and folds the rest into otel.metric.overflow) and send
 // user content to the metrics receiver. Duration and errors must carry
 // db.operation too, or every operation without request attributes would fall
-// into one unlabeled series.
+// into one unlabeled series. That includes every storage.<Role>.<Method>
+// operation, so a role decorator is driven as well.
 func TestStorageMetricsCarryOnlyTheOperation(t *testing.T) {
 	clearTelemetryEnv(t)
 	t.Setenv("BD_OTEL_STDOUT", "true")
@@ -112,6 +114,8 @@ func TestStorageMetricsCarryOnlyTheOperation(t *testing.T) {
 	_, _ = s.GetIssue(ctx, "bd-missing")
 	_, _ = s.GetIssueByExternalRef(ctx, "gh-9")
 	_, _ = s.SearchIssues(ctx, "rotate the prod password", types.IssueFilter{})
+	_, _ = s.WrapIssueReader(&fakeIssueReader{}).Get(ctx, issueops.GetRequest{ID: "bd-1"})
+	_, _ = s.WrapIssueReader(&fakeIssueReader{err: errors.New("not found")}).Get(ctx, issueops.GetRequest{ID: "bd-missing"})
 
 	got := metricAttrSets(t, reader)
 	want := map[string][]string{
@@ -119,17 +123,20 @@ func TestStorageMetricsCarryOnlyTheOperation(t *testing.T) {
 			"db.operation=CreateIssue",
 			"db.operation=GetIssue",
 			"db.operation=GetIssueByExternalRef",
+			"db.operation=IssueReader.Get",
 			"db.operation=SearchIssues",
 		},
 		"bd.storage.operation.duration": {
 			"db.operation=CreateIssue",
 			"db.operation=GetIssue",
 			"db.operation=GetIssueByExternalRef",
+			"db.operation=IssueReader.Get",
 			"db.operation=SearchIssues",
 		},
 		"bd.storage.errors": {
 			"db.operation=GetIssue",
 			"db.operation=GetIssueByExternalRef",
+			"db.operation=IssueReader.Get",
 		},
 	}
 	for name, sets := range want {
