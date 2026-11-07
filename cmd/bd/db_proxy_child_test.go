@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 	"github.com/stretchr/testify/assert"
@@ -54,6 +55,33 @@ func TestNewDatabaseServer_BackendExternal(t *testing.T) {
 		_, ok := srv.(*server.ExternalDoltServer)
 		assert.True(t, ok)
 	})
+}
+
+// TestDbProxyChildProxyOpts_TraceConnectionsFollowsDebug pins the only wiring
+// that turns proxy.log's per-connection lines back on: db-proxy-child sets
+// TraceConnections from debug.Enabled(), i.e. the BD_DEBUG it inherits.
+func TestDbProxyChildProxyOpts_TraceConnectionsFollowsDebug(t *testing.T) {
+	t.Cleanup(func() { debug.SetVerbose(false) })
+	debug.SetVerbose(true)
+	assert.True(t, dbProxyChildProxyOpts(nil).TraceConnections, "debug on must trace connections")
+	debug.SetVerbose(false)
+	// False unless BD_DEBUG is set in the test's own environment.
+	assert.Equal(t, debug.Enabled(), dbProxyChildProxyOpts(nil).TraceConnections, "TraceConnections must follow debug.Enabled()")
+}
+
+// TestDbProxyChildProxyOpts_ServerLogPathFollowsRotateFlag: the child bounds
+// the server log while it runs only when the spawning bd marked it as its
+// own (--rotate-logpath); an operator's log path is never handed on.
+func TestDbProxyChildProxyOpts_ServerLogPathFollowsRotateFlag(t *testing.T) {
+	prevPath, prevRotate := dbProxyChildLogPath, dbProxyChildRotateLogPath
+	t.Cleanup(func() { dbProxyChildLogPath, dbProxyChildRotateLogPath = prevPath, prevRotate })
+
+	dbProxyChildLogPath = "/beads/dolt/server.log"
+	dbProxyChildRotateLogPath = true
+	assert.Equal(t, "/beads/dolt/server.log", dbProxyChildProxyOpts(nil).ServerLogPath)
+
+	dbProxyChildRotateLogPath = false
+	assert.Empty(t, dbProxyChildProxyOpts(nil).ServerLogPath)
 }
 
 func TestNewDatabaseServer_BackendLocalSharedServerStillStubbed(t *testing.T) {

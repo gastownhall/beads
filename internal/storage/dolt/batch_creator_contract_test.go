@@ -24,6 +24,12 @@ func TestBatchCreatorContract(t *testing.T) {
 	t.Run("CreatesEveryItemAsOneAct", func(t *testing.T) {
 		conformance.RunBatchCreatorCreatesEveryItemAsOneAct(t, ctx, fixture)
 	})
+	t.Run("MintsADistinctIDForEachIdenticalItem", func(t *testing.T) {
+		conformance.RunBatchCreatorMintsADistinctIDForEachIdenticalItem(t, ctx, fixture)
+	})
+	t.Run("MintsPastAnIDALaterItemNames", func(t *testing.T) {
+		conformance.RunBatchCreatorMintsPastAnIDALaterItemNames(t, ctx, fixture)
+	})
 	t.Run("RefusesEverythingWhenOneItemRefuses", func(t *testing.T) {
 		conformance.RunBatchCreatorRefusesEverythingWhenOneItemRefuses(t, ctx, fixture)
 	})
@@ -60,6 +66,9 @@ func TestBatchCreatorContract(t *testing.T) {
 	t.Run("EchoesSubSecondTimestamps", func(t *testing.T) {
 		conformance.RunBatchCreatorEchoesSubSecondTimestamps(t, ctx, fixture)
 	})
+	t.Run("AppliesTheDefaultPriority", func(t *testing.T) {
+		conformance.RunBatchCreatorAppliesTheDefaultPriority(t, ctx, fixture)
+	})
 }
 
 // newDoltBatchCreatorFixture composes the frozen role kit with this backend's
@@ -83,6 +92,7 @@ func newDoltBatchCreatorFixture(t *testing.T, prefix string) (conformance.BatchC
 		BatchCreator: creator,
 		CreateIssue:  kit.CreateIssue,
 		QueryScalar:  kit.QueryScalar,
+		SetConfig:    kit.SetConfig,
 		CountHistory: kit.CountHistory,
 	}, ctx, stop
 }

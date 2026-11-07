@@ -47,7 +47,7 @@ func runQuickProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 			Labels:                  labels,
 			InheritLabelsFromParent: parentID != "",
 		}
-		result, err := uw.IssueUseCase().CreateIssue(ctx, params, actor)
+		result, err := uw.IssueUseCase().CreateIssue(ctx, params, currentActor())
 		if err != nil {
 			return nil, "", err
 		}

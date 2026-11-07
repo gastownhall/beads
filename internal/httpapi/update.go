@@ -39,13 +39,15 @@ const (
 var (
 	updateRequestMembers = []string{
 		"actor", updateClaimMember, "expected_assignee", "expected_status", "expected_version",
-		"force_assignee_transfer", "force_close_policy", "force_notes_overwrite", updatePatchMember,
+		"force_assignee_transfer", "force_close_policy", "force_notes_overwrite", "allow_template",
+		updatePatchMember,
 	}
 	issuePatchMembers = []string{
 		"title", "description", "design", "acceptance_criteria",
 		"notes", "append_notes", "priority", "issue_type", "status",
 		"assignee", "parent_id", "labels", "add_labels", "remove_labels", "metadata",
-		"estimated_minutes", "external_ref", "due_at", "defer_until",
+		"estimated_minutes", "external_ref", "due_at", "defer_until", "persistence",
+		"await_id", "waiters",
 	}
 	// nullablePatchMembers is the closed set on which explicit `null` CLEARS
 	// rather than refuses. They are exactly the members the role models as
@@ -181,6 +183,12 @@ func (s *Server) updateRequest(w http.ResponseWriter, r *http.Request, id string
 	if !ok {
 		return issueops.UpdateRequest{}, false
 	}
+	// allow_template is passed through: the role owns the template guard and
+	// what standing it down means.
+	allowTemplate, ok := s.booleanMember(w, r, members, "allow_template")
+	if !ok {
+		return issueops.UpdateRequest{}, false
+	}
 	if forceNotesOverwrite && !patch.Notes.Set {
 		s.fail(w, r, InvalidArgument("force_notes_overwrite", ReasonInvalidValue,
 			"`force_notes_overwrite` bypasses the fence on a NOTES REPLACEMENT; send `patch.notes` with it"))
@@ -244,6 +252,7 @@ func (s *Server) updateRequest(w http.ResponseWriter, r *http.Request, id string
 		ForceClosePolicy:      forceClosePolicy,
 		ForceAssigneeTransfer: forceAssigneeTransfer,
 		ForceNotesOverwrite:   forceNotesOverwrite,
+		AllowTemplate:         allowTemplate,
 		Provenance:            updateProvenance,
 	}, true
 }
@@ -418,6 +427,18 @@ func (s *Server) issuePatch(w http.ResponseWriter, r *http.Request, id string, m
 		}
 		patch.ParentID = issueops.Field[string]{Set: true, Value: *wire.ParentId}
 	}
+	if set("persistence") {
+		// The plane move (CapIssuesUpdatePersistence). The handler checks only
+		// that the value is one of the role's three modes, so an unknown one is
+		// a 400 naming the member rather than a translated storage error; the
+		// move itself, and every refusal it earns, is the role's.
+		mode := issueops.PersistenceMode(*wire.Persistence)
+		if !mode.IsValid() {
+			return refuse("persistence", fmt.Sprintf("`persistence` is %q; send %q, %q or %q",
+				*wire.Persistence, issueops.PersistenceModePersistent, issueops.PersistenceModeEphemeral, issueops.PersistenceModeNoHistory))
+		}
+		patch.Persistence = issueops.Field[issueops.PersistenceMode]{Set: true, Value: mode}
+	}
 	if set("metadata") {
 		// applyMetadataPatch, unchanged and not respelled: the replace/merge/
 		// set/unset algebra is one definition, and a second copy here would be a
@@ -472,6 +493,7 @@ func (s *Server) issuePatch(w http.ResponseWriter, r *http.Request, id string, m
 		member.apply(values)
 	}
 	patch.Labels = labelEdit
+	patchGateMembers(&patch, set, wire.AwaitId, wire.Waiters)
 
 	// The four nullable members. Set is true whenever the member is present;
 	// the VALUE is a nil pointer for an explicit null, which is how a clear
@@ -493,6 +515,23 @@ func (s *Server) issuePatch(w http.ResponseWriter, r *http.Request, id string, m
 		patch.DeferUntil = issueops.Field[*time.Time]{Set: true, Value: wire.DeferUntil}
 	}
 	return patch, true
+}
+
+// patchGateMembers projects the two gate members a patch publishes
+// (CapIssuesUpdateGates) onto the role's IssuePatch, for updateIssue and for
+// issues:batchApply's update item alike. Neither is nullable — the caller has
+// already refused a `null` — so a present member always carries a value: the
+// empty string clears await_id, and `[]` clears waiters, which is a WHOLE-VALUE
+// replacement. It checks nothing: the bounds are the role's
+// (issueops.GateFieldError), so the wire refuses what a local update refuses
+// and no more.
+func patchGateMembers(patch *issueops.IssuePatch, set func(string) bool, awaitID *string, waiters *[]string) {
+	if set("await_id") && awaitID != nil {
+		patch.AwaitID = issueops.Field[string]{Set: true, Value: *awaitID}
+	}
+	if set("waiters") && waiters != nil {
+		patch.Waiters = issueops.Field[[]string]{Set: true, Value: append([]string{}, *waiters...)}
+	}
 }
 
 // isJSONNull reports whether a raw member is the literal `null`.
@@ -657,6 +696,13 @@ func (s *Server) failUpdate(w http.ResponseWriter, r *http.Request, request issu
 
 	case !errors.Is(err, storage.ErrValidation):
 		s.failErr(w, r, err)
+
+	// A gate member past the role's bound (CapIssuesUpdateGates), named. Its
+	// detail is the caller's own input only (gateFieldParam), so it is quoted.
+	case isGateFieldError(err):
+		field, detail, _ := gateFieldParam(err)
+		refused()
+		s.fail(w, r, InvalidArgument(patchParam(field), ReasonInvalidValue, detail+"; nothing was written"))
 
 	default:
 		refused()

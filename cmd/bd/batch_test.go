@@ -1,9 +1,13 @@
 package main
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 func TestTokenizeBatchLine(t *testing.T) {
@@ -256,6 +260,91 @@ func TestParseUpdateKVs(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("parseUpdateKVs = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBatchDepAddEdge pins the edge a `dep add` line builds on both backends,
+// and that the line asks the dotted-id hierarchy rule before either backend
+// writes: the refusal is the role's own typed error, so a batch prints the
+// sentence `bd dep add` prints and rolls back on it.
+func TestBatchDepAddEdge(t *testing.T) {
+	tooLong := strings.Repeat("x", types.MaxDependencyTypeLen+1)
+	tests := []struct {
+		name       string
+		args       []string
+		want       *types.Dependency
+		wantErr    string
+		wantDotted bool
+	}{
+		{
+			name: "default type is blocks",
+			args: []string{"bd-1", "bd-2"},
+			want: &types.Dependency{IssueID: "bd-1", DependsOnID: "bd-2", Type: types.DepBlocks},
+		},
+		{
+			name: "explicit type",
+			args: []string{"bd-1", "bd-2", "related"},
+			want: &types.Dependency{IssueID: "bd-1", DependsOnID: "bd-2", Type: types.DepRelated},
+		},
+		{
+			name:    "missing to-id",
+			args:    []string{"bd-1"},
+			wantErr: "dep add requires <from-id> <to-id>",
+		},
+		{
+			name:    "invalid type",
+			args:    []string{"bd-1", "bd-2", tooLong},
+			wantErr: `dep add: invalid dependency type "` + tooLong + `"`,
+		},
+		{
+			name:       "dotted child gated on its own parent",
+			args:       []string{"bd-abc.1", "bd-abc"},
+			wantDotted: true,
+		},
+		{
+			name:       "any explicit type up the tree, not only blocking ones",
+			args:       []string{"bd-abc.1", "bd-abc", "related"},
+			wantDotted: true,
+		},
+		{
+			name:       "parent-child past the immediate parent",
+			args:       []string{"bd-abc.1.2", "bd-abc", "parent-child"},
+			wantDotted: true,
+		},
+		{
+			name: "parent-child to the immediate parent is the hierarchy itself",
+			args: []string{"bd-abc.1", "bd-abc", "parent-child"},
+			want: &types.Dependency{IssueID: "bd-abc.1", DependsOnID: "bd-abc", Type: types.DepParentChild},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := batchDepAddEdge(tt.args)
+			switch {
+			case tt.wantDotted:
+				var dotted *publicops.DottedChildDependencyError
+				if !errors.As(err, &dotted) {
+					t.Fatalf("batchDepAddEdge(%q) = %+v, %v; want *DottedChildDependencyError", tt.args, got, err)
+				}
+				if !errors.Is(err, publicops.ErrValidation) {
+					t.Errorf("refusal %v does not match ErrValidation", err)
+				}
+				if dotted.IssueID != tt.args[0] || dotted.DependsOnID != tt.args[1] {
+					t.Errorf("refusal names %s -> %s, want %s -> %s", dotted.IssueID, dotted.DependsOnID, tt.args[0], tt.args[1])
+				}
+			case tt.wantErr != "":
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("batchDepAddEdge(%q) err = %v, want %q", tt.args, err, tt.wantErr)
+				}
+			default:
+				if err != nil {
+					t.Fatalf("batchDepAddEdge(%q): %v", tt.args, err)
+				}
+				if !reflect.DeepEqual(got, tt.want) {
+					t.Errorf("batchDepAddEdge(%q) = %+v, want %+v", tt.args, got, tt.want)
+				}
 			}
 		})
 	}

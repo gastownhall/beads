@@ -315,7 +315,7 @@ func TestWorktreeCommandsIgnoreInheritedGitRoutingState(t *testing.T) {
 		commitTestFile(t, decoyMain, "README.md", "linked decoy\n", "decoy commit")
 		writeTestConfigYAML(t, filepath.Join(decoyMain, ".beads"), "json: [\n")
 		decoyLane := filepath.Join(t.TempDir(), "linked-decoy")
-		command := exec.Command("git", "worktree", "add", "-b", "linked-decoy", decoyLane)
+		command := gitCommand("worktree", "add", "-b", "linked-decoy", decoyLane)
 		command.Dir = decoyMain
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("create decoy linked worktree: %v\n%s", err, output)
@@ -378,7 +378,7 @@ func decodeWorktreeCommandJSON(t *testing.T, output string, target any) {
 
 func gitWorktreeRegistry(t *testing.T, repoDir string) string {
 	t.Helper()
-	command := exec.Command("git", "worktree", "list", "--porcelain")
+	command := gitCommand("worktree", "list", "--porcelain")
 	command.Dir = repoDir
 	output, err := command.CombinedOutput()
 	if err != nil {
@@ -416,7 +416,7 @@ func assertGitWorktreePaths(t *testing.T, repoDir string, want ...string) {
 
 func gitRevParsePath(t *testing.T, repoDir, selector string) string {
 	t.Helper()
-	command := exec.Command("git", "rev-parse", selector)
+	command := gitCommand("rev-parse", selector)
 	command.Dir = repoDir
 	output, err := command.CombinedOutput()
 	if err != nil {
@@ -439,10 +439,10 @@ func TestResolveWorktreePathByName(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(mainDir, "README.md"), []byte("# Test\n"), 0644); err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
-	cmd := exec.Command("git", "add", ".")
+	cmd := gitCommand("add", ".")
 	cmd.Dir = mainDir
 	_ = cmd.Run()
-	cmd = exec.Command("git", "commit", "-m", "Initial commit")
+	cmd = gitCommand("commit", "-m", "Initial commit")
 	cmd.Dir = mainDir
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("Failed to create initial commit: %v\n%s", err, output)
@@ -456,14 +456,14 @@ func TestResolveWorktreePathByName(t *testing.T) {
 
 	// Create a worktree inside .worktrees/
 	worktreePath := filepath.Join(worktreesDir, "test-wt")
-	cmd = exec.Command("git", "worktree", "add", "-b", "test-wt", worktreePath)
+	cmd = gitCommand("worktree", "add", "-b", "test-wt", worktreePath)
 	cmd.Dir = mainDir
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("Failed to create worktree: %v\n%s", err, output)
 	}
 	defer func() {
 		// Cleanup worktree
-		cmd := exec.Command("git", "worktree", "remove", worktreePath, "--force")
+		cmd := gitCommand("worktree", "remove", worktreePath, "--force")
 		cmd.Dir = mainDir
 		_ = cmd.Run()
 	}()

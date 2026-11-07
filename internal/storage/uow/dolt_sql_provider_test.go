@@ -10,7 +10,22 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 )
+
+func TestBuildDSNUsesAuthenticatedProxyNetwork(t *testing.T) {
+	dsn := buildDSN(proxy.DataNetwork, proxy.Endpoint{Host: "127.0.0.1", Port: 12345}, "beads", "root", "secret", "")
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Net != proxy.DataNetwork {
+		t.Fatalf("DSN network = %q, want %q", cfg.Net, proxy.DataNetwork)
+	}
+	if cfg.Addr != "127.0.0.1:12345" {
+		t.Fatalf("DSN address = %q, want %q", cfg.Addr, "127.0.0.1:12345")
+	}
+}
 
 // fakePinger is a pinger test double that returns a scripted sequence of
 // responses and fails the test if called more times than scripted — that

@@ -270,6 +270,20 @@ func setupTestStore(t *testing.T) (*DoltStore, func()) {
 	return store, cleanup
 }
 
+// rerunSchemaInitOnTestStore re-runs schema initialization on a
+// setupTestStore store, for tests that set up a schema state and then assert
+// what one more migration pass does to it. Every setupTestStore caller shares
+// testSharedDB, so this pass's GET_LOCK contends with every parallel test's
+// own setup-time init for the same database-scoped lock name, exactly like the
+// branch-local init in setupTestStore. The bare initSchemaOnDB gives up after
+// one 5s wait (migrationLockAcquireTimeoutSeconds) and failed such tests with
+// "schema migration lock unavailable: timeout" on loaded CI runners; the
+// retrying helper retries only a contended lock or a transient connection
+// error, never a migration result, so the outcome under test is unchanged.
+func rerunSchemaInitOnTestStore(ctx context.Context, store *DoltStore) (int, error) {
+	return initSchemaOnDBWithRetry(ctx, store.db)
+}
+
 // setupConcurrentTestStore creates a test store with its own database for
 // concurrent tests that need multiple connections. Branch-per-test isolation
 // requires MaxOpenConns=1, which prevents concurrent transactions.
@@ -1267,7 +1281,7 @@ func TestDeleteIssuesBatchPerformance(t *testing.T) {
 			dep := &types.Dependency{
 				IssueID:     fmt.Sprintf("batch-del-%d", i),
 				DependsOnID: fmt.Sprintf("batch-del-%d", i-1),
-				Type:        types.DepBlocks,
+				Type:        types.DepParentChild,
 			}
 			if err := store.AddDependency(ctx, dep, "tester"); err != nil {
 				t.Fatalf("failed to add dependency %d: %v", i, err)
@@ -1387,7 +1401,7 @@ func TestDeleteIssuesDryRun(t *testing.T) {
 	ctx, cancel := testContext(t)
 	defer cancel()
 
-	// Create 3 issues with chain deps and a label
+	// Create 3 issues with parent-child chain deps and a label
 	for i := 1; i <= 3; i++ {
 		iss := &types.Issue{
 			ID: fmt.Sprintf("dry-%d", i), Title: fmt.Sprintf("Dry %d", i),
@@ -1399,7 +1413,7 @@ func TestDeleteIssuesDryRun(t *testing.T) {
 		if i > 1 {
 			dep := &types.Dependency{
 				IssueID: fmt.Sprintf("dry-%d", i), DependsOnID: fmt.Sprintf("dry-%d", i-1),
-				Type: types.DepBlocks,
+				Type: types.DepParentChild,
 			}
 			if err := store.AddDependency(ctx, dep, "tester"); err != nil {
 				t.Fatalf("failed to add dep: %v", err)
@@ -1525,7 +1539,7 @@ func TestDeleteIssuesBatchBoundary(t *testing.T) {
 				}
 				if i > 0 {
 					dep := &types.Dependency{
-						IssueID: id, DependsOnID: ids[i-1], Type: types.DepBlocks,
+						IssueID: id, DependsOnID: ids[i-1], Type: types.DepParentChild,
 					}
 					if err := store.AddDependency(ctx, dep, "tester"); err != nil {
 						t.Fatalf("failed to add dep: %v", err)
@@ -1581,7 +1595,7 @@ func TestDeleteIssuesCircularDeps(t *testing.T) {
 		{"circ-c", "circ-b"},
 	} {
 		dep := &types.Dependency{
-			IssueID: d.from, DependsOnID: d.to, Type: types.DepBlocks,
+			IssueID: d.from, DependsOnID: d.to, Type: types.DepParentChild,
 		}
 		if err := store.AddDependency(ctx, dep, "tester"); err != nil {
 			t.Fatalf("failed to add dep %s->%s: %v", d.from, d.to, err)
@@ -1592,7 +1606,7 @@ func TestDeleteIssuesCircularDeps(t *testing.T) {
 	// ability to handle cycles that may exist in the database, not AddDependency.
 	if _, err := store.execContext(ctx, `
 		INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by, metadata)
-		VALUES (UUID(), ?, ?, 'blocks', NOW(), 'tester', '{}')
+		VALUES (UUID(), ?, ?, 'parent-child', NOW(), 'tester', '{}')
 	`, "circ-a", "circ-c"); err != nil {
 		t.Fatalf("failed to insert cycle-completing dep circ-a->circ-c: %v", err)
 	}
@@ -1642,7 +1656,7 @@ func TestDeleteIssuesDiamondDeps(t *testing.T) {
 	}
 	for _, d := range deps {
 		dep := &types.Dependency{
-			IssueID: d.from, DependsOnID: d.to, Type: types.DepBlocks,
+			IssueID: d.from, DependsOnID: d.to, Type: types.DepParentChild,
 		}
 		if err := store.AddDependency(ctx, dep, "tester"); err != nil {
 			t.Fatalf("failed to add dep: %v", err)

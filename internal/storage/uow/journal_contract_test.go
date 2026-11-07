@@ -42,6 +42,42 @@ func TestJournalContract(t *testing.T) {
 	t.Run("HeadSurvivesAFullPrune", func(t *testing.T) {
 		conformance.RunJournalHeadSurvivesAFullPrune(t, ctx, fixture)
 	})
+	t.Run("ArrivalStampsAWispCreateWithItsRecordSeq", func(t *testing.T) {
+		conformance.RunJournalArrivalStampsAWispCreateWithItsRecordSeq(t, ctx, fixture)
+	})
+	t.Run("ArrivalOrdersABatchByItem", func(t *testing.T) {
+		conformance.RunJournalArrivalOrdersABatchByItem(t, ctx, fixture)
+	})
+	t.Run("ArrivalIsOnEveryReadPath", func(t *testing.T) {
+		conformance.RunJournalArrivalIsOnEveryReadPath(t, ctx, fixture)
+	})
+	t.Run("ArrivalNeverChanges", func(t *testing.T) {
+		conformance.RunJournalArrivalNeverChanges(t, ctx, fixture)
+	})
+	t.Run("ArrivalOnlyWhileJournaling", func(t *testing.T) {
+		conformance.RunJournalArrivalOnlyWhileJournaling(t, ctx, fixture)
+	})
+	t.Run("ArrivalOnlyOnTheWispPlane", func(t *testing.T) {
+		conformance.RunJournalArrivalOnlyOnTheWispPlane(t, ctx, fixture)
+	})
+	t.Run("ArrivalRecoversCreateOrderAfterTruncation", func(t *testing.T) {
+		conformance.RunJournalArrivalRecoversCreateOrderAfterTruncation(t, ctx, fixture)
+	})
+	t.Run("ArrivalIsNeverReused", func(t *testing.T) {
+		conformance.RunJournalArrivalIsNeverReused(t, ctx, fixture)
+	})
+	t.Run("ArrivalIgnoresSuppliedValues", func(t *testing.T) {
+		conformance.RunJournalArrivalIgnoresSuppliedValues(t, ctx, fixture)
+	})
+	t.Run("ArrivalReimportKeepsTheStamp", func(t *testing.T) {
+		conformance.RunJournalArrivalReimportKeepsTheStamp(t, ctx, fixture)
+	})
+	t.Run("ArrivalFirstCreateRecordStampsAnUnstampedRow", func(t *testing.T) {
+		conformance.RunJournalArrivalFirstCreateRecordStampsAnUnstampedRow(t, ctx, fixture)
+	})
+	t.Run("ArrivalRenameKeepsTheStamp", func(t *testing.T) {
+		conformance.RunJournalArrivalRenameKeepsTheStamp(t, ctx, fixture)
+	})
 	t.Run("EveryMutationKindLandsARow", func(t *testing.T) {
 		conformance.RunJournalEveryMutationKindLandsARow(t, ctx, fixture)
 	})
@@ -68,9 +104,18 @@ func newUOWJournalFixture(t *testing.T, ctx context.Context, prefix string) conf
 	if !ok {
 		t.Fatalf("provider %T does not implement storage.EventsJournalConfigurer", provider)
 	}
+	roles, ok := provider.(conformance.ArrivalRoleSource)
+	if !ok {
+		t.Fatalf("provider %T does not offer the lifecycle, batch-create, import and reader accessors", provider)
+	}
 	return conformance.JournalFixture{
-		IssuePrefix:       prefix,
-		Journal:           cursor,
+		IssuePrefix: prefix,
+		Journal:     cursor,
+		Arrival: conformance.ArrivalHooksFromSource(t, roles, func(ctx context.Context, id string) error {
+			return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+				return "promote " + id, uw.IssueUseCase().PromoteWisp(ctx, id, "actor")
+			})
+		}),
 		SetJournalEnabled: configurer.SetEventsJournalEnabled,
 		Prune: func(ctx context.Context, before int64, retainDays, retainRows int) (int64, error) {
 			// Ephemeral, exactly as `bd events prune` runs it here: the journal

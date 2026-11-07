@@ -257,7 +257,7 @@ func TestDisplayPrettyListWithDepsReadyExplicitStatusFooter(t *testing.T) {
 	}
 
 	depsOut := captureStdout(t, func() error {
-		displayPrettyListWithDepsMode(issues, false, nil, "scheduling", false, true, "in_progress", "", false)
+		displayPrettyListWithDepsMode(issues, false, nil, "scheduling", false, true, "in_progress", "", false, nil)
 		return nil
 	})
 	if strings.Contains(depsOut, "open only") || strings.Contains(depsOut, "excludes in_progress") {

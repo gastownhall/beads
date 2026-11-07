@@ -37,6 +37,10 @@ var (
 	// ResetCaches: see that function's comment and PinNoRepositoryUnderForTesting's
 	// doc for why the pin must outlive a cache reset to do its job.
 	pinnedRootForTesting string
+	// pinnedRootRawForTesting is the pin as given (absolute but not
+	// symlink-resolved). underPinnedRootForTesting matches against both forms
+	// so canonicalization only ever widens the fence, never narrows it.
+	pinnedRootRawForTesting string
 )
 
 // underPinnedRootForTesting reports whether wd is pinnedRootForTesting itself
@@ -44,21 +48,75 @@ var (
 // getGitContext lookup while a pin is active, so a test that chdirs outside
 // the pinned root (e.g. into its own t.TempDir() fixture) still gets real git
 // detection scoped to that fixture.
+//
+// Both sides are compared in canonical form (see canonicalPinPath): on macOS
+// t.TempDir() and os.TempDir() live under /var/folders/..., but /var is a
+// symlink to /private/var and getcwd(2) reports the resolved
+// /private/var/folders/... path, so a raw prefix test never matched and the
+// pin silently did nothing there.
 func underPinnedRootForTesting(wd string) bool {
 	if pinnedRootForTesting == "" || wd == "" {
 		return false
 	}
-	if wd == pinnedRootForTesting {
-		return true
+	canonicalWD := canonicalPinPath(wd)
+	for _, root := range []string{pinnedRootForTesting, pinnedRootRawForTesting} {
+		if root == "" {
+			continue
+		}
+		for _, dir := range []string{wd, canonicalWD} {
+			if dir == root || strings.HasPrefix(dir, root+string(filepath.Separator)) {
+				return true
+			}
+		}
 	}
-	return strings.HasPrefix(wd, pinnedRootForTesting+string(filepath.Separator))
+	return false
+}
+
+// canonicalPinPath returns p as an absolute, symlink-resolved, cleaned path,
+// falling back to the best form available when resolution fails (e.g. the
+// path no longer exists), so the pin comparison is never stricter than the
+// raw strings.
+func canonicalPinPath(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
+	}
+	return filepath.Clean(p)
 }
 
 // initGitContext populates the gitContext with a single git call.
 // This is called once per process via sync.Once.
+//
+// The process-wide context is the one every bd invocation resolves at startup
+// (beads directory discovery), so it first tries discoverGitInProcess, which
+// answers the common layouts — an ordinary repository, a linked worktree, a
+// submodule, no repository at all — from the filesystem with the exact output
+// `git rev-parse --git-dir --git-common-dir --show-toplevel` would print, and
+// declines (falling back to that subprocess) for anything it cannot prove
+// equivalent: GIT_DIR-style overrides, repository config that moves the work
+// tree, ownership that would engage safe.directory, and so on.
 func initGitContext() {
+	if raw, ok := discoverGitInProcess(); ok {
+		gitCtx = gitContextFromRevParse("", raw)
+		return
+	}
 	gitCtx = loadGitContext("", nil)
 }
+
+// revParseResult is the answer to `git rev-parse --git-dir --git-common-dir
+// --show-toplevel`, in Git's own spelling, or notRepo when Git would report
+// that the directory is not inside a repository.
+type revParseResult struct {
+	gitDir, commonDir, topLevel string
+	notRepo                     bool
+	notRepoErr                  error // why, when notRepo; nil means errNotGitRepository
+}
+
+// errNotGitRepository stands in for git's exit status when in-process
+// discovery establishes that there is no repository to find.
+var errNotGitRepository = errors.New("no .git found in the working directory or any parent")
 
 func loadGitContext(workDir string, env []string) gitContext {
 	var ctx gitContext
@@ -84,10 +142,29 @@ func loadGitContext(workDir string, env []string) gitContext {
 		ctx.err = fmt.Errorf("unexpected git rev-parse output: got %d lines, expected 3", len(lines))
 		return ctx
 	}
+	return gitContextFromRevParse(workDir, revParseResult{
+		gitDir:    strings.TrimSpace(lines[0]),
+		commonDir: strings.TrimSpace(lines[1]),
+		topLevel:  strings.TrimSpace(lines[2]),
+	})
+}
 
-	ctx.gitDirRaw = strings.TrimSpace(lines[0])
-	commonDirRaw := strings.TrimSpace(lines[1])
-	repoRootRaw := strings.TrimSpace(lines[2])
+// gitContextFromRevParse derives the cached context from rev-parse output,
+// whichever of git or discoverGitInProcess produced it, so both paths share
+// one normalization.
+func gitContextFromRevParse(workDir string, raw revParseResult) gitContext {
+	var ctx gitContext
+	if raw.notRepo {
+		reason := raw.notRepoErr
+		if reason == nil {
+			reason = errNotGitRepository
+		}
+		ctx.err = fmt.Errorf("not a git repository: %w", reason)
+		return ctx
+	}
+	ctx.gitDirRaw = raw.gitDir
+	commonDirRaw := raw.commonDir
+	repoRootRaw := raw.topLevel
 
 	// Convert commonDir to absolute for reliable comparison
 	absCommon, err := absoluteGitPath(workDir, commonDirRaw)
@@ -144,7 +221,7 @@ type HooksContext struct {
 // normalizeHooksWorkDir anchors workDir and normalizes its symlinks and case
 // once. Every HooksContext producer shares it so they cannot drift into emitting
 // different spellings of the same directory: worktree code string-compares these
-// paths (GH#880).
+// paths (GH#880). GetMainRepoRootFrom shares it for the same reason.
 // The caller-supplied directory must resolve before it can select a repo:
 // unlike the discovered repoRoot spelling in loadGitContext, it is an input
 // to Git.
@@ -426,6 +503,27 @@ func GetMainRepoRoot() (string, error) {
 	return ctx.mainRepoRoot(), nil
 }
 
+// GetMainRepoRootFrom is the path-aware variant of GetMainRepoRoot: it
+// resolves the repository containing startDir rather than the current
+// working directory's, and neither reads nor changes the cached context.
+// startDir is anchored and symlink/case-normalized as ResolveHooksContext's
+// workDir is, and Git's environment is inherited. It errors outside a work
+// tree.
+func GetMainRepoRootFrom(startDir string) (string, error) {
+	if startDir == "" {
+		return "", fmt.Errorf("main repository root requires a working directory")
+	}
+	workDir, err := normalizeHooksWorkDir(startDir)
+	if err != nil {
+		return "", err
+	}
+	ctx := loadGitContext(workDir, nil)
+	if ctx.err != nil {
+		return "", ctx.err
+	}
+	return ctx.mainRepoRoot(), nil
+}
+
 func (ctx *gitContext) mainRepoRoot() string {
 	if ctx.isWorktree {
 		// For worktrees, the main repo root is the parent of the shared .git directory.
@@ -556,11 +654,11 @@ var errPinnedNoRepository = errors.New("not a git repository (pinned for testing
 // WARNING: Not thread-safe, like ResetCaches. Only call before m.Run(),
 // before any goroutines that might read the git context are started.
 func PinNoRepositoryUnderForTesting(root string) {
-	abs, err := filepath.Abs(root)
-	if err == nil {
-		root = abs
+	pinnedRootRawForTesting = root
+	if abs, err := filepath.Abs(root); err == nil {
+		pinnedRootRawForTesting = abs
 	}
-	pinnedRootForTesting = root
+	pinnedRootForTesting = canonicalPinPath(root)
 	gitCtxOnce = sync.Once{}
 	gitCtx = gitContext{}
 }

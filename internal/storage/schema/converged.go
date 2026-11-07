@@ -99,7 +99,9 @@ func alreadyConverged(ctx context.Context, db DBConn, databaseName string, selec
 	// deliberately non-ignored table that the next pull's auto-commit puts
 	// into HEAD and push replicates fleet-wide.
 	//
-	// Two always-succeeding reads on the hot path, both bounded to one row.
+	// Two SHOW TABLES listings on the hot path, safe to issue because
+	// selectTargetDatabase has put the session on the target (see
+	// readIgnoredCursorState).
 	state, err := readIgnoredCursorState(ctx, db, qualifier)
 	if err != nil {
 		return false, err

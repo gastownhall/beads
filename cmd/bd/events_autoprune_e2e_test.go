@@ -13,7 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 )
 
-// TestAutoPruneBoundsTheJournalAfterAMutatingCommand is the feature as a user
+// TestEmbeddedAutoPruneBoundsTheJournalAfterAMutatingCommand is the feature as a user
 // meets it: enable the journal, write, and the journal stays inside its floors
 // without anyone running `bd events prune`.
 //
@@ -30,7 +30,7 @@ import (
 // because the throttle's persisted watermark is never stamped while auto-prune
 // is off, so the next command with it on is the first pass this workspace has
 // ever run.
-func TestAutoPruneBoundsTheJournalAfterAMutatingCommand(t *testing.T) {
+func TestEmbeddedAutoPruneBoundsTheJournalAfterAMutatingCommand(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -117,12 +117,12 @@ func TestAutoPruneBoundsTheJournalAfterAMutatingCommand(t *testing.T) {
 	}
 }
 
-// TestAutoPruneLeavesAnUnboundedJournalAlone. Both floors at 0 is the documented
+// TestEmbeddedAutoPruneLeavesAnUnboundedJournalAlone. Both floors at 0 is the documented
 // way to keep every record, and it is also the configuration the truncation
 // tests run under — so a maintenance pass that ignored it would quietly delete
 // the history those tests (and any consumer that chose an unbounded ledger)
 // depend on.
-func TestAutoPruneLeavesAnUnboundedJournalAlone(t *testing.T) {
+func TestEmbeddedAutoPruneLeavesAnUnboundedJournalAlone(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -158,7 +158,7 @@ func TestAutoPruneLeavesAnUnboundedJournalAlone(t *testing.T) {
 	}
 }
 
-// TestAutoPruneRespectsBdConfigSet drives the whole retention story through
+// TestEmbeddedAutoPruneRespectsBdConfigSet drives the whole retention story through
 // `bd config set` rather than the environment.
 //
 // The four events-journal keys are startup settings read through viper before
@@ -167,7 +167,7 @@ func TestAutoPruneLeavesAnUnboundedJournalAlone(t *testing.T) {
 // `bd config set events-journal true` reported success and changed nothing.
 // A new key is one YamlOnlyKeys entry away from repeating it, and the symptom
 // is invisible: retention that silently keeps whatever the default was.
-func TestAutoPruneRespectsBdConfigSet(t *testing.T) {
+func TestEmbeddedAutoPruneRespectsBdConfigSet(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -221,7 +221,7 @@ func TestAutoPruneRespectsBdConfigSet(t *testing.T) {
 	}
 }
 
-// TestAutoPruneDoesNotRunForReadOnlyCommands. The trigger is writer-pays, and
+// TestEmbeddedAutoPruneDoesNotRunForReadOnlyCommands. The trigger is writer-pays, and
 // three separate gates keep it that way — each one covered here by a command
 // that would prune the journal without it:
 //
@@ -236,7 +236,7 @@ func TestAutoPruneRespectsBdConfigSet(t *testing.T) {
 //   - `bd migrate --dry-run` is a PREVIEW. It promised not to mutate and holds
 //     a write-refusing store; maintenance must not be the one write it
 //     performs.
-func TestAutoPruneDoesNotRunForReadOnlyCommands(t *testing.T) {
+func TestEmbeddedAutoPruneDoesNotRunForReadOnlyCommands(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}

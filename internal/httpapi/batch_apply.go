@@ -84,25 +84,25 @@ var (
 	applyItemMembers         = []string{"close", "create", "dep_add", "kind", "update"}
 	applyRefMembers          = []string{"id", "key"}
 	applyCreateItemMembers   = []string{
-		"acceptance_criteria", "assignee", "defer_until", "description", "design",
+		"acceptance_criteria", "assignee", "await_id", "await_type", "defer_until", "description", "design",
 		"due_at", "ephemeral", "estimated_minutes", "external_ref", "id",
 		"issue_type", "key", "labels", "metadata", "metadata_refs", "no_history",
-		"notes", "owner", "priority", "sender", "status", "title",
+		"notes", "owner", "priority", "sender", "status", "timeout", "title", "waiters",
 	}
 	applyUpdateItemMembers = []string{
 		"expected_assignee", "expected_status", "expected_version",
 		"force_assignee_transfer", "force_close_policy", "force_notes_overwrite", "patch", "target",
 	}
 	applyPatchMembers = []string{
-		"acceptance_criteria", "append_notes", "assignee", "defer_until",
+		"acceptance_criteria", "append_notes", "assignee", "await_id", "defer_until",
 		"description", "design", "due_at", "estimated_minutes", "external_ref",
 		"issue_type", "labels", "metadata", "notes", "owner", "priority",
-		"status", "title",
+		"status", "title", "waiters",
 	}
 	applyLabelPatchMembers    = []string{"add", "remove", "replace"}
 	applyMetadataPatchMembers = []string{"merge", "replace", "set", "unset"}
 	applyCloseItemMembers     = []string{"expected_version", "force", "reason", "session", "target"}
-	applyDepAddItemMembers    = []string{"metadata", "source", "target", "type"}
+	applyDepAddItemMembers    = []string{"has_spawner", "metadata", "source", "target", "thread_id", "type"}
 
 	// applyItemKinds is the tag vocabulary, paired with the payload member each
 	// value names. It is one map rather than a switch so the enum, the member
@@ -213,6 +213,7 @@ func (s *Server) applyBatchRequest(w http.ResponseWriter, r *http.Request) (issu
 	if res != nil {
 		return refuse(res)
 	}
+	// No created_by stamp: the role defaults each create item's to the actor.
 	return issueops.ApplyBatchRequest{
 		Actor:                 actor,
 		Items:                 items,
@@ -425,8 +426,11 @@ func applyCreateItem(prefix string, encoded json.RawMessage, raw map[string]json
 	if wire.NoHistory != nil {
 		issue.NoHistory = *wire.NoHistory
 	}
+	createGateMembers(issue, wire.AwaitType, wire.AwaitId, wire.Timeout, wire.Waiters)
 
-	item := &issueops.CreateItem{Key: derefString(wire.Key), Issue: issue}
+	// An absent `priority` is the role's default (CreateItem.DefaultPriority),
+	// never a 0 — which is P0 — made up here.
+	item := &issueops.CreateItem{Key: derefString(wire.Key), Issue: issue, DefaultPriority: wire.Priority == nil}
 	refs, res := applyMetadataRefs(prefix, raw)
 	if res != nil {
 		return nil, res
@@ -632,6 +636,7 @@ func applyPatch(prefix string, encoded json.RawMessage, raw map[string]json.RawM
 	if set("defer_until") {
 		patch.DeferUntil = issueops.Field[*time.Time]{Set: true, Value: wire.DeferUntil}
 	}
+	patchGateMembers(&patch, set, wire.AwaitId, wire.Waiters)
 	if set("labels") {
 		labels, res := applyLabelPatch(prefix+"labels.", raw["labels"])
 		if res != nil {
@@ -823,6 +828,28 @@ func applyDepAddItem(prefix string, raw map[string]json.RawMessage) (*issueops.D
 	if metadata, present := raw["metadata"]; present {
 		item.Metadata = string(metadata)
 	}
+	// has_spawner and thread_id are additive members gated client-side by
+	// issues.batchApply.depAddLineage (routes.go CapBatchApplyDepAddLineage):
+	// the server always understands them once wired, so there is no
+	// capability check here — the gate lives entirely in the client that
+	// decides whether to SEND them against an older server.
+	hasSpawner, res := applyBoolMember(raw, prefix, "has_spawner")
+	if res != nil {
+		return nil, res
+	}
+	item.HasSpawner = hasSpawner
+	threadID, res := applyTextMember(raw, prefix, "thread_id")
+	if res != nil {
+		return nil, res
+	}
+	// The document's minLength: 1. An ABSENT thread_id already names no thread
+	// (and a re-add keeps the stored one), so an empty one would only be a
+	// second spelling of it — refused, as an empty `type` is, rather than read.
+	if _, present := raw["thread_id"]; present && threadID == "" {
+		res := InvalidArgument(prefix+"thread_id", ReasonInvalidValue, "`thread_id` must not be empty; omit it to name no thread")
+		return nil, &res
+	}
+	item.ThreadID = threadID
 	return item, nil
 }
 
@@ -930,6 +957,7 @@ func (s *Server) failApplyBatch(w http.ResponseWriter, r *http.Request, request 
 		endpoint     *issueops.DependencyEndpointNotFoundError
 		openChildren *issueops.CloseOpenChildrenError
 		claimed      *issueops.ClaimConflictError
+		expired      *issueops.IdempotencyExpiredError
 	)
 	// The item wrapper is read once and shared by every branch below: a refusal
 	// that names an item names it whatever the inner sentinel turns out to be.
@@ -1001,6 +1029,21 @@ func (s *Server) failApplyBatch(w http.ResponseWriter, r *http.Request, request 
 		s.refusedApplyBatch(r, err)
 		s.fail(w, r, at(InvalidArgument("", ReasonInvalidValue, "an issue cannot depend on itself"), "target"))
 
+	// A RETIRED explicit id on a create item is a 410, by its own type and
+	// ahead of the occupied-id and validation arms, for failCreateIssue's
+	// reason.
+	case errors.As(err, &expired):
+		s.refusedApplyBatch(r, err)
+		if itemErr != nil && itemErr.IssueID == "" {
+			// A create refused before its id was minted names no id on the
+			// item; this refusal is ABOUT the id the caller sent, so it is the
+			// one `item_issue_id` can and should carry.
+			itemErr.IssueID = expired.ID
+		}
+		s.fail(w, r, at(newResult(CodeIdempotencyExpired,
+			"a create item's `id` was retired by a retention sweep; the create that used it already happened and nothing was written").
+			WithClosedAt(expired.ClosedAt), "id"))
+
 	// An occupied explicit id is a 409: the body is well-formed and stays
 	// well-formed, and what refuses it is STATE the client cannot see without
 	// reading it — so recovery is to look at that state (adopt the row, pick
@@ -1023,6 +1066,14 @@ func (s *Server) failApplyBatch(w http.ResponseWriter, r *http.Request, request 
 	case errors.Is(err, issueops.ErrCloseBlocked):
 		s.fail(w, r, at(closeBlockedResult(err,
 			"an item closes a blocked issue", "clear the blocker, or send the item's force flag"), ""))
+
+	// An update item naming a template, or the close guards on a close item:
+	// the shared mapping, carrying the holder for not_assignee, plus the item
+	// members.
+	case errors.Is(err, issueops.ErrTemplateReadOnly),
+		errors.Is(err, issueops.ErrPinned),
+		errors.As(err, new(*issueops.CloseNotAssigneeError)):
+		s.fail(w, r, at(ClassifyError(err), ""))
 
 	case errors.Is(err, storage.ErrAlreadyClaimed):
 		res := at(newResult(CodeAlreadyClaimed,
@@ -1051,6 +1102,17 @@ func (s *Server) failApplyBatch(w http.ResponseWriter, r *http.Request, request 
 	// refusal's 400 above.
 	case errors.Is(err, storage.ErrNotFound):
 		s.fail(w, r, at(NotFound(), ""))
+
+	// A gate member past the role's bound (CapIssuesCreateGates on a create
+	// item, CapIssuesUpdateGates on an update item's patch), named at its own
+	// level. Its detail is the caller's own input only (gateFieldParam).
+	case isGateFieldError(err):
+		field, detail, _ := gateFieldParam(err)
+		s.refusedApplyBatch(r, err)
+		if itemErr != nil && itemErr.Kind == issueops.ItemUpdate {
+			field = "patch." + field
+		}
+		s.fail(w, r, at(InvalidArgument("", ReasonInvalidValue, detail+"; nothing was written"), field))
 
 	case errors.Is(err, storage.ErrValidation):
 		s.refusedApplyBatch(r, err)

@@ -46,6 +46,7 @@ func TestProxiedServerHistoryRemoteRefusalFrontDoorMatrix(t *testing.T) {
 			}},
 			fixture{name: "external-unix", make: func(t *testing.T) proxiedProject {
 				requireProxiedServerEnv(t)
+				requireSocat(t)
 				upstream := testutil.StartIsolatedDoltContainerHandle(t)
 				socket := shortSocketPath(t, "dolt.sock")
 				bridge := startHistoryUnixBridge(t, socket, upstream.Port)
@@ -316,9 +317,7 @@ func openDirectHistoryDB(t *testing.T, p directHistoryProject) *sql.DB {
 
 func startHistoryUnixBridge(t *testing.T, endpoint, upstreamPort string) *exec.Cmd {
 	t.Helper()
-	if _, err := exec.LookPath("socat"); err != nil {
-		t.Skipf("socat is required for external Unix topology: %v", err)
-	}
+	requireSocat(t)
 	if err := os.Remove(endpoint); err != nil && !os.IsNotExist(err) {
 		t.Fatalf("remove stale Unix socket: %v", err)
 	}
@@ -358,7 +357,7 @@ func TestProxiedServerHistoryRemoteSupportedFrontDoorParity(t *testing.T) {
 		}},
 		{"external-tcp", func(t *testing.T) proxiedProject {
 			requireProxiedServerEnv(t)
-			return newSharedProxiedProject(t, bd, "hs_tcp")
+			return newSharedProxiedRootProject(t, bd, "hs_tcp")
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -388,13 +387,16 @@ func TestProxiedServerHistoryRemoteSupportedFrontDoorParity(t *testing.T) {
 	}
 }
 
-func TestHistoryRemoteSupportedDirectAndProxiedParity(t *testing.T) {
+func TestProxiedServerHistoryRemoteSupportedDirectParity(t *testing.T) {
 	if os.Getenv("BEADS_TEST_PROXIED_SERVER") != "1" {
 		t.Skip("set BEADS_TEST_PROXIED_SERVER=1 to run direct/server parity")
 	}
 	bd := buildEmbeddedBD(t)
 	direct := newDirectHistoryProject(t, bd, "hp_direct")
-	proxied := newSharedProxiedProject(t, bd, "hp_proxy")
+	// Root, not the database-scoped user: exerciseHistoryParity's `bd dolt
+	// remote remove` needs DOLT_REMOTE, a server-wide privilege (#7436 moved
+	// the other remote-removing tests to root; this one ran in no lane then).
+	proxied := newSharedProxiedRootProject(t, bd, "hp_proxy")
 
 	directIssue := createDirectHistoryIssue(t, bd, direct)
 	proxyIssue := bdProxiedCreate(t, bd, proxied.dir, "history parity")

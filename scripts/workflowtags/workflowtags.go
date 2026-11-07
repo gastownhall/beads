@@ -92,7 +92,7 @@ type workflowStep struct {
 // allowsBareCommands reports whether a workflow opts out of this check with the
 // repository's existing marker in its first five lines.
 //
-// This check runs in the required pr-policy lane, so without an opt-out a
+// This check is required (//scripts/repochecks:workflow_tags_test), so without an opt-out a
 // workflow that legitimately needs a bare `go` command has no way through. The
 // marker and its five-line window are not invented here: scripts/check-build-tags.sh
 // already honors exactly `^# build-tags: allow-bare` within `head -n 5`, and

@@ -50,19 +50,31 @@ func seedReadyIssues(t *testing.T, bd, dir string, n int) []string {
 	return ids
 }
 
-// TestEmbeddedMaxRowsNonListPaths covers the non-list CLI paths wired up in
+// TestEmbeddedMaxRowsNonListPaths covered the non-list CLI paths wired up in
 // be-x42v.2: ready, dep tree, find-duplicates, graph --all, plus the env-only
 // doctor family (lint, doctor --check=conventions, doctor --check=pollution),
 // and config show emission of BEADS_MAX_ROWS.
-func TestEmbeddedMaxRowsNonListPaths(t *testing.T) {
+//
+// This test was split into five top-level tests (TestEmbeddedMaxRowsReady,
+// TestEmbeddedMaxRowsReadyMerge, TestEmbeddedMaxRowsDepTreeAndDuplicates,
+// TestEmbeddedMaxRowsGraph, TestEmbeddedMaxRowsDoctorAndConfig) below so the
+// Bazel embedded-cmd shard script (a top-level-function-name sharder) can
+// spread this ~564s single-process long pole across up to five shards
+// instead of pinning it to one. Every t.Run subtest name and body is
+// unchanged from the original single function; only the grouping into
+// separate top-level funcs (each gated and built the same way) changed. See
+// scripts/ci/embedded_cmd_test_durations.json for the before/after subtest-name
+// equivalence proof.
+
+// ----------- bd ready -----------
+
+func TestEmbeddedMaxRowsReady(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
 	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
-
-	// ----------- bd ready -----------
 
 	t.Run("ReadyMaxRows_FlagOverCap_Exits2", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "mrrdf")
@@ -96,7 +108,7 @@ func TestEmbeddedMaxRowsNonListPaths(t *testing.T) {
 	// `bd ready --json` and `bd list --ready --json` route through
 	// GetReadyWorkWithCountsInTx, a separate query path from the plain
 	// `bd ready` above (GetReadyWorkInTx). Mirrors
-	// TestEmbeddedMaxRowsList/Flag_OverCap's --json coverage for `bd list`.
+	// TestEmbeddedMaxRowsListBasic/Flag_OverCap's --json coverage for `bd list`.
 	t.Run("ReadyMaxRowsJSON_FlagOverCap_Exits2", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "mrrjf")
 		seedReadyIssues(t, bd, dir, 6)
@@ -133,6 +145,17 @@ func TestEmbeddedMaxRowsNonListPaths(t *testing.T) {
 			t.Errorf("stderr missing source --max-rows=3:\n%s", out)
 		}
 	})
+}
+
+// ----------- bd ready (--include-ephemeral merge paths) -----------
+
+func TestEmbeddedMaxRowsReadyMerge(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	// be-x42v.4 follow-up (review SHOULD-FIX 8): confirms the cap still
 	// fires end-to-end for --include-ephemeral after propagating MaxRows
@@ -185,8 +208,17 @@ func TestEmbeddedMaxRowsNonListPaths(t *testing.T) {
 			t.Errorf("delivered-page-under-cap should not emit cap error:\n%s", out)
 		}
 	})
+}
 
-	// ----------- bd dep tree -----------
+// ----------- bd dep tree, bd find-duplicates -----------
+
+func TestEmbeddedMaxRowsDepTreeAndDuplicates(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("DepTreeMaxRows_TreeNodes_Exits2", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "mrdt")
@@ -227,8 +259,17 @@ func TestEmbeddedMaxRowsNonListPaths(t *testing.T) {
 			t.Errorf("stderr missing source --max-rows=3:\n%s", out)
 		}
 	})
+}
 
-	// ----------- bd graph --all -----------
+// ----------- bd graph --all, bd graph <issue> -----------
+
+func TestEmbeddedMaxRowsGraph(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("GraphAllMaxRows_Exits2", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "mrgr")
@@ -281,8 +322,17 @@ func TestEmbeddedMaxRowsNonListPaths(t *testing.T) {
 			t.Errorf("under-cap single-issue graph should not emit cap error:\n%s", out)
 		}
 	})
+}
 
-	// ----------- bd lint (env-only) -----------
+// ----------- bd lint, bd doctor (env-only), bd config show -----------
+
+func TestEmbeddedMaxRowsDoctorAndConfig(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("LintMaxRows_EnvOnly_Exits2", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "mrln")
@@ -380,11 +430,15 @@ func countListIDs(out, prefix string) int {
 	return strings.Count(out, prefix+"-")
 }
 
-// TestEmbeddedMaxRowsList covers the 10 designer §6.1 behavioral scenarios
-// for `bd list`. Builder bead: be-x42v.2 (CLI wiring). All subtests share a
-// single rig of 21 open task issues — the dataset size from the designer's
-// fixture.
-func TestEmbeddedMaxRowsList(t *testing.T) {
+// TestEmbeddedMaxRowsList{Basic,LimitInteraction} were split from
+// TestEmbeddedMaxRowsList (measured ~209.67s under --config=embedded) into 2
+// top-level tests over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once. Both cover the 10 designer §6.1
+// behavioral scenarios for `bd list`. Builder bead: be-x42v.2 (CLI wiring).
+// Each redoes the original's shared rig of 21 open task issues — the
+// dataset size from the designer's fixture — independently.
+func TestEmbeddedMaxRowsListBasic(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -512,6 +566,21 @@ func TestEmbeddedMaxRowsList(t *testing.T) {
 			t.Errorf("expected 'must be non-negative' in stderr:\n%s", out)
 		}
 	})
+}
+
+func TestEmbeddedMaxRowsListLimitInteraction(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "mrl")
+
+	const totalRows = 21
+	for i := 0; i < totalRows; i++ {
+		bdCreate(t, bd, dir, fmt.Sprintf("List max-rows %d", i), "--type", "task")
+	}
 
 	t.Run("LimitSet_CapTighter", func(t *testing.T) {
 		// limit=100, cap=5: 21 rows are scanned (LIMIT cap+1=6 sniffs

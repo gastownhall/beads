@@ -340,6 +340,7 @@ type timedProvider struct {
 var (
 	_ uow.IssueReaderSource         = timedProvider{}
 	_ uow.IssueClaimerSource        = timedProvider{}
+	_ uow.MoleculeStepperSource     = timedProvider{}
 	_ uow.BatchCloserSource         = timedProvider{}
 	_ uow.ReadyClaimerSource        = timedProvider{}
 	_ uow.ReleaserSource            = timedProvider{}
@@ -349,6 +350,10 @@ var (
 	_ uow.CycleDetectorSource       = timedProvider{}
 	_ uow.EdgeReaderSource          = timedProvider{}
 	_ uow.GraphCounterSource        = timedProvider{}
+	_ uow.BatchGetterSource         = timedProvider{}
+	_ uow.LeaseReclaimerSource      = timedProvider{}
+	_ uow.HeartbeaterSource         = timedProvider{}
+	_ uow.BlockedListerSource       = timedProvider{}
 	_ uow.RelationsSource           = timedProvider{}
 	_ uow.CommenterSource           = timedProvider{}
 	_ uow.BlockingAnnotatorSource   = timedProvider{}
@@ -465,6 +470,36 @@ func (p timedProvider) EdgeReader() (issueops.EdgeReader, error) {
 // reason and with the same hazard as IssueReader.
 func (p timedProvider) GraphCounter() (issueops.GraphCounter, error) {
 	return uow.NewGraphCounter(p)
+}
+
+// BatchGetter builds the batch-read role OVER THIS WRAPPER, for the same
+// reason and with the same hazard as IssueReader.
+func (p timedProvider) BatchGetter() (issueops.BatchGetter, error) {
+	return uow.NewBatchGetter(p)
+}
+
+// LeaseReclaimer builds the stale-lease sweep OVER THIS WRAPPER, for the same
+// reason and with the same hazard as IssueReader.
+func (p timedProvider) LeaseReclaimer() (issueops.LeaseReclaimer, error) {
+	return uow.NewLeaseReclaimer(p)
+}
+
+// Heartbeater builds the lease refresh OVER THIS WRAPPER, for the same reason
+// and with the same hazard as IssueReader.
+func (p timedProvider) Heartbeater() (issueops.Heartbeater, error) {
+	return uow.NewHeartbeater(p)
+}
+
+// BlockedLister builds the blocked listing OVER THIS WRAPPER, for
+// IssueReader's reason: its unit of work lands in this request's uow_ms.
+func (p timedProvider) BlockedLister() (issueops.BlockedLister, error) {
+	return uow.NewBlockedLister(p)
+}
+
+// MoleculeStepper builds the advance-a-molecule role OVER THIS WRAPPER, so
+// every read and the claim it composes go through this wrapper's roles.
+func (p timedProvider) MoleculeStepper() (issueops.MoleculeStepper, error) {
+	return uow.NewMoleculeStepper(p)
 }
 
 // IssueRelations builds the single-anchor neighbor role OVER THIS WRAPPER, for

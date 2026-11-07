@@ -174,6 +174,25 @@ func TestLookupUsesLastEffectiveValue(t *testing.T) {
 	}
 }
 
+func TestLookupForOS(t *testing.T) {
+	env := []string{"TARGET=first", "target=mixed-case", "TARGET=last", "MALFORMED"}
+	for _, tt := range []struct {
+		goos, key, want string
+		found           bool
+	}{
+		{"linux", "TARGET", "last", true},
+		{"linux", "target", "mixed-case", true},
+		{"linux", "Target", "", false},
+		{"windows", "TARGET", "last", true},
+		{"windows", "target", "last", true},
+		{"windows", "Target", "last", true},
+	} {
+		if value, ok := LookupForOS(env, tt.key, tt.goos); value != tt.want || ok != tt.found {
+			t.Errorf("LookupForOS(%s, %s) = %q, %v; want %q, %v", tt.key, tt.goos, value, ok, tt.want, tt.found)
+		}
+	}
+}
+
 func TestContainsKeyWithPrefixUsesKeyIdentity(t *testing.T) {
 	env := []string{
 		"MALFORMED",

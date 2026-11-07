@@ -460,7 +460,7 @@ func TestIssueLinksToDependencies(t *testing.T) {
 		},
 	}
 
-	deps := issueLinksToDependencies(42, links, config)
+	deps := issueLinksToDependencies(&Issue{IID: 42}, links, config)
 
 	if len(deps) != 3 {
 		t.Fatalf("issueLinksToDependencies returned %d dependencies, want 3", len(deps))
@@ -551,7 +551,7 @@ func TestIssueLinksToDependencies_AsTarget(t *testing.T) {
 		},
 	}
 
-	deps := issueLinksToDependencies(42, links, config)
+	deps := issueLinksToDependencies(&Issue{IID: 42}, links, config)
 
 	if len(deps) != 1 {
 		t.Fatalf("issueLinksToDependencies returned %d dependencies, want 1", len(deps))
@@ -578,7 +578,7 @@ func TestIssueLinksToDependencies_UnknownLinkType(t *testing.T) {
 		},
 	}
 
-	deps := issueLinksToDependencies(42, links, config)
+	deps := issueLinksToDependencies(&Issue{IID: 42}, links, config)
 
 	if len(deps) != 0 {
 		t.Fatalf("issueLinksToDependencies returned %d dependencies, want 0 for unknown link type", len(deps))
@@ -598,7 +598,7 @@ func TestIssueLinksToDependencies_NilIssues(t *testing.T) {
 		},
 	}
 
-	deps := issueLinksToDependencies(42, links, config)
+	deps := issueLinksToDependencies(&Issue{IID: 42}, links, config)
 
 	if len(deps) != 0 {
 		t.Fatalf("issueLinksToDependencies returned %d dependencies, want 0 for nil target", len(deps))

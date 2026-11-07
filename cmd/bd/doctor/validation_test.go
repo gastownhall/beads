@@ -5,6 +5,7 @@ package doctor
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/types"
@@ -471,6 +473,130 @@ func TestCheckChildParentDependenciesDB_BlockingDetected(t *testing.T) {
 	}
 }
 
+// TestCheckChildParentDependenciesDB_ParentGateOnOwnChildNotFlagged pins the
+// check's scope against the reverse shape GH#4814 reported: a parent that
+// waits for, or blocks on, its own child across a real parent-child edge.
+// Since gastownhall/beads#6506 that edge holds back the parent, not the
+// child, so the children stay ready and the check must stay OK; a warning
+// would point --fix-child-parent at a working close gate. Parent Close Gates
+// reports the blocks form instead (adapted from PR#5131's mirror test).
+func TestCheckChildParentDependenciesDB_ParentGateOnOwnChildNotFlagged(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+
+	// The shape bd create --parent writes: dotted ids AND real parent-child
+	// edges. test-gate.1 has an open child, so the waits-for gate is live.
+	issues := []*types.Issue{
+		{ID: "test-gate", Title: "Parent epic", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic},
+		{ID: "test-gate.1", Title: "Child task", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "test-gate.1.1", Title: "Grandchild task", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "test-gate.2", Title: "Second child task", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	}
+	for _, issue := range issues {
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", issue.ID, err)
+		}
+	}
+	for _, dep := range []*types.Dependency{
+		{IssueID: "test-gate.1", DependsOnID: "test-gate", Type: types.DepParentChild},
+		{IssueID: "test-gate.1.1", DependsOnID: "test-gate.1", Type: types.DepParentChild},
+		{IssueID: "test-gate.2", DependsOnID: "test-gate", Type: types.DepParentChild},
+		{IssueID: "test-gate", DependsOnID: "test-gate.1", Type: types.DepWaitsFor},
+	} {
+		if err := store.AddDependency(ctx, dep, "test"); err != nil {
+			t.Fatalf("AddDependency %s -> %s (%s): %v", dep.IssueID, dep.DependsOnID, dep.Type, err)
+		}
+	}
+
+	// A legacy blocks row onto the other child goes in raw, because the write
+	// path refuses it now. The derived flags are then inverted, so the
+	// ready-work checks below pass only if the full recompute really derived
+	// them from these edges.
+	db := store.DB()
+	for _, stmt := range []string{
+		"INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (UUID(), 'test-gate', 'test-gate.2', 'blocks', NOW(), 'test')",
+		"UPDATE issues SET is_blocked = CASE WHEN id = 'test-gate' THEN 0 ELSE 1 END WHERE id LIKE 'test-gate%'",
+		"CALL DOLT_COMMIT('-Am', 'test: seed parent close gates')",
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if _, err := store.RecomputeAllBlocked(ctx); err != nil {
+		t.Fatalf("RecomputeAllBlocked: %v", err)
+	}
+
+	ready, err := store.GetReadyWork(ctx, types.WorkFilter{Status: types.StatusOpen})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	inReady := map[string]bool{}
+	for _, issue := range ready {
+		inReady[issue.ID] = true
+	}
+	for _, id := range []string{"test-gate.1", "test-gate.1.1", "test-gate.2"} {
+		if !inReady[id] {
+			t.Errorf("%s missing from ready work: the parent's gate must not hold back its children", id)
+		}
+	}
+	if inReady["test-gate"] {
+		t.Error("test-gate is ready, but it waits for and blocks on open children")
+	}
+
+	check := checkChildParentDependenciesDB(db)
+	if check.Status != StatusOK {
+		t.Errorf("Status = %q, want %q (detail %q): a parent's gate on its own child is not a deadlock", check.Status, StatusOK, check.Detail)
+	}
+	if check.Message != "No child→parent dependencies" {
+		t.Errorf("Message = %q, want %q", check.Message, "No child→parent dependencies")
+	}
+
+	gates := checkParentBlocksOwnChildDB(db)
+	if !strings.Contains(gates.Detail, "test-gate→test-gate.2") {
+		t.Errorf("Parent Close Gates detail = %q, want it to list the legacy blocks row test-gate→test-gate.2", gates.Detail)
+	}
+}
+
+// TestCheckChildParentDependenciesDB_ParentBlocksChildIgnoredWithoutRealEdge
+// verifies a parent blocking on an issue whose id only looks like its child's
+// is not flagged. IDs and edges diverge by design after a reparent or import;
+// a parent blocking on an orphaned-dotted issue with no structural link is the
+// ordinary "epic waits for its subtask" shape, not a deadlock (bee-ghosttrack
+// review, PR#5131).
+func TestCheckChildParentDependenciesDB_ParentBlocksChildIgnoredWithoutRealEdge(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+
+	parent := &types.Issue{Title: "Parent epic", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	if err := store.CreateIssue(ctx, parent, "test"); err != nil {
+		t.Fatalf("Failed to create parent: %v", err)
+	}
+
+	db := store.DB()
+	childID := parent.ID + ".1"
+
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, created_at, updated_at)
+		 VALUES (?, 'Orphaned dotted issue', '', '', '', '', 'open', 2, 'task', NOW(), NOW())`,
+		childID)
+	if err != nil {
+		t.Fatalf("Failed to insert child: %v", err)
+	}
+
+	// No parent-child edge: childID's dotted ID is coincidental, not structural.
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (UUID(), ?, ?, 'blocks', NOW(), 'test')`,
+		parent.ID, childID)
+	if err != nil {
+		t.Fatalf("Failed to insert dependency: %v", err)
+	}
+
+	check := checkChildParentDependenciesDB(db)
+	if check.Status != StatusOK {
+		t.Fatalf("Status = %q, want %q (dotted ID alone, no real parent-child edge, must not be flagged)", check.Status, StatusOK)
+	}
+}
+
 // TestCheckChildParentDependenciesDB_NonBlockingIgnored verifies that
 // parent-child type dependencies (structural hierarchy) are NOT flagged.
 func TestCheckChildParentDependenciesDB_NonBlockingIgnored(t *testing.T) {
@@ -715,5 +841,158 @@ func TestCheckGitConflicts_DoltBackend_Clean(t *testing.T) {
 
 	if hasConflicts {
 		t.Fatal("Expected no conflicts in clean database")
+	}
+}
+
+// TestCheckParentBlocksOwnChildDB_NoGates verifies the informational check is
+// quiet on a store with no close gates — including one that has an ordinary
+// parent-child hierarchy, which must not be mistaken for a gate.
+func TestCheckParentBlocksOwnChildDB_NoGates(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+
+	parent := &types.Issue{Title: "Parent epic", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	if err := store.CreateIssue(ctx, parent, "test"); err != nil {
+		t.Fatalf("Failed to create parent: %v", err)
+	}
+	child := &types.Issue{Title: "Child task", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, child, "test"); err != nil {
+		t.Fatalf("Failed to create child: %v", err)
+	}
+	db := store.DB()
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (UUID(), ?, ?, 'parent-child', NOW(), 'test')`,
+		child.ID, parent.ID); err != nil {
+		t.Fatalf("Failed to insert parent-child edge: %v", err)
+	}
+
+	check := checkParentBlocksOwnChildDB(db)
+
+	if check.Status != StatusOK {
+		t.Errorf("Status = %q, want %q", check.Status, StatusOK)
+	}
+	if check.Message != "No parent→own-descendant blocking edges" {
+		t.Errorf("Message = %q, want the empty-inventory message", check.Message)
+	}
+	if check.Category != CategoryMetadata {
+		t.Errorf("Category = %q, want %q", check.Category, CategoryMetadata)
+	}
+}
+
+// TestCheckParentBlocksOwnChildDB_GateReported verifies the inventory: a parent
+// that blocks on its own parent-child child OR grandchild is listed, by both
+// ids, and the check stays OK — these edges are legal since gastownhall/beads#6506 and the
+// check has no fix.
+func TestCheckParentBlocksOwnChildDB_GateReported(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+
+	parent := &types.Issue{Title: "Parent epic", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	if err := store.CreateIssue(ctx, parent, "test"); err != nil {
+		t.Fatalf("Failed to create parent: %v", err)
+	}
+	child := &types.Issue{Title: "Child task", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, child, "test"); err != nil {
+		t.Fatalf("Failed to create child: %v", err)
+	}
+	grandchild := &types.Issue{Title: "Grandchild task", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, grandchild, "test"); err != nil {
+		t.Fatalf("Failed to create grandchild: %v", err)
+	}
+	other := &types.Issue{Title: "Unrelated blocker", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, other, "test"); err != nil {
+		t.Fatalf("Failed to create unrelated blocker: %v", err)
+	}
+
+	db := store.DB()
+	edges := []struct{ from, to, depType string }{
+		{child.ID, parent.ID, "parent-child"},
+		{grandchild.ID, child.ID, "parent-child"},
+		{parent.ID, child.ID, "blocks"},      // the close gate
+		{parent.ID, grandchild.ID, "blocks"}, // a gate two levels down: listed too
+		{parent.ID, other.ID, "blocks"},      // exogenous: must NOT be listed
+		{child.ID, other.ID, "blocks"},       // an ordinary blocker on the child
+	}
+	for _, e := range edges {
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (UUID(), ?, ?, ?, NOW(), 'test')`,
+			e.from, e.to, e.depType); err != nil {
+			t.Fatalf("Failed to insert %s edge %s->%s: %v", e.depType, e.from, e.to, err)
+		}
+	}
+
+	check := checkParentBlocksOwnChildDB(db)
+
+	if check.Status != StatusOK {
+		t.Errorf("Status = %q, want %q: the idiom is legal, the check only reports it", check.Status, StatusOK)
+	}
+	if check.Fix != "" {
+		t.Errorf("Fix = %q, want empty: this check has no --fix", check.Fix)
+	}
+	if check.Category != CategoryMetadata {
+		t.Errorf("Category = %q, want %q", check.Category, CategoryMetadata)
+	}
+	if !strings.Contains(check.Message, "2 parent→own-descendant") {
+		t.Errorf("Message = %q, want a count of exactly the two close gates", check.Message)
+	}
+	for _, wantDetail := range []string{parent.ID + "→" + child.ID, parent.ID + "→" + grandchild.ID} {
+		if !strings.Contains(check.Detail, wantDetail) {
+			t.Errorf("Detail = %q, want it to name %q", check.Detail, wantDetail)
+		}
+	}
+	if strings.Contains(check.Detail, other.ID) {
+		t.Errorf("Detail = %q, must not list the exogenous blocker %s", check.Detail, other.ID)
+	}
+}
+
+// TestCheckParentBlocksOwnChildDB_QueryFailureWarns verifies that an inventory
+// query that fails is a warning, not an OK that reads as "no gates". A closed
+// handle fails every query without reaching a server.
+func TestCheckParentBlocksOwnChildDB_QueryFailureWarns(t *testing.T) {
+	db, err := sql.Open("mysql", "root@tcp(127.0.0.1:1)/none")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	_ = db.Close()
+
+	check := checkParentBlocksOwnChildDB(db)
+
+	if check.Status != StatusWarning {
+		t.Errorf("Status = %q, want %q", check.Status, StatusWarning)
+	}
+	if check.Message != "N/A (query failed)" {
+		t.Errorf("Message = %q, want %q", check.Message, "N/A (query failed)")
+	}
+	if check.Detail == "" {
+		t.Error("Detail is empty, want the query error")
+	}
+}
+
+// TestTruncateDetail_CutsOnARuneBoundary pins the --json contract: a cut
+// detail line is still valid UTF-8. The gate inventory joins its entries with
+// U+2192, three bytes wide, so a byte-indexed cut lands mid-rune for two of
+// every three offsets and emits a replacement-character sequence into JSON.
+func TestTruncateDetail_CutsOnARuneBoundary(t *testing.T) {
+	// One entry is 6 bytes: "a", U+2192 (3), "b", ",", " " — so successive
+	// totals step past 200 at offsets that are not rune starts.
+	entry := "a→b"
+	for n := 1; n < 120; n++ {
+		parts := make([]string, n)
+		for i := range parts {
+			parts[i] = entry
+		}
+		got := truncateDetail(strings.Join(parts, ", "))
+		if !utf8.ValidString(got) {
+			t.Fatalf("n=%d: truncateDetail produced invalid UTF-8: %q", n, got)
+		}
+		if len(got) > detailMaxBytes+len("...") {
+			t.Fatalf("n=%d: truncateDetail returned %d bytes, want <= %d",
+				n, len(got), detailMaxBytes+len("..."))
+		}
+	}
+
+	// Short input is returned whole, with no ellipsis.
+	if got := truncateDetail("wr-p→wr-c"); got != "wr-p→wr-c" {
+		t.Errorf("short detail was rewritten: %q", got)
 	}
 }

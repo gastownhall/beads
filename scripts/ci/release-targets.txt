@@ -1,7 +1,6 @@
-# Release target manifest for pr.yml's check-release-target-cross-compilation
-# job (F7a). One "GOOS GOARCH GROUP" row per target; GROUP assigns the target
-# to one of the job's two matrix legs (see
-# scripts/ci/check-release-cross-compile.sh).
+# Release target manifest: one "GOOS GOARCH" row per shipped release target.
+# scripts/ci/bazel-release-cross-compile.sh (bazel.yml's pure-Go lane) builds
+# the whole tree for each row with Bazel (--platforms, cgo off).
 #
 # Kept in sync with .goreleaser.yml's builds: list, PLUS the darwin/amd64 and
 # darwin/arm64 pair that .goreleaser.yml deliberately omits (built instead by
@@ -11,15 +10,11 @@
 # TestReleaseTargetCrossCompilationMatrixMatchesGoreleaser enforces this: it
 # fails if this file and .goreleaser.yml (plus the darwin exception) ever
 # disagree on the target set.
-#
-# Groups are an even split for balanced job runtime, not a semantic
-# boundary - cross-compilation never touches the target OS, so both groups
-# build and run entirely on the Linux runner.
-linux amd64 unix
-linux arm64 unix
-android arm64 unix
-freebsd amd64 unix
-darwin amd64 desktop
-darwin arm64 desktop
-windows amd64 desktop
-windows arm64 desktop
+linux amd64
+linux arm64
+android arm64
+freebsd amd64
+darwin amd64
+darwin arm64
+windows amd64
+windows arm64

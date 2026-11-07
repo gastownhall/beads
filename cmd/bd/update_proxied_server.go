@@ -28,6 +28,11 @@ func runUpdateProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		fmt.Println("No updates specified")
 		return nil
 	}
+	// A8 (beads#4682): "one id only" (T4.8), mirroring the direct route's
+	// requireSingleIfRevisionID call in update.go.
+	if err := requireSingleIfRevisionID(in.ifRevision, args); err != nil {
+		return err
+	}
 
 	// Derive success-output format from the global JSON decision (--json OR
 	// --format json OR config), the same signal reportUpdateFailures uses, so
@@ -82,11 +87,12 @@ func proxiedIssueLifecycle() (issueops.Lifecycle, error) {
 
 // applyUpdateProxiedOne applies one issue's update — plain or --claim —
 // through issueops.Lifecycle. What stays here is this surface's own protocol:
-// the template guard, the advisory reassign pre-read, the per-id failure
-// taxonomy the multi-id batch needs and the notes-overwrite warning. Hooks are
-// NOT among them: they fire from the write plumbing now (the notifying provider
-// wired in main.go), which is what makes an update fire the same events here as
-// it does on the embedded path.
+// the advisory reassign pre-read, the per-id failure taxonomy the multi-id
+// batch needs (a template refusal is one of its verdicts; the guard itself is
+// the role's) and the notes-overwrite warning. Hooks are NOT among them: they
+// fire from the write plumbing now (the notifying provider wired in main.go),
+// which is what makes an update fire the same events here as it does on the
+// embedded path.
 //
 // Provenance carries the commit message this path has always written, so `bd
 // dolt log` reads the same after the move as before it. The plane is
@@ -102,9 +108,9 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 	if err != nil {
 		return nil, nil, HandleError("%v", err)
 	}
-	before, fail := proxiedUpdateTarget(ctx, id, in)
-	if fail != nil {
-		return nil, fail, nil
+	before, fail, err := proxiedUpdateTarget(ctx, id, in)
+	if err != nil || fail != nil {
+		return nil, fail, err
 	}
 	patch, err := proxiedUpdatePatch(in, before)
 	if err != nil {
@@ -122,13 +128,14 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 		expectedStatus = &expected
 	}
 	result, err := runCommandUpdateMutation(ctx, ops, commandUpdateMutation{
-		actor:            actor,
+		actor:            currentActor(),
 		issueID:          id,
 		patch:            patch,
 		claim:            in.claim,
 		force:            in.force,
 		expectedAssignee: in.ifAssignee,
 		expectedStatus:   expectedStatus,
+		expectedVersion:  in.ifRevision,
 		provenance:       fmt.Sprintf("bd: update %s", id),
 	})
 	if err != nil {
@@ -139,6 +146,18 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 		// aborting is the right call for both.
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, nil, err
+		}
+		// A8: an active --if-revision guard reports through gascity's
+		// dedicated conditional-write envelope instead of the generic
+		// updateIDFailure batch shape — requireSingleIfRevisionID already
+		// guarantees args has exactly one id, so returning the reported exit
+		// error here (which the caller's `if err != nil { return err }`
+		// propagates straight out) is equivalent to the generic path for this
+		// one id.
+		if in.ifRevision != nil {
+			if reported, ok := reportIfRevisionFailure("updating", id, err, in.ifRevision); ok {
+				return nil, nil, reported
+			}
 		}
 		return nil, proxiedUpdateFailure(id, in.claim, err), nil
 	}
@@ -171,33 +190,38 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 }
 
 // proxiedUpdateTarget reads the row an update is about through the query role,
-// for the things the mutation's own result cannot answer: whether the target is
-// a template, whether an unguarded assignee edit is about to take the issue
-// from a live foreign holder, whether --notes is about to replace existing
-// notes, and whether --defer="" should also clear a deferred status. It no
-// longer reads the pre-state to decide a hook: a status-crossing update fires
-// on_update and nothing else, from the plumbing, exactly as it does on the
-// embedded path.
-func proxiedUpdateTarget(ctx context.Context, id string, in *updateInput) (*types.Issue, *updateIDFailure) {
+// for the things the mutation's own result cannot answer: whether an unguarded
+// assignee edit is about to take the issue from a live foreign holder, whether
+// --notes is about to replace existing notes, and whether --defer="" should
+// also clear a deferred status. It no longer reads the pre-state to decide a
+// hook: a status-crossing update fires on_update and nothing else, from the
+// plumbing, exactly as it does on the embedded path. The error is non-nil
+// only for an --if-revision guard outcome it has already reported, which the
+// caller returns as the command's exit error.
+func proxiedUpdateTarget(ctx context.Context, id string, in *updateInput) (*types.Issue, *updateIDFailure, error) {
 	rd, err := proxiedIssueReader()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
-		return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("resolving issue: %v", err)}
+		return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("resolving issue: %v", err)}, nil
 	}
 	details, err := rd.Get(ctx, issueops.GetRequest{ID: id})
 	if err != nil {
+		// A guarded update that lost to a concurrent `bd delete` committing
+		// before this pre-read is the same lost race as one committing inside
+		// the guarded write: report it through the guard envelope.
+		if reported, ok := reportIfRevisionTargetGone("updating", id, err, in.ifRevision); ok {
+			return nil, nil, reported
+		}
 		if errors.Is(err, issueops.ErrNotFound) {
 			fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-			return nil, &updateIDFailure{ID: id, Error: "issue not found"}
+			return nil, &updateIDFailure{ID: id, Error: "issue not found"}, nil
 		}
 		fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
-		return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("resolving issue: %v", err)}
+		return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("resolving issue: %v", err)}, nil
 	}
 	current := &details.Issue
-	if err := validateIssueUpdatable(id, current); err != nil {
-		fmt.Fprintf(os.Stderr, "%s\n", err)
-		return nil, &updateIDFailure{ID: id, Error: err.Error()}
-	}
+	// The template guard is the role's, enforced inside the mutation;
+	// proxiedUpdateFailure prints its refusal as this route always did.
 	// bd-98s5c: an unguarded assignee update must not silently overwrite
 	// another actor's live claim. Skipped under --if-assignee, whose CAS names
 	// the holder explicitly (park stays possible without --force), and under
@@ -205,14 +229,16 @@ func proxiedUpdateTarget(ctx context.Context, id string, in *updateInput) (*type
 	// same transfer inside the mutation with ErrAlreadyClaimed; this pre-read is
 	// what keeps the advice a user reads identical on both routes. A policy
 	// refusal: terminal per-issue failure, exit 1, never GuardMismatch/13.
-	if newAssignee, ok := in.fields["assignee"].(string); ok && in.ifAssignee == nil && !in.claim {
-		if err := validateIssueReassignable(id, current, actor, newAssignee,
+	// mc-zndi7.74: also skipped when this pre-read is already stale against an
+	// active --if-revision guard — see ifRevisionAlreadyStale's doc.
+	if newAssignee, ok := in.fields["assignee"].(string); ok && in.ifAssignee == nil && !in.claim && !ifRevisionAlreadyStale(current, in.ifRevision) {
+		if err := validateIssueReassignable(id, current, currentActor(), newAssignee,
 			proxiedClaimPoolAliases(ctx), in.force); err != nil {
 			fmt.Fprintf(os.Stderr, "%s\n", err)
-			return nil, &updateIDFailure{ID: id, Error: err.Error()}
+			return nil, &updateIDFailure{ID: id, Error: err.Error()}, nil
 		}
 	}
-	return current, nil
+	return current, nil, nil
 }
 
 // proxiedClaimPoolAliases is uowClaimPoolAliases for a caller that owns no unit
@@ -246,6 +272,10 @@ func proxiedClaimPoolAliases(ctx context.Context) func() []string {
 // longer owns, so both now read as the generic update failure. The id still
 // fails, loudly and non-zero.
 func proxiedUpdateFailure(id string, claim bool, err error) *updateIDFailure {
+	if refusal, ok := templateReadOnlyRefusal(id, err); ok {
+		fmt.Fprintf(os.Stderr, "%s\n", refusal)
+		return &updateIDFailure{ID: id, Error: refusal.Error()}
+	}
 	switch {
 	case errors.Is(err, storage.ErrNotFound):
 		fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)

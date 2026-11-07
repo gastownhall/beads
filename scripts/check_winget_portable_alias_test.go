@@ -10,16 +10,12 @@ import (
 )
 
 // The guard's own vocabulary is shared between mikefarah yq v4 and python-yq,
-// so either flavour exercises these cases. Deliberately a plain skip rather
-// than requireHostTool: //scripts:scripts_test is tagged host-tools, and that
-// tag's declared inventory (git, python3, awk, sed, find, grep, timeout) does
-// not include yq, so failing under Bazel would red the shared target on hosts
-// that keep the promise the tag actually makes.
+// so either flavour exercises these cases. Under Bazel yq is part of the
+// executor inventory the //scripts go_tests rely on (the rbe-west worker
+// image and ubuntu-latest ship mikefarah yq v4), so a missing yq fails there.
 func skipWithoutYQ(t *testing.T) {
 	t.Helper()
-	if _, err := exec.LookPath("yq"); err != nil {
-		t.Skipf("yq not available: %v", err)
-	}
+	requireHostTool(t, "yq")
 }
 
 const (

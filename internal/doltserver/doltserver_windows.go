@@ -60,11 +60,11 @@ func findPIDOnPort(port int) int {
 	return 0
 }
 
-// listDoltProcessPIDs returns PIDs of all running dolt sql-server processes.
+// readDoltProcessPIDs returns PIDs of all running dolt sql-server processes.
 // Uses PowerShell Get-CimInstance to query dolt.exe processes and filter by
 // command line. Zombies are not a concern on Windows (they don't appear in
-// process lists).
-func listDoltProcessPIDs() []int {
+// process lists). An error means the process list could not be read.
+func readDoltProcessPIDs() ([]int, error) {
 	// Single PowerShell call: find dolt.exe processes whose command line
 	// contains "sql-server", output PIDs one per line.
 	script := `Get-CimInstance Win32_Process -Filter "Name='dolt.exe'" | ` +
@@ -72,7 +72,7 @@ func listDoltProcessPIDs() []int {
 		`Select-Object -ExpandProperty ProcessId`
 	out, err := exec.Command("powershell.exe", "-NoProfile", "-Command", script).Output()
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("listing processes: %w", err)
 	}
 	var pids []int
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -86,7 +86,7 @@ func listDoltProcessPIDs() []int {
 		}
 		pids = append(pids, pid)
 	}
-	return pids
+	return pids, nil
 }
 
 // isProcessInDir returns false on Windows. Windows doesn't expose process CWD
@@ -113,6 +113,27 @@ func isProcessAlive(pid int) bool {
 	return err == nil && status == uint32(windows.WAIT_TIMEOUT)
 }
 
+// isSignalableProcess is isProcessAlive on Windows, which already answers
+// false for a process this user may not open.
+func isSignalableProcess(pid int) bool {
+	return isProcessAlive(pid)
+}
+
+// serverInfoProcessExists reports whether pid, from a sql-server.info file,
+// names a process, by the dolt CLI's own test on Windows
+// (sqlserver.ProcessExists): os.FindProcess opens it.
+func serverInfoProcessExists(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	_ = process.Release()
+	return true
+}
+
 // gracefulStop terminates a process on Windows. Uses TerminateProcess (hard kill)
 // directly. Data safety comes from FlushWorkingSet which runs in StopWithForce
 // before calling gracefulStop. The Unix SIGTERM is a courtesy; the real protection
@@ -126,3 +147,6 @@ func gracefulStop(pid int, timeout time.Duration) error {
 	time.Sleep(500 * time.Millisecond)
 	return nil
 }
+
+// killProcessGroup is a no-op on Windows; killAndWait kills the child itself.
+func killProcessGroup(int) {}

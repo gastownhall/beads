@@ -2,6 +2,9 @@ package scripts_test
 
 import (
 	"fmt"
+	"math"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -26,49 +29,119 @@ import (
 // than kept as independent copies.
 
 // F3: the same "same-repo PR, or merge_group" Blacksmith expression used by
-// pr.yml's and pr-risk.yml's bazel-coverage/ci-gate/detect-ci-tier jobs - a
-// package-level const so every test that needs it (TestSameRepoBlacksmithRunners,
-// TestPRRiskBazelCoverageJob, ...) reads the one literal.
+// pr.yml's and pr-risk.yml's ci-gate jobs - a package-level const so every
+// test that needs it (TestSameRepoBlacksmithRunners, ...) reads the one
+// literal.
 const sameRepoBlacksmith2vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
 
 // F7a: the same same-repo expression at 4 vCPU and 8 vCPU, for jobs sized
-// larger than the 2 vCPU default (check-doc-flags, pr-policy-wrapper,
-// pr-risk.yml's test-nix at 4 vCPU; check-release-target-cross-compilation at
-// 8 vCPU). F7c's advisory workflows also use the 4 vCPU size.
+// larger than the 2 vCPU default (check-doc-flags,
+// pr-risk.yml's test-nix at 4 vCPU). F7c's advisory workflows also use the 4 vCPU size.
 const sameRepoBlacksmith4vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
 const sameRepoBlacksmith8vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}"
 
-// F7b: same-repo Blacksmith Windows (blacksmith-*vcpu-windows-2025, public
-// beta) and macOS (blacksmith-*vcpu-macos-latest) labels, same ternary shape
-// as the Linux consts above - forks/Dependabot keep the current GitHub-hosted
-// windows-latest/macos-latest label. windows-2025 is GitHub's windows-2025
-// image minus the full Visual Studio IDE, EdgeDriver and WinAppDriver; VS
-// Build Tools 2022 is present (cgo via MSVC/clang-cl or an installed
-// mingw-w64 toolchain), but there is no Linux Docker. Jobs moved onto these
-// labels that rely on a specific Windows toolchain detail already document
-// that dependency at the call site.
-const sameRepoBlacksmithWindows2vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-windows-2025' || 'windows-latest' }}"
-const sameRepoBlacksmithWindows4vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest' }}"
-const sameRepoBlacksmithWindows8vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-8vcpu-windows-2025' || 'windows-latest' }}"
-const sameRepoBlacksmithWindows16vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-16vcpu-windows-2025' || 'windows-latest' }}"
-const sameRepoBlacksmithMacOS6vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-6vcpu-macos-latest' || 'macos-latest' }}"
-const sameRepoBlacksmithMacOS12vcpu = "${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-12vcpu-macos-latest' || 'macos-latest' }}"
+// Windows and macOS jobs run on Blacksmith for every event, forks and
+// Dependabot included (ga-96smfk.22): rbe-west has no Windows or macOS
+// workers, and Blacksmith serves fork PRs in this org (gascity's fork PRs
+// run on blacksmith-* labels). So their runs-on is the literal label,
+// wrapped in a trivial expression like main.yml's push-only Blacksmith jobs
+// (a bare self-hosted label trips actionlint). windows-2025 is GitHub's
+// windows-2025 image minus the full Visual Studio IDE, EdgeDriver and
+// WinAppDriver; VS Build Tools 2022 is present, but there is no Linux
+// Docker. Fork runs get no secrets and a read-only token, and each job runs
+// in a fresh VM; the repository's fork-PR approval setting is the boundary
+// for who may run code there (a fork's own workflow file controls runs-on
+// anyway). TestBlacksmithJobsReadNoSecrets keeps every such job free of
+// secret reads.
+const blacksmithWindows2vcpuRunsOn = "${{ 'blacksmith-2vcpu-windows-2025' }}"
+const blacksmithWindows4vcpuRunsOn = "${{ 'blacksmith-4vcpu-windows-2025' }}"
 
-// sameRepoPlatformsMatrixMarkerRunsOn is the "matrix marker" form (spec
-// F7/F7b §2.1) used by mixed-OS matrix jobs (pr-preflight-platforms,
-// check-doc-freshness-platforms): Actions does not expand `${{ }}` inside a
-// matrix array/include value, so each OS leg's `include` entry instead sets a
-// plain string marker field (`runner: same-repo-linux` etc.), and a single
-// chained ternary in the job's `runs-on` tests which marker (if any) the
-// current leg carries, falling back to `matrix.os` for legs with no marker or
-// when the marker's own same-repo condition is false.
+// bazel.yml's lanes pick their runner from the rbe job's decision alone
+// (TestBazelRBEJobDecidesOnce): Blacksmith in modes remote and cache,
+// GitHub-hosted otherwise. Mode cache reads rbe-cache (rbe-west's anonymous
+// read-only cache), which refuses GitHub-hosted runners, so its lanes (an
+// rbe=cache dispatch's, the only way into mode cache) run on Blacksmith.
+// bazelRemoteRunsOn builds that ternary for one Blacksmith size so every
+// lane's pinned runs-on is the same literal apart from the label.
+func bazelRemoteRunsOn(label string) string {
+	return "${{ (needs.rbe.outputs.mode == 'remote' || needs.rbe.outputs.mode == 'cache') && '" + label + "' || 'ubuntu-latest' }}"
+}
+
+// bazelRRCCacheReaderRunsOn is bazelRemoteRunsOn for the lanes that read the
+// remote repo contents cache in mode cache (isBazelRRCCacheReader): their
+// GitHub-hosted fallback is ubuntu-24.04, not ubuntu-latest, because the
+// cached trees come from a 24.04 host (design R2) and the image must not
+// move under them. (Mode cache itself now runs on Blacksmith's
+// ubuntu-2404, the family rrc-seed writes from.)
+func bazelRRCCacheReaderRunsOn(label string) string {
+	return "${{ (needs.rbe.outputs.mode == 'remote' || needs.rbe.outputs.mode == 'cache') && '" + label + "' || 'ubuntu-24.04' }}"
+}
+
+// bazelBlacksmithModes: the modes in which bazelRemoteRunsOn picks the
+// Blacksmith label.
+var bazelBlacksmithModes = map[string]bool{"remote": true, "cache": true}
+
+// isBazelRRCCacheReader: a remote repo contents cache reader
+// (bazelRRCReadLanes) that also runs in mode cache (not remote-only).
+// bazel-dolt-race and bazel-dolt-int run only in mode remote (their own ifs,
+// TestBazelDoltRaceArmsExactlyOnePerMode, TestBazelDoltIntArmsExactlyOnePerMode),
+// so they keep the lanes' ubuntu-latest fallback like the remote-only jobs:
+// the fallback branch of their runs-on ternary is never actually taken.
+func isBazelRRCCacheReader(name string) bool {
+	return slices.Contains(bazelRRCReadLanes, name) && !bazelRemoteOnlyJobs[name] && name != bazelDoltRaceJobName && name != bazelDoltIntJobName
+}
+
+// The default lane size: every action executes on rbe-west, but the
+// client's loading and analysis is CPU-bound and gates every action
+// (ga-vnycm2.8: 17-38 s on 2 vCPU, 12-26 s on 4), so 4 vCPU.
+var bazelLaneRunsOn = bazelRemoteRunsOn("blacksmith-4vcpu-ubuntu-2404")
+
+// rbe-prewarm only dispatches a pool worker: no Bazel client, 2 vCPU.
+var bazelPrewarmRunsOn = bazelRemoteRunsOn("blacksmith-2vcpu-ubuntu-2404")
+
+// bazel-test's `bazel test //... --config=ci` spent ~63 of its 81 s in
+// client-side loading and analysis (1798 packages, 66k configured targets;
+// critical path 7.65 s, every action a remote cache hit), which Skyframe
+// parallelizes across the client's cores: 8 vCPU (ga-vnycm2.8 analysis-only:
+// 25.6 s on 4 vCPU, 16.3 s on 8).
+var bazelTestLaneRunsOn = bazelRemoteRunsOn("blacksmith-8vcpu-ubuntu-2404")
+
+// The package gates: package-npm at 4 vCPU (F3); package-mcp at 8 vCPU with
+// pytest -n 16 (bazelMCPPytestWorkers), since its pytest run is dominated by
+// per-test `bd init` fixture setup, which is CPU-bound and parallel.
+var bazelPackageRunsOn = map[string]string{
+	"package-mcp": bazelRemoteRunsOn("blacksmith-8vcpu-ubuntu-2404"),
+	"package-npm": bazelRemoteRunsOn("blacksmith-4vcpu-ubuntu-2404"),
+}
+
+// package-mcp's BEADS_MCP_PYTEST_WORKERS: 16 xdist workers on the 8 vCPU
+// Blacksmith runner (modes remote and cache), package-mcp.sh's default 8 on
+// the GitHub-hosted fallback (forks, Dependabot, rbe off/skip).
+const bazelMCPPytestWorkers = "${{ (needs.rbe.outputs.mode == 'remote' || needs.rbe.outputs.mode == 'cache') && '16' || '8' }}"
+
+// Blacksmith macOS (Apple Silicon M4, ARM64), pinned to macos-26 (the image
+// GitHub's macos-latest resolves to) so the PR legs and main.yml's
+// blacksmith-macos-go-build-cache saver share one image regardless of when
+// Blacksmith moves its own -latest alias.
+const blacksmithMacOSLabel = "blacksmith-6vcpu-macos-26"
+const blacksmithWindowsLabel = "blacksmith-4vcpu-windows-2025"
+
+// platformsMatrixRunsOn: the mixed-OS matrix jobs (pr-preflight-platforms,
+// check-doc-freshness-platforms) name each leg's Blacksmith label in its
+// `include` entry's `runner` field.
+const platformsMatrixRunsOn = "${{ matrix.runner }}"
+
+// platformsMatrixRunners: each mixed-OS matrix leg's `os` (which keeps the
+// check names stable) -> its Blacksmith label.
 //
-// F7b review fix (S3): the macOS branch is a plain 'macos-latest', never
-// Blacksmith - Blacksmith macOS runners bill at roughly 20x Linux/Windows
-// rates and no push-to-main Blacksmith-macOS cache saver exists. The
-// `same-repo-macos` marker itself is kept (only its resolved value changed)
-// so the job's matrix shape stays uniform across all three OSes.
-const sameRepoPlatformsMatrixMarkerRunsOn = "${{ matrix.runner == 'same-repo-linux' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest') || matrix.runner == 'same-repo-windows' && ((github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-windows-2025' || 'windows-latest') || matrix.runner == 'same-repo-macos' && 'macos-latest' || matrix.os }}"
+// Runner-size A/B (#7381, 2026-10-08): pr-preflight-platforms' Windows leg on
+// blacksmith-8vcpu-windows-2025 restored the 4 vCPU saver's cache fine, but
+// waited 63s for an 8 vCPU Windows runner and finished at 144s against 129s
+// on 4 vCPU, so it stays on blacksmithWindowsLabel.
+var platformsMatrixRunners = map[string]string{
+	"macos-latest":   blacksmithMacOSLabel,
+	"windows-latest": blacksmithWindowsLabel,
+}
 
 // --- a minimal GitHub Actions expression evaluator -------------------------
 //
@@ -82,8 +155,16 @@ const sameRepoPlatformsMatrixMarkerRunsOn = "${{ matrix.runner == 'same-repo-lin
 // string, for the small subset of the GitHub Actions expression language
 // this repo's same-repo Blacksmith ternaries use: string literals, dotted
 // identifier lookups (resolved from a caller-supplied context map), ==, !=,
-// &&, ||, !, and parentheses. It is not a general-purpose GHA expression
-// engine - no functions, no numbers, no object/array literals.
+// &&, ||, !, parentheses, and the true/false/null literals. Identifiers may
+// contain '-' (inputs.fork-farm), and == / != follow GitHub's loose equality
+// (ghEquals: strings case-insensitively, mixed types as numbers). It is not a general-purpose GHA
+// expression engine - no functions, no numbers, no object/array literals.
+//
+// Merge queue (ci_merge_queue_test.go): callers simulate a merge_group run
+// with github.event_name "merge_group", github.actor
+// "github-merge-queue[bot]", github.ref "refs/heads/gh-readonly-queue/...",
+// the github.event.merge_group.* fields, and no github.event.pull_request.*
+// key at all (null on that event).
 //
 // && and || use GitHub's own short-circuit-returns-operand semantics (not
 // strict booleans: `false && 'x'` is `false`, not `false`'s boolean negation
@@ -99,7 +180,7 @@ func ghTokenize(s string) ([]ghToken, error) {
 	var toks []ghToken
 	i := 0
 	isIdentByte := func(b byte) bool {
-		return b == '.' || b == '_' ||
+		return b == '.' || b == '_' || b == '-' ||
 			(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 	}
 	for i < len(s) {
@@ -156,7 +237,7 @@ func ghTokenize(s string) ([]ghToken, error) {
 type ghParser struct {
 	toks []ghToken
 	pos  int
-	ctx  map[string]string
+	ctx  map[string]any
 }
 
 func (p *ghParser) peek() (ghToken, bool) {
@@ -273,13 +354,22 @@ func (p *ghParser) parsePrimary() (any, error) {
 	case "string":
 		return tok.val, nil
 	case "ident":
+		switch tok.val {
+		case "true":
+			return true, nil
+		case "false":
+			return false, nil
+		case "null":
+			return nil, nil
+		}
 		v, ok := p.ctx[tok.val]
 		if !ok {
 			// An identifier the caller's context does not mention (for
-			// example a deleted fork's head.repo.full_name) is null in the
-			// real evaluator; treat it as the empty string, which compares
-			// unequal to every non-empty literal this repo's expressions use.
-			return "", nil
+			// example a deleted fork's head.repo.full_name, or any
+			// github.event.pull_request.* field on merge_group) is null in
+			// the real evaluator: falsy, == null and == '' (both 0), unequal
+			// to every non-empty, non-numeric literal.
+			return nil, nil
 		}
 		return v, nil
 	default:
@@ -300,8 +390,53 @@ func ghTruthy(v any) bool {
 	}
 }
 
+// ghEquals: GitHub's loose equality for the operand kinds this evaluator
+// produces. Two strings compare case-insensitively; two booleans, or two
+// nulls, directly; otherwise both sides are coerced to numbers (null and ”
+// to 0, true to 1, false to 0, any other string to its numeric value or
+// NaN) and NaN equals nothing. So `true == 'true'` is false, as on GitHub
+// (the classic workflow_call boolean-input bug), and `false == ”` is true.
 func ghEquals(a, b any) bool {
-	return fmt.Sprint(a) == fmt.Sprint(b)
+	if sa, ok := a.(string); ok {
+		if sb, ok := b.(string); ok {
+			return strings.EqualFold(sa, sb)
+		}
+	}
+	if ba, ok := a.(bool); ok {
+		if bb, ok := b.(bool); ok {
+			return ba == bb
+		}
+	}
+	if a == nil && b == nil {
+		return true
+	}
+	na, nb := ghNumber(a), ghNumber(b)
+	return !math.IsNaN(na) && !math.IsNaN(nb) && na == nb
+}
+
+// ghNumber: GitHub's coercion of an operand to a number.
+func ghNumber(v any) float64 {
+	switch x := v.(type) {
+	case nil:
+		return 0
+	case bool:
+		if x {
+			return 1
+		}
+		return 0
+	case string:
+		t := strings.TrimSpace(x)
+		if t == "" {
+			return 0
+		}
+		f, err := strconv.ParseFloat(t, 64)
+		if err != nil {
+			return math.NaN()
+		}
+		return f
+	default:
+		return math.NaN()
+	}
 }
 
 // evalGHExpr evaluates a GitHub Actions `${{ ... }}` expression (the wrapper
@@ -309,6 +444,16 @@ func ghEquals(a, b any) bool {
 // "github.event_name") to its string value. See the package comment above
 // for the supported subset.
 func evalGHExpr(expr string, ctx map[string]string) (any, error) {
+	typed := make(map[string]any, len(ctx))
+	for k, v := range ctx {
+		typed[k] = v
+	}
+	return evalGHExprTyped(expr, typed)
+}
+
+// evalGHExprTyped: evalGHExpr with typed context values (a bool for a
+// boolean input such as inputs.fresh-test-results, nil for null).
+func evalGHExprTyped(expr string, ctx map[string]any) (any, error) {
 	expr = strings.TrimSpace(expr)
 	expr = strings.TrimPrefix(expr, "${{")
 	expr = strings.TrimSuffix(expr, "}}")
@@ -382,12 +527,6 @@ func TestSameRepoBlacksmithExpressionSemantics(t *testing.T) {
 		{"blacksmith-2vcpu-ubuntu-2404", "ubuntu-latest", sameRepoBlacksmith2vcpu},
 		{"blacksmith-4vcpu-ubuntu-2404", "ubuntu-latest", sameRepoBlacksmith4vcpu},
 		{"blacksmith-8vcpu-ubuntu-2404", "ubuntu-latest", sameRepoBlacksmith8vcpu},
-		{"blacksmith-2vcpu-windows-2025", "windows-latest", sameRepoBlacksmithWindows2vcpu},
-		{"blacksmith-4vcpu-windows-2025", "windows-latest", sameRepoBlacksmithWindows4vcpu},
-		{"blacksmith-8vcpu-windows-2025", "windows-latest", sameRepoBlacksmithWindows8vcpu},
-		{"blacksmith-16vcpu-windows-2025", "windows-latest", sameRepoBlacksmithWindows16vcpu},
-		{"blacksmith-6vcpu-macos-latest", "macos-latest", sameRepoBlacksmithMacOS6vcpu},
-		{"blacksmith-12vcpu-macos-latest", "macos-latest", sameRepoBlacksmithMacOS12vcpu},
 	}
 	for _, c := range cases {
 		ctx := map[string]string{
@@ -411,59 +550,155 @@ func TestSameRepoBlacksmithExpressionSemantics(t *testing.T) {
 	}
 }
 
-// TestSameRepoPlatformsMatrixMarkerRunsOnExpressionSemantics runs the real,
-// pinned sameRepoPlatformsMatrixMarkerRunsOn chained-ternary expression
-// (pr-preflight-platforms' and check-doc-freshness-platforms' runs-on, F7b
-// §2.1) through evalGHExpr for every (marker, event) combination the policy
-// cares about: the linux/windows `runner` markers resolve to that OS's
-// Blacksmith label only on a trusted same-repo PR/merge_group, falling back
-// to that OS's GitHub-hosted label otherwise; the macos marker always
-// resolves to GitHub-hosted macos-latest regardless of trust (F7b review fix
-// S3: Blacksmith macOS is ~20x the Linux/Windows rate and has no push-to-main
-// cache saver); and a leg with no marker at all (there is none today, but the
-// fallback must still be safe) falls back to matrix.os.
-func TestSameRepoPlatformsMatrixMarkerRunsOnExpressionSemantics(t *testing.T) {
+// TestBlacksmithWindowsMacOSRunsOnEveryEvent: the Windows and macOS labels
+// resolve to Blacksmith on every event shape, forks and Dependabot included;
+// there is no GitHub-hosted fallback left to drift to.
+func TestBlacksmithWindowsMacOSRunsOnEveryEvent(t *testing.T) {
 	const ownRepo = "steveyegge/beads"
-	trustedCtx := map[string]string{
-		"github.event_name":                             "pull_request",
-		"github.event.pull_request.head.repo.full_name": ownRepo,
-		"github.repository":                             ownRepo,
-		"github.actor":                                  "alice",
+	events := []struct{ name, event, headRepo, actor string }{
+		{"same-repo PR", "pull_request", ownRepo, "alice"},
+		{"merge_group", "merge_group", "", ""},
+		{"fork PR", "pull_request", "someone-else/beads", "alice"},
+		{"deleted fork head", "pull_request", "", "alice"},
+		{"dependabot", "pull_request", ownRepo, "dependabot[bot]"},
+		{"push", "push", "", "alice"},
+		{"schedule", "schedule", "", ""},
 	}
-	forkCtx := map[string]string{
-		"github.event_name":                             "pull_request",
-		"github.event.pull_request.head.repo.full_name": "someone-else/beads",
-		"github.repository":                             ownRepo,
-		"github.actor":                                  "alice",
+	for _, c := range []struct{ expr, want string }{
+		{blacksmithWindows2vcpuRunsOn, "blacksmith-2vcpu-windows-2025"},
+		{blacksmithWindows4vcpuRunsOn, blacksmithWindowsLabel},
+		{"${{ '" + blacksmithMacOSLabel + "' }}", blacksmithMacOSLabel},
+	} {
+		for _, e := range events {
+			ctx := map[string]string{
+				"github.event_name":                             e.event,
+				"github.event.pull_request.head.repo.full_name": e.headRepo,
+				"github.repository":                             ownRepo,
+				"github.actor":                                  e.actor,
+			}
+			if got := mustEvalGHRunsOn(t, c.expr, ctx); got != c.want {
+				t.Errorf("%s under %s = %q, want %q", c.expr, e.name, got, c.want)
+			}
+		}
 	}
-	cases := []struct {
-		name       string
-		marker     string // matrix.runner
-		os         string // matrix.os
-		ctx        map[string]string
-		wantRunsOn string
+	for _, leg := range []string{blacksmithMacOSLabel, blacksmithWindowsLabel} {
+		if got := mustEvalGHRunsOn(t, platformsMatrixRunsOn, map[string]string{"matrix.runner": leg}); got != leg {
+			t.Errorf("%s with matrix.runner %q = %q", platformsMatrixRunsOn, leg, got)
+		}
+	}
+}
+
+// TestBazelRBERunnerOutsideGastownhall evaluates bazel.yml's real rbe job
+// runs-on: in gastownhall (github.repository_owner_id gastownhallOwnerID,
+// whatever the org is called) the same-repo events get Blacksmith and fork,
+// Dependabot and pull_request_target runs GitHub-hosted; in a fork
+// repository's own CI, which has no Blacksmith, every event is
+// GitHub-hosted, so its pushes and dispatches reach mode local instead of
+// queueing for a day. (The lanes follow the decided mode, local there:
+// TestBlacksmithBazelRunnerSizes.)
+func TestBazelRBERunnerOutsideGastownhall(t *testing.T) {
+	rbe := readCIWorkflow(t, bazelWorkflowName).job(t, bazelRBEJobName)
+	runsOn := rbe.RunsOn
+	forkRepo := rbe.step(t, "Decide remote execution").Env["FORK_REPO"]
+	events := []struct {
+		name, event, headRepo, actor string
+		blacksmith                   bool // in gastownhall
 	}{
-		{"linux marker, trusted", "same-repo-linux", "ubuntu-latest", trustedCtx, "blacksmith-4vcpu-ubuntu-2404"},
-		{"linux marker, fork", "same-repo-linux", "ubuntu-latest", forkCtx, "ubuntu-latest"},
-		{"windows marker, trusted", "same-repo-windows", "windows-latest", trustedCtx, "blacksmith-4vcpu-windows-2025"},
-		{"windows marker, fork", "same-repo-windows", "windows-latest", forkCtx, "windows-latest"},
-		// F7b review fix (S3): macOS never resolves to Blacksmith, trusted or not.
-		{"macos marker, trusted", "same-repo-macos", "macos-latest", trustedCtx, "macos-latest"},
-		{"macos marker, fork", "same-repo-macos", "macos-latest", forkCtx, "macos-latest"},
-		{"no marker falls back to matrix.os", "", "some-other-os", trustedCtx, "some-other-os"},
+		{"push", "push", "", "alice", true},
+		{"workflow_dispatch", "workflow_dispatch", "", "alice", true},
+		{"schedule", "schedule", "", "", true},
+		{"merge_group", "merge_group", "", "github-merge-queue[bot]", true},
+		{"same-repo PR", "pull_request", "<own>", "alice", true},
+		{"fork PR", "pull_request", "someone-else/beads", "alice", false},
+		{"Dependabot PR", "pull_request", "<own>", "dependabot[bot]", false},
+		{"pull_request_target", "pull_request_target", "someone-else/beads", "alice", false},
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			ctx := map[string]string{}
-			for k, v := range c.ctx {
-				ctx[k] = v
+	for _, owner := range []struct {
+		repo, name, id string
+		upstream       bool
+	}{
+		{"gastownhall/beads", "gastownhall", gastownhallOwnerID, true},
+		{"gastowntown/beads", "gastowntown", gastownhallOwnerID, true}, // renamed org
+		{"someone/beads", "someone", "31337", false},
+		{"gastownhall/beads-fork", "gastownhall", "31337", false}, // a look-alike name
+	} {
+		// The decision's FORK_REPO reads the same id: mode local exactly
+		// outside gastownhall.
+		v, err := evalGHExpr(forkRepo, map[string]string{"github.repository_owner": owner.name, "github.repository_owner_id": owner.id})
+		if err != nil {
+			t.Fatalf("FORK_REPO %q: %v", forkRepo, err)
+		}
+		if got, want := ghTruthy(v), !owner.upstream; got != want {
+			t.Errorf("%s (owner id %s): FORK_REPO %q = %v, want %v", owner.repo, owner.id, forkRepo, got, want)
+		}
+		for _, e := range events {
+			head := e.headRepo
+			if head == "<own>" {
+				head = owner.repo
 			}
-			ctx["matrix.runner"] = c.marker
-			ctx["matrix.os"] = c.os
-			got := mustEvalGHRunsOn(t, sameRepoPlatformsMatrixMarkerRunsOn, ctx)
-			if got != c.wantRunsOn {
-				t.Errorf("%s: runs-on = %q, want %q", c.name, got, c.wantRunsOn)
+			ctx := map[string]string{
+				"github.event_name":                             e.event,
+				"github.event.pull_request.head.repo.full_name": head,
+				"github.repository":                             owner.repo,
+				"github.repository_owner":                       owner.name,
+				"github.repository_owner_id":                    owner.id,
+				"github.actor":                                  e.actor,
 			}
-		})
+			want := "ubuntu-latest"
+			if owner.upstream && e.blacksmith {
+				want = "blacksmith-2vcpu-ubuntu-2404"
+			}
+			if got := mustEvalGHRunsOn(t, runsOn, ctx); got != want {
+				t.Errorf("%s in %s (owner id %s): rbe runs-on %q, want %q", e.name, owner.repo, owner.id, got, want)
+			}
+		}
+	}
+}
+
+// TestBlacksmithBazelRunnerSizes evaluates every bazel.yml lane's real
+// runs-on (and package-mcp's xdist worker count) under each rbe mode: modes
+// remote and cache get the lane's Blacksmith size (mode cache reads
+// rbe-cache, which refuses GitHub-hosted runners), every other mode the
+// GitHub-hosted runner, and package-mcp runs 16 xdist workers exactly when
+// it is on its 8 vCPU runner (8 everywhere else, package-mcp.sh's default).
+func TestBlacksmithBazelRunnerSizes(t *testing.T) {
+	workflow := readCIWorkflow(t, bazelWorkflowName)
+	wantRemote := map[string]string{
+		bazelJobName:           "blacksmith-8vcpu-ubuntu-2404",
+		bazelPackageMCPJobName: "blacksmith-8vcpu-ubuntu-2404",
+		bazelPackageNPMJobName: "blacksmith-4vcpu-ubuntu-2404",
+		bazelRBEPrewarmJobName: "blacksmith-2vcpu-ubuntu-2404",
+	}
+	mcpGate := workflow.job(t, bazelPackageMCPJobName).step(t, "Run MCP package gate")
+	if got := mcpGate.Env["BEADS_MCP_PYTEST_WORKERS"]; got != bazelMCPPytestWorkers {
+		t.Errorf("package-mcp Run MCP package gate BEADS_MCP_PYTEST_WORKERS = %q, want %q", got, bazelMCPPytestWorkers)
+	}
+	for _, mode := range []string{"remote", "fork-ro", "fork-rw", "local", "cache", "skip"} {
+		ctx := map[string]string{"needs.rbe.outputs.mode": mode}
+		for name, job := range workflow.Jobs {
+			if name == bazelRBEJobName || isBazelRRCJob(name) {
+				continue // rrc jobs: push/schedule only, never a fork (literal label)
+			}
+			want := "ubuntu-latest"
+			if isBazelRRCCacheReader(name) {
+				want = "ubuntu-24.04"
+			}
+			if bazelBlacksmithModes[mode] {
+				want = "blacksmith-4vcpu-ubuntu-2404"
+				if label, ok := wantRemote[name]; ok {
+					want = label
+				}
+			}
+			if got := mustEvalGHRunsOn(t, job.RunsOn, ctx); got != want {
+				t.Errorf("%s runs-on under mode %s = %q, want %q", name, mode, got, want)
+			}
+		}
+		wantWorkers := "8"
+		if mustEvalGHRunsOn(t, workflow.job(t, bazelPackageMCPJobName).RunsOn, ctx) == "blacksmith-8vcpu-ubuntu-2404" {
+			wantWorkers = "16"
+		}
+		if got := mustEvalGHRunsOn(t, mcpGate.Env["BEADS_MCP_PYTEST_WORKERS"], ctx); got != wantWorkers {
+			t.Errorf("package-mcp BEADS_MCP_PYTEST_WORKERS under mode %s = %q, want %q", mode, got, wantWorkers)
+		}
 	}
 }

@@ -35,10 +35,11 @@ freshness source.
 | `reference/json-schema.md` | `Last reviewed:` marker tied to `cmd/bd/output.go`, `cmd/bd/errors.go`, and protocol tests. (Mintlify port: was `JSON_SCHEMA.md`.) |
 | `recovery/init-safety.md` | `Last reviewed:` marker tied to `cmd/bd/init*.go` safety code and tests. (Mintlify port: was `RECOVERY.md`.) |
 | `ERROR_HANDLING.md` | `Last reviewed:` marker tied to current command error exits and JSON error helpers. |
-| `LINTING.md` | `Last reviewed:` marker tied to `.golangci.yml`, `scripts/ci/pr-lint.sh`, `scripts/pr-lint/`, the `Makefile` wrapper, and CI workflow wiring. |
+| `LINTING.md` | `Last reviewed:` marker tied to `.golangci.yml`, `tools/nogo/`, `scripts/ci/pr-lint.sh`, `scripts/pr-lint/`, the `Makefile` wrapper, and CI workflow wiring. |
 | `SERVE_RUNBOOK.md` | `Last reviewed:` marker tied to the operating-envelope constants in `internal/httpapi/server.go` and the log fields in its `event`/`request` emitters. |
 | `CI_CLEANUP_PLAN.md` | `Last reviewed:` marker tied to the CI audit, workflow files, wrapper scripts, `Makefile`, package manifests, and maintainer decision review. |
 | `design/otel/otel-data-model.md` | `Last reviewed:` marker tied to telemetry, Dolt storage, hooks, and AI call sites. |
+| `EMBEDDING_OVER_PROXIED_SERVER.md` | `Last reviewed:` marker naming the commit it was read at, tied to `internal/storage/dbproxy/`, `internal/storage/uow/`, `internal/storage/schema/` gate and lock, `cmd/bd/dolt_proxied_lifecycle.go`, and the root `beads*.go` open path down into `internal/storage/dolt/` and `internal/storage/embeddeddolt/`. Re-read against those sources per release; the doc describes observed behaviour, so a stale marker makes it wrong rather than merely old. |
 
 Follow-up automation should replace marker-only checks with generated or
 `--check` blocks where a clean code source exists.
@@ -63,7 +64,7 @@ Follow-up automation should replace marker-only checks with generated or
 | `BDP_GRAPH_ARCHITECTURE.md` | Keep | Graph-plane design record; ruled contracts and dated dependency sources, not runtime or merge clearance. |
 | `BDP_GRAPH_CLI_AND_STORAGE_SPEC.md` | Keep | Graph-plane design record; ruled contracts and dated dependency sources, not runtime or merge clearance. |
 | `CLAUDE_INTEGRATION.md` | Keep | Design/user guide for Claude setup; paired with `SETUP.md`. |
-| `CLAUDE.md` | Revise | Kept as architecture orientation only; command/workflow duplication was reduced in favour of root `AGENTS.md` and `AGENT_INSTRUCTIONS.md`. |
+| `AGENTS.md` (`CLAUDE.md` is a symlink to it) | Keep | Contributor orientation for `engdocs/`: verified pointers only; workflow rules live in the root `AGENTS.md`. |
 | `CLI_REFERENCE.md` | Keep/generated | Generated command reference from live help output. |
 | `CI_CLEANUP_PLAN.md` | Keep as maintainer context | Dated CI policy, measurements, and implementation roadmap; current commands live in workflows and the `Makefile`. |
 | `CI_REQUIRED_CHECK_TOPOLOGY.md` | Keep as maintainer context | Implemented workflow design record for aggregate-gate policy; branch-protection and ruleset adoption remain pending. Live job membership and display names come from `.github/workflows/*.yml` and their structural tests; copied wiring and rollout steps are historical snapshots. |
@@ -86,7 +87,9 @@ Follow-up automation should replace marker-only checks with generated or
 | `DOLT-BACKEND.md` | Consolidated pointer | Old duplicate staged; stable path points to canonical `DOLT.md`. |
 | `DOLT.md` | Keep/canonical | Canonical Dolt backend guide. |
 | `ERROR_HANDLING.md` | Keep with freshness | Pattern guide with code-linked examples; marker added. |
+| `EMBEDDING_OVER_PROXIED_SERVER.md` | Keep with freshness | Observed proxied-server surfaces an embedder reads (pid file, child argv, status JSON, optional interfaces). Descriptive, not a compatibility contract; marker tied to the dbproxy, uow, schema-gate and proxied-lifecycle sources it quotes. |
 | `EXCLUSIVE_LOCK.md` | Keep | Behaviour/design doc for lock protocol. |
+| `EXTENDING.md` | Keep | Storage-API contracts callers must honor; entry point for embedder docs. |
 | `FAQ.md` | Revise | Opening wording now describes beads as Dolt-powered; stale pre-1.0 status removed. |
 | `FEDERATION.md` | Keep/canonical | Canonical federation (peer-to-peer sync) guide; moved from root `FEDERATION-SETUP.md`, which is now a stable pointer. Absorbed the duplicate federation section previously in `DOLT.md`. |
 | `GIT_INTEGRATION.md` | Keep | User-facing git/worktree/hook behaviour. |

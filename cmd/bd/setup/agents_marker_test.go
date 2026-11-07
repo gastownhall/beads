@@ -5,8 +5,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/templates/agents"
 )
@@ -167,6 +169,93 @@ func TestInstallAgentsDefaultsToFullProfile(t *testing.T) {
 	content := string(data)
 	if !strings.Contains(content, "profile:full") {
 		t.Error("default profile should be full")
+	}
+}
+
+// TestAgentsSectionRemoveReaddIsStable pins what --remove and a later setup
+// leave behind: removing the section leaves no blank-line hole, setup appends
+// it again after one blank line, and from then on each --remove and each setup
+// leaves the same bytes, however often they alternate. A file the user wrote
+// gets back what it held before setup added the section.
+func TestAgentsSectionRemoveReaddIsStable(t *testing.T) {
+	stubDetectRenderOpts(t)
+	integration := agentsIntegration{
+		name:         "TestAgent",
+		setupCommand: "bd setup testagent",
+		profile:      agents.ProfileMinimal,
+	}
+	section := agents.RenderSection(agents.ProfileMinimal)
+	scaffold := createNewAgentsFileWithProfile(agents.ProfileMinimal)
+
+	tests := []struct {
+		name        string
+		seed        string // "" means setup creates the file
+		wantRemoved string
+	}{
+		{
+			name:        "file setup created",
+			wantRemoved: strings.Replace(scaffold, section+"\n\n", "", 1),
+		},
+		{
+			name:        "user file",
+			seed:        "# My Project\n\nHouse rules live here.\n",
+			wantRemoved: "# My Project\n\nHouse rules live here.\n",
+		},
+		{
+			name:        "user file without a final newline",
+			seed:        "# My Project",
+			wantRemoved: "# My Project\n",
+		},
+		{
+			name:        "user file ending in blank lines",
+			seed:        "# My Project\n\n\n",
+			wantRemoved: "# My Project\n",
+		},
+		{
+			name:        "CRLF user file",
+			seed:        "# My Project\r\n\r\nHouse rules live here.\r\n",
+			wantRemoved: "# My Project\r\n\r\nHouse rules live here.\r\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env, _, _ := newFactoryTestEnv(t)
+			if tt.seed != "" {
+				if err := os.WriteFile(env.agentsPath, []byte(tt.seed), 0o644); err != nil {
+					t.Fatalf("seed: %v", err)
+				}
+			}
+			step := func(name string, run func(agentsEnv, agentsIntegration) error) string {
+				t.Helper()
+				if err := run(env, integration); err != nil {
+					t.Fatalf("%s: %v", name, err)
+				}
+				data, err := os.ReadFile(env.agentsPath)
+				if err != nil {
+					t.Fatalf("read after %s: %v", name, err)
+				}
+				return string(data)
+			}
+
+			step("setup", installAgents)
+			removed := step("remove", removeAgents)
+			if removed != tt.wantRemoved {
+				t.Fatalf("after remove:\ngot:  %q\nwant: %q", removed, tt.wantRemoved)
+			}
+			readded := step("setup again", installAgents)
+			if want := removed + "\n" + section; readded != want {
+				t.Fatalf("after setup again:\ngot:  %q\nwant: %q", readded, want)
+			}
+			for cycle := 2; cycle <= 3; cycle++ {
+				if got := step("remove", removeAgents); got != removed {
+					t.Fatalf("remove #%d changed the result:\ngot:  %q\nwant: %q", cycle, got, removed)
+				}
+				if got := step("setup", installAgents); got != readded {
+					t.Fatalf("setup #%d changed the result:\ngot:  %q\nwant: %q", cycle+1, got, readded)
+				}
+			}
+		})
 	}
 }
 
@@ -439,5 +528,211 @@ func TestLegacyToNewMigrationViaInstall(t *testing.T) {
 	}
 	if !strings.Contains(content, "# Header") || !strings.Contains(content, "# Footer") {
 		t.Error("surrounding content should be preserved")
+	}
+}
+
+// seedAgentsFileWithOldMtime writes content to path with mode 0600 and
+// backdates it, so a test can tell whether installAgents rewrote it:
+// atomicWriteFile replaces the file with a new one (new inode, fresh mtime).
+func seedAgentsFileWithOldMtime(t *testing.T, path, content string) os.FileInfo {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("seed %s: %v", path, err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatalf("chmod %s: %v", path, err)
+	}
+	old := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatalf("backdate %s: %v", path, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info
+}
+
+// assertAgentsFileUntouched fails if path no longer holds content, or was
+// rewritten since seedAgentsFileWithOldMtime returned seed: replaced by a new
+// file, given a new mtime, or had its mode reset.
+func assertAgentsFileUntouched(t *testing.T, path, content string, seed os.FileInfo) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if string(data) != content {
+		t.Errorf("%s changed:\n got: %q\nwant: %q", path, data, content)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if !os.SameFile(seed, info) {
+		t.Errorf("%s was replaced by a new file (inode changed)", path)
+	}
+	if !info.ModTime().Equal(seed.ModTime()) {
+		t.Errorf("%s was rewritten: mtime %v, want %v", path, info.ModTime(), seed.ModTime())
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Errorf("%s mode = %o, want 0600", path, info.Mode().Perm())
+	}
+}
+
+// A rerun of bd setup on a file whose beads section is already current must
+// leave the file alone and say so, as bd init's updateAgentFile does. It used
+// to write the same bytes back (fresh mtime, new inode, mode reset to 0644)
+// and report "Updated existing beads section".
+func TestInstallAgentsLeavesCurrentSectionUntouched(t *testing.T) {
+	stubDetectRenderOpts(t)
+	tests := []struct {
+		name      string
+		installed agents.Profile
+		requested agents.Profile
+	}{
+		{name: "same profile", installed: agents.ProfileMinimal, requested: agents.ProfileMinimal},
+		{name: "full profile kept for a minimal integration", installed: agents.ProfileFull, requested: agents.ProfileMinimal},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env, stdout, stderr := newFactoryTestEnv(t)
+			content := "# My Project\n\n" + agents.RenderSection(tt.installed) + "\n## Notes\n"
+			seed := seedAgentsFileWithOldMtime(t, env.agentsPath, content)
+
+			integration := agentsIntegration{name: "TestAgent", setupCommand: "bd setup testagent", profile: tt.requested}
+			if err := installAgents(env, integration); err != nil {
+				t.Fatalf("installAgents: %v", err)
+			}
+
+			assertAgentsFileUntouched(t, env.agentsPath, content, seed)
+			out := stdout.String()
+			if !strings.Contains(out, "✓ AGENTS.md already has the current beads section\n") {
+				t.Errorf("expected the section to be reported current, got:\n%s", out)
+			}
+			if strings.Contains(out, "Updated existing beads section") {
+				t.Errorf("reported an update to a file it left unchanged:\n%s", out)
+			}
+			if stderr.Len() != 0 {
+				t.Errorf("unexpected stderr: %s", stderr.String())
+			}
+		})
+	}
+}
+
+// malformedMarkerContents are agents-file contents whose beads section cannot
+// be replaced: the END marker is missing, or comes before BEGIN.
+var malformedMarkerContents = []struct {
+	name    string
+	content string
+}{
+	{
+		name:    "missing END marker",
+		content: "# My Project\n\n<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:00000000 -->\nOlder guidance; its END marker was lost.\n",
+	},
+	{
+		name:    "END before BEGIN",
+		content: "# My Project\n\n<!-- END BEADS INTEGRATION -->\nStray text.\n<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:00000000 -->\nOlder guidance.\n",
+	},
+}
+
+// A section with malformed markers cannot be replaced. installAgents used to
+// write the file back unchanged and report "Updated existing beads section";
+// like bd init's updateAgentFile it now leaves the file alone and returns the
+// error.
+func TestInstallAgentsReportsMalformedMarkers(t *testing.T) {
+	stubDetectRenderOpts(t)
+	for _, tt := range malformedMarkerContents {
+		t.Run(tt.name, func(t *testing.T) {
+			env, stdout, stderr := newFactoryTestEnv(t)
+			seed := seedAgentsFileWithOldMtime(t, env.agentsPath, tt.content)
+
+			integration := agentsIntegration{name: "TestAgent", setupCommand: "bd setup testagent", profile: agents.ProfileFull}
+			err := installAgents(env, integration)
+			if !errors.Is(err, agents.ErrMalformedMarkers) {
+				t.Fatalf("installAgents error = %v, want %v", err, agents.ErrMalformedMarkers)
+			}
+
+			assertAgentsFileUntouched(t, env.agentsPath, tt.content, seed)
+			if strings.Contains(stdout.String(), "Updated existing beads section") {
+				t.Errorf("reported an update to a file it could not update:\n%s", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "malformed beads section markers") {
+				t.Errorf("expected the malformed markers on stderr, got: %q", stderr.String())
+			}
+		})
+	}
+}
+
+// bd setup claude treats a CLAUDE.md it cannot update as non-fatal: hooks are
+// already installed, so it warns and returns nil, leaving the file alone.
+// When CLAUDE.md is an @AGENTS.md stub, the file it cannot update is AGENTS.md,
+// and the beads block still in the stub must stay: stripping it is safe only
+// once AGENTS.md holds the current section.
+func TestInstallClaudeWarnsOnMalformedMarkers(t *testing.T) {
+	stubDetectRenderOpts(t)
+	for _, tt := range malformedMarkerContents {
+		t.Run(tt.name, func(t *testing.T) {
+			env, stdout, stderr := newClaudeTestEnv(t)
+			claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+			seed := seedAgentsFileWithOldMtime(t, claudePath, tt.content)
+
+			if err := installClaude(env, false, false); err != nil {
+				t.Fatalf("installClaude returned error: %v", err)
+			}
+
+			assertAgentsFileUntouched(t, claudePath, tt.content, seed)
+			if strings.Contains(stdout.String(), "Updated existing beads section") {
+				t.Errorf("reported an update to a file it could not update:\n%s", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "Warning: failed to update "+claudeInstructionsFile) {
+				t.Errorf("expected a non-fatal warning on stderr, got: %q", stderr.String())
+			}
+		})
+		t.Run(tt.name+" in the redirected AGENTS.md", func(t *testing.T) {
+			env, stdout, stderr := newClaudeTestEnv(t)
+			claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+			claudeContent := staleClaudeStubWithBlock()
+			claudeSeed := seedAgentsFileWithOldMtime(t, claudePath, claudeContent)
+			agentsPath := filepath.Join(env.projectDir, "AGENTS.md")
+			agentsSeed := seedAgentsFileWithOldMtime(t, agentsPath, tt.content)
+
+			if err := installClaude(env, false, false); err != nil {
+				t.Fatalf("installClaude returned error: %v", err)
+			}
+
+			assertAgentsFileUntouched(t, agentsPath, tt.content, agentsSeed)
+			// AGENTS.md was not updated, so the stub's block is the only
+			// well-formed beads section the project has.
+			assertAgentsFileUntouched(t, claudePath, claudeContent, claudeSeed)
+			if strings.Contains(stdout.String(), "Removed stale beads block") {
+				t.Errorf("reported stripping %s although AGENTS.md was not updated:\n%s", claudeInstructionsFile, stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "Warning: failed to update AGENTS.md") {
+				t.Errorf("expected the warning to name AGENTS.md, the file that failed, got: %q", stderr.String())
+			}
+		})
+	}
+}
+
+// bd setup mux fails on an AGENTS.md it cannot update, before installing its
+// .mux hooks.
+func TestInstallMuxFailsOnMalformedMarkers(t *testing.T) {
+	stubDetectRenderOpts(t)
+	for _, tt := range malformedMarkerContents {
+		t.Run(tt.name, func(t *testing.T) {
+			env, _, _ := newFactoryTestEnv(t)
+			seed := seedAgentsFileWithOldMtime(t, env.agentsPath, tt.content)
+
+			err := installMux(env, false, false)
+			if !errors.Is(err, agents.ErrMalformedMarkers) {
+				t.Fatalf("installMux error = %v, want %v", err, agents.ErrMalformedMarkers)
+			}
+
+			assertAgentsFileUntouched(t, env.agentsPath, tt.content, seed)
+			if _, statErr := os.Stat(muxProjectDir(env.agentsPath)); !os.IsNotExist(statErr) {
+				t.Errorf("expected no .mux hooks directory, stat err = %v", statErr)
+			}
+		})
 	}
 }

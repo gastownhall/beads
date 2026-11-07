@@ -467,7 +467,7 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 		return HandleError("initializing Notion tracker: %v", err)
 	}
 
-	engine := tracker.NewEngine(nt, store, actor)
+	engine := tracker.NewEngine(nt, store, currentActor())
 	engine.PullHooks = buildNotionPullHooks(ctx)
 	unsupportedStats := newNotionUnsupportedPushStats()
 	engine.PushHooks = buildNotionPushHooks(ctx, nt, unsupportedStats)

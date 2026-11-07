@@ -112,7 +112,7 @@ NOTE: This is a rare operation. Most users never need this command.`,
 				)
 			}
 
-			if err := repairPrefixes(ctx, store, actor, newPrefix, issues, prefixes, dryRun); err != nil {
+			if err := repairPrefixes(ctx, store, currentActor(), newPrefix, issues, prefixes, dryRun); err != nil {
 				return HandleError("failed to repair prefixes: %v", err)
 			}
 			if !dryRun {
@@ -335,6 +335,7 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 
 	// Pattern to match any issue ID reference in text (both hash and sequential IDs)
 	oldPrefixPattern := regexp.MustCompile(`\b[a-z][a-z0-9-]*-[a-z0-9]+\b`)
+	gates := beadGatesByTarget(issues)
 
 	// Rename each issue
 	for _, is := range incorrectIssues {
@@ -343,7 +344,6 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 
 		// Apply text replacements in all issue fields
 		issue := is.issue
-		issue.ID = newID
 
 		// Replace all issue IDs in text fields using the rename map
 		replaceFunc := func(match string) string {
@@ -366,7 +366,7 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 		}
 
 		// Update the issue in the database
-		if err := st.UpdateIssueID(ctx, oldID, newID, issue, actorName); err != nil {
+		if err := renameIssueKeepingBeadGates(ctx, st, issue, newID, gates[oldID], actorName); err != nil {
 			return fmt.Errorf("failed to update issue %s -> %s: %w", oldID, newID, err)
 		}
 
@@ -433,6 +433,7 @@ func renamePrefixInDB(ctx context.Context, oldPrefix, newPrefix string, issues [
 		return strings.Replace(match, oldP+"-", newP+"-", 1)
 	}
 
+	gates := beadGatesByTarget(issues)
 	for _, issue := range issues {
 		oldID := issue.ID
 		newID := rewriteIssueID(oldP, newP, oldID)
@@ -455,8 +456,7 @@ func renamePrefixInDB(ctx context.Context, oldPrefix, newPrefix string, issues [
 			continue
 		}
 
-		issue.ID = newID
-		if err := store.UpdateIssueID(ctx, oldID, newID, issue, actor); err != nil {
+		if err := renameIssueKeepingBeadGates(ctx, store, issue, newID, gates[oldID], currentActor()); err != nil {
 			return fmt.Errorf("failed to update issue %s: %w", oldID, err)
 		}
 	}

@@ -765,39 +765,42 @@ func TestSizeCapStatus_UnavailableOnWalkError(t *testing.T) {
 	}
 }
 
-// postSyncCommitFailingStore syncs successfully but then fails the
-// GetCurrentCommit that runBackupExport needs to record its watermark — one
-// of the runBackupExport exits that returns without persisting state. Every
-// other GetCurrentCommit (change detection) succeeds.
-type postSyncCommitFailingStore struct {
+// destinationGoesReadOnlyStore syncs successfully, but the destination
+// loses write access the instant the sync finishes (e.g. a quota hit or a
+// read-only remount mid-backup): BackupDatabase itself succeeds, so the
+// sync genuinely happens, but it chmods dir read-only as a side effect, so
+// runBackupExport's post-sync saveBackupState — the call that would record
+// the new watermark — fails and never reaches disk. That is one of the
+// runBackupExport exits that returns without persisting state; the single
+// pre-sync GetCurrentCommit read (#7044) always succeeds here, so this
+// isolates the write-failure exit rather than a commit-read failure.
+type destinationGoesReadOnlyStore struct {
 	failingBackupStore
-	justSynced bool
+	t *testing.T
 }
 
-func (f *postSyncCommitFailingStore) BackupDatabase(ctx context.Context, dir string) error {
-	f.justSynced = true
-	return f.failingBackupStore.BackupDatabase(ctx, dir)
-}
-
-func (f *postSyncCommitFailingStore) GetCurrentCommit(context.Context) (string, error) {
-	if f.justSynced {
-		f.justSynced = false
-		return "", errors.New("dolt server unavailable")
+func (f *destinationGoesReadOnlyStore) BackupDatabase(ctx context.Context, dir string) error {
+	if err := f.failingBackupStore.BackupDatabase(ctx, dir); err != nil {
+		return err
 	}
-	return f.commit, nil
+	if err := os.Chmod(dir, 0o500); err != nil {
+		f.t.Fatalf("chmod destination read-only: %v", err)
+	}
+	return nil
 }
 
 // TestMaybeAutoBackup_WalkErrorArmsIntervalThrottle pins the PR #6071
 // iteration-2 review's behavioral minor: when the size-cap walk fails,
 // maybeAutoBackup warns and proceeds uncapped, and it must re-arm the
 // interval throttle itself before doing so. runBackupExport does not persist
-// state.Timestamp on every exit — here the post-sync GetCurrentCommit fails
-// after a successful sync — so without the re-arm the walk, its warning and
-// the sync itself all repeat on every bd command instead of once per
-// backup.interval.
+// state.Timestamp on every exit — here the sync itself succeeds (proving
+// fail-open) but the destination goes read-only immediately afterward, so
+// the post-sync saveBackupState that would record the new watermark fails —
+// so without the re-arm the walk, its warning and the sync itself all
+// repeat on every bd command instead of once per backup.interval.
 func TestMaybeAutoBackup_WalkErrorArmsIntervalThrottle(t *testing.T) {
 	if os.Geteuid() == 0 {
-		t.Skip("running as root; chmod does not deny reads")
+		t.Skip("running as root; chmod does not deny reads/writes")
 	}
 	t.Chdir(t.TempDir())
 	// The sync has to actually run for this test to reach runBackupExport's
@@ -823,6 +826,7 @@ func TestMaybeAutoBackup_WalkErrorArmsIntervalThrottle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("backupDir: %v", err)
 	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) }) // undo the simulated read-only destination so t.TempDir() can clean up
 	// One unreadable entry inside an otherwise writable destination: the
 	// walk fails, but backup_state.json can still be read and written.
 	locked := filepath.Join(dir, "locked")
@@ -838,7 +842,7 @@ func TestMaybeAutoBackup_WalkErrorArmsIntervalThrottle(t *testing.T) {
 
 	oldStore := store
 	// Different commit from the watermark ⇒ data changed ⇒ the walk runs.
-	fake := &postSyncCommitFailingStore{failingBackupStore: failingBackupStore{commit: "deadbeef"}}
+	fake := &destinationGoesReadOnlyStore{failingBackupStore: failingBackupStore{commit: "deadbeef"}, t: t}
 	store = fake
 	t.Cleanup(func() { store = oldStore })
 

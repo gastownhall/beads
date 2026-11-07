@@ -88,7 +88,7 @@ func TestBootstrapNoWorkspace(t *testing.T) {
 	})
 }
 
-func TestEmbeddedBootstrap(t *testing.T) {
+func TestEmbeddedBootstrapExistingDryRunInit(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -110,13 +110,13 @@ func TestEmbeddedBootstrap(t *testing.T) {
 
 	t.Run("bootstrap_dry_run_fresh", func(t *testing.T) {
 		dir := t.TempDir()
-		cmd := exec.Command("git", "init", "-q")
+		cmd := gitCommand("init", "-q")
 		cmd.Dir = dir
 		cmd.CombinedOutput()
-		cmd = exec.Command("git", "config", "user.name", "Test")
+		cmd = gitCommand("config", "user.name", "Test")
 		cmd.Dir = dir
 		cmd.CombinedOutput()
-		cmd = exec.Command("git", "config", "user.email", "test@test.com")
+		cmd = gitCommand("config", "user.email", "test@test.com")
 		cmd.Dir = dir
 		cmd.CombinedOutput()
 		// Create .beads with metadata.json so FindBeadsDir detects it
@@ -134,13 +134,13 @@ func TestEmbeddedBootstrap(t *testing.T) {
 
 	t.Run("bootstrap_init", func(t *testing.T) {
 		dir := t.TempDir()
-		cmd := exec.Command("git", "init", "-q")
+		cmd := gitCommand("init", "-q")
 		cmd.Dir = dir
 		cmd.CombinedOutput()
-		cmd = exec.Command("git", "config", "user.name", "Test")
+		cmd = gitCommand("config", "user.name", "Test")
 		cmd.Dir = dir
 		cmd.CombinedOutput()
-		cmd = exec.Command("git", "config", "user.email", "test@test.com")
+		cmd = gitCommand("config", "user.email", "test@test.com")
 		cmd.Dir = dir
 		cmd.CombinedOutput()
 		beadsDir := filepath.Join(dir, ".beads")
@@ -160,6 +160,15 @@ func TestEmbeddedBootstrap(t *testing.T) {
 			t.Errorf("expected 'Created fresh database':\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
 		}
 	})
+}
+
+func TestEmbeddedBootstrapJSONLAndGitOrigin(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	// ===== JSONL Import =====
 
@@ -176,13 +185,13 @@ func TestEmbeddedBootstrap(t *testing.T) {
 
 		// Create new dir with .beads + issues.jsonl but no database
 		dir := t.TempDir()
-		gitCmd := exec.Command("git", "init", "-q")
+		gitCmd := gitCommand("init", "-q")
 		gitCmd.Dir = dir
 		gitCmd.CombinedOutput()
-		gitCmd = exec.Command("git", "config", "user.name", "Test")
+		gitCmd = gitCommand("config", "user.name", "Test")
 		gitCmd.Dir = dir
 		gitCmd.CombinedOutput()
-		gitCmd = exec.Command("git", "config", "user.email", "test@test.com")
+		gitCmd = gitCommand("config", "user.email", "test@test.com")
 		gitCmd.Dir = dir
 		gitCmd.CombinedOutput()
 		destBeads := filepath.Join(dir, ".beads")
@@ -284,5 +293,51 @@ func TestEmbeddedBootstrapConcurrent(t *testing.T) {
 		if r.err != nil && !strings.Contains(r.err.Error(), "one writer at a time") {
 			t.Errorf("worker %d failed: %v", r.worker, r.err)
 		}
+	}
+}
+
+// TestEmbeddedBootstrapCloneFailureScrubsCredentials pins the credential scrub
+// at the "Bootstrap failed:" print site (mc-gcmer). An unencoded "#" or "?" in
+// the password ends the URL's authority early, so the remote is not a forge
+// and is cloned as configured. The clone error then carries the password
+// twice: sanitizeURL passes a URL net/url cannot parse through unchanged, and
+// Dolt's "invalid remote url:" repeats it.
+func TestEmbeddedBootstrapCloneFailureScrubsCredentials(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	for _, tc := range []struct{ name, password string }{
+		{"hash", "pa#ss"},
+		{"question_mark", "pa?ss"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			initGitRepoAt(t, dir)
+			beadsDir := filepath.Join(dir, ".beads")
+			if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+				t.Fatalf("mkdir .beads: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte("{}"), 0o644); err != nil {
+				t.Fatalf("write metadata.json: %v", err)
+			}
+			seedSyncRemote(t, beadsDir, "https://alice:"+tc.password+"@github.com/org/db")
+
+			cmd := exec.Command(bd, "bootstrap", "--yes")
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			stdout, stderr, err := runCommandBuffers(t, cmd)
+			// A failure before the clone would pass the leak check below
+			// without reaching the print site.
+			if err == nil || !strings.Contains(stderr.String(), "Bootstrap failed: clone from remote:") {
+				t.Fatalf("bootstrap should fail at the clone, got err=%v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+			}
+			if strings.Contains(stdout.String()+stderr.String(), tc.password) {
+				t.Errorf("bootstrap printed the sync.remote password %q:\nstdout:\n%s\nstderr:\n%s", tc.password, stdout.String(), stderr.String())
+			}
+		})
 	}
 }

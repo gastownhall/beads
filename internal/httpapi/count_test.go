@@ -117,6 +117,10 @@ func TestCountForwardsEveryDocumentedParameter(t *testing.T) {
 		"has_metadata_key":  {"audit_ref"},
 		"include_infra":     {"true"},
 		"include_ephemeral": {"true"},
+		"parent":            {"bd-9"},
+		"no_parent":         {"true"},
+		"exclude_type":      {"wisp", "gate"},
+		"exclude_status":    {"closed", "archived"},
 	}.Encode())
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
@@ -169,6 +173,11 @@ func TestCountForwardsEveryDocumentedParameter(t *testing.T) {
 
 		IncludeInfra:     true,
 		IncludeEphemeral: true,
+
+		ParentID:      "bd-9",
+		NoParent:      true,
+		ExcludeTypes:  []string{"wisp", "gate"},
+		ExcludeStatus: []string{"closed", "archived"},
 	}
 	if !reflect.DeepEqual(got[0], want) {
 		t.Errorf("request = %+v\nwant     %+v", got[0], want)
@@ -645,6 +654,10 @@ var countFieldForParameter = map[string]string{
 	"has_metadata_key":  "HasMetadataKey",
 	"include_infra":     "IncludeInfra",
 	"include_ephemeral": "IncludeEphemeral",
+	"parent":            "ParentID",
+	"no_parent":         "NoParent",
+	"exclude_type":      "ExcludeTypes",
+	"exclude_status":    "ExcludeStatus",
 }
 
 // TestEveryCountRequestFieldIsPublished: the wire publishes every filter the

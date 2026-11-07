@@ -151,7 +151,7 @@ var largeBatchApplyShapes = []struct {
 		},
 	},
 	{
-		name: "712 (mol 2x)",
+		name: large712ShapeName,
 		db:   "m712",
 		build: func(rootID string) issueops.ApplyBatchRequest {
 			return batchfixtures.Shape712("tester", rootID)
@@ -166,11 +166,13 @@ var largeBatchApplyShapes = []struct {
 	},
 }
 
-// TestLargeBatchApplyStatementCounts_Embedded pins the ACTUAL number of SQL
-// statements issueops.ApplyBatchInTx issues on the embedded backend, for
-// each of three measured shapes (slice B0). It is a REGRESSION BASELINE for
-// B2 (a later, lighter fast
-// path): B2 must lower these numbers, and this test is what proves it did.
+// TestLargeBatchApplyStatementCounts{356,712,Classic40}_Embedded (below)
+// jointly pin the ACTUAL number of SQL statements issueops.ApplyBatchInTx
+// issues on the embedded backend, for each of three measured shapes (slice
+// B0; originally one test, TestLargeBatchApplyStatementCounts_Embedded, see
+// its split's doc comment below for why it is now 3). Together they are a
+// REGRESSION BASELINE for B2 (a later, lighter fast path): B2 must lower
+// these numbers, and these tests are what prove it did.
 //
 // The exact counts are backend- and Dolt-version-sensitive by nature — they
 // come from real driver round trips, not a cost model — so a failure here
@@ -189,12 +191,55 @@ var largeBatchApplyShapes = []struct {
 // and must be re-measured and re-pinned deliberately.
 const statementCountTolerance = 2
 
-func TestLargeBatchApplyStatementCounts_Embedded(t *testing.T) {
+// large712ShapeName is largeBatchApplyShapes' "712 (mol 2x)" entry name,
+// shared between the race-skip check and the zero-match guard in
+// runLargeBatchApplyStatementCountsShape below so the two can never drift
+// apart (see N2 in the F1 CI-speed review): if this shape is ever renamed in
+// largeBatchApplyShapes, both call sites must be updated together, and the
+// zero-match guard below fails loudly instead of letting a stale name here
+// silently skip the entire pinned assertion.
+const large712ShapeName = "712 (mol 2x)"
+
+// TestLargeBatchApplyStatementCounts356_Embedded,
+// TestLargeBatchApplyStatementCounts712_Embedded and
+// TestLargeBatchApplyStatementCountsClassic40_Embedded were split from
+// TestLargeBatchApplyStatementCounts_Embedded (measured ~350.25s under
+// --config=embedded: 81.03s + 260.70s + 8.52s for the 356/712/classic-40
+// shapes respectively) into 3 top-level tests, one per shape, for CI shard
+// balance (see scripts/ci/embedded_storage_test_durations.json and
+// engdocs/TESTING.md, slice F1). Each runs exactly one disjoint element of
+// largeBatchApplyShapes, selected by name (not index) so the split stays
+// correct if the shared shapes slice is reordered; the union of shapes run
+// is identical to the original loop's, each exactly once.
+//
+// The 712 (mol 2x) shape alone still measures ~260-300s: it is a single
+// pinned statement-count assertion over one indivisible ApplyBatchInTx
+// transaction (no internal sub-cases to split further), a genuine, CPU-bound
+// cost: 12382 real SQL statement round-trips through the race-instrumented
+// in-process Dolt engine. It is skipped under -race below, following the
+// exact precedent TestLargeBatchApplyWallClock_Embedded set for its
+// 1000-item shape: the cost here is race-instrumentation overhead on the
+// engine's own internal goroutine/lock machinery, not on anything this
+// test's own logic does, and unlike the wall-clock test this one DOES have a
+// real pass/fail assertion (the pinned Total() above), so skipping it under
+// race moves this regression check to the non-race embedded variant — not a
+// weakening of the assertion itself. //internal/storage/embeddeddolt:embeddeddolt_batch_apply_nonrace_test
+// (the Bazel embedded tier) selects this test, so the full 12382-statement
+// pinned baseline still runs, non-race.
+func runLargeBatchApplyStatementCountsShape(t *testing.T, shapeName string) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
 
+	matched := false
 	for _, tc := range largeBatchApplyShapes {
+		if tc.name != shapeName {
+			continue
+		}
+		matched = true
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == large712ShapeName && raceEnabled {
+				t.Skip("712-item shape's statement-count assertion skipped under -race (race-instrumentation overhead on the Dolt engine itself, not test logic); embeddeddolt_batch_apply_nonrace_test runs the full pinned assertion non-race instead; see doc comment above")
+			}
 			fixture := newPristineEmbeddedDoltFixture(t, tc.db)
 			t.Cleanup(func() { closeEmbeddedDoltStore(t, fixture.store) })
 
@@ -224,6 +269,27 @@ func TestLargeBatchApplyStatementCounts_Embedded(t *testing.T) {
 			}
 		})
 	}
+	if !matched {
+		// N2 (F1 review): a renamed/typo'd shapeName argument used to just
+		// silently iterate zero times and PASS with zero subtests run,
+		// looking identical to a legitimately skipped run. Fail loudly
+		// instead so a drift between this function's callers and
+		// largeBatchApplyShapes' names (or large712ShapeName above) is
+		// caught immediately.
+		t.Fatalf("no shape named %q in largeBatchApplyShapes; this test ran zero subtests", shapeName)
+	}
+}
+
+func TestLargeBatchApplyStatementCounts356_Embedded(t *testing.T) {
+	runLargeBatchApplyStatementCountsShape(t, "356 (mol 1x)")
+}
+
+func TestLargeBatchApplyStatementCounts712_Embedded(t *testing.T) {
+	runLargeBatchApplyStatementCountsShape(t, large712ShapeName)
+}
+
+func TestLargeBatchApplyStatementCountsClassic40_Embedded(t *testing.T) {
+	runLargeBatchApplyStatementCountsShape(t, "40 (classic)")
 }
 
 // wallClockShapes is the coordinator's item-8 ask: real wall-clock numbers at
@@ -287,8 +353,8 @@ var wallClockShapes = []struct {
 //     own wrapper gets under -race, anywhere in CI, is 150 items; without
 //     -race it still gets the full 1000 in that same subtest. This is a
 //     known, deliberate gap for the race-enabled lane specifically, not an
-//     oversight — closing it needs a dedicated non-race embedded run (see the
-//     nightly workflow step added alongside this comment).
+//     oversight — the dedicated non-race embedded run is
+//     //internal/storage/embeddeddolt:embeddeddolt_batch_apply_nonrace_test.
 func TestLargeBatchApplyWallClock_Embedded(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
@@ -339,10 +405,51 @@ func TestLargeBatchApplyWallClock_Embedded(t *testing.T) {
 // issued for each measured shape, as last observed on this branch. B2 must
 // lower these; a change for any other reason should be re-measured and
 // re-pinned deliberately, not adjusted to make a failure go away.
+//
+// Re-pinned for the batch-create round-trip work (was 7009 / 14014 / 846):
+//   - ExecuteCreate hands its own BatchContext to the batch body instead of
+//     letting it re-read the same config: -6 statements per create item
+//     (356: 102 creates, -612; 712: 204, -1224; classic: 10, -60).
+//   - A create's blocked-state recompute first probes which of its ids have
+//     a dependency row of their own (+1). An id without one — every freshly
+//     created item — then gets one plain UPDATE instead of the two union
+//     UPDATEs: net 0, and the dropped statements were the expensive ones.
+//     Recomputes outside the create paths (dep adds, updates, closes) run no
+//     probe and are unchanged.
+//
+// Net: 356 -613 (incl. the documented 1-statement jitter), 712 -1224,
+// classic -60.
+//
+// Re-pinned for the parent-child cascade (gastownhall/beads#6506; classic
+// was 786). A parent-child edge now carries only a parent's exogenous
+// blockedness, and in this shape each parent-child dep add pays seven more
+// reads:
+//   - appendSiblingsUnderAncestorsInTx reseeds the parent's other children:
+//     one ancestorChainInTx walk and four child probes (both dependency
+//     tables, both parent columns), +5.
+//   - The batched mark/unmark reads its exogeneity set first
+//     (batchExogeneity): the parent-kind probe and the issue-parent read,
+//     +2. The probe skips the wisp-parent read, and the ancestry prune costs
+//     nothing while that read is empty.
+//
+// Net: classic +49 (seven distinct parent-child adds; the eighth repeats a
+// pair and is a no-op). 356 and 712 are unchanged.
+//
+// Re-pinned for the create-only existence reads (was 6396 / 12790 / 835).
+// The create-only guard already reads both planes for the id, so neither the
+// cross-plane collision check nor the create-only insert re-reads a plane:
+// -2 statements per create item (356: 102 creates, -204; 712: 204, -408;
+// classic: 10, -20). The Dolt server backend drops by the same amounts.
+//
+// Re-pinned for the id-retention guard (was 6192 / 12382 / 815). The
+// create-only guard now reads a create's occupancy — both row tables and both
+// id tombstone tables — in ONE statement where it used to read the two row
+// tables in two: -1 statement per create item (356: 102 creates, -102; 712:
+// 204, -204; classic: 10, -10).
 var pinnedEmbeddedStatementCounts = map[string]int64{
-	"356 (mol 1x)": 7009,
-	"712 (mol 2x)": 14014,
-	"40 (classic)": 846,
+	"356 (mol 1x)":    6090,
+	large712ShapeName: 12178,
+	"40 (classic)":    805,
 }
 
 // BenchmarkLargeBatchApply_Embedded benchmarks issueops.ApplyBatchInTx on

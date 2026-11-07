@@ -23,8 +23,9 @@ bd info --whats-new
 
 1. With your current `bd`, sync remote-backed databases before installing the
    new binary:
-   `bd dolt push`
    `bd dolt pull`
+   `bd dolt commit`
+   `bd dolt push`
 2. Back up **with that same current binary**, before installing:
    `bd export --all -o .beads/backup/pre-migrate-$(date +%Y%m%d).jsonl`
 3. Upgrade using the command that matches your install method.
@@ -34,11 +35,14 @@ bd info --whats-new
    `bd version`
 5. If crossing a schema migration on a remote-backed database, only the
    designated migrator runs:
-   `bd migrate`
+   `bd migrate schema`
    `bd dolt push`
 
-Other clones should install the new binary and run `bd bootstrap`, not
-independently migrate. The full procedure is below.
+Other clones must not migrate independently. After the migrator pushes, each
+other clone runs `bd dolt pull` with its current binary, then installs the new
+one. A clone that already has the new binary adopts the migrated database by
+moving its local database aside and running `bd bootstrap`; `bd bootstrap` on
+its own leaves an existing database untouched. The full procedure is below.
 
 ## Upgrading
 
@@ -136,7 +140,7 @@ bd migrate --inspect --json
 bd migrate --dry-run
 
 # Apply migrations
-bd migrate
+bd migrate schema
 
 # Migrate and clean up old files
 bd migrate --yes
@@ -196,6 +200,25 @@ and picks up where it left off.
 Those lines go to stderr, and only when stderr is a terminal, so a piped or CI
 upgrade prints nothing at all. Silence there is not a stall either.
 
+#### Repair blocked flags after migrating
+
+Migration 0059 can mark issues as blocked when they are not, which drops them
+out of `bd ready` without any error
+([#7037](https://github.com/gastownhall/beads/issues/7037)). It happens on a
+Dolt server older than 2.4.0, and the embedded engine of `bd` releases that
+link Dolt older than 2.4.0 (every release through v1.3.x) is likely affected
+too.
+Once a database has migrated, run this once for that database on every clone:
+
+```bash
+bd recompute-blocked --json
+```
+
+It recomputes the flag from the dependency graph, so it is safe on any
+database, and `"rows_corrected"` greater than zero means the database was hit.
+It works in embedded, server and proxied-server mode, so run it even where
+`bd doctor` cannot check blocked state.
+
 #### Upgrade every client that shares a store, together
 
 A bd binary refuses a database migrated past the schema it knows, rather than
@@ -226,8 +249,8 @@ a Dolt remote configured. Migrating more than one clone of a shared remote
 independently forks the schema, after which `bd dolt pull` can no longer merge —
 the break is silent and, across a primary-key-reshaping migration, unrecoverable
 ([#4259](https://github.com/gastownhall/beads/issues/4259)). The supported flow
-is: one machine migrates and publishes; every other clone re-clones the migrated
-database.
+is: one machine migrates and publishes; every other clone takes the migrated
+database from the remote instead of migrating its own.
 
 This applies to **every** upgrade that crosses a pending migration on a
 remote-backed database — the same procedure whether you are moving to a
@@ -244,7 +267,10 @@ The gate is **state-aware by default**
   server always stops for consent, because migrating it changes the schema
   every connected client sees (see [Shared servers](#shared-servers) below).
 - **stops and directs you to adopt** (`bd bootstrap`) when the remote has
-  already been migrated by another clone.
+  already been migrated by another clone. On a clone that already has a local
+  database, `bd bootstrap` by itself reports `Nothing to do.` and changes
+  nothing; adopt with the steps under *Multiple clones sharing one remote*
+  below.
 - **stops for a human decision** when this clone and the remote applied
   different content for the same migration (a genuine fork), or when the
   remote's schema state cannot be read from the cached ref.
@@ -261,7 +287,9 @@ There is one exception, and the gate names it when it applies: if the stop is
 the *data-behind* one — this clone is level with the remote on schema but is
 missing commits it has not pulled — then `bd dolt pull` is the remedy and is
 allowed through, because migrating before that pull is what wedges the clone.
-See [Clone behind the remote](#clone-behind-the-remote). Every other
+A proxied-server workspace refuses `bd dolt pull` outright, so there the pull
+runs on the server host instead. See
+[Clone behind the remote](#clone-behind-the-remote). Every other
 pending-migration refusal still blocks the pull, so the ordering rule above is
 what to plan for.
 
@@ -284,7 +312,7 @@ also copy the `.beads` directory (or `dolt backup` in server mode) while no
 bd dolt push                              # 1. CURRENT binary: publish all local work
 bd export --all -o .beads/backup/pre-migrate.jsonl   # 2. backup (see above)
 # 3. install the new binary (see Upgrading above)
-bd migrate                                # 4. migrate as the designated migrator
+bd migrate schema                         # 4. migrate as the designated migrator
 bd dolt push                              # 5. publish the migrated schema
 bd version                                # 6. confirm the new version is active
 ```
@@ -294,36 +322,86 @@ migrating here as the designated migrator, adopting the remote's already-migrate
 database, or recovering a fork — and asks for an explicit operator decision.
 Follow the guidance it prints.
 
-For scripted or CI upgrades where nobody reads the output, run `bd migrate` as
-an explicit step in exactly one job, never in all of them. If the gate blocks a
-run it prints both the available options and the scripted override that fits
-the situation.
+For scripted or CI upgrades where nobody reads the output, run
+`bd migrate schema` as an explicit step in exactly one job, never in all of
+them. If the gate blocks a run it prints both the available options and the
+scripted override that fits the situation.
 
 **Multiple clones sharing one remote:**
 
 ```bash
-# 1. With your CURRENT (old) binary, on EVERY clone: publish all work and get in
-#    sync, then stop editing until the upgrade is done.
-bd dolt push
+# 1. With your CURRENT (old) binary, on EVERY clone: get in sync, commit and
+#    publish all work, and back up, then stop editing until the upgrade is
+#    done. If the push is rejected because another clone pushed first, run
+#    the first three commands again.
 bd dolt pull
-
-# 2. Designated migrator ONLY: back up, install the new binary, then migrate
-#    and publish.
+bd dolt commit
+bd dolt push
+mkdir -p .beads/backup
 bd export --all -o .beads/backup/pre-migrate.jsonl
-bd migrate
+
+# 2. Designated migrator ONLY, once every other clone has finished step 1:
+#    run step 1's pull, commit and push once more with the CURRENT binary,
+#    then install the new binary, migrate and publish.
+bd migrate schema
 bd dolt push
 
-# 3. Every OTHER clone: install the new binary, then ADOPT the migrated database.
-#    (bd dolt pull is refused here — the clone still has pending migrations — so
-#    re-clone instead. Safe because step 1 already pushed all work.)
-bd bootstrap
+# 3. Every OTHER clone, after the migrator has pushed: pull the migrated
+#    database while still on the CURRENT binary, then install the new binary.
+bd dolt pull
+bd version                    # after installing: confirm the new version
 ```
 
-`bd bootstrap` replaces the local database, so any work not pushed in step 1 is
-lost — that is why step 1 publishes everything first. If a clone was instead
-migrated independently and `bd dolt pull` later fails with `cannot merge because
-table dependencies has different primary keys in its common ancestor`, the
-schema has already forked — follow the recovery playbook:
+The pull in step 3 brings the migrated schema down with the data, so the new
+binary finds nothing to migrate and the clone keeps its local state. Between
+that pull and the install, the old binary refuses the database (it is now
+newer than the schema the old binary knows), so install straight away. On the
+upgrade to 1.3.0 the clone's earlier `events` audit rows are the exception:
+they stop syncing with migration 0062, so after that pull they remain only in
+history.
+
+Run `bd dolt commit` in step 1 even on a clone where you wrote nothing, so
+that the step 3 pull is a fast-forward: on 1.2.2 a pull that merges can leave
+part of the merge uncommitted, and on the upgrade to 1.3.0 that leftover turns
+the step 3 pull into a merge that cannot succeed (see
+[Pull fails on a clone still on the old release](/recovery/sync-failures#pull-fails-on-a-clone-still-on-the-old-release)).
+It prints `Nothing to commit.` when nothing is pending. The migrator syncs
+again in step 2 because the gate judges whether a clone is behind from its
+last fetch: a migrator that has not fetched since the other clones pushed
+migrates as if it were level, and its push is then rejected as a
+non-fast-forward. On the upgrade to 1.3.0 that leaves the migrator in
+[Merge blocked on the events table (migration 0062)](/recovery/sync-failures#merge-blocked-on-the-events-table-migration-0062).
+
+**A clone that already runs the new binary** cannot take step 3 as written: the
+gate refuses `bd dolt pull` while the clone has pending migrations. Adopt the
+migrated database by re-cloning it. `bd bootstrap` never replaces an existing
+database — run against one, it prints `Database already exists` and
+`Nothing to do.` and leaves the clone on the old schema — so move the local
+database aside first, then re-apply the step 1 backup:
+
+```bash
+mv .beads/embeddeddolt .beads/backup/embeddeddolt.pre-adopt   # embedded mode (the default)
+bd bootstrap                                 # clones the migrated database from the remote
+bd import .beads/backup/pre-migrate.jsonl    # restores what a re-clone cannot bring
+```
+
+The re-clone brings only what the remote has, so the import restores this
+clone's clone-local beads (wisps, for example) and anything step 1 did not
+push; rows the remote already holds in a newer version are skipped as stale.
+The backup has to come from the old binary, as in step 1: on a clone with
+pending migrations the new binary's `bd export` fails. Keep the moved-aside
+directory until you have checked the result — the old binary can still open
+it. In server mode the database lives under `.beads/dolt/` instead; stop the
+server and move the database outside `.beads/dolt/` (see
+[re-clone-gotchas](/recovery/init-safety#re-clone-gotchas)).
+
+A clone that adopts the migrated database this way, by the pull in step 3 or
+by `bd bootstrap`, can start with an empty `events` audit table; see
+[Pre-upgrade audit events on adopting clones](#pre-upgrade-audit-events-on-adopting-clones).
+
+If a clone was instead migrated independently and `bd dolt pull` later fails
+with `cannot merge because table dependencies has different primary keys in its
+common ancestor`, the schema has already forked — follow the recovery playbook:
 [the pk-fork-refused runbook](/recovery/init-safety#pk-fork-refused).
 
 <Note>
@@ -332,10 +410,107 @@ schema against the cached remote ref — a useful post-upgrade verification.
 It runs in both server and embedded modes.
 </Note>
 
+### Pre-upgrade audit events on adopting clones
+
+Since 1.3.0 the `events` audit table (what `bd history <id> --events` shows)
+is clone-local: migration 0062 commits the drop of the old versioned table,
+and that drop replicates, but the clone-local table that replaces it does not.
+Only the clone that ran the migration keeps its rows. Every clone that adopts
+the migrated database instead starts with an **empty** `events` table
+([#7039](https://github.com/gastownhall/beads/issues/7039)). That covers a
+clone that takes the pull in step 3 above, one re-cloned by `bd bootstrap`,
+and a fresh clone made after the migration. The old rows are not gone: they
+stay in the clone's own Dolt history, just below the drop commit.
+
+**bd v1.4.0 and later** put them back once, on the first open, with no
+extra step or consent. bd reads the table as of each commit just before a
+drop, adds only the rows the live table is missing, and prints:
+
+```
+Restored 42 pre-upgrade audit event(s) from this clone's history (gastownhall/beads#7039).
+```
+
+- **Existing rows stay.** Rows already in the table are kept with their ids.
+  A row is restored only as many times as history holds it more often than
+  the live table does, so a second run adds nothing.
+- **Deleted and renamed issues are skipped.** History holds each event
+  under the id its issue had at the upgrade, so events of an issue deleted
+  or renamed since (`bd rename`, `bd rename-prefix`) are not restored, and
+  bd prints `Skipped N pre-upgrade audit event(s) whose issue id no longer
+  exists (deleted or renamed).`
+- **Restored rows are local.** Like every event since 1.3.0, they are not
+  committed and do not replicate; each clone restores its own. New events
+  still do not replicate either.
+- **Interrupted runs retry.** If the open fails or is killed partway, the
+  next open finishes the job without duplicating what was already written.
+- **No history, nothing to restore.** A brand-new database, a clone of a
+  history that was squashed or expired (see
+  [history squash](/recovery/history-squash)), or a shallow clone
+  (`dolt clone --depth`) whose history stops at the upgrade has no
+  pre-upgrade rows to read; bd completes silently. A `bd backup` taken
+  before the upgrade may still hold them.
+
+If bd prints `Warning: could not restore pre-upgrade audit events from
+<commit>`, part of that commit's history could not be read (a missing chunk
+or Dolt's schema-encoding drift, for example), and the audit history of this
+clone is **incomplete**. Unreadable history never blocks an open: bd carries
+on, skips what it could not read, and does not try again by itself. Once the
+history reads again (after a storage repair, for example), have bd retry by
+removing the restore's marker (in embedded mode, while no `bd` command runs);
+the next command repeats the restore, which only adds what is still missing:
+
+```bash
+# Embedded mode (the default):
+cd .beads/embeddeddolt/<db>
+dolt sql -q "DELETE FROM ignored_schema_migrations WHERE version >= 31"
+
+# Server mode, from the project directory:
+bd sql "DELETE FROM ignored_schema_migrations WHERE version >= 31"
+```
+
+The statement also removes the markers of any later clone-local migrations,
+which the next command re-applies. Otherwise, recover the rows from a clone
+or backup that can read that history and copy them in by hand as shown below.
+
+To recover the rows **with v1.3.4 or earlier**, copy them in by hand with the
+[Dolt CLI](https://docs.dolthub.com/cli-reference/cli) while no `bd` command
+runs. This is only safe when the live table is still empty and history holds
+exactly one drop commit; otherwise install a newer release, which merges the
+two without duplicates.
+
+```bash
+cd .beads/embeddeddolt/<db>   # server mode: bd dolt stop, then cd .beads/dolt/<db>
+
+# 1. The drop commit (its message is exact) and the commit just before it.
+dolt sql -q "SELECT commit_hash FROM dolt_log WHERE message = 'schema: drop versioned events table for ignored-plane flip (bd-red8u)'"
+dolt sql -q "SELECT parent_hash FROM dolt_commit_ancestors WHERE commit_hash = '<drop>' AND parent_index = 0"
+
+# 2. How many rows history holds, and confirm the live table is empty (0).
+dolt sql -q "SELECT COUNT(*) FROM events AS OF '<parent>'"
+dolt sql -q "SELECT COUNT(*) FROM events"
+
+# 3. Copy the rows of issues that still exist.
+dolt sql -q "INSERT INTO events (issue_id, event_type, actor, old_value, new_value, comment, created_at, id)
+  SELECT issue_id, event_type, actor, old_value, new_value, comment, created_at, id
+  FROM events AS OF '<parent>' WHERE issue_id IN (SELECT id FROM issues)"
+
+# 4. Check the count, then a sample issue.
+dolt sql -q "SELECT COUNT(*) FROM events"
+bd history <id> --events      # server mode: bd dolt start first
+```
+
+If the first query finds nothing, the drop commit was rewritten (by a squash
+or a rebase, for example) and its message no longer matches; look for the
+last commit whose `events` table still has rows with `dolt log` and
+`SELECT COUNT(*) FROM events AS OF '<commit>'`, and use that commit as
+`<parent>`.
+
 ### Clone behind the remote
 
 This is the one pending-migration stop whose remedy is a `bd dolt pull`, and
 the one the gate links here rather than to the migrate-or-adopt recipe above.
+A proxied-server workspace refuses that pull, so it runs on the server host
+instead; the last part of this section covers that case.
 
 It fires when the clone is **level with the remote on schema but behind it in
 data** — the remote has commits this clone has not pulled. On schema alone the
@@ -361,6 +536,17 @@ on embedded storage / `bd conflicts resolve` on a server store). Once there is
 nothing left to pull, the clone is the first-mover it looked like and the
 migration proceeds on its own.
 
+If the clone already migrated past schema 61 and the pull then refuses with
+`local changes would be stomped by merge: events`, see
+[Merge blocked on the events table (migration 0062)](/recovery/sync-failures#merge-blocked-on-the-events-table-migration-0062)
+before trying anything else. A push from this clone publishes the migrated
+history, so every clone still on 1.2.2 or older first publishes its work and
+stops writing, as that section describes. Then a plain `bd dolt push` (no
+`--force`) shows whether the remote was only behind this clone: if it
+succeeds, the next pull has nothing to merge. If the push is rejected as a
+non-fast-forward, or the merge stops on an `events` schema conflict instead,
+follow that section's steps.
+
 Do **not** force past this stop. `bd migrate --force` applies the migration
 while the clone is still behind — precisely the state the stop exists to
 prevent — and the `bd dolt push` that would follow is rejected as a
@@ -382,6 +568,25 @@ bare `bd migrate schema` consent applies only to a shared database with *no*
 remote. It is safe at this point and only at this point: the pull has already
 landed the commits the clone was missing.
 
+**In proxied-server mode** the database is shared too, so the same two steps
+apply, but they run from two places. The workspace refuses `bd dolt pull`
+(`proxy.dolt_pull.unsupported`) and `bd conflicts`, so the pull, and any
+conflict resolution it needs, runs where the database lives: on the server
+host, from a workspace with direct database access. The consent step can then
+be run from the proxied workspace, but only once that pull has landed:
+
+```bash
+bd dolt pull                     # on the server host, with direct database access
+bd migrate schema --force        # then, from the proxied workspace
+```
+
+Nothing in the proxied workspace enforces that order. It refuses the bare
+`bd migrate` verb but not `bd migrate schema --force`, and
+`BD_ALLOW_REMOTE_MIGRATE=1` grants the same consent to any command. Both are
+honored before this stop is reached, so the stop never sees them: run either
+one before the pull and it migrates the database while it is still behind.
+Do not reach for either to get past the stop.
+
 ### Shared servers
 
 A server-mode database is served to every `bd` client connected to that
@@ -396,7 +601,8 @@ Upgrade one server's clients like this:
 
 ```bash
 # 1. Upgrade bd on every client of the server. Reads keep working throughout —
-#    an upgraded client reads the old schema, it just cannot write to it.
+#    an upgraded client reads the old schema, it just cannot write to it
+#    (unless the server's schema is v53 or older; see below).
 bd version                     # on each client, confirm the new version
 
 # 2. Once, from a workspace already set up against this server: consent.
@@ -410,15 +616,23 @@ Between steps 1 and 2, an upgraded client reads normally and its writes are
 refused with the gate's guidance. Nothing is silently promoted, so there is no
 deadline — but the window is a degraded one, so keep it short.
 
+If the server's schema is v53 or older (1.1.x, or 1.2.2, the re-release of
+the 1.1 line), reads can fail too until step 2: `bd list` stops with
+`table not found: leases`
+([#6929](https://github.com/gastownhall/beads/issues/6929)). Run step 2 as
+soon as the clients are upgraded.
+
 **If the shared server also has a Dolt remote**, step 2 is not enough. Two
 hazards now apply at once — the co-resident lockout above and the cross-clone
 fork of [Remote-backed databases](#remote-backed-databases-and-multiple-clones)
 — so `bd` requires the stronger designated-migrator consent it describes:
 `bd migrate --force`, from exactly one machine, followed by `bd dolt push`. If
-another clone has already migrated and pushed, adopt its database with
-`bd bootstrap` instead of migrating. On a shared server, adopting also promotes
-the schema for every client of that server, so step 1 still comes first either
-way.
+another clone has already migrated and pushed, adopt its database instead of
+migrating, as described under
+[Remote-backed databases](#remote-backed-databases-and-multiple-clones) —
+`bd bootstrap` alone does not replace an existing database. On a shared
+server, adopting also promotes the schema for every client of that server, so
+step 1 still comes first either way.
 
 <Warning>
 Migrating is one-way for the fleet: after step 2, a client still on the older
@@ -433,7 +647,7 @@ there: do step 2 from a client that is already set up, or join and migrate in
 one step with `BD_ALLOW_REMOTE_MIGRATE=1 bd init …`.
 
 The same rules apply in **proxied-server mode**, which is a shared server
-reached through a local proxy. Two differences worth knowing:
+reached through a local proxy. Three differences worth knowing:
 
 - read commands print a warning and keep serving the current schema, rather
   than the read simply not touching it;
@@ -441,7 +655,10 @@ reached through a local proxy. Two differences worth knowing:
   because a daemon has no operator to consent for it. Reconcile the schema
   first with step 2, then start the daemon — or, for an unattended service,
   put `BD_ALLOW_REMOTE_MIGRATE=1` in its environment as an explicit, auditable
-  standing consent.
+  standing consent;
+- the data-behind stop's remedy, `bd dolt pull`, cannot be run from the
+  proxied workspace: run it on the server host first, then consent from the
+  proxied workspace (see [Clone behind the remote](#clone-behind-the-remote)).
 
 ## Cross-era Upgrades
 
@@ -481,9 +698,11 @@ bridge below accepts SQLite sources only.
 
 ### `.beads/embeddeddolt/`: direct upgrade
 
-Upgrade the binary and run:
+Upgrade the binary, apply the pending schema migrations, and update the
+database metadata:
 
 ```bash
+bd migrate schema
 bd migrate
 ```
 
@@ -532,8 +751,8 @@ metadata is missing or leaves `dolt_mode` blank/`embedded`; it does not override
 an explicit server selection with a local root. Compatibility admission cannot
 prove that a workspace is modern. If you know it was created by v0.55.4 through
 v0.62.0, use this explicit bridge even when its witness was lost or damaged.
-Otherwise, follow the normal `bd migrate --dry-run` and `bd migrate` flow for
-an admitted server workspace.
+Otherwise, follow the normal `bd migrate --dry-run` and `bd migrate schema`
+flow for an admitted server workspace.
 
 ### One `.beads/*.db` file: sealed SQLite bridge
 
@@ -596,7 +815,7 @@ bd hooks install
 
 ```bash
 bd migrate --dry-run
-bd migrate
+bd migrate schema
 ```
 
 ### Recovery after upgrade

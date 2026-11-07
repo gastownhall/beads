@@ -54,6 +54,17 @@ type CountRequest struct {
 	// than quietly tightened, because a scripted caller that counts a status
 	// its workspace has since dropped currently reads 0 and would start reading
 	// an error.
+	//
+	// "all" is this field's one well-defined non-literal spelling, and it is
+	// NOT ErrValidation: it is equivalent to leaving Status empty, and
+	// BuildListFilter treats its own "all" selector identically (the no-filter
+	// spelling), so `bd count --status all <predicate>` and `bd list --status
+	// all <predicate> --all` already agree on cardinality for the shared part
+	// of the predicate. Rejecting it here would break that count/list parity
+	// (the whole point of this role, GH#4387) for every caller already
+	// spelling it, and there is no caller-visible ambiguity it would resolve:
+	// "no status" is a filter that excludes every row, which "all" has never
+	// meant on either front door.
 	Status string
 	// IssueType restricts the type, with the same match-nothing-rather-than-fail
 	// treatment Status gets and no alias expansion at all.
@@ -65,6 +76,24 @@ type CountRequest struct {
 	// none. Setting both is not refused — they are handed to the filter as
 	// written and answer with the empty intersection.
 	Assignee string
+
+	// ParentID restricts to one issue's children, spelled as
+	// ListRequest.ParentID spells it: a parent-child dependency edge, OR (for
+	// an issue with no such edge) a dotted-id prefix match. NoParent restricts
+	// to rows with no parent-child dependency edge. It does not consult the
+	// dotted-id convention, so an edge-less dotted-id child (X.1) still counts
+	// as top-level — it is counted by BOTH ParentID X and NoParent, as it is
+	// listed by both `bd list --parent X --flat` and `bd list --no-parent`.
+	//
+	// Setting both IS refused, as ErrValidation, UNLIKE Assignee/NoAssignee
+	// above: `bd list`'s CLI already refuses `--parent` with `--no-parent`
+	// (cmd/bd/list_input.go) with this same wording, and a caller reaching
+	// this role directly — over HTTP, or through a future client that skips
+	// the primary CLI's flag parser — gets the identical refusal rather than
+	// a silent empty-intersection answer the primary CLI would never have let
+	// it ask for.
+	ParentID string
+	NoParent bool
 
 	// Priority is an exact priority; PriorityMin and PriorityMax bound a range
 	// inclusively. All three are pointers because 0 is a real priority, for the
@@ -85,6 +114,23 @@ type CountRequest struct {
 	// de-duplication happen inside, so a caller passes the string it was given
 	// rather than a slice it had to prepare.
 	IDFilter string
+
+	// ExcludeTypes names types to exclude, spelled as ListRequest.ExcludeTypes
+	// spells it: entries may be comma-separated, splitting and normalization
+	// happen inside, and an entry is NOT validated against the workspace
+	// vocabulary — an unrecognized type excludes nothing rather than failing.
+	// It composes with IncludeInfra's own "gate" exclusion rather than
+	// replacing it: both contribute to the same exclusion set.
+	ExcludeTypes []string
+	// ExcludeStatus names statuses to exclude (behavior token
+	// `issues.count.scope`; ListRequest.ExcludeStatus is its listing twin,
+	// validated by the same rule): entries may be comma-separated, and — UNLIKE
+	// Status and ExcludeTypes above — each name IS validated against the
+	// workspace vocabulary (built-in statuses plus the workspace's own custom
+	// ones). An unrecognized name is ErrValidation rather than excluding
+	// nothing: a caller building an exclusion list by hand gets a loud failure
+	// on a typo instead of a silently wider, overcounted answer.
+	ExcludeStatus []string
 
 	// TitleContains, DescContains and NotesContains are substring matches on
 	// the three long fields, spelled as ListRequest spells them so the two
@@ -119,7 +165,8 @@ type CountRequest struct {
 	//   - template molecules are excluded, which a default count includes;
 	//   - gate beads are excluded, unless IssueType asks for gates by name;
 	//   - an IssueType the workspace calls infra routes the count to the
-	//     ephemeral tier instead of the durable one.
+	//     ephemeral tier instead of the durable one — unless IncludeEphemeral
+	//     is also set, which lifts that routing, as it does for a listing.
 	//
 	// The infra vocabulary is the WORKSPACE's, read from configuration inside
 	// the implementation. A caller does not supply it and cannot: that is the
@@ -149,6 +196,11 @@ type CountRequest struct {
 	// IncludeTemplates admits them. That predates this field and is unchanged by
 	// it; only IncludeInfra sets out to reconcile cardinality, and it pays for
 	// that with three changes beyond the plane.
+	//
+	// Beside IncludeInfra it does one thing more, the same thing it does to a
+	// listing: it lifts the fourth change's routing of an infra IssueType, so
+	// the durable rows of that type (a promoted wisp, a retyped issue) are
+	// counted along with its wisps rather than instead of them.
 	//
 	// Unset — and with IncludeInfra also unset — the count is durable-plane
 	// only: the historical answer, unchanged.

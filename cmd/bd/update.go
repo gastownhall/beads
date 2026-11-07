@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/timeparsing"
@@ -40,6 +41,10 @@ type commandUpdateMutation struct {
 	force            bool
 	expectedAssignee *string
 	expectedStatus   *issueops.Status
+	// expectedVersion is the A8 --if-revision guard (beads#4682 design doc
+	// item 4): nil disables the check; a non-nil value composes with
+	// expectedAssignee/expectedStatus, all of which must hold.
+	expectedVersion *int64
 	// provenance names the history entry the write records. Empty takes the
 	// backend's default, which is what the direct route wants; the proxied
 	// route spells the message it has always written.
@@ -66,6 +71,7 @@ func runCommandUpdateMutation(ctx context.Context, updater commandIssueUpdater, 
 		ForceNotesOverwrite:   mutation.force && mutation.patch.Notes.Set,
 		ExpectedAssignee:      mutation.expectedAssignee,
 		ExpectedStatus:        mutation.expectedStatus,
+		ExpectedVersion:       mutation.expectedVersion,
 		Provenance:            mutation.provenance,
 	})
 }
@@ -140,11 +146,18 @@ pointless).`,
 		// was given without an explicit --status, to flip status=deferred back
 		// to open (matches the help text's "show in bd ready immediately").
 		var clearDeferStatus bool
+		// explicitSession: --session was typed (rather than inherited from
+		// CLAUDE_SESSION_ID), so omitting it on a store that cannot carry it
+		// is said out loud (remote_backend.go).
+		var explicitSession bool
 
 		if cmd.Flags().Changed("status") {
 			status, _ := cmd.Flags().GetString("status")
 			var customStatuses []string
-			if store != nil {
+			// A built-in status is valid whatever the custom vocabulary says,
+			// so only a non-built-in one pays for reading it: over http that
+			// read is a gateway round trip (bts-xpw.3.14.6).
+			if store != nil && !types.Status(status).IsValid() {
 				cs, err := store.GetCustomStatuses(rootCtx)
 				if err != nil {
 					if !jsonOutput {
@@ -162,6 +175,7 @@ pointless).`,
 			// If status is being set to closed, include session if provided
 			if status == "closed" {
 				session, _ := cmd.Flags().GetString("session")
+				explicitSession = session != ""
 				if session == "" {
 					session = os.Getenv("CLAUDE_SESSION_ID")
 				}
@@ -398,12 +412,18 @@ pointless).`,
 			return nil
 		}
 
-		// Conditional-update guards (bd-wsqvw): validated against the same
-		// status set as --status, mutually exclusive with --claim (which is
-		// its own compare-and-set), and only meaningful with a field update
-		// to ride on.
-		ifAssignee, ifStatus, err := updateGuardsFromFlags(cmd, claimFlag, updates)
+		// Conditional-update guards (bd-wsqvw, and A8's --if-revision,
+		// beads#4682): validated against the same status set as --status,
+		// mutually exclusive with --claim (which is its own compare-and-set),
+		// and only meaningful with a field update to ride on.
+		ifAssignee, ifStatus, ifRevision, err := updateGuardsFromFlags(cmd, claimFlag, updates)
 		if err != nil {
+			return err
+		}
+		// A8: "one id only" (T4.8) — a single --if-revision token names one
+		// row's version, so applying it to every id in a multi-id batch would
+		// guard only the first write the batch happened to resolve.
+		if err := requireSingleIfRevisionID(ifRevision, args); err != nil {
 			return err
 		}
 		var expectedStatus *issueops.Status
@@ -427,6 +447,7 @@ pointless).`,
 
 		updatedIssues := []*types.Issue{}
 		var firstUpdatedID string // Track first successful update for last-touched
+		var warnedSessionOmitted bool
 		var failures []updateIDFailure
 		recordFailure := func(id, reason string) {
 			failures = append(failures, updateIDFailure{ID: id, Error: reason})
@@ -467,7 +488,14 @@ pointless).`,
 				if result != nil {
 					result.Close()
 				}
-				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+				// A concurrent `bd delete` that commits before this
+				// resolution is the same lost race as one that commits
+				// inside the guarded write below. requireSingleIfRevisionID
+				// guarantees this is the only id, so nothing is pending.
+				if reported, ok := reportIfRevisionTargetGone("updating", id, err, ifRevision); ok {
+					return reported
+				}
+				fmt.Fprintf(os.Stderr, "Error resolving %s: %s\n", id, remedy.PrintedMessage(err))
 				recordFailure(id, fmt.Sprintf("resolving issue: %v", err))
 				continue
 			}
@@ -482,12 +510,9 @@ pointless).`,
 			issue := result.Issue
 			issueStore := result.Store
 
-			if err := validateIssueUpdatable(id, issue); err != nil {
-				fmt.Fprintf(os.Stderr, "%s\n", err)
-				recordFailure(id, err.Error())
-				closeIfUnmutated(result)
-				continue
-			}
+			// The template guard is the role's (issueops.Lifecycle.Update),
+			// enforced inside the mutation on every route; its refusal is
+			// printed below as the line this command always printed.
 
 			// bd-98s5c: an unguarded assignee update must not silently
 			// overwrite another actor's live claim. Skipped under
@@ -499,8 +524,8 @@ pointless).`,
 			// and an assignee edit that rides a WON claim only ever touches
 			// the actor's own fresh claim. A policy refusal, so it exits 1,
 			// not 13.
-			if newAssignee, ok := updates["assignee"].(string); ok && ifAssignee == nil && !claimFlag {
-				if err := validateIssueReassignable(id, issue, actor, newAssignee,
+			if newAssignee, ok := updates["assignee"].(string); ok && ifAssignee == nil && !claimFlag && !ifRevisionAlreadyStale(issue, ifRevision) {
+				if err := validateIssueReassignable(id, issue, currentActor(), newAssignee,
 					storeClaimPoolAliases(ctx, issueStore), forceFlag); err != nil {
 					fmt.Fprintf(os.Stderr, "%s\n", err)
 					recordFailure(id, err.Error())
@@ -519,6 +544,19 @@ pointless).`,
 			// earlier transaction) silently erased concurrent writers' keys —
 			// both processes exited 0, one process's committed write vanished.
 			patch := basePatch
+			// S6d: a store whose wire cannot carry closed_by_session still
+			// closes; the session is attribution only (remote_backend.go).
+			if patch.ClosedBySession.Set && !storeCarriesCallerAttribution(issueStore) {
+				patch.ClosedBySession = issueops.Field[string]{}
+				if !warnedSessionOmitted {
+					warnedSessionOmitted = true
+					if explicitSession {
+						fmt.Fprintf(os.Stderr, "%s --session is not recorded: this backend's update cannot carry closed_by_session (bd close --session records it)\n", ui.RenderWarn("!"))
+					} else {
+						fmt.Fprintf(os.Stderr, "%s CLAUDE_SESSION_ID is not recorded as closed_by_session: this backend's update cannot carry it (bd close records it)\n", ui.RenderWarn("!"))
+					}
+				}
+			}
 			// GH#3233: --defer="" restores ready visibility only if the issue
 			// was actually deferred. Other statuses (blocked, in_progress, …)
 			// shouldn't be clobbered just because defer_until was stale.
@@ -527,7 +565,7 @@ pointless).`,
 			}
 			ops, err := writeOps(issueStore)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
+				fmt.Fprintf(os.Stderr, "Error updating %s: %s\n", id, remedy.PrintedMessage(err))
 				recordFailure(id, fmt.Sprintf("updating issue: %v", err))
 				closeIfUnmutated(result)
 				continue
@@ -541,29 +579,46 @@ pointless).`,
 			// through: `--force -s closed` is now a legitimate way to ask for
 			// the close-policy half alone.
 			updateResult, updateErr := runCommandUpdateMutation(opsCtx, ops, commandUpdateMutation{
-				actor:            actor,
+				actor:            currentActor(),
 				issueID:          result.ResolvedID,
 				patch:            patch,
 				claim:            claimFlag,
 				force:            forceFlag,
 				expectedAssignee: ifAssignee,
 				expectedStatus:   expectedStatus,
+				expectedVersion:  ifRevision,
 			})
 			if updateErr != nil {
+				// A8 (beads#4682): an active --if-revision guard reports
+				// through gascity's dedicated conditional-write envelope
+				// instead of the generic per-ID batch report below —
+				// requireSingleIfRevisionID already guarantees args has
+				// exactly one id when ifRevision is set, so reporting and
+				// returning here is equivalent to falling through to
+				// reportUpdateFailures for this one failure.
+				if ifRevision != nil {
+					if reported, ok := reportIfRevisionFailure("updating", id, updateErr, ifRevision); ok {
+						closeIfUnmutated(result)
+						closePendingResults()
+						return reported
+					}
+				}
 				failureText := fmt.Sprintf("updating issue: %v", updateErr)
-				switch {
-				case errors.Is(updateErr, issueops.ErrNotesOverwrite):
+				if refusal, ok := templateReadOnlyRefusal(id, updateErr); ok {
+					failureText = refusal.Error()
+					fmt.Fprintf(os.Stderr, "%s\n", refusal)
+				} else if errors.Is(updateErr, issueops.ErrNotesOverwrite) {
 					// The contract's AuthorizeNotesOverwrite fence refused
 					// inside the mutation transaction. Print the advice, not
 					// the raw sentinel.
 					refusal := errNotesOverwriteRefusal(id)
 					failureText = refusal.Error()
 					fmt.Fprintf(os.Stderr, "%s\n", refusal)
-				case errors.Is(updateErr, issueops.ErrClaimBlocked), errors.Is(updateErr, issueops.ErrCloseBlocked) && !claimFlag:
+				} else if errors.Is(updateErr, issueops.ErrClaimBlocked) || errors.Is(updateErr, issueops.ErrCloseBlocked) && !claimFlag {
 					failureText = fmt.Sprintf("%v (use --force to override)", updateErr)
 					fmt.Fprintf(os.Stderr, "%s\n", failureText)
-				default:
-					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, updateErr)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error updating %s: %s\n", id, remedy.PrintedMessage(updateErr))
 				}
 				failures = append(failures, updateIDFailure{
 					ID:            id,
@@ -580,13 +635,13 @@ pointless).`,
 			}
 			// Audit log key field changes (survives Dolt GC flatten)
 			if patch.Status.Set {
-				audit.LogFieldChange(result.ResolvedID, "status", string(issue.Status), string(patch.Status.Value), actor, "")
+				audit.LogFieldChange(result.ResolvedID, "status", string(issue.Status), string(patch.Status.Value), currentActor(), "")
 			}
 			if patch.Assignee.Set {
-				audit.LogFieldChange(result.ResolvedID, "assignee", issue.Assignee, patch.Assignee.Value, actor, "")
+				audit.LogFieldChange(result.ResolvedID, "assignee", issue.Assignee, patch.Assignee.Value, currentActor(), "")
 			}
 			if patch.Priority.Set {
-				audit.LogFieldChange(result.ResolvedID, "priority", fmt.Sprintf("%d", issue.Priority), fmt.Sprintf("%d", patch.Priority.Value), actor, "")
+				audit.LogFieldChange(result.ResolvedID, "priority", fmt.Sprintf("%d", issue.Priority), fmt.Sprintf("%d", patch.Priority.Value), currentActor(), "")
 			}
 
 			// The operation's own post-state snapshot replaces the re-read.
@@ -620,7 +675,7 @@ pointless).`,
 				if s == nil {
 					continue
 				}
-				if err := commitPendingIfEmbedded(ctx, s, actor, doltAutoCommitParams{
+				if err := commitPendingIfEmbedded(ctx, s, currentActor(), doltAutoCommitParams{
 					Command:  "update",
 					IssueIDs: ids,
 				}); err != nil {
@@ -844,20 +899,25 @@ func warnNotesReplacement(id string) {
 }
 
 // ExitGuardMismatch is the exit code when a `bd update` run failed solely
-// because --if-assignee/--if-status guards did not match: the precondition no
-// longer held, nothing was written, and retrying is pointless — another actor
-// won the race. Scripts branch on it to tell "racer won, skip gracefully"
-// (13) from infra failure (1, retry/abort). Mixed batches — any failure that
-// is NOT a guard mismatch — exit 1, the conservative "something needs a
-// retry" verdict. The stderr line carries the machine-greppable sentinel
-// text ("assignee mismatch" / "status mismatch") either way.
+// because --if-assignee/--if-status/--if-revision guards did not match: the
+// precondition no longer held, nothing was written, and retrying is
+// pointless — another actor won the race. Scripts branch on it to tell
+// "racer won, skip gracefully" (13) from infra failure (1, retry/abort).
+// Mixed batches — any failure that is NOT a guard mismatch — exit 1, the
+// conservative "something needs a retry" verdict. The stderr line carries the
+// machine-greppable sentinel text ("assignee mismatch" / "status mismatch" /
+// "revision mismatch") either way. `bd close`, `bd assign` and `bd delete`
+// reuse this same constant for their own --if-revision guard (A8, beads#4682).
 const ExitGuardMismatch = 13
 
-// isGuardMismatch reports whether err is a bd-wsqvw conditional-update guard
-// refusal (stale --if-assignee/--if-status), the failure class that exits
+// isGuardMismatch reports whether err is a conditional-write guard refusal —
+// bd-wsqvw's stale --if-assignee/--if-status, or A8's stale --if-revision
+// (storage.ErrVersionMismatch) — the failure class that exits
 // ExitGuardMismatch instead of 1.
 func isGuardMismatch(err error) bool {
-	return errors.Is(err, storage.ErrAssigneeMismatch) || errors.Is(err, storage.ErrStatusMismatch)
+	return errors.Is(err, storage.ErrAssigneeMismatch) ||
+		errors.Is(err, storage.ErrStatusMismatch) ||
+		errors.Is(err, storage.ErrVersionMismatch)
 }
 
 // updateIDFailure records one issue ID that could not be updated and why.
@@ -919,7 +979,7 @@ func reportUpdateFailures(failures []updateIDFailure, total int) error {
 	} else {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
 		for _, f := range failures {
-			fmt.Fprintf(os.Stderr, "  %s: %s\n", f.ID, f.Error)
+			fmt.Fprintf(os.Stderr, "  %s: %s\n", f.ID, remedy.PrintedText(f.Error))
 		}
 	}
 	allGuard := len(failures) > 0
@@ -957,16 +1017,18 @@ func toJSONValue(s string) json.RawMessage {
 }
 
 // updateGuardsFromFlags reads the bd-wsqvw conditional-update guards
-// (--if-assignee/--if-status) with presence detected via Changed(), so
-// `--if-assignee ""` is a real guard meaning "expected unassigned" rather than
-// "no guard" (the unclaim.go idiom). It rejects combining guards with --claim
-// (--claim is its own compare-and-set with claim-pool semantics; the guards
-// would silently duplicate or contradict it) and guards with no regular field
-// update to ride on (the CAS applies to the issues-row UPDATE; label and
-// parent edits run outside it and would not be guarded). An --if-status value
-// is validated against the same built-in + custom status set as --status, so a
-// typo fails fast instead of mismatching forever.
-func updateGuardsFromFlags(cmd *cobra.Command, claimFlag bool, updates map[string]interface{}) (ifAssignee, ifStatus *string, err error) {
+// (--if-assignee/--if-status) and A8's --if-revision (beads#4682) with
+// presence detected via Changed(), so `--if-assignee ""` is a real guard
+// meaning "expected unassigned" rather than "no guard" (the unclaim.go
+// idiom). It rejects combining any guard with --claim (--claim is its own
+// compare-and-set with claim-pool semantics; the guards would silently
+// duplicate or contradict it) and guards with no regular field update to ride
+// on (the CAS applies to the issues-row UPDATE; label and parent edits run
+// outside it and would not be guarded). An --if-status value is validated
+// against the same built-in + custom status set as --status, so a typo fails
+// fast instead of mismatching forever; --if-revision is validated as a
+// decimal int64 the same way.
+func updateGuardsFromFlags(cmd *cobra.Command, claimFlag bool, updates map[string]interface{}) (ifAssignee, ifStatus *string, ifRevision *int64, err error) {
 	if cmd.Flags().Changed("if-assignee") {
 		v, _ := cmd.Flags().GetString("if-assignee")
 		ifAssignee = &v
@@ -974,21 +1036,25 @@ func updateGuardsFromFlags(cmd *cobra.Command, claimFlag bool, updates map[strin
 	if cmd.Flags().Changed("if-status") {
 		v, _ := cmd.Flags().GetString("if-status")
 		var customStatuses []string
-		if store != nil {
+		if store != nil && !types.Status(v).IsValid() {
 			if cs, csErr := store.GetCustomStatuses(rootCtx); csErr == nil {
 				customStatuses = cs
 			}
 		}
 		if !types.Status(v).IsValidWithCustom(customStatuses) {
-			return nil, nil, HandleErrorRespectJSON("invalid --if-status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", v)
+			return nil, nil, nil, HandleErrorRespectJSON("invalid --if-status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", v)
 		}
 		ifStatus = &v
 	}
-	if ifAssignee == nil && ifStatus == nil {
-		return nil, nil, nil
+	ifRevision, err = parseIfRevisionFlag(cmd)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if ifAssignee == nil && ifStatus == nil && ifRevision == nil {
+		return nil, nil, nil, nil
 	}
 	if claimFlag {
-		return nil, nil, HandleErrorRespectJSON("cannot combine --if-assignee/--if-status with --claim (--claim is already an atomic compare-and-set)")
+		return nil, nil, nil, HandleErrorRespectJSON("cannot combine --if-assignee/--if-status/--if-revision with --claim (--claim is already an atomic compare-and-set)")
 	}
 	hasFieldUpdate := false
 	for k := range updates {
@@ -999,9 +1065,9 @@ func updateGuardsFromFlags(cmd *cobra.Command, claimFlag bool, updates map[strin
 		}
 	}
 	if !hasFieldUpdate {
-		return nil, nil, HandleErrorRespectJSON("--if-assignee/--if-status require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard")
+		return nil, nil, nil, HandleErrorRespectJSON("--if-assignee/--if-status/--if-revision require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard")
 	}
-	return ifAssignee, ifStatus, nil
+	return ifAssignee, ifStatus, ifRevision, nil
 }
 
 func init() {
@@ -1047,6 +1113,9 @@ func init() {
 	// Conditional (compare-and-set) update guards (bd-wsqvw)
 	updateCmd.Flags().String("if-assignee", "", "Apply the update only if the current assignee equals this value (--if-assignee '' requires unassigned); a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
 	updateCmd.Flags().String("if-status", "", "Apply the update only if the current status equals this value; a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
+	// A8 (beads#4682): composes with --if-assignee/--if-status above — all
+	// guards present must hold, or nothing is written.
+	updateCmd.Flags().String("if-revision", "", ifRevisionFlagHelp+" Composes with --if-assignee/--if-status: all guards present must hold.")
 	// --force and --if-assignee are NOT mutually exclusive: --force still
 	// drives the close-policy and notes-overwrite halves (runCommandUpdateMutation),
 	// and the contract itself refuses ForceAssigneeTransfer alongside
@@ -1080,4 +1149,17 @@ func init() {
 	updateCmd.Flags().StringArray("unset-metadata", nil, "Remove metadata key (repeatable, e.g., --unset-metadata team)")
 	updateCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(updateCmd)
+}
+
+// templateReadOnlyRefusal reports whether err is the update role's template
+// refusal (issueops.Lifecycle.Update, any route) and, when it is, returns it
+// spelled against id — the argument as the caller typed it, which is what this
+// CLI's template sentence has always named. It is found with errors.Is because
+// the refusal may arrive wrapped by the unit of work or inside the served
+// problem envelope.
+func templateReadOnlyRefusal(id string, err error) (error, bool) {
+	if !errors.Is(err, issueops.ErrTemplateReadOnly) {
+		return nil, false
+	}
+	return &issueops.TemplateReadOnlyError{IssueID: id}, true
 }

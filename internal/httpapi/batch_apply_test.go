@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/storage"
@@ -84,7 +85,7 @@ func TestApplyBatchForwardsEveryLevelOfTheDocumentedBody(t *testing.T) {
 				"expected_version":"42"}},
 			{"kind":"dep_add","dep_add":{
 				"source":{"key":"root"},"target":{"id":"bd-7"},"type":"waits-for",
-				"metadata":{"gate":"any-children"}}}
+				"metadata":{"gate":"any-children"},"has_spawner":true,"thread_id":"th-plan"}}
 		]
 	}`)
 	if resp.StatusCode != http.StatusOK {
@@ -143,6 +144,12 @@ func TestApplyBatchForwardsEveryLevelOfTheDocumentedBody(t *testing.T) {
 	}
 	if create.Issue.Priority != 1 {
 		t.Errorf("create.priority = %d, want 1", create.Issue.Priority)
+	}
+	// created_by is not the handler's to stamp: the item reaches the role
+	// without one, and the role defaults it to the request's actor
+	// (backend/conformance's batch-apply contract pins that half).
+	if create.Issue.CreatedBy != "" {
+		t.Errorf("create.created_by = %q, want it left to the role", create.Issue.CreatedBy)
 	}
 	if create.Issue.EstimatedMinutes == nil || *create.Issue.EstimatedMinutes != 30 {
 		t.Errorf("create.estimated_minutes = %v, want 30", create.Issue.EstimatedMinutes)
@@ -234,6 +241,11 @@ func TestApplyBatchForwardsEveryLevelOfTheDocumentedBody(t *testing.T) {
 	// handler that parsed it would be a second definition of what a gate is.
 	if depAdd.Metadata != `{"gate":"any-children"}` {
 		t.Errorf("dep_add.metadata = %q, want the caller's bytes unaltered", depAdd.Metadata)
+	}
+	// The lineage members reach the role as sent: issues.batchApply.depAddLineage
+	// gates whether a CLIENT sends them, and this server always reads them.
+	if !depAdd.HasSpawner || depAdd.ThreadID != "th-plan" {
+		t.Errorf("dep_add.has_spawner/thread_id = %v/%q, want true/%q", depAdd.HasSpawner, depAdd.ThreadID, "th-plan")
 	}
 }
 
@@ -512,6 +524,29 @@ func TestApplyBatchRejectsTheShapesTheDocumentRefuses(t *testing.T) {
 				t.Errorf("the role was called %d times for a refused request, want 0", len(applier.requests()))
 			}
 		})
+	}
+}
+
+// TestApplyBatchRefusesAnEmptyThreadID pins the document's minLength: 1 on a
+// dep_add item's thread_id. An absent member already names no thread, so an
+// empty one is refused by name rather than read as a second spelling of it.
+// The client never sends one (setItemString omits an empty value), so only a
+// direct-wire caller reaches this.
+func TestApplyBatchRefusesAnEmptyThreadID(t *testing.T) {
+	applier := &roleBatchApplier{}
+	ts := newApplyBatchServer(t, applier)
+
+	resp := ts.claim(t, batchApplyPath, `{"actor":"alice","items":[{"kind":"dep_add","dep_add":{
+		"source":{"id":"a"},"target":{"id":"b"},"type":"blocks","thread_id":""}}]}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
+	}
+	body := decodeBody(t, resp)
+	if body["param"] != "items[0].dep_add.thread_id" || body["reason"] != "invalid_value" {
+		t.Errorf("param/reason = %v/%v, want items[0].dep_add.thread_id/invalid_value", body["param"], body["reason"])
+	}
+	if len(applier.requests()) != 0 {
+		t.Errorf("the role was called for a refused request; nothing may reach it")
 	}
 }
 
@@ -851,10 +886,34 @@ func TestApplyBatchMapsTheRolesTypedRefusalsOntoTheDocumentedCodes(t *testing.T)
 			wantParam:  "items[0].create.id",
 		},
 		{
+			// A 410, not the occupied id's 409: the id was retired by a
+			// retaining sweep, so there is no row to read and adopt, and the
+			// identical request can never succeed.
+			name: "a retired explicit id",
+			err: itemErr(0, issueops.ItemCreate, "root", "",
+				&issueops.IdempotencyExpiredError{ID: "bd-op-1", ClosedAt: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)}),
+			wantStatus: http.StatusGone,
+			wantCode:   "idempotency_expired",
+			wantParam:  "items[0].create.id",
+		},
+		{
 			name:       "a target that names nothing",
 			err:        itemErr(0, issueops.ItemUpdate, "", "bd-9", storage.ErrNotFound),
 			wantStatus: http.StatusNotFound,
 			wantCode:   "not_found",
+		},
+		{
+			// The dotted-id hierarchy rule is request validation (it unwraps to
+			// ErrValidation), never the hierarchy CONFLICT's dependency_cycle:
+			// it is decided from the two resolved ids, ahead of every check that
+			// reads the stored graph, so even a child whose parent-child edge IS
+			// stored gets this 400, with no hierarchy members to describe.
+			name: "a dotted child gated on its own parent",
+			err: itemErr(0, issueops.ItemDepAdd, "", "bd-1.1",
+				&issueops.DottedChildDependencyError{IssueID: "bd-1.1", DependsOnID: "bd-1", Type: issueops.DepBlocks}),
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_argument",
+			wantParam:  "items",
 		},
 		{
 			name:       "the workspace's own validation",

@@ -218,6 +218,14 @@ func TestProxiedServerShow(t *testing.T) {
 			t.Errorf("expected comments with --include-comments: %v", m)
 		}
 	})
+}
+
+// TestProxiedServerShowB holds more of TestProxiedServerShow's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerShowB(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	// ga-clgh: proxied path mirror of the direct-path fix (a2a69f5e9). The
 	// proxied handler used to leave comments_omitted unset entirely, so a
@@ -398,7 +406,6 @@ func TestProxiedServerShow(t *testing.T) {
 			t.Errorf("expected title in output: %s", out)
 		}
 	})
-
 }
 
 func TestProxiedServerShow2(t *testing.T) {
@@ -591,6 +598,14 @@ func TestProxiedServerShow2(t *testing.T) {
 			t.Errorf("expected --refs output to contain referrer %s: %s", child.ID, out)
 		}
 	})
+}
+
+// TestProxiedServerShow2B holds more of TestProxiedServerShow2's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerShow2B(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("show_refs_groups_by_type", func(t *testing.T) {
 		t.Parallel()
@@ -754,7 +769,6 @@ func TestProxiedServerShow2(t *testing.T) {
 			t.Errorf("expected wisp child %s in --children: %s", childW.ID, out)
 		}
 	})
-
 }
 
 func TestProxiedServerShow3(t *testing.T) {
@@ -785,9 +799,46 @@ func TestProxiedServerShow3(t *testing.T) {
 		p := newSharedProxiedProject(t, bd, "saoi")
 		issue := bdProxiedCreate(t, bd, p.dir, "AsOf invalid", "--type", "task")
 
-		_, stderr, _ := bdProxiedRunBuffers(t, bd, p.dir, "show", issue.ID, "--as-of", "'; DROP TABLE issues; --")
+		stdout, stderr := bdProxiedShowFail(t, bd, p.dir, issue.ID, "--as-of", "'; DROP TABLE issues; --")
 		if !strings.Contains(stderr, "invalid ref") {
 			t.Errorf("expected 'invalid ref' in stderr, got: %s", stderr)
+		}
+		if stdout != "" {
+			t.Errorf("expected nothing on stdout when no issue was read, got: %s", stdout)
+		}
+	})
+
+	// The proxied twin of TestEmbeddedShowAsOfFailureExitCodes: when no issue
+	// can be read at the ref the command fails the way plain show does, and a
+	// batch that read at least one issue still succeeds.
+	t.Run("show_as_of_nothing_found_fails_like_show", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "saon")
+		issue := bdProxiedCreate(t, bd, p.dir, "AsOf kept", "--type", "task")
+		hash := proxiedCurrentCommit(t, p)
+		later := bdProxiedCreate(t, bd, p.dir, "AsOf created later", "--type", "task")
+
+		stdout, stderr := bdProxiedShowFail(t, bd, p.dir, later.ID, "--as-of", hash)
+		if stdout != "" || !strings.Contains(stderr, later.ID) {
+			t.Errorf("want empty stdout and %s reported on stderr\nstdout:\n%s\nstderr:\n%s", later.ID, stdout, stderr)
+		}
+
+		stdout, stderr = bdProxiedShowFail(t, bd, p.dir, later.ID, "--as-of", hash, "--json")
+		var envelope struct {
+			Error string `json:"error"`
+			Hint  string `json:"hint"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &envelope); err != nil ||
+			envelope.Error != "no issues found matching the provided IDs" || envelope.Hint == "" {
+			t.Errorf("--json stdout is not show's error envelope (%v):\n%s", err, stdout)
+		}
+		if !strings.Contains(stderr, later.ID) {
+			t.Errorf("--json stderr does not report %s:\n%s", later.ID, stderr)
+		}
+
+		arr := bdProxiedShowDetailsAll(t, bd, p.dir, issue.ID, later.ID, "--as-of", hash)
+		if len(arr) != 1 || arr[0]["id"] != issue.ID || arr[0]["title"] != "AsOf kept" {
+			t.Errorf("partial --as-of read: want only %s as of the ref, got %v", issue.ID, arr)
 		}
 	})
 
@@ -887,6 +938,14 @@ func TestProxiedServerShow3(t *testing.T) {
 				arr[0]["id"], arr[1]["id"], root.ID, reply.ID)
 		}
 	})
+}
+
+// TestProxiedServerShow3B holds more of TestProxiedServerShow3's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerShow3B(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("show_thread_orphan_message_renders_alone", func(t *testing.T) {
 		t.Parallel()

@@ -49,17 +49,6 @@ func (b aptStepBudget) loopHeader() string {
 func aptStepBudgets() []aptStepBudget {
 	return []aptStepBudget{
 		{
-			workflow:       "migration-test.yml",
-			job:            "historical-upgrades",
-			step:           "Install test dependencies",
-			updateAttempts: 3,
-			updateTimeout:  120,
-			backoff:        10,
-			installTimeout: 180,
-			installPkgs:    "jq libicu74",
-			capMinutes:     11,
-		},
-		{
 			workflow:       "release.yml",
 			job:            "goreleaser",
 			step:           "Install cross-compilation toolchains and signing tools",
@@ -69,28 +58,6 @@ func aptStepBudgets() []aptStepBudget {
 			installTimeout: 300,
 			installPkgs:    "gcc-mingw-w64-x86-64 gcc-aarch64-linux-gnu osslsigncode",
 			capMinutes:     13,
-		},
-		{
-			workflow:       "pr.yml",
-			job:            "windows-test-binaries",
-			step:           "Install mingw cross-compiler",
-			updateAttempts: 3,
-			updateTimeout:  120,
-			backoff:        10,
-			installTimeout: 300,
-			installPkgs:    "gcc-mingw-w64-x86-64",
-			capMinutes:     12,
-		},
-		{
-			workflow:       "main.yml",
-			job:            "windows-test-binaries-cache",
-			step:           "Install mingw cross-compiler",
-			updateAttempts: 3,
-			updateTimeout:  120,
-			backoff:        10,
-			installTimeout: 300,
-			installPkgs:    "gcc-mingw-w64-x86-64",
-			capMinutes:     12,
 		},
 	}
 }

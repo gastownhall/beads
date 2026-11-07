@@ -14,7 +14,9 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// The proxied-server mirror of TestEmbeddedCreateStorageClass. This is the
+// The proxied-server mirror of TestEmbeddedCreateStorageClassConflicts /
+// TestEmbeddedCreateStorageClassBatchAndMisc (one TestEmbeddedCreateStorageClass
+// before the F1 CI-speed split). This is the
 // transport the field report was filed against and the one Enterprise builds
 // run: every `--storage-class` value was accepted and dropped, so an
 // `ephemeral` request minted a DURABLE row and the durable-class-on-wisp-plane

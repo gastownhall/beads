@@ -1,3 +1,9 @@
+# Lint policy for nogo (//tools/nogo), which runs these linters beside every
+# Bazel Go compile: tools/nogo/internal/golangci embeds this file and applies
+# it as golangci-lint v2.10.1 would (enabled linters, settings, run.tests,
+# generated files, exclusion rules). Decoding is strict, so a key the nogo
+# wrappers do not implement fails the build. golangci-lint itself still reads
+# it (editors, ad-hoc runs), but CI gates on nogo; see engdocs/LINTING.md.
 version: "2"
 
 run:
@@ -461,12 +467,28 @@ linters:
       # tests: false` means forbidigo never analyzes a test file at all, so that
       # entry asserts nothing either way and scoping it would be the churn this
       # comment just refused to write.
-      - path: '^cmd/bd/(close|duplicates|find_duplicates|gate|gc|graph|info|label|orphans|purge|search|todo|wisp|human)(_proxied_server)?\.go$'
+      #
+      # `search` LEFT this list when all three of its routes moved onto
+      # issueops.Reader.List with issueops.SearchListRequest (cmd/bd/search.go);
+      # it builds no filter any more.
+      #
+      # `gate` LEFT it when `bd gate check` joined `bd gate list` on
+      # issueops.ListGates over the route's Querier: cmd/bd/gate.go and
+      # cmd/bd/gate_proxied_server.go name no filter type any more.
+      # `gate_discover` keeps its own hole below, since findPendingGates still
+      # asks SearchIssues for its gates.
+      - path: '^cmd/bd/(close|duplicates|find_duplicates|gc|graph|info|label|orphans|purge|todo|wisp|human)(_proxied_server)?\.go$'
         text: 'do not write a filter here'
         linters:
           - forbidigo
       # Molecule reporting: each selects the members of one molecule.
-      - path: '^cmd/bd/mol_(current|port|progress|ready_gated|stale)\.go$'
+      #
+      # `mol current` and `mol progress` LEFT this list when their in_progress
+      # and hooked listings moved onto issueops.Reader.List (cmd/bd/mol_roles.go)
+      # so a remote backend answers them. The proxied route's in-transaction
+      # port still searches through the unit of work, and that filter lives in
+      # mol_port.go beside the port.
+      - path: '^cmd/bd/mol_(port|ready_gated|stale)\.go$'
         text: 'do not write a filter here'
         linters:
           - forbidigo

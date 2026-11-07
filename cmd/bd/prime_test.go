@@ -493,6 +493,38 @@ func TestFormatMemoriesForPrimeTimesOutOpeningStore(t *testing.T) {
 	}
 }
 
+// TestFormatMemoriesForPrimeTimesOutOpeningRegisteredBackend is the unstubbed
+// twin of TestFormatMemoriesForPrimeTimesOutOpeningStore, which replaces
+// ensureStoreActiveForPrime and so cannot see how the real open frames its
+// error. Here the real open dials a registered remote backend that outlives
+// BEADS_PRIME_TIMEOUT, and the timeout banner must still win over the generic
+// "storage unavailable" one.
+func TestFormatMemoriesForPrimeTimesOutOpeningRegisteredBackend(t *testing.T) {
+	const backend = "contract-prime-open-timeout"
+	registerContractBlockingBackend(t, backend, true)
+	t.Setenv("BEADS_DIR", writeContractBackendConfig(t, backend))
+	t.Setenv(primeStoreTimeoutEnv, "50ms")
+	oldStore := store
+	oldStoreActive := storeActive
+	oldEnsure := ensureStoreActiveForPrime
+	oldProxied := proxiedServerMode
+	store = nil
+	storeActive = false
+	ensureStoreActiveForPrime = ensureStoreActiveWithContext
+	proxiedServerMode = false
+	t.Cleanup(func() {
+		store = oldStore
+		storeActive = oldStoreActive
+		ensureStoreActiveForPrime = oldEnsure
+		proxiedServerMode = oldProxied
+	})
+
+	out := formatMemoriesForPrime(false)
+	if !strings.Contains(out, "timed out after 50ms") {
+		t.Fatalf("expected the store-open timeout banner in prime memory output, got %q", out)
+	}
+}
+
 // stubPrimeStoreOpen points prime's lazy store open at the given error and
 // clears the ambient store, so a test drives formatMemoriesForPrime through a
 // chosen failure edge. proxiedServerMode is forced off so the classic route is

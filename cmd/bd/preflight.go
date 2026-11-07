@@ -378,9 +378,10 @@ func runLintCheckAt(root string, skipLint bool) CheckResult {
 	cmd.Dir = invocation.dir
 	// CombinedOutput collects through a pipe that every descendant inherits, so
 	// killing the direct child on deadline does not close the write end while a
-	// golangci-lint grandchild still holds it. Without a WaitDelay the deadline
-	// therefore cannot bound this call at all, and the message appended below
-	// never prints in the one case it exists to report.
+	// linter grandchild (golangci-lint, or bazel under the Beads driver) still
+	// holds it. Without a WaitDelay the deadline therefore cannot bound this
+	// call at all, and the message appended below never prints in the one case
+	// it exists to report.
 	cmd.WaitDelay = lintCancellationGrace
 	output, err := cmd.CombinedOutput()
 	// Report the deadline only when it actually decided the result: a child that

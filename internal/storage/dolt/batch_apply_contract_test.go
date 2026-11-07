@@ -175,6 +175,26 @@ func TestBatchApplyContract(t *testing.T) {
 		defer cancel()
 		conformance.RunBatchApplyNormalizesTheWaitsForGate(t, ctx, fixture)
 	})
+	t.Run("StampsSpawnerIDOnlyWhenNamed", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyStampsSpawnerIDOnlyWhenNamed(t, ctx, fixture)
+	})
+	t.Run("CarriesThreadIDOntoTheStoredEdge", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyCarriesThreadIDOntoTheStoredEdge(t, ctx, fixture)
+	})
+	t.Run("CarriesThreadIDOntoAnExistingEdge", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyCarriesThreadIDOntoAnExistingEdge(t, ctx, fixture)
+	})
+	t.Run("RefusesAThreadIDLongerThanItsColumn", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyRefusesAThreadIDLongerThanItsColumn(t, ctx, fixture)
+	})
 	t.Run("SplicesAForwardMetadataRef", func(t *testing.T) {
 		ctx, cancel := testContext(t)
 		defer cancel()
@@ -234,6 +254,36 @@ func TestBatchApplyContract(t *testing.T) {
 		ctx, cancel := testContext(t)
 		defer cancel()
 		conformance.RunBatchApplyRefusesAnUnusableRequest(t, ctx, fixture)
+	})
+	t.Run("UpdateItemsRefuseATemplate", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyUpdateItemsRefuseATemplate(t, ctx, fixture)
+	})
+	t.Run("SplicesTheMetadataOfATemplateItCreates", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplySplicesTheMetadataOfATemplateItCreates(t, ctx, fixture)
+	})
+	t.Run("CloseItemsAnswerToTheCloseGuards", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyCloseItemsAnswerToTheCloseGuards(t, ctx, fixture)
+	})
+	t.Run("RefusesADottedChildGatedOnItsOwnParent", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyRefusesADottedChildGatedOnItsOwnParent(t, ctx, fixture)
+	})
+	t.Run("AppliesTheDefaultPriority", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyAppliesTheDefaultPriority(t, ctx, fixture)
+	})
+	t.Run("CarriesTheGateMembers", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyCarriesTheGateMembers(t, ctx, fixture)
 	})
 }
 

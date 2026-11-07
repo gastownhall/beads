@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
@@ -32,19 +34,34 @@ func openStoreDB(beadsDir string) (*sql.DB, storage.DoltStorage, error) {
 	return db, store, nil
 }
 
-// CheckOrphanedDependencies detects dependencies pointing to non-existent issues.
-func CheckOrphanedDependencies(path string) DoctorCheck {
-	beadsDir := ResolveBeadsDirForRepo(path)
-
-	db, store, err := openStoreDB(beadsDir)
+// CheckOrphanedDependencies detects dependencies pointing to non-existent issues
+// on the server its bd doctor --fix repair (fix.OrphanedDependencies) deletes
+// them from (fix.OpenScanDB). It read the store's server, so beside a live
+// BEADS_DOLT_SERVER_SOCKET and a resolved port it diagnosed the socket's
+// server while the repair deleted rows on the server at the port and
+// reported them fixed (#7874 review). It reports a database whose repair
+// server it cannot read as CheckBlockedConsistencyWithStore does: "N/A (no
+// database)" only when the shared store found no database either, else a
+// warning, so bd doctor --check=validate does not pass a database it never
+// read.
+func CheckOrphanedDependencies(path string, ss *SharedStore) DoctorCheck {
+	db, err := fix.OpenScanDB(path)
 	if err != nil {
+		if ss.Store() == nil {
+			return DoctorCheck{
+				Name:    "Orphaned Dependencies",
+				Status:  "ok",
+				Message: "N/A (no database)",
+			}
+		}
 		return DoctorCheck{
 			Name:    "Orphaned Dependencies",
-			Status:  "ok",
-			Message: "N/A (no database)",
+			Status:  StatusWarning,
+			Message: "Unable to check orphaned dependencies",
+			Detail:  err.Error(),
 		}
 	}
-	defer func() { _ = store.Close() }()
+	defer func() { _ = db.Close() }()
 
 	return checkOrphanedDependenciesDB(db)
 }
@@ -321,20 +338,176 @@ func CheckGitConflicts(path string) DoctorCheck {
 // CheckChildParentDependencies detects child→parent blocking dependencies.
 // These often indicate a modeling mistake (deadlock: child waits for parent, parent waits for children).
 // However, they may be intentional in some workflows, so removal requires explicit opt-in.
-func CheckChildParentDependencies(path string) DoctorCheck {
+// It reads the server that removal (fix.ChildParentDependencies) writes
+// (fix.OpenScanDB), and reports a database whose repair server it cannot
+// read, as CheckOrphanedDependencies does.
+func CheckChildParentDependencies(path string, ss *SharedStore) DoctorCheck {
+	db, err := fix.OpenScanDB(path)
+	if err != nil {
+		if ss.Store() == nil {
+			return DoctorCheck{
+				Name:    "Child-Parent Dependencies",
+				Status:  "ok",
+				Message: "N/A (no database)",
+			}
+		}
+		return DoctorCheck{
+			Name:    "Child-Parent Dependencies",
+			Status:  StatusWarning,
+			Message: "Unable to check child→parent dependencies",
+			Detail:  err.Error(),
+		}
+	}
+	defer func() { _ = db.Close() }()
+
+	return checkChildParentDependenciesDB(db)
+}
+
+// detailMaxBytes is the budget for a DoctorCheck Detail line: enough to show
+// the shape of a finding, short enough not to bury the report.
+const detailMaxBytes = 200
+
+// truncateDetail cuts a detail line to detailMaxBytes WITHOUT splitting a
+// rune. The gate inventory joins its entries with U+2192 (three bytes), so a
+// plain detail[:200] lands mid-rune about two times in three and puts invalid
+// UTF-8 into `bd doctor --json`, where it is no longer a display nuisance but
+// a value a consumer has to decode.
+func truncateDetail(detail string) string {
+	if len(detail) <= detailMaxBytes {
+		return detail
+	}
+	cut := detailMaxBytes
+	for cut > 0 && !utf8.RuneStart(detail[cut]) {
+		cut--
+	}
+	return detail[:cut] + "..."
+}
+
+// CheckParentBlocksOwnChild reports parents that carry a blocking edge onto one
+// of their own parent-child descendants — the "close gate on the epic" idiom,
+// where P blocks on C1 and C2 (or on a grandchild) so P cannot close before
+// them.
+//
+// It is INFORMATIONAL and has no fix. Before gastownhall/beads#6506 these
+// edges were a trap: the parent's blocked bit cascaded to its children
+// whatever set it, so the gate hid the very children it was waiting for and
+// nothing in the subtree could ever become ready. The cascade now propagates
+// only exogenous blockedness, so the edges are harmless and frequently
+// intentional; what an operator wants from doctor is the inventory — which
+// beads in this store use the idiom — not a repair. An inventory query that
+// fails or times out is a warning, as in the file's other checks, so it cannot
+// pass for an empty inventory.
+func CheckParentBlocksOwnChild(path string) DoctorCheck {
 	beadsDir := ResolveBeadsDirForRepo(path)
 
 	db, store, err := openStoreDB(beadsDir)
 	if err != nil {
 		return DoctorCheck{
-			Name:    "Child-Parent Dependencies",
-			Status:  "ok",
-			Message: "N/A (no database)",
+			Name:     "Parent Close Gates",
+			Status:   StatusOK,
+			Message:  "N/A (no database)",
+			Category: CategoryMetadata,
 		}
 	}
 	defer func() { _ = store.Close() }()
 
-	return checkChildParentDependenciesDB(db)
+	return checkParentBlocksOwnChildDB(db)
+}
+
+// checkParentBlocksOwnChildDB is the core logic for CheckParentBlocksOwnChild.
+// The pair is symmetric-but-opposite to checkChildParentDependenciesDB above:
+// that one finds a CHILD blocking on its PARENT (still a deadlock, still
+// fixable); this one finds a PARENT blocking on its own DESCENDANT, and
+// matches on real parent-child edges rather than on dotted-ID ancestry,
+// because the close-gate idiom is wired with explicit edges between unrelated
+// ids. "Descendant" is walked to the same four parent-child levels the cascade
+// fix uses to decide "inside my own subtree" (issueops subtreeWalkDepth), so
+// the inventory and the fix agree on which gates are gates: a parent that
+// blocks on its grandchild is listed, one that blocks five levels down is not.
+func checkParentBlocksOwnChildDB(db *sql.DB) DoctorCheck {
+	//nolint:gosec // G202: doctorDependencyUnionSQL returns a fixed internal SELECT fragment.
+	query := `
+		SELECT DISTINCT b.issue_id, b.depends_on_id
+		FROM (` + doctorDependencyUnionSQL() + `) b
+		JOIN (
+		    SELECT l1.depends_on_id AS anc, l1.issue_id AS des
+		    FROM (` + doctorDependencyUnionSQL() + `) l1
+		    WHERE l1.type = 'parent-child'
+		  UNION
+		    SELECT l1.depends_on_id, l2.issue_id
+		    FROM (` + doctorDependencyUnionSQL() + `) l1
+		    JOIN (` + doctorDependencyUnionSQL() + `) l2
+		      ON l2.type = 'parent-child' AND l2.depends_on_id = l1.issue_id
+		    WHERE l1.type = 'parent-child'
+		  UNION
+		    SELECT l1.depends_on_id, l3.issue_id
+		    FROM (` + doctorDependencyUnionSQL() + `) l1
+		    JOIN (` + doctorDependencyUnionSQL() + `) l2
+		      ON l2.type = 'parent-child' AND l2.depends_on_id = l1.issue_id
+		    JOIN (` + doctorDependencyUnionSQL() + `) l3
+		      ON l3.type = 'parent-child' AND l3.depends_on_id = l2.issue_id
+		    WHERE l1.type = 'parent-child'
+		  UNION
+		    SELECT l1.depends_on_id, l4.issue_id
+		    FROM (` + doctorDependencyUnionSQL() + `) l1
+		    JOIN (` + doctorDependencyUnionSQL() + `) l2
+		      ON l2.type = 'parent-child' AND l2.depends_on_id = l1.issue_id
+		    JOIN (` + doctorDependencyUnionSQL() + `) l3
+		      ON l3.type = 'parent-child' AND l3.depends_on_id = l2.issue_id
+		    JOIN (` + doctorDependencyUnionSQL() + `) l4
+		      ON l4.type = 'parent-child' AND l4.depends_on_id = l3.issue_id
+		    WHERE l1.type = 'parent-child'
+		) d ON d.anc = b.issue_id AND d.des = b.depends_on_id
+		WHERE b.type IN ('blocks', 'conditional-blocks')
+		ORDER BY b.issue_id, b.depends_on_id
+	`
+	rows, err := db.Query(query)
+	if err != nil {
+		return DoctorCheck{
+			Name:     "Parent Close Gates",
+			Status:   StatusWarning,
+			Message:  "N/A (query failed)",
+			Detail:   err.Error(),
+			Category: CategoryMetadata,
+		}
+	}
+	defer rows.Close()
+
+	var gates []string
+	for rows.Next() {
+		var issueID, dependsOnID string
+		if err := rows.Scan(&issueID, &dependsOnID); err == nil {
+			gates = append(gates, fmt.Sprintf("%s→%s", issueID, dependsOnID))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return DoctorCheck{
+			Name:     "Parent Close Gates",
+			Status:   StatusWarning,
+			Message:  "N/A (row iteration error)",
+			Detail:   err.Error(),
+			Category: CategoryMetadata,
+		}
+	}
+
+	if len(gates) == 0 {
+		return DoctorCheck{
+			Name:     "Parent Close Gates",
+			Status:   StatusOK,
+			Message:  "No parent→own-descendant blocking edges",
+			Category: CategoryMetadata,
+		}
+	}
+
+	detail := truncateDetail(strings.Join(gates, ", "))
+
+	return DoctorCheck{
+		Name:     "Parent Close Gates",
+		Status:   StatusOK,
+		Message:  fmt.Sprintf("%d parent→own-descendant blocking edge(s) (informational: these gates do not keep the children out of bd ready)", len(gates)),
+		Detail:   detail,
+		Category: CategoryMetadata,
+	}
 }
 
 // checkDoltConflicts queries the Dolt server for unresolved merge conflicts (GH-2249).
@@ -418,6 +591,18 @@ func checkChildParentDependenciesDB(db *sql.DB) DoctorCheck {
 	// Query for child→parent BLOCKING dependencies where issue_id starts with target id + "."
 	// Only matches blocking types (blocks, conditional-blocks, waits-for) that cause deadlock.
 	// Excludes 'parent-child' type which is a legitimate structural hierarchy relationship.
+	//
+	// The reverse shape, a parent that blocks on or waits for its own child
+	// (GH#4814), is deliberately not matched. Since gastownhall/beads#6506 the
+	// parent-child cascade propagates only exogenous blockedness, so that edge
+	// holds back the parent, not the child: it is a close gate, not a
+	// deadlock. That holds while every parent-child chain up from the child
+	// reaches the parent within the cascade's walk (issueops subtreeWalkDepth,
+	// four levels). A child that also has a parent outside the gating parent's
+	// subtree is still locked out of bd ready (bd-eoxqs0): a cascade defect,
+	// not a reason to delete the gate. The write path refuses the blocks form
+	// in favor of a waits-for gate, and checkParentBlocksOwnChildDB lists any
+	// blocks-form rows.
 	//nolint:gosec // G202: doctorDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
 		SELECT d.issue_id, d.depends_on_id

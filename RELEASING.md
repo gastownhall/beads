@@ -94,15 +94,19 @@ release-critical gates do not all run on every PR, so "tag the tip of main"
 means tagging a SHA nobody has fully tested. A burned tag is never reused
 (the v1.1.1 and v1.2.0 precedents), so that gamble is expensive.
 
-**Cut the branch from a SHA that is green on both `Main` and
-`Nightly Full Tests`.** The `Main` workflow runs on push to `main` and the
-`Nightly Full Tests` workflow runs on a 2am UTC schedule, so the newest SHA
-with both is usually a few hours behind the tip:
+**Cut the branch from a SHA that is green on `Bazel`, `Main` and
+`Nightly`.** The `Bazel` workflow (every Linux test lane, on rbe-west) and
+the `Main` workflow (the macOS and Windows jobs) run on push to `main`, and
+the `Nightly` workflow (the full Bazel suite with no cached test results)
+runs on a 2am UTC schedule, so the newest SHA with all three is usually a
+few hours behind the tip:
 
 ```bash
+gh run list --workflow Bazel --branch main --event push --status success --limit 5 \
+  --json headSha,conclusion,createdAt
 gh run list --workflow Main --branch main --status success --limit 5 \
   --json headSha,conclusion,createdAt
-gh run list --workflow "Nightly Full Tests" --status success --limit 3 \
+gh run list --workflow Nightly --status success --limit 3 \
   --json headSha,conclusion,createdAt
 
 git fetch origin
@@ -136,16 +140,17 @@ git log --oneline main..release/1.3.0
 
 Before starting a release:
 
-- [ ] `release/x.y.z` branch cut from a SHA green on `Main` **and**
-      `Nightly Full Tests` (see [Release Branches](#release-branches))
-- [ ] All tests passing (`go test ./...`)
+- [ ] `release/x.y.z` branch cut from a SHA green on `Bazel`, `Main` **and**
+      `Nightly` (see [Release Branches](#release-branches))
+- [ ] All tests passing (`make test`, the Bazel test lane)
 - [ ] npm package tests passing (`cd npm-package && npm run test:all`)
 - [ ] **Upgrade smoke tests pass** (`make test-upgrade`) — see [Release Stability Gate](engdocs/RELEASE-STABILITY-GATE.md)
-- [ ] **Regression tests pass** (`make test-regression`)
+- [ ] **Regression tests pass**
+      (`bazel test //tests/regression:regression_test --config=doltserver-cmd`)
 - [ ] **Every release target cross-compiles** — see
-      [Cross-compile before tagging](#cross-compile-before-tagging). PR CI does
-      not build them ([#5662](https://github.com/gastownhall/beads/issues/5662)),
-      and a target that fails at tag time burns the tag.
+      [Cross-compile before tagging](#cross-compile-before-tagging). PR CI
+      builds them only with cgo off, and a target that fails at tag time
+      burns the tag.
 - [ ] **CHANGELOG.md updated with release notes** (see format below)
 - [ ] **CHANGELOG rollup checked** — nothing left under `[Unreleased]` that
       belongs in this release, and nothing filed under a *previous* release's
@@ -163,12 +168,15 @@ Before starting a release:
 
 ### Cross-compile before tagging
 
-`.goreleaser.yml` builds darwin, linux, windows **and freebsd**, but PR CI
-builds none of the cross targets — the v1.2.0 tag burned on a freebsd
-compilation failure that no pre-tag gate could have caught
-([#5661](https://github.com/gastownhall/beads/pull/5661) fixed the break,
-[#5662](https://github.com/gastownhall/beads/issues/5662) tracks the CI gap).
-Until that gap is closed, build them by hand before tagging:
+`.goreleaser.yml` builds darwin, linux, windows **and freebsd**; the v1.2.0
+tag burned on a freebsd compilation failure no pre-tag gate caught
+([#5661](https://github.com/gastownhall/beads/pull/5661),
+[#5662](https://github.com/gastownhall/beads/issues/5662)). PR CI now builds
+the whole tree for every target in `scripts/ci/release-targets.txt` with Bazel
+(`scripts/ci/bazel-release-cross-compile.sh`, in bazel.yml's pure-Go lane),
+but with cgo off, while linux/amd64, linux/arm64, windows/amd64,
+android/arm64 and the darwin pair ship with `CGO_ENABLED=1`. Build the real
+release configuration by hand before tagging:
 
 ```bash
 goreleaser build --snapshot --clean
@@ -176,6 +184,25 @@ goreleaser build --snapshot --clean
 
 A failure here costs a rebase. The same failure after the tag is pushed costs
 the tag.
+
+The android/arm64 CGO snapshot is Linux x86_64 only. `bd-android-arm64`
+compiles with the Android NDK r30 clang through `scripts/ci/android-arm64-cc`
+and `-cxx`, which install the pinned NDK (`scripts/ci/install-android-ndk.sh`)
+on first use, so on Linux x86_64 the command above, or
+`goreleaser build --snapshot --clean --id bd-android-arm64` alone, needs no
+setup. To install the NDK once up front instead:
+
+```bash
+export "$(scripts/ci/install-android-ndk.sh "$HOME/.cache/beads-ndk")"
+```
+
+On macOS the full snapshot stops at the android id with the wrappers'
+"Linux x86_64 only" error: omit `--id bd-android-arm64` (pass `--id` for each
+of the other builds) and build the android id on a Linux machine, or rely on
+release.yml's Ubuntu `goreleaser` job. Its post hooks check the binary with
+`scripts/verify-cgo.sh` and `scripts/verify-android-elf.sh` (Bionic
+`/system/bin/linker64` interpreter, 16 KB `PT_LOAD` alignment; needs
+`readelf`).
 
 ## 1. Prepare Release
 
@@ -933,6 +960,10 @@ goreleaser check
 # Test build locally
 goreleaser build --snapshot --clean
 ```
+
+The `bd-android-arm64` build only runs on Linux x86_64 (see
+[Cross-compile before tagging](#cross-compile-before-tagging)). On macOS,
+omit `--id bd-android-arm64` and build that id on Linux.
 
 ## Version Numbering
 

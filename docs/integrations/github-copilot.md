@@ -207,4 +207,4 @@ This page covers VS Code. For JetBrains IDEs, check whether your IDE supports MC
 - [Copilot CLI](/integrations/copilot-cli) - Terminal-based Copilot integration
 - [Quickstart](/getting-started/quickstart) - bd command basics
 - [Installation](/getting-started/installation) - Full install guide
-- [Agent Instructions](https://github.com/gastownhall/beads/blob/main/AGENT_INSTRUCTIONS.md) - Full agent workflow reference
+- [IDE and Agent Setup](/getting-started/ide-setup) - Agent integration profiles and setup

@@ -210,6 +210,24 @@ func (*serveIdentityStore) ReadyClaimer() (issueops.ReadyClaimer, error) {
 	return serveIdentityRole{}, nil
 }
 func (*serveIdentityStore) Releaser() (issueops.Releaser, error) { return serveIdentityRole{}, nil }
+
+// LeaseReclaimer is declared at depth 1 for Releaser's reason: its hook
+// decorator wraps, and the recursion would otherwise land on a nil-embedded
+// promotion.
+func (*serveIdentityStore) LeaseReclaimer() (issueops.LeaseReclaimer, error) {
+	return serveIdentityRole{}, nil
+}
+
+// Heartbeater is declared at depth 1 for the same reason: its hook decorator
+// recurses, and the recursion would otherwise land on a nil-embedded promotion.
+func (*serveIdentityStore) Heartbeater() (issueops.Heartbeater, error) {
+	return serveIdentityRole{}, nil
+}
+
+// BlockedLister is declared at depth 1 for the same reason.
+func (*serveIdentityStore) BlockedLister() (issueops.BlockedLister, error) {
+	return serveIdentityRole{}, nil
+}
 func (*serveIdentityStore) IssueLifecycle() (issueops.Lifecycle, error) {
 	return serveIdentityRole{}, nil
 }
@@ -232,6 +250,14 @@ func (*serveIdentityStore) EdgeReader() (issueops.EdgeReader, error) { return se
 // compile error — and it surfaced only on the full-suite macOS shard, because
 // no test name here matches the ones a role slice thinks to run.
 func (*serveIdentityStore) GraphCounter() (issueops.GraphCounter, error) {
+	return serveIdentityRole{}, nil
+}
+
+// BatchGetter is declared at depth 1 for GraphCounter's reason: the many-ids
+// read is also a read, so its hook decorator (hook_batch_getter.go) recurses
+// and the recursion would land on a nil-embedded promotion if this were not
+// here.
+func (*serveIdentityStore) BatchGetter() (issueops.BatchGetter, error) {
 	return serveIdentityRole{}, nil
 }
 
@@ -289,6 +315,9 @@ func (*serveIdentityStore) MetadataCAS() (issueops.MetadataCAS, error) {
 type serveIdentityRole struct {
 	issueops.Lifecycle
 	issueops.Releaser
+	issueops.LeaseReclaimer
+	issueops.Heartbeater
+	issueops.BlockedLister
 	issueops.ReadyClaimer
 	issueops.BatchCloser
 	issueops.MetadataCAS
@@ -297,6 +326,7 @@ type serveIdentityRole struct {
 	issueops.CycleDetector
 	issueops.EdgeReader
 	issueops.GraphCounter
+	issueops.BatchGetter
 	issueops.Relations
 	issueops.Commenter
 	issueops.BlockingAnnotator

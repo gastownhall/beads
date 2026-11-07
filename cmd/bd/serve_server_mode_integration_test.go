@@ -34,7 +34,8 @@ type serverModeProject struct {
 	env      []string
 }
 
-func newServerModeProject(t *testing.T, bd, prefix string) serverModeProject {
+// extraInitArgs are appended to the `bd init --server` command line.
+func newServerModeProject(t *testing.T, bd, prefix string, extraInitArgs ...string) serverModeProject {
 	t.Helper()
 	// The shared container IS an externally-managed dolt sql-server: nothing
 	// about it is proxied. The gate env var is named for the suite that
@@ -62,6 +63,7 @@ func newServerModeProject(t *testing.T, bd, prefix string) serverModeProject {
 		"--database", database,
 		"--prefix", prefix,
 		"--non-interactive", "--skip-agents", "--skip-hooks")
+	cmd.Args = append(cmd.Args, extraInitArgs...)
 	cmd.Dir = dir
 	cmd.Env = env
 	stdout, stderr, err := runCommandBuffers(t, cmd)
@@ -285,27 +287,29 @@ func TestServerModeServeSkipsPostRunMaintenance(t *testing.T) {
 // from the global one is a lie with a straight face. Without the fix the
 // handshake and the startup line both report p.database here.
 //
-// Deliberately not named TestServerMode...: this would make it discovered by
-// the shard scripts' ^Test(ProxiedServer|ServerMode) regex, but it still
-// fails: `bd serve --global` refuses to auto-apply 4 pending schema
-// migrations (v65 to v69) to a shared/proxied server database and exits 1
-// with a consent-required usage message instead of starting (bead filed:
-// shared-server global DB created at schema v65, serve --global refuses the
-// #5920 migration guard). Renaming it into a required lane before that's
-// resolved would turn Bazel + the legacy 15-shard hash-fallback + main.yml's
-// push job red. Rename it once the guard interaction is resolved.
-func TestSharedServerModeServeGlobalReportsTheServedDatabase(t *testing.T) {
-	requireSharedProxiedServer(t)
+// The workspace is set up the way an operator joins an externally-managed
+// shared server: `bd init --shared-server --external`, which provisions
+// beads_global on that server at the current schema, plus
+// BEADS_DOLT_SERVER_PORT naming it. Both halves are load-bearing. Shared-server
+// mode deliberately ignores the workspace's own dolt_server_port and resolves
+// the machine-wide shared server (env, the shared port file, then 3308), and
+// `--external` means bd never writes that port file. Without the env var every
+// --global command here dials 127.0.0.1:3308 instead of the test server:
+// unreachable on CI, and on a developer machine running a real shared server,
+// that server's own beads_global. Without the init, beads_global does not exist
+// on the test server at all.
+func TestServerModeSharedServeGlobalReportsTheServedDatabase(t *testing.T) {
+	port := requireSharedProxiedServer(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)
-	p := newServerModeProject(t, bd, "srvgl")
+	p := newServerModeProject(t, bd, "srvgl", "--shared-server", "--external")
 
-	// Shared-server mode is server mode plus this switch; the workspace is
-	// otherwise the same one every other case in this file uses. It also moves
-	// the proxy root under the shared dolt directory, so the project-local
-	// cleanup newServerModeProject registered does not cover the child this test
-	// leaves behind.
-	p.env = append(p.env, "BEADS_DOLT_SHARED_SERVER=1")
+	// Shared-server mode is server mode plus this switch (init also persisted
+	// it in config.yaml); the workspace is otherwise the same one every other
+	// case in this file uses. It also moves the proxy root under the shared
+	// dolt directory, so the project-local cleanup newServerModeProject
+	// registered does not cover the child this test leaves behind.
+	p.env = append(p.env, "BEADS_DOLT_SHARED_SERVER=1", "BEADS_DOLT_SERVER_PORT="+strconv.Itoa(port))
 	sharedProxyRoot := filepath.Join(p.dir, ".beads", "shared-server", "dolt")
 	t.Cleanup(func() {
 		if err := proxy.Shutdown(sharedProxyRoot); err != nil {

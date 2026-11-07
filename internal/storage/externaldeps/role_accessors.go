@@ -15,7 +15,20 @@ import (
 // IssueReader builds the read role on the policy store. In particular, Ready
 // and List(ReadyFlag) must call this store's filtered ready methods rather than
 // promoted methods on the undecorated store.
-func (s *Store) IssueReader() (issueops.Reader, error) { return storereader.New(s) }
+//
+// A remote inner store answers with its own reader instead, with the ready
+// exclusion laid over it (remote_roles.go): storereader is built from the
+// legacy method seam a remote store only partly serves.
+func (s *Store) IssueReader() (issueops.Reader, error) {
+	if s.rolesAreRemote() {
+		inner, err := s.inner.IssueReader()
+		if err != nil {
+			return nil, err
+		}
+		return &remoteReader{inner: inner, policy: s}, nil
+	}
+	return storereader.New(s)
+}
 
 // IssueClaimer rejects a direct claim of externally blocked work before the
 // backend's atomic claim operation. ReadyClaimer below handles selection among
@@ -24,6 +37,9 @@ func (s *Store) IssueClaimer() (issueops.Claimer, error) {
 	inner, err := s.inner.IssueClaimer()
 	if err != nil {
 		return nil, err
+	}
+	if s.rolesAreRemote() {
+		return &remoteClaimer{inner: inner, policy: s}, nil
 	}
 	return &issueClaimer{inner: inner, policy: s}, nil
 }
@@ -34,6 +50,7 @@ type issueClaimer struct {
 }
 
 func (c *issueClaimer) Claim(ctx context.Context, req issueops.ClaimRequest) (issueops.ClaimResult, error) {
+	ctx = storage.WithLivePolicyProbe(ctx)
 	blocked, blockers, err := c.policy.IsBlocked(ctx, req.IssueID)
 	if err != nil {
 		return issueops.ClaimResult{}, err
@@ -47,12 +64,20 @@ func (c *issueClaimer) Claim(ctx context.Context, req issueops.ClaimRequest) (is
 // ReadyClaimer keeps external blockers out of the ready-claim selection used
 // by HTTP serving. The local compare-and-swap remains inside ClaimReadyIssue.
 func (s *Store) ReadyClaimer() (issueops.ReadyClaimer, error) {
+	if s.rolesAreRemote() {
+		inner, err := s.inner.ReadyClaimer()
+		if err != nil {
+			return nil, err
+		}
+		return &remoteReadyClaimer{inner: inner, policy: s}, nil
+	}
 	return &readyClaimer{policy: s}, nil
 }
 
 type readyClaimer struct{ policy *Store }
 
 func (c *readyClaimer) ClaimNext(ctx context.Context, req issueops.ClaimNextRequest) (issueops.ClaimNextResult, error) {
+	ctx = storage.WithLivePolicyProbe(ctx)
 	if err := storageissueops.ValidateClaimNextRequest(req); err != nil {
 		return issueops.ClaimNextResult{}, err
 	}
@@ -86,6 +111,9 @@ func (s *Store) BlockingAnnotator() (issueops.BlockingAnnotator, error) {
 	if err != nil {
 		return nil, err
 	}
+	if s.rolesAreRemote() {
+		return &remoteBlockingAnnotator{inner: inner, policy: s}, nil
+	}
 	return &blockingAnnotator{inner: inner, policy: s}, nil
 }
 
@@ -94,22 +122,44 @@ type blockingAnnotator struct {
 	policy *Store
 }
 
+// AnnotateBlocking overlays, on the backend's own answer, what IsBlocked
+// reports for each item: a blocked item's BlockedBy is IsBlocked's blocker
+// list (local live blockers plus unsatisfied external refs). It reads that
+// for the whole page at
+// once (blockedStates), so a page costs a bounded number of reads and opens
+// each foreign project at most once, instead of IsBlocked's reads and foreign
+// opens per item.
 func (a *blockingAnnotator) AnnotateBlocking(ctx context.Context, req issueops.BlockingRequest) (issueops.BlockingResult, error) {
 	result, err := a.inner.AnnotateBlocking(ctx, req)
 	if err != nil {
 		return issueops.BlockingResult{}, err
 	}
+	if len(result.Items) == 0 {
+		return result, nil
+	}
+	ids := make([]string, 0, len(result.Items))
+	for _, item := range result.Items {
+		ids = append(ids, item.ID)
+	}
+	states, err := a.policy.blockedStates(ctx, ids)
+	if err != nil {
+		return issueops.BlockingResult{}, err
+	}
 	for i := range result.Items {
-		blocked, blockers, err := a.policy.IsBlocked(ctx, result.Items[i].ID)
-		if err != nil {
-			return issueops.BlockingResult{}, err
-		}
-		if blocked {
-			result.Items[i].BlockedBy = blockers
+		state := states[result.Items[i].ID]
+		if state.blocked {
+			result.Items[i].BlockedBy = state.blockers
+			// The flag follows IsBlockedBatch's external invariant: an
+			// unsatisfied external blocker blocks, whatever the column says.
+			if req.IncludeIsBlocked {
+				result.Items[i].IsBlocked = boolPtr(true)
+			}
 		}
 	}
 	return result, nil
 }
+
+func boolPtr(v bool) *bool { return &v }
 
 // TreeWalker preserves synthetic external leaves for the normal down-tree
 // request. Reverse walks do not follow a source's dependencies, and the
@@ -118,6 +168,9 @@ func (s *Store) TreeWalker() (issueops.TreeWalker, error) {
 	inner, err := s.inner.TreeWalker()
 	if err != nil {
 		return nil, err
+	}
+	if s.rolesAreRemote() {
+		return &remoteTreeWalker{inner: inner, policy: s}, nil
 	}
 	return &treeWalker{inner: inner, policy: s}, nil
 }

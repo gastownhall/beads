@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -284,6 +285,26 @@ func (s *InstrumentedStorage) SearchIssueSummaries(ctx context.Context, query st
 	}
 	s.done(ctx, span, t, err, attrs...)
 	return summaries, err
+}
+
+var _ storage.DescendantSearcher = (*InstrumentedStorage)(nil)
+
+// SearchDescendants traces the `bd list --parent` tree walk
+// (storage.DescendantSearcher) as one span over the whole tree.
+// storage.SearchDescendants offers the walk to this layer before unwrapping it,
+// and this layer hands it on to the layers beneath: the embedded and Dolt
+// server stores still read the tree in one read transaction, and a store
+// without the capability (the http client) is walked node by node beneath
+// this span, which then stands for the walk's one SearchIssues call per node.
+func (s *InstrumentedStorage) SearchDescendants(ctx context.Context, rootID string, filter types.IssueFilter) ([]*types.Issue, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", rootID)}
+	ctx, span, t := s.op(ctx, "SearchDescendants", attrs...)
+	issues, err := storage.SearchDescendants(ctx, s.inner, rootID, filter)
+	if err == nil {
+		span.SetAttributes(attribute.Int("bd.result.count", len(issues)))
+	}
+	s.done(ctx, span, t, err, attrs...)
+	return issues, err
 }
 
 // ── Dependencies ────────────────────────────────────────────────────────────
@@ -594,6 +615,41 @@ func (s *InstrumentedStorage) GetAllConfig(ctx context.Context) (map[string]stri
 	v, err := s.inner.GetAllConfig(ctx)
 	s.done(ctx, span, t, err)
 	return v, err
+}
+
+// GetConfigByPrefix forwards the domain.ConfigPrefixReader optional fast
+// path when the wrapped store provides it, and otherwise falls back to
+// instrumented GetAllConfig filtered in-process — so wrapping a store never
+// costs it the capability.
+//
+// cmd/bd discovers that capability with storage.UnwrapStore, the repo's
+// standard idiom, which peels all the way to the raw store: on that path the
+// inner method is called directly and this span does not fire. The forwarder
+// is kept deliberately rather than deleted — it preserves the capability for
+// any caller holding the instrumented store, and it is the layer a
+// peel-until-implements discovery would stop at if spans on prefix reads ever
+// justify that non-standard peel.
+func (s *InstrumentedStorage) GetConfigByPrefix(ctx context.Context, prefix string) (map[string]string, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.config.prefix", prefix)}
+	if pr, ok := s.inner.(interface {
+		GetConfigByPrefix(ctx context.Context, prefix string) (map[string]string, error)
+	}); ok {
+		ctx, span, t := s.op(ctx, "GetConfigByPrefix", attrs...)
+		v, err := pr.GetConfigByPrefix(ctx, prefix)
+		s.done(ctx, span, t, err, attrs...)
+		return v, err
+	}
+	all, err := s.GetAllConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string)
+	for k, v := range all {
+		if strings.HasPrefix(k, prefix) {
+			out[k] = v
+		}
+	}
+	return out, nil
 }
 
 func (s *InstrumentedStorage) SetLocalMetadata(ctx context.Context, key, value string) error {

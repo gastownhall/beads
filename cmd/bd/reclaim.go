@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -8,9 +9,11 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/storage/issueops"
+	storeops "github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var reclaimCmd = &cobra.Command{
@@ -99,29 +102,66 @@ Examples:
 
 		CheckReadonly("reclaim")
 
-		if usesProxiedServer() {
-			return runReclaimProxiedServer(rootCtx, olderThan, filter)
-		}
-
-		ctx := rootCtx
-		reclaimed, err := store.ReclaimExpiredLeases(ctx, olderThan, filter, actor)
+		reclaimer, err := openLeaseReclaimer()
 		if err != nil {
 			return HandleErrorRespectJSON("reclaim: %v", err)
 		}
-
-		ids := make([]string, 0, len(reclaimed))
-		for _, r := range reclaimed {
-			ids = append(ids, r.ID)
+		// The role mints the sweep's version commit itself, so batch and off
+		// modes have to be said on the CONTEXT, the way `bd prune` says them.
+		// The proxied route applied the policy to rootCtx in the root pre-run
+		// already, and issueOpsContext leaves a context that defers alone.
+		ctx := rootCtx
+		if !usesProxiedServer() {
+			if ctx, err = issueOpsContext(rootCtx); err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
 		}
-		if err := commitPendingIfEmbedded(ctx, store, actor, doltAutoCommitParams{
-			Command:  "reclaim",
-			IssueIDs: ids,
-		}); err != nil {
-			return HandleErrorRespectJSON("failed to commit: %v", err)
+		result, err := reclaimer.Reclaim(ctx, issueops.ReclaimRequest{
+			Actor:     currentActor(),
+			OlderThan: olderThan,
+			Filter:    filter,
+		})
+		if err != nil {
+			return HandleErrorRespectJSON("reclaim: %v", err)
+		}
+		if len(result.Reclaimed) > 0 {
+			commandDidWrite.Store(true)
 		}
 
-		return renderReclaim(reclaimed, !filter.IsEmpty())
+		return renderReclaim(result.Reclaimed, !filter.IsEmpty())
 	},
+}
+
+// openLeaseReclaimer hands back the stale-lease sweep for whichever route this
+// invocation is on: the store's own accessor (through every decorator the store
+// was wired with, so the workspace's on_update hook fires once per reverted
+// row, and over a registered HTTP backend the wire's reclaimIssues), or the
+// proxied-server provider's.
+func openLeaseReclaimer() (issueops.LeaseReclaimer, error) {
+	if usesProxiedServer() {
+		return proxiedLeaseReclaimer()
+	}
+	if store == nil {
+		if err := ensureStoreActive(); err != nil {
+			return nil, err
+		}
+	}
+	return store.LeaseReclaimer()
+}
+
+// proxiedLeaseReclaimer takes the sweep through the proxied-server provider's
+// OWN capability accessor, proxiedSweeper's two-step and for its reason: the
+// accessor is where each layer (the notifying provider's hooks included) is
+// added.
+func proxiedLeaseReclaimer() (issueops.LeaseReclaimer, error) {
+	if uowProvider == nil {
+		return nil, errors.New("proxied-server UOW provider not initialized")
+	}
+	src, ok := uowProvider.(uow.LeaseReclaimerSource)
+	if !ok {
+		return nil, fmt.Errorf("proxied-server provider %T does not offer the lease-sweep surface", uowProvider)
+	}
+	return src.LeaseReclaimer()
 }
 
 func renderReclaim(reclaimed []types.ReclaimedLease, scoped bool) error {
@@ -224,7 +264,7 @@ func reclaimFilterFromFlags(cmd *cobra.Command) (types.ReclaimFilter, error) {
 }
 
 func init() {
-	reclaimCmd.Flags().Duration("older-than", 2*issueops.DefaultLeaseTTL,
+	reclaimCmd.Flags().Duration("older-than", 2*storeops.DefaultLeaseTTL,
 		"Only reclaim leases that expired at least this long ago (grace window)")
 	registerReclaimScopeFlags(reclaimCmd.Flags())
 	rootCmd.AddCommand(reclaimCmd)

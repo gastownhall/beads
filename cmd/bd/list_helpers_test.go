@@ -14,15 +14,6 @@ import (
 	"github.com/steveyegge/beads/internal/workapi"
 )
 
-type watchListDependencyStoreStub struct {
-	allDeps map[string][]*types.Dependency
-	err     error
-}
-
-func (s watchListDependencyStoreStub) GetAllDependencyRecords(_ context.Context) (map[string][]*types.Dependency, error) {
-	return s.allDeps, s.err
-}
-
 func TestListParseTimeFlag(t *testing.T) {
 	cases := []string{
 		"2025-12-26",
@@ -293,7 +284,7 @@ func TestListDisplayPrettyListHonorsSort(t *testing.T) {
 		}
 
 		out := captureStdout(t, func() error {
-			displayPrettyListWithDepsMode(issues, false, nil, "", false, false, "closed", "closed", false)
+			displayPrettyListWithDepsMode(issues, false, nil, "", false, false, "closed", "closed", false, nil)
 			return nil
 		})
 		newAt, oldAt := strings.Index(out, "bd-new"), strings.Index(out, "bd-old")
@@ -309,7 +300,7 @@ func TestListDisplayPrettyListHonorsSort(t *testing.T) {
 		}
 
 		out := captureStdout(t, func() error {
-			displayPrettyListWithDepsMode(issues, false, nil, "", false, false, "", "", true)
+			displayPrettyListWithDepsMode(issues, false, nil, "", false, false, "", "", true, nil)
 			return nil
 		})
 		p3At, p0At := strings.Index(out, "bd-p3"), strings.Index(out, "bd-p0")
@@ -328,12 +319,56 @@ func TestListDisplayPrettyListHonorsSort(t *testing.T) {
 		}
 
 		out := captureStdout(t, func() error {
-			displayPrettyListWithDepsMode([]*types.Issue{parent, oldChild, newChild}, false, deps, "", false, false, "closed", "closed", false)
+			displayPrettyListWithDepsMode([]*types.Issue{parent, oldChild, newChild}, false, deps, "", false, false, "closed", "closed", false, nil)
 			return nil
 		})
 		newAt, oldAt := strings.Index(out, newChild.ID), strings.Index(out, oldChild.ID)
 		if newAt < 0 || oldAt < 0 || newAt > oldAt {
 			t.Fatalf("tree siblings ignore --sort closed:\n%s", out)
+		}
+	})
+
+	t.Run("deps scheduling", func(t *testing.T) {
+		// At both levels the --deps tree orders (roots, and one parent's
+		// children): late depends on dep, so dep prints first although --sort
+		// closed alone would lead with the newer late; free has no edge, so
+		// --sort closed puts it ahead of dep, where priority would put it last.
+		oldest := time.Now().Add(-3 * time.Hour)
+		parentAt := time.Now().Add(-4 * time.Hour)
+		parent := &types.Issue{ID: "bd-parent", Title: "Parent", Status: types.StatusClosed, Priority: 2, IssueType: types.TypeEpic, ClosedAt: &parentAt}
+		rootDep := &types.Issue{ID: "bd-root-dep", Title: "Root dependency", Status: types.StatusClosed, Priority: 0, IssueType: types.TypeTask, ClosedAt: &oldest}
+		rootLate := &types.Issue{ID: "bd-root-late", Title: "Root dependent", Status: types.StatusClosed, Priority: 1, IssueType: types.TypeTask, ClosedAt: &newer}
+		rootFree := &types.Issue{ID: "bd-root-free", Title: "Root unlinked", Status: types.StatusClosed, Priority: 2, IssueType: types.TypeTask, ClosedAt: &older}
+		childDep := &types.Issue{ID: "bd-child-dep", Title: "Child dependency", Status: types.StatusClosed, Priority: 0, IssueType: types.TypeTask, ClosedAt: &oldest}
+		childLate := &types.Issue{ID: "bd-child-late", Title: "Child dependent", Status: types.StatusClosed, Priority: 1, IssueType: types.TypeTask, ClosedAt: &newer}
+		childFree := &types.Issue{ID: "bd-child-free", Title: "Child unlinked", Status: types.StatusClosed, Priority: 2, IssueType: types.TypeTask, ClosedAt: &older}
+		deps := map[string][]*types.Dependency{
+			rootLate.ID:  {{IssueID: rootLate.ID, DependsOnID: rootDep.ID, Type: types.DepBlocks}},
+			childDep.ID:  {{IssueID: childDep.ID, DependsOnID: parent.ID, Type: types.DepParentChild}},
+			childFree.ID: {{IssueID: childFree.ID, DependsOnID: parent.ID, Type: types.DepParentChild}},
+			childLate.ID: {
+				{IssueID: childLate.ID, DependsOnID: parent.ID, Type: types.DepParentChild},
+				{IssueID: childLate.ID, DependsOnID: childDep.ID, Type: types.DepBlocks},
+			},
+		}
+		issues := []*types.Issue{parent, rootDep, rootLate, rootFree, childDep, childLate, childFree}
+
+		out := captureStdout(t, func() error {
+			displayPrettyListWithDepsMode(issues, false, deps, "scheduling", false, false, "closed", "closed", false, nil)
+			return nil
+		})
+		// A dependency's id also appears on its dependent's annotation row; the
+		// first occurrence is still the dependency's own row whenever it prints first.
+		for _, want := range [][]string{
+			{rootFree.ID, rootDep.ID, rootLate.ID},
+			{childFree.ID, childDep.ID, childLate.ID},
+		} {
+			for i := 1; i < len(want); i++ {
+				before, after := strings.Index(out, want[i-1]), strings.Index(out, want[i])
+				if before < 0 || after < 0 || before > after {
+					t.Fatalf("--deps scheduling --sort closed: want %s before %s:\n%s", want[i-1], want[i], out)
+				}
+			}
 		}
 	})
 }
@@ -373,7 +408,7 @@ func TestListDisplayPrettyList_TruncatedSummary(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() error {
-		displayPrettyListWithDepsMode(issues, false, nil, "", true, false, "", "", false)
+		displayPrettyListWithDepsMode(issues, false, nil, "", true, false, "", "", false, nil)
 		return nil
 	})
 	if !strings.Contains(out, "Showing 2 issues") {
@@ -390,8 +425,8 @@ func TestListDisplayPrettyList_TruncatedSummary(t *testing.T) {
 func TestDisplayWatchedIssueList_UsesDependencyHierarchy(t *testing.T) {
 	parent := &types.Issue{ID: "bd-zparent", Title: "Parent", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
 	child := &types.Issue{ID: "bd-achild", Title: "Child", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
-	store := watchListDependencyStoreStub{
-		allDeps: map[string][]*types.Dependency{
+	store := &edgeSourceStub{
+		edges: map[string][]*types.Dependency{
 			child.ID: {
 				{IssueID: child.ID, DependsOnID: parent.ID, Type: types.DepParentChild},
 			},

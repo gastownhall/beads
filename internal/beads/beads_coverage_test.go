@@ -485,6 +485,64 @@ func TestGetRedirectInfoFrom(t *testing.T) {
 	}
 }
 
+// TestGetDiscoveredRedirectInfo pins the BEADS_DIR-free redirect probe on the
+// two shapes where GetRedirectInfo's BEADS_DIR fallback answers for the wrong
+// workspace. A redirect the cwd reaches only by walking up past a repo root
+// without .beads is masked once BEADS_DIR names the store. Another workspace's
+// redirected .beads named in BEADS_DIR is reported as if the cwd held it.
+func TestGetDiscoveredRedirectInfo(t *testing.T) {
+	t.Cleanup(git.ResetCaches)
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+
+	storeDir := filepath.Join(tmpDir, "store", ".beads")
+	repo := filepath.Join(tmpDir, "repo")
+	nested := filepath.Join(repo, "sub")
+	other := filepath.Join(tmpDir, "other")
+	for _, dir := range []string{storeDir, filepath.Join(nested, ".beads"), filepath.Join(other, ".beads")} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Target must contain a recognizable database for FollowRedirect to
+	// honor the redirect (gastownhall/beads#4692 guard).
+	if err := os.WriteFile(filepath.Join(storeDir, "beads.db"), []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{nested, other} {
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "redirect"), []byte(storeDir+"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := exec.Command("git", "init", "-q")
+	cmd.Dir = repo
+	if err := cmd.Run(); err != nil {
+		t.Skipf("git not available: %v", err)
+	}
+
+	// cwd = nested workspace, BEADS_DIR = the store it redirects to.
+	t.Chdir(nested)
+	git.ResetCaches()
+	t.Setenv("BEADS_DIR", storeDir)
+	if GetRedirectInfo().IsRedirected {
+		t.Fatal("control: a BEADS_DIR naming the store must mask the nested redirect from GetRedirectInfo")
+	}
+	if info := GetDiscoveredRedirectInfo(); !info.IsRedirected || info.TargetDir != storeDir {
+		t.Errorf("GetDiscoveredRedirectInfo() in the nested workspace = %+v, want redirect to %q", info, storeDir)
+	}
+
+	// cwd = repo root without .beads, BEADS_DIR = another workspace's redirect.
+	t.Chdir(repo)
+	git.ResetCaches()
+	t.Setenv("BEADS_DIR", filepath.Join(other, ".beads"))
+	if !GetRedirectInfo().IsRedirected {
+		t.Fatal("control: GetRedirectInfo must fall back to a redirected BEADS_DIR")
+	}
+	if info := GetDiscoveredRedirectInfo(); info.IsRedirected {
+		t.Errorf("GetDiscoveredRedirectInfo() with another workspace's BEADS_DIR = %+v, want no redirect", info)
+	}
+}
+
 // TestRepoLocalBeadsDirCanonicalizesRepoRoot pins both halves of the shared
 // repo-local tier's contract (gastownhall/beads#5509): the repo root is
 // canonicalized before it is joined, so the From locator's raw
