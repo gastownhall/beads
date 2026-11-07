@@ -2976,9 +2976,10 @@ func buildServerDSN(cfg *Config, database string) string {
 	return parsed.FormatDSN()
 }
 
-// execWithLongTimeout opens a one-shot database connection with readTimeout=5m
-// and executes the given query. Push/pull operations can exceed the default
-// readTimeout when the server performs network I/O to git remotes.
+// execWithLongTimeout opens a one-shot database connection with the
+// configurable transfer read deadline (BEADS_DOLT_TRANSFER_TIMEOUT, 5m by
+// default) and executes the given query. Push/pull operations can exceed the
+// default readTimeout when the server performs network I/O to git remotes.
 //
 // The query is wrapped in an explicit transaction (BEGIN/COMMIT) so that
 // DOLT_PULL merge operations succeed even when the server runs with
@@ -2994,17 +2995,12 @@ func buildServerDSN(cfg *Config, database string) string {
 // fetch writes only remote-tracking refs, never the working branch. Neither
 // depends on this fresh connection's default checkout.
 func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args ...any) error {
-	cfg, err := mysql.ParseDSN(s.connStr)
+	deadline := transferExecTimeoutDuration()
+	db, err := s.oneShotConn(deadline)
 	if err != nil {
-		return fmt.Errorf("failed to parse DSN for long-timeout connection: %w", err)
-	}
-	cfg.ReadTimeout = 5 * time.Minute
-	db, err := sql.Open("mysql", cfg.FormatDSN())
-	if err != nil {
-		return fmt.Errorf("failed to open long-timeout connection: %w", err)
+		return err
 	}
 	defer db.Close()
-	db.SetMaxOpenConns(1)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -3025,7 +3021,7 @@ func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args 
 // passes s.branch explicitly as a CALL DOLT_PUSH(...) arg, so this fresh
 // connection's default checkout never matters.
 func (s *DoltStore) execWithLongTimeoutNoTx(ctx context.Context, query string, args ...any) error {
-	db, err := s.oneShotConn(5 * time.Minute)
+	db, err := s.oneShotConn(transferExecTimeoutDuration())
 	if err != nil {
 		return err
 	}
@@ -3037,10 +3033,11 @@ func (s *DoltStore) execWithLongTimeoutNoTx(ctx context.Context, query string, a
 // oneShotConn opens a one-shot connection with the given read deadline
 // (0 = no deadline), for callers that pass a DBConn into versioncontrolops.
 // The pool's 10s ReadTimeout kills any server-side procedure that performs
-// sustained network I/O; push/pull use 5m, while backup sync/restore use no
-// deadline at all — a first sync to a remote destination (gs://) can exceed
-// any fixed budget, and the server aborts the transfer when the client
-// connection drops, so a too-short deadline can never converge by retrying.
+// sustained network I/O; transfers use the BEADS_DOLT_TRANSFER_TIMEOUT
+// deadline (5m by default), while backup sync/restore use no deadline at
+// all — a first sync to a remote destination (gs://) can exceed any fixed
+// budget, and the server aborts the transfer when the client connection
+// drops, so a too-short deadline can never converge by retrying.
 // Caller closes.
 func (s *DoltStore) oneShotConn(readTimeout time.Duration) (*sql.DB, error) {
 	cfg, err := mysql.ParseDSN(s.connStr)
@@ -5686,13 +5683,14 @@ func (s *DoltStore) verifyPullLanded(ctx context.Context, remote, preHead string
 }
 
 // refreshTrackingRef fetches remote/s.branch into this database's
-// remote-tracking refs over a dedicated long-timeout, credential-aware
+// remote-tracking refs over a dedicated transfer-deadline, credential-aware
 // connection, so verifyPullLanded's comparison reads a tracking ref this
 // database just wrote. It mirrors pullTransport's own network calls: a
-// long-timeout connection (openLongTimeoutConn) wrapped in the remote's
-// credential/S3 environment (withRemoteOperationEnv), which is what lets the
-// refresh reach CLI-routed (git-protocol, credential, cloud-auth) remotes that
-// the default s.db pool — short read timeout, no CLI credentials — cannot.
+// one-shot connection on the BEADS_DOLT_TRANSFER_TIMEOUT deadline wrapped in
+// the remote's credential/S3 environment (withRemoteOperationEnv), which is
+// what lets the refresh reach CLI-routed (git-protocol, credential,
+// cloud-auth) remotes that the default s.db pool — short read timeout, no
+// CLI credentials — cannot.
 //
 // Only the FETCH runs here, and DOLT_FETCH is branch-global: it advances
 // remote-tracking refs and never touches the working branch, so the fresh
@@ -5701,7 +5699,8 @@ func (s *DoltStore) verifyPullLanded(ctx context.Context, remote, preHead string
 // verifyPullLanded stay on s.db, where the short pool timeout is right: they are
 // local, fast, and branch-parameterized.
 func (s *DoltStore) refreshTrackingRef(ctx context.Context, remote string) error {
-	db, err := s.openLongTimeoutConn()
+	deadline := transferExecTimeoutDuration()
+	db, err := s.oneShotConn(deadline)
 	if err != nil {
 		return err
 	}
@@ -5795,7 +5794,12 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 // (whether it errored or not) and auto-resolving metadata-only conflicts.
 // openLongTimeoutConn opens a dedicated single-connection *sql.DB to this store's
 // database with a long read timeout, for merge/pull/conflict operations that can run
-// longer than the default connection timeout. The caller must Close the returned DB.
+// longer than the default connection timeout. Its 5m deadline is deliberately
+// fixed: the BEADS_DOLT_TRANSFER_TIMEOUT knob applies only to the SQL transfer
+// connections (see oneShotConn's transfer callers), not to the history reads,
+// blocked-state recomputation and federation staging that share this opener —
+// and not to backup sync/restore, which passes 0 for no deadline at all.
+// The caller must Close the returned DB.
 func (s *DoltStore) openLongTimeoutConn() (*sql.DB, error) {
 	cfg, err := mysql.ParseDSN(s.connStr)
 	if err != nil {
@@ -5838,7 +5842,7 @@ func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote str
 	// DOLT_PULL's second positional arg names the remote ref to merge FROM
 	// (dolt's doDoltPull binds it to remoteRefName); the merge TARGET is
 	// always the session's current working branch (CWBHeadRef), which on this
-	// fresh openLongTimeoutConn connection is the database's default branch,
+	// fresh one-shot connection is the database's default branch,
 	// never s.branch. So store.go's two callers, which pass s.branch to
 	// CALL DOLT_PULL(...), pin only the source and still merge into the
 	// default branch; federation.go's peer-pull route (CALL DOLT_PULL(?),
@@ -5853,7 +5857,8 @@ func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote str
 	// regression test asserting the merge target rather than riding an
 	// unrelated TDD cycle. Tracked as be-5ybd, which covers all three call
 	// sites. The fix is s.pinStoreBranch(ctx, db) before BeginTx below.
-	db, err := s.openLongTimeoutConn()
+	deadline := transferExecTimeoutDuration()
+	db, err := s.oneShotConn(deadline)
 	if err != nil {
 		return pullReport{}, err
 	}
