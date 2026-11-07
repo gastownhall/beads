@@ -284,7 +284,7 @@ Emitted for single-row queries via `queryRowContext()`.
 
 ### `dolt.commit`
 
-Emitted for DOLT_COMMIT operations. Carries only the shared `doltSpanAttrs()` (see the note at the top of this section) — the commit message no longer appears on this span. It survives only as `db.commit_msg` on the `storage.RunInTransaction` / `storage.RunInIssueLifecycleTransaction` spans (`internal/telemetry/storage.go:556,564`).
+Emitted for DOLT_COMMIT operations. Carries only the shared `doltSpanAttrs()` (see the note at the top of this section) — the commit message no longer appears on this span. It survives only as `db.commit_msg` on the `storage.RunInTransaction` / `storage.RunInIssueLifecycleTransaction` spans (`internal/telemetry/storage.go:674,682`).
 
 ### `dolt.push`
 
