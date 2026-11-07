@@ -247,6 +247,86 @@ func TestForeignProxiedExternalReadGateStaysUnconfirmed(t *testing.T) {
 	}
 }
 
+// TestForeignProxiedExternalReadCredentialsAndTLS is AC-6's unit test: the
+// external read presents BEADS_PROXIED_SERVER_EXTERNAL_PASSWORD and only it,
+// sends no credential to a host the driver would read as another server, and
+// honors the sidecar's TLS settings rather than falling back to plaintext.
+func TestForeignProxiedExternalReadCredentialsAndTLS(t *testing.T) {
+	t.Run("external_password_is_presented", func(t *testing.T) {
+		srv := newFakeMySQLLogin(t)
+		externalReadTown(t, &configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: srv.port(), User: "rig_user"})
+		t.Setenv(configfile.ExternalDoltPasswordEnvVar, "rig-secret")
+
+		_, err := resolveViaPrefixRouting(context.Background(), "gt-target1")
+		if isProxiedStoreUnrouted(err) {
+			t.Fatalf("routed read refused: %v", err)
+		}
+		logins := srv.Logins()
+		if len(logins) == 0 {
+			t.Fatalf("no login reached the rig's server; error: %v", err)
+		}
+		for _, login := range logins {
+			if !srv.PresentsPassword(login, "rig-secret") {
+				t.Errorf("login as %q presented no password; want %s's", login.User, configfile.ExternalDoltPasswordEnvVar)
+			}
+		}
+	})
+
+	t.Run("launcher_password_is_not_inherited", func(t *testing.T) {
+		srv := newFakeMySQLLogin(t)
+		externalReadTown(t, &configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: srv.port(), User: "rig_user"})
+		t.Setenv("BEADS_DOLT_PASSWORD", "launcher-secret")
+
+		_, err := resolveViaPrefixRouting(context.Background(), "gt-target1")
+		if isProxiedStoreUnrouted(err) {
+			t.Fatalf("routed read refused: %v", err)
+		}
+		logins := srv.Logins()
+		if len(logins) == 0 {
+			t.Fatalf("no login reached the rig's server; error: %v", err)
+		}
+		for _, login := range logins {
+			if !srv.PresentsPassword(login, "") {
+				t.Error("the launcher's BEADS_DOLT_PASSWORD was presented to the rig's server")
+			}
+		}
+	})
+
+	t.Run("untrusted_destination_gets_no_credential", func(t *testing.T) {
+		externalReadTown(t, &configfile.ExternalDoltConfig{Host: "127.0.0.1#@tcp(evil.example", Port: closedTCPPort(t)})
+		t.Setenv(configfile.ExternalDoltPasswordEnvVar, "rig-secret")
+
+		_, err := resolveViaPrefixRouting(context.Background(), "gt-target1")
+		if err == nil || !strings.Contains(err.Error(), "credential was not sent") {
+			t.Fatalf("err = %v, want the endpoint trust refusal", err)
+		}
+	})
+
+	t.Run("tls_required_is_not_downgraded", func(t *testing.T) {
+		srv := newFakeMySQLLogin(t)
+		externalReadTown(t, &configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: srv.port(), TLSRequired: true, TLSSkipVerify: true})
+		t.Setenv(configfile.ExternalDoltPasswordEnvVar, "rig-secret")
+
+		_, err := resolveViaPrefixRouting(context.Background(), "gt-target1")
+		if err == nil || !strings.Contains(err.Error(), "TLS requested but server does not support TLS") {
+			t.Fatalf("err = %v, want the driver's refusal of a server without TLS", err)
+		}
+		if logins := srv.Logins(); len(logins) != 0 {
+			t.Errorf("a TLS-required read logged in over plaintext: %+v", logins)
+		}
+	})
+
+	t.Run("tls_ca_is_read", func(t *testing.T) {
+		missingCA := filepath.Join(t.TempDir(), "missing-ca.pem")
+		externalReadTown(t, &configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: closedTCPPort(t), TLSRequired: true, TLSCACert: missingCA})
+
+		_, err := resolveViaPrefixRouting(context.Background(), "gt-target1")
+		if err == nil || !strings.Contains(err.Error(), "read TLSCACert") {
+			t.Fatalf("err = %v, want the sidecar's TLSCACert read failure", err)
+		}
+	})
+}
+
 // TestForeignProxiedExternalReadWritesNothingInTarget is AC-4's unit half: a
 // foreign read that reaches the rig's external server, and one that cannot,
 // leave every file in the rig's workspace as it was (no dolt directory,
