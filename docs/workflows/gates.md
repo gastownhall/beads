@@ -81,10 +81,24 @@ topology. Two limitations to expect, both tracked in
   await value reports `cannot be checked (multi-rig routing removed)` and
   stays pending regardless of the awaited bead's status. Close it with
   `bd gate resolve`.
-- **Prefix routing cannot open a proxied-server target rig.** A routed
-  lookup into a rig that is itself in proxied-server mode fails with
-  `proxy server store needs to be uow provider`, so an all-proxied
-  shared-server topology cannot resolve routed targets at all.
+- **Prefix routing reads a proxied-server target rig only on an external
+  server.** A routed read into a rig that is itself in proxied-server mode
+  (a `bead` gate's check, the gate pre-check in `bd close`, `bd dep add`'s
+  target lookup) works when the rig's `proxied_server_client_info.json`
+  names an external Dolt server (`bd init --proxied-server
+  --proxied-server-external-host` or `--proxied-server-external-socket-path`).
+  bd connects to that server directly and read-only, as the user the file
+  names, to the rig's own `dolt_database`, with the password in
+  `BEADS_PROXIED_SERVER_EXTERNAL_PASSWORD` (none when it is unset), and
+  writes nothing into the rig. A password goes to a server other than bd's
+  local one, or a socket you own, only once that server is pinned for the
+  rig ([endpoint pins](/reference/configuration)); until then the gate stays
+  pending. A rig whose server bd manages (no external
+  server in that file) can be reached only through its own proxy, so a
+  routed read into it fails with `this command has no proxied-server route`,
+  and a gate awaiting one of its beads stays pending as `cannot confirm the
+  awaited bead is gone`. Routed writes into any proxied-server rig are
+  refused the same way.
 
 ## Gates in formulas
 

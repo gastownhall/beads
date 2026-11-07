@@ -177,15 +177,20 @@ Configure the project path under `external_projects`, then label a target
 project issue `provides:checkout-ready`. The dependency blocks until an issue
 with that label is closed. `bd ready`, `bd blocked`, and `bd dep tree` resolve
 the capability at query time; an unconfigured or unavailable project remains
-blocking.
+blocking. A target project in proxied-server mode is read only when its
+`proxied_server_client_info.json` names an external Dolt server, which bd
+reads directly and read-only; a project whose server bd manages cannot be
+opened from another workspace, so its dependencies stay blocking.
 
 A bare ID whose prefix names another rig (`bd dep add bd-abc gt-123`) is
 stored even when bd cannot find it in this database or through routes. `bd dep
 add` then warns on stderr that the ID was not found, or says why it could not
 be verified (the lookup itself failed, or the routed rig matches it only to
 other IDs), and prints the `bd dep remove` command that deletes the edge if the
-ID was a typo (`--quiet` silences the warning). Prefix routing cannot open a
-rig in proxied-server mode yet
+ID was a typo (`--quiet` silences the warning). An ID routed to a rig in
+proxied-server mode is checked only when that rig's
+`proxied_server_client_info.json` names an external Dolt server, which bd
+reads directly; a rig whose server bd manages cannot be opened through a route
 ([#5861](https://github.com/gastownhall/beads/issues/5861)), so bd cannot check
 an ID routed to such a rig and stores it without a warning.
 

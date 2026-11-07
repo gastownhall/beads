@@ -238,10 +238,11 @@ func resolveUnresolvedDepTarget(sourceID, dependsOnArg string, resolveErr error)
 // depTargetLookupMiss is the miss both dep add routes keep for a cross-prefix
 // target their lookup did not find: the lookup error itself, which
 // unresolvedDepTargetWarning prints, or nil when bd could not look the target
-// up at all. A route into a rig in proxied-server mode is that case: bd will
-// not open a proxied-server workspace as a direct store
-// (errProxiedStoreUnrouted), and a routed read has no other way into one yet
-// (#5861, docs/workflows/gates.md). The refusal says nothing about the target,
+// up at all. A route into a rig in proxied-server mode whose server bd
+// manages is that case: bd will not open a proxied-server workspace as a
+// direct store (errProxiedStoreUnrouted), and a routed read reaches only one
+// whose sidecar names an external server (openForeignProxiedExternalRead;
+// #5861, docs/workflows/gates.md). The refusal says nothing about the target,
 // and in an all-proxied town it answers for every cross-rig edge, so reporting
 // it would print a typo notice, with a bd dep remove that deletes the edge,
 // for every valid one. A typo into such a rig is stored without a notice, as
@@ -617,7 +618,7 @@ func emitImplicitBlocksDefaultWarning() {
 // ambiguous in the routed rig) is named as the reason the target could not be
 // verified, because reporting it as a miss would misstate the cause, the rule
 // isRoutingFailure keeps. A rig bd cannot open at all, one in proxied-server
-// mode, never gets here: depTargetLookupMiss leaves no miss for it. miss is
+// mode whose server bd manages, never gets here: depTargetLookupMiss leaves no miss for it. miss is
 // printed as one line (remedy.PrintedError):
 // it can repeat the typed target or a routed path, and a line break in either
 // must not forge the remedy line under it.
