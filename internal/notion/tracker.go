@@ -19,12 +19,11 @@ import (
 const defaultBatchPushWorkers = 8
 
 type pushOutcome struct {
-	created      *itracker.BatchPushItem
-	updated      *itracker.BatchPushItem
-	skipped      string
-	warning      string
-	err          *itracker.BatchPushError
-	trackerIssue *itracker.TrackerIssue
+	created *itracker.BatchPushItem
+	updated *itracker.BatchPushItem
+	skipped string
+	warning string
+	err     *itracker.BatchPushError
 }
 
 type notionAPI interface {
@@ -55,12 +54,9 @@ type Tracker struct {
 	viewURL      string
 	authSource   AuthSource
 
-	cacheMu         sync.RWMutex
-	issueCache      []itracker.TrackerIssue
-	remoteByPageID  map[string]itracker.TrackerIssue
-	remoteByLocalID map[string]itracker.TrackerIssue
-	lastQueried     int
-	lastCandidates  int
+	statsMu        sync.RWMutex
+	lastQueried    int
+	lastCandidates int
 }
 
 // maxQueryPages reads the pagination bound for the Notion query endpoint.
@@ -177,16 +173,16 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts itracker.FetchOptions) (
 	}
 	// queried counts the live rows this query returned — not the whole remote
 	// source, which a filtered pull no longer touches.
-	t.cacheMu.Lock()
+	t.statsMu.Lock()
 	t.lastQueried = queried
 	t.lastCandidates = len(result)
-	t.cacheMu.Unlock()
+	t.statsMu.Unlock()
 	return result, nil
 }
 
 func (t *Tracker) LastPullStats() (queried int, candidates int) {
-	t.cacheMu.RLock()
-	defer t.cacheMu.RUnlock()
+	t.statsMu.RLock()
+	defer t.statsMu.RUnlock()
 	return t.lastQueried, t.lastCandidates
 }
 
@@ -312,12 +308,7 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*itracke
 	if err != nil {
 		return nil, err
 	}
-	trackerIssue, err := TrackerIssueFromPullIssue(PulledIssueFromPage(*page), t.config)
-	if err != nil {
-		return nil, err
-	}
-	t.upsertRemoteIssue(trackerIssue)
-	return trackerIssue, nil
+	return TrackerIssueFromPullIssue(PulledIssueFromPage(*page), t.config)
 }
 
 func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *types.Issue) (*itracker.TrackerIssue, error) {
@@ -336,12 +327,7 @@ func (t *Tracker) UpdateIssue(ctx context.Context, externalID string, issue *typ
 	if err != nil {
 		return nil, err
 	}
-	trackerIssue, err := TrackerIssueFromPullIssue(PulledIssueFromPage(*page), t.config)
-	if err != nil {
-		return nil, err
-	}
-	t.upsertRemoteIssue(trackerIssue)
-	return trackerIssue, nil
+	return TrackerIssueFromPullIssue(PulledIssueFromPage(*page), t.config)
 }
 
 func (t *Tracker) BatchPush(ctx context.Context, issues []*types.Issue, forceIDs map[string]bool) (*itracker.BatchPushResult, error) {
@@ -353,9 +339,6 @@ func (t *Tracker) BatchPushDryRun(ctx context.Context, issues []*types.Issue, fo
 }
 
 func (t *Tracker) executeBatchPush(ctx context.Context, issues []*types.Issue, forceIDs map[string]bool, dryRun bool) (*itracker.BatchPushResult, error) {
-	if err := t.ensureRemoteIndex(ctx); err != nil {
-		return nil, err
-	}
 	result := &itracker.BatchPushResult{}
 	if len(issues) == 0 {
 		return result, nil
@@ -409,9 +392,6 @@ func (t *Tracker) executeBatchPush(ctx context.Context, issues []*types.Issue, f
 		if outcome.err != nil {
 			result.Errors = append(result.Errors, *outcome.err)
 		}
-		if outcome.trackerIssue != nil {
-			t.upsertRemoteIssue(outcome.trackerIssue)
-		}
 	}
 	return result, nil
 }
@@ -427,17 +407,17 @@ func (t *Tracker) pushOne(ctx context.Context, issue *types.Issue, force, dryRun
 
 	extRef := derefStr(issue.ExternalRef)
 	pageID := ExtractNotionIdentifier(extRef)
-	remote, hasRemote := t.lookupRemoteByPageID(pageID)
-	if !hasRemote {
-		remote, hasRemote = t.lookupRemoteByLocalID(issue.ID)
+	remote, err := t.resolveRemoteForPush(ctx, issue.ID, pageID)
+	if err != nil {
+		return pushOutcome{err: &itracker.BatchPushError{LocalID: issue.ID, Message: err.Error()}}
 	}
-	if !hasRemote && strings.TrimSpace(extRef) != "" && pageID != "" {
+	if remote == nil && strings.TrimSpace(extRef) != "" && pageID != "" {
 		return pushOutcome{
 			skipped: issue.ID,
 			warning: fmt.Sprintf("Skipped %s: Notion external_ref points outside the current target; clear external_ref to recreate it in this data source", issue.ID),
 		}
 	}
-	create := !hasRemote
+	create := remote == nil
 
 	if !create && !force {
 		if trackerIssueEqual(issue, remote) {
@@ -464,8 +444,7 @@ func (t *Tracker) pushOne(ctx context.Context, issue *types.Issue, force, dryRun
 		}
 		ref := firstNonEmpty(t.BuildExternalRef(trackerIssue), trackerIssue.URL)
 		return pushOutcome{
-			created:      &itracker.BatchPushItem{LocalID: issue.ID, ExternalRef: ref},
-			trackerIssue: trackerIssue,
+			created: &itracker.BatchPushItem{LocalID: issue.ID, ExternalRef: ref},
 		}
 	}
 
@@ -486,9 +465,27 @@ func (t *Tracker) pushOne(ctx context.Context, issue *types.Issue, force, dryRun
 	}
 	ref := firstNonEmpty(t.BuildExternalRef(trackerIssue), trackerIssue.URL)
 	return pushOutcome{
-		updated:      &itracker.BatchPushItem{LocalID: issue.ID, ExternalRef: ref},
-		trackerIssue: trackerIssue,
+		updated: &itracker.BatchPushItem{LocalID: issue.ID, ExternalRef: ref},
 	}
+}
+
+// resolveRemoteForPush finds the remote page a push should write to: first
+// the page the issue's external_ref names, when it is still a live member of
+// the configured data source, then the page carrying the issue's Beads ID. A
+// resolution error is an outcome all its own, never a miss: creating a second
+// page for an issue whose lookup merely failed is how duplicates are born,
+// and an outage on one issue's lookup must not decide any other issue's.
+func (t *Tracker) resolveRemoteForPush(ctx context.Context, localID, pageID string) (*itracker.TrackerIssue, error) {
+	if pageID != "" {
+		page, err := t.fetchMemberPage(ctx, pageID)
+		if err != nil {
+			return nil, err
+		}
+		if page != nil {
+			return TrackerIssueFromPullIssue(PulledIssueFromPage(*page), t.config)
+		}
+	}
+	return t.fetchRemoteByLocalID(ctx, localID)
 }
 
 func (t *Tracker) FieldMapper() itracker.FieldMapper {
@@ -517,106 +514,6 @@ func (t *Tracker) BuildExternalRef(issue *itracker.TrackerIssue) string {
 		return canonical
 	}
 	return ""
-}
-
-func (t *Tracker) ensureRemoteIndex(ctx context.Context) error {
-	t.cacheMu.RLock()
-	ready := t.issueCache != nil && t.remoteByPageID != nil && t.remoteByLocalID != nil
-	t.cacheMu.RUnlock()
-	if ready {
-		return nil
-	}
-
-	pages, err := t.client.QueryDataSource(ctx, t.dataSourceID, nil)
-	if err != nil {
-		return err
-	}
-	cache := make([]itracker.TrackerIssue, 0, len(pages))
-	byPageID := make(map[string]itracker.TrackerIssue, len(pages))
-	byLocalID := make(map[string]itracker.TrackerIssue, len(pages))
-	for _, page := range pages {
-		if page.InTrash || page.Archived {
-			continue
-		}
-		pulled := PulledIssueFromPage(page)
-		trackerIssue, err := TrackerIssueFromPullIssue(pulled, t.config)
-		if err != nil {
-			return err
-		}
-		cache = append(cache, *trackerIssue)
-		if id := strings.TrimSpace(trackerIssue.ID); id != "" {
-			byPageID[id] = *trackerIssue
-		}
-		if identifier := strings.TrimSpace(pulled.ID); identifier != "" {
-			byLocalID[identifier] = *trackerIssue
-		}
-	}
-
-	t.cacheMu.Lock()
-	t.issueCache = cache
-	t.remoteByPageID = byPageID
-	t.remoteByLocalID = byLocalID
-	t.cacheMu.Unlock()
-	return nil
-}
-
-func (t *Tracker) lookupRemoteByPageID(pageID string) (*itracker.TrackerIssue, bool) {
-	return t.lookupRemoteIssue(t.remoteByPageID, pageID)
-}
-
-func (t *Tracker) lookupRemoteByLocalID(localID string) (*itracker.TrackerIssue, bool) {
-	return t.lookupRemoteIssue(t.remoteByLocalID, localID)
-}
-
-func (t *Tracker) lookupRemoteIssue(index map[string]itracker.TrackerIssue, identifier string) (*itracker.TrackerIssue, bool) {
-	identifier = strings.TrimSpace(identifier)
-	if identifier == "" {
-		return nil, false
-	}
-	t.cacheMu.RLock()
-	defer t.cacheMu.RUnlock()
-	issue, ok := index[identifier]
-	if !ok {
-		return nil, false
-	}
-	cloned := cloneTrackerIssue(issue)
-	return &cloned, true
-}
-
-func (t *Tracker) upsertRemoteIssue(issue *itracker.TrackerIssue) {
-	if issue == nil {
-		return
-	}
-	cloned := cloneTrackerIssue(*issue)
-	t.cacheMu.Lock()
-	defer t.cacheMu.Unlock()
-
-	replaced := false
-	for i := range t.issueCache {
-		if sameTrackerIssue(t.issueCache[i], *issue) {
-			t.issueCache[i] = cloned
-			replaced = true
-			break
-		}
-	}
-	if !replaced {
-		t.issueCache = append(t.issueCache, cloned)
-	}
-	if t.remoteByPageID == nil {
-		t.remoteByPageID = make(map[string]itracker.TrackerIssue)
-	}
-	if t.remoteByLocalID == nil {
-		t.remoteByLocalID = make(map[string]itracker.TrackerIssue)
-	}
-	if id := strings.TrimSpace(issue.ID); id != "" {
-		t.remoteByPageID[id] = cloned
-	}
-	if identifier := strings.TrimSpace(ExtractNotionIdentifier(issue.URL)); identifier != "" {
-		t.remoteByPageID[identifier] = cloned
-	}
-	if raw, ok := issue.Raw.(*PulledIssue); ok && raw != nil && strings.TrimSpace(raw.ID) != "" {
-		t.remoteByLocalID[strings.TrimSpace(raw.ID)] = cloned
-	}
 }
 
 // getConfig reads a config value from storage, falling back to env var.
@@ -698,38 +595,6 @@ func normalizeStringSlice(values []string) []string {
 	}
 	sort.Strings(result)
 	return result
-}
-
-func sameTrackerIssue(left, right itracker.TrackerIssue) bool {
-	leftIDs := []string{
-		ExtractNotionIdentifier(left.ID),
-		ExtractNotionIdentifier(left.Identifier),
-		ExtractNotionIdentifier(left.URL),
-	}
-	rightIDs := []string{
-		ExtractNotionIdentifier(right.ID),
-		ExtractNotionIdentifier(right.Identifier),
-		ExtractNotionIdentifier(right.URL),
-	}
-	for _, leftID := range leftIDs {
-		if leftID == "" {
-			continue
-		}
-		for _, rightID := range rightIDs {
-			if rightID != "" && leftID == rightID {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func cloneTrackerIssue(issue itracker.TrackerIssue) itracker.TrackerIssue {
-	cloned := issue
-	if issue.Labels != nil {
-		cloned.Labels = append([]string(nil), issue.Labels...)
-	}
-	return cloned
 }
 
 func matchesFetchSince(issue *itracker.TrackerIssue, since *time.Time) bool {

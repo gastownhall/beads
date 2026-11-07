@@ -538,6 +538,80 @@ func TestTrackerFetchIssueTargetedBeyondQueryBound(t *testing.T) {
 	}
 }
 
+// TestTrackerPushBeyondQueryBound pins AC-4: batch push — of one issue or 32
+// — resolves each issue with targeted lookups only, so pushing into a data
+// source larger than the query bound works. Before the fix every push size
+// failed before any push decision, because all of them needed the index.
+func TestTrackerPushBeyondQueryBound(t *testing.T) {
+	edited := time.Now().UTC().Add(-2 * time.Hour)
+	server := newTestNotionServer(t,
+		memberPage("aaaaaaaa-0000-0000-0000-000000000001", "bd-a", "Existing", edited),
+	)
+	server.failUnfiltered = true
+	tracker := server.tracker()
+	pageRef := "https://www.notion.so/Existing-aaaaaaaa000000000000000000000001"
+
+	result, err := tracker.BatchPush(context.Background(), []*types.Issue{{
+		ID:          "bd-a",
+		Title:       "Existing, edited locally",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+		ExternalRef: &pageRef,
+		UpdatedAt:   time.Now().UTC(),
+	}}, map[string]bool{})
+	if err != nil {
+		t.Fatalf("single-issue BatchPush returned error: %v", err)
+	}
+	if len(result.Updated) != 1 || len(result.Created) != 0 || len(result.Errors) != 0 || len(result.Skipped) != 0 {
+		t.Fatalf("single-issue push result = %+v, want one update", result)
+	}
+
+	var many []*types.Issue
+	for i := 0; i < 32; i++ {
+		many = append(many, &types.Issue{
+			ID:        fmt.Sprintf("bd-n%02d", i),
+			Title:     fmt.Sprintf("New %02d", i),
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			UpdatedAt: time.Now().UTC(),
+		})
+	}
+	result, err = tracker.BatchPush(context.Background(), many, map[string]bool{})
+	if err != nil {
+		t.Fatalf("32-issue BatchPush returned error: %v", err)
+	}
+	if len(result.Created) != 32 || len(result.Errors) != 0 {
+		t.Fatalf("32-issue push created %d with %d errors, want 32 creates and no errors",
+			len(result.Created), len(result.Errors))
+	}
+	if server.unfilteredQueries() != 0 {
+		t.Fatalf("push issued %d unfiltered queries, want none", server.unfilteredQueries())
+	}
+
+	// Dry-run resolves the same way and writes nothing. The two issues now
+	// exist remotely exactly as pushed, so resolution finds them and the
+	// property comparison reports them in sync.
+	before := server.requestCount()
+	dry, err := tracker.BatchPushDryRun(context.Background(), many[:2], map[string]bool{})
+	if err != nil {
+		t.Fatalf("BatchPushDryRun returned error: %v", err)
+	}
+	if len(dry.Skipped) != 2 || len(dry.Created) != 0 || len(dry.Errors) != 0 {
+		t.Fatalf("dry-run result = %+v, want the two lookups to report in sync", dry)
+	}
+	server.mu.Lock()
+	posts, patches := len(server.posts), len(server.patches)
+	server.mu.Unlock()
+	if after := server.requestCount(); after != before+2 {
+		t.Fatalf("dry-run issued %d requests for 2 issues, want the 2 lookups only", after-before)
+	}
+	if posts != 32 || patches != 1 {
+		t.Fatalf("server saw %d creates and %d patches; the dry-run must not write (want 32 and 1 from the earlier pushes)", posts, patches)
+	}
+}
+
 func titles(issues []itracker.TrackerIssue) []string {
 	result := make([]string, 0, len(issues))
 	for _, issue := range issues {

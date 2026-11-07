@@ -548,6 +548,10 @@ func TestTrackerBuildExternalRefFallbacks(t *testing.T) {
 	}
 }
 
+// TestTrackerBatchPushReusesRemoteInventory pins AC-4: each pushed issue is
+// resolved on its own — the referenced page by a direct read, an unreferenced
+// one by a Beads-ID query — with no whole-source enumeration to seed or
+// poison.
 func TestTrackerBatchPushReusesRemoteInventory(t *testing.T) {
 	t.Parallel()
 
@@ -557,6 +561,7 @@ func TestTrackerBatchPushReusesRemoteInventory(t *testing.T) {
 		URL:            "https://www.notion.so/Task-0123456789abcdef0123456789abcdef",
 		CreatedTime:    createdAt,
 		LastEditedTime: createdAt.Add(5 * time.Minute),
+		Parent:         &PageParent{Type: "data_source_id", DataSourceID: "ds_123", DatabaseID: "db_1"},
 		Properties: map[string]PageProperty{
 			PropertyTitle:    {Title: []RichText{{PlainText: "Existing remote"}}},
 			PropertyBeadsID:  {RichText: []RichText{{PlainText: "bd-1"}}},
@@ -618,11 +623,19 @@ func TestTrackerBatchPushReusesRemoteInventory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BatchPush returned error: %v", err)
 	}
-	if api.queryCalls != 1 {
-		t.Fatalf("queryCalls = %d, want 1", api.queryCalls)
-	}
 	if len(result.Updated) != 1 || len(result.Created) != 1 {
 		t.Fatalf("result = %+v", result)
+	}
+	// bd-1's external_ref resolves by one page read; bd-2, with no reference,
+	// by one Beads-ID query that finds nothing and so creates.
+	if api.getCalls != 1 {
+		t.Fatalf("getCalls = %d, want 1 (the referenced page)", api.getCalls)
+	}
+	if api.queryCalls != 1 || len(api.queryFilters) != 1 || api.queryFilters[0] == nil {
+		t.Fatalf("queryCalls = %d with filters %v, want 1 Beads-ID equality query", api.queryCalls, api.queryFilters)
+	}
+	if filter := api.queryFilters[0]; filter["property"] != PropertyBeadsID {
+		t.Fatalf("query filter = %v, want scoped to %q", filter, PropertyBeadsID)
 	}
 	if api.lastUpdatePageID != "01234567-89ab-cdef-0123-456789abcdef" {
 		t.Fatalf("lastUpdatePageID = %q", api.lastUpdatePageID)
