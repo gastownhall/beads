@@ -36,6 +36,47 @@ func ComputeRepoIDForPath(repoPath string) (string, error) {
 	return id, err
 }
 
+// RepoFingerprint is this checkout's repository identity plus the context
+// needed to compare it against a stored repo_id.
+//
+// GH#5990: a checkout whose origin remote spells the forge through an SSH
+// host alias (git@alias-a:org/repo.git) hashed differently from the same
+// repository reached by its canonical host. When the local SSH
+// configuration resolves such an alias to a canonical HostName, ID is the
+// resolved-host fingerprint and LegacyID keeps the pre-change literal-host
+// hash, so an id this same checkout stored earlier still matches. SSHAlias
+// and SSHHostName are set only when an alias was resolved; every other
+// derivation leaves them empty and ID equals LegacyID.
+type RepoFingerprint struct {
+	// ID is the fingerprint to compute and store going forward.
+	ID string
+	// Source reports whether the fingerprint derived from the origin remote
+	// or from the local path fallback.
+	Source RepoIDSource
+	// LegacyID is the pre-GH#5990 fingerprint: the same remote hashed
+	// without SSH alias resolution.
+	LegacyID string
+	// SSHAlias is the written host of the resolved SSH alias, if any.
+	SSHAlias string
+	// SSHHostName is the HostName the local SSH config resolved it to.
+	SSHHostName string
+}
+
+// Matches reports whether stored is a fingerprint this checkout computed:
+// the current ID, or the LegacyID of a checkout whose alias resolution just
+// changed what it computes. It deliberately never recognizes another
+// machine's alias spelling — a stored id can only match hashes derived from
+// this checkout's own remote.
+func (fp RepoFingerprint) Matches(stored string) bool {
+	if stored == "" {
+		return false
+	}
+	if stored == fp.ID {
+		return true
+	}
+	return fp.LegacyID != "" && stored == fp.LegacyID
+}
+
 // ComputeRepoIDForPathWithSource is ComputeRepoIDForPath plus which derivation
 // produced the fingerprint, so callers (bd doctor, bd migrate --update-repo-id)
 // can tell a canonical remote-derived fingerprint from the path fallback
@@ -49,6 +90,19 @@ func ComputeRepoIDForPath(repoPath string) (string, error) {
 // worktree operations would compute a different repo_id and bd doctor would
 // report a fingerprint mismatch.
 func ComputeRepoIDForPathWithSource(repoPath string) (string, RepoIDSource, error) {
+	fp, err := ComputeRepoFingerprintForPath(repoPath)
+	if err != nil {
+		return "", "", err
+	}
+	return fp.ID, fp.Source, nil
+}
+
+// ComputeRepoFingerprintForPath computes the repository fingerprint for the
+// git repository rooted at or containing repoPath, resolving supported SSH
+// host aliases through the local SSH configuration before hashing
+// (GH#5990). Resolution failures are not errors: the fingerprint keeps its
+// legacy literal-host value, matching what pre-GH#5990 code computed.
+func ComputeRepoFingerprintForPath(repoPath string) (RepoFingerprint, error) {
 	output, err := runGitInRepo(repoPath, "config", "--get", "remote.origin.url")
 	if err != nil {
 		// No remote configured — fall back to path-based fingerprint.
@@ -56,22 +110,35 @@ func ComputeRepoIDForPathWithSource(repoPath string) (string, RepoIDSource, erro
 		// worktrees produce the same fingerprint as the main checkout.
 		repoRoot, rootErr := mainRepoRootForPath(repoPath)
 		if rootErr != nil {
-			return "", "", fmt.Errorf("not a git repository")
+			return RepoFingerprint{}, fmt.Errorf("not a git repository")
 		}
 
 		normalized := normalizedRepoPath(repoRoot)
-		hash := sha256.Sum256([]byte(normalized))
-		return hex.EncodeToString(hash[:16]), RepoIDSourcePath, nil
+		id := repoIDHash(normalized)
+		return RepoFingerprint{ID: id, LegacyID: id, Source: RepoIDSourcePath}, nil
 	}
 
 	repoURL := strings.TrimSpace(string(output))
 	canonical, err := canonicalizeGitURL(repoURL)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to canonicalize URL: %w", err)
+		return RepoFingerprint{}, fmt.Errorf("failed to canonicalize URL: %w", err)
 	}
 
+	legacy := repoIDHash(canonical)
+	fp := RepoFingerprint{ID: legacy, LegacyID: legacy, Source: RepoIDSourceRemote}
+	if split, ok := splitSSHRemote(repoURL); ok {
+		if host, resolved := resolveSSHAliasHost(split); resolved {
+			fp.ID = repoIDHash(host + split.portSuffix + split.tail)
+			fp.SSHAlias = strings.ToLower(split.host)
+			fp.SSHHostName = host
+		}
+	}
+	return fp, nil
+}
+
+func repoIDHash(canonical string) string {
 	hash := sha256.Sum256([]byte(canonical))
-	return hex.EncodeToString(hash[:16]), RepoIDSourceRemote, nil
+	return hex.EncodeToString(hash[:16])
 }
 
 func canonicalizeGitURL(rawURL string) (string, error) {
