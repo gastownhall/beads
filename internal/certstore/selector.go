@@ -85,21 +85,30 @@ type Selector struct {
 
 // Validate checks the selector's shape without touching any store.
 func (s Selector) Validate() error {
+	if _, err := s.normalizedThumbprint(); err != nil {
+		return err
+	}
+	_, err := s.searchOrder()
+	return err
+}
+
+// normalizedThumbprint returns the selector's thumbprint normalized, or ""
+// when the selector names a subject instead. It fails unless exactly one of
+// Subject and Thumbprint is set and a thumbprint is well formed. Selection
+// relies on it as well as Validate, so a selector that skipped Validate
+// still cannot match every certificate.
+func (s Selector) normalizedThumbprint() (string, error) {
 	hasSubject := strings.TrimSpace(s.Subject) != ""
 	hasThumb := strings.TrimSpace(s.Thumbprint) != ""
 	switch {
 	case hasSubject && hasThumb:
-		return errors.New("certstore: set a subject or a thumbprint, not both")
+		return "", errors.New("certstore: set a subject or a thumbprint, not both")
 	case !hasSubject && !hasThumb:
-		return errors.New("certstore: a subject or a thumbprint is required")
+		return "", errors.New("certstore: a subject or a thumbprint is required")
+	case hasThumb:
+		return normalizeThumbprint(s.Thumbprint)
 	}
-	if hasThumb {
-		if _, err := normalizeThumbprint(s.Thumbprint); err != nil {
-			return err
-		}
-	}
-	_, err := s.searchOrder()
-	return err
+	return "", nil
 }
 
 func (s Selector) searchOrder() ([]StorePath, error) {
