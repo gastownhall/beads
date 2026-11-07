@@ -180,11 +180,11 @@ func TestGetDependentsWithMetadataInTxToleratesMissingWispDependencyTable(t *tes
 	t.Parallel()
 
 	_, mock, tx := beginMockTx(t)
-	mock.ExpectQuery(`SELECT issue_id, type FROM dependencies WHERE`).
-		WithArgs("epic-1").
+	mock.ExpectQuery(edgeQueryRegex(depReaderEntryPoints[0], "dependencies")).
+		WithArgs("epic-1", "epic-1", "epic-1").
 		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "type"}))
-	mock.ExpectQuery(`SELECT issue_id, type FROM wisp_dependencies WHERE`).
-		WithArgs("epic-1").
+	mock.ExpectQuery(edgeQueryRegex(depReaderEntryPoints[0], "wisp_dependencies")).
+		WithArgs("epic-1", "epic-1", "epic-1").
 		WillReturnError(errors.New("Error 1146: Table 'db.wisp_dependencies' doesn't exist"))
 
 	if _, err := GetDependentsWithMetadataInTx(context.Background(), tx, "epic-1"); err != nil {

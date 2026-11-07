@@ -1,6 +1,9 @@
 package sqlbuild
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // ReadyWorkIssueColumns is IssueSelectColumns qualified with the "i." alias
 // used by the counts mega-query. The lease overlay columns keep their own
@@ -130,33 +133,78 @@ func (h CountsHydration) IssueColumns() string {
 //
 // hyd selects which aggregates are computed at all; see CountsHydration.
 func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, limitSQL string, includeWispReverseDeps bool, hyd CountsHydration) (string, []any) {
+	return SearchCountsSQLScoped(tables, ids, nil, whereSQL, orderBySQL, limitSQL, includeWispReverseDeps, hyd)
+}
+
+// MaxCountsScope bounds a predicate-form scope. A scoped query binds the
+// scope at most twelve times, so a larger scope runs unscoped rather than
+// approach per-statement placeholder limits.
+const MaxCountsScope = 1000
+
+// SearchCountsSQLScoped bounds predicate-form aggregates to explicit filter
+// IDs. The driver also requires i.id IN (scope), preserving each surviving
+// row's aggregates. Callers must supply a scope containing every ID their
+// predicate can match, as BuildIssueFilterClauses does for IssueFilter.IDs.
+// Returned arguments follow the caller's predicate arguments. An empty or
+// oversized scope leaves the predicate form unchanged; by-IDs ignores scope.
+func SearchCountsSQLScoped(tables FilterTables, ids, scope []string, whereSQL, orderBySQL, limitSQL string, includeWispReverseDeps bool, hyd CountsHydration) (string, []any) {
 	byIDs := len(ids) > 0
+	whereBody, whereOK := strings.CutPrefix(whereSQL, "WHERE ")
+	if !byIDs && ((whereSQL != "" && !whereOK) || len(scope) > MaxCountsScope) {
+		scope = nil // an unrecognized predicate shape or an oversized scope is never scoped
+	}
+	scoped := byIDs || len(scope) > 0
+	if !byIDs {
+		ids = scope
+	}
 	inSQL, idArgs := InPlaceholders(ids)
 
-	// Per-subquery id constraints. Empty strings in the predicate form leave the
-	// projection unchanged; in the by-IDs form they push the page down so no
-	// subquery aggregates more than the page's worth of rows.
-	var labelWhere, depBlocksExtra, rcDepExtra, rcWispExtra, ccWhere, pcExtra, depWhere string
-	if byIDs {
+	// Per-subquery id constraints. Empty strings in the unscoped predicate form
+	// leave the projection unchanged; with ids or a scope they push the id set
+	// down so no subquery aggregates more than that set's worth of rows.
+	var labelWhere, depBlocksExtra, ccWhere, pcExtra, depWhere string
+	if scoped {
 		labelWhere = fmt.Sprintf("WHERE issue_id IN (%s)", inSQL)
 		depBlocksExtra = fmt.Sprintf(" AND issue_id IN (%s)", inSQL)
-		rcDepExtra = fmt.Sprintf(" AND %s IN (%s)", DepTargetExpr, inSQL)
-		rcWispExtra = fmt.Sprintf(" AND %s IN (%s)", DepTargetExpr, inSQL)
 		ccWhere = fmt.Sprintf("WHERE issue_id IN (%s)", inSQL)
 		pcExtra = fmt.Sprintf(" AND issue_id IN (%s)", inSQL)
 		depWhere = fmt.Sprintf("WHERE issue_id IN (%s)", inSQL)
 	}
+	// deps_json's element order is the order its rows reach JSON_ARRAYAGG. The
+	// unscoped predicate form scans dependencies in primary-key order, while an
+	// issue_id-constrained read comes back in (issue_id, target) index order.
+	// The first physical column is the id primary key on current schemas and
+	// issue_id on older schemas that read-only opens may still encounter.
+	// Retain that observed scan order without requiring an id column.
+	depFrom := tables.Dependencies
+	if scoped && !byIDs {
+		depFrom = fmt.Sprintf("(SELECT * FROM %s %s ORDER BY 1) scoped_deps", tables.Dependencies, depWhere)
+		depWhere = ""
+	}
 
+	// The reverse-blocker rows. Scoped, the target constraint is rendered as
+	// per-column branches (DepTargetUnion) that seek the (type, target)
+	// indexes; "COALESCE(...) IN (ids)" could use none and scanned every
+	// 'blocks' edge once per query.
+	var rcArgs []any
 	reverseBlockerSelect := fmt.Sprintf(`
 				SELECT %s AS dep_id
-				FROM dependencies WHERE type = 'blocks'%s
-	`, DepTargetExpr, rcDepExtra)
+				FROM dependencies WHERE type = 'blocks'
+	`, DepTargetExpr)
+	if scoped {
+		reverseBlockerSelect = DepTargetUnion("dependencies", "", func(col string) string { return col + " AS dep_id" }, fmt.Sprintf("IN (%s)", inSQL), " AND type = 'blocks'")
+		rcArgs = DepTargetUnionArgs(idArgs, nil)
+	}
 	if includeWispReverseDeps {
-		reverseBlockerSelect += fmt.Sprintf(`
+		wispSelect := fmt.Sprintf(`SELECT %s AS dep_id
+				FROM wisp_dependencies WHERE type = 'blocks'`, DepTargetExpr)
+		if scoped {
+			wispSelect = DepTargetUnion("wisp_dependencies", "", func(col string) string { return col + " AS dep_id" }, fmt.Sprintf("IN (%s)", inSQL), " AND type = 'blocks'")
+			rcArgs = append(rcArgs, DepTargetUnionArgs(idArgs, nil)...)
+		}
+		reverseBlockerSelect += `
 				UNION ALL
-				SELECT %s AS dep_id
-				FROM wisp_dependencies WHERE type = 'blocks'%s
-		`, DepTargetExpr, rcWispExtra)
+				` + wispSelect
 	}
 
 	labelsSelect := "l.labels_json AS labels_json"
@@ -211,13 +259,22 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 	// ORDER BY and LIMIT stay outer, after the joins. Everything else — empty
 	// whereSQL (nothing to push down) and the by-IDs form (subqueries already
 	// id-constrained) — keeps the plain driver.
+	// A scoped predicate form also bounds the derived driver by the scope.
 	driverSQL := fmt.Sprintf("%s i", tables.Main)
-	if !byIDs && whereSQL != "" {
+	driverWhere := whereSQL
+	if !byIDs && scoped {
+		if driverWhere == "" {
+			driverWhere = fmt.Sprintf("WHERE i.id IN (%s)", inSQL)
+		} else {
+			driverWhere = fmt.Sprintf("WHERE (%s) AND i.id IN (%s)", whereBody, inSQL)
+		}
+	}
+	if !byIDs && driverWhere != "" {
 		driverSQL = fmt.Sprintf(`(
 			SELECT i.*
 			FROM %s i
 			%s
-		) i`, tables.Main, whereSQL)
+		) i`, tables.Main, driverWhere)
 	}
 	outerClause := fmt.Sprintf("%s\n\t\t%s", orderBySQL, limitSQL)
 	if byIDs {
@@ -257,31 +314,35 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 		labelsJoin,
 		countsJoins,
 		DepTargetExpr, tables.Dependencies, pcExtra,
-		DepJSONObject, tables.Dependencies, depWhere,
+		DepJSONObject, depFrom, depWhere,
 		outerClause,
 	)
 
-	if !byIDs {
+	if !scoped {
 		return sqlText, nil
 	}
 
-	// args follow the placeholder order in sqlText: labels join (unless
-	// skipped), dc, rc dependencies branch, rc wisp branch (if any), cc (all
-	// four unless the counts are skipped), pc, d, then the driver.
-	args := make([]any, 0, len(idArgs)*8)
+	// args follow the placeholder order in sqlText: the scoped predicate
+	// form's driver scope (after the caller's whereSQL args), labels join
+	// (unless skipped), dc, the rc branches (three per dependency table), cc
+	// (all unless the counts are skipped), pc, d, then the by-IDs driver.
+	args := make([]any, 0, len(idArgs)*14)
+	if !byIDs {
+		args = append(args, idArgs...) // scoped driver
+	}
 	if !hyd.SkipLabels {
 		args = append(args, idArgs...)
 	}
 	if !hyd.SkipCounts {
 		args = append(args, idArgs...) // dc
-		args = append(args, idArgs...) // rc dependencies
-		if includeWispReverseDeps {
-			args = append(args, idArgs...) // rc wisp_dependencies
-		}
+		args = append(args, rcArgs...) // rc branches
 		args = append(args, idArgs...) // cc
 	}
 	args = append(args, idArgs...) // pc
 	args = append(args, idArgs...) // d
+	if !byIDs {
+		return sqlText, args
+	}
 	args = append(args, idArgs...) // driver
 	return sqlText, args
 }

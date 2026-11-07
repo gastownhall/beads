@@ -2,12 +2,46 @@ package issueops
 
 import (
 	"context"
+	"database/sql/driver"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+func TestSearchIssuesWithCountsBindsScopedIDsAfterPredicate(t *testing.T) {
+	for _, wispDeps := range []bool{false, true} {
+		t.Run(fmt.Sprint(wispDeps), func(t *testing.T) {
+			_, mock, tx := beginMockTx(t)
+			probe := mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`)
+			if wispDeps {
+				probe.WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+			} else {
+				probe.WillReturnError(errors.New("Error 1146: Table 'db.wisp_dependencies' doesn't exist"))
+			}
+			args := []driver.Value{"%needle%", "one", "two"}
+			points := 9
+			if wispDeps {
+				points = 12
+			}
+			for range points {
+				args = append(args, "one", "two")
+			}
+			mock.ExpectQuery(`(?s)WHERE \(LOWER\(title\) LIKE \? AND id IN \(\?, \?\)\) AND i.id IN \(\?,\?\).*ORDER BY i\.priority`).
+				WithArgs(args...).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+			_, err := SearchIssuesWithCountsInTx(t.Context(), tx, "", types.IssueFilter{TitleContains: "needle", IDs: []string{"one", "two"}, SkipWisps: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
 
 func TestSearchIssuesWithCountsAppliesLimitToEachSourceQuery(t *testing.T) {
 	t.Parallel()

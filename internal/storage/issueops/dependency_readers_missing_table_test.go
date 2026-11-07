@@ -106,7 +106,17 @@ func edgeQueryRegex(ep depReaderEntryPoint, table string) string {
 	if ep.withType {
 		cols += ", type"
 	}
+	if ep.inbound {
+		return `(?s)^SELECT ` + cols + ` FROM \(SELECT \* FROM \(SELECT \* FROM ` + table + ` WHERE depends_on_issue_id = \?.*UNION ALL SELECT \* FROM ` + table + ` WHERE depends_on_wisp_id = \?.*UNION ALL SELECT \* FROM ` + table + ` WHERE depends_on_external = \?.*ORDER BY 1\) dependents$`
+	}
 	return "^" + regexp.QuoteMeta("SELECT "+cols+" FROM "+table+" WHERE "+where) + "$"
+}
+
+func edgeQueryArgs(ep depReaderEntryPoint, anchor string) []driver.Value {
+	if ep.inbound {
+		return []driver.Value{anchor, anchor, anchor}
+	}
+	return []driver.Value{anchor}
 }
 
 func edgeRows(ep depReaderEntryPoint, edges []readerRow) *sqlmock.Rows {
@@ -180,9 +190,9 @@ func TestDependencyReadersMissingWispPlaneIsNotAnError(t *testing.T) {
 	for _, ep := range depReaderEntryPoints {
 		t.Run(ep.name, func(t *testing.T) {
 			_, mock, tx := beginMockTx(t)
-			mock.ExpectQuery(edgeQueryRegex(ep, "dependencies")).WithArgs("epic-1").
+			mock.ExpectQuery(edgeQueryRegex(ep, "dependencies")).WithArgs(edgeQueryArgs(ep, "epic-1")...).
 				WillReturnRows(edgeRows(ep, threeChildren))
-			mock.ExpectQuery(edgeQueryRegex(ep, "wisp_dependencies")).WithArgs("epic-1").
+			mock.ExpectQuery(edgeQueryRegex(ep, "wisp_dependencies")).WithArgs(edgeQueryArgs(ep, "epic-1")...).
 				WillReturnError(tableNotFound("wisp_dependencies"))
 			expectDurableHydration(mock, readerIDs(threeChildren))
 
@@ -219,9 +229,9 @@ func TestDependencyReadersCrossTableDuplicateReturnedOnce(t *testing.T) {
 	for _, ep := range depReaderEntryPoints {
 		t.Run(ep.name, func(t *testing.T) {
 			_, mock, tx := beginMockTx(t)
-			mock.ExpectQuery(edgeQueryRegex(ep, "dependencies")).WithArgs("epic-1").
+			mock.ExpectQuery(edgeQueryRegex(ep, "dependencies")).WithArgs(edgeQueryArgs(ep, "epic-1")...).
 				WillReturnRows(edgeRows(ep, threeChildren))
-			mock.ExpectQuery(edgeQueryRegex(ep, "wisp_dependencies")).WithArgs("epic-1").
+			mock.ExpectQuery(edgeQueryRegex(ep, "wisp_dependencies")).WithArgs(edgeQueryArgs(ep, "epic-1")...).
 				WillReturnRows(edgeRows(ep, wispPlane))
 			expectDurableHydration(mock, readerIDs(want))
 
