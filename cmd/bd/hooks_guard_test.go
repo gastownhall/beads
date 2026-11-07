@@ -14,6 +14,36 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestStandaloneHookCommandKeepsTrackedGuard(t *testing.T) {
+	for _, mode := range []string{"default", "shared"} {
+		t.Run(mode, func(t *testing.T) {
+			_, _, commonExclude, _ := newInitExcludeRepos(t)
+			target := filepath.Dir(filepath.Dir(filepath.Dir(commonExclude)))
+			t.Chdir(target)
+			hooksDir := filepath.Join(target, ".beads-hooks")
+			require.NoError(t, os.Mkdir(hooksDir, 0755))
+			path := filepath.Join(hooksDir, "pre-commit")
+			const foreign = "#!/bin/sh\necho tracked owner\n"
+			require.NoError(t, os.WriteFile(path, []byte(foreign), 0755))
+			initExcludeGit(t, target, "add", ".beads-hooks/pre-commit")
+			initExcludeGit(t, target, "config", "--local", "core.hooksPath", hooksDir)
+			setStandaloneHookMode(t, mode)
+			var err error
+			stderr := captureStderr(t, func() { err = hooksInstallCmd.RunE(hooksInstallCmd, nil) })
+			if mode == "shared" {
+				require.NoError(t, err)
+				require.Contains(t, string(readInitHooksFile(t, path)), foreign)
+				require.Contains(t, string(readInitHooksFile(t, path)), hookSectionBeginPrefix)
+			} else {
+				require.Equal(t, &exitError{Code: 1}, err)
+				require.Contains(t, stderr, "tracked by git")
+				require.Equal(t, foreign, string(readInitHooksFile(t, path)))
+				require.NoFileExists(t, filepath.Join(hooksDir, "post-merge"))
+			}
+		})
+	}
+}
+
 func TestGuardHookWritePathIgnoresInheritedGitRouting(t *testing.T) {
 	runGit := func(repo string, args ...string) {
 		t.Helper()
