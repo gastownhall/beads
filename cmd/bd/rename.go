@@ -147,6 +147,11 @@ func updateReferencesInAllIssues(ctx context.Context, store storage.DoltStorage,
 			updates["acceptance_criteria"] = oldPattern.ReplaceAllString(issue.AcceptanceCriteria, newID)
 			updated = true
 		}
+		if oldPattern.MatchString(issue.CloseReason) {
+			// Without a status change UpdateIssue leaves closed_at alone.
+			updates["close_reason"] = oldPattern.ReplaceAllString(issue.CloseReason, newID)
+			updated = true
+		}
 
 		if updated {
 			if err := store.UpdateIssue(ctx, issue.ID, updates, actor); err != nil {
