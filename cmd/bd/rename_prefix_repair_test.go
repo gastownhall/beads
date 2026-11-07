@@ -456,6 +456,56 @@ func TestRenameReportsReferencesItLeft(t *testing.T) {
 		}
 	})
 
+	t.Run("comments", func(t *testing.T) {
+		// Comments keep their text, author, ID and time; each one mentioning
+		// test-a is listed, wherever it is attached. The renamed issue's
+		// comments move to test-z with it.
+		st := newStore(t,
+			&types.Issue{ID: "test-a", Title: "A"},
+			&types.Issue{ID: "test-b", Title: "B"},
+			&types.Issue{ID: "test-wisp-w1", Title: "W", Ephemeral: true},
+		)
+		var before []*types.Comment
+		for _, c := range []struct{ issueID, text string }{
+			{"test-b", "blocked on test-a"},
+			{"test-b", "see test-a.1"},
+			{"test-a", "test-a, test-a"},
+			{"test-wisp-w1", "spawned by test-a"},
+		} {
+			comment, err := st.AddIssueComment(ctx, c.issueID, "alice", c.text)
+			if err != nil {
+				t.Fatalf("failed to comment on %s: %v", c.issueID, err)
+			}
+			before = append(before, comment)
+		}
+		wantLines(t, runRenameOutput(t, st, "test-a", "test-z"), []string{
+			"References left unchanged:",
+			"  test-b comment " + before[0].ID + ": test-a (comment text is not rewritten)",
+			"  test-wisp-w1 comment " + before[3].ID + ": test-a (comment text is not rewritten)",
+			"  test-z comment " + before[2].ID + ": test-a (comment text is not rewritten)",
+		})
+
+		after, err := st.GetCommentsForIssues(ctx, []string{"test-b", "test-wisp-w1", "test-z"})
+		if err != nil {
+			t.Fatalf("failed to get comments: %v", err)
+		}
+		byID := map[string]*types.Comment{}
+		for _, comments := range after {
+			for _, c := range comments {
+				byID[c.ID] = c
+			}
+		}
+		for _, want := range before {
+			if want.IssueID == "test-a" {
+				want.IssueID = "test-z"
+			}
+			got := byID[want.ID]
+			if got == nil || got.IssueID != want.IssueID || got.Author != want.Author || got.Text != want.Text || !got.CreatedAt.Equal(want.CreatedAt) {
+				t.Errorf("comment %s after the rename = %+v, want %+v", want.ID, got, want)
+			}
+		}
+	})
+
 	t.Run("quiet", func(t *testing.T) {
 		st := newStore(t,
 			&types.Issue{ID: "test-a", Title: "A"},

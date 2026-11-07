@@ -53,10 +53,12 @@ func TestRenameIDReferences(t *testing.T) {
 // memory. UpdateIssue records each update, those of failIDs too, before it
 // fails them: a failed update may still have landed.
 type fakeRenameReferenceStore struct {
-	issues  []*types.Issue
-	listErr error
-	failIDs map[string]bool
-	updates map[string]map[string]interface{}
+	issues      []*types.Issue
+	listErr     error
+	failIDs     map[string]bool
+	updates     map[string]map[string]interface{}
+	comments    map[string][]*types.Comment
+	commentsErr error
 }
 
 func (s *fakeRenameReferenceStore) SearchIssues(context.Context, string, types.IssueFilter) ([]*types.Issue, error) {
@@ -72,6 +74,19 @@ func (s *fakeRenameReferenceStore) UpdateIssue(_ context.Context, id string, upd
 		return errors.New("injected UpdateIssue failure")
 	}
 	return nil
+}
+
+func (s *fakeRenameReferenceStore) GetCommentsForIssues(_ context.Context, issueIDs []string) (map[string][]*types.Comment, error) {
+	if s.commentsErr != nil {
+		return nil, s.commentsErr
+	}
+	found := map[string][]*types.Comment{}
+	for _, id := range issueIDs {
+		if c := s.comments[id]; c != nil {
+			found[id] = c
+		}
+	}
+	return found, nil
 }
 
 // renameReportText renders report as bd rename prints it after its Renamed
@@ -172,6 +187,47 @@ func TestUpdateReferencesInAllIssues(t *testing.T) {
 		st := &fakeRenameReferenceStore{listErr: errors.New("injected SearchIssues failure")}
 		report := updateReferencesInAllIssues(ctx, st, "test-a", "test-z", "test")
 		want := "Warning: references to test-a were not checked: failed to list issues: injected SearchIssues failure\n"
+		if got := renameReportText(report, "test-a", "test-z"); got != want {
+			t.Errorf("report:\n%s\nwant:\n%s", got, want)
+		}
+	})
+
+	t.Run("comments", func(t *testing.T) {
+		t.Parallel()
+		// Comments are listed, never updated: once per comment, in issue
+		// then comment order, the renamed issue's own included.
+		st := &fakeRenameReferenceStore{
+			issues: []*types.Issue{{ID: "test-z", Title: "renamed"}, {ID: "test-10"}, {ID: "test-9"}},
+			comments: map[string][]*types.Comment{
+				"test-10": {{ID: "c2", Text: "test-a"}, {ID: "c5", Text: "test-a, then test-a again"}, {ID: "c1", Text: "test-a.1 only"}},
+				"test-9":  {{ID: "c3", Text: "see (test-a)."}},
+				"test-z":  {{ID: "c4", Text: "test-a is done"}},
+			},
+		}
+		report := updateReferencesInAllIssues(ctx, st, "test-a", "test-z", "test")
+		if len(st.updates) != 0 {
+			t.Errorf("updates = %v, want none: comment text is not rewritten", st.updates)
+		}
+		want := "References left unchanged:\n" +
+			"  test-9 comment c3: test-a (comment text is not rewritten)\n" +
+			"  test-10 comment c2: test-a (comment text is not rewritten)\n" +
+			"  test-10 comment c5: test-a (comment text is not rewritten)\n" +
+			"  test-z comment c4: test-a (comment text is not rewritten)\n"
+		if got := renameReportText(report, "test-a", "test-z"); got != want {
+			t.Errorf("report:\n%s\nwant:\n%s", got, want)
+		}
+	})
+
+	t.Run("comment read failure", func(t *testing.T) {
+		t.Parallel()
+		st := &fakeRenameReferenceStore{
+			issues:      []*types.Issue{{ID: "test-b", Notes: "see test-a"}},
+			commentsErr: errors.New("injected GetCommentsForIssues failure"),
+		}
+		report := updateReferencesInAllIssues(ctx, st, "test-a", "test-z", "test")
+		want := "Rewrote test-a to test-z in:\n" +
+			"  test-b: notes\n" +
+			"Warning: comments were not checked for references to test-a: injected GetCommentsForIssues failure\n"
 		if got := renameReportText(report, "test-a", "test-z"); got != want {
 			t.Errorf("report:\n%s\nwant:\n%s", got, want)
 		}

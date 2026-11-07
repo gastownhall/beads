@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -116,12 +117,14 @@ func runRename(cmd *cobra.Command, args []string) error {
 type renameReferenceStore interface {
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
 	UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error
+	GetCommentsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Comment, error)
 }
 
 // renameReport is what the reference scan of a rename did, for the user to
 // review. Entries are in natural issue-ID order.
 type renameReport struct {
 	rewritten []renameFieldsUpdate // updates that rewrote oldID to newID
+	left      []renameLeftRef      // mentions found and not rewritten
 	failed    []renameFieldsUpdate // updates that returned an error
 	unchecked []string             // what could not be read, and why
 }
@@ -134,10 +137,35 @@ type renameFieldsUpdate struct {
 	err     error    // the update's error; it may still have landed
 }
 
+// renameLeftRef is a mention of the renamed issue that the rename found and
+// left as it was, in a field or a comment.
+type renameLeftRef struct {
+	issueID   string
+	field     string // the field it is in; "" for a comment
+	commentID string
+	mention   string // the spelling found
+	note      string // why it was left
+}
+
+// location orders and names where l is: fields in renameRefFields order, then
+// comments.
+func (l renameLeftRef) location() (int, string) {
+	for i, f := range renameRefFields {
+		if f.name == l.field {
+			return i, l.field
+		}
+	}
+	return len(renameRefFields), "comment " + l.commentID
+}
+
 // updateReferencesInAllIssues updates text references to the old ID in all
 // issues, the renamed one included: it runs after the rename, so that issue is
 // listed under newID with its text still naming oldID. Each issue is updated
 // on its own, so a failed update is reported and the others still go ahead.
+//
+// Comment text is never rewritten: a comment is a record of what was said,
+// and editing one would need its own journaled write. Each comment that
+// mentions oldID is listed for review instead.
 func updateReferencesInAllIssues(ctx context.Context, st renameReferenceStore, oldID, newID, actor string) renameReport {
 	var report renameReport
 	issues, err := st.SearchIssues(ctx, "", types.IssueFilter{})
@@ -167,9 +195,31 @@ func updateReferencesInAllIssues(ctx context.Context, st renameReferenceStore, o
 		}
 	}
 
+	issueIDs := make([]string, len(issues))
+	for i, issue := range issues {
+		issueIDs[i] = issue.ID
+	}
+	comments, err := st.GetCommentsForIssues(ctx, issueIDs)
+	if err != nil {
+		report.unchecked = append(report.unchecked, fmt.Sprintf("comments were not checked for references to %s: %v", oldID, err))
+	}
+	for issueID, list := range comments {
+		for _, c := range list {
+			if hasIDRef(c.Text, oldID) {
+				report.left = append(report.left, renameLeftRef{issueID: issueID, commentID: c.ID, mention: oldID, note: "comment text is not rewritten"})
+			}
+		}
+	}
+
 	byIssueID := func(a, b renameFieldsUpdate) int { return utils.NaturalCompareIDs(a.issueID, b.issueID) }
 	slices.SortFunc(report.rewritten, byIssueID)
 	slices.SortFunc(report.failed, byIssueID)
+	slices.SortFunc(report.left, func(a, b renameLeftRef) int {
+		ai, _ := a.location()
+		bi, _ := b.location()
+		return cmp.Or(utils.NaturalCompareIDs(a.issueID, b.issueID), cmp.Compare(ai, bi),
+			strings.Compare(a.commentID, b.commentID), strings.Compare(a.mention, b.mention))
+	})
 	return report
 }
 
@@ -180,6 +230,13 @@ func (r renameReport) write(w io.Writer, oldID, newID string) {
 		fmt.Fprintf(w, "Rewrote %s to %s in:\n", oldID, newID)
 		for _, u := range r.rewritten {
 			fmt.Fprintf(w, "  %s: %s\n", u.issueID, strings.Join(u.fields, ", ")) //nolint:gosec // G705: terminal output, not a browser context
+		}
+	}
+	if len(r.left) > 0 {
+		fmt.Fprintln(w, "References left unchanged:")
+		for _, l := range r.left {
+			_, where := l.location()
+			fmt.Fprintf(w, "  %s %s: %s (%s)\n", l.issueID, where, l.mention, l.note) //nolint:gosec // G705: terminal output, not a browser context
 		}
 	}
 	for _, u := range r.failed {
@@ -221,6 +278,13 @@ func replaceIDRefs(text, oldID, newID string) string {
 	}
 	b.WriteString(text[last:])
 	return b.String()
+}
+
+// hasIDRef reports whether text mentions id (see forEachIDRef).
+func hasIDRef(text, id string) bool {
+	found := false
+	forEachIDRef(text, id, func(int, int) { found = true })
+	return found
 }
 
 // forEachIDRef calls fn with the byte range of each mention of id in text. A
