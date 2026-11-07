@@ -160,7 +160,8 @@ func TestPullTransferDeadlineScope(t *testing.T) {
 		expectDrainedCall(mock, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'metadata')")
 		expectDrainedCall(mock, "CALL DOLT_ADD('metadata')")
 		expectNoViolations(mock)
-		expectDrainedCall(mock, autoResolveCommitCall)
+		expectMergeResult(mock, "labels")
+		expectDrainedCall(mock, "CALL DOLT_COMMIT('-m', ?)", autoResolveCommitMsg)
 
 		ctx, cancel := context.WithCancel(context.WithValue(context.Background(), pullCallerKey{}, "caller"))
 		defer cancel()
