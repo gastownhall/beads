@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/remedy"
@@ -202,15 +203,35 @@ func openAutoRoutedStore(ctx context.Context, store storage.DoltStorage, writabl
 	// report a historical SQLite or legacy Dolt target as a missing
 	// dolt_database field.
 	if _, err := admitForeignWorkspace(targetBeadsDir); err != nil {
-		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: %w", remedy.PrintedValue(targetRepoPath), err)
+		return nil, false, rule, routedOpenError(rule, targetRepoPath, "", err)
 	}
 	database, err := autoRouteTargetDatabase(targetBeadsDir, writable)
 	if err != nil {
-		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: target has no dolt_database configured: %w", remedy.PrintedValue(targetRepoPath), err)
+		return nil, false, rule, routedOpenError(rule, targetRepoPath, "target has no dolt_database configured: ", err)
 	}
 	targetStore, err := openRoutedTargetStore(ctx, targetBeadsDir, database, writable)
 	if err != nil {
-		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: %w", remedy.PrintedValue(targetRepoPath), err)
+		return nil, false, rule, routedOpenError(rule, targetRepoPath, "", err)
 	}
 	return wireExternalDependencyPolicy(targetStore), true, rule, nil
+}
+
+// routedOpenError reports a failed open of the auto-routed target at
+// targetRepoPath, detail being the stage-specific prefix of err. A
+// contributor route also says that contributor routing chose the target and
+// how to turn it off, and, when the target holds no workspace at all (a
+// deleted planning repo), that restoring it is what recovers its issues:
+// otherwise the error names a path the user may never have chosen (GH#5957).
+// Other rules keep their plain error. err stays wrapped, so
+// ErrNoBeadsDatabase still matches.
+func routedOpenError(rule routing.RoutingRule, targetRepoPath, detail string, err error) error {
+	err = fmt.Errorf("failed to open routed store at %s: %s%w", remedy.PrintedValue(targetRepoPath), detail, err)
+	if rule != routing.RuleContributor {
+		return err
+	}
+	guidance := "contributor routing (beads.role=contributor, or inferred from the origin URL) selected this planning repo"
+	if !beads.HasProjectFiles(filepath.Join(targetRepoPath, ".beads")) {
+		guidance += "; restore the planning repo to recover its issues (a later bd create initializes an empty planning store, which does not restore them)"
+	}
+	return fmt.Errorf("%w; %s; to disable contributor-role routing: git config beads.role maintainer", err, guidance)
 }
