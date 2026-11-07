@@ -52,6 +52,28 @@ func TestDocsGraphPlanExampleValidates(t *testing.T) {
 	}
 }
 
+// TestDocsGraphPlanEdgeNotesStateDirection pins the edge direction in the
+// --graph supplement's Edge notes: buildGraphApplyRequest makes from the dep
+// source and to the target, as `bd dep add <from> <to>` does, so a plan
+// author who reads `from` as the blocker inverts every blocks edge.
+func TestDocsGraphPlanEdgeNotesStateDirection(t *testing.T) {
+	_, notes, ok := strings.Cut(createGraphPlanSupplement, "Edge notes:")
+	if !ok {
+		t.Fatal("Edge notes not found in create_graph_plan.md supplement")
+	}
+	notes, _, _ = strings.Cut(notes, "Comments cannot")
+	notes = strings.Join(strings.Fields(notes), " ")
+	for _, want := range []string{
+		"`bd dep add <from> <to>`",
+		"`from_key`/`from_id` is the dependent",
+		"`to_key`/`to_id` is the issue it depends on",
+	} {
+		if !strings.Contains(notes, want) {
+			t.Errorf("create_graph_plan.md Edge notes must state the edge direction: missing %q", want)
+		}
+	}
+}
+
 func TestValidateGraphApplyPlanAcceptsCustomTypes(t *testing.T) {
 	plan := &GraphApplyPlan{
 		Nodes: []GraphApplyNode{

@@ -70,6 +70,10 @@ Node notes:
 
 Edge notes:
 
+- Edges read like `bd dep add <from> <to>`: `from_key`/`from_id` is the
+  dependent and `to_key`/`to_id` is the issue it depends on. For the default
+  `blocks` type, `to` is the blocker, and `from` stays out of `bd ready`
+  until `to` closes.
 - `type` defaults to `blocks`. `parent_key`/`parent_id` on nodes already
   create `parent-child` edges; don't repeat them in `edges`.
 - `gate` (`all-children` | `any-children`) and `spawner_key`/`spawner_id`
