@@ -60,8 +60,9 @@ type Client struct {
 	HTTPClient    *http.Client
 
 	// MaxQueryPages bounds pagination in QueryDataSource. Zero means
-	// maxQueryPages. Raise it for a data source larger than
-	// maxQueryPages*maxPageSize rows, which otherwise cannot be synced at all.
+	// maxQueryPages. Raise it when a query matches more than
+	// maxQueryPages*maxPageSize rows, as a full pull of a larger data source
+	// does; such a query otherwise fails.
 	MaxQueryPages int
 
 	// after is the retry delay hook, swapped out in tests so backoff coverage
@@ -192,7 +193,11 @@ func (c *Client) CreateDatabase(ctx context.Context, parentPageID, title string)
 	return &db, nil
 }
 
-func (c *Client) QueryDataSource(ctx context.Context, dataSourceID string) ([]Page, error) {
+// QueryDataSource returns every row of the data source that matches filter,
+// following cursors up to the configured page bound. A nil filter queries the
+// whole data source. Past the bound it returns an error and no rows, since a
+// caller cannot tell a truncated result from a complete one.
+func (c *Client) QueryDataSource(ctx context.Context, dataSourceID string, filter map[string]interface{}) ([]Page, error) {
 	var pages []Page
 	var cursor string
 	limit := c.maxQueryPages()
@@ -200,6 +205,9 @@ func (c *Client) QueryDataSource(ctx context.Context, dataSourceID string) ([]Pa
 		request := map[string]interface{}{
 			"page_size":   maxPageSize,
 			"result_type": "page",
+		}
+		if filter != nil {
+			request["filter"] = filter
 		}
 		if cursor != "" {
 			request["start_cursor"] = cursor
@@ -225,8 +233,8 @@ func (c *Client) QueryDataSource(ctx context.Context, dataSourceID string) ([]Pa
 	// reader can actually pull — this message reaches CLI operators, who cannot
 	// call a Go method.
 	return nil, fmt.Errorf(
-		"query pagination exceeded %d pages (~%d rows): this data source is larger than the "+
-			"configured bound, so no sync can complete. Raise it with "+
+		"query pagination exceeded %d pages (~%d rows): the rows matching this query exceed the "+
+			"configured bound, so the query could not finish. Raise it with "+
 			"'bd config set notion.max_query_pages <n>' or the NOTION_MAX_QUERY_PAGES "+
 			"environment variable, or reduce the number of rows in the data source",
 		limit, limit*maxPageSize)

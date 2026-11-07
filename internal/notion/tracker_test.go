@@ -2,6 +2,7 @@ package notion
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -28,9 +29,32 @@ func (f *fakeAPI) GetCurrentUser(context.Context) (*User, error) { return f.user
 func (f *fakeAPI) RetrieveDataSource(context.Context, string) (*DataSource, error) {
 	return f.dataSource, nil
 }
-func (f *fakeAPI) QueryDataSource(context.Context, string) ([]Page, error) {
+
+// QueryDataSource serves f.pages as the rows of the queried source, applying
+// the timestamp and Beads ID filters the tracker sends.
+func (f *fakeAPI) QueryDataSource(_ context.Context, _ string, filter map[string]interface{}) ([]Page, error) {
 	f.queryCalls++
-	return append([]Page(nil), f.pages...), nil
+	var pages []Page
+	for _, page := range f.pages {
+		if fakeFilterMatches(page, filter) {
+			pages = append(pages, page)
+		}
+	}
+	return pages, nil
+}
+
+func fakeFilterMatches(page Page, filter map[string]interface{}) bool {
+	if filter == nil {
+		return true
+	}
+	if cond, ok := filter["last_edited_time"].(map[string]interface{}); ok {
+		cutoff, err := time.Parse(time.RFC3339, fmt.Sprint(cond["on_or_after"]))
+		return err == nil && !page.LastEditedTime.Before(cutoff)
+	}
+	if cond, ok := filter["rich_text"].(map[string]interface{}); ok && filter["property"] == PropertyBeadsID {
+		return DataSourceTitle(page.Properties[PropertyBeadsID].RichText) == cond["equals"]
+	}
+	return false
 }
 func (f *fakeAPI) ArchivePage(context.Context, string, bool) (*Page, error) {
 	return f.archivePage, nil
