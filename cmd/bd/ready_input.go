@@ -85,6 +85,12 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 	in.ExcludeLabels, _ = cmd.Flags().GetStringSlice("exclude-label")
 	in.LabelPattern, _ = cmd.Flags().GetString("label-pattern")
 	in.LabelRegex, _ = cmd.Flags().GetString("label-regex")
+	// Same refusal as gatherListInput's, for the same reason (GH#6636): the
+	// special modes that dispatch before this gatherer never read these
+	// listing flags, so they are promised nothing here.
+	if err := rejectEmptyLabelPatterns(cmd, in.LabelPattern, in.LabelRegex); err != nil {
+		return in, err
+	}
 	in.IssueType, _ = cmd.Flags().GetString("type")
 	in.ParentID, _ = cmd.Flags().GetString("parent")
 	in.IncludeDeferred, _ = cmd.Flags().GetBool("include-deferred")

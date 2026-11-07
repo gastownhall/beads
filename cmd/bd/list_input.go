@@ -87,6 +87,13 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in.ExcludeLabels, _ = cmd.Flags().GetStringSlice("exclude-label")
 	in.LabelPattern, _ = cmd.Flags().GetString("label-pattern")
 	in.LabelRegex, _ = cmd.Flags().GetString("label-regex")
+	// Refused before the skip-label checks and every other filter so an
+	// unusable pattern cannot fall through to "no pattern" (GH#6636); the
+	// placement keeps the JSON format resolution above it in charge of where
+	// the refusal is printed.
+	if err := rejectEmptyLabelPatterns(cmd, in.LabelPattern, in.LabelRegex); err != nil {
+		return in, err
+	}
 	in.TitleSearch, _ = cmd.Flags().GetString("title")
 	in.SpecPrefix, _ = cmd.Flags().GetString("spec")
 	in.IDFilter, _ = cmd.Flags().GetString("id")
