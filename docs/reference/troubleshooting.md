@@ -557,6 +557,13 @@ prettier, ruff, etc.) stop running, with:
 Since `bd hooks run` chains to your original hook internally, the timeout
 covers both beads' own work and your entire hook pipeline.
 
+Since the deadline may stop the chained check before it decides, a
+`pre-commit` or `pre-push` hook with a chained `<hook>.old` refuses the commit
+or push instead, with `the gate outcome is unknown, refusing`. This also
+happens when the chained hook passed and beads' own later work hit the
+deadline, since the hook cannot tell the two apart. Other hooks continue. Hook sections installed before this behavior continue in both
+cases until `bd hooks install` refreshes them.
+
 **Fix:** Increase the timeout (default 300 seconds):
 
 ```bash
@@ -582,8 +589,14 @@ from the terminal is stopped until the deadline ends it.
 Already-installed hook sections are not refreshed automatically. After upgrading
 to a version that changed the timeout probe — the name-only check, the uutils
 coreutils banner, or the Perl fallback that could not stop `bd`
-([#7753](https://github.com/gastownhall/beads/issues/7753)) — run
-`bd hooks install` once to refresh existing canonical sections.
+([#7753](https://github.com/gastownhall/beads/issues/7753)) — or the
+chained-hook handling from
+[#6751](https://github.com/gastownhall/beads/issues/6751), run
+`bd hooks install` once to refresh existing canonical sections. The refresh
+rewrites a section even when its version marker already matches, and keeps
+content outside the markers. For shared hooks, run `bd hooks install --shared`
+and commit the refreshed `.beads-hooks/` files with your normal commit
+workflow.
 
 ### Permission denied on git hooks
 

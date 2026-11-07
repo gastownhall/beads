@@ -411,10 +411,10 @@ func TestUninstallHooksPreservesExternalIntegrationHook(t *testing.T) {
 // guard must skip it even though it is not IsBdHook, and must still run a plain
 // .old.
 //
-// The delegating fixture comments its "bd hooks run" line out. The classifier
-// matches the call anywhere in the file, so it still classifies as an external
-// integration, but if the guard stops firing it only leaves the marker behind
-// instead of recursing.
+// The delegating fixture comments its "bd hooks run" line out. The guard
+// matches the call anywhere in a line, so it still counts as delegation, but if
+// the guard stops firing it only leaves the marker behind instead of
+// recursing.
 func TestRunChainedHookSkipsDelegatingOldHook(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("chained .old fixtures are POSIX shell scripts")
@@ -446,14 +446,14 @@ func TestRunChainedHookSkipsDelegatingOldHook(t *testing.T) {
 			}
 
 			// Pin the classification the guard keys on, so a fixture that
-			// stopped looking like an integration cannot pass for the wrong
+			// stopped looking like delegation cannot pass for the wrong
 			// reason.
 			info, err := getHookVersion(oldHook)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if info.IsBdHook || info.IsExternalIntegration != tc.delegates {
-				t.Fatalf("fixture classified as %+v, want IsExternalIntegration=%v and IsBdHook=false", info, tc.delegates)
+			if beads := isBeadsChainedHook(script); info.IsBdHook || beads != tc.delegates {
+				t.Fatalf("fixture classified as %+v with isBeadsChainedHook=%v, want IsBdHook=false and isBeadsChainedHook=%v", info, beads, tc.delegates)
 			}
 
 			if code := runChainedHook("pre-commit", nil); code != 0 {
@@ -462,6 +462,54 @@ func TestRunChainedHookSkipsDelegatingOldHook(t *testing.T) {
 			_, statErr := os.Stat(marker)
 			if ran := statErr == nil; ran != tc.wantRun {
 				t.Fatalf("chained .old ran = %v, want %v", ran, tc.wantRun)
+			}
+		})
+	}
+}
+
+// TestRunChainedHookRemapsReservedStatuses pins GH#6751: a chained hook's
+// exit 3, 124 or 142 would read as a skip or a timeout to the generated
+// section around bd hooks run (an installed older section even turns 3 into
+// success), so bd reports it as 1 and names the original status. Every other
+// status passes through unchanged.
+func TestRunChainedHookRemapsReservedStatuses(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chained .old fixtures are POSIX shell scripts")
+	}
+	for _, tc := range []struct {
+		exit     string
+		want     int
+		reserved bool
+	}{
+		{exit: "0", want: 0},
+		{exit: "1", want: 1},
+		{exit: "7", want: 7},
+		{exit: "3", want: 1, reserved: true},
+		{exit: "124", want: 1, reserved: true},
+		{exit: "142", want: 1, reserved: true},
+	} {
+		t.Run("exit "+tc.exit, func(t *testing.T) {
+			repoDir := setupGuardTestRepo(t)
+			hooksDir := filepath.Join(repoDir, ".git", "hooks")
+			if err := os.MkdirAll(hooksDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			script := "#!/bin/sh\necho sidecar-diagnostic >&2\nexit " + tc.exit + "\n"
+			if err := os.WriteFile(filepath.Join(hooksDir, "pre-commit.old"), []byte(script), 0755); err != nil {
+				t.Fatal(err)
+			}
+
+			var code int
+			stderr := captureStderr(t, func() { code = runChainedHook("pre-commit", nil) })
+			if code != tc.want {
+				t.Errorf("runChainedHook() = %d, want %d\n%s", code, tc.want, stderr)
+			}
+			if !strings.Contains(stderr, "sidecar-diagnostic") {
+				t.Errorf("chained hook's own stderr was lost\n%s", stderr)
+			}
+			remapped := strings.Contains(stderr, "pre-commit.old exited "+tc.exit)
+			if remapped != tc.reserved {
+				t.Errorf("remap diagnostic present = %v, want %v\n%s", remapped, tc.reserved, stderr)
 			}
 		})
 	}

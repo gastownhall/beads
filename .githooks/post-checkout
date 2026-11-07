@@ -1,6 +1,48 @@
 #!/usr/bin/env sh
 # --- BEGIN BEADS INTEGRATION v1.3.4 ---
 # This section is managed by beads. Do not remove these markers.
+case "$0" in
+  */*) _bd_hook_dir=${0%/*} ;;
+  *) _bd_hook_dir=. ;;
+esac
+_bd_chain_hook="$_bd_hook_dir/post-checkout.old"
+_bd_chain=0
+case ":${BD_HOOK_CHAIN_ACTIVE:-}:" in
+  *":post-checkout:"*) ;;
+  *)
+    if [ -f "$_bd_chain_hook" ] && [ -x "$_bd_chain_hook" ]; then
+      _bd_chain=1
+      if [ -r "$_bd_chain_hook" ]; then
+        _bd_chain_first=1
+        while IFS= read -r _bd_chain_line || [ -n "$_bd_chain_line" ]; do
+          if [ "$_bd_chain_first" -eq 1 ]; then
+            _bd_chain_first=0
+            case "$_bd_chain_line" in
+              "#!"*) ;;
+              *) break ;;
+            esac
+          fi
+          case "$_bd_chain_line" in
+            "# --- BEGIN BEADS ""INTEGRATION"*|"# bd-""shim "*|"# bd-hooks-""version: "*|*"# bd (""beads)"*) _bd_chain=0; break ;;
+            *bd*hooks*run*)
+              _bd_chain_words=" $_bd_chain_line "
+              while :; do
+                case "$_bd_chain_words" in
+                  *"	"*) _bd_chain_words="${_bd_chain_words%%"	"*} ${_bd_chain_words#*"	"}" ;;
+                  *"  "*) _bd_chain_words="${_bd_chain_words%%"  "*} ${_bd_chain_words#*"  "}" ;;
+                  *) break ;;
+                esac
+              done
+              case "$_bd_chain_words" in
+                *[![:alnum:]_]"bd hooks run"[![:alnum:]_]*) _bd_chain=0; break ;;
+              esac
+              ;;
+          esac
+        done < "$_bd_chain_hook" 2>/dev/null
+      fi
+    fi
+    ;;
+esac
 if command -v bd >/dev/null 2>&1; then
   export BD_GIT_HOOK=1
   _bd_timeout=${BEADS_HOOK_TIMEOUT:-300}
@@ -63,9 +105,12 @@ if command -v bd >/dev/null 2>&1; then
     echo >&2 "beads: hook 'post-checkout' timed out after ${_bd_timeout}s — continuing without beads"
     _bd_exit=0
   fi
-  if [ "$_bd_exit" -eq 3 ]; then
-    echo >&2 "beads: database not initialized — skipping hook 'post-checkout'"
+  if [ "$_bd_exit" -ne 0 ]; then exit "$_bd_exit"; fi
+elif [ "$_bd_chain" -eq 1 ]; then
+  if BD_HOOK_CHAIN_ACTIVE="${BD_HOOK_CHAIN_ACTIVE:+$BD_HOOK_CHAIN_ACTIVE:}post-checkout" "$_bd_chain_hook" "$@"; then
     _bd_exit=0
+  else
+    _bd_exit=$?
   fi
   if [ "$_bd_exit" -ne 0 ]; then exit "$_bd_exit"; fi
 fi

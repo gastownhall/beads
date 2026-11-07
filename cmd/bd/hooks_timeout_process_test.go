@@ -175,7 +175,16 @@ type hookProcessFixture struct {
 }
 
 type hookProcessCase struct {
-	fixtures    []hookProcessFixture
+	fixtures []hookProcessFixture
+	// hookName is the managed hook to generate; empty means pre-push.
+	hookName string
+	// hookDirFiles are written beside the hook, e.g. a chained <hook>.old.
+	hookDirFiles []hookProcessFixture
+	// trailer is user content written after the managed section.
+	trailer string
+	// noBD leaves bd off the controlled PATH.
+	noBD        bool
+	extraEnv    []string
 	bdBody      string
 	bdExit      int
 	shellOption string
@@ -385,7 +394,9 @@ func testHookProcessReservedStatuses(t *testing.T) {
 		wantWarning   bool
 		wantDBWarning bool
 	}{
-		{name: "database-not-initialized is skipped", fixtures: gnu, bdExit: 3, wantDBWarning: true},
+		// GH#6751: bd hooks run never opens a database, so its 3 is a chained
+		// hook's verdict and is returned, not read as "not initialized".
+		{name: "exit 3 propagates", fixtures: gnu, bdExit: 3, wantExit: 3},
 		{name: "GNU owns 124", fixtures: gnu, bdExit: 124, wantWarning: true},
 		{name: "GNU preserves 137", fixtures: gnu, bdExit: 137, wantExit: 137},
 		{name: "GNU preserves 142", fixtures: gnu, bdExit: 142, wantExit: 142},
@@ -522,7 +533,8 @@ func testHookProcessRealPerlStatuses(t *testing.T) {
 		wantDBWarning bool
 	}{
 		{name: "success continues", bdExit: 0},
-		{name: "database-not-initialized is skipped", bdExit: 3, wantDBWarning: true},
+		// GH#6751: a 3 from bd hooks run is a chained hook's verdict, not a skip.
+		{name: "exit 3 propagates", bdExit: 3, wantExit: 3},
 		{name: "other status is preserved", bdExit: 37, wantExit: 37},
 		{name: "124 is preserved", bdExit: 124, wantExit: 124},
 		{name: "142 is reported as a timeout", bdExit: 142, wantWarning: true},
@@ -638,19 +650,39 @@ if timeout --version >/dev/null 2>&1; then exit 2; fi
 
 func runGeneratedHookProcess(t *testing.T, tc hookProcessCase) hookProcessResult {
 	t.Helper()
+	return runGeneratedHookProcessWithSetup(t, tc, nil)
+}
+
+// runGeneratedHookProcessWithSetup is runGeneratedHookProcess with a setup
+// callback that may add files to the hook's directory before the hook runs.
+func runGeneratedHookProcessWithSetup(t *testing.T, tc hookProcessCase, setup func(hookDir string)) hookProcessResult {
+	t.Helper()
 
 	binDir := t.TempDir()
 	bdBody := tc.bdBody
 	if bdBody == "" {
 		bdBody = hookProcessBDStub
 	}
-	writeHookProcessFixture(t, binDir, "bd", bdBody)
+	if !tc.noBD {
+		writeHookProcessFixture(t, binDir, "bd", bdBody)
+	}
 	for _, fixture := range tc.fixtures {
 		writeHookProcessFixture(t, binDir, fixture.name, fixture.body)
 	}
 
-	hookPath := filepath.Join(t.TempDir(), "pre-push")
-	writeHookProcessFixture(t, filepath.Dir(hookPath), filepath.Base(hookPath), "#!/bin/sh\n"+generateHookSection("pre-push"))
+	hookName := tc.hookName
+	if hookName == "" {
+		hookName = "pre-push"
+	}
+	hookDir := t.TempDir()
+	hookPath := filepath.Join(hookDir, hookName)
+	writeHookProcessFixture(t, hookDir, hookName, "#!/bin/sh\n"+generateHookSection(hookName)+tc.trailer)
+	for _, fixture := range tc.hookDirFiles {
+		writeHookProcessFixture(t, hookDir, fixture.name, fixture.body)
+	}
+	if setup != nil {
+		setup(hookDir)
+	}
 	controlledPath := hookProcessShellPath(t, binDir)
 	if tc.pathTail != "" {
 		controlledPath += ":" + tc.pathTail
@@ -682,7 +714,11 @@ shift
 	t.Cleanup(cancel)
 	cmd := exec.CommandContext(ctx, shellPath, commandArgs...)
 	cmd.WaitDelay = time.Second
+	// The hook is sourced, so its $0 has no slash and it looks for a chained
+	// <hook>.old in the current directory: run it from the hook's own.
+	cmd.Dir = hookDir
 	cmd.Env = append(hookProcessEnv(), "HOOK_TEST_BD_EXIT="+strconv.Itoa(tc.bdExit))
+	cmd.Env = append(cmd.Env, tc.extraEnv...)
 	if tc.timeout != nil {
 		cmd.Env = append(cmd.Env, "BEADS_HOOK_TIMEOUT="+*tc.timeout)
 	}
@@ -927,7 +963,8 @@ func hookProcessEnv() []string {
 		}
 		upper := strings.ToUpper(key)
 		if upper == "BASH_ENV" || upper == "BASHOPTS" || upper == "ENV" || upper == "SHELLOPTS" ||
-			upper == "BEADS_HOOK_TIMEOUT" || upper == "HOOK_TEST_BD_EXIT" || upper == "HOOK_TEST_SLEEP" {
+			upper == "BEADS_HOOK_TIMEOUT" || upper == "HOOK_TEST_BD_EXIT" || upper == "HOOK_TEST_SLEEP" ||
+			upper == "BD_HOOK_CHAIN_ACTIVE" {
 			continue
 		}
 		env = append(env, entry)
@@ -944,7 +981,7 @@ func hookProcessGitEnv(home string, extra ...string) []string {
 		}
 		upper := strings.ToUpper(key)
 		if upper == "HOME" || upper == "USERPROFILE" || upper == "BASH_ENV" || upper == "BASHOPTS" || upper == "ENV" || upper == "SHELLOPTS" ||
-			strings.HasPrefix(upper, "GIT_") || upper == "HOOK_TEST_BD_EXIT" {
+			strings.HasPrefix(upper, "GIT_") || upper == "HOOK_TEST_BD_EXIT" || upper == "BD_HOOK_CHAIN_ACTIVE" {
 			continue
 		}
 		env = append(env, entry)

@@ -1208,6 +1208,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Generated git hooks run a chained `<hook>.old` themselves when `bd` is not
+  on `PATH`, with git's arguments and standard input, so a failing
+  pre-commit or pre-push check stops the commit or push instead of being
+  skipped (GH#6751, building on #6840 by vishnujayvel).
+  With or without `bd`, a `<hook>.old` is skipped only when it is itself a
+  beads hook: one beads wrote, or one that calls `bd hooks run`.
+  `bd hooks run` no longer skips a chained hook that merely mentions a beads
+  marker, such as a check that greps for the beads section.
+  A chained hook that exits 124 or 142, which the hook section reads as its
+  own timeout, or 3, which sections installed earlier read as a skip, makes
+  `bd hooks run` fail with exit 1 and a warning naming its status.
+  A status 3 from `bd hooks run` now fails the hook instead of printing
+  `database not initialized` and continuing; `bd hooks run` never opens the
+  database, so that 3 was the chained hook's verdict.
+  When the hook deadline ends a `pre-commit` or `pre-push` hook that has a
+  chained `<hook>.old`, the hook refuses the commit or push and says the
+  outcome is unknown instead of continuing.
+  Run `bd hooks install` once (`--shared` for shared hooks) to refresh
+  installed hook sections.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

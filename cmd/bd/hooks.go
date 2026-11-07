@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -99,11 +100,95 @@ const hookTimeoutKillAfterSeconds = 2
 //     status. SIGHUP, SIGINT and SIGTERM that reach the supervisor are passed
 //     on to the group: a Ctrl-C signals the terminal's process group, which no
 //     longer holds bd.
-//   - If the beads database is not initialized (exit code 3), the hook exits
-//     successfully with a warning so that git operations are not blocked.
+//
+// Chained hooks (GH#6751, building on PR #6840 by vishnujayvel): bd hooks run
+// runs <hookName>.old, a foreign tool's hook, before its own work, so the
+// section must not let a skipped bd skip that gate too.
+//   - The section classifies <hookName>.old by runChainedHook's rules
+//     (isBeadsChainedHook): an executable regular file is chained unless it
+//     is a beads hook, which would chain back into bd: a line starting with
+//     the section, shim or version marker, the inline marker anywhere in a
+//     line, or a line calling bd hooks run (spaces or tabs between the
+//     words). A marker quoted later in a line does not count, so a foreign
+//     gate that mentions one runs with or without bd on PATH. Only a script,
+//     a file whose first line starts with #!, is scanned, so a binary stays
+//     eligible without a whole-file read, and a file the shell cannot read is
+//     chained. runChainedHook reads any file, so the two differ for a file
+//     that is not a script but holds one of those lines.
+//     TestChainedHookClassifiersAgree runs both over the same sidecars.
+//     The classifier uses shell builtins only (minimal PATHs are the case it
+//     exists for) and reads the file on its own descriptor, leaving the hook's
+//     stdin to the chained hook. Its marker patterns are split into adjacent
+//     quoted fragments so the generated text holds no marker literal that a
+//     Go marker scanner would read as a second section or a legacy hook.
+//   - Without bd on PATH, the section runs an eligible chained hook itself
+//     with the hook's argv and stdin, exits with its nonzero status, and
+//     falls through to the content after the section on success. The run
+//     sets BD_HOOK_CHAIN_ACTIVE to the hook name, so a chained hook that
+//     re-enters its parent hook is not chained again.
+//   - When the deadline ends bd hooks run for pre-commit or pre-push with an
+//     eligible chained hook, the gate's verdict is unknown, so the section
+//     refuses rather than continuing. The gate is never rerun.
+//   - bd's exit 3 is returned as is. bd hooks run never opens a database
+//     (hooks is a no-database command), so the old "database not initialized"
+//     skip only ever swallowed a chained hook's own exit 3.
 func generateHookSection(hookName string) string {
+	continueOnTimeout := "echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n"
+	timeoutHandling := "    " + continueOnTimeout +
+		"    _bd_exit=0\n"
+	if hookName == "pre-commit" || hookName == "pre-push" {
+		timeoutHandling = "    if [ \"$_bd_chain\" -eq 1 ]; then\n" +
+			"      echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s while chained hook '" + hookName + ".old' may still have been running; the gate outcome is unknown, refusing (raise BEADS_HOOK_TIMEOUT to give it more time)\"\n" +
+			"      _bd_exit=1\n" +
+			"    else\n" +
+			"      " + continueOnTimeout +
+			"      _bd_exit=0\n" +
+			"    fi\n"
+	}
 	return hookSectionBeginLine() + "\n" +
 		"# This section is managed by beads. Do not remove these markers.\n" +
+		"case \"$0\" in\n" +
+		"  */*) _bd_hook_dir=${0%/*} ;;\n" +
+		"  *) _bd_hook_dir=. ;;\n" +
+		"esac\n" +
+		"_bd_chain_hook=\"$_bd_hook_dir/" + hookName + ".old\"\n" +
+		"_bd_chain=0\n" +
+		"case \":${BD_HOOK_CHAIN_ACTIVE:-}:\" in\n" +
+		"  *\":" + hookName + ":\"*) ;;\n" +
+		"  *)\n" +
+		"    if [ -f \"$_bd_chain_hook\" ] && [ -x \"$_bd_chain_hook\" ]; then\n" +
+		"      _bd_chain=1\n" +
+		"      if [ -r \"$_bd_chain_hook\" ]; then\n" +
+		"        _bd_chain_first=1\n" +
+		"        while IFS= read -r _bd_chain_line || [ -n \"$_bd_chain_line\" ]; do\n" +
+		"          if [ \"$_bd_chain_first\" -eq 1 ]; then\n" +
+		"            _bd_chain_first=0\n" +
+		"            case \"$_bd_chain_line\" in\n" +
+		"              \"#!\"*) ;;\n" +
+		"              *) break ;;\n" +
+		"            esac\n" +
+		"          fi\n" +
+		"          case \"$_bd_chain_line\" in\n" +
+		"            \"# --- BEGIN BEADS \"\"INTEGRATION\"*|\"# bd-\"\"shim \"*|\"# bd-hooks-\"\"version: \"*|*\"# bd (\"\"beads)\"*) _bd_chain=0; break ;;\n" +
+		"            *bd*hooks*run*)\n" +
+		"              _bd_chain_words=\" $_bd_chain_line \"\n" +
+		"              while :; do\n" +
+		"                case \"$_bd_chain_words\" in\n" +
+		"                  *\"\t\"*) _bd_chain_words=\"${_bd_chain_words%%\"\t\"*} ${_bd_chain_words#*\"\t\"}\" ;;\n" +
+		"                  *\"  \"*) _bd_chain_words=\"${_bd_chain_words%%\"  \"*} ${_bd_chain_words#*\"  \"}\" ;;\n" +
+		"                  *) break ;;\n" +
+		"                esac\n" +
+		"              done\n" +
+		"              case \"$_bd_chain_words\" in\n" +
+		"                *[![:alnum:]_]\"bd hooks run\"[![:alnum:]_]*) _bd_chain=0; break ;;\n" +
+		"              esac\n" +
+		"              ;;\n" +
+		"          esac\n" +
+		"        done < \"$_bd_chain_hook\" 2>/dev/null\n" +
+		"      fi\n" +
+		"    fi\n" +
+		"    ;;\n" +
+		"esac\n" +
 		"if command -v bd >/dev/null 2>&1; then\n" +
 		"  export BD_GIT_HOOK=1\n" +
 		"  _bd_timeout=${BEADS_HOOK_TIMEOUT:-" + fmt.Sprintf("%d", hookTimeoutSeconds) + "}\n" +
@@ -163,12 +248,14 @@ func generateHookSection(hookName string) string {
 		"    fi\n" +
 		"  fi\n" +
 		"  if { [ \"$_bd_timeout_backend\" = coreutils ] && [ \"$_bd_exit\" -eq 124 ]; } || { [ \"$_bd_timeout_backend\" = perl ] && [ \"$_bd_exit\" -eq 142 ]; }; then\n" +
-		"    echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n" +
-		"    _bd_exit=0\n" +
+		timeoutHandling +
 		"  fi\n" +
-		"  if [ \"$_bd_exit\" -eq 3 ]; then\n" +
-		"    echo >&2 \"beads: database not initialized — skipping hook '" + hookName + "'\"\n" +
+		"  if [ \"$_bd_exit\" -ne 0 ]; then exit \"$_bd_exit\"; fi\n" +
+		"elif [ \"$_bd_chain\" -eq 1 ]; then\n" +
+		"  if BD_HOOK_CHAIN_ACTIVE=\"${BD_HOOK_CHAIN_ACTIVE:+$BD_HOOK_CHAIN_ACTIVE:}" + hookName + "\" \"$_bd_chain_hook\" \"$@\"; then\n" +
 		"    _bd_exit=0\n" +
+		"  else\n" +
+		"    _bd_exit=$?\n" +
 		"  fi\n" +
 		"  if [ \"$_bd_exit\" -ne 0 ]; then exit \"$_bd_exit\"; fi\n" +
 		"fi\n" +
@@ -1777,6 +1864,38 @@ func resetHooksPathAt(repoRoot, commonDir, storageHooksDir string, configEnv []s
 // Hook Implementation Functions (called by thin shims via 'bd hooks run')
 // =============================================================================
 
+// bdHooksRunCallPattern matches a bd hooks run call on one line of a hook,
+// its words separated by spaces or tabs as the shell separates them. doctor's
+// pattern, which also matches across a line break, decides only how a hook is
+// reported.
+var bdHooksRunCallPattern = regexp.MustCompile(`\bbd[ \t]+hooks[ \t]+run\b`)
+
+// isBeadsChainedHook reports whether a chained <hook>.old with this content is
+// a beads hook, which runChainedHook must not run: running it would redo bd's
+// hook work, or call bd hooks run, which chains to the same .old again without
+// bound (GH#843, GH#1120). That is a line starting with the section, shim or
+// version marker, the inline marker anywhere in a line, or a line calling bd
+// hooks run, the shape beads prescribes for external managers (GH#946).
+//
+// A marker quoted later in a line does none of that, so such a hook runs,
+// although getHookVersion reports it as an external integration: it may be a
+// foreign gate (GH#6751). This is a recursion question, not ownership. The
+// generated section applies the same rules to a script when bd is not on PATH
+// (see generateHookSection), so a gate runs or is skipped alike with or
+// without bd.
+func isBeadsChainedHook(content string) bool {
+	for _, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(line, hookSectionBeginPrefix) ||
+			strings.HasPrefix(line, shimVersionPrefix) ||
+			strings.HasPrefix(line, hookVersionPrefix) ||
+			strings.Contains(line, inlineHookMarker) ||
+			bdHooksRunCallPattern.MatchString(line) {
+			return true
+		}
+	}
+	return false
+}
+
 // runChainedHook runs a .old hook if it exists. Returns the exit code.
 // If the hook doesn't exist, returns 0 (success).
 func runChainedHook(hookName string, args []string) int {
@@ -1788,26 +1907,23 @@ func runChainedHook(hookName string, args []string) int {
 
 	oldHookPath := filepath.Join(hooksDir, hookName+".old")
 
-	// Check if the .old hook exists and is executable
+	// Check if the .old hook is an executable regular file, as the generated
+	// section does before it runs one without bd
 	info, err := os.Stat(oldHookPath)
 	if err != nil {
 		return 0 // No chained hook
 	}
-	if info.Mode().Perm()&0111 == 0 {
-		return 0 // Not executable
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
+		return 0 // Not an executable file
 	}
 
-	// Check if .old is itself a bd hook (shim or inline) - skip to prevent infinite recursion
-	// This can happen if user runs `bd hooks install --chain` multiple times,
-	// renaming an existing bd hook to .old. See: GH#843, GH#1120
-	//
-	// IsExternalIntegration counts here too: a .old that delegates via
-	// "bd hooks run" re-enters bd, which chains to the same .old again. This is a
-	// recursion question ("would running this call us back?"), not an ownership
-	// question, so it takes the wider predicate — unlike the write sites, which
-	// stay on IsBdHook alone.
-	versionInfo, err := getHookVersion(oldHookPath)
-	if err == nil && (versionInfo.IsBdHook || versionInfo.IsExternalIntegration) {
+	// Skip a .old that is itself a beads hook (see isBeadsChainedHook). This
+	// can happen if a user ran `bd hooks install --chain` multiple times,
+	// renaming an existing bd hook to .old (GH#843, GH#1120), or if .old
+	// delegates via "bd hooks run" like an external manager's hook. A .old
+	// that cannot be read is run, as the section runs one it cannot read.
+	content, err := os.ReadFile(oldHookPath) // #nosec G304 -- path is the chained hook in the git hooks directory
+	if err == nil && isBeadsChainedHook(string(content)) {
 		// Skip execution - .old would call us again
 		return 0
 	}
@@ -1821,7 +1937,17 @@ func runChainedHook(hookName string, args []string) int {
 
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return exitErr.ExitCode()
+			code := exitErr.ExitCode()
+			// GH#6751: the generated section reads 124 and 142 from bd as its
+			// own deadline, and sections installed before GH#6751 read 3 as an
+			// uninitialized database; either way a chained gate's failure would
+			// pass as a skip. Those statuses become 1, with the original
+			// reported on stderr; every other status is returned unchanged.
+			if code == 3 || code == 124 || code == 142 {
+				fmt.Fprintf(os.Stderr, "Warning: chained hook %s.old exited %d, which the beads hook section reserves for a skip or timeout; failing with exit 1 instead\n", hookName, code)
+				return 1
+			}
+			return code
 		}
 		// Other error - treat as failure
 		fmt.Fprintf(os.Stderr, "Warning: chained hook %s failed: %v\n", hookName, err)

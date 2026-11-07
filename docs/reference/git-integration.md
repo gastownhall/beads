@@ -68,6 +68,24 @@ bd hooks install --chain    # Run existing hooks before bd hooks
 Hook installation is worktree-aware: `bd` resolves the shared git directory,
 so installing from a linked worktree works.
 
+A hook kept beside the beads hook as `<hook>.old` (for example, one you moved
+there by hand) is chained: `bd hooks run` runs it first. If `bd` is not on
+`PATH` when the hook fires, the hook runs `<hook>.old` itself with git's
+arguments and standard input, so a pre-commit or pre-push check that fails
+still stops the commit or push instead of being skipped. A `<hook>.old` that
+is itself a beads hook (one beads wrote, or one that calls `bd hooks run`) is
+skipped either way, while a check that merely mentions a beads marker, such
+as one that greps for the beads section, runs. Hooks installed before this
+change skip `<hook>.old` when `bd` is missing; run `bd hooks install` (add
+`--shared` for shared hooks) once to refresh them.
+
+The hook passes on the chained hook's exit status. The hook reads 124 and 142
+from `bd hooks run` as its own timeout, and hooks installed before this change
+also read 3 as a skip, so when `bd hooks run` runs a chained hook that exits
+3, 124 or 142, it fails with exit 1 and a warning naming the original status.
+When the hook runs `<hook>.old` itself because `bd` is missing, every status
+passes through unchanged.
+
 ### Status
 
 ```bash
@@ -165,13 +183,21 @@ the hook itself returns.
 Already-installed hook sections are not refreshed automatically. After upgrading
 to a release that changed the generated timeout probe — the name-only check,
 the uutils coreutils banner, or the Perl fallback that could not stop `bd`
-([#7753](https://github.com/gastownhall/beads/issues/7753)) — run
+([#7753](https://github.com/gastownhall/beads/issues/7753)) — or the
+chained-hook handling from
+[#6751](https://github.com/gastownhall/beads/issues/6751), run
 `bd hooks install` once to refresh
 already-installed canonical hook sections. Automatic generated-policy adoption is
 tracked separately.
 
 When the timeout is reached, beads prints a warning and lets the git
-operation proceed — the commit or push is not blocked.
+operation proceed, with one exception: if a `pre-commit` or `pre-push` hook
+has a chained `<hook>.old`, the deadline may have stopped that check before it
+decided, so beads refuses the commit or push and says the outcome is unknown.
+The chained hook is never rerun. Beads cannot tell whether the chained hook had
+already passed and its own later work (such as the pre-commit export) hit the
+deadline, so it refuses in that case too. Raise `BEADS_HOOK_TIMEOUT` to give
+the hook more time.
 
 ## Conflict Resolution
 
