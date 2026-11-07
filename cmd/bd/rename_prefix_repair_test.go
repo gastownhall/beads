@@ -327,8 +327,8 @@ func TestRenameRewritesCloseReasonAndOwnText(t *testing.T) {
 	}
 
 	a, err := testStore.GetIssue(ctx, "test-a")
-	if err != nil {
-		t.Fatalf("failed to get test-a: %v", err)
+	if err != nil || a.ClosedAt == nil {
+		t.Fatalf("test-a after close: %+v, %v; want a closed_at", a, err)
 	}
 	if err := renameIssueKeepingBeadGates(ctx, testStore, a, "test-z", nil, "test"); err != nil {
 		t.Fatalf("rename failed: %v", err)
@@ -352,6 +352,12 @@ func TestRenameRewritesCloseReasonAndOwnText(t *testing.T) {
 		if f.got != f.want {
 			t.Errorf("renamed issue %s = %q, want %q", f.field, f.got, f.want)
 		}
+	}
+	if z.Status != types.StatusClosed {
+		t.Errorf("renamed issue status = %q, want closed", z.Status)
+	}
+	if z.ClosedAt == nil || !z.ClosedAt.Equal(*a.ClosedAt) {
+		t.Errorf("renamed issue closed_at = %v, want it unchanged at %v", z.ClosedAt, *a.ClosedAt)
 	}
 	b, err := testStore.GetIssue(ctx, "test-b")
 	if err != nil {
