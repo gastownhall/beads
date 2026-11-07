@@ -4,6 +4,7 @@ load("@rules_shell//shell:sh_test.bzl", "sh_test")
 go_library(
     name = "versioncontrolops",
     srcs = [
+        "aftermerge.go",
         "automerge.go",
         "backup.go",
         "blocked_recompute.go",
@@ -20,6 +21,7 @@ go_library(
         "mergesettle.go",
         "remoterefs.go",
         "remotes.go",
+        "transfer.go",
         "version_control.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/storage/versioncontrolops",
@@ -37,6 +39,7 @@ go_library(
 go_test(
     name = "versioncontrolops_test",
     srcs = [
+        "aftermerge_test.go",
         "automerge_test.go",
         "backup_test.go",
         "clone_test.go",
@@ -51,6 +54,8 @@ go_test(
         "remotes_githooks_test.go",
         "remotes_gittrace_test.go",
         "remotes_test.go",
+        "transfer_pull_test.go",
+        "transfer_test.go",
     ],
     embed = [":versioncontrolops"],
     deps = [

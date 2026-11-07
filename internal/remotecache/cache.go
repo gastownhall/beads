@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltversion"
+	"github.com/steveyegge/beads/internal/execgrace"
 	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/lockfile"
@@ -229,11 +230,19 @@ func requireDoltCLIVersion(ctx context.Context, doltBin string) error {
 	return nil
 }
 
+// doltCmdWaitDelay bounds how long a canceled cache transfer may take to
+// stop (and its inherited output pipes to close) after its SIGTERM, before
+// os/exec kills the dolt child.
+const doltCmdWaitDelay = 15 * time.Second
+
 // doltCmd builds a dolt CLI invocation for cache transfers with git tracing
 // scrubbed (internal/gittraceenv) and templated hooks disabled (GH#4272).
+// Canceling ctx asks dolt to stop with SIGTERM so it can reap its git
+// transport, killing it after doltCmdWaitDelay (internal/execgrace).
 // dir "" runs in the process working directory.
 func doltCmd(ctx context.Context, dir string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "dolt", args...) // #nosec G204 -- fixed command with validated remote/ref args
+	execgrace.Configure(cmd, doltCmdWaitDelay)
 	cmd.Dir = dir
 	cmd.Env = githooksenv.DisabledEnv(gittraceenv.ScrubEnv(os.Environ()))
 	return cmd

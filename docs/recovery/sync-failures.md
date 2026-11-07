@@ -388,6 +388,43 @@ which also covers server mode. The clone's own commit history and `events`
 rows stay in the moved-aside directory; keep it until you have checked the
 result.
 
+## Embedded database stays busy after an interrupted push or pull
+
+In embedded mode a `bd` process holds the database while it runs, so a push,
+pull or fetch that is slow to stop can make the next command wait to open it.
+In releases after v1.3.2, a failed open names the database, its directory and
+how long the open ran, for example
+`opening embedded database "beads" in "/repo/.beads/embeddeddolt" failed after 30s: ...`,
+followed by the engine's own error.
+
+`bd` cannot tell which process holds the database: the message shows a holder
+only when the engine's error itself reports one. To look for one yourself on
+Linux or macOS, list the processes with files open under the directory the
+message names:
+
+```bash
+lsof +D '/repo/.beads/embeddeddolt'
+```
+
+This is a manual hint, not proof: a process listed there may only be reading
+the files, and how long it has run is not how long it has held the database.
+Let a running `bd` or `dolt` finish or stop it normally before removing
+anything.
+
+To stop an embedded `bd dolt push` or `bd dolt pull`, press Ctrl-C once or
+send it one `SIGTERM`. In releases after v1.3.2 that first signal cancels the
+transfer: Dolt stops the git or SSH transport it started, and `bd` exits with
+an error and releases the database. This cleanup is cooperative. A second
+signal, or `kill -9`, ends `bd` at once without that cleanup and can leave the
+transport running.
+
+In those releases, a signal that arrives after a pull's fetch has finished
+does not stop the pull: `bd` completes the local merge before it exits, so the
+database is not left in the middle of a merge. The recompute of blocked flags
+that follows the merge then gets up to 15 more seconds. If it cannot open the
+database in that time because another process holds it, `bd` exits with an
+error that names `bd recompute-blocked`; run it once the database is free.
+
 ## Prevention
 
 - Ensure stable network before sync

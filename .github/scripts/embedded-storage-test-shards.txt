@@ -193,6 +193,8 @@
 40 5 TestEmbeddedMergeAfterEventsFlipOrdinary
 40 5 TestEmbeddedMergeAndSettleCommitsPeerTableChanges
 40 5 TestEmbeddedReaderListKeysetPositionResumesTheCreatedDescIDAscOrder
+40 5 TestOpenSQLFailureContext
+40 5 TestOpenSQLFailureNamesLocationElapsedAndCallerDeadline
 40 5 TestRecordVersionKeepsSubSecondChangeAt
 40 5 TestWithPeerAuth
 
@@ -369,6 +371,7 @@
 40 19 TestEmbeddedMigration0062FlipsEventsToIgnoredPlane
 40 19 TestEmbeddedReaderListMaxRowsIsHonored
 40 19 TestEmbeddedRelationsAnswersInThePinnedOrder
+40 19 TestEmbeddedRemoteTimeoutEntryPoints
 40 19 TestEmbeddedTransactionDependencyPersistsIsBlocked
 40 19 TestIgnoredCursorHealConvergesFromEveryCrashState
 40 19 TestMintedIDsPassOverEveryHeldID
@@ -388,6 +391,7 @@
 40 20 TestEmbeddedMigrateCanceledFaultRestoresTransactionCommit_4470
 40 20 TestEmbeddedMigrateStepCommitLeavesUntouchedUserDirt_4566
 40 20 TestEmbeddedOpenReadOnly_SkipsGateAndMigrations
+40 20 TestEmbeddedPullFinishesMergeAfterCallerCancellation
 40 20 TestEmbeddedReadyClaimerClaimsAnEphemeralRowTheFilterAdmits
 40 20 TestEventsJournalRestartAndRetentionBoundary
 40 20 TestForeignSkipDetailIsBounded
