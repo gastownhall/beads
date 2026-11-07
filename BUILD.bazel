@@ -125,6 +125,13 @@ exports_files(
     visibility = ["//test/docsync:__pkg__"],
 )
 
+# //internal/storage/embeddeddolt:embeddeddolt_test: the recovery guide whose
+# SQL recovery_guide_events_test.go runs.
+exports_files(
+    ["docs/recovery/accidental-1-2-1-release.md"],
+    visibility = ["//internal/storage/embeddeddolt:__pkg__"],
+)
+
 # //cmd/bd:bd_test: tracked git hooks (generator parity) and the formula
 # primitive fixtures.
 filegroup(

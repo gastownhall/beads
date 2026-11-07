@@ -271,6 +271,7 @@
 40 11 TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPasswordStored
 
 40 12 TestCounterExcludeStatusAcceptsAWorkspaceCustomStatusWithoutIncludeInfra
+40 12 TestEmbeddedAccidentalReleaseFinishOldRetrack
 40 12 TestEmbeddedClaimerAcceptsAConfiguredActiveStatusAndRefusesAConfiguredWipOne
 40 12 TestEmbeddedClaimerRefusesAWispIDAsNotFound
 40 12 TestEmbeddedDependencyEditorVersionsOnlyARealAddOrRemove
@@ -282,6 +283,7 @@
 40 12 TestLifecycleUpdateContract
 40 12 TestReaderListExcludeStatusAcceptsAWorkspaceCustomStatus
 
+40 13 TestEmbeddedAccidentalReleaseRecoveredCloneWrites
 40 13 TestEmbeddedActivationDoesNotOpenTheEngine
 40 13 TestEmbeddedDepRekeyConvergesRenameChain
 40 13 TestEmbeddedDependencyEditorAppliesParentChildBeforeBlockingEdges
@@ -323,6 +325,7 @@
 40 15 TestReadyWorkPageTotalFilterMatrix
 
 40 16 TestDescendantWalkReachesEveryTargetKindAndStopsOnCycles
+40 16 TestEmbeddedAccidentalReleaseRecoveryDivergentPeers
 40 16 TestEmbeddedDeferredActivationRecordsFromTheFirstWrite
 40 16 TestEmbeddedDependencyEditorAddedEchoesTheRequestOrder
 40 16 TestEmbeddedDependencyEditorRemovesOnlyTheNamedEdge
@@ -336,6 +339,7 @@
 40 16 TestWithPeerAuth_DivergedRemoteURLFailsClosed
 
 40 17 TestAddDependency
+40 17 TestEmbeddedAccidentalReleaseRecoveryTwoFlips
 40 17 TestEmbeddedBatchCloserWispItemClosesAndEarnsTheClaim
 40 17 TestEmbeddedDependencyEditorSameTypeReAddWithChangedThreadMintsOneVersion
 40 17 TestEmbeddedIgnoredMigration0031OpensAShallowClone
@@ -527,6 +531,7 @@
 
 40 30 TestCounterContract
 40 30 TestCycleDetectorContract
+40 30 TestEmbeddedAccidentalReleaseRecoveryV121Clone
 40 30 TestEmbeddedClaimerTakesAnOpenIssueTheActorAlreadyHolds
 40 30 TestEmbeddedCommitToleratesNothingToCommit
 40 30 TestEmbeddedDeferredSwitchReadErrorFailsTheWrite
@@ -555,6 +560,7 @@
 40 31 TestWithPeerAuth_KeyMismatchFailsClosed
 
 40 32 TestCurrentAddressForNeverReseedsAnAbsentStoreEpochRow
+40 32 TestEmbeddedAccidentalReleaseMissingEventsClone
 40 32 TestEmbeddedClaimerGrantsALiveLeaseOnTheRowItWonAndLeavesARefusedOneAlone
 40 32 TestEmbeddedDependencyEditorRefusesAMissingLocalTarget
 40 32 TestEmbeddedDirtyTablesGate_BlocksReopenThenWorkingSetReconcileRecovers
@@ -568,6 +574,7 @@
 40 32 TestRemoteVerbPlainRemoteKeepsAmbientEnv
 40 32 TestWithPeerAuth_MissingRemoteFailsClosed
 
+40 33 TestEmbeddedAccidentalReleaseRecoveryRestoresEvents
 40 33 TestEmbeddedBatchCloserDuplicateItemRecloseAtItsOwnIndex
 40 33 TestEmbeddedDependencyEditorClosedChildAddSatisfiesAnAnyChildrenGate
 40 33 TestEmbeddedDependencyEditorValidationRefusalsWriteNothing
