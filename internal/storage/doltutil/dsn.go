@@ -63,6 +63,13 @@ type ServerDSN struct {
 	Database string        // optional; empty connects without selecting a database
 	Timeout  time.Duration // connect timeout; 0 defaults to 5s
 	TLS      bool
+	// TLSConfigName names a TLS configuration registered with
+	// mysql.RegisterTLSConfig. When set it overrides TLS on the built DSN
+	// (tls=<name> instead of tls=true), so a caller holding a full
+	// sidecar-grade tls.Config — CA, client certificate, server name — puts
+	// it on the connection instead of the boolean's anonymous one. Empty
+	// keeps the TLS bool's spelling below.
+	TLSConfigName string
 }
 
 // String builds the MySQL DSN string. Always sets parseTime=true,
@@ -119,9 +126,12 @@ func (d ServerDSN) String() string {
 		Timeout:              timeout,
 		AllowNativePasswords: true,
 	}
-	if d.TLS {
+	switch {
+	case d.TLSConfigName != "":
+		cfg.TLSConfig = d.TLSConfigName
+	case d.TLS:
 		cfg.TLSConfig = "true"
-	} else {
+	default:
 		// go-sql-driver/mysql v1.8+ defaults to tls=preferred when TLSConfig
 		// is empty. Dolt servers without TLS reject preferred-mode negotiation
 		// with "TLS requested but server does not support TLS". Explicitly

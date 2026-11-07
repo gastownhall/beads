@@ -465,6 +465,13 @@ type Config struct {
 	ServerUser     string // MySQL user (default: root)
 	ServerPassword string // MySQL password (default: empty, can be set via BEADS_DOLT_PASSWORD)
 	ServerTLS      bool   // Enable TLS for server connections (required for Hosted Dolt)
+	// ServerTLSConfigName names a TLS configuration registered with
+	// mysql.RegisterTLSConfig and overrides ServerTLS on the built DSN, so a
+	// caller holding a full external-endpoint tls.Config (CA, client
+	// certificate, server name) connects with it rather than the boolean's
+	// anonymous configuration. Set by NewExternalReadOnly, which registers the
+	// name; never set it by hand without registering.
+	ServerTLSConfigName string
 
 	// ServerPortSource records which step of doltserver's port-resolution
 	// chain (or the caller-explicit/env-var reads in applyConfigDefaults)
@@ -537,6 +544,21 @@ type Config struct {
 	// ServerHost/Port/Socket/User. Set by the store factory based on
 	// metadata.json dolt_mode=proxied-server.
 	ProxiedServer bool
+
+	// ExternalReadOnly is the resolved posture of a strictly non-mutating
+	// read of a foreign proxied-server workspace whose sidecar names an
+	// external SQL server (#5861): the connection goes straight to that
+	// endpoint, target database and user, and owns nothing locally. Set only
+	// by NewExternalReadOnly. It pins the open read-only (ReadOnly,
+	// RequireReadableSchema), unable to create or start anything
+	// (CreateIfMissing=false, DisableAutoStart=true), and bypasses
+	// applyConfigDefaults' ambient host/port/socket/user/password/database
+	// resolution in applyExternalReadOnlyDefaults: an empty password or
+	// socket is an intentionally empty value from the caller, never an
+	// invitation to inherit the launcher's BEADS_DOLT_* settings. A
+	// socket-only endpoint stays socket-only — newServerMode skips the
+	// socket-first/TCP-fallback transport resolution for this posture.
+	ExternalReadOnly bool
 
 	// Gateway indicates the server is an authenticating gateway server: a credential
 	// command supplies a short-lived token as the connection username. bd treats such a
@@ -1125,6 +1147,12 @@ func endSpan(span trace.Span, err error) {
 // ErrStoreClosed is returned when an operation is attempted on a closed store.
 var ErrStoreClosed = errors.New("store is closed")
 
+// ErrExternalReadOnlyWrite is returned by every write path on a store opened
+// through NewExternalReadOnly (the external-read posture, #5861): a foreign
+// routed read must never mutate the target workspace's database, whatever
+// method reaches a write through the store it returned.
+var ErrExternalReadOnlyWrite = errors.New("write refused: external-read store is a read-only connection to another workspace")
+
 // withReadTx runs fn inside a transaction while holding the store's read-lock.
 // Used for read operations that need a *sql.Tx to share issueops functions.
 //
@@ -1380,6 +1408,14 @@ func (s *DoltStore) commitWriteTx(ctx context.Context, fn func(tx *sql.Tx) error
 func (s *DoltStore) commitWriteTxOn(ctx context.Context, beginner txBeginner, fn func(tx *sql.Tx) error) (issueops.BlockedRecheck, error) {
 	if s.closed.Load() {
 		return issueops.BlockedRecheck{}, ErrStoreClosed
+	}
+	if s.cfg != nil && s.cfg.ExternalReadOnly {
+		// Method-level write refusal of the external-read posture
+		// (NewExternalReadOnly, #5861). The open already pins ReadOnly and
+		// never migrates, creates, or starts anything; this is the backstop
+		// for any write that still reaches the one choke point every write
+		// transaction funnels through.
+		return issueops.BlockedRecheck{}, ErrExternalReadOnlyWrite
 	}
 	tx, err := beginner.BeginTx(ctx, nil)
 	if err != nil {
@@ -1768,6 +1804,16 @@ func (s *DoltStore) queryRowContext(ctx context.Context, scan func(*sql.Row) err
 
 // applyConfigDefaults fills in default values for unset Config fields.
 func applyConfigDefaults(cfg *Config) {
+	// The external-read posture (NewExternalReadOnly) arrives fully resolved:
+	// its endpoint, database, user and password came from the target's
+	// sidecar and an explicit operator-supplied password, where an empty
+	// value is authoritative. Every default below exists to resolve an
+	// intentionally empty field from the launcher's environment — exactly
+	// what this open must not do.
+	if cfg.ExternalReadOnly {
+		applyExternalReadOnlyDefaults(cfg)
+		return
+	}
 	if cfg.Database == "" {
 		// Check env var first — this is the highest-priority override and
 		// must be consulted even when no config file was loaded.
@@ -1833,6 +1879,28 @@ func applyConfigDefaults(cfg *Config) {
 	// Pool knobs last: every DoltStore open (the CLI's store and library
 	// callers of New/NewFromConfig*) reaches New, so the knob ladders hold
 	// here regardless of how cfg was built.
+	applyPoolKnobs(cfg)
+}
+
+// applyExternalReadOnlyDefaults is applyConfigDefaults for the
+// NewExternalReadOnly posture: only the defaults that carry no endpoint
+// meaning. It resolves no connection field — the caller's values stand as
+// given, empty ones included (see Config.ExternalReadOnly) — and it applies
+// neither ResolveServerPort nor the port file/config.yaml chain, which would
+// let the launcher's workspace steer the foreign endpoint's port. The
+// BEADS_TEST_MODE production-port guard stays active: a test must not reach a
+// production server through this posture any more than through a local one.
+func applyExternalReadOnlyDefaults(cfg *Config) {
+	if cfg.CommitterName == "" {
+		cfg.CommitterName = "beads"
+	}
+	if cfg.CommitterEmail == "" {
+		cfg.CommitterEmail = "beads@local"
+	}
+	if cfg.Remote == "" {
+		cfg.Remote = "origin"
+	}
+	applyTestModePortGuard(cfg)
 	applyPoolKnobs(cfg)
 }
 
@@ -1997,7 +2065,7 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 // own server, shared or not, listens on 127.0.0.1 only.
 func resolveLocalActiveDatabaseDir(cfg *Config) string {
 	if cfg == nil || cfg.BeadsDir == "" || cfg.Database == "" ||
-		cfg.Gateway || cfg.ProxiedServer || cfg.ServerSocket != "" ||
+		cfg.ExternalReadOnly || cfg.Gateway || cfg.ProxiedServer || cfg.ServerSocket != "" ||
 		cfg.ServerTLS || !configfile.BdRunsServerAt(cfg.ServerHost) {
 		return ""
 	}
@@ -2194,7 +2262,14 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// isn't currently connectable must not block operations when the server is
 	// reachable over TCP. Normalizing here means the fail-fast dial below and
 	// the DSN built in openServerConnection agree on the transport.
-	cfg.ServerSocket = ResolveSocketTransport(cfg.ServerSocket, cfg.ServerHost, cfg.ServerPort, 500*time.Millisecond)
+	//
+	// The external-read posture is exempt: a sidecar that names a socket
+	// names that socket and nothing else (Config.ExternalReadOnly), and a
+	// fallback to TCP would send the credential to an endpoint the sidecar
+	// never described. Its failure stays a socket failure.
+	if !cfg.ExternalReadOnly {
+		cfg.ServerSocket = ResolveSocketTransport(cfg.ServerSocket, cfg.ServerHost, cfg.ServerPort, 500*time.Millisecond)
+	}
 
 	// Port 0 means "not yet resolved", and only auto-start resolves it. An
 	// open that will not start a server must not dial 127.0.0.1:0 and then
@@ -2926,13 +3001,14 @@ func createDatabaseRefusedError(cfg *Config, err error) error {
 // Adds ReadTimeout/WriteTimeout for long-lived connection pools.
 func buildServerDSN(cfg *Config, database string) string {
 	base := doltutil.ServerDSN{
-		Socket:   cfg.ServerSocket,
-		Host:     cfg.ServerHost,
-		Port:     cfg.ServerPort,
-		User:     cfg.ServerUser,
-		Password: cfg.ServerPassword,
-		Database: database,
-		TLS:      cfg.ServerTLS,
+		Socket:        cfg.ServerSocket,
+		Host:          cfg.ServerHost,
+		Port:          cfg.ServerPort,
+		User:          cfg.ServerUser,
+		Password:      cfg.ServerPassword,
+		Database:      database,
+		TLS:           cfg.ServerTLS,
+		TLSConfigName: cfg.ServerTLSConfigName,
 	}
 	// Parse the base DSN and add pool-specific timeouts.
 	parsed, err := mysql.ParseDSN(base.String())

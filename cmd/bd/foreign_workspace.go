@@ -226,6 +226,14 @@ func openForeignStore(ctx context.Context, beadsDir string, access foreignAccess
 	}
 	switch access {
 	case foreignRead:
+		// A proxied-server target with an external sidecar is read through
+		// the strictly non-mutating external connection (#5861); every other
+		// read keeps the factory dispatch. See
+		// openForeignProxiedExternalRead for the boundary.
+		store, handled, err := openForeignProxiedExternalRead(ctx, beadsDir)
+		if handled || err != nil {
+			return store, err
+		}
 		return newReadOnlyStoreFromConfig(ctx, beadsDir)
 	case foreignPreview:
 		return newPreviewStoreFromConfig(ctx, beadsDir)
