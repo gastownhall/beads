@@ -208,7 +208,7 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 			IssueID:  dep.IssueID,
 			Type:     types.EventDependencyAdded,
 			Actor:    actor,
-			NewValue: fmt.Sprintf("Added dependency: %s %s %s", dep.IssueID, dep.Type, dep.DependsOnID),
+			NewValue: dep.AddedEventDescription(),
 		}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
 			return fmt.Errorf("db: DependencySQLRepository.Insert: record dependency_added event: %w", err)
 		}
