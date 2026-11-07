@@ -970,3 +970,96 @@ func schemaVersion(t *testing.T, d *planTestDB) int {
 	}
 	return v
 }
+
+// updatedStamps reads every row's updated_at as a UTC second-precision string.
+func (d *planTestDB) updatedStamps(table string) map[string]string {
+	d.t.Helper()
+	rows, err := d.conn.QueryContext(d.ctx, "SELECT id, DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') FROM "+table)
+	if err != nil {
+		d.t.Fatalf("read %s updated_at: %v", table, err)
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var id, stamp string
+		if err := rows.Scan(&id, &stamp); err != nil {
+			d.t.Fatalf("scan %s updated_at: %v", table, err)
+		}
+		out[id] = stamp
+	}
+	if err := rows.Err(); err != nil {
+		d.t.Fatalf("read %s updated_at: %v", table, err)
+	}
+	return out
+}
+
+// TestMigrationBodyPlanFullChainFromV58 is #6520 AC-7: from a clean,
+// committed main-v58/ignored-v14 database holding the AC-1 graph, the
+// designated migrator (MigrateUpWithLock on a pinned session) brings both
+// cursors to this binary's latest versions within 120 seconds, keeps the
+// frozen hashes on rows 59 and ignored 15, and leaves both entity kinds with
+// the frozen predicate's blocked state and their fixture updated_at stamps.
+func TestMigrationBodyPlanFullChainFromV58(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	t.Cleanup(cancel)
+
+	g := scaledPlanGraph()
+	d := newPlanTestDB(t, ctx)
+	d.migrateToV58I14()
+	d.load(g)
+	d.commit("fixture: #6520 graph at main v58 / ignored v14")
+	wantIssues, wantWisps := blockedModel(g)
+
+	const bound = 120 * time.Second
+	elapsed, err := d.bounded(bound, func() error {
+		_, err := schema.MigrateUpWithLock(ctx, d.conn, d.name)
+		return err
+	})
+	t.Logf("full migration pass from main v58 / ignored v14: %s", elapsed.Round(time.Millisecond))
+	if elapsed > bound {
+		t.Fatalf("full migration pass did not finish within %s (stopped at %s; #6520)", bound, elapsed.Round(time.Millisecond))
+	}
+	if err != nil {
+		t.Fatalf("full migration pass: %v", err)
+	}
+
+	if got, err := schema.CurrentVersion(ctx, d.conn); err != nil || got != schema.LatestVersion() {
+		t.Errorf("main cursor = %d (%v), want %d", got, err, schema.LatestVersion())
+	}
+	if got, err := schema.CurrentIgnoredVersion(ctx, d.conn); err != nil || got != schema.LatestIgnoredVersion() {
+		t.Errorf("ignored cursor = %d (%v), want %d", got, err, schema.LatestIgnoredVersion())
+	}
+	if got := d.cursorHash("schema_migrations", 59); got != main59Hash {
+		t.Errorf("schema_migrations row 59 content_hash = %q, want the frozen file's %q", got, main59Hash)
+	}
+	if got := d.cursorHash("ignored_schema_migrations", 15); got != ignored15Hash {
+		t.Errorf("ignored_schema_migrations row 15 content_hash = %q, want the frozen file's %q", got, ignored15Hash)
+	}
+	requireSameIDs(t, "blocked issues after the full pass", d.blockedIDs("issues"), wantIssues)
+	requireSameIDs(t, "blocked wisps after the full pass", d.blockedIDs("wisps"), wantWisps)
+
+	for _, kind := range []struct {
+		table string
+		rows  []planEntity
+	}{{"issues", g.issues}, {"wisps", g.wisps}} {
+		stamps := d.updatedStamps(kind.table)
+		if len(stamps) != len(kind.rows) {
+			t.Errorf("%s has %d rows after the full pass, want %d", kind.table, len(stamps), len(kind.rows))
+		}
+		changed := 0
+		for _, e := range kind.rows {
+			if want := e.updated.UTC().Format(time.DateTime); stamps[e.id] != want {
+				if changed < 3 {
+					t.Errorf("%s %s updated_at = %q, want the fixture's %q", kind.table, e.id, stamps[e.id], want)
+				}
+				changed++
+			}
+		}
+		if changed > 0 {
+			t.Errorf("%d %s rows lost their fixture updated_at", changed, kind.table)
+		}
+	}
+}
