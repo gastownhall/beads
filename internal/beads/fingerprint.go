@@ -212,7 +212,7 @@ func resolveSSHAliasCanonical(repoPath, rawURL, legacyCanonical string) (canonic
 		return "", "", "", false
 	}
 	tail := legacyCanonical[len(host):]
-	if !safeSSHToken.MatchString(host) || net.ParseIP(host) != nil {
+	if !sshAliasLookupAllowed(host) {
 		return "", "", "", false
 	}
 	// An unsafe user would be skipped rather than dropped: ssh applies
@@ -231,10 +231,61 @@ func resolveSSHAliasCanonical(repoPath, rawURL, legacyCanonical string) (canonic
 		return "", "", "", false
 	}
 	resolved, ok := normalizeSSHHostName(out)
-	if !ok || resolved == strings.TrimSuffix(host, ".") {
+	if !ok || resolved == strings.TrimSuffix(host, ".") || !sshHostNameAdoptable(host, resolved) {
 		return "", "", "", false
 	}
 	return resolved + tail, host, resolved, true
+}
+
+// sshAliasLookupAllowed decides whether a written (lowercased) host may be
+// an alias worth resolving. Unsafe tokens and IP literals never are. A
+// two-label domain name (github.com) is taken as the forge's own name: its
+// SSH transport may be configured elsewhere (ssh.github.com) without that
+// changing which repository the remote names. Bare aliases and domain names
+// of three or more labels are looked up.
+func sshAliasLookupAllowed(host string) bool {
+	if !safeSSHToken.MatchString(host) || net.ParseIP(host) != nil {
+		return false
+	}
+	labels := strings.Split(strings.TrimSuffix(host, "."), ".")
+	return !isDomainNameShaped(labels) || len(labels) >= 3
+}
+
+// sshHostNameAdoptable decides whether the HostName an alias resolved to may
+// replace it in the fingerprint. A bare alias (alias-a, github.com-work)
+// takes any valid HostName. A domain name only takes a parent domain it is a
+// strict subdomain of (work.github.com -> github.com), never a sibling or
+// child transport endpoint. These are heuristics: two-label aliases and
+// unrelated dotted aliases keep their literal spelling.
+func sshHostNameAdoptable(host, resolved string) bool {
+	host = strings.TrimSuffix(host, ".")
+	if !isDomainNameShaped(strings.Split(host, ".")) {
+		return true
+	}
+	return strings.Contains(resolved, ".") && net.ParseIP(resolved) == nil &&
+		strings.HasSuffix(host, "."+resolved)
+}
+
+// isDomainNameShaped reports whether labels look like a fully qualified
+// domain name: at least two labels, the last a TLD of two or more ASCII
+// letters or an IDNA (xn--) label.
+func isDomainNameShaped(labels []string) bool {
+	if len(labels) < 2 {
+		return false
+	}
+	tld := labels[len(labels)-1]
+	if strings.HasPrefix(tld, "xn--") {
+		return true
+	}
+	if len(tld) < 2 {
+		return false
+	}
+	for _, r := range tld {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') {
+			return false
+		}
+	}
+	return true
 }
 
 // customSSHTransport reports whether Git would reach the remote through an

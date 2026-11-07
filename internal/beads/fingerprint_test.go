@@ -911,3 +911,65 @@ func TestComputeRepoFingerprint_NeverResolved(t *testing.T) {
 		assertUnresolvedFingerprint(t, remote, fingerprintForRemote(t, remote))
 	})
 }
+
+// An ordinary forge host keeps its pre-change id even when the local SSH
+// config points its transport elsewhere (Host github.com / HostName
+// ssh.github.com); only bare aliases and strict subdomains of the HostName
+// are adopted.
+func TestComputeRepoFingerprint_CanonicalHostPolicy(t *testing.T) {
+	isolateFingerprintGitEnv(t)
+
+	t.Run("ssh.github.com override through real ssh -G", func(t *testing.T) {
+		installFakeSSH(t, "#!/bin/sh\nfor dest; do :; done\ncase \"${dest#*@}\" in\ngithub.com) echo 'hostname ssh.github.com' ;;\n*) echo \"hostname ${dest#*@}\" ;;\nesac\n")
+		const remote = "git@github.com:org/repo.git"
+		fp := fingerprintForRemote(t, remote)
+		assertUnresolvedFingerprint(t, remote, fp)
+		if https := repoIDForRemote(t, "https://github.com/org/repo.git"); fp.ID != https {
+			t.Fatalf("ssh id %s != https id %s", fp.ID, https)
+		}
+	})
+
+	hostNames := map[string]string{
+		"github.com":           "ssh.github.com",
+		"gitlab.example.com":   "altssh.gitlab.example.com",
+		"a.example.com":        "b.example.com",
+		"work.github.com":      "github.com",
+		"work.example.org":     "org",
+		"host.xn--p1ai":        "ssh.host.xn--p1ai",
+		"build.lan2":           "github.com",
+		"deep.work.github.com": "github.com",
+	}
+	calls := stubSSHResolver(t, hostNames)
+
+	tests := []struct {
+		remote     string
+		wantLookup bool
+		resolved   string // empty: the pre-change id is kept
+	}{
+		{"git@github.com:org/repo.git", false, ""},
+		{"ssh://git@GitHub.com:2222/org/repo.git", false, ""},
+		{"git@host.xn--p1ai:org/repo.git", false, ""},
+		{"git@gitlab.example.com:org/repo.git", true, ""},
+		{"git@a.example.com:org/repo.git", true, ""},
+		{"git@work.example.org:org/repo.git", true, ""},
+		{"git@work.github.com:org/repo.git", true, "github.com/org/repo"},
+		{"git@deep.work.github.com:org/repo.git", true, "github.com/org/repo"},
+		{"git@build.lan2:org/repo.git", true, "github.com/org/repo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.remote, func(t *testing.T) {
+			*calls = 0
+			fp := fingerprintForRemote(t, tt.remote)
+			if gotLookup := *calls > 0; gotLookup != tt.wantLookup {
+				t.Fatalf("lookup made = %v, want %v", gotLookup, tt.wantLookup)
+			}
+			if tt.resolved == "" {
+				assertUnresolvedFingerprint(t, tt.remote, fp)
+				return
+			}
+			if fp.ID != hashRepoIdentity(tt.resolved) || !fp.AliasResolved() {
+				t.Fatalf("fingerprint = %+v, want id of %s", fp, tt.resolved)
+			}
+		})
+	}
+}
