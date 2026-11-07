@@ -251,10 +251,17 @@ On Windows (GH#6101) the same check uses a Windows policy in
   resolves physically inside them. Temp is checked before system roots so the
   SYSTEM account's `C:\Windows\Temp` works.
 
-Limitations: the check is lexical plus one resolution at call time; it does
-not hold a handle, so a link swapped in afterwards is not caught. Other
-volumes and shares are not denied as a whole, and Windows ACLs are not
-consulted.
+Limitations: the check is best-effort, lexical plus one resolution at call
+time; it does not hold a handle, so a link retargeted afterwards is not
+caught. Administrative shares (`\\host\C$\Windows`) are not treated as
+equivalent to the local path they expose, and an alias outside the
+carve-outs that cannot be resolved (access denied) is judged by its spelled
+form. Other volumes and shares are not denied as a whole, and Windows ACLs
+are not consulted.
+
+The POSIX body of `isPathInSafeBoundary` below the Windows dispatch is
+deliberately unchanged; keep it byte-identical, and keep the dispatch ahead
+of it, when rebasing POSIX boundary changes (e.g. PR #6326).
 
 ## Server Mode Handling
 
