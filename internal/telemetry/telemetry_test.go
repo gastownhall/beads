@@ -255,6 +255,29 @@ func TestBuildResource_OTELResourceAttributesMerged(t *testing.T) {
 	}
 }
 
+// TestBuildResource_ProcessAttributesBounded pins mc-vin7r: the resource
+// carries no argv. process.command_args grows with the command line (a `bd dep
+// list` over thousands of ids made a 96 KB attribute that crash-looped the
+// collector) and copies untrusted titles out of argv; process.command_line is
+// the same data joined. The bounded process attributes stay.
+func TestBuildResource_ProcessAttributesBounded(t *testing.T) {
+	clearAllEnv(t)
+	res, err := buildResource(context.Background(), "bd", "1.0.0")
+	if err != nil {
+		t.Fatalf("buildResource: %v", err)
+	}
+	for _, key := range []string{"process.command_args", "process.command_line"} {
+		if got, ok := lookupAttr(res.Attributes(), key); ok {
+			t.Errorf("%s = %q, want absent", key, got.Emit())
+		}
+	}
+	for _, key := range []string{"process.pid", "process.executable.name"} {
+		if _, ok := lookupAttr(res.Attributes(), key); !ok {
+			t.Errorf("%s missing", key)
+		}
+	}
+}
+
 // resetTelemetryState restores noop providers and clears registered shutdown
 // hooks after a test that called Init, so global OTel state doesn't leak
 // between tests.
