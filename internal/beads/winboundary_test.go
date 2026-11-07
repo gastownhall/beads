@@ -24,6 +24,8 @@ func TestWinCleanPath(t *testing.T) {
 		{"case preserved", `C:\WINDOWS`, `C:\WINDOWS`, true},
 		{"dot segments collapsed", `C:\a\.\b\..`, `C:\a`, true},
 		{"dotdot cannot escape volume", `C:\..\..\beads`, `C:\beads`, true},
+		{"dotdot at root stays drive root", `C:\..`, `C:\`, true},
+		{"inner space kept", `C:\Program Files\beads`, `C:\Program Files\beads`, true},
 		{"trailing separator dropped", `C:/x/y/`, `C:\x\y`, true},
 		{"drive root", `C:\`, `C:\`, true},
 		{"drive root via extended form", `\\?\C:\`, `C:\`, true},
@@ -46,6 +48,22 @@ func TestWinCleanPath(t *testing.T) {
 		{"globalroot device", `\\?\GLOBALROOT\Device\Harddisk0\x`, ``, false},
 		{"physical drive device", `\\.\PhysicalDrive0`, ``, false},
 		{"serial device", `\\.\COM1`, ``, false},
+
+		{"alternate data stream", `C:\proj\.beads:secret`, ``, false},
+		{"colon in component", `C:\foo:bar`, ``, false},
+		{"reserved char lt", `C:\fo<o`, ``, false},
+		{"reserved char gt", `C:\fo>o`, ``, false},
+		{"reserved char quote", `C:\fo"o`, ``, false},
+		{"reserved char pipe", `C:\foo|bar`, ``, false},
+		{"reserved char question", `C:\foo?bar`, ``, false},
+		{"reserved char star", `C:\foo*bar`, ``, false},
+		{"control char", "C:\\fo\x01o", ``, false},
+		{"trailing dot", `C:\foo.`, ``, false},
+		{"trailing dot mid-path", `C:\a.\b`, ``, false},
+		{"trailing double dot", `C:\foo..`, ``, false},
+		{"trailing space", `C:\foo `, ``, false},
+		{"UNC trailing dot", `\\server\share\foo.`, ``, false},
+		{"UNC reserved char", `\\server\sha|re`, ``, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -250,6 +268,15 @@ func TestWindowsPathInSafeBoundary(t *testing.T) {
 		{"ordinary workspace", `D:\beads`, `D:\beads`, true},
 		{"drive root workspace", `C:\`, `C:\`, true},
 		{"UNC workspace", `\\server\share\proj\.beads`, `\\server\share\proj\.beads`, true},
+
+		// Spellings Win32 silently normalizes or forbids have no stable
+		// plain form: an ADS colon, reserved characters, control bytes, and
+		// trailing dot/space components are denied rather than guessed at —
+		// even for an otherwise ordinary location.
+		{"ads spelling of ordinary path", `C:\work\proj\.beads:evil`, `C:\work\proj\.beads:evil`, false},
+		{"reserved char in ordinary path", `C:\work\pro<j`, `C:\work\pro<j`, false},
+		{"trailing-dot spelling of ordinary path", `C:\work\proj.`, `C:\work\proj.`, false},
+		{"trailing-space spelling of ordinary path", `C:\work\proj `, `C:\work\proj `, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

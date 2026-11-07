@@ -13,9 +13,11 @@ import "strings"
 // comparison form. It folds separators, collapses "." and ".." components
 // without escaping the volume, and maps the extended \\?\ and \\.\ spellings
 // of DOS and UNC paths onto their plain forms. Relative paths, drive-relative
-// "C:foo" spellings, and extended forms with no plain equivalent (Volume
-// GUIDs, GLOBALROOT, device-only \\.\ names) are rejected. Components keep
-// their original case; comparisons use strings.EqualFold.
+// "C:foo" spellings, extended forms with no plain equivalent (Volume GUIDs,
+// GLOBALROOT, device-only \\.\ names), and spellings Win32 would silently
+// normalize away (alternate data stream colons, reserved characters, control
+// bytes, trailing dot/space components) are rejected. Components keep their
+// original case; comparisons use strings.EqualFold.
 func winCleanPath(p string) (string, bool) {
 	s := strings.ReplaceAll(p, "/", `\`)
 	switch {
@@ -41,6 +43,9 @@ func winCleanPath(p string) (string, bool) {
 			return "", false // "C:foo" resolves against the drive's CWD
 		}
 		comps := cleanWinComps(strings.Split(tail[1:], `\`))
+		if !winValidComps(comps) {
+			return "", false
+		}
 		if len(comps) == 0 {
 			return vol + `\`, true // drive root
 		}
@@ -50,7 +55,13 @@ func winCleanPath(p string) (string, bool) {
 		if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
 			return "", false // UNC needs both a server and a share
 		}
+		if !winValidComp(parts[0]) || !winValidComp(parts[1]) {
+			return "", false
+		}
 		comps := cleanWinComps(parts[2:])
+		if !winValidComps(comps) {
+			return "", false
+		}
 		vol := `\\` + parts[0] + `\` + parts[1]
 		if len(comps) == 0 {
 			return vol, true // share root
@@ -59,6 +70,38 @@ func winCleanPath(p string) (string, bool) {
 	default:
 		return "", false // relative or otherwise unsupported
 	}
+}
+
+// winValidComps reports whether every component of a cleaned path has a
+// stable plain form. Bare "." and ".." are consumed by cleaning first, so
+// "C:\.." still names the drive root.
+func winValidComps(comps []string) bool {
+	for _, c := range comps {
+		if !winValidComp(c) {
+			return false
+		}
+	}
+	return true
+}
+
+// winValidComp reports whether a path component can be compared meaningfully.
+// A colon past the volume is an alternate data stream; < > " | ? * and bytes
+// below 0x20 are reserved; Win32 strips a trailing dot or space — so none of
+// those spellings name a file the boundary could locate. They are rejected
+// rather than guessed at (c is never empty: cleaning drops empty parts).
+func winValidComp(c string) bool {
+	for i := 0; i < len(c); i++ {
+		switch b := c[i]; b {
+		case ':', '<', '>', '"', '|', '?', '*':
+			return false
+		default:
+			if b < 0x20 {
+				return false
+			}
+		}
+	}
+	last := c[len(c)-1]
+	return last != '.' && last != ' '
 }
 
 func isWinDrivePath(s string) bool {
