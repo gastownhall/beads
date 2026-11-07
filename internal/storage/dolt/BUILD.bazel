@@ -309,6 +309,7 @@ go_test(
         "migration_0073_rollback_test.go",
         "migration_body_plan_differential_test.go",
         "migration_body_plan_fixture_test.go",
+        "migration_body_plan_full_chain_test.go",
         "migration_body_plan_replay_test.go",
         "migration_body_plan_scaled_test.go",
         "mixed_table_lifecycle_test.go",
