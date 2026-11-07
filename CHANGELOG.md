@@ -703,6 +703,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd dep add` no longer reads the whole dependency graph a second time
+  inside its write.** With per-edge cycle checks on (the default), a request
+  that adds a `blocks`, `conditional-blocks` or `parent-child` edge sent two
+  extra reads at the end, one of every row in `dependencies` and one of every
+  row in `wisp_dependencies`, to look for a cycle the per-edge checks had
+  already ruled out: each check runs in the same transaction after the
+  request's earlier edges are written. The write now sends 2 fewer
+  statements (18 to 16 for the edge work of one `blocks` edge, measured on
+  embedded Dolt) and reads none of those rows.
+  A bulk `bd dep add --file … --no-cycle-check` skips the per-edge probes and
+  so still runs the whole-graph check; for a single edge the flag only skips
+  the post-add cycle warning. That check and `bd dep cycles` now read only the
+  edge types they check rather than every edge.
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add

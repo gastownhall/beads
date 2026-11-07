@@ -147,6 +147,7 @@ go_test(
         "deleter_contract_test.go",
         "dependencies_test.go",
         "dependency_editor_contract_test.go",
+        "dependency_editor_cycle_scan_test.go",
         "dependency_editor_version_history_test.go",
         "dependents_records_test.go",
         "descendants_test.go",

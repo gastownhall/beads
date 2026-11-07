@@ -92,12 +92,27 @@ func AppendSchedulingGraphInTx(ctx context.Context, tx DBTX, depTables []string,
 	return appendDependencyGraphInTx(ctx, tx, depTables, graph, true)
 }
 
+// The type sets the two graph readers send as a WHERE, so rows of other
+// types (related, tracks, waits-for and the rest) are not read at all. They
+// must match the Go check in appendDependencyGraphInTx, which stays as the
+// exact test: a collation that compared types without regard to case would
+// otherwise widen the set.
+const (
+	blockingGraphTypes   = "'blocks', 'conditional-blocks'"
+	schedulingGraphTypes = "'blocks', 'conditional-blocks', 'parent-child'"
+)
+
 func appendDependencyGraphInTx(ctx context.Context, tx DBTX, depTables []string, graph map[string][]string, includeParentChild bool) error {
+	graphTypes := blockingGraphTypes
+	if includeParentChild {
+		graphTypes = schedulingGraphTypes
+	}
 	for _, depTable := range depTables {
 		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 			SELECT issue_id, %s AS depends_on_id, type
 			FROM %s
-		`, DepTargetExpr, depTable))
+			WHERE type IN (%s)
+		`, DepTargetExpr, depTable, graphTypes))
 		if err != nil {
 			return fmt.Errorf("dependency graph: query %s: %w", depTable, err)
 		}

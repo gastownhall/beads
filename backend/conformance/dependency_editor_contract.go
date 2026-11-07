@@ -749,9 +749,11 @@ func RunDependencyEditorRetypeRefusalLeavesTheOriginalEdge(t *testing.T, ctx con
 // the same request already written, and the whole-graph gate that runs when
 // SkipPerEdgeCycleCheck turned the probe off (dependencyeditor.go:66-70).
 //
-// The skip-probe half needs three edges because the cycle it closes only
-// exists once all three of the request's own edges are in place, which is
-// exactly what a per-edge probe cannot see.
+// The skip-probe half uses three edges whose cycle only exists once all three
+// of the request's own edges are in place. With the probes on, the probe of
+// the third edge would refuse it, because each probe runs in the request's
+// transaction after the earlier edges are inserted (the first half shows
+// that). With the probes off, only the whole-graph gate can refuse it.
 func RunDependencyEditorRefusalWritesNothing(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
 	t.Helper()
 	a := fixture.IssuePrefix + "-refuse-a"
