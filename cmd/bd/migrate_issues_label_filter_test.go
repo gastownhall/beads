@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -191,6 +192,45 @@ func TestMigrateIssuesRefusesEmptyLabelFilter(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+// TestMigrateIssuesNormalizesLabelFilter pins the usable half of GH#6636's
+// migration fix: the candidate scan gets the labels trimmed, without blank
+// elements, deduplicated and in their original order, on both command
+// spellings; an omitted --label puts no label restriction on the scan.
+func TestMigrateIssuesNormalizesLabelFilter(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{"omitted", nil, nil},
+		{"padded-blank-duplicate", []string{"--label", " frontend ,,urgent ,frontend"}, []string{"frontend", "urgent"}},
+		{"repeated-flag", []string{"--label", "urgent", "--label", " frontend", "--label", "urgent "}, []string{"urgent", "frontend"}},
+		{"internal-space", []string{"--label", " needs review , ,needs review"}, []string{"needs review"}},
+	}
+	for spelling, runE := range migrateIssuesRunEs(t) {
+		for _, c := range cases {
+			t.Run(spelling+"/"+c.name, func(t *testing.T) {
+				stub := setupMigrateLabelStub(t, false)
+				args := append([]string{"--from", "repo-a", "--to", "repo-b", "--dry-run"}, c.args...)
+				stdout, stderr, err := runMigrateIssues(t, runE, args...)
+				if err != nil {
+					t.Fatalf("RunE(%q) = %v (stdout %q, stderr %q), want no error", c.args, err, stdout, stderr)
+				}
+				scans := stub.candidateSearches()
+				if len(scans) != 1 {
+					t.Fatalf("got %d candidate scans (all searches %+v), want exactly 1", len(scans), stub.searches)
+				}
+				if got := scans[0].Labels; !slices.Equal(got, c.want) {
+					t.Errorf("candidate scan Labels = %q, want %q", got, c.want)
+				}
+				if stub.transactions != 0 {
+					t.Errorf("dry run ran %d transactions, want none", stub.transactions)
+				}
+			})
 		}
 	}
 }
