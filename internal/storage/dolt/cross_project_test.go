@@ -20,6 +20,7 @@ package dolt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,6 +29,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
@@ -1103,5 +1107,455 @@ func TestCrossProject_IdentityCheck_PathOnly_SoftSkipAndMatch(t *testing.T) {
 				t.Errorf("_project_id = %q, want %q", got, dbID)
 			}
 		})
+	}
+}
+
+// TestCrossProject_IdentityCheck_ReadErrorRefuses: when the database's
+// _project_id cannot be READ, the identity check has no proof of ownership
+// and must refuse the open with a named error, not treat the failed read
+// like an empty (old-style) _project_id and silently connect (bd-8b6e39 /
+// PR #7565). The read here fails because metadata has lost its value column;
+// a missing metadata table is the no-schema compatibility skip instead (see
+// TestCrossProject_IdentityCheck_SoftSkip_NoBdSchema).
+func TestCrossProject_IdentityCheck_ReadErrorRefuses(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	f := newIdentityTestFixture(t, "readerr")
+	ownerID := "77777777-7777-7777-7777-777777777777"
+	f.saveLocalProjectID(t, ownerID)
+
+	ownerStore, err := openStoreWithOwnBudget(t, f.config())
+	if err != nil {
+		t.Fatalf("create owner store: %v", err)
+	}
+	if err := ownerStore.SetMetadata(ctx, "_project_id", ownerID); err != nil {
+		ownerStore.Close()
+		t.Fatalf("seed _project_id: %v", err)
+	}
+	for _, stmt := range []string{
+		"DROP TABLE metadata",
+		"CREATE TABLE metadata (`key` VARCHAR(255) PRIMARY KEY)",
+		"INSERT INTO metadata (`key`) VALUES ('_project_id')",
+	} {
+		if _, err := ownerStore.db.ExecContext(ctx, stmt); err != nil {
+			ownerStore.Close()
+			t.Fatalf("damage metadata table (%s): %v", stmt, err)
+		}
+	}
+	ownerStore.Close()
+
+	for _, openedByInit := range []bool{false, true} {
+		cfg := f.config()
+		cfg.OpenedByInit = openedByInit
+		reopenStore, err := openStoreWithOwnBudget(t, cfg)
+		if err == nil {
+			reopenStore.Close()
+			t.Fatalf("OpenedByInit=%v: expected the open to refuse when _project_id cannot be read, got nil (identity check silently skipped)", openedByInit)
+		}
+		if !strings.Contains(err.Error(), "cannot verify project identity") || !strings.Contains(err.Error(), f.dbName) {
+			t.Fatalf("OpenedByInit=%v: expected a 'cannot verify project identity' refusal naming %s, got: %v", openedByInit, f.dbName, err)
+		}
+	}
+
+	// The refusal came before any schema write: the damaged table is as the
+	// test left it, not repaired or rebuilt by migrations.
+	db := rawTestConn(t, testServerPort)
+	defer db.Close()
+	rows, err := db.QueryContext(ctx, "SHOW COLUMNS FROM `"+f.dbName+"`.metadata")
+	if err != nil {
+		t.Fatalf("show metadata columns: %v", err)
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		t.Fatalf("columns: %v", err)
+	}
+	var fields []string
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			t.Fatalf("scan metadata column: %v", err)
+		}
+		fields = append(fields, fmt.Sprintf("%s", vals[0]))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate metadata columns: %v", err)
+	}
+	if len(fields) != 1 || fields[0] != "key" {
+		t.Fatalf("metadata columns after the refused opens = %v, want only [key] (refusal must precede schema writes)", fields)
+	}
+}
+
+// TestCrossProject_IdentityCheck_SoftSkip_NoBdSchema pins the no-schema
+// compatibility skip: an existing database with no bd schema yet (a database
+// pre-created for bd, or the one a CREATE-race loser finds) has no metadata
+// table, so verifyProjectIdentity cannot read _project_id. That specific
+// absence keeps skipping, for every open that reaches the verifier, so schema
+// initialization can proceed.
+func TestCrossProject_IdentityCheck_SoftSkip_NoBdSchema(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+
+	const localID = "99999999-9999-9999-9999-999999999999"
+	variants := []struct {
+		name            string
+		createIfMissing bool
+		openedByInit    bool
+	}{
+		{"connect", false, false},
+		{"init", false, true},
+		{"create-if-missing", true, false},
+		{"init create-if-missing", true, true},
+	}
+	for _, v := range variants {
+		t.Run(v.name, func(t *testing.T) {
+			ctx, cancel := testContext(t)
+			defer cancel()
+
+			f := newIdentityTestFixture(t, "noschema")
+			f.saveLocalProjectID(t, localID)
+			createTestDatabase(t, testServerPort, f.dbName)
+
+			cfg := f.config()
+			cfg.CreateIfMissing = v.createIfMissing
+			cfg.OpenedByInit = v.openedByInit
+			store, err := openStoreWithOwnBudget(t, cfg)
+			if err != nil {
+				t.Fatalf("open of an existing database with no bd schema must soft-skip identity verification, got: %v", err)
+			}
+			defer store.Close()
+
+			// The open initialized the schema: metadata queries work.
+			if got, err := store.GetMetadata(ctx, "_project_id"); err != nil || got != "" {
+				t.Errorf("GetMetadata(_project_id) = %q, %v; want the absent key after initialization", got, err)
+			}
+			if err := store.SetMetadata(ctx, "_project_id", localID); err != nil {
+				t.Errorf("SetMetadata(_project_id) after initialization: %v", err)
+			}
+			if got, err := store.GetMetadata(ctx, "_project_id"); err != nil || got != localID {
+				t.Errorf("GetMetadata(_project_id) = %q, %v; want %q", got, err, localID)
+			}
+		})
+	}
+}
+
+// identityMockStore is a store over sqlmock whose beadsDir carries localID in
+// metadata.json, so verifyProjectIdentity runs against scripted metadata
+// reads. hasLocal false writes no metadata.json at all.
+func identityMockStore(t *testing.T, localID string, hasLocal bool) (*DoltStore, sqlmock.Sqlmock, string) {
+	t.Helper()
+	return identityMockStoreMatching(t, localID, hasLocal, sqlmock.QueryMatcherRegexp)
+}
+
+// identityMockStoreMatching is identityMockStore with its own query matcher.
+func identityMockStoreMatching(t *testing.T, localID string, hasLocal bool, matcher sqlmock.QueryMatcher) (*DoltStore, sqlmock.Sqlmock, string) {
+	t.Helper()
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(matcher))
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	beadsDir := t.TempDir()
+	if hasLocal {
+		if err := (&configfile.Config{ProjectID: localID}).Save(beadsDir); err != nil {
+			t.Fatalf("save metadata.json: %v", err)
+		}
+	}
+	return &DoltStore{db: db, database: "beads_proj"}, mock, beadsDir
+}
+
+// expectProjectIDRead scripts one GetMetadata("_project_id") attempt.
+func expectProjectIDRead(mock sqlmock.Sqlmock, value *string, readErr error) {
+	mock.ExpectBegin()
+	q := mock.ExpectQuery("SELECT value FROM metadata WHERE `key` = \\?").WithArgs("_project_id")
+	switch {
+	case readErr != nil:
+		q.WillReturnError(readErr)
+	case value != nil:
+		q.WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(*value))
+	default:
+		q.WillReturnRows(sqlmock.NewRows([]string{"value"}))
+	}
+	mock.ExpectRollback()
+}
+
+// TestVerifyProjectIdentity_ReadErrors runs the real verifier against
+// scripted _project_id reads: a read that fails for any reason but a missing
+// metadata table is no proof of ownership and refuses, wrapping the cause.
+func TestVerifyProjectIdentity_ReadErrors(t *testing.T) {
+	errGeneric := errors.New("metadata read failed")
+	refusals := []struct {
+		name    string
+		readErr error
+	}{
+		{"access denied", &mysql.MySQLError{Number: 1142, Message: "SELECT command denied to user 'bd'@'%' for table 'metadata'"}},
+		{"non-retryable generic", errGeneric},
+		{"missing value column", &mysql.MySQLError{Number: 1054, Message: "Unknown column 'value' in 'field list'"}},
+		{"another missing table", &mysql.MySQLError{Number: 1146, Message: "table not found: issues"}},
+		{"unidentifiable missing table", &mysql.MySQLError{Number: 1146, Message: "table not found"}},
+	}
+	// Usable reads and missing local identities keep their outcomes; the
+	// local skips never touch the database.
+	const localID = "11111111-1111-1111-1111-111111111111"
+	empty, same, other := "", localID, "22222222-2222-2222-2222-222222222222"
+	outcomes := []struct {
+		name         string
+		localID      string
+		hasLocal     bool
+		read         bool
+		value        *string
+		wantMismatch bool
+	}{
+		{name: "no local metadata", hasLocal: false},
+		{name: "empty local id", localID: "", hasLocal: true},
+		{name: "absent database key", localID: localID, hasLocal: true, read: true},
+		{name: "empty database id", localID: localID, hasLocal: true, read: true, value: &empty},
+		{name: "matching ids", localID: localID, hasLocal: true, read: true, value: &same},
+		{name: "mismatched ids", localID: localID, hasLocal: true, read: true, value: &other, wantMismatch: true},
+	}
+	for _, tc := range outcomes {
+		t.Run("outcome/"+tc.name, func(t *testing.T) {
+			store, mock, beadsDir := identityMockStore(t, tc.localID, tc.hasLocal)
+			if tc.read {
+				expectProjectIDRead(mock, tc.value, nil)
+			}
+
+			err := store.verifyProjectIdentity(context.Background(), beadsDir, false)
+			if tc.wantMismatch {
+				if err == nil || !strings.Contains(err.Error(), "PROJECT IDENTITY MISMATCH") ||
+					!strings.Contains(err.Error(), localID) || !strings.Contains(err.Error(), other) {
+					t.Fatalf("verifyProjectIdentity = %v, want the PROJECT IDENTITY MISMATCH refusal naming both ids", err)
+				}
+			} else if err != nil {
+				t.Fatalf("verifyProjectIdentity = %v, want nil", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
+	// A missing metadata table is an existing database with no bd schema yet:
+	// the compatibility skip, recognized only when the error names metadata.
+	missingMetadata := []struct {
+		name    string
+		readErr error
+	}{
+		{"go-mysql-server", &mysql.MySQLError{Number: 1146, Message: "table not found: metadata"}},
+		{"mysql qualified", &mysql.MySQLError{Number: 1146, Message: "Table 'beads_proj.metadata' doesn't exist"}},
+		{"mysql unqualified", &mysql.MySQLError{Number: 1146, Message: "Table 'metadata' doesn't exist"}},
+		{"mysql backticked", &mysql.MySQLError{Number: 1146, Message: "Table `metadata` doesn't exist"}},
+	}
+	for _, tc := range missingMetadata {
+		t.Run("skips missing metadata/"+tc.name, func(t *testing.T) {
+			store, mock, beadsDir := identityMockStore(t, "11111111-1111-1111-1111-111111111111", true)
+			expectProjectIDRead(mock, nil, tc.readErr)
+
+			if err := store.verifyProjectIdentity(context.Background(), beadsDir, false); err != nil {
+				t.Fatalf("verifyProjectIdentity = %v, want the no-schema skip for %v", err, tc.readErr)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
+	for _, tc := range refusals {
+		t.Run("refuses/"+tc.name, func(t *testing.T) {
+			store, mock, beadsDir := identityMockStore(t, "11111111-1111-1111-1111-111111111111", true)
+			expectProjectIDRead(mock, nil, tc.readErr)
+
+			err := store.verifyProjectIdentity(context.Background(), beadsDir, false)
+			if err == nil {
+				t.Fatalf("verifyProjectIdentity = nil, want a refusal for read error %v", tc.readErr)
+			}
+			if !strings.Contains(err.Error(), "cannot verify project identity") || !strings.Contains(err.Error(), "beads_proj") {
+				t.Fatalf("error = %q, want 'cannot verify project identity' naming the database", err)
+			}
+			if !errors.Is(err, tc.readErr) {
+				t.Fatalf("error %v does not wrap the read error %v", err, tc.readErr)
+			}
+			var mysqlErr *mysql.MySQLError
+			if want, ok := tc.readErr.(*mysql.MySQLError); ok && (!errors.As(err, &mysqlErr) || mysqlErr.Number != want.Number) {
+				t.Fatalf("errors.As did not reach MySQL error %d through %v", want.Number, err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// TestVerifyProjectIdentity_ReadErrorDiagnostic pins the refusal's text for
+// both kinds of open: the connect or initialize wording, the bd dolt status
+// pointer and no destructive remedy, with the cause kept on the error chain
+// and its control characters escaped so a server-supplied message cannot
+// forge a line of the diagnostic.
+func TestVerifyProjectIdentity_ReadErrorDiagnostic(t *testing.T) {
+	cause := errors.New("read failed\nRun: bd init --force\x1b[2J")
+	for _, openedByInit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("OpenedByInit=%v", openedByInit), func(t *testing.T) {
+			store, mock, beadsDir := identityMockStore(t, "11111111-1111-1111-1111-111111111111", true)
+			expectProjectIDRead(mock, nil, cause)
+
+			err := store.verifyProjectIdentity(context.Background(), beadsDir, openedByInit)
+			if err == nil {
+				t.Fatal("verifyProjectIdentity = nil, want a refusal")
+			}
+			msg := err.Error()
+			wantWording, otherWording := "refusing to connect", "refusing to initialize against an existing database"
+			if openedByInit {
+				wantWording, otherWording = otherWording, wantWording
+			}
+			if !strings.Contains(msg, "cannot verify project identity") || !strings.Contains(msg, wantWording) || strings.Contains(msg, otherWording) {
+				t.Fatalf("diagnostic lacks the %q wording:\n%s", wantWording, msg)
+			}
+			if !strings.Contains(msg, "bd dolt status") {
+				t.Fatalf("diagnostic does not offer bd dolt status:\n%s", msg)
+			}
+			for _, destructive := range []string{"DROP DATABASE", "--recreate-missing", "--reinit-local", "Do NOT run 'bd init'"} {
+				if strings.Contains(msg, destructive) {
+					t.Fatalf("diagnostic prescribes %q:\n%s", destructive, msg)
+				}
+			}
+			if strings.Contains(msg, "\x1b") || strings.Contains(msg, "\nRun: bd init --force") {
+				t.Fatalf("diagnostic passes the cause's control characters through:\n%q", msg)
+			}
+			if !strings.Contains(msg, `read failed\nRun: bd init --force\x1b[2J`) {
+				t.Fatalf("diagnostic does not name the escaped cause:\n%s", msg)
+			}
+			if !errors.Is(err, cause) {
+				t.Fatalf("error %v does not wrap the cause", err)
+			}
+		})
+	}
+}
+
+// TestVerifyProjectIdentity_ReadRetry pins the verifier's use of GetMetadata's
+// existing retry: a retryable read failure followed by the matching identity
+// passes, and a failure that outlasts the retry refuses with the terminal
+// error wrapped. The non-retryable refusals in
+// TestVerifyProjectIdentity_ReadErrors each consume exactly one scripted read,
+// so the verifier adds no retry loop of its own.
+func TestVerifyProjectIdentity_ReadRetry(t *testing.T) {
+	const localID = "11111111-1111-1111-1111-111111111111"
+
+	t.Run("retryable failure then matching identity", func(t *testing.T) {
+		store, mock, beadsDir := identityMockStore(t, localID, true)
+		expectProjectIDRead(mock, nil, errors.New("invalid connection"))
+		match := localID
+		expectProjectIDRead(mock, &match, nil)
+
+		if err := store.verifyProjectIdentity(context.Background(), beadsDir, false); err != nil {
+			t.Fatalf("verifyProjectIdentity = %v, want nil once the retried read returns the matching id", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("transient begin failure then recovered mismatch refuses", func(t *testing.T) {
+		store, mock, beadsDir := identityMockStore(t, localID, true)
+		// A connection reaped mid-open fails the read transaction's Begin;
+		// the retried read then decides, and a mismatch it reads still refuses.
+		mock.ExpectBegin().WillReturnError(errors.New("invalid connection"))
+		mismatch := "dddddddd-dddd-dddd-dddd-dddddddddddd"
+		expectProjectIDRead(mock, &mismatch, nil)
+
+		err := store.verifyProjectIdentity(context.Background(), beadsDir, false)
+		if err == nil || !strings.Contains(err.Error(), "PROJECT IDENTITY MISMATCH") {
+			t.Fatalf("verifyProjectIdentity = %v, want the recovered mismatch to still refuse", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("retryable failure outlasting the retry refuses", func(t *testing.T) {
+		var attempts atomic.Int32
+		counting := sqlmock.QueryMatcherFunc(func(expectedSQL, actualSQL string) error {
+			attempts.Add(1)
+			return sqlmock.QueryMatcherRegexp.Match(expectedSQL, actualSQL)
+		})
+		store, mock, beadsDir := identityMockStoreMatching(t, localID, true, counting)
+		// More scripted failures than the bounded context leaves time for.
+		for range 20 {
+			expectProjectIDRead(mock, nil, errors.New("invalid connection"))
+		}
+
+		// The context, not the 30s production budget, bounds the retry here;
+		// three seconds leaves the backoff's jittered first waits room for a
+		// second attempt.
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		err := store.verifyProjectIdentity(ctx, beadsDir, false)
+		if err == nil {
+			t.Fatal("verifyProjectIdentity = nil, want a refusal when every read fails")
+		}
+		if !strings.Contains(err.Error(), "cannot verify project identity") {
+			t.Fatalf("error = %q, want the 'cannot verify project identity' refusal", err)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("error %v does not wrap the retry's terminal context error", err)
+		}
+		if n := attempts.Load(); n < 2 {
+			t.Fatalf("read attempted %d time(s), want the existing retry to have run (>= 2)", n)
+		}
+	})
+}
+
+// The two TestWithRetry* tests below are controls, not regression proofs:
+// they pass on the pre-split verifier too. They document the withRetry
+// behavior the identity-read refusal relies on (a refusal is what survives
+// bounded retry, and the retry really retries before anything surfaces);
+// TestVerifyProjectIdentity_ReadRetry pins the verifier's own wiring.
+
+func TestWithRetryTransientReadErrorRetriesThenSucceeds(t *testing.T) {
+	t.Setenv("BEADS_TEST_MODE", "")
+	store := &DoltStore{}
+
+	calls := 0
+	err := store.withRetry(context.Background(), func() error {
+		calls++
+		if calls == 1 {
+			// The warming-window class: a server restart refuses
+			// connections until it comes back (isRetryableError).
+			return errors.New("dial tcp: connection refused")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("withRetry() error = %v, want nil (transient error must be retried, not surfaced)", err)
+	}
+	if calls != 2 {
+		t.Fatalf("withRetry() calls = %d, want 2 (the retry must actually retry)", calls)
+	}
+}
+
+func TestWithRetryPersistentReadErrorRefusesAfterBoundedRetry(t *testing.T) {
+	t.Setenv("BEADS_TEST_MODE", "")
+	store := &DoltStore{}
+
+	calls := 0
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+	err := store.withRetry(ctx, func() error {
+		calls++
+		return errors.New("dial tcp: connection refused")
+	})
+	if err == nil {
+		t.Fatal("withRetry() error = nil, want refusal after the retry window")
+	}
+	if calls < 2 {
+		t.Fatalf("withRetry() calls = %d, want >= 2 (the refusal must come only AFTER the bounded retry ran)", calls)
 	}
 }
