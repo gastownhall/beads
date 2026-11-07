@@ -526,8 +526,8 @@ func proxiedInitTeamServer(flag bool, existing *configfile.Config) bool {
 }
 
 func buildProxiedServerClientInfo(rootPath, configPath, logPath string, port int, idleTimeout time.Duration, external *configfile.ExternalDoltConfig) (*configfile.ProxiedServerClientInfo, error) {
-	if rootPath == "" && configPath == "" && logPath == "" && port == 0 && idleTimeout == 0 && external == nil {
-		return nil, nil
+	if idleTimeout == 0 {
+		idleTimeout = configfile.DefaultProxyIdleTimeout
 	}
 	clean := func(p string) (string, error) {
 		if p == "" {
