@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -238,6 +239,20 @@ func (c *Client) QueryDataSource(ctx context.Context, dataSourceID string, filte
 			"'bd config set notion.max_query_pages <n>' or the NOTION_MAX_QUERY_PAGES "+
 			"environment variable, or reduce the number of rows in the data source",
 		limit, limit*maxPageSize)
+}
+
+// RetrievePage reads one page by ID. A page that does not exist or is not
+// shared with the integration is an *APIError with StatusCode 404 (isNotFound).
+func (c *Client) RetrievePage(ctx context.Context, pageID string) (*Page, error) {
+	body, err := c.doRequest(ctx, http.MethodGet, "/pages/"+url.PathEscape(pageID), nil, retrySafe)
+	if err != nil {
+		return nil, err
+	}
+	var page Page
+	if err := json.Unmarshal(body, &page); err != nil {
+		return nil, fmt.Errorf("parse page response: %w", err)
+	}
+	return &page, nil
 }
 
 func (c *Client) CreatePage(ctx context.Context, dataSourceID string, properties map[string]interface{}) (*Page, error) {
@@ -537,13 +552,42 @@ func parseRetryAfter(value string) (time.Duration, bool) {
 	return 0, false
 }
 
+// APIError is a non-2xx response from the Notion API. Callers that branch on
+// the status, such as treating a missing page as absent rather than as a
+// failure, match it with errors.As instead of parsing the message.
+type APIError struct {
+	StatusCode int
+	Code       string
+	Message    string
+	// Body is the trimmed response body, reported when it carried no JSON
+	// message.
+	Body string
+}
+
+func (e *APIError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("Notion API error %s (%d): %s", e.Code, e.StatusCode, e.Message)
+	}
+	return fmt.Sprintf("Notion API error (%d): %s", e.StatusCode, e.Body)
+}
+
 func notionAPIError(status int, body []byte) error {
-	var apiErr struct {
+	apiErr := &APIError{StatusCode: status, Body: strings.TrimSpace(string(body))}
+	var decoded struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
 	}
-	if err := json.Unmarshal(body, &apiErr); err == nil && apiErr.Message != "" {
-		return fmt.Errorf("Notion API error %s (%d): %s", apiErr.Code, status, apiErr.Message)
+	if err := json.Unmarshal(body, &decoded); err == nil && decoded.Message != "" {
+		apiErr.Code = decoded.Code
+		apiErr.Message = decoded.Message
 	}
-	return fmt.Errorf("Notion API error (%d): %s", status, strings.TrimSpace(string(body)))
+	return apiErr
+}
+
+// isNotFound reports whether err is Notion answering 404 for the requested
+// object. Only the API's own answer counts: an authentication failure, an
+// exhausted retry, a transport or context error is never a missing page.
+func isNotFound(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
 }
