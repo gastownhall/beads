@@ -265,3 +265,25 @@ func TestDoltNew_WispIsBlockedRestoreAllowsEphemeralCreate_RealDolt(t *testing.T
 		t.Fatalf("new independent wisp is_blocked = %v, want [0]", got)
 	}
 }
+
+// TestDoltNew_WispIsBlockedRestoreHealthyCloneConverges_RealDolt is AC-4's
+// store half: a healthy clone with 0032 pending records it, keeps its flags,
+// and a converged reopen leaves it recorded. The probe count is pinned in the
+// schema package (TestIgnored32HealthyCloneOnlyProbes).
+func TestDoltNew_WispIsBlockedRestoreHealthyCloneConverges_RealDolt(t *testing.T) {
+	c := newWispIsBlockedClone(t)
+	g := c.seedGraph()
+	c.exec("rewind ignored cursor", "DELETE FROM ignored_schema_migrations WHERE version >= 32")
+	c.reopen()
+
+	if got := c.cursor(); got != 32 {
+		t.Fatalf("ignored cursor after migrating a healthy clone = %d, want 32", got)
+	}
+	if got := c.blockedFlags("wisps", g.b, g.c, g.d); !slices.Equal(got, []int{1, 1, 0}) {
+		t.Fatalf("healthy wisp is_blocked (b, c, d) = %v, want [1 1 0]", got)
+	}
+	c.reopen()
+	if got := c.count("cursor rows", "SELECT COUNT(*) FROM ignored_schema_migrations WHERE version = 32"); got != 1 {
+		t.Fatalf("ignored cursor rows for 32 after a converged reopen = %d, want 1", got)
+	}
+}
