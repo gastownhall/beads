@@ -64,13 +64,13 @@ The outermost grouping: the OTel **resource** attached to every span and metric,
 |---|---|---|
 | `service.name` | string | `"bd"` (overridable with `OTEL_SERVICE_NAME`) |
 | `service.version` | string | Current bd version string |
-| `host.name` | string | System hostname (`resource.WithHost`) |
-| `process.*` | various | SDK process detector (`resource.WithProcess`): pid, executable, command line (`process.command_args`), runtime, owner |
+| `host.name` | string | System hostname (`resource.WithHost`). Laptops are often named after their user; override it with `OTEL_RESOURCE_ATTRIBUTES=host.name=...` |
+| `process.pid`, `process.executable.name`, `process.runtime.name` / `.version` / `.description` | various | SDK process detectors, listed one by one in `buildResource` (not `resource.WithProcess`) |
 | *(any)* | string | Extra `key=value` pairs from `OTEL_RESOURCE_ATTRIBUTES` (`resource.WithFromEnv`), which can also override the above |
 
 No `os.*` detector is installed.
 
-**Raw command line on the resource (fix pending).** `resource.WithProcess()` (`internal/telemetry/telemetry.go:145`) includes the SDK's command-args detector, so `process.command_args` is the raw, unscrubbed `os.Args`. The resource is attached to every metric export (`sdkmetric.WithResource`, `telemetry.go:209`), so every OTLP metric export carries the full command line, including any secret-flag values and DSN userinfo that `scrubArgsForTelemetry` removes from the `bd.args` span attribute (§2). (Traces are console-only, so this affects the OTLP metrics path.) A code fix is being prepared separately; until it lands, treat the metrics backend as receiving raw arguments.
+**No command line on the resource (fixed in #8222).** The resource is attached to every metric export and span, so it never carries `process.command_args` (the raw, unscrubbed `os.Args`, which can hold the secret-flag values and DSN userinfo that `scrubArgsForTelemetry` removes from `bd.args`, §2), `process.executable.path` or `process.owner`. `resource.WithProcess()` would add all three, so `buildResource` names its process detectors instead; `TestBuildResource_NeverCarriesCommandLine` pins this.
 
 ### 1.2 Command
 
@@ -95,7 +95,7 @@ Emitted once per `bd` subcommand execution. Anchors all subsequent events for th
 |---|---|---|
 | `bd.command` | string | Subcommand name |
 | `bd.version` | string | bd version |
-| `bd.args` | string | Full arguments passed to command, scrubbed via `scrubArgsForTelemetry` (secret-flag values and DSN userinfo redacted). The scrub applies to this attribute only: the resource's `process.command_args` still carries the raw arguments (§1.1, fix pending) |
+| `bd.args` | string | Full arguments passed to command, scrubbed via `scrubArgsForTelemetry` (secret-flag values and DSN userinfo redacted). The resource carries no command line (§1.1) |
 | `bd.actor` | string | Actor identity (set after actor resolution) |
 
 ---
@@ -508,7 +508,7 @@ Every metric name, span name, and attribute listed in this document is backed by
 |-----------|-----------|--------|
 | `bd.command.<name>` | `bd.command`, `bd.version`, `bd.args` (scrubbed) | built in `cmd/bd/command_telemetry.go` (`startCommandSpan`/`commandSpanAttrs`), called from `cmd/bd/main.go:1425` |
 | `bd.command.<name>` | `bd.actor` (added later) | `cmd/bd/main.go:1988` |
-| *(resource)* | `service.name`, `service.version`, `host.name`, `process.*`, `OTEL_RESOURCE_ATTRIBUTES` | `internal/telemetry/telemetry.go:138-148` (`buildResource`) |
+| *(resource)* | `service.name`, `service.version`, `host.name`, `process.pid` / `.executable.name` / `.runtime.*`, `OTEL_RESOURCE_ATTRIBUTES` | `internal/telemetry/telemetry.go:147-161` (`buildResource`) |
 | `storage.<op>` / `storage.<Role>.<Method>` (all methods) | `db.operation` + method-specific attrs | `internal/telemetry/storage.go:76-84` (role decorators throughout `internal/telemetry/`) |
 | `storage.RunInTransaction` / `storage.RunInIssueLifecycleTransaction` | `db.commit_msg` | `internal/telemetry/storage.go:674,682` |
 | `dolt.query` | `db.operation="query"`, `db.statement` + `doltSpanAttrs()` | `store.go:1725` |
