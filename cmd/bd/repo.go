@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
@@ -46,7 +47,10 @@ var repoAddCmd = &cobra.Command{
 	Long: `Add a repository path to the repos.additional list in config.yaml.
 
 The path should point to a directory containing a .beads folder.
-Paths can be absolute or relative (they are stored as-is).
+A relative path is resolved against the current directory and stored as
+an absolute path, so it names the same repository wherever bd later runs.
+Absolute paths, remote URLs and ~/ paths are stored as typed; a ~/ entry
+stays relative to each user's home directory.
 
 This modifies .beads/config.yaml, which is version-controlled and
 shared across all clones of this repository.`,
@@ -69,18 +73,19 @@ shared across all clones of this repository.`,
 		if remotecache.IsRemoteURL(repoPath) {
 			fmt.Fprintf(os.Stderr, "Adding remote repository: %s\n", repoPath)
 		} else {
-			expandedPath := repoPath
-			if len(repoPath) > 0 && repoPath[0] == '~' {
-				home, err := os.UserHomeDir()
-				if err == nil {
-					expandedPath = filepath.Join(home, repoPath[1:])
-				}
-			}
+			expandedPath := expandRepoTilde(repoPath)
 
 			beadsDir := filepath.Join(expandedPath, ".beads")
 			if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
 				return HandleError("no beads workspace found at %s", expandedPath)
 			}
+		}
+
+		// Later commands resolve the entry from their own cwd, so a relative
+		// path is stored as the absolute path it names here.
+		repoPath, err := normalizeRepoPathForStorage(repoPath)
+		if err != nil {
+			return HandleError("failed to resolve repository path: %v", err)
 		}
 
 		configPath, err := config.FindConfigYAMLPath()
@@ -329,13 +334,7 @@ Also triggers Dolt push/pull if a remote is configured.`,
 			}
 
 			// Local path: expand tilde
-			expandedPath := repoPath
-			if len(repoPath) > 0 && repoPath[0] == '~' {
-				home, err := os.UserHomeDir()
-				if err == nil {
-					expandedPath = filepath.Join(home, repoPath[1:])
-				}
-			}
+			expandedPath := expandRepoTilde(repoPath)
 
 			// Resolve to absolute path for consistent mtime caching
 			absPath, err := filepath.Abs(expandedPath)
@@ -429,6 +428,29 @@ Also triggers Dolt push/pull if a remote is configured.`,
 		}
 		return nil
 	},
+}
+
+// expandRepoTilde expands a leading ~ in a repos.additional entry to the home
+// directory. The entry is returned unchanged when the home directory is unknown.
+func expandRepoTilde(repoPath string) string {
+	if len(repoPath) > 0 && repoPath[0] == '~' {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, repoPath[1:])
+		}
+	}
+	return repoPath
+}
+
+// normalizeRepoPathForStorage returns the repos.additional spelling for a
+// repository argument. A relative local path becomes absolute against the
+// current directory; remote URLs, ~ paths and absolute paths are returned
+// verbatim (a ~ entry is already cwd-independent, and expanding it would put
+// one user's home directory into the shared config.yaml).
+func normalizeRepoPathForStorage(repoPath string) (string, error) {
+	if remotecache.IsRemoteURL(repoPath) || strings.HasPrefix(repoPath, "~") || filepath.IsAbs(repoPath) {
+		return repoPath, nil
+	}
+	return filepath.Abs(repoPath)
 }
 
 // parseIssuesFromJSONL reads and parses issues from a JSONL file.

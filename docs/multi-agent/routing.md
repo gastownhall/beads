@@ -189,6 +189,13 @@ bd repo sync                     # import beads from all additional repos
 bd repo remove ~/.beads-planning # remove, deleting its hydrated beads
 ```
 
+`bd repo add` stores a relative path as the absolute path it names from the
+directory you run it in, so the entry points at the same repo wherever later
+commands run. Absolute paths, remote URLs and `~/` paths are stored as typed.
+A `~/` entry stays relative to each user's home directory, which keeps the
+shared `config.yaml` portable across clones; an absolute entry names one
+machine's layout.
+
 `bd repo sync` reads each additional repo's `.beads/issues.jsonl` export and
 imports the beads with their original prefixes and `source_repo` set,
 skipping repos whose export hasn't changed. `bd init --contributor` wires

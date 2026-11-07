@@ -6316,7 +6316,10 @@ bd repo add
     | Add a repository path to the repos.additional list in config.yaml.
     |
     | The path should point to a directory containing a .beads folder.
-    | Paths can be absolute or relative (they are stored as-is).
+    | A relative path is resolved against the current directory and stored as
+    | an absolute path, so it names the same repository wherever bd later runs.
+    | Absolute paths, remote URLs and ~/ paths are stored as typed; a ~/ entry
+    | stays relative to each user's home directory.
     |
     | This modifies .beads/config.yaml, which is version-controlled and
     | shared across all clones of this repository.
