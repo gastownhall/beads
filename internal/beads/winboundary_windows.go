@@ -67,11 +67,6 @@ const (
 	winVolumeNameDOS      = 0x0
 )
 
-// errWinDanglingLink reports a link whose target does not exist. Opening it
-// fails like a missing entry, but the entry is there, so it must not be
-// mistaken for an absent path the walk may climb past.
-var errWinDanglingLink = errors.New("dangling link")
-
 // winExtendedSpelling returns the \\?\ form of a cleaned absolute path, which
 // the OS opens without re-normalizing it: \\?\C:\x or \\?\UNC\server\share\x.
 func winExtendedSpelling(path string) string {
@@ -98,9 +93,8 @@ func resolveWindowsFinalPath(path string) (string, bool, error) {
 		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			if _, lerr := os.Lstat(ext); lerr == nil {
-				return "", false, errWinDanglingLink
-			}
+			_, lerr := os.Lstat(ext)
+			return "", false, winOpenError(err, lerr)
 		}
 		return "", false, err
 	}

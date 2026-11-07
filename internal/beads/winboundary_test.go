@@ -345,6 +345,7 @@ func TestWindowsBoundaryPhysical(t *testing.T) {
 		`D:\work\file.txt`:   {file: true},
 		`D:\work\dangling`:   {err: errWinFakeDangling},
 		`D:\work\locked`:     {err: errWinFakeAccess},
+		`D:\work\unprovable`: {err: winOpenError(fs.ErrNotExist, errWinFakeAccess)},
 		`C:\PROGRA~1`:        {final: `\\?\C:\Program Files`},
 		`X:\`:                {final: `\\?\C:\Users\bob`},
 		`\\srv\share`:        {final: `\\?\UNC\srv\share`},
@@ -371,6 +372,7 @@ func TestWindowsBoundaryPhysical(t *testing.T) {
 	for _, in := range []string{
 		`D:\work\dangling`, `D:\work\dangling\new\.beads`,
 		`D:\work\locked\.beads`,
+		`D:\work\unprovable\.beads`,
 		`D:\work\file.txt\.beads`,
 		`Q:\work\.beads`, `\\nosuch\share\.beads`,
 	} {
@@ -383,6 +385,26 @@ func TestWindowsBoundaryPhysical(t *testing.T) {
 	p, _ := winCleanPath(`D:\work`)
 	if _, ok := newWindowsBoundary(windowsFacts{}).physical(p); ok {
 		t.Errorf("physical without a resolver resolved")
+	}
+}
+
+// A not-found open proves absence only when the no-follow Lstat agrees: an
+// entry Lstat sees is a dangling link, and an Lstat failing otherwise leaves
+// the entry unresolved rather than absent.
+func TestWinOpenError(t *testing.T) {
+	notFound := fs.ErrNotExist
+	if err := winOpenError(notFound, fs.ErrNotExist); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("both not found: %v, want fs.ErrNotExist", err)
+	}
+	if err := winOpenError(notFound, nil); !errors.Is(err, errWinDanglingLink) {
+		t.Errorf("Lstat found the entry: %v, want errWinDanglingLink", err)
+	}
+	err := winOpenError(notFound, errWinFakeAccess)
+	if errors.Is(err, fs.ErrNotExist) || !errors.Is(err, errWinFakeAccess) {
+		t.Errorf("Lstat access error: %v, want the access error and not fs.ErrNotExist", err)
+	}
+	if err := winOpenError(errWinFakeAccess, nil); !errors.Is(err, errWinFakeAccess) {
+		t.Errorf("open access error: %v, want it unchanged", err)
 	}
 }
 

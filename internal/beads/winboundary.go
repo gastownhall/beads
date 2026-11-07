@@ -2,6 +2,7 @@ package beads
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"strings"
 	"unicode/utf8"
@@ -198,6 +199,27 @@ func winUNCVolume(s string) (vol, rest string, ok bool) {
 // fs.ErrNotExist proves the entry absent; any other error (a dangling link,
 // access denied, an unavailable volume) leaves the path unresolved.
 type winResolver func(path string) (final string, isDir bool, err error)
+
+// errWinDanglingLink reports a link whose target does not exist. Opening it
+// fails like a missing entry, but the entry is there, so it must not be
+// mistaken for an absent path the walk may climb past.
+var errWinDanglingLink = errors.New("dangling link")
+
+// winOpenError classifies a failed open, which follows links, using lstatErr
+// from an Lstat of the same entry, which does not. Only a not-found from both
+// proves the entry absent. A present entry is a dangling link, and an Lstat
+// that fails for any other reason (access denied, an unavailable volume)
+// cannot prove absence: both leave the path unresolved instead of letting
+// the walk climb past an entry that may be the link that matters.
+func winOpenError(openErr, lstatErr error) error {
+	if !errors.Is(openErr, fs.ErrNotExist) || errors.Is(lstatErr, fs.ErrNotExist) {
+		return openErr
+	}
+	if lstatErr == nil {
+		return errWinDanglingLink
+	}
+	return fmt.Errorf("entry not provably absent: %w", lstatErr)
+}
 
 // winRoot is a policy root in both spellings: as named, and its physical
 // location when that resolved.
