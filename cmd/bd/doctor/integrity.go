@@ -654,12 +654,25 @@ func classifyRepoFingerprint(storedRepoID, currentRepoID string, currentSource b
 				Fix:     "On a synced clone, leave it (or add the canonical origin remote). Only run 'bd migrate --update-repo-id' if this checkout is the canonical repository — the new id propagates to every clone on the next sync",
 			}
 		}
+		// GH#5990: a stored hash cannot say which repository produced it, so
+		// a mismatch is not proof of a different repository: clones of one
+		// repository through different SSH aliases, or a bd upgrade, also
+		// produce one. Keep it an error, but never suggest deleting or moving
+		// .beads aside: it may be a redirect or the configuration of a shared
+		// server, and nothing here shows the database is disposable.
+		detail := fmt.Sprintf("stored: %s, current: %s", truncateID(storedRepoID), truncateID(currentRepoID))
+		if current.AliasResolved() {
+			detail += fmt.Sprintf(" (this checkout's SSH host alias %q resolved to %q; its pre-alias id %s does not match either)",
+				current.SSHAlias, current.SSHHostName, truncateID(current.LegacyID))
+		}
 		return DoctorCheck{
 			Name:    "Repo Fingerprint",
 			Status:  StatusError,
-			Message: "Database belongs to different repository",
-			Detail:  fmt.Sprintf("stored: %s, current: %s", truncateID(storedRepoID), truncateID(currentRepoID)),
-			Fix:     "Run 'bd migrate --update-repo-id' if URL changed, or 'rm -rf .beads && bd init' if wrong database",
+			Message: "Database fingerprint does not match this repository's remote",
+			Detail:  detail,
+			Fix: "If every clone using this database points to the same repository, upgrade bd on all of them and run " +
+				"'bd migrate --update-repo-id' once, from a clone whose fingerprint is the intended one; it rewrites the shared id for every clone. " +
+				"If the database belongs to another repository, keep it and check which database this workspace is configured to use before reconnecting or reinitializing by hand",
 		}
 	}
 

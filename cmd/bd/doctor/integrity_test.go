@@ -209,6 +209,20 @@ func TestCheckDependencyCycles_NoDatabase(t *testing.T) {
 // 'bd migrate --update-repo-id' would propagate it to every clone. That case
 // must warn-and-advise-leaving-it, not present as "wrong database".
 func TestClassifyRepoFingerprint(t *testing.T) {
+	// GH#5990: a fingerprint mismatch carries no evidence that the database
+	// is disposable, and in a shared-ledger deployment deleting it destroys
+	// real state. No branch may suggest deleting or moving it aside.
+	assertNoDestructiveAdvice := func(t *testing.T, check DoctorCheck) {
+		t.Helper()
+		for _, text := range []string{check.Message, check.Detail, check.Fix} {
+			for _, bad := range []string{"rm ", "rm -rf", "mv ", "bd init", "delete", "Delete"} {
+				if strings.Contains(text, bad) {
+					t.Fatalf("check suggests %q: %q", bad, text)
+				}
+			}
+		}
+	}
+
 	t.Run("match is OK regardless of source", func(t *testing.T) {
 		check := classifyRepoFingerprint("aaaa1111bbbb2222", "aaaa1111bbbb2222", beads.RepoIDSourcePath)
 		if check.Status != StatusOK {
@@ -224,6 +238,49 @@ func TestClassifyRepoFingerprint(t *testing.T) {
 		if !strings.Contains(check.Fix, "bd migrate --update-repo-id") {
 			t.Fatalf("Fix = %q, want the update-repo-id repair offered", check.Fix)
 		}
+		if check.Message != "Database fingerprint does not match this repository's remote" {
+			t.Fatalf("Message = %q, want the mismatch stated without asserting another repository", check.Message)
+		}
+		for _, want := range []string{"same repository", "every clone"} {
+			if !strings.Contains(check.Fix, want) {
+				t.Fatalf("Fix = %q, want the conditional shared-id migration (%q)", check.Fix, want)
+			}
+		}
+		assertNoDestructiveAdvice(t, check)
+	})
+
+	t.Run("mismatch after alias resolution is still an error", func(t *testing.T) {
+		current := beads.RepoFingerprint{
+			ID:          "cccc3333dddd4444",
+			Source:      beads.RepoIDSourceRemote,
+			LegacyID:    "eeee5555ffff6666",
+			SSHAlias:    "alias-b",
+			SSHHostName: "github.com",
+		}
+		check := classifyRepoFingerprint("aaaa1111bbbb2222", current)
+		if check.Status != StatusError {
+			t.Fatalf("Status = %q, want %q (message=%q)", check.Status, StatusError, check.Message)
+		}
+		for _, want := range []string{"aaaa1111", "cccc3333", "eeee5555", "alias-b", "github.com"} {
+			if !strings.Contains(check.Detail, want) {
+				t.Fatalf("Detail = %q, want %q named", check.Detail, want)
+			}
+		}
+		if strings.Contains(check.Detail, "cosmetic") || strings.Contains(check.Detail, "same repository") {
+			t.Fatalf("Detail = %q must not claim the mismatch is harmless", check.Detail)
+		}
+		if !strings.Contains(check.Fix, "bd migrate --update-repo-id") {
+			t.Fatalf("Fix = %q, want the update-repo-id repair offered", check.Fix)
+		}
+		assertNoDestructiveAdvice(t, check)
+	})
+
+	t.Run("short ids are shown safely", func(t *testing.T) {
+		check := classifyRepoFingerprint("abc", beads.RepoFingerprint{ID: "cccc3333dddd4444", Source: beads.RepoIDSourceRemote})
+		if check.Status != StatusError || !strings.Contains(check.Detail, "stored: abc,") {
+			t.Fatalf("check = %+v, want an error showing the short stored id", check)
+		}
+		assertNoDestructiveAdvice(t, check)
 	})
 
 	t.Run("mismatch with path-fallback current id warns and advises leaving it", func(t *testing.T) {
@@ -237,5 +294,6 @@ func TestClassifyRepoFingerprint(t *testing.T) {
 		if !strings.Contains(check.Fix, "propagates to every clone") {
 			t.Fatalf("Fix = %q, want the propagation named", check.Fix)
 		}
+		assertNoDestructiveAdvice(t, check)
 	})
 }
