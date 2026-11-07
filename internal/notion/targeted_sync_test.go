@@ -795,6 +795,44 @@ func TestTrackerPushLookupErrorIsolation(t *testing.T) {
 	}
 }
 
+// TestTrackerIncrementalVsFullOldPageDiscovery pins AC-7: an old unlinked
+// page (a Beads ID no local row carries, edited before the cutoff) is
+// discovered only by a cursor-less full pull. Incremental pulls no longer
+// backfill it; an explicit page fetch still retrieves it whatever its age.
+func TestTrackerIncrementalVsFullOldPageDiscovery(t *testing.T) {
+	now := time.Now().UTC()
+	server := newTestNotionServer(t,
+		memberPage("aaaaaaaa-0000-0000-0000-00000000000a", "bd-old", "Old unlinked", now.Add(-3*time.Hour)),
+		memberPage("aaaaaaaa-0000-0000-0000-00000000000b", "bd-new", "Recently edited", now.Add(-10*time.Minute)),
+	)
+	tracker := server.tracker()
+	since := now.Add(-30 * time.Minute)
+
+	incremental, err := tracker.FetchIssues(context.Background(), itracker.FetchOptions{Since: &since})
+	if err != nil {
+		t.Fatalf("incremental FetchIssues returned error: %v", err)
+	}
+	if len(incremental) != 1 || incremental[0].Title != "Recently edited" {
+		t.Fatalf("incremental fetch = %v, want only the recently edited page — old unlinked pages are a full-pull concern now", titles(incremental))
+	}
+
+	full, err := tracker.FetchIssues(context.Background(), itracker.FetchOptions{})
+	if err != nil {
+		t.Fatalf("full FetchIssues returned error: %v", err)
+	}
+	if len(full) != 2 {
+		t.Fatalf("full fetch discovered %d pages, want 2 — recovery of an old page is the full pull's job", len(full))
+	}
+
+	direct, err := tracker.FetchIssue(context.Background(), "bd-old")
+	if err != nil {
+		t.Fatalf("FetchIssue(bd-old) returned error: %v", err)
+	}
+	if direct == nil || direct.Title != "Old unlinked" {
+		t.Fatalf("FetchIssue(bd-old) = %+v, want the old page regardless of age", direct)
+	}
+}
+
 func titles(issues []itracker.TrackerIssue) []string {
 	result := make([]string, 0, len(issues))
 	for _, issue := range issues {
