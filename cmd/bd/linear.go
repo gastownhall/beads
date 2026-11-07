@@ -676,14 +676,15 @@ func findLinearMilestoneEpic(ctx context.Context, st tracker.Store, ref, milesto
 }
 
 func mergedLinearMilestoneMetadata(existing json.RawMessage, ms *linear.ProjectMilestone) (json.RawMessage, error) {
-	data := make(map[string]interface{})
-	if len(existing) > 0 {
-		trimmed := strings.TrimSpace(string(existing))
-		if trimmed != "" && trimmed != "null" {
-			if err := json.Unmarshal(existing, &data); err != nil {
-				return nil, fmt.Errorf("existing milestone metadata is not a JSON object: %w", err)
-			}
-		}
+	// json.Number decode: an unrelated integer past 2^53 in the existing
+	// metadata keeps its stored digits through the re-marshal (GH#6330). Empty
+	// or null existing metadata decodes to nil, so keep the initialized map.
+	data, err := storage.DecodeMetadataObject(existing)
+	if err != nil {
+		return nil, fmt.Errorf("existing milestone metadata is not a JSON object: %w", err)
+	}
+	if data == nil {
+		data = make(map[string]interface{})
 	}
 
 	linearMeta, _ := data["linear"].(map[string]interface{})

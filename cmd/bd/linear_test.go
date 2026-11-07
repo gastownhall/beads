@@ -2145,3 +2145,53 @@ func (s *linearSyncStore) PreviousExternalRef(context.Context, string, time.Time
 	}
 	return *s.issue.ExternalRef, true, nil
 }
+
+// TestMergedLinearMilestoneMetadataKeepsLargeIntegers (bd-emny2t, GH#6330):
+// updating the Linear milestone block must re-encode the rest of the metadata
+// without routing numbers through float64 — an unrelated 19-digit thread_id
+// keeps every digit. Empty existing metadata still yields a usable map (the
+// create path passes nil).
+func TestMergedLinearMilestoneMetadataKeepsLargeIntegers(t *testing.T) {
+	existing := json.RawMessage(`{"thread_id":1546130668394913822,` +
+		`"linear":{"kind":"project_milestone","issue_sync":true,` +
+		`"project_milestone":{"id":"ms-1","name":"old"}}}`)
+	ms := &linear.ProjectMilestone{ID: "ms-1", Name: "Q1", Progress: 0.5}
+
+	merged, err := mergedLinearMilestoneMetadata(existing, ms)
+	if err != nil {
+		t.Fatalf("mergedLinearMilestoneMetadata: %v", err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(merged, &m); err != nil {
+		t.Fatalf("unmarshal merged %s: %v", merged, err)
+	}
+	if got, want := string(m["thread_id"]), "1546130668394913822"; got != want {
+		t.Errorf("thread_id = %s, want %s (unrelated integer past 2^53 re-encoded through float64)", got, want)
+	}
+
+	// The linear block is updated in place: sibling keys survive, the milestone
+	// carries the new state.
+	var lin map[string]json.RawMessage
+	if err := json.Unmarshal(m["linear"], &lin); err != nil {
+		t.Fatalf("unmarshal linear %s: %v", m["linear"], err)
+	}
+	if string(lin["issue_sync"]) != "true" {
+		t.Errorf("linear.issue_sync = %s, want true (sibling key lost)", lin["issue_sync"])
+	}
+	var pm map[string]json.RawMessage
+	if err := json.Unmarshal(lin["project_milestone"], &pm); err != nil {
+		t.Fatalf("unmarshal project_milestone %s: %v", lin["project_milestone"], err)
+	}
+	if string(pm["id"]) != `"ms-1"` || string(pm["name"]) != `"Q1"` {
+		t.Errorf("project_milestone = id %s name %s, want ms-1 / Q1", pm["id"], pm["name"])
+	}
+
+	// Create path: nil existing metadata still initializes the map.
+	fresh, err := mergedLinearMilestoneMetadata(nil, ms)
+	if err != nil {
+		t.Fatalf("mergedLinearMilestoneMetadata(nil): %v", err)
+	}
+	if !strings.Contains(string(fresh), `"kind":"project_milestone"`) {
+		t.Errorf("fresh merge = %s, want a linear project_milestone object", fresh)
+	}
+}
