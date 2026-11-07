@@ -520,6 +520,30 @@ func TestClientRetrievePage(t *testing.T) {
 		}
 	})
 
+	t.Run("529 is retried for a GET", func(t *testing.T) {
+		t.Parallel()
+		var calls atomic.Int64
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if calls.Add(1) == 1 {
+				w.WriteHeader(statusNotionOverloaded)
+				return
+			}
+			_, _ = io.WriteString(w, `{"object":"page","id":"page-1"}`)
+		}))
+		defer server.Close()
+
+		var slept []time.Duration
+		client := NewClient("secret-token").WithBaseURL(server.URL)
+		client.after = firesImmediately(&slept)
+		page, err := client.RetrievePage(context.Background(), "page-1")
+		if err != nil || page.ID != "page-1" {
+			t.Fatalf("RetrievePage after 529 = (%+v, %v), want page-1", page, err)
+		}
+		if calls.Load() != 2 {
+			t.Fatalf("requests = %d, want 2 (a GET retries on 529)", calls.Load())
+		}
+	})
+
 	t.Run("exhausted retries stay an error", func(t *testing.T) {
 		t.Parallel()
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
