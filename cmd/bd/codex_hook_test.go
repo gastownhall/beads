@@ -425,3 +425,39 @@ func TestCodexHookUserPromptRefreshFailureEmitsValidOutputAndDoesNotRetry(t *tes
 		t.Errorf("failed refresh retried on every prompt: prime calls = %d, want 1", calls)
 	}
 }
+
+func TestCodexHookUserPromptRefreshRearmsAfterFailure(t *testing.T) {
+	_, postJSON, promptJSON := codexHookRefreshSession(t)
+
+	calls := 0
+	stubCodexHookPrime(t, func(bool) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", errors.New("workspace unavailable")
+		}
+		return "REARMED BEADS CONTEXT\n", nil
+	})
+
+	runCodexHookPayload(t, context.Background(), codexHookPostCompact, postJSON)
+	requireCodexHookSystemMessage(t, runCodexHookPayload(t, context.Background(), codexHookUserPromptSubmit, promptJSON))
+	if out := runCodexHookPayload(t, context.Background(), codexHookUserPromptSubmit, promptJSON); len(out) != 0 {
+		t.Fatalf("ordinary prompt after failed refresh: want no output, got %s", out)
+	}
+
+	runCodexHookPayload(t, context.Background(), codexHookPostCompact, postJSON)
+	out := runCodexHookPayload(t, context.Background(), codexHookUserPromptSubmit, promptJSON)
+	raw := decodeCodexHookObject(t, out)
+	var hso codexHookSpecificOutput
+	if err := json.Unmarshal(raw["hookSpecificOutput"], &hso); err != nil {
+		t.Fatalf("re-armed refresh hookSpecificOutput: %v\n%s", err, out)
+	}
+	if hso.HookEventName != codexHookUserPromptSubmit || hso.AdditionalContext != "REARMED BEADS CONTEXT\n" {
+		t.Fatalf("re-armed refresh output = %s", out)
+	}
+	if out := runCodexHookPayload(t, context.Background(), codexHookUserPromptSubmit, promptJSON); len(out) != 0 {
+		t.Fatalf("prompt after re-armed refresh: want no output, got %s", out)
+	}
+	if calls != 2 {
+		t.Fatalf("prime calls = %d, want 2", calls)
+	}
+}
