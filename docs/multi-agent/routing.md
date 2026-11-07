@@ -194,7 +194,9 @@ directory you run it in, so the entry points at the same repo wherever later
 commands run. Absolute paths, remote URLs and `~/` paths are stored as typed.
 A `~/` entry stays relative to each user's home directory, which keeps the
 shared `config.yaml` portable across clones; an absolute entry names one
-machine's layout.
+machine's layout. `bd repo remove` matches the entry as typed first, then by
+the absolute path a relative argument names, so entries written by older bd
+versions are removed by their stored spelling.
 
 `bd repo sync` reads each additional repo's `.beads/issues.jsonl` export and
 imports the beads with their original prefixes and `source_repo` set,

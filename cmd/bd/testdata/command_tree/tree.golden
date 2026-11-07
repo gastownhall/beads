@@ -6343,8 +6343,10 @@ bd repo remove
   long:
     | Remove a repository path from the repos.additional list in config.yaml.
     |
-    | The path must exactly match what was added (e.g., if you added "~/foo",
-    | you must remove "~/foo", not "/home/user/foo").
+    | The path is first matched against the configured entries exactly as typed.
+    | A relative path that matches no entry is then resolved against the current
+    | directory, the way 'bd repo add' stores it. A ~ entry is removed by its ~
+    | spelling (if you added "~/foo", remove "~/foo", not "/home/user/foo").
     |
     | This command also removes any previously-hydrated issues from the database
     | that came from the removed repository.
