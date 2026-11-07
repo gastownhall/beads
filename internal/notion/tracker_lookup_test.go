@@ -692,3 +692,160 @@ func TestTrackerFetchIssueTargeted(t *testing.T) {
 		t.Fatalf("single fetches sent %d unfiltered queries, want none", reqs.unfilteredQueries)
 	}
 }
+
+// localTask is the local side of fakeRow: equal to the row when title is
+// "Task "+beadsID.
+func localTask(beadsID, title string, updated time.Time, ref string) *types.Issue {
+	issue := &types.Issue{ID: beadsID, Title: title, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, UpdatedAt: updated}
+	if ref != "" {
+		issue.ExternalRef = &ref
+	}
+	return issue
+}
+
+func pushedIDs(items []itracker.BatchPushItem) []string {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.LocalID)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// Push resolves each issue with a direct read of its linked page or a Beads ID
+// query, never by listing the data source, so it works for every push size on
+// a data source too large to enumerate.
+func TestTrackerPushBeyondQueryBound(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	edited := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	newer := edited.Add(30 * time.Minute)
+
+	// Each fixture is: bd-1 linked and changed (update), bd-2 unlinked but in
+	// the source by Beads ID and changed (update), bd-3 unchanged (skip), bd-4
+	// linked with the remote edited later (skip unless forced), bd-new nowhere
+	// (create).
+	setup := func(t *testing.T) (*fakeNotion, []fakePage, []*types.Issue) {
+		f := newFakeNotion(t)
+		f.hugeSource = true
+		rows := []fakePage{fakeRow(1, "bd-1", edited), fakeRow(2, "bd-2", edited), fakeRow(3, "bd-3", edited), fakeRow(4, "bd-4", edited)}
+		f.addPages(rows...)
+		issues := []*types.Issue{
+			localTask("bd-1", "Changed 1", newer, rows[0].URL),
+			localTask("bd-2", "Changed 2", newer, ""),
+			localTask("bd-3", "Task bd-3", newer, rows[2].URL),
+			localTask("bd-4", "Changed 4", edited.Add(-time.Hour), rows[3].URL),
+			localTask("bd-new", "New", newer, ""),
+		}
+		return f, rows, issues
+	}
+
+	t.Run("one issue per push", func(t *testing.T) {
+		t.Parallel()
+		f, rows, issues := setup(t)
+		tr := f.tracker()
+		want := []struct{ created, updated, skipped string }{
+			{updated: "bd-1"}, {updated: "bd-2"}, {skipped: "bd-3"}, {skipped: "bd-4"}, {created: "bd-new"},
+		}
+		for i, issue := range issues {
+			result, err := tr.BatchPush(ctx, []*types.Issue{issue}, nil)
+			if err != nil {
+				t.Fatalf("BatchPush(%s): %v", issue.ID, err)
+			}
+			got := struct{ created, updated, skipped string }{
+				strings.Join(pushedIDs(result.Created), ","), strings.Join(pushedIDs(result.Updated), ","), strings.Join(result.Skipped, ","),
+			}
+			if got != want[i] || len(result.Errors) != 0 || len(result.Warnings) != 0 {
+				t.Fatalf("BatchPush(%s) = %+v, want %+v", issue.ID, result, want[i])
+			}
+		}
+		reqs := f.requests()
+		if got, want := strings.Join(reqs.updated, ","), compactID(rows[0].ID)+","+compactID(rows[1].ID); got != want {
+			t.Fatalf("updated pages = %s, want %s", got, want)
+		}
+		if got := strings.Join(reqs.created, ","); got != "bd-new" {
+			t.Fatalf("created = %s, want bd-new", got)
+		}
+		// A linked issue costs one read; an unlinked one costs one query.
+		if len(reqs.gets) != 3 || len(reqs.filters) != 2 || reqs.unfilteredQueries != 0 {
+			t.Fatalf("requests = %+v, want 3 direct reads, 2 filtered queries and no enumeration", reqs)
+		}
+
+		f.resetRequests()
+		result, err := tr.BatchPush(ctx, []*types.Issue{issues[3]}, map[string]bool{"bd-4": true})
+		if err != nil || len(result.Updated) != 1 || result.Updated[0].LocalID != "bd-4" {
+			t.Fatalf("forced BatchPush(bd-4) = (%+v, %v), want bd-4 updated", result, err)
+		}
+		if reqs := f.requests(); len(reqs.updated) != 1 || reqs.updated[0] != compactID(rows[3].ID) || reqs.unfilteredQueries != 0 {
+			t.Fatalf("forced push requests = %+v, want one update of %s", reqs, rows[3].ID)
+		}
+	})
+
+	t.Run("32 issues in one push", func(t *testing.T) {
+		t.Parallel()
+		f, rows, issues := setup(t)
+		wantCreated := []string{"bd-new"}
+		for i := len(issues); i < 32; i++ {
+			id := fmt.Sprintf("bd-extra-%02d", i)
+			issues = append(issues, localTask(id, "Extra", newer, ""))
+			wantCreated = append(wantCreated, id)
+		}
+		sort.Strings(wantCreated)
+
+		result, err := f.tracker().BatchPush(ctx, issues, nil)
+		if err != nil {
+			t.Fatalf("BatchPush: %v", err)
+		}
+		sort.Strings(result.Skipped)
+		if got := strings.Join(pushedIDs(result.Updated), ","); got != "bd-1,bd-2" {
+			t.Fatalf("updated = %s, want bd-1,bd-2", got)
+		}
+		if got := strings.Join(result.Skipped, ","); got != "bd-3,bd-4" {
+			t.Fatalf("skipped = %s, want bd-3,bd-4", got)
+		}
+		if got, want := strings.Join(pushedIDs(result.Created), ","), strings.Join(wantCreated, ","); got != want {
+			t.Fatalf("created = %s, want %s", got, want)
+		}
+		if len(result.Errors) != 0 || len(result.Warnings) != 0 {
+			t.Fatalf("errors = %+v, warnings = %v", result.Errors, result.Warnings)
+		}
+		reqs := f.requests()
+		sort.Strings(reqs.updated)
+		if got, want := strings.Join(reqs.updated, ","), compactID(rows[0].ID)+","+compactID(rows[1].ID); got != want {
+			t.Fatalf("updated pages = %s, want %s", got, want)
+		}
+		if reqs.unfilteredQueries != 0 || len(reqs.created) != len(wantCreated) {
+			t.Fatalf("requests = %+v, want %d creates and no enumeration", reqs, len(wantCreated))
+		}
+	})
+
+	t.Run("dry run writes nothing", func(t *testing.T) {
+		t.Parallel()
+		f, _, issues := setup(t)
+		result, err := f.tracker().BatchPushDryRun(ctx, issues, map[string]bool{"bd-4": true})
+		if err != nil {
+			t.Fatalf("BatchPushDryRun: %v", err)
+		}
+		if got := strings.Join(pushedIDs(result.Updated), ","); got != "bd-1,bd-2,bd-4" {
+			t.Fatalf("dry-run updated = %s, want bd-1,bd-2,bd-4", got)
+		}
+		if got := strings.Join(pushedIDs(result.Created), ","); got != "bd-new" {
+			t.Fatalf("dry-run created = %s, want bd-new", got)
+		}
+		if reqs := f.requests(); len(reqs.created) != 0 || len(reqs.updated) != 0 || reqs.unfilteredQueries != 0 {
+			t.Fatalf("dry run requests = %+v, want no writes and no enumeration", reqs)
+		}
+	})
+
+	t.Run("empty push sends nothing", func(t *testing.T) {
+		t.Parallel()
+		f, _, _ := setup(t)
+		result, err := f.tracker().BatchPush(ctx, nil, nil)
+		if err != nil || result == nil {
+			t.Fatalf("BatchPush(nil) = (%+v, %v), want an empty result", result, err)
+		}
+		if reqs := f.requests(); reqs.unfilteredQueries != 0 || len(reqs.filters) != 0 || len(reqs.gets) != 0 {
+			t.Fatalf("empty push requests = %+v, want none", reqs)
+		}
+	})
+}
