@@ -8,8 +8,12 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
 )
 
 // TestDirToFileURLRejectsSchemes pins the guard that stops a URL being turned
@@ -78,6 +82,92 @@ func TestExtractAddressConflictName(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestBackupSyncWithPrunePassesNativeProcedureOptions(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT url FROM dolt_backups WHERE name = ?")).
+		WithArgs("default").
+		WillReturnRows(sqlmock.NewRows([]string{"url"}).AddRow("file:///tmp/backup"))
+	query := "CALL DOLT_BACKUP('sync', ?, '--prune-with-grace-period', ?)"
+	mock.ExpectExec(regexp.QuoteMeta(query)).
+		WithArgs("default", "30m0s").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	outcome, err := BackupSyncWithPrune(context.Background(), db, "default", 30*time.Minute)
+	if err != nil {
+		t.Fatalf("BackupSyncWithPrune: %v", err)
+	}
+	if outcome.Status != "unavailable" || !strings.Contains(outcome.Message, "did not return a prune summary") {
+		t.Fatalf("BackupSyncWithPrune outcome = %+v, want explicit unavailable status for SQL-only result", outcome)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBackupSyncWithPruneRejectsTooShortGracePeriodBeforeSQL(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	_, err = BackupSyncWithPrune(context.Background(), db, "default", time.Minute)
+	if err == nil || !strings.Contains(err.Error(), "at least 10m") {
+		t.Fatalf("BackupSyncWithPrune short grace error = %v, want minimum-duration error", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBackupRemoteURLReadsDoltRegisteredBackup(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT url FROM dolt_backups WHERE name = ?")).
+		WithArgs("default").
+		WillReturnRows(sqlmock.NewRows([]string{"url"}).AddRow("file:///registered/backup"))
+
+	got, err := BackupRemoteURL(context.Background(), db, "default")
+	if err != nil {
+		t.Fatalf("BackupRemoteURL: %v", err)
+	}
+	if got != "file:///registered/backup" {
+		t.Fatalf("BackupRemoteURL = %q, want registered URL", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBackupRemoteURLReportsMissingRegisteredBackup(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT url FROM dolt_backups WHERE name = ?")).
+		WithArgs("default").
+		WillReturnRows(sqlmock.NewRows([]string{"url"}))
+
+	_, err = BackupRemoteURL(context.Background(), db, "default")
+	if !errors.Is(err, ErrBackupRemoteNotFound) {
+		t.Fatalf("BackupRemoteURL error = %v, want ErrBackupRemoteNotFound", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }
 

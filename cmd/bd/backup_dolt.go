@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,6 +27,7 @@ import (
 // and are faster for large databases.
 
 const defaultDoltBackupName = "default"
+const backupSyncPruneGracePeriodFlag = "prune-with-grace-period"
 
 var backupInitCmd = &cobra.Command{
 	Use:     "init <path>",
@@ -130,6 +132,20 @@ var backupSyncCmd = &cobra.Command{
 This pushes the entire database state (all branches, full history) to the
 backup location configured with 'bd backup init'.
 
+For file:// destinations, --prune-with-grace-period <duration> asks Dolt to
+remove manifest-unreferenced table files older than the duration before
+syncing. This reclaims orphan files from interrupted syncs; it does not reclaim
+unreachable chunks inside files still referenced by the manifest, so the backup
+size cap remains the control for normal backup growth. The duration must be at
+least 10m and shorter than the sync interval, or pruning may never run. Dolt
+skips pruning if any destination file was modified within the grace period.
+
+Pruning is best-effort: a prune failure does not fail the sync. Embedded mode
+reports Dolt's prune summary when available. On SQL-server and proxied routes,
+Dolt writes that summary to server stdout and does not return it over SQL, so
+bd reports the prune outcome as unavailable; check the Dolt server logs.
+Without the flag, sync behavior is unchanged.
+
 The backup is atomic — if the sync fails, the previous backup state is preserved.
 
 Run 'bd backup init <path>' first to configure a destination.`,
@@ -137,7 +153,16 @@ Run 'bd backup init <path>' first to configure a destination.`,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("backup sync")
-
+		rawGracePeriod, err := cmd.Flags().GetDuration(backupSyncPruneGracePeriodFlag)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		gracePeriod, prune, err := validateBackupPruneGracePeriod(
+			rawGracePeriod, cmd.Flags().Changed(backupSyncPruneGracePeriodFlag),
+		)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
 		evt := metrics.NewCommandEvent("backup-sync")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -146,11 +171,6 @@ Run 'bd backup init <path>' first to configure a destination.`,
 		}()
 
 		ctx := rootCtx
-		if usesProxiedServer() {
-			if err := requireLocalProxiedBackup("backup sync"); err != nil {
-				return err
-			}
-		}
 		release, err := acquireBackupLock(backupLockWait)
 		if err != nil {
 			if errors.Is(err, errBackupBusy) {
@@ -161,6 +181,9 @@ Run 'bd backup init <path>' first to configure a destination.`,
 		defer release()
 
 		if usesProxiedServer() {
+			if prune {
+				return runBackupSyncProxiedWithPrune(ctx, gracePeriod)
+			}
 			return runBackupSyncProxied(ctx)
 		}
 		if store == nil {
@@ -170,6 +193,16 @@ Run 'bd backup init <path>' first to configure a destination.`,
 		bs, ok := storage.UnwrapStore(store).(storage.BackupStore)
 		if !ok {
 			return fmt.Errorf("storage backend does not support backup operations")
+		}
+		var prunable storage.PrunableBackupStore
+		if prune {
+			prunable, ok = storage.UnwrapStore(store).(storage.PrunableBackupStore)
+			if !ok {
+				return fmt.Errorf("storage backend does not support backup pruning")
+			}
+			if err := requireFileBackupForPrune(ctx, prunable.BackupRemoteURL); err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
 		}
 
 		// First, commit any pending changes so they're included in the backup
@@ -181,12 +214,19 @@ Run 'bd backup init <path>' first to configure a destination.`,
 		start := time.Now()
 
 		// Sync to the configured backup
-		if err := bs.BackupSync(ctx, defaultDoltBackupName); err != nil {
-			if strings.Contains(err.Error(), "no backup") ||
-				strings.Contains(err.Error(), "not found") {
+		var syncErr error
+		var pruneOutcome versioncontrolops.BackupPruneOutcome
+		if prune {
+			pruneOutcome, syncErr = prunable.BackupSyncWithPrune(ctx, defaultDoltBackupName, gracePeriod)
+		} else {
+			syncErr = bs.BackupSync(ctx, defaultDoltBackupName)
+		}
+		if syncErr != nil {
+			if strings.Contains(syncErr.Error(), "no backup") ||
+				strings.Contains(syncErr.Error(), "not found") {
 				return fmt.Errorf("no backup destination configured. Run 'bd backup init <path>' first")
 			}
-			return fmt.Errorf("backup sync failed: %w", err)
+			return fmt.Errorf("backup sync failed: %w", syncErr)
 		}
 
 		elapsed := time.Since(start)
@@ -197,13 +237,20 @@ Run 'bd backup init <path>' first to configure a destination.`,
 		}
 
 		if jsonOutput {
-			return outputJSON(map[string]interface{}{
+			result := map[string]interface{}{
 				"synced":   true,
 				"duration": elapsed.String(),
-			})
+			}
+			if prune {
+				result["prune"] = pruneOutcome
+			}
+			return outputJSON(result)
 		}
 
 		fmt.Printf("Backup synced in %s\n", elapsed.Round(time.Millisecond))
+		if prune {
+			fmt.Printf("Prune outcome: %s\n", pruneOutcome.Summary())
+		}
 		return nil
 	},
 }
@@ -493,7 +540,43 @@ backup configuration. The backup data at the destination is not deleted.`,
 }
 
 func init() {
+	backupSyncCmd.Flags().Duration(backupSyncPruneGracePeriodFlag, 0, "Best-effort prune of aged orphan files in a file:// backup destination")
 	backupCmd.AddCommand(backupInitCmd)
 	backupCmd.AddCommand(backupSyncCmd)
 	backupCmd.AddCommand(backupRemoveCmd)
+}
+
+func validateBackupPruneGracePeriod(gracePeriod time.Duration, provided bool) (time.Duration, bool, error) {
+	if !provided {
+		return 0, false, nil
+	}
+	if gracePeriod < versioncontrolops.MinBackupPruneGracePeriod {
+		return 0, true, fmt.Errorf("--%s must be at least %s", backupSyncPruneGracePeriodFlag, versioncontrolops.MinBackupPruneGracePeriod)
+	}
+	return gracePeriod, true, nil
+}
+
+func requireFileBackupForPrune(ctx context.Context, readBackupURL func(context.Context, string) (string, error)) error {
+	backupURL, err := readBackupURL(ctx, defaultDoltBackupName)
+	if err != nil {
+		if errors.Is(err, versioncontrolops.ErrBackupRemoteNotFound) {
+			return fmt.Errorf("no backup destination configured. Run 'bd backup init <path>' first")
+		}
+		return fmt.Errorf("read backup destination: %w", err)
+	}
+	return validateBackupPruneDestination(backupURL)
+}
+
+func validateBackupPruneDestination(backupURL string) error {
+	parsed, err := url.Parse(backupURL)
+	if err != nil || parsed.Scheme == "" {
+		return fmt.Errorf("--%s requires a valid file:// backup destination", backupSyncPruneGracePeriodFlag)
+	}
+	if !strings.EqualFold(parsed.Scheme, "file") {
+		return fmt.Errorf("--%s supports only file:// backup destinations (configured scheme: %s)", backupSyncPruneGracePeriodFlag, parsed.Scheme)
+	}
+	if !strings.HasPrefix(strings.ToLower(backupURL), "file://") {
+		return fmt.Errorf("--%s requires a file:// backup destination", backupSyncPruneGracePeriodFlag)
+	}
+	return nil
 }
