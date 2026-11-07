@@ -8,6 +8,7 @@ go_library(
         "container_provider_windows.go",
         "dockercontext.go",
         "doltlock.go",
+        "doltsqlserver.go",
         "git_env.go",
         "git_test_hooks.go",
         "localdoltserver.go",
@@ -113,6 +114,7 @@ go_test(
     name = "testutil_test",
     srcs = [
         "dockercontext_test.go",
+        "doltsqlserver_test.go",
         "git_env_test.go",
         "gm2g3g5r_failopen_test.go",
         "gm2g3g5r_failopen_unix_test.go",

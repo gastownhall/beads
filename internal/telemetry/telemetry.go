@@ -132,9 +132,18 @@ func translateLegacyEnv() []string {
 
 // buildResource assembles the OTel Resource describing this bd process.
 //
-// Defaults are merged with the host/process detectors and finally with the
-// FromEnv detector, so OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES can
+// Defaults are merged with the host and process detectors and finally with
+// the FromEnv detector, so OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES can
 // override anything set by the caller.
+//
+// The process detectors are listed one by one instead of resource.WithProcess:
+// the resource rides on every exported metric and span, and WithProcess would
+// add process.command_args (the raw os.Args, bypassing the scrubbed bd.args
+// span attribute, so a --password=... or a search string would reach the
+// receiver), process.executable.path (often under the user's home directory)
+// and process.owner (the OS user name). Only the non-identifying process
+// attributes are kept: pid, executable name and Go runtime name/version/
+// description.
 func buildResource(ctx context.Context, serviceName, version string) (*resource.Resource, error) {
 	return resource.New(ctx,
 		resource.WithAttributes(
@@ -142,7 +151,11 @@ func buildResource(ctx context.Context, serviceName, version string) (*resource.
 			semconv.ServiceVersionKey.String(version),
 		),
 		resource.WithHost(),
-		resource.WithProcess(),
+		resource.WithProcessPID(),
+		resource.WithProcessExecutableName(),
+		resource.WithProcessRuntimeName(),
+		resource.WithProcessRuntimeVersion(),
+		resource.WithProcessRuntimeDescription(),
 		resource.WithFromEnv(),
 	)
 }
