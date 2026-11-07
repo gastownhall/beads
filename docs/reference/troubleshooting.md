@@ -154,9 +154,8 @@ rebuild a damaged store. Follow
 the damaged store and its configuration first, then recover into a fresh store
 from a Dolt remote, a Dolt-native backup, or a JSONL export.
 
-In releases after v1.3.2, the `bd doctor --fix` repairs that replace a
-database (automatic integrity recovery and the repo fingerprint fix's
-"Reinitialize database" choice) accept only a database path from
+In releases after v1.3.4, automatic integrity recovery (the `bd doctor --fix`
+repair that replaces a database) accepts only a database path from
 `metadata.json` that lies under the workspace's `.beads` directory as written,
 or the location `BEADS_DOLT_DATA_DIR` selects. A `dolt_data_dir` or `database`
 outside `.beads`, at `.beads` itself, a symlinked database, or a path that
@@ -348,6 +347,74 @@ tracking the same work twice.
   # Legacy method (deprecated, points at the database file directly)
   export BEADS_DB=/path/to/db
   ```
+
+### Repo Fingerprint: "Database fingerprint does not match this repository's remote"
+
+`bd doctor` compares the repository fingerprint stored in the database
+(`repo_id`) with one computed from this checkout's `origin` remote. The stored
+value is a hash: it cannot say which repository or remote spelling produced
+it, so a mismatch does not prove the database belongs to another repository.
+**Do not delete or move `.beads` to silence it.** In a shared-ledger setup
+`.beads` may only point at a shared server, and removing it loses real state.
+
+Clones that reach one repository through different SSH host aliases
+(`git@alias-a:org/repo.git`, `git@alias-b:org/repo.git`) used to hash the
+alias spelling and could never agree. bd now asks `ssh -G` which `HostName`
+your SSH config gives the alias and hashes that, so aliases of the same host
+and path produce the same fingerprint as `git@github.com:org/repo.git` and
+`https://github.com/org/repo.git`. A database stamped by this checkout before
+the upgrade still verifies. To converge a shared ledger:
+
+1. Check that every clone using the database points to the same repository.
+2. Upgrade bd on every clone.
+3. Run `bd migrate --update-repo-id` once, from a clone whose computed
+   fingerprint is the one you want. This rewrites the shared `repo_id` for
+   every clone; `bd doctor` alone never rewrites it.
+
+Alias resolution is a compatibility heuristic, and bd keeps the previous
+fingerprint whenever it does not apply:
+
+- Bare aliases (`alias-a`, `github-work`, `github.com-work`) are resolved to
+  any `HostName`. A dotted alias of three or more labels is resolved only to a
+  parent domain (`work.github.com` to `github.com`). A two-label name such as
+  `github.com` is never rewritten, even if its SSH transport is configured to
+  `ssh.github.com`; two-label and unrelated dotted aliases are not supported.
+- An alias whose SSH config sets a `Port` other than 22 is not resolved: the
+  same `HostName` on another port can be a different server. A port written in
+  the remote URL (`ssh://git@alias-a:2222/org/repo.git`) overrides the config
+  and is hashed as before.
+- `GIT_SSH`, `GIT_SSH_COMMAND` or `core.sshCommand` select a custom transport
+  whose host mapping `ssh -G` cannot speak for. bd still asks `ssh -G` whether
+  the host is an alias, and keeps the previous fingerprint of one that is. A
+  host that is not an alias, such as `gitlab.example.com` mapped to itself, is
+  unaffected.
+- A missing `ssh`, a failing or slow (over two seconds) `ssh -G`, or output
+  without a usable `hostname` and `port` keeps the previous fingerprint.
+- A bare host that `ssh -G` maps to itself keeps the previous fingerprint. It
+  may be the server's own name (`gitserver`), or an alias that other machines
+  configure but this machine's SSH config lacks: `ssh -G` echoes an unknown
+  host back.
+
+In those last three cases the fingerprint may differ from the one a session
+or machine that resolves the alias computes. `bd doctor` therefore reports a
+different stored value as a warning that names the reason, and
+`bd doctor --fix --yes` and `bd migrate --update-repo-id --yes` (or `--json`)
+refuse to replace it; the interactive update warns before it asks. Run them
+where `ssh -G` resolves the alias and no custom transport is set. If a bare
+host is the server's own name, run `bd migrate --update-repo-id` without
+`--yes` and confirm the update.
+
+The fingerprint follows each machine's own SSH config, so clones that map one
+alias to different `HostName`s (`ssh.github.com` on one machine, `github.com`
+on another) compute different fingerprints.
+
+`ssh -G` evaluates your SSH configuration without connecting, but it runs any
+`Match exec` commands and may use DNS if `CanonicalizeHostname` is set.
+
+If the database really belongs to another repository, keep it, check which
+database the workspace is configured to use (`bd where` shows the active
+`.beads`, including redirects), and reconnect or reinitialize by hand once you
+know nothing in it is needed.
 
 ### Circuit breaker: "server appears down, failing fast"
 

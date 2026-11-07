@@ -590,7 +590,14 @@ func CheckRepoFingerprintWithStore(ss *SharedStore, path string) DoctorCheck {
 	return checkRepoFingerprintWithStore(store, path)
 }
 
-func checkRepoFingerprintWithStore(store *dolt.DoltStore, path string) DoctorCheck {
+// repoMetadataStore is the store surface the fingerprint check needs. The
+// concrete *dolt.DoltStore satisfies it; tests substitute a fake so the
+// stored-vs-current comparison is exercisable without a database.
+type repoMetadataStore interface {
+	GetMetadata(ctx context.Context, key string) (string, error)
+}
+
+func checkRepoFingerprintWithStore(store repoMetadataStore, path string) DoctorCheck {
 	ctx := context.Background()
 
 	storedRepoID, err := store.GetMetadata(ctx, "repo_id")
@@ -613,7 +620,7 @@ func checkRepoFingerprintWithStore(store *dolt.DoltStore, path string) DoctorChe
 		}
 	}
 
-	currentRepoID, currentSource, err := beads.ComputeRepoIDForPathWithSource(path)
+	current, err := beads.ComputeRepoFingerprintForPath(path)
 	if err != nil {
 		if strings.Contains(err.Error(), "not a git repository") {
 			return DoctorCheck{
@@ -630,14 +637,15 @@ func checkRepoFingerprintWithStore(store *dolt.DoltStore, path string) DoctorChe
 		}
 	}
 
-	return classifyRepoFingerprint(storedRepoID, currentRepoID, currentSource)
+	return classifyRepoFingerprint(storedRepoID, current)
 }
 
 // classifyRepoFingerprint turns a stored-vs-current fingerprint comparison into
 // a doctor check. Pure so the mismatch branches are unit-testable without a
 // store.
-func classifyRepoFingerprint(storedRepoID, currentRepoID string, currentSource beads.RepoIDSource) DoctorCheck {
-	if storedRepoID != currentRepoID {
+func classifyRepoFingerprint(storedRepoID string, current beads.RepoFingerprint) DoctorCheck {
+	currentRepoID := current.ID
+	if !current.Matches(storedRepoID) {
 		// bd-46vla: with no origin remote here, the local fingerprint is a
 		// path hash that can never match a remote-derived stored id — the
 		// signature of a synced clone on a host without the canonical remote.
@@ -645,7 +653,7 @@ func classifyRepoFingerprint(storedRepoID, currentRepoID string, currentSource b
 		// metadata table, so 'bd migrate --update-repo-id' would stamp this
 		// host's path hash into shared state and propagate it to every clone
 		// on the next sync (the GH#4361 class).
-		if currentSource == beads.RepoIDSourcePath {
+		if current.Source == beads.RepoIDSourcePath {
 			return DoctorCheck{
 				Name:    "Repo Fingerprint",
 				Status:  StatusWarning,
@@ -654,19 +662,69 @@ func classifyRepoFingerprint(storedRepoID, currentRepoID string, currentSource b
 				Fix:     "On a synced clone, leave it (or add the canonical origin remote). Only run 'bd migrate --update-repo-id' if this checkout is the canonical repository — the new id propagates to every clone on the next sync",
 			}
 		}
+		// GH#5990: this session could not resolve the remote's SSH host
+		// alias (a custom SSH transport, or no usable answer from ssh -G),
+		// so the current id hashes the alias as written. A session that
+		// resolves it, as the shared-ledger sequence below converges on,
+		// computes another id: the mismatch is no evidence against the
+		// stored id, and updating it from here would split the clones again.
+		if current.AliasUnresolved() {
+			return DoctorCheck{
+				Name:    "Repo Fingerprint",
+				Status:  StatusWarning,
+				Message: "Fingerprint differs, but this session could not resolve the SSH host alias",
+				Detail: fmt.Sprintf("stored: %s, current: %s — the current id hashes the SSH host alias %q as written because %s; a session that resolves the alias may compute the stored id",
+					truncateID(storedRepoID), truncateID(currentRepoID), current.SSHAlias, current.SSHAliasUnresolved),
+				Fix: "Rerun 'bd doctor' where ssh -G can resolve the alias (no GIT_SSH, GIT_SSH_COMMAND or core.sshCommand) to check the stored id. " +
+					"Do not run 'bd migrate --update-repo-id' from this session: it would replace the shared id with this unresolved one for every clone",
+			}
+		}
+		// Review (#8212): ssh -G echoes a host its configuration does not
+		// know, so this machine cannot tell a bare host that is the server's
+		// own name from an alias configured only on other machines, which
+		// compute its HostName's id. The mismatch is no proof of another
+		// repository either way: warn, and leave the update to a person who
+		// knows which it is.
+		if current.AliasUnmapped() {
+			return DoctorCheck{
+				Name:    "Repo Fingerprint",
+				Status:  StatusWarning,
+				Message: "Fingerprint differs, but the SSH host may be an alias this machine does not configure",
+				Detail: fmt.Sprintf("stored: %s, current: %s — this machine's SSH config maps the bare SSH host %q to no other HostName, so the current id hashes it as written; a clone whose SSH config maps it to a HostName computes a different id",
+					truncateID(storedRepoID), truncateID(currentRepoID), current.SSHAlias),
+				Fix: fmt.Sprintf("If %q is an SSH host alias, add its Host entry to this machine's SSH config and rerun 'bd doctor'. ", current.SSHAlias) +
+					"If it is the server's own name and every clone using this database points to this repository, run 'bd migrate --update-repo-id' without --yes or --json: " +
+					"it asks before it rewrites the shared id for every clone",
+			}
+		}
+		// GH#5990: a stored hash cannot say which repository produced it, so
+		// a mismatch is not proof of a different repository: clones of one
+		// repository through different SSH aliases, or a bd upgrade, also
+		// produce one. Keep it an error, but never suggest deleting or moving
+		// .beads aside: it may be a redirect or the configuration of a shared
+		// server, and nothing here shows the database is disposable.
+		detail := fmt.Sprintf("stored: %s, current: %s", truncateID(storedRepoID), truncateID(currentRepoID))
+		if current.AliasResolved() {
+			detail += fmt.Sprintf(" (this checkout's SSH host alias %q resolved to %q; its pre-alias id %s does not match either)",
+				current.SSHAlias, current.SSHHostName, truncateID(current.LegacyID))
+		}
 		return DoctorCheck{
 			Name:    "Repo Fingerprint",
 			Status:  StatusError,
-			Message: "Database belongs to different repository",
-			Detail:  fmt.Sprintf("stored: %s, current: %s", truncateID(storedRepoID), truncateID(currentRepoID)),
-			Fix:     "Run 'bd migrate --update-repo-id' if URL changed, or 'rm -rf .beads && bd init' if wrong database",
+			Message: "Database fingerprint does not match this repository's remote",
+			Detail:  detail,
+			Fix: "If every clone using this database points to the same repository, upgrade bd on all of them and run " +
+				"'bd migrate --update-repo-id' once, from a clone whose fingerprint is the intended one; it rewrites the shared id for every clone. " +
+				"If the database belongs to another repository, keep it and check which database this workspace is configured to use before reconnecting or reinitializing by hand",
 		}
 	}
 
+	// GH#5990: a stored id may be this checkout's legacy literal-alias
+	// fingerprint; show the id that matched.
 	return DoctorCheck{
 		Name:    "Repo Fingerprint",
 		Status:  StatusOK,
-		Message: fmt.Sprintf("Verified (%s)", truncateID(currentRepoID)),
+		Message: fmt.Sprintf("Verified (%s)", truncateID(storedRepoID)),
 	}
 }
 
