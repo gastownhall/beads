@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -297,5 +298,109 @@ func TestExternalReadOnlyDSNTLSConfigName(t *testing.T) {
 	}
 	if got := buildServerDSN(base(), "db"); !strings.Contains(got, "tls=true") {
 		t.Fatalf("unnamed TLS keeps tls=true, got: %s", got)
+	}
+}
+
+// TestExternalReadOnlyNoMutation pins the strictly non-mutating half of the
+// external-read posture (#5861 item 2, AC-4): a successful external read of a
+// proxied target changes nothing — not one file in the target workspace (no
+// proxy root, no auto-start port file, no local data directory), no dolt
+// commit, no schema migration row — and an open whose database is missing
+// creates neither the database nor any local state.
+func TestExternalReadOnlyNoMutation(t *testing.T) {
+	skipIfNoServer(t)
+	f := newExternalReadOnlyFixture(t)
+	ctx := context.Background()
+
+	// snapshot records every file under the fixture's workspace root.
+	snapshot := func() map[string]int64 {
+		t.Helper()
+		files := map[string]int64{}
+		err := filepath.WalkDir(filepath.Dir(f.beadsDir), func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			rel, err := filepath.Rel(filepath.Dir(f.beadsDir), path)
+			if err != nil {
+				return err
+			}
+			files[rel] = info.Size()
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("snapshot workspace files: %v", err)
+		}
+		return files
+	}
+	// serverState reads the row counts an unnoticed write or migration would
+	// move: dolt commits and applied schema migrations.
+	serverState := func() (commits, migrations int) {
+		t.Helper()
+		db := rawTestConn(t, testServerPort)
+		defer db.Close()
+		var mig int
+		if err := db.QueryRow("SELECT COUNT(*) FROM `" + f.database + "`.schema_migrations").Scan(&mig); err != nil {
+			t.Fatalf("count schema_migrations: %v", err)
+		}
+		var com int
+		if err := db.QueryRow("SELECT COUNT(*) FROM `" + f.database + "`.dolt_log").Scan(&com); err != nil {
+			t.Fatalf("count dolt_log: %v", err)
+		}
+		return com, mig
+	}
+
+	filesBefore := snapshot()
+	commitsBefore, migrationsBefore := serverState()
+
+	store, err := NewExternalReadOnly(ctx, f.beadsDir, f.database, f.external, "")
+	if err != nil {
+		t.Fatalf("NewExternalReadOnly: %v", err)
+	}
+	if _, err := store.GetIssue(ctx, f.issueID); err != nil {
+		t.Fatalf("read seeded issue: %v", err)
+	}
+	if _, err := store.GetMetadata(ctx, "_project_id"); err != nil {
+		t.Fatalf("read workspace identity: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close external store: %v", err)
+	}
+
+	if filesAfter := snapshot(); !reflect.DeepEqual(filesBefore, filesAfter) {
+		t.Errorf("external read changed the target workspace:\nbefore: %v\nafter:  %v", filesBefore, filesAfter)
+	}
+	if _, err := os.Stat(filepath.Join(f.beadsDir, "dolt")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("external read must not create a local data directory at %s: %v", filepath.Join(f.beadsDir, "dolt"), err)
+	}
+	commitsAfter, migrationsAfter := serverState()
+	if commitsAfter != commitsBefore {
+		t.Errorf("external read minted dolt commits: %d -> %d", commitsBefore, commitsAfter)
+	}
+	if migrationsAfter != migrationsBefore {
+		t.Errorf("external read applied schema migrations: %d -> %d", migrationsBefore, migrationsAfter)
+	}
+
+	// A read whose database is missing fails without creating anything on
+	// either side: not the database, not local state in a fresh workspace.
+	missing := uniqueTestDBName(t)
+	freshDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(freshDir, 0o755); err != nil {
+		t.Fatalf("create fresh .beads: %v", err)
+	}
+	assertDatabaseNotExists(t, testServerPort, missing)
+	if _, err := NewExternalReadOnly(ctx, freshDir, missing, f.external, ""); err == nil {
+		t.Fatal("expected database-not-found error, got nil")
+	}
+	assertDatabaseNotExists(t, testServerPort, missing)
+	entries, err := os.ReadDir(freshDir)
+	if err != nil {
+		t.Fatalf("read fresh .beads: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("a failed external read must leave the workspace empty, found %v", entries)
 	}
 }
