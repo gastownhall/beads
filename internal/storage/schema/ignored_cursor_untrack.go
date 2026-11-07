@@ -80,32 +80,43 @@ type ignoredCursorState struct {
 	// needsUntrack: the legacy shape — cursor table committed at HEAD while
 	// dolt_ignore genuinely covers it.
 	needsUntrack bool
-	// strayScratch: a scratch table survives from an interrupted repair.
-	// Left alone it is eventually committed into HEAD by an unrelated
-	// auto-commit and replicated fleet-wide, and it keeps the resurrection
-	// hazard armed (see resumeIgnoredCursorUntrack).
+	// strayScratch: a scratch table survives in the working set from an
+	// interrupted repair. Left alone it is eventually committed into HEAD by
+	// an unrelated auto-commit and replicated fleet-wide, and it keeps the
+	// resurrection hazard armed (see resumeIgnoredCursorUntrack).
 	strayScratch bool
+	// scratchPendingDeletion: the scratch is committed at HEAD but already
+	// dropped from the working set — an interrupted sweep (or an older
+	// peer's commit the local drop never followed) left its deletion
+	// pending. That deletion is a tracked delta "__temp__%" hides from
+	// every ignore-filtered dirty guard, so nothing else ever commits it
+	// and `bd dolt pull` refuses it forever (PR #7075).
+	scratchPendingDeletion bool
 }
 
 func (s ignoredCursorState) reconcileNeeded() bool {
-	return s.needsUntrack || s.strayScratch
+	return s.needsUntrack || s.strayScratch || s.scratchPendingDeletion
 }
 
 // readIgnoredCursorState answers both halves of the gate. On a healthy
-// database that is two SHOW TABLES listings, HEAD's and the working set's; a
-// dolt_ignore read joins them only when the cursor is tracked at HEAD. None of
-// them may fail, and that is not incidental: a Dolt session that issues a
-// FAILING statement stays pinned to its pre-statement catalog snapshot for the
-// rest of its pooled life (be-bv7x), and this runs on every writable open and
-// every lock-free fast-path evaluation. A SHOW TABLES listing fails with no
-// database selected (1105) and on a session whose database was dropped (1049),
-// so both callers must already have the session on the target database; a
-// session that may have no usable database needs tableInCurrentDatabase.
+// database that is three SHOW TABLES listings — the cursor at HEAD, the
+// scratch in the working set, and, when that listing missed, the scratch at
+// HEAD, which recognizes a deletion an interrupted sweep left pending (PR
+// #7075); a dolt_ignore read joins them only when the cursor is tracked at
+// HEAD. None of them may fail, and that is not incidental: a Dolt session
+// that issues a FAILING statement stays pinned to its pre-statement catalog
+// snapshot for the rest of its pooled life (be-bv7x), and this runs on every
+// writable open and every lock-free fast-path evaluation. A SHOW TABLES
+// listing fails with no database selected (1105) and on a session whose
+// database was dropped (1049), so both callers must already have the session
+// on the target database; a session that may have no usable database needs
+// tableInCurrentDatabase.
 //
 // qualifier is the identifier-quoted database name selectTargetDatabase
 // returned, or empty when the session is already on the target database. The
-// scratch probe takes no qualifier: it lists the session's current database,
-// which both callers have already made the target.
+// scratch's working-set probe takes no qualifier: it lists the session's
+// current database, which both callers have already made the target. The
+// scratch's HEAD probe takes the same qualifier the cursor's did.
 func readIgnoredCursorState(ctx context.Context, db DBConn, qualifier string) (ignoredCursorState, error) {
 	var state ignoredCursorState
 
@@ -123,12 +134,26 @@ func readIgnoredCursorState(ctx context.Context, db DBConn, qualifier string) (i
 		return state, fmt.Errorf("probing %s: %w", ignoredCursorUntrackTempTable, err)
 	}
 	state.strayScratch = stray
+	if stray {
+		return state, nil
+	}
+	// A scratch that is absent from the working set can still be committed
+	// at HEAD. The HEAD listing is the same always-succeeding LIKE form the
+	// cursor probe above uses (a direct `SELECT … AS OF 'HEAD'` would fail
+	// on every healthy database and pin the pooled session), and it is
+	// skipped whenever the working-set probe already found the scratch, so
+	// the healthy database pays it rather than the repairing one.
+	pending, err := tableTrackedAtHead(ctx, db, qualifier, ignoredCursorUntrackTempTable)
+	if err != nil {
+		return state, err
+	}
+	state.scratchPendingDeletion = pending
 	return state, nil
 }
 
 // healTrackedIgnoredCursorTable untracks a legacy tracked-at-HEAD
 // ignored_schema_migrations table and restores its rows, reporting whether it
-// changed anything. It runs on every writable open and costs two reads on a
+// changed anything. It runs on every writable open and costs three reads on a
 // healthy database.
 //
 // Failure policy, straight from the #5816 lesson that a heal must never mint a

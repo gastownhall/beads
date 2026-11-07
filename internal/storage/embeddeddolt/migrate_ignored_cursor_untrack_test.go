@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -673,6 +674,188 @@ func TestIgnoredCursorHealRespectsOverrideUnderBroaderPattern(t *testing.T) {
 		}
 		if n := untrackCommitCount(t, ctx, conn); n != 0 {
 			t.Errorf("commits referencing #4356 = %d, want 0 under an operator override", n)
+		}
+	})
+}
+
+// commitScratchPendingDeletionAtHead leaves the store in the shape PR #7075
+// reports (bd-fgdx42): the #4356 scratch table committed into HEAD by some
+// earlier writer — the interrupted repair's own untrackCursorInPlace leaves
+// it in the working set, and the forced add and commit put it on the
+// versioned plane the way an older binary's blanket commit or a replicated
+// peer did — then dropped locally without committing the deletion. That
+// deletion is a TRACKED delta the "__temp__%" pattern hides from
+// ignore-filtered status, which is exactly why nothing else ever sweeps it.
+// The cursor must be untracked first; untrackCursorInPlace does that and
+// leaves the scratch behind for the forced add to stage.
+func commitScratchPendingDeletionAtHead(t *testing.T, ctx context.Context, conn *sql.Conn) {
+	t.Helper()
+	untrackCursorInPlace(t, ctx, conn)
+	mustExecOn(t, ctx, conn, "CALL DOLT_ADD('-f', ?)", untrackScratchTable)
+	mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('-m', 'scratch committed by an older peer')")
+	mustExecOn(t, ctx, conn, "DROP TABLE "+untrackScratchTable)
+	if !trackedAtHead(t, ctx, conn, untrackScratchTable) {
+		t.Fatalf("%s is not committed at HEAD; the pending-deletion state was not reproduced", untrackScratchTable)
+	}
+	if tablePresent(t, ctx, conn, untrackScratchTable) {
+		t.Fatalf("%s is still in the working set; the fixture must leave the deletion pending", untrackScratchTable)
+	}
+	if dirty := dirtyTableNames(t, ctx, conn); !contains(dirty, untrackScratchTable) {
+		t.Fatalf("dolt_status = %v, want the scratch listed: the untracked-only working set has no other symptom", dirty)
+	}
+}
+
+// TestIgnoredCursorScratchPendingDeletionIsSweptOnOpen pins bd-fgdx42 (PR
+// #7075): a #4356 scratch table committed at HEAD but already dropped from
+// the working set leaves an uncommitted deletion that a writable open must
+// sweep (commit), so HEAD stops carrying the table and pulls are not refused.
+// The live cursor must ride through untouched, the sweep must stay scoped —
+// an unrelated staged change is unstaged, kept in the working set, and never
+// committed under the sweep's message — and a second open must find nothing
+// left to do.
+func TestIgnoredCursorScratchPendingDeletionIsSweptOnOpen(t *testing.T) {
+	ctx := t.Context()
+	f := newLegacyTrackedFixture(t, "scratchpending")
+
+	var before []string
+	var commitsBefore int
+	f.withRawConn(t, func(conn *sql.Conn) {
+		commitScratchPendingDeletionAtHead(t, ctx, conn)
+		// An unrelated tracked-table change, staged, that a scoped sweep
+		// must neither commit nor discard.
+		mustExecOn(t, ctx, conn, "INSERT INTO config (`key`, value) VALUES ('unrelated.sweep', 'kept')")
+		mustExecOn(t, ctx, conn, "CALL DOLT_ADD('config')")
+		before = cursorRows(t, ctx, conn)
+		commitsBefore = commitCount(t, ctx, conn)
+	})
+
+	f.reopenAndClose(t)
+
+	var afterSweep int
+	f.withRawConn(t, func(conn *sql.Conn) {
+		if trackedAtHead(t, ctx, conn, untrackScratchTable) {
+			t.Errorf("%s is still committed at HEAD; its pending deletion was never committed", untrackScratchTable)
+		}
+		if dirty := dirtyTableNames(t, ctx, conn); contains(dirty, untrackScratchTable) {
+			t.Errorf("dolt_status still lists %s after the open: %v", untrackScratchTable, dirty)
+		}
+		if got := cursorRows(t, ctx, conn); !slices.Equal(got, before) {
+			t.Errorf("cursor rows changed across the sweep:\n got: %v\nwant: %v", got, before)
+		}
+		// Scoped: the unrelated change survived in the working set and never
+		// reached HEAD.
+		var kept string
+		if err := conn.QueryRowContext(ctx,
+			"SELECT value FROM config WHERE `key` = 'unrelated.sweep'").Scan(&kept); err != nil {
+			t.Fatalf("reading the unrelated working-set row: %v", err)
+		}
+		if kept != "kept" {
+			t.Errorf("unrelated working-set row = %q, want %q: the sweep discarded it", kept, "kept")
+		}
+		var atHead int
+		if err := conn.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM config AS OF 'HEAD' WHERE `key` = 'unrelated.sweep'").Scan(&atHead); err != nil {
+			t.Fatalf("reading config at HEAD: %v", err)
+		}
+		if atHead != 0 {
+			t.Errorf("the unrelated staged change rode into HEAD under the sweep's commit")
+		}
+		afterSweep = commitCount(t, ctx, conn)
+		if afterSweep != commitsBefore+1 {
+			t.Errorf("commits after the sweep = %d, want %d (exactly the scoped sweep)", afterSweep, commitsBefore+1)
+		}
+	})
+
+	f.reopenAndClose(t)
+
+	f.withRawConn(t, func(conn *sql.Conn) {
+		if trackedAtHead(t, ctx, conn, untrackScratchTable) {
+			t.Errorf("%s is back at HEAD after a healthy open", untrackScratchTable)
+		}
+		if got := commitCount(t, ctx, conn); got != afterSweep {
+			t.Errorf("commits after a second open = %d, want %d (a healthy database must produce no commit)", got, afterSweep)
+		}
+	})
+}
+
+// TestIgnoredCursorScratchTrackedAtHeadIsSweptOnOpen keeps the shape that was
+// already reachable honest: a scratch committed at HEAD AND still in the
+// working set — the drop's crash window, or a peer's commit replicated onto a
+// store that then dropped its local copy — is swept with the deletion
+// committed out of HEAD. The working-set probe alone catches this one; it
+// must stay swept now that the gate also knows the HEAD-only form.
+func TestIgnoredCursorScratchTrackedAtHeadIsSweptOnOpen(t *testing.T) {
+	ctx := t.Context()
+	f := newLegacyTrackedFixture(t, "scratchboth")
+
+	f.withRawConn(t, func(conn *sql.Conn) {
+		untrackCursorInPlace(t, ctx, conn)
+		mustExecOn(t, ctx, conn, "CALL DOLT_ADD('-f', ?)", untrackScratchTable)
+		mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('-m', 'scratch committed by an older peer')")
+		if !trackedAtHead(t, ctx, conn, untrackScratchTable) {
+			t.Fatalf("%s is not committed at HEAD; the sweep's tracked branch would not be exercised", untrackScratchTable)
+		}
+		if !tablePresent(t, ctx, conn, untrackScratchTable) {
+			t.Fatalf("%s is not in the working set; this fixture pins the both-locations shape", untrackScratchTable)
+		}
+	})
+
+	f.reopenAndClose(t)
+
+	f.withRawConn(t, func(conn *sql.Conn) {
+		if trackedAtHead(t, ctx, conn, untrackScratchTable) {
+			t.Errorf("%s is still committed at HEAD; its deletion was never committed", untrackScratchTable)
+		}
+		if tablePresent(t, ctx, conn, untrackScratchTable) {
+			t.Errorf("%s survived the heal", untrackScratchTable)
+		}
+		if dirty := dirtyTableNames(t, ctx, conn); len(dirty) > 0 {
+			t.Errorf("working set is dirty after the heal: %v", dirty)
+		}
+		if got := len(cursorRows(t, ctx, conn)); got != len(f.cursorRows) {
+			t.Errorf("cursor rows = %d, want %d (the live cursor is not a restore target)", got, len(f.cursorRows))
+		}
+	})
+}
+
+// TestScratchHeadProbeSucceedsOnABrandNewDatabase pins the be-bv7x shape of
+// the gate's new read on the youngest database it can run against: both
+// spellings of the scratch HEAD listing — unqualified on a selected session,
+// and qualified with the name a selector would quote — must SUCCEED there.
+// A probe that failed on a healthy database would pin the pooled Dolt
+// session to a stale catalog snapshot for the rest of its life, which is
+// exactly what the direct `SELECT … AS OF 'HEAD'` spelling would do.
+func TestScratchHeadProbeSucceedsOnABrandNewDatabase(t *testing.T) {
+	ctx := t.Context()
+	pristine := newPristineEmbeddedDoltFixture(t, "scratchprobe")
+	closeEmbeddedDoltStore(t, pristine.store)
+	f := &legacyTrackedFixture{beadsDir: pristine.beadsDir, dataDir: pristine.dataDir, database: "scratchprobe"}
+
+	f.withRawConn(t, func(conn *sql.Conn) {
+		probes := []string{
+			"SHOW TABLES AS OF 'HEAD' LIKE '" + untrackScratchTable + "'",
+			"SHOW TABLES FROM `" + f.database + "` AS OF 'HEAD' LIKE '" + untrackScratchTable + "'",
+		}
+		for _, query := range probes {
+			rows, err := conn.QueryContext(ctx, query)
+			if err != nil {
+				t.Fatalf("%s: %v (a listing that fails on a healthy database pins the pooled session, be-bv7x)", query, err)
+			}
+			for rows.Next() {
+				var name string
+				if err := rows.Scan(&name); err != nil {
+					rows.Close()
+					t.Fatalf("%s: %v", query, err)
+				}
+				if strings.EqualFold(name, untrackScratchTable) {
+					t.Errorf("%s listed %s on a brand-new database", query, name)
+				}
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				t.Fatalf("%s: %v", query, err)
+			}
+			rows.Close()
 		}
 	})
 }
