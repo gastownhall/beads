@@ -1000,6 +1000,9 @@ func (s *DoltStore) serverCredentialsNote(ctx context.Context, remote, op string
 		} else {
 			fmt.Fprintf(&b, "; bd passes the user (--user), and server-mode %s uses the Dolt server's startup environment for DOLT_REMOTE_PASSWORD", op)
 		}
+		if peer {
+			b.WriteString("; one server-wide DOLT_REMOTE_PASSWORD goes with every user bd passes, so it cannot supply different passwords for different peers")
+		}
 	}
 	return b.String()
 }

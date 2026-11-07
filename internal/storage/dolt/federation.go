@@ -51,14 +51,14 @@ func (s *DoltStore) pushRefToPeer(ctx context.Context, peer string, refspec stri
 		if useCLI, err := s.prepareCLIRouteForPeerCredentials(ctx, peer, creds); err != nil {
 			return err
 		} else if useCLI {
-			return s.doltCLIPushRefToPeer(ctx, peer, refspec, creds)
+			return s.withServerCredentialsNote(ctx, peer, "push", true, creds, s.doltCLIPushRefToPeer(ctx, peer, refspec, creds))
 		}
-		return withEnvCredentials(creds, func() error {
+		return s.withServerCredentialsNote(ctx, peer, "push", true, creds, withEnvCredentials(creds, func() error {
 			if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH(?, ?)", peer, refspec); err != nil {
-				return fmt.Errorf("failed to push to peer %s: %w", peer, err)
+				return markTransferFailure(fmt.Errorf("failed to push to peer %s: %w", peer, err))
 			}
 			return nil
-		})
+		}))
 	})
 }
 
@@ -120,12 +120,12 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 			return err
 		} else if useCLI {
 			pullErr := s.finishCLIPull(ctx, s.doltCLIPullFromPeer(ctx, peer, creds))
-			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
+			return s.withServerCredentialsNote(ctx, peer, "pull", true, creds, s.peerPullOutcome(ctx, peer, pullErr, &conflicts))
 		}
-		return withEnvCredentials(creds, func() error {
+		return s.withServerCredentialsNote(ctx, peer, "pull", true, creds, withEnvCredentials(creds, func() error {
 			pullErr := s.pullWithAutoResolve(ctx, peer, "CALL DOLT_PULL(?)", peer)
 			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
-		})
+		}))
 	})
 	return s.finishPeerPull(ctx, conflicts, err, preHead)
 }
@@ -183,14 +183,14 @@ func (s *DoltStore) Fetch(ctx context.Context, peer string) error {
 		if useCLI, err := s.prepareCLIRouteForPeerCredentials(ctx, peer, creds); err != nil {
 			return err
 		} else if useCLI {
-			return s.doltCLIFetchFromPeer(ctx, peer, creds)
+			return s.withServerCredentialsNote(ctx, peer, "fetch", true, creds, s.doltCLIFetchFromPeer(ctx, peer, creds))
 		}
-		return withEnvCredentials(creds, func() error {
+		return s.withServerCredentialsNote(ctx, peer, "fetch", true, creds, withEnvCredentials(creds, func() error {
 			if err := s.execWithLongTimeout(ctx, "CALL DOLT_FETCH(?)", peer); err != nil {
-				return fmt.Errorf("failed to fetch from peer %s: %w", peer, err)
+				return markTransferFailure(fmt.Errorf("failed to fetch from peer %s: %w", peer, err))
 			}
 			return nil
-		})
+		}))
 	})
 }
 

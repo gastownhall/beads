@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
@@ -59,14 +60,21 @@ exit 0
 }
 
 // serverTransferStore is a server-mode store for beadsDir on 127.0.0.1:port
-// whose SQL connection is sqlmock (listing remotes, each "name", "url") and
-// whose long-timeout SQL connections reach nothing. With served set, its CLI
+// whose SQL connection is sqlmock (listing remotes, each "name", "url";
+// queries match with their whitespace collapsed) and whose long-timeout SQL
+// connections reach nothing. With served set, its CLI
 // directory is a database a live server on port serves (serveDoltDatabase),
 // so the CLI routes run there; otherwise it has none and every transfer
 // takes the SQL route.
-func serverTransferStore(t *testing.T, beadsDir string, port int, served bool, user, password string, remotes ...[2]string) *DoltStore {
+func serverTransferStore(t *testing.T, beadsDir string, port int, served bool, user, password string, remotes ...[2]string) (*DoltStore, sqlmock.Sqlmock) {
 	t.Helper()
-	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	collapsed := sqlmock.QueryMatcherFunc(func(expected, actual string) error {
+		if strings.Join(strings.Fields(expected), " ") != strings.Join(strings.Fields(actual), " ") {
+			return fmt.Errorf("query %q is not %q", actual, expected)
+		}
+		return nil
+	})
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(collapsed))
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
@@ -99,7 +107,7 @@ func serverTransferStore(t *testing.T, beadsDir string, port int, served bool, u
 			t.Fatal(err)
 		}
 	}
-	return store
+	return store, mock
 }
 
 // requireServerNote asserts that err keeps the transfer's own failure and
@@ -203,7 +211,7 @@ func TestServerRunTransferFailureNamesTheServersEnvironment(t *testing.T) {
 			if tc.cloud {
 				t.Setenv("AZURE_STORAGE_KEY", "cloud-secret")
 			}
-			store := serverTransferStore(t, unmanagedWorkspace(t), 3310, tc.served, tc.user, tc.pass, [2]string{"origin", tc.url})
+			store, _ := serverTransferStore(t, unmanagedWorkspace(t), 3310, tc.served, tc.user, tc.pass, [2]string{"origin", tc.url})
 			ctx := context.Background()
 			var err error
 			switch tc.op {
@@ -217,6 +225,145 @@ func TestServerRunTransferFailureNamesTheServersEnvironment(t *testing.T) {
 			requireServerNote(t, err, tc.failure, tc.want, "client-secret", "cloud-secret")
 			if tc.failure != missingPassword && strings.Contains(err.Error(), "has no DOLT_REMOTE_PASSWORD") {
 				t.Errorf("error %q says the password is missing, which a %q failure does not show", err, tc.failure)
+			}
+		})
+	}
+}
+
+// expectFederationPeer answers GetFederationPeer for name with a peer row
+// holding user and, encrypted with the store's credential key, password, or
+// with no row when both are empty.
+func expectFederationPeer(t *testing.T, store *DoltStore, mock sqlmock.Sqlmock, name, url, user, password string) {
+	t.Helper()
+	const query = `SELECT name, remote_url, username, password_encrypted, sovereignty, last_sync, created_at, updated_at FROM federation_peers WHERE name = ?`
+	columns := []string{"name", "remote_url", "username", "password_encrypted", "sovereignty", "last_sync", "created_at", "updated_at"}
+	if user == "" && password == "" {
+		mock.ExpectQuery(query).WithArgs(name).WillReturnRows(sqlmock.NewRows(columns))
+		return
+	}
+	var encrypted []byte
+	if password != "" {
+		store.credentialKey = make([]byte, 32)
+		var err error
+		if encrypted, err = store.encryptPassword(password); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now()
+	mock.ExpectQuery(query).WithArgs(name).
+		WillReturnRows(sqlmock.NewRows(columns).AddRow(name, url, user, encrypted, "T2", nil, now, now))
+}
+
+// TestServerRunPeerTransferFailureNamesThePeersServerEnvironment pins the
+// note on a federation peer (AC-2): a server-mode push, filtered push, pull or
+// fetch to a peer bd holds a user for (a password is optional), or a
+// cloud-only peer whose scheme's cloud variables bd's environment has, that
+// fails in its transfer names the peer and what the server takes from its
+// startup environment, with the limit of one server-wide password. For a
+// peer with a user only it never says bd holds a password, and it never
+// borrows the default remote's identity.
+func TestServerRunPeerTransferFailureNamesThePeersServerEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fake")
+	}
+	clearPredicateEnv(t)
+	clearCloudAuthEnv(t)
+	const originURL = "https://doltremoteapi.dolthub.com/org/origin"
+	const peerURL = "https://doltremoteapi.dolthub.com/org/peer"
+	const azURL = "az://account.blob.core.windows.net/container/peer"
+	const refused = "could not access dolt url: connection refused"
+	const serverWide = "one server-wide DOLT_REMOTE_PASSWORD goes with every user bd passes, so it cannot supply different passwords for different peers"
+
+	for _, tc := range []struct {
+		name       string
+		url        string
+		served     bool
+		user, pass string // the peer row; no user and no password: no row
+		cloud      bool
+		op         string
+		failure    string
+		want       []string
+		notWant    []string
+		cliCall    string
+	}{
+		{
+			name: "CLI fetch with a user only", url: peerURL, served: true,
+			user: "peer-user", op: "fetch", failure: refused,
+			want:    []string{`fetch for peer "peer1"`, "takes DOLT_REMOTE_PASSWORD", "server-mode fetch uses the Dolt server's startup environment for DOLT_REMOTE_PASSWORD", serverWide},
+			notWant: []string{"password it holds", "origin"},
+			cliCall: "|fetch --user peer-user peer1|DOLT_REMOTE_PASSWORD=",
+		},
+		{
+			name: "CLI push with a held user and password", url: peerURL, served: true,
+			user: "peer-user", pass: "peer-secret", op: "push", failure: refused,
+			want:    []string{`push for peer "peer1"`, `the password it holds for peer "peer1" is not forwarded`, serverWide},
+			cliCall: "|push --user peer-user peer1 main|DOLT_REMOTE_PASSWORD=peer-secret",
+		},
+		{
+			name: "CLI filtered push with a held user and password", url: peerURL, served: true,
+			user: "peer-user", pass: "peer-secret", op: "filtered-push", failure: refused,
+			want:    []string{`push for peer "peer1"`, serverWide},
+			cliCall: "|push --user peer-user peer1 staging:main|",
+		},
+		{
+			name: "CLI pull with a user only", url: peerURL, served: true,
+			user: "peer-user", op: "pull", failure: refused,
+			want:    []string{`pull for peer "peer1"`, "server-mode pull uses the Dolt server's startup environment for DOLT_REMOTE_PASSWORD"},
+			notWant: []string{"password it holds"},
+			cliCall: "|pull --user peer-user peer1 main|",
+		},
+		{
+			name: "SQL fetch with a user only", url: peerURL,
+			user: "peer-user", op: "fetch", failure: "failed to fetch from peer peer1",
+			want:    []string{`fetch for peer "peer1"`, serverWide},
+			notWant: []string{"password it holds"},
+		},
+		{
+			name: "SQL push with a held user and password", url: peerURL,
+			user: "peer-user", pass: "peer-secret", op: "push", failure: "failed to push to peer peer1",
+			want: []string{`push for peer "peer1"`, "is not forwarded", serverWide},
+		},
+		{
+			name: "SQL push to a cloud-only peer", url: azURL,
+			cloud: true, op: "push", failure: "failed to push to peer peer1",
+			want:    []string{`push for peer "peer1"`, "takes AZURE_STORAGE_* from the environment"},
+			notWant: []string{"DOLT_REMOTE_PASSWORD"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			callLog := failingDoltOnPath(t, tc.failure, "origin "+originURL, "peer1 "+tc.url)
+			if tc.cloud {
+				t.Setenv("AZURE_STORAGE_KEY", "cloud-secret")
+			}
+			store, mock := serverTransferStore(t, unmanagedWorkspace(t), 3310, tc.served, "origin-user", "origin-secret",
+				[2]string{"origin", originURL}, [2]string{"peer1", tc.url})
+			expectFederationPeer(t, store, mock, "peer1", tc.url, tc.user, tc.pass)
+			ctx := context.Background()
+			var err error
+			switch tc.op {
+			case "push":
+				err = store.PushTo(ctx, "peer1")
+			case "filtered-push":
+				err = store.pushRefToPeer(ctx, "peer1", "staging:main")
+			case "pull":
+				_, err = store.PullFrom(ctx, "peer1")
+			case "fetch":
+				err = store.Fetch(ctx, "peer1")
+			}
+			requireServerNote(t, err, tc.failure, tc.want, "peer-secret", "origin-secret", "cloud-secret")
+			for _, nw := range tc.notWant {
+				if strings.Contains(err.Error(), nw) {
+					t.Errorf("error %q says %q", err, nw)
+				}
+			}
+			if tc.cliCall != "" {
+				raw, readErr := os.ReadFile(callLog)
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				if !strings.Contains(string(raw), tc.cliCall) || strings.Contains(string(raw), "origin-user") {
+					t.Fatalf("dolt calls %q lack the peer's own transfer %q, or use the default remote's user", raw, tc.cliCall)
+				}
 			}
 		})
 	}
