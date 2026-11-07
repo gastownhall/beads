@@ -603,6 +603,56 @@ func TestInOwnServiceHome(t *testing.T) {
 	}
 }
 
+// TestIsPathInSafeBoundary_ServiceHomeLookupScoped proves the account lookup
+// behind the service-home exception is consulted only for candidate paths —
+// those under the lexical /var/lib root or its physical spelling. Every other
+// verdict must not touch the OS account database: the carve-out must not add
+// an account lookup (with its failure modes and its cost) to unrelated
+// paths, whose outcomes stay exactly as they were without the exception.
+func TestIsPathInSafeBoundary_ServiceHomeLookupScoped(t *testing.T) {
+	lookups := 0
+	savedAccount := serviceHomeAccount
+	serviceHomeAccount = func() string {
+		lookups++
+		return ""
+	}
+	t.Cleanup(func() { serviceHomeAccount = savedAccount })
+	// serviceHomeRoot keeps its production value /var/lib: candidate
+	// detection is a pure prefix comparison against it (plus its physical
+	// spelling), so no fixture is needed and none may be created under the
+	// real root.
+
+	// Outcomes for these paths are owned by TestIsPathInSafeBoundary; here
+	// only the lookup count matters.
+	nonCandidates := []struct {
+		name string
+		path string
+	}{
+		{"blocked /etc path", "/etc/beads"},
+		{"blocked /usr path", "/usr/local/beads"},
+		{"blocked /var path outside the service root", "/var/log/beads/.beads"},
+		{"prefix sibling /var/libx is not /var/lib", "/var/libx/beads/.beads"},
+		{"peer home under /home", "/home/some-other-nonexistent-user/.beads"},
+		{"ordinary temp path", filepath.Join(t.TempDir(), ".beads")},
+	}
+	for _, tt := range nonCandidates {
+		t.Run(tt.name, func(t *testing.T) {
+			before := lookups
+			isPathInSafeBoundary(tt.path)
+			if got := lookups - before; got != 0 {
+				t.Errorf("isPathInSafeBoundary(%q) consulted the service-home account lookup %d time(s), want 0", tt.path, got)
+			}
+		})
+	}
+	t.Run("candidate /var/lib path consults the lookup", func(t *testing.T) {
+		before := lookups
+		isPathInSafeBoundary("/var/lib/some-service/.beads")
+		if lookups == before {
+			t.Error("isPathInSafeBoundary(/var/lib/some-service/.beads) never consulted the service-home account lookup")
+		}
+	})
+}
+
 // TestResolvedPathWithinRoot exercises the symlink-escape hardening helper added
 // for be-vc1 — the HIGH finding on the /Users/Shared carve-out. The helper must:
 //

@@ -222,7 +222,21 @@ system directories:
 - Other users' home directories
 
 Temporary directories (e.g., `/var/folders` on macOS) are explicitly allowed
-for test environments.
+for test environments, as is `/var/tmp`.
+
+One more carve-out narrows the `/var` entry rather than widening the allowed
+set (GH#6323): a service account whose home is a specific directory below
+`/var/lib` — the Debian `adduser --system` convention, e.g.
+`/var/lib/<service>` — may point `BEADS_DIR` inside its own home. Admission
+requires a non-root effective uid, an existing home directory below the
+physical `/var/lib` root that is **owned by that uid**, and a request that
+resolves — symlinks and not-yet-created descendants included — inside that
+home; the root itself, sibling homes, and symlink escapes stay rejected. The
+ownership gate is the trust basis: the home lookup itself may come from
+`os/user`'s `$HOME` fallback in pure-Go builds, so location alone is not
+evidence the directory is this account's own. Ownership is checked with
+`dirOwnedBy`, which exists only on Unix builds — non-Unix builds fail closed
+and never admit the exception.
 
 ## Server Mode Handling
 

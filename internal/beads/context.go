@@ -646,8 +646,11 @@ func isPathInSafeBoundary(path string) bool {
 	// must actually exist and be owned by the effective uid — an
 	// environment-derived home lookup alone is not trust evidence (pure-Go
 	// os/user falls back to $HOME, and permissions do not stop another account
-	// from reading a directory it does not own).
-	if inOwnServiceHome(absPath, serviceHomeRoot, serviceHomeAccount(), os.Geteuid()) {
+	// from reading a directory it does not own). serviceHomeCandidate gates
+	// the account lookup, so paths nowhere near the service root keep their
+	// old verdict without touching the OS account database.
+	if serviceHomeCandidate(absPath) &&
+		inOwnServiceHome(absPath, serviceHomeRoot, serviceHomeAccount(), os.Geteuid()) {
 		return true
 	}
 
@@ -828,6 +831,24 @@ func inOwnServiceHome(path, root, home string, euid int) bool {
 // /var/lib.
 func pathWithinRoot(abs, root string) bool {
 	return abs == root || strings.HasPrefix(abs, root+string(filepath.Separator))
+}
+
+// serviceHomeCandidate reports whether absPath could qualify for the
+// service-home exception at all: it must sit under the lexical service root
+// or that root's physical spelling (callers may canonicalize either way, the
+// same both-spellings allowance the temp-root carve-out makes). It is
+// consulted before the account lookup so a path nowhere near /var/lib — an
+// /etc or /usr rejection, a peer home, an ordinary safe path — never touches
+// the OS account database on its way to the verdict it already had.
+func serviceHomeCandidate(absPath string) bool {
+	if pathWithinRoot(absPath, serviceHomeRoot) {
+		return true
+	}
+	phys, err := filepath.EvalSymlinks(serviceHomeRoot)
+	if err != nil {
+		return false
+	}
+	return pathWithinRoot(absPath, phys)
 }
 
 // GetRepoContextForWorkspace returns a fresh RepoContext for a specific workspace.
