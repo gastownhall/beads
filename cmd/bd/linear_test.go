@@ -2145,3 +2145,65 @@ func (s *linearSyncStore) PreviousExternalRef(context.Context, string, time.Time
 	}
 	return *s.issue.ExternalRef, true, nil
 }
+
+// TestMergedLinearMilestoneMetadataKeepsLargeIntegers (GH#6330): merging the
+// milestone block into existing metadata must leave unrelated numbers, and
+// numbers already inside the linear block, with their stored digits, while
+// sibling keys survive and the milestone carries the new state.
+func TestMergedLinearMilestoneMetadataKeepsLargeIntegers(t *testing.T) {
+	ms := &linear.ProjectMilestone{ID: "ms-1", Name: "Q1", Progress: 60.61, TargetDate: "2026-05-12"}
+	existing := json.RawMessage(`{"thread_id":1546130668394913822,` +
+		`"linear":{"kind":"old","issue_sync":true,"seq":9007199254740993,` +
+		`"project_milestone":{"id":"ms-1","name":"old"}}}`)
+
+	merged, err := mergedLinearMilestoneMetadata(existing, ms)
+	if err != nil {
+		t.Fatalf("mergedLinearMilestoneMetadata: %v", err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(merged, &m); err != nil {
+		t.Fatalf("unmarshal merged %s: %v", merged, err)
+	}
+	if got, want := string(m["thread_id"]), "1546130668394913822"; got != want {
+		t.Errorf("thread_id = %s, want %s (unrelated integer past 2^53 re-encoded through float64)", got, want)
+	}
+
+	var lin map[string]json.RawMessage
+	if err := json.Unmarshal(m["linear"], &lin); err != nil {
+		t.Fatalf("unmarshal linear %s: %v", m["linear"], err)
+	}
+	if got, want := string(lin["seq"]), "9007199254740993"; got != want {
+		t.Errorf("linear.seq = %s, want %s", got, want)
+	}
+	if string(lin["issue_sync"]) != "true" {
+		t.Errorf("linear.issue_sync = %s, want true (sibling key lost)", lin["issue_sync"])
+	}
+	if string(lin["kind"]) != `"project_milestone"` {
+		t.Errorf("linear.kind = %s, want \"project_milestone\"", lin["kind"])
+	}
+	var pm map[string]json.RawMessage
+	if err := json.Unmarshal(lin["project_milestone"], &pm); err != nil {
+		t.Fatalf("unmarshal project_milestone %s: %v", lin["project_milestone"], err)
+	}
+	if string(pm["id"]) != `"ms-1"` || string(pm["name"]) != `"Q1"` || string(pm["progress"]) != "60.61" {
+		t.Errorf("project_milestone = id %s name %s progress %s, want ms-1 / Q1 / 60.61", pm["id"], pm["name"], pm["progress"])
+	}
+
+	// Empty, null and empty-object metadata (the create path passes nil)
+	// still start from an initialized map.
+	for _, empty := range []string{``, `null`, `{}`} {
+		merged, err := mergedLinearMilestoneMetadata(json.RawMessage(empty), ms)
+		if err != nil {
+			t.Fatalf("mergedLinearMilestoneMetadata(%q): %v", empty, err)
+		}
+		if !strings.Contains(string(merged), `"kind":"project_milestone"`) {
+			t.Errorf("mergedLinearMilestoneMetadata(%q) = %s, want the milestone block", empty, merged)
+		}
+	}
+	if _, err := mergedLinearMilestoneMetadata(nil, ms); err != nil {
+		t.Fatalf("mergedLinearMilestoneMetadata(nil): %v", err)
+	}
+	if _, err := mergedLinearMilestoneMetadata(json.RawMessage(`[1]`), ms); err == nil {
+		t.Error("mergedLinearMilestoneMetadata([1]) = nil error, want a non-object error")
+	}
+}
