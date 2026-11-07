@@ -5,7 +5,7 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-10-26
+Last reviewed: 2026-11-07
 
 Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, `internal/config/`, `internal/configfile/`, and `internal/endpointtrust/`.
 
@@ -23,9 +23,11 @@ Dolt is the only storage backend. Embedded mode (the default) stores data at `.b
 `config.yaml` is searched in this order, with later files overriding earlier ones:
 
 1. `~/.beads/config.yaml` (legacy user-level, lowest priority)
-2. `~/.config/bd/config.yaml` (user-level; this exact path is checked even on platforms whose native user-config directory differs)
+2. one modern user-level file: `~/.config/bd/config.yaml`, or, only when that file does not exist, the native user-config location (`~/Library/Application Support/bd/config.yaml` on macOS, `%APPDATA%\bd\config.yaml` on Windows, `$XDG_CONFIG_HOME/bd/config.yaml` on Linux when `XDG_CONFIG_HOME` names a directory other than `~/.config`)
 3. `<repo>/.beads/config.yaml` (project-level, walked up from the current directory)
 4. `$BEADS_DIR/config.yaml` (highest priority, when `BEADS_DIR` points at a different workspace)
+
+The two modern user-level locations are never merged: when `~/.config/bd/config.yaml` exists, it is the only one of the two that is read, and loading configuration does not check whether the native location holds a file. That per-launch check was reported to raise the macOS "would like to access data from other apps" prompt (GH#8113); other commands that look up the native directory on their own, such as `bd doctor` and `bd prime`, are unchanged. Settings that live only in the native file, including private confirmations such as a trusted endpoint, stop applying once the documented file exists; copy the ones you want into `~/.config/bd/config.yaml`. The legacy `~/.beads/config.yaml` still merges beneath whichever modern file was selected.
 
 A `config.local.yaml` next to the project `config.yaml` is also merged in last for machine-specific overrides that should not be committed.
 
