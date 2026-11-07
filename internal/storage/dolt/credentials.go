@@ -941,6 +941,27 @@ func (s *DoltStore) withServerEnvNote(ctx context.Context, procedure, remote str
 	return fmt.Errorf("%w%s", err, note)
 }
 
+// WithBackupSyncServerEnvNote completes the error of a failed CALL
+// DOLT_BACKUP('sync', name) run on a Dolt server through db, a connection to
+// that server, with serverEnvNote for the destination the server has
+// registered for name (dolt_backups). The sync runs in the server's process
+// and sends no user. The error is returned unchanged when the destination
+// cannot be read or the note does not apply.
+func WithBackupSyncServerEnvNote(ctx context.Context, db versioncontrolops.DBConn, name string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var backupURL string
+	if lookupErr := db.QueryRowContext(ctx, "SELECT url FROM dolt_backups WHERE name = ?", name).Scan(&backupURL); lookupErr != nil {
+		return err
+	}
+	note := serverEnvNote("DOLT_BACKUP", backupURL, nil, os.Environ())
+	if note == "" {
+		return err
+	}
+	return fmt.Errorf("%w%s", err, note)
+}
+
 // serverEnvNote is the note for a failed CALL procedure to remoteURL that ran
 // in the Dolt server's process: it names the credential variables bd holds
 // that the server takes from its own environment instead, and the remedy. bd

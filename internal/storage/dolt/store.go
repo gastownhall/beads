@@ -1668,7 +1668,11 @@ func (s *DoltStore) BackupSync(ctx context.Context, name string) error {
 		return err
 	}
 	defer db.Close()
-	return versioncontrolops.BackupSync(ctx, db, name)
+	err = versioncontrolops.BackupSync(ctx, db, name)
+	if s.serverMode {
+		err = WithBackupSyncServerEnvNote(ctx, s.db, name, err)
+	}
+	return err
 }
 
 // BackupRemove removes a configured Dolt backup destination.
