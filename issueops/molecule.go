@@ -429,13 +429,116 @@ func AnalyzeMolecule(g *MoleculeGraph) *MoleculeAnalysis {
 		for blockedID := range blocks[issue.ID] {
 			info.Blocks = append(info.Blocks, blockedID)
 		}
-		info.IsReady = (issue.Status == types.StatusOpen || issue.Status == types.StatusInProgress) && len(info.BlockedBy) == 0
-		if info.IsReady {
-			analysis.ReadySteps++
-		}
+		info.IsReady = issue.ID != g.Root.ID && (issue.Status == types.StatusOpen || issue.Status == types.StatusInProgress) && len(info.BlockedBy) == 0
 		sort.Strings(info.BlockedBy)
 		sort.Strings(info.Blocks)
 		analysis.Steps[issue.ID] = info
+	}
+
+	// A step whose parent is itself EXOGENOUSLY blocked is blocked too,
+	// inherited down the parent-child hierarchy (BlockedStateInvariant), even
+	// though its own direct blocks/conditional-blocks/waits-for edges are
+	// clear. "Exogenously" mirrors the shared predicate in
+	// internal/storage/issueops/blocked_consistency.go (gastownhall/beads#6506):
+	// a parent-child edge propagates only a blocking reason whose target is
+	// OUTSIDE the parent's own subtree. A parent blocked solely by its own
+	// descendants — the "close gate on the epic" idiom, where P carries
+	// blocks edges onto its own children C1/C2 so P cannot close before them —
+	// must not darken C1/C2, the very children it is waiting for; that would
+	// be the #6506 permanent lock reborn inside a molecule.
+	//
+	// childParents inverts parentChildren; a child can have more than one
+	// parent-child parent (a shared leg under two legs), so this is a slice,
+	// not a single value, and isParentExogenouslyBlocked treats "any of this
+	// child's parents is blocked" as blocking (that question is asked once per
+	// parent, from isAncestorBlocked, not duplicated here). descendantsOf is
+	// memoized per parent; parentBlocked is memoized since a deep hierarchy
+	// would otherwise re-walk the same chain once per descendant. Both walks
+	// guard against a parent-child cycle (one edge at a time, or an
+	// import/merge, can produce one) the same way blockingDepths does below:
+	// a visiting set that answers "not yet decided" rather than recursing
+	// forever.
+	childParents := make(map[string][]string)
+	for parentID, children := range parentChildren {
+		for _, childID := range children {
+			childParents[childID] = append(childParents[childID], parentID)
+		}
+	}
+	descendants := make(map[string]map[string]bool)
+	visitingSubtree := make(map[string]bool)
+	var descendantsOf func(id string) map[string]bool
+	descendantsOf = func(id string) map[string]bool {
+		if d, ok := descendants[id]; ok {
+			return d
+		}
+		if visitingSubtree[id] {
+			return nil
+		}
+		visitingSubtree[id] = true
+		set := make(map[string]bool)
+		for _, childID := range parentChildren[id] {
+			set[childID] = true
+			for d := range descendantsOf(childID) {
+				set[d] = true
+			}
+		}
+		descendants[id] = set
+		return set
+	}
+	parentBlocked := make(map[string]bool)
+	visitingParent := make(map[string]bool)
+	var isParentExogenouslyBlocked func(parentID string) bool
+	isParentExogenouslyBlocked = func(parentID string) bool {
+		if blocked, cached := parentBlocked[parentID]; cached {
+			return blocked
+		}
+		if visitingParent[parentID] {
+			return false
+		}
+		visitingParent[parentID] = true
+		blocked := false
+		parent := g.IssueMap[parentID]
+		// A closed or pinned parent is never itself blocked (the same two
+		// statuses the shared predicate withholds every other blocking rule
+		// for), so blockage does not inherit past one.
+		if parent != nil && parent.Status != types.StatusClosed && parent.Status != types.StatusPinned {
+			if parentInfo := analysis.Steps[parentID]; parentInfo != nil {
+				subtree := descendantsOf(parentID)
+				for _, blockerID := range parentInfo.BlockedBy {
+					if !subtree[blockerID] {
+						blocked = true
+						break
+					}
+				}
+			}
+			if !blocked {
+				for _, grandParentID := range childParents[parentID] {
+					if isParentExogenouslyBlocked(grandParentID) {
+						blocked = true
+						break
+					}
+				}
+			}
+		}
+		parentBlocked[parentID] = blocked
+		return blocked
+	}
+	isAncestorBlocked := func(id string) bool {
+		for _, parentID := range childParents[id] {
+			if isParentExogenouslyBlocked(parentID) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, issue := range g.Issues {
+		info := analysis.Steps[issue.ID]
+		if info.IsReady && isAncestorBlocked(issue.ID) {
+			info.IsReady = false
+		}
+		if info.IsReady {
+			analysis.ReadySteps++
+		}
 	}
 
 	depths := blockingDepths(g, blockedBy)
@@ -581,9 +684,10 @@ type MoleculeView struct {
 	// several are); NextStep the first ready step.
 	CurrentStep *Issue
 	NextStep    *Issue
-	// Ready holds every node the analysis marks ready (open or in progress
-	// with no open blocker inside the molecule), root included, in graph
-	// order: `bd ready --mol`'s list, hydrated rows (assignee and all).
+	// Ready holds every STEP the analysis marks ready (open or in progress
+	// with no open blocker inside the molecule, root excluded — the root is
+	// the molecule itself, not a step a worker claims), in graph order:
+	// `bd ready --mol`'s list, hydrated rows (assignee and all).
 	Ready []*Issue
 }
 
