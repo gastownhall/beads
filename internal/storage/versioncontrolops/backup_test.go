@@ -26,6 +26,8 @@ func TestDirToFileURLRejectsSchemes(t *testing.T) {
 	for _, dir := range []string{
 		"https://doltremoteapi.dolthub.com/user/repo",
 		"file:///already/a/url",
+		"file:///C:/already/a/url",
+		`file://c:\already\a\url`,
 		"aws://bucket/key",
 		"gs://bucket/key",
 	} {
