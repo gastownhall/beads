@@ -70,3 +70,21 @@ func BatchCloserWithPolicy(store DoltStorage, policy BatchClosePolicy) (issueops
 	}
 	return source.BatchCloserWithPolicy(policy)
 }
+
+// PolicyBatchApplierSource carries the close policy into the apply-many surface
+// the way PolicyBatchCloserSource does for close-many.
+type PolicyBatchApplierSource interface {
+	BatchApplierWithPolicy(BatchClosePolicy) (issueops.BatchApplier, error)
+}
+
+// BatchApplierWithPolicy refuses unsupported policy rather than bypassing it.
+func BatchApplierWithPolicy(store DoltStorage, policy BatchClosePolicy) (issueops.BatchApplier, error) {
+	if len(policy.blockers) == 0 {
+		return store.BatchApplier()
+	}
+	source, ok := store.(PolicyBatchApplierSource)
+	if !ok {
+		return nil, &ErrUnsupported{Op: "BatchApplierWithPolicy", Backend: fmt.Sprintf("%T", store)}
+	}
+	return source.BatchApplierWithPolicy(policy)
+}
