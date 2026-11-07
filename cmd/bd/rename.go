@@ -194,16 +194,13 @@ func updateReferencesInAllIssues(ctx context.Context, st renameReferenceStore, o
 	for _, issue := range issues {
 		updates := make(map[string]interface{})
 		var fields []string
-		for _, f := range renameRefFields {
+		texts := make([]string, len(renameRefFields)) // each field's text as it now stands
+		for i, f := range renameRefFields {
 			text := f.text(issue)
-			if rewritten := replaceIDRefs(text, oldID, newID); rewritten != text {
-				updates[f.name] = rewritten
+			texts[i] = replaceIDRefs(text, oldID, newID)
+			if texts[i] != text {
+				updates[f.name] = texts[i]
 				fields = append(fields, f.name)
-			}
-			// Rewriting oldID leaves short forms as they were, so whether
-			// or not the update lands they are those of text.
-			if shortForm != "" && hasIDRef(text, shortForm) {
-				report.left = append(report.left, renameLeftRef{issueID: issue.ID, field: f.name, mention: shortForm, note: "possible short form of " + oldID})
 			}
 		}
 
@@ -211,8 +208,21 @@ func updateReferencesInAllIssues(ctx context.Context, st renameReferenceStore, o
 			u := renameFieldsUpdate{issueID: issue.ID, fields: fields}
 			if u.err = st.UpdateIssue(ctx, issue.ID, updates, actor); u.err != nil {
 				report.failed = append(report.failed, u)
+				// The update may or may not have landed: look for short
+				// forms in the text as it was read.
+				for i, f := range renameRefFields {
+					texts[i] = f.text(issue)
+				}
 			} else {
 				report.rewritten = append(report.rewritten, u)
+			}
+		}
+
+		// A rewrite can spell a short form itself (abc-bd-foo.1 renamed to
+		// bd-foo.1), so a field is checked as it stands after its update.
+		for i, f := range renameRefFields {
+			if shortForm != "" && hasIDRef(texts[i], shortForm) {
+				report.left = append(report.left, renameLeftRef{issueID: issue.ID, field: f.name, mention: shortForm, note: "possible short form of " + oldID})
 			}
 		}
 	}

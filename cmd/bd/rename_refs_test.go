@@ -260,6 +260,32 @@ func TestUpdateReferencesInAllIssues(t *testing.T) {
 			t.Errorf("report:\n%s\nwant:\n%s", got, want)
 		}
 	})
+
+	t.Run("short forms after the update", func(t *testing.T) {
+		t.Parallel()
+		// A field is checked for short forms as it stands: after a rewrite
+		// that landed, as read when the update failed, and as read when it
+		// needed none.
+		st := &fakeRenameReferenceStore{
+			issues: []*types.Issue{
+				{ID: "abc-c", Notes: "see abc-bd-foo.1"},
+				{ID: "abc-d", Notes: "see abc-bd-foo.1", Design: "bd-foo.1 too"},
+				{ID: "abc-e", Description: "bd-foo.1"},
+			},
+			failIDs: map[string]bool{"abc-d": true},
+		}
+		report := updateReferencesInAllIssues(ctx, st, "abc-bd-foo.1", "bd-foo.1", "bd-foo.1", "test")
+		want := "Rewrote abc-bd-foo.1 to bd-foo.1 in:\n" +
+			"  abc-c: notes\n" +
+			"References left unchanged:\n" +
+			"  abc-c notes: bd-foo.1 (possible short form of abc-bd-foo.1)\n" +
+			"  abc-d design: bd-foo.1 (possible short form of abc-bd-foo.1)\n" +
+			"  abc-e description: bd-foo.1 (possible short form of abc-bd-foo.1)\n" +
+			"Warning: failed to update references in abc-d (notes); the update may or may not have landed: injected UpdateIssue failure\n"
+		if got := renameReportText(report, "abc-bd-foo.1", "bd-foo.1"); got != want {
+			t.Errorf("report:\n%s\nwant:\n%s", got, want)
+		}
+	})
 }
 
 func TestRenameShortForm(t *testing.T) {
