@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/batchfixtures"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/storage/sqlcount"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -62,6 +63,13 @@ func explainEdgePlan(t *testing.T, tx *sql.Tx, st recordedStatement) string {
 	return plan
 }
 
+// targetLed reports whether a reads an index a target column leads, alone or
+// after type, rather than one that only carries it after issue_id.
+func (a edgeAccess) targetLed() bool {
+	return strings.HasPrefix(a.index, "["+a.table+".depends_on_") ||
+		strings.HasPrefix(a.index, "["+a.table+".type,"+a.table+".depends_on_")
+}
+
 // unseekableTargets counts, per dependency table, the target columns no index
 // of that table leads with. A branch matching such a column untyped has no
 // index to seek: wisp_dependencies created by migration 0021 has none on
@@ -103,7 +111,7 @@ func assertTargetSeeks(t *testing.T, plan, target string, want int, unseekable m
 	bounded := "[" + target + ", " + target + "]"
 	unbounded := map[string]int{}
 	for _, a := range accesses {
-		if !strings.Contains(a.index, a.table+".depends_on_") || !strings.Contains(a.filters, bounded) {
+		if !a.targetLed() || !strings.Contains(a.filters, bounded) {
 			unbounded[a.table]++
 			if unbounded[a.table] > unseekable[a.table] {
 				t.Errorf("%s read is not a target-bounded index range (index %q, filters %q):\n%s", a.table, a.index, a.filters, plan)
@@ -194,6 +202,66 @@ func TestDependentCountPlansUseTargetIndexes(t *testing.T) {
 			}
 			if got := strings.Count(plan, "keys: d.issue_id"); got != 3 {
 				t.Errorf("plan probes the home table by d.issue_id %d times, want 3:\n%s", got, plan)
+			}
+		}
+	})
+
+	// The by-IDs search hydration counts each page row's blockers. Its other
+	// subqueries read the edge tables by issue_id; the reverse-blocker one
+	// must read them by target, one bounded range per column and plane.
+	t.Run("search counts by ids", func(t *testing.T) {
+		ids := []string{target, batchfixtures.LargeGraphID("dc", 5), batchfixtures.LargeGraphID("dc", 1500)}
+		q, args := sqlbuild.SearchCountsSQL(sqlbuild.IssuesFilterTables, ids, "", "", "", true, sqlbuild.CountsHydration{})
+		plan := explainEdgePlan(t, tx, recordedStatement{q, args})
+		for _, a := range edgeAccesses(plan) {
+			if a.index == "" {
+				t.Errorf("plan reads %s with a table scan:\n%s", a.table, plan)
+			}
+		}
+		seeks := 0
+		for _, a := range edgeAccesses(plan) {
+			if !a.targetLed() {
+				continue
+			}
+			for _, id := range ids {
+				if !strings.Contains(a.filters, "["+id+", "+id+"]") {
+					t.Errorf("%s target read is not bounded to %s (index %q, filters %q):\n%s", a.table, id, a.index, a.filters, plan)
+				}
+			}
+			seeks++
+		}
+		if seeks != 6 {
+			t.Errorf("plan has %d target-column reads, want 6 (three columns, two planes):\n%s", seeks, plan)
+		}
+
+		// And the rewritten count is the count: each page row's rdep_count
+		// is its 'blocks' dependents across both planes.
+		rows, err := tx.QueryContext(ctx, "SELECT id, rdep_count FROM ("+q+") page", args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]int64{}
+		for rows.Next() {
+			var id string
+			var n int64
+			if err := rows.Scan(&id, &n); err != nil {
+				t.Fatal(err)
+			}
+			got[id] = n
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range ids {
+			var want int64
+			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM (
+				SELECT `+sqlbuild.DepTargetExpr+` AS dep_id FROM dependencies WHERE type = 'blocks'
+				UNION ALL SELECT `+sqlbuild.DepTargetExpr+` AS dep_id FROM wisp_dependencies WHERE type = 'blocks'
+			) b WHERE dep_id = ?`, id).Scan(&want); err != nil {
+				t.Fatal(err)
+			}
+			if got[id] != want {
+				t.Errorf("rdep_count(%s) = %d, want %d", id, got[id], want)
 			}
 		}
 	})
