@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 var migrateIssuesCmd = &cobra.Command{
@@ -82,6 +83,12 @@ Examples:
 		if err := rejectEmptyLabelFilter(cmd, "label", labels); err != nil {
 			return err
 		}
+		// Normalized once, here, so the params carry the same label set the
+		// listing commands would build: trimmed, deduplicated, order kept.
+		// Without it the refusal above would be the only change and "  "
+		// would still be a raw label that matches nothing rather than a
+		// refused spelling.
+		labels = utils.NormalizeLabels(labels)
 
 		if idsFile != "" {
 			fileIDs, err := loadIDsFromFile(idsFile)

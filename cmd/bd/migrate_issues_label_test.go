@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -339,4 +340,54 @@ func TestMigrateIssuesRefusesEmptyLabelFilter(t *testing.T) {
 			})
 		}
 	})
+}
+
+// TestMigrateIssuesNormalizesLabelFilter pins the other half of GH#6636's
+// migration fix: a --label with usable content reaches the candidate query as
+// the same normalized set the listing commands build — trimmed, deduplicated,
+// original order — instead of the raw CSV elements. Before this, " frontend "
+// was a different label from "frontend", and a duplicate selected the same
+// issue twice in the filter; with the empty-value refusal in place, dropping
+// normalization would instead widen "  " to an unrestricted label scope, so
+// the two halves only close the hole together.
+func TestMigrateIssuesNormalizesLabelFilter(t *testing.T) {
+	cases := []struct {
+		name       string
+		label      string // empty means the flag is not passed at all
+		wantLabels []string
+	}{
+		{"normalized in order", " frontend ,,urgent ,frontend", []string{"frontend", "urgent"}},
+		{"omitted means no label restriction", "", nil},
+		{"internal space preserved", "needs work", []string{"needs work"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pinJSONOutput(t, false)
+			stub := setupMigrateIssuesTestStore(t)
+
+			args := []string{"--from", "repo-from", "--to", "repo-to", "--dry-run"}
+			if tc.label != "" {
+				args = append(args, "--label", tc.label)
+			}
+			cmd := newMigrateIssuesFlagsCommand(t, args...)
+
+			err, stdout, stderr := captureMigrateIssuesRunE(t, migrateIssuesCmd.RunE, cmd)
+			if err != nil {
+				t.Fatalf("RunE(%v) = %v, want a dry run to succeed\nstderr:\n%s", args, err, stderr)
+			}
+
+			got := stub.candidateFilter()
+			if got == nil {
+				t.Fatalf("no candidate SearchIssues ran; searches = %d, want the candidate scan (SourceRepo set, Limit 0) among them", stub.searchCalls())
+			}
+			if *got.SourceRepo != "repo-from" {
+				t.Errorf("candidate filter SourceRepo = %q, want repo-from", *got.SourceRepo)
+			}
+			if !slices.Equal(got.Labels, tc.wantLabels) {
+				t.Errorf("candidate filter Labels = %q, want %q", got.Labels, tc.wantLabels)
+			}
+
+			_ = stdout // the dry-run plan text is not under test here
+		})
+	}
 }
