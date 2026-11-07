@@ -244,6 +244,46 @@ func TestClassifyRepoFingerprint(t *testing.T) {
 		}
 	})
 
+	// GH#5990: an unresolved mismatch on an alias-resolved checkout stays an
+	// error (the stored id is some other machine's spelling), and the check
+	// must say how this checkout reaches the remote so the user can tell the
+	// shared-ledger case from a genuinely foreign database.
+	t.Run("alias-resolved mismatch stays an error and names the alias", func(t *testing.T) {
+		fp := beads.RepoFingerprint{ID: "cccc3333dddd4444", LegacyID: "eeee5555ffff6666", Source: beads.RepoIDSourceRemote, SSHAlias: "alias-a", SSHHostName: "github.com"}
+		check := classifyRepoFingerprint("aaaa1111bbbb2222", fp)
+		if check.Status != StatusError {
+			t.Fatalf("Status = %q, want %q (message=%q)", check.Status, StatusError, check.Message)
+		}
+		if !strings.Contains(check.Detail, `SSH alias "alias-a"`) {
+			t.Fatalf("Detail = %q, want the alias named", check.Detail)
+		}
+		if !strings.Contains(check.Detail, "github.com") {
+			t.Fatalf("Detail = %q, want the resolved HostName named", check.Detail)
+		}
+	})
+
+	// GH#5990: the fix menu used to offer `rm -rf .beads && bd init` for a
+	// suspected wrong database. The stored id lives in versioned metadata,
+	// so no branch of this check may suggest deleting or moving state; the
+	// guidance must be preservation-first.
+	t.Run("no branch suggests deleting state", func(t *testing.T) {
+		fps := []beads.RepoFingerprint{
+			{ID: "cccc3333dddd4444", LegacyID: "cccc3333dddd4444", Source: beads.RepoIDSourceRemote},
+			{ID: "cccc3333dddd4444", LegacyID: "cccc3333dddd4444", Source: beads.RepoIDSourcePath},
+			{ID: "cccc3333dddd4444", LegacyID: "eeee5555ffff6666", Source: beads.RepoIDSourceRemote, SSHAlias: "alias-a", SSHHostName: "github.com"},
+		}
+		for _, fp := range fps {
+			for _, stored := range []string{"aaaa1111bbbb2222", "cccc3333dddd4444"} {
+				check := classifyRepoFingerprint(stored, fp)
+				for _, forbidden := range []string{"rm -rf", "rm -", "bd init", "mv "} {
+					if strings.Contains(check.Fix, forbidden) || strings.Contains(check.Detail, forbidden) {
+						t.Errorf("stored=%s source=%s: check suggests %q (fix=%q detail=%q)", stored, fp.Source, forbidden, check.Fix, check.Detail)
+					}
+				}
+			}
+		}
+	})
+
 	t.Run("mismatch with remote-derived current id is an error", func(t *testing.T) {
 		fp := beads.RepoFingerprint{ID: "cccc3333dddd4444", LegacyID: "cccc3333dddd4444", Source: beads.RepoIDSourceRemote}
 		check := classifyRepoFingerprint("aaaa1111bbbb2222", fp)

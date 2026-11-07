@@ -664,12 +664,23 @@ func classifyRepoFingerprint(storedRepoID string, current beads.RepoFingerprint)
 				Fix:     "On a synced clone, leave it (or add the canonical origin remote). Only run 'bd migrate --update-repo-id' if this checkout is the canonical repository — the new id propagates to every clone on the next sync",
 			}
 		}
+		// GH#5990: the remedy must be preservation-first. repo_id lives in
+		// the versioned metadata table, so deleting .beads here destroys the
+		// shared ledger; the safe repair is converging every clone on one id
+		// via 'bd migrate --update-repo-id' (the id is shared and propagates
+		// to every clone on the next sync).
+		detail := fmt.Sprintf("stored: %s, current: %s", truncateID(storedRepoID), truncateID(current.ID))
+		if current.SSHAlias != "" {
+			detail += fmt.Sprintf(" — this checkout reaches the remote through SSH alias %q (HostName %s)", current.SSHAlias, current.SSHHostName)
+		}
 		return DoctorCheck{
 			Name:    "Repo Fingerprint",
 			Status:  StatusError,
-			Message: "Database belongs to different repository",
-			Detail:  fmt.Sprintf("stored: %s, current: %s", truncateID(storedRepoID), truncateID(current.ID)),
-			Fix:     "Run 'bd migrate --update-repo-id' if URL changed, or 'rm -rf .beads && bd init' if wrong database",
+			Message: "Database fingerprint does not match this repository's remote",
+			Detail:  detail,
+			Fix: "Verify every clone points at the same repository and runs this bd version, then run 'bd migrate --update-repo-id' once: " +
+				"the repository ID is shared, and the new value propagates to every clone on the next sync. " +
+				"If this is genuinely a different repository's database, keep the files and check the .beads location before reconnecting or reinitializing",
 		}
 	}
 
