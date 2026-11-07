@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -13,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 var renameCmd = &cobra.Command{
@@ -96,44 +99,80 @@ func runRename(cmd *cobra.Command, args []string) error {
 		return HandleError("failed to rename issue: %v", err)
 	}
 
-	if err := updateReferencesInAllIssues(ctx, store, oldID, newID, actor); err != nil {
-		fmt.Printf("Warning: failed to update some references: %v\n", err)
-	}
+	report, err := updateReferencesInAllIssues(ctx, store, oldID, newID, actor)
 
 	fmt.Printf("Renamed %s -> %s\n", ui.RenderWarn(oldID), ui.RenderAccent(newID))
+	report.write(os.Stdout, oldID, newID)
+	if err != nil {
+		fmt.Printf("Warning: failed to update some references: %v\n", err)
+	}
 
 	commandDidWrite.Store(true)
 
 	return nil
 }
 
+// renameReferenceStore is the part of the store the reference scan of a
+// rename reads and writes through.
+type renameReferenceStore interface {
+	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
+	UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error
+}
+
+// renameReport is what the reference scan of a rename did, for the user to
+// review. Entries are in natural issue-ID order.
+type renameReport struct {
+	rewritten []renameFieldsUpdate // updates that rewrote oldID to newID
+}
+
+// renameFieldsUpdate names the fields of one issue that an update rewrote.
+type renameFieldsUpdate struct {
+	issueID string
+	fields  []string // in renameRefFields order
+}
+
 // updateReferencesInAllIssues updates text references to the old ID in all
 // issues, the renamed one included: it runs after the rename, so that issue is
 // listed under newID with its text still naming oldID.
-func updateReferencesInAllIssues(ctx context.Context, store storage.DoltStorage, oldID, newID, actor string) error {
-	// Get all issues
-	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+func updateReferencesInAllIssues(ctx context.Context, st renameReferenceStore, oldID, newID, actor string) (renameReport, error) {
+	var report renameReport
+	issues, err := st.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
-		return fmt.Errorf("failed to list issues: %w", err)
+		return report, fmt.Errorf("failed to list issues: %w", err)
 	}
 
 	for _, issue := range issues {
 		updates := make(map[string]interface{})
+		var fields []string
 		for _, f := range renameRefFields {
 			text := f.text(issue)
 			if rewritten := replaceIDRefs(text, oldID, newID); rewritten != text {
 				updates[f.name] = rewritten
+				fields = append(fields, f.name)
 			}
 		}
 
 		if len(updates) > 0 {
-			if err := store.UpdateIssue(ctx, issue.ID, updates, actor); err != nil {
-				return fmt.Errorf("failed to update references in %s: %w", issue.ID, err)
+			if err := st.UpdateIssue(ctx, issue.ID, updates, actor); err != nil {
+				return report, fmt.Errorf("failed to update references in %s: %w", issue.ID, err)
 			}
+			report.rewritten = append(report.rewritten, renameFieldsUpdate{issueID: issue.ID, fields: fields})
 		}
 	}
 
-	return nil
+	slices.SortFunc(report.rewritten, func(a, b renameFieldsUpdate) int { return utils.NaturalCompareIDs(a.issueID, b.issueID) })
+	return report, nil
+}
+
+// write prints the report of a rename of oldID to newID. It prints nothing
+// when there is nothing to report.
+func (r renameReport) write(w io.Writer, oldID, newID string) {
+	if len(r.rewritten) > 0 {
+		fmt.Fprintf(w, "Rewrote %s to %s in:\n", oldID, newID)
+		for _, u := range r.rewritten {
+			fmt.Fprintf(w, "  %s: %s\n", u.issueID, strings.Join(u.fields, ", ")) //nolint:gosec // G705: terminal output, not a browser context
+		}
+	}
 }
 
 // renameRefFields are the issue text fields bd rename rewrites, in the order

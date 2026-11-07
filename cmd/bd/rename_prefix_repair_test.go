@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -332,7 +333,7 @@ func TestRenameRewritesCloseReasonAndOwnText(t *testing.T) {
 	if err := renameIssueKeepingBeadGates(ctx, testStore, a, "test-z", nil, "test"); err != nil {
 		t.Fatalf("rename failed: %v", err)
 	}
-	if err := updateReferencesInAllIssues(ctx, testStore, "test-a", "test-z", "test"); err != nil {
+	if _, err := updateReferencesInAllIssues(ctx, testStore, "test-a", "test-z", "test"); err != nil {
 		t.Fatalf("reference update failed: %v", err)
 	}
 
@@ -365,4 +366,68 @@ func TestRenameRewritesCloseReasonAndOwnText(t *testing.T) {
 	if b.ClosedAt == nil || !b.ClosedAt.Equal(*closedB.ClosedAt) {
 		t.Errorf("test-b closed_at = %v, want it unchanged at %v", b.ClosedAt, *closedB.ClosedAt)
 	}
+}
+
+// runRenameOutput runs bd rename old new against st and returns the lines it
+// printed after its "Renamed old -> new" line.
+func runRenameOutput(t *testing.T, st storage.DoltStorage, oldID, newID string) []string {
+	t.Helper()
+	oldRootCtx, oldWrote := rootCtx, commandDidWrite.Load()
+	rootCtx = context.Background()
+	defer func() { rootCtx = oldRootCtx; commandDidWrite.Store(oldWrote) }()
+	out, err := captureStdoutWithError(t, func() error {
+		return withRenameStore(st, func() error { return runRename(renameCmd, []string{oldID, newID}) })
+	})
+	if err != nil {
+		t.Fatalf("bd rename %s %s: %v\n%s", oldID, newID, err, out)
+	}
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if !strings.HasPrefix(lines[0], "Renamed ") {
+		t.Fatalf("bd rename %s %s printed %q first, want its Renamed line", oldID, newID, lines[0])
+	}
+	return lines[1:]
+}
+
+func TestRenameReportsReferencesItLeft(t *testing.T) {
+	// GH#7040: bd rename rewrote references without saying where, so nothing
+	// told the user which issues it had changed.
+	ctx := context.Background()
+	newStore := func(t *testing.T, issues ...*types.Issue) storage.DoltStorage {
+		t.Helper()
+		testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+		for _, issue := range issues {
+			issue.Status, issue.Priority, issue.IssueType = types.StatusOpen, 2, types.TypeTask
+			if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
+				t.Fatalf("failed to create issue %s: %v", issue.ID, err)
+			}
+		}
+		return testStore
+	}
+	wantLines := func(t *testing.T, got, want []string) {
+		t.Helper()
+		if strings.Join(got, "\n") != strings.Join(want, "\n") {
+			t.Errorf("bd rename report:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+		}
+	}
+
+	t.Run("rewritten fields", func(t *testing.T) {
+		st := newStore(t,
+			&types.Issue{ID: "test-a", Title: "A", Notes: "see test-a"},
+			&types.Issue{ID: "test-b", Title: "test-a follow-up", Description: "after test-a"},
+			&types.Issue{ID: "test-c", Title: "C", Description: "unrelated test-a.1"},
+		)
+		wantLines(t, runRenameOutput(t, st, "test-a", "test-z"), []string{
+			"Rewrote test-a to test-z in:",
+			"  test-b: title, description",
+			"  test-z: notes",
+		})
+	})
+
+	t.Run("quiet", func(t *testing.T) {
+		st := newStore(t,
+			&types.Issue{ID: "test-a", Title: "A"},
+			&types.Issue{ID: "test-b", Title: "B", Description: "about test-a.1"},
+		)
+		wantLines(t, runRenameOutput(t, st, "test-a", "test-z"), nil)
+	})
 }
