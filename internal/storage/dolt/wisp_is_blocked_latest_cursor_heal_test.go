@@ -250,3 +250,18 @@ func TestDoltNew_WispIsBlockedRestoreRecomputesFlags_RealDolt(t *testing.T) {
 		}
 	}
 }
+
+// TestDoltNew_WispIsBlockedRestoreAllowsEphemeralCreate_RealDolt is AC-4:
+// creating a wisp recomputes is_blocked, which failed on the missing column.
+func TestDoltNew_WispIsBlockedRestoreAllowsEphemeralCreate_RealDolt(t *testing.T) {
+	c := newWispIsBlockedClone(t)
+	c.seedGraph()
+	c.breakShape()
+	c.reopen()
+
+	const id = "wib-new"
+	c.create(&types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true})
+	if got := c.blockedFlags("wisps", id); !slices.Equal(got, []int{0}) {
+		t.Fatalf("new independent wisp is_blocked = %v, want [0]", got)
+	}
+}
