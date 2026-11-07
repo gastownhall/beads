@@ -53,6 +53,7 @@ var storeConstructors = map[string]map[string]bool{
 		"NewFromConfig":               true,
 		"NewFromConfigWithOptions":    true,
 		"NewFromConfigWithCLIOptions": true,
+		"NewExternalReadOnly":         true,
 	},
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt": {
 		"Open":                       true,
@@ -128,6 +129,10 @@ var constructionExemptions = map[string]string{
 	// writes are applied, and journaled, by the bd serve it dials.
 	"store_factory.go:openNonMutatingStoreFromConfig":       "read-only/preview open: built-in arms refuse writes and the http arm's writes are journaled by its server, so no mutation can go unrecorded",
 	"store_factory_nocgo.go:openNonMutatingStoreFromConfig": "read-only/preview open: built-in arms refuse writes and the http arm's writes are journaled by its server, so no mutation can go unrecorded",
+	// A foreign read of a proxied-server workspace's external server
+	// (gastownhall/beads#5861): dolt.NewExternalReadOnly is a ReadOnly server
+	// open that never migrates, starts nothing and refuses writes.
+	"foreign_proxied_external_read.go:newExternalReadStore": "strict non-mutating external read: a ReadOnly server open that refuses writes, so no mutation can go unrecorded",
 
 	// Store-open-time reconciliation, which runs BEFORE the command's own store
 	// exists and therefore before any workspace config could be applied to it.

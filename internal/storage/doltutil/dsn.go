@@ -63,6 +63,9 @@ type ServerDSN struct {
 	Database string        // optional; empty connects without selecting a database
 	Timeout  time.Duration // connect timeout; 0 defaults to 5s
 	TLS      bool
+	// TLSConfigName names a TLS configuration registered with
+	// mysql.RegisterTLSConfig; when set it outranks TLS.
+	TLSConfigName string
 }
 
 // String builds the MySQL DSN string. Always sets parseTime=true,
@@ -119,7 +122,9 @@ func (d ServerDSN) String() string {
 		Timeout:              timeout,
 		AllowNativePasswords: true,
 	}
-	if d.TLS {
+	if d.TLSConfigName != "" {
+		cfg.TLSConfig = d.TLSConfigName
+	} else if d.TLS {
 		cfg.TLSConfig = "true"
 	} else {
 		// go-sql-driver/mysql v1.8+ defaults to tls=preferred when TLSConfig

@@ -487,16 +487,22 @@ with a version is used without the check (logged under `BD_DEBUG`). In
 proxied-server mode a genuinely missing or broken `dolt` binary (not found,
 not executable, or the probe itself fails/times out) is a hard error.
 
-### Prefix routing: "proxy server store needs to be uow provider"
+### Prefix routing: "this command has no proxied-server route"
 
 A lookup routed through the orchestrator's `routes.jsonl` prefix routes
-fails with this error when the rig that owns the prefix is itself running in
-proxied-server mode — routed reads cannot open a proxied-server rig. In an
-all-proxied shared-server topology that applies to every routed target, so
-cross-rig bead gates and a plain `bd show <routed-id>` both dead-end here.
+fails with `this command has no proxied-server route; bd will not open a
+proxied-server workspace as a direct store` when the rig that owns the prefix
+is itself running in proxied-server mode and bd manages its server: such a
+rig is reachable only through its own proxy. Cross-rig bead gates into it
+stay pending (`cannot confirm the awaited bead is gone`), and a routed write
+into any proxied-server rig is refused the same way.
 
-Run the command from the owning rig's own workspace instead, where the ID
-resolves locally rather than through a route. Tracked in
+A routed read into a proxied-server rig whose `proxied_server_client_info.json`
+names an external Dolt server works: bd connects to that server directly and
+read-only, as the user the file names, with the password in
+`BEADS_PROXIED_SERVER_EXTERNAL_PASSWORD`. Otherwise run the command from the
+owning rig's own workspace, where the ID resolves locally rather than through
+a route. Tracked in
 [#5861](https://github.com/gastownhall/beads/issues/5861).
 
 ## Sync Issues
