@@ -10,7 +10,19 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
+
+// wantCanonicalFileURL computes the canonical local backup file URL for an
+// absolute host path independently of the production formatter: separators
+// forward, ASCII drive letter uppercase on Windows (#6019).
+func wantCanonicalFileURL(abs string) string {
+	p := filepath.ToSlash(abs)
+	if len(p) >= 2 && p[1] == ':' && 'a' <= p[0] && p[0] <= 'z' {
+		p = string(p[0]-'a'+'A') + p[1:]
+	}
+	return "file://" + p
+}
 
 func TestResolveDoltBackupURL(t *testing.T) {
 	t.Parallel()
@@ -18,8 +30,10 @@ func TestResolveDoltBackupURL(t *testing.T) {
 	// Build the absolute-path fixture with platform-native semantics.
 	// A hard-coded POSIX literal like "/mnt/usb/beads-backup" is not absolute
 	// on Windows (no volume name), so resolveDoltBackupURL would resolve it
-	// against the current drive and return "file://C:\\mnt\\usb\\...".
-	// t.TempDir() is absolute and already cleaned on every platform.
+	// against the current drive; t.TempDir() is absolute and already cleaned
+	// on every platform. The expected URL is computed by wantCanonicalFileURL:
+	// forward slashes and an uppercase Windows drive letter, the form
+	// versioncontrolops.FileURL emits.
 	absBackup := filepath.Join(t.TempDir(), "beads-backup")
 
 	tests := []struct {
@@ -54,9 +68,9 @@ func TestResolveDoltBackupURL(t *testing.T) {
 			wantExact: "gs://bucket/path",
 		},
 		{
-			name:      "absolute path gets file:// prefix",
+			name:      "absolute path gets the canonical file:// URL",
 			input:     absBackup,
-			wantExact: "file://" + absBackup,
+			wantExact: wantCanonicalFileURL(absBackup),
 		},
 		{
 			name:    "relative path gets resolved and prefixed",
@@ -86,9 +100,41 @@ func TestResolveDoltBackupURL_HomeTilde(t *testing.T) {
 	t.Parallel()
 	got := resolveDoltBackupURL("~/backups/beads")
 	home, _ := os.UserHomeDir()
-	want := "file://" + filepath.Join(home, "backups/beads")
+	want := wantCanonicalFileURL(filepath.Join(home, "backups/beads"))
 	if got != want {
 		t.Errorf("resolveDoltBackupURL(~/backups/beads) = %q, want %q", got, want)
+	}
+}
+
+// TestResolveDoltBackupURLMatchesDirToFileURL pins that the CLI's URL
+// resolution and the storage layer's agree on an existing local backup
+// directory: both feed the same resolved absolute path through the shared
+// formatter, so `bd backup init` and the auto-backup path register one URL
+// spelling and Dolt's address-conflict handling sees one destination. The
+// expected URL is computed independently of the production formatter.
+// No t.Parallel: the relative-path row resolves against the process cwd.
+func TestResolveDoltBackupURLMatchesDirToFileURL(t *testing.T) {
+	backup := filepath.Join(t.TempDir(), "beads-backup")
+	if err := os.Mkdir(backup, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, input := range []string{backup, "beads-backup"} {
+		cli := resolveDoltBackupURL(input)
+		storeURL, err := versioncontrolops.DirToFileURL(input)
+		if err != nil {
+			t.Fatalf("DirToFileURL(%q): %v", input, err)
+		}
+		if cli != storeURL {
+			t.Errorf("resolveDoltBackupURL(%q) = %q, DirToFileURL(%q) = %q, want identical URLs",
+				input, cli, input, storeURL)
+		}
+		abs, err := filepath.Abs(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := wantCanonicalFileURL(abs); cli != want {
+			t.Errorf("resolveDoltBackupURL(%q) = %q, want the canonical %q", input, cli, want)
+		}
 	}
 }
 

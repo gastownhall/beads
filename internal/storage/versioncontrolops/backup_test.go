@@ -188,6 +188,51 @@ func TestBackupToDirRefusesMissingOrFileDestination(t *testing.T) {
 	}
 }
 
+// TestBackupToDirRegistersFileURL pins the auto-backup registration contract
+// (#6019): BackupToDir hands DOLT_BACKUP('add') the canonical file URL of its
+// directory — forward slashes and an uppercase drive on Windows — under the
+// backup_export name, then syncs that same name. The expected URL is computed
+// here independently of the production formatter.
+func TestBackupToDirRegistersFileURL(t *testing.T) {
+	backup := t.TempDir()
+	conn := &restoreConn{}
+	if err := BackupToDir(context.Background(), conn, conn, backup); err != nil {
+		t.Fatalf("BackupToDir(%q): %v", backup, err)
+	}
+	if len(conn.args) != 3 {
+		t.Fatalf("ExecContext called %d times, want 3 (rm, add, sync): %v", len(conn.args), conn.args)
+	}
+	rm, add, sync := conn.args[0], conn.args[1], conn.args[2]
+	if len(rm) != 1 || rm[0] != ExportBackupName {
+		t.Errorf("remove args = %v, want [%s]", rm, ExportBackupName)
+	}
+	if len(sync) != 1 || sync[0] != ExportBackupName {
+		t.Errorf("sync args = %v, want [%s]", sync, ExportBackupName)
+	}
+	abs, err := filepath.Abs(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := wantBackupFileURL(abs)
+	if len(add) != 2 || add[0] != ExportBackupName || add[1] != want {
+		t.Errorf("add args = %v, want [%s %s]", add, ExportBackupName, want)
+	}
+	if url, _ := add[1].(string); strings.Contains(url, `\`) {
+		t.Errorf("registered URL %q must not contain a backslash", url)
+	}
+}
+
+// wantBackupFileURL computes the canonical backup file URL for an absolute
+// host path independently of the production formatter: separators forward,
+// ASCII drive letter uppercase on Windows.
+func wantBackupFileURL(abs string) string {
+	p := filepath.ToSlash(abs)
+	if len(p) >= 2 && p[1] == ':' && 'a' <= p[0] && p[0] <= 'z' {
+		p = string(p[0]-'a'+'A') + p[1:]
+	}
+	return "file://" + p
+}
+
 // restoreConn is a DBConn stub for BackupRestore: ExecContext records each
 // statement's bind args and returns execErr.
 type restoreConn struct {
