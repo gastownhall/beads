@@ -146,6 +146,7 @@ go_test(
         "cycle_detector_contract_test.go",
         "deleter_contract_test.go",
         "dep_counts_oracle_test.go",
+        "dep_counts_plan_test.go",
         "dep_counts_shape_test.go",
         "dependencies_test.go",
         "dependency_editor_contract_test.go",

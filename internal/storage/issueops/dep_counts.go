@@ -113,6 +113,15 @@ func countDepUnion(ctx context.Context, tx DBTX, table, union string, args []any
 // missing-plane tolerance and no durable-ownership suppression: the
 // home-table join drops a wisp row whose issue_id has no wisps row on its
 // own, and the two planes are simply summed.
+//
+// Each branch's projection carries JOIN_ORDER/LOOKUP_JOIN hints pinning the
+// dependency table as the join driver and the home table as the primary-key
+// lookup: without them the statistics-less embedded planner drives the join
+// from an issues.status index scan (every open row, per branch) and probes
+// dependencies per row — the scan shape this rewrite exists to remove.
+// TestDependentCountPlansUseTargetIndexes pins the plan; on MySQL, JOIN_ORDER
+// is honored and the unknown LOOKUP_JOIN hint is ignored, the same trade the
+// reachability walks make.
 func CountDependentsByStatusInTx(ctx context.Context, tx DBTX, sourceID string, status types.Status) (int64, error) {
 	planes := []struct {
 		table string
@@ -120,11 +129,13 @@ func CountDependentsByStatusInTx(ctx context.Context, tx DBTX, sourceID string, 
 	}{
 		{
 			"dependencies",
-			sqlbuild.DepTargetUnion("d.", "dependencies d JOIN issues i ON i.id = d.issue_id", "d.issue_id", "= ?", " AND i.status = ?"),
+			sqlbuild.DepTargetUnion("d.", "dependencies d JOIN issues i ON i.id = d.issue_id",
+				"/*+ JOIN_ORDER(d,i) LOOKUP_JOIN(d,i) */ d.issue_id", "= ?", " AND i.status = ?"),
 		},
 		{
 			"wisp_dependencies",
-			sqlbuild.DepTargetUnion("d.", "wisp_dependencies d JOIN wisps w ON w.id = d.issue_id", "d.issue_id", "= ?", " AND w.status = ?"),
+			sqlbuild.DepTargetUnion("d.", "wisp_dependencies d JOIN wisps w ON w.id = d.issue_id",
+				"/*+ JOIN_ORDER(d,w) LOOKUP_JOIN(d,w) */ d.issue_id", "= ?", " AND w.status = ?"),
 		},
 	}
 	var total int64
