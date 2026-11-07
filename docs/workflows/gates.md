@@ -71,20 +71,25 @@ check.
 bd gate create --type=gh:pr --blocks bd-abc --await-id=42 --repo=owner/other-repo
 ```
 
-### Known limitations: multi-rig and proxied-server topologies
+### Multi-rig and proxied-server topologies
 
-Bead gates and prefix routing (`routes.jsonl`) do not work in every
-topology. Two limitations to expect, both tracked in
-[#5861](https://github.com/gastownhall/beads/issues/5861):
+Bead gates and prefix routing (`routes.jsonl`) work across rigs, including
+topologies that were once limited (both originally tracked in
+[#5861](https://github.com/gastownhall/beads/issues/5861)):
 
-- **Cross-rig bead gates never resolve on their own.** A `<rig>:<bead-id>`
-  await value reports `cannot be checked (multi-rig routing removed)` and
-  stays pending regardless of the awaited bead's status. Close it with
-  `bd gate resolve`.
-- **Prefix routing cannot open a proxied-server target rig.** A routed
-  lookup into a rig that is itself in proxied-server mode fails with
-  `proxy server store needs to be uow provider`, so an all-proxied
-  shared-server topology cannot resolve routed targets at all.
+- **`<rig>:<bead-id>` await values resolve through routes.** A cross-rig
+  await is looked up in the named rig, so the gate resolves when the awaited
+  bead closes there and stays pending while it is open (fixed by #6962).
+- **A routed lookup into a proxied-server rig reads it when its sidecar names
+  an external SQL server.** Gate checks, `bd close` pre-checks, routed reads,
+  and `bd dep add` target verification go through that external connection,
+  read-only. One limitation remains: a *managed-local* proxied rig — one whose
+  proxy owns the database and whose sidecar names no external server — cannot
+  be opened by a foreign bd at all. A routed lookup into such a rig fails
+  with `this command has no proxied-server route`, a gate awaiting a bead
+  there stays pending as unconfirmed rather than resolving on its own, and a
+  `bd dep add` edge into it is stored without the typo warning (the refusal
+  says nothing about the target).
 
 ## Gates in formulas
 

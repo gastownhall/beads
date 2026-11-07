@@ -238,14 +238,17 @@ func resolveUnresolvedDepTarget(sourceID, dependsOnArg string, resolveErr error)
 // depTargetLookupMiss is the miss both dep add routes keep for a cross-prefix
 // target their lookup did not find: the lookup error itself, which
 // unresolvedDepTargetWarning prints, or nil when bd could not look the target
-// up at all. A route into a rig in proxied-server mode is that case: bd will
-// not open a proxied-server workspace as a direct store
-// (errProxiedStoreUnrouted), and a routed read has no other way into one yet
-// (#5861, docs/workflows/gates.md). The refusal says nothing about the target,
-// and in an all-proxied town it answers for every cross-rig edge, so reporting
-// it would print a typo notice, with a bd dep remove that deletes the edge,
-// for every valid one. A typo into such a rig is stored without a notice, as
-// it was before GH#6556.
+// up at all. A route into a managed-local proxied rig — one whose proxy owns
+// the database and whose sidecar names no external SQL server — is that case:
+// the only routed read such a rig serves is the external connection its
+// sidecar would name (#5861, docs/workflows/gates.md), and it has none, so the
+// lookup ends at errProxiedStoreUnrouted. The refusal says nothing about the
+// target, and in an all-proxied town it answers for every cross-rig edge into
+// such rigs, so reporting it would print a typo notice, with a bd dep remove
+// that deletes the edge, for every valid one. A typo into such a rig is stored
+// without a notice, as it was before GH#6556. A rig whose sidecar names an
+// external server is read through it, so a missing target there warns like any
+// other miss.
 func depTargetLookupMiss(lookupErr error) error {
 	var capErr *ProxyCapabilityError
 	if errors.As(lookupErr, &capErr) && capErr.Code == "proxy.store.unrouted" {
@@ -616,8 +619,9 @@ func emitImplicitBlocksDefaultWarning() {
 // routing; any other error (a routes.jsonl or rig that cannot be read, an ID
 // ambiguous in the routed rig) is named as the reason the target could not be
 // verified, because reporting it as a miss would misstate the cause, the rule
-// isRoutingFailure keeps. A rig bd cannot open at all, one in proxied-server
-// mode, never gets here: depTargetLookupMiss leaves no miss for it. miss is
+// isRoutingFailure keeps. A rig bd cannot open at all — a proxied-server rig
+// whose sidecar names no external SQL server — never gets here:
+// depTargetLookupMiss leaves no miss for it. miss is
 // printed as one line (remedy.PrintedError):
 // it can repeat the typed target or a routed path, and a line break in either
 // must not forge the remedy line under it.

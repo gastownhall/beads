@@ -177,11 +177,14 @@ func proxiedLookupTitle(ctx context.Context, uw uow.UnitOfWork, id string) strin
 // wisp, then a prefix route; proxied mode has no contributor auto-routing.
 // No route for the target leaves the server's not-found as the answer; a
 // route that fails is returned as itself, so the warning names it rather
-// than calling the target missing. A route into a rig in proxied-server mode
-// leaves no miss (depTargetLookupMiss): that is not a failed lookup but none
-// at all, because bd will not open such a rig as a direct store (#5861). The
-// refusal says nothing about the target, and in an all-proxied town it would
-// call every valid cross-rig edge a typo.
+// than calling the target missing. A route into a managed-local proxied rig —
+// one whose sidecar names no external SQL server — leaves no miss
+// (depTargetLookupMiss): that is not a failed lookup but none at all, because
+// the only routed read such a rig serves is the external connection its
+// sidecar would name, and it has none (#5861). The refusal says nothing about
+// the target, and in an all-proxied town it would call every valid cross-rig
+// edge into such rigs a typo. A rig whose sidecar names an external server is
+// read through it, so a missing target there warns.
 //
 // Both lookups are exact because the stored row holds the target as typed.
 // The route's default resolver would count a unique leading prefix of a rig

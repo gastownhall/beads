@@ -62,16 +62,28 @@ func wireExternalDependencyPolicy(store storage.DoltStorage) storage.DoltStorage
 	if store == nil {
 		return nil
 	}
-	return externaldeps.New(
-		store,
-		func(project externaldeps.ProjectName) (string, bool) {
-			path := config.ResolveExternalProjectPath(string(project))
-			return path, path != ""
-		},
-		func(ctx context.Context, projectRoot string) (storage.DoltStorage, error) {
-			return openForeignStore(ctx, filepath.Join(projectRoot, ".beads"), foreignRead)
-		},
-	)
+	return externaldeps.New(store, locateExternalDependencyProject, openExternalDependencyProject)
+}
+
+// locateExternalDependencyProject resolves an external-deps project name to
+// its workspace root, for the policy's cross-project reads. Shared by both
+// plumbings (wireExternalDependencyPolicy and
+// wireExternalDependencyUOWProvider), which must resolve projects alike.
+func locateExternalDependencyProject(project externaldeps.ProjectName) (string, bool) {
+	path := config.ResolveExternalProjectPath(string(project))
+	return path, path != ""
+}
+
+// openExternalDependencyProject opens an external-deps project workspace for
+// the policy's cross-project reads, read-only through openForeignStore. The
+// #5861 item 2 route widened what this seam can open — a proxied-server
+// project whose sidecar names an external SQL server is read through that
+// connection, where before it was refused as unrouted — deliberately: the
+// policy reads blocking state, which is exactly the non-mutating foreign read
+// the route serves. A managed-local proxied project (no external sidecar)
+// keeps the typed refusal.
+func openExternalDependencyProject(ctx context.Context, projectRoot string) (storage.DoltStorage, error) {
+	return openForeignStore(ctx, filepath.Join(projectRoot, ".beads"), foreignRead)
 }
 
 // waitForCommandHooks lets the hooks this command fired finish before the
@@ -106,14 +118,5 @@ func wireProxiedUOWProvider(provider uow.UnitOfWorkProvider, sinks uow.Sinks) uo
 }
 
 func wireExternalDependencyUOWProvider(provider uow.UnitOfWorkProvider) uow.UnitOfWorkProvider {
-	return externaldeps.WrapUOWProvider(
-		provider,
-		func(project externaldeps.ProjectName) (string, bool) {
-			path := config.ResolveExternalProjectPath(string(project))
-			return path, path != ""
-		},
-		func(ctx context.Context, projectRoot string) (storage.DoltStorage, error) {
-			return openForeignStore(ctx, filepath.Join(projectRoot, ".beads"), foreignRead)
-		},
-	)
+	return externaldeps.WrapUOWProvider(provider, locateExternalDependencyProject, openExternalDependencyProject)
 }
