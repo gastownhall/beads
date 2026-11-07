@@ -175,4 +175,35 @@ func TestProxiedServerGateRoutedExternalTarget(t *testing.T) {
 			t.Errorf("expected 1 resolved, got:\n%s", out)
 		}
 	})
+
+	// AC-3: bd close's gate pre-check refuses while B's bead is open and
+	// permits the close once it is closed.
+	t.Run("close_precheck_follows_target_state", func(t *testing.T) {
+		t.Parallel()
+		a := newSharedProxiedProject(t, bd, "rca")
+		b := newSharedProxiedProject(t, bd, "rcb")
+		routeExternalRig(t, a.dir, b.dir, "rcb")
+		target := bdProxiedCreate(t, bd, b.dir, "Awaited external bead")
+		gate := bdProxiedCreate(t, bd, a.dir, "Cross-rig bead gate", "--type", "gate")
+		db := openProxiedDB(t, a)
+		seedGateAwait(t, db, gate.ID, "bead", target.ID, time.Now().UTC(), 0)
+
+		out, stderr, err := bdProxiedRunBuffers(t, bd, a.dir, "close", gate.ID)
+		if err == nil {
+			t.Fatalf("bd close of a gate awaiting an open external bead succeeded:\n%s", out)
+		}
+		combined := out + stderr
+		if !strings.Contains(combined, "gate condition not satisfied") || !strings.Contains(combined, target.ID+" is open") {
+			t.Fatalf("bd close refused for another reason than the open target:\n%s", combined)
+		}
+		if got := readStatus(t, db, gate.ID); got == types.StatusClosed {
+			t.Fatal("refused close closed the gate")
+		}
+
+		bdProxiedClose(t, bd, b.dir, target.ID)
+		bdProxiedClose(t, bd, a.dir, gate.ID)
+		if got := readStatus(t, db, gate.ID); got != types.StatusClosed {
+			t.Errorf("gate should close once its external target is closed, got %q", got)
+		}
+	})
 }
