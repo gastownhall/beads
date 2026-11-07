@@ -93,6 +93,24 @@ func isolateBeadsDirForTest(t *testing.T) {
 	t.Setenv("BEADS_DIR", "")
 }
 
+func setupEndpointTrustWorkspaceForTest(t *testing.T) {
+	t.Helper()
+	isolateBeadsDirForTest(t)
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, ".config"))
+	// An earlier in-process command may have recorded another workspace.
+	config.RecordWorkspaceBeadsDir(beadsDir)
+}
+
 // initConfigForTest initializes viper config for a test and ensures cleanup.
 // main.go's init() calls config.Initialize() which picks up the real .beads/config.yaml.
 // TestMain resets viper, but any test calling config.Initialize() re-loads the real config.

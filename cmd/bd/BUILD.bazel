@@ -413,6 +413,7 @@ go_library(
         "//internal/doltremote",
         "//internal/doltserver",
         "//internal/doltversion",
+        "//internal/endpointtrust",
         "//internal/eventsjournal",
         "//internal/execenv",
         "//internal/formula",
@@ -625,6 +626,7 @@ go_test(
         "comments_add_test.go",
         "comments_cli_embedded_test.go",
         "comments_test.go",
+        "compact_dates_embedded_test.go",
         "compact_embedded_test.go",
         "compact_gc_flag_test.go",
         "compact_gc_size_test.go",
@@ -641,6 +643,8 @@ go_test(
         "config_embedded_test.go",
         "config_get_backup_enabled_embedded_test.go",
         "config_get_backup_enabled_test.go",
+        "config_get_readonly_embedded_test.go",
+        "config_get_store_free_test.go",
         "config_guard_test.go",
         "config_isolation_regression_test.go",
         "config_leaked_secret_test.go",
@@ -838,6 +842,7 @@ go_test(
         "foreign_workspace_test.go",
         "format_json_alias_embedded_test.go",
         "formula_fixture_proxied_test.go",
+        "formula_gtroot_dotenv_test.go",
         "formula_help_test.go",
         "formula_primitives_test.go",
         "formula_schema_test.go",
@@ -882,6 +887,7 @@ go_test(
         "history_proxied_integration_test.go",
         "history_remote_frontdoor_matrix_test.go",
         "hook_env_test.go",
+        "hook_index_env_test.go",
         "hooks_embedded_test.go",
         "hooks_exec_composition_test.go",
         "hooks_export_staged_deletion_test.go",
@@ -890,6 +896,8 @@ go_test(
         "hooks_husky_test.go",
         "hooks_marker_skip_test.go",
         "hooks_post_merge_import_test.go",
+        "hooks_symlinked_dir_test.go",
+        "hooks_symlinked_hooks_dir_repro_test.go",
         "hooks_timeout_process_test.go",
         "hooks_worktree_test.go",
         "human_embedded_test.go",
@@ -955,6 +963,7 @@ go_test(
         "init_stealth_test.go",
         "init_team_server_test.go",
         "init_test.go",
+        "init_transaction_commit_server_test.go",
         "init_worktree_test.go",
         "jira_max_rows_gate_test.go",
         "jira_test.go",
@@ -1430,6 +1439,7 @@ go_test(
         "//internal/git",
         "//internal/gitenv",
         "//internal/githooksenv",
+        "//internal/github",
         "//internal/gitlab",
         "//internal/hooks",
         "//internal/httpapi",
@@ -1871,6 +1881,13 @@ exports_files(
         "ready.go",
     ],
     visibility = ["//internal/httpapi:__pkg__"],
+)
+
+# //scripts:android_release_docs_test: the comment counting the CGO_ENABLED=0
+# release targets.
+exports_files(
+    ["store_factory_server_mode.go"],
+    visibility = ["//scripts:__pkg__"],
 )
 
 # Release-metadata surfaces gated by //internal/versioncheck's releaseSources

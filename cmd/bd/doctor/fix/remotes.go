@@ -91,12 +91,23 @@ func openScanDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
 // it is set, else TCP at ep's host and port, as the configured user with the
 // password keyed to that port.
 func openWorkspaceDB(ep doltserver.Endpoint, cfg *configfile.Config, socket string) (*sql.DB, error) {
+	password := ep.Password()
+	if password != "" {
+		// Refuse to send BEADS_DOLT_PASSWORD to a shared-config host (metadata
+		// dolt_server_host / config.yaml dolt.host) the workspace never pinned,
+		// as the store's open does. bd doctor --fix repairs and read-only scans
+		// both open through here (openFixDB/openScanDB), so neither can harvest
+		// the password by naming an attacker's host (GH#7886).
+		if err := ep.EnsureTrustedForCredential(cfg); err != nil {
+			return nil, err
+		}
+	}
 	connStr := doltutil.ServerDSN{
 		Socket:   socket,
 		Host:     ep.Host,
 		Port:     ep.Port,
 		User:     cfg.GetDoltServerUser(),
-		Password: ep.Password(),
+		Password: password,
 		Database: cfg.GetDoltDatabase(),
 		TLS:      cfg.GetDoltServerTLS(),
 	}.String()

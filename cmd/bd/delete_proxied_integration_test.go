@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -26,7 +27,9 @@ func TestProxiedServerDelete(t *testing.T) {
 
 	survivor := bdProxiedCreate(t, bd, p.dir, "Survivor", "--type", "task")
 	target := bdProxiedCreate(t, bd, p.dir, "Target", "--type", "task", "--label", "alpha", "--deps", "depends-on:"+survivor.ID)
-	dependent := bdProxiedCreate(t, bd, p.dir, "Dependent", "--type", "task", "--deps", "depends-on:"+target.ID)
+	// A parent-child child, not a depends-on edge: a cascade follows
+	// containment only (GH#6301).
+	dependent := bdProxiedCreate(t, bd, p.dir, "Dependent", "--type", "task", "--parent", target.ID)
 	descendant := bdProxiedCreate(t, bd, p.dir, "Descendant", "--type", "task", "--parent", dependent.ID)
 	bdProxiedUpdateOne(t, bd, p.dir, survivor.ID, "--description", "see "+target.ID+" for context")
 
@@ -51,14 +54,16 @@ func TestProxiedServerDelete(t *testing.T) {
 		"schema_version":       float64(1),
 		"would_delete":         float64(3),
 		"dependencies_removed": float64(3),
-		"labels_removed":       float64(1),
-		"events_removed":       float64(4),
+		"labels_removed":       float64(3), // the children inherit target's label
+		"events_removed":       float64(6),
 		"ids":                  []any{target.ID},
 		"not_found":            nil,
 		"connected":            []any{survivor.ID},
 		"dry_run":              false,
 		"cascade":              true,
 		"would_orphan":         float64(0),
+		"would_delete_ids":     sortedAny(target.ID, dependent.ID, descendant.ID),
+		"would_orphan_ids":     nil,
 	}
 	if !deleteJSONEqual(preview, previewWant) {
 		t.Errorf("preview JSON: got %#v, want %#v", preview, previewWant)
@@ -80,10 +85,11 @@ func TestProxiedServerDelete(t *testing.T) {
 		"deleted":              []any{target.ID},
 		"deleted_count":        float64(3),
 		"dependencies_removed": float64(3),
-		"labels_removed":       float64(1),
-		"events_removed":       float64(4),
+		"labels_removed":       float64(3), // the children inherit target's label
+		"events_removed":       float64(6),
 		"references_updated":   float64(1),
 		"orphaned_issues":      nil,
+		"deleted_ids":          sortedAny(target.ID, dependent.ID, descendant.ID),
 	}
 	if !deleteJSONEqual(deleted, deletedWant) {
 		t.Errorf("delete JSON: got %#v, want %#v", deleted, deletedWant)
@@ -134,6 +140,17 @@ func TestProxiedServerDelete(t *testing.T) {
 
 func deleteJSONEqual(got, want map[string]any) bool {
 	return reflect.DeepEqual(got, want)
+}
+
+// sortedAny is ids in ascending order, decoded the way a JSON array is.
+func sortedAny(ids ...string) []any {
+	sorted := append([]string(nil), ids...)
+	sort.Strings(sorted)
+	out := make([]any, len(sorted))
+	for i, id := range sorted {
+		out[i] = id
+	}
+	return out
 }
 
 // TestProxiedServerDeleteForceOrphans pins the embedded-parity --force

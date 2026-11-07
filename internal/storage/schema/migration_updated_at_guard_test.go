@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -14,9 +15,11 @@ import (
 )
 
 const (
-	guardColumnQuery = `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME = \? AND COLUMN_NAME = \?`
-	guardTableQuery  = `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`
-	guardIndexQuery  = `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.STATISTICS.*TABLE_NAME = \? AND INDEX_NAME = \?`
+	// The pre-repairs (ensureWispIsBlockedForRecompute and kin) still probe
+	// through INFORMATION_SCHEMA; the guard itself never does.
+	guardRepairColumnQuery = `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME = \? AND COLUMN_NAME = \?`
+	guardTableQuery        = `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`
+	guardIndexQuery        = `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.STATISTICS.*TABLE_NAME = \? AND INDEX_NAME = \?`
 )
 
 // quietStderr discards the runner's progress lines for one test.
@@ -54,8 +57,7 @@ func TestRunMigrationsRestoresIgnored0007UpdatedAtBeforeItsCursorRow(t *testing.
 	defer db.Close()
 
 	// 1. Snapshot, with the is_blocked flag the body rewrites.
-	guardExpectColumn(mock, "wisps", "updated_at", true)
-	guardExpectColumn(mock, "wisps", "is_blocked", true)
+	guardExpectColumns(mock, "wisps", "id", "updated_at", "is_blocked")
 	mock.ExpectQuery(`SELECT id, updated_at, is_blocked FROM wisps ORDER BY id`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at", "is_blocked"}).
 			AddRow("w-1", "2025-04-02 09:30:32", 0).
@@ -63,15 +65,15 @@ func TestRunMigrationsRestoresIgnored0007UpdatedAtBeforeItsCursorRow(t *testing.
 	// 2. ensureWispIsBlockedForRecompute: everything already in place.
 	mock.ExpectQuery(guardTableQuery).WithArgs("wisps").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
-	guardExpectColumn(mock, "wisps", "is_blocked", true)
+	mock.ExpectQuery(guardRepairColumnQuery).WithArgs("wisps", "is_blocked").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
 	mock.ExpectQuery(guardIndexQuery).WithArgs("wisps", "idx_wisps_is_blocked").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
 	// 3. The frozen body.
 	mock.ExpectExec(`UPDATE wisps SET is_blocked = 0`).WillReturnResult(sqlmock.NewResult(0, 1))
 	// 4. Restore: only w-1 was rewritten (now blocked) and stamped; w-2 is
 	// unchanged and not rewritten.
-	guardExpectColumn(mock, "wisps", "updated_at", true)
-	guardExpectColumn(mock, "wisps", "is_blocked", true)
+	guardExpectColumns(mock, "wisps", "id", "updated_at", "is_blocked")
 	mock.ExpectQuery(`SELECT id, updated_at, is_blocked FROM wisps ORDER BY id`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at", "is_blocked"}).
 			AddRow("w-1", "2026-11-02 04:00:00", 1).
@@ -111,18 +113,17 @@ func TestRunMigrationsFailsGuardedStepOnUpdatedAtGuardError(t *testing.T) {
 		want   string
 	}{
 		{
-			name: "snapshot flag probe fails",
+			name: "snapshot column listing fails",
 			expect: func(mock sqlmock.Sqlmock) {
-				guardExpectColumn(mock, "issues", "updated_at", true)
-				mock.ExpectQuery(guardColumnQuery).WithArgs("issues", "is_blocked").WillReturnError(injected)
+				guardExpectShowTables(mock, "issues")
+				mock.ExpectQuery(guardShowColumnsQuery("issues")).WillReturnError(injected)
 			},
 			want: "snapshotting updated_at before migration 0046_",
 		},
 		{
 			name: "snapshot read fails",
 			expect: func(mock sqlmock.Sqlmock) {
-				guardExpectColumn(mock, "issues", "updated_at", true)
-				guardExpectColumn(mock, "issues", "is_blocked", false)
+				guardExpectColumns(mock, "issues", "id", "updated_at")
 				mock.ExpectQuery(guardIssuesSelect).WillReturnError(injected)
 			},
 			want: "snapshotting updated_at before migration 0046_",
@@ -267,14 +268,40 @@ const (
 	guardNewStamp         = "2026-11-02 04:00:00"
 )
 
-// guardExpectColumn primes one schemaColumnExists probe of table.column.
-func guardExpectColumn(mock sqlmock.Sqlmock, table, column string, present bool) {
-	count := 0
-	if present {
-		count = 1
+// guardShowColumnsQuery matches guardColumnsOf's listing of table.
+func guardShowColumnsQuery(table string) string {
+	return `^SHOW COLUMNS FROM ` + table + `$`
+}
+
+// guardExpectShowTables primes guardColumnsOf's SHOW TABLES, listing tables.
+func guardExpectShowTables(mock sqlmock.Sqlmock, tables ...string) {
+	rows := sqlmock.NewRows([]string{"Tables_in_beads"})
+	for _, table := range tables {
+		rows.AddRow(table)
 	}
-	mock.ExpectQuery(guardColumnQuery).WithArgs(table, column).
-		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(count))
+	mock.ExpectQuery(`^SHOW TABLES$`).WillReturnRows(rows)
+}
+
+// guardShowColumnsRows is a SHOW COLUMNS result listing cols, in order.
+func guardShowColumnsRows(cols ...string) *sqlmock.Rows {
+	rows := sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"})
+	for _, col := range cols {
+		rows.AddRow(col, "text", "YES", "", nil, "")
+	}
+	return rows
+}
+
+// guardExpectColumns primes one guardColumnsOf listing of a present table:
+// SHOW TABLES finds it, SHOW COLUMNS lists cols in table order.
+func guardExpectColumns(mock sqlmock.Sqlmock, table string, cols ...string) {
+	guardExpectShowTables(mock, "dependencies", table)
+	mock.ExpectQuery(guardShowColumnsQuery(table)).WillReturnRows(guardShowColumnsRows(cols...))
+}
+
+// guardExpectAbsentTable primes one guardColumnsOf probe of a table the
+// database lacks: SHOW TABLES does not list it and no SHOW COLUMNS follows.
+func guardExpectAbsentTable(mock sqlmock.Sqlmock) {
+	guardExpectShowTables(mock, "dependencies", "issues")
 }
 
 // guardRestoreSQL matches the statement restoreUpdatedAtBatch builds for n
@@ -328,16 +355,18 @@ func guardPrimeThroughBody(mock sqlmock.Sqlmock, commitEachStep, flagBefore bool
 		mock.ExpectQuery(guardDirtyStatusQuery).
 			WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}))
 	}
-	guardExpectColumn(mock, "issues", "updated_at", true)
-	guardExpectColumn(mock, "issues", "is_blocked", flagBefore)
+	if flagBefore {
+		guardExpectColumns(mock, "issues", "id", "updated_at", "is_blocked")
+	} else {
+		guardExpectColumns(mock, "issues", "id", "updated_at")
+	}
 	if flagBefore {
 		mock.ExpectQuery(guardIssuesFlagSelect).WillReturnRows(snapshotRows)
 	} else {
 		mock.ExpectQuery(guardIssuesSelect).WillReturnRows(snapshotRows)
 	}
 	mock.ExpectExec(`SET @needs_add`).WillReturnResult(sqlmock.NewResult(0, 1))
-	guardExpectColumn(mock, "issues", "updated_at", true)
-	guardExpectColumn(mock, "issues", "is_blocked", true)
+	guardExpectColumns(mock, "issues", "id", "updated_at", "is_blocked")
 }
 
 // guardPrimeTail primes main 0046's cursor row and, on the commitEachStep
@@ -506,13 +535,12 @@ func TestUpdatedAtGuardRowMovesPreferDestinationHistory(t *testing.T) {
 
 	// Snapshot, sorted by table: issues (source, no flag) then wisps
 	// (destination, with the ephemeral flag the body sets).
-	guardExpectColumn(mock, "issues", "updated_at", true)
+	guardExpectColumns(mock, "issues", "id", "updated_at", "ephemeral")
 	mock.ExpectQuery(guardIssuesSelect).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).
 			AddRow("mover", "2025-01-06 10:00:00").
 			AddRow("native", "2025-01-01 00:00:00"))
-	guardExpectColumn(mock, "wisps", "updated_at", true)
-	guardExpectColumn(mock, "wisps", "ephemeral", true)
+	guardExpectColumns(mock, "wisps", "id", "updated_at", "ephemeral")
 	mock.ExpectQuery(`SELECT id, updated_at, ephemeral FROM wisps ORDER BY id`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at", "ephemeral"}).
 			AddRow("bystander", "2025-01-03 00:00:00", 1).
@@ -525,8 +553,7 @@ func TestUpdatedAtGuardRowMovesPreferDestinationHistory(t *testing.T) {
 	// (collision) got flipped and stamped, bystander was edited by another
 	// writer with its flag already set, doomed is gone. Only mover, legacy
 	// and native are restored.
-	guardExpectColumn(mock, "wisps", "updated_at", true)
-	guardExpectColumn(mock, "wisps", "ephemeral", true)
+	guardExpectColumns(mock, "wisps", "id", "updated_at", "ephemeral")
 	mock.ExpectQuery(`SELECT id, updated_at, ephemeral FROM wisps ORDER BY id`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at", "ephemeral"}).
 			AddRow("bystander", "2026-11-02 03:59:58", 1).
@@ -552,18 +579,6 @@ func TestUpdatedAtGuardRowMovesPreferDestinationHistory(t *testing.T) {
 	}
 }
 
-// guardFingerprintColumnsQuery matches fingerprintColumnsOf's column listing.
-const guardFingerprintColumnsQuery = `(?s)SELECT COLUMN_NAME FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME = \? AND COLUMN_NAME <> 'updated_at'.*ORDER BY ORDINAL_POSITION`
-
-// guardExpectFingerprintColumns primes one fingerprintColumnsOf listing.
-func guardExpectFingerprintColumns(mock sqlmock.Sqlmock, table string, cols ...string) {
-	rows := sqlmock.NewRows([]string{"COLUMN_NAME"})
-	for _, col := range cols {
-		rows.AddRow(col)
-	}
-	mock.ExpectQuery(guardFingerprintColumnsQuery).WithArgs(table).WillReturnRows(rows)
-}
-
 // TestUpdatedAtGuardRestoresJoinStampedRowsOnly pins the join rule on main
 // 0041, whose dependency-split UPDATEs join issues and wisps without
 // assigning them: a row whose columns other than updated_at read the same
@@ -574,13 +589,12 @@ func guardExpectFingerprintColumns(mock sqlmock.Sqlmock, table string, cols ...s
 func TestUpdatedAtGuardRestoresJoinStampedRowsOnly(t *testing.T) {
 	fpSelect := "SELECT id, updated_at, " + regexp.QuoteMeta(fingerprintSQL([]string{"id", "title", "status"})) + " FROM issues ORDER BY id"
 	snapshot := func(mock sqlmock.Sqlmock) {
-		guardExpectColumn(mock, "issues", "updated_at", true)
-		guardExpectFingerprintColumns(mock, "issues", "id", "title", "status")
+		guardExpectColumns(mock, "issues", "id", "title", "updated_at", "status")
 		mock.ExpectQuery(fpSelect).WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at", "fp"}).
 			AddRow("bd-edited", "2025-03-02 10:00:00", "fp-edited").
 			AddRow("bd-target", guardOldStamp, "fp-target").
 			AddRow("bd-untouched", "2025-03-03 11:00:00", "fp-untouched"))
-		guardExpectColumn(mock, "wisps", "updated_at", false)
+		guardExpectAbsentTable(mock)
 	}
 	afterBody := sqlmock.NewRows([]string{"id", "updated_at", "fp"}).
 		AddRow("bd-edited", "2026-11-02 03:59:58", "fp-edited-by-another-writer").
@@ -610,26 +624,127 @@ func TestUpdatedAtGuardRestoresJoinStampedRowsOnly(t *testing.T) {
 	t.Run("join-stamped row restored, edited and untouched rows left alone", func(t *testing.T) {
 		run(t, func(mock sqlmock.Sqlmock) {
 			snapshot(mock)
-			guardExpectColumn(mock, "issues", "updated_at", true)
-			guardExpectFingerprintColumns(mock, "issues", "id", "title", "status")
+			guardExpectColumns(mock, "issues", "id", "title", "updated_at", "status")
 			mock.ExpectQuery(fpSelect).WillReturnRows(afterBody)
 			mock.ExpectExec(guardRestoreSQL("issues", 1)).
 				WithArgs(guardRestoreArgs(guardRestoreRow{"bd-target", guardOldStamp, guardNewStamp})...).
 				WillReturnResult(sqlmock.NewResult(0, 1))
-			guardExpectColumn(mock, "wisps", "updated_at", false)
+			guardExpectAbsentTable(mock)
 		})
 	})
 
 	t.Run("a dropped fingerprint column turns the join rule off", func(t *testing.T) {
 		run(t, func(mock sqlmock.Sqlmock) {
 			snapshot(mock)
-			guardExpectColumn(mock, "issues", "updated_at", true)
-			guardExpectFingerprintColumns(mock, "issues", "id", "title")
+			guardExpectColumns(mock, "issues", "id", "title", "updated_at")
 			// No fingerprint is read and no restore is primed: an issued
 			// UPDATE fails as unexpected.
 			mock.ExpectQuery(`SELECT id, updated_at FROM issues ORDER BY id`).
 				WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}).AddRow("bd-target", guardNewStamp))
-			guardExpectColumn(mock, "wisps", "updated_at", false)
+			guardExpectAbsentTable(mock)
 		})
 	})
+}
+
+// TestUpdatedAtGuardProbesColumnsWithoutInformationSchema pins the guard's
+// probe form for every registered step of both series: snapshot and restore
+// ask only SHOW TABLES, SHOW COLUMNS FROM <table> and their own row reads,
+// never INFORMATION_SCHEMA. Dolt does not push an INFORMATION_SCHEMA.COLUMNS
+// predicate down, so each such probe walks every database on the server
+// (~6 s at 300 databases on Dolt 2.6.0) while the migration lock is held.
+// The matcher records every statement the guard sends and refuses any that
+// names INFORMATION_SCHEMA, whichever expectation it is offered to.
+func TestUpdatedAtGuardProbesColumnsWithoutInformationSchema(t *testing.T) {
+	allowed := regexp.MustCompile(`^(SHOW TABLES|SHOW COLUMNS FROM (issues|wisps)|SELECT id, updated_at\b.* FROM (issues|wisps) ORDER BY id)$`)
+	for key := range updatedAtGuards {
+		t.Run(fmt.Sprintf("%s/%d", key.cursorTable, key.version), func(t *testing.T) {
+			sent := map[string]bool{}
+			matcher := sqlmock.QueryMatcherFunc(func(expected, actual string) error {
+				sent[actual] = true
+				if strings.Contains(strings.ToLower(actual), "information_schema") {
+					return fmt.Errorf("guard sent an INFORMATION_SCHEMA probe: %s", actual)
+				}
+				re, err := regexp.Compile(expected)
+				if err != nil {
+					return err
+				}
+				if !re.MatchString(actual) {
+					return fmt.Errorf("%q does not match %q", actual, expected)
+				}
+				return nil
+			})
+			db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(matcher))
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			mock.MatchExpectationsInOrder(false)
+			cols := []string{"id", "title", "updated_at", "is_blocked", "ephemeral"}
+			for range 8 {
+				guardExpectShowTables(mock, "issues", "wisps")
+				for _, table := range []string{"issues", "wisps"} {
+					mock.ExpectQuery(guardShowColumnsQuery(table)).WillReturnRows(guardShowColumnsRows(cols...))
+					mock.ExpectQuery(`^SELECT id, updated_at\b.* FROM ` + table + ` ORDER BY id$`).
+						WillReturnRows(sqlmock.NewRows([]string{"id", "updated_at"}))
+				}
+			}
+
+			src := mainSource
+			if key.cursorTable == ignoredSource.cursorTable {
+				src = ignoredSource
+			}
+			snap, err := snapshotUpdatedAt(context.Background(), db, src, key.version)
+			if err != nil {
+				t.Fatalf("snapshotUpdatedAt: %v", err)
+			}
+			if snap == nil {
+				t.Fatal("registered step got no snapshot")
+			}
+			if err := snap.restore(context.Background(), db); err != nil {
+				t.Fatalf("restore: %v", err)
+			}
+			if len(sent) == 0 {
+				t.Fatal("guard sent no statement; the sweep tested nothing")
+			}
+			for query := range sent {
+				if !allowed.MatchString(query) {
+					t.Errorf("guard sent %q; want only SHOW TABLES, SHOW COLUMNS and its row reads", query)
+				}
+			}
+		})
+	}
+}
+
+// TestUpdatedAtGuardColumnNamesCompareCaseInsensitively pins that the
+// SHOW-based listing answers as the INFORMATION_SCHEMA probes it replaced:
+// a table SHOW TABLES lists in another case is present, updated_at and the
+// flag are found in any case, and the fingerprint drops updated_at in any
+// case while keeping table order.
+func TestUpdatedAtGuardColumnNamesCompareCaseInsensitively(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+	guardExpectShowTables(mock, "dependencies", "WISPS")
+	mock.ExpectQuery(guardShowColumnsQuery("wisps")).
+		WillReturnRows(guardShowColumnsRows("ID", "Title", "Updated_At", "IS_BLOCKED"))
+
+	cols, err := guardColumnsOf(context.Background(), db, "wisps")
+	if err != nil {
+		t.Fatalf("guardColumnsOf: %v", err)
+	}
+	if !hasColumnFold(cols, "updated_at") {
+		t.Errorf("hasColumnFold(%v, updated_at) = false, want true", cols)
+	}
+	spec := updatedAtGuards[repairKey{"ignored_schema_migrations", 7}]
+	if got := spec.presentFlag("wisps", cols); got != "is_blocked" {
+		t.Errorf("presentFlag = %q, want is_blocked", got)
+	}
+	if got, want := fingerprintColumns(cols), []string{"ID", "Title", "IS_BLOCKED"}; !slices.Equal(got, want) {
+		t.Errorf("fingerprintColumns = %v, want %v", got, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
 }
