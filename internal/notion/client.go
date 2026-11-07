@@ -492,8 +492,8 @@ func (c *Client) doAttempt(httpClient *http.Client, req *http.Request) (body []b
 // Every other retryable status — 529 included — can be reported after the write
 // already landed, so those are replayed only for a request its call site declared
 // retrySafe. Retrying a creating POST on 529 is how one bd issue becomes two
-// Notion rows: the create-vs-update index is keyed on the bd ID and keeps only
-// the last match, so the duplicate is invisible and every later sync updates just
+// Notion rows: the Beads ID lookup that decides create-vs-update keeps only the
+// last match, so the duplicate is invisible and every later sync updates just
 // one of the pair. The read-only query POST carries no such risk, and it is the
 // endpoint that pays for these retries most, issuing up to MaxQueryPages
 // sequential requests per sync.
