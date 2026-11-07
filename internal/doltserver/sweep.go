@@ -2,6 +2,7 @@ package doltserver
 
 import (
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -154,14 +155,36 @@ func tempDirRoots() []string {
 	if err != nil {
 		home = ""
 	}
+	account := accountHomeDir()
+	tmpdir := os.TempDir()
 	var roots []string
-	for _, root := range canonicalRoots([]string{os.TempDir(), os.Getenv("GOTMPDIR"), "/tmp"}) {
-		if !isCredibleTempRoot(root, home) {
+	for _, root := range canonicalRoots([]string{tmpdir, os.Getenv("GOTMPDIR"), "/tmp"}) {
+		if !isCredibleTempRoot(root, home, account, tmpdir) {
 			continue
 		}
 		roots = append(roots, root)
 	}
 	return roots
+}
+
+// accountHomeDir is the home directory the account database (/etc/passwd,
+// Directory Services) records for the current user, or "" when it cannot be
+// determined. Unlike $HOME it is not an environment variable, so a test
+// harness that re-points HOME at a throwaway directory cannot move it — which
+// is what lets isSandboxHome tell that throwaway HOME apart from a real one
+// (see isCredibleTempRoot). A package variable so tests can pin it.
+var accountHomeDir = func() string {
+	u, err := user.Current()
+	if err != nil || u.HomeDir == "" || !filepath.IsAbs(u.HomeDir) {
+		return ""
+	}
+	// A service account whose recorded home is "/" names no real home: every
+	// HOME would sit "inside" it. Treat it as unknown.
+	h := filepath.Clean(u.HomeDir)
+	if h == string(filepath.Separator) {
+		return ""
+	}
+	return h
 }
 
 // isCredibleTempRoot reports whether root is narrow enough to bound the
@@ -189,13 +212,44 @@ func tempDirRoots() []string {
 // locations itself. Otherwise a bare TMPDIR=/var/tmp — where mktemp -d puts
 // the sandbox home directly under the shared root — would hand back all of
 // /var/tmp, and with it every other user's workspace there.
-func isCredibleTempRoot(root, home string) bool {
+//
+// accountHome is the account database's home for the current user
+// (accountHomeDir), or "" when unknown, and tmpdir is os.TempDir(). Together
+// they are the second witness that lets a sandbox HOME live under a TMPDIR
+// outside the fixed temp locations — a gate host with TMPDIR=/data/tmp, where
+// test-env.sh mktemp -ds the sandbox HOME under /data/tmp. That witness only ever rescues the root that IS
+// tmpdir: TMPDIR is the operator's declared temp location, while GOTMPDIR
+// and every other candidate get no such benefit of the doubt (a HOME under
+// GOTMPDIR=/home is still a real-looking home, TestTempDirRootsCoverGOTMPDIR).
+// accountHome also adds one rejection of its own: a root that IS or contains
+// the account home is never credible, whatever HOME says, because that is
+// where the user's real workspaces live.
+func isCredibleTempRoot(root, home, accountHome, tmpdir string) bool {
 	cleaned := filepath.Clean(root)
 	if cleaned == "" || cleaned == "." || cleaned == string(filepath.Separator) {
 		return false
 	}
 	if !filepath.IsAbs(cleaned) {
 		return false
+	}
+	accountHomes := canonicalRoots([]string{accountHome})
+	for _, a := range accountHomes {
+		if isUnderDir(filepath.Clean(a), cleaned) {
+			return false
+		}
+	}
+	// The account-home witness is scoped to TMPDIR's own root.
+	isTMPDIR := false
+	if tmpdir != "" {
+		for _, t := range canonicalRoots([]string{tmpdir}) {
+			if filepath.Clean(t) == cleaned {
+				isTMPDIR = true
+			}
+		}
+	}
+	witnessHomes := accountHomes
+	if !isTMPDIR {
+		witnessHomes = nil
 	}
 	if home == "" {
 		return true
@@ -208,20 +262,44 @@ func isCredibleTempRoot(root, home string) bool {
 		if !isUnderDir(h, cleaned) {
 			continue
 		}
-		if !isSandboxHome(h) || isSharedTempRoot(cleaned, runtime.GOOS) {
+		if !isSandboxHome(h, witnessHomes) || isSharedTempRoot(cleaned, runtime.GOOS) {
 			return false
 		}
 	}
 	return true
 }
 
-// isSandboxHome reports whether home lives inside a FIXED system temp
-// location — the shape a test harness's throwaway HOME takes. It is judged
-// against hardcoded locations, never os.TempDir(), so TMPDIR cannot vote on
-// its own credibility: TMPDIR=/home with HOME=/home/runner must still read as
-// a real home under an overbroad root (TestTempDirRootsRejectsOverbroadTMPDIR).
-func isSandboxHome(home string) bool {
-	return isUnderFixedTempRoots(home, runtime.GOOS)
+// isSandboxHome reports whether home is a test harness's throwaway HOME
+// rather than a real one. Two independent witnesses qualify it:
+//
+//   - home lives inside a FIXED system temp location (isUnderFixedTempRoots);
+//   - the account database knows the user's real home (accountHomes is
+//     non-empty) and home is neither that directory nor inside it — HOME was
+//     re-pointed away from the account's home, which is exactly what
+//     scripts/ci/lib/test-env.sh and the HOME-pinning suites do. The caller
+//     passes accountHomes only when judging TMPDIR's own root, so this
+//     witness never rescues GOTMPDIR or any other candidate.
+//
+// Neither witness is os.TempDir(), so TMPDIR still cannot vote on its own
+// credibility: TMPDIR=/home with HOME=/home/runner reads as a real home under
+// an overbroad root (TestTempDirRootsRejectsOverbroadTMPDIR), because
+// /home/runner IS the account home — and isCredibleTempRoot independently
+// refuses any root containing the account home. With no account home known,
+// only the fixed-location witness applies, which is the conservative
+// earlier behavior.
+func isSandboxHome(home string, accountHomes []string) bool {
+	if isUnderFixedTempRoots(home, runtime.GOOS) {
+		return true
+	}
+	if len(accountHomes) == 0 {
+		return false
+	}
+	for _, a := range accountHomes {
+		if isUnderDir(home, filepath.Clean(a)) {
+			return false
+		}
+	}
+	return true
 }
 
 // isUnderFixedTempRoots reports whether path lies under one of the temp

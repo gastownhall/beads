@@ -560,7 +560,7 @@ func TestIsCredibleTempRoot(t *testing.T) {
 		{"/Users/other", true},
 	}
 	for _, tc := range cases {
-		if got := isCredibleTempRoot(tc.root, home); got != tc.want {
+		if got := isCredibleTempRoot(tc.root, home, "", ""); got != tc.want {
 			t.Errorf("isCredibleTempRoot(%q, %q) = %v, want %v", tc.root, home, got, tc.want)
 		}
 	}
@@ -582,16 +582,16 @@ func TestIsCredibleTempRoot(t *testing.T) {
 		{"/tmp", "/tmp", false},
 	}
 	for _, tc := range sandboxCases {
-		if got := isCredibleTempRoot(tc.root, tc.home); got != tc.want {
+		if got := isCredibleTempRoot(tc.root, tc.home, "", ""); got != tc.want {
 			t.Errorf("isCredibleTempRoot(%q, %q) = %v, want %v", tc.root, tc.home, got, tc.want)
 		}
 	}
 
 	// With no home known, only the structural rejections apply.
-	if !isCredibleTempRoot("/Users/dev", "") {
+	if !isCredibleTempRoot("/Users/dev", "", "", "") {
 		t.Error("isCredibleTempRoot with no home should accept an ordinary absolute path")
 	}
-	if isCredibleTempRoot("/", "") {
+	if isCredibleTempRoot("/", "", "", "") {
 		t.Error("isCredibleTempRoot must reject the filesystem root even with no home")
 	}
 }
@@ -779,6 +779,126 @@ func TestSandboxHomeUnderVarTmpTMPDIR(t *testing.T) {
 		}
 		// Bounded, not disabled: the hardcoded /tmp fallback still has to
 		// come through, or the arm would be inert rather than scoped.
+		if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
+			t.Errorf("tempDirRoots() = %v, want /tmp still covered", roots)
+		}
+	})
+}
+
+// pinAccountHome replaces accountHomeDir for the duration of t, so the
+// account-database witness is deterministic whatever host runs the test.
+func pinAccountHome(t *testing.T, home string) {
+	t.Helper()
+	orig := accountHomeDir
+	accountHomeDir = func() string { return home }
+	t.Cleanup(func() { accountHomeDir = orig })
+}
+
+// TestSandboxHomeUnderNonStandardTMPDIR is the general case behind
+// TestSandboxHomeUnderVarTmpTMPDIR: a gate host can point TMPDIR at ANY
+// disk-backed directory (e.g. /data/tmp), not just one under /var/tmp,
+// and scripts/ci/lib/test-env.sh mktemp -ds the sandbox HOME under it. The
+// fixed-location witness cannot vouch for that HOME, so previously
+// it disqualified os.TempDir() itself and tempDirRoots()
+// collapsed to [/tmp], failing TestTempDirRootsBoundTheOrphanArm and the
+// end-to-end subtest of TestSandboxHomeUnderPerUserTempRoot on such hosts.
+// The account database's home is the second witness: a HOME re-pointed away
+// from it is a sandbox.
+func TestSandboxHomeUnderNonStandardTMPDIR(t *testing.T) {
+	const account = "/home/beads-fixture"
+
+	t.Run("credibility table", func(t *testing.T) {
+		const sandbox = "/data/tmp/beads-test-env-abc123/home"
+		cases := []struct {
+			name, root, home, account, tmpdir string
+			want                              bool
+		}{
+			{"sandbox HOME under a non-standard TMPDIR keeps it", "/data/tmp", sandbox, account, "/data/tmp", true},
+			{"no account home known: conservative, as before", "/data/tmp", sandbox, "", "/data/tmp", false},
+			{"witness never rescues a root that is not TMPDIR", "/data/tmp", sandbox, account, "/tmp", false},
+			{"GOTMPDIR containing a fixture HOME is still dropped", "/home", "/home/beads-fixture", "/root", "/tmp", false},
+			{"HOME is the account home: TMPDIR cannot vote", "/home", "/home/runner", "/home/runner", "/home", false},
+			{"root containing the account home is never credible", "/home", "/home/sandbox-xyz", account, "/home", false},
+			{"root containing the account home, no HOME known", "/home", "", account, "/home", false},
+			{"root that IS the account home", account, "", account, account, false},
+			{"HOME nested in the account home is not a sandbox", account + "/tmp", account + "/tmp/x/home", account, account + "/tmp", false},
+			{"root inside the account home, HOME is the account home", account + "/tmp", account, account, account + "/tmp", true},
+			{"root that IS the sandbox HOME", sandbox, sandbox, account, sandbox, false},
+			{"shared root stays bounded", "/var/tmp", "/var/tmp/tmp.abc123/home", account, "/var/tmp", false},
+			{"filesystem root stays out", "/", sandbox, account, "/", false},
+		}
+		for _, tc := range cases {
+			if got := isCredibleTempRoot(tc.root, tc.home, tc.account, tc.tmpdir); got != tc.want {
+				t.Errorf("%s: isCredibleTempRoot(%q, %q, %q, %q) = %v, want %v",
+					tc.name, tc.root, tc.home, tc.account, tc.tmpdir, got, tc.want)
+			}
+		}
+	})
+
+	// End to end: the exact shape test-env.sh builds under TMPDIR=/data/tmp,
+	// with a TMPDIR path that is under no fixed temp location.
+	const tmpdir = "/srv/beads-gate-probe/tmp"
+	t.Run("HOME inside a non-standard TMPDIR keeps it a root", func(t *testing.T) {
+		pinAccountHome(t, account)
+		t.Setenv("TMPDIR", tmpdir)
+		t.Setenv("GOTMPDIR", "")
+		t.Setenv("HOME", tmpdir+"/beads-test-env-abc123/home")
+
+		roots := tempDirRoots()
+		if !underAnyRoot(tmpdir+"/beads-bd-tests-xyz/.beads/dolt", roots) {
+			t.Errorf("tempDirRoots() = %v with TMPDIR=%s, want it still covered", roots, tmpdir)
+		}
+		const sibling = "/srv/beads-gate-probe/production/.beads/dolt"
+		if underAnyRoot(sibling, roots) {
+			t.Errorf("tempDirRoots() = %v credited unrelated sibling path %q", roots, sibling)
+		}
+		if underAnyRoot(account+"/project/.beads/dolt", roots) {
+			t.Errorf("tempDirRoots() = %v covers a workspace under the account home", roots)
+		}
+	})
+
+	// The same probe TestSandboxHomeUnderPerUserTempRoot runs against the
+	// real os.TempDir(), re-run with TMPDIR forced to a non-standard path so
+	// a /tmp-based CI runner pins the case a /data/tmp host hits.
+	t.Run("HOME directly inside a non-standard os.TempDir keeps it a root", func(t *testing.T) {
+		pinAccountHome(t, account)
+		t.Setenv("TMPDIR", tmpdir)
+		t.Setenv("GOTMPDIR", "")
+		t.Setenv("HOME", filepath.Join(os.TempDir(), "beads-sandbox-home-probe"))
+
+		roots := tempDirRoots()
+		if !underAnyRoot(filepath.Join(os.TempDir(), "beads-bd-tests-xyz", ".beads", "dolt"), roots) {
+			t.Errorf("tempDirRoots() = %v, want os.TempDir() %q still covered", roots, os.TempDir())
+		}
+	})
+
+	// The CI shape that caught an earlier draft of this fix: under Bazel the
+	// account home is not under /home, so a fixture HOME there reads as
+	// re-pointed. GOTMPDIR=/home must still be dropped — the account-home
+	// witness only ever rescues TMPDIR's own root.
+	t.Run("GOTMPDIR containing a fixture HOME is still dropped", func(t *testing.T) {
+		pinAccountHome(t, "/root")
+		t.Setenv("TMPDIR", "")
+		t.Setenv("GOTMPDIR", "/home")
+		t.Setenv("HOME", "/home/beads-fixture")
+
+		roots := tempDirRoots()
+		if underAnyRoot("/home/beads-fixture/project/.beads/dolt", roots) {
+			t.Errorf("tempDirRoots() = %v covers a workspace under the fixture home", roots)
+		}
+	})
+
+	// TMPDIR=/home with the user's REAL home: unchanged by the new witness.
+	t.Run("TMPDIR containing the real home is still dropped", func(t *testing.T) {
+		pinAccountHome(t, "/home/runner")
+		t.Setenv("TMPDIR", "/home")
+		t.Setenv("GOTMPDIR", "")
+		t.Setenv("HOME", "/home/runner")
+
+		roots := tempDirRoots()
+		if underAnyRoot("/home/runner/project/.beads/dolt", roots) {
+			t.Errorf("tempDirRoots() = %v covers a workspace under the real home", roots)
+		}
 		if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
 			t.Errorf("tempDirRoots() = %v, want /tmp still covered", roots)
 		}
