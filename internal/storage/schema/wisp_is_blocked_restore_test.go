@@ -216,3 +216,22 @@ func TestIgnored32WithoutWispsIsANoOp(t *testing.T) {
 	}
 	d.requireSteps(wispRestoreStepBody, wispRestoreStepCursor)
 }
+
+// TestIgnored32HealthyCloneOnlyProbes is AC-6 at the runner: a healthy clone
+// pays the three probes and nothing else (no DDL, no recompute), and once 32
+// is recorded a converged pass runs nothing at all.
+func TestIgnored32HealthyCloneOnlyProbes(t *testing.T) {
+	d := newWispRestoreDB(t)
+	d.expectProbes(true, true, true)
+	if _, err := d.migrate(); err != nil {
+		t.Fatalf("runMigrations(ignored 31..32): %v", err)
+	}
+	d.requireSteps(wispRestoreStepBody, wispRestoreStepCursor)
+
+	d.steps = nil
+	applied, err := runMigrations(context.Background(), d, ignoredSource, 32, 32, false)
+	if err != nil || applied != 0 {
+		t.Fatalf("converged runMigrations(ignored 32..32) = (%d, %v), want (0, nil)", applied, err)
+	}
+	d.requireSteps()
+}
