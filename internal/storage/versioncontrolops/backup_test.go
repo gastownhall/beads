@@ -285,6 +285,13 @@ func TestFileURLForOS(t *testing.T) {
 		{name: "AC-2 drive root", goos: "windows", abs: `z:\`, want: "file://Z:/", parses: true},
 		{name: "AC-2 UNC share", goos: "windows", abs: `\\nas\share\beads`, want: "file:////nas/share/beads"},
 		{name: "AC-2 space and percent", goos: "windows", abs: `C:\Users\my dir\100%done`, want: "file://C:/Users/my dir/100%done"},
+
+		{name: "AC-3 linux plain", goos: "linux", abs: "/home/me/backup", want: "file:///home/me/backup"},
+		{name: "AC-3 linux backslash", goos: "linux", abs: `/tmp/we\ird`, want: `file:///tmp/we\ird`},
+		{name: "AC-3 linux space and percent", goos: "linux", abs: "/tmp/my dir/100%done", want: "file:///tmp/my dir/100%done"},
+		{name: "AC-3 darwin plain", goos: "darwin", abs: "/Users/me/backup", want: "file:///Users/me/backup"},
+		{name: "AC-3 darwin backslash", goos: "darwin", abs: `/tmp/we\ird`, want: `file:///tmp/we\ird`},
+		{name: "AC-3 darwin space and percent", goos: "darwin", abs: "/tmp/my dir/100%done", want: "file:///tmp/my dir/100%done"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := fileURLForOS(tc.abs, tc.goos)
