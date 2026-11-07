@@ -62,7 +62,7 @@ func serveRefusingSQLConn(c net.Conn) {
 	hs = append(hs, salt[:8]...)
 	hs = append(hs, 0)
 	hs = binary.LittleEndian.AppendUint16(hs, uint16(caps))
-	hs = append(hs, 45)                                // utf8mb4_general_ci
+	hs = append(hs, 45)                               // utf8mb4_general_ci
 	hs = binary.LittleEndian.AppendUint16(hs, 0x0002) // SERVER_STATUS_AUTOCOMMIT
 	hs = binary.LittleEndian.AppendUint16(hs, uint16(caps>>16))
 	hs = append(hs, byte(len(salt)+1))
