@@ -38,9 +38,12 @@ type codexHookInput struct {
 }
 
 type codexHookResponse struct {
-	Continue           bool                    `json:"continue,omitempty"`
-	SystemMessage      string                  `json:"systemMessage,omitempty"`
-	HookSpecificOutput codexHookSpecificOutput `json:"hookSpecificOutput,omitempty"`
+	Continue      bool   `json:"continue,omitempty"`
+	SystemMessage string `json:"systemMessage,omitempty"`
+	// HookSpecificOutput is a pointer so system-message-only responses omit
+	// it: Codex rejects an event-specific object without hookEventName, and
+	// omitempty never drops a value struct.
+	HookSpecificOutput *codexHookSpecificOutput `json:"hookSpecificOutput,omitempty"`
 }
 
 type codexHookSpecificOutput struct {
@@ -134,7 +137,7 @@ func codexHookMarkerBaseDir() string {
 func writeCodexHookAdditionalContext(stdout io.Writer, event, context string) error {
 	return json.NewEncoder(stdout).Encode(codexHookResponse{
 		Continue: true,
-		HookSpecificOutput: codexHookSpecificOutput{
+		HookSpecificOutput: &codexHookSpecificOutput{
 			HookEventName:     event,
 			AdditionalContext: context,
 		},

@@ -60,12 +60,82 @@ func TestCodexHookPreCompactWarnsWhenMemoriesUnavailable(t *testing.T) {
 		t.Fatalf("runCodexHook: %v", err)
 	}
 
-	var got codexHookResponse
-	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
-		t.Fatalf("parse output: %v\n%s", err, out.String())
+	msg := requireCodexHookSystemMessage(t, out.Bytes())
+	if !strings.Contains(msg, "Beads context check failed") {
+		t.Fatalf("expected warning systemMessage, got %q", msg)
 	}
-	if !strings.Contains(got.SystemMessage, "Beads context check failed") {
-		t.Fatalf("expected warning systemMessage, got %#v", got)
+}
+
+// decodeCodexHookObject decodes hook stdout as exactly one JSON object and
+// returns its raw wire keys, so a test sees fields the response type would
+// hide (an emitted empty hookSpecificOutput decodes fine into the struct).
+func decodeCodexHookObject(t *testing.T, out []byte) map[string]json.RawMessage {
+	t.Helper()
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		t.Fatalf("hook output is not a JSON object: %q", out)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &raw); err != nil {
+		t.Fatalf("parse hook output: %v\n%s", err, out)
+	}
+	return raw
+}
+
+// requireCodexHookSystemMessage asserts the warning response shape Codex
+// accepts for every event: continue:true plus a nonempty systemMessage and no
+// hookSpecificOutput key (an event-specific object must name hookEventName).
+func requireCodexHookSystemMessage(t *testing.T, out []byte) string {
+	t.Helper()
+	raw := decodeCodexHookObject(t, out)
+	if hso, ok := raw["hookSpecificOutput"]; ok {
+		t.Fatalf("warning response must omit hookSpecificOutput, got %s in %s", hso, out)
+	}
+	if len(raw) != 2 {
+		t.Fatalf("warning response keys = %d, want continue and systemMessage only: %s", len(raw), out)
+	}
+	var cont bool
+	if err := json.Unmarshal(raw["continue"], &cont); err != nil || !cont {
+		t.Fatalf("warning response continue = %s (err %v), want true", raw["continue"], err)
+	}
+	var msg string
+	if err := json.Unmarshal(raw["systemMessage"], &msg); err != nil || strings.TrimSpace(msg) == "" {
+		t.Fatalf("warning response systemMessage = %s (err %v), want nonempty string", raw["systemMessage"], err)
+	}
+	return msg
+}
+
+func TestCodexHookSystemMessageOmitsHookSpecificOutput(t *testing.T) {
+	var out bytes.Buffer
+	if err := writeCodexHookSystemMessage(&out, "Beads warning"); err != nil {
+		t.Fatalf("writeCodexHookSystemMessage: %v", err)
+	}
+	if msg := requireCodexHookSystemMessage(t, out.Bytes()); msg != "Beads warning" {
+		t.Fatalf("systemMessage = %q", msg)
+	}
+}
+
+func TestCodexHookUserPromptRefreshFailureEmitsValidWarning(t *testing.T) {
+	codexHookMarkerDirOverride = t.TempDir()
+	t.Cleanup(func() { codexHookMarkerDirOverride = "" })
+	stubCodexHookPrime(t, func(bool) (string, error) {
+		return "", errors.New("bd prime: signal: killed")
+	})
+
+	input := codexHookInput{SessionID: "s1", CWD: "repo", HookEventName: codexHookPostCompact}
+	postJSON, _ := json.Marshal(input)
+	if err := runCodexHook(context.Background(), codexHookPostCompact, bytes.NewReader(postJSON), ioDiscard{}); err != nil {
+		t.Fatalf("PostCompact hook: %v", err)
+	}
+	input.HookEventName = codexHookUserPromptSubmit
+	promptJSON, _ := json.Marshal(input)
+	var out bytes.Buffer
+	if err := runCodexHook(context.Background(), codexHookUserPromptSubmit, bytes.NewReader(promptJSON), &out); err != nil {
+		t.Fatalf("UserPromptSubmit hook: %v", err)
+	}
+	msg := requireCodexHookSystemMessage(t, out.Bytes())
+	if !strings.Contains(msg, "Beads context refresh after compaction failed") {
+		t.Fatalf("expected refresh warning, got %q", msg)
 	}
 }
 
