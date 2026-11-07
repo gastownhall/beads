@@ -53,6 +53,12 @@ data-safety guard only. It never authorizes silent divergence of remote
 history. When origin advertises `refs/dolt/data`, `bd init --force`
 refuses unless `--discard-remote` is also passed.
 
+When the `refs/dolt/data` probe fails (unreachable remote, missing
+credentials), remote history is unknown, and unknown is treated as present:
+the same refusal applies. The refusal text says the history could not be
+verified rather than claiming it exists (`remote-unverified-without-discard-remote`).
+This is a clarification of the existing rule, not a policy change.
+
 ### Invariant 3 — central chokepoint (executable, not advisory)
 
 Every flag on `bd init` that can interact with remote history routes

@@ -252,6 +252,14 @@ var edgeCountEntryPoints = []edgeCountEntryPoint{
 	{name: "CountDependencyEdgesInTx/out", dir: domain.DepDirectionOut},
 }
 
+// durableCountRegex and wispCountRegex match each plane's count statement
+// in either direction of CountDependencyEdgesInTx: Out counts the table
+// directly, In counts a per-target-column union of it.
+var (
+	durableCountRegex = `^SELECT count\(\*\) FROM (\(SELECT issue_id FROM )?dependencies WHERE `
+	wispCountRegex    = `^SELECT count\(\*\) FROM (\(SELECT issue_id FROM )?wisp_dependencies WHERE `
+)
+
 // TestCountDependencyEdgesMissingWispPlaneIsNotAnError: with no
 // wisp_dependencies the durable count is the whole answer, as it is for the
 // listing, instead of an error that publishes a count of 0.
@@ -259,9 +267,9 @@ func TestCountDependencyEdgesMissingWispPlaneIsNotAnError(t *testing.T) {
 	for _, ep := range edgeCountEntryPoints {
 		t.Run(ep.name, func(t *testing.T) {
 			_, mock, tx := beginMockTx(t)
-			mock.ExpectQuery(`^SELECT count\(\*\) FROM dependencies WHERE `).
+			mock.ExpectQuery(durableCountRegex).
 				WillReturnRows(scalarCountRows(3))
-			mock.ExpectQuery(`^SELECT count\(\*\) FROM wisp_dependencies WHERE `).
+			mock.ExpectQuery(wispCountRegex).
 				WillReturnError(tableNotFound("wisp_dependencies"))
 
 			n, err := CountDependencyEdgesInTx(context.Background(), tx, "epic-1", ep.dir, nil)
@@ -367,11 +375,11 @@ func TestCountDependencyEdgesBrokenPlaneIsAnError(t *testing.T) {
 				_, mock, tx := beginMockTx(t)
 				gone := tc.durable
 				if gone != nil {
-					mock.ExpectQuery(`^SELECT count\(\*\) FROM dependencies WHERE `).WillReturnError(gone)
+					mock.ExpectQuery(durableCountRegex).WillReturnError(gone)
 				} else {
 					gone = tc.wisp
-					mock.ExpectQuery(`^SELECT count\(\*\) FROM dependencies WHERE `).WillReturnRows(scalarCountRows(3))
-					mock.ExpectQuery(`^SELECT count\(\*\) FROM wisp_dependencies WHERE `).WillReturnError(gone)
+					mock.ExpectQuery(durableCountRegex).WillReturnRows(scalarCountRows(3))
+					mock.ExpectQuery(wispCountRegex).WillReturnError(gone)
 				}
 
 				n, err := CountDependencyEdgesInTx(context.Background(), tx, "epic-1", ep.dir, nil)

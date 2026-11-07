@@ -136,38 +136,34 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 	// Per-subquery id constraints. Empty strings in the predicate form leave the
 	// projection unchanged; in the by-IDs form they push the page down so no
 	// subquery aggregates more than the page's worth of rows.
-	var labelWhere, depBlocksExtra, rcDepExtra, rcWispExtra, ccWhere, pcExtra, depWhere string
+	var labelWhere, depBlocksExtra, ccWhere, pcExtra, depWhere string
 	if byIDs {
 		labelWhere = fmt.Sprintf("WHERE issue_id IN (%s)", inSQL)
 		depBlocksExtra = fmt.Sprintf(" AND issue_id IN (%s)", inSQL)
-		// depTargetInSQL OR-combines three direct-column IN-lists instead of
-		// wrapping DepTargetExpr's COALESCE around the filter (GH#7666):
-		// Dolt cannot use the index on depends_on_issue_id through a COALESCE
-		// expression, so this subquery's filter degraded into a full scan of
-		// `dependencies`/`wisp_dependencies` per page, growing with total
-		// dependency rows rather than the page size. DepTargetExpr itself is
-		// untouched below in the SELECT list (reverseBlockerSelect's dep_id
-		// projection): that position isn't filtered, so it isn't slow, and it
-		// still needs COALESCE's single-value-per-row resolution for the GROUP
-		// BY key. Each OR branch repeats idArgs once (see the args tail).
-		depTargetInSQL := fmt.Sprintf("(depends_on_issue_id IN (%s) OR depends_on_wisp_id IN (%s) OR depends_on_external IN (%s))", inSQL, inSQL, inSQL)
-		rcDepExtra = fmt.Sprintf(" AND %s", depTargetInSQL)
-		rcWispExtra = fmt.Sprintf(" AND %s", depTargetInSQL)
 		ccWhere = fmt.Sprintf("WHERE issue_id IN (%s)", inSQL)
 		pcExtra = fmt.Sprintf(" AND issue_id IN (%s)", inSQL)
 		depWhere = fmt.Sprintf("WHERE issue_id IN (%s)", inSQL)
 	}
 
+	// The predicate form counts every blocker. The by-IDs form counts only
+	// the page's, matching each bare target column in its own branch
+	// (DepTargetUnion) so every branch can seek a target index; a page-wide
+	// `DepTargetExpr IN (...)` gives Dolt nothing to seek (gascity#7666).
+	reverseBlockers := func(table string) string {
+		if byIDs {
+			return DepTargetUnion(table, "", func(col string) string { return col + " AS dep_id" },
+				"IN ("+inSQL+")", " AND type = 'blocks'")
+		}
+		return fmt.Sprintf("SELECT %s AS dep_id\n\t\t\t\tFROM %s WHERE type = 'blocks'", DepTargetExpr, table)
+	}
 	reverseBlockerSelect := fmt.Sprintf(`
-				SELECT %s AS dep_id
-				FROM dependencies WHERE type = 'blocks'%s
-	`, DepTargetExpr, rcDepExtra)
+				%s
+	`, reverseBlockers("dependencies"))
 	if includeWispReverseDeps {
 		reverseBlockerSelect += fmt.Sprintf(`
 				UNION ALL
-				SELECT %s AS dep_id
-				FROM wisp_dependencies WHERE type = 'blocks'%s
-		`, DepTargetExpr, rcWispExtra)
+				%s
+		`, reverseBlockers("wisp_dependencies"))
 	}
 
 	labelsSelect := "l.labels_json AS labels_json"
@@ -277,22 +273,18 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 	}
 
 	// args follow the placeholder order in sqlText: labels join (unless
-	// skipped), dc, rc dependencies branch (3x idArgs: one per OR'd target
-	// column, see depTargetInSQL above), rc wisp branch (if any, also 3x),
-	// cc, pc, d, then the driver.
+	// skipped), dc, the three rc dependencies branches, the three rc wisp
+	// branches (if any), cc (all unless the counts are skipped), pc, d, then
+	// the driver.
 	args := make([]any, 0, len(idArgs)*12)
 	if !hyd.SkipLabels {
 		args = append(args, idArgs...)
 	}
 	if !hyd.SkipCounts {
-		args = append(args, idArgs...) // dc
-		args = append(args, idArgs...) // rc dependencies: depends_on_issue_id
-		args = append(args, idArgs...) // rc dependencies: depends_on_wisp_id
-		args = append(args, idArgs...) // rc dependencies: depends_on_external
+		args = append(args, idArgs...)                          // dc
+		args = append(args, DepTargetUnionArgs(idArgs, nil)...) // rc dependencies
 		if includeWispReverseDeps {
-			args = append(args, idArgs...) // rc wisp_dependencies: depends_on_issue_id
-			args = append(args, idArgs...) // rc wisp_dependencies: depends_on_wisp_id
-			args = append(args, idArgs...) // rc wisp_dependencies: depends_on_external
+			args = append(args, DepTargetUnionArgs(idArgs, nil)...) // rc wisp_dependencies
 		}
 		args = append(args, idArgs...) // cc
 	}

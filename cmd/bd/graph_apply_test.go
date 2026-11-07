@@ -52,6 +52,52 @@ func TestDocsGraphPlanExampleValidates(t *testing.T) {
 	}
 }
 
+// TestGraphPlanHelpDocumentsEdgeDirection pins the direction contract of
+// plan edges (gascity#7664): the from endpoint is the dependent and the to
+// endpoint is what it depends on — the roles `bd dep add
+// [issue-id] [depends-on-id]` assigns its two positionals. The supplement
+// once said nothing about direction, leaving readers to guess which endpoint
+// waits; this test fails if the Edge notes stop stating the roles AND if
+// buildGraphApplyBatchRequest stops mapping From→Source (dependent) and
+// To→Target (dependency), so documentation and apply behavior cannot drift
+// apart in either direction.
+func TestGraphPlanHelpDocumentsEdgeDirection(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "a", Title: "A"},
+			{Key: "b", Title: "B"},
+		},
+		Edges: []GraphApplyEdge{{FromKey: "a", ToKey: "b"}}, // type defaults to blocks
+	}
+	req, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "tester", "")
+	if err != nil {
+		t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+	}
+	var blocks []*issueops.DepAddItem
+	for i := range req.Items {
+		if it := req.Items[i].DepAdd; it != nil && it.Type == types.DepBlocks {
+			blocks = append(blocks, it)
+		}
+	}
+	if len(blocks) != 1 {
+		t.Fatalf("plan produced %d blocks dep_add items, want 1", len(blocks))
+	}
+	if blocks[0].Source != (issueops.Ref{Key: "a"}) || blocks[0].Target != (issueops.Ref{Key: "b"}) {
+		t.Fatalf("edge from=a to=b applied as Source=%+v Target=%+v; from must land in Source (the dependent) and to in Target (the dependency)", blocks[0].Source, blocks[0].Target)
+	}
+
+	notes := createGraphPlanSupplement
+	start := strings.Index(notes, "Edge notes:")
+	if start < 0 {
+		t.Fatal("Edge notes section not found in create_graph_plan.md supplement")
+	}
+	for _, want := range []string{"bd dep add", "from_key", "to_key", "dependent"} {
+		if !strings.Contains(notes[start:], want) {
+			t.Errorf("Edge notes do not document edge direction: %q missing (from endpoint = dependent, to endpoint = the dependency it waits on)", want)
+		}
+	}
+}
+
 func TestValidateGraphApplyPlanAcceptsCustomTypes(t *testing.T) {
 	plan := &GraphApplyPlan{
 		Nodes: []GraphApplyNode{

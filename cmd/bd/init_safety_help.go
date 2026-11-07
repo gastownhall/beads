@@ -34,6 +34,10 @@ FLAG SURFACE
                                 --discard-remote to override. Nor does it
                                 authorize recreating a missing server-mode
                                 database; that takes --recreate-missing.
+                                If the remote cannot be read, its history
+                                is unverified and this refuses too; fix
+                                access, or add --remote "" to initialize
+                                without connecting that remote.
 
   bd init --reinit-local \      Discard the remote's Dolt history and
       --discard-remote          replace it with the local reinit. First
@@ -93,8 +97,9 @@ DESTROY-TOKEN (non-interactive only)
 
 EXIT CODES
 
-  10    refused: remote has Dolt history and you selected local history
-        without --discard-remote
+  10    refused: remote has Dolt history, or its history could not be
+        verified, and you selected local history without
+        --discard-remote
   11    refused: existing local data and you declined the destroy confirm
         (interactive mode only)
   12    refused: destructive re-init (--discard-remote, or --reinit-local

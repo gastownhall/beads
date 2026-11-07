@@ -244,19 +244,18 @@ bd gate create --type=timer --blocks issue-2 --timeout=30m \
 bd gate create --type=bead --blocks issue-2 --await-id=other-rig:issue-id \
   --title="Wait for upstream fix"
 
-# Manual approval gate (the default type when --type is omitted)
-bd gate create --blocks issue-2 --title="Deploy approval"
+# Manual approval gate
+bd gate create --type=human --blocks issue-2 --reason="Deploy approval"
 ```
 
 ### Wiring Gates into Dependencies
 
-`--blocks` above already wires the gate into the dependency graph — `bd dep
-add` is not needed for a gate created this way. It stays available for
-wiring an *existing* gate issue (or any other issue) as a dependency by hand:
+A gate is an issue. `--blocks` already wires the blocked issue at creation;
+`bd dep add` is for wiring another waiter:
 
 ```bash
-# issue-2 waits for an existing gate <gate-id> (which waits for PR #42)
-bd dep add issue-2 <gate-id>
+# issue-3 also waits for the gate (which waits for PR #42)
+bd dep add issue-3 <gate-id>
 ```
 
 ### Checking Gates
@@ -321,9 +320,8 @@ Agent A finishes work, opens PR, creates a gate so Agent B waits for merge:
 # Agent A
 bd update issue-1 --status=in_progress
 # ... write code, open PR #42 ...
-bd create --type=gate --title="Wait for PR #42" \
-  --await-type=gh:pr --await-id=42
-bd dep add issue-2 <gate-id>
+bd gate create --type=gh:pr --blocks issue-2 --await-id=42 \
+  --title="Wait for PR #42"
 bd close issue-1
 
 # Agent B
@@ -336,9 +334,8 @@ bd ready                         # issue-2 appears
 ### CI Gate Before Deploy
 
 ```bash
-bd create --type=gate --title="CI green on main" \
-  --await-type=gh:run --await-id=<run-id>
-bd dep add deploy-task <gate-id>
+bd gate create --type=gh:run --blocks deploy-task --await-id=<run-id> \
+  --title="CI green on main"
 ```
 
 ### Epic with Ordered Phases

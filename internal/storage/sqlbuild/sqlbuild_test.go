@@ -580,12 +580,9 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	}
 
 	// By-IDs form: driver and every subquery are constrained to the ids, and the
-	// arg count matches the placeholder injection points (labels=1, dc=1,
-	// rc-deps=3, rc-wisp=3, cc=1, pc=1, d=1, driver=1 = 12 for the wisp family
-	// with labels). rc-deps/rc-wisp each inject idArgs three times — once per
-	// OR'd target column (depends_on_issue_id/depends_on_wisp_id/
-	// depends_on_external) — instead of once through a COALESCE filter
-	// (GH#7666: COALESCE in a WHERE clause defeats Dolt's index).
+	// arg count matches the placeholder injection points (labels, dc, three
+	// rc-deps target-column branches, three rc-wisp ones, cc, pc, d, driver =
+	// 12 for the wisp family with labels).
 	byIDs, idArgs := SearchCountsSQL(WispsFilterTables, []string{"a", "b"}, "", "", "", true, CountsHydration{})
 	if !strings.Contains(byIDs, "WHERE i.id IN (?,?)") {
 		t.Errorf("by-IDs counts SQL missing driver id filter:\n%s", byIDs)
@@ -599,21 +596,45 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	if strings.Contains(byIDs, "ORDER BY") || strings.Contains(byIDs, "LIMIT") {
 		t.Error("by-IDs counts SQL must not carry ORDER BY / LIMIT (order restored in Go)")
 	}
-	if strings.Contains(byIDs, "COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) IN") {
-		t.Errorf("by-IDs counts SQL must not filter the reverse-blocker subquery through COALESCE (GH#7666):\n%s", byIDs)
-	}
-	if !strings.Contains(byIDs, "(depends_on_issue_id IN (?,?) OR depends_on_wisp_id IN (?,?) OR depends_on_external IN (?,?))") {
-		t.Errorf("by-IDs counts SQL missing the index-friendly OR'd target-column filter:\n%s", byIDs)
-	}
 	if len(idArgs) != 12*2 {
 		t.Errorf("by-IDs args = %d, want %d", len(idArgs), 12*2)
 	}
+	// The reverse-blocker count matches the page on each bare target column,
+	// which Dolt can seek, not on the COALESCE'd target, which it cannot
+	// (gascity#7666). Each plane contributes one branch per column.
+	if strings.Contains(byIDs, DepTargetExpr+" IN (") {
+		t.Errorf("by-IDs reverse-blocker count matches the COALESCE'd target:\n%s", byIDs)
+	}
+	for _, want := range []string{
+		"SELECT depends_on_issue_id AS dep_id FROM dependencies WHERE depends_on_issue_id IN (?,?) AND type = 'blocks'",
+		"SELECT depends_on_wisp_id AS dep_id FROM dependencies WHERE depends_on_wisp_id IN (?,?) AND COALESCE(depends_on_issue_id) IS NULL AND type = 'blocks'",
+		"SELECT depends_on_external AS dep_id FROM wisp_dependencies WHERE depends_on_external IN (?,?) AND COALESCE(depends_on_issue_id, depends_on_wisp_id) IS NULL AND type = 'blocks'",
+	} {
+		if !strings.Contains(byIDs, want) {
+			t.Errorf("by-IDs counts SQL missing reverse-blocker branch %q:\n%s", want, byIDs)
+		}
+	}
+	// The ids bind once per placeholder group, in placeholder order.
+	if got, want := strings.Count(byIDs, "?"), len(idArgs); got != want {
+		t.Errorf("by-IDs counts SQL has %d placeholders for %d args", got, want)
+	}
+	for i, a := range idArgs {
+		if want := []string{"a", "b"}[i%2]; a != want {
+			t.Fatalf("by-IDs arg %d = %v, want %q (args %v)", i, a, want, idArgs)
+		}
+	}
 
 	// skipLabels drops the labels point and !includeWispReverseDeps drops the
-	// rc-wisp points, leaving dc=1, rc-deps=3, cc=1, pc=1, d=1, driver=1 = 8.
+	// three rc-wisp points, leaving 8 injection points (dc, three rc-deps, cc,
+	// pc, d, driver).
 	_, idArgsNoLabels := SearchCountsSQL(IssuesFilterTables, []string{"a", "b"}, "", "", "", false, CountsHydration{SkipLabels: true})
 	if len(idArgsNoLabels) != 8*2 {
 		t.Errorf("by-IDs args (skipLabels, no wisp deps) = %d, want %d", len(idArgsNoLabels), 8*2)
+	}
+	// With labels and no wisp plane: 9 per id.
+	_, idArgsNoWisp := SearchCountsSQL(IssuesFilterTables, []string{"a", "b"}, "", "", "", false, CountsHydration{})
+	if len(idArgsNoWisp) != 9*2 {
+		t.Errorf("by-IDs args (no wisp deps) = %d, want %d", len(idArgsNoWisp), 9*2)
 	}
 
 	// SkipCounts drops the three cardinality joins and projects constants in
