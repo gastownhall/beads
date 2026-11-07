@@ -1062,3 +1062,91 @@ func TestHealSweepsAHeadOnlyScratchWithoutRestoringFromIt(t *testing.T) {
 	}
 
 }
+
+// TestAlreadyConvergedDeclinesOnAScratchPendingDeletionAtHead closes the
+// server-mode half of PR #7075: a database whose only residue is the #4356
+// scratch committed at HEAD with its deletion pending reads at-latest and
+// fully seeded, so every earlier predicate says "converged" — and a fast
+// path that believed them would short-circuit before MigrateUp, leaving the
+// tracked deletion to wedge every pull with no repair path. The gate must
+// decline before the migration-lock probe, in both session shapes, and the
+// scratch HEAD listing must run under the SAME qualifier the selector
+// quoted.
+func TestAlreadyConvergedDeclinesOnAScratchPendingDeletionAtHead(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		selector DatabaseSelector
+		expect   func(sqlmock.Sqlmock)
+	}{
+		{
+			name:     "session already on the database",
+			selector: nil,
+			expect: func(mock sqlmock.Sqlmock) {
+				expectCurrentDatabase(mock, "testdb")
+			},
+		},
+		{
+			name:     "database selected for us",
+			selector: testDatabaseSelector,
+			expect: func(mock sqlmock.Sqlmock) {
+				expectSessionPutOnDatabase(mock, "testdb")
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			db, mock := newMockDB(t)
+
+			doltIgnore := unqualifiedDoltIgnore
+			qualifier := ""
+			if tt.selector != nil {
+				doltIgnore = qualifiedDoltIgnore("testdb")
+				qualifier = "`testdb`"
+			}
+			tt.expect(mock)
+			expectNoMigrationWorkNeeded(mock)
+			expectDoltIgnoreRead(mock, doltIgnore, seededIgnorePatterns(LatestVersion()))
+			expectHeadTableProbe(mock, qualifier, ignoredSource.cursorTable, false)
+			expectScratchProbes(mock, qualifier, false, true)
+
+			converged, err := alreadyConverged(context.Background(), db, "testdb", tt.selector)
+			if err != nil {
+				t.Fatalf("alreadyConverged() error = %v, want nil", err)
+			}
+			if converged {
+				t.Fatal("alreadyConverged() = true with a scratch deletion pending at HEAD, want false: server mode would never sweep it")
+			}
+			// The lock probe must never be reached — the mock is not primed
+			// for it.
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+		})
+	}
+}
+
+// The fast path's probes fail closed, and the new read is no exception. The
+// error must be the scratch probe's own — named for the table it was listing
+// — not some later statement stumbling over an expectation this test never
+// primed.
+func TestAlreadyConvergedFailsClosedOnAnUnreadableScratchHeadProbe(t *testing.T) {
+	db, mock := newMockDB(t)
+
+	expectCurrentDatabase(mock, "testdb")
+	expectNoMigrationWorkNeeded(mock)
+	expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
+	expectHeadTableProbe(mock, "", ignoredSource.cursorTable, false)
+	expectShowTable(mock, ignoredCursorUntrackTempTable, false)
+	mock.ExpectQuery(regexp.QuoteMeta("SHOW TABLES AS OF 'HEAD' LIKE '" + ignoredCursorUntrackTempTable + "'")).
+		WillReturnError(sql.ErrConnDone)
+
+	converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
+	if err == nil {
+		t.Fatal("alreadyConverged() error = nil, want the scratch HEAD probe failure")
+	}
+	if !strings.Contains(err.Error(), "listing "+ignoredCursorUntrackTempTable+" at HEAD") {
+		t.Fatalf("alreadyConverged() error = %v, want the failure named for the scratch HEAD listing", err)
+	}
+	if converged {
+		t.Fatal("alreadyConverged() = true on an unreadable scratch HEAD probe, want false")
+	}
+}
