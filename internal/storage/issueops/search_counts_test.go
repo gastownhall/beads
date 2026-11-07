@@ -15,11 +15,19 @@ func TestSearchIssuesWithCountsAppliesLimitToEachSourceQuery(t *testing.T) {
 	_, mock, tx := beginMockTx(t)
 	mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
-	mock.ExpectQuery(`(?s)FROM issues i.*ORDER BY i\.priority ASC, i\.created_at DESC, i\.id ASC\s+LIMIT 3`).
+	// A bounded page is answered ids-first (#7635), so the bound and the order
+	// land on each table's id scan.
+	mock.ExpectQuery(`^SELECT issues\.id FROM issues\s+ORDER BY priority ASC, created_at DESC, id ASC\s+LIMIT 3$`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	// An empty id scan still runs one by-IDs statement (a sentinel id).
+	mock.ExpectQuery(`(?s)FROM issues i\s.*WHERE i\.id IN \(\?\)`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
-	mock.ExpectQuery(`(?s)FROM wisps i.*ORDER BY i\.priority ASC, i\.created_at DESC, i\.id ASC\s+LIMIT 3`).
+	mock.ExpectQuery(`^SELECT wisps\.id FROM wisps\s+ORDER BY priority ASC, created_at DESC, id ASC\s+LIMIT 3$`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	// An empty id scan still runs one by-IDs statement (a sentinel id).
+	mock.ExpectQuery(`(?s)FROM wisps i\s.*WHERE i\.id IN \(\?\)`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 
 	got, err := SearchIssuesWithCountsInTx(context.Background(), tx, "", types.IssueFilter{Limit: 3})
@@ -68,11 +76,18 @@ func TestSearchIssuesWithCountsPushesSortIntoSQL(t *testing.T) {
 	_, mock, tx := beginMockTx(t)
 	mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
-	mock.ExpectQuery(`(?s)FROM issues i.*ORDER BY i\.created_at DESC, i\.id ASC\s+LIMIT 2`).
+	// The page's order lands on the id scan that cuts it (ids-first, #7635).
+	mock.ExpectQuery(`^SELECT issues\.id FROM issues\s+ORDER BY created_at DESC, id ASC\s+LIMIT 2$`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	// An empty id scan still runs one by-IDs statement (a sentinel id).
+	mock.ExpectQuery(`(?s)FROM issues i\s.*WHERE i\.id IN \(\?\)`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
-	mock.ExpectQuery(`(?s)FROM wisps i.*ORDER BY i\.created_at DESC, i\.id ASC\s+LIMIT 2`).
+	mock.ExpectQuery(`^SELECT wisps\.id FROM wisps\s+ORDER BY created_at DESC, id ASC\s+LIMIT 2$`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	// An empty id scan still runs one by-IDs statement (a sentinel id).
+	mock.ExpectQuery(`(?s)FROM wisps i\s.*WHERE i\.id IN \(\?\)`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 
 	filter := types.IssueFilter{SortBy: "created", Limit: 2}
