@@ -2063,8 +2063,8 @@ func testEmbeddedInitGitBootstrapRouting(t *testing.T, names ...string) {
 // TestEmbeddedContributorRoutingMissingPlanningRepo pins GH#5957 end to end:
 // once a fork's planning repo is deleted, routed commands fail naming the
 // repo, the contributor routing that chose it, how to restore it and how to
-// opt out, and recreate nothing; bd create still starts an empty planning
-// store.
+// opt out, and recreate nothing (bd list/ready included, rather than an
+// empty result); bd create still starts an empty planning store.
 func TestEmbeddedContributorRoutingMissingPlanningRepo(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
@@ -2131,6 +2131,8 @@ func TestEmbeddedContributorRoutingMissingPlanningRepo(t *testing.T) {
 	}
 	missing(t, "bd update", "update", created.ID, "--status", "in_progress")
 	missing(t, "bd close", "close", created.ID)
+	missing(t, "bd list", "list")
+	missing(t, "bd ready", "ready")
 
 	// Regression: a routed create still initializes an empty planning store;
 	// the deleted issue is not back.

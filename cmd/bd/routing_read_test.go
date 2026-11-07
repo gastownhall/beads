@@ -307,7 +307,13 @@ func (s *routingSettingsMapStore) GetAllConfig(context.Context) (map[string]stri
 func checkMissingPlanningRepoError(t *testing.T, writable bool) {
 	t.Helper()
 	store, planningDir := missingPlanningRouteFixture(t, "contributor", "routing.contributor")
-	routedStore, routed, rule, err := openAutoRoutedStore(t.Context(), store, writable)
+	open := openRoutedReadStore
+	if writable {
+		open = func(ctx context.Context, s storage.DoltStorage) (storage.DoltStorage, bool, routing.RoutingRule, error) {
+			return openAutoRoutedStore(ctx, s, true)
+		}
+	}
+	routedStore, routed, rule, err := open(t.Context(), store)
 	if err == nil {
 		_ = routedStore.Close()
 		t.Fatalf("open of a missing planning repo succeeded (routed=%v)", routed)
@@ -332,6 +338,12 @@ func checkMissingPlanningRepoError(t *testing.T, writable bool) {
 	if _, statErr := os.Stat(planningDir); !os.IsNotExist(statErr) {
 		t.Errorf("routed open created the missing planning repo: %v", statErr)
 	}
+}
+
+// A routed read (bd list/ready) of a missing planning repo fails the same way
+// instead of reading as an empty result.
+func TestOpenRoutedReadStoreMissingPlanningRepoNamesRouting(t *testing.T) {
+	checkMissingPlanningRepoError(t, false)
 }
 
 func TestOpenAutoRoutedStoreMissingPlanningRepoNamesRouting(t *testing.T) {
