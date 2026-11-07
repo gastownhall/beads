@@ -432,3 +432,43 @@ func TestFormatIssueLong_EmptyMetadata(t *testing.T) {
 		t.Errorf("expected no Metadata line for empty metadata, got: %q", result)
 	}
 }
+
+// TestFormatIssueCustomMetadata_LargeInteger (GH#6330): integers past 2^53 must
+// render with their stored digits, at the top level and nested in objects and
+// arrays, instead of snapping to the nearest float64.
+func TestFormatIssueCustomMetadata_LargeInteger(t *testing.T) {
+	t.Parallel()
+	issue := &types.Issue{Metadata: json.RawMessage(`{` +
+		`"big":1546130668394913822,` +
+		`"just_over":9007199254740993,` +
+		`"nested":{"id":1546130668394913822,"ids":[9007199254740993,1]},` +
+		`"min":-9223372036854775808,` +
+		`"umax":18446744073709551615,` +
+		`"str":"1546130668394913822",` +
+		`"tiny":0.0000001}`)}
+	out := formatIssueCustomMetadata(issue)
+	for prefix, want := range map[string]string{
+		"  big:":       "  big: 1546130668394913822",
+		"  just_over:": "  just_over: 9007199254740993",
+		"  nested:":    `  nested: {"id":1546130668394913822,"ids":[9007199254740993,1]}`,
+		"  min:":       "  min: -9223372036854775808",
+		"  umax:":      "  umax: 18446744073709551615",
+		"  str:":       "  str: 1546130668394913822",
+		"  tiny:":      "  tiny: 0.0000001",
+	} {
+		if got := metadataLine(out, prefix); got != want {
+			t.Errorf("line %q = %q, want %q", prefix, got, want)
+		}
+	}
+}
+
+// TestFormatIssueCustomMetadata_NonObjectRoot keeps the raw fallback for a
+// metadata value that is valid JSON but not an object.
+func TestFormatIssueCustomMetadata_NonObjectRoot(t *testing.T) {
+	t.Parallel()
+	issue := &types.Issue{Metadata: json.RawMessage(`[1546130668394913822]`)}
+	out := formatIssueCustomMetadata(issue)
+	if got := metadataLine(out, "  "); got != "  [1546130668394913822]" {
+		t.Errorf("raw fallback line = %q, want %q", got, "  [1546130668394913822]")
+	}
+}
