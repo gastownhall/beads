@@ -58,6 +58,14 @@ func TestResolveDoltBackupURL(t *testing.T) {
 			wantExact: "file:///tmp/backup",
 		},
 		{
+			// A hand-written native Windows spelling still passes through
+			// verbatim (#6019): the fix normalizes paths bd resolves itself,
+			// never a URL the caller already schemed.
+			name:      "native windows file:// URL passes through verbatim",
+			input:     `file://c:\Users\me\backup`,
+			wantExact: `file://c:\Users\me\backup`,
+		},
+		{
 			name:      "aws:// URL passes through",
 			input:     "aws://[key:secret@]bucket/path",
 			wantExact: "aws://[key:secret@]bucket/path",
