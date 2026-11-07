@@ -107,7 +107,9 @@ func runRename(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// updateReferencesInAllIssues updates text references to the old ID in all issues
+// updateReferencesInAllIssues updates text references to the old ID in all
+// issues, the renamed one included: it runs after the rename, so that issue
+// is listed once, under newID, its text still naming oldID.
 func updateReferencesInAllIssues(ctx context.Context, store storage.DoltStorage, oldID, newID, actor string) error {
 	// Get all issues
 	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
@@ -119,10 +121,6 @@ func updateReferencesInAllIssues(ctx context.Context, store storage.DoltStorage,
 	oldPattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(oldID) + `\b`)
 
 	for _, issue := range issues {
-		if issue.ID == newID {
-			continue // Skip the renamed issue itself
-		}
-
 		updated := false
 		updates := make(map[string]interface{})
 

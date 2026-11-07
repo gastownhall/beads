@@ -59,4 +59,38 @@ func TestUpdateReferencesInAllIssues(t *testing.T) {
 			t.Errorf("close_reason update = %v, want %q", got, "duplicate of bd-new")
 		}
 	})
+
+	t.Run("rewrites the renamed issue's own text", func(t *testing.T) {
+		// The identity rename carries the issue's text over verbatim, so the
+		// scan must also rewrite the issue itself, once, under its new ID.
+		s := &renameRefsFakeStore{
+			issues: []*types.Issue{
+				{
+					ID:               "bd-new",
+					Title:            "bd-old follow-up",
+					Description:      "split out of bd-old",
+					Design:           "per bd-old's design",
+					Notes:            "see bd-old history",
+					AcceptanceCriteria: "bd-old behavior kept",
+					Status:           types.StatusClosed,
+					CloseReason:      "superseded by bd-old",
+				},
+			},
+		}
+		if err := updateReferencesInAllIssues(context.Background(), s, "bd-old", "bd-new", "test"); err != nil {
+			t.Fatalf("updateReferencesInAllIssues: %v", err)
+		}
+		for field, want := range map[string]string{
+			"title":               "bd-new follow-up",
+			"description":         "split out of bd-new",
+			"design":              "per bd-new's design",
+			"notes":               "see bd-new history",
+			"acceptance_criteria": "bd-new behavior kept",
+			"close_reason":        "superseded by bd-new",
+		} {
+			if got := s.update("bd-new", field); got != want {
+				t.Errorf("%s update = %v, want %q", field, got, want)
+			}
+		}
+	})
 }
