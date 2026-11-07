@@ -4,14 +4,17 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -68,12 +71,45 @@ func externalOnlyCopy(t *testing.T, rig proxiedProject, database string) string 
 	return dir
 }
 
+// sharedServerState is what a foreign read must not change on the shared
+// server: the databases it holds and the working root of database.
+func sharedServerState(t *testing.T, port int, database string) string {
+	t.Helper()
+	db, err := sql.Open("mysql", doltutil.ServerDSN{Host: "127.0.0.1", Port: port, User: "root", Database: database}.String())
+	if err != nil {
+		t.Fatalf("open shared server: %v", err)
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, "SHOW DATABASES")
+	if err != nil {
+		t.Fatalf("SHOW DATABASES: %v", err)
+	}
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, name)
+	}
+	_ = rows.Close()
+	sort.Strings(names)
+	var working string
+	// database is uniqueProxiedDatabase's bdtest_<n>: safe to splice.
+	if err := db.QueryRowContext(ctx, "SELECT @@"+database+"_working").Scan(&working); err != nil {
+		t.Fatalf("read %s working root: %v", database, err)
+	}
+	return strings.Join(names, ",") + " " + working
+}
+
 // TestProxiedServerRoutedExternalTargetInProcess runs the routed read in this
 // process, as a direct launcher does, so it can drive routing's globals
 // (dbPath) and the launcher's environment. It is not parallel for that
 // reason.
 func TestProxiedServerRoutedExternalTargetInProcess(t *testing.T) {
-	requireSharedProxiedServer(t)
+	port := requireSharedProxiedServer(t)
 	bd := buildEmbeddedBD(t)
 
 	a := newSharedProxiedProject(t, bd, "rla")
@@ -82,6 +118,7 @@ func TestProxiedServerRoutedExternalTargetInProcess(t *testing.T) {
 	// The read goes to a copy of B's configuration that never ran a proxy, so
 	// every file under it is one the read alone could have written.
 	bCopy := externalOnlyCopy(t, b, "")
+	missing := externalOnlyCopy(t, b, b.database+"_missing")
 
 	// A's own connection settings, which must not reach B's server.
 	isolateBeadsDirForTest(t)
@@ -128,6 +165,43 @@ func TestProxiedServerRoutedExternalTargetInProcess(t *testing.T) {
 		issue, err = prefixRoutedBeadGateTarget(ctx, "rlb-nosuchbead")
 		if issue != nil || !errors.Is(err, errBeadGateTargetUnconfirmed) || !strings.Contains(err.Error(), `no issue found matching "rlb-nosuchbead"`) {
 			t.Fatalf("gate lookup of an absent bead = %+v, %v; want it unconfirmed", issue, err)
+		}
+	})
+
+	// AC-4: reads that succeed, miss, and name a database the server does not
+	// hold change no file of the target workspace and nothing on the server.
+	t.Run("reads_write_nothing", func(t *testing.T) {
+		before := sharedServerState(t, port, b.database)
+		copyFiles := snapshotForeignTree(t, bCopy)
+		missingFiles := snapshotForeignTree(t, missing)
+
+		routeExternalRig(t, a.dir, bCopy, "rlb")
+		if result, err := resolveViaPrefixRouting(ctx, target.ID); err != nil {
+			t.Fatalf("routed read of %s: %v", target.ID, err)
+		} else {
+			result.Close()
+		}
+		if _, err := resolveViaPrefixRouting(ctx, "rlb-nosuchbead"); err == nil {
+			t.Fatal("routed read of an absent bead succeeded")
+		}
+		assertForeignTreeUnchanged(t, bCopy, copyFiles)
+
+		routeExternalRig(t, a.dir, missing, "rlb")
+		_, err := resolveViaPrefixRouting(ctx, target.ID)
+		if err == nil {
+			t.Fatal("routed read of a database the server does not hold succeeded")
+		}
+		if isProxiedStoreUnrouted(err) {
+			t.Fatalf("routed read refused instead of tried: %v", err)
+		}
+		issue, gateErr := prefixRoutedBeadGateTarget(ctx, target.ID)
+		if issue != nil || !errors.Is(gateErr, errBeadGateTargetUnconfirmed) {
+			t.Fatalf("gate lookup into a missing database = %+v, %v; want it unconfirmed", issue, gateErr)
+		}
+		assertForeignTreeUnchanged(t, missing, missingFiles)
+
+		if after := sharedServerState(t, port, b.database); after != before {
+			t.Errorf("shared server changed under foreign reads:\nbefore %s\nafter  %s", before, after)
 		}
 	})
 }

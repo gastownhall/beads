@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -161,4 +162,35 @@ func TestForeignProxiedExternalReadUsesTargetEndpoint(t *testing.T) {
 			t.Error("presented a password: the launcher's BEADS_DOLT_PASSWORD reached the rig's server")
 		}
 	}
+}
+
+// TestForeignProxiedExternalReadWritesNothingInTarget is AC-4's unit half: a
+// foreign read that reaches the rig's external server, and one that cannot,
+// leave every file in the rig's workspace as it was (no dolt directory,
+// runtime file, sidecar or metadata rewrite).
+func TestForeignProxiedExternalReadWritesNothingInTarget(t *testing.T) {
+	t.Run("server_reached", func(t *testing.T) {
+		srv := newFakeMySQLLogin(t)
+		rig := externalReadTown(t, &configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: srv.port()})
+		rigRoot := filepath.Dir(rig)
+		before := snapshotForeignTree(t, rigRoot)
+
+		_, err := resolveViaPrefixRouting(context.Background(), "gt-target1")
+		if srv.Conns() == 0 {
+			t.Fatalf("the read never dialed the rig's external server; error: %v", err)
+		}
+		assertForeignTreeUnchanged(t, rigRoot, before)
+	})
+
+	t.Run("server_unreachable", func(t *testing.T) {
+		rig := externalReadTown(t, &configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: closedTCPPort(t)})
+		rigRoot := filepath.Dir(rig)
+		before := snapshotForeignTree(t, rigRoot)
+
+		_, err := resolveViaPrefixRouting(context.Background(), "gt-target1")
+		if err == nil || !strings.Contains(err.Error(), "unreachable") {
+			t.Fatalf("err = %v, want the rig's server reported unreachable", err)
+		}
+		assertForeignTreeUnchanged(t, rigRoot, before)
+	})
 }
