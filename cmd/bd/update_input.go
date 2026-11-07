@@ -44,6 +44,19 @@ type updateInput struct {
 	force bool
 }
 
+// normalizeAssigneeInput folds the hidden-empty spellings of an assignee — a
+// bare '-' and whitespace-only values — into the "" clear sentinel that
+// already stores NULL, so "unassigned" has exactly one on-disk form. Both
+// literals used to be stored verbatim, and every emptiness check (-z, //"",
+// == null) classified them as ASSIGNED, stranding dead-lane claims silently.
+// Any other value passes through verbatim, spaces included.
+func normalizeAssigneeInput(v string) string {
+	if t := strings.TrimSpace(v); t == "" || t == "-" {
+		return ""
+	}
+	return v
+}
+
 func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, error) {
 	in := &updateInput{fields: map[string]any{}}
 
@@ -81,7 +94,7 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 	}
 	if cmd.Flags().Changed("assignee") {
 		assignee, _ := cmd.Flags().GetString("assignee")
-		in.fields["assignee"] = assignee
+		in.fields["assignee"] = normalizeAssigneeInput(assignee)
 	}
 	in.force, _ = cmd.Flags().GetBool("force")
 	description, descChanged, err := getDescriptionFlag(cmd)

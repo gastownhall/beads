@@ -202,7 +202,7 @@ pointless).`,
 		}
 		if cmd.Flags().Changed("assignee") {
 			assignee, _ := cmd.Flags().GetString("assignee")
-			updates["assignee"] = assignee
+			updates["assignee"] = normalizeAssigneeInput(assignee)
 		}
 		description, descChanged, err := getDescriptionFlag(cmd)
 		if err != nil {
