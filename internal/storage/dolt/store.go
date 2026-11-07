@@ -1299,12 +1299,7 @@ func (s *DoltStore) withRetryTxOn(ctx context.Context, beginner txBeginner, fn f
 		return ErrCircuitOpen
 	}
 
-	bo := backoff.NewExponentialBackOff()
-	bo.InitialInterval = 25 * time.Millisecond
-	bo.MaxElapsedTime = 5 * time.Second
-	if s.serverMode {
-		bo.MaxElapsedTime = 15 * time.Second
-	}
+	bo := newWriteTxRetryBackOff(s.serverMode)
 	var pending issueops.BlockedRecheck
 	if err := backoff.Retry(func() error {
 		var err error
@@ -1356,6 +1351,32 @@ func (s *DoltStore) withRetryTxOn(ctx context.Context, beginner txBeginner, fn f
 	}
 	logBlockedRecheckFailure(ctx, pending, s.recheckBlockedAfterCommit(ctx, pending))
 	return nil
+}
+
+// writeTxRetryMaxInterval is the longest single wait between withRetryTx
+// attempts (before jitter). Uncapped, the exponential waits stretch to several
+// seconds each, so a writer that keeps losing commit-time conflicts — routine
+// when every mutation bumps the events-journal counter row — gets only about a
+// dozen attempts in its budget; against five concurrent journaled writers,
+// 1-5% of creates exhausted it. A one-second cap keeps attempts arriving
+// through the whole budget.
+const writeTxRetryMaxInterval = time.Second
+
+// newWriteTxRetryBackOff is withRetryTx's schedule: exponential waits from
+// storage.TxConflictReplayInitialInterval, capped at writeTxRetryMaxInterval
+// and randomized by half in either direction so colliding writers do not retry
+// in lockstep. On a sql-server the budget is storage.TxConflictReplayMaxElapsed,
+// the one the proxied routes (uow.RunTx) and storage.RunReplayableTransaction
+// share; an embedded store keeps its shorter 5s.
+func newWriteTxRetryBackOff(serverMode bool) *backoff.ExponentialBackOff {
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = storage.TxConflictReplayInitialInterval
+	bo.MaxInterval = writeTxRetryMaxInterval
+	bo.MaxElapsedTime = 5 * time.Second
+	if serverMode {
+		bo.MaxElapsedTime = storage.TxConflictReplayMaxElapsed
+	}
+	return bo
 }
 
 func (s *DoltStore) withWriteTx(ctx context.Context, fn func(tx *sql.Tx) error) error {

@@ -3,9 +3,12 @@ package tracker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
 	"testing"
+
+	"github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -307,5 +310,72 @@ func TestUOWStoreApplyIssueUpdateNormalizesLabels(t *testing.T) {
 				t.Fatalf("commits = %d, want 1", state.commits)
 			}
 		})
+	}
+}
+
+// replayCreateState drives one create through a lost commit-time conflict.
+// Its create mints the next ID into the caller's issue when the issue carries
+// none, as the domain create does, and records the ID each attempt was handed.
+// Its first commit fails with the serialization error Dolt's commit-time merge
+// raises, so uow.RunTx rolls that attempt back and replays the body.
+type replayCreateState struct {
+	conflicts int
+	minted    int
+	handed    []string
+}
+
+type replayCreateIssueUC struct {
+	domain.IssueUseCase
+	s *replayCreateState
+}
+
+func (u replayCreateIssueUC) CreateIssue(_ context.Context, p domain.CreateIssueParams, _ string) (domain.CreateIssueResult, error) {
+	u.s.handed = append(u.s.handed, p.Issue.ID)
+	if p.Issue.ID == "" {
+		u.s.minted++
+		p.Issue.ID = fmt.Sprintf("bd-%d", u.s.minted)
+	}
+	return domain.CreateIssueResult{Issue: p.Issue}, nil
+}
+
+type replayCreateUOW struct {
+	uow.UnitOfWork
+	s *replayCreateState
+}
+
+func (u replayCreateUOW) Close(context.Context)             {}
+func (u replayCreateUOW) IssueUseCase() domain.IssueUseCase { return replayCreateIssueUC{s: u.s} }
+func (u replayCreateUOW) Commit(context.Context, string) error {
+	if u.s.conflicts > 0 {
+		u.s.conflicts--
+		return &mysql.MySQLError{Number: 1213, Message: "serialization failure"}
+	}
+	return nil
+}
+
+type replayCreateProvider struct{ s *replayCreateState }
+
+func (p replayCreateProvider) NewUOW(context.Context) (uow.UnitOfWork, error) {
+	return replayCreateUOW{s: p.s}, nil
+}
+func (replayCreateProvider) Close(context.Context) error { return nil }
+
+// TestUOWStoreCreateIssueReplayStartsFromTheRequest: the proxied tracker create
+// writes the minted ID into the caller's issue, and RunTx replays the body
+// after a lost commit-time conflict. The replay must be handed the issue as the
+// caller passed it: the domain create reads a leftover ID as one the caller
+// named and, in counter mode, upserts over the issue the winning writer
+// committed under that number. The caller keeps the committed attempt's ID.
+func TestUOWStoreCreateIssueReplayStartsFromTheRequest(t *testing.T) {
+	state := &replayCreateState{conflicts: 1}
+	issue := &types.Issue{Title: "pulled from the tracker"}
+	if err := NewUOWStore(replayCreateProvider{s: state}).CreateIssue(context.Background(), issue, "tracker"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if want := []string{"", ""}; !reflect.DeepEqual(state.handed, want) {
+		t.Fatalf("the create was handed IDs %q, want %q: the replay re-used the rolled-back attempt's ID", state.handed, want)
+	}
+	if issue.ID != "bd-2" {
+		t.Fatalf("caller's issue ID = %q, want the committed attempt's bd-2", issue.ID)
 	}
 }

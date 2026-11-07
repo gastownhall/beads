@@ -39,7 +39,16 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 	}
 
 	var result issueops.CreateIssueResult
+	restore := issueops.SnapshotCreateInputs([]*types.Issue{issue})
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		// The create writes its minted ID (and timestamps, content hash, and
+		// inline comment IDs) back into the caller's issue, and withRetryTx
+		// replays this body after a lost commit-time conflict. Each attempt
+		// starts from the caller's request: a rolled-back attempt's minted ID
+		// re-used as if the caller had asked for it takes the explicit-ID
+		// upsert path and overwrites the writer that won it (in counter mode
+		// that writer minted the same number).
+		restore()
 		// SkipPrefixValidation matches legacy behavior: single-issue path does
 		// not validate prefixes for explicit IDs.
 		bc, err := issueops.NewBatchContext(ctx, tx, storage.BatchCreateOptions{
@@ -114,8 +123,11 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 				issue.Ephemeral = true
 			}
 		}
+		restore := issueops.SnapshotCreateInputs(issues)
 		var result issueops.CreateIssuesResult
 		if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+			// Each attempt starts from the caller's issues; see createIssue.
+			restore()
 			var err error
 			result, err = issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
 			return err
@@ -128,7 +140,10 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 	}
 
 	var result issueops.CreateIssuesResult
+	restore := issueops.SnapshotCreateInputs(issues)
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		// Each attempt starts from the caller's issues; see createIssue.
+		restore()
 		var err error
 		result, err = issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
 		return err

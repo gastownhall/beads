@@ -50,7 +50,16 @@ func (o *importer) ImportBatch(ctx context.Context, request publicops.ImportBatc
 	if request.Actor == "" {
 		return publicops.ImportBatchResult{}, fmt.Errorf("import batch: actor must not be empty")
 	}
+	// The create engine writes what it mints (IDs, timestamps, content hash,
+	// inline edge sources and comment IDs) back into request.Issues, and
+	// RunTxResult replays this body after a lost commit-time conflict. Each
+	// attempt starts from the rows as the caller sent them: a rolled-back
+	// attempt's minted ID re-used as if the caller had asked for it would, in
+	// counter mode, upsert over the issue the winning writer committed under
+	// that number.
+	restore := storageissueops.SnapshotCreateInputs(request.Issues)
 	return RunTxResult(ctx, o.provider, func(ctx context.Context, uw UnitOfWork) (publicops.ImportBatchResult, string, error) {
+		restore()
 		var result publicops.ImportBatchResult
 
 		// Seed issue_prefix before CreateIssuesInTxWithResult needs it (via

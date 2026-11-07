@@ -1142,6 +1142,7 @@ go_test(
         "query_proxied_integration_test.go",
         "quick_embedded_test.go",
         "quick_todo_proxied_integration_test.go",
+        "quick_todo_proxied_replay_test.go",
         "quickstart_embedded_test.go",
         "race_detector_off_test.go",
         "race_detector_on_test.go",

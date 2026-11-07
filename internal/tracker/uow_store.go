@@ -6,6 +6,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -140,7 +141,15 @@ func (s *uowStore) GetDependenciesWithMetadata(ctx context.Context, id string) (
 }
 
 func (s *uowStore) CreateIssue(ctx context.Context, issue *types.Issue, actor string) error {
+	// The create writes its minted ID (and defaulted timestamps) back into the
+	// caller's issue, and RunTx replays this body after a lost commit-time
+	// conflict. Each attempt starts from the issue as the caller passed it:
+	// the rolled-back attempt's ID would read as one the caller named and, in
+	// counter mode, upsert over the issue the winning writer committed under
+	// that number. The committed attempt's writes stay, as on the direct route.
+	restore := issueops.SnapshotCreateInputs([]*types.Issue{issue})
 	return uow.RunTx(ctx, s.provider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
+		restore()
 		_, err := uw.IssueUseCase().CreateIssue(ctx, domain.CreateIssueParams{Issue: issue}, actor)
 		return "bd: tracker create", err
 	})

@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
@@ -40,7 +41,12 @@ func runQuickProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 		IssueType: types.IssueType(issueType).Normalize(),
 	}
 
+	// Each replayed attempt starts from the request built above; see
+	// runTodoAddProxiedServer. Without --parent the create mints a top-level
+	// ID into issue, which a replay would otherwise treat as caller-named.
+	restore := storageissueops.SnapshotCreateInputs([]*types.Issue{issue})
 	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (*types.Issue, string, error) {
+		restore()
 		params := domain.CreateIssueParams{
 			Issue:                   issue,
 			ParentID:                parentID,
