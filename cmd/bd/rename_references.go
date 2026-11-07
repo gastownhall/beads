@@ -117,7 +117,17 @@ type renameReferenceReport struct {
 	newID string
 
 	updated   []renameRefUpdated // rewrites that landed, by issue
+	failed    []renameRefFailed  // updates that failed; unconfirmed, never "unchanged"
 	issuesErr error              // the issue listing failed: nothing was checked
+}
+
+// renameRefFailed is one issue whose reference update failed after the
+// identity rename had committed. The write may still have landed (a lost
+// commit response), so its fields are unconfirmed, not unchanged.
+type renameRefFailed struct {
+	issueID string
+	fields  []string // fields the update named
+	err     error
 }
 
 // renameRefUpdated is one issue whose references were rewritten.
@@ -127,7 +137,7 @@ type renameRefUpdated struct {
 }
 
 func (r *renameReferenceReport) empty() bool {
-	return len(r.updated) == 0
+	return len(r.updated) == 0 && len(r.failed) == 0 && r.issuesErr == nil
 }
 
 // sortReports orders the report deterministically: issues in natural ID
@@ -135,6 +145,9 @@ func (r *renameReferenceReport) empty() bool {
 func (r *renameReferenceReport) sortReports() {
 	sort.Slice(r.updated, func(a, b int) bool {
 		return utils.NaturalCompareIDs(r.updated[a].issueID, r.updated[b].issueID) < 0
+	})
+	sort.Slice(r.failed, func(a, b int) bool {
+		return utils.NaturalCompareIDs(r.failed[a].issueID, r.failed[b].issueID) < 0
 	})
 }
 
@@ -150,5 +163,14 @@ func printRenameReferenceReport(w io.Writer, rep *renameReferenceReport) {
 		for _, u := range rep.updated {
 			fmt.Fprintf(w, "  %s: %s\n", u.issueID, strings.Join(u.fields, ", "))
 		}
+	}
+	if len(rep.failed) > 0 {
+		fmt.Fprintln(w, "Warning: could not rewrite some references (the rename itself succeeded):")
+		for _, f := range rep.failed {
+			fmt.Fprintf(w, "  %s (%s): %v\n", f.issueID, strings.Join(f.fields, ", "), f.err)
+		}
+	}
+	if rep.issuesErr != nil {
+		fmt.Fprintf(w, "Warning: references could not be checked: %v\n", rep.issuesErr)
 	}
 }

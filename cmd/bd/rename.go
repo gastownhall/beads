@@ -126,7 +126,11 @@ func updateReferencesInAllIssues(ctx context.Context, store storage.DoltStorage,
 	if rep.issuesErr != nil {
 		return rep.issuesErr
 	}
-	return nil
+	var errs []error
+	for _, f := range rep.failed {
+		errs = append(errs, fmt.Errorf("could not rewrite references in %s (%s): %w", f.issueID, strings.Join(f.fields, ", "), f.err))
+	}
+	return errors.Join(errs...)
 }
 
 // scanRenameReferences rewrites references to oldID across every issue's
@@ -155,7 +159,9 @@ func scanRenameReferences(ctx context.Context, fields issueRefStore, oldID, newI
 			continue
 		}
 		if err := fields.UpdateIssue(ctx, issue.ID, updates, actor); err != nil {
-			// The write may still have landed; keep scanning the rest.
+			// The write may still have landed, so its fields are
+			// unconfirmed, never unchanged; keep scanning the rest.
+			rep.failed = append(rep.failed, renameRefFailed{issueID: issue.ID, fields: changed, err: err})
 			continue
 		}
 		rep.updated = append(rep.updated, renameRefUpdated{issueID: issue.ID, fields: changed})

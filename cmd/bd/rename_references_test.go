@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -18,6 +19,11 @@ type renameRefsFakeStore struct {
 	storage.DoltStorage
 	issues  []*types.Issue
 	updates []renameRefsFakeUpdate
+	// failUpdate names issues whose UpdateIssue fails after the call is
+	// recorded, like a commit whose response was lost; listErr fails the
+	// listing outright.
+	failUpdate map[string]error
+	listErr    error
 }
 
 // renameRefsFakeUpdate is one UpdateIssue call the fake recorded.
@@ -27,11 +33,17 @@ type renameRefsFakeUpdate struct {
 }
 
 func (s *renameRefsFakeStore) SearchIssues(context.Context, string, types.IssueFilter) ([]*types.Issue, error) {
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
 	return s.issues, nil
 }
 
 func (s *renameRefsFakeStore) UpdateIssue(_ context.Context, id string, updates map[string]interface{}, _ string) error {
 	s.updates = append(s.updates, renameRefsFakeUpdate{id: id, updates: updates})
+	if err, ok := s.failUpdate[id]; ok {
+		return err
+	}
 	return nil
 }
 
@@ -68,14 +80,14 @@ func TestUpdateReferencesInAllIssues(t *testing.T) {
 		s := &renameRefsFakeStore{
 			issues: []*types.Issue{
 				{
-					ID:               "bd-new",
-					Title:            "bd-old follow-up",
-					Description:      "split out of bd-old",
-					Design:           "per bd-old's design",
-					Notes:            "see bd-old history",
+					ID:                 "bd-new",
+					Title:              "bd-old follow-up",
+					Description:        "split out of bd-old",
+					Design:             "per bd-old's design",
+					Notes:              "see bd-old history",
 					AcceptanceCriteria: "bd-old behavior kept",
-					Status:           types.StatusClosed,
-					CloseReason:      "superseded by bd-old",
+					Status:             types.StatusClosed,
+					CloseReason:        "superseded by bd-old",
 				},
 			},
 		}
@@ -153,6 +165,23 @@ func TestUpdateReferencesInAllIssues(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("wrapper joins update failures without failing the scan", func(t *testing.T) {
+		s := &renameRefsFakeStore{
+			issues: []*types.Issue{
+				{ID: "bd-a", Title: "refs bd-old"},
+				{ID: "bd-b", Notes: "refs bd-old"},
+			},
+			failUpdate: map[string]error{"bd-a": errors.New("boom")},
+		}
+		err := updateReferencesInAllIssues(context.Background(), s, "bd-old", "bd-new", "test")
+		if err == nil || !strings.Contains(err.Error(), "bd-a") {
+			t.Errorf("error = %v, want bd-a's failure joined", err)
+		}
+		if got := s.update("bd-b", "notes"); got != "refs bd-new" {
+			t.Errorf("bd-b notes update = %v, want the scan to continue", got)
+		}
+	})
 }
 
 func TestPrintRenameReferenceReport(t *testing.T) {
@@ -176,6 +205,64 @@ func TestPrintRenameReferenceReport(t *testing.T) {
 		printRenameReferenceReport(&buf, &renameReferenceReport{})
 		if buf.Len() != 0 {
 			t.Errorf("empty report printed %q, want nothing", buf.String())
+		}
+	})
+
+	t.Run("reports failed updates and keeps scanning", func(t *testing.T) {
+		injected := errors.New("injected update failure")
+		s := &renameRefsFakeStore{
+			issues: []*types.Issue{
+				{ID: "bd-a", Title: "refs bd-old"},
+				{ID: "bd-b", Description: "refs bd-old too"},
+			},
+			failUpdate: map[string]error{"bd-a": injected},
+		}
+		rep := scanRenameReferences(context.Background(), s, "bd-old", "bd-new", "test")
+
+		// The later issue is still updated: one failure must not stop
+		// the independent updates.
+		if got := s.update("bd-b", "description"); got != "refs bd-new too" {
+			t.Errorf("bd-b description update = %v, want the rewrite to continue past bd-a's failure", got)
+		}
+
+		// The failed update is reported as failed, never as success: a
+		// storage error may follow a committed write.
+		if len(rep.updated) != 1 || rep.updated[0].issueID != "bd-b" {
+			t.Errorf("updated = %+v, want only bd-b", rep.updated)
+		}
+		if len(rep.failed) != 1 {
+			t.Fatalf("failed = %+v, want bd-a's failure", rep.failed)
+		}
+		if rep.failed[0].issueID != "bd-a" || rep.failed[0].err != injected {
+			t.Errorf("failed[0] = %+v, want bd-a with the injected error", rep.failed[0])
+		}
+		if got := strings.Join(rep.failed[0].fields, ", "); got != "title" {
+			t.Errorf("failed[0] fields = %q, want %q", got, "title")
+		}
+
+		var buf bytes.Buffer
+		printRenameReferenceReport(&buf, rep)
+		for _, want := range []string{
+			"Warning: could not rewrite some references (the rename itself succeeded):",
+			"  bd-a (title): injected update failure",
+		} {
+			if !strings.Contains(buf.String(), want) {
+				t.Errorf("report %q does not contain %q", buf.String(), want)
+			}
+		}
+	})
+
+	t.Run("reports an unchecked scan when listing fails", func(t *testing.T) {
+		s := &renameRefsFakeStore{listErr: errors.New("injected listing failure")}
+		rep := scanRenameReferences(context.Background(), s, "bd-old", "bd-new", "test")
+		if rep.issuesErr == nil {
+			t.Fatalf("issuesErr = nil, want the listing failure recorded")
+		}
+		var buf bytes.Buffer
+		printRenameReferenceReport(&buf, rep)
+		want := "Warning: references could not be checked: failed to list issues: injected listing failure"
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("report %q does not contain %q", buf.String(), want)
 		}
 	})
 }
