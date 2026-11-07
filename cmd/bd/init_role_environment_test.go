@@ -236,6 +236,14 @@ func TestAutoConfigureForkContributorIgnoresInheritedGitRouting(t *testing.T) {
 						t.Errorf("call %d: stdout still points at the post-init-unusable bd init --role=maintainer: %q", call+1, stdout)
 					}
 				}
+				if name == "maintainer" && call == 0 {
+					if !strings.Contains(string(stdout), "Contributor routing skipped (beads.role=maintainer).") {
+						t.Errorf("call %d: maintainer skip lacks the beads.role explanation: %q", call+1, stdout)
+					}
+					if strings.Contains(string(stdout), "bd init --contributor") {
+						t.Errorf("call %d: maintainer skip still suggests the interactive wizard, unusable post-init: %q", call+1, stdout)
+					}
+				}
 				wantWarning := name == "config_lock" && call == 0
 				if got := strings.Contains(stderr, "Warning: failed to set beads.role=contributor:"); got != wantWarning {
 					t.Errorf("call %d: role warning = %q, want warning %v", call+1, stderr, wantWarning)

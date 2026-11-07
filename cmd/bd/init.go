@@ -559,6 +559,9 @@ To enable: bd config set export.auto true
 Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
   Skips all interactive prompts, using sensible defaults:
   • Role defaults to "maintainer" (override with --role)
+  • On a fork (an "upstream" remote), contributor routing is auto-configured:
+    issues route to ~/.beads-planning, announced on stdout unless --quiet
+  • A pre-existing beads.role=maintainer is kept: no contributor routing
   • Fork exclude auto-configured when fork detected
   • Auto-export left at default (disabled)
   • --contributor and --team flags are rejected (wizards require interaction)
@@ -2183,6 +2186,20 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// holding the project (see guardInitInHomeDir).
 		projectRoleRepo := func() bool { return !keepHomeClean && isInitRoleGitRepo(ctx) }
 
+		// Whether the role authority already held a role before init writes
+		// anything: the fork setup below must preserve that choice (a
+		// pre-existing beads.role=maintainer is not silently switched to
+		// contributor auto-routing), while a role init synthesized itself —
+		// the maintainer default and the prompt's decline answer — must not
+		// disable fresh-fork auto-configuration (GH#5957). Read before the
+		// prompt and the default writes below so those cannot mask it.
+		roleExistedBeforeInit := false
+		if projectRoleRepo() {
+			if _, hasRole := getBeadsRole(); hasRole {
+				roleExistedBeforeInit = true
+			}
+		}
+
 		// Prompt for contributor mode if:
 		// - In a git repo (needed to set beads.role config)
 		// - Interactive terminal (stdin is TTY) and not --non-interactive
@@ -2290,9 +2307,17 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// This gate also enables planning-repository creation and config.yaml updates.
 		// quiet alone gates the notices: --non-interactive skips prompts, not the
 		// disclosure of a routing decision that silently reroutes every write
-		// (GH#5957).
+		// (GH#5957). The role passed here is the effective one: an explicit
+		// --role wins; otherwise a role that existed before init (possibly
+		// changed by the interactive prompt above, hence re-read here) is the
+		// user's standing choice, while the empty value — no role before init
+		// — lets fresh-fork auto-configuration proceed.
 		if !contributor && projectRoleRepo() {
-			if err := autoConfigureForkContributor(ctx, store, quiet, roleFlag); err != nil && !quiet {
+			effectiveRole := roleFlag
+			if effectiveRole == "" && roleExistedBeforeInit {
+				effectiveRole, _ = getBeadsRole()
+			}
+			if err := autoConfigureForkContributor(ctx, store, quiet, effectiveRole); err != nil && !quiet {
 				fmt.Fprintf(os.Stderr, "Warning: failed to auto-configure fork contributor routing: %v\n", err)
 			}
 		}

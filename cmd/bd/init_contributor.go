@@ -272,19 +272,24 @@ Created by: bd init --contributor
 
 // autoConfigureForkContributor configures contributor routing when bd init
 // detects a fork (upstream remote present) and routing is not yet set.
-// Non-interactive and idempotent. roleFlag is the --role flag value (if any).
-func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage, quiet bool, roleFlag string) error {
+// Non-interactive and idempotent. effectiveRole is the role that should
+// govern the decision, not only the --role flag: the caller passes the flag
+// when given, else the pre-existing beads.role init must preserve, and the
+// empty value when no role existed before init — so the maintainer default
+// init synthesizes does not disable fresh-fork auto-configuration, while a
+// maintainer choice that predates the fork setup does (GH#5957).
+func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage, quiet bool, effectiveRole string) error {
 	isFork, upstreamURL := detectForkSetup()
 	if !isFork {
 		return nil
 	}
 
-	// Explicit --role=maintainer on a fork: acknowledge fork, skip routing.
-	if roleFlag == "maintainer" {
+	// Maintainer role — explicit --role or pre-existing beads.role: acknowledge
+	// fork, skip routing, leave the role and any route settings untouched.
+	if effectiveRole == "maintainer" {
 		if !quiet {
 			fmt.Printf("\n  %s Fork detected (upstream: %s)\n", ui.RenderWarn("⚠"), upstreamURL)
-			fmt.Printf("    Contributor routing skipped (--role=maintainer).\n")
-			fmt.Printf("    To set up contributor routing later: bd init --contributor\n")
+			fmt.Printf("    Contributor routing skipped (beads.role=maintainer).\n")
 		}
 		return nil
 	}

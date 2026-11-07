@@ -1666,17 +1666,34 @@ func TestEmbeddedInitRoleRoutingRetainedFork(t *testing.T) {
 	testEmbeddedInitRoleRouting(t, "retained", "fork")
 }
 
+// The maintainer-retention fork cases (GH#5957, bd-8ktymt): a pre-existing
+// beads.role=maintainer — or an explicit --role=maintainer — keeps a fork
+// out of contributor auto-routing, and the choice survives a .beads reset
+// because it lives in git config, not the workspace.
+func TestEmbeddedInitRoleRoutingRetainedMaintainerFork(t *testing.T) {
+	testEmbeddedInitRoleRouting(t, "fork_maintainer", "fork_explicit_maintainer")
+}
+
 func testEmbeddedInitRoleRouting(t *testing.T, names ...string) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
 	}
 	bd := buildEmbeddedBD(t)
 	// Serial: newInitRoleFixture owns CWD and environment for each child.
-	for _, tc := range []struct{ name, initial, flag, want string }{
-		{"explicit", "maintainer", "contributor", "contributor"},
-		{"default", "", "", "maintainer"},
-		{"retained", "contributor", "", "contributor"},
-		{"fork", "", "", "contributor"},
+	// fork marks the fork fixture (an upstream remote); wantPlanning whether
+	// fork auto-configuration should create ~/.beads-planning and the
+	// routing keys; reinit removes .beads between two init invocations to
+	// prove the role in git config, not the workspace, carries the decision.
+	for _, tc := range []struct {
+		name, initial, flag, want string
+		fork, wantPlanning, reinit bool
+	}{
+		{"explicit", "maintainer", "contributor", "contributor", false, false, false},
+		{"default", "", "", "maintainer", false, false, false},
+		{"retained", "contributor", "", "contributor", false, false, false},
+		{"fork", "", "", "contributor", true, true, false},
+		{"fork_maintainer", "maintainer", "", "maintainer", true, false, true},
+		{"fork_explicit_maintainer", "", "maintainer", "maintainer", true, false, false},
 	} {
 		if !slices.Contains(names, tc.name) {
 			continue
@@ -1695,7 +1712,7 @@ func testEmbeddedInitRoleRouting(t *testing.T, names ...string) {
 			}
 			preserveInitRoleInputs(t, filepath.Join(decoy, ".git", "config"), global)
 			beadsDir := filepath.Join(target, ".beads")
-			if tc.name == "fork" {
+			if tc.fork {
 				initRoleFixtureGit(t, target, "remote", "add", "upstream", filepath.Join(home, "upstream.git"))
 				if err := os.MkdirAll(beadsDir, 0750); err != nil {
 					t.Fatal(err)
@@ -1708,41 +1725,68 @@ func testEmbeddedInitRoleRouting(t *testing.T, names ...string) {
 			if tc.flag != "" {
 				args = append(args, "--role", tc.flag)
 			}
-			cmd := exec.Command(bd, args...)
-			cmd.Dir = target
-			env := bdEnv(home)
-			for _, key := range []string{"BD_DB", "BD_DOLT_HOST", "BD_DOLT_PORT"} {
-				env = envWithout(env, key)
+			runInit := func() {
+				t.Helper()
+				cmd := exec.Command(bd, args...)
+				cmd.Dir = target
+				env := bdEnv(home)
+				for _, key := range []string{"BD_DB", "BD_DOLT_HOST", "BD_DOLT_PORT"} {
+					env = envWithout(env, key)
+				}
+				// Explicit storage selection bypasses the separate early git-init guard.
+				cmd.Env = append(env, "BEADS_DIR="+beadsDir, "DOLT_ROOT_PATH="+home, "BD_DOLT_MODE=embedded", "BD_EVENTS_JOURNAL=false")
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("embedded init failed: %v\n%s", err, out)
+				}
+				cfg, err := configfile.Load(beadsDir)
+				if err != nil || cfg == nil || cfg.GetBackend() != configfile.BackendDolt || cfg.DoltMode != configfile.DoltModeEmbedded {
+					t.Fatalf("init must persist embedded metadata: %+v, %v", cfg, err)
+				}
+				if info, err := os.Stat(filepath.Join(beadsDir, "embeddeddolt", "rolefixture", ".dolt")); err != nil || !info.IsDir() {
+					t.Fatalf("embedded database directory missing: %v", err)
+				}
 			}
-			// Explicit storage selection bypasses the separate early git-init guard.
-			cmd.Env = append(env, "BEADS_DIR="+beadsDir, "DOLT_ROOT_PATH="+home, "BD_DOLT_MODE=embedded", "BD_EVENTS_JOURNAL=false")
-			if out, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("embedded init failed: %v\n%s", err, out)
-			}
-			cfg, err := configfile.Load(beadsDir)
-			if err != nil || cfg == nil || cfg.GetBackend() != configfile.BackendDolt || cfg.DoltMode != configfile.DoltModeEmbedded {
-				t.Fatalf("init must persist embedded metadata: %+v, %v", cfg, err)
-			}
-			if info, err := os.Stat(filepath.Join(beadsDir, "embeddeddolt", "rolefixture", ".dolt")); err != nil || !info.IsDir() {
-				t.Fatalf("embedded database directory missing: %v", err)
-			}
-			if got := initRoleFixtureGit(t, target, "config", "--local", "--get", "beads.role"); got != tc.want {
-				t.Errorf("embedded init target role = %q, want %q", got, tc.want)
-			}
-			if tc.name == "fork" {
+			assertOutcome := func() {
+				t.Helper()
+				if got := initRoleFixtureGit(t, target, "config", "--local", "--get", "beads.role"); got != tc.want {
+					t.Errorf("embedded init target role = %q, want %q", got, tc.want)
+				}
 				planning := filepath.Join(home, ".beads-planning")
-				if got := initRoleFixtureGit(t, planning, "rev-parse", "--is-inside-work-tree"); got != "true" {
-					t.Errorf("planning Git repository missing: %q", got)
+				if tc.wantPlanning {
+					if got := initRoleFixtureGit(t, planning, "rev-parse", "--is-inside-work-tree"); got != "true" {
+						t.Errorf("planning Git repository missing: %q", got)
+					}
+					// Read the stored value; config get reads this key's YAML/default source.
+					routing := readBack(t, beadsDir, "rolefixture", "routing.contributor", false)
+					if filepath.Clean(routing) != filepath.Clean(planning) {
+						t.Errorf("persisted contributor routing = %q; want %q", routing, planning)
+					}
+					repos, err := config.GetReposFromYAML(filepath.Join(beadsDir, "config.yaml"))
+					if err != nil || len(repos.Additional) != 1 || filepath.Clean(repos.Additional[0]) != filepath.Clean(planning) {
+						t.Errorf("planning repo in config.yaml = %+v, %v", repos, err)
+					}
+				} else if tc.fork {
+					if _, err := os.Stat(planning); !os.IsNotExist(err) {
+						t.Errorf("fork with a maintainer role created the planning repository: %v", err)
+					}
+					if got := readBack(t, beadsDir, "rolefixture", "routing.contributor", false); got != "" {
+						t.Errorf("fork with a maintainer role persisted routing.contributor = %q, want unset", got)
+					}
+					if got := readBack(t, beadsDir, "rolefixture", "routing.mode", false); got != "" {
+						t.Errorf("fork with a maintainer role persisted routing.mode = %q, want unset", got)
+					}
 				}
-				// Read the stored value; config get reads this key's YAML/default source.
-				routing := readBack(t, beadsDir, "rolefixture", "routing.contributor", false)
-				if filepath.Clean(routing) != filepath.Clean(planning) {
-					t.Errorf("persisted contributor routing = %q; want %q", routing, planning)
+			}
+			runInit()
+			assertOutcome()
+			if tc.reinit {
+				// The reporter's reset: remove the workspace, not the role.
+				// Re-init must not silently re-establish contributor routing.
+				if err := os.RemoveAll(beadsDir); err != nil {
+					t.Fatal(err)
 				}
-				repos, err := config.GetReposFromYAML(filepath.Join(beadsDir, "config.yaml"))
-				if err != nil || len(repos.Additional) != 1 || filepath.Clean(repos.Additional[0]) != filepath.Clean(planning) {
-					t.Errorf("planning repo in config.yaml = %+v, %v", repos, err)
-				}
+				runInit()
+				assertOutcome()
 			}
 		})
 	}
