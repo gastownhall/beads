@@ -299,13 +299,14 @@ func TestRenameFailureLeavesBeadGatesPending(t *testing.T) {
 
 func TestRenameRewritesCloseReasonAndOwnText(t *testing.T) {
 	// GH#7040: bd rename left other issues' close_reason and the renamed
-	// issue's own text naming the old ID. Rewriting a close_reason must leave
-	// the closed issue closed, at its old closed_at.
+	// issue's own text naming the old ID, and rewrote a dotted child's ID that
+	// starts with it. Rewriting a close_reason must leave the closed issue
+	// closed, at its old closed_at.
 	ctx := context.Background()
 	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
 
 	for _, issue := range []*types.Issue{
-		{ID: "test-a", Title: "A (test-a)", Description: "test-a tracks this", Design: "test-a design",
+		{ID: "test-a", Title: "A (test-a)", Description: "test-a tracks test-a.1; test-a,test-a; see test-a.", Design: "test-a design",
 			Notes: "notes on test-a", AcceptanceCriteria: "test-a done", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
 		{ID: "test-b", Title: "B", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
 	} {
@@ -341,7 +342,7 @@ func TestRenameRewritesCloseReasonAndOwnText(t *testing.T) {
 	}
 	for _, f := range []struct{ field, got, want string }{
 		{"title", z.Title, "A (test-z)"},
-		{"description", z.Description, "test-z tracks this"},
+		{"description", z.Description, "test-z tracks test-a.1; test-z,test-z; see test-z."},
 		{"design", z.Design, "test-z design"},
 		{"notes", z.Notes, "notes on test-z"},
 		{"acceptance_criteria", z.AcceptanceCriteria, "test-z done"},

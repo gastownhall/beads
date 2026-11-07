@@ -117,41 +117,16 @@ func updateReferencesInAllIssues(ctx context.Context, store storage.DoltStorage,
 		return fmt.Errorf("failed to list issues: %w", err)
 	}
 
-	// Pattern to match the old ID as a word boundary
-	oldPattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(oldID) + `\b`)
-
 	for _, issue := range issues {
-		updated := false
 		updates := make(map[string]interface{})
-
-		// Check and update each text field
-		if oldPattern.MatchString(issue.Title) {
-			updates["title"] = oldPattern.ReplaceAllString(issue.Title, newID)
-			updated = true
-		}
-		if oldPattern.MatchString(issue.Description) {
-			updates["description"] = oldPattern.ReplaceAllString(issue.Description, newID)
-			updated = true
-		}
-		if oldPattern.MatchString(issue.Design) {
-			updates["design"] = oldPattern.ReplaceAllString(issue.Design, newID)
-			updated = true
-		}
-		if oldPattern.MatchString(issue.Notes) {
-			updates["notes"] = oldPattern.ReplaceAllString(issue.Notes, newID)
-			updated = true
-		}
-		if oldPattern.MatchString(issue.AcceptanceCriteria) {
-			updates["acceptance_criteria"] = oldPattern.ReplaceAllString(issue.AcceptanceCriteria, newID)
-			updated = true
-		}
-		if oldPattern.MatchString(issue.CloseReason) {
-			// Without a status change UpdateIssue leaves closed_at alone.
-			updates["close_reason"] = oldPattern.ReplaceAllString(issue.CloseReason, newID)
-			updated = true
+		for _, f := range renameRefFields {
+			text := f.text(issue)
+			if rewritten := replaceIDRefs(text, oldID, newID); rewritten != text {
+				updates[f.name] = rewritten
+			}
 		}
 
-		if updated {
+		if len(updates) > 0 {
 			if err := store.UpdateIssue(ctx, issue.ID, updates, actor); err != nil {
 				return fmt.Errorf("failed to update references in %s: %w", issue.ID, err)
 			}
@@ -159,6 +134,71 @@ func updateReferencesInAllIssues(ctx context.Context, store storage.DoltStorage,
 	}
 
 	return nil
+}
+
+// renameRefFields are the issue text fields bd rename rewrites, in the order
+// its report lists them. A close_reason update carries no status, so
+// UpdateIssue leaves a closed issue closed at its closed_at.
+var renameRefFields = []struct {
+	name string
+	text func(*types.Issue) string
+}{
+	{"title", func(i *types.Issue) string { return i.Title }},
+	{"description", func(i *types.Issue) string { return i.Description }},
+	{"design", func(i *types.Issue) string { return i.Design }},
+	{"notes", func(i *types.Issue) string { return i.Notes }},
+	{"acceptance_criteria", func(i *types.Issue) string { return i.AcceptanceCriteria }},
+	{"close_reason", func(i *types.Issue) string { return i.CloseReason }},
+}
+
+// replaceIDRefs replaces each mention of oldID in text with newID (see
+// forEachIDRef). The replacement is never scanned again, so a newID that
+// contains oldID is not rewritten twice.
+func replaceIDRefs(text, oldID, newID string) string {
+	var b strings.Builder
+	last := 0
+	forEachIDRef(text, oldID, func(start, end int) {
+		b.WriteString(text[last:start])
+		b.WriteString(newID)
+		last = end
+	})
+	if last == 0 {
+		return text
+	}
+	b.WriteString(text[last:])
+	return b.String()
+}
+
+// forEachIDRef calls fn with the byte range of each mention of id in text. A
+// mention is a whole token of ID characters (isIDTokenChar) that is id itself,
+// or id followed only by periods, read as sentence punctuation and left out of
+// the range. Matching is case-sensitive. A longer token names another issue
+// and is no mention: renaming test-a leaves test-a.1, test-a-v2, pre-test-a
+// and test-a_x alone.
+func forEachIDRef(text, id string, fn func(start, end int)) {
+	if id == "" {
+		return
+	}
+	for i := 0; i < len(text); {
+		if !isIDTokenChar(text[i]) {
+			i++
+			continue
+		}
+		start := i
+		for i < len(text) && isIDTokenChar(text[i]) {
+			i++
+		}
+		token := text[start:i]
+		if strings.HasPrefix(token, id) && strings.Trim(token[len(id):], ".") == "" {
+			fn(start, start+len(id))
+		}
+	}
+}
+
+// isIDTokenChar reports whether c can be part of an issue ID: an ASCII letter
+// or digit, or one of the separators bd rename admits in a new ID.
+func isIDTokenChar(c byte) bool {
+	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '_' || c == '.' || c == '-'
 }
 
 // beadGateRenameStore is the part of the store a rename writes through.
