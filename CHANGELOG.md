@@ -1208,6 +1208,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd doctor` no longer reports a repo-fingerprint mismatch on checkouts
+  whose origin remote spells the forge through an SSH host alias
+  (`git@alias-a:org/repo.git`): bd resolves supported aliases through the
+  local SSH configuration before hashing, keeps accepting the fingerprint a
+  checkout stored before the upgrade, and agrees with the HTTPS spelling of
+  the same remote. A two-label domain such as `github.com` is never
+  remapped, a deeper domain (`work.github.com`) is only remapped to its
+  parent domain, and a custom SSH transport (`GIT_SSH*`,
+  `core.sshCommand`) or a failed lookup keeps the previous fingerprint.
+  The mismatch remedy is preservation-first: it explains that the
+  repository ID is shared and points at `bd migrate --update-repo-id`
+  instead of suggesting `rm -rf .beads && bd init`, and `bd doctor --fix`
+  no longer offers a reinitialize option that deleted the database
+  directory (GH#5990).
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

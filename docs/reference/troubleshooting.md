@@ -378,6 +378,41 @@ bd list
 On macOS, `/tmp` is a symlink to `/private/tmp`, which is not always cleared
 on restart — the state file can persist across reboots.
 
+### Repo fingerprint mismatch (SSH alias or changed remote)
+
+**Symptom:** `bd doctor` reports `Repo Fingerprint: Database fingerprint
+does not match this repository's remote`, often on one machine of several
+sharing a synced `.beads` database.
+
+**Cause:** The database stores a `repo_id` fingerprint derived from the
+repository's `origin` remote. Before bd resolved SSH host aliases, each
+machine's alias spelling of the same forge (`git@alias-a:org/repo.git` vs
+`git@github.com:org/repo.git`) hashed differently, so every clone but the
+one that initialized the ledger mismatched. bd now resolves supported
+aliases through your `~/.ssh/config` before hashing, still accepts the
+fingerprint this checkout stored before the upgrade, and agrees with the
+HTTPS spelling of the same remote.
+
+Resolution covers aliases the standard OpenSSH client can evaluate
+(`ssh -G <alias>` against your home config). It does not apply when a
+custom SSH transport is selected (`GIT_SSH`, `GIT_SSH_COMMAND`,
+`GIT_SSH_VARIANT`, or `core.sshCommand`), to spellings `ssh` cannot
+resolve, or to two-label domains such as `github.com`, which are never
+remapped. A deeper domain such as `work.github.com` is only remapped to a
+parent domain (`github.com`), never to a sibling or unrelated host.
+
+**Fix:**
+
+1. Verify every clone of this repository points at the same remote and runs
+   this bd version.
+2. Run `bd migrate --update-repo-id` once from any clone.
+
+The repository ID is shared: the new value propagates to every clone on the
+next sync. Do not delete `.beads` — the fingerprint lives in the versioned
+metadata table, and deleting it destroys the shared ledger. If the database
+genuinely belongs to another repository, keep the files and check the
+`.beads` location before reconnecting or reinitializing anything.
+
 ## Dolt Server Issues
 
 ### Server not starting
