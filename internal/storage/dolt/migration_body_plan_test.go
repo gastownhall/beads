@@ -720,3 +720,127 @@ func TestMigrationBodyPlanMatchesFrozenBody(t *testing.T) {
 		t.Fatalf("no graph blocked anything; the differential compared only no-ops")
 	}
 }
+
+// indexShape lists every index column in the database, stand-ins included.
+func (d *planTestDB) indexShape() []string {
+	d.t.Helper()
+	rows, err := d.conn.QueryContext(d.ctx,
+		"SELECT TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX, COLUMN_NAME FROM INFORMATION_SCHEMA.STATISTICS "+
+			"WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX")
+	if err != nil {
+		d.t.Fatalf("read index shape: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var table, index, column string
+		var seq int
+		if err := rows.Scan(&table, &index, &seq, &column); err != nil {
+			d.t.Fatalf("scan index shape: %v", err)
+		}
+		out = append(out, fmt.Sprintf("%s.%s[%d]=%s", table, index, seq, column))
+	}
+	return out
+}
+
+// TestMigrationBodyPlanReplaysInterruptedPrefix is #6520 AC-6: a 0059 step
+// interrupted after part of its old (frozen) or planned body ran, with no
+// version-59 cursor row, replays through the bounded runner to the same
+// rows as an uninterrupted step, records the frozen hash, leaves no
+// stand-in, and leaves every real table's indexes as they were.
+func TestMigrationBodyPlanReplaysInterruptedPrefix(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	t.Cleanup(cancel)
+
+	frozen, err := schema.MigrationSQL(main59File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned, err := schema.PlannedMigrationSQL(main59File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A prefix ends just before marker, or with throughLine just after the
+	// line that contains it.
+	prefixes := []struct {
+		name, body, marker string
+		throughLine        bool
+	}{
+		{"frozen through stand-in creation", frozen, "SET @has_wisps", false},
+		{"frozen through stand-in copies", frozen, "-- Self-assign updated_at", false},
+		{"frozen through zeroing update", frozen, "WITH RECURSIVE", false},
+		{"planned through first stand-in index", planned, "CREATE INDEX idx_bd0059_deps_issue_type", true},
+		{"planned through all stand-in indexes", planned, "CREATE INDEX idx_bd0059_deps_type_wisp", true},
+	}
+
+	g := scaledPlanGraph()
+	wantIssues, _ := blockedModel(g)
+
+	ref := newPlanTestDB(t, ctx)
+	ref.migrateToV58I14()
+	ref.load(g)
+	if elapsed, err := ref.bounded(30*time.Second, func() error {
+		_, err := schema.MigrateUpTo(ctx, ref.conn, 59)
+		return err
+	}); err != nil {
+		t.Fatalf("uninterrupted migrate to 59 (%s): %v", elapsed.Round(time.Millisecond), err)
+	}
+	wantRows := ref.snapshotRows("issues")
+
+	for _, p := range prefixes {
+		t.Run(p.name, func(t *testing.T) {
+			d := newPlanTestDB(t, ctx)
+			d.migrateToV58I14()
+			d.load(g)
+			indexesBefore := d.indexShape()
+
+			cut := strings.Index(p.body, p.marker)
+			if cut < 0 {
+				t.Fatalf("0059 body has no %q", p.marker)
+			}
+			if p.throughLine {
+				cut += strings.Index(p.body[cut:], "\n") + 1
+			}
+			d.exec(p.body[:cut])
+			if len(d.standIns()) == 0 {
+				t.Fatalf("prefix left no stand-in; it does not model an interrupted 0059")
+			}
+			if got := schemaVersion(t, d); got != 58 {
+				t.Fatalf("schema cursor after the prefix = %d, want 58", got)
+			}
+
+			elapsed, err := d.bounded(30*time.Second, func() error {
+				_, err := schema.MigrateUpTo(ctx, d.conn, 59)
+				return err
+			})
+			if err != nil {
+				t.Fatalf("replay migrate to 59 (%s): %v", elapsed.Round(time.Millisecond), err)
+			}
+			if got := d.snapshotRows("issues"); !slices.Equal(got, wantRows) {
+				t.Errorf("issues after replay differ from the uninterrupted run")
+			}
+			requireSameIDs(t, "blocked issues after replay", d.blockedIDs("issues"), wantIssues)
+			if got := d.cursorHash("schema_migrations", 59); got != main59Hash {
+				t.Errorf("schema_migrations row 59 content_hash = %q, want the frozen file's %q", got, main59Hash)
+			}
+			if left := d.standIns(); len(left) > 0 {
+				t.Errorf("stand-ins left after replay: %v", left)
+			}
+			if got := d.indexShape(); !slices.Equal(got, indexesBefore) {
+				t.Errorf("indexes changed across the interrupted step and its replay:\nbefore: %v\nafter:  %v", indexesBefore, got)
+			}
+		})
+	}
+}
+
+func schemaVersion(t *testing.T, d *planTestDB) int {
+	t.Helper()
+	var v int
+	if err := d.conn.QueryRowContext(d.ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&v); err != nil {
+		t.Fatalf("read schema cursor: %v", err)
+	}
+	return v
+}
