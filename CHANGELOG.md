@@ -1247,6 +1247,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a formula write target (see Security). Shell environment still wins over
   the file.
 
+- `docs/reference/protected-branches.md` no longer says Dolt keeps issue data
+  "outside Git refs". It now names the refs a git-backed Dolt remote holds
+  and warns that `git push --mirror` from an ordinary clone deletes
+  `refs/dolt/data` on the remote (#5266).
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short
