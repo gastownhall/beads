@@ -612,6 +612,139 @@ func TestTrackerPushBeyondQueryBound(t *testing.T) {
 	}
 }
 
+// TestTrackerPushStaleRefFallback pins AC-5: when the referenced page is
+// missing, archived, trashed, or outside the configured source, push falls
+// back to the source-scoped Beads ID lookup — updating that match when one
+// exists, and emitting the stale-ref warning when nothing does.
+func TestTrackerPushStaleRefFallback(t *testing.T) {
+	staleRef := func(id string) string {
+		return "https://www.notion.so/stale-" + strings.ReplaceAll(id, "-", "")
+	}
+	pushOne := func(t *testing.T, tracker *Tracker, issue *types.Issue) *itracker.BatchPushResult {
+		t.Helper()
+		result, err := tracker.BatchPush(context.Background(), []*types.Issue{issue}, map[string]bool{})
+		if err != nil {
+			t.Fatalf("BatchPush returned error: %v", err)
+		}
+		return result
+	}
+
+	t.Run("missing referenced page falls back to the Beads ID match", func(t *testing.T) {
+		edited := time.Now().UTC().Add(-2 * time.Hour)
+		server := newTestNotionServer(t,
+			memberPage("aaaaaaaa-0000-0000-0000-000000000001", "bd-1", "Live", edited),
+		)
+		server.failUnfiltered = true
+		ref := staleRef("bbbbbbbb-0000-0000-0000-000000000009")
+
+		result := pushOne(t, server.tracker(), &types.Issue{
+			ID: "bd-1", Title: "Updated locally", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+			ExternalRef: &ref, UpdatedAt: time.Now().UTC(),
+		})
+		if len(result.Updated) != 1 || len(result.Created) != 0 || len(result.Skipped) != 0 {
+			t.Fatalf("result = %+v, want the Beads ID match updated", result)
+		}
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		if len(server.patches) != 1 || server.patches[0] != "aaaaaaaa-0000-0000-0000-000000000001" {
+			t.Fatalf("patches = %v, want the live member", server.patches)
+		}
+		if len(server.posts) != 0 {
+			t.Fatalf("push created %d pages over a stale ref, want none", len(server.posts))
+		}
+	})
+
+	t.Run("archived referenced page falls back", func(t *testing.T) {
+		edited := time.Now().UTC().Add(-2 * time.Hour)
+		archived := memberPage("cccccccc-0000-0000-0000-000000000001", "bd-1", "Archived twin", edited)
+		archived.Archived = true
+		server := newTestNotionServer(t,
+			archived,
+			memberPage("aaaaaaaa-0000-0000-0000-000000000001", "bd-1", "Live", edited),
+		)
+		server.failUnfiltered = true
+		ref := staleRef("cccccccc-0000-0000-0000-000000000001")
+
+		result := pushOne(t, server.tracker(), &types.Issue{
+			ID: "bd-1", Title: "Updated locally", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+			ExternalRef: &ref, UpdatedAt: time.Now().UTC(),
+		})
+		if len(result.Updated) != 1 || len(result.Created) != 0 {
+			t.Fatalf("result = %+v, want the live Beads ID match updated", result)
+		}
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		if len(server.patches) != 1 || server.patches[0] != "aaaaaaaa-0000-0000-0000-000000000001" {
+			t.Fatalf("patches = %v, want the live member, not the archived twin", server.patches)
+		}
+	})
+
+	t.Run("trashed referenced page falls back", func(t *testing.T) {
+		edited := time.Now().UTC().Add(-2 * time.Hour)
+		trashed := memberPage("cccccccc-0000-0000-0000-000000000002", "bd-1", "Trashed twin", edited)
+		trashed.InTrash = true
+		server := newTestNotionServer(t,
+			trashed,
+			memberPage("aaaaaaaa-0000-0000-0000-000000000001", "bd-1", "Live", edited),
+		)
+		server.failUnfiltered = true
+		ref := staleRef("cccccccc-0000-0000-0000-000000000002")
+
+		result := pushOne(t, server.tracker(), &types.Issue{
+			ID: "bd-1", Title: "Updated locally", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+			ExternalRef: &ref, UpdatedAt: time.Now().UTC(),
+		})
+		if len(result.Updated) != 1 || len(result.Created) != 0 {
+			t.Fatalf("result = %+v, want the live Beads ID match updated", result)
+		}
+	})
+
+	t.Run("referenced page outside the configured source falls back", func(t *testing.T) {
+		edited := time.Now().UTC().Add(-2 * time.Hour)
+		foreign := memberPage("dddddddd-0000-0000-0000-000000000001", "bd-1", "Foreign source", edited)
+		foreign.parent = memberParent("99999999-9999-9999-9999-999999999999")
+		server := newTestNotionServer(t,
+			foreign,
+			memberPage("aaaaaaaa-0000-0000-0000-000000000001", "bd-1", "Live", edited),
+		)
+		server.failUnfiltered = true
+		ref := staleRef("dddddddd-0000-0000-0000-000000000001")
+
+		result := pushOne(t, server.tracker(), &types.Issue{
+			ID: "bd-1", Title: "Updated locally", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+			ExternalRef: &ref, UpdatedAt: time.Now().UTC(),
+		})
+		if len(result.Updated) != 1 || len(result.Created) != 0 {
+			t.Fatalf("result = %+v, want the configured source's match updated", result)
+		}
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		if len(server.patches) != 1 || server.patches[0] != "aaaaaaaa-0000-0000-0000-000000000001" {
+			t.Fatalf("patches = %v, want the member page, never the foreign one", server.patches)
+		}
+	})
+
+	t.Run("both lookups miss leaves the issue skipped with the warning", func(t *testing.T) {
+		server := newTestNotionServer(t)
+		server.failUnfiltered = true
+		ref := staleRef("bbbbbbbb-0000-0000-0000-000000000009")
+
+		result := pushOne(t, server.tracker(), &types.Issue{
+			ID: "bd-1", Title: "Unlinked", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+			ExternalRef: &ref, UpdatedAt: time.Now().UTC(),
+		})
+		if len(result.Skipped) != 1 || result.Skipped[0] != "bd-1" {
+			t.Fatalf("skipped = %+v, want bd-1", result.Skipped)
+		}
+		if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "outside the current target") {
+			t.Fatalf("warnings = %+v, want the stale-ref warning", result.Warnings)
+		}
+		if len(result.Created) != 0 || len(result.Updated) != 0 {
+			t.Fatalf("result = %+v, want no writes over a doubly-missing reference", result)
+		}
+	})
+}
+
 func titles(issues []itracker.TrackerIssue) []string {
 	result := make([]string, 0, len(issues))
 	for _, issue := range issues {
