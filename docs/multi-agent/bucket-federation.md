@@ -193,14 +193,16 @@ dolt config --global --add user.email "you@example.com"
 
 ### Auth works in the shell but sync fails in server mode
 
-With an external Dolt SQL server, `CALL DOLT_PUSH/PULL` runs *inside the
-server process*, which only has the environment it inherited at startup.
-Credentials exported afterwards never reach it. bd detects cloud credentials
-matching the remote's scheme (`GOOGLE_*`/`GCS_*` for `gs://`, `AWS_*` for
-`s3://`/`aws://`, `AZURE_STORAGE_*` for `az://`) and routes push/pull through
-a `dolt` CLI subprocess, which inherits the current environment. If sync still
-cannot authenticate, restart the server with the credentials in its
-environment.
+With a Dolt SQL server, push and pull run *inside the server process*, which
+only has the environment it inherited at startup. Credentials exported
+afterwards never reach it. That holds for the `dolt` CLI route too: when bd
+sees cloud credentials matching the remote's scheme (`GOOGLE_*`/`GCS_*` for
+`gs://`, `AWS_*` for `s3://`/`aws://`, `AZURE_STORAGE_*` for `az://`) it runs
+`dolt` in the database directory, and there `dolt` hands the transfer to the
+server. Restart the server from a shell that has the credentials: for the
+server bd started, `bd dolt stop`, then `bd dolt start`; for any other server,
+set them in its environment and restart it. See
+[Remote credentials in server mode](/architecture/dolt#remote-credentials-in-server-mode).
 
 ### The remote is named something other than `origin`
 

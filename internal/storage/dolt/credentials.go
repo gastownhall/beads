@@ -719,9 +719,13 @@ func (s *DoltStore) shouldUseCLIForPeerCredentialsWithError(ctx context.Context,
 // shouldUseCLIForCredentials returns true when CLI subprocess routing should
 // be used instead of SQL path for credential-bearing push/pull operations.
 //
-// When true, callers should route through doltCLIPush/Pull instead of
-// CALL DOLT_PUSH/PULL, because withEnvCredentials() sets env vars on the
-// bd client process — the external server process cannot see them.
+// When true, callers route through doltCLIPush/Pull instead of
+// CALL DOLT_PUSH/PULL. The route keeps the CLI's transfer timeout and the
+// pre-push fsck; it does not deliver the password. The CLI runs only in a
+// database directory the server holds (hasCLIDatabase), where it hands the
+// transfer to that server, which reads DOLT_REMOTE_PASSWORD from the
+// environment it was started with, not from the child's cmd.Env (GH#8210;
+// serverCredentialsNote). Per-call password delivery is #5953.
 //
 // Returns true when ALL conditions are met:
 //  1. Credentials exist (remoteUser or remotePassword non-empty)
@@ -790,9 +794,11 @@ func (s *DoltStore) shouldUseCLIForLocalRemoteWithError(ctx context.Context, rem
 // relevant to the remote's scheme are checked, preventing misrouting when
 // multiple remotes use different cloud providers (e.g., DoltHub + Azure).
 //
-// The CLI subprocess inherits the current process env, so these env vars
-// reach the dolt binary. The SQL server process may not have them if it was
-// started in a different context (GH#6).
+// They pick the CLI route and name what serverCredentialsNote reports. With
+// a Dolt sql-server they do not reach the transfer: the CLI runs only in a
+// database directory the server holds, and hands the transfer to that
+// server, which reads them from the environment it was started with
+// (GH#6, GH#8210).
 var cloudAuthSchemeMap = map[string][]string{
 	"az://":      {"AZURE_STORAGE_"},  // Azure Blob Storage
 	"aws://":     {"AWS_"},            // Dolt AWS remotes (S3 + DynamoDB)
@@ -846,12 +852,13 @@ func envPrefixesForRemoteURL(url string) []string {
 // present, bd materializes the same remote into the local CLI directory before
 // routing to the CLI subprocess.
 //
-// When bd connects to an external dolt-sql-server (server mode), CALL
-// DOLT_PUSH/PULL executes inside the server process. That process only has
-// the env vars it inherited at startup. If cloud credentials were set (or
-// changed) after the server started, the SQL path silently fails to
-// authenticate. Routing through a CLI subprocess (dolt push/pull) ensures
-// the child process inherits the current environment (GH#6).
+// When bd connects to a dolt sql-server (server mode), CALL DOLT_PUSH/PULL
+// executes inside the server process, which only has the env vars it
+// inherited at startup. The CLI route (GH#6) does not change that: the CLI
+// runs only in a database directory the server holds (hasCLIDatabase), and
+// there it hands the transfer to the server (GH#8210). The route keeps the
+// CLI's timeout and fsck; the credentials must be in the server's startup
+// environment (serverCredentialsNote says so on a failed transfer).
 func (s *DoltStore) shouldUseCLIForCloudAuth(ctx context.Context, remote string) bool {
 	ok, err := s.prepareCLIRouteForCloudAuth(ctx, remote)
 	if err != nil {

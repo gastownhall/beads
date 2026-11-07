@@ -91,6 +91,11 @@ Credentials are encrypted and stored locally. They are used automatically
 when syncing with the peer. If --user is provided without --password,
 you will be prompted for the password interactively.
 
+With a Dolt SQL server, the sync runs in the server's process: bd passes the
+user, but the server reads DOLT_REMOTE_PASSWORD from the environment it was
+started with, not the stored password, and one server-wide password cannot
+serve peers that need different ones.
+
 Examples:
   bd federation add-peer town-beta dolthub://acme/town-beta-beads
   bd federation add-peer town-gamma 192.168.1.100:3306/beads --user sync-bot

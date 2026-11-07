@@ -109,6 +109,12 @@ Stored credentials are used automatically during sync:
 bd federation add-peer town-gamma 192.168.1.100:3306/beads --user sync-bot
 ```
 
+With a Dolt SQL server, the sync runs in the server's process. bd passes the
+peer's user, but the server reads `DOLT_REMOTE_PASSWORD` from the environment
+it was started with, not the password bd stores, and one server-wide password
+cannot serve peers that need different ones. See
+[Remote credentials in server mode](/architecture/dolt#remote-credentials-in-server-mode).
+
 ### JSON Output
 
 For scripting, use the `--json` flag:

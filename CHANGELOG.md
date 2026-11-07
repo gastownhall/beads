@@ -1208,6 +1208,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A server-mode push, pull or fetch that fails now says where the server
+  takes its remote credentials from (GH#8210).** With a Dolt SQL server the
+  transfer runs in the server's process, on the SQL route and on the `dolt`
+  CLI route alike (the CLI in a database directory the server holds hands it
+  to the server), and that process reads `DOLT_REMOTE_PASSWORD` and the cloud
+  variables (`AWS_*`, `GOOGLE_*`/`GCS_*`, `AZURE_STORAGE_*`, `OCI_*`) from the
+  environment it was started with, never from bd's. The failure keeps its
+  cause and adds that, for a remote or federation peer bd holds a user for, or
+  whose cloud variables bd's environment has: that a password bd holds is not
+  forwarded, that one server-wide password cannot serve different peers, and
+  how to restart the server with them (`bd dolt stop`, then `bd dolt start`
+  from a shell that exports them, only for the server bd proves it started;
+  otherwise set them in the server's own environment). Timeouts, cancellation,
+  the pre-push fsck, a refused `dolt` binary, git-protocol and file remotes are
+  unchanged. Sending a password per call stays open (#5953).
+- **The SQL route now passes the user bd holds for a federation peer.** A
+  push, pull or fetch to a peer added with `--user` ran `CALL DOLT_PUSH`,
+  `DOLT_PULL` or `DOLT_FETCH` without `--user`, so the server never sent it.
+  It now passes `--user`, as the default remote's push and pull already did,
+  and so do the fetch of a pull's branch-tracking fallback and the
+  pull-landed check's refresh.
+
 - `bd config set`, `bd config unset`, `bd repo add` and `bd repo remove` now
   replace an existing `config.yaml` in one step (temp file in the same
   directory, fsync, rename) instead of truncating and rewriting it in place.

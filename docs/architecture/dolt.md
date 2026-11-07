@@ -586,11 +586,43 @@ bd dolt pull
 remotes are the source of truth for `bd dolt remote list`, `bd dolt push`, and
 `bd dolt pull`.
 
-For git-protocol remotes, credentialed external-server remotes, and cloud
-remotes whose credentials are only present in the current shell, `bd dolt push`
-and `bd dolt pull` automatically materialize a matching local CLI remote before
-using the `dolt` CLI transport. The CLI remote is a local transport mirror, not
-a separate configuration source.
+For git-protocol remotes, credentialed remotes, and cloud remotes whose
+credentials are set in the current shell, `bd dolt push` and `bd dolt pull`
+automatically materialize a matching local CLI remote before using the `dolt`
+CLI transport. The CLI remote is a local transport mirror, not a separate
+configuration source.
+
+### Remote credentials in server mode
+
+With a Dolt SQL server, every push, pull and fetch runs in the server's
+process. `CALL DOLT_PUSH`/`PULL`/`FETCH` run there, and the `dolt` CLI that bd
+runs in a database directory the server holds hands the transfer to the
+server. That process reads `DOLT_REMOTE_PASSWORD` and the cloud variables of
+the remote's scheme (`AWS_*`, `GOOGLE_*`/`GCS_*`, `AZURE_STORAGE_*`, `OCI_*`)
+from the environment it was started with:
+
+- Variables you export after the server started never reach it.
+- bd passes the user it holds for a remote with `--user`, but the server
+  takes the password from its own startup environment. A password bd stores
+  (`bd federation add-peer --password`, the credentials file) is not
+  forwarded to the server.
+- One server has one `DOLT_REMOTE_PASSWORD`, which goes with every user bd
+  passes, so peers that need different passwords cannot all authenticate
+  through the same server.
+
+To give the server credentials, start it with them. For the server bd
+starts for your workspace:
+
+```bash
+bd dolt stop
+export DOLT_REMOTE_PASSWORD=...   # or the cloud variables your remote needs
+bd dolt start
+```
+
+For a server bd did not start (an external or shared server), set the
+variables in that server's environment and restart it with its own tooling.
+Sending a password per call, or a different password per peer, is not
+supported yet ([#5953](https://github.com/gastownhall/beads/issues/5953)).
 
 If you are upgrading from an older beads version and previously added remotes
 with raw `dolt remote add`, re-register them with `bd dolt remote add <name>
@@ -744,7 +776,7 @@ dolt:
 | `BEADS_DOLT_SERVER_USER` | MySQL connection user |
 | `BEADS_DOLT_SHARED_SERVER` | Enable shared server mode (set to "1" or "true") |
 | `DOLT_REMOTE_USER` | Clone/push/pull auth user |
-| `DOLT_REMOTE_PASSWORD` | Clone/push/pull auth password |
+| `DOLT_REMOTE_PASSWORD` | Clone/push/pull auth password (with a Dolt SQL server, read from the server's startup environment; see [Remote credentials in server mode](#remote-credentials-in-server-mode)) |
 | `BD_DOLT_AUTO_COMMIT` | Override auto-commit setting |
 
 **Note:** `BEADS_DOLT_SERVER_PORT` (and the legacy `BEADS_DOLT_PORT`) do more
