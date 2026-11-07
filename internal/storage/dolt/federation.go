@@ -185,12 +185,12 @@ func (s *DoltStore) Fetch(ctx context.Context, peer string) error {
 		} else if useCLI {
 			return s.doltCLIFetchFromPeer(ctx, peer, creds)
 		}
-		return withEnvCredentials(creds, func() error {
+		return s.withServerEnvNote(ctx, "DOLT_FETCH", peer, nil, withEnvCredentials(creds, func() error {
 			if err := s.execWithLongTimeout(ctx, "CALL DOLT_FETCH(?)", peer); err != nil {
-				return fmt.Errorf("failed to fetch from peer %s: %w", peer, err)
+				return fmt.Errorf("failed to fetch from peer %s: %w", peer, remoteTransferFailure(err))
 			}
 			return nil
-		})
+		}))
 	})
 }
 
