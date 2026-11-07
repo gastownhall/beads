@@ -1,7 +1,10 @@
 package beads
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
+	"strings"
 	"testing"
 )
 
@@ -294,5 +297,159 @@ func TestWindowsPathInSafeBoundary_Profiles(t *testing.T) {
 		`C:\Users`:              true,
 		`C:\Users\alice\.beads`: false,
 		`D:\beads`:              true,
+	})
+}
+
+// winFakeEntry is one existing entry of a fake Windows filesystem: its final
+// physical path ("" for itself), whether it is a file, and an error to report
+// instead (a dangling link, access denied).
+type winFakeEntry struct {
+	final string
+	file  bool
+	err   error
+}
+
+// winFakeFS is an injected winResolver over a fixed set of entries, keyed
+// case-insensitively. Entries not listed do not exist.
+func winFakeFS(entries map[string]winFakeEntry) winResolver {
+	byKey := map[string]winFakeEntry{}
+	for k, e := range entries {
+		byKey[strings.ToLower(k)] = e
+	}
+	return func(path string) (string, bool, error) {
+		e, ok := byKey[strings.ToLower(path)]
+		if !ok {
+			return "", false, fs.ErrNotExist
+		}
+		if e.err != nil {
+			return "", false, e.err
+		}
+		if e.final == "" {
+			return `\\?\` + path, !e.file, nil
+		}
+		return e.final, !e.file, nil
+	}
+}
+
+var (
+	errWinFakeDangling = errors.New("fake dangling link")
+	errWinFakeAccess   = errors.New("fake access denied")
+)
+
+func TestWindowsBoundaryPhysical(t *testing.T) {
+	b := newWindowsBoundary(windowsFacts{Resolve: winFakeFS(map[string]winFakeEntry{
+		`C:\`:                {},
+		`D:\`:                {},
+		`D:\work`:            {},
+		`D:\work\link`:       {final: `\\?\C:\Windows`},
+		`D:\work\file.txt`:   {file: true},
+		`D:\work\dangling`:   {err: errWinFakeDangling},
+		`D:\work\locked`:     {err: errWinFakeAccess},
+		`C:\PROGRA~1`:        {final: `\\?\C:\Program Files`},
+		`X:\`:                {final: `\\?\C:\Users\bob`},
+		`\\srv\share`:        {final: `\\?\UNC\srv\share`},
+		`\\srv\share\linked`: {final: `\\?\UNC\other\data\linked`},
+	})})
+	for in, want := range map[string]string{
+		`D:\work`:                          `D:\work`,
+		`d:\WORK\new\.beads`:               `D:\WORK\new\.beads`, // missing tail kept as named
+		`D:\work\link`:                     `C:\Windows`,
+		`D:\work\link\System32\new\.beads`: `C:\Windows\System32\new\.beads`,
+		`C:\PROGRA~1\tool`:                 `C:\Program Files\tool`,
+		`X:\proj\.beads`:                   `C:\Users\bob\proj\.beads`,
+		`\\srv\share\linked\.beads`:        `\\other\data\linked\.beads`,
+		`D:\work\file.txt`:                 `D:\work\file.txt`,
+	} {
+		p, _ := winCleanPath(in)
+		got, ok := b.physical(p)
+		if !ok || got.String() != want {
+			t.Errorf("physical(%q) = %q, %v; want %q, true", in, got.String(), ok, want)
+		}
+	}
+	// Failures are never walked past: a dangling link, an access error, a
+	// file with a tail below it, and a volume that does not exist.
+	for _, in := range []string{
+		`D:\work\dangling`, `D:\work\dangling\new\.beads`,
+		`D:\work\locked\.beads`,
+		`D:\work\file.txt\.beads`,
+		`Q:\work\.beads`, `\\nosuch\share\.beads`,
+	} {
+		p, _ := winCleanPath(in)
+		if got, ok := b.physical(p); ok {
+			t.Errorf("physical(%q) = %q, true; want unresolved", in, got.String())
+		}
+	}
+	// Without a resolver nothing resolves.
+	p, _ := winCleanPath(`D:\work`)
+	if _, ok := newWindowsBoundary(windowsFacts{}).physical(p); ok {
+		t.Errorf("physical without a resolver resolved")
+	}
+}
+
+// AC-2: an existing alias into a denied system directory or another user's
+// profile (junction, symlink, short name, subst drive) is denied by its
+// physical location, also for a not-yet-created descendant.
+func TestWindowsPathInSafeBoundary_PhysicalAlias(t *testing.T) {
+	b := newWindowsBoundary(windowsFacts{
+		ProfilesDir: `C:\Users`,
+		Home:        `C:\Users\alice`,
+		Getenv:      winEnv(map[string]string{"ProgramFiles": `C:\PF`}),
+		Resolve: winFakeFS(map[string]winFakeEntry{
+			`C:\`:                       {},
+			`D:\`:                       {},
+			`C:\Windows`:                {},
+			`C:\Users`:                  {},
+			`C:\Users\alice`:            {},
+			`C:\Users\bob`:              {},
+			`D:\work`:                   {},
+			`D:\work\winlink`:           {final: `\\?\C:\Windows`},
+			`D:\work\bobjunction`:       {final: `\\?\C:\Users\bob`},
+			`C:\PROGRA~1`:               {final: `\\?\C:\Program Files`},
+			`C:\PF`:                     {final: `\\?\E:\RealPF`}, // relocated system root
+			`C:\Users\ALICE~1`:          {final: `\\?\C:\Users\alice`},
+			`C:\Users\BOB~1`:            {final: `\\?\C:\Users\bob`},
+			`C:\Users\carol`:            {final: `\\?\E:\carol-data`}, // relocated peer profile
+			`C:\Users\alice\to-bob`:     {final: `\\?\C:\Users\bob\proj`},
+			`C:\Users\alice\deps`:       {final: `\\?\D:\deps`},
+			`X:\`:                       {final: `\\?\C:\Users\bob`},
+			`Y:\`:                       {final: `\\?\C:\Windows\System32`},
+			`\\srv\share`:               {},
+			`\\srv\share\sys`:           {final: `\\?\C:\Windows`},
+			`D:\work\dangling`:          {err: errWinFakeDangling},
+			`C:\Windows\dangling`:       {err: errWinFakeDangling},
+			`C:\Users\alice\locked`:     {err: errWinFakeAccess},
+			`C:\Users\dave`:             {err: errWinFakeAccess},
+			`D:\work\aliceAlias`:        {final: `\\?\C:\Users\alice`},
+			`D:\work\aliceAlias\nested`: {final: `\\?\C:\Users\alice\nested`},
+		}),
+	})
+	winBoundaryCheck(t, b, map[string]bool{
+		// Aliases into system roots.
+		`D:\work\winlink`:                     false,
+		`D:\work\winlink\System32\new\.beads`: false,
+		`C:\PROGRA~1\beads`:                   false,
+		`C:\PROGRA~1\new\.beads`:              false,
+		`Y:\.beads`:                           false,
+		`\\srv\share\sys\new\.beads`:          false,
+		`E:\RealPF\tool\.beads`:               false, // physical form of a system root
+		`C:\PF\tool`:                          false,
+		`C:\Windows\dangling\.beads`:          false, // unresolved: named form decides
+		// Aliases into another user's profile.
+		`D:\work\bobjunction`:            false,
+		`D:\work\bobjunction\new\.beads`: false,
+		`X:\.beads`:                      false,
+		`C:\Users\BOB~1\.beads`:          false,
+		`C:\Users\alice\to-bob\.beads`:   false,
+		`C:\Users\carol\.beads`:          false, // a relocated peer is still a peer
+		`C:\Users\dave\.beads`:           false, // unresolved peer
+		// Aliases of the current home resolve into it and stay admitted.
+		`C:\Users\ALICE~1\src\.beads`:   true,
+		`D:\work\aliceAlias\src\.beads`: true,
+		`C:\Users\alice\deps\.beads`:    true,
+		`C:\Users\alice\locked\.beads`:  true, // unresolved: named form decides
+		// Ordinary paths: physical or (unresolved) named form.
+		`D:\work\.beads`:          true,
+		`D:\work\dangling\.beads`: true,
+		`Q:\offline\.beads`:       true,
 	})
 }

@@ -1,6 +1,8 @@
 package beads
 
 import (
+	"errors"
+	"io/fs"
 	"strings"
 	"unicode/utf8"
 )
@@ -44,6 +46,8 @@ type windowsFacts struct {
 	ProfilesDir string
 	// Home is the current user's home directory, "" when unknown.
 	Home string
+	// Resolve finds physical locations; nil resolves nothing.
+	Resolve winResolver
 }
 
 // winPath is a cleaned absolute Windows path in comparison form: vol is a
@@ -187,13 +191,43 @@ func winUNCVolume(s string) (vol, rest string, ok bool) {
 	return `\\` + server + `\` + share, rest, true
 }
 
+// winResolver opens an existing path, following links, and returns its final
+// physical path and whether it is a directory. An error matching
+// fs.ErrNotExist proves the entry absent; any other error (a dangling link,
+// access denied, an unavailable volume) leaves the path unresolved.
+type winResolver func(path string) (final string, isDir bool, err error)
+
+// winRoot is a policy root in both spellings: as named, and its physical
+// location when that resolved.
+type winRoot struct {
+	lex      winPath
+	phys     winPath
+	resolved bool
+}
+
+func (r winRoot) String() string {
+	return r.lex.String()
+}
+
+// contains reports whether p is within either spelling of the root.
+func (r winRoot) contains(p winPath) bool {
+	return p.within(r.lex) || (r.resolved && p.within(r.phys))
+}
+
+// strictlyContains is contains without the root itself.
+func (r winRoot) strictlyContains(p winPath) bool {
+	return (p.within(r.lex) && len(p.comps) > len(r.lex.comps)) ||
+		(r.resolved && p.within(r.phys) && len(p.comps) > len(r.phys.comps))
+}
+
 // windowsBoundary is the Windows policy built from one set of host facts.
 type windowsBoundary struct {
-	system   []winPath
-	profiles []winPath
+	resolve  winResolver
+	system   []winRoot
+	profiles []winRoot
 	// home is the current user's home, nil when unknown. An unknown home
 	// admits no private profile at all.
-	home *winPath
+	home *winRoot
 }
 
 func newWindowsBoundary(f windowsFacts) *windowsBoundary {
@@ -201,12 +235,12 @@ func newWindowsBoundary(f windowsFacts) *windowsBoundary {
 	if getenv == nil {
 		getenv = func(string) string { return "" }
 	}
-	b := &windowsBoundary{}
+	b := &windowsBoundary{resolve: f.Resolve}
 	addSystem := func(s string) {
 		// Malformed values and volume roots are discarded: a root of C:\
 		// would deny the whole drive.
 		if p, ok := winCleanPath(s); ok && !p.isVolumeRoot() {
-			b.system = append(b.system, p)
+			b.system = append(b.system, b.root(p))
 		}
 	}
 	for _, s := range winFixedSystemRoots {
@@ -223,7 +257,7 @@ func newWindowsBoundary(f windowsFacts) *windowsBoundary {
 	// arbitrary home would turn sibling projects into "peer profiles".
 	addProfile := func(s string) {
 		if p, ok := winCleanPath(s); ok && !p.isVolumeRoot() {
-			b.profiles = append(b.profiles, p)
+			b.profiles = append(b.profiles, b.root(p))
 		}
 	}
 	addProfile(`C:\Users`)
@@ -235,20 +269,62 @@ func newWindowsBoundary(f windowsFacts) *windowsBoundary {
 	if homeOK && len(home.comps) >= 2 && strings.EqualFold(home.comps[len(home.comps)-2], "Users") {
 		addProfile(winPath{vol: home.vol, comps: home.comps[:len(home.comps)-1]}.String())
 	}
-	// A home that is a volume root or sits at or above a profile parent
-	// would exempt every profile below it, so it counts as unknown.
+	// A home that is a volume root or sits at or above a profile parent, in
+	// either spelling, would exempt every profile below it, so it counts as
+	// unknown.
 	if homeOK && !home.isVolumeRoot() {
+		h := b.root(home)
 		for _, r := range b.profiles {
-			if r.within(home) {
+			if h.contains(r.lex) || (r.resolved && h.contains(r.phys)) {
 				homeOK = false
 				break
 			}
 		}
 		if homeOK {
-			b.home = &home
+			b.home = &h
 		}
 	}
 	return b
+}
+
+func (b *windowsBoundary) root(p winPath) winRoot {
+	phys, ok := b.physical(p)
+	return winRoot{lex: p, phys: phys, resolved: ok}
+}
+
+// physical resolves p to its physical location. Trailing components proven
+// absent are carried over onto the longest existing ancestor, which must be a
+// directory, so a not-yet-created BEADS_DIR still resolves through a link
+// above it. Any other failure leaves p unresolved: walking above an entry
+// that exists but cannot be resolved would erase exactly the link that
+// matters.
+func (b *windowsBoundary) physical(p winPath) (winPath, bool) {
+	if b.resolve == nil {
+		return winPath{}, false
+	}
+	cur := p
+	var missing []string
+	for {
+		final, isDir, err := b.resolve(cur.String())
+		if err == nil {
+			if len(missing) > 0 && !isDir {
+				return winPath{}, false
+			}
+			fp, ok := winCleanPath(final)
+			if !ok {
+				return winPath{}, false
+			}
+			fp.comps = append(fp.comps[:len(fp.comps):len(fp.comps)], missing...)
+			return fp, true
+		}
+		if !errors.Is(err, fs.ErrNotExist) || cur.isVolumeRoot() {
+			// A missing volume root means an unavailable volume.
+			return winPath{}, false
+		}
+		last := len(cur.comps) - 1
+		missing = append([]string{cur.comps[last]}, missing...)
+		cur = winPath{vol: cur.vol, comps: cur.comps[:last]}
+	}
 }
 
 // inPeerProfile reports whether p lies inside a user profile other than the
@@ -256,7 +332,7 @@ func newWindowsBoundary(f windowsFacts) *windowsBoundary {
 // admitted, as /home is on POSIX) and outside the current home.
 func (b *windowsBoundary) inPeerProfile(p winPath) bool {
 	for _, r := range b.profiles {
-		if p.within(r) && len(p.comps) > len(r.comps) && (b.home == nil || !p.within(*b.home)) {
+		if r.strictlyContains(p) && (b.home == nil || !b.home.contains(p)) {
 			return true
 		}
 	}
@@ -264,7 +340,9 @@ func (b *windowsBoundary) inPeerProfile(p winPath) bool {
 }
 
 // allows reports whether a guard input (as given, and its absolute form) lies
-// outside every denied Windows location.
+// outside every denied Windows location. Both the path as named and its
+// physical location count; when resolution fails, the named form alone
+// decides (the boundary is best effort, as on POSIX).
 func (b *windowsBoundary) allows(input, abs string) bool {
 	if !winInputSpellingOK(input) {
 		return false
@@ -273,12 +351,29 @@ func (b *windowsBoundary) allows(input, abs string) bool {
 	if !ok {
 		return false
 	}
+	phys, resolved := b.physical(p)
+	forms := []winPath{p}
+	if resolved {
+		forms = append(forms, phys)
+	}
 	for _, r := range b.system {
-		if p.within(r) {
-			return false
+		for _, q := range forms {
+			if r.contains(q) {
+				return false
+			}
 		}
 	}
-	return !b.inPeerProfile(p)
+	// A path physically inside another user's profile is denied however it
+	// is named. A path named inside another user's profile is denied unless
+	// it is an alias (a short name, say) that resolves into the current home:
+	// a peer profile relocated elsewhere is still a peer profile.
+	if resolved && b.inPeerProfile(phys) {
+		return false
+	}
+	if b.inPeerProfile(p) {
+		return resolved && b.home != nil && b.home.contains(phys)
+	}
+	return true
 }
 
 // windowsPathInSafeBoundary is isPathInSafeBoundary on Windows.
