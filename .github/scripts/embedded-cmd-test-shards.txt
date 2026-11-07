@@ -44,6 +44,7 @@
 
 100 10 TestEmbeddedCreateScalarAndRelationships
 
+100 11 TestEmbeddedInitReinitLocalNonInteractiveTakesTokenPath
 100 11 TestEmbeddedKVConcurrent
 
 100 12 TestEmbeddedAutoImportFallback_ConflictSkip_SkipsRetiredRows
@@ -173,6 +174,7 @@
 
 100 41 TestEmbeddedCompactAbortsDivergentReplay
 100 41 TestEmbeddedDuplicateConcurrent
+100 41 TestEmbeddedInitReinitLocalRefusesDatabaseRepoint
 100 41 TestEmbeddedVersionedHistoryFollowsTheStoreItWritesInto
 
 100 42 TestEmbeddedCompactMisdatedOldWindow
@@ -485,7 +487,9 @@
 100 84 TestEmbeddedDeleteCascadeFollowsOnlyParentChild
 100 84 TestEmbeddedDoltRemoteAdd_GitOriginCollision_Exits1
 100 84 TestEmbeddedInitGitBootstrapRoutingDecoyInvalid
+100 84 TestEmbeddedInitReinitLocalAuthorizedSwitch
 100 84 TestEmbeddedInitSelectedExcludeRoutingStealthInvalid
+100 84 TestEmbeddedInitSkipGitCommit
 100 84 TestEmbeddedMigratePersonal_preservesComments
 
 100 85 TestEmbeddedBootstrapExistingDryRunInit
@@ -499,6 +503,7 @@
 100 86 TestEmbeddedDoltRemoteAdd_DifferentURL_ProceedsNormally
 100 86 TestEmbeddedExplicitHierarchicalParentEdges
 100 86 TestEmbeddedInitHooksRouting
+100 86 TestEmbeddedInitReinitLocalDestroyTokenAuthorizesRepoint
 100 86 TestEmbeddedMigratePersonal_noopWhenEmpty
 
 100 87 TestEmbeddedCreateRepoProxiedTargetError
