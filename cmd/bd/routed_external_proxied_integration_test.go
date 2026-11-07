@@ -4,11 +4,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // Routed reads into a proxied-server rig whose sidecar names an external Dolt
@@ -104,6 +108,71 @@ func TestProxiedServerRoutedExternalTargetInProcess(t *testing.T) {
 		}
 		if !result.Routed {
 			t.Error("result not marked routed")
+		}
+	})
+
+	// AC-2 (direct launcher) and AC-5 (absent bead): the routed gate lookup
+	// reports the target's actual state, and an absent bead as unconfirmed.
+	t.Run("gate_lookup_reports_target_state", func(t *testing.T) {
+		routeExternalRig(t, a.dir, bCopy, "rlb")
+		issue, err := prefixRoutedBeadGateTarget(ctx, target.ID)
+		if err != nil || issue == nil || issue.Status != types.StatusOpen {
+			t.Fatalf("gate lookup of open %s = %+v, %v; want it open", target.ID, issue, err)
+		}
+		gateTarget := bdProxiedCreate(t, bd, b.dir, "Closed external target")
+		bdProxiedClose(t, bd, b.dir, gateTarget.ID)
+		issue, err = prefixRoutedBeadGateTarget(ctx, gateTarget.ID)
+		if err != nil || issue == nil || issue.Status != types.StatusClosed {
+			t.Fatalf("gate lookup of closed %s = %+v, %v; want it closed", gateTarget.ID, issue, err)
+		}
+		issue, err = prefixRoutedBeadGateTarget(ctx, "rlb-nosuchbead")
+		if issue != nil || !errors.Is(err, errBeadGateTargetUnconfirmed) || !strings.Contains(err.Error(), `no issue found matching "rlb-nosuchbead"`) {
+			t.Fatalf("gate lookup of an absent bead = %+v, %v; want it unconfirmed", issue, err)
+		}
+	})
+}
+
+// TestProxiedServerGateRoutedExternalTarget drives bd gate check and bd close
+// in proxied-server rig A on gates awaiting beads in external proxied-server
+// rig B, reached through A's routes.jsonl.
+func TestProxiedServerGateRoutedExternalTarget(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	// AC-2: gate check leaves the gate pending on B's open bead, for that
+	// reason, and resolves it once the bead closes.
+	t.Run("gate_check_follows_target_state", func(t *testing.T) {
+		t.Parallel()
+		a := newSharedProxiedProject(t, bd, "rga")
+		b := newSharedProxiedProject(t, bd, "rgb")
+		routeExternalRig(t, a.dir, b.dir, "rgb")
+		target := bdProxiedCreate(t, bd, b.dir, "Awaited external bead")
+		gate := bdProxiedCreate(t, bd, a.dir, "Cross-rig bead gate", "--type", "gate")
+		db := openProxiedDB(t, a)
+		seedGateAwait(t, db, gate.ID, "bead", target.ID, time.Now().UTC(), 0)
+
+		out, stderr, err := bdProxiedRunBuffers(t, bd, a.dir, "gate", "check", "--type", "bead")
+		if err != nil {
+			t.Fatalf("gate check (target open) failed: %v\nstderr:\n%s", err, stderr)
+		}
+		if got := readStatus(t, db, gate.ID); got == types.StatusClosed {
+			t.Fatal("gate resolved while its external target is open")
+		}
+		if combined := out + stderr; strings.Contains(combined, "cannot confirm") || strings.Contains(combined, "proxied-server route") {
+			t.Fatalf("gate pending because its target could not be read, not because it is open:\n%s", combined)
+		}
+
+		bdProxiedClose(t, bd, b.dir, target.ID)
+		out, stderr, err = bdProxiedRunBuffers(t, bd, a.dir, "gate", "check", "--type", "bead")
+		if err != nil {
+			t.Fatalf("gate check (target closed) failed: %v\nstderr:\n%s", err, stderr)
+		}
+		if got := readStatus(t, db, gate.ID); got != types.StatusClosed {
+			t.Fatalf("gate should resolve once its external target closes, got %q\nstdout:\n%s\nstderr:\n%s", got, out, stderr)
+		}
+		if !strings.Contains(out, "1 resolved") {
+			t.Errorf("expected 1 resolved, got:\n%s", out)
 		}
 	})
 }
