@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/execenv"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
@@ -85,6 +86,74 @@ type exportAutoState struct {
 const exportAutoStateFile = "export-state.json"
 const gitAddTimeout = 5 * time.Second
 
+// autoExportPath is the JSONL file auto-export writes in beadsDir.
+func autoExportPath(beadsDir string) string {
+	exportPath := config.GetString("export.path")
+	if exportPath == "" {
+		if globalFlag {
+			exportPath = "global-issues.jsonl"
+		} else {
+			exportPath = "issues.jsonl"
+		}
+	}
+	return filepath.Join(beadsDir, exportPath)
+}
+
+// autoExportCommand is the top-level command (topLevelCommandName) whose
+// post-run maintenance is running auto-export. PersistentPostRunE sets it
+// for that call only, so a direct call of maybeAutoExport reads "".
+var autoExportCommand string
+
+// noteAutoExportDefaultOff explains, on stderr, why a workspace that
+// auto-exported before v1.0.5 no longer refreshes its JSONL: #4063 made
+// export.auto opt-in, and a workspace that never set the key went silent
+// (GH#4887). It only reads; it never writes state, config or the JSONL.
+//
+// It speaks only while export.auto comes from the default (any explicit
+// value is a choice already made) and both export-state.json, which every
+// auto-export saves, and the JSONL exist: together they show this workspace
+// has a JSONL that auto-export used to refresh. Quiet, JSON and hook-JSON
+// output keep it silent, as they do the other advisory notices, and so do
+// the commands that never show the metrics first-run notice
+// (firstRunNoticeSuppressedCommands). `bd prime` is one of them: it opens
+// the store for memories, and the Codex and Cursor session hooks run it and
+// put its stderr in the agent's context.
+func noteAutoExportDefaultOff() {
+	if isQuiet() || jsonOutput || primeHookJSONMode || firstRunNoticeSuppressedCommands[autoExportCommand] {
+		return
+	}
+	if config.GetValueSource("export.auto") != config.SourceDefault {
+		return
+	}
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return
+	}
+	// `bd config set` writes YAML without updating the loaded config, so the
+	// invocation that records a choice still reads the default above. Ask the
+	// workspace files themselves; one that cannot be read gets no advice.
+	if _, present, err := config.WorkspaceYamlSettingWithLocal(beadsDir, "export.auto"); err != nil || present {
+		if err != nil {
+			debug.Logf("auto-export: default-off note skipped: %v\n", err)
+		}
+		return
+	}
+	fullPath := autoExportPath(beadsDir)
+	for _, path := range []string{filepath.Join(beadsDir, exportAutoStateFile), fullPath} {
+		info, err := os.Stat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			return
+		}
+	}
+	// export.path comes from the clone's config.yaml, and the note prints it
+	// beside two paste-ready commands.
+	fmt.Fprintf(os.Stderr,
+		"Info: auto-export is off by default since bd v1.0.5; %s is no longer refreshed automatically. "+
+			"Re-enable with: bd config set export.auto true "+
+			"(keep it off and silence this note: bd config set export.auto false)\n",
+		remedy.PrintedValue(fullPath))
+}
+
 // maybeAutoExport writes a git-tracked JSONL file if enabled and due.
 // Called from PersistentPostRun after auto-backup.
 //
@@ -99,13 +168,17 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 		return nil
 	}
 
-	if !config.GetBool("export.auto") {
-		return nil
-	}
+	// The store guards come before the export.auto check so the default-off
+	// notice below only reaches commands that opened a store.
 	if store == nil {
 		return nil
 	}
 	if lm, ok := storage.UnwrapStore(store).(storage.LifecycleManager); ok && lm.IsClosed() {
+		return nil
+	}
+
+	if !config.GetBool("export.auto") {
+		noteAutoExportDefaultOff()
 		return nil
 	}
 
@@ -116,15 +189,7 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 
 	// Resolve the export path before throttle/check detection so all decisions
 	// refer to the path that would actually be written.
-	exportPath := config.GetString("export.path")
-	if exportPath == "" {
-		if globalFlag {
-			exportPath = "global-issues.jsonl"
-		} else {
-			exportPath = "issues.jsonl"
-		}
-	}
-	fullPath := filepath.Join(beadsDir, exportPath)
+	fullPath := autoExportPath(beadsDir)
 
 	// Load state + interval.
 	state := loadExportAutoState(beadsDir)

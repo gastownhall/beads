@@ -2632,8 +2632,13 @@ var rootCmd = &cobra.Command{
 				// Auto-export: write git-tracked JSONL for portability if enabled and due.
 				// Read-only commands must not perform post-run maintenance writes or emit
 				// sync guidance after machine-readable output.
+				// autoExportCommand lets the default-off note stay out of the
+				// hook and protocol bridges (noteAutoExportDefaultOff).
 				if shouldRunPostCommandAutoExport(cmd) {
-					if err := runPostRunAutoExport(rootCtx, commandAllowsEmptyAutoExport(cmd)); err != nil {
+					autoExportCommand = topLevelCommandName(cmd)
+					err := runPostRunAutoExport(rootCtx, commandAllowsEmptyAutoExport(cmd))
+					autoExportCommand = ""
+					if err != nil {
 						return HandleError("%v", err)
 					}
 				}

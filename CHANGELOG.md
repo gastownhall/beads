@@ -1208,6 +1208,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A workspace that auto-exported before v1.0.5 and never set `export.auto`
+  is now told why its JSONL stopped refreshing (#4887). Since #4063 made
+  `export.auto` opt-in, such a workspace went silent. While the key is unset
+  in every layer and both `.beads/export-state.json` and the export JSONL
+  exist, each command that would otherwise auto-export prints an `Info:`
+  note on stderr naming the file, `bd config set export.auto true` to resume and
+  `bd config set export.auto false` to keep it off and silence the note.
+  `--quiet`, `--json`, git hooks and `bd prime`, whose output agent session
+  hooks inject, stay silent; the default stays `false` and nothing is
+  written.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In
