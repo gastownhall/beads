@@ -702,7 +702,8 @@ var serviceHomeAccount = func() (home string, euid int) {
 // inOwnServiceHome reports whether path lies inside home, an account home
 // strictly below root (production: /var/lib), for a non-root euid. Both home and path are compared
 // after symlink resolution, so a link out of the home or the root never
-// qualifies, while a path that does not exist yet still can.
+// qualifies, while a path that does not exist yet still can. The request must
+// also be spelled under root, lexically or physically.
 func inOwnServiceHome(path, root, home string, euid int) bool {
 	if euid <= 0 {
 		// Root never qualifies, and a negative uid means none is known.
@@ -716,10 +717,22 @@ func inOwnServiceHome(path, root, home string, euid int) bool {
 	if err != nil {
 		return false
 	}
-	if !strings.HasPrefix(physHome, physRoot+string(filepath.Separator)) {
+	if !pathBelow(physHome, physRoot) {
+		return false
+	}
+	// The request itself must be spelled under the root (either spelling), so
+	// a link elsewhere in a blocked directory cannot borrow the home's
+	// admission by resolving into it.
+	if !pathBelow(path, filepath.Clean(root)) && !pathBelow(path, physRoot) {
 		return false
 	}
 	return resolvedPathWithinRoot(path, physHome)
+}
+
+// pathBelow reports whether path lies strictly below dir, comparing on a
+// separator boundary so /var/libx is not below /var/lib.
+func pathBelow(path, dir string) bool {
+	return strings.HasPrefix(filepath.Clean(path), dir+string(filepath.Separator))
 }
 
 // resolveLongestExistingAncestor canonicalizes path by resolving symlinks on its
