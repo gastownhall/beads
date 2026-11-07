@@ -43,7 +43,9 @@ import (
 // and its siblings) are never called here — asserting the reference store's
 // funnel would be the mirror image of seeding through the client, and just as
 // empty — so binding this hook carries no risk of laundering a client
-// assertion through the store it happens to share a process with.
+// assertion through the store it happens to share a process with. The one
+// exception is RunIssueOperationsUpdateRejectsATitleOverTheLengthLimit, whose
+// registration below says what it does and does not exercise.
 //
 // ONE ENVIRONMENT PER CASE, which the contract requires rather than prefers:
 // RunIssueOperationsCreateRoutesInfraTypesToWisps installs BARE workspace-global
@@ -175,6 +177,16 @@ func TestServedIssueOperationsUpdateFoldsMetadataIntoOneEvent(t *testing.T) {
 
 func TestServedIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary(t *testing.T) {
 	conformance.RunIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary(t, t.Context(), newServedIssueOperationsFixture(t, "hiob"))
+}
+
+// THIS REGISTRATION SENDS NO HTTP REQUEST FOR ITS SUBJECT. The case's subject
+// is the raw UpdateRaw funnel, which this leg binds to the embedded REFERENCE
+// store (env.reference.UpdateIssue), so it re-tests that store's title gate
+// (beads#8150), not the client. It stays registered as a reference-store
+// check; a title edit the client sends is a typed updateIssue request, which
+// ValidateUpdateRequest already checked before this case existed.
+func TestServedIssueOperationsUpdateRejectsATitleOverTheLengthLimit(t *testing.T) {
+	conformance.RunIssueOperationsUpdateRejectsATitleOverTheLengthLimit(t, t.Context(), newServedIssueOperationsFixture(t, "hiod"))
 }
 
 // The two STATUS-CROSSING settlement cases. They are the update's half of what
