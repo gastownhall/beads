@@ -1208,6 +1208,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On Windows, the experimental dolt-mode migrations (`bd migrate
+  from-server-to-proxied-server`, `from-proxied-server-to-server` and their
+  shared-server variants) no longer abort with `syncing
+  dolt-mode-migration.json directory: ... Access is denied` (or `syncing
+  migration directory: ...`) after writing or removing their journal (GH#6882).
+  bd skips only the directory sync Windows cannot do; every other journal file
+  and directory error is still reported, and other hosts still sync. This
+  alone does not make the migrations work on native Windows: they now fail at
+  a later step, after switching `dolt_mode` in the committed
+  `.beads/metadata.json`. The forward migrations fail writing
+  `proxied_server_client_info.json` (GH#6858), the reverse ones fail removing
+  `proxy.lock` (GH#6884), and the journal they leave can be neither resumed
+  nor reversed. Do not run them on native Windows until those fixes ship.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

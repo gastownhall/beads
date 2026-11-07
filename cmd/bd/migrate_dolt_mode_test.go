@@ -891,6 +891,92 @@ func TestMigrateResume_JournalFromBeforeEffectiveIdleTimeout(t *testing.T) {
 	}
 }
 
+func TestMigrateJournal_SaveRoundTrip(t *testing.T) {
+	beadsDir := t.TempDir()
+	root := filepath.Join(beadsDir, "dolt")
+	j := &migrateJournal{
+		Version: 1, SourceMode: configfile.DoltModeServer, TargetMode: configfile.DoltModeProxiedServer,
+		RootPath: root, Sidecar: &configfile.ProxiedServerClientInfo{RootPath: root},
+		Ownership: "managed-local", Attempt: 1,
+	}
+	for _, phase := range []migratePhase{migratePrepared, migrateTargetConfigured} {
+		j.Phase = phase
+		require.NoError(t, saveMigrateJournal(beadsDir, j))
+		loaded, err := loadMigrateJournal(beadsDir)
+		require.NoError(t, err)
+		require.Equal(t, j, loaded)
+	}
+	entries, err := os.ReadDir(beadsDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "save must not leave temporary files")
+	require.Equal(t, migrateJournalFileName, entries[0].Name())
+	require.False(t, entries[0].IsDir())
+}
+
+func TestMigrateJournal_Remove(t *testing.T) {
+	beadsDir := t.TempDir()
+	path := migrateJournalPath(beadsDir)
+	// Seed directly so removal exercises its own directory flush independently.
+	require.NoError(t, os.WriteFile(path, []byte("{}"), 0o600))
+	require.NoError(t, removeMigrateJournal(beadsDir))
+	_, err := os.Stat(path)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	require.NoError(t, removeMigrateJournal(beadsDir), "missing journal is a no-op")
+	_, err = os.Stat(path)
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestMigrateJournal_FilesystemErrors(t *testing.T) {
+	t.Run("missing parent", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), "missing")
+		require.ErrorIs(t, saveMigrateJournal(beadsDir, &migrateJournal{}), os.ErrNotExist)
+		require.ErrorIs(t, removeMigrateJournal(beadsDir), os.ErrNotExist)
+	})
+	t.Run("rename destination is directory", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		path := migrateJournalPath(beadsDir)
+		require.NoError(t, os.Mkdir(path, 0o700))
+		marker := filepath.Join(path, "keep")
+		require.NoError(t, os.WriteFile(marker, []byte("unchanged"), 0o600))
+		var renameErr *os.LinkError
+		require.ErrorAs(t, saveMigrateJournal(beadsDir, &migrateJournal{}), &renameErr)
+		require.Equal(t, path, renameErr.New)
+		contents, err := os.ReadFile(marker)
+		require.NoError(t, err)
+		require.Equal(t, "unchanged", string(contents))
+		entries, err := os.ReadDir(beadsDir)
+		require.NoError(t, err)
+		require.Len(t, entries, 1, "failed save must not leave temporary files")
+		require.Equal(t, migrateJournalFileName, entries[0].Name())
+		require.True(t, entries[0].IsDir())
+	})
+	t.Run("remove nonempty directory", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		path := migrateJournalPath(beadsDir)
+		require.NoError(t, os.Mkdir(path, 0o700))
+		marker := filepath.Join(path, "keep")
+		require.NoError(t, os.WriteFile(marker, []byte("unchanged"), 0o600))
+		var removeErr *os.PathError
+		require.ErrorAs(t, removeMigrateJournal(beadsDir), &removeErr)
+		require.Equal(t, path, removeErr.Path)
+		contents, err := os.ReadFile(marker)
+		require.NoError(t, err)
+		require.Equal(t, "unchanged", string(contents))
+	})
+}
+
+func TestMigrateJournal_DirSyncSkipsOnlyWindows(t *testing.T) {
+	// Sync on a closed handle fails with os.ErrClosed on every host, so a nil
+	// result shows the flush was skipped, not that it succeeded.
+	d, err := os.Open(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, d.Close())
+	require.NoError(t, syncMigrateJournalDir("windows", d))
+	for _, goos := range []string{"linux", "darwin", "freebsd"} {
+		require.ErrorIs(t, syncMigrateJournalDir(goos, d), os.ErrClosed, goos)
+	}
+}
+
 func TestMigrateJournal_UnknownPhaseFailsClosed(t *testing.T) {
 	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
 	path := migrateJournalPath(beadsDir)
