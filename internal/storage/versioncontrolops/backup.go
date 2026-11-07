@@ -2,11 +2,15 @@ package versioncontrolops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+
+	"github.com/steveyegge/beads/internal/remedy"
 )
 
 // ExportBackupName is the Dolt backup remote the auto-backup path registers
@@ -38,9 +42,145 @@ func BackupRemove(ctx context.Context, db DBConn, name string) error {
 	return nil
 }
 
+// ErrNoBackup is wrapped by the refusal RestoreSourceURL returns for a local
+// source directory that holds no Dolt backup, so a caller can attach its own
+// remedy without matching message text.
+var ErrNoBackup = errors.New("no Dolt backup found: restore refused before changing the database")
+
+// RestoreSourceURL validates dir as a local directory holding a Dolt backup
+// and returns its file:// URL, ready for BackupRestore.
+//
+// DOLT_BACKUP('restore', '--force') opens the source, drops the target
+// database and recreates it before it syncs the source's roots, and Dolt's
+// file store treats an absent manifest as an empty store rather than an open
+// error — so a directory that merely exists drops the live database and only
+// then fails (GH#7098). The checks here are the ones the stores already made
+// (the directory exists and is a directory) plus the one piece of Dolt's
+// backup layout that rules the drop out: a regular manifest file, identified
+// the same way dolt_remote_reset_data.go recognizes a file backup store. A
+// regular manifest is a layout prerequisite, not a promise that the backup is
+// complete, readable or restorable; interpreting its contents is Dolt's, on
+// the other side of beads' storage boundary.
+//
+// The check is an interim guard for that engine ordering, and it lives in
+// this storage package so the layout knowledge stays behind the storage
+// boundary: both stores run it in RestoreDatabase, the proxied route runs it
+// as its preflight before it quiesces the topology, and the commands above
+// act on the typed ErrNoBackup, never on the layout. The engine-side fix is
+// proposed in dolthub/dolt#11951, which restores into a staging database and
+// swaps it in only once the transfer succeeds. Once the pinned Dolt carries
+// that, a failed restore leaves the live database as it was, and the manifest
+// check can go. The fileURLSyntax refusal stays: staging does not change
+// which directory Dolt reads, so a source Dolt reads as another directory
+// would still restore whatever backup that one holds.
+//
+// It applies with and without --force: a directory without a manifest is
+// never a usable local restore source. Symlinks are followed the way os.Stat
+// follows them. A URL names no local directory, so it is refused as a
+// missing source, and DirToFileURL refuses its scheme should a directory by
+// that name exist. A backup whose path holds one of fileURLSyntax's
+// characters is refused as well, since Dolt would restore from a directory
+// other than the one checked here; that refusal does not wrap ErrNoBackup.
+// When such a path holds no backup but the directory Dolt reads it as does,
+// the ErrNoBackup refusal names that directory (misreadSourceHint).
+func RestoreSourceURL(dir string) (string, error) {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return "", fmt.Errorf("backup source does not exist: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("backup source is not a directory: %s", dir)
+	}
+	manifest, err := os.Stat(filepath.Join(dir, "manifest"))
+	switch {
+	case os.IsNotExist(err):
+		return "", fmt.Errorf("%q: %w (no manifest file)%s", dir, ErrNoBackup, misreadSourceHint(dir))
+	case err != nil:
+		return "", fmt.Errorf("refusing restore from %q: %w", dir, remedy.PrintedError(err))
+	case !manifest.Mode().IsRegular():
+		return "", fmt.Errorf("%q: %w (manifest is not a regular file)%s", dir, ErrNoBackup, misreadSourceHint(dir))
+	}
+	url, err := DirToFileURL(dir)
+	if err != nil {
+		return "", err
+	}
+	path := strings.TrimPrefix(url, "file://")
+	if i := strings.IndexAny(path, fileURLSyntax()); i >= 0 {
+		return "", fmt.Errorf("refusing restore from %q: Dolt does not take '%c' in a file:// URL literally and would restore from a different directory. The database was not restored; move or rename the backup to a path without '%c' and restore from there", path, path[i], path[i])
+	}
+	return url, nil
+}
+
+// fileURLSyntax returns the characters a restore source's absolute path must
+// not hold. Dolt reads the file:// URL DirToFileURL builds with net/url, which
+// ends the path at '#' (a fragment) or '?' (a query) and decodes a '%XX'
+// escape (any other '%' fails the parse), then turns each '\' into '/', and
+// opens the directory that is left, creating it when it is missing. So
+// RestoreSourceURL would vouch for one directory while Dolt restores from
+// another: under --force Dolt drops the live database before it finds that
+// one empty, or it restores whatever backup the other directory holds.
+// Escaping the path does not help, because Dolt rebuilds the URL from the
+// decoded path and parses it again. A Windows drive-letter path skips net/url
+// and takes '\' as its separator, but Dolt's file store unescapes the path a
+// second time, so '%' is refused on every platform.
+func fileURLSyntax() string {
+	if runtime.GOOS == "windows" {
+		return "%"
+	}
+	return `#?%\`
+}
+
+// misreadSourceHint is what a refusal that found no backup at dir adds when
+// Dolt does not take dir's file:// URL literally and the directory it reads
+// instead holds a Dolt backup. bd's backup writers (auto-backup, `bd backup
+// init` and sync) hand Dolt the same unescaped URL, so the backups bd synced
+// to dir went to that directory, as did those of every other path Dolt reads
+// the same way. It is "" when Dolt takes dir literally, cannot parse its URL
+// (then bd's backups to dir failed too) or reads it as a directory without a
+// regular manifest.
+func misreadSourceHint(dir string) string {
+	url, err := DirToFileURL(dir)
+	if err != nil {
+		return ""
+	}
+	path := strings.TrimPrefix(url, "file://")
+	i := strings.IndexAny(path, fileURLSyntax())
+	if i < 0 {
+		return ""
+	}
+	read, ok := doltFileURLDir(url)
+	if !ok {
+		return ""
+	}
+	if manifest, err := os.Stat(filepath.Join(read, "manifest")); err != nil || !manifest.Mode().IsRegular() {
+		return ""
+	}
+	return fmt.Sprintf(". Dolt does not take '%c' in a file:// URL literally and reads this path as %q, which holds a Dolt backup: bd's backups to this path went there, as do those of any other path Dolt reads the same way", path[i], read)
+}
+
+// doltFileURLDir returns the directory Dolt reads url, a file:// URL
+// DirToFileURL built, as (fileURLSyntax describes how), and false when Dolt
+// cannot parse url.
+func doltFileURLDir(url string) (string, bool) {
+	if runtime.GOOS == "windows" {
+		dir, err := neturl.PathUnescape(strings.TrimPrefix(url, "file://"))
+		return dir, err == nil
+	}
+	u, err := neturl.Parse(url)
+	if err != nil {
+		return "", false
+	}
+	return filepath.Clean(strings.ReplaceAll(u.Path, `\`, "/")), true
+}
+
 // BackupRestore restores a database from a backup at the given URL into
 // the named database. When force is true, an existing database with the
 // same name is overwritten. Mirrors the CLI: dolt backup restore [--force] <url> <db_name>
+//
+// A caller starting from a local directory must validate it with
+// RestoreSourceURL first: the engine replaces the named database before it
+// discovers a source that holds no backup, so the URL-level operation cannot
+// protect it.
 func BackupRestore(ctx context.Context, db DBConn, url, dbName string, force bool) error {
 	if force {
 		if _, err := db.ExecContext(ctx, "CALL DOLT_BACKUP('restore', '--force', ?, ?)", url, dbName); err != nil {

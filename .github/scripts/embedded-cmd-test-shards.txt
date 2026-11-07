@@ -186,6 +186,7 @@
 100 43 TestEmbeddedInitExplicitBeadsDirIsAuthoritative
 100 43 TestEmbeddedReadyEmptyStateRealBlocker
 
+100 44 TestEmbeddedBackupRestoreRefusesSourceWithoutBackup
 100 44 TestEmbeddedCompactKeepsCommitDates
 100 44 TestEmbeddedCompactRecentAncestorOfBoundary
 100 44 TestEmbeddedIfRevisionComposesWithIfAssigneeIfStatus

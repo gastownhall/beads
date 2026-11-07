@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -89,6 +91,19 @@ func init() {
 	backupCmd.AddCommand(backupRestoreCmd)
 }
 
+// restoreSourceError adds what to do instead to err when it says the restore
+// source holds no Dolt backup (versioncontrolops.ErrNoBackup): pass the
+// directory 'bd backup init' set up, which the no-argument form never reads,
+// or load a JSONL export, the likeliest wrong source, with bd import. Any
+// other error is returned as it is. The advice is one line, and the refusal
+// it wraps quotes the source path, so a path cannot forge an output line.
+func restoreSourceError(err error) error {
+	if !errors.Is(err, versioncontrolops.ErrNoBackup) {
+		return err
+	}
+	return fmt.Errorf("%w. The database was not restored. To restore the Dolt backup that 'bd backup init <dir>' and 'bd backup sync' wrote, run 'bd backup restore <dir>'; to load a JSONL export, run 'bd import <file>' instead", err)
+}
+
 // runBackupRestore restores the database from a Dolt-native backup.
 func runBackupRestore(ctx context.Context, s storage.DoltStorage, dir string, force bool) error {
 	if s == nil {
@@ -101,7 +116,7 @@ func runBackupRestore(ctx context.Context, s storage.DoltStorage, dir string, fo
 	}
 
 	if err := bs.RestoreDatabase(ctx, dir, force); err != nil {
-		return err
+		return restoreSourceError(err)
 	}
 
 	// After a force restore, the database's _project_id may differ from

@@ -206,3 +206,64 @@ func readProxiedBackupStatus(t *testing.T, bd string, p proxiedProject) proxiedB
 	}
 	return status
 }
+
+// TestManagedLocalProxiedBackupRestoreRefusesSourceWithoutBackup is the
+// managed-local proxied counterpart of
+// TestEmbeddedBackupRestoreRefusesSourceWithoutBackup (GH#7098). The proxied
+// restore quiesces the serving topology before it restores, so a source
+// without a Dolt backup must be refused before that: the proxy and its dolt
+// child are the same live processes straight after the refusal (checked
+// before any further command could relaunch them), the refusal is a JSON
+// error, and the source and the workspace's issues are untouched.
+func TestManagedLocalProxiedBackupRestoreRefusesSourceWithoutBackup(t *testing.T) {
+	requireManagedLocalProxiedEnv(t)
+
+	bd := buildEmbeddedBD(t)
+	p := bdManagedLocalInit(t, bd, "bknb", 5*time.Minute)
+	bdProxiedCreate(t, bd, p.dir, "survives the refused restore A", "-p", "1")
+	bdProxiedCreate(t, bd, p.dir, "survives the refused restore B", "-p", "1")
+	before := proxiedIssueIDs(t, bd, p)
+
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "issues.jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	proxyPID := readManagedProxyPidFile(t, p)
+	backendPID := readManagedBackendPidFile(t, p)
+	if proxyPID == nil || backendPID == nil || !processAlive(proxyPID.Pid) || !processAlive(backendPID.Pid) {
+		t.Fatalf("precondition: the managed topology should be serving; proxy %+v, dolt child %+v", proxyPID, backendPID)
+	}
+
+	stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "backup", "restore", source, "--force", "--json")
+
+	// First, before any other bd command can relaunch the topology.
+	if pf := readManagedProxyPidFile(t, p); pf == nil || pf.Pid != proxyPID.Pid || !processAlive(pf.Pid) {
+		t.Errorf("refused restore disturbed the proxy: before %+v, now %+v", proxyPID, pf)
+	}
+	if pf := readManagedBackendPidFile(t, p); pf == nil || pf.Pid != backendPID.Pid || !processAlive(pf.Pid) {
+		t.Errorf("refused restore disturbed the dolt child: before %+v, now %+v", backendPID, pf)
+	}
+
+	if err == nil {
+		t.Fatalf("bd backup restore --force from a source without a backup succeeded:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	var refusal struct {
+		Error string `json:"error"`
+	}
+	if start := strings.Index(stdout, "{"); start < 0 {
+		t.Errorf("restore refusal printed no JSON on stdout:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	} else if jerr := json.Unmarshal([]byte(stdout[start:]), &refusal); jerr != nil {
+		t.Errorf("restore refusal is not JSON on stdout: %v\n%s", jerr, stdout)
+	} else if !strings.Contains(refusal.Error, "no Dolt backup found") || !strings.Contains(refusal.Error, source) {
+		t.Errorf("restore refusal does not name %s as holding no Dolt backup: %q", source, refusal.Error)
+	}
+
+	entries, rerr := os.ReadDir(source)
+	if rerr != nil || len(entries) != 1 || entries[0].Name() != "issues.jsonl" {
+		t.Errorf("source %s changed across the refused restore: %v, %v", source, entries, rerr)
+	}
+	if got := proxiedIssueIDs(t, bd, p); !slices.Equal(got, before) {
+		t.Errorf("refused restore changed the data:\n got  %v\n want %v", got, before)
+	}
+}
