@@ -96,6 +96,17 @@ func OwnReadyAffectingEdgeSQL(tables FilterTables, alias string) string {
 		tables.Dependencies, alias, readyAffectingTypesSQL())
 }
 
+// OwnReadyAffectingEdgeIDsSQL selects which of ids (one batch, at most
+// QueryBatchSize) are the issue_id of a ready-affecting row in tables'
+// dependency table: the bounded, by-id form of OwnReadyAffectingEdgeSQL, for a
+// caller that qualifies the flags of a known set of rows rather than of every
+// flagged row (StaleBlockedIDsSQL).
+func OwnReadyAffectingEdgeIDsSQL(tables FilterTables, ids []string) (string, []any) {
+	placeholders, args := InPlaceholders(ids)
+	return fmt.Sprintf("SELECT DISTINCT issue_id FROM %s WHERE issue_id IN (%s) AND type IN (%s)",
+		tables.Dependencies, placeholders, readyAffectingTypesSQL()), args
+}
+
 // StaleBlockedIDsSQL selects the ids of one table family whose is_blocked flag
 // is stale: set on a row OwnReadyAffectingEdgeSQL rejects. Each stack resolves
 // it once per ready read and hands the ids to BuildReadyWorkWhere in

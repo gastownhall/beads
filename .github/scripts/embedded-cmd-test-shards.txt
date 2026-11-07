@@ -44,6 +44,7 @@
 
 100 10 TestEmbeddedCreateScalarAndRelationships
 
+100 11 TestEmbeddedDepTreeJSONCarriesInheritedBlock
 100 11 TestEmbeddedKVConcurrent
 
 100 12 TestEmbeddedAutoImportFallback_ConflictSkip_SkipsRetiredRows
@@ -73,6 +74,7 @@
 100 19 TestEmbeddedLabelConcurrent
 100 19 TestEmbeddedNewDoltStore_StrictReadOnlyRefusesWritesOnFreshDatabase
 
+100 20 TestEmbeddedDepTreeRootBlockedThroughParent
 100 20 TestEmbeddedInitRoleRoutingRetainedFork
 100 20 TestEmbeddedMigrateSchema_IdentityMismatchRefusesBeforeApplying
 
@@ -483,6 +485,7 @@
 100 83 TestEmbeddedReadyConcurrent
 
 100 84 TestEmbeddedDeleteCascadeFollowsOnlyParentChild
+100 84 TestEmbeddedDepTreeIgnoresStaleFlagOnEdgelessIssue
 100 84 TestEmbeddedDoltRemoteAdd_GitOriginCollision_Exits1
 100 84 TestEmbeddedInitGitBootstrapRoutingDecoyInvalid
 100 84 TestEmbeddedInitSelectedExcludeRoutingStealthInvalid

@@ -185,6 +185,7 @@ go_test(
         "served_relations_test.go",
         "served_releaser_test.go",
         "served_test.go",
+        "served_tree_blocked_test.go",
         "served_unlimited_read_test.go",
         "served_wrong_server_test.go",
         "store_dependent_test.go",

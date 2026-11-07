@@ -1247,6 +1247,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a formula write target (see Security). Shell environment still wins over
   the file.
 
+- `bd dep tree` no longer marks a blocked root `[READY]` when its blocking is
+  inherited through a parent (a child of a blocked epic) or comes from a
+  blocker past `--max-depth`. The marker now reads the same stored, transitive
+  blocked flag `bd ready` and `bd blocked` use, still ignoring a stale flag
+  on an issue with no dependency that can block it, and `bd dep tree --json`
+  (direct, proxied and served) adds `is_blocked: true` to each blocked node
+  (refs #6630). The member reflects local blocking only: a node blocked solely
+  by an unsatisfied external dependency carries none. With `--direction up` or
+  `both`, an issue that depends on the root no longer marks an unblocked root
+  `[BLOCKED]`.
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short
