@@ -103,6 +103,12 @@ sequence. The multi-session loop:
 4. Close it: `bd close <id>`
 5. Repeat until the molecule is done
 
+A step under a parent step that is blocked by something outside that parent
+waits as well. In releases after v1.3.2, `bd ready --mol`, `bd mol show
+--parallel` and the molecule's auto-advance on close treat such a step as
+blocked by its parent, as `bd ready` does. A parent blocked only by its own
+children (a close gate) does not hold those children back.
+
 ### Dependency Types
 
 Only some dependency types block execution:

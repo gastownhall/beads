@@ -49,11 +49,13 @@ Two cooking modes are available:
     Produces a proto with {{variable}} placeholders intact.
     Use for: modeling, estimation, contractor handoff, planning.
     Variables are NOT substituted - the output shows the template structure.
+    Step conditions are kept as written, not evaluated.
 
   RUNTIME (--mode=runtime or when --var flags provided):
     Produces a fully-resolved proto with variables substituted.
     Use for: final validation before pour, seeing exact output.
     Requires all variables to have values (via --var or defaults).
+    Steps whose condition is false are omitted, as pour omits them.
 
 Formulas are high-level workflow templates that support:
   - Variable definitions with defaults and validation
@@ -396,6 +398,25 @@ func runCook(cmd *cobra.Command, args []string) error {
 		if err := formula.ValidateVars(resolved, flags.inputVars); err != nil {
 			return HandleError("%v", err)
 		}
+
+		// Drop steps whose condition is false, as pour does (GH#7639).
+		// Filter before substitution (conditions are evaluated on their
+		// {{var}} form) and before ExtractVariables below, so a placeholder
+		// only a dropped step uses is not demanded.
+		conditionVars := make(map[string]string)
+		for name, def := range resolved.Vars {
+			if def != nil && def.Default != nil {
+				conditionVars[name] = *def.Default
+			}
+		}
+		for k, v := range flags.inputVars {
+			conditionVars[k] = v
+		}
+		filteredSteps, err := formula.FilterStepsByCondition(resolved.Steps, conditionVars)
+		if err != nil {
+			return HandleError("filtering steps by condition: %v", err)
+		}
+		resolved.Steps = filteredSteps
 	}
 
 	protoID := resolved.Formula
