@@ -43,3 +43,20 @@ func TestWindowsBoundaryRegression(t *testing.T) {
 		}
 	}
 }
+
+// TestWindowsBoundarySpellingRegression drives the real isPathInSafeBoundary
+// with spellings that open a system directory without naming it plainly: the
+// directory's $INDEX_ALLOCATION stream, and a trailing dot that Win32 strips.
+func TestWindowsBoundarySpellingRegression(t *testing.T) {
+	winDir := winTestWindowsDir(t)
+	for _, path := range []string{
+		winDir + `::$INDEX_ALLOCATION\System32`,
+		winDir + `\System32::$INDEX_ALLOCATION`,
+		winDir + `.\System32`,
+		`\\?\GLOBALROOT\Device\HarddiskVolume1\beads`,
+	} {
+		if isPathInSafeBoundary(path) {
+			t.Errorf("isPathInSafeBoundary(%q) = true, want false (ambiguous spelling)", path)
+		}
+	}
+}
