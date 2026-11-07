@@ -1199,6 +1199,7 @@ go_test(
         "root_context_lifecycle_test.go",
         "routed_local_near_miss_test.go",
         "routed_mutation_test.go",
+        "routed_proxied_mutation_test.go",
         "routed_proxied_target_repro_test.go",
         "routed_test.go",
         "routing_notice_test.go",
