@@ -173,6 +173,7 @@ go_test(
         "migration_0073_add_arrival_seq_test.go",
         "migration_0074_create_id_tombstones_test.go",
         "migration_body_drain_test.go",
+        "migration_body_plan_contract_test.go",
         "migration_body_plans_test.go",
         "migration_content_hashes_test.go",
         "migration_freeze_test.go",

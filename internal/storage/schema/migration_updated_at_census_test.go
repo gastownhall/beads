@@ -45,7 +45,16 @@ func shippedCensusSeries(t *testing.T) []censusSeries {
 			if err != nil {
 				t.Fatalf("reading %s/%s: %v", src.dir, mf.name, err)
 			}
-			s.files = append(s.files, censusFile{version: mf.version, name: mf.name, sql: string(data)})
+			// The census covers the SQL a migration run actually executes:
+			// the frozen bytes verbatim for unregistered steps, the
+			// registered plan's replacement body for registered ones
+			// (bd-f1s6sq AC-5) — resolved here exactly as runMigrations
+			// resolves it, so the verdict is about the statements that run.
+			body, err := resolveMigrationBody(src, mf, data)
+			if err != nil {
+				t.Fatalf("resolving %s/%s: %v", src.dir, mf.name, err)
+			}
+			s.files = append(s.files, censusFile{version: mf.version, name: mf.name, sql: body})
 		}
 		if len(s.files) == 0 {
 			t.Fatalf("%s: no migrations found", src.dir)
@@ -53,6 +62,47 @@ func shippedCensusSeries(t *testing.T) []censusSeries {
 		out = append(out, s)
 	}
 	return out
+}
+
+// TestCensusCoversExecutedMigrationSQL (bd-f1s6sq AC-5): the census's input
+// for a registered execution plan must be the body a migration run actually
+// executes — the plan-resolved body — not the superseded frozen file bytes.
+// A census that reads file bytes while the runner executes planned bodies
+// certifies SQL that never runs, so its "every UPDATE assigns updated_at"
+// verdict would be about the wrong statements.
+func TestCensusCoversExecutedMigrationSQL(t *testing.T) {
+	for key := range migrationBodyPlans {
+		src, ok := map[string]migrationSource{
+			mainSource.cursorTable:    mainSource,
+			ignoredSource.cursorTable: ignoredSource,
+		}[key.cursorTable]
+		if !ok {
+			t.Fatalf("plan registered for unknown cursor table %q", key.cursorTable)
+		}
+		planned, err := plannedBodySQL(src, key.version)
+		if err != nil {
+			t.Fatalf("resolve planned body for %s/%d: %v", key.cursorTable, key.version, err)
+		}
+		found := false
+		for _, s := range shippedCensusSeries(t) {
+			if s.cursorTable != key.cursorTable {
+				continue
+			}
+			for _, f := range s.files {
+				if f.version != key.version {
+					continue
+				}
+				found = true
+				if f.sql != planned {
+					t.Errorf("census input for %s v%d is %d bytes but the executed body is %d bytes; the census must cover executed SQL, not file bytes",
+						key.cursorTable, key.version, len(f.sql), len(planned))
+				}
+			}
+		}
+		if !found {
+			t.Errorf("census never saw version %d of %s", key.version, key.cursorTable)
+		}
+	}
 }
 
 func TestMigrationUpdatesOfAutoStampedTablesKeepUpdatedAt(t *testing.T) {
