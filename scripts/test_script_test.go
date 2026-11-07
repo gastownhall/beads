@@ -350,6 +350,22 @@ func TestTestScriptPrebuiltTestBinaryContract(t *testing.T) {
 		}
 	})
 
+	// #7177: a developer's own GO_TEST_PARALLEL=2 override must not leak
+	// into this default-contract fixture, the same way TEST_TIMEOUT and the
+	// BEADS_TEST_ENV_* markers are already isolated above for an analogous
+	// reason. The fixture asserts the hardcoded "-test.parallel 4" default;
+	// without isolation it inherits whatever this test binary's own process
+	// happens to run under.
+	t.Run("isolates the default -test.parallel from an inherited GO_TEST_PARALLEL override", func(t *testing.T) {
+		t.Setenv("GO_TEST_PARALLEL", "2")
+		repoRoot := sourceRepoRoot(t)
+		run := runTestScriptWithPrebuiltBinary(t, repoRoot, []string{"./scripts/ci"})
+		wantArgs := []string{"-test.timeout", "25m", "-test.parallel", "4", "-test.paniconexit0"}
+		if strings.Join(run.args, " ") != strings.Join(wantArgs, " ") {
+			t.Fatalf("args = %v, want %v (GO_TEST_PARALLEL=2 leaked into the default-contract fixture)", run.args, wantArgs)
+		}
+	})
+
 	t.Run("refuses more than one package", func(t *testing.T) {
 		repoRoot := sourceRepoRoot(t)
 		output, err := runTestScriptWithPrebuiltBinaryExpectFailure(t, repoRoot, []string{"./scripts/ci", "./scripts"})
@@ -482,6 +498,14 @@ func runTestScriptPrebuiltBinary(t *testing.T, repoRoot string, args []string) (
 		"BEADS_TEST_ENV_ROOT",
 		"BEADS_TEST_ENV_DISABLE",
 		"BEADS_TEST_ENV_KEEP",
+		// GO_TEST_PARALLEL (#7177): scripts/test.sh explicitly supports this
+		// as a caller override, same as TEST_TIMEOUT above, so a developer
+		// running `go test ./scripts/...` with GO_TEST_PARALLEL=2 set in
+		// their own shell must not have it leak into this fixture's
+		// subprocess — the default-contract subtests below assert the
+		// hardcoded "-test.parallel 4" default, not whatever this test
+		// binary's own process happens to run under.
+		"GO_TEST_PARALLEL",
 	),
 		"BEADS_TEST_BD_BINARY=/nonexistent-bd-not-needed-in-prebuilt-test-binary-mode",
 		"BEADS_TEST_PREBUILT_TEST_BINARY="+fakeBin,
