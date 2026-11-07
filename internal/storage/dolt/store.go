@@ -5369,7 +5369,7 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 	logRouteDecision("push", remote, false)
 	defer func() {
 		if retErr != nil {
-			if note := s.serverEnvCredentialsNote(ctx, remote, creds); note != "" {
+			if note := s.serverEnvCredentialsNote(ctx, "CALL DOLT_PUSH", remote, creds); note != "" {
 				retErr = fmt.Errorf("%w%s", retErr, note)
 			}
 		}

@@ -691,21 +691,6 @@ func (s *DoltStore) prepareCLIRouteForPeerCredentials(ctx context.Context, peer 
 	return false, nil
 }
 
-// prepareCLIRouteForPeer reports whether a federation peer transfer (push,
-// pull, fetch) runs through the dolt CLI on account of the credentials it
-// needs, in the default remote's order: the peer's stored credentials first,
-// then cloud credentials for the peer URL's scheme in bd's environment
-// (prepareCLIRouteForCloudAuth). In server mode CALL DOLT_PUSH/PULL/FETCH run
-// in the server's process, which only has the environment it started with;
-// the dolt child inherits bd's (GH#6). Both checks route only where the CLI
-// directory is the database the connected server serves (hasCLIDatabase).
-func (s *DoltStore) prepareCLIRouteForPeer(ctx context.Context, peer string, creds *remoteCredentials) (bool, error) {
-	if useCLI, err := s.prepareCLIRouteForPeerCredentials(ctx, peer, creds); err != nil || useCLI {
-		return useCLI, err
-	}
-	return s.prepareCLIRouteForCloudAuth(ctx, peer)
-}
-
 func (s *DoltStore) shouldUseCLIForPeerCredentialsWithError(ctx context.Context, peer string, creds *remoteCredentials) (bool, error) {
 	return s.prepareCLIRouteForPeerCredentials(ctx, peer, creds)
 }
@@ -894,16 +879,18 @@ func (s *DoltStore) shouldUseCLIForCloudAuthWithError(ctx context.Context, remot
 	return s.prepareCLIRouteForCloudAuth(ctx, remote)
 }
 
-// serverEnvCredentialsNote completes the error of a push that failed on the
-// SQL route when this bd holds the remote's credentials. In server mode CALL
-// DOLT_PUSH runs in the Dolt server's process, which takes DOLT_REMOTE_PASSWORD
+// serverEnvCredentialsNote completes the error of a transfer that failed on
+// the SQL route (call is "CALL DOLT_PUSH", "CALL DOLT_PULL" or "CALL
+// DOLT_FETCH") when this bd holds the remote's credentials. In server mode the
+// call runs in the Dolt server's process, which takes DOLT_REMOTE_PASSWORD
 // (for the remote user bd passes) and the cloud-storage variables of the
 // remote URL's scheme (cloudAuthSchemeMap) from its own environment: bd sets
-// them only in its own process (withRemoteOperationEnv), which a server bd
-// does not run never sees. The note names the ones bd holds, so a push that a
-// server without them refuses says where they must be set. It is empty when
-// bd holds none, and in embedded mode, where the push runs in this process.
-func (s *DoltStore) serverEnvCredentialsNote(ctx context.Context, remote string, creds *remoteCredentials) string {
+// them only in its own process (withRemoteOperationEnv), and a server has
+// only the environment it started with. The note names the ones bd holds, so
+// a transfer that a server without them refuses says where they must be set.
+// It is empty when bd holds none, and in embedded mode, where the transfer
+// runs in this process.
+func (s *DoltStore) serverEnvCredentialsNote(ctx context.Context, call, remote string, creds *remoteCredentials) string {
 	if !s.serverMode {
 		return ""
 	}
@@ -928,5 +915,23 @@ func (s *DoltStore) serverEnvCredentialsNote(ctx context.Context, remote string,
 	if len(held) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("; CALL DOLT_PUSH runs in the Dolt server's process, which takes %s from its own environment, not from bd's", strings.Join(held, " and "))
+	return fmt.Sprintf("; %s runs in the Dolt server's process, which takes %s from its own environment, not from bd's", call, strings.Join(held, " and "))
+}
+
+// notePeerServerEnvCredentials completes err, the failure of a federation
+// peer push, pull or fetch on the SQL route (call), with
+// serverEnvCredentialsNote. The peer's call passes no --user, so the server
+// reads no DOLT_REMOTE_PASSWORD for it, and the note names only the
+// cloud-storage variables of the peer URL's scheme that bd holds. A dolt CLI
+// run in a database directory the server serves hands the transfer to that
+// server too (requireCLIDoltBinary), so routing the transfer through the CLI
+// would not bring bd's variables to it.
+func (s *DoltStore) notePeerServerEnvCredentials(ctx context.Context, call, peer string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if note := s.serverEnvCredentialsNote(ctx, call, peer, nil); note != "" {
+		return fmt.Errorf("%w%s", err, note)
+	}
+	return err
 }

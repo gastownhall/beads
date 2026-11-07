@@ -1208,15 +1208,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Federation peer push, pull and fetch (`bd federation sync`) against an
-  external Dolt server now take the `dolt` CLI route the default remote
-  already takes (GH#6) when the shell running bd holds cloud credentials for
-  the peer URL's scheme (`DOLT_REMOTE_*` for DoltHub and Hosted Dolt,
-  `AWS_*`, `AZURE_STORAGE_*`, ...), so the `dolt` child inherits them instead
-  of the transfer running as `CALL DOLT_PUSH`/`DOLT_PULL`/`DOLT_FETCH` in a
-  server that only has the environment it started with. Stored peer
-  credentials still take precedence, and the CLI is used only where the local
-  database directory is the one the connected server serves (refs #5953).
+- In server mode, a federation peer push, pull or fetch (`bd federation
+  sync`, `bd federation status`) that fails as `CALL DOLT_PUSH`,
+  `DOLT_PULL` or `DOLT_FETCH` on the Dolt server now names the cloud
+  credential variables bd holds for the peer URL's scheme (`AWS_*`,
+  `AZURE_STORAGE_*`, `GOOGLE_*`, `GCS_*`, `OCI_*`), which the server reads
+  from the environment it started with, not from bd's, as a failed push to
+  the workspace's own remote already does. The federation docs say to set
+  them where the server starts. Routing the transfer through the `dolt` CLI
+  would not bring them along: a `dolt` command run in the database directory
+  the server serves hands the transfer to that server (refs #5953).
 - `bd config set`, `bd config unset`, `bd repo add` and `bd repo remove` now
   replace an existing `config.yaml` in one step (temp file in the same
   directory, fsync, rename) instead of truncating and rewriting it in place.

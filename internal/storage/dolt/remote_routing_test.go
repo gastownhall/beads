@@ -12,7 +12,6 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
-	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil"
@@ -78,13 +77,6 @@ func TestSQLCapableCLIRoutingFallsBackWhenCLIDirIsNotDoltRepo(t *testing.T) {
 			name: "peer credential remote",
 			route: func(store *DoltStore) (bool, error) {
 				return store.shouldUseCLIForPeerCredentialsWithError(ctx, "peer", creds)
-			},
-		},
-		{
-			name: "peer cloud auth remote",
-			route: func(store *DoltStore) (bool, error) {
-				t.Setenv("AZURE_STORAGE_ACCOUNT", "account")
-				return store.prepareCLIRouteForPeer(ctx, "peercloud", nil)
 			},
 		},
 	}
@@ -161,13 +153,6 @@ func TestCLIRoutingFallsBackToSQLWhenNoCLIDir(t *testing.T) {
 			name: "peer credential remote",
 			route: func(store *DoltStore) (bool, error) {
 				return store.shouldUseCLIForPeerCredentialsWithError(ctx, "peer", creds)
-			},
-		},
-		{
-			name: "peer cloud auth remote",
-			route: func(store *DoltStore) (bool, error) {
-				t.Setenv("AZURE_STORAGE_ACCOUNT", "account")
-				return store.prepareCLIRouteForPeer(ctx, "peercloud", nil)
 			},
 		},
 	}
@@ -317,14 +302,12 @@ func clearServerPortEnv(t *testing.T) {
 
 // leftoverRemoteRows lists, as the server's dolt_remotes does, the remotes
 // the CLI-route tests below route: a git-protocol default remote, a
-// git-protocol federation peer, an Azure remote for the cloud-auth route, and
-// an Azure federation peer for the peer cloud-auth route.
+// git-protocol federation peer, and an Azure remote for the cloud-auth route.
 func leftoverRemoteRows(gitURL, azURL string) *sqlmock.Rows {
 	return sqlmock.NewRows([]string{"name", "url", "params"}).
 		AddRow("origin", gitURL, nil).
 		AddRow("peer", gitURL, nil).
-		AddRow("cloud", azURL, nil).
-		AddRow("peercloud", azURL, nil)
+		AddRow("cloud", azURL, nil)
 }
 
 // TestCLIRoutesUseALeftoverDatabaseOnlyWhereBdRunsTheServer pins every CLI
@@ -360,7 +343,6 @@ func TestCLIRoutesUseALeftoverDatabaseOnlyWhereBdRunsTheServer(t *testing.T) {
 		{"local remote", func(s *DoltStore) (bool, error) { return s.shouldUseCLIForLocalRemoteWithError(ctx, "origin") }},
 		{"peer git protocol", func(s *DoltStore) (bool, error) { return s.prepareCLIRouteForPeerGitProtocol(ctx, "peer") }},
 		{"peer credential remote", func(s *DoltStore) (bool, error) { return s.prepareCLIRouteForPeerCredentials(ctx, "peer", creds) }},
-		{"peer cloud auth remote", func(s *DoltStore) (bool, error) { return s.prepareCLIRouteForPeer(ctx, "peercloud", nil) }},
 	}
 
 	for _, tc := range []struct {
@@ -418,7 +400,7 @@ func TestCLIRoutesUseALeftoverDatabaseOnlyWhereBdRunsTheServer(t *testing.T) {
 				standInForServedDatabase(t, cliDir, port)
 			}
 			initLocalDoltRepoForRemote(t, cliDir)
-			for name, url := range map[string]string{"origin": gitURL, "peer": gitURL, "cloud": azURL, "peercloud": azURL} {
+			for name, url := range map[string]string{"origin": gitURL, "peer": gitURL, "cloud": azURL} {
 				if err := doltutil.AddCLIRemote(cliDir, name, url); err != nil {
 					t.Fatalf("AddCLIRemote(%s): %v", name, err)
 				}
@@ -465,17 +447,9 @@ func TestCLIRoutesUseALeftoverDatabaseOnlyWhereBdRunsTheServer(t *testing.T) {
 // answers `dolt remote -v` with origin at remoteURL.
 func fakeDoltOnPath(t *testing.T, remoteURL string) string {
 	t.Helper()
-	return fakeDoltOnPathWithRemote(t, "origin", remoteURL)
-}
-
-// fakeDoltOnPathWithRemote is fakeDoltOnPath for a remote named remote, and
-// answers `dolt version` with the minimum version bd requires, which every
-// CLI route checks before it runs the binary.
-func fakeDoltOnPathWithRemote(t *testing.T, remote, remoteURL string) string {
-	t.Helper()
 	binDir := t.TempDir()
 	callLog := filepath.Join(binDir, "calls.log")
-	script := fmt.Sprintf("#!/bin/sh\necho \"$(pwd -P)|$*|DOLT_REMOTE_PASSWORD=${DOLT_REMOTE_PASSWORD:-}\" >> '%s'\nif [ \"$1 $2\" = \"remote -v\" ]; then echo '%s %s'; fi\nif [ \"$1\" = \"version\" ]; then echo 'dolt version %s'; fi\nexit 0\n", callLog, remote, remoteURL, doltversion.RequiredMin)
+	script := fmt.Sprintf("#!/bin/sh\necho \"$(pwd -P)|$*|DOLT_REMOTE_PASSWORD=${DOLT_REMOTE_PASSWORD:-}\" >> '%s'\nif [ \"$1 $2\" = \"remote -v\" ]; then echo 'origin %s'; fi\nexit 0\n", callLog, remoteURL)
 	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(script), 0o755); err != nil { // #nosec G306 -- test fixture must be executable
 		t.Fatal(err)
 	}
@@ -719,68 +693,69 @@ func TestCredentialPushOnAnEnvNamedPortKeepsTheCLIOnlyForBdsOwnServer(t *testing
 	}
 }
 
-// TestPeerCloudAuthRoutesThroughTheDoltCLI pins the cloud-auth route of the
-// federation peer transfers (GH#6, #5953). A server-mode store whose
-// .beads/dolt/<db> is the database bd's own server serves has an HTTPS peer
-// with no federation_peers row, so no stored credentials. With
-// DOLT_REMOTE_PASSWORD in bd's environment, push, pull and fetch run the
-// dolt CLI in that directory, whose child inherits the password; CALL
-// DOLT_PUSH/PULL/FETCH would run in the server's process, which only has the
-// environment it started with. With only another scheme's variable
-// (AZURE_STORAGE_ACCOUNT) set, each stays on SQL and runs no dolt transfer.
-func TestPeerCloudAuthRoutesThroughTheDoltCLI(t *testing.T) {
+// TestPeerTransfersRunOnTheServerAndNameTheCloudCredentialsBdHolds pins where
+// a federation peer push, pull and fetch run in server mode, and what their
+// failure says (#5953). A server-mode store whose .beads/dolt/<db> is the
+// database bd's own server serves has a peer with no federation_peers row, so
+// no stored credentials. Cloud credentials for the peer URL's scheme in bd's
+// environment do not move the transfer to the dolt CLI: run in that
+// directory, dolt would hand it to the server, which takes them from its own
+// environment either way. So each runs CALL DOLT_PUSH, DOLT_PULL or
+// DOLT_FETCH, runs no dolt, and its failure names the variables of the
+// peer's scheme that bd holds. Another scheme's variable adds no note, nor
+// does DOLT_REMOTE_PASSWORD for an HTTPS peer: the peer's call passes no
+// --user, so the server would not read it.
+func TestPeerTransfersRunOnTheServerAndNameTheCloudCredentialsBdHolds(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell fake")
 	}
 	clearPredicateEnv(t)
 	clearCloudAuthEnv(t)
-	const (
-		peer    = "peer"
-		peerURL = "https://doltremoteapi.dolthub.com/org/peer"
-	)
-	callLog := fakeDoltOnPathWithRemote(t, peer, peerURL)
+	const peer = "peer"
 
 	ops := []struct {
 		name string
 		// run returns the conflicts a pull reports; push and fetch report none.
 		run func(context.Context, *DoltStore) ([]storage.Conflict, error)
-		// transfer is the dolt command line the CLI route runs.
-		transfer string
-		// sqlErr is how the SQL route's failure reads.
+		// call is the SQL call the transfer runs on the server.
+		call string
+		// sqlErr is how that call's failure reads.
 		sqlErr string
 	}{
 		{
-			name:     "push",
-			run:      func(ctx context.Context, s *DoltStore) ([]storage.Conflict, error) { return nil, s.PushTo(ctx, peer) },
-			transfer: "push " + peer + " main",
-			sqlErr:   "failed to push to peer " + peer,
+			name:   "push",
+			run:    func(ctx context.Context, s *DoltStore) ([]storage.Conflict, error) { return nil, s.PushTo(ctx, peer) },
+			call:   "CALL DOLT_PUSH",
+			sqlErr: "failed to push to peer " + peer,
 		},
 		{
-			name:     "pull",
-			run:      func(ctx context.Context, s *DoltStore) ([]storage.Conflict, error) { return s.PullFrom(ctx, peer) },
-			transfer: "pull " + peer + " main",
-			sqlErr:   "failed to pull from peer " + peer,
+			name:   "pull",
+			run:    func(ctx context.Context, s *DoltStore) ([]storage.Conflict, error) { return s.PullFrom(ctx, peer) },
+			call:   "CALL DOLT_PULL",
+			sqlErr: "failed to pull from peer " + peer,
 		},
 		{
-			name:     "fetch",
-			run:      func(ctx context.Context, s *DoltStore) ([]storage.Conflict, error) { return nil, s.Fetch(ctx, peer) },
-			transfer: "fetch " + peer,
-			sqlErr:   "failed to fetch from peer " + peer,
+			name:   "fetch",
+			run:    func(ctx context.Context, s *DoltStore) ([]storage.Conflict, error) { return nil, s.Fetch(ctx, peer) },
+			call:   "CALL DOLT_FETCH",
+			sqlErr: "failed to fetch from peer " + peer,
 		},
 	}
 	envs := []struct {
-		name, key, value string
-		wantCLI          bool
+		name, peerURL, key, value string
+		// held is what the note names; empty means no note.
+		held string
 	}{
-		{"DOLT_REMOTE_PASSWORD", "DOLT_REMOTE_PASSWORD", "client-secret", true},
-		{"only AZURE_STORAGE_ACCOUNT", "AZURE_STORAGE_ACCOUNT", "account", false},
+		{"AWS_PROFILE for an s3 peer", "s3://bucket/beads", "AWS_PROFILE", "sync", "AWS_*"},
+		{"only AZURE_STORAGE_ACCOUNT for an s3 peer", "s3://bucket/beads", "AZURE_STORAGE_ACCOUNT", "account", ""},
+		{"DOLT_REMOTE_PASSWORD for an https peer", "https://doltremoteapi.dolthub.com/org/peer", "DOLT_REMOTE_PASSWORD", "client-secret", ""},
 	}
 
 	for _, op := range ops {
 		for _, env := range envs {
 			t.Run(op.name+"/"+env.name, func(t *testing.T) {
 				t.Setenv(env.key, env.value)
-				_ = os.Remove(callLog)
+				callLog := fakeDoltOnPath(t, env.peerURL)
 				db, mock, err := sqlmock.New()
 				if err != nil {
 					t.Fatalf("sqlmock: %v", err)
@@ -789,7 +764,7 @@ func TestPeerCloudAuthRoutesThroughTheDoltCLI(t *testing.T) {
 				mock.MatchExpectationsInOrder(false)
 				for i := 0; i < 8; i++ {
 					mock.ExpectQuery("SELECT name, url, params FROM dolt_remotes").
-						WillReturnRows(sqlmock.NewRows([]string{"name", "url", "params"}).AddRow(peer, peerURL, nil))
+						WillReturnRows(sqlmock.NewRows([]string{"name", "url", "params"}).AddRow(peer, env.peerURL, nil))
 				}
 				// No federation_peers row: the peer has no stored credentials.
 				mock.ExpectQuery("FROM federation_peers WHERE name = ").
@@ -812,8 +787,7 @@ func TestPeerCloudAuthRoutesThroughTheDoltCLI(t *testing.T) {
 					readOnly: true,
 					db:       db,
 					cfg:      &Config{ServerHost: "127.0.0.1", ServerPort: 3310},
-					// The SQL route's own connection fails at once, which is
-					// how this test tells it was taken.
+					// The SQL call's own connection fails at once.
 					connStr: unroutableConnStr,
 				}
 				serveDoltDatabase(t, store, store.dbPath, 3310)
@@ -827,32 +801,24 @@ func TestPeerCloudAuthRoutesThroughTheDoltCLI(t *testing.T) {
 				if err != nil && !os.IsNotExist(err) {
 					t.Fatal(err)
 				}
-				calls := strings.TrimSpace(string(raw))
+				if calls := strings.TrimSpace(string(raw)); calls != "" {
+					t.Fatalf("%s with %s set ran dolt in the served database:\n%s", op.name, env.key, calls)
+				}
 				if len(conflicts) != 0 {
 					t.Fatalf("%s: conflicts = %v, want none", op.name, conflicts)
 				}
-				if !env.wantCLI {
-					// Remote and version probes are not transfers; no push,
-					// pull or fetch may run on the SQL route.
-					for _, verb := range []string{"push", "pull", "fetch"} {
-						if strings.Contains(calls, "|"+verb+" ") {
-							t.Fatalf("%s with only %s set ran a dolt CLI transfer:\n%s", op.name, env.key, calls)
-						}
-					}
-					if opErr == nil || !strings.Contains(opErr.Error(), op.sqlErr) || !strings.Contains(opErr.Error(), "127.0.0.1:1") {
-						t.Fatalf("%s = %v, want the SQL route's failure on its unroutable connection (%q)", op.name, opErr, op.sqlErr)
+				if opErr == nil || !strings.Contains(opErr.Error(), op.sqlErr) || !strings.Contains(opErr.Error(), "127.0.0.1:1") {
+					t.Fatalf("%s = %v, want the failure of %s on its unroutable connection (%q)", op.name, opErr, op.call, op.sqlErr)
+				}
+				if env.held == "" {
+					if strings.Contains(opErr.Error(), "runs in the Dolt server's process") {
+						t.Fatalf("%s with only %s set = %v, want no note on the server's environment", op.name, env.key, opErr)
 					}
 					return
 				}
-				if opErr != nil {
-					t.Fatalf("%s through the dolt CLI: %v", op.name, opErr)
-				}
-				cliDir, err := filepath.EvalSymlinks(store.CLIDir())
-				if err != nil {
-					t.Fatal(err)
-				}
-				if want := cliDir + "|" + op.transfer + "|DOLT_REMOTE_PASSWORD=" + env.value; !strings.Contains(calls, want) {
-					t.Fatalf("dolt calls %q lack the cloud-auth transfer %q", calls, want)
+				note := op.call + " runs in the Dolt server's process, which takes " + env.held + " from its own environment, not from bd's"
+				if !strings.Contains(opErr.Error(), note) {
+					t.Fatalf("%s = %v, want it to name where the server takes %s from (%q)", op.name, opErr, env.key, note)
 				}
 			})
 		}

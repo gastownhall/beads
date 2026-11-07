@@ -33,9 +33,6 @@ const federationStagingCleanupTimeout = 30 * time.Second
 // PushTo pushes commits to a specific peer remote.
 // If credentials are stored for this peer, they are used automatically.
 // For git-protocol remotes, uses CLI `dolt push` to avoid MySQL connection timeouts.
-// Stored credentials, or cloud credentials for the peer URL's scheme in bd's
-// environment, also route through CLI `dolt push` in server mode where the CLI
-// directory is the served database (prepareCLIRouteForPeer).
 func (s *DoltStore) PushTo(ctx context.Context, peer string) error {
 	return s.pushRefToPeer(ctx, peer, s.branch)
 }
@@ -51,26 +48,24 @@ func (s *DoltStore) pushRefToPeer(ctx context.Context, peer string, refspec stri
 		})
 	}
 	return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
-		if useCLI, err := s.prepareCLIRouteForPeer(ctx, peer, creds); err != nil {
+		if useCLI, err := s.prepareCLIRouteForPeerCredentials(ctx, peer, creds); err != nil {
 			return err
 		} else if useCLI {
 			return s.doltCLIPushRefToPeer(ctx, peer, refspec, creds)
 		}
-		return withEnvCredentials(creds, func() error {
+		sqlErr := withEnvCredentials(creds, func() error {
 			if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH(?, ?)", peer, refspec); err != nil {
 				return fmt.Errorf("failed to push to peer %s: %w", peer, err)
 			}
 			return nil
 		})
+		return s.notePeerServerEnvCredentials(ctx, "CALL DOLT_PUSH", peer, sqlErr)
 	})
 }
 
 // PullFrom pulls changes from a specific peer remote.
 // If credentials are stored for this peer, they are used automatically.
 // For git-protocol remotes, uses CLI `dolt pull` to avoid MySQL connection timeouts.
-// Stored credentials, or cloud credentials for the peer URL's scheme in bd's
-// environment, also route through CLI `dolt pull` in server mode where the CLI
-// directory is the served database (prepareCLIRouteForPeer).
 // Returns any merge conflicts if present.
 func (s *DoltStore) PullFrom(ctx context.Context, peer string) ([]storage.Conflict, error) {
 	var conflicts []storage.Conflict
@@ -121,17 +116,18 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 		return s.finishPeerPull(ctx, conflicts, err, preHead)
 	}
 	err = s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
-		// Credential and cloud-auth CLI routing: mirrors git-protocol peer pull path.
-		if useCLI, err := s.prepareCLIRouteForPeer(ctx, peer, creds); err != nil {
+		// Credential CLI routing: mirrors git-protocol peer pull path.
+		if useCLI, err := s.prepareCLIRouteForPeerCredentials(ctx, peer, creds); err != nil {
 			return err
 		} else if useCLI {
 			pullErr := s.finishCLIPull(ctx, s.doltCLIPullFromPeer(ctx, peer, creds))
 			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
 		}
-		return withEnvCredentials(creds, func() error {
+		sqlErr := withEnvCredentials(creds, func() error {
 			pullErr := s.pullWithAutoResolve(ctx, peer, "CALL DOLT_PULL(?)", peer)
 			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
 		})
+		return s.notePeerServerEnvCredentials(ctx, "CALL DOLT_PULL", peer, sqlErr)
 	})
 	return s.finishPeerPull(ctx, conflicts, err, preHead)
 }
@@ -176,9 +172,6 @@ func (s *DoltStore) finishPeerPull(ctx context.Context, conflicts []storage.Conf
 // Fetch fetches refs from a peer without merging.
 // If credentials are stored for this peer, they are used automatically.
 // For git-protocol remotes, uses CLI `dolt fetch` to avoid MySQL connection timeouts.
-// Stored credentials, or cloud credentials for the peer URL's scheme in bd's
-// environment, also route through CLI `dolt fetch` in server mode where the CLI
-// directory is the served database (prepareCLIRouteForPeer).
 func (s *DoltStore) Fetch(ctx context.Context, peer string) error {
 	if useCLI, err := s.prepareCLIRouteForPeerGitProtocol(ctx, peer); err != nil {
 		return err
@@ -188,18 +181,19 @@ func (s *DoltStore) Fetch(ctx context.Context, peer string) error {
 		})
 	}
 	return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
-		// Credential and cloud-auth CLI routing: route fetch through CLI subprocess.
-		if useCLI, err := s.prepareCLIRouteForPeer(ctx, peer, creds); err != nil {
+		// Credential CLI routing: route fetch through CLI subprocess.
+		if useCLI, err := s.prepareCLIRouteForPeerCredentials(ctx, peer, creds); err != nil {
 			return err
 		} else if useCLI {
 			return s.doltCLIFetchFromPeer(ctx, peer, creds)
 		}
-		return withEnvCredentials(creds, func() error {
+		sqlErr := withEnvCredentials(creds, func() error {
 			if err := s.execWithLongTimeout(ctx, "CALL DOLT_FETCH(?)", peer); err != nil {
 				return fmt.Errorf("failed to fetch from peer %s: %w", peer, err)
 			}
 			return nil
 		})
+		return s.notePeerServerEnvCredentials(ctx, "CALL DOLT_FETCH", peer, sqlErr)
 	})
 }
 
