@@ -785,6 +785,31 @@ func TestProxiedServerClose2B(t *testing.T) {
 		}
 	})
 
+	// close_suggest_next_blocked_status is
+	// TestEmbeddedCloseSuggestNextBlockedStatus's proxied twin (bd-e5d8fd).
+	t.Run("close_suggest_next_blocked_status", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "csbs")
+		a := bdProxiedCreate(t, bd, p.dir, "Blocker A")
+		b := bdProxiedCreate(t, bd, p.dir, "Held B", "--deps", "depends-on:"+a.ID)
+		c := bdProxiedCreate(t, bd, p.dir, "Waiting C", "--deps", "depends-on:"+a.ID)
+		bdProxiedUpdate(t, bd, p.dir, b.ID, "--status", "blocked")
+		out := bdProxiedClose(t, bd, p.dir, a.ID, "--suggest-next")
+		hint := "    → still status 'blocked' (bd close leaves it). If ready to release: bd update " + b.ID + " --status open\n"
+		if !strings.Contains(out, "  • "+b.ID+" — Held B (P2)\n"+hint) {
+			t.Errorf("bd close --suggest-next does not name %s's release under it:\n%s", b.ID, out)
+		}
+		if strings.Count(out, "still status 'blocked'") != 1 {
+			t.Errorf("bd close --suggest-next prints the blocked-status hint for more than %s:\n%s", b.ID, out)
+		}
+		if !strings.Contains(out, "  • "+c.ID+" — Waiting C (P2)\n") {
+			t.Errorf("bd close --suggest-next changed open %s's line:\n%s", c.ID, out)
+		}
+		if got := readStatus(t, openProxiedDB(t, p), b.ID); got != types.StatusBlocked {
+			t.Errorf("bd close changed %s's explicit status to %q, want it left blocked", b.ID, got)
+		}
+	})
+
 	t.Run("single_transaction_dolt_commit", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "stdc")
