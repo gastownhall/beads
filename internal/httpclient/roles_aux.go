@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
 	storageops "github.com/steveyegge/beads/internal/storage/issueops"
@@ -254,6 +255,18 @@ func validateSettingWrite(key, value string) error {
 	}
 	if err := types.CheckTextLen("config value", value); err != nil {
 		return fmt.Errorf("%w: %w", issueops.ErrValidation, err)
+	}
+	// config.YamlOnlyKeys — startup settings and the tracker secrets — must
+	// live in the workspace's local config.yaml, never in this plane's
+	// row-per-key storage, which is the Dolt config table: a SYNCED table
+	// replicated to every remote on push/pull. `bd config set` already
+	// refuses these at its own door; this mirror and the server-side
+	// workapi.ValidateSettingWrite it is pinned to (wave2c_config_test.go's
+	// TestSettingWriteValidationMatchesTheSharedValidator) are two more doors
+	// onto the same plane and must refuse the same set (GH#7559).
+	if config.IsYamlOnlyKey(key) {
+		return invalid("%q must be set in the workspace's local config.yaml (bd config set %s <value>), not written here: "+
+			"this plane is the Dolt config table, which syncs to every remote on push/pull", key, key)
 	}
 	// The prefix is owned by `bd init --prefix`, `bd bootstrap` and
 	// `bd rename-prefix`, each of which does work this plane cannot: rewriting
