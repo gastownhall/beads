@@ -99,13 +99,12 @@ func runRename(cmd *cobra.Command, args []string) error {
 		return HandleError("failed to rename issue: %v", err)
 	}
 
-	report, err := updateReferencesInAllIssues(ctx, store, oldID, newID, actor)
+	// The rename has committed: a failed reference update is reported, not
+	// returned as the command's error.
+	report := updateReferencesInAllIssues(ctx, store, oldID, newID, actor)
 
 	fmt.Printf("Renamed %s -> %s\n", ui.RenderWarn(oldID), ui.RenderAccent(newID))
 	report.write(os.Stdout, oldID, newID)
-	if err != nil {
-		fmt.Printf("Warning: failed to update some references: %v\n", err)
-	}
 
 	commandDidWrite.Store(true)
 
@@ -123,22 +122,28 @@ type renameReferenceStore interface {
 // review. Entries are in natural issue-ID order.
 type renameReport struct {
 	rewritten []renameFieldsUpdate // updates that rewrote oldID to newID
+	failed    []renameFieldsUpdate // updates that returned an error
+	unchecked []string             // what could not be read, and why
 }
 
-// renameFieldsUpdate names the fields of one issue that an update rewrote.
+// renameFieldsUpdate names the fields of one issue that an update rewrote, or
+// tried to.
 type renameFieldsUpdate struct {
 	issueID string
 	fields  []string // in renameRefFields order
+	err     error    // the update's error; it may still have landed
 }
 
 // updateReferencesInAllIssues updates text references to the old ID in all
 // issues, the renamed one included: it runs after the rename, so that issue is
-// listed under newID with its text still naming oldID.
-func updateReferencesInAllIssues(ctx context.Context, st renameReferenceStore, oldID, newID, actor string) (renameReport, error) {
+// listed under newID with its text still naming oldID. Each issue is updated
+// on its own, so a failed update is reported and the others still go ahead.
+func updateReferencesInAllIssues(ctx context.Context, st renameReferenceStore, oldID, newID, actor string) renameReport {
 	var report renameReport
 	issues, err := st.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
-		return report, fmt.Errorf("failed to list issues: %w", err)
+		report.unchecked = append(report.unchecked, fmt.Sprintf("references to %s were not checked: failed to list issues: %v", oldID, err))
+		return report
 	}
 
 	for _, issue := range issues {
@@ -153,15 +158,19 @@ func updateReferencesInAllIssues(ctx context.Context, st renameReferenceStore, o
 		}
 
 		if len(updates) > 0 {
-			if err := st.UpdateIssue(ctx, issue.ID, updates, actor); err != nil {
-				return report, fmt.Errorf("failed to update references in %s: %w", issue.ID, err)
+			u := renameFieldsUpdate{issueID: issue.ID, fields: fields}
+			if u.err = st.UpdateIssue(ctx, issue.ID, updates, actor); u.err != nil {
+				report.failed = append(report.failed, u)
+			} else {
+				report.rewritten = append(report.rewritten, u)
 			}
-			report.rewritten = append(report.rewritten, renameFieldsUpdate{issueID: issue.ID, fields: fields})
 		}
 	}
 
-	slices.SortFunc(report.rewritten, func(a, b renameFieldsUpdate) int { return utils.NaturalCompareIDs(a.issueID, b.issueID) })
-	return report, nil
+	byIssueID := func(a, b renameFieldsUpdate) int { return utils.NaturalCompareIDs(a.issueID, b.issueID) }
+	slices.SortFunc(report.rewritten, byIssueID)
+	slices.SortFunc(report.failed, byIssueID)
+	return report
 }
 
 // write prints the report of a rename of oldID to newID. It prints nothing
@@ -172,6 +181,12 @@ func (r renameReport) write(w io.Writer, oldID, newID string) {
 		for _, u := range r.rewritten {
 			fmt.Fprintf(w, "  %s: %s\n", u.issueID, strings.Join(u.fields, ", ")) //nolint:gosec // G705: terminal output, not a browser context
 		}
+	}
+	for _, u := range r.failed {
+		fmt.Fprintf(w, "Warning: failed to update references in %s (%s); the update may or may not have landed: %v\n", u.issueID, strings.Join(u.fields, ", "), u.err) //nolint:gosec // G705: terminal output, not a browser context
+	}
+	for _, scope := range r.unchecked {
+		fmt.Fprintf(w, "Warning: %s\n", scope) //nolint:gosec // G705: terminal output, not a browser context
 	}
 }
 
