@@ -325,3 +325,44 @@ func TestDoltNew_EphemeralCreateAfterWispHeal_RealDolt(t *testing.T) {
 		t.Fatalf("created wisp wh-e flag = %v (present=%v), want present and false", got, ok)
 	}
 }
+
+// TestDoltNew_WispHealHealthyCloneRecordsOnce_RealDolt covers AC-4: a healthy
+// clone -- column and index intact, flags live -- records ignored 0032
+// exactly once on its first open, and every converged reopen after that pays
+// only the three probes: no re-record, no repair writes, no flag flips.
+func TestDoltNew_WispHealHealthyCloneRecordsOnce_RealDolt(t *testing.T) {
+	env := newWispHealEnv(t)
+
+	first, err := env.open()
+	if err != nil {
+		t.Fatalf("New (fresh): %v", err)
+	}
+	seedWispBlockedGraph(t, first)
+	if err := first.Close(); err != nil {
+		t.Fatalf("close seeded store: %v", err)
+	}
+
+	// The first open on a fresh database is also its first converged state;
+	// a clone that adopts the marker by pull starts converged instead, which
+	// is the same cursor shape this reopen observes.
+	for i := 0; i < 3; i++ {
+		again, err := env.open()
+		if err != nil {
+			t.Fatalf("converged reopen %d: %v", i, err)
+		}
+		if n := env.scalarInt(again, "SELECT COUNT(*) FROM ignored_schema_migrations WHERE version = 32"); n != 1 {
+			again.Close()
+			t.Fatalf("converged reopen %d recorded ignored 0032 %d times, want exactly 1", i, n)
+		}
+		env.requireWispIsBlockedShape(again)
+		for id, want := range map[string]bool{"wh-b": true, "wh-c": true, "wh-d": false} {
+			if got := env.wispFlags(again)[id]; got != want {
+				again.Close()
+				t.Fatalf("flag for %s after converged reopen %d = %v, want %v (a converged clone must not recompute)", id, i, got, want)
+			}
+		}
+		if err := again.Close(); err != nil {
+			t.Fatalf("close converged reopen %d: %v", i, err)
+		}
+	}
+}
