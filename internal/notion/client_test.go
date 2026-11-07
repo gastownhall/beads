@@ -2,6 +2,7 @@ package notion
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -86,7 +87,7 @@ func TestClientQueryDataSourcePaginates(t *testing.T) {
 	})
 
 	client := NewClient("secret-token").WithBaseURL(server.URL)
-	pages, err := client.QueryDataSource(context.Background(), "ds_123")
+	pages, err := client.QueryDataSource(context.Background(), "ds_123", nil)
 	if err != nil {
 		t.Fatalf("QueryDataSource returned error: %v", err)
 	}
@@ -268,7 +269,7 @@ func TestClientQueryDataSourceRespectsConfiguredPageBound(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient("secret-token").WithBaseURL(server.URL).WithMaxQueryPages(3)
-	_, err := client.QueryDataSource(context.Background(), "ds_123")
+	_, err := client.QueryDataSource(context.Background(), "ds_123", nil)
 	if err == nil {
 		t.Fatal("QueryDataSource succeeded, want pagination-bound error")
 	}
@@ -286,6 +287,117 @@ func TestClientQueryDataSourceRespectsConfiguredPageBound(t *testing.T) {
 		!strings.Contains(err.Error(), "NOTION_MAX_QUERY_PAGES") {
 		t.Fatalf("error should name the config key and env var, got: %v", err)
 	}
+	// The bound now describes the rows the query matched, not the whole sync:
+	// a filtered incremental pull can legitimately finish under it, so the old
+	// "no sync can complete" claim would be wrong.
+	if strings.Contains(err.Error(), "no sync can complete") {
+		t.Fatalf("error still claims no sync can complete, got: %v", err)
+	}
+}
+
+// TestClientQueryDataSourceFilters pins the filter contract of the query
+// endpoint: the filter survives cursor pagination, a nil filter leaves the
+// request shape unchanged, and a filtered query that cannot finish under the
+// bound fails with the same levers named and no partial result.
+func TestClientQueryDataSourceFilters(t *testing.T) {
+	t.Parallel()
+
+	newRecordingServer := func(t *testing.T) (*httptest.Server, *[]map[string]interface{}) {
+		t.Helper()
+		var bodies []map[string]interface{}
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var body map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			bodies = append(bodies, body)
+			if len(bodies) == 1 {
+				_, _ = io.WriteString(w, `{"results":[{"id":"p1"}],"has_more":true,"next_cursor":"c2"}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"results":[{"id":"p2"}],"has_more":false}`)
+		}))
+		t.Cleanup(server.Close)
+		return server, &bodies
+	}
+	filter := map[string]interface{}{
+		"timestamp":        "last_edited_time",
+		"last_edited_time": map[string]interface{}{"on_or_after": "2026-11-01T12:00:00Z"},
+	}
+
+	t.Run("filter survives cursor pagination", func(t *testing.T) {
+		t.Parallel()
+		server, bodies := newRecordingServer(t)
+		client := NewClient("secret-token").WithBaseURL(server.URL)
+		pages, err := client.QueryDataSource(context.Background(), "ds_123", filter)
+		if err != nil {
+			t.Fatalf("QueryDataSource returned error: %v", err)
+		}
+		if len(pages) != 2 {
+			t.Fatalf("pages = %d, want 2", len(pages))
+		}
+		if len(*bodies) != 2 {
+			t.Fatalf("requests = %d, want 2", len(*bodies))
+		}
+		cursorBody := (*bodies)[1]
+		if cursorBody["filter"] == nil {
+			t.Fatalf("cursor request dropped the filter: %v", cursorBody)
+		}
+		if cursorBody["start_cursor"] != "c2" {
+			t.Fatalf("cursor request start_cursor = %v, want c2", cursorBody["start_cursor"])
+		}
+	})
+
+	t.Run("nil filter omits the filter key", func(t *testing.T) {
+		t.Parallel()
+		server, bodies := newRecordingServer(t)
+		client := NewClient("secret-token").WithBaseURL(server.URL)
+		if _, err := client.QueryDataSource(context.Background(), "ds_123", nil); err != nil {
+			t.Fatalf("QueryDataSource returned error: %v", err)
+		}
+		if body := (*bodies)[0]; body["filter"] != nil {
+			t.Fatalf("nil filter still sent a filter key: %v", body)
+		}
+	})
+
+	t.Run("finishing exactly at the bound succeeds", func(t *testing.T) {
+		t.Parallel()
+		var calls atomic.Int64
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.ReadAll(r.Body)
+			more := calls.Add(1) < 2
+			_, _ = io.WriteString(w, fmt.Sprintf(`{"results":[{"id":"p"}],"has_more":%t,"next_cursor":"c"}`, more))
+		}))
+		defer server.Close()
+		client := NewClient("secret-token").WithBaseURL(server.URL).WithMaxQueryPages(2)
+		pages, err := client.QueryDataSource(context.Background(), "ds_123", filter)
+		if err != nil {
+			t.Fatalf("QueryDataSource returned error: %v", err)
+		}
+		if len(pages) != 2 || calls.Load() != 2 {
+			t.Fatalf("pages = %d after %d requests, want 2 pages in exactly 2 requests", len(pages), calls.Load())
+		}
+	})
+
+	t.Run("filtered query past the bound fails with no partial result", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.ReadAll(r.Body)
+			_, _ = io.WriteString(w, `{"results":[{"id":"p"}],"has_more":true,"next_cursor":"c"}`)
+		}))
+		defer server.Close()
+		client := NewClient("secret-token").WithBaseURL(server.URL).WithMaxQueryPages(2)
+		pages, err := client.QueryDataSource(context.Background(), "ds_123", filter)
+		if err == nil {
+			t.Fatal("QueryDataSource succeeded, want the pagination-bound error")
+		}
+		if pages != nil {
+			t.Fatalf("QueryDataSource returned %d rows alongside its error; partial success is not a success", len(pages))
+		}
+		if !strings.Contains(err.Error(), "2 pages") || !strings.Contains(err.Error(), "200 rows") ||
+			!strings.Contains(err.Error(), "notion.max_query_pages") ||
+			!strings.Contains(err.Error(), "NOTION_MAX_QUERY_PAGES") {
+			t.Fatalf("error should name the bound in pages and rows and both levers, got: %v", err)
+		}
+	})
 }
 
 func TestClientQueryDataSourceDefaultBoundUnchanged(t *testing.T) {
@@ -300,7 +412,7 @@ func TestClientQueryDataSourceDefaultBoundUnchanged(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient("secret-token").WithBaseURL(server.URL)
-	if _, err := client.QueryDataSource(context.Background(), "ds_123"); err == nil {
+	if _, err := client.QueryDataSource(context.Background(), "ds_123", nil); err == nil {
 		t.Fatal("QueryDataSource succeeded, want pagination-bound error")
 	}
 	// Hardcoded rather than compared against maxQueryPages: pinned to the
@@ -338,7 +450,7 @@ func TestClientRetriesRateLimitedRequestHonoringRetryAfter(t *testing.T) {
 	client := NewClient("secret-token").WithBaseURL(server.URL)
 	client.after = firesImmediately(&slept)
 
-	pages, err := client.QueryDataSource(context.Background(), "ds_123")
+	pages, err := client.QueryDataSource(context.Background(), "ds_123", nil)
 	if err != nil {
 		t.Fatalf("QueryDataSource returned error: %v", err)
 	}
@@ -415,7 +527,7 @@ func TestClientRetriesServerErrorOnQueryPost(t *testing.T) {
 			client := NewClient("secret-token").WithBaseURL(server.URL)
 			client.after = firesImmediately(&slept)
 
-			pages, err := client.QueryDataSource(context.Background(), "ds_123")
+			pages, err := client.QueryDataSource(context.Background(), "ds_123", nil)
 			if err != nil {
 				t.Fatalf("QueryDataSource returned error: %v", err)
 			}
@@ -576,7 +688,7 @@ func TestClientRetryWaitObservesContextCancellation(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := client.QueryDataSource(ctx, "ds_123")
+		_, err := client.QueryDataSource(ctx, "ds_123", nil)
 		done <- err
 	}()
 
@@ -618,7 +730,7 @@ func TestClientRefusesRetryAfterLongerThanItWillWait(t *testing.T) {
 	client := NewClient("secret-token").WithBaseURL(server.URL)
 	client.after = mustNotWait(t, "a Retry-After beyond maxRetryDelay must not be clamped and retried")
 
-	_, err := client.QueryDataSource(context.Background(), "ds_123")
+	_, err := client.QueryDataSource(context.Background(), "ds_123", nil)
 	if err == nil {
 		t.Fatal("QueryDataSource succeeded, want a refusal")
 	}
@@ -655,7 +767,7 @@ func TestClientRefusesLongRetryAfterInHTTPDateForm(t *testing.T) {
 	client := NewClient("secret-token").WithBaseURL(server.URL)
 	client.after = mustNotWait(t, "a date-form Retry-After beyond maxRetryDelay must not be clamped and retried")
 
-	_, err := client.QueryDataSource(context.Background(), "ds_123")
+	_, err := client.QueryDataSource(context.Background(), "ds_123", nil)
 	if err == nil {
 		t.Fatal("QueryDataSource succeeded, want a refusal")
 	}

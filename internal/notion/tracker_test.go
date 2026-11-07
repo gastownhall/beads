@@ -2,7 +2,9 @@ package notion
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -10,14 +12,25 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// fakeAPI is the in-memory notionAPI. It applies the query filters the
+// tracker sends (see pageMatchesFilter in targeted_sync_test.go), records
+// filters and lookups, and can fail unfiltered queries outright. Methods take
+// the mutex because batch push resolves issues from worker goroutines.
 type fakeAPI struct {
-	user             *User
-	dataSource       *DataSource
-	pages            []Page
-	createdPage      *Page
-	updatedPage      *Page
-	archivePage      *Page
-	queryCalls       int
+	mu           sync.Mutex
+	user         *User
+	dataSource   *DataSource
+	pages        []Page
+	createdPage  *Page
+	updatedPage  *Page
+	archivePage  *Page
+	queryCalls   int
+	queryFilters []map[string]interface{} // one per query; nil = unfiltered
+	getCalls     int
+	retrievedIDs []string
+
+	failUnfiltered bool
+
 	lastCreateDSID   string
 	lastCreateProps  map[string]interface{}
 	lastUpdatePageID string
@@ -28,19 +41,35 @@ func (f *fakeAPI) GetCurrentUser(context.Context) (*User, error) { return f.user
 func (f *fakeAPI) RetrieveDataSource(context.Context, string) (*DataSource, error) {
 	return f.dataSource, nil
 }
-func (f *fakeAPI) QueryDataSource(context.Context, string) ([]Page, error) {
+func (f *fakeAPI) QueryDataSource(_ context.Context, _ string, filter map[string]interface{}) ([]Page, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.queryCalls++
-	return append([]Page(nil), f.pages...), nil
+	f.queryFilters = append(f.queryFilters, filter)
+	if filter == nil && f.failUnfiltered {
+		return nil, fmt.Errorf("query pagination exceeded 2 pages (~200 rows): unfiltered queries fail in this fake")
+	}
+	matched := make([]Page, 0, len(f.pages))
+	for _, page := range f.pages {
+		if pageMatchesFilter(page, filter) {
+			matched = append(matched, page)
+		}
+	}
+	return matched, nil
 }
 func (f *fakeAPI) ArchivePage(context.Context, string, bool) (*Page, error) {
 	return f.archivePage, nil
 }
 func (f *fakeAPI) CreatePage(_ context.Context, dataSourceID string, properties map[string]interface{}) (*Page, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.lastCreateDSID = dataSourceID
 	f.lastCreateProps = properties
 	return f.createdPage, nil
 }
 func (f *fakeAPI) UpdatePage(_ context.Context, pageID string, properties map[string]interface{}) (*Page, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.lastUpdatePageID = pageID
 	f.lastUpdateProps = properties
 	return f.updatedPage, nil
@@ -110,58 +139,87 @@ func TestTrackerFetchIssuesFiltersArchivedAndState(t *testing.T) {
 	}
 }
 
-func TestTrackerFetchIssuesBackfillStillHonorsClosedState(t *testing.T) {
+// TestTrackerIncrementalBoundary pins the server-side Since cutoff to the
+// same UTC minute floor matchesFetchSince truncates to: a page stamped
+// exactly at the floor is fetched, one stamped before it is not, and the
+// filter the tracker sends names that floor. State filtering, archived
+// exclusion, the limit, and the queried/candidate stats ride along.
+func TestTrackerIncrementalBoundary(t *testing.T) {
 	t.Parallel()
 
-	api := &fakeAPI{
-		pages: []Page{
-			{
-				ID:             "01234567-89ab-cdef-0123-456789abcdef",
-				URL:            "https://www.notion.so/Open-0123456789abcdef0123456789abcdef",
-				CreatedTime:    time.Now().UTC().Add(-2 * time.Hour),
-				LastEditedTime: time.Now().UTC().Add(-2 * time.Hour),
-				Properties: map[string]PageProperty{
-					PropertyTitle:    {Title: []RichText{{PlainText: "Open"}}},
-					PropertyBeadsID:  {RichText: []RichText{{PlainText: "bd-open"}}},
-					PropertyStatus:   {Select: &SelectOption{Name: "Open"}},
-					PropertyPriority: {Select: &SelectOption{Name: "Medium"}},
-					PropertyType:     {Select: &SelectOption{Name: "Task"}},
-				},
+	// Non-UTC zone with a nonzero second component: the filter must carry the
+	// UTC minute floor, not the raw local time.
+	since := time.Date(2026, 11, 1, 14, 34, 56, 0, time.FixedZone("test", 2*60*60))
+	floor := since.UTC().Truncate(time.Minute) // 2026-11-01T12:34:00Z
+	page := func(id, beadsID, title, status string, edited time.Time) Page {
+		return Page{
+			ID:             id,
+			URL:            "https://www.notion.so/x-" + strings.ReplaceAll(id, "-", ""),
+			CreatedTime:    edited.Add(-time.Hour),
+			LastEditedTime: edited,
+			Properties: map[string]PageProperty{
+				PropertyTitle:    {Title: []RichText{{PlainText: title}}},
+				PropertyBeadsID:  {RichText: []RichText{{PlainText: beadsID}}},
+				PropertyStatus:   {Select: &SelectOption{Name: status}},
+				PropertyPriority: {Select: &SelectOption{Name: "Medium"}},
+				PropertyType:     {Select: &SelectOption{Name: "Task"}},
 			},
-			{
-				ID:             "fedcba98-7654-3210-fedc-ba9876543210",
-				URL:            "https://www.notion.so/Closed-fedcba9876543210fedcba9876543210",
-				CreatedTime:    time.Now().UTC().Add(-2 * time.Hour),
-				LastEditedTime: time.Now().UTC().Add(-2 * time.Hour),
-				Properties: map[string]PageProperty{
-					PropertyTitle:    {Title: []RichText{{PlainText: "Closed"}}},
-					PropertyBeadsID:  {RichText: []RichText{{PlainText: "bd-closed"}}},
-					PropertyStatus:   {Select: &SelectOption{Name: "Closed"}},
-					PropertyPriority: {Select: &SelectOption{Name: "Medium"}},
-					PropertyType:     {Select: &SelectOption{Name: "Task"}},
-				},
-			},
-		},
+		}
 	}
+	archived := page("33333333-0000-0000-0000-000000000004", "bd-arch", "Archived after floor", "Open", floor.Add(3*time.Minute))
+	archived.Archived = true
+	api := &fakeAPI{pages: []Page{
+		page("11111111-0000-0000-0000-000000000001", "bd-before", "Before the floor", "Open", floor.Add(-time.Second)),
+		page("22222222-0000-0000-0000-000000000002", "bd-at", "At the floor", "Open", floor),
+		page("33333333-0000-0000-0000-000000000003", "bd-after", "After the floor", "Open", floor.Add(time.Minute)),
+		page("44444444-0000-0000-0000-000000000005", "bd-closed", "Closed after floor", "Closed", floor.Add(2*time.Minute)),
+		archived,
+	}}
 	tracker := &Tracker{client: api, config: DefaultMappingConfig(), dataSourceID: "ds_123"}
 
-	since := time.Now().UTC().Add(-30 * time.Minute)
-	issues, err := tracker.FetchIssues(context.Background(), itracker.FetchOptions{
-		State: "closed",
-		Since: &since,
-	})
+	issues, err := tracker.FetchIssues(context.Background(), itracker.FetchOptions{Since: &since})
 	if err != nil {
 		t.Fatalf("FetchIssues returned error: %v", err)
 	}
-	if len(issues) != 1 {
-		t.Fatalf("issues = %d, want 1", len(issues))
+	want := []string{"At the floor", "After the floor", "Closed after floor"}
+	if len(issues) != len(want) {
+		t.Fatalf("issues = %v, want %v", titles(issues), want)
 	}
-	if issues[0].Title != "Closed" {
-		t.Fatalf("title = %q, want Closed", issues[0].Title)
+	for i, title := range want {
+		if issues[i].Title != title {
+			t.Fatalf("issues = %v, want %v", titles(issues), want)
+		}
+	}
+
+	if len(api.queryFilters) != 1 {
+		t.Fatalf("queries = %d, want one", len(api.queryFilters))
+	}
+	filter := api.queryFilters[0]
+	if filter["timestamp"] != "last_edited_time" {
+		t.Fatalf("filter timestamp = %v, want last_edited_time", filter["timestamp"])
+	}
+	condition, ok := filter["last_edited_time"].(map[string]interface{})
+	if !ok || condition["on_or_after"] != "2026-11-01T12:34:00Z" {
+		t.Fatalf("filter condition = %v, want on_or_after 2026-11-01T12:34:00Z", filter["last_edited_time"])
+	}
+
+	// State and limit still select from the live rows the query returned:
+	// queried counts them, candidates the survivors.
+	_, err = tracker.FetchIssues(context.Background(), itracker.FetchOptions{Since: &since, State: "open", Limit: 1})
+	if err != nil {
+		t.Fatalf("FetchIssues(state, limit) returned error: %v", err)
+	}
+	queried, candidates := tracker.LastPullStats()
+	if queried != 3 || candidates != 1 {
+		t.Fatalf("LastPullStats = (%d, %d), want (3, 1) — three live rows in the window, one open candidate under the limit", queried, candidates)
 	}
 }
 
-func TestTrackerFetchIssuesExcludesEqualLastSyncBoundary(t *testing.T) {
+// TestTrackerFetchIssuesIncludesFloorOfLastSyncMinute pins the boundary the
+// way operators feel it: a fetch from Since returns pages stamped at Since's
+// UTC minute floor — so edits made later in the same minute as last_sync are
+// not lost — and the stats name the rows the window query returned.
+func TestTrackerFetchIssuesIncludesFloorOfLastSyncMinute(t *testing.T) {
 	t.Parallel()
 
 	boundary := time.Date(2026, 3, 22, 9, 54, 51, 0, time.UTC)
@@ -171,9 +229,9 @@ func TestTrackerFetchIssuesExcludesEqualLastSyncBoundary(t *testing.T) {
 				ID:             "01234567-89ab-cdef-0123-456789abcdef",
 				URL:            "https://www.notion.so/Task-0123456789abcdef0123456789abcdef",
 				CreatedTime:    boundary.Add(-10 * time.Minute),
-				LastEditedTime: boundary,
+				LastEditedTime: boundary.Add(9 * time.Second), // 09:55:00, the floor of since
 				Properties: map[string]PageProperty{
-					PropertyTitle:    {Title: []RichText{{PlainText: "Equal boundary"}}},
+					PropertyTitle:    {Title: []RichText{{PlainText: "At the floor"}}},
 					PropertyBeadsID:  {RichText: []RichText{{PlainText: "bd-1"}}},
 					PropertyStatus:   {Select: &SelectOption{Name: "Open"}},
 					PropertyPriority: {Select: &SelectOption{Name: "Medium"}},
@@ -184,9 +242,9 @@ func TestTrackerFetchIssuesExcludesEqualLastSyncBoundary(t *testing.T) {
 				ID:             "11111111-2222-3333-4444-555555555555",
 				URL:            "https://www.notion.so/Task-11111111222233334444555555555555",
 				CreatedTime:    boundary.Add(-5 * time.Minute),
-				LastEditedTime: boundary.Add(time.Second),
+				LastEditedTime: boundary.Add(10 * time.Second), // one second past the floor
 				Properties: map[string]PageProperty{
-					PropertyTitle:    {Title: []RichText{{PlainText: "After boundary"}}},
+					PropertyTitle:    {Title: []RichText{{PlainText: "After the floor"}}},
 					PropertyBeadsID:  {RichText: []RichText{{PlainText: "bd-2"}}},
 					PropertyStatus:   {Select: &SelectOption{Name: "Open"}},
 					PropertyPriority: {Select: &SelectOption{Name: "Medium"}},
@@ -197,15 +255,15 @@ func TestTrackerFetchIssuesExcludesEqualLastSyncBoundary(t *testing.T) {
 	}
 	tracker := &Tracker{client: api, config: DefaultMappingConfig(), dataSourceID: "ds_123"}
 
-	boundary = boundary.Add(23 * time.Second)
-	issues, err := tracker.FetchIssues(context.Background(), itracker.FetchOptions{Since: &boundary})
+	since := boundary.Add(23 * time.Second) // 09:55:14, floor 09:55:00
+	issues, err := tracker.FetchIssues(context.Background(), itracker.FetchOptions{Since: &since})
 	if err != nil {
 		t.Fatalf("FetchIssues returned error: %v", err)
 	}
 	if len(issues) != 2 {
 		t.Fatalf("issues = %d, want 2", len(issues))
 	}
-	if issues[0].Title != "Equal boundary" || issues[1].Title != "After boundary" {
+	if issues[0].Title != "At the floor" || issues[1].Title != "After the floor" {
 		t.Fatalf("titles = %q, %q", issues[0].Title, issues[1].Title)
 	}
 	queried, candidates := tracker.LastPullStats()

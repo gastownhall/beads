@@ -30,7 +30,7 @@ type pushOutcome struct {
 type notionAPI interface {
 	GetCurrentUser(ctx context.Context) (*User, error)
 	RetrieveDataSource(ctx context.Context, dataSourceID string) (*DataSource, error)
-	QueryDataSource(ctx context.Context, dataSourceID string) ([]Page, error)
+	QueryDataSource(ctx context.Context, dataSourceID string, filter map[string]interface{}) ([]Page, error)
 	CreatePage(ctx context.Context, dataSourceID string, properties map[string]interface{}) (*Page, error)
 	UpdatePage(ctx context.Context, pageID string, properties map[string]interface{}) (*Page, error)
 	ArchivePage(ctx context.Context, pageID string, inTrash bool) (*Page, error)
@@ -138,36 +138,47 @@ var _ itracker.SinceGranularityProvider = (*Tracker)(nil)
 // SinceGranularity reports that FetchIssues matches Since to the minute.
 func (t *Tracker) SinceGranularity() time.Duration { return fetchSinceGranularity }
 
+// FetchIssues pulls the data source's live pages. An incremental pull (Since
+// set) sends a server-side last_edited_time filter, so a data source larger
+// than the query bound still syncs when only the edited window fits under it
+// (#6004); a cursor-less pull enumerates everything under the same bound.
+//
+// The window query deliberately drops the old whole-source backfill: a page
+// edited before the cursor that no local row links to is no longer discovered
+// here. A cursor-less fetch finds it, and FetchIssue retrieves a known page
+// whatever its age; docs/reference/configuration.md records the change.
 func (t *Tracker) FetchIssues(ctx context.Context, opts itracker.FetchOptions) ([]itracker.TrackerIssue, error) {
-	if err := t.ensureRemoteIndex(ctx); err != nil {
-		return nil, err
-	}
-	localByExternalIdentifier, localByID, err := t.buildLocalPullIndexes(ctx)
+	pages, err := t.client.QueryDataSource(ctx, t.dataSourceID, fetchSinceFilter(opts.Since))
 	if err != nil {
 		return nil, err
 	}
-	t.cacheMu.RLock()
-
-	result := make([]itracker.TrackerIssue, 0, len(t.issueCache))
-	for _, issue := range t.issueCache {
-		candidate := cloneTrackerIssue(issue)
-		if !matchesFetchState(&candidate, opts.State) {
+	result := make([]itracker.TrackerIssue, 0, len(pages))
+	queried := 0
+	for _, page := range pages {
+		if page.InTrash || page.Archived {
 			continue
 		}
-		if !matchesFetchSince(&candidate, opts.Since) && !shouldBackfillNotionIssue(&candidate, localByExternalIdentifier, localByID) {
-			continue
+		issue, err := TrackerIssueFromPullIssue(PulledIssueFromPage(page), t.config)
+		if err != nil {
+			return nil, err
 		}
-		result = append(result, candidate)
+		queried++
 		if opts.Limit > 0 && len(result) >= opts.Limit {
-			break
+			continue
 		}
+		if !matchesFetchState(issue, opts.State) {
+			continue
+		}
+		if !matchesFetchSince(issue, opts.Since) {
+			continue
+		}
+		result = append(result, *issue)
 	}
-	queried := len(t.issueCache)
-	candidates := len(result)
-	t.cacheMu.RUnlock()
+	// queried counts the live rows this query returned — not the whole remote
+	// source, which a filtered pull no longer touches.
 	t.cacheMu.Lock()
 	t.lastQueried = queried
-	t.lastCandidates = candidates
+	t.lastCandidates = len(result)
 	t.cacheMu.Unlock()
 	return result, nil
 }
@@ -178,31 +189,21 @@ func (t *Tracker) LastPullStats() (queried int, candidates int) {
 	return t.lastQueried, t.lastCandidates
 }
 
-func (t *Tracker) buildLocalPullIndexes(ctx context.Context) (map[string]struct{}, map[string]struct{}, error) {
-	localByExternalIdentifier := map[string]struct{}{}
-	localByID := map[string]struct{}{}
-	if t.store == nil {
-		return localByExternalIdentifier, localByID, nil
+// fetchSinceFilter builds the server-side query filter for an incremental
+// pull: pages edited at or after the UTC minute floor of Since. That is the
+// same cutoff matchesFetchSince applies, so the server filter and the
+// retained client-side match agree on the boundary minute.
+func fetchSinceFilter(since *time.Time) map[string]interface{} {
+	if since == nil {
+		return nil
 	}
-	localIssues, err := t.store.SearchIssues(ctx, "", types.IssueFilter{})
-	if err != nil {
-		return nil, nil, fmt.Errorf("searching local issues: %w", err)
+	cutoff := since.UTC().Truncate(fetchSinceGranularity)
+	return map[string]interface{}{
+		"timestamp": "last_edited_time",
+		"last_edited_time": map[string]interface{}{
+			"on_or_after": cutoff.Format(time.RFC3339),
+		},
 	}
-	for _, issue := range localIssues {
-		if issue == nil {
-			continue
-		}
-		if id := strings.TrimSpace(issue.ID); id != "" {
-			localByID[id] = struct{}{}
-		}
-		if issue.ExternalRef == nil {
-			continue
-		}
-		if identifier := ExtractNotionIdentifier(strings.TrimSpace(*issue.ExternalRef)); identifier != "" {
-			localByExternalIdentifier[identifier] = struct{}{}
-		}
-	}
-	return localByExternalIdentifier, localByID, nil
 }
 
 func (t *Tracker) FetchIssue(ctx context.Context, identifier string) (*itracker.TrackerIssue, error) {
@@ -458,7 +459,7 @@ func (t *Tracker) ensureRemoteIndex(ctx context.Context) error {
 		return nil
 	}
 
-	pages, err := t.client.QueryDataSource(ctx, t.dataSourceID)
+	pages, err := t.client.QueryDataSource(ctx, t.dataSourceID, nil)
 	if err != nil {
 		return err
 	}
@@ -694,29 +695,6 @@ func matchesFetchState(issue *itracker.TrackerIssue, stateFilter string) bool {
 	default:
 		return true
 	}
-}
-
-func shouldBackfillNotionIssue(issue *itracker.TrackerIssue, localByExternalIdentifier, localByID map[string]struct{}) bool {
-	if issue == nil {
-		return false
-	}
-	for _, ref := range []string{issue.URL, issue.ID, issue.Identifier} {
-		if identifier := ExtractNotionIdentifier(ref); identifier != "" {
-			if _, ok := localByExternalIdentifier[identifier]; ok {
-				return false
-			}
-		}
-	}
-	raw, ok := issue.Raw.(*PulledIssue)
-	if !ok || raw == nil {
-		return false
-	}
-	localID := strings.TrimSpace(raw.ID)
-	if localID == "" {
-		return false
-	}
-	_, ok = localByID[localID]
-	return !ok
 }
 
 func derefStr(value *string) string {

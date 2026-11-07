@@ -27,6 +27,7 @@ go_test(
         "client_test.go",
         "mapping_test.go",
         "refs_test.go",
+        "targeted_sync_test.go",
         "tracker_test.go",
     ],
     embed = [":notion"],
