@@ -106,11 +106,13 @@ func TestListHelpIsByteIdenticalOutsideIncludeAllTypes(t *testing.T) {
 // way it does on the real command. gatherListInput reads many other flags,
 // but GetString / GetBool on an unregistered flag return zero values, so this
 // stays minimal — the same shape as newWispTypeInputCmd.
-func newIncludeAllTypesInputCmd(t *testing.T, args ...string) *cobra.Command {
+func newIncludeAllTypesInputCmd(t *testing.T, registerUnion bool, args ...string) *cobra.Command {
 	t.Helper()
 	cmd := &cobra.Command{Use: "list"}
 	f := cmd.Flags()
-	f.Bool("include-all-types", false, "")
+	if registerUnion {
+		f.Bool("include-all-types", false, "")
+	}
 	f.Bool("include-templates", false, "")
 	f.Bool("include-gates", false, "")
 	f.Bool("include-infra", false, "")
@@ -130,6 +132,14 @@ func newIncludeAllTypesInputCmd(t *testing.T, args ...string) *cobra.Command {
 // the limit policy below is the real one, not whatever another test left in
 // the process (the same setup as TestListLimitPolicyIsResolvedBeforeTheRequest).
 func gatherIncludeAllTypesInput(t *testing.T, args ...string) (listInput, error) {
+	return gatherIncludeAllTypesInputVariant(t, true, args...)
+}
+
+// gatherIncludeAllTypesInputVariant is the same with the union flag left
+// UNREGISTERED, which is what `bd list` looked like before it existed: a
+// GetBool on an unregistered flag returns the zero value, so the request a
+// caller that never passes the flag builds must be identical either way.
+func gatherIncludeAllTypesInputVariant(t *testing.T, registerUnion bool, args ...string) (listInput, error) {
 	t.Helper()
 	defer func(prev bool) { jsonOutput = prev }(jsonOutput)
 	jsonOutput = false
@@ -139,7 +149,7 @@ func gatherIncludeAllTypesInput(t *testing.T, args ...string) (listInput, error)
 	if err := config.Initialize(); err != nil {
 		t.Fatalf("config.Initialize: %v", err)
 	}
-	return gatherListInput(newIncludeAllTypesInputCmd(t, args...))
+	return gatherListInput(newIncludeAllTypesInputCmd(t, registerUnion, args...))
 }
 
 // TestGatherListInput_IncludeAllTypesReachesTheFilter pins the wiring, not
@@ -332,4 +342,104 @@ func TestGatherListInput_WispTypeWithIncludeAllTypesIsAccepted(t *testing.T) {
 	if !in.IncludeAllTypes {
 		t.Error("IncludeAllTypes must survive onto the request alongside the predicate")
 	}
+}
+
+// TestGatherListInput_ExistingFlagsKeepTheirRequestIdentity is the control the
+// two changes above ride on: every flag combination that omits
+// --include-all-types must build the same request and the same filter as it
+// did before the flag existed. Each combination is gathered twice on an
+// otherwise identical command, once with the union flag unregistered (the old
+// surface) and once registered but false (the new surface); only the callers
+// that pass the flag may see a difference.
+func TestGatherListInput_ExistingFlagsKeepTheirRequestIdentity(t *testing.T) {
+	for _, args := range [][]string{
+		{},
+		{"--all"},
+		{"--include-templates"},
+		{"--include-gates"},
+		{"--include-infra"},
+		{"--include-ephemeral"},
+		{"--all", "--include-ephemeral"},
+		{"--limit", "5"},
+		{"--all", "--limit", "5"},
+	} {
+		name := "bare"
+		if len(args) > 0 {
+			name = strings.Join(args, " ")
+		}
+		t.Run(name, func(t *testing.T) {
+			base, err := gatherIncludeAllTypesInputVariant(t, false, args...)
+			if err != nil {
+				t.Fatalf("gatherListInput (no union flag, %v): %v", args, err)
+			}
+			today, err := gatherIncludeAllTypesInputVariant(t, true, args...)
+			if err != nil {
+				t.Fatalf("gatherListInput (union registered, %v): %v", args, err)
+			}
+			if !reflect.DeepEqual(base.ListRequest, today.ListRequest) {
+				t.Errorf("registering --include-all-types must not change the request for %v:\nbase:  %#v\ntoday: %#v", args, base.ListRequest, today.ListRequest)
+			}
+			if base.effectiveLimit != today.effectiveLimit {
+				t.Errorf("effectiveLimit changed for %v: base %d, today %d", args, base.effectiveLimit, today.effectiveLimit)
+			}
+			cfg := workapi.ListConfig{}
+			fBase, err := workapi.BuildListFilter(base.ListRequest, cfg)
+			if err != nil {
+				t.Fatalf("BuildListFilter (base, %v): %v", args, err)
+			}
+			fToday, err := workapi.BuildListFilter(today.ListRequest, cfg)
+			if err != nil {
+				t.Fatalf("BuildListFilter (today, %v): %v", args, err)
+			}
+			if !reflect.DeepEqual(fBase, fToday) {
+				t.Errorf("registering --include-all-types must not change the filter for %v", args)
+			}
+		})
+	}
+
+	// --all is the axis the reworded help describes; pin that its actual
+	// effects are exactly those: the status/pinned defaults and the default
+	// limit lift, the type/plane suppressions do not, and the union stays off.
+	t.Run("--all lifts status, pinned and the default limit only", func(t *testing.T) {
+		in, err := gatherIncludeAllTypesInput(t, "--all")
+		if err != nil {
+			t.Fatalf("gatherListInput (--all): %v", err)
+		}
+		if !in.AllFlag {
+			t.Fatal("--all must set AllFlag")
+		}
+		if in.IncludeAllTypes {
+			t.Error("--all must not set IncludeAllTypes: the status and type axes are deliberately independent")
+		}
+		filter, err := workapi.BuildListFilter(in.ListRequest, workapi.ListConfig{})
+		if err != nil {
+			t.Fatalf("BuildListFilter: %v", err)
+		}
+		if len(filter.ExcludeTypes) == 0 {
+			t.Error("--all must leave the default type exclusions in place; that is --include-all-types' axis")
+		}
+		if filter.IsTemplate == nil || *filter.IsTemplate {
+			t.Errorf("--all must keep templates hidden, got IsTemplate %v", filter.IsTemplate)
+		}
+		if !filter.SkipWisps {
+			t.Error("--all must keep the wisp plane suppressed")
+		}
+		if len(filter.ExcludeStatus) != 0 {
+			t.Errorf("--all must lift the default status exclusions, got %v", filter.ExcludeStatus)
+		}
+		if filter.Pinned != nil {
+			t.Errorf("--all must lift the default pinned exclusion, got Pinned %v", *filter.Pinned)
+		}
+		if in.effectiveLimit != 0 {
+			t.Errorf("--all must lift the default limit, got effectiveLimit %d", in.effectiveLimit)
+		}
+
+		limited, err := gatherIncludeAllTypesInput(t, "--all", "--limit", "5")
+		if err != nil {
+			t.Fatalf("gatherListInput (--all --limit 5): %v", err)
+		}
+		if limited.effectiveLimit != 5 {
+			t.Errorf("an explicit --limit must outrank --all, got effectiveLimit %d", limited.effectiveLimit)
+		}
+	})
 }
