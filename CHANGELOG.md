@@ -1234,6 +1234,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the export is not left staged at its old content. It also decides whether
   the commit touches `.beads` from that index, and in a linked worktree no
   longer re-stages an export you removed with `git rm` (#4080).
+- **`bd init`'s guards and destroy count are about the database the workspace
+  uses, not the one `--database`, `--server-host` or `--server-port` names**
+  (GH#6172, #7954). A re-init that named another database counted and
+  witnessed a mix of the two: an exported `BEADS_DOLT_SERVER_DATABASE` that
+  init's own open ignores, and init's target endpoint. A count that failed
+  there read as zero, so a populated workspace could be repointed with no
+  confirmation. Every guard now reads the database `metadata.json` records, at
+  the endpoint the workspace's commands dial, logging in with that endpoint's
+  credentials. `bd init --reinit-local` naming another database is a repoint:
+  a populated configured database takes the `destroy N issues` confirmation
+  under a warning that names both databases, an empty one proceeds with one
+  `Repointing this workspace from database A to B` notice, a missing one gets
+  the missing-database refusal that `--recreate-missing` lifts, and one that
+  exists but cannot be read is refused (exit 1) whatever `--recreate-missing`
+  or `--destroy-token` say. A plain `bd init` naming another database over a
+  live one is refused as already initialized, a `.beads/redirect` stub is
+  guarded as the workspace it points at, and a re-init whose workspace
+  another `bd init` changed while it waited for the init gate is refused;
+  re-run it. A repoint to another server stops the Dolt server bd runs for
+  the workspace, whose port file would otherwise keep its commands on the old
+  database. See [init-repoint](docs/recovery/init-safety.md#init-repoint).
+
 - **bd again reads `GT_ROOT` from a rig's `.beads/.env`** (#8117; also
   shipped in 1.3.4). `gc rig add` writes the city root there, and the
   `.beads/.env` allowlist from #7879 (also in 1.3.3) dropped it, printing
