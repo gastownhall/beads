@@ -260,3 +260,42 @@ func TestBackupRestorePassesURLVerbatim(t *testing.T) {
 		}
 	}
 }
+
+// TestFileURLForOS pins the file:// URL bd generates for a local backup
+// directory (GH#6019). On Windows filepath.Abs can return a lowercase drive
+// and backslashes, "c:\Users\...": glued onto "file://", Dolt's URL parser
+// only special-cases uppercase drive letters, so it fell through to net/url
+// and failed with `invalid port ":\Users\..." after host`. Every Windows
+// spelling of a directory must now come out as one uppercase-drive,
+// forward-slash URL, and POSIX paths, where a backslash is a legal filename
+// byte, must come out exactly as before.
+func TestFileURLForOS(t *testing.T) {
+	for _, tc := range []struct {
+		name, goos, abs, want string
+		parses                bool // net/url.Parse must succeed with Host+Path == want's path
+	}{
+		{name: "AC-1 reported path", goos: "windows",
+			abs:  `c:\Users\alxta\atl-logs-parser\.beads\backup`,
+			want: "file://C:/Users/alxta/atl-logs-parser/.beads/backup", parses: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := fileURLForOS(tc.abs, tc.goos)
+			if got != tc.want {
+				t.Fatalf("fileURLForOS(%q, %q) = %q, want %q", tc.abs, tc.goos, got, tc.want)
+			}
+			if tc.goos == "windows" && strings.Contains(got, `\`) {
+				t.Errorf("fileURLForOS(%q, windows) = %q, which still holds a backslash", tc.abs, got)
+			}
+			if !tc.parses {
+				return
+			}
+			u, err := neturl.Parse(got)
+			if err != nil {
+				t.Fatalf("net/url.Parse(%q): %v", got, err)
+			}
+			if path := strings.TrimPrefix(tc.want, "file://"); u.Host+u.Path != path {
+				t.Errorf("net/url.Parse(%q) Host+Path = %q, want %q", got, u.Host+u.Path, path)
+			}
+		})
+	}
+}
