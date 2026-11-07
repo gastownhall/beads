@@ -451,6 +451,33 @@ func TestRenameShortForm(t *testing.T) {
 	})
 }
 
+// TestRenameReferenceHelp pins the rename help against the reference
+// rewrite's actual contract: which fields are rewritten, what is
+// deliberately left alone, and that the scan's outcome is reported.
+func TestRenameReferenceHelp(t *testing.T) {
+	long := renameCmd.Long
+	for _, want := range []string{
+		"title", "description", "design", "notes", "acceptance criteria", "close reason",
+	} {
+		if !strings.Contains(long, want) {
+			t.Errorf("rename help does not name the rewritten field %q:\n%s", want, long)
+		}
+	}
+	for _, want := range []string{
+		"comment",        // comment text follows the issue but is not rewritten
+		"not rewritten",  // what the scan deliberately leaves alone
+		"short-form",     // possible short-form references are flagged
+		"left in place",  // how the report describes them
+	} {
+		if !strings.Contains(long, want) {
+			t.Errorf("rename help does not explain %q:\n%s", want, long)
+		}
+	}
+	if strings.Contains(long, "--dry-run") {
+		t.Errorf("rename help mentions --dry-run, which the command does not have:\n%s", long)
+	}
+}
+
 func TestRenameIDReferences(t *testing.T) {
 	renames := []struct {
 		name   string

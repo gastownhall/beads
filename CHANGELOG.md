@@ -1208,6 +1208,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd rename` no longer leaves stale references behind (GH#7040, found and
+  first tested in #7399). The reference rewrite now covers every issue's
+  close_reason and the renamed issue's own text, not only other issues'
+  title, description, design, notes and acceptance criteria; it matches IDs
+  by token instead of word boundary, so renaming `bd-auth` no longer
+  rewrites the `bd-auth` inside `bd-auth-v2` or the parent part of dotted
+  children like `bd-auth.1`; and one failed update no longer fails the
+  command after the rename has already committed. After the Renamed line the
+  rename now reports what it did: the rewritten fields, by issue, and —
+  because comment text and short-form references (`12x.39` for
+  `abc-12x.39`) are deliberately left as written — every comment and
+  possible short form still naming the old ID, with any update that could
+  not be confirmed. The help text and the advanced docs now say the same,
+  and no longer advertise a `--dry-run` flag the command does not have.
+
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

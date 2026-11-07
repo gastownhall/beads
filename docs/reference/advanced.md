@@ -11,13 +11,18 @@ Rename issues while preserving references:
 
 ```bash
 bd rename bd-42 bd-new-id
-bd rename bd-42 bd-new-id --dry-run  # Preview
 ```
 
 Updates:
-- All dependencies pointing to old ID
-- All references in other issues
-- Comments and descriptions
+- All dependencies pointing to the old ID
+- Text references in every issue's title, description, design, notes,
+  acceptance criteria and close reason — the renamed issue's own text
+  included; longer IDs that contain the old one are preserved
+- Labels, events, and comments, which follow the issue to the new ID
+
+Comment text and short-form references are not rewritten: after the rename
+they are listed as references left in place, together with any update that
+could not be confirmed. See [bd rename](/cli-reference/rename).
 
 ## Prefix Rename
 
@@ -29,7 +34,8 @@ bd rename-prefix kw- --dry-run  # Preview without applying
 bd rename-prefix kw-            # Every knowledge-work-* ID becomes kw-*
 ```
 
-The rename updates all issue IDs and all text references across all fields.
+The rename updates all issue IDs and the text references in titles,
+descriptions, designs, acceptance criteria, and notes.
 Prefixes are lowercase letters, numbers, and hyphens,
 must start with a letter, and must end with a hyphen. If a corrupted database
 contains issues with multiple prefixes, `bd rename-prefix <prefix> --repair`

@@ -6218,9 +6218,15 @@ bd rename
     |
     | This updates:
     | - The issue's primary ID
-    | - All references in other issues (descriptions, titles, notes, etc.)
+    | - Text references in every issue's title, description, design, notes,
+    |   acceptance criteria and close reason - the renamed issue's own text
+    |   included; longer IDs that contain the old one are preserved
     | - Dependencies pointing to/from this issue
-    | - Labels, comments, and events
+    | - Labels and events; comments follow the issue to the new ID
+    |
+    | Comment text and short-form references are not rewritten: mentions of the
+    | old ID (12x.39 for abc-12x.39) are listed as references left in place,
+    | together with any update that could not be confirmed.
     |
     | Examples:
     |   bd rename bd-w382l bd-dolt     # Rename to memorable ID
