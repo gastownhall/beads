@@ -273,6 +273,35 @@ bd list --label backend --label-any urgent,release-blocker
 bd list --label needs-review,needs-tests --label-any frontend,ui,mobile
 ```
 
+### Pattern Filtering (--label-pattern / --label-regex)
+
+Match labels by shape rather than by name:
+
+```bash
+# Glob: matches tech-debt, tech-legacy, ...
+bd list --label-pattern 'tech-*'
+
+# Regex (unanchored): matches tech-debt, tech-legacy, ...
+bd ready --label-regex 'tech-(debt|legacy)'
+```
+
+**An empty value is an error, not "no filter".** Supplying
+`--label-pattern ""` (or a whitespace-only glob) or `--label-regex ""` fails
+with `--label-pattern was supplied but contains no pattern` (or the
+`--label-regex` equivalent) instead of silently listing everything. The one
+asymmetry is deliberate: a whitespace-only `--label-regex` is accepted,
+because labels can contain spaces and a blank-looking regex is still a real
+substring pattern, while a whitespace-only glob can never match a trimmed
+label and is refused. Omitting the flags still means no pattern filter, and
+usable patterns reach the query exactly as typed — including one that fails
+to compile, which surfaces as a query error rather than an input error.
+
+`bd migrate-issues --label` follows the same rule: `--label ""` (or any
+spelling whose elements are all blank) is refused with `--label was supplied
+but contains no usable label` instead of widening the migration to every
+issue matching the other filters, and the labels that remain are trimmed and
+deduplicated before selection.
+
 ## Workflow Examples
 
 ### Triage Workflow

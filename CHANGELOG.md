@@ -685,6 +685,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A supplied-but-empty label pattern is now an error on `bd list` and
+  `bd ready`, and on `bd migrate issues --label`**
+  ([#6636](https://github.com/gastownhall/beads/issues/6636)).
+  `--label-pattern ""` (or a whitespace-only glob) and `--label-regex ""` on
+  `bd list`/`bd ready` used to be read as *no pattern*, silently dropping the
+  label predicate and widening the listing; they now fail with `--label-pattern
+  was supplied but contains no pattern` / `--label-regex was supplied but
+  contains no pattern`. Unchanged: a whitespace-only `--label-regex` is still
+  accepted — labels may contain spaces, so it is a real substring pattern,
+  while the same value as a glob can never match a normalized (trimmed) label
+  and is refused — and omitting the flags still means no pattern filter.
+  `bd migrate issues --label ""` (same on the hidden `bd migrate-issues`
+  alias), whose empty slice pflag produced used to fall through to *no label
+  filter* — migrating every issue in `--from` matching the other filters,
+  behind the `--yes`/`--json` confirmation bypasses a script uses — now fails
+  with `--label was supplied but contains no usable label` before any store
+  query, plan or write; a `--label` with usable content is normalized
+  (trimmed, deduplicated) the way the listing commands normalize theirs.
+
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add
