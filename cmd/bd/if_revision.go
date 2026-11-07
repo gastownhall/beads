@@ -20,7 +20,7 @@ import (
 // syntax, the one-id rule and the exit-code contract. Each verb appends what is specific
 // to it (close has no other guards to compose with; update composes with
 // --if-assignee/--if-status).
-const ifRevisionFlagHelp = "Apply the write only if the issue's current revision equals this value (the decimal int64 from `bd show --json`'s \"revision\" field). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures)."
+const ifRevisionFlagHelp = "Apply the write only if the issue's current revision equals this value (the decimal int64 from the \"revision\" field of `bd show --json`, or of the row a previous `bd update --json` printed). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures)."
 
 // parseIfRevisionFlag reads --if-revision with presence detected via
 // Changed(), matching --if-assignee/--if-status's idiom, and parses it with
