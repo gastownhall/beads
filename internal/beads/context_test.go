@@ -403,6 +403,25 @@ func TestIsPathInSafeBoundary(t *testing.T) {
 		{"var/tmp root", "/var/tmp", true},
 		{"var/tmp GOTMPDIR-style subdir", "/var/tmp/gotmp/TestSomething1234/001/.beads", true},
 	}
+	if runtime.GOOS == "windows" {
+		// The POSIX table means nothing on Windows (GH#6101); the portable
+		// Windows policy tests live in winboundary_test.go.
+		winDir := hostWindowsFacts().WindowsDir
+		tests = []struct {
+			name     string
+			path     string
+			expected bool
+		}{
+			{"windows directory", filepath.Join(winDir, ".beads"), false},
+			{"windows System32", filepath.Join(winDir, "System32", ".beads"), false},
+			{"program files", `C:\Program Files\beads`, false},
+			{"other user profile", `C:\Users\some-other-nonexistent-user\.beads`, false},
+			{"user home directory", filepath.Join(homeDir, "projects", ".beads"), true},
+			{"temp directory", os.TempDir(), true},
+			{"temp directory not-yet-created subpath", filepath.Join(os.TempDir(), "be-kghzr-nonexistent-subpath", ".beads"), true},
+			{"windows directory sibling", filepath.Join(filepath.VolumeName(winDir)+`\`, "Windows-src", ".beads"), true},
+		}
+	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -502,6 +521,9 @@ func TestIsPathInSafeBoundary_SharedSymlinkEscape(t *testing.T) {
 // symlink under it whose target escapes to a rejected system directory. Skipped
 // when /var/tmp is absent or not writable, so it never fails spuriously.
 func TestIsPathInSafeBoundary_VarTmpSymlinkEscape(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("/var/tmp is a POSIX directory")
+	}
 	const varTmp = "/var/tmp"
 	if info, err := os.Stat(varTmp); err != nil || !info.IsDir() {
 		t.Skipf("%s not present as a directory: %v", varTmp, err)
@@ -533,16 +555,24 @@ func TestIsPathInSafeBoundary_VarTmpSymlinkEscape(t *testing.T) {
 // cross-platform and always present, so this test is not OS-gated.
 func TestIsPathInSafeBoundary_TempDirSymlinkEscape(t *testing.T) {
 	tempDir := os.TempDir()
+	sysDir := "/etc"
+	if runtime.GOOS == "windows" {
+		sysDir = hostWindowsFacts().WindowsDir
+	}
 
 	// Plant a symlink under the world-writable OS temp dir pointing OUTSIDE the
-	// boundary, at /etc (a system dir). Best-effort clear of any stale link from a
+	// boundary, at a system dir. Best-effort clear of any stale link from a
 	// crashed run, then register cleanup.
 	link := filepath.Join(tempDir, fmt.Sprintf(".be-kghzr-escape-test-%d", os.Getpid()))
 	_ = os.Remove(link)
-	if err := os.Symlink("/etc", link); err != nil {
+	if err := os.Symlink(sysDir, link); err != nil {
 		t.Skipf("cannot create symlink in %s (not writable?): %v", tempDir, err)
 	}
 	t.Cleanup(func() { _ = os.Remove(link) })
+	// Some Windows emulations report success without creating the link.
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Skipf("symlink %s was not created: %v", link, err)
+	}
 
 	// A BEADS_DIR routed *through* the escaping symlink must be rejected: its bytes
 	// resolve into /etc, outside the temp dir. The trailing ".beads" component does
@@ -550,12 +580,12 @@ func TestIsPathInSafeBoundary_TempDirSymlinkEscape(t *testing.T) {
 	// this is the exact shape that tripped the old unresolved-path fallback.
 	target := filepath.Join(link, ".beads")
 	if isPathInSafeBoundary(target) {
-		t.Errorf("isPathInSafeBoundary(%q) = true, want false (path through symlink escaping temp dir to /etc)", target)
+		t.Errorf("isPathInSafeBoundary(%q) = true, want false (path through symlink escaping temp dir to %s)", target, sysDir)
 	}
 
 	// The escaping symlink itself also resolves outside the boundary.
 	if isPathInSafeBoundary(link) {
-		t.Errorf("isPathInSafeBoundary(%q) = true, want false (symlink under temp dir escaping to /etc)", link)
+		t.Errorf("isPathInSafeBoundary(%q) = true, want false (symlink under temp dir escaping to %s)", link, sysDir)
 	}
 }
 
