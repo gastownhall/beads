@@ -636,6 +636,21 @@ func isPathInSafeBoundary(path string) bool {
 		return resolvedPathWithinRoot(absPath, "/var/tmp")
 	}
 
+	// Service-home exception (GH#6323, SEC-003): a service account whose home
+	// is a specific directory below /var/lib — the Debian `adduser --system`
+	// convention, e.g. /var/lib/flow-estate — may point BEADS_DIR inside its
+	// own home even though /var itself stays blocklisted just below. The
+	// exception (inOwnServiceHome) is deliberately narrow: it never admits the
+	// root account, /var/lib itself, another service's sibling home, or a
+	// request that resolves outside the account home, and the home directory
+	// must actually exist and be owned by the effective uid — an
+	// environment-derived home lookup alone is not trust evidence (pure-Go
+	// os/user falls back to $HOME, and permissions do not stop another account
+	// from reading a directory it does not own).
+	if inOwnServiceHome(absPath, serviceHomeRoot, serviceHomeAccount(), os.Geteuid()) {
+		return true
+	}
+
 	for _, prefix := range unsafePrefixes {
 		if strings.HasPrefix(absPath, prefix+"/") || absPath == prefix {
 			return false
@@ -722,6 +737,97 @@ func resolvedPathWithinRoot(absPath, root string) bool {
 	resolved := resolveLongestExistingAncestor(absPath)
 	resolvedRoot := resolveLongestExistingAncestor(root)
 	return resolved == resolvedRoot || strings.HasPrefix(resolved, resolvedRoot+string(filepath.Separator))
+}
+
+// serviceHomeRoot is the root below which a service-account home may sit
+// despite the /var entry in unsafePrefixes. A package var, not a constant,
+// solely so tests can point the boundary at a temporary fixture root: the
+// real /var/lib belongs to the system and must never be rearranged for a
+// test. Production never reassigns it.
+var serviceHomeRoot = "/var/lib"
+
+// serviceHomeAccount is the account lookup the service-home exception
+// consults: the current account's home directory, read the way every other
+// home check in this package reads it (account database first, $HOME
+// fallback — userHomeDir). A package var so tests can inject a fixture
+// account, which the OS account database cannot be repointed to provide,
+// and so a test can observe which paths trigger the lookup at all.
+// Production never reassigns it.
+var serviceHomeAccount = func() string { return userHomeDir() }
+
+// inOwnServiceHome reports whether path — a BEADS_DIR candidate — lies inside
+// the current non-root account's own service home below root, the narrow
+// carve-out that lets a service account homed at e.g. /var/lib/<service> use
+// bd against its own store despite the /var blocklist entry (GH#6323).
+//
+// Admission requires all of:
+//   - a positive effective uid: root is never admitted, nor an invalid one;
+//   - an absolute home — never root itself — that exists as a directory,
+//     resolves through symlinks, and stays strictly below the physical root;
+//   - the resolved home owned by that uid, the gate that keeps an
+//     environment-derived home lookup ($HOME fallback in pure-Go os/user)
+//     from nominating system state this account does not control;
+//   - the request under the lexical root or its physical spelling (callers
+//     may canonicalize either way, as the temp-root carve-out already
+//     allows), resolving — symlinks and not-yet-created descendants included
+//     — inside the physical home.
+//
+// Everything else stays rejected: the root itself, siblings of the home under
+// it, requests that resolve outside the home or outside the root, wrong
+// owners, missing or non-directory homes, and any uid that is not a positive
+// non-root one.
+func inOwnServiceHome(path, root, home string, euid int) bool {
+	if euid <= 0 {
+		return false
+	}
+	home = filepath.Clean(strings.TrimSuffix(home, "/"))
+	if home == "" || !filepath.IsAbs(home) {
+		return false
+	}
+	root = filepath.Clean(strings.TrimSuffix(root, "/"))
+	if root == "" || !filepath.IsAbs(root) {
+		return false
+	}
+	// The home must exist as a real directory. A not-yet-created service home
+	// is not evidence of anything — unlike the not-yet-created BEADS_DIR
+	// descendants admitted below, which still have to sit under an existing,
+	// owned home.
+	resolvedHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		return false
+	}
+	if fi, err := os.Stat(resolvedHome); err != nil || !fi.IsDir() {
+		return false
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return false
+	}
+	if !pathWithinRoot(resolvedHome, resolvedRoot) || resolvedHome == resolvedRoot {
+		return false
+	}
+	if !dirOwnedBy(resolvedHome, euid) {
+		return false
+	}
+	absPath := filepath.Clean(path)
+	if !filepath.IsAbs(absPath) {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return false
+		}
+		absPath = abs
+	}
+	if !pathWithinRoot(absPath, root) && !pathWithinRoot(absPath, resolvedRoot) {
+		return false
+	}
+	return resolvedPathWithinRoot(absPath, resolvedHome)
+}
+
+// pathWithinRoot reports whether abs is root itself or below it, compared on
+// a path-separator boundary so a sibling like /var/libx never matches
+// /var/lib.
+func pathWithinRoot(abs, root string) bool {
+	return abs == root || strings.HasPrefix(abs, root+string(filepath.Separator))
 }
 
 // GetRepoContextForWorkspace returns a fresh RepoContext for a specific workspace.

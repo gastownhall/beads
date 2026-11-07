@@ -6,6 +6,8 @@ go_library(
         "beads.go",
         "context.go",
         "fingerprint.go",
+        "owner_other.go",
+        "owner_unix.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/beads",
     visibility = ["//:__subpackages__"],
@@ -42,7 +44,9 @@ go_test(
         "testmain_integration_test.go",
         "testmain_test.go",
         "user_global_beads_test.go",
+        "var_lib_service_home_test.go",
     ],
+    data = glob(["testdata/**"]),
     embed = [":beads"],
     deps = [
         "//internal/ceiling",

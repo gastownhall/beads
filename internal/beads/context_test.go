@@ -414,6 +414,173 @@ func TestIsPathInSafeBoundary(t *testing.T) {
 	}
 }
 
+// TestIsPathInSafeBoundary_OwnServiceHome drives the real boundary —
+// isPathInSafeBoundary, unsafePrefixes blocklist and all — against a
+// temporary stand-in for the /var/lib service-home carve-out (GH#6323).
+//
+// The fixture base is appended to a saved copy of unsafePrefixes so the whole
+// fixture area is blocklisted exactly the way /var is in production: nothing
+// under it can be admitted except through the service-home exception. TMPDIR
+// is repointed to a disjoint sibling first, so the os.TempDir() carve-out
+// (which admits everything under the temp root) cannot cover the fixture and
+// hand the test passes the exception did not earn. The account seams
+// (serviceHomeRoot, serviceHomeAccount) stand in for the OS account database,
+// which a test cannot repoint at a fixture home.
+func TestIsPathInSafeBoundary_OwnServiceHome(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("the service-home exception never admits uid 0, so a root runner cannot exercise admission through the real boundary")
+	}
+	fixtureBase := t.TempDir()
+	// Disjoint temp root for os.TempDir() once TMPDIR moves below.
+	t.Setenv("TMPDIR", t.TempDir())
+
+	serviceRoot := filepath.Join(fixtureBase, "varlib")
+	home := filepath.Join(serviceRoot, "flow-estate")
+	releaseDir := filepath.Join(home, "releases", "r1")
+	for _, dir := range []string{
+		serviceRoot,
+		home,
+		releaseDir,
+		filepath.Join(serviceRoot, "some-other-service"),
+		filepath.Join(fixtureBase, "outside"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	// A release entry that is a symlink escaping the home (but staying inside
+	// the blocklisted fixture area): the exception must resolve it and
+	// refuse, not follow it out of the account home.
+	if err := os.Symlink(filepath.Join(fixtureBase, "outside"), filepath.Join(home, "releases", "r3")); err != nil {
+		t.Fatalf("symlink escaping release: %v", err)
+	}
+
+	savedPrefixes := unsafePrefixes
+	savedRoot, savedAccount := serviceHomeRoot, serviceHomeAccount
+	unsafePrefixes = append(append([]string{}, savedPrefixes...), fixtureBase)
+	t.Cleanup(func() {
+		unsafePrefixes = savedPrefixes
+		serviceHomeRoot = savedRoot
+		serviceHomeAccount = savedAccount
+	})
+	serviceHomeRoot = serviceRoot
+	accountHome := func() string { return home }
+
+	tests := []struct {
+		name     string
+		account  func() string
+		path     string
+		expected bool
+	}{
+		{"account home itself", accountHome, home, true},
+		{"existing release .beads", accountHome, filepath.Join(releaseDir, ".beads"), true},
+		{"not-yet-created release .beads", accountHome, filepath.Join(home, "releases", "r2", ".beads"), true},
+
+		{"no account home configured", func() string { return "" }, filepath.Join(home, ".beads"), false},
+		{"account home missing from disk", func() string { return filepath.Join(serviceRoot, "no-such-service") }, filepath.Join(serviceRoot, "no-such-service", ".beads"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			serviceHomeAccount = tt.account
+			if got := isPathInSafeBoundary(tt.path); got != tt.expected {
+				t.Errorf("isPathInSafeBoundary(%q) = %v, want %v", tt.path, got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestInOwnServiceHome table-tests the service-home helper directly, with the
+// root argument pointed at a temporary fixture (the real /var/lib belongs to
+// the system). Ownership is exercised with the runner's own uid; on a root
+// runner the fixture home is chowned to nobody's uid (65534) and that uid is
+// supplied instead, so positive rows stay meaningful there too.
+func TestInOwnServiceHome(t *testing.T) {
+	euid := os.Geteuid()
+	if euid == 0 {
+		euid = 65534 // nobody: see the comment above
+	}
+
+	base := t.TempDir()
+	root := filepath.Join(base, "varlib")
+	home := filepath.Join(root, "svc")
+	for _, dir := range []string{root, home, filepath.Join(root, "releases", "r1"), filepath.Join(root, "othersvc")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "afile"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write afile: %v", err)
+	}
+	outsideRoot := t.TempDir() // a second temp dir, genuinely outside root
+	outsideHome := filepath.Join(root, "outside-home")
+	if err := os.MkdirAll(outsideHome, 0o755); err != nil {
+		t.Fatalf("mkdir outsideHome: %v", err)
+	}
+	// Aliases and escape hatches, all with existing targets so
+	// resolveLongestExistingAncestor follows them rather than falling back to
+	// the lexical spelling.
+	aliasToHome := filepath.Join(root, "alias")       // valid home alias -> home
+	aliasToRoot := filepath.Join(root, "aliasroot")   // home alias resolving to the root itself
+	escapeToSibling := filepath.Join(home, "escape1") // out of the home, still under root
+	escapeOut := filepath.Join(home, "escape2")       // out of the root entirely
+	for link, target := range map[string]string{
+		aliasToHome:     home,
+		aliasToRoot:     root,
+		escapeToSibling: filepath.Join(root, "othersvc"),
+		escapeOut:       outsideRoot,
+	} {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatalf("symlink %s -> %s: %v", link, target, err)
+		}
+	}
+	// A symlinked root spelling, as macOS's /var -> /private/var shape would
+	// produce: requests may arrive through the link or through the physical
+	// target, and both must work.
+	rootPhys := filepath.Join(base, "varlibphys")
+	if err := os.MkdirAll(filepath.Join(rootPhys, "svc"), 0o755); err != nil {
+		t.Fatalf("mkdir rootPhys/svc: %v", err)
+	}
+	rootLink := filepath.Join(base, "varliblink")
+	if err := os.Symlink(rootPhys, rootLink); err != nil {
+		t.Fatalf("symlink rootLink: %v", err)
+	}
+	if euid == 65534 {
+		// Root runner: make the fixture homes owned by the injected uid so
+		// the ownership gate can pass for them.
+		for _, dir := range []string{home, filepath.Join(rootPhys, "svc")} {
+			if err := os.Chown(dir, 65534, -1); err != nil {
+				t.Skipf("cannot chown fixture home to 65534 on this runner: %v", err)
+			}
+		}
+	}
+
+	accountHome := func() string { return home }
+	tests := []struct {
+		name string
+		path string
+		root string
+		home func() string
+		euid int
+		want bool
+	}{
+		{"home itself", home, root, accountHome, euid, true},
+		{"existing descendant", filepath.Join(home, "releases", "r1", ".beads"), root, accountHome, euid, true},
+		{"missing descendant", filepath.Join(home, "notyet", ".beads"), root, accountHome, euid, true},
+
+		{"request via a home alias", filepath.Join(aliasToHome, ".beads"), root, accountHome, euid, true},
+		{"home nominated through an alias", filepath.Join(home, ".beads"), root, func() string { return aliasToHome }, euid, true},
+		{"symlinked root, request via the link", filepath.Join(rootLink, "svc", ".beads"), rootLink, func() string { return filepath.Join(rootLink, "svc") }, euid, true},
+		{"symlinked root, request in physical form", filepath.Join(rootPhys, "svc", ".beads"), rootLink, func() string { return filepath.Join(rootLink, "svc") }, euid, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := inOwnServiceHome(tt.path, tt.root, tt.home(), tt.euid); got != tt.want {
+				t.Errorf("inOwnServiceHome(%q, root=%q, home=%q, euid=%d) = %v, want %v", tt.path, tt.root, tt.home(), tt.euid, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestResolvedPathWithinRoot exercises the symlink-escape hardening helper added
 // for be-vc1 — the HIGH finding on the /Users/Shared carve-out. The helper must:
 //
