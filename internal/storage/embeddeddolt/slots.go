@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
@@ -50,8 +51,9 @@ func (s *EmbeddedDoltStore) SlotGet(ctx context.Context, issueID, key string) (s
 		return "", fmt.Errorf("no slot %q on %s: no metadata", key, issueID)
 	}
 
-	metadata := make(map[string]interface{})
-	if err := json.Unmarshal(issue.Metadata, &metadata); err != nil {
+	// UseNumber keeps a number's stored digits through the re-marshal below.
+	metadata, err := storage.DecodeMetadataObject(issue.Metadata)
+	if err != nil {
 		return "", fmt.Errorf("parsing metadata for %s: %w", issueID, err)
 	}
 
