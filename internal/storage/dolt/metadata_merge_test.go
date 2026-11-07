@@ -414,3 +414,39 @@ func TestSlotClearConcurrentNoClobber(t *testing.T) {
 		}
 	}
 }
+
+// TestMetadataLargeIntegerRoundTrips (bd-emny2t, GH#6330): an integer past 2^53 written into
+// issue metadata must read back with every digit, on the create, update and merge paths.
+func TestMetadataLargeIntegerRoundTrips(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	const big = "1546130668394913822"
+	const justOver = "9007199254740993"
+
+	const id = "mm-bigint"
+	issue := &types.Issue{
+		ID: id, Title: "precision", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		Metadata: json.RawMessage(`{"created":` + big + `}`),
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if err := store.UpdateIssue(ctx, id, map[string]any{
+		"metadata": json.RawMessage(`{"created":` + big + `,"num":` + big + `,"just_over":` + justOver + `}`),
+	}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue metadata: %v", err)
+	}
+	if err := store.MergeMetadata(ctx, id, "merged", json.RawMessage(big), "tester"); err != nil {
+		t.Fatalf("MergeMetadata: %v", err)
+	}
+
+	m := getMetadataMap(t, ctx, store, id)
+	for key, want := range map[string]string{"created": big, "num": big, "just_over": justOver, "merged": big} {
+		if got := string(m[key]); got != want {
+			t.Errorf("metadata[%q] = %s, want %s (integer past 2^53 lost precision)", key, got, want)
+		}
+	}
+}
