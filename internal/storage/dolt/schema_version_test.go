@@ -428,3 +428,59 @@ func TestSchemaRunsInitWhenMissing(t *testing.T) {
 	_, _ = store.db.ExecContext(dropCtx, fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", dbName))
 	store.Close()
 }
+
+// TestWispsLateColumns0053 reproduces #6080: a clone
+// whose local wisps table was created from an older shape after its synced
+// schema_migrations had already passed 0023/0027 never gets wisps.no_history
+// or wisps.started_at (both ALTERs run only when wisps exists at that point).
+// Migration 0053 copies both columns from wisps into issues, so it failed with
+// "column \"started_at\" could not be found in any table in scope".
+func TestWispsLateColumns0053(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	for _, col := range []string{"no_history", "started_at"} {
+		if _, err := store.db.ExecContext(ctx, "ALTER TABLE wisps DROP COLUMN "+col); err != nil {
+			t.Fatalf("drop wisps.%s: %v", col, err)
+		}
+	}
+
+	const rigID = "schema-rig-old-wisps"
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO wisps (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, ephemeral, rig)
+		VALUES (?, 'Rig identity', '', '', '', '', 'open', 1, 'rig', 1, 'test-rig')
+	`, rigID); err != nil {
+		t.Fatalf("seed rig wisp: %v", err)
+	}
+
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version >= ?", rigRepairVersion); err != nil {
+		t.Fatalf("mark 0053 pending: %v", err)
+	}
+	if _, err := schema.MigrateUp(ctx, store.db); err != nil {
+		t.Fatalf("MigrateUp on wisps without no_history/started_at: %v", err)
+	}
+
+	var promoted int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM issues WHERE id = ? AND issue_type = 'rig' AND ephemeral = 0 AND rig = 'test-rig' AND started_at IS NULL`,
+		rigID).Scan(&promoted); err != nil {
+		t.Fatalf("count promoted rig issue: %v", err)
+	}
+	if promoted != 1 {
+		t.Fatalf("promoted rig issue rows = %d, want 1", promoted)
+	}
+	for _, col := range []string{"no_history", "started_at"} {
+		var n int
+		if err := store.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps' AND COLUMN_NAME = ?`,
+			col).Scan(&n); err != nil {
+			t.Fatalf("probe wisps.%s: %v", col, err)
+		}
+		if n != 1 {
+			t.Fatalf("wisps.%s present = %d, want 1 after the 0053 repair", col, n)
+		}
+	}
+}

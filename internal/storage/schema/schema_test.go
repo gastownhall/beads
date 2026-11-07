@@ -508,12 +508,15 @@ func TestRunMigrationsSnapshotsDirtyTablesBeforeRepairSoRepairMutationsCommitAto
 	guardExpectAbsentTable(mock)
 
 	// 3. preMigrationRepair(53): ensureIssuesRigColumns (all present, no
-	// exec), ensureWispDependenciesSplitTargets (table absent, no-op), then
-	// ensureDependenciesIDColumn actually mutating `dependencies`.
+	// exec), ensureWispsLateColumns and ensureWispDependenciesSplitTargets
+	// (tables absent, no-op), then ensureDependenciesIDColumn actually
+	// mutating `dependencies`.
 	for _, col := range []string{"hook_bead", "role_bead", "agent_state", "last_activity", "role_type", "rig"} {
 		mock.ExpectQuery(columnQuery).WithArgs("issues", col).
 			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
 	}
+	mock.ExpectQuery(tableQuery).WithArgs("wisps").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 	mock.ExpectQuery(tableQuery).WithArgs("wisp_dependencies").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 	mock.ExpectQuery(columnQuery).WithArgs("dependencies", "id").

@@ -56,6 +56,9 @@ func repairV53RigAndSplitTargets(ctx context.Context, db DBConn) error {
 	if err := ensureIssuesRigColumns(ctx, db); err != nil {
 		return err
 	}
+	if err := ensureWispsLateColumns(ctx, db); err != nil {
+		return err
+	}
 	if err := ensureWispDependenciesSplitTargets(ctx, db); err != nil {
 		return err
 	}
@@ -811,4 +814,38 @@ func schemaColumnInPrimaryKey(ctx context.Context, db DBConn, table, column stri
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// ensureWispsLateColumns repairs #6080: 0023 and 0027 add no_history and
+// started_at to wisps only when wisps already exists when they run. A clone
+// whose local wisps table was created later, from an older shape that lacked
+// started_at (the Go constant replaced in f079786b), reaches v52 without the
+// column, and migration 0053, which copies both columns from wisps into issues,
+// fails with "column ... could not be found in any table in scope" even with
+// zero rig wisps. Definitions mirror 0023 and 0027.
+func ensureWispsLateColumns(ctx context.Context, db DBConn) error {
+	hasWisps, err := schemaTableExists(ctx, db, "wisps")
+	if err != nil {
+		return fmt.Errorf("checking wisps table: %w", err)
+	}
+	if !hasWisps {
+		return nil
+	}
+	columns := []struct{ name, definition string }{
+		{"no_history", "TINYINT(1) DEFAULT 0"},
+		{"started_at", "DATETIME"},
+	}
+	for _, col := range columns {
+		present, err := schemaColumnExists(ctx, db, "wisps", col.name)
+		if err != nil {
+			return fmt.Errorf("checking wisps.%s: %w", col.name, err)
+		}
+		if present {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, "ALTER TABLE wisps ADD COLUMN "+col.name+" "+col.definition); err != nil {
+			return fmt.Errorf("adding wisps.%s for migration 0053: %w", col.name, err)
+		}
+	}
+	return nil
 }
