@@ -142,10 +142,6 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts itracker.FetchOptions) (
 	if err := t.ensureRemoteIndex(ctx); err != nil {
 		return nil, err
 	}
-	localByExternalIdentifier, localByID, err := t.buildLocalPullIndexes(ctx)
-	if err != nil {
-		return nil, err
-	}
 	t.cacheMu.RLock()
 
 	result := make([]itracker.TrackerIssue, 0, len(t.issueCache))
@@ -154,7 +150,7 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts itracker.FetchOptions) (
 		if !matchesFetchState(&candidate, opts.State) {
 			continue
 		}
-		if !matchesFetchSince(&candidate, opts.Since) && !shouldBackfillNotionIssue(&candidate, localByExternalIdentifier, localByID) {
+		if !matchesFetchSince(&candidate, opts.Since) {
 			continue
 		}
 		result = append(result, candidate)
@@ -176,33 +172,6 @@ func (t *Tracker) LastPullStats() (queried int, candidates int) {
 	t.cacheMu.RLock()
 	defer t.cacheMu.RUnlock()
 	return t.lastQueried, t.lastCandidates
-}
-
-func (t *Tracker) buildLocalPullIndexes(ctx context.Context) (map[string]struct{}, map[string]struct{}, error) {
-	localByExternalIdentifier := map[string]struct{}{}
-	localByID := map[string]struct{}{}
-	if t.store == nil {
-		return localByExternalIdentifier, localByID, nil
-	}
-	localIssues, err := t.store.SearchIssues(ctx, "", types.IssueFilter{})
-	if err != nil {
-		return nil, nil, fmt.Errorf("searching local issues: %w", err)
-	}
-	for _, issue := range localIssues {
-		if issue == nil {
-			continue
-		}
-		if id := strings.TrimSpace(issue.ID); id != "" {
-			localByID[id] = struct{}{}
-		}
-		if issue.ExternalRef == nil {
-			continue
-		}
-		if identifier := ExtractNotionIdentifier(strings.TrimSpace(*issue.ExternalRef)); identifier != "" {
-			localByExternalIdentifier[identifier] = struct{}{}
-		}
-	}
-	return localByExternalIdentifier, localByID, nil
 }
 
 func (t *Tracker) FetchIssue(ctx context.Context, identifier string) (*itracker.TrackerIssue, error) {
@@ -694,29 +663,6 @@ func matchesFetchState(issue *itracker.TrackerIssue, stateFilter string) bool {
 	default:
 		return true
 	}
-}
-
-func shouldBackfillNotionIssue(issue *itracker.TrackerIssue, localByExternalIdentifier, localByID map[string]struct{}) bool {
-	if issue == nil {
-		return false
-	}
-	for _, ref := range []string{issue.URL, issue.ID, issue.Identifier} {
-		if identifier := ExtractNotionIdentifier(ref); identifier != "" {
-			if _, ok := localByExternalIdentifier[identifier]; ok {
-				return false
-			}
-		}
-	}
-	raw, ok := issue.Raw.(*PulledIssue)
-	if !ok || raw == nil {
-		return false
-	}
-	localID := strings.TrimSpace(raw.ID)
-	if localID == "" {
-		return false
-	}
-	_, ok = localByID[localID]
-	return !ok
 }
 
 func derefStr(value *string) string {
