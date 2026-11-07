@@ -82,6 +82,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd close --suggest-next` and `bd doctor` now name a `blocked` status
+  that outlived its blocker.** A dependent whose status a hand or a tracker
+  import set to `blocked` keeps that status when `bd close` closes its last
+  blocker — close never rewrites a status you chose — and the hold was
+  invisible: `bd ready` and `bd blocked` read the dependency graph's
+  `is_blocked` flag, which the close clears. `bd close --suggest-next`
+  prints the held row with the reviewed release (`bd update <id> --status
+  open`), text lanes only; `--json` keeps its shape. `bd doctor` gains a
+  warn-only "Blocked Status" check (count, up to five ids, manual guidance;
+  no OverallOK change), `bd doctor --check=conventions` gains
+  `conventions.blocked-status` for embedded workspaces, and `bd doctor
+  --fix` reports the deliberate refusal instead of a repair. `bd statuses`
+  and the dependencies doc now distinguish the explicit status from the
+  derived flag.
+  See [The `blocked` status is not the dependency graph](docs/core-concepts/dependencies.md#the-blocked-status-is-not-the-dependency-graph).
+
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same

@@ -116,6 +116,31 @@ bd blocked
 Shows every blocked issue and what blocks it. Use after closing an issue
 to see what just unblocked.
 
+### The `blocked` status is not the dependency graph
+
+`bd blocked` reads the `is_blocked` flag the dependency graph maintains:
+edges set it, closing a blocker clears it. The `blocked` **status** is a
+separate, explicit marker a hand or a tracker import sets — and `bd close`
+never rewrites a status you chose, so it survives the close that released
+the last blocker.
+
+When a close leaves a dependent in that state, `bd close --suggest-next`
+names it:
+
+```
+Newly unblocked:
+  • bd-8b — Held dependent (P2)
+       → still status 'blocked' (bd close leaves it). If ready to release: bd update bd-8b --status open
+```
+
+`bd doctor` reports any `blocked` status whose stored blocked flag is
+clear — the "Blocked Status" check in the full doctor, and
+`conventions.blocked-status` under `bd doctor --check=conventions` (the
+embedded-capable lane). Neither rewrites the status for you: the hold may
+be intentional, or a tracker import's to manage. Releasing it is a
+reviewed decision — `bd update <id> --status open` — and a missing edge is
+a separate fact to record with `bd dep add`.
+
 ## Visualizing Dependencies
 
 ### Dependency Tree

@@ -18,7 +18,7 @@ var builtInStatuses = []struct {
 }{
 	{types.StatusOpen, types.CategoryActive, "Available to work (default)"},
 	{types.StatusInProgress, types.CategoryWIP, "Actively being worked on"},
-	{types.StatusBlocked, types.CategoryWIP, "Blocked by a dependency"},
+	{types.StatusBlocked, types.CategoryWIP, "An explicit status; bd close does not clear it"},
 	{types.StatusDeferred, types.CategoryFrozen, "Deliberately put on ice for later"},
 	{types.StatusClosed, types.CategoryDone, "Completed"},
 	{types.StatusPinned, types.CategoryFrozen, "Persistent, stays open indefinitely"},
