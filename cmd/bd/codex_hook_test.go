@@ -45,15 +45,23 @@ func TestCodexHookSessionStartInjectsPrimeContext(t *testing.T) {
 		t.Fatalf("runCodexHook: %v", err)
 	}
 
-	var got codexHookResponse
-	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
-		t.Fatalf("parse output: %v\n%s", err, out.String())
+	if got := requireCodexHookAdditionalContext(t, out.Bytes(), codexHookSessionStart); got != "BEADS PRIME\nbd ready --json\n" {
+		t.Fatalf("additionalContext = %q, want prime output unchanged", got)
 	}
-	if got.HookSpecificOutput.HookEventName != codexHookSessionStart {
-		t.Fatalf("hook event = %q", got.HookSpecificOutput.HookEventName)
+}
+
+func TestCodexHookWhitespacePrimeOutputEmitsNothing(t *testing.T) {
+	stubCodexHookPrime(t, func(bool) (string, error) { return " \n\t\n", nil })
+
+	out := runCodexHookPayload(t, context.Background(), codexHookSessionStart, []byte(`{"session_id":"s1","cwd":"/repo"}`))
+	if len(out) != 0 {
+		t.Fatalf("SessionStart with blank prime output: want no output, got %s", out)
 	}
-	if !strings.Contains(got.HookSpecificOutput.AdditionalContext, "bd ready --json") {
-		t.Fatalf("expected prime output in additionalContext: %#v", got)
+
+	_, postJSON, promptJSON := codexHookRefreshSession(t)
+	runCodexHookPayload(t, context.Background(), codexHookPostCompact, postJSON)
+	if out := runCodexHookPayload(t, context.Background(), codexHookUserPromptSubmit, promptJSON); len(out) != 0 {
+		t.Fatalf("refresh with blank prime output: want no output, got %s", out)
 	}
 }
 
@@ -114,6 +122,33 @@ func requireCodexHookSystemMessage(t *testing.T, out []byte) string {
 		t.Fatalf("warning response systemMessage = %s (err %v), want nonempty string", raw["systemMessage"], err)
 	}
 	return msg
+}
+
+// requireCodexHookAdditionalContext asserts the success response shape:
+// continue:true plus a hookSpecificOutput naming event, and returns its
+// additionalContext.
+func requireCodexHookAdditionalContext(t *testing.T, out []byte, event string) string {
+	t.Helper()
+	raw := decodeCodexHookObject(t, out)
+	if _, ok := raw["systemMessage"]; ok || len(raw) != 2 {
+		t.Fatalf("context response keys: want continue and hookSpecificOutput only: %s", out)
+	}
+	var cont bool
+	if err := json.Unmarshal(raw["continue"], &cont); err != nil || !cont {
+		t.Fatalf("context response continue = %s (err %v), want true", raw["continue"], err)
+	}
+	var hso map[string]json.RawMessage
+	if err := json.Unmarshal(raw["hookSpecificOutput"], &hso); err != nil || hso == nil || len(hso) != 2 {
+		t.Fatalf("hookSpecificOutput = %s (err %v), want hookEventName and additionalContext", raw["hookSpecificOutput"], err)
+	}
+	var gotEvent, additional string
+	if err := json.Unmarshal(hso["hookEventName"], &gotEvent); err != nil || gotEvent != event {
+		t.Fatalf("hookEventName = %s (err %v), want %q", hso["hookEventName"], err, event)
+	}
+	if err := json.Unmarshal(hso["additionalContext"], &additional); err != nil {
+		t.Fatalf("additionalContext = %s: %v", hso["additionalContext"], err)
+	}
+	return additional
 }
 
 func TestCodexHookSystemMessageOmitsHookSpecificOutput(t *testing.T) {
@@ -186,8 +221,8 @@ func TestCodexHookPostCompactMarksAndUserPromptRefreshesOnce(t *testing.T) {
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("expected refresh marker removed, stat err=%v", err)
 	}
-	if !strings.Contains(out.String(), "REFRESHED BEADS CONTEXT") {
-		t.Fatalf("expected refreshed context, got %s", out.String())
+	if got := requireCodexHookAdditionalContext(t, out.Bytes(), codexHookUserPromptSubmit); got != "REFRESHED BEADS CONTEXT\n" {
+		t.Fatalf("additionalContext = %q, want prime output unchanged", got)
 	}
 
 	out.Reset()
