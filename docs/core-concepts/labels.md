@@ -287,6 +287,11 @@ whitespace) and `--label-regex ""` exit with an error instead of being read as
 A regex of only whitespace is still accepted as written: it matches labels
 that contain a space.
 
+`bd migrate issues --label` follows the same rule: a supplied `--label` with
+no usable label (`""`, `"  "`, `",,"`) exits with an error before anything is
+selected or moved, rather than migrating every issue in `--from`. Usable
+labels are trimmed and deduplicated.
+
 ## Workflow Examples
 
 ### Triage Workflow

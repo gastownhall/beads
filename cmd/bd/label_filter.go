@@ -4,7 +4,29 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/beads/internal/utils"
 )
+
+// rejectEmptyLabelFilter reports whether flagName was supplied but every
+// element in raw is blank, in which case the caller meant "match nothing"
+// (however it phrased that), not "no filter" -- and "no filter" is exactly
+// what an empty NormalizeLabels result means everywhere downstream. Using
+// cmd.Flags().Changed keeps that distinction, which the normalized slice
+// itself has already destroyed by the time any caller sees it.
+//
+// Ported from #6632, which routes the listing commands' --label, --label-any
+// and --exclude-label through it; here `bd migrate issues --label` uses it
+// (GH#6636), where "no filter" would select every issue in --from.
+func rejectEmptyLabelFilter(cmd *cobra.Command, flagName string, raw []string) error {
+	if !cmd.Flags().Changed(flagName) {
+		return nil
+	}
+	if len(utils.NormalizeLabels(raw)) == 0 {
+		return HandleErrorRespectJSON("--%s was supplied but contains no usable label", flagName)
+	}
+	return nil
+}
 
 // rejectEmptyLabelPatterns refuses a supplied --label-pattern or --label-regex
 // that carries no pattern (GH#6636). Downstream, an empty pattern string means

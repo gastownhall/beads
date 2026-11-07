@@ -1048,6 +1048,7 @@ go_test(
         "migrate_force_test.go",
         "migrate_hooks_apply_test.go",
         "migrate_hooks_test.go",
+        "migrate_issues_label_filter_test.go",
         "migrate_issues_max_rows_gate_test.go",
         "migrate_personal_server_test.go",
         "migrate_personal_test.go",

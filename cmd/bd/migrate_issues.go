@@ -73,6 +73,12 @@ Examples:
 			return HandleErrorRespectJSON("--from and --to must be different repositories")
 		}
 
+		// A supplied --label with no usable label must not read as "no
+		// label filter": that would select every issue in --from (GH#6636).
+		if err := rejectEmptyLabelFilter(cmd, "label", labels); err != nil {
+			return err
+		}
+
 		if idsFile != "" {
 			fileIDs, err := loadIDsFromFile(idsFile)
 			if err != nil {
