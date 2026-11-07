@@ -33,6 +33,10 @@ type skewSource struct {
 	depCountErr  error
 	rdepCount    int64
 	rdepCountErr error
+
+	comments      []*types.Comment
+	commentCount  int64
+	commentCntErr error
 }
 
 func (s skewSource) GetIssue(_ context.Context, _ string) (*types.Issue, error) { return s.issue, nil }
@@ -50,13 +54,13 @@ func (s skewSource) CountDependents(_ context.Context, _ string, _ bool) (int64,
 	return s.rdepCount, s.rdepCountErr
 }
 func (s skewSource) CountComments(_ context.Context, _ string, _ bool) (int64, error) {
-	return 0, nil
+	return s.commentCount, s.commentCntErr
 }
 func (s skewSource) IterDependents(_ context.Context, _ string, _ bool) (storage.Iter[types.IssueWithDependencyMetadata], error) {
 	return storage.NewSliceIter(s.dependents), nil
 }
 func (s skewSource) IterComments(_ context.Context, _ string, _ bool) (storage.Iter[types.Comment], error) {
-	return storage.NewSliceIter[types.Comment](nil), nil
+	return storage.NewSliceIter(s.comments), nil
 }
 
 func depRow(id string, t types.DependencyType) *types.IssueWithDependencyMetadata {
@@ -129,17 +133,16 @@ func TestBuildIssueDetails_UnresolvableDependencies(t *testing.T) {
 			count: 3,
 		},
 		{
-			// Symmetric: a failed COUNT yields 0, and 0 minus a
-			// populated slice is negative, but say so explicitly
-			// rather than relying on the sign.
+			// Symmetric: a failed COUNT must not be published at all
+			// (GH#7563) - not as its zero value, which would be
+			// indistinguishable from an issue with no dependencies.
 			name: "count read failed",
 			src: skewSource{
 				issue:       issue,
 				deps:        []*types.IssueWithDependencyMetadata{depRow("rp-2", types.DepBlocks)},
 				depCountErr: errors.New("backend down"),
 			},
-			want:  nil,
-			count: 0,
+			want: nil,
 		},
 	}
 
@@ -149,7 +152,11 @@ func TestBuildIssueDetails_UnresolvableDependencies(t *testing.T) {
 			if err != nil {
 				t.Fatalf("BuildIssueDetails: %v", err)
 			}
-			if details.DependencyCount == nil || *details.DependencyCount != tc.count {
+			if tc.src.depCountErr != nil {
+				if details.DependencyCount != nil {
+					t.Errorf("DependencyCount = %d, want unset (count query failed)", *details.DependencyCount)
+				}
+			} else if details.DependencyCount == nil || *details.DependencyCount != tc.count {
 				t.Errorf("DependencyCount = %v, want %d", details.DependencyCount, tc.count)
 			}
 			switch {
@@ -162,6 +169,75 @@ func TestBuildIssueDetails_UnresolvableDependencies(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBuildIssueDetails_FailedCountsAreUnset pins GH#7563: a Count* method
+// that returns an error must leave the matching IssueDetails field unset
+// (DependentCount/DependencyCount/CommentCount are *int64 with omitempty for
+// exactly this), not published as the zero value Count* also returns on
+// error. A published 0 is indistinguishable from an issue that genuinely has
+// none, which is already how the UnresolvableDependencies/UnresolvableDependents
+// deltas treat a count error - they go silent rather than report a delta
+// against a count of 0 - so the raw count was the one field still
+// contradicting that rule.
+func TestBuildIssueDetails_FailedCountsAreUnset(t *testing.T) {
+	ctx := context.Background()
+	issue := &types.Issue{ID: "rp-1"}
+	boom := errors.New("simulated count failure")
+
+	t.Run("dependent and dependency counts", func(t *testing.T) {
+		src := skewSource{issue: issue, depCountErr: boom, rdepCountErr: boom}
+		details, err := BuildIssueDetails(ctx, src, issue, false, DetailOptions{})
+		if err != nil {
+			t.Fatalf("BuildIssueDetails: %v", err)
+		}
+		if details.DependentCount != nil {
+			t.Errorf("DependentCount = %d, want unset", *details.DependentCount)
+		}
+		if details.DependencyCount != nil {
+			t.Errorf("DependencyCount = %d, want unset", *details.DependencyCount)
+		}
+	})
+
+	// The IncludeComments case from the report: a failed count beside a
+	// real comment must not publish a comment_count that contradicts the
+	// comments it actually returns.
+	t.Run("comment count, with comments included", func(t *testing.T) {
+		src := skewSource{
+			issue:         issue,
+			commentCntErr: boom,
+			comments:      []*types.Comment{{ID: "c-1", IssueID: "rp-1", Author: "alice", Text: "a real comment"}},
+		}
+		details, err := BuildIssueDetails(ctx, src, issue, false, DetailOptions{IncludeComments: true})
+		if err != nil {
+			t.Fatalf("BuildIssueDetails: %v", err)
+		}
+		if details.CommentCount != nil {
+			t.Errorf("CommentCount = %d, want unset", *details.CommentCount)
+		}
+		if len(details.Comments) != 1 {
+			t.Errorf("Comments = %v, want the one comment IterComments returned", details.Comments)
+		}
+	})
+
+	// The default, count-only view: a failed comment count must not
+	// announce comments_omitted either, for the same reason the list path's
+	// TestHydrateListCommentsMarksNothingWhenCountsAreSkipped already
+	// requires (list_comments_test.go) - deriving the flag from a count that
+	// means nothing is exactly the bug.
+	t.Run("comment count failed, count-only view", func(t *testing.T) {
+		src := skewSource{issue: issue, commentCntErr: boom}
+		details, err := BuildIssueDetails(ctx, src, issue, false, DetailOptions{})
+		if err != nil {
+			t.Fatalf("BuildIssueDetails: %v", err)
+		}
+		if details.CommentCount != nil {
+			t.Errorf("CommentCount = %d, want unset", *details.CommentCount)
+		}
+		if details.CommentsOmitted != nil {
+			t.Errorf("CommentsOmitted = %v, want unset", *details.CommentsOmitted)
+		}
+	})
 }
 
 // TestBuildIssueDetails_UnresolvableDependents pins the inbound half, and in
