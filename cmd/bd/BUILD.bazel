@@ -744,6 +744,7 @@ go_test(
         "doctor_conventions_test.go",
         "doctor_delete_guard_test.go",
         "doctor_embedded_test.go",
+        "doctor_fix_blocked_status_test.go",
         "doctor_fix_gate_wiring_test.go",
         "doctor_fix_order_test.go",
         "doctor_fix_pending_migrations_test.go",

@@ -449,6 +449,11 @@ func applyFixList(path string, fixes []doctorCheck) {
 			// No auto-fix: duplicates require user review
 			fmt.Printf("  ⚠ Run 'bd duplicates' to review and merge duplicates\n")
 			continue
+		case doctor.BlockedStatusCheckName:
+			// No auto-fix: a status set to 'blocked' may be a hold only a
+			// person can release (bd-e5d8fd)
+			fmt.Printf("  ⚠ Blocked Status is advisory and changes no status: review each issue, then release it with 'bd update <id>... --status open'\n")
+			continue
 		case "Test Pollution":
 			// No auto-fix: test cleanup requires user review
 			fmt.Printf("  ⚠ Run 'bd doctor --check=pollution' to review and clean test issues\n")

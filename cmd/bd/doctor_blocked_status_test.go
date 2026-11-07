@@ -64,3 +64,54 @@ func TestDoctorReportsBlockedStatusWithoutFailing(t *testing.T) {
 		t.Errorf("bd doctor changed %s's status to %q", held.ID, got.Status)
 	}
 }
+
+// TestDoctorFixPreservesBlockedStatus runs bd doctor --fix's apply step, with
+// and without --yes, over the Blocked Status and Blocked State checks bd
+// doctor reports for a server-mode workspace holding an issue set to status
+// 'blocked' with nothing blocking it (bd-e5d8fd). Neither run changes the
+// status; the --yes run prints the manual-review guidance and claims no repair
+// of it. (Without --yes on a non-terminal stdin it applies nothing.)
+func TestDoctorFixPreservesBlockedStatus(t *testing.T) {
+	repo := t.TempDir()
+	beadsDir := filepath.Join(repo, ".beads")
+	store := newTestStoreIsolatedDB(t, filepath.Join(beadsDir, "dolt"), "dfs")
+	t.Setenv("BEADS_DIR", beadsDir)
+	ctx := context.Background()
+	held := &types.Issue{Title: "held by hand", Status: types.StatusBlocked, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, held, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	result := runDiagnostics(repo)
+	result.Checks = slices.DeleteFunc(result.Checks, func(c doctorCheck) bool {
+		return c.Name != doctor.BlockedStatusCheckName && c.Name != doctor.BlockedConsistencyCheckName
+	})
+	if i := slices.IndexFunc(result.Checks, func(c doctorCheck) bool { return c.Name == doctor.BlockedStatusCheckName }); i < 0 || result.Checks[i].Status != statusWarning {
+		t.Fatalf("bd doctor reports no Blocked Status warning for %s: %+v", held.ID, result.Checks)
+	}
+
+	previousYes := doctorYes
+	t.Cleanup(func() { doctorYes = previousYes })
+	for _, yes := range []bool{false, true} {
+		doctorYes = yes
+		out := captureStdout(t, func() error {
+			applyFixes(result, doctor.FixGate{AllowDBFix: true, AllowFSFix: true, DBReachable: true})
+			return nil
+		})
+		if yes {
+			if !strings.Contains(out, blockedStatusFixGuidance) {
+				t.Errorf("bd doctor --fix --yes does not print the Blocked Status guidance:\n%s", out)
+			}
+			if strings.Contains(out, "Fix summary: 1 fixed") {
+				t.Errorf("bd doctor --fix --yes counts the Blocked Status advisory as fixed:\n%s", out)
+			}
+		}
+		got, err := store.GetIssue(ctx, held.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != types.StatusBlocked {
+			t.Errorf("bd doctor --fix (--yes=%v) changed %s's status to %q", yes, held.ID, got.Status)
+		}
+	}
+}
