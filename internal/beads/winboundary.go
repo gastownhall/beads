@@ -120,6 +120,10 @@ func winIsVolumeRoot(p string) bool {
 // and validation happen in newWindowsBoundary.
 type windowsBoundaryInput struct {
 	systemRootValues []string
+	// resolve physically resolves a path (following junctions and symlinks)
+	// to its final spelling; ok=false means unresolved. nil means no
+	// resolution is available.
+	resolve func(path string) (string, bool)
 }
 
 // windowsBoundary is the validated, normalized form of windowsBoundaryInput.
@@ -127,6 +131,7 @@ type windowsBoundaryInput struct {
 // unavailable and the corresponding rule contributes nothing.
 type windowsBoundary struct {
 	systemRoots []string
+	resolve     func(path string) (string, bool)
 }
 
 // newWindowsBoundary validates and normalizes the host facts. Malformed and
@@ -139,7 +144,26 @@ func newWindowsBoundary(in windowsBoundaryInput) windowsBoundary {
 			b.systemRoots = append(b.systemRoots, canon)
 		}
 	}
+	b.resolve = in.resolve
 	return b
+}
+
+// resolvePath returns the physical form of a canonical path, or "" when it
+// is unresolved. Physical answers matter exactly where a spelling can lie:
+// carve-out containment, and aliases into denied roots.
+func (b windowsBoundary) resolvePath(p string) string {
+	if b.resolve == nil || p == "" {
+		return ""
+	}
+	out, ok := b.resolve(p)
+	if !ok || out == "" {
+		return ""
+	}
+	canon, ok := winCleanPath(out)
+	if !ok {
+		return ""
+	}
+	return canon
 }
 
 // inSafeBoundary evaluates the Windows SEC-003 policy for a path in both its
@@ -151,8 +175,28 @@ func (b windowsBoundary) inSafeBoundary(input, abs string) bool {
 	if !okIn || !okAbs {
 		return false
 	}
+	phys := b.resolvePath(lexAbs)
 	for _, root := range b.systemRoots {
 		if winWithin(root, lexInput) || winWithin(root, lexAbs) {
+			return false
+		}
+	}
+	if phys != "" {
+		for _, root := range b.systemRoots {
+			if winWithin(root, phys) {
+				return false
+			}
+		}
+	}
+	// A root spelled through an alias must still deny what it physically
+	// contains (a relocated install named by a link).
+	for _, root := range b.systemRoots {
+		rootPhys := b.resolvePath(root)
+		if rootPhys == "" || rootPhys == root {
+			continue
+		}
+		if winWithin(rootPhys, lexInput) || winWithin(rootPhys, lexAbs) ||
+			(phys != "" && winWithin(rootPhys, phys)) {
 			return false
 		}
 	}

@@ -52,6 +52,7 @@ go_test(
         "testmain_test.go",
         "user_global_beads_test.go",
         "winboundary_test.go",
+        "winboundary_windows_test.go",
     ],
     embed = [":beads"],
     deps = [

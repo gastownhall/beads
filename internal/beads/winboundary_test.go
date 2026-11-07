@@ -136,4 +136,59 @@ func TestWindowsPathInSafeBoundary(t *testing.T) {
 			}
 		})
 	}
+
+	// An existing alias into a denied system directory is rejected by where
+	// it physically lands, not just by its spelling — including a missing
+	// descendant reached through the alias. The resolver map stands in for
+	// the CreateFile + GetFinalPathNameByHandle adapter (wine-verified in
+	// TestWindowsBoundaryRegression).
+	t.Run("physical alias into denied system root", func(t *testing.T) {
+		b := newWindowsBoundary(windowsBoundaryInput{
+			systemRootValues: []string{`C:\Windows`},
+			resolve: func(p string) (string, bool) {
+				switch p {
+				case `C:\links\sys`:
+					return `C:\Windows\System32`, true
+				case `C:\links\sys\new\.beads`:
+					return `C:\Windows\System32\new\.beads`, true
+				}
+				return "", false
+			},
+		})
+		if b.inSafeBoundary(`C:\links\sys`, `C:\links\sys`) {
+			t.Error("inSafeBoundary(alias into C:\\Windows) = true, want false")
+		}
+		if b.inSafeBoundary(`C:\links\sys\new\.beads`, `C:\links\sys\new\.beads`) {
+			t.Error("inSafeBoundary(missing descendant through alias) = true, want false")
+		}
+	})
+
+	// A physically aliased root (relocated install named through a link)
+	// still denies what it contains.
+	t.Run("aliased system root denies its contents", func(t *testing.T) {
+		b := newWindowsBoundary(windowsBoundaryInput{
+			systemRootValues: []string{`D:\links\winroot`},
+			resolve: func(p string) (string, bool) {
+				if p == `D:\links\winroot` {
+					return `D:\realwin`, true
+				}
+				return "", false
+			},
+		})
+		if b.inSafeBoundary(`D:\realwin\System32`, `D:\realwin\System32`) {
+			t.Error("inSafeBoundary(path inside aliased root) = true, want false")
+		}
+	})
+
+	// Ordinary paths keep their lexical answer when resolution is
+	// unavailable: the boundary is best-effort outside carve-outs.
+	t.Run("ordinary path with unresolved physical form stays admitted", func(t *testing.T) {
+		b := newWindowsBoundary(windowsBoundaryInput{
+			systemRootValues: []string{`C:\Windows`},
+			resolve: func(string) (string, bool) { return "", false },
+		})
+		if !b.inSafeBoundary(`C:\work\proj\.beads`, `C:\work\proj\.beads`) {
+			t.Error("inSafeBoundary(ordinary unresolved path) = false, want true")
+		}
+	})
 }
