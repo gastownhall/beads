@@ -1066,6 +1066,12 @@ func shouldBeBlockedIDsUnionScopedPrecomputedSQL(
 // subtree", and the empty string says "no parent is", which is what an empty
 // set means.
 //
+// A migration pass runs these legs too: ignored/0032's repair
+// (schema.restoreWispIsBlocked) derives wisp flags through
+// RecomputeAllWispIsBlockedInTx before any later ignored version runs. A
+// column that only a later ignored migration adds cannot be read here
+// without failing that repair, and every open, on the clones it heals.
+//
 //nolint:gosec // G201: depTable and scope are constants; the conditions come from the two callers above.
 func shouldBeBlockedIDsUnionCoreSQL(depTable, scope, issueParentCond, wispParentCond string) string {
 	targetHint, parentHint := "", ""

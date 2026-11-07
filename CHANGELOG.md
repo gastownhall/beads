@@ -1211,12 +1211,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A clone whose `wisps` table lost its `is_blocked` column or
   `idx_wisps_is_blocked` index after its ignored migration cursor passed 15
   heals on the next open (refs #4468, #5257). The repairs at ignored 7 and 15
-  run only while those versions are pending, so such a clone stayed broken:
-  `bd ready` and `bd create --ephemeral` failed with "table does not have
-  column is_blocked". The new ignored migration 0032 restores the column and
-  index and derives every wisp's blocked flag, keeping wisp timestamps and
-  writing no durable issue, so blocked wisps do not show as ready. It runs
-  once: a clone that loses the column after recording 0032 is not covered.
+  run only while those versions are pending, so a clone that lost the column
+  stayed broken: `bd close`, `bd update --status`, `bd ready` and
+  `bd create --ephemeral` failed with `does not have column "is_blocked"`
+  (`bd ready` also with `column "is_blocked" could not be found in any table
+  in scope`). Losing only the index slowed ready queries without failing
+  them. The new ignored migration 0032 restores the column and index and
+  derives every wisp's blocked flag, keeping wisp timestamps and writing no
+  durable issue, so blocked wisps do not show as ready. It runs once: a clone
+  that loses the column after recording 0032 is not covered.
   Durable `issues.is_blocked` drift is still repaired only by an explicit full
   recompute (`bd recompute-blocked`).
 - `bd config get` for a config.yaml, git-config or user-global key no longer
