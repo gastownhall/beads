@@ -348,7 +348,10 @@ exist to run the Dolt suites set it. `BEADS_TEST_REQUIRE_SOCAT=1` does the
 same for the proxied subtests that bridge an external endpoint with `socat`
 (external-unix, the outage/reconnect matrix); `//cmd/bd:bd_proxied_test`
 sets it; the legacy GitHub proxied jobs retired in #7353 had no `socat`
-and left it unset.
+and left it unset. `BEADS_TEST_REQUIRE_WINDOWS_LINKS=1` does the same for
+the `internal/beads` boundary tests that create a junction or symlink;
+`pr.yml`'s native Windows step for them sets it, in `worktree-remove-windows`,
+which `CI Gate / Required` requires.
 
 Under Bazel, `bazel test //... --config=doltserver` runs the Dolt-backed
 domain, uow, tracker, doctor/fix, protocol and testutil suites on the `local`

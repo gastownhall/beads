@@ -100,9 +100,10 @@ func resolveWindowsFinalPath(path string) (string, bool, error) {
 	}
 	defer func() { _ = windows.CloseHandle(h) }()
 
+	// The entry exists from here on, so no failure may read as absence.
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
-		return "", false, err
+		return "", false, winResolveError(err)
 	}
 	isDir := info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
 
@@ -111,7 +112,7 @@ func resolveWindowsFinalPath(path string) (string, bool, error) {
 		buf := make([]uint16, n)
 		got, err := windows.GetFinalPathNameByHandle(h, &buf[0], n, winFileNameNormalized|winVolumeNameDOS)
 		if err != nil {
-			return "", false, err
+			return "", false, winResolveError(err)
 		}
 		// On success got excludes the NUL; when buf is too small it is the
 		// size needed, including the NUL.

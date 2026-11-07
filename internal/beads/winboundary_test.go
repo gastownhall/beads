@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"strings"
 	"testing"
 )
@@ -13,6 +14,19 @@ import (
 
 func winEnv(kv map[string]string) func(string) string {
 	return func(k string) string { return kv[k] }
+}
+
+// skipWithoutLink skips a test whose junction or symlink the host could not
+// create, or fails it when BEADS_TEST_REQUIRE_WINDOWS_LINKS=1. pr.yml's native
+// Windows boundary step sets that, so the alias regressions cannot pass there
+// by skipping.
+func skipWithoutLink(t *testing.T, format string, args ...any) {
+	t.Helper()
+	msg := fmt.Sprintf(format, args...)
+	if os.Getenv("BEADS_TEST_REQUIRE_WINDOWS_LINKS") == "1" {
+		t.Fatalf("%s (BEADS_TEST_REQUIRE_WINDOWS_LINKS=1)", msg)
+	}
+	t.Skip(msg)
 }
 
 func winBoundaryCheck(t *testing.T, b *windowsBoundary, cases map[string]bool) {
@@ -376,6 +390,7 @@ func TestWindowsBoundaryPhysical(t *testing.T) {
 		`D:\work\dangling`:   {err: errWinFakeDangling},
 		`D:\work\locked`:     {err: errWinFakeAccess},
 		`D:\work\unprovable`: {err: winOpenError(fs.ErrNotExist, errWinFakeAccess)},
+		`D:\work\letterless`: {err: winResolveError(fs.ErrNotExist)},
 		`C:\PROGRA~1`:        {final: `\\?\C:\Program Files`},
 		`X:\`:                {final: `\\?\C:\Users\bob`},
 		`\\srv\share`:        {final: `\\?\UNC\srv\share`},
@@ -397,12 +412,14 @@ func TestWindowsBoundaryPhysical(t *testing.T) {
 			t.Errorf("physical(%q) = %q, %v; want %q, true", in, got.String(), ok, want)
 		}
 	}
-	// Failures are never walked past: a dangling link, an access error, a
-	// file with a tail below it, and a volume that does not exist.
+	// Failures are never walked past: a dangling link, an access error, an
+	// entry that opened but did not resolve, a file with a tail below it, and
+	// a volume that does not exist.
 	for _, in := range []string{
 		`D:\work\dangling`, `D:\work\dangling\new\.beads`,
 		`D:\work\locked\.beads`,
 		`D:\work\unprovable\.beads`,
+		`D:\work\letterless\.beads`,
 		`D:\work\file.txt\.beads`,
 		`Q:\work\.beads`, `\\nosuch\share\.beads`,
 	} {
@@ -435,6 +452,18 @@ func TestWinOpenError(t *testing.T) {
 	}
 	if err := winOpenError(errWinFakeAccess, nil); !errors.Is(err, errWinFakeAccess) {
 		t.Errorf("open access error: %v, want it unchanged", err)
+	}
+}
+
+// A failure after a successful open leaves the entry unresolved, never
+// absent, whatever the cause: GetFinalPathNameByHandle's ERROR_PATH_NOT_FOUND
+// for a volume with no drive letter matches fs.ErrNotExist on its own.
+func TestWinResolveError(t *testing.T) {
+	for _, cause := range []error{fs.ErrNotExist, fmt.Errorf("final path: %w", fs.ErrNotExist), errWinFakeAccess} {
+		err := winResolveError(cause)
+		if errors.Is(err, fs.ErrNotExist) || !errors.Is(err, errWinUnresolved) || !strings.Contains(err.Error(), cause.Error()) {
+			t.Errorf("winResolveError(%v) = %v, want errWinUnresolved naming the cause, not fs.ErrNotExist", cause, err)
+		}
 	}
 }
 
@@ -503,6 +532,37 @@ func TestWindowsPathInSafeBoundary_PhysicalAlias(t *testing.T) {
 		`D:\work\.beads`:          true,
 		`D:\work\dangling\.beads`: true,
 		`Q:\offline\.beads`:       true,
+	})
+}
+
+// A home that resolves to a volume root keeps only its named form: its
+// physical form would exempt the whole volume, including a peer profile
+// relocated onto it.
+func TestWindowsPathInSafeBoundary_HomeOnVolumeRoot(t *testing.T) {
+	b := newWindowsBoundary(windowsFacts{
+		ProfilesDir: `C:\Users`,
+		Home:        `C:\Users\alice`,
+		Resolve: winFakeFS(map[string]winFakeEntry{
+			`C:\`:              {},
+			`E:\`:              {},
+			`C:\Users`:         {},
+			`C:\Users\alice`:   {final: `\\?\E:\`},
+			`C:\Users\ALICE~1`: {final: `\\?\E:\`},
+			`C:\Users\bob`:     {final: `\\?\E:\bob-data`},
+			`E:\bob-data`:      {},
+		}),
+	})
+	if b.home == nil || b.home.String() != `C:\Users\alice` || b.home.resolved {
+		t.Errorf("home = %v (resolved %v), want C:\\Users\\alice by its named form only", b.home, b.home != nil && b.home.resolved)
+	}
+	winBoundaryCheck(t, b, map[string]bool{
+		`C:\Users\alice\.beads`:     true,
+		`C:\Users\alice\src\.beads`: true,
+		`E:\src\.beads`:             true, // named outside every profile
+		`C:\Users\bob\.beads`:       false,
+		`C:\Users\bob\src\.beads`:   false,
+		// An alias of this home is judged by its name, as a peer's is.
+		`C:\Users\ALICE~1\.beads`: false,
 	})
 }
 

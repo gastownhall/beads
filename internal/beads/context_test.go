@@ -566,12 +566,12 @@ func TestIsPathInSafeBoundary_TempDirSymlinkEscape(t *testing.T) {
 	link := filepath.Join(tempDir, fmt.Sprintf(".be-kghzr-escape-test-%d", os.Getpid()))
 	_ = os.Remove(link)
 	if err := os.Symlink(sysDir, link); err != nil {
-		t.Skipf("cannot create symlink in %s (not writable?): %v", tempDir, err)
+		skipWithoutLink(t, "cannot create symlink in %s (not writable?): %v", tempDir, err)
 	}
 	t.Cleanup(func() { _ = os.Remove(link) })
 	// Some Windows emulations report success without creating the link.
 	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
-		t.Skipf("symlink %s was not created: %v", link, err)
+		skipWithoutLink(t, "symlink %s was not created: %v", link, err)
 	}
 
 	// A BEADS_DIR routed *through* the escaping symlink must be rejected: its bytes

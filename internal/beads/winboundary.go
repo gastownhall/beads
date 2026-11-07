@@ -197,13 +197,27 @@ func winUNCVolume(s string) (vol, rest string, ok bool) {
 // winResolver opens an existing path, following links, and returns its final
 // physical path and whether it is a directory. An error matching
 // fs.ErrNotExist proves the entry absent; any other error (a dangling link,
-// access denied, an unavailable volume) leaves the path unresolved.
+// access denied, an unavailable volume, an entry that opened but did not
+// resolve) leaves the path unresolved.
 type winResolver func(path string) (final string, isDir bool, err error)
 
 // errWinDanglingLink reports a link whose target does not exist. Opening it
 // fails like a missing entry, but the entry is there, so it must not be
 // mistaken for an absent path the walk may climb past.
 var errWinDanglingLink = errors.New("dangling link")
+
+// errWinUnresolved reports an entry that opened, so it exists, but whose
+// final path could not be read.
+var errWinUnresolved = errors.New("entry exists but did not resolve")
+
+// winResolveError classifies a failure after a successful open. The entry
+// exists, so the error must never read as absence: GetFinalPathNameByHandle
+// fails with ERROR_PATH_NOT_FOUND for a volume that has no drive letter, which
+// matches fs.ErrNotExist and would let the walk climb past the entry. The
+// cause is kept as text only.
+func winResolveError(err error) error {
+	return fmt.Errorf("%w: %v", errWinUnresolved, err)
+}
 
 // winOpenError classifies a failed open, which follows links, using lstatErr
 // from an Lstat of the same entry, which does not. Only a not-found from both
@@ -244,6 +258,11 @@ func (r winRoot) strictlyContains(p winPath) bool {
 		(r.resolved && p.within(r.phys) && len(p.comps) > len(r.phys.comps))
 }
 
+// containsRoot reports whether o, in either of its spellings, is within r.
+func (r winRoot) containsRoot(o winRoot) bool {
+	return r.contains(o.lex) || (o.resolved && r.contains(o.phys))
+}
+
 // windowsBoundary is the Windows policy built from one set of host facts.
 type windowsBoundary struct {
 	resolve  winResolver
@@ -266,78 +285,92 @@ func newWindowsBoundary(f windowsFacts) *windowsBoundary {
 		getenv = func(string) string { return "" }
 	}
 	b := &windowsBoundary{resolve: f.Resolve}
-	addSystem := func(s string) {
-		// Malformed values and volume roots are discarded: a root of C:\
-		// would deny the whole drive.
-		if p, ok := winCleanPath(s); ok && !p.isVolumeRoot() {
-			b.system = append(b.system, b.root(p))
-		}
-	}
-	for _, s := range winFixedSystemRoots {
-		addSystem(s)
-	}
-	addSystem(f.WindowsDir)
+	system := append(append([]string{}, winFixedSystemRoots...), f.WindowsDir)
 	for _, k := range winSystemRootEnv {
-		addSystem(getenv(k))
+		system = append(system, getenv(k))
 	}
-
-	// Profile parents hold every user's private profile. The fixed floor and
-	// the OS report are joined by SystemDrive\Users and by the home's parent,
-	// the latter only when it is named Users: inferring a parent from an
-	// arbitrary home would turn sibling projects into "peer profiles".
-	addProfile := func(s string) {
-		if p, ok := winCleanPath(s); ok && !p.isVolumeRoot() {
-			b.profiles = append(b.profiles, b.root(p))
-		}
-	}
-	addProfile(`C:\Users`)
-	addProfile(f.ProfilesDir)
-	if d := getenv("SystemDrive"); len(d) == 2 && isDriveLetter(d[0]) && d[1] == ':' {
-		addProfile(d + `\Users`)
-	}
+	b.system = b.policyRoots(system)
 	home, homeOK := winCleanPath(f.Home)
-	if homeOK && len(home.comps) >= 2 && strings.EqualFold(home.comps[len(home.comps)-2], "Users") {
-		addProfile(winPath{vol: home.vol, comps: home.comps[:len(home.comps)-1]}.String())
-	}
-	// A home that is a volume root or sits at or above a profile parent, in
-	// either spelling, would exempt every profile below it, so it counts as
-	// unknown.
-	if homeOK && !home.isVolumeRoot() {
-		h := b.root(home)
-		for _, r := range b.profiles {
-			if h.contains(r.lex) || (r.resolved && h.contains(r.phys)) {
-				homeOK = false
-				break
-			}
-		}
-		if homeOK {
-			b.home = &h
-		}
-	}
-
+	b.profiles = b.policyRoots(winProfileParents(f.ProfilesDir, getenv("SystemDrive"), home, homeOK))
+	b.home = b.homeRoot(home, homeOK)
 	for _, r := range b.profiles {
 		pub := winPath{vol: r.lex.vol, comps: append(r.lex.comps[:len(r.lex.comps):len(r.lex.comps)], "Public")}
 		b.public = append(b.public, b.root(pub))
 	}
+	b.temp = b.tempRoot(f.TempDir)
+	return b
+}
 
-	// A temp directory that is a volume root or sits at or above a system
-	// root or profile parent, in either spelling, would admit what those
-	// deny, so it is no carve-out. A proper descendant such as the SYSTEM
-	// account's C:\Windows\Temp stays one.
-	if t, ok := winCleanPath(f.TempDir); ok && !t.isVolumeRoot() {
-		tr := b.root(t)
-		usable := !(tr.resolved && tr.phys.isVolumeRoot())
-		for _, r := range append(append([]winRoot{}, b.system...), b.profiles...) {
-			if tr.contains(r.lex) || (r.resolved && tr.contains(r.phys)) {
-				usable = false
-				break
-			}
-		}
-		if usable {
-			b.temp = &tr
+// policyRoots returns the roots paths name, in order. Malformed values and
+// volume roots are discarded: a root of C:\ would deny the whole drive.
+func (b *windowsBoundary) policyRoots(paths []string) []winRoot {
+	var roots []winRoot
+	for _, s := range paths {
+		if p, ok := winCleanPath(s); ok && !p.isVolumeRoot() {
+			roots = append(roots, b.root(p))
 		}
 	}
-	return b
+	return roots
+}
+
+// winProfileParents names the directories that hold every user's private
+// profile. The fixed floor and the OS report are joined by SystemDrive\Users
+// and by the home's parent, the latter only when it is named Users: inferring
+// a parent from an arbitrary home would turn sibling projects into "peer
+// profiles".
+func winProfileParents(profilesDir, systemDrive string, home winPath, homeOK bool) []string {
+	parents := []string{`C:\Users`, profilesDir}
+	if len(systemDrive) == 2 && isDriveLetter(systemDrive[0]) && systemDrive[1] == ':' {
+		parents = append(parents, systemDrive+`\Users`)
+	}
+	if homeOK && len(home.comps) >= 2 && strings.EqualFold(home.comps[len(home.comps)-2], "Users") {
+		parents = append(parents, winPath{vol: home.vol, comps: home.comps[:len(home.comps)-1]}.String())
+	}
+	return parents
+}
+
+// homeRoot returns the current user's home, nil when it is unknown. A home
+// that is a volume root or sits at or above a profile parent, in either
+// spelling, would exempt every profile below it, so it counts as unknown. A
+// home that resolves to a volume root (a profile junctioned to E:\) keeps
+// only its named form: its physical form would exempt that whole volume, and
+// with it a peer profile relocated onto the volume.
+func (b *windowsBoundary) homeRoot(home winPath, ok bool) *winRoot {
+	if !ok || home.isVolumeRoot() {
+		return nil
+	}
+	h := b.root(home)
+	if h.resolved && h.phys.isVolumeRoot() {
+		h = winRoot{lex: home}
+	}
+	for _, r := range b.profiles {
+		if h.containsRoot(r) {
+			return nil
+		}
+	}
+	return &h
+}
+
+// tempRoot returns the temp-directory carve-out, nil when it is unusable. A
+// temp directory that is a volume root or sits at or above a system root or
+// profile parent, in either spelling, would admit what those deny, so it is
+// no carve-out. A proper descendant such as the SYSTEM account's
+// C:\Windows\Temp stays one.
+func (b *windowsBoundary) tempRoot(dir string) *winRoot {
+	t, ok := winCleanPath(dir)
+	if !ok || t.isVolumeRoot() {
+		return nil
+	}
+	tr := b.root(t)
+	if tr.resolved && tr.phys.isVolumeRoot() {
+		return nil
+	}
+	for _, r := range append(append([]winRoot{}, b.system...), b.profiles...) {
+		if tr.containsRoot(r) {
+			return nil
+		}
+	}
+	return &tr
 }
 
 func (b *windowsBoundary) root(p winPath) winRoot {

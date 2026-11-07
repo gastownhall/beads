@@ -240,11 +240,13 @@ On Windows (GH#6101) the same check uses a Windows policy in
 - **Profiles**: under `C:\Users`, the reported profiles directory,
   `%SystemDrive%\Users` and the home's parent when it is named `Users`, only
   the current user's home is allowed. With no known home, no private profile
-  is allowed.
+  is allowed. A home that resolves to a volume root (a profile junctioned to
+  `E:\`) counts by its spelled form only, so it cannot exempt that volume.
 - **Physical location**: the longest existing ancestor is resolved with
   `GetFinalPathNameByHandle`, so junctions, symlinks, short names and `subst`
   drives into a denied location are denied, including for missing
-  descendants. When the path does not resolve, its spelled form decides.
+  descendants. When the path does not resolve (access denied, a dangling
+  link, a volume with no drive letter), its spelled form decides.
 - **Carve-outs**: the temp directory (`os.TempDir()`, ignored when it is a
   volume root or at or above a system or profile root) and
   `<profile parent>\Public` (never `%PUBLIC%`) are allowed only when the path
@@ -259,9 +261,10 @@ carve-outs that cannot be resolved (access denied) is judged by its spelled
 form. Other volumes and shares are not denied as a whole, and Windows ACLs
 are not consulted.
 
-The POSIX body of `isPathInSafeBoundary` below the Windows dispatch is
-deliberately unchanged; keep it byte-identical, and keep the dispatch ahead
-of it, when rebasing POSIX boundary changes (e.g. PR #6326).
+On Windows, `isPathInSafeBoundary` returns the Windows policy's answer
+before its POSIX body runs, so the POSIX rules below the dispatch never
+apply to Windows paths: change them for POSIX alone, and change the Windows
+policy in `winboundary.go`.
 
 ## Server Mode Handling
 

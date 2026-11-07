@@ -92,7 +92,7 @@ func winTestJunction(t *testing.T, link, target string) {
 	t.Helper()
 	out, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput()
 	if _, lerr := os.Lstat(link); err != nil || lerr != nil {
-		t.Skipf("cannot create junction: %v: %s", err, out)
+		skipWithoutLink(t, "cannot create junction: %v: %s", err, out)
 	}
 	t.Cleanup(func() { _ = os.Remove(link) })
 }
@@ -103,7 +103,7 @@ func winTestSymlink(t *testing.T, link, target string) {
 	t.Helper()
 	err := os.Symlink(target, link)
 	if _, lerr := os.Lstat(link); err != nil || lerr != nil {
-		t.Skipf("cannot create symlink: %v", err)
+		skipWithoutLink(t, "cannot create symlink: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Remove(link) })
 }
