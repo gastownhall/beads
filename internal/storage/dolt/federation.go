@@ -67,6 +67,8 @@ func (s *DoltStore) pushRefToPeer(ctx context.Context, peer string, refspec stri
 // PullFrom pulls changes from a specific peer remote.
 // If credentials are stored for this peer, they are used automatically.
 // For git-protocol remotes, uses CLI `dolt pull` to avoid MySQL connection timeouts.
+// Cloud credentials held only in bd's environment also route through the CLI,
+// which inherits them (prepareCLIRouteForPeer).
 // Returns any merge conflicts if present.
 func (s *DoltStore) PullFrom(ctx context.Context, peer string) ([]storage.Conflict, error) {
 	var conflicts []storage.Conflict
@@ -117,8 +119,9 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 		return s.finishPeerPull(ctx, conflicts, err, preHead)
 	}
 	err = s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
-		// Credential CLI routing: mirrors git-protocol peer pull path.
-		if useCLI, err := s.prepareCLIRouteForPeerCredentials(ctx, peer, creds); err != nil {
+		// Credential CLI routing: mirrors git-protocol peer pull path, and
+		// cloud credentials held only in bd's environment route the same way.
+		if useCLI, err := s.prepareCLIRouteForPeer(ctx, peer, creds); err != nil {
 			return err
 		} else if useCLI {
 			pullErr := s.finishCLIPull(ctx, s.doltCLIPullFromPeer(ctx, peer, creds))
