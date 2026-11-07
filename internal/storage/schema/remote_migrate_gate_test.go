@@ -3,6 +3,7 @@ package schema
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -366,5 +367,195 @@ func TestRemoteMigrateGateAdoptFastForward(t *testing.T) {
 	msg := e.UserMessage()
 	if !strings.Contains(msg, "losslessly") && !strings.Contains(msg, "loss-free") {
 		t.Errorf("UserMessage should explain the fast-forward is loss-free:\n%s", msg)
+	}
+}
+
+// readsRefusedGateCases is one refusal per decision the gate can return,
+// for the gastownhall/beads#6572 read-refusal tests.
+func readsRefusedGateCases() map[string]*RemoteMigrateGateError {
+	base := func(e RemoteMigrateGateError) *RemoteMigrateGateError {
+		e.CurrentVersion, e.LatestVersion, e.Pending = 59, 66, 7
+		return &e
+	}
+	return map[string]*RemoteMigrateGateError{
+		"blunt":            base(RemoteMigrateGateError{}),
+		"adopt":            base(RemoteMigrateGateError{Decision: gateDecisionAdopt}),
+		"adopt-ff":         base(RemoteMigrateGateError{Decision: gateDecisionAdoptFastForward}),
+		"fork-skew":        base(RemoteMigrateGateError{Decision: gateDecisionForkSkew, SkewVersions: []int{60}}),
+		"shared-no-remote": base(RemoteMigrateGateError{Decision: gateDecisionSharedNoRemote, Shared: true}),
+		"data-behind":      base(RemoteMigrateGateError{FallbackReason: fallbackReasonDataBehind}),
+		"data-behind proxied shared": base(RemoteMigrateGateError{
+			FallbackReason: fallbackReasonDataBehind, Shared: true, Proxied: true,
+		}),
+	}
+}
+
+// TestRemoteMigrateGateError_ReadsRefused pins the classification a refused
+// read-through relies on (gastownhall/beads#6572): with ReadsRefused attached
+// the error is still the gate's, with its decision, and is also the
+// *SchemaBehindError naming what is missing; without it nothing unwraps and
+// the one-line refusal is unchanged.
+func TestRemoteMigrateGateError_ReadsRefused(t *testing.T) {
+	for name, gateErr := range readsRefusedGateCases() {
+		t.Run(name, func(t *testing.T) {
+			plain := gateErr.Error()
+			if u := gateErr.Unwrap(); u != nil {
+				t.Fatalf("Unwrap() without ReadsRefused = %v, want nil", u)
+			}
+			if IsSchemaBehindError(gateErr) {
+				t.Fatal("a gate refusal without ReadsRefused classifies as *SchemaBehindError")
+			}
+			if strings.Contains(plain, "reads are refused") {
+				t.Fatalf("Error() without ReadsRefused claims reads are refused: %q", plain)
+			}
+
+			refused := *gateErr
+			refused.ReadsRefused = &SchemaBehindError{DBVersion: 59, BinaryVersion: 66, Missing: []string{"leases", "wisps.storage_class"}}
+			var err error = &refused
+			var gotGate *RemoteMigrateGateError
+			if !errors.As(err, &gotGate) || gotGate.Decision != gateErr.Decision {
+				t.Fatalf("errors.As(gate) = %v, want the gate refusal with Decision %q", gotGate, gateErr.Decision)
+			}
+			var behind *SchemaBehindError
+			if !errors.As(err, &behind) || behind != refused.ReadsRefused {
+				t.Fatalf("errors.As(behind) did not find the attached *SchemaBehindError in %v", err)
+			}
+			msg := err.Error()
+			if !strings.HasPrefix(msg, plain) {
+				t.Errorf("Error() = %q, want it to keep the refusal %q first", msg, plain)
+			}
+			for _, want := range []string{"reads are refused too", "schema v59 lacks leases, wisps.storage_class"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("Error() = %q, want it to contain %q", msg, want)
+				}
+			}
+		})
+	}
+	var nilGate *RemoteMigrateGateError
+	if u := nilGate.Unwrap(); u != nil {
+		t.Errorf("nil gate Unwrap() = %v, want nil", u)
+	}
+}
+
+// TestRemoteMigrateGateError_ReadsRefusedRendering pins what a refused
+// read-through tells the operator and the agent (gastownhall/beads#6572):
+// that reads are refused too and what the schema lacks, beside the unchanged
+// decision-specific remedy and options. It must not keep promising that reads
+// continue, and must not add a migration instruction the decision did not
+// already give (the generic `bd migrate schema` remedy of a plain
+// SchemaBehindError would contradict adopt, fork-skew and data-behind). On
+// the data-behind stop it must say that the pull alone does not restore
+// reads, since those need the clone-local tables reconciled too, and must
+// not forbid the re-run the decision prescribes after the pull.
+func TestRemoteMigrateGateError_ReadsRefusedRendering(t *testing.T) {
+	const promise = " Reads keep working on the current schema meanwhile, as long as it can answer this binary's reads."
+	const nothingElse = "; nothing else is needed."
+	for name, gateErr := range readsRefusedGateCases() {
+		t.Run(name, func(t *testing.T) {
+			plainMsg, plainDirective, plainOptions := gateErr.UserMessage(), gateErr.AgentDirective(), gateErr.Options()
+			refused := *gateErr
+			refused.ReadsRefused = &SchemaBehindError{DBVersion: 59, BinaryVersion: 66, Missing: []string{"leases.granted_node"}}
+
+			msg := refused.UserMessage()
+			for _, want := range []string{"reads are refused too, not only writes", "leases.granted_node", "clone-local tables"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("UserMessage() missing %q:\n%s", want, msg)
+				}
+			}
+			for _, promised := range []string{"keep working", "whole remedy", "nothing else is needed"} {
+				if strings.Contains(strings.ToLower(msg), promised) {
+					t.Errorf("UserMessage() still promises %q:\n%s", promised, msg)
+				}
+			}
+			if gateErr.IsDataBehind() && !strings.Contains(msg, "reconciles tracked history only") {
+				t.Errorf("UserMessage() does not say the pull leaves the clone-local tables as they are:\n%s", msg)
+			}
+			if strings.Contains(refused.Notes(), "BD_IGNORE_SCHEMA_SKEW") {
+				t.Errorf("Notes() recommends the skew escape hatch, which trades the refusal for query-time failures:\n%s", refused.Notes())
+			}
+			// Every line of the decision's guidance survives, except the
+			// read-continuation paragraph and the pull's whole-remedy lead,
+			// which the refusal replaces.
+			for _, paragraph := range strings.Split(plainMsg, "\n\n") {
+				if strings.Contains(paragraph, "keep working") {
+					continue
+				}
+				for _, line := range strings.Split(paragraph, "\n") {
+					if strings.Contains(line, "whole remedy") {
+						continue
+					}
+					if !strings.Contains(msg, line) {
+						t.Errorf("UserMessage() dropped the decision's line %q:\n%s", line, msg)
+					}
+				}
+			}
+			if got, want := strings.Count(msg, "bd migrate"), strings.Count(plainMsg, "bd migrate"); got != want {
+				t.Errorf("UserMessage() names `bd migrate` %d times, want the decision's own %d:\n%s", got, want, msg)
+			}
+
+			directive := refused.AgentDirective()
+			kept := strings.TrimSuffix(strings.TrimSuffix(plainDirective, promise), nothingElse)
+			if !strings.HasPrefix(directive, kept) {
+				t.Errorf("AgentDirective() = %q, want it to keep the decision's directive %q", directive, plainDirective)
+			}
+			for _, want := range []string{"Reads are refused too", "leases.granted_node"} {
+				if !strings.Contains(directive, want) {
+					t.Errorf("AgentDirective() = %q, want it to contain %q", directive, want)
+				}
+			}
+			for _, promised := range []string{"Reads keep working", "nothing else is needed"} {
+				if strings.Contains(directive, promised) {
+					t.Errorf("AgentDirective() still promises %q: %q", promised, directive)
+				}
+			}
+			if gateErr.IsDataBehind() && !strings.Contains(directive, "tracked history only") {
+				t.Errorf("AgentDirective() = %q, want it to say the pull does not rebuild the clone-local tables", directive)
+			}
+			// No directive may both prescribe a re-run and forbid one: the
+			// non-shared data-behind stop says re-running the original
+			// command migrates on its own, and an agent handed that beside
+			// an outright retry ban stalls. Every retry ban is scoped to the
+			// remedy instead.
+			for _, ban := range strings.Split(directive, "do NOT retry")[1:] {
+				if clause, _, _ := strings.Cut(ban, "."); !strings.Contains(clause, " before ") {
+					t.Errorf("AgentDirective() forbids retrying outright (%q): %q", "do NOT retry"+clause, directive)
+				}
+			}
+			if strings.Contains(directive, "re-running the original command") &&
+				strings.Contains(strings.ToLower(directive), "do not auto-run a migration") {
+				t.Errorf("AgentDirective() prescribes the re-run that migrates and forbids auto-running a migration: %q", directive)
+			}
+			if got, want := strings.Count(directive, "bd migrate"), strings.Count(plainDirective, "bd migrate"); got != want {
+				t.Errorf("AgentDirective() names `bd migrate` %d times, want the decision's own %d: %q", got, want, directive)
+			}
+			if got := refused.Options(); !reflect.DeepEqual(got, plainOptions) {
+				t.Errorf("Options() = %+v, want the decision's own %+v", got, plainOptions)
+			}
+		})
+	}
+}
+
+// TestRemoteMigrateGateError_UncheckedReadsKeepAQualifiedPromise pins the
+// shared-no-remote guidance when no readability verdict was computed (nil
+// ReadsRefused: strict opens, write paths). Reads were not verified, merely
+// not refused, so the continuation promise stays in both the operator body
+// and the agent directive, qualified to a schema this binary's reads can
+// query, and nothing claims reads are refused.
+func TestRemoteMigrateGateError_UncheckedReadsKeepAQualifiedPromise(t *testing.T) {
+	e := readsRefusedGateCases()["shared-no-remote"]
+	msg := e.UserMessage()
+	for _, want := range []string{"Read commands keep working", "as long as it can answer this binary's reads"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("UserMessage() missing %q:\n%s", want, msg)
+		}
+	}
+	d := e.AgentDirective()
+	if !strings.Contains(d, "Reads keep working on the current schema meanwhile, as long as it can answer this binary's reads.") {
+		t.Errorf("AgentDirective() = %q, want the qualified continuation promise", d)
+	}
+	for _, out := range []string{msg, d} {
+		if strings.Contains(strings.ToLower(out), "reads are refused") {
+			t.Errorf("unchecked reads rendered as refused: %q", out)
+		}
 	}
 }

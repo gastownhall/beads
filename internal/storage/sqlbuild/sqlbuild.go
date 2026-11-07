@@ -100,6 +100,37 @@ func LeaseJoin(tableRef string) string {
 	return "LEFT JOIN leases ON leases.issue_id = " + tableRef + ".id"
 }
 
+// leaseJoinKey is the leases column LeaseJoin matches issue ids on.
+const leaseJoinKey = "issue_id"
+
+// ReadRelation is one table the shared issue hydration reads and the columns
+// it selects from that table. Optional marks a table a database may
+// legitimately lack (OptionalWispTable); a present optional table still has
+// to carry every column.
+type ReadRelation struct {
+	Table    string
+	Columns  []string
+	Optional bool
+}
+
+// IssueReadRelations describes what full issue hydration
+// (IssueSelectColumns plus LeaseJoin) needs from the schema: the row columns
+// on issues and on wisps, which reads fall back to, and the lease overlay
+// with its join key. It describes this shared projection, not every
+// command's SQL; a change to the projection or the join has to be reflected
+// here (TestIssueReadRelations pins the agreement).
+func IssueReadRelations() []ReadRelation {
+	lease := []string{leaseJoinKey}
+	for _, column := range ColumnNames(LeaseSelectColumns) {
+		lease = append(lease, strings.TrimPrefix(column, "leases."))
+	}
+	return []ReadRelation{
+		{Table: IssuesFilterTables.Main, Columns: ColumnNames(IssueBaseColumns)},
+		{Table: WispsFilterTables.Main, Columns: ColumnNames(IssueBaseColumns), Optional: OptionalWispTable(WispsFilterTables.Main)},
+		{Table: "leases", Columns: lease},
+	}
+}
+
 // QueryBatchSize bounds IN-clause sizes when long ID lists are folded into
 // WHERE fragments.
 const QueryBatchSize = 200

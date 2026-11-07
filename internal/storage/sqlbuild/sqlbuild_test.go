@@ -750,3 +750,65 @@ func TestColumnNames(t *testing.T) {
 		t.Errorf("QualifyColumns = %q, want %q", got, want)
 	}
 }
+
+// TestIssueReadRelations pins the readability descriptor against the
+// projection and join it describes, so a column or join added to full issue
+// hydration cannot be missed by the open-time readability check
+// (gastownhall/beads#6572).
+func TestIssueReadRelations(t *testing.T) {
+	t.Parallel()
+
+	relations := map[string]ReadRelation{}
+	for _, r := range IssueReadRelations() {
+		if _, dup := relations[r.Table]; dup {
+			t.Fatalf("IssueReadRelations lists %s twice", r.Table)
+		}
+		relations[r.Table] = r
+	}
+	if len(relations) != 3 {
+		t.Fatalf("IssueReadRelations tables = %v, want issues, wisps and leases", relations)
+	}
+
+	base := ColumnNames(IssueBaseColumns)
+	for _, table := range []string{"issues", "wisps"} {
+		r := relations[table]
+		if !slices.Equal(r.Columns, base) {
+			t.Errorf("%s columns = %v, want IssueBaseColumns %v", table, r.Columns, base)
+		}
+		// The lite projection selects a subset of the row columns, so
+		// requiring the full list covers it.
+		for _, column := range ColumnNames(IssueBaseColumnsLite) {
+			if !slices.Contains(r.Columns, column) {
+				t.Errorf("%s does not require lite column %s", table, column)
+			}
+		}
+		if r.Optional != OptionalWispTable(table) {
+			t.Errorf("%s Optional = %v, want OptionalWispTable = %v", table, r.Optional, OptionalWispTable(table))
+		}
+	}
+
+	leases := relations["leases"]
+	if leases.Optional {
+		t.Error("leases is Optional; LeaseJoin joins it on every hydration read")
+	}
+	// Every leases.<column> the projection or the join names is required.
+	var referenced []string
+	for _, column := range ColumnNames(IssueSelectColumns) {
+		if name, ok := strings.CutPrefix(column, "leases."); ok {
+			referenced = append(referenced, name)
+		}
+	}
+	for _, field := range strings.Fields(LeaseJoin("issues")) {
+		if name, ok := strings.CutPrefix(field, "leases."); ok {
+			referenced = append(referenced, name)
+		}
+	}
+	if len(referenced) < 4 {
+		t.Fatalf("found leases references %v, want the three overlay columns and the join key", referenced)
+	}
+	for _, column := range referenced {
+		if !slices.Contains(leases.Columns, column) {
+			t.Errorf("leases does not require %s, which issue hydration references", column)
+		}
+	}
+}

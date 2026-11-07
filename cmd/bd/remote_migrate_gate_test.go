@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -354,6 +355,34 @@ func TestRenderTypedOpenError(t *testing.T) {
 		}
 	})
 
+	t.Run("a refused read-through renders that reads are refused", func(t *testing.T) {
+		// gastownhall/beads#6572: the refusal also classifies as
+		// *schema.SchemaBehindError, but it is still the gate's block that
+		// renders, with its own remedy, and no longer promises reads.
+		gate := &schema.RemoteMigrateGateError{
+			CurrentVersion: 53, LatestVersion: 66, Pending: 13,
+			Decision:     "shared-no-remote",
+			ReadsRefused: &schema.SchemaBehindError{DBVersion: 53, BinaryVersion: 66, Missing: []string{"leases.granted_node"}},
+		}
+		out, handled := capture(func() bool {
+			return renderTypedOpenError(fmt.Errorf("uow: init schema: %w", gate))
+		})
+		if !handled {
+			t.Fatal("renderTypedOpenError = false, want true for a wrapped gate refusal")
+		}
+		if out != gate.UserMessage() {
+			t.Errorf("rendered output is not the full UserMessage:\n%s", out)
+		}
+		for _, want := range []string{"co-resident", "bd migrate schema", "Reads are refused too, not just writes", "reads are refused too, not only writes", "leases.granted_node"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("output missing %q:\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, "Read commands keep working") {
+			t.Errorf("output still promises reads keep working:\n%s", out)
+		}
+	})
+
 	t.Run("an ordinary error is left to the caller", func(t *testing.T) {
 		out, handled := capture(func() bool {
 			return renderTypedOpenError(errors.New("connection refused"))
@@ -365,4 +394,68 @@ func TestRenderTypedOpenError(t *testing.T) {
 			t.Errorf("nothing should be printed for an untyped error, got:\n%s", out)
 		}
 	})
+}
+
+// TestHandleRemoteMigrateGateJSON_ReadsRefused covers the agent-facing block
+// of a refused read-through (gastownhall/beads#6572) for every decision. The
+// refusal evidence travels in the existing error and hint fields: error says
+// reads are refused too and names what the schema lacks, and the hint drops
+// any promise that reads continue. The remote_migrate_gate block itself is
+// exactly what it is without the refusal: no new fields, the same observed,
+// expected, options, decision and docs.
+func TestHandleRemoteMigrateGateJSON_ReadsRefused(t *testing.T) {
+	captureJSON := func(gate *schema.RemoteMigrateGateError) map[string]interface{} {
+		t.Helper()
+		origStderr := os.Stderr
+		r, w, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			t.Fatal(pipeErr)
+		}
+		os.Stderr = w
+		handleRemoteMigrateGateJSON(gate)
+		_ = w.Close()
+		os.Stderr = origStderr
+		var buf bytes.Buffer
+		if _, err := io.Copy(&buf, r); err != nil {
+			t.Fatal(err)
+		}
+		_ = r.Close()
+		var parsed map[string]interface{}
+		if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+			t.Fatalf("json.Unmarshal stderr: %v\nstderr was: %s", err, buf.String())
+		}
+		return parsed
+	}
+	for name, plain := range map[string]*schema.RemoteMigrateGateError{
+		"shared-no-remote": {CurrentVersion: 53, LatestVersion: 66, Pending: 13, Decision: "shared-no-remote", Shared: true},
+		"adopt":            {CurrentVersion: 53, LatestVersion: 66, Pending: 13, Decision: "adopt"},
+		"adopt-ff":         {CurrentVersion: 53, LatestVersion: 66, Pending: 13, Decision: "adopt-ff"},
+		"fork-skew":        {CurrentVersion: 53, LatestVersion: 66, Pending: 13, Decision: "fork-skew", SkewVersions: []int{60}},
+		"blunt":            {CurrentVersion: 53, LatestVersion: 66, Pending: 13},
+		"data-behind":      {CurrentVersion: 53, LatestVersion: 66, Pending: 13, FallbackReason: "data-behind"},
+		"data-behind proxied shared": {
+			CurrentVersion: 53, LatestVersion: 66, Pending: 13, FallbackReason: "data-behind", Shared: true, Proxied: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			refused := *plain
+			refused.ReadsRefused = &schema.SchemaBehindError{DBVersion: 53, BinaryVersion: 66, Missing: []string{"leases.granted_node"}}
+			before, after := captureJSON(plain), captureJSON(&refused)
+
+			errText, _ := after["error"].(string)
+			if errText != refused.Error() || !strings.Contains(errText, "reads are refused too") || !strings.Contains(errText, "leases.granted_node") {
+				t.Errorf("error = %q, want %q, saying reads are refused and naming leases.granted_node", errText, refused.Error())
+			}
+			hint, _ := after["hint"].(string)
+			if hint != refused.AgentDirective() || !strings.Contains(hint, "Reads are refused too") ||
+				!strings.Contains(hint, "leases.granted_node") || strings.Contains(hint, "Reads keep working") {
+				t.Errorf("hint = %q, want the directive saying reads are refused, naming leases.granted_node, and not that they keep working", hint)
+			}
+			gate, _ := after["remote_migrate_gate"].(map[string]interface{})
+			beforeGate, _ := before["remote_migrate_gate"].(map[string]interface{})
+			if !reflect.DeepEqual(gate, beforeGate) {
+				t.Errorf("remote_migrate_gate = %v, want the decision's own block unchanged %v", gate, beforeGate)
+			}
+		})
+	}
 }

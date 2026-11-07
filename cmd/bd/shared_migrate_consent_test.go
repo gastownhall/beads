@@ -81,10 +81,18 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 		decision string
 		want     string
 		absent   string
+		// alsoWant and stale pin the adopt remedy (#6687): bare `bd bootstrap`
+		// no-ops on this existing database, the notice links the procedure
+		// rather than printing filesystem commands, and it makes no promise
+		// about reads, which can fail on the old schema.
+		alsoWant []string
+		stale    []string
 	}{
 		{decision: "shared-no-remote", want: "bd migrate schema"},
-		{decision: "adopt", want: "bd bootstrap", absent: "bd migrate schema"},
-		{decision: "adopt-ff", want: "bd bootstrap", absent: "bd migrate schema"},
+		{decision: "adopt", want: schema.AdoptionGuideURL, absent: "bd migrate schema", alsoWant: []string{`"Nothing to do."`, "no other bd process", "server section"},
+			stale: []string{"adopt it with 'bd bootstrap'", "reads keep working", "mv .beads"}},
+		{decision: "adopt-ff", want: schema.AdoptionGuideURL, absent: "bd migrate schema", alsoWant: []string{`"Nothing to do."`, "no other bd process", "server section"},
+			stale: []string{"adopt it with 'bd bootstrap'", "reads keep working", "mv .beads"}},
 		{decision: "fork-skew", want: "bd doctor", absent: "bd migrate schema"},
 		{decision: "", want: "bd migrate", absent: "bd migrate schema"},
 	} {
@@ -105,6 +113,16 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 			if tt.absent != "" && strings.Contains(out, tt.absent) {
 				t.Errorf("notice for %q must not prescribe %q (the verb does not unlock this arm):\n%s",
 					tt.decision, tt.absent, out)
+			}
+			for _, want := range tt.alsoWant {
+				if !strings.Contains(out, want) {
+					t.Errorf("notice for %q missing %q:\n%s", tt.decision, want, out)
+				}
+			}
+			for _, stale := range tt.stale {
+				if strings.Contains(out, stale) {
+					t.Errorf("notice for %q still says %q:\n%s", tt.decision, stale, out)
+				}
 			}
 		})
 	}
@@ -145,6 +163,73 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 			t.Errorf("only a gate refusal should produce a notice, got:\n%s", out)
 		}
 	})
+}
+
+// TestNoticeSharedMigrateRefusalReadsAreConditional pins what the notice says
+// about reads (gastownhall/beads#6572): a read-only command reads on at the
+// current schema only while this binary's issue reads can query it, so no
+// decision may promise that reads keep working, and every decision that used
+// to says when they do not.
+func TestNoticeSharedMigrateRefusalReadsAreConditional(t *testing.T) {
+	pinJSONOutput(t, false)
+	for _, tt := range []struct {
+		decision string
+		caveat   bool
+	}{
+		{decision: "shared-no-remote", caveat: true},
+		{decision: "adopt", caveat: true},
+		{decision: "adopt-ff", caveat: true},
+		{decision: "fork-skew"},
+		{decision: "", caveat: true},
+	} {
+		t.Run("decision="+tt.decision, func(t *testing.T) {
+			out := captureNoticeStderr(t, func() {
+				noticeSharedMigrateRefusal(&schema.RemoteMigrateGateError{
+					CurrentVersion: 65, LatestVersion: 66, Pending: 1,
+					Decision: tt.decision,
+				})
+			})
+			if strings.Contains(strings.ToLower(out), "keep working") {
+				t.Errorf("notice promises reads keep working:\n%s", out)
+			}
+			for _, want := range []string{"only while it has every table and column", "otherwise they are refused"} {
+				if got := strings.Contains(out, want); got != tt.caveat {
+					t.Errorf("notice contains %q = %v, want %v:\n%s", want, got, tt.caveat, out)
+				}
+			}
+		})
+	}
+
+	// A gate error already carrying a read refusal states it in place of the
+	// caveat, naming what is missing and prescribing nothing beyond the
+	// decision's own remedy: on adopt, migrating here is what not to do.
+	for _, decision := range []string{"shared-no-remote", "adopt", ""} {
+		t.Run("carried refusal decision="+decision, func(t *testing.T) {
+			out := captureNoticeStderr(t, func() {
+				noticeSharedMigrateRefusal(&schema.RemoteMigrateGateError{
+					CurrentVersion: 65, LatestVersion: 66, Pending: 1,
+					Decision: decision,
+					ReadsRefused: &schema.SchemaBehindError{
+						DBVersion: 65, BinaryVersion: 66,
+						Missing: []string{"leases", "leases.granted_node"},
+					},
+				})
+			})
+			for _, want := range []string{"Read commands are refused too", "schema v65 lacks leases, leases.granted_node"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("notice missing %q:\n%s", want, out)
+				}
+			}
+			for _, absent := range []string{"keep working", "only while it has every table and column", "until the schema is migrated"} {
+				if strings.Contains(out, absent) {
+					t.Errorf("notice carrying a read refusal still says %q:\n%s", absent, out)
+				}
+			}
+			if decision == "adopt" && strings.Contains(out, "bd migrate") {
+				t.Errorf("adopt notice prescribes a migration:\n%s", out)
+			}
+		})
+	}
 }
 
 // TestSharedRefusalPrescribesAWorkingVerb closes the loop the review flagged:

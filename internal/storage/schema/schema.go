@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"golang.org/x/term"
 )
 
@@ -276,15 +277,28 @@ type SchemaBehindError struct {
 	// administrator's rather than `bd migrate schema`, the same line
 	// uow.checkTeamServerSchema draws for a beads-team-server schema.
 	Gateway bool
+	// Missing names what this binary's reads select and the database lacks,
+	// as a table ("leases") or table.column ("wisps.storage_class"), when
+	// CheckReadableDrift found it. Empty for a refusal on the version alone.
+	Missing []string
 }
 
 func (e *SchemaBehindError) Error() string {
-	if e.Gateway {
-		return fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d; the gateway server owns this database's schema and bd never migrates it — ask the server administrator to upgrade the database, or keep using a bd release that matches schema v%d",
-			e.DBVersion, e.BinaryVersion, e.DBVersion)
+	lacks := ""
+	if len(e.Missing) > 0 {
+		lacks = " and its reads need " + e.MissingSummary() + ", which this database lacks"
 	}
-	return fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d; bd does not migrate a database without explicit consent — run `bd migrate schema` in that workspace to migrate, keep using a bd release that matches schema v%d, or set BD_IGNORE_SCHEMA_SKEW=1 to read anyway (queries touching newer schema may fail)",
-		e.DBVersion, e.BinaryVersion, e.DBVersion)
+	if e.Gateway {
+		return fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d%s; the gateway server owns this database's schema and bd never migrates it — ask the server administrator to upgrade the database, or keep using a bd release that matches schema v%d",
+			e.DBVersion, e.BinaryVersion, lacks, e.DBVersion)
+	}
+	return fmt.Sprintf("schema version mismatch: database is at v%d, binary expects v%d%s; bd does not migrate a database without explicit consent — run `bd migrate schema` in that workspace to migrate, keep using a bd release that matches schema v%d, or set BD_IGNORE_SCHEMA_SKEW=1 to read anyway (queries touching newer schema may fail)",
+		e.DBVersion, e.BinaryVersion, lacks, e.DBVersion)
+}
+
+// MissingSummary renders Missing as one comma-separated list.
+func (e *SchemaBehindError) MissingSummary() string {
+	return strings.Join(e.Missing, ", ")
 }
 
 // IsSchemaBehindError reports whether err (or any error it wraps) is a
@@ -306,37 +320,47 @@ func CheckBehindDrift(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("schema behind-drift check: %w", err)
 	}
-	return behindDriftError(currentVersion)
+	return behindDriftError(currentVersion, nil)
 }
 
-// behindDriftError is CheckBehindDrift's verdict on a version already read.
-func behindDriftError(currentVersion int) error {
+// behindDriftError is CheckBehindDrift's verdict on a version already read,
+// and CheckReadableDrift's with the missing relations it found.
+func behindDriftError(currentVersion int, missing []string) error {
 	if currentVersion >= LatestVersion() {
 		return nil
 	}
 	if os.Getenv("BD_IGNORE_SCHEMA_SKEW") == "1" {
+		lacks := ""
+		if len(missing) > 0 {
+			lacks = " and lacks " + strings.Join(missing, ", ")
+		}
 		fmt.Fprintf(os.Stderr,
-			"Warning: schema skew ignored — database (v%d) is behind binary (v%d) and is opened without migrating; some queries may fail\n",
-			currentVersion, LatestVersion())
+			"Warning: schema skew ignored — database (v%d) is behind binary (v%d)%s and is opened without migrating; some queries may fail\n",
+			currentVersion, LatestVersion(), lacks)
 		return nil
 	}
-	return &SchemaBehindError{DBVersion: currentVersion, BinaryVersion: LatestVersion()}
+	return &SchemaBehindError{DBVersion: currentVersion, BinaryVersion: LatestVersion(), Missing: missing}
 }
 
 // CheckReadableDrift is the drift check for an open that reads a database at
 // its current schema instead of migrating it: a read-only open, or one through
 // a gateway server, which owns its schema. From one version read it refuses
 // forward drift as CheckForwardDrift does, and a database BEHIND the binary
-// only when table lacks one of columns, the columns the caller's reads
-// select, with CheckBehindDrift's *SchemaBehindError and escape hatch.
+// only when it lacks a table or column of relations, what the caller's reads
+// select (normally sqlbuild.IssueReadRelations), with CheckBehindDrift's
+// *SchemaBehindError, naming what is missing, and escape hatch.
 //
 // A behind database that has all of them stays open: it keeps serving reads
 // at its current schema until its operator consents to the migration
 // (bd-578h9.5, gastownhall/beads#5920). One that lacks any of them cannot
 // answer a single such read, and without this check it would open fine and
-// then fail every read with an unknown-column error. A database at the
-// binary's version costs only the version read CheckForwardDrift makes.
-func CheckReadableDrift(ctx context.Context, db DBConn, table string, columns []string) error {
+// then fail every read with an unknown-column or unknown-table error. That
+// includes the clone-local tables a refused migration leaves as they were,
+// such as leases, which every hydrated issue read joins
+// (gastownhall/beads#6572). An absent Optional relation is not missing; a
+// present one must carry every column. A database at the binary's version
+// costs only the version read CheckForwardDrift makes.
+func CheckReadableDrift(ctx context.Context, db DBConn, relations []sqlbuild.ReadRelation) error {
 	currentVersion, err := CurrentVersion(ctx, db)
 	if err != nil {
 		return fmt.Errorf("schema drift check: %w", err)
@@ -344,58 +368,71 @@ func CheckReadableDrift(ctx context.Context, db DBConn, table string, columns []
 	if currentVersion >= LatestVersion() {
 		return forwardDriftError(currentVersion)
 	}
-	missing, err := missingColumns(ctx, db, table, columns)
-	if err != nil {
-		return fmt.Errorf("schema drift check: %w", err)
+	var missing []string
+	for _, relation := range relations {
+		exists, lacking, err := missingColumns(ctx, db, relation.Table, relation.Columns)
+		if err != nil {
+			return fmt.Errorf("schema drift check: %w", err)
+		}
+		switch {
+		case !exists && relation.Optional:
+		case !exists:
+			missing = append(missing, relation.Table)
+		default:
+			for _, column := range lacking {
+				missing = append(missing, relation.Table+"."+column)
+			}
+		}
 	}
 	if len(missing) == 0 {
 		return nil
 	}
-	return behindDriftError(currentVersion)
+	return behindDriftError(currentVersion, missing)
 }
 
-// missingColumns returns the entries of columns that table lacks, all of them
-// when the table does not exist. Names compare case-insensitively, as MySQL
-// compares column names. It lists the one table with SHOW COLUMNS for
+// missingColumns reports whether table exists and, when it does, the entries
+// of columns it lacks. Names compare case-insensitively, as MySQL compares
+// column names. It lists the one table with SHOW COLUMNS for
 // showColumnExists's reason (Dolt answers INFORMATION_SCHEMA.COLUMNS by
 // scanning every database on the server), and only after
 // tableInCurrentDatabase has found the table, because a SHOW COLUMNS that
 // fails pins the pooled session to its catalog snapshot (be-bv7x). table is
 // a hardcoded identifier, never user input.
-func missingColumns(ctx context.Context, db DBConn, table string, columns []string) ([]string, error) {
+func missingColumns(ctx context.Context, db DBConn, table string, columns []string) (bool, []string, error) {
 	exists, err := tableInCurrentDatabase(ctx, db, table)
 	if err != nil {
-		return nil, fmt.Errorf("checking table %s: %w", table, err)
+		return false, nil, fmt.Errorf("checking table %s: %w", table, err)
 	}
+	if !exists {
+		return false, nil, nil
+	}
+	//nolint:gosec // G201: table is a hardcoded identifier, never user input.
+	rows, err := db.QueryContext(ctx, "SHOW COLUMNS FROM "+table)
+	if err != nil {
+		return false, nil, fmt.Errorf("listing %s columns: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+	cols, err := rows.Columns()
+	if err != nil {
+		return false, nil, fmt.Errorf("listing %s columns: %w", table, err)
+	}
+	// The first of SHOW COLUMNS' cells (Field, Type, Null, ...) is the name.
 	present := map[string]bool{}
-	if exists {
-		//nolint:gosec // G201: table is a hardcoded identifier, never user input.
-		rows, err := db.QueryContext(ctx, "SHOW COLUMNS FROM "+table)
-		if err != nil {
-			return nil, fmt.Errorf("listing %s columns: %w", table, err)
+	cells := make([]sql.RawBytes, len(cols))
+	dest := make([]any, len(cols))
+	for i := range cells {
+		dest[i] = &cells[i]
+	}
+	for rows.Next() {
+		if err := rows.Scan(dest...); err != nil {
+			return false, nil, fmt.Errorf("listing %s columns: %w", table, err)
 		}
-		defer func() { _ = rows.Close() }()
-		cols, err := rows.Columns()
-		if err != nil {
-			return nil, fmt.Errorf("listing %s columns: %w", table, err)
+		if len(cells) > 0 {
+			present[strings.ToLower(string(cells[0]))] = true
 		}
-		// The first of SHOW COLUMNS' cells (Field, Type, Null, ...) is the name.
-		cells := make([]sql.RawBytes, len(cols))
-		dest := make([]any, len(cols))
-		for i := range cells {
-			dest[i] = &cells[i]
-		}
-		for rows.Next() {
-			if err := rows.Scan(dest...); err != nil {
-				return nil, fmt.Errorf("listing %s columns: %w", table, err)
-			}
-			if len(cells) > 0 {
-				present[strings.ToLower(string(cells[0]))] = true
-			}
-		}
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("listing %s columns: %w", table, err)
-		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, nil, fmt.Errorf("listing %s columns: %w", table, err)
 	}
 	var missing []string
 	for _, column := range columns {
@@ -403,7 +440,7 @@ func missingColumns(ctx context.Context, db DBConn, table string, columns []stri
 			missing = append(missing, column)
 		}
 	}
-	return missing, nil
+	return true, missing, nil
 }
 
 type dirtyTableState struct {

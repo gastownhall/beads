@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -71,6 +72,48 @@ func TestDoltNew_RequireReadableSchema(t *testing.T) {
 			t.Fatalf("New (read-only, cursor behind, columns present) = %v, want success: reads keep working on the old schema", err)
 		}
 	})
+
+	// Behind with the issues projection intact but the lease overlay every
+	// issue read LEFT JOINs short a column: checking issues alone opened this
+	// and then failed each read on the unknown leases.granted_node.
+	if _, err := store.db.ExecContext(ctx, "ALTER TABLE leases DROP COLUMN granted_node"); err != nil {
+		t.Fatalf("drop leases.granted_node: %v", err)
+	}
+	for _, tc := range []struct {
+		name    string
+		cfg     Config
+		gateway bool
+	}{
+		{name: "read-only open refuses a schema without a lease overlay column", cfg: Config{ReadOnly: true, RequireReadableSchema: true}},
+		{name: "gateway open refuses a schema without a lease overlay column", cfg: Config{Gateway: true, RequireReadableSchema: true}, gateway: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := tc.cfg
+			err := openWith(&cfg)
+			var behindErr *schema.SchemaBehindError
+			if !errors.As(err, &behindErr) {
+				t.Fatalf("New (missing leases.granted_node) = %T (%v), want *schema.SchemaBehindError", err, err)
+			}
+			if behindErr.DBVersion != behind || behindErr.Gateway != tc.gateway {
+				t.Errorf("SchemaBehindError = %+v, want v%d behind, Gateway = %v", *behindErr, behind, tc.gateway)
+			}
+			if want := []string{"leases.granted_node"}; !slices.Equal(behindErr.Missing, want) || !strings.Contains(err.Error(), "leases.granted_node") {
+				t.Errorf("refusal %q (Missing %v) does not name exactly %v", err, behindErr.Missing, want)
+			}
+			if names := strings.Contains(err.Error(), "bd migrate schema"); names == tc.gateway {
+				t.Errorf("refusal %q: names `bd migrate schema` = %v, want %v (a gateway's schema is its administrator's)", err, names, !tc.gateway)
+			}
+		})
+	}
+	t.Run("an open that does not ask still opens on the broken lease overlay", func(t *testing.T) {
+		if err := openWith(&Config{ReadOnly: true}); err != nil {
+			t.Fatalf("New (read-only, no RequireReadableSchema, missing leases.granted_node) = %v, want success", err)
+		}
+	})
+	if _, err := store.db.ExecContext(ctx,
+		"ALTER TABLE leases ADD COLUMN granted_node VARCHAR(255) NOT NULL DEFAULT ''"); err != nil {
+		t.Fatalf("restore leases.granted_node: %v", err)
+	}
 
 	// Behind for real: 0073's down takes arrival_seq off both planes, the
 	// shape of a database the previous release migrated.

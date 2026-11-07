@@ -600,9 +600,9 @@ configured, though the two cases consent differently
 Upgrade one server's clients like this:
 
 ```bash
-# 1. Upgrade bd on every client of the server. Reads keep working throughout —
-#    an upgraded client reads the old schema, it just cannot write to it
-#    (unless the server's schema is v53 or older; see below).
+# 1. Upgrade bd on every client of the server. An upgraded client cannot
+#    write to the old schema, and reads it only while that schema has every
+#    table and column its reads select (see below).
 bd version                     # on each client, confirm the new version
 
 # 2. Once, from a workspace already set up against this server: consent.
@@ -612,14 +612,21 @@ bd migrate schema              # add --global for the shared global database
 bd doctor
 ```
 
-Between steps 1 and 2, an upgraded client reads normally and its writes are
-refused with the gate's guidance. Nothing is silently promoted, so there is no
+Between steps 1 and 2, an upgraded client's writes are refused with the gate's
+guidance, and it reads only while the old schema has everything its reads
+select. Nothing is silently promoted, so there is no
 deadline — but the window is a degraded one, so keep it short.
 
-If the server's schema is v53 or older (1.1.x, or 1.2.2, the re-release of
-the 1.1 line), reads can fail too until step 2: `bd list` stops with
-`table not found: leases`
-([#6929](https://github.com/gastownhall/beads/issues/6929)). Run step 2 as
+If the server's schema lacks a table or column the upgraded client's reads
+select, reads are refused too until step 2. A schema at v53 or older (1.1.x,
+or 1.2.2, the re-release of the 1.1 line) has no `leases` table, for example:
+`bd list` then stops when it opens the database, with a schema version
+mismatch error that names `leases` as missing and `bd migrate schema` (step 2)
+as the way to migrate. In proxied-server mode it stops with the gate's
+guidance instead, saying that reads are refused too and that the schema lacks
+`leases`
+([#6929](https://github.com/gastownhall/beads/issues/6929),
+[#6572](https://github.com/gastownhall/beads/issues/6572)). Run step 2 as
 soon as the clients are upgraded.
 
 **If the shared server also has a Dolt remote**, step 2 is not enough. Two
@@ -650,7 +657,9 @@ The same rules apply in **proxied-server mode**, which is a shared server
 reached through a local proxy. Three differences worth knowing:
 
 - read commands print a warning and keep serving the current schema, rather
-  than the read simply not touching it;
+  than the read simply not touching it, but only while that schema has every
+  table and column their reads select; otherwise they are refused with the
+  gate's guidance;
 - `bd serve` refuses to start against a database with pending migrations,
   because a daemon has no operator to consent for it. Reconcile the schema
   first with step 2, then start the daemon — or, for an unattended service,
