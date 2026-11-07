@@ -132,6 +132,11 @@ backup location configured with 'bd backup init'.
 
 The backup is atomic — if the sync fails, the previous backup state is preserved.
 
+In server mode the sync runs in the Dolt server's process, which reads cloud
+credentials (AWS_*, GOOGLE_*, ...) from its own environment, not bd's. Set them
+where the server starts and restart it (for a bd-managed server, 'bd dolt stop'
+then 'bd dolt start' from the shell that has them).
+
 Run 'bd backup init <path>' first to configure a destination.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,

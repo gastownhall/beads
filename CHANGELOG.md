@@ -1258,6 +1258,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd_storage_operation_duration_ms` and `bd_storage_errors_total` gain
   `db_operation`.
 
+- A failed server-mode push, pull, fetch, federation sync or `bd backup sync`
+  to a cloud destination now says why it may have failed: the transfer runs in
+  the Dolt server's process, which reads cloud credentials (`AWS_*`,
+  `GOOGLE_*`/`GCS_*`, `AZURE_STORAGE_*`, `OCI_*`) and `DOLT_REMOTE_PASSWORD`
+  from its own environment, not bd's. That is true whether bd uses SQL or the
+  `dolt` CLI. The error keeps its original text and appends one note naming the
+  variables bd holds that the server reads instead, with the remedy: set them
+  where the server starts and restart it (`bd dolt stop`, then `bd dolt start`,
+  for a bd-managed server). The note carries no URL or values and is added only
+  when it applies. The server-mode troubleshooting docs and `bd backup sync`
+  help no longer claim the CLI route refreshes the server's credentials
+  (#5953, reported by @jonesmabea).
+
 - `bd config set`, `bd config unset`, `bd repo add` and `bd repo remove` now
   replace an existing `config.yaml` in one step (temp file in the same
   directory, fsync, rename) instead of truncating and rewriting it in place.
