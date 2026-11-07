@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -38,9 +39,12 @@ type codexHookInput struct {
 }
 
 type codexHookResponse struct {
-	Continue           bool                    `json:"continue,omitempty"`
-	SystemMessage      string                  `json:"systemMessage,omitempty"`
-	HookSpecificOutput codexHookSpecificOutput `json:"hookSpecificOutput,omitempty"`
+	Continue      bool   `json:"continue,omitempty"`
+	SystemMessage string `json:"systemMessage,omitempty"`
+	// HookSpecificOutput is a pointer so system-message-only responses omit
+	// it: Codex rejects an event-specific object without hookEventName, and
+	// omitempty never drops a value struct.
+	HookSpecificOutput *codexHookSpecificOutput `json:"hookSpecificOutput,omitempty"`
 }
 
 type codexHookSpecificOutput struct {
@@ -98,9 +102,22 @@ func codexHookInjectPrime(ctx context.Context, stdout io.Writer, event string) e
 
 func codexHookPreCompactCheck(ctx context.Context, stdout io.Writer) error {
 	if _, err := codexHookExecPrime(ctx, true); err != nil {
-		return writeCodexHookSystemMessage(stdout, fmt.Sprintf("Beads context check failed before compaction: %v", err))
+		return writeCodexHookSystemMessage(stdout, fmt.Sprintf("Beads context check failed before compaction: %s", codexHookPrimeFailureReason(ctx, err)))
 	}
 	return nil
+}
+
+// codexHookPrimeFailureReason renders a prime failure for a hook warning. An
+// expired context means prime was cut off by the hook deadline (a parent
+// deadline can be shorter than the hook's own 30 seconds, so no exact elapsed
+// time is claimed); anything else is summarized by primeErrorSummary so
+// captured subprocess output cannot flood the same UI path the warning is
+// shown in.
+func codexHookPrimeFailureReason(ctx context.Context, err error) string {
+	if ctxErr := ctx.Err(); errors.Is(ctxErr, context.DeadlineExceeded) {
+		return "bd prime exceeded the hook deadline"
+	}
+	return primeErrorSummary(err)
 }
 
 func codexHookMarkNeedsRefresh(input codexHookInput) error {
@@ -108,15 +125,19 @@ func codexHookMarkNeedsRefresh(input codexHookInput) error {
 }
 
 func codexHookMaybeRefresh(ctx context.Context, input codexHookInput, stdout io.Writer) error {
-	path := codexHookRefreshMarkerPath(input)
-	if _, err := os.Stat(path); err != nil {
+	// Consume the marker before the attempt: a failed or killed prime must
+	// not leave every later prompt retrying it, and a marker a PostCompact
+	// writes while prime runs must survive for the next prompt. A marker that
+	// is absent or cannot be removed starts no refresh.
+	if err := os.Remove(codexHookRefreshMarkerPath(input)); err != nil {
 		return nil
 	}
 	out, err := codexHookExecPrime(ctx, false)
 	if err != nil {
-		return writeCodexHookSystemMessage(stdout, fmt.Sprintf("Beads context refresh after compaction failed: %v", err))
+		// The marker was already consumed, so this one warning is the only
+		// automatic attempt; name the manual recovery and the re-arm event.
+		return writeCodexHookSystemMessage(stdout, fmt.Sprintf("Beads context refresh after compaction failed: %s. Run bd prime to reload context; automatic refresh will retry after the next compaction.", codexHookPrimeFailureReason(ctx, err)))
 	}
-	_ = os.Remove(path)
 	if strings.TrimSpace(out) == "" {
 		return nil
 	}
@@ -134,7 +155,7 @@ func codexHookMarkerBaseDir() string {
 func writeCodexHookAdditionalContext(stdout io.Writer, event, context string) error {
 	return json.NewEncoder(stdout).Encode(codexHookResponse{
 		Continue: true,
-		HookSpecificOutput: codexHookSpecificOutput{
+		HookSpecificOutput: &codexHookSpecificOutput{
 			HookEventName:     event,
 			AdditionalContext: context,
 		},

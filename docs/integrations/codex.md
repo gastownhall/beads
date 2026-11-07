@@ -26,7 +26,9 @@ Codex 0.129.0+ supports `/hooks`, compact lifecycle hooks, and hook-provided dev
 - `SessionStart` (`startup|resume|clear`) injects full `bd prime` output.
 - `PreCompact` (`manual|auto`) checks `bd prime --memories-only` and warns if Beads context is unavailable.
 - `PostCompact` (`manual|auto`) records that the session needs a Beads refresh.
-- `UserPromptSubmit` injects full `bd prime` once after compaction, then clears the refresh marker.
+- `UserPromptSubmit` clears the refresh marker, then injects full `bd prime` once after compaction.
+
+The marker is cleared before the refresh runs, so each compaction gets one refresh attempt. If `bd prime` fails or exceeds the hook deadline, Codex shows one short warning and later prompts run without a refresh. Run `bd prime` to reload context by hand; the next compaction schedules another automatic refresh.
 
 `PreCompact` alone does not inject context because Codex ignores plain stdout from compact hooks. The post-compact marker plus first-prompt refresh is the reliable recovery path.
 
