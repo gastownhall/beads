@@ -102,7 +102,7 @@ func genPlanGraph(name string, seed int64, nIssues, issueDeps, nWisps, wispDeps 
 	}
 
 	type key struct {
-		wisp           bool
+		wisp            bool
 		src, on, onKind string
 	}
 	seen := map[key]bool{}
@@ -582,5 +582,141 @@ func TestMigrationBodyPlanScaledGraphIgnored15(t *testing.T) {
 	requireSameIDs(t, "blocked wisps after ignored 0015", d.blockedIDs("wisps"), wantWisps)
 	if got := d.cursorHash("ignored_schema_migrations", 15); got != ignored15Hash {
 		t.Errorf("ignored_schema_migrations row 15 content_hash = %q, want the frozen file's %q", got, ignored15Hash)
+	}
+}
+
+// snapshotRows renders every row of table, ordered by id, column by column.
+func (d *planTestDB) snapshotRows(table string) []string {
+	d.t.Helper()
+	rows, err := d.conn.QueryContext(d.ctx, "SELECT * FROM "+table+" ORDER BY id")
+	if err != nil {
+		d.t.Fatalf("snapshot %s: %v", table, err)
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		d.t.Fatalf("snapshot %s columns: %v", table, err)
+	}
+	var out []string
+	for rows.Next() {
+		vals := make([]sql.RawBytes, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			d.t.Fatalf("snapshot %s scan: %v", table, err)
+		}
+		var b strings.Builder
+		for i, v := range vals {
+			if v == nil {
+				fmt.Fprintf(&b, "%s=NULL ", cols[i])
+			} else {
+				fmt.Fprintf(&b, "%s=%q ", cols[i], v)
+			}
+		}
+		out = append(out, b.String())
+	}
+	if err := rows.Err(); err != nil {
+		d.t.Fatalf("snapshot %s: %v", table, err)
+	}
+	return out
+}
+
+func (d *planTestDB) standIns() []string {
+	d.t.Helper()
+	rows, err := d.conn.QueryContext(d.ctx,
+		"SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME LIKE '\\_\\_bd\\_0059%' ORDER BY TABLE_NAME")
+	if err != nil {
+		d.t.Fatalf("list stand-ins: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			d.t.Fatalf("scan stand-in: %v", err)
+		}
+		out = append(out, name)
+	}
+	return out
+}
+
+func (d *planTestDB) clearGraph() {
+	d.t.Helper()
+	for _, table := range []string{"wisp_dependencies", "dependencies", "wisps", "issues"} {
+		d.exec("DELETE FROM " + table)
+	}
+}
+
+// TestMigrationBodyPlanMatchesFrozenBody is #6520 AC-3: on small mixed graphs
+// (both target kinds, waits-for with every gate shape, NULL metadata,
+// dangling targets, cross-kind parent-child trees) with scrambled is_blocked
+// and fixed old timestamps, the frozen and planned bodies of main 0059 and
+// ignored/0015 leave identical issues and wisps rows, and the planned 0059
+// leaves no stand-in behind.
+func TestMigrationBodyPlanMatchesFrozenBody(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	t.Cleanup(cancel)
+
+	frozen59, err := schema.MigrationSQL(main59File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen15, err := schema.IgnoredMigrationSQL(ignored15File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned59, err := schema.PlannedMigrationSQL(main59File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned15, err := schema.PlannedIgnoredMigrationSQL(ignored15File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planned59 == frozen59 || planned15 == frozen15 {
+		t.Fatal("no execution plan is registered for main 0059 or ignored/0015; nothing to compare")
+	}
+
+	d := newPlanTestDB(t, ctx)
+	d.migrateToV58I14()
+
+	run := func(g *planGraph, body59, body15 string) (issues, wisps []string) {
+		d.clearGraph()
+		d.load(g)
+		d.exec(body59)
+		d.exec(body15)
+		if left := d.standIns(); len(left) > 0 {
+			t.Fatalf("%s: stand-ins left behind: %v", g.name, left)
+		}
+		return d.snapshotRows("issues"), d.snapshotRows("wisps")
+	}
+
+	const graphs = 40
+	blockedSeen := 0
+	for seed := int64(1); seed <= graphs; seed++ {
+		rng := rand.New(rand.NewSource(seed))
+		nIssues, nWisps := 4+rng.Intn(12), 4+rng.Intn(12)
+		g := genPlanGraph(fmt.Sprintf("diff%02d", seed), seed, nIssues, nIssues+rng.Intn(2*nIssues), nWisps, nWisps+rng.Intn(2*nWisps))
+		wantIssues, wantWisps := blockedModel(g)
+		blockedSeen += len(wantIssues) + len(wantWisps)
+
+		frozenIssues, frozenWisps := run(g, frozen59, frozen15)
+		plannedIssues, plannedWisps := run(g, planned59, planned15)
+		if !slices.Equal(frozenIssues, plannedIssues) {
+			t.Errorf("%s: issues differ between frozen and planned bodies:\nfrozen:  %v\nplanned: %v", g.name, frozenIssues, plannedIssues)
+		}
+		if !slices.Equal(frozenWisps, plannedWisps) {
+			t.Errorf("%s: wisps differ between frozen and planned bodies:\nfrozen:  %v\nplanned: %v", g.name, frozenWisps, plannedWisps)
+		}
+		requireSameIDs(t, g.name+" blocked issues", d.blockedIDs("issues"), wantIssues)
+		requireSameIDs(t, g.name+" blocked wisps", d.blockedIDs("wisps"), wantWisps)
+	}
+	if blockedSeen == 0 {
+		t.Fatalf("no graph blocked anything; the differential compared only no-ops")
 	}
 }
