@@ -33,6 +33,19 @@ func readLineUnbuffered() (string, error) {
 	}
 }
 
+// repoFingerprintStore is the metadata surface the repo-id update needs.
+type repoFingerprintStore interface {
+	GetMetadata(ctx context.Context, key string) (string, error)
+	SetMetadata(ctx context.Context, key, value string) error
+	Close() error
+}
+
+// newRepoFingerprintStore opens the store the fingerprint fix reads and
+// writes repo_id through. Package var as a seam for tests.
+var newRepoFingerprintStore = func(ctx context.Context, beadsDir string) (repoFingerprintStore, error) {
+	return dolt.NewFromConfig(ctx, beadsDir)
+}
+
 // updateRepoIDInProcess updates the repo_id metadata directly in the Dolt store,
 // avoiding subprocess lock contention. (GH#1805)
 func updateRepoIDInProcess(path string, beadsDir string, autoYes bool) error {
@@ -45,7 +58,7 @@ func updateRepoIDInProcess(path string, beadsDir string, autoYes bool) error {
 	}
 
 	// Open database
-	store, err := dolt.NewFromConfig(ctx, beadsDir)
+	store, err := newRepoFingerprintStore(ctx, beadsDir)
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
@@ -68,6 +81,9 @@ func updateRepoIDInProcess(path string, beadsDir string, autoYes bool) error {
 		fmt.Printf("  WARNING: Changing repository ID can break sync if other clones exist.\n\n")
 		fmt.Printf("  Current repo ID: %s\n", oldDisplay)
 		fmt.Printf("  New repo ID:     %s\n\n", newDisplay)
+		// GH#5990: repo_id lives in the versioned metadata table, so this
+		// change is visible to every clone, not just this one.
+		fmt.Printf("  The repository ID is shared: the new value applies to every clone using this database.\n\n")
 		fmt.Printf("  Continue? [y/N] ")
 		response, err := repoFingerprintReadLine()
 		if err != nil {
@@ -85,6 +101,9 @@ func updateRepoIDInProcess(path string, beadsDir string, autoYes bool) error {
 		return fmt.Errorf("failed to update repo_id: %w", err)
 	}
 
+	if autoYes {
+		fmt.Println("  The repository ID is shared: the new value applies to every clone using this database.")
+	}
 	fmt.Printf("  ✓ Repository ID updated (old: %s, new: %s)\n", oldDisplay, newDisplay)
 	return nil
 }

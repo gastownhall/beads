@@ -1,12 +1,15 @@
 package fix
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 )
 
@@ -184,5 +187,140 @@ func TestRepoFingerprint_ReinitializeChoicePreservesFiles(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// fakeRepoFingerprintStore stands in for the Dolt store in the update path.
+type fakeRepoFingerprintStore struct {
+	values map[string]string
+	writes int
+	closed bool
+}
+
+func (f *fakeRepoFingerprintStore) GetMetadata(_ context.Context, key string) (string, error) {
+	return f.values[key], nil
+}
+
+func (f *fakeRepoFingerprintStore) SetMetadata(_ context.Context, key, value string) error {
+	f.values[key] = value
+	f.writes++
+	return nil
+}
+
+func (f *fakeRepoFingerprintStore) Close() error {
+	f.closed = true
+	return nil
+}
+
+// setupAliasFingerprintWorkspace creates a workspace whose origin is
+// git@alias-a:org/repo.git, with git config isolated and an ssh first on
+// PATH whose configuration maps alias-a to HostName github.com.
+func setupAliasFingerprintWorkspace(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake ssh is a shell script")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_SSH", "")
+	t.Setenv("GIT_SSH_COMMAND", "")
+	t.Setenv("GIT_SSH_VARIANT", "")
+
+	sshDir := t.TempDir()
+	script := `#!/bin/sh
+for dest; do :; done
+case "${dest#*@}" in
+alias-a) echo "hostname github.com" ;;
+*) echo "hostname ${dest#*@}" ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(sshDir, "ssh"), []byte(script), 0o700); err != nil { // #nosec G306 -- test executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", sshDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dir := setupTestWorkspace(t)
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"config", "core.hooksPath", t.TempDir()},
+		{"remote", "add", "origin", "git@alias-a:org/repo.git"},
+	} {
+		cmd := gitCommand(args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	return dir
+}
+
+// GH#5990: on a ledger stamped with this checkout's old alias hash, the
+// repair's update writes the newly computed (resolved) id, not the legacy
+// alias hash, exactly once, closes the store, and says the id is shared.
+func TestRepoFingerprint_UpdateWritesResolvedIDForSharedLedger(t *testing.T) {
+	dir := setupAliasFingerprintWorkspace(t)
+	fp, err := beads.ComputeRepoFingerprintForPath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fp.AliasResolved() || fp.LegacyID == "" || fp.ID == fp.LegacyID {
+		t.Fatalf("test precondition: alias-a must resolve to a new id, got %+v", fp)
+	}
+	wantID, err := beads.ComputeRepoIDForPath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wantID != fp.ID {
+		t.Fatalf("ComputeRepoIDForPath = %s, want the resolved id %s", wantID, fp.ID)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		autoYes bool
+		answers []string
+	}{
+		{name: "choice 1 confirmed", answers: []string{"1", "y"}},
+		{name: "--yes", autoYes: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeRepoFingerprintStore{values: map[string]string{"repo_id": fp.LegacyID}}
+			oldNewStore := newRepoFingerprintStore
+			newRepoFingerprintStore = func(context.Context, string) (repoFingerprintStore, error) {
+				return fake, nil
+			}
+			t.Cleanup(func() { newRepoFingerprintStore = oldNewStore })
+
+			answers := tc.answers
+			oldReadLine := repoFingerprintReadLine
+			repoFingerprintReadLine = func() (string, error) {
+				if len(answers) == 0 {
+					t.Fatal("unexpected prompt")
+				}
+				answer := answers[0]
+				answers = answers[1:]
+				return answer, nil
+			}
+			t.Cleanup(func() { repoFingerprintReadLine = oldReadLine })
+
+			var runErr error
+			out := captureRepoFingerprintStdout(t, func() {
+				runErr = RepoFingerprint(dir, tc.autoYes)
+			})
+			if runErr != nil {
+				t.Fatalf("RepoFingerprint returned error: %v\n%s", runErr, out)
+			}
+			if len(answers) != 0 {
+				t.Fatalf("unused answers %v\n%s", answers, out)
+			}
+			if got := fake.values["repo_id"]; got != fp.ID {
+				t.Fatalf("repo_id after update = %s, want the resolved id %s (legacy %s)", got, fp.ID, fp.LegacyID)
+			}
+			if fake.writes != 1 || !fake.closed {
+				t.Fatalf("store writes = %d, closed = %v; want exactly one write and a close", fake.writes, fake.closed)
+			}
+			if !strings.Contains(out, "The repository ID is shared") {
+				t.Fatalf("output must explain the shared-ID consequence:\n%s", out)
+			}
+		})
 	}
 }

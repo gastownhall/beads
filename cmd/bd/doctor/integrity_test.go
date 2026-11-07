@@ -414,3 +414,65 @@ func TestCheckRepoFingerprint_LegacyAliasHashMatches(t *testing.T) {
 		t.Fatalf("stored repo_id changed from %s to %s", fp.LegacyID, got)
 	}
 }
+
+// GH#5990: a shared ledger initialized by one clone's old alias hash. Before
+// the explicit update only that clone verifies (through its LegacyID); after
+// one explicit update writes the newly computed id, every clone reaching the
+// repository through a supported alias, and the canonical HTTPS clone,
+// verifies. Doctor reads never write metadata.
+func TestRepoFingerprint_SharedLedgerConvergesAfterExplicitUpdate(t *testing.T) {
+	useFakeAliasSSH(t)
+
+	cloneA := newFingerprintClone(t, "git@alias-a:org/repo.git")
+	cloneB := newFingerprintClone(t, "git@alias-b:org/repo.git")
+	cloneHTTPS := newFingerprintClone(t, "https://github.com/org/repo.git")
+	fingerprint := func(dir string) beads.RepoFingerprint {
+		fp, err := beads.ComputeRepoFingerprintForPath(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fp
+	}
+	fpA, fpB := fingerprint(cloneA), fingerprint(cloneB)
+	if !fpA.AliasResolved() || !fpB.AliasResolved() {
+		t.Fatalf("aliases not resolved: A=%+v B=%+v", fpA, fpB)
+	}
+	if fpA.LegacyID == fpB.LegacyID {
+		t.Fatal("each alias spelling must have its own legacy hash")
+	}
+
+	// The ledger as bd init stamped it on clone A before the upgrade.
+	store := &fakeRepoMetadataStore{values: map[string]string{"repo_id": fpA.LegacyID}}
+	if check := checkRepoFingerprintWithStore(store, cloneA); check.Status != StatusOK {
+		t.Fatalf("clone A before update: %q %q, want OK through its legacy id", check.Status, check.Message)
+	}
+	if check := checkRepoFingerprintWithStore(store, cloneB); check.Status != StatusError {
+		t.Fatalf("clone B before update: %q %q, want an error until the explicit update", check.Status, check.Message)
+	}
+	if len(store.writes) != 0 {
+		t.Fatalf("doctor reads rewrote metadata keys %v; reads must not write", store.writes)
+	}
+
+	// The explicit update ('bd migrate --update-repo-id', or the doctor
+	// repair's update choice) records what ComputeRepoIDForPath returns.
+	updated, err := beads.ComputeRepoIDForPath(cloneB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated == fpA.LegacyID {
+		t.Fatal("explicit update recorded the old alias hash")
+	}
+	if err := store.SetMetadata(context.Background(), "repo_id", updated); err != nil {
+		t.Fatal(err)
+	}
+	store.writes = nil
+
+	for name, dir := range map[string]string{"A": cloneA, "B": cloneB, "https": cloneHTTPS} {
+		if check := checkRepoFingerprintWithStore(store, dir); check.Status != StatusOK {
+			t.Errorf("clone %s after update: %q %q (%s), want OK", name, check.Status, check.Message, check.Detail)
+		}
+	}
+	if len(store.writes) != 0 {
+		t.Fatalf("doctor reads rewrote metadata keys %v; reads must not write", store.writes)
+	}
+}
