@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -712,42 +713,164 @@ func TestProxiedServerReady2(t *testing.T) {
 		}
 	})
 
-	t.Run("max_rows_claim_policy_and_transaction", func(t *testing.T) {
+	t.Run("max_rows_overage_exits_2", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "rcmr")
 		for i := 0; i < 3; i++ {
-			bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Claim under cap %d", i), "--label", "rcmr-claim")
+			bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Ready under cap %d", i), "--label", "rcmr-cap")
 		}
 
 		out := bdProxiedReadyFail(t, bd, p, "--claim", "--max-rows", "-1")
 		if !strings.Contains(out, "must be non-negative") {
 			t.Errorf("expected --max-rows usage-error rejection, got: %s", out)
 		}
-		out = bdProxiedReadyFail(t, bd, p, "--max-rows", "1")
-		if !strings.Contains(out, "not supported in proxied-server mode") {
-			t.Errorf("expected --max-rows proxied-server rejection for bulk ready, got: %s", out)
+
+		for _, tc := range []struct {
+			name   string
+			env    []string
+			args   []string
+			source string
+		}{
+			{name: "flag text", args: []string{"--max-rows", "1"}, source: "--max-rows"},
+			{name: "flag json", args: []string{"--json", "--max-rows", "1"}, source: "--max-rows"},
+			{name: "env text", env: []string{"BEADS_MAX_ROWS=1"}, source: "BEADS_MAX_ROWS"},
+			{name: "env json", env: []string{"BEADS_MAX_ROWS=1"}, args: []string{"--json"}, source: "BEADS_MAX_ROWS"},
+		} {
+			args := append([]string{"ready", "--label", "rcmr-cap"}, tc.args...)
+			stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, tc.env, args...)
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+				t.Errorf("%s: err = %v, want exit 2\nstdout:\n%s\nstderr:\n%s", tc.name, err, stdout, stderr)
+				continue
+			}
+			if want := fmt.Sprintf("%s=1 exceeded", tc.source); !strings.Contains(stderr, want) {
+				t.Errorf("%s: stderr = %q, want it to name %q", tc.name, stderr, want)
+			}
+			if strings.Contains(stderr, "not supported in proxied-server mode") {
+				t.Errorf("%s: the cap was refused instead of enforced: %q", tc.name, stderr)
+			}
+			if stdout != "" {
+				t.Errorf("%s: stdout = %q, want nothing on a cap overage", tc.name, stdout)
+			}
 		}
-		stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir,
-			[]string{"BEADS_MAX_ROWS=1"}, "ready")
-		if err == nil {
-			t.Fatalf("expected BEADS_MAX_ROWS under proxied bulk ready to fail, but it succeeded:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
-		}
-		if out := stdout + stderr; !strings.Contains(out, "not supported in proxied-server mode") {
-			t.Errorf("expected BEADS_MAX_ROWS proxied-server rejection for bulk ready, got: %s", out)
+	})
+
+	t.Run("max_rows_at_or_above_the_result_matches_uncapped", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rcmu")
+		for i := 0; i < 3; i++ {
+			bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Ready within cap %d", i), "--label", "rcmu-cap")
 		}
 
-		before := bdProxiedReadyJSON(t, bd, p, "--label", "rcmr-claim")
-		stdout, stderr, err = bdProxiedRunBuffersWithEnv(t, bd, p.dir,
-			[]string{"BEADS_MAX_ROWS=1"}, "ready", "--claim", "--json", "--label", "rcmr-claim")
-		if err == nil {
-			t.Fatalf("bd ready --claim --json under BEADS_MAX_ROWS=1 should refuse")
+		run := func(env []string, args ...string) string {
+			t.Helper()
+			full := append([]string{"ready", "--label", "rcmu-cap"}, args...)
+			stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, append([]string{"BD_JSON_ENVELOPE=1"}, env...), full...)
+			if err != nil {
+				t.Fatalf("bd %s (env %v) failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(full, " "), env, err, stdout, stderr)
+			}
+			return "stdout:\n" + stdout + "stderr:\n" + stderr
 		}
-		if out := stdout + stderr; !strings.Contains(out, "not supported in proxied-server mode") {
-			t.Fatalf("expected cap refusal, got:\n%s", out)
+
+		for _, tc := range []struct {
+			name     string
+			uncapped []string
+			capped   []string
+			env      []string
+		}{
+			{name: "flag cap equals the result", uncapped: nil, capped: []string{"--max-rows", "3"}},
+			{name: "env cap equals the result", uncapped: nil, env: []string{"BEADS_MAX_ROWS=3"}},
+			{name: "cap equals a truncating limit", uncapped: []string{"--limit", "2"}, capped: []string{"--limit", "2", "--max-rows", "2"}},
+			{name: "env cap equals a truncating limit", uncapped: []string{"--limit", "2"}, capped: []string{"--limit", "2"}, env: []string{"BEADS_MAX_ROWS=2"}},
+			{name: "flag cap above the result", uncapped: nil, capped: []string{"--max-rows", "5"}},
+			{name: "flag cap above a one-row page", uncapped: []string{"--limit", "1"}, capped: []string{"--limit", "1", "--max-rows", "2"}},
+			{name: "env cap above a one-row page", uncapped: []string{"--limit", "1"}, capped: []string{"--limit", "1"}, env: []string{"BEADS_MAX_ROWS=2"}},
+		} {
+			for _, format := range [][]string{nil, {"--json"}} {
+				want := run(nil, append(append([]string{}, tc.uncapped...), format...)...)
+				got := run(tc.env, append(append([]string{}, tc.capped...), format...)...)
+				if got != want {
+					t.Errorf("%s %v: capped output differs from uncapped\ncapped:\n%s\nuncapped:\n%s", tc.name, format, got, want)
+				}
+			}
 		}
-		after := bdProxiedReadyJSON(t, bd, p, "--label", "rcmr-claim")
-		if len(after) != len(before) {
-			t.Fatalf("claim refusal mutated ready set: before=%d after=%d", len(before), len(after))
+
+		// The one page a cap may refuse is the one that reaches past its own
+		// skipped rows: --offset 2 --limit 1 touches three rows, two skipped
+		// plus the page, and pays a cap of 2 on what it touched. The same page
+		// without the offset fits the cap (above), and the same offset with no
+		// cap keeps paging: one row, the third.
+		for _, tc := range []struct {
+			name   string
+			env    []string
+			args   []string
+			source string
+		}{
+			{name: "flag text", args: []string{"--max-rows", "2"}, source: "--max-rows"},
+			{name: "flag json", args: []string{"--json", "--max-rows", "2"}, source: "--max-rows"},
+			{name: "env text", env: []string{"BEADS_MAX_ROWS=2"}, source: "BEADS_MAX_ROWS"},
+			{name: "env json", env: []string{"BEADS_MAX_ROWS=2"}, args: []string{"--json"}, source: "BEADS_MAX_ROWS"},
+		} {
+			args := append([]string{"ready", "--label", "rcmu-cap", "--offset", "2", "--limit", "1"}, tc.args...)
+			stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, tc.env, args...)
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+				t.Errorf("offset %s: err = %v, want exit 2\nstdout:\n%s\nstderr:\n%s", tc.name, err, stdout, stderr)
+				continue
+			}
+			if want := fmt.Sprintf("%s=2 exceeded", tc.source); !strings.Contains(stderr, want) {
+				t.Errorf("offset %s: stderr = %q, want it to name %q", tc.name, stderr, want)
+			}
+			if stdout != "" {
+				t.Errorf("offset %s: stdout = %q, want nothing on a cap overage", tc.name, stdout)
+			}
+		}
+		all := bdProxiedReadyJSON(t, bd, p, "--label", "rcmu-cap")
+		page := bdProxiedReadyJSON(t, bd, p, "--label", "rcmu-cap", "--offset", "2", "--limit", "1")
+		if len(all) != 3 || len(page) != 1 || page[0].ID != all[2].ID {
+			t.Errorf("uncapped --offset 2 --limit 1 = %+v, want the third of %+v", page, all)
+		}
+		if text := run(nil, "--offset", "2", "--limit", "1"); !strings.Contains(text, all[2].ID) || strings.Contains(text, all[0].ID) || strings.Contains(text, all[1].ID) {
+			t.Errorf("uncapped text --offset 2 --limit 1 should show only %s:\n%s", all[2].ID, text)
+		}
+	})
+
+	t.Run("max_rows_below_the_ready_set_claims_one", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct {
+			name   string
+			prefix string
+			env    []string
+			args   []string
+		}{
+			{name: "flag", prefix: "rcmcf", args: []string{"--max-rows", "1"}},
+			{name: "env", prefix: "rcmce", env: []string{"BEADS_MAX_ROWS=1"}},
+		} {
+			p := newSharedProxiedProject(t, bd, tc.prefix)
+			label := tc.prefix + "-claim"
+			for i := 0; i < 3; i++ {
+				bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Claim under cap %d", i), "--label", label)
+			}
+
+			before := bdProxiedReadyJSON(t, bd, p, "--label", label)
+			if len(before) != 3 {
+				t.Fatalf("%s: %d issues ready before the claim, want 3", tc.name, len(before))
+			}
+			args := append([]string{"ready", "--claim", "--json", "--label", label}, tc.args...)
+			stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, tc.env, args...)
+			if err != nil {
+				t.Fatalf("%s: bd ready --claim under a cap of 1 failed: %v\nstdout:\n%s\nstderr:\n%s", tc.name, err, stdout, stderr)
+			}
+			var claimed []types.IssueWithCounts
+			if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &claimed); err != nil {
+				t.Fatalf("%s: parse claim JSON: %v\n%s", tc.name, err, stdout)
+			}
+			if len(claimed) != 1 || claimed[0].Status != types.StatusInProgress {
+				t.Fatalf("%s: claimed = %+v, want exactly one in_progress issue", tc.name, claimed)
+			}
+			if left := bdProxiedReadyJSON(t, bd, p, "--label", label); len(left) != len(before)-1 {
+				t.Fatalf("%s: %d issues still ready after one claim, want %d", tc.name, len(left), len(before)-1)
+			}
 		}
 	})
 }

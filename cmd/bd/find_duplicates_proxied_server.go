@@ -15,6 +15,9 @@ func runFindDuplicatesProxiedServer(ctx context.Context, filter types.IssueFilte
 
 	page, err := uw.IssueUseCase().SearchIssues(ctx, "", filter)
 	if err != nil {
+		if capErr := handleMaxRowsError(err); capErr != nil {
+			return capErr
+		}
 		return HandleErrorRespectJSON("fetching issues: %v", err)
 	}
 	issues := filterClosedIfNoStatus(page.Items, status)

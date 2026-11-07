@@ -4,6 +4,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -137,6 +140,132 @@ func TestProxiedServerGraph(t *testing.T) {
 		}
 		if !strings.Contains(string(out), epic.ID) {
 			t.Errorf("expected epic ID in JSON output: %s", out)
+		}
+	})
+
+	// capRun runs bd under the given extra env and reports its exit code.
+	capRun := func(t *testing.T, dir string, env []string, args ...string) (string, string, int) {
+		t.Helper()
+		stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, dir, env, args...)
+		var exitErr *exec.ExitError
+		switch {
+		case err == nil:
+			return stdout, stderr, 0
+		case errors.As(err, &exitErr):
+			return stdout, stderr, exitErr.ExitCode()
+		default:
+			t.Fatalf("bd %s: %v", strings.Join(args, " "), err)
+			return "", "", -1
+		}
+	}
+	capSources := []struct {
+		name   string
+		source string
+		args   func(n int) ([]string, []string)
+	}{
+		{name: "flag", source: "--max-rows", args: func(n int) ([]string, []string) {
+			return nil, []string{"--max-rows", fmt.Sprint(n)}
+		}},
+		{name: "env", source: "BEADS_MAX_ROWS", args: func(n int) ([]string, []string) {
+			return []string{fmt.Sprintf("BEADS_MAX_ROWS=%d", n)}, nil
+		}},
+	}
+
+	t.Run("max_rows_caps_the_connected_component", func(t *testing.T) {
+		cp := newSharedProxiedProject(t, bd, "grpcap")
+		a := bdProxiedCreate(t, bd, cp.dir, "Component A", "--type", "task")
+		b := bdProxiedCreate(t, bd, cp.dir, "Component B", "--type", "task")
+		c := bdProxiedCreate(t, bd, cp.dir, "Component C", "--type", "task")
+		for _, pair := range [][2]string{{b.ID, a.ID}, {c.ID, b.ID}} {
+			if out, err := bdProxiedRun(t, bd, cp.dir, "dep", "add", pair[0], pair[1]); err != nil {
+				t.Fatalf("dep add: %v\n%s", err, out)
+			}
+		}
+		for _, format := range [][]string{nil, {"--json"}} {
+			base := append([]string{"graph", a.ID}, format...)
+			wantOut, wantErr, code := capRun(t, cp.dir, nil, base...)
+			if code != 0 {
+				t.Fatalf("uncapped graph %s %v exited %d: %s", a.ID, format, code, wantErr)
+			}
+
+			for _, src := range capSources {
+				env, flags := src.args(2)
+				stdout, stderr, code := capRun(t, cp.dir, env, append(append([]string{}, base...), flags...)...)
+				if code != 2 {
+					t.Errorf("%s %v cap 2: exit = %d, want 2\nstdout:\n%s\nstderr:\n%s", src.name, format, code, stdout, stderr)
+				}
+				if want := "3 found, " + src.source + "=2 exceeded"; !strings.Contains(stderr, want) {
+					t.Errorf("%s %v cap 2: stderr = %q, want %q", src.name, format, stderr, want)
+				}
+				if stdout != "" {
+					t.Errorf("%s %v cap 2: stdout = %q, want nothing on a cap overage", src.name, format, stdout)
+				}
+
+				env, flags = src.args(3)
+				stdout, stderr, code = capRun(t, cp.dir, env, append(append([]string{}, base...), flags...)...)
+				if code != 0 || stdout != wantOut || stderr != wantErr {
+					t.Errorf("%s %v cap 3: exit %d, output differs from uncapped\ncapped:\n%s%s\nuncapped:\n%s%s",
+						src.name, format, code, stdout, stderr, wantOut, wantErr)
+				}
+			}
+		}
+	})
+
+	t.Run("max_rows_caps_each_status_of_all", func(t *testing.T) {
+		cp := newSharedProxiedProject(t, bd, "grpall")
+		want := map[string]bool{}
+		for _, status := range []string{"open", "in_progress", "blocked"} {
+			for i := 0; i < 2; i++ {
+				iss := bdProxiedCreate(t, bd, cp.dir, fmt.Sprintf("All %s %d", status, i), "--type", "task")
+				if status != "open" {
+					if out, err := bdProxiedRun(t, bd, cp.dir, "update", iss.ID, "--status", status); err != nil {
+						t.Fatalf("update %s --status %s: %v\n%s", iss.ID, status, err, out)
+					}
+				}
+				want[iss.ID] = true
+			}
+		}
+
+		for _, src := range capSources {
+			env, flags := src.args(2)
+			stdout, stderr, code := capRun(t, cp.dir, env, append([]string{"graph", "--all", "--json"}, flags...)...)
+			if code != 0 {
+				t.Fatalf("%s cap 2: exit = %d, want 0\nstderr:\n%s", src.name, code, stderr)
+			}
+			var subgraphs []struct {
+				Issues []struct {
+					ID string `json:"id"`
+				} `json:"Issues"`
+			}
+			if err := json.Unmarshal([]byte(stdout), &subgraphs); err != nil {
+				t.Fatalf("%s cap 2: unmarshal: %v\n%s", src.name, err, stdout)
+			}
+			got := map[string]bool{}
+			for _, sg := range subgraphs {
+				for _, iss := range sg.Issues {
+					got[iss.ID] = true
+				}
+			}
+			if len(got) != len(want) {
+				t.Errorf("%s cap 2: graph --all holds %v, want all six of %v", src.name, got, want)
+			}
+			for id := range want {
+				if !got[id] {
+					t.Errorf("%s cap 2: graph --all is missing %s", src.name, id)
+				}
+			}
+
+			env, flags = src.args(1)
+			stdout, stderr, code = capRun(t, cp.dir, env, append([]string{"graph", "--all"}, flags...)...)
+			if code != 2 {
+				t.Errorf("%s cap 1: exit = %d, want 2\nstdout:\n%s\nstderr:\n%s", src.name, code, stdout, stderr)
+			}
+			if want := src.source + "=1 exceeded"; !strings.Contains(stderr, want) {
+				t.Errorf("%s cap 1: stderr = %q, want %q", src.name, stderr, want)
+			}
+			if stdout != "" {
+				t.Errorf("%s cap 1: stdout = %q, want nothing on a cap overage", src.name, stdout)
+			}
 		}
 	})
 

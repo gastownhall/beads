@@ -1,7 +1,10 @@
 package main
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -259,5 +262,49 @@ func TestIssueText(t *testing.T) {
 	text2 := issueText(issue2)
 	if text2 != "Just title" {
 		t.Errorf("issueText() = %q, want %q", text2, "Just title")
+	}
+}
+
+// TestFindDuplicatesReachesProxiedRouteUnderPositiveMaxRows pins that a
+// positive cap from either source no longer stops `bd find-duplicates` before
+// its proxied route. The assertion is two-sided: no refusal, AND the run
+// reached the proxied route, which with a nil uowProvider fails opening its
+// unit of work rather than dialing a server.
+func TestFindDuplicatesReachesProxiedRouteUnderPositiveMaxRows(t *testing.T) {
+	pinProxiedServerMode(t)
+	pinJSONOutput(t, false)
+
+	if uowProvider != nil {
+		t.Fatal("precondition: uowProvider must be nil so the route cannot open a real proxied connection")
+	}
+
+	for _, source := range []string{"flag", "env"} {
+		t.Run(source, func(t *testing.T) {
+			cmd := &cobra.Command{Use: "find-duplicates"}
+			cmd.Flags().String("method", "mechanical", "")
+			cmd.Flags().Float64("threshold", 0.5, "")
+			cmd.Flags().String("status", "", "")
+			cmd.Flags().Int("limit", 50, "")
+			cmd.Flags().String("model", "unused", "")
+			addRoutedMaxRowsFlag(cmd)
+			if source == "flag" {
+				t.Setenv(maxRowsEnvVar, "")
+				if err := cmd.Flags().Set(maxRowsFlagName, "5"); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				t.Setenv(maxRowsEnvVar, "5")
+			}
+
+			var err error
+			stderr := captureStderr(t, func() { err = runFindDuplicates(cmd, nil) })
+
+			if strings.Contains(stderr, "not supported in proxied-server mode") {
+				t.Fatalf("proxied `bd find-duplicates` refused a cap the proxied route enforces: %q", stderr)
+			}
+			if !strings.Contains(stderr, "proxied-server UOW provider not initialized") {
+				t.Fatalf("proxied `bd find-duplicates` did not reach the proxied route: err=%v stderr=%q", err, stderr)
+			}
+		})
 	}
 }

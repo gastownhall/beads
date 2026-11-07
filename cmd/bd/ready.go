@@ -63,22 +63,6 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		}
 
 		if usesProxiedServer() {
-			// The proxied ready role cannot enforce a row cap, including on
-			// --claim. Refuse any positive cap rather than silently dropping
-			// this safety limit; malformed values remain usage errors. The
-			// pre-provider front door refuses the same cap first, so this is
-			// its backstop — both raise proxy.max_rows.unsupported.
-			//
-			// --gated is skipped here as well as at the front door, and it has
-			// to be skipped in both places: this backstop calls
-			// AssertProxyCapability with an empty command, so it always
-			// resolves the mode-wide refusal and cannot honor the
-			// command-specific allow the front door's path-keyed assert reads.
-			// Exempting only the front door would move the split from one
-			// refusal site to the other, not close it.
-			if err := rejectReadyMaxRowsUnderProxiedServer(cmd); err != nil {
-				return err
-			}
 			return runReadyProxiedServer(cmd, rootCtx)
 		}
 
@@ -118,9 +102,8 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			return runReadyExplain(cmd)
 		}
 
-		// The row cap is meaningful on this route alone - the proxied one
-		// rejects a live cap outright - so this is the only caller that hands
-		// the gatherer a resolver for it.
+		// The special arms above return before the cap is resolved, as they
+		// always have; the listing and the claim below resolve it once here.
 		in, err := gatherReadyInput(cmd, resolveMaxRows)
 		if err != nil {
 			return err
@@ -288,8 +271,8 @@ This is useful for agents executing molecules to see which steps can run next.`,
 
 // readyGatedArm reports whether this `bd ready` invocation dispatches to the
 // gate-resume arm — the same scan `bd mol ready --gated` runs, and the reason
-// the row cap does not apply to it. Both proxied refusal sites call this, so
-// the exemption cannot land on one and miss the other.
+// the row cap does not apply to it. The proxied route calls this to skip
+// resolving the cap for the arm, as the direct route skips it.
 //
 // The arm lists molecules whose gate closed, never ready rows: on the direct
 // route --gated reaches runMolReadyGatedCore above any cap resolution, and on
@@ -300,8 +283,8 @@ This is useful for agents executing molecules to see which steps can run next.`,
 // line across its two spellings.
 //
 // --claim is excluded deliberately. `--claim --gated` is a usage error
-// (gatherReadyInput), not a gated run, so the claim arm keeps the refusal it is
-// owed on every code path and this exemption cannot reopen it.
+// (gatherReadyInput), not a gated run, so it resolves the cap like any other
+// claim before the gatherer reports the conflict.
 func readyGatedArm(cmd *cobra.Command) bool {
 	if cmd == nil {
 		return false
@@ -311,23 +294,6 @@ func readyGatedArm(cmd *cobra.Command) bool {
 	}
 	claim, _ := cmd.Flags().GetBool("claim")
 	return !claim
-}
-
-// rejectReadyMaxRowsUnderProxiedServer is `bd ready`'s in-RunE backstop for the
-// row cap the proxied ready role cannot enforce. It exists as a named function
-// rather than an inline `if` so the exemption is reachable from a unit test:
-// the front door's half runs against the real command tree in
-// TestProxyCapabilityFrontDoorAllowsSupportedCommands, but this half sits
-// behind usesProxiedServer() and would otherwise be pinned only by the
-// env-gated proxied e2e lane.
-//
-// Call it in place of rejectMaxRowsUnderProxiedServer on this command; every
-// other capped command wants the unconditional form.
-func rejectReadyMaxRowsUnderProxiedServer(cmd *cobra.Command) error {
-	if readyGatedArm(cmd) {
-		return nil
-	}
-	return rejectMaxRowsUnderProxiedServer(cmd)
 }
 
 // blockedRequestFromFlags builds the blocked listing's request from
@@ -872,7 +838,7 @@ func init() {
 	readyCmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
 	readyCmd.Flags().String("has-metadata-key", "", "Filter issues that have this metadata key set")
 	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.
-	addMaxRowsFlag(readyCmd)
+	addRoutedMaxRowsFlag(readyCmd)
 	rootCmd.AddCommand(readyCmd)
 	blockedCmd.Flags().String("parent", "", "Filter to descendants of this bead/epic")
 	blockedCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")

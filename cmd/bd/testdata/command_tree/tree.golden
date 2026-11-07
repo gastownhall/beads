@@ -2673,7 +2673,7 @@ bd find-duplicates
     |   bd find-duplicates --limit 20            # Show top 20 pairs
     |   bd find-duplicates --json                # JSON output
   flag --limit -n type=int default="50" usage="Maximum number of pairs to show"
-  flag --max-rows type=int default="0" usage="Hard upper bound on rows fetched from storage. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries. Not supported under --proxied-server: an explicit --max-rows or BEADS_MAX_ROWS cap errors out rather than silently going unenforced."
+  flag --max-rows type=int default="0" usage="Hard upper bound on rows returned. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries. Honored on both the direct and the --proxied-server route."
   flag --method type=string default="mechanical" usage="Detection method: mechanical, ai"
   flag --model type=string default="" usage="AI model to use (only with --method ai; default from config ai.model)"
   flag --status -s type=string default="" usage="Filter by status (default: non-closed)"
@@ -3304,7 +3304,7 @@ bd graph
   flag --compact type=bool default="false" usage="Tree format, one line per issue, more scannable"
   flag --dot type=bool default="false" usage="Output Graphviz DOT format (pipe to: dot -Tsvg > graph.svg)"
   flag --html type=bool default="false" usage="Output self-contained interactive HTML (redirect to file)"
-  flag --max-rows type=int default="0" usage="Hard upper bound on rows fetched from storage. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries. Not supported under --proxied-server: an explicit --max-rows or BEADS_MAX_ROWS cap errors out rather than silently going unenforced."
+  flag --max-rows type=int default="0" usage="Hard upper bound on rows returned. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries. Honored on both the direct and the --proxied-server route."
   flag --open type=bool default="false" usage="Show only open issues (filters out closed/deferred), forces compact layer format"
 
 bd graph check
@@ -6044,7 +6044,7 @@ bd ready
   flag --label-pattern type=string default="" usage="Filter by label glob pattern (e.g., 'tech-*' matches tech-debt, tech-legacy)"
   flag --label-regex type=string default="" usage="Filter by label regex pattern (e.g., 'tech-(debt|legacy)')"
   flag --limit -n type=int default="100" usage="Maximum issues to show (use 0 for unlimited)"
-  flag --max-rows type=int default="0" usage="Hard upper bound on rows fetched from storage. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries. Not supported under --proxied-server: an explicit --max-rows or BEADS_MAX_ROWS cap errors out rather than silently going unenforced."
+  flag --max-rows type=int default="0" usage="Hard upper bound on rows returned. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries. Honored on both the direct and the --proxied-server route."
   flag --metadata-field type=stringArray default="[]" usage="Filter by metadata field (key=value, repeatable)"
   flag --mol type=string default="" usage="Filter to steps within a specific molecule"
   flag --mol-type type=string default="" usage="Filter by molecule type: swarm, patrol, or work"
