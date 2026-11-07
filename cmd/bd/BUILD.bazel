@@ -896,6 +896,8 @@ go_test(
         "hooks_husky_test.go",
         "hooks_marker_skip_test.go",
         "hooks_post_merge_import_test.go",
+        "hooks_symlinked_dir_test.go",
+        "hooks_symlinked_hooks_dir_repro_test.go",
         "hooks_timeout_process_test.go",
         "hooks_worktree_test.go",
         "human_embedded_test.go",
