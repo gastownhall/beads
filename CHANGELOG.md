@@ -1208,6 +1208,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd doctor`'s "bd prime Command/Output" and "Prime Documentation" checks now
+  run the bd binary that is running doctor, in the workspace being diagnosed
+  (GH#8130). They ran whichever `bd` came first on PATH, in the caller's
+  working directory, so `bd doctor <path>` checked the wrong workspace, a
+  missing PATH `bd` was reported as a broken `bd prime`, and a different
+  installed bd version could open, and migrate, the database being diagnosed.
+  The child now runs as `bd -C <path> prime --no-memories`: it uses the
+  workspace bd resolves from `<path>`, a linked git worktree included, and
+  opens no database, so it cannot migrate one past `--readonly` or a migration
+  freeze. A failed check shows the end of the child's output and the exact
+  command to rerun. Whether `bd` is on PATH is still reported by
+  "CLI Availability".
+
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In
