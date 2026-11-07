@@ -163,9 +163,22 @@ first `bd create` or `bd import` fails with `table not found: events`. A
 smoke test of reads or `bd kv set` does not show that recovery is complete;
 step 6 does.
 
-If you push/pull issue data with teammates, note that the migrated cursor
-replicates: either recover every clone, or recover one and push, then have
-the others pull.
+### Machines that share the database
+
+The migrated cursor and the removal of `events` both replicate, so the
+order matters when you push and pull issue data with teammates or other
+machines:
+
+1. Recover the machine that holds the audit rows written since the upgrade
+   (steps 2 to 7), then `bd dolt push`.
+2. Every other machine that ran v1.2.1 itself recovers on its own, steps 2
+   to 7, **before** it pulls; then `bd dolt pull` and `bd dolt push`. A
+   machine that pulls first fails the pull, because the pull would overwrite
+   its local `events` table or because its schema is ahead.
+3. Machines that never ran v1.2.1 just `bd dolt pull`.
+
+A machine that got the migration only by pulling it has no local `events`
+table; follow [If `events` is missing or empty](#if-events-is-missing-or-empty).
 
 ## Stopgap: keep working before you recover
 

@@ -191,6 +191,14 @@ func oldLineCommit(ctx context.Context, conn *sql.Conn) error {
 	return err
 }
 
+// oldLinePull is the 1.1 line's bd dolt pull: commit pending, then pull.
+func oldLinePull(ctx context.Context, conn *sql.Conn) error {
+	if err := oldLineCommit(ctx, conn); err != nil {
+		return fmt.Errorf("commit pending before pull: %w", err)
+	}
+	return schema.DrainCall(ctx, conn, "CALL DOLT_PULL('origin', 'main')")
+}
+
 func mustOK(t *testing.T, what string, err error) {
 	t.Helper()
 	if err != nil {
@@ -295,6 +303,22 @@ func eventsIgnoreRuleAtHead(t *testing.T, ctx context.Context, conn *sql.Conn) b
 	return scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM dolt_ignore AS OF 'HEAD' WHERE pattern = 'events'") > 0
 }
 
+// requireCleanMerge asserts a pull left no row or schema conflicts, no open
+// merge and nothing pending.
+func requireCleanMerge(t *testing.T, ctx context.Context, conn *sql.Conn) {
+	t.Helper()
+	if n := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM dolt_conflicts"); n != 0 {
+		t.Fatalf("%d tables in conflict after the pull", n)
+	}
+	if n := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM dolt_schema_conflicts"); n != 0 {
+		t.Fatalf("%d tables in schema conflict after the pull", n)
+	}
+	if n := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM dolt_merge_status WHERE is_merging"); n != 0 {
+		t.Fatal("the pull left a merge open")
+	}
+	requireNothingPending(t, ctx, conn)
+}
+
 // requireWritableLikeOldLine performs an issue-plus-event write and the 1.1
 // line's commit, and asserts the write landed in HEAD with nothing left
 // pending.
@@ -383,5 +407,69 @@ func TestEmbeddedAccidentalReleaseRecoveredCloneWrites(t *testing.T) {
 	withRawConn(t, clone, preflipDatabase, func(conn *sql.Conn) {
 		requireWritableLikeOldLine(t, ctx, conn, "clone-1", "clone-create")
 		requireEventTags(t, ctx, conn, "HEAD", "clone-create", "post-keep", "pre-keep")
+	})
+}
+
+// TestEmbeddedAccidentalReleaseRecoveryDivergentPeers is AC-3: peers that
+// diverged before the flip, two of which ran v1.2.1, follow the guide's
+// synchronization order. Both merges complete cleanly and hold the surviving
+// common events plus each peer's own, without the deleted issue's.
+func TestEmbeddedAccidentalReleaseRecoveryDivergentPeers(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	guide := readAccidentalReleaseGuide(t)
+
+	first := seedMainSchemaAt(t, ctx, 53)
+	withRawConn(t, first, preflipDatabase, func(conn *sql.Conn) {
+		mustOK(t, "create common-keep", oldLineCreate(ctx, conn, "common-keep", "common-keep"))
+		mustOK(t, "create common-gone", oldLineCreate(ctx, conn, "common-gone", "common-gone"))
+		mustOK(t, "commit common work", oldLineCommit(ctx, conn))
+	})
+	remoteURL := publishToNewRemote(t, ctx, first)
+	_, second := cloneLineage(t, ctx, remoteURL)
+	_, neverMigrated := cloneLineage(t, ctx, remoteURL)
+
+	// Divergent 1.1-line work, then v1.2.1 on two of the peers.
+	withRawConn(t, second, preflipDatabase, func(conn *sql.Conn) {
+		mustOK(t, "create second-1", oldLineCreate(ctx, conn, "second-1", "second-pre"))
+		mustOK(t, "commit", oldLineCommit(ctx, conn))
+		migrateLikeV121(t, ctx, conn)
+		mustOK(t, "post-upgrade event", oldLineEvent(ctx, conn, "second-1", "second-post"))
+		mustOK(t, "commit", oldLineCommit(ctx, conn))
+	})
+	withRawConn(t, neverMigrated, preflipDatabase, func(conn *sql.Conn) {
+		mustOK(t, "create never-1", oldLineCreate(ctx, conn, "never-1", "never-pre"))
+		mustOK(t, "commit", oldLineCommit(ctx, conn))
+	})
+	withRawConn(t, first, preflipDatabase, func(conn *sql.Conn) {
+		migrateLikeV121(t, ctx, conn)
+		mustOK(t, "post-upgrade event", oldLineEvent(ctx, conn, "common-keep", "first-post"))
+		mustExecOn(t, ctx, conn, "DELETE FROM issues WHERE id = 'common-gone'")
+		mustOK(t, "commit", oldLineCommit(ctx, conn))
+	})
+
+	// The machine holding post-upgrade rows recovers and pushes first.
+	mustOK(t, "first: the guide's required steps", runGuideSection(t, first, guide, guideRequiredSection))
+	withRawConn(t, first, preflipDatabase, func(conn *sql.Conn) {
+		mustExecOn(t, ctx, conn, "CALL DOLT_PUSH('origin', 'main')")
+	})
+
+	// Another migrated machine recovers on its own before it pulls.
+	mustOK(t, "second: the guide's required steps", runGuideSection(t, second, guide, guideRequiredSection))
+	withRawConn(t, second, preflipDatabase, func(conn *sql.Conn) {
+		mustOK(t, "second: pull", oldLinePull(ctx, conn))
+		requireCleanMerge(t, ctx, conn)
+		requireEventTags(t, ctx, conn, "HEAD", "common-keep", "first-post", "second-post", "second-pre")
+		mustExecOn(t, ctx, conn, "CALL DOLT_PUSH('origin', 'main')")
+	})
+
+	// A machine that never ran v1.2.1 just pulls.
+	withRawConn(t, neverMigrated, preflipDatabase, func(conn *sql.Conn) {
+		mustOK(t, "never-migrated: pull", oldLinePull(ctx, conn))
+		requireCleanMerge(t, ctx, conn)
+		requireEventTags(t, ctx, conn, "HEAD", "common-keep", "first-post", "never-pre", "second-post", "second-pre")
+		if v := currentMainVersion(t, ctx, conn); v != 53 {
+			t.Fatalf("schema cursor = %d after the pull, want 53", v)
+		}
 	})
 }
