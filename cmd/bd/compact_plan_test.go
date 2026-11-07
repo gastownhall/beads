@@ -37,6 +37,10 @@ func TestPlanCompactionReplaysInCommitOrder(t *testing.T) {
 	if plan.initialHash != "old1" {
 		t.Errorf("initialHash = %q, want old1", plan.initialHash)
 	}
+	// The head is the highest-order commit, though parent is dated after it.
+	if plan.headHash != "child" {
+		t.Errorf("headHash = %q, want child", plan.headHash)
+	}
 }
 
 func TestPlanCompactionNoRecent(t *testing.T) {
@@ -45,7 +49,7 @@ func TestPlanCompactionNoRecent(t *testing.T) {
 		{Hash: "b", Date: now.Add(-time.Hour), CommitOrder: 2},
 		{Hash: "a", Date: now.Add(-2 * time.Hour), CommitOrder: 1},
 	}, now)
-	if len(plan.recentHashes) != 0 || plan.oldCommits != 2 || plan.boundaryHash != "b" || plan.initialHash != "a" {
+	if len(plan.recentHashes) != 0 || plan.oldCommits != 2 || plan.boundaryHash != "b" || plan.initialHash != "a" || plan.headHash != "b" {
 		t.Errorf("unexpected plan: %+v", plan)
 	}
 }
@@ -200,5 +204,45 @@ func TestPlanCompactionSelectsBoundaryAndRootByCommitOrder(t *testing.T) {
 	}
 	if plan.refusal != nil {
 		t.Errorf("unexpected refusal: %s", plan.refusal.message())
+	}
+}
+
+// TestPlanCompactionHeadIsHighestCommitOrder: Compact verifies its replay
+// against the plan's head, the HEAD the log was read from. That is the
+// highest-order commit, not the newest-dated one; a clock that jumped back
+// can date HEAD before its ancestors, in either window.
+func TestPlanCompactionHeadIsHighestCommitOrder(t *testing.T) {
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		entries []storage.CommitInfo
+		want    string
+	}{
+		{
+			name: "recent head dated before a recent ancestor",
+			entries: []storage.CommitInfo{
+				{Hash: "r1", Date: now.Add(2 * time.Hour), CommitOrder: 3},
+				{Hash: "head", Date: now.Add(time.Hour), CommitOrder: 4},
+				{Hash: "o2", Date: now.Add(-time.Hour), CommitOrder: 2},
+				{Hash: "o1", Date: now.Add(-2 * time.Hour), CommitOrder: 1},
+			},
+			want: "head",
+		},
+		{
+			name: "old head dated before an old ancestor",
+			entries: []storage.CommitInfo{
+				{Hash: "o2", Date: now.Add(-time.Hour), CommitOrder: 2},
+				{Hash: "head", Date: now.Add(-2 * time.Hour), CommitOrder: 3},
+				{Hash: "o1", Date: now.Add(-3 * time.Hour), CommitOrder: 1},
+			},
+			want: "head",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := planCompaction(tt.entries, now).headHash; got != tt.want {
+				t.Errorf("headHash = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

@@ -4618,8 +4618,8 @@ paths:
       operationId: deleteIssues
       summary: Delete named beads
       description: >-
-        Erases the beads this request NAMES, and — under `cascade` — everything
-        that depends on them. It is the operation behind `bd delete`, the other
+        Erases the beads this request NAMES, and — under `cascade` — their
+        parent-child descendants. It is the operation behind `bd delete`, the other
         DESTRUCTIVE operation on this surface alongside `issues:sweep`, and
         nothing it deletes comes back.
 
@@ -4647,9 +4647,14 @@ paths:
         the request depends on is REFUSED with `400` / `invalid_argument`, and
         nothing is deleted. `force` deletes the named beads and leaves those
         dependents ORPHANED — they keep their rows, lose their edges, and come
-        back in `orphaned`. `cascade` deletes the transitive closure instead,
-        so nothing is left outside it to orphan; a request carrying both
-        behaves as `cascade`.
+        back in `orphaned`. `cascade` deletes the named beads' parent-child
+        descendants as well, and every other dependent of that set survives
+        ORPHANED and comes back in `orphaned`, as under `force`; a request
+        carrying both behaves as `cascade`. A server announces this
+        containment-only cascade with the `issues.delete.containmentCascade`
+        behavior token: an older server's `cascade` deleted every transitive
+        dependent, so a client must not send `cascade` to a server that does
+        not advertise it.
 
 
         The refusal is the LIBRARY's, not this handler's — the same surface
@@ -9225,7 +9230,13 @@ components:
             record (see `Issue.arrival_seq`; build-level like the others —
             records are stamped only while the workspace journals, which
             `GET /v0/beads/events` reports by answering `409
-            events_journal_disabled` when it does not). One behavior token is
+            events_journal_disabled` when it does not), and
+            `issues.delete.containmentCascade`, which announces that
+            `issues:delete`'s `cascade` deletes only the named beads'
+            parent-child descendants and orphans every other dependent (see
+            `DeleteIssuesRequest.cascade`; a server without it deletes every
+            transitive dependent, so a client refuses to send `cascade` to
+            one). One behavior token is
             CONDITIONAL rather than build-level: `policy.external_dependencies`
             announces that this server's ready, blocked-listing, claim,
             claim-next, close, blocking and dependency-tree operations already
@@ -9572,11 +9583,14 @@ components:
           type: boolean
           default: false
           description: >-
-            Also delete the transitive closure of everything that depends on
-            the named beads. With `cascade` there is nothing left outside the
-            set to orphan, so it makes `force` moot rather than conflicting
-            with it: a request carrying both behaves as `cascade` and
-            `orphaned` comes back empty.
+            Also delete the named beads' parent-child descendants, at every
+            depth. Every other dependent of the deleted set — a bead joined by
+            any edge type other than parent-child — survives with its edges to
+            the set removed and comes back in `orphaned`, so `cascade` makes
+            `force` moot rather than conflicting with it: a request carrying
+            both behaves as `cascade`. Announced by the
+            `issues.delete.containmentCascade` behavior token; a server
+            without it deletes every transitive dependent instead.
         force:
           type: boolean
           default: false
@@ -9705,12 +9719,27 @@ components:
           type: array
           description: >-
             The surviving beads that depended on something this request
-            deleted, in ascending id order. Present exactly when the request
-            carried `force` without `cascade`, which is the only mode in which
-            orphaning is possible; absent otherwise.
+            deleted, in ascending id order. Present when the request carried
+            `cascade` (a cascade follows parent-child edges only, so a bead
+            joined to the deleted tree by any other edge survives it) or
+            `force` without `cascade`, and some bead was orphaned; absent
+            otherwise.
 
 
             DIRECT dependents only. A bead two edges away lost no edge.
+          items:
+            type: string
+        deleted_ids:
+          type: array
+          description: >-
+            The beads `deleted` counts, in ascending id order without
+            duplicates: under `cascade`, the whole parent-child closure. Under
+            `dry_run` it names the beads that would go, so a preview and the
+            deletion that follows it can be compared id for id.
+
+
+            Optional, because a server older than this member does not send
+            it; a client reading such a server gets no names, never wrong ones.
           items:
             type: string
 

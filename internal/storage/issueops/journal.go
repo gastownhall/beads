@@ -467,6 +467,15 @@ func getJournalIssueInTx(ctx context.Context, tx DBTX, issueID string) (*types.I
 // transaction. actor is stored as-is — "" for the genuinely unattributable
 // paths — in the NOT NULL DEFAULT ” actor column.
 //
+// The column list is shape-adaptive (journal_shape.go, PR A1): seq, ts, op
+// and issue_id are always named, and each optional column — actor,
+// issue_json, dep_json, comment_json — is named only when journalShapeFor(tx)
+// says this store's table actually has it. On a canonical table that is every
+// column, in the same order this INSERT has always used; on an old-lineage
+// table missing one, the write still lands and that one payload is simply not
+// recorded, rather than failing the whole mutation the journal row shares a
+// transaction with.
+//
 // stamp asks for the create record's seq to be written onto the wisps row as
 // its arrival_seq (only recordIssueEventInTx, RecordEventInTx's body, passes
 // true, and only for a create of an unstamped wisp-plane row). The stamp is
@@ -491,6 +500,8 @@ func insertEventRow(ctx context.Context, tx DBTX, op EventOp, issueID string, is
 		}
 		commentJSON = string(b)
 	}
+
+	shape := journalShapeFor(tx)
 	// record writes the journal row at seq. prior is the stamp an earlier
 	// attempt in this transaction already wrote (0 for none), which the retry
 	// below moves rather than leaving behind.
@@ -509,10 +520,8 @@ func insertEventRow(ctx context.Context, tx DBTX, op EventOp, issueID string, is
 			}
 			issueJSON = string(b)
 		}
-		_, err := tx.ExecContext(ctx, `
-			INSERT INTO bd_events_journal (seq, ts, op, issue_id, actor, issue_json, dep_json, comment_json)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		`, seq, time.Now().UTC(), string(op), issueID, actor, issueJSON, depJSON, commentJSON)
+		query, args := journalInsert(shape, seq, op, issueID, actor, issueJSON, depJSON, commentJSON)
+		_, err := tx.ExecContext(ctx, query, args...)
 		return err
 	}
 
@@ -547,6 +556,41 @@ func insertEventRow(ctx context.Context, tx DBTX, op EventOp, issueID string, is
 		}
 	}
 	return nil
+}
+
+// journalInsert builds insertEventRow's INSERT and its arguments for one
+// journal row: seq, ts, op and issue_id always, then each optional column
+// shape says the table has, in the order the INSERT has always named them.
+func journalInsert(shape *JournalShape, seq int64, op EventOp, issueID, actor string, issueJSON, depJSON, commentJSON any) (string, []any) {
+	type optionalJournalValue struct {
+		column string
+		value  any
+	}
+	var optionalValues []optionalJournalValue
+	if shape.HasActor {
+		optionalValues = append(optionalValues, optionalJournalValue{"actor", actor})
+	}
+	if shape.HasIssueJSON {
+		optionalValues = append(optionalValues, optionalJournalValue{"issue_json", issueJSON})
+	}
+	if shape.HasDepJSON {
+		optionalValues = append(optionalValues, optionalJournalValue{"dep_json", depJSON})
+	}
+	if shape.HasCommentJSON {
+		optionalValues = append(optionalValues, optionalJournalValue{"comment_json", commentJSON})
+	}
+	columns := make([]string, 0, 4+len(optionalValues))
+	columns = append(columns, "seq", "ts", "op", "issue_id")
+	args := make([]any, 0, 4+len(optionalValues))
+	args = append(args, seq, time.Now().UTC(), string(op), issueID)
+	for _, ov := range optionalValues {
+		columns = append(columns, ov.column)
+		args = append(args, ov.value)
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(columns)), ", ")
+	//nolint:gosec // columns is built entirely from the fixed name literals above, never from caller input.
+	query := fmt.Sprintf("INSERT INTO bd_events_journal (%s) VALUES (%s)", strings.Join(columns, ", "), placeholders)
+	return query, args
 }
 
 // stampArrivalSeqInTx writes seq onto the wisps row issueID as its arrival_seq.

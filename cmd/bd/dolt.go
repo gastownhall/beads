@@ -1639,6 +1639,19 @@ func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 	runExternalDoltStatusAt(doltserver.ResolveEndpoint(beadsDir, cfg), cfg)
 }
 
+// endpointTrustErrForCredential reports a workspace-pin violation when password
+// is non-empty, so a caller that builds its own authenticated DSN (rather than
+// going through the store's gated open) refuses to send BEADS_DOLT_PASSWORD or a
+// credentials-file password to a shared-config endpoint it never pinned
+// (GH#7886). It is nil when nothing authenticates (no password) and a no-op for
+// bd's own local server and the vendor default.
+func endpointTrustErrForCredential(ep doltserver.Endpoint, cfg *configfile.Config, password string) error {
+	if password == "" {
+		return nil
+	}
+	return ep.EnsureTrustedForCredential(cfg)
+}
+
 // runExternalDoltStatusAt is runExternalDoltStatus for ep, an endpoint the
 // caller already resolved for cfg's workspace (doltserver.ResolveEndpoint).
 // It names the server it dialed: the unix socket when it dialed one (Socket,
@@ -1663,6 +1676,12 @@ func runExternalDoltStatusAt(ep doltserver.Endpoint, cfg *configfile.Config) {
 		// No port resolved and no socket: nothing to dial. Give the store's
 		// advice for this server, not a dial of 127.0.0.1:0.
 		connErr = unresolved
+	} else if trustErr := endpointTrustErrForCredential(ep, cfg, password); trustErr != nil {
+		// The password would be sent to a shared-config host (metadata.json
+		// dolt_server_host / config.yaml dolt.host) the workspace never pinned:
+		// refuse the authenticated probe rather than hand BEADS_DOLT_PASSWORD to
+		// it (the store's open refuses the same change — GH#7886).
+		connErr = trustErr
 	} else {
 		// The connection the store makes, over its transport: a live unix
 		// socket first, else TCP (doltserver.Endpoint.Transport). Resolved
@@ -1955,6 +1974,9 @@ func purgeDroppedDatabases(ctx context.Context, conn versioncontrolops.DBConn) e
 type doltRemoteAddStore interface {
 	ListRemotes(ctx context.Context) ([]storage.RemoteInfo, error)
 	AddRemote(ctx context.Context, name, url string) error
+	// AddRemoteWithRef is AddRemote for a git-backed remote whose Dolt data
+	// lives on the git ref ref; an empty ref is AddRemote.
+	AddRemoteWithRef(ctx context.Context, name, url, ref string) error
 	RemoveRemote(ctx context.Context, name string) error
 }
 
@@ -1980,13 +2002,52 @@ func confirmDoltRemoteOverwrite(surface, name, existingURL, newURL string) bool 
 	return response == "y" || response == "yes"
 }
 
-func findDoltRemoteURL(remotes []storage.RemoteInfo, name string) string {
+// findDoltRemote returns the named remote's whole record — URL and git ref —
+// so a caller re-registering it can carry what it recorded; the zero
+// storage.RemoteInfo when absent.
+func findDoltRemote(remotes []storage.RemoteInfo, name string) storage.RemoteInfo {
 	for _, remote := range remotes {
 		if remote.Name == name {
-			return remote.URL
+			return remote
 		}
 	}
-	return ""
+	return storage.RemoteInfo{}
+}
+
+func findDoltRemoteURL(remotes []storage.RemoteInfo, name string) string {
+	return findDoltRemote(remotes, name).URL
+}
+
+// registerPersistedDoltRemote registers on the server a remote that the
+// server does not list but the served database records on disk at a URL
+// matching url. The server resolves push, pull and fetch through that
+// listing and reads repo_state.json only when it loads the database, so
+// the recorded remote is added, its URL (the spelling a restart would load)
+// and git ref, and the server ends where a listed match leaves it.
+func registerPersistedDoltRemote(ctx context.Context, st doltRemoteAddStore, persisted storage.RemoteInfo, url string) error {
+	if len(persisted.CLIOnlyParams) > 0 {
+		// The server rewrites the remote's record from the add, which
+		// carries only the URL and git ref: it would erase these for good,
+		// where a restart loads them.
+		return fmt.Errorf("its recorded parameters %s cannot be set over SQL, and the add would erase them; restart the Dolt server so it loads the remote as recorded", remedy.PrintedList(persisted.CLIOnlyParams, ", "))
+	}
+	addErr := st.AddRemoteWithRef(ctx, persisted.Name, persisted.URL, persisted.Ref)
+	if addErr == nil || !strings.Contains(strings.ToLower(addErr.Error()), "already exists") {
+		return addErr
+	}
+	// The server checks the add against the set it lists, which lacked the
+	// remote, so a concurrent add registered it in between. That is the
+	// state this add wanted, as the push path's re-add takes it
+	// (prepareCLIRouteForGitProtocol), once the server lists the remote at
+	// a matching URL.
+	remotes, err := st.ListRemotes(ctx)
+	if err != nil {
+		return fmt.Errorf("%w (listing remotes again: %v)", addErr, err)
+	}
+	if !doltutil.RemoteURLsMatch(findDoltRemoteURL(remotes, persisted.Name), url) {
+		return addErr
+	}
+	return nil
 }
 
 func ensureDoltRemote(ctx context.Context, st doltRemoteAddStore, name, url string, confirm doltRemoteOverwriteConfirmer) (doltRemoteAddResult, error) {
@@ -1996,15 +2057,18 @@ func ensureDoltRemote(ctx context.Context, st doltRemoteAddStore, name, url stri
 	}
 
 	existingURL := findDoltRemoteURL(remotes, name)
+	var persisted storage.RemoteInfo
 	existingFromDiskOnly := false
 	if existingURL == "" {
 		// An empty listing is not proof the remote is absent: a freshly
 		// (auto-)started sql-server can report empty dolt_remotes while the
 		// remote is persisted on disk (GH#2118, wy-6k7f7). Recover the
-		// persisted URL so the add gets the same match/confirm treatment it
-		// would after the window, instead of silently writing over an
-		// invisible remote.
-		existingURL = findDoltRemoteURL(persistedRemoteInfosFor(st), name)
+		// persisted record — URL and git ref — so a match below can register
+		// it on the server and a URL disagreement still gets the confirm
+		// treatment it would after the window, instead of silently writing
+		// over an invisible remote.
+		persisted = findDoltRemote(persistedRemoteInfosFor(st), name)
+		existingURL = persisted.URL
 		existingFromDiskOnly = existingURL != ""
 	}
 	if existingURL == "" {
@@ -2015,6 +2079,11 @@ func ensureDoltRemote(ctx context.Context, st doltRemoteAddStore, name, url stri
 	}
 
 	if doltutil.RemoteURLsMatch(existingURL, url) {
+		if existingFromDiskOnly {
+			if err := registerPersistedDoltRemote(ctx, st, persisted, url); err != nil {
+				return doltRemoteAddResult{}, fmt.Errorf("add remote %s: %w", name, err)
+			}
+		}
 		return doltRemoteAddResult{}, nil
 	}
 
@@ -2880,6 +2949,13 @@ func openDoltServerConnection() (*sql.DB, func(), error) {
 	}
 	user := cfg.GetDoltServerUser()
 	password := os.Getenv("BEADS_DOLT_PASSWORD")
+	if password != "" {
+		// Refuse to send BEADS_DOLT_PASSWORD to a shared-config host the
+		// workspace never pinned, as the store's open does (GH#7886).
+		if err := doltserver.CheckEndpointTrust(beadsDir, cfg, host, port, cfg.GetDoltServerSocket()); err != nil {
+			return nil, nil, HandleError("%v", err)
+		}
+	}
 
 	connStr := doltutil.ServerDSN{
 		Host:     host,

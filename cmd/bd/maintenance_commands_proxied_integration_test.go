@@ -354,6 +354,50 @@ func TestProxiedServerCompactHistory(t *testing.T) {
 	})
 }
 
+// TestProxiedServerCompactKeepsPendingWrite: a change in main's working set
+// that no Dolt commit holds yet survives bd compact through the proxied front
+// door and stays pending. The hard reset compaction used to end with deleted
+// it after its writer had been told it succeeded.
+func TestProxiedServerCompactKeepsPendingWrite(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	p := newSharedProxiedRootProject(t, bd, "cppend")
+
+	issue := bdProxiedCreate(t, bd, p.dir, "committed title", "--type", "task")
+	bdProxiedCreate(t, bd, p.dir, "filler", "--type", "task")
+	commitsBefore := proxiedCommitCount(t, bd, p)
+
+	db := openProxiedDB(t, p)
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, "UPDATE issues SET title = ? WHERE id = ?", "pending title", issue.ID); err != nil {
+		t.Fatalf("write pending title: %v", err)
+	}
+
+	stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "compact", "--days", "0", "--force")
+	if err != nil {
+		t.Fatalf("compact --force failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Compacted") {
+		t.Fatalf("expected 'Compacted' summary, got: %s", stdout)
+	}
+	if after := proxiedCommitCount(t, bd, p); after >= commitsBefore {
+		t.Errorf("expected fewer commits after compaction: before=%d after=%d", commitsBefore, after)
+	}
+
+	var working, head string
+	if err := db.QueryRowContext(ctx, "SELECT title FROM issues WHERE id = ?", issue.ID).Scan(&working); err != nil {
+		t.Fatalf("read working title: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, "SELECT title FROM issues AS OF 'HEAD' WHERE id = ?", issue.ID).Scan(&head); err != nil {
+		t.Fatalf("read HEAD title: %v", err)
+	}
+	if working != "pending title" || head != "committed title" {
+		t.Errorf("after compact: working title = %q, HEAD title = %q; want the pending %q kept uncommitted over %q",
+			working, head, "pending title", "committed title")
+	}
+}
+
 func proxiedCommitCount(t *testing.T, bd string, p proxiedProject) int {
 	t.Helper()
 	rows := bdProxiedSQLJSON(t, bd, p.dir, "SELECT COUNT(*) as count FROM dolt_log")

@@ -20,6 +20,11 @@ type compactPlan struct {
 	// initialHash and boundaryHash are the soft-reset target and the temp
 	// branch point for the squashed base.
 	initialHash, boundaryHash string
+	// headHash is the highest-order commit: main's HEAD when the log was
+	// read. Compact verifies the replay against it rather than against
+	// main's HEAD at the end of the replay, which another writer may have
+	// moved since.
+	headHash string
 	// refusal is set when the plan would squash history (more than one old
 	// commit) but the date partition is not contiguous in commit order, so
 	// replaying the recent commits onto the squashed base could change data
@@ -61,6 +66,9 @@ func shortCommitHash(hash string) string {
 //   - initialHash is the lowest-order commit and boundaryHash the
 //     highest-order old commit (the first such entry on ties), so the squashed
 //     base is the old window's final state even when its dates are shuffled;
+//   - headHash is the highest-order commit overall (the first such entry on
+//     ties), the HEAD the log was read from and so the tree the replay must
+//     reproduce;
 //   - the recent commits replay in ascending order, so a child dated before its
 //     parent is not cherry-picked first and does not conflict (#6516).
 //
@@ -75,10 +83,13 @@ func planCompaction(logEntries []storage.CommitInfo, cutoff time.Time) compactPl
 	var plan compactPlan
 	recent := make([]storage.CommitInfo, 0, len(logEntries))
 	var maxOld *storage.CommitInfo
-	initial := &logEntries[0]
+	initial, head := &logEntries[0], &logEntries[0]
 	for i, entry := range logEntries {
 		if entry.CommitOrder < initial.CommitOrder {
 			initial = &logEntries[i]
+		}
+		if entry.CommitOrder > head.CommitOrder {
+			head = &logEntries[i]
 		}
 		if entry.Date.Before(cutoff) {
 			plan.oldCommits++
@@ -89,7 +100,7 @@ func planCompaction(logEntries []storage.CommitInfo, cutoff time.Time) compactPl
 			recent = append(recent, entry)
 		}
 	}
-	plan.initialHash = initial.Hash
+	plan.initialHash, plan.headHash = initial.Hash, head.Hash
 	if maxOld != nil {
 		plan.boundaryHash = maxOld.Hash
 	}

@@ -217,7 +217,7 @@ one side and row changes on the other. Dolt cannot resolve that in either
 direction: `DOLT_CONFLICTS_RESOLVE('--ours','events')` and `--theirs` both
 fail with `table not found`, and `ALTER TABLE` does not apply. An `events`
 schema conflict is not proof of this cause on its own, but after migration
-0062 it is the likely one. bd releases after v1.3.2 print this diagnosis under
+0062 it is the likely one. bd v1.4.0 and later print this diagnosis under
 the merge blockers.
 
 Because `events` is ignored, `dolt status` shows a clean working set even

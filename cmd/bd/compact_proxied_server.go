@@ -128,7 +128,7 @@ func runCompactProxiedServer(ctx context.Context) error {
 
 	var pruned, tags []string
 	if err := runProxiedNonTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
-		if err := versioncontrolops.Compact(ctx, conn, initialHash, boundaryHash, oldCommits, recentHashes); err != nil {
+		if err := versioncontrolops.Compact(ctx, conn, initialHash, boundaryHash, plan.headHash, oldCommits, recentHashes); err != nil {
 			return err
 		}
 		var perr error

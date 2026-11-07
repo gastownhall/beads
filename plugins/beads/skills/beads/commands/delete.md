@@ -20,7 +20,7 @@ Delete one or more issues and clean up all references.
 ## Dependency Handling
 
 - **Default**: Fails if issue has dependents not in deletion set
-- **--cascade**: Recursively delete all dependent issues
+- **--cascade**: Also delete parent-child descendants; other dependents survive (orphaned)
 - **--force**: Delete and orphan dependents
 
 ## What Gets Deleted
