@@ -915,6 +915,19 @@ func MigrateUpTo(ctx context.Context, db DBConn, maxVersion int) (int, error) {
 	return applied, err
 }
 
+// MigrateIgnoredUpTo applies ignored-source migrations up to and including
+// maxVersion, mirroring MigrateUpTo on the ignored lane: bounded, without
+// MigrateUp's guards, backfills, rekeys or main-source pass. It exists so
+// cross-package server tests can reconstruct the clone-local wisp schema at
+// a historical version — the bounded half of a mixed issue/wisp recompute
+// rehearsal (gastownhall/beads#6520), where main must sit below 0059 while
+// the wisp tables already carry the ignored chain's split-target shape.
+// Production code must use MigrateUp, for the same reason as MigrateUpTo.
+func MigrateIgnoredUpTo(ctx context.Context, db DBConn, maxVersion int) (int, error) {
+	applied, _, err := ignoredSource.migrate(ctx, db, maxVersion)
+	return applied, err
+}
+
 // MigrateUp brings both migration sources (main and dolt-ignored) to the
 // binary's latest versions, with all open-time reconciles, guards, backfills
 // and rekeys. db must be a single session held for the whole call — pin a
@@ -2290,6 +2303,19 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 			return count, fmt.Errorf("reading migration %s: %w", mf.name, err)
 		}
 
+		// Resolve the body this step will execute before anything else in
+		// the step can mutate. An execution plan registered for this exact
+		// file (see migration_body_plans.go) substitutes an equivalent
+		// planned body here; drift between a plan and the shipped bytes
+		// fails the pass closed — ahead of the dirty-table snapshot, the
+		// updated_at snapshot, the pre-repair, the body and the cursor row.
+		// The cursor still hashes the original data below: a plan changes
+		// what runs, never the migration's recorded identity.
+		body, err := resolveMigrationBody(src, mf, data)
+		if err != nil {
+			return count, fmt.Errorf("resolving execution plan for migration %s: %w", mf.name, err)
+		}
+
 		// Snapshot the working set BEFORE the pre-migration repair runs, not
 		// just before the migration's own SQL. preMigrationRepair (below) can
 		// itself mutate synced tables (e.g. #4690's ensureDependenciesIDColumn
@@ -2346,7 +2372,7 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		// should carry. So a wedge inside the per-step commit is still silent;
 		// CHANGELOG.md scopes the user-facing promise to match.
 		if err := runMigrationWithWatchdog(ctx, watchdogStderr, mf.version, humanMigrationName(mf.name), migrationWatchdogIntervalDuration(),
-			func(ctx context.Context) error { return execMigrationBody(ctx, db, string(data)) },
+			func(ctx context.Context) error { return execMigrationBody(ctx, db, body) },
 		); err != nil {
 			return count, fmt.Errorf("migration %s: %w", mf.name, err)
 		}
