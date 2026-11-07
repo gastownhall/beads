@@ -1225,6 +1225,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Building that release target (`goreleaser --id bd-android-arm64`) now needs
   a Linux x86_64 host; see RELEASING.md.
 
+- **`bd list --include-all-types` reaches every bead hidden for what it is
+  (GH#5694).** `ListRequest.IncludeAllTypes`, the switch that lifts the gate,
+  template, infra and wisp-plane suppressions together and any added later,
+  had no `bd list` flag, so a script's widest `bd list` request was
+  the hand-kept `--include-gates --include-templates --include-infra` list,
+  which narrows silently when a suppression is added. `bd list` now registers
+  the flag, and `--wisp-type` accepts it as admitting the wisp plane. It is
+  independent of `--all`: the default status and pinned exclusions and the
+  default limit still apply, so `--all --include-all-types` lifts both sets of
+  defaults (explicit filters, `--exclude-type` and `--limit` still apply).
+  `--all` behaves as before; its help now says it lifts the status and pinned
+  exclusions and the default limit, not the type suppressions. The `bd serve`
+  HTTP transport refuses the flag, as it already refuses
+  `ListRequest.IncludeAllTypes`, since the v0 wire has no form for it.
+
 - With `export.git-add` on, the pre-commit export now lands in commits made
   with `git commit -- <paths>`, `-a`, `-i` or `-p`. It used to stage into
   `.git/index`, whose lock the commit holds, so it was skipped with
