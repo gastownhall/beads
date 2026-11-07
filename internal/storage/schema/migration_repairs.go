@@ -39,6 +39,7 @@ var preMigrationRepairs = map[repairKey]func(context.Context, DBConn) error{
 	{"ignored_schema_migrations", 7}:  ensureWispIsBlockedForRecompute,
 	{"ignored_schema_migrations", 15}: ensureWispIsBlockedForRecompute,
 	{"ignored_schema_migrations", 31}: seedEventsFromPreflipHistory,
+	{"ignored_schema_migrations", 32}: restoreWispIsBlocked,
 }
 
 // preMigrationRepair dispatches any repair registered for (source, version).
@@ -302,7 +303,9 @@ func ensureWispTablesForMixedBlockedRecompute(ctx context.Context, db DBConn) er
 // 0015) or on a later already-healed pass merely re-confirms the column and
 // index are present rather than re-adding them. It mirrors ignored/0006's
 // own two statements so a clone that never ran 0006 to completion still
-// ends up in the shape 0006 would have produced.
+// ends up in the shape 0006 would have produced. A clone that loses the
+// column after its cursor passed 15 is healed by restoreWispIsBlocked at
+// ignored 32 instead.
 func ensureWispIsBlockedForRecompute(ctx context.Context, db DBConn) error {
 	hasWisps, err := schemaTableExists(ctx, db, "wisps")
 	if err != nil {
@@ -345,6 +348,47 @@ func ensureWispIsBlockedIndex(ctx context.Context, db DBConn) error {
 	}
 	if _, err := db.ExecContext(ctx, "CREATE INDEX idx_wisps_is_blocked ON wisps(is_blocked, status)"); err != nil {
 		return fmt.Errorf("creating idx_wisps_is_blocked: %w", err)
+	}
+	return nil
+}
+
+// restoreWispIsBlocked is the pre-migration repair for ignored/0032, the
+// heal for a clone already past ignored 15 whose wisps table lost is_blocked
+// or its index (refs gastownhall/beads#4468, #5257). The ignored 7/15 entries
+// above cannot reach such a clone: they run only while their own version is
+// pending, and a low cursor row going missing never re-pends one. A sentinel
+// column cannot either (see schemaSentinelColumn's floor rules).
+//
+// A healthy clone pays the three probes and nothing else. An absent wisps
+// table is left to ignored/0001 and the cursor-reality repair, as at 7/15.
+func restoreWispIsBlocked(ctx context.Context, db DBConn) error {
+	hasWisps, err := schemaTableExists(ctx, db, "wisps")
+	if err != nil {
+		return fmt.Errorf("checking wisps table: %w", err)
+	}
+	if !hasWisps {
+		return nil
+	}
+	hasColumn, err := schemaColumnExists(ctx, db, "wisps", "is_blocked")
+	if err != nil {
+		return fmt.Errorf("checking wisps.is_blocked column: %w", err)
+	}
+	hasIndex, err := schemaIndexExists(ctx, db, "wisps", "idx_wisps_is_blocked")
+	if err != nil {
+		return fmt.Errorf("checking idx_wisps_is_blocked index: %w", err)
+	}
+	if hasColumn && hasIndex {
+		return nil
+	}
+	if !hasColumn {
+		if _, err := db.ExecContext(ctx, "ALTER TABLE wisps ADD COLUMN is_blocked TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
+			return fmt.Errorf("adding wisps.is_blocked: %w", err)
+		}
+	}
+	if !hasIndex {
+		if _, err := db.ExecContext(ctx, "CREATE INDEX idx_wisps_is_blocked ON wisps(is_blocked, status)"); err != nil {
+			return fmt.Errorf("creating idx_wisps_is_blocked: %w", err)
+		}
 	}
 	return nil
 }
