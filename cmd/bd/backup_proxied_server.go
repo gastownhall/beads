@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
@@ -209,7 +210,10 @@ func runBackupSyncProxied(ctx context.Context) error {
 			// saying out loud and is not worth refusing to back up over.
 			fmt.Fprintf(os.Stderr, "Warning: failed to commit pending changes: %v\n", err)
 		}
-		return versioncontrolops.BackupSync(ctx, conn, proxiedBackupTargetName)
+		// The sync runs in the server's process, so a failure names the
+		// credentials it takes from its own environment (bd-f68dud).
+		err := versioncontrolops.BackupSync(ctx, conn, proxiedBackupTargetName)
+		return dolt.WithBackupSyncServerEnvNote(ctx, conn, proxiedBackupTargetName, err)
 	})
 	if err != nil {
 		if strings.Contains(err.Error(), "no backup") || strings.Contains(err.Error(), "not found") {

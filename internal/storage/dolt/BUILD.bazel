@@ -139,6 +139,7 @@ go_test(
         "active_database_size_test.go",
         "autostart_test.go",
         "aux_row_id_rekey_test.go",
+        "backup_sync_env_note_test.go",
         "batch_apply_contract_test.go",
         "batch_closer_contract_test.go",
         "batch_creator_contract_test.go",
