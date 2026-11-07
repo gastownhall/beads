@@ -727,6 +727,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a row in both `issues` and `wisps`, the result's labels and outgoing
   dependency records now come from `issues`, as its body already did; they
   used to come from the wisp row.
+- **A server-mode write's post-transaction commit stages its tables with one
+  `DOLT_ADD`.** The Dolt commit that most writes run after their SQL
+  transaction used to send one `CALL DOLT_ADD` per table it stages; it now
+  sends one call that names them all. The staged set is the same. A write that stages N tables sends
+  N-1 fewer statements: one fewer for a two-table write such as
+  `bd label add` (events and labels), and two fewer for a `bd dep add` that
+  records its event and changes a blocked flag (dependencies, events and
+  issues). With versioned history on, its tables join the same call
+  instead of adding one statement each.
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add
