@@ -46,6 +46,8 @@ type windowsFacts struct {
 	ProfilesDir string
 	// Home is the current user's home directory, "" when unknown.
 	Home string
+	// TempDir is os.TempDir(), "" when unknown.
+	TempDir string
 	// Resolve finds physical locations; nil resolves nothing.
 	Resolve winResolver
 }
@@ -228,6 +230,12 @@ type windowsBoundary struct {
 	// home is the current user's home, nil when unknown. An unknown home
 	// admits no private profile at all.
 	home *winRoot
+	// public holds <profile parent>\Public for each profile parent, the
+	// shared profile (the /Users/Shared analog). The PUBLIC variable is never
+	// trusted: pointing it at a peer profile would exempt that profile.
+	public []winRoot
+	// temp is the temp-directory carve-out, nil when unusable.
+	temp *winRoot
 }
 
 func newWindowsBoundary(f windowsFacts) *windowsBoundary {
@@ -284,6 +292,29 @@ func newWindowsBoundary(f windowsFacts) *windowsBoundary {
 			b.home = &h
 		}
 	}
+
+	for _, r := range b.profiles {
+		pub := winPath{vol: r.lex.vol, comps: append(r.lex.comps[:len(r.lex.comps):len(r.lex.comps)], "Public")}
+		b.public = append(b.public, b.root(pub))
+	}
+
+	// A temp directory that is a volume root or sits at or above a system
+	// root or profile parent, in either spelling, would admit what those
+	// deny, so it is no carve-out. A proper descendant such as the SYSTEM
+	// account's C:\Windows\Temp stays one.
+	if t, ok := winCleanPath(f.TempDir); ok && !t.isVolumeRoot() {
+		tr := b.root(t)
+		usable := !(tr.resolved && tr.phys.isVolumeRoot())
+		for _, r := range append(append([]winRoot{}, b.system...), b.profiles...) {
+			if tr.contains(r.lex) || (r.resolved && tr.contains(r.phys)) {
+				usable = false
+				break
+			}
+		}
+		if usable {
+			b.temp = &tr
+		}
+	}
 	return b
 }
 
@@ -332,7 +363,16 @@ func (b *windowsBoundary) physical(p winPath) (winPath, bool) {
 // admitted, as /home is on POSIX) and outside the current home.
 func (b *windowsBoundary) inPeerProfile(p winPath) bool {
 	for _, r := range b.profiles {
-		if r.strictlyContains(p) && (b.home == nil || !b.home.contains(p)) {
+		if r.strictlyContains(p) && (b.home == nil || !b.home.contains(p)) && !b.inPublic(p) {
+			return true
+		}
+	}
+	return false
+}
+
+func (b *windowsBoundary) inPublic(p winPath) bool {
+	for _, r := range b.public {
+		if r.contains(p) {
 			return true
 		}
 	}
@@ -356,11 +396,33 @@ func (b *windowsBoundary) allows(input, abs string) bool {
 	if resolved {
 		forms = append(forms, phys)
 	}
-	for _, r := range b.system {
+	in := func(r winRoot) bool {
 		for _, q := range forms {
 			if r.contains(q) {
-				return false
+				return true
 			}
+		}
+		return false
+	}
+	// The temp and Public carve-outs are world-writable: a path in either
+	// spelling is admitted only when it and the root both resolved and it
+	// lies physically inside, so a planted link cannot escape through them.
+	// An unresolved path inside a carve-out is denied. Temp comes first so
+	// the SYSTEM account's temp directory under C:\Windows works.
+	carvedIn := func(r winRoot) bool {
+		return resolved && r.resolved && phys.within(r.phys)
+	}
+	if b.temp != nil && in(*b.temp) {
+		return carvedIn(*b.temp)
+	}
+	for _, r := range b.system {
+		if in(r) {
+			return false
+		}
+	}
+	for _, r := range b.public {
+		if in(r) && !carvedIn(r) {
+			return false
 		}
 	}
 	// A path physically inside another user's profile is denied however it

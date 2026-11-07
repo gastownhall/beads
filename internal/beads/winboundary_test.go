@@ -453,3 +453,129 @@ func TestWindowsPathInSafeBoundary_PhysicalAlias(t *testing.T) {
 		`Q:\offline\.beads`:       true,
 	})
 }
+
+func TestNewWindowsBoundary_Temp(t *testing.T) {
+	resolve := winFakeFS(map[string]winFakeEntry{
+		`C:\`:       {},
+		`T:\tmp`:    {final: `\\?\D:\`},
+		`T:\users`:  {final: `\\?\C:\Users`},
+		`T:\pf`:     {final: `\\?\C:\Program Files\x\..`},
+		`T:\winsub`: {final: `\\?\C:\Windows\Temp`},
+	})
+	// A temp directory that is invalid, a volume root, or at or above a
+	// system root or profile parent (in either form) is no carve-out.
+	for _, temp := range []string{
+		"", `relative\tmp`, `C:\`, `C:\Users`, `c:\users\`, `C:\Windows`,
+		`C:\Program Files`, `E:\Profiles`, `E:\`, `T:\tmp`, `T:\users`, `T:\pf`,
+	} {
+		b := newWindowsBoundary(windowsFacts{ProfilesDir: `E:\Profiles\All`, TempDir: temp, Resolve: resolve})
+		if b.temp != nil {
+			t.Errorf("temp %q: got carve-out %v, want none", temp, b.temp)
+		}
+	}
+	// Proper descendants stay carve-outs, including the SYSTEM account's.
+	for _, temp := range []string{`C:\Windows\Temp`, `C:\Users\alice\AppData\Local\Temp`, `D:\Temp`, `T:\winsub`} {
+		b := newWindowsBoundary(windowsFacts{TempDir: temp, Resolve: resolve})
+		if b.temp == nil {
+			t.Errorf("temp %q: got no carve-out", temp)
+		}
+	}
+
+	// Public is <profile parent>\Public for each parent, never $PUBLIC.
+	b := newWindowsBoundary(windowsFacts{
+		ProfilesDir: `E:\Profiles`,
+		Getenv:      winEnv(map[string]string{"PUBLIC": `C:\Users\bob`}),
+	})
+	var got []string
+	for _, r := range b.public {
+		got = append(got, r.String())
+	}
+	if want := `[C:\Users\Public E:\Profiles\Public]`; fmt.Sprint(got) != want {
+		t.Errorf("public roots = %v, want %s", got, want)
+	}
+}
+
+// AC-4: inside the temp and Public carve-outs, a path whose longest existing
+// ancestor resolves inside the carve-out is admitted, missing descendants
+// included; escapes and unresolved paths are rejected.
+func TestWindowsPathInSafeBoundary_CarveOuts(t *testing.T) {
+	b := newWindowsBoundary(windowsFacts{
+		ProfilesDir: `C:\Users`,
+		Home:        `C:\Users\alice`,
+		TempDir:     `D:\Temp`,
+		Getenv:      winEnv(map[string]string{"PUBLIC": `C:\Users\bob`}),
+		Resolve: winFakeFS(map[string]winFakeEntry{
+			`C:\`:                     {},
+			`D:\`:                     {},
+			`C:\Users`:                {},
+			`C:\Users\alice`:          {},
+			`C:\Users\bob`:            {},
+			`C:\Users\Public`:         {},
+			`C:\Users\Public\proj`:    {},
+			`C:\Users\Public\to-bob`:  {final: `\\?\C:\Users\bob`},
+			`C:\Users\Public\to-win`:  {final: `\\?\C:\Windows`},
+			`C:\Users\Public\to-temp`: {final: `\\?\D:\Temp`},
+			`C:\Users\Public\locked`:  {err: errWinFakeAccess},
+			`D:\Temp`:                 {},
+			`D:\Temp\proj`:            {},
+			`D:\Temp\to-bob`:          {final: `\\?\C:\Users\bob\x`},
+			`D:\Temp\to-home`:         {final: `\\?\C:\Users\alice\src`},
+			`D:\Temp\to-public`:       {final: `\\?\C:\Users\Public`},
+			`D:\Temp\dangling`:        {err: errWinFakeDangling},
+			`D:\work`:                 {},
+			`D:\work\to-temp`:         {final: `\\?\D:\Temp\proj`},
+			`D:\work\to-public`:       {final: `\\?\C:\Users\Public\proj`},
+			`C:\Users\alice\to-pub`:   {final: `\\?\C:\Users\Public\proj`},
+		}),
+	})
+	winBoundaryCheck(t, b, map[string]bool{
+		// Temp.
+		`D:\Temp`:                    true,
+		`D:\Temp\proj\.beads`:        true,
+		`d:\temp\new\deep\.beads`:    true, // missing descendants
+		`D:\work\to-temp\new\.beads`: true, // physically inside
+		`D:\Temp\to-bob\.beads`:      false,
+		`D:\Temp\to-home\.beads`:     false, // any escape, even to the home
+		`D:\Temp\to-public\.beads`:   false,
+		`D:\Temp\dangling\.beads`:    false, // unresolved
+		`D:\TempX\.beads`:            true,  // a sibling, not the carve-out
+		// Public.
+		`C:\Users\Public`:                true,
+		`C:\Users\Public\proj\.beads`:    true,
+		`c:\users\public\new\.beads`:     true,
+		`D:\work\to-public\.beads`:       true,
+		`C:\Users\alice\to-pub\.beads`:   true,
+		`C:\Users\Public\to-bob\.beads`:  false,
+		`C:\Users\Public\to-win\.beads`:  false,
+		`C:\Users\Public\to-temp\.beads`: true, // physically in temp
+		`C:\Users\Public\locked\.beads`:  false,
+		`C:\Users\Publicity\.beads`:      false, // a peer profile
+		`C:\Users\bob\.beads`:            false, // $PUBLIC is not trusted
+	})
+
+	// Without physical resolution nothing inside a carve-out is admitted.
+	b = newWindowsBoundary(windowsFacts{ProfilesDir: `C:\Users`, Home: `C:\Users\alice`, TempDir: `D:\Temp`})
+	winBoundaryCheck(t, b, map[string]bool{
+		`D:\Temp\proj\.beads`:         false,
+		`C:\Users\Public\proj\.beads`: false,
+		`D:\work\.beads`:              true,
+	})
+
+	// The SYSTEM account's temp directory sits under C:\Windows: the temp
+	// carve-out precedes the system denial, and only for physical paths.
+	b = newWindowsBoundary(windowsFacts{
+		TempDir: `C:\Windows\Temp`,
+		Resolve: winFakeFS(map[string]winFakeEntry{
+			`C:\`:                {},
+			`C:\Windows`:         {},
+			`C:\Windows\Temp`:    {},
+			`C:\Windows\Temp\up`: {final: `\\?\C:\Windows\System32`},
+		}),
+	})
+	winBoundaryCheck(t, b, map[string]bool{
+		`C:\Windows\Temp\proj\.beads`: true,
+		`C:\Windows\Temp\up\.beads`:   false,
+		`C:\Windows\TempX\.beads`:     false,
+		`C:\Windows\System32`:         false,
+	})
+}
