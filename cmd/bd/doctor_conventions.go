@@ -3,12 +3,14 @@ package main
 import (
 	"fmt"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/validation"
 )
 
-// runConventionsCheck runs a composite conventions check: lint, stale, and orphans.
+// runConventionsCheck runs a composite conventions check: lint, stale, orphans,
+// and blocked-status.
 // All findings are advisory (warning, never error) - conventions are a choice.
 func runConventionsCheck(path string) error {
 	// doctor opts out of PersistentPreRun DB init via skipStoreAnnotation, so
@@ -29,6 +31,7 @@ func runConventionsCheck(path string) error {
 	checks = append(checks, lintChecks...)
 	checks = append(checks, runConventionsStale()...)
 	checks = append(checks, runConventionsOrphans(path)...)
+	checks = append(checks, runConventionsBlockedStatus())
 
 	if jsonOutput {
 		overallOK := true
@@ -153,6 +156,24 @@ func runConventionsLint() ([]doctorCheck, error) {
 		Fix:      "bd lint",
 		Category: "Conventions",
 	}}, nil
+}
+
+// runConventionsBlockedStatus runs bd doctor's Blocked Status advisory as a
+// conventions check, so embedded workspaces, where full doctor does not run,
+// can see the issues held in status 'blocked' with nothing blocking them
+// (bd-e5d8fd). Like the advisory, it changes no status.
+func runConventionsBlockedStatus() doctorCheck {
+	if store == nil {
+		return doctorCheck{
+			Name:     "conventions.blocked-status",
+			Status:   statusWarning,
+			Message:  "database not available",
+			Category: "Conventions",
+		}
+	}
+	check := convertWithCategory(doctor.CheckBlockedStatus(rootCtx, store), "Conventions")
+	check.Name = "conventions.blocked-status"
+	return check
 }
 
 // runConventionsStale checks for issues with no recent activity.
