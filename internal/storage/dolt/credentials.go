@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 // Credential storage and encryption for federation peers.
@@ -978,4 +979,22 @@ func (s *DoltStore) annotateServerEnvTransferError(ctx context.Context, plan ser
 		return err
 	}
 	return fmt.Errorf("%w%s", err, note)
+}
+
+// BackupSyncServerEnvNote is the server-environment note for a failed backup
+// sync (GH#5953). The sync runs as CALL DOLT_BACKUP in the Dolt server's
+// process, which takes the destination's credentials from the server's own
+// environment. db is the connection the sync ran on, used only to read the
+// destination's URL from dolt_backups; env is bd's environment snapshot. The
+// note is empty when the destination is unknown — including when the server
+// cannot be reached to answer, which keeps connection failures from being
+// explained as credential failures — or when bd's environment holds none of
+// the destination scheme's variables (see cloudAuthSchemeMap). The CLI's
+// proxied-server route uses it beside the store's own BackupSync.
+func BackupSyncServerEnvNote(ctx context.Context, db versioncontrolops.DBConn, name string, env []string) string {
+	var destURL string
+	if err := db.QueryRowContext(ctx, "SELECT url FROM dolt_backups WHERE name = ?", name).Scan(&destURL); err != nil || destURL == "" {
+		return ""
+	}
+	return buildServerEnvCredentialsNote("CALL DOLT_BACKUP", destURL, nil, env)
 }

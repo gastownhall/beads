@@ -1665,10 +1665,20 @@ func (s *DoltStore) BackupAdd(ctx context.Context, name, url string) error {
 func (s *DoltStore) BackupSync(ctx context.Context, name string) error {
 	db, err := s.oneShotConn(0)
 	if err != nil {
-		return err
+		return err // connecting to the server, not the transfer itself
 	}
 	defer db.Close()
-	return versioncontrolops.BackupSync(ctx, db, name)
+	syncErr := versioncontrolops.BackupSync(ctx, db, name)
+	if syncErr == nil || !s.serverMode {
+		return syncErr
+	}
+	// The destination lookup doubles as the gate that keeps connection
+	// failures unexplained: a server that cannot be reached to answer it was
+	// never reached by the transfer either (GH#5953).
+	if note := BackupSyncServerEnvNote(ctx, db, name, os.Environ()); note != "" {
+		return fmt.Errorf("%w%s", syncErr, note)
+	}
+	return syncErr
 }
 
 // BackupRemove removes a configured Dolt backup destination.

@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
@@ -209,7 +210,17 @@ func runBackupSyncProxied(ctx context.Context) error {
 			// saying out loud and is not worth refusing to back up over.
 			fmt.Fprintf(os.Stderr, "Warning: failed to commit pending changes: %v\n", err)
 		}
-		return versioncontrolops.BackupSync(ctx, conn, proxiedBackupTargetName)
+		if err := versioncontrolops.BackupSync(ctx, conn, proxiedBackupTargetName); err != nil {
+			// The sync ran as CALL DOLT_BACKUP in the proxied server's
+			// process, which takes the destination's credentials from its
+			// own environment, not this client's (GH#5953). The note avoids
+			// the phrases the handler below reads as a missing destination.
+			if note := dolt.BackupSyncServerEnvNote(ctx, conn, proxiedBackupTargetName, os.Environ()); note != "" {
+				return fmt.Errorf("%w%s", err, note)
+			}
+			return err
+		}
+		return nil
 	})
 	if err != nil {
 		if strings.Contains(err.Error(), "no backup") || strings.Contains(err.Error(), "not found") {

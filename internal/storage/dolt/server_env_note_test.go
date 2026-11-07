@@ -381,6 +381,77 @@ func TestSettleMergeInTxNamesServerEnvironment(t *testing.T) {
 	})
 }
 
+// TestBackupSyncFailureNamesServerEnvironment pins the backup-sync note
+// (GH#5953): the helper names the destination's variable family from the
+// server's own dolt_backups row and stays silent for an unknown destination
+// or an empty environment, and the store's BackupSync leaves a failure to
+// even reach the server unexplained — the destination lookup that builds the
+// note cannot answer through a connection that never opened.
+func TestBackupSyncFailureNamesServerEnvironment(t *testing.T) {
+	ctx := context.Background()
+	const s3URL = "s3://bucket/beads"
+
+	t.Run("helper names the destination's variables", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		mock.ExpectQuery("SELECT url FROM dolt_backups").
+			WillReturnRows(sqlmock.NewRows([]string{"url"}).AddRow(s3URL))
+
+		note := BackupSyncServerEnvNote(ctx, db, "default", []string{"AWS_ACCESS_KEY_ID=AKIAFRESH"})
+
+		if !strings.Contains(note, "; CALL DOLT_BACKUP runs in the Dolt server's process, which takes AWS_* from its own environment, not from bd's") {
+			t.Fatalf("note %q should name the procedure and the AWS family", note)
+		}
+		if !strings.Contains(note, "restart it") {
+			t.Fatalf("note %q should end with the startup-environment remedy", note)
+		}
+	})
+
+	t.Run("unknown destination stays silent", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		mock.ExpectQuery("SELECT url FROM dolt_backups").
+			WillReturnRows(sqlmock.NewRows([]string{"url"})) // no row: destination not registered
+
+		if note := BackupSyncServerEnvNote(ctx, db, "default", []string{"AWS_ACCESS_KEY_ID=AKIAFRESH"}); note != "" {
+			t.Fatalf("unknown destination should carry no note, got %q", note)
+		}
+	})
+
+	t.Run("nothing held stays silent", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		mock.ExpectQuery("SELECT url FROM dolt_backups").
+			WillReturnRows(sqlmock.NewRows([]string{"url"}).AddRow(s3URL))
+
+		if note := BackupSyncServerEnvNote(ctx, db, "default", nil); note != "" {
+			t.Fatalf("nothing held should carry no note, got %q", note)
+		}
+	})
+
+	t.Run("connection failure carries no note", func(t *testing.T) {
+		store := &DoltStore{serverMode: true, connStr: unroutableConnStr}
+
+		err := store.BackupSync(ctx, "default")
+
+		if err == nil || !strings.Contains(err.Error(), "sync backup default") {
+			t.Fatalf("err = %v, want the sync's own failure", err)
+		}
+		if strings.Contains(err.Error(), "server's process") {
+			t.Fatalf("a failure to reach the server %q must not be explained as its environment", err)
+		}
+	})
+}
+
 // TestFinishPeerPullFailureCarriesNoCredentialNote pins that a peer pull whose
 // transfer succeeded but whose post-merge is_blocked recompute failed keeps
 // the recompute's error clean (GH#5953): the note explains transfer
