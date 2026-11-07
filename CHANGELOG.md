@@ -1247,6 +1247,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a formula write target (see Security). Shell environment still wins over
   the file.
 
+- Mutating commands no longer exit 1 with `auto-export: git add failed: exit
+  status 128` when `export.git-add` is on and the beads directory is outside
+  the current directory's git repository (an exported `BEADS_DIR`, for
+  example). The export is written and nothing is staged (#4351).
 - `bd create --file` and other batch creates no longer fail with "issue
   already exists" on an id bd generated itself. The batch chose every id
   before it wrote any row, so two of its items could be handed the same short
