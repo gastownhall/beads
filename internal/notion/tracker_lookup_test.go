@@ -849,3 +849,95 @@ func TestTrackerPushBeyondQueryBound(t *testing.T) {
 		}
 	})
 }
+
+// An external_ref whose page is missing, archived, trashed or in another data
+// source falls back to the row carrying the issue's Beads ID. With no such row
+// the push is skipped with the stale-ref warning: nothing is created, and the
+// stale page is never written.
+func TestTrackerPushStaleReferenceFallsBack(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	edited := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	newer := edited.Add(30 * time.Minute)
+
+	stale := map[string]func(n int, beadsID string) (ref string, page *fakePage){
+		"missing": func(n int, _ string) (string, *fakePage) {
+			return fmt.Sprintf("bbbbbbbb-0000-4000-8000-%012d", n), nil
+		},
+		"archived": func(n int, beadsID string) (string, *fakePage) {
+			page := fakeRow(n, beadsID, edited)
+			page.Archived = true
+			return page.URL, &page
+		},
+		"trashed": func(n int, beadsID string) (string, *fakePage) {
+			page := fakeRow(n, beadsID, edited)
+			page.InTrash = true
+			return page.URL, &page
+		},
+		"foreign": func(n int, beadsID string) (string, *fakePage) {
+			page := fakeRow(n, beadsID, edited)
+			page.Parent = sourceParent("11111111-2222-4333-8444-555555555555")
+			return page.URL, &page
+		},
+	}
+
+	for name, makeStale := range stale {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeNotion(t)
+			f.hugeSource = true
+
+			// bd-update and bd-skip have a live row; bd-orphan has none.
+			var issues []*types.Issue
+			var staleIDs []string
+			for i, c := range []struct{ beadsID, title string }{
+				{"bd-update", "Changed"}, {"bd-skip", "Task bd-skip"}, {"bd-orphan", "Changed"},
+			} {
+				ref, page := makeStale(10+i, c.beadsID)
+				if page != nil {
+					f.addPages(*page)
+				}
+				staleIDs = append(staleIDs, compactID(ExtractNotionIdentifier(ref)))
+				issues = append(issues, localTask(c.beadsID, c.title, newer, ref))
+			}
+			live := fakeRow(20, "bd-update", edited)
+			f.addPages(live, fakeRow(21, "bd-skip", edited))
+
+			result, err := f.tracker().BatchPush(ctx, issues, nil)
+			if err != nil {
+				t.Fatalf("BatchPush: %v", err)
+			}
+			sort.Strings(result.Skipped)
+			if got := strings.Join(pushedIDs(result.Updated), ","); got != "bd-update" {
+				t.Fatalf("updated = %q, want bd-update", got)
+			}
+			if got := strings.Join(result.Skipped, ","); got != "bd-orphan,bd-skip" {
+				t.Fatalf("skipped = %q, want bd-orphan,bd-skip", got)
+			}
+			if len(result.Created) != 0 || len(result.Errors) != 0 {
+				t.Fatalf("created = %+v, errors = %+v, want none", result.Created, result.Errors)
+			}
+			if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "Skipped bd-orphan: Notion external_ref points outside the current target") {
+				t.Fatalf("warnings = %q, want only the stale-ref warning for bd-orphan", result.Warnings)
+			}
+			if got := result.Updated[0].ExternalRef; compactID(ExtractNotionIdentifier(got)) != compactID(live.ID) {
+				t.Fatalf("bd-update external_ref = %q, want the live row %s", got, live.ID)
+			}
+
+			reqs := f.requests()
+			if len(reqs.created) != 0 || len(reqs.updated) != 1 || reqs.updated[0] != compactID(live.ID) {
+				t.Fatalf("writes = created %v, updated %v; want only an update of %s", reqs.created, reqs.updated, live.ID)
+			}
+			for _, id := range staleIDs {
+				for _, updated := range reqs.updated {
+					if updated == id {
+						t.Fatalf("stale page %s was written", id)
+					}
+				}
+			}
+			if reqs.unfilteredQueries != 0 {
+				t.Fatalf("push sent %d unfiltered queries, want none", reqs.unfilteredQueries)
+			}
+		})
+	}
+}
