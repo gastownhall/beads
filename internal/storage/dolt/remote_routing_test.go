@@ -80,6 +80,13 @@ func TestSQLCapableCLIRoutingFallsBackWhenCLIDirIsNotDoltRepo(t *testing.T) {
 				return store.shouldUseCLIForPeerCredentialsWithError(ctx, "peer", creds)
 			},
 		},
+		{
+			name: "peer cloud auth remote",
+			route: func(store *DoltStore) (bool, error) {
+				t.Setenv("AZURE_STORAGE_ACCOUNT", "account")
+				return store.prepareCLIRouteForPeer(ctx, "peercloud", nil)
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -154,6 +161,13 @@ func TestCLIRoutingFallsBackToSQLWhenNoCLIDir(t *testing.T) {
 			name: "peer credential remote",
 			route: func(store *DoltStore) (bool, error) {
 				return store.shouldUseCLIForPeerCredentialsWithError(ctx, "peer", creds)
+			},
+		},
+		{
+			name: "peer cloud auth remote",
+			route: func(store *DoltStore) (bool, error) {
+				t.Setenv("AZURE_STORAGE_ACCOUNT", "account")
+				return store.prepareCLIRouteForPeer(ctx, "peercloud", nil)
 			},
 		},
 	}
@@ -303,12 +317,14 @@ func clearServerPortEnv(t *testing.T) {
 
 // leftoverRemoteRows lists, as the server's dolt_remotes does, the remotes
 // the CLI-route tests below route: a git-protocol default remote, a
-// git-protocol federation peer, and an Azure remote for the cloud-auth route.
+// git-protocol federation peer, an Azure remote for the cloud-auth route, and
+// an Azure federation peer for the peer cloud-auth route.
 func leftoverRemoteRows(gitURL, azURL string) *sqlmock.Rows {
 	return sqlmock.NewRows([]string{"name", "url", "params"}).
 		AddRow("origin", gitURL, nil).
 		AddRow("peer", gitURL, nil).
-		AddRow("cloud", azURL, nil)
+		AddRow("cloud", azURL, nil).
+		AddRow("peercloud", azURL, nil)
 }
 
 // TestCLIRoutesUseALeftoverDatabaseOnlyWhereBdRunsTheServer pins every CLI
@@ -344,6 +360,7 @@ func TestCLIRoutesUseALeftoverDatabaseOnlyWhereBdRunsTheServer(t *testing.T) {
 		{"local remote", func(s *DoltStore) (bool, error) { return s.shouldUseCLIForLocalRemoteWithError(ctx, "origin") }},
 		{"peer git protocol", func(s *DoltStore) (bool, error) { return s.prepareCLIRouteForPeerGitProtocol(ctx, "peer") }},
 		{"peer credential remote", func(s *DoltStore) (bool, error) { return s.prepareCLIRouteForPeerCredentials(ctx, "peer", creds) }},
+		{"peer cloud auth remote", func(s *DoltStore) (bool, error) { return s.prepareCLIRouteForPeer(ctx, "peercloud", nil) }},
 	}
 
 	for _, tc := range []struct {
@@ -401,7 +418,7 @@ func TestCLIRoutesUseALeftoverDatabaseOnlyWhereBdRunsTheServer(t *testing.T) {
 				standInForServedDatabase(t, cliDir, port)
 			}
 			initLocalDoltRepoForRemote(t, cliDir)
-			for name, url := range map[string]string{"origin": gitURL, "peer": gitURL, "cloud": azURL} {
+			for name, url := range map[string]string{"origin": gitURL, "peer": gitURL, "cloud": azURL, "peercloud": azURL} {
 				if err := doltutil.AddCLIRemote(cliDir, name, url); err != nil {
 					t.Fatalf("AddCLIRemote(%s): %v", name, err)
 				}

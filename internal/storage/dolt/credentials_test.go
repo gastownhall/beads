@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1382,5 +1383,71 @@ func TestDecryptWithKeyStaysUnwrappedForRotation(t *testing.T) {
 	}
 	if errors.Is(err, storage.ErrCredentialKeyMismatch) {
 		t.Errorf("error = %v, want the bare cipher error; classification belongs to decryptPassword", err)
+	}
+}
+
+// TestPeerCloudAuthCLIRouting: federation peer push, fetch and pull must take
+// the cloud-auth CLI route like the default remote does (GH#6, #5953) when
+// bd's environment holds credentials for the peer URL's scheme, and only
+// then: with only another scheme's variable (AZURE_STORAGE_ACCOUNT) set they
+// stay on SQL. The CLI route materializes the peer into the local CLI
+// directory before running dolt; the SQL route never writes there, so the
+// CLI remote's presence shows the route. The peer points at a closed local
+// port, so every transfer fails on either route.
+func TestPeerCloudAuthCLIRouting(t *testing.T) {
+	if realDoltTestServerRequired() && testServerPort == 0 {
+		t.Fatal("Dolt server required for peer cloud-auth routing coverage")
+	}
+	skipIfNoServer(t)
+	clearCloudAuthEnv(t)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	closedPort := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	peerURL := fmt.Sprintf("http://127.0.0.1:%d/org/beads", closedPort)
+
+	store := openCloudAuthTestStore(t, "peer_route")
+	ensureCloudAuthCLIDatabase(t, store)
+
+	ops := []struct {
+		name string
+		run  func(ctx context.Context, peer string) error
+	}{
+		{"push", store.PushTo},
+		{"fetch", store.Fetch},
+		{"pull", func(ctx context.Context, peer string) error {
+			_, err := store.PullFrom(ctx, peer)
+			return err
+		}},
+	}
+	envs := []struct {
+		name, key, value string
+		wantCLI          bool
+	}{
+		{"DOLT_REMOTE_USER", "DOLT_REMOTE_USER", "admin", true},
+		{"only AZURE_STORAGE_ACCOUNT", "AZURE_STORAGE_ACCOUNT", "account", false},
+	}
+	for i, env := range envs {
+		for _, op := range ops {
+			t.Run(env.name+"/"+op.name, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+				defer cancel()
+				t.Setenv(env.key, env.value)
+				peer := fmt.Sprintf("peer_%s_%d", op.name, i)
+				if err := store.AddRemote(ctx, peer, peerURL); err != nil {
+					t.Fatalf("AddRemote: %v", err)
+				}
+				if err := op.run(ctx, peer); err == nil {
+					t.Fatalf("%s to a closed port succeeded", op.name)
+				}
+				got := doltutil.FindCLIRemote(store.CLIDir(), peer)
+				if gotCLI := doltutil.RemoteURLsMatch(got, peerURL); gotCLI != env.wantCLI {
+					t.Errorf("%s: CLI route = %v (local CLI remote %q), want %v for %s with %s set", op.name, gotCLI, got, env.wantCLI, peerURL, env.key)
+				}
+			})
+		}
 	}
 }
