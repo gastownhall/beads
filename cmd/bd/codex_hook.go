@@ -76,7 +76,7 @@ func runCodexHook(ctx context.Context, event string, stdin io.Reader, stdout io.
 
 	switch event {
 	case codexHookSessionStart:
-		return codexHookInjectPrime(ctx, stdout, codexHookSessionStart)
+		return codexHookHandleSessionStart(ctx, input, stdout)
 	case codexHookPreCompact:
 		return codexHookPreCompactCheck(ctx, stdout)
 	case codexHookPostCompact:
@@ -86,6 +86,14 @@ func runCodexHook(ctx context.Context, event string, stdin io.Reader, stdout io.
 	default:
 		return fmt.Errorf("unsupported Codex hook event %q", event)
 	}
+}
+
+// codexHookHandleSessionStart injects full `bd prime` output into the new
+// session and clears any stale post-compaction refresh marker.
+func codexHookHandleSessionStart(ctx context.Context, input codexHookInput, stdout io.Writer) error {
+	_ = os.Remove(codexHookRefreshMarkerPath(input)) // best-effort: drop stale marker
+
+	return codexHookInjectPrime(ctx, stdout, codexHookSessionStart)
 }
 
 func codexHookInjectPrime(ctx context.Context, stdout io.Writer, event string) error {
