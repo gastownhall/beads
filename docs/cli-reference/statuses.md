@@ -22,6 +22,15 @@ Categories control behavior:
 
 Statuses without a category (legacy format) are valid but excluded from 'bd ready'.
 
+The blocked status is an explicit hold, set by hand ('bd update <id> --status
+blocked') or by a tracker sync. Dependency blocking is separate: an issue with
+an open blocker is listed by 'bd blocked' and left out of 'bd ready', whatever
+its status. Closing an issue's last blocker clears its dependency blocking but
+leaves the status as it is ('bd close --suggest-next' flags it); after review,
+release the issue with 'bd update <id> --status open'. 'bd doctor' (Blocked
+Status) and 'bd doctor --check=conventions' (conventions.blocked-status) list
+issues in status blocked whose stored dependency-blocked flag is clear.
+
 Examples:
   bd statuses            # List all statuses with icons and categories
   bd statuses --json     # Output as JSON

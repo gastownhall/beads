@@ -82,6 +82,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An issue left in status `blocked` after its dependency blocking clears is
+  now flagged instead of left invisible.** Status `blocked` is an explicit
+  hold, set by hand or by a tracker sync, and closing an issue's last blocker
+  leaves it as it is, so such an issue appeared in neither `bd ready` nor
+  `bd blocked`. `bd close --suggest-next` now prints, under each newly
+  unblocked issue still in status `blocked`, `still status 'blocked' (bd close
+  leaves it). If ready to release: bd update <id> --status open`. `bd doctor`
+  gains an advisory Blocked Status check for status-`blocked` issues whose
+  stored dependency-blocked flag is clear (count, up to five IDs, manual
+  guidance; it does not change the overall result), embedded workspaces get
+  the same check as `conventions.blocked-status` under `bd doctor
+  --check=conventions`, and `bd doctor --fix` prints review guidance for it
+  rather than a repair. Nothing changes a status on its own; `bd close
+  --suggest-next --json` output is unchanged. `bd statuses` and the
+  dependency docs now separate the status from dependency blocking.
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same

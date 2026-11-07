@@ -1285,6 +1285,7 @@ go_test(
         "status_proxied_integration_test.go",
         "status_suppressed_test.go",
         "status_test.go",
+        "statuses_blocked_test.go",
         "statuses_types_proxied_integration_test.go",
         "stdio_race_guard_test.go",
         "storage_chain_test.go",
