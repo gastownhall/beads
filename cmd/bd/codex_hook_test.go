@@ -61,15 +61,29 @@ func TestCodexHookSessionStartInjectsPrimeContext(t *testing.T) {
 		t.Fatalf("runCodexHook: %v", err)
 	}
 
+	raw := decodeCodexHookObject(t, out.Bytes())
+	if _, ok := raw["systemMessage"]; ok {
+		t.Errorf("success response must not carry a systemMessage, got %s", raw["systemMessage"])
+	}
 	var got codexHookResponse
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("parse output: %v\n%s", err, out.String())
 	}
+	if got.HookSpecificOutput == nil {
+		t.Fatalf("success response must keep hookSpecificOutput, got %s", out.String())
+	}
 	if got.HookSpecificOutput.HookEventName != codexHookSessionStart {
 		t.Fatalf("hook event = %q", got.HookSpecificOutput.HookEventName)
 	}
-	if !strings.Contains(got.HookSpecificOutput.AdditionalContext, "bd ready --json") {
-		t.Fatalf("expected prime output in additionalContext: %#v", got)
+	if got.HookSpecificOutput.AdditionalContext != "BEADS PRIME\nbd ready --json\n" {
+		t.Fatalf("additionalContext must be the unchanged prime output, got %#v", got.HookSpecificOutput.AdditionalContext)
+	}
+	var hsoFields map[string]json.RawMessage
+	if err := json.Unmarshal(raw["hookSpecificOutput"], &hsoFields); err != nil || hsoFields == nil {
+		t.Fatalf("hookSpecificOutput must be a JSON object: %v (%s)", err, raw["hookSpecificOutput"])
+	}
+	if len(hsoFields) != 2 {
+		t.Errorf("hookSpecificOutput keys = %v, want exactly hookEventName and additionalContext", hsoFields)
 	}
 }
 
@@ -162,8 +176,22 @@ func TestCodexHookPostCompactMarksAndUserPromptRefreshesOnce(t *testing.T) {
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("expected refresh marker removed, stat err=%v", err)
 	}
-	if !strings.Contains(out.String(), "REFRESHED BEADS CONTEXT") {
-		t.Fatalf("expected refreshed context, got %s", out.String())
+	raw := decodeCodexHookObject(t, out.Bytes())
+	if _, ok := raw["systemMessage"]; ok {
+		t.Errorf("refresh success must not carry a systemMessage, got %s", raw["systemMessage"])
+	}
+	var got codexHookResponse
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("parse refresh output: %v\n%s", err, out.String())
+	}
+	if got.HookSpecificOutput == nil {
+		t.Fatalf("refresh success must keep hookSpecificOutput, got %s", out.String())
+	}
+	if got.HookSpecificOutput.HookEventName != codexHookUserPromptSubmit {
+		t.Errorf("hook event = %q, want %s", got.HookSpecificOutput.HookEventName, codexHookUserPromptSubmit)
+	}
+	if got.HookSpecificOutput.AdditionalContext != "REFRESHED BEADS CONTEXT\n" {
+		t.Errorf("additionalContext must be the unchanged prime output, got %#v", got.HookSpecificOutput.AdditionalContext)
 	}
 
 	out.Reset()
