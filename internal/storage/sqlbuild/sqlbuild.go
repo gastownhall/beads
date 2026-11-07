@@ -97,7 +97,21 @@ const IssueSelectColumnsLite = IssueBaseColumnsLite + `,
 // alias). LEFT JOIN: rows without a live claim have no lease row and hydrate
 // nil lease fields.
 func LeaseJoin(tableRef string) string {
-	return "LEFT JOIN leases ON leases.issue_id = " + tableRef + ".id"
+	return "LEFT JOIN leases ON leases." + leaseJoinColumn + " = " + tableRef + ".id"
+}
+
+// leaseJoinColumn is the leases column LeaseJoin matches issue ids on.
+const leaseJoinColumn = "issue_id"
+
+// LeaseOverlayColumns are the leases columns a read through LeaseJoin needs,
+// unqualified: the join column and the LeaseSelectColumns. A read-only open
+// checks for them (schema.CheckReadableDrift) beside the issue columns.
+func LeaseOverlayColumns() []string {
+	columns := []string{leaseJoinColumn}
+	for _, column := range ColumnNames(LeaseSelectColumns) {
+		columns = append(columns, strings.TrimPrefix(column, "leases."))
+	}
+	return columns
 }
 
 // QueryBatchSize bounds IN-clause sizes when long ID lists are folded into

@@ -423,8 +423,8 @@ type Config struct {
 	// RequireReadableSchema makes an open that will not migrate the database
 	// (ReadOnly, or Gateway, whose server owns the schema) refuse one whose
 	// schema is behind this binary's and lacks a column the shared issue
-	// projection selects, with *schema.SchemaBehindError
-	// (schema.CheckReadableDrift). Such a database cannot answer a single
+	// projection selects or the lease overlay it joins, with
+	// *schema.SchemaBehindError (schema.CheckReadableDrift). Such a database cannot answer a single
 	// issue read; without the check the open succeeds and every list, show
 	// and ready fails afterwards on an unknown column. A behind database that
 	// has every projected column still opens, so reads keep working through
@@ -2143,20 +2143,22 @@ var dialServer = net.DialTimeout
 // issueProjectionColumns are the columns every issue read selects from the
 // row (sqlbuild.IssueBaseColumns, shared by both planes). checkOpenSchemaDrift
 // requires them on issues, the replicated table whose shape the schema cursor
-// describes.
+// describes, and the lease overlay those reads join on leases.
 var issueProjectionColumns = sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)
 
 // checkOpenSchemaDrift is newServerMode's schema drift check. Every open
 // refuses a database ahead of this binary (schema.CheckForwardDrift). An open
 // that will not migrate and sets Config.RequireReadableSchema also refuses,
-// from the same version read, one behind it that lacks a projected column
-// (schema.CheckReadableDrift). Through a gateway that refusal names the
-// server administrator's remedy, since bd never migrates a gateway's schema.
+// from the same version read, one behind it that lacks a projected column or
+// the lease overlay (schema.CheckReadableDrift). Through a gateway that
+// refusal names the server administrator's remedy, since bd never migrates a gateway's schema.
 func checkOpenSchemaDrift(ctx context.Context, db *sql.DB, cfg *Config) error {
 	if !cfg.RequireReadableSchema || (!cfg.ReadOnly && !cfg.Gateway) {
 		return schema.CheckForwardDrift(ctx, db)
 	}
-	err := schema.CheckReadableDrift(ctx, db, "issues", issueProjectionColumns)
+	err := schema.CheckReadableDrift(ctx, db,
+		schema.ReadableRequirement{Table: "issues", Columns: issueProjectionColumns},
+		schema.ReadableRequirement{Table: "leases", Columns: sqlbuild.LeaseOverlayColumns()})
 	var behind *schema.SchemaBehindError
 	if cfg.Gateway && errors.As(err, &behind) {
 		behind.Gateway = true

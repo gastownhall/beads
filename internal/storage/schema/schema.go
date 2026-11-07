@@ -323,20 +323,30 @@ func behindDriftError(currentVersion int) error {
 	return &SchemaBehindError{DBVersion: currentVersion, BinaryVersion: LatestVersion()}
 }
 
+// ReadableRequirement names a table and the columns of it that a caller's
+// reads select.
+type ReadableRequirement struct {
+	Table   string
+	Columns []string
+}
+
 // CheckReadableDrift is the drift check for an open that reads a database at
 // its current schema instead of migrating it: a read-only open, or one through
 // a gateway server, which owns its schema. From one version read it refuses
 // forward drift as CheckForwardDrift does, and a database BEHIND the binary
-// only when table lacks one of columns, the columns the caller's reads
-// select, with CheckBehindDrift's *SchemaBehindError and escape hatch.
+// only when one of requirements' tables, or one of its columns, is missing:
+// the tables and columns the caller's reads select. The refusal is
+// CheckBehindDrift's *SchemaBehindError, with its escape hatch.
 //
 // A behind database that has all of them stays open: it keeps serving reads
 // at its current schema until its operator consents to the migration
 // (bd-578h9.5, gastownhall/beads#5920). One that lacks any of them cannot
 // answer a single such read, and without this check it would open fine and
-// then fail every read with an unknown-column error. A database at the
-// binary's version costs only the version read CheckForwardDrift makes.
-func CheckReadableDrift(ctx context.Context, db DBConn, table string, columns []string) error {
+// then fail every read with an unknown-column or missing-table error
+// (gastownhall/beads#6929: the leases overlay every issue read joins). A
+// database at the binary's version costs only the version read
+// CheckForwardDrift makes.
+func CheckReadableDrift(ctx context.Context, db DBConn, requirements ...ReadableRequirement) error {
 	currentVersion, err := CurrentVersion(ctx, db)
 	if err != nil {
 		return fmt.Errorf("schema drift check: %w", err)
@@ -344,14 +354,16 @@ func CheckReadableDrift(ctx context.Context, db DBConn, table string, columns []
 	if currentVersion >= LatestVersion() {
 		return forwardDriftError(currentVersion)
 	}
-	missing, err := missingColumns(ctx, db, table, columns)
-	if err != nil {
-		return fmt.Errorf("schema drift check: %w", err)
+	for _, req := range requirements {
+		missing, err := missingColumns(ctx, db, req.Table, req.Columns)
+		if err != nil {
+			return fmt.Errorf("schema drift check: %w", err)
+		}
+		if len(missing) > 0 {
+			return behindDriftError(currentVersion)
+		}
 	}
-	if len(missing) == 0 {
-		return nil
-	}
-	return behindDriftError(currentVersion)
+	return nil
 }
 
 // missingColumns returns the entries of columns that table lacks, all of them

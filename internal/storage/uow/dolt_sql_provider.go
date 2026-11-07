@@ -505,10 +505,12 @@ func readThroughRefusedMigration(ctx context.Context, conn *sql.Conn, database s
 	}
 	// Reading on at the current schema works only while this binary's issue
 	// reads can query it. A schema that lacks a column the shared projection
-	// selects would answer every one of them with an unknown-column error, so
-	// it is refused here as server mode's read-only open refuses it
-	// (dolt.Config.RequireReadableSchema).
-	if err := schema.CheckReadableDrift(ctx, conn, "issues", sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)); err != nil {
+	// selects, or the leases overlay it joins, would answer every one of them
+	// with an unknown-column or missing-table error, so it is refused here as
+	// server mode's read-only open refuses it (dolt.Config.RequireReadableSchema).
+	if err := schema.CheckReadableDrift(ctx, conn,
+		schema.ReadableRequirement{Table: "issues", Columns: sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)},
+		schema.ReadableRequirement{Table: "leases", Columns: sqlbuild.LeaseOverlayColumns()}); err != nil {
 		if isSerializationError(err) {
 			return err
 		}
