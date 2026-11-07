@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // Tests for openForeignProxiedExternalRead, the foreign read of a
@@ -243,6 +244,66 @@ func TestForeignProxiedExternalReadGateStaysUnconfirmed(t *testing.T) {
 			if want != "" && !strings.Contains(err.Error(), want) {
 				t.Errorf("err = %v, want it to name %q", err, want)
 			}
+			assertBeadGatePendingUnconfirmed(t, err)
+		})
+	}
+}
+
+// unconfirmedBeadGateGetter answers every lookup with a pre-built error, the
+// way routedBeadGateGetter hands prefixRoutedBeadGateTarget's error through,
+// so the gate outcome of a real unconfirmed error can be asserted without a
+// store.
+type unconfirmedBeadGateGetter struct{ err error }
+
+func (g unconfirmedBeadGateGetter) GetIssue(context.Context, string) (*types.Issue, error) {
+	return nil, g.err
+}
+
+// assertBeadGatePendingUnconfirmed checks the gate outcome of err, a routed
+// target's lookup error: pending with the unconfirmed reason, neither
+// resolved as gone nor a hard error.
+func assertBeadGatePendingUnconfirmed(t *testing.T, err error) {
+	t.Helper()
+	resolved, reason, gateErr := checkBeadGate(context.Background(), unconfirmedBeadGateGetter{err: err}, "gt-target1")
+	if gateErr != nil {
+		t.Fatalf("an unconfirmed target is a pending gate, not an error: %v", gateErr)
+	}
+	if resolved {
+		t.Fatalf("an unconfirmed target must not resolve the gate: %s", reason)
+	}
+	if !strings.Contains(reason, "cannot confirm") {
+		t.Fatalf("pending reason should say the absence is unconfirmed, got: %q", reason)
+	}
+}
+
+// TestForeignProxiedExternalReadManagedLocalGateStaysUnconfirmed is AC-5 for
+// a rig whose server bd manages (no sidecar, or one naming no external
+// server): its gate target keeps the typed proxy.store.unrouted refusal,
+// wrapped as errBeadGateTargetUnconfirmed, so the gate stays pending rather
+// than reading the refusal as the bead being gone.
+func TestForeignProxiedExternalReadManagedLocalGateStaysUnconfirmed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		sidecar *configfile.ProxiedServerClientInfo
+	}{
+		{"absent_sidecar", nil},
+		{"managed_local_sidecar", &configfile.ProxiedServerClientInfo{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := externalReadTown(t, nil)
+			if tc.sidecar != nil {
+				if err := configfile.SaveProxiedServerClientInfo(rig, tc.sidecar); err != nil {
+					t.Fatal(err)
+				}
+			}
+			issue, err := prefixRoutedBeadGateTarget(context.Background(), "gt-target1")
+			if issue != nil {
+				t.Fatalf("got bead %s from a managed-local rig", issue.ID)
+			}
+			if !errors.Is(err, errBeadGateTargetUnconfirmed) || !isProxiedStoreUnrouted(err) {
+				t.Fatalf("err = %v, want proxy.store.unrouted wrapped as errBeadGateTargetUnconfirmed", err)
+			}
+			assertBeadGatePendingUnconfirmed(t, err)
 		})
 	}
 }
