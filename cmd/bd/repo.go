@@ -46,7 +46,9 @@ var repoAddCmd = &cobra.Command{
 	Long: `Add a repository path to the repos.additional list in config.yaml.
 
 The path should point to a directory containing a .beads folder.
-Paths can be absolute or relative (they are stored as-is).
+A relative path is resolved to an absolute path at add time, so the
+stored entry names the same workspace no matter which directory later
+commands run from.
 
 This modifies .beads/config.yaml, which is version-controlled and
 shared across all clones of this repository.`,
@@ -69,13 +71,7 @@ shared across all clones of this repository.`,
 		if remotecache.IsRemoteURL(repoPath) {
 			fmt.Fprintf(os.Stderr, "Adding remote repository: %s\n", repoPath)
 		} else {
-			expandedPath := repoPath
-			if len(repoPath) > 0 && repoPath[0] == '~' {
-				home, err := os.UserHomeDir()
-				if err == nil {
-					expandedPath = filepath.Join(home, repoPath[1:])
-				}
-			}
+			expandedPath := expandRepoTilde(repoPath)
 
 			beadsDir := filepath.Join(expandedPath, ".beads")
 			if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
@@ -88,19 +84,27 @@ shared across all clones of this repository.`,
 			return HandleError("failed to find config.yaml: %v", err)
 		}
 
-		if err := config.AddRepo(configPath, repoPath); err != nil {
+		// Resolve the target once, at add time: every consumer re-resolves a
+		// stored relative string against its own cwd, so it would name a
+		// different repository per directory (bd-59llyl).
+		storedPath, err := normalizeRepoPathForStorage(repoPath)
+		if err != nil {
+			return HandleError("failed to resolve repository path %s: %v", repoPath, err)
+		}
+
+		if err := config.AddRepo(configPath, storedPath); err != nil {
 			return HandleError("failed to add repository: %v", err)
 		}
 
 		if jsonOutput {
 			result := map[string]interface{}{
 				"added": true,
-				"path":  repoPath,
+				"path":  storedPath,
 			}
 			return json.NewEncoder(os.Stdout).Encode(result)
 		}
 
-		fmt.Printf("Added repository: %s\n", repoPath)
+		fmt.Printf("Added repository: %s\n", storedPath)
 		fmt.Printf("Run 'bd repo sync' to hydrate issues from this repository.\n")
 		return nil
 	},
@@ -329,13 +333,7 @@ Also triggers Dolt push/pull if a remote is configured.`,
 			}
 
 			// Local path: expand tilde
-			expandedPath := repoPath
-			if len(repoPath) > 0 && repoPath[0] == '~' {
-				home, err := os.UserHomeDir()
-				if err == nil {
-					expandedPath = filepath.Join(home, repoPath[1:])
-				}
-			}
+			expandedPath := expandRepoTilde(repoPath)
 
 			// Resolve to absolute path for consistent mtime caching
 			absPath, err := filepath.Abs(expandedPath)
@@ -429,6 +427,28 @@ Also triggers Dolt push/pull if a remote is configured.`,
 		}
 		return nil
 	},
+}
+
+// expandRepoTilde expands a leading `~` to the user's home directory.
+// `bd repo add` (validating the target) and `bd repo sync` (resolving a
+// configured entry) both read a path through this helper, so add-time
+// validation and use-time resolution cannot drift apart. A home-directory
+// lookup that fails leaves the path unchanged.
+func expandRepoTilde(path string) string {
+	if len(path) > 0 && path[0] == '~' {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, path[1:])
+		}
+	}
+	return path
+}
+
+// normalizeRepoPathForStorage returns the entry `bd repo add` persists for
+// arg. A relative target is resolved against the working directory once, at
+// add time: every consumer re-resolves a stored relative string against its
+// own cwd, so it would name a different repository per directory (bd-59llyl).
+func normalizeRepoPathForStorage(arg string) (string, error) {
+	return filepath.Abs(arg)
 }
 
 // parseIssuesFromJSONL reads and parses issues from a JSONL file.
