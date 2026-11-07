@@ -128,12 +128,12 @@ func TestInitFreshWithUnreachableGitOriginSucceeds(t *testing.T) {
 
 // unverifiedRemoteRefusalPhrase is the What line of the refusal init prints
 // when the refs/dolt/data probe failed: it must say the history could not be
-// verified, never that the remote already has it (gascity#7665).
+// verified, never that the remote already has it (GH#7665).
 const unverifiedRemoteRefusalPhrase = "could not verify whether the remote has Dolt history"
 
 // TestInitReinitLocalWithUnreachableGitOriginRefusesUnverified is the
 // override-path twin of TestInitFreshWithUnreachableGitOriginSucceeds
-// (gascity#7665). A remote the probe cannot read is UNKNOWN, and ADR-0002
+// (GH#7665). A remote the probe cannot read is UNKNOWN, and ADR-0002
 // keeps an unknown remote fail-closed for local-source overrides, so init
 // still refuses with ExitRemoteDivergenceRefused before creating anything.
 // What changed is the diagnosis: nothing confirmed history, so the refusal
@@ -526,7 +526,7 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 // with confirmed history gets, for every supported flag/token/TTY
 // combination: same action, same exit code, same destroy-token reason. The
 // one permitted difference is the override-without-discard refusal, which
-// must carry its own reason and say the history is unverified (gascity#7665).
+// must carry its own reason and say the history is unverified (GH#7665).
 // RemoteProbeUnknown alone (RemoteHasDoltData left false) is held to the
 // same contract: unknown is never "no remote data".
 func TestCheckRemoteSafety_UnknownRemoteMatchesConfirmed(t *testing.T) {

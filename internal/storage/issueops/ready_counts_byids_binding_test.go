@@ -13,7 +13,7 @@ import (
 )
 
 // TestReadyCountsByIDsPageBindsEveryInjectionPoint pins the by-IDs counts
-// mega-query's placeholder/arg alignment (gascity#7666): the guarded
+// mega-query's placeholder/arg alignment (GH#7666): the guarded
 // per-column reverse-blocker unions bind the page once per branch — three
 // durable branches plus three wisp branches — on top of the labels, dc, cc,
 // pc, deps and driver points, so a page of two ids binds 24 parameters in

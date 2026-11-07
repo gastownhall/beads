@@ -281,6 +281,7 @@
 40 12 TestHistoryPresenceContract
 40 12 TestLifecycleUpdateContract
 40 12 TestReaderListExcludeStatusAcceptsAWorkspaceCustomStatus
+40 12 TestReadyCountsByIDsMatchPredicateForm
 
 40 13 TestEmbeddedActivationDoesNotOpenTheEngine
 40 13 TestEmbeddedDepRekeyConvergesRenameChain
@@ -555,6 +556,7 @@
 40 31 TestWithPeerAuth_KeyMismatchFailsClosed
 
 40 32 TestCurrentAddressForNeverReseedsAnAbsentStoreEpochRow
+40 32 TestDependentCountsMatchCoalesceOracle
 40 32 TestEmbeddedClaimerGrantsALiveLeaseOnTheRowItWonAndLeavesARefusedOneAlone
 40 32 TestEmbeddedDependencyEditorRefusesAMissingLocalTarget
 40 32 TestEmbeddedDirtyTablesGate_BlocksReopenThenWorkingSetReconcileRecovers
@@ -568,6 +570,7 @@
 40 32 TestRemoteVerbPlainRemoteKeepsAmbientEnv
 40 32 TestWithPeerAuth_MissingRemoteFailsClosed
 
+40 33 TestDependentCountPlansUseTargetIndexes
 40 33 TestEmbeddedBatchCloserDuplicateItemRecloseAtItsOwnIndex
 40 33 TestEmbeddedDependencyEditorClosedChildAddSatisfiesAnAnyChildrenGate
 40 33 TestEmbeddedDependencyEditorValidationRefusalsWriteNothing

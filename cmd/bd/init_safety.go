@@ -272,6 +272,8 @@ func refusalMessageUnverified() string {
   Next:
     Fix access to the remote, then check it:
       git ls-remote <remote-url> refs/dolt/data
+    This probe reads only git remotes; a Dolt-native remote (DoltHub,
+    aws://, gs://, file://) always fails it, so use an option below.
 
     Initialize without connecting that remote:
       add --remote "" to this bd init command

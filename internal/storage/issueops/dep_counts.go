@@ -70,7 +70,7 @@ func countDistinctEdges(ctx context.Context, tx DBTX, anchorExpr, farCol, farGua
 // countInboundEdges is countDistinctEdges for the In direction, where the
 // anchor is the target. Each plane is read as sqlbuild.DepTargetUnion's guarded
 // per-column branches rather than through DepTargetExpr, so every branch can
-// seek a target-column index instead of scanning the table (gascity#7666).
+// seek a target-column index instead of scanning the table (GH#7666).
 // The type filter sits inside each counted branch; the durable union that
 // excludes wisp rows is unfiltered, as in countDistinctEdges.
 func countInboundEdges(ctx context.Context, tx DBTX, typeClause, targetID string, typeArgs []any) (int64, error) {
@@ -107,7 +107,7 @@ func countInboundEdges(ctx context.Context, tx DBTX, typeClause, targetID string
 // wisp_dependencies joined to wisps, summed, so a wisp dependent counts the way
 // GetDependentsWithMetadata lists it. Each plane is one query over
 // sqlbuild.DepTargetUnion's guarded per-column branches, so the target match
-// can seek an index instead of scanning the edge table (gascity#7666). The
+// can seek an index instead of scanning the edge table (GH#7666). The
 // join hints keep the edge table the outer side, probing the home table by
 // primary key per matched edge; without them Dolt drives the join from a
 // status index range or a merge join over the whole edge table. A missing

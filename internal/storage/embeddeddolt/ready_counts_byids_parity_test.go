@@ -20,7 +20,7 @@ func nullDepArg(v string) any {
 
 // TestReadyCountsByIDsMatchPredicateForm is the embedded twin of dolt's
 // by-IDs/predicate parity test for the guarded reverse-blocker rewrite
-// (gascity#7666): a bounded ready page hydrates through SearchCountsSQL's
+// (GH#7666): a bounded ready page hydrates through SearchCountsSQL's
 // by-IDs form — rc subquery a guarded per-column union per plane — and must
 // project exactly what the unbounded predicate form projects, over blocker
 // edges in every target column, a non-blocks edge rc ignores, and wisp-plane

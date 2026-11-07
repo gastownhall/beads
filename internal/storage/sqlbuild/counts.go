@@ -148,7 +148,7 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 	// The predicate form counts every blocker. The by-IDs form counts only
 	// the page's, matching each bare target column in its own branch
 	// (DepTargetUnion) so every branch can seek a target index; a page-wide
-	// `DepTargetExpr IN (...)` gives Dolt nothing to seek (gascity#7666).
+	// `DepTargetExpr IN (...)` gives Dolt nothing to seek (GH#7666).
 	reverseBlockers := func(table string) string {
 		if byIDs {
 			return DepTargetUnion(table, "", func(col string) string { return col + " AS dep_id" },

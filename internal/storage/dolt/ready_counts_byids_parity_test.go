@@ -19,7 +19,7 @@ func nullDepArg(v string) any {
 }
 
 // TestReadyCountsByIDsMatchPredicateForm is the results-match leg of the
-// by-IDs reverse-blocker rewrite (gascity#7666): a bounded ready page — which
+// by-IDs reverse-blocker rewrite (GH#7666): a bounded ready page — which
 // hydrates through SearchCountsSQL's by-IDs form, whose rc subquery is now
 // the guarded per-column union per plane — must project exactly what the
 // unbounded page's predicate form projects, over a fixture that puts blocker

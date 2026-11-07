@@ -58,7 +58,7 @@ func edgeAccesses(plan string) []edgeAccess {
 // failure under test here rather than an unrecognized format. A plan in which
 // no dependency-table read is recognized at all fails rather than skips: a
 // skip would silently pass a supported engine's scan plan, the very shape
-// these gates exist to catch (gascity#7666).
+// these gates exist to catch (GH#7666).
 func explainEdgePlan(t *testing.T, tx *sql.Tx, st recordedStatement) string {
 	t.Helper()
 	plan := explainPlanText(t, tx, st)
@@ -129,7 +129,7 @@ func assertTargetSeeks(t *testing.T, plan, target string, want int, unseekable m
 // (CountDependencyEdgesInTx's In leg, typed and untyped, and
 // CountDependentsByStatusInTx) seek the dependency tables by target. Matching
 // the COALESCE'd target expression instead left Dolt nothing to seek, so every
-// count read every edge in both planes (gascity#7666). The plans are checked
+// count read every edge in both planes (GH#7666). The plans are checked
 // twice: first with the wisp plane empty and without statistics, the case
 // where Dolt is likeliest to range over a precedence guard's NULLs instead,
 // then with every target column of both planes populated.

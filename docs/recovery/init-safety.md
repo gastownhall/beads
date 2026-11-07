@@ -122,11 +122,16 @@ this section is the one that applies.
 You selected local history (`--force`, `--reinit-local`, or `--from-jsonl`)
 without `--discard-remote`, and `bd` could not read the remote's
 `refs/dolt/data`: the remote does not exist, needs credentials this shell
-does not have, or the network failed. An unreadable remote might still hold
-your team's history, so `bd` refuses exactly as it would for confirmed
+does not have, or the network failed. The probe is `git ls-remote`, so it
+also always fails on a Dolt-native remote (DoltHub, `aws://`, `gs://`,
+`file://`), which is not a git repository. An unreadable remote might still
+hold your team's history, so `bd` refuses exactly as it would for confirmed
 history ([ADR 0002](https://github.com/gastownhall/beads/blob/main/engdocs/adr/0002-init-safety-invariants.md)
 treats an unknown remote as having history). A plain `bd init` without
-those flags is not refused here: it falls back to a fresh local database.
+those flags is not refused here. When the remote is the git origin, it
+falls back to a fresh local database. When it is a configured
+`sync.remote`, it tries to clone that remote instead, and exits with code 1
+(`failed to clone remote`) if the clone cannot read it.
 
 **Recovery paths**
 
@@ -139,6 +144,10 @@ git ls-remote <remote-url> refs/dolt/data
 Once that command succeeds, re-run your `bd init`. If it prints a
 `refs/dolt/data` line, the remote does have history: adopt it with
 `bd bootstrap`, or follow [init-force-refused](#init-force-refused).
+
+This path is for git remotes only. `git ls-remote` can never read a
+Dolt-native remote, so `bd init` cannot verify one: adopt its history with
+`bd bootstrap`, which reads it through Dolt, or take path 2 or 3.
 
 ### 2. Initialize without connecting that remote
 

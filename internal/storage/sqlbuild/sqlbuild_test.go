@@ -601,7 +601,7 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	}
 	// The reverse-blocker count matches the page on each bare target column,
 	// which Dolt can seek, not on the COALESCE'd target, which it cannot
-	// (gascity#7666). Each plane contributes one branch per column.
+	// (GH#7666). Each plane contributes one branch per column.
 	if strings.Contains(byIDs, DepTargetExpr+" IN (") {
 		t.Errorf("by-IDs reverse-blocker count matches the COALESCE'd target:\n%s", byIDs)
 	}

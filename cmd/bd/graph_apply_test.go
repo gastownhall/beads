@@ -53,7 +53,7 @@ func TestDocsGraphPlanExampleValidates(t *testing.T) {
 }
 
 // TestGraphPlanHelpDocumentsEdgeDirection pins the direction contract of
-// plan edges (gascity#7664): the from endpoint is the dependent and the to
+// plan edges (GH#7664): the from endpoint is the dependent and the to
 // endpoint is what it depends on — the roles `bd dep add
 // [issue-id] [depends-on-id]` assigns its two positionals. The supplement
 // once said nothing about direction, leaving readers to guess which endpoint

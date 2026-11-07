@@ -15,7 +15,7 @@ import (
 
 // TestDependentCountsMatchCoalesceOracle is the parity guard for the guarded
 // per-column UNION ALL rewrite of the inbound dependency counts
-// (gascity#7666): CountDependencyEdgesInTx's In direction and
+// (GH#7666): CountDependencyEdgesInTx's In direction and
 // CountDependentsByStatus must return exactly what their old COALESCE
 // queries computed, over durable/wisp edges covering every target column,
 // mixed types and source statuses, an external value that collides with a
