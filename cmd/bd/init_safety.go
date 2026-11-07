@@ -158,8 +158,10 @@ type RemoteSafetyDecision struct {
 // function — never add a new `&& !someFlag` at the call site. See the
 // guard matrix test in init_safety_test.go.
 func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
-	// No remote data → no cross-boundary concern. Proceed.
-	if !in.RemoteHasDoltData {
+	// No remote data → no cross-boundary concern. Proceed. An unknown probe
+	// result is never "no data", even if a caller left RemoteHasDoltData
+	// false: ADR-0002 treats unknown as has-data.
+	if !in.RemoteHasDoltData && !in.RemoteProbeUnknown {
 		return RemoteSafetyDecision{Action: ActionNoRemoteData, Reason: "no-remote-data"}
 	}
 

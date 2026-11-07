@@ -10,6 +10,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -520,6 +521,89 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 	}
 }
 
+// TestCheckRemoteSafety_UnknownRemoteMatchesConfirmed pins that an UNKNOWN
+// remote (the refs/dolt/data probe failed) gets exactly the decision a remote
+// with confirmed history gets, for every supported flag/token/TTY
+// combination: same action, same exit code, same destroy-token reason. The
+// one permitted difference is the override-without-discard refusal, which
+// must carry its own reason and say the history is unverified (gascity#7665).
+// RemoteProbeUnknown alone (RemoteHasDoltData left false) is held to the
+// same contract: unknown is never "no remote data".
+func TestCheckRemoteSafety_UnknownRemoteMatchesConfirmed(t *testing.T) {
+	type flags struct{ force, reinit, jsonl, discard, interactive bool }
+	tokens := []struct{ name, supplied string }{
+		{"no-token", ""}, {"wrong-token", "DESTROY-wrong"}, {"matching-token", "DESTROY-bd"},
+	}
+	for mask := 0; mask < 1<<5; mask++ {
+		f := flags{mask&1 != 0, mask&2 != 0, mask&4 != 0, mask&8 != 0, mask&16 != 0}
+		for _, tok := range tokens {
+			base := RemoteSafetyInput{
+				Force: f.force, ReinitLocal: f.reinit, FromJSONL: f.jsonl, DiscardRemote: f.discard,
+				IsInteractive: f.interactive, DestroyToken: tok.supplied, ExpectedToken: "DESTROY-bd",
+			}
+			name := fmt.Sprintf("force=%t/reinit=%t/jsonl=%t/discard=%t/tty=%t/%s",
+				f.force, f.reinit, f.jsonl, f.discard, f.interactive, tok.name)
+			t.Run(name, func(t *testing.T) {
+				confirmedIn := base
+				confirmedIn.RemoteHasDoltData = true
+				confirmed := CheckRemoteSafety(confirmedIn)
+
+				unknownIn := confirmedIn
+				unknownIn.RemoteProbeUnknown = true
+				unknownOnlyIn := base
+				unknownOnlyIn.RemoteProbeUnknown = true
+
+				for label, in := range map[string]RemoteSafetyInput{"unknown": unknownIn, "unknown-only": unknownOnlyIn} {
+					got := CheckRemoteSafety(in)
+					if got.Action != confirmed.Action || got.ExitCode != confirmed.ExitCode {
+						t.Errorf("%s: (Action, ExitCode) = (%v, %d) reason=%q, want confirmed-history (%v, %d) reason=%q",
+							label, got.Action, got.ExitCode, got.Reason, confirmed.Action, confirmed.ExitCode, confirmed.Reason)
+						continue
+					}
+					if confirmed.Reason != "force-without-discard-remote" {
+						if got.Reason != confirmed.Reason || got.UserMessage != confirmed.UserMessage {
+							t.Errorf("%s: reason=%q, want confirmed-history reason %q with the same message", label, got.Reason, confirmed.Reason)
+						}
+						continue
+					}
+					if got.Reason != "remote-unverified-without-discard-remote" {
+						t.Errorf("%s: reason = %q, want remote-unverified-without-discard-remote", label, got.Reason)
+					}
+					if !strings.Contains(got.UserMessage, unverifiedRemoteRefusalPhrase) || strings.Contains(got.UserMessage, "already has Dolt history") {
+						t.Errorf("%s: refusal must say the history is unverified, not confirmed:\n%s", label, got.UserMessage)
+					}
+				}
+				if confirmed.Reason == "force-without-discard-remote" && !strings.Contains(confirmed.UserMessage, "already has Dolt history") {
+					t.Errorf("confirmed-history refusal lost its confirmed wording:\n%s", confirmed.UserMessage)
+				}
+			})
+		}
+	}
+}
+
+// TestCheckRemoteSafety_UnverifiedRefusalTextNoEcho holds the
+// unverified-remote refusal to the same error-text contract as the
+// confirmed-history one: safe tools and the help topic, never a complete
+// destructive invocation or a token value.
+func TestCheckRemoteSafety_UnverifiedRefusalTextNoEcho(t *testing.T) {
+	msg := CheckRemoteSafety(RemoteSafetyInput{RemoteHasDoltData: true, RemoteProbeUnknown: true, ReinitLocal: true}).UserMessage
+	for _, banned := range []string{
+		"bd init --force --discard-remote --destroy-token",
+		"bd init --reinit-local --discard-remote --destroy-token",
+		"--discard-remote --destroy-token",
+		"DESTROY-",
+	} {
+		if strings.Contains(msg, banned) {
+			t.Errorf("unverified refusal contains destructive echo %q:\n%s", banned, msg)
+		}
+	}
+	for _, must := range []string{"bd bootstrap", "bd doctor", "bd help init-safety", "git ls-remote", `--remote ""`} {
+		if !strings.Contains(msg, must) {
+			t.Errorf("unverified refusal does not name %q:\n%s", must, msg)
+		}
+	}
+}
+
 // TestCheckRemoteSafety_TokenRefusalDistinguishesPresence pins which refusal
 // text each exit-12 path gets. The distinction is load-bearing, not cosmetic:
 // the missing-token message tells the user to "re-run interactively ... and
@@ -659,6 +743,14 @@ func TestHandleRemoteSafetyDecision_RefusalSeam(t *testing.T) {
 			"refuse-divergence aborts with 10",
 			RemoteSafetyDecision{
 				Action: ActionRefuseDivergence, Reason: "force-without-discard-remote",
+				ExitCode: ExitRemoteDivergenceRefused, UserMessage: "refusal",
+			},
+			false, ExitRemoteDivergenceRefused,
+		},
+		{
+			"refuse-unverified aborts with 10",
+			RemoteSafetyDecision{
+				Action: ActionRefuseDivergence, Reason: "remote-unverified-without-discard-remote",
 				ExitCode: ExitRemoteDivergenceRefused, UserMessage: "refusal",
 			},
 			false, ExitRemoteDivergenceRefused,
