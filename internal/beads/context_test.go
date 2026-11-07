@@ -484,6 +484,8 @@ func TestIsPathInSafeBoundary_OwnServiceHome(t *testing.T) {
 
 		{"no account home configured", func() string { return "" }, filepath.Join(home, ".beads"), false},
 		{"account home missing from disk", func() string { return filepath.Join(serviceRoot, "no-such-service") }, filepath.Join(serviceRoot, "no-such-service", ".beads"), false},
+		{"account home is the service root itself", func() string { return serviceRoot }, filepath.Join(home, ".beads"), false},
+		{"account home outside the service root", func() string { return fixtureBase }, filepath.Join(home, ".beads"), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -581,6 +583,16 @@ func TestInOwnServiceHome(t *testing.T) {
 		{"symlink escaping the home to a sibling", filepath.Join(escapeToSibling, ".beads"), root, accountHome, euid, false},
 		{"symlink escaping the service root", filepath.Join(escapeOut, ".beads"), root, accountHome, euid, false},
 		{"home alias resolving to the root itself", filepath.Join(home, ".beads"), root, func() string { return aliasToRoot }, euid, false},
+
+		{"uid 0 is never admitted", filepath.Join(home, ".beads"), root, accountHome, 0, false},
+		{"negative uid", filepath.Join(home, ".beads"), root, accountHome, -1, false},
+		{"uid that does not own the home", filepath.Join(home, ".beads"), root, accountHome, euid + 1, false},
+		{"empty home", filepath.Join(home, ".beads"), root, func() string { return "" }, euid, false},
+		{"relative home", filepath.Join(home, ".beads"), root, func() string { return "svc" }, euid, false},
+		{"missing home", filepath.Join(home, ".beads"), root, func() string { return filepath.Join(root, "nothere") }, euid, false},
+		{"non-directory home", filepath.Join(home, ".beads"), root, func() string { return filepath.Join(root, "afile") }, euid, false},
+		{"home equal to the service root", filepath.Join(home, ".beads"), root, func() string { return root }, euid, false},
+		{"home outside the service root", filepath.Join(home, ".beads"), root, func() string { return base }, euid, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
