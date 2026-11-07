@@ -45,8 +45,10 @@ func TestEveryTimedProviderAccessorBindsToTheWrapper(t *testing.T) {
 			continue
 		}
 		// NewUOW is the layer itself and Close is lifecycle; neither constructs
-		// a role. Everything else on this type is an accessor.
-		if fn.Name.Name == "NewUOW" || fn.Name.Name == "Close" {
+		// a role. FenceProvider constructs none either: it answers which provider
+		// holds the GET_LOCK fence, and that fence is no unit of work to time.
+		// Everything else on this type is an accessor.
+		if fn.Name.Name == "NewUOW" || fn.Name.Name == "Close" || fn.Name.Name == "FenceProvider" {
 			continue
 		}
 		recv := "p"
