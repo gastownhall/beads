@@ -65,6 +65,14 @@ Every metric and span carries the OTel resource describing the bd process:
 |-----------|-------|-------|
 | `service.name` | `bd` | Override with `OTEL_SERVICE_NAME`. |
 | `service.version` | bd version | |
+| `host.name` | hostname | |
+| `process.pid`, `process.executable.name` | pid, `bd` | |
+| `process.runtime.name`, `process.runtime.version`, `process.runtime.description` | Go runtime | |
+
+The resource never carries the command line (`process.command_args`), the
+executable path or the OS user name (`process.owner`): the command line can
+hold secrets and search text, and the other two identify the user. The
+command's scrubbed arguments are on the command span only (`bd.args`).
 
 Add anything else via `OTEL_RESOURCE_ATTRIBUTES`.
 
