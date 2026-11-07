@@ -2074,8 +2074,8 @@ func testEmbeddedInitGitBootstrapRouting(t *testing.T, names ...string) {
 // TestEmbeddedContributorRoutingMissingPlanningRepo pins GH#5957 end to end:
 // once a fork's planning repo is deleted, routed commands fail naming the
 // repo, the contributor routing that chose it, how to restore it and how to
-// opt out, and recreate nothing; bd create still starts an empty planning
-// store.
+// opt out, and recreate nothing (bd list/ready included, rather than an
+// empty result); bd create still starts an empty planning store.
 func TestEmbeddedContributorRoutingMissingPlanningRepo(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
@@ -2121,6 +2121,8 @@ func TestEmbeddedContributorRoutingMissingPlanningRepo(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &created); err != nil || created.ID == "" {
 		t.Fatalf("bd create --json = %q: %v", stdout, err)
 	}
+	planningBeadsDir := filepath.Join(planning, ".beads")
+	assertIssueInStore(t, planningBeadsDir, "beads", created.ID)
 	if err := os.RemoveAll(planning); err != nil {
 		t.Fatal(err)
 	}
@@ -2142,16 +2144,36 @@ func TestEmbeddedContributorRoutingMissingPlanningRepo(t *testing.T) {
 	}
 	missing(t, "bd update", "update", created.ID, "--status", "in_progress")
 	missing(t, "bd close", "close", created.ID)
+	missing(t, "bd list", "list")
+	missing(t, "bd ready", "ready")
 
 	// Regression: a routed create still initializes an empty planning store;
 	// the deleted issue is not back.
-	if stdout, stderr, err := run("create", "after deletion", "--json"); err != nil {
+	stdout, stderr, err = run("create", "after deletion", "--json")
+	if err != nil {
 		t.Fatalf("routed bd create after deletion: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 	}
-	if !beads.HasProjectFiles(filepath.Join(planning, ".beads")) {
+	var fresh struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &fresh); err != nil || fresh.ID == "" {
+		t.Fatalf("bd create --json after deletion = %q: %v", stdout, err)
+	}
+	if !beads.HasProjectFiles(planningBeadsDir) {
 		t.Errorf("routed bd create did not initialize the planning store at %s", planning)
 	}
+	// The fresh store's database carries the source prefix, not the deleted
+	// fork setup's "beads".
+	assertIssueInStore(t, planningBeadsDir, "forkmp", fresh.ID)
+	assertIssueNotInStore(t, planningBeadsDir, "forkmp", created.ID)
 	if stdout, stderr, err := run("show", created.ID); err == nil {
 		t.Errorf("deleted planning issue %s reappeared:\nstdout:\n%s\nstderr:\n%s", created.ID, stdout, stderr)
+	}
+	stdout, stderr, err = run("list", "--json")
+	if err != nil {
+		t.Fatalf("bd list --json after the routed create: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, fresh.ID) || strings.Contains(stdout, created.ID) {
+		t.Errorf("bd list --json = want new issue %s and not the lost %s:\n%s", fresh.ID, created.ID, stdout)
 	}
 }
