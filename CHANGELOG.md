@@ -1360,6 +1360,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ... nothing to commit`. The migration pass now turns the setting off for
   its own session and restores it on return. The same error at migration
   0028, reported on bd 1.0.4, was fixed in v1.0.5 (#4470).
+- `bd init` in server mode now adopts a database with no migration cursor
+  whose working set holds uncommitted changes in tables the migrations alter,
+  as a beads v1.0.0 seeder (Gas Town rig setup) leaves it. It commits the
+  working set in one commit, migrates, and prints a note on stderr. Before,
+  `bd init` refused the database and wrote no workspace configuration, so
+  `gt install` could not finish; the way out was `bd dolt commit` from a
+  workspace that reaches the database, then `bd init` again. A database
+  with a migration cursor still refuses. When `bd init --json` initializes
+  a workspace (not with `--proxied-server`, which still prints its text
+  summary), stdout now carries a single JSON summary and the progress lines
+  go to stderr. See
+  [init-dirty-working-set](docs/recovery/init-safety.md#init-dirty-working-set)
+  (#6089).
 - `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
   from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
   the default remote and reported "Push complete."; a name that differs from

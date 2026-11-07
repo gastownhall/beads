@@ -299,3 +299,148 @@ func containsTable(tables []string, want string) bool {
 	}
 	return false
 }
+
+// TestServerModeDirtyTablesErrorUnversioned pins the classification bd init
+// keys its adoption of a pre-cursor database on (gastownhall/beads#6089): a
+// strict server open's pending-migration dirty refusal reports Unversioned
+// exactly when the main migration cursor read 0 — no schema_migrations table,
+// or an empty one — and not on a database a binary already migrated. The
+// field has to survive the store's error wrapping, since that is how init
+// receives it.
+func TestServerModeDirtyTablesErrorUnversioned(t *testing.T) {
+	integration.RequireDolt(t)
+	port, err := testutil.FindFreePort()
+	if err != nil {
+		t.Fatalf("find free port: %v", err)
+	}
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "0")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
+	t.Setenv("BEADS_DOLT_PORT", "")
+	t.Setenv("BEADS_DOLT_PASSWORD", "")
+
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatalf("mkdir beads dir: %v", err)
+	}
+	state, err := doltserver.Start(beadsDir)
+	if err != nil {
+		t.Fatalf("start local Dolt server: %v", err)
+	}
+	t.Cleanup(func() {
+		current, stateErr := doltserver.IsRunning(beadsDir)
+		if stateErr != nil {
+			t.Errorf("check local Dolt server before stop: %v", stateErr)
+			return
+		}
+		if current == nil || !current.Running {
+			return
+		}
+		if err := doltserver.Stop(beadsDir); err != nil {
+			t.Errorf("stop local Dolt server: %v", err)
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	// strictDirtyRefusal opens database strictly and returns the refusal.
+	strictDirtyRefusal := func(t *testing.T, database string) *schema.DirtyTablesError {
+		t.Helper()
+		store, err := New(ctx, lenientOpenConfig(beadsDir, state.Port, database))
+		if err == nil {
+			store.Close()
+			t.Fatal("New (plain writable open) = nil, want *schema.DirtyTablesError")
+		}
+		var dirtyErr *schema.DirtyTablesError
+		if !errors.As(err, &dirtyErr) {
+			t.Fatalf("New error = %T (%v), want error wrapping *schema.DirtyTablesError", err, err)
+		}
+		return dirtyErr
+	}
+
+	for _, tc := range []struct {
+		name     string
+		database string
+		cursor   string // DDL creating an empty cursor table, or "" for none
+	}{
+		{name: "absent cursor table", database: "unversioned_absent"},
+		{name: "empty cursor table", database: "unversioned_empty", cursor: `CREATE TABLE schema_migrations (
+	version INT PRIMARY KEY,
+	applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	content_hash CHAR(64)
+)`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			admin := prepareUnversionedDirtyConfigDatabase(t, ctx, state.Port, tc.database, tc.cursor)
+			defer admin.Close()
+
+			dirtyErr := strictDirtyRefusal(t, tc.database)
+			if !dirtyErr.Unversioned {
+				t.Fatalf("DirtyTablesError.Unversioned = false for main cursor 0 (%s), want true", tc.name)
+			}
+			if !containsTable(dirtyErr.Tables, "config") {
+				t.Fatalf("DirtyTablesError.Tables = %v, want to include config", dirtyErr.Tables)
+			}
+		})
+	}
+
+	t.Run("nonzero cursor", func(t *testing.T) {
+		const database = "unversioned_v51"
+		admin := prepareLenientOpenDatabaseAtV51(t, ctx, state.Port, database)
+		defer admin.Close()
+		if _, err := admin.ExecContext(ctx,
+			"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes) VALUES (?, ?, '', '', '', '')",
+			database+"-1", "uncommitted issue",
+		); err != nil {
+			t.Fatalf("dirty issues table: %v", err)
+		}
+
+		if dirtyErr := strictDirtyRefusal(t, database); dirtyErr.Unversioned {
+			t.Fatalf("DirtyTablesError.Unversioned = true at main cursor 51, want false")
+		}
+	})
+}
+
+// prepareUnversionedDirtyConfigDatabase creates database with only the legacy
+// (beads v1.0.0) config table, committed, then leaves an issue_prefix row
+// uncommitted in it. cursorDDL, when set, creates an empty main cursor table
+// in the committed baseline. Returns a connection to the database.
+func prepareUnversionedDirtyConfigDatabase(t *testing.T, ctx context.Context, port int, database, cursorDDL string) *sql.DB {
+	t.Helper()
+	adminDSN := doltutil.ServerDSN{Host: "127.0.0.1", Port: port, User: "root"}.String()
+	admin, err := sql.Open("mysql", adminDSN)
+	if err != nil {
+		t.Fatalf("open admin connection: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx, "CREATE DATABASE `"+database+"`"); err != nil {
+		admin.Close()
+		t.Fatalf("create database %s: %v", database, err)
+	}
+	if err := admin.Close(); err != nil {
+		t.Fatalf("close admin connection: %v", err)
+	}
+
+	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: port, User: "root", Database: database}.String()
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatalf("open %s: %v", database, err)
+	}
+	stmts := []string{
+		"CREATE TABLE config (`key` VARCHAR(255) PRIMARY KEY, value TEXT NOT NULL)",
+		"INSERT INTO config (`key`, value) VALUES ('schema_version', '11')",
+	}
+	if cursorDDL != "" {
+		stmts = append(stmts, cursorDDL)
+	}
+	stmts = append(stmts,
+		"CALL DOLT_COMMIT('-Am', 'test: legacy baseline', '--author', 'Beads Test <beads@example.com>')",
+		"INSERT INTO config (`key`, value) VALUES ('issue_prefix', 'hq')",
+	)
+	for _, stmt := range stmts {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			db.Close()
+			t.Fatalf("prepare %s: %s: %v", database, stmt, err)
+		}
+	}
+	return db
+}

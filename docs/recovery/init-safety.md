@@ -3,9 +3,9 @@ title: Recovery Playbooks
 description: Step-by-step recovery for bd init and bd dolt push/pull refusals, including the primary-key fork playbook
 ---
 
-Last reviewed: 2026-10-01
+Last reviewed: 2026-11-02
 
-Freshness source: `cmd/bd/init.go`, `cmd/bd/init_safety.go`,
+Freshness source: `cmd/bd/init.go`, `cmd/bd/init_store_open.go`, `cmd/bd/init_safety.go`,
 `cmd/bd/init_safety_test.go`, `cmd/bd/init_safety_help.go`, and
 `cmd/bd/dolt.go`.
 
@@ -27,6 +27,7 @@ See also: `bd help init-safety`, and
 - [init-local-exists — `bd init --reinit-local` refused because local data already exists](#init-local-exists)
 - [init-home-refused — `bd init` refused because the working directory is your home directory](#init-home-refused)
 - [init-missing-server-db — `bd init` refused because the configured server-side database is missing](#init-missing-server-db)
+- [init-dirty-working-set — pending migrations refuse a dirty working set, or `bd init` committed it on a server database with no migration cursor](#init-dirty-working-set)
 - [pk-fork-refused — `bd dolt pull`/`push` refused because a table has different primary keys in its common ancestor](#pk-fork-refused)
 - [re-clone-gotchas — two gotchas hit during manual re-clone recovery: damaged stores left inside `data_dir`, and a fresh clone missing clone-local tables](#re-clone-gotchas)
 
@@ -440,6 +441,120 @@ rows rarely apply there.
   mode before creating anything, and does not restore over a database the
   server already holds. Elsewhere, including shared-server mode named only
   by `dolt.shared-server` in a config.yaml, it uses the embedded store.
+
+---
+
+## init-dirty-working-set
+
+**Symptom**
+
+```
+$ bd init --server ...
+Error: failed to open Dolt store: failed to initialize schema: schema migration:
+pending schema migrations alter pre-existing dirty tables: config, interactions, routes;
+run 'bd dolt commit' to commit the working set at the current schema, then re-run the
+migration (gastownhall/beads#4566)
+```
+
+On a server database with no recorded migration cursor (below), the same
+init succeeds instead and prints, on stderr:
+
+```
+Warning: pending schema migrations alter pre-existing dirty tables: config, interactions, routes; ...
+Note: database "hq" had uncommitted changes in tables the schema migrations alter (config, interactions, routes); bd init committed the working set in its own commit, then applied the migrations (gastownhall/beads#6089)
+```
+
+**Why this happens**
+
+Opening the store applies pending schema migrations, and the
+[#4566](https://github.com/gastownhall/beads/pull/4566) guard refuses to run
+a migration that alters a table with uncommitted changes: migrating under a
+dirty working set could lose those rows or leave them unreadable at the new
+shape. Two situations produce the same refusal:
+
+- **A versioned database with uncommitted work.** The database records a
+  main migration cursor (at least one row in `schema_migrations`), and some
+  writer left changes uncommitted. bd cannot tell that work from half-applied
+  changes, so it refuses and leaves the rows as they are.
+- **An unversioned database left dirty by an older SDK.** The recorded main
+  cursor is 0: there is no `schema_migrations` table, or it has no rows.
+  Gas Town's rig setup on beads v1.0.0 leaves this shape: it writes
+  `issue_prefix` to `config` and creates `routes` and `interactions` without
+  committing them. `bd init` refused it and wrote no workspace
+  configuration, so `gt install` could not finish
+  ([#6089](https://github.com/gastownhall/beads/issues/6089)): the way out
+  was `bd dolt commit` from a workspace that reaches the database, then
+  `bd init` again.
+
+A cursor of 0 says only what the database records. It does not prove that
+the database is empty, that it holds no user data, or that no bd release
+ever migrated it (a deleted cursor table reads the same way).
+
+**What `bd init` does**
+
+A writable server-mode `bd init` that hits the refusal on an unversioned
+database adopts it: it commits the whole committable working set in one
+Dolt commit with the message `bd init: commit pre-existing working set
+before schema migration (gastownhall/beads#6089)`, then opens the store again
+and applies the migrations. The commit includes every uncommitted row, user
+rows included, exactly as a manual `bd dolt commit` would; running `bd init`
+against the database is the decision to adopt it. Like the manual commit, it
+is not atomic with the refusal and does not fence other writers.
+
+The `Warning:` line comes from the store's reconciling open and prints even
+under `--quiet`; `--quiet` drops only the `Note:` line. With `--json`, the
+note stays on stderr and stdout carries the JSON summary. If the commit or
+the reconciling open fails, init stops with the original refusal followed by
+`; bd init could not commit the pre-existing working set:` and the cause.
+
+Init does not adopt a versioned database, and embedded, proxied-server,
+gateway, read-only and preview opens never commit on init's behalf.
+
+**Recovery paths**
+
+- **You got the note:** init committed the working set and migrated the
+  database. To see what it committed:
+
+  ```bash
+  bd sql "SELECT commit_hash, date FROM dolt_log WHERE message LIKE 'bd init: commit pre-existing%'"
+  ```
+
+  If init also printed `WARNING: the database has an issue prefix (...) but
+  no project identity`, as it does for a database a beads v1.0.0 seeder
+  wrote, the database is still half-identified. Settle it as the warning
+  says: run `bd doctor --fix` from the clone whose identity should win, then
+  re-init the others.
+
+- **You got the refusal (a versioned database, or any bd command other than
+  `bd init`):** inspect the pending changes before you commit them. From a
+  SQL client connected to the server, in that database:
+
+  ```sql
+  SELECT * FROM dolt_status;
+  SELECT * FROM dolt_diff('HEAD', 'WORKING', 'config');  -- one per listed table
+  ```
+
+  Then, from a workspace that reaches the database, commit the working set
+  at the current schema and re-run the command:
+
+  ```bash
+  bd dolt commit -m "commit pending changes at the current schema"
+  ```
+
+  If the changes are not wanted, discard them instead (`CALL
+  DOLT_CHECKOUT('<table>')` for a modified table, `DROP TABLE` for a new one)
+  rather than committing them.
+
+- **No workspace can reach the server** (for example, `bd init` failed before
+  writing `.beads`): commit from a SQL client connected to the server, after
+  the inspection above:
+
+  ```sql
+  USE `<database>`;
+  CALL DOLT_COMMIT('-Am', 'commit pending changes at the current schema');
+  ```
+
+  Then re-run `bd init` or the refused command.
 
 ---
 
