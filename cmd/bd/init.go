@@ -2288,8 +2288,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// Non-interactive, idempotent; only fires when upstream remote detected
 		// and routing.contributor is not already set.
 		// This gate also enables planning-repository creation and config.yaml updates.
+		// quiet alone gates the notices: --non-interactive skips prompts, not the
+		// disclosure of a routing decision that silently reroutes every write
+		// (GH#5957).
 		if !contributor && projectRoleRepo() {
-			if err := autoConfigureForkContributor(ctx, store, quiet || nonInteractive, roleFlag); err != nil && !quiet {
+			if err := autoConfigureForkContributor(ctx, store, quiet, roleFlag); err != nil && !quiet {
 				fmt.Fprintf(os.Stderr, "Warning: failed to auto-configure fork contributor routing: %v\n", err)
 			}
 		}

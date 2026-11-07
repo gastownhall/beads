@@ -228,6 +228,14 @@ func TestAutoConfigureForkContributorIgnoresInheritedGitRouting(t *testing.T) {
 				if got := strings.Contains(string(stdout), "Fork detected — configuring contributor routing\n"); got != wantBanner {
 					t.Errorf("call %d: stdout = %q, want setup banner %v", call+1, stdout, wantBanner)
 				}
+				if name == "configure" && call == 0 {
+					if !strings.Contains(string(stdout), "To disable contributor-role routing: git config beads.role maintainer") {
+						t.Errorf("call %d: stdout lacks the working role opt-out: %q", call+1, stdout)
+					}
+					if strings.Contains(string(stdout), "bd init --role=maintainer") {
+						t.Errorf("call %d: stdout still points at the post-init-unusable bd init --role=maintainer: %q", call+1, stdout)
+					}
+				}
 				wantWarning := name == "config_lock" && call == 0
 				if got := strings.Contains(stderr, "Warning: failed to set beads.role=contributor:"); got != wantWarning {
 					t.Errorf("call %d: role warning = %q, want warning %v", call+1, stderr, wantWarning)

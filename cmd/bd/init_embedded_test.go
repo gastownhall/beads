@@ -1988,3 +1988,118 @@ func testEmbeddedInitGitBootstrapRouting(t *testing.T, names ...string) {
 		})
 	}
 }
+
+// TestEmbeddedInitForkNonInteractiveRoutingIsLocalAndAnnounced reproduces
+// GH#5957 (bd-8ktymt): `bd init --non-interactive` on a fork must keep
+// beads.role out of the GLOBAL git config and must say on stdout that it
+// chose contributor routing (without --quiet).
+func TestEmbeddedInitForkNonInteractiveRoutingIsLocalAndAnnounced(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	dir := t.TempDir()
+	initGitRepoAt(t, dir)
+	for name, bare := range map[string]string{"origin": filepath.Join(dir, "origin.git"), "upstream": filepath.Join(dir, "upstream.git")} {
+		if out, err := gitCommand("init", "--bare", bare).CombinedOutput(); err != nil {
+			t.Fatalf("git init --bare %s: %v\n%s", bare, err, out)
+		}
+		cmd := gitCommand("remote", "add", name, bare)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git remote add %s: %v\n%s", name, err, out)
+		}
+	}
+
+	globalCfg := filepath.Join(t.TempDir(), "gitconfig-global")
+	if err := os.WriteFile(globalCfg, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := envWithout(envWithout(bdEnv(dir), "GIT_CONFIG_GLOBAL"), "XDG_CONFIG_HOME")
+	env = append(env, "GIT_CONFIG_GLOBAL="+globalCfg, "XDG_CONFIG_HOME="+t.TempDir())
+
+	cmd := exec.Command(bd, "init", "--non-interactive", "--prefix", "forkni")
+	cmd.Dir = dir
+	cmd.Env = env
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd init failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	globalRole, _ := exec.Command("git", "config", "--file", globalCfg, "--get", "beads.role").Output()
+	if got := strings.TrimSpace(string(globalRole)); got != "" {
+		t.Errorf("bd init wrote beads.role=%q to the GLOBAL git config %s", got, globalCfg)
+	}
+	localCmd := gitCommand("config", "--local", "--get", "beads.role")
+	localCmd.Dir = dir
+	localRole, _ := localCmd.Output()
+	if got := strings.TrimSpace(string(localRole)); got != "contributor" {
+		t.Errorf("repo-local beads.role: got %q, want %q", got, "contributor")
+	}
+
+	if !strings.Contains(strings.ToLower(stdout.String()), "contributor routing") {
+		t.Errorf("bd init --non-interactive chose contributor routing silently; stdout has no line about it:\n%s", stdout.String())
+	}
+}
+
+// TestEmbeddedInitForkRoutingDisclosedNonInteractive pins the caller wiring
+// the direct-helper tests cannot see (GH#5957, bd-8ktymt): non-interactive
+// init must disclose the fork routing decision on stdout (AC-1), and an
+// explicit --quiet must suppress those notices without suppressing the
+// configuration itself (AC-2).
+func TestEmbeddedInitForkRoutingDisclosedNonInteractive(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+	bd := buildEmbeddedBD(t)
+	for _, name := range []string{"disclosed"} {
+		t.Run(name, func(t *testing.T) {
+			target, decoy, home := newInitRoleFixture(t)
+			initRoleFixtureGit(t, target, "remote", "add", "upstream", filepath.Join(home, "upstream.git"))
+			global := filepath.Join(home, ".gitconfig")
+			initRoleFixtureGit(t, target, "config", "--file", global, "user.name", "Fork Fixture")
+			initRoleFixtureGit(t, target, "config", "--file", global, "user.email", "fork@example.invalid")
+			preserveInitRoleInputs(t, filepath.Join(decoy, ".git", "config"), global)
+			planning := filepath.Join(home, ".beads-planning")
+			beadsDir := filepath.Join(target, ".beads")
+			args := []string{"init", "--prefix", "forkdisc", "--non-interactive", "--skip-hooks", "--skip-agents"}
+			if name == "quiet" {
+				args = append(args, "--quiet")
+			}
+			cmd := exec.Command(bd, args...)
+			cmd.Dir = target
+			env := bdEnv(home)
+			for _, key := range []string{"BEADS_DIR", "BD_DB", "BD_DOLT_HOST", "BD_DOLT_PORT"} {
+				env = envWithout(env, key)
+			}
+			cmd.Env = append(env, "DOLT_ROOT_PATH="+home, "BD_DOLT_MODE=embedded", "BD_EVENTS_JOURNAL=false")
+			stdout, stderr, err := runCommandBuffers(t, cmd)
+			if err != nil {
+				t.Fatalf("embedded init failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+			}
+			// Whatever the stream policy, the configuration itself happened.
+			if got := initRoleFixtureGit(t, target, "config", "--local", "--get", "beads.role"); got != "contributor" {
+				t.Errorf("local beads.role = %q, want %q", got, "contributor")
+			}
+			if got := readBack(t, beadsDir, "forkdisc", "routing.mode", false); got != "auto" {
+				t.Errorf("persisted routing.mode = %q, want %q", got, "auto")
+			}
+			if got := readBack(t, beadsDir, "forkdisc", "routing.contributor", false); filepath.Clean(got) != filepath.Clean(planning) {
+				t.Errorf("persisted routing.contributor = %q, want %q", got, planning)
+			}
+			if name == "disclosed" {
+				for _, want := range []string{planning, "routing.mode=auto", "git config beads.role maintainer"} {
+					if !strings.Contains(stdout.String(), want) {
+						t.Errorf("non-interactive init stdout lacks %q:\n%s", want, stdout.String())
+					}
+				}
+				if strings.Contains(stdout.String(), "bd init --role=maintainer") {
+					t.Errorf("stdout points at the post-init-unusable bd init --role=maintainer:\n%s", stdout.String())
+				}
+			}
+		})
+	}
+}

@@ -373,7 +373,10 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 		if createdPlanning {
 			fmt.Printf("  %s Added .beads/ to planning repo\n", ui.RenderPass("✓"))
 		}
-		fmt.Printf("\n  To use maintainer mode instead: bd init --role=maintainer\n")
+		// The working opt-out: `bd init --role=maintainer` is refused by the
+		// existing-workspace guard once this init has run (GH#5957), and the
+		// role change is the command that actually turns routing off.
+		fmt.Printf("\n  To disable contributor-role routing: git config beads.role maintainer\n")
 	}
 	return nil
 }
