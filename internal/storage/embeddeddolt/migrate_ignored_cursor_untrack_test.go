@@ -5,8 +5,10 @@ package embeddeddolt_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -673,6 +675,174 @@ func TestIgnoredCursorHealRespectsOverrideUnderBroaderPattern(t *testing.T) {
 		}
 		if n := untrackCommitCount(t, ctx, conn); n != 0 {
 			t.Errorf("commits referencing #4356 = %d, want 0 under an operator override", n)
+		}
+	})
+}
+
+// ignoredCursorTempSweepCommitMessage is the message of the scoped commit that
+// sweeps a scratch table committed at HEAD.
+const ignoredCursorTempSweepCommitMessage = "schema: drop stray ignored_schema_migrations untrack scratch table (gastownhall/beads#4356)"
+
+// newScratchPendingDeletionFixture builds the state the reconcile gate used to
+// miss: the cursor already untracked, the untrack scratch committed at HEAD
+// (an older peer, or replication from one), and the scratch then dropped from
+// the working set without that deletion ever being committed — the window
+// between dropIgnoredCursorScratch's publish and its scoped commit. "__temp__%"
+// hides the scratch from every ignore-filtered dirty guard, so nothing but a
+// HEAD probe can tell that the deletion is still owed.
+func newScratchPendingDeletionFixture(t *testing.T, database string) *legacyTrackedFixture {
+	t.Helper()
+	ctx := t.Context()
+	f := newLegacyTrackedFixture(t, database)
+
+	f.withRawConn(t, func(conn *sql.Conn) {
+		untrackCursorInPlace(t, ctx, conn)
+		mustExecOn(t, ctx, conn, "CALL DOLT_ADD('-f', ?)", untrackScratchTable)
+		mustExecOn(t, ctx, conn, "CALL DOLT_COMMIT('-m', 'peer: scratch table committed by an older binary')")
+		mustExecOn(t, ctx, conn, "DROP TABLE "+untrackScratchTable)
+
+		// The preconditions everything below rests on. Without them the test
+		// silently covers the working-set scratch path the gate already sees,
+		// or passes because the scratch name is not ignored at all.
+		requireTempPatternSeeded(t, conn)
+		if !trackedAtHead(t, ctx, conn, untrackScratchTable) {
+			t.Fatalf("fixture did not commit %s into HEAD", untrackScratchTable)
+		}
+		if tablePresent(t, ctx, conn, untrackScratchTable) {
+			t.Fatalf("fixture left %s in the working set", untrackScratchTable)
+		}
+		if dirty := dirtyTableNames(t, ctx, conn); !contains(dirty, untrackScratchTable) {
+			t.Fatalf("dolt_status does not list the pending %s deletion: %v", untrackScratchTable, dirty)
+		}
+		if trackedAtHead(t, ctx, conn, "ignored_schema_migrations") {
+			t.Fatal("fixture left ignored_schema_migrations tracked at HEAD; the legacy-shape branch would run instead")
+		}
+		f.cursorRows = cursorRows(t, ctx, conn)
+		f.commits = commitCount(t, ctx, conn)
+	})
+	return f
+}
+
+// sweepCommits returns the hashes of the commits the scratch sweep minted.
+func sweepCommits(t *testing.T, ctx context.Context, conn *sql.Conn) []string {
+	t.Helper()
+	rows, err := conn.QueryContext(ctx,
+		"SELECT commit_hash FROM dolt_log WHERE message = ?", ignoredCursorTempSweepCommitMessage)
+	if err != nil {
+		t.Fatalf("reading sweep commits: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var hash string
+		if err := rows.Scan(&hash); err != nil {
+			t.Fatalf("reading sweep commits: %v", err)
+		}
+		out = append(out, hash)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("reading sweep commits: %v", err)
+	}
+	return out
+}
+
+// commitTables lists the tables a commit changed.
+func commitTables(t *testing.T, ctx context.Context, conn *sql.Conn, hash string) []string {
+	t.Helper()
+	rows, err := conn.QueryContext(ctx,
+		"SELECT table_name FROM dolt_diff WHERE commit_hash = ? ORDER BY table_name", hash)
+	if err != nil {
+		t.Fatalf("reading tables changed by %s: %v", hash, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("reading tables changed by %s: %v", hash, err)
+		}
+		out = append(out, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("reading tables changed by %s: %v", hash, err)
+	}
+	return out
+}
+
+func configValue(t *testing.T, ctx context.Context, conn *sql.Conn, asOf, key string) (string, bool) {
+	t.Helper()
+	var value string
+	//nolint:gosec // G201: asOf is a test-local constant.
+	err := conn.QueryRowContext(ctx, "SELECT value FROM config"+asOf+" WHERE `key` = ?", key).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false
+	}
+	if err != nil {
+		t.Fatalf("reading config %q%s: %v", key, asOf, err)
+	}
+	return value, true
+}
+
+// TestIgnoredCursorScratchPendingDeletionIsSweptOnOpen is bd-fgdx42: with the
+// scratch committed at HEAD and already gone from the working set, the open
+// must commit that pending deletion — and only it — or `bd dolt pull` refuses
+// the delta forever. The live cursor is the truth and must come through
+// unchanged; an unrelated staged change must neither ride into the sweep
+// commit nor lose its working-set value.
+func TestIgnoredCursorScratchPendingDeletionIsSweptOnOpen(t *testing.T) {
+	ctx := t.Context()
+	f := newScratchPendingDeletionFixture(t, "scratchheadonly")
+
+	const unrelatedKey = "test.scratch-sweep-unrelated"
+	f.withRawConn(t, func(conn *sql.Conn) {
+		mustExecOn(t, ctx, conn, "INSERT INTO config (`key`, value) VALUES (?, 'v1')", unrelatedKey)
+		mustExecOn(t, ctx, conn, "CALL DOLT_ADD('config')")
+	})
+
+	f.reopenAndClose(t)
+
+	var swept []string
+	var afterSweep int
+	f.withRawConn(t, func(conn *sql.Conn) {
+		if trackedAtHead(t, ctx, conn, untrackScratchTable) {
+			t.Errorf("%s is still committed at HEAD; its pending deletion was never committed", untrackScratchTable)
+		}
+		if dirty := dirtyTableNames(t, ctx, conn); contains(dirty, untrackScratchTable) {
+			t.Errorf("dolt_status still lists %s after the open: %v", untrackScratchTable, dirty)
+		}
+		if got := cursorRows(t, ctx, conn); !slices.Equal(got, f.cursorRows) {
+			t.Errorf("cursor rows changed across the sweep:\n got: %v\nwant: %v", got, f.cursorRows)
+		}
+		afterSweep = commitCount(t, ctx, conn)
+		if afterSweep != f.commits+1 {
+			t.Errorf("commits after the sweep = %d, want %d (exactly the scoped sweep)", afterSweep, f.commits+1)
+		}
+		swept = sweepCommits(t, ctx, conn)
+		if len(swept) != 1 {
+			t.Fatalf("sweep commits = %d, want exactly 1", len(swept))
+		}
+		if tables := commitTables(t, ctx, conn, swept[0]); len(tables) != 1 || tables[0] != untrackScratchTable {
+			t.Errorf("sweep commit changed %v, want only %s", tables, untrackScratchTable)
+		}
+		if _, atHead := configValue(t, ctx, conn, " AS OF 'HEAD'", unrelatedKey); atHead {
+			t.Errorf("the unrelated staged config row %q rode into HEAD", unrelatedKey)
+		}
+		if v, ok := configValue(t, ctx, conn, "", unrelatedKey); !ok || v != "v1" {
+			t.Errorf("working-set config %q = %q (present %v), want v1 kept", unrelatedKey, v, ok)
+		}
+	})
+
+	// Idempotent: a second open finds nothing owed and commits nothing.
+	f.reopenAndClose(t)
+	f.withRawConn(t, func(conn *sql.Conn) {
+		if again := sweepCommits(t, ctx, conn); len(again) != 1 {
+			t.Errorf("sweep commits after a second open = %d, want still 1", len(again))
+		}
+		if got := commitCount(t, ctx, conn); got != afterSweep {
+			t.Errorf("commits after a second open = %d, want %d (a healthy database must produce no commit)", got, afterSweep)
+		}
+		if trackedAtHead(t, ctx, conn, untrackScratchTable) || tablePresent(t, ctx, conn, untrackScratchTable) {
+			t.Errorf("%s reappeared after a second open", untrackScratchTable)
 		}
 	})
 }
