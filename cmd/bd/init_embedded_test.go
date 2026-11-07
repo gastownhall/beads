@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/gitenv"
@@ -2027,5 +2028,90 @@ func testEmbeddedInitGitBootstrapRouting(t *testing.T, names ...string) {
 				t.Errorf("init created the inherited invalid Git directory: %v", err)
 			}
 		})
+	}
+}
+
+// TestEmbeddedContributorRoutingMissingPlanningRepo pins GH#5957 end to end:
+// once a fork's planning repo is deleted, routed commands fail naming the
+// repo, the contributor routing that chose it, how to restore it and how to
+// opt out, and recreate nothing; bd create still starts an empty planning
+// store.
+func TestEmbeddedContributorRoutingMissingPlanningRepo(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	repo, home := t.TempDir(), t.TempDir()
+	initGitRepoAt(t, repo)
+	addUpstream := gitCommand("remote", "add", "upstream", filepath.Join(home, "upstream.git"))
+	addUpstream.Dir = repo
+	if out, err := addUpstream.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add upstream: %v\n%s", err, out)
+	}
+	globalCfg := filepath.Join(home, ".gitconfig")
+	if err := os.WriteFile(globalCfg, []byte("[user]\n\tname = Missing Planning Fixture\n\temail = planning@example.invalid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := bdEnv(home)
+	for _, key := range []string{"GIT_CONFIG_GLOBAL", "XDG_CONFIG_HOME", "BD_DB", "BD_DOLT_HOST", "BD_DOLT_PORT"} {
+		env = envWithout(env, key)
+	}
+	env = append(env, "GIT_CONFIG_GLOBAL="+globalCfg, "XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+		"DOLT_ROOT_PATH="+home, "BD_DOLT_MODE=embedded", "BD_EVENTS_JOURNAL=false")
+	run := func(args ...string) (string, string, error) {
+		cmd := exec.Command(bd, args...)
+		cmd.Dir, cmd.Env = repo, env
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		return stripANSI(stdout.String()), stripANSI(stderr.String()), err
+	}
+
+	if stdout, stderr, err := run("init", "--prefix", "forkmp", "--non-interactive", "--quiet", "--skip-hooks", "--skip-agents"); err != nil {
+		t.Fatalf("bd init: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	planning := filepath.Join(home, ".beads-planning")
+	stdout, stderr, err := run("create", "planning issue", "--json")
+	if err != nil {
+		t.Fatalf("routed bd create: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &created); err != nil || created.ID == "" {
+		t.Fatalf("bd create --json = %q: %v", stdout, err)
+	}
+	if err := os.RemoveAll(planning); err != nil {
+		t.Fatal(err)
+	}
+
+	missing := func(t *testing.T, what string, args ...string) {
+		t.Helper()
+		stdout, stderr, err := run(args...)
+		if err == nil {
+			t.Fatalf("%s over a deleted planning repo succeeded:\nstdout:\n%s\nstderr:\n%s", what, stdout, stderr)
+		}
+		for _, want := range []string{planning, "no beads database found", "contributor routing", "restore the planning repo to recover its issues", "git config beads.role maintainer"} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("%s stderr lacks %q:\n%s", what, want, stderr)
+			}
+		}
+		if _, statErr := os.Stat(planning); !os.IsNotExist(statErr) {
+			t.Fatalf("%s recreated the deleted planning repo: %v", what, statErr)
+		}
+	}
+	missing(t, "bd update", "update", created.ID, "--status", "in_progress")
+	missing(t, "bd close", "close", created.ID)
+
+	// Regression: a routed create still initializes an empty planning store;
+	// the deleted issue is not back.
+	if stdout, stderr, err := run("create", "after deletion", "--json"); err != nil {
+		t.Fatalf("routed bd create after deletion: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if !beads.HasProjectFiles(filepath.Join(planning, ".beads")) {
+		t.Errorf("routed bd create did not initialize the planning store at %s", planning)
+	}
+	if stdout, stderr, err := run("show", created.ID); err == nil {
+		t.Errorf("deleted planning issue %s reappeared:\nstdout:\n%s\nstderr:\n%s", created.ID, stdout, stderr)
 	}
 }
