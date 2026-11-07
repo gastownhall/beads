@@ -1208,6 +1208,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- With several stores open in one process, the `bd.db.pool_open`,
+  `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
+  of the stores open now, summed. Each store registered the gauges with its
+  own callback, and the OTel SDK keeps only the first callback of an
+  instrument, so the gauges reported the first store's pool forever, even
+  after it closed.
+- The console trace and metric exporters (`OTEL_TRACES_EXPORTER=console`,
+  `OTEL_METRICS_EXPORTER=console`, legacy `BD_OTEL_STDOUT=true`) write to
+  stderr, as documented. They wrote to stdout, where their JSON mixed into
+  the command's own output and broke `--json` consumers.
+- `bd.storage.operation.duration`, `bd.ai.request.duration` and the
+  `bd.ai.duration_ms` span attribute record fractional milliseconds. They
+  were truncated to whole milliseconds, so a sub-millisecond storage call
+  recorded 0.
+
 - The `bd.storage.operations`, `bd.storage.operation.duration` and
   `bd.storage.errors` metrics are now keyed by `db.operation` alone. The
   counter also carried every request attribute of the call (issue ids,

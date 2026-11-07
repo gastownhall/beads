@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -135,5 +136,63 @@ func TestStorageMetricsCarryOnlyTheOperation(t *testing.T) {
 		if strings.Join(got[name], " | ") != strings.Join(sets, " | ") {
 			t.Errorf("%s attribute sets = %q, want %q", name, got[name], sets)
 		}
+	}
+}
+
+// TestMillisecondsKeepsTheFraction pins that durations are recorded as
+// fractional milliseconds. time.Duration.Milliseconds truncates, so a
+// sub-millisecond storage call (most point reads) recorded as 0 ms and a
+// 1.9 ms call as 1 ms.
+func TestMillisecondsKeepsTheFraction(t *testing.T) {
+	for _, tc := range []struct {
+		d    time.Duration
+		want float64
+	}{
+		{250 * time.Microsecond, 0.25},
+		{1900 * time.Microsecond, 1.9},
+		{3 * time.Second, 3000},
+		{0, 0},
+	} {
+		if got := Milliseconds(tc.d); got != tc.want {
+			t.Errorf("Milliseconds(%v) = %v, want %v", tc.d, got, tc.want)
+		}
+	}
+}
+
+// slowGetStore answers GetIssue after a sub-millisecond pause.
+type slowGetStore struct{ storage.DoltStorage }
+
+func (slowGetStore) GetIssue(_ context.Context, id string) (*types.Issue, error) {
+	time.Sleep(300 * time.Microsecond)
+	return &types.Issue{ID: id}, nil
+}
+
+// TestStorageDurationRecordsSubMillisecondCalls pins that a storage call
+// shorter than a millisecond records its real duration, not 0.
+func TestStorageDurationRecordsSubMillisecondCalls(t *testing.T) {
+	clearTelemetryEnv(t)
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	reader := withManualMeter(t)
+	s := WrapStorage(slowGetStore{}).(*InstrumentedStorage)
+	_, _ = s.GetIssue(context.Background(), "bd-1")
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	var sum float64
+	var found bool
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if h, ok := m.Data.(metricdata.Histogram[float64]); ok && m.Name == "bd.storage.operation.duration" {
+				for _, dp := range h.DataPoints {
+					sum += dp.Sum
+					found = true
+				}
+			}
+		}
+	}
+	if !found || sum < 0.3 {
+		t.Fatalf("bd.storage.operation.duration sum = %v ms (found=%v), want >= 0.3", sum, found)
 	}
 }

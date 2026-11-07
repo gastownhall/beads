@@ -328,6 +328,9 @@ type DoltStore struct {
 	beadsDir string      // Path to .beads directory (parent of dbPath)
 	database string      // Database name (subdirectory under dbPath)
 	closed   atomic.Bool // Tracks whether Close() has been called
+	// untrackPool removes db from the process pool gauges (processPools);
+	// set by registerPoolGauges, called by Close.
+	untrackPool func()
 	// eventsJournalEnabled activates the durable events journal for THIS store
 	// instance only (storage.EventsJournalConfigurer); never process-global.
 	eventsJournalEnabled atomic.Bool
@@ -1043,45 +1046,101 @@ func init() {
 	)
 }
 
-// registerPoolGauges registers observable gauges that report sql.DB pool stats
-// on each OTel collection cycle. These are essential for diagnosing shared-server
-// degradation under multi-worktree load (GH#3140).
-func (s *DoltStore) registerPoolGauges() {
-	m := otel.Meter("github.com/steveyegge/beads/storage/dolt")
-	db := s.db
+// poolSet is the set of sql.DB pools of the stores open in this process,
+// which the bd.db.pool_* gauges report on each collection.
+//
+// The gauges are registered once per process, and each store adds its pool
+// on open and removes it on Close. Registering them per store with an inline
+// callback does not work: the SDK keeps only the first callback of an
+// instrument, so a process that opened a second store reported the first
+// store's pool forever, closed or not, and kept it reachable.
+//
+// With several stores open the gauges report the sum over their pools: the
+// connections this process holds against its servers.
+type poolSet struct {
+	mu  sync.Mutex
+	dbs map[*sql.DB]struct{}
+}
 
-	m.Int64ObservableGauge("bd.db.pool_open", //nolint:errcheck,gosec
-		metric.WithDescription("Current number of open connections (in-use + idle)"),
-		metric.WithUnit("{connection}"),
-		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().OpenConnections))
-			return nil
-		}),
-	)
-	m.Int64ObservableGauge("bd.db.pool_in_use", //nolint:errcheck,gosec
-		metric.WithDescription("Connections currently in use"),
-		metric.WithUnit("{connection}"),
-		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().InUse))
-			return nil
-		}),
-	)
-	m.Int64ObservableGauge("bd.db.pool_idle", //nolint:errcheck,gosec
-		metric.WithDescription("Idle connections in pool"),
-		metric.WithUnit("{connection}"),
-		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().Idle))
-			return nil
-		}),
-	)
-	m.Int64ObservableGauge("bd.db.pool_max_open", //nolint:errcheck,gosec
-		metric.WithDescription("Maximum number of open connections (pool limit)"),
-		metric.WithUnit("{connection}"),
-		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().MaxOpenConnections))
-			return nil
-		}),
-	)
+// track adds db to the set and returns a func that removes it. The returned
+// func is idempotent.
+func (p *poolSet) track(db *sql.DB) (untrack func()) {
+	p.mu.Lock()
+	if p.dbs == nil {
+		p.dbs = make(map[*sql.DB]struct{})
+	}
+	p.dbs[db] = struct{}{}
+	p.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			p.mu.Lock()
+			delete(p.dbs, db)
+			p.mu.Unlock()
+		})
+	}
+}
+
+// stats returns the summed pool stats of the open stores.
+func (p *poolSet) stats() (open, inUse, idle, maxOpen int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for db := range p.dbs {
+		st := db.Stats()
+		open += int64(st.OpenConnections)
+		inUse += int64(st.InUse)
+		idle += int64(st.Idle)
+		maxOpen += int64(st.MaxOpenConnections)
+	}
+	return open, inUse, idle, maxOpen
+}
+
+// register creates the four pool gauges on m with one callback over the set.
+func (p *poolSet) register(m metric.Meter) error {
+	gauge := func(name, desc string) (metric.Int64ObservableGauge, error) {
+		return m.Int64ObservableGauge(name, metric.WithDescription(desc), metric.WithUnit("{connection}"))
+	}
+	openG, err := gauge("bd.db.pool_open", "Current number of open connections (in-use + idle)")
+	if err != nil {
+		return err
+	}
+	inUseG, err := gauge("bd.db.pool_in_use", "Connections currently in use")
+	if err != nil {
+		return err
+	}
+	idleG, err := gauge("bd.db.pool_idle", "Idle connections in pool")
+	if err != nil {
+		return err
+	}
+	maxG, err := gauge("bd.db.pool_max_open", "Maximum number of open connections (pool limit)")
+	if err != nil {
+		return err
+	}
+	_, err = m.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		open, inUse, idle, maxOpen := p.stats()
+		o.ObserveInt64(openG, open)
+		o.ObserveInt64(inUseG, inUse)
+		o.ObserveInt64(idleG, idle)
+		o.ObserveInt64(maxG, maxOpen)
+		return nil
+	}, openG, inUseG, idleG, maxG)
+	return err
+}
+
+var (
+	processPools          = &poolSet{}
+	processPoolGaugesOnce sync.Once
+)
+
+// registerPoolGauges adds the store's pool to the process pool gauges, which
+// report sql.DB pool stats on each OTel collection cycle. These are essential
+// for diagnosing shared-server degradation under multi-worktree load
+// (GH#3140). Close removes the pool again.
+func (s *DoltStore) registerPoolGauges() {
+	processPoolGaugesOnce.Do(func() {
+		_ = processPools.register(otel.Meter("github.com/steveyegge/beads/storage/dolt"))
+	})
+	s.untrackPool = processPools.track(s.db)
 }
 
 // doltSpanAttrs returns the fixed attributes shared by all SQL spans.
@@ -3785,6 +3844,9 @@ func (s *DoltStore) Close() error {
 	s.closed.Store(true)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.untrackPool != nil {
+		s.untrackPool()
+	}
 	var err error
 	if s.db != nil {
 		if cerr := doltutil.CloseWithTimeout("db", s.db.Close); cerr != nil {

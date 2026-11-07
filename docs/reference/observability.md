@@ -105,7 +105,7 @@ sum(rate(bd_storage_operations_total[5m]))               # operation rate
 ### Confirm storage instrumentation locally
 
 To verify the storage decorator chain is wired up without standing up a
-collector, run `bd` with stdout exporters and look for `bd.storage.*`
+collector, run `bd` with the console exporters and look for `bd.storage.*`
 records on stderr:
 
 ```bash
@@ -200,8 +200,8 @@ The `hook.stdout` / `hook.stderr` events carry two attributes: `output` (the tex
 ```
 cmd/bd/main.go
   └─ telemetry.Init()
-      ├─ OTEL_TRACES_EXPORTER=console        → TracerProvider stdout
-      ├─ OTEL_METRICS_EXPORTER=console       → MeterProvider stdout
+      ├─ OTEL_TRACES_EXPORTER=console        → TracerProvider stderr
+      ├─ OTEL_METRICS_EXPORTER=console       → MeterProvider stderr
       └─ OTEL_EXPORTER_OTLP_METRICS_ENDPOINT → MeterProvider HTTP → VictoriaMetrics
 
 internal/storage/dolt/        → bd_db_* metrics + dolt.* spans
