@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/uow"
 )
@@ -137,6 +138,97 @@ func TestBackupSyncProxiedFailureNamesServerEnvironment(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBackupSyncCommandFailureNamesServerEnvironment runs `bd backup sync`
+// through Cobra on a managed-local proxied server (bd-f68dud, GH#5953): the
+// command's own error handling carries the DOLT_BACKUP note to stderr in
+// text mode and into the JSON error object with --json, and a successful
+// sync reports success with no note even while bd holds the variables.
+//
+// Cannot be parallel: mutates the jsonOutput, proxiedServerMode, rootCtx and
+// uowProvider globals.
+func TestBackupSyncCommandFailureNamesServerEnvironment(t *testing.T) {
+	const note = "; CALL DOLT_BACKUP runs in the Dolt server's process, which takes AWS_* from its own environment, not from bd's; " +
+		"if the server lacks current credentials, set them in the environment the server starts from and restart it"
+	run := func(t *testing.T, syncErr error, args ...string) (string, string, error) {
+		t.Helper()
+		beadsDir := prepareBackupStatusTest(t)
+		clearBackupNoteCloudEnv(t)
+		t.Setenv("AWS_ACCESS_KEY_ID", "sentinel-key")
+		proxiedServerMode = true
+		if err := os.WriteFile(configfile.ProxiedServerClientInfoPath(beadsDir), []byte(`{}`), 0o600); err != nil {
+			t.Fatalf("write proxied sidecar: %v", err)
+		}
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		mock.MatchExpectationsInOrder(false)
+		mock.ExpectQuery("FROM dolt_status").WillReturnRows(sqlmock.NewRows([]string{"COUNT(*)"}).AddRow(0))
+		sync := mock.ExpectExec("CALL DOLT_BACKUP\\('sync'").WithArgs(proxiedBackupTargetName)
+		if syncErr != nil {
+			sync.WillReturnError(syncErr)
+		} else {
+			sync.WillReturnResult(sqlmock.NewResult(0, 0))
+		}
+		mock.ExpectQuery("SELECT url FROM dolt_backups WHERE name").WithArgs(proxiedBackupTargetName).
+			WillReturnRows(sqlmock.NewRows([]string{"url"}).AddRow("s3://bucket/backups"))
+
+		oldProvider, oldCtx := uowProvider, rootCtx
+		uowProvider = &sqlmockMaintenanceProvider{db: db}
+		// The bare test root runs no PersistentPreRun, so the RunE's rootCtx
+		// would otherwise be nil.
+		rootCtx = context.Background()
+		t.Cleanup(func() {
+			uowProvider = oldProvider
+			rootCtx = oldCtx
+		})
+
+		root := &cobra.Command{Use: "bd"}
+		root.PersistentFlags().BoolVar(&jsonOutput, "json", false, "output JSON")
+		backup := &cobra.Command{Use: "backup"}
+		backup.AddCommand(backupSyncCmd)
+		root.AddCommand(backup)
+		root.SetArgs(append([]string{"backup", "sync"}, args...))
+		return executeBackupStatusCommand(t, root)
+	}
+	refused := errors.New("AccessDenied: the bucket refused the request")
+	want := "backup sync failed: sync backup " + proxiedBackupTargetName + ": " + refused.Error() + note
+
+	t.Run("text", func(t *testing.T) {
+		stdout, stderr, err := run(t, refused)
+		if err == nil {
+			t.Fatal("bd backup sync succeeded, want the sync failure")
+		}
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr = %q, want %q", stderr, want)
+		}
+		if strings.Contains(stdout, "server's process") {
+			t.Fatalf("stdout = %q, want the text error on stderr only", stdout)
+		}
+	})
+
+	t.Run("json", func(t *testing.T) {
+		stdout, _, err := run(t, refused, "--json")
+		if err == nil {
+			t.Fatal("bd backup sync --json succeeded, want the sync failure")
+		}
+		if !strings.Contains(stdout, `"error"`) || !strings.Contains(stdout, want) {
+			t.Fatalf("stdout = %q, want the JSON error object carrying %q", stdout, want)
+		}
+	})
+
+	t.Run("success", func(t *testing.T) {
+		stdout, stderr, err := run(t, nil)
+		if err != nil {
+			t.Fatalf("bd backup sync = %v (stderr %q), want success", err, stderr)
+		}
+		if !strings.Contains(stdout, "Backup synced") || strings.Contains(stdout+stderr, "server's process") {
+			t.Fatalf("stdout = %q, stderr = %q; want the success report and no note", stdout, stderr)
+		}
+	})
 }
 
 // clearBackupNoteCloudEnv unsets the cloud credential variables a runner may

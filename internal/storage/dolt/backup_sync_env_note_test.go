@@ -15,7 +15,8 @@ import (
 // that scheme's variables, carries one DOLT_BACKUP note naming them. The
 // destination is the one the server has registered (dolt_backups). A lookup
 // that fails or finds nothing, a file destination, embedded mode, and a
-// failure to set up the sync connection leave the error unchanged. The note
+// failure to set up the sync connection (a bad DSN, an unreachable server)
+// leave the error unchanged and look nothing up. The note
 // avoids the "no backup"/"not found" wording the backup commands match on.
 func TestBackupSyncFailureNamesServerEnvironment(t *testing.T) {
 	for _, tc := range []struct {
@@ -34,6 +35,7 @@ func TestBackupSyncFailureNamesServerEnvironment(t *testing.T) {
 		{name: "file destination", url: "file:///tmp/backups", env: map[string]string{"AWS_ACCESS_KEY_ID": "sentinel-key"}},
 		{name: "embedded mode", url: "s3://bucket/backups", embedded: true, env: map[string]string{"AWS_ACCESS_KEY_ID": "sentinel-key"}},
 		{name: "connection setup fails", url: "s3://bucket/backups", connStr: "no-database-separator", env: map[string]string{"AWS_ACCESS_KEY_ID": "sentinel-key"}},
+		{name: "server unreachable", url: "s3://bucket/backups", connStr: unroutableConnStr, env: map[string]string{"AWS_ACCESS_KEY_ID": "sentinel-key"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearCloudAuthEnv(t)
@@ -54,19 +56,29 @@ func TestBackupSyncFailureNamesServerEnvironment(t *testing.T) {
 			default:
 				q.WillReturnRows(sqlmock.NewRows([]string{"url"}).AddRow(tc.url))
 			}
-			connStr := unroutableConnStr
-			if tc.connStr != "" {
-				connStr = tc.connStr
+			// The sync connection reaches a server that refuses the CALL
+			// itself, unless the case breaks the connection's setup.
+			connStr := tc.connStr
+			if connStr == "" {
+				connStr = refusingSQLServer(t)
 			}
 			store := &DoltStore{serverMode: !tc.embedded, db: db, database: "beads", connStr: connStr}
 
 			err = store.BackupSync(context.Background(), "default")
 
 			if err == nil {
-				t.Fatal("BackupSync succeeded against an unroutable server")
+				t.Fatal("BackupSync succeeded, want the sync to fail")
 			}
-			if tc.connStr == "" && !strings.Contains(err.Error(), "sync backup default") {
-				t.Fatalf("BackupSync = %v, want the sync failure in its existing context", err)
+			if tc.connStr == "" && !strings.Contains(err.Error(), "sync backup default: Error 1105 (HY000): "+refusedCallMessage) {
+				t.Fatalf("BackupSync = %v, want the refused sync in its existing context", err)
+			}
+			if tc.connStr == unroutableConnStr && !strings.Contains(err.Error(), "sync backup default") {
+				t.Fatalf("BackupSync = %v, want the dial failure in the sync's context", err)
+			}
+			if tc.connStr != "" {
+				if lookupErr := mock.ExpectationsWereMet(); lookupErr == nil {
+					t.Fatal("a sync that never reached the server looked its destination up")
+				}
 			}
 			checkServerEnvNote(t, err, "DOLT_BACKUP", tc.vars, tc.url)
 			for _, phrase := range []string{"no backup", "not found"} {

@@ -1748,7 +1748,14 @@ func (s *DoltStore) BackupSync(ctx context.Context, name string) error {
 		return err
 	}
 	defer db.Close()
-	err = versioncontrolops.BackupSync(ctx, db, name)
+	// Acquire the connection before the CALL: a failure to reach the server
+	// is not the sync's failure, so it gets no server-environment note.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("sync backup %s: %w", name, err)
+	}
+	defer conn.Close()
+	err = versioncontrolops.BackupSync(ctx, conn, name)
 	if s.serverMode {
 		err = WithBackupSyncServerEnvNote(ctx, s.db, name, err)
 	}
