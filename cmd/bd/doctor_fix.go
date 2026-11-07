@@ -438,6 +438,16 @@ func applyFixList(path string, fixes []doctorCheck) {
 			// priority in the sort above so it runs after every graph-mutating
 			// fix, recomputing from the corrected graph.
 			err = fix.RecomputeBlocked(path)
+		case "Blocked Status":
+			// GH#6565: advisory by design — the hold may be intentional or a
+			// tracker import's to manage, so --fix never rewrites the status.
+			// Neither fixed nor skipped; the guidance is the check's own Fix
+			// text. Without this case the default branch would print "No
+			// automatic fix available", which reads as a gap in --fix rather
+			// than a deliberate refusal.
+			fmt.Printf("  ⚠ Status left unchanged — held rows need review, not repair\n")
+			fmt.Printf("  Manual fix: %s\n", shown.Fix)
+			continue
 		case "Child-Parent Dependencies":
 			// Requires explicit opt-in flag (destructive, may remove intentional deps)
 			if !doctorFixChildParent {
