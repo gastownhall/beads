@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1382,5 +1383,50 @@ func TestDecryptWithKeyStaysUnwrappedForRotation(t *testing.T) {
 	}
 	if errors.Is(err, storage.ErrCredentialKeyMismatch) {
 		t.Errorf("error = %v, want the bare cipher error; classification belongs to decryptPassword", err)
+	}
+}
+
+// TestPeerCloudAuthCLIRouting: federation peer push, fetch and pull must take
+// the cloud-auth CLI route like the default remote does (GH#6, #5953) when
+// bd's environment holds credentials for the peer URL's scheme. The CLI route
+// materializes the peer into the local CLI directory before running dolt; the
+// SQL route never writes there, so the CLI remote's presence shows the route.
+func TestPeerCloudAuthCLIRouting(t *testing.T) {
+	skipIfNoServer(t)
+	clearCloudAuthEnv(t)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	closedPort := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	peerURL := fmt.Sprintf("http://127.0.0.1:%d/org/beads", closedPort)
+
+	ctx := context.Background()
+	store := openCloudAuthTestStore(t, "peer_route")
+	ensureCloudAuthCLIDatabase(t, store)
+	t.Setenv("DOLT_REMOTE_USER", "admin")
+
+	ops := []struct {
+		name string
+		run  func(peer string) error
+	}{
+		{"push", func(peer string) error { return store.PushTo(ctx, peer) }},
+		{"fetch", func(peer string) error { return store.Fetch(ctx, peer) }},
+		{"pull", func(peer string) error { _, err := store.PullFrom(ctx, peer); return err }},
+	}
+	for _, op := range ops {
+		t.Run(op.name, func(t *testing.T) {
+			peer := "peer_" + op.name
+			if err := store.AddRemote(ctx, peer, peerURL); err != nil {
+				t.Fatalf("AddRemote: %v", err)
+			}
+			_ = op.run(peer) // the peer port is closed; only the route matters
+			got := doltutil.FindCLIRemote(store.CLIDir(), peer)
+			if !doltutil.RemoteURLsMatch(got, peerURL) {
+				t.Errorf("%s: CLI route = false (local CLI remote %q), want true for %s with DOLT_REMOTE_USER set", op.name, got, peerURL)
+			}
+		})
 	}
 }

@@ -589,7 +589,10 @@ remotes are the source of truth for `bd dolt remote list`, `bd dolt push`, and
 For git-protocol remotes, credentialed external-server remotes, and cloud
 remotes whose credentials are only present in the current shell, `bd dolt push`
 and `bd dolt pull` automatically materialize a matching local CLI remote before
-using the `dolt` CLI transport. The CLI remote is a local transport mirror, not
+using the `dolt` CLI transport. Federation peer push, pull and fetch take the
+same routes for their peers (see the Credentials section of
+[the federation guide](/multi-agent/federation)).
+The CLI remote is a local transport mirror, not
 a separate configuration source.
 
 If you are upgrading from an older beads version and previously added remotes

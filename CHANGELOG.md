@@ -1208,6 +1208,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Federation peer push, pull and fetch now run through the local `dolt` CLI,
+  like the default remote already did, when the peer's URL uses a cloud
+  scheme and credentials for that scheme are present only in the shell `bd`
+  runs in (GH#6, #5953). The SQL route ran inside the external sql-server
+  process, which could not see those credentials and failed to authenticate.
+  An unrelated scheme's variables still leave the transfer on SQL, and a
+  local Dolt directory the connected server does not serve never routes to
+  the CLI.
 - `bd config set`, `bd config unset`, `bd repo add` and `bd repo remove` now
   replace an existing `config.yaml` in one step (temp file in the same
   directory, fsync, rename) instead of truncating and rewriting it in place.

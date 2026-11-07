@@ -109,6 +109,18 @@ Stored credentials are used automatically during sync:
 bd federation add-peer town-gamma 192.168.1.100:3306/beads --user sync-bot
 ```
 
+Cloud credentials that live only in the shell `bd` runs in are honored too.
+For a peer whose URL uses a cloud scheme (`dolthub://`, `https://`, `aws://`,
+`az://`, `gs://`, `oci://`, ...), a matching variable in bd's environment —
+`DOLT_REMOTE_USER`/`DOLT_REMOTE_PASSWORD` for DoltHub and Hosted Dolt,
+`AWS_*`/`AZURE_STORAGE_*`/... for object stores — routes that peer's push,
+pull and fetch through a local `dolt` subprocess that inherits it, since the
+SQL route would run inside the server process with the environment that
+server started with. Stored credentials take precedence when both exist. The
+CLI route requires the workspace's local Dolt directory to be the database
+the connected server serves; otherwise the transfer stays on SQL and the
+credentials must be set on the server.
+
 ### JSON Output
 
 For scripting, use the `--json` flag:

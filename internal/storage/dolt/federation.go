@@ -175,6 +175,8 @@ func (s *DoltStore) finishPeerPull(ctx context.Context, conflicts []storage.Conf
 // Fetch fetches refs from a peer without merging.
 // If credentials are stored for this peer, they are used automatically.
 // For git-protocol remotes, uses CLI `dolt fetch` to avoid MySQL connection timeouts.
+// Cloud credentials held only in bd's environment also route through the CLI,
+// which inherits them (prepareCLIRouteForPeer).
 func (s *DoltStore) Fetch(ctx context.Context, peer string) error {
 	if useCLI, err := s.prepareCLIRouteForPeerGitProtocol(ctx, peer); err != nil {
 		return err
@@ -184,8 +186,9 @@ func (s *DoltStore) Fetch(ctx context.Context, peer string) error {
 		})
 	}
 	return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
-		// Credential CLI routing: route fetch through CLI subprocess.
-		if useCLI, err := s.prepareCLIRouteForPeerCredentials(ctx, peer, creds); err != nil {
+		// Credential CLI routing: route fetch through CLI subprocess, as with
+		// cloud credentials held only in bd's environment.
+		if useCLI, err := s.prepareCLIRouteForPeer(ctx, peer, creds); err != nil {
 			return err
 		} else if useCLI {
 			return s.doltCLIFetchFromPeer(ctx, peer, creds)

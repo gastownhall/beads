@@ -751,6 +751,9 @@ func TestPeerCloudAuthRoutesThroughTheDoltCLI(t *testing.T) {
 		{"pull with the peer scheme's password", "pull", func(t *testing.T) {
 			t.Setenv("DOLT_REMOTE_PASSWORD", "client-secret")
 		}, true},
+		{"fetch with the peer scheme's password", "fetch", func(t *testing.T) {
+			t.Setenv("DOLT_REMOTE_PASSWORD", "client-secret")
+		}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.env(t)
