@@ -10,6 +10,10 @@ import (
 
 const userConfigYamlDisplayFallback = "~/.config/bd/config.yaml"
 
+// userConfigStat is the existence probe for user-level config candidates.
+// Tests replace it to record which paths are probed; production uses os.Stat.
+var userConfigStat = os.Stat
+
 // userConfigYamlCandidates contains only cleaned, absolute paths suitable for
 // the current operating system's filesystem APIs. A missing candidate means
 // its source could not be resolved safely.
@@ -89,11 +93,8 @@ func UserConfigYamlPath() (string, error) {
 }
 
 func selectUserConfigYamlPath(candidates userConfigYamlCandidates) (string, error) {
-	if userConfigPathExists(candidates.documented) {
-		return candidates.documented, nil
-	}
-	if candidates.native != candidates.documented && userConfigPathExists(candidates.native) {
-		return candidates.native, nil
+	if path := existingUserConfigYamlPath(candidates); path != "" {
+		return path, nil
 	}
 	if candidates.documented != "" {
 		return candidates.documented, nil
@@ -107,6 +108,22 @@ func selectUserConfigYamlPath(candidates userConfigYamlCandidates) (string, erro
 		err = errors.New("no absolute native user directory is available")
 	}
 	return "", fmt.Errorf("resolve user config.yaml: %w", err)
+}
+
+// existingUserConfigYamlPath returns the existing modern user config file:
+// the documented <home>/.config/bd location when it exists, otherwise the
+// native os.UserConfigDir location when it is distinct and exists, otherwise
+// "". The native candidate is never probed while the documented file exists:
+// on macOS that probe of ~/Library/Application Support raises an app-data
+// privacy prompt (GH#8113).
+func existingUserConfigYamlPath(candidates userConfigYamlCandidates) string {
+	if userConfigPathExists(candidates.documented) {
+		return candidates.documented
+	}
+	if candidates.native != candidates.documented && userConfigPathExists(candidates.native) {
+		return candidates.native
+	}
+	return ""
 }
 
 // UserConfigYamlDisplayPath returns a human-readable location for command
@@ -127,6 +144,6 @@ func userConfigPathExists(path string) bool {
 	if path == "" {
 		return false
 	}
-	_, err := os.Stat(path)
+	_, err := userConfigStat(path)
 	return err == nil
 }
