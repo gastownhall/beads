@@ -2145,3 +2145,39 @@ func (s *linearSyncStore) PreviousExternalRef(context.Context, string, time.Time
 	}
 	return *s.issue.ExternalRef, true, nil
 }
+
+// TestMergedLinearMilestoneMetadataKeepsLargeIntegers (GH#6330): merging the
+// milestone block into existing metadata must leave unrelated numbers, and
+// numbers already inside the linear block, with their stored digits.
+func TestMergedLinearMilestoneMetadataKeepsLargeIntegers(t *testing.T) {
+	ms := &linear.ProjectMilestone{ID: "milestone-1", Name: "M1", Progress: 60.61, TargetDate: "2026-05-12"}
+	existing := json.RawMessage(`{"thread_id":1546130668394913822,"linear":{"kind":"old","seq":9007199254740993}}`)
+
+	merged, err := mergedLinearMilestoneMetadata(existing, ms)
+	if err != nil {
+		t.Fatalf("mergedLinearMilestoneMetadata: %v", err)
+	}
+	for _, want := range []string{
+		`"thread_id":1546130668394913822`,
+		`"seq":9007199254740993`,
+		`"kind":"project_milestone"`,
+		`"progress":60.61`,
+	} {
+		if !strings.Contains(string(merged), want) {
+			t.Errorf("merged metadata = %s, want it to contain %s", merged, want)
+		}
+	}
+
+	for _, empty := range []string{``, `null`, `{}`} {
+		merged, err := mergedLinearMilestoneMetadata(json.RawMessage(empty), ms)
+		if err != nil {
+			t.Fatalf("mergedLinearMilestoneMetadata(%q): %v", empty, err)
+		}
+		if !strings.Contains(string(merged), `"kind":"project_milestone"`) {
+			t.Errorf("mergedLinearMilestoneMetadata(%q) = %s, want the milestone block", empty, merged)
+		}
+	}
+	if _, err := mergedLinearMilestoneMetadata(json.RawMessage(`[1]`), ms); err == nil {
+		t.Error("mergedLinearMilestoneMetadata([1]) = nil error, want a non-object error")
+	}
+}
