@@ -1208,6 +1208,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- In proxied-server mode, the proxy no longer shuts down as idle while it is
+  serving a steady stream of short `bd` commands (#7191). Its idle watcher
+  looked at the open-connection count once per tick, so a connection that
+  opened and closed between two ticks went unseen. Each authenticated
+  connection's start and end now restart the idle timeout, so the proxy exits
+  a full timeout after its last client finishes. Connections that never
+  authenticate still do not keep it up.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

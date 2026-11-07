@@ -567,6 +567,164 @@ func TestProxy_IdleTimeout_Never(t *testing.T) {
 	assertNoPidFile(t, root)
 }
 
+// requireStaysUpFor fails the test if the proxy exits before d has passed
+// since from.
+func requireStaysUpFor(t *testing.T, h *proxyHandle, stats *proxy.Stats, from time.Time, d time.Duration) {
+	t.Helper()
+	timer := time.NewTimer(time.Until(from.Add(d)))
+	defer timer.Stop()
+	select {
+	case <-h.exited:
+		t.Fatalf("proxy exited %s after the last activity, before its %s idle timeout (idle timeouts=%d)",
+			time.Since(from).Round(time.Millisecond), d, stats.Snapshot().IdleTimeouts)
+	case <-timer.C:
+	}
+}
+
+// #7191: a steady stream of authenticated short-lived connections, each
+// opened and closed between two watcher ticks, is activity. The proxy must
+// not expire while it lasts, and must still expire once it stops.
+func TestProxy_IdleTimeout_BlockedByShortLivedConns(t *testing.T) {
+	t.Parallel()
+
+	ts := server.New()
+	ts.Handler = server.DiscardHandler
+	stats := &proxy.Stats{}
+	port := freeTCPPort(t)
+	root := t.TempDir()
+
+	const idle = 2 * time.Second
+	h := runProxy(t, proxy.ProxyOpts{
+		RootDir: root, Port: port,
+		IdleTimeout: idle,
+		Server:      ts, Stats: stats,
+	})
+	waitListening(t, root, listenWait)
+
+	// Dial and close every 200ms for 5s (> 2*idle): never an idle-long gap
+	// without a connection, and no connection is open across a tick for long.
+	var lastClose time.Time
+	dials := 0
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case <-h.exited:
+			t.Fatalf("proxy exited under short-lived connection traffic after %d dials (idle timeouts=%d)",
+				dials, stats.Snapshot().IdleTimeouts)
+		default:
+		}
+		conn := dialProxy(t, port)
+		_, err := conn.Write([]byte("x"))
+		require.NoError(t, err)
+		lastClose = time.Now()
+		require.NoError(t, conn.Close())
+		dials++
+		time.Sleep(200 * time.Millisecond)
+	}
+	assert.Equal(t, int64(0), stats.Snapshot().IdleTimeouts)
+	pf, err := pidfile.Read(root, proxy.PIDFileName)
+	require.NoError(t, err)
+	require.NotNil(t, pf, "proxy.pid must stay published under traffic")
+
+	// Traffic stopped: the proxy stays up a full timeout after the last
+	// connection, then expires on its own, exactly once.
+	requireStaysUpFor(t, h, stats, lastClose, idle)
+	require.NoError(t, h.waitErr(t, 3*idle))
+	s := stats.Snapshot()
+	assert.Equal(t, int64(1), s.IdleTimeouts)
+	assert.Equal(t, int64(1), s.BackendStopCalls)
+	assertNoPidFile(t, root)
+}
+
+// #7191: the end of an authenticated connection is activity too. A
+// connection held open longer than the timeout must not leave the proxy to
+// expire on the next tick after it closes.
+func TestProxy_IdleTimeout_RestartsWhenLongConnCloses(t *testing.T) {
+	t.Parallel()
+
+	ts := server.New()
+	ts.Handler = server.DiscardHandler
+	stats := &proxy.Stats{}
+	port := freeTCPPort(t)
+	root := t.TempDir()
+
+	const idle = 2 * time.Second
+	h := runProxy(t, proxy.ProxyOpts{
+		RootDir: root, Port: port,
+		IdleTimeout: idle,
+		Server:      ts, Stats: stats,
+	})
+	waitListening(t, root, listenWait)
+
+	conn := dialProxy(t, port)
+	require.NoError(t, conn.SetDeadline(time.Time{}))
+	select {
+	case <-h.exited:
+		t.Fatalf("proxy exited while a connection was held (idle timeouts=%d)", stats.Snapshot().IdleTimeouts)
+	case <-time.After(idle + idle/2):
+	}
+
+	// The handler finishes after the client closes, so measuring from here
+	// is conservative.
+	closed := time.Now()
+	require.NoError(t, conn.Close())
+	requireStaysUpFor(t, h, stats, closed, idle)
+
+	require.NoError(t, h.waitErr(t, 3*idle))
+	s := stats.Snapshot()
+	assert.Equal(t, int64(1), s.IdleTimeouts)
+	assert.Equal(t, int64(1), s.BackendStopCalls)
+	assertNoPidFile(t, root)
+}
+
+// #7191: only authenticated connections are activity. A stream of
+// connections that never complete the BDPROXY1 exchange must neither hold
+// idle exit off nor reach the backend.
+func TestProxy_IdleTimeout_IgnoresUnauthenticatedConns(t *testing.T) {
+	t.Parallel()
+
+	ts := server.New()
+	stats := &proxy.Stats{}
+	port := freeTCPPort(t)
+	root := t.TempDir()
+
+	const idle = 2 * time.Second
+	h := runProxy(t, proxy.ProxyOpts{
+		RootDir: root, Port: port,
+		IdleTimeout: idle,
+		Server:      ts, Stats: stats,
+	})
+	waitListening(t, root, listenWait)
+
+	deadline := time.Now().Add(3 * idle)
+dialing:
+	for time.Now().Before(deadline) {
+		select {
+		case <-h.exited:
+			break dialing
+		default:
+		}
+		c, err := net.DialTimeout("tcp", proxyAddr(port), ioTimeout)
+		if err != nil {
+			// The proxy removes proxy.pid before it closes the listener, so
+			// a refused dial is only acceptable once it is shutting down.
+			assertNoPidFile(t, root)
+			break
+		}
+		require.NoError(t, c.Close())
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	require.NoError(t, h.waitErr(t, max(time.Until(deadline), 0)+time.Second))
+	s := stats.Snapshot()
+	assert.Positive(t, s.AcceptCalls)
+	assert.Equal(t, int64(1), s.IdleTimeouts)
+	assert.Equal(t, int64(0), s.BackendDialAttempts)
+	// The readiness dial is the only backend session the proxy ever makes.
+	assert.Equal(t, int64(1), ts.Snapshot().AcceptedConns)
+	assertNoPidFile(t, root)
+}
+
 func TestProxy_ConcurrentConnections(t *testing.T) {
 	t.Parallel()
 
