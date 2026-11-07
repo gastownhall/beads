@@ -3,7 +3,10 @@ title: Issue Metadata
 description: Storing arbitrary JSON on issues as the extension point for integrations and execution hints
 ---
 
-The `metadata` field on issues accepts arbitrary JSON. Any valid JSON value is stored as-is.
+The `metadata` field on issues accepts arbitrary JSON. It is stored in a JSON
+column, so bd reads back the same JSON document rather than the same text:
+whitespace and key order can change, a duplicated key keeps one value, and
+numbers follow the rules in [Numbers in metadata](#numbers-in-metadata).
 
 Metadata is the preferred extension point for data that is specific to an
 integration, orchestrator, team workflow, or experimental automation. Before
@@ -74,6 +77,42 @@ This keeps beads' core issue model stable while allowing the integration to
 round-trip fields it understands. Prefer namespaced keys and keep
 tracker-specific policy in the integration. If a value becomes broadly useful
 to beads itself, revisit whether it deserves a native field.
+
+## Numbers in metadata
+
+Store identifiers as JSON strings, not numbers. A string keeps its exact text
+with every storage engine and every JSON reader:
+
+```bash
+bd update <id> --metadata '{"thread_id": "1546130668394913822"}'
+```
+
+A JSON number is kept by the Dolt engine this version of `bd` is built with as
+follows:
+
+- An integer that fits a signed or unsigned 64-bit integer (from
+  `-9223372036854775808` to `18446744073709551615`) keeps every digit, including
+  19-digit ids past 2^53 (`9007199254740992`). `bd show`, `bd show --json` and
+  slot reads print those digits.
+- A number with a decimal point or an exponent, and an integer outside that
+  range, is stored as a 64-bit float: about 15 to 17 significant digits survive,
+  and the spelling can change (`1.0` reads back as `1`).
+
+In server mode the Dolt server stores the value, so these rules hold only when
+the server's engine handles numbers the same way. An older Dolt server, or an
+older `bd` in embedded mode, can round every integer past 2^53 to the nearest
+float without an error
+([#6330](https://github.com/gastownhall/beads/issues/6330)). Digits lost that
+way cannot be recovered; write the value again, preferably as a string.
+
+With [versioned issue history](/reference/configuration#versioned-issue-history)
+on, a write to an issue that participates in history refuses any number whose
+magnitude is above 2^53-1 (the I-JSON exact-integer range, whatever its
+spelling), even one the engine could store. Turning it on with
+`bd config set versioned-history.enabled true` checks the store first and
+refuses, writing nothing, while an issue that history would record holds such a
+value. An issue created while history was off is legacy: its writes are not
+checked, and the enable-time check skips it unless it is a template.
 
 ## Reserved Key Prefixes
 
