@@ -35,6 +35,10 @@ type DBTX interface {
 // idx_*_issue_target / idx_*_wisp_target indexes). EXISTS(a OR b) is
 // EXISTS(a) OR EXISTS(b), so the result is unchanged; the IS NOT NULL guards
 // stay, as before (cd.col = NULL never matches anyway).
+//
+// Like shouldBeBlockedIDsUnionCoreSQL, it runs inside ignored/0032's repair,
+// before later ignored versions: it must not read a column that only a later
+// ignored migration adds.
 const waitsForGateBlockedSQL = `
 		(
 		  (
