@@ -110,7 +110,7 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 	} else if useCLI {
 		err = s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
 			pullErr := s.finishCLIPull(ctx, s.doltCLIPullFromPeer(ctx, peer, creds))
-			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
+			return s.withServerEnvNote(ctx, "DOLT_PULL", peer, creds, s.peerPullOutcome(ctx, peer, pullErr, &conflicts))
 		})
 		return s.finishPeerPull(ctx, conflicts, err, preHead)
 	}
@@ -120,12 +120,12 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 			return err
 		} else if useCLI {
 			pullErr := s.finishCLIPull(ctx, s.doltCLIPullFromPeer(ctx, peer, creds))
-			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
+			return s.withServerEnvNote(ctx, "DOLT_PULL", peer, creds, s.peerPullOutcome(ctx, peer, pullErr, &conflicts))
 		}
-		return withEnvCredentials(creds, func() error {
+		return s.withServerEnvNote(ctx, "DOLT_PULL", peer, nil, withEnvCredentials(creds, func() error {
 			pullErr := s.pullWithAutoResolve(ctx, peer, "CALL DOLT_PULL(?)", peer)
 			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
-		})
+		}))
 	})
 	return s.finishPeerPull(ctx, conflicts, err, preHead)
 }
