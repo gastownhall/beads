@@ -123,7 +123,7 @@ func ComputeRepoFingerprintForPath(repoPath string) (RepoFingerprint, error) {
 	}
 
 	fp := RepoFingerprint{ID: hashRepoIdentity(canonical), Source: RepoIDSourceRemote}
-	if resolved, alias, hostName, ok := resolveSSHAliasCanonical(repoURL, canonical); ok {
+	if resolved, alias, hostName, ok := resolveSSHAliasCanonical(repoPath, repoURL, canonical); ok {
 		fp.LegacyID = fp.ID
 		fp.ID = hashRepoIdentity(resolved)
 		fp.SSHAlias = alias
@@ -200,8 +200,9 @@ func parseSSHRemote(rawURL string) (sshRemote, bool) {
 // resolveSSHAliasCanonical returns the canonical identity of an SSH remote
 // with its written host replaced by the HostName the local SSH configuration
 // maps it to. It reports false, leaving the legacy identity in force,
-// whenever the remote is not SSH or the alias cannot be resolved.
-func resolveSSHAliasCanonical(rawURL, legacyCanonical string) (canonical, alias, hostName string, ok bool) {
+// whenever the remote is not SSH, Git would use a custom SSH transport, or
+// the alias cannot be resolved.
+func resolveSSHAliasCanonical(repoPath, rawURL, legacyCanonical string) (canonical, alias, hostName string, ok bool) {
 	remote, ok := parseSSHRemote(rawURL)
 	if !ok {
 		return "", "", "", false
@@ -212,6 +213,14 @@ func resolveSSHAliasCanonical(rawURL, legacyCanonical string) (canonical, alias,
 	}
 	tail := legacyCanonical[len(host):]
 	if !safeSSHToken.MatchString(host) || net.ParseIP(host) != nil {
+		return "", "", "", false
+	}
+	// An unsafe user would be skipped rather than dropped: ssh applies
+	// Match user rules, so a different user could select a different host.
+	if remote.user != "" && !safeSSHToken.MatchString(remote.user) {
+		return "", "", "", false
+	}
+	if customSSHTransport(repoPath) {
 		return "", "", "", false
 	}
 
@@ -228,18 +237,42 @@ func resolveSSHAliasCanonical(rawURL, legacyCanonical string) (canonical, alias,
 	return resolved + tail, host, resolved, true
 }
 
+// customSSHTransport reports whether Git would reach the remote through an
+// SSH command other than ssh with its default configuration, whose HostName
+// mapping ssh -G cannot speak for.
+func customSSHTransport(repoPath string) bool {
+	for _, key := range []string{"GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT"} {
+		if strings.TrimSpace(os.Getenv(key)) != "" {
+			return true
+		}
+	}
+	out, err := runGitInRepo(repoPath, "config", "--get", "core.sshCommand")
+	return err == nil && strings.TrimSpace(string(out)) != ""
+}
+
 // normalizeSSHHostName validates a HostName printed by ssh -G and returns it
 // lowercased without a trailing dot.
 func normalizeSSHHostName(hostName string) (string, bool) {
 	hostName = strings.TrimSuffix(strings.ToLower(hostName), ".")
+	if hostName == "" || len(hostName) > 253 {
+		return hostName, false
+	}
 	if net.ParseIP(hostName) != nil {
 		return hostName, true
 	}
-	return hostName, safeSSHToken.MatchString(hostName)
+	return hostName, validSSHHostName.MatchString(hostName)
 }
 
+// validSSHHostName matches a lowercased DNS hostname: dot-separated labels
+// that start and end alphanumerically and contain no underscores.
+var validSSHHostName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+
 // sshConfigHostName asks ssh which HostName its configuration gives the
-// destination. ssh -G evaluates the configuration without connecting.
+// destination. ssh -G evaluates the configuration without connecting, but it
+// is local policy, not a pure function: Match exec runs programs and
+// CanonicalizeHostname may consult DNS. The lookup is bounded by ctx and
+// WaitDelay; stdin and stderr are not connected, and an ssh found only
+// through a relative PATH entry is refused.
 func sshConfigHostName(ctx context.Context, user, host, port string) (string, error) {
 	sshPath, err := sshLookPath("ssh")
 	if err != nil {
