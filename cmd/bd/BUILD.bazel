@@ -934,6 +934,8 @@ go_test(
         "init_commit_test.go",
         "init_embedded_test.go",
         "init_endpoint_test.go",
+        "init_ephemeral_root_integration_test.go",
+        "init_ephemeral_root_test.go",
         "init_explicit_beads_dir_embedded_test.go",
         "init_external_autostart_test.go",
         "init_external_message_test.go",
