@@ -290,6 +290,17 @@ func TestFileURLForOS(t *testing.T) {
 		{name: "AC-2 space and percent", goos: "windows", abs: `C:\Users\my dir\100%done`, want: "file://C:/Users/my dir/100%done"},
 		{name: "AC-2 space, percent and hash stay literal", goos: "windows",
 			abs: `c:\Users\John Doe\100%\a#b`, want: "file://C:/Users/John Doe/100%/a#b", earlPath: "C:/Users/John Doe/100%/a#b"},
+
+		{name: "AC-3 linux plain", goos: "linux", abs: "/home/me/backup", want: "file:///home/me/backup"},
+		{name: "AC-3 linux backslash", goos: "linux", abs: `/tmp/we\ird`, want: `file:///tmp/we\ird`},
+		{name: "AC-3 linux space and percent", goos: "linux", abs: "/tmp/my dir/100%done", want: "file:///tmp/my dir/100%done"},
+		{name: "AC-3 linux root", goos: "linux", abs: "/", want: "file:///"},
+		{name: "AC-3 linux drive-like component", goos: "linux", abs: "/srv/c:/x", want: "file:///srv/c:/x"},
+		{name: "AC-3 darwin plain", goos: "darwin", abs: "/Users/me/backup", want: "file:///Users/me/backup"},
+		{name: "AC-3 darwin backslash", goos: "darwin", abs: `/tmp/we\ird`, want: `file:///tmp/we\ird`},
+		{name: "AC-3 darwin space and percent", goos: "darwin", abs: "/tmp/my dir/100%done", want: "file:///tmp/my dir/100%done"},
+		{name: "AC-3 darwin root", goos: "darwin", abs: "/", want: "file:///"},
+		{name: "AC-3 darwin drive-like component", goos: "darwin", abs: "/srv/c:/x", want: "file:///srv/c:/x"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := fileURLForOS(tc.abs, tc.goos)
