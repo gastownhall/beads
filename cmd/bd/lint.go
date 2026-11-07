@@ -14,11 +14,12 @@ import (
 
 // LintResult holds the validation result for a single issue.
 type LintResult struct {
-	ID       string   `json:"id"`
-	Title    string   `json:"title"`
-	Type     string   `json:"type"`
-	Missing  []string `json:"missing,omitempty"`
-	Warnings int      `json:"warnings"`
+	ID       string                   `json:"id"`
+	Title    string                   `json:"title"`
+	Type     string                   `json:"type"`
+	Missing  []string                 `json:"missing,omitempty"`
+	TooLong  []validation.FieldLength `json:"too_long,omitempty"`
+	Warnings int                      `json:"warnings"`
 }
 
 var lintCmd = &cobra.Command{
@@ -40,6 +41,14 @@ Additional per-type sections can be required via config; they are ADDITIVE
 to the built-ins above (built-in requirements are never relaxed):
 
   bd config set lint.sections.epic "Standards scorecard, Cost"
+
+Text fields can be capped by length, in characters, for every issue type.
+Fields: title, description, design, acceptance_criteria, notes. Unset means
+no limit. An optional hint, written for your own workflow, is shown with each
+over-length finding:
+
+  bd config set lint.max-chars.design 4000
+  bd config set lint.max-chars-hint.design "Split into child issues"
 
 Examples:
   bd lint                    # Lint all open issues
@@ -148,15 +157,17 @@ func runLint(issues []*types.Issue) error {
 			missing[i] = m.Heading
 		}
 
+		warnings := len(missing) + len(templateErr.TooLong)
 		result := LintResult{
 			ID:       issue.ID,
 			Title:    issue.Title,
 			Type:     string(issue.IssueType),
 			Missing:  missing,
-			Warnings: len(missing),
+			TooLong:  templateErr.TooLong,
+			Warnings: warnings,
 		}
 		results = append(results, result)
-		totalWarnings += len(missing)
+		totalWarnings += warnings
 	}
 
 	if jsonOutput {
@@ -184,6 +195,12 @@ func runLint(issues []*types.Issue) error {
 		fmt.Printf("%s [%s]: %s\n", r.ID, r.Type, r.Title)
 		for _, m := range r.Missing {
 			fmt.Printf("  ⚠ Missing: %s\n", m)
+		}
+		for _, f := range r.TooLong {
+			fmt.Printf("  ⚠ Too long: %s (%d chars, max %d)\n", f.Field, f.Chars, f.Max)
+			if f.Hint != "" {
+				fmt.Printf("    → %s\n", f.Hint)
+			}
 		}
 		fmt.Println()
 	}
