@@ -703,15 +703,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Server mode: one-statement settings reads no longer open a transaction.**
-  `GetConfig`, `GetAllConfig`, `GetConfigByPrefix`, `GetMetadata`,
-  `GetLocalMetadata` and `GetInfraTypes` sent `START TRANSACTION` and `ROLLBACK`
-  around a single `SELECT`, two more round trips for a consistency one statement
-  already has. A store now asks `SELECT @@autocommit` once and skips them when it
-  is on, so `bd list` sends 5 fewer statements and `bd create` 16 fewer, about
-  0.5 s and 1.6 s at 100 ms round-trip time. A server started with
-  `--no-auto-commit` keeps the transactions, because a bare `SELECT` there stays on
-  an old snapshot.
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add
@@ -776,6 +767,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     anything that reads `@@sql_mode` sees it. Dolt has done so since 2.3.3,
     not 2.6.0, so this is new only for a server moving from a release before
     2.3.3, such as 2.1.8.
+- **Server mode: one-statement settings reads no longer open a transaction.**
+  `GetConfig`, `GetAllConfig`, `GetConfigByPrefix`, `GetMetadata`,
+  `GetLocalMetadata` and `GetInfraTypes` sent `START TRANSACTION` and `ROLLBACK`
+  around a single `SELECT`, two more round trips for a consistency one statement
+  already has. A store now asks `SELECT @@autocommit` once and skips them when it
+  is on, so `bd list` sends 5 fewer statements and `bd create` 16 fewer, about
+  0.5 s and 1.6 s at 100 ms round-trip time. A server started with
+  `--no-auto-commit` keeps the transactions, because a bare `SELECT` there stays on
+  an old snapshot.
 - **Embedded mode now runs the Dolt 2.6.0 engine, and the module needs Go
   1.27.3.** `bd` links `dolthub/dolt/go` at the v2.6.0 release (with
   `go-mysql-server` to match). Dolt's own `go.mod` declares `go 1.27.3`, so
