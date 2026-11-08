@@ -33,6 +33,10 @@ func TestCheckClosable(t *testing.T) {
 		{"forced held", &types.Issue{Assignee: "bob"}, "alice", true, nil},
 		{"own", &types.Issue{Assignee: "alice"}, "alice", false, nil},
 		{"unassigned", &types.Issue{}, "alice", false, nil},
+		// bd-740y4x: the slash and exact double-hyphen spellings of one
+		// rig-qualified owner match in both directions (ga-2vy9p2).
+		{"own slash-qualified under double-hyphen", &types.Issue{Status: types.StatusOpen, Assignee: "gascity/bob"}, "gascity--bob", false, nil},
+		{"own double-hyphen under slash-qualified", &types.Issue{Status: types.StatusOpen, Assignee: "gascity--bob"}, "gascity/bob", false, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
