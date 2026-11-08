@@ -415,3 +415,46 @@ func TestWispCreateRejectsInvalidWispType(t *testing.T) {
 		})
 	}
 }
+
+// TestWispCreateWithoutWispTypeStaysUntyped is the regression guard for
+// callers that do not pass --wisp-type: the same root and child issues are
+// created as before, each with an empty wisp_type (GH#8209).
+func TestWispCreateWithoutWispTypeStaysUntyped(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		run  func(*cobra.Command, []string) error
+		cmd  func(*testing.T) *cobra.Command
+	}{
+		{"bd mol wisp create omitted", runWispCreate, func(*testing.T) *cobra.Command { return makeWispTestCmd(false, false) }},
+		{"bd mol wisp omitted", runWisp, func(*testing.T) *cobra.Command { return makeWispTestCmd(false, false) }},
+		{"bd mol wisp create explicit empty", runWispCreate, func(t *testing.T) *cobra.Command { return makeWispTestCmdWithType(t, false, false, "") }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := context.Background()
+			s := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
+			rootID := wispTestProto(t, ctx, s, 2)
+			withWispTestGlobals(t, s, ctx)
+
+			var runErr error
+			_ = captureStdout(t, func() error {
+				runErr = c.run(c.cmd(t), []string{rootID})
+				return nil
+			})
+			if runErr != nil {
+				t.Fatalf("%s: %v", c.name, runErr)
+			}
+
+			got := ephemeralIssues(t, ctx, s)
+			titles := map[string]bool{}
+			for _, issue := range got {
+				titles[issue.Title] = true
+				if issue.WispType != "" {
+					t.Errorf("%s (%q): wisp_type = %q, want empty", issue.ID, issue.Title, issue.WispType)
+				}
+			}
+			if len(got) != 3 || !titles["Proto Root"] || !titles["Step 1"] || !titles["Step 2"] {
+				t.Errorf("created %d ephemeral issues %v, want the root and both steps", len(got), titles)
+			}
+		})
+	}
+}
