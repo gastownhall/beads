@@ -221,3 +221,65 @@ func TestSettleIgnoredTableStompPreservesUnconfirmedFailures(t *testing.T) {
 		}
 	})
 }
+
+// TestSettleIgnoredTableStompContributorScenarios carries the ahead/behind
+// scenarios of the contributor's skip-the-merge fix (#8104) over to the
+// post-refusal proof: the merge still runs, and only after the engine refused
+// it does the wrapper decide. A remote with nothing this clone lacks (the
+// reported 430 ahead / 0 behind, and level) is the no-op pull; a remote with
+// commits this clone lacks (one ahead, diverged) or unreadable evidence keeps
+// the refusal, as the typed ignored-table error, never success.
+func TestSettleIgnoredTableStompContributorScenarios(t *testing.T) {
+	const (
+		head   = "hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh"
+		remote = "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+		base   = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+	cases := []struct {
+		name   string
+		proof  func(sqlmock.Sqlmock)
+		wantOK bool
+	}{
+		{name: "remote is an ancestor (430 ahead, 0 behind)", wantOK: true, proof: func(m sqlmock.Sqlmock) {
+			m.ExpectQuery(mergeBaseQuery).WillReturnRows(sqlmock.NewRows([]string{"base", "tip"}).AddRow(remote, remote))
+			m.ExpectQuery(mergingQuery).WillReturnRows(sqlmock.NewRows([]string{"is_merging"}).AddRow(false))
+		}},
+		{name: "level (0 ahead, 0 behind)", wantOK: true, proof: func(m sqlmock.Sqlmock) {
+			m.ExpectQuery(mergeBaseQuery).WillReturnRows(sqlmock.NewRows([]string{"base", "tip"}).AddRow(head, head))
+			m.ExpectQuery(mergingQuery).WillReturnRows(sqlmock.NewRows([]string{"is_merging"}).AddRow(false))
+		}},
+		{name: "remote one ahead (0 ahead, 1 behind)", proof: func(m sqlmock.Sqlmock) {
+			m.ExpectQuery(mergeBaseQuery).WillReturnRows(sqlmock.NewRows([]string{"base", "tip"}).AddRow(head, remote))
+		}},
+		{name: "diverged (2 ahead, 1 behind)", proof: func(m sqlmock.Sqlmock) {
+			m.ExpectQuery(mergeBaseQuery).WillReturnRows(sqlmock.NewRows([]string{"base", "tip"}).AddRow(base, remote))
+		}},
+		{name: "evidence unavailable", proof: func(m sqlmock.Sqlmock) {
+			m.ExpectQuery(mergeBaseQuery).WillReturnError(errors.New("count failed"))
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock := newIgnoredMergeMock(t)
+			tc.proof(mock)
+			if !tc.wantOK {
+				mock.ExpectQuery(ignoredQuery).WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow("events"))
+			}
+
+			err := settleIgnoredTableStomp(context.Background(), db, "origin/main", stompRefusal)
+			if tc.wantOK {
+				if err != nil {
+					t.Fatalf("settle = %v; want the no-op pull to succeed", err)
+				}
+			} else {
+				var ignoredErr *IgnoredTablesMergeError
+				if !errors.As(err, &ignoredErr) || !errors.Is(err, stompRefusal) {
+					t.Fatalf("settle = %v; want the typed refusal wrapping the original", err)
+				}
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
