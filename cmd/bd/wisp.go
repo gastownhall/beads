@@ -137,6 +137,7 @@ The wisp will:
 
 Examples:
   bd mol wisp create mol-patrol                    # Ephemeral patrol cycle
+  bd mol wisp create mol-patrol --wisp-type patrol # Typed for TTL compaction
   bd mol wisp create mol-health-check              # One-time health check
   bd mol wisp create mol-diagnostics --var target=db  # Diagnostic run`,
 	Args:          cobra.ExactArgs(1),
@@ -165,6 +166,7 @@ type wispCreateInput struct {
 	dryRun   bool
 	rootOnly bool
 	varFlags []string
+	wispType types.WispType
 }
 
 func gatherWispCreateInput(cmd *cobra.Command, args []string) wispCreateInput {
@@ -172,6 +174,8 @@ func gatherWispCreateInput(cmd *cobra.Command, args []string) wispCreateInput {
 	in.dryRun, _ = cmd.Flags().GetBool("dry-run")
 	in.rootOnly, _ = cmd.Flags().GetBool("root-only")
 	in.varFlags, _ = cmd.Flags().GetStringArray("var")
+	wispTypeStr, _ := cmd.Flags().GetString("wisp-type")
+	in.wispType = types.WispType(wispTypeStr)
 	return in
 }
 
@@ -284,6 +288,7 @@ func runWispCreateCore(cmd *cobra.Command, args []string) error {
 		Ephemeral: true,
 		Prefix:    types.IDPrefixWisp,
 		RootOnly:  rootOnly,
+		WispType:  in.wispType,
 	})
 	if err != nil {
 		return HandleError("creating wisp: %v", err)
@@ -1049,6 +1054,7 @@ func init() {
 	wispCreateCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value); a name the proto cannot consume is an error")
 	wispCreateCmd.Flags().Bool("dry-run", false, "Preview what would be created")
 	wispCreateCmd.Flags().Bool("root-only", false, "Create only the root issue (no child step issues)")
+	wispCreateCmd.Flags().String("wisp-type", "", "Wisp type for TTL-based compaction, applied to the root and all created steps: heartbeat, ping, patrol, gc_report, recovery, error, escalation (empty leaves them untyped)")
 
 	wispListCmd.Flags().Bool("all", false, "Include closed wisps")
 	wispListCmd.Flags().String("type", "", "Filter by issue type (e.g., agent, task, patrol)")

@@ -100,6 +100,13 @@ type CloneOptions struct {
 	Ephemeral bool              // If true, spawned issues are marked for bulk deletion
 	Prefix    string            // Override prefix for ID generation (bd-hobo: distinct prefixes)
 
+	// WispType stamps this wisp type on every created issue (root and child
+	// steps alike) for TTL-based compaction. It is a literal enum, not a
+	// template variable. Empty preserves today's untyped clones; the wisp
+	// creation commands supply it together with Ephemeral, and every other
+	// clone caller leaves the zero value.
+	WispType types.WispType
+
 	// Dynamic bonding fields (for Christmas Ornament pattern)
 	ParentID string // Parent molecule ID to bond under (e.g., "patrol-x7k")
 	ChildRef string // Child reference with variables (e.g., "arm-{{polecat_name}}")
@@ -919,6 +926,7 @@ func cloneSubgraphInto(ctx context.Context, w molWriter, subgraph *TemplateSubgr
 			Assignee:           issueAssignee,
 			EstimatedMinutes:   oldIssue.EstimatedMinutes,
 			Ephemeral:          opts.Ephemeral, // mark for cleanup when closed
+			WispType:           opts.WispType,  // type every created issue shares (TTL compaction)
 			IDPrefix:           opts.Prefix,    // distinct prefixes for mols/wisps
 			// Gate fields (for async coordination)
 			AwaitType: oldIssue.AwaitType,

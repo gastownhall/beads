@@ -5354,11 +5354,13 @@ bd mol wisp create
     |
     | Examples:
     |   bd mol wisp create mol-patrol                    # Ephemeral patrol cycle
+    |   bd mol wisp create mol-patrol --wisp-type patrol # Typed for TTL compaction
     |   bd mol wisp create mol-health-check              # One-time health check
     |   bd mol wisp create mol-diagnostics --var target=db  # Diagnostic run
   flag --dry-run type=bool default="false" usage="Preview what would be created"
   flag --root-only type=bool default="false" usage="Create only the root issue (no child step issues)"
   flag --var type=stringArray default="[]" usage="Variable substitution (key=value); a name the proto cannot consume is an error"
+  flag --wisp-type type=string default="" usage="Wisp type for TTL-based compaction, applied to the root and all created steps: heartbeat, ping, patrol, gc_report, recovery, error, escalation (empty leaves them untyped)"
 
 bd mol wisp gc
   use: "gc"
