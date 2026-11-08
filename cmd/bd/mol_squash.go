@@ -326,8 +326,11 @@ func squashMoleculeInto(ctx context.Context, w molWriter, root *types.Issue, chi
 			return nil, fmt.Errorf("failed to close wisp root %s: %w", root.ID, err)
 		}
 		// Clear ephemeral so the closed root stops being re-emitted by every wisp-table export cycle.
-		if err := w.UpdateIssue(ctx, root.ID, map[string]interface{}{"wisp": false}, actorName); err != nil {
-			return nil, fmt.Errorf("failed to clear ephemeral flag on root %s: %w", root.ID, err)
+		// Clear wisp_type with it: bd purge counts a typed row as ephemeral even
+		// without the flag, so a kept typed root would be purged and its digest
+		// left without a parent.
+		if err := w.UpdateIssue(ctx, root.ID, map[string]interface{}{"wisp": false, "wisp_type": ""}, actorName); err != nil {
+			return nil, fmt.Errorf("failed to clear ephemeral flag and wisp type on root %s: %w", root.ID, err)
 		}
 		result.WispSquash = true
 	}

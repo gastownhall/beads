@@ -1250,6 +1250,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `error`, `escalation`), and is rejected with `bd create`'s diagnostic before
   anything is created or previewed when invalid. Omitting it keeps today's
   untyped wisps. Existing callers stay untyped until they pass the flag.
+  `bd mol squash` now clears the type along with the wisp flag of the root
+  it keeps, so `bd purge` no longer deletes a squashed typed root and leaves
+  its digest without a parent.
   ([#8209](https://github.com/gastownhall/beads/issues/8209))
 
 - The `bd.storage.operations`, `bd.storage.operation.duration` and

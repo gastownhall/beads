@@ -162,6 +162,58 @@ func TestProxiedServerWispCreate(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("squash_clears_wisp_type_so_purge_keeps_root", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "wcsq")
+		proto := bdProxiedCreate(t, bd, p.dir, "Squash typed proto", "--type", "epic", "--label", "template")
+		step := bdProxiedCreate(t, bd, p.dir, "Squash typed step", "--type", "task", "--parent", proto.ID)
+		db := openProxiedDB(t, p)
+
+		idMapping := proxiedWispCreateMapping(t, bd, p.dir, []string{proto.ID, step.ID},
+			"mol", "wisp", proto.ID, "--wisp-type", "patrol", "--json")
+		root := idMapping[proto.ID]
+
+		out, err := bdProxiedRun(t, bd, p.dir, "mol", "squash", root, "--json")
+		if err != nil {
+			t.Fatalf("bd mol squash %s --json: %v\n%s", root, err, out)
+		}
+		var squashed struct {
+			DigestID   string `json:"digest_id"`
+			WispSquash bool   `json:"wisp_squash"`
+		}
+		if err := json.Unmarshal(out, &squashed); err != nil {
+			t.Fatalf("unmarshal squash: %v\n%s", err, out)
+		}
+		if squashed.DigestID == "" || !squashed.WispSquash {
+			t.Fatalf("bd mol squash %s: digest_id = %q, wisp_squash = %v; want a digest and the root closed", root, squashed.DigestID, squashed.WispSquash)
+		}
+		if got := proxiedWispType(t, db, root); got != "" {
+			t.Errorf("squashed root %s wisp_type = %q, want empty", root, got)
+		}
+
+		out, err = bdProxiedRun(t, bd, p.dir, "purge", "--force", "--json")
+		if err != nil {
+			t.Fatalf("bd purge --force --json: %v\n%s", err, out)
+		}
+		var purged struct {
+			PurgedCount int `json:"purged_count"`
+		}
+		if err := json.Unmarshal(out, &purged); err != nil {
+			t.Fatalf("unmarshal purge: %v\n%s", err, out)
+		}
+		if purged.PurgedCount != 0 {
+			t.Errorf("bd purge --force purged %d beads after the squash, want 0", purged.PurgedCount)
+		}
+		proxiedWispType(t, db, root) // fails if purge deleted the squashed root
+		var parentEdges int
+		if err := db.QueryRow("SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND type = 'parent-child'", squashed.DigestID).Scan(&parentEdges); err != nil {
+			t.Fatalf("count digest parent edges: %v", err)
+		}
+		if parentEdges != 1 {
+			t.Errorf("digest %s has %d parent-child edges after purge, want 1 (to %s)", squashed.DigestID, parentEdges, root)
+		}
+	})
 }
 
 // proxiedWispCreateMapping runs a wisp creation command with --json, checks

@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // wispTestProto creates a proto epic with the given number of parent-child
@@ -454,6 +455,79 @@ func TestWispCreateWithoutWispTypeStaysUntyped(t *testing.T) {
 			}
 			if len(got) != 3 || !titles["Proto Root"] || !titles["Step 1"] || !titles["Step 2"] {
 				t.Errorf("created %d ephemeral issues %v, want the root and both steps", len(got), titles)
+			}
+		})
+	}
+}
+
+// TestSquashTypedWispIsNotPurged verifies `bd mol squash` still keeps a wisp
+// typed with --wisp-type: squash clears the type with the wisp flag, because
+// bd purge counts a typed row as ephemeral, and would otherwise delete the
+// squashed root and orphan its digest (GH#8209).
+func TestSquashTypedWispIsNotPurged(t *testing.T) {
+	for _, wispType := range []string{"patrol", ""} {
+		t.Run(fmt.Sprintf("wisp-type=%q", wispType), func(t *testing.T) {
+			ctx := context.Background()
+			s := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
+			protoID := wispTestProto(t, ctx, s, 2)
+			withWispTestGlobals(t, s, ctx)
+
+			var runErr error
+			_ = captureStdout(t, func() error {
+				runErr = runWispCreate(makeWispTestCmdWithType(t, false, false, wispType), []string{protoID})
+				return nil
+			})
+			if runErr != nil {
+				t.Fatalf("runWispCreate --wisp-type %q: %v", wispType, runErr)
+			}
+			var rootID string
+			for _, issue := range ephemeralIssues(t, ctx, s) {
+				if issue.Title == "Proto Root" {
+					rootID = issue.ID
+				}
+			}
+			if rootID == "" {
+				t.Fatal("runWispCreate created no wisp root")
+			}
+
+			squashCmd := &cobra.Command{Use: "squash"}
+			squashCmd.Flags().Bool("dry-run", false, "")
+			squashCmd.Flags().Bool("keep-children", false, "")
+			squashCmd.Flags().String("summary", "", "")
+			_ = captureStdout(t, func() error {
+				runErr = runMolSquash(squashCmd, []string{rootID})
+				return nil
+			})
+			if runErr != nil {
+				t.Fatalf("runMolSquash %s: %v", rootID, runErr)
+			}
+
+			root, err := s.GetIssue(ctx, rootID)
+			if err != nil {
+				t.Fatalf("GetIssue %s after squash: %v", rootID, err)
+			}
+			if root.Status != types.StatusClosed || root.Ephemeral || root.WispType != "" {
+				t.Errorf("squashed root: status=%s ephemeral=%v wisp_type=%q, want closed, false and empty",
+					root.Status, root.Ephemeral, root.WispType)
+			}
+
+			sweeper, err := s.Sweeper()
+			if err != nil {
+				t.Fatalf("Sweeper: %v", err)
+			}
+			// The request `bd purge` sends, as a preview.
+			preview, err := sweeper.Sweep(ctx, issueops.SweepRequest{
+				Actor:                 "test",
+				Tier:                  issueops.SweepEphemeral,
+				ProtectLiveDependents: true,
+				DryRun:                true,
+			})
+			if err != nil {
+				t.Fatalf("purge preview: %v", err)
+			}
+			if preview.Swept != 0 {
+				t.Errorf("bd purge would delete %d beads after the squash, want 0 (the squashed root %s and its digest are kept)",
+					preview.Swept, rootID)
 			}
 		})
 	}
