@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Idle connections can no longer lock bd out of its database proxy.** The
+  proxy's control port is loopback TCP, reachable by any local user, and it
+  turned new connections away while eight earlier ones sat silent for up to
+  two seconds, so a handful of idle connections made proxy discovery fail
+  until bd's open timed out. The control port now holds up to 256
+  connections and evicts the oldest when full, so a bd probe gets through a
+  pool of parked connections. It does not restrict which local users can
+  reach the port (GH#5697).
+
 - **Telemetry no longer exports the raw command line.** With telemetry on
   (`BD_OTEL_ENABLED=true`), the OTel resource attached to every exported
   metric and span carried `process.command_args`, the unscrubbed `os.Args`,
