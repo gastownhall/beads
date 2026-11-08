@@ -257,6 +257,42 @@ func TestSingleStatementReadKeepsATransactionWithoutAutocommit(t *testing.T) {
 		}
 	})
 
+	t.Run("a refused mode read is remembered as off", func(t *testing.T) {
+		// A server or proxy that refuses the variable will refuse it every time.
+		// Asking again would add the probe to every read, one statement more than
+		// a transaction read without it.
+		store, mock, counts := vhCountedStore(t)
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT @@autocommit")).WillReturnError(errAutocommitRefused)
+		for range 2 {
+			mock.ExpectBegin()
+			mock.ExpectQuery(query).WithArgs("issue_prefix").WillReturnRows(row())
+			mock.ExpectRollback()
+		}
+		for range 2 {
+			if got, err := store.GetConfig(context.Background(), "issue_prefix"); err != nil || got != "bd" {
+				t.Fatalf("GetConfig = %q, %v", got, err)
+			}
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+		if got := counts.Snapshot(); got.Total() != 3 || got.Begin != 2 || got.Rollback != 2 {
+			t.Fatalf("want the refused probe once and two transaction reads, got %+v", got)
+		}
+	})
+
+	t.Run("a canceled mode read is not remembered", func(t *testing.T) {
+		store, _, _ := vhCountedStore(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := store.GetConfig(ctx, "issue_prefix"); err == nil {
+			t.Fatal("GetConfig on a canceled context succeeded")
+		}
+		if got := store.autocommit.Load(); got != 0 {
+			t.Fatalf("a canceled mode read cached %d, want unknown (0)", got)
+		}
+	})
+
 	t.Run("autocommit on is read once", func(t *testing.T) {
 		store, mock, counts := vhCountedStore(t)
 		expectAutocommit(mock, 1)
@@ -272,6 +308,62 @@ func TestSingleStatementReadKeepsATransactionWithoutAutocommit(t *testing.T) {
 		}
 		if got := counts.Snapshot().Total(); got != 3 {
 			t.Fatalf("two reads sent %d statements, want 3", got)
+		}
+	})
+}
+
+// errAutocommitRefused is a definite answer that will not change on retry, as a
+// proxy that does not forward the variable would give.
+var errAutocommitRefused = errors.New("Error 1193 (HY000): Unknown system variable 'autocommit'")
+
+// TestAutocommitProbeFollowsTheCircuitBreaker: the mode read runs before the
+// read's own retry loop, so it does the breaker accounting one retry attempt
+// does. Without it, every settings read during an outage first dials the server
+// (up to the connect timeout) before the read itself fails fast.
+func TestAutocommitProbeFollowsTheCircuitBreaker(t *testing.T) {
+	t.Run("an open breaker sends no probe", func(t *testing.T) {
+		t.Setenv("BEADS_TEST_MODE", "")
+		store, mock, counts := vhCountedStore(t)
+		store.breaker = newTestCircuitBreaker(t)
+		for range circuitFailureThreshold {
+			store.breaker.RecordFailure()
+		}
+		if _, err := store.GetConfig(context.Background(), "issue_prefix"); !errors.Is(err, ErrCircuitOpen) {
+			t.Fatalf("GetConfig with the breaker open = %v, want ErrCircuitOpen", err)
+		}
+		if got := counts.Snapshot().Total(); got != 0 {
+			t.Fatalf("an open breaker let %d statements through", got)
+		}
+		if got := store.autocommit.Load(); got != 0 {
+			t.Fatalf("an open breaker cached the mode as %d, want unknown (0)", got)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("a lost connection on the probe counts toward the breaker", func(t *testing.T) {
+		t.Setenv("BEADS_TEST_MODE", "")
+		store, mock, counts := vhCountedStore(t)
+		store.breaker = newTestCircuitBreaker(t)
+		for range circuitFailureThreshold - 1 {
+			store.breaker.RecordFailure()
+		}
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT @@autocommit")).WillReturnError(errVHReadLost)
+		if _, err := store.GetConfig(context.Background(), "issue_prefix"); !errors.Is(err, ErrCircuitOpen) {
+			t.Fatalf("GetConfig after the probe tripped the breaker = %v, want ErrCircuitOpen", err)
+		}
+		if state := store.breaker.State(); state != circuitOpen {
+			t.Fatalf("breaker after a lost probe = %q, want %q", state, circuitOpen)
+		}
+		if got := counts.Snapshot(); got.Total() != 1 || got.Begin != 0 {
+			t.Fatalf("want the probe alone and no transaction, got %+v", got)
+		}
+		if got := store.autocommit.Load(); got != 0 {
+			t.Fatalf("a lost probe cached the mode as %d, want unknown (0)", got)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
 		}
 	})
 }

@@ -1164,7 +1164,9 @@ func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) e
 // START TRANSACTION and ROLLBACK would add two round trips and no consistency.
 // With it off (dolt sql-server --no-auto-commit) a bare SELECT holds its session
 // on that snapshot until a later BEGIN, so the read keeps its transaction. A read
-// of more than one statement that must agree with itself takes withReadTx.
+// of more than one statement that must agree with itself takes withReadTx. So
+// does a read of the events journal: withSingleRead does not scope the probed
+// journal shape (issueops.ScopeEventsJournalShape), and withReadTx does.
 func (s *DoltStore) withSingleRead(ctx context.Context, fn func(q issueops.DBTX) error) error {
 	if s.closed.Load() {
 		return ErrStoreClosed
@@ -1180,8 +1182,14 @@ func (s *DoltStore) withSingleRead(ctx context.Context, fn func(q issueops.DBTX)
 }
 
 // serverAutocommits reports whether the server's sessions run with autocommit on,
-// asking once per store. A failed read reports false, the safe answer, and is
-// asked again next time.
+// asking once per store. The question follows the circuit breaker as one
+// withRetry attempt does: it is not sent while the breaker refuses requests, and
+// a lost connection counts toward tripping it. Any failure reports false, the
+// safe answer. A failure that can clear (a lost connection, a canceled context)
+// is asked again next time. Any other, such as a proxy that refuses the variable
+// or a value that will not scan, is remembered as off, so the store reads in a
+// transaction as it did before this probe existed and does not pay for the probe
+// again on every read.
 func (s *DoltStore) serverAutocommits(ctx context.Context) bool {
 	switch s.autocommit.Load() {
 	case 1:
@@ -1189,10 +1197,17 @@ func (s *DoltStore) serverAutocommits(ctx context.Context) bool {
 	case 2:
 		return false
 	}
+	if !circuitWriteManaged(ctx) && s.breaker != nil && !s.breaker.Allow() {
+		return false
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var on sql.NullInt64
 	if err := s.db.QueryRowContext(ctx, "SELECT @@autocommit").Scan(&on); err != nil {
+		_ = s.recordRetryFailure(ctx, err)
+		if ctx.Err() == nil && !isRetryableError(err) {
+			s.autocommit.Store(2)
+		}
 		return false
 	}
 	if on.Valid && on.Int64 == 1 {
