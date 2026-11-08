@@ -400,3 +400,88 @@ func lastNonEmptyLine(s string) string {
 	}
 	return ""
 }
+
+// TestProxiedServerBatchDepAddCanonicalizesAliasesAndRefusesUnknownTypes pins
+// the batch `dep add` type contract on BOTH backends (GH#5560): the documented
+// aliases store the canonical blocks edge that ready/blocked gating matches,
+// and a type outside the dep-add vocabulary — a typo like `blcoks` — is
+// refused with the line number, the offending spelling and the accepted list,
+// rolling the whole batch back. batchDepAddEdge is the shared edge builder, so
+// neither backend can drift from `bd dep add`'s vocabulary again.
+func TestProxiedServerBatchDepAddCanonicalizesAliasesAndRefusesUnknownTypes(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	type outcome struct {
+		refusedCode       int
+		refusalNamesLine  bool
+		refusalNamesType  bool
+		refusalNamesWords bool
+		rolledBack        bool
+		edgesAfterRefusal int
+		aliasCode         int
+		edgesAfterAlias   int
+		aliasGates        bool
+	}
+	outcomes := make(map[string]outcome, 2)
+
+	for _, env := range newCrossModeEnvs(t, bd, "bqc", "bqp") {
+		var got outcome
+
+		a := env.create(t, "Dep-add alias A")
+		b := env.create(t, "Dep-add alias B")
+
+		// Line 1 is a valid write the refusal on line 2 must take back with
+		// it: after the failed batch, A is still P2 (its default) and B has
+		// no edge.
+		script := fmt.Sprintf("update %s priority=1\ndep add %s %s blcoks\n", a, a, b)
+		stdout, stderr, code := env.runStdin(t, script, "batch")
+		got.refusedCode = code
+		report := stdout + stderr
+		got.refusalNamesLine = strings.Contains(report, "line 2")
+		got.refusalNamesType = strings.Contains(report, "blcoks")
+		got.refusalNamesWords = strings.Contains(report, "valid types")
+		got.rolledBack = env.show(t, a).Priority == 2
+		got.edgesAfterRefusal = len(env.depList(t, a))
+
+		// The alias spelling commits the canonical edge, which gates its
+		// source while the target is open.
+		aliasScript := fmt.Sprintf("dep add %s %s blocked-by\n", a, b)
+		stdout, stderr, code = env.runStdin(t, aliasScript, "batch")
+		got.aliasCode = code
+		if code != 0 {
+			t.Fatalf("[%s] batch dep add blocked-by failed with exit %d\nstdout:\n%s\nstderr:\n%s", env.mode, code, stdout, stderr)
+		}
+		got.edgesAfterAlias = len(env.depList(t, a))
+		ready := proxiedIDSet(t, env.mustRun(t, "ready", "--json"))
+		blocked := proxiedIDSet(t, env.mustRun(t, "blocked", "--json"))
+		got.aliasGates = !ready[a] && blocked[a]
+
+		outcomes[env.mode] = got
+
+		if got.refusedCode == 0 {
+			t.Errorf("[%s] batch with a mistyped dep-add type exited 0; it must be refused", env.mode)
+		}
+		if !got.refusalNamesLine || !got.refusalNamesType || !got.refusalNamesWords {
+			t.Errorf("[%s] refusal must name the line, the type and the vocabulary: line=%v type=%v words=%v\n%s",
+				env.mode, got.refusalNamesLine, got.refusalNamesType, got.refusalNamesWords, report)
+		}
+		if !got.rolledBack {
+			t.Errorf("[%s] the refused line did not roll back line 1's priority write", env.mode)
+		}
+		if got.edgesAfterRefusal != 0 {
+			t.Errorf("[%s] the refused batch left %d edges on A, want 0", env.mode, got.edgesAfterRefusal)
+		}
+		if got.edgesAfterAlias != 1 {
+			t.Errorf("[%s] batch dep add blocked-by: %d edges on A, want 1", env.mode, got.edgesAfterAlias)
+		}
+		if !got.aliasGates {
+			t.Errorf("[%s] the blocked-by edge did not gate A while B is open", env.mode)
+		}
+	}
+
+	if outcomes["classic"] != outcomes["proxied"] {
+		t.Errorf("cross-mode divergence:\nclassic=%+v\nproxied=%+v", outcomes["classic"], outcomes["proxied"])
+	}
+}
