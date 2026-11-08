@@ -560,6 +560,9 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
   Skips all interactive prompts, using sensible defaults:
   • Role defaults to "maintainer" (override with --role)
   • Fork exclude auto-configured when fork detected
+  • On a fresh fork (upstream remote, no routing yet), contributor routing to
+    ~/.beads-planning is configured and reported (silence it with --quiet)
+    unless beads.role=maintainer was already set or --role=maintainer is given
   • Auto-export left at default (disabled)
   • --contributor and --team flags are rejected (wizards require interaction)
   Also auto-detected when stdin is not a terminal or CI=true is set.`,
@@ -2183,6 +2186,14 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// holding the project (see guardInitInHomeDir).
 		projectRoleRepo := func() bool { return !keepHomeClean && isInitRoleGitRepo(ctx) }
 
+		// A beads.role set before this init is the user's choice and gates fork
+		// routing below; the maintainer default init writes next is not, so a
+		// fresh fork still auto-routes (GH#5957).
+		roleBeforeInit := false
+		if projectRoleRepo() {
+			_, roleBeforeInit = getBeadsRole()
+		}
+
 		// Prompt for contributor mode if:
 		// - In a git repo (needed to set beads.role config)
 		// - Interactive terminal (stdin is TTY) and not --non-interactive
@@ -2289,7 +2300,16 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// and routing.contributor is not already set.
 		// This gate also enables planning-repository creation and config.yaml updates.
 		if !contributor && projectRoleRepo() {
-			if err := autoConfigureForkContributor(ctx, store, quiet || nonInteractive, roleFlag); err != nil && !quiet {
+			// --role wins; otherwise a role that predates init (read now, so a
+			// prompted change counts) keeps a maintainer fork unrouted.
+			forkRole := roleFlag
+			if forkRole == "" && roleBeforeInit {
+				forkRole, _ = getBeadsRole()
+			}
+			// Only --quiet silences the setup report: --non-interactive skips
+			// prompts, not the notice that writes will now route to the
+			// planning repo (GH#5957).
+			if err := autoConfigureForkContributor(ctx, store, quiet, forkRole); err != nil && !quiet {
 				fmt.Fprintf(os.Stderr, "Warning: failed to auto-configure fork contributor routing: %v\n", err)
 			}
 		}

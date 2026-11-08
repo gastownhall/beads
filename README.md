@@ -90,7 +90,7 @@ Beads supports hierarchical IDs for epics:
 
 **Contributor vs Maintainer:** When working on open-source projects:
 
-* **Contributors** (forked repos): Run `bd init --contributor` to route planning issues to a separate repo (e.g., `~/.beads-planning`). Keeps experimental work out of PRs.
+* **Contributors** (forked repos): Run `bd init --contributor` to route planning issues to a separate repo (e.g., `~/.beads-planning`). Keeps experimental work out of PRs. A plain `bd init` on a fork (an `upstream` remote) sets this up automatically and says so, unless `beads.role` is already `maintainer`; to turn it off afterwards, run `git config beads.role maintainer`. If the planning repo is deleted, routed updates, closes and reads fail naming it: restore it to get its issues back (a later `bd create` starts an empty planning store, which does not restore them).
 * **Maintainers** (write access): Beads auto-detects maintainer role via SSH URLs or HTTPS with credentials. Only need `git config beads.role maintainer` if using GitHub HTTPS without credentials but you have write access.
 
 ## 📦 Installation

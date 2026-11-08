@@ -272,19 +272,20 @@ Created by: bd init --contributor
 
 // autoConfigureForkContributor configures contributor routing when bd init
 // detects a fork (upstream remote present) and routing is not yet set.
-// Non-interactive and idempotent. roleFlag is the --role flag value (if any).
-func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage, quiet bool, roleFlag string) error {
+// Non-interactive and idempotent. role is the effective role for this init:
+// the --role flag, else a beads.role that predates the init, else "" (the
+// caller's synthesized maintainer default does not count).
+func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage, quiet bool, role string) error {
 	isFork, upstreamURL := detectForkSetup()
 	if !isFork {
 		return nil
 	}
 
-	// Explicit --role=maintainer on a fork: acknowledge fork, skip routing.
-	if roleFlag == "maintainer" {
+	// Maintainer on a fork: acknowledge fork, skip routing.
+	if role == "maintainer" {
 		if !quiet {
 			fmt.Printf("\n  %s Fork detected (upstream: %s)\n", ui.RenderWarn("⚠"), upstreamURL)
-			fmt.Printf("    Contributor routing skipped (--role=maintainer).\n")
-			fmt.Printf("    To set up contributor routing later: bd init --contributor\n")
+			fmt.Printf("    Contributor routing skipped (beads.role=maintainer).\n")
 		}
 		return nil
 	}
@@ -294,7 +295,7 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 		if !quiet {
 			fmt.Printf("\n  %s Fork detected (upstream: %s)\n", ui.RenderWarn("⚠"), upstreamURL)
 			fmt.Printf("    Contributor routing already configured → %s\n", remedy.PrintedValue(existing))
-			fmt.Printf("    Skipping auto-setup. To reconfigure: bd init --contributor\n")
+			fmt.Printf("    Skipping auto-setup. To reconfigure: bd config set routing.contributor <path>\n")
 		}
 		return nil
 	}
@@ -303,7 +304,7 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 			if !quiet {
 				fmt.Printf("\n  %s Fork detected (upstream: %s)\n", ui.RenderWarn("⚠"), upstreamURL)
 				fmt.Printf("    Contributor routing configured via config.yaml → %s\n", remedy.PrintedValue(yamlVal))
-				fmt.Printf("    Skipping auto-setup. To reconfigure: bd init --contributor\n")
+				fmt.Printf("    Skipping auto-setup. To reconfigure: bd config set routing.contributor <path>\n")
 			}
 			return nil
 		}
@@ -373,7 +374,7 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 		if createdPlanning {
 			fmt.Printf("  %s Added .beads/ to planning repo\n", ui.RenderPass("✓"))
 		}
-		fmt.Printf("\n  To use maintainer mode instead: bd init --role=maintainer\n")
+		fmt.Printf("\n  To disable contributor-role routing: git config beads.role maintainer\n")
 	}
 	return nil
 }
