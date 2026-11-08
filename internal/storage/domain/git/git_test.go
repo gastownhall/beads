@@ -382,6 +382,37 @@ func (s *testSuite) TestCommitInitArtifacts_UnbornHeadLeavesForeignStagedFiles()
 	s.requireForeignWorkUntouched()
 }
 
+func (s *testSuite) TestCommit_OnlyLeavesOtherStagedChangesStaged() {
+	s.gitInit()
+	s.writeFile("work.txt", "unrelated work")
+	s.Require().NoError(s.repo.Add(s.Ctx(), "work.txt"))
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0750))
+	s.writeFile(".beads/config.yaml", "x")
+	s.Require().NoError(s.repo.Add(s.Ctx(), ".beads/"))
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "init", Only: []string{".beads/"}})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal(".beads/config.yaml", s.gitOut("show", "--name-only", "--format=", "HEAD"))
+	s.Equal("work.txt", s.gitOut("diff", "--cached", "--name-only"))
+}
+
+func (s *testSuite) TestCommit_OnlySkipsPathWithNothingStaged() {
+	s.gitInit()
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0750))
+	s.writeFile(".beads/config.yaml", "x")
+	// Every file under .cursor is ignored, so adding it stages nothing; a
+	// pathspec git knows no file under would refuse the whole commit.
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".cursor"), 0750))
+	s.writeFile(".cursor/.gitignore", "*\n")
+	s.Require().NoError(s.repo.Add(s.Ctx(), ".beads/", ".cursor"))
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "init", Only: []string{".beads/", ".cursor"}})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal(".beads/config.yaml", s.gitOut("show", "--name-only", "--format=", "HEAD"))
+}
+
 func (s *testSuite) TestAdd_EmptyPathsErrors() {
 	s.gitInit()
 	err := s.repo.Add(s.Ctx())
