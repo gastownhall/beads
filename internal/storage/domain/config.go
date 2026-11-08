@@ -249,6 +249,35 @@ func (u *configUseCaseImpl) GetAllConfig(ctx context.Context) (map[string]string
 	return out, nil
 }
 
+var _ ConfigKeysReader = (*configUseCaseImpl)(nil)
+
+// GetConfigKeys implements ConfigKeysReader on the use case, reading the keys in
+// one statement when the repository supports it and picking them out of the
+// GetAllConfig result when it does not (same rows either way, by exact key).
+func (u *configUseCaseImpl) GetConfigKeys(ctx context.Context, keys ...string) (map[string]string, error) {
+	if kr, ok := u.cfgRepo.(ConfigKeysReader); ok {
+		out, err := kr.GetConfigKeys(ctx, keys...)
+		if err != nil {
+			return nil, fmt.Errorf("GetConfigKeys: %w", err)
+		}
+		return out, nil
+	}
+	out := make(map[string]string, len(keys))
+	if len(keys) == 0 {
+		return out, nil
+	}
+	all, err := u.cfgRepo.GetAllConfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("GetConfigKeys: %w", err)
+	}
+	for _, k := range keys {
+		if v, ok := all[k]; ok {
+			out[k] = v
+		}
+	}
+	return out, nil
+}
+
 // GetConfigByPrefix implements ConfigPrefixReader on the use case, pushing
 // the prefix into SQL when the repository supports it and filtering the
 // GetAllConfig result in-process when it does not (same rows either way).
