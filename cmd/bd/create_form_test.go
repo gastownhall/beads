@@ -540,6 +540,35 @@ func TestCreateIssueFromFormValues(t *testing.T) {
 		assertFormBlocksEdge(t, ctx, s, child.ID, target.ID)
 	})
 
+	// bd-3073gm: dependencies the form would refuse fail a direct call before
+	// it reserves a child ID or writes an issue or an edge.
+	t.Run("InvalidDependenciesFailBeforeAnyWrite", func(t *testing.T) {
+		parent := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Refusal parent", IssueType: "epic"})
+		target := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Refusal target"})
+		for _, deps := range [][]string{
+			{"frobs:" + target.ID},
+			{"owned-by:" + target.ID},
+			{"blocks:"},
+			{"related:" + target.ID, "blocks:" + target.ID},
+			{"blocks:" + target.ID, "related:" + target.ID},
+			{"discovered-from:" + target.ID, "blocked-by:" + target.ID},
+		} {
+			fv := &createFormValues{Title: "Refused child", Priority: 2, IssueType: "task", ParentID: parent.ID, Dependencies: deps}
+			if issue, err := CreateIssueFromFormValues(ctx, s, fv, "test"); err == nil {
+				t.Errorf("CreateIssueFromFormValues(deps %q) created %s, want a refusal", deps, issue.ID)
+			}
+		}
+		if dependents, err := s.GetDependents(ctx, target.ID); err != nil {
+			t.Fatalf("GetDependents %s: %v", target.ID, err)
+		} else if len(dependents) != 0 {
+			t.Errorf("refused creates left %d edges to %s", len(dependents), target.ID)
+		}
+		child := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Accepted child", ParentID: parent.ID})
+		if want := parent.ID + ".1"; child.ID != want {
+			t.Errorf("first accepted child of %s is %s, want %s: a refused create reserved a child ID", parent.ID, child.ID, want)
+		}
+	})
+
 	t.Run("AllPriorities", func(t *testing.T) {
 		for priority := 0; priority <= 4; priority++ {
 			fv := &createFormValues{

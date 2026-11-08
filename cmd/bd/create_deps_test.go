@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"reflect"
 	"strings"
@@ -201,6 +202,13 @@ func TestParseFormDeps(t *testing.T) {
 		},
 		{name: "blocks and an alias are one edge", in: []string{"blocks:bd-b", "depends-on:bd-b"}, want: []domain.DependencySpec{blocksB}},
 		{name: "every blocking spelling is one edge", in: []string{"bd-b", "blocked-by:bd-b", "blocks:bd-b", "depends-on:bd-b"}, want: []domain.DependencySpec{blocksB}},
+		{name: "unknown type", in: []string{"frobs:bd-b"}, wantErr: `unknown dependency type "frobs"`},
+		{name: "custom type", in: []string{"owned-by:bd-b"}, wantErr: `unknown dependency type "owned-by"`},
+		{name: "empty type", in: []string{":bd-b"}, wantErr: `invalid dependency type ""`},
+		{name: "typed entry without a target", in: []string{"blocks:"}, wantErr: `dependency "blocks:" names no issue`},
+		{name: "two types on one target", in: []string{"related:bd-b", "blocks:bd-b"}, wantErr: `cannot attach both "related" and "blocks" to the same target "bd-b"`},
+		{name: "two types on one target, blocks first", in: []string{"blocks:bd-b", "related:bd-b"}, wantErr: `cannot attach both "blocks" and "related" to the same target "bd-b"`},
+		{name: "an alias and another type on one target", in: []string{"discovered-from:bd-b", "blocked-by:bd-b"}, wantErr: `cannot attach both "discovered-from" and "blocks"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -236,6 +244,9 @@ func TestFormDependencyValidation(t *testing.T) {
 		{value: "bd-a, blocks:bd-b", wantErr: ""},
 		{value: "blocked-by:bd-b, depends-on:bd-b, blocks:bd-b", wantErr: ""},
 		{value: "", wantErr: ""},
+		{value: "bd-a, frobs:bd-b", wantErr: `unknown dependency type "frobs"`},
+		{value: "blocks:", wantErr: "names no issue"},
+		{value: "related:bd-b, blocks:bd-b", wantErr: "cannot attach both"},
 	} {
 		value := tt.value
 		field := newFormDepsInput(&value)
@@ -252,6 +263,19 @@ func TestFormDependencyValidation(t *testing.T) {
 		}
 	}
 
+	var value string
+	var out bytes.Buffer
+	field := newFormDepsInput(&value)
+	in := strings.NewReader("related:bd-b, blocks:bd-b\nrelated:bd-b, blocked-by:bd-c\n")
+	if err := field.RunAccessible(&out, in); err != nil {
+		t.Fatalf("RunAccessible: %v", err)
+	}
+	if !strings.Contains(out.String(), "cannot attach both") {
+		t.Errorf("accessible prompt output %q does not report the conflict", out.String())
+	}
+	if value != "related:bd-b, blocked-by:bd-c" {
+		t.Errorf("Dependencies field = %q, want the corrected entry", value)
+	}
 }
 
 // TestLinkDependencyType pins the type bd link stores on every route
