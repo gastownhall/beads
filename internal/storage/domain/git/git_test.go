@@ -413,6 +413,98 @@ func (s *testSuite) TestCommit_OnlySkipsPathWithNothingStaged() {
 	s.Equal(".beads/config.yaml", s.gitOut("show", "--name-only", "--format=", "HEAD"))
 }
 
+func (s *testSuite) TestCommitInitArtifacts_LeavesPreStagedWorkStaged() {
+	s.gitInit()
+	s.writeFile("work.txt", "unrelated work")
+	s.Require().NoError(s.repo.Add(s.Ctx(), "work.txt"))
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0750))
+	s.writeFile(".beads/config.yaml", "x")
+	s.writeFile("AGENTS.md", "agents")
+
+	result, err := domain.NewGitUseCase(s.tmpDir, s.repo).CommitInitArtifacts(s.Ctx(), domain.CommitInitArtifactsParams{
+		BeadsDir:      ".beads/",
+		OptionalPaths: []string{"AGENTS.md", "CLAUDE.md"},
+		Message:       "init",
+	})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal(".beads/config.yaml\nAGENTS.md", s.gitOut("show", "--name-only", "--format=", "HEAD"))
+	s.Equal("work.txt", s.gitOut("diff", "--cached", "--name-only"))
+}
+
+// runFails runs a git command that is expected to exit nonzero, such as a
+// merge that stops on a conflict.
+func (s *testSuite) runFails(args ...string) {
+	s.T().Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = s.tmpDir
+	s.Require().Error(cmd.Run())
+}
+
+// commitBaseAndSide commits a.txt and a side branch that changes it and adds
+// side.txt, then returns to the starting branch. With conflict, the starting
+// branch also changes a.txt, so merging side stops on a.txt.
+func (s *testSuite) commitBaseAndSide(conflict bool) {
+	s.T().Helper()
+	s.gitInit()
+	s.writeFile("a.txt", "base\n")
+	s.run("git", "add", "a.txt")
+	s.run("git", "commit", "-q", "-m", "base")
+	s.run("git", "checkout", "-q", "-b", "side")
+	s.writeFile("a.txt", "side\n")
+	s.writeFile("side.txt", "side\n")
+	s.run("git", "add", "a.txt", "side.txt")
+	s.run("git", "commit", "-q", "-m", "side")
+	s.run("git", "checkout", "-q", "-")
+	changed := "ours.txt"
+	if conflict {
+		changed = "a.txt"
+	}
+	s.writeFile(changed, "ours\n")
+	s.run("git", "add", changed)
+	s.run("git", "commit", "-q", "-m", "ours")
+}
+
+// requireOnlyCommitRefusedDuringMerge stages .beads/config.yaml during an
+// in-progress merge and requires git to refuse the Only commit without
+// moving HEAD, changing the index or removing MERGE_HEAD.
+func (s *testSuite) requireOnlyCommitRefusedDuringMerge() {
+	s.T().Helper()
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0750))
+	s.writeFile(".beads/config.yaml", "x")
+	s.Require().NoError(s.repo.Add(s.Ctx(), ".beads/"))
+	head := s.gitOut("rev-parse", "HEAD")
+	mergeHead := s.gitOut("rev-parse", "--verify", "MERGE_HEAD")
+	index := s.gitOut("ls-files", "--stage")
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "init", Only: []string{".beads/"}})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "partial commit during a merge")
+	s.False(result.DidCommit)
+	s.Equal(head, s.gitOut("rev-parse", "HEAD"))
+	s.Equal(mergeHead, s.gitOut("rev-parse", "--verify", "MERGE_HEAD"))
+	s.Equal(index, s.gitOut("ls-files", "--stage"))
+}
+
+func (s *testSuite) TestCommit_OnlyRefusedDuringConflictedMerge() {
+	s.commitBaseAndSide(true)
+	s.runFails("merge", "side")
+	s.Equal("UU a.txt", s.gitOut("status", "--porcelain", "--", "a.txt"))
+
+	s.requireOnlyCommitRefusedDuringMerge()
+	s.run("git", "merge", "--abort")
+	s.runFails("rev-parse", "-q", "--verify", "MERGE_HEAD")
+}
+
+func (s *testSuite) TestCommit_OnlyRefusedDuringMergeNoCommit() {
+	s.commitBaseAndSide(false)
+	s.run("git", "merge", "--no-commit", "--no-ff", "side")
+
+	s.requireOnlyCommitRefusedDuringMerge()
+	s.run("git", "merge", "--abort")
+	s.runFails("rev-parse", "-q", "--verify", "MERGE_HEAD")
+}
+
 func (s *testSuite) TestAdd_EmptyPathsErrors() {
 	s.gitInit()
 	err := s.repo.Add(s.Ctx())
