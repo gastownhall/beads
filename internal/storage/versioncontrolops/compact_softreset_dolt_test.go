@@ -510,6 +510,37 @@ func TestCompactKeepsCommitLandingBeforeMainMoves(t *testing.T) {
 		}
 		f.wantStatus("u:false")
 	})
+
+	// AC-2 composed: a landing commit's committed data and a row staged after
+	// it (staging before would sweep the row into that commit) both reach
+	// main's HEAD through the one follow-up commit, while the working-only
+	// rows stay pending and out of it. The pre-staged rows live on their own
+	// table: DOLT_ADD stages a table's whole working diff, so staging u would
+	// sweep the pending u rows in with them.
+	t.Run("pre-staged and working-only rows around a landing commit", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		f.writePending(f.db)
+		f.landRow(f.conn())
+		f.exec(f.db,
+			"CREATE TABLE w (id INT PRIMARY KEY, v VARCHAR(32))",
+			"INSERT INTO w VALUES (800, 'staged')",
+			"CALL DOLT_ADD('w')",
+		)
+
+		if err := f.compact(&compactHookConn{}); err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+		if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 600"); n != 1 {
+			t.Fatalf("landed t row 600 in main's HEAD: present=false, want present=true")
+		}
+		if n := f.count("SELECT COUNT(*) FROM w AS OF 'HEAD' WHERE id = 800"); n != 1 {
+			t.Fatalf("pre-staged w row 800 in main's HEAD: present=false, want present=true")
+		}
+		f.wantPendingKept()
+		f.wantStatus("config:false", "u:false")
+		f.wantFollowupLog()
+		f.wantNoTempBranch()
+	})
 }
 
 // AC-3: a quiet compaction keeps main's tree, replaces the old commits with
