@@ -59,7 +59,30 @@ func makeWispTestCmd(rootOnly, dryRun bool) *cobra.Command {
 	c.Flags().StringArray("var", []string{}, "")
 	c.Flags().Bool("dry-run", dryRun, "")
 	c.Flags().Bool("root-only", rootOnly, "")
+	c.Flags().String("wisp-type", "", "")
 	return c
+}
+
+// makeWispTestCmdWithType is makeWispTestCmd with --wisp-type set to wispType
+// through the flag API, as a parsed command line would.
+func makeWispTestCmdWithType(t *testing.T, rootOnly, dryRun bool, wispType string) *cobra.Command {
+	t.Helper()
+	c := makeWispTestCmd(rootOnly, dryRun)
+	if err := c.Flags().Set("wisp-type", wispType); err != nil {
+		t.Fatalf("set --wisp-type=%q: %v", wispType, err)
+	}
+	return c
+}
+
+// ephemeralIssues returns every issue in the store with Ephemeral=true.
+func ephemeralIssues(t *testing.T, ctx context.Context, s *dolt.DoltStore) []*types.Issue {
+	t.Helper()
+	tru := true
+	results, err := s.SearchIssues(ctx, "", types.IssueFilter{Ephemeral: &tru})
+	if err != nil {
+		t.Fatalf("SearchIssues: %v", err)
+	}
+	return results
 }
 
 // countEphemeral returns the number of issues in the store with Ephemeral=true.
@@ -166,6 +189,123 @@ func TestWispCreateDryRunFanoutMessage(t *testing.T) {
 		}
 		if !strings.Contains(output, "--root-only") {
 			t.Errorf("skip message should reference --root-only flag, got:\n%s", output)
+		}
+	})
+}
+
+// TestWispCommandsRegisterWispTypeFlag checks the real wisp creation commands
+// expose --wisp-type as an empty-by-default string, so a wisp instantiated
+// from a proto can carry a type the way `bd create --ephemeral` does (GH#8209).
+func TestWispCommandsRegisterWispTypeFlag(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		cmd  *cobra.Command
+	}{
+		{"bd mol wisp create <proto>", wispCreateCmd},
+	} {
+		f := c.cmd.Flags().Lookup("wisp-type")
+		if f == nil {
+			t.Errorf("%s: no --wisp-type flag", c.name)
+			continue
+		}
+		if f.Value.Type() != "string" {
+			t.Errorf("%s: --wisp-type type = %s, want string", c.name, f.Value.Type())
+		}
+		if f.DefValue != "" {
+			t.Errorf("%s: --wisp-type default = %q, want empty", c.name, f.DefValue)
+		}
+	}
+}
+
+// TestWispCreateStampsWispType verifies `bd mol wisp create --wisp-type`
+// stamps the type on every issue the wisp creates: the root and each child
+// step (GH#8209).
+func TestWispCreateStampsWispType(t *testing.T) {
+	t.Run("root and children", func(t *testing.T) {
+		ctx := context.Background()
+		s := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
+		rootID := wispTestProto(t, ctx, s, 2)
+		withWispTestGlobals(t, s, ctx)
+
+		var runErr error
+		_ = captureStdout(t, func() error {
+			runErr = runWispCreate(makeWispTestCmdWithType(t, false, false, "patrol"), []string{rootID})
+			return nil
+		})
+		if runErr != nil {
+			t.Fatalf("runWispCreate --wisp-type patrol: %v", runErr)
+		}
+
+		got := ephemeralIssues(t, ctx, s)
+		if len(got) != 3 {
+			t.Fatalf("expected 3 ephemeral wisp issues (root + 2 children), got %d", len(got))
+		}
+		ids := map[string]bool{}
+		for _, issue := range got {
+			ids[issue.ID] = true
+			if issue.WispType != types.WispTypePatrol {
+				t.Errorf("%s (%q): wisp_type = %q, want %q", issue.ID, issue.Title, issue.WispType, types.WispTypePatrol)
+			}
+		}
+
+		tru, patrol := true, types.WispTypePatrol
+		typed, err := s.SearchIssues(ctx, "", types.IssueFilter{Ephemeral: &tru, WispType: &patrol})
+		if err != nil {
+			t.Fatalf("SearchIssues by wisp type: %v", err)
+		}
+		if len(typed) != len(ids) {
+			t.Errorf("filter wisp_type=patrol matched %d issues, want %d", len(typed), len(ids))
+		}
+		for _, issue := range typed {
+			if !ids[issue.ID] {
+				t.Errorf("filter wisp_type=patrol matched unexpected issue %s", issue.ID)
+			}
+		}
+	})
+
+	t.Run("root-only", func(t *testing.T) {
+		ctx := context.Background()
+		s := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
+		rootID := wispTestProto(t, ctx, s, 2)
+		withWispTestGlobals(t, s, ctx)
+
+		var runErr error
+		_ = captureStdout(t, func() error {
+			runErr = runWispCreate(makeWispTestCmdWithType(t, true, false, "patrol"), []string{rootID})
+			return nil
+		})
+		if runErr != nil {
+			t.Fatalf("runWispCreate --root-only --wisp-type patrol: %v", runErr)
+		}
+
+		got := ephemeralIssues(t, ctx, s)
+		if len(got) != 1 {
+			t.Fatalf("expected 1 ephemeral wisp issue (root only), got %d", len(got))
+		}
+		if got[0].WispType != types.WispTypePatrol {
+			t.Errorf("root wisp_type = %q, want %q", got[0].WispType, types.WispTypePatrol)
+		}
+	})
+
+	t.Run("dry-run writes nothing", func(t *testing.T) {
+		ctx := context.Background()
+		s := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
+		rootID := wispTestProto(t, ctx, s, 2)
+		withWispTestGlobals(t, s, ctx)
+
+		var runErr error
+		output := captureStdout(t, func() error {
+			runErr = runWispCreate(makeWispTestCmdWithType(t, false, true, "patrol"), []string{rootID})
+			return nil
+		})
+		if runErr != nil {
+			t.Fatalf("runWispCreate --dry-run --wisp-type patrol: %v", runErr)
+		}
+		if !strings.Contains(output, "would create wisp with 3 issues") {
+			t.Errorf("dry-run should preview 3 issues, got:\n%s", output)
+		}
+		if got := countEphemeral(t, ctx, s); got != 0 {
+			t.Errorf("dry-run created %d ephemeral issues, want 0", got)
 		}
 	})
 }
