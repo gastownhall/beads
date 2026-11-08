@@ -327,3 +327,82 @@ func TestSelectedWorkspaceWhereProvenance(t *testing.T) {
 // clone1's checkout (or from outside any repository) reports clone2's
 // identity — its redirect-source database for context, its own stub for
 // where provenance — never clone1's.
+func TestSelectedWorkspaceRedirectDatabase(t *testing.T) {
+	root := t.TempDir()
+	sharedBeads := filepath.Join(root, "shared", ".beads")
+	writeSelectedServerTarget(t, sharedBeads, "shared_db", "sharedpfx")
+
+	newClone := func(name, database string) selectedWorkspace {
+		dir := filepath.Join(root, name)
+		initGitRepoForContextTest(t, dir)
+		beadsDir := filepath.Join(dir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+			t.Fatalf("mkdir %s beads dir: %v", name, err)
+		}
+		if err := (&configfile.Config{
+			Backend:      configfile.BackendDolt,
+			DoltMode:     configfile.DoltModeServer,
+			DoltDatabase: database,
+		}).Save(beadsDir); err != nil {
+			t.Fatalf("save %s stub metadata: %v", name, err)
+		}
+		writeRedirectForTest(t, beadsDir, sharedBeads)
+		return selectedWorkspace{dir: dir, beadsDir: beadsDir}
+	}
+	clone1 := newClone("clone1", "clone1_db")
+	clone2 := newClone("clone2", "clone2_db")
+
+	assertContextNamesClone2 := func(t *testing.T) {
+		t.Helper()
+		info := runSelectedContextJSON(t)
+		assertSelectedDirEqual(t, info.BeadsDir, sharedBeads, "context beads_dir")
+		if info.Database != "clone2_db" {
+			t.Errorf("context database = %q, want clone2's redirect-source %q", info.Database, "clone2_db")
+		}
+		if info.Database == "clone1_db" {
+			t.Errorf("context database = clone1_db: the caller's redirect-source database leaked into the selection")
+		}
+	}
+
+	t.Run("dash-C clone2 from clone1", func(t *testing.T) {
+		if err := runSelectedWorkspacePreRun(t, clone1.dir, contextCmd, selectViaChangeDir(clone2.dir)); err != nil {
+			t.Fatalf("PersistentPreRunE(context): %v", err)
+		}
+		if got := os.Getenv("BEADS_DOLT_SERVER_DATABASE"); got != "clone2_db" {
+			t.Errorf("BEADS_DOLT_SERVER_DATABASE = %q, want clone2's %q", got, "clone2_db")
+		}
+		assertContextNamesClone2(t)
+	})
+
+	t.Run("dash-C clone2 from outside any repository", func(t *testing.T) {
+		if err := runSelectedWorkspacePreRun(t, t.TempDir(), contextCmd, selectViaChangeDir(clone2.dir)); err != nil {
+			t.Fatalf("PersistentPreRunE(context): %v", err)
+		}
+		if got := os.Getenv("BEADS_DOLT_SERVER_DATABASE"); got != "clone2_db" {
+			t.Errorf("BEADS_DOLT_SERVER_DATABASE = %q, want clone2's %q", got, "clone2_db")
+		}
+		assertContextNamesClone2(t)
+	})
+
+	t.Run("where reports clone2 provenance", func(t *testing.T) {
+		if err := runSelectedWorkspacePreRun(t, clone1.dir, whereCmd, selectViaChangeDir(clone2.dir)); err != nil {
+			t.Fatalf("PersistentPreRunE(where): %v", err)
+		}
+		result, err := runSelectedWhereJSON(t)
+		if err != nil {
+			t.Fatalf("where --json: %v", err)
+		}
+		assertSelectedDirEqual(t, result.Path, sharedBeads, "where path")
+		assertSelectedDirEqual(t, result.RedirectedFrom, clone2.beadsDir, "where redirected_from")
+		if sameDirPath(result.RedirectedFrom, clone1.beadsDir) {
+			t.Errorf("where redirected_from = clone1's stub: the caller's redirect was reported as the selection's provenance")
+		}
+	})
+}
+
+// TestSelectedWorkspaceSelectionEdges pins AC-6: the selection rule keeps the
+// precedences the historical regressions fixed — the caller's own redirect
+// (be-xil), BEADS_DIR naming the redirect target (bd-wayc3), BEADS_DIR naming
+// the redirecting stub itself, explicit database targets (be-fyt), a
+// user-exported BEADS_DOLT_SERVER_DATABASE, and a .beads/.env selector — and
+// never inherits the caller's source into a foreign or nested selection.
