@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -514,6 +515,20 @@ func TestCreateIssueFromFormValues(t *testing.T) {
 		}
 	})
 
+	// bd-3073gm (GH#5585): every blocking spelling the form takes makes the
+	// new issue depend on its target with the canonical, gating blocks type.
+	// The form's blocks:<id> keeps its historical direction, unlike --deps'.
+	t.Run("BlockingSpellingsGateTheNewIssue", func(t *testing.T) {
+		for _, spelling := range []string{"", "blocks:", "blocked-by:", "depends-on:"} {
+			target := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Gate target " + spelling})
+			child := createFormIssueForTest(t, ctx, s, &createFormValues{
+				Title:        "Gated by " + spelling,
+				Dependencies: []string{spelling + target.ID},
+			})
+			assertFormBlocksEdge(t, ctx, s, child.ID, target.ID)
+		}
+	})
+
 	t.Run("AllPriorities", func(t *testing.T) {
 		for priority := 0; priority <= 4; priority++ {
 			fv := &createFormValues{
@@ -770,4 +785,54 @@ func TestFormValuesIntegration(t *testing.T) {
 			t.Errorf("expected 2 labels, got %d", len(labels))
 		}
 	})
+}
+
+// createFormIssueForTest creates an issue through CreateIssueFromFormValues,
+// defaulting the fields the dependency tests do not care about.
+func createFormIssueForTest(t *testing.T, ctx context.Context, s storage.DoltStorage, fv *createFormValues) *types.Issue {
+	t.Helper()
+	if fv.IssueType == "" {
+		fv.IssueType = "task"
+	}
+	if fv.Priority == 0 {
+		fv.Priority = 2
+	}
+	issue, err := CreateIssueFromFormValues(ctx, s, fv, "test")
+	if err != nil {
+		t.Fatalf("CreateIssueFromFormValues(%q, deps %q): %v", fv.Title, fv.Dependencies, err)
+	}
+	return issue
+}
+
+// assertFormBlocksEdge checks that from has exactly one dependency, a blocks
+// edge on to, that no edge runs the other way, and that the edge keeps from
+// out of ready work while to is open.
+func assertFormBlocksEdge(t *testing.T, ctx context.Context, s storage.DoltStorage, from, to string) {
+	t.Helper()
+	recs, err := s.GetDependencyRecords(ctx, from)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords %s: %v", from, err)
+	}
+	if len(recs) != 1 || recs[0].DependsOnID != to || recs[0].Type != types.DepBlocks {
+		for _, r := range recs {
+			t.Logf("%s -> %s (%s)", r.IssueID, r.DependsOnID, r.Type)
+		}
+		t.Errorf("%s has %d dependencies, want one blocks edge on %s", from, len(recs), to)
+	}
+	back, err := s.GetDependencyRecords(ctx, to)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords %s: %v", to, err)
+	}
+	for _, r := range back {
+		t.Errorf("reversed edge written: %s -> %s (%s)", r.IssueID, r.DependsOnID, r.Type)
+	}
+	ready, err := s.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	for _, issue := range ready {
+		if issue.ID == from {
+			t.Errorf("%s is ready while its blocker %s is open", from, to)
+		}
+	}
 }
