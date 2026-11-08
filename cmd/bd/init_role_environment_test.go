@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -659,6 +661,175 @@ func TestInitArtifactGitRouting(t *testing.T) {
 					t.Errorf("nonrepo was mutated: %v", err)
 				}
 			}
+		})
+	}
+}
+
+// captureInitCommitOutput returns what fn printed to stdout and stderr. It
+// redirects stdout by hand because both capture helpers hold stdioMutex.
+func captureInitCommitOutput(t *testing.T, fn func()) (stdout, stderr string) {
+	t.Helper()
+	stderr = captureStderr(t, func() {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan []byte, 1)
+		go func() {
+			data, _ := io.ReadAll(r)
+			done <- data
+		}()
+		old := os.Stdout
+		os.Stdout = w
+		defer func() {
+			os.Stdout = old
+			_ = w.Close()
+			stdout = string(<-done)
+			_ = r.Close()
+		}()
+		fn()
+	})
+	return stdout, stderr
+}
+
+// initCommitScopeHead returns HEAD, or "" while the branch is unborn.
+func initCommitScopeHead(t *testing.T, repo string) string {
+	t.Helper()
+	cmd := gitCommand("rev-parse", "-q", "--verify", "HEAD")
+	cmd.Dir, cmd.Env = repo, gitenv.ScrubRouting(os.Environ())
+	out, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return ""
+		}
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+type initCommitScopeCase struct {
+	name string
+	// unborn leaves the branch without a commit; unchanged commits the
+	// artifacts before the bootstrap runs; partly leaves an unstaged edit on
+	// top of the staged foreign file; jj marks the work tree as a Jujutsu
+	// workspace.
+	unborn, unchanged, partly, jj, quiet bool
+}
+
+// prepareInitCommitScope writes the beads artifacts and a staged foreign
+// work.txt into repo, which must already be a Git repository.
+func prepareInitCommitScope(t *testing.T, repo string, tc initCommitScopeCase) {
+	t.Helper()
+	git := func(args ...string) { initRoleFixtureGit(t, repo, args...) }
+	write := func(path, content string) {
+		t.Helper()
+		path = filepath.Join(repo, path)
+		if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git("config", "user.name", "Scope Fixture")
+	git("config", "user.email", "scope@example.invalid")
+	git("config", "commit.gpgSign", "false")
+	if !tc.unborn {
+		write("seed", "seed\n")
+		git("add", "seed")
+		git("-c", "core.hooksPath=", "commit", "-q", "-m", "seed")
+	}
+	write(".beads/config.yaml", "# beads\n")
+	write("CLAUDE.md", "beads instructions\n")
+	if tc.unchanged {
+		git("add", ".beads/", "CLAUDE.md")
+		git("-c", "core.hooksPath=", "commit", "-q", "-m", "artifacts")
+	}
+	write("work.txt", "staged work\n")
+	git("add", "work.txt")
+	if tc.partly {
+		write("work.txt", "staged work\nunstaged edit\n")
+	}
+	if tc.jj {
+		if err := os.MkdirAll(filepath.Join(repo, ".jj", "repo"), 0750); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// checkInitCommitScope asserts the bootstrap outcome for tc, given the HEAD
+// and index entries recorded before the bootstrap ran.
+func checkInitCommitScope(t *testing.T, repo string, tc initCommitScopeCase, headBefore, stageBefore, stdout, stderr string) {
+	t.Helper()
+	git := func(args ...string) string { return initRoleFixtureGit(t, repo, args...) }
+	head := initCommitScopeHead(t, repo)
+	switch {
+	case tc.jj:
+		if head != headBefore {
+			t.Errorf("Jujutsu workspace HEAD moved from %q to %q", headBefore, head)
+		}
+		if got := git("ls-files", "--stage"); got != stageBefore {
+			t.Errorf("Jujutsu workspace index changed:\n%s\nwant:\n%s", got, stageBefore)
+		}
+		hasNote := strings.Contains(stderr, "skipped bootstrap commit") && strings.Contains(stderr, "Jujutsu")
+		if tc.quiet && stderr != "" || !tc.quiet && !hasNote {
+			t.Errorf("quiet=%v Jujutsu stderr = %q", tc.quiet, stderr)
+		}
+		return
+	case tc.unchanged:
+		if head != headBefore {
+			t.Errorf("no-change bootstrap moved HEAD from %q to %q", headBefore, head)
+		}
+		if stderr != "" || strings.Contains(stdout, "Committed beads files") {
+			t.Errorf("no-change bootstrap reported stdout=%q stderr=%q", stdout, stderr)
+		}
+	default:
+		if head == headBefore || initCommitScopeHead(t, repo) == "" {
+			t.Fatalf("bootstrap did not commit; stderr=%q", stderr)
+		}
+		if headBefore != "" {
+			if parent := git("rev-parse", "HEAD^"); parent != headBefore {
+				t.Errorf("bootstrap commit parent = %s, want %s", parent, headBefore)
+			}
+		}
+		if got := git("show", "--name-only", "--format=", "HEAD"); got != ".beads/config.yaml\nCLAUDE.md" {
+			t.Errorf("bootstrap committed:\n%s\nwant only the artifacts", got)
+		}
+		if !tc.quiet && !strings.Contains(stdout, "Committed beads files") {
+			t.Errorf("missing commit message: stdout=%q stderr=%q", stdout, stderr)
+		}
+	}
+	if got := git("diff", "--cached", "--name-status"); got != "A\twork.txt" {
+		t.Errorf("index after bootstrap = %q, want only the foreign work.txt staged", got)
+	}
+	if got := git("show", ":work.txt"); got != "staged work" {
+		t.Errorf("staged work.txt blob = %q", got)
+	}
+	want := "staged work\n"
+	if tc.partly {
+		want += "unstaged edit\n"
+	}
+	if got, err := os.ReadFile(filepath.Join(repo, "work.txt")); err != nil || string(got) != want {
+		t.Errorf("work.txt on disk = %q (%v), want %q", got, err, want)
+	}
+}
+
+// TestInitArtifactCommitScope pins GH#5654 for the embedded bootstrap: the
+// commit records only the init artifacts and leaves whatever else the user
+// staged, or left unstaged, exactly as it was.
+func TestInitArtifactCommitScope(t *testing.T) {
+	for _, tc := range []initCommitScopeCase{
+		{name: "foreign_staged"},
+		{name: "partly_staged", partly: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target, _, _ := newInitRoleFixture(t)
+			prepareInitCommitScope(t, target, tc)
+			headBefore := initCommitScopeHead(t, target)
+			stageBefore := initRoleFixtureGit(t, target, "ls-files", "--stage")
+			stdout, stderr := captureInitCommitOutput(t, func() { commitEmbeddedInitArtifacts(target, tc.quiet) })
+			checkInitCommitScope(t, target, tc, headBefore, stageBefore, stdout, stderr)
 		})
 	}
 }

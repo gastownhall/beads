@@ -255,11 +255,25 @@ func (r *gitRepositoryImpl) Commit(ctx context.Context, params domain.GitCommitP
 	if params.SkipHooks {
 		args = append(args, "-c", "core.hooksPath=")
 	}
+	var only []string
+	if params.Only != nil {
+		staged, err := r.stagedUnder(ctx, params.Only)
+		if err != nil {
+			return domain.GitCommitResult{}, err
+		}
+		only = staged
+		args = append(args, "--literal-pathspecs")
+	}
 	args = append(args, "commit")
 	if params.NoVerify {
 		args = append(args, "--no-verify")
 	}
 	args = append(args, "-m", params.Message)
+	if params.Only != nil {
+		// --only commits these files' working-tree content, which the caller
+		// has just staged, and leaves every other index entry as it was.
+		args = append(append(args, "--only", "--"), only...)
+	}
 	out, err := r.gitCmd(ctx, args...).CombinedOutput()
 	if err != nil {
 		if bytes.Contains(out, []byte("nothing to commit")) || bytes.Contains(out, []byte("no changes added to commit")) {
@@ -268,4 +282,29 @@ func (r *gitRepositoryImpl) Commit(ctx context.Context, params domain.GitCommitP
 		return domain.GitCommitResult{Output: out}, fmt.Errorf("git: Commit: %w: %s", err, bytes.TrimSpace(out))
 	}
 	return domain.GitCommitResult{DidCommit: true, Output: out}, nil
+}
+
+// stagedUnder lists the exact files with staged changes under paths, relative
+// to workDir. Renames are split so neither side can pull a path outside the
+// scope into a partial commit.
+func (r *gitRepositoryImpl) stagedUnder(ctx context.Context, paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	args := append([]string{"--literal-pathspecs", "diff", "--cached", "--name-only", "-z", "--no-renames", "--relative", "--"}, paths...)
+	out, err := r.gitCmd(ctx, args...).Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return nil, fmt.Errorf("git: Commit: list staged paths: %w: %s", err, bytes.TrimSpace(exitErr.Stderr))
+		}
+		return nil, fmt.Errorf("git: Commit: list staged paths: %w", err)
+	}
+	var files []string
+	for _, name := range strings.Split(string(out), "\x00") {
+		if name != "" {
+			files = append(files, name)
+		}
+	}
+	return files, nil
 }
