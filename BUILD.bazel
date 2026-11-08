@@ -68,6 +68,13 @@ exports_files(
     ],
 )
 
+# //internal/httpapi:httpapi_test: the --json reference whose count-field
+# vocabulary TestCountVocabularyIsStatedOnTheTypesAndTheJSONReference pins.
+exports_files(
+    ["docs/reference/json-schema.md"],
+    visibility = ["//internal/httpapi:__pkg__"],
+)
+
 # //scripts:android_release_docs_test: the docs describing the android/arm64
 # cgo release build.
 exports_files(

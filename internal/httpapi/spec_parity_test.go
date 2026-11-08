@@ -2,6 +2,9 @@ package httpapi
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -2274,4 +2277,103 @@ func TestSpecWorkRowCountsStateTheirEdgeVocabulary(t *testing.T) {
 			t.Errorf("IssueWithCounts.%s: nullable on a member every row computes", name)
 		}
 	}
+}
+
+// TestCountVocabularyIsStatedOnTheTypesAndTheJSONReference carries
+// TestSpecWorkRowCountsStateTheirEdgeVocabulary's rule to the two other places
+// a consumer reads the count fields from: the Go types the wire structs are
+// pinned to, and the `bd --json` reference (bd-dh3uij, GH#5688). Each list,
+// ready, show or export count must say which edges it counts, and the
+// reference must tell a caller who wants "open dependents" how to ask for that
+// instead, with the limits of the answer it gets. Terms, not prose, are
+// pinned, and the reference is whitespace-normalized so a reflow keeps the
+// check.
+func TestCountVocabularyIsStatedOnTheTypesAndTheJSONReference(t *testing.T) {
+	const typesFile = "../../internal/types/types.go"
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, typesFile, nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parse %s: %v", typesFile, err)
+	}
+	typeDocs := map[string]string{}
+	fieldDocs := map[string]string{}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.TYPE {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			ts := spec.(*ast.TypeSpec)
+			typeDocs[ts.Name.Name] = gen.Doc.Text()
+			st, ok := ts.Type.(*ast.StructType)
+			if !ok {
+				continue
+			}
+			for _, field := range st.Fields.List {
+				for _, name := range field.Names {
+					fieldDocs[ts.Name.Name+"."+name.Name] = field.Doc.Text() + field.Comment.Text()
+				}
+			}
+		}
+	}
+	requireTerms := func(where, text string, terms ...string) {
+		t.Helper()
+		text = strings.Join(strings.Fields(text), " ")
+		for _, term := range terms {
+			if !strings.Contains(text, term) {
+				t.Errorf("%s does not mention %q:\n%s", where, term, text)
+			}
+		}
+	}
+
+	for _, field := range []string{"IssueWithCounts.DependencyCount", "IssueWithCounts.DependentCount"} {
+		requireTerms(typesFile+" "+field, fieldDocs[field], "`blocks`", "every edge type", "IssueDetails", "status")
+	}
+	requireTerms(typesFile+" IssueWithCounts.DependencyCount", fieldDocs["IssueWithCounts.DependencyCount"], "Dependencies")
+	for _, field := range []string{"IssueDetails.DependencyCount", "IssueDetails.DependentCount"} {
+		requireTerms(typesFile+" "+field, fieldDocs[field], "every edge type", "distinct", "IssueWithCounts")
+	}
+	requireTerms(typesFile+" DependencyCounts", typeDocs["DependencyCounts"], "`blocks`", "every edge type")
+	for _, field := range []string{"ReadyItem.DependencyCount", "ReadyItem.DependentCount"} {
+		requireTerms(typesFile+" "+field, fieldDocs[field], "`blocks`")
+	}
+
+	const refFile = "../../docs/reference/json-schema.md"
+	raw, err := os.ReadFile(refFile)
+	if err != nil {
+		t.Fatalf("read %s: %v", refFile, err)
+	}
+	ref := string(raw)
+	section := func(heading string) string {
+		t.Helper()
+		_, rest, ok := strings.Cut(ref, "\n"+heading+"\n")
+		if !ok {
+			t.Fatalf("%s has no %q section", refFile, heading)
+		}
+		if next := strings.Index(rest, "\n#"); next >= 0 {
+			rest = rest[:next]
+		}
+		return rest
+	}
+
+	list := section("### bd list --json")
+	required, _, ok := strings.Cut(list, "Optional fields:")
+	if !ok {
+		t.Fatalf("%s: bd list --json section has no Optional fields list", refFile)
+	}
+	requireTerms(refFile+" bd list --json required fields", required,
+		"`dependency_count`", "`dependent_count`", "`comment_count`")
+	requireTerms(refFile+" bd list --json", list,
+		"outgoing `blocks` edges", "incoming `blocks` edges", "parent-child", "`dependencies` array", "bd show")
+	requireTerms(refFile+" bd ready --json", section("### bd ready --json"), "`blocks` edges")
+	requireTerms(refFile+" bd show --json", section("### bd show --json"),
+		"`dependency_count`", "`dependent_count`", "every edge type", "distinct", "`bd list`")
+	requireTerms(refFile+" bd export --json", section("### bd export --json"), "`blocks` edges")
+	requireTerms(refFile+" Consumer Guidelines", section("## Consumer Guidelines"),
+		"open dependents",
+		"bd show <ids...> --json",
+		`deps=$(bd dep list "$id" --direction=up --json) || exit`,
+		`select(.status != "closed")`,
+		"non-closed", "deferred", "no local issue row", "not an atomic",
+		"countDependencyEdges", "direction=in", "100", "missing")
 }

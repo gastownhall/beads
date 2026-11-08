@@ -126,8 +126,10 @@ go_test(
     ],
     data = [
         "claim.go",
+        "//:docs/reference/json-schema.md",
         "//cmd/bd:list.go",
         "//cmd/bd:ready.go",
+        "//internal/types:types.go",
     ] + glob(["testdata/**"]),
     embed = [":httpapi"],
     deps = [
