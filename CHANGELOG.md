@@ -834,7 +834,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   between is not shown; for an ID present both as an issue and as a wisp, it
   now prints the labels of the issue whose body it shows, where it used to
   print the wisp's. `bd list --flat --long` no longer loads the
-  blocking decoration it does not render (8 fewer). `bd ready --plain` no
+  blocking decoration it does not render (8 fewer), so it also no longer
+  prints the warning that an external project is unavailable; the compact,
+  agent and `--all` views without `--long` still print it. `bd ready --plain` no
   longer reads parent edges and parent epics, which only the default view
   prints (4, plus 4 per distinct parent). The text confirmation of
   `bd priority` and `bd note` prints the title read before the write instead
