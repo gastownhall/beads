@@ -52,7 +52,7 @@ type syncStalenessInputs struct {
 // invisible to it: a documented diagnostic limit, not a verdict (GH#6289).
 func originCheckSkipReason(beadsDir string) string {
 	for _, key := range []string{"no-push", "dolt.local-only"} {
-		if v, err := strconv.ParseBool(config.GetStringFromDir(beadsDir, key)); err == nil && v {
+		if v, err := strconv.ParseBool(strings.TrimSpace(config.GetStringFromDir(beadsDir, key))); err == nil && v {
 			return key
 		}
 	}

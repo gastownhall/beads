@@ -4,6 +4,8 @@ package doctor
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -253,6 +255,39 @@ func TestSyncStalenessResult(t *testing.T) {
 			}
 			if got.Name != "Sync Staleness" || got.Category != CategoryFederation {
 				t.Errorf("Name/Category = %q/%q, want Sync Staleness/%s", got.Name, got.Category, CategoryFederation)
+			}
+		})
+	}
+}
+
+// TestOriginCheckSkipReason pins which workspace settings turn the origin leg
+// of Sync Staleness off (GH#6289): the inspected workspace's
+// .beads/config.yaml, not the config of the directory bd doctor runs from.
+func TestOriginCheckSkipReason(t *testing.T) {
+	tests := []struct {
+		name   string
+		config string // "" writes no config.yaml
+		want   string
+	}{
+		{name: "no config", want: ""},
+		{name: "no-push", config: "no-push: true\n", want: "no-push"},
+		{name: "dolt.local-only nested", config: "dolt:\n  local-only: true\n", want: "dolt.local-only"},
+		{name: "dolt.local-only flat key", config: "dolt.local-only: \"true\"\n", want: "dolt.local-only"},
+		{name: "value padded with whitespace", config: "no-push: \" true \"\n", want: "no-push"},
+		{name: "both, no-push named first", config: "no-push: true\ndolt:\n  local-only: true\n", want: "no-push"},
+		{name: "explicitly false", config: "no-push: false\ndolt:\n  local-only: false\n", want: ""},
+		{name: "unparseable value", config: "no-push: maybe\n", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			beadsDir := t.TempDir()
+			if tt.config != "" {
+				if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(tt.config), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := originCheckSkipReason(beadsDir); got != tt.want {
+				t.Errorf("originCheckSkipReason = %q, want %q", got, tt.want)
 			}
 		})
 	}
