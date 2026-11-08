@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -238,25 +239,7 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 		}
 		defer func() { _ = store.Close() }()
 
-		remotes, err := store.ListRemotes(ctx)
-		if err != nil || len(remotes) == 0 {
-			return DoctorCheck{
-				Name:     "Federation remotesapi",
-				Status:   StatusOK,
-				Message:  "N/A (no peers configured)",
-				Category: CategoryFederation,
-			}
-		}
-
-		// Has remotes but no server running - suggest starting in federation mode
-		return DoctorCheck{
-			Name:     "Federation remotesapi",
-			Status:   StatusWarning,
-			Message:  fmt.Sprintf("Server not running (%d peers configured)", len(remotes)),
-			Detail:   "Federation requires dolt sql-server for peer sync",
-			Fix:      "Start dolt sql-server in server mode to enable peer-to-peer sync",
-			Category: CategoryFederation,
-		}
+		return remotesAPIServerDownCheck(store.ListRemotes(ctx))
 	}
 
 	// Server is running - check if any federation peers are configured before
@@ -293,6 +276,52 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 	// Server is running and peers are configured - check if remotesapi port is
 	// accessible.
 	return checkRemotesAPIListener(beadsDir, pid)
+}
+
+// remotesAPIServerDownCheck is the Federation remotesapi result when no
+// server is running, given the store's remote listing. origin is the default
+// sync remote, not a peer, so an origin-only workspace has nothing to serve.
+func remotesAPIServerDownCheck(remotes []storage.RemoteInfo, err error) DoctorCheck {
+	if err != nil {
+		return DoctorCheck{
+			Name:     "Federation remotesapi",
+			Status:   StatusOK,
+			Message:  "Skipped (SQL remotes unavailable)",
+			Detail:   err.Error(),
+			Category: CategoryFederation,
+		}
+	}
+	peers := federationPeerCount(remotes)
+	if peers == 0 {
+		return DoctorCheck{
+			Name:     "Federation remotesapi",
+			Status:   StatusOK,
+			Message:  "N/A (no peers configured)",
+			Category: CategoryFederation,
+		}
+	}
+
+	// Has peers but no server running - suggest starting in federation mode
+	return DoctorCheck{
+		Name:     "Federation remotesapi",
+		Status:   StatusWarning,
+		Message:  fmt.Sprintf("Server not running (%d peers configured)", peers),
+		Detail:   "Federation requires dolt sql-server for peer sync",
+		Fix:      "Start dolt sql-server in server mode to enable peer-to-peer sync",
+		Category: CategoryFederation,
+	}
+}
+
+// federationPeerCount counts the federation peers among remotes: every
+// remote other than origin, as the Peer Connectivity check counts them.
+func federationPeerCount(remotes []storage.RemoteInfo) int {
+	peers := 0
+	for _, r := range remotes {
+		if r.Name != "origin" {
+			peers++
+		}
+	}
+	return peers
 }
 
 // federationPeers reports whether the store the federation checks open
