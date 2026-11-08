@@ -123,3 +123,29 @@ func TestCLI_Batch_DepAdd_TypeBlockedByAliasGates(t *testing.T) {
 		t.Errorf("expected \"Batch Blocked\" excluded from `bd ready` after batch dep.add blocked-by, got: %s", readyOut)
 	}
 }
+
+// TestCLI_Batch_DepAdd_UnknownTypeRejected mirrors the unknown-type rejection
+// coverage for the batch dep.add op.
+func TestCLI_Batch_DepAdd_UnknownTypeRejected(t *testing.T) {
+	bd := buildBDForInitTests(t)
+	dir := t.TempDir()
+	runCreateDepsBD(t, bd, dir, "init", "--backend", "dolt", "--prefix", "test",
+		"--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+
+	a := createDepsExtractID(t, runCreateDepsBD(t, bd, dir, "create", "Batch A", "-p", "1", "--json"))
+	b := createDepsExtractID(t, runCreateDepsBD(t, bd, dir, "create", "Batch B", "-p", "1", "--json"))
+
+	script := "dep add " + a + " " + b + " bogus-type\n"
+	scriptFile := filepath.Join(dir, "batch-bogus.txt")
+	if err := os.WriteFile(scriptFile, []byte(script), 0o600); err != nil {
+		t.Fatalf("write batch script: %v", err)
+	}
+
+	out, err := runCreateDepsBDRaw(bd, dir, "batch", "-f", scriptFile)
+	if err == nil {
+		t.Errorf("bd batch dep.add bogus-type exited 0; output:\n%s", out)
+	}
+	if !strings.Contains(out, "unknown dependency type") {
+		t.Errorf("expected 'unknown dependency type' error, got:\n%s", out)
+	}
+}
