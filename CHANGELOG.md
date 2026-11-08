@@ -716,6 +716,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so still runs the whole-graph check; for a single edge the flag only skips
   the post-add cycle warning. That check and `bd dep cycles` now read only the
   edge types they check rather than every edge.
+- **`bd dep tree` stops reading at its depth limit.** A node on the last
+  level `--max-depth` allows is still shown, but the walk no longer reads its
+  edges and loads its neighbors, which it then discarded. That saves 2
+  statements for each such node with no edges, 4 when its edges point only at
+  missing or external targets, and 5 or more when at least one neighbor loads
+  (server and embedded modes alike). The tree returned is
+  unchanged.
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add
