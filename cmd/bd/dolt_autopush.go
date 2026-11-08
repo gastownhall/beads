@@ -150,6 +150,21 @@ func pushedCommitForState(ctx context.Context, target autoPushTarget, prePush st
 	return c
 }
 
+// recordPushSuccess records a successful push to the default (origin) remote
+// in push-state.json: both timestamps take the current time, last_error is
+// cleared, and last_commit is the post-push HEAD (pushedCommitForState).
+// prePush is the HEAD read just before the push, or "" if that read failed.
+// The push already succeeded, so callers report a bookkeeping error without
+// failing the command.
+func recordPushSuccess(ctx context.Context, target autoPushTarget, prePush string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	return savePushState(&pushState{
+		LastPush:    now,
+		LastCommit:  pushedCommitForState(ctx, target, prePush),
+		LastAttempt: now,
+	})
+}
+
 // maybeAutoPush pushes to the Dolt remote if enabled and the debounce interval has passed.
 // Called from PersistentPostRun after auto-commit and auto-backup.
 func maybeAutoPush(ctx context.Context) {
@@ -247,9 +262,7 @@ func maybeAutoPush(ctx context.Context) {
 		return
 	}
 
-	// Record last push time and commit to local file.
-	now := time.Now().UTC().Format(time.RFC3339)
-	if err := savePushState(&pushState{LastPush: now, LastCommit: pushedCommitForState(ctx, st, currentCommit)}); err != nil {
+	if err := recordPushSuccess(ctx, st, currentCommit); err != nil {
 		debug.Logf("dolt auto-push: failed to save push state: %v\n", err)
 	}
 
