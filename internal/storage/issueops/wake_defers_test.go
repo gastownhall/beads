@@ -91,8 +91,9 @@ func wakeAgainstScript(t *testing.T, history bool) error {
 }
 
 // TestExpiredDefersDue pins the preflight's answers and statements: one
-// statement over both tables, the issues-only form only when the wisps table is
-// missing, and any other error returned rather than read as "nothing due".
+// statement over both tables, the issues-only form on a table-not-found error
+// that does not name issues, and any other error returned rather than read as
+// "nothing due".
 func TestExpiredDefersDue(t *testing.T) {
 	const both = `SELECT EXISTS \(SELECT 1 FROM issues WHERE status = 'deferred' AND defer_until IS NOT NULL AND defer_until <= UTC_TIMESTAMP\(\)\), ` +
 		`EXISTS \(SELECT 1 FROM wisps WHERE status = 'deferred' AND defer_until IS NOT NULL AND defer_until <= UTC_TIMESTAMP\(\)\)`
@@ -167,12 +168,25 @@ func TestExpiredDefersDue(t *testing.T) {
 			statements: 1,
 		},
 		{
-			name: "a 1146 that names no table is returned, not retried in the issues-only form",
+			// The sweep tolerates any table-not-found error from its wisps half,
+			// so the preflight asks the issues-only form rather than skip a sweep
+			// that would have woken issues.
+			name: "a 1146 that names no table falls back to the issues-only form",
 			script: func(m sqlmock.Sqlmock) {
 				m.ExpectQuery(both).WillReturnError(unnamedMissing)
+				m.ExpectQuery(issuesOnly).WillReturnRows(sqlmock.NewRows([]string{"i"}).AddRow(1))
 			},
-			wantErrIs:  unnamedMissing,
-			statements: 1,
+			want:       true,
+			statements: 2,
+		},
+		{
+			name: "a 1146 that names no table, then a failing issues-only form, is returned",
+			script: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(both).WillReturnError(unnamedMissing)
+				m.ExpectQuery(issuesOnly).WillReturnError(missingIssues)
+			},
+			wantErrIs:  missingIssues,
+			statements: 2,
 		},
 		{
 			name: "an unrelated error is returned, not retried in the issues-only form",

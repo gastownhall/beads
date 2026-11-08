@@ -97,9 +97,13 @@ const expiredDeferPredicate = `status = 'deferred' AND defer_until IS NOT NULL
 //     sweep on a fresh snapshot; any other failure skips this sweep, which is
 //     advisory.
 //
-// A database without the wisps table gets the issues-only form, as the sweep
-// tolerates that table's absence. Any other error, a missing issues table
-// included, is returned for the caller to treat as it treats a failed sweep.
+// A table-not-found error that does not name the issues table gets the
+// issues-only form, as the sweep tolerates any table-not-found error from its
+// wisps half; that covers a database without the wisps table, and a 1146 whose
+// text names no table. If the missing table is in fact issues, the issues-only
+// form fails too and its error is returned, as the sweep's issues half would
+// fail. Any other error, a missing issues table included, is returned for the
+// caller to treat as it treats a failed sweep.
 func ExpiredDefersDue(ctx context.Context, q DBTX) (bool, error) {
 	var issuesDue, wispsDue bool
 	err := q.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM issues WHERE "+expiredDeferPredicate+
@@ -107,7 +111,7 @@ func ExpiredDefersDue(ctx context.Context, q DBTX) (bool, error) {
 	if err == nil {
 		return issuesDue || wispsDue, nil
 	}
-	if !dberrors.IsMissingTable(err, "wisps") {
+	if !dberrors.IsTableNotExist(err) || dberrors.IsMissingTable(err, "issues") {
 		return false, fmt.Errorf("wake expired defers: preflight: %w", err)
 	}
 	if err := q.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM issues WHERE "+expiredDeferPredicate+")").

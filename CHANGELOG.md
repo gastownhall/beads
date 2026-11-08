@@ -800,8 +800,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when nothing was due, which is almost always. It now asks one
   `SELECT EXISTS(...), EXISTS(...)` first, without a transaction where the
   server autocommits, and opens the write only on a true answer. Against a dolt
-  sql-server a sweep with nothing due sends 1 statement instead of 4 (5 on a
-  store's first write, which also read the versioned-history switch). A sweep
+  sql-server a sweep with nothing due sends 1 statement instead of 4. When it is
+  the store's first read it sends 2, because it also asks the server's
+  autocommit mode once; it used to send 5, because the store's first write also
+  read the versioned-history switch. A SQL user without write privileges now
+  gets bd's "lacks write privileges" warning only when a defer is due, instead
+  of from every ready read. A sweep
   that wakes something sends 1 more than before with autocommit on and both
   tables present, 2 more on a database without the wisps table, 3 more on a
   server started with `--no-auto-commit`, and 4 more on such a server without
