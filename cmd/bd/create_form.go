@@ -70,15 +70,7 @@ func parseCreateFormInput(raw *createFormRawInput) *createFormValues {
 	}
 
 	// Parse dependencies
-	var deps []string
-	if raw.Deps != "" {
-		for _, d := range strings.Split(raw.Deps, ",") {
-			d = strings.TrimSpace(d)
-			if d != "" {
-				deps = append(deps, d)
-			}
-		}
-	}
+	deps := splitFormDepsField(raw.Deps)
 
 	return &createFormValues{
 		Title:              raw.Title,
@@ -92,6 +84,37 @@ func parseCreateFormInput(raw *createFormRawInput) *createFormValues {
 		ExternalRef:        raw.ExternalRef,
 		Dependencies:       deps,
 	}
+}
+
+// splitFormDepsField splits the Dependencies field's raw comma-separated
+// value into trimmed, non-empty entries. parseCreateFormInput applies this
+// conversion before CreateIssueFromFormValues, and the field's Validate
+// callback applies the same one, so validation and creation see identical
+// entries. (Labels keeps its own inline split; only the deps field is in
+// scope here.)
+func splitFormDepsField(s string) []string {
+	var out []string
+	for _, entry := range strings.Split(s, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry != "" {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// validateFormDepsField is the Dependencies field's huh Validate callback:
+// it runs the same parse the create will run, so a malformed entry or a
+// same-target type conflict is correctable in the field — huh keeps the
+// entered value — instead of failing the create after the form is
+// submitted.
+func validateFormDepsField(s string) error {
+	entries := splitFormDepsField(s)
+	if len(entries) == 0 {
+		return nil
+	}
+	_, err := parseFormDeps(entries)
+	return err
 }
 
 // parseFormDeps routes the create form's Dependencies entries through the
@@ -362,7 +385,8 @@ func runCreateForm(cmd *cobra.Command) error {
 				Title("Dependencies").
 				Description("Format: type:id or just id (optional). Bare ids, blocks:id and the depends-on/blocked-by aliases all make THIS issue depend on the target; other types name the relationship").
 				Placeholder("e.g., discovered-from:bd-20, blocks:bd-15").
-				Value(&raw.Deps),
+				Value(&raw.Deps).
+				Validate(validateFormDepsField),
 
 			huh.NewConfirm().
 				Title("Create this issue?").

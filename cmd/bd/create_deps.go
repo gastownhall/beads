@@ -81,8 +81,11 @@ func dedupeDepSpecs(specs []domain.DependencySpec) ([]domain.DependencySpec, err
 			seen[key] = s.Type
 			out = append(out, s)
 		case prev != s.Type:
+			// Flag-neutral on purpose: the create form runs the same dedupe
+			// (bd-3073gm), and its errors surface in a field that has never
+			// heard of --deps.
 			return nil, fmt.Errorf(
-				"--deps cannot attach both %q and %q to the same target %q: a target can only carry one dependency type at a time. Pick one type, or open a separate issue for the second relationship (GH#4626)",
+				"cannot attach both %q and %q to the same target %q: a target can only carry one dependency type at a time. Pick one type, or open a separate issue for the second relationship (GH#4626)",
 				prev, s.Type, s.TargetID,
 			)
 		default:
