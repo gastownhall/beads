@@ -409,3 +409,87 @@ func TestEmbeddedIgnoredCommittableDirtyRefusesBeforeMigrating(t *testing.T) {
 		})
 	}
 }
+
+// TestEmbeddedIgnoredCommittableDirtyReconcileRecovers covers
+// gastownhall/beads#5816 AC-4: the AC-3 refusal is recoverable in-band. The
+// working-set-reconcile open behind "bd dolt commit" warns and opens, its
+// CommitAll commits the dirty child_counters row (and only committable data),
+// and the next ordinary open converges both series without losing that row
+// or publishing the unrelated dirty wisp.
+func TestEmbeddedIgnoredCommittableDirtyReconcileRecovers(t *testing.T) {
+	ctx := t.Context()
+	beadsDir, dataDir := committableIgnoredDirtyFixture(t, false)
+
+	var (
+		reconcile *embeddeddolt.EmbeddedDoltStore
+		openErr   error
+	)
+	warning := captureStderr(t, func() {
+		reconcile, openErr = embeddeddolt.OpenForWorkingSetReconcile(ctx, beadsDir, "testdb", "main")
+	})
+	if openErr != nil {
+		t.Fatalf("OpenForWorkingSetReconcile = %v, want the DirtyTablesError refusal tolerated", openErr)
+	}
+	if !strings.Contains(warning, "Warning:") || !strings.Contains(warning, "child_counters") {
+		reconcile.Close()
+		t.Fatalf("reconcile open stderr = %q, want a warning naming child_counters", warning)
+	}
+	committed, err := reconcile.CommitAll(ctx, "reconcile working set")
+	reconcile.Close()
+	if err != nil {
+		t.Fatalf("CommitAll: %v", err)
+	}
+	if !committed {
+		t.Fatal("CommitAll committed = false, want the dirty child_counters row committed")
+	}
+
+	store, err := embeddeddolt.Open(ctx, beadsDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("Open (post-commit) = %v, want migrations to converge", err)
+	}
+	store.Close()
+
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer func() { _ = cleanup() }()
+	if got, want := ignoredCursorVersion(t, ctx, db), schema.LatestIgnoredVersion(); got != want {
+		t.Fatalf("ignored cursor = %d, want %d", got, want)
+	}
+	// Read through db: a second OpenSQL would wait on the one held here.
+	var mainVersion int
+	if err := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&mainVersion); err != nil {
+		t.Fatalf("read schema version: %v", err)
+	}
+	if mainVersion != schema.LatestVersion() {
+		t.Fatalf("schema version = %d, want %d", mainVersion, schema.LatestVersion())
+	}
+	for _, q := range []string{
+		"SELECT last_child FROM child_counters AS OF 'HEAD' WHERE parent_id = '" + committableParentID + "'",
+		"SELECT last_child FROM child_counters WHERE parent_id = '" + committableParentID + "'",
+	} {
+		var lastChild int
+		if err := db.QueryRowContext(ctx, q).Scan(&lastChild); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		if lastChild != 7 {
+			t.Fatalf("%s = %d, want 7", q, lastChild)
+		}
+	}
+	var working, atHead int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM wisps WHERE id = '"+committableWispID+"'").Scan(&working); err != nil {
+		t.Fatalf("count working wisp: %v", err)
+	}
+	// An untracked wisps table is absent from HEAD altogether, which also
+	// keeps the row out of it.
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM wisps AS OF 'HEAD' WHERE id = '"+committableWispID+"'").Scan(&atHead); err != nil &&
+		!strings.Contains(err.Error(), "table not found") {
+		t.Fatalf("count committed wisp: %v", err)
+	}
+	if working != 1 || atHead != 0 {
+		t.Fatalf("unrelated wisp: working = %d, at HEAD = %d; want 1 and 0 (it must stay local)", working, atHead)
+	}
+}
