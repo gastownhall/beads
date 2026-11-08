@@ -18,7 +18,8 @@ import (
 // BenchmarkPerfSearchWithCountsLabelPage times the label-filtered counts
 // search a list page runs on the store-backed seam (#7635): one label,
 // newest first, a 50-row page plus the probe row (LIMIT 51), over a
-// wisp-heavy store, and the same read with no bound. Each shape runs twice:
+// wisp-heavy store, the same read with no bound, and an unbounded read of a
+// label on one wisp in 500. Each shape runs twice:
 //
 //   - ids-first: DoltStore.SearchIssuesWithCounts, end to end, as shipped.
 //   - predicate: searchcountsequiv.PredicateFormSearch, the pre-#7635 read —
@@ -89,9 +90,14 @@ func BenchmarkPerfSearchWithCountsLabelPage(b *testing.B) {
 
 	for _, page := range []struct {
 		name  string
+		label string
 		limit int
-	}{{"limit=51", 51}, {"unbounded", 0}} {
-		filter := types.IssueFilter{Labels: []string{countsBenchLabel}, SortBy: "created", Limit: page.limit}
+	}{
+		{"limit=51", countsBenchLabel, 51},
+		{"unbounded", countsBenchLabel, 0},
+		{"unbounded-narrow", countsBenchNarrowLabel, 0},
+	} {
+		filter := types.IssueFilter{Labels: []string{page.label}, SortBy: "created", Limit: page.limit}
 		for _, path := range []struct {
 			name   string
 			search func(context.Context, types.IssueFilter) ([]*types.IssueWithCounts, error)
@@ -115,7 +121,11 @@ const (
 	countsBenchMolecule  = 8
 	countsBenchLabelPool = 100
 	countsBenchLabel     = "order-run:target"
-	countsBenchBatch     = 500
+	// countsBenchNarrowLabel is on one wisp in 500: an unbounded read of it
+	// matches well under the ids-first ceiling even at 46k wisps.
+	countsBenchNarrowLabel = "order-run:narrow"
+	countsBenchNarrowEvery = 500
+	countsBenchBatch       = 500
 )
 
 // seedCountsBench writes the fixture with multi-row INSERTs in one
@@ -193,6 +203,9 @@ func seedCountsBench(ctx context.Context, tb testing.TB, db *sql.DB, wisps int) 
 		if rng.Intn(19) == 0 {
 			labelRows = append(labelRows, []any{wispID(i), countsBenchLabel})
 			targets++
+		}
+		if i%countsBenchNarrowEvery == countsBenchNarrowEvery-1 {
+			labelRows = append(labelRows, []any{wispID(i), countsBenchNarrowLabel})
 		}
 		switch pos := i % countsBenchMolecule; {
 		case pos == 0:

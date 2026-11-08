@@ -269,13 +269,80 @@ func TestSearchIssuesWithCountsEmptyIDScanStillResolvesTables(t *testing.T) {
 	}
 }
 
+// probeOverflowRows answers an unbounded read's id probe with one id past the
+// ids-first ceiling, so the read keeps the predicate form.
+func probeOverflowRows(prefix string) *sqlmock.Rows {
+	return idRows(pageIDs(prefix, countsIDsFirstMaxBound+1)...)
+}
+
+// TestSearchIssuesWithCountsUnboundedProbeGoesIDsFirst pins that a read with
+// no bound, or one above countsIDsFirstMaxBound, runs the id scan as a probe
+// capped one past the ceiling, and that a probe that comes back within the
+// ceiling — at exactly the ceiling included — is hydrated by-IDs and
+// delivered in the scan's order, with no predicate-form statement.
+func TestSearchIssuesWithCountsUnboundedProbeGoesIDsFirst(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		filter  types.IssueFilter
+		matches int
+	}{
+		{name: "unbounded, few matches", filter: types.IssueFilter{Labels: []string{"hot"}, SortBy: "created"}, matches: 9},
+		{name: "unbounded, matches at the ceiling", filter: types.IssueFilter{Labels: []string{"hot"}, SortBy: "created"}, matches: countsIDsFirstMaxBound},
+		{name: "bound above the ceiling", filter: types.IssueFilter{Labels: []string{"hot"}, SortBy: "created", Limit: 1000}, matches: 40},
+		{name: "MaxRows breaker", filter: types.IssueFilter{Labels: []string{"hot"}, SortBy: "created", MaxRows: countsIDsFirstMaxBound}, matches: 40},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, mock, tx := beginMockTx(t)
+			ids, marks, created := scrambled("bd", tc.matches)
+
+			mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).WillReturnRows(probeRow())
+			mock.ExpectQuery(idScanSQL("issues", "labels", countsIDsFirstMaxBound+1)).WithArgs("hot").WillReturnRows(idRows(ids...))
+			mock.ExpectQuery(byIDsSQL("issues", len(ids))).
+				WithArgs(byIDsArgs(IssuesFilterTables, ids, true)...).WillReturnRows(countsRows(shuffled(ids), marks, created))
+
+			f := tc.filter
+			f.SkipWisps = true
+			got, err := SearchIssuesWithCountsInTx(context.Background(), tx, "", f)
+			if err != nil {
+				t.Fatalf("SearchIssuesWithCountsInTx: %v", err)
+			}
+			assertDelivered(t, got, ids, marks)
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet sql expectations: %v", err)
+			}
+		})
+	}
+}
+
+// TestSearchIssuesWithCountsUnboundedEmptyProbeStillResolvesTables pins that
+// an unbounded probe that finds nothing still runs the sentinel by-IDs
+// statement, as an empty bounded page does.
+func TestSearchIssuesWithCountsUnboundedEmptyProbeStillResolvesTables(t *testing.T) {
+	_, mock, tx := beginMockTx(t)
+	mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).WillReturnRows(probeRow())
+	mock.ExpectQuery(idScanSQL("issues", "labels", countsIDsFirstMaxBound+1)).WithArgs("hot").WillReturnRows(idRows())
+	mock.ExpectQuery(byIDsSQL("issues", 1)).WithArgs(byIDsArgs(IssuesFilterTables, []string{""}, true)...).
+		WillReturnRows(countsRows([]string{""}, map[string]int{"": 1}, map[string]time.Time{}))
+
+	filter := types.IssueFilter{Labels: []string{"hot"}, SortBy: "created", SkipWisps: true}
+	out, err := SearchIssuesWithCountsInTx(context.Background(), tx, "", filter)
+	if err != nil {
+		t.Fatalf("SearchIssuesWithCountsInTx: %v", err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("got %d rows from an empty probe", len(out))
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
 // TestSearchIssuesWithCountsPredicateFormWhenNotIDsFirst pins the cases that
-// keep the predicate form: an unbounded read (no LIMIT to push, so ids-first
-// would hydrate the whole match set in batches, which measured slower), a
-// Go-side sort (no SQL order to cut a page under), a bound above
-// countsIDsFirstMaxBound (a MaxRows breaker with no Limit renders one), and
-// a label filter with an empty entry, which the id scan's label JOINs would
-// drop (labelJoinsMatchPredicate).
+// keep the predicate form: an unbounded or above-ceiling read whose id probe
+// overflows the ceiling (hydrating that many ids in batches measured slower),
+// a Go-side sort (no SQL order to cut a page under), and a label filter with
+// an empty entry, which the id scan's label JOINs would drop
+// (labelJoinsMatchPredicate).
 func TestSearchIssuesWithCountsPredicateFormWhenNotIDsFirst(t *testing.T) {
 	const oneLabel = `id IN \(SELECT issue_id FROM labels WHERE label = \?\)`
 	for _, tc := range []struct {
@@ -284,11 +351,12 @@ func TestSearchIssuesWithCountsPredicateFormWhenNotIDsFirst(t *testing.T) {
 		where  string         // the derived driver's WHERE, as a regexp
 		args   []driver.Value // its args
 		limit  string         // the predicate form's outer LIMIT, "" for none
+		probe  bool           // whether an id probe runs (and overflows) first
 	}{
-		{name: "unbounded", filter: types.IssueFilter{Labels: []string{"hot"}, SortBy: "created"}},
+		{name: "unbounded, probe overflows", filter: types.IssueFilter{Labels: []string{"hot"}, SortBy: "created"}, probe: true},
 		{name: "go-side sort", filter: types.IssueFilter{Labels: []string{"hot"}, SortBy: "id", Limit: 3}},
-		{name: "bound above the ids-first ceiling", filter: types.IssueFilter{Labels: []string{"hot"}, SortBy: "created", MaxRows: countsIDsFirstMaxBound},
-			limit: fmt.Sprintf("LIMIT %d", countsIDsFirstMaxBound+1)},
+		{name: "bound above the ids-first ceiling, probe overflows", filter: types.IssueFilter{Labels: []string{"hot"}, SortBy: "created", MaxRows: countsIDsFirstMaxBound},
+			limit: fmt.Sprintf("LIMIT %d", countsIDsFirstMaxBound+1), probe: true},
 		{name: "empty Labels entry", filter: types.IssueFilter{Labels: []string{"hot", ""}, SortBy: "created", Limit: 3},
 			where: oneLabel + ` AND ` + oneLabel, args: []driver.Value{"hot", ""}, limit: "LIMIT 3"},
 		{name: "empty LabelsAny entry", filter: types.IssueFilter{LabelsAny: []string{"hot", ""}, SortBy: "created", Limit: 3},
@@ -297,6 +365,10 @@ func TestSearchIssuesWithCountsPredicateFormWhenNotIDsFirst(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, mock, tx := beginMockTx(t)
 			mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).WillReturnRows(probeRow())
+			if tc.probe {
+				mock.ExpectQuery(idScanSQL("issues", "labels", countsIDsFirstMaxBound+1)).WithArgs("hot").
+					WillReturnRows(probeOverflowRows("bd"))
+			}
 			// The predicate form: the filter inside the derived driver, any
 			// LIMIT outside, after the aggregate joins.
 			where, args := tc.where, tc.args

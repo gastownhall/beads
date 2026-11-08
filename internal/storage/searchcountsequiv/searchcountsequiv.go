@@ -1,8 +1,9 @@
 // Package searchcountsequiv checks that the store-backed counts search,
 // issueops.SearchIssuesWithCountsInTx, returns exactly what the predicate form
 // of sqlbuild.SearchCountsSQL returns for the same request (#7635). A bounded
-// page is answered ids-first — an id scan, then the by-IDs form in batches —
-// and the predicate form is the oracle it must reproduce row for row: the same
+// page, and an unbounded read whose id probe stays within the ceiling, is
+// answered ids-first — an id scan, then the by-IDs form in batches — and the
+// predicate form is the oracle it must reproduce row for row: the same
 // rows in the same order, every column, labels and dependencies compared as
 // sets, the same issues+wisps merge and the same MaxRows refusal.
 //
@@ -93,6 +94,17 @@ func largeCases() []Case {
 		{Name: "label created skip wisps 200", Filter: types.IssueFilter{Labels: bulk, SortBy: "created", Limit: 200, SkipWisps: true}, WantRows: 200},
 		{Name: "label created skip wisps 201", Filter: types.IssueFilter{Labels: bulk, SortBy: "created", Limit: 201, SkipWisps: true}, WantRows: 201},
 		{Name: "label created ephemeral 200", Filter: types.IssueFilter{Ephemeral: ptr(true), Labels: bulk, SortBy: "created", Limit: 200}, WantRows: 200},
+		// Unbounded reads probe for one id past the ceiling: a probe that
+		// fills it falls back to the predicate form, one that does not is
+		// hydrated by-IDs. The created_at cutoffs pick the first 222 rows
+		// (200 of them "bulk") and the first 201 rows of each table.
+		{Name: "unbounded label 207 per table", Filter: types.IssueFilter{Labels: bulk, SortBy: "created"}, WantRows: 414},
+		{Name: "unbounded label skip wisps at the ceiling", Filter: types.IssueFilter{Labels: bulk, SortBy: "created", CreatedBefore: ptr(base.Add(74 * time.Minute)), SkipWisps: true}, WantRows: 200},
+		{Name: "unbounded labelsAny skip wisps one past the ceiling", Filter: types.IssueFilter{LabelsAny: []string{"bulk", "other"}, SortBy: "created", CreatedBefore: ptr(base.Add(67 * time.Minute)), SkipWisps: true}, WantRows: 201},
+		{Name: "unbounded label at the ceiling per table", Filter: types.IssueFilter{Labels: bulk, CreatedBefore: ptr(base.Add(74 * time.Minute))}, WantRows: 400},
+		{Name: "unbounded label ephemeral at the ceiling", Filter: types.IssueFilter{Ephemeral: ptr(true), Labels: bulk, SortBy: "created", CreatedBefore: ptr(base.Add(74 * time.Minute))}, WantRows: 200},
+		{Name: "max rows above the ceiling at the ceiling", Filter: types.IssueFilter{Labels: bulk, SortBy: "created", CreatedBefore: ptr(base.Add(74 * time.Minute)), MaxRows: 450}, WantRows: 400},
+		{Name: "max rows trips past a probe that fills", Filter: types.IssueFilter{Labels: bulk, SortBy: "created", MaxRows: 300, MaxRowsSource: "--max-rows"}},
 	}
 }
 

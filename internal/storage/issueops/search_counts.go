@@ -144,27 +144,34 @@ func runFilterSearchQueryInTx(ctx context.Context, tx *sql.Tx, query string, fil
 	// measured. The ceiling is one batch per leg, which keeps the first three
 	// pages of a default listing (offset + 50 + the probe row) ids-first; the
 	// price is that a full 101-200-row page on a store under ~2k rows pays up
-	// to ~50 ms more than the predicate form would. Above it — an explicit
-	// large --limit, or Limit 0 under a MaxRows breaker, which pushes
-	// MaxRows+1 — the predicate form stays. So does a label filter the id
-	// scan's JOINs would read differently (labelJoinsMatchPredicate).
-	if eff > 0 && !goSideSort && eff <= countsIDsFirstMaxBound && labelJoinsMatchPredicate(filter) {
+	// to ~50 ms more than the predicate form would. An unbounded read, an
+	// explicit large --limit, or Limit 0 under a MaxRows breaker (which pushes
+	// MaxRows+1) runs the id scan as a probe capped one past the ceiling, and
+	// keeps the predicate form only when the probe fills it. A label filter
+	// the id scan's JOINs would read differently (labelJoinsMatchPredicate)
+	// always keeps the predicate form.
+	idsFirst := !goSideSort && labelJoinsMatchPredicate(filter)
+	if idsFirst && eff > 0 && eff <= countsIDsFirstMaxBound {
 		ids, err := searchTableInTxT(ctx, tx, query, filter, tables, idProjection)
 		if err != nil {
 			return nil, err
 		}
-		if len(ids) == 0 {
-			// AN EMPTY PAGE STILL RESOLVES EVERY TABLE THE PREDICATE FORM READ.
-			// The id scan reads only the main table (and its labels), so on
-			// its own an empty page would answer a missing leases or
-			// wisp_comments table — neither of them optional (#5942) — with
-			// an empty success. One by-IDs statement over a sentinel id
-			// reaches the same tables the predicate form joined, so their
-			// errors still propagate; whatever it returns is discarded.
-			_, err := hydrateCountsByIDsInTx(ctx, tx, tables, []string{""}, includeWispReverseDeps, hydrationFor(filter))
+		return hydrateIDsFirstPageInTx(ctx, tx, tables, ids, includeWispReverseDeps, hydrationFor(filter))
+	}
+
+	// An unbounded or above-ceiling read probes for at most one batch of ids
+	// past the ceiling; a probe that comes back within it holds every match.
+	if idsFirst {
+		probe := filter
+		probe.Limit = countsIDsFirstMaxBound + 1
+		probe.MaxRows = 0
+		ids, err := searchTableInTxT(ctx, tx, query, probe, tables, idProjection)
+		if err != nil {
 			return nil, err
 		}
-		return hydrateCountsByIDsInTx(ctx, tx, tables, ids, includeWispReverseDeps, hydrationFor(filter))
+		if len(ids) <= countsIDsFirstMaxBound {
+			return hydrateIDsFirstPageInTx(ctx, tx, tables, ids, includeWispReverseDeps, hydrationFor(filter))
+		}
 	}
 
 	whereClauses, args, err := BuildIssueFilterClauses(query, filter, tables)
@@ -208,6 +215,22 @@ func runSearchQueryInTx(ctx context.Context, tx DBTX, tables FilterTables, where
 // the predicate form; the plain seam's own reading is left as it is.
 func labelJoinsMatchPredicate(filter types.IssueFilter) bool {
 	return !slices.Contains(filter.Labels, "") && !slices.Contains(filter.LabelsAny, "")
+}
+
+// hydrateIDsFirstPageInTx hydrates an id scan's page through the by-IDs form.
+//
+// AN EMPTY PAGE STILL RESOLVES EVERY TABLE THE PREDICATE FORM READ. The id
+// scan reads only the main table (and its labels), so on its own an empty
+// page would answer a missing leases or wisp_comments table — neither of them
+// optional (#5942) — with an empty success. One by-IDs statement over a
+// sentinel id reaches the same tables the predicate form joined, so their
+// errors still propagate; whatever it returns is discarded.
+func hydrateIDsFirstPageInTx(ctx context.Context, tx DBTX, tables FilterTables, ids []string, includeWispReverseDeps bool, hyd sqlbuild.CountsHydration) ([]*types.IssueWithCounts, error) {
+	if len(ids) == 0 {
+		_, err := hydrateCountsByIDsInTx(ctx, tx, tables, []string{""}, includeWispReverseDeps, hyd)
+		return nil, err
+	}
+	return hydrateCountsByIDsInTx(ctx, tx, tables, ids, includeWispReverseDeps, hyd)
 }
 
 // hydrateCountsByIDsInTx hydrates the counts rows for ids through the by-IDs

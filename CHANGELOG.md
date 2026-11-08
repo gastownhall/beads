@@ -512,6 +512,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matches reverse blockers through each target column's index instead of a
   `COALESCE` no index serves. The rows returned are unchanged, including on
   stores that still hold a dependency row with two targets. (#7635)
+- **An unbounded `bd list` that matches few rows no longer costs what the
+  whole store does.** On the local backends, a read with no limit (or one
+  above 200) first probes for up to 201 matching ids. If 200 or fewer come
+  back, those are all the matches, and bd loads labels, counts, parent and
+  dependencies for them only; otherwise it runs the previous query. At 46k
+  wisps, an unbounded one-label read matching 91 wisps went from about
+  900 ms to about 58 ms with Dolt table statistics off. Wider reads pay one
+  capped id scan, within run-to-run noise there. The rows returned are
+  unchanged.
 - `bd preflight --fix --json` no longer returns a `Version sync` fix result:
   version updates must keep all release surfaces aligned via `scripts/update-versions.sh`.
 - Release-tag pushes require Go and reject batches containing different release versions.
