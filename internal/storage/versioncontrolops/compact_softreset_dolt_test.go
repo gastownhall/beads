@@ -29,6 +29,9 @@ type compactHookConn struct {
 
 	// beforeExec runs before each ExecContext statement is forwarded.
 	beforeExec func(query string)
+	// afterReset runs once the final reset of main onto compact-tmp has been
+	// forwarded and succeeded, before Compact reads main's staged set.
+	afterReset func()
 	// beforeFollowUp runs after the staged check, just before the follow-up
 	// commit is forwarded.
 	beforeFollowUp func()
@@ -54,10 +57,15 @@ func (c *compactHookConn) ExecContext(ctx context.Context, query string, args ..
 	if c.beforeExec != nil {
 		c.beforeExec(query)
 	}
-	if isFinalReset(query) {
-		c.resetDone.Store(true)
+	if !isFinalReset(query) {
+		return c.Conn.ExecContext(ctx, query, args...)
 	}
-	return c.Conn.ExecContext(ctx, query, args...)
+	c.resetDone.Store(true)
+	res, err := c.Conn.ExecContext(ctx, query, args...)
+	if err == nil && c.afterReset != nil {
+		c.afterReset()
+	}
+	return res, err
 }
 
 func (c *compactHookConn) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
@@ -510,6 +518,58 @@ func TestCompactKeepsCommitLandingBeforeMainMoves(t *testing.T) {
 		}
 		f.wantStatus("u:false")
 	})
+}
+
+// The residual window after the head move: a writer whose transaction began
+// after a landed commit C1 reached main, and whose Dolt commit lands after
+// main's HEAD moved to the compacted history but before Compact commits what
+// the move left staged. Both acknowledged commits must be in main's committed
+// HEAD when Compact returns; neither may be left as uncommitted working data.
+func TestCompactStraddlingWriterKeepsLandedCommit(t *testing.T) {
+	port := startCompactTestServer(t)
+	f := newCompactFixture(t, port)
+	f.writePending(f.db)
+	landing := f.conn()
+	straddler := f.conn()
+
+	hook := &compactHookConn{
+		beforeExec: onceBeforeFinalReset(func() {
+			f.landRow(landing)
+			f.exec(straddler,
+				"START TRANSACTION",
+				"INSERT INTO t VALUES (900, 'straddling')",
+			)
+		}),
+	}
+	var straddled bool
+	hook.afterReset = func() {
+		straddled = true
+		f.exec(straddler,
+			"CALL DOLT_ADD('t')",
+			"CALL DOLT_COMMIT('-m', 'straddling 900')",
+			"COMMIT",
+		)
+	}
+	if err := f.compact(hook); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if !straddled {
+		t.Fatalf("the straddling writer never committed across the head move")
+	}
+
+	for _, id := range []int{600, 900} {
+		if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = ?", id); n != 1 {
+			t.Fatalf("acknowledged t row %d in main's committed HEAD: present=false, want present=true (status %q)", id, f.status())
+		}
+	}
+	for _, s := range f.status() {
+		if strings.HasPrefix(s, "t:") {
+			t.Fatalf("dolt_status after Compact = %q, want no uncommitted t changes", f.status())
+		}
+	}
+	f.wantPendingKept()
+	f.wantStatus("config:false", "u:false")
+	f.wantNoTempBranch()
 }
 
 // AC-3: a quiet compaction keeps main's tree, replaces the old commits with
