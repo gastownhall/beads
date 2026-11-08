@@ -993,6 +993,7 @@ go_test(
         "legacy_upgrade_guard_witness_test.go",
         "linear_roundtrip_test.go",
         "linear_test.go",
+        "link_batch_deps_test.go",
         "lint_embedded_test.go",
         "lint_stale_proxied_integration_test.go",
         "list_comments_embedded_test.go",

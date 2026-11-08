@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -61,6 +62,23 @@ func TestProxiedServerLink(t *testing.T) {
 				t.Errorf("link --type %s --json = %s, want type blocks", alias, out)
 			}
 			assertProxiedDepExistsWithType(t, db, a.ID, b.ID, "blocks")
+
+			// The canonical edge gates: a is not ready and is blocked while
+			// b stays open.
+			ready, _, err := bdProxiedRunBuffers(t, bd, p.dir, "ready", "--json", "--limit", "0")
+			if err != nil {
+				t.Fatalf("ready --json: %v", err)
+			}
+			if proxiedIDSet(t, ready)[a.ID] {
+				t.Errorf("link --type %s left %s ready; the canonical blocks edge must gate it", alias, a.ID)
+			}
+			blocked, _, err := bdProxiedRunBuffers(t, bd, p.dir, "blocked", "--json")
+			if err != nil {
+				t.Fatalf("blocked --json: %v", err)
+			}
+			if !proxiedIDSet(t, blocked)[a.ID] {
+				t.Errorf("link --type %s did not list %s as blocked: %s", alias, a.ID, blocked)
+			}
 
 			c := bdProxiedCreate(t, bd, p.dir, "Alias text from "+alias)
 			d := bdProxiedCreate(t, bd, p.dir, "Alias text to "+alias)
@@ -159,4 +177,40 @@ func TestProxiedServerGateList(t *testing.T) {
 			t.Errorf("bead-scoped list must not include unrelated gate %s:\n%s", unrelated.ID, out)
 		}
 	})
+}
+
+// proxiedIDSet parses a JSON listing of issues (`bd ready --json`, `bd
+// blocked --json`, ...) into a set of issue ids: a bare array, or the object
+// envelope whose "issues"/"data"/"items" member holds the rows.
+func proxiedIDSet(t *testing.T, out string) map[string]bool {
+	t.Helper()
+	trimmed := []byte(strings.TrimSpace(out))
+	set := make(map[string]bool)
+	collect := func(rows []map[string]any) {
+		for _, row := range rows {
+			if id, ok := row["id"].(string); ok {
+				set[id] = true
+			}
+		}
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(trimmed, &rows); err == nil {
+		collect(rows)
+		return set
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &envelope); err != nil {
+		t.Fatalf("parse JSON issue listing: %v\n%s", err, out)
+	}
+	for _, key := range []string{"issues", "data", "items"} {
+		if raw, ok := envelope[key]; ok {
+			if err := json.Unmarshal(raw, &rows); err != nil {
+				t.Fatalf("parse JSON listing member %q: %v\n%s", key, err, out)
+			}
+			collect(rows)
+			return set
+		}
+	}
+	t.Fatalf("JSON issue listing has no row array: %s", out)
+	return set
 }
