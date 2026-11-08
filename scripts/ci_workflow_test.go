@@ -4826,14 +4826,13 @@ var conformanceCoreSlowGroups = []string{"ReadyCountsPageChunking", "Portable"}
 // owned (ga-96smfk.22): the same -short cmd/bd subset, the same cmd/bd and
 // test-binary builds, and the exact js/wasm refusal contract with its count
 // guard. The selectors below are that job's, frozen, except that the cmd/bd
-// subset also runs TestNocgoStoreFactoriesRefuseGraphWorkspace and
-// TestStoreFactoriesRefuseUnsupportedBackendInLegacyConfig, the only runs of
-// the CGO_ENABLED=0 store factories' graph_mode refusal and of their refusal
-// of a legacy config.json's backend before migrating it.
+// subset also runs TestStoreFactoriesRefuseUnsupportedBackendInLegacyConfig,
+// the only run of the CGO_ENABLED=0 store factories' refusal of a legacy
+// config.json's backend before migrating it.
 func TestBazelPureJobMirrorsPureGoJob(t *testing.T) {
 	job := readCIWorkflow(t, bazelWorkflowName).job(t, bazelPureJobName)
 
-	const pureCmdBDTests = "^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir|NocgoFactoriesHonorSharedServer|NocgoNewDoltStoreFromConfig_ErrorSuggestsCorrectFlag|NocgoNewReadOnlyStoreFromConfig_ErrorSuggestsCorrectFlag|NocgoStoreFactoriesRefuseGraphWorkspace|StoreFactoriesRefuseUnsupportedBackendInLegacyConfig)"
+	const pureCmdBDTests = "^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir|NocgoFactoriesHonorSharedServer|NocgoNewDoltStoreFromConfig_ErrorSuggestsCorrectFlag|NocgoNewReadOnlyStoreFromConfig_ErrorSuggestsCorrectFlag|StoreFactoriesRefuseUnsupportedBackendInLegacyConfig)"
 	if job.Env["PURE_CMD_BD_TESTS"] != pureCmdBDTests {
 		t.Errorf("%s PURE_CMD_BD_TESTS = %q, want the pure cmd/bd -run selector %q", bazelPureJobName, job.Env["PURE_CMD_BD_TESTS"], pureCmdBDTests)
 	}

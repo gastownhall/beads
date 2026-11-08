@@ -2381,8 +2381,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.beads` it passed over (a lone `vc.db`) instead of reporting that no
   workspace was found. A routed write to a repository with no embedded
   database refuses before migrating its legacy `config.json`. `beads.Open`
-  now also refuses a workspace in a format this build cannot open, or naming
-  a removed or unknown backend, as the other library opens do. The library
+  now also refuses a workspace naming a removed or unknown backend, as the
+  other library opens do. The library
   opens and Dolt constructors now report metadata naming the removed
   `sqlite` backend beside a non-empty SQLite database as a historical SQLite
   workspace (`LegacyWorkspaceError`, admission's text) rather than with the
@@ -2660,15 +2660,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   UNC path such as `\\server\share\planning`, all printed in the command
   before, now get a `<path>` placeholder, as does a path with a single quote,
   such as `~/Jane's planning`, elsewhere.
-- **`bd doctor` says when its multi-repo types check skips a database.** For
-  a `repos.additional` repository in a format this build cannot open (a
-  `graph_mode` other than `dependency`, or the `graph-preview-format`
-  marker), the check listed only the custom types in that repository's
-  `config.yaml`, without saying that it had not read the repository's
-  database. It now adds a line under that repository saying so, naming the
-  workspace and its format. The line shows with `--verbose`, in `--json`,
-  and beside an "Issues with unknown types" warning, which can name types
-  that only the skipped database declares.
 
 - **`bd doctor` no longer rewrites a `repos.additional` repository whose
   metadata names a backend bd does not recognize.** Its multi-repo types
@@ -2861,8 +2852,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `routing.contributor` at the redirect target, unless the planning repo
   names a database of its own there, which `routing.contributor` cannot
   select; a rig beside the project under a shared root is such a planning
-  repo). A planning repo in a format this build cannot open exits 16 with
-  a hint, as `bd` does in that repo. A planning repo whose `metadata.json`
+  repo). A planning repo whose `metadata.json`
   has no `dolt_database`, or whose database has not been bootstrapped, is
   refused before anything moves. So is a planning repo that is the project's
   own workspace (for example `routing.contributor: .`), or a clone of it,
@@ -2984,62 +2974,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with no `.local_version` witness. A pre-1.0 witness, or a `.beads/dolt` that
   holds anything, is still refused, and commands other than `bd init` are
   decided as before.
-- **A graph-mode workspace is refused instead of opened as an Issue store.**
-  Graph-preview builds mark their workspaces with `"graph_mode": "link"` and
-  `graph_*` binding fields in `metadata.json`, beside an ordinary Dolt
-  backend. bd opened such a workspace as an Issue store and ran Issue schema
-  initialization against the graph database, and every `metadata.json` rewrite
-  (including the `config.json` to `metadata.json` migration) dropped the
-  marker and the binding. Now any `graph_mode` other than `dependency`,
-  including a value bd does not recognize, makes every command that runs in
-  the workspace or names it with `--db` or `BEADS_DB` (`bd init`, `bd doctor`
-  and `bd bootstrap` included), and `bd create --repo` aimed at it, refuse it
-  before touching anything. The refusal names the format and exits with code
-  16, so installed beads git hooks refuse commits and pushes there too.
-  Commands that reach such a workspace only through a route from another
-  one, such as a routed `bd show`, fail without touching it, but not with
-  code 16. Store-less commands such as `bd version` and `bd help` still run.
-  A `metadata.json` rewrite keeps `graph_mode` and the `graph_*` fields
-  graph-preview builds write, and like those builds it omits a zero
-  `graph_schema_version` and a false `graph_ready`.
-- **A graph workspace without `graph_mode` in its metadata is refused too.**
-  Graph-preview builds write a `.beads/graph-preview-format` marker before
-  `metadata.json`. bd ignored it. When an older bd had rewritten
-  `metadata.json` without `graph_mode`, bd opened the graph database by its
-  recorded name and ran Issue schema initialization against it; when
-  `metadata.json` was never written or was lost, bd fell back to the default
-  database name and created an Issue database inside the graph workspace, and
-  `bd init` initialized an Issue workspace there. A `.beads` holding that
-  marker, whatever it contains and whatever its metadata says (absent,
-  stripped, unparseable or an explicit `dependency`), is now refused wherever
-  a `graph_mode` workspace is: commands run in it or naming it with `--db` or
-  `BEADS_DB`, `bd create --repo` aimed at it, and `bd bootstrap` in a
-  workspace below it that would take its metadata exit with code 16 and a
-  hint to restore `metadata.json`, and routed and cross-repository opens fail
-  without opening its database.
-- **The Go library's opens refuse a graph workspace too.**
-  `beads.OpenBestAvailable`, `OpenBestAvailableWith`, `OpenFromConfig` and
-  `OpenGated` opened a workspace whose `metadata.json` declares a
-  `graph_mode` other than `dependency`, or whose `.beads` holds the
-  `graph-preview-format` marker, as an Issue store and ran Issue schema
-  migrations into the graph database. They now
-  return `*beads.UnsupportedWorkspaceFormatError` (match it with `errors.As`)
-  before opening, creating or changing anything, the same refusal the CLI
-  exits 16 with.
-- **`bd doctor` no longer rewrites a graph workspace listed in
-  `repos.additional`.** Its multi-repo types check read each additional
-  repository's metadata with the loader that migrates a legacy `config.json`
-  into `metadata.json`. A graph workspace whose metadata was still a
-  `config.json` (marked by `graph_mode` in it, or by the
-  `graph-preview-format` marker beside it) therefore lost that file, and with
-  it any `graph_*` key bd does not know, to a new `metadata.json` before the
-  store open refused the workspace. The check now reads that metadata without
-  migrating it and skips the database of a workspace in a format this build
-  cannot open, leaving the workspace byte-identical; it still lists the
-  custom types in that repository's `config.yaml`, as before. It also no
-  longer migrates an ordinary additional repository's legacy `config.json`
-  when there is no Dolt database there to read.
-- **`bd doctor` no longer rewrites or empties nested graph workspaces.**
+- **`bd doctor` no longer rewrites the metadata of nested workspaces.**
   Its Classic Artifacts check walks every `.beads` directory under the
   repository, those of nested repositories and worktrees included, which
   command admission never checks. Both the scan (plain `bd doctor` and
@@ -3047,25 +2982,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd doctor --check=artifacts --clean`) read each one's metadata with the
   loader that migrates a legacy `config.json` into `metadata.json`, so a
   nested workspace whose metadata was still a `config.json` lost that file,
-  and any key bd does not know, such as a `graph_*` key beyond those a
-  rewrite keeps, to a new `metadata.json`. The cleanup also treated a graph
-  workspace's files as artifacts: in a location that should hold only a
-  redirect, such as `polecats/*/.beads` or `.git/beads-worktrees/*/.beads`,
-  it removed the `graph-preview-format` marker and the `dolt` directory, and,
-  without a `redirect` file, the metadata too. The check now reads that
-  metadata without migrating it, and it neither reports nor removes anything
-  in a `.beads` whose format this build cannot open (a `graph_mode` other
-  than `dependency`, or the `graph-preview-format` marker), which it leaves
-  byte-identical. In a redirect-only location, the workspace's own metadata
-  beside its `redirect` file now stays as it is: a legacy `config.json`
-  there is no longer migrated, and neither it nor a `metadata.json` there is
-  reported as cruft any more. The scan had listed that file as safe to
-  delete, though the cleanup kept it, so `bd doctor` warned about it again
-  after every `--fix`. A `config.json` kept beside a `redirect` is inert:
-  across a redirect, bd takes the source workspace's `dolt_database` only
-  from its `metadata.json`, and bd stopped writing `config.json` before
-  `dolt_database` existed. Rename a hand-written one to `metadata.json` for
-  its `dolt_database` to take effect.
+  and any key bd does not know, to a new `metadata.json`. The check now reads
+  that metadata without migrating it. In a redirect-only location, the
+  workspace's own metadata beside its `redirect` file now stays as it is: a
+  legacy `config.json` there is no longer migrated, and neither it nor a
+  `metadata.json` there is reported as cruft any more. The scan had listed
+  that file as safe to delete, though the cleanup kept it, so `bd doctor`
+  warned about it again after every `--fix`. A `config.json` kept beside a
+  `redirect` is inert: across a redirect, bd takes the source workspace's
+  `dolt_database` only from its `metadata.json`, and bd stopped writing
+  `config.json` before `dolt_database` existed. Rename a hand-written one to
+  `metadata.json` for its `dolt_database` to take effect.
 - **`bd doctor` no longer deletes the SQLite files of a nested workspace on
   another backend.** The Classic Artifacts check reports `beads.db`,
   `beads.db-wal`, `beads.db-shm` and `beads.backup-*.db` only in a `.beads`
@@ -3089,23 +3016,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Dolt, so the check listed its WAL, SHM and backups as safe to delete and
   the cleanup removed them. Both now pass over every historical SQLite
   layout that bd refuses to open.
-- **Activating the HTTP backend refuses a graph workspace too.**
-  `bdhttp.Attach` and `bdhttp.Connect` activated it in a workspace whose
-  `metadata.json` declares a `graph_mode` other than `dependency`, or whose
-  `.beads` holds the `graph-preview-format` marker: they wrote the http
-  sidecar and `.gitignore`, set the `metadata.json` backend to `http` and
-  migrated a legacy `config.json`, and `Connect` handshook with the server
-  first. They now return `*bdhttp.UnsupportedWorkspaceFormatError` (the type
-  `beads.UnsupportedWorkspaceFormatError` names) before writing anything, and
-  `Connect` before it dials; `bdhttp.SaveTarget`, which writes the sidecar
-  alone, refuses it the same way. `bd connect` in a linked git worktree with no
-  `.beads` of its own attaches the main checkout's `.beads`, and attached a
-  graph workspace there that only the marker or a legacy `config.json`
-  declares (refused without `--force`, it still migrated that `config.json`);
-  it now exits 16 there too, without dialing or writing. A workspace that a
-  graph build declares while `bd connect`'s handshake is in flight now gets
-  the same refusal, hint and exit 16 before `bd connect` writes anything
-  there, where `bd connect` wrote its `.gitignore` and then exited 1.
 - **`bd setup claude --remove` no longer leaves a blank-line hole.** Removing
   the beads section from `CLAUDE.md` (or, with the other setup recipes, from
   `AGENTS.md` or `GEMINI.md`) left the blank lines around it behind, three in

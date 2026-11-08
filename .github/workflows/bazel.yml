@@ -1251,7 +1251,7 @@ jobs:
     outputs:
       result: ${{ steps.result.outputs.result }}
     env:
-      PURE_CMD_BD_TESTS: '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir|NocgoFactoriesHonorSharedServer|NocgoNewDoltStoreFromConfig_ErrorSuggestsCorrectFlag|NocgoNewReadOnlyStoreFromConfig_ErrorSuggestsCorrectFlag|NocgoStoreFactoriesRefuseGraphWorkspace|StoreFactoriesRefuseUnsupportedBackendInLegacyConfig)'
+      PURE_CMD_BD_TESTS: '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir|NocgoFactoriesHonorSharedServer|NocgoNewDoltStoreFromConfig_ErrorSuggestsCorrectFlag|NocgoNewReadOnlyStoreFromConfig_ErrorSuggestsCorrectFlag|StoreFactoriesRefuseUnsupportedBackendInLegacyConfig)'
       # The only pre-merge run of these boundaries: where it executes
       # remotely --config=sole-run fails on a remote cache eviction instead
       # of re-running the whole invocation (whose retry could turn a failed
