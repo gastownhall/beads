@@ -371,14 +371,17 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	// still swallowed: this route has always rendered the page undecorated
 	// rather than failing on it, while the proxied route fails — a difference
 	// between the two CALLERS, recorded for the owner in AMBIGUITIES.md
-	// (A-blk-1) rather than converged here.
-	blocking := annotateListBlocking(ctx, activeStore, issueIDs)
-	// Batched by id set, never per row — see gatesByIssueID. --long and
-	// --format render no gate (GatedBy lives on types.IssueDetails, which a
-	// --format template cannot reach), so neither pays for the reads; agent
+	// (A-blk-1) rather than converged here. --long renders no blocking
+	// decoration, so it skips the read; agent and compact mode render it.
+	//
+	// Gates are batched by id set, never per row — see gatesByIssueID. --long
+	// and --format render no gate (GatedBy lives on types.IssueDetails, which
+	// a --format template cannot reach), so neither pays for the reads; agent
 	// and compact mode both spend them and both render them.
+	var blocking listBlocking
 	var gated map[string][]string
 	if ui.IsAgentMode() || !in.longFormat {
+		blocking = annotateListBlocking(ctx, activeStore, issueIDs)
 		gated = gatedIssueIDs(ctx, activeStore, issues, nil)
 	}
 

@@ -237,10 +237,13 @@ var showCmd = &cobra.Command{
 				fmt.Printf("\n%s\n%s\n", ui.RenderBold("ACCEPTANCE CRITERIA"), uimd.RenderMarkdown(issue.AcceptanceCriteria))
 			}
 
-			// Show labels
-			labels, _ := issueStore.GetLabels(ctx, issue.ID) // Best effort: show issue even if label fetch fails
-			if len(labels) > 0 {
-				fmt.Printf("\n%s %s\n", ui.RenderBold("LABELS:"), strings.Join(labels, ", "))
+			// The labels are the ones the issue read returned with the body,
+			// from the table that answered for it, so for an ID present in
+			// both issues and wisps they are the durable row's. They are as of
+			// that read: a label change committed between it and this render
+			// is not shown, as no field of the body is.
+			if len(issue.Labels) > 0 {
+				fmt.Printf("\n%s %s\n", ui.RenderBold("LABELS:"), strings.Join(issue.Labels, ", "))
 			}
 
 			// Show custom metadata (GH#1406)

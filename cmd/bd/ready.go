@@ -255,8 +255,6 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			maybeShowTip(store)
 			return nil
 		}
-		parentEpicMap := buildParentEpicMap(ctx, activeStore, issues)
-
 		usePlain := in.plainFormat || !in.prettyFormat
 		if usePlain {
 			fmt.Printf("\n%s Ready work (%d issues with no active blockers):\n\n", ui.RenderAccent("📋"), len(issues))
@@ -274,7 +272,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			}
 			fmt.Println()
 		} else {
-			displayReadyList(issues, parentEpicMap)
+			// Only this view prints the parent epic, so only it reads the
+			// parent edges and the parents.
+			displayReadyList(issues, buildParentEpicMap(ctx, activeStore, issues))
 		}
 
 		if truncated {

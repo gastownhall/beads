@@ -1094,6 +1094,7 @@ go_test(
         "orphans_embedded_test.go",
         "orphans_proxied_integration_test.go",
         "orphans_test.go",
+        "output_skipped_reads_test.go",
         "output_test.go",
         "pour_proxied_integration_test.go",
         "pour_unknown_vars_pipeline_test.go",
