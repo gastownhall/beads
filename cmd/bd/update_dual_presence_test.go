@@ -121,17 +121,52 @@ func TestCLI_UpdateDualPresenceRefuses(t *testing.T) {
 }
 
 // TestCLI_UpdateDualPresenceRepairThenUpdate is the recovery the refusal points
-// at: the existing server-mode doctor repair deletes the issues copy and keeps
-// the wisp copy, after which a notes update succeeds and is what show returns,
-// and --persistent leaves one durable row carrying it and no wisp row.
+// at: the update refuses first, then the existing server-mode doctor repair
+// deletes the issues copy and keeps the wisp copy, after which a notes update
+// succeeds and is what show returns, and --persistent leaves one durable row
+// carrying it and no wisp row.
 func TestCLI_UpdateDualPresenceRepairThenUpdate(t *testing.T) {
 	w := newDualPresenceCLI(t)
 	id := w.seedTwin()
 	rows := func(table string) string {
 		return w.must("sql", "--csv", fmt.Sprintf("SELECT title, notes FROM %s WHERE id = '%s'", table, id))
 	}
+	// value is the single cell a one-column query prints under its header.
+	value := func(query string) string {
+		t.Helper()
+		lines := strings.Split(strings.TrimSpace(w.must("sql", "--csv", query)), "\n")
+		if len(lines) != 2 {
+			t.Fatalf("bd sql %q printed %d lines, want a header and one row:\n%s", query, len(lines), strings.Join(lines, "\n"))
+		}
+		return strings.TrimSpace(lines[1])
+	}
+	requireCounts := func(step, issues, wisps string) {
+		t.Helper()
+		if got := value(fmt.Sprintf("SELECT COUNT(*) FROM issues WHERE id = '%s'", id)); got != issues {
+			t.Fatalf("%s: issues rows for %s = %s, want %s", step, id, got, issues)
+		}
+		if got := value(fmt.Sprintf("SELECT COUNT(*) FROM wisps WHERE id = '%s'", id)); got != wisps {
+			t.Fatalf("%s: wisps rows for %s = %s, want %s", step, id, got, wisps)
+		}
+	}
+	requireCounts("fixture", "1", "1")
 	if !strings.Contains(rows("issues"), "durable copy") || !strings.Contains(rows("wisps"), "wisp copy") {
 		t.Fatalf("fixture is not dual-present:\nissues %s\nwisps %s", rows("issues"), rows("wisps"))
+	}
+
+	// Before the repair the same update refuses, names the repair and
+	// writes nothing.
+	before := w.snapshot(id)
+	if stdout, stderr, err := w.run("update", id, "--notes", "probe", "--force"); err == nil {
+		t.Fatalf("bd update of dual-present %s exited 0 before the repair\nstdout:\n%s\nstderr:\n%s", id, stdout, stderr)
+	} else if !strings.Contains(stderr, id) || !strings.Contains(stderr, "bd doctor --check=validate --fix") {
+		t.Errorf("pre-repair refusal does not name %s and the repair:\n%s", id, stderr)
+	}
+	after := w.snapshot(id)
+	for i := range before {
+		if before[i] != after[i] {
+			t.Errorf("pre-repair refused update changed persisted state:\nbefore %s\nafter  %s", before[i], after[i])
+		}
 	}
 
 	// --yes stands in for the confirmation a terminal user gives. The fix
@@ -140,10 +175,11 @@ func TestCLI_UpdateDualPresenceRepairThenUpdate(t *testing.T) {
 	if stdout, stderr, err := w.run("doctor", "--check=validate", "--fix", "--yes"); err != nil {
 		t.Logf("bd doctor --check=validate --fix --yes: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 	}
-	if got := rows("issues"); strings.Contains(got, "durable copy") {
-		t.Fatalf("doctor repair kept the issues copy:\n%s", got)
+	requireCounts("after the repair", "0", "1")
+	if got := value(fmt.Sprintf("SELECT notes FROM wisps WHERE id = '%s'", id)); got != "wisp notes" {
+		t.Fatalf("doctor repair did not keep the wisp notes: got %q", got)
 	}
-	if got := rows("wisps"); !strings.Contains(got, "wisp copy") || !strings.Contains(got, "wisp notes") {
+	if got := rows("wisps"); !strings.Contains(got, "wisp copy") {
 		t.Fatalf("doctor repair did not keep the wisp copy:\n%s", got)
 	}
 
@@ -160,10 +196,8 @@ func TestCLI_UpdateDualPresenceRepairThenUpdate(t *testing.T) {
 	}
 
 	w.must("update", id, "--persistent")
-	if got := rows("wisps"); strings.Contains(got, "wisp copy") {
-		t.Errorf("--persistent left a wisp row:\n%s", got)
-	}
-	if got := w.must("sql", "--csv", fmt.Sprintf("SELECT COUNT(*) AS n, MAX(notes) AS notes FROM issues WHERE id = '%s'", id)); !strings.Contains(got, "1,probe") {
-		t.Errorf("--persistent issues rows = %s, want one row with notes probe", got)
+	requireCounts("after --persistent", "1", "0")
+	if got := value(fmt.Sprintf("SELECT notes FROM issues WHERE id = '%s'", id)); got != "probe" {
+		t.Errorf("after --persistent: durable notes = %q, want %q", got, "probe")
 	}
 }
