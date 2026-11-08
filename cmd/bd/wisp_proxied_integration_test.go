@@ -3,6 +3,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -98,6 +99,107 @@ func TestProxiedServerWispCreate(t *testing.T) {
 			t.Errorf("expected no wisps created by --dry-run, found %d", count)
 		}
 	})
+
+	t.Run("wisp_type_stamps_every_created_wisp", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "wcwt")
+		proto := bdProxiedCreate(t, bd, p.dir, "Typed wisp proto", "--type", "epic", "--label", "template")
+		step := bdProxiedCreate(t, bd, p.dir, "Typed wisp step", "--type", "task", "--parent", proto.ID)
+		db := openProxiedDB(t, p)
+
+		rootAndStep := []string{proto.ID, step.ID}
+		for _, c := range []struct {
+			name string
+			args []string
+			srcs []string
+			want string
+		}{
+			{"create patrol", []string{"mol", "wisp", "create", proto.ID, "--wisp-type", "patrol"}, rootAndStep, "patrol"},
+			{"bare heartbeat", []string{"mol", "wisp", proto.ID, "--wisp-type", "heartbeat"}, rootAndStep, "heartbeat"},
+			{"create root-only patrol", []string{"mol", "wisp", "create", proto.ID, "--root-only", "--wisp-type", "patrol"}, []string{proto.ID}, "patrol"},
+			{"create omitted", []string{"mol", "wisp", "create", proto.ID}, rootAndStep, ""},
+			{"create explicit empty", []string{"mol", "wisp", "create", proto.ID, "--wisp-type", ""}, rootAndStep, ""},
+		} {
+			idMapping := proxiedWispCreateMapping(t, bd, p.dir, c.srcs, append(c.args, "--json")...)
+			for _, src := range c.srcs {
+				id := idMapping[src]
+				if got := proxiedWispType(t, db, id); got != c.want {
+					t.Errorf("%s: wisp %s (from %s) wisp_type = %q, want %q", c.name, id, src, got, c.want)
+				}
+			}
+		}
+	})
+
+	t.Run("invalid_wisp_type_creates_nothing", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "wcwi")
+		proto := bdProxiedCreate(t, bd, p.dir, "Invalid type proto", "--type", "epic", "--label", "template")
+		bdProxiedCreate(t, bd, p.dir, "Invalid type step", "--type", "task", "--parent", proto.ID)
+		db := openProxiedDB(t, p)
+
+		for _, args := range [][]string{
+			{"mol", "wisp", "create", proto.ID, "--wisp-type", "bogus"},
+			{"mol", "wisp", "create", proto.ID, "--wisp-type", "bogus", "--dry-run"},
+			{"mol", "wisp", proto.ID, "--wisp-type", "default"},
+			{"mol", "wisp", proto.ID, "--wisp-type", "default", "--dry-run"},
+		} {
+			stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, args...)
+			if err == nil {
+				t.Errorf("bd %s: expected an error, got none\n%s", strings.Join(args, " "), stdout)
+			}
+			if !strings.Contains(stderr, "invalid wisp-type") {
+				t.Errorf("bd %s: stderr = %q, want the invalid wisp-type diagnostic", strings.Join(args, " "), stderr)
+			}
+			if strings.Contains(stdout, "Dry run") {
+				t.Errorf("bd %s: invalid --wisp-type produced a dry-run preview:\n%s", strings.Join(args, " "), stdout)
+			}
+			var count int
+			if err := db.QueryRow("SELECT COUNT(*) FROM wisps").Scan(&count); err != nil {
+				t.Fatalf("count wisps: %v", err)
+			}
+			if count != 0 {
+				t.Errorf("bd %s: invalid --wisp-type left %d wisps behind, want 0", strings.Join(args, " "), count)
+			}
+		}
+	})
+}
+
+// proxiedWispCreateMapping runs a wisp creation command with --json, checks
+// it created exactly one wisp for each of srcs (the proto issue IDs it should
+// clone), and returns its id_mapping (proto ID -> created wisp ID).
+func proxiedWispCreateMapping(t *testing.T, bd, dir string, srcs []string, args ...string) map[string]string {
+	t.Helper()
+	out, err := bdProxiedRun(t, bd, dir, args...)
+	if err != nil {
+		t.Fatalf("bd %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	var got struct {
+		Created   int               `json:"created"`
+		IDMapping map[string]string `json:"id_mapping"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, out)
+	}
+	if got.Created != len(srcs) || len(got.IDMapping) != len(srcs) {
+		t.Fatalf("bd %s: created = %d (%d mapped), want %d", strings.Join(args, " "), got.Created, len(got.IDMapping), len(srcs))
+	}
+	for _, src := range srcs {
+		if _, ok := got.IDMapping[src]; !ok {
+			t.Fatalf("bd %s: id_mapping has no entry for proto issue %s: %v", strings.Join(args, " "), src, got.IDMapping)
+		}
+	}
+	return got.IDMapping
+}
+
+// proxiedWispType reads wisps.wisp_type for id, failing when the row is
+// missing.
+func proxiedWispType(t *testing.T, db *sql.DB, id string) string {
+	t.Helper()
+	var wispType string
+	if err := db.QueryRow("SELECT COALESCE(wisp_type, '') FROM wisps WHERE id = ?", id).Scan(&wispType); err != nil {
+		t.Fatalf("read wisp_type for %s: %v", id, err)
+	}
+	return wispType
 }
 
 func TestProxiedServerWispList(t *testing.T) {
