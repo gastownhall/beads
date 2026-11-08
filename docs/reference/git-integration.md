@@ -48,6 +48,9 @@ commit, with its staged content untouched. Two boundaries are worth knowing:
 - When nothing under the artifact paths changed, init makes no commit and
   prints no success message; your staged work is left exactly as it was.
 
+In a Jujutsu workspace, init skips the auto-commit entirely (see
+[Branchless Workflows](#branchless-workflows-jujutsu--jj)).
+
 ## Git Hooks
 
 ### Installation
@@ -345,6 +348,11 @@ bd init --stealth        # Full invisible mode (also skips hooks + agents)
 **Colocated repos** (`jj git init --colocate`): Git hooks work normally.
 Beads installs simplified hooks (`pre-commit` and `post-merge` only, no
 staging logic).
+
+`bd init` makes no bootstrap commit in a Jujutsu workspace — a native Git
+commit would fork the jj commit graph and orphan the working-copy commit.
+The artifacts it generated stay in the working copy; record them yourself,
+for example with `jj commit -m "bd init: initialize beads issue tracking"`.
 
 **Pure jj repos** (no git): Since jj doesn't have native hooks yet, set up
 push aliases:

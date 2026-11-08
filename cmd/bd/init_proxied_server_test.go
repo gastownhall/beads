@@ -1142,3 +1142,35 @@ func TestProxiedInitTailCommitScopeNothingToCommit(t *testing.T) {
 	require.Equal(t, before, runGit(target, "rev-parse", "HEAD"), "nothing-to-commit bootstrap moved HEAD")
 	require.Equal(t, "work.txt", runGit(target, "diff", "--cached", "--name-only"))
 }
+
+// GH#5654: a colocated Jujutsu workspace keeps its own commit graph, so the
+// proxied bootstrap must not make a native Git commit in it: HEAD and the
+// staged entries stay untouched and a note (only when not quiet) says the
+// artifacts are left for jj to record.
+func TestProxiedInitTailCommitScopeJujutsu(t *testing.T) {
+	for _, quiet := range []bool{false, true} {
+		target, runGit := proxiedTailCommitFixture(t)
+		require.NoError(t, os.Mkdir(filepath.Join(target, ".jj"), 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(target, "seed.txt"), []byte("seed\n"), 0600))
+		runGit(target, "add", "seed.txt")
+		runGit(target, "-c", "core.hooksPath=", "commit", "-m", "seed")
+		require.NoError(t, os.WriteFile(filepath.Join(target, "work.txt"), []byte("unrelated work\n"), 0600))
+		runGit(target, "add", "work.txt")
+		require.NoError(t, os.Mkdir(filepath.Join(target, ".beads"), 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(target, ".beads", "artifact"), []byte("beads\n"), 0600))
+		before := runGit(target, "rev-parse", "HEAD")
+		stageBefore := runGit(target, "ls-files", "--stage")
+
+		stderr := runProxiedTailForCommitScope(t, target, quiet)
+
+		if quiet {
+			require.NotContains(t, stderr, "skipped bootstrap commit")
+			require.NotContains(t, stderr, "Jujutsu")
+		} else {
+			require.Contains(t, stderr, "skipped bootstrap commit")
+			require.Contains(t, stderr, "Jujutsu")
+		}
+		require.Equal(t, before, runGit(target, "rev-parse", "HEAD"), "Jujutsu skip still moved HEAD")
+		require.Equal(t, stageBefore, runGit(target, "ls-files", "--stage"), "Jujutsu skip changed the index")
+	}
+}
