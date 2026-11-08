@@ -333,18 +333,19 @@ func TestSchemaMigrationRejectsChangedPreExistingDirtyTable(t *testing.T) {
 }
 
 const (
-	schemaTrackedWispID      = "schema-tracked-wisp"
-	schemaTrackedWispTitle   = "live wisp title"
-	schemaTrackedCommentID   = "schema-tracked-wisp-comment"
-	schemaTrackedCommentText = "live wisp comment payload"
+	schemaTrackedWispID          = "schema-tracked-wisp"
+	schemaTrackedWispTitle       = "live wisp title"
+	schemaTrackedWispDescription = "live wisp description"
+	schemaTrackedCommentID       = "schema-tracked-wisp-comment"
+	schemaTrackedCommentText     = "live wisp comment payload"
 )
 
 // setupTrackedIgnoredDirtyStore is the server-mode twin of the embedded
 // gastownhall/beads#5816 fixture: wisps and wisp_comments are dolt-ignored
 // but tracked at HEAD, hold live uncommitted rows, and the ignored cursor sits
 // below ignored migration 0024, which touches wisp_comments. downgradeText
-// makes 0024 perform real DDL on replay; stageWisps leaves wisps staged.
-func setupTrackedIgnoredDirtyStore(t *testing.T, downgradeText, stageWisps bool) (*DoltStore, func()) {
+// makes 0024 perform real DDL on replay; stage leaves the named tables staged.
+func setupTrackedIgnoredDirtyStore(t *testing.T, downgradeText bool, stage ...string) (*DoltStore, func()) {
 	t.Helper()
 	store, cleanup := setupTestStore(t)
 
@@ -359,11 +360,11 @@ func setupTrackedIgnoredDirtyStore(t *testing.T, downgradeText, stageWisps bool)
 		"CALL DOLT_ADD('-f', 'wisps')",
 		"CALL DOLT_ADD('-f', 'wisp_comments')",
 		"CALL DOLT_COMMIT('-m', 'test: track wisp tables')",
-		"INSERT INTO wisps (id, title) VALUES ('"+schemaTrackedWispID+"', '"+schemaTrackedWispTitle+"')",
+		"INSERT INTO wisps (id, title, description) VALUES ('"+schemaTrackedWispID+"', '"+schemaTrackedWispTitle+"', '"+schemaTrackedWispDescription+"')",
 		"INSERT INTO wisp_comments (id, issue_id, author, text) VALUES ('"+schemaTrackedCommentID+"', '"+schemaTrackedWispID+"', 'agent', '"+schemaTrackedCommentText+"')",
 	)
-	if stageWisps {
-		queries = append(queries, "CALL DOLT_ADD('-f', 'wisps')")
+	for _, table := range stage {
+		queries = append(queries, "CALL DOLT_ADD('-f', '"+table+"')")
 	}
 	queries = append(queries, "DELETE FROM ignored_schema_migrations WHERE version >= 24")
 	for _, q := range queries {
@@ -410,6 +411,33 @@ func assertSchemaTrackedWispRowsAbsentAtHead(t *testing.T, ctx context.Context, 
 	}
 }
 
+// assertSchemaNoStagedTrackedWispTables fails when a wisp table delta is
+// still staged, where the next commit of any kind would publish it.
+func assertSchemaNoStagedTrackedWispTables(t *testing.T, ctx context.Context, store *DoltStore) {
+	t.Helper()
+	var staged int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_status WHERE staged = true AND table_name IN ('wisps', 'wisp_comments')",
+	).Scan(&staged); err != nil {
+		t.Fatalf("count staged wisp tables: %v", err)
+	}
+	if staged != 0 {
+		t.Fatalf("%d wisp table delta(s) still staged after migration, want 0", staged)
+	}
+}
+
+func schemaWispCommentsTextType(t *testing.T, ctx context.Context, store *DoltStore) string {
+	t.Helper()
+	var columnType string
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisp_comments' AND COLUMN_NAME = 'text'`,
+	).Scan(&columnType); err != nil {
+		t.Fatalf("read wisp_comments.text type: %v", err)
+	}
+	return columnType
+}
+
 func schemaIgnoredCursorVersion(t *testing.T, ctx context.Context, store *DoltStore) int {
 	t.Helper()
 	var version int
@@ -434,7 +462,7 @@ func TestSchemaIgnoredTrackedDirtyMigrationOpens(t *testing.T) {
 		{name: "0024 performs real DDL", downgradeText: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			store, cleanup := setupTrackedIgnoredDirtyStore(t, tc.downgradeText, false)
+			store, cleanup := setupTrackedIgnoredDirtyStore(t, tc.downgradeText)
 			defer cleanup()
 
 			ctx, cancel := testContext(t)
@@ -446,16 +474,60 @@ func TestSchemaIgnoredTrackedDirtyMigrationOpens(t *testing.T) {
 			if got, want := schemaIgnoredCursorVersion(t, ctx, store), schema.LatestIgnoredVersion(); got != want {
 				t.Fatalf("ignored cursor = %d, want %d", got, want)
 			}
-			var columnType string
-			if err := store.db.QueryRowContext(ctx, `
-				SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS
-				WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisp_comments' AND COLUMN_NAME = 'text'`,
-			).Scan(&columnType); err != nil {
-				t.Fatalf("read wisp_comments.text type: %v", err)
-			}
-			if columnType != "longtext" {
+			if columnType := schemaWispCommentsTextType(t, ctx, store); columnType != "longtext" {
 				t.Fatalf("wisp_comments.text = %q, want longtext after 0024", columnType)
 			}
+		})
+	}
+}
+
+func schemaTrackedWispRowSnapshot(t *testing.T, ctx context.Context, store *DoltStore) string {
+	t.Helper()
+	var wisp, comment string
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT CONCAT_WS('|', id, title, description, CAST(created_at AS CHAR)) FROM wisps WHERE id = ?", schemaTrackedWispID,
+	).Scan(&wisp); err != nil {
+		t.Fatalf("read wisp %s: %v", schemaTrackedWispID, err)
+	}
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT CONCAT_WS('|', id, issue_id, author, text, CAST(created_at AS CHAR)) FROM wisp_comments WHERE id = ?", schemaTrackedCommentID,
+	).Scan(&comment); err != nil {
+		t.Fatalf("read wisp comment %s: %v", schemaTrackedCommentID, err)
+	}
+	return wisp + "\n" + comment
+}
+
+// TestSchemaIgnoredTrackedDirtyMigrationPreservesRows is the server-mode twin
+// of TestEmbeddedIgnoredTrackedDirtyMigrationPreservesRows
+// (gastownhall/beads#5816 AC-2).
+func TestSchemaIgnoredTrackedDirtyMigrationPreservesRows(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stage []string
+	}{
+		{name: "unstaged"},
+		{name: "pre-staged wisps", stage: []string{"wisps"}},
+		{name: "pre-staged wisp_comments", stage: []string{"wisp_comments"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, cleanup := setupTrackedIgnoredDirtyStore(t, true, tc.stage...)
+			defer cleanup()
+
+			ctx, cancel := testContext(t)
+			defer cancel()
+
+			before := schemaTrackedWispRowSnapshot(t, ctx, store)
+			if _, err := rerunSchemaInitOnTestStore(ctx, store); err != nil {
+				t.Fatalf("schema init: %v", err)
+			}
+			if after := schemaTrackedWispRowSnapshot(t, ctx, store); after != before {
+				t.Fatalf("wisp rows after migration =\n%s\nwant unchanged\n%s", after, before)
+			}
+			if columnType := schemaWispCommentsTextType(t, ctx, store); columnType != "longtext" {
+				t.Fatalf("wisp_comments.text = %q, want longtext after 0024", columnType)
+			}
+			assertSchemaTrackedWispRowsAbsentAtHead(t, ctx, store)
+			assertSchemaNoStagedTrackedWispTables(t, ctx, store)
 		})
 	}
 }
