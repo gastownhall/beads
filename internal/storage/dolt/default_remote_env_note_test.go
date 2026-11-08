@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
 )
 
 // TestDefaultRemoteTransferFailureNamesServerEnvironment pins bd-f68dud
@@ -17,7 +19,8 @@ import (
 // from its own environment instead, and the remedy. The error stays usable:
 // its context is kept and the CLI's exit status is still reachable. A
 // failure before the transfer (fsck, or a SQL connection that never reached
-// the server) gets no note.
+// the server) gets no note, and neither does a CLI pull that transferred and
+// stopped on conflicts the resolver left for the operator.
 func TestDefaultRemoteTransferFailureNamesServerEnvironment(t *testing.T) {
 	const s3URL = "s3://bucket/beads"
 	const hosted = "https://doltremoteapi.dolthub.com/org/repo"
@@ -29,6 +32,7 @@ func TestDefaultRemoteTransferFailureNamesServerEnvironment(t *testing.T) {
 		env           map[string]string
 		o             envNoteOpts
 		refuse        []string
+		expect        func(sqlmock.Sqlmock)
 		run           func(context.Context, *DoltStore) error
 		wantContext   string
 		procedure     string
@@ -90,9 +94,20 @@ func TestDefaultRemoteTransferFailureNamesServerEnvironment(t *testing.T) {
 		},
 		{
 			name: "CLI cloud-auth pull", url: s3URL, env: aws, o: envNoteOpts{cli: true, readOnly: true},
-			refuse:      []string{"pull"},
+			refuse: []string{"pull"},
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery("FROM dolt_conflicts").WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}))
+			},
 			run:         func(ctx context.Context, s *DoltStore) error { return s.Pull(ctx) },
 			wantContext: "dolt pull failed", procedure: "DOLT_PULL", vars: "AWS_*",
+			wantExitError: true, wantCLICallIn: "pull origin main",
+		},
+		{
+			name: "CLI cloud-auth pull that stops on operator conflicts", url: s3URL, env: aws, o: envNoteOpts{cli: true},
+			refuse:        []string{"pull"},
+			expect:        expectDeclinedCLIPullConflicts,
+			run:           func(ctx context.Context, s *DoltStore) error { return s.Pull(ctx) },
+			wantContext:   "dolt pull failed",
 			wantExitError: true, wantCLICallIn: "pull origin main",
 		},
 	} {
@@ -103,7 +118,10 @@ func TestDefaultRemoteTransferFailureNamesServerEnvironment(t *testing.T) {
 			for k, v := range tc.env {
 				t.Setenv(k, v)
 			}
-			store, _ := envNoteStore(t, "origin", tc.url, tc.o)
+			store, mock := envNoteStore(t, "origin", tc.url, tc.o)
+			if tc.expect != nil {
+				tc.expect(mock)
+			}
 
 			err := tc.run(context.Background(), store)
 
@@ -125,4 +143,22 @@ func TestDefaultRemoteTransferFailureNamesServerEnvironment(t *testing.T) {
 			}
 		})
 	}
+}
+
+// expectDeclinedCLIPullConflicts serves a writable store's pull whose CLI
+// transfer left a conflict on roadmaps, a table the resolver never resolves:
+// nothing to commit before the pull, the resolver's session finds the
+// conflict and rolls back, and the conflict is still there for the operator.
+func expectDeclinedCLIPullConflicts(mock sqlmock.Sqlmock) {
+	roadmaps := func() *sqlmock.Rows {
+		return sqlmock.NewRows([]string{"table", "num_conflicts"}).AddRow("roadmaps", 3)
+	}
+	mock.ExpectQuery("FROM dolt_status").WillReturnRows(sqlmock.NewRows([]string{"table_name"}))
+	mock.ExpectExec("SET @@dolt_allow_commit_conflicts = 1").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectBegin()
+	mock.ExpectQuery("FROM dolt_conflicts").WillReturnRows(roadmaps()) // resolver pre-screen declines roadmaps
+	mock.ExpectQuery("FROM dolt_constraint_violations").WillReturnRows(sqlmock.NewRows([]string{"table"}))
+	mock.ExpectRollback()
+	mock.ExpectExec("SET @@dolt_allow_commit_conflicts = 0").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("FROM dolt_conflicts").WillReturnRows(roadmaps()) // still there after the rollback
 }

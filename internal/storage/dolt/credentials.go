@@ -892,7 +892,9 @@ func (s *DoltStore) shouldUseCLIForCloudAuthWithError(ctx context.Context, remot
 // DOLT_PUSH/PULL/FETCH statement, or the dolt CLI push/pull/fetch subprocess.
 // Failures before the transfer (routing, fsck, binary checks, CLI remote
 // setup) and after it (merge, recompute) are not marked, so only a transfer
-// failure gets the server-environment note (withServerEnvNote).
+// failure gets the server-environment note (withServerEnvNote). A CLI pull
+// that stopped in its merge on conflicts loses the mark once they are found
+// (cliPullOutcome).
 type remoteTransferError struct {
 	err   error
 	noted bool

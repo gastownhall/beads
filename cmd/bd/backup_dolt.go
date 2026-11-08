@@ -122,10 +122,17 @@ After adding, run 'bd backup sync' to push your data.`,
 	},
 }
 
-var backupSyncCmd = &cobra.Command{
-	Use:   "sync",
-	Short: "Push database to configured Dolt backup",
-	Long: `Sync the current beads database to the configured Dolt backup destination.
+var backupSyncCmd = newBackupSyncCommand()
+
+// newBackupSyncCommand builds `bd backup sync`. A test that runs the command
+// under a throwaway root builds its own: executing the registered command
+// there would re-parent it and merge that root's persistent flags into its
+// flag set, which the command-tree golden reads.
+func newBackupSyncCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "sync",
+		Short: "Push database to configured Dolt backup",
+		Long: `Sync the current beads database to the configured Dolt backup destination.
 
 This pushes the entire database state (all branches, full history) to the
 backup location configured with 'bd backup init'.
@@ -138,79 +145,80 @@ where the server starts and restart it (for a bd-managed server, 'bd dolt stop'
 then 'bd dolt start' from the shell that has them).
 
 Run 'bd backup init <path>' first to configure a destination.`,
-	SilenceUsage:  true,
-	SilenceErrors: true,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		CheckReadonly("backup sync")
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			CheckReadonly("backup sync")
 
-		evt := metrics.NewCommandEvent("backup-sync")
-		defer func() {
-			if c := metrics.Global(); c != nil {
-				c.CloseEventAndAdd(evt)
+			evt := metrics.NewCommandEvent("backup-sync")
+			defer func() {
+				if c := metrics.Global(); c != nil {
+					c.CloseEventAndAdd(evt)
+				}
+			}()
+
+			ctx := rootCtx
+			if usesProxiedServer() {
+				if err := requireLocalProxiedBackup("backup sync"); err != nil {
+					return err
+				}
 			}
-		}()
-
-		ctx := rootCtx
-		if usesProxiedServer() {
-			if err := requireLocalProxiedBackup("backup sync"); err != nil {
-				return err
+			release, err := acquireBackupLock(backupLockWait)
+			if err != nil {
+				if errors.Is(err, errBackupBusy) {
+					return HandleErrorRespectJSON("%v; retry when it completes", err)
+				}
+				return HandleErrorRespectJSON("%v", err)
 			}
-		}
-		release, err := acquireBackupLock(backupLockWait)
-		if err != nil {
-			if errors.Is(err, errBackupBusy) {
-				return HandleErrorRespectJSON("%v; retry when it completes", err)
+			defer release()
+
+			if usesProxiedServer() {
+				return runBackupSyncProxied(ctx)
 			}
-			return HandleErrorRespectJSON("%v", err)
-		}
-		defer release()
-
-		if usesProxiedServer() {
-			return runBackupSyncProxied(ctx)
-		}
-		if store == nil {
-			return fmt.Errorf("no store available")
-		}
-
-		bs, ok := storage.UnwrapStore(store).(storage.BackupStore)
-		if !ok {
-			return fmt.Errorf("storage backend does not support backup operations")
-		}
-
-		// First, commit any pending changes so they're included in the backup
-		if err := store.Commit(ctx, "bd: pre-backup commit"); err != nil && !isDoltNothingToCommit(err) {
-			fmt.Fprintf(os.Stderr, "Warning: failed to commit pending changes: %v\n", err)
-		}
-		commandDidExplicitDoltCommit = true
-
-		start := time.Now()
-
-		// Sync to the configured backup
-		if err := bs.BackupSync(ctx, defaultDoltBackupName); err != nil {
-			if strings.Contains(err.Error(), "no backup") ||
-				strings.Contains(err.Error(), "not found") {
-				return fmt.Errorf("no backup destination configured. Run 'bd backup init <path>' first")
+			if store == nil {
+				return fmt.Errorf("no store available")
 			}
-			return fmt.Errorf("backup sync failed: %w", err)
-		}
 
-		elapsed := time.Since(start)
+			bs, ok := storage.UnwrapStore(store).(storage.BackupStore)
+			if !ok {
+				return fmt.Errorf("storage backend does not support backup operations")
+			}
 
-		// Update backup state
-		if err := updateDoltBackupState(elapsed); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: backup synced but failed to update state: %v\n", err)
-		}
+			// First, commit any pending changes so they're included in the backup
+			if err := store.Commit(ctx, "bd: pre-backup commit"); err != nil && !isDoltNothingToCommit(err) {
+				fmt.Fprintf(os.Stderr, "Warning: failed to commit pending changes: %v\n", err)
+			}
+			commandDidExplicitDoltCommit = true
 
-		if jsonOutput {
-			return outputJSON(map[string]interface{}{
-				"synced":   true,
-				"duration": elapsed.String(),
-			})
-		}
+			start := time.Now()
 
-		fmt.Printf("Backup synced in %s\n", elapsed.Round(time.Millisecond))
-		return nil
-	},
+			// Sync to the configured backup
+			if err := bs.BackupSync(ctx, defaultDoltBackupName); err != nil {
+				if strings.Contains(err.Error(), "no backup") ||
+					strings.Contains(err.Error(), "not found") {
+					return fmt.Errorf("no backup destination configured. Run 'bd backup init <path>' first")
+				}
+				return fmt.Errorf("backup sync failed: %w", err)
+			}
+
+			elapsed := time.Since(start)
+
+			// Update backup state
+			if err := updateDoltBackupState(elapsed); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: backup synced but failed to update state: %v\n", err)
+			}
+
+			if jsonOutput {
+				return outputJSON(map[string]interface{}{
+					"synced":   true,
+					"duration": elapsed.String(),
+				})
+			}
+
+			fmt.Printf("Backup synced in %s\n", elapsed.Round(time.Millisecond))
+			return nil
+		},
+	}
 }
 
 // resolveDoltBackupURL converts a user-provided path or URL into a Dolt backup URL.

@@ -588,10 +588,13 @@ remotes are the source of truth for `bd dolt remote list`, `bd dolt push`, and
 `bd dolt pull`.
 
 For git-protocol remotes, credentialed external-server remotes, and cloud
-remotes whose credentials are only present in the current shell, `bd dolt push`
-and `bd dolt pull` automatically materialize a matching local CLI remote before
+remotes whose credential variables are set in your shell, `bd dolt push` and
+`bd dolt pull` automatically materialize a matching local CLI remote before
 using the `dolt` CLI transport. The CLI remote is a local transport mirror, not
-a separate configuration source.
+a separate configuration source. In server mode the `dolt` CLI still hands the
+transfer to the Dolt server, which reads credentials from its own environment,
+not your shell's; see
+[Auth works in the shell but sync fails in server mode](/multi-agent/bucket-federation#auth-works-in-the-shell-but-sync-fails-in-server-mode).
 
 If you are upgrading from an older beads version and previously added remotes
 with raw `dolt remote add`, re-register them with `bd dolt remote add <name>

@@ -1267,9 +1267,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   variables bd holds that the server reads instead, with the remedy: set them
   where the server starts and restart it (`bd dolt stop`, then `bd dolt start`,
   for a bd-managed server). The note carries no URL or values and is added only
-  when it applies. The server-mode troubleshooting docs and `bd backup sync`
-  help no longer claim the CLI route refreshes the server's credentials
-  (#5953, reported by @jonesmabea).
+  when it applies. The server-mode troubleshooting docs no longer claim the
+  CLI route refreshes the server's credentials, and the `bd backup sync`,
+  `bd dolt push` and `bd dolt pull` help now explains where the server reads
+  them (#5953, reported by @jonesmabea).
 
 - `bd config set`, `bd config unset`, `bd repo add` and `bd repo remove` now
   replace an existing `config.yaml` in one step (temp file in the same

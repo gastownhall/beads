@@ -2018,7 +2018,10 @@ bd dolt pull
     |
     | Requires a Dolt remote to be configured in the database directory.
     | For Hosted Dolt, set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD environment
-    | variables for authentication.
+    | variables for authentication. In server mode the pull runs in the Dolt server's
+    | process, which reads DOLT_REMOTE_PASSWORD and cloud credentials (AWS_*,
+    | GOOGLE_*, ...) from its own environment, not bd's: set them where the server
+    | starts and restart it.
     |
     | Name a remote to pull from it instead of the default: 'bd dolt pull <remote>'
     | or 'bd dolt pull --remote <remote>'. The remote must already exist (see
@@ -2045,7 +2048,10 @@ bd dolt push
     | consent: interactively, or via --yes; --no-adopt or BD_NO_REMOTE_ADOPT=1
     | disables adoption entirely.
     | For Hosted Dolt, set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD environment
-    | variables for authentication.
+    | variables for authentication. In server mode the push runs in the Dolt server's
+    | process, which reads DOLT_REMOTE_PASSWORD and cloud credentials (AWS_*,
+    | GOOGLE_*, ...) from its own environment, not bd's: set them where the server
+    | starts and restart it.
     |
     | Use --force to overwrite remote changes (e.g., when the remote has
     | uncommitted changes in its working set).

@@ -5838,7 +5838,7 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 		// CLI pull leaves any conflicts in the working set; run the auto-resolver so
 		// git-protocol remotes get the same audit-only dependency / metadata repair
 		// as the SQL DOLT_PULL path (#4259).
-		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
+		return pullReport{}, s.cliPullOutcome(ctx, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds)))
 	}
 	// Credential CLI routing: mirrors git-protocol path, including post-pull
 	// auto-resolution.
@@ -5847,7 +5847,7 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 	} else if useCLI {
 		logRouteDecision("pull", remote, true)
 		sent = creds
-		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
+		return pullReport{}, s.cliPullOutcome(ctx, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds)))
 	}
 	// Cloud auth CLI routing (GH#6), including post-pull auto-resolution.
 	if useCLI, err := s.prepareCLIRouteForCloudAuth(ctx, remote); err != nil {
@@ -5855,7 +5855,7 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 	} else if useCLI {
 		logRouteDecision("pull", remote, true)
 		sent = creds
-		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
+		return pullReport{}, s.cliPullOutcome(ctx, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds)))
 	}
 	// Local file:// pulls intentionally stay on the SQL path. The matching CLI
 	// guard is a push-only optimization; SQL pull keeps pullWithAutoResolve in
@@ -6310,6 +6310,25 @@ func (s *DoltStore) finishCLIPull(ctx context.Context, pullErr error) error {
 		return pullErr
 	}
 	return nil
+}
+
+// cliPullOutcome passes on what finishCLIPull returned for a CLI pull from one
+// of this store's remotes (a federation pull returns its conflicts as data
+// instead: peerPullOutcome). A failed pull that left conflicts in the working
+// set for the operator did transfer and stopped in its merge, so its error
+// loses the transfer mark and gets no server-environment note
+// (withServerEnvNote), as the SQL route's MergeConflictsError gets none. The
+// mark is on the error itself, where cliTransferError put it; the text and the
+// rest of the chain are kept.
+func (s *DoltStore) cliPullOutcome(ctx context.Context, pullErr error) error {
+	transfer, ok := pullErr.(*remoteTransferError)
+	if !ok {
+		return pullErr
+	}
+	if conflicts, err := s.GetConflicts(ctx); err == nil && len(conflicts) > 0 {
+		return transfer.err
+	}
+	return pullErr
 }
 
 // autoResolveConflictsAfterCLIPull inspects the working set and auto-resolves the

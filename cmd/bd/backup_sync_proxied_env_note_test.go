@@ -189,7 +189,9 @@ func TestBackupSyncCommandFailureNamesServerEnvironment(t *testing.T) {
 		root := &cobra.Command{Use: "bd"}
 		root.PersistentFlags().BoolVar(&jsonOutput, "json", false, "output JSON")
 		backup := &cobra.Command{Use: "backup"}
-		backup.AddCommand(backupSyncCmd)
+		// A fresh command, so the registered backupSyncCmd keeps its parent
+		// and flag set (see newBackupSyncCommand).
+		backup.AddCommand(newBackupSyncCommand())
 		root.AddCommand(backup)
 		root.SetArgs(append([]string{"backup", "sync"}, args...))
 		return executeBackupStatusCommand(t, root)
