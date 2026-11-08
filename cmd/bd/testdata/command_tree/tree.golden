@@ -4328,7 +4328,7 @@ bd link
     |   bd link bd-123 bd-456                    # bd-456 blocks bd-123
     |   bd link bd-123 bd-456 --type related     # bd-123 related to bd-456
     |   bd link bd-123 bd-456 --type parent-child
-  flag --type -t type=string default="blocks" usage="Dependency type (blocks|tracks|related|parent-child|discovered-from)"
+  flag --type -t type=string default="blocks" usage="Dependency type: one of approved-by, assigned-to, attests, authored-by, blocked-by, blocks, caused-by, conditional-blocks, delegated-from, depends-on, discovered-from, duplicates, parent-child, related, relates-to, replies-to, supersedes, tracks, until, validates, waits-for (blocked-by and depends-on are stored as blocks), or any custom type of at most 32 characters, stored as given; a custom type does not gate ready work"
 
 bd lint
   use: "lint [issue-id...]"

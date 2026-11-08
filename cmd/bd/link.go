@@ -134,7 +134,11 @@ func linkDependencyType(raw string) (types.DependencyType, error) {
 }
 
 func init() {
-	linkCmd.Flags().StringP("type", "t", "blocks", "Dependency type (blocks|tracks|related|parent-child|discovered-from)")
+	// The list is the one validateDependencyType checks for `bd dep add`, so
+	// the help cannot drift from the types bd knows.
+	linkCmd.Flags().StringP("type", "t", "blocks", fmt.Sprintf(
+		"Dependency type: one of %s (blocked-by and depends-on are stored as blocks), or any custom type of at most %d characters, stored as given; a custom type does not gate ready work",
+		createDepsAcceptedTypeList(), types.MaxDependencyTypeLen))
 	linkCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(linkCmd)
 }
