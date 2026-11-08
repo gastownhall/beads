@@ -207,8 +207,20 @@ working table that is never committed. Dolt refuses to merge a commit that
 still has the versioned table into a clone that holds the ignored one, and it
 refuses before it checks whether there is anything to merge. So the first
 error also appears when the remote is only behind this clone, still at a
-commit from before this clone migrated, with no new work in it. `bd sync`
-then fails on every run, because it pulls before it pushes.
+commit from before this clone migrated, with no new work in it.
+
+**What bd does with this refusal ([#6368](https://github.com/gastownhall/beads/issues/6368)):**
+bd recognizes the `stomped` error on the ignored table. When the remote is
+only behind, `bd dolt pull` and `bd sync` recognize there is nothing to
+merge and succeed, so the sync's own push advances the remote and clears
+the wedge for every replica — that shape needs no operator anymore. When the
+remote carries history this clone does not have, the refusal is real
+operator work: `bd sync` halts with exit 4 (`dirty-stuck`), names the
+protected table(s) in the halt message and under
+`ignored_tables_on_remote` in `--json`, and points here. A bd release
+without the fix reports the same halt as a generic exit 1 on every run
+(because sync pulls before it pushes) — upgrade to a fixed release and the
+behind-remote shape self-heals on the next `bd sync`.
 
 When the remote does have new work from a peer that has not migrated (or
 whose history predates the migration, such as unpushed work on a laptop), that

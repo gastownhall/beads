@@ -36,9 +36,12 @@ import (
 //	3  retries exhausted on a transient, self-healing condition (another replica
 //	   kept winning the push race, or a concurrent writer kept the working set
 //	   dirty); retry on the next tick.
-//	4  the dirty working set blocking the is_blocked repair is NOT transient: the
-//	   same pending graph edits have blocked every tick for a while and nothing
-//	   is advancing. Retrying will never publish; an operator must resolve it.
+//	4  operator-only work, nothing pushed: either the dirty working set blocking
+//	   the is_blocked repair is NOT transient (the same pending graph edits have
+//	   blocked every tick for a while, or constraint violations no writer will
+//	   commit are holding it dirty), or the pull was refused to protect ignored
+//	   working table(s) the remote still tracks (GH#6368). Retrying will never
+//	   publish; an operator must resolve it.
 const (
 	ExitSyncConflict         = 2
 	ExitSyncRetriesExhausted = 3
@@ -705,11 +708,15 @@ The repair in step 3 refuses to run while another writer has uncommitted changes
 to issues/dependencies. That is transient and not this sync's doing, so it is
 retried on the same budget as a push race rather than failing the run. A working
 set that is NOT transient exits 4 instead, because no amount of retrying will
-ever publish and only an operator can clear it. Two kinds of evidence say so:
-constraint violations on the dirty tables are detected positively and escalate
-on the very attempt that finds them; an abandoned uncommitted edit has no such
-positive signal, so it is only inferred once the same pending graph edits have
-blocked every attempt of several consecutive runs.
+ever publish and only an operator can clear it. Three kinds of evidence say
+so: constraint violations on the dirty tables are detected positively and
+escalate on the very attempt that finds them; a pull refused to protect ignored
+working table(s) the remote still tracks (a table this clone keeps on Dolt's
+ignore plane while the remote's history has it versioned) is detected
+positively from the engine's own refusal, which names the tables; and an
+abandoned uncommitted edit has no positive signal, so it is only inferred once
+the same pending graph edits have blocked every attempt of several consecutive
+runs.
 
 Conflicts sync cannot resolve safely are NEVER auto-resolved: it halts before
 recomputing or pushing and exits 2, and repeated runs keep halting the same way
@@ -726,9 +733,12 @@ Exit codes (a sync timer can branch on these without parsing output):
   2  merge conflict — halted, nothing pushed, resolve it by hand
   3  retries exhausted (push race, or a concurrent writer's dirty working set)
      — transient, nothing pushed, retry on the next tick
-  4  the dirty working set is stuck, not busy: identical pending graph edits
-     blocked every attempt of several consecutive runs — nothing pushed, and no
-     later tick will publish until an operator clears it
+  4  operator-only work, nothing pushed: identical pending graph edits blocked
+     every attempt of several consecutive runs, constraint violations no writer
+     will commit are holding the repair dirty, or the pull was refused to protect
+     ignored working table(s) the remote still tracks (their names are in the
+     halt message and under ignored_tables_on_remote in --json) — no later tick
+     will publish until an operator clears it
 
 On the default-remote path, a rig with no Dolt remote yet but a git origin
 configured adopts that origin as its Dolt remote first, exactly as 'bd dolt push'

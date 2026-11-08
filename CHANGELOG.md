@@ -1226,6 +1226,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A pull refused to protect an ignored table the remote still tracks is no
+  longer a generic failure ([#6368](https://github.com/gastownhall/beads/issues/6368)).
+  After migration 0062 moved the `events` audit table onto Dolt's ignore
+  plane, a clone with local `events` rows pulling from a remote whose history
+  still tracks the versioned table got "local changes would be stomped by
+  merge: events" on every pull — including when the remote was only behind
+  and the pull had nothing to merge, because the engine checks for stomped
+  working tables before it compares histories. `bd sync` died as a generic
+  exit 1 on every tick. bd now recognizes the refusal: a remote that is
+  already contained in this clone is treated as the no-op pull it is (the
+  pull succeeds, and the sync's own push clears the wedge for every
+  replica), and a remote that genuinely diverged halts `bd sync` as
+  dirty-stuck (exit 4) naming the protected table(s) — in the halt message
+  and under `ignored_tables_on_remote` in `--json` — with the recovery
+  runbook in `docs/recovery/sync-failures.md`. Plain `bd dolt push` (never
+  `--force`) is the remedy when this clone is at or ahead of the remote.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

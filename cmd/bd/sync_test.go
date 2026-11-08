@@ -2357,3 +2357,18 @@ func TestSyncStuckMessageIgnoredTables(t *testing.T) {
 		t.Errorf("ignored-tables halt claims another cause's evidence:\n%s", got)
 	}
 }
+
+// The command help must keep documenting the ignored-table halt under exit 4
+// (GH#6368): it is what an operator reads when a timer pages on the exit
+// code, and the help golden only pins that the text changed, not that it
+// stayed meaningful.
+func TestSyncHelpDocumentsIgnoredTablesExit(t *testing.T) {
+	for _, want := range []string{
+		"ignored working table(s) the remote still tracks",
+		"ignored_tables_on_remote",
+	} {
+		if !strings.Contains(syncCmd.Long, want) {
+			t.Errorf("`bd sync --help` does not document %q", want)
+		}
+	}
+}
