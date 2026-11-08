@@ -139,8 +139,19 @@ func resolveLinkDependencyType(raw string) (types.DependencyType, error) {
 	return dt, nil
 }
 
+// linkTypeFlagHelp renders bd link's --type usage from the accepted-type
+// list the shared validators check (createDepsAcceptedTypeList: the
+// well-known types plus the depends-on/blocked-by aliases), so the help
+// cannot drift from the code again. Link also takes custom types; the help
+// says what they do and do not buy.
+func linkTypeFlagHelp() string {
+	return fmt.Sprintf(
+		"Dependency type (%s). Custom types are accepted too (non-empty, max %d chars); they are stored as-is and do not gate ready work",
+		createDepsAcceptedTypeList(), types.MaxDependencyTypeLen)
+}
+
 func init() {
-	linkCmd.Flags().StringP("type", "t", "blocks", "Dependency type (blocks|tracks|related|parent-child|discovered-from)")
+	linkCmd.Flags().StringP("type", "t", "blocks", linkTypeFlagHelp())
 	linkCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(linkCmd)
 }

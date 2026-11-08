@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -71,4 +72,34 @@ func TestLinkDependencyType(t *testing.T) {
 			t.Errorf("resolveLinkDependencyType(\"\") err = %v, want the invalid-type refusal", err)
 		}
 	})
+}
+
+// TestLinkTypeFlagHelp pins bd link's --type usage: derived from the shared
+// accepted-type list (createDepsAcceptedTypeList — the well-known types and
+// both aliases), plus the custom-type allowance with its length limit and
+// the non-gating caveat. The old hardcoded list named five types and neither
+// alias, and could drift from what the validators accept (bd-3073gm).
+func TestLinkTypeFlagHelp(t *testing.T) {
+	flag := linkCmd.Flags().Lookup("type")
+	if flag == nil {
+		t.Fatal("bd link has no --type flag")
+	}
+	usage := flag.Usage
+
+	for _, depType := range strings.Split(createDepsAcceptedTypeList(), ", ") {
+		if !strings.Contains(usage, depType) {
+			t.Errorf("bd link --type usage is missing %q (from createDepsAcceptedTypeList): %s", depType, usage)
+		}
+	}
+	for _, want := range []string{
+		"blocked-by",
+		"depends-on",
+		"Custom types",
+		strconv.Itoa(types.MaxDependencyTypeLen),
+		"do not gate ready work",
+	} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("bd link --type usage is missing %q: %s", want, usage)
+		}
+	}
 }
