@@ -587,6 +587,11 @@ func CheckFederationSyncStaleness(path string) DoctorCheck {
 	for _, remote := range remotes {
 		if remote.Name == originRemote {
 			origin = readOriginSyncFacts(beadsDir)
+			status, err := store.SyncStatus(ctx, originRemote)
+			origin.statusErr = err
+			if status != nil {
+				origin.ahead, origin.behind = status.LocalAhead, status.LocalBehind
+			}
 			continue
 		}
 
@@ -614,11 +619,15 @@ func CheckFederationSyncStaleness(path string) DoctorCheck {
 const originRemote = "origin"
 
 // originSyncFacts is what Sync Staleness knows about origin without a network
-// call: the local push history in push-state.json (GH#6289).
+// call: the local push history in push-state.json and a comparison of local
+// history with the cached origin ref, which is only as fresh as the last
+// pull, push or sync (GH#6289).
 type originSyncFacts struct {
-	checked  bool             // origin is configured, so its leg ran
-	state    *pushstate.State // push-state.json; nil when there is none
-	stateErr error            // push-state.json exists but cannot be read or parsed
+	checked       bool             // origin is configured, so its leg ran
+	state         *pushstate.State // push-state.json; nil when there is none
+	stateErr      error            // push-state.json exists but cannot be read or parsed
+	ahead, behind int              // commits only local / only in the cached ref; -1 when there is no ref
+	statusErr     error            // the comparison itself failed
 }
 
 // readOriginSyncFacts loads origin's local push history from beadsDir.
@@ -663,6 +672,29 @@ func originFindings(o originSyncFacts) (message string, details, fixes []string)
 			fmt.Sprintf("origin: the last push attempt (%s) failed: %s", when, o.state.LastError),
 			"Retry with 'bd dolt push' or 'bd sync'; a successful push to origin clears this warning")
 	}
+	const refreshFix = "Run 'bd dolt pull' to refresh the cached origin ref, then re-run 'bd doctor'"
+	switch {
+	case o.statusErr != nil:
+		add("Comparison with cached origin refs unavailable",
+			fmt.Sprintf("origin: cannot compare local history with the cached origin ref: %v", o.statusErr),
+			refreshFix)
+	case o.ahead < 0 || o.behind < 0:
+		add("Comparison with cached origin refs unavailable",
+			"origin: no cached origin ref to compare local history with (this clone has not pulled from or pushed to origin)",
+			refreshFix)
+	case o.ahead > 0 && o.behind > 0:
+		add("Local history diverged from cached origin refs",
+			fmt.Sprintf("origin: %d local commits are not in the cached origin ref, which has %d commits not in local history", o.ahead, o.behind),
+			"Run 'bd dolt pull', then 'bd dolt push'")
+	case o.ahead > 0:
+		add("Local history ahead of cached origin refs",
+			fmt.Sprintf("origin: %d local commits are not in the cached origin ref", o.ahead),
+			"Run 'bd dolt push'; if a push already ran, check its output and retry")
+	case o.behind > 0:
+		add("Local history behind cached origin refs",
+			fmt.Sprintf("origin: the cached origin ref has %d commits not in local history", o.behind),
+			"Run 'bd dolt pull'")
+	}
 	return message, details, fixes
 }
 
@@ -681,6 +713,17 @@ func syncStalenessResult(origin originSyncFacts, peers peerStaleness) DoctorChec
 		fixes = append(fixes, "Run 'bd federation sync' to synchronize with peers")
 	}
 
+	if message == "" && origin.checked {
+		return DoctorCheck{
+			Name:    "Sync Staleness",
+			Status:  StatusOK,
+			Message: "No local sync staleness detected",
+			Detail: fmt.Sprintf("Local history matches the cached origin ref and .beads/%s records no failed push. "+
+				"No network call was made: the cached ref is as fresh as the last pull, push or sync, "+
+				"so this does not prove what origin holds now.", pushstate.FileName),
+			Category: CategoryFederation,
+		}
+	}
 	if message == "" {
 		return DoctorCheck{
 			Name:     "Sync Staleness",
