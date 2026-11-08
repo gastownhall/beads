@@ -1226,6 +1226,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd update` refuses an ID that has a row in both the issues and the wisps
+  table (GH#5991). Reads return the issues copy, but the update wrote the
+  wisp copy and exited 0, so the change never appeared in `bd show`. The
+  update now exits nonzero, writes nothing, and names the ID, both tables and
+  the server-mode repair, `bd doctor --check=validate --fix`, which deletes
+  the issues copy and keeps the wisp copy without merging them. The same
+  typed refusal (`issueops.ErrDualPresence`, `*issueops.DualPresenceError`)
+  comes from every update path: the Lifecycle role, the legacy map update,
+  the unit-of-work update and the persistence move. Close and reopen are
+  unchanged.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

@@ -93,6 +93,12 @@ Updates are applied per issue ID, not atomically across IDs: when some IDs
 fail, the remaining issues are still updated, every failed ID is reported on
 stderr, and the command exits nonzero.
 
+An ID with a row in both the issues and the wisps table is refused and
+nothing is written: reads return the issues copy, so an update could change
+a copy no reader sees. In a server-mode workspace, ` + "`bd doctor --check=validate --fix`" + `
+repairs every such ID by deleting its issues copy and keeping the wisp copy,
+without merging the two.
+
 Exit codes: 1 for general failures; 13 when every failure is a stale
 --if-assignee/--if-status guard (the precondition no longer held, nothing was
 written — another actor won the race, so retrying the same guard is
