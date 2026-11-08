@@ -165,10 +165,9 @@ var constructionExemptions = map[string]string{
 	// handlers are not here — StaleClosedIssues and PatrolPollution (which
 	// DELETE issues) and the two fresh-clone import paths (which CREATE them)
 	// open through openBeadMutatingStore and journal like any other mutation.
-	"doctor/fix/metadata.go:FixMissingMetadata":            "writes bd_version / repo_id / clone_id workspace metadata, never a bead",
-	"doctor/fix/metadata.go:FixProjectIdentity":            "writes the workspace's _project_id, never a bead",
-	"doctor/fix/repo_fingerprint.go:RepoFingerprint":       "rewrites the workspace repo_id fingerprint, never a bead",
-	"doctor/fix/repo_fingerprint.go:updateRepoIDInProcess": "rewrites the workspace repo_id fingerprint in-process, never a bead",
+	"doctor/fix/metadata.go:FixMissingMetadata":                  "writes bd_version / repo_id / clone_id workspace metadata, never a bead",
+	"doctor/fix/metadata.go:FixProjectIdentity":                  "writes the workspace's _project_id, never a bead",
+	"doctor/fix/repo_fingerprint.go:var newRepoFingerprintStore": "opens the store the repo-id update rewrites the workspace repo_id fingerprint through, never a bead",
 
 	// The root pre-run probes the backend registry to choose WHICH factory to
 	// call; the construction itself is delegated to newRegisteredBackendStore,
