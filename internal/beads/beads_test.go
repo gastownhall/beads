@@ -2944,6 +2944,18 @@ func writeBeadsProjectFixture(t *testing.T, dir string, withDB bool) {
 	}
 }
 
+// writeRootRedirect points the .beads directory dir's redirect file at
+// target via an absolute path.
+func writeRootRedirect(t *testing.T, dir, target string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, RedirectFileName), []byte(target+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestFindBeadsDirFromWorktreeRootMatchesCwdDiscovery pins the path-based
 // resolver's linked-worktree behavior (GH#7782): once the ancestor walk has
 // processed the worktree's own root, a usable shared .beads (git-common-dir)
@@ -2994,6 +3006,11 @@ func TestFindBeadsDirFromWorktreeRootMatchesCwdDiscovery(t *testing.T) {
 				// shared store wins over the ancestor, but cwd parity is not
 				// asserted for invalid redirects.
 				{name: "invalid root redirect", shared: "db", root: "redirect_invalid", ancestorDB: true, want: "shared"},
+				// A valid root redirect is the worktree's explicit workspace
+				// choice and wins over the shared store, even when its target
+				// holds only server-mode metadata with no local database.
+				{name: "root redirect to independent metadata project", shared: "db", root: "redirect_independent", ancestorDB: true, want: "redirect", parity: true},
+				{name: "root redirect to ancestor metadata project", shared: "db", root: "redirect_ancestor", want: "ancestor", parity: true},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					var sharedRoot, worktree string
@@ -3022,6 +3039,11 @@ func TestFindBeadsDirFromWorktreeRootMatchesCwdDiscovery(t *testing.T) {
 						writeBeadsProjectFixture(t, rootBeads, false)
 					case "db":
 						writeBeadsProjectFixture(t, rootBeads, true)
+					case "redirect_independent":
+						writeBeadsProjectFixture(t, independent, false)
+						writeRootRedirect(t, rootBeads, independent)
+					case "redirect_ancestor":
+						writeRootRedirect(t, rootBeads, ancestor)
 					case "redirect_invalid":
 						if err := os.MkdirAll(rootBeads, 0o755); err != nil {
 							t.Fatal(err)

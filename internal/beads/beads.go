@@ -671,7 +671,8 @@ func FindDatabasePath() string {
 // path-based behavior). For a linked Git worktree, once the walk has
 // processed the worktree's own root, a usable shared .beads (via
 // git-common-dir) is preferred over ancestors outside the worktree's
-// repository (GH#7782), matching FindBeadsDir's worktree fallback order.
+// repository (GH#7782), matching FindBeadsDir's worktree fallback order;
+// a valid redirect at the worktree root still wins over the shared store.
 func FindBeadsDirFrom(startDir string) string {
 	if startDir == "" {
 		return ""
@@ -731,7 +732,15 @@ func FindBeadsDirFrom(startDir string) string {
 		isJJSecondaryRoot := jjSecondaryRoot != "" && utils.PathsEqual(dir, jjSecondaryRoot)
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			resolved := FollowRedirect(beadsDir)
-			if isWorktreeRoot && fallbackHasDB && !hasBeadsDatabase(resolved) {
+			redirectFollowed := !utils.PathsEqual(resolved, beadsDir)
+			if isWorktreeRoot && redirectFollowed && hasBeadsProjectFiles(resolved) {
+				// A valid redirect at the worktree root is its explicit
+				// workspace choice and wins over the shared store, even when
+				// the target holds project files but no local database
+				// (server-mode metadata), matching FindBeadsDir's step 3a.
+				// FollowRedirect has already validated the target.
+				return resolved
+			} else if isWorktreeRoot && fallbackHasDB && !hasBeadsDatabase(resolved) {
 				// A worktree root can contain tracked .beads metadata without
 				// owning the ignored database directory. Match FindBeadsDir by
 				// preferring the shared worktree database in that case.

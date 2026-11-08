@@ -17,8 +17,10 @@ directory instead of changing into it — resolves that directory's own
 workspace: from inside a linked worktree, discovery prefers the repository's
 shared `.beads` (located via `git-common-dir`) once it has processed the
 worktree's own root, instead of climbing into a parent folder's unrelated
-`.beads` project (GH#7782). Path-based discovery does not consult `BEADS_DIR`;
-that variable applies to discovery from the working directory.
+`.beads` project (GH#7782). A `.beads/redirect` at the worktree root still
+wins over the shared store, including when its target holds server-mode
+metadata without a local database. Path-based discovery does not consult
+`BEADS_DIR`; that variable applies to discovery from the working directory.
 
 Startup *config* discovery — the `rev-parse` probe in `internal/config`'s
 `gitDirsForRepo`, which locates a linked worktree's shared `.beads` config —
