@@ -5620,6 +5620,12 @@ func (s *DoltStore) settleIgnoredTableStomp(ctx context.Context, remote string, 
 	if err := checkoutBranchIfNeeded(ctx, conn, s.branch); err != nil {
 		return pullErr
 	}
+	// Confirm the pin took: evidence read on any other branch says nothing
+	// about the branch this pull merged into.
+	var active string
+	if err := conn.QueryRowContext(ctx, "SELECT active_branch()").Scan(&active); err != nil || active != s.branch {
+		return pullErr
+	}
 	if refreshErr == nil {
 		if noop, err := versioncontrolops.ProveMergeNoop(ctx, conn, remote+"/"+s.branch); err == nil && noop {
 			return nil

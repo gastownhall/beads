@@ -5,12 +5,15 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/doltversion"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
@@ -278,6 +281,165 @@ func TestPullIgnoredTableCLI(t *testing.T) {
 		before := readIgnoredTableState(t, ctx, store)
 
 		assertIgnoredTablesMergeError(t, store.finishPull(ctx, "origin", before.head, cliStompPullError(t, ctx, store)))
+		assertIgnoredTableStateIntact(t, ctx, store, before)
+	})
+}
+
+// ignoredTableRemoteURL reads the URL the fixture registered for origin.
+func ignoredTableRemoteURL(t *testing.T, ctx context.Context, store *DoltStore) string {
+	t.Helper()
+	var url string
+	if err := store.db.QueryRowContext(ctx, "SELECT url FROM dolt_remotes WHERE name = 'origin'").Scan(&url); err != nil {
+		t.Fatalf("read origin url: %v", err)
+	}
+	return url
+}
+
+// fakeStompingDoltOnPath puts a dolt on PATH that answers the version floor
+// and the remote listing the CLI routes read, records every other call, and
+// answers `dolt pull` with the engine's stomped-tables diagnostic for the
+// fixture's scratch table and exit 1: the failure a git-protocol or
+// credentialed remote's subprocess reports for GH#6368, deterministically and
+// without a reachable remote of that kind. It returns the call log's path.
+func fakeStompingDoltOnPath(t *testing.T, remoteURL string) string {
+	t.Helper()
+	binDir := t.TempDir()
+	calls := filepath.Join(binDir, "calls.log")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = version ]; then echo 'dolt version " + doltversion.RequiredMin.String() + "'; exit 0; fi\n" +
+		"if [ \"$1 $2\" = 'remote -v' ]; then echo 'origin " + remoteURL + "'; exit 0; fi\n" +
+		"echo \"$@\" >> '" + calls + "'\n" +
+		"if [ \"$1\" = pull ]; then printf 'error: local changes would be stomped by merge:\\n\\t" + ignoredScratchTable + "\\n Please commit your changes before you merge.\\n'; exit 1; fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(script), 0o755); err != nil { // #nosec G306 -- test fixture must be executable
+		t.Fatalf("write the fake dolt: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return calls
+}
+
+// standInCLIRemoteDir makes store's CLIDir count as the served database its
+// CLI routes may run the dolt binary in (hasCLIDatabase): a .dolt directory
+// whose repo_state.json records the same origin the server sees, and the
+// stand-in for the proof a live server on the dialed port serves it, the
+// established pattern (standInForServedDatabase), since the suite's own server
+// serves a data directory of its own.
+func standInCLIRemoteDir(t *testing.T, store *DoltStore, remoteURL string) {
+	t.Helper()
+	clearServerPortEnv(t)
+	cliDir := store.CLIDir()
+	standInForServedDatabase(t, cliDir, store.cfg.ServerPort)
+	if err := os.MkdirAll(filepath.Join(cliDir, ".dolt"), 0o755); err != nil {
+		t.Fatalf("create the CLI database dir: %v", err)
+	}
+	state := fmt.Sprintf(`{"remotes":{"origin":{"name":"origin","url":%q}}}`, remoteURL)
+	if err := os.WriteFile(filepath.Join(cliDir, ".dolt", "repo_state.json"), []byte(state), 0o600); err != nil {
+		t.Fatalf("record the origin remote in the CLI database dir: %v", err)
+	}
+}
+
+// TestPullIgnoredTableCLIRoute runs the contained case through the real
+// store.Pull on the CLI route: credentials on the default remote route the
+// transport through the dolt subprocess (the credential route keys on the
+// credentials, not the URL scheme, so the file:// remote stays fetchable over
+// SQL for the containment evidence), and the subprocess's refusal, a real
+// cliTransferError, must reach the shared post-transport handler and be
+// recognized as the no-op. The fake dolt's call log proves the route was
+// taken.
+func TestPullIgnoredTableCLIRoute(t *testing.T) {
+	ctx, store := newIgnoredTableServerStore(t, false)
+	remoteURL := ignoredTableRemoteURL(t, ctx, store)
+	store.remoteUser = "testuser"
+	standInCLIRemoteDir(t, store, remoteURL)
+	calls := fakeStompingDoltOnPath(t, remoteURL)
+	before := readIgnoredTableState(t, ctx, store)
+
+	if err := store.Pull(ctx); err != nil {
+		t.Fatalf("CLI-route pull of a remote tip HEAD already contains = %v; want a no-op success", err)
+	}
+	assertIgnoredTableStateIntact(t, ctx, store, before)
+
+	logged, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatalf("read the fake dolt's call log: %v", err)
+	}
+	if !strings.Contains(string(logged), "pull") {
+		t.Fatalf("the CLI route never ran a dolt pull (calls logged: %q)", strings.TrimSpace(string(logged)))
+	}
+}
+
+// TestPullIgnoredTableRecoveredRunsMaintenance pins that a recognized no-op
+// is an ordinary successful pull: the successful-pull maintenance runs, so a
+// pending is_blocked recompute marker (bd-578h9.11), which only that
+// maintenance consumes, is gone, while the ignored rows and merge state stay
+// as they were.
+func TestPullIgnoredTableRecoveredRunsMaintenance(t *testing.T) {
+	ctx, store := newIgnoredTableServerStore(t, false)
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin marker tx: %v", err)
+	}
+	if err := issueops.MarkIsBlockedRecomputePendingInTx(ctx, tx, "full"); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("mark pending: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit marker: %v", err)
+	}
+	before := readIgnoredTableState(t, ctx, store)
+
+	if err := store.Pull(ctx); err != nil {
+		t.Fatalf("pull of a remote tip HEAD already contains = %v; want a no-op success", err)
+	}
+	var markers int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM metadata WHERE `key` = 'is_blocked_recompute_pending'").Scan(&markers); err != nil {
+		t.Fatalf("count markers: %v", err)
+	}
+	if markers != 0 {
+		t.Fatalf("pending recompute marker survived the recovered pull (%d rows); the successful-pull maintenance did not run", markers)
+	}
+	after := readIgnoredTableState(t, ctx, store)
+	if !slices.Equal(after.rows, before.rows) {
+		t.Fatalf("pull changed the ignored working rows:\nbefore %v\nafter  %v", before.rows, after.rows)
+	}
+	if after.merging {
+		t.Fatal("pull left a merge open")
+	}
+}
+
+// TestPullIgnoredTableUnprovable pins that no automatic success is claimed
+// from missing evidence, even on a remote that is in fact contained: a
+// tracking ref that cannot be refreshed keeps the confirmed refusal as the
+// typed error, and an unknown store branch keeps the original failure.
+func TestPullIgnoredTableUnprovable(t *testing.T) {
+	t.Run("refresh fails", func(t *testing.T) {
+		ctx, store := newIgnoredTableServerStore(t, false)
+		before := readIgnoredTableState(t, ctx, store)
+		pullErr := cliStompPullError(t, ctx, store)
+		remoteDir := strings.TrimPrefix(ignoredTableRemoteURL(t, ctx, store), "file://")
+		if err := os.RemoveAll(remoteDir); err != nil {
+			t.Fatalf("remove the fixture remote: %v", err)
+		}
+		if err := store.refreshTrackingRef(ctx, "origin"); err == nil {
+			t.Fatal("fixture: the tracking ref still refreshes with the remote gone")
+		}
+
+		assertIgnoredTablesMergeError(t, store.finishPull(ctx, "origin", before.head, pullErr))
+		assertIgnoredTableStateIntact(t, ctx, store, before)
+	})
+	t.Run("unknown branch", func(t *testing.T) {
+		ctx, store := newIgnoredTableServerStore(t, false)
+		before := readIgnoredTableState(t, ctx, store)
+		pullErr := cliStompPullError(t, ctx, store)
+		store.branch = "no-such-branch"
+
+		err := store.finishPull(ctx, "origin", before.head, pullErr)
+		store.branch = "main"
+		var ignoredErr *versioncontrolops.IgnoredTablesMergeError
+		if err == nil || errors.As(err, &ignoredErr) || !strings.Contains(err.Error(), "stomped by merge") {
+			t.Fatalf("pull with unknown branch evidence = %v; want the original refusal, unclassified", err)
+		}
 		assertIgnoredTableStateIntact(t, ctx, store, before)
 	})
 }
