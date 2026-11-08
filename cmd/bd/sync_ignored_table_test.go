@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
@@ -129,6 +132,76 @@ func TestSyncIgnoredTableStuck(t *testing.T) {
 		}
 		if !strings.Contains(msg, "Do not force-push") {
 			t.Errorf("report does not warn off the destructive remedies:\n%s", msg)
+		}
+	})
+
+	t.Run("human report explains the clean status and the conditional push", func(t *testing.T) {
+		msg := strings.Join(syncStuckMessage(&syncOutcome{
+			Status:                syncStatusDirtyStuck,
+			Attempts:              1,
+			IgnoredTablesOnRemote: []string{"events"},
+		}), "\n")
+		for _, want := range []string{
+			"'dolt status' can look clean",
+			"non-fast-forward",
+			"dolt add -f",
+			"dolt checkout -- <table>",
+			"sync timers",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("report missing %q:\n%s", want, msg)
+			}
+		}
+		if strings.Contains(msg, "bd vc status") {
+			t.Errorf("report credits bd vc status with listing the ignored rows:\n%s", msg)
+		}
+		// Old writers must be stopped before the plain push, or their next
+		// push undoes it.
+		if stop, push := strings.Index(msg, "stop them first"), strings.Index(msg, "bd dolt push"); stop < 0 || push < 0 || stop > push {
+			t.Errorf("report does not order stopping old writers before the plain push:\n%s", msg)
+		}
+	})
+
+	t.Run("human report keeps the run's earlier transients", func(t *testing.T) {
+		msg := strings.Join(syncStuckMessage(&syncOutcome{
+			Status:   syncStatusDirtyStuck,
+			Attempts: 3,
+			Transients: []syncTransient{
+				{Attempt: 1, Kind: syncTransientPushRace, Error: "push rejected"},
+				{Attempt: 2, Kind: syncTransientDirtyGraph, Error: "dirty graph"},
+			},
+			IgnoredTablesOnRemote: []string{"events"},
+		}), "\n")
+		if !strings.Contains(msg, "hit BOTH transient conditions") {
+			t.Errorf("report drops the mixed-transient note:\n%s", msg)
+		}
+	})
+
+	t.Run("evidence survives the cross-tick detector", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DIR", beadsDir)
+		saveSyncState(beadsDir, &syncState{DirtyGraphFingerprint: "issues:aaa", StuckTicks: 2})
+
+		r := &syncOpsRecorder{pullErrs: []error{ignoredTablesPullErr()}}
+		out, err := runSyncLoop(context.Background(), r.ops(), defaultSyncAttempts)
+		if err != nil {
+			t.Fatalf("runSyncLoop error = %v", err)
+		}
+		applyDirtyProgress(out, time.Now())
+		if out.Status != syncStatusDirtyStuck {
+			t.Fatalf("status after applyDirtyProgress = %q, want %q", out.Status, syncStatusDirtyStuck)
+		}
+		if !reflect.DeepEqual(out.IgnoredTablesOnRemote, []string{"events", "wisps"}) {
+			t.Fatalf("IgnoredTablesOnRemote after applyDirtyProgress = %v, want [events wisps]", out.IgnoredTablesOnRemote)
+		}
+		if got := loadSyncState(beadsDir); got.StuckTicks != 0 {
+			t.Fatalf("detector marker = %+v, want it reset (the detector ran)", got)
+		}
+		if msg := strings.Join(syncStuckMessage(out), "\n"); !strings.Contains(msg, "remote still tracks table(s) this clone ignores: events, wisps") {
+			t.Errorf("report after applyDirtyProgress lost the immediate evidence:\n%s", msg)
 		}
 	})
 }

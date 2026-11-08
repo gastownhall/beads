@@ -1210,15 +1210,22 @@ func syncIgnoredTablesMessage(out *syncOutcome) []string {
 	lines = append(lines,
 		"Dolt will not merge history that tracks a table over this clone's unversioned rows of it,",
 		"so every retry is refused the same way. Nothing was pushed.",
-		"If the remote holds nothing this clone lacks (only clones on this release write to it), an",
-		"ordinary 'bd dolt push' publishes the migrated history and the next sync runs normally.",
-		"If peers on an older release are still pushing, stop them first; if the remote holds their",
-		"work, migrate that history as the runbook describes:",
+		"'dolt status' can look clean here: the protected rows sit on the ignored working plane,",
+		"not among uncommitted changes, so nothing this clone can commit clears the refusal.",
+		"Recovery, in order:",
+		"  1. If peers on an older release still push to this remote, stop them first, including",
+		"     their sync timers, or their next push restores the old history.",
+		"  2. If the remote holds nothing this clone lacks (only clones on this release write to it),",
+		"     an ordinary 'bd dolt push' (never a force push) publishes the migrated history and the",
+		"     next sync runs normally.",
+		"  3. If that push is rejected as non-fast-forward, or the remote holds peers' work, the",
+		"     remote carries history this clone lacks: migrate it as the runbook describes:",
 		"  https://github.com/gastownhall/beads/blob/main/docs/recovery/sync-failures.md#merge-blocked-on-the-events-table-migration-0062",
 		"Do not force-push, delete the local rows, or re-track the table to get past this: each one",
-		"discards or republishes data.",
+		"discards or republishes data. Staging over the guard ('dolt add -f') or discarding the rows",
+		"('dolt checkout -- <table>') destroys the working data the refusal is protecting.",
 		"This exit is deliberately distinct from exit 3 so a sync timer can page instead of retrying forever.")
-	return lines
+	return append(lines, syncMixedTransientNote(out)...)
 }
 
 // syncStuckTicks is how many consecutive exhausted runs against byte-identical
