@@ -154,6 +154,19 @@ func PullWithStrategy(ctx context.Context, db DBConn, remote, branch, user, stra
 	}
 	trackingRef := remote + "/" + branch
 	if err := MergeAndSettleWithStrategy(ctx, db, trackingRef, strategy); err != nil {
+		// GH#6368: the engine checks for stomped working tables before it
+		// checks whether the fetched ref is already contained in HEAD, so an
+		// ignored-but-remote-tracked table refuses even a no-op pull. When the
+		// refusal protects engine-confirmed ignored tables and the containment
+		// proof holds, the pull is the no-op it always was; when it does not,
+		// the typed error lets `bd sync` report the real outcome. Only this
+		// wrapper recognizes the no-op — direct merges keep the refusal.
+		if outcome, handled := resolveStompedIgnoredTables(ctx, db, trackingRef, err); handled {
+			if outcome == nil {
+				return nil
+			}
+			return fmt.Errorf("merge %s: %w", trackingRef, outcome)
+		}
 		return fmt.Errorf("merge %s: %w", trackingRef, err)
 	}
 	return nil

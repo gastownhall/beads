@@ -17,6 +17,7 @@ go_library(
         "fastforward.go",
         "flatten.go",
         "gc.go",
+        "ignoredtables.go",
         "mergesettle.go",
         "remoterefs.go",
         "remotes.go",
