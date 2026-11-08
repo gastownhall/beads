@@ -122,7 +122,7 @@ func parseFormDeps(entries []string) ([]domain.DependencySpec, error) {
 		spec.SwapDirection = false
 		out = append(out, spec)
 	}
-	return out, nil
+	return dedupeDepSpecs(out)
 }
 
 // CreateIssueFromFormValues creates an issue from the given form values.

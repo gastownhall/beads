@@ -860,3 +860,145 @@ func TestCreateIssueFromFormValuesDependencyTypes(t *testing.T) {
 		}
 	})
 }
+
+// TestCreateIssueFromFormValuesDependencyDedupe pins the form's dedupe of
+// canonical-equivalent repeats (the form twin of GH#4626): two spellings
+// that name the same blocks edge collapse to one dependency instead of
+// colliding at write time, and the direction pin keeps blocks:B from
+// colliding with the aliases either.
+func TestCreateIssueFromFormValuesDependencyDedupe(t *testing.T) {
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	s := newTestStore(t, testDB)
+	ctx := context.Background()
+
+	target, err := CreateIssueFromFormValues(ctx, s, &createFormValues{
+		Title:     "Dedupe target",
+		Priority:  2,
+		IssueType: "task",
+	}, "test")
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+
+	for name, deps := range map[string][]string{
+		"both aliases":              {"blocked-by:" + target.ID, "depends-on:" + target.ID},
+		"explicit blocks and alias": {"blocks:" + target.ID, "depends-on:" + target.ID},
+		"bare id and alias":         {target.ID, "blocked-by:" + target.ID},
+	} {
+		child, err := CreateIssueFromFormValues(ctx, s, &createFormValues{
+			Title:        "Dedupe child " + name,
+			Priority:     2,
+			IssueType:    "bug",
+			Dependencies: deps,
+		}, "test")
+		if err != nil {
+			t.Fatalf("%s: create failed; equivalent spellings must collapse, not conflict: %v", name, err)
+		}
+		rows, err := s.GetDependenciesWithMetadata(ctx, child.ID)
+		if err != nil {
+			t.Fatalf("%s: GetDependenciesWithMetadata: %v", name, err)
+		}
+		if len(rows) != 1 || rows[0].ID != target.ID || rows[0].DependencyType != types.DepBlocks {
+			t.Errorf("%s: child deps = %+v, want the single collapsed blocks edge to %s", name, rows, target.ID)
+		}
+	}
+}
+
+// TestCreateIssueFromFormValuesDependencyRefusals pins the form's early
+// refusals: an unknown type, an empty typed target, or two different
+// canonical types for one target fail the create up front — before a parent
+// lookup, a child-ID reservation, or any write — with an actionable,
+// flag-neutral error. The Dependencies field validator runs the same parse
+// before submission; these are the entries it keeps in the field for
+// correction.
+func TestCreateIssueFromFormValuesDependencyRefusals(t *testing.T) {
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	s := newTestStore(t, testDB)
+	ctx := context.Background()
+
+	target, err := CreateIssueFromFormValues(ctx, s, &createFormValues{
+		Title:     "Refusal target",
+		Priority:  2,
+		IssueType: "task",
+	}, "test")
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+
+	t.Run("unknown type fails the create", func(t *testing.T) {
+		_, err := CreateIssueFromFormValues(ctx, s, &createFormValues{
+			Title:        "Unknown type child",
+			Priority:     2,
+			IssueType:    "bug",
+			Dependencies: []string{"owned-by:" + target.ID},
+		}, "test")
+		if err == nil || !strings.Contains(err.Error(), "owned-by") || !strings.Contains(err.Error(), "valid types") {
+			t.Errorf("create with an unknown dep type: err = %v, want the refusal naming the spelling and the vocabulary", err)
+		}
+	})
+
+	t.Run("empty typed target fails the create", func(t *testing.T) {
+		_, err := CreateIssueFromFormValues(ctx, s, &createFormValues{
+			Title:        "Empty target child",
+			Priority:     2,
+			IssueType:    "bug",
+			Dependencies: []string{"blocks:"},
+		}, "test")
+		if err == nil || !strings.Contains(err.Error(), "target is empty") {
+			t.Errorf("create with an empty typed target: err = %v, want the empty-target refusal", err)
+		}
+	})
+
+	t.Run("same-target type conflict names both types and the target", func(t *testing.T) {
+		_, err := CreateIssueFromFormValues(ctx, s, &createFormValues{
+			Title:        "Conflicting types child",
+			Priority:     2,
+			IssueType:    "bug",
+			Dependencies: []string{"related:" + target.ID, "blocks:" + target.ID},
+		}, "test")
+		if err == nil || !strings.Contains(err.Error(), "cannot attach both") ||
+			!strings.Contains(err.Error(), "related") || !strings.Contains(err.Error(), "blocks") ||
+			!strings.Contains(err.Error(), target.ID) {
+			t.Errorf("create with conflicting dep types: err = %v, want the conflict naming both types and %s", err, target.ID)
+		}
+		if err != nil && strings.Contains(err.Error(), "--deps") {
+			t.Errorf("the form's conflict error must be flag-neutral, got: %v", err)
+		}
+	})
+
+	t.Run("refusal precedes the parent child-ID reservation", func(t *testing.T) {
+		parent, err := CreateIssueFromFormValues(ctx, s, &createFormValues{
+			Title:     "Refusal parent",
+			Priority:  2,
+			IssueType: "epic",
+		}, "test")
+		if err != nil {
+			t.Fatalf("create parent: %v", err)
+		}
+		if _, err := CreateIssueFromFormValues(ctx, s, &createFormValues{
+			Title:        "Never created",
+			Priority:     2,
+			IssueType:    "bug",
+			ParentID:     parent.ID,
+			Dependencies: []string{"owned-by:" + target.ID},
+		}, "test"); err == nil {
+			t.Fatal("create with an unknown dep type under a parent must fail")
+		}
+		// Nothing was written and no child slot was consumed: the next
+		// valid child takes the first hierarchical id.
+		child, err := CreateIssueFromFormValues(ctx, s, &createFormValues{
+			Title:     "First real child",
+			Priority:  2,
+			IssueType: "bug",
+			ParentID:  parent.ID,
+		}, "test")
+		if err != nil {
+			t.Fatalf("create the first valid child: %v", err)
+		}
+		if want := parent.ID + ".1"; child.ID != want {
+			t.Errorf("after the refused create, the next child is %s, want %s (nothing written, no slot consumed)", child.ID, want)
+		}
+	})
+}

@@ -77,4 +77,24 @@ func TestParseFormDeps(t *testing.T) {
 			t.Errorf("parseFormDeps(owned-by:bd-6) err = %v, want the unknown-type refusal naming the spelling and the vocabulary", err)
 		}
 	})
+
+	t.Run("canonical-equivalent repeats collapse to one edge", func(t *testing.T) {
+		for name, tc := range map[string]struct {
+			deps     []string
+			wantType types.DependencyType
+		}{
+			"both aliases":              {[]string{"blocked-by:bd-1", "depends-on:bd-1"}, types.DepBlocks},
+			"explicit blocks and alias": {[]string{"blocks:bd-1", "depends-on:bd-1"}, types.DepBlocks},
+			"bare id and alias":         {[]string{"bd-1", "blocked-by:bd-1"}, types.DepBlocks},
+			"identical repeat":          {[]string{"related:bd-1", "related:bd-1"}, types.DepRelated},
+		} {
+			got, err := parseFormDeps(tc.deps)
+			if err != nil {
+				t.Fatalf("%s: equivalent spellings must collapse, not conflict: %v", name, err)
+			}
+			if len(got) != 1 || got[0].Type != tc.wantType || got[0].TargetID != "bd-1" {
+				t.Errorf("%s: parseFormDeps(%q) = %+v, want the single collapsed %s edge", name, tc.deps, got, tc.wantType)
+			}
+		}
+	})
 }
