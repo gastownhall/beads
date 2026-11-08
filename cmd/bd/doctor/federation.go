@@ -264,7 +264,7 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 			Detail:   err.Error(),
 			Category: CategoryFederation,
 		}
-	case err == nil && !peers:
+	case err == nil && peers == 0:
 		return DoctorCheck{
 			Name:     "Federation remotesapi",
 			Status:   StatusOK,
@@ -274,8 +274,18 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 	}
 
 	// Server is running and peers are configured - check if remotesapi port is
-	// accessible.
-	return checkRemotesAPIListener(beadsDir, pid)
+	// accessible. The listener's state is the result; the peer count, when
+	// the listing succeeded, rides along in Detail.
+	check := checkRemotesAPIListener(beadsDir, pid)
+	if err == nil {
+		count := fmt.Sprintf("%d peers configured", peers)
+		if check.Detail == "" {
+			check.Detail = count
+		} else {
+			check.Detail += "\n" + count
+		}
+	}
+	return check
 }
 
 // remotesAPIServerDownCheck is the Federation remotesapi result when no
@@ -324,29 +334,24 @@ func federationPeerCount(remotes []storage.RemoteInfo) int {
 	return peers
 }
 
-// federationPeers reports whether the store the federation checks open
-// (federationStoreConfig) lists a federation peer, a remote other than
-// origin. When it cannot tell, err is the store open's or ListRemotes's error
+// federationPeers counts the federation peers, the remotes other than
+// origin, that the store the federation checks open (federationStoreConfig)
+// lists. When it cannot tell, err is the store open's or ListRemotes's error
 // and skipped the message that names the step that failed, as
 // CheckLegacyCLIRemotes reports it.
-func federationPeers(beadsDir, doltPath string) (peers bool, skipped string, err error) {
+func federationPeers(beadsDir, doltPath string) (peers int, skipped string, err error) {
 	ctx := context.Background()
 	store, err := dolt.New(ctx, federationStoreConfig(beadsDir, doltPath))
 	if err != nil {
-		return false, "Skipped (database unavailable)", err
+		return 0, "Skipped (database unavailable)", err
 	}
 	defer func() { _ = store.Close() }()
 
 	remotes, err := store.ListRemotes(ctx)
 	if err != nil {
-		return false, "Skipped (SQL remotes unavailable)", err
+		return 0, "Skipped (SQL remotes unavailable)", err
 	}
-	for _, r := range remotes {
-		if r.Name != "origin" {
-			return true, "", nil
-		}
-	}
-	return false, "", nil
+	return federationPeerCount(remotes), "", nil
 }
 
 // checkRemotesAPIListener probes the remotesapi listener of a running server.
