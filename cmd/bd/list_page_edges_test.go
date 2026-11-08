@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -112,6 +113,84 @@ func TestListDependencyRecordsReturnsTheReadError(t *testing.T) {
 			// back to dotted-id nesting and the gate decoration reads its own.
 			if got != nil {
 				t.Errorf("listDependencyRecords returned %v beside its error, want nil", got)
+			}
+		})
+	}
+}
+
+// TestPageDependencyRecordsOrdersAndShapesLikeTheEdgeRead pins the page-derived
+// edge map to listDependencyRecords' contract: each issue's edges sorted by
+// target and then type (issueops.FinishEdgeRead's order), no key for an issue
+// with no edges, nil rows and nil edges skipped, a non-nil map for an empty
+// page, and the page's own slices left in their order.
+func TestPageDependencyRecordsOrdersAndShapesLikeTheEdgeRead(t *testing.T) {
+	dep := func(from, to string, typ types.DependencyType) *types.Dependency {
+		return &types.Dependency{IssueID: from, DependsOnID: to, Type: typ}
+	}
+	aToC := dep("pe-a", "pe-c", types.DepBlocks)
+	aToBRelated := dep("pe-a", "pe-b", types.DepRelated)
+	aToBBlocks := dep("pe-a", "pe-b", types.DepBlocks)
+	aToEpic := dep("pe-a", "pe-epic", types.DepParentChild)
+	a := &types.Issue{ID: "pe-a", Dependencies: []*types.Dependency{aToC, nil, aToBRelated, aToEpic, aToBBlocks}}
+	b := &types.Issue{ID: "pe-b"}
+	c := &types.Issue{ID: "pe-c", Dependencies: []*types.Dependency{}}
+	before := slices.Clone(a.Dependencies)
+
+	got := pageDependencyRecords([]*types.Issue{a, nil, b, c})
+	want := map[string][]*types.Dependency{"pe-a": {aToBBlocks, aToBRelated, aToC, aToEpic}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("pageDependencyRecords = %v, want %v", got, want)
+	}
+	if !slices.Equal(a.Dependencies, before) {
+		t.Errorf("pageDependencyRecords reordered the page row's own edges: %v", a.Dependencies)
+	}
+	for _, issues := range [][]*types.Issue{nil, {}, {nil}} {
+		if got := pageDependencyRecords(issues); got == nil || len(got) != 0 {
+			t.Errorf("pageDependencyRecords(%v) = %#v, want an empty non-nil map", issues, got)
+		}
+	}
+}
+
+// pageEdgeStoreStub is a store for listPageDependencies: its edge reader is an
+// edgeSourceStub and it reports itself remote or not.
+type pageEdgeStoreStub struct {
+	storage.DoltStorage
+	src    *edgeSourceStub
+	remote bool
+}
+
+func (s pageEdgeStoreStub) EdgeReader() (issueops.EdgeReader, error) { return s.src.EdgeReader() }
+func (s pageEdgeStoreStub) IsRemoteBackendStore() bool               { return s.remote }
+
+// TestListPageDependenciesReadsEdgesOnlyForARemoteBackend pins where the flat
+// page's edges come from: the page rows on a store-backed route, and one edge
+// read naming the listed ids on a remote backend, whose wire page is not
+// trusted to carry them.
+func TestListPageDependenciesReadsEdgesOnlyForARemoteBackend(t *testing.T) {
+	pageEdge := &types.Dependency{IssueID: "pe-a", DependsOnID: "pe-page", Type: types.DepBlocks}
+	readEdge := &types.Dependency{IssueID: "pe-a", DependsOnID: "pe-read", Type: types.DepBlocks}
+	page := []*types.Issue{{ID: "pe-a", Dependencies: []*types.Dependency{pageEdge}}, {ID: "pe-b"}}
+
+	for _, tc := range []struct {
+		name     string
+		remote   bool
+		want     map[string][]*types.Dependency
+		requests [][]string
+	}{
+		{"store-backed", false, map[string][]*types.Dependency{"pe-a": {pageEdge}}, nil},
+		{"remote backend", true, map[string][]*types.Dependency{"pe-a": {readEdge}}, [][]string{{"pe-a", "pe-b"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := &edgeSourceStub{edges: map[string][]*types.Dependency{"pe-a": {readEdge}}}
+			got, err := listPageDependencies(context.Background(), pageEdgeStoreStub{src: src, remote: tc.remote}, page)
+			if err != nil {
+				t.Fatalf("listPageDependencies: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("listPageDependencies = %v, want %v", got, tc.want)
+			}
+			if !reflect.DeepEqual(src.requests, tc.requests) {
+				t.Errorf("edge reads = %v, want %v", src.requests, tc.requests)
 			}
 		})
 	}

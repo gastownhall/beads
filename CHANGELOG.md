@@ -703,6 +703,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd list` draws dependencies from the listing it already read.** The
+  default tree and `--deps` view used to read the listed issues' dependency
+  edges again after the listing, and the flat compact and agent views read
+  them again to decide which rows a gate holds. The listing query already
+  returns each row's edges, so these views now use those: 6 fewer statements
+  for the tree in server mode and 4 fewer for the flat compact and agent
+  views. The edges are now as of the listing, so an issue another process
+  deletes in between keeps the edges it was listed with, where they used to
+  disappear. For an ID present both as an issue and as a wisp, the tree now
+  draws the edges of the issue it lists, where it used to draw the wisp's.
+  `--parent`, `--watch`, `--format` and a remote (`bd connect`) backend still
+  read the edges separately.
 - **Five text outputs skip store reads they never printed.** `bd show` takes
   an issue's labels from the issue read instead of reading them again (4
   fewer statements in server mode). The labels are now as of the read that
