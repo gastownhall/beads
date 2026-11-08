@@ -128,6 +128,17 @@ type syncOutcome struct {
 	// syncStuckTicks. Empty means this run's dirty-stuck status, if any, came
 	// from the tick-count inference instead (wy-mhouc).
 	ConstraintViolations []storage.ConstraintViolation `json:"constraint_violations,omitempty"`
+	// IgnoredTablesOnRemote names the working table(s) the engine refused to
+	// merge over — "local changes would be stomped by merge" — which this
+	// clone keeps on the ignored working plane while the remote's history
+	// still tracks them (GH#6368, the migration 0062 events flip). The
+	// storage layer types the refusal when it can confirm the names against
+	// dolt_status_ignored; the engine diagnostic alone is the backstop for a
+	// refusal that reached sync untyped. No retry can converge — the engine
+	// stomps before it compares histories — so the run stops as dirty-stuck
+	// (exit 4) with the names, instead of dying as the generic exit 1 the
+	// field report did. Empty for every other dirty-stuck cause.
+	IgnoredTablesOnRemote []string `json:"ignored_tables_on_remote,omitempty"`
 }
 
 // syncTransient is one attempt's transient failure.
@@ -315,6 +326,31 @@ func runSyncLoop(ctx context.Context, ops syncOps, maxAttempts int) (*syncOutcom
 				})
 				ops.report("pull behind a fast-forwardable remote tip (peer pushed after our fetch) — re-pulling and retrying")
 				continue
+			}
+			// GH#6368: the engine refused the merge to protect working table(s)
+			// the remote's history still tracks while this clone holds them on
+			// the ignored plane. The storage layer types the refusal when it
+			// could confirm the names against dolt_status_ignored; the engine's
+			// own diagnostic is the backstop for a refusal that reached sync
+			// untyped (a route with no session to confirm on). Either way no
+			// retry can converge — the engine stomps the named tables before it
+			// ever compares histories — so this stops as dirty-stuck (exit 4)
+			// with the names, instead of the generic exit 1 the field report
+			// died as. Nothing is pushed: pushing past the refusal would race
+			// the very divergence an operator must reconcile.
+			var ignoredTables []string
+			var typed *versioncontrolops.IgnoredTablesMergeError
+			if errors.As(pullErr, &typed) {
+				ignoredTables = typed.Tables
+			} else if names, ok := versioncontrolops.ParseStompedTableNames(pullErr); ok {
+				ignoredTables = names
+			}
+			if ignoredTables != nil {
+				out.Status = syncStatusDirtyStuck
+				out.IgnoredTablesOnRemote = ignoredTables
+				ops.report(fmt.Sprintf("pull refused to protect working table(s) %s still tracked on the remote — stopping without pushing",
+					strings.Join(ignoredTables, ", ")))
+				return out, nil
 			}
 			return out, fmt.Errorf("pull: %w", pullErr)
 		}
@@ -1120,13 +1156,42 @@ func syncMixedTransientNote(out *syncOutcome) []string {
 // constraint violations no writer will ever commit, an abandoned uncommitted
 // edit — reports the same "transient, retry on the next tick" forever, so no
 // tick ever publishes and nothing in the output ever changes to say so
-// (wy-wub2s). Two distinct kinds of evidence can drive this: out.ConstraintViolations
+// (wy-wub2s). Three distinct kinds of evidence can drive this:
+// out.IgnoredTablesOnRemote names the working tables the engine's stomp guard
+// protected because the remote still tracks them while this clone ignores
+// them (GH#6368) — positive on the very attempt that found it; out.ConstraintViolations
 // is a POSITIVE read, from storage.MergeBlockerInspector, naming exactly what
-// is stuck and why on the very attempt that found it (wy-mhouc); absent that,
+// is stuck and why on the very attempt that found it (wy-mhouc); absent both,
 // out.DirtyGraphStuckTicks is the fallback INFERENCE — the pending graph edits
 // have been byte-identical across every attempt of the last N runs, so this is
 // a stuck table rather than a busy fleet, without knowing the specific cause.
 func syncStuckMessage(out *syncOutcome) []string {
+	if len(out.IgnoredTablesOnRemote) > 0 {
+		lines := []string{
+			fmt.Sprintf("Error: the pull was refused to protect working table(s) the remote still tracks: %s.",
+				strings.Join(out.IgnoredTablesOnRemote, ", ")),
+			"",
+			"This clone holds those table(s) on the ignored working plane (their rows are local",
+			"working data, never committed), but the remote's history still tracks them, so the",
+			"engine refuses every merge over them. `bd vc status` looks clean because it is:",
+			"the protected rows are ignored, not uncommitted changes — nothing this clone can",
+			"commit will clear the refusal, and no retry can converge.",
+			"",
+			"Recovery, in order:",
+			"  bd dolt push    # PLAIN push only — never --force. If this clone is at or ahead of",
+			"                  # the remote tip, the push fast-forwards the remote and clears the",
+			"                  # wedge for every replica that pulls it.",
+			"",
+			"If that push is rejected as non-fast-forward, the remote carries history this clone",
+			"does not have — follow the migration-0062 ignored-table runbook in",
+			"docs/recovery/sync-failures.md to reconcile with the peer instead. Do NOT stage over",
+			"the guard (dolt add -f) or discard the rows (dolt checkout -- <table>): both destroy",
+			"the working data the refusal is protecting.",
+			"Nothing was pushed. This exit is deliberately distinct from exit 3 so a sync timer",
+			"can page instead of retrying forever.",
+		}
+		return append(lines, syncMixedTransientNote(out)...)
+	}
 	if len(out.ConstraintViolations) > 0 {
 		lines := []string{
 			"Error: the is_blocked repair is blocked by constraint violations no writer will ever commit.",

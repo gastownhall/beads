@@ -2229,3 +2229,131 @@ func TestSyncStatePersistence(t *testing.T) {
 		t.Errorf("corrupt marker loaded as %+v, want zero", got)
 	}
 }
+
+// The #6368 triage reproduction, at the layer the field report died at: a
+// table listed in dolt_ignore but still tracked on the remote makes the engine
+// refuse every pull over it — before it ever compares histories, so even a
+// contained remote is refused. Surfacing that as a generic error made
+// `bd sync` exit 1 and retry forever on a condition no tick could ever clear.
+func TestRunSyncLoopIgnoredTableTrackedOnRemoteIsNotAGenericPullError(t *testing.T) {
+	stomped := errors.New("merge origin/main: Error 1105: error: local changes would be stomped by merge: events\n Please commit your changes before you merge.")
+	r := &syncOpsRecorder{pullErrs: []error{stomped}}
+	out, err := runSyncLoop(context.Background(), r.ops(), defaultSyncAttempts)
+	if err != nil {
+		t.Fatalf("runSyncLoop returned a generic error (bd sync exits 1): %v; want status %q (exit %d) or %q",
+			err, syncStatusDirtyStuck, ExitSyncDirtyStuck, syncStatusOK)
+	}
+	if out.Status != syncStatusDirtyStuck && out.Status != syncStatusOK {
+		t.Fatalf("status = %q, want %q (exit %d) or %q", out.Status, syncStatusDirtyStuck, ExitSyncDirtyStuck, syncStatusOK)
+	}
+}
+
+// The refusal halt itself, for both shapes the refusal arrives in: typed by
+// the storage layer (names confirmed against dolt_status_ignored) and untyped
+// (the engine's diagnostic alone). The run stops on the attempt that found
+// it — no retry, no recompute, no push — as dirty-stuck (exit 4), with the
+// names on the outcome for --json.
+func TestRunSyncLoopIgnoredTablesRefusalStopsWithoutPushing(t *testing.T) {
+	typed := &versioncontrolops.IgnoredTablesMergeError{
+		Tables: []string{"events"},
+		Err:    errors.New("merge origin/main: Error 1105: error: local changes would be stomped by merge:\n\tevents\n Please commit your changes before you merge."),
+	}
+	untyped := errors.New("dolt pull failed: error: local changes would be stomped by merge:\n\tevents\n Please commit your changes before you merge.: exit status 1")
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"the typed refusal", typed},
+		{"the untyped engine diagnostic", untyped},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &syncOpsRecorder{pullErrs: []error{tc.err}}
+			out, err := runSyncLoop(context.Background(), r.ops(), defaultSyncAttempts)
+			if err != nil {
+				t.Fatalf("runSyncLoop returned a generic error (bd sync exits 1): %v", err)
+			}
+			if out.Status != syncStatusDirtyStuck {
+				t.Fatalf("status = %q, want %q (exit %d)", out.Status, syncStatusDirtyStuck, ExitSyncDirtyStuck)
+			}
+			if r.pulls != 1 || r.recomputes != 0 || r.pushes != 0 {
+				t.Errorf("pulls/recomputes/pushes = %d/%d/%d, want the halt on the attempt that found it: 1/0/0",
+					r.pulls, r.recomputes, r.pushes)
+			}
+			if out.Attempts != 1 {
+				t.Errorf("Attempts = %d, want 1 (no retry budget may be spent on operator-only work)", out.Attempts)
+			}
+			if !reflect.DeepEqual(out.IgnoredTablesOnRemote, []string{"events"}) {
+				t.Errorf("IgnoredTablesOnRemote = %v, want [events]", out.IgnoredTablesOnRemote)
+			}
+			// --json names the tables: a timer pages on the diagnosis, not
+			// just the exit code.
+			wire, merr := json.Marshal(out)
+			if merr != nil {
+				t.Fatalf("marshal outcome: %v", merr)
+			}
+			if !strings.Contains(string(wire), `"status":"dirty-stuck"`) ||
+				!strings.Contains(string(wire), `"ignored_tables_on_remote":["events"]`) {
+				t.Errorf("--json wire %s does not report the dirty-stuck halt with the table names", wire)
+			}
+		})
+	}
+}
+
+// A live conflict is the higher-priority halt: a pull that surfaced conflict
+// rows alongside the refusal reports the conflict (exit 2, the operator must
+// resolve it), and the ignored-tables report must not override it.
+func TestRunSyncLoopIgnoredTablesYieldToLiveConflicts(t *testing.T) {
+	typed := &versioncontrolops.IgnoredTablesMergeError{
+		Tables: []string{"events"},
+		Err:    errors.New("merge origin/main: Error 1105: error: local changes would be stomped by merge: events\n Please commit your changes before you merge."),
+	}
+	r := &syncOpsRecorder{pullConflicts: [][]string{{"issues"}}, pullErrs: []error{typed}}
+	out, err := runSyncLoop(context.Background(), r.ops(), defaultSyncAttempts)
+	if err != nil {
+		t.Fatalf("runSyncLoop returned a generic error: %v", err)
+	}
+	if out.Status != syncStatusConflict {
+		t.Fatalf("status = %q, want %q (a live conflict outranks the ignored-tables halt)", out.Status, syncStatusConflict)
+	}
+	if !reflect.DeepEqual(out.Conflicts, []string{"issues"}) {
+		t.Errorf("Conflicts = %v, want [issues]", out.Conflicts)
+	}
+	if len(out.IgnoredTablesOnRemote) > 0 {
+		t.Errorf("IgnoredTablesOnRemote = %v on a conflict halt, want none", out.IgnoredTablesOnRemote)
+	}
+}
+
+// The ignored-tables branch of the stuck report: names the protected tables,
+// explains why `bd vc status` looks clean, gives the conditional plain-push
+// remedy (never force) with the runbook for the non-fast-forward case, and
+// warns against destroying the very rows the guard protected.
+func TestSyncStuckMessageIgnoredTables(t *testing.T) {
+	got := strings.Join(syncStuckMessage(&syncOutcome{
+		Status:                syncStatusDirtyStuck,
+		Attempts:              1,
+		IgnoredTablesOnRemote: []string{"events"},
+	}), "\n")
+	if !strings.Contains(got, "events") {
+		t.Errorf("message does not name the protected table:\n%s", got)
+	}
+	if !strings.Contains(got, "looks clean") {
+		t.Errorf("message does not explain why dolt status shows nothing:\n%s", got)
+	}
+	if !strings.Contains(got, "bd dolt push") || !strings.Contains(got, "never --force") {
+		t.Errorf("message does not give the plain-push remedy with the no-force rule:\n%s", got)
+	}
+	if !strings.Contains(got, "non-fast-forward") || !strings.Contains(got, "sync-failures.md") {
+		t.Errorf("message does not route the diverged case to the runbook:\n%s", got)
+	}
+	if !strings.Contains(got, "dolt add -f") || !strings.Contains(got, "dolt checkout --") {
+		t.Errorf("message does not warn against staging over or discarding the protected rows:\n%s", got)
+	}
+	if strings.Contains(got, "retry on the next tick") {
+		t.Errorf("stuck message still tells the operator to wait:\n%s", got)
+	}
+	// This is its own cause: the message must not claim the tick-count or
+	// constraint-violation evidence it never had.
+	if strings.Contains(got, "consecutive sync run(s)") || strings.Contains(got, "constraint violation") {
+		t.Errorf("ignored-tables halt claims another cause's evidence:\n%s", got)
+	}
+}
