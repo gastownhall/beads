@@ -460,9 +460,14 @@ func batchDepAddEdge(args []string) (*types.Dependency, error) {
 	if len(args) >= 3 {
 		depType = args[2]
 	}
-	dt := types.DependencyType(depType)
-	if !dt.IsValid() {
-		return nil, fmt.Errorf("dep add: invalid dependency type %q", depType)
+	// The batch grammar documents `dep add`'s vocabulary, so the line asks
+	// the same canonical/validate pair `bd dep add` does: the aliases
+	// blocked-by/depends-on store the canonical blocks edge that
+	// ready/blocked gating matches (GH#5560), and a type outside the
+	// well-known list is refused instead of stored as an inert edge.
+	dt := canonicalDependencyType(types.DependencyType(depType))
+	if err := validateDependencyType(dt); err != nil {
+		return nil, fmt.Errorf("dep add: %w", err)
 	}
 	if err := publicops.CheckDottedChildDependency(from, to, dt); err != nil {
 		return nil, err

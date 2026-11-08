@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -294,9 +295,10 @@ func TestBatchDepAddEdge(t *testing.T) {
 			wantErr: "dep add requires <from-id> <to-id>",
 		},
 		{
-			name:    "invalid type",
-			args:    []string{"bd-1", "bd-2", tooLong},
-			wantErr: `dep add: invalid dependency type "` + tooLong + `"`,
+			name: "invalid type",
+			args: []string{"bd-1", "bd-2", tooLong},
+			wantErr: `dep add: invalid dependency type "` + tooLong + `" (must be non-empty, max ` +
+				strconv.Itoa(types.MaxDependencyTypeLen) + ` chars); valid types: ` + createDepsAcceptedTypeList(),
 		},
 		{
 			name:       "dotted child gated on its own parent",
@@ -370,5 +372,24 @@ func TestBatchCmd_Registered(t *testing.T) {
 	}
 	if cmd.Flags().Lookup("message") == nil {
 		t.Error("batch missing --message flag")
+	}
+}
+
+// TestBatchDepAddEdgeCanonicalizesAliasesAndRejectsUnknownTypes pins bd-3073gm
+// (GH#5560): a batch `dep add` line must store the alias `blocked-by` as the
+// canonical `blocks` type that ready/blocked gating matches, and must refuse a
+// type outside the well-known vocabulary, as `bd dep add` does.
+func TestBatchDepAddEdgeCanonicalizesAliasesAndRejectsUnknownTypes(t *testing.T) {
+	for _, alias := range []string{"blocked-by", "depends-on"} {
+		got, err := batchDepAddEdge([]string{"bd-a", "bd-b", alias})
+		if err != nil {
+			t.Fatalf("batchDepAddEdge(%q): %v", alias, err)
+		}
+		if got.Type != types.DepBlocks {
+			t.Errorf("batchDepAddEdge(%q).Type = %q, want %q", alias, got.Type, types.DepBlocks)
+		}
+	}
+	if got, err := batchDepAddEdge([]string{"bd-a", "bd-b", "blokcs"}); err == nil {
+		t.Errorf("batchDepAddEdge(typo %q) = %+v, nil; want an unknown-type error", "blokcs", got)
 	}
 }
