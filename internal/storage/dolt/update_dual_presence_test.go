@@ -362,3 +362,104 @@ func TestPersistenceMoveRefusesDualPresence(t *testing.T) {
 	after := snapshotDualPresenceState(t, ctx, store, id)
 	before.assertEqual(t, "persistence move", after)
 }
+
+// TestUpdateRoutingUnchangedForSinglePlaneIDs pins what the resolver must NOT
+// change (GH#5991's blast radius): a durable-only ID updates the issues row
+// and makes exactly one Dolt commit; a wisp-only ID updates the wisps row and
+// commits nothing (wisps are dolt-ignored); a missing ID is still
+// ErrNotFound, with no row created in either plane by the probe.
+func TestUpdateRoutingUnchangedForSinglePlaneIDs(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	lifecycle, err := store.IssueLifecycle()
+	if err != nil {
+		t.Fatalf("IssueLifecycle(): %v", err)
+	}
+	db := store.UnderlyingDB()
+	commitCount := func() int {
+		var n int
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM dolt_log`).Scan(&n); err != nil {
+			t.Fatalf("count dolt_log: %v", err)
+		}
+		return n
+	}
+
+	// Durable plane: one update, one commit, the issues row carries it.
+	durable := &types.Issue{Title: "durable canary", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, durable, "tester"); err != nil {
+		t.Fatalf("create durable canary: %v", err)
+	}
+	before := commitCount()
+	if _, err := lifecycle.Update(ctx, issueops.UpdateRequest{Actor: "tester", IssueID: durable.ID,
+		Patch: issueops.IssuePatch{Notes: issueops.Field[string]{Set: true, Value: "durable update"}}}); err != nil {
+		t.Fatalf("durable update: %v", err)
+	}
+	if got := commitCount(); got != before+1 {
+		t.Errorf("durable update made %d new Dolt commits, want exactly 1", got-before)
+	}
+	var durableNotes string
+	if err := db.QueryRowContext(ctx, `SELECT notes FROM issues WHERE id = ?`, durable.ID).Scan(&durableNotes); err != nil {
+		t.Fatalf("read issues row: %v", err)
+	}
+	if durableNotes != "durable update" {
+		t.Errorf("durable notes = %q, want the updated value in issues", durableNotes)
+	}
+	var wispCopies int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM wisps WHERE id = ?`, durable.ID).Scan(&wispCopies); err != nil {
+		t.Fatalf("count wisps copies: %v", err)
+	}
+	if wispCopies != 0 {
+		t.Errorf("durable update left %d rows in wisps, want none", wispCopies)
+	}
+
+	// Wisp plane: demote, then update — the wisps row carries it, no commit.
+	wisp := &types.Issue{Title: "wisp canary", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, wisp, "tester"); err != nil {
+		t.Fatalf("create wisp canary: %v", err)
+	}
+	if err := store.UpdateIssue(ctx, wisp.ID, map[string]any{"no_history": true}, "tester"); err != nil {
+		t.Fatalf("demote wisp canary: %v", err)
+	}
+	before = commitCount()
+	if _, err := lifecycle.Update(ctx, issueops.UpdateRequest{Actor: "tester", IssueID: wisp.ID,
+		Patch: issueops.IssuePatch{Notes: issueops.Field[string]{Set: true, Value: "wisp update"}}}); err != nil {
+		t.Fatalf("wisp update: %v", err)
+	}
+	if got := commitCount(); got != before {
+		t.Errorf("wisp update made %d new Dolt commits, want none (wisps are unversioned)", got-before)
+	}
+	var wispNotes string
+	if err := db.QueryRowContext(ctx, `SELECT notes FROM wisps WHERE id = ?`, wisp.ID).Scan(&wispNotes); err != nil {
+		t.Fatalf("read wisps row: %v", err)
+	}
+	if wispNotes != "wisp update" {
+		t.Errorf("wisp notes = %q, want the updated value in wisps", wispNotes)
+	}
+	var durableCopies int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, wisp.ID).Scan(&durableCopies); err != nil {
+		t.Fatalf("count issues copies: %v", err)
+	}
+	if durableCopies != 0 {
+		t.Errorf("wisp update left %d rows in issues, want none", durableCopies)
+	}
+
+	// Missing ID: still ErrNotFound, no row created by the probes.
+	_, err = lifecycle.Update(ctx, issueops.UpdateRequest{Actor: "tester", IssueID: "test-never-created",
+		Patch: issueops.IssuePatch{Notes: issueops.Field[string]{Set: true, Value: "probe"}}})
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("missing-id update error = %v, want storage.ErrNotFound", err)
+	}
+	for _, table := range []string{"issues", "wisps"} {
+		var n int
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table+` WHERE id = ?`, "test-never-created").Scan(&n); err != nil {
+			t.Fatalf("count %s for missing id: %v", table, err)
+		}
+		if n != 0 {
+			t.Errorf("missing-id update created %d rows in %s, want none", n, table)
+		}
+	}
+}

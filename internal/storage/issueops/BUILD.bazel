@@ -199,6 +199,7 @@ go_test(
         "ready_work_missing_table_test.go",
         "ready_work_test.go",
         "reopen_test.go",
+        "resolve_update_plane_test.go",
         "retained_types_test.go",
         "role_requests_test.go",
         "row_lock_guard_test.go",
