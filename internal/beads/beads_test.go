@@ -2925,3 +2925,197 @@ func TestResolveBeadsDirForRepoIgnoresInheritedRouting(t *testing.T) {
 		})
 	}
 }
+
+// TestFindBeadsDirFromWorktreeDoesNotAdoptUnrelatedParentProject reproduces
+// GH#7782: `bd -C <linked worktree>` must resolve the worktree's own project
+// (the shared .beads via git-common-dir), not a .beads that an unrelated
+// ancestor folder of the worktree happens to hold.
+func TestFindBeadsDirFromWorktreeDoesNotAdoptUnrelatedParentProject(t *testing.T) {
+	parent := t.TempDir()
+	parentBeads := filepath.Join(parent, ".beads")
+	if err := os.MkdirAll(filepath.Join(parentBeads, "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(parentBeads, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	project := filepath.Join(parent, "project")
+	worktree := filepath.Join(parent, "project-wt")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGitInDir(t, project, "init")
+	runGitInDir(t, project, "config", "user.email", "test@example.com")
+	runGitInDir(t, project, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(project, "README.md"), []byte("# Test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitInDir(t, project, "add", "README.md")
+	runGitInDir(t, project, "commit", "-m", "Initial commit")
+	runGitInDir(t, project, "worktree", "add", worktree, "HEAD")
+
+	projectBeads := filepath.Join(project, ".beads")
+	if err := os.MkdirAll(filepath.Join(projectBeads, "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectBeads, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("BEADS_DIR", "")
+	if err := os.Unsetenv("BEADS_DIR"); err != nil {
+		t.Fatal(err)
+	}
+
+	want := utils.CanonicalizePath(projectBeads)
+	if got := FindBeadsDirFrom(worktree); !utils.PathsEqual(got, want) {
+		t.Errorf("FindBeadsDirFrom(worktree) = %q, want the worktree's own project %q (not parent %q)", got, want, parentBeads)
+	}
+
+	t.Cleanup(git.ResetCaches)
+	t.Chdir(worktree)
+	git.ResetCaches()
+	if got := FindBeadsDir(); !utils.PathsEqual(got, want) {
+		t.Errorf("FindBeadsDir() from worktree cwd = %q, want %q", got, want)
+	}
+}
+
+// isolateWorktreeDiscovery clears inherited git routing, BEADS_DIR and user
+// configuration so path-based and cwd discovery see only the test fixture.
+func isolateWorktreeDiscovery(t *testing.T) {
+	t.Helper()
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) || key == "BEADS_DIR" {
+			t.Setenv(key, "")
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	git.ResetCaches()
+	t.Cleanup(git.ResetCaches)
+}
+
+// linkedWorktreeUnderProject is a linked worktree whose common parent
+// directory holds an unrelated beads project.
+type linkedWorktreeUnderProject struct {
+	root     string // linked worktree root
+	shared   string // shared .beads the worktree's git-common-dir selects
+	ancestor string // unrelated project in the common parent
+}
+
+func setupLinkedWorktreeUnderProject(t *testing.T, layout string, ancestorProject bool) linkedWorktreeUnderProject {
+	t.Helper()
+	setup := setupRegularWorktreeRepo
+	if layout == "bare" {
+		setup = setupBareParentWorktree
+	}
+	main, worktree := setup(t)
+	f := linkedWorktreeUnderProject{
+		root:     worktree,
+		shared:   filepath.Join(main, ".beads"),
+		ancestor: filepath.Join(filepath.Dir(worktree), ".beads"),
+	}
+	if ancestorProject {
+		writeBeadsProject(t, f.ancestor, false)
+	}
+	return f
+}
+
+// writeBeadsProject creates a .beads project with metadata and, when withDB
+// is set, a Dolt database directory.
+func writeBeadsProject(t *testing.T, beadsDir string, withDB bool) {
+	t.Helper()
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if withDB {
+		if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// assertWorktreeDiscovery checks that discovery from start selects want both
+// through FindBeadsDirFrom and through cwd discovery with BEADS_DIR unset.
+func assertWorktreeDiscovery(t *testing.T, start, want string) {
+	t.Helper()
+	if got := FindBeadsDirFrom(start); !sameDiscovery(got, want) {
+		t.Errorf("FindBeadsDirFrom(%q) = %q, want %q", start, got, want)
+	}
+	t.Cleanup(git.ResetCaches)
+	t.Chdir(start)
+	git.ResetCaches()
+	if got := FindBeadsDir(); !sameDiscovery(got, want) {
+		t.Errorf("FindBeadsDir() from %q = %q, want %q", start, got, want)
+	}
+}
+
+func sameDiscovery(got, want string) bool {
+	if want == "" || got == "" {
+		return got == want
+	}
+	return utils.PathsEqual(got, want)
+}
+
+// TestFindBeadsDirFromWorktreePrefersSharedStoreOverAncestor covers GH#7782:
+// from a linked worktree with no usable root store, path-based discovery
+// selects the worktree's shared store rather than an unrelated ancestor.
+func TestFindBeadsDirFromWorktreePrefersSharedStoreOverAncestor(t *testing.T) {
+	isolateWorktreeDiscovery(t)
+	for _, layout := range []string{"regular", "bare"} {
+		for _, tc := range []struct {
+			name  string
+			setup func(t *testing.T, f linkedWorktreeUnderProject) (start, want string)
+		}{
+			{"no root store, shared database", func(t *testing.T, f linkedWorktreeUnderProject) (string, string) {
+				writeBeadsProject(t, f.shared, true)
+				return f.root, f.shared
+			}},
+			{"no root store, shared database, from subdirectory", func(t *testing.T, f linkedWorktreeUnderProject) (string, string) {
+				writeBeadsProject(t, f.shared, true)
+				sub := filepath.Join(f.root, "sub dir")
+				if err := os.Mkdir(sub, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				return sub, f.shared
+			}},
+			{"root metadata only, shared database", func(t *testing.T, f linkedWorktreeUnderProject) (string, string) {
+				writeBeadsProject(t, f.shared, true)
+				writeBeadsProject(t, filepath.Join(f.root, ".beads"), false)
+				return f.root, f.shared
+			}},
+			{"no root store, shared metadata only", func(t *testing.T, f linkedWorktreeUnderProject) (string, string) {
+				writeBeadsProject(t, f.shared, false)
+				return f.root, f.shared
+			}},
+			{"root database wins", func(t *testing.T, f linkedWorktreeUnderProject) (string, string) {
+				writeBeadsProject(t, f.shared, true)
+				local := filepath.Join(f.root, ".beads")
+				writeBeadsProject(t, local, true)
+				return f.root, local
+			}},
+			{"nested project below root wins", func(t *testing.T, f linkedWorktreeUnderProject) (string, string) {
+				writeBeadsProject(t, f.shared, true)
+				nested := filepath.Join(f.root, "nested")
+				writeBeadsProject(t, filepath.Join(nested, ".beads"), false)
+				return nested, filepath.Join(nested, ".beads")
+			}},
+		} {
+			t.Run(layout+"/"+tc.name, func(t *testing.T) {
+				f := setupLinkedWorktreeUnderProject(t, layout, true)
+				start, want := tc.setup(t, f)
+				assertWorktreeDiscovery(t, start, want)
+			})
+		}
+	}
+}

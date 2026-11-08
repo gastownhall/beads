@@ -699,11 +699,16 @@ func FindBeadsDirFrom(startDir string) string {
 
 	fallbackBeadsDir := ""
 	fallbackHasDB := false
+	sharedBeadsDir := ""
 	if repoRoot != "" {
 		fallbackBeadsDir = worktreeFallbackBeadsDirForRepo(repoRoot)
 		if fallbackBeadsDir != "" {
 			if fbInfo, err := os.Stat(fallbackBeadsDir); err == nil && fbInfo.IsDir() {
-				fallbackHasDB = hasBeadsDatabase(FollowRedirect(fallbackBeadsDir))
+				resolved := FollowRedirect(fallbackBeadsDir)
+				fallbackHasDB = hasBeadsDatabase(resolved)
+				if hasBeadsProjectFiles(resolved) {
+					sharedBeadsDir = resolved
+				}
 			}
 		}
 	}
@@ -728,6 +733,12 @@ func FindBeadsDirFrom(startDir string) string {
 			}
 		}
 
+		// A linked worktree's shared store outranks any ancestor outside the
+		// worktree, matching FindBeadsDir's walk bound at the worktree root
+		// (GH#7782). Without a usable shared store, keep searching ancestors.
+		if sharedBeadsDir != "" && utils.PathsEqual(dir, repoRoot) {
+			return sharedBeadsDir
+		}
 	}
 
 	if fallbackBeadsDir != "" {
