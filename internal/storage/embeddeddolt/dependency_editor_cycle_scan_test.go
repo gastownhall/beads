@@ -28,6 +28,11 @@ var dependencyGraphScan = regexp.MustCompile(`(?s)AS depends_on_id, type\s+FROM 
 // whole-graph scan at the end would find nothing the probes did not. That
 // scan read every row of both dependency tables, so it must not be sent.
 //
+// When the probes are skipped the scan is still sent, and the test also pins
+// what it must read then: the scheduling types only, in primary-key order,
+// and parent-child rows among them, so a cycle through an existing
+// parent-child edge is still refused.
+//
 // The test calls ExecuteAddDependencies directly on a counted connection,
 // not the CLI: `bd dep add` scans the graph once more after it commits, for
 // its cycle warning, and that read is outside the storage call.
@@ -113,7 +118,9 @@ func TestEmbeddedAddDependenciesSkipsTheGraphScanWhenEveryEdgeWasProbed(t *testi
 
 	// The control: the matcher above must see the scan when it is sent, or
 	// the subtest before it proves nothing. With the probes skipped the scan
-	// is the only cycle check, and it reads only the scheduling types.
+	// is the only cycle check, and it reads only the scheduling types, in
+	// primary-key order (see the comment on the type sets in
+	// internal/storage/issueops/cycles.go for why the order matters).
 	t.Run("unprobed request still scans, filtered to the scheduling types", func(t *testing.T) {
 		statements, total, err := execute(t, issueops.AddDependenciesRequest{
 			Actor: "tester", Edges: acyclic, SkipPerEdgeCycleCheck: true,
@@ -127,9 +134,47 @@ func TestEmbeddedAddDependenciesSkipsTheGraphScanWhenEveryEdgeWasProbed(t *testi
 			t.Fatalf("graph scans = %d, want one per dependency table:\n%s", len(scans), strings.Join(scans, "\n"))
 		}
 		for _, scan := range scans {
-			if !strings.Contains(scan, "WHERE type IN ('blocks', 'conditional-blocks', 'parent-child')") {
-				t.Errorf("graph scan reads every edge type, want only the scheduling types: %s", scan)
+			if !strings.Contains(scan, "WHERE type IN ('blocks', 'conditional-blocks', 'parent-child') ORDER BY id") {
+				t.Errorf("graph scan is not the scheduling-type read in primary-key order: %s", scan)
 			}
+		}
+	})
+
+	// The gate must read parent-child rows as well as the blocking types: a
+	// request with the probes skipped (bd dep add --file --no-cycle-check)
+	// and the batch applier's end gate rely on it to refuse a cycle that runs
+	// through an existing parent-child edge. Here e becomes d's child first,
+	// then one unprobed request adds d -> a and a -> e, closing
+	// e -> d -> a -> e. Neither blocks edge joins an issue to its own
+	// ancestor or descendant, so the hierarchy check lets both through, and
+	// the parent-child edge is not one of the request's own edges, so only a
+	// gate that reads parent-child rows finds a path back from either new
+	// edge's target to its source.
+	t.Run("unprobed request refuses a cycle through an existing parent-child edge", func(t *testing.T) {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("BeginTx: %v", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, _, err := storageissueops.ExecuteAddDependencies(ctx, tx, issueops.AddDependenciesRequest{
+			Actor: "tester",
+			Edges: []issueops.DependencyEdge{{IssueID: e, DependsOnID: d, Type: types.DepParentChild}},
+		}); err != nil {
+			t.Fatalf("ExecuteAddDependencies(%s child of %s): %v", e, d, err)
+		}
+		_, _, err = storageissueops.ExecuteAddDependencies(ctx, tx, issueops.AddDependenciesRequest{
+			Actor: "tester",
+			Edges: []issueops.DependencyEdge{
+				{IssueID: d, DependsOnID: a, Type: types.DepBlocks},
+				{IssueID: a, DependsOnID: e, Type: types.DepBlocks},
+			},
+			SkipPerEdgeCycleCheck: true,
+		})
+		if !errors.Is(err, issueops.ErrDependencyCycle) {
+			t.Fatalf("ExecuteAddDependencies error = %v, want ErrDependencyCycle from the whole-graph gate", err)
+		}
+		if want := d + " → " + a + " → " + e + " → " + d; !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal = %q, want it to name the cycle %s", err, want)
 		}
 	})
 
