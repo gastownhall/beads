@@ -889,6 +889,13 @@ func TestResolveTypeKeyNameCollision(t *testing.T) {
 			wantErr: []string{"type fallback is ambiguous", "Done, Canceled", "linear.outbound_state_map.closed"},
 		},
 		{
+			name:    "AC-2 documented type map leaves open ambiguous across Backlog and Todo",
+			states:  team,
+			config:  typeMap,
+			status:  types.StatusOpen,
+			wantErr: []string{"type fallback is ambiguous", "Backlog, Todo", "linear.outbound_state_map.open"},
+		},
+		{
 			name:   "documented type map still resolves in_progress",
 			states: team,
 			config: typeMap,
