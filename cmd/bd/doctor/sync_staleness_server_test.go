@@ -74,6 +74,15 @@ func writeDoctorPushState(t *testing.T, beadsDir string, ps pushstate.State) {
 	}
 }
 
+// writeWorkspaceConfig writes one of beadsDir's config files
+// (config.yaml or config.local.yaml).
+func writeWorkspaceConfig(t *testing.T, beadsDir, name, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(beadsDir, name), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestCheckFederationSyncStaleness_OriginTrackingRef_RealDolt drives Sync
 // Staleness against a real Dolt server and file:// remotes (GH#6289). The
 // origin leg reads only the cached origin ref and push-state.json, so every
@@ -144,11 +153,41 @@ func TestCheckFederationSyncStaleness_OriginTrackingRef_RealDolt(t *testing.T) {
 		}
 	})
 
+	// The behind and diverged cases count commits on the cached origin ref
+	// that local history lacks, the half of SyncStatus's comparison the
+	// cases above leave at zero.
+	t.Run("AC-7: local history behind the cached origin ref warns with pull guidance", func(t *testing.T) {
+		repo, _, st := originSyncWorkspace(t, port, false)
+		doltCall(t, st, "CALL DOLT_COMMIT('--allow-empty', '-m', 'pushed')")
+		if err := st.Push(ctx); err != nil {
+			t.Fatalf("push origin: %v", err)
+		}
+		doltCall(t, st, "CALL DOLT_RESET('--hard', 'HEAD~1')")
+		check := CheckFederationSyncStaleness(repo)
+		if check.Status != StatusWarning || check.Message != "Origin sync staleness detected" ||
+			!strings.Contains(check.Detail, "origin: local is 1 commit(s) behind the cached origin tracking ref; pull ('bd dolt pull')") {
+			t.Fatalf("got %s %q (detail %q), want a warning that local is 1 commit behind the cached origin ref", check.Status, check.Message, check.Detail)
+		}
+	})
+
+	t.Run("AC-7: local history diverged from the cached origin ref warns with pull then push guidance", func(t *testing.T) {
+		repo, _, st := originSyncWorkspace(t, port, false)
+		doltCall(t, st, "CALL DOLT_COMMIT('--allow-empty', '-m', 'pushed')")
+		if err := st.Push(ctx); err != nil {
+			t.Fatalf("push origin: %v", err)
+		}
+		doltCall(t, st, "CALL DOLT_RESET('--hard', 'HEAD~1')")
+		doltCall(t, st, "CALL DOLT_COMMIT('--allow-empty', '-m', 'local only')")
+		check := CheckFederationSyncStaleness(repo)
+		if check.Status != StatusWarning || check.Message != "Origin sync staleness detected" ||
+			!strings.Contains(check.Detail, "have diverged (local is 1 commit(s) ahead and 1 behind)") {
+			t.Fatalf("got %s %q (detail %q), want a warning that local and the cached origin ref diverged 1/1", check.Status, check.Message, check.Detail)
+		}
+	})
+
 	t.Run("AC-8: disabled origin is skipped and peer warnings are kept", func(t *testing.T) {
 		repo, beadsDir, st := originSyncWorkspace(t, port, true)
-		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  local-only: true\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		writeWorkspaceConfig(t, beadsDir, "config.yaml", "dolt:\n  local-only: true\n")
 		// One commit on peer1 that local history lacks; origin is never
 		// pushed and its push history records a failure, either of which
 		// would warn if the origin leg ran.
@@ -167,6 +206,53 @@ func TestCheckFederationSyncStaleness_OriginTrackingRef_RealDolt(t *testing.T) {
 			check.Fix != "Run 'bd federation sync' to synchronize with peers" {
 			t.Fatalf("got %s %q (detail %q, fix %q), want the peer warning with the origin check skipped",
 				check.Status, check.Message, check.Detail, check.Fix)
+		}
+	})
+
+	// The skip settings resolve as bd resolves them in the workspace: a
+	// config.local.yaml beside config.yaml overrides it in both directions.
+	t.Run("AC-8: a config.local.yaml that re-enables pushes keeps a recorded failure visible", func(t *testing.T) {
+		repo, beadsDir, st := originSyncWorkspace(t, port, false)
+		if err := st.Push(ctx); err != nil {
+			t.Fatalf("push origin: %v", err)
+		}
+		writeWorkspaceConfig(t, beadsDir, "config.yaml", "no-push: true\n")
+		writeWorkspaceConfig(t, beadsDir, "config.local.yaml", "no-push: false\n")
+		writeDoctorPushState(t, beadsDir, pushstate.State{LastAttempt: time.Now().UTC().Format(time.RFC3339), LastError: "timed out after 30s"})
+
+		check := CheckFederationSyncStaleness(repo)
+		if check.Status != StatusWarning || check.Message != "Origin sync staleness detected" ||
+			!strings.Contains(check.Detail, "failed: timed out after 30s") || strings.Contains(check.Detail, "skipped") {
+			t.Fatalf("got %s %q (detail %q), want the recorded failure reported with the origin leg run", check.Status, check.Message, check.Detail)
+		}
+	})
+
+	t.Run("AC-8: a config.local.yaml that turns dolt.local-only on skips origin", func(t *testing.T) {
+		repo, beadsDir, _ := originSyncWorkspace(t, port, false)
+		writeWorkspaceConfig(t, beadsDir, "config.yaml", "dolt:\n  local-only: false\n")
+		writeWorkspaceConfig(t, beadsDir, "config.local.yaml", "dolt:\n  local-only: true\n")
+
+		// Never pushed: the unavailable comparison would warn if the origin
+		// leg ran.
+		check := CheckFederationSyncStaleness(repo)
+		if check.Status != StatusOK || check.Message != "Origin check skipped (dolt.local-only: true); no peer staleness detected" {
+			t.Fatalf("got %s %q (detail %q), want the origin check skipped", check.Status, check.Message, check.Detail)
+		}
+	})
+
+	t.Run("AC-8: no-push with dolt.auto-push still checks origin and says why", func(t *testing.T) {
+		repo, beadsDir, st := originSyncWorkspace(t, port, false)
+		if err := st.Push(ctx); err != nil {
+			t.Fatalf("push origin: %v", err)
+		}
+		writeWorkspaceConfig(t, beadsDir, "config.yaml", "no-push: true\ndolt:\n  auto-push: true\n")
+		writeDoctorPushState(t, beadsDir, pushstate.State{LastAttempt: time.Now().UTC().Format(time.RFC3339), LastError: "remote unreachable"})
+
+		check := CheckFederationSyncStaleness(repo)
+		if check.Status != StatusWarning || check.Message != "Origin sync staleness detected" ||
+			!strings.Contains(check.Detail, "origin checked despite no-push: true") ||
+			!strings.Contains(check.Detail, "failed: remote unreachable") {
+			t.Fatalf("got %s %q (detail %q), want the auto-push failure reported and the no-push override named", check.Status, check.Message, check.Detail)
 		}
 	})
 }

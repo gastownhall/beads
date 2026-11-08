@@ -183,6 +183,16 @@ func ensureCleanGlobalState(t *testing.T) {
 	t.Setenv("BEADS_DIR", os.Getenv("BEADS_DIR"))
 }
 
+// pinStorageMode makes usesSQLServer report server mode when server is true,
+// and embedded mode, bd's default, otherwise.
+func pinStorageMode(t *testing.T, server bool) {
+	t.Helper()
+	oldServer, oldProxied := serverMode, proxiedServerMode
+	t.Cleanup(func() { serverMode, proxiedServerMode = oldServer, oldProxied })
+	serverMode, proxiedServerMode = server, false
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+}
+
 // savedGlobals holds a snapshot of package-level globals for safe restoration.
 // Used by saveAndRestoreGlobals to ensure test isolation.
 type savedGlobals struct {

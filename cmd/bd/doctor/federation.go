@@ -613,13 +613,12 @@ func CheckFederationSyncStaleness(path string) DoctorCheck {
 		// When it is, we can add time-based staleness warnings here
 	}
 
-	// The origin leg runs only when the workspace allows pushes; a rig that
-	// opted out (no-push, dolt.local-only) is reported as skipped, not
-	// judged.
+	// The origin leg runs only when some bd push path can reach origin; a
+	// rig that opted out (dolt.local-only, or no-push with auto-push off) is
+	// reported as skipped, not judged.
 	if in.OriginConfigured {
-		if reason := originCheckSkipReason(beadsDir); reason != "" {
-			in.OriginSkipReason = reason
-		} else {
+		in.OriginSkipReason, in.OriginAutoPushDespiteNoPush = originCheckSkipReason(beadsDir)
+		if in.OriginSkipReason == "" {
 			in.OriginStatus, in.OriginStatusErr = store.SyncStatus(ctx, "origin")
 			in.PushState, in.PushStateErr = pushstate.Load(beadsDir)
 		}

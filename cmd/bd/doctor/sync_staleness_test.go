@@ -145,7 +145,9 @@ func TestSyncStalenessResult(t *testing.T) {
 			},
 			status:  StatusWarning,
 			message: "Origin sync staleness detected",
-			detail:  []string{"comparison with cached remote refs unavailable", "cached origin tracking ref"},
+			// SyncStatus reports -1 for a missing tracking ref and for a
+			// failed comparison alike, so the finding names both causes.
+			detail: []string{"comparison with cached remote refs unavailable", "no cached origin tracking ref yet", "or the comparison failed"},
 		},
 		{
 			name: "status error warns that comparison is unavailable",
@@ -216,6 +218,34 @@ func TestSyncStalenessResult(t *testing.T) {
 			fix:     "Run 'bd federation sync' to synchronize with peers",
 		},
 		{
+			// Auto-push ignores no-push, so a workspace with both still
+			// pushes to origin and its recorded failure must not hide
+			// behind no-push.
+			name: "no-push with auto-push still reports a recorded failure and says why",
+			in: syncStalenessInputs{
+				HasRemotes:                  true,
+				OriginConfigured:            true,
+				OriginAutoPushDespiteNoPush: true,
+				OriginStatus:                syncStatus(0, 0),
+				PushState:                   &pushstate.State{LastAttempt: "2026-01-02T00:00:00Z", LastError: "timed out after 30s"},
+			},
+			status:  StatusWarning,
+			message: "Origin sync staleness detected",
+			detail:  []string{"origin checked despite no-push: true, because dolt.auto-push: true still pushes to origin", "failed: timed out after 30s"},
+		},
+		{
+			name: "no-push with auto-push and a clean origin passes and says why",
+			in: syncStalenessInputs{
+				HasRemotes:                  true,
+				OriginConfigured:            true,
+				OriginAutoPushDespiteNoPush: true,
+				OriginStatus:                syncStatus(0, 0),
+			},
+			status:  StatusOK,
+			message: "No local sync staleness detected",
+			detail:  []string{"origin checked despite no-push: true", "do not verify the remote's current contents"},
+		},
+		{
 			name: "disabled origin without peer findings reports the skip",
 			in: syncStalenessInputs{
 				HasRemotes:       true,
@@ -261,33 +291,62 @@ func TestSyncStalenessResult(t *testing.T) {
 }
 
 // TestOriginCheckSkipReason pins which workspace settings turn the origin leg
-// of Sync Staleness off (GH#6289): the inspected workspace's
-// .beads/config.yaml, not the config of the directory bd doctor runs from.
+// of Sync Staleness off (GH#6289). They are read from the inspected
+// workspace's own config, not the config of the directory bd doctor runs
+// from, and a config.local.yaml beside config.yaml overrides it in both
+// directions, as it does for every bd command there. no-push is a skip reason
+// only while dolt.auto-push is off, because auto-push ignores no-push.
 func TestOriginCheckSkipReason(t *testing.T) {
 	tests := []struct {
-		name   string
-		config string // "" writes no config.yaml
-		want   string
+		name         string
+		config       string // "" writes no config.yaml
+		local        string // "" writes no config.local.yaml
+		want         string
+		wantAutoPush bool // the leg runs only because auto-push ignores no-push
 	}{
 		{name: "no config", want: ""},
 		{name: "no-push", config: "no-push: true\n", want: "no-push"},
+		{name: "no-push with auto-push off", config: "no-push: true\ndolt:\n  auto-push: false\n", want: "no-push"},
+		{name: "no-push with auto-push on still checks origin", config: "no-push: true\ndolt:\n  auto-push: true\n", want: "", wantAutoPush: true},
+		{name: "auto-push alone", config: "dolt:\n  auto-push: true\n", want: ""},
 		{name: "dolt.local-only nested", config: "dolt:\n  local-only: true\n", want: "dolt.local-only"},
 		{name: "dolt.local-only flat key", config: "dolt.local-only: \"true\"\n", want: "dolt.local-only"},
-		{name: "value padded with whitespace", config: "no-push: \" true \"\n", want: "no-push"},
-		{name: "both, no-push named first", config: "no-push: true\ndolt:\n  local-only: true\n", want: "no-push"},
+		{name: "dolt.local-only also stops auto-push", config: "dolt:\n  local-only: true\n  auto-push: true\n", want: "dolt.local-only"},
+		{name: "both, dolt.local-only named first", config: "no-push: true\ndolt:\n  local-only: true\n", want: "dolt.local-only"},
 		{name: "explicitly false", config: "no-push: false\ndolt:\n  local-only: false\n", want: ""},
+		// bd reads these with viper's GetBool, which does not trim or
+		// guess: a value it reads as false must not skip the leg here.
+		{name: "value padded with whitespace", config: "no-push: \" true \"\n", want: ""},
 		{name: "unparseable value", config: "no-push: maybe\n", want: ""},
+
+		{name: "local no-push false overrides config true", config: "no-push: true\n", local: "no-push: false\n", want: ""},
+		{name: "local no-push true overrides config false", config: "no-push: false\n", local: "no-push: true\n", want: "no-push"},
+		{name: "local local-only false overrides config true", config: "dolt:\n  local-only: true\n", local: "dolt:\n  local-only: false\n", want: ""},
+		{name: "local local-only true overrides config false", config: "dolt:\n  local-only: false\n", local: "dolt.local-only: true\n", want: "dolt.local-only"},
+		{name: "local auto-push true overrides config false under no-push", config: "no-push: true\ndolt:\n  auto-push: false\n", local: "dolt:\n  auto-push: true\n", want: "", wantAutoPush: true},
+		{name: "local auto-push false overrides config true under no-push", config: "no-push: true\ndolt:\n  auto-push: true\n", local: "dolt:\n  auto-push: false\n", want: "no-push"},
+		{name: "local file without the key keeps config's value", config: "no-push: true\n", local: "dolt:\n  port: 3307\n", want: "no-push"},
+		// bd merges config.local.yaml only beside a config.yaml, so a lone
+		// local file sets nothing.
+		{name: "lone config.local.yaml is ignored", local: "no-push: true\n", want: ""},
+		// An unreadable setting counts as unset: the leg runs rather than
+		// hide a recorded failure behind a skip.
+		{name: "unparseable config.local.yaml runs the leg", config: "no-push: true\n", local: "no-push: [\n", want: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			beadsDir := t.TempDir()
-			if tt.config != "" {
-				if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(tt.config), 0o600); err != nil {
+			for name, body := range map[string]string{"config.yaml": tt.config, "config.local.yaml": tt.local} {
+				if body == "" {
+					continue
+				}
+				if err := os.WriteFile(filepath.Join(beadsDir, name), []byte(body), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if got := originCheckSkipReason(beadsDir); got != tt.want {
-				t.Errorf("originCheckSkipReason = %q, want %q", got, tt.want)
+			got, gotAutoPush := originCheckSkipReason(beadsDir)
+			if got != tt.want || gotAutoPush != tt.wantAutoPush {
+				t.Errorf("originCheckSkipReason = (%q, %v), want (%q, %v)", got, gotAutoPush, tt.want, tt.wantAutoPush)
 			}
 		})
 	}

@@ -1244,10 +1244,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `bd doctor`'s Sync Staleness check now covers `origin`, not just federation
   peers. It warns on a recorded push failure (even when HEAD matches the
   cached origin ref), an unreadable push record, local history ahead of,
-  behind or diverged from the cached `origin` ref, or no cached ref to
-  compare, and reports the origin check as skipped under `no-push` or
-  `dolt.local-only`. It still makes no network call, so a pass reads "No
+  behind or diverged from the cached `origin` ref, or a comparison that is
+  unavailable (no cached ref yet, or the comparison failed). It reports the
+  origin check as skipped under `dolt.local-only`, or under `no-push` while
+  `dolt.auto-push` is off (auto-push ignores `no-push`), and reads those
+  settings from the workspace's `config.yaml` with `config.local.yaml`
+  taking precedence. It still makes no network call, so a pass reads "No
   local sync staleness detected" and does not prove what the remote holds.
+  The ahead/behind count behind this check and server-mode `bd federation
+  status` now walks only the commits that differ, not the whole history.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

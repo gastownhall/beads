@@ -324,21 +324,23 @@ func (s *DoltStore) SyncStatus(ctx context.Context, peer string) (*storage.SyncS
 
 	// Get ahead/behind counts by comparing refs.
 	// This requires the peer to have been fetched first.
-	// Dolt's AS OF requires a literal ref: bind parameters (even inside CONCAT)
-	// fail server-side with `unbound variable "v1" in query`, so validate the
-	// ref and interpolate it (same pattern as embeddeddolt SyncStatus).
+	// dolt_log('a..b') lists the commits reachable from b but not from a, so
+	// each count walks only the divergence. The NOT IN over two full dolt_log
+	// scans it replaced cost O(history) on every call, and bd doctor's Sync
+	// Staleness check runs this for origin on every server-mode workspace
+	// (GH#6289). The ref stays a validated, interpolated literal, as that AS
+	// OF form required: bind parameters (even inside CONCAT) failed
+	// server-side there with `unbound variable "v1" in query`.
 	remoteRef := peer + "/" + s.branch
 	if err := issueops.ValidateRef(remoteRef); err != nil {
 		status.LocalAhead = -1
 		status.LocalBehind = -1
 	} else {
-		//nolint:gosec // G201: remoteRef is validated by issueops.ValidateRef above — AS OF requires a literal
+		//nolint:gosec // G201: remoteRef is validated by issueops.ValidateRef above
 		query := fmt.Sprintf(`
 			SELECT
-				(SELECT COUNT(*) FROM dolt_log WHERE commit_hash NOT IN
-					(SELECT commit_hash FROM dolt_log AS OF '%s')) as ahead,
-				(SELECT COUNT(*) FROM dolt_log AS OF '%s' WHERE commit_hash NOT IN
-					(SELECT commit_hash FROM dolt_log)) as behind
+				(SELECT COUNT(*) FROM dolt_log('%s..HEAD')) AS ahead,
+				(SELECT COUNT(*) FROM dolt_log('HEAD..%s')) AS behind
 		`, remoteRef, remoteRef)
 		if err := s.db.QueryRowContext(ctx, query).
 			Scan(&status.LocalAhead, &status.LocalBehind); err != nil {
