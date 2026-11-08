@@ -289,6 +289,16 @@ func TestBatchDepAddEdge(t *testing.T) {
 			want: &types.Dependency{IssueID: "bd-1", DependsOnID: "bd-2", Type: types.DepRelated},
 		},
 		{
+			name: "blocked-by alias stores the gating blocks type",
+			args: []string{"bd-1", "bd-2", "blocked-by"},
+			want: &types.Dependency{IssueID: "bd-1", DependsOnID: "bd-2", Type: types.DepBlocks},
+		},
+		{
+			name: "depends-on alias stores the gating blocks type",
+			args: []string{"bd-1", "bd-2", "depends-on"},
+			want: &types.Dependency{IssueID: "bd-1", DependsOnID: "bd-2", Type: types.DepBlocks},
+		},
+		{
 			name:    "missing to-id",
 			args:    []string{"bd-1"},
 			wantErr: "dep add requires <from-id> <to-id>",
