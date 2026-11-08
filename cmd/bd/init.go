@@ -4470,9 +4470,26 @@ func resolveInitDoltMode(proxiedFlag, sharedFlag, serverFlag bool) string {
 	return "embedded"
 }
 
+// jjBootstrapCommitSkipNote is the shared non-quiet notice printed when an
+// init bootstrap route declines its automatic commit inside a Jujutsu
+// workspace: a native Git commit would silently fork the jj commit graph
+// (GH#5654), so the artifacts are left in the working copy for the user to
+// record with jj.
+const jjBootstrapCommitSkipNote = "Note: skipped bootstrap commit because this is a Jujutsu workspace; the beads files remain in the working copy, to be recorded with jj."
+
 // commitEmbeddedInitArtifacts stages the local init artifacts and preserves the
 // optional-add and nonfatal commit behavior of the embedded bootstrap.
 func commitEmbeddedInitArtifacts(workDir string, quiet bool) {
+	repo := domaingit.NewInitGitRepository(workDir)
+	// A colocated jj workspace tracks its own commit graph on top of the Git
+	// one; a native bootstrap commit would fork it (GH#5654). Leave the
+	// artifacts in the working copy instead of staging or committing them.
+	if isJJ, jjErr := repo.IsJujutsuRepo(context.Background()); jjErr == nil && isJJ {
+		if !quiet {
+			fmt.Fprintln(os.Stderr, jjBootstrapCommitSkipNote)
+		}
+		return
+	}
 	if initArtifactGitCommand(workDir, "rev-parse", "--git-dir").Run() != nil {
 		if !quiet {
 			fmt.Fprintln(os.Stderr, "Note: skipped bootstrap commit because Git could not resolve the selected repository.")
@@ -4519,7 +4536,7 @@ func commitEmbeddedInitArtifacts(workDir string, quiet bool) {
 		// The commit is scoped to the staged changes under the artifact
 		// candidates, so work the user staged before bd init stays
 		// staged instead of landing in the bootstrap commit (GH#5654).
-		commit, commitErr := domaingit.NewInitGitRepository(workDir).Commit(context.Background(), domain.GitCommitParams{
+		commit, commitErr := repo.Commit(context.Background(), domain.GitCommitParams{
 			Message:   "bd init: initialize beads issue tracking",
 			NoVerify:  true,
 			SkipHooks: true,

@@ -113,3 +113,57 @@ func TestCommitEmbeddedInitArtifactsNothingToCommitIsSilent(t *testing.T) {
 		t.Errorf("staged after init = %q, want the user's work.txt still staged", staged)
 	}
 }
+
+// GH#5654: a colocated Jujutsu workspace keeps its own commit graph, so the
+// embedded bootstrap must not make a native Git commit in it: HEAD and the
+// staged entries stay untouched and a note (only when not quiet) says the
+// artifacts are left for jj to record.
+func TestCommitEmbeddedInitArtifactsSkipsJujutsuWorkspace(t *testing.T) {
+	for _, quiet := range []bool{false, true} {
+		repo := t.TempDir()
+		initRoleFixtureGit(t, repo, "init", "-q")
+		initRoleFixtureGit(t, repo, "config", "user.email", "t@t.local")
+		initRoleFixtureGit(t, repo, "config", "user.name", "Test")
+		initRoleFixtureGit(t, repo, "config", "commit.gpgsign", "false")
+		if err := os.MkdirAll(filepath.Join(repo, ".jj"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, "seed.txt"), []byte("seed\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		initRoleFixtureGit(t, repo, "add", "seed.txt")
+		initRoleFixtureGit(t, repo, "commit", "-m", "seed")
+		if err := os.WriteFile(filepath.Join(repo, "work.txt"), []byte("unrelated work\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		initRoleFixtureGit(t, repo, "add", "work.txt")
+		if err := os.MkdirAll(filepath.Join(repo, ".beads"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, ".beads", "config.yaml"), []byte("# beads\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		before := initRoleFixtureGit(t, repo, "rev-parse", "HEAD")
+
+		stderr := captureStderr(t, func() { commitEmbeddedInitArtifacts(repo, quiet) })
+
+		if quiet {
+			if stderr != "" {
+				t.Errorf("quiet Jujutsu skip wrote stderr: %q", stderr)
+			}
+		} else {
+			if !strings.Contains(stderr, "skipped bootstrap commit") || !strings.Contains(stderr, "Jujutsu") {
+				t.Errorf("missing Jujutsu skip note: %q", stderr)
+			}
+		}
+		if after := initRoleFixtureGit(t, repo, "rev-parse", "HEAD"); after != before {
+			t.Errorf("Jujutsu skip still moved HEAD: %s -> %s", before, after)
+		}
+		if tracked := initRoleFixtureGit(t, repo, "ls-files", "--", ".beads"); tracked != "" {
+			t.Errorf("Jujutsu skip staged beads artifacts: %s", tracked)
+		}
+		if staged := initRoleFixtureGit(t, repo, "diff", "--cached", "--name-only"); staged != "work.txt" {
+			t.Errorf("staged after Jujutsu skip = %q, want the user's work.txt still staged", staged)
+		}
+	}
+}
