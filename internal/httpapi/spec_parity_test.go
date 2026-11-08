@@ -2195,3 +2195,83 @@ func specDeclaresBearer(t *testing.T, so specOp) bool {
 	}
 	return false
 }
+
+// TestSpecWorkRowCountsStateTheirEdgeVocabulary is bd-dh3uij's gate on the
+// four dependency-count descriptions. The LIST/READY work row
+// (IssueWithCounts) counts `blocks` edges only — its counts share the ready
+// work query, whose cardinalities are blocks-shaped — while the DETAIL view
+// (IssueDetails) counts every edge type with far-end deduplication, so the
+// same-named fields legitimately answer different questions for the same
+// issue. A client that reads "Number of issues this one depends on" as an
+// all-types cardinality builds a "no open dependents" sweep check on the
+// list path that passes vacuously on every parent-child dependent
+// (GH#5688), which is exactly the reading the old one-line descriptions
+// invited. This pins the vocabulary the corrected descriptions must carry —
+// blocks-vs-every-type, the excluded edge types, and the two reads that
+// answer the wider questions — rather than their full prose, which stays
+// free to move.
+func TestSpecWorkRowCountsStateTheirEdgeVocabulary(t *testing.T) {
+	doc := loadSpec(t)
+	schemas := mapAt(t, mapAt(t, doc, "components"), "schemas")
+	workRow := mapAt(t, schemas, "IssueWithCounts")
+	details := mapAt(t, schemas, "IssueDetails")
+
+	// described returns a property's description prose, failing when the
+	// property is absent or undocumented — an undocumented count is the
+	// original defect, not a state this gate tolerates.
+	described := func(schemaName string, schema map[string]any, name string) string {
+		t.Helper()
+		prop := mapAt(t, mapAt(t, schema, "properties"), name)
+		prose, _ := prop["description"].(string)
+		if prose == "" {
+			t.Fatalf("%s.%s carries no description", schemaName, name)
+		}
+		return prose
+	}
+	// requires pins semantic terms, not prose: lower-cased substring
+	// containment, one failure message per missing term.
+	requires := func(where, prose string, terms ...string) {
+		t.Helper()
+		lower := strings.ToLower(prose)
+		for _, term := range terms {
+			if !strings.Contains(lower, strings.ToLower(term)) {
+				t.Errorf("%s: description does not state %q — the term the corrected contract must carry", where, term)
+			}
+		}
+	}
+
+	// The work-row counts are incoming/outgoing blocks-edge cardinalities
+	// that name the types they exclude and point at the two reads that
+	// answer the wider questions.
+	requires("IssueWithCounts.dependency_count", described("IssueWithCounts", workRow, "dependency_count"),
+		"blocks", "outgoing", "parent-child", "getIssue", "countDependencyEdges")
+	requires("IssueWithCounts.dependent_count", described("IssueWithCounts", workRow, "dependent_count"),
+		"blocks", "incoming", "parent-child", "getIssue", "countDependencyEdges")
+
+	// The detail counts cover every edge type with their deduplication rule
+	// and distinguish themselves from the same-named work-row fields.
+	requires("IssueDetails.dependency_count", described("IssueDetails", details, "dependency_count"),
+		"every edge type", "once", "blocks", "work row")
+	requires("IssueDetails.dependent_count", described("IssueDetails", details, "dependent_count"),
+		"every edge type", "once", "blocks", "work row")
+
+	// Both work-row counts stay REQUIRED integers: the list and ready pages
+	// compute them unconditionally, so a nullable or dropped member would be
+	// a wire-format break, not a documentation fix.
+	required := map[string]bool{}
+	for _, name := range toStrings(t, workRow["required"]) {
+		required[name] = true
+	}
+	for _, name := range []string{"dependency_count", "dependent_count"} {
+		if !required[name] {
+			t.Errorf("IssueWithCounts: %s left the required set; list and ready compute it on every row", name)
+		}
+		prop := mapAt(t, mapAt(t, workRow, "properties"), name)
+		if got, _ := prop["type"].(string); got != "integer" {
+			t.Errorf("IssueWithCounts.%s: type %q, want integer", name, got)
+		}
+		if nullable, _ := prop["nullable"].(bool); nullable {
+			t.Errorf("IssueWithCounts.%s: nullable on a member every row computes", name)
+		}
+	}
+}
