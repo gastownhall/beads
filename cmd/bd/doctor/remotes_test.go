@@ -153,6 +153,52 @@ func TestCheckDoltRemoteGitOrigin(t *testing.T) {
 		})
 	}
 
+	// origin matching the git origin over a transport that is not git (raw
+	// http(s):// reaches a remotesapi server, file:// a native file store) is
+	// reported, with advice to point origin at the git transport.
+	offGit := []struct {
+		name, gitOrigin string
+		remotes         []storage.RemoteInfo
+		wantAlias       string
+	}{
+		{
+			name:      "raw https origin",
+			gitOrigin: "https://github.com/org/repo.git",
+			remotes:   []storage.RemoteInfo{{Name: "origin", URL: "https://bob:s3cret@github.com/org/repo.git"}},
+		},
+		{
+			name:      "native file origin",
+			gitOrigin: "file:///srv/git/repo.git",
+			remotes:   []storage.RemoteInfo{{Name: "origin", URL: "file:///srv/git/repo.git"}},
+		},
+		{
+			name:      "raw https origin beside an alias",
+			gitOrigin: "https://github.com/org/repo.git",
+			remotes: []storage.RemoteInfo{
+				{Name: "origin", URL: "https://github.com/org/repo.git"},
+				{Name: "backup", URL: "git+https://github.com/org/repo.git"},
+			},
+			wantAlias: "backup",
+		},
+	}
+	for _, tc := range offGit {
+		t.Run(tc.name, func(t *testing.T) {
+			root := remoteCheckWorkspace(t, tc.gitOrigin, "")
+			stubSQLRemotes(t, nil, tc.remotes...)
+			check := CheckDoltRemoteGitOrigin(root)
+			if check.Status != StatusWarning || !strings.Contains(check.Message, "origin matches the git origin URL but does not use a git transport") {
+				t.Fatalf("got %s %q, want a warning that origin does not use a git transport", check.Status, check.Message)
+			}
+			if !strings.Contains(check.Fix, "bd dolt remote add origin git+") {
+				t.Errorf("fix = %q, want advice to point origin at a git transport URL", check.Fix)
+			}
+			if tc.wantAlias != "" && (!strings.Contains(check.Message, ": "+tc.wantAlias) || !strings.Contains(check.Fix, "Review "+tc.wantAlias)) {
+				t.Errorf("got message %q, fix %q, want alias %s reported as well", check.Message, check.Fix, tc.wantAlias)
+			}
+			assertNoSyncDisablingAdvice(t, check)
+		})
+	}
+
 	// Outcomes that do not depend on how a match is classified.
 	t.Run("no Dolt remote matches", func(t *testing.T) {
 		root := remoteCheckWorkspace(t, "https://github.com/org/repo.git", "")

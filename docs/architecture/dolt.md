@@ -601,6 +601,15 @@ mismatched CLI remotes under `Dolt Remote Migration`.
 > from standard Git refs (`refs/heads/`, `refs/tags/`). You can safely point a
 > `git+ssh://` remote at the same repository as your project source code. See
 > [Dolt Git Remotes](https://docs.dolthub.com/concepts/dolt/git/remotes).
+>
+> This is the default sync setup: a Dolt remote named `origin` over a git
+> transport (`git+https://`, `git+ssh://`, `git+http://`, `git+file://` or
+> `git://`) that points at the git `origin`. `bd dolt remote add` accepts it
+> and `bd doctor` reports it OK under `Dolt Remote vs Git Origin`. Doctor
+> still warns when a remote under another name points at the git origin
+> (bd treats it as a federation peer, not the default sync remote), and when
+> `origin` points at it over raw `http(s)://` or `file://`, which reach a
+> remotesapi server or a native file store instead of `refs/dolt/data`.
 
 ### List/Remove Remotes
 
