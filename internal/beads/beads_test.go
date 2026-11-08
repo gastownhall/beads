@@ -2925,3 +2925,230 @@ func TestResolveBeadsDirForRepoIgnoresInheritedRouting(t *testing.T) {
 		})
 	}
 }
+
+// writeBeadsProjectFixture creates a .beads project directory at dir: a
+// metadata.json and, when withDB is set, a dolt/ data directory. withDB false
+// models a server-mode (metadata-only) project with no local database.
+func writeBeadsProjectFixture(t *testing.T, dir string, withDB bool) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if withDB {
+		if err := os.MkdirAll(filepath.Join(dir, "dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestFindBeadsDirFromWorktreeRootMatchesCwdDiscovery pins the path-based
+// resolver's linked-worktree behavior (GH#7782): once the ancestor walk has
+// processed the worktree's own root, a usable shared .beads (git-common-dir)
+// is preferred over an unrelated ancestor folder's project, and the result
+// agrees with cwd discovery in the same fixture with BEADS_DIR unset.
+func TestFindBeadsDirFromWorktreeRootMatchesCwdDiscovery(t *testing.T) {
+	// Environment isolation per TestFindBeadsDirFromIgnoresInheritedRouting:
+	// inherited Git routing must not steer the fixtures' probes, and the user
+	// global config must stay out of discovery.
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, t.TempDir())
+	}
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("BEADS_DIR", "")
+	if err := os.Unsetenv("BEADS_DIR"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, layout := range []string{"regular", "bare"} {
+		t.Run(layout, func(t *testing.T) {
+			for _, tc := range []struct {
+				name       string
+				shared     string // shared store: "db", "metadata", or "" (none)
+				root       string // worktree-root .beads: "", "metadata", "db", "redirect_invalid", ...
+				start      string // "": worktree root; "sub": plain subdir; "nested": nested project
+				nested     bool   // create a nested .beads project below the worktree root
+				ancestorDB bool   // ancestor project holds a database (else metadata only)
+				noAncestor bool   // omit the unrelated ancestor project entirely
+				want       string // "shared", "root", "nested", "ancestor", "redirect", or "" (none)
+				parity     bool   // also assert FindBeadsDir() from the same directory
+			}{
+				{name: "no root store, shared db, from root", shared: "db", ancestorDB: true, want: "shared", parity: true},
+				{name: "no root store, shared db, from subdir", shared: "db", start: "sub", ancestorDB: true, want: "shared", parity: true},
+				{name: "root metadata only, shared db", shared: "db", root: "metadata", ancestorDB: true, want: "shared", parity: true},
+				{name: "no root store, shared metadata only", shared: "metadata", ancestorDB: true, want: "shared", parity: true},
+				{name: "root own database", shared: "db", root: "db", ancestorDB: true, want: "root", parity: true},
+				{name: "nested project below root", shared: "db", nested: true, start: "nested", ancestorDB: true, want: "nested", parity: true},
+				// An invalid redirect leaves the root store unusable; the
+				// shared store wins over the ancestor, but cwd parity is not
+				// asserted for invalid redirects.
+				{name: "invalid root redirect", shared: "db", root: "redirect_invalid", ancestorDB: true, want: "shared"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					var sharedRoot, worktree string
+					if layout == "regular" {
+						sharedRoot, worktree = setupRegularWorktreeRepo(t)
+					} else {
+						sharedRoot, worktree = setupBareParentWorktree(t)
+					}
+					parent := filepath.Dir(worktree)
+					shared := filepath.Join(sharedRoot, ".beads")
+					ancestor := filepath.Join(parent, ".beads")
+					independent := filepath.Join(parent, "independent", ".beads")
+					rootBeads := filepath.Join(worktree, ".beads")
+
+					switch tc.shared {
+					case "db":
+						writeBeadsProjectFixture(t, shared, true)
+					case "metadata":
+						writeBeadsProjectFixture(t, shared, false)
+					}
+					if !tc.noAncestor {
+						writeBeadsProjectFixture(t, ancestor, tc.ancestorDB)
+					}
+					switch tc.root {
+					case "metadata":
+						writeBeadsProjectFixture(t, rootBeads, false)
+					case "db":
+						writeBeadsProjectFixture(t, rootBeads, true)
+					case "redirect_invalid":
+						if err := os.MkdirAll(rootBeads, 0o755); err != nil {
+							t.Fatal(err)
+						}
+						missing := filepath.Join(parent, "missing-target", ".beads")
+						if err := os.WriteFile(filepath.Join(rootBeads, RedirectFileName), []byte(missing+"\n"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+
+					start := worktree
+					wantPath := ""
+					switch tc.want {
+					case "shared":
+						wantPath = shared
+					case "root":
+						wantPath = rootBeads
+					case "ancestor":
+						wantPath = ancestor
+					case "redirect":
+						wantPath = independent
+					}
+					nestedBeads := ""
+					if tc.nested {
+						nestedDir := filepath.Join(worktree, "nested-project")
+						nestedBeads = filepath.Join(nestedDir, ".beads")
+						writeBeadsProjectFixture(t, nestedBeads, false)
+						start = nestedDir
+						if tc.want == "nested" {
+							wantPath = nestedBeads
+						}
+					}
+					if tc.start == "sub" {
+						start = filepath.Join(worktree, "sub dir")
+						if err := os.MkdirAll(start, 0o755); err != nil {
+							t.Fatal(err)
+						}
+					}
+
+					if got := FindBeadsDirFrom(start); !utils.PathsEqual(got, wantPath) {
+						t.Errorf("FindBeadsDirFrom(%q) = %q, want %q", start, got, wantPath)
+					}
+					if tc.parity {
+						t.Chdir(start)
+						git.ResetCaches()
+						if got := FindBeadsDir(); !utils.PathsEqual(got, wantPath) {
+							t.Errorf("FindBeadsDir() from %q = %q, want %q (cwd parity)", start, got, wantPath)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestFindBeadsDirFromPlainRepoWalkUp pins the plain-repository guard for the
+// GH#7782 fix: bounding discovery at a linked worktree's root must not
+// change walk-up for a plain (non-worktree) repository nested inside a
+// project folder, which keeps discovering the parent folder's project.
+func TestFindBeadsDirFromPlainRepoWalkUp(t *testing.T) {
+	parent := t.TempDir()
+	parentBeads := filepath.Join(parent, ".beads")
+	writeBeadsProjectFixture(t, parentBeads, true)
+
+	repo := filepath.Join(parent, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGitInDir(t, repo, "init")
+	runGitInDir(t, repo, "config", "user.email", "test@example.com")
+	runGitInDir(t, repo, "config", "user.name", "Test User")
+
+	if got := FindBeadsDirFrom(repo); !utils.PathsEqual(got, parentBeads) {
+		t.Errorf("FindBeadsDirFrom(%q) = %q, want parent project %q", repo, got, parentBeads)
+	}
+}
+
+// TestFindBeadsDirFromWorktreeDoesNotAdoptUnrelatedParentProject reproduces
+// GH#7782: `bd -C <linked worktree>` must resolve the worktree's own project
+// (the shared .beads via git-common-dir), not a .beads that an unrelated
+// ancestor folder of the worktree happens to hold.
+func TestFindBeadsDirFromWorktreeDoesNotAdoptUnrelatedParentProject(t *testing.T) {
+	parent := t.TempDir()
+	parentBeads := filepath.Join(parent, ".beads")
+	if err := os.MkdirAll(filepath.Join(parentBeads, "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(parentBeads, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	project := filepath.Join(parent, "project")
+	worktree := filepath.Join(parent, "project-wt")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGitInDir(t, project, "init")
+	runGitInDir(t, project, "config", "user.email", "test@example.com")
+	runGitInDir(t, project, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(project, "README.md"), []byte("# Test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitInDir(t, project, "add", "README.md")
+	runGitInDir(t, project, "commit", "-m", "Initial commit")
+	runGitInDir(t, project, "worktree", "add", worktree, "HEAD")
+
+	projectBeads := filepath.Join(project, ".beads")
+	if err := os.MkdirAll(filepath.Join(projectBeads, "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectBeads, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("BEADS_DIR", "")
+	if err := os.Unsetenv("BEADS_DIR"); err != nil {
+		t.Fatal(err)
+	}
+
+	want := utils.CanonicalizePath(projectBeads)
+	if got := FindBeadsDirFrom(worktree); !utils.PathsEqual(got, want) {
+		t.Errorf("FindBeadsDirFrom(worktree) = %q, want the worktree's own project %q (not parent %q)", got, want, parentBeads)
+	}
+
+	t.Chdir(worktree)
+	git.ResetCaches()
+	if got := FindBeadsDir(); !utils.PathsEqual(got, want) {
+		t.Errorf("FindBeadsDir() from worktree cwd = %q, want %q", got, want)
+	}
+}

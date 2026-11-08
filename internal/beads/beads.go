@@ -664,6 +664,14 @@ func FindDatabasePath() string {
 
 // FindBeadsDirFrom finds the effective .beads/ directory as if discovery
 // started from startDir, without changing the process working directory.
+// Unlike FindBeadsDir, it does not consult BEADS_DIR: the caller named a
+// directory, so path-based discovery (bd -C, hooks, rig tooling) resolves
+// that directory's own workspace, and parity with cwd discovery is not
+// universal (plain-repository walk-up and invalid redirects keep their
+// path-based behavior). For a linked Git worktree, once the walk has
+// processed the worktree's own root, a usable shared .beads (via
+// git-common-dir) is preferred over ancestors outside the worktree's
+// repository (GH#7782), matching FindBeadsDir's worktree fallback order.
 func FindBeadsDirFrom(startDir string) string {
 	if startDir == "" {
 		return ""
@@ -699,11 +707,16 @@ func FindBeadsDirFrom(startDir string) string {
 
 	fallbackBeadsDir := ""
 	fallbackHasDB := false
+	sharedBeadsDir := ""
 	if repoRoot != "" {
 		fallbackBeadsDir = worktreeFallbackBeadsDirForRepo(repoRoot)
 		if fallbackBeadsDir != "" {
 			if fbInfo, err := os.Stat(fallbackBeadsDir); err == nil && fbInfo.IsDir() {
-				fallbackHasDB = hasBeadsDatabase(FollowRedirect(fallbackBeadsDir))
+				resolved := FollowRedirect(fallbackBeadsDir)
+				fallbackHasDB = hasBeadsDatabase(resolved)
+				if hasBeadsProjectFiles(resolved) {
+					sharedBeadsDir = resolved
+				}
 			}
 		}
 	}
@@ -711,10 +724,13 @@ func FindBeadsDirFrom(startDir string) string {
 	walk := NewAncestorDirWalk(startDir, startDir).passOverUserGlobalBeads(repoRoot, true)
 	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		beadsDir := filepath.Join(dir, ".beads")
+		// A linked worktree's own root bounds path-based discovery once the
+		// shared store is known, even when the root has no .beads of its own.
+		// Plain repositories have no fallback pathname and never stop here.
+		isWorktreeRoot := fallbackBeadsDir != "" && repoRoot != "" && utils.PathsEqual(dir, repoRoot)
+		isJJSecondaryRoot := jjSecondaryRoot != "" && utils.PathsEqual(dir, jjSecondaryRoot)
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			resolved := FollowRedirect(beadsDir)
-			isWorktreeRoot := repoRoot != "" && utils.PathsEqual(dir, repoRoot)
-			isJJSecondaryRoot := jjSecondaryRoot != "" && utils.PathsEqual(dir, jjSecondaryRoot)
 			if isWorktreeRoot && fallbackHasDB && !hasBeadsDatabase(resolved) {
 				// A worktree root can contain tracked .beads metadata without
 				// owning the ignored database directory. Match FindBeadsDir by
@@ -726,6 +742,16 @@ func FindBeadsDirFrom(startDir string) string {
 			} else if hasBeadsProjectFiles(resolved) {
 				return resolved
 			}
+		}
+		if isWorktreeRoot && sharedBeadsDir != "" {
+			// The walk has processed the worktree's own root. Prefer its
+			// usable shared store (GH#7782) instead of climbing into
+			// ancestors outside the worktree's repository, which can hold an
+			// unrelated project that would otherwise capture discovery —
+			// `bd -C <linked worktree>` must not adopt a parent folder's
+			// store. Without a usable shared store, the ancestor walk below
+			// is preserved.
+			return sharedBeadsDir
 		}
 
 	}

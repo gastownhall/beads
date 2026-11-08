@@ -12,6 +12,14 @@ separate from Git branch commits.
 All worktrees in the same repository use the same beads workspace unless you
 override discovery with `BEADS_DIR`.
 
+Path-based selection — `bd -C <dir>`, hooks, and other tooling that names a
+directory instead of changing into it — resolves that directory's own
+workspace: from inside a linked worktree, discovery prefers the repository's
+shared `.beads` (located via `git-common-dir`) once it has processed the
+worktree's own root, instead of climbing into a parent folder's unrelated
+`.beads` project (GH#7782). Path-based discovery does not consult `BEADS_DIR`;
+that variable applies to discovery from the working directory.
+
 Startup *config* discovery — the `rev-parse` probe in `internal/config`'s
 `gitDirsForRepo`, which locates a linked worktree's shared `.beads` config —
 scrubs inherited Git routing variables such as `GIT_DIR` and `GIT_WORK_TREE`
