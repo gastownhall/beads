@@ -295,14 +295,16 @@ func (s *testSuite) gitOut(args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// prepareInitArtifacts writes the beads artifacts and stages a foreign
-// work.txt, with an unstaged edit on top, after a seed commit.
-func (s *testSuite) prepareInitArtifacts() {
+// prepareInitArtifacts writes the beads artifacts into a new repository,
+// after a seed commit unless unborn.
+func (s *testSuite) prepareInitArtifacts(unborn bool) {
 	s.T().Helper()
 	s.gitInit()
-	s.writeFile("seed", "seed\n")
-	s.run("git", "add", "seed")
-	s.run("git", "commit", "-q", "-m", "seed")
+	if !unborn {
+		s.writeFile("seed", "seed\n")
+		s.run("git", "add", "seed")
+		s.run("git", "commit", "-q", "-m", "seed")
+	}
 	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0750))
 	s.writeFile(filepath.Join(".beads", "config.yaml"), "# beads\n")
 	s.writeFile("CLAUDE.md", "beads instructions\n")
@@ -337,7 +339,7 @@ func (s *testSuite) requireForeignWorkUntouched() {
 // GH#5654: the init commit holds only the artifact paths; a file the user
 // staged beforehand keeps its staged blob and its unstaged edit.
 func (s *testSuite) TestCommitInitArtifacts_LeavesForeignStagedFiles() {
-	s.prepareInitArtifacts()
+	s.prepareInitArtifacts(false)
 	s.stageForeignWork()
 	seed := s.gitOut("rev-parse", "HEAD")
 
@@ -352,7 +354,7 @@ func (s *testSuite) TestCommitInitArtifacts_LeavesForeignStagedFiles() {
 // GH#5654: when the artifacts already match HEAD, a foreign staged file is no
 // reason to commit; the result reports no commit and no error.
 func (s *testSuite) TestCommitInitArtifacts_NothingToCommitWithForeignStaged() {
-	s.prepareInitArtifacts()
+	s.prepareInitArtifacts(false)
 	s.run("git", "add", ".beads", "CLAUDE.md")
 	s.run("git", "commit", "-q", "-m", "artifacts")
 	s.stageForeignWork()
@@ -362,6 +364,21 @@ func (s *testSuite) TestCommitInitArtifacts_NothingToCommitWithForeignStaged() {
 	s.Require().NoError(err)
 	s.False(result.DidCommit)
 	s.Equal(head, s.gitOut("rev-parse", "HEAD"))
+	s.requireForeignWorkUntouched()
+}
+
+// GH#5654: on an unborn branch the init commit becomes the root commit with
+// only the artifacts, leaving none of them staged (or staged for deletion)
+// and the foreign file staged as before.
+func (s *testSuite) TestCommitInitArtifacts_UnbornHeadLeavesForeignStagedFiles() {
+	s.prepareInitArtifacts(true)
+	s.stageForeignWork()
+
+	result, err := s.commitInitArtifacts()
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal("1", s.gitOut("rev-list", "--count", "HEAD"))
+	s.Equal(".beads/config.yaml\nCLAUDE.md", s.gitOut("show", "--name-only", "--format=", "HEAD"))
 	s.requireForeignWorkUntouched()
 }
 

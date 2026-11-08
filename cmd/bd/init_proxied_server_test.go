@@ -805,6 +805,7 @@ func TestProxiedInitTailCommitScope(t *testing.T) {
 	for _, tc := range []initCommitScopeCase{
 		{name: "foreign_staged"},
 		{name: "partly_staged", partly: true},
+		{name: "unborn", unborn: true},
 		{name: "unchanged", unchanged: true},
 		{name: "jj", jj: true},
 		{name: "jj_quiet", jj: true, quiet: true},
