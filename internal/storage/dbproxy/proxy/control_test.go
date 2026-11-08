@@ -371,8 +371,11 @@ func TestControl_ConcurrentIdentify(t *testing.T) {
 	}
 }
 
-func TestControl_CapsConcurrentHandshakes(t *testing.T) {
-	control, _, _ := newControlServer(t)
+// bd-g4xtvt (GH#5697): the control listener is loopback TCP, reachable by any
+// local uid. A full pool of idle connections that never send a request must
+// not lock a legitimate secret holder out of the identity handshake.
+func TestControl_IdleConnectionsDoNotStarveIdentify(t *testing.T) {
+	control, secret, want := newControlServer(t)
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(control.Port()))
 	conns := make([]net.Conn, 0, maxConcurrentIdentRequests)
 	t.Cleanup(func() {
@@ -380,24 +383,25 @@ func TestControl_CapsConcurrentHandshakes(t *testing.T) {
 			_ = conn.Close()
 		}
 	})
+	firstDial := time.Now()
 	for range maxConcurrentIdentRequests {
 		conn, err := net.DialTimeout("tcp", addr, time.Second)
 		require.NoError(t, err)
 		conns = append(conns, conn)
 	}
 	require.Eventually(t, func() bool {
-		return len(control.slots) == maxConcurrentIdentRequests
-	}, time.Second, 10*time.Millisecond)
+		return activeControlConns(control) == maxConcurrentIdentRequests
+	}, time.Second, time.Millisecond)
 
-	extra, err := net.DialTimeout("tcp", addr, time.Second)
-	require.NoError(t, err)
-	defer extra.Close()
-	require.NoError(t, extra.SetDeadline(time.Now().Add(time.Second)))
-	_, err = io.WriteString(extra, "IDENT blocked blocked\n")
-	require.NoError(t, err)
-	buf := make([]byte, 1)
-	_, err = extra.Read(buf)
-	require.Error(t, err)
+	// The idle holders keep their connections for identDeadline; the
+	// caller's budget is shorter, so it must be served without waiting
+	// them out.
+	got, err := identity.Identify("127.0.0.1", control.Port(), secret, identityProbeTimeout)
+	require.NoError(t, err, "idle unauthenticated connections exhausted the control listener")
+	require.Less(t, time.Since(firstDial), identDeadline,
+		"an idle holder may have timed out before the probe, so the pool was not full")
+	got.MAC = ""
+	assert.Equal(t, &want, got)
 }
 
 // Persistent transient Accept failures (e.g. EMFILE) must not tear down the
@@ -409,7 +413,6 @@ func TestControl_AcceptLoopSurvivesPersistentErrors(t *testing.T) {
 		listener: listener,
 		done:     make(chan struct{}),
 		closing:  make(chan struct{}),
-		slots:    make(chan struct{}, maxConcurrentIdentRequests),
 	}
 	immediately := make(chan time.Time)
 	close(immediately)
@@ -474,4 +477,11 @@ func (l *failingListener) Close() error {
 
 func (l *failingListener) Addr() net.Addr {
 	return &net.TCPAddr{}
+}
+
+// activeControlConns reports how many connections control holds in its pool.
+func activeControlConns(control *controlServer) int {
+	control.mu.Lock()
+	defer control.mu.Unlock()
+	return control.active.Len()
 }
