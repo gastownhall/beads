@@ -714,23 +714,31 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 	}
 
 	if !in.stealth && isRepo && t.useLocalBeads {
-		commitResult, err := gitUC.CommitInitArtifacts(ctx, domain.CommitInitArtifactsParams{
-			BeadsDir: ".beads/",
-			OptionalPaths: []string{
-				config.SafeAgentsFile(),
-				filepath.Join(".claude", "settings.json"),
-				"CLAUDE.md",
-				".gitignore",
-			},
-			Message:   "bd init: initialize beads issue tracking",
-			NoVerify:  true,
-			SkipHooks: true,
-		})
-		switch {
-		case err != nil && !in.quiet:
-			fmt.Fprintf(os.Stderr, "Warning: failed to commit beads files: %v\n", err)
-		case err == nil && commitResult.DidCommit && !in.quiet:
-			fmt.Printf("  %s Committed beads files to git\n", ui.RenderPass("✓"))
+		// A native commit in a Jujutsu workspace moves HEAD under jj and
+		// orphans its working-copy commit (GH#5654); leave the artifacts there.
+		if gitUC.IsJujutsuRepo(ctx) {
+			if !in.quiet {
+				fmt.Fprintln(os.Stderr, initJujutsuBootstrapSkipNote)
+			}
+		} else {
+			commitResult, err := gitUC.CommitInitArtifacts(ctx, domain.CommitInitArtifactsParams{
+				BeadsDir: ".beads/",
+				OptionalPaths: []string{
+					config.SafeAgentsFile(),
+					filepath.Join(".claude", "settings.json"),
+					"CLAUDE.md",
+					".gitignore",
+				},
+				Message:   "bd init: initialize beads issue tracking",
+				NoVerify:  true,
+				SkipHooks: true,
+			})
+			switch {
+			case err != nil && !in.quiet:
+				fmt.Fprintf(os.Stderr, "Warning: failed to commit beads files: %v\n", err)
+			case err == nil && commitResult.DidCommit && !in.quiet:
+				fmt.Printf("  %s Committed beads files to git\n", ui.RenderPass("✓"))
+			}
 		}
 	}
 
