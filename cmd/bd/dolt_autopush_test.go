@@ -681,3 +681,80 @@ func TestMaybeAutoPush_ThrottlesAfterFailure(t *testing.T) {
 		})
 	}
 }
+
+// headMovingAutoPushStore is a fakeAutoPushStore whose Push moves HEAD (as
+// the real Push's pre-push commit does, GH#5433) and whose post-push HEAD read
+// can fail.
+type headMovingAutoPushStore struct {
+	fakeAutoPushStore
+	afterPush    string
+	afterPushErr error
+	pushed       bool
+}
+
+func (f *headMovingAutoPushStore) GetCurrentCommit(context.Context) (string, error) {
+	if f.pushed {
+		return f.afterPush, f.afterPushErr
+	}
+	return f.commit, nil
+}
+
+func (f *headMovingAutoPushStore) Push(context.Context) error {
+	f.pushCalls++
+	f.pushed = true
+	return nil
+}
+
+// TestMaybeAutoPush_SuccessClearsLastError pins AC-3 of GH#6289: once the
+// throttle of a failed attempt has expired and HEAD has moved, a successful
+// auto-push records success in both timestamps, records the post-push HEAD
+// (or the pre-push HEAD when the re-read fails) and clears last_error.
+func TestMaybeAutoPush_SuccessClearsLastError(t *testing.T) {
+	expired := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	failed := pushState{LastPush: expired, LastCommit: "c0", LastAttempt: expired, LastError: "timed out after 30s"}
+
+	tests := []struct {
+		name         string
+		afterPushErr error
+		wantCommit   string
+	}{
+		{name: "post-push HEAD", wantCommit: "c2"},
+		{name: "re-read fails, pre-push fallback", afterPushErr: errors.New("engine closed"), wantCommit: "c1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			beadsDir, _ := setupNoGitOpsAutoPushWorkspace(t, "no-git-ops: true\ndolt:\n  auto-push: true\n")
+			fake := &headMovingAutoPushStore{fakeAutoPushStore: fakeAutoPushStore{commit: "c1"}, afterPush: "c2", afterPushErr: tt.afterPushErr}
+			setStore(fake)
+			seed := failed
+			if err := savePushState(&seed); err != nil {
+				t.Fatalf("savePushState: %v", err)
+			}
+
+			before := time.Now().UTC().Truncate(time.Second)
+			maybeAutoPush(context.Background())
+			after := time.Now().UTC()
+
+			if fake.pushCalls != 1 {
+				t.Fatalf("Push calls = %d, want 1 (throttle expired and HEAD moved)", fake.pushCalls)
+			}
+			got := readPushStateMap(t, beadsDir)
+			for _, key := range []string{"last_push", "last_attempt"} {
+				v, _ := got[key].(string)
+				at, err := time.Parse(time.RFC3339, v)
+				if err != nil || at.Before(before) || at.After(after) {
+					t.Errorf("%s = %q, want this successful push's time; state %v", key, v, got)
+				}
+			}
+			if got["last_push"] != got["last_attempt"] {
+				t.Errorf("last_push %v != last_attempt %v, want both set to the success time", got["last_push"], got["last_attempt"])
+			}
+			if got["last_commit"] != tt.wantCommit {
+				t.Errorf("last_commit = %v, want %q", got["last_commit"], tt.wantCommit)
+			}
+			if v, ok := got["last_error"]; ok {
+				t.Errorf("last_error = %v, want it cleared by the successful push", v)
+			}
+		})
+	}
+}
