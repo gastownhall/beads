@@ -652,3 +652,46 @@ func TestMaybeAutoPush_FailureKeepsLastPush(t *testing.T) {
 		})
 	}
 }
+
+// TestMaybeAutoPush_ThrottlesAfterFailure pins AC-2 of GH#6289: the debounce
+// keys off the later valid timestamp of last_attempt and last_push, so a
+// recent failed attempt still throttles retries even though it no longer
+// moves last_push, and legacy last_push-only files keep throttling as before.
+func TestMaybeAutoPush_ThrottlesAfterFailure(t *testing.T) {
+	now := time.Now().UTC()
+	recent := now.Add(-time.Minute).Format(time.RFC3339)
+	expired := now.Add(-time.Hour).Format(time.RFC3339)
+
+	tests := []struct {
+		name     string
+		seed     pushState
+		wantPush bool
+	}{
+		{name: "recent attempt, old success", seed: pushState{LastPush: expired, LastCommit: "c0", LastAttempt: recent, LastError: "boom"}},
+		{name: "recent attempt, no success yet", seed: pushState{LastAttempt: recent, LastError: "boom"}},
+		{name: "recent attempt, malformed success", seed: pushState{LastPush: "yesterday", LastCommit: "c0", LastAttempt: recent}},
+		{name: "newer success, older attempt", seed: pushState{LastPush: recent, LastCommit: "c0", LastAttempt: expired}},
+		{name: "recent success, malformed attempt", seed: pushState{LastPush: recent, LastCommit: "c0", LastAttempt: "garbage"}},
+		{name: "legacy last_push-only file", seed: pushState{LastPush: recent, LastCommit: "c0"}},
+		{name: "both expired", seed: pushState{LastPush: expired, LastCommit: "c0", LastAttempt: expired, LastError: "boom"}, wantPush: true},
+		{name: "expired legacy file", seed: pushState{LastPush: expired, LastCommit: "c0"}, wantPush: true},
+		{name: "both malformed", seed: pushState{LastPush: "x", LastCommit: "c0", LastAttempt: "y"}, wantPush: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, fake := setupNoGitOpsAutoPushWorkspace(t, "no-git-ops: true\ndolt:\n  auto-push: true\n")
+			fake.commit = "c1"
+			seed := tt.seed
+			if err := savePushState(&seed); err != nil {
+				t.Fatalf("savePushState: %v", err)
+			}
+
+			maybeAutoPush(context.Background())
+
+			if got := fake.pushCalls == 1; got != tt.wantPush {
+				t.Errorf("Push calls = %d with state %+v, want pushed=%v", fake.pushCalls, tt.seed, tt.wantPush)
+			}
+		})
+	}
+}
