@@ -349,6 +349,22 @@ func (s *testSuite) TestCommitInitArtifacts_LeavesForeignStagedFiles() {
 	s.requireForeignWorkUntouched()
 }
 
+// GH#5654: when the artifacts already match HEAD, a foreign staged file is no
+// reason to commit; the result reports no commit and no error.
+func (s *testSuite) TestCommitInitArtifacts_NothingToCommitWithForeignStaged() {
+	s.prepareInitArtifacts()
+	s.run("git", "add", ".beads", "CLAUDE.md")
+	s.run("git", "commit", "-q", "-m", "artifacts")
+	s.stageForeignWork()
+	head := s.gitOut("rev-parse", "HEAD")
+
+	result, err := s.commitInitArtifacts()
+	s.Require().NoError(err)
+	s.False(result.DidCommit)
+	s.Equal(head, s.gitOut("rev-parse", "HEAD"))
+	s.requireForeignWorkUntouched()
+}
+
 func (s *testSuite) TestAdd_EmptyPathsErrors() {
 	s.gitInit()
 	err := s.repo.Add(s.Ctx())
