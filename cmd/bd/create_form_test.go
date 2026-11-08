@@ -4,11 +4,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func TestParseFormInput(t *testing.T) {
@@ -768,6 +770,93 @@ func TestFormValuesIntegration(t *testing.T) {
 		}
 		if len(labels) != 2 {
 			t.Errorf("expected 2 labels, got %d", len(labels))
+		}
+	})
+}
+
+// TestCreateIssueFromFormValuesDependencyTypes pins the create form's
+// dependency spellings end to end (bd-3073gm, GH#5585/#5560): every documented
+// way to say "this issue depends on B" — a bare id, blocks:B, or the
+// blocked-by/depends-on aliases — must store the canonical blocks edge the
+// form has always meant, gate the new issue while B is open, and never write
+// the reversed edge.
+func TestCreateIssueFromFormValuesDependencyTypes(t *testing.T) {
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	s := newTestStore(t, testDB)
+	ctx := context.Background()
+
+	createFormTarget := func(t *testing.T, title string) *types.Issue {
+		t.Helper()
+		target, err := CreateIssueFromFormValues(ctx, s, &createFormValues{
+			Title:     title,
+			Priority:  2,
+			IssueType: "task",
+		}, "test")
+		if err != nil {
+			t.Fatalf("create target %s: %v", title, err)
+		}
+		return target
+	}
+
+	t.Run("every depends-on spelling stores one canonical blocks edge", func(t *testing.T) {
+		for spelling, entry := range map[string]string{
+			"bare id":         "%s",
+			"explicit blocks": "blocks:%s",
+			"blocked-by":      "blocked-by:%s",
+			"depends-on":      "depends-on:%s",
+		} {
+			target := createFormTarget(t, "Dep target "+spelling)
+			child, err := CreateIssueFromFormValues(ctx, s, &createFormValues{
+				Title:        "Dep child " + spelling,
+				Priority:     2,
+				IssueType:    "bug",
+				Dependencies: []string{fmt.Sprintf(entry, target.ID)},
+			}, "test")
+			if err != nil {
+				t.Fatalf("%s: create: %v", spelling, err)
+			}
+
+			deps, err := s.GetDependenciesWithMetadata(ctx, child.ID)
+			if err != nil {
+				t.Fatalf("%s: GetDependenciesWithMetadata: %v", spelling, err)
+			}
+			if len(deps) != 1 || deps[0].ID != target.ID || deps[0].DependencyType != types.DepBlocks {
+				t.Errorf("%s: child deps = %+v, want the single canonical blocks edge to %s", spelling, deps, target.ID)
+			}
+
+			// No reversed B-to-new edge, and the gating direction is the
+			// new issue's: it is blocked while the target stays open.
+			reverse, err := s.GetDependencies(ctx, target.ID)
+			if err != nil {
+				t.Fatalf("%s: GetDependencies(target): %v", spelling, err)
+			}
+			for _, d := range reverse {
+				if d.ID == child.ID {
+					t.Errorf("%s: wrote the reversed edge %s -> %s", spelling, target.ID, child.ID)
+				}
+			}
+			// The live ready listing is the gate bd ready/blocked run: the
+			// canonical blocks edge holds the child out while the target,
+			// which nothing blocks, stays ready.
+			reader, err := s.IssueReader()
+			if err != nil {
+				t.Fatalf("%s: IssueReader: %v", spelling, err)
+			}
+			page, err := reader.Ready(ctx, issueops.ReadyRequest{})
+			if err != nil {
+				t.Fatalf("%s: Ready: %v", spelling, err)
+			}
+			ready := make(map[string]bool, len(page.Items))
+			for _, item := range page.Items {
+				ready[item.ID] = true
+			}
+			if ready[child.ID] {
+				t.Errorf("%s: the canonical blocks edge did not gate %s while %s is open", spelling, child.ID, target.ID)
+			}
+			if !ready[target.ID] {
+				t.Errorf("%s: the unblocked target %s must stay ready, ready set = %v", spelling, target.ID, ready)
+			}
 		}
 	})
 }

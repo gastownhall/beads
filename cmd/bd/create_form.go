@@ -94,11 +94,51 @@ func parseCreateFormInput(raw *createFormRawInput) *createFormValues {
 	}
 }
 
+// parseFormDeps routes the create form's Dependencies entries through the
+// same per-entry parser as `bd create --deps` (parseDepSpec), so the
+// documented aliases canonicalize to the gating blocks type instead of being
+// stored as literal inert edges (bd-3073gm, GH#5585/#5560).
+//
+// One deliberate divergence is pinned here, before anything else: direction.
+// A form entry has always meant "the new issue depends on the target" —
+// including `blocks:<id>`, the OPPOSITE of --deps' explicit blocks: swap —
+// so every parsed spec carries SwapDirection=false. Pinning before dedupe is
+// what makes `blocks:B, depends-on:B` one edge rather than a direction
+// collision.
+func parseFormDeps(entries []string) ([]domain.DependencySpec, error) {
+	var out []domain.DependencySpec
+	for _, raw := range entries {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		spec, err := parseDepSpec(raw)
+		if err != nil {
+			return nil, err
+		}
+		if spec.TargetID == "" {
+			return nil, fmt.Errorf("invalid dependency %q: target is empty", raw)
+		}
+		spec.SwapDirection = false
+		out = append(out, spec)
+	}
+	return out, nil
+}
+
 // CreateIssueFromFormValues creates an issue from the given form values.
 // It returns the created issue and any error that occurred.
 // This function handles parent-child relationships, labels, dependencies,
 // and source_repo inheritance.
 func CreateIssueFromFormValues(ctx context.Context, s storage.DoltStorage, fv *createFormValues, actor string) (*types.Issue, error) {
+	// Parse dependency specs before anything else: a malformed entry fails
+	// the create before a parent lookup, a child-ID reservation, or any
+	// write. The form's field validator runs the same parse, so a caller
+	// that went through the TUI already corrected the entry there.
+	depSpecs, err := parseFormDeps(fv.Dependencies)
+	if err != nil {
+		return nil, err
+	}
+
 	// If parent is specified, validate it exists and generate child ID
 	var explicitID string
 	var inheritedLabels []string
@@ -147,42 +187,14 @@ func CreateIssueFromFormValues(ctx context.Context, s storage.DoltStorage, fv *c
 	}
 
 	// If a discovered-from dependency is present, inherit source_repo from
-	// the referenced parent issue.
-	if dfParent := discoveredFromParent(fv.Dependencies); dfParent != "" {
+	// the referenced parent issue. The specs are already canonicalized, so
+	// this reads the parsed pipeline rather than re-deriving type:target
+	// pairs from the raw entries.
+	if dfParent := discoveredFromParentSpec(depSpecs); dfParent != "" {
 		parentIssue, err := s.GetIssue(ctx, dfParent)
 		if err == nil && parentIssue != nil && parentIssue.SourceRepo != "" {
 			issue.SourceRepo = parentIssue.SourceRepo
 		}
-	}
-
-	// Parse dependency specs before creating anything. The form keeps its
-	// historical lenient parsing (warn and skip malformed entries), but the
-	// edges that do parse commit atomically with the create below.
-	var depSpecs []domain.DependencySpec
-	for _, depSpec := range fv.Dependencies {
-		depSpec = strings.TrimSpace(depSpec)
-		if depSpec == "" {
-			continue
-		}
-
-		var depType types.DependencyType
-		var dependsOnID string
-
-		if strings.Contains(depSpec, ":") {
-			parts := strings.SplitN(depSpec, ":", 2)
-			depType = types.DependencyType(strings.TrimSpace(parts[0]))
-			dependsOnID = strings.TrimSpace(parts[1])
-		} else {
-			depType = types.DepBlocks
-			dependsOnID = depSpec
-		}
-
-		if !depType.IsValid() {
-			fmt.Fprintf(os.Stderr, "Warning: invalid dependency type '%s' (valid: blocks, related, parent-child, discovered-from)\n", depType)
-			continue
-		}
-
-		depSpecs = append(depSpecs, domain.DependencySpec{Type: depType, TargetID: dependsOnID})
 	}
 
 	// The issue and its edges (parent-child per GH#1983, plus form deps)
@@ -348,7 +360,7 @@ func runCreateForm(cmd *cobra.Command) error {
 		huh.NewGroup(
 			huh.NewInput().
 				Title("Dependencies").
-				Description("Format: type:id or just id (optional)").
+				Description("Format: type:id or just id (optional). Bare ids, blocks:id and the depends-on/blocked-by aliases all make THIS issue depend on the target; other types name the relationship").
 				Placeholder("e.g., discovered-from:bd-20, blocks:bd-15").
 				Value(&raw.Deps),
 

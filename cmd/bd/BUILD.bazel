@@ -684,6 +684,7 @@ go_test(
         "create_dispatch_test.go",
         "create_embedded_test.go",
         "create_external_ref_test.go",
+        "create_form_deps_test.go",
         "create_form_test.go",
         "create_input_test.go",
         "create_labels_test.go",
