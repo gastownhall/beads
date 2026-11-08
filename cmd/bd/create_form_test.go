@@ -529,6 +529,17 @@ func TestCreateIssueFromFormValues(t *testing.T) {
 		}
 	})
 
+	// bd-3073gm: spellings that resolve to the same edge collapse to it
+	// instead of colliding as two types on one target.
+	t.Run("EquivalentSpellingsCollapse", func(t *testing.T) {
+		target := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Collapse target"})
+		child := createFormIssueForTest(t, ctx, s, &createFormValues{
+			Title:        "Collapse child",
+			Dependencies: []string{"blocked-by:" + target.ID, "depends-on:" + target.ID, "blocks:" + target.ID, target.ID},
+		})
+		assertFormBlocksEdge(t, ctx, s, child.ID, target.ID)
+	})
+
 	t.Run("AllPriorities", func(t *testing.T) {
 		for priority := 0; priority <= 4; priority++ {
 			fv := &createFormValues{

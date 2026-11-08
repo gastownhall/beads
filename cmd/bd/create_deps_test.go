@@ -199,6 +199,8 @@ func TestParseFormDeps(t *testing.T) {
 				{Type: types.DepRelated, TargetID: "bd-b"},
 			},
 		},
+		{name: "blocks and an alias are one edge", in: []string{"blocks:bd-b", "depends-on:bd-b"}, want: []domain.DependencySpec{blocksB}},
+		{name: "every blocking spelling is one edge", in: []string{"bd-b", "blocked-by:bd-b", "blocks:bd-b", "depends-on:bd-b"}, want: []domain.DependencySpec{blocksB}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -220,6 +222,36 @@ func TestParseFormDeps(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestFormDependencyValidation drives the create form's real Dependencies
+// field (bd-3073gm): input the form would refuse is reported on the field when
+// it loses focus, with the typed text left in place, and the accessible
+// prompt re-asks until the entry is corrected.
+func TestFormDependencyValidation(t *testing.T) {
+	for _, tt := range []struct {
+		value   string
+		wantErr string
+	}{
+		{value: "bd-a, blocks:bd-b", wantErr: ""},
+		{value: "blocked-by:bd-b, depends-on:bd-b, blocks:bd-b", wantErr: ""},
+		{value: "", wantErr: ""},
+	} {
+		value := tt.value
+		field := newFormDepsInput(&value)
+		field.Blur()
+		err := field.Error()
+		switch {
+		case tt.wantErr == "" && err != nil:
+			t.Errorf("Dependencies field %q: %v, want it accepted", tt.value, err)
+		case tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)):
+			t.Errorf("Dependencies field %q error = %v, want %q", tt.value, err, tt.wantErr)
+		}
+		if value != tt.value {
+			t.Errorf("Dependencies field %q holds %q after validation, want the entered text kept", tt.value, value)
+		}
+	}
+
 }
 
 // TestLinkDependencyType pins the type bd link stores on every route
