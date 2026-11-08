@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -484,4 +485,168 @@ func activeControlConns(control *controlServer) int {
 	control.mu.Lock()
 	defer control.mu.Unlock()
 	return control.active.Len()
+}
+
+// AC-2 (bd-g4xtvt): a full pool admits the newcomer by closing its oldest
+// connection; the pool never holds more than maxConcurrentIdentRequests.
+func TestControl_FullPoolEvictsOldest(t *testing.T) {
+	control, listener, _ := startSyntheticControl(t, time.After)
+	firstAdmitted := time.Now()
+	peers := make([]*testControlConn, 0, maxConcurrentIdentRequests+3)
+	for range maxConcurrentIdentRequests {
+		conn, _ := newTestControlConn(t)
+		feedControlConn(t, listener, conn)
+		peers = append(peers, conn)
+		require.LessOrEqual(t, activeControlConns(control), maxConcurrentIdentRequests)
+	}
+	require.Eventually(t, func() bool {
+		return activeControlConns(control) == maxConcurrentIdentRequests
+	}, time.Second, time.Millisecond)
+
+	for evicted := range 3 {
+		newcomer, _ := newTestControlConn(t)
+		feedControlConn(t, listener, newcomer)
+		peers = append(peers, newcomer)
+		requireClosed(t, peers[evicted], "the oldest connection was not evicted")
+		require.Less(t, time.Since(firstAdmitted), identDeadline,
+			"the oldest connection may have timed out rather than been evicted")
+		assert.Equal(t, maxConcurrentIdentRequests, activeControlConns(control))
+		for _, kept := range []*testControlConn{peers[evicted+1], peers[len(peers)-2], newcomer} {
+			assert.False(t, kept.isClosed(), "a connection newer than the oldest was closed")
+		}
+	}
+}
+
+// chanListener hands the control accept loop the connections and errors a
+// test feeds it, in order.
+type chanListener struct {
+	conns  chan net.Conn
+	errs   chan error
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newChanListener() *chanListener {
+	return &chanListener{conns: make(chan net.Conn), errs: make(chan error), closed: make(chan struct{})}
+}
+
+func (l *chanListener) Accept() (net.Conn, error) {
+	select {
+	case conn := <-l.conns:
+		return conn, nil
+	case err := <-l.errs:
+		return nil, err
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *chanListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *chanListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)}
+}
+
+// startSyntheticControl runs a control server whose accept loop serves the
+// connections fed to the returned listener. It returns the control secret.
+func startSyntheticControl(t *testing.T, after func(time.Duration) <-chan time.Time) (*controlServer, *chanListener, string) {
+	t.Helper()
+	listener := newChanListener()
+	secret := testDataSecret
+	control := &controlServer{
+		listener: listener,
+		secret:   secret,
+		done:     make(chan struct{}),
+		closing:  make(chan struct{}),
+		reply: func() identity.IdentReply {
+			return identity.IdentReply{Schema: pidfile.SchemaV2, Role: pidfile.KindProxy, RootID: "workspace-root"}
+		},
+	}
+	go control.acceptLoopWithAfter(after)
+	t.Cleanup(func() { _ = control.Close() })
+	return control, listener, secret
+}
+
+// feedControlConn hands conn to the accept loop.
+func feedControlConn(t *testing.T, listener *chanListener, conn net.Conn) {
+	t.Helper()
+	select {
+	case listener.conns <- conn:
+	case <-time.After(time.Second):
+		t.Fatal("control accept loop did not accept the connection")
+	}
+}
+
+// testControlConn is the proxy side of a net.Pipe. It records closes, can
+// fail SetDeadline or shorten the deadline the handler sets, and reports
+// when a reply write starts and returns.
+type testControlConn struct {
+	net.Conn
+	deadlineErr error
+	deadline    time.Duration // nonzero: replaces the handler's deadline
+
+	closes     atomic.Int32
+	closed     chan struct{}
+	closeOnce  sync.Once
+	writing    chan struct{}
+	written    chan struct{}
+	writeStart sync.Once
+	writeEnd   sync.Once
+}
+
+// newTestControlConn returns the proxy side of a pipe and the client side,
+// which the test closes at cleanup.
+func newTestControlConn(t *testing.T) (*testControlConn, net.Conn) {
+	t.Helper()
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+	return &testControlConn{
+		Conn:    server,
+		closed:  make(chan struct{}),
+		writing: make(chan struct{}),
+		written: make(chan struct{}),
+	}, client
+}
+
+func (c *testControlConn) SetDeadline(deadline time.Time) error {
+	if c.deadlineErr != nil {
+		return c.deadlineErr
+	}
+	if c.deadline != 0 {
+		deadline = time.Now().Add(c.deadline)
+	}
+	return c.Conn.SetDeadline(deadline)
+}
+
+func (c *testControlConn) Write(p []byte) (int, error) {
+	c.writeStart.Do(func() { close(c.writing) })
+	defer c.writeEnd.Do(func() { close(c.written) })
+	return c.Conn.Write(p)
+}
+
+func (c *testControlConn) Close() error {
+	c.closes.Add(1)
+	c.closeOnce.Do(func() { close(c.closed) })
+	return c.Conn.Close()
+}
+
+func (c *testControlConn) isClosed() bool {
+	select {
+	case <-c.closed:
+		return true
+	default:
+		return false
+	}
+}
+
+func requireClosed(t *testing.T, conn *testControlConn, msg string) {
+	t.Helper()
+	select {
+	case <-conn.closed:
+	case <-time.After(time.Second):
+		t.Fatal(msg)
+	}
 }
