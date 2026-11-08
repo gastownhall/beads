@@ -201,6 +201,7 @@ func TestWispCommandsRegisterWispTypeFlag(t *testing.T) {
 		name string
 		cmd  *cobra.Command
 	}{
+		{"bd mol wisp <proto>", wispCmd},
 		{"bd mol wisp create <proto>", wispCreateCmd},
 	} {
 		f := c.cmd.Flags().Lookup("wisp-type")
@@ -308,4 +309,43 @@ func TestWispCreateStampsWispType(t *testing.T) {
 			t.Errorf("dry-run created %d ephemeral issues, want 0", got)
 		}
 	})
+}
+
+// TestBareWispStampsWispType drives the real bare `bd mol wisp <proto>`
+// command: its own flag set must accept --wisp-type, and every issue it
+// creates must carry the type (GH#8209).
+func TestBareWispStampsWispType(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
+	rootID := wispTestProto(t, ctx, s, 2)
+	withWispTestGlobals(t, s, ctx)
+
+	t.Cleanup(func() {
+		if f := wispCmd.Flags().Lookup("wisp-type"); f != nil {
+			_ = f.Value.Set(f.DefValue)
+			f.Changed = false
+		}
+	})
+	if err := wispCmd.ParseFlags([]string{"--wisp-type", "heartbeat"}); err != nil {
+		t.Fatalf("bd mol wisp %s --wisp-type heartbeat: %v", rootID, err)
+	}
+
+	var runErr error
+	_ = captureStdout(t, func() error {
+		runErr = runWisp(wispCmd, []string{rootID})
+		return nil
+	})
+	if runErr != nil {
+		t.Fatalf("runWisp --wisp-type heartbeat: %v", runErr)
+	}
+
+	got := ephemeralIssues(t, ctx, s)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 ephemeral wisp issues (root + 2 children), got %d", len(got))
+	}
+	for _, issue := range got {
+		if issue.WispType != types.WispTypeHeartbeat {
+			t.Errorf("%s (%q): wisp_type = %q, want %q", issue.ID, issue.Title, issue.WispType, types.WispTypeHeartbeat)
+		}
+	}
 }

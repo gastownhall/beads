@@ -5318,6 +5318,7 @@ bd mol wisp
     | Examples:
     |   bd mol wisp beads-release --var version=1.0  # Release workflow
     |   bd mol wisp mol-my-workflow                  # Ephemeral operational cycle
+    |   bd mol wisp mol-patrol --wisp-type patrol    # Typed wisp (root + steps)
     |   bd mol wisp list                             # List all wisps
     |   bd mol wisp gc                               # Garbage collect old wisps
     |
@@ -5327,6 +5328,7 @@ bd mol wisp
   flag --dry-run type=bool default="false" usage="Preview what would be created"
   flag --root-only type=bool default="false" usage="Create only the root issue (no child step issues)"
   flag --var type=stringArray default="[]" usage="Variable substitution (key=value); a name the proto cannot consume is an error"
+  flag --wisp-type type=string default="" usage="Wisp type for TTL-based compaction, applied to the root and every created step: heartbeat, ping, patrol, gc_report, recovery, error, escalation (default: untyped)"
 
 bd mol wisp create
   use: "create <proto-id>"

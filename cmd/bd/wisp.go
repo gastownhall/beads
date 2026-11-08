@@ -61,6 +61,7 @@ The wisp lifecycle:
 Examples:
   bd mol wisp beads-release --var version=1.0  # Release workflow
   bd mol wisp mol-my-workflow                  # Ephemeral operational cycle
+  bd mol wisp mol-patrol --wisp-type patrol    # Typed wisp (root + steps)
   bd mol wisp list                             # List all wisps
   bd mol wisp gc                               # Garbage collect old wisps
 
@@ -1053,6 +1054,7 @@ func init() {
 	wispCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value); a name the proto cannot consume is an error")
 	wispCmd.Flags().Bool("dry-run", false, "Preview what would be created")
 	wispCmd.Flags().Bool("root-only", false, "Create only the root issue (no child step issues)")
+	wispCmd.Flags().String("wisp-type", "", wispTypeFlagUsage)
 
 	// Wisp create command flags (kept for backwards compat: bd mol wisp create <proto>)
 	wispCreateCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value); a name the proto cannot consume is an error")
