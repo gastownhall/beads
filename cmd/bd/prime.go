@@ -296,14 +296,7 @@ func readCustomPrimeContent(workspaceDir, beadsDir string) (string, bool) {
 // or walked up from a subdirectory (see the CASE A/B tests in
 // prime_divergence_test.go).
 func primeWorkspaceDir() string {
-	if strings.TrimSpace(changeDir) == "" {
-		return ""
-	}
-	abs, err := filepath.Abs(changeDir)
-	if err != nil {
-		return filepath.Clean(changeDir)
-	}
-	return abs
+	return changeDirWorkspace()
 }
 
 // primeGitCmd returns the git command prime's repository probes run. Under -C

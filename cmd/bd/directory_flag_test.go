@@ -1,11 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/configfile"
 )
 
 func TestResolveChangeDirBeadsDirDoesNotChangeCWD(t *testing.T) {
@@ -219,6 +222,119 @@ func TestIsPreviewCommand(t *testing.T) {
 			}
 			if got := isPreviewCommand(cmd); got != tt.want {
 				t.Fatalf("isPreviewCommand() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// selectedWorkspaceEnvForTest clears every inherited workspace selector and
+// database override, so only the fixture chooses the database.
+func selectedWorkspaceEnvForTest(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"BEADS_DIR", "BEADS_DB", "BD_DB",
+		"BEADS_DOLT_SERVER_DATABASE", "BEADS_DOLT_SHARED_SERVER",
+		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT",
+	} {
+		t.Setenv(key, "")
+	}
+	setChangeDirForTest(t, "")
+	resetRepoContextCachesForTest(t)
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	savePersistentPreRunState(t)
+	t.Cleanup(restoreChangeDirSelection)
+}
+
+// newServerWorkspaceForTest creates <dir>/.beads as a server-mode workspace
+// naming database and returns the .beads path.
+func newServerWorkspaceForTest(t *testing.T, dir, database string) string {
+	t.Helper()
+	beadsDir := filepath.Join(dir, ".beads")
+	writeTestConfigYAML(t, beadsDir, "")
+	writeMetadataConfig(t, beadsDir, configfile.DoltModeServer, database)
+	return beadsDir
+}
+
+// newRedirectedCallerForTest builds the GH#5756 caller: a git repository whose
+// .beads names caller_db and redirects to shared storage. It returns the
+// repository and the caller's .beads.
+func newRedirectedCallerForTest(t *testing.T) (callerDir, callerBeadsDir string) {
+	t.Helper()
+	root := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	sharedBeadsDir := newServerWorkspaceForTest(t, filepath.Join(root, "shared"), "shared_db")
+	callerDir = filepath.Join(root, "caller")
+	initGitRepoAt(t, mkdirForTest(t, callerDir))
+	callerBeadsDir = filepath.Join(callerDir, ".beads")
+	writeRedirectForTest(t, callerBeadsDir, sharedBeadsDir)
+	writeMetadataConfig(t, callerBeadsDir, configfile.DoltModeServer, "caller_db")
+	return callerDir, callerBeadsDir
+}
+
+func mkdirForTest(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	return dir
+}
+
+// runContextJSONForTest runs the context command's startup and body in
+// process and returns the database it reports.
+func runContextJSONForTest(t *testing.T) string {
+	t.Helper()
+	if err := rootCmd.PersistentPreRunE(contextCmd, nil); err != nil {
+		t.Fatalf("PersistentPreRunE(context): %v", err)
+	}
+	jsonOutput = true
+	out := captureStdout(t, func() error { return contextCmd.RunE(contextCmd, nil) })
+	var got struct {
+		Database string `json:"database"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("context --json output %q: %v", out, err)
+	}
+	return got.Database
+}
+
+// TestSelectedWorkspaceDatabaseIsolation pins GH#5756 for the no-store
+// commands: a workspace selected by -C or an exported BEADS_DIR reports its
+// own database, never the redirect-source database of the caller's cwd repo.
+func TestSelectedWorkspaceDatabaseIsolation(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		selector string
+		cmd      *cobra.Command
+	}{
+		{name: "context via -C", selector: "-C", cmd: contextCmd},
+		{name: "context via BEADS_DIR", selector: "BEADS_DIR", cmd: contextCmd},
+		{name: "doctor startup via -C", selector: "-C", cmd: doctorCmd},
+		{name: "doctor startup via BEADS_DIR", selector: "BEADS_DIR", cmd: doctorCmd},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			selectedWorkspaceEnvForTest(t)
+			callerDir, _ := newRedirectedCallerForTest(t)
+			targetDir := filepath.Join(t.TempDir(), "target")
+			targetBeadsDir := newServerWorkspaceForTest(t, targetDir, "target_db")
+			t.Chdir(callerDir)
+			if tc.selector == "-C" {
+				changeDir = targetDir
+			} else {
+				t.Setenv("BEADS_DIR", targetBeadsDir)
+			}
+
+			if tc.cmd == contextCmd {
+				if got := runContextJSONForTest(t); got != "target_db" {
+					t.Fatalf("context database = %q, want target_db (the caller's redirect-source database leaked into the selected workspace)", got)
+				}
+			} else if err := rootCmd.PersistentPreRunE(tc.cmd, nil); err != nil {
+				t.Fatalf("PersistentPreRunE(%s): %v", tc.cmd.Name(), err)
+			}
+			if got := os.Getenv("BEADS_DOLT_SERVER_DATABASE"); got != "" {
+				t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want unset for a selected workspace without a redirect", got)
 			}
 		})
 	}
