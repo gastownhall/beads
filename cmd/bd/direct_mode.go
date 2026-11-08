@@ -38,11 +38,19 @@ func ensureStoreActiveWithContext(ctx context.Context) error {
 func ensureReadOnlyStoreActiveWithContext(ctx context.Context) error {
 	return ensureStoreActiveWith(ctx, func(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
 		st, err := newReadOnlyStoreFromConfig(ctx, beadsDir)
-		if err == nil && isEmbeddedStore(st) {
-			writeRefusingLazyStore = st
-		}
+		recordWriteRefusingStore(st, err)
 		return st, err
 	})
+}
+
+// recordWriteRefusingStore records st in writeRefusingLazyStore when it is an
+// embedded store, the only backend whose read-only open refuses writes. A
+// server-mode store from newReadOnlyStoreFromConfig is writable underneath, so
+// it is not recorded and its post-command steps, auto-backup among them, run.
+func recordWriteRefusingStore(st storage.DoltStorage, err error) {
+	if err == nil && isEmbeddedStore(st) {
+		writeRefusingLazyStore = st
+	}
 }
 
 // writeRefusingLazyStore is the embedded store ensureReadOnlyStoreActiveWithContext

@@ -817,7 +817,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before, 10 and 2 after). On embedded Dolt that store refuses writes, so
   `bd prime` no longer attempts the post-command auto-backup, and in a
   workspace whose database has not been created yet it reports the memory
-  section as unavailable instead of creating an empty database. `bd info
+  section as unavailable instead of creating an empty database. Its read-only
+  open also does not rename a legacy hyphenated database name on disk, so in a
+  workspace that still has one, `bd prime` reports the memory section as
+  unavailable until any other bd command renames it. `bd info
   --thanks`, `bd info --whats-new` and `bd types --sections` no longer open
   the database at all (49 statements before, none after), so they work while
   it is unreachable. In direct server mode the read-only open does not
