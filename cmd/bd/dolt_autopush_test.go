@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
@@ -437,4 +441,214 @@ func TestPushedCommitForState(t *testing.T) {
 			t.Fatalf("pushedCommitForState() = %q, want %q (pre-push fallback)", got, "before")
 		}
 	})
+}
+
+// failingAutoPushStore is a fakeAutoPushStore whose Push always fails.
+type failingAutoPushStore struct {
+	fakeAutoPushStore
+}
+
+func (f *failingAutoPushStore) Push(context.Context) error {
+	f.pushCalls++
+	return errors.New("remote unreachable")
+}
+
+// TestMaybeAutoPush_FailedPushDoesNotAdvanceLastPush pins GH#6289: a failed
+// auto-push must not rewrite push-state.json's last_push success watermark,
+// otherwise the file claims a push happened that never reached the remote.
+func TestMaybeAutoPush_FailedPushDoesNotAdvanceLastPush(t *testing.T) {
+	beadsDir, _ := setupNoGitOpsAutoPushWorkspace(t, "no-git-ops: true\ndolt:\n  auto-push: true\n")
+	failing := &failingAutoPushStore{fakeAutoPushStore{commit: "newcommit"}}
+	setStore(failing)
+
+	const prevPush = "2026-01-01T00:00:00Z"
+	if err := savePushState(&pushState{LastPush: prevPush, LastCommit: "oldcommit"}); err != nil {
+		t.Fatalf("savePushState: %v", err)
+	}
+
+	maybeAutoPush(context.Background())
+
+	if failing.pushCalls != 1 {
+		t.Fatalf("Push calls = %d, want 1", failing.pushCalls)
+	}
+	data, err := os.ReadFile(filepath.Join(beadsDir, "push-state.json"))
+	if err != nil {
+		t.Fatalf("read push-state.json: %v", err)
+	}
+	got, err := loadPushState()
+	if err != nil || got == nil {
+		t.Fatalf("loadPushState: %v (state %v)", err, got)
+	}
+	if got.LastPush != prevPush {
+		t.Errorf("last_push = %q after a FAILED auto-push, want unchanged %q (failure must not look like success; GH#6289)\npush-state.json: %s",
+			got.LastPush, prevPush, data)
+	}
+	if got.LastCommit != "oldcommit" {
+		t.Errorf("last_commit = %q, want unchanged %q", got.LastCommit, "oldcommit")
+	}
+}
+
+// scriptedAutoPushStore is a fakeAutoPushStore whose Push runs push. Push
+// runs on pushWithContext's goroutine, which can outlive a timed-out call, so
+// the count is atomic.
+type scriptedAutoPushStore struct {
+	fakeAutoPushStore
+	push  func(context.Context) error
+	calls atomic.Int32
+}
+
+func (f *scriptedAutoPushStore) Push(ctx context.Context) error {
+	f.calls.Add(1)
+	return f.push(ctx)
+}
+
+// readPushStateMap reads push-state.json as raw JSON, so the assertions see
+// exactly the keys on disk rather than what the Go struct makes of them.
+func readPushStateMap(t *testing.T, beadsDir string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(beadsDir, "push-state.json"))
+	if err != nil {
+		t.Fatalf("read push-state.json: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("parse push-state.json %q: %v", data, err)
+	}
+	return m
+}
+
+// TestMaybeAutoPush_FailureKeepsLastPush pins AC-1 of GH#6289: a failed or
+// timed-out auto-push leaves the success fields (last_push, last_commit)
+// exactly as they were and records the failure in last_attempt plus a
+// credential-scrubbed, single-line, bounded last_error.
+func TestMaybeAutoPush_FailureKeepsLastPush(t *testing.T) {
+	const (
+		oldPush   = "2026-01-01T00:00:00Z"
+		oldCommit = "c0"
+	)
+	longUTF8 := strings.Repeat("é", 400) // 800 bytes of two-byte runes
+
+	tests := []struct {
+		name      string
+		config    string
+		seed      *pushState
+		push      func(context.Context) error
+		wantError func(t *testing.T, got string)
+	}{
+		{
+			name: "push error",
+			seed: &pushState{LastPush: oldPush, LastCommit: oldCommit},
+			push: func(context.Context) error { return errors.New("remote unreachable") },
+			wantError: func(t *testing.T, got string) {
+				if got != "remote unreachable" {
+					t.Errorf("last_error = %q, want %q", got, "remote unreachable")
+				}
+			},
+		},
+		{
+			name:   "context-driven timeout",
+			config: "  auto-push-timeout: 20ms\n",
+			seed:   &pushState{LastPush: oldPush, LastCommit: oldCommit},
+			push: func(ctx context.Context) error {
+				<-ctx.Done()
+				return ctx.Err()
+			},
+			wantError: func(t *testing.T, got string) {
+				if got != "timed out after 20ms" {
+					t.Errorf("last_error = %q, want %q", got, "timed out after 20ms")
+				}
+			},
+		},
+		{
+			name: "credentials and multiline output",
+			seed: &pushState{LastPush: oldPush, LastCommit: oldCommit},
+			push: func(context.Context) error {
+				return errors.New("fatal: could not push\n  to https://alice:s3cret@example.com/org/repo.git\n\tretry later")
+			},
+			wantError: func(t *testing.T, got string) {
+				if strings.Contains(got, "s3cret") || strings.Contains(got, "alice") {
+					t.Errorf("last_error = %q, want URL credentials scrubbed", got)
+				}
+				if strings.ContainsAny(got, "\n\r\t") || strings.Contains(got, "  ") {
+					t.Errorf("last_error = %q, want a single line with collapsed whitespace", got)
+				}
+				if !strings.Contains(got, "example.com/org/repo.git") || !strings.HasPrefix(got, "fatal: could not push to ") {
+					t.Errorf("last_error = %q, want the scrubbed diagnostic kept", got)
+				}
+			},
+		},
+		{
+			name: "long UTF-8 error",
+			seed: &pushState{LastPush: oldPush, LastCommit: oldCommit},
+			push: func(context.Context) error { return errors.New(longUTF8) },
+			wantError: func(t *testing.T, got string) {
+				if len(got) > 512 {
+					t.Errorf("len(last_error) = %d, want at most 512", len(got))
+				}
+				if !utf8.ValidString(got) || !strings.HasPrefix(longUTF8, got) || len(got) < 512-utf8.UTFMax {
+					t.Errorf("last_error = %q, want a prefix of the error cut on a rune boundary", got)
+				}
+			},
+		},
+		{
+			// 510 ASCII bytes then three-byte runes: byte 512 falls inside
+			// the first rune, so the cut must back up to 510.
+			name: "long error cut inside a three-byte rune",
+			seed: &pushState{LastPush: oldPush, LastCommit: oldCommit},
+			push: func(context.Context) error {
+				return errors.New(strings.Repeat("a", 510) + strings.Repeat("世", 10))
+			},
+			wantError: func(t *testing.T, got string) {
+				if want := strings.Repeat("a", 510); got != want {
+					t.Errorf("last_error = %q (len %d), want the 510-byte ASCII prefix", got, len(got))
+				}
+			},
+		},
+		{
+			name: "absent state",
+			push: func(context.Context) error { return errors.New("remote unreachable") },
+			wantError: func(t *testing.T, got string) {
+				if got != "remote unreachable" {
+					t.Errorf("last_error = %q, want %q", got, "remote unreachable")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			beadsDir, _ := setupNoGitOpsAutoPushWorkspace(t, "no-git-ops: true\ndolt:\n  auto-push: true\n"+tt.config)
+			fake := &scriptedAutoPushStore{fakeAutoPushStore: fakeAutoPushStore{commit: "c1"}, push: tt.push}
+			setStore(fake)
+			if tt.seed != nil {
+				if err := savePushState(tt.seed); err != nil {
+					t.Fatalf("savePushState: %v", err)
+				}
+			}
+
+			before := time.Now().UTC().Truncate(time.Second)
+			_ = captureStderr(t, func() { maybeAutoPush(context.Background()) })
+			after := time.Now().UTC()
+
+			if n := fake.calls.Load(); n != 1 {
+				t.Fatalf("Push calls = %d, want 1", n)
+			}
+			got := readPushStateMap(t, beadsDir)
+			wantPush, wantCommit := "", ""
+			if tt.seed != nil {
+				wantPush, wantCommit = tt.seed.LastPush, tt.seed.LastCommit
+			}
+			if got["last_push"] != wantPush || got["last_commit"] != wantCommit {
+				t.Errorf("success fields = (%v, %v), want unchanged (%q, %q) after a failed push; state %v",
+					got["last_push"], got["last_commit"], wantPush, wantCommit, got)
+			}
+			attempt, _ := got["last_attempt"].(string)
+			at, err := time.Parse(time.RFC3339, attempt)
+			if err != nil || at.Before(before) || at.After(after) {
+				t.Errorf("last_attempt = %q, want an RFC3339 time of this attempt; state %v", attempt, got)
+			}
+			lastErr, _ := got["last_error"].(string)
+			tt.wantError(t, lastErr)
+		})
+	}
 }

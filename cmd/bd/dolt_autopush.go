@@ -5,22 +5,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/pushstate"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
 // pushState tracks auto-push state in a local file (.beads/push-state.json)
 // instead of the Dolt metadata table, to avoid merge conflicts on multi-machine
-// setups (GH#2466).
-type pushState struct {
-	LastPush   string `json:"last_push"`   // RFC3339 timestamp
-	LastCommit string `json:"last_commit"` // Dolt commit hash
-}
+// setups (GH#2466). bd doctor reads the same file through internal/pushstate.
+type pushState = pushstate.State
 
 type autoPushTarget interface {
 	GetCurrentCommit(ctx context.Context) (string, error)
@@ -32,26 +31,15 @@ func pushStatePath() (string, error) {
 	if beadsDir == "" {
 		return "", fmt.Errorf("%s", activeWorkspaceNotFoundError())
 	}
-	return filepath.Join(beadsDir, "push-state.json"), nil
+	return pushstate.Path(beadsDir), nil
 }
 
 func loadPushState() (*pushState, error) {
-	path, err := pushStatePath()
-	if err != nil {
-		return nil, err
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return nil, fmt.Errorf("%s", activeWorkspaceNotFoundError())
 	}
-	data, err := os.ReadFile(path) //nolint:gosec // path is constructed internally
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var ps pushState
-	if err := json.Unmarshal(data, &ps); err != nil {
-		return nil, err
-	}
-	return &ps, nil
+	return pushstate.Load(beadsDir)
 }
 
 func savePushState(ps *pushState) error {
@@ -69,6 +57,28 @@ func savePushState(ps *pushState) error {
 // autoPushTimeout bounds the st.Push() call that shells out to git fetch,
 // which blocks indefinitely when the remote is unreachable (GH#3370).
 const autoPushTimeout = 30 * time.Second
+
+// maxPushErrorLen caps the push error recorded in push-state.json.
+const maxPushErrorLen = 512
+
+// pushFailureReason renders a failed push for push-state.json's last_error:
+// a timeout reads "timed out after <d>"; any other error has embedded URL
+// credentials scrubbed, is collapsed onto one line, and is cut at
+// maxPushErrorLen bytes on a UTF-8 boundary.
+func pushFailureReason(err error, timedOut bool, timeout time.Duration) string {
+	if timedOut {
+		return fmt.Sprintf("timed out after %s", timeout)
+	}
+	reason := strings.Join(strings.Fields(scrubURLCredentials(err.Error())), " ")
+	if len(reason) <= maxPushErrorLen {
+		return reason
+	}
+	cut := maxPushErrorLen
+	for cut > 0 && !utf8.RuneStart(reason[cut]) {
+		cut--
+	}
+	return reason[:cut]
+}
 
 // isDoltAutoPushEnabled returns whether auto-push to Dolt remote should run.
 // Returns true only when explicitly opted in via dolt.auto-push=true in
@@ -202,14 +212,16 @@ func maybeAutoPush(ctx context.Context) {
 			}
 		}
 		debug.Logf("dolt auto-push: push error: %v\n", err)
-		// Throttle retries after failure so a hanging remote doesn't make every
-		// subsequent bd command pay the push timeout. We record the attempt
-		// timestamp but NOT a new LastCommit, so when the remote recovers the
-		// change-detection check (currentCommit != LastCommit) still triggers.
+		// Record the failed attempt without touching the success fields
+		// (GH#6289): last_push/last_commit keep describing the last push that
+		// actually reached the remote, so neither this file nor bd doctor
+		// reads a failure as a success. LastCommit stays stale, so when the
+		// remote recovers the change-detection check still triggers.
 		if ps == nil {
 			ps = &pushState{}
 		}
-		ps.LastPush = time.Now().UTC().Format(time.RFC3339)
+		ps.LastAttempt = time.Now().UTC().Format(time.RFC3339)
+		ps.LastError = pushFailureReason(err, pushCtx.Err() == context.DeadlineExceeded, pushTimeout)
 		if saveErr := savePushState(ps); saveErr != nil {
 			debug.Logf("dolt auto-push: failed to save push state after error: %v\n", saveErr)
 		}
