@@ -48,6 +48,11 @@ project/
 Key points:
 
 - `bd` discovers the repository's `.beads` directory from linked worktrees.
+  From a linked worktree, `bd` and `bd -C <worktree>` select the repository's
+  shared `.beads` ahead of any `.beads` in a folder above the worktree, unless
+  the worktree's own `.beads` holds a database or a `redirect` file, which
+  wins. A folder above the worktree is used only when the shared `.beads`
+  does not exist or holds no project files.
 - Issue changes are stored in Dolt, not committed to the current Git branch.
 - Cross-clone sync uses `bd dolt pull` and `bd dolt push`.
 - No `sync.branch` or beads-managed Git worktree is required.

@@ -664,6 +664,11 @@ func FindDatabasePath() string {
 
 // FindBeadsDirFrom finds the effective .beads/ directory as if discovery
 // started from startDir, without changing the process working directory.
+// Unlike FindBeadsDir it ignores BEADS_DIR. From a linked git worktree it
+// prefers a project below the worktree root, then the root's own .beads
+// (skipped when it holds neither a database nor a redirect and the shared
+// store has a database), then the worktree's shared .beads, and searches
+// ancestors outside the worktree only when no shared store is usable.
 func FindBeadsDirFrom(startDir string) string {
 	if startDir == "" {
 		return ""
