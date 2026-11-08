@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/backends"
 )
 
 func TestResolveChangeDirBeadsDirDoesNotChangeCWD(t *testing.T) {
@@ -364,5 +367,48 @@ func TestSelectedWorkspaceStorelessIsolation(t *testing.T) {
 				t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want unset: the caller's redirect-source database must not follow -C", got)
 			}
 		})
+	}
+}
+
+// TestSelectedWorkspaceBackendAdmission pins GH#5756 for workspaces admitted
+// without local database files: -C onto a registered-backend workspace from a
+// redirected caller still reaches that backend, without the caller's
+// redirect-source database exported for the open.
+func TestSelectedWorkspaceBackendAdmission(t *testing.T) {
+	selectedWorkspaceEnvForTest(t)
+	const name = "selected-workspace-admission"
+	var opened []string
+	open := func(_ context.Context, beadsDir string) (storage.DoltStorage, error) {
+		opened = append(opened, beadsDir)
+		return nil, errRegistryReadWrite
+	}
+	backends.Register(name, backends.Backend{Open: open, OpenReadOnly: open, WorkspaceIsBeadsDir: true, Remote: true})
+	t.Cleanup(func() { backends.Deregister(name) })
+
+	callerDir, _ := newRedirectedCallerForTest(t)
+	targetDir := filepath.Join(t.TempDir(), "target")
+	targetBeadsDir := filepath.Join(targetDir, ".beads")
+	if err := os.MkdirAll(targetBeadsDir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", targetBeadsDir, err)
+	}
+	if err := (&configfile.Config{Backend: name}).Save(targetBeadsDir); err != nil {
+		t.Fatalf("save metadata.json: %v", err)
+	}
+	t.Chdir(callerDir)
+	changeDir = targetDir
+
+	if err := rootCmd.PersistentPreRunE(listCmd, nil); err == nil {
+		t.Fatal("PersistentPreRunE(list) succeeded against a backend that refuses every open")
+	}
+	if len(opened) == 0 {
+		t.Fatal("the registered backend was never opened: admission fell through to the no-database refusal")
+	}
+	for _, dir := range opened {
+		if !sameDirPath(dir, targetBeadsDir) {
+			t.Fatalf("backend opened %q, want the selected workspace %q", dir, targetBeadsDir)
+		}
+	}
+	if got := os.Getenv("BEADS_DOLT_SERVER_DATABASE"); got != "" {
+		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want unset: the caller's redirect-source database must not follow -C", got)
 	}
 }
