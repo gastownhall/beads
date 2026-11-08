@@ -3,14 +3,21 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"maps"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/testutil/legacyworkspace"
@@ -38,6 +45,172 @@ func TestHandleWorkspaceGuardErrorExitCodes(t *testing.T) {
 				t.Fatalf("stderr does not carry the refusal:\n%s", stderr)
 			}
 		})
+	}
+}
+
+// Error framing and the bd dolt diagnostics read a workspace's metadata outside
+// the store factories: framing names the backend of an open that may have just
+// been refused, and bd dolt show and status, which admission guards already,
+// load and validate it again. None of them may migrate a historical SQLite
+// workspace's legacy config.json into metadata.json, and the diagnostics refuse
+// it with admission's refusal and exit code. Each layout has metadata, so
+// BEADS_DIR selects it.
+func TestWorkspaceMetadataReadersLeaveHistoricalSQLiteWorkspaceUnchanged(t *testing.T) {
+	pinLegacyUpgradeGuardEnv(t)
+	requireLegacyRefusal := func(t *testing.T, name string, run func() error) {
+		t.Helper()
+		var err error
+		stderr := captureStderr(t, func() { err = run() })
+		if code, ok := exitCodeFromError(err); !ok || code != 1 {
+			t.Fatalf("%s exit code = %d (%v), want 1", name, code, ok)
+		}
+		if !strings.Contains(stderr, "Error: "+legacyworkspace.HistoricalSQLiteRefusal) {
+			t.Fatalf("%s did not print admission's refusal:\n%s", name, stderr)
+		}
+	}
+	readers := map[string]func(t *testing.T, beadsDir string){
+		"error framing": func(t *testing.T, beadsDir string) {
+			_ = backendNameForErrorFraming(beadsDir)
+		},
+		"dolt backend config": func(t *testing.T, beadsDir string) {
+			if _, err := loadDoltBackendConfig(beadsDir); !isLegacyUpgradeRefusal(err) {
+				t.Fatalf("loadDoltBackendConfig = %v, want admission's legacy refusal", err)
+			}
+		},
+		"dolt show": func(t *testing.T, _ string) {
+			requireLegacyRefusal(t, "bd dolt show", func() error { return showDoltConfig(false) })
+		},
+		"dolt status": func(t *testing.T, _ string) {
+			requireLegacyRefusal(t, "bd dolt status", func() error { return doltStatusCmd.RunE(doltStatusCmd, nil) })
+		},
+	}
+	for _, layout := range legacyworkspace.HistoricalSQLiteLayouts() {
+		if _, ok := layout.Files["vc.db"]; ok {
+			// Metadata-less: discovery does not select it, so nothing reads it.
+			continue
+		}
+		for name, read := range readers {
+			t.Run(layout.Name+"/"+name, func(t *testing.T) {
+				beadsDir := filepath.Join(t.TempDir(), ".beads")
+				layout.Write(t, beadsDir)
+				t.Setenv("BEADS_DIR", beadsDir)
+				before := legacyworkspace.TreeDigest(t, beadsDir)
+				read(t, beadsDir)
+				if after := legacyworkspace.TreeDigest(t, beadsDir); !maps.Equal(after, before) {
+					t.Fatalf("%s changed the workspace: before %v, after %v", name, before, after)
+				}
+			})
+		}
+	}
+}
+
+// bd connect checks the workspace it attaches before its handshake, and again
+// once the handshake returns: the workspace can change while the handshake is
+// in flight. A historical SQLite workspace that appears meanwhile is refused
+// with admission's refusal and exit code 1 before connect writes anything
+// there: the workspace keeps exactly the layout that appeared, with no
+// .gitignore, sidecar or metadata.json of connect's.
+func TestConnectRefusesAHistoricalSQLiteWorkspaceAppearingDuringItsHandshake(t *testing.T) {
+	bd := buildBDUnderTest(t)
+	const handshake = `{"api_version":"v0","backend":"dolt","bd_version":"9.9.9",` +
+		`"beads_dir":"/srv/.beads","capabilities":["issues.get"],"database":"beads",` +
+		`"dolt_mode":"server","project_id":"proj-legacy-race","repo_root":"/srv",` +
+		`"schema_version":1,"wire_revision":1,"min_client_wire_revision":1}`
+	// write lays layout down as another process would, without a *testing.T:
+	// it runs on the server's goroutine.
+	write := func(layout legacyworkspace.Layout, beadsDir string) error {
+		for name, content := range layout.Files {
+			path := filepath.Join(beadsDir, filepath.FromSlash(name))
+			if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+				return err
+			}
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, layout := range legacyworkspace.HistoricalSQLiteLayouts() {
+		for _, flags := range [][]string{nil, {"--json"}} {
+			t.Run(layout.Name+"/connect"+strings.Join(flags, ""), func(t *testing.T) {
+				repoDir := t.TempDir()
+				initGitRepoAt(t, repoDir)
+				beadsDir := filepath.Join(repoDir, ".beads")
+				// The workspace as the other process alone leaves it.
+				appearedDir := filepath.Join(t.TempDir(), ".beads")
+				if err := write(layout, appearedDir); err != nil {
+					t.Fatal(err)
+				}
+				want := legacyworkspace.TreeDigest(t, appearedDir)
+				appeared := make(chan error, 1)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path != "/v0/beads/context" {
+						http.NotFound(w, r)
+						return
+					}
+					select {
+					case appeared <- write(layout, beadsDir):
+					default:
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(handshake))
+				}))
+				t.Cleanup(server.Close)
+				args := append(append([]string{"connect"}, flags...), server.URL)
+
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, bd, args...)
+				cmd.Dir = repoDir
+				cmd.Env = append(bdEnv(t.TempDir()), "BEADS_DOLT_SERVER_MODE=0", "BEADS_DOLT_SHARED_SERVER=0")
+				var output bytes.Buffer
+				cmd.Stdout = &output
+				cmd.Stderr = &output
+				err := cmd.Run()
+				if ctx.Err() != nil {
+					t.Fatalf("bd %s did not finish promptly: %v\n%s", strings.Join(args, " "), ctx.Err(), output.String())
+				}
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+					t.Fatalf("bd %s = %v, want exit 1\n%s", strings.Join(args, " "), err, output.String())
+				}
+				select {
+				case err := <-appeared:
+					if err != nil {
+						t.Fatalf("writing the workspace during the handshake: %v", err)
+					}
+				default:
+					t.Fatalf("bd %s never reached its handshake, so the late refusal went unexercised\n%s", strings.Join(args, " "), output.String())
+				}
+				if !strings.Contains(output.String(), ": "+legacyworkspace.HistoricalSQLiteRefusal) {
+					t.Fatalf("bd %s did not print admission's refusal, naming the workspace:\n%s", strings.Join(args, " "), output.String())
+				}
+				if got := legacyworkspace.TreeDigest(t, beadsDir); !maps.Equal(got, want) {
+					t.Fatalf("refused bd %s changed the workspace: got %v, want %v\n%s", strings.Join(args, " "), slices.Sorted(maps.Keys(got)), slices.Sorted(maps.Keys(want)), output.String())
+				}
+			})
+		}
+	}
+}
+
+// A create target whose legacy config.json does not load is not refused by the
+// discovery check ensureBeadsDirForPath runs first (checkDiscoveredForOpen): it
+// is left to what follows, here the not-auto-created refusal of a target
+// allowCreate rules out.
+func TestEnsureBeadsDirForPathLeavesUnloadableLegacyConfigToItsLoad(t *testing.T) {
+	targetDir := t.TempDir()
+	beadsDir := filepath.Join(targetDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.json"), []byte(`{"backend":"dolt",`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// allowCreate=false stops just after the discovery check, before anything
+	// is created, so the result shows which branch ran.
+	err := ensureBeadsDirForPath(context.Background(), targetDir, nil, false)
+	if err == nil || isLegacyUpgradeRefusal(err) || !strings.Contains(err.Error(), "no beads workspace found") {
+		t.Fatalf("ensureBeadsDirForPath() = %v, want the not-auto-created refusal", err)
 	}
 }
 

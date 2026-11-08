@@ -31,6 +31,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/testutil/legacyworkspace"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -270,6 +271,14 @@ func TestRemedyPrintersNameValuesEscaped(t *testing.T) {
 		}
 		return beadsDir
 	}
+	// historicalSQLite is a hostile path holding a workspace bd's admission
+	// refuses as a historical SQLite workspace.
+	historicalSQLite := func(t *testing.T) string {
+		t.Helper()
+		beadsDir := hostileBeadsDir(t)
+		legacyworkspace.HistoricalSQLiteLayouts()[0].Write(t, beadsDir)
+		return beadsDir
+	}
 	for _, tc := range []struct {
 		name string
 		out  func(t *testing.T) string
@@ -325,6 +334,18 @@ func TestRemedyPrintersNameValuesEscaped(t *testing.T) {
 		{"bd init guard, server message", func(t *testing.T) string {
 			return initGuardServerMessage("beads", hostileName, 3307, "bd", "").Error() +
 				initGuardServerMessage("beads", "db", 3307, "bd", "git+https://example.com/r.git"+hostileName).Error()
+		}},
+		{"migrate-personal planning repo refused as a historical SQLite workspace", func(t *testing.T) string {
+			beadsDir := historicalSQLite(t)
+			return captureStderr(t, func() {
+				_ = planningOpenError(filepath.Dir(beadsDir), checkDiscoveredForOpen(beadsDir))
+			})
+		}},
+		{"bd create --repo target refused as a historical SQLite workspace", func(t *testing.T) string {
+			beadsDir := historicalSQLite(t)
+			return captureStderr(t, func() {
+				_ = handleRepoTargetInitError(filepath.Dir(beadsDir), checkRepoTargetForOpen(filepath.Dir(beadsDir)))
+			})
 		}},
 		{"bd create --repo target store open failure", func(t *testing.T) string {
 			beadsDir := hostileBeadsDir(t)
