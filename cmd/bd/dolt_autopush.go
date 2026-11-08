@@ -110,6 +110,28 @@ func pushWithContext(ctx context.Context, target autoPushTarget) error {
 	}
 }
 
+// lastPushActivity returns the later of ps's last_attempt and last_push, the
+// moment the debounce interval runs from. Each is parsed independently and an
+// invalid value is ignored, so a legacy last_push-only file still throttles
+// and a malformed field cannot disable the throttle the other one sets.
+func lastPushActivity(ps *pushState) (time.Time, bool) {
+	if ps == nil {
+		return time.Time{}, false
+	}
+	var last time.Time
+	found := false
+	for _, v := range []string{ps.LastAttempt, ps.LastPush} {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			continue
+		}
+		if !found || t.After(last) {
+			last, found = t, true
+		}
+	}
+	return last, found
+}
+
 // pushedCommitForState returns the commit to record as LastCommit after a
 // successful auto-push. Push commits pending changes before pushing (GH#5433),
 // so HEAD can move during the push call; reusing the pre-push value would leave
@@ -165,13 +187,10 @@ func maybeAutoPush(ctx context.Context) {
 		interval = 5 * time.Minute
 	}
 
-	if ps != nil && ps.LastPush != "" {
-		lastPush, err := time.Parse(time.RFC3339, ps.LastPush)
-		if err == nil && time.Since(lastPush) < interval {
-			debug.Logf("dolt auto-push: throttled (last push %s ago, interval %s)\n",
-				time.Since(lastPush).Round(time.Second), interval)
-			return
-		}
+	if last, ok := lastPushActivity(ps); ok && time.Since(last) < interval {
+		debug.Logf("dolt auto-push: throttled (last push attempt %s ago, interval %s)\n",
+			time.Since(last).Round(time.Second), interval)
+		return
 	}
 
 	// Change detection: skip if nothing changed since last push
