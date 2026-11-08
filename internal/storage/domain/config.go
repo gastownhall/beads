@@ -253,7 +253,8 @@ var _ ConfigKeysReader = (*configUseCaseImpl)(nil)
 
 // GetConfigKeys implements ConfigKeysReader on the use case, reading the keys in
 // one statement when the repository supports it and picking them out of the
-// GetAllConfig result when it does not (same rows either way, by exact key).
+// GetAllConfig result when it does not. The fallback selects exact keys; a
+// repository's own read keeps its database collation and key remapping.
 func (u *configUseCaseImpl) GetConfigKeys(ctx context.Context, keys ...string) (map[string]string, error) {
 	if kr, ok := u.cfgRepo.(ConfigKeysReader); ok {
 		out, err := kr.GetConfigKeys(ctx, keys...)

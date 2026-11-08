@@ -649,7 +649,8 @@ func (s *InstrumentedStorage) GetAllConfig(ctx context.Context) (map[string]stri
 // GetConfigKeys forwards the domain.ConfigKeysReader optional fast path when
 // the wrapped store provides it, and otherwise picks the keys out of
 // instrumented GetAllConfig, so wrapping a store never costs it the capability.
-// As with GetConfigByPrefix, cmd/bd unwraps to the raw store, so this span fires
+// The fallback selects exact keys; a store's own read keeps its database
+// collation and key remapping. As with GetConfigByPrefix, cmd/bd unwraps to the raw store, so this span fires
 // only for a caller that holds the instrumented store. The span records how many
 // keys were asked for, not their names.
 func (s *InstrumentedStorage) GetConfigKeys(ctx context.Context, keys ...string) (map[string]string, error) {
