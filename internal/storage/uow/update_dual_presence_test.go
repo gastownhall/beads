@@ -146,3 +146,85 @@ func TestLifecycleUpdateRefusesDualPresence(t *testing.T) {
 		})
 	}
 }
+
+// TestDualPresenceCloseReopenUnchanged pins what the GH#5991 refusal leaves
+// alone: Close and Reopen are separate verbs that keep targeting the wisp copy
+// of a dual-present ID, and their version-only ApplyUpdate precondition (which
+// mutates nothing) still checks the wisp row instead of refusing.
+func TestDualPresenceCloseReopenUnchanged(t *testing.T) {
+	ctx := context.Background()
+	operations, provider := newRealIssueOperationsWithProvider(t, ctx)
+	id := "bd-dual-close"
+	seedUOWDualPresentIssue(t, ctx, operations, provider, id)
+	seeded := readUOWDualPresenceSnapshot(t, ctx, provider, id)
+	requireUOWDualPresentFixture(t, seeded)
+
+	// durableRows keeps only the issues-plane rows, which neither verb may touch.
+	durableRows := func(snap []string) []string {
+		var rows []string
+		for _, row := range snap {
+			for _, prefix := range []string{"issues: ", "labels: ", "events: ", "dependencies: ", "issue_versions: "} {
+				if strings.HasPrefix(row, prefix) {
+					rows = append(rows, row)
+				}
+			}
+		}
+		return rows
+	}
+	wisp := func() *types.Issue {
+		t.Helper()
+		issue, err := RunTxRead(ctx, provider, func(ctx context.Context, uw UnitOfWork) (*types.Issue, error) {
+			return uw.IssueUseCase().GetWisp(ctx, id)
+		})
+		if err != nil || issue == nil {
+			t.Fatalf("read wisp copy of %s: %v", id, err)
+		}
+		return issue
+	}
+	durableStatus := func() string {
+		t.Helper()
+		issue, err := RunTxRead(ctx, provider, func(ctx context.Context, uw UnitOfWork) (*types.Issue, error) {
+			return uw.IssueUseCase().GetIssue(ctx, id)
+		})
+		if err != nil || issue == nil {
+			t.Fatalf("read issues copy of %s: %v", id, err)
+		}
+		return string(issue.Status)
+	}
+
+	stale := wisp().RowVersion + 1000
+	if _, err := operations.Close(ctx, issueops.CloseRequest{Actor: "writer", IssueID: id, Reason: "done", ExpectedVersion: &stale}); !errors.Is(err, issueops.ErrVersionMismatch) {
+		t.Fatalf("Close with a stale version: err = %v, want ErrVersionMismatch", err)
+	}
+
+	version := wisp().RowVersion
+	closed, err := operations.Close(ctx, issueops.CloseRequest{Actor: "writer", IssueID: id, Reason: "done", ExpectedVersion: &version})
+	if err != nil {
+		t.Fatalf("Close of dual-present %s: %v", id, err)
+	}
+	if closed.Issue == nil || closed.Issue.Title != "wisp "+id || closed.Issue.Status != types.StatusClosed {
+		t.Fatalf("Close result = %+v, want the closed wisp copy", closed.Issue)
+	}
+	if got := wisp().Status; got != types.StatusClosed {
+		t.Errorf("wisp status after Close = %q, want closed", got)
+	}
+	if got := durableStatus(); got != string(types.StatusOpen) {
+		t.Errorf("issues status after Close = %q, want open", got)
+	}
+
+	version = wisp().RowVersion
+	reopened, err := operations.Reopen(ctx, issueops.ReopenRequest{Actor: "writer", IssueID: id, ExpectedVersion: &version})
+	if err != nil {
+		t.Fatalf("Reopen of dual-present %s: %v", id, err)
+	}
+	if reopened.Issue == nil || reopened.Issue.Title != "wisp "+id || reopened.Issue.Status != types.StatusOpen {
+		t.Fatalf("Reopen result = %+v, want the reopened wisp copy", reopened.Issue)
+	}
+	if got := wisp().Status; got != types.StatusOpen {
+		t.Errorf("wisp status after Reopen = %q, want open", got)
+	}
+
+	if before, after := durableRows(seeded), durableRows(readUOWDualPresenceSnapshot(t, ctx, provider, id)); !reflect.DeepEqual(before, after) {
+		t.Errorf("Close/Reopen of the wisp copy changed the issues copy:\nbefore %q\nafter  %q", before, after)
+	}
+}
