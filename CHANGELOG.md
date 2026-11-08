@@ -703,6 +703,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The documented meaning of the dependency count fields is corrected; the
+  counts themselves are unchanged.** `bd list --json`, `bd ready --json` and
+  `bd export` report `dependency_count` / `dependent_count` as incoming and
+  outgoing `blocks`-edge cardinalities — parent-child and other edge types are
+  not counted and no status filter is applied — while `bd show --json`
+  reports the same-named fields as every-edge-type detail cardinalities. The
+  OpenAPI descriptions, Go type comments and JSON reference previously
+  described both as plain "number of issues this one depends on", which
+  invited reading the list count as an all-types number: a "never close an
+  issue that still has open dependents" check built on `bd list --json`
+  passes vacuously on every parent-child dependent. No query, wire value or
+  field name changed. Consumers that need every-type counts should read
+  `bd show --json`; consumers that need a status-sensitive count of
+  non-closed dependents should list them with
+  `bd dep list <id> --direction=up --json` and filter the returned statuses —
+  see the Consumer Guidelines in `docs/reference/json-schema.md`.
+  ([#5688](https://github.com/gastownhall/beads/issues/5688))
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add

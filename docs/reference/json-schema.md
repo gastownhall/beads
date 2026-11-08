@@ -3,7 +3,7 @@ title: JSON Output Schema Contract
 description: The stable JSON output contract for bd --json commands, covering the schema_version envelope, per-command fields, and consumer guidelines.
 ---
 
-Last reviewed: 2026-11-07
+Last reviewed: 2026-11-08
 
 Freshness source: `cmd/bd/output.go`, `cmd/bd/errors.go`, and
 `cmd/bd/protocol/json_contract_test.go`.
@@ -208,13 +208,31 @@ Required fields per item:
 Optional fields:
 - `description`, `owner`, `updated_at`, `closed_at`
 - `labels` (string[]): Attached labels
-- `dependencies` (object[]): Dependency records
-- `dependency_count`, `dependent_count`, `comment_count` (number)
+- `dependencies` (object[]): Dependency records — every outgoing edge type,
+  so this array can hold more records than `dependency_count` counts
+
+Computed count fields (required on every row — the list query computes them
+unconditionally):
+- `dependency_count` (number): Outgoing `blocks` edges — how many issues this
+  one depends on through a `blocks` dependency edge
+- `dependent_count` (number): Incoming `blocks` edges — how many issues
+  depend on this one through a `blocks` dependency edge
+- `comment_count` (number)
 - `parent` (string|null): Parent issue ID
+
+The two dependency counts are BLOCKS-ONLY cardinalities. Edge types other
+than `blocks` — a `parent-child` child, a `discovered-from` or `relates-to`
+link — are not counted, and no status filter is applied: neither number
+means "open dependents". An epic whose dependents are its children therefore
+reports `dependent_count: 0` here while `bd show` reports them all. For
+every-type detail cardinalities use `bd show`; for a status-sensitive count
+of non-closed dependents see [Consumer Guidelines](#consumer-guidelines).
 
 ### bd ready --json
 
-Same schema as `bd list --json`. Items are filtered to unblocked issues only.
+Same schema as `bd list --json`, including the blocks-only meaning of
+`dependency_count` and `dependent_count` (the ready query shares the list
+path's counts machinery). Items are filtered to unblocked issues only.
 Each item includes `dependency_count`, `dependent_count`, `comment_count`,
 and optional `parent` fields. In envelope mode a `--limit`-truncated result
 adds the envelope-level `pagination` key (see the envelope section above).
@@ -237,6 +255,17 @@ items, plus:
 - `revision` (string): guarded-write optimistic-concurrency token, an opaque
   decimal string compared by equality and echoed back verbatim; always present,
   including a legacy `"0"`
+- `dependency_count` / `dependent_count` (number): EVERY-TYPE detail
+  cardinalities — how many DISTINCT issues this one depends on / depend on
+  this one, over every edge type (`blocks`, `parent-child`,
+  `discovered-from`, and the rest) with every status included. An edge held
+  in both the durable and wisp dependency planes counts once, and an edge
+  whose far end has no row in this database still counts
+  (`unresolvable_dependencies` / `unresolvable_dependents` disclose those
+  when the corresponding array was read). These are NOT the same numbers as
+  the list/ready `dependency_count` / `dependent_count`, which count
+  `blocks` edges only — the same-named fields answer different questions
+  and can differ for the same issue
 - `dependencies` (object[]): Full dependency records
 - `comments` (object[]): Comment thread — present only with `--include-comments`;
   the default response returns `comment_count` only (count-only, be-ijck6q)
@@ -321,6 +350,13 @@ marked rows as ephemeral (purge-eligible and export-excluded). The v0.35–
 v0.37 `wisp` key — those streams' spelling of `ephemeral` — is still honored
 as a read-side legacy alias.
 
+Issue records' `dependency_count` / `dependent_count` use the same
+blocks-only vocabulary as the list work row: outgoing and incoming `blocks`
+edge cardinalities summed across both dependency planes, with other edge
+types uncounted and no status filter applied. An epic whose dependents are
+its children exports `dependent_count: 0`; the every-type counts are a
+`bd show` read, not an export field.
+
 ## Consumer Guidelines
 
 1. **Check `schema_version`** on object output. If the version is
@@ -334,3 +370,35 @@ as a read-side legacy alias.
 
 4. **Use `--json` flag**, not `--format json`. The `--json` flag is
    the stable contract; `--format` is for human-readable variants.
+
+5. **Do not read a dependency cardinality as "open dependents".** None of
+   the unfiltered counts — list, ready, show or export — is
+   status-filtered, so `dependent_count: 0` never means "nothing still
+   depends on this" and a sweep guard built on it passes vacuously.
+   Choose the read that answers the question you are asking:
+   - For every-type detail cardinalities over all statuses, use
+     `bd show <ids...> --json` and read its `dependency_count` /
+     `dependent_count`.
+   - For a count of NON-CLOSED, locally resolvable dependent issues, list
+     the dependents and filter by status yourself:
+     ```sh
+     deps=$(bd dep list "$id" --direction=up --json) || exit
+     printf '%s\n' "$deps" | jq '[.[] | select(.status != "closed")] | length'
+     ```
+     The `|| exit` is part of the pattern, not decoration: a failed `bd dep
+     list` must abort the check, because treating its error output as an
+     empty list is the vacuous-pass failure this guidance exists to
+     prevent. `status != "closed"` means non-closed — deferred and custom
+     statuses count as still-open dependents; it does not mean
+     status exactly `open`. This is also not an atomic sweep check, and it
+     is not a count of stored edge rows: `bd dep list --direction=up`
+     omits dependents whose far end has no issue row in this database, so
+     a dangling edge is invisible here while `bd show`'s count still
+     includes it.
+   - Over HTTP, use `countDependencyEdges` with `direction=in` and explicit
+     filters: omit `type` to cover all edge types, pass `status` to narrow
+     by the dependent's status. Honor the 100-anchor bound per call, treat
+     a `missing: true` anchor as "no answer for this id" rather than a
+     zero, and note that this endpoint sums edge rows across both
+     dependency planes — it is not guaranteed to equal `getIssue`'s
+     deduplicated detail counts.

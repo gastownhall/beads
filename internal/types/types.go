@@ -1223,10 +1223,19 @@ type Dependency struct {
 	ThreadID string `json:"thread_id,omitempty"`
 }
 
-// DependencyCounts holds counts for dependencies and dependents
+// DependencyCounts holds counts for dependencies and dependents.
+//
+// Both numbers are BLOCKS-EDGE cardinalities: issueops.GetDependencyCountsInTx
+// counts `type = 'blocks'` edge rows in each direction and sums the durable and
+// wisp dependency planes. Edge types other than `blocks` — a `parent-child`
+// child, a `discovered-from` or `relates-to` link — are not counted, and no
+// status filter is applied: neither number means "open dependents". They are
+// edge-row sums, not distinct-far-end counts, so they can differ both from the
+// every-type detail counts on IssueDetails (which deduplicate an edge held in
+// both planes) and from the same-named blocks-only fields on a work row.
 type DependencyCounts struct {
-	DependencyCount int `json:"dependency_count"` // Number of issues this issue depends on
-	DependentCount  int `json:"dependent_count"`  // Number of issues that depend on this issue
+	DependencyCount int `json:"dependency_count"` // Outgoing `blocks` edge rows summed across planes
+	DependentCount  int `json:"dependent_count"`  // Incoming `blocks` edge rows summed across planes
 }
 
 // IssueWithDependencyMetadata extends Issue with dependency relationship type
@@ -1236,9 +1245,31 @@ type IssueWithDependencyMetadata struct {
 	DependencyType DependencyType `json:"dependency_type"`
 }
 
-// IssueWithCounts extends Issue with dependency relationship counts
+// IssueWithCounts extends Issue with the work-row cardinalities: the element
+// type of `bd list --json`, `bd ready --json` and their served listings.
 type IssueWithCounts struct {
 	*Issue
+
+	// DependencyCount / DependentCount are BLOCKS-EDGE cardinalities, the
+	// two aggregates the counts mega-query computes alongside the rows
+	// (sqlbuild.SearchCountsSQL): outgoing and incoming `blocks` edges
+	// respectively. Edge types other than `blocks` — a `parent-child` child,
+	// a `discovered-from` or `relates-to` link — are NOT counted, and no
+	// status filter is applied: neither number means "open dependents", so
+	// an epic whose dependents are its children reads dependent_count 0
+	// here while `bd show` reports them (GH#5688). The forward count reads
+	// the durable dependencies table; the reverse count unions the wisp
+	// plane when the store probes that table. The embedded Issue.Dependencies
+	// array is a different shape entirely: it carries every outgoing edge
+	// type, so it can hold more records than DependencyCount.
+	//
+	// For every-type detail cardinalities read `bd show` (IssueDetails); for
+	// a count over explicitly chosen edge types and directions use
+	// countDependencyEdges. Neither is guaranteed to equal these numbers.
+	//
+	// Under issueops.ListRequest.SkipCounts these fields read 0 because the
+	// aggregates were never computed — a text listing's rows, which print no
+	// cardinality — and 0 there is "not computed", not "no edges".
 	DependencyCount int     `json:"dependency_count"`
 	DependentCount  int     `json:"dependent_count"`
 	CommentCount    int     `json:"comment_count"`
@@ -1287,6 +1318,19 @@ type IssueDetails struct {
 	// Cardinality fields — emitted by default (count-only mode).
 	// Slice fields (Dependents, Comments) are nil when count-only is active.
 	// Use --include-dependents / --include-comments to populate the slices.
+	//
+	// DependentCount / DependencyCount are EVERY-TYPE detail cardinalities
+	// (issueops.CountDependencyEdgesInTx with no type filter): one per
+	// DISTINCT far end over every edge type — `blocks`, `parent-child`,
+	// `discovered-from` and the rest — with every status included, so
+	// neither means "open dependents". An edge held in both the durable and
+	// the wisp dependency planes counts once, a database without the wisp
+	// table counts the durable plane alone, and an edge whose far end has
+	// no row in this database still counts (UnresolvableDependents /
+	// UnresolvableDependencies below disclose those when the slices were
+	// read). These are NOT the numbers the same-named work-row fields
+	// report: a list or ready row counts `blocks` edges only, so the two
+	// can differ for the same issue (GH#5688).
 	DependentCount  *int64 `json:"dependent_count,omitempty"`
 	DependencyCount *int64 `json:"dependency_count,omitempty"`
 	CommentCount    *int64 `json:"comment_count,omitempty"`
@@ -1960,6 +2004,14 @@ type ReadyExplanation struct {
 // a waits-for edge here is the ordinary spawner-still-open case. A target the
 // caller did not supply a status for is counted under ResolvedBlockers, the
 // ready set's own verdict being the only word available.
+//
+// DependencyCount / DependentCount carry the DependencyCounts the explanation
+// was built from (issueops.GetDependencyCountsInTx): outgoing and incoming
+// `blocks` edge rows summed across the durable and wisp planes. Edge types
+// other than `blocks` — parent-child above all — are not counted and no status
+// filter is applied, so like the list row's same-named fields these are blocks
+// cardinalities, not "open dependents" (GH#5688); the every-type counts live on
+// `bd show` (IssueDetails).
 type ReadyItem struct {
 	*Issue
 	Reason             string   `json:"reason"`
