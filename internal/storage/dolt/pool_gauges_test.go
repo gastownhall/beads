@@ -3,6 +3,8 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"maps"
+	"strings"
 	"testing"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -23,29 +25,37 @@ func openUnconnectedDB(t *testing.T, maxOpen int) *sql.DB {
 	return db
 }
 
-// poolMaxOpen collects bd.db.pool_max_open; ok is false when no point was
-// observed.
-func poolMaxOpen(t *testing.T, reader *sdkmetric.ManualReader) (value int64, ok bool) {
+// poolGauges collects the bd.db.pool_* gauges by name; a gauge with no
+// observed point is absent.
+func poolGauges(t *testing.T, reader *sdkmetric.ManualReader) map[string]int64 {
 	t.Helper()
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &rm); err != nil {
 		t.Fatalf("collect: %v", err)
 	}
+	values := map[string]int64{}
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
-			if m.Name != "bd.db.pool_max_open" {
+			if !strings.HasPrefix(m.Name, "bd.db.pool_") {
 				continue
 			}
 			g, isGauge := m.Data.(metricdata.Gauge[int64])
 			if !isGauge {
-				t.Fatalf("bd.db.pool_max_open is %T, want an int64 gauge", m.Data)
+				t.Fatalf("%s is %T, want an int64 gauge", m.Name, m.Data)
 			}
 			for _, dp := range g.DataPoints {
-				value += dp.Value
-				ok = true
+				values[m.Name] += dp.Value
 			}
 		}
 	}
+	return values
+}
+
+// poolMaxOpen collects bd.db.pool_max_open; ok is false when no point was
+// observed.
+func poolMaxOpen(t *testing.T, reader *sdkmetric.ManualReader) (value int64, ok bool) {
+	t.Helper()
+	value, ok = poolGauges(t, reader)["bd.db.pool_max_open"]
 	return value, ok
 }
 
@@ -124,5 +134,60 @@ func TestRegisterPoolGaugesTracksEachStoreUntilClose(t *testing.T) {
 	_ = second.Close()
 	if tracked(secondDB) {
 		t.Fatal("second Close must untrack")
+	}
+}
+
+// TestPoolGaugesKeepEachStatAtClose pins what a short command's final export
+// reads. Close must take the pool's stats before it closes the pool, because
+// sql.DB.Close drops the idle connections, and each stat must reach its own
+// gauge. The pool holds two connections and has one idle, so the four gauges
+// all differ and a swapped pair shows.
+func TestPoolGaugesKeepEachStatAtClose(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+
+	pools := &poolSet{}
+	if err := pools.register(provider.Meter("test")); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	db, _ := openMockDB(t)
+	db.SetMaxOpenConns(5)
+	ctx := context.Background()
+	conns := make([]*sql.Conn, 3)
+	for i := range conns {
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("db.Conn: %v", err)
+		}
+		conns[i] = conn
+	}
+	// Return one connection to the idle list and hold the other two.
+	if err := conns[0].Close(); err != nil {
+		t.Fatalf("release a connection: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = conns[1].Close()
+		_ = conns[2].Close()
+	})
+
+	store := &DoltStore{db: db}
+	store.untrackPool = pools.track(db)
+	want := map[string]int64{
+		"bd.db.pool_open":     3,
+		"bd.db.pool_in_use":   2,
+		"bd.db.pool_idle":     1,
+		"bd.db.pool_max_open": 5,
+	}
+	if got := poolGauges(t, reader); !maps.Equal(got, want) {
+		t.Fatalf("pool gauges with the store open = %v, want %v", got, want)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := poolGauges(t, reader); !maps.Equal(got, want) {
+		t.Fatalf("pool gauges after Close = %v, want %v (the pool's stats at Close)", got, want)
 	}
 }
