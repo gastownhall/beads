@@ -33,7 +33,8 @@ via Git LFS.
 
 ### The Bootstrap Commit
 
-Unless you pass `--stealth`, `bd init` in a Git repository stages its
+Unless you pass `--stealth` or work in a Jujutsu workspace (see
+[Jujutsu Setup](#jujutsu-setup)), `bd init` in a Git repository stages its
 artifacts and makes one commit, `bd init: initialize beads issue tracking`.
 That commit holds only the changes under the artifact paths: `.beads/`, the
 agents file, `.claude/settings.json`, `CLAUDE.md`, `.agents/`, `.codex/`,
@@ -344,6 +345,12 @@ bd init --stealth        # Full invisible mode (also skips hooks + agents)
 **Colocated repos** (`jj git init --colocate`): Git hooks work normally.
 Beads installs simplified hooks (`pre-commit` and `post-merge` only, no
 staging logic).
+
+In a Jujutsu workspace `bd init` makes no bootstrap commit: a native
+`git commit` would move Git's `HEAD` under jj and leave the previous
+working-copy commit as a stray head. Init prints a note instead, and the
+beads files stay in the working copy for you to record with jj (for example
+with `jj commit` or `jj describe`).
 
 **Pure jj repos** (no git): Since jj doesn't have native hooks yet, set up
 push aliases:

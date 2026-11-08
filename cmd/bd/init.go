@@ -4470,11 +4470,23 @@ func resolveInitDoltMode(proxiedFlag, sharedFlag, serverFlag bool) string {
 	return "embedded"
 }
 
+// initJujutsuBootstrapSkipNote is printed instead of the bootstrap commit in
+// a Jujutsu workspace: a native git commit there moves HEAD under jj, which
+// then rebases its working copy onto it and orphans the previous one (GH#5654).
+const initJujutsuBootstrapSkipNote = "Note: skipped bootstrap commit because this is a Jujutsu workspace; the beads files remain in the working copy for you to record with jj."
+
 // commitEmbeddedInitArtifacts stages the local init artifacts and preserves the
 // optional-add and nonfatal commit behavior of the embedded bootstrap. The
 // commit is scoped to the artifact paths, so anything else the user had
 // staged stays staged (GH#5654).
 func commitEmbeddedInitArtifacts(workDir string, quiet bool) {
+	repo := domaingit.NewInitGitRepository(workDir)
+	if isJJ, _ := repo.IsJujutsuRepo(context.Background()); isJJ {
+		if !quiet {
+			fmt.Fprintln(os.Stderr, initJujutsuBootstrapSkipNote)
+		}
+		return
+	}
 	if initArtifactGitCommand(workDir, "rev-parse", "--git-dir").Run() != nil {
 		if !quiet {
 			fmt.Fprintln(os.Stderr, "Note: skipped bootstrap commit because Git could not resolve the selected repository.")
@@ -4499,7 +4511,7 @@ func commitEmbeddedInitArtifacts(workDir string, quiet bool) {
 		// of them for the bootstrap commit to avoid self-deadlocking
 		// while init still owns the embedded Dolt lock. --no-verify
 		// alone does not skip prepare-commit-msg.
-		result, commitErr := domaingit.NewInitGitRepository(workDir).Commit(context.Background(), domain.GitCommitParams{
+		result, commitErr := repo.Commit(context.Background(), domain.GitCommitParams{
 			Message:   "bd init: initialize beads issue tracking",
 			NoVerify:  true,
 			SkipHooks: true,
