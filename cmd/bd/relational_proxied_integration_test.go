@@ -74,6 +74,18 @@ func TestProxiedServerLink(t *testing.T) {
 		}
 	})
 
+	t.Run("link_custom_type_kept", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "lc")
+		a := bdProxiedCreate(t, bd, p.dir, "Custom from")
+		b := bdProxiedCreate(t, bd, p.dir, "Custom to")
+		if _, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "link", a.ID, b.ID, "--type", "owned-by"); err != nil {
+			t.Fatalf("link --type owned-by failed: %v\nstderr:\n%s", err, stderr)
+		}
+		db := openProxiedDB(t, p)
+		assertProxiedDepExistsWithType(t, db, a.ID, b.ID, "owned-by")
+	})
+
 	t.Run("link_invalid_type_rejected", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "li")
