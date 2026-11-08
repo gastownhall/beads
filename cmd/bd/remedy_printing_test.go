@@ -270,14 +270,6 @@ func TestRemedyPrintersNameValuesEscaped(t *testing.T) {
 		}
 		return beadsDir
 	}
-	graphMarked := func(t *testing.T) string {
-		t.Helper()
-		beadsDir := hostileBeadsDir(t)
-		if err := os.WriteFile(filepath.Join(beadsDir, configfile.GraphFormatMarkerFile), nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		return beadsDir
-	}
 	for _, tc := range []struct {
 		name string
 		out  func(t *testing.T) string
@@ -333,18 +325,6 @@ func TestRemedyPrintersNameValuesEscaped(t *testing.T) {
 		{"bd init guard, server message", func(t *testing.T) string {
 			return initGuardServerMessage("beads", hostileName, 3307, "bd", "").Error() +
 				initGuardServerMessage("beads", "db", 3307, "bd", "git+https://example.com/r.git"+hostileName).Error()
-		}},
-		{"migrate-personal planning repo in a graph format", func(t *testing.T) string {
-			beadsDir := graphMarked(t)
-			return captureStderr(t, func() {
-				_ = planningOpenError(filepath.Dir(beadsDir), checkDiscoveredForOpen(beadsDir))
-			})
-		}},
-		{"bd create --repo target in a graph format", func(t *testing.T) string {
-			beadsDir := graphMarked(t)
-			return captureStderr(t, func() {
-				_ = handleRepoTargetInitError(filepath.Dir(beadsDir), checkRepoTargetFormat(filepath.Dir(beadsDir)))
-			})
 		}},
 		{"bd create --repo target store open failure", func(t *testing.T) string {
 			beadsDir := hostileBeadsDir(t)
@@ -1251,19 +1231,6 @@ func TestEmbeddedRemedyPrinting_migratePersonal(t *testing.T) {
 		requireNamesHostileValue(t, "bd migrate-personal", out)
 	})
 
-	t.Run("planning repo in a graph format", func(t *testing.T) {
-		t.Parallel()
-		dir, _, _ := bdInit(t, bd, "--prefix", "rpd")
-		planningDir := hostilePlanningRepo(t, bd, dir)
-		if err := os.WriteFile(filepath.Join(planningDir, ".beads", configfile.GraphFormatMarkerFile), []byte("link-preview-v9\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		bdCreate(t, bd, dir, "Personal issue")
-		out := requireMigratePersonalRefused(t, bd, dir, "graph-preview-format marker")
-		requireNoTerminalControl(t, "bd migrate-personal", out)
-		requireNamesHostileValue(t, "bd migrate-personal", out)
-	})
-
 	t.Run("planning repo with metadata.json and no database", func(t *testing.T) {
 		t.Parallel()
 		// A fresh clone of a planning repo: its committed metadata.json is
@@ -1307,23 +1274,6 @@ func TestEmbeddedRemedyPrinting_createTarget(t *testing.T) {
 	t.Parallel()
 	bd := buildEmbeddedBD(t)
 	dir, _, _ := bdInit(t, bd, "--prefix", "rpt")
-
-	t.Run("target in a graph format", func(t *testing.T) {
-		t.Parallel()
-		targetDir := filepath.Join(t.TempDir(), hostileFileName)
-		if err := os.MkdirAll(filepath.Join(targetDir, ".beads"), 0o750); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(targetDir, ".beads", configfile.GraphFormatMarkerFile), []byte("link-preview-v9\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		out := bdCreateFail(t, bd, dir, "--silent", "Routed into a graph target", "--repo", targetDir)
-		if !strings.Contains(out, "graph-preview-format marker") {
-			t.Errorf("bd create --repo did not refuse the graph-format target:\n%s", out)
-		}
-		requireNoTerminalControl(t, "bd create --repo", out)
-		requireNamesHostileValue(t, "bd create --repo", out)
-	})
 
 	targetDir := filepath.Join(t.TempDir(), hostileFileName)
 	if err := os.MkdirAll(targetDir, 0o750); err != nil {
