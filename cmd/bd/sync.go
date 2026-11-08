@@ -128,6 +128,13 @@ type syncOutcome struct {
 	// syncStuckTicks. Empty means this run's dirty-stuck status, if any, came
 	// from the tick-count inference instead (wy-mhouc).
 	ConstraintViolations []storage.ConstraintViolation `json:"constraint_violations,omitempty"`
+	// IgnoredTablesOnRemote names the tables, dolt_ignore'd here but still
+	// tracked by the remote's history, over which the pull's merge was
+	// refused (GH#6368). Set only with dirty-stuck, on the attempt that hit
+	// it: the same state refuses every retry, so only an operator clears it.
+	IgnoredTablesOnRemote []string `json:"ignored_tables_on_remote,omitempty"`
+	// IgnoredTablesError is that pull's original error.
+	IgnoredTablesError string `json:"ignored_tables_error,omitempty"`
 }
 
 // syncTransient is one attempt's transient failure.
@@ -315,6 +322,19 @@ func runSyncLoop(ctx context.Context, ops syncOps, maxAttempts int) (*syncOutcom
 				})
 				ops.report("pull behind a fast-forwardable remote tip (peer pushed after our fetch) — re-pulling and retrying")
 				continue
+			}
+			// GH#6368: the merge was refused over ignored working tables the
+			// remote still tracks, and the pull could not prove it a no-op.
+			// The same state refuses every retry, so stop here: exit 4, like
+			// any other condition only an operator can clear. Typed by the
+			// storage layer from positive evidence, never matched on text.
+			var ignoredErr *versioncontrolops.IgnoredTablesMergeError
+			if errors.As(pullErr, &ignoredErr) {
+				out.Status = syncStatusDirtyStuck
+				out.IgnoredTablesOnRemote = ignoredErr.Tables
+				out.IgnoredTablesError = pullErr.Error()
+				ops.report("pull refused over ignored tables the remote still tracks — escalating")
+				return out, nil
 			}
 			return out, fmt.Errorf("pull: %w", pullErr)
 		}
@@ -1127,6 +1147,9 @@ func syncMixedTransientNote(out *syncOutcome) []string {
 // have been byte-identical across every attempt of the last N runs, so this is
 // a stuck table rather than a busy fleet, without knowing the specific cause.
 func syncStuckMessage(out *syncOutcome) []string {
+	if len(out.IgnoredTablesOnRemote) > 0 {
+		return syncIgnoredTablesMessage(out)
+	}
 	if len(out.ConstraintViolations) > 0 {
 		lines := []string{
 			"Error: the is_blocked repair is blocked by constraint violations no writer will ever commit.",
@@ -1166,6 +1189,32 @@ func syncStuckMessage(out *syncOutcome) []string {
 		"Nothing was pushed. This exit is deliberately distinct from exit 3 so a sync timer can page",
 		"instead of retrying forever.")
 	return append(lines, syncMixedTransientNote(out)...)
+}
+
+// syncIgnoredTablesMessage is the exit-4 report for a pull refused over
+// ignored tables the remote still tracks (GH#6368). A remote that is only
+// behind this clone never gets here — the pull proves that a no-op and sync
+// pushes as usual — so the remote either holds history this clone lacks or
+// the proof could not be completed.
+func syncIgnoredTablesMessage(out *syncOutcome) []string {
+	lines := []string{
+		"Error: the pull was refused because the remote still tracks table(s) this clone ignores: " + strings.Join(out.IgnoredTablesOnRemote, ", "),
+	}
+	if out.IgnoredTablesError != "" {
+		lines = append(lines, "  pull error: "+out.IgnoredTablesError)
+	}
+	lines = append(lines,
+		"Dolt will not merge history that tracks a table over this clone's unversioned rows of it,",
+		"so every retry is refused the same way. Nothing was pushed.",
+		"If the remote holds nothing this clone lacks (only clones on this release write to it), an",
+		"ordinary 'bd dolt push' publishes the migrated history and the next sync runs normally.",
+		"If peers on an older release are still pushing, stop them first; if the remote holds their",
+		"work, migrate that history as the runbook describes:",
+		"  https://github.com/gastownhall/beads/blob/main/docs/recovery/sync-failures.md#merge-blocked-on-the-events-table-migration-0062",
+		"Do not force-push, delete the local rows, or re-track the table to get past this: each one",
+		"discards or republishes data.",
+		"This exit is deliberately distinct from exit 3 so a sync timer can page instead of retrying forever.")
+	return lines
 }
 
 // syncStuckTicks is how many consecutive exhausted runs against byte-identical
