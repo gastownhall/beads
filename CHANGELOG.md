@@ -837,8 +837,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `a3f8` is resolved as before. `bd dep add` and `bd dep <a> --blocks <b>`
   also take the titles in their confirmation line from the issues they
   resolved instead of reading each again, and send 18 fewer statements in
-  all. A dependency target found through `routes.jsonl` now shows its title
-  in that line. The `bd serve` http backend keeps the old sequence: a lookup
+  all. An issue on either side of the dependency that is found through
+  `routes.jsonl` or a routed prefix now shows its title in that line, where
+  it used to show the bare ID. The `bd serve` http backend keeps the old sequence: a lookup
   there costs one request when the CLI read memo answers the second read, and
   two without it, and reading directly first would add a request to every
   miss.

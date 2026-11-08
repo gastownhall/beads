@@ -141,6 +141,17 @@ func TestResolveAndGetFromStoreFullIDReadsOnlyTheIssue(t *testing.T) {
 	if err != nil || !result.Routed || result.ResolvedID != "gt-xyz9" {
 		t.Fatalf("routed resolveAndGetFromStore = %+v, %v; want gt-xyz9, routed", result, err)
 	}
+
+	// The resolved id is the stored issue's, not the text typed. They differ
+	// only where the id column's collation matches other spellings (a
+	// case-insensitive or PAD SPACE collation; bd creates neither), and then the
+	// command must act on the row's own id.
+	folding := newResolveCallStore()
+	folding.issues["BD-ABC1"] = &types.Issue{ID: "bd-abc1", Title: "stored lower-case"}
+	result, err = resolveAndGetFromStore(context.Background(), folding, "BD-ABC1", false)
+	if err != nil || result.ResolvedID != "bd-abc1" || result.Issue.ID != "bd-abc1" {
+		t.Fatalf("resolveAndGetFromStore(BD-ABC1) = %+v, %v; want the stored id bd-abc1", result, err)
+	}
 }
 
 // TestResolveAndGetFromStoreAbbreviatedIDFallsBack pins the cost: a prefixed
