@@ -771,3 +771,81 @@ func identRequest(t *testing.T, secret, nonce string) string {
 	require.NoError(t, err)
 	return "IDENT " + mac + " " + nonce + "\n"
 }
+
+// AC-5 (bd-g4xtvt): below capacity the listener answers as before: a valid
+// client gets the signed reply without the secret crossing the wire, and a
+// malformed or unauthenticated request gets no reply bytes.
+func TestControl_AnswersOnlyAuthenticatedRequests(t *testing.T) {
+	control, secret, want := newControlServer(t)
+	relayPort, sent := recordingRelay(t, control.Port())
+	got, err := identity.Identify("127.0.0.1", relayPort, secret, identityProbeTimeout)
+	require.NoError(t, err)
+	assert.Len(t, got.MAC, 64)
+	got.MAC = ""
+	assert.Equal(t, &want, got)
+	wire := sent()
+	require.True(t, strings.HasPrefix(wire, "IDENT "), "relay recorded %q", wire)
+	assert.NotContains(t, wire, secret, "the request disclosed the secret")
+
+	nonce := strings.Repeat("ab", 16)
+	mac := strings.Fields(identRequest(t, secret, nonce))[1]
+	for _, tc := range []struct {
+		name    string
+		request string
+	}{
+		{name: "wrong secret", request: identRequest(t, "not-the-secret", nonce)},
+		{name: "raw secret", request: "IDENT " + secret + " " + nonce + "\n"},
+		{name: "malformed nonce", request: "IDENT " + mac + " zz\n"},
+		{name: "missing newline", request: "IDENT " + mac + " " + nonce},
+		{name: "wrong verb", request: "WHOAMI " + mac + " " + nonce + "\n"},
+		{name: "oversized", request: "IDENT " + strings.Repeat("x", maxIdentRequestBytes) + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(control.Port())), time.Second)
+			require.NoError(t, err)
+			defer conn.Close()
+			require.NoError(t, conn.SetDeadline(time.Now().Add(time.Second)))
+			_, err = io.WriteString(conn, tc.request)
+			require.NoError(t, err)
+			require.NoError(t, conn.(*net.TCPConn).CloseWrite())
+			reply, err := io.ReadAll(conn)
+			var netErr net.Error
+			require.False(t, errors.As(err, &netErr) && netErr.Timeout(), "the listener kept the connection open")
+			assert.Empty(t, reply)
+		})
+	}
+}
+
+// recordingRelay forwards one connection to the control port and returns
+// its own port and a func reporting what the client sent once it is done.
+func recordingRelay(t *testing.T, controlPort int) (int, func() string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	var sent strings.Builder
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		client, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer client.Close()
+		upstream, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(controlPort)))
+		if err != nil {
+			return
+		}
+		defer upstream.Close()
+		go func() { _, _ = io.Copy(client, upstream) }()
+		_, _ = io.Copy(upstream, io.TeeReader(client, &sent))
+	}()
+	return ln.Addr().(*net.TCPAddr).Port, func() string {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("relay did not finish")
+		}
+		return sent.String()
+	}
+}
