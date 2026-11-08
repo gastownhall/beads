@@ -3,6 +3,7 @@
 package doctor
 
 import (
+	"net"
 	"net/http/cgi"
 	"net/http/httptest"
 	"os"
@@ -101,6 +102,8 @@ func lsRemoteDoltData(t *testing.T, url string) string {
 // set, and the repository carries real Dolt data under refs/dolt/data. The
 // origin check is OK without advice to remove origin or go local-only, and
 // both federation checks see no peer: origin is the sync remote, not one.
+// With one more remote both count exactly that peer, the remotesapi
+// listener's state and the peer's reachability reported apart from it.
 func TestDoctorGitBackedOriginTopology(t *testing.T) {
 	if testutil.DoltContainerCrashed() {
 		t.Skipf("Dolt test server crashed: %v", testutil.DoltContainerCrashError())
@@ -175,6 +178,46 @@ func TestDoctorGitBackedOriginTopology(t *testing.T) {
 			if check := CheckFederationPeerConnectivity(repo); check.Status != StatusOK || check.Message != "No federation peers configured (only origin remote)" {
 				t.Errorf("Peer Connectivity: got %s %q (%s), want ok %q",
 					check.Status, check.Message, check.Detail, "No federation peers configured (only origin remote)")
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name         string
+		listenerOpen bool
+	}{
+		{"remotesapi listener closed", false},
+		{"remotesapi listener open", true},
+	} {
+		t.Run("origin carrying refs/dolt/data plus one peer, "+tc.name, func(t *testing.T) {
+			peer := storage.RemoteInfo{Name: "peer1", URL: "http://127.0.0.1:" + strconv.Itoa(closedLocalPort(t)) + "/beads"}
+			repo := workspace(t, "published.git", peer)
+			if tc.listenerOpen {
+				ln, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = ln.Close() })
+				t.Setenv("BEADS_DOLT_REMOTESAPI_PORT", strconv.Itoa(ln.Addr().(*net.TCPAddr).Port))
+			}
+			remotesAPIPort := os.Getenv("BEADS_DOLT_REMOTESAPI_PORT")
+			assertOriginOK(t, repo)
+
+			check := CheckFederationRemotesAPI(repo)
+			wantStatus, wantMessage := StatusError, "remotesapi port "+remotesAPIPort+" not accessible"
+			if tc.listenerOpen {
+				wantStatus, wantMessage = StatusOK, "Port "+remotesAPIPort+" accessible"
+			}
+			if check.Status != wantStatus || check.Message != wantMessage || !strings.HasSuffix(check.Detail, "1 peers configured") {
+				t.Errorf("Federation remotesapi: got %s %q (%q), want %s %q with Detail ending %q",
+					check.Status, check.Message, check.Detail, wantStatus, wantMessage, "1 peers configured")
+			}
+
+			// The peer is counted once whether or not it is reachable.
+			check = CheckFederationPeerConnectivity(repo)
+			if check.Message != "1 peers reachable" && check.Message != "1/1 peers unreachable" {
+				t.Errorf("Peer Connectivity: got %s %q (%s), want exactly one peer, reachable or not",
+					check.Status, check.Message, check.Detail)
 			}
 		})
 	}
