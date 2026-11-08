@@ -351,7 +351,10 @@ func TestControl_RejectsOversizedAndGarbageRequests(t *testing.T) {
 
 func TestControl_ConcurrentIdentify(t *testing.T) {
 	control, secret, want := newControlServer(t)
-	const calls = maxConcurrentIdentRequests
+	// Above the old pool of 8, but well below maxConcurrentIdentRequests, so
+	// the pool never evicts one of these probes, and below macOS's 128-entry
+	// listen backlog, so no dial waits out a dropped SYN.
+	const calls = 32
 	errs := make(chan error, calls)
 	var wg sync.WaitGroup
 	for range calls {
@@ -807,7 +810,9 @@ func TestControl_AnswersOnlyAuthenticatedRequests(t *testing.T) {
 			require.NoError(t, conn.SetDeadline(time.Now().Add(time.Second)))
 			_, err = io.WriteString(conn, tc.request)
 			require.NoError(t, err)
-			require.NoError(t, conn.(*net.TCPConn).CloseWrite())
+			// The listener closes an oversized request with bytes still unread,
+			// so the kernel may reset the connection before this half-close.
+			_ = conn.(*net.TCPConn).CloseWrite()
 			reply, err := io.ReadAll(conn)
 			var netErr net.Error
 			require.False(t, errors.As(err, &netErr) && netErr.Timeout(), "the listener kept the connection open")
