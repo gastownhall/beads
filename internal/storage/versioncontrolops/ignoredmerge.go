@@ -101,10 +101,80 @@ func ProveMergeNoop(ctx context.Context, db DBConn, ref string) (bool, error) {
 	return true, nil
 }
 
+// IgnoredTablesMergeError is a pull the engine refused because tables that
+// are dolt_ignore'd here — new, unstaged working tables on this branch — are
+// still tracked by the incoming history, and the pull could not prove the
+// merge a no-op. Retrying the same state never clears it: the remote has to
+// be brought level (a plain push, when it is only behind) or its history
+// migrated, which is an operator's call (docs/recovery/sync-failures.md).
+// Error returns the engine's original message unchanged; Unwrap returns the
+// original error.
+type IgnoredTablesMergeError struct {
+	// Tables are the ignored working tables the engine named, sorted.
+	Tables []string
+	// Err is the pull's original error.
+	Err error
+}
+
+func (e *IgnoredTablesMergeError) Error() string { return e.Err.Error() }
+
+func (e *IgnoredTablesMergeError) Unwrap() error { return e.Err }
+
+// ignoredWorkingTables reads the tables the engine itself reports as ignored
+// on this session's branch. dolt_status_ignored applies dolt_ignore's glob
+// and override rules and sets ignored only for unstaged new tables, so a
+// tracked table is never reported, whatever dolt_ignore says about its name.
+func ignoredWorkingTables(ctx context.Context, db DBConn) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, "SELECT table_name FROM dolt_status_ignored WHERE ignored")
+	if err != nil {
+		return nil, fmt.Errorf("query ignored tables: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	ignored := make(map[string]bool)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("scan ignored table: %w", err)
+		}
+		ignored[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate ignored tables: %w", err)
+	}
+	return ignored, nil
+}
+
+// ClassifyIgnoredTableStomp wraps err in an IgnoredTablesMergeError when it
+// is the engine's stomp refusal and every table it names is positively an
+// ignored working table on db's session. Anything less — a malformed
+// diagnostic, a named table that is tracked or absent, an unreadable ignore
+// state — returns err unchanged: a wrong diagnosis would send the operator to
+// the wrong runbook.
+func ClassifyIgnoredTableStomp(ctx context.Context, db DBConn, err error) error {
+	tables, ok := StompedTables(err)
+	if !ok {
+		return err
+	}
+	ignored, qErr := ignoredWorkingTables(ctx, db)
+	if qErr != nil {
+		return err
+	}
+	for _, table := range tables {
+		if !ignored[table] {
+			return err
+		}
+	}
+	return &IgnoredTablesMergeError{Tables: tables, Err: err}
+}
+
 // settleIgnoredTableStomp is the normal pull wrappers' handling of a merge
-// error: when err is the engine's stomp refusal and the merge of ref is a
-// proven no-op, the pull succeeded with nothing to merge and nil is returned;
-// otherwise err is returned. db is the pinned session the merge ran on.
+// error. When err is the engine's stomp refusal and the merge of ref is a
+// proven no-op, the pull succeeded with nothing to merge and nil is returned.
+// Otherwise a refusal over confirmed ignored tables becomes an
+// IgnoredTablesMergeError, and anything else is returned unchanged. An
+// unprovable containment only declines the success; it does not erase the
+// positive evidence that ignored rows block this merge. db is the pinned
+// session the merge ran on.
 func settleIgnoredTableStomp(ctx context.Context, db DBConn, ref string, err error) error {
 	if _, ok := StompedTables(err); !ok {
 		return err
@@ -112,5 +182,5 @@ func settleIgnoredTableStomp(ctx context.Context, db DBConn, ref string, err err
 	if noop, proofErr := ProveMergeNoop(ctx, db, ref); proofErr == nil && noop {
 		return nil
 	}
-	return err
+	return ClassifyIgnoredTableStomp(ctx, db, err)
 }

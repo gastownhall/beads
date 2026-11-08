@@ -5,9 +5,11 @@ package embeddeddolt_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
@@ -113,4 +115,69 @@ func TestEmbeddedPullIgnoredTableAncestor(t *testing.T) {
 		t.Fatalf("second pull, remote level with HEAD = %v; want success", err)
 	}
 	assertPullLeftStoreIntact(t, ctx, conn, headBefore, eventsBefore)
+}
+
+// TestEmbeddedPullIgnoredTableDiverged is the escalation half of GH#6368: the
+// remote holds pre-flip peer work this clone does not have, so the merge is
+// not a no-op and the pull must still fail — but as an IgnoredTablesMergeError
+// naming the ignored table, which bd sync maps to its operator-only exit,
+// instead of an anonymous error. The original refusal stays reachable, and the
+// store is left exactly as it was: HEAD, the local ignored rows, no peer work,
+// no open merge.
+func TestEmbeddedPullIgnoredTableDiverged(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMainSchemaAt(t, ctx, 61)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+	seedFlippedStoreBehindRemote(t, ctx, conn)
+
+	// A peer that never migrated publishes more pre-flip work: a new bead and
+	// another row on the still-versioned events table, on top of the remote
+	// tip this clone already has.
+	mustDrain(t, ctx, conn, "CALL DOLT_CHECKOUT('-b', 'peer', 'origin/main')")
+	execFrozenGuard(t, ctx, conn, `
+INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type)
+VALUES ('peer-1', 'peer work', '', '', '', '', 'open', 2, 'task');
+INSERT INTO events (issue_id, event_type, actor, created_at, id)
+VALUES ('pull-1', 'updated', 'laptop', '2026-07-30 00:00:01', 'evt-peer-1');
+`)
+	mustDrain(t, ctx, conn, "CALL DOLT_ADD('-A')")
+	mustDrain(t, ctx, conn, "CALL DOLT_COMMIT('-m', 'test: un-migrated peer work')")
+	peerTip := scalarString(t, ctx, conn, "SELECT commit_hash FROM dolt_log LIMIT 1")
+	mustDrain(t, ctx, conn, "CALL DOLT_PUSH('origin', 'peer:main')")
+	mustDrain(t, ctx, conn, "CALL DOLT_CHECKOUT('main')")
+	mustDrain(t, ctx, conn, "CALL DOLT_BRANCH('-D', 'peer')")
+
+	headBefore := scalarString(t, ctx, conn, "SELECT commit_hash FROM dolt_log LIMIT 1")
+	eventsBefore := eventRows(t, ctx, conn)
+
+	err := versioncontrolops.Pull(ctx, conn, "origin", "main", "")
+	if err == nil {
+		t.Fatal("pull of divergent pre-flip history succeeded; want the ignored-table refusal")
+	}
+	var ignoredErr *versioncontrolops.IgnoredTablesMergeError
+	if !errors.As(err, &ignoredErr) {
+		t.Fatalf("pull error is not an IgnoredTablesMergeError: %v", err)
+	}
+	if !slices.Equal(ignoredErr.Tables, []string{"events"}) {
+		t.Fatalf("IgnoredTablesMergeError.Tables = %v, want [events]", ignoredErr.Tables)
+	}
+	for _, want := range []string{"stomped by merge", "events"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error lost the engine's original refusal (missing %q): %v", want, err)
+		}
+	}
+	if errors.Unwrap(ignoredErr) == nil || errors.Unwrap(ignoredErr).Error() != err.Error() {
+		t.Fatalf("Unwrap does not return the original error: %v", errors.Unwrap(ignoredErr))
+	}
+
+	assertPullLeftStoreIntact(t, ctx, conn, headBefore, eventsBefore)
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM dolt_log WHERE commit_hash = ?", peerTip); got != 0 {
+		t.Fatalf("refused pull put peer tip %s in ancestry", peerTip)
+	}
+	if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM issues WHERE id = 'peer-1'"); got != 0 {
+		t.Fatalf("peer beads landed by a refused pull = %d, want 0", got)
+	}
 }
