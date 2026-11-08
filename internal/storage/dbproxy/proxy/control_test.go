@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -649,4 +650,124 @@ func requireClosed(t *testing.T, conn *testControlConn, msg string) {
 	case <-time.After(time.Second):
 		t.Fatal(msg)
 	}
+}
+
+// AC-3 (bd-g4xtvt): however a handler ends, its connection is closed and
+// leaves the pool exactly once, without taking another connection's place.
+func TestControl_ConnectionCleanup(t *testing.T) {
+	nonce := strings.Repeat("ab", 16)
+	writeAsync := func(client net.Conn, request string) {
+		go func() { _, _ = io.WriteString(client, request) }()
+	}
+	for _, tc := range []struct {
+		name   string
+		setup  func(conn *testControlConn)
+		client func(t *testing.T, client net.Conn, secret string)
+	}{
+		{name: "success", client: func(t *testing.T, client net.Conn, secret string) {
+			writeAsync(client, identRequest(t, secret, nonce))
+			_, err := bufio.NewReader(client).ReadString('\n')
+			require.NoError(t, err)
+		}},
+		{name: "missing newline", client: func(t *testing.T, client net.Conn, secret string) {
+			_, err := io.WriteString(client, "IDENT "+nonce)
+			require.NoError(t, err)
+			_ = client.Close()
+		}},
+		{name: "oversize", client: func(t *testing.T, client net.Conn, secret string) {
+			writeAsync(client, "IDENT "+strings.Repeat("x", maxIdentRequestBytes)+"\n")
+		}},
+		{name: "wrong verb", client: func(t *testing.T, client net.Conn, secret string) {
+			writeAsync(client, "WHOAMI "+strings.Repeat("0", 64)+" "+nonce+"\n")
+		}},
+		{name: "invalid MAC", client: func(t *testing.T, client net.Conn, secret string) {
+			writeAsync(client, identRequest(t, "not-the-secret", nonce))
+		}},
+		{name: "peer close", client: func(t *testing.T, client net.Conn, secret string) {
+			_ = client.Close()
+		}},
+		{name: "deadline setup fails", setup: func(conn *testControlConn) {
+			conn.deadlineErr = errors.New("set deadline failed")
+		}},
+		{name: "deadline expiry", setup: func(conn *testControlConn) {
+			conn.deadline = 20 * time.Millisecond
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			control, listener, secret := startSyntheticControl(t, time.After)
+			conn, client := newTestControlConn(t)
+			if tc.setup != nil {
+				tc.setup(conn)
+			}
+			feedControlConn(t, listener, conn)
+			if tc.client != nil {
+				tc.client(t, client, secret)
+			}
+			requireClosed(t, conn, "the handler did not close its connection")
+			require.Eventually(t, func() bool {
+				return activeControlConns(control) == 0
+			}, time.Second, time.Millisecond)
+		})
+	}
+
+	t.Run("tracked through a blocked reply write", func(t *testing.T) {
+		control, listener, secret := startSyntheticControl(t, time.After)
+		conn, client := newTestControlConn(t)
+		feedControlConn(t, listener, conn)
+		writeAsync(client, identRequest(t, secret, nonce))
+		select {
+		case <-conn.writing:
+		case <-time.After(time.Second):
+			t.Fatal("the handler did not start its reply")
+		}
+		// The client has not read the reply, so the write is still blocked.
+		assert.Equal(t, 1, activeControlConns(control), "a handler writing its reply left the pool early")
+		assert.False(t, conn.isClosed())
+
+		_, err := bufio.NewReader(client).ReadString('\n')
+		require.NoError(t, err)
+		requireClosed(t, conn, "the handler did not close its connection")
+		require.Eventually(t, func() bool {
+			return activeControlConns(control) == 0
+		}, time.Second, time.Millisecond)
+	})
+
+	t.Run("an evicted handler leaves its replacement in place", func(t *testing.T) {
+		control, listener, secret := startSyntheticControl(t, time.After)
+		victim, victimClient := newTestControlConn(t)
+		feedControlConn(t, listener, victim)
+		writeAsync(victimClient, identRequest(t, secret, nonce))
+		select {
+		case <-victim.writing:
+		case <-time.After(time.Second):
+			t.Fatal("the handler did not start its reply")
+		}
+		for range maxConcurrentIdentRequests - 1 {
+			conn, _ := newTestControlConn(t)
+			feedControlConn(t, listener, conn)
+		}
+		newcomer, _ := newTestControlConn(t)
+		feedControlConn(t, listener, newcomer)
+
+		requireClosed(t, victim, "the oldest connection was not evicted")
+		select {
+		case <-victim.written:
+		case <-time.After(time.Second):
+			t.Fatal("eviction did not unblock the victim's reply write")
+		}
+		// The second close is the victim handler's own cleanup.
+		require.Eventually(t, func() bool {
+			return victim.closes.Load() == 2
+		}, time.Second, time.Millisecond)
+		assert.Equal(t, maxConcurrentIdentRequests, activeControlConns(control))
+		assert.False(t, newcomer.isClosed())
+	})
+}
+
+// identRequest renders an IDENT request for nonce, authenticated by secret.
+func identRequest(t *testing.T, secret, nonce string) string {
+	t.Helper()
+	mac, err := identity.IdentRequestMAC(secret, nonce)
+	require.NoError(t, err)
+	return "IDENT " + mac + " " + nonce + "\n"
 }
