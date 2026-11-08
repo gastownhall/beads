@@ -272,6 +272,22 @@ func TestAssigneeMatches(t *testing.T) {
 			actor:   "gastown_mayor",
 			wantErr: false,
 		},
+		// bd-740y4x: the report pair. A rig-qualified identity stored under
+		// its raw slash spelling must be closable by the same principal under
+		// the session-name spelling ("--" for "/"), without --force, in both
+		// actor/assignee directions.
+		{
+			name:    "rig-qualified identity under session-name spelling passes (bd-740y4x)",
+			issue:   &types.Issue{ID: "bd-test", Assignee: "gascity/bob"},
+			actor:   "gascity--bob",
+			wantErr: false,
+		},
+		{
+			name:    "rig-qualified identity under session-name spelling passes with spellings exchanged (bd-740y4x)",
+			issue:   &types.Issue{ID: "bd-test", Assignee: "gascity--bob"},
+			actor:   "gascity/bob",
+			wantErr: false,
+		},
 		// The control that keeps the guard from becoming a no-op: a genuinely
 		// DIFFERENT agent must still be refused, even though its own name also
 		// contains separator characters that canonicalize.

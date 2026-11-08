@@ -33,6 +33,11 @@ func TestCheckClosable(t *testing.T) {
 		{"forced held", &types.Issue{Assignee: "bob"}, "alice", true, nil},
 		{"own", &types.Issue{Assignee: "alice"}, "alice", false, nil},
 		{"unassigned", &types.Issue{}, "alice", false, nil},
+		// bd-740y4x: the report pair, both actor/assignee directions — a
+		// rig-qualified holder under its raw slash spelling is the same
+		// principal as the session-name spelling, so the close is allowed.
+		{"held slash vs session spelling", &types.Issue{Assignee: "gascity/bob"}, "gascity--bob", false, nil},
+		{"held session spelling vs slash", &types.Issue{Assignee: "gascity--bob"}, "gascity/bob", false, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
