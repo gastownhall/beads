@@ -157,6 +157,23 @@ func TestSyncStalenessResult(t *testing.T) {
 			detail:  []string{"comparison with cached remote refs unavailable: engine closed"},
 		},
 		{
+			name: "recorded failure and an ahead cached ref both report",
+			in: syncStalenessInputs{
+				HasRemotes:       true,
+				OriginConfigured: true,
+				OriginStatus:     syncStatus(1, 0),
+				PushState: &pushstate.State{
+					LastPush:    "2026-01-01T00:00:00Z",
+					LastAttempt: "2026-01-02T00:00:00Z",
+					LastError:   "timed out after 30s",
+				},
+			},
+			status:  StatusWarning,
+			message: "Origin sync staleness detected",
+			detail:  []string{"failed: timed out after 30s", "1 commit(s) ahead of the cached origin tracking ref"},
+			fix:     "bd dolt push",
+		},
+		{
 			name: "peer-only findings keep the established wording",
 			in: syncStalenessInputs{
 				HasRemotes:      true,

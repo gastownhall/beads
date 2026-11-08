@@ -109,4 +109,38 @@ func TestCheckFederationSyncStaleness_OriginTrackingRef_RealDolt(t *testing.T) {
 				check.Status, check.Message, check.Detail, check.Fix)
 		}
 	})
+
+	t.Run("AC-7: origin added but never fetched or pushed warns that the comparison is unavailable", func(t *testing.T) {
+		repo, _, _ := originSyncWorkspace(t, port, false)
+		check := CheckFederationSyncStaleness(repo)
+		if check.Status != StatusWarning || check.Message != "Origin sync staleness detected" ||
+			!strings.Contains(check.Detail, "comparison with cached remote refs unavailable") {
+			t.Fatalf("got %s %q (detail %q), want a warning that no cached origin ref exists", check.Status, check.Message, check.Detail)
+		}
+	})
+
+	t.Run("AC-7: refreshed cached origin ref equal to HEAD passes locally", func(t *testing.T) {
+		repo, _, st := originSyncWorkspace(t, port, false)
+		if err := st.Push(ctx); err != nil {
+			t.Fatalf("push origin: %v", err)
+		}
+		check := CheckFederationSyncStaleness(repo)
+		if check.Status != StatusOK || check.Message != "No local sync staleness detected" ||
+			!strings.Contains(check.Detail, "do not verify the remote's current contents") {
+			t.Fatalf("got %s %q (detail %q), want the explicitly local-only pass", check.Status, check.Message, check.Detail)
+		}
+	})
+
+	t.Run("AC-7: a commit after the push warns that local history is ahead", func(t *testing.T) {
+		repo, _, st := originSyncWorkspace(t, port, false)
+		if err := st.Push(ctx); err != nil {
+			t.Fatalf("push origin: %v", err)
+		}
+		doltCall(t, st, "CALL DOLT_COMMIT('--allow-empty', '-m', 'unpushed')")
+		check := CheckFederationSyncStaleness(repo)
+		if check.Status != StatusWarning || check.Message != "Origin sync staleness detected" ||
+			!strings.Contains(check.Detail, "origin: local is 1 commit(s) ahead of the cached origin tracking ref") {
+			t.Fatalf("got %s %q (detail %q), want a warning that local is 1 commit ahead of the cached origin ref", check.Status, check.Message, check.Detail)
+		}
+	})
 }
