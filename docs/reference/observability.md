@@ -65,7 +65,7 @@ Every metric and span carries the OTel resource describing the bd process:
 |-----------|-------|-------|
 | `service.name` | `bd` | Override with `OTEL_SERVICE_NAME`. |
 | `service.version` | bd version | |
-| `host.name` | hostname | |
+| `host.name` | hostname | Often the user's name on a laptop; override with `OTEL_RESOURCE_ATTRIBUTES=host.name=<name>`. |
 | `process.pid`, `process.executable.name` | pid, `bd` | |
 | `process.runtime.name`, `process.runtime.version`, `process.runtime.description` | Go runtime | |
 
