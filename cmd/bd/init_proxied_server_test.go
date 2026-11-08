@@ -806,6 +806,9 @@ func TestProxiedInitTailCommitScope(t *testing.T) {
 		{name: "foreign_staged"},
 		{name: "partly_staged", partly: true},
 		{name: "unchanged", unchanged: true},
+		{name: "jj", jj: true},
+		{name: "jj_quiet", jj: true, quiet: true},
+		{name: "git_nested_in_jj", jjParent: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			target, _, _ := newInitRoleFixture(t)
