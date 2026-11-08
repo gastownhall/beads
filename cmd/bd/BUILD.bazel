@@ -1299,6 +1299,7 @@ go_test(
         "swarm_proxied_integration_test.go",
         "swarm_ready_fronts_test.go",
         "sync_git_test.go",
+        "sync_ignored_table_test.go",
         "sync_is_scoped_test.go",
         "sync_issues_flag_test.go",
         "sync_parent_flag_test.go",
