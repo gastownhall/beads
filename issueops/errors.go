@@ -75,6 +75,34 @@ var ErrAssigneeMismatch = errors.New("assignee mismatch")
 // --append-notes.
 var ErrNotesOverwrite = errors.New("update would replace existing notes")
 
+// ErrDualPresence is the sentinel every *DualPresenceError matches: an update
+// was refused because its ID names a row in BOTH the issues and the wisps
+// table.
+var ErrDualPresence = errors.New("issue exists in both issues and wisps")
+
+// DualPresenceError refuses an update whose ID has a row in both the issues
+// and the wisps table (GH#5991). Readers resolve such an ID issues-first while
+// the wisp routing resolved it wisps-first, so an update used to report
+// success while changing the copy no reader returns. The update is refused
+// before anything is written, and the refusal names the existing repair rather
+// than picking a winner.
+//
+// It matches ErrDualPresence.
+type DualPresenceError struct {
+	// ID is the issue ID present in both tables.
+	ID string
+}
+
+func (e *DualPresenceError) Error() string {
+	return fmt.Sprintf("%v: update of %s refused: the ID has a row in both the issues and the wisps table, so the write could change a copy that reads do not return; "+
+		"in a server-mode workspace `bd doctor --check=validate --fix` repairs every such ID by deleting its issues copy (with that copy's labels, dependencies, events and comments) and keeping the wisp copy, "+
+		"without merging the two, so compare them first if the issues copy holds edits you need",
+		ErrDualPresence, e.ID)
+}
+
+// Unwrap makes DualPresenceError match ErrDualPresence.
+func (e *DualPresenceError) Unwrap() error { return ErrDualPresence }
+
 // NotesReplacement reports whether proposed would replace existing non-empty
 // notes with different non-empty content — the one condition the
 // notes-overwrite fence refuses without ForceNotesOverwrite. An explicit

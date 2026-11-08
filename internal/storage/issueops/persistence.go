@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // PersistenceMoveResult reports the durable tables changed by a persistence move.
@@ -283,7 +284,7 @@ func locatePersistenceMoveRow(ctx context.Context, tx DBTX, id string) (wisp, fo
 		return false, false, fmt.Errorf("locate issue persistence plane: %w", err)
 	}
 	if issueCount > 0 && wispCount > 0 {
-		return false, false, fmt.Errorf("locate issue persistence plane: ID %q exists in both issues and wisps", id)
+		return false, false, fmt.Errorf("locate issue persistence plane: %w", &publicops.DualPresenceError{ID: id})
 	}
 	return wispCount > 0, wispCount+issueCount > 0, nil
 }
