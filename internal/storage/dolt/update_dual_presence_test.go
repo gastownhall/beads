@@ -243,6 +243,9 @@ func dualPresenceRolePatches(parentID string) []struct {
 		{"label only", publicops.UpdateRequest{Patch: publicops.IssuePatch{Labels: publicops.LabelPatch{Add: []string{"probe-label"}}}}},
 		{"parent only", publicops.UpdateRequest{Patch: publicops.IssuePatch{ParentID: publicops.Field[string]{Set: true, Value: parentID}}}},
 		{"persistence only", publicops.UpdateRequest{Patch: publicops.IssuePatch{Persistence: publicops.Field[publicops.PersistenceMode]{Set: true, Value: types.PersistenceModePersistent}}}},
+		// Both copies are already open: restating the status changes nothing,
+		// but a status patch through Update is still an update and refuses.
+		{"status restatement", publicops.UpdateRequest{Patch: publicops.IssuePatch{Status: publicops.Field[publicops.Status]{Set: true, Value: types.StatusOpen}}}},
 	}
 }
 
