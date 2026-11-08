@@ -164,9 +164,11 @@ func buildResource(ctx context.Context, serviceName, version string) (*resource.
 // When no opt-in is in effect (BD_OTEL_ENABLED=true or any legacy BD_OTEL_*
 // selector), installs no-op providers and returns immediately (zero overhead).
 //
-// Traces are exported only when OTEL_TRACES_EXPORTER=console (stdout, for
+// Traces are exported only when OTEL_TRACES_EXPORTER=console (stderr, for
 // local debugging); there is no remote trace backend.
-// Metrics are exported to OTEL_EXPORTER_OTLP_METRICS_ENDPOINT and/or stdout.
+// Metrics are exported to OTEL_EXPORTER_OTLP_METRICS_ENDPOINT and/or stderr.
+// The console exporters write to stderr, never stdout, so their JSON does not
+// mix into a command's own output (bd ... --json).
 func Init(ctx context.Context, serviceName, version string) error {
 	if mappings := translateLegacyEnv(); len(mappings) > 0 {
 		fmt.Fprintf(os.Stderr,
@@ -207,7 +209,7 @@ func Init(ctx context.Context, serviceName, version string) error {
 }
 
 func buildTraceProvider(_ context.Context, res *resource.Resource) (*sdktrace.TracerProvider, error) {
-	exp, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
+	exp, err := stdouttrace.New(stdouttrace.WithWriter(os.Stderr), stdouttrace.WithPrettyPrint())
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +226,7 @@ func buildMetricProvider(ctx context.Context, res *resource.Resource) (*sdkmetri
 	console, otlp := selectedMetricExporters()
 
 	if console {
-		exp, err := stdoutmetric.New()
+		exp, err := stdoutmetric.New(stdoutmetric.WithWriter(os.Stderr))
 		if err != nil {
 			return nil, err
 		}
@@ -298,4 +300,11 @@ func Shutdown(ctx context.Context) {
 		_ = fn(ctx)
 	}
 	shutdownFns = nil
+}
+
+// Milliseconds returns d in fractional milliseconds, the unit of bd's
+// duration histograms and *_ms attributes. time.Duration.Milliseconds
+// truncates to a whole number, which records a sub-millisecond call as 0.
+func Milliseconds(d time.Duration) float64 {
+	return float64(d) / float64(time.Millisecond)
 }
