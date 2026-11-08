@@ -515,4 +515,60 @@ func TestJSONContract_WorkRowCountsAreBlocksOnlyShowCountsEveryEdge(t *testing.T
 			}
 		}
 	})
+
+	// The status-sensitive alternative the reference documents for "does E
+	// still have open dependents": list the incoming edges and keep the
+	// non-closed ones, the Go spelling of its
+	// `jq '[.[] | select(.status != "closed")] | length'`. Runs last: it closes
+	// a child, which the subtests above must not see.
+	t.Run("incoming listing with the non-closed predicate", func(t *testing.T) {
+		w.run("close", children[0], "--reason", "done")
+
+		dependents := parseJSONOutput(t, w.run("dep", "list", e, "--direction=up", "--json"))
+		got := map[string]string{}
+		nonClosed := 0
+		for _, dep := range dependents {
+			id, _ := dep["id"].(string)
+			status, hasStatus := dep["status"].(string)
+			depType, hasType := dep["dependency_type"].(string)
+			if !hasStatus || !hasType {
+				t.Fatalf("bd dep list --direction=up record %s lacks status or dependency_type: %v", id, dep)
+			}
+			got[id] = depType
+			if status != "closed" {
+				nonClosed++
+			}
+		}
+		want := map[string]string{
+			children[0]: "parent-child",
+			children[1]: "parent-child",
+			children[2]: "parent-child",
+			blockedByE:  "blocks",
+		}
+		if len(dependents) != len(want) {
+			t.Errorf("bd dep list --direction=up returned %d records %v, want the %d local dependents %v", len(dependents), got, len(want), want)
+		}
+		for id, typ := range want {
+			if got[id] != typ {
+				t.Errorf("bd dep list --direction=up: %s dependency_type = %q, want %q", id, got[id], typ)
+			}
+		}
+		if nonClosed != 3 {
+			t.Errorf("non-closed dependents = %d, want 3 (one of four closed)", nonClosed)
+		}
+		if listCount := count(row(e), "dependent_count", "bd list"); listCount == nonClosed {
+			t.Errorf("list's dependent_count %d equals the non-closed predicate's %d; the fixture is meant to tell them apart", listCount, nonClosed)
+		}
+	})
+
+	// The documented snippet keeps the listing's failure (`|| exit`), because
+	// a failed read must not be parsed as an empty list and so as zero
+	// dependents. That rests on the command failing.
+	t.Run("a failed listing is not an empty list", func(t *testing.T) {
+		missing := w.prefix + "-doesnotexist"
+		out, code := w.runExpectError("dep", "list", missing, "--direction=up", "--json")
+		if code == 0 {
+			t.Fatalf("bd dep list %s exited 0; want a failure, not an empty list:\n%s", missing, out)
+		}
+	})
 }
