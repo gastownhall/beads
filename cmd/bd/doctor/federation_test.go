@@ -1153,4 +1153,25 @@ func TestCheckFederationRemotesAPI_ProbeOnlyServer(t *testing.T) {
 			}
 		})
 	}
+
+	// The running arm reports the configured peer count beside the listener
+	// state, never inside it: origin is the default sync remote, not a
+	// federation peer (GH#6150), so a one-peer topology is told apart from an
+	// origin-only one even while the listener itself is down.
+	t.Run("running server names the configured peer count beside the listener state", func(t *testing.T) {
+		repo, _ := probeOnlyServerWorkspace(t, port, "origin", "peer1")
+		t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
+		remotesAPIPort := os.Getenv("BEADS_DOLT_REMOTESAPI_PORT")
+		check := CheckFederationRemotesAPI(repo)
+		wantDetail := "Server reachable at 127.0.0.1:" + strconv.Itoa(port) + " (no PID file in this workspace names it) but remotesapi port unreachable"
+		if check.Status != StatusError || check.Message != "remotesapi port "+remotesAPIPort+" not accessible" ||
+			!strings.Contains(check.Detail, wantDetail) {
+			t.Fatalf("live server at %d with a peer: got %s %q (%s), want error %q with Detail containing %q",
+				port, check.Status, check.Message, check.Detail, "remotesapi port "+remotesAPIPort+" not accessible", wantDetail)
+		}
+		if !strings.Contains(check.Detail, "1 peers configured") || strings.Contains(check.Detail, "2 peers configured") {
+			t.Fatalf("live server at %d with origin and one peer: Detail %q must name exactly 1 configured peer, never 2",
+				port, check.Detail)
+		}
+	})
 }

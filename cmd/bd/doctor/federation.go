@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -239,7 +240,7 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 		defer func() { _ = store.Close() }()
 
 		remotes, err := store.ListRemotes(ctx)
-		if err != nil || len(remotes) == 0 {
+		if err != nil {
 			return DoctorCheck{
 				Name:     "Federation remotesapi",
 				Status:   StatusOK,
@@ -248,11 +249,21 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 			}
 		}
 
-		// Has remotes but no server running - suggest starting in federation mode
+		message, warning := remotesAPIServerDownCheck(remotes)
+		if !warning {
+			return DoctorCheck{
+				Name:     "Federation remotesapi",
+				Status:   StatusOK,
+				Message:  message,
+				Category: CategoryFederation,
+			}
+		}
+
+		// Has peers but no server running - suggest starting in federation mode
 		return DoctorCheck{
 			Name:     "Federation remotesapi",
 			Status:   StatusWarning,
-			Message:  fmt.Sprintf("Server not running (%d peers configured)", len(remotes)),
+			Message:  message,
 			Detail:   "Federation requires dolt sql-server for peer sync",
 			Fix:      "Start dolt sql-server in server mode to enable peer-to-peer sync",
 			Category: CategoryFederation,
@@ -281,7 +292,7 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 			Detail:   err.Error(),
 			Category: CategoryFederation,
 		}
-	case err == nil && !peers:
+	case err == nil && peers == 0:
 		return DoctorCheck{
 			Name:     "Federation remotesapi",
 			Status:   StatusOK,
@@ -291,33 +302,63 @@ func CheckFederationRemotesAPI(path string) DoctorCheck {
 	}
 
 	// Server is running and peers are configured - check if remotesapi port is
-	// accessible.
-	return checkRemotesAPIListener(beadsDir, pid)
+	// accessible. The listener's state is the verdict; the count of peers the
+	// listing found rides beside it in the Detail, never inside it, so a
+	// closed listener still reports exactly how many peers need it.
+	check := checkRemotesAPIListener(beadsDir, pid)
+	if err == nil {
+		if check.Detail != "" {
+			check.Detail += "\n"
+		}
+		check.Detail += fmt.Sprintf("%d peers configured", peers)
+	}
+	return check
 }
 
-// federationPeers reports whether the store the federation checks open
-// (federationStoreConfig) lists a federation peer, a remote other than
-// origin. When it cannot tell, err is the store open's or ListRemotes's error
-// and skipped the message that names the step that failed, as
-// CheckLegacyCLIRemotes reports it.
-func federationPeers(beadsDir, doltPath string) (peers bool, skipped string, err error) {
+// federationPeers counts the federation peers the store the federation checks
+// open (federationStoreConfig) lists: remotes other than origin, which is the
+// default sync remote, not a peer (GH#6150). When it cannot tell, err is the
+// store open's or ListRemotes's error and skipped the message that names the
+// step that failed, as CheckLegacyCLIRemotes reports it.
+func federationPeers(beadsDir, doltPath string) (peers int, skipped string, err error) {
 	ctx := context.Background()
 	store, err := dolt.New(ctx, federationStoreConfig(beadsDir, doltPath))
 	if err != nil {
-		return false, "Skipped (database unavailable)", err
+		return 0, "Skipped (database unavailable)", err
 	}
 	defer func() { _ = store.Close() }()
 
 	remotes, err := store.ListRemotes(ctx)
 	if err != nil {
-		return false, "Skipped (SQL remotes unavailable)", err
+		return 0, "Skipped (SQL remotes unavailable)", err
 	}
+	peers = 0
 	for _, r := range remotes {
 		if r.Name != "origin" {
-			return true, "", nil
+			peers++
 		}
 	}
-	return false, "", nil
+	return peers, "", nil
+}
+
+// remotesAPIServerDownCheck classifies a successfully listed remotes
+// configuration for the remotesapi check's server-down branch: origin is the
+// default sync remote, not a federation peer (GH#6150), so only the other
+// remotes count. Zero peers means federation is not in play and the check is
+// not applicable; otherwise the warning names the peer count, never the
+// total remote count. A pure helper so tests can pin the decision without a
+// live server.
+func remotesAPIServerDownCheck(remotes []storage.RemoteInfo) (message string, warning bool) {
+	peers := 0
+	for _, r := range remotes {
+		if r.Name != "origin" {
+			peers++
+		}
+	}
+	if peers == 0 {
+		return "N/A (no peers configured)", false
+	}
+	return fmt.Sprintf("Server not running (%d peers configured)", peers), true
 }
 
 // checkRemotesAPIListener probes the remotesapi listener of a running server.
