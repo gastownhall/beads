@@ -3156,3 +3156,54 @@ func TestFindBeadsDirFromWorktreeRootRedirectWins(t *testing.T) {
 		}
 	}
 }
+
+// TestFindBeadsDirFromWorktreeWithoutSharedStoreKeepsAncestor checks that a
+// sibling linked worktree with no usable root or shared store still finds a
+// discoverable ancestor project, matching cwd discovery's extended walk.
+func TestFindBeadsDirFromWorktreeWithoutSharedStoreKeepsAncestor(t *testing.T) {
+	isolateWorktreeDiscovery(t)
+	for _, layout := range []string{"regular", "bare"} {
+		for _, tc := range []struct {
+			name     string
+			ancestor bool
+			shared   func(t *testing.T, shared string)
+		}{
+			{"absent shared store", true, func(*testing.T, string) {}},
+			{"empty shared store", true, func(t *testing.T, shared string) {
+				if err := os.MkdirAll(shared, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}},
+			{"absent shared store, no ancestor", false, func(*testing.T, string) {}},
+		} {
+			t.Run(layout+"/"+tc.name, func(t *testing.T) {
+				f := setupLinkedWorktreeUnderProject(t, layout, tc.ancestor)
+				tc.shared(t, f.shared)
+				want := ""
+				if tc.ancestor {
+					want = f.ancestor
+				}
+				assertWorktreeDiscovery(t, f.root, want)
+			})
+		}
+	}
+}
+
+// TestFindBeadsDirFromPlainRepoWalkUp checks that the linked-worktree bound
+// leaves a plain repository's walk-up to a parent project unchanged.
+func TestFindBeadsDirFromPlainRepoWalkUp(t *testing.T) {
+	isolateWorktreeDiscovery(t)
+	parent := t.TempDir()
+	want := filepath.Join(parent, ".beads")
+	writeBeadsProject(t, want, true)
+	repo := filepath.Join(parent, "repo")
+	if err := os.MkdirAll(filepath.Join(repo, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGitInDir(t, repo, "init")
+	for _, start := range []string{repo, filepath.Join(repo, "sub")} {
+		if got := FindBeadsDirFrom(start); !utils.PathsEqual(got, want) {
+			t.Errorf("FindBeadsDirFrom(%q) = %q, want parent project %q", start, got, want)
+		}
+	}
+}
