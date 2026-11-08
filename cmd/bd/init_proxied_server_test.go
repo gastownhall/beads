@@ -807,6 +807,7 @@ func TestProxiedInitTailCommitScope(t *testing.T) {
 		{name: "partly_staged", partly: true},
 		{name: "unborn", unborn: true},
 		{name: "unchanged", unchanged: true},
+		{name: "staged_untrack", untrack: true},
 		{name: "jj", jj: true},
 		{name: "jj_quiet", jj: true, quiet: true},
 		{name: "git_nested_in_jj", jjParent: true},

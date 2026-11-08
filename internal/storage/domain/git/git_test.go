@@ -427,6 +427,69 @@ func (s *testSuite) TestCommit_OnlyWithNothingStagedDidCommitFalse() {
 	s.Equal("work.txt", s.gitOut("diff", "--cached", "--name-only"))
 }
 
+// Only names the files from the staged diff, but the commit records their
+// working-tree content: an unstaged edit on top of a staged file goes in
+// with it, and the index then matches the commit.
+func (s *testSuite) TestCommit_OnlyRecordsWorkingTreeContent() {
+	s.gitInit()
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0750))
+	s.writeFile(".beads/config.yaml", "staged\n")
+	s.Require().NoError(s.repo.Add(s.Ctx(), ".beads/"))
+	s.writeFile(".beads/config.yaml", "staged\nunstaged\n")
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "init", Only: []string{".beads/"}})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal("staged\nunstaged", s.gitOut("show", "HEAD:.beads/config.yaml"))
+	s.Empty(s.gitOut("status", "--porcelain"))
+}
+
+// untrackIgnoredBeadsFile commits .beads/key, which .beads/.gitignore
+// ignores, then stages its removal with git rm --cached, as bd doctor --fix
+// untracks an ignored runtime file. The file stays on disk, and a staged
+// config.yaml stands in for the init artifacts.
+func (s *testSuite) untrackIgnoredBeadsFile() {
+	s.T().Helper()
+	s.gitInit()
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0750))
+	s.writeFile(".beads/.gitignore", "key\n")
+	s.writeFile(".beads/key", "committed key\n")
+	s.run("git", "add", "-f", ".beads/.gitignore", ".beads/key")
+	s.run("git", "commit", "-q", "-m", "seed")
+	s.run("git", "rm", "-q", "--cached", ".beads/key")
+	s.writeFile(".beads/config.yaml", "x")
+}
+
+// A staged removal of a file still on disk stays staged and out of the Only
+// commit: --only would record the file's working-tree content and track it
+// again, undoing the user's git rm --cached.
+func (s *testSuite) TestCommit_OnlyKeepsStagedRemovalOfFileOnDisk() {
+	s.untrackIgnoredBeadsFile()
+	s.writeFile(".beads/key", "rotated key\n")
+	s.Require().NoError(s.repo.Add(s.Ctx(), ".beads/"))
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "init", Only: []string{".beads/"}})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal(".beads/config.yaml", s.gitOut("show", "--name-only", "--format=", "HEAD"))
+	s.Equal("committed key", s.gitOut("show", "HEAD:.beads/key"))
+	s.Equal("D\t.beads/key", s.gitOut("diff", "--cached", "--name-status"))
+}
+
+// The removal of a file that is gone from disk is an ordinary change under
+// the scope, and the Only commit records it.
+func (s *testSuite) TestCommit_OnlyCommitsStagedRemovalOfDeletedFile() {
+	s.untrackIgnoredBeadsFile()
+	s.Require().NoError(os.Remove(filepath.Join(s.tmpDir, ".beads", "key")))
+	s.Require().NoError(s.repo.Add(s.Ctx(), ".beads/"))
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "init", Only: []string{".beads/"}})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal("A\t.beads/config.yaml\nD\t.beads/key", s.gitOut("show", "--name-status", "--format=", "HEAD"))
+	s.Empty(s.gitOut("diff", "--cached", "--name-status"))
+}
+
 func (s *testSuite) TestCommitInitArtifacts_LeavesPreStagedWorkStaged() {
 	s.gitInit()
 	s.writeFile("work.txt", "unrelated work")

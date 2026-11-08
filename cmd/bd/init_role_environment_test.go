@@ -712,11 +712,13 @@ type initCommitScopeCase struct {
 	name string
 	// unborn leaves the branch without a commit; unchanged commits the
 	// artifacts before the bootstrap runs; partly leaves an unstaged edit on
-	// top of the staged foreign file; jj marks the work tree as a Jujutsu
-	// workspace, with a bare .jj directory (no repo child) when jjBare;
-	// jjParent puts the Jujutsu workspace above the repository, whose own
-	// .git ends the walk, so it commits as usual.
-	unborn, unchanged, partly, jj, jjBare, jjParent, quiet bool
+	// top of the staged foreign file; untrack stages the removal of a
+	// committed, ignored .beads file that stays on disk with new content, as
+	// bd doctor --fix untracks one with git rm --cached; jj marks the work
+	// tree as a Jujutsu workspace, with a bare .jj directory (no repo child)
+	// when jjBare; jjParent puts the Jujutsu workspace above the repository,
+	// whose own .git ends the walk, so it commits as usual.
+	unborn, unchanged, partly, untrack, jj, jjBare, jjParent, quiet bool
 }
 
 // prepareInitCommitScope writes the beads artifacts and a staged foreign
@@ -741,6 +743,14 @@ func prepareInitCommitScope(t *testing.T, repo string, tc initCommitScopeCase) {
 		write("seed", "seed\n")
 		git("add", "seed")
 		git("-c", "core.hooksPath=", "commit", "-q", "-m", "seed")
+	}
+	if tc.untrack {
+		write(".beads/.gitignore", ".beads-credential-key\n")
+		write(".beads/.beads-credential-key", "committed key\n")
+		git("add", "-f", ".beads/.gitignore", ".beads/.beads-credential-key")
+		git("-c", "core.hooksPath=", "commit", "-q", "-m", "tracked key")
+		git("rm", "-q", "--cached", ".beads/.beads-credential-key")
+		write(".beads/.beads-credential-key", "rotated key\n")
 	}
 	write(".beads/config.yaml", "# beads\n")
 	write("CLAUDE.md", "beads instructions\n")
@@ -810,8 +820,17 @@ func checkInitCommitScope(t *testing.T, repo string, tc initCommitScopeCase, hea
 			t.Errorf("missing commit message: stdout=%q stderr=%q", stdout, stderr)
 		}
 	}
-	if got := git("diff", "--cached", "--name-status"); got != "A\twork.txt" {
-		t.Errorf("index after bootstrap = %q, want only the foreign work.txt staged", got)
+	wantStaged := "A\twork.txt"
+	if tc.untrack {
+		// The untrack stays staged, and HEAD keeps the committed key, not
+		// the one on disk.
+		wantStaged = "D\t.beads/.beads-credential-key\n" + wantStaged
+		if got := git("show", "HEAD:.beads/.beads-credential-key"); got != "committed key" {
+			t.Errorf("HEAD key = %q, want the committed key, not the one on disk", got)
+		}
+	}
+	if got := git("diff", "--cached", "--name-status"); got != wantStaged {
+		t.Errorf("index after bootstrap = %q, want %q", got, wantStaged)
 	}
 	if got := git("show", ":work.txt"); got != "staged work" {
 		t.Errorf("staged work.txt blob = %q", got)
@@ -834,6 +853,7 @@ func TestInitArtifactCommitScope(t *testing.T) {
 		{name: "partly_staged", partly: true},
 		{name: "unborn", unborn: true},
 		{name: "unchanged", unchanged: true},
+		{name: "staged_untrack", untrack: true},
 		{name: "jj", jj: true},
 		{name: "jj_quiet", jj: true, quiet: true},
 		{name: "jj_bare", jj: true, jjBare: true},

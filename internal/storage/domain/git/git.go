@@ -275,7 +275,8 @@ func (r *gitRepositoryImpl) Commit(ctx context.Context, params domain.GitCommitP
 	args = append(args, "-m", params.Message)
 	if params.Only != nil {
 		// --only commits these files' working-tree content, which the caller
-		// has just staged, and leaves every other index entry as it was.
+		// has just staged, and leaves every other index entry as it was,
+		// including any staged removal stagedUnder left out.
 		args = append(append(args, "--only", "--"), only...)
 	}
 	out, err := r.gitCmd(ctx, args...).CombinedOutput()
@@ -290,12 +291,15 @@ func (r *gitRepositoryImpl) Commit(ctx context.Context, params domain.GitCommitP
 
 // stagedUnder lists the exact files with staged changes under paths, relative
 // to workDir. Renames are split so neither side can pull a path outside the
-// scope into a partial commit.
+// scope into a partial commit. A staged removal of a file still on disk, as
+// git rm --cached leaves an ignored file, is left out: --only would commit
+// the file's working-tree content and track it again, so the removal stays
+// staged instead.
 func (r *gitRepositoryImpl) stagedUnder(ctx context.Context, paths []string) ([]string, error) {
 	if len(paths) == 0 {
 		return nil, nil
 	}
-	args := append([]string{"--literal-pathspecs", "diff", "--cached", "--name-only", "-z", "--no-renames", "--relative", "--"}, paths...)
+	args := append([]string{"--literal-pathspecs", "diff", "--cached", "--name-status", "-z", "--no-renames", "--relative", "--"}, paths...)
 	out, err := r.gitCmd(ctx, args...).Output()
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -305,10 +309,16 @@ func (r *gitRepositoryImpl) stagedUnder(ctx context.Context, paths []string) ([]
 		return nil, fmt.Errorf("git: Commit: list staged paths: %w", err)
 	}
 	var files []string
-	for _, name := range strings.Split(string(out), "\x00") {
-		if name != "" {
-			files = append(files, name)
+	// -z prints each entry as its status and its path, each ended by a NUL.
+	fields := strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00")
+	for i := 0; i+1 < len(fields); i += 2 {
+		status, name := fields[i], fields[i+1]
+		if status == "D" {
+			if _, err := os.Lstat(filepath.Join(r.workDir, name)); err == nil {
+				continue
+			}
 		}
+		files = append(files, name)
 	}
 	return files, nil
 }
