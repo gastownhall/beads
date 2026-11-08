@@ -172,7 +172,7 @@ var schemaAdditions = []schemaAddition{{
 		"ignored_schema_migrations": {"28"},
 	},
 }, {
-	By: "arrival_seq, the events journal's create stamp (BD-5)",
+	By: "arrival_seq, the events journal's initial stamp (BD-5)",
 	Columns: map[string][]string{
 		// Migration 0073: carried on the replicated plane for shape only and
 		// never written there.

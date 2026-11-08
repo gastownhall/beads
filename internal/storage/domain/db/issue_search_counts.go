@@ -166,13 +166,18 @@ func (r *issueSQLRepositoryImpl) runFilterSearchQuery(ctx context.Context, query
 		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
 	}
 	orderBy := orderBySQL(filter.SortBy, filter.SortDesc, "i")
-	return r.runSearchQuery(ctx, tables, whereSQL, orderBy, searchWindowForFilter(filter).sql, args, includeWispReverseDeps, hydrationFor(filter))
+	return r.runSearchQuery(ctx, tables, filter.IDs, whereSQL, orderBy, searchWindowForFilter(filter).sql, args, includeWispReverseDeps, hydrationFor(filter))
 }
 
+// runSearchQuery renders the predicate form. scope is the filter's explicit
+// ids, which buildIssueFilterClauses already ANDs into whereSQL, so the
+// aggregates are bounded by them (sqlbuild.SearchCountsSQLScoped).
+//
 //nolint:gosec // G201: SQL fragments are built from hardcoded table names and parameterized filters.
-func (r *issueSQLRepositoryImpl) runSearchQuery(ctx context.Context, tables filterTables, whereSQL, orderBySQL, limitSQL string, args []any, includeWispReverseDeps bool, hyd sqlbuild.CountsHydration) ([]*types.IssueWithCounts, error) {
-	searchSQL, _ := sqlbuild.SearchCountsSQL(tables, nil, whereSQL, orderBySQL, limitSQL, includeWispReverseDeps, hyd)
-	return r.scanCountsQuery(ctx, tables, searchSQL, args, hyd)
+func (r *issueSQLRepositoryImpl) runSearchQuery(ctx context.Context, tables filterTables, scope []string, whereSQL, orderBySQL, limitSQL string, args []any, includeWispReverseDeps bool, hyd sqlbuild.CountsHydration) ([]*types.IssueWithCounts, error) {
+	searchSQL, scopeArgs := sqlbuild.SearchCountsSQLScoped(tables, nil, scope, whereSQL, orderBySQL, limitSQL, includeWispReverseDeps, hyd)
+	bound := append(append(make([]any, 0, len(args)+len(scopeArgs)), args...), scopeArgs...)
+	return r.scanCountsQuery(ctx, tables, searchSQL, bound, hyd)
 }
 
 // scanCountsQuery runs a prebuilt counts mega-query and hydrates each row,
