@@ -846,8 +846,16 @@ func selectedRedirectSourceDir() string {
 		}
 		return ""
 	}
-	if os.Getenv("BEADS_DIR") != "" {
-		if info := beads.GetDiscoveredRedirectInfo(); info.IsRedirected && sameDirPath(info.TargetDir, beads.ExplicitBeadsDir()) {
+	if raw := os.Getenv("BEADS_DIR"); raw != "" {
+		explicit := beads.ExplicitBeadsDir()
+		source := utils.CanonicalizePath(raw)
+		if own := beads.ResolveRedirect(source); own.WasRedirected {
+			if sameDirPath(own.TargetDir, explicit) {
+				return source
+			}
+			return ""
+		}
+		if info := beads.GetDiscoveredRedirectInfo(); info.IsRedirected && sameDirPath(info.TargetDir, explicit) {
 			return info.LocalDir
 		}
 		return ""
