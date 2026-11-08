@@ -93,7 +93,8 @@ func (s *sweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (issueop
 		msg := fmt.Sprintf("bd: sweep %d %s bead(s)", result.Swept, req.Tier)
 		if err := schema.DrainCall(ctx, tx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
 			msg, s.store.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-			return fmt.Errorf("dolt commit: %w", err)
+			// The sweep's commit point, as for the Deleter.
+			return wrapSQLCommitError("dolt commit", err)
 		}
 		return nil
 	}); err != nil {
