@@ -257,12 +257,9 @@ func TestRemoteMigrateGateCursorAdvancedAfterRead(t *testing.T) {
 		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM dolt_remotes`).
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 		// The peer migrates to latest here. Every read below sees latest.
-		// checkMigrateConsent reads the cursor for the current version and
-		// again for the pending versions:
-		for range 2 {
-			expectCursorProbe(mock, "schema_migrations", true)
-			expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest)
-		}
+		// checkMigrateConsent reads the cursor once:
+		expectCursorProbe(mock, "schema_migrations", true)
+		expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest)
 		// The dolt_ignore seed (already complete) and the cursor-untrack
 		// reconcile (nothing to do):
 		expectIgnorePatternSeedNoop(mock, latest)

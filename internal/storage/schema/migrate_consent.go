@@ -189,11 +189,9 @@ func checkMigrateConsent(ctx context.Context, db DBConn) error {
 	if current == 0 {
 		return nil // fresh database — creating it is consent for its schema
 	}
-	pending, err := mainSource.pendingVersions(ctx, db)
-	if err != nil {
-		return fmt.Errorf("migrate consent: read pending versions: %w", err)
-	}
-	return migrateConsentDecision(current, len(pending))
+	// The pending list comes from the cursor just read: a second read would cost
+	// three statements and could disagree with the version reported above.
+	return migrateConsentDecision(current, len(mainSource.pendingAbove(current)))
 }
 
 // migrateConsentDecision is checkMigrateConsent's pure decision core: nil when

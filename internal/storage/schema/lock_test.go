@@ -1078,14 +1078,12 @@ func TestMigrateUpWithLockFreshBootstrapHealCapabilityIsOneShot(t *testing.T) {
 	}
 }
 
-// expectMigrateConsentReads mocks checkMigrateConsent's reads when no consent
-// is held: the main cursor once for the fresh-database exemption, and again
-// for the pending count.
+// expectMigrateConsentReads mocks checkMigrateConsent's read when no consent is
+// held: the main cursor, once, which answers both the fresh-database exemption
+// and the pending count.
 func expectMigrateConsentReads(mock sqlmock.Sqlmock, cursor int) {
-	for range 2 {
-		expectCursorProbe(mock, "schema_migrations", true)
-		expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
-	}
+	expectCursorProbe(mock, "schema_migrations", true)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
 }
 
 // TestMigrateUpWithLockFreshBootstrapHealIsMigrateConsent pins that heal

@@ -843,6 +843,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd list` already refused the pair at flag parse, so its behavior is
   unchanged; over HTTP the pair is a `400 invalid_argument` on `no_parent`.
 
+- **The migration consent check reads the schema cursor once.** `MigrateUp`
+  read the cursor for the current version and again for the pending list. Both
+  answers now come from one read, which sends 3 fewer statements on each
+  embedded open and on a server-mode open that is not already converged. A
+  converged server-mode open does not reach this check.
 - **`bd gate discover` skips template gates, as `bd gate check` does.** A
   template gh:run gate is a proto that work is poured from; on the direct,
   proxied and embedded routes `bd gate discover` used to record a discovered
