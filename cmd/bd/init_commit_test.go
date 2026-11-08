@@ -167,3 +167,40 @@ func TestCommitEmbeddedInitArtifactsSkipsJujutsuWorkspace(t *testing.T) {
 		}
 	}
 }
+
+// GH#5654: on a fresh repository with no commits yet, the bootstrap commit
+// still creates the initial commit, scoped to the beads artifacts, and leaves
+// an unrelated pre-staged file staged and uncommitted.
+func TestCommitEmbeddedInitArtifactsUnbornHeadScopedInitialCommit(t *testing.T) {
+	repo := t.TempDir()
+	initRoleFixtureGit(t, repo, "init", "-q")
+	initRoleFixtureGit(t, repo, "config", "user.email", "t@t.local")
+	initRoleFixtureGit(t, repo, "config", "user.name", "Test")
+	initRoleFixtureGit(t, repo, "config", "commit.gpgsign", "false")
+	if err := os.WriteFile(filepath.Join(repo, "work.txt"), []byte("unrelated work\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initRoleFixtureGit(t, repo, "add", "work.txt")
+	if err := os.MkdirAll(filepath.Join(repo, ".beads"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".beads", "config.yaml"), []byte("# beads\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	commitEmbeddedInitArtifacts(repo, true)
+
+	committed := initRoleFixtureGit(t, repo, "show", "--name-only", "--format=", "HEAD")
+	if !strings.Contains(committed, ".beads/config.yaml") {
+		t.Fatalf("initial commit is missing the beads scaffold; committed files:\n%s", committed)
+	}
+	if strings.Contains(committed, "work.txt") {
+		t.Errorf("initial commit swept the pre-staged work.txt; committed files:\n%s", committed)
+	}
+	if staged := initRoleFixtureGit(t, repo, "diff", "--cached", "--name-only"); staged != "work.txt" {
+		t.Errorf("staged after init = %q, want the user's work.txt still staged", staged)
+	}
+	if residue := initRoleFixtureGit(t, repo, "diff", "--cached", "--name-only", "--", ".beads"); residue != "" {
+		t.Errorf("initial commit left a staged change under .beads/: %s", residue)
+	}
+}

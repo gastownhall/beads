@@ -1174,3 +1174,59 @@ func TestProxiedInitTailCommitScopeJujutsu(t *testing.T) {
 		require.Equal(t, stageBefore, runGit(target, "ls-files", "--stage"), "Jujutsu skip changed the index")
 	}
 }
+
+// GH#5654: on a fresh repository with an unborn HEAD, the proxied init tail
+// must create the initial bootstrap commit scoped to the beads artifacts,
+// leaving an unrelated pre-staged file staged and uncommitted.
+func TestProxiedInitTailCommitScopeUnbornHead(t *testing.T) {
+	// Serial: the fixture owns the process directory and environment.
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			require.NoError(t, os.Unsetenv(key))
+		}
+	}
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	runGit := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := gitCommand(args...)
+		cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "fixture git %v: %s", args, out)
+		return strings.TrimSpace(string(out))
+	}
+	target := t.TempDir()
+	runGit(target, "init", "--quiet")
+	for key, value := range map[string]string{"user.name": "Fixture", "user.email": "fixture@example.test", "commit.gpgSign": "false", "core.hooksPath": ".git/hooks"} {
+		runGit(target, "config", "--local", key, value)
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(target, "work.txt"), []byte("unrelated work\n"), 0600))
+	runGit(target, "add", "work.txt")
+	require.NoError(t, os.Mkdir(filepath.Join(target, ".beads"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(target, ".beads", "artifact"), []byte("beads\n"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(target, "CLAUDE.md"), []byte("optional\n"), 0600))
+
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("setup-exclude", false, "")
+	in := initProxiedServerInput{skipHooks: true, skipAgents: true, nonInteractive: true, quiet: true}
+	stderr := captureStderr(t, func() {
+		require.NoError(t, runInitProxiedServerTail(cmd, t.Context(), in, runInitTailContext{
+			workDir:       target,
+			beadsDir:      filepath.Join(target, ".beads"),
+			useLocalBeads: true,
+			fsUseCase:     &initTailForkObservation{},
+			gitUC:         storagegit.NewGitProvider(target).GitUseCase(),
+		}))
+	})
+	require.Empty(t, stderr, "quiet bootstrap left diagnostics behind")
+	committed := runGit(target, "show", "--name-only", "--format=", "HEAD")
+	require.Contains(t, committed, ".beads/artifact")
+	require.Contains(t, committed, "CLAUDE.md")
+	require.NotContains(t, committed, "work.txt")
+	require.Equal(t, "work.txt", runGit(target, "diff", "--cached", "--name-only"))
+	require.Empty(t, runGit(target, "diff", "--cached", "--name-only", "--", ".beads", "CLAUDE.md"))
+}

@@ -396,6 +396,37 @@ func (s *testSuite) TestCommitInitArtifacts_NothingToCommitWithForeignStaged() {
 	s.Equal("work.txt", s.gitOutput("diff", "--cached", "--name-only"))
 }
 
+// GH#5654: the init commit is a partial commit over the artifact paths, so on
+// a fresh repository with an unborn HEAD it creates the initial commit without
+// sweeping an unrelated pre-staged file into it.
+func (s *testSuite) TestCommitInitArtifacts_UnbornHeadScopedInitialCommit() {
+	s.gitInit()
+	s.writeFile("work.txt", "unrelated work\n")
+	s.run("git", "add", "work.txt")
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0o750))
+	s.writeFile(".beads/config.yaml", "# beads\n")
+	s.writeFile("CLAUDE.md", "instructions\n")
+
+	result, err := domain.NewGitUseCase(s.tmpDir, s.repo).CommitInitArtifacts(s.Ctx(), domain.CommitInitArtifactsParams{
+		BeadsDir:      ".beads/",
+		OptionalPaths: []string{"CLAUDE.md"},
+		Message:       "bd init: initialize beads issue tracking",
+		NoVerify:      true,
+		SkipHooks:     true,
+	})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+
+	committed := s.gitOutput("show", "--name-only", "--format=", "HEAD")
+	s.Contains(committed, ".beads/config.yaml")
+	s.Contains(committed, "CLAUDE.md")
+	s.NotContains(committed, "work.txt")
+	// The user's staged file survives untouched, and the committed artifacts
+	// leave no staged residue behind.
+	s.Equal("work.txt", s.gitOutput("diff", "--cached", "--name-only"))
+	s.Empty(s.gitOutput("diff", "--cached", "--name-only", "--", ".beads", "CLAUDE.md"))
+}
+
 // gitOutput runs git in the suite's repository and returns its trimmed
 // combined output, for assertions that need to read repository state.
 func (s *testSuite) gitOutput(args ...string) string {
