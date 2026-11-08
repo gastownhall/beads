@@ -1226,6 +1226,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The documented meaning of `dependency_count` and `dependent_count` is
+  corrected; the counts themselves are unchanged (GH#5688). On `bd list`,
+  `bd ready` and `bd export` rows, and on `/v0/beads/issues` and
+  `/v0/beads/ready`, they count `blocks` edges only, so an epic whose
+  dependents are all parent-child children reports `dependent_count: 0`;
+  `bd show` counts every edge type. Neither is a count of open dependents.
+  Automation that gates on a list row's `dependent_count` (for example
+  "never close an issue with open dependents") should switch to
+  `bd dep list <id> --direction=up --json` and filter by status; see the
+  JSON Output Schema Contract's consumer guidelines.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

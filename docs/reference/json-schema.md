@@ -3,7 +3,7 @@ title: JSON Output Schema Contract
 description: The stable JSON output contract for bd --json commands, covering the schema_version envelope, per-command fields, and consumer guidelines.
 ---
 
-Last reviewed: 2026-11-07
+Last reviewed: 2026-11-08
 
 Freshness source: `cmd/bd/output.go`, `cmd/bd/errors.go`, and
 `cmd/bd/protocol/json_contract_test.go`.
@@ -204,19 +204,34 @@ Required fields per item:
   molecule, gate, spike, story, milestone, the internal `event` type, or a
   type configured in `types.custom`
 - `created_at` (string): RFC3339 timestamp
+- `dependency_count` (number): How many outgoing `blocks` edges the issue
+  has (the issues it is blocked by), whatever their status
+- `dependent_count` (number): How many incoming `blocks` edges point at the
+  issue (the issues it blocks), whatever their status
+- `comment_count` (number): Comments on the issue
 
 Optional fields:
 - `description`, `owner`, `updated_at`, `closed_at`
 - `labels` (string[]): Attached labels
-- `dependencies` (object[]): Dependency records
-- `dependency_count`, `dependent_count`, `comment_count` (number)
+- `dependencies` (object[]): Dependency records of every type
 - `parent` (string|null): Parent issue ID
+
+The two dependency counts are **blocks-only**. Edges of every other type
+(parent-child, discovered-from, related, ...) are not counted: an epic whose
+dependents are all parent-child children reports `dependent_count: 0`, and the
+`dependencies` array can hold more records than `dependency_count` because it
+carries every type. `bd show --json` reuses both names for every edge type, so
+the two commands can report different numbers for the same issue by design.
+Neither command's count is the number of *open* dependents; see the Consumer
+Guidelines below before gating automation on one.
 
 ### bd ready --json
 
 Same schema as `bd list --json`. Items are filtered to unblocked issues only.
 Each item includes `dependency_count`, `dependent_count`, `comment_count`,
-and optional `parent` fields. In envelope mode a `--limit`-truncated result
+and optional `parent` fields. The dependency counts are the same blocks-only
+cardinalities as list's: outgoing and incoming `blocks` edges, whatever their
+status. In envelope mode a `--limit`-truncated result
 adds the envelope-level `pagination` key (see the envelope section above).
 
 ### bd blocked --json
@@ -238,6 +253,13 @@ items, plus:
   decimal string compared by equality and echoed back verbatim; always present,
   including a legacy `"0"`
 - `dependencies` (object[]): Full dependency records
+- `dependency_count` (number): How many issues this one depends on over
+  every edge type, whatever their status: one per distinct far end, so an edge
+  held in both dependency planes counts once. Edges whose far end has no local
+  row are counted and reported in `unresolvable_dependencies`
+- `dependent_count` (number): How many issues depend on this one over every
+  edge type, whatever their status, counted the same way. Use
+  `--include-dependents` for the records themselves
 - `comments` (object[]): Comment thread — present only with `--include-comments`;
   the default response returns `comment_count` only (count-only, be-ijck6q)
 - `comments_omitted` (boolean, optional): `true` only when `comment_count` is
@@ -256,6 +278,10 @@ items, plus:
   hold: only the issue's own edges count, so a child of a gated parent, which
   `bd ready` also withholds because a blocked parent blocks its children,
   carries no `gated_by`
+
+Show's `dependency_count` and `dependent_count` share their names with the
+`bd list` / `bd ready` fields but not their meaning: show counts every edge
+type, list and ready count `blocks` edges only.
 
 ### bd close --json
 
@@ -309,6 +335,10 @@ not to the interchange stream. The interchange's own version marker is the
 optional `_schema` header record (`{"_schema":"beads-jsonl/1"}`), which
 readers skip.
 
+Issue records carry `dependency_count` and `dependent_count` with the
+`bd list --json` meaning: outgoing and incoming `blocks` edges, summed over
+both dependency planes, not every edge type.
+
 Issue records carry an optional `wisp_plane` boolean: the explicit
 wisps-plane marker. Export stamps it on rows that live in the wisps table
 when the row flags alone cannot prove the plane (a `no_history: true` record
@@ -334,3 +364,31 @@ as a read-side legacy alias.
 
 4. **Use `--json` flag**, not `--format json`. The `--json` flag is
    the stable contract; `--format` is for human-readable variants.
+
+5. **Pick the dependency count that answers your question.** No `--json`
+   count is a number of open dependents: each is an unfiltered cardinality
+   across every status.
+   - `bd list`, `bd ready` and `bd export` rows count `blocks` edges only.
+   - `bd show <ids...> --json` counts every edge type, all statuses.
+   - For the dependents that are not closed, list them and filter by status:
+
+     ```bash
+     deps=$(bd dep list "$id" --direction=up --json) || exit
+     printf '%s\n' "$deps" | jq '[.[] | select(.status != "closed")] | length'
+     ```
+
+     Each record carries the dependent's `status` and its `dependency_type`.
+     The predicate means non-closed: `open`, `in_progress`, `blocked`,
+     `deferred`, `pinned`, `hooked` and custom statuses all count, so compare
+     against the exact statuses you mean if "open" is literal. Keep the
+     `|| exit`: without it a failed command reads as an empty list and the
+     count as 0. The listing omits a dependent that has no local issue row
+     (an edge recorded from another database), so it is not a count of edge
+     rows, and it is not an atomic check: a dependent added or reopened after
+     the read is not seen by a sweep that acts on it.
+   - Over HTTP, `GET /v0/beads/dependencies:count` (`countDependencyEdges`)
+     with `direction=in` and explicit `status` filters counts dependents per
+     issue; omit `type` to count every edge type. It takes at most 100
+     `issue_id` values per call, reports an unknown id as `missing: true` with
+     `count: 0`, and sums edge rows across both dependency planes rather than
+     deduplicating them, so it can exceed `bd show`'s count.

@@ -1223,10 +1223,16 @@ type Dependency struct {
 	ThreadID string `json:"thread_id,omitempty"`
 }
 
-// DependencyCounts holds counts for dependencies and dependents
+// DependencyCounts holds an issue's work-row cardinalities: its outgoing and
+// incoming `blocks` edges, the numbers IssueWithCounts and ReadyItem carry
+// (bd list, bd ready, bd ready --explain, bd export). Edges of every other
+// type are not counted, and neither is status-filtered: these are not "open
+// dependents". A detail view counts every edge type instead
+// (IssueDetails.DependencyCount / DependentCount), so the same id can carry
+// two different numbers under one JSON name (bd-dh3uij, GH#5688).
 type DependencyCounts struct {
-	DependencyCount int `json:"dependency_count"` // Number of issues this issue depends on
-	DependentCount  int `json:"dependent_count"`  // Number of issues that depend on this issue
+	DependencyCount int `json:"dependency_count"` // Outgoing `blocks` edges: the issues this one is blocked by
+	DependentCount  int `json:"dependent_count"`  // Incoming `blocks` edges: the issues this one blocks
 }
 
 // IssueWithDependencyMetadata extends Issue with dependency relationship type
@@ -1239,10 +1245,22 @@ type IssueWithDependencyMetadata struct {
 // IssueWithCounts extends Issue with dependency relationship counts
 type IssueWithCounts struct {
 	*Issue
-	DependencyCount int     `json:"dependency_count"`
-	DependentCount  int     `json:"dependent_count"`
-	CommentCount    int     `json:"comment_count"`
-	Parent          *string `json:"parent,omitempty"` // Computed parent from parent-child dep (bd-ym8c)
+	// DependencyCount and DependentCount are the work row's cardinalities:
+	// outgoing and incoming `blocks` edges, whatever the far end's status
+	// (DependencyCounts). Other edge types (parent-child, discovered-from,
+	// related, ...) are not counted, so DependencyCount can be smaller than
+	// len(Issue.Dependencies), which carries every type, and an epic whose
+	// dependents are all children has DependentCount 0. IssueDetails reuses
+	// both JSON names for every edge type; a caller that needs that number,
+	// or a status-filtered one, reads the detail view or the dependency
+	// listings, never this row (bd-dh3uij, GH#5688). Under SkipCounts both
+	// are zero because nothing was computed.
+	DependencyCount int `json:"dependency_count"`
+	// DependentCount: incoming `blocks` edges only, any status; IssueDetails'
+	// dependent_count is every edge type (see DependencyCount above).
+	DependentCount int     `json:"dependent_count"`
+	CommentCount   int     `json:"comment_count"`
+	Parent         *string `json:"parent,omitempty"` // Computed parent from parent-child dep (bd-ym8c)
 
 	// CommentsOmitted is the list row's half of the ga-clgh contract
 	// IssueDetails.CommentsOmitted states for the detail view, and it is set
@@ -1287,7 +1305,17 @@ type IssueDetails struct {
 	// Cardinality fields — emitted by default (count-only mode).
 	// Slice fields (Dependents, Comments) are nil when count-only is active.
 	// Use --include-dependents / --include-comments to populate the slices.
-	DependentCount  *int64 `json:"dependent_count,omitempty"`
+	//
+	// DependentCount and DependencyCount count every edge type, whatever the
+	// far end's status: one per distinct far end, so an edge held in both
+	// dependency planes counts once (issueops.CountDependencyEdgesInTx). They
+	// share their JSON names with IssueWithCounts' work-row counts, which
+	// count `blocks` edges alone, so `bd show` and `bd list` can disagree on
+	// the same issue by design (bd-dh3uij, GH#5688).
+	DependentCount *int64 `json:"dependent_count,omitempty"`
+	// DependencyCount: every edge type, one per distinct dependency, including
+	// the UnresolvableDependencies the Dependencies slice cannot list; not
+	// IssueWithCounts' blocks-only dependency_count.
 	DependencyCount *int64 `json:"dependency_count,omitempty"`
 	CommentCount    *int64 `json:"comment_count,omitempty"`
 
@@ -1966,8 +1994,8 @@ type ReadyItem struct {
 	ResolvedBlockers   []string `json:"resolved_blockers"`
 	PinnedDependencies []string `json:"pinned_dependencies,omitempty"`
 	OpenDependencies   []string `json:"open_dependencies,omitempty"`
-	DependencyCount    int      `json:"dependency_count"`
-	DependentCount     int      `json:"dependent_count"`
+	DependencyCount    int      `json:"dependency_count"` // Work-row DependencyCounts: outgoing `blocks` edges only
+	DependentCount     int      `json:"dependent_count"`  // Work-row DependencyCounts: incoming `blocks` edges only
 	Parent             *string  `json:"parent,omitempty"`
 }
 
