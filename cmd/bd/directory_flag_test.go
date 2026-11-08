@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -291,18 +292,23 @@ func mkdirForTest(t *testing.T, dir string) string {
 // process and returns the database it reports.
 func runContextJSONForTest(t *testing.T) string {
 	t.Helper()
+	return runContextInfoForTest(t).Database
+}
+
+// runContextInfoForTest runs the context command's startup and body in
+// process and returns its JSON result.
+func runContextInfoForTest(t *testing.T) ContextInfo {
+	t.Helper()
 	if err := rootCmd.PersistentPreRunE(contextCmd, nil); err != nil {
 		t.Fatalf("PersistentPreRunE(context): %v", err)
 	}
 	jsonOutput = true
 	out := captureStdout(t, func() error { return contextCmd.RunE(contextCmd, nil) })
-	var got struct {
-		Database string `json:"database"`
-	}
+	var got ContextInfo
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
 		t.Fatalf("context --json output %q: %v", out, err)
 	}
-	return got.Database
+	return got
 }
 
 // TestSelectedWorkspaceDatabaseIsolation pins GH#5756 for the no-store
@@ -498,4 +504,146 @@ func TestSelectedWorkspaceRedirectPrecedence(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSelectedWorkspaceSelectionEdges pins the selection edges GH#5756 must
+// keep: an explicit --db target suppresses ambient preservation, a .beads/.env
+// selector routes to a foreign target, a nested direct workspace under an
+// ancestor redirect stays foreign, the retained source does not survive into
+// the next command, BEADS_DIR naming a redirecting .beads keeps its redirect
+// from outside any repository, BEADS_DIR naming the caller's redirect target
+// keeps the caller's provenance (bd-wayc3), and plain discovery still passes
+// over a redirect at the temp root.
+func TestSelectedWorkspaceSelectionEdges(t *testing.T) {
+	t.Run("explicit --db target suppresses ambient preservation", func(t *testing.T) {
+		selectedWorkspaceEnvForTest(t)
+		callerDir, _ := newRedirectedCallerForTest(t)
+		targetBeadsDir := newServerWorkspaceForTest(t, filepath.Join(t.TempDir(), "target"), "target_db")
+		t.Chdir(callerDir)
+		dbPath = filepath.Join(targetBeadsDir, "dolt")
+		flag := rootCmd.PersistentFlags().Lookup("db")
+		flag.Changed = true
+		t.Cleanup(func() { flag.Changed = false })
+
+		if err := rootCmd.PersistentPreRunE(doctorCmd, nil); err != nil {
+			t.Fatalf("PersistentPreRunE(doctor): %v", err)
+		}
+		if got := os.Getenv("BEADS_DOLT_SERVER_DATABASE"); got != "" {
+			t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want unset: an explicit --db target wins over the caller's redirect", got)
+		}
+	})
+
+	t.Run(".env selector routes to a foreign target", func(t *testing.T) {
+		selectedWorkspaceEnvForTest(t)
+		callerDir, callerBeadsDir := newRedirectedCallerForTest(t)
+		targetBeadsDir := newServerWorkspaceForTest(t, filepath.Join(t.TempDir(), "target"), "target_db")
+		envFile := filepath.Join(beads.FollowRedirect(callerBeadsDir), ".env")
+		if err := os.WriteFile(envFile, []byte("BEADS_DIR="+targetBeadsDir+"\n"), 0o600); err != nil {
+			t.Fatalf("write .env selector: %v", err)
+		}
+		t.Chdir(callerDir)
+
+		info := runContextInfoForTest(t)
+		if !sameDirPath(info.BeadsDir, targetBeadsDir) || info.Database != "target_db" {
+			t.Fatalf("context = %q (%q), want %q (target_db)", info.BeadsDir, info.Database, targetBeadsDir)
+		}
+		if got := os.Getenv("BEADS_DOLT_SERVER_DATABASE"); got != "" {
+			t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want unset for a foreign .env selection", got)
+		}
+	})
+
+	t.Run("nested direct workspace under an ancestor redirect", func(t *testing.T) {
+		selectedWorkspaceEnvForTest(t)
+		callerDir, _ := newRedirectedCallerForTest(t)
+		nestedDir := filepath.Join(callerDir, "nested")
+		nestedBeadsDir := newServerWorkspaceForTest(t, nestedDir, "nested_db")
+		t.Chdir(callerDir)
+		changeDir = nestedDir
+
+		info := runContextInfoForTest(t)
+		if !sameDirPath(info.BeadsDir, nestedBeadsDir) || info.Database != "nested_db" {
+			t.Fatalf("context = %q (%q), want %q (nested_db)", info.BeadsDir, info.Database, nestedBeadsDir)
+		}
+		if got := os.Getenv("BEADS_DOLT_SERVER_DATABASE"); got != "" {
+			t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want unset: the ancestor repo's redirect is not the nested workspace's", got)
+		}
+	})
+
+	t.Run("retained source does not survive into the next command", func(t *testing.T) {
+		selectedWorkspaceEnvForTest(t)
+		callerDir, _ := newRedirectedCallerForTest(t)
+		targetDir := filepath.Join(t.TempDir(), "target")
+		newServerWorkspaceForTest(t, targetDir, "target_db")
+		t.Chdir(callerDir)
+
+		if err := rootCmd.PersistentPreRunE(doctorCmd, nil); err != nil {
+			t.Fatalf("PersistentPreRunE(doctor), first command: %v", err)
+		}
+		if got := os.Getenv("BEADS_DOLT_SERVER_DATABASE"); got != "caller_db" {
+			t.Fatalf("first command preserved %q, want caller_db", got)
+		}
+
+		// A fresh process starts with the preserved variable unset.
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+		changeDir = targetDir
+		if got := runContextJSONForTest(t); got != "target_db" {
+			t.Fatalf("second command context database = %q, want target_db", got)
+		}
+		if got := os.Getenv("BEADS_DOLT_SERVER_DATABASE"); got != "" {
+			t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want unset: the first command's source leaked into the second", got)
+		}
+	})
+
+	t.Run("BEADS_DIR naming a redirecting .beads from outside any repository", func(t *testing.T) {
+		selectedWorkspaceEnvForTest(t)
+		_, callerBeadsDir := newRedirectedCallerForTest(t)
+		t.Chdir(t.TempDir())
+		t.Setenv("BEADS_DIR", callerBeadsDir)
+
+		got := runWhereJSONForTest(t)
+		if !sameDirPath(got.Path, beads.FollowRedirect(callerBeadsDir)) || !sameDirPath(got.RedirectedFrom, callerBeadsDir) {
+			t.Fatalf("where = %q via %q, want %q via %q", got.Path, got.RedirectedFrom, beads.FollowRedirect(callerBeadsDir), callerBeadsDir)
+		}
+	})
+
+	t.Run("BEADS_DIR naming the redirect target keeps the caller's provenance", func(t *testing.T) {
+		selectedWorkspaceEnvForTest(t)
+		callerDir, callerBeadsDir := newRedirectedCallerForTest(t)
+		sharedBeadsDir := beads.FollowRedirect(callerBeadsDir)
+		t.Chdir(callerDir)
+		t.Setenv("BEADS_DIR", sharedBeadsDir)
+
+		got := runWhereJSONForTest(t)
+		if !sameDirPath(got.Path, sharedBeadsDir) || !sameDirPath(got.RedirectedFrom, callerBeadsDir) {
+			t.Fatalf("where = %q via %q, want %q via %q", got.Path, got.RedirectedFrom, sharedBeadsDir, callerBeadsDir)
+		}
+	})
+
+	t.Run("plain discovery passes over a redirect at the temp root", func(t *testing.T) {
+		selectedWorkspaceEnvForTest(t)
+		tempRoot := filepath.Join(t.TempDir(), "tmp")
+		writeRedirectForTest(t, filepath.Join(tempRoot, ".beads"), filepath.Join(t.TempDir(), ".beads"))
+		child := mkdirForTest(t, filepath.Join(tempRoot, "fixture"))
+		t.Setenv("TMPDIR", tempRoot)
+		// With no workspace discovered, the no-store guard also considers
+		// the user-global ~/.beads, which belongs to whoever runs the test.
+		t.Setenv("HOME", t.TempDir())
+		t.Chdir(child)
+
+		if err := rootCmd.PersistentPreRunE(whereCmd, nil); err != nil {
+			t.Fatalf("PersistentPreRunE(where): %v", err)
+		}
+		jsonOutput = true
+		out, err := captureStdoutWithError(t, func() error { return whereCmd.RunE(whereCmd, nil) })
+		var exitErr *exitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("where RunE = %v, want the silent no-workspace exit", err)
+		}
+		var payload struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(out), &payload); err != nil || payload.Error != "no_beads_directory" {
+			t.Fatalf("where --json = %q (%v), want the no_beads_directory error", out, err)
+		}
+	})
 }
