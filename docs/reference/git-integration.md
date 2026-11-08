@@ -42,7 +42,8 @@ stays staged and out of the commit, and unstaged edits stay unstaged.
 
 The scope is by path, not by who wrote the change: if one of those files
 already had uncommitted edits of yours (a modified `CLAUDE.md` or
-`.gitignore`, say), the bootstrap commit includes them. If Git refuses the
+`.gitignore`, say), the bootstrap commit includes them. When nothing under
+the artifact paths differs from `HEAD`, init makes no commit. If Git refuses the
 commit (during a merge, for example), init prints a warning with Git's reason
 and continues.
 

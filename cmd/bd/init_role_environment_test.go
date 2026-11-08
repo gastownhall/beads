@@ -822,6 +822,7 @@ func TestInitArtifactCommitScope(t *testing.T) {
 	for _, tc := range []initCommitScopeCase{
 		{name: "foreign_staged"},
 		{name: "partly_staged", partly: true},
+		{name: "unchanged", unchanged: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			target, _, _ := newInitRoleFixture(t)

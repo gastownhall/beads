@@ -261,6 +261,10 @@ func (r *gitRepositoryImpl) Commit(ctx context.Context, params domain.GitCommitP
 		if err != nil {
 			return domain.GitCommitResult{}, err
 		}
+		if len(staged) == 0 {
+			// Nothing in scope changed; whatever else is staged is not ours.
+			return domain.GitCommitResult{DidCommit: false}, nil
+		}
 		only = staged
 		args = append(args, "--literal-pathspecs")
 	}
