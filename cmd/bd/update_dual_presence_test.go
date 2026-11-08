@@ -119,3 +119,51 @@ func TestCLI_UpdateDualPresenceRefuses(t *testing.T) {
 		}
 	}
 }
+
+// TestCLI_UpdateDualPresenceRepairThenUpdate is the recovery the refusal points
+// at: the existing server-mode doctor repair deletes the issues copy and keeps
+// the wisp copy, after which a notes update succeeds and is what show returns,
+// and --persistent leaves one durable row carrying it and no wisp row.
+func TestCLI_UpdateDualPresenceRepairThenUpdate(t *testing.T) {
+	w := newDualPresenceCLI(t)
+	id := w.seedTwin()
+	rows := func(table string) string {
+		return w.must("sql", "--csv", fmt.Sprintf("SELECT title, notes FROM %s WHERE id = '%s'", table, id))
+	}
+	if !strings.Contains(rows("issues"), "durable copy") || !strings.Contains(rows("wisps"), "wisp copy") {
+		t.Fatalf("fixture is not dual-present:\nissues %s\nwisps %s", rows("issues"), rows("wisps"))
+	}
+
+	// --yes stands in for the confirmation a terminal user gives. The fix
+	// re-runs the checks and exits nonzero while any other check still warns,
+	// so its exit status is not the contract; the rows are.
+	if stdout, stderr, err := w.run("doctor", "--check=validate", "--fix", "--yes"); err != nil {
+		t.Logf("bd doctor --check=validate --fix --yes: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if got := rows("issues"); strings.Contains(got, "durable copy") {
+		t.Fatalf("doctor repair kept the issues copy:\n%s", got)
+	}
+	if got := rows("wisps"); !strings.Contains(got, "wisp copy") || !strings.Contains(got, "wisp notes") {
+		t.Fatalf("doctor repair did not keep the wisp copy:\n%s", got)
+	}
+
+	w.must("update", id, "--notes", "probe", "--force")
+	var shown []struct {
+		Title string `json:"title"`
+		Notes string `json:"notes"`
+	}
+	if out := w.must("show", id, "--json"); json.Unmarshal([]byte(out), &shown) != nil || len(shown) != 1 {
+		t.Fatalf("parse show output:\n%s", out)
+	}
+	if shown[0].Title != "wisp copy" || shown[0].Notes != "probe" {
+		t.Fatalf("show after update = %+v, want the wisp copy with notes %q", shown[0], "probe")
+	}
+
+	w.must("update", id, "--persistent")
+	if got := rows("wisps"); strings.Contains(got, "wisp copy") {
+		t.Errorf("--persistent left a wisp row:\n%s", got)
+	}
+	if got := w.must("sql", "--csv", fmt.Sprintf("SELECT COUNT(*) AS n, MAX(notes) AS notes FROM issues WHERE id = '%s'", id)); !strings.Contains(got, "1,probe") {
+		t.Errorf("--persistent issues rows = %s, want one row with notes probe", got)
+	}
+}
