@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -227,5 +228,58 @@ func TestEmbeddedDoltRemoteAdd_JSON_AllowGitOrigin_WarningOnStderr(t *testing.T)
 	if !strings.Contains(stderr.String(), "Warning:") {
 		t.Errorf("--json --allow-git-origin: expected Warning on stderr, got:\nstderr: %s\nstdout: %s",
 			stderr.String(), stdout.String())
+	}
+}
+
+// TestEmbeddedDoltRemoteAdd_GitBackedOrigin_Accepted asserts that the default
+// git-backed sync remote, origin over a git transport naming the git origin's
+// repository, is added without --allow-git-origin and without the collision
+// warning: Dolt keeps its data under refs/dolt/data, apart from the source
+// branches (GH#6150). The remote is stored and sync.remote persisted. The raw
+// https:// form of the same URL is still refused (GitOriginCollision_Exits1).
+func TestEmbeddedDoltRemoteAdd_GitBackedOrigin_Accepted(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded integration tests")
+	}
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	originURL := "https://github.com/org/repo.git"
+	doltURL := "git+https://github.com/org/repo.git"
+	for _, tc := range []struct {
+		name, prefix string
+		flags        []string
+	}{
+		{"without the flag", "gb", nil},
+		{"with a redundant --allow-git-origin", "gf", []string{"--allow-git-origin"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, _, _ := bdInit(t, bd, "--prefix", tc.prefix)
+			setGitOrigin(t, dir, originURL)
+
+			_, stderr, err := remoteAdd(t, bd, dir, append(tc.flags, "origin", doltURL)...)
+			if err != nil {
+				t.Fatalf("bd dolt remote add origin %s: %v\nstderr: %s", doltURL, err, stderr)
+			}
+			if strings.Contains(stderr, "refusing to add") || strings.Contains(stderr, "matches the git origin") {
+				t.Errorf("git-backed origin drew the git-origin collision guard\nstderr:\n%s", stderr)
+			}
+
+			list, listErr, err := bdDoltSeparate(t, bd, dir, "remote", "list")
+			if err != nil {
+				t.Fatalf("bd dolt remote list: %v\nstderr: %s", err, listErr)
+			}
+			if !strings.Contains(list, "origin") || !strings.Contains(list, doltURL) {
+				t.Errorf("remote list does not show origin %s:\n%s", doltURL, list)
+			}
+
+			cfg, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(cfg), doltURL) {
+				t.Errorf("sync.remote %s not persisted to config.yaml:\n%s", doltURL, cfg)
+			}
+		})
 	}
 }
