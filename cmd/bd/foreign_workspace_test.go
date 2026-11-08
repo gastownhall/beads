@@ -65,7 +65,9 @@ var foreignOpenAccesses = map[string]foreignAccess{
 // routed and external opens reached it unchecked: a server-mode one
 // auto-started a Dolt server inside it and a routed write ran bd's schema
 // migrations into its database, and an embedded create made a database beside
-// its root.
+// its root. A server launcher admits the one layout refused only for the
+// embedded open (ServerLauncherAdmits), as
+// TestForeignOpenThroughServerAdmitsCurrentEraDoltRoot pins.
 func TestAdmitForeignWorkspaceRefusesLegacyDoltAsAdmissionDoes(t *testing.T) {
 	launchers := map[string]string{
 		"embedded launcher": "",
@@ -73,6 +75,9 @@ func TestAdmitForeignWorkspaceRefusesLegacyDoltAsAdmissionDoes(t *testing.T) {
 	}
 	for launcherName, launcherYAML := range launchers {
 		for _, layout := range legacyworkspace.LegacyDoltLayouts() {
+			if layout.ServerLauncherAdmits && launcherYAML != "" {
+				continue
+			}
 			t.Run(launcherName+"/"+layout.Name, func(t *testing.T) {
 				isolateForeignWorkspaceSignals(t, launcherYAML)
 				beadsDir := filepath.Join(t.TempDir(), ".beads")
@@ -96,6 +101,173 @@ func TestAdmitForeignWorkspaceRefusesLegacyDoltAsAdmissionDoes(t *testing.T) {
 				}
 				if after := legacyworkspace.TreeDigest(t, beadsDir); !maps.Equal(after, before) {
 					t.Fatalf("the legacy workspace changed: before %v, after %v", slices.Sorted(maps.Keys(before)), slices.Sorted(maps.Keys(after)))
+				}
+			})
+		}
+	}
+}
+
+// TestForeignOpenThroughServerAdmitsCurrentEraDoltRoot pins the other side of
+// the foreign refusal of a current-era .beads/dolt root that nothing in the
+// target selects a server for (GH#6259). That refusal stops the empty
+// embedded database an embedded open would create beside the root. A
+// launcher whose merged configuration sends an open through the store
+// factories to a server, by server mode or by dolt.shared-server, therefore
+// admits the target, as main did. The selection can come from the BD_
+// environment or the user-level config.yaml, which bd run inside the target
+// also reads and admits it under, or from the launcher's own config.yaml.
+// Each such open gets past admission to the server, where nothing listens.
+// The same target is refused with nothing selected, and when its metadata
+// names the embedded mode, which outranks those layers for the open as it
+// does for bd run inside it. The create and planning initializers
+// (ensureBeadsDirForPath, the dry-run's checkRepoTargetInitializable and
+// migrate-personal's refuseUninitializablePlanningRepo) write an embedded
+// database, and a metadata.json naming the embedded mode, into a target with
+// no metadata.json whatever the launcher selects, so they refuse that target
+// under every selection. A target whose own config.yaml enables
+// dolt.shared-server is admitted by every one of them under every selection:
+// that setting outranks the metadata.json an initializer writes, so the store
+// factories open it through a server before and after the write, and bd run
+// inside it admits it. Nothing changes the target.
+func TestForeignOpenThroughServerAdmitsCurrentEraDoltRoot(t *testing.T) {
+	var layout legacyworkspace.LegacyDoltLayout
+	for _, candidate := range legacyworkspace.LegacyDoltLayouts() {
+		if candidate.ServerLauncherAdmits {
+			layout = candidate
+		}
+	}
+	if layout.Name == "" {
+		t.Fatal("legacyworkspace.LegacyDoltLayouts has no layout a server launcher admits")
+	}
+	withMetadata := func(metadata string) map[string]string {
+		files := maps.Clone(layout.Files)
+		if metadata == "" {
+			delete(files, "metadata.json")
+		} else {
+			files["metadata.json"] = metadata
+		}
+		return files
+	}
+	serverYAML := "dolt:\n  mode: server\n"
+	sharedYAML := "dolt:\n  shared-server: true\n"
+	ownSharedServer := withMetadata("")
+	ownSharedServer["config.yaml"] = sharedYAML
+	targets := []struct {
+		name  string
+		files map[string]string
+		// embedded marks metadata naming the embedded mode, which no
+		// selection here overrides.
+		embedded bool
+		// sharedServer marks a target whose own config.yaml enables
+		// dolt.shared-server, which selects a server for it under every
+		// selection here.
+		sharedServer bool
+	}{
+		{name: "metadata naming no dolt_mode", files: layout.Files},
+		{name: "metadata naming the embedded mode", files: withMetadata(`{"backend":"dolt","dolt_mode":"embedded","dolt_database":"hq"}`), embedded: true},
+		{name: "no metadata", files: withMetadata("")},
+		{name: "no metadata, its own config.yaml shared server", files: ownSharedServer, sharedServer: true},
+	}
+	selections := []struct {
+		name     string
+		launcher string // the launcher's config.yaml, "" for none
+		user     string // the user-level config.yaml, "" for none
+		bdMode   string // BD_DOLT_MODE, "" for unset
+		bdShared string // BD_DOLT_SHARED_SERVER, "" for unset
+	}{
+		{name: "BD_DOLT_MODE=server", bdMode: "server"},
+		{name: "user-level config.yaml server mode", user: serverYAML},
+		{name: "launcher config.yaml server mode", launcher: serverYAML},
+		{name: "BD_DOLT_SHARED_SERVER=true", bdShared: "true"},
+		{name: "user-level config.yaml shared server", user: sharedYAML},
+		{name: "launcher config.yaml shared server", launcher: sharedYAML},
+		{name: "nothing selected"},
+	}
+	initializers := map[string]func(*testing.T, string) error{
+		"create": func(t *testing.T, beadsDir string) error {
+			return ensureBeadsDirForPath(t.Context(), filepath.Dir(beadsDir), nil, true)
+		},
+		"create --dry-run": func(_ *testing.T, beadsDir string) error {
+			_, err := checkRepoTargetInitializable(filepath.Dir(beadsDir), true)
+			return err
+		},
+		"migrate-personal": func(_ *testing.T, beadsDir string) error {
+			return refuseUninitializablePlanningRepo(beadsDir)
+		},
+	}
+	for _, target := range targets {
+		for _, sel := range selections {
+			t.Run(target.name+"/"+sel.name, func(t *testing.T) {
+				admitted := target.sharedServer || sel.name != "nothing selected" && !target.embedded
+				_, hasMetadata := target.files["metadata.json"]
+				isolateForeignWorkspaceSignals(t, sel.launcher)
+				// Nothing listens there, and the isolation turned auto-start
+				// off. Neither a host on this machine nor a port selects a
+				// server.
+				t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+				t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+				t.Setenv("BEADS_SHARED_SERVER_DIR", filepath.Join(t.TempDir(), "shared-server"))
+				t.Setenv("BD_DOLT_HOST", "")
+				t.Setenv("BD_DOLT_SHARED_SERVER", sel.bdShared)
+				t.Setenv("BD_DOLT_MODE", sel.bdMode)
+				// The user-level config.yaml, under the HOME the isolation
+				// set; the launcher's configuration is loaded again over it.
+				userConfigDir := filepath.Join(os.Getenv("HOME"), ".config")
+				t.Setenv("XDG_CONFIG_HOME", userConfigDir)
+				if sel.user != "" {
+					legacyworkspace.Layout{Files: map[string]string{"config.yaml": sel.user}}.Write(t, filepath.Join(userConfigDir, "bd"))
+				}
+				config.ResetForTesting()
+				if err := config.Initialize(); err != nil {
+					t.Fatalf("config.Initialize: %v", err)
+				}
+				beadsDir := filepath.Join(t.TempDir(), ".beads")
+				legacyworkspace.Layout{Files: target.files}.Write(t, beadsDir)
+				before := legacyworkspace.TreeDigest(t, beadsDir)
+				want := legacyworkspace.LegacyDoltRefusal(layout.Reason)
+				// refused reports whether err is the refusal of this root,
+				// and fails the test on any other legacy refusal.
+				refused := func(err error) bool {
+					t.Helper()
+					var legacyErr *configfile.LegacyWorkspaceError
+					if !errors.As(err, &legacyErr) {
+						return false
+					}
+					if err.Error() != want {
+						t.Fatalf("refusal = %q, want %q", err, want)
+					}
+					return true
+				}
+
+				if _, err := admitForeignWorkspace(beadsDir); refused(err) == admitted || admitted && err != nil {
+					t.Fatalf("admitForeignWorkspace = %v, want admitted %v", err, admitted)
+				}
+				for name, access := range foreignOpenAccesses {
+					store, err := openForeignStore(t.Context(), beadsDir, access)
+					if err == nil {
+						_ = store.Close()
+						t.Fatalf("openForeignStore(%s) opened a store with no server listening", name)
+					}
+					if refused(err) == admitted {
+						t.Fatalf("openForeignStore(%s) = %v, want admitted %v", name, err, admitted)
+					}
+					if admitted && !strings.Contains(err.Error(), "Dolt server") {
+						t.Fatalf("openForeignStore(%s) = %v, want it to dial the Dolt server", name, err)
+					}
+				}
+				// A target with a metadata.json is opened through the store
+				// factories after these (refuseExistingCreateTarget); one
+				// without is initialized embedded, with a metadata.json that,
+				// of the settings here, only its own dolt.shared-server
+				// outranks.
+				initAdmitted := admitted && (hasMetadata || target.sharedServer)
+				for name, initialize := range initializers {
+					if err := initialize(t, beadsDir); refused(err) == initAdmitted || initAdmitted && err != nil {
+						t.Fatalf("%s = %v, want admitted %v", name, err, initAdmitted)
+					}
+				}
+				if after := legacyworkspace.TreeDigest(t, beadsDir); !maps.Equal(after, before) {
+					t.Fatalf("the target changed: before %v, after %v", slices.Sorted(maps.Keys(before)), slices.Sorted(maps.Keys(after)))
 				}
 			})
 		}
@@ -690,5 +862,46 @@ func TestRefuseUninitializableTargetRefusesWhatAdmissionRefuses(t *testing.T) {
 				t.Fatalf("the target changed: before %v, after %v", before, after)
 			}
 		})
+	}
+}
+
+// TestRefuseUninitializableTargetIgnoresLauncherSharedServer pins the legacy
+// side of the initializers' refusal under a launcher whose config.yaml
+// enables dolt.shared-server. An open through the store factories admits a
+// metadata-less legacy Dolt root from it, since it opens the target through
+// that server (guardForeignLegacyDoltWorkspace). The create and planning
+// initializers write an embedded database beside the root and a metadata.json
+// naming the embedded mode, under which nothing falls back to the launcher's
+// dolt.shared-server, so they refuse the root as bd run inside it does, and
+// write nothing.
+func TestRefuseUninitializableTargetIgnoresLauncherSharedServer(t *testing.T) {
+	isolateForeignWorkspaceSignals(t, "dolt:\n  shared-server: true\n")
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	legacyworkspace.Layout{Files: map[string]string{"dolt/beads/.dolt/noms/manifest": "legacy manifest"}}.Write(t, beadsDir)
+	before := legacyworkspace.TreeDigest(t, beadsDir)
+
+	if _, err := admitForeignWorkspace(beadsDir); err != nil {
+		t.Fatalf("admitForeignWorkspace = %v, want the shared-server launcher's open admitted", err)
+	}
+	want := legacyworkspace.LegacyDoltRefusal("legacy Dolt workspace")
+	for name, initialize := range map[string]func() error{
+		"create": func() error {
+			return ensureBeadsDirForPath(t.Context(), filepath.Dir(beadsDir), nil, true)
+		},
+		"create --dry-run": func() error {
+			_, err := checkRepoTargetInitializable(filepath.Dir(beadsDir), true)
+			return err
+		},
+		"migrate-personal": func() error {
+			return refuseUninitializablePlanningRepo(beadsDir)
+		},
+	} {
+		var legacyErr *configfile.LegacyWorkspaceError
+		if err := initialize(); !errors.As(err, &legacyErr) || err.Error() != want {
+			t.Errorf("%s = %v, want %q", name, err, want)
+		}
+	}
+	if after := legacyworkspace.TreeDigest(t, beadsDir); !maps.Equal(after, before) {
+		t.Fatalf("the target changed: before %v, after %v", slices.Sorted(maps.Keys(before)), slices.Sorted(maps.Keys(after)))
 	}
 }
