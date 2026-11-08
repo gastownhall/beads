@@ -840,10 +840,19 @@ func runSyncCommand(cmd *cobra.Command, _ []string) error {
 			if noPush {
 				return nil
 			}
+			prePush := prePushCommit(ctx, remote, st)
+			var err error
 			if remote != "" {
-				return st.PushRemote(ctx, remote, false)
+				err = st.PushRemote(ctx, remote, false)
+			} else {
+				err = st.Push(ctx)
 			}
-			return st.Push(ctx)
+			// push-state.json describes origin only (GH#6289): a sync against
+			// another remote must not clear origin's recorded failure.
+			if err == nil && (remote == "" || remote == pushStateRemote) {
+				recordManualPushSuccess(ctx, st, prePush)
+			}
+			return err
 		},
 	}
 	// Per-step progress is the non-essential output -q exists to silence: this

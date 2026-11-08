@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,6 +109,7 @@ type pushStateFakeStore struct {
 	remotes         []storage.RemoteInfo
 	pushed          bool
 	calls           []string
+	pulls           int
 }
 
 func (f *pushStateFakeStore) GetCurrentCommit(context.Context) (string, error) {
@@ -253,4 +255,110 @@ func TestDoltPushRecordsPushState(t *testing.T) {
 			t.Errorf("stderr = %q, want a warning that push-state.json was not updated", stderr)
 		}
 	})
+}
+
+// The sync loop's pull, conflict and recompute steps, all clean; pulls are
+// counted so a skipped push can be told apart from a skipped sync.
+func (f *pushStateFakeStore) Pull(context.Context) error                       { f.pulls++; return nil }
+func (f *pushStateFakeStore) PullRemote(context.Context, string) error         { f.pulls++; return nil }
+func (f *pushStateFakeStore) RecomputeAllBlocked(context.Context) (int, error) { return 0, nil }
+func (f *pushStateFakeStore) GetConflicts(context.Context) ([]storage.Conflict, error) {
+	return nil, nil
+}
+
+// TestSyncRecordsPushState pins AC-5 of GH#6289: a bd sync whose push to the
+// default remote or to origin succeeds records success in push-state.json,
+// while a sync against another remote, a failed push, and a skipped push
+// (no-push, dolt.local-only) leave the file exactly as it was.
+func TestSyncRecordsPushState(t *testing.T) {
+	// Cannot be parallel: mutates env vars, config, the store global and
+	// syncCmd's flags.
+	tests := []struct {
+		name      string
+		config    string
+		remote    string
+		pushErr   error
+		wantCalls string
+		wantErr   bool
+		recorded  bool
+		wantPull  bool
+	}{
+		{name: "default remote", wantCalls: "Push", recorded: true},
+		{name: "--remote origin", remote: "origin", wantCalls: "PushRemote(origin)", recorded: true},
+		{name: "--remote backup", remote: "backup", wantCalls: "PushRemote(backup)"},
+		{name: "push fails", pushErr: errors.New("permission denied"), wantCalls: "Push", wantErr: true},
+		{name: "no-push", config: "no-push: true\n", wantPull: true},
+		{name: "dolt.local-only", config: "dolt:\n  local-only: true\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			saveAndRestoreGlobals(t)
+			resetCommandContext()
+			oldJSON, oldCtx, oldQuiet, oldAdopt := jsonOutput, rootCtx, quietFlag, syncAdoptGitOrigin
+			t.Cleanup(func() {
+				jsonOutput, rootCtx, quietFlag, syncAdoptGitOrigin = oldJSON, oldCtx, oldQuiet, oldAdopt
+				_ = syncCmd.Flags().Set("attempts", fmt.Sprintf("%d", defaultSyncAttempts))
+				_ = syncCmd.Flags().Set("remote", "")
+			})
+			syncAdoptGitOrigin = func(context.Context, storage.DoltStorage, adoptPolicy, adoptOptIn) (bool, error) { return false, nil }
+			jsonOutput, quietFlag, rootCtx = false, false, context.Background()
+
+			seed := staleFailedPushState()
+			beadsDir := pushStateWorkspace(t, tt.config, seed)
+			fake := &pushStateFakeStore{head: "c1", afterPush: "c2", pushErr: tt.pushErr, remotes: pushStateTestRemotes()}
+			store = fake
+			if err := syncCmd.Flags().Set("remote", tt.remote); err != nil {
+				t.Fatal(err)
+			}
+
+			before := time.Now().UTC()
+			var runErr error
+			_, stderr := captureStdio(t, func() { runErr = runSyncCommand(syncCmd, nil) })
+			after := time.Now().UTC()
+
+			if got := strings.Join(fake.calls, ","); got != tt.wantCalls {
+				t.Fatalf("store push calls = %q, want %q (stderr %q)", got, tt.wantCalls, stderr)
+			}
+			if (runErr != nil) != tt.wantErr {
+				t.Fatalf("runSyncCommand error = %v, want error=%v (stderr %q)", runErr, tt.wantErr, stderr)
+			}
+			if tt.wantPull && fake.pulls == 0 {
+				t.Errorf("pulls = 0, want the pull to still run when only the push is skipped")
+			}
+			if tt.recorded {
+				assertPushStateRecordedSuccess(t, beadsDir, before, after, "c2")
+			} else {
+				assertPushStateUnchanged(t, beadsDir, seed)
+			}
+		})
+	}
+}
+
+// TestSyncPushStateDoesNotRecordProxiedServer pins that bd sync keeps
+// refusing proxied-server workspaces before it touches the store, so a seeded
+// failure record survives untouched.
+func TestSyncPushStateDoesNotRecordProxiedServer(t *testing.T) {
+	saveAndRestoreGlobals(t)
+	resetCommandContext()
+	pinStorageMode(t, false)
+	oldJSON, oldCtx := jsonOutput, rootCtx
+	t.Cleanup(func() { jsonOutput, rootCtx = oldJSON, oldCtx })
+	jsonOutput, rootCtx = false, context.Background()
+
+	seed := staleFailedPushState()
+	beadsDir := pushStateWorkspace(t, "", seed)
+	fake := &pushStateFakeStore{head: "c1", afterPush: "c2", remotes: pushStateTestRemotes()}
+	store = fake
+	proxiedServerMode = true
+
+	var runErr error
+	_, _ = captureStdio(t, func() { runErr = runSyncCommand(syncCmd, nil) })
+	if runErr == nil {
+		t.Fatal("runSyncCommand in proxied-server mode: want the refusal, got nil")
+	}
+	if len(fake.calls) != 0 || fake.pulls != 0 {
+		t.Errorf("store calls = %v, pulls = %d, want none before the refusal", fake.calls, fake.pulls)
+	}
+	assertPushStateUnchanged(t, beadsDir, seed)
 }
