@@ -265,3 +265,65 @@ func TestSelectedWorkspaceStorelessIsolation(t *testing.T) {
 // redirect provenance only for a selection that actually came through that
 // redirect. A foreign selection made from inside a redirected caller reports
 // no provenance; the caller's own selection keeps reporting its redirect.
+func TestSelectedWorkspaceWhereProvenance(t *testing.T) {
+	fixture := newRedirectedCallerFixture(t)
+	targetDir := t.TempDir()
+	targetBeads := filepath.Join(targetDir, ".beads")
+	writeSelectedServerTarget(t, targetBeads, "target_db", "targetpfx")
+
+	assertWhereDescribesTarget := func(t *testing.T) {
+		t.Helper()
+		result, err := runSelectedWhereJSON(t)
+		if err != nil {
+			t.Fatalf("where --json: %v", err)
+		}
+		assertSelectedDirEqual(t, result.Path, targetBeads, "where path")
+		assertSelectedDirEqual(t, result.DatabasePath, filepath.Join(targetBeads, "dolt"), "where database_path")
+		if result.Prefix != "targetpfx" {
+			t.Errorf("where prefix = %q, want %q", result.Prefix, "targetpfx")
+		}
+		if result.RedirectedFrom != "" {
+			t.Errorf("where redirected_from = %q, want none: the selection did not come through that redirect", result.RedirectedFrom)
+		}
+	}
+
+	t.Run("foreign direct target via dash-C", func(t *testing.T) {
+		if err := runSelectedWorkspacePreRun(t, fixture.callerDir, whereCmd, selectViaChangeDir(targetDir)); err != nil {
+			t.Fatalf("PersistentPreRunE(where): %v", err)
+		}
+		assertNoCallerDatabaseLeak(t)
+		assertWhereDescribesTarget(t)
+	})
+
+	t.Run("foreign direct target via BEADS_DIR", func(t *testing.T) {
+		if err := runSelectedWorkspacePreRun(t, fixture.callerDir, whereCmd, selectViaBeadsDir(targetBeads)); err != nil {
+			t.Fatalf("PersistentPreRunE(where): %v", err)
+		}
+		assertNoCallerDatabaseLeak(t)
+		assertWhereDescribesTarget(t)
+	})
+
+	// The caller's own workspace still reports its redirect (be-xil /
+	// bd-wayc3): without this row the fix could pass by never preserving.
+	t.Run("caller's own redirect keeps provenance", func(t *testing.T) {
+		if err := runSelectedWorkspacePreRun(t, fixture.callerDir, whereCmd, nil); err != nil {
+			t.Fatalf("PersistentPreRunE(where): %v", err)
+		}
+		result, err := runSelectedWhereJSON(t)
+		if err != nil {
+			t.Fatalf("where --json: %v", err)
+		}
+		assertSelectedDirEqual(t, result.Path, fixture.sharedBeads, "where path")
+		assertSelectedDirEqual(t, result.DatabasePath, filepath.Join(fixture.sharedBeads, "dolt"), "where database_path")
+		if result.Prefix != "sharedpfx" {
+			t.Errorf("where prefix = %q, want %q", result.Prefix, "sharedpfx")
+		}
+		assertSelectedDirEqual(t, result.RedirectedFrom, fixture.callerBeads, "where redirected_from")
+	})
+}
+
+// TestSelectedWorkspaceRedirectDatabase pins AC-4: two clones of one shared
+// database have distinct redirect-source names; selecting clone2 from
+// clone1's checkout (or from outside any repository) reports clone2's
+// identity — its redirect-source database for context, its own stub for
+// where provenance — never clone1's.

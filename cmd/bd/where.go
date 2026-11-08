@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
@@ -11,7 +9,6 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/utils"
 )
 
 // WhereResult contains information about the active beads location
@@ -74,11 +71,12 @@ Examples:
 
 		result.Path = beadsDir
 
-		// Check if we got here via redirect by looking for the original .beads directory
-		// Walk up from cwd to find any .beads with a redirect file
-		originalBeadsDir := findOriginalBeadsDir()
-		if originalBeadsDir != "" && originalBeadsDir != beadsDir {
-			result.RedirectedFrom = originalBeadsDir
+		// Report provenance from the redirect source retained at command
+		// startup, not from a walk of the cwd: `bd where` answers for the
+		// selected workspace (-C / BEADS_DIR), and a caller's own redirect
+		// must not be reported as a foreign selection's provenance (GH#5756).
+		if source := selectedRedirectProvenance(beadsDir); source != "" {
+			result.RedirectedFrom = source
 		}
 
 		// Find the database path
@@ -149,49 +147,22 @@ func shouldReadWherePrefixFromStore(beadsDir string) bool {
 	return !cfg.IsDoltServerMode() && !cfg.IsDoltProxiedServerMode()
 }
 
-// findOriginalBeadsDir walks up from cwd looking for a .beads directory with a redirect file
-// Returns the original .beads path if found, empty string otherwise
-func findOriginalBeadsDir() string {
-	cwd, err := os.Getwd()
-	if err != nil {
+// selectedRedirectProvenance reports the redirect source behind beadsDir for
+// `bd where`: the source retained at command startup, and only when the
+// selection actually came through that redirect — its target resolves to the
+// printed beads dir. A foreign selection made from inside an unrelated
+// redirected workspace therefore reports no provenance, and neither does an
+// explicit database target, which suppresses retention (be-fyt).
+func selectedRedirectProvenance(beadsDir string) string {
+	source := retainedRedirectSourceDir
+	if source == "" || beadsDir == "" {
 		return ""
 	}
-
-	// Canonicalize cwd to handle symlinks
-	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
-		cwd = resolved
+	info := beads.ResolveRedirect(source)
+	if !info.WasRedirected || sameDirPath(source, beadsDir) || !sameDirPath(info.TargetDir, beadsDir) {
+		return ""
 	}
-
-	// Check BEADS_DIR first: if the env points at a .beads directory with a
-	// redirect file, that's the original. Fall through to the fs walk if
-	// BEADS_DIR is set but does not contain a redirect — bd's startup now
-	// rebinds BEADS_DIR to the resolved target (#3230) after following
-	// redirects, so an unconditional early-return here would hide every
-	// redirect from `bd where` output.
-	if envDir := os.Getenv("BEADS_DIR"); envDir != "" {
-		envDir = utils.CanonicalizePath(envDir)
-		redirectFile := filepath.Join(envDir, beads.RedirectFileName)
-		if _, err := os.Stat(redirectFile); err == nil {
-			return envDir
-		}
-	}
-
-	// Walk up directory tree looking for .beads with redirect.
-	walk := beads.NewAncestorDirWalk(cwd, cwd)
-	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
-		beadsDir := filepath.Join(dir, ".beads")
-		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
-			redirectFile := filepath.Join(beadsDir, beads.RedirectFileName)
-			if _, err := os.Stat(redirectFile); err == nil {
-				return beadsDir
-			}
-			// Found .beads without redirect - this is the actual location
-			return ""
-		}
-
-	}
-
-	return ""
+	return source
 }
 
 func init() {
