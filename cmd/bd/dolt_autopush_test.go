@@ -733,3 +733,74 @@ func TestMaybeAutoPush_ThrottlesAfterFailure(t *testing.T) {
 		}
 	})
 }
+
+// flakyCommitAutoPushStore reads HEAD fine before the push and fails the
+// post-push re-read, so the fallback branch of the success recording is
+// taken inside maybeAutoPush itself.
+type flakyCommitAutoPushStore struct {
+	fakeAutoPushStore
+	reads int
+}
+
+func (f *flakyCommitAutoPushStore) GetCurrentCommit(context.Context) (string, error) {
+	f.reads++
+	if f.reads == 1 {
+		return "before", nil
+	}
+	return "", errors.New("engine closed")
+}
+
+// runSuccessfulAutoPush runs one auto-push that succeeds, against raw seeded
+// state, and returns the recorded state. pushCalls is the counter of the
+// store installed for the run, so a wrapping fake's overrides still count.
+func runSuccessfulAutoPush(t *testing.T, st storage.DoltStorage, pushCalls *int) *pushState {
+	t.Helper()
+	beadsDir, _ := setupNoGitOpsAutoPushWorkspace(t, "no-git-ops: true\ndolt:\n  auto-push: true\n")
+	seedRawPushState(t, beadsDir, `{"last_push":"2026-01-01T00:00:00Z","last_commit":"oldcommit",`+
+		`"last_attempt":"2026-01-01T00:00:00Z","last_error":"remote unreachable"}`)
+	setStore(st)
+
+	maybeAutoPush(context.Background())
+
+	if *pushCalls != 1 {
+		t.Fatalf("Push calls = %d, want 1", *pushCalls)
+	}
+	got, err := loadPushState()
+	if err != nil || got == nil {
+		t.Fatalf("loadPushState: %v (state %v)", err, got)
+	}
+	return got
+}
+
+// TestMaybeAutoPush_SuccessClearsLastError pins the success half of the
+// attempt/success split (GH#6289): a push that reached the remote records
+// BOTH timestamps, publishes the post-push commit (falling back to the
+// pre-push one when the re-read fails), and clears last_error so the
+// recorded failure does not outlive the recovery.
+func TestMaybeAutoPush_SuccessClearsLastError(t *testing.T) {
+	t.Run("success refreshes both timestamps and clears the error", func(t *testing.T) {
+		fake := &fakeAutoPushStore{commit: "newhead"}
+		got := runSuccessfulAutoPush(t, fake, &fake.pushCalls)
+		if got.LastError != "" {
+			t.Errorf("last_error = %q after a successful push, want cleared", got.LastError)
+		}
+		if got.LastCommit != "newhead" {
+			t.Errorf("last_commit = %q, want the post-push commit %q", got.LastCommit, "newhead")
+		}
+		requireRecentAttempt(t, got)
+		if push, err := time.Parse(time.RFC3339, got.LastPush); err != nil || time.Since(push) > time.Minute {
+			t.Errorf("last_push = %q, want a fresh success timestamp: %v", got.LastPush, err)
+		}
+	})
+
+	t.Run("failed re-read falls back to the pre-push commit", func(t *testing.T) {
+		st := &flakyCommitAutoPushStore{fakeAutoPushStore: fakeAutoPushStore{commit: "irrelevant"}}
+		got := runSuccessfulAutoPush(t, st, &st.pushCalls)
+		if got.LastCommit != "before" {
+			t.Errorf("last_commit = %q, want the pre-push fallback %q", got.LastCommit, "before")
+		}
+		if got.LastError != "" {
+			t.Errorf("last_error = %q after a successful push, want cleared", got.LastError)
+		}
+	})
+}
