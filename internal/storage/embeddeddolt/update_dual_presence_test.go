@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
@@ -138,6 +139,9 @@ func TestEmbeddedUpdateRefusesDualPresence(t *testing.T) {
 	}{
 		{"UpdateIssue notes", func(id string) error {
 			return te.store.UpdateIssue(ctx, id, map[string]interface{}{"notes": "probe"}, "tester")
+		}},
+		{"UpdateIssueChecked title", func(id string) error {
+			return te.store.UpdateIssueChecked(ctx, id, map[string]interface{}{"title": "probe"}, "tester", storage.UpdateIssueOptions{})
 		}},
 		{"role notes", role(publicops.UpdateRequest{ForceNotesOverwrite: true, Patch: publicops.IssuePatch{Notes: publicops.Field[string]{Set: true, Value: "probe"}}})},
 		{"role same-value notes", role(publicops.UpdateRequest{Patch: publicops.IssuePatch{Notes: publicops.Field[string]{Set: true, Value: "durable notes"}}})},

@@ -180,7 +180,7 @@ func TestLegacyUpdateRefusesDualPresence(t *testing.T) {
 		{"UpdateIssueChecked notes", func(id string) error {
 			return store.UpdateIssueChecked(ctx, id, map[string]interface{}{"notes": "probe"}, "tester", storage.UpdateIssueOptions{})
 		}},
-		{"MoveIssuePersistenceInTx", func(id string) error {
+		{"MoveIssuePersistenceInTx to persistent", func(id string) error {
 			return store.withRetryTx(ctx, func(tx *sql.Tx) error {
 				current, err := issueops.GetIssueInTx(ctx, tx, id)
 				if err != nil {
@@ -189,6 +189,26 @@ func TestLegacyUpdateRefusesDualPresence(t *testing.T) {
 				_, err = issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModePersistent, "tester")
 				return err
 			})
+		}},
+		// The opposite direction on a caller-managed transaction: the
+		// issues-first read hands the move the durable copy, the one a demote
+		// would relocate onto the plane its twin already holds, and the
+		// caller's rollback must leave nothing half-copied.
+		{"MoveIssuePersistenceInTx to ephemeral", func(id string) error {
+			tx, err := store.UnderlyingDB().BeginTx(ctx, nil)
+			if err != nil {
+				return err
+			}
+			current, err := issueops.GetIssueInTx(ctx, tx, id)
+			if err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+			_, moveErr := issueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModeEphemeral, "tester")
+			if err := tx.Rollback(); err != nil {
+				return fmt.Errorf("rollback after %v: %w", moveErr, err)
+			}
+			return moveErr
 		}},
 	}
 	for i, tc := range cases {
