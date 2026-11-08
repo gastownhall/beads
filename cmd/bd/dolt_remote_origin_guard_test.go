@@ -224,6 +224,70 @@ func TestDoltRemoteMatchesGitOrigin_DifferentURL_ReturnsFalse(t *testing.T) {
 	}
 }
 
+// --- doltRemoteAddNeedsGitOriginOverride ---
+
+// TestDoltRemoteAddNeedsGitOriginOverride_CanonicalGitOrigin_ReturnsFalse
+// pins the exemption: the remote named origin at the Git-transport form of
+// the git origin URL is the canonical git-backed sync remote, so bd dolt
+// remote add must never demand the override for it.
+func TestDoltRemoteAddNeedsGitOriginOverride_CanonicalGitOrigin_ReturnsFalse(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		origin   string
+		doltURL  string
+	}{
+		{"git+https", "https://github.com/org/repo.git", "git+https://github.com/org/repo.git"},
+		{"git+ssh against an SCP origin", "git@github.com:org/repo.git", "git+ssh://git@github.com/org/repo.git"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			initBareGitRepoForTest(t, dir)
+			runGitCommand(t, dir, "remote", "add", "origin", tc.origin)
+			t.Chdir(dir)
+
+			if doltRemoteAddNeedsGitOriginOverride("origin", tc.doltURL) {
+				t.Errorf("doltRemoteAddNeedsGitOriginOverride(origin, %q) = true, want false: the canonical git-backed origin needs no override", tc.doltURL)
+			}
+		})
+	}
+}
+
+// TestDoltRemoteAddNeedsGitOriginOverride_NonCanonicalMatches_ReturnTrue
+// pins what still needs --allow-git-origin: every other form that matches
+// the git origin — an origin on a raw http(s) URL, an alias on the git+
+// form — is not the canonical sync remote its name or URL suggests.
+func TestDoltRemoteAddNeedsGitOriginOverride_NonCanonicalMatches_ReturnTrue(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		remote  string
+		doltURL string
+	}{
+		{"origin on the raw https form", "origin", "https://github.com/org/repo.git"},
+		{"alias on the git+ form", "backup", "git+https://github.com/org/repo.git"},
+		{"alias on the raw form", "dolt-origin", "https://github.com/org/repo.git"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			initBareGitRepoForTest(t, dir)
+			runGitCommand(t, dir, "remote", "add", "origin", "https://github.com/org/repo.git")
+			t.Chdir(dir)
+
+			if !doltRemoteAddNeedsGitOriginOverride(tc.remote, tc.doltURL) {
+				t.Errorf("doltRemoteAddNeedsGitOriginOverride(%q, %q) = false, want true: only origin on a Git transport is exempt", tc.remote, tc.doltURL)
+			}
+		})
+	}
+}
+
+func TestDoltRemoteAddNeedsGitOriginOverride_NoGitDir_ReturnsFalse(t *testing.T) {
+	dir := t.TempDir() // no git repo
+	t.Chdir(dir)
+
+	if doltRemoteAddNeedsGitOriginOverride("origin", "git+https://github.com/org/repo.git") {
+		t.Error("doltRemoteAddNeedsGitOriginOverride() = true with no git origin, want false")
+	}
+}
+
 // --- flag registration ---
 
 func TestAllowGitOriginFlag_RegisteredOnDoltRemoteAddCmd(t *testing.T) {

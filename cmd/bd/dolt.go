@@ -2125,7 +2125,7 @@ var doltRemoteAddCmd = &cobra.Command{
 			return SilentExit()
 		}
 		allowGitOrigin, _ := cmd.Flags().GetBool("allow-git-origin")
-		if doltRemoteMatchesGitOrigin(args[1]) {
+		if doltRemoteAddNeedsGitOriginOverride(args[0], args[1]) {
 			if !allowGitOrigin {
 				fmt.Fprintf(os.Stderr, "Error: refusing to add %q as a Dolt remote — this URL matches the git origin.\n", args[1])
 				fmt.Fprintln(os.Stderr, "  Hint: use --allow-git-origin to proceed anyway (e.g. monorepo layout).")

@@ -598,8 +598,13 @@ with raw `dolt remote add`, re-register them with `bd dolt remote add <name>
 mismatched CLI remotes under `Dolt Remote Migration`.
 
 > **Sharing a Git repo**: Dolt stores data under `refs/dolt/data`, separate
-> from standard Git refs (`refs/heads/`, `refs/tags/`). You can safely point a
-> `git+ssh://` remote at the same repository as your project source code. See
+> from standard Git refs (`refs/heads/`, `refs/tags/`). Adding the remote
+> named `origin` at the git-transport form of your git origin
+> (`bd dolt remote add origin git+https://github.com/org/repo.git`) is the
+> canonical cross-machine sync topology: bd adds it without
+> `--allow-git-origin`, and `bd doctor` treats it as the sync remote, never a
+> collision. Any other remote pointing at the git origin — an alias, or
+> `origin` on a raw non-git URL — still needs `--allow-git-origin`. See
 > [Dolt Git Remotes](https://docs.dolthub.com/concepts/dolt/git/remotes).
 
 ### List/Remove Remotes
