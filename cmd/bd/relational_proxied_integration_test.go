@@ -44,6 +44,36 @@ func TestProxiedServerLink(t *testing.T) {
 		assertProxiedDepExistsWithType(t, db, a.ID, b.ID, "related")
 	})
 
+	// bd-3073gm (GH#5585): the proxied route canonicalizes the documented
+	// aliases exactly as the direct route does.
+	t.Run("link_alias_stores_blocks", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "la")
+		db := openProxiedDB(t, p)
+		for _, alias := range []string{"blocked-by", "depends-on"} {
+			a := bdProxiedCreate(t, bd, p.dir, "Alias from "+alias)
+			b := bdProxiedCreate(t, bd, p.dir, "Alias to "+alias)
+			out, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "link", a.ID, b.ID, "--type", alias, "--json")
+			if err != nil {
+				t.Fatalf("link --type %s failed: %v\nstderr:\n%s", alias, err, stderr)
+			}
+			if !strings.Contains(out, `"type": "blocks"`) {
+				t.Errorf("link --type %s --json = %s, want type blocks", alias, out)
+			}
+			assertProxiedDepExistsWithType(t, db, a.ID, b.ID, "blocks")
+
+			c := bdProxiedCreate(t, bd, p.dir, "Alias text from "+alias)
+			d := bdProxiedCreate(t, bd, p.dir, "Alias text to "+alias)
+			text, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "link", c.ID, d.ID, "--type", alias)
+			if err != nil {
+				t.Fatalf("link --type %s failed: %v\nstderr:\n%s", alias, err, stderr)
+			}
+			if !strings.Contains(text, "(blocks)") || strings.Contains(text, "("+alias+")") {
+				t.Errorf("link --type %s output = %q, want the stored (blocks) type", alias, text)
+			}
+		}
+	})
+
 	t.Run("link_invalid_type_rejected", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "li")
