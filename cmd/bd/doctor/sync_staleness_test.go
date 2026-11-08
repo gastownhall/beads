@@ -2,6 +2,8 @@ package doctor
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -127,6 +129,26 @@ func TestSyncStalenessResult(t *testing.T) {
 			message: "Last push to origin failed",
 			details: []string{"timed out after 30s", "origin: 1 local commits are not in the cached origin ref"},
 		},
+		{
+			name:    "AC-8: disabled origin with no peer finding names the skipped check",
+			origin:  originSyncFacts{skipped: "dolt.local-only=true"},
+			status:  StatusOK,
+			message: "Origin check skipped (dolt.local-only=true)",
+			details: []string{"Push to origin is disabled (dolt.local-only=true in .beads/config.yaml)", "peers are still checked"},
+		},
+		{
+			name:    "AC-8: disabled origin keeps the peer warning, detail and fix",
+			origin:  originSyncFacts{skipped: "no-push=true"},
+			peers:   behindPeer,
+			status:  StatusWarning,
+			message: "2 total commits behind peers; origin check skipped (no-push=true)",
+			details: []string{
+				"peer1: 2 commits behind",
+				"origin: check skipped: push to origin is disabled (no-push=true in .beads/config.yaml)",
+			},
+			fixes: []string{peerFix},
+			exact: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -155,6 +177,38 @@ func TestSyncStalenessResult(t *testing.T) {
 				if want := strings.Join(tt.fixes, "; "); got.Fix != want {
 					t.Errorf("Fix = %q, want exactly %q", got.Fix, want)
 				}
+			}
+		})
+	}
+}
+
+// TestOriginSkipReason pins which workspace settings turn the origin leg of
+// Sync Staleness off (GH#6289): the inspected workspace's .beads/config.yaml,
+// not the config of the directory bd doctor runs from.
+func TestOriginSkipReason(t *testing.T) {
+	tests := []struct {
+		name   string
+		config string // "" writes no config.yaml
+		want   string
+	}{
+		{name: "no config", want: ""},
+		{name: "no-push", config: "no-push: true\n", want: "no-push=true"},
+		{name: "dolt.local-only nested", config: "dolt:\n  local-only: true\n", want: "dolt.local-only=true"},
+		{name: "dolt.local-only flat key", config: "dolt.local-only: \"true\"\n", want: "dolt.local-only=true"},
+		{name: "both, no-push named first", config: "no-push: true\ndolt:\n  local-only: true\n", want: "no-push=true"},
+		{name: "explicitly false", config: "no-push: false\ndolt:\n  local-only: false\n", want: ""},
+		{name: "unparseable value", config: "no-push: maybe\n", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			beadsDir := t.TempDir()
+			if tt.config != "" {
+				if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(tt.config), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := originSkipReason(beadsDir); got != tt.want {
+				t.Errorf("originSkipReason = %q, want %q", got, tt.want)
 			}
 		})
 	}

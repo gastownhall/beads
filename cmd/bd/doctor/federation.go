@@ -6,9 +6,11 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/pushstate"
@@ -571,8 +573,9 @@ func CheckFederationSyncStaleness(path string) DoctorCheck {
 	}
 	defer func() { _ = store.Close() }()
 
+	skipped := originSkipReason(beadsDir)
 	remotes, err := store.ListRemotes(ctx)
-	if err != nil || len(remotes) == 0 {
+	if (err != nil || len(remotes) == 0) && skipped == "" {
 		return DoctorCheck{
 			Name:     "Sync Staleness",
 			Status:   StatusOK,
@@ -582,10 +585,13 @@ func CheckFederationSyncStaleness(path string) DoctorCheck {
 	}
 
 	// Origin's leg reads only local state; the peer leg is unchanged.
-	var origin originSyncFacts
+	origin := originSyncFacts{skipped: skipped}
 	var peers peerStaleness
 	for _, remote := range remotes {
 		if remote.Name == originRemote {
+			if skipped != "" {
+				continue
+			}
 			origin = readOriginSyncFacts(beadsDir)
 			status, err := store.SyncStatus(ctx, originRemote)
 			origin.statusErr = err
@@ -628,6 +634,19 @@ type originSyncFacts struct {
 	stateErr      error            // push-state.json exists but cannot be read or parsed
 	ahead, behind int              // commits only local / only in the cached ref; -1 when there is no ref
 	statusErr     error            // the comparison itself failed
+	skipped       string           // the setting that disables push to origin, e.g. "no-push=true"
+}
+
+// originSkipReason names the setting in the inspected workspace's
+// .beads/config.yaml that disables push to origin, or returns "" when
+// neither no-push nor dolt.local-only is set.
+func originSkipReason(beadsDir string) string {
+	for _, key := range []string{"no-push", "dolt.local-only"} {
+		if on, err := strconv.ParseBool(strings.TrimSpace(config.GetStringFromDir(beadsDir, key))); err == nil && on {
+			return key + "=true"
+		}
+	}
+	return ""
 }
 
 // readOriginSyncFacts loads origin's local push history from beadsDir.
@@ -711,6 +730,22 @@ func syncStalenessResult(origin originSyncFacts, peers peerStaleness) DoctorChec
 		}
 		details = append(details, peers.lines...)
 		fixes = append(fixes, "Run 'bd federation sync' to synchronize with peers")
+	}
+
+	if origin.skipped != "" {
+		if message == "" {
+			return DoctorCheck{
+				Name:    "Sync Staleness",
+				Status:  StatusOK,
+				Message: fmt.Sprintf("Origin check skipped (%s)", origin.skipped),
+				Detail: fmt.Sprintf("Push to origin is disabled (%s in .beads/config.yaml), so local history was not "+
+					"compared with origin and .beads/%s was not read. Federation peers are still checked.",
+					origin.skipped, pushstate.FileName),
+				Category: CategoryFederation,
+			}
+		}
+		message += fmt.Sprintf("; origin check skipped (%s)", origin.skipped)
+		details = append(details, fmt.Sprintf("origin: check skipped: push to origin is disabled (%s in .beads/config.yaml)", origin.skipped))
 	}
 
 	if message == "" && origin.checked {

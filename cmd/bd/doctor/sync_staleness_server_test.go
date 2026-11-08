@@ -142,4 +142,28 @@ func TestCheckFederationSyncStaleness_OriginTrackingRef_RealDolt(t *testing.T) {
 			t.Fatalf("got %s %q (detail %q), want a warning that 1 commit is not in the cached origin ref", check.Status, check.Message, check.Detail)
 		}
 	})
+
+	t.Run("AC-8: disabled origin is skipped and peer warnings are kept", func(t *testing.T) {
+		repo, beadsDir, st := originSyncWorkspace(t, port, true)
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  local-only: true\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// One commit on peer1 that local history lacks; origin is never
+		// pushed and its push history records a failure, either of which
+		// would warn if the origin leg ran.
+		doltCall(t, st, "CALL DOLT_COMMIT('--allow-empty', '-m', 'peer only')")
+		if err := st.PushRemote(ctx, "peer1", false); err != nil {
+			t.Fatalf("push peer1: %v", err)
+		}
+		doltCall(t, st, "CALL DOLT_RESET('--hard', 'HEAD~1')")
+		writeDoctorPushState(t, beadsDir, pushstate.State{LastAttempt: time.Now().UTC().Format(time.RFC3339), LastError: "timed out after 30s"})
+
+		check := CheckFederationSyncStaleness(repo)
+		if check.Status != StatusWarning || check.Message != "1 total commits behind peers; origin check skipped (dolt.local-only=true)" ||
+			!strings.Contains(check.Detail, "peer1: 1 commits behind") || strings.Contains(check.Detail, "failed") ||
+			!strings.Contains(check.Fix, "bd federation sync") {
+			t.Fatalf("got %s %q (detail %q, fix %q), want the peer warning with the origin check skipped",
+				check.Status, check.Message, check.Detail, check.Fix)
+		}
+	})
 }
