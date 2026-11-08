@@ -48,6 +48,7 @@ import (
 	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
@@ -1185,11 +1186,12 @@ func (s *DoltStore) withSingleRead(ctx context.Context, fn func(q issueops.DBTX)
 // asking once per store. The question follows the circuit breaker as one
 // withRetry attempt does: it is not sent while the breaker refuses requests, and
 // a lost connection counts toward tripping it. Any failure reports false, the
-// safe answer. A failure that can clear (a lost connection, a canceled context)
-// is asked again next time. Any other, such as a proxy that refuses the variable
-// or a value that will not scan, is remembered as off, so the store reads in a
-// transaction as it did before this probe existed and does not pay for the probe
-// again on every read.
+// safe answer, and is asked again next time unless the server definitely refused
+// the question (autocommitProbeRefused). A refusal is remembered as off, so the
+// store reads in a transaction as it did before this probe existed and does not
+// pay for the probe again on every read. A failure that can clear, such as a lost
+// connection or too many connections, is not remembered, because that would cost
+// the store its single-statement reads after the server recovers.
 func (s *DoltStore) serverAutocommits(ctx context.Context) bool {
 	switch s.autocommit.Load() {
 	case 1:
@@ -1202,20 +1204,34 @@ func (s *DoltStore) serverAutocommits(ctx context.Context) bool {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var on sql.NullInt64
+	// A string, so that an unexpected value reads as "not on" rather than failing
+	// to scan on every read.
+	var on sql.NullString
 	if err := s.db.QueryRowContext(ctx, "SELECT @@autocommit").Scan(&on); err != nil {
 		_ = s.recordRetryFailure(ctx, err)
-		if ctx.Err() == nil && !isRetryableError(err) {
+		if autocommitProbeRefused(err) {
 			s.autocommit.Store(2)
 		}
 		return false
 	}
-	if on.Valid && on.Int64 == 1 {
+	if on.Valid && on.String == "1" {
 		s.autocommit.Store(1)
 		return true
 	}
 	s.autocommit.Store(2)
 	return false
+}
+
+// autocommitProbeRefused reports whether err is the server definitely refusing
+// SELECT @@autocommit, which asking again will not change: an unknown system
+// variable (1193), a statement it cannot parse (1064, a proxy that does not speak
+// the syntax), or a privilege refusal.
+func autocommitProbeRefused(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) && (mysqlErr.Number == 1193 || mysqlErr.Number == 1064) {
+		return true
+	}
+	return dberrors.IsAccessDenied(err)
 }
 
 // execer is satisfied by both *sql.DB and *sql.Conn, letting pinStoreBranch

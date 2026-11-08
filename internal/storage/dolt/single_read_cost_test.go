@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	mysql "github.com/go-sql-driver/mysql"
 )
 
 // expectAutocommit mocks the once-per-store read of the server's autocommit mode.
@@ -261,13 +262,44 @@ func TestSingleStatementReadKeepsATransactionWithoutAutocommit(t *testing.T) {
 		// A server or proxy that refuses the variable will refuse it every time.
 		// Asking again would add the probe to every read, one statement more than
 		// a transaction read without it.
-		store, mock, counts := vhCountedStore(t)
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT @@autocommit")).WillReturnError(errAutocommitRefused)
-		for range 2 {
-			mock.ExpectBegin()
-			mock.ExpectQuery(query).WithArgs("issue_prefix").WillReturnRows(row())
-			mock.ExpectRollback()
+		for _, refusal := range []error{
+			&mysql.MySQLError{Number: 1193, Message: "Unknown system variable 'autocommit'"},
+			&mysql.MySQLError{Number: 1064, Message: "You have an error in your SQL syntax"},
+			&mysql.MySQLError{Number: 1227, Message: "Access denied; you need the SUPER privilege"},
+		} {
+			store, mock, counts := vhCountedStore(t)
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT @@autocommit")).WillReturnError(refusal)
+			for range 2 {
+				mock.ExpectBegin()
+				mock.ExpectQuery(query).WithArgs("issue_prefix").WillReturnRows(row())
+				mock.ExpectRollback()
+			}
+			for range 2 {
+				if got, err := store.GetConfig(context.Background(), "issue_prefix"); err != nil || got != "bd" {
+					t.Fatalf("after %v: GetConfig = %q, %v", refusal, got, err)
+				}
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("after %v: %v", refusal, err)
+			}
+			if got := counts.Snapshot(); got.Total() != 3 || got.Begin != 2 || got.Rollback != 2 {
+				t.Fatalf("after %v: want the refused probe once and two transaction reads, got %+v", refusal, got)
+			}
 		}
+	})
+
+	t.Run("a temporary server error is asked again", func(t *testing.T) {
+		// Too many connections is not a connection-loss error and is not in the
+		// retry list, but it clears. Remembering it would leave the store on
+		// transaction reads for its lifetime after the server recovers.
+		store, mock, _ := vhCountedStore(t)
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT @@autocommit")).
+			WillReturnError(&mysql.MySQLError{Number: 1040, Message: "Too many connections"})
+		mock.ExpectBegin()
+		mock.ExpectQuery(query).WithArgs("issue_prefix").WillReturnRows(row())
+		mock.ExpectRollback()
+		expectAutocommit(mock, 1)
+		mock.ExpectQuery(query).WithArgs("issue_prefix").WillReturnRows(row())
 		for range 2 {
 			if got, err := store.GetConfig(context.Background(), "issue_prefix"); err != nil || got != "bd" {
 				t.Fatalf("GetConfig = %q, %v", got, err)
@@ -276,8 +308,22 @@ func TestSingleStatementReadKeepsATransactionWithoutAutocommit(t *testing.T) {
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatal(err)
 		}
-		if got := counts.Snapshot(); got.Total() != 3 || got.Begin != 2 || got.Rollback != 2 {
-			t.Fatalf("want the refused probe once and two transaction reads, got %+v", got)
+	})
+
+	t.Run("a value other than 1 is read as off, without failing", func(t *testing.T) {
+		store, mock, _ := vhCountedStore(t)
+		expectAutocommit(mock, "ON")
+		mock.ExpectBegin()
+		mock.ExpectQuery(query).WithArgs("issue_prefix").WillReturnRows(row())
+		mock.ExpectRollback()
+		if got, err := store.GetConfig(context.Background(), "issue_prefix"); err != nil || got != "bd" {
+			t.Fatalf("GetConfig = %q, %v", got, err)
+		}
+		if got := store.autocommit.Load(); got != 2 {
+			t.Fatalf("mode after an unexpected value = %d, want off (2)", got)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
 		}
 	})
 
@@ -311,10 +357,6 @@ func TestSingleStatementReadKeepsATransactionWithoutAutocommit(t *testing.T) {
 		}
 	})
 }
-
-// errAutocommitRefused is a definite answer that will not change on retry, as a
-// proxy that does not forward the variable would give.
-var errAutocommitRefused = errors.New("Error 1193 (HY000): Unknown system variable 'autocommit'")
 
 // TestAutocommitProbeFollowsTheCircuitBreaker: the mode read runs before the
 // read's own retry loop, so it does the breaker accounting one retry attempt
