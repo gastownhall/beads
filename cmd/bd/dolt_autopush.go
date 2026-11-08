@@ -111,6 +111,26 @@ func pushedCommitForState(ctx context.Context, target autoPushTarget, prePush st
 
 // maybeAutoPush pushes to the Dolt remote if enabled and the debounce interval has passed.
 // Called from PersistentPostRun after auto-commit and auto-backup.
+// latestValidTimestamp returns the later of the valid RFC3339 timestamps in
+// a and b, parsing each independently. Absent or malformed values are
+// ignored, so one bad field never hides a fresh timestamp in the other
+// (GH#6289). ok is false when neither value parses.
+func latestValidTimestamp(a, b string) (latest time.Time, ok bool) {
+	for _, s := range []string{a, b} {
+		if s == "" {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			continue
+		}
+		if !ok || t.After(latest) {
+			latest, ok = t, true
+		}
+	}
+	return latest, ok
+}
+
 // lastErrorLimit bounds the last_error line recorded in push-state.json: the
 // file is meant to be read by humans and parsers, not to carry a push's whole
 // stderr.
@@ -186,11 +206,16 @@ func maybeAutoPush(ctx context.Context) {
 		interval = 5 * time.Minute
 	}
 
-	if ps != nil && ps.LastPush != "" {
-		lastPush, err := time.Parse(time.RFC3339, ps.LastPush)
-		if err == nil && time.Since(lastPush) < interval {
-			debug.Logf("dolt auto-push: throttled (last push %s ago, interval %s)\n",
-				time.Since(lastPush).Round(time.Second), interval)
+	if ps != nil {
+		// The window is measured from the later valid of last_attempt and
+		// last_push, each parsed independently (GH#6289): a recent failed
+		// attempt must throttle retries the way the pre-split code's
+		// last_push bump did, a legacy file with only last_push still
+		// debounces, and a malformed value in one field cannot disable the
+		// other.
+		if last, ok := latestValidTimestamp(ps.LastAttempt, ps.LastPush); ok && time.Since(last) < interval {
+			debug.Logf("dolt auto-push: throttled (last attempt/push %s ago, interval %s)\n",
+				time.Since(last).Round(time.Second), interval)
 			return
 		}
 	}

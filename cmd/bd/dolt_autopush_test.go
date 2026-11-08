@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -641,4 +642,94 @@ func TestMaybeAutoPush_TimeoutRecordsTimeoutError(t *testing.T) {
 		t.Errorf("success watermarks advanced on a timed-out push: last_push=%q last_commit=%q, want both empty",
 			ps.LastPush, ps.LastCommit)
 	}
+}
+
+// seedRawPushState writes push-state.json verbatim, so a test can seed file
+// shapes exactly as a workspace on disk holds them (legacy layouts, values a
+// newer binary never wrote, malformed timestamps).
+func seedRawPushState(t *testing.T, beadsDir, raw string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(beadsDir, "push-state.json"), []byte(raw), 0o644); err != nil {
+		t.Fatalf("seed push-state.json: %v", err)
+	}
+}
+
+// runAutoPushAgainstState runs one auto-push (commit "newcommit", Push
+// succeeds) against a workspace whose push-state.json holds raw, and
+// returns how many times Push ran. The debounce window is what decides.
+func runAutoPushAgainstState(t *testing.T, configYAML, raw string) int {
+	t.Helper()
+	beadsDir, _ := setupNoGitOpsAutoPushWorkspace(t, configYAML)
+	if raw != "" {
+		seedRawPushState(t, beadsDir, raw)
+	}
+	fake := &fakeAutoPushStore{commit: "newcommit"}
+	setStore(fake)
+
+	maybeAutoPush(context.Background())
+
+	return fake.pushCalls
+}
+
+// recentRFC3339 is an RFC3339 timestamp a few seconds ago.
+func recentRFC3339() string {
+	return time.Now().UTC().Add(-3 * time.Second).Format(time.RFC3339)
+}
+
+// TestMaybeAutoPush_ThrottlesAfterFailure pins the debounce contract after
+// GH#6289 split attempt time from success time: the window is measured from
+// the LATER valid of last_attempt and last_push, each parsed independently,
+// so a recent failed attempt still throttles retries, a legacy file with
+// only last_push keeps working, and a malformed value in one field cannot
+// disable the other (GH#6289).
+func TestMaybeAutoPush_ThrottlesAfterFailure(t *testing.T) {
+	const autoPushCfg = "no-git-ops: true\ndolt:\n  auto-push: true\n"
+	const oldPush = "2026-01-01T00:00:00Z"
+
+	t.Run("recent attempt throttles", func(t *testing.T) {
+		raw := fmt.Sprintf(`{"last_push":%q,"last_commit":"oldcommit","last_attempt":%q,"last_error":"remote unreachable"}`,
+			oldPush, recentRFC3339())
+		if calls := runAutoPushAgainstState(t, autoPushCfg, raw); calls != 0 {
+			t.Fatalf("Push calls = %d, want 0 (recent failed attempt must throttle the retry)", calls)
+		}
+	})
+
+	t.Run("expired attempt does not throttle", func(t *testing.T) {
+		raw := fmt.Sprintf(`{"last_push":%q,"last_commit":"oldcommit","last_attempt":"2026-01-01T01:00:00Z","last_error":"remote unreachable"}`,
+			oldPush)
+		if calls := runAutoPushAgainstState(t, autoPushCfg, raw); calls != 1 {
+			t.Fatalf("Push calls = %d, want 1 (expired attempt is due again)", calls)
+		}
+	})
+
+	t.Run("legacy file with recent last_push throttles", func(t *testing.T) {
+		raw := fmt.Sprintf(`{"last_push":%q,"last_commit":"oldcommit"}`, recentRFC3339())
+		if calls := runAutoPushAgainstState(t, autoPushCfg, raw); calls != 0 {
+			t.Fatalf("Push calls = %d, want 0 (legacy last_push-only file still debounces)", calls)
+		}
+	})
+
+	t.Run("malformed attempt falls back to valid last_push", func(t *testing.T) {
+		raw := fmt.Sprintf(`{"last_push":%q,"last_commit":"oldcommit","last_attempt":"yesterday"}`,
+			recentRFC3339())
+		if calls := runAutoPushAgainstState(t, autoPushCfg, raw); calls != 0 {
+			t.Fatalf("Push calls = %d, want 0 (invalid last_attempt must not disable the last_push window)", calls)
+		}
+	})
+
+	t.Run("malformed attempt with old last_push is due", func(t *testing.T) {
+		raw := fmt.Sprintf(`{"last_push":%q,"last_commit":"oldcommit","last_attempt":"yesterday"}`,
+			oldPush)
+		if calls := runAutoPushAgainstState(t, autoPushCfg, raw); calls != 1 {
+			t.Fatalf("Push calls = %d, want 1 (only invalid timestamps on file: push is due)", calls)
+		}
+	})
+
+	t.Run("newer success than attempt throttles", func(t *testing.T) {
+		raw := fmt.Sprintf(`{"last_push":%q,"last_commit":"newcommit","last_attempt":"2026-01-01T01:00:00Z"}`,
+			recentRFC3339())
+		if calls := runAutoPushAgainstState(t, autoPushCfg, raw); calls != 0 {
+			t.Fatalf("Push calls = %d, want 0 (later valid timestamp wins)", calls)
+		}
+	})
 }
