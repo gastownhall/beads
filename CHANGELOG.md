@@ -1226,6 +1226,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd linear sync` no longer pushes to a workflow state just because it is
+  named after its own type when another state of a type mapped to the same
+  status exists. With the type-keyed `linear.state_map` from
+  `bd linear --help`, on a team with Backlog, Todo, In Progress, Done and
+  Canceled, every closed issue went to "Canceled" although "Done" was mapped
+  too, and every open issue went to "Backlog" over "Todo": the `canceled` key
+  matched the state named "Canceled" as a name choice. Such a state now
+  counts only by type, so the push stops with the type-fallback ambiguity
+  error that names `linear.outbound_state_map.<status>` as the fix. A name
+  key that is not a type still wins: `linear.state_map.done = closed` next to
+  `linear.state_map.canceled = closed` now pushes closed issues to "Done"
+  instead of reporting that closed maps to multiple Linear states.
+
 - The `bd.storage.operations`, `bd.storage.operation.duration` and
   `bd.storage.errors` metrics are now keyed by `db.operation` alone. The
   counter also carried every request attribute of the call (issue ids,

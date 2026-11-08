@@ -1145,3 +1145,150 @@ func TestPushFieldsEqualToBeads(t *testing.T) {
 		t.Fatal("expected beads-form fallback comparison to ignore local-only fields")
 	}
 }
+
+// TestResolveTypeKeyNameCollision covers a state named after its own type
+// ("Canceled" of type canceled): the type-keyed linear.state_map from
+// `bd linear --help` reads the same entry for its name and its type, so the
+// name pass must leave it to the type pass, where a sibling of a mapped type
+// ("Done", "Todo") makes the push ambiguous instead of silently losing.
+func TestResolveTypeKeyNameCollision(t *testing.T) {
+	team := []State{
+		{ID: "state-backlog", Name: "Backlog", Type: "backlog"},
+		{ID: "state-todo", Name: "Todo", Type: "unstarted"},
+		{ID: "state-progress", Name: "In Progress", Type: "started"},
+		{ID: "state-done", Name: "Done", Type: "completed"},
+		{ID: "state-canceled", Name: "Canceled", Type: "canceled"},
+	}
+	typeMap := map[string]string{
+		"linear.state_map.backlog":   "open",
+		"linear.state_map.unstarted": "open",
+		"linear.state_map.started":   "in_progress",
+		"linear.state_map.completed": "closed",
+		"linear.state_map.canceled":  "closed",
+	}
+	withKeys := func(base map[string]string, extra map[string]string) map[string]string {
+		out := make(map[string]string, len(base)+len(extra))
+		for k, v := range base {
+			out[k] = v
+		}
+		for k, v := range extra {
+			out[k] = v
+		}
+		return out
+	}
+
+	tests := []struct {
+		name    string
+		states  []State
+		config  map[string]string
+		status  types.Status
+		wantID  string
+		wantErr []string
+	}{
+		{
+			name:    "AC-1 documented type map leaves closed ambiguous across Done and Canceled",
+			states:  team,
+			config:  typeMap,
+			status:  types.StatusClosed,
+			wantErr: []string{"type fallback is ambiguous", "Done, Canceled", "linear.outbound_state_map.closed"},
+		},
+		{
+			name:   "documented type map still resolves in_progress",
+			states: team,
+			config: typeMap,
+			status: types.StatusInProgress,
+			wantID: "state-progress",
+		},
+		{
+			name:   "self-named state alone still resolves through the type pass",
+			states: team,
+			config: map[string]string{"linear.state_map.canceled": "closed"},
+			status: types.StatusClosed,
+			wantID: "state-canceled",
+		},
+		{
+			name:   "single self-named Backlog state resolves open",
+			states: []State{{ID: "state-backlog", Name: "Backlog", Type: "backlog"}},
+			config: map[string]string{"linear.state_map.backlog": "open"},
+			status: types.StatusOpen,
+			wantID: "state-backlog",
+		},
+		{
+			name: "mixed-case and padded self-named state still reaches type ambiguity",
+			states: []State{
+				{ID: "state-done", Name: "Done", Type: "completed"},
+				{ID: "state-canceled", Name: " CANCELED ", Type: "canceled"},
+			},
+			config:  typeMap,
+			status:  types.StatusClosed,
+			wantErr: []string{"type fallback is ambiguous", "Done", "CANCELED", "linear.outbound_state_map.closed"},
+		},
+		{
+			name: "padded mixed-case type still reaches type ambiguity",
+			states: []State{
+				{ID: "state-backlog", Name: "backlog", Type: " Backlog "},
+				{ID: "state-todo", Name: "Todo", Type: "unstarted"},
+			},
+			config:  typeMap,
+			status:  types.StatusOpen,
+			wantErr: []string{"type fallback is ambiguous", "backlog, Todo", "linear.outbound_state_map.open"},
+		},
+		{
+			name:   "outbound override still wins over type ambiguity",
+			states: team,
+			config: withKeys(typeMap, map[string]string{"linear.outbound_state_map.closed": "Done"}),
+			status: types.StatusClosed,
+			wantID: "state-done",
+		},
+		{
+			name: "state named after another type stays a name match",
+			states: []State{
+				{ID: "state-backlog", Name: "Backlog", Type: "unstarted"},
+				{ID: "state-todo", Name: "Todo", Type: "unstarted"},
+			},
+			config: map[string]string{
+				"linear.state_map.backlog":   "open",
+				"linear.state_map.unstarted": "open",
+			},
+			status: types.StatusOpen,
+			wantID: "state-backlog",
+		},
+		{
+			name:   "two distinct name matches stay a name ambiguity",
+			states: append(slices.Clone(team), State{ID: "state-shipped", Name: "Shipped", Type: "completed"}),
+			config: map[string]string{
+				"linear.state_map.done":    "closed",
+				"linear.state_map.shipped": "closed",
+			},
+			status:  types.StatusClosed,
+			wantErr: []string{"maps beads status \"closed\" to multiple Linear states", "Done, Shipped"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := LoadMappingConfig(&mockConfigLoader{config: test.config})
+			got, err := ResolveStateIDForBeadsStatus(&StateCache{States: test.states}, test.status, config)
+			if len(test.wantErr) > 0 {
+				if err == nil {
+					t.Fatalf("ResolveStateIDForBeadsStatus(%s) = %q, want an error containing %q", test.status, got, test.wantErr)
+				}
+				if got != "" {
+					t.Errorf("ResolveStateIDForBeadsStatus(%s) id = %q with error, want empty", test.status, got)
+				}
+				for _, want := range test.wantErr {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("ResolveStateIDForBeadsStatus(%s) error = %q, want it to contain %q", test.status, err, want)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveStateIDForBeadsStatus(%s) error = %v", test.status, err)
+			}
+			if got != test.wantID {
+				t.Fatalf("ResolveStateIDForBeadsStatus(%s) = %q, want %q", test.status, got, test.wantID)
+			}
+		})
+	}
+}
