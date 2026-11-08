@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -189,6 +190,133 @@ func readUowDualPresenceRowState(t *testing.T, ctx context.Context, provider Uni
 		return "read dual presence state", nil
 	}); err != nil {
 		t.Fatalf("read dual presence row state for %s: %v", id, err)
+	}
+	return state
+}
+
+// TestDualPresenceCloseReopenUnchanged pins the boundary GH#5991's refusal
+// draws: Close and Reopen are separate operations whose wisp targeting a
+// dual-present ID keeps, while Update refuses. The uow Close/Reopen paths
+// run their version precondition through ApplyUpdate with a version-only
+// spec — a spec that mutates nothing — so the refusal the mutation guard
+// raises must not swallow them: the wisp copy closes and reopens through
+// that path, and the durable twin the issues-first reader shows never
+// moves. The settled create-batch equivalence golden pins the same
+// twin-close contract at the storage layer and passes unmodified.
+//
+// The final Update is the load-bearing contrast: before the fix it silently
+// misrouted (the copy bd show never reads), so the test fails there, and
+// after the fix it refuses while the closes around it still succeed.
+func TestDualPresenceCloseReopenUnchanged(t *testing.T) {
+	ctx := context.Background()
+	operations, provider, id := seedUowDualPresence(t, ctx, "uow-dp-cr")
+
+	if durable, wisp := readUowDualPresencePlaneStatus(t, ctx, provider, id); durable != "open" || wisp != "open" {
+		t.Fatalf("fixture: %s durable status = %q, wisp status = %q, want both open", id, durable, wisp)
+	}
+	durableBefore := readUowDualPresenceRowState(t, ctx, provider, id)
+
+	// Close without a precondition: the wisp copy closes, the durable twin
+	// stays exactly as it was.
+	closed, err := operations.Close(ctx, issueops.CloseRequest{Actor: "tester", IssueID: id, Reason: "done"})
+	if err != nil {
+		t.Fatalf("close dual-present %s: %v", id, err)
+	}
+	if !closed.Changed || closed.Issue == nil || closed.Issue.Status != types.StatusClosed {
+		t.Fatalf("close of dual-present %s reported %+v; want a real close of the wisp copy", id, closed)
+	}
+	if durable, wisp := readUowDualPresencePlaneStatus(t, ctx, provider, id); durable != "open" || wisp != "closed" {
+		t.Fatalf("after close: %s durable status = %q, wisp status = %q, want open/closed", id, durable, wisp)
+	}
+	if state := readUowDualPresenceRowState(t, ctx, provider, id); durablePortion(state) != durablePortion(durableBefore) {
+		t.Errorf("close of the wisp twin changed the durable copy:\nbefore: %s\nafter:  %s", durableBefore, state)
+	}
+
+	// Reopen through the version-precondition path: ApplyUpdate sees a
+	// version-only spec on a dual-present ID and must pass it through.
+	closedVersion := closed.Issue.RowVersion
+	reopened, err := operations.Reopen(ctx, issueops.ReopenRequest{Actor: "tester", IssueID: id, Reason: "reopened", ExpectedVersion: &closedVersion})
+	if err != nil {
+		t.Fatalf("reopen dual-present %s through the version precondition: %v", id, err)
+	}
+	if !reopened.Changed || reopened.Issue == nil || reopened.Issue.Status != types.StatusOpen {
+		t.Fatalf("reopen of dual-present %s reported %+v; want a real reopen of the wisp copy", id, reopened)
+	}
+	if durable, wisp := readUowDualPresencePlaneStatus(t, ctx, provider, id); durable != "open" || wisp != "open" {
+		t.Fatalf("after reopen: %s durable status = %q, wisp status = %q, want both open", id, durable, wisp)
+	}
+	if state := readUowDualPresenceRowState(t, ctx, provider, id); durablePortion(state) != durablePortion(durableBefore) {
+		t.Errorf("reopen of the wisp twin changed the durable copy:\nbefore: %s\nafter:  %s", durableBefore, state)
+	}
+
+	// Close again through the same precondition path.
+	reopenedVersion := reopened.Issue.RowVersion
+	reclosed, err := operations.Close(ctx, issueops.CloseRequest{Actor: "tester", IssueID: id, Reason: "done again", ExpectedVersion: &reopenedVersion})
+	if err != nil {
+		t.Fatalf("close dual-present %s through the version precondition: %v", id, err)
+	}
+	if !reclosed.Changed || reclosed.Issue == nil || reclosed.Issue.Status != types.StatusClosed {
+		t.Fatalf("preconditioned close of dual-present %s reported %+v; want a real close of the wisp copy", id, reclosed)
+	}
+	if durable, wisp := readUowDualPresencePlaneStatus(t, ctx, provider, id); durable != "open" || wisp != "closed" {
+		t.Fatalf("after second close: %s durable status = %q, wisp status = %q, want open/closed", id, durable, wisp)
+	}
+	if state := readUowDualPresenceRowState(t, ctx, provider, id); durablePortion(state) != durablePortion(durableBefore) {
+		t.Errorf("preconditioned close of the wisp twin changed the durable copy:\nbefore: %s\nafter:  %s", durableBefore, state)
+	}
+
+	// The boundary itself: the same twin's Update refuses while its Close and
+	// Reopen went through. The typed-refusal pin (errors.As
+	// *issueops.DualPresenceError) lives in TestLifecycleUpdateRefusesDualPresence;
+	// this asserts the boundary the AC names — Update may not succeed where
+	// the separate operations keep working.
+	_, err = operations.Update(ctx, issueops.UpdateRequest{Actor: "tester", IssueID: id, Patch: issueops.IssuePatch{
+		Title: issueops.Field[string]{Set: true, Value: "probe"},
+	}})
+	if err == nil {
+		t.Fatalf("uow update on dual-present %s succeeded beside the unchanged Close/Reopen; want the dual-presence refusal", id)
+	}
+	if durable, wisp := readUowDualPresencePlaneStatus(t, ctx, provider, id); durable != "open" || wisp != "closed" {
+		t.Errorf("after the refused update: %s durable status = %q, wisp status = %q, want open/closed", id, durable, wisp)
+	}
+}
+
+// readUowDualPresencePlaneStatus reads both copies' lifecycle status, the
+// plane a Close or Reopen moves. It returns (durable, wisp).
+func readUowDualPresencePlaneStatus(t *testing.T, ctx context.Context, provider UnitOfWorkProvider, id string) (string, string) {
+	t.Helper()
+	var durable, wisp string
+	if err := RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+		row := func(table string) (string, error) {
+			result, err := uw.RawSQLUseCase().Query(ctx, fmt.Sprintf("SELECT status FROM %s WHERE id = ?", table), id)
+			if err != nil {
+				return "", err
+			}
+			if len(result.Rows) != 1 || len(result.Rows[0]) != 1 {
+				return "", fmt.Errorf("unexpected %s row: %#v", table, result.Rows)
+			}
+			return fmt.Sprint(result.Rows[0][0]), nil
+		}
+		var err error
+		if durable, err = row("issues"); err != nil {
+			return "", err
+		}
+		if wisp, err = row("wisps"); err != nil {
+			return "", err
+		}
+		return "read dual presence statuses", nil
+	}); err != nil {
+		t.Fatalf("read dual presence plane status for %s: %v", id, err)
+	}
+	return durable, wisp
+}
+
+// durablePortion splits readUowDualPresenceRowState's "durable | wisp"
+// string and keeps the durable half, so a wisp-plane change does not fail a
+// comparison that only promises the durable copy is untouched.
+func durablePortion(state string) string {
+	if before, _, found := strings.Cut(state, " | "); found {
+		return before
 	}
 	return state
 }
