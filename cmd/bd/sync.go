@@ -39,6 +39,8 @@ import (
 //	4  the dirty working set blocking the is_blocked repair is NOT transient: the
 //	   same pending graph edits have blocked every tick for a while and nothing
 //	   is advancing. Retrying will never publish; an operator must resolve it.
+//	   Also used when the pull is refused over tables this clone ignores but
+//	   the remote still tracks (GH#6368): the same state refuses every tick.
 const (
 	ExitSyncConflict         = 2
 	ExitSyncRetriesExhausted = 3
@@ -712,7 +714,9 @@ Exit codes (a sync timer can branch on these without parsing output):
      — transient, nothing pushed, retry on the next tick
   4  the dirty working set is stuck, not busy: identical pending graph edits
      blocked every attempt of several consecutive runs — nothing pushed, and no
-     later tick will publish until an operator clears it
+     later tick will publish until an operator clears it. Also: the pull was
+     refused over table(s) this clone ignores but the remote still tracks
+     (docs/recovery/sync-failures.md)
 
 On the default-remote path, a rig with no Dolt remote yet but a git origin
 configured adopts that origin as its Dolt remote first, exactly as 'bd dolt push'

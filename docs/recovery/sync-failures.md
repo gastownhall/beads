@@ -196,6 +196,10 @@ local changes would be stomped by merge: events
 the table(s) events have schema conflicts
 ```
 
+`bd sync` reports the first error as exit code 4 (`dirty-stuck`), names the
+tables in its report, and lists them under `ignored_tables_on_remote` with
+`--json`. Retrying never clears it, so a sync timer should stop and alert.
+
 The first error comes before any merge starts, so nothing is left open. The
 second leaves a merge open, and `dolt_schema_conflicts` names `events` with
 `cannot merge a table deletion with data modification`. The bead tables
@@ -207,8 +211,12 @@ working table that is never committed. Dolt refuses to merge a commit that
 still has the versioned table into a clone that holds the ignored one, and it
 refuses before it checks whether there is anything to merge. So the first
 error also appears when the remote is only behind this clone, still at a
-commit from before this clone migrated, with no new work in it. `bd sync`
-then fails on every run, because it pulls before it pushes.
+commit from before this clone migrated, with no new work in it. Older bd
+releases then fail `bd sync` on every run, because it pulls before it pushes.
+Current releases check for that case: when the remote's tip is already in this
+clone's history and no merge is open, the pull has nothing to merge, so
+`bd dolt pull` succeeds and `bd sync` goes on to push. Only a remote with
+commits this clone does not have still stops the pull.
 
 When the remote does have new work from a peer that has not migrated (or
 whose history predates the migration, such as unpushed work on a laptop), that
