@@ -56,42 +56,57 @@ func CheckDoltRemoteGitOrigin(repoPath string) DoctorCheck {
 	}
 
 	normalizedOrigin := doltremote.CanonicalForComparison(originURL)
-	var colliding []string
-	gitSyncOrigin := false
+	var aliases []string
+	gitSyncOrigin, originOffGit := false, false
 	for _, r := range sqlRemotes {
 		if doltremote.CanonicalForComparison(r.URL) != normalizedOrigin {
 			continue
 		}
-		if doltutil.IsGitSyncRemote(r.Name, r.URL) {
+		switch {
+		case doltutil.IsGitSyncRemote(r.Name, r.URL):
 			gitSyncOrigin = true
-			continue
+		case r.Name == "origin":
+			originOffGit = true
+		default:
+			aliases = append(aliases, r.Name)
 		}
-		colliding = append(colliding, r.Name)
 	}
 
-	if len(colliding) == 0 && gitSyncOrigin {
+	if len(aliases) == 0 && !originOffGit {
+		message := "No Dolt remote matches git origin"
+		if gitSyncOrigin {
+			message = "Dolt remote origin is the git-backed sync remote for the git origin"
+		}
 		return DoctorCheck{
 			Name:     name,
 			Status:   StatusOK,
-			Message:  "Dolt remote origin is the git-backed sync remote for the git origin",
+			Message:  message,
 			Category: CategoryDolt,
 		}
 	}
-	if len(colliding) == 0 {
-		return DoctorCheck{
-			Name:     name,
-			Status:   StatusOK,
-			Message:  "No Dolt remote matches git origin",
-			Category: CategoryDolt,
-		}
+
+	var messages, details, fixes []string
+	if originOffGit {
+		messages = append(messages, "1 Dolt remote(s) match the git origin URL: origin")
+		details = append(details, "Using the git origin as a Dolt remote causes git and Dolt sync to share the same endpoint, which can cause conflicts.")
+		fixes = append(fixes, "Remove the conflicting remote(s) with 'bd dolt remote remove <name>', or set dolt.local-only=true to disable remote sync.")
+	}
+	if len(aliases) > 0 {
+		names := strings.Join(aliases, ", ")
+		messages = append(messages, fmt.Sprintf("%d Dolt remote(s) besides origin match the git origin URL: %s", len(aliases), names))
+		details = append(details, "bd syncs through the Dolt remote named origin by default and treats every other remote as a federation peer, even one that points at the same git repository.")
+		fixes = append(fixes, fmt.Sprintf("Review %s: if a remote only duplicates the git origin, remove it with 'bd dolt remote remove <name>' and sync through origin.", names))
+	}
+	if gitSyncOrigin {
+		details = append(details, "Dolt remote origin is the git-backed sync remote and needs no change.")
 	}
 
 	return DoctorCheck{
 		Name:     name,
 		Status:   StatusWarning,
-		Message:  fmt.Sprintf("%d Dolt remote(s) match the git origin URL: %s", len(colliding), strings.Join(colliding, ", ")),
-		Detail:   "Using the git origin as a Dolt remote causes git and Dolt sync to share the same endpoint, which can cause conflicts.",
-		Fix:      "Remove the conflicting remote(s) with 'bd dolt remote remove <name>', or set dolt.local-only=true to disable remote sync.",
+		Message:  strings.Join(messages, "; "),
+		Detail:   strings.Join(details, " "),
+		Fix:      strings.Join(fixes, " "),
 		Category: CategoryDolt,
 	}
 }

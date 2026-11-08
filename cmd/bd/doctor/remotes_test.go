@@ -91,6 +91,68 @@ func TestCheckDoltRemoteGitOrigin(t *testing.T) {
 		})
 	}
 
+	// A remote under another name that matches the git origin is a federation
+	// peer, not the default sync remote, so it is reported, alone or beside a
+	// valid git-backed origin, which is never among the affected names. The
+	// advice is about that alias only, whatever sync.remote says.
+	aliases := []struct {
+		name, syncRemote string
+		remotes          []storage.RemoteInfo
+		wantAffected     string
+		wantOriginOK     bool
+	}{
+		{
+			name:         "alias alone",
+			remotes:      []storage.RemoteInfo{{Name: "backup", URL: "git+https://github.com/org/repo.git"}},
+			wantAffected: "backup",
+		},
+		{
+			name:       "alias named by sync.remote",
+			syncRemote: "backup",
+			remotes: []storage.RemoteInfo{
+				{Name: "origin", URL: "git+https://github.com/org/repo.git"},
+				{Name: "backup", URL: "git+https://github.com/org/repo.git"},
+			},
+			wantAffected: "backup",
+			wantOriginOK: true,
+		},
+		{
+			name: "aliases beside the git-backed origin",
+			remotes: []storage.RemoteInfo{
+				{Name: "origin", URL: "git+https://bob:s3cret@github.com/org/repo.git"},
+				{Name: "backup", URL: "git+https://github.com/org/repo"},
+				{Name: "mirror", URL: "https://github.com/org/repo.git"},
+				{Name: "peer", URL: "http://127.0.0.1:50051/beads"},
+			},
+			wantAffected: "backup, mirror",
+			wantOriginOK: true,
+		},
+	}
+	for _, tc := range aliases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := remoteCheckWorkspace(t, "https://github.com/org/repo.git", tc.syncRemote)
+			stubSQLRemotes(t, nil, tc.remotes...)
+			check := CheckDoltRemoteGitOrigin(root)
+			if check.Status != StatusWarning {
+				t.Fatalf("got %s %q, want a warning about %s", check.Status, check.Message, tc.wantAffected)
+			}
+			_, affected, _ := strings.Cut(check.Message, "match the git origin URL: ")
+			if affected != tc.wantAffected {
+				t.Errorf("affected names = %q (message %q), want %q", affected, check.Message, tc.wantAffected)
+			}
+			if !strings.Contains(check.Fix, tc.wantAffected) || !strings.Contains(check.Fix, "sync through origin") {
+				t.Errorf("fix = %q, want advice to review %s and sync through origin", check.Fix, tc.wantAffected)
+			}
+			if strings.Contains(check.Detail, "conflict") {
+				t.Errorf("detail = %q claims a conflict the alias need not cause", check.Detail)
+			}
+			if tc.wantOriginOK != strings.Contains(check.Detail, "origin is the git-backed sync remote and needs no change") {
+				t.Errorf("detail = %q, want the git-backed origin called fine: %v", check.Detail, tc.wantOriginOK)
+			}
+			assertNoSyncDisablingAdvice(t, check)
+		})
+	}
+
 	// Outcomes that do not depend on how a match is classified.
 	t.Run("no Dolt remote matches", func(t *testing.T) {
 		root := remoteCheckWorkspace(t, "https://github.com/org/repo.git", "")
