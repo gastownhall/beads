@@ -71,6 +71,52 @@ func WakeExpiredDefersInTx(ctx context.Context, tx DBTX) (WakeDefersResult, erro
 	return result, nil
 }
 
+// expiredDeferPredicate matches the rows WakeExpiredDefersInTx wakes: dated
+// defers whose date has passed. ExpiredDefersDue and the sweep's snapshot
+// SELECT use the same eligibility predicate.
+const expiredDeferPredicate = `status = 'deferred' AND defer_until IS NOT NULL
+		  AND defer_until <= UTC_TIMESTAMP()`
+
+// ExpiredDefersDue reports, in one statement, whether WakeExpiredDefersInTx
+// would find anything to wake in issues or wisps. A caller runs it before
+// opening the sweep's write transaction, so a ready read with nothing due
+// sends one SELECT instead of a transaction with a SELECT per table.
+//
+// q need not be the sweep's transaction, and usually is not. The answer can
+// then be stale by the time the sweep runs, and that is acceptable both ways:
+//   - A row that becomes due after a false answer is woken by the next sweep,
+//     which runs at the top of the next ready read or claim.
+//   - A row rescued after a true answer (undeferred, re-deferred further out,
+//     claimed, closed) by a transaction that committed before the sweep's write
+//     transaction took its snapshot is not woken: the snapshot SELECT repeats
+//     the predicate and excludes it. A rescue that commits concurrently, after
+//     that snapshot, is handled as it was before the preflight existed: the
+//     sweep's UPDATE rewrites row_lock, so the two writes conflict at commit
+//     instead of merging, and the sweep's transaction is rolled back. The
+//     server store's transaction retry replays a rolled-back-for-conflict
+//     sweep on a fresh snapshot; any other failure skips this sweep, which is
+//     advisory.
+//
+// A database without the wisps table gets the issues-only form, as the sweep
+// tolerates that table's absence. Any other error, a missing issues table
+// included, is returned for the caller to treat as it treats a failed sweep.
+func ExpiredDefersDue(ctx context.Context, q DBTX) (bool, error) {
+	var issuesDue, wispsDue bool
+	err := q.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM issues WHERE "+expiredDeferPredicate+
+		"), EXISTS (SELECT 1 FROM wisps WHERE "+expiredDeferPredicate+")").Scan(&issuesDue, &wispsDue)
+	if err == nil {
+		return issuesDue || wispsDue, nil
+	}
+	if !dberrors.IsMissingTable(err, "wisps") {
+		return false, fmt.Errorf("wake expired defers: preflight: %w", err)
+	}
+	if err := q.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM issues WHERE "+expiredDeferPredicate+")").
+		Scan(&issuesDue); err != nil {
+		return false, fmt.Errorf("wake expired defers: preflight (issues only): %w", err)
+	}
+	return issuesDue, nil
+}
+
 func wakeExpiredDefersInTable(ctx context.Context, tx DBTX, table, eventsTable string) ([]string, error) {
 	// Snapshot first so each genuinely-woken row gets its own event. The
 	// UPDATE below repeats the whole predicate, so a row rescued between the
@@ -79,8 +125,7 @@ func wakeExpiredDefersInTable(ctx context.Context, tx DBTX, table, eventsTable s
 	//nolint:gosec // G201: table is a hardcoded constant from the caller above.
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 		SELECT id FROM %s
-		WHERE status = 'deferred' AND defer_until IS NOT NULL
-		  AND defer_until <= UTC_TIMESTAMP()
+		WHERE `+expiredDeferPredicate+`
 	`, table))
 	if err != nil {
 		return nil, fmt.Errorf("wake expired defers: scan %s: %w", table, err)

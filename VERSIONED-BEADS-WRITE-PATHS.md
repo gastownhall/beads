@@ -28,7 +28,7 @@ Row numbers are the historical table's. Line numbers in this table are against t
 | 19 | claim.go:`claimIssueInTx` and domain/db/issue.go:`Claim` | yes | VERSIONED | claim.go:239 and issue.go:551; `ExecuteUpdate`'s Claim flag passes `mintVersion=false` and mints once at its own end |
 | 20 | unclaim.go:`finishUnclaimInTx` (unclaim, release) | yes | VERSIONED | unclaim.go:137 |
 | 21 | lease.go:`ReclaimExpiredLeasesInTx` | yes | VERSIONED | lease.go:786 |
-| 22 | wake_defers.go:`wakeExpiredDefersInTable` | yes | VERSIONED | wake_defers.go:143 |
+| 22 | wake_defers.go:`wakeExpiredDefersInTable` | yes | VERSIONED | wake_defers.go:181 |
 | 23 | labels.go:`addLabelInTx` / `removeLabelInTx` and domain/db/label.go:`Insert` / `Delete` | yes | VERSIONED | labels.go:190 and :239 gated on `RowsAffected() > 0`; label.go:91 and :130; `applyLabelPatch` (aggregate.go:360) mints only when called outside `ExecuteUpdate` |
 | 25 | promote.go:`PromoteFromEphemeralInTx` | yes | VERSIONED | after the label, dependency and comment copies; create-shaped only for a new issues row that carried no participation (the row began as a wisp, or was demoted while history was off); update-shaped when the promotion restored the participation a demotion carried (a legacy row stays legacy, R2.3) and when the issues plane already held the id (dual presence) |
 | 27 | persistence.go:`moveIssuePersistenceInTx` | yes | VERSIONED | the same-plane repair mints update-shaped; a move out of the wisps table mints create-shaped only when the row carried no participation (`PersistenceMoveResult.BeginsHistory`) and update-shaped when the move restored the participation a demotion carried; `ExecuteUpdate` passes `mintVersion=false` and mints once at its own end, choosing the shape the same way |
@@ -68,7 +68,7 @@ Direct legs, `internal/storage/issueops/` (18):
 | reopen.go:126 | `reopenIssueInTx` | reopen |
 | unclaim.go:137 | `finishUnclaimInTx` | unclaim / release |
 | update.go:555 | `updateIssueInTx` | update |
-| wake_defers.go:143 | `wakeExpiredDefersInTable` | defer wake |
+| wake_defers.go:181 | `wakeExpiredDefersInTable` | defer wake |
 
 uow leg, `internal/storage/domain/db/` (9):
 

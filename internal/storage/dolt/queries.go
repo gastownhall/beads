@@ -115,11 +115,32 @@ func deferWakeSweepEligible(readOnly, classifiedRead bool) bool {
 // A strict --readonly, preview, or foreign-project open must never sweep,
 // which is why deferWakeSweepEligible checks classifiedRead rather than the
 // guard dropping the readOnly check entirely (be-vbhpf).
+//
+// The write transaction opens only when one statement, read without a
+// transaction where the server autocommits (withSingleRead), finds a defer that
+// is due. Most ready reads find none, and then send that one statement instead
+// of START TRANSACTION, a SELECT per table and COMMIT. The preflight and the
+// write are separate transactions, so the answer can be stale; see
+// issueops.ExpiredDefersDue for why either stale answer is safe (a false one
+// delays the wake to the next sweep; a true one is rechecked by the sweep's own
+// predicate). A failed preflight is handled like a failed sweep.
 func (s *DoltStore) wakeExpiredDefers(ctx context.Context) {
 	if !deferWakeSweepEligible(s.readOnly, s.classifiedRead) {
 		return
 	}
+	// The preflight runs inside the same circuit boundary as the write, on the
+	// boundary's context. An open circuit then sends nothing at all, and the
+	// preflight's success does not reset the breaker before the write has
+	// finished: a write that loses its commit response still counts against it.
 	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		var due bool
+		if err := s.withSingleRead(ctx, func(q issueops.DBTX) error {
+			var err error
+			due, err = issueops.ExpiredDefersDue(ctx, q)
+			return err
+		}); err != nil || !due {
+			return err
+		}
 		return s.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (issueops.ChangedTables, string, error) {
 			woke, err := issueops.WakeExpiredDefersInTx(ctx, tx)
 			if err != nil {
