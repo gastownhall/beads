@@ -13,17 +13,23 @@ import (
 // opaqueWrapper stands in for a per-request provider wrapper such as bd serve's
 // timing wrapper (internal/httpapi's timedProvider): roles are built over IT,
 // and it neither unwraps nor answers FenceProvider, which is what that wrapper
-// was before it answered FenceProvider. Its NewUOW records the call and answers
-// err, so a test sees which provider a write went through without a database
-// behind it.
+// was before it answered FenceProvider. Its NewUOW records the call, runs onOpen
+// when one is set, and answers err, so a test sees which provider a write went
+// through, and when, without a database behind it.
 type opaqueWrapper struct {
 	inner  UnitOfWorkProvider
 	err    error
+	onOpen func(context.Context) error
 	opened int
 }
 
-func (w *opaqueWrapper) NewUOW(context.Context) (UnitOfWork, error) {
+func (w *opaqueWrapper) NewUOW(ctx context.Context) (UnitOfWork, error) {
 	w.opened++
+	if w.onOpen != nil {
+		if err := w.onOpen(ctx); err != nil {
+			return nil, err
+		}
+	}
 	return nil, w.err
 }
 
@@ -39,8 +45,8 @@ func (w *fencedWrapper) FenceProvider() UnitOfWorkProvider { return w.inner }
 // of a guarded delete built over a per-request wrapper, the way bd serve builds
 // every role: the GET_LOCK fence is taken on the pool of the provider beneath
 // the wrapper (found through FenceProvider and then Unwrap), and the write
-// still opens its unit of work through the wrapper itself, so the request's
-// timing and the policy layers above the bare provider see it.
+// still opens its unit of work through the wrapper itself, inside the lock, so
+// the request's timing and the policy layers above the bare provider see it.
 //
 // The hook layer stands in for the external-dependency policy bd serve has
 // beneath its wrapper; both peel with Unwrap.
@@ -51,19 +57,27 @@ func TestGuardedDeleteTakesTheFenceBeneathAPerRequestWrapper(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 
+	// In order, which sqlmock enforces: the lock session's database, the lock,
+	// the write (a marker the wrapper sends when it opens a unit of work), and
+	// the release. A write outside the lock breaks the order.
 	lock := deleteFenceLockName("beads", "bd-1")
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT DATABASE()")).
 		WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow("beads"))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
 		WithArgs(lock, deleteFenceLockTimeoutSeconds).
 		WillReturnRows(sqlmock.NewRows([]string{"GET_LOCK"}).AddRow(1))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 'write'")).
+		WillReturnRows(sqlmock.NewRows([]string{"write"}).AddRow("write"))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
 		WithArgs(lock).
 		WillReturnRows(sqlmock.NewRows([]string{"RELEASE_LOCK"}).AddRow(1))
 
 	errWrite := errors.New("the write opened its unit of work through the wrapper")
 	beneath := NewNotifyingProvider(&doltSQLProvider{db: db}, Sinks{Hook: &notifyRunner{}})
-	wrapper := &fencedWrapper{opaqueWrapper{inner: beneath, err: errWrite}}
+	wrapper := &fencedWrapper{opaqueWrapper{inner: beneath, err: errWrite, onOpen: func(ctx context.Context) error {
+		var marker string
+		return db.QueryRowContext(ctx, "SELECT 'write'").Scan(&marker)
+	}}}
 	deleter, err := NewDeleter(wrapper)
 	if err != nil {
 		t.Fatalf("NewDeleter: %v", err)
@@ -75,15 +89,14 @@ func TestGuardedDeleteTakesTheFenceBeneathAPerRequestWrapper(t *testing.T) {
 	})
 	if !errors.Is(err, errWrite) {
 		t.Fatalf("Delete = %v, want the wrapper's own answer: the write must open its unit of work "+
-			"through the wrapper the role was built over, never through the provider holding the fence", err)
+			"through the wrapper the role was built over, inside the fence, never through the provider "+
+			"holding the fence (a sqlmock error here means the write ran outside the lock)", err)
 	}
 	if wrapper.opened != 1 {
 		t.Errorf("the wrapper opened %d units of work, want 1", wrapper.opened)
 	}
-	// In order: the session's database, the lock, and its release. A delete
-	// that skipped the fence leaves the last two unmet.
 	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("the fence was not taken and released on the pool beneath the wrapper: %v", err)
+		t.Errorf("the write did not run inside a fence taken and released on the pool beneath the wrapper: %v", err)
 	}
 }
 
