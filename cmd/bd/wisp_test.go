@@ -349,3 +349,69 @@ func TestBareWispStampsWispType(t *testing.T) {
 		}
 	}
 }
+
+// TestWispCreateRejectsInvalidWispType verifies both wisp creation entrypoints
+// reject a --wisp-type outside the enum with bd create's diagnostic, before
+// any preview or write, and accept every enum value and empty (GH#8209).
+func TestWispCreateRejectsInvalidWispType(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
+	rootID := wispTestProto(t, ctx, s, 2)
+	withWispTestGlobals(t, s, ctx)
+
+	handlers := []struct {
+		name string
+		run  func(*cobra.Command, []string) error
+	}{
+		{"bd mol wisp create", runWispCreate},
+		{"bd mol wisp", runWisp},
+	}
+
+	for _, h := range handlers {
+		for _, value := range []string{"bogus", "default"} {
+			for _, dryRun := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/dry-run=%v", h.name, value, dryRun), func(t *testing.T) {
+					var runErr error
+					stdout, stderr := captureStdio(t, func() {
+						runErr = h.run(makeWispTestCmdWithType(t, false, dryRun, value), []string{rootID})
+					})
+					if runErr == nil {
+						t.Fatalf("--wisp-type %s: expected an error, got none (stdout:\n%s)", value, stdout)
+					}
+					want := fmt.Sprintf("invalid wisp-type %q (must be %s)", value, types.ValidWispTypeNames())
+					if !strings.Contains(stderr, want) {
+						t.Errorf("stderr = %q, want it to contain %q", stderr, want)
+					}
+					if strings.Contains(stdout, "Dry run") {
+						t.Errorf("invalid --wisp-type must not print a dry-run preview, got:\n%s", stdout)
+					}
+					if got := countEphemeral(t, ctx, s); got != 0 {
+						t.Errorf("invalid --wisp-type created %d ephemeral issues, want 0", got)
+					}
+				})
+			}
+		}
+	}
+
+	valid := []string{""}
+	for _, wt := range []types.WispType{
+		types.WispTypeHeartbeat, types.WispTypePing, types.WispTypePatrol, types.WispTypeGCReport,
+		types.WispTypeRecovery, types.WispTypeError, types.WispTypeEscalation,
+	} {
+		valid = append(valid, string(wt))
+	}
+	for _, value := range valid {
+		t.Run(fmt.Sprintf("valid/%q", value), func(t *testing.T) {
+			var runErr error
+			stdout, stderr := captureStdio(t, func() {
+				runErr = runWispCreate(makeWispTestCmdWithType(t, false, true, value), []string{rootID})
+			})
+			if runErr != nil {
+				t.Fatalf("--wisp-type %q rejected: %v\n%s", value, runErr, stderr)
+			}
+			if !strings.Contains(stdout, "Dry run") {
+				t.Errorf("--wisp-type %q: expected a dry-run preview, got:\n%s", value, stdout)
+			}
+		})
+	}
+}
