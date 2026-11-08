@@ -646,6 +646,37 @@ func (s *InstrumentedStorage) GetAllConfig(ctx context.Context) (map[string]stri
 // any caller holding the instrumented store, and it is the layer a
 // peel-until-implements discovery would stop at if spans on prefix reads ever
 // justify that non-standard peel.
+// GetConfigKeys forwards the domain.ConfigKeysReader optional fast path when
+// the wrapped store provides it, and otherwise picks the keys out of
+// instrumented GetAllConfig, so wrapping a store never costs it the capability.
+// As with GetConfigByPrefix, cmd/bd unwraps to the raw store, so this span fires
+// only for a caller that holds the instrumented store. The span records how many
+// keys were asked for, not their names.
+func (s *InstrumentedStorage) GetConfigKeys(ctx context.Context, keys ...string) (map[string]string, error) {
+	if kr, ok := s.inner.(interface {
+		GetConfigKeys(ctx context.Context, keys ...string) (map[string]string, error)
+	}); ok {
+		ctx, span, t := s.op(ctx, "GetConfigKeys", attribute.Int("bd.config.key_count", len(keys)))
+		v, err := kr.GetConfigKeys(ctx, keys...)
+		s.done(ctx, span, t, err)
+		return v, err
+	}
+	out := make(map[string]string, len(keys))
+	if len(keys) == 0 {
+		return out, nil
+	}
+	all, err := s.GetAllConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, k := range keys {
+		if v, ok := all[k]; ok {
+			out[k] = v
+		}
+	}
+	return out, nil
+}
+
 func (s *InstrumentedStorage) GetConfigByPrefix(ctx context.Context, prefix string) (map[string]string, error) {
 	attrs := []attribute.KeyValue{attribute.String("bd.config.prefix", prefix)}
 	if pr, ok := s.inner.(interface {
