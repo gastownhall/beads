@@ -58,7 +58,8 @@ func CheckDoltRemoteGitOrigin(repoPath string) DoctorCheck {
 	}
 
 	normalizedOrigin := doltremote.CanonicalForComparison(originURL)
-	var affected []string
+	var aliases []string
+	originWrongTransport := false
 	gitSyncOrigin := false
 	for _, r := range sqlRemotes {
 		if doltremote.CanonicalForComparison(r.URL) != normalizedOrigin {
@@ -70,10 +71,17 @@ func CheckDoltRemoteGitOrigin(repoPath string) DoctorCheck {
 			gitSyncOrigin = true
 			continue
 		}
-		affected = append(affected, r.Name)
+		if r.Name == "origin" {
+			// Matches the git origin repository but not over a Git
+			// transport: a raw http(s), file or cloud URL addresses a Dolt
+			// remote server or native storage, not the git repository.
+			originWrongTransport = true
+			continue
+		}
+		aliases = append(aliases, r.Name)
 	}
 
-	if len(affected) == 0 {
+	if !originWrongTransport && len(aliases) == 0 {
 		if gitSyncOrigin {
 			return DoctorCheck{
 				Name:     name,
@@ -91,12 +99,25 @@ func CheckDoltRemoteGitOrigin(repoPath string) DoctorCheck {
 		}
 	}
 
+	var affected []string
+	var detail, fix []string
+	if originWrongTransport {
+		affected = append(affected, "origin")
+		detail = append(detail, "origin matches the git origin URL but does not use a Git transport: git-backed sync requires a git+ URL, for example git+https://example.com/org/repo.git.")
+		fix = append(fix, "Configure origin for Git-backed sync: 'bd dolt remote remove origin' and 'bd dolt remote add origin git+<git origin URL>', so Dolt data travels on the git origin's refs/dolt/data ref.")
+	}
+	if len(aliases) > 0 {
+		affected = append(affected, aliases...)
+		detail = append(detail, fmt.Sprintf("origin is the default sync remote; %s point(s) at the git origin repository under another name, a federation peer with an unexpected role for that URL.", strings.Join(aliases, ", ")))
+		fix = append(fix, "Review the matching remote(s): remove an unintended one with 'bd dolt remote remove <name>', or point it at its own repository. The git-backed origin remains the remote for default sync.")
+	}
+
 	return DoctorCheck{
 		Name:     name,
 		Status:   StatusWarning,
 		Message:  fmt.Sprintf("%d Dolt remote(s) match the git origin URL: %s", len(affected), strings.Join(affected, ", ")),
-		Detail:   "origin is the default sync remote; a Dolt remote with another name that points at the git origin repository is a federation peer with an unexpected role for that URL.",
-		Fix:      "Review the matching remote(s): remove an unintended one with 'bd dolt remote remove <name>', or point it at its own repository. The git-backed origin remains the remote for default sync.",
+		Detail:   strings.Join(detail, "\n"),
+		Fix:      strings.Join(fix, "\n"),
 		Category: CategoryDolt,
 	}
 }

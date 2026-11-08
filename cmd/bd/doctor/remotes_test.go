@@ -170,3 +170,64 @@ func TestCheckDoltRemoteGitOrigin_AliasMatchWarnsAboutAliasOnly(t *testing.T) {
 		}
 	})
 }
+
+// TestCheckDoltRemoteGitOrigin_OriginWrongTransport covers a Dolt remote
+// named origin that canonically matches the git origin URL without using a
+// Git transport: raw http(s), file and cloud URLs address a Dolt remote
+// server or native storage, not the git repository, so origin is not the
+// git-backed sync remote its name suggests. The warning must be about the
+// transport and advise configuring origin for Git sync — never local-only.
+func TestCheckDoltRemoteGitOrigin_OriginWrongTransport(t *testing.T) {
+	// Only raw http(s) both canonicalizes to the git origin form and misses
+	// the Git-transport classifier: ssh:// and SCP forms are Git transports,
+	// and file or cloud URLs never canonicalize to an https origin at all.
+	for _, tc := range []struct {
+		gitOrigin string
+		doltURL   string
+	}{
+		{"https://github.com/org/repo.git", "https://github.com/org/repo.git"},
+		{"https://GitHub.com/org/repo", "https://user@github.com/org/repo.git"},
+		{"http://localhost:3000/org/repo.git", "http://localhost:3000/org/repo"},
+	} {
+		t.Run(tc.doltURL, func(t *testing.T) {
+			root := serverModeWorkspace(t, "")
+			clearResolveBeadsDirCache()
+			t.Cleanup(clearResolveBeadsDirCache)
+			initGitRepoWithOrigin(t, root, tc.gitOrigin)
+			stubSQLRemotes(t, []storage.RemoteInfo{{Name: "origin", URL: tc.doltURL}})
+
+			check := CheckDoltRemoteGitOrigin(root)
+			if check.Status != StatusWarning {
+				t.Fatalf("status = %q, want %q; message=%q", check.Status, StatusWarning, check.Message)
+			}
+			if !strings.Contains(check.Message, "origin") {
+				t.Errorf("message %q must name origin", check.Message)
+			}
+			if !strings.Contains(check.Detail, "transport") {
+				t.Errorf("detail %q must explain the transport problem", check.Detail)
+			}
+			if !strings.Contains(check.Fix, "git+") {
+				t.Errorf("fix %q must recommend configuring origin for Git-backed sync (a git+ URL)", check.Fix)
+			}
+			if strings.Contains(check.Fix, "local-only") {
+				t.Errorf("fix %q must not advise disabling sync", check.Fix)
+			}
+		})
+	}
+
+	// The exemption must come from canonical equality plus a Git transport,
+	// never from a lax comparison: a git+file:// remote does not match a
+	// file:// git origin, so that pair stays a no-match, not a canonical OK.
+	t.Run("git+file remote does not match a file:// origin", func(t *testing.T) {
+		root := serverModeWorkspace(t, "")
+		clearResolveBeadsDirCache()
+		t.Cleanup(clearResolveBeadsDirCache)
+		initGitRepoWithOrigin(t, root, "file:///srv/org/repo.git")
+		stubSQLRemotes(t, []storage.RemoteInfo{{Name: "origin", URL: "git+file:///srv/org/repo.git"}})
+
+		check := CheckDoltRemoteGitOrigin(root)
+		if check.Status != StatusOK || check.Message != "No Dolt remote matches git origin" {
+			t.Errorf("file:// vs git+file://: got %s %q, want ok %q", check.Status, check.Message, "No Dolt remote matches git origin")
+		}
+	})
+}
