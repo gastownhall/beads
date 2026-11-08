@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
@@ -410,5 +411,57 @@ func TestSelectedWorkspaceBackendAdmission(t *testing.T) {
 	}
 	if got := os.Getenv("BEADS_DOLT_SERVER_DATABASE"); got != "" {
 		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want unset: the caller's redirect-source database must not follow -C", got)
+	}
+}
+
+// TestSelectedWorkspaceRedirectDatabase pins GH#5756 for two clones sharing
+// one redirected storage under distinct source databases: selecting clone2
+// from clone1 (or from outside any repository) uses clone2's own redirect, so
+// context reports clone2's database and where names clone2 as the source.
+func TestSelectedWorkspaceRedirectDatabase(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		selector   string
+		fromClone1 bool
+		cmd        *cobra.Command
+	}{
+		{name: "context via -C from clone1", selector: "-C", fromClone1: true, cmd: contextCmd},
+		{name: "context via BEADS_DIR from clone1", selector: "BEADS_DIR", fromClone1: true, cmd: contextCmd},
+		{name: "context via -C from outside", selector: "-C", cmd: contextCmd},
+		{name: "where via -C from clone1", selector: "-C", fromClone1: true, cmd: whereCmd},
+		{name: "where via BEADS_DIR from clone1", selector: "BEADS_DIR", fromClone1: true, cmd: whereCmd},
+		{name: "where via -C from outside", selector: "-C", cmd: whereCmd},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			selectedWorkspaceEnvForTest(t)
+			clone1Dir, clone1BeadsDir := newRedirectedCallerForTest(t)
+			sharedBeadsDir := beads.FollowRedirect(clone1BeadsDir)
+			clone2Dir := filepath.Join(filepath.Dir(clone1Dir), "clone2")
+			initGitRepoAt(t, mkdirForTest(t, clone2Dir))
+			clone2BeadsDir := filepath.Join(clone2Dir, ".beads")
+			writeRedirectForTest(t, clone2BeadsDir, sharedBeadsDir)
+			writeMetadataConfig(t, clone2BeadsDir, configfile.DoltModeServer, "clone2_db")
+			if tc.fromClone1 {
+				t.Chdir(clone1Dir)
+			} else {
+				t.Chdir(t.TempDir())
+			}
+			if tc.selector == "-C" {
+				changeDir = clone2Dir
+			} else {
+				t.Setenv("BEADS_DIR", clone2BeadsDir)
+			}
+
+			if tc.cmd == contextCmd {
+				if got := runContextJSONForTest(t); got != "clone2_db" {
+					t.Fatalf("context database = %q, want clone2_db", got)
+				}
+				return
+			}
+			got := runWhereJSONForTest(t)
+			if !sameDirPath(got.Path, sharedBeadsDir) || !sameDirPath(got.RedirectedFrom, clone2BeadsDir) {
+				t.Fatalf("where = %q via %q, want %q via %q", got.Path, got.RedirectedFrom, sharedBeadsDir, clone2BeadsDir)
+			}
+		})
 	}
 }
