@@ -377,11 +377,16 @@ func setupStraddledCutoff(t *testing.T, prefix string) straddledCutoff {
 
 	now := time.Now()
 	withEmbeddedConn(t, f.beadsDir, func(conn *sql.Conn) {
-		embeddedCommit(t, conn, "UPDATE issues SET title = ? WHERE id = ?", []any{"edit A", f.issueID},
+		// issues.updated_at re-stamps at second precision on any UPDATE
+		// that does not assign it. Re-stamps in different seconds make the
+		// cherry-pick of A onto the squashed B conflict on updated_at
+		// before the divergence check. Holding it fixed leaves the title
+		// as the only difference.
+		embeddedCommit(t, conn, "UPDATE issues SET title = ?, updated_at = updated_at WHERE id = ?", []any{"edit A", f.issueID},
 			"repro: edit A", now.Add(40*time.Minute))
 		// B is undated, as in the report: it is the newest old commit by
 		// the time compact runs.
-		embeddedCommit(t, conn, "UPDATE issues SET title = ? WHERE id = ?", []any{"ORIGINAL", f.issueID},
+		embeddedCommit(t, conn, "UPDATE issues SET title = ?, updated_at = updated_at WHERE id = ?", []any{"ORIGINAL", f.issueID},
 			"repro: revert to ORIGINAL", time.Time{})
 		rows, err := conn.QueryContext(t.Context(), "SELECT commit_hash, date FROM dolt_log ORDER BY commit_order DESC LIMIT 2")
 		if err != nil {
