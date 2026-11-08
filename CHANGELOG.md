@@ -703,39 +703,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **`bd list` draws dependencies from the listing it already read.** The
-  default tree and `--deps` view used to read the listed issues' dependency
-  edges again after the listing, and the flat compact and agent views read
-  them again to decide which rows a gate holds. The listing query already
-  returns each row's edges, so these views now use those: 6 fewer statements
-  for the tree in server mode and 4 fewer for the flat compact and agent
-  views. The edges are now as of the listing, so an issue another process
-  deletes in between keeps the edges it was listed with, where they used to
-  disappear. For an ID present both as an issue and as a wisp, the tree now
-  draws the edges of the issue it lists, where it used to draw the wisp's.
-  `--parent`, `--watch`, `--format` and a remote (`bd connect`) backend still
-  read the edges separately.
-- **Five text outputs skip store reads they never printed.** `bd show` takes
-  an issue's labels from the issue read instead of reading them again (4
-  fewer statements in server mode). The labels are now as of the read that
-  returned the body, so a label change committed by another process in
-  between is not shown; for an ID present both as an issue and as a wisp, it
-  now prints the labels of the issue whose body it shows, where it used to
-  print the wisp's. `bd list --flat --long` no longer loads the
-  blocking decoration it does not render (8 fewer). `bd ready --plain` no
-  longer reads parent edges and parent epics, which only the default view
-  prints (4, plus 4 per distinct parent). The text confirmation of
-  `bd priority` and `bd note` prints the title read before the write instead
-  of reading the issue again (4 fewer), so a rename committed by another
-  process in between shows the old title, and the title is printed even when
-  the old read after the write would have failed and dropped it; `--json`
-  still reads the issue after the write. `bd defer --reason` appends the
-  reason inside the update transaction instead of reading the notes first and
-  writing a replacement (4 fewer), so a note another process adds in between
-  is no longer overwritten; an issue deleted between resolution and the
-  write is now reported as `Error deferring <id>` from the update instead of
-  `Error loading <id>`. Neither error-path change affects whether a write
-  that succeeded landed.
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add
@@ -848,6 +815,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every backend; it used to let `PinnedFlag` win silently. `bd list` already
   refused the pair at flag parse, so its behavior is unchanged; over HTTP the
   pair is a `400 invalid_argument` on `no_pinned`.
+- **`bd list` draws dependencies from the listing it already read.** The
+  default tree and `--deps` view used to read the listed issues' dependency
+  edges again after the listing, and the flat compact and agent views read
+  them again to decide which rows a gate holds. The listing query already
+  returns each row's edges, so these views now use those: 6 fewer statements
+  for the tree in server mode and 4 fewer for the flat compact and agent
+  views. The edges are now as of the listing, so an issue another process
+  deletes in between keeps the edges it was listed with, where they used to
+  disappear. For an ID present both as an issue and as a wisp, the tree now
+  draws the edges of the issue it lists, where it used to draw the wisp's.
+  `--parent`, `--watch`, `--format` and a remote (`bd connect`) backend still
+  read the edges separately.
+- **Five text outputs skip store reads they never printed.** `bd show` takes
+  an issue's labels from the issue read instead of reading them again (4
+  fewer statements in server mode). The labels are now as of the read that
+  returned the body, so a label change committed by another process in
+  between is not shown; for an ID present both as an issue and as a wisp, it
+  now prints the labels of the issue whose body it shows, where it used to
+  print the wisp's. `bd list --flat --long` no longer loads the
+  blocking decoration it does not render (8 fewer). `bd ready --plain` no
+  longer reads parent edges and parent epics, which only the default view
+  prints (4, plus 4 per distinct parent). The text confirmation of
+  `bd priority` and `bd note` prints the title read before the write instead
+  of reading the issue again (4 fewer), so a rename committed by another
+  process in between shows the old title, and the title is printed even when
+  the old read after the write would have failed and dropped it; `--json`
+  still reads the issue after the write. `bd defer --reason` appends the
+  reason inside the update transaction instead of reading the notes first and
+  writing a replacement (4 fewer), so a note another process adds in between
+  is no longer overwritten; an issue deleted between resolution and the
+  write is now reported as `Error deferring <id>` from the update instead of
+  `Error loading <id>`. Neither error-path change affects whether a write
+  that succeeded landed.
 - `issueops.Reader.List` refuses `ParentID` together with `NoParent` with
   `ErrValidation` (`--parent and --no-parent are mutually exclusive`) on
   every backend, as `CountRequest` already did; it used to answer with only
