@@ -712,18 +712,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0.5 s and 1.6 s at 100 ms round-trip time. A server started with
   `--no-auto-commit` keeps the transactions, because a bare `SELECT` there stays on
   an old snapshot.
-- **Server mode: more one-statement reads no longer open a transaction.** The
-  durable-only issue count (`bd count`), memory recall and listing (`bd recall`,
-  `bd memories`) and the read that verifies a claim after its commit each drop
-  `START TRANSACTION` and `ROLLBACK`, 2 fewer statements each. The external-blocker
-  read behind `bd ready` now reads both dependency tables in one statement, 3
-  fewer per read; when `wisp_dependencies` is missing it reads both tables again
-  inside one transaction, so the durable rows come from the same snapshot as the
-  missing table. The `bd list` page no longer probes `wisp_dependencies`, which
-  it does not use without dependency counts or wisps, so it is one statement and
-  sends 3 fewer. `bd status` reads its two counts in one transaction instead of
-  two, 2 fewer, and the two counts now come from one snapshot. A server started
-  with `--no-auto-commit` keeps the transactions for the single reads.
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add
@@ -800,6 +788,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   base like git's ORT strategy (dolthub/dolt#12125). Some merges that 2.5.x
   completed silently now conflict, and some spurious conflicts no longer
   occur. Pull/push through a single remote is unaffected.
+- **Server mode: more one-statement reads no longer open a transaction.** The
+  durable-only issue count (`bd count`), memory recall and listing (`bd recall`,
+  `bd memories`) and the read that verifies a claim after its commit each drop
+  `START TRANSACTION` and `ROLLBACK`, 2 fewer statements each. The external-blocker
+  read behind `bd ready` now reads both dependency tables in one statement, 3
+  fewer per read; when `wisp_dependencies` is missing it reads both tables again
+  inside one transaction, so the durable rows come from the same snapshot as the
+  missing table. The `bd list` page no longer probes `wisp_dependencies`, which
+  it does not use without dependency counts or wisps, so it is one statement and
+  sends 3 fewer. `bd status` reads its two counts in one transaction instead of
+  two, 2 fewer, and the two counts now come from one snapshot. A server started
+  with `--no-auto-commit` keeps the transactions for the single reads.
 - Over an HTTP workspace, `bd ready --json` without `BD_JSON_ENVELOPE` no
   longer sends `GET /v0/beads/ready:count` after a page the limit cut short:
   the total only went into the stderr hint. It lists one row past the limit
