@@ -806,6 +806,25 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 		return nil, fmt.Errorf("ApplyUpdate %s: %w", id, err)
 	}
 
+	// A wisp row beside a durable twin is the state whose every mutation wrote
+	// the copy the issues-first reader never sees (GH#5991). The claim, label
+	// and reparent branches below route through the wisp use cases directly —
+	// they bypass the SQL field updater — so the guard has to live HERE, ahead
+	// of the first mutation, not inside any one branch. It fires only for a
+	// spec that asks to change something: the uow Close/Reopen paths call
+	// ApplyUpdate with a version-only spec to run their precondition, and
+	// their existing twin-targeting behavior (the settled equivalence golden
+	// pins closing the wisp copy) is unchanged.
+	if useWisp && updateSpecMutates(spec) {
+		durable, existsErr := u.issueRepo.Exists(ctx, id, IssueTableOpts{})
+		if existsErr != nil {
+			return nil, fmt.Errorf("ApplyUpdate %s: probe durable plane: %w", id, existsErr)
+		}
+		if durable {
+			return nil, &publicops.DualPresenceError{ID: id}
+		}
+	}
+
 	if spec.ExpectedVersion != nil || spec.ExpectedAssignee != nil || spec.ExpectedStatus != nil {
 		var current *types.Issue
 		if useWisp {
@@ -944,6 +963,20 @@ func (u *issueUseCaseImpl) isWispID(ctx context.Context, id string) (bool, error
 		return false, fmt.Errorf("probe wisps table: %w", err)
 	}
 	return found, nil
+}
+
+// updateSpecMutates reports whether spec asks ApplyUpdate to change anything:
+// a field write, a claim, any label edit, a reparent or a persistence move. A
+// syntactically nonempty but semantically no-op patch still counts — the
+// dual-presence refusal (GH#5991) is about the row's state, not the request's
+// effect, so it cannot be bypassed by asking for a value the row already
+// carries. A version/assignee/status-precondition-only spec mutates nothing
+// and is not a mutation request: the uow Close/Reopen precondition probes
+// ride exactly that shape.
+func updateSpecMutates(spec UpdateSpec) bool {
+	return len(spec.Fields) > 0 || spec.Claim || spec.SetLabels != nil ||
+		len(spec.AddLabels) > 0 || len(spec.RemoveLabels) > 0 ||
+		spec.Reparent != nil || spec.Persistence != nil
 }
 
 // PromoteWisp moves an active wisp to the Dolt-versioned issues plane,

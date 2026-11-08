@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -247,4 +249,116 @@ func (s dualPresenceState) assertEqual(t *testing.T, label string, other dualPre
 	if s != other {
 		t.Errorf("state changed across the refused update (%s):\nbefore: %+v\nafter:  %+v", label, s, other)
 	}
+}
+
+// TestLegacyUpdateRefusesDualPresence pins the legacy funnel: DoltStore.
+// UpdateIssue and UpdateIssueChecked route through isActiveWisp's bare
+// wisps-existence probe at the store level, but both funnel into the guarded
+// UpdateIssueInTx, so the legacy server paths (bd's own CLI legs that bypass
+// the role executor, and any direct DoltStore consumer) refuse a dual-present
+// ID with the same typed error instead of merging against the issues-first
+// pre-image and writing the wisp copy.
+func TestLegacyUpdateRefusesDualPresence(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	id := seedDualPresenceCanary(t, ctx, store, "legacy")
+	before := snapshotDualPresenceState(t, ctx, store, id)
+
+	variants := []struct {
+		name   string
+		update func(id string) error
+	}{
+		{
+			name: "UpdateIssue",
+			update: func(id string) error {
+				return store.UpdateIssue(ctx, id, map[string]any{"notes": "probe"}, "tester")
+			},
+		},
+		{
+			name: "UpdateIssueChecked",
+			update: func(id string) error {
+				return store.UpdateIssueChecked(ctx, id, map[string]any{"title": "probe"}, "tester", storage.UpdateIssueOptions{})
+			},
+		},
+	}
+
+	for _, variant := range variants {
+		t.Run(variant.name, func(t *testing.T) {
+			err := variant.update(id)
+			if err == nil {
+				t.Fatalf("legacy update (%s) on dual-present %s succeeded; want refusal", variant.name, id)
+			}
+			var dual *issueops.DualPresenceError
+			if !errors.As(err, &dual) {
+				t.Fatalf("legacy update (%s) error = %v, want *issueops.DualPresenceError", variant.name, err)
+			}
+			if dual.ID != id {
+				t.Errorf("DualPresenceError.ID = %q, want %q", dual.ID, id)
+			}
+			if !errors.Is(err, issueops.ErrDualPresence) {
+				t.Errorf("refusal does not match issueops.ErrDualPresence: %v", err)
+			}
+
+			after := snapshotDualPresenceState(t, ctx, store, id)
+			before.assertEqual(t, variant.name, after)
+		})
+	}
+}
+
+// TestPersistenceMoveRefusesDualPresence pins the move's own locator: a
+// directed persistence move on a dual-present ID is refused with the same
+// typed error the update paths raise (not the old prose-only failure), and
+// the caller's transaction still rolls back — nothing moved, no half-copied
+// auxiliary rows. The move is driven directly because every role and domain
+// route now refuses a dual-present ID before it reaches the locator; the
+// locator keeps its own guard for the callers that come after.
+func TestPersistenceMoveRefusesDualPresence(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	id := seedDualPresenceCanary(t, ctx, store, "move")
+	before := snapshotDualPresenceState(t, ctx, store, id)
+
+	tx, err := store.UnderlyingDB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// The reader the move consults first is issues-first, so `current` is the
+	// durable copy — exactly the row a demote would try to relocate onto a
+	// plane its twin already occupies.
+	current, err := storageissueops.GetIssueInTx(ctx, tx, id)
+	if err != nil {
+		t.Fatalf("GetIssueInTx: %v", err)
+	}
+	_, err = storageissueops.MoveIssuePersistenceInTx(ctx, tx, current, types.PersistenceModeEphemeral, "tester")
+	if err == nil {
+		_ = tx.Rollback()
+		t.Fatalf("persistence move on dual-present %s succeeded; want refusal", id)
+	}
+	var dual *issueops.DualPresenceError
+	if !errors.As(err, &dual) {
+		_ = tx.Rollback()
+		t.Fatalf("persistence move error = %v, want *issueops.DualPresenceError", err)
+	}
+	if dual.ID != id {
+		t.Errorf("DualPresenceError.ID = %q, want %q", dual.ID, id)
+	}
+	if !errors.Is(err, issueops.ErrDualPresence) {
+		t.Errorf("refusal does not match issueops.ErrDualPresence: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+
+	after := snapshotDualPresenceState(t, ctx, store, id)
+	before.assertEqual(t, "persistence move", after)
 }

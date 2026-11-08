@@ -283,7 +283,12 @@ func locatePersistenceMoveRow(ctx context.Context, tx DBTX, id string) (wisp, fo
 		return false, false, fmt.Errorf("locate issue persistence plane: %w", err)
 	}
 	if issueCount > 0 && wispCount > 0 {
-		return false, false, fmt.Errorf("locate issue persistence plane: ID %q exists in both issues and wisps", id)
+		// The same typed refusal the update paths raise (GH#5991): a caller
+		// that errors.As publicops.DualPresenceError learns the move was
+		// refused for the same reason an ordinary update was, instead of
+		// parsing this prose. The transaction rolls back as before — nothing
+		// moved.
+		return false, false, dualPresenceError(id)
 	}
 	return wispCount > 0, wispCount+issueCount > 0, nil
 }

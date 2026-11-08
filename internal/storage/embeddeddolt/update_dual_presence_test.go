@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -105,4 +106,73 @@ func embeddedDualPresenceRowState(t *testing.T, ctx context.Context, te *testEnv
 		return fmt.Sprintf("notes=%q row_lock=%q updated_at=%q", notes.String, rowLock.String, updatedAt.String)
 	}
 	return row("issues") + " | " + row("wisps")
+}
+
+// TestEmbeddedLegacyUpdateRefusesDualPresence is the embedded mirror of the
+// legacy funnel (TestLegacyUpdateRefusesDualPresence in internal/storage/dolt):
+// EmbeddedDoltStore.UpdateIssue and UpdateIssueChecked route on the same bare
+// wisps-existence probe but funnel into the guarded UpdateIssueInTx, so a
+// dual-present ID refuses typed here too.
+func TestEmbeddedLegacyUpdateRefusesDualPresence(t *testing.T) {
+	te := newTestEnv(t, "edl")
+	ctx := context.Background()
+
+	issue := &types.Issue{
+		Title:     "embedded legacy dual presence canary",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := te.store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("create canary: %v", err)
+	}
+	id := issue.ID
+	te.exec(t, ctx, `INSERT INTO wisps (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) `+
+		`SELECT id, title, description, design, acceptance_criteria, notes, status, priority, issue_type FROM issues WHERE id = ?`, id)
+	te.exec(t, ctx, `UPDATE issues SET notes = 'durable notes' WHERE id = ?`, id)
+	te.exec(t, ctx, `UPDATE wisps SET notes = 'wisp notes' WHERE id = ?`, id)
+
+	variants := []struct {
+		name   string
+		update func(id string) error
+	}{
+		{
+			name: "UpdateIssue",
+			update: func(id string) error {
+				return te.store.UpdateIssue(ctx, id, map[string]any{"notes": "probe"}, "tester")
+			},
+		},
+		{
+			name: "UpdateIssueChecked",
+			update: func(id string) error {
+				return te.store.UpdateIssueChecked(ctx, id, map[string]any{"title": "probe"}, "tester", storage.UpdateIssueOptions{})
+			},
+		},
+	}
+
+	for _, variant := range variants {
+		t.Run(variant.name, func(t *testing.T) {
+			before := embeddedDualPresenceRowState(t, ctx, te, id)
+
+			err := variant.update(id)
+			if err == nil {
+				t.Fatalf("embedded legacy update (%s) on dual-present %s succeeded; want refusal", variant.name, id)
+			}
+			var dual *issueops.DualPresenceError
+			if !errors.As(err, &dual) {
+				t.Fatalf("embedded legacy update (%s) error = %v, want *issueops.DualPresenceError", variant.name, err)
+			}
+			if dual.ID != id {
+				t.Errorf("DualPresenceError.ID = %q, want %q", dual.ID, id)
+			}
+			if !errors.Is(err, issueops.ErrDualPresence) {
+				t.Errorf("refusal does not match issueops.ErrDualPresence: %v", err)
+			}
+
+			after := embeddedDualPresenceRowState(t, ctx, te, id)
+			if before != after {
+				t.Errorf("state changed across the refused embedded legacy update (%s):\nbefore: %s\nafter:  %s", variant.name, before, after)
+			}
+		})
+	}
 }
