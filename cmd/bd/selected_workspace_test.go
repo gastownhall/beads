@@ -15,8 +15,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -231,3 +233,35 @@ func TestSelectedWorkspaceDatabaseIsolation(t *testing.T) {
 // workspace selected via -C gets the same no-beads-database refusal
 // `cd <target> && bd list` gets, without the caller's database name copied
 // into the environment along the way.
+func TestSelectedWorkspaceStorelessIsolation(t *testing.T) {
+	fixture := newRedirectedCallerFixture(t)
+	targetDir := t.TempDir()
+	writeTestConfigYAML(t, filepath.Join(targetDir, ".beads"), "issue-prefix: storeless\n")
+
+	for _, cmd := range []*cobra.Command{listCmd, createCmd, updateCmd} {
+		t.Run(cmd.Name(), func(t *testing.T) {
+			var preRunErr error
+			stderr := captureStderr(t, func() {
+				preRunErr = runSelectedWorkspacePreRun(t, fixture.callerDir, cmd, selectViaChangeDir(targetDir))
+			})
+
+			if preRunErr == nil {
+				t.Fatalf("PersistentPreRunE(%s) = nil, want the no-database refusal", cmd.Name())
+			}
+			var exitErr *exitError
+			if !errors.As(preRunErr, &exitErr) {
+				t.Fatalf("PersistentPreRunE(%s) = %v, want the silent no-database exit", cmd.Name(), preRunErr)
+			}
+			if !strings.Contains(stderr, "no beads database found") {
+				t.Errorf("refusal stderr = %q, want the no-database refusal", stderr)
+			}
+			assertNoCallerDatabaseLeak(t)
+		})
+	}
+}
+
+// TestSelectedWorkspaceWhereProvenance pins AC-3: `bd where` describes the
+// selected workspace — its path, database path, and prefix — and reports
+// redirect provenance only for a selection that actually came through that
+// redirect. A foreign selection made from inside a redirected caller reports
+// no provenance; the caller's own selection keeps reporting its redirect.

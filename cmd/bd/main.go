@@ -1838,8 +1838,12 @@ var rootCmd = &cobra.Command{
 		// When .beads/redirect points to a shared directory with a different
 		// dolt_database, the source's database name would be lost. Capture it
 		// early and set BEADS_DOLT_SERVER_DATABASE so all store opens use it.
+		// The source is the selection's own (retainRedirectSourceDir), so a
+		// foreign -C / BEADS_DIR target does not inherit the caller's database
+		// (GH#5756); an explicit database target below suppresses retention
+		// entirely, as before (be-fyt).
 		if dbPath == "" {
-			preserveRedirectSourceDatabase(beads.GetRedirectInfo().LocalDir)
+			retainRedirectSourceDir()
 		}
 
 		if dbPath == "" {
