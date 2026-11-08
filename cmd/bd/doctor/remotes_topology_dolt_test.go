@@ -179,10 +179,10 @@ func gitBackedOriginWorkspace(t *testing.T, port int, remotes map[string]string)
 // TestDoctorGitBackedOriginTopology runs doctor's affected checks against a
 // real git-backed origin topology: a git origin and a SQL Dolt origin at the
 // same served repository, with real Dolt data published under refs/dolt/data
-// and sync.remote configured. The origin-only topology is the canonical one:
-// doctor must not recommend removing the origin or disabling sync, and the
-// federation checks must count zero peers for it — origin is the sync remote,
-// not a federation peer.
+// and sync.remote configured. Doctor must not recommend removing the origin
+// or disabling sync, and the federation checks must count peers
+// consistently: zero for an origin-only topology, one when a federation peer
+// is added — origin is the sync remote, never itself a peer.
 func TestDoctorGitBackedOriginTopology(t *testing.T) {
 	if testutil.DoltContainerCrashed() {
 		t.Skipf("Dolt test server crashed: %v", testutil.DoltContainerCrashError())
@@ -218,6 +218,38 @@ func TestDoctorGitBackedOriginTopology(t *testing.T) {
 		conn := CheckFederationPeerConnectivity(repo)
 		if conn.Status != StatusOK || !strings.Contains(conn.Message, "No federation peers configured") {
 			t.Errorf("peer connectivity = %s %q, want ok reporting no federation peers", conn.Status, conn.Message)
+		}
+	})
+
+	t.Run("one federation peer is counted exactly once", func(t *testing.T) {
+		repo, _ := gitBackedOriginWorkspace(t, port, map[string]string{
+			"origin": originURL,
+			"peer1":  "file://" + filepath.Join(t.TempDir(), "peer.git"),
+		})
+
+		originCheck := CheckDoltRemoteGitOrigin(repo)
+		if originCheck.Status != StatusOK {
+			t.Errorf("origin check = %s %q (%s), want ok with a peer present",
+				originCheck.Status, originCheck.Message, originCheck.Detail)
+		}
+
+		// The remotesapi listener is closed in this fixture, so the check
+		// reports the listener error — but separately from the configured
+		// peer count, which must be exactly one.
+		fed := CheckFederationRemotesAPI(repo)
+		if !strings.Contains(fed.Detail, "1 peers configured") || strings.Contains(fed.Detail, "2 peers configured") {
+			t.Errorf("federation remotesapi = %s %q (%s), want exactly 1 configured peer named in the detail",
+				fed.Status, fed.Message, fed.Detail)
+		}
+
+		// Connectivity reports the peer's reachability; whatever it is, the
+		// total must be one peer, never two.
+		conn := CheckFederationPeerConnectivity(repo)
+		if !strings.Contains(conn.Message, "1 peers") && !strings.Contains(conn.Message, "1/1 peers") {
+			t.Errorf("peer connectivity = %s %q, want a total of exactly 1 peer", conn.Status, conn.Message)
+		}
+		if strings.Contains(conn.Message, "2 peers") {
+			t.Errorf("peer connectivity = %s %q counts the origin as a peer", conn.Status, conn.Message)
 		}
 	})
 }
