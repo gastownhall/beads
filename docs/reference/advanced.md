@@ -142,6 +142,10 @@ Limitations and guidance:
 - Git worktrees don't need redirects — linked worktrees discover the
   repository's `.beads` workspace automatically. See
   [Git Worktrees](/reference/worktrees).
+- A redirect belongs to its own clone. `bd -C <dir>` or `BEADS_DIR` uses the
+  selected workspace's redirect (and its `dolt_database`), never the one in
+  your current directory: from a redirected clone, `bd -C ../other-project
+  where` names `../other-project/.beads` with no "via redirect" line.
 
 ## Extensible Database
 
