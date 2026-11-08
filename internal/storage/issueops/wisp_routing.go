@@ -22,6 +22,51 @@ func IsActiveWispInTx(ctx context.Context, tx DBTX, id string) bool {
 	return err == nil
 }
 
+// ResolveUpdatePlaneInTx reports which plane an UPDATE of id must write:
+// true for the wisps table, false for issues. It is the update paths' own
+// resolver, distinct from IsActiveWispInTx in two ways.
+//
+// First, it matches the reader's precedence. GetIssueInTx resolves an id
+// issues-first, so an update that routed wisps-first wrote the copy `bd show`
+// never reads and reported success (GH#5991). Here the wisps probe only
+// decides whether the durable plane needs checking: no wisp row — or no wisps
+// table at all, the optional one — means durable routing on the existing
+// single probe, and a wisp hit adds one primary-key probe of issues.
+//
+// Second, it refuses a twin instead of picking a side. A row in both tables is
+// corruption an update must not reconcile: the resolver returns a
+// *publicops.DualPresenceError, which every update caller propagates, so both
+// copies keep their values. Absence is answered only by a genuine no-row (or
+// the optional wisps table's absence); any other probe failure is returned
+// rather than mistaken for an empty table.
+//
+// It adds no locks, retries, schema changes or driver-specific recovery: two
+// primary-key probes inside the caller's own transaction.
+func ResolveUpdatePlaneInTx(ctx context.Context, tx DBTX, id string) (bool, error) {
+	var exists int
+	err := tx.QueryRowContext(ctx, "SELECT 1 FROM wisps WHERE id = ? LIMIT 1", id).Scan(&exists)
+	switch {
+	case err == nil:
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case isTableNotExistError(err):
+		// The wisps table is optional: a database that never demoted a row
+		// has no wisp plane to consult, and every id is durable.
+		return false, nil
+	default:
+		return false, fmt.Errorf("resolve update plane: probe wisps: %w", err)
+	}
+	err = tx.QueryRowContext(ctx, "SELECT 1 FROM issues WHERE id = ? LIMIT 1", id).Scan(&exists)
+	switch {
+	case err == nil:
+		return false, dualPresenceError(id)
+	case errors.Is(err, sql.ErrNoRows):
+		return true, nil
+	default:
+		return false, fmt.Errorf("resolve update plane: probe issues: %w", err)
+	}
+}
+
 func wispsTableEmptyOrMissingInTx(ctx context.Context, tx DBTX) (bool, error) {
 	var probe int
 	err := tx.QueryRowContext(ctx, "SELECT 1 FROM wisps LIMIT 1").Scan(&probe)

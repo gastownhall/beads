@@ -96,7 +96,15 @@ stderr, and the command exits nonzero.
 Exit codes: 1 for general failures; 13 when every failure is a stale
 --if-assignee/--if-status guard (the precondition no longer held, nothing was
 written — another actor won the race, so retrying the same guard is
-pointless).`,
+pointless).
+
+An ID that exists in both the issues and the wisps tables — a duplicate an
+older demote-then-reimport sequence could leave behind — is refused rather
+than updated, and both copies are left untouched. Repair it with
+'bd doctor --check=validate --fix' in a server-mode workspace: the repair
+deletes the issues copy and keeps the wisp copy, for every duplicate in the
+workspace (not only the named ID), and does not merge divergent field
+values.`,
 	// The non-interactive no-ID refusal lives in argument validation, which
 	// cobra runs before root's PersistentPreRunE — so a scripted `bd update
 	// $ID ...` with an empty $ID fails fast, before the pre-run hooks can

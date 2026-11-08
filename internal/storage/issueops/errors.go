@@ -36,6 +36,14 @@ func MissingDependencyTarget(issueID, dependsOnID string) error {
 	}
 }
 
+// dualPresenceError builds the public refusal for an id that names a row in
+// both the issues and the wisps table. Every update plumbing that detects the
+// collision mints the refusal here, so the message and the type are identical
+// from the guarded executor, the legacy funnel and the persistence move.
+func dualPresenceError(id string) error {
+	return &publicops.DualPresenceError{ID: id}
+}
+
 // ErrTooManyRows is returned by SearchIssuesInTx (and equivalent paths in
 // other backends) when a search would yield more rows than the caller's
 // MaxRows cap allows. Callers can match it with errors.As to surface a

@@ -524,3 +524,33 @@ func (e *DependencyHierarchyConflictError) Error() string {
 	return fmt.Sprintf("%s cannot be blocked by its descendant %s: waiting on your own subtree is a close gate, not a blocks edge — use a waits-for gate over the children (bd gate)",
 		e.IssueID, e.BlockerID)
 }
+
+// ErrDualPresence is the sentinel behind DualPresenceError: the id names a
+// row in BOTH the issues and the wisps table. Reads resolve such an id
+// issues-first, so a write that picked the wisp copy would report success
+// while leaving the row the caller reads untouched — the update paths refuse
+// the whole request instead of picking a side. It is corruption left by an
+// older demote-then-reimport sequence (GH#5991), not a state any write
+// should silently reconcile.
+var ErrDualPresence = errors.New("issue exists in both the issues and wisps tables")
+
+// DualPresenceError refuses an update whose id names a row in both the issues
+// and the wisps table. Nothing was written: the refusal happens before the
+// pre-image read, so both copies keep the values and versions they had.
+//
+// The repair is the doctor's existing cross-table duplicate fix, which the
+// message names along with exactly what it removes. It does not merge
+// divergent field values, and it acts on every duplicate in the workspace,
+// not only this id — the message says both, so an operator repairing a
+// runbook bead knows to check the durable copy's fields before deleting it.
+type DualPresenceError struct {
+	// ID is the dual-present issue id.
+	ID string
+}
+
+func (e *DualPresenceError) Error() string {
+	return fmt.Sprintf("%s exists in both the issues and wisps tables; the update was refused and both copies are untouched. Repair: run 'bd doctor --check=validate --fix' in a server-mode workspace — it deletes the issues copy and keeps the wisp copy (for every duplicate in the workspace, not only this id; divergent field values are not merged, so review the durable copy before repairing)", e.ID)
+}
+
+// Unwrap makes DualPresenceError match ErrDualPresence.
+func (e *DualPresenceError) Unwrap() error { return ErrDualPresence }

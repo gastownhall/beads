@@ -1226,6 +1226,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd update` on an ID that exists in both the `issues` and the `wisps`
+  tables — a duplicate an older demote-then-reimport sequence could leave
+  behind — now refuses the update instead of silently writing one copy. The
+  read path is issues-first but the write path was wisps-first, so the update
+  reported success while editing the copy `bd show` never reads, and no Dolt
+  commit was created. The refusal is a typed error naming the id, both
+  tables, and the existing repair: `bd doctor --check=validate --fix` in a
+  server-mode workspace, which deletes the `issues` copy and keeps the wisp
+  copy (for every duplicate in the workspace, not only the named id).
+  Updates on single-plane ids are unchanged, and both copies are left
+  untouched by the refusal.
+
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

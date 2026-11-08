@@ -157,8 +157,17 @@ func executeUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 	}
 	// The plane restriction is resolved HERE, inside the update's own
 	// transaction, so a caller that serves durable issues only cannot be handed
-	// a wisp by a resolve that ran earlier.
-	if attempt.IssuePlaneOnly && IsActiveWispInTx(ctx, tx, attempt.IssueID) {
+	// a wisp by a resolve that ran earlier. The same resolve refuses an id
+	// present in BOTH tables before the pre-image read, any authorization or
+	// any patch mutates: a twin is corruption, and picking either side — the
+	// wisp the old wisps-first probe picked, or the issue the reader prefers —
+	// would report success for a write the caller cannot see (GH#5991). The
+	// refusal stands even when the requested values would be a no-op.
+	isWisp, err := ResolveUpdatePlaneInTx(ctx, tx, attempt.IssueID)
+	if err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	if attempt.IssuePlaneOnly && isWisp {
 		return publicops.UpdateResult{}, nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, attempt.IssueID)
 	}
 	tables := ChangedTables{}

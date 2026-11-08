@@ -7231,6 +7231,14 @@ bd update
     | --if-assignee/--if-status guard (the precondition no longer held, nothing was
     | written — another actor won the race, so retrying the same guard is
     | pointless).
+    |
+    | An ID that exists in both the issues and the wisps tables — a duplicate an
+    | older demote-then-reimport sequence could leave behind — is refused rather
+    | than updated, and both copies are left untouched. Repair it with
+    | 'bd doctor --check=validate --fix' in a server-mode workspace: the repair
+    | deletes the issues copy and keeps the wisp copy, for every duplicate in the
+    | workspace (not only the named ID), and does not merge divergent field
+    | values.
   flag --acceptance type=string default="" usage="Acceptance criteria"
   flag --acceptance-criteria type=string default="" hidden usage="DEPRECATED: use --acceptance"
   flag --add-label -l type=stringSlice default="[]" usage="Add labels (repeatable); -l matches bd create -l"
