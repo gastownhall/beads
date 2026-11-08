@@ -288,6 +288,52 @@ func TestAssigneeMatches(t *testing.T) {
 			actor:   "gascity/bob",
 			wantErr: false,
 		},
+		// bd-740y4x controls: the slash/double-hyphen match must not widen
+		// into a different agent, a different rig, or the dotted-alias axis,
+		// which #5856 keeps distinct from the rig-qualified one. The typed
+		// refusal is pinned for both guards in issueops' TestCheckClosable.
+		{
+			name:        "rig-qualified owner refuses different agent in the same rig (bd-740y4x)",
+			issue:       &types.Issue{ID: "bd-test", Status: types.StatusOpen, Assignee: "gascity/bob"},
+			actor:       "gascity/alice",
+			wantErr:     true,
+			wantErrFrag: `assignee is "gascity/bob", actor is "gascity/alice"`,
+		},
+		{
+			name:        "rig-qualified owner refuses same agent name in a different rig (bd-740y4x)",
+			issue:       &types.Issue{ID: "bd-test", Status: types.StatusOpen, Assignee: "gascity/bob"},
+			actor:       "python419--bob",
+			wantErr:     true,
+			wantErrFrag: `assignee is "gascity/bob", actor is "python419--bob"`,
+		},
+		{
+			name:        "rig-qualified owner refuses double-underscore dotted-axis spelling (bd-740y4x)",
+			issue:       &types.Issue{ID: "bd-test", Status: types.StatusOpen, Assignee: "gascity/bob"},
+			actor:       "gascity__bob",
+			wantErr:     true,
+			wantErrFrag: `assignee is "gascity/bob", actor is "gascity__bob"`,
+		},
+		{
+			name:        "rig-qualified owner refuses dot dotted-axis spelling (bd-740y4x)",
+			issue:       &types.Issue{ID: "bd-test", Status: types.StatusOpen, Assignee: "gascity/bob"},
+			actor:       "gascity.bob",
+			wantErr:     true,
+			wantErrFrag: `assignee is "gascity/bob", actor is "gascity.bob"`,
+		},
+		{
+			name:        "rig-qualified owner refuses single-underscore dotted-axis spelling (bd-740y4x)",
+			issue:       &types.Issue{ID: "bd-test", Status: types.StatusOpen, Assignee: "gascity/bob"},
+			actor:       "gascity_bob",
+			wantErr:     true,
+			wantErrFrag: `assignee is "gascity/bob", actor is "gascity_bob"`,
+		},
+		{
+			name:        "rig-qualified owner refuses single-hyphen dotted-axis spelling (bd-740y4x)",
+			issue:       &types.Issue{ID: "bd-test", Status: types.StatusOpen, Assignee: "gascity/bob"},
+			actor:       "gascity-bob",
+			wantErr:     true,
+			wantErrFrag: `assignee is "gascity/bob", actor is "gascity-bob"`,
+		},
 		// The control that keeps the guard from becoming a no-op: a genuinely
 		// DIFFERENT agent must still be refused, even though its own name also
 		// contains separator characters that canonicalize.

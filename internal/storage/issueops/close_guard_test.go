@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/validation"
 	publicops "github.com/steveyegge/beads/issueops"
 )
 
@@ -56,6 +57,28 @@ func TestCheckClosable(t *testing.T) {
 	if err := CheckClosable("bd-1", &types.Issue{Assignee: "bob"}, "alice", false); !errors.As(err, &held) ||
 		held.IssueID != "bd-1" || held.Assignee != "bob" || held.Actor != "alice" {
 		t.Fatalf("held refusal = %#v", err)
+	}
+	// bd-740y4x controls, through both close guards (this one and
+	// validation.AssigneeMatches): the slash/double-hyphen owner match must
+	// not widen into a different agent, a different rig, or the dotted-alias
+	// axis, and the refusal keeps the supplied assignee and actor.
+	guards := map[string]func(issue *types.Issue, actor string) error{
+		"CheckClosable": func(issue *types.Issue, actor string) error {
+			return CheckClosable("bd-1", issue, actor, false)
+		},
+		"AssigneeMatches": func(issue *types.Issue, actor string) error {
+			return validation.AssigneeMatches(actor, false)("bd-1", issue)
+		},
+	}
+	for name, guard := range guards {
+		for _, actor := range []string{"gascity/alice", "python419--bob", "gascity__bob", "gascity.bob", "gascity_bob", "gascity-bob"} {
+			err := guard(&types.Issue{Status: types.StatusOpen, Assignee: "gascity/bob"}, actor)
+			var held *publicops.CloseNotAssigneeError
+			if !errors.Is(err, publicops.ErrNotOwner) || !errors.As(err, &held) ||
+				held.IssueID != "bd-1" || held.Assignee != "gascity/bob" || held.Actor != actor {
+				t.Errorf("%s(gascity/bob, %q) = %#v, want CloseNotAssigneeError{bd-1, gascity/bob, %q}", name, actor, err, actor)
+			}
+		}
 	}
 }
 
