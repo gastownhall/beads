@@ -74,6 +74,18 @@ func IsGitProtocolURL(url string) bool {
 		strings.HasPrefix(url, "git://")
 }
 
+// IsGitSyncRemote reports whether the named remote is the canonical
+// git-backed sync remote: the remote named origin whose URL uses a Git
+// transport, so Dolt data travels on a git ref (refs/dolt/data by default)
+// of the git origin. bd wires exactly this topology itself (bootstrap, and
+// bd dolt remote add origin), and the federation checks already treat origin
+// as the default sync remote rather than a peer. Raw http(s), file and
+// cloud URLs do not qualify on name alone: they address a Dolt remote server
+// or native storage, not the git repository.
+func IsGitSyncRemote(name, url string) bool {
+	return name == "origin" && IsGitProtocolURL(url)
+}
+
 // PersistedRemotes reads the Dolt remotes recorded in
 // <dbPath>/.dolt/repo_state.json directly, without shelling out to the dolt
 // CLI — so it works when the dolt binary is absent and its failure modes are

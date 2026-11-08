@@ -10,12 +10,18 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltremote"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 var querySQLRemotesForDoctor = querySQLRemotes
 
-// CheckDoltRemoteGitOrigin warns when any configured Dolt remote URL matches
-// the git origin — a likely misconfiguration since beads syncs via Dolt, not git.
+// CheckDoltRemoteGitOrigin classifies Dolt remotes whose URL points at the
+// git origin repository. The git-backed origin — the remote named origin
+// whose URL uses a Git transport — is the canonical sync transport bd
+// itself wires (Dolt data travels on refs/dolt/data of the git origin), so
+// it is OK, never a collision. What still warns is any other remote pointing
+// there: a non-origin alias, or an origin whose URL matches without using a
+// Git transport.
 func CheckDoltRemoteGitOrigin(repoPath string) DoctorCheck {
 	name := "Dolt Remote vs Git Origin"
 	beadsDir := ResolveBeadsDirForRepo(repoPath)
@@ -53,13 +59,30 @@ func CheckDoltRemoteGitOrigin(repoPath string) DoctorCheck {
 
 	normalizedOrigin := doltremote.CanonicalForComparison(originURL)
 	var colliding []string
+	gitSyncOrigin := false
 	for _, r := range sqlRemotes {
-		if doltremote.CanonicalForComparison(r.URL) == normalizedOrigin {
-			colliding = append(colliding, r.Name)
+		if doltremote.CanonicalForComparison(r.URL) != normalizedOrigin {
+			continue
 		}
+		if doltutil.IsGitSyncRemote(r.Name, r.URL) {
+			// The canonical git-backed sync remote: refs/dolt/data on the
+			// git origin, the topology bd itself wires.
+			gitSyncOrigin = true
+			continue
+		}
+		colliding = append(colliding, r.Name)
 	}
 
 	if len(colliding) == 0 {
+		if gitSyncOrigin {
+			return DoctorCheck{
+				Name:     name,
+				Status:   StatusOK,
+				Message:  "Dolt remote origin uses the git origin for git-backed sync",
+				Detail:   "The git-backed origin carries the Dolt data ref (refs/dolt/data) on the git origin, the canonical cross-machine sync transport.",
+				Category: CategoryDolt,
+			}
+		}
 		return DoctorCheck{
 			Name:     name,
 			Status:   StatusOK,

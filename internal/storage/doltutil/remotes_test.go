@@ -79,6 +79,41 @@ func TestIsGitProtocolURL(t *testing.T) {
 	}
 }
 
+// TestIsGitSyncRemote pins the canonical git-backed sync remote rule: origin
+// by name plus a Git-transport URL. Name alone never qualifies — origin on a
+// raw http(s), file or cloud URL addresses a Dolt remote server or native
+// storage, not the git repository — and neither does a Git-transport URL
+// under any other name, which is a federation peer.
+func TestIsGitSyncRemote(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{"origin", "git+https://github.com/org/repo.git", true},
+		{"origin", "git+ssh://git@github.com/org/repo.git", true},
+		{"origin", "git@github.com:org/repo.git", true},
+		{"origin", "git://127.0.0.1:9999/repo.git", true},
+		{"origin", "git+file:///srv/repo.git", true},
+		{"origin", "https://github.com/org/repo.git", false},
+		{"origin", "http://localhost:50051/repo", false},
+		{"origin", "file:///local/path", false},
+		{"origin", "aws://[table:bucket]/db", false},
+		{"origin", "/absolute/local/path", false},
+		{"peer1", "git+https://github.com/org/repo.git", false},
+		{"backup", "git+ssh://git@github.com/org/repo.git", false},
+		{"origin", "", false},
+	}
+	for _, tt := range tests {
+		label := tt.name + " " + tt.url
+		t.Run(label, func(t *testing.T) {
+			if got := IsGitSyncRemote(tt.name, tt.url); got != tt.want {
+				t.Errorf("IsGitSyncRemote(%q, %q) = %v, want %v", tt.name, tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRemoteURLsMatchNormalizesGitURLs(t *testing.T) {
 	tests := []struct {
 		name string
