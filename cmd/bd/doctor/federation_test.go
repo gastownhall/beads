@@ -939,6 +939,22 @@ func TestCheckFederationRemotesAPI_AllCheckNames(t *testing.T) {
 // closed.
 func probeOnlyServerWorkspace(t *testing.T, port int, remotes ...string) (repo, beadsDir string) {
 	t.Helper()
+	dbName := "doctest_fedprobe_" + strconv.FormatInt(time.Now().UnixNano(), 16)
+	urls := make(map[string]string, len(remotes))
+	for _, name := range remotes {
+		urls[name] = "file:///tmp/" + dbName + "-" + name
+	}
+	return serverWorkspaceWithRemotes(t, port, dbName, urls)
+}
+
+// serverWorkspaceWithRemotes is probeOnlyServerWorkspace with explicit
+// remote URLs: a fresh database named dbName on the Dolt test server at
+// port (dropped at cleanup), holding the named remotes at the given URLs.
+// Callers that need a remote whose URL is not a throwaway file path — the
+// git-backed origin of the GH#6150 topology — pass it here instead of the
+// synthesized one.
+func serverWorkspaceWithRemotes(t *testing.T, port int, dbName string, remoteURLs map[string]string) (repo, beadsDir string) {
+	t.Helper()
 	repo, beadsDir = doctorEndpointWorkspace(t)
 	t.Setenv("GT_ROOT", "")
 	t.Setenv("BEADS_DOLT_AUTO_START", "0")
@@ -947,7 +963,6 @@ func probeOnlyServerWorkspace(t *testing.T, port int, remotes ...string) (repo, 
 		t.Fatal(err)
 	}
 
-	dbName := "doctest_fedprobe_" + strconv.FormatInt(time.Now().UnixNano(), 16)
 	t.Cleanup(func() { dropDoctorTestDatabase(dbName, port) })
 	ctx := context.Background()
 	store, err := dolt.New(ctx, &dolt.Config{
@@ -960,8 +975,8 @@ func probeOnlyServerWorkspace(t *testing.T, port int, remotes ...string) (repo, 
 	if err != nil {
 		t.Fatalf("create %s: %v", dbName, err)
 	}
-	for _, name := range remotes {
-		if err := store.AddRemote(ctx, name, "file:///tmp/"+dbName+"-"+name); err != nil {
+	for name, url := range remoteURLs {
+		if err := store.AddRemote(ctx, name, url); err != nil {
 			_ = store.Close()
 			t.Fatalf("add remote %s: %v", name, err)
 		}
