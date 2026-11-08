@@ -165,6 +165,37 @@ func recordPushSuccess(ctx context.Context, target autoPushTarget, prePush strin
 	})
 }
 
+// pushStateRemote is the remote push-state.json describes: the default
+// remote, which is always origin. A push to any other named remote (a backup,
+// a peer) must not record success there, or it would clear origin's recorded
+// failure and suppress origin's auto-push.
+const pushStateRemote = "origin"
+
+// prePushCommit reads HEAD just before a manual push to remote ("" for the
+// default remote), for recordPushSuccess's fallback. It reads nothing for a
+// remote push-state.json does not describe, and a failed read returns "":
+// bookkeeping never blocks the push.
+func prePushCommit(ctx context.Context, remote string, target autoPushTarget) string {
+	if remote != "" && remote != pushStateRemote {
+		return ""
+	}
+	c, err := target.GetCurrentCommit(ctx)
+	if err != nil {
+		debug.Logf("push state: failed to read HEAD before push: %v\n", err)
+		return ""
+	}
+	return c
+}
+
+// recordManualPushSuccess records a successful bd dolt push / bd sync push to
+// origin. The push already succeeded, so a bookkeeping failure is reported as
+// a warning and never changes the command's outcome.
+func recordManualPushSuccess(ctx context.Context, target autoPushTarget, prePush string) {
+	if err := recordPushSuccess(ctx, target, prePush); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: push succeeded but push-state.json was not updated: %v\n", err)
+	}
+}
+
 // maybeAutoPush pushes to the Dolt remote if enabled and the debounce interval has passed.
 // Called from PersistentPostRun after auto-commit and auto-backup.
 func maybeAutoPush(ctx context.Context) {
