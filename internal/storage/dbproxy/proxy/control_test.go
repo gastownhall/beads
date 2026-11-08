@@ -371,35 +371,6 @@ func TestControl_ConcurrentIdentify(t *testing.T) {
 	}
 }
 
-func TestControl_CapsConcurrentHandshakes(t *testing.T) {
-	control, _, _ := newControlServer(t)
-	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(control.Port()))
-	conns := make([]net.Conn, 0, maxConcurrentIdentRequests)
-	t.Cleanup(func() {
-		for _, conn := range conns {
-			_ = conn.Close()
-		}
-	})
-	for range maxConcurrentIdentRequests {
-		conn, err := net.DialTimeout("tcp", addr, time.Second)
-		require.NoError(t, err)
-		conns = append(conns, conn)
-	}
-	require.Eventually(t, func() bool {
-		return len(control.slots) == maxConcurrentIdentRequests
-	}, time.Second, 10*time.Millisecond)
-
-	extra, err := net.DialTimeout("tcp", addr, time.Second)
-	require.NoError(t, err)
-	defer extra.Close()
-	require.NoError(t, extra.SetDeadline(time.Now().Add(time.Second)))
-	_, err = io.WriteString(extra, "IDENT blocked blocked\n")
-	require.NoError(t, err)
-	buf := make([]byte, 1)
-	_, err = extra.Read(buf)
-	require.Error(t, err)
-}
-
 // Persistent transient Accept failures (e.g. EMFILE) must not tear down the
 // control server: the data path may still be healthy, and losing control only
 // degrades adoption to the caller's poll/retry path.
@@ -409,7 +380,6 @@ func TestControl_AcceptLoopSurvivesPersistentErrors(t *testing.T) {
 		listener: listener,
 		done:     make(chan struct{}),
 		closing:  make(chan struct{}),
-		slots:    make(chan struct{}, maxConcurrentIdentRequests),
 	}
 	immediately := make(chan time.Time)
 	close(immediately)
@@ -474,4 +444,35 @@ func (l *failingListener) Close() error {
 
 func (l *failingListener) Addr() net.Addr {
 	return &net.TCPAddr{}
+}
+
+// bd-g4xtvt (GH#5697): the control listener is loopback TCP, reachable by any
+// local uid. A pool of idle connections that never send a request must not
+// lock a legitimate secret holder out of the identity handshake: the listener
+// evicts its oldest tracked peer instead of refusing the probe.
+func TestControl_IdleConnectionsDoNotStarveIdentify(t *testing.T) {
+	control, secret, want := newControlServer(t)
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(control.Port()))
+	conns := make([]net.Conn, 0, maxConcurrentIdentRequests)
+	t.Cleanup(func() {
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+	})
+	for range maxConcurrentIdentRequests {
+		conn, err := net.DialTimeout("tcp", addr, time.Second)
+		require.NoError(t, err)
+		conns = append(conns, conn)
+	}
+	require.Eventually(t, func() bool {
+		return control.activeIdentConns() == maxConcurrentIdentRequests
+	}, 5*time.Second, 5*time.Millisecond)
+
+	// The idle holders keep their admission deadline for identDeadline; the
+	// caller's budget is the production 500 ms probe, so it must be served
+	// without waiting them out.
+	got, err := identity.Identify("127.0.0.1", control.Port(), secret, identityProbeTimeout)
+	require.NoError(t, err, "idle unauthenticated connections exhausted the control listener")
+	got.MAC = ""
+	assert.Equal(t, &want, got)
 }

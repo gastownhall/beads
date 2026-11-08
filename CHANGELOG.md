@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Idle connections can no longer lock callers out of the dbproxy control
+  handshake (GH#5697).** The managed proxy's control listener is loopback
+  TCP, which any local user can reach, and it used to close every new IDENT
+  connection while its eight admission slots were held, so a handful of
+  silent connections held for the two-second read deadline could starve
+  proxy adoption until the caller's discovery budget ran out. The listener
+  now tracks connections in a bounded pool (256, oldest first) and, when
+  the pool is full, evicts its oldest idle member instead of refusing the
+  new probe, so discovery succeeds through a pool of parked idle
+  connections. This does not promise availability under an arbitrary
+  connection flood or provide per-user transport isolation.
+
 - **Telemetry no longer exports the raw command line.** With telemetry on
   (`BD_OTEL_ENABLED=true`), the OTel resource attached to every exported
   metric and span carried `process.command_args`, the unscrubbed `os.Args`,
