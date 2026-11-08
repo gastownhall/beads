@@ -99,12 +99,13 @@ func AppendSchedulingGraphInTx(ctx context.Context, tx DBTX, depTables []string,
 // otherwise widen the set.
 //
 // The read also sends ORDER BY id, the primary key of both dependency tables.
-// Without the filter the engine scanned each table in primary-key order. With
-// it, the engine may read through a type-leading index instead and return the
-// rows grouped by type. The rows are the same either way, but each adjacency
-// list is built in row order, and CycleThroughEdgesInGraph follows the first
-// path it finds, so the order decides which of two equally short cycle paths a
-// refusal names. Keeping primary-key order keeps those messages as they were.
+// A read without ORDER BY has no guaranteed order: the unfiltered scan was
+// observed in primary-key order, and with the filter the engine may read through
+// a type-leading index and return the rows grouped by type. The rows are the same
+// either way, but each adjacency list is built in row order, and
+// CycleThroughEdgesInGraph follows the first path it finds, so the order decides
+// which of two equally short cycle paths a refusal names. ORDER BY id makes that
+// order explicit, so type-index ordering cannot change those messages.
 const (
 	blockingGraphTypes   = "'blocks', 'conditional-blocks'"
 	schedulingGraphTypes = "'blocks', 'conditional-blocks', 'parent-child'"
