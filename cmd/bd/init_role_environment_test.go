@@ -713,8 +713,9 @@ type initCommitScopeCase struct {
 	// unborn leaves the branch without a commit; unchanged commits the
 	// artifacts before the bootstrap runs; partly leaves an unstaged edit on
 	// top of the staged foreign file; jj marks the work tree as a Jujutsu
-	// workspace.
-	unborn, unchanged, partly, jj, quiet bool
+	// workspace; jjParent puts the Jujutsu workspace above the repository,
+	// whose own .git ends the walk, so it commits as usual.
+	unborn, unchanged, partly, jj, jjParent, quiet bool
 }
 
 // prepareInitCommitScope writes the beads artifacts and a staged foreign
@@ -751,8 +752,12 @@ func prepareInitCommitScope(t *testing.T, repo string, tc initCommitScopeCase) {
 	if tc.partly {
 		write("work.txt", "staged work\nunstaged edit\n")
 	}
-	if tc.jj {
-		if err := os.MkdirAll(filepath.Join(repo, ".jj", "repo"), 0750); err != nil {
+	if tc.jj || tc.jjParent {
+		root := repo
+		if tc.jjParent {
+			root = filepath.Dir(repo)
+		}
+		if err := os.MkdirAll(filepath.Join(root, ".jj", "repo"), 0750); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -823,6 +828,9 @@ func TestInitArtifactCommitScope(t *testing.T) {
 		{name: "foreign_staged"},
 		{name: "partly_staged", partly: true},
 		{name: "unchanged", unchanged: true},
+		{name: "jj", jj: true},
+		{name: "jj_quiet", jj: true, quiet: true},
+		{name: "git_nested_in_jj", jjParent: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			target, _, _ := newInitRoleFixture(t)
