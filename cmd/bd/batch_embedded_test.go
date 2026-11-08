@@ -146,6 +146,44 @@ dep add tba-2 tba-3 depends-on
 	}
 }
 
+// TestBatch_DepAddUnknownTypeRollsBack pins bd-3073gm (GH#5560): a `dep add`
+// line naming a type outside `bd dep add`'s vocabulary (a typo, or a custom
+// type) is refused with the accepted types, and the earlier lines of the
+// batch are rolled back with it.
+func TestBatch_DepAddUnknownTypeRollsBack(t *testing.T) {
+	for _, bad := range []string{"blcoks", "owned-by"} {
+		t.Run(bad, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			st := newTestStoreWithPrefix(t, filepath.Join(tmpDir, ".beads", "beads.db"), "tbu")
+			ctx := context.Background()
+
+			seedBatchTestIssues(t, ctx, st, "tbu-1", "tbu-2")
+
+			err := runBatchScriptInTx(t, ctx, st, "update tbu-1 priority=0\ndep add tbu-1 tbu-2 "+bad+"\n")
+			if err == nil {
+				t.Fatalf("batch with dep add type %q succeeded, want a refusal", bad)
+			}
+			if !strings.Contains(err.Error(), `"`+bad+`"`) || !strings.Contains(err.Error(), "valid types:") {
+				t.Errorf("refusal = %v, want it to name %q and the accepted types", err, bad)
+			}
+			got, gerr := st.GetIssue(ctx, "tbu-1")
+			if gerr != nil {
+				t.Fatalf("GetIssue tbu-1: %v", gerr)
+			}
+			if got.Priority != 2 {
+				t.Errorf("tbu-1 priority = %d, want 2: the refused batch must roll back", got.Priority)
+			}
+			recs, rerr := st.GetDependencyRecords(ctx, "tbu-1")
+			if rerr != nil {
+				t.Fatalf("GetDependencyRecords tbu-1: %v", rerr)
+			}
+			for _, r := range recs {
+				t.Errorf("refused batch left %s -> %s (%s)", r.IssueID, r.DependsOnID, r.Type)
+			}
+		})
+	}
+}
+
 // TestBatch_RollbackOnError verifies that if any op in the batch fails the
 // entire transaction is rolled back and earlier writes are not visible.
 //
