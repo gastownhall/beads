@@ -849,3 +849,36 @@ func recordingRelay(t *testing.T, controlPort int) (int, func() string) {
 		return sent.String()
 	}
 }
+
+// Below capacity the revised listener must keep serving valid clients the
+// existing signed reply and closing invalid ones without reply bytes, with
+// the request secret still absent from the wire (pinned client-side by
+// TestIdentifyRequestCarriesFreshNonce in the identity package).
+func TestControl_BelowCapacityServesValidAndRefusesInvalidClients(t *testing.T) {
+	control, secret, want := newControlServer(t)
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(control.Port()))
+	const parked = 64 // below maxConcurrentIdentRequests, above the old pool of 8
+	conns := make([]net.Conn, 0, parked)
+	t.Cleanup(func() {
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+	})
+	for range parked {
+		conn, err := net.DialTimeout("tcp", addr, time.Second)
+		require.NoError(t, err)
+		conns = append(conns, conn)
+	}
+	require.Eventually(t, func() bool {
+		return activeControlConns(control) == parked
+	}, 5*time.Second, 5*time.Millisecond)
+
+	got, err := identity.Identify("127.0.0.1", control.Port(), secret, time.Second)
+	require.NoError(t, err, "a valid client must be served below capacity")
+	assert.Len(t, got.MAC, 64)
+	got.MAC = ""
+	assert.Equal(t, &want, got)
+
+	_, err = identity.Identify("127.0.0.1", control.Port(), "not-the-secret", time.Second)
+	require.ErrorIs(t, err, identity.ErrIdentRefused, "an unauthenticated client must get no reply bytes")
+}
