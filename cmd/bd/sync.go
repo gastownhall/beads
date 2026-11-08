@@ -811,6 +811,11 @@ func runSyncCommand(cmd *cobra.Command, _ []string) error {
 	// local-only mirror look broken.
 	noPush := config.GetBool("no-push")
 
+	// prePushCommit feeds the push-state recording below: the commit read
+	// just before the push op ran. A read error does not block the push
+	// (GH#6289); the post-push re-read usually supplies the real value.
+	var prePushCommit string
+
 	ops := syncOps{
 		pull: func(ctx context.Context) ([]string, error) {
 			var err error
@@ -840,6 +845,9 @@ func runSyncCommand(cmd *cobra.Command, _ []string) error {
 			if noPush {
 				return nil
 			}
+			if c, err := st.GetCurrentCommit(ctx); err == nil {
+				prePushCommit = c
+			}
 			if remote != "" {
 				return st.PushRemote(ctx, remote, false)
 			}
@@ -858,6 +866,15 @@ func runSyncCommand(cmd *cobra.Command, _ []string) error {
 	if noPush && out.Status == syncStatusOK {
 		out.Pushed = false
 		out.PushSkipped = true
+	}
+	// A sync that pushed to origin (the default remote, or one named
+	// origin) records the success the same way `bd dolt push` does, so the
+	// two verbs leave the same trail in push-state.json and the post-run
+	// auto-push does not repeat the push (GH#6289). Any other remote, a
+	// failed push, or the no-push skip leaves the recorded state alone: a
+	// named backup remote's success must not clear origin's failure.
+	if err == nil && out.Status == syncStatusOK && out.Pushed && (remote == "" || remote == "origin") {
+		recordPushSuccess(rootCtx, st, prePushCommit)
 	}
 	if err != nil {
 		// A rig with no remote at all is the benign solo case the dolt verbs
