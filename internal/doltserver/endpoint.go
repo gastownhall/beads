@@ -263,6 +263,70 @@ func CheckEndpointTrust(beadsDir string, fileCfg *configfile.Config, host string
 	return endpointtrust.Check(beadsDir, "dolt-server", endpoint, fromPrivate)
 }
 
+// CheckExternalReadTrust is CheckEndpointTrust for the endpoint another
+// workspace's proxied-server sidecar names, which a read from outside that
+// workspace dials with BEADS_PROXIED_SERVER_EXTERNAL_PASSWORD
+// (dolt.NewExternalReadOnly, gastownhall/beads#5861). beadsDir is that
+// workspace, and only its pins count. The sidecar chose the endpoint, so
+// CheckEndpointTrust's private sources say nothing about it: a
+// BEADS_DOLT_SERVER_HOST or user-level dolt.host names this process's own
+// server, whatever host it names, and a metadata.json without
+// dolt_server_host does not make the sidecar's host private. The syntax
+// check and the socket and loopback rules are CheckEndpointTrust's; any
+// other endpoint must already be pinned for beadsDir, and the read never
+// pins one, so a pin is the operator's explicit confirmation of that
+// endpoint. The refusal names the sidecar and the pin to set, not
+// BEADS_DOLT_SERVER_HOST or dolt.host, which would move this process's own
+// connection.
+func CheckExternalReadTrust(beadsDir, host string, port int, socket string) error {
+	if err := validateCredentialDialTarget(host, socket); err != nil {
+		return err
+	}
+	if socket != "" {
+		// A sidecar names a socket or a host and port, never both.
+		return endpointtrust.Check(beadsDir, "dolt-server", "unix:"+socket, false)
+	}
+	endpoint := "mysql://" + net.JoinHostPort(configfile.UnbracketHost(host), strconv.Itoa(port))
+	return externalReadTrustError(beadsDir, endpointtrust.Check(beadsDir, "dolt-server", endpoint, false))
+}
+
+// externalReadTrustError restates CheckExternalReadTrust's pin refusal for
+// the endpoint beadsDir's sidecar names: it names that file and the pin that
+// would admit the endpoint, and keeps the endpointtrust error it replaces in
+// the chain. Any other error is returned as it is.
+func externalReadTrustError(beadsDir string, err error) error {
+	var firstUse *endpointtrust.FirstUseError
+	var mismatch *endpointtrust.MismatchError
+	var got, found string
+	switch {
+	case errors.As(err, &firstUse):
+		got, found = firstUse.Got, "which is not pinned for that workspace"
+	case errors.As(err, &mismatch):
+		got, found = mismatch.Got, "but that workspace's Dolt server is pinned to "+mismatch.Pinned
+	default:
+		return err
+	}
+	sidecar := remedy.PrintedValue(configfile.ProxiedServerClientInfoPath(beadsDir))
+	pinFile, pinKey := endpointtrust.PinLocation(beadsDir)
+	if pinFile == "" {
+		pinFile = "trusted-endpoints.json"
+	}
+	return &externalReadTrustRefusal{err: err, msg: fmt.Sprintf(
+		"%s names the external Dolt server %s, %s. Your %s was not sent. "+
+			"If that server is intended, pin it: set workspaces[%q][\"dolt-server\"] to %q in %s. Otherwise correct %s.",
+		sidecar, got, found, configfile.ExternalDoltPasswordEnvVar, pinKey, got, remedy.PrintedValue(pinFile), sidecar)}
+}
+
+// externalReadTrustRefusal is externalReadTrustError's refusal: its own text,
+// with the endpointtrust error it restates kept for errors.As.
+type externalReadTrustRefusal struct {
+	msg string
+	err error
+}
+
+func (e *externalReadTrustRefusal) Error() string { return e.msg }
+func (e *externalReadTrustRefusal) Unwrap() error { return e.err }
+
 // validateCredentialDialTarget refuses a Dolt host or socket that the trust
 // check and the MySQL driver would read as two different servers. The trust
 // check classifies the host by re-parsing a synthesized mysql://host:port URL,

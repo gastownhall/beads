@@ -546,6 +546,24 @@ type Config struct {
 	// ApplyGatewayCredential, never by hand.
 	Gateway bool
 
+	// ExternalRead marks the strict non-mutating open of another workspace's
+	// external Dolt endpoint that only NewExternalReadOnly builds, from that
+	// workspace's proxied-server sidecar (gastownhall/beads#5861). Its
+	// endpoint, user and password are already resolved, an empty password
+	// or socket included: applyConfigDefaults reads none of the ambient
+	// host, port, socket or password sources for it, a socket-only endpoint
+	// has no port for the socket-first TCP fallback to take (a sidecar names
+	// a socket or a host and port, never both: ExternalDoltConfig.Validate),
+	// and the store owns no local storage (no data directory, port file or
+	// managed server), whatever host it dials.
+	ExternalRead bool
+
+	// ServerTLSConfigName names a go-sql-driver TLS configuration registered
+	// with mysql.RegisterTLSConfig, which the connection uses in place of
+	// ServerTLS's default one. NewExternalReadOnly sets it from the sidecar's
+	// TLS settings (configfile.ExternalDoltConfig.TLSClientConfig).
+	ServerTLSConfigName string
+
 	// AutoStart enables transparent server auto-start when connection fails.
 	// When true and the host is localhost, bd will start a dolt sql-server
 	// automatically if one isn't running. Disabled under orchestrator (GT_ROOT set).
@@ -881,6 +899,9 @@ func circuitWriteManaged(ctx context.Context) bool {
 // terminal success. Nested retry helpers keep failure accounting but defer
 // their success reset to this boundary.
 func (s *DoltStore) withCircuitWrite(ctx context.Context, op func(context.Context) error) error {
+	if err := s.refuseExternalReadWrite(); err != nil {
+		return err
+	}
 	if circuitWriteManaged(ctx) {
 		return op(ctx)
 	}
@@ -1124,6 +1145,25 @@ func endSpan(span trace.Span, err error) {
 // when started with --no-auto-commit). Without this, writes remain in an
 // ErrStoreClosed is returned when an operation is attempted on a closed store.
 var ErrStoreClosed = errors.New("store is closed")
+
+// ErrExternalReadOnlyWrite is the refusal of a write on a store
+// NewExternalReadOnly opened (Config.ExternalRead): a routed foreign read
+// must never mutate the target workspace's database. The store's write
+// entry points return it before any SQL: every write withCircuitWrite
+// admits (the issue, label, dependency and comment writes and the Commit
+// family among them), every write transaction commitWriteTxOn begins,
+// RunInTransaction and ApplySchemaMigrations. A method that writes past all
+// of them is not covered; the store's callers only read.
+var ErrExternalReadOnlyWrite = errors.New("write refused: external-read store is a read-only connection to another workspace")
+
+// refuseExternalReadWrite is ErrExternalReadOnlyWrite on a store
+// NewExternalReadOnly opened, else nil.
+func (s *DoltStore) refuseExternalReadWrite() error {
+	if s.cfg != nil && s.cfg.ExternalRead {
+		return ErrExternalReadOnlyWrite
+	}
+	return nil
+}
 
 // withReadTx runs fn inside a transaction while holding the store's read-lock.
 // Used for read operations that need a *sql.Tx to share issueops functions.
@@ -1380,6 +1420,12 @@ func (s *DoltStore) commitWriteTx(ctx context.Context, fn func(tx *sql.Tx) error
 func (s *DoltStore) commitWriteTxOn(ctx context.Context, beginner txBeginner, fn func(tx *sql.Tx) error) (issueops.BlockedRecheck, error) {
 	if s.closed.Load() {
 		return issueops.BlockedRecheck{}, ErrStoreClosed
+	}
+	// The external-read open already pins ReadOnly and never migrates,
+	// creates or starts anything; this backstops a write transaction that
+	// reaches it past withCircuitWrite.
+	if err := s.refuseExternalReadWrite(); err != nil {
+		return issueops.BlockedRecheck{}, err
 	}
 	tx, err := beginner.BeginTx(ctx, nil)
 	if err != nil {
@@ -1801,7 +1847,35 @@ func applyConfigDefaults(cfg *Config) {
 		cfg.Remote = "origin"
 	}
 
-	// Server connection defaults (applied in server mode; embedded mode bypasses TCP)
+	if cfg.ExternalRead {
+		// NewExternalReadOnly resolved the endpoint and credential from the
+		// target's sidecar; none of the launcher's sources may fill a field
+		// it left empty. A socket-only endpoint dials no port, so the test
+		// guard has nothing to rewrite there.
+		if cfg.ServerSocket == "" {
+			applyTestModePortGuard(cfg)
+		}
+	} else {
+		applyServerConnectionDefaults(cfg)
+	}
+
+	// Remote credentials for Hosted Dolt push/pull (env vars take precedence)
+	if cfg.RemoteUser == "" {
+		cfg.RemoteUser = os.Getenv("DOLT_REMOTE_USER")
+	}
+	if cfg.RemotePassword == "" {
+		cfg.RemotePassword = os.Getenv("DOLT_REMOTE_PASSWORD")
+	}
+	// Pool knobs last: every DoltStore open (the CLI's store and library
+	// callers of New/NewFromConfig*) reaches New, so the knob ladders hold
+	// here regardless of how cfg was built.
+	applyPoolKnobs(cfg)
+}
+
+// applyServerConnectionDefaults fills the server endpoint and credential
+// fields a caller left empty from the environment and the workspace's port
+// chain (applied in server mode; embedded mode bypasses TCP).
+func applyServerConnectionDefaults(cfg *Config) {
 	if cfg.ServerSocket == "" {
 		cfg.ServerSocket = os.Getenv("BEADS_DOLT_SERVER_SOCKET")
 	}
@@ -1822,18 +1896,6 @@ func applyConfigDefaults(cfg *Config) {
 	if cfg.ServerPassword == "" {
 		cfg.ServerPassword = os.Getenv("BEADS_DOLT_PASSWORD")
 	}
-
-	// Remote credentials for Hosted Dolt push/pull (env vars take precedence)
-	if cfg.RemoteUser == "" {
-		cfg.RemoteUser = os.Getenv("DOLT_REMOTE_USER")
-	}
-	if cfg.RemotePassword == "" {
-		cfg.RemotePassword = os.Getenv("DOLT_REMOTE_PASSWORD")
-	}
-	// Pool knobs last: every DoltStore open (the CLI's store and library
-	// callers of New/NewFromConfig*) reaches New, so the knob ladders hold
-	// here regardless of how cfg was built.
-	applyPoolKnobs(cfg)
 }
 
 // ResolveServerPort applies the store's port rule to cfg, as New does before
@@ -1978,9 +2040,17 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// never pinned, so a committed endpoint cannot harvest BEADS_DOLT_PASSWORD
 	// (GH#7886). The credentials-file password is already keyed to [host:port],
 	// so a swapped host finds no entry and sends nothing; this adds the check for
-	// BEADS_DOLT_PASSWORD, which is sent to whatever host is configured.
+	// BEADS_DOLT_PASSWORD, which is sent to whatever host is configured. An
+	// external read's endpoint is another workspace's sidecar's, which none of
+	// this process's own settings vouch for: it has its own rule.
 	if cfg.ServerPassword != "" {
-		if err := doltserver.CheckEndpointTrust(cfg.BeadsDir, nil, cfg.ServerHost, cfg.ServerPort, cfg.ServerSocket); err != nil {
+		var err error
+		if cfg.ExternalRead {
+			err = doltserver.CheckExternalReadTrust(cfg.BeadsDir, cfg.ServerHost, cfg.ServerPort, cfg.ServerSocket)
+		} else {
+			err = doltserver.CheckEndpointTrust(cfg.BeadsDir, nil, cfg.ServerHost, cfg.ServerPort, cfg.ServerSocket)
+		}
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -1997,7 +2067,7 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 // own server, shared or not, listens on 127.0.0.1 only.
 func resolveLocalActiveDatabaseDir(cfg *Config) string {
 	if cfg == nil || cfg.BeadsDir == "" || cfg.Database == "" ||
-		cfg.Gateway || cfg.ProxiedServer || cfg.ServerSocket != "" ||
+		cfg.Gateway || cfg.ProxiedServer || cfg.ExternalRead || cfg.ServerSocket != "" ||
 		cfg.ServerTLS || !configfile.BdRunsServerAt(cfg.ServerHost) {
 		return ""
 	}
@@ -2722,9 +2792,15 @@ func unresolvedServerPortError(cfg *Config, beadsDir, serverDir string) error {
 // this machine whose port is named by a setting that declares its server
 // externally managed (doltserver.ExternalPortSetting), or "" for any other
 // endpoint, which keeps its own advice. addr is the endpoint that was dialed.
+// An external read's endpoint is named by beadsDir's sidecar, which declares
+// its server externally managed whatever its port: "bd dolt start" would
+// start a server of bd's own for the launching workspace, never that one.
 func externallyManagedPortHint(cfg *Config, beadsDir, addr string) string {
 	if cfg.ServerSocket != "" || isExternalServerHost(cfg.ServerHost) {
 		return ""
+	}
+	if cfg.ExternalRead {
+		return doltserver.ExternallyManagedAdvice(remedy.PrintedValue(configfile.ProxiedServerClientInfoPath(beadsDir)), addr)
 	}
 	decl := doltserver.ExternalPortSetting(beadsDir, cfg.ServerPortSource, cfg.ServerPort)
 	if decl.NamesEndpoint && cfg.OpenedByInit && cfg.ServerPortSource == doltserver.PortSourceCallerExplicit {
@@ -2933,6 +3009,8 @@ func buildServerDSN(cfg *Config, database string) string {
 		Password: cfg.ServerPassword,
 		Database: database,
 		TLS:      cfg.ServerTLS,
+		// A registered TLS configuration outranks TLS's default one.
+		TLSConfigName: cfg.ServerTLSConfigName,
 	}
 	// Parse the base DSN and add pool-specific timeouts.
 	parsed, err := mysql.ParseDSN(base.String())
@@ -3596,7 +3674,7 @@ func initSchemaOnDBWithRetryAndGateBootstrapHeal(
 func sharedServerDatabase(cfg *Config) bool {
 	// No workspace to prove ownership from — a bare dolt.New pointed at some
 	// endpoint. Fail closed.
-	if cfg == nil || cfg.BeadsDir == "" {
+	if cfg == nil || cfg.BeadsDir == "" || cfg.ExternalRead {
 		return true
 	}
 	// Somebody else's server by construction: a host bd does not run its
@@ -3717,6 +3795,9 @@ func (s *DoltStore) initSchema(ctx context.Context, bootstrapHeal *schema.FreshB
 // per-database advisory lock, with retry for transient lock contention.
 // Implements storage.SchemaMigrator.
 func (s *DoltStore) ApplySchemaMigrations(ctx context.Context) (int, error) {
+	if err := s.refuseExternalReadWrite(); err != nil {
+		return 0, err
+	}
 	migDB, err := s.openMigrationDB()
 	if err != nil {
 		return 0, err
@@ -4757,7 +4838,7 @@ func (s *DoltStore) cliDirServesServer() bool {
 	if cfg == nil {
 		cfg = &Config{}
 	}
-	if cfg.Gateway || cfg.ServerTLS || cfg.ServerSocket != "" || !configfile.BdRunsServerAt(cfg.ServerHost) {
+	if cfg.Gateway || cfg.ExternalRead || cfg.ServerTLS || cfg.ServerSocket != "" || !configfile.BdRunsServerAt(cfg.ServerHost) {
 		return false
 	}
 	if !servesDatabaseDirOnPort(s.CLIDir(), cfg.ServerPort) {
@@ -4792,7 +4873,7 @@ func (s *DoltStore) ManagedServerDir() (string, bool) {
 	if cfg == nil || s.beadsDir == "" {
 		return "", false
 	}
-	if cfg.Gateway || cfg.ServerTLS || cfg.ServerSocket != "" || !configfile.BdRunsServerAt(cfg.ServerHost) {
+	if cfg.Gateway || cfg.ExternalRead || cfg.ServerTLS || cfg.ServerSocket != "" || !configfile.BdRunsServerAt(cfg.ServerHost) {
 		return "", false
 	}
 	serverDir := doltserver.ResolveServerDir(s.beadsDir)

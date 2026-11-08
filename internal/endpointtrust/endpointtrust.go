@@ -166,6 +166,15 @@ func WorkspaceKey() string {
 	return key
 }
 
+// PinLocation names where Check keeps workspaceKey's pins, for a refusal
+// whose remedy is to pin an endpoint by hand: the pin store's path and the
+// workspace's key in it. Each is "" when it cannot be resolved.
+func PinLocation(workspaceKey string) (file, key string) {
+	file, _ = pinsPath()
+	key, _ = cleanWorkspaceKey(workspaceKey)
+	return file, key
+}
+
 // PrivateMatch reports whether value matches a private environment variable
 // (excluding .beads/.env) or user-level global configuration.
 func PrivateMatch(key, envVar, value string) bool {

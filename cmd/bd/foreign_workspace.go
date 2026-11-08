@@ -226,6 +226,11 @@ func openForeignStore(ctx context.Context, beadsDir string, access foreignAccess
 	}
 	switch access {
 	case foreignRead:
+		// A proxied-server workspace with an external server is read there
+		// directly; both factories refuse every proxied-server workspace.
+		if store, handled, err := openForeignProxiedExternalRead(ctx, beadsDir); handled {
+			return store, err
+		}
 		return newReadOnlyStoreFromConfig(ctx, beadsDir)
 	case foreignPreview:
 		return newPreviewStoreFromConfig(ctx, beadsDir)

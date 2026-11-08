@@ -1,0 +1,585 @@
+package dolt
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/endpointtrust"
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
+)
+
+// Tests for NewExternalReadOnly (#5861 item 2): the strictly non-mutating
+// connection a routed foreign read opens into a proxied-server target's
+// external SQL server. The posture contract under test — see
+// Config.ExternalRead — is that the connection is built only from the
+// sidecar's endpoint and the caller's explicit values: no ambient launcher
+// environment, no creation, no auto-start, no mutation.
+
+// externalReadOnlyFixture seeds one proxied-server target workspace whose
+// external server is the test container, then hands back everything a test
+// needs to open it externally.
+type externalReadOnlyFixture struct {
+	beadsDir  string
+	database  string
+	projectID string
+	external  configfile.ExternalDoltConfig
+	issueID   string
+}
+
+func newExternalReadOnlyFixture(t *testing.T) *externalReadOnlyFixture {
+	t.Helper()
+	ctx := context.Background()
+	f := &externalReadOnlyFixture{
+		beadsDir:  filepath.Join(t.TempDir(), ".beads"),
+		database:  uniqueTestDBName(t),
+		projectID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		external:  configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: testServerPort},
+	}
+	if err := os.MkdirAll(f.beadsDir, 0o755); err != nil {
+		t.Fatalf("create target .beads: %v", err)
+	}
+	meta := configfile.Config{
+		ProjectID:    f.projectID,
+		DoltMode:     configfile.DoltModeProxiedServer,
+		DoltDatabase: f.database,
+	}
+	if err := meta.Save(f.beadsDir); err != nil {
+		t.Fatalf("save target metadata.json: %v", err)
+	}
+	// An ordinary writable open of the same database — the target rig's own
+	// bd would have done this — creates it, seeds the workspace identity the
+	// external open must verify, and leaves one issue to read back.
+	seed, err := openStoreWithOwnBudget(t, &Config{
+		Path:            filepath.Join(f.beadsDir, "dolt"),
+		BeadsDir:        f.beadsDir,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testServerPort,
+		Database:        f.database,
+		CommitterName:   "test",
+		CommitterEmail:  "test@test.com",
+		MaxOpenConns:    1,
+		CreateIfMissing: true,
+	})
+	if err != nil {
+		t.Fatalf("seed target database: %v", err)
+	}
+	if err := seed.SetMetadata(ctx, "_project_id", f.projectID); err != nil {
+		seed.Close()
+		t.Fatalf("seed _project_id: %v", err)
+	}
+	if err := setConfigWithOwnBudget(t, seed, "issue_prefix", "gt"); err != nil {
+		seed.Close()
+		t.Fatalf("seed issue_prefix: %v", err)
+	}
+	issue := &types.Issue{
+		Title:     "external read target",
+		IssueType: types.TypeTask,
+		Priority:  2,
+		Status:    types.StatusOpen,
+	}
+	if err := seed.CreateIssue(ctx, issue, "tester"); err != nil {
+		seed.Close()
+		t.Fatalf("seed issue: %v", err)
+	}
+	f.issueID = issue.ID
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+	return f
+}
+
+// externalReadOnly is NewExternalReadOnly with ExternalReadConfig's fields
+// as arguments.
+func externalReadOnly(ctx context.Context, beadsDir, database string, external configfile.ExternalDoltConfig, password string) (*DoltStore, error) {
+	return NewExternalReadOnly(ctx, ExternalReadConfig{BeadsDir: beadsDir, Database: database, External: external, Password: password})
+}
+
+// openExternal is the fixture's NewExternalReadOnly plus the read-back that
+// proves the open produced a usable connection, not just a nil error.
+func (f *externalReadOnlyFixture) openExternal(t *testing.T, database, password string, external configfile.ExternalDoltConfig, beadsDir ...string) *DoltStore {
+	t.Helper()
+	dir := f.beadsDir
+	if len(beadsDir) > 0 {
+		dir = beadsDir[0]
+	}
+	store, err := externalReadOnly(context.Background(), dir, database, external, password)
+	if err != nil {
+		t.Fatalf("NewExternalReadOnly: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	issue, err := store.GetIssue(context.Background(), f.issueID)
+	if err != nil {
+		t.Fatalf("read seeded issue through the external store: %v", err)
+	}
+	if issue == nil || issue.ID != f.issueID {
+		t.Fatalf("read back the wrong issue: %+v", issue)
+	}
+	return store
+}
+
+func TestExternalReadOnlyConnection(t *testing.T) {
+	skipIfNoServer(t)
+	f := newExternalReadOnlyFixture(t)
+
+	t.Run("reads the target's database over the sidecar's endpoint", func(t *testing.T) {
+		f.openExternal(t, f.database, "", f.external)
+	})
+
+	t.Run("hostile launcher environment does not reach the connection", func(t *testing.T) {
+		// The launcher's environment names a different endpoint, a different
+		// database, and a password. None of it may reach the external read:
+		// the connection fields come from the sidecar and the caller only,
+		// and an explicitly empty password stays empty rather than falling
+		// back to BEADS_DOLT_PASSWORD.
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "192.0.2.1")
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+		t.Setenv("BEADS_DOLT_SERVER_SOCKET", "/nonexistent/beads.sock")
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "evil_db")
+		t.Setenv("BEADS_DOLT_PASSWORD", "hunter2") // #nolint:gosec // test fixture, never a real credential
+		f.openExternal(t, f.database, "", f.external)
+	})
+
+	t.Run("connects as the sidecar's scoped user", func(t *testing.T) {
+		// A user granted only this database — the topology the sidecar
+		// describes — reads it through the external open.
+		db := rawTestConn(t, testServerPort)
+		defer db.Close()
+		for _, stmt := range []string{
+			fmt.Sprintf("CREATE USER '%s'@'%%'", f.database),
+			fmt.Sprintf("GRANT ALL ON `%s`.* TO '%s'@'%%'", f.database, f.database),
+		} {
+			if _, err := db.Exec(stmt); err != nil {
+				t.Fatalf("%s: %v", stmt, err)
+			}
+		}
+		scoped := f.external
+		scoped.User = f.database
+		f.openExternal(t, f.database, "", scoped)
+	})
+
+	t.Run("missing database fails without creating it", func(t *testing.T) {
+		missing := uniqueTestDBName(t)
+		assertDatabaseNotExists(t, testServerPort, missing)
+		_, err := externalReadOnly(context.Background(), f.beadsDir, missing, f.external, "")
+		if err == nil {
+			t.Fatal("expected database-not-found error, got nil")
+		}
+		if !containsAny(err.Error(), "not found", "does not exist", "unknown database") {
+			t.Fatalf("error should indicate database not found, got: %v", err)
+		}
+		assertDatabaseNotExists(t, testServerPort, missing)
+	})
+
+	t.Run("workspace identity mismatch is refused", func(t *testing.T) {
+		foreignDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(foreignDir, 0o755); err != nil {
+			t.Fatalf("create foreign .beads: %v", err)
+		}
+		foreignMeta := configfile.Config{
+			ProjectID:    "ffffffff-1111-2222-3333-444444444444",
+			DoltMode:     configfile.DoltModeProxiedServer,
+			DoltDatabase: f.database,
+		}
+		if err := foreignMeta.Save(foreignDir); err != nil {
+			t.Fatalf("save foreign metadata.json: %v", err)
+		}
+		_, err := externalReadOnly(context.Background(), foreignDir, f.database, f.external, "")
+		if err == nil {
+			t.Fatal("expected identity mismatch error, got nil")
+		}
+		if !strings.Contains(err.Error(), "PROJECT IDENTITY MISMATCH") {
+			t.Fatalf("expected PROJECT IDENTITY MISMATCH, got: %v", err)
+		}
+	})
+
+	t.Run("socket-only endpoint stays socket-only", func(t *testing.T) {
+		sock := configfile.ExternalDoltConfig{Socket: filepath.Join(t.TempDir(), "missing.sock")}
+		_, err := externalReadOnly(context.Background(), f.beadsDir, f.database, sock, "")
+		if err == nil {
+			t.Fatal("expected dial error for a socket nothing listens on, got nil")
+		}
+		if !strings.Contains(err.Error(), sock.Socket) {
+			t.Fatalf("error should name the socket %s, got: %v", sock.Socket, err)
+		}
+		if strings.Contains(err.Error(), "tcp") {
+			t.Fatalf("a socket-only endpoint must not fall back to TCP, got: %v", err)
+		}
+	})
+
+	t.Run("writes are refused", func(t *testing.T) {
+		ctx := context.Background()
+		store := f.openExternal(t, f.database, "", f.external)
+		count := func(table string) int {
+			t.Helper()
+			var n int
+			if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&n); err != nil {
+				t.Fatalf("count %s: %v", table, err)
+			}
+			return n
+		}
+		commitsBefore := count("dolt_log")
+		newIssue := func() *types.Issue {
+			return &types.Issue{Title: "must not land", IssueType: types.TypeTask, Priority: 2, Status: types.StatusOpen}
+		}
+		callbackRan := false
+		for _, w := range []struct {
+			name  string
+			write func() error
+		}{
+			{"CreateIssue", func() error { return store.CreateIssue(ctx, newIssue(), "tester") }},
+			{"RunInTransaction", func() error {
+				return store.RunInTransaction(ctx, "must not land", func(tx storage.Transaction) error {
+					callbackRan = true
+					return tx.CreateIssue(ctx, newIssue(), "tester")
+				})
+			}},
+			{"Commit", func() error { return store.Commit(ctx, "must not land") }},
+		} {
+			if err := w.write(); !errors.Is(err, ErrExternalReadOnlyWrite) {
+				t.Errorf("%s through the external store must fail with ErrExternalReadOnlyWrite, got: %v", w.name, err)
+			}
+		}
+		if callbackRan {
+			t.Error("RunInTransaction ran its callback on the external store")
+		}
+		// Nothing landed: the issues table still holds exactly the seed, and
+		// the target's history has no new commit.
+		if n := count("issues"); n != 1 {
+			t.Errorf("refused writes must leave exactly the seeded issue, found %d", n)
+		}
+		if n := count("dolt_log"); n != commitsBefore {
+			t.Errorf("refused writes minted Dolt commits: %d -> %d", commitsBefore, n)
+		}
+	})
+}
+
+// TestExternalReadOnlyValidation covers the refusals that happen before any
+// dial: they need no server.
+func TestExternalReadOnlyValidation(t *testing.T) {
+	valid := configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: 1}
+	for _, tc := range []struct {
+		name             string
+		beadsDir, db     string
+		external         configfile.ExternalDoltConfig
+		wantErrSubstring string
+	}{
+		{"no workspace", "", "db", valid, "workspace"},
+		{"no database", "/w/.beads", "", valid, "database"},
+		{"invalid external endpoint", "/w/.beads", "db", configfile.ExternalDoltConfig{Host: "h"}, "Host requires Port"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := externalReadOnly(context.Background(), tc.beadsDir, tc.db, tc.external, "")
+			if err == nil {
+				t.Fatalf("expected refusal, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantErrSubstring) {
+				t.Fatalf("error should contain %q, got: %v", tc.wantErrSubstring, err)
+			}
+		})
+	}
+}
+
+// TestExternalReadOnlyDSNTLSConfigName pins the DSN spelling of the TLS
+// handoff: a sidecar-grade named TLS config replaces the anonymous tls=true,
+// and an unnamed one keeps it.
+func TestExternalReadOnlyDSNTLSConfigName(t *testing.T) {
+	base := func() *Config {
+		return &Config{ServerHost: "sql.example", ServerPort: 13306, ServerUser: "root", ServerTLS: true}
+	}
+	named := base()
+	named.ServerTLSConfigName = "beads-external-test"
+	if got := buildServerDSN(named, "db"); !strings.Contains(got, "tls=beads-external-test") {
+		t.Fatalf("named TLS config must reach the DSN, got: %s", got)
+	}
+	if got := buildServerDSN(base(), "db"); !strings.Contains(got, "tls=true") {
+		t.Fatalf("unnamed TLS keeps tls=true, got: %s", got)
+	}
+}
+
+// TestExternalReadOnlyNoMutation pins the strictly non-mutating half of the
+// external-read posture (#5861 item 2, AC-4): a successful external read of a
+// proxied target changes nothing — not one file in the target workspace (no
+// proxy root, no auto-start port file, no local data directory), no dolt
+// commit, no schema migration row — and an open whose database is missing
+// creates neither the database nor any local state.
+func TestExternalReadOnlyNoMutation(t *testing.T) {
+	skipIfNoServer(t)
+	f := newExternalReadOnlyFixture(t)
+	ctx := context.Background()
+
+	// snapshot records every file under the fixture's workspace root.
+	snapshot := func() map[string]int64 {
+		t.Helper()
+		files := map[string]int64{}
+		err := filepath.WalkDir(filepath.Dir(f.beadsDir), func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			rel, err := filepath.Rel(filepath.Dir(f.beadsDir), path)
+			if err != nil {
+				return err
+			}
+			files[rel] = info.Size()
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("snapshot workspace files: %v", err)
+		}
+		return files
+	}
+	// serverState reads the row counts an unnoticed write or migration would
+	// move: dolt commits and applied schema migrations.
+	serverState := func() (commits, migrations int) {
+		t.Helper()
+		db := rawTestConn(t, testServerPort)
+		defer db.Close()
+		var mig int
+		if err := db.QueryRow("SELECT COUNT(*) FROM `" + f.database + "`.schema_migrations").Scan(&mig); err != nil {
+			t.Fatalf("count schema_migrations: %v", err)
+		}
+		var com int
+		if err := db.QueryRow("SELECT COUNT(*) FROM `" + f.database + "`.dolt_log").Scan(&com); err != nil {
+			t.Fatalf("count dolt_log: %v", err)
+		}
+		return com, mig
+	}
+
+	filesBefore := snapshot()
+	commitsBefore, migrationsBefore := serverState()
+
+	store, err := externalReadOnly(ctx, f.beadsDir, f.database, f.external, "")
+	if err != nil {
+		t.Fatalf("NewExternalReadOnly: %v", err)
+	}
+	if _, err := store.GetIssue(ctx, f.issueID); err != nil {
+		t.Fatalf("read seeded issue: %v", err)
+	}
+	if _, err := store.GetMetadata(ctx, "_project_id"); err != nil {
+		t.Fatalf("read workspace identity: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close external store: %v", err)
+	}
+
+	if filesAfter := snapshot(); !reflect.DeepEqual(filesBefore, filesAfter) {
+		t.Errorf("external read changed the target workspace:\nbefore: %v\nafter:  %v", filesBefore, filesAfter)
+	}
+	if _, err := os.Stat(filepath.Join(f.beadsDir, "dolt")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("external read must not create a local data directory at %s: %v", filepath.Join(f.beadsDir, "dolt"), err)
+	}
+	commitsAfter, migrationsAfter := serverState()
+	if commitsAfter != commitsBefore {
+		t.Errorf("external read minted dolt commits: %d -> %d", commitsBefore, commitsAfter)
+	}
+	if migrationsAfter != migrationsBefore {
+		t.Errorf("external read applied schema migrations: %d -> %d", migrationsBefore, migrationsAfter)
+	}
+
+	// A read whose database is missing fails without creating anything on
+	// either side: not the database, not local state in a fresh workspace.
+	missing := uniqueTestDBName(t)
+	freshDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(freshDir, 0o755); err != nil {
+		t.Fatalf("create fresh .beads: %v", err)
+	}
+	assertDatabaseNotExists(t, testServerPort, missing)
+	if _, err := externalReadOnly(ctx, freshDir, missing, f.external, ""); err == nil {
+		t.Fatal("expected database-not-found error, got nil")
+	}
+	assertDatabaseNotExists(t, testServerPort, missing)
+	entries, err := os.ReadDir(freshDir)
+	if err != nil {
+		t.Fatalf("read fresh .beads: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("a failed external read must leave the workspace empty, found %v", entries)
+	}
+}
+
+// boundedExternalCtx bounds a test's external open, so a TEST-NET dial that
+// unexpectedly hangs fails fast instead of waiting out the test timeout.
+func boundedExternalCtx(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+// TestExternalReadOnlyTrustFailClosed pins AC-6's credential rule: the
+// external password is never sent to an untrusted destination. The endpoint
+// comes from the target's sidecar, so only the target workspace's own pins
+// admit a non-loopback one (doltserver.CheckExternalReadTrust, run inside
+// New): an unpinned endpoint is refused with endpointtrust.FirstUseError and
+// a changed one with MismatchError, before any dial, whatever the launcher's
+// own host settings or the target's metadata.json name, and the refused read
+// pins nothing. Loopback is bd's own trusted origin and proceeds to the
+// connection. Pins are isolated per test through XDG_CONFIG_HOME.
+func TestExternalReadOnlyTrustFailClosed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	// newTarget lays out a proxied-server target workspace whose
+	// metadata.json names metadataHost as dolt_server_host ("" for none, as a
+	// workspace whose only endpoint is its sidecar's has).
+	newTarget := func(t *testing.T, metadataHost string) string {
+		t.Helper()
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatalf("create target .beads: %v", err)
+		}
+		meta := configfile.Config{
+			ProjectID:      "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+			DoltMode:       configfile.DoltModeProxiedServer,
+			DoltDatabase:   "gtdb",
+			DoltServerHost: metadataHost,
+		}
+		if err := meta.Save(beadsDir); err != nil {
+			t.Fatalf("save target metadata.json: %v", err)
+		}
+		return beadsDir
+	}
+	// pinnedTo reports whether beadsDir's Dolt server pin is endpoint. The
+	// probe never pins: endpointtrust.Check writes only for a trusted source.
+	pinnedTo := func(beadsDir, endpoint string) bool {
+		return endpointtrust.Check(beadsDir, "dolt-server", endpoint, false) == nil
+	}
+	// pin records endpoint as beadsDir's Dolt server, as a private
+	// confirmation of it does.
+	pin := func(t *testing.T, beadsDir, endpoint string) {
+		t.Helper()
+		if err := endpointtrust.Check(beadsDir, "dolt-server", endpoint, true); err != nil {
+			t.Fatalf("pin %s for %s: %v", endpoint, beadsDir, err)
+		}
+	}
+	// assertRefused checks that err is the pin refusal want points to, worded
+	// for the sidecar: it names that file, the pin to set and the password it
+	// withheld, never the launcher's own endpoint settings, whose remedy
+	// would move the launcher's connection.
+	assertRefused := func(t *testing.T, err error, want any) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("expected a trust refusal, got nil")
+		}
+		if !errors.As(err, want) {
+			t.Fatalf("want %T before any dial, got: %v", want, err)
+		}
+		msg := err.Error()
+		for _, part := range []string{configfile.ProxiedServerClientInfoFileName, `["dolt-server"]`, configfile.ExternalDoltPasswordEnvVar + " was not sent"} {
+			if !strings.Contains(msg, part) {
+				t.Errorf("refusal should name %q, got: %s", part, msg)
+			}
+		}
+		for _, part := range []string{"BEADS_DOLT_SERVER_HOST", "config.yaml"} {
+			if strings.Contains(msg, part) {
+				t.Errorf("refusal must not point at the launcher's %s, got: %s", part, msg)
+			}
+		}
+	}
+	const endpoint = "mysql://192.0.2.10:3306"
+	external := configfile.ExternalDoltConfig{Host: "192.0.2.10", Port: 3306}
+
+	t.Run("non-loopback endpoint with a password is refused before dialing", func(t *testing.T) {
+		beadsDir := newTarget(t, "192.0.2.9")
+		_, err := externalReadOnly(boundedExternalCtx(t), beadsDir, "gtdb",
+			configfile.ExternalDoltConfig{Host: "203.0.2.10", Port: 3306}, "secret") // #nolint:gosec // test fixture, never a real credential
+		var firstUse *endpointtrust.FirstUseError
+		assertRefused(t, err, &firstUse)
+	})
+
+	t.Run("the launcher's own host setting does not vouch for the sidecar's endpoint", func(t *testing.T) {
+		// BEADS_DOLT_SERVER_HOST names the launcher's own server. Naming
+		// another host, or even the sidecar's, it confirms nothing the target
+		// pins, and the refused read pins nothing either.
+		for _, launcherHost := range []string{"launcher.example", "192.0.2.10"} {
+			t.Run(launcherHost, func(t *testing.T) {
+				t.Setenv("BEADS_DOLT_SERVER_HOST", launcherHost)
+				t.Setenv("BEADS_DOLT_SERVER_PORT", "3306")
+				beadsDir := newTarget(t, "192.0.2.9")
+				_, err := externalReadOnly(boundedExternalCtx(t), beadsDir, "gtdb", external, "secret") // #nolint:gosec // test fixture, never a real credential
+				var firstUse *endpointtrust.FirstUseError
+				assertRefused(t, err, &firstUse)
+				if pinnedTo(beadsDir, endpoint) {
+					t.Errorf("the refused read pinned %s for the target", endpoint)
+				}
+			})
+		}
+	})
+
+	t.Run("metadata without dolt_server_host does not make the sidecar's host private", func(t *testing.T) {
+		beadsDir := newTarget(t, "")
+		_, err := externalReadOnly(boundedExternalCtx(t), beadsDir, "gtdb", external, "secret") // #nolint:gosec // test fixture, never a real credential
+		var firstUse *endpointtrust.FirstUseError
+		assertRefused(t, err, &firstUse)
+		if pinnedTo(beadsDir, endpoint) {
+			t.Errorf("the refused read pinned %s for the target", endpoint)
+		}
+	})
+
+	t.Run("an endpoint pinned for the target proceeds to the connection", func(t *testing.T) {
+		beadsDir := newTarget(t, "")
+		pin(t, beadsDir, endpoint)
+		_, err := externalReadOnly(boundedExternalCtx(t), beadsDir, "gtdb", external, "secret") // #nolint:gosec // test fixture, never a real credential
+		if err == nil {
+			t.Fatal("expected a dial error for an address nothing answers on, got nil")
+		}
+		var firstUse *endpointtrust.FirstUseError
+		var mismatch *endpointtrust.MismatchError
+		if errors.As(err, &firstUse) || errors.As(err, &mismatch) {
+			t.Fatalf("the target pins %s, so the read must pass the trust check, got: %v", endpoint, err)
+		}
+	})
+
+	t.Run("a pin for another endpoint is neither bypassed nor replaced", func(t *testing.T) {
+		const pinned = "mysql://192.0.2.20:3306"
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "launcher.example")
+		beadsDir := newTarget(t, "")
+		pin(t, beadsDir, pinned)
+		_, err := externalReadOnly(boundedExternalCtx(t), beadsDir, "gtdb", external, "secret") // #nolint:gosec // test fixture, never a real credential
+		var mismatch *endpointtrust.MismatchError
+		assertRefused(t, err, &mismatch)
+		if !pinnedTo(beadsDir, pinned) {
+			t.Errorf("the refused read replaced the target's pin %s", pinned)
+		}
+	})
+
+	t.Run("loopback endpoint with a password proceeds to the connection", func(t *testing.T) {
+		beadsDir := newTarget(t, "192.0.2.9")
+		_, err := externalReadOnly(context.Background(), beadsDir, "gtdb",
+			configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: 1}, "secret") // #nolint:gosec // test fixture, never a real credential
+		if err == nil {
+			t.Fatal("expected a dial error for a port nothing listens on, got nil")
+		}
+		var firstUse *endpointtrust.FirstUseError
+		if errors.As(err, &firstUse) {
+			t.Fatalf("loopback is bd's own trusted origin, got FirstUseError: %v", err)
+		}
+	})
+
+	t.Run("no password sends no credential anywhere", func(t *testing.T) {
+		beadsDir := newTarget(t, "192.0.2.9")
+		_, err := externalReadOnly(boundedExternalCtx(t), beadsDir, "gtdb",
+			configfile.ExternalDoltConfig{Host: "203.0.2.10", Port: 3306}, "")
+		if err == nil {
+			t.Fatal("expected a dial error, got nil")
+		}
+		var firstUse *endpointtrust.FirstUseError
+		if errors.As(err, &firstUse) {
+			t.Fatalf("an empty password must not trip the credential trust check, got: %v", err)
+		}
+	})
+}

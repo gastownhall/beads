@@ -178,8 +178,10 @@ func proxiedLookupTitle(ctx context.Context, uw uow.UnitOfWork, id string) strin
 // No route for the target leaves the server's not-found as the answer; a
 // route that fails is returned as itself, so the warning names it rather
 // than calling the target missing. A route into a rig in proxied-server mode
-// leaves no miss (depTargetLookupMiss): that is not a failed lookup but none
-// at all, because bd will not open such a rig as a direct store (#5861). The
+// is read on the external server its sidecar names; one whose server bd
+// manages leaves no miss (depTargetLookupMiss): that is not a failed lookup
+// but none at all, because bd will not open such a rig as a direct store
+// (#5861). The
 // refusal says nothing about the target, and in an all-proxied town it would
 // call every valid cross-rig edge a typo.
 //

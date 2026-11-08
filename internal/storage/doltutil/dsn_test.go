@@ -152,6 +152,26 @@ func TestServerDSN_TLSEnabledWhenRequested(t *testing.T) {
 	}
 }
 
+// TestServerDSN_TLSConfigNameOutranksTLS pins that a registered TLS
+// configuration (an external server's CA, client certificate and server name)
+// reaches the DSN instead of the driver's default verification.
+func TestServerDSN_TLSConfigNameOutranksTLS(t *testing.T) {
+	dsn := ServerDSN{
+		Host:          "hosted.doltdb.com",
+		Port:          3307,
+		User:          "myuser",
+		TLS:           true,
+		TLSConfigName: "beads-external-read-0123",
+	}.String()
+
+	if !strings.Contains(dsn, "tls=beads-external-read-0123") {
+		t.Errorf("DSN should name the registered TLS config; got %q", dsn)
+	}
+	if strings.Contains(dsn, "tls=true") || strings.Contains(dsn, "tls=false") {
+		t.Errorf("DSN should carry only the registered TLS config; got %q", dsn)
+	}
+}
+
 // TestServerDSNIPv6Host pins the address the driver dials for an IPv6 server
 // host: the bracketed host:port, whether the host is configured bare ("::1")
 // or bracketed ("[::1]"), and with surrounding whitespace, which
