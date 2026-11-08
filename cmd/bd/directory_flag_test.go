@@ -647,3 +647,71 @@ func TestSelectedWorkspaceSelectionEdges(t *testing.T) {
 		}
 	})
 }
+
+// TestSelectedWorkspaceRemoteStartup pins GH#5756 for remote workspaces
+// without local database files selected with -C from a redirected caller: a
+// proxied-server workspace keeps doctor's capability refusal, a registered
+// backend keeps its identity, and a host-inferred server keeps its host, none
+// of them with the caller's redirect-source database exported.
+func TestSelectedWorkspaceRemoteStartup(t *testing.T) {
+	newTargetForTest := func(t *testing.T) (targetDir, targetBeadsDir string) {
+		t.Helper()
+		targetDir = filepath.Join(t.TempDir(), "target")
+		return targetDir, mkdirForTest(t, filepath.Join(targetDir, ".beads"))
+	}
+	assertNoCallerDatabase := func(t *testing.T) {
+		t.Helper()
+		if got := os.Getenv("BEADS_DOLT_SERVER_DATABASE"); got != "" {
+			t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want unset: the caller's redirect-source database must not follow -C", got)
+		}
+	}
+
+	t.Run("proxied-server target keeps doctor's refusal", func(t *testing.T) {
+		selectedWorkspaceEnvForTest(t)
+		callerDir, _ := newRedirectedCallerForTest(t)
+		targetDir, targetBeadsDir := newTargetForTest(t)
+		writeMetadataConfig(t, targetBeadsDir, configfile.DoltModeProxiedServer, "proxied_db")
+		t.Chdir(callerDir)
+		changeDir = targetDir
+
+		var err error
+		stderr := captureStderr(t, func() { err = rootCmd.PersistentPreRunE(doctorCmd, nil) })
+		var exitErr *exitError
+		if !errors.As(err, &exitErr) || !strings.Contains(stderr, "doctor is not supported in proxied-server mode") {
+			t.Fatalf("PersistentPreRunE(doctor) = %v, stderr %q; want the proxied-server refusal", err, stderr)
+		}
+		assertNoCallerDatabase(t)
+	})
+
+	t.Run("registered http backend target keeps its identity", func(t *testing.T) {
+		selectedWorkspaceEnvForTest(t)
+		callerDir, _ := newRedirectedCallerForTest(t)
+		targetDir, targetBeadsDir := newTargetForTest(t)
+		if err := (&configfile.Config{Backend: "http"}).Save(targetBeadsDir); err != nil {
+			t.Fatalf("save metadata.json: %v", err)
+		}
+		t.Chdir(callerDir)
+		changeDir = targetDir
+
+		info := runContextInfoForTest(t)
+		if !sameDirPath(info.BeadsDir, targetBeadsDir) || info.Backend != "http" {
+			t.Fatalf("context = %q (backend %q), want %q (http)", info.BeadsDir, info.Backend, targetBeadsDir)
+		}
+		assertNoCallerDatabase(t)
+	})
+
+	t.Run("host-inferred server target keeps its host", func(t *testing.T) {
+		selectedWorkspaceEnvForTest(t)
+		callerDir, _ := newRedirectedCallerForTest(t)
+		targetDir, targetBeadsDir := newTargetForTest(t)
+		writeTestConfigYAML(t, targetBeadsDir, "dolt:\n  host: 10.9.9.9\n")
+		t.Chdir(callerDir)
+		changeDir = targetDir
+
+		info := runContextInfoForTest(t)
+		if !sameDirPath(info.BeadsDir, targetBeadsDir) || info.ServerHost != "10.9.9.9" {
+			t.Fatalf("context = %q (server_host %q), want %q (10.9.9.9)", info.BeadsDir, info.ServerHost, targetBeadsDir)
+		}
+		assertNoCallerDatabase(t)
+	})
+}
