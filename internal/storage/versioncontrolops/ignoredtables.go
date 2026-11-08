@@ -55,7 +55,7 @@ const (
 	stompedTablesTerminator = "Please commit your changes before you merge."
 )
 
-// parseStompedTableNames extracts the table names from the engine's
+// ParseStompedTableNames extracts the table names from the engine's
 // stomped-tables diagnostic, wherever the error is wrapped. ok is false for
 // every error it cannot parse exactly.
 //
@@ -65,7 +65,7 @@ const (
 // The segment is split ONLY on those separators: a token carrying internal
 // whitespace is not a table name, and one ambiguous token declines the whole
 // diagnostic rather than yielding a wrong diagnosis.
-func parseStompedTableNames(err error) ([]string, bool) {
+func ParseStompedTableNames(err error) ([]string, bool) {
 	if err == nil {
 		return nil, false
 	}
@@ -162,19 +162,45 @@ func mergeRefContainedInHead(ctx context.Context, db DBConn, ref string) (bool, 
 	return mergeBase.String == refHash.String, nil
 }
 
-// mergeNotOpen reads dolt_merge_status.is_merging and requires an explicit,
+// MergeNotOpen reads dolt_merge_status.is_merging and requires an explicit,
 // successful observation that no merge is open. The refused merge this guards
 // never opened (the engine stomps before it opens anything), so anything other
 // than a clean false — a failed read, a missing system table, a missing row —
 // means the session state is unknown and the refusal must not be reinterpreted.
 // (mergeInProgress's missing-table/missing-row fallbacks answer "not merging"
 // here; this is deliberately stricter.)
-func mergeNotOpen(ctx context.Context, db DBConn) (bool, error) {
+func MergeNotOpen(ctx context.Context, db DBConn) (bool, error) {
 	var merging bool
 	if err := db.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&merging); err != nil {
 		return false, fmt.Errorf("query merge status: %w", err)
 	}
 	return !merging, nil
+}
+
+// ClassifyIgnoredTablesRefusal is the classification half of the GH#6368
+// triage, for pull wrappers that do not run the merge themselves (the shared
+// server's post-transport handler): mergeErr is parsed for the engine's
+// stomped-tables diagnostic and, when it parses, every named table must be
+// positively confirmed as an ignored working table on db's session
+// (dolt_status_ignored). confirmed is true only for that case, with the typed
+// error carrying the (deduped, sorted) names and the original error; every
+// other outcome — an unparseable diagnostic, a name the session does not
+// confirm, evidence that fails to read — leaves the caller holding the
+// original error.
+//
+// confirmed does NOT mean the pull is a no-op: the engine stomps the named
+// tables before it ever compares histories, so containment must be proven
+// separately before the refusal may be treated as one.
+func ClassifyIgnoredTablesRefusal(ctx context.Context, db DBConn, mergeErr error) (typed *IgnoredTablesMergeError, confirmed bool) {
+	tables, ok := ParseStompedTableNames(mergeErr)
+	if !ok {
+		return nil, false
+	}
+	confirmedIgnored, err := confirmIgnoredWorkingTables(ctx, db, tables)
+	if err != nil || !confirmedIgnored {
+		return nil, false
+	}
+	return &IgnoredTablesMergeError{Tables: tables, Err: mergeErr}, true
 }
 
 // resolveStompedIgnoredTables decides what the normal pull wrappers do with a
@@ -195,18 +221,14 @@ func mergeNotOpen(ctx context.Context, db DBConn) (bool, error) {
 // db must be the same session the merge ran on: the ignore evidence and the
 // hash reads are session state.
 func resolveStompedIgnoredTables(ctx context.Context, db DBConn, ref string, mergeErr error) (outcome error, handled bool) {
-	tables, ok := parseStompedTableNames(mergeErr)
-	if !ok {
-		return mergeErr, false
-	}
-	confirmed, err := confirmIgnoredWorkingTables(ctx, db, tables)
-	if err != nil || !confirmed {
+	classified, confirmed := ClassifyIgnoredTablesRefusal(ctx, db, mergeErr)
+	if !confirmed {
 		return mergeErr, false
 	}
 	contained, cerr := mergeRefContainedInHead(ctx, db, ref)
-	notOpen, merr := mergeNotOpen(ctx, db)
+	notOpen, merr := MergeNotOpen(ctx, db)
 	if cerr == nil && merr == nil && contained && notOpen {
 		return nil, true
 	}
-	return &IgnoredTablesMergeError{Tables: tables, Err: mergeErr}, true
+	return classified, true
 }

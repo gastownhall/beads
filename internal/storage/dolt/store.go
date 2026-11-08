@@ -5566,7 +5566,17 @@ func (s *DoltStore) pullFromRemoteUnchecked(ctx context.Context, remote string) 
 	}
 
 	if err := s.pullTransport(ctx, remote); err != nil {
-		return err
+		// GH#6368: the engine checks for stomped working tables before it
+		// checks whether the fetched ref is already contained in this branch,
+		// so a pull from a remote that is a strict ancestor — a content no-op —
+		// dies with the stomped-tables refusal on both routes (CALL DOLT_PULL's
+		// wrapped engine error, the CLI route's cliTransferError carrying the
+		// subprocess output). Classify the refusal and, when it protected only
+		// engine-confirmed ignored working tables and the containment proof
+		// holds, report the no-op the pull always was; the post-transport
+		// checks below (verifyPullLanded, the recompute) then run as for any
+		// successful pull.
+		return s.resolveStompedIgnoredTablesPull(ctx, remote, err)
 	}
 
 	// ga-ivaps: a route that returns nil having merged nothing is silent
@@ -5582,6 +5592,89 @@ func (s *DoltStore) pullFromRemoteUnchecked(ctx context.Context, remote string) 
 		if err := s.recomputeBlockedAfterPull(ctx, preHead); err != nil {
 			return fmt.Errorf("pull succeeded but is_blocked recompute failed: %w", err)
 		}
+	}
+	return nil
+}
+
+// resolveStompedIgnoredTablesPull decides what pullFromRemoteUnchecked does
+// with a transport error the engine refused with the stomped-tables diagnostic
+// (GH#6368): the server-mode twin of versioncontrolops'
+// resolveStompedIgnoredTables, for pulls whose merge ran inside CALL DOLT_PULL
+// or in the dolt subprocess rather than in MergeAndSettle.
+//
+// The outcomes, mirroring the embedded wrapper:
+//
+//   - not the stomped-tables diagnostic, a name this database does not confirm
+//     as an ignored working table, or any classification evidence that fails
+//     to read: the original error, unchanged. The refusal keeps whatever
+//     framing its route gave it, and bd sync reports it as before.
+//   - confirmed ignored tables with the PROVEN no-op — the tracking ref
+//     refreshed over this database's own connection (credential-aware, like
+//     the pull's own network calls), its hash read from dolt_remote_branches,
+//     the merge base of s.branch and the tracking ref equal to that hash, and
+//     an explicit observation that no merge is open: nil. The refusal guarded
+//     a content no-op, so the pull reports no-op success and the caller's
+//     successful-pull maintenance (verifyPullLanded, the is_blocked
+//     recompute) runs as for any pull.
+//   - confirmed ignored tables without that proof — divergence, an unfetchable
+//     remote, an unreadable ref, unknown session state: the typed
+//     IgnoredTablesMergeError, so bd sync can report the operator-only outcome
+//     instead of a generic exit 1.
+//
+// The evidence reads run on one long-timeout connection pinned to the branch
+// this store reads (pinStoreBranch, then active_branch() must name s.branch):
+// dolt_status_ignored and the merge status are session state, and a fresh
+// connection defaults to the database's default branch.
+func (s *DoltStore) resolveStompedIgnoredTablesPull(ctx context.Context, remote string, pullErr error) error {
+	if _, ok := versioncontrolops.ParseStompedTableNames(pullErr); !ok {
+		return pullErr
+	}
+	db, err := s.openLongTimeoutConn()
+	if err != nil {
+		return pullErr
+	}
+	defer db.Close()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return pullErr
+	}
+	defer conn.Close()
+	if err := s.pinStoreBranch(ctx, conn); err != nil {
+		return pullErr
+	}
+	var active string
+	if err := conn.QueryRowContext(ctx, "SELECT active_branch()").Scan(&active); err != nil || active != s.branch {
+		return pullErr
+	}
+	classified, confirmed := versioncontrolops.ClassifyIgnoredTablesRefusal(ctx, conn, pullErr)
+	if !confirmed {
+		return pullErr
+	}
+	// The no-op proof. The refresh is required to succeed, not best-effort as
+	// in verifyPullLanded: here it is evidence — a tracking ref this database
+	// cannot even fetch is not one whose containment can be proven — and the
+	// route that failed (a CLI subprocess or a CALL) says nothing about what
+	// this database can see.
+	if err := s.refreshTrackingRef(ctx, remote); err != nil {
+		return classified
+	}
+	trackingRef := "remotes/" + remote + "/" + s.branch
+	var remoteHash string
+	if err := conn.QueryRowContext(ctx,
+		"SELECT hash FROM dolt_remote_branches WHERE name = ?", trackingRef).Scan(&remoteHash); err != nil || remoteHash == "" {
+		return classified
+	}
+	var mergeBase sql.NullString
+	if err := conn.QueryRowContext(ctx,
+		"SELECT DOLT_MERGE_BASE(?, ?)", s.branch, trackingRef).Scan(&mergeBase); err != nil {
+		return classified
+	}
+	notOpen, err := versioncontrolops.MergeNotOpen(ctx, conn)
+	if err != nil {
+		return classified
+	}
+	if !mergeBase.Valid || mergeBase.String != remoteHash || !notOpen {
+		return classified
 	}
 	return nil
 }
