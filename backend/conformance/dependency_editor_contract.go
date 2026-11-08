@@ -747,7 +747,7 @@ func RunDependencyEditorRetypeRefusalLeavesTheOriginalEdge(t *testing.T, ctx con
 // any refused edge refuses the whole request and writes nothing — on BOTH
 // refusal paths: the per-edge cycle probe, which fires with an earlier edge of
 // the same request already written, and the whole-graph gate that runs when
-// SkipPerEdgeCycleCheck turned the probe off (dependencyeditor.go:66-70).
+// SkipPerEdgeCycleCheck turned the probe off (dependencyeditor.go:69-78).
 //
 // The skip-probe half uses three edges whose cycle only exists once all three
 // of the request's own edges are in place. With the probes on, the probe of
@@ -978,7 +978,7 @@ func RunDependencyEditorRefusesBlockingEdgeAcrossItsOwnHierarchy(t *testing.T, c
 }
 
 // RunDependencyEditorRefusesSelfDependencyWithTheProbeSkipped pins
-// dependencyeditor.go:66-70: SkipPerEdgeCycleCheck never drops the
+// dependencyeditor.go:69-78: SkipPerEdgeCycleCheck never drops the
 // self-dependency refusal. An edge that points an issue at itself is refused
 // with ErrSelfDependency with or without the flag, and for every type — a
 // non-scheduling self-edge is never seen by a cycle probe at all, so the flag
@@ -1427,7 +1427,7 @@ func RunDependencyEditorRemovesOnlyTheNamedEdge(t *testing.T, ctx context.Contex
 }
 
 // RunDependencyEditorSkipPerEdgeCycleCheckDropsOnlyTheProbe pins the rest of
-// dependencyeditor.go:66-71. Two existing cases show what the flag does NOT
+// dependencyeditor.go:69-78. Two existing cases show what the flag does NOT
 // drop — the whole-graph gate and the self-dependency refusal — but both are
 // refusals, and so is every other skip=true request in this file. Nothing yet
 // shows the flag doing the thing it exists for: a caller wiring a large acyclic

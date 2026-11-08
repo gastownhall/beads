@@ -344,6 +344,71 @@ func TestGetDependencyTreeInTxDepthCutoffBeatsStub(t *testing.T) {
 	}
 }
 
+// TestGetDependencyTreeInTxRecordsALastLevelNodeAsExpanded pins that a node
+// on the last level maxDepth allows still counts as expanded, although the
+// walk returns it without reading its edges. root depends on a then b, and a
+// depends on b, with maxDepth 3: b is first reached through a at depth 2, the
+// last level, and the root's own edge into b must then be a Deduped stub at
+// depth 1 that reuses the issue already read. If the early return came before
+// b was recorded, the walk would expand b a second time at depth 1, sending
+// reads this mock does not script.
+func TestGetDependencyTreeInTxRecordsALastLevelNodeAsExpanded(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	expectIssue(mock, "root", "Root")
+	expectDependencies(mock, "root", []dependencyRow{
+		{id: "a", depType: string(types.DepBlocks)},
+		{id: "b", depType: string(types.DepBlocks)},
+	})
+	expectIssueBatch(mock, []string{"a", "b"})
+	expectIssue(mock, "a", "A")
+	expectDependencies(mock, "a", []dependencyRow{{id: "b", depType: string(types.DepBlocks)}})
+	expectIssueBatchOne(mock, "b")
+	expectIssue(mock, "b", "B")
+	// No expectation for b's edges (b is on the last level) or for the stub.
+
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	tree, err := GetDependencyTreeInTx(context.Background(), tx, "root", 3, false, false)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("GetDependencyTreeInTx: %v", err)
+	}
+	mock.ExpectRollback()
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+
+	if got := treeIDs(tree); strings.Join(got, ",") != "root,a,b,b" {
+		t.Fatalf("tree = %v, want [root a b b]", got)
+	}
+	for i, node := range tree {
+		if node.Deduped != (i == 3) {
+			t.Fatalf("row %d (%s) Deduped = %v, want only the last row to be a stub", i, node.ID, node.Deduped)
+		}
+	}
+	if full := tree[2]; full.Depth != 2 || full.ParentID != "a" {
+		t.Fatalf("expanded b = depth %d parent %q, want 2/a", full.Depth, full.ParentID)
+	}
+	stub := tree[3]
+	if stub.Depth != 1 || stub.ParentID != "root" || stub.EdgeFromParent != types.DepBlocks {
+		t.Fatalf("stub of b = depth %d parent %q edge %q, want 1/root/blocks", stub.Depth, stub.ParentID, stub.EdgeFromParent)
+	}
+	if stub.Title != "B" {
+		t.Fatalf("stub title = %q, want the expanded issue's %q", stub.Title, "B")
+	}
+}
+
 // TestGetDependencyTreeInTxReadsNothingPastTheDepthLimit walks from root, in
 // each direction, with a depth limit of one level and of two. A node on the
 // last level the limit allows is read and returned, but its edges lead only to
