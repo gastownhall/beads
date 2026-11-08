@@ -132,3 +132,19 @@ func TestSyncIgnoredTableStuck(t *testing.T) {
 		}
 	})
 }
+
+// TestSyncHelpNamesIgnoredTableRefusalAsExit4 pins that the documented exit
+// codes a sync timer branches on name the ignored-table refusal under exit 4,
+// not only under the generic error.
+func TestSyncHelpNamesIgnoredTableRefusalAsExit4(t *testing.T) {
+	_, exit4, ok := strings.Cut(syncCmd.Long, "\n  4  ")
+	if !ok {
+		t.Fatalf("sync help has no exit-4 entry:\n%s", syncCmd.Long)
+	}
+	exit4, _, _ = strings.Cut(exit4, "\n\n")
+	for _, want := range []string{"ignores", "remote still tracks", "docs/recovery/sync-failures.md"} {
+		if !strings.Contains(exit4, want) {
+			t.Errorf("exit-4 entry does not mention %q:\n%s", want, exit4)
+		}
+	}
+}
