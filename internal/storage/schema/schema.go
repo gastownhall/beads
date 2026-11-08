@@ -1099,7 +1099,11 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	// ignored migrations may alter them in place. Committable tables the
 	// ignored series touches (0002 deletes child_counters rows) still refuse.
 	touchedIgnoredDirtyTables, err := ignoredSource.pendingMigrationDirtyTables(ctx, db, dirtyBefore)
-	if err != nil {
+	// A failed ignored read must not mask a main-series refusal: that typed
+	// error is what the reconcile opens recover from, and the open after the
+	// recovery reads the ignored series again. So the read error returns only
+	// when the main series has nothing to refuse.
+	if err != nil && len(touchedDirtyTables) == 0 {
 		return 0, fmt.Errorf("checking dirty tables against pending ignored migrations: %w", err)
 	}
 	if len(touchedDirtyTables) > 0 || len(touchedIgnoredDirtyTables) > 0 {

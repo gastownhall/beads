@@ -1242,17 +1242,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd_storage_operation_duration_ms` and `bd_storage_errors_total` gain
   `db_operation`.
 
-- Opening a database whose `wisps` or `wisp_comments` table is tracked in Dolt
-  history and holds uncommitted wisps no longer fails with "pending ignored
-  schema migrations alter pre-existing dirty tables" when a wisp schema
-  migration is pending (#5816). Those tables are dolt-ignored, so their rows
-  are local to the clone and never part of a commit: the migration now
-  updates them in place and leaves them uncommitted, and no wisp data is
-  lost. When a pending wisp migration would change committable data that
-  already has uncommitted changes (it can delete `child_counters` rows), bd
-  still refuses, but now before any migration runs and with the same message
-  as the main migrations, so `bd dolt commit` commits the working set and the
-  next open migrates. Diagnosis by @marcodelpin.
+- Opening a database where any wisp table (`wisps`, `wisp_comments`,
+  `wisp_dependencies`, ...) is tracked in Dolt history and holds uncommitted
+  rows no longer fails with "pending ignored schema migrations alter
+  pre-existing dirty tables" when a wisp schema migration is pending (#5816).
+  The wisp tables are dolt-ignored, so their rows are local to the clone and
+  never part of a commit: the migration now updates them in place and leaves
+  them uncommitted, and no wisp data is lost. When a pending wisp migration
+  would change committable data that already has uncommitted changes (it can
+  delete `child_counters` rows), bd still refuses, but now before any
+  migration runs and with the same message as the main migrations, so
+  `bd dolt commit` commits the working set and the next open migrates.
+  Diagnosis by @marcodelpin.
 - `bd config set`, `bd config unset`, `bd repo add` and `bd repo remove` now
   replace an existing `config.yaml` in one step (temp file in the same
   directory, fsync, rename) instead of truncating and rewriting it in place.
