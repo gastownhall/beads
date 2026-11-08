@@ -79,6 +79,11 @@ func TestInstrumentedStorageGetConfigKeys(t *testing.T) {
 		if got, err := wrapped.GetConfigKeys(ctx); err != nil || len(got) != 0 {
 			t.Fatalf("GetConfigKeys() = %v, %v, want an empty map", got, err)
 		}
+		// The fallback matches exact keys. Only a store's own read can apply a
+		// case-insensitive collation.
+		if got, err := wrapped.GetConfigKeys(ctx, "ROUTING.MODE"); err != nil || len(got) != 0 {
+			t.Fatalf("GetConfigKeys(ROUTING.MODE) = %v, %v, want no match by exact key", got, err)
+		}
 	})
 }
 
