@@ -100,6 +100,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd mol wisp` and `bd mol wisp create` accept `--wisp-type`.** The wisp
+  creation commands could not set a wisp type, so every wisp cloned from a
+  proto was permanently untyped and invisible to TTL-compaction categories
+  and wisp-type filters, while plain `bd create --ephemeral` sets the same
+  column (gastownhall/beads#8209). Both spellings now take the same enum
+  `bd create` validates — heartbeat, ping, patrol, gc_report, recovery,
+  error, escalation — and stamp it on the root issue and every child step
+  the creation makes; omitted or empty keeps today's untyped behavior.
+
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same

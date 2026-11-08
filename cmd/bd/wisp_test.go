@@ -216,6 +216,12 @@ func TestWispCreateStampsWispType(t *testing.T) {
 		assertWispRows(t, ctx, s, 3, types.WispTypePatrol)
 	})
 
+	t.Run("bare wisp command stamps root and children", func(t *testing.T) {
+		ctx, s, rootID := newWispTypeFixture(t)
+		runWispCreateTyped(t, runWisp, makeWispTestCmd(false, false), []string{rootID}, string(types.WispTypeHeartbeat))
+		assertWispRows(t, ctx, s, 3, types.WispTypeHeartbeat)
+	})
+
 	t.Run("create root-only stamps the root", func(t *testing.T) {
 		ctx, s, rootID := newWispTypeFixture(t)
 		runWispCreateTyped(t, runWispCreate, makeWispTestCmd(true, false), []string{rootID}, string(types.WispTypePatrol))
