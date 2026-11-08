@@ -5,12 +5,17 @@ package embeddeddolt_test
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 const (
@@ -250,6 +255,157 @@ func TestEmbeddedIgnoredTrackedDirtyMigrationPreservesRows(t *testing.T) {
 			}
 			assertTrackedWispRowsAbsentAtHead(t, ctx, db)
 			assertNoStagedTrackedWispTables(t, ctx, db)
+		})
+	}
+}
+
+const (
+	committableParentID = "testdb-parent"
+	committableWispID   = "testdb-unrelated-wisp"
+)
+
+// committableIgnoredDirtyFixture builds a fully seeded embedded database whose
+// committable child_counters table holds an uncommitted row for a durable
+// (committed, non-wisp) parent, while the untracked ignored cursor sits at 1,
+// so pending ignored migration 0002 touches child_counters. An unrelated
+// dirty wisp rides along to prove nothing publishes it. rewindMain also leaves
+// the latest main migration pending (it does not touch child_counters, so only
+// the ignored-series intersection can refuse).
+func committableIgnoredDirtyFixture(t *testing.T, rewindMain bool) (beadsDir, dataDir string) {
+	t.Helper()
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
+	}
+	ctx := t.Context()
+	beadsDir = filepath.Join(t.TempDir(), ".beads")
+	dataDir = filepath.Join(beadsDir, "embeddeddolt")
+
+	store, err := embeddeddolt.Open(ctx, beadsDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "testdb"); err != nil {
+		store.Close()
+		t.Fatalf("SetConfig(issue_prefix): %v", err)
+	}
+	parent := &types.Issue{
+		ID:        committableParentID,
+		Title:     "durable parent",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeEpic,
+	}
+	if err := store.CreateIssue(ctx, parent, "tester"); err != nil {
+		store.Close()
+		t.Fatalf("CreateIssue(parent): %v", err)
+	}
+	if _, err := store.CommitAll(ctx, "test: durable parent"); err != nil {
+		store.Close()
+		t.Fatalf("CommitAll: %v", err)
+	}
+	store.Close()
+
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer func() { _ = cleanup() }()
+	queries := []string{
+		"INSERT INTO child_counters (parent_id, last_child) VALUES ('" + committableParentID + "', 7) " +
+			"ON DUPLICATE KEY UPDATE last_child = 7",
+		"INSERT INTO wisps (id, title) VALUES ('" + committableWispID + "', 'unrelated wisp')",
+		"DELETE FROM ignored_schema_migrations WHERE version > 1",
+	}
+	if rewindMain {
+		queries = append(queries, fmt.Sprintf("DELETE FROM schema_migrations WHERE version >= %d", schema.LatestVersion()))
+	}
+	for _, q := range queries {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatalf("fixture %q: %v", q, err)
+		}
+	}
+	return beadsDir, dataDir
+}
+
+// committableIgnoredDirtySnapshot renders everything the refused pass must
+// leave alone: both cursors row by row, HEAD, the dirty child_counters row
+// and the unrelated wisp.
+func committableIgnoredDirtySnapshot(t *testing.T, ctx context.Context, db *sql.DB) string {
+	t.Helper()
+	var b strings.Builder
+	for _, q := range []string{
+		"SELECT CONCAT_WS(':', version, COALESCE(content_hash, '')) FROM schema_migrations ORDER BY version",
+		"SELECT CONCAT_WS(':', version, COALESCE(content_hash, '')) FROM ignored_schema_migrations ORDER BY version",
+		"SELECT HASHOF('HEAD')",
+		"SELECT CONCAT_WS('|', parent_id, last_child) FROM child_counters WHERE parent_id = '" + committableParentID + "'",
+		"SELECT CONCAT_WS('|', id, title) FROM wisps WHERE id = '" + committableWispID + "'",
+	} {
+		rows, err := db.QueryContext(ctx, q)
+		if err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		for rows.Next() {
+			var s string
+			if err := rows.Scan(&s); err != nil {
+				rows.Close()
+				t.Fatalf("%s: %v", q, err)
+			}
+			b.WriteString(s)
+			b.WriteByte('\n')
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		b.WriteString("--\n")
+	}
+	return b.String()
+}
+
+// TestEmbeddedIgnoredCommittableDirtyRefusesBeforeMigrating covers
+// gastownhall/beads#5816 AC-3: a pending ignored migration that touches dirty
+// committable data refuses with the typed *schema.DirtyTablesError (the one
+// the working-set-reconcile open tolerates) before any numbered migration
+// runs, leaving both cursors, HEAD and the user rows unchanged.
+func TestEmbeddedIgnoredCommittableDirtyRefusesBeforeMigrating(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		rewindMain bool
+	}{
+		{name: "ignored series pending"},
+		{name: "main series pending too", rewindMain: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			beadsDir, dataDir := committableIgnoredDirtyFixture(t, tc.rewindMain)
+
+			db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+			if err != nil {
+				t.Fatalf("OpenSQL: %v", err)
+			}
+			before := committableIgnoredDirtySnapshot(t, ctx, db)
+			_ = cleanup()
+
+			store, err := embeddeddolt.Open(ctx, beadsDir, "testdb", "main")
+			if err == nil {
+				store.Close()
+				t.Fatal("Open = nil, want *schema.DirtyTablesError for dirty child_counters")
+			}
+			var dirtyErr *schema.DirtyTablesError
+			if !errors.As(err, &dirtyErr) {
+				t.Fatalf("Open error = %T (%v), want error wrapping *schema.DirtyTablesError", err, err)
+			}
+			if !slices.Equal(dirtyErr.Tables, []string{"child_counters"}) {
+				t.Fatalf("DirtyTablesError.Tables = %v, want [child_counters]", dirtyErr.Tables)
+			}
+
+			db, cleanup, err = embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+			if err != nil {
+				t.Fatalf("OpenSQL (post-refusal): %v", err)
+			}
+			defer func() { _ = cleanup() }()
+			if after := committableIgnoredDirtySnapshot(t, ctx, db); after != before {
+				t.Fatalf("state after refusal =\n%s\nwant unchanged\n%s", after, before)
+			}
 		})
 	}
 }

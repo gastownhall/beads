@@ -2,6 +2,9 @@ package dolt
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -529,5 +532,169 @@ func TestSchemaIgnoredTrackedDirtyMigrationPreservesRows(t *testing.T) {
 			assertSchemaTrackedWispRowsAbsentAtHead(t, ctx, store)
 			assertSchemaNoStagedTrackedWispTables(t, ctx, store)
 		})
+	}
+}
+
+const (
+	schemaCommittableParentID     = "schema-committable-parent"
+	schemaCommittableWispID       = "schema-committable-unrelated-wisp"
+	schemaCommittableDirtyIssueID = "schema-committable-dirty-issue"
+)
+
+// setupCommittableIgnoredDirtyStore is the server-mode twin of the embedded
+// committable fixture: a durable parent issue is committed, child_counters
+// holds an uncommitted row for it, an unrelated wisp is dirty, and the ignored
+// cursor sits at 1 so pending ignored migration 0002 touches child_counters.
+// rewindMain also leaves the latest main migration (which does not touch
+// child_counters) pending.
+func setupCommittableIgnoredDirtyStore(t *testing.T, rewindMain bool) (*DoltStore, func()) {
+	t.Helper()
+	store, cleanup := setupTestStore(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	parent := &types.Issue{
+		ID:        schemaCommittableParentID,
+		Title:     "durable parent",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeEpic,
+	}
+	if err := store.CreateIssue(ctx, parent, "tester"); err != nil {
+		cleanup()
+		t.Fatalf("CreateIssue(parent): %v", err)
+	}
+	if _, err := store.CommitAll(ctx, "test: durable parent"); err != nil {
+		cleanup()
+		t.Fatalf("CommitAll: %v", err)
+	}
+	queries := []string{
+		"INSERT INTO child_counters (parent_id, last_child) VALUES ('" + schemaCommittableParentID + "', 7) " +
+			"ON DUPLICATE KEY UPDATE last_child = 7",
+		"INSERT INTO wisps (id, title) VALUES ('" + schemaCommittableWispID + "', 'unrelated wisp')",
+		"DELETE FROM ignored_schema_migrations WHERE version > 1",
+	}
+	if rewindMain {
+		queries = append(queries, fmt.Sprintf("DELETE FROM schema_migrations WHERE version >= %d", schema.LatestVersion()))
+	}
+	for _, q := range queries {
+		if _, err := store.db.ExecContext(ctx, q); err != nil {
+			cleanup()
+			t.Fatalf("fixture %q: %v", q, err)
+		}
+	}
+	return store, cleanup
+}
+
+func schemaCommittableIgnoredDirtySnapshot(t *testing.T, ctx context.Context, store *DoltStore) string {
+	t.Helper()
+	var b strings.Builder
+	for _, q := range []string{
+		"SELECT CONCAT_WS(':', version, COALESCE(content_hash, '')) FROM schema_migrations ORDER BY version",
+		"SELECT CONCAT_WS(':', version, COALESCE(content_hash, '')) FROM ignored_schema_migrations ORDER BY version",
+		"SELECT HASHOF('HEAD')",
+		"SELECT CONCAT_WS('|', parent_id, last_child) FROM child_counters WHERE parent_id = '" + schemaCommittableParentID + "'",
+		"SELECT CONCAT_WS('|', id, title) FROM wisps WHERE id = '" + schemaCommittableWispID + "'",
+		"SELECT CONCAT_WS('|', id, title) FROM issues WHERE id = '" + schemaCommittableDirtyIssueID + "'",
+	} {
+		rows, err := store.db.QueryContext(ctx, q)
+		if err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		for rows.Next() {
+			var s string
+			if err := rows.Scan(&s); err != nil {
+				rows.Close()
+				t.Fatalf("%s: %v", q, err)
+			}
+			b.WriteString(s)
+			b.WriteByte('\n')
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		b.WriteString("--\n")
+	}
+	return b.String()
+}
+
+// TestSchemaIgnoredCommittableDirtyRefusesBeforeMigrating is the server-mode
+// twin of TestEmbeddedIgnoredCommittableDirtyRefusesBeforeMigrating
+// (gastownhall/beads#5816 AC-3).
+func TestSchemaIgnoredCommittableDirtyRefusesBeforeMigrating(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		rewindMain bool
+	}{
+		{name: "ignored series pending"},
+		{name: "main series pending too", rewindMain: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, cleanup := setupCommittableIgnoredDirtyStore(t, tc.rewindMain)
+			defer cleanup()
+
+			ctx, cancel := testContext(t)
+			defer cancel()
+
+			before := schemaCommittableIgnoredDirtySnapshot(t, ctx, store)
+			_, err := rerunSchemaInitOnTestStore(ctx, store)
+			if err == nil {
+				t.Fatal("schema init = nil, want *schema.DirtyTablesError for dirty child_counters")
+			}
+			var dirtyErr *schema.DirtyTablesError
+			if !errors.As(err, &dirtyErr) {
+				t.Fatalf("schema init error = %T (%v), want error wrapping *schema.DirtyTablesError", err, err)
+			}
+			if !slices.Equal(dirtyErr.Tables, []string{"child_counters"}) {
+				t.Fatalf("DirtyTablesError.Tables = %v, want [child_counters]", dirtyErr.Tables)
+			}
+			if after := schemaCommittableIgnoredDirtySnapshot(t, ctx, store); after != before {
+				t.Fatalf("state after refusal =\n%s\nwant unchanged\n%s", after, before)
+			}
+		})
+	}
+}
+
+// TestSchemaIgnoredCommittableRefusalWithPendingMainMigrations locks the
+// relocation (gastownhall/beads#5816 AC-3): the ignored-series committable
+// check runs beside the main one, ahead of every numbered migration, and the
+// two intersections merge into one sorted, de-duplicated list. Main 0054+
+// name only issues (0053, the last child_counters migration, stays recorded)
+// while ignored 0002 names child_counters, so the refusal carries both names
+// and neither numbered series advances.
+func TestSchemaIgnoredCommittableRefusalWithPendingMainMigrations(t *testing.T) {
+	store, cleanup := setupCommittableIgnoredDirtyStore(t, false)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Raw SQL, not CreateIssue: the store auto-commits its own writes, so
+	// only a raw insert leaves issues dirty for the pending main series.
+	for _, q := range []string{
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes) VALUES ('" +
+			schemaCommittableDirtyIssueID + "', 'uncommitted issue', '', '', '', '')",
+		"DELETE FROM schema_migrations WHERE version > 53",
+	} {
+		if _, err := store.db.ExecContext(ctx, q); err != nil {
+			t.Fatalf("fixture %q: %v", q, err)
+		}
+	}
+
+	before := schemaCommittableIgnoredDirtySnapshot(t, ctx, store)
+	_, err := rerunSchemaInitOnTestStore(ctx, store)
+	if err == nil {
+		t.Fatal("schema init = nil, want *schema.DirtyTablesError with both migration series pending")
+	}
+	var dirtyErr *schema.DirtyTablesError
+	if !errors.As(err, &dirtyErr) {
+		t.Fatalf("schema init error = %T (%v), want error wrapping *schema.DirtyTablesError", err, err)
+	}
+	if want := []string{"child_counters", "issues"}; !slices.Equal(dirtyErr.Tables, want) {
+		t.Fatalf("DirtyTablesError.Tables = %v, want the sorted, de-duplicated merge %v", dirtyErr.Tables, want)
+	}
+	if after := schemaCommittableIgnoredDirtySnapshot(t, ctx, store); after != before {
+		t.Fatalf("state after refusal =\n%s\nwant unchanged\n%s", after, before)
 	}
 }
