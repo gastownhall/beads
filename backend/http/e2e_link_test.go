@@ -55,6 +55,48 @@ func TestE2E_LinkOverHTTP(t *testing.T) {
 		}
 	})
 
+	t.Run("alias spellings canonicalize to the gating blocks type", func(t *testing.T) {
+		// GH#5585: --type blocked-by/depends-on used to be stored verbatim,
+		// an inert edge ready/blocked gating never matched. The link must
+		// store the canonical blocks, report it, and actually gate.
+		for _, alias := range []string{"blocked-by", "depends-on"} {
+			from := f.create("alias link source " + alias)
+			to := f.create("alias link target " + alias)
+
+			r := f.mustRun(nil, "link", from, to, "--type", alias, "--json")
+			var out map[string]any
+			if err := json.Unmarshal([]byte(strings.TrimSpace(r.stdout)), &out); err != nil {
+				t.Fatalf("bd link --type %s --json: %v\n%s", alias, err, r.stdout)
+			}
+			if out["type"] != "blocks" {
+				t.Errorf("bd link --type %s --json reported type %v, want the canonical blocks", alias, out["type"])
+			}
+
+			list := f.mustRun(nil, "dep", "list", from, "--json").stdout
+			if !depListHas(t, list, to, "blocks") {
+				t.Errorf("bd link --type %s did not store a canonical blocks edge to %s: %s", alias, to, list)
+			}
+
+			ready := f.mustRun(nil, "ready", "--json").stdout
+			if jsonIDSet(t, ready)[from] {
+				t.Errorf("bd link --type %s left %s ready; the canonical blocks edge must gate it while %s is open", alias, from, to)
+			}
+			blocked := f.mustRun(nil, "blocked", "--json").stdout
+			if !jsonIDSet(t, blocked)[from] {
+				t.Errorf("bd link --type %s did not list %s as blocked while %s is open: %s", alias, from, to, blocked)
+			}
+		}
+	})
+
+	t.Run("alias text output reports the canonical type", func(t *testing.T) {
+		from := f.create("alias text source")
+		to := f.create("alias text target")
+		r := f.mustRun(nil, "link", from, to, "--type", "blocked-by")
+		if !strings.Contains(r.stdout, "(blocks)") || strings.Contains(r.stdout, "blocked-by") {
+			t.Errorf("bd link --type blocked-by output = %q, want the canonical (blocks) spelling", r.stdout)
+		}
+	})
+
 	t.Run("text output names both issues", func(t *testing.T) {
 		from := f.create("text link source")
 		to := f.create("text link target")

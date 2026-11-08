@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -42,6 +43,44 @@ func TestProxiedServerLink(t *testing.T) {
 
 		db := openProxiedDB(t, p)
 		assertProxiedDepExistsWithType(t, db, a.ID, b.ID, "related")
+	})
+
+	t.Run("link_alias_canonicalizes_to_blocks", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "lb")
+		a := bdProxiedCreate(t, bd, p.dir, "Alias from")
+
+		// GH#5585: the documented aliases must store the canonical blocks
+		// edge (the one ready/blocked gating matches), not the literal
+		// spelling, and the confirmation must report what was stored.
+		for _, alias := range []string{"blocked-by", "depends-on"} {
+			target := bdProxiedCreate(t, bd, p.dir, "Alias target "+alias)
+			out, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "link", a.ID, target.ID, "--type", alias)
+			if err != nil {
+				t.Fatalf("link --type %s failed: %v\nstderr:\n%s", alias, err, stderr)
+			}
+			if !strings.Contains(out, "(blocks)") {
+				t.Errorf("link --type %s reported the raw alias; want the canonical (blocks):\n%s", alias, out)
+			}
+
+			db := openProxiedDB(t, p)
+			assertProxiedDepExistsWithType(t, db, a.ID, target.ID, "blocks")
+
+			ready, _, err := bdProxiedRunBuffers(t, bd, p.dir, "ready", "--json")
+			if err != nil {
+				t.Fatalf("ready --json: %v", err)
+			}
+			if proxiedIDSet(t, ready)[a.ID] {
+				t.Errorf("link --type %s left %s ready; the canonical blocks edge must gate it", alias, a.ID)
+			}
+			blocked, _, err := bdProxiedRunBuffers(t, bd, p.dir, "blocked", "--json")
+			if err != nil {
+				t.Fatalf("blocked --json: %v", err)
+			}
+			if !proxiedIDSet(t, blocked)[a.ID] {
+				t.Errorf("link --type %s did not list %s as blocked: %s", alias, a.ID, blocked)
+			}
+		}
 	})
 
 	t.Run("link_invalid_type_rejected", func(t *testing.T) {
@@ -117,4 +156,40 @@ func TestProxiedServerGateList(t *testing.T) {
 			t.Errorf("bead-scoped list must not include unrelated gate %s:\n%s", unrelated.ID, out)
 		}
 	})
+}
+
+// proxiedIDSet parses a JSON listing of issues (`bd ready --json`, `bd
+// blocked --json`, ...) into a set of issue ids: a bare array, or the object
+// envelope whose "issues"/"data"/"items" member holds the rows.
+func proxiedIDSet(t *testing.T, out string) map[string]bool {
+	t.Helper()
+	trimmed := []byte(strings.TrimSpace(out))
+	set := make(map[string]bool)
+	collect := func(rows []map[string]any) {
+		for _, row := range rows {
+			if id, ok := row["id"].(string); ok {
+				set[id] = true
+			}
+		}
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(trimmed, &rows); err == nil {
+		collect(rows)
+		return set
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &envelope); err != nil {
+		t.Fatalf("parse JSON issue listing: %v\n%s", err, out)
+	}
+	for _, key := range []string{"issues", "data", "items"} {
+		if raw, ok := envelope[key]; ok {
+			if err := json.Unmarshal(raw, &rows); err != nil {
+				t.Fatalf("parse JSON listing member %q: %v\n%s", key, err, out)
+			}
+			collect(rows)
+			return set
+		}
+	}
+	t.Fatalf("JSON issue listing has no row array: %s", out)
+	return set
 }

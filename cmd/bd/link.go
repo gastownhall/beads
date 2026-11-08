@@ -62,17 +62,17 @@ Examples:
 		}
 		defer toCleanup()
 
-		dt := types.DependencyType(depType)
-		// link's own checks run before anything is written, and over http
-		// before the dial: the dotted-child rule (the role raises it too) and
-		// the type's length. Unlike `bd dep add`, link takes any type a
-		// workspace spells, so it never asks validateDependencyType.
-		if err := issueops.CheckDottedChildDependency(fromID, toID, dt); err != nil {
+		dt, err := resolveLinkDependencyType(depType)
+		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
-
-		if !dt.IsValid() {
-			return HandleErrorRespectJSON("invalid dependency type %q: must be non-empty and at most %d characters", depType, types.MaxDependencyTypeLen)
+		// link's own checks run before anything is written, and over http
+		// before the dial: the dotted-child rule (the role raises it too).
+		// Unlike `bd dep add`, link takes any type a workspace spells — the
+		// resolver below only canonicalizes the documented aliases and checks
+		// the type's length, never the well-known vocabulary.
+		if err := issueops.CheckDottedChildDependency(fromID, toID, dt); err != nil {
+			return HandleErrorRespectJSON("%v", err)
 		}
 
 		opsCtx, err := issueOpsContext(ctx)
@@ -113,13 +113,30 @@ Examples:
 				"status":        "added",
 				"issue_id":      fromID,
 				"depends_on_id": toID,
-				"type":          depType,
+				"type":          string(dt),
 			})
 		}
 		fmt.Printf("%s Linked: %s depends on %s (%s)\n",
-			ui.RenderPass("✓"), formatFeedbackIDParen(fromID, fromTitle), formatFeedbackIDParen(toID, toTitle), depType)
+			ui.RenderPass("✓"), formatFeedbackIDParen(fromID, fromTitle), formatFeedbackIDParen(toID, toTitle), dt)
 		return nil
 	},
+}
+
+// resolveLinkDependencyType is link's share of the dep-add pair in
+// create_deps.go: it maps the documented alias spellings "depends-on" and
+// "blocked-by" to the canonical "blocks" storage type that ready/blocked
+// gating matches (GH#5585), so an alias stores and gates exactly like
+// `--type blocks`. Unlike `bd dep add`, link takes any type a workspace
+// spells — its documented custom-type contract (backend/http's custom-type
+// tests pin it) — so the only further check is the structural one: the type
+// must be non-empty and fit the storage column, the same IsValid limit the
+// raw check used to enforce.
+func resolveLinkDependencyType(raw string) (types.DependencyType, error) {
+	dt := canonicalDependencyType(types.DependencyType(raw))
+	if !dt.IsValid() {
+		return "", fmt.Errorf("invalid dependency type %q: must be non-empty and at most %d characters", raw, types.MaxDependencyTypeLen)
+	}
+	return dt, nil
 }
 
 func init() {
