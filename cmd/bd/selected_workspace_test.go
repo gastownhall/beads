@@ -623,3 +623,79 @@ func TestSelectedWorkspaceSelectionEdges(t *testing.T) {
 // host-inferred server — selected via -C from a redirected caller keeps its
 // admission path and identity, without the caller's redirect-source database
 // name injected.
+func TestSelectedWorkspaceRemoteStartup(t *testing.T) {
+	fixture := newRedirectedCallerFixture(t)
+
+	// doctor on a proxied-server workspace answers with the typed
+	// capability refusal, not a corrupted startup: admission stays
+	// available and the caller's database stays out of the environment.
+	t.Run("proxied-server target keeps admission", func(t *testing.T) {
+		targetDir := t.TempDir()
+		targetBeads := filepath.Join(targetDir, ".beads")
+		if err := os.MkdirAll(targetBeads, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := (&configfile.Config{
+			Backend:      configfile.BackendDolt,
+			DoltMode:     configfile.DoltModeProxiedServer,
+			DoltDatabase: "proxied_db",
+		}).Save(targetBeads); err != nil {
+			t.Fatalf("save metadata: %v", err)
+		}
+
+		var preRunErr error
+		stderr := captureStderr(t, func() {
+			preRunErr = runSelectedWorkspacePreRun(t, fixture.callerDir, doctorCmd, selectViaChangeDir(targetDir))
+		})
+		// HandleProxyCapabilityError prints the typed refusal and exits
+		// with its exit code; admission answered is the refusal on stderr.
+		var exitErr *exitError
+		if !errors.As(preRunErr, &exitErr) {
+			t.Fatalf("PersistentPreRunE(doctor) = %v, want the proxy refusal's exit", preRunErr)
+		}
+		if !strings.Contains(stderr, "doctor is not supported in proxied-server mode") {
+			t.Errorf("doctor refusal stderr = %q, want the proxy.doctor.unsupported refusal", stderr)
+		}
+		assertNoCallerDatabaseLeak(t)
+	})
+
+	// A registered remote backend (http) keeps its backend identity.
+	t.Run("registered http backend target keeps its identity", func(t *testing.T) {
+		targetDir := t.TempDir()
+		targetBeads := filepath.Join(targetDir, ".beads")
+		if err := os.MkdirAll(targetBeads, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := (&configfile.Config{Backend: "http"}).Save(targetBeads); err != nil {
+			t.Fatalf("save metadata: %v", err)
+		}
+
+		if err := runSelectedWorkspacePreRun(t, fixture.callerDir, contextCmd, selectViaChangeDir(targetDir)); err != nil {
+			t.Fatalf("PersistentPreRunE(context): %v", err)
+		}
+		assertNoCallerDatabaseLeak(t)
+		info := runSelectedContextJSON(t)
+		assertSelectedDirEqual(t, info.BeadsDir, targetBeads, "context beads_dir")
+		if info.Backend != "http" {
+			t.Errorf("context backend = %q, want %q", info.Backend, "http")
+		}
+	})
+
+	// A metadata-less workspace whose config.yaml names a remote server host
+	// is a server workspace (GH#3545); context reports that host.
+	t.Run("host-inferred server target keeps its host", func(t *testing.T) {
+		targetDir := t.TempDir()
+		targetBeads := filepath.Join(targetDir, ".beads")
+		writeTestConfigYAML(t, targetBeads, "dolt:\n  host: 10.9.9.9\n")
+
+		if err := runSelectedWorkspacePreRun(t, fixture.callerDir, contextCmd, selectViaChangeDir(targetDir)); err != nil {
+			t.Fatalf("PersistentPreRunE(context): %v", err)
+		}
+		assertNoCallerDatabaseLeak(t)
+		info := runSelectedContextJSON(t)
+		assertSelectedDirEqual(t, info.BeadsDir, targetBeads, "context beads_dir")
+		if info.ServerHost != "10.9.9.9" {
+			t.Errorf("context server_host = %q, want the target's %q", info.ServerHost, "10.9.9.9")
+		}
+	})
+}
