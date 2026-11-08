@@ -703,26 +703,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **`bd dep add` no longer reads the whole dependency graph a second time
-  inside its write.** With per-edge cycle checks on (the default), a request
-  that adds a `blocks`, `conditional-blocks` or `parent-child` edge sent two
-  extra reads at the end, one of every row in `dependencies` and one of every
-  row in `wisp_dependencies`, to look for a cycle the per-edge checks had
-  already ruled out: each check runs in the same transaction after the
-  request's earlier edges are written. The write now sends 2 fewer
-  statements (18 to 16 for the edge work of one `blocks` edge, measured on
-  embedded Dolt) and reads none of those rows.
-  A bulk `bd dep add --file … --no-cycle-check` skips the per-edge probes and
-  so still runs the whole-graph check; for a single edge the flag only skips
-  the post-add cycle warning. That check and `bd dep cycles` now read only the
-  edge types they check rather than every edge.
-- **`bd dep tree` stops reading at its depth limit.** A node on the last
-  level `--max-depth` allows is still shown, but the walk no longer reads its
-  edges and loads its neighbors, which it then discarded. That saves 2
-  statements for each such node with no edges, 4 when its edges point only at
-  missing or external targets, and 5 or more when at least one neighbor loads
-  (server and embedded modes alike). The tree returned is
-  unchanged.
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add
@@ -817,6 +797,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`BEADS_HTTP_POLICY_CACHE_TTL`, a duration, a number of seconds, or `off`),
   and a handshake the process already holds still wins. Claims and closes
   always ask the server.
+- **`bd dep add` no longer reads the whole dependency graph a second time
+  inside its write.** With per-edge cycle checks on (the default), a request
+  that adds a `blocks`, `conditional-blocks` or `parent-child` edge sent two
+  extra reads at the end, one of every row in `dependencies` and one of every
+  row in `wisp_dependencies`, to look for a cycle the per-edge checks had
+  already ruled out: each check runs in the same transaction after the
+  request's earlier edges are written. The write now sends 2 fewer
+  statements (18 to 16 for the edge work of one `blocks` edge, measured on
+  embedded Dolt) and reads none of those rows.
+  A bulk `bd dep add --file … --no-cycle-check` skips the per-edge probes and
+  so still runs the whole-graph check; for a single edge the flag only skips
+  the post-add cycle warning. That check and `bd dep cycles` now read only the
+  edge types they check rather than every edge.
+- **`bd dep tree` stops reading at its depth limit.** A node on the last
+  level `--max-depth` allows is still shown, but the walk no longer reads its
+  edges and loads its neighbors, which it then discarded. That saves 2
+  statements for each such node with no edges, 4 when its edges point only at
+  missing or external targets, and 5 or more when at least one neighbor loads
+  (server and embedded modes alike). The tree returned is
+  unchanged.
 - `bd serve` normalizes every RFC 3339 time bound on the issue listing and
   count (`created_*`, `updated_*`, `closed_*`, and the new `defer_*` and
   `due_*`) to UTC before it reaches storage. A bound carrying an offset
