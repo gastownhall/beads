@@ -242,12 +242,27 @@ fi
 # migration is still required (it upgrades in-place workspaces, whose ignored
 # cursor is likewise at-latest); the twin is what carries the change through
 # the fresh-clone door. Data-only statements (UPDATE/INSERT/DELETE) don't
-# trigger this: clone-local data is clone-local by design.
+# trigger this check: clone-local data is clone-local by design, and Check D
+# matches DDL only.
+#
+# Behind-cursor clones are the second door, and it covers data statements
+# too: a clone taken while a producer's schema_migrations MAX is below the
+# cloning binary's latest (the normal window after every schema bump, before
+# all producers have re-pushed) runs the pending main migrations BEFORE the
+# ignored series recreates the clone-local tables, so every pending main
+# statement — DDL and data alike — must tolerate those tables being absent
+# (gastownhall/beads#4176). In new SQL, prefer an existence guard
+# (INFORMATION_SCHEMA.TABLES / CREATE TABLE IF NOT EXISTS); for frozen,
+# already-shipped SQL register a keyed pre-migration repair in
+# internal/storage/schema/migration_repairs.go (the {schema_migrations,47}
+# shape) instead of editing the file. The Dolt-server regression test
+# covering both doors is
+# internal/storage/dolt/clone_skew_0047_wisps_test.go; the engine-level
+# backstop for the at-latest shape is
+# internal/storage/embeddeddolt/migrate_ignored_plane_shape_test.go.
 #
 # The table list mirrors internal/storage/schema/schema.go's
-# doltIgnorePatterns + versionGatedDoltIgnorePatterns. The engine-level
-# backstop for the same invariant is
-# internal/storage/embeddeddolt/migrate_ignored_plane_shape_test.go.
+# doltIgnorePatterns + versionGatedDoltIgnorePatterns.
 if [ -z "$base" ] || [ -z "${merge_base:-}" ]; then
   [ "$scope" = tree ] || echo "WARN (ignored twins) no usable base ref; skipping check D." >&2
 else
