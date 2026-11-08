@@ -29,6 +29,11 @@ type compactHookConn struct {
 
 	// beforeExec runs before each ExecContext statement is forwarded.
 	beforeExec func(query string)
+	// afterFinalReset runs after the final reset of main onto compact-tmp
+	// has been forwarded successfully: the window between the head move and
+	// the staged check, where a writer whose transaction began before the
+	// move can finish its Dolt commit.
+	afterFinalReset func()
 	// beforeFollowUp runs after the staged check, just before the follow-up
 	// commit is forwarded.
 	beforeFollowUp func()
@@ -54,10 +59,15 @@ func (c *compactHookConn) ExecContext(ctx context.Context, query string, args ..
 	if c.beforeExec != nil {
 		c.beforeExec(query)
 	}
-	if isFinalReset(query) {
-		c.resetDone.Store(true)
+	if !isFinalReset(query) {
+		return c.Conn.ExecContext(ctx, query, args...)
 	}
-	return c.Conn.ExecContext(ctx, query, args...)
+	c.resetDone.Store(true)
+	res, err := c.Conn.ExecContext(ctx, query, args...)
+	if err == nil && c.afterFinalReset != nil {
+		c.afterFinalReset()
+	}
+	return res, err
 }
 
 func (c *compactHookConn) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
@@ -647,6 +657,97 @@ func TestCompactFollowupFailureKeepsChangesStaged(t *testing.T) {
 		f.wantLog(replayedLog)
 		f.wantStatus("t:true")
 		f.wantNoTempBranch()
+	})
+}
+
+// AC-1: a writer whose transaction begins on a head that a concurrent commit
+// C1 had already reached, and whose Dolt commit finishes only after the final
+// reset moved main onto the compacted history, must not demote C1's
+// acknowledged commit to uncommitted working data: both writers' rows end up
+// in main's committed HEAD, and t holds no leftover working change.
+func TestCompactStraddlingWriterKeepsLandedCommit(t *testing.T) {
+	port := startCompactTestServer(t)
+
+	// beginStraddler opens W's transaction on a pinned connection and inserts
+	// t 900, as bd's own transactions run: the SQL writes land inside the
+	// transaction, the Dolt commit at the end of it.
+	beginStraddler := func(f *compactFixture, straddler *sql.Conn) *sql.Tx {
+		f.t.Helper()
+		wtx, err := straddler.BeginTx(f.ctx, nil)
+		if err != nil {
+			f.t.Fatalf("begin writer transaction: %v", err)
+		}
+		if _, err := wtx.ExecContext(f.ctx, "INSERT INTO t VALUES (900, 'writer')"); err != nil {
+			f.t.Fatalf("writer insert t 900: %v", err)
+		}
+		return wtx
+	}
+	// finishStraddler runs W's Dolt commit inside its still-open transaction
+	// and then commits the SQL transaction, so the writer's commit finishes
+	// while main's HEAD is the head the reset installed.
+	finishStraddler := func(f *compactFixture, wtx *sql.Tx) {
+		f.t.Helper()
+		f.exec(wtx,
+			"CALL DOLT_ADD('t')",
+			"CALL DOLT_COMMIT('-m', 'writer 900')",
+		)
+		if err := wtx.Commit(); err != nil {
+			f.t.Fatalf("writer commit: %v", err)
+		}
+	}
+	wantBothRowsLanded := func(f *compactFixture) {
+		f.t.Helper()
+		for _, id := range []int{600, 900} {
+			if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = ?", id); n != 1 {
+				f.t.Fatalf("writer t row %d in main's HEAD: found=%d, want 1", id, n)
+			}
+			if n := f.count("SELECT COUNT(*) FROM t WHERE id = ?", id); n != 1 {
+				f.t.Fatalf("writer t row %d on main: found=%d, want 1", id, n)
+			}
+		}
+		// Neither acknowledged commit may be demoted to the working set, so
+		// t must not appear in dolt_status at all; only the fixture's pending
+		// config/u changes may.
+		f.wantStatus("config:false", "u:false")
+		f.wantPendingKept()
+		f.wantNoTempBranch()
+	}
+
+	// C1 landed after the plan was read and W's transaction began on the head
+	// it reached; W's Dolt commit finishes after the reset.
+	t.Run("straddling the reset", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		f.writePending(f.db)
+		f.landRow(f.conn())
+
+		wtx := beginStraddler(f, f.conn())
+		hook := &compactHookConn{afterFinalReset: func() { finishStraddler(f, wtx) }}
+		if err := f.compact(hook); err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+		wantBothRowsLanded(f)
+	})
+
+	// The same straddle with C1 landing in the last gap, between the replay
+	// check and the reset: W begins after C1 and spans both the commit and
+	// the head move.
+	t.Run("straddling a commit and the reset", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		f.writePending(f.db)
+		lander, straddler := f.conn(), f.conn()
+
+		var wtx *sql.Tx
+		hook := &compactHookConn{
+			beforeExec: onceBeforeFinalReset(func() {
+				f.landRow(lander)
+				wtx = beginStraddler(f, straddler)
+			}),
+			afterFinalReset: func() { finishStraddler(f, wtx) },
+		}
+		if err := f.compact(hook); err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+		wantBothRowsLanded(f)
 	})
 }
 
