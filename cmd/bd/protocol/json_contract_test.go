@@ -430,7 +430,7 @@ func TestJSONContract_WorkRowCountsAreBlocksOnlyShowCountsEveryEdge(t *testing.T
 	// dependent, one outgoing blocks edge and one outgoing discovered-from
 	// edge. Every count has something to say about it.
 	epic := w.create("--title", "Counts epic", "--type", "epic")
-	w.create("--title", "Counts child 1", "--parent", epic)
+	child1 := w.create("--title", "Counts child 1", "--parent", epic)
 	w.create("--title", "Counts child 2", "--parent", epic)
 	w.create("--title", "Counts child 3", "--parent", epic)
 	blocksDependent := w.create("--title", "Counts blocks dependent")
@@ -494,5 +494,57 @@ func TestJSONContract_WorkRowCountsAreBlocksOnlyShowCountsEveryEdge(t *testing.T
 		assertFieldFloat(t, listRow(bare), "dependent_count", 0)
 		assertFieldFloat(t, w.showJSON(bare), "dependency_count", 0)
 		assertFieldFloat(t, w.showJSON(bare), "dependent_count", 0)
+	})
+
+	t.Run("non_closed_predicate_counts_status_not_edge_type", func(t *testing.T) {
+		// The documented status-sensitive alternative to the counts: list
+		// the dependents, filter the statuses yourself. Closing one
+		// parent-child dependent changes the predicate's answer without
+		// touching any stored edge.
+		w.run("close", child1, "--reason", "done")
+
+		// The incoming dependency listing still returns ALL FOUR locally
+		// present dependents — three children plus the blocks dependent —
+		// each carrying its status and its dependency_type.
+		out := w.run("dep", "list", epic, "--direction=up", "--json")
+		dependents := parseJSONOutput(t, out)
+		if len(dependents) != 4 {
+			t.Fatalf("bd dep list --direction=up returned %d dependents, want all 4 locally present ones", len(dependents))
+		}
+		types := map[string]int{}
+		for _, dep := range dependents {
+			if _, ok := dep["status"]; !ok {
+				t.Errorf("dependent %v carries no status; the predicate filters on it", dep["id"])
+			}
+			depType, _ := dep["dependency_type"].(string)
+			types[depType]++
+		}
+		if types["parent-child"] != 3 || types["blocks"] != 1 {
+			t.Errorf("dependent edge types = %v, want three parent-child and one blocks", types)
+		}
+
+		// The documented predicate — non-closed rather than status exactly
+		// open — counts 3: the closed child drops out, the two open children
+		// and the blocks dependent stay.
+		nonClosed := 0
+		for _, dep := range dependents {
+			if status, _ := dep["status"].(string); status != "closed" {
+				nonClosed++
+			}
+		}
+		if nonClosed != 3 {
+			t.Errorf("non-closed dependent predicate = %d, want 3 (closed child excluded, open children and blocks dependent included)", nonClosed)
+		}
+	})
+
+	t.Run("failed_listing_is_not_an_empty_list", func(t *testing.T) {
+		// The shell pattern's `|| exit` half: a failed bd dep list must
+		// abort the check, because parsing its output as an empty
+		// dependency list is the vacuous-pass failure this guidance exists
+		// to prevent. An unresolvable anchor fails the command outright.
+		out, err := w.tryRun("dep", "list", "nonexistent-xyz", "--direction=up", "--json")
+		if err == nil {
+			t.Errorf("bd dep list of an unknown id exited 0 (output %q); the failure must abort the predicate, not read as zero dependents", out)
+		}
 	})
 }
