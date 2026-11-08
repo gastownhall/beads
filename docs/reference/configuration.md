@@ -271,7 +271,7 @@ dolt:
 How it works:
 
 - After each write command (after auto-commit and auto-backup), `bd` checks whether a push is due.
-- Pushes are debounced: skipped if the last push attempt, successful or not, was less than `dolt.auto-push-interval` ago.
+- Pushes are debounced: skipped if the later of the last recorded attempt and the last successful push was less than `dolt.auto-push-interval` ago.
 - Change detection: skipped if the Dolt HEAD commit hasn't changed since the last successful push.
 - Push failures and timeouts are warnings only (non-fatal), and failed attempts are throttled too.
 - Push bookkeeping lives in `.beads/push-state.json`, a per-machine file (not in the database, to avoid merge conflicts across machines).
@@ -282,10 +282,10 @@ How it works:
 |-------|---------|
 | `last_push` | When a push to `origin` last succeeded |
 | `last_commit` | The HEAD commit that successful push published |
-| `last_attempt` | When a push to `origin` was last attempted, successful or not |
+| `last_attempt` | When bd last attempted a push to `origin`: a successful push or a failed auto-push |
 | `last_error` | Why the last attempt failed (one line, credentials removed); absent after a success |
 
-A failed or timed-out auto-push records `last_attempt` and `last_error` and leaves `last_push` and `last_commit` alone, so a failure never reads as a successful push. A successful auto-push, `bd dolt push` (to the default remote or `origin`, with or without `--force`) or `bd sync` (default remote or `--remote origin`) sets both timestamps, records the pushed HEAD and clears `last_error`. A push to any other remote, a failed push, and a push skipped by `no-push` or `dolt.local-only` leave the file unchanged. Pushing to `origin` with plain `dolt push`, outside bd, does not update the file; run `bd dolt push` once afterwards to record it.
+A failed or timed-out auto-push records `last_attempt` and `last_error` and leaves `last_push` and `last_commit` alone, so a failure never reads as a successful push. A successful auto-push, `bd dolt push` (to the default remote or `origin`, with or without `--force`) or `bd sync` (default remote or `--remote origin`) sets both timestamps, records the pushed HEAD and clears `last_error`. A push to any other remote, a failed `bd dolt push` or `bd sync` push (its own error reports the failure), and a push skipped by `no-push` or `dolt.local-only` leave the file unchanged. Pushing to `origin` with plain `dolt push`, outside bd, does not update the file; run `bd dolt push` once afterwards to record it.
 
 Older bd versions record a failed auto-push as a success and do not record manual pushes. When versions mix on one machine, an older bd may overwrite the file and drop `last_attempt` and `last_error`. An older file that holds only `last_push` and `last_commit` still throttles auto-push.
 

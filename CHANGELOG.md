@@ -1227,15 +1227,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - A failed or timed-out Dolt auto-push no longer reads as a successful push
-  ([GH#6289](https://github.com/gastownhall/beads/issues/6289)). It recorded
-  `last_push` and `last_commit` in `.beads/push-state.json` as if the push
-  had landed, so later write commands skipped retrying until HEAD moved.
-  Failures now record `last_attempt` and a one-line, credential-scrubbed
-  `last_error` instead; the auto-push interval runs from the later of the
-  last attempt and the last success, and a successful push clears
-  `last_error`. Successful `bd dolt push` and `bd sync` pushes to the
-  default remote or `origin` now record success too; pushes to other remotes
-  do not touch the file. A push made with the `dolt` CLI outside bd is not
+  ([GH#6289](https://github.com/gastownhall/beads/issues/6289)). A failed
+  auto-push advanced `last_push` in `.beads/push-state.json` while
+  `last_commit` stayed unchanged, so the file read as a recent successful
+  push. A failed auto-push now records `last_attempt` and a one-line,
+  credential-scrubbed `last_error` instead and leaves `last_push` and
+  `last_commit` alone; the auto-push interval runs from the later of the
+  last attempt and the last success. A successful push sets both
+  timestamps and clears `last_error`. Successful `bd dolt push` and
+  `bd sync` pushes to the default remote or `origin` now record success
+  too; a failed `bd dolt push` or `bd sync` leaves the file unchanged (the
+  command's own error reports it), and pushes to other remotes do not touch
+  the file. A push made with the `dolt` CLI outside bd is not
   recorded, and an older bd on the same machine may rewrite the file without
   the new fields.
 - `bd doctor`'s Sync Staleness check now covers `origin`, not just federation
