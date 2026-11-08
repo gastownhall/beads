@@ -1107,3 +1107,38 @@ func TestProxiedInitTailCommitScope(t *testing.T) {
 	require.Equal(t, "work.txt", runGit(target, "diff", "--cached", "--name-only"))
 	require.Equal(t, "unrelated work", runGit(target, "show", ":work.txt"))
 }
+
+// GH#5654: when the artifact paths match HEAD and only foreign work is
+// staged, the proxied bootstrap must report neither success nor failure and
+// leave HEAD and the staged work untouched.
+func TestProxiedInitTailCommitScopeNothingToCommit(t *testing.T) {
+	target, runGit := proxiedTailCommitFixture(t)
+	require.NoError(t, os.Mkdir(filepath.Join(target, ".beads"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(target, ".beads", "artifact"), []byte("beads\n"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(target, "CLAUDE.md"), []byte("optional\n"), 0600))
+	runGit(target, "add", ".beads", "CLAUDE.md")
+	runGit(target, "-c", "core.hooksPath=", "commit", "-m", "seed")
+	require.NoError(t, os.WriteFile(filepath.Join(target, "work.txt"), []byte("unrelated work\n"), 0600))
+	runGit(target, "add", "work.txt")
+	before := runGit(target, "rev-parse", "HEAD")
+
+	// Two runs: the shared stdio mutex does not allow capturing both streams
+	// at once, and neither run changes any state.
+	stderr := runProxiedTailForCommitScope(t, target, false)
+	require.NotContains(t, stderr, "failed to commit beads files")
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("setup-exclude", false, "")
+	in := initProxiedServerInput{skipHooks: true, skipAgents: true, nonInteractive: true}
+	stdout := captureStdout(t, func() error {
+		return runInitProxiedServerTail(cmd, t.Context(), in, runInitTailContext{
+			workDir:       target,
+			beadsDir:      filepath.Join(target, ".beads"),
+			useLocalBeads: true,
+			fsUseCase:     &initTailForkObservation{},
+			gitUC:         storagegit.NewGitProvider(target).GitUseCase(),
+		})
+	})
+	require.NotContains(t, stdout, "Committed beads files")
+	require.Equal(t, before, runGit(target, "rev-parse", "HEAD"), "nothing-to-commit bootstrap moved HEAD")
+	require.Equal(t, "work.txt", runGit(target, "diff", "--cached", "--name-only"))
+}

@@ -4519,7 +4519,7 @@ func commitEmbeddedInitArtifacts(workDir string, quiet bool) {
 		// The commit is scoped to the staged changes under the artifact
 		// candidates, so work the user staged before bd init stays
 		// staged instead of landing in the bootstrap commit (GH#5654).
-		_, commitErr := domaingit.NewInitGitRepository(workDir).Commit(context.Background(), domain.GitCommitParams{
+		commit, commitErr := domaingit.NewInitGitRepository(workDir).Commit(context.Background(), domain.GitCommitParams{
 			Message:   "bd init: initialize beads issue tracking",
 			NoVerify:  true,
 			SkipHooks: true,
@@ -4538,7 +4538,7 @@ func commitEmbeddedInitArtifacts(workDir string, quiet bool) {
 			if !quiet {
 				fmt.Fprintf(os.Stderr, "Warning: failed to commit beads files: %v\n", commitErr)
 			}
-		} else if !quiet {
+		} else if commit.DidCommit && !quiet {
 			fmt.Printf("  %s Committed beads files to git\n", ui.RenderPass("✓"))
 		}
 		// WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/

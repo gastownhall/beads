@@ -370,6 +370,32 @@ func (s *testSuite) TestCommitInitArtifacts_LeavesForeignStagedFiles() {
 	s.Equal("unrelated work\n", string(body))
 }
 
+// GH#5654: when the artifact paths match HEAD and only foreign work is
+// staged, CommitInitArtifacts reports DidCommit=false without error and
+// leaves HEAD and the staged work untouched.
+func (s *testSuite) TestCommitInitArtifacts_NothingToCommitWithForeignStaged() {
+	s.gitInit()
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0o750))
+	s.writeFile(".beads/config.yaml", "# beads\n")
+	s.writeFile("CLAUDE.md", "instructions\n")
+	s.run("git", "add", ".beads", "CLAUDE.md")
+	s.run("git", "commit", "-q", "-m", "seed")
+	s.writeFile("work.txt", "unrelated work\n")
+	s.run("git", "add", "work.txt")
+
+	result, err := domain.NewGitUseCase(s.tmpDir, s.repo).CommitInitArtifacts(s.Ctx(), domain.CommitInitArtifactsParams{
+		BeadsDir:      ".beads/",
+		OptionalPaths: []string{"CLAUDE.md"},
+		Message:       "bd init: initialize beads issue tracking",
+		NoVerify:      true,
+		SkipHooks:     true,
+	})
+	s.Require().NoError(err)
+	s.False(result.DidCommit)
+	s.Equal("1", s.gitOutput("rev-list", "--count", "HEAD"))
+	s.Equal("work.txt", s.gitOutput("diff", "--cached", "--name-only"))
+}
+
 // gitOutput runs git in the suite's repository and returns its trimmed
 // combined output, for assertions that need to read repository state.
 func (s *testSuite) gitOutput(args ...string) string {
