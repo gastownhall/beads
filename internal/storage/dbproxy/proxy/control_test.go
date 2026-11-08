@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -475,4 +476,64 @@ func TestControl_IdleConnectionsDoNotStarveIdentify(t *testing.T) {
 	require.NoError(t, err, "idle unauthenticated connections exhausted the control listener")
 	got.MAC = ""
 	assert.Equal(t, &want, got)
+}
+
+// waitPeerClosed blocks until the server closes conn. A parked-but-open
+// peer only ever hits the local read deadline, so a real close is one whose
+// error is not os.ErrDeadlineExceeded, without depending on OS-specific EOF
+// versus reset distinctions.
+func waitPeerClosed(t *testing.T, conn net.Conn) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		_, err := conn.Read(make([]byte, 1))
+		return err != nil && !errors.Is(err, os.ErrDeadlineExceeded)
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
+// assertPeerOpen fails as soon as the server closes conn.
+func assertPeerOpen(t *testing.T, conn net.Conn) {
+	t.Helper()
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(300*time.Millisecond)))
+	_, err := conn.Read(make([]byte, 1))
+	require.ErrorIs(t, err, os.ErrDeadlineExceeded, "connection must stay open")
+}
+
+// At capacity one more connection evicts the oldest tracked peer: the
+// newcomer is admitted while the oldest is closed, the tracked count never
+// exceeds maxConcurrentIdentRequests, and a recent idle peer stays open.
+func TestControl_FullPoolEvictsOldest(t *testing.T) {
+	control, _, _ := newControlServer(t)
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(control.Port()))
+	conns := make([]net.Conn, 0, maxConcurrentIdentRequests+2)
+	t.Cleanup(func() {
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+	})
+	dial := func() net.Conn {
+		conn, err := net.DialTimeout("tcp", addr, time.Second)
+		require.NoError(t, err)
+		conns = append(conns, conn)
+		return conn
+	}
+	for range maxConcurrentIdentRequests {
+		_ = dial()
+	}
+	require.Eventually(t, func() bool {
+		return control.activeIdentConns() == maxConcurrentIdentRequests
+	}, 5*time.Second, 5*time.Millisecond)
+
+	newcomer := dial()
+	waitPeerClosed(t, conns[0])
+	require.LessOrEqual(t, control.activeIdentConns(), maxConcurrentIdentRequests)
+	assertPeerOpen(t, newcomer)
+	assertPeerOpen(t, conns[maxConcurrentIdentRequests-1])
+
+	// A second admission evicts exactly the next-oldest peer, leaving the
+	// rest of the pool untouched.
+	dial()
+	waitPeerClosed(t, conns[1])
+	require.LessOrEqual(t, control.activeIdentConns(), maxConcurrentIdentRequests)
+	assertPeerOpen(t, conns[2])
 }
