@@ -1,6 +1,7 @@
 package linear
 
 import (
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -1247,6 +1248,65 @@ func TestResolveTypeKeyNameCollision(t *testing.T) {
 			config: map[string]string{"linear.state_map.canceled": "closed"},
 			status: types.StatusClosed,
 			wantID: "state-canceled",
+		},
+		{
+			name:   "distinct name key wins over self-named type key",
+			states: defaultTeam,
+			config: map[string]string{
+				"linear.state_map.done":     "closed",
+				"linear.state_map.canceled": "closed",
+			},
+			status: types.StatusClosed,
+			wantID: "state-done",
+		},
+		{
+			name:   "documented type map still resolves in_progress",
+			states: defaultTeam,
+			config: documentedTypeMap,
+			status: types.StatusInProgress,
+			wantID: "state-progress",
+		},
+		{
+			name:   "outbound override still wins over ambiguous types",
+			states: defaultTeam,
+			config: func() map[string]string {
+				config := maps.Clone(documentedTypeMap)
+				config["linear.outbound_state_map.closed"] = "Done"
+				return config
+			}(),
+			status: types.StatusClosed,
+			wantID: "state-done",
+		},
+		{
+			// "Backlog" is a type word, just not this state's own type; a
+			// deliberate name choice equal to another type stays a name key.
+			name: "name key equal to another type still wins",
+			states: []State{
+				{ID: "state-backlog", Name: "Backlog", Type: "unstarted"},
+				{ID: "state-todo", Name: "Todo", Type: "unstarted"},
+			},
+			config: map[string]string{
+				"linear.state_map.backlog":   "open",
+				"linear.state_map.unstarted": "open",
+			},
+			status: types.StatusOpen,
+			wantID: "state-backlog",
+		},
+		{
+			name: "two distinct name matches still error",
+			states: []State{
+				{ID: "state-done", Name: "Done", Type: "completed"},
+				{ID: "state-shipped", Name: "Shipped", Type: "completed"},
+			},
+			config: map[string]string{
+				"linear.state_map.done":    "closed",
+				"linear.state_map.shipped": "closed",
+			},
+			status: types.StatusClosed,
+			wantErr: []string{
+				"maps beads status \"closed\" to multiple Linear states",
+				"Done, Shipped",
+			},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
