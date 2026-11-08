@@ -58,7 +58,7 @@ func CheckDoltRemoteGitOrigin(repoPath string) DoctorCheck {
 	}
 
 	normalizedOrigin := doltremote.CanonicalForComparison(originURL)
-	var colliding []string
+	var affected []string
 	gitSyncOrigin := false
 	for _, r := range sqlRemotes {
 		if doltremote.CanonicalForComparison(r.URL) != normalizedOrigin {
@@ -70,10 +70,10 @@ func CheckDoltRemoteGitOrigin(repoPath string) DoctorCheck {
 			gitSyncOrigin = true
 			continue
 		}
-		colliding = append(colliding, r.Name)
+		affected = append(affected, r.Name)
 	}
 
-	if len(colliding) == 0 {
+	if len(affected) == 0 {
 		if gitSyncOrigin {
 			return DoctorCheck{
 				Name:     name,
@@ -94,9 +94,9 @@ func CheckDoltRemoteGitOrigin(repoPath string) DoctorCheck {
 	return DoctorCheck{
 		Name:     name,
 		Status:   StatusWarning,
-		Message:  fmt.Sprintf("%d Dolt remote(s) match the git origin URL: %s", len(colliding), strings.Join(colliding, ", ")),
-		Detail:   "Using the git origin as a Dolt remote causes git and Dolt sync to share the same endpoint, which can cause conflicts.",
-		Fix:      "Remove the conflicting remote(s) with 'bd dolt remote remove <name>', or set dolt.local-only=true to disable remote sync.",
+		Message:  fmt.Sprintf("%d Dolt remote(s) match the git origin URL: %s", len(affected), strings.Join(affected, ", ")),
+		Detail:   "origin is the default sync remote; a Dolt remote with another name that points at the git origin repository is a federation peer with an unexpected role for that URL.",
+		Fix:      "Review the matching remote(s): remove an unintended one with 'bd dolt remote remove <name>', or point it at its own repository. The git-backed origin remains the remote for default sync.",
 		Category: CategoryDolt,
 	}
 }
