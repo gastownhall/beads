@@ -272,6 +272,22 @@ func TestAssigneeMatches(t *testing.T) {
 			actor:   "gastown_mayor",
 			wantErr: false,
 		},
+		// bd-740y4x (PR #5644): a rig-qualified owner stored as "gascity/bob"
+		// and resolved by a layer that cannot carry "/" as "gascity--bob" is
+		// one principal; the exact "--" decodes to "/" (ga-2vy9p2), so the
+		// owner closes its own bead without --force, in either direction.
+		{
+			name:    "rig-qualified owner under double-hyphen spelling passes (bd-740y4x)",
+			issue:   &types.Issue{ID: "bd-test", Status: types.StatusOpen, Assignee: "gascity/bob"},
+			actor:   "gascity--bob",
+			wantErr: false,
+		},
+		{
+			name:    "rig-qualified owner stored under double-hyphen spelling passes for the slash actor (bd-740y4x)",
+			issue:   &types.Issue{ID: "bd-test", Status: types.StatusOpen, Assignee: "gascity--bob"},
+			actor:   "gascity/bob",
+			wantErr: false,
+		},
 		// The control that keeps the guard from becoming a no-op: a genuinely
 		// DIFFERENT agent must still be refused, even though its own name also
 		// contains separator characters that canonicalize.
