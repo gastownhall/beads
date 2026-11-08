@@ -184,6 +184,11 @@ func runWispCreateCore(cmd *cobra.Command, args []string) error {
 	CheckReadonly("wisp create")
 
 	in := gatherWispCreateInput(cmd, args)
+	// Validate before the route split so both routes, dry-run included,
+	// reject a bad type with bd create's diagnostic before loading the proto.
+	if !in.wispType.IsValid() {
+		return HandleError("invalid wisp-type %q (must be %s)", in.wispType, types.ValidWispTypeNames())
+	}
 
 	if usesProxiedServer() {
 		return runWispCreateProxiedServer(rootCtx, in)
