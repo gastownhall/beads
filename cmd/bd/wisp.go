@@ -185,6 +185,13 @@ func runWispCreateCore(cmd *cobra.Command, args []string) error {
 
 	in := gatherWispCreateInput(cmd, args)
 
+	// Same enum and diagnostic as `bd create`, checked before the route
+	// split so dry runs and the proxied-server path reject invalid values
+	// without loading the proto or writing anything. IsValid accepts empty.
+	if !in.wispType.IsValid() {
+		return HandleError("invalid wisp-type %q (must be %s)", in.wispType, types.ValidWispTypeNames())
+	}
+
 	if usesProxiedServer() {
 		return runWispCreateProxiedServer(rootCtx, in)
 	}

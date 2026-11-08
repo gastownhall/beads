@@ -240,6 +240,88 @@ func TestWispCreateStampsWispType(t *testing.T) {
 	})
 }
 
+// TestWispCreateRejectsInvalidWispType verifies both wisp-creation entrypoints
+// validate --wisp-type against the same enum as `bd create`, reject the value
+// before any write or dry-run preview, and leave the store untouched.
+// `default` is the TTL fallback key, not a writable type (GH#8209).
+func TestWispCreateRejectsInvalidWispType(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
+	rootID := wispTestProto(t, ctx, s, 2)
+	withWispTestGlobals(t, s, ctx)
+
+	handlers := []struct {
+		name    string
+		handler func(*cobra.Command, []string) error
+	}{
+		{"bd mol wisp create", runWispCreate},
+		{"bd mol wisp", runWisp},
+	}
+
+	for _, h := range handlers {
+		for _, value := range []string{"bogus", "default"} {
+			for _, dryRun := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s rejects %q dry_run=%t", h.name, value, dryRun), func(t *testing.T) {
+					cmd := makeWispTestCmd(false, dryRun)
+					if err := cmd.Flags().Set("wisp-type", value); err != nil {
+						t.Fatalf("set --wisp-type=%q: %v", value, err)
+					}
+					stdout, runErr := captureStdoutWithError(t, func() error {
+						return h.handler(cmd, []string{rootID})
+					})
+					if runErr == nil {
+						t.Fatalf("--wisp-type %s succeeded; want invalid-value rejection", value)
+					}
+					if strings.Contains(stdout, "Dry run") {
+						t.Errorf("invalid --wisp-type produced a dry-run preview:\n%s", stdout)
+					}
+					if got := countEphemeral(t, ctx, s); got != 0 {
+						t.Errorf("invalid --wisp-type created %d issues, want 0", got)
+					}
+				})
+			}
+		}
+	}
+
+	t.Run("diagnostic matches bd create", func(t *testing.T) {
+		want := fmt.Sprintf("invalid wisp-type %q (must be %s)", "bogus", types.ValidWispTypeNames())
+		for _, h := range handlers {
+			stderr := captureStderr(t, func() {
+				cmd := makeWispTestCmd(false, false)
+				if err := cmd.Flags().Set("wisp-type", "bogus"); err != nil {
+					t.Fatalf("set --wisp-type: %v", err)
+				}
+				if err := h.handler(cmd, []string{rootID}); err == nil {
+					t.Fatalf("%s accepted --wisp-type bogus", h.name)
+				}
+			})
+			if !strings.Contains(stderr, want) {
+				t.Errorf("%s stderr missing %q, got:\n%s", h.name, want, stderr)
+			}
+		}
+	})
+
+	t.Run("every valid enum value and empty pass validation", func(t *testing.T) {
+		for _, wt := range append(types.ValidWispTypes(), types.WispType("")) {
+			cmd := makeWispTestCmd(false, true)
+			if err := cmd.Flags().Set("wisp-type", string(wt)); err != nil {
+				t.Fatalf("set --wisp-type=%q: %v", wt, err)
+			}
+			var runErr error
+			out := captureStdout(t, func() error {
+				runErr = runWispCreate(cmd, []string{rootID})
+				return nil
+			})
+			if runErr != nil {
+				t.Fatalf("--wisp-type %q: %v", wt, runErr)
+			}
+			if !strings.Contains(out, "Dry run") {
+				t.Errorf("--wisp-type %q dry run printed no preview:\n%s", wt, out)
+			}
+		}
+	})
+}
+
 // TestWispCreateDryRunFanoutMessage verifies the dry-run printout reflects
 // full DAG materialization by default and switches to "root only" wording
 // only under --root-only. Catches regressions in user-facing messaging.
