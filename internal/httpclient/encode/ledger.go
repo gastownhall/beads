@@ -161,6 +161,7 @@ func Ledger() []Row {
 	rows = append(rows, writeSideRows()...)
 	rows = append(rows, commandRows()...)
 	rows = append(rows, readyRequestRows()...)
+	rows = append(rows, blockedRequestRows()...)
 	rows = append(rows, listRequestRows()...)
 	rows = append(rows, queryRequestRows()...)
 	rows = append(rows, issueFilterRows()...)
@@ -191,6 +192,7 @@ var cachedLedger = sync.OnceValue(Ledger)
 
 var (
 	tyReadyRequest        = reflect.TypeOf(issueops.ReadyRequest{})
+	tyBlockedRequest      = reflect.TypeOf(issueops.BlockedRequest{})
 	tyListRequest         = reflect.TypeOf(issueops.ListRequest{})
 	tyQueryRequest        = reflect.TypeOf(issueops.QueryRequest{})
 	tyCountRequest        = reflect.TypeOf(issueops.CountRequest{})

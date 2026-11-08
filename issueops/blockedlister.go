@@ -27,6 +27,15 @@ type BlockedRequest struct {
 	LabelsAny []string
 	// ExcludeLabels must all be absent.
 	ExcludeLabels []string
+	// Ctx is the caller's declared execution context, as `k` / `k=v` tokens;
+	// see ReadyRequest.Ctx for the rule. nil means none was declared and the
+	// requires predicate is off: every blocked row lists, exactly as before
+	// the field existed. Non-nil, EVEN EMPTY, hides every row carrying a
+	// `requires:<token>` label the context does not satisfy, so the listing
+	// names as blocked only work the caller could run once unblocked. The
+	// nil/empty distinction is the whole semantics, so the role normalizes it
+	// with types.NormalizeCtx, never as a label list.
+	Ctx []string
 }
 
 // BlockedResult is the blocked listing.
