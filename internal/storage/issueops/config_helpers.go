@@ -116,8 +116,12 @@ func resolveCustomTypesFromTableInTx(ctx context.Context, tx DBTX) ([]string, bo
 }
 
 // GetConfigKeysInTx reads the named config keys in one statement. Keys with no
-// row are absent from the result. A row a case-insensitive collation matched is
-// reported under the spelling asked for, the answer a read of that key would give.
+// row are absent from the result. The config table takes the database's default
+// collation, so on a case-insensitive one the IN list can return a row spelled
+// differently from the key asked for. Such a row is reported under the spelling
+// asked for, the answer a read of that key would give. The remap folds letter
+// case only (strings.EqualFold), not accents, and a row that matches two keys
+// asked for in different case is reported under one of them.
 func GetConfigKeysInTx(ctx context.Context, tx DBTX, keys ...string) (map[string]string, error) {
 	if len(keys) == 0 {
 		return map[string]string{}, nil

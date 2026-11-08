@@ -813,7 +813,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   356-item plan. The standalone claim operation is unchanged. For an ID
   with a row in both `issues` and `wisps`, the result's labels and outgoing
   dependency records now come from `issues`, as its body already did; they
-  used to come from the wisp row.
+  used to come from the wisp row. A label that an update adds to such an ID
+  is still written to the wisp row, so that update's result does not list it.
 - **A server-mode write's post-transaction commit stages its tables with one
   `DOLT_ADD`.** The Dolt commit that most writes run after their SQL
   transaction used to send one `CALL DOLT_ADD` per table it stages; it now
