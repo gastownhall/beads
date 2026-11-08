@@ -31,6 +31,21 @@ runtime files out of git — no manual gitignore rules are needed. Never track
 the database directory (`.beads/embeddeddolt/` or `.beads/dolt/`) in git or
 via Git LFS.
 
+### The Bootstrap Commit
+
+Unless you pass `--stealth`, `bd init` in a Git repository stages its
+artifacts and makes one commit, `bd init: initialize beads issue tracking`.
+That commit holds only the changes under the artifact paths: `.beads/`, the
+agents file, `.claude/settings.json`, `CLAUDE.md`, `.agents/`, `.codex/`,
+`.cursor/` and `.gitignore` (whichever exist). Anything else you had staged
+stays staged and out of the commit, and unstaged edits stay unstaged.
+
+The scope is by path, not by who wrote the change: if one of those files
+already had uncommitted edits of yours (a modified `CLAUDE.md` or
+`.gitignore`, say), the bootstrap commit includes them. If Git refuses the
+commit (during a merge, for example), init prints a warning with Git's reason
+and continues.
+
 ## Git Hooks
 
 ### Installation
