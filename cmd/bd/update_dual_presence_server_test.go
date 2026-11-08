@@ -152,3 +152,128 @@ func TestCLI_UpdateDualPresence(t *testing.T) {
 		t.Errorf("bd show %s no longer reads the durable copy after the refusal:\n%s", id, showOut)
 	}
 }
+
+// TestCLI_UpdateDualPresenceRepairWorkflow walks the recovery the refusal
+// message points at (GH#5991): the existing doctor validation repair on the
+// corrupted workspace keeps the wisp copy's data and deletes the durable
+// twin, the next update succeeds and is visible, and the persistence
+// conversion after it leaves exactly one durable row carrying the updated
+// notes. Before the fix the first step is the one that fails: the update
+// silently succeeded, so nothing steered the user at the repair.
+func TestCLI_UpdateDualPresenceRepairWorkflow(t *testing.T) {
+	skipIfNoDolt(t)
+
+	tmpDir := t.TempDir()
+	env := os.Environ()
+	database := uniqueTestDBName(t)
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+
+	bd := func(args ...string) (string, error) {
+		return runBDExecAllowErrorWithEnv(t, tmpDir, env, args...)
+	}
+	mustBD := func(args ...string) string {
+		t.Helper()
+		out, err := bd(args...)
+		if err != nil {
+			t.Fatalf("bd %v failed: %v\n%s", args, err, out)
+		}
+		return out
+	}
+	sqlValue := func(query string) string {
+		t.Helper()
+		out := mustBD("sql", "--csv", query)
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		if len(lines) < 2 {
+			t.Fatalf("bd sql %q printed no row:\n%s", query, out)
+		}
+		return strings.TrimSpace(lines[len(lines)-1])
+	}
+
+	mustBD("init", "--backend", "dolt", "--server", "--external",
+		"--server-host", "127.0.0.1",
+		"--server-port", fmt.Sprintf("%d", testDoltServerPort),
+		"--database", database,
+		"--prefix", "udpw", "--quiet")
+
+	createOut := mustBD("create", "dual presence repair canary", "--type", "task", "--json")
+	jsonStart := strings.Index(createOut, "{")
+	if jsonStart < 0 {
+		t.Fatalf("bd create --json printed no object:\n%s", createOut)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(createOut[jsonStart:]), &created); err != nil {
+		t.Fatalf("parse bd create --json output: %v\n%s", err, createOut)
+	}
+	id := created.ID
+
+	// The corrupted state, seeded the way the reporter's database got there:
+	// a demote into wisps, wisp notes of their own, then the stale import's
+	// durable twin with different notes.
+	mustBD("update", id, "--no-history")
+	mustBD("update", id, "--notes", "wisp notes", "--force")
+	mustBD("sql", fmt.Sprintf(
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) "+
+			"SELECT id, title, description, design, acceptance_criteria, notes, status, priority, issue_type "+
+			"FROM wisps WHERE id = '%s'", id))
+	mustBD("sql", fmt.Sprintf("UPDATE issues SET notes = 'durable notes' WHERE id = '%s'", id))
+	if got := sqlValue(fmt.Sprintf("SELECT COUNT(*) FROM issues WHERE id = '%s'", id)); got != "1" {
+		t.Fatalf("fixture: issues copy count = %q, want 1", got)
+	}
+	if got := sqlValue(fmt.Sprintf("SELECT COUNT(*) FROM wisps WHERE id = '%s'", id)); got != "1" {
+		t.Fatalf("fixture: wisps copy count = %q, want 1", got)
+	}
+
+	// 1. The update refuses and names the repair — the step that fails
+	// before the fix, where the update silently wrote the wisp copy.
+	stdout, stderr, err := runBDExecSeparated(t, testBD, tmpDir, env,
+		"update", id, "--notes", "probe", "--force")
+	if err == nil {
+		t.Fatalf("bd update %s on a dual-present ID exited 0 instead of pointing at the repair.\nstdout:\n%s\nstderr:\n%s", id, stdout, stderr)
+	}
+	for _, want := range []string{id, "bd doctor --check=validate --fix"} {
+		if !strings.Contains(stdout+"\n"+stderr, want) {
+			t.Errorf("bd update refusal does not mention %q:\nstdout:\n%s\nstderr:\n%s", want, stdout, stderr)
+		}
+	}
+
+	// 2. The doctor validation repair: keeps the wisp copy's data, deletes
+	// the durable twin.
+	fixOut, err := bd("doctor", "--check=validate", "--fix", "--yes")
+	if err != nil {
+		t.Fatalf("bd doctor --check=validate --fix --yes failed: %v\n%s", err, fixOut)
+	}
+	if !strings.Contains(fixOut, "cross-table duplicate") {
+		t.Errorf("the doctor repair output does not name the cross-table duplicate it fixed:\n%s", fixOut)
+	}
+	if got := sqlValue(fmt.Sprintf("SELECT COUNT(*) FROM issues WHERE id = '%s'", id)); got != "0" {
+		t.Errorf("after the repair the durable copy of %s still exists; want it deleted (kept the wisp copy)", id)
+	}
+	if got := sqlValue(fmt.Sprintf("SELECT COUNT(*) FROM wisps WHERE id = '%s'", id)); got != "1" {
+		t.Errorf("after the repair the wisp copy of %s is gone; want the repair to keep it", id)
+	}
+	if got := sqlValue(fmt.Sprintf("SELECT notes FROM wisps WHERE id = '%s'", id)); got != "wisp notes" {
+		t.Errorf("after the repair the wisp copy of %s carries notes %q; want the wisp data kept", id, got)
+	}
+
+	// 3. The update the refusal blocked now succeeds — and is visible.
+	mustBD("update", id, "--notes", "repaired notes", "--force")
+	showOut := mustBD("show", id, "--json")
+	if !strings.Contains(showOut, "repaired notes") {
+		t.Errorf("bd show %s does not display the post-repair update:\n%s", id, showOut)
+	}
+
+	// 4. Persistence conversion: one durable row with the updated notes, no
+	// wisp row.
+	mustBD("update", id, "--persistent")
+	if got := sqlValue(fmt.Sprintf("SELECT COUNT(*) FROM issues WHERE id = '%s'", id)); got != "1" {
+		t.Errorf("after --persistent: issues copy count = %q, want 1", got)
+	}
+	if got := sqlValue(fmt.Sprintf("SELECT COUNT(*) FROM wisps WHERE id = '%s'", id)); got != "0" {
+		t.Errorf("after --persistent: wisps copy count = %q, want 0", got)
+	}
+	if got := sqlValue(fmt.Sprintf("SELECT notes FROM issues WHERE id = '%s'", id)); got != "repaired notes" {
+		t.Errorf("after --persistent: durable notes = %q, want %q", got, "repaired notes")
+	}
+}
