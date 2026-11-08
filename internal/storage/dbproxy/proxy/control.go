@@ -36,6 +36,8 @@ type controlServer struct {
 	// oldest accepted first. The zero value is an empty pool.
 	mu     sync.Mutex
 	active list.List // of *controlConn
+
+	handlers sync.WaitGroup
 }
 
 // controlConn is one admitted control connection. elem is its place in
@@ -79,8 +81,28 @@ func (s *controlServer) Close() error {
 			err = nil
 		}
 		<-s.done
+		s.closeActive()
+		s.handlers.Wait()
 	})
 	return err
+}
+
+// closeActive empties the pool and closes its connections, which unblocks
+// their handlers. It runs after the accept loop exited, so nothing joins
+// the pool afterwards.
+func (s *controlServer) closeActive() {
+	var conns []net.Conn
+	s.mu.Lock()
+	for e := s.active.Front(); e != nil; e = e.Next() {
+		c := e.Value.(*controlConn)
+		c.elem = nil
+		conns = append(conns, c.conn)
+	}
+	s.active.Init()
+	s.mu.Unlock()
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
 }
 
 // acceptLoop retries transient Accept failures (e.g. EMFILE) indefinitely
@@ -120,7 +142,7 @@ func (s *controlServer) acceptLoopWithAfter(after func(time.Duration) <-chan tim
 		delay = controlAcceptRetryDelay
 		c := s.admit(conn)
 		deadline := time.Now().Add(identDeadline)
-		go s.serve(c, deadline)
+		s.handlers.Go(func() { s.serve(c, deadline) })
 	}
 }
 

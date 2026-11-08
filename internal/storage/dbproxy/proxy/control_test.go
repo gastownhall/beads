@@ -849,3 +849,57 @@ func recordingRelay(t *testing.T, controlPort int) (int, func() string) {
 		return sent.String()
 	}
 }
+
+// AC-6 (bd-g4xtvt): closing the control server stops admission and closes
+// and drains every connection it holds, idle or blocked in a reply write,
+// also while the accept loop is backing off after a transient failure.
+func TestControl_CloseDrainsConnections(t *testing.T) {
+	never := func(time.Duration) <-chan time.Time { return nil }
+	control, listener, secret := startSyntheticControl(t, never)
+	idle, _ := newTestControlConn(t)
+	feedControlConn(t, listener, idle)
+	writer, writerClient := newTestControlConn(t)
+	feedControlConn(t, listener, writer)
+	request := identRequest(t, secret, strings.Repeat("ab", 16))
+	go func() { _, _ = io.WriteString(writerClient, request) }()
+	select {
+	case <-writer.writing:
+	case <-time.After(time.Second):
+		t.Fatal("the handler did not start its reply")
+	}
+	require.Equal(t, 2, activeControlConns(control))
+	// The loop now waits out a backoff that never ends: Close must wake it.
+	select {
+	case listener.errs <- errors.New("transient accept failure"):
+	case <-time.After(time.Second):
+		t.Fatal("control accept loop did not take the accept error")
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- control.Close() }()
+	select {
+	case err := <-closed:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return")
+	}
+	for _, conn := range []*testControlConn{idle, writer} {
+		assert.True(t, conn.isClosed(), "Close left a tracked connection open")
+		// The second close is the handler's own cleanup: it finished
+		// before Close returned.
+		assert.EqualValues(t, 2, conn.closes.Load(), "Close returned before the handler drained")
+	}
+	select {
+	case <-writer.written:
+	default:
+		t.Fatal("the blocked reply write was still pending after Close")
+	}
+	assert.Equal(t, 0, activeControlConns(control))
+
+	late, _ := newTestControlConn(t)
+	select {
+	case listener.conns <- late:
+		t.Fatal("the control server accepted a connection after Close")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
