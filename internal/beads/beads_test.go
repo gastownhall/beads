@@ -465,6 +465,113 @@ func TestFindBeadsDirFromPreservesNestedProjectUnderOSTempRoot(t *testing.T) {
 	}
 }
 
+// TestFindBeadsDirFromWithSource pins the redirect source reported for each
+// discovery tier of FindBeadsDirFrom: the .beads whose redirect the selection
+// followed, or "" for a direct workspace. `bd -C` takes the source database
+// from it (GH#5756), so a tier that loses the source loses the database.
+func TestFindBeadsDirFromWithSource(t *testing.T) {
+	t.Cleanup(git.ResetCaches)
+	mkdir := func(t *testing.T, dir string) string {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	// workspace gives dir a .beads with project files and returns it.
+	workspace := func(t *testing.T, dir string) string {
+		t.Helper()
+		beadsDir := mkdir(t, filepath.Join(dir, ".beads"))
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return beadsDir
+	}
+	// redirect gives dir a .beads that redirects to target and returns it.
+	redirect := func(t *testing.T, dir, target string) string {
+		t.Helper()
+		beadsDir := mkdir(t, filepath.Join(dir, ".beads"))
+		if err := os.WriteFile(filepath.Join(beadsDir, RedirectFileName), []byte(target+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return beadsDir
+	}
+	gitRepo := func(t *testing.T, dir string) string {
+		t.Helper()
+		runGitInDir(t, mkdir(t, dir), "init", "-q")
+		return dir
+	}
+	samePath := func(got, want string) bool {
+		if got == "" || want == "" {
+			return got == want
+		}
+		return utils.PathsEqual(got, want)
+	}
+
+	for _, tc := range []struct {
+		name string
+		// setup builds the fixture and returns where discovery starts, the
+		// workspace it must select, and the redirect it must report.
+		setup func(t *testing.T, root string) (start, wantSelected, wantSource string)
+	}{
+		{name: "walk up to a redirect", setup: func(t *testing.T, root string) (string, string, string) {
+			store := workspace(t, filepath.Join(root, "store"))
+			repo := gitRepo(t, filepath.Join(root, "repo"))
+			return mkdir(t, filepath.Join(repo, "sub")), store, redirect(t, repo, store)
+		}},
+		{name: "direct workspace", setup: func(t *testing.T, root string) (string, string, string) {
+			repo := gitRepo(t, filepath.Join(root, "repo"))
+			return repo, workspace(t, repo), ""
+		}},
+		{name: "nested direct workspace under a redirected root", setup: func(t *testing.T, root string) (string, string, string) {
+			repo := gitRepo(t, filepath.Join(root, "repo"))
+			redirect(t, repo, workspace(t, filepath.Join(root, "store")))
+			nested := filepath.Join(repo, "nested")
+			return nested, workspace(t, nested), ""
+		}},
+		{name: "nested redirect under a redirected root", setup: func(t *testing.T, root string) (string, string, string) {
+			repo := gitRepo(t, filepath.Join(root, "repo"))
+			redirect(t, repo, workspace(t, filepath.Join(root, "storeA")))
+			storeB := workspace(t, filepath.Join(root, "storeB"))
+			sub := mkdir(t, filepath.Join(repo, "sub"))
+			return sub, storeB, redirect(t, sub, storeB)
+		}},
+		{name: "linked worktree inherits the main checkout's redirect", setup: func(t *testing.T, root string) (string, string, string) {
+			mainRepo, worktree := setupRegularWorktreeRepo(t)
+			store := workspace(t, filepath.Join(root, "store"))
+			return worktree, store, redirect(t, mainRepo, store)
+		}},
+		{name: "jj secondary inherits the primary's redirect", setup: func(t *testing.T, root string) (string, string, string) {
+			primary := filepath.Join(root, "primary")
+			mkdir(t, filepath.Join(primary, ".jj", "repo"))
+			secondary := filepath.Join(root, "secondary")
+			mkdir(t, filepath.Join(secondary, ".jj"))
+			if err := os.WriteFile(filepath.Join(secondary, ".jj", "repo"), []byte(filepath.Join(primary, ".jj", "repo")+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			store := workspace(t, filepath.Join(root, "store"))
+			return secondary, store, redirect(t, primary, store)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			start, wantSelected, wantSource := tc.setup(t, root)
+			git.ResetCaches()
+
+			selected, source := FindBeadsDirFromWithSource(start)
+			if !samePath(selected, wantSelected) || !samePath(source, wantSource) {
+				t.Fatalf("FindBeadsDirFromWithSource(%q) = (%q, %q), want (%q, %q)", start, selected, source, wantSelected, wantSource)
+			}
+			if got := FindBeadsDirFrom(start); got != selected {
+				t.Fatalf("FindBeadsDirFrom(%q) = %q, want the same selection %q", start, got, selected)
+			}
+		})
+	}
+}
+
 func TestDiscoveryResolversDoNotAdoptOSTempRootAncestor(t *testing.T) {
 	tempRoot := filepath.Join(t.TempDir(), "tmp")
 	rootBeadsDir := filepath.Join(tempRoot, ".beads")

@@ -1226,6 +1226,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd -C <dir>` and an exported `BEADS_DIR` use the selected workspace's own
+  redirect and `dolt_database`, not the redirect in your current directory
+  (GH#5756). Run from a redirected clone, they opened the selected
+  workspace's store under the clone's `dolt_database`, and `bd where`
+  reported the clone's redirect as the selected workspace's. `bd where` and
+  `bd prime`'s redirect notice now report only a redirect that leads to the
+  selected workspace. A `BEADS_DIR` naming your current clone's own redirect
+  target still keeps that clone's redirect and `dolt_database` (bd-wayc3),
+  and `bd -C` onto a linked worktree with no `.beads` of its own keeps its
+  main checkout's redirect, as running bd inside the worktree does.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

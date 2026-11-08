@@ -44,6 +44,7 @@
 
 100 10 TestEmbeddedCreateScalarAndRelationships
 
+100 11 TestEmbeddedChangeDirStorelessTargetDoesNotServeCallerStore
 100 11 TestEmbeddedKVConcurrent
 
 100 12 TestEmbeddedAutoImportFallback_ConflictSkip_SkipsRetiredRows
@@ -58,6 +59,7 @@
 100 14 TestEmbeddedReopenConcurrent
 
 100 15 TestEmbeddedPurgeWispsPlaneRetention
+100 15 TestEmbeddedSelectedWorkspaceWriteIsolation
 
 100 16 TestEmbeddedMemoryConcurrent
 100 16 TestEmbeddedMigratePersonal_refusesIssueAlreadyInPlanningRepo
