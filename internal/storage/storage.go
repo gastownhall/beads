@@ -41,7 +41,14 @@ var (
 	ErrVersionMismatch    = issueops.ErrVersionMismatch
 	ErrStatusMismatch     = issueops.ErrStatusMismatch
 	ErrNotesOverwrite     = issueops.ErrNotesOverwrite
+	// ErrDualPresence matches an update refused because its ID has a row in
+	// both the issues and the wisps table (issueops.DualPresenceError).
+	ErrDualPresence = issueops.ErrDualPresence
 )
+
+// DualPresenceError reports the ID of an update refused because it names a
+// row in both the issues and the wisps table. See issueops.DualPresenceError.
+type DualPresenceError = issueops.DualPresenceError
 
 // CloseOpenChildrenError reports the issue and open-child count that refused a
 // guarded close. See issueops.CloseOpenChildrenError.

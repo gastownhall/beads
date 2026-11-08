@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/steveyegge/beads/internal/storage/dberrors"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // IsActiveWispInTx checks whether the given ID exists in the wisps table
@@ -20,6 +23,36 @@ func IsActiveWispInTx(ctx context.Context, tx DBTX, id string) bool {
 	var exists int
 	err := tx.QueryRowContext(ctx, "SELECT 1 FROM wisps WHERE id = ? LIMIT 1", id).Scan(&exists)
 	return err == nil
+}
+
+// ResolveUpdatePlaneInTx reports which table an update of id writes: true for
+// wisps, false for issues. It is IsActiveWispInTx with the one answer that
+// predicate cannot give. An ID with a row in BOTH tables is refused with
+// *publicops.DualPresenceError (GH#5991): readers resolve it issues-first,
+// while a wisps-first write would change the copy no reader returns and still
+// report success.
+//
+// The durable path costs the same single wisps probe as before; the issues
+// probe runs only on a wisp hit. A missing wisps table routes durable, as it
+// always has. Any other probe failure is returned rather than read as "no
+// row", so a broken probe can never route a twin's write by default.
+func ResolveUpdatePlaneInTx(ctx context.Context, tx DBTX, id string) (bool, error) {
+	var probe int
+	err := tx.QueryRowContext(ctx, "SELECT 1 FROM wisps WHERE id = ? LIMIT 1", id).Scan(&probe)
+	switch {
+	case errors.Is(err, sql.ErrNoRows), err != nil && dberrors.IsMissingTable(err, "wisps"):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("resolve update plane for %s: probe wisps: %w", id, err)
+	}
+	err = tx.QueryRowContext(ctx, "SELECT 1 FROM issues WHERE id = ? LIMIT 1", id).Scan(&probe)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return true, nil
+	case err != nil:
+		return false, fmt.Errorf("resolve update plane for %s: probe issues: %w", id, err)
+	}
+	return false, &publicops.DualPresenceError{ID: id}
 }
 
 func wispsTableEmptyOrMissingInTx(ctx context.Context, tx DBTX) (bool, error) {
