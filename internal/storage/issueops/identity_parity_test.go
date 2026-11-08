@@ -21,7 +21,10 @@ import (
 // TestCanonicalActor/TestActorMatches already pin in
 // internal/validation/issue_test.go through BOTH implementations; a future
 // edit to either separator set or matching rule that isn't mirrored in the
-// other fails here, not in production.
+// other fails here, not in production. The bd-740y4x rows below add the
+// slash-qualified report pair and its negative-control spellings to those
+// tables; TestAssigneeMatches/TestCheckClosable are the expected-value
+// oracle for them (parity alone is not).
 func TestIdentityCanonicalizationParityWithValidation(t *testing.T) {
 	canonicalCases := []struct {
 		name string
@@ -39,6 +42,14 @@ func TestIdentityCanonicalizationParityWithValidation(t *testing.T) {
 		{name: "exact double-hyphen separator decodes to the rig-qualified slash (ga-2vy9p2)", in: "gastown--mayor"},
 		{name: "raw slash passes through unchanged", in: "gastown/mayor"},
 		{name: "a hyphen run longer than two is not the exact slash spelling and falls back to generic collapse", in: "gastown---mayor"},
+		{name: "report pair: raw slash spelling passes through (bd-740y4x)", in: "gascity/bob"},
+		{name: "report pair: session-name spelling decodes to the rig-qualified slash (bd-740y4x)", in: "gascity--bob"},
+		{name: "negative control: a different agent in the same rig (bd-740y4x)", in: "gascity--alice"},
+		{name: "negative control: the same agent name in a different rig (bd-740y4x)", in: "python419--bob"},
+		{name: "negative control: dotted-axis double-underscore spelling stays off the slash axis (bd-740y4x)", in: "gascity__bob"},
+		{name: "negative control: dotted-axis dot spelling stays off the slash axis (bd-740y4x)", in: "gascity.bob"},
+		{name: "negative control: dotted-axis single-underscore spelling stays off the slash axis (bd-740y4x)", in: "gascity_bob"},
+		{name: "negative control: dotted-axis hyphen spelling stays off the slash axis (bd-740y4x)", in: "gascity-bob"},
 	}
 	for _, tc := range canonicalCases {
 		t.Run("CanonicalActor/"+tc.name, func(t *testing.T) {
@@ -63,6 +74,14 @@ func TestIdentityCanonicalizationParityWithValidation(t *testing.T) {
 		{name: "double-hyphen and double-underscore spellings no longer widen to the same identity (ga-2vy9p2)", assignee: "gastown--mayor", actor: "gastown__mayor"},
 		{name: "double-hyphen spelling matches its raw-slash identity (ga-2vy9p2)", assignee: "gastown--mayor", actor: "gastown/mayor"},
 		{name: "raw slash and raw dot stay genuinely distinct identities", assignee: "gastown/mayor", actor: "gastown.mayor"},
+		{name: "report pair: session-name spelling matches its raw-slash identity (bd-740y4x)", assignee: "gascity/bob", actor: "gascity--bob"},
+		{name: "report pair: raw-slash identity matches its session-name spelling, exchanged (bd-740y4x)", assignee: "gascity--bob", actor: "gascity/bob"},
+		{name: "report pair negative: a different agent in the same rig does not match (bd-740y4x)", assignee: "gascity/bob", actor: "gascity--alice"},
+		{name: "report pair negative: the same agent name in a different rig does not match (bd-740y4x)", assignee: "gascity/bob", actor: "python419--bob"},
+		{name: "report pair negative: dotted-axis double-underscore spelling does not match the slash spelling (bd-740y4x)", assignee: "gascity/bob", actor: "gascity__bob"},
+		{name: "report pair negative: dotted-axis dot spelling does not match the slash spelling (bd-740y4x)", assignee: "gascity/bob", actor: "gascity.bob"},
+		{name: "report pair negative: dotted-axis single-underscore spelling does not match the slash spelling (bd-740y4x)", assignee: "gascity/bob", actor: "gascity_bob"},
+		{name: "report pair negative: dotted-axis hyphen spelling does not match the slash spelling (bd-740y4x)", assignee: "gascity/bob", actor: "gascity-bob"},
 	}
 	for _, tc := range matchCases {
 		t.Run("ActorMatches/"+tc.name, func(t *testing.T) {
