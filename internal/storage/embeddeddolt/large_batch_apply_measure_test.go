@@ -446,10 +446,19 @@ func TestLargeBatchApplyWallClock_Embedded(t *testing.T) {
 // id tombstone tables — in ONE statement where it used to read the two row
 // tables in two: -1 statement per create item (356: 102 creates, -102; 712:
 // 204, -204; classic: 10, -10).
+//
+// Re-pinned for the dual-presence update refusal (GH#5991; was 6090 / 12178 /
+// 805). A guarded update now resolves its plane in executeUpdate, before the
+// pre-image, where only an IssuePlaneOnly update probed before; the inner
+// updater keeps its own resolve because it is also a standalone entry point.
+// That is one more wisps probe per update item (356: 16 updates, +16; 712: 32,
+// +32; classic: 10, +10). Every update here targets a durable create, so the
+// issues probe a wisp hit adds never runs. The Dolt server backend rises by
+// the same amounts.
 var pinnedEmbeddedStatementCounts = map[string]int64{
-	"356 (mol 1x)":    6090,
-	large712ShapeName: 12178,
-	"40 (classic)":    805,
+	"356 (mol 1x)":    6106,
+	large712ShapeName: 12210,
+	"40 (classic)":    815,
 }
 
 // BenchmarkLargeBatchApply_Embedded benchmarks issueops.ApplyBatchInTx on

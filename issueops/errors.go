@@ -95,8 +95,10 @@ type DualPresenceError struct {
 
 func (e *DualPresenceError) Error() string {
 	return fmt.Sprintf("%v: update of %s refused: the ID has a row in both the issues and the wisps table, so the write could change a copy that reads do not return; "+
-		"in a server-mode workspace `bd doctor --check=validate --fix` repairs every such ID by deleting its issues copy (with that copy's labels, dependencies, events and comments) and keeping the wisp copy, "+
-		"without merging the two, so compare them first if the issues copy holds edits you need",
+		"in a server-mode workspace `bd doctor --check=validate --fix` (with --yes when run non-interactively) repairs every such ID by deleting its issues copy and keeping the wisp copy, without merging the two. "+
+		"That delete also removes the issues copy's labels, dependencies, events and comments, and every other issue's dependency on it (a child's parent-child link, a blocks edge or any other type), "+
+		"so first list every such ID, not only this one, with `bd sql 'SELECT id FROM issues WHERE id IN (SELECT id FROM wisps)'`; for each, compare the two copies if the issues copy holds edits you need, "+
+		"and record its dependents with `bd dep list <id> --direction=up` to re-add with `bd dep add` any edge the repair removed",
 		ErrDualPresence, e.ID)
 }
 

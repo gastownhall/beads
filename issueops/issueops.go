@@ -346,8 +346,10 @@ type UpdateRequest struct {
 	// Claim is true.
 	ExpectedStatus *Status
 	// IssuePlaneOnly restricts the update to the issue plane: an ID that names
-	// a wisp is ErrNotFound rather than an ephemeral row to update. The zero
-	// value keeps the both-plane auto-resolve every caller gets today.
+	// only a wisp is ErrNotFound rather than an ephemeral row to update, and an
+	// ID with a row in both planes is refused with *DualPresenceError either
+	// way, as Lifecycle.Update documents. The zero value keeps the both-plane
+	// auto-resolve every caller gets today.
 	//
 	// Resolution happens INSIDE the transaction the update runs in, so a
 	// caller cannot be handed the plane an earlier read saw. It exists for the
@@ -569,8 +571,15 @@ type Lifecycle interface {
 	// patch and force flags, unless it sets AllowTemplate — templates are
 	// read-only — checked after the
 	// compare-and-set preconditions, so a stale guard still reports the
-	// mismatch. A refusal or validation error leaves persistent state
-	// unchanged.
+	// mismatch. A request that sets any patch field or a claim for an ID with
+	// a row in both the issues and the wisps table returns *DualPresenceError,
+	// even when it only restates current values. Request validation comes
+	// first; a check of a requested value against stored state or workspace
+	// configuration, such as an issue type the workspace does not define, may
+	// come after the refusal. An implementation may report a template,
+	// assignee-transfer or notes-overwrite refusal it checks first, and may
+	// answer a request that sets nothing without refusing. A refusal or
+	// validation error leaves persistent state unchanged.
 	Update(context.Context, UpdateRequest) (UpdateResult, error)
 	// Close validates guards and commits the complete request as one atomic
 	// mutation. It moves the issue to literal StatusClosed, including from a
