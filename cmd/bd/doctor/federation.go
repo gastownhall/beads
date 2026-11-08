@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/pushstate"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -531,7 +532,13 @@ func CheckFederationPeerConnectivity(path string) DoctorCheck {
 	}
 }
 
-// CheckFederationSyncStaleness checks for stale sync status with peers.
+// CheckFederationSyncStaleness checks for stale sync status with peers and,
+// since GH#6289, with origin — the remote push-state.json describes and the
+// one the check used to skip entirely, which let a failed auto-push report
+// "Sync is up to date". The check stays offline: origin is judged from the
+// workspace's own evidence (recorded push attempts and cached tracking refs,
+// via SyncStatus), never from a network call, and the aggregation lives in
+// evaluateSyncStaleness so its combinations are unit-testable.
 func CheckFederationSyncStaleness(path string) DoctorCheck {
 	backend, beadsDir := getBackendAndBeadsDir(path)
 
@@ -579,13 +586,14 @@ func CheckFederationSyncStaleness(path string) DoctorCheck {
 		}
 	}
 
-	// Check sync status for each peer
-	var staleWarnings []string
-	var totalBehind int
+	in := syncStalenessInputs{HasRemotes: true}
 
+	// Check sync status for each peer
 	for _, remote := range remotes {
-		// Skip origin - check only federation peers
+		// Origin is not a federation peer; it is checked in its own leg
+		// below.
 		if remote.Name == "origin" {
+			in.OriginConfigured = true
 			continue
 		}
 
@@ -596,8 +604,8 @@ func CheckFederationSyncStaleness(path string) DoctorCheck {
 
 		// Warn if significantly behind
 		if status.LocalBehind > 0 {
-			totalBehind += status.LocalBehind
-			staleWarnings = append(staleWarnings, fmt.Sprintf("%s: %d commits behind",
+			in.TotalPeerBehind += status.LocalBehind
+			in.PeerWarnings = append(in.PeerWarnings, fmt.Sprintf("%s: %d commits behind",
 				remote.Name, status.LocalBehind))
 		}
 
@@ -605,23 +613,19 @@ func CheckFederationSyncStaleness(path string) DoctorCheck {
 		// When it is, we can add time-based staleness warnings here
 	}
 
-	if len(staleWarnings) == 0 {
-		return DoctorCheck{
-			Name:     "Sync Staleness",
-			Status:   StatusOK,
-			Message:  "Sync is up to date",
-			Category: CategoryFederation,
+	// The origin leg runs only when the workspace allows pushes; a rig that
+	// opted out (no-push, dolt.local-only) is reported as skipped, not
+	// judged.
+	if in.OriginConfigured {
+		if reason := originCheckSkipReason(beadsDir); reason != "" {
+			in.OriginSkipReason = reason
+		} else {
+			in.OriginStatus, in.OriginStatusErr = store.SyncStatus(ctx, "origin")
+			in.PushState, in.PushStateErr = pushstate.Load(beadsDir)
 		}
 	}
 
-	return DoctorCheck{
-		Name:     "Sync Staleness",
-		Status:   StatusWarning,
-		Message:  fmt.Sprintf("%d total commits behind peers", totalBehind),
-		Detail:   strings.Join(staleWarnings, "\n"),
-		Fix:      "Run 'bd federation sync' to synchronize with peers",
-		Category: CategoryFederation,
-	}
+	return evaluateSyncStaleness(in)
 }
 
 // CheckFederationConflicts checks for unresolved merge conflicts.
