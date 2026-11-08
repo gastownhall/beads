@@ -1200,6 +1200,16 @@ func TestResolveTypeKeyNameCollision(t *testing.T) {
 			wantErr: []string{"type fallback is ambiguous", "Backlog, Todo", "linear.outbound_state_map.open"},
 		},
 		{
+			name:   "AC-3 a name key that is not a type outranks a self-named state",
+			states: team,
+			config: map[string]string{
+				"linear.state_map.done":     "closed",
+				"linear.state_map.canceled": "closed",
+			},
+			status: types.StatusClosed,
+			wantID: "state-done",
+		},
+		{
 			name:   "documented type map still resolves in_progress",
 			states: team,
 			config: typeMap,
