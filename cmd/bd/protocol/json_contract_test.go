@@ -410,3 +410,89 @@ func TestJSONContract_SchemaVersionPresent(t *testing.T) {
 		})
 	}
 }
+
+// TestJSONContract_WorkRowCountsAreBlocksOnlyShowCountsEveryEdge pins
+// bd-dh3uij (GH#5688): the same-named count fields on a LIST work row and a
+// SHOW detail answer different questions, and the difference is the
+// contract, not a bug to be fixed. The list row counts `blocks` edges only —
+// it shares the ready-work counts machinery — so an epic whose dependents
+// are its children reports dependent_count 0 there, exactly the reading
+// that made a reporter's "never close an issue with open dependents" sweep
+// pass vacuously. Show counts every edge type with far-end deduplication.
+// This is a behavior pin that passes at base: runtime is intentionally
+// unchanged; the fix for GH#5688 is the documented meaning, corrected
+// elsewhere.
+func TestJSONContract_WorkRowCountsAreBlocksOnlyShowCountsEveryEdge(t *testing.T) {
+	t.Parallel()
+	w := newWorkspace(t)
+
+	// E: three parent-child dependents (its children), one blocks
+	// dependent, one outgoing blocks edge and one outgoing discovered-from
+	// edge. Every count has something to say about it.
+	epic := w.create("--title", "Counts epic", "--type", "epic")
+	w.create("--title", "Counts child 1", "--parent", epic)
+	w.create("--title", "Counts child 2", "--parent", epic)
+	w.create("--title", "Counts child 3", "--parent", epic)
+	blocksDependent := w.create("--title", "Counts blocks dependent")
+	w.run("dep", "add", blocksDependent, epic)
+	upstream := w.create("--title", "Counts upstream")
+	w.run("dep", "add", epic, upstream)
+	discoveredSource := w.create("--title", "Counts discovered source")
+	w.run("dep", "add", epic, discoveredSource, "--type", "discovered-from")
+
+	listRow := func(id string) map[string]any {
+		t.Helper()
+		row := findByID(parseJSONOutput(t, w.run("list", "--json")), id)
+		if row == nil {
+			t.Fatalf("bd list --json did not return %s", id)
+		}
+		return row
+	}
+
+	t.Run("list_counts_blocks_edges_only", func(t *testing.T) {
+		row := listRow(epic)
+		// Outgoing blocks edges: the upstream edge. The discovered-from
+		// edge is outgoing but not blocks, so it does not count.
+		assertFieldFloat(t, row, "dependency_count", 1)
+		// Incoming blocks edges: the blocks dependent. The three children
+		// are dependents via parent-child edges, which do not count.
+		assertFieldFloat(t, row, "dependent_count", 1)
+		// The dependencies array carries EVERY outgoing edge type, so it
+		// outnumbers the count: two records where dependency_count says one.
+		deps := getObjectSlice(row, "dependencies")
+		types := map[string]bool{}
+		for _, dep := range deps {
+			depType, _ := dep["type"].(string)
+			types[depType] = true
+		}
+		if len(deps) != 2 || !types["blocks"] || !types["discovered-from"] {
+			t.Errorf("list dependencies = %d records with types %v, want both the blocks and the discovered-from outgoing edges", len(deps), types)
+		}
+	})
+
+	t.Run("show_counts_every_edge_type", func(t *testing.T) {
+		shown := w.showJSON(epic)
+		// Outgoing: upstream (blocks) + discovered source. Incoming: three
+		// children (parent-child) + the blocks dependent.
+		assertFieldFloat(t, shown, "dependency_count", 2)
+		assertFieldFloat(t, shown, "dependent_count", 4)
+	})
+
+	t.Run("epic_with_only_child_dependents_reads_zero_on_list", func(t *testing.T) {
+		// The reporter's shape with no blocks dependent to mask it: list
+		// 0, show > 0 for the same issue.
+		parent := w.create("--title", "Child-only epic", "--type", "epic")
+		w.create("--title", "Child-only child A", "--parent", parent)
+		w.create("--title", "Child-only child B", "--parent", parent)
+		assertFieldFloat(t, listRow(parent), "dependent_count", 0)
+		assertFieldFloat(t, w.showJSON(parent), "dependent_count", 2)
+	})
+
+	t.Run("no_edges_agrees_across_both_paths", func(t *testing.T) {
+		bare := w.create("--title", "Counts bare issue")
+		assertFieldFloat(t, listRow(bare), "dependency_count", 0)
+		assertFieldFloat(t, listRow(bare), "dependent_count", 0)
+		assertFieldFloat(t, w.showJSON(bare), "dependency_count", 0)
+		assertFieldFloat(t, w.showJSON(bare), "dependent_count", 0)
+	})
+}
