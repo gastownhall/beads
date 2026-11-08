@@ -540,6 +540,23 @@ func TestCreateIssueFromFormValues(t *testing.T) {
 		assertFormBlocksEdge(t, ctx, s, child.ID, target.ID)
 	})
 
+	// bd-3073gm: each equivalent pair on its own stores one blocks edge, so
+	// no single pairing can collide as two types on one target.
+	t.Run("EquivalentPairsCollapse", func(t *testing.T) {
+		for _, pair := range [][2]string{
+			{"blocked-by:", "depends-on:"},
+			{"blocks:", "depends-on:"},
+			{"", "blocked-by:"},
+		} {
+			target := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Pair target " + pair[0] + pair[1]})
+			child := createFormIssueForTest(t, ctx, s, &createFormValues{
+				Title:        "Pair child " + pair[0] + pair[1],
+				Dependencies: []string{pair[0] + target.ID, pair[1] + target.ID},
+			})
+			assertFormBlocksEdge(t, ctx, s, child.ID, target.ID)
+		}
+	})
+
 	// bd-3073gm: dependencies the form would refuse fail a direct call before
 	// it reserves a child ID or writes an issue or an edge.
 	t.Run("InvalidDependenciesFailBeforeAnyWrite", func(t *testing.T) {
