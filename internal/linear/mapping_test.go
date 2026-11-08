@@ -906,6 +906,15 @@ func TestResolveTypeKeyNameCollision(t *testing.T) {
 			wantID: "state-done",
 		},
 		{
+			// The CHANGELOG's upgrade note: a name key next to the
+			// documented type map wins the same way.
+			name:   "a name key next to the documented type map outranks it",
+			states: append(slices.Clone(team), State{ID: "state-duplicate", Name: "Duplicate", Type: "canceled"}),
+			config: withKeys(typeMap, map[string]string{"linear.state_map.duplicate": "closed"}),
+			status: types.StatusClosed,
+			wantID: "state-duplicate",
+		},
+		{
 			name:   "documented type map still resolves in_progress",
 			states: team,
 			config: typeMap,
@@ -1324,11 +1333,12 @@ func TestPushFieldsEqualMatchesPushedState(t *testing.T) {
 		},
 		{
 			// A state named after its own type ("Canceled" of canceled) still
-			// echoes as the pushed state: pushStateEqual's name/type OR reads
-			// the same state_map entry for it.
+			// echoes as the pushed state. The custom status reads back as
+			// open, so only pushStateEqual's name/type OR recognizes it, and
+			// both of its terms read the same state_map entry.
 			name:     "self_named_state_echo",
-			stateMap: map[string]string{"canceled": "closed"},
-			status:   types.StatusClosed, state: canceled, want: true,
+			stateMap: map[string]string{"canceled": "review"},
+			status:   types.Status("review"), state: canceled, want: true,
 		},
 		{
 			// A state the pull maps back to the local status still counts,

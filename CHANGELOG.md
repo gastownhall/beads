@@ -1256,7 +1256,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a type still wins: `linear.state_map.done = closed` next to
   `linear.state_map.canceled = closed` now pushes closed issues to "Done"
   instead of reporting that closed maps to multiple Linear states (#3288,
-  fixed by @kyoto-bonsai in #8100).
+  fixed by @kyoto-bonsai in #8100). **Upgrading:** with that help map on such
+  a team, every push now stops before it writes anything, and so does a
+  plain `bd linear sync`, pull included, because it checks the push mapping
+  first (`--pull` alone still runs). Set `linear.outbound_state_map.open` and
+  `linear.outbound_state_map.closed` to the states to push to, such as `Todo`
+  and `Done`; `bd linear --help` now shows both lines. A team with a second
+  started-type state such as "In Review" needs
+  `linear.outbound_state_map.in_progress` as well, as it already did. Another
+  name key wins the same way: `duplicate = closed` next to the type keys sends
+  closed issues to "Duplicate" unless `linear.outbound_state_map.closed` is
+  set. Issues that earlier syncs put in "Canceled" or "Backlog" this way stay
+  there: sync counts their state as matching and leaves them until another
+  pushed field changes, so move any you want elsewhere by hand.
 
 - The `bd.storage.operations`, `bd.storage.operation.duration` and
   `bd.storage.errors` metrics are now keyed by `db.operation` alone. The
