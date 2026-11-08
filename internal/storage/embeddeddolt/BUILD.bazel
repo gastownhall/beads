@@ -259,6 +259,7 @@ go_test(
         "transaction_phase_internal_test.go",
         "transaction_wisp_lifecycle_persistence_test.go",
         "tree_walker_contract_test.go",
+        "update_dual_presence_test.go",
         "update_mergeops_test.go",
         "version_completeness_behaviour_test.go",
         "version_reconciler_contract_test.go",
