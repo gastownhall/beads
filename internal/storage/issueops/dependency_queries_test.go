@@ -105,7 +105,7 @@ func externalBlockingUnionQueryRegex() string {
 			plane + ` AS plane\s+FROM ` + regexp.QuoteMeta(table) +
 			`\s+WHERE depends_on_external LIKE 'external:%'\s+AND type IN \('blocks', 'conditional-blocks', 'waits-for'\)`
 	}
-	return `(?s)` + leg("dependencies", "0") + `\s+UNION ALL\s+` + leg("wisp_dependencies", "1") + `\s+ORDER BY issue_id, plane`
+	return `(?s)` + leg("dependencies", "0") + `\s+UNION ALL\s+` + leg("wisp_dependencies", "1") + `\s+ORDER BY issue_id, plane\s*$`
 }
 
 func externalBlockingUnionRows() *sqlmock.Rows {

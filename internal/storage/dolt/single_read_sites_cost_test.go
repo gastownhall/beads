@@ -29,7 +29,7 @@ type oneStatementReadSite struct {
 
 var (
 	countIssuesQuery     = `SELECT COUNT\(\*\) FROM issues`
-	externalBlockerQuery = `(?s)FROM dependencies.*UNION ALL.*FROM wisp_dependencies.*ORDER BY issue_id, plane`
+	externalBlockerQuery = `(?s)FROM dependencies.*UNION ALL.*FROM wisp_dependencies.*ORDER BY issue_id, plane\s*$`
 	listPageQuery        = `(?s)FROM issues i.*ORDER BY i\.priority ASC, i\.created_at DESC, i\.id ASC`
 	claimStateQuery      = regexp.QuoteMeta("SELECT assignee, status FROM issues WHERE id = ?")
 	memoryRecallQuery    = regexp.QuoteMeta("SELECT value FROM config WHERE `key` = ?")
@@ -225,6 +225,11 @@ func TestReadsOfSeveralStatementsKeepTheirTransaction(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store, mock, counts := vhCountedStore(t)
+			// With the mode unknown, a read moved onto withSingleRead would send the
+			// probe, sqlmock would refuse it, and the read would fall back to the
+			// transaction this test expects. With autocommit known to be on, only a
+			// read that really keeps its transaction passes.
+			store.autocommit.Store(1)
 			mock.ExpectBegin()
 			tc.expect(mock)
 			mock.ExpectRollback()
