@@ -719,6 +719,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0.5 s and 1.6 s at 100 ms round-trip time. A server started with
   `--no-auto-commit` keeps the transactions, because a bare `SELECT` there stays on
   an old snapshot.
+- **Commands that take an issue ID send 5 fewer statements when the ID is
+  typed in full.** Resolving an ID searched for it and then read the issue,
+  two read transactions. An ID with a hyphen inside it is now read directly
+  with that same issue read, so `bd show`, `bd update`, `bd priority`,
+  `bd close`, `bd comments` and the other commands that look an issue up
+  this way send one read transaction. Only when the direct read finds
+  nothing does resolution run as before, which costs a prefixed abbreviation
+  such as `bd-a3f` or a missing ID 4 more statements; a bare hash such as
+  `a3f8` is resolved as before. `bd dep add` and `bd dep <a> --blocks <b>`
+  also take the titles in their confirmation line from the issues they
+  resolved instead of reading each again, and send 18 fewer statements in
+  all. A dependency target found through `routes.jsonl` now shows its title
+  in that line. The `bd serve` http backend keeps the old sequence: a lookup
+  there costs one request when the CLI read memo answers the second read, and
+  two without it, and reading directly first would add a request to every
+  miss.
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add

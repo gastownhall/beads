@@ -1184,6 +1184,8 @@ go_test(
         "reset_hook_ownership_test.go",
         "reset_worktree_test.go",
         "resolve_dolt_server_connection_test.go",
+        "resolve_exact_id_dolt_test.go",
+        "resolve_exact_id_test.go",
         "restore_embedded_test.go",
         "restore_test.go",
         "retain_ids_embedded_test.go",
