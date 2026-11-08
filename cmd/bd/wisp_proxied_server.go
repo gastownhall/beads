@@ -96,6 +96,7 @@ func runWispCreateProxiedServer(ctx context.Context, in wispCreateInput) error {
 			Ephemeral: true,
 			Prefix:    types.IDPrefixWisp,
 			RootOnly:  in.rootOnly,
+			WispType:  in.wispType,
 		})
 		if err != nil {
 			return nil, "", fmt.Errorf("creating wisp: %w", err)

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -96,6 +97,152 @@ func TestProxiedServerWispCreate(t *testing.T) {
 		}
 		if count != 0 {
 			t.Errorf("expected no wisps created by --dry-run, found %d", count)
+		}
+	})
+
+	// proxiedWispCreateJSON runs a wisp-creation spelling (bare or create)
+	// with the given extra args and --json, returning its created count and
+	// id mapping (proto id -> created wisp id).
+	proxiedWispCreateJSON := func(t *testing.T, dir, spelling string, extraArgs ...string) (int, map[string]string) {
+		t.Helper()
+		args := []string{"mol", "wisp"}
+		if spelling == "create" {
+			args = append(args, "create")
+		}
+		args = append(args, extraArgs...)
+		args = append(args, "--json")
+		out, err := bdProxiedRun(t, bd, dir, args...)
+		if err != nil {
+			t.Fatalf("bd mol wisp %s %s: %v\n%s", spelling, strings.Join(extraArgs, " "), err, out)
+		}
+		var got struct {
+			Created   int               `json:"created"`
+			IDMapping map[string]string `json:"id_mapping"`
+		}
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("unmarshal: %v\n%s", err, out)
+		}
+		return got.Created, got.IDMapping
+	}
+
+	// assertProxiedWispType reads wisp_type of the wisp cloned from srcID.
+	assertProxiedWispType := func(t *testing.T, db *sql.DB, idMapping map[string]string, srcID, want string) {
+		t.Helper()
+		dst, ok := idMapping[srcID]
+		if !ok {
+			t.Fatalf("id_mapping has no entry for proto issue %s", srcID)
+		}
+		var wt string
+		if err := db.QueryRow("SELECT wisp_type FROM wisps WHERE id = ?", dst).Scan(&wt); err != nil {
+			t.Fatalf("read wisp_type of %s: %v", dst, err)
+		}
+		if wt != want {
+			t.Errorf("wisp %s (from %s) has wisp_type %q, want %q", dst, srcID, wt, want)
+		}
+	}
+
+	t.Run("create_wisp_type_stamps_root_and_step", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "wctp")
+		proto := bdProxiedCreate(t, bd, p.dir, "Typed create proto", "--type", "epic", "--label", "template")
+		step := bdProxiedCreate(t, bd, p.dir, "Typed create step", "--type", "task", "--parent", proto.ID)
+
+		created, idMapping := proxiedWispCreateJSON(t, p.dir, "create", proto.ID, "--wisp-type", "patrol")
+		if created != 2 {
+			t.Errorf("created = %d, want 2 (root + 1 step)", created)
+		}
+		db := openProxiedDB(t, p)
+		defer db.Close()
+		assertProxiedWispType(t, db, idMapping, proto.ID, "patrol")
+		assertProxiedWispType(t, db, idMapping, step.ID, "patrol")
+	})
+
+	t.Run("bare_wisp_type_stamps_root_and_step", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "wctb")
+		proto := bdProxiedCreate(t, bd, p.dir, "Typed bare proto", "--type", "epic", "--label", "template")
+		step := bdProxiedCreate(t, bd, p.dir, "Typed bare step", "--type", "task", "--parent", proto.ID)
+
+		created, idMapping := proxiedWispCreateJSON(t, p.dir, "bare", proto.ID, "--wisp-type", "heartbeat")
+		if created != 2 {
+			t.Errorf("created = %d, want 2 (root + 1 step)", created)
+		}
+		db := openProxiedDB(t, p)
+		defer db.Close()
+		assertProxiedWispType(t, db, idMapping, proto.ID, "heartbeat")
+		assertProxiedWispType(t, db, idMapping, step.ID, "heartbeat")
+	})
+
+	t.Run("root_only_and_untyped_defaults", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "wctd")
+		proto := bdProxiedCreate(t, bd, p.dir, "Default proto", "--type", "epic", "--label", "template")
+		step := bdProxiedCreate(t, bd, p.dir, "Default step", "--type", "task", "--parent", proto.ID)
+
+		db := openProxiedDB(t, p)
+		defer db.Close()
+
+		created, idMapping := proxiedWispCreateJSON(t, p.dir, "create", proto.ID, "--root-only", "--wisp-type", "gc_report")
+		if created != 1 {
+			t.Errorf("root-only created = %d, want 1", created)
+		}
+		assertProxiedWispType(t, db, idMapping, proto.ID, "gc_report")
+
+		// Omitted --wisp-type: same root+step fanout as before, untyped.
+		created, idMapping = proxiedWispCreateJSON(t, p.dir, "create", proto.ID)
+		if created != 2 {
+			t.Errorf("omitted created = %d, want 2", created)
+		}
+		assertProxiedWispType(t, db, idMapping, proto.ID, "")
+		assertProxiedWispType(t, db, idMapping, step.ID, "")
+
+		// Explicitly empty --wisp-type: still untyped.
+		created, idMapping = proxiedWispCreateJSON(t, p.dir, "create", proto.ID, "--wisp-type", "")
+		if created != 2 {
+			t.Errorf("explicit empty created = %d, want 2", created)
+		}
+		assertProxiedWispType(t, db, idMapping, proto.ID, "")
+		assertProxiedWispType(t, db, idMapping, step.ID, "")
+	})
+
+	t.Run("invalid_wisp_type_rejected", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "wctx")
+		proto := bdProxiedCreate(t, bd, p.dir, "Invalid proto", "--type", "epic", "--label", "template")
+		bdProxiedCreate(t, bd, p.dir, "Invalid step", "--type", "task", "--parent", proto.ID)
+
+		db := openProxiedDB(t, p)
+		defer db.Close()
+
+		for _, tc := range []struct {
+			spell  string
+			dryRun bool
+		}{{"create", false}, {"create", true}, {"bare", false}, {"bare", true}} {
+			args := []string{"mol", "wisp"}
+			if tc.spell == "create" {
+				args = append(args, "create")
+			}
+			args = append(args, proto.ID, "--wisp-type", "bogus")
+			if tc.dryRun {
+				args = append(args, "--dry-run")
+			}
+			stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, args...)
+			if err == nil {
+				t.Errorf("bd mol wisp %s --wisp-type bogus (dry-run=%t) succeeded:\n%s", tc.spell, tc.dryRun, stdout)
+			}
+			if !strings.Contains(stderr, `invalid wisp-type "bogus"`) {
+				t.Errorf("bd mol wisp %s --wisp-type bogus (dry-run=%t) stderr missing diagnostic:\n%s", tc.spell, tc.dryRun, stderr)
+			}
+			if strings.Contains(stdout, "Dry run") {
+				t.Errorf("invalid --wisp-type produced a dry-run preview:\n%s", stdout)
+			}
+			var count int
+			if err := db.QueryRow("SELECT COUNT(*) FROM wisps").Scan(&count); err != nil {
+				t.Fatalf("count wisps: %v", err)
+			}
+			if count != 0 {
+				t.Errorf("invalid --wisp-type left %d wisps behind, want 0", count)
+			}
 		}
 	})
 }
