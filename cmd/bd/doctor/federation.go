@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/pushstate"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -531,7 +532,8 @@ func CheckFederationPeerConnectivity(path string) DoctorCheck {
 	}
 }
 
-// CheckFederationSyncStaleness checks for stale sync status with peers.
+// CheckFederationSyncStaleness checks for stale sync status with origin and
+// peers, from local state only: no network call is made.
 func CheckFederationSyncStaleness(path string) DoctorCheck {
 	backend, beadsDir := getBackendAndBeadsDir(path)
 
@@ -579,13 +581,12 @@ func CheckFederationSyncStaleness(path string) DoctorCheck {
 		}
 	}
 
-	// Check sync status for each peer
-	var staleWarnings []string
-	var totalBehind int
-
+	// Origin's leg reads only local state; the peer leg is unchanged.
+	var origin originSyncFacts
+	var peers peerStaleness
 	for _, remote := range remotes {
-		// Skip origin - check only federation peers
-		if remote.Name == "origin" {
+		if remote.Name == originRemote {
+			origin = readOriginSyncFacts(beadsDir)
 			continue
 		}
 
@@ -596,8 +597,8 @@ func CheckFederationSyncStaleness(path string) DoctorCheck {
 
 		// Warn if significantly behind
 		if status.LocalBehind > 0 {
-			totalBehind += status.LocalBehind
-			staleWarnings = append(staleWarnings, fmt.Sprintf("%s: %d commits behind",
+			peers.totalBehind += status.LocalBehind
+			peers.lines = append(peers.lines, fmt.Sprintf("%s: %d commits behind",
 				remote.Name, status.LocalBehind))
 		}
 
@@ -605,7 +606,82 @@ func CheckFederationSyncStaleness(path string) DoctorCheck {
 		// When it is, we can add time-based staleness warnings here
 	}
 
-	if len(staleWarnings) == 0 {
+	return syncStalenessResult(origin, peers)
+}
+
+// originRemote is the remote bd dolt push, bd sync and auto-push publish to
+// by default, and the one .beads/push-state.json describes.
+const originRemote = "origin"
+
+// originSyncFacts is what Sync Staleness knows about origin without a network
+// call: the local push history in push-state.json (GH#6289).
+type originSyncFacts struct {
+	checked  bool             // origin is configured, so its leg ran
+	state    *pushstate.State // push-state.json; nil when there is none
+	stateErr error            // push-state.json exists but cannot be read or parsed
+}
+
+// readOriginSyncFacts loads origin's local push history from beadsDir.
+func readOriginSyncFacts(beadsDir string) originSyncFacts {
+	state, err := pushstate.Load(beadsDir)
+	return originSyncFacts{checked: true, state: state, stateErr: err}
+}
+
+// peerStaleness is the peer leg's finding: one line per peer this clone is
+// behind, and the total commits behind.
+type peerStaleness struct {
+	lines       []string
+	totalBehind int
+}
+
+// originFindings turns origin's facts into a warning message (the first
+// finding's), detail lines and fixes; an empty message means no finding.
+func originFindings(o originSyncFacts) (message string, details, fixes []string) {
+	if !o.checked {
+		return "", nil, nil
+	}
+	add := func(msg, detail, fix string) {
+		if message == "" {
+			message = msg
+		}
+		details = append(details, detail)
+		fixes = append(fixes, fix)
+	}
+	switch {
+	case o.stateErr != nil:
+		add("Push history unreadable",
+			fmt.Sprintf("origin: cannot read the local push history in .beads/%s: %v", pushstate.FileName, o.stateErr),
+			fmt.Sprintf("Repair or delete .beads/%s; the next successful push to origin rewrites it", pushstate.FileName))
+	case o.state != nil && o.state.LastError != "":
+		// A recorded failure warns even when the cached origin ref or the
+		// timestamps look current: the last attempt to publish did not land.
+		when := o.state.LastAttempt
+		if when == "" {
+			when = "an unrecorded time"
+		}
+		add("Last push to origin failed",
+			fmt.Sprintf("origin: the last push attempt (%s) failed: %s", when, o.state.LastError),
+			"Retry with 'bd dolt push' or 'bd sync'; a successful push to origin clears this warning")
+	}
+	return message, details, fixes
+}
+
+// syncStalenessResult aggregates the origin and peer legs into the Sync
+// Staleness check. A peer-only finding reads as it always has.
+func syncStalenessResult(origin originSyncFacts, peers peerStaleness) DoctorCheck {
+	message, details, fixes := originFindings(origin)
+	if len(peers.lines) > 0 {
+		peerMsg := fmt.Sprintf("%d total commits behind peers", peers.totalBehind)
+		if message == "" {
+			message = peerMsg
+		} else {
+			message += "; " + peerMsg
+		}
+		details = append(details, peers.lines...)
+		fixes = append(fixes, "Run 'bd federation sync' to synchronize with peers")
+	}
+
+	if message == "" {
 		return DoctorCheck{
 			Name:     "Sync Staleness",
 			Status:   StatusOK,
@@ -617,9 +693,9 @@ func CheckFederationSyncStaleness(path string) DoctorCheck {
 	return DoctorCheck{
 		Name:     "Sync Staleness",
 		Status:   StatusWarning,
-		Message:  fmt.Sprintf("%d total commits behind peers", totalBehind),
-		Detail:   strings.Join(staleWarnings, "\n"),
-		Fix:      "Run 'bd federation sync' to synchronize with peers",
+		Message:  message,
+		Detail:   strings.Join(details, "\n"),
+		Fix:      strings.Join(fixes, "; "),
 		Category: CategoryFederation,
 	}
 }
