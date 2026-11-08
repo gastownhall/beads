@@ -334,6 +334,53 @@ func (s *testSuite) TestExec_HappensInWorkDir() {
 	s.True(info.IsDir())
 }
 
+// GH#5654: CommitInitArtifacts commits only the staged changes under the
+// artifact paths; a file the user staged beforehand stays staged, with its
+// blob and working-tree content intact.
+func (s *testSuite) TestCommitInitArtifacts_LeavesForeignStagedFiles() {
+	s.gitInit()
+	s.writeFile("seed.txt", "seed\n")
+	s.run("git", "add", "seed.txt")
+	s.run("git", "commit", "-q", "-m", "seed")
+	s.writeFile("work.txt", "unrelated work\n")
+	s.run("git", "add", "work.txt")
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0o750))
+	s.writeFile(".beads/config.yaml", "# beads\n")
+	s.writeFile("CLAUDE.md", "instructions\n")
+
+	result, err := domain.NewGitUseCase(s.tmpDir, s.repo).CommitInitArtifacts(s.Ctx(), domain.CommitInitArtifactsParams{
+		BeadsDir:      ".beads/",
+		OptionalPaths: []string{"CLAUDE.md"},
+		Message:       "bd init: initialize beads issue tracking",
+		NoVerify:      true,
+		SkipHooks:     true,
+	})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+
+	committed := s.gitOutput("show", "--name-only", "--format=", "HEAD")
+	s.Contains(committed, ".beads/config.yaml")
+	s.Contains(committed, "CLAUDE.md")
+	s.NotContains(committed, "work.txt")
+	// The user's staged blob and working-tree content survive the partial commit.
+	s.Equal("work.txt", s.gitOutput("diff", "--cached", "--name-only"))
+	s.Equal("unrelated work", s.gitOutput("show", ":work.txt"))
+	body, err := os.ReadFile(filepath.Join(s.tmpDir, "work.txt"))
+	s.Require().NoError(err)
+	s.Equal("unrelated work\n", string(body))
+}
+
+// gitOutput runs git in the suite's repository and returns its trimmed
+// combined output, for assertions that need to read repository state.
+func (s *testSuite) gitOutput(args ...string) string {
+	s.T().Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = s.tmpDir
+	out, err := cmd.CombinedOutput()
+	s.Require().NoError(err, "git %v: %s", args, out)
+	return strings.TrimSpace(string(out))
+}
+
 func TestRoleConfigIgnoresInheritedGitRouting(t *testing.T) {
 	for _, entry := range os.Environ() {
 		key := gitenv.EntryKey(entry)

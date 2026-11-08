@@ -31,6 +31,23 @@ runtime files out of git — no manual gitignore rules are needed. Never track
 the database directory (`.beads/embeddeddolt/` or `.beads/dolt/`) in git or
 via Git LFS.
 
+## The init auto-commit
+
+After scaffolding, `bd init` stages the artifacts it generated (`.beads/`,
+the agent instruction files it created, and the `.gitignore` it may have
+updated) and makes one commit: `bd init: initialize beads issue tracking`.
+
+That commit is a **partial commit scoped to those artifact paths**. Work you
+had already staged before running `bd init` stays staged and out of the
+commit, with its staged content untouched. Two boundaries are worth knowing:
+
+- Files you had **edited inside the artifact paths** (for example an existing
+  `CLAUDE.md` or `.gitignore`) are eligible for the commit along with the
+  files init generated: init does not try to split its own edits from your
+  earlier ones there.
+- When nothing under the artifact paths changed, init makes no commit and
+  prints no success message; your staged work is left exactly as it was.
+
 ## Git Hooks
 
 ### Installation

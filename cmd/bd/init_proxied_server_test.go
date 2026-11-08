@@ -1031,3 +1031,79 @@ func TestInitHooksEmptyPathRetainsUseCase(t *testing.T) {
 	require.Same(t, supplied, fs)
 	require.Nil(t, hooks)
 }
+
+// proxiedTailCommitFixture builds an isolated git repository for the
+// bootstrap-commit scope tests, with local identity config and a runGit
+// helper bound to the scrubbed test environment.
+func proxiedTailCommitFixture(t *testing.T) (string, func(dir string, args ...string) string) {
+	t.Helper()
+	// Serial: the fixture owns the process directory and environment.
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			require.NoError(t, os.Unsetenv(key))
+		}
+	}
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	target := t.TempDir()
+	runGit := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := gitCommand(args...)
+		cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "fixture git %v: %s", args, out)
+		return strings.TrimSpace(string(out))
+	}
+	runGit(target, "init", "--quiet")
+	for key, value := range map[string]string{"user.name": "Fixture", "user.email": "fixture@example.test", "commit.gpgSign": "false", "core.hooksPath": ".git/hooks"} {
+		runGit(target, "config", "--local", key, value)
+	}
+	return target, runGit
+}
+
+// runProxiedTailForCommitScope runs the proxied init tail over the fixture
+// repository with hooks and agent generation skipped, isolating the bootstrap
+// commit, and returns the captured stderr.
+func runProxiedTailForCommitScope(t *testing.T, target string, quiet bool) string {
+	t.Helper()
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("setup-exclude", false, "")
+	in := initProxiedServerInput{skipHooks: true, skipAgents: true, nonInteractive: true, quiet: quiet}
+	return captureStderr(t, func() {
+		require.NoError(t, runInitProxiedServerTail(cmd, t.Context(), in, runInitTailContext{
+			workDir:       target,
+			beadsDir:      filepath.Join(target, ".beads"),
+			useLocalBeads: true,
+			fsUseCase:     &initTailForkObservation{},
+			gitUC:         storagegit.NewGitProvider(target).GitUseCase(),
+		}))
+	})
+}
+
+// GH#5654: the proxied init tail's bootstrap commit must record the beads
+// artifacts without sweeping in work the user staged beforehand.
+func TestProxiedInitTailCommitScope(t *testing.T) {
+	target, runGit := proxiedTailCommitFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(target, "seed.txt"), []byte("seed\n"), 0600))
+	runGit(target, "add", "seed.txt")
+	runGit(target, "-c", "core.hooksPath=", "commit", "-m", "seed")
+	require.NoError(t, os.WriteFile(filepath.Join(target, "work.txt"), []byte("unrelated work\n"), 0600))
+	runGit(target, "add", "work.txt")
+	require.NoError(t, os.Mkdir(filepath.Join(target, ".beads"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(target, ".beads", "artifact"), []byte("beads\n"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(target, "CLAUDE.md"), []byte("optional\n"), 0600))
+
+	require.Empty(t, runProxiedTailForCommitScope(t, target, true))
+
+	committed := runGit(target, "show", "--name-only", "--format=", "HEAD")
+	require.Contains(t, committed, ".beads/artifact")
+	require.Contains(t, committed, "CLAUDE.md")
+	require.NotContains(t, committed, "work.txt")
+	require.NotContains(t, committed, "seed.txt")
+	require.Equal(t, "work.txt", runGit(target, "diff", "--cached", "--name-only"))
+	require.Equal(t, "unrelated work", runGit(target, "show", ":work.txt"))
+}

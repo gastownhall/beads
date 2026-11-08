@@ -218,6 +218,9 @@ func (u *gitUseCaseImpl) CommitInitArtifacts(ctx context.Context, params CommitI
 		Message:   params.Message,
 		NoVerify:  params.NoVerify,
 		SkipHooks: params.SkipHooks,
+		// Scope the bootstrap commit to the staged changes under the
+		// artifact paths so pre-staged user work stays staged (GH#5654).
+		Only: paths,
 	})
 	if err != nil {
 		return CommitInitArtifactsResult{}, fmt.Errorf("CommitInitArtifacts: commit: %w", err)
