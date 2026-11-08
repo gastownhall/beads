@@ -831,18 +831,23 @@ func loadServerModeFromConfig() error {
 // still belongs to the caller, and the redirect of the caller's repo would
 // otherwise hand its source database name to a foreign workspace (GH#5756).
 //
-//   - -C: the redirect of the -C workspace itself. Never the caller's, even
-//     when both redirect to the same storage, so a second clone keeps its own
-//     source database.
+//   - -C: the redirect the -C selection itself followed
+//     (beads.FindBeadsDirFromWithSource), including a linked worktree's
+//     inherited main-checkout redirect. Never the caller's, even when both
+//     redirect to the same storage, so a second clone keeps its own source
+//     database.
 //   - BEADS_DIR: the redirect of the named directory itself. When it has none,
 //     the cwd's own redirect, but only when BEADS_DIR names that redirect's
 //     target: bd-wayc3's BEADS_DIR pre-set to the redirect target.
-//   - neither: the cwd discovery of beads.GetRedirectInfo, as before.
+//   - neither: the cwd discovery of beads.GetRedirectInfo, as before. It is
+//     not checked against the selection: a nested workspace below a
+//     redirected repository root still gets the root's source database, as
+//     it did before GH#5756.
 func selectedRedirectSourceDir() string {
 	if workspace := changeDirWorkspace(); workspace != "" {
-		info := beads.GetRedirectInfoFrom(workspace)
-		if info.IsRedirected && sameDirPath(info.TargetDir, beads.ExplicitBeadsDir()) {
-			return info.LocalDir
+		selected, source := beads.FindBeadsDirFromWithSource(workspace)
+		if source != "" && sameDirPath(selected, beads.ExplicitBeadsDir()) {
+			return source
 		}
 		return ""
 	}

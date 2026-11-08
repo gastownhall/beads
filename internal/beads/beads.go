@@ -382,15 +382,17 @@ func GetDiscoveredRedirectInfo() RedirectInfo {
 // checked for a redirect first, then the nearest .beads walking up from dir.
 // BEADS_DIR is not consulted, since a caller asking about dir has already
 // resolved it (under `bd -C dir` it names the redirect target itself, which
-// would mask the clone's redirect). Used by `bd -C dir prime` so the redirect
-// notice describes the primed workspace (gastownhall/beads#5509).
+// would mask the clone's redirect). Used by role detection under `bd -C dir`
+// (gastownhall/beads#5509).
 //
 // NOTE: the non-git fallback here is the walk-up probe alone, so relative to
 // GetRedirectInfo this drops three cwd-specific tiers: BEADS_DIR (deliberate,
 // see above), the worktree-local redirect / separate-DB probe, and
 // GetWorktreeFallbackBeadsDir. Inside a git worktree those tiers can answer
 // differently, so a caller that has not already resolved dir the way
-// `bd -C dir` does wants GetRedirectInfo, not this.
+// `bd -C dir` does wants GetRedirectInfo, not this. A caller that needs the
+// redirect behind the `bd -C dir` selection itself wants
+// FindBeadsDirFromWithSource, which follows FindBeadsDirFrom's tiers.
 func GetRedirectInfoFrom(dir string) RedirectInfo {
 	// The repository root bounds this answer twice: the repo-local .beads
 	// candidate below, and the ancestor walk's user-global skip
@@ -665,13 +667,25 @@ func FindDatabasePath() string {
 // FindBeadsDirFrom finds the effective .beads/ directory as if discovery
 // started from startDir, without changing the process working directory.
 func FindBeadsDirFrom(startDir string) string {
+	selected, _ := FindBeadsDirFromWithSource(startDir)
+	return selected
+}
+
+// FindBeadsDirFromWithSource is FindBeadsDirFrom that also returns the
+// redirecting .beads directory it followed to reach selected, or "" when
+// selected was not reached through a redirect. The source comes from the
+// discovery tier that made the selection (the walk up from startDir, the
+// worktree fallback to the main checkout's .beads, or the jj primary
+// workspace), so it names the redirect behind the selection even where
+// GetRedirectInfoFrom, which lacks the last two tiers, finds none.
+func FindBeadsDirFromWithSource(startDir string) (selected, redirectSource string) {
 	if startDir == "" {
-		return ""
+		return "", ""
 	}
 
 	info, err := os.Stat(startDir)
 	if err != nil || !info.IsDir() {
-		return ""
+		return "", ""
 	}
 
 	startDir = utils.CanonicalizePath(startDir)
@@ -682,6 +696,7 @@ func FindBeadsDirFrom(startDir string) string {
 
 	jjSecondaryRoot := ""
 	jjPrimaryBeadsDir := ""
+	jjPrimarySource := ""
 	jjPrimaryHasDB := false
 	if root, ok := git.JJSecondaryWorkspaceRootFrom(startDir); ok {
 		jjSecondaryRoot = utils.CanonicalizePath(root)
@@ -691,6 +706,7 @@ func FindBeadsDirFrom(startDir string) string {
 				resolved := FollowRedirect(primaryBeadsDir)
 				if hasBeadsProjectFiles(resolved) {
 					jjPrimaryBeadsDir = resolved
+					jjPrimarySource = redirectSourceOf(primaryBeadsDir, resolved)
 					jjPrimaryHasDB = hasBeadsDatabase(resolved)
 				}
 			}
@@ -724,7 +740,7 @@ func FindBeadsDirFrom(startDir string) string {
 				// .beads metadata without the ignored database directory.
 				// Match FindBeadsDir by preferring the primary workspace DB.
 			} else if hasBeadsProjectFiles(resolved) {
-				return resolved
+				return resolved, redirectSourceOf(beadsDir, resolved)
 			}
 		}
 
@@ -734,16 +750,26 @@ func FindBeadsDirFrom(startDir string) string {
 		if info, err := os.Stat(fallbackBeadsDir); err == nil && info.IsDir() {
 			resolved := FollowRedirect(fallbackBeadsDir)
 			if hasBeadsProjectFiles(resolved) {
-				return resolved
+				return resolved, redirectSourceOf(fallbackBeadsDir, resolved)
 			}
 		}
 	}
 
 	if jjPrimaryBeadsDir != "" {
-		return jjPrimaryBeadsDir
+		return jjPrimaryBeadsDir, jjPrimarySource
 	}
 
-	return ""
+	return "", ""
+}
+
+// redirectSourceOf returns beadsDir when FollowRedirect(beadsDir) left it for
+// resolved, or "" when resolved is beadsDir itself: no redirect, or one
+// FollowRedirect refused.
+func redirectSourceOf(beadsDir, resolved string) string {
+	if resolved == beadsDir {
+		return ""
+	}
+	return beadsDir
 }
 
 // HasProjectFiles reports whether discovery treats beadsDir as a beads

@@ -503,13 +503,20 @@ func primeDoltSyncBullets(doltSync bool, pushFirst bool) string {
 		"- `bd dolt push` - Push beads to Dolt remote\n"
 }
 
-// primeRedirectInfo reports the redirect state of the primed workspace: the
-// -C target when one is given (#5509), else the process cwd exactly as before.
+// primeRedirectInfo reports the redirect that led to the primed workspace:
+// the source startup recorded for the selection (selectedRedirectSource),
+// which bd where and bd context report too. Under -C (#5509) or an exported
+// BEADS_DIR that is the selected workspace's own redirect, never the cwd's
+// (GH#5756).
 func primeRedirectInfo() beads.RedirectInfo {
-	if ws := primeWorkspaceDir(); ws != "" {
-		return internalbeads.GetRedirectInfoFrom(ws)
+	if selectedRedirectSource == "" {
+		return beads.RedirectInfo{}
 	}
-	return beads.GetRedirectInfo()
+	return beads.RedirectInfo{
+		IsRedirected: true,
+		LocalDir:     selectedRedirectSource,
+		TargetDir:    internalbeads.FollowRedirect(selectedRedirectSource),
+	}
 }
 
 // getRedirectNotice returns a notice string if beads is redirected

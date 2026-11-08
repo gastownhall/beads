@@ -506,14 +506,56 @@ func TestSelectedWorkspaceRedirectPrecedence(t *testing.T) {
 	}
 }
 
+// TestSelectedWorkspacePrimeRedirectNotice pins GH#5756 for bd prime: its
+// redirect notice describes the redirect behind the primed workspace, the one
+// bd where reports, so a workspace selected with -C or BEADS_DIR from a
+// redirected caller carries none, while the caller's own discovery keeps it.
+func TestSelectedWorkspacePrimeRedirectNotice(t *testing.T) {
+	for _, selector := range []string{"plain discovery", "-C", "BEADS_DIR", "-C nested"} {
+		t.Run(selector, func(t *testing.T) {
+			selectedWorkspaceEnvForTest(t)
+			callerDir, callerBeadsDir := newRedirectedCallerForTest(t)
+			targetDir := filepath.Join(t.TempDir(), "target")
+			targetBeadsDir := newServerWorkspaceForTest(t, targetDir, "target_db")
+			t.Chdir(callerDir)
+			wantTarget := ""
+			switch selector {
+			case "-C":
+				changeDir = targetDir
+			case "BEADS_DIR":
+				t.Setenv("BEADS_DIR", targetBeadsDir)
+			case "-C nested":
+				nestedDir := filepath.Join(callerDir, "nested")
+				newServerWorkspaceForTest(t, nestedDir, "nested_db")
+				changeDir = nestedDir
+			default:
+				wantTarget = beads.FollowRedirect(callerBeadsDir)
+			}
+
+			if err := rootCmd.PersistentPreRunE(primeCmd, nil); err != nil {
+				t.Fatalf("PersistentPreRunE(prime): %v", err)
+			}
+			notice := getRedirectNotice(false)
+			if wantTarget == "" && notice != "" {
+				t.Fatalf("prime redirect notice = %q, want none: the caller's redirect does not lead to the selected workspace", notice)
+			}
+			if wantTarget != "" && !strings.Contains(notice, wantTarget) {
+				t.Fatalf("prime redirect notice = %q, want one naming %q", notice, wantTarget)
+			}
+		})
+	}
+}
+
 // TestSelectedWorkspaceSelectionEdges pins the selection edges GH#5756 must
 // keep: an explicit --db target suppresses ambient preservation, a .beads/.env
 // selector routes to a foreign target, a nested direct workspace under an
-// ancestor redirect stays foreign, the retained source does not survive into
-// the next command, BEADS_DIR naming a redirecting .beads keeps its redirect
-// from outside any repository, BEADS_DIR naming the caller's redirect target
-// keeps the caller's provenance (bd-wayc3), and plain discovery still passes
-// over a redirect at the temp root.
+// ancestor redirect stays foreign (and plain discovery's where does not credit
+// it to the ancestor's redirect), a linked worktree with no .beads keeps its
+// main checkout's redirect, the retained source does not survive into the
+// next command, BEADS_DIR naming a redirecting .beads keeps its redirect from
+// outside any repository, BEADS_DIR naming the caller's redirect target keeps
+// the caller's provenance (bd-wayc3), and plain discovery still passes over a
+// redirect at the temp root.
 func TestSelectedWorkspaceSelectionEdges(t *testing.T) {
 	t.Run("explicit --db target suppresses ambient preservation", func(t *testing.T) {
 		selectedWorkspaceEnvForTest(t)
@@ -568,6 +610,58 @@ func TestSelectedWorkspaceSelectionEdges(t *testing.T) {
 			t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want unset: the ancestor repo's redirect is not the nested workspace's", got)
 		}
 	})
+
+	t.Run("plain discovery in a nested direct workspace reports no redirect", func(t *testing.T) {
+		selectedWorkspaceEnvForTest(t)
+		callerDir, _ := newRedirectedCallerForTest(t)
+		nestedDir := filepath.Join(callerDir, "nested")
+		nestedBeadsDir := newServerWorkspaceForTest(t, nestedDir, "nested_db")
+		t.Chdir(nestedDir)
+
+		got := runWhereJSONForTest(t)
+		if !sameDirPath(got.Path, nestedBeadsDir) || got.RedirectedFrom != "" {
+			t.Fatalf("where = %q via %q, want %q with no redirect: the ancestor's redirect does not lead to the nested workspace", got.Path, got.RedirectedFrom, nestedBeadsDir)
+		}
+	})
+
+	// A linked worktree outside its main checkout, with no .beads of its own,
+	// reaches the main checkout's redirect only through the worktree fallback,
+	// so -C onto it must keep that redirect's source database just as plain
+	// discovery from inside it does.
+	for _, tc := range []struct {
+		selector string
+		cmd      *cobra.Command
+	}{
+		{selector: "-C", cmd: contextCmd},
+		{selector: "-C", cmd: whereCmd},
+		{selector: "plain discovery", cmd: contextCmd},
+		{selector: "plain discovery", cmd: whereCmd},
+	} {
+		t.Run("linked worktree without .beads: "+tc.cmd.Name()+" via "+tc.selector, func(t *testing.T) {
+			selectedWorkspaceEnvForTest(t)
+			worktree, _, mainBeadsDir, sharedBeadsDir := newWorktreeInheritingRedirectForTest(t)
+			writeMetadataConfig(t, mainBeadsDir, configfile.DoltModeServer, "main_db")
+			writeMetadataConfig(t, sharedBeadsDir, configfile.DoltModeServer, "shared_db")
+			if tc.selector == "-C" {
+				t.Chdir(filepath.Dir(mainBeadsDir))
+				changeDir = worktree
+			} else {
+				t.Chdir(worktree)
+			}
+
+			if tc.cmd == contextCmd {
+				info := runContextInfoForTest(t)
+				if !sameDirPath(info.BeadsDir, sharedBeadsDir) || info.Database != "main_db" {
+					t.Fatalf("context = %q (%q), want %q (main_db, the main checkout's source database)", info.BeadsDir, info.Database, sharedBeadsDir)
+				}
+				return
+			}
+			got := runWhereJSONForTest(t)
+			if !sameDirPath(got.Path, sharedBeadsDir) || !sameDirPath(got.RedirectedFrom, mainBeadsDir) {
+				t.Fatalf("where = %q via %q, want %q via %q", got.Path, got.RedirectedFrom, sharedBeadsDir, mainBeadsDir)
+			}
+		})
+	}
 
 	t.Run("retained source does not survive into the next command", func(t *testing.T) {
 		selectedWorkspaceEnvForTest(t)

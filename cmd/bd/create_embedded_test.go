@@ -1804,11 +1804,10 @@ func TestEmbeddedChangeDirStorelessTargetDoesNotServeCallerStore(t *testing.T) {
 	stdout, stderr, _ = runCommandBuffers(t, where)
 	var result WhereResult
 	if jerr := json.Unmarshal(stdout.Bytes(), &result); jerr != nil {
-		t.Logf("bd -C <storeless target> where gave no JSON result: %v\nstdout:\n%s\nstderr:\n%s", jerr, stdout.String(), stderr.String())
-	} else {
-		if result.DatabasePath != "" || result.Prefix == "caller" || result.RedirectedFrom != "" {
-			t.Fatalf("bd -C <storeless target> where mixed workspaces: path=%q redirected_from=%q prefix=%q database=%q\nstderr:\n%s",
-				result.Path, result.RedirectedFrom, result.Prefix, result.DatabasePath, stderr.String())
-		}
+		t.Fatalf("bd -C <storeless target> where gave no JSON result: %v\nstdout:\n%s\nstderr:\n%s", jerr, stdout.String(), stderr.String())
+	}
+	if !sameDirPath(result.Path, targetBeads) || result.DatabasePath != "" || result.Prefix == "caller" || result.RedirectedFrom != "" {
+		t.Fatalf("bd -C <storeless target> where mixed workspaces: path=%q redirected_from=%q prefix=%q database=%q, want path %q alone\nstderr:\n%s",
+			result.Path, result.RedirectedFrom, result.Prefix, result.DatabasePath, targetBeads, stderr.String())
 	}
 }
