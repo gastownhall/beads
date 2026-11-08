@@ -437,6 +437,7 @@ go_library(
         "//internal/migration/legacysqlite",
         "//internal/molecules",
         "//internal/notion",
+        "//internal/pushstate",
         "//internal/query",
         "//internal/recipes",
         "//internal/remedy",

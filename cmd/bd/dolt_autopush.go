@@ -6,21 +6,23 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/pushstate"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
-// pushState tracks auto-push state in a local file (.beads/push-state.json)
-// instead of the Dolt metadata table, to avoid merge conflicts on multi-machine
-// setups (GH#2466).
-type pushState struct {
-	LastPush   string `json:"last_push"`   // RFC3339 timestamp
-	LastCommit string `json:"last_commit"` // Dolt commit hash
-}
+// pushState is the shared push-state schema (internal/pushstate). The
+// file-based auto-push state lives in .beads/push-state.json rather than the
+// Dolt metadata table to avoid merge conflicts on multi-machine setups
+// (GH#2466). Since GH#6289 last_push/last_commit are success watermarks;
+// failed attempts record last_attempt/last_error instead of advancing them.
+type pushState = pushstate.State
 
 type autoPushTarget interface {
 	GetCurrentCommit(ctx context.Context) (string, error)
@@ -36,22 +38,11 @@ func pushStatePath() (string, error) {
 }
 
 func loadPushState() (*pushState, error) {
-	path, err := pushStatePath()
-	if err != nil {
-		return nil, err
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return nil, fmt.Errorf("%s", activeWorkspaceNotFoundError())
 	}
-	data, err := os.ReadFile(path) //nolint:gosec // path is constructed internally
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var ps pushState
-	if err := json.Unmarshal(data, &ps); err != nil {
-		return nil, err
-	}
-	return &ps, nil
+	return pushstate.Load(beadsDir)
 }
 
 func savePushState(ps *pushState) error {
@@ -116,6 +107,46 @@ func pushedCommitForState(ctx context.Context, target autoPushTarget, prePush st
 		return prePush
 	}
 	return c
+}
+
+// maybeAutoPush pushes to the Dolt remote if enabled and the debounce interval has passed.
+// Called from PersistentPostRun after auto-commit and auto-backup.
+// lastErrorLimit bounds the last_error line recorded in push-state.json: the
+// file is meant to be read by humans and parsers, not to carry a push's whole
+// stderr.
+const lastErrorLimit = 512
+
+// sanitizePushStateError renders a failed push's error as the last_error
+// value push-state.json records (GH#6289): a timeout names the bound it hit,
+// any other error keeps its message with embedded URL credentials scrubbed
+// (the same scrubber bootstrap and sync errors go through), whitespace
+// collapsed to one line, and the line truncated at lastErrorLimit bytes on a
+// UTF-8 boundary so a split rune is never written.
+func sanitizePushStateError(timedOut bool, pushTimeout time.Duration, err error) string {
+	if timedOut {
+		return fmt.Sprintf("timed out after %s", pushTimeout)
+	}
+	if err == nil {
+		return ""
+	}
+	return truncateUTF8(strings.Join(strings.Fields(scrubURLCredentials(err.Error())), " "), lastErrorLimit)
+}
+
+// truncateUTF8 cuts s to at most limit bytes without splitting a UTF-8 rune.
+func truncateUTF8(s string, limit int) string {
+	if limit <= 0 || len(s) <= limit {
+		return s
+	}
+	b := []byte(s[:limit])
+	for len(b) > 0 {
+		r, size := utf8.DecodeLastRune(b)
+		if r == utf8.RuneError && size == 1 {
+			b = b[:len(b)-1]
+			continue
+		}
+		break
+	}
+	return string(b)
 }
 
 // maybeAutoPush pushes to the Dolt remote if enabled and the debounce interval has passed.
@@ -203,13 +234,17 @@ func maybeAutoPush(ctx context.Context) {
 		}
 		debug.Logf("dolt auto-push: push error: %v\n", err)
 		// Throttle retries after failure so a hanging remote doesn't make every
-		// subsequent bd command pay the push timeout. We record the attempt
-		// timestamp but NOT a new LastCommit, so when the remote recovers the
-		// change-detection check (currentCommit != LastCommit) still triggers.
+		// subsequent bd command pay the push timeout. The attempt is recorded
+		// as an attempt — last_attempt plus a scrubbed last_error — and the
+		// success watermarks last_push/last_commit are left untouched, so the
+		// file never claims a push happened that never reached the remote
+		// (GH#6289) and, when the remote recovers, the change-detection check
+		// (currentCommit != LastCommit) still triggers.
 		if ps == nil {
 			ps = &pushState{}
 		}
-		ps.LastPush = time.Now().UTC().Format(time.RFC3339)
+		ps.LastAttempt = time.Now().UTC().Format(time.RFC3339)
+		ps.LastError = sanitizePushStateError(pushCtx.Err() == context.DeadlineExceeded, pushTimeout, err)
 		if saveErr := savePushState(ps); saveErr != nil {
 			debug.Logf("dolt auto-push: failed to save push state after error: %v\n", saveErr)
 		}
