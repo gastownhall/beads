@@ -154,7 +154,10 @@ func PullWithStrategy(ctx context.Context, db DBConn, remote, branch, user, stra
 	}
 	trackingRef := remote + "/" + branch
 	if err := MergeAndSettleWithStrategy(ctx, db, trackingRef, strategy); err != nil {
-		return fmt.Errorf("merge %s: %w", trackingRef, err)
+		// GH#6368: the engine refuses a merge over an ignored working table
+		// before checking whether there is anything to merge. A fetched tip
+		// HEAD already contains is a no-op pull, not a failure.
+		return settleIgnoredTableStomp(ctx, db, trackingRef, fmt.Errorf("merge %s: %w", trackingRef, err))
 	}
 	return nil
 }

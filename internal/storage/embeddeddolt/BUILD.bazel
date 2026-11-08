@@ -227,6 +227,7 @@ go_test(
         "preview_readonly_test.go",
         "promote_no_history_test.go",
         "pull_config_wedge_test.go",
+        "pull_ignored_table_test.go",
         "pull_settle_test.go",
         "push_commit_pending_test.go",
         "querier_contract_test.go",
