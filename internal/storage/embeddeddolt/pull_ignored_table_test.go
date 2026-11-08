@@ -402,3 +402,122 @@ func TestEmbeddedStorePullIgnoredTableAncestor(t *testing.T) {
 		})
 	})
 }
+
+// TestEmbeddedStorePullIgnoredTableDiverged pins the other half of #6368: the same
+// ignored-table refusal on a remote that genuinely diverged — a peer pushed
+// work this clone does not have — must NOT be treated as the no-op. The pull
+// still fails, but as the typed IgnoredTablesMergeError: the refusal is real
+// operator-only work (an operator must reconcile the ignored working rows
+// with the incoming history), and `bd sync` (pinned in cmd/bd/sync_ignored_table_test.go)
+// reports it as the ignored-table outcome instead of a generic exit 1. The
+// failure must also be inert: nothing merged, the head never moved, the
+// protected rows are exactly what they were, and the successful-pull
+// maintenance (which consumes the pending-recompute marker) did not run.
+func TestEmbeddedStorePullIgnoredTableDiverged(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	beadsDir, remoteURL, eventsBefore := storeIgnoredPullFixture(t, ctx)
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+
+	// A peer clones the remote at its pre-flip tip and pushes its own work,
+	// so the remote's main leaves this clone's history: divergence, the shape
+	// no containment proof can ever excuse.
+	peerData := filepath.Join(t.TempDir(), "embeddeddolt")
+	if err := os.MkdirAll(peerData, 0o700); err != nil {
+		t.Fatalf("create peer data dir: %v", err)
+	}
+	withRawConn(t, peerData, "", func(peer *sql.Conn) {
+		mustExecOn(t, ctx, peer, "CALL DOLT_CLONE(?, 'testdb')", remoteURL)
+		mustExecOn(t, ctx, peer, "USE testdb")
+		tipBefore := scalarString(t, ctx, peer, "SELECT DOLT_HASHOF('origin/main')")
+		execFrozenGuard(t, ctx, peer, `
+INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type)
+VALUES ('peer-diverge-1', 'peer diverges the remote', '', '', '', '', 'open', 2, 'task');
+`)
+		mustDrain(t, ctx, peer, "CALL DOLT_COMMIT('-Am', 'test: peer diverges the remote')")
+		mustDrain(t, ctx, peer, "CALL DOLT_PUSH('origin', 'main')")
+		// Fixture evidence: the peer's work moved the remote's main off the
+		// tip this clone last pushed. Whether the new tip is contained in this
+		// clone's history is the local session's question, asserted below once
+		// the refused pull has fetched the tracking ref.
+		tipAfter := scalarString(t, ctx, peer, "SELECT DOLT_HASHOF('origin/main')")
+		if tipAfter == tipBefore {
+			t.Fatalf("peer push did not move the remote (tip %s)", tipAfter)
+		}
+	})
+
+	store, err := embeddeddolt.Open(ctx, beadsDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer closeEmbeddedDoltStore(t, store)
+	requireStoreIgnoredPullPreconditions(t, ctx, dataDir, eventsBefore)
+
+	headBefore, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("read HEAD before the pull: %v", err)
+	}
+	pullErr := store.Pull(ctx)
+	if pullErr == nil {
+		closeEmbeddedDoltStore(t, store)
+		t.Fatal("pull of a diverged remote succeeded; the ignored-table refusal is operator-only work")
+	}
+
+	// The typed refusal: names the engine-confirmed ignored table and
+	// preserves the engine's original error for the operator.
+	var typed *versioncontrolops.IgnoredTablesMergeError
+	if !errors.As(pullErr, &typed) {
+		closeEmbeddedDoltStore(t, store)
+		t.Fatalf("pull error is not the typed ignored-tables refusal: %v", pullErr)
+	}
+	if !slices.Equal(typed.Tables, []string{"events"}) {
+		closeEmbeddedDoltStore(t, store)
+		t.Fatalf("typed refusal names %v, want [events]", typed.Tables)
+	}
+	if inner := typed.Unwrap(); inner == nil || !strings.Contains(inner.Error(), "local changes would be stomped by merge") {
+		closeEmbeddedDoltStore(t, store)
+		t.Fatalf("typed refusal lost the engine's original error: %v", typed.Unwrap())
+	}
+
+	// The failure is inert: the head never moved, no merge opened, the
+	// protected rows are exactly what they were, and the peer's work did not
+	// arrive.
+	headAfter, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		closeEmbeddedDoltStore(t, store)
+		t.Fatalf("read HEAD after the failed pull: %v", err)
+	}
+	if headAfter != headBefore {
+		closeEmbeddedDoltStore(t, store)
+		t.Fatalf("failed pull moved HEAD: %s -> %s", headBefore, headAfter)
+	}
+	closeEmbeddedDoltStore(t, store)
+
+	withRawConn(t, dataDir, "testdb", func(conn *sql.Conn) {
+		// Fixture evidence, on the session that refused the merge: the
+		// fetched remote tip is genuinely not contained in this clone's
+		// history — their merge base is neither tip.
+		base := scalarString(t, ctx, conn, "SELECT DOLT_MERGE_BASE('main', 'origin/main')")
+		tip := scalarString(t, ctx, conn, "SELECT DOLT_HASHOF('origin/main')")
+		if base == tip {
+			t.Fatalf("fetched remote tip %s is contained in HEAD (merge base %s); the fixture does not diverge", tip, base)
+		}
+		if merging := scalarBool(t, ctx, conn, "SELECT is_merging FROM dolt_merge_status"); merging {
+			t.Fatal("refused pull left a merge open")
+		}
+		if got := eventRows(t, ctx, conn); !slices.Equal(got, eventsBefore) {
+			t.Fatalf("refused pull changed local ignored events rows:\nbefore %v\nafter  %v", eventsBefore, got)
+		}
+		if got := scalarInt(t, ctx, conn, "SELECT COUNT(*) FROM issues WHERE id = 'peer-diverge-1'"); got != 0 {
+			t.Fatalf("refused pull delivered the peer's work anyway (%d rows)", got)
+		}
+		// The successful-pull maintenance never ran: the pending-recompute
+		// marker only a successful pull consumes is still there. A refusal
+		// mistaken for a no-op would have eaten it.
+		if got := scalarInt(t, ctx, conn,
+			"SELECT COUNT(*) FROM metadata WHERE `key` = 'is_blocked_recompute_pending'"); got != 1 {
+			t.Fatalf("pending-recompute marker rows = %d after the failed pull, want 1 (no successful-pull maintenance may run)", got)
+		}
+	})
+}
