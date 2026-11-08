@@ -238,6 +238,28 @@ func TestWispCreateStampsWispType(t *testing.T) {
 			t.Errorf("dry run created %d issues, want 0", got)
 		}
 	})
+
+	// The two subtests below are preservation checks: omitting --wisp-type,
+	// or passing it explicitly empty, must keep creating the same root and
+	// child issues with empty wisp_type, exactly as before the flag existed.
+	t.Run("omitted leaves issues untyped", func(t *testing.T) {
+		ctx, s, rootID := newWispTypeFixture(t)
+		var runErr error
+		_ = captureStdout(t, func() error {
+			runErr = runWispCreate(makeWispTestCmd(false, false), []string{rootID})
+			return nil
+		})
+		if runErr != nil {
+			t.Fatalf("wisp create without --wisp-type: %v", runErr)
+		}
+		assertWispRows(t, ctx, s, 3, "")
+	})
+
+	t.Run("explicit empty leaves issues untyped", func(t *testing.T) {
+		ctx, s, rootID := newWispTypeFixture(t)
+		runWispCreateTyped(t, runWispCreate, makeWispTestCmd(false, false), []string{rootID}, "")
+		assertWispRows(t, ctx, s, 3, "")
+	})
 }
 
 // TestWispCreateRejectsInvalidWispType verifies both wisp-creation entrypoints
