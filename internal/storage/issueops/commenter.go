@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	publicops "github.com/steveyegge/beads/issueops"
@@ -49,7 +50,10 @@ func ExecuteAddComment(ctx context.Context, tx *sql.Tx, request publicops.AddCom
 	if err != nil {
 		return publicops.AddCommentResult{}, nil, err
 	}
-	comment, err := AddIssueCommentInTx(ctx, tx, request.IssueID, request.Author, request.Text)
+	// resolveCommentPlaneInTx found the row in tx, the transaction the insert
+	// runs in, so the insert uses its plane and does not look again. The
+	// timestamp is the one AddIssueCommentInTx would give a live comment.
+	comment, err := insertIssueCommentInTx(ctx, tx, commentTable, request.IssueID, request.Author, request.Text, time.Now().UTC().Truncate(time.Second), true)
 	if err != nil {
 		return publicops.AddCommentResult{}, nil, err
 	}
@@ -61,7 +65,7 @@ func ExecuteAddComment(ctx context.Context, tx *sql.Tx, request publicops.AddCom
 // resolveCommentPlaneInTx names the comment table the anchor's thread lives in,
 // refusing an id that names neither an issue nor a wisp.
 //
-// The existence probe is here rather than left to the insert's own so the
+// The existence probe is here, and the insert does not repeat it, so the
 // refusal is TYPED: AddIssueCommentInTx reports a missing anchor as prose, and
 // a caller of this role classifies with errors.Is. It resolves the plane in
 // the same transaction the insert runs in, so a comment cannot land on a row

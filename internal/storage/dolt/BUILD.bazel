@@ -274,6 +274,7 @@ go_test(
         "issue_operations_contract_test.go",
         "issue_operations_persistence_test.go",
         "issue_operations_staging_test.go",
+        "issue_operations_statement_count_test.go",
         "issue_operations_test.go",
         "issues_conflict_test.go",
         "joiniter_spike_test.go",

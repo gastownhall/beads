@@ -451,10 +451,23 @@ func TestLargeBatchApplyWallClock_Embedded(t *testing.T) {
 // now reads its nine config keys in one statement where it read them in nine: -8
 // statements per create item (356: 102 creates, -816; 712: 204, -1632; classic:
 // 10, -80).
+//
+// Re-pinned for reusing rows a write transaction already read (was 5274 /
+// 10546 / 725):
+//   - Every create and update result takes its labels from the body read and
+//     its outgoing dependency records from that plane's dependency table: -3
+//     per create item and per update item (the label routing probe, the second
+//     label read and the wisp partition probe).
+//   - An update hands the row it read to the update funnel instead of the
+//     funnel reading it again (-2), and skips DELETE FROM leases when that row
+//     has no lease (-1): -3 more per assign update.
+//
+// Net: 356 -402 (102 creates, 16 assigns); 712 -804 (204, 32); classic -90
+// (10, 10). The Dolt server backend drops by the same amounts.
 var pinnedEmbeddedStatementCounts = map[string]int64{
-	"356 (mol 1x)":    5274,
-	large712ShapeName: 10546,
-	"40 (classic)":    725,
+	"356 (mol 1x)":    4872,
+	large712ShapeName: 9742,
+	"40 (classic)":    635,
 }
 
 // BenchmarkLargeBatchApply_Embedded benchmarks issueops.ApplyBatchInTx on

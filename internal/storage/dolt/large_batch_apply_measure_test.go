@@ -180,10 +180,14 @@ const statementCountToleranceDolt = 2
 // now reads its nine config keys in one statement where it read them in nine: -8
 // statements per create item (356: 102 creates, -816; 712: 204, -1632; classic:
 // 10, -80).
+//
+// Re-pinned for reusing rows a write transaction already read (was 5274 /
+// 10546 / 725; breakdown in pinnedEmbeddedStatementCounts): -3 per create
+// item and -6 per assign update (356: -402; 712: -804; classic: -90).
 var pinnedDoltStatementCounts = map[string]int64{
-	"356 (mol 1x)": 5274,
-	"712 (mol 2x)": 10546,
-	"40 (classic)": 725,
+	"356 (mol 1x)": 4872,
+	"712 (mol 2x)": 9742,
+	"40 (classic)": 635,
 }
 
 // BenchmarkLargeBatchApply_Dolt is gated by setupBenchStore's own

@@ -244,7 +244,10 @@ func executeUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 		updates[OpForceClosePolicy] = true
 	}
 	if len(updates) > 0 {
-		updated, err := updateIssueInTx(ctx, tx, attempt.IssueID, updates, attempt.Actor, true, false)
+		// current was read in tx, and nothing in tx has written the row or its
+		// lease since (a claim's write comes before current is re-read above),
+		// so the funnel starts from it instead of reading the row again.
+		updated, err := updateIssueInTxFromRow(ctx, tx, attempt.IssueID, current, updates, attempt.Actor, true, false)
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}

@@ -710,6 +710,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   apply as well. A failed read falls back to reading each key, and a config write
   in the same scope is seen by the next read. `bd q`, the create form, and creates
   on the proxied route read as before.
+- **Create, update, close, reopen and comment send fewer SQL statements.**
+  The result that create, update, close and reopen hydrate now takes its
+  labels from the issue read and its outgoing dependency records from the
+  dependency table of the plane that read answered on, which saves three
+  statements per result when the wisps table is empty. An update reuses the
+  row it read in its own transaction instead of reading it again (two
+  fewer) and skips `DELETE FROM leases` when that row has no lease (one
+  fewer). Separately, a comment checks its issue's plane and existence once
+  instead of twice (two fewer). On a Dolt server with no wisps: create 20 to
+  17, close 30 to 27, reopen 24 to 21, an update that claims 20 to 17, an
+  update that claims and patches 26 to 21, a status update 15 to 9 (10 when
+  the issue holds a lease), and a comment 7 to 5. A batch apply saves three
+  per create item and six per assign update: 5274 to 4872 statements for a
+  356-item plan. The standalone claim operation is unchanged. For an ID
+  with a row in both `issues` and `wisps`, the result's labels and outgoing
+  dependency records now come from `issues`, as its body already did; they
+  used to come from the wisp row.
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add
