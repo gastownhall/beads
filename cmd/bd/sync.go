@@ -36,11 +36,13 @@ import (
 //	3  retries exhausted on a transient, self-healing condition (another replica
 //	   kept winning the push race, or a concurrent writer kept the working set
 //	   dirty); retry on the next tick.
-//	4  the dirty working set blocking the is_blocked repair is NOT transient: the
-//	   same pending graph edits have blocked every tick for a while and nothing
-//	   is advancing. Retrying will never publish; an operator must resolve it.
-//	   Also used when the pull is refused over tables this clone ignores but
-//	   the remote still tracks (GH#6368): the same state refuses every tick.
+//	4  operator-only work, nothing pushed: either the dirty working set blocking
+//	   the is_blocked repair is NOT transient (the same pending graph edits have
+//	   blocked every tick for a while, or constraint violations no writer will
+//	   commit are holding it dirty), or the pull was refused over table(s) this
+//	   clone ignores but the remote still tracks and storage could not prove the
+//	   pull a no-op (GH#6368). Retrying will never publish; an operator must
+//	   resolve it.
 const (
 	ExitSyncConflict         = 2
 	ExitSyncRetriesExhausted = 3
@@ -691,11 +693,16 @@ The repair in step 3 refuses to run while another writer has uncommitted changes
 to issues/dependencies. That is transient and not this sync's doing, so it is
 retried on the same budget as a push race rather than failing the run. A working
 set that is NOT transient exits 4 instead, because no amount of retrying will
-ever publish and only an operator can clear it. Two kinds of evidence say so:
-constraint violations on the dirty tables are detected positively and escalate
-on the very attempt that finds them; an abandoned uncommitted edit has no such
-positive signal, so it is only inferred once the same pending graph edits have
-blocked every attempt of several consecutive runs.
+ever publish and only an operator can clear it. Three kinds of evidence say
+so: constraint violations on the dirty tables are detected positively and
+escalate on the very attempt that finds them; a pull refused over table(s) this
+clone ignores but the remote still tracks (a table this clone keeps on Dolt's
+ignore plane while the remote's history has it versioned) is detected
+positively from engine-confirmed storage evidence (the refused tables are on
+this clone's ignored working plane) when the pull cannot be proven a no-op; and
+an abandoned uncommitted edit has no positive signal, so it is only inferred
+once the same pending graph edits have blocked every attempt of several
+consecutive runs.
 
 Conflicts sync cannot resolve safely are NEVER auto-resolved: it halts before
 recomputing or pushing and exits 2, and repeated runs keep halting the same way
@@ -712,11 +719,13 @@ Exit codes (a sync timer can branch on these without parsing output):
   2  merge conflict — halted, nothing pushed, resolve it by hand
   3  retries exhausted (push race, or a concurrent writer's dirty working set)
      — transient, nothing pushed, retry on the next tick
-  4  the dirty working set is stuck, not busy: identical pending graph edits
-     blocked every attempt of several consecutive runs — nothing pushed, and no
-     later tick will publish until an operator clears it. Also: the pull was
-     refused over table(s) this clone ignores but the remote still tracks
-     (docs/recovery/sync-failures.md)
+  4  operator-only work, nothing pushed: identical pending graph edits blocked
+     every attempt of several consecutive runs, constraint violations no writer
+     will commit are holding the repair dirty, or the pull was refused over
+     table(s) this clone ignores but the remote still tracks (their names are in
+     the halt message and under ignored_tables_on_remote in --json; see
+     docs/recovery/sync-failures.md) — no later tick will publish until an
+     operator clears it
 
 On the default-remote path, a rig with no Dolt remote yet but a git origin
 configured adopts that origin as its Dolt remote first, exactly as 'bd dolt push'
@@ -1144,9 +1153,13 @@ func syncMixedTransientNote(out *syncOutcome) []string {
 // constraint violations no writer will ever commit, an abandoned uncommitted
 // edit — reports the same "transient, retry on the next tick" forever, so no
 // tick ever publishes and nothing in the output ever changes to say so
-// (wy-wub2s). Two distinct kinds of evidence can drive this: out.ConstraintViolations
+// (wy-wub2s). Three distinct kinds of evidence can drive this:
+// out.IgnoredTablesOnRemote names the tables a pull was refused over because
+// this clone ignores them while the remote still tracks them (GH#6368), read
+// from the typed storage error on the very attempt that found it, and is
+// reported first; out.ConstraintViolations
 // is a POSITIVE read, from storage.MergeBlockerInspector, naming exactly what
-// is stuck and why on the very attempt that found it (wy-mhouc); absent that,
+// is stuck and why on the very attempt that found it (wy-mhouc); absent both,
 // out.DirtyGraphStuckTicks is the fallback INFERENCE — the pending graph edits
 // have been byte-identical across every attempt of the last N runs, so this is
 // a stuck table rather than a busy fleet, without knowing the specific cause.

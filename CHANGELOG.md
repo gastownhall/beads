@@ -1227,13 +1227,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - After migration 0062, `bd dolt pull` and `bd sync` no longer fail when the
-  remote is only behind this clone (GH#6368). Dolt refuses a merge over a
-  table this clone ignores but the remote still tracks (`events`), even with
-  nothing to merge. bd now treats that refusal as a no-op pull when the
-  remote's tip is already in this clone's history and no merge is open, so
-  `bd sync` goes on to push and brings the remote level. When the remote has
-  commits this clone does not, the pull returns a typed error naming the
-  tables, and `bd sync` stops with exit code 4 (`dirty-stuck`) and
+  remote is only behind this clone
+  ([#6368](https://github.com/gastownhall/beads/issues/6368)). Dolt refuses a
+  merge over a table this clone ignores but the remote still tracks
+  (`events`), even with nothing to merge. bd now treats that refusal as a
+  no-op pull when the remote's tip is already in this clone's history and no
+  merge is open, so `bd sync` goes on to push and brings the remote level.
+  When the remote has commits this clone does not, or bd cannot prove the
+  pull a no-op (the remote could not be refreshed, or containment or the
+  merge state could not be read), the pull returns a typed error naming the
+  tables, confirmed against this clone's ignored working tables, and
+  `bd sync` stops with exit code 4 (`dirty-stuck`) and
   `ignored_tables_on_remote` in `--json`, pointing at the recovery runbook,
   instead of failing with exit 1 on every tick. bd never stages, deletes or
   overwrites the ignored rows.
