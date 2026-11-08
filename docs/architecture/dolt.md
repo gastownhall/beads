@@ -603,13 +603,17 @@ mismatched CLI remotes under `Dolt Remote Migration`.
 > [Dolt Git Remotes](https://docs.dolthub.com/concepts/dolt/git/remotes).
 >
 > This is the default sync setup: a Dolt remote named `origin` over a git
-> transport (`git+https://`, `git+ssh://`, `git+http://`, `git+file://` or
-> `git://`) that points at the git `origin`. `bd dolt remote add` accepts it
-> and `bd doctor` reports it OK under `Dolt Remote vs Git Origin`. Doctor
-> still warns when a remote under another name points at the git origin
-> (bd treats it as a federation peer, not the default sync remote), and when
-> `origin` points at it over raw `http(s)://` or `file://`, which reach a
-> remotesapi server or a native file store instead of `refs/dolt/data`.
+> transport (`git+https://`, `git+ssh://`, `git+http://` or `git+file://`)
+> that points at the git `origin`. Dolt stores an `http(s)://`, `ssh://` or
+> `file://` URL, scp-style address or path that ends in `.git` in its `git+`
+> form, so the git origin's own URL works when it ends in `.git`.
+> `bd dolt remote add` accepts it and `bd doctor` reports it OK under
+> `Dolt Remote vs Git Origin`. Doctor still warns when a remote under another
+> name points at the git origin (bd treats it as a federation peer, not the
+> default sync remote), and when `origin` points at it over another
+> transport: without `.git`, raw `http(s)://`, `ssh://` and `file://` reach a
+> remotesapi server, Dolt's own ssh transfer and a native file store instead
+> of `refs/dolt/data`, and Dolt has no `git://` transport.
 
 ### List/Remove Remotes
 

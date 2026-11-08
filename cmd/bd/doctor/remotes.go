@@ -88,7 +88,7 @@ func CheckDoltRemoteGitOrigin(repoPath string) DoctorCheck {
 	var messages, details, fixes []string
 	if originOffGit {
 		messages = append(messages, "Dolt remote origin matches the git origin URL but does not use a git transport")
-		details = append(details, "Over a raw http(s):// URL Dolt talks to a remotesapi server, and over file:// it writes a native file store, so origin does not keep Dolt data under refs/dolt/data on the git repository the way the git-backed sync remote does.")
+		details = append(details, "Dolt keeps a remote's data under refs/dolt/data on the git repository only when its URL is git+https://, git+http://, git+ssh:// or git+file://. Over raw http(s):// it talks to a remotesapi server, over ssh:// it runs its own transfer, over file:// it writes a native file store, and it has no git:// transport.")
 		fixes = append(fixes, "Point origin at the git transport form of the git origin, e.g. 'bd dolt remote add origin git+https://<host>/<org>/<repo>.git' or 'bd dolt remote add origin git+ssh://git@<host>/<org>/<repo>.git' (bd asks before replacing the current URL).")
 	}
 	if len(aliases) > 0 {

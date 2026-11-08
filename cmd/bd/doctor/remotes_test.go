@@ -62,7 +62,7 @@ func TestCheckDoltRemoteGitOrigin(t *testing.T) {
 	// The Dolt remote named origin over a git transport is the default
 	// git-backed sync remote bd wires up, which keeps its data under
 	// refs/dolt/data on the same repository. It is OK with no Fix, whatever
-	// URL form either side uses and whatever sync.remote says.
+	// form the git origin's URL takes and whatever sync.remote says.
 	canonical := []struct {
 		name, gitOrigin, doltOrigin, syncRemote string
 	}{
@@ -70,8 +70,6 @@ func TestCheckDoltRemoteGitOrigin(t *testing.T) {
 		{"https and git+https without .git", "https://github.com/org/repo.git", "git+https://github.com/org/repo", ""},
 		{"scp and git+ssh", "git@github.com:org/repo.git", "git+ssh://git@github.com/org/repo.git", ""},
 		{"ssh and git+ssh", "ssh://git@github.com/org/repo.git", "git+ssh://git@github.com/org/repo.git", ""},
-		{"scp on both sides", "git@github.com:org/repo.git", "git@github.com:org/repo.git", ""},
-		{"git daemon", "git://127.0.0.1:9418/repo.git", "git://127.0.0.1:9418/repo.git", ""},
 		{"http and git+http", "http://127.0.0.1:3000/repo.git", "git+http://127.0.0.1:3000/repo.git", ""},
 		{"credentials and host case", "https://bob:s3cret@GitHub.com/org/repo.git/", "git+https://github.com/org/repo.git", ""},
 		{"sync.remote URL form", "https://github.com/org/repo.git", "git+https://github.com/org/repo.git", "git+https://github.com/org/repo.git"},
@@ -153,9 +151,11 @@ func TestCheckDoltRemoteGitOrigin(t *testing.T) {
 		})
 	}
 
-	// origin matching the git origin over a transport that is not git (raw
-	// http(s):// reaches a remotesapi server, file:// a native file store) is
-	// reported, with advice to point origin at the git transport.
+	// origin matching the git origin over a transport that is not git is
+	// reported, with advice to point origin at the git transport: raw
+	// http(s):// reaches a remotesapi server, ssh:// Dolt's own transfer and
+	// file:// a native file store, and Dolt has no git:// transport and cannot
+	// parse an scp-style address.
 	offGit := []struct {
 		name, gitOrigin string
 		remotes         []storage.RemoteInfo
@@ -170,6 +170,21 @@ func TestCheckDoltRemoteGitOrigin(t *testing.T) {
 			name:      "native file origin",
 			gitOrigin: "file:///srv/git/repo.git",
 			remotes:   []storage.RemoteInfo{{Name: "origin", URL: "file:///srv/git/repo.git"}},
+		},
+		{
+			name:      "native ssh origin",
+			gitOrigin: "git@github.com:org/repo.git",
+			remotes:   []storage.RemoteInfo{{Name: "origin", URL: "ssh://git@github.com/org/repo"}},
+		},
+		{
+			name:      "git daemon origin",
+			gitOrigin: "git://127.0.0.1:9418/repo.git",
+			remotes:   []storage.RemoteInfo{{Name: "origin", URL: "git://127.0.0.1:9418/repo.git"}},
+		},
+		{
+			name:      "scp origin",
+			gitOrigin: "git@github.com:org/repo.git",
+			remotes:   []storage.RemoteInfo{{Name: "origin", URL: "git@github.com:org/repo.git"}},
 		},
 		{
 			name:      "raw https origin beside an alias",

@@ -1,11 +1,14 @@
 package main
 
 import (
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/doltremote"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // Unit tests for the git-origin collision guard helpers:
@@ -221,6 +224,110 @@ func TestDoltRemoteMatchesGitOrigin_DifferentURL_ReturnsFalse(t *testing.T) {
 
 	if doltRemoteMatchesGitOrigin("https://doltremoteapi.dolthub.com/org/repo") {
 		t.Error("doltRemoteMatchesGitOrigin() = true for different URL, want false")
+	}
+}
+
+// --- refuseGitOriginDoltRemote ---
+
+// TestRefuseGitOriginDoltRemote pins the git-origin guard of bd dolt remote
+// add (GH#6150). origin that Dolt stores git-backed passes silently, however
+// it is spelled: Dolt stores a URL that ends in .git in its git+ form. origin
+// that Dolt would store over another transport is refused with its git
+// transport form and no advice to give up sync. Any other name at the git
+// origin keeps the original refusal, and --allow-git-origin turns a refusal
+// into a warning.
+func TestRefuseGitOriginDoltRemote(t *testing.T) {
+	for _, tc := range []struct {
+		name, gitOrigin, remote, url string
+		allow, refused               bool
+		line                         string // a line of stderr; none when the add passes silently
+	}{
+		{name: "git+https origin", gitOrigin: "https://github.com/org/repo.git", remote: "origin", url: "git+https://github.com/org/repo.git"},
+		{name: "https origin ending in .git", gitOrigin: "https://github.com/org/repo.git", remote: "origin", url: "https://github.com/org/repo.git"},
+		{name: "scp origin ending in .git", gitOrigin: "git@github.com:org/repo.git", remote: "origin", url: "git@github.com:org/repo.git"},
+		{name: "file origin ending in .git", gitOrigin: "file:///srv/git/repo.git", remote: "origin", url: "file:///srv/git/repo.git"},
+		{
+			name: "https origin without .git", gitOrigin: "https://github.com/org/repo", remote: "origin", url: "https://github.com/org/repo",
+			refused: true, line: "  Hint: add origin over the git transport: bd dolt remote add origin git+https://github.com/org/repo",
+		},
+		{
+			name: "https origin with a trailing slash", gitOrigin: "https://github.com/org/repo.git", remote: "origin", url: "https://github.com/org/repo.git/",
+			refused: true, line: "  Hint: add origin over the git transport: bd dolt remote add origin git+https://github.com/org/repo.git/",
+		},
+		{
+			name: "ssh origin without .git", gitOrigin: "ssh://git@github.com/org/repo", remote: "origin", url: "ssh://git@github.com/org/repo",
+			refused: true, line: "  Hint: add origin over the git transport: bd dolt remote add origin 'git+ssh://git@github.com/org/repo'",
+		},
+		{
+			name: "file origin without .git", gitOrigin: "file:///srv/git/repo", remote: "origin", url: "file:///srv/git/repo",
+			refused: true, line: "  Hint: add origin over the git transport: bd dolt remote add origin git+file:///srv/git/repo",
+		},
+		{
+			name: "git daemon origin", gitOrigin: "git://127.0.0.1:9418/repo.git", remote: "origin", url: "git://127.0.0.1:9418/repo.git",
+			refused: true, line: "  Hint: add origin over a git transport (git+https://, git+ssh:// or git+file://) to the same repository.",
+		},
+		{
+			name: "an alias at the git origin", gitOrigin: "https://github.com/org/repo.git", remote: "backup", url: "git+https://github.com/org/repo.git",
+			refused: true, line: "  Hint: or set dolt.local-only=true to disable remote sync entirely.",
+		},
+		{
+			name: "--allow-git-origin", gitOrigin: "https://github.com/org/repo", remote: "origin", url: "https://github.com/org/repo", allow: true,
+			line: `Warning: "https://github.com/org/repo" matches the git origin — proceeding because --allow-git-origin is set.`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			initBareGitRepoForTest(t, dir)
+			runGitCommand(t, dir, "remote", "add", "origin", tc.gitOrigin)
+			t.Chdir(dir)
+
+			var refused bool
+			stderr := captureStderr(t, func() { refused = refuseGitOriginDoltRemote(tc.remote, tc.url, tc.allow) })
+			if refused != tc.refused {
+				t.Errorf("refused = %v, want %v\nstderr:\n%s", refused, tc.refused, stderr)
+			}
+			if tc.line == "" {
+				if stderr != "" {
+					t.Errorf("stderr = %q, want the git-backed origin to pass silently", stderr)
+				}
+				return
+			}
+			if !strings.Contains(stderr, tc.line+"\n") {
+				t.Errorf("stderr lacks %q:\n%s", tc.line, stderr)
+			}
+			if tc.refused && !strings.Contains(stderr, "Error: refusing to add "+strconv.Quote(tc.url)) {
+				t.Errorf("stderr does not refuse %q:\n%s", tc.url, stderr)
+			}
+			if tc.refused && tc.remote == "origin" && (strings.Contains(stderr, "local-only") || strings.Contains(stderr, "--allow-git-origin")) {
+				t.Errorf("origin drew the alias advice instead of its git transport:\n%s", stderr)
+			}
+		})
+	}
+}
+
+// TestGitTransportURL pins the git transport form the guard suggests for
+// origin: one Dolt stores git-backed, or none for a transport Dolt lacks.
+func TestGitTransportURL(t *testing.T) {
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		url, want string
+		ok        bool
+	}{
+		{"https://github.com/org/repo", "git+https://github.com/org/repo", true},
+		{"http://127.0.0.1:3000/repo", "git+http://127.0.0.1:3000/repo", true},
+		{"ssh://git@github.com/org/repo", "git+ssh://git@github.com/org/repo", true},
+		{"git@github.com:org/repo", "git+ssh://git@github.com/org/repo", true},
+		{"file:///srv/git/repo", "git+file:///srv/git/repo", true},
+		{dir, "git+file://" + filepath.ToSlash(dir), true},
+		{"git://127.0.0.1:9418/repo.git", "", false},
+	} {
+		got, ok := gitTransportURL(tc.url)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("gitTransportURL(%q) = %q, %v; want %q, %v", tc.url, got, ok, tc.want, tc.ok)
+		}
+		if ok && !doltutil.IsGitBackedRemoteURL(got) {
+			t.Errorf("gitTransportURL(%q) = %q, which Dolt does not store git-backed", tc.url, got)
+		}
 	}
 }
 
