@@ -286,6 +286,69 @@ func (s *testSuite) TestCommit_NothingToCommitDidCommitFalse() {
 	s.True(strings.Contains(string(result.Output), "nothing to commit"))
 }
 
+func (s *testSuite) gitOut(args ...string) string {
+	s.T().Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = s.tmpDir
+	out, err := cmd.Output()
+	s.Require().NoError(err, "git %v", args)
+	return strings.TrimSpace(string(out))
+}
+
+// prepareInitArtifacts writes the beads artifacts and stages a foreign
+// work.txt, with an unstaged edit on top, after a seed commit.
+func (s *testSuite) prepareInitArtifacts() {
+	s.T().Helper()
+	s.gitInit()
+	s.writeFile("seed", "seed\n")
+	s.run("git", "add", "seed")
+	s.run("git", "commit", "-q", "-m", "seed")
+	s.Require().NoError(os.MkdirAll(filepath.Join(s.tmpDir, ".beads"), 0750))
+	s.writeFile(filepath.Join(".beads", "config.yaml"), "# beads\n")
+	s.writeFile("CLAUDE.md", "beads instructions\n")
+}
+
+func (s *testSuite) stageForeignWork() {
+	s.T().Helper()
+	s.writeFile("work.txt", "staged work\n")
+	s.run("git", "add", "work.txt")
+	s.writeFile("work.txt", "staged work\nunstaged edit\n")
+}
+
+func (s *testSuite) commitInitArtifacts() (domain.CommitInitArtifactsResult, error) {
+	return domain.NewGitUseCase(s.tmpDir, s.repo).CommitInitArtifacts(s.Ctx(), domain.CommitInitArtifactsParams{
+		BeadsDir:      ".beads/",
+		OptionalPaths: []string{"CLAUDE.md", ".gitignore"},
+		Message:       "bd init: initialize beads issue tracking",
+		NoVerify:      true,
+		SkipHooks:     true,
+	})
+}
+
+func (s *testSuite) requireForeignWorkUntouched() {
+	s.T().Helper()
+	s.Equal("A\twork.txt", s.gitOut("diff", "--cached", "--name-status"))
+	s.Equal("staged work", s.gitOut("show", ":work.txt"))
+	data, err := os.ReadFile(filepath.Join(s.tmpDir, "work.txt"))
+	s.Require().NoError(err)
+	s.Equal("staged work\nunstaged edit\n", string(data))
+}
+
+// GH#5654: the init commit holds only the artifact paths; a file the user
+// staged beforehand keeps its staged blob and its unstaged edit.
+func (s *testSuite) TestCommitInitArtifacts_LeavesForeignStagedFiles() {
+	s.prepareInitArtifacts()
+	s.stageForeignWork()
+	seed := s.gitOut("rev-parse", "HEAD")
+
+	result, err := s.commitInitArtifacts()
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+	s.Equal(seed, s.gitOut("rev-parse", "HEAD^"))
+	s.Equal(".beads/config.yaml\nCLAUDE.md", s.gitOut("show", "--name-only", "--format=", "HEAD"))
+	s.requireForeignWorkUntouched()
+}
+
 func (s *testSuite) TestAdd_EmptyPathsErrors() {
 	s.gitInit()
 	err := s.repo.Add(s.Ctx())

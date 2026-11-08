@@ -798,6 +798,30 @@ func TestProxiedInitTailGitUsesSelectedDirectory(t *testing.T) {
 	}
 }
 
+// TestProxiedInitTailCommitScope pins GH#5654 for the proxied-server tail: the
+// bootstrap commit through CommitInitArtifacts records only the init artifacts
+// and leaves whatever else the user staged, or left unstaged, as it was.
+func TestProxiedInitTailCommitScope(t *testing.T) {
+	for _, tc := range []initCommitScopeCase{
+		{name: "foreign_staged"},
+		{name: "partly_staged", partly: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target, _, _ := newInitRoleFixture(t)
+			prepareInitCommitScope(t, target, tc)
+			headBefore := initCommitScopeHead(t, target)
+			stageBefore := initRoleFixtureGit(t, target, "ls-files", "--stage")
+			cmd := &cobra.Command{}
+			cmd.Flags().Bool("setup-exclude", false, "")
+			in := initProxiedServerInput{skipHooks: true, skipAgents: true, nonInteractive: true, quiet: tc.quiet}
+			stdout, stderr := captureInitCommitOutput(t, func() {
+				require.NoError(t, runInitProxiedServerTail(cmd, t.Context(), in, runInitTailContext{workDir: target, beadsDir: filepath.Join(target, ".beads"), useLocalBeads: true, fsUseCase: &initTailForkObservation{}, gitUC: storagegit.NewGitProvider(target).GitUseCase()}))
+			})
+			checkInitCommitScope(t, target, tc, headBefore, stageBefore, stdout, stderr)
+		})
+	}
+}
+
 // TestProxiedInitTailKeepHomeCleanLeavesEnclosingRepoAlone runs the tail for
 // the home-directory opt-out from a home inside another repository, as a
 // dotfiles or monorepo checkout above it is. That repository is not the

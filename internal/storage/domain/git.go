@@ -217,6 +217,7 @@ func (u *gitUseCaseImpl) CommitInitArtifacts(ctx context.Context, params CommitI
 		Message:   params.Message,
 		NoVerify:  params.NoVerify,
 		SkipHooks: params.SkipHooks,
+		Only:      paths,
 	})
 	if err != nil {
 		return CommitInitArtifactsResult{}, fmt.Errorf("CommitInitArtifacts: commit: %w", err)

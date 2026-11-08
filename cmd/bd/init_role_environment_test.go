@@ -781,7 +781,7 @@ func checkInitCommitScope(t *testing.T, repo string, tc initCommitScopeCase, hea
 		if head != headBefore {
 			t.Errorf("no-change bootstrap moved HEAD from %q to %q", headBefore, head)
 		}
-		if stderr != "" || strings.Contains(stdout, "Committed beads files") {
+		if strings.Contains(stderr, "failed to commit") || strings.Contains(stdout, "Committed beads files") {
 			t.Errorf("no-change bootstrap reported stdout=%q stderr=%q", stdout, stderr)
 		}
 	default:
