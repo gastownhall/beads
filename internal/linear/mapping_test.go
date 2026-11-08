@@ -1198,6 +1198,17 @@ func TestResolveTypeKeyNameCollision(t *testing.T) {
 			},
 		},
 		{
+			name:   "open self-named state reaches type ambiguity with Todo",
+			states: defaultTeam,
+			config: documentedTypeMap,
+			status: types.StatusOpen,
+			wantErr: []string{
+				"type fallback is ambiguous",
+				"Backlog, Todo",
+				"linear.outbound_state_map.open",
+			},
+		},
+		{
 			name: "padded mixed-case self-named name still reaches the type pass",
 			states: []State{
 				{ID: "state-done", Name: "Done", Type: "completed"},
