@@ -149,8 +149,9 @@ func TestLifecycleUpdateRefusesDualPresence(t *testing.T) {
 
 // TestDualPresenceCloseReopenUnchanged pins what the GH#5991 refusal leaves
 // alone: Close and Reopen are separate verbs that keep targeting the wisp copy
-// of a dual-present ID, and their version-only ApplyUpdate precondition (which
-// mutates nothing) still checks the wisp row instead of refusing.
+// of a dual-present ID, with and without their version-only ApplyUpdate
+// precondition (which mutates nothing and still checks the wisp row instead
+// of refusing), while an Update of the same twin still refuses.
 func TestDualPresenceCloseReopenUnchanged(t *testing.T) {
 	ctx := context.Background()
 	operations, provider := newRealIssueOperationsWithProvider(t, ctx)
@@ -222,6 +223,39 @@ func TestDualPresenceCloseReopenUnchanged(t *testing.T) {
 	}
 	if got := wisp().Status; got != types.StatusOpen {
 		t.Errorf("wisp status after Reopen = %q, want open", got)
+	}
+
+	// Close without a precondition skips the version-only ApplyUpdate and
+	// still closes the wisp copy.
+	unguarded, err := operations.Close(ctx, issueops.CloseRequest{Actor: "writer", IssueID: id, Reason: "done again"})
+	if err != nil {
+		t.Fatalf("unconditioned Close of dual-present %s: %v", id, err)
+	}
+	if !unguarded.Changed || unguarded.Issue == nil || unguarded.Issue.Title != "wisp "+id || unguarded.Issue.Status != types.StatusClosed {
+		t.Fatalf("unconditioned Close result = %+v, want a real close of the wisp copy", unguarded)
+	}
+	if got := wisp().Status; got != types.StatusClosed {
+		t.Errorf("wisp status after unconditioned Close = %q, want closed", got)
+	}
+	if got := durableStatus(); got != string(types.StatusOpen) {
+		t.Errorf("issues status after unconditioned Close = %q, want open", got)
+	}
+
+	// The boundary: the twin Close and Reopen just moved still refuses an
+	// Update, and the refusal changes nothing on either plane.
+	beforeUpdate := readUOWDualPresenceSnapshot(t, ctx, provider, id)
+	_, err = operations.Update(ctx, issueops.UpdateRequest{Actor: "writer", IssueID: id, Patch: issueops.IssuePatch{
+		Title: issueops.Field[string]{Set: true, Value: "probe"},
+	}})
+	if !errors.Is(err, issueops.ErrDualPresence) {
+		t.Fatalf("Update of dual-present %s after Close/Reopen: err = %v, want ErrDualPresence", id, err)
+	}
+	var dual *issueops.DualPresenceError
+	if !errors.As(err, &dual) || dual.ID != id {
+		t.Fatalf("Update of dual-present %s after Close/Reopen: errors.As = %#v from %v, want ID %q", id, dual, err, id)
+	}
+	if after := readUOWDualPresenceSnapshot(t, ctx, provider, id); !reflect.DeepEqual(beforeUpdate, after) {
+		t.Errorf("refused update after Close/Reopen changed persisted state:\nbefore %q\nafter  %q", beforeUpdate, after)
 	}
 
 	if before, after := durableRows(seeded), durableRows(readUOWDualPresenceSnapshot(t, ctx, provider, id)); !reflect.DeepEqual(before, after) {
