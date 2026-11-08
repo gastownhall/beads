@@ -1824,8 +1824,11 @@ var rootCmd = &cobra.Command{
 		// When .beads/redirect points to a shared directory with a different
 		// dolt_database, the source's database name would be lost. Capture it
 		// early and set BEADS_DOLT_SERVER_DATABASE so all store opens use it.
+		// Only a redirect that leads to the selected workspace counts
+		// (selectedRedirectSourceDir, GH#5756).
 		if dbPath == "" {
-			preserveRedirectSourceDatabase(beads.GetRedirectInfo().LocalDir)
+			selectedRedirectSource = selectedRedirectSourceDir()
+			preserveRedirectSourceDatabase(selectedRedirectSource)
 		}
 
 		if dbPath == "" {

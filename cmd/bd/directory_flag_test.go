@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -335,6 +336,32 @@ func TestSelectedWorkspaceDatabaseIsolation(t *testing.T) {
 			}
 			if got := os.Getenv("BEADS_DOLT_SERVER_DATABASE"); got != "" {
 				t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want unset for a selected workspace without a redirect", got)
+			}
+		})
+	}
+}
+
+// TestSelectedWorkspaceStorelessIsolation pins GH#5756 for the store
+// commands: -C onto a workspace with no database keeps the existing
+// no-database refusal and never exports the caller's redirect-source database
+// on the way there.
+func TestSelectedWorkspaceStorelessIsolation(t *testing.T) {
+	for _, cmd := range []*cobra.Command{listCmd, createCmd, updateCmd} {
+		t.Run(cmd.Name(), func(t *testing.T) {
+			selectedWorkspaceEnvForTest(t)
+			callerDir, _ := newRedirectedCallerForTest(t)
+			targetDir := filepath.Join(t.TempDir(), "target")
+			writeTestConfigYAML(t, filepath.Join(targetDir, ".beads"), "prefix: zz\n")
+			t.Chdir(callerDir)
+			changeDir = targetDir
+
+			var err error
+			stderr := captureStderr(t, func() { err = rootCmd.PersistentPreRunE(cmd, nil) })
+			if err == nil || !strings.Contains(stderr, "no beads database found") {
+				t.Fatalf("PersistentPreRunE(%s) = %v, stderr %q; want the no-database refusal", cmd.Name(), err, stderr)
+			}
+			if got := os.Getenv("BEADS_DOLT_SERVER_DATABASE"); got != "" {
+				t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want unset: the caller's redirect-source database must not follow -C", got)
 			}
 		})
 	}
