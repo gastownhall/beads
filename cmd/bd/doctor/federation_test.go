@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/testutil"
 )
@@ -939,6 +940,17 @@ func TestCheckFederationRemotesAPI_AllCheckNames(t *testing.T) {
 // closed.
 func probeOnlyServerWorkspace(t *testing.T, port int, remotes ...string) (repo, beadsDir string) {
 	t.Helper()
+	infos := make([]storage.RemoteInfo, 0, len(remotes))
+	for _, name := range remotes {
+		infos = append(infos, storage.RemoteInfo{Name: name})
+	}
+	return probeOnlyServerWorkspaceWithURLs(t, port, infos...)
+}
+
+// probeOnlyServerWorkspaceWithURLs is probeOnlyServerWorkspace with each
+// remote's URL given; an empty URL names a file:// path no peer serves.
+func probeOnlyServerWorkspaceWithURLs(t *testing.T, port int, remotes ...storage.RemoteInfo) (repo, beadsDir string) {
+	t.Helper()
 	repo, beadsDir = doctorEndpointWorkspace(t)
 	t.Setenv("GT_ROOT", "")
 	t.Setenv("BEADS_DOLT_AUTO_START", "0")
@@ -960,10 +972,14 @@ func probeOnlyServerWorkspace(t *testing.T, port int, remotes ...string) (repo, 
 	if err != nil {
 		t.Fatalf("create %s: %v", dbName, err)
 	}
-	for _, name := range remotes {
-		if err := store.AddRemote(ctx, name, "file:///tmp/"+dbName+"-"+name); err != nil {
+	for _, r := range remotes {
+		url := r.URL
+		if url == "" {
+			url = "file:///tmp/" + dbName + "-" + r.Name
+		}
+		if err := store.AddRemote(ctx, r.Name, url); err != nil {
 			_ = store.Close()
-			t.Fatalf("add remote %s: %v", name, err)
+			t.Fatalf("add remote %s: %v", r.Name, err)
 		}
 	}
 	_ = store.Close()
