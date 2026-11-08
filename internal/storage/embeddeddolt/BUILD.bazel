@@ -171,6 +171,7 @@ go_test(
         "history_presence_contract_test.go",
         "history_test.go",
         "id_retention_contract_test.go",
+        "ignored_dirty_tables_test.go",
         "is_blocked_batch_test.go",
         "issue_lifecycle_test.go",
         "issue_operations_behavior_test.go",
