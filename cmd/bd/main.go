@@ -828,6 +828,72 @@ func preserveRedirectSourceDatabase(beadsDir string) {
 	}
 }
 
+// retainedRedirectSourceDir is the redirect-source .beads directory THIS
+// command's workspace selection came through, resolved once at the
+// preservation points below — before selectedNoDBBeadsDir and
+// prepareSelectedCommandContext rebind BEADS_DIR to the post-redirect target,
+// at which point the caller's .beads is no longer reachable through the
+// environment. Empty when the selection did not come through a redirect the
+// caller owns. Reset at the top of every PersistentPreRunE run; `bd where`
+// reads it for provenance instead of walking the cwd (GH#5756).
+var retainedRedirectSourceDir string
+
+// selectedRedirectSourceDir resolves the redirect source for the workspace
+// this command selected, closing the be-bf75p gap: preservation used to key
+// off beads.GetRedirectInfo(), which describes the ambient cwd repo, so a
+// foreign target selected with -C or an exported BEADS_DIR inherited the
+// caller's redirect-source dolt_database. The rule, in order:
+//
+//   - -C <dir>: the redirect the -C workspace's own repository root holds
+//     (GetRedirectInfoFrom — BEADS_DIR already names the -C-resolved target,
+//     which would mask it). The source counts only when its redirect target
+//     is the selection (ExplicitBeadsDir): a workspace nested below an
+//     ancestor repo's redirect is foreign and keeps no source. Never falls
+//     back to the caller.
+//   - BEADS_DIR exported (or set by a .beads/.env selector in
+//     loadSelectionEnvironment — at the preservation points it is live
+//     either way): the redirect the named directory itself holds; when it
+//     holds none, the redirect the cwd's discovery finds counts only when
+//     its target is the selection (bd-wayc3: BEADS_DIR pre-set to the
+//     redirect target still means the caller's own redirect).
+//   - No selector: the ambient discovery's redirect — unchanged from
+//     be-xil, this is the caller's own workspace.
+func selectedRedirectSourceDir() string {
+	if strings.TrimSpace(changeDir) != "" {
+		workspace := changeDirWorkspace()
+		if workspace == "" {
+			return ""
+		}
+		info := beads.GetRedirectInfoFrom(workspace)
+		if info.IsRedirected && sameDirPath(info.TargetDir, beads.ExplicitBeadsDir()) {
+			return info.LocalDir
+		}
+		return ""
+	}
+	if raw := os.Getenv("BEADS_DIR"); raw != "" {
+		own := beads.ResolveRedirect(utils.CanonicalizePath(raw))
+		if own.WasRedirected && sameDirPath(own.TargetDir, beads.ExplicitBeadsDir()) {
+			return own.SourceDir
+		}
+		discovered := beads.GetDiscoveredRedirectInfo()
+		if discovered.IsRedirected && sameDirPath(discovered.TargetDir, beads.ExplicitBeadsDir()) {
+			return discovered.LocalDir
+		}
+		return ""
+	}
+	return beads.GetRedirectInfo().LocalDir
+}
+
+// retainRedirectSourceDir resolves this command's selection once and
+// preserves its redirect-source database, replacing the unconditional
+// preserveRedirectSourceDatabase(beads.GetRedirectInfo().LocalDir) whose
+// cwd-derived answer inherited the caller's database into a foreign selection
+// (GH#5756).
+func retainRedirectSourceDir() {
+	retainedRedirectSourceDir = selectedRedirectSourceDir()
+	preserveRedirectSourceDatabase(retainedRedirectSourceDir)
+}
+
 // explicitDBTargetGiven reports whether the caller named an explicit database
 // target that overrides the ambient workspace. These are the three routes the
 // PR body for be-fyt names and that selectedNoDBBeadsDir below honors ahead of
@@ -844,16 +910,12 @@ func preserveRedirectSourceDatabase(beadsDir string) {
 // `bd doctor --db <name>` in a redirected repo; see
 // TestDoctorPersistentPreRunBareDBNameStillPreservesAmbientSourceDatabase.
 //
-// KNOWN GAP (be-bf75p): selectedNoDBBeadsDir honors a fourth route this
-// predicate does not — BEADS_DIR != "" -> beads.FindBeadsDir() (~line 551) —
-// so a BEADS_DIR naming a foreign target still inherits the ambient repo's
-// redirect-source database. Reproduces only inside a git repo, because
-// GetRedirectInfo reaches the ambient repo through findLocalBdsDirInRepo
-// (internal/beads/beads.go:394), which keys off git.GetRepoRoot() alone.
-// Emptiness is the wrong test for it: BEADS_DIR pre-set *to the redirect
-// target* is bd-wayc3's own case, where preservation is wanted, so the fix has
-// to compare BEADS_DIR against the redirect target rather than check that it
-// is unset. That comparison is be-bf75p's, not this PR's.
+// The BEADS_DIR route this predicate does not cover is selectedRedirectSourceDir's
+// to judge, not an emptiness test's: a BEADS_DIR naming a foreign target must
+// inherit nothing (GH#5756), while BEADS_DIR pre-set *to the redirect target*
+// is bd-wayc3's own case, where preservation is wanted. That comparison — the
+// named selection against the redirect's target — is what
+// selectedRedirectSourceDir does; be-bf75p was the gap it closed.
 func explicitDBTargetGiven() bool {
 	return dbPath != "" || os.Getenv("BEADS_DB") != "" || os.Getenv("BD_DB") != ""
 }
@@ -1378,6 +1440,10 @@ var rootCmd = &cobra.Command{
 		commandDidWriteTipMetadata = false
 		commandTipIDsShown = make(map[string]struct{})
 		commandFreeze = migration.Result{}
+		// Per-command redirect-source retention (GH#5756): bypass paths that
+		// never reach a preservation point must not see the previous
+		// command's source.
+		retainedRedirectSourceDir = ""
 
 		// Set up signal-aware context with batch commit flush on shutdown.
 		// Unlike signal.NotifyContext, this also handles SIGHUP and flushes
@@ -1691,14 +1757,13 @@ var rootCmd = &cobra.Command{
 			// routes that populate dbPath/BEADS_DB/BD_DB.
 			//
 			// It does NOT cover selectedNoDBBeadsDir's fourth route, BEADS_DIR
-			// (~line 551), so the two predicates still disagree there and a
-			// foreign BEADS_DIR target inherits the ambient repo's
-			// redirect-source database — inside a git repo only. Measured, not
-			// assumed; tracked and specified as be-bf75p. See the KNOWN GAP
-			// paragraph on explicitDBTargetGiven for why emptiness is the wrong
-			// test and what the fix has to compare instead.
+			// (~line 551). That route is retention's to judge instead:
+			// retainRedirectSourceDir compares the selection against the
+			// redirect's target, so a foreign BEADS_DIR target inherits
+			// nothing while bd-wayc3's pre-set-to-target case keeps the
+			// caller's own source (GH#5756, closing be-bf75p).
 			if !explicitDBTargetGiven() {
-				preserveRedirectSourceDatabase(beads.GetRedirectInfo().LocalDir)
+				retainRedirectSourceDir()
 			}
 			beadsDir := selectedNoDBBeadsDir(cmd)
 			prepareSelectedNoDBContext(beadsDir)

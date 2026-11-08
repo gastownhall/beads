@@ -28,6 +28,7 @@ func savePersistentPreRunState(t *testing.T) {
 	oldJSONOutput := jsonOutput
 	oldReadonlyMode := readonlyMode
 	oldDoltAutoCommit := doltAutoCommit
+	oldRetainedRedirectSourceDir := retainedRedirectSourceDir
 	flagState := snapshotRootFlagState()
 	t.Cleanup(func() {
 		serverMode = oldServerMode
@@ -37,6 +38,7 @@ func savePersistentPreRunState(t *testing.T) {
 		jsonOutput = oldJSONOutput
 		readonlyMode = oldReadonlyMode
 		doltAutoCommit = oldDoltAutoCommit
+		retainedRedirectSourceDir = oldRetainedRedirectSourceDir
 		restoreRootFlagState(t, flagState)
 	})
 
@@ -47,6 +49,7 @@ func savePersistentPreRunState(t *testing.T) {
 	jsonOutput = false
 	readonlyMode = false
 	doltAutoCommit = ""
+	retainedRedirectSourceDir = ""
 }
 
 func writeMetadataConfig(t *testing.T, beadsDir string, doltMode string, database string) {

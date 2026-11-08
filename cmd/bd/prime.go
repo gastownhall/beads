@@ -286,16 +286,13 @@ func readCustomPrimeContent(workspaceDir, beadsDir string) (string, bool) {
 	return "", false
 }
 
-// primeWorkspaceDir returns the directory prime resolves workspace-relative
-// state against — the .beads/PRIME.md local tier, the AGENTS.md/CLAUDE.md
-// divergence reminder, the git probes behind the default template's
-// git-authority wording, and the template's redirect notice: the absolute -C
-// target when set, else "" (the process cwd). -C only redirects BEADS_DIR, it does not chdir, so this is what makes
-// `bd -C dir prime` match `cd dir && bd prime` (#5509). It is deliberately not
-// the parent of the resolved beads dir, which may have followed .beads/redirect
-// or walked up from a subdirectory (see the CASE A/B tests in
-// prime_divergence_test.go).
-func primeWorkspaceDir() string {
+// changeDirWorkspace returns the absolute -C workspace when -C is set, else
+// "". -C only redirects BEADS_DIR, it does not chdir, so this is the
+// directory-relative seam every -C-aware resolution keys off: prime's
+// workspace state (#5509) and the redirect-source selection that keeps a
+// foreign -C target from inheriting the caller's redirect-source database
+// (GH#5756).
+func changeDirWorkspace() string {
 	if strings.TrimSpace(changeDir) == "" {
 		return ""
 	}
@@ -304,6 +301,18 @@ func primeWorkspaceDir() string {
 		return filepath.Clean(changeDir)
 	}
 	return abs
+}
+
+// primeWorkspaceDir returns the directory prime resolves workspace-relative
+// state against — the .beads/PRIME.md local tier, the AGENTS.md/CLAUDE.md
+// divergence reminder, the git probes behind the default template's
+// git-authority wording, and the template's redirect notice: the absolute -C
+// target when set, else "" (the process cwd), via changeDirWorkspace. It is
+// deliberately not the parent of the resolved beads dir, which may have
+// followed .beads/redirect or walked up from a subdirectory (see the CASE A/B
+// tests in prime_divergence_test.go).
+func primeWorkspaceDir() string {
+	return changeDirWorkspace()
 }
 
 // primeGitCmd returns the git command prime's repository probes run. Under -C
