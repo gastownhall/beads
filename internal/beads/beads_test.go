@@ -3011,6 +3011,11 @@ func TestFindBeadsDirFromWorktreeRootMatchesCwdDiscovery(t *testing.T) {
 				// holds only server-mode metadata with no local database.
 				{name: "root redirect to independent metadata project", shared: "db", root: "redirect_independent", ancestorDB: true, want: "redirect", parity: true},
 				{name: "root redirect to ancestor metadata project", shared: "db", root: "redirect_ancestor", want: "ancestor", parity: true},
+				// Retention guard (GH#7782 scope): with no usable root or
+				// shared store, the sibling-layout ancestor walk is preserved
+				// and still agrees with cwd discovery.
+				{name: "no root or shared store, ancestor retained", ancestorDB: true, want: "ancestor", parity: true},
+				{name: "no root or shared store, no ancestor", noAncestor: true, want: "", parity: true},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					var sharedRoot, worktree string
