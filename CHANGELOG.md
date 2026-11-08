@@ -1226,6 +1226,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A failed automatic push no longer looks like a success, and `bd doctor`'s
+  Sync Staleness check no longer reports "Sync is up to date" while origin is
+  silently out of sync ([GH#6289](https://github.com/gastownhall/beads/issues/6289)).
+  A failed auto-push advanced `last_push` in `.beads/push-state.json`, so the
+  workspace looked pushed when it wasn't; and the doctor check skipped the
+  `origin` remote entirely and never read push-state.json, so it reported a
+  green sync on evidence that never included origin. Now `last_push` /
+  `last_commit` advance only on a successful push (auto-push, `bd dolt push`
+  and `bd sync` pushing to the default remote or `origin`), failures record
+  `last_attempt` and a scrubbed, 512-byte-truncated `last_error` instead (and
+  the debounce respects the later of success and attempt), and Sync Staleness
+  judges origin offline from the cached tracking ref plus the recorded push
+  attempts: a recorded failure warns even beside equal cached refs, divergence
+  and a missing comparison warn instead of reading as clean, the all-clear
+  names itself local evidence, and `no-push` / `dolt.local-only` workspaces get
+  the skipped origin leg named rather than judged.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

@@ -284,6 +284,25 @@ bd doctor --fix --yes
 `noms/LOCK`). These are Dolt-internal files and removing them **will cause
 unrecoverable data corruption**. Dolt manages these files itself.
 
+### Doctor says sync is stale (or you need to be sure it isn't)
+
+`bd doctor`'s **Sync Staleness** check never contacts the remote: it compares
+local history against the cached `origin` tracking ref (updated by the last
+push or pull) and reads the recorded push attempts in
+[`.beads/push-state.json`](/reference/configuration#auto-push). That is enough
+to catch a failed push — a recorded `last_error` warns even when the cached ref
+looks current, and the check says so when it had no cached ref to compare
+against — but it is local evidence only:
+
+- An all-clear means "nothing local says the sync is stale", not "the remote
+  has your commits". To verify what the remote actually holds, compare
+  directly, e.g. `git ls-remote <remote-url> refs/dolt/data` (or
+  `dolt ls-remote origin` from the database directory) against your local
+  commit hash.
+- If the workspace sets `no-push: true` or `dolt.local-only: true`, the origin
+  leg cannot judge sync from this machine and is reported as skipped, not
+  clean. Peer findings are still checked.
+
 ### "fatal: Unable to read current working directory"
 
 The Dolt server's working directory no longer exists (common after branch switches). Restart it:

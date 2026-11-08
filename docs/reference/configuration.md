@@ -273,8 +273,11 @@ How it works:
 - After each write command (after auto-commit and auto-backup), `bd` checks whether a push is due.
 - Pushes are debounced: skipped if the last push was less than `dolt.auto-push-interval` ago.
 - Change detection: skipped if the Dolt HEAD commit hasn't changed since the last push.
-- Push failures are warnings only (non-fatal), and failed attempts are throttled too.
-- Last push time and commit are tracked in `.beads/push-state.json`, a per-machine file (not in the database, to avoid merge conflicts across machines).
+- Push failures are warnings only (non-fatal), and failed attempts are throttled too: a failed attempt records the time and a scrubbed error message, and the next attempt is debounced from the later of the last success and the last attempt.
+- Push state is tracked in `.beads/push-state.json`, a per-machine file (not in the database, to avoid merge conflicts across machines). Fields:
+  - `last_push` / `last_commit` — success watermarks: only a push that actually succeeded (auto-push, `bd dolt push`, or `bd sync` pushing to the default remote or `origin`) advances them. A failed attempt never does.
+  - `last_attempt` / `last_error` — the most recent attempt: set on failure with a scrubbed, whitespace-collapsed, 512-byte-truncated error message (credentials redacted; timeouts record `timed out after <duration>`), cleared on the next success.
+- Because the file is per-machine, a workspace shared by several machines or by mixed bd versions sees only that machine's attempts; a machine running an older bd that does not write the file contributes no push history, and manual `dolt push` runs outside bd update the remote without updating the file.
 
 Before pushing, `bd` verifies the local chunk store with `dolt fsck --quiet`, bounded by a 30-second timeout. For large stores, raise it with the runtime-only `BEADS_FSCK_TIMEOUT` environment variable (accepts durations like `2m` or bare seconds like `90`).
 
