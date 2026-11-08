@@ -257,3 +257,135 @@ func TestUpdateRefusesDualPresence(t *testing.T) {
 		})
 	}
 }
+
+// TestUpdateSingleTableRoutingUnchanged pins what the dual-presence refusal
+// must not change: an ID in one table only is updated in that table, a durable
+// update still lands in Dolt history while a wisp-only update does not, a
+// missing ID still reports not-found, and a durable update still works when
+// the optional wisps table is gone.
+func TestUpdateSingleTableRoutingUnchanged(t *testing.T) {
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	countRows := func(t *testing.T, ctx context.Context, store *DoltStore, query string, args ...any) int {
+		t.Helper()
+		var n int
+		if err := store.UnderlyingDB().QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+		return n
+	}
+	notesIn := func(t *testing.T, ctx context.Context, store *DoltStore, table, id string) string {
+		t.Helper()
+		var notes string
+		//nolint:gosec // G201: table is "issues" or "wisps".
+		if err := store.UnderlyingDB().QueryRowContext(ctx, fmt.Sprintf("SELECT notes FROM %s WHERE id = ?", table), id).Scan(&notes); err != nil {
+			t.Fatalf("read %s notes of %s: %v", table, id, err)
+		}
+		return notes
+	}
+	notesRequest := func(id, notes string) publicops.UpdateRequest {
+		return publicops.UpdateRequest{Actor: "writer", IssueID: id, ForceNotesOverwrite: true, Patch: publicops.IssuePatch{Notes: publicops.Field[string]{Set: true, Value: notes}}}
+	}
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	operations, err := NewIssueOperations(store)
+	if err != nil {
+		t.Fatalf("NewIssueOperations: %v", err)
+	}
+	durable := &types.Issue{ID: "single-durable", Title: "durable", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	wisp := &types.Issue{ID: "single-wisp", Title: "wisp", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true}
+	for _, issue := range []*types.Issue{durable, wisp} {
+		if err := store.CreateIssue(ctx, issue, "seed"); err != nil {
+			t.Fatalf("create %s: %v", issue.ID, err)
+		}
+	}
+	if countRows(t, ctx, store, "SELECT COUNT(*) FROM wisps WHERE id = ?", wisp.ID) != 1 || countRows(t, ctx, store, "SELECT COUNT(*) FROM issues WHERE id = ?", wisp.ID) != 0 {
+		t.Fatalf("fixture: %s is not wisp-only", wisp.ID)
+	}
+
+	updates := []struct {
+		name string
+		run  func(id, notes string) error
+	}{
+		{"UpdateIssue", func(id, notes string) error {
+			return store.UpdateIssue(ctx, id, map[string]interface{}{"notes": notes}, "writer")
+		}},
+		{"Lifecycle", func(id, notes string) error {
+			_, err := operations.Update(ctx, notesRequest(id, notes))
+			return err
+		}},
+	}
+	for _, u := range updates {
+		t.Run(u.name+" durable only", func(t *testing.T) {
+			commits := countRows(t, ctx, store, "SELECT COUNT(*) FROM dolt_log")
+			if err := u.run(durable.ID, "durable "+u.name); err != nil {
+				t.Fatalf("update durable-only %s: %v", durable.ID, err)
+			}
+			if got := notesIn(t, ctx, store, "issues", durable.ID); got != "durable "+u.name {
+				t.Errorf("issues notes = %q, want %q", got, "durable "+u.name)
+			}
+			if n := countRows(t, ctx, store, "SELECT COUNT(*) FROM wisps WHERE id = ?", durable.ID); n != 0 {
+				t.Errorf("durable update created %d wisps rows", n)
+			}
+			if after := countRows(t, ctx, store, "SELECT COUNT(*) FROM dolt_log"); after <= commits {
+				t.Errorf("durable update made no Dolt commit (dolt_log %d -> %d)", commits, after)
+			}
+		})
+		t.Run(u.name+" wisp only", func(t *testing.T) {
+			commits := countRows(t, ctx, store, "SELECT COUNT(*) FROM dolt_log")
+			if err := u.run(wisp.ID, "wisp "+u.name); err != nil {
+				t.Fatalf("update wisp-only %s: %v", wisp.ID, err)
+			}
+			if got := notesIn(t, ctx, store, "wisps", wisp.ID); got != "wisp "+u.name {
+				t.Errorf("wisps notes = %q, want %q", got, "wisp "+u.name)
+			}
+			if n := countRows(t, ctx, store, "SELECT COUNT(*) FROM issues WHERE id = ?", wisp.ID); n != 0 {
+				t.Errorf("wisp update created %d issues rows", n)
+			}
+			if after := countRows(t, ctx, store, "SELECT COUNT(*) FROM dolt_log"); after != commits {
+				t.Errorf("wisp-only update made a Dolt commit (dolt_log %d -> %d)", commits, after)
+			}
+		})
+		t.Run(u.name+" missing", func(t *testing.T) {
+			if err := u.run("single-missing", "probe"); !errors.Is(err, storage.ErrNotFound) {
+				t.Errorf("update of a missing ID: err = %v, want ErrNotFound", err)
+			}
+		})
+	}
+
+	t.Run("durable without the wisps table", func(t *testing.T) {
+		bare, cleanup := setupTestStore(t)
+		defer cleanup()
+		// setupTestStore parks this subtest until the parent returns and
+		// cancels its context, so the subtest needs its own.
+		ctx, cancel := testContext(t)
+		defer cancel()
+		bareOps, err := NewIssueOperations(bare)
+		if err != nil {
+			t.Fatalf("NewIssueOperations: %v", err)
+		}
+		issue := &types.Issue{ID: "single-bare", Title: "durable", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		if err := bare.CreateIssue(ctx, issue, "seed"); err != nil {
+			t.Fatalf("create %s: %v", issue.ID, err)
+		}
+		// A database without the wisp schema has none of the wisp-plane
+		// tables; dropping wisps alone leaves foreign keys that fail writes.
+		execOnOneConn(t, ctx, bare, "SET foreign_key_checks = 0",
+			"DROP TABLE wisp_dependencies", "DROP TABLE wisp_labels", "DROP TABLE wisp_events",
+			"DROP TABLE wisp_comments", "DROP TABLE wisps", "SET foreign_key_checks = 1")
+		if err := bare.UpdateIssue(ctx, issue.ID, map[string]interface{}{"notes": "legacy"}, "writer"); err != nil {
+			t.Fatalf("UpdateIssue without wisps: %v", err)
+		}
+		if got := notesIn(t, ctx, bare, "issues", issue.ID); got != "legacy" {
+			t.Errorf("issues notes after UpdateIssue = %q, want %q", got, "legacy")
+		}
+		if _, err := bareOps.Update(ctx, notesRequest(issue.ID, "role")); err != nil {
+			t.Fatalf("Lifecycle Update without wisps: %v", err)
+		}
+		if got := notesIn(t, ctx, bare, "issues", issue.ID); got != "role" {
+			t.Errorf("issues notes after Lifecycle Update = %q, want %q", got, "role")
+		}
+	})
+}
