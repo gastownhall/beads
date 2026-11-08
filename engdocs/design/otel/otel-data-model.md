@@ -104,7 +104,7 @@ Emitted once per `bd` subcommand execution. Anchors all subsequent events for th
 
 `telemetry.WrapStorage` (`InstrumentedStorage`) instruments the methods of the core storage interface and every issueops role accessor: it emits `storage.<Method>` spans and, through the role decorators in `internal/telemetry/`, `storage.<Role>.<Method>` spans (e.g. `storage.IssueReader.Ready`, `storage.ReadyClaimer.ClaimNext`, `storage.Sweeper.Sweep`). The `DoltStorage` capability sub-interfaces (version control, history, sync, and so on) pass through unwrapped; they are covered by the `dolt.*` spans in §4 instead. The tables below are representative examples; the complete list is the inventory at the end of this section.
 
-**Metric labels.** `InstrumentedStorage.op` puts `db.operation` plus the method's start attributes on the span and on the `bd.storage.operations` counter. `InstrumentedStorage.done` records `bd.storage.operation.duration` and `bd.storage.errors` with only the attributes each method passes to `done` itself, **never** `db.operation`. Most methods pass their start attributes again, but not all: of the 125 storage span names (77 direct, 48 role), 48 direct operations pass their start attributes to `done`, and the other 29 direct operations plus all 48 role operations (77 of 125) pass none and record those two instruments with no attributes at all. Twelve of those 29 do have start attributes that reach only the span and the counter: `RunInTransaction`, `RunInIssueLifecycleTransaction`, `CountDependencies`, `CountDependents`, `CountIssueComments`, `CountEvents`, `MergeSlotAcquire`, `MergeSlotRelease`, `SlotSet`, `SlotGet`, `SlotClear` and `MergeMetadata` (for example `db.commit_msg` on `RunInTransaction`, `internal/telemetry/storage.go:674-676`). (`AddDependencyWithOptions` and `RemoveDependencyWithOptions` reuse the `AddDependency` / `RemoveDependency` names, so 79 methods emit the 77 direct names.) Start attributes such as `bd.issue.id`, `bd.actor`, `bd.query` and `db.commit_msg` are per-request values, so the series they produce are high-cardinality. Result attributes set later on the span (`bd.result.count`, etc.) are never metric labels.
+**Metric labels.** The span carries `db.operation` plus the method's request attributes (`bd.issue.id`, `bd.actor`, `bd.query`, `db.commit_msg`, ...). The three `bd.storage.*` metrics (`operations`, `operation.duration`, `errors`) carry `db.operation` and nothing else (`InstrumentedStorage.op` / `done`). Request attributes are per-request values: as metric labels they would make one series per value, run into the SDK's per-metric cardinality limit (2000 attribute sets, the rest folded into `otel.metric.overflow`) and send search text, commit messages and actor names to the metrics receiver. Result attributes set later on the span (`bd.result.count`, etc.) are not metric labels either. The attribute tables below describe the spans.
 
 ### `storage.CreateIssue`
 
@@ -214,6 +214,8 @@ SlotClear SlotGet SlotSet UnclaimIssue UnclaimIssueIfAssignee UpdateIssue
 UpdateIssueChecked UpdateIssueType
 ```
 
+`AddDependencyWithOptions` and `RemoveDependencyWithOptions` reuse the `AddDependency` / `RemoveDependency` names, so 79 methods emit the 77 direct names.
+
 **Issueops role operations** — `storage.<Role>.<Method>`, emitted when a caller
 goes through the guarded issueops surface instead of calling storage directly
 (48 spans):
@@ -247,9 +249,8 @@ The two families do **not** double-count. The role decorators wrap the
 before wrapping), so one logical operation through the issueops front door emits
 its role span only — not a second `storage.<Method>` span beneath it. A create
 via issueops is one `storage.IssueOperations.Create`; a create via direct
-storage is one `storage.CreateIssue`. Operation counts are therefore comparable
-across both paths (per `db.operation`); durations are not separable by
-operation (see *Metric labels* above).
+storage is one `storage.CreateIssue`. Operation counts, durations and errors
+are therefore comparable across both paths, per `db.operation`.
 
 ---
 
@@ -286,7 +287,7 @@ Emitted for single-row queries via `queryRowContext()`.
 
 ### `dolt.commit`
 
-Emitted for DOLT_COMMIT operations. Carries only the shared `doltSpanAttrs()` (see the note at the top of this section) — the commit message no longer appears on this span. It survives only as `db.commit_msg` on the `storage.RunInTransaction` / `storage.RunInIssueLifecycleTransaction` spans (`internal/telemetry/storage.go:674,682`).
+Emitted for DOLT_COMMIT operations. Carries only the shared `doltSpanAttrs()` (see the note at the top of this section) — the commit message no longer appears on this span. It survives only as `db.commit_msg` on the `storage.RunInTransaction` / `storage.RunInIssueLifecycleTransaction` spans (`internal/telemetry/storage.go:691,699`).
 
 ### `dolt.push`
 
@@ -423,9 +424,9 @@ Emitted by the external-tracker sync engine (`internal/tracker/engine.go`, used 
 
 | Metric (code name) | Type | Unit | Labels | Status |
 |--------|------|------|--------|--------|
-| `bd.storage.operations` | Counter | — | `db.operation` + method start attributes | ✅ Implemented |
-| `bd.storage.operation.duration` | Histogram | `ms` | only what the method passes to `done` (start attributes on 48 direct operations, none elsewhere); never `db.operation` (§3) | ✅ Implemented |
-| `bd.storage.errors` | Counter | — | only what the method passes to `done` (start attributes on 48 direct operations, none elsewhere); never `db.operation` (§3) | ✅ Implemented |
+| `bd.storage.operations` | Counter | — | `db.operation` only | ✅ Implemented |
+| `bd.storage.operation.duration` | Histogram | `ms` | `db.operation` only | ✅ Implemented |
+| `bd.storage.errors` | Counter | — | `db.operation` only | ✅ Implemented |
 | `bd.issue.count` | Gauge | — | `status` | ✅ Implemented (recorded on `GetStatistics`) |
 | `bd.db.retry_count` | Counter | `{retry}` | — | ✅ Implemented |
 | `bd.db.lock_wait_ms` | Histogram | `ms` | — | 🔲 Registered, not recorded |
@@ -448,6 +449,8 @@ Emitted by the external-tracker sync engine (`internal/tracker/engine.go`, used 
 | `bd.ai.input_tokens` | Counter | `{token}` | `bd.ai.model` | ✅ Implemented (compact only) |
 | `bd.ai.output_tokens` | Counter | `{token}` | `bd.ai.model` | ✅ Implemented (compact only) |
 | `bd.ai.request.duration` | Histogram | `ms` | `bd.ai.model` | ✅ Implemented (compact only) |
+
+The `bd.storage.*` metrics carry `db.operation` only, never the span's request attributes (§3; pinned by `TestStorageMetricsCarryOnlyTheOperation`).
 
 ---
 
