@@ -782,6 +782,12 @@ or 'bd dolt push --remote <remote>'. The remote must already exist (see
 		}
 		if remote != "" {
 			fmt.Printf("Pushing to Dolt remote %q...\n", remote)
+			// prePush feeds the success recording below; a read error does
+			// not block the push itself (GH#6289).
+			prePush, err := st.GetCurrentCommit(ctx)
+			if err != nil {
+				prePush = ""
+			}
 			if err := st.PushRemote(ctx, remote, force); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				if isRemoteNotFoundErr(err) {
@@ -797,6 +803,13 @@ or 'bd dolt push --remote <remote>'. The remote must already exist (see
 				}
 				return SilentExit()
 			}
+			// Only a push to origin (the remote push-state.json describes)
+			// records success: a named backup remote reaching its own remote
+			// must not clear origin's recorded failure or suppress its
+			// pending auto-push (GH#6289).
+			if remote == "origin" {
+				recordPushSuccess(ctx, st, prePush)
+			}
 			fmt.Println("Push complete.")
 			return nil
 		}
@@ -810,6 +823,12 @@ or 'bd dolt push --remote <remote>'. The remote must already exist (see
 		}
 		fmt.Println("Pushing to Dolt remote...")
 
+		// prePush feeds the success recording below; a read error does not
+		// block the push itself (GH#6289).
+		prePush, err := st.GetCurrentCommit(ctx)
+		if err != nil {
+			prePush = ""
+		}
 		var pushErr error
 		if force {
 			pushErr = st.ForcePush(ctx)
@@ -835,6 +854,12 @@ or 'bd dolt push --remote <remote>'. The remote must already exist (see
 			}
 			return SilentExit()
 		}
+		// The default remote is origin (storage falls back to it when no
+		// remote is named), so a successful push here is a successful origin
+		// push: record it, in the command body, so server and embedded mode
+		// agree and the post-run auto-push does not repeat the push
+		// (GH#6289).
+		recordPushSuccess(ctx, st, prePush)
 		fmt.Println("Push complete.")
 		return nil
 	},
