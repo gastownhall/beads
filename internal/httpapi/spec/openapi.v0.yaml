@@ -8204,10 +8204,28 @@ components:
         # --- added by IssueWithCounts ---
         dependency_count:
           type: integer
-          description: Number of issues this one depends on.
+          description: >-
+            How many outgoing `blocks` edges this issue has: the issues it is
+            blocked by, whatever their status. Edges of every other type
+            (parent-child, discovered-from, related, ...) are not counted, so
+            an issue whose `dependencies` array holds more records than this
+            number is the expected case, not a fault. This is NOT the detail
+            view's `dependency_count`, which shares the name and counts every
+            edge type: read `getIssue` for that, or `countDependencyEdges`
+            with `direction=out` and an explicit `type` filter for a count
+            narrowed by edge type.
         dependent_count:
           type: integer
-          description: Number of issues that depend on this one.
+          description: >-
+            How many incoming `blocks` edges point at this issue: the issues
+            it blocks, whatever their status. Edges of every other type are
+            not counted, so an epic whose dependents are all parent-child
+            children reports 0 here. It is neither every dependent nor the
+            number of open dependents, and a gate such as "never close an
+            issue that still has open dependents" must not read it. Read
+            `getIssue` for the every-edge-type detail count, or
+            `countDependencyEdges` with `direction=in` (omit `type` to count
+            every type) and a `status` filter for a status-sensitive count.
         comment_count:
           type: integer
         comments_omitted:
@@ -8331,9 +8349,25 @@ components:
         dependency_count:
           type: integer
           format: int64
+          description: >-
+            How many issues this one depends on over every edge type (blocks,
+            parent-child, discovered-from, related, ...), whatever their
+            status: one per distinct far end, so an edge held in both
+            dependency planes counts once. It covers the edges `dependencies`
+            lists plus the `unresolvable_dependencies` it cannot, and it is
+            NOT the same number as the work row's (`IssueWithCounts`)
+            same-named field, which counts outgoing `blocks` edges alone.
         dependent_count:
           type: integer
           format: int64
+          description: >-
+            How many issues depend on this one over every edge type, whatever
+            their status: one per distinct dependent, so an edge held in both
+            dependency planes counts once. It covers the `dependents`
+            `include_dependents` returns plus the `unresolvable_dependents`
+            they cannot list, and it is NOT the same number as the work row's
+            (`IssueWithCounts`) same-named field, which counts incoming
+            `blocks` edges alone.
         comment_count:
           type: integer
           format: int64

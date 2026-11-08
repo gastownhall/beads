@@ -2195,3 +2195,59 @@ func specDeclaresBearer(t *testing.T, so specOp) bool {
 	}
 	return false
 }
+
+// TestSpecWorkRowCountsStateTheirEdgeVocabulary pins the two meanings the
+// document gives `dependency_count` and `dependent_count` (bd-dh3uij,
+// GH#5688). A work row (`IssueWithCounts`, what `bd list --json` and
+// `bd ready --json` emit) counts `blocks` edges alone, while a detail view
+// (`IssueDetails`, what `bd show --json` emits) counts every edge type. The
+// two fields share their names, so a description that says only "issues that
+// depend on this one" reads as the detail meaning, and an automation that
+// gates on a work row's zero passes vacuously for an issue whose dependents
+// are all parent-child edges. The SQL is not under test here; the wording a
+// generated client reads is.
+func TestSpecWorkRowCountsStateTheirEdgeVocabulary(t *testing.T) {
+	doc := loadSpec(t)
+	schemas := mapAt(t, mapAt(t, doc, "components"), "schemas")
+
+	description := func(schema, field string) (map[string]any, string) {
+		t.Helper()
+		prop := mapAt(t, mapAt(t, mapAt(t, schemas, schema), "properties"), field)
+		desc, _ := prop["description"].(string)
+		if desc == "" {
+			t.Errorf("%s.%s has no description", schema, field)
+		}
+		return prop, desc
+	}
+	requireTerms := func(where, desc string, terms ...string) {
+		t.Helper()
+		for _, term := range terms {
+			if !strings.Contains(desc, term) {
+				t.Errorf("%s description does not mention %q:\n%s", where, term, desc)
+			}
+		}
+	}
+
+	workRow := mapAt(t, schemas, "IssueWithCounts")
+	required, _ := workRow["required"].([]any)
+	for field, direction := range map[string]string{
+		"dependency_count": "outgoing",
+		"dependent_count":  "incoming",
+	} {
+		where := "IssueWithCounts." + field
+		prop, desc := description("IssueWithCounts", field)
+		if prop["type"] != "integer" {
+			t.Errorf("%s type = %v, want integer", where, prop["type"])
+		}
+		if !slices.Contains(required, any(field)) {
+			t.Errorf("%s is no longer required; a work row's count is computed on every row", where)
+		}
+		requireTerms(where, desc, "`blocks`", direction, "parent-child", "`getIssue`", "`countDependencyEdges`")
+	}
+
+	for _, field := range []string{"dependency_count", "dependent_count"} {
+		where := "IssueDetails." + field
+		_, desc := description("IssueDetails", field)
+		requireTerms(where, desc, "every edge type", "distinct", "`IssueWithCounts`")
+	}
+}
