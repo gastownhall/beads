@@ -10,12 +10,16 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltremote"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 var querySQLRemotesForDoctor = querySQLRemotes
 
-// CheckDoltRemoteGitOrigin warns when any configured Dolt remote URL matches
-// the git origin — a likely misconfiguration since beads syncs via Dolt, not git.
+// CheckDoltRemoteGitOrigin reviews the Dolt remotes whose URL matches the git
+// origin. The remote named origin over a git transport is the default
+// git-backed sync remote bd itself wires up: Dolt keeps its data under
+// refs/dolt/data, apart from the source branches, so it is OK (GH#6150).
+// Any other matching remote is reported.
 func CheckDoltRemoteGitOrigin(repoPath string) DoctorCheck {
 	name := "Dolt Remote vs Git Origin"
 	beadsDir := ResolveBeadsDirForRepo(repoPath)
@@ -53,12 +57,26 @@ func CheckDoltRemoteGitOrigin(repoPath string) DoctorCheck {
 
 	normalizedOrigin := doltremote.CanonicalForComparison(originURL)
 	var colliding []string
+	gitSyncOrigin := false
 	for _, r := range sqlRemotes {
-		if doltremote.CanonicalForComparison(r.URL) == normalizedOrigin {
-			colliding = append(colliding, r.Name)
+		if doltremote.CanonicalForComparison(r.URL) != normalizedOrigin {
+			continue
 		}
+		if doltutil.IsGitSyncRemote(r.Name, r.URL) {
+			gitSyncOrigin = true
+			continue
+		}
+		colliding = append(colliding, r.Name)
 	}
 
+	if len(colliding) == 0 && gitSyncOrigin {
+		return DoctorCheck{
+			Name:     name,
+			Status:   StatusOK,
+			Message:  "Dolt remote origin is the git-backed sync remote for the git origin",
+			Category: CategoryDolt,
+		}
+	}
 	if len(colliding) == 0 {
 		return DoctorCheck{
 			Name:     name,
