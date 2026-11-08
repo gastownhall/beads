@@ -1017,6 +1017,11 @@ func TestAlreadyConvergedDeclinesWhenTheTablesChangedUnderIt(t *testing.T) {
 		}
 	})
 
+	// The error must be the re-read's own, not just any error. A probe that
+	// swallowed the failure would go on to the lock term with a listing it never
+	// verified, and here that term fails too, because the mock has no
+	// IS_FREE_LOCK to answer it. Asserting only that an error came back would
+	// accept that error in place of the re-read's.
 	t.Run("a failed re-read fails closed", func(t *testing.T) {
 		db, mock := newMockDB(t)
 
@@ -1027,11 +1032,14 @@ func TestAlreadyConvergedDeclinesWhenTheTablesChangedUnderIt(t *testing.T) {
 		mock.ExpectQuery("^SHOW TABLES$").WillReturnError(sql.ErrConnDone)
 
 		converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
-		if err == nil {
-			t.Fatal("alreadyConverged() error = nil, want the re-read's failure")
+		if !errors.Is(err, sql.ErrConnDone) {
+			t.Fatalf("alreadyConverged() error = %v, want the re-read's failure (%v)", err, sql.ErrConnDone)
 		}
 		if converged {
 			t.Fatal("alreadyConverged() = true on a failed re-read, want false")
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
 		}
 	})
 }
