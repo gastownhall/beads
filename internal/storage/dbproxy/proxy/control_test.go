@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -536,4 +537,169 @@ func TestControl_FullPoolEvictsOldest(t *testing.T) {
 	waitPeerClosed(t, conns[1])
 	require.LessOrEqual(t, control.activeIdentConns(), maxConcurrentIdentRequests)
 	assertPeerOpen(t, conns[2])
+}
+
+// testIdentNonce is a fixed 16-byte nonce for tests that drive the IDENT
+// exchange directly.
+const testIdentNonce = "0123456789abcdef0123456789abcdef"
+
+// validIdentRequest renders an authenticated IDENT request line.
+func validIdentRequest(t *testing.T, secret string) string {
+	t.Helper()
+	mac, err := identity.IdentRequestMAC(secret, testIdentNonce)
+	require.NoError(t, err)
+	return "IDENT " + mac + " " + testIdentNonce + "\n"
+}
+
+// deadlineFailingConn is a connection whose deadline cannot be set, to drive
+// the admission failure path.
+type deadlineFailingConn struct{ net.Conn }
+
+func (*deadlineFailingConn) SetDeadline(time.Time) error { return errors.New("deadline unsupported") }
+
+// Every handler termination — success, malformed or unauthenticated request,
+// peer close, deadline expiry, admission failure or eviction — must close
+// the connection and remove its tracking exactly once, without disturbing
+// another connection's membership.
+func TestControl_ConnectionCleanup(t *testing.T) {
+	control, secret, _ := newControlServer(t)
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(control.Port()))
+	for _, tc := range []struct {
+		name  string
+		drive func(t *testing.T, conn net.Conn)
+	}{
+		{name: "success", drive: func(t *testing.T, conn net.Conn) {
+			require.NoError(t, conn.SetDeadline(time.Now().Add(time.Second)))
+			_, err := io.WriteString(conn, validIdentRequest(t, secret))
+			require.NoError(t, err)
+			line, err := bufio.NewReader(io.LimitReader(conn, 4097)).ReadString('\n')
+			require.NoError(t, err)
+			assert.Contains(t, line, `"role":"`+pidfile.KindProxy+`"`)
+		}},
+		{name: "missing newline", drive: func(t *testing.T, conn net.Conn) {
+			_, err := io.WriteString(conn, strings.TrimSuffix(validIdentRequest(t, secret), "\n"))
+			require.NoError(t, err)
+		}},
+		{name: "oversized", drive: func(t *testing.T, conn net.Conn) {
+			_, err := io.WriteString(conn, "IDENT "+strings.Repeat("x", maxIdentRequestBytes)+" "+testIdentNonce+"\n")
+			require.NoError(t, err)
+		}},
+		{name: "wrong verb", drive: func(t *testing.T, conn net.Conn) {
+			_, err := io.WriteString(conn, "WHOAMI\n")
+			require.NoError(t, err)
+		}},
+		{name: "invalid MAC", drive: func(t *testing.T, conn net.Conn) {
+			_, err := io.WriteString(conn, "IDENT "+strings.Repeat("0", 64)+" "+testIdentNonce+"\n")
+			require.NoError(t, err)
+		}},
+		{name: "peer close", drive: func(t *testing.T, conn net.Conn) {
+			_ = conn.Close()
+		}},
+		{name: "deadline expiry", drive: func(t *testing.T, conn net.Conn) {}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, err := net.DialTimeout("tcp", addr, time.Second)
+			require.NoError(t, err)
+			tc.drive(t, conn)
+			require.Eventually(t, func() bool {
+				return control.activeIdentConns() == 0
+			}, 4*time.Second, 10*time.Millisecond)
+			_ = conn.Close()
+		})
+	}
+
+	t.Run("tracked through a pending reply", func(t *testing.T) {
+		root := t.TempDir()
+		secret, err := identity.WriteSecret(root)
+		require.NoError(t, err)
+		replied := make(chan struct{})
+		release := make(chan struct{})
+		control, err := startControl(root, func() identity.IdentReply {
+			close(replied)
+			<-release
+			return identity.IdentReply{}
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = control.Close() })
+
+		conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(control.Port())), time.Second)
+		require.NoError(t, err)
+		defer func() { _ = conn.Close() }()
+		require.NoError(t, conn.SetDeadline(time.Now().Add(5*time.Second)))
+		_, err = io.WriteString(conn, validIdentRequest(t, secret))
+		require.NoError(t, err)
+		select {
+		case <-replied:
+		case <-time.After(time.Second):
+			t.Fatal("handler did not reach the reply callback")
+		}
+		// The handler is past its read but has not completed: releasing
+		// the entry after the read would strand this connection outside
+		// the tracked pool while the reply is still pending.
+		assert.Equal(t, 1, control.activeIdentConns(), "connection must stay tracked until the handler completes")
+		close(release)
+		line, err := bufio.NewReader(io.LimitReader(conn, 4097)).ReadString('\n')
+		require.NoError(t, err)
+		assert.Contains(t, line, `"control_port":`)
+		require.Eventually(t, func() bool {
+			return control.activeIdentConns() == 0
+		}, time.Second, 5*time.Millisecond)
+	})
+
+	t.Run("deadline setup failure frees capacity", func(t *testing.T) {
+		s := &controlServer{done: make(chan struct{}), closing: make(chan struct{})}
+		serverEnd, clientEnd := net.Pipe()
+		defer func() { _ = clientEnd.Close() }()
+		// The deadline must be set before admission: closing the peer end
+		// makes later pipe deadline calls fail on a closed pipe.
+		require.NoError(t, clientEnd.SetReadDeadline(time.Now().Add(time.Second)))
+		require.Nil(t, s.admit(&deadlineFailingConn{Conn: serverEnd}))
+		assert.Equal(t, 0, s.activeIdentConns(), "an unusable connection must not keep capacity occupied")
+		_, err := clientEnd.Read(make([]byte, 1))
+		require.Error(t, err, "the unusable connection must be closed")
+	})
+
+	t.Run("eviction races completion without disturbing another entry", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		defer func() { _ = ln.Close() }()
+		s := &controlServer{
+			listener: ln,
+			secret:   testDataSecret,
+			done:     make(chan struct{}),
+			closing:  make(chan struct{}),
+			reply:    func() identity.IdentReply { return identity.IdentReply{Schema: pidfile.SchemaV2, Role: pidfile.KindProxy} },
+		}
+		serverA, clientA := net.Pipe()
+		serverB, clientB := net.Pipe()
+		defer func() { _ = clientA.Close(); _ = clientB.Close() }()
+
+		entryA := s.admit(serverA)
+		entryB := s.admit(serverB)
+		require.NotNil(t, entryA)
+		require.NotNil(t, entryB)
+		require.Equal(t, 2, s.activeIdentConns())
+
+		// A completes a full exchange while B stays parked.
+		require.NoError(t, clientA.SetDeadline(time.Now().Add(2*time.Second)))
+		_, err = io.WriteString(clientA, validIdentRequest(t, testDataSecret))
+		require.NoError(t, err)
+		line, err := bufio.NewReader(io.LimitReader(clientA, 4097)).ReadString('\n')
+		require.NoError(t, err)
+		assert.Contains(t, line, `"role":"`+pidfile.KindProxy+`"`)
+		require.Eventually(t, func() bool {
+			return s.activeIdentConns() == 1
+		}, time.Second, 5*time.Millisecond)
+
+		// Eviction and the evicted handler's own cleanup can both release
+		// B; each release must be idempotent and leave the other entries
+		// alone. The read deadline is set before the releases, while the
+		// pipe end is still open.
+		require.NoError(t, clientB.SetReadDeadline(time.Now().Add(time.Second)))
+		s.release(entryB)
+		s.release(entryB)
+		assert.Equal(t, 0, s.activeIdentConns())
+		_, err = clientB.Read(make([]byte, 1))
+		require.Error(t, err, "the evicted peer must observe the close")
+	})
 }
