@@ -465,3 +465,37 @@ func TestSelectedWorkspaceRedirectDatabase(t *testing.T) {
 		})
 	}
 }
+
+// TestSelectedWorkspaceRedirectPrecedence pins the redirect-source shapes
+// GH#5756 must keep: plain discovery from the redirected caller, BEADS_DIR
+// naming the caller's own redirect target (bd-wayc3) or its redirecting
+// .beads, and a user-exported BEADS_DOLT_SERVER_DATABASE, which still wins.
+func TestSelectedWorkspaceRedirectPrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		beadsDir  func(callerBeadsDir string) string
+		exported  string
+		wantDBase string
+	}{
+		{name: "plain discovery", wantDBase: "caller_db"},
+		{name: "BEADS_DIR names the redirect target", beadsDir: beads.FollowRedirect, wantDBase: "caller_db"},
+		{name: "BEADS_DIR names the redirecting workspace", beadsDir: func(dir string) string { return dir }, wantDBase: "caller_db"},
+		{name: "user-exported database", exported: "user_db", wantDBase: "user_db"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			selectedWorkspaceEnvForTest(t)
+			callerDir, callerBeadsDir := newRedirectedCallerForTest(t)
+			t.Chdir(callerDir)
+			if tc.beadsDir != nil {
+				t.Setenv("BEADS_DIR", tc.beadsDir(callerBeadsDir))
+			}
+			if tc.exported != "" {
+				t.Setenv("BEADS_DOLT_SERVER_DATABASE", tc.exported)
+			}
+
+			if got := runContextJSONForTest(t); got != tc.wantDBase {
+				t.Fatalf("context database = %q, want %q", got, tc.wantDBase)
+			}
+		})
+	}
+}
