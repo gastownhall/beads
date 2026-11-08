@@ -736,3 +736,83 @@ func TestControl_BelowCapacityServesValidAndRefusesInvalidClients(t *testing.T) 
 	_, err = identity.Identify("127.0.0.1", control.Port(), "not-the-secret", time.Second)
 	require.ErrorIs(t, err, identity.ErrIdentRefused, "an unauthenticated client must get no reply bytes")
 }
+
+// scriptedListener hands Accept pre-queued connections and reports closed
+// once Close is called.
+type scriptedListener struct {
+	conns  chan net.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newScriptedListener() *scriptedListener {
+	return &scriptedListener{conns: make(chan net.Conn), closed: make(chan struct{})}
+}
+
+func (l *scriptedListener) Accept() (net.Conn, error) {
+	select {
+	case conn := <-l.conns:
+		return conn, nil
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *scriptedListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *scriptedListener) Addr() net.Addr { return &net.TCPAddr{} }
+
+// Closing the control server must stop admission, close and drain every
+// tracked connection — including one blocked writing its reply — and wait
+// for the handlers to unwind, not just the listener. The capped
+// accept-retry/backoff behavior itself stays pinned by
+// TestControl_AcceptLoopSurvivesPersistentErrors.
+func TestControl_CloseDrainsConnections(t *testing.T) {
+	root := t.TempDir()
+	secret, err := identity.WriteSecret(root)
+	require.NoError(t, err)
+	s := &controlServer{
+		listener: newScriptedListener(),
+		secret:   secret,
+		done:     make(chan struct{}),
+		closing:  make(chan struct{}),
+		reply:    func() identity.IdentReply { return identity.IdentReply{Schema: pidfile.SchemaV2, Role: pidfile.KindProxy} },
+	}
+	go s.acceptLoop()
+
+	// An idle peer, admitted and parked in the handshake read, and a
+	// blocked-write peer: a valid request whose reply cannot be written
+	// until the client reads, and the client does not.
+	idleServer, idleClient := net.Pipe()
+	writeServer, writeClient := net.Pipe()
+	defer func() {
+		_ = idleClient.Close()
+		_ = writeClient.Close()
+	}()
+	s.listener.(*scriptedListener).conns <- idleServer
+	s.listener.(*scriptedListener).conns <- writeServer
+	require.Eventually(t, func() bool {
+		return s.activeIdentConns() == 2
+	}, time.Second, 5*time.Millisecond)
+
+	// Read deadlines are set while both pipe ends are still open; a pipe
+	// deadline call fails once the peer end has closed.
+	require.NoError(t, idleClient.SetReadDeadline(time.Now().Add(5*time.Second)))
+	require.NoError(t, writeClient.SetReadDeadline(time.Now().Add(5*time.Second)))
+	_, err = io.WriteString(writeClient, validIdentRequest(t, secret))
+	require.NoError(t, err)
+	// Both peers stay tracked while the reply write is blocked.
+	require.Never(t, func() bool { return s.activeIdentConns() != 2 }, 200*time.Millisecond, 20*time.Millisecond)
+
+	require.NoError(t, s.Close())
+	assert.Equal(t, 0, s.activeIdentConns(), "shutdown must detach tracked connections")
+	// Close returned only after the handlers drained; both peers observe
+	// the close of their tracked connections.
+	_, err = idleClient.Read(make([]byte, 1))
+	require.Error(t, err, "the parked read must unwind at shutdown")
+	_, err = writeClient.Read(make([]byte, 1))
+	require.Error(t, err, "the blocked reply write must unwind at shutdown")
+}
