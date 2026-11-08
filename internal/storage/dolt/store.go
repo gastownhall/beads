@@ -5565,8 +5565,17 @@ func (s *DoltStore) pullFromRemoteUnchecked(ctx context.Context, remote string) 
 		preHead = h
 	}
 
-	if err := s.pullTransport(ctx, remote); err != nil {
-		return err
+	return s.finishPull(ctx, remote, preHead, s.pullTransport(ctx, remote))
+}
+
+// finishPull is what every pull route shares after its transport returned
+// transportErr: SQL and CLI routes alike end here, so a failure is judged and
+// a success verified and maintained the same way whichever route ran.
+func (s *DoltStore) finishPull(ctx context.Context, remote, preHead string, transportErr error) error {
+	if transportErr != nil {
+		if err := s.settleIgnoredTableStomp(ctx, remote, transportErr); err != nil {
+			return err
+		}
 	}
 
 	// ga-ivaps: a route that returns nil having merged nothing is silent
@@ -5584,6 +5593,39 @@ func (s *DoltStore) pullFromRemoteUnchecked(ctx context.Context, remote string) 
 		}
 	}
 	return nil
+}
+
+// settleIgnoredTableStomp is the server store's handling of GH#6368: the
+// engine refused the pull's merge as a stomp of a dolt_ignore'd working table
+// (see versioncontrolops.StompedTables). When a freshly fetched remote tip is
+// already contained in s.branch and no merge is open there, the pull had
+// nothing to merge and nil is returned; otherwise a refusal over confirmed
+// ignored tables becomes a versioncontrolops.IgnoredTablesMergeError, and
+// anything else is returned unchanged.
+//
+// Evidence is read on a session pinned to s.branch: HEAD, merge state and the
+// ignored working tables are branch state, and a pooled connection may sit on
+// the database's default branch (be-b0am). The refresh runs first, on its own
+// connection, so the pin never waits on the pool it holds.
+func (s *DoltStore) settleIgnoredTableStomp(ctx context.Context, remote string, pullErr error) error {
+	if _, ok := versioncontrolops.StompedTables(pullErr); !ok || s.branch == "" {
+		return pullErr
+	}
+	refreshErr := s.refreshTrackingRef(ctx, remote)
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return pullErr
+	}
+	defer conn.Close()
+	if err := checkoutBranchIfNeeded(ctx, conn, s.branch); err != nil {
+		return pullErr
+	}
+	if refreshErr == nil {
+		if noop, err := versioncontrolops.ProveMergeNoop(ctx, conn, remote+"/"+s.branch); err == nil && noop {
+			return nil
+		}
+	}
+	return versioncontrolops.ClassifyIgnoredTableStomp(ctx, conn, pullErr)
 }
 
 // branchHash returns the commit hash at the tip of a local branch, or the empty
