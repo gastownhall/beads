@@ -132,6 +132,14 @@ bd where          # Active .beads location, including redirect info
 bd where --json
 ```
 
+When you select a workspace explicitly (`bd -C <dir>`, or an exported
+`BEADS_DIR`), the selected workspace's own configuration decides which
+database is used and which redirect `bd where` reports — the checkout you run
+`bd` from contributes nothing. A selected target that holds no database fails
+the same way `cd <target> && bd list` does, instead of quietly answering from
+another checkout's database. `-C` only selects the workspace; it does not
+change the process working directory.
+
 Limitations and guidance:
 
 - Redirect chains are not followed — only a single level works, so a redirect
