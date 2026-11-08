@@ -173,6 +173,55 @@ func TestCanonicalDependencyType(t *testing.T) {
 	}
 }
 
+// TestParseFormDeps pins the create form's dependency parsing (bd-3073gm,
+// GH#5585): the --deps vocabulary and alias canonicalization, the form's own
+// direction (the new issue is always the source, blocks:<id> included) pinned
+// before dedupe, and the refusals the form's field and a direct call share.
+func TestParseFormDeps(t *testing.T) {
+	blocksB := domain.DependencySpec{Type: types.DepBlocks, TargetID: "bd-b"}
+	tests := []struct {
+		name    string
+		in      []string
+		want    []domain.DependencySpec
+		wantErr string
+	}{
+		{name: "no entries", in: nil, want: nil},
+		{name: "blank entries are skipped", in: []string{" ", ""}, want: nil},
+		{name: "bare id blocks the new issue", in: []string{"bd-b"}, want: []domain.DependencySpec{blocksB}},
+		{name: "explicit blocks keeps the form's direction", in: []string{" blocks:bd-b "}, want: []domain.DependencySpec{blocksB}},
+		{name: "blocked-by alias", in: []string{"blocked-by:bd-b"}, want: []domain.DependencySpec{blocksB}},
+		{name: "depends-on alias", in: []string{"depends-on:bd-b"}, want: []domain.DependencySpec{blocksB}},
+		{
+			name: "other types name their relationship",
+			in:   []string{"discovered-from:bd-a", "related:bd-b"},
+			want: []domain.DependencySpec{
+				{Type: types.DepDiscoveredFrom, TargetID: "bd-a"},
+				{Type: types.DepRelated, TargetID: "bd-b"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseFormDeps(tt.in)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("parseFormDeps(%q) = %+v, %v; want an error containing %q", tt.in, got, err, tt.wantErr)
+				}
+				if strings.Contains(err.Error(), "--deps") {
+					t.Errorf("parseFormDeps(%q) error %q names the --deps flag the form does not have", tt.in, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseFormDeps(%q): %v", tt.in, err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("parseFormDeps(%q) = %+v, want %+v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestLinkDependencyType pins the type bd link stores on every route
 // (bd-3073gm, GH#5585): the two documented aliases become the gating
 // "blocks", any other type a workspace spells is kept exactly as given, and
