@@ -30,6 +30,8 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
+	"github.com/steveyegge/beads/internal/storage/domain"
+	domaingit "github.com/steveyegge/beads/internal/storage/domain/git"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/schema"
@@ -4514,10 +4516,26 @@ func commitEmbeddedInitArtifacts(workDir string, quiet bool) {
 		// of them for the bootstrap commit to avoid self-deadlocking
 		// while init still owns the embedded Dolt lock. --no-verify
 		// alone does not skip prepare-commit-msg.
-		commitArgs := []string{"-c", "core.hooksPath=", "commit", "--no-verify", "-m", "bd init: initialize beads issue tracking"}
-		commitCmd := initArtifactGitCommand(workDir, commitArgs...)
-		if commitOut, commitErr := commitCmd.CombinedOutput(); commitErr != nil {
-			if !quiet && !strings.Contains(string(commitOut), "nothing to commit") {
+		// The commit is scoped to the staged changes under the artifact
+		// candidates, so work the user staged before bd init stays
+		// staged instead of landing in the bootstrap commit (GH#5654).
+		_, commitErr := domaingit.NewInitGitRepository(workDir).Commit(context.Background(), domain.GitCommitParams{
+			Message:   "bd init: initialize beads issue tracking",
+			NoVerify:  true,
+			SkipHooks: true,
+			Only: []string{
+				".beads/",
+				agentsFileToStage,
+				filepath.Join(".claude", "settings.json"),
+				"CLAUDE.md",
+				".agents",
+				".codex",
+				".cursor",
+				".gitignore",
+			},
+		})
+		if commitErr != nil {
+			if !quiet {
 				fmt.Fprintf(os.Stderr, "Warning: failed to commit beads files: %v\n", commitErr)
 			}
 		} else if !quiet {

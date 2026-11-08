@@ -255,11 +255,63 @@ func (r *gitRepositoryImpl) Commit(ctx context.Context, params domain.GitCommitP
 	if params.SkipHooks {
 		args = append(args, "-c", "core.hooksPath=")
 	}
+	if params.Only != nil {
+		files, err := r.stagedFilesUnder(ctx, params.Only)
+		if err != nil {
+			return domain.GitCommitResult{}, err
+		}
+		if len(files) == 0 {
+			return domain.GitCommitResult{DidCommit: false}, nil
+		}
+		args = append(args, "--literal-pathspecs", "commit")
+		if params.NoVerify {
+			args = append(args, "--no-verify")
+		}
+		args = append(args, "-m", params.Message, "--only", "--")
+		args = append(args, files...)
+		return r.runCommit(ctx, args)
+	}
 	args = append(args, "commit")
 	if params.NoVerify {
 		args = append(args, "--no-verify")
 	}
 	args = append(args, "-m", params.Message)
+	return r.runCommit(ctx, args)
+}
+
+// stagedFilesUnder lists the staged changes under the given
+// work-directory-relative paths, without touching the index. The cached diff
+// resolves against HEAD's tree — or the empty tree on an unborn HEAD — so a
+// bootstrap commit can name exactly what init staged and nothing else
+// (GH#5654). --no-renames keeps a staged rename from smuggling its outside
+// side into the selection, --literal-pathspecs keeps candidate paths literal
+// instead of glob-like, --relative keeps the output work-directory-relative
+// when the workDir is a repository subdirectory, and -z keeps filenames with
+// spaces or newlines intact.
+func (r *gitRepositoryImpl) stagedFilesUnder(ctx context.Context, paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	args := []string{"--literal-pathspecs", "diff", "--cached", "--name-only", "-z", "--no-renames", "--relative", "--"}
+	args = append(args, paths...)
+	out, err := r.gitCmd(ctx, args...).Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return nil, fmt.Errorf("git: Commit: scope: %w: %s", err, bytes.TrimSpace(exitErr.Stderr))
+		}
+		return nil, fmt.Errorf("git: Commit: scope: %w", err)
+	}
+	var files []string
+	for _, name := range bytes.Split(out, []byte{0}) {
+		if len(name) > 0 {
+			files = append(files, string(name))
+		}
+	}
+	return files, nil
+}
+
+func (r *gitRepositoryImpl) runCommit(ctx context.Context, args []string) (domain.GitCommitResult, error) {
 	out, err := r.gitCmd(ctx, args...).CombinedOutput()
 	if err != nil {
 		if bytes.Contains(out, []byte("nothing to commit")) || bytes.Contains(out, []byte("no changes added to commit")) {

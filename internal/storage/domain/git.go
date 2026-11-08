@@ -32,6 +32,11 @@ type GitCommitParams struct {
 	Message   string
 	NoVerify  bool
 	SkipHooks bool
+	// Only scopes the commit to the staged changes under the given
+	// work-directory-relative paths. Nil keeps the historical whole-index
+	// commit; a non-nil slice — including an empty one, which selects no
+	// paths — never falls back to an unscoped commit (GH#5654).
+	Only []string
 }
 
 type GitCommitResult struct {
