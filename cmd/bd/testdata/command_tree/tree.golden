@@ -471,7 +471,9 @@ bd batch
     |   #comment  (blank lines and '# ...' comments are ignored)
     |
     | Supported 'update' keys: status, priority, title, assignee, force
-    | Supported dependency types: see 'bd dep add --help' (default: blocks)
+    | Supported dependency types: the built-ins 'bd dep add --type' accepts (see
+    | 'bd dep add --help'; default: blocks). The blocked-by and depends-on aliases
+    | are stored as blocks; any other type is refused and rolls the batch back.
     |
     | 'force' is not a field. An update whose status moves the issue into closed
     | (or a configured done status) is refused when it still has open children or
@@ -4328,7 +4330,7 @@ bd link
     |   bd link bd-123 bd-456                    # bd-456 blocks bd-123
     |   bd link bd-123 bd-456 --type related     # bd-123 related to bd-456
     |   bd link bd-123 bd-456 --type parent-child
-  flag --type -t type=string default="blocks" usage="Dependency type: one of approved-by, assigned-to, attests, authored-by, blocked-by, blocks, caused-by, conditional-blocks, delegated-from, depends-on, discovered-from, duplicates, parent-child, related, relates-to, replies-to, supersedes, tracks, until, validates, waits-for (blocked-by and depends-on are stored as blocks), or any custom type of at most 32 characters, stored as given; a custom type does not gate ready work"
+  flag --type -t type=string default="blocks" usage="Dependency type: one of approved-by, assigned-to, attests, authored-by, blocked-by, blocks, caused-by, conditional-blocks, delegated-from, depends-on, discovered-from, duplicates, parent-child, related, relates-to, replies-to, supersedes, tracks, until, validates, waits-for (blocked-by and depends-on are stored as blocks), or any non-empty custom type of at most 32 characters, stored as given; a custom type does not gate ready work"
 
 bd lint
   use: "lint [issue-id...]"

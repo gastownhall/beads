@@ -1226,17 +1226,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `blocked-by` and `depends-on` now mean `blocks` everywhere bd takes a
-  dependency type, so the edge gates ready work (GH#5585). `bd link --type`
-  stored them literally, so the source stayed in `bd ready`; it now stores
-  and reports `blocks`, and still keeps any other type of 1-32 characters
-  as given. `bd batch` `dep add` canonicalizes the aliases and refuses a
-  type `bd dep add` does not know (a typo such as `blcoks` was accepted
-  and gated nothing), rolling the batch back. The `bd create` form reads
-  `id`, `blocks:id` and the aliases as "this issue depends on id", as
-  `--deps` does, collapses equivalent spellings, and refuses an unknown or
-  conflicting dependency in the field and before it writes anything. The
-  `bd link --type` help lists the accepted types.
+- The `depends-on`/`blocked-by` dependency aliases now gate `bd ready` and
+  `bd blocked` (GH#5585, GH#5560). `bd link --type depends-on` (or
+  `blocked-by`), `bd batch dep add` and the `bd create-form` Dependencies
+  field stored the alias verbatim, and only its length was checked, so the
+  edge sat as an inert custom type that never blocked anything. All three
+  routes now map both aliases to the canonical `blocks` type before storing,
+  so an alias behaves exactly like `--type blocks`. `bd link` keeps taking
+  custom types as-is (they still do not gate), and its `--type` help is now
+  derived from the accepted-type list so it can no longer drift. `bd batch
+  dep add` rejects an unknown type with the accepted-type vocabulary and
+  the input line number, and rolls the batch back on both backends (its
+  help now says so); the create form's Dependencies field validates
+  entries in the field (huh keeps the value for correction), fails the
+  create before any write, and collapses canonical-equivalent repeats like
+  `blocked-by:A, depends-on:A` into one edge.
 
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools

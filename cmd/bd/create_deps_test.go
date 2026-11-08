@@ -326,7 +326,7 @@ func TestLinkTypeFlagUsage(t *testing.T) {
 	for _, want := range []string{
 		createDepsAcceptedTypeList(),
 		"blocked-by and depends-on are stored as blocks",
-		"custom type",
+		"non-empty custom type",
 		fmt.Sprintf("at most %d characters", types.MaxDependencyTypeLen),
 		"does not gate ready work",
 	} {
