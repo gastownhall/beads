@@ -38,6 +38,16 @@ func TestCheckClosable(t *testing.T) {
 		// principal as the session-name spelling, so the close is allowed.
 		{"held slash vs session spelling", &types.Issue{Assignee: "gascity/bob"}, "gascity--bob", false, nil},
 		{"held session spelling vs slash", &types.Issue{Assignee: "gascity--bob"}, "gascity/bob", false, nil},
+		// bd-740y4x: negative controls for the report pair — a different agent
+		// in the same rig, the same agent in a different rig, and every
+		// dotted-axis spelling of the rig name still refuse: the slash axis and
+		// the dotted alias axis are deliberately distinct (ga-2vy9p2).
+		{"held by a different agent in the same rig", &types.Issue{Assignee: "gascity/bob"}, "gascity--alice", false, publicops.ErrNotOwner},
+		{"held by the same agent name in a different rig", &types.Issue{Assignee: "gascity/bob"}, "python419--bob", false, publicops.ErrNotOwner},
+		{"held slash vs dotted-axis double-underscore spelling", &types.Issue{Assignee: "gascity/bob"}, "gascity__bob", false, publicops.ErrNotOwner},
+		{"held slash vs dotted-axis dot spelling", &types.Issue{Assignee: "gascity/bob"}, "gascity.bob", false, publicops.ErrNotOwner},
+		{"held slash vs dotted-axis single-underscore spelling", &types.Issue{Assignee: "gascity/bob"}, "gascity_bob", false, publicops.ErrNotOwner},
+		{"held slash vs dotted-axis hyphen spelling", &types.Issue{Assignee: "gascity/bob"}, "gascity-bob", false, publicops.ErrNotOwner},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -57,6 +67,14 @@ func TestCheckClosable(t *testing.T) {
 	if err := CheckClosable("bd-1", &types.Issue{Assignee: "bob"}, "alice", false); !errors.As(err, &held) ||
 		held.IssueID != "bd-1" || held.Assignee != "bob" || held.Actor != "alice" {
 		t.Fatalf("held refusal = %#v", err)
+	}
+	// bd-740y4x: a report-pair negative control is the same ownership refusal,
+	// retaining both spellings so the close sentence names the holder and the
+	// actor exactly as supplied.
+	var slashHeld *publicops.CloseNotAssigneeError
+	if err := CheckClosable("bd-1", &types.Issue{Assignee: "gascity/bob"}, "gascity--alice", false); !errors.As(err, &slashHeld) ||
+		slashHeld.IssueID != "bd-1" || slashHeld.Assignee != "gascity/bob" || slashHeld.Actor != "gascity--alice" {
+		t.Fatalf("same-rig different-agent refusal = %#v", err)
 	}
 }
 

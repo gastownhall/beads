@@ -1,10 +1,12 @@
 package validation
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func TestExists(t *testing.T) {
@@ -299,6 +301,59 @@ func TestAssigneeMatches(t *testing.T) {
 			wantErr:     true,
 			wantErrFrag: "assignee is",
 		},
+		// bd-740y4x: the negative controls around the report pair. A different
+		// agent in the same rig, the same agent name in a different rig, and
+		// every dotted-axis spelling of the rig name must all still refuse:
+		// the slash axis and the dotted alias axis are deliberately distinct
+		// (ga-2vy9p2), so folding them would be the widening that fix removed.
+		{
+			name:        "different agent in the same rig stays rejected (bd-740y4x)",
+			issue:       &types.Issue{ID: "bd-test", Assignee: "gascity/bob"},
+			actor:       "gascity--alice",
+			force:       false,
+			wantErr:     true,
+			wantErrFrag: "assignee is",
+		},
+		{
+			name:        "same agent name in a different rig stays rejected (bd-740y4x)",
+			issue:       &types.Issue{ID: "bd-test", Assignee: "gascity/bob"},
+			actor:       "python419--bob",
+			force:       false,
+			wantErr:     true,
+			wantErrFrag: "assignee is",
+		},
+		{
+			name:        "dotted-axis double-underscore spelling stays rejected (bd-740y4x)",
+			issue:       &types.Issue{ID: "bd-test", Assignee: "gascity/bob"},
+			actor:       "gascity__bob",
+			force:       false,
+			wantErr:     true,
+			wantErrFrag: "assignee is",
+		},
+		{
+			name:        "dotted-axis dot spelling stays rejected (bd-740y4x)",
+			issue:       &types.Issue{ID: "bd-test", Assignee: "gascity/bob"},
+			actor:       "gascity.bob",
+			force:       false,
+			wantErr:     true,
+			wantErrFrag: "assignee is",
+		},
+		{
+			name:        "dotted-axis single-underscore spelling stays rejected (bd-740y4x)",
+			issue:       &types.Issue{ID: "bd-test", Assignee: "gascity/bob"},
+			actor:       "gascity_bob",
+			force:       false,
+			wantErr:     true,
+			wantErrFrag: "assignee is",
+		},
+		{
+			name:        "dotted-axis hyphen spelling stays rejected (bd-740y4x)",
+			issue:       &types.Issue{ID: "bd-test", Assignee: "gascity/bob"},
+			actor:       "gascity-bob",
+			force:       false,
+			wantErr:     true,
+			wantErrFrag: "assignee is",
+		},
 	}
 
 	for _, tt := range tests {
@@ -310,6 +365,22 @@ func TestAssigneeMatches(t *testing.T) {
 			if tt.wantErrFrag != "" && err != nil {
 				if !strings.Contains(err.Error(), tt.wantErrFrag) {
 					t.Errorf("AssigneeMatches() error %q should contain %q", err.Error(), tt.wantErrFrag)
+				}
+			}
+			// bd-740y4x: every mismatch is the ownership refusal — the sentence
+			// `bd close` has always printed — not a new error, and it retains
+			// the supplied actor and assignee so the user can see both spellings.
+			if tt.wantErr {
+				if !errors.Is(err, issueops.ErrNotOwner) {
+					t.Errorf("AssigneeMatches() error = %v, want match for %v", err, issueops.ErrNotOwner)
+				}
+				var notAssignee *issueops.CloseNotAssigneeError
+				if !errors.As(err, &notAssignee) {
+					t.Fatalf("AssigneeMatches() error = %v, want *CloseNotAssigneeError", err)
+				}
+				if notAssignee.IssueID != "bd-test" || notAssignee.Assignee != tt.issue.Assignee || notAssignee.Actor != tt.actor {
+					t.Errorf("CloseNotAssigneeError fields = {IssueID: %q, Assignee: %q, Actor: %q}, want {%q, %q, %q}",
+						notAssignee.IssueID, notAssignee.Assignee, notAssignee.Actor, "bd-test", tt.issue.Assignee, tt.actor)
 				}
 			}
 		})
