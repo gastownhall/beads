@@ -406,30 +406,50 @@ func TestWhereCommand_UsesConfigPrefixFromSelectedDB(t *testing.T) {
 }
 
 // TestSelectedWorkspaceWhereProvenance pins GH#5756 for bd where: the
-// "via redirect" note names the redirect that led to the reported workspace,
-// so a workspace selected with -C or BEADS_DIR from a redirected caller
-// carries none, while the caller's own discovery still reports its redirect.
+// reported path, database path and prefix describe the reported workspace,
+// and the "via redirect" note names the redirect that led to it, so a
+// workspace selected with -C or BEADS_DIR from a redirected caller carries
+// none, while the caller's own discovery still reports its redirect.
 func TestSelectedWorkspaceWhereProvenance(t *testing.T) {
+	// withDoltDirAndPrefix gives a workspace a dolt data directory and a
+	// config.yaml prefix, so where has both to report.
+	withDoltDirAndPrefix := func(t *testing.T, beadsDir, prefix string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o750); err != nil {
+			t.Fatalf("mkdir dolt dir: %v", err)
+		}
+		writeTestConfigYAML(t, beadsDir, "issue-prefix: "+prefix+"\n")
+	}
+
 	for _, selector := range []string{"none", "-C", "BEADS_DIR"} {
 		t.Run(selector, func(t *testing.T) {
 			selectedWorkspaceEnvForTest(t)
 			callerDir, callerBeadsDir := newRedirectedCallerForTest(t)
+			sharedBeadsDir := beads.FollowRedirect(callerBeadsDir)
+			withDoltDirAndPrefix(t, sharedBeadsDir, "sharedpfx")
 			targetDir := filepath.Join(t.TempDir(), "target")
 			targetBeadsDir := newServerWorkspaceForTest(t, targetDir, "target_db")
+			withDoltDirAndPrefix(t, targetBeadsDir, "targetpfx")
 			t.Chdir(callerDir)
-			wantPath, wantFrom := targetBeadsDir, ""
+			wantPath, wantFrom, wantPrefix := targetBeadsDir, "", "targetpfx"
 			switch selector {
 			case "-C":
 				changeDir = targetDir
 			case "BEADS_DIR":
 				t.Setenv("BEADS_DIR", targetBeadsDir)
 			default:
-				wantPath, wantFrom = beads.FollowRedirect(callerBeadsDir), callerBeadsDir
+				wantPath, wantFrom, wantPrefix = sharedBeadsDir, callerBeadsDir, "sharedpfx"
 			}
 
 			got := runWhereJSONForTest(t)
 			if !sameDirPath(got.Path, wantPath) {
 				t.Fatalf("where path = %q, want %q", got.Path, wantPath)
+			}
+			if wantDB := filepath.Join(wantPath, "dolt"); !sameDirPath(got.DatabasePath, wantDB) {
+				t.Fatalf("where database_path = %q, want %q", got.DatabasePath, wantDB)
+			}
+			if got.Prefix != wantPrefix {
+				t.Fatalf("where prefix = %q, want %q", got.Prefix, wantPrefix)
 			}
 			if got.RedirectedFrom != wantFrom && !sameDirPath(got.RedirectedFrom, wantFrom) {
 				t.Fatalf("where redirected_from = %q, want %q", got.RedirectedFrom, wantFrom)
