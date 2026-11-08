@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -406,123 +405,51 @@ func TestWhereCommand_UsesConfigPrefixFromSelectedDB(t *testing.T) {
 	}
 }
 
-// TestFindOriginalBeadsDir_BeadsDirEnvWithoutRedirectFallsThrough guards
-// against a regression where `bd where` silently dropped its "(via redirect
-// from ...)" footnote after #3230 started rebinding BEADS_DIR to the
-// post-redirect target. Before the fix, an early `return ""` when BEADS_DIR
-// was set but had no redirect file short-circuited the filesystem walk,
-// so `bd where` from inside a redirecting worktree never reported the
-// redirect source.
-//
-// Scenario: worktree's .beads/ holds a redirect file pointing to the
-// shared .beads/, and BEADS_DIR has been set to the shared target (as
-// bd's own startup does for rebound commands). findOriginalBeadsDir must
-// still walk up from cwd and discover the worktree's redirecting .beads/.
-func TestFindOriginalBeadsDir_BeadsDirEnvWithoutRedirectFallsThrough(t *testing.T) {
-	tmp := t.TempDir()
+// TestSelectedWorkspaceWhereProvenance pins GH#5756 for bd where: the
+// "via redirect" note names the redirect that led to the reported workspace,
+// so a workspace selected with -C or BEADS_DIR from a redirected caller
+// carries none, while the caller's own discovery still reports its redirect.
+func TestSelectedWorkspaceWhereProvenance(t *testing.T) {
+	for _, selector := range []string{"none", "-C", "BEADS_DIR"} {
+		t.Run(selector, func(t *testing.T) {
+			selectedWorkspaceEnvForTest(t)
+			callerDir, callerBeadsDir := newRedirectedCallerForTest(t)
+			targetDir := filepath.Join(t.TempDir(), "target")
+			targetBeadsDir := newServerWorkspaceForTest(t, targetDir, "target_db")
+			t.Chdir(callerDir)
+			wantPath, wantFrom := targetBeadsDir, ""
+			switch selector {
+			case "-C":
+				changeDir = targetDir
+			case "BEADS_DIR":
+				t.Setenv("BEADS_DIR", targetBeadsDir)
+			default:
+				wantPath, wantFrom = beads.FollowRedirect(callerBeadsDir), callerBeadsDir
+			}
 
-	// Redirect source: worktree/.beads/ with a redirect file.
-	worktreeRoot := filepath.Join(tmp, "worktree")
-	worktreeBeads := filepath.Join(worktreeRoot, ".beads")
-	if err := os.MkdirAll(worktreeBeads, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	target := filepath.Join(tmp, "main", ".beads")
-	if err := os.MkdirAll(target, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	redirectFile := filepath.Join(worktreeBeads, beads.RedirectFileName)
-	if err := os.WriteFile(redirectFile, []byte(target), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Simulate bd's post-rebind state: BEADS_DIR points at the resolved
-	// target, which does NOT carry a redirect file.
-	t.Setenv("BEADS_DIR", target)
-	t.Chdir(worktreeRoot)
-
-	got := findOriginalBeadsDir()
-	if got == "" {
-		t.Fatal("findOriginalBeadsDir returned empty; expected the redirecting worktree .beads/")
-	}
-	// Compare by base+parent since /var vs /private/var may be resolved either way.
-	if !strings.HasSuffix(got, filepath.Join("worktree", ".beads")) {
-		t.Errorf("findOriginalBeadsDir = %q, want a path ending in worktree/.beads", got)
+			got := runWhereJSONForTest(t)
+			if !sameDirPath(got.Path, wantPath) {
+				t.Fatalf("where path = %q, want %q", got.Path, wantPath)
+			}
+			if got.RedirectedFrom != wantFrom && !sameDirPath(got.RedirectedFrom, wantFrom) {
+				t.Fatalf("where redirected_from = %q, want %q", got.RedirectedFrom, wantFrom)
+			}
+		})
 	}
 }
 
-// TestFindOriginalBeadsDir_BeadsDirEnvWithRedirectReturnsEnv keeps the
-// BEADS_DIR fast path working when the env var itself points at a
-// redirecting directory (a user-set BEADS_DIR override). The env value
-// should win without a filesystem walk.
-func TestFindOriginalBeadsDir_BeadsDirEnvWithRedirectReturnsEnv(t *testing.T) {
-	tmp := t.TempDir()
-	envBeads := filepath.Join(tmp, "alt", ".beads")
-	if err := os.MkdirAll(envBeads, 0o755); err != nil {
-		t.Fatal(err)
+// runWhereJSONForTest runs the where command's startup and body in process
+// and returns its JSON result.
+func runWhereJSONForTest(t *testing.T) WhereResult {
+	t.Helper()
+	if err := rootCmd.PersistentPreRunE(whereCmd, nil); err != nil {
+		t.Fatalf("PersistentPreRunE(where): %v", err)
 	}
-	target := filepath.Join(tmp, "shared", ".beads")
-	if err := os.MkdirAll(target, 0o755); err != nil {
-		t.Fatal(err)
+	jsonOutput = true
+	out := captureStdout(t, func() error { return whereCmd.RunE(whereCmd, nil) })
+	var got WhereResult
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("where --json output %q: %v", out, err)
 	}
-	if err := os.WriteFile(filepath.Join(envBeads, beads.RedirectFileName), []byte(target), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Run cwd from an unrelated directory so the fs walk alone cannot find
-	// the redirect — only the BEADS_DIR env check can.
-	unrelated := filepath.Join(tmp, "unrelated")
-	if err := os.MkdirAll(unrelated, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("BEADS_DIR", envBeads)
-	t.Chdir(unrelated)
-
-	got := findOriginalBeadsDir()
-	// Compare by suffix for macOS /var vs /private/var differences.
-	if !strings.HasSuffix(got, filepath.Join("alt", ".beads")) {
-		t.Errorf("findOriginalBeadsDir = %q, want a path ending in alt/.beads", got)
-	}
-}
-
-func TestFindOriginalBeadsDirRespectsOSTempRootCeiling(t *testing.T) {
-	t.Run("child does not inherit redirect", func(t *testing.T) {
-		tempRoot := filepath.Join(t.TempDir(), "tmp")
-		rootBeads := filepath.Join(tempRoot, ".beads")
-		if err := os.MkdirAll(rootBeads, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(rootBeads, beads.RedirectFileName), []byte(filepath.Join(t.TempDir(), ".beads")), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		child := filepath.Join(tempRoot, "fixture")
-		if err := os.MkdirAll(child, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("TMPDIR", tempRoot)
-		t.Setenv("BEADS_DIR", "")
-		t.Chdir(child)
-
-		if got := findOriginalBeadsDir(); got != "" {
-			t.Fatalf("findOriginalBeadsDir() = %q, want no temp-root ancestor", got)
-		}
-	})
-
-	t.Run("temp root start remains usable", func(t *testing.T) {
-		tempRoot := filepath.Join(t.TempDir(), "tmp")
-		rootBeads := filepath.Join(tempRoot, ".beads")
-		if err := os.MkdirAll(rootBeads, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(rootBeads, beads.RedirectFileName), []byte(filepath.Join(t.TempDir(), ".beads")), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("TMPDIR", tempRoot)
-		t.Setenv("BEADS_DIR", "")
-		t.Chdir(tempRoot)
-
-		if got := findOriginalBeadsDir(); !utils.PathsEqual(got, rootBeads) {
-			t.Fatalf("findOriginalBeadsDir() = %q, want %q", got, rootBeads)
-		}
-	})
+	return got
 }

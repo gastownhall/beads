@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
@@ -1749,5 +1750,65 @@ func TestEmbeddedSelectedWorkspaceWriteIsolation(t *testing.T) {
 	}
 	if got := query(targetBeadsDir, "target", "SHOW DATABASES"); slices.Contains(got, "caller") {
 		t.Fatalf("target store databases = %q: the caller's redirect-source database was created in the selected workspace", got)
+	}
+}
+
+// TestEmbeddedChangeDirStorelessTargetDoesNotServeCallerStore pins GH#5756:
+// `bd -C <target>` whose .beads holds no store must not answer from the
+// caller's store, the way `cd <target> && bd list` already fails honestly.
+func TestEmbeddedChangeDirStorelessTargetDoesNotServeCallerStore(t *testing.T) {
+	bd := buildEmbeddedBD(t)
+	_, sharedBeads, _ := bdInit(t, bd, "--prefix", "caller")
+	// The caller reaches its store through a .beads/redirect, the reporter's
+	// "redirect to a shared store" flavour.
+	callerDir := t.TempDir()
+	initGitRepoAt(t, callerDir)
+	callerBeads := filepath.Join(callerDir, ".beads")
+	if err := os.MkdirAll(callerBeads, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(callerBeads, beads.RedirectFileName), []byte(sharedBeads+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	create := exec.Command(bd, "create", "Caller only issue", "--json")
+	create.Dir = callerDir
+	create.Env = bdEnv(callerDir)
+	if stdout, stderr, err := runCommandBuffers(t, create); err != nil {
+		t.Fatalf("bd create in caller failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	targetDir := t.TempDir()
+	targetBeads := filepath.Join(targetDir, ".beads")
+	if err := os.MkdirAll(targetBeads, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(targetBeads, "config.yaml"), []byte("prefix: zz\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	list := exec.Command(bd, "-C", targetDir, "list", "--status=open", "--json")
+	list.Dir = callerDir
+	list.Env = bdEnv(callerDir)
+	stdout, stderr, err := runCommandBuffers(t, list)
+	if strings.Contains(stdout.String(), "Caller only issue") || strings.Contains(stdout.String(), "caller-") {
+		t.Fatalf("bd -C <storeless target> list served the caller's store (err=%v)\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if err == nil {
+		t.Fatalf("bd -C <storeless target> list succeeded, want a no-database error\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+
+	where := exec.Command(bd, "-C", targetDir, "where", "--json")
+	where.Dir = callerDir
+	where.Env = bdEnv(callerDir)
+	stdout, stderr, _ = runCommandBuffers(t, where)
+	var result WhereResult
+	if jerr := json.Unmarshal(stdout.Bytes(), &result); jerr != nil {
+		t.Logf("bd -C <storeless target> where gave no JSON result: %v\nstdout:\n%s\nstderr:\n%s", jerr, stdout.String(), stderr.String())
+	} else {
+		if result.DatabasePath != "" || result.Prefix == "caller" || result.RedirectedFrom != "" {
+			t.Fatalf("bd -C <storeless target> where mixed workspaces: path=%q redirected_from=%q prefix=%q database=%q\nstderr:\n%s",
+				result.Path, result.RedirectedFrom, result.Prefix, result.DatabasePath, stderr.String())
+		}
 	}
 }
