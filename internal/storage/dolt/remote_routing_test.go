@@ -608,7 +608,8 @@ func TestPushAtAHostBdDoesNotRunRunsNoDoltInTheLeftoverDatabase(t *testing.T) {
 // gets the password. Otherwise, as when the recorded PID is now a process
 // that is not dolt, the port may be any server's, so the push runs CALL
 // DOLT_PUSH on it, which takes the password from the server process's own
-// environment, and its failure says so.
+// environment, and its failure says so. The SQL route reaches a server that
+// refuses the CALL (refusingSQLServer): only a CALL that ran gets the note.
 func TestCredentialPushOnAnEnvNamedPortKeepsTheCLIOnlyForBdsOwnServer(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell fake")
@@ -654,7 +655,7 @@ func TestCredentialPushOnAnEnvNamedPortKeepsTheCLIOnlyForBdsOwnServer(t *testing
 				remotePassword: "client-secret",
 				db:             db,
 				cfg:            &Config{ServerHost: "127.0.0.1", ServerPort: 3310, BeadsDir: beadsDir},
-				connStr:        unroutableConnStr,
+				connStr:        refusingSQLServer(t),
 			}
 			serveDoltDatabase(t, store, store.dbPath, 3310)
 			if err := os.MkdirAll(filepath.Join(store.CLIDir(), ".dolt", "noms"), 0o755); err != nil {

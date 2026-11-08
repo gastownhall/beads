@@ -44,21 +44,24 @@ func (s *DoltStore) pushRefToPeer(ctx context.Context, peer string, refspec stri
 		return err
 	} else if useCLI {
 		return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
-			return s.doltCLIPushRefToPeer(ctx, peer, refspec, creds)
+			return s.withServerEnvNote(ctx, "DOLT_PUSH", peer, creds, os.Environ(), s.doltCLIPushRefToPeer(ctx, peer, refspec, creds))
 		})
 	}
 	return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
 		if useCLI, err := s.prepareCLIRouteForPeerCredentials(ctx, peer, creds); err != nil {
 			return err
 		} else if useCLI {
-			return s.doltCLIPushRefToPeer(ctx, peer, refspec, creds)
+			return s.withServerEnvNote(ctx, "DOLT_PUSH", peer, creds, os.Environ(), s.doltCLIPushRefToPeer(ctx, peer, refspec, creds))
 		}
-		return withEnvCredentials(creds, func() error {
+		// Snapshot bd's environment before withEnvCredentials sets the
+		// credential pair process-wide, so the note names what bd holds.
+		env := os.Environ()
+		return s.withServerEnvNote(ctx, "DOLT_PUSH", peer, nil, env, withEnvCredentials(creds, func() error {
 			if err := s.execWithLongTimeout(ctx, "CALL DOLT_PUSH(?, ?)", peer, refspec); err != nil {
 				return fmt.Errorf("failed to push to peer %s: %w", peer, err)
 			}
 			return nil
-		})
+		}))
 	})
 }
 
@@ -110,7 +113,7 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 	} else if useCLI {
 		err = s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
 			pullErr := s.finishCLIPull(ctx, s.doltCLIPullFromPeer(ctx, peer, creds))
-			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
+			return s.withServerEnvNote(ctx, "DOLT_PULL", peer, creds, os.Environ(), s.peerPullOutcome(ctx, peer, pullErr, &conflicts))
 		})
 		return s.finishPeerPull(ctx, conflicts, err, preHead)
 	}
@@ -120,12 +123,15 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 			return err
 		} else if useCLI {
 			pullErr := s.finishCLIPull(ctx, s.doltCLIPullFromPeer(ctx, peer, creds))
-			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
+			return s.withServerEnvNote(ctx, "DOLT_PULL", peer, creds, os.Environ(), s.peerPullOutcome(ctx, peer, pullErr, &conflicts))
 		}
-		return withEnvCredentials(creds, func() error {
+		// Snapshot bd's environment before withEnvCredentials sets the
+		// credential pair process-wide, so the note names what bd holds.
+		env := os.Environ()
+		return s.withServerEnvNote(ctx, "DOLT_PULL", peer, nil, env, withEnvCredentials(creds, func() error {
 			pullErr := s.pullWithAutoResolve(ctx, peer, "CALL DOLT_PULL(?)", peer)
 			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
-		})
+		}))
 	})
 	return s.finishPeerPull(ctx, conflicts, err, preHead)
 }
@@ -175,7 +181,7 @@ func (s *DoltStore) Fetch(ctx context.Context, peer string) error {
 		return err
 	} else if useCLI {
 		return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
-			return s.doltCLIFetchFromPeer(ctx, peer, creds)
+			return s.withServerEnvNote(ctx, "DOLT_FETCH", peer, creds, os.Environ(), s.doltCLIFetchFromPeer(ctx, peer, creds))
 		})
 	}
 	return s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
@@ -183,14 +189,17 @@ func (s *DoltStore) Fetch(ctx context.Context, peer string) error {
 		if useCLI, err := s.prepareCLIRouteForPeerCredentials(ctx, peer, creds); err != nil {
 			return err
 		} else if useCLI {
-			return s.doltCLIFetchFromPeer(ctx, peer, creds)
+			return s.withServerEnvNote(ctx, "DOLT_FETCH", peer, creds, os.Environ(), s.doltCLIFetchFromPeer(ctx, peer, creds))
 		}
-		return withEnvCredentials(creds, func() error {
+		// Snapshot bd's environment before withEnvCredentials sets the
+		// credential pair process-wide, so the note names what bd holds.
+		env := os.Environ()
+		return s.withServerEnvNote(ctx, "DOLT_FETCH", peer, nil, env, withEnvCredentials(creds, func() error {
 			if err := s.execWithLongTimeout(ctx, "CALL DOLT_FETCH(?)", peer); err != nil {
 				return fmt.Errorf("failed to fetch from peer %s: %w", peer, err)
 			}
 			return nil
-		})
+		}))
 	})
 }
 

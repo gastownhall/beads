@@ -1748,7 +1748,18 @@ func (s *DoltStore) BackupSync(ctx context.Context, name string) error {
 		return err
 	}
 	defer db.Close()
-	return versioncontrolops.BackupSync(ctx, db, name)
+	// Acquire the connection before the CALL: a failure to reach the server
+	// is not the sync's failure, so it gets no server-environment note.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("sync backup %s: %w", name, err)
+	}
+	defer conn.Close()
+	err = versioncontrolops.BackupSync(ctx, conn, name)
+	if s.serverMode {
+		err = WithBackupSyncServerEnvNote(ctx, s.db, name, err)
+	}
+	return err
 }
 
 // BackupRemove removes a configured Dolt backup destination.
@@ -3042,6 +3053,11 @@ func buildServerDSN(cfg *Config, database string) string {
 // autocommit=1. Without this, Dolt rejects merges under autocommit because
 // it cannot expose conflict-resolution tables to the caller.
 //
+// Only the statement's own failure is marked as a transfer failure
+// (remoteTransferError): DSN parse, dial and BEGIN fail before the server ran
+// anything, and a COMMIT failure follows a transfer that ran, so neither gets
+// the server-environment note.
+//
 // Audited for be-b0am's fresh-connection branch hazard: safe — but the two
 // callers are safe for different reasons, so the annotation names both.
 // federation.go's CALL DOLT_PUSH(?, ?) names the refspec explicitly. Its
@@ -3068,7 +3084,7 @@ func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args 
 	}
 	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 		_ = tx.Rollback()
-		return err
+		return remoteTransferFailure(err)
 	}
 	return tx.Commit()
 }
@@ -3077,6 +3093,10 @@ func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args 
 // an explicit transaction. Push operations do not need the pull/merge conflict
 // handling above, and DOLT_PUSH has diverged from direct `dolt push` behavior
 // when wrapped in a SQL transaction.
+//
+// The connection is acquired before the statement runs, so only the
+// statement's own failure is marked as a transfer failure
+// (remoteTransferError); DSN parse and dial failures are not.
 //
 // Audited for be-b0am's fresh-connection branch hazard: safe. Every caller
 // passes s.branch explicitly as a CALL DOLT_PUSH(...) arg, so this fresh
@@ -3087,8 +3107,13 @@ func (s *DoltStore) execWithLongTimeoutNoTx(ctx context.Context, query string, a
 		return err
 	}
 	defer db.Close()
-	_, err = db.ExecContext(ctx, query, args...)
-	return err
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_, err = conn.ExecContext(ctx, query, args...)
+	return remoteTransferFailure(err)
 }
 
 // oneShotConn opens a one-shot connection with the given read deadline
@@ -5327,13 +5352,14 @@ func (s *DoltStore) doltCLIPush(ctx context.Context, remote string, force bool, 
 
 // cliTransferError wraps a failed CLI transfer, distinguishing a transfer that
 // hit the bounded timeout (actionable: raise BEADS_CLI_TRANSFER_TIMEOUT, or
-// check what holds the database directory busy) from an ordinary failure.
+// check what holds the database directory busy) from an ordinary failure. The
+// result is marked as a transfer failure (remoteTransferError).
 func cliTransferError(op, remote string, transferCtx context.Context, out []byte, err error) error {
 	if errors.Is(transferCtx.Err(), context.DeadlineExceeded) {
-		return fmt.Errorf("%s to %q timed out after %s (override with %s=<duration>; large transfers to cloud remotes can run long, and a busy dolt sql-server serving the database directory can stall CLI transfers): %s: %w",
-			op, remote, cliExecTimeoutDuration(), cliExecTimeoutEnv, strings.TrimSpace(string(out)), err)
+		return remoteTransferFailure(fmt.Errorf("%s to %q timed out after %s (override with %s=<duration>; large transfers to cloud remotes can run long, and a busy dolt sql-server serving the database directory can stall CLI transfers): %s: %w",
+			op, remote, cliExecTimeoutDuration(), cliExecTimeoutEnv, strings.TrimSpace(string(out)), err))
 	}
-	return fmt.Errorf("%s failed: %s: %w", op, strings.TrimSpace(string(out)), err)
+	return remoteTransferFailure(fmt.Errorf("%s failed: %s: %w", op, strings.TrimSpace(string(out)), err))
 }
 
 // doltCLIPull shells out to `dolt pull` from the database directory.
@@ -5414,6 +5440,13 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 	)
 	defer func() { endSpan(span, retErr) }()
 	creds := s.credentialsForRemote(remote)
+	// sent is what the route passes with --user, for the server-environment
+	// note on a failed transfer: the CLI routes pass creds' user, the SQL
+	// route only the default remote's user.
+	var sent *remoteCredentials
+	// env is bd's environment before withRemoteOperationEnv sets anything.
+	env := os.Environ()
+	defer func() { retErr = s.withServerEnvNote(ctx, "DOLT_PUSH", remote, sent, env, retErr) }()
 	// Git-protocol remotes: use CLI to avoid MySQL connection timeout during transfer.
 	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
 	// but still need CLI to avoid SQL connection timeout.
@@ -5423,43 +5456,43 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 		return err
 	} else if useCLI {
 		logRouteDecision("push", remote, true)
+		sent = creds
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
 	// Credential CLI routing: when credentials are set and server is external,
-	// route through CLI subprocess so credentials reach the dolt process via
-	// cmd.Env (applyToCmd). The SQL path's withEnvCredentials sets process-wide
-	// env vars that an external server cannot see.
+	// route through CLI subprocess, which passes the user with --user and the
+	// password via cmd.Env (applyToCmd). In server mode the CLI hands the
+	// transfer to the server serving its directory, which reads
+	// DOLT_REMOTE_PASSWORD from its own environment (serverEnvNote).
 	if useCLI, err := s.prepareCLIRouteForCredentials(ctx, remote, creds); err != nil {
 		return err
 	} else if useCLI {
 		logRouteDecision("push", remote, true)
+		sent = creds
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
 	// Cloud auth CLI routing: when cloud storage env vars (AZURE_*, AWS_*,
-	// etc.) are set and we're in server mode, route through CLI so the dolt
-	// subprocess inherits the current env. The SQL server may not have these
-	// vars if it was started in a different context (GH#6).
+	// etc.) are set and we're in server mode, route through CLI. This does not
+	// give the server those vars: the CLI hands the transfer to the server
+	// serving its directory, which reads its own environment (GH#6,
+	// serverEnvNote).
 	if useCLI, err := s.prepareCLIRouteForCloudAuth(ctx, remote); err != nil {
 		return err
 	} else if useCLI {
 		logRouteDecision("push", remote, true)
+		sent = creds
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
 	if useCLI, err := s.shouldUseCLIForLocalRemoteWithError(ctx, remote); err != nil {
 		return err
 	} else if useCLI {
 		logRouteDecision("push", remote, true)
+		sent = creds
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
 	logRouteDecision("push", remote, false)
-	defer func() {
-		if retErr != nil {
-			if note := s.serverEnvCredentialsNote(ctx, remote, creds); note != "" {
-				retErr = fmt.Errorf("%w%s", retErr, note)
-			}
-		}
-	}()
 	if s.remoteUser != "" && remote == s.remote {
+		sent = creds
 		return withRemoteOperationEnv(creds, s.isS3Remote(ctx, remote), func() error {
 			if force {
 				if err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH('--force', '--user', ?, ?, ?)", s.remoteUser, remote, s.branch); err != nil {
@@ -5787,8 +5820,12 @@ func (s *DoltStore) pullTransport(ctx context.Context, remote string) error {
 // it merged or was already up to date, and its stdout is discarded — so they
 // report nothing; the SQL routes return what CALL DOLT_PULL (or the fallback's
 // CALL DOLT_MERGE) said. See pullReport for what that does and does not prove.
-func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (pullReport, error) {
+func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (_ pullReport, retErr error) {
 	creds := s.credentialsForRemote(remote)
+	// sent is what the route passes with --user (see pushToRemote).
+	var sent *remoteCredentials
+	env := os.Environ()
+	defer func() { retErr = s.withServerEnvNote(ctx, "DOLT_PULL", remote, sent, env, retErr) }()
 	// Git-protocol remotes: use CLI to avoid MySQL connection timeout during transfer.
 	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
 	// but still need CLI to avoid SQL connection timeout.
@@ -5797,10 +5834,11 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 		return pullReport{}, err
 	} else if useCLI {
 		logRouteDecision("pull", remote, true)
+		sent = creds
 		// CLI pull leaves any conflicts in the working set; run the auto-resolver so
 		// git-protocol remotes get the same audit-only dependency / metadata repair
 		// as the SQL DOLT_PULL path (#4259).
-		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
+		return pullReport{}, s.cliPullOutcome(ctx, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds)))
 	}
 	// Credential CLI routing: mirrors git-protocol path, including post-pull
 	// auto-resolution.
@@ -5808,14 +5846,16 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 		return pullReport{}, err
 	} else if useCLI {
 		logRouteDecision("pull", remote, true)
-		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
+		sent = creds
+		return pullReport{}, s.cliPullOutcome(ctx, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds)))
 	}
 	// Cloud auth CLI routing (GH#6), including post-pull auto-resolution.
 	if useCLI, err := s.prepareCLIRouteForCloudAuth(ctx, remote); err != nil {
 		return pullReport{}, err
 	} else if useCLI {
 		logRouteDecision("pull", remote, true)
-		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
+		sent = creds
+		return pullReport{}, s.cliPullOutcome(ctx, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds)))
 	}
 	// Local file:// pulls intentionally stay on the SQL path. The matching CLI
 	// guard is a push-only optimization; SQL pull keeps pullWithAutoResolve in
@@ -5823,6 +5863,7 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 	logRouteDecision("pull", remote, false)
 	var report pullReport
 	if s.remoteUser != "" && remote == s.remote {
+		sent = creds
 		err := withRemoteOperationEnv(creds, s.isS3Remote(ctx, remote), func() error {
 			var err error
 			report, err = s.pullWithAutoResolveReporting(ctx, remote, "CALL DOLT_PULL('--user', ?, ?, ?)", s.remoteUser, remote, s.branch)
@@ -5948,6 +5989,7 @@ func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote str
 	// nothing arrived and one that only knows no error occurred (ga-bq9zd).
 	pullRow, pullErr := schema.CallReturningRow(ctx, tx, query, args...)
 	report := parseMergeReport(pullRow)
+	pullErr = remoteTransferFailure(pullErr)
 
 	// GH#3144: When DOLT_PULL fails because upstream branch tracking is not
 	// configured in repo_state.json (common when remote was added via
@@ -5956,7 +5998,7 @@ func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote str
 	if pullErr != nil && isBranchTrackingError(pullErr) {
 		if err := schema.DrainCall(ctx, tx, "CALL DOLT_FETCH(?, ?)", remote, s.branch); err != nil {
 			_ = tx.Rollback()
-			return pullReport{}, fmt.Errorf("fetch from %s/%s: %w", remote, s.branch, err)
+			return pullReport{}, fmt.Errorf("fetch from %s/%s: %w", remote, s.branch, remoteTransferFailure(err))
 		}
 		trackingRef := remote + "/" + s.branch
 		// The merge, not the pull, is now what happened — so its row replaces
@@ -6268,6 +6310,25 @@ func (s *DoltStore) finishCLIPull(ctx context.Context, pullErr error) error {
 		return pullErr
 	}
 	return nil
+}
+
+// cliPullOutcome passes on what finishCLIPull returned for a CLI pull from one
+// of this store's remotes (a federation pull returns its conflicts as data
+// instead: peerPullOutcome). A failed pull that left conflicts in the working
+// set for the operator did transfer and stopped in its merge, so its error
+// loses the transfer mark and gets no server-environment note
+// (withServerEnvNote), as the SQL route's MergeConflictsError gets none. The
+// mark is on the error itself, where cliTransferError put it; the text and the
+// rest of the chain are kept.
+func (s *DoltStore) cliPullOutcome(ctx context.Context, pullErr error) error {
+	transfer, ok := pullErr.(*remoteTransferError)
+	if !ok {
+		return pullErr
+	}
+	if conflicts, err := s.GetConflicts(ctx); err == nil && len(conflicts) > 0 {
+		return transfer.err
+	}
+	return pullErr
 }
 
 // autoResolveConflictsAfterCLIPull inspects the working set and auto-resolves the
