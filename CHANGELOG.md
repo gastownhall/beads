@@ -1226,6 +1226,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd mol wisp create <proto>` and `bd mol wisp <proto>` accept
+  `--wisp-type`, so a wisp instantiated from a proto can be typed the way
+  `bd create --ephemeral --wisp-type` already is. The type is stamped on the
+  wisp root and every created step (only the root under `--root-only`), takes
+  the same values (`heartbeat`, `ping`, `patrol`, `gc_report`, `recovery`,
+  `error`, `escalation`), and is rejected with `bd create`'s diagnostic before
+  anything is created or previewed when invalid. Omitting it keeps today's
+  untyped wisps. Existing callers stay untyped until they pass the flag.
+  ([#8209](https://github.com/gastownhall/beads/issues/8209))
+
 - The `bd.storage.operations`, `bd.storage.operation.duration` and
   `bd.storage.errors` metrics are now keyed by `db.operation` alone. The
   counter also carried every request attribute of the call (issue ids,
