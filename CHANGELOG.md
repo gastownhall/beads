@@ -1226,6 +1226,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A failed or timed-out Dolt auto-push no longer reads as a successful push
+  ([GH#6289](https://github.com/gastownhall/beads/issues/6289)). It recorded
+  `last_push` and `last_commit` in `.beads/push-state.json` as if the push
+  had landed, so later write commands skipped retrying until HEAD moved.
+  Failures now record `last_attempt` and a one-line, credential-scrubbed
+  `last_error` instead; the auto-push interval runs from the later of the
+  last attempt and the last success, and a successful push clears
+  `last_error`. Successful `bd dolt push` and `bd sync` pushes to the
+  default remote or `origin` now record success too; pushes to other remotes
+  do not touch the file. A push made with the `dolt` CLI outside bd is not
+  recorded, and an older bd on the same machine may rewrite the file without
+  the new fields.
+- `bd doctor`'s Sync Staleness check now covers `origin`, not just federation
+  peers. It warns on a recorded push failure (even when HEAD matches the
+  cached origin ref), an unreadable push record, local history ahead of,
+  behind or diverged from the cached `origin` ref, or no cached ref to
+  compare, and reports the origin check as skipped under `no-push` or
+  `dolt.local-only`. It still makes no network call, so a pass reads "No
+  local sync staleness detected" and does not prove what the remote holds.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
