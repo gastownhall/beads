@@ -31,9 +31,13 @@ const cloneSkewPhaseTimeout = 4 * time.Minute
 // internal/storage/schema/migration_repairs.go) does exactly that ahead of
 // 0047's frozen SQL.
 //
-// The cursor-46 subtest pins that historical repair: a clone at exactly the
-// reported crash cursor must open through the consented production
-// schema-init path and converge on the binary's latest cursors.
+// The cursor-46 subtest pins that historical repair. But it cannot catch a
+// FUTURE main migration that references a clone-local table without
+// tolerating its absence: repair 47 has already recreated the tables by the
+// time anything after 47 runs. The second subtest therefore runs the newest
+// main migration on a clone whose cursor is LatestVersion()-1, where no
+// repair has recreated the wisp tables yet (see the clone-local table rules
+// in scripts/check-migration-hygiene.sh's Check D).
 //
 // The consumers are genuine DOLT_CLONEs of a file remote, not databases with
 // a hand-maintained table-drop list: only a real clone exercises
@@ -59,7 +63,10 @@ func TestMigrateUpCloneBelowLatestWithoutWispTables(t *testing.T) {
 	// Sequential subtests sharing one producer that advances through the
 	// sorted cursors, so the main migration chain replays once instead of
 	// twice. Subtests are deliberately serial: one test slot, one producer.
-	cursors := []int{46}
+	cursors := []int{46, latestMain - 1}
+	if cursors[1] <= cursors[0] {
+		t.Skipf("latest main version %d leaves no clone-skew window above cursor 46", latestMain)
+	}
 
 	// ctx outlives every phase context: it only pins the producer
 	// connection for the whole test; each phase carries its own deadline.
