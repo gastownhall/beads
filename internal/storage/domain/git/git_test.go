@@ -413,6 +413,20 @@ func (s *testSuite) TestCommit_OnlySkipsPathWithNothingStaged() {
 	s.Equal(".beads/config.yaml", s.gitOut("show", "--name-only", "--format=", "HEAD"))
 }
 
+// An Only scope with nothing staged under it is no commit, even on an unborn
+// branch with another file staged.
+func (s *testSuite) TestCommit_OnlyWithNothingStagedDidCommitFalse() {
+	s.gitInit()
+	s.writeFile("work.txt", "unrelated work")
+	s.Require().NoError(s.repo.Add(s.Ctx(), "work.txt"))
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "init", Only: []string{".beads/"}})
+	s.Require().NoError(err)
+	s.False(result.DidCommit)
+	s.runFails("rev-parse", "-q", "--verify", "HEAD")
+	s.Equal("work.txt", s.gitOut("diff", "--cached", "--name-only"))
+}
+
 func (s *testSuite) TestCommitInitArtifacts_LeavesPreStagedWorkStaged() {
 	s.gitInit()
 	s.writeFile("work.txt", "unrelated work")
