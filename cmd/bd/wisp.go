@@ -138,7 +138,8 @@ The wisp will:
 Examples:
   bd mol wisp create mol-patrol                    # Ephemeral patrol cycle
   bd mol wisp create mol-health-check              # One-time health check
-  bd mol wisp create mol-diagnostics --var target=db  # Diagnostic run`,
+  bd mol wisp create mol-diagnostics --var target=db  # Diagnostic run
+  bd mol wisp create mol-patrol --wisp-type patrol # Typed patrol cycle (root + steps)`,
 	Args:          cobra.ExactArgs(1),
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -165,6 +166,7 @@ type wispCreateInput struct {
 	dryRun   bool
 	rootOnly bool
 	varFlags []string
+	wispType types.WispType
 }
 
 func gatherWispCreateInput(cmd *cobra.Command, args []string) wispCreateInput {
@@ -172,6 +174,8 @@ func gatherWispCreateInput(cmd *cobra.Command, args []string) wispCreateInput {
 	in.dryRun, _ = cmd.Flags().GetBool("dry-run")
 	in.rootOnly, _ = cmd.Flags().GetBool("root-only")
 	in.varFlags, _ = cmd.Flags().GetStringArray("var")
+	wispType, _ := cmd.Flags().GetString("wisp-type")
+	in.wispType = types.WispType(wispType)
 	return in
 }
 
@@ -282,6 +286,7 @@ func runWispCreateCore(cmd *cobra.Command, args []string) error {
 		Vars:      vars,
 		Actor:     currentActor(),
 		Ephemeral: true,
+		WispType:  in.wispType,
 		Prefix:    types.IDPrefixWisp,
 		RootOnly:  rootOnly,
 	})
@@ -1039,6 +1044,10 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 	return nil
 }
 
+// wispTypeFlagUsage is the --wisp-type help shared by both wisp creation
+// commands; the values are the ones `bd create --wisp-type` accepts.
+const wispTypeFlagUsage = "Wisp type for TTL-based compaction, applied to the root and every created step: heartbeat, ping, patrol, gc_report, recovery, error, escalation (default: untyped)"
+
 func init() {
 	// Wisp command flags (for direct create: bd mol wisp <proto>)
 	wispCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value); a name the proto cannot consume is an error")
@@ -1049,6 +1058,7 @@ func init() {
 	wispCreateCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value); a name the proto cannot consume is an error")
 	wispCreateCmd.Flags().Bool("dry-run", false, "Preview what would be created")
 	wispCreateCmd.Flags().Bool("root-only", false, "Create only the root issue (no child step issues)")
+	wispCreateCmd.Flags().String("wisp-type", "", wispTypeFlagUsage)
 
 	wispListCmd.Flags().Bool("all", false, "Include closed wisps")
 	wispListCmd.Flags().String("type", "", "Filter by issue type (e.g., agent, task, patrol)")
