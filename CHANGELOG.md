@@ -703,6 +703,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd rules compact` previews by default and applies only with `--force`.**
+  It used to apply merges by default, writing the composite and deleting the
+  source rules. Scripts using `--auto` or `--group` to apply merges must add
+  `--force`. Applying now copies each source to `<name>.md.backup` before
+  deleting it; undo a merge by deleting the composite and renaming each
+  backup back. The preview lists, by source, every line the composite drops
+  (it keeps only `**Do:**` and `**Don't:**` lines), and a rule with no such
+  lines is skipped by `--auto` and refused by `--group`.
+  ([#5719](https://github.com/gastownhall/beads/issues/5719))
 - **Server mode: a write's schema convergence check lists the tables once.**
   The check that lets a write skip the migration lock read `SHOW TABLES` ten times
   and the `information_schema.schemata` probe twice, one per table it asks about.
@@ -724,15 +733,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1 when they hold rows. Empty or malformed config values still mean no
   backfill, a failed read is still an error, and a database missing one of
   those tables gets the same answer as before.
-- **`bd rules compact` previews by default and applies only with `--force`.**
-  It used to apply merges by default, writing the composite and deleting the
-  source rules. Scripts using `--auto` or `--group` to apply merges must add
-  `--force`. Applying now copies each source to `<name>.md.backup` before
-  deleting it; undo a merge by deleting the composite and renaming each
-  backup back. The preview lists, by source, every line the composite drops
-  (it keeps only `**Do:**` and `**Don't:**` lines), and a rule with no such
-  lines is skipped by `--auto` and refused by `--group`.
-  ([#5719](https://github.com/gastownhall/beads/issues/5719))
 - **`bd` requires Dolt 2.6.0 or newer outside embedded mode, and refuses
   anything older.** `doltversion.RecommendedMin` (2.5.0, a warning) is now
   `doltversion.RequiredMin` (2.6.0, an error). `bd dolt start` and
