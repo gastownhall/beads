@@ -1057,6 +1057,7 @@ func TestPushFieldsEqualMatchesPushedState(t *testing.T) {
 	blocked := &State{ID: "state-blocked", Name: "Blocked", Type: "started"}
 	inProgress := &State{ID: "state-progress", Name: "In Progress", Type: "started"}
 	onHold := &State{ID: "state-hold", Name: "On Hold", Type: "started"}
+	canceled := &State{ID: "state-canceled", Name: "Canceled", Type: "canceled"}
 	for _, test := range []struct {
 		name     string
 		stateMap map[string]string // linear.state_map.<key>
@@ -1095,6 +1096,14 @@ func TestPushFieldsEqualMatchesPushedState(t *testing.T) {
 			name:     "type_mapped_custom_status",
 			stateMap: map[string]string{"started": "review"},
 			status:   types.Status("review"), state: inProgress, want: true,
+		},
+		{
+			// A state named after its own type ("Canceled" of canceled) still
+			// echoes as the pushed state: pushStateEqual's name/type OR reads
+			// the same state_map entry for it.
+			name:     "self_named_state_echo",
+			stateMap: map[string]string{"canceled": "closed"},
+			status:   types.StatusClosed, state: canceled, want: true,
 		},
 		{
 			// A state the pull maps back to the local status still counts,
@@ -1143,5 +1152,162 @@ func TestPushFieldsEqualToBeads(t *testing.T) {
 
 	if !PushFieldsEqualToBeads(local, remote) {
 		t.Fatal("expected beads-form fallback comparison to ignore local-only fields")
+	}
+}
+
+// TestResolveTypeKeyNameCollision covers ResolveStateIDForBeadsStatus when a
+// Linear workflow state is named after its own type ("Canceled" of type
+// canceled, "Backlog" of type backlog) and linear.state_map carries the
+// documented type keys: the state reads the same entry by name and by type,
+// so the name pass must leave it to the type pass instead of silently
+// winning over a sibling state the type map also selects (PR #8100).
+func TestResolveTypeKeyNameCollision(t *testing.T) {
+	// A team shaped like Linear's default workflow.
+	defaultTeam := []State{
+		{ID: "state-backlog", Name: "Backlog", Type: "backlog"},
+		{ID: "state-todo", Name: "Todo", Type: "unstarted"},
+		{ID: "state-progress", Name: "In Progress", Type: "started"},
+		{ID: "state-done", Name: "Done", Type: "completed"},
+		{ID: "state-canceled", Name: "Canceled", Type: "canceled"},
+	}
+	// The type-keyed map documented in `bd linear --help`.
+	documentedTypeMap := map[string]string{
+		"linear.state_map.backlog":   "open",
+		"linear.state_map.unstarted": "open",
+		"linear.state_map.started":   "in_progress",
+		"linear.state_map.completed": "closed",
+		"linear.state_map.canceled":  "closed",
+	}
+	for _, tc := range []struct {
+		name    string
+		states  []State
+		config  map[string]string // linear.* dotted config entries
+		status  types.Status
+		wantID  string
+		wantErr []string // required substrings of the error; empty wants wantID
+	}{
+		{
+			name:   "closed self-named state reaches type ambiguity with Done",
+			states: defaultTeam,
+			config: documentedTypeMap,
+			status: types.StatusClosed,
+			wantErr: []string{
+				"type fallback is ambiguous",
+				"Done, Canceled",
+				"linear.outbound_state_map.closed",
+			},
+		},
+		{
+			name: "padded mixed-case self-named name still reaches the type pass",
+			states: []State{
+				{ID: "state-done", Name: "Done", Type: "completed"},
+				{ID: "state-canceled", Name: " CANCELED ", Type: "canceled"},
+			},
+			config: map[string]string{
+				"linear.state_map.completed": "closed",
+				"linear.state_map.canceled":  "closed",
+			},
+			status: types.StatusClosed,
+			wantErr: []string{
+				"type fallback is ambiguous",
+				"linear.outbound_state_map.closed",
+			},
+		},
+		{
+			name: "padded self-named type still reaches the type pass",
+			states: []State{
+				{ID: "state-done", Name: "Done", Type: "completed"},
+				{ID: "state-canceled", Name: "Canceled", Type: " canceled "},
+			},
+			config: map[string]string{
+				"linear.state_map.completed": "closed",
+				"linear.state_map.canceled":  "closed",
+			},
+			status: types.StatusClosed,
+			wantErr: []string{
+				"type fallback is ambiguous",
+				"Done, Canceled",
+				"linear.outbound_state_map.closed",
+			},
+		},
+		{
+			name:   "lone self-named state still resolves through the type pass",
+			states: []State{{ID: "state-canceled", Name: "Canceled", Type: "canceled"}},
+			config: map[string]string{"linear.state_map.canceled": "closed"},
+			status: types.StatusClosed,
+			wantID: "state-canceled",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config := LoadMappingConfig(&mockConfigLoader{config: tc.config})
+			got, err := ResolveStateIDForBeadsStatus(&StateCache{States: tc.states}, tc.status, config)
+			if len(tc.wantErr) > 0 {
+				if err == nil {
+					t.Fatalf("ResolveStateIDForBeadsStatus(%s) = %q, nil; want error mentioning %q", tc.status, got, tc.wantErr)
+				}
+				if got != "" {
+					t.Errorf("error case returned ID %q, want empty", got)
+				}
+				for _, want := range tc.wantErr {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error %q does not mention %q", err, want)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveStateIDForBeadsStatus(%s) error = %v", tc.status, err)
+			}
+			if got != tc.wantID {
+				t.Errorf("ResolveStateIDForBeadsStatus(%s) = %q, want %q", tc.status, got, tc.wantID)
+			}
+		})
+	}
+}
+
+// TestResolveStateIDForBeadsStatusTypeKeyDoesNotWinByStateName reproduces
+// bd-frhcmv (PR #8100): with the type-keyed linear.state_map from
+// `bd linear --help`, a state named after its own type ("Canceled" of type
+// canceled, "Backlog" of type backlog) must not silently win the name pass
+// over a sibling state ("Done", "Todo") that the type map also selects.
+func TestResolveStateIDForBeadsStatusTypeKeyDoesNotWinByStateName(t *testing.T) {
+	cache := &StateCache{
+		States: []State{
+			{ID: "state-backlog", Name: "Backlog", Type: "backlog"},
+			{ID: "state-todo", Name: "Todo", Type: "unstarted"},
+			{ID: "state-progress", Name: "In Progress", Type: "started"},
+			{ID: "state-done", Name: "Done", Type: "completed"},
+			{ID: "state-canceled", Name: "Canceled", Type: "canceled"},
+		},
+	}
+	config := DefaultMappingConfig()
+	config.ExplicitStateMap["backlog"] = "open"
+	config.ExplicitStateMap["unstarted"] = "open"
+	config.ExplicitStateMap["started"] = "in_progress"
+	config.ExplicitStateMap["completed"] = "closed"
+	config.ExplicitStateMap["canceled"] = "closed"
+
+	for _, tc := range []struct {
+		status types.Status
+		states string
+	}{
+		{types.StatusClosed, "Done, Canceled"},
+		{types.StatusOpen, "Backlog, Todo"},
+	} {
+		got, err := ResolveStateIDForBeadsStatus(cache, tc.status, config)
+		if err == nil {
+			t.Errorf("status %q: resolved silently to %q, want type-fallback ambiguity across %s", tc.status, got, tc.states)
+			continue
+		}
+		if msg := err.Error(); !strings.Contains(msg, "type fallback is ambiguous") || !strings.Contains(msg, tc.states) || !strings.Contains(msg, "linear.outbound_state_map."+string(tc.status)) {
+			t.Errorf("status %q: unexpected error: %v", tc.status, err)
+		}
+	}
+
+	// A name key that is not a type still selects its state.
+	config.ExplicitStateMap["done"] = "closed"
+	got, err := ResolveStateIDForBeadsStatus(cache, types.StatusClosed, config)
+	if err != nil || got != "state-done" {
+		t.Errorf("with done = closed: got (%q, %v), want state-done", got, err)
 	}
 }

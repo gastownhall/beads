@@ -5569,6 +5569,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for it, so upgrade every bd that shares the workspace, or run `bd dolt stop`
   before going back to an older one.
 
+### Fixed
+
+- **Linear pushes no longer let a state named after its own type win the name
+  pass.** With the type-keyed `linear.state_map` documented in
+  `bd linear --help` (`backlog`/`unstarted` to open, `started` to
+  in_progress, `completed`/`canceled` to closed), a Linear workflow state
+  whose name equals its own type — "Canceled" of type canceled, "Backlog" of
+  type backlog — matched the same entry by name, so every closed issue was
+  silently pushed to "Canceled" while "Done" was also mapped, and open issues
+  went to "Backlog" over "Todo". Such states are now left to the type pass,
+  which either resolves uniquely or reports the existing ambiguity error
+  naming `linear.outbound_state_map.<status>` as the way to disambiguate; a
+  name key that is not the state's own type (`done = closed` next to
+  `canceled = closed`) still selects its state. Pull mapping and the
+  push-echo comparison are unchanged.
+
 ## [1.3.4] - 2026-11-04
 
 First stable release of the 1.3.4 patch line. It ships the same code as

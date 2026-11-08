@@ -371,7 +371,10 @@ func stateMapMatchesStatus(mapped string, status types.Status) bool {
 // ResolveStateIDForBeadsStatus returns the unique Linear workflow state ID to
 // use when pushing the given beads status. Push only trusts explicit
 // linear.state_map.* entries; defaults are safe for pull but too ambiguous for
-// mutation.
+// mutation. Resolution order: a linear.outbound_state_map.<status> override,
+// then a linear.state_map entry matching a state's name (a state named after
+// its own type is left to the type pass), then a linear.state_map entry
+// matching a state's type.
 func ResolveStateIDForBeadsStatus(cache *StateCache, status types.Status, config *MappingConfig) (string, error) {
 	if cache == nil || len(cache.States) == 0 {
 		return "", fmt.Errorf("no workflow states found")
@@ -397,6 +400,13 @@ func ResolveStateIDForBeadsStatus(cache *StateCache, status types.Status, config
 
 	var nameMatches []State
 	for _, state := range cache.States {
+		// A state named after its own type ("Canceled" of type canceled)
+		// reads the same state_map entry by name and by type; that entry
+		// describes the state's type, so leave the state to the type pass
+		// below instead of letting it win or collide as a name choice.
+		if strings.ToLower(strings.TrimSpace(state.Name)) == strings.ToLower(strings.TrimSpace(state.Type)) {
+			continue
+		}
 		if explicitStateMapMatches(config, state.Name, status) {
 			nameMatches = append(nameMatches, state)
 		}
