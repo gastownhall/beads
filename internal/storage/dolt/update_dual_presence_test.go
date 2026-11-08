@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -196,6 +197,62 @@ func TestLegacyUpdateRefusesDualPresence(t *testing.T) {
 			seedDualPresentIssue(t, ctx, store, id)
 			before := readDualPresenceSnapshot(t, ctx, store.UnderlyingDB(), id)
 			assertDualPresenceRefusal(t, tc.run(id), id)
+			assertDualPresenceSnapshotUnchanged(t, before, readDualPresenceSnapshot(t, ctx, store.UnderlyingDB(), id))
+		})
+	}
+}
+
+// dualPresenceRolePatches are valid, authorized Lifecycle updates, one per
+// write path ExecuteUpdate can take: fields, claim, labels, parent and
+// persistence. The notes replacement carries --force so the notes-overwrite
+// fence stays out of the way; the same-value notes already match the copy the
+// fence reads.
+func dualPresenceRolePatches(parentID string) []struct {
+	name    string
+	request publicops.UpdateRequest
+} {
+	return []struct {
+		name    string
+		request publicops.UpdateRequest
+	}{
+		{"notes", publicops.UpdateRequest{ForceNotesOverwrite: true, Patch: publicops.IssuePatch{Notes: publicops.Field[string]{Set: true, Value: "probe"}}}},
+		{"same-value notes", publicops.UpdateRequest{Patch: publicops.IssuePatch{Notes: publicops.Field[string]{Set: true, Value: "durable notes"}}}},
+		{"append notes", publicops.UpdateRequest{Patch: publicops.IssuePatch{AppendNotes: publicops.Field[string]{Set: true, Value: "probe"}}}},
+		{"metadata", publicops.UpdateRequest{Patch: publicops.IssuePatch{Metadata: publicops.MetadataPatch{Merge: publicops.Field[json.RawMessage]{Set: true, Value: []byte(`{"copy":"probe"}`)}}}}},
+		{"claim only", publicops.UpdateRequest{Claim: true}},
+		{"label only", publicops.UpdateRequest{Patch: publicops.IssuePatch{Labels: publicops.LabelPatch{Add: []string{"probe-label"}}}}},
+		{"parent only", publicops.UpdateRequest{Patch: publicops.IssuePatch{ParentID: publicops.Field[string]{Set: true, Value: parentID}}}},
+		{"persistence only", publicops.UpdateRequest{Patch: publicops.IssuePatch{Persistence: publicops.Field[publicops.PersistenceMode]{Set: true, Value: types.PersistenceModePersistent}}}},
+	}
+}
+
+// TestUpdateRefusesDualPresence covers the server Lifecycle role. Its
+// ExecuteUpdate reads the issues copy as the pre-image but used to write
+// claims, labels and parents through helpers that route wisps-first, so every
+// write path must refuse a twin before the first write.
+func TestUpdateRefusesDualPresence(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	operations, err := NewIssueOperations(store)
+	if err != nil {
+		t.Fatalf("NewIssueOperations: %v", err)
+	}
+	parent := &types.Issue{ID: "dual-role-parent", Title: "parent", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeEpic}
+	if err := store.CreateIssue(ctx, parent, "seed"); err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+
+	for i, tc := range dualPresenceRolePatches(parent.ID) {
+		t.Run(tc.name, func(t *testing.T) {
+			id := fmt.Sprintf("dual-role-%d", i)
+			seedDualPresentIssue(t, ctx, store, id)
+			before := readDualPresenceSnapshot(t, ctx, store.UnderlyingDB(), id)
+			request := tc.request
+			request.Actor, request.IssueID = "writer", id
+			_, err := operations.Update(ctx, request)
+			assertDualPresenceRefusal(t, err, id)
 			assertDualPresenceSnapshotUnchanged(t, before, readDualPresenceSnapshot(t, ctx, store.UnderlyingDB(), id))
 		})
 	}

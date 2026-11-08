@@ -5,6 +5,7 @@ package embeddeddolt_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -105,12 +106,32 @@ func requireEmbeddedDualPresenceRefusal(t *testing.T, err error, id string) {
 // TestEmbeddedUpdateRefusesDualPresence proves the shared guard reaches the
 // embedded store: its legacy map update and its Lifecycle role both run the
 // shared issueops update, which used to write the wisp twin of an ID that
-// reads resolve to the issues copy.
+// reads resolve to the issues copy, and the role's claim, label and parent
+// paths, which route wisps-first on their own.
 func TestEmbeddedUpdateRefusesDualPresence(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	te := newTestEnv(t, "dual")
 	ctx := t.Context()
 
+	operations, err := embeddeddolt.NewIssueOperations(te.store)
+	if err != nil {
+		t.Fatalf("NewIssueOperations: %v", err)
+	}
+	parent := &types.Issue{ID: "dual-parent", Title: "parent", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeEpic}
+	if err := te.store.CreateIssue(ctx, parent, "seed"); err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	role := func(request publicops.UpdateRequest) func(id string) error {
+		return func(id string) error {
+			request.Actor, request.IssueID = "writer", id
+			_, err := operations.Update(ctx, request)
+			return err
+		}
+	}
+
+	// Each role case is a valid, authorized update along one ExecuteUpdate
+	// write path; the notes replacement carries --force past the
+	// notes-overwrite fence.
 	cases := []struct {
 		name string
 		run  func(id string) error
@@ -118,6 +139,13 @@ func TestEmbeddedUpdateRefusesDualPresence(t *testing.T) {
 		{"UpdateIssue notes", func(id string) error {
 			return te.store.UpdateIssue(ctx, id, map[string]interface{}{"notes": "probe"}, "tester")
 		}},
+		{"role notes", role(publicops.UpdateRequest{ForceNotesOverwrite: true, Patch: publicops.IssuePatch{Notes: publicops.Field[string]{Set: true, Value: "probe"}}})},
+		{"role same-value notes", role(publicops.UpdateRequest{Patch: publicops.IssuePatch{Notes: publicops.Field[string]{Set: true, Value: "durable notes"}}})},
+		{"role metadata", role(publicops.UpdateRequest{Patch: publicops.IssuePatch{Metadata: publicops.MetadataPatch{Merge: publicops.Field[json.RawMessage]{Set: true, Value: []byte(`{"copy":"probe"}`)}}}})},
+		{"role claim only", role(publicops.UpdateRequest{Claim: true})},
+		{"role label only", role(publicops.UpdateRequest{Patch: publicops.IssuePatch{Labels: publicops.LabelPatch{Add: []string{"probe-label"}}}})},
+		{"role parent only", role(publicops.UpdateRequest{Patch: publicops.IssuePatch{ParentID: publicops.Field[string]{Set: true, Value: parent.ID}}})},
+		{"role persistence only", role(publicops.UpdateRequest{Patch: publicops.IssuePatch{Persistence: publicops.Field[publicops.PersistenceMode]{Set: true, Value: types.PersistenceModePersistent}}})},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
