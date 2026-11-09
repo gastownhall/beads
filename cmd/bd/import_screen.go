@@ -324,7 +324,8 @@ func importRejectedError(source string, rejected []importRejection) error {
 // reported in result, once in Skipped, and with --rejects saved to that file
 // first: a rejects file that cannot be written refuses the import before any
 // import write, so a skipped record is never dropped without the copy the
-// caller asked for.
+// caller asked for. A dry run (result.DryRun) settles them the same way but
+// saves nothing.
 func applyImportRejections(result *importResultJSON, source string, rejected []importRejection, skipInvalid bool, rejectsPath string) error {
 	if len(rejected) == 0 {
 		return nil
@@ -332,7 +333,7 @@ func applyImportRejections(result *importResultJSON, source string, rejected []i
 	if !skipInvalid {
 		return importRejectedError(source, rejected)
 	}
-	if rejectsPath != "" {
+	if rejectsPath != "" && !result.DryRun {
 		if err := saveImportRejects(rejectsPath, source, rejected); err != nil {
 			return fmt.Errorf("save the %d invalid record(s) from %s to %s; nothing was imported: %w", len(rejected), source, rejectsPath, err)
 		}
@@ -407,6 +408,19 @@ func warnImportInvalidSkipped(source string, rejected []importRejection, rejects
 		fmt.Fprintln(os.Stderr, "  not saved separately; stdin is not kept, so rerun with --rejects <file> to keep them")
 	default:
 		fmt.Fprintf(os.Stderr, "  not saved separately; they remain in %s\n", source) //nolint:gosec // G705: stderr, not a browser context
+	}
+}
+
+// warnImportInvalidWouldSkip is warnImportInvalidSkipped for a dry run, which
+// skips the same records but saves none of them.
+func warnImportInvalidWouldSkip(source string, rejected []importRejection, rejectsPath string) {
+	if len(rejected) == 0 {
+		return
+	}
+	//nolint:gosec // G705: stderr, not a browser context
+	fmt.Fprintf(os.Stderr, "warning: dry run: would skip %d invalid record(s) from %s:\n%s", len(rejected), source, formatImportRejections(source, rejected))
+	if rejectsPath != "" {
+		fmt.Fprintf(os.Stderr, "  would save them to %s (a dry run writes nothing)\n", rejectsPath) //nolint:gosec // G705: stderr, not a browser context
 	}
 }
 

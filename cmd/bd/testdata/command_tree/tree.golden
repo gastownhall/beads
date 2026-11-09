@@ -3626,6 +3626,18 @@ bd import
     | re-running the same import is safe and converges (rows upsert,
     | labels/comments/dependencies deduplicate).
     |
+    | Every row is checked against the database's rules (status and type
+    | vocabulary, including the configured status.custom and types.custom, plus
+    | the other insert checks) before anything is written. By default a single
+    | invalid row fails the whole import, naming each one as <file>:<line>: <id>,
+    | and nothing is imported. --skip-invalid imports the valid rows instead and
+    | reports the skipped ones; add --rejects <file> to keep their original lines
+    | (merged into the file, never overwriting earlier records). --dry-run applies
+    | the same check and writes neither the database nor the rejects file. A line
+    | that is not valid JSON always fails the import with its location.
+    | Auto-import, 'bd init --from-jsonl', 'bd bootstrap' and the git-hook import
+    | always skip invalid rows into <name>.rejected.jsonl next to the source.
+    |
     | EXAMPLES:
     |   bd import                        # Import from configured import.path
     |   bd import backup.jsonl           # Import from a specific file
@@ -3633,6 +3645,8 @@ bd import
     |   bd import -                      # Read JSONL from stdin
     |   cat issues.jsonl | bd import -   # Pipe JSONL from another tool
     |   bd import --dry-run              # Show what would be imported
+    |   bd import --skip-invalid --rejects rejected.jsonl backup.jsonl
+    |                                    # Import the valid rows, keep the rest
     |   bd import --dedup                # Skip issues with duplicate titles
     |   bd import --allow-stale old.jsonl # Restore an older snapshot (overwrites newer local rows)
     |   bd import --json                 # Structured output with created and skipped IDs

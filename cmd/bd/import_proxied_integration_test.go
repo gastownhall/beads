@@ -627,6 +627,45 @@ func TestProxiedServerImport(t *testing.T) {
 		}
 	})
 
+	t.Run("invalid_record_dry_run_writes_nothing", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "impd")
+		db := openProxiedDB(t, p)
+
+		rows := fixtureIssues("impd")
+		rows[1].Status = "verify"
+		path := filepath.Join(p.dir, "invalid.jsonl")
+		if err := os.WriteFile(path, []byte(importFixtureJSONL(t, rows)), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+		if _, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "import", "--dry-run", path); err == nil || !strings.Contains(stderr, path+":3: impd-r2") {
+			t.Errorf("strict dry run = err %v, want a refusal locating impd-r2\nstderr:\n%s", err, stderr)
+		}
+
+		rejects := filepath.Join(t.TempDir(), "rejects.jsonl")
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "import", "--dry-run", "--skip-invalid", "--rejects", rejects, "--json", path)
+		if err != nil {
+			t.Fatalf("bd import --dry-run --skip-invalid failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		var report struct {
+			Created        int `json:"created"`
+			Skipped        int `json:"skipped"`
+			InvalidSkipped int `json:"invalid_skipped"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+			t.Fatalf("stdout is not one JSON document: %v\n%s", err, stdout)
+		}
+		if report.Created != 2 || report.Skipped != 1 || report.InvalidSkipped != 1 {
+			t.Errorf("dry-run report = %+v, want created=2 skipped=1 invalid_skipped=1", report)
+		}
+		if _, err := os.Lstat(rejects); !os.IsNotExist(err) {
+			t.Errorf("dry run wrote the rejects file (lstat err %v)", err)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM issues WHERE id LIKE 'impd-%'"); got != 0 {
+			t.Errorf("dry run wrote %d issue(s)", got)
+		}
+	})
+
 	t.Run("custom_vocabulary_is_accepted", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "impv")

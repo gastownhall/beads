@@ -92,7 +92,7 @@ func runImportRecordsProxied(ctx context.Context, records []importRecord, memori
 
 	if importDryRun {
 		result.Memories = len(memories)
-		result.Skipped = dedupHits
+		result.Skipped += dedupHits
 
 		classification, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (*ImportResult, error) {
 			return classifyDryRunImport(ctx, uw.IssueUseCase(), issues, importAllowStale)

@@ -91,6 +91,18 @@ the already-committed chunks are durable and the command exits nonzero;
 re-running the same import is safe and converges (rows upsert,
 labels/comments/dependencies deduplicate).
 
+Every row is checked against the database's rules (status and type
+vocabulary, including the configured status.custom and types.custom, plus
+the other insert checks) before anything is written. By default a single
+invalid row fails the whole import, naming each one as <file>:<line>: <id>,
+and nothing is imported. --skip-invalid imports the valid rows instead and
+reports the skipped ones; add --rejects <file> to keep their original lines
+(merged into the file, never overwriting earlier records). --dry-run applies
+the same check and writes neither the database nor the rejects file. A line
+that is not valid JSON always fails the import with its location.
+Auto-import, 'bd init --from-jsonl', 'bd bootstrap' and the git-hook import
+always skip invalid rows into <name>.rejected.jsonl next to the source.
+
 EXAMPLES:
   bd import                        # Import from configured import.path
   bd import backup.jsonl           # Import from a specific file
@@ -98,6 +110,8 @@ EXAMPLES:
   bd import -                      # Read JSONL from stdin
   cat issues.jsonl | bd import -   # Pipe JSONL from another tool
   bd import --dry-run              # Show what would be imported
+  bd import --skip-invalid --rejects rejected.jsonl backup.jsonl
+                                   # Import the valid rows, keep the rest
   bd import --dedup                # Skip issues with duplicate titles
   bd import --allow-stale old.jsonl # Restore an older snapshot (overwrites newer local rows)
   bd import --json                 # Structured output with created and skipped IDs`,
@@ -315,7 +329,7 @@ func runImportRecordsClassic(ctx context.Context, records []importRecord, memori
 
 	if importDryRun {
 		result.Memories = len(memories)
-		result.Skipped = dedupHits
+		result.Skipped += dedupHits
 
 		classification, err := classifyDryRunImport(ctx, store, issues, importAllowStale)
 		if err != nil {
@@ -480,6 +494,7 @@ func applyImportOutcome(result *importResultJSON, importResult *ImportResult) {
 // renderImportDryRun reports a dry run (JSON or stderr), identically in both
 // modes.
 func renderImportDryRun(result importResultJSON, memoriesCount int, source string, dedupHits int) error {
+	warnImportInvalidWouldSkip(result.Source, result.InvalidRecords, importRejects)
 	if jsonOutput {
 		return outputJSON(result)
 	}
@@ -493,6 +508,9 @@ func renderImportDryRun(result importResultJSON, memoriesCount int, source strin
 		considered, result.Created, result.Updated, result.Unchanged, memoriesCount, source)
 	if dedupHits > 0 {
 		fmt.Fprintf(os.Stderr, " (%d duplicates skipped)", dedupHits) //nolint:gosec // G705: stderr, not a browser context
+	}
+	if result.InvalidSkipped > 0 {
+		fmt.Fprintf(os.Stderr, " (%d invalid skipped)", result.InvalidSkipped) //nolint:gosec // G705: stderr, not a browser context
 	}
 	if len(result.StaleSkippedIDs) > 0 {
 		fmt.Fprintf(os.Stderr, " (%d stale skipped)", len(result.StaleSkippedIDs))

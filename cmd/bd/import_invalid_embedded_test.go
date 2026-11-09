@@ -538,3 +538,135 @@ func TestEmbeddedRecoveryQuarantinePreservesAndFailsClosed(t *testing.T) {
 		}
 	})
 }
+
+// importDryRunReport is the part of `bd import --json` the dry-run tests read.
+type importDryRunReport struct {
+	Created        int    `json:"created"`
+	Skipped        int    `json:"skipped"`
+	InvalidSkipped int    `json:"invalid_skipped"`
+	RejectsFile    string `json:"rejects_file"`
+	InvalidRecords []struct {
+		Line int    `json:"line"`
+		ID   string `json:"id"`
+	} `json:"invalid_records"`
+}
+
+// TestEmbeddedImportInvalidRecordDryRun pins AC-7: `bd import --dry-run`
+// screens like the real import — strict refuses, --skip-invalid reports the
+// same counts — while writing neither the database nor the rejects file, and
+// an undecodable line is located by its physical line in every import mode
+// before anything is written.
+func TestEmbeddedImportInvalidRecordDryRun(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt import tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	assertNoIssues := func(t *testing.T, dir, prefix string) {
+		t.Helper()
+		for _, issue := range bdListJSON(t, bd, dir, "--all") {
+			if strings.HasPrefix(issue.ID, prefix+"-") {
+				t.Errorf("issue %s written", issue.ID)
+			}
+		}
+	}
+
+	t.Run("strict_refuses_like_the_real_import", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "drs")
+		path := filepath.Join(t.TempDir(), "mixed.jsonl")
+		if err := os.WriteFile(path, []byte(invalidImportFixture(t, "drs", 3, 2)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, stderr, err := bdImportResult(t, bd, dir, "--dry-run", path)
+		if err == nil {
+			t.Fatalf("strict dry run of an invalid record succeeded\nstderr:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, path+":4: drs-2") {
+			t.Errorf("stderr does not locate the invalid record:\n%s", stderr)
+		}
+		assertNoIssues(t, dir, "drs")
+	})
+
+	t.Run("skip_invalid_matches_the_real_import_and_writes_nothing", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "drk")
+		path := filepath.Join(t.TempDir(), "mixed.jsonl")
+		if err := os.WriteFile(path, []byte(invalidImportFixture(t, "drk", 3, 2)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		rejects := filepath.Join(t.TempDir(), "rejects.jsonl")
+		run := func(args ...string) (importDryRunReport, string) {
+			t.Helper()
+			stdout, stderr, err := bdImportResult(t, bd, dir, append(args, "--skip-invalid", "--rejects", rejects, "--json", path)...)
+			if err != nil {
+				t.Fatalf("bd import %v failed: %v\nstdout:\n%s\nstderr:\n%s", args, err, stdout, stderr)
+			}
+			var report importDryRunReport
+			if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+				t.Fatalf("stdout is not one JSON document: %v\n%s", err, stdout)
+			}
+			return report, stderr
+		}
+
+		dry, stderr := run("--dry-run")
+		if dry.Created != 2 || dry.Skipped != 1 || dry.InvalidSkipped != 1 || dry.RejectsFile != "" ||
+			len(dry.InvalidRecords) != 1 || dry.InvalidRecords[0].Line != 4 || dry.InvalidRecords[0].ID != "drk-2" {
+			t.Errorf("dry-run report = %+v, want created=2 skipped=1 invalid_skipped=1, drk-2 at line 4, no rejects_file", dry)
+		}
+		if !strings.Contains(stderr, path+":4: drk-2") {
+			t.Errorf("dry-run stderr does not locate the invalid record:\n%s", stderr)
+		}
+		if _, err := os.Lstat(rejects); !os.IsNotExist(err) {
+			t.Errorf("dry run wrote the rejects file (lstat err %v)", err)
+		}
+		assertNoIssues(t, dir, "drk")
+
+		actual, _ := run()
+		if actual.Created != dry.Created || actual.Skipped != dry.Skipped || actual.InvalidSkipped != dry.InvalidSkipped {
+			t.Errorf("real import = %+v, dry run = %+v: the counts differ", actual, dry)
+		}
+	})
+
+	t.Run("undecodable_line_is_located_in_every_mode", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "dru")
+		lines := strings.Split(invalidImportFixture(t, "dru", 3), "\n")
+		lines[3] = `{"id":"dru-2","title":` // physical line 4
+		fixture := strings.Join(lines, "\n")
+		path := filepath.Join(t.TempDir(), "broken.jsonl")
+		if err := os.WriteFile(path, []byte(fixture), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		for _, mode := range [][]string{nil, {"--skip-invalid"}, {"--dry-run"}, {"--dry-run", "--skip-invalid"}} {
+			_, stderr, err := bdImportResult(t, bd, dir, append(mode, path)...)
+			if err == nil {
+				t.Errorf("bd import %v of an undecodable line succeeded", mode)
+			}
+			if !strings.Contains(stderr, path+":4:") {
+				t.Errorf("bd import %v does not locate the undecodable line:\n%s", mode, stderr)
+			}
+		}
+		assertNoIssues(t, dir, "dru")
+
+		// The recovery import reports the same location and writes nothing.
+		jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(fixture), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(bd, "create", "post-import marker", "--type", "task")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		_, stderrBuf, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd create after a failed auto-import: %v\n%s", err, stderrBuf.String())
+		}
+		if !strings.Contains(stderrBuf.String(), jsonlPath+":4:") {
+			t.Errorf("auto-import does not locate the undecodable line:\n%s", stderrBuf.String())
+		}
+		for _, issue := range bdListJSON(t, bd, dir, "--all") {
+			if issue.Title != "post-import marker" {
+				t.Errorf("auto-import wrote %s from a file it could not decode", issue.ID)
+			}
+		}
+	})
+}
