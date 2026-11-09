@@ -256,6 +256,89 @@ func TestEmbeddedDoltRemoteAndPush(t *testing.T) {
 	})
 }
 
+// bdSkipIdentityCheck runs bd with BEADS_SKIP_IDENTITY_CHECK=1: the second
+// clone of the renumber-hint fixture below pulls the first clone's metadata,
+// and the CLI write path would otherwise refuse on the workspace-identity
+// check (the field condition `bd doctor --fix`/`bd bootstrap` reconciles;
+// the override keeps the test on its subject, the pull hint).
+func bdSkipIdentityCheck(t *testing.T, bd, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command(bd, args...)
+	cmd.Dir = dir
+	cmd.Env = append(bdEnv(dir), "BEADS_SKIP_IDENTITY_CHECK=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bd %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return string(out)
+}
+
+// TestEmbeddedDoltPullRenumbersHint (GH#4796, bd-28sb25 AC-2): a plain pull
+// that hits an offline-divergence child-id collision fails exactly as before,
+// and its failure output adds a best-effort repair plan plus the
+// --renumber-children flag hint — without renaming anything or masking the
+// original error.
+func TestEmbeddedDoltPullRenumbersHint(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dirA, _, _ := bdInit(t, bd, "--prefix", "pn")
+	remoteDir := t.TempDir()
+	bdDolt(t, bd, dirA, "remote", "add", "origin", "file://"+remoteDir)
+
+	parent := bdCreate(t, bd, dirA, "Parent epic for renumber hint", "--type", "epic")
+	bdDolt(t, bd, dirA, "commit", "-m", "seed parent")
+	bdDolt(t, bd, dirA, "push")
+
+	// The second clone pulls the parent, then both clones mint a child under
+	// it while "offline": same id, different beads.
+	dirB, _, _ := bdInit(t, bd, "--prefix", "pn")
+	bdDolt(t, bd, dirB, "remote", "add", "origin", "file://"+remoteDir)
+	bdDolt(t, bd, dirB, "pull")
+
+	localChild := bdCreate(t, bd, dirA, "Local child one", "--parent", parent.ID)
+	bdDolt(t, bd, dirA, "commit", "-m", "local child")
+	remoteChild := parseIssueJSON(t, []byte(bdSkipIdentityCheck(t, bd, dirB,
+		"create", "Remote child one", "--parent", parent.ID, "--json")))
+	if remoteChild.ID != localChild.ID {
+		t.Fatalf("fixture: colliding children got distinct ids %s and %s", localChild.ID, remoteChild.ID)
+	}
+	bdSkipIdentityCheck(t, bd, dirB, "dolt", "commit", "-m", "remote child")
+	bdSkipIdentityCheck(t, bd, dirB, "dolt", "push")
+
+	out := bdDoltFail(t, bd, dirA, "pull")
+
+	// The existing conflict failure stays the story: the error is printed,
+	// not replaced.
+	if !strings.Contains(out, "Error:") {
+		t.Errorf("pull failure output lost its error line:\n%s", out)
+	}
+	// The best-effort plan: the local colliding child moves above both
+	// sides' high-water marks (both counters are 1), plus the flag hint.
+	wantPlan := localChild.ID + " -> " + parent.ID + ".2"
+	if !strings.Contains(out, wantPlan) {
+		t.Errorf("pull failure output is missing the renumber plan %q:\n%s", wantPlan, out)
+	}
+	if !strings.Contains(out, "--renumber-children") {
+		t.Errorf("pull failure output is missing the --renumber-children hint:\n%s", out)
+	}
+
+	// Nothing was renamed: the local child keeps its id and content.
+	show := exec.Command(bd, "show", localChild.ID, "--json")
+	show.Dir = dirA
+	show.Env = bdEnv(dirA)
+	showOut, err := show.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bd show %s after failed pull: %v\n%s", localChild.ID, err, showOut)
+	}
+	if !strings.Contains(string(showOut), "Local child one") {
+		t.Errorf("local child %s changed content after the plain pull:\n%s", localChild.ID, showOut)
+	}
+}
+
 // TestEmbeddedDoltConcurrent exercises dolt operations concurrently.
 func TestEmbeddedDoltConcurrent(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {

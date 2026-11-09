@@ -916,6 +916,10 @@ reports conflicts.`,
 				} else if isDivergedHistoryErr(err) {
 					printDivergedHistoryGuidance("pull")
 				}
+				var mce *versioncontrolops.MergeConflictsError
+				if errors.As(err, &mce) {
+					printChildRenumberHint(ctx, st, remote)
+				}
 				return SilentExit()
 			}
 			fmt.Println("Pull complete.")
@@ -946,11 +950,42 @@ reports conflicts.`,
 			} else if isDivergedHistoryErr(err) {
 				printDivergedHistoryGuidance("pull")
 			}
+			var mce *versioncontrolops.MergeConflictsError
+			if errors.As(err, &mce) {
+				printChildRenumberHint(ctx, st, "")
+			}
 			return SilentExit()
 		}
 		fmt.Println("Pull complete.")
 		return nil
 	},
+}
+
+// printChildRenumberHint reports the offline-collision repair a plain pull's
+// conflict failure makes possible (GH#4796): when two clones minted children
+// under the same parent while offline, the add/add conflicts are colliding
+// NAMES, not content, and `bd dolt pull --renumber-children` can rename the
+// local copies above both sides' high-water marks before merging. Best-effort
+// and read-only — a planning failure or an empty plan prints nothing, and the
+// proposal renames nothing, so the pull's own error stays the story.
+func printChildRenumberHint(ctx context.Context, st storage.DoltStorage, remote string) {
+	planner, ok := storage.UnwrapStore(st).(storage.ChildRenumberPlanner)
+	if !ok {
+		return
+	}
+	plan, err := planner.PlanChildRenumbers(ctx, remote)
+	if err != nil || plan.Empty() {
+		return
+	}
+	remoteArg := ""
+	if remote != "" {
+		remoteArg = " " + remote
+	}
+	fmt.Fprintln(os.Stderr, "\nChild id collision from offline divergence:")
+	for _, m := range plan.Mappings {
+		fmt.Fprintf(os.Stderr, "  %s -> %s\n", m.OldID, m.NewID)
+	}
+	fmt.Fprintf(os.Stderr, "Run 'bd dolt pull --renumber-children%s' to rename these local children and pull.\n", remoteArg)
 }
 
 var doltCommitCmd = &cobra.Command{

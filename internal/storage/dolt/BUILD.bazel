@@ -66,6 +66,7 @@ go_library(
         "relations.go",
         "releaser.go",
         "rename.go",
+        "renumber_pull.go",
         "schema.go",
         "slots.go",
         "stats_reporter.go",

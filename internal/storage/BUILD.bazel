@@ -11,6 +11,7 @@ go_library(
         "blocked_recomputer.go",
         "bulk_issues.go",
         "child_counter_reservation.go",
+        "child_renumber.go",
         "compaction.go",
         "config_metadata.go",
         "dependency_queries.go",
