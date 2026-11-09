@@ -619,6 +619,149 @@ func TestCircuitBreakerPathsRejectsRelativeOverride(t *testing.T) {
 	}
 }
 
+// TestSweepCircuitDirs covers the parameterized legacy sweep (GH#4223): the
+// existing expiry rules remove stale entries in a real legacy directory and
+// leave retained entries with their contents and permissions intact, an
+// absent directory is never created, and a symlinked directory is never
+// traversed — the stale state behind it survives. Every directory stays
+// inside the test's own temp root.
+func TestSweepCircuitDirs(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now()
+
+	write := func(dir, name string, content []byte, mtime time.Time) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	stateFile := func(state circuitState, ref time.Time) []byte {
+		t.Helper()
+		state.TrippedAt = ref
+		state.LastFailure = ref
+		data, err := json.Marshal(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+
+	// A real legacy directory holding one file per sweep rule.
+	realDir := filepath.Join(root, "real-legacy")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldRef := now.Add(-circuitStaleTTL - time.Hour)
+	agedRef := now.Add(-closedSweepTTL - time.Hour)
+	staleOpen := write(realDir, "beads-dolt-circuit-127-0-0-1-3307-old.json",
+		stateFile(circuitState{State: circuitOpen}, oldRef), now)
+	staleHalfOpen := write(realDir, "beads-dolt-circuit-127-0-0-1-3308-old.json",
+		stateFile(circuitState{State: circuitHalfOpen}, oldRef), now)
+	agedClosed := write(realDir, "beads-dolt-circuit-127-0-0-1-3309-aged.json",
+		stateFile(circuitState{State: circuitClosed}, now), agedRef)
+	corrupt := write(realDir, "beads-dolt-circuit-127-0-0-1-3310-corrupt.json",
+		[]byte("not json"), now)
+	portZero := write(realDir, "beads-dolt-circuit-0.json",
+		stateFile(circuitState{State: circuitOpen}, now), now)
+	freshOpenData := stateFile(circuitState{State: circuitOpen, Failures: 5}, now)
+	freshOpen := write(realDir, "beads-dolt-circuit-127-0-0-1-3311-fresh.json",
+		freshOpenData, now)
+	freshClosed := write(realDir, "beads-dolt-circuit-127-0-0-1-3312-live.json",
+		stateFile(circuitState{State: circuitClosed}, now), now)
+
+	// An absent legacy directory: must not be created by the sweep.
+	absentDir := filepath.Join(root, "absent-legacy")
+
+	// A symlinked legacy directory: its target holds stale state that must
+	// survive untouched because the sweep never follows the link.
+	linkTarget := filepath.Join(root, "link-target")
+	if err := os.MkdirAll(linkTarget, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	behindLink := write(linkTarget, "beads-dolt-circuit-127-0-0-1-3313-old.json",
+		stateFile(circuitState{State: circuitOpen}, oldRef), now)
+	linkDir := filepath.Join(root, "link-legacy")
+	if err := os.Symlink(linkTarget, linkDir); err != nil {
+		t.Fatal(err)
+	}
+
+	sweepLegacyCircuitDirs([]string{realDir, absentDir, linkDir})
+
+	for _, removed := range []string{staleOpen, staleHalfOpen, agedClosed, corrupt, portZero} {
+		if _, err := os.Stat(removed); !os.IsNotExist(err) {
+			t.Errorf("stale entry must be removed by the sweep: %s (stat err %v)", removed, err)
+		}
+	}
+	for _, retained := range []string{freshOpen, freshClosed} {
+		info, err := os.Stat(retained)
+		if err != nil {
+			t.Errorf("retained entry must survive the sweep: %v", err)
+			continue
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Errorf("retained entry %s mode = %o, want 0600", retained, got)
+		}
+	}
+	if got, err := os.ReadFile(freshOpen); err != nil || string(got) != string(freshOpenData) {
+		t.Errorf("retained open entry content changed (err %v): %s", err, got)
+	}
+	if _, err := os.Stat(absentDir); !os.IsNotExist(err) {
+		t.Errorf("absent legacy directory must not be created: %s (stat err %v)", absentDir, err)
+	}
+	if _, err := os.Stat(behindLink); err != nil {
+		t.Errorf("a symlinked legacy directory must not be traversed: %v", err)
+	}
+}
+
+// TestLegacyCircuitSweepDirs covers the legacy directory list: the temp-root
+// unsuffixed directory and the historical hardcoded /tmp one, deduplicated
+// (a TMPDIR-less process resolves both to /tmp/beads-circuit), excluding the
+// live directory on platforms that keep the unsuffixed name, and skipped
+// entirely with the test override set so tests never touch real shared
+// locations (GH#4223).
+func TestLegacyCircuitSweepDirs(t *testing.T) {
+	custom := t.TempDir()
+	t.Setenv("TMPDIR", custom)
+	t.Setenv("TMP", custom)
+	t.Setenv("TEMP", custom)
+	live := filepath.Join(custom, "beads-circuit-1000")
+
+	t.Setenv(testCircuitBreakerDirEnv, "")
+	got := legacyCircuitSweepDirs(live)
+	want := []string{filepath.Join(custom, "beads-circuit"), filepath.Join("/tmp", "beads-circuit")}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("legacy sweep dirs = %v, want %v", got, want)
+	}
+
+	// Dedup: a TMPDIR-less process resolves os.TempDir() to /tmp.
+	t.Setenv("TMPDIR", "")
+	t.Setenv("TMP", "")
+	t.Setenv("TEMP", "")
+	if os.TempDir() == "/tmp" {
+		got = legacyCircuitSweepDirs(live)
+		if len(got) != 1 || got[0] != "/tmp/beads-circuit" {
+			t.Errorf("legacy sweep dirs with TMPDIR unset = %v, want [/tmp/beads-circuit]", got)
+		}
+		// The live directory is excluded even when it carries a legacy name.
+		got = legacyCircuitSweepDirs("/tmp/beads-circuit")
+		if len(got) != 0 {
+			t.Errorf("legacy sweep dirs must exclude the live directory, got %v", got)
+		}
+	}
+
+	// Override isolation: no legacy directory at all.
+	override := t.TempDir()
+	t.Setenv(testCircuitBreakerDirEnv, override)
+	if got := legacyCircuitSweepDirs(override); len(got) != 0 {
+		t.Errorf("legacy sweep dirs with test override = %v, want none", got)
+	}
+}
+
 func TestIsConnectionError(t *testing.T) {
 	tests := []struct {
 		name     string
