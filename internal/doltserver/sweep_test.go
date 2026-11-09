@@ -196,24 +196,35 @@ func TestCanonicalRootsForSweep(t *testing.T) {
 	}
 }
 
+// doltServerArgvExamples are invocations the sweep must recognize as dolt
+// sql-servers. TestSweepPredicateIsSubsetOfProductionMatch renders them as ps
+// rows to check production's looser listing accepts each one too.
+var doltServerArgvExamples = [][]string{
+	{"dolt", "sql-server"},
+	{"./bin/dolt", "sql-server", "-P", "1"},
+	{"/usr/local/bin/dolt", "sql-server", "-H", "127.0.0.1"},
+	// Global/profiling flags may precede the subcommand.
+	{"dolt", "--prof", "cpu", "--prof-path", "/tmp/p", "sql-server", "--port", "1"},
+	{"/Users/dev/My Tools/dolt", "sql-server"},
+	// Lexical by design: a separate positional argument still passes.
+	{"dolt", "checkout", "sql-server"},
+}
+
 // TestIsDoltServerArgv pins the sweep's identity gate (gastownhall/beads#6186):
 // argv[0]'s basename is exactly "dolt" and a later argument is exactly
 // "sql-server". Mentioning both words anywhere in the command line, as the
 // substring check it replaced accepted, is not enough.
 func TestIsDoltServerArgv(t *testing.T) {
+	for _, argv := range doltServerArgvExamples {
+		if !isDoltServerArgv(argv) {
+			t.Errorf("isDoltServerArgv(%q) = false, want true", argv)
+		}
+	}
 	cases := []struct {
 		name string
 		argv []string
 		want bool
 	}{
-		{"bare dolt", []string{"dolt", "sql-server"}, true},
-		{"relative path", []string{"./bin/dolt", "sql-server", "-P", "1"}, true},
-		{"absolute path", []string{"/usr/local/bin/dolt", "sql-server", "-H", "127.0.0.1"}, true},
-		{"global flags before the subcommand", []string{"dolt", "--prof", "cpu", "--prof-path", "/tmp/p", "sql-server", "--port", "1"}, true},
-		{"executable path containing spaces", []string{"/Users/dev/My Tools/dolt", "sql-server"}, true},
-		// Lexical by design: a separate positional argument still passes.
-		{"positional sql-server argument", []string{"dolt", "checkout", "sql-server"}, true},
-
 		{"nil argv", nil, false},
 		{"dolt alone", []string{"dolt"}, false},
 		{"single flattened title", []string{"dolt sql-server"}, false},
