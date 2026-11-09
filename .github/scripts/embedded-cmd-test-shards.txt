@@ -173,6 +173,7 @@
 100 39 TestEmbeddedNewDoltStoreFromConfig_NoMetadata
 
 100 40 TestEmbeddedIfRevisionOutranksReassignFenceCLI
+100 40 TestEmbeddedImportUndecodableLineNamesLine
 100 40 TestEmbeddedNewDoltStoreFromConfig_HyphenatedDBName
 100 40 TestEmbeddedUpdateLifecycleClaimParentCommit
 
