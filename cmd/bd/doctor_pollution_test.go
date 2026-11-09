@@ -7,7 +7,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -350,5 +352,66 @@ func TestSelectPollutionCleanup_LinkLookup(t *testing.T) {
 		if err == nil || len(deletable) != 0 {
 			t.Errorf("lookup failure (%v/%v): deletable %v, err %v; want nothing selected and an error", broken.outErr, broken.inErr, deletable, err)
 		}
+	}
+}
+
+// TestDoctorPollution_ValidateGateMatchesScorer pins GH#5025: on an
+// unchanged database with no row cap, bd doctor --check=pollution and the
+// validate gate's Test Pollution check report the same hits. Mixed-case
+// fixtures count in both; substantive work, closed issues, epics and
+// ephemeral wisps count in neither.
+func TestDoctorPollution_ValidateGateMatchesScorer(t *testing.T) {
+	tmpDir, s := pollutionCleanupWorkspace(t, "pgm")
+	ctx := context.Background()
+
+	want := []string{
+		seedPollutionIssue(t, s, "Test issue", ""),
+		seedPollutionIssue(t, s, "Test-fixture data", ""),
+	}
+	slices.Sort(want)
+	seedPollutionIssue(t, s, "test-runner hangs on sync", "The runner stalls after the third push; logs attached.")
+	closedAt := time.Now().UTC()
+	for _, issue := range []*types.Issue{
+		{Title: "Test issue", Status: types.StatusClosed, ClosedAt: &closedAt, Priority: 2, IssueType: types.TypeTask},
+		{Title: "test-fixture epic", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeEpic},
+		{Title: "Test issue", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true},
+	} {
+		if err := s.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("CreateIssue(%q): %v", issue.Title, err)
+		}
+	}
+
+	cmd := exec.Command(buildBDForInitTests(t), "doctor", "--check=pollution", "--json")
+	cmd.Dir = tmpDir
+	cmd.Env = append(bdEnv(tmpDir), doctorMaxRowsEnv("BD_JSON_ENVELOPE=0")...)
+	stdout, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("bd doctor --check=pollution --json: %v\n%s", err, stdout)
+	}
+	var detailed struct {
+		PollutedCount int `json:"polluted_count"`
+		Issues        []struct {
+			ID string `json:"id"`
+		} `json:"issues"`
+	}
+	if err := json.Unmarshal(stdout, &detailed); err != nil {
+		t.Fatalf("parse detailed pollution JSON: %v\n%s", err, stdout)
+	}
+	var detailedIDs []string
+	for _, issue := range detailed.Issues {
+		detailedIDs = append(detailedIDs, issue.ID)
+	}
+	slices.Sort(detailedIDs)
+	if detailed.PollutedCount != len(want) || !slices.Equal(detailedIDs, want) {
+		t.Errorf("detailed check: polluted_count %d, IDs %v; want %d, %v", detailed.PollutedCount, detailedIDs, len(want), want)
+	}
+
+	check := testPollutionCheck(t, tmpDir)
+	var gateCount int
+	if _, err := fmt.Sscanf(check.Message, "%d potential test issue(s) detected", &gateCount); err != nil || check.Status != statusWarning {
+		t.Fatalf("validate gate = %q %q, want a warning counting %d hits", check.Status, check.Message, len(want))
+	}
+	if gateCount != detailed.PollutedCount || gateCount != len(want) {
+		t.Errorf("validate gate counts %d, detailed check %d, scorer %d; all must agree", gateCount, detailed.PollutedCount, len(want))
 	}
 }
