@@ -33,6 +33,7 @@ go_test(
         "credentials_test.go",
         "credentials_unix_remedy_test.go",
         "dolt_host_test.go",
+        "dolt_mode_test.go",
         "external_dolt_config_test.go",
         "historical_sqlite_test.go",
         "remedy_printing_test.go",

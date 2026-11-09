@@ -353,6 +353,25 @@ const (
 	DoltModeProxiedServer = "proxied-server"
 )
 
+// IsKnownDoltMode reports whether mode is a dolt_mode value this build
+// recognizes: the empty value (the mode is then inferred the way
+// IsDoltServerMode documents) or a case variant of the three constants. It
+// deliberately matches the storage-mode selectors' own comparison —
+// strings.ToLower, no trimming, no strings.EqualFold: a Unicode fold such
+// as the long s in "ſerver" is a value the selectors do not recognize
+// either, so admission must refuse it rather than admit a mode the store
+// would not select. Storage admission refuses every other value fail-closed
+// (UnknownDoltModeErrorAt): an unrecognized mode matched no selector and
+// silently selected the embedded store, which read a workspace's real
+// database as an empty tracker with exit 0 (GH#5104).
+func IsKnownDoltMode(mode string) bool {
+	switch strings.ToLower(mode) {
+	case "", DoltModeEmbedded, DoltModeServer, DoltModeProxiedServer:
+		return true
+	}
+	return false
+}
+
 // Default Dolt server settings
 const (
 	DefaultDoltServerHost     = "127.0.0.1"

@@ -181,3 +181,24 @@ func UnknownBackendErrorAt(backend, beadsDir string, cfg *Config) error {
 	}
 	return fmt.Errorf("storage backend %q in %s is not recognized or supported; %s; the supported backend is %q; %s", backend, remedy.PrintedValue(metadataFile), BackendNotOpenedGuarantee, BackendDolt, fix)
 }
+
+// UnknownDoltModeErrorAt is the fail-closed error for metadata whose
+// dolt_mode names a mode this build does not recognize (GH#5104): no mode
+// selector matched the value, so storage selection silently fell through to
+// the embedded store and read the workspace's real database as an empty
+// tracker with exit 0. It names the value, the file the mode was read from
+// (MetadataFilePath: metadata.json, or a legacy config.json not yet
+// migrated), the supported vocabulary and the data-safety guarantee. The
+// remedy branches the way the backend messages do not: a NEWER bd may
+// legitimately have written the mode, so the primary remedy is to upgrade;
+// a typo is repaired by restoring the mode this workspace was initialized
+// with — never by deleting the field or substituting "embedded", which can
+// point the workspace at a different, empty database again. It invents no
+// minimum release number: the compatibility floor of a mode this build
+// predates is not this build's to assert.
+func UnknownDoltModeErrorAt(mode, beadsDir string) error {
+	return fmt.Errorf("dolt_mode %s in %s is not recognized by this bd; the supported dolt_mode values are %q, %q and %q, or no dolt_mode at all; %s; upgrade bd if a newer bd wrote this workspace, or edit the file and restore the dolt_mode this workspace was initialized with — do not delete the \"dolt_mode\" field and do not substitute %q, which can point this workspace at a different, empty database",
+		remedy.PrintedValue(mode), remedy.PrintedValue(MetadataFilePath(beadsDir)),
+		DoltModeEmbedded, DoltModeServer, DoltModeProxiedServer,
+		BackendNotOpenedGuarantee, DoltModeEmbedded)
+}

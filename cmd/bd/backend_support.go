@@ -8,10 +8,20 @@ import (
 )
 
 // validateConfiguredBackend fails closed on metadata that selects a removed or
-// unrecognized backend. beadsDir is the workspace whose metadata cfg came from;
-// the rejection inspects it (read-only) so a workspace that already holds a Dolt
-// database is told to fix the stale "backend" value rather than to export and
-// reinitialize. Pass "" only where there is genuinely no workspace directory.
+// unrecognized backend, or a Dolt workspace whose dolt_mode names a mode this
+// build does not recognize. beadsDir is the workspace whose metadata cfg came
+// from; the rejection inspects it (read-only) so a workspace that already holds
+// a Dolt database is told to fix the stale "backend" value rather than to export
+// and reinitialize. Pass "" only where there is genuinely no workspace
+// directory.
+//
+// The mode check rides the same seam for the same reason (GH#5104): an
+// unrecognized dolt_mode matched no selector and silently selected the
+// embedded store, so a workspace initialized by a newer build read as an
+// empty tracker with exit 0. It refuses even when a server override could
+// otherwise select a server: the workspace's own recorded mode stays
+// uninterpretable. Registered non-Dolt backends dispatch before it, and
+// backend errors keep their precedence: the mode is Dolt-only vocabulary.
 func validateConfiguredBackend(cfg *configfile.Config, beadsDir string) error {
 	if cfg == nil {
 		return nil
@@ -23,6 +33,9 @@ func validateConfiguredBackend(cfg *configfile.Config, beadsDir string) error {
 	case configfile.BackendPostgres, configfile.BackendMySQL, configfile.BackendSQLite:
 		return configfile.RemovedBackendErrorAt(cfg.Backend, beadsDir, cfg)
 	case "", configfile.BackendDolt:
+		if !configfile.IsKnownDoltMode(cfg.DoltMode) {
+			return configfile.UnknownDoltModeErrorAt(cfg.DoltMode, beadsDir)
+		}
 		return nil
 	default:
 		return configfile.UnknownBackendErrorAt(cfg.Backend, beadsDir, cfg)
