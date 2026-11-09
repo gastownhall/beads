@@ -214,7 +214,8 @@ type MigrationGate func(context.Context, *sql.Conn) error
 //
 //   - the steady-state alreadyConverged fast path above returns before the
 //     lock is ever taken, so a converged open pays the gate zero statements;
-//   - preparation has already CREATEd and USEd the database, so a fresh
+//   - preparation has already probed the database's visibility, CREATEd
+//     whatever the probe could not see, and USEd the database, so a fresh
 //     bootstrap reads CurrentVersion == 0 and passes (creating a database is
 //     consent for its schema);
 //   - a refusal propagates out through the deferred lock release, so refusing
@@ -266,9 +267,10 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 	// there is nothing converged to detect and the bootstrap path stays
 	// exactly as it was. A caller's locked preparation is skipped only once
 	// alreadyConverged has proved the database already existed and put the
-	// session on it — preparation's CREATE DATABASE would then have failed
-	// with "database exists" and captured no authority, and its USE is the
-	// statement alreadyConverged itself issued.
+	// session on it — preparation's visibility probe (gastownhall/beads#5079)
+	// would then see the database and contribute only the same USE
+	// alreadyConverged itself issued, so no CREATE runs and no authority is
+	// captured.
 	if o.freshBootstrapHeal == nil {
 		converged, convergedErr := alreadyConverged(ctx, conn, databaseName, o.databaseSelector)
 		switch {

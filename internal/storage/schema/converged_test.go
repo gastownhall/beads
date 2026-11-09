@@ -321,6 +321,67 @@ func TestMigrateUpWithLockKeepsLockWithBootstrapHeal(t *testing.T) {
 	}
 }
 
+// TestDatabaseExists covers the schemata visibility read the convergence probe
+// and the locked bootstrap preparation share (gastownhall/beads#5079): a
+// positive answer, a negative answer, and a wrapped query failure. A false
+// answer means not visible to THIS credential — never proof of global absence,
+// since a server hides a database from a credential that has not been granted
+// it — so the assertions pin the values, not just the absence of errors.
+func TestDatabaseExists(t *testing.T) {
+	t.Run("visible database", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		expectDatabaseExistsProbe(mock, "testdb", true)
+
+		visible, err := DatabaseExists(context.Background(), db, "testdb")
+		if err != nil {
+			t.Fatalf("DatabaseExists() error = %v, want nil", err)
+		}
+		if !visible {
+			t.Fatal("DatabaseExists() = false on a database schemata reports, want true")
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	t.Run("invisible database", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		expectDatabaseExistsProbe(mock, "testdb", false)
+
+		visible, err := DatabaseExists(context.Background(), db, "testdb")
+		if err != nil {
+			t.Fatalf("DatabaseExists() error = %v, want nil", err)
+		}
+		if visible {
+			t.Fatal("DatabaseExists() = true on a database schemata does not report, want false")
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	t.Run("query failure is wrapped, and reported as not visible", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM information_schema\.schemata`).
+			WithArgs("testdb").
+			WillReturnError(sql.ErrConnDone)
+
+		visible, err := DatabaseExists(context.Background(), db, "testdb")
+		if err == nil {
+			t.Fatal("DatabaseExists() error = nil, want the query failure wrapped")
+		}
+		if !strings.Contains(err.Error(), `probing database "testdb" existence`) {
+			t.Fatalf("DatabaseExists() error = %v, want the existing probe wrapping preserved", err)
+		}
+		if !errors.Is(err, sql.ErrConnDone) {
+			t.Fatalf("DatabaseExists() error = %v, want the underlying driver error preserved", err)
+		}
+		if visible {
+			t.Fatal("DatabaseExists() = true on a failed probe, want false")
+		}
+	})
+}
+
 // TestAlreadyConvergedFallsThroughOnAMissingDatabase is the fresh-bootstrap
 // case. The database does not exist yet, so the probe must decline WITHOUT
 // issuing the USE that would fail — a failing statement pins a Dolt session to

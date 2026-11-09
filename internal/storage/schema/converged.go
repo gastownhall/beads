@@ -125,6 +125,31 @@ func alreadyConverged(ctx context.Context, db DBConn, databaseName string, selec
 	return migrationLockFree(ctx, db, MigrationLockName(databaseName))
 }
 
+// DatabaseExists reports whether databaseName is visible to THIS credential on
+// the server, with one information_schema.schemata read that succeeds whatever
+// the answer. Visibility, not existence: a server hides a database from a
+// credential that has not been granted it, so a false answer never proves the
+// database is absent — only that this credential cannot see it. That is the
+// distinction the least-privilege fix turns on (gastownhall/beads#5079): after
+// a negative probe, a denied CREATE cannot tell "not provisioned" from "not
+// granted", which is why that refusal must name both possibilities.
+//
+// It is the probe both open paths share. The convergence probe reaches it
+// through selectTargetDatabase before selecting onto the database; locked
+// bootstrap preparation (uow) calls it directly so it can look before it
+// leaps: a database the credential can already see gets only the USE, never
+// either CREATE form, whose global privilege a read must not need.
+func DatabaseExists(ctx context.Context, db DBConn, databaseName string) (bool, error) {
+	var exists int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = ?",
+		databaseName,
+	).Scan(&exists); err != nil {
+		return false, fmt.Errorf("probing database %q existence: %w", databaseName, err)
+	}
+	return exists > 0, nil
+}
+
 // selectTargetDatabase puts the pinned session on databaseName, reporting
 // whether it is now provably there and — when a selector had to be used to get
 // there — the identifier-quoted name to schema-qualify later reads with.
@@ -144,11 +169,11 @@ func alreadyConverged(ctx context.Context, db DBConn, databaseName string, selec
 // creation and issues the #5012 fresh-bootstrap heal capability.
 //
 // Selecting is also what makes skipping a caller's locked bootstrap
-// preparation safe: preparation creates the database and USEs it, and both
-// have provably happened here — the database existed before we touched it (so
-// preparation's bare CREATE DATABASE could only have failed with "database
-// exists" and captured no heal authority), and the selector issues the same
-// USE preparation would.
+// preparation safe: preparation probes the database's visibility first
+// (gastownhall/beads#5079) and only CREATEs what the probe could not see, so
+// for any database that got this far, preparation re-derives exactly what this
+// probe already proved — the database exists, so no CREATE form is issued —
+// and the selector issues the same USE preparation would.
 //
 // The existence probe is not decoration. A Dolt session that issues a FAILING
 // statement stays pinned to its pre-statement catalog snapshot, so a USE of a
@@ -166,14 +191,11 @@ func selectTargetDatabase(ctx context.Context, db DBConn, databaseName string, s
 		return false, "", nil
 	}
 
-	var exists int
-	if err := db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = ?",
-		databaseName,
-	).Scan(&exists); err != nil {
-		return false, "", fmt.Errorf("probing database %q existence: %w", databaseName, err)
+	exists, err := DatabaseExists(ctx, db, databaseName)
+	if err != nil {
+		return false, "", err
 	}
-	if exists == 0 {
+	if !exists {
 		return false, "", nil
 	}
 

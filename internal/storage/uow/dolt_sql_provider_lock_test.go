@@ -2,6 +2,7 @@ package uow
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"regexp"
 	"strings"
@@ -106,6 +107,9 @@ func TestInitSchemaAcquiresMigrationLockBeforeBootstrapDDL(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
 		WithArgs(lockName, 5).
 		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	// The locked preparation probes visibility from inside the lock too
+	// (gastownhall/beads#5079), and only then CREATEs what it cannot see.
+	expectDatabaseExistsProbe(mock, "beads", false)
 	mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `beads`")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
@@ -183,10 +187,11 @@ func TestInitSchemaConvergenceProbeRunsWithNoSessionDatabase(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
 		WithArgs(lockName, 5).
 		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
-	// The bare CREATE DATABASE loses to the database the probe just proved
-	// exists, so this init captures no fresh-bootstrap heal authority.
-	mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `beads`")).
-		WillReturnError(&mysql.MySQLError{Number: 1007, Message: "database exists"})
+	// The locked preparation probes visibility from inside the lock
+	// (gastownhall/beads#5079): the database is visible there too, so no
+	// CREATE form runs at all and this init captures no fresh-bootstrap heal
+	// authority.
+	expectDatabaseExistsProbe(mock, "beads", true)
 	mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	// The shared-store migration gate, between preparation and MigrateUp. This
@@ -213,6 +218,211 @@ func TestInitSchemaConvergenceProbeRunsWithNoSessionDatabase(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("the convergence probe must reach the schema predicates on a session with no database selected: %v", err)
 	}
+}
+
+// newPreparerMock pins a fresh sqlmock connection and returns a preparer bound
+// to it, so a test can drive bootstrapPreparer.prepare directly through the
+// same statement stream MigrateUpWithLock would.
+func newPreparerMock(t *testing.T) (*bootstrapPreparer, *sql.Conn, sqlmock.Sqlmock) {
+	t.Helper()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		db.Close()
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = conn.Close()
+		_ = db.Close()
+	})
+	p := &doltSQLProvider{
+		defaultBranch:  defaultBranch,
+		serverEndpoint: "tcp:127.0.0.1:3306",
+	}
+	return &bootstrapPreparer{provider: p, database: "beads"}, conn, mock
+}
+
+// expectPreparationCapture mocks the fresh-bootstrap identity capture a
+// successful bare CREATE triggers: the identity read, then the pristine-
+// history and working-set checks.
+func expectPreparationCapture(mock sqlmock.Sqlmock, database string) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT DATABASE(), @@server_uuid, DOLT_HASHOF('HEAD')")).
+		WillReturnRows(sqlmock.NewRows([]string{"database", "server_uuid", "head"}).AddRow(database, "server-uuid", "initial-head"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_log")).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status")).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+}
+
+// expectPreparationUse mocks the one statement the visible branch contributes.
+func expectPreparationUse(mock sqlmock.Sqlmock) {
+	mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+}
+
+// assertPermanentClassification fails unless classifyInitSchemaError wraps err
+// in backoff.Permanent, the contract every non-retryable preparation failure
+// keeps.
+func assertPermanentClassification(t *testing.T, err error) {
+	t.Helper()
+	var permanentErr *backoff.PermanentError
+	if !errors.As(classifyInitSchemaError(err), &permanentErr) {
+		t.Fatalf("classifyInitSchemaError(%v) is not permanent", err)
+	}
+}
+
+// TestBootstrapPreparerProbesBeforeCreate is the red-to-green regression for
+// gastownhall/beads#5079: locked bootstrap preparation must look before it
+// leaps. A preparer that issues CREATE DATABASE unconditionally needs the
+// global CREATE privilege on every open — even for a read of a database that
+// already exists and is visible to the credential — so a least-privilege
+// account is refused before the command it opened for ever runs.
+//
+// The probe-first contract, AC-1: a database the credential can see gets the
+// visibility probe and the USE, never either CREATE form; the preparer keeps
+// whatever creation state and heal capability it already carried; a probe
+// that fails must not fall through to CREATE; an invalid name is rejected
+// before anything reaches the wire.
+func TestBootstrapPreparerProbesBeforeCreate(t *testing.T) {
+	t.Run("visible database on the initial attempt issues no CREATE", func(t *testing.T) {
+		prep, conn, mock := newPreparerMock(t)
+		expectDatabaseExistsProbe(mock, "beads", true)
+		expectPreparationUse(mock)
+
+		capability, err := prep.prepare(context.Background(), conn)
+		if err != nil {
+			t.Fatalf("prepare() error = %v, want nil: a visible database needs no CREATE (gastownhall/beads#5079)", err)
+		}
+		if capability != nil {
+			t.Fatalf("prepare() capability = %v, want nil: a database this preparer did not create carries no fresh-bootstrap authority", capability)
+		}
+		if prep.created {
+			t.Error("created = true; a visible database must not be recorded as created by this preparer")
+		}
+		if prep.heal != nil {
+			t.Error("heal captured on a visible database; visibility must never establish ownership")
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("ordered SQL expectations (no CREATE form may be sent): %v", err)
+		}
+	})
+
+	t.Run("visible database on a retry preserves prior creation state and capability", func(t *testing.T) {
+		prep, conn, mock := newPreparerMock(t)
+		// A previous attempt created the database and captured authority.
+		expectDatabaseExistsProbe(mock, "beads", false)
+		mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `beads`")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		expectPreparationUse(mock)
+		expectPreparationCapture(mock, "beads")
+		first, err := prep.prepare(context.Background(), conn)
+		if err != nil {
+			t.Fatalf("first prepare() error = %v, want nil", err)
+		}
+		if first == nil {
+			t.Fatal("first prepare() capability = nil, want the captured authority")
+		}
+
+		// The retry finds the database visible: no sticky CREATE IF NOT
+		// EXISTS either, and the original capability comes back unchanged.
+		expectDatabaseExistsProbe(mock, "beads", true)
+		expectPreparationUse(mock)
+		second, err := prep.prepare(context.Background(), conn)
+		if err != nil {
+			t.Fatalf("retry prepare() error = %v, want nil", err)
+		}
+		if second != first {
+			t.Fatalf("retry prepare() capability = %v, want the original %v unchanged", second, first)
+		}
+		if !prep.created {
+			t.Error("created = false after the retry; the prior creation state must be preserved, not reset")
+		}
+		if prep.heal != first {
+			t.Error("heal replaced on the retry; a visible database must not recapture authority")
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("ordered SQL expectations (no CREATE form may be sent on the retry): %v", err)
+		}
+	})
+
+	t.Run("failed probe does not fall through to CREATE, and retries on serialization", func(t *testing.T) {
+		prep, conn, mock := newPreparerMock(t)
+		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM information_schema\.schemata`).
+			WithArgs("beads").
+			WillReturnError(&mysql.MySQLError{Number: 1213, Message: "Deadlock found when trying to get lock"})
+
+		_, err := prep.prepare(context.Background(), conn)
+		if err == nil {
+			t.Fatal("prepare() error = nil, want the probe failure surfaced")
+		}
+		var serialization *mysql.MySQLError
+		if !errors.As(err, &serialization) || serialization.Number != 1213 {
+			t.Fatalf("prepare() error = %v, want the probe's serialization failure preserved", err)
+		}
+		var permanentErr *backoff.PermanentError
+		if errors.As(classifyInitSchemaError(err), &permanentErr) {
+			t.Fatalf("classifyInitSchemaError(%v) is permanent; a serialization failure must stay retryable", err)
+		}
+		// No CREATE was primed: a fall-through would surface as sqlmock's
+		// unexpected-statement error, not the 1213 the assertions above hold.
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+		if prep.created {
+			t.Error("created = true after a failed probe; the probe must not mark anything created")
+		}
+	})
+
+	t.Run("failed probe is permanent when the failure is not serialization", func(t *testing.T) {
+		prep, conn, mock := newPreparerMock(t)
+		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM information_schema\.schemata`).
+			WithArgs("beads").
+			WillReturnError(errors.New("probe transport broke"))
+
+		_, err := prep.prepare(context.Background(), conn)
+		if err == nil || !strings.Contains(err.Error(), "probe transport broke") {
+			t.Fatalf("prepare() error = %v, want the probe failure surfaced", err)
+		}
+		assertPermanentClassification(t, err)
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations (no CREATE may follow a failed probe): %v", err)
+		}
+	})
+
+	t.Run("invalid identifier is rejected before any statement", func(t *testing.T) {
+		prep, conn, mock := newPreparerMock(t)
+		prep.database = "bad`name"
+
+		_, err := prep.prepare(context.Background(), conn)
+		if err == nil || !strings.Contains(err.Error(), "invalid identifier") {
+			t.Fatalf("prepare() error = %v, want the identifier rejection", err)
+		}
+		assertPermanentClassification(t, err)
+		// Nothing was primed, so any statement would have been unexpected and
+		// would have replaced this error with sqlmock's own.
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations (an invalid name must issue no SQL): %v", err)
+		}
+	})
+
+	t.Run("a database that disappears after a positive probe fails the USE, permanently", func(t *testing.T) {
+		prep, conn, mock := newPreparerMock(t)
+		expectDatabaseExistsProbe(mock, "beads", true)
+		mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+			WillReturnError(&mysql.MySQLError{Number: 1049, Message: "Unknown database 'beads'"})
+
+		_, err := prep.prepare(context.Background(), conn)
+		if err == nil || !strings.Contains(err.Error(), "switching to database") {
+			t.Fatalf("prepare() error = %v, want the USE failure surfaced", err)
+		}
+		assertPermanentClassification(t, err)
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
 }
 
 // TestSelectProbeDatabaseIssuesPreparationsUse pins the two properties the
@@ -262,4 +472,88 @@ func TestSelectProbeDatabaseIssuesPreparationsUse(t *testing.T) {
 			t.Fatalf("unmet SQL expectations (an invalid name must be refused before any statement): %v", err)
 		}
 	})
+}
+
+// TestInitSchemaReadOnlyOpenOfExistingDatabaseIssuesNoCreateDatabase
+// reproduces gastownhall/beads#5079: a read command over the proxied open path
+// must not require global CREATE on a database that already exists. Here the
+// pre-lock convergence probe proves the database exists (and puts the session
+// on it), but declines because the cursor is behind this binary, so the locked
+// path runs. A least-privilege (SELECT-only) credential cannot CREATE DATABASE,
+// so any bare CREATE sent here fails the whole read before it starts; the
+// correct behavior is to look before leaping (the direct stack's
+// CreateIfMissing guard) and read through on the old schema.
+//
+// Adapted from the triage repro at the pipeline base: the locked preparation's
+// own visibility probe — the statement this fix adds — is primed between
+// GET_LOCK and the USE. The recorded-CREATE matcher and the zero-CREATE
+// assertion are the repro's, unchanged.
+func TestInitSchemaReadOnlyOpenOfExistingDatabaseIssuesNoCreateDatabase(t *testing.T) {
+	t.Setenv(schema.AllowRemoteMigrateEnv, "0")
+	t.Setenv(schema.SmartGateEnv, "1")
+	t.Cleanup(func() {
+		schema.SetSharedMigrateConsent(false)
+		schema.SetForceAllowRemoteMigrate(false)
+	})
+
+	var sentCreate []string
+	matcher := sqlmock.QueryMatcherFunc(func(expectedSQL, actualSQL string) error {
+		if strings.Contains(strings.ToUpper(actualSQL), "CREATE DATABASE") {
+			sentCreate = append(sentCreate, actualSQL)
+		}
+		return sqlmock.QueryMatcherRegexp.Match(expectedSQL, actualSQL)
+	})
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(matcher))
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	// Pre-lock convergence probe: the database exists, the session is put on
+	// it, and the cursor is behind, so the probe declines.
+	expectNoSessionDatabase(mock)
+	expectDatabaseExistsProbe(mock, "beads", true)
+	mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	expectCursorProbe(mock, "schema_migrations", true)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")).
+		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(dataBehindCurrent))
+
+	lockName := schema.MigrationLockName("beads")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, 5).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	// Locked preparation, probe-first: existence is established from inside
+	// the lock too, so no CREATE DATABASE is expected on this path — only the
+	// probe and the USE.
+	expectDatabaseExistsProbe(mock, "beads", true)
+	mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	expectSharedGateProbe(mock, dataBehindCurrent, 1)
+	expectSmartGateDataBehindRoute(mock, 1, 2)
+	expectLockRelease(mock, lockName)
+	mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	expectIssuesProjection(mock, dataBehindCurrent, "")
+
+	p := &doltSQLProvider{
+		defaultBranch:     defaultBranch,
+		db:                db,
+		serverEndpoint:    "tcp:127.0.0.1:3306",
+		proxiedServerMode: true,
+		readOnly:          true,
+	}
+	var initErr error
+	_ = captureStderr(t, func() {
+		initErr = p.initSchema(context.Background(), "beads")
+	})
+	if len(sentCreate) > 0 {
+		t.Errorf("read-only open of an existing database sent %q; a SELECT-only credential is refused here (gastownhall/beads#5079)", sentCreate)
+	}
+	if initErr != nil {
+		t.Fatalf("initSchema() error = %v, want nil: a read command on an existing database must not need global CREATE", initErr)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
 }
