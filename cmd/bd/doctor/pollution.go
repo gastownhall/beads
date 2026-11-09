@@ -17,6 +17,11 @@ var testPrefixPattern = regexp.MustCompile(`^(test|benchmark|sample|tmp|temp|deb
 // name an issue as a throwaway test issue.
 var genericTestPhrases = []string{"issue for testing", "test issue", "sample issue"}
 
+// testTitleWords are the title searches FindTestPollution unions: the words
+// of testPrefixPattern. Every title the classifier can match contains one of
+// them, including each of genericTestPhrases.
+var testTitleWords = []string{"test", "benchmark", "sample", "tmp", "temp", "debug", "dummy"}
+
 // Heuristic points per signal. A match's Score is its points divided by ten;
 // the scores are uncalibrated strengths for ordering output, not
 // probabilities, and they decide neither inclusion nor deletion.
@@ -117,6 +122,36 @@ func DetectTestPollution(ctx context.Context, evidence PollutionEvidence, issues
 		matches = append(matches, m)
 	}
 	return matches, nil
+}
+
+// PollutionStore is the store surface FindTestPollution reads.
+type PollutionStore interface {
+	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
+	PollutionEvidence
+}
+
+// FindTestPollution is DetectTestPollution over the issues whose titles
+// contain one of testTitleWords, so the full doctor run need not load every
+// issue. The searches narrow candidates only: they set no status, type or
+// limit, and the classifier alone decides, so on the same store the result
+// is the one bd doctor --check=pollution reports from its full scan.
+func FindTestPollution(ctx context.Context, s PollutionStore) ([]PollutionMatch, error) {
+	seen := make(map[string]bool)
+	var candidates []*types.Issue
+	for _, word := range testTitleWords {
+		issues, err := s.SearchIssues(ctx, "", types.IssueFilter{TitleContains: word})
+		if err != nil {
+			return nil, fmt.Errorf("searching titles containing %q: %w", word, err)
+		}
+		for _, issue := range issues {
+			if issue == nil || seen[issue.ID] {
+				continue
+			}
+			seen[issue.ID] = true
+			candidates = append(candidates, issue)
+		}
+	}
+	return DetectTestPollution(ctx, s, candidates)
 }
 
 // isPollutionProtected reports whether an issue is never a pollution match
