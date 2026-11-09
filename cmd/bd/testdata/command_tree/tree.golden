@@ -3609,6 +3609,21 @@ bd import
     | --allow-stale, which imports every row even when it overwrites newer
     | local state.
     |
+    | REJECTED RECORDS: every issue row is screened against the same validation
+    | the writer applies (a status or issue type the workspace does not know —
+    | including its custom vocabulary — a too-long label, an invalid priority)
+    | before anything is written. By default one invalid record refuses the whole
+    | import: nothing is written, and each rejected record is reported with its
+    | file, physical line, issue id and the validation reason. Repair or register
+    | the invalid value, or re-run with --skip-invalid to import the valid
+    | records. --skip-invalid drops the rejected records and warns on stderr with
+    | their locations; pair it with --rejects <file> to preserve the rejected
+    | records verbatim (raw line bytes, unknown fields intact) in a JSONL file
+    | you can repair and re-import later. Without --rejects the skipped records
+    | are not saved anywhere, and the warning says so. Undecodable lines are
+    | always fatal — for both strict and skip modes — and report their physical
+    | line; only records that decoded cleanly can be screened and preserved.
+    |
     | The staleness guard is import's ONLY overwrite guard: the per-field
     | fences that bd update enforces (notes overwrite, live-claim reassign,
     | close policy) do not apply to imported rows. Import replaces rows
@@ -3634,12 +3649,16 @@ bd import
     |   cat issues.jsonl | bd import -   # Pipe JSONL from another tool
     |   bd import --dry-run              # Show what would be imported
     |   bd import --dedup                # Skip issues with duplicate titles
+    |   bd import --skip-invalid mixed.jsonl # Import valid records, skip invalid ones
+    |   bd import --skip-invalid --rejects bad.jsonl mixed.jsonl # ...and preserve the skipped records
     |   bd import --allow-stale old.jsonl # Restore an older snapshot (overwrites newer local rows)
     |   bd import --json                 # Structured output with created and skipped IDs
   flag --allow-stale type=bool default="false" usage="Import rows even when older than the local issue (required to restore an older snapshot)"
   flag --dedup type=bool default="false" usage="Skip lines whose title matches an existing open issue"
   flag --dry-run type=bool default="false" usage="Show what would be imported without importing"
   flag --input -i type=string default="" usage="Read JSONL from a specific file"
+  flag --rejects type=string default="" usage="Preserve skipped invalid records verbatim in this JSONL file (requires --skip-invalid)"
+  flag --skip-invalid type=bool default="false" usage="Skip invalid issue records (reported with their line and reason) instead of refusing the import"
 
 bd info
   use: "info"

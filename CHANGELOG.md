@@ -100,6 +100,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd import --skip-invalid` and `--rejects <file>`.** One invalid record
+  no longer costs the whole import. `bd import` now screens every parsed
+  record against the writer's own validation (including configured custom
+  statuses and types) BEFORE anything is written: by default the import is
+  refused up front — nonzero exit, nothing imported, each rejected record's
+  source line, issue id and reason, and the remedies — instead of failing
+  mid-write after the prefix seed and memory records have already landed.
+  `--skip-invalid` drops the rejected records instead, warns on stderr with
+  their locations, and (paired with `--rejects <file>`) preserves them
+  verbatim, unknown fields included, merging with and never truncating an
+  existing rejects file. Recovery paths that must not be wedged by a stale
+  shared mirror — auto-import after an upgrade, `bd init --from-jsonl`,
+  `bd bootstrap`, and the legacy git-hook JSONL sync — always skip and
+  quarantine invalid records beside the source file
+  (`<name>.rejected.jsonl`), import the valid rows and memories, and still
+  report every skip. `--dry-run` applies the same strict/skip classification
+  without writing. The `--json` result carries `invalid_skipped`,
+  `invalid_records` (line, id, reason) and `rejects_file`.
+
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same
@@ -1226,6 +1245,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Auto-import no longer aborts the entire write path on a single invalid
+  status value** (GH#4492). One row in a shared `issues.jsonl` whose status
+  or type the running bd no longer accepts (written by an older bd, or
+  referencing a custom value this workspace never registered) made every
+  command's auto-import fail, so no command could write, and `bd init
+  --from-jsonl` failed altogether. The invalid row is now quarantined beside
+  the source and the valid rows (and memories) import; the attempt is stamped
+  and the outer command proceeds. Explicit `bd import` stays strict by
+  default and is refused up front instead (see `--skip-invalid` under
+  Added).
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

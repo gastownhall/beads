@@ -99,6 +99,10 @@ backup/
 *.db-shm
 db.sqlite
 bd.db
+
+# Rejected import records (GH#4492: --skip-invalid preserves refused rows
+# beside their source as raw JSONL; machine-local, never shared)
+*.rejected.jsonl
 # NOTE: Do NOT add negation patterns here.
 # They would override fork protection in .git/info/exclude.
 # Config files (metadata.json, config.yaml) are tracked by git by default
@@ -152,6 +156,7 @@ var requiredPatterns = []string{
 	"http_local_metadata.json",
 	".local_version",
 	"backup/",
+	"*.rejected.jsonl",
 }
 
 // CheckGitignore checks if .beads/.gitignore is up to date.
