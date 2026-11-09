@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -709,5 +710,268 @@ func TestEmbeddedDoltPullRenumberChildrenSubtree(t *testing.T) {
 	}
 	if again != nil {
 		t.Errorf("second PullWithChildRenumbers proposed %+v; the clones converged and need no repair", again)
+	}
+}
+
+// buildOfflineChildResidualConflict builds the AC-6 fixture: the report
+// divergence of buildOfflineChildCollision plus a conflict the renumber
+// repair does not touch — a shared issue bd-rn6r whose title both legs
+// change differently, so the merge fails even after the colliding children
+// are renamed away. The repair's renames commit; its merge does not.
+//
+// Returns the pinned heads: local (branch) and remote (tracking ref).
+func buildOfflineChildResidualConflict(t *testing.T, beadsDir string) (localHead, remoteHead string) {
+	t.Helper()
+	ctx := t.Context()
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+
+	store, err := embeddeddolt.Open(ctx, beadsDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("Open (create): %v", err)
+	}
+	store.Close()
+
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer func() { _ = cleanup() }()
+
+	mustExec := func(stage, q string, args ...any) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx, q, args...); err != nil {
+			t.Fatalf("%s: %v", stage, err)
+		}
+	}
+	head := func() string {
+		t.Helper()
+		var hash string
+		if err := db.QueryRowContext(ctx, "SELECT commit_hash FROM dolt_log LIMIT 1").Scan(&hash); err != nil {
+			t.Fatalf("read head hash: %v", err)
+		}
+		return hash
+	}
+	seedChild := func(id, title string) {
+		t.Helper()
+		mustExec("seed "+id, "INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) "+
+			"VALUES (?, ?, '', '', '', '', 'open', 2, 'task')", id, title)
+	}
+
+	// C0: the shared ancestor — parent with counter 70, no children, and the
+	// issue both legs will modify.
+	mustExec("seed parent", "INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) "+
+		"VALUES ('bd-rn6r', 'parent epic', '', '', '', '', 'open', 2, 'epic')")
+	mustExec("seed solo", "INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) "+
+		"VALUES ('bd-rn6r-solo', 'solo base', '', '', '', '', 'open', 2, 'task')")
+	mustExec("seed counter 70", "INSERT INTO child_counters (parent_id, last_child) VALUES ('bd-rn6r', 70)")
+	mustExec("commit C0", "CALL DOLT_COMMIT('-Am', 'test: seed ancestor and solo issue (C0)')")
+	c0 := head()
+	mustExec("add remote", "CALL DOLT_REMOTE('add', 'origin', ?)", "file://"+filepath.Join(t.TempDir(), "remote"))
+	mustExec("push C0", "CALL DOLT_PUSH('origin', 'main')")
+
+	// The local clone's leg: children 71-73, counter 73, and its own change
+	// to the solo issue.
+	seedChild("bd-rn6r.71", "local child 71")
+	seedChild("bd-rn6r.72", "local child 72")
+	seedChild("bd-rn6r.73", "local child 73")
+	mustExec("local counter 73", "UPDATE child_counters SET last_child = 73 WHERE parent_id = 'bd-rn6r'")
+	mustExec("local solo", "UPDATE issues SET title = 'solo local' WHERE id = 'bd-rn6r-solo'")
+	mustExec("commit local leg", "CALL DOLT_COMMIT('-Am', 'test: local children 71-73 and solo local')")
+	localHead = head()
+
+	// The other clone's leg: children 71-72, counter 72, and a DIFFERENT
+	// change to the same solo issue.
+	mustExec("rewind to C0", "CALL DOLT_RESET('--hard', ?)", c0)
+	seedChild("bd-rn6r.71", "remote child 71")
+	seedChild("bd-rn6r.72", "remote child 72")
+	mustExec("remote counter 72", "UPDATE child_counters SET last_child = 72 WHERE parent_id = 'bd-rn6r'")
+	mustExec("remote solo", "UPDATE issues SET title = 'solo remote' WHERE id = 'bd-rn6r-solo'")
+	mustExec("commit remote leg", "CALL DOLT_COMMIT('-Am', 'test: remote children 71-72 and solo remote')")
+	remoteHead = head()
+	mustExec("push remote leg", "CALL DOLT_PUSH('origin', 'main')")
+
+	// Back on the local leg: the branch diverges from remotes/origin/main.
+	mustExec("rewind to local leg", "CALL DOLT_RESET('--hard', ?)", localHead)
+	return localHead, remoteHead
+}
+
+// TestEmbeddedDoltPullRenumberChildrenRetained (GH#4796, bd-28sb25 AC-6): a
+// repair whose merge fails after the renames commits the rename once and
+// never replays it. The retry finds no collision to rename — the earlier
+// invocation already renamed the local children — recognizes the retained
+// rename commit by the marker naming the remote revision it pinned, and
+// reports the same partial result (Retained, same commit, same mappings)
+// with the merge's own outcome. Once the operator resolves the residual
+// conflict, the retained repair's merge completes and a further pull reports
+// nothing: the repair is spent.
+func TestEmbeddedDoltPullRenumberChildrenRetained(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
+	}
+
+	ctx := context.Background()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	localHead, remoteHead := buildOfflineChildResidualConflict(t, beadsDir)
+
+	store, err := embeddeddolt.Open(ctx, beadsDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	// First repair: the renames commit, the merge fails on the solo issue's
+	// both-changed title, and the partial result reports what moved.
+	result, err := store.PullWithChildRenumbers(ctx, "")
+	if err == nil {
+		t.Fatal("PullWithChildRenumbers succeeded; want the residual bd-rn6r-solo conflict to fail the merge")
+	}
+	if result == nil {
+		t.Fatal("PullWithChildRenumbers returned no partial result with the merge error")
+	}
+	if result.Retained {
+		t.Error("result.Retained = true on the first invocation; no earlier repair exists")
+	}
+	firstRename := result.RenameCommit
+	if firstRename == "" || firstRename == localHead {
+		t.Fatalf("result.RenameCommit = %q; the renames were not committed", firstRename)
+	}
+	wantMappings := []storage.ChildRenumberMapping{
+		{OldID: "bd-rn6r.71", NewID: "bd-rn6r.74", Root: true},
+		{OldID: "bd-rn6r.72", NewID: "bd-rn6r.75", Root: true},
+	}
+	if result.Plan == nil || len(result.Plan.Mappings) != len(wantMappings) {
+		t.Fatalf("first result mappings = %+v, want %+v", result.Plan, wantMappings)
+	}
+	for i, m := range wantMappings {
+		if result.Plan.Mappings[i] != m {
+			t.Errorf("first mapping %d = %+v, want %+v", i, result.Plan.Mappings[i], m)
+		}
+	}
+
+	// The rename commit carries the marker naming the pinned remote revision,
+	// and the failed merge left it as the branch head with the working set
+	// restored.
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, filepath.Join(beadsDir, "embeddeddolt"), "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL (verify): %v", err)
+	}
+	var message string
+	found := false
+	rows, err := db.QueryContext(ctx, "SELECT commit_hash, message FROM dolt_log")
+	if err != nil {
+		t.Fatalf("read dolt_log: %v", err)
+	}
+	for rows.Next() {
+		var hash, msg string
+		if err := rows.Scan(&hash, &msg); err != nil {
+			rows.Close()
+			t.Fatalf("scan dolt_log: %v", err)
+		}
+		if hash == firstRename {
+			message, found = msg, true
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read dolt_log: %v", err)
+	}
+	if !found {
+		t.Fatalf("rename commit %s not in dolt_log", firstRename)
+	}
+	if !strings.Contains(message, "bd-renumber: remote_head="+remoteHead) {
+		t.Errorf("rename commit message lacks the retained-repair marker for %s:\n%s", remoteHead, message)
+	}
+	var head string
+	if err := db.QueryRowContext(ctx,
+		"SELECT hash FROM dolt_branches WHERE name = 'main'").Scan(&head); err != nil {
+		t.Fatalf("read branch head: %v", err)
+	}
+	if head != firstRename {
+		t.Errorf("branch head after the failed merge = %s, want the rename commit %s (working set restored)", head, firstRename)
+	}
+	cleanup()
+
+	// Retry: the same unmergeable state reports the retained rename instead
+	// of renaming anything again.
+	result, err = store.PullWithChildRenumbers(ctx, "")
+	if err == nil {
+		t.Fatal("retry succeeded; want the residual conflict to fail the merge again")
+	}
+	if result == nil {
+		t.Fatal("retry returned no result; the retained repair was not reported")
+	}
+	if !result.Retained {
+		t.Error("retry result.Retained = false; the rename commit is from an earlier invocation")
+	}
+	if result.RenameCommit != firstRename {
+		t.Errorf("retry RenameCommit = %s, want the retained %s (no second rename commit)", result.RenameCommit, firstRename)
+	}
+	if result.Plan == nil || len(result.Plan.Mappings) != len(wantMappings) {
+		t.Fatalf("retry mappings = %+v, want the replayed %+v", result.Plan, wantMappings)
+	}
+	for i, m := range wantMappings {
+		if result.Plan.Mappings[i] != m {
+			t.Errorf("retry mapping %d = %+v, want the replayed %+v", i, result.Plan.Mappings[i], m)
+		}
+	}
+
+	// The operator resolves the residual conflict by adopting the remote
+	// content, and the retained repair's merge completes.
+	db, cleanup, err = embeddeddolt.OpenSQL(ctx, filepath.Join(beadsDir, "embeddeddolt"), "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL (resolve): %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"UPDATE issues SET title = 'solo remote' WHERE id = 'bd-rn6r-solo'"); err != nil {
+		t.Fatalf("adopt remote solo title: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"CALL DOLT_COMMIT('-Am', 'test: adopt the remote solo title')"); err != nil {
+		t.Fatalf("commit the resolution: %v", err)
+	}
+	cleanup()
+
+	result, err = store.PullWithChildRenumbers(ctx, "")
+	if err != nil {
+		t.Fatalf("PullWithChildRenumbers after resolving the residual conflict: %v", err)
+	}
+	if result == nil || !result.Retained {
+		t.Fatalf("result = %+v, err = %v; want the retained repair to complete and report itself", result, err)
+	}
+	if result.RenameCommit != firstRename {
+		t.Errorf("completed repair RenameCommit = %s, want the retained %s", result.RenameCommit, firstRename)
+	}
+
+	// The merge landed: both sides' children coexist under their own ids and
+	// the solo issue carries the adopted title. The repair is spent — a
+	// further pull has nothing to rename and nothing to retain.
+	db, cleanup, err = embeddeddolt.OpenSQL(ctx, filepath.Join(beadsDir, "embeddeddolt"), "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL (final): %v", err)
+	}
+	for id, title := range map[string]string{
+		"bd-rn6r.71":   "remote child 71",
+		"bd-rn6r.72":   "remote child 72",
+		"bd-rn6r.73":   "local child 73",
+		"bd-rn6r.74":   "local child 71",
+		"bd-rn6r.75":   "local child 72",
+		"bd-rn6r-solo": "solo remote",
+	} {
+		var got string
+		if err := db.QueryRowContext(ctx,
+			"SELECT title FROM issues WHERE id = ?", id).Scan(&got); err != nil {
+			t.Errorf("read %s after the completed repair: %v", id, err)
+		} else if got != title {
+			t.Errorf("title of %s = %q, want %q", id, got, title)
+		}
+	}
+	cleanup()
+
+	result, err = store.PullWithChildRenumbers(ctx, "")
+	if err != nil {
+		t.Fatalf("further pull: %v", err)
+	}
+	if result != nil {
+		t.Errorf("further pull reported %+v; the retained repair is spent and the result must be nil", result)
 	}
 }

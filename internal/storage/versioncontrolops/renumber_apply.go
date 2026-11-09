@@ -95,12 +95,130 @@ func PullWithChildRenumbersFromFetched(ctx context.Context, db DBConn, remote, b
 	if !plan.Empty() {
 		return applyAndMergeChildRenumbers(ctx, db, plan, branch, author)
 	}
-	// No eligible collision: no identity changes, no rename commit — normal
-	// pull settlement alone decides success or failure (AC-8).
-	if err := MergeAndSettle(ctx, db, remote+"/"+branch); err != nil {
+	// No eligible collision — but an earlier invocation may have committed a
+	// rename against this same remote revision and then lost the merge: its
+	// rename commit is in history carrying the marker that names the remote
+	// head it pinned. Report it as retained instead of renaming again (AC-6);
+	// once the pinned revision has joined the branch's history the repair
+	// completed, and nothing is retained.
+	retained, err := retainedChildRenumberResult(ctx, db, plan)
+	if err != nil {
 		return nil, err
 	}
-	return nil, nil
+	// Normal pull settlement decides success or failure (AC-8); the retained
+	// result, when there is one, travels with either outcome.
+	if err := MergeAndSettle(ctx, db, remote+"/"+branch); err != nil {
+		if retained != nil {
+			return retained, err
+		}
+		return nil, err
+	}
+	return retained, nil
+}
+
+// retainedChildRenumberResult rebuilds the partial result of an earlier
+// --renumber-children invocation whose merge did not complete: its rename
+// commit is in the branch's history while the remote revision it pinned is
+// not. The mappings replay from the commit message's renumber lines, with
+// each mapping's Root flag inferred — a mapping whose old id sits inside
+// another mapping's old id moved by subtree, only the rest were allocated.
+// Returns nil when no repair is retained against plan.RemoteHead.
+func retainedChildRenumberResult(ctx context.Context, db DBConn, plan *storage.ChildRenumberPlan) (*storage.ChildRenumberResult, error) {
+	if plan.RemoteHead == "" {
+		return nil, nil
+	}
+	// The repair completed once the pinned revision joined the branch's
+	// history: a marker for it afterwards is history, not a pending partial
+	// result, and the no-collision pull stays a nil result (AC-8).
+	var merged int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_log WHERE commit_hash = ?", plan.RemoteHead).Scan(&merged); err != nil {
+		return nil, fmt.Errorf("renumber: check the branch history for %s: %w", plan.RemoteHead, err)
+	}
+	if merged > 0 {
+		return nil, nil
+	}
+	marker := retainedChildRenumberMarker + plan.RemoteHead
+	rows, err := db.QueryContext(ctx, "SELECT commit_hash, message FROM dolt_log")
+	if err != nil {
+		return nil, fmt.Errorf("renumber: read the branch history: %w", err)
+	}
+	// dolt_log lists newest first: the first marker naming this remote head
+	// is the repair to retain.
+	var renameCommit string
+	var mappings []storage.ChildRenumberMapping
+	for rows.Next() {
+		var hash, message string
+		if err := rows.Scan(&hash, &message); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("renumber: read the branch history: %w", err)
+		}
+		if renameCommit == "" && strings.Contains(message, marker) {
+			renameCommit = hash
+			mappings = parseChildRenumberMessage(message)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("renumber: read the branch history: %w", err)
+	}
+	_ = rows.Close()
+	if renameCommit == "" {
+		return nil, nil
+	}
+	inferChildRenumberRoots(mappings)
+	return &storage.ChildRenumberResult{
+		Plan: &storage.ChildRenumberPlan{
+			Remote:     plan.Remote,
+			RemoteRef:  plan.RemoteRef,
+			RemoteHead: plan.RemoteHead,
+			LocalHead:  plan.LocalHead,
+			Mappings:   mappings,
+		},
+		RenameCommit: renameCommit,
+		Retained:     true,
+	}, nil
+}
+
+// parseChildRenumberMessage replays the mappings a rename commit recorded,
+// one "renumber: <old> -> <new>" line per identity change. Lines that do not
+// parse are skipped, not fatal: the report is best-effort history, and the
+// retry never re-renames whatever a line failed to record.
+func parseChildRenumberMessage(message string) []storage.ChildRenumberMapping {
+	var mappings []storage.ChildRenumberMapping
+	for _, line := range strings.Split(message, "\n") {
+		rest, ok := strings.CutPrefix(line, "renumber: ")
+		if !ok {
+			continue
+		}
+		oldID, newID, ok := strings.Cut(rest, " -> ")
+		if !ok || oldID == "" || newID == "" {
+			continue
+		}
+		mappings = append(mappings, storage.ChildRenumberMapping{OldID: oldID, NewID: newID})
+	}
+	return mappings
+}
+
+// inferChildRenumberRoots marks a replayed mapping Root when no other mapping
+// renamed one of its ancestors: the roots were the allocated collisions,
+// everything else moved by subtree under one of them.
+func inferChildRenumberRoots(mappings []storage.ChildRenumberMapping) {
+	oldIDs := make(map[string]bool, len(mappings))
+	for _, m := range mappings {
+		oldIDs[m.OldID] = true
+	}
+	for i := range mappings {
+		mappings[i].Root = true
+		parent, _, ok := issueops.ParseHierarchicalID(mappings[i].OldID)
+		for ok {
+			if oldIDs[parent] {
+				mappings[i].Root = false
+				break
+			}
+			parent, _, ok = issueops.ParseHierarchicalID(parent)
+		}
+	}
 }
 
 // applyAndMergeChildRenumbers executes one revalidated plan: rename the local
@@ -173,14 +291,23 @@ func applyAndMergeChildRenumbers(ctx context.Context, db DBConn, plan *storage.C
 	return result, nil
 }
 
+// retainedChildRenumberMarker prefixes the rename commit message's closing
+// line, which names the remote revision the repair pinned: a later
+// invocation that finds no collision but this unmerged revision recognizes
+// the renames as already committed and reports them as retained instead of
+// renaming again (AC-6).
+const retainedChildRenumberMarker = "bd-renumber: remote_head="
+
 // childRenumberCommitMessage is the rename commit's message: one human summary
-// line and the mapping, so history shows exactly which identities moved.
+// line, the mapping (one line per identity change, so history shows exactly
+// which identities moved), and the retained-repair marker closing it.
 func childRenumberCommitMessage(plan *storage.ChildRenumberPlan) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "bd: renumber local children before merging %s (GH#4796)\n", plan.RemoteRef)
 	for _, m := range plan.Mappings {
 		fmt.Fprintf(&b, "renumber: %s -> %s\n", m.OldID, m.NewID)
 	}
+	fmt.Fprintf(&b, "%s%s\n", retainedChildRenumberMarker, plan.RemoteHead)
 	return b.String()
 }
 
