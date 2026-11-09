@@ -1075,7 +1075,8 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 		}, nil
 	})
 	if err != nil {
-		return HandleError("%v", err)
+		return reportWispClosedGCPurgeFailure(progress, len(ids), err,
+			map[string]interface{}{"deleted_ids": slices.Clone(progress.ConfirmedIDs)})
 	}
 
 	// The bookkeeping deleteBatch did for its whole request (GH#5896), and

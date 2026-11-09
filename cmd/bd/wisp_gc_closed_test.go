@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -300,9 +301,13 @@ func requestSizes(t *testing.T, d *wispClosedGCStubDeleter) []int {
 
 // TestWispPurgeClosedCommitsBoundedChunks pins the GH#4684 execution shape:
 // a forced closed purge of 450 wisps deletes through sequential requests of
-// 200, 200 and 50 ids — never one 450-id transaction.
+// 200, 200 and 50 ids — never one 450-id transaction — and a request that
+// fails mid-run leaves the earlier chunks committed instead of discarding
+// the whole purge with the transaction that failed.
 //
-// At base this is red: the purge made one 450-id request.
+// At base this is red twice over: the purge made one 450-id request, so the
+// injected failure (the request containing the final candidate) erased all
+// progress, and no chunk boundary existed to stop at.
 func TestWispPurgeClosedCommitsBoundedChunks(t *testing.T) {
 	t.Run("success deletes 200 200 50", func(t *testing.T) {
 		s, d := useWispClosedGCStub(t, 450)
@@ -339,6 +344,40 @@ func TestWispPurgeClosedCommitsBoundedChunks(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("third chunk failure keeps the first 400", func(t *testing.T) {
+		ids := wispClosedGCIDs(450)
+		_, d := useWispClosedGCStubIssues(t, wispClosedGCIssues(ids, false))
+		// The fake deletion operation refuses, atomically, any request
+		// containing the final selected candidate.
+		d.failID = ids[len(ids)-1]
+		d.failErr = context.DeadlineExceeded
+		jsonOutput = true
+
+		stdout, _, err := runWispPurgeClosedCaptured(t, false, true)
+		if err == nil {
+			t.Fatalf("a purge whose third chunk failed exited nil\nstdout:\n%s", stdout)
+		}
+		if got := requestSizes(t, d); !slices.Equal(got, []int{200, 200, 50}) {
+			t.Fatalf("deletion requests = %v; want two committed chunks of 200 plus the refused 50 — no chunk after the failure", got)
+		}
+		obj := decodeWispPurgeJSON(t, stdout)
+		if got := wispPurgeIntField(t, obj, "deleted_count"); got != 400 {
+			t.Errorf("deleted_count = %d; want 400 confirmed by the two committed chunks", got)
+		}
+		if got := wispPurgeIntField(t, obj, "remaining_count"); got != 50 {
+			t.Errorf("remaining_count = %d; want the 50 unconfirmed ids of the refused chunk", got)
+		}
+		if _, ok := obj["error"]; !ok {
+			t.Errorf("partial-failure JSON has no error field\nobject: %v", obj)
+		}
+		if hint, ok := obj["hint"].(string); !ok || !strings.Contains(strings.ToLower(hint), "rerun") {
+			t.Errorf("partial-failure JSON hint = %v; want rerun guidance", obj["hint"])
+		}
+		if code, ok := exitCodeFromError(err); !ok || code != 1 {
+			t.Errorf("exit code = %v, %v; want nonzero", err, code)
+		}
+	})
 }
 
 // TestWispPurgeClosedSkipsPerIDResolution pins that the forced chunk path
@@ -361,4 +400,67 @@ func TestWispPurgeClosedSkipsPerIDResolution(t *testing.T) {
 		t.Errorf("command-layer per-id resolution after selection: %d singleton id searches, %d GetIssue calls; want 0 of each",
 			s.singletonSearches, s.getIssueCalls)
 	}
+}
+
+// TestWispPurgeClosedJSONReportsPartialProgress drives the partial-failure
+// outcome through the command boundary and decodes the ENTIRE stdout stream
+// as one object: exactly one JSON document, carrying the success fields, the
+// confirmed count, the unconfirmed remainder, the cause and a rerun hint, with
+// a nonzero exit. A missing-id refusal mid-run is diagnosed the same way —
+// no retry, no shrink, no phantom deletes.
+func TestWispPurgeClosedJSONReportsPartialProgress(t *testing.T) {
+	ids := wispClosedGCIDs(450)
+
+	t.Run("injected deadline failure", func(t *testing.T) {
+		_, d := useWispClosedGCStubIssues(t, wispClosedGCIssues(ids, false))
+		d.failID = ids[420]
+		d.failErr = context.DeadlineExceeded
+		jsonOutput = true
+
+		stdout, _, err := runWispPurgeClosedCaptured(t, false, true)
+		if err == nil {
+			t.Fatalf("a mid-run failure exited nil\nstdout:\n%s", stdout)
+		}
+		obj := decodeWispPurgeJSON(t, stdout)
+		if got := wispPurgeIntField(t, obj, "deleted_count"); got != 400 {
+			t.Errorf("deleted_count = %d; want 400", got)
+		}
+		if got := wispPurgeIDsField(t, obj, "deleted_ids"); len(got) != 400 {
+			t.Errorf("deleted_ids lists %d ids; want the 400 confirmed ones", len(got))
+		}
+		if got := wispPurgeIntField(t, obj, "remaining_count"); got != 50 {
+			t.Errorf("remaining_count = %d; want 50", got)
+		}
+		if msg, _ := obj["error"].(string); !strings.Contains(msg, "context deadline exceeded") {
+			t.Errorf("error = %q; want the original cause", msg)
+		}
+		if hint, _ := obj["hint"].(string); !strings.Contains(strings.ToLower(hint), "rerun") {
+			t.Errorf("hint = %q; want rerun guidance", hint)
+		}
+		if _, ok := obj["dependencies_removed"].(float64); !ok {
+			t.Errorf("dependencies_removed missing from the partial-failure object: %v", obj)
+		}
+	})
+
+	t.Run("missing id stops without retries", func(t *testing.T) {
+		_, d := useWispClosedGCStubIssues(t, wispClosedGCIssues(ids, false))
+		d.failID = ids[401]
+		d.failErr = &issueops.NotFoundError{IDs: []string{ids[401]}}
+		jsonOutput = true
+
+		stdout, _, err := runWispPurgeClosedCaptured(t, false, true)
+		if err == nil {
+			t.Fatalf("a missing-id refusal exited nil\nstdout:\n%s", stdout)
+		}
+		if got := len(d.requests); got != 3 {
+			t.Errorf("deleter saw %d requests; want exactly 3 (two committed, one refused) — no shrink-and-retry loop", got)
+		}
+		obj := decodeWispPurgeJSON(t, stdout)
+		if got := wispPurgeIntField(t, obj, "deleted_count"); got != 400 {
+			t.Errorf("deleted_count = %d; want 400 confirmed before the refusal", got)
+		}
+		if msg, _ := obj["error"].(string); !strings.Contains(msg, ids[401]) {
+			t.Errorf("error = %q; want it to name the missing id", msg)
+		}
+	})
 }

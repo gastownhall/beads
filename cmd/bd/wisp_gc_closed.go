@@ -21,8 +21,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"slices"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -106,4 +108,40 @@ func printWispClosedGCConfirmed(p wispClosedGCProgress) {
 	fmt.Printf("  Removed %d label(s)\n", p.Labels)
 	fmt.Printf("  Removed %d event(s)\n", p.Events)
 	fmt.Printf("  Updated text references in %d issue(s)\n", p.ReferencesUpdated)
+}
+
+// wispClosedGCRerunHint is the guidance a partially failed purge reports.
+// It deliberately does not promise the failed chunk wrote nothing: counts
+// are confirmed progress, and a rerun reselects current data.
+const wispClosedGCRerunHint = "rerun the same command to reselect current data and delete the remaining closed wisps"
+
+// reportWispClosedGCPurgeFailure renders the stopped-mid-selection outcome of
+// a forced chunked purge: the confirmed progress, the original cause and a
+// rerun hint, with a nonzero exit.
+//
+// routeJSON holds the extra keys the route's SUCCESS object carries (the
+// direct route's deleted_ids); it may be nil. Rendering happens exactly once
+// here — the returned exitError prints nothing at any outer handler — and
+// JSON mode emits exactly one stdout object, so machine consumers parse one
+// document whether the purge finished or stopped.
+func reportWispClosedGCPurgeFailure(p wispClosedGCProgress, selected int, err error, routeJSON map[string]interface{}) error {
+	remaining := selected - len(p.ConfirmedIDs)
+	if jsonOutput {
+		answer := p.successFields()
+		for key, value := range routeJSON {
+			answer[key] = value
+		}
+		answer["remaining_count"] = remaining
+		answer["error"] = err.Error()
+		answer["hint"] = wispClosedGCRerunHint
+		if jsonErr := outputJSON(answer); jsonErr != nil {
+			return jsonErr
+		}
+		return &exitError{Code: 1}
+	}
+	fmt.Fprintf(os.Stderr, "Error: %s\n", remedy.PrintedText(err.Error()))
+	fmt.Fprintf(os.Stderr, "Confirmed %d deletion(s) before the failure; %d of %d selected closed wisp(s) are unconfirmed.\n",
+		len(p.ConfirmedIDs), remaining, selected)
+	fmt.Fprintf(os.Stderr, "Hint: %s\n", wispClosedGCRerunHint)
+	return &exitError{Code: 1}
 }
