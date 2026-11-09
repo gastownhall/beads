@@ -109,19 +109,6 @@ func depTargetIn(alias, placeholders string) string {
 	return depTargetExpr(alias) + " IN (" + placeholders + ")"
 }
 
-// IsExternalDepTarget reports whether a dependency target is one this database
-// cannot hold a row for. Two shapes qualify: an "external:" reference, which
-// names something outside beads entirely, and a target whose id prefix names
-// ANOTHER REPOSITORY, which lives in that rig's database and not this one.
-// Both belong in depends_on_external — the one target column carrying no
-// foreign key into issues — so this is the single rule every backend must
-// classify by, whether it writes through a tx (ClassifyDepTarget) or through
-// the domain repository (db.pickDepTargetColumn).
-func IsExternalDepTarget(sourceID, targetID string) bool {
-	return strings.HasPrefix(targetID, "external:") ||
-		types.ExtractPrefix(sourceID) != types.ExtractPrefix(targetID)
-}
-
 // DepTargetPresence answers the local-row questions ClassifyDepTargetFrom asks
 // about a dependency target: whether this database holds it as an active wisp
 // and whether it holds it as an issue. Each is asked at most once and only

@@ -179,6 +179,16 @@ with that label is closed. `bd ready`, `bd blocked`, and `bd dep tree` resolve
 the capability at query time; an unconfigured or unavailable project remains
 blocking.
 
+An ID with another prefix that this database holds (a database with several
+`allowed_prefixes`, or an issue imported from another rig) is a local
+dependency like any other: it blocks, `bd blocked` names it, and cycle and
+parent-child checks apply to it. Beads decides by whether the ID is in this
+database when the edge is written, not by its prefix. An edge written before
+beads followed this rule still points at such a target as an unverified
+external ID and does not block; adding the same edge again leaves it as it is,
+so run `bd dep remove` and then `bd dep add` with the same `--type` to make it
+local.
+
 A bare ID whose prefix names another rig (`bd dep add bd-abc gt-123`) is
 stored even when bd cannot find it in this database or through routes. `bd dep
 add` then warns on stderr that the ID was not found, or says why it could not

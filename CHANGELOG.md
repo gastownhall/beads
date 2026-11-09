@@ -1226,6 +1226,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A dependency on a local issue or wisp with another prefix now blocks.
+  bd classified a target by its prefix alone, so in a database with several
+  prefixes (`allowed_prefixes`) an edge onto a present issue of another prefix
+  was stored as an unverified external ID: the source showed as ready, `bd
+  blocked` did not name the blocker, and cycle and parent-child checks skipped
+  the edge (GH#8299). Every write path (`bd dep add`, create and import with
+  dependencies, batch apply, and server-mode transactions, including a target
+  created earlier in the same transaction) now files a target present in this
+  database as a local issue or wisp. A foreign ID this database holds no row
+  for is stored and warned about as before. Edges written before the fix keep
+  their external target; re-adding the same edge does not change it, so remove
+  and re-add one to make it block.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
