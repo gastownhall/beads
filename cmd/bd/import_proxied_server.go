@@ -29,9 +29,10 @@ func proxiedImporter() (publicops.Importer, error) {
 
 // runImportRecordsProxied is the proxied-server import pipeline over the
 // parsed records. It mirrors runImportRecordsClassic stage for stage — dedup,
-// dry-run classification, stale pre-filter, batch write, issue_prefix
-// reconciliation — through the SAME classification and reporting code, with
-// two deliberate structural differences:
+// the read-only plan (dried-run classification, stale pre-filter, record
+// screen), batch write, issue_prefix reconciliation — through the SAME
+// classification and reporting code, with two deliberate structural
+// differences:
 //
 //   - ONE COMMIT PER INVOCATION. The classic path chunks a large import into
 //     bounded transactions (a SQLite write-lock fairness measure) and commits
@@ -44,7 +45,7 @@ func proxiedImporter() (publicops.Importer, error) {
 //     its own read (reporting StaleSkippedIDs and keeping stale rows' aux data
 //     out of the batch), and RejectStaleUpserts re-checks updated_at inside
 //     the write transaction, closing the same race the classic path closes.
-func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memories []memoryRecord, source string) error {
+func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memories []memoryRecord, sources map[*types.Issue]importRecordSource, source string) error {
 	if uowProvider == nil {
 		return fmt.Errorf("proxied-server UOW provider not initialized")
 	}
@@ -73,45 +74,35 @@ func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memorie
 		DryRun:    importDryRun,
 	}
 
+	// THE PLAN (read-only), in ONE unit of work: the stale pre-filter or the
+	// --allow-stale existence classification, then the pre-write record screen
+	// (GH#4492) — whose vocabulary read rides the same ConfigUseCase the
+	// proxied create path validates from. A reject fails the strict import
+	// here, before the batch is submitted, so nothing is written on the
+	// server either.
+	plan, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (*importRunPlan, error) {
+		return planProxiedImport(ctx, uw, issues, importAllowStale, importDryRun, sources)
+	})
+	if err != nil {
+		return err
+	}
+	if err := applyImportScreenPolicy(&result, plan); err != nil {
+		return err
+	}
+	issues = plan.Issues
+
 	if importDryRun {
 		result.Memories = len(memories)
 		result.Skipped = dedupHits
 
 		classification, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (*ImportResult, error) {
-			return classifyDryRunImport(ctx, uw.IssueUseCase(), issues, importAllowStale)
+			return dryRunClassification(ctx, uw.IssueUseCase(), plan.Issues, plan.StaleSkippedIDs, &plan.ChangePlan, importAllowStale)
 		})
 		if err != nil {
 			return fmt.Errorf("dry-run: %w", err)
 		}
 		applyImportDryRunClassification(&result, classification)
 		return renderImportDryRun(result, len(memories), source, dedupHits)
-	}
-
-	// Pre-filter half of the stale guard (bd-pkim8): report rows already
-	// known stale and keep their labels/comments/dependencies out of the
-	// batch entirely. A local update racing between this read and the batch
-	// write is caught by RejectStaleUpserts inside the write transaction.
-	var staleSkippedIDs []string
-	var changePlan importChangePlan
-	if !importAllowStale && len(issues) > 0 {
-		type staleOutcome struct {
-			filtered []*types.Issue
-			skipped  []string
-			plan     importChangePlan
-		}
-		out, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (staleOutcome, error) {
-			filtered, skipped, plan, err := filterStaleImportIssues(ctx, uw.IssueUseCase(), issues)
-			if err != nil {
-				return staleOutcome{}, err
-			}
-			return staleOutcome{filtered: filtered, skipped: skipped, plan: plan}, nil
-		})
-		if err != nil {
-			return err
-		}
-		issues = out.filtered
-		staleSkippedIDs = out.skipped
-		changePlan = out.plan
 	}
 
 	memoryEntries := make([]publicops.ImportMemory, 0, len(memories))
@@ -175,11 +166,41 @@ func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memorie
 		for _, dep := range batch.SkippedDependencies {
 			skippedDependencies = append(skippedDependencies, fmt.Sprintf("%s -> %s: %s", dep.IssueID, dep.DependsOnID, dep.Reason))
 		}
-		applyImportOutcome(&result, assembleImportResult(issues, staleSkippedIDs, changePlan, staleRejectedSet, retiredSet, skippedDependencies))
+		applyImportOutcome(&result, assembleImportResult(issues, plan.StaleSkippedIDs, plan.ChangePlan, staleRejectedSet, retiredSet, skippedDependencies))
 	} else {
-		result.Skipped += len(staleSkippedIDs)
-		result.StaleSkippedIDs = append(result.StaleSkippedIDs, staleSkippedIDs...)
+		result.Skipped += len(plan.StaleSkippedIDs)
+		result.StaleSkippedIDs = append(result.StaleSkippedIDs, plan.StaleSkippedIDs...)
 	}
 
 	return renderImportOutcome(result, source, dedupHits)
+}
+
+// planProxiedImport is planClassicImport's proxied twin (bd-8mz4zq /
+// GH#4492): the same stale-filter-then-screen order over the same shared
+// code, with the lookup and the vocabulary both served by the unit of work.
+func planProxiedImport(ctx context.Context, uw uow.UnitOfWork, issues []*types.Issue, allowStale, classify bool, sources map[*types.Issue]importRecordSource) (*importRunPlan, error) {
+	plan := &importRunPlan{}
+	if allowStale {
+		if classify {
+			cp, err := classifyImportIssuesExistence(ctx, uw.IssueUseCase(), issues)
+			if err != nil {
+				return nil, err
+			}
+			plan.ChangePlan = cp
+		}
+		plan.Issues = issues
+	} else {
+		filtered, skippedIDs, cp, err := filterStaleImportIssues(ctx, uw.IssueUseCase(), issues)
+		if err != nil {
+			return nil, err
+		}
+		plan.Issues, plan.StaleSkippedIDs, plan.ChangePlan = filtered, skippedIDs, cp
+	}
+	kept, rejects, err := screenImportRows(ctx, uowImportVocabulary{uw: uw}, plan.Issues, sources)
+	if err != nil {
+		return nil, err
+	}
+	plan.Issues = kept
+	plan.Rejects = rejects
+	return plan, nil
 }

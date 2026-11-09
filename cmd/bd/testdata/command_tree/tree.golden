@@ -3572,6 +3572,14 @@ bd import
     | 'bd export' emits — see 'bd export' output for the canonical schema. Only
     | "title" is required; everything else is optional.
     |
+    | Every record is validated the way the writer validates it BEFORE anything is
+    | imported: a record the writer would refuse (an unregistered status or type, a
+    | missing title, an unsatisfiable field rule) fails the import up front with the
+    | record's line number and the validator's reason, and nothing is imported —
+    | not even the valid records around it. To import the valid records anyway and
+    | set the invalid ones aside, re-run with --skip-invalid; the invalid records
+    | are then listed on stderr instead of aborting the import.
+    |
     | Common fields:
     |   title                  Required. Short summary.
     |   description            Long-form body.
@@ -3640,6 +3648,7 @@ bd import
   flag --dedup type=bool default="false" usage="Skip lines whose title matches an existing open issue"
   flag --dry-run type=bool default="false" usage="Show what would be imported without importing"
   flag --input -i type=string default="" usage="Read JSONL from a specific file"
+  flag --skip-invalid type=bool default="false" usage="Skip invalid records (listed on stderr) instead of failing the import on the first one"
 
 bd info
   use: "info"

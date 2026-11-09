@@ -186,6 +186,7 @@ go_library(
         "import.go",
         "import_path.go",
         "import_proxied_server.go",
+        "import_screen.go",
         "import_shared.go",
         "info.go",
         "info_proxied_server.go",

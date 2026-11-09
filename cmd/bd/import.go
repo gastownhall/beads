@@ -39,6 +39,14 @@ Each JSONL line should map to an issue. The importer accepts every field
 'bd export' emits — see 'bd export' output for the canonical schema. Only
 "title" is required; everything else is optional.
 
+Every record is validated the way the writer validates it BEFORE anything is
+imported: a record the writer would refuse (an unregistered status or type, a
+missing title, an unsatisfiable field rule) fails the import up front with the
+record's line number and the validator's reason, and nothing is imported —
+not even the valid records around it. To import the valid records anyway and
+set the invalid ones aside, re-run with --skip-invalid; the invalid records
+are then listed on stderr instead of aborting the import.
+
 Common fields:
   title                  Required. Short summary.
   description            Long-form body.
@@ -114,6 +122,7 @@ var (
 	importDedup      bool
 	importAllowStale bool
 	importInput      string
+	importSkipInvalid bool
 )
 
 func init() {
@@ -121,6 +130,7 @@ func init() {
 	importCmd.Flags().BoolVar(&importDryRun, "dry-run", false, "Show what would be imported without importing")
 	importCmd.Flags().BoolVar(&importDedup, "dedup", false, "Skip lines whose title matches an existing open issue")
 	importCmd.Flags().BoolVar(&importAllowStale, "allow-stale", false, "Import rows even when older than the local issue (required to restore an older snapshot)")
+	importCmd.Flags().BoolVar(&importSkipInvalid, "skip-invalid", false, "Skip invalid records (listed on stderr) instead of failing the import on the first one")
 	rootCmd.AddCommand(importCmd)
 }
 
@@ -255,23 +265,27 @@ type importResultJSON struct {
 	StaleSkippedIDs     []string       `json:"stale_skipped_ids,omitempty"`
 	RetiredIDs          []string       `json:"retired_ids,omitempty"`
 	SkippedDependencies []string       `json:"skipped_dependencies,omitempty"`
-	DryRun              bool           `json:"dry_run,omitempty"`
+	// Rejected lists the records the pre-write screen excluded under
+	// --skip-invalid, with their source line, id and the validator's reason
+	// (GH#4492).
+	Rejected []importReject `json:"rejected,omitempty"`
+	DryRun   bool           `json:"dry_run,omitempty"`
 }
 
 func runImportFromReader(ctx context.Context, r io.Reader, source string) error {
-	issues, memories, err := parseImportRecords(r)
+	issues, memories, sources, err := parseImportRecords(r)
 	if err != nil {
 		return err
 	}
 
 	if usesProxiedServer() {
-		return runImportRecordsProxied(ctx, issues, memories, source)
+		return runImportRecordsProxied(ctx, issues, memories, sources, source)
 	}
 
 	if store == nil {
 		return fmt.Errorf("no database — run 'bd init' or 'bd bootstrap' first")
 	}
-	return runImportRecordsClassic(ctx, issues, memories, source)
+	return runImportRecordsClassic(ctx, issues, memories, sources, source)
 }
 
 // parseImportRecords scans one JSONL stream into issue rows and memory
@@ -280,14 +294,23 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 // reader): the optional _schema header and tombstones are skipped, and the
 // "wisp_plane" boolean is honored as the explicit wisps-plane marker (and
 // the legacy "wisp" alias for "ephemeral") via applyImportWispPlane.
-func parseImportRecords(r io.Reader) ([]*types.Issue, []memoryRecord, error) {
+//
+// It also records each issue row's physical source (line number and raw
+// bytes, keyed by the row's pointer) so the pre-write screen can name a
+// rejected record's line (GH#4492) and echo it verbatim into a rejects file.
+// Line numbers count every physical line of the stream, including the blanks,
+// headers and tombstones the loop skips.
+func parseImportRecords(r io.Reader) ([]*types.Issue, []memoryRecord, map[*types.Issue]importRecordSource, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 64*1024*1024)
 
 	var issues []*types.Issue
 	var memories []memoryRecord
+	sources := make(map[*types.Issue]importRecordSource)
 
+	lineNum := 0
 	for scanner.Scan() {
+		lineNum++
 		line := scanner.Text()
 		if line == "" {
 			continue
@@ -295,7 +318,7 @@ func parseImportRecords(r io.Reader) ([]*types.Issue, []memoryRecord, error) {
 
 		var peek map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(line), &peek); err != nil {
-			return nil, nil, fmt.Errorf("failed to parse JSONL line: %w", err)
+			return nil, nil, nil, fmt.Errorf("failed to parse JSONL line: %w", err)
 		}
 
 		// Skip the optional beads-jsonl header record (§J1.3). A canonical
@@ -315,7 +338,7 @@ func parseImportRecords(r io.Reader) ([]*types.Issue, []memoryRecord, error) {
 			if err := json.Unmarshal(rawType, &typeStr); err == nil && typeStr == "memory" {
 				var mem memoryRecord
 				if err := json.Unmarshal([]byte(line), &mem); err != nil {
-					return nil, nil, fmt.Errorf("failed to parse memory record: %w", err)
+					return nil, nil, nil, fmt.Errorf("failed to parse memory record: %w", err)
 				}
 				if mem.Key != "" && mem.Value != "" {
 					memories = append(memories, mem)
@@ -326,7 +349,7 @@ func parseImportRecords(r io.Reader) ([]*types.Issue, []memoryRecord, error) {
 
 		var issue types.Issue
 		if err := json.Unmarshal([]byte(line), &issue); err != nil {
-			return nil, nil, fmt.Errorf("failed to parse issue from JSONL: %w", err)
+			return nil, nil, nil, fmt.Errorf("failed to parse issue from JSONL: %w", err)
 		}
 		if issue.Status == "tombstone" {
 			continue
@@ -334,18 +357,23 @@ func parseImportRecords(r io.Reader) ([]*types.Issue, []memoryRecord, error) {
 		applyImportWispPlane(peek, &issue)
 		issue.SetDefaults()
 		issues = append(issues, &issue)
+		sources[&issue] = importRecordSource{Line: lineNum, Raw: line}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, nil, fmt.Errorf("failed to scan JSONL: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to scan JSONL: %w", err)
 	}
-	return issues, memories, nil
+	return issues, memories, sources, nil
 }
 
 // runImportRecordsClassic is the classic (embedded/direct store) import
-// pipeline over the parsed records: dedup, dry-run classification, memory
-// writes, the batch issue import, the final commit and the issue_prefix
-// reconciliation.
-func runImportRecordsClassic(ctx context.Context, issues []*types.Issue, memories []memoryRecord, source string) error {
+// pipeline over the parsed records: dedup, the read-only plan (stale filter
+// plus the pre-write record screen), then the writes — memory writes, the
+// batch issue import, the final commit and the issue_prefix reconciliation.
+// The plan completes before the FIRST write (GH#4492): a record the writer
+// would refuse fails the import with its line and reason while the database
+// is still untouched, so an invalid record can no longer discard its valid
+// neighbors mid-transaction — on any chunk, including the first.
+func runImportRecordsClassic(ctx context.Context, issues []*types.Issue, memories []memoryRecord, sources map[*types.Issue]importRecordSource, source string) error {
 	// Dedup: skip issues whose title matches an existing open issue
 	dedupHits := 0
 	if importDedup && len(issues) > 0 {
@@ -358,11 +386,25 @@ func runImportRecordsClassic(ctx context.Context, issues []*types.Issue, memorie
 		DryRun:    importDryRun,
 	}
 
+	// THE PLAN (read-only): the stale pre-filter and the record screen, both
+	// done before anything is written. Rows the stale guard excluded are not
+	// screened — they will not be written, so they cannot be rejected either;
+	// the strict error and the skip listing below therefore speak only about
+	// rows that were about to land (bd-8mz4zq / GH#4492).
+	plan, err := planClassicImport(ctx, store, issues, importAllowStale, importDryRun, sources)
+	if err != nil {
+		return err
+	}
+	if err := applyImportScreenPolicy(&result, plan); err != nil {
+		return err
+	}
+	issues = plan.Issues
+
 	if importDryRun {
 		result.Memories = len(memories)
 		result.Skipped = dedupHits
 
-		classification, err := classifyDryRunImport(ctx, store, issues, importAllowStale)
+		classification, err := dryRunClassification(ctx, store, plan.Issues, plan.StaleSkippedIDs, &plan.ChangePlan, importAllowStale)
 		if err != nil {
 			return fmt.Errorf("dry-run: %w", err)
 		}
@@ -418,7 +460,7 @@ func runImportRecordsClassic(ctx context.Context, issues []*types.Issue, memorie
 	// Import issues
 	if len(issues) > 0 {
 		opts := ImportOptions{SkipPrefixValidation: true, AllowStale: importAllowStale}
-		importResult, err := importIssuesCore(ctx, "", store, issues, opts)
+		importResult, err := importIssuesPlanned(ctx, store, issues, plan.StaleSkippedIDs, plan.ChangePlan, opts)
 		if err != nil {
 			return fmt.Errorf("import failed: %w", err)
 		}

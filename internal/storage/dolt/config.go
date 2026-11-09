@@ -138,6 +138,28 @@ func (s *DoltStore) GetLocalMetadata(ctx context.Context, key string) (string, e
 	return value, err
 }
 
+// ReadInsertVocabulary reads the status and issue-type vocabularies the batch
+// writer validates inserts against (NewBatchContext → GetCustomStatusesTx +
+// ResolveCustomTypesInTx), through the same read transaction and the SAME
+// resolvers. It is the authoritative seam the import pre-screen needs
+// (GH#4492): the cached, error-swallowing GetCustomStatuses/GetCustomTypes
+// below would either reject records the writer accepts or wave through ones it
+// refuses, so the screen must not use them. Errors are returned, not fallen
+// back from — an unreadable vocabulary is a hard stop for a validator, never a
+// guessed one.
+func (s *DoltStore) ReadInsertVocabulary(ctx context.Context) (statuses, customTypes []string, err error) {
+	err = s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		statuses, err = issueops.GetCustomStatusesTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		customTypes, err = issueops.ResolveCustomTypesInTx(ctx, tx)
+		return err
+	})
+	return statuses, customTypes, err
+}
+
 func (s *DoltStore) loadCustomConfigCache(ctx context.Context) {
 	s.cacheMu.Lock()
 	if s.customStatusCached && s.customTypeCached {

@@ -146,6 +146,81 @@ type importRelationLookup interface {
 // behavior). Any other error is a real read failure and stops the import.
 var errImportRelationsUnavailable = errors.New("import relation lookup unavailable")
 
+// importRunPlan is the read-only plan of one classic-mode import: the row set
+// the writes will actually touch (post stale-filter, post screen), the
+// classification the report renders from it (StaleSkippedIDs, ChangePlan), and
+// the records the pre-write screen rejected (GH#4492). Completing the plan
+// before the first write is what lets an invalid record fail the import with
+// nothing written, on any chunk size.
+type importRunPlan struct {
+	Issues          []*types.Issue
+	StaleSkippedIDs []string
+	ChangePlan      importChangePlan
+	Rejects         []importReject
+}
+
+// planClassicImport plans one classic-mode import in read-only mode (bd-8mz4zq
+// / GH#4492): the stale pre-filter first (rows it excludes will not be written,
+// so the screen never sees them), then the pre-write record screen over what
+// remains. classify asks for the dry-run classification too — the write path
+// never reads a classification it would not use (matching the pre-split
+// behavior, where only --dry-run ran the existence classifier under
+// --allow-stale).
+func planClassicImport(ctx context.Context, lookup importIssueLookup, issues []*types.Issue, allowStale, classify bool, sources map[*types.Issue]importRecordSource) (*importRunPlan, error) {
+	plan := &importRunPlan{}
+	if allowStale {
+		if classify {
+			cp, err := classifyImportIssuesExistence(ctx, lookup, issues)
+			if err != nil {
+				return nil, err
+			}
+			plan.ChangePlan = cp
+		}
+		plan.Issues = issues
+	} else {
+		filtered, skippedIDs, cp, err := filterStaleImportIssues(ctx, lookup, issues)
+		if err != nil {
+			return nil, err
+		}
+		plan.Issues, plan.StaleSkippedIDs, plan.ChangePlan = filtered, skippedIDs, cp
+	}
+	kept, rejects, err := screenImportRows(ctx, importVocabularyOf(lookupToDoltStorage(lookup)), plan.Issues, sources)
+	if err != nil {
+		return nil, err
+	}
+	plan.Issues = kept
+	plan.Rejects = rejects
+	return plan, nil
+}
+
+// lookupToDoltStorage recovers the classic store behind the import lookup seam
+// when there is one, for importVocabularyOf's decorator unwrap. Unit-test
+// fakes pass through as-is (and answer no vocabulary).
+func lookupToDoltStorage(lookup importIssueLookup) storage.DoltStorage {
+	if st, ok := lookup.(storage.DoltStorage); ok {
+		return st
+	}
+	return nil
+}
+
+// applyImportScreenPolicy resolves what the record screen found against the
+// command's flags, identically in both storage modes. Strict (the default)
+// fails the import on the FIRST reject with the line/id/reason error; the
+// skip mode folds the rejects into the result and drops them from the writes.
+// The caller has already returned before any write, which is the AC's
+// no-import promise.
+func applyImportScreenPolicy(result *importResultJSON, plan *importRunPlan) error {
+	if len(plan.Rejects) == 0 {
+		return nil
+	}
+	if !importSkipInvalid {
+		return errStrictImportRejected(plan.Rejects[0])
+	}
+	result.Rejected = plan.Rejects
+	result.Skipped += len(plan.Rejects)
+	return nil
+}
+
 // importIssuesCore imports issues into the Dolt store.
 // This is a bridge function that delegates to the Dolt store's batch creation.
 func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, issues []*types.Issue, opts ImportOptions) (*ImportResult, error) {
@@ -169,9 +244,21 @@ func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, 
 		issues = filtered
 		staleSkippedIDs = skipped
 		changePlan = plan
-		if len(issues) == 0 {
-			return &ImportResult{Skipped: len(staleSkippedIDs), StaleSkippedIDs: staleSkippedIDs, Unchanged: len(changePlan.Unchanged)}, nil
-		}
+	}
+
+	return importIssuesPlanned(ctx, store, issues, staleSkippedIDs, changePlan, opts)
+}
+
+// importIssuesPlanned is the WRITE half of the import over an already-planned
+// row set: the stale pre-filter has already run (bd-8mz4zq / GH#4492), so it
+// consumes the caller's filtered rows and classification rather than
+// re-reading them. importIssuesCore remains the wrapper for callers that have
+// not planned; the split is what lets an explicit `bd import` complete its
+// whole read-only plan — stale filter AND record screen — before the first
+// write, on imports of any chunk count.
+func importIssuesPlanned(ctx context.Context, store storage.DoltStorage, issues []*types.Issue, staleSkippedIDs []string, changePlan importChangePlan, opts ImportOptions) (*ImportResult, error) {
+	if opts.DryRun || len(issues) == 0 {
+		return &ImportResult{Skipped: len(staleSkippedIDs), StaleSkippedIDs: staleSkippedIDs, Unchanged: len(changePlan.Unchanged)}, nil
 	}
 
 	var skippedDependencies []string
@@ -1099,7 +1186,10 @@ func classifyImportIssuesExistence(ctx context.Context, store importIssueLookup,
 
 // classifyDryRunImport runs the same id lookup as a real import, without
 // writing anything, so --dry-run can report create/update/skip counts
-// instead of treating every row as a create (GH#4901).
+// instead of treating every row as a create (GH#4901). Kept as the
+// plan-then-classify wrapper for callers that have not planned; the command
+// paths, which plan once (planClassicImport / the proxied equivalent), hand
+// the finished plan to dryRunClassification instead.
 func classifyDryRunImport(ctx context.Context, store importIssueLookup, issues []*types.Issue, allowStale bool) (*ImportResult, error) {
 	if len(issues) == 0 {
 		return &ImportResult{}, nil
@@ -1113,7 +1203,27 @@ func classifyDryRunImport(ctx context.Context, store importIssueLookup, issues [
 		if err != nil {
 			return nil, err
 		}
-		retiredIDs, err := excludeRetiredFromImportPlan(ctx, store, issues, &plan)
+		return dryRunClassification(ctx, store, issues, nil, &plan, true)
+	}
+
+	filtered, staleSkippedIDs, plan, err := filterStaleImportIssues(ctx, store, issues)
+	if err != nil {
+		return nil, err
+	}
+	return dryRunClassification(ctx, store, filtered, staleSkippedIDs, &plan, false)
+}
+
+// dryRunClassification folds a completed read-only plan into the dry-run
+// report, over exactly the rows the real write would touch. issues is the
+// planned write set (stale rows and screen rejects already removed), and
+// plan's classification must have been produced with classify=true when
+// allowStale is set (the command paths plan and classify in the same read).
+func dryRunClassification(ctx context.Context, store importIssueLookup, issues []*types.Issue, staleSkippedIDs []string, plan *importChangePlan, allowStale bool) (*ImportResult, error) {
+	if len(issues) == 0 && len(staleSkippedIDs) == 0 {
+		return &ImportResult{Skipped: 0, StaleSkippedIDs: nil}, nil
+	}
+	if allowStale {
+		retiredIDs, err := excludeRetiredFromImportPlan(ctx, store, issues, plan)
 		if err != nil {
 			return nil, err
 		}
@@ -1126,12 +1236,8 @@ func classifyDryRunImport(ctx context.Context, store importIssueLookup, issues [
 		}, nil
 	}
 
-	filtered, staleSkippedIDs, plan, err := filterStaleImportIssues(ctx, store, issues)
-	if err != nil {
-		return nil, err
-	}
-	considered := len(filtered)
-	retiredIDs, err := excludeRetiredFromImportPlan(ctx, store, filtered, &plan)
+	considered := len(issues)
+	retiredIDs, err := excludeRetiredFromImportPlan(ctx, store, issues, plan)
 	if err != nil {
 		return nil, err
 	}
@@ -1139,7 +1245,7 @@ func classifyDryRunImport(ctx context.Context, store importIssueLookup, issues [
 	for _, id := range retiredIDs {
 		retiredSet[id] = true
 	}
-	for _, issue := range filtered {
+	for _, issue := range issues {
 		if issue != nil && retiredSet[issue.ID] {
 			considered--
 		}
@@ -1317,13 +1423,17 @@ func importFromLocalJSONL(ctx context.Context, store storage.DoltStorage, localP
 	return result.Issues, nil
 }
 
-// parseJSONLFile reads a JSONL file and returns parsed issues and config
-// entries (memories). Pure function — no store I/O.
-func parseJSONLFile(path string) ([]*types.Issue, map[string]string, error) {
+// parseJSONLFile reads a JSONL file and returns parsed issues, config
+// entries (memories) and each issue row's physical source (line number and
+// raw bytes, keyed by the row's pointer — see parseImportRecords). Pure
+// function — no store I/O.
+//
+//nolint:unparam // the recovery path's quarantine (bd-8mz4zq AC-7) consumes the sources map
+func parseJSONLFile(path string) ([]*types.Issue, map[string]string, map[*types.Issue]importRecordSource, error) {
 	//nolint:gosec // G304: path from user-provided CLI argument
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read JSONL file %s: %w", path, err)
+		return nil, nil, nil, fmt.Errorf("failed to read JSONL file %s: %w", path, err)
 	}
 
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
@@ -1331,8 +1441,11 @@ func parseJSONLFile(path string) ([]*types.Issue, map[string]string, error) {
 	scanner.Buffer(make([]byte, 0, 1024*1024), 64*1024*1024)
 	var issues []*types.Issue
 	configEntries := make(map[string]string)
+	sources := make(map[*types.Issue]importRecordSource)
 
+	lineNum := 0
 	for scanner.Scan() {
+		lineNum++
 		line := scanner.Text()
 		if line == "" {
 			continue
@@ -1341,7 +1454,7 @@ func parseJSONLFile(path string) ([]*types.Issue, map[string]string, error) {
 		// Peek at the record to check for _type field
 		var peek map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(line), &peek); err != nil {
-			return nil, nil, fmt.Errorf("failed to parse JSONL line: %w", err)
+			return nil, nil, nil, fmt.Errorf("failed to parse JSONL line: %w", err)
 		}
 
 		// Skip the optional beads-jsonl metadata/header record.
@@ -1364,7 +1477,7 @@ func parseJSONLFile(path string) ([]*types.Issue, map[string]string, error) {
 			if err := json.Unmarshal(rawType, &typeStr); err == nil && typeStr == "memory" {
 				var mem memoryRecord
 				if err := json.Unmarshal([]byte(line), &mem); err != nil {
-					return nil, nil, fmt.Errorf("failed to parse memory record: %w", err)
+					return nil, nil, nil, fmt.Errorf("failed to parse memory record: %w", err)
 				}
 				if mem.Key != "" && mem.Value != "" {
 					configEntries[kvPrefix+memoryPrefix+mem.Key] = mem.Value
@@ -1376,7 +1489,7 @@ func parseJSONLFile(path string) ([]*types.Issue, map[string]string, error) {
 		// Regular issue record
 		var issue types.Issue
 		if err := json.Unmarshal([]byte(line), &issue); err != nil {
-			return nil, nil, fmt.Errorf("failed to parse issue from JSONL: %w", err)
+			return nil, nil, nil, fmt.Errorf("failed to parse issue from JSONL: %w", err)
 		}
 		// Skip tombstone entries: these are deleted issues exported by older
 		// versions (pre-v0.50) with status "tombstone" and deleted_at set.
@@ -1389,12 +1502,13 @@ func parseJSONLFile(path string) ([]*types.Issue, map[string]string, error) {
 
 		issue.SetDefaults()
 		issues = append(issues, &issue)
+		sources[&issue] = importRecordSource{Line: lineNum, Raw: line}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, nil, fmt.Errorf("failed to scan JSONL: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to scan JSONL: %w", err)
 	}
 
-	return issues, configEntries, nil
+	return issues, configEntries, sources, nil
 }
 
 // applyImportWispPlane resolves which storage plane (wisps vs issues table) a
@@ -1478,7 +1592,7 @@ func importFromLocalJSONLConflictSkip(ctx context.Context, store storage.DoltSto
 // SetConfig, while routing regular issue records through the normal path.
 // conflictSkip selects insert-if-new (true) vs UPSERT (false) for issue rows.
 func importFromLocalJSONLWithOpts(ctx context.Context, store storage.DoltStorage, localPath string, conflictSkip bool) (*importLocalResult, error) {
-	issues, configEntries, err := parseJSONLFile(localPath)
+	issues, configEntries, _, err := parseJSONLFile(localPath)
 	if err != nil {
 		return nil, err
 	}

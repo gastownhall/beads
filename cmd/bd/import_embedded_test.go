@@ -342,3 +342,97 @@ func TestEmbeddedImportConcurrent(t *testing.T) {
 	}
 	t.Logf("%d/%d import workers succeeded", successes, numWorkers)
 }
+
+// TestEmbeddedImportInvalidRecordNamesLine reproduces #4492: a single invalid
+// record must fail the import with an error that names its source line and
+// the validator's reason, rather than a bare rolled-back transaction.
+func TestEmbeddedImportInvalidRecordNamesLine(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt import tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "imbad")
+
+	jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+	now := time.Now().UTC()
+	writeJSONLFile(t, jsonlPath, []types.Issue{
+		{ID: "imbad-aaa", Title: "Valid A", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+		{ID: "imbad-bbb", Title: "Invalid B", Status: types.Status("verify"), IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+		{ID: "imbad-ccc", Title: "Valid C", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+	})
+
+	cmd := exec.Command(bd, "import", jsonlPath)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	out := stdout.String() + stderr.String()
+	if err == nil {
+		t.Fatalf("bd import of a file with an invalid status should fail by default; output:\n%s", out)
+	}
+	if !strings.Contains(out, "line 2") || !strings.Contains(out, "invalid status: verify") {
+		t.Fatalf("import error should name the offending line (line 2) and reason (invalid status: verify); got:\n%s", out)
+	}
+	if !strings.Contains(out, "nothing was imported") {
+		t.Errorf("import error should say plainly that nothing was imported; got:\n%s", out)
+	}
+	// GH#4492's core promise: a strict failure means NO import data was
+	// written — not the valid rows before the bad one, nothing.
+	if issues := bdListJSONAllowError(t, bd, dir); len(issues) != 0 {
+		t.Errorf("a failed import must not leave rows behind; found %d issues", len(issues))
+	}
+	for _, id := range []string{"imbad-aaa", "imbad-bbb", "imbad-ccc"} {
+		cmd := exec.Command(bd, "show", id)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		if _, _, err := runCommandBuffers(t, cmd); err == nil {
+			t.Errorf("bd show %s should fail after a failed import; the row must not exist", id)
+		}
+	}
+}
+
+// TestEmbeddedImportInvalidRecordAcrossChunks pins the chunking half of
+// #4492: the screen runs before the FIRST chunk is written, so a file whose
+// invalid record sits after a full chunk's worth of valid ones (chunk size is
+// importChunkSize = 250) still imports nothing — the pre-screen fix, not a
+// per-chunk rollback, is what makes the failure atomic.
+func TestEmbeddedImportInvalidRecordAcrossChunks(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt import tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "imch")
+
+	jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+	now := time.Now().UTC()
+	rows := make([]types.Issue, 0, 301)
+	for i := 1; i <= 300; i++ {
+		rows = append(rows, types.Issue{
+			ID: fmt.Sprintf("imch-%03d", i), Title: "Valid row", Status: types.StatusOpen, IssueType: types.TypeTask,
+			CreatedAt: now, UpdatedAt: now,
+		})
+	}
+	rows = append(rows, types.Issue{
+		ID: "imch-bad", Title: "Invalid row", Status: types.Status("deferred-forever"), IssueType: types.TypeTask,
+		CreatedAt: now, UpdatedAt: now,
+	})
+	writeJSONLFile(t, jsonlPath, rows)
+
+	cmd := exec.Command(bd, "import", jsonlPath)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	out := stdout.String() + stderr.String()
+	if err == nil {
+		t.Fatalf("bd import of a chunked file with an invalid status should fail; output:\n%s", out)
+	}
+	if !strings.Contains(out, "line 301") {
+		t.Fatalf("import error should name the offending line (line 301, after a full chunk of valid rows); got:\n%s", out)
+	}
+	if issues := bdListJSONAllowError(t, bd, dir); len(issues) != 0 {
+		t.Errorf("a failed chunked import must not commit earlier chunks; found %d issues", len(issues))
+	}
+}

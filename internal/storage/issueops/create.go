@@ -3,6 +3,7 @@ package issueops
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	gmssql "github.com/dolthub/go-mysql-server/sql"
 	"github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -771,7 +773,30 @@ func PrepareIssueForInsert(issue *types.Issue, customStatuses, customTypes []str
 		return fmt.Errorf("metadata validation failed for issue %s: %w", issue.ID, err)
 	}
 
-	// Normalize timestamps to UTC, defaulting to now.
+	normalizeIssueForInsert(issue)
+
+	if err := issue.ValidateWithCustom(customStatuses, customTypes); err != nil {
+		return fmt.Errorf("validation failed for issue %s: %w", issue.ID, err)
+	}
+	if issue.ContentHash == "" {
+		issue.ContentHash = issue.ComputeContentHash()
+	}
+	// arrival_seq is assigned by storage alone, at the journal's create seam
+	// (stampArrivalSeqInTx). A value carried in from a caller, an import, or a
+	// row being moved between planes is never stored, and the struct must not
+	// claim one the row does not have; the create record hands the row's own
+	// stamp back (RecordCreateEventInTx).
+	issue.ArrivalSeq = 0
+	return nil
+}
+
+// normalizeIssueForInsert applies PrepareIssueForInsert's timestamp treatment
+// to the issue it is given: created_at/updated_at default to now and normalize
+// to UTC, optional timestamps normalize to UTC, and a closed row without
+// closed_at gets one. Split out of PrepareIssueForInsert so the import
+// pre-screen (ValidateIssueForInsert) can share the exact normalization on a
+// copy instead of restating it. MUTATES the issue it is handed.
+func normalizeIssueForInsert(issue *types.Issue) {
 	now := time.Now().UTC()
 	if issue.CreatedAt.IsZero() {
 		issue.CreatedAt = now
@@ -797,20 +822,43 @@ func PrepareIssueForInsert(issue *types.Issue, customStatuses, customTypes []str
 		closedAt := maxTime.Add(time.Second)
 		issue.ClosedAt = &closedAt
 	}
+}
 
-	if err := issue.ValidateWithCustom(customStatuses, customTypes); err != nil {
+// ValidateIssueForInsert reports the rejection PrepareIssueForInsert would
+// return for this row at write time, without mutating the row or any pointee:
+// it applies the same normalization to a SHALLOW COPY and runs the same
+// validation the writer runs. The import pre-screen calls this so a record the
+// writer would refuse is refused BEFORE any import write, with the writer's
+// own error text (GH#4492) — and so the writer's side effects (content hash,
+// arrival_seq, timestamp stamping on the stored row) stay in the writer.
+//
+// The copy is safe against pointee mutation: every normalization step
+// (NormalizeOptionalTimestampsToUTC, the closed_at fill) assigns new pointers
+// to the copy's own fields rather than writing through the ones it shares with
+// the original, so the caller's timestamps, slices and Metadata bytes are
+// untouched.
+func ValidateIssueForInsert(issue *types.Issue, customStatuses, customTypes []string) error {
+	if err := validateMetadataForInsertScreen(issue.Metadata); err != nil {
+		return fmt.Errorf("metadata validation failed for issue %s: %w", issue.ID, err)
+	}
+	probe := *issue
+	normalizeIssueForInsert(&probe)
+	if err := probe.ValidateWithCustom(customStatuses, customTypes); err != nil {
 		return fmt.Errorf("validation failed for issue %s: %w", issue.ID, err)
 	}
-	if issue.ContentHash == "" {
-		issue.ContentHash = issue.ComputeContentHash()
-	}
-	// arrival_seq is assigned by storage alone, at the journal's create seam
-	// (stampArrivalSeqInTx). A value carried in from a caller, an import, or a
-	// row being moved between planes is never stored, and the struct must not
-	// claim one the row does not have; the create record hands the row's own
-	// stamp back (RecordCreateEventInTx).
-	issue.ArrivalSeq = 0
 	return nil
+}
+
+// validateMetadataForInsertScreen runs the metadata-schema check the writer
+// runs, minus its warn-mode stderr output: the writer prints those warnings
+// when IT validates, and the screen runs before the writer, so screening must
+// not duplicate them. Error-mode failures are preserved verbatim so the screen
+// reports exactly what the writer would.
+func validateMetadataForInsertScreen(metadata json.RawMessage) error {
+	if config.MetadataValidationMode() == "warn" {
+		return nil
+	}
+	return ValidateMetadataIfConfigured(metadata)
 }
 
 // ValidateIssueIDPrefix validates that the issue ID matches the configured prefix

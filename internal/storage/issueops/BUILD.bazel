@@ -182,6 +182,7 @@ go_test(
         "id_coordination_test.go",
         "id_retention_test.go",
         "identity_parity_test.go",
+        "insert_validation_test.go",
         "journal_autoprune_test.go",
         "journal_completeness_test.go",
         "journal_prune_test.go",
