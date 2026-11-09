@@ -330,6 +330,7 @@ go_test(
         "queries_test.go",
         "readable_schema_open_test.go",
         "reader_contract_test.go",
+        "readonly_ignored_behind_repro_test.go",
         "readonly_server_policy_test.go",
         "ready_claimer_contract_test.go",
         "ready_counter_contract_test.go",
