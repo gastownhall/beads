@@ -250,8 +250,8 @@ func pollutionEdgeCount(t *testing.T, s *dolt.DoltStore, ids []string) int {
 // backup holds issue rows only, so deleting a hit that has dependency
 // records would lose edges no restore brings back. A high-confidence hit
 // with any incoming or outgoing record, of any type and including an
-// ephemeral dependent, is neither backed up nor deleted, its edges stay,
-// and the output says the links prevented cleanup.
+// ephemeral dependent or a NoHistory child, is neither backed up nor
+// deleted, its edges stay, and the output says the links prevented cleanup.
 func TestDoctorPollutionClean_SkipsLinkedHighConfidence(t *testing.T) {
 	tmpDir, s := pollutionCleanupWorkspace(t, "pck")
 	ctx := context.Background()
@@ -291,6 +291,13 @@ func TestDoctorPollutionClean_SkipsLinkedHighConfidence(t *testing.T) {
 	})
 	link("incoming from an ephemeral wisp", func(hit string) *types.Dependency {
 		return &types.Dependency{IssueID: wisp.ID, DependsOnID: hit, Type: types.DepBlocks}
+	})
+	link("parent of a NoHistory child", func(hit string) *types.Dependency {
+		child := &types.Issue{ID: hit + ".1", Title: "Child step", Status: types.StatusOpen, Priority: 3, IssueType: types.TypeTask, NoHistory: true}
+		if err := s.CreateIssue(ctx, child, "test"); err != nil {
+			t.Fatalf("CreateIssue(%q): %v", child.ID, err)
+		}
+		return &types.Dependency{IssueID: child.ID, DependsOnID: hit, Type: types.DepParentChild}
 	})
 
 	var linkedIDs []string
