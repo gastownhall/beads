@@ -810,7 +810,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// it here rather than silently creating the wrong workspace; downstream
 		// registrants supply their own workspace-creation path.
 		if backends.Registered(backendFlag) {
-			return fmt.Errorf("backend %q cannot be created by bd init; it can only open an existing workspace (bd init provisions \"dolt\", the default)", backendFlag)
+			if !backends.CanCreate(backendFlag) {
+				return fmt.Errorf("backend %q cannot be created by bd init; it can only open an existing workspace (bd init provisions \"dolt\", the default)", backendFlag)
+			}
+			initIfMissing, _ := cmd.Flags().GetBool("init-if-missing")
+			return runInitRegisteredBackend(cmd.Context(), backendFlag, prefix, quiet, initIfMissing)
 		}
 		for _, legacyFlag := range removedBackendInitFlags {
 			if cmd.Flags().Changed(legacyFlag.name) {

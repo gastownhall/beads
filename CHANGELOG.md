@@ -100,6 +100,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A registered storage backend can now be provisioned by `bd init`.** The
+  backend registry (`internal/storage/backends`) gains an optional `Create`
+  hook on `Backend`, with `backends.CanCreate` and `backends.Create` beside
+  `Lookup` and `Registered`. `bd init --backend=<name>` on a registered backend
+  that supplies the hook runs a minimal init: the existing-data guard, the
+  standard `.beads/.gitignore`, the backend's own store creation,
+  `metadata.json` naming the backend with a fresh project id, then the issue
+  prefix and the workspace identity written through the opened store. A
+  registered backend without the hook is still refused by name, as before, so
+  nothing changes for the `http` backend or for any registrant that only opens
+  workspaces something else created. This is the init half of the backend seam
+  GH#4547 describes; the Dolt init path is untouched.
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same
