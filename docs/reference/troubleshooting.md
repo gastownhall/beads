@@ -487,6 +487,65 @@ with a version is used without the check (logged under `BD_DEBUG`). In
 proxied-server mode a genuinely missing or broken `dolt` binary (not found,
 not executable, or the probe itself fails/times out) is a hard error.
 
+### Migration 0040 fails with "nothing to commit"
+
+A schema migration fails with the error below: `bd migrate schema`, or any
+command in a `bd` build that migrates the database when it opens it:
+
+```
+migration 0040_ignored_tables_also_nonlocal_tables.up.sql: Error 1105: nothing to commit
+```
+
+and the database stays at schema version 39. One known cause is Dolt's
+automatic transaction commits: with `behavior.dolt_transaction_commit: true`
+in the server's config, or the variable set on the server, every SQL
+statement is committed on its own, so the `DOLT_COMMIT` inside migration 0040
+finds nothing left to commit. The failed attempt leaves 0040's first row
+committed. Check the setting on the server:
+
+```sql
+SELECT @@GLOBAL.dolt_transaction_commit, @@SESSION.dolt_transaction_commit;
+```
+
+A `1` in either column means automatic transaction commits are on. This is
+separate from the Dolt 2.6.0 minimum above: a supported server can have the
+setting on too, so upgrading Dolt alone does not fix it.
+
+**Recover with a bd build that suspends the setting.** A `bd` whose
+changelog lists the `dolt_transaction_commit` fix for schema migrations turns
+the setting off for its own migration session and restores it afterwards; it
+never changes the server-wide setting. Run it against a supported Dolt, then
+migrate explicitly, since an existing database is not migrated without
+consent:
+
+```bash
+bd migrate schema
+```
+
+The migration clears the row the failed attempt left, runs 0040 again, and
+continues to the latest version.
+
+**With an older bd build**, an administrator can turn the setting off for the
+migration by hand. bd 1.2.0 or newer is required, because those builds clear
+the leftover row before 0040 runs again:
+
+```sql
+-- note the current value first; this affects new sessions of every client
+SET @@GLOBAL.dolt_transaction_commit = 0;
+```
+
+Then run `bd migrate schema` from a new `bd` process (sessions opened before
+the change keep the old value), and restore the previous value afterwards if
+it was `1`:
+
+```sql
+SET @@GLOBAL.dolt_transaction_commit = 1;
+```
+
+A `SET @@GLOBAL` change does not survive a server restart. If the setting
+comes from `behavior.dolt_transaction_commit` in the server's config file,
+changing it there takes effect only after a restart.
+
 ### Prefix routing: "proxy server store needs to be uow provider"
 
 A lookup routed through the orchestrator's `routes.jsonl` prefix routes
