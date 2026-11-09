@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
@@ -336,42 +337,131 @@ func TestDoctorPollutionClean_SkipsLinkedHighConfidence(t *testing.T) {
 	}
 }
 
-// fakePollutionEdges serves canned dependency records, or an error, to
-// selectPollutionCleanup.
-type fakePollutionEdges struct {
-	out, in       map[string][]*types.Dependency
-	outErr, inErr error
-	asked         [][]string
+// beadExists reports whether id is still stored on either plane: a NoHistory
+// bead lives in the wisps table, which issueExists does not read.
+func beadExists(t *testing.T, s *dolt.DoltStore, id string) bool {
+	t.Helper()
+	_, err := s.GetIssue(context.Background(), id)
+	if errors.Is(err, storage.ErrNotFound) {
+		return false
+	}
+	if err != nil {
+		t.Fatalf("GetIssue(%s): %v", id, err)
+	}
+	return true
 }
 
-func (f *fakePollutionEdges) GetDependencyRecordsForIssues(_ context.Context, ids []string) (map[string][]*types.Dependency, error) {
+// pollutionCommentCount returns how many comments ids carry.
+func pollutionCommentCount(t *testing.T, s *dolt.DoltStore, ids []string) int {
+	t.Helper()
+	counts, err := s.GetCommentCounts(context.Background(), ids)
+	if err != nil {
+		t.Fatalf("GetCommentCounts: %v", err)
+	}
+	n := 0
+	for _, c := range counts {
+		n += c
+	}
+	return n
+}
+
+// TestDoctorPollutionClean_SkipsCommentedHighConfidence pins the comment
+// half of the cleanup guard: the backup does not carry comments and deleting
+// an issue drops them, so a high-confidence hit with a comment, including a
+// NoHistory hit whose comments live in the wisp plane, is neither backed up
+// nor deleted, its comments stay, and the output says the comments
+// prevented cleanup.
+func TestDoctorPollutionClean_SkipsCommentedHighConfidence(t *testing.T) {
+	tmpDir, s := pollutionCleanupWorkspace(t, "pcm")
+	ctx := context.Background()
+
+	uncommented := seedPollutionIssue(t, s, "Test issue", "")
+	commented := seedPollutionIssue(t, s, "Test issue: flaky sync on CI", "")
+	noHistory := &types.Issue{Title: "Test issue", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, NoHistory: true}
+	if err := s.CreateIssue(ctx, noHistory, "test"); err != nil {
+		t.Fatalf("CreateIssue(NoHistory): %v", err)
+	}
+	commentedIDs := []string{commented, noHistory.ID}
+	for _, id := range commentedIDs {
+		if _, err := s.AddIssueComment(ctx, id, "test", "Seen again on the nightly run."); err != nil {
+			t.Fatalf("AddIssueComment(%s): %v", id, err)
+		}
+	}
+	if got := pollutionCommentCount(t, s, commentedIDs); got != len(commentedIDs) {
+		t.Fatalf("seeded %d comments, read back %d", len(commentedIDs), got)
+	}
+
+	out, code := bdRunRaw(t, buildBDForInitTests(t), tmpDir, doctorMaxRowsEnv(), "doctor", "--check=pollution", "--clean", "--yes")
+	if code != 0 {
+		t.Fatalf("bd doctor --check=pollution --clean --yes exited %d\n%s", code, out)
+	}
+
+	if beadExists(t, s, uncommented) {
+		t.Errorf("uncommented high-confidence hit %s survived cleanup", uncommented)
+	}
+	for _, id := range commentedIDs {
+		if !beadExists(t, s, id) {
+			t.Errorf("hit %s was deleted; its comments must prevent cleanup", id)
+		}
+		if !strings.Contains(out, "Skipping "+id+": comments prevent cleanup") {
+			t.Errorf("output does not say comments prevented cleanup of %s", id)
+		}
+	}
+	if got := pollutionBackupIDs(t, tmpDir); !slices.Equal(got, []string{uncommented}) {
+		t.Errorf("backup IDs = %v, want exactly [%s]", got, uncommented)
+	}
+	if got := pollutionCommentCount(t, s, commentedIDs); got != len(commentedIDs) {
+		t.Errorf("comments on commented hits after cleanup = %d, want %d unchanged", got, len(commentedIDs))
+	}
+	if t.Failed() {
+		t.Logf("output:\n%s", out)
+	}
+}
+
+// fakePollutionGuard serves canned dependency records and comment counts, or
+// an error, to selectPollutionCleanup.
+type fakePollutionGuard struct {
+	out, in                   map[string][]*types.Dependency
+	comments                  map[string]int
+	outErr, inErr, commentErr error
+	asked                     [][]string
+}
+
+func (f *fakePollutionGuard) GetDependencyRecordsForIssues(_ context.Context, ids []string) (map[string][]*types.Dependency, error) {
 	f.asked = append(f.asked, ids)
 	return f.out, f.outErr
 }
 
-func (f *fakePollutionEdges) GetDependentRecordsForIssues(_ context.Context, ids []string) (map[string][]*types.Dependency, error) {
+func (f *fakePollutionGuard) GetDependentRecordsForIssues(_ context.Context, ids []string) (map[string][]*types.Dependency, error) {
 	f.asked = append(f.asked, ids)
 	return f.in, f.inErr
 }
 
-// TestSelectPollutionCleanup_LinkLookup pins the link guard's selection:
+func (f *fakePollutionGuard) GetCommentCounts(_ context.Context, ids []string) (map[string]int, error) {
+	f.asked = append(f.asked, ids)
+	return f.comments, f.commentErr
+}
+
+// TestSelectPollutionCleanup_LinkLookup pins the cleanup guard's selection:
 // only high-confidence hits are looked up, a hit with an outgoing or an
-// incoming record is skipped, and a failed lookup in either direction
-// selects nothing, so cleanup stops before any prompt, backup or delete.
+// incoming record or with a comment is skipped, and a failed lookup of
+// either direction or of the comments selects nothing, so cleanup stops
+// before any prompt, backup or delete.
 func TestSelectPollutionCleanup_LinkLookup(t *testing.T) {
 	hit := func(id string, score float64) pollutionResult {
 		return pollutionResult{issue: &types.Issue{ID: id}, score: score}
 	}
-	polluted := []pollutionResult{hit("h-free", 1.4), hit("h-out", 1.4), hit("h-in", 1.3), hit("m-1", 0.8)}
+	polluted := []pollutionResult{hit("h-free", 1.4), hit("h-out", 1.4), hit("h-in", 1.3), hit("h-comment", 1.4), hit("m-1", 0.8)}
 	edge := func(from, to string) []*types.Dependency {
 		return []*types.Dependency{{IssueID: from, DependsOnID: to, Type: types.DepRelated}}
 	}
 
-	edges := &fakePollutionEdges{
-		out: map[string][]*types.Dependency{"h-out": edge("h-out", "ext:other:x")},
-		in:  map[string][]*types.Dependency{"h-in": edge("wisp-1", "h-in")},
+	guard := &fakePollutionGuard{
+		out:      map[string][]*types.Dependency{"h-out": edge("h-out", "ext:other:x")},
+		in:       map[string][]*types.Dependency{"h-in": edge("wisp-1", "h-in")},
+		comments: map[string]int{"h-comment": 2, "m-1": 1},
 	}
-	deletable, skipped, err := selectPollutionCleanup(context.Background(), edges, polluted)
+	deletable, skipped, err := selectPollutionCleanup(context.Background(), guard, polluted)
 	if err != nil {
 		t.Fatalf("selectPollutionCleanup: %v", err)
 	}
@@ -387,22 +477,29 @@ func TestSelectPollutionCleanup_LinkLookup(t *testing.T) {
 			t.Errorf("%s skip reason = %q, want dependency links", id, reasons[id])
 		}
 	}
+	if want := "comments prevent cleanup (2 comment(s))"; !strings.HasPrefix(reasons["h-comment"], want) {
+		t.Errorf("h-comment skip reason = %q, want it to start %q", reasons["h-comment"], want)
+	}
 	if !strings.Contains(reasons["m-1"], "manual review") {
 		t.Errorf("m-1 skip reason = %q, want manual review", reasons["m-1"])
 	}
-	for _, ids := range edges.asked {
-		if !slices.Equal(ids, []string{"h-free", "h-out", "h-in"}) {
+	if len(guard.asked) != 3 {
+		t.Errorf("made %d lookups, want 3: outgoing, incoming and comments", len(guard.asked))
+	}
+	for _, ids := range guard.asked {
+		if !slices.Equal(ids, []string{"h-free", "h-out", "h-in", "h-comment"}) {
 			t.Errorf("looked up %v, want the high-confidence hits only", ids)
 		}
 	}
 
-	for _, broken := range []*fakePollutionEdges{
+	for _, broken := range []*fakePollutionGuard{
 		{outErr: errors.New("outbound read failed")},
 		{inErr: errors.New("inbound read failed")},
+		{commentErr: errors.New("comment read failed")},
 	} {
 		deletable, _, err := selectPollutionCleanup(context.Background(), broken, polluted)
 		if err == nil || len(deletable) != 0 {
-			t.Errorf("lookup failure (%v/%v): deletable %v, err %v; want nothing selected and an error", broken.outErr, broken.inErr, deletable, err)
+			t.Errorf("lookup failure (%v/%v/%v): deletable %v, err %v; want nothing selected and an error", broken.outErr, broken.inErr, broken.commentErr, deletable, err)
 		}
 	}
 }

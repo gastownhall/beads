@@ -109,13 +109,13 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 	}
 
 	if !clean {
-		fmt.Printf("Run 'bd doctor --check=pollution --clean' to delete the high-confidence issues that have no dependency links (with confirmation); the rest are for manual review.\n")
+		fmt.Printf("Run 'bd doctor --check=pollution --clean' to delete the high-confidence issues that have no dependency links or comments (with confirmation); the rest are for manual review.\n")
 		return nil
 	}
 
 	deletable, skipped, err := selectPollutionCleanup(ctx, store, polluted)
 	if err != nil {
-		return HandleError("checking dependency links before cleanup: %v", err)
+		return HandleError("checking dependency links and comments before cleanup: %v", err)
 	}
 	for _, skip := range skipped {
 		fmt.Printf("Skipping %s: %s\n", skip.issue.ID, skip.reason)
@@ -163,21 +163,23 @@ type pollutionSkip struct {
 	reason string
 }
 
-// pollutionEdgeReader is the batched dependency read the cleanup guard needs.
-type pollutionEdgeReader interface {
+// pollutionGuardReader is the batched reads the cleanup guard needs.
+type pollutionGuardReader interface {
 	GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error)
 	GetDependentRecordsForIssues(ctx context.Context, targetIDs []string) (map[string][]*types.Dependency, error)
+	GetCommentCounts(ctx context.Context, issueIDs []string) (map[string]int, error)
 }
 
 // selectPollutionCleanup splits reported hits into those cleanup may back up
 // and delete and those it leaves for review. Only high-confidence hits are
 // deletable: a medium-confidence hit rests on a single title signal, which
 // real work can carry. A high-confidence hit with any dependency record, in
-// either direction and of any type, is skipped too: the backup holds issue
-// rows only, so deleting it would lose edges no restore brings back
-// (GH#5025). A failed lookup selects nothing. The guard covers the hits as
-// read here; it does not lock out a concurrent edit.
-func selectPollutionCleanup(ctx context.Context, edges pollutionEdgeReader, polluted []pollutionResult) (deletable []pollutionResult, skipped []pollutionSkip, err error) {
+// either direction and of any type, or with any comment is skipped too: the
+// backup holds issue rows only, without their edges or comments, so deleting
+// it would lose data no restore brings back (GH#5025). A failed lookup
+// selects nothing. The guard covers the hits as read here; it does not lock
+// out a concurrent edit.
+func selectPollutionCleanup(ctx context.Context, guard pollutionGuardReader, polluted []pollutionResult) (deletable []pollutionResult, skipped []pollutionSkip, err error) {
 	var high []pollutionResult
 	var highIDs []string
 	for _, p := range polluted {
@@ -192,19 +194,30 @@ func selectPollutionCleanup(ctx context.Context, edges pollutionEdgeReader, poll
 		return nil, skipped, nil
 	}
 
-	outgoing, err := edges.GetDependencyRecordsForIssues(ctx, highIDs)
+	outgoing, err := guard.GetDependencyRecordsForIssues(ctx, highIDs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading outgoing dependencies: %w", err)
 	}
-	incoming, err := edges.GetDependentRecordsForIssues(ctx, highIDs)
+	incoming, err := guard.GetDependentRecordsForIssues(ctx, highIDs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading incoming dependencies: %w", err)
+	}
+	comments, err := guard.GetCommentCounts(ctx, highIDs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading comment counts: %w", err)
 	}
 	for _, p := range high {
 		if n := len(outgoing[p.issue.ID]) + len(incoming[p.issue.ID]); n > 0 {
 			skipped = append(skipped, pollutionSkip{
 				issue:  p.issue,
 				reason: fmt.Sprintf("dependency links prevent cleanup (%d link(s)); review manually", n),
+			})
+			continue
+		}
+		if n := comments[p.issue.ID]; n > 0 {
+			skipped = append(skipped, pollutionSkip{
+				issue:  p.issue,
+				reason: fmt.Sprintf("comments prevent cleanup (%d comment(s)); review manually", n),
 			})
 			continue
 		}
@@ -219,6 +232,6 @@ func init() {
 	doctorCmd.Flags().BoolVar(&checkHealthMode, "check-health", false, "Quick health check for git hooks (silent on success)")
 	doctorCmd.Flags().StringVarP(&doctorOutput, "output", "o", "", "Export diagnostics to JSON file")
 	doctorCmd.Flags().StringVar(&doctorCheckFlag, "check", "", "Run specific check in detail (e.g., 'pollution')")
-	doctorCmd.Flags().BoolVar(&doctorClean, "clean", false, "For pollution check: delete unlinked high-confidence test issues")
+	doctorCmd.Flags().BoolVar(&doctorClean, "clean", false, "For pollution check: delete high-confidence test issues that have no links or comments")
 	doctorCmd.Flags().BoolVar(&doctorDeep, "deep", false, "Validate full graph integrity")
 }
