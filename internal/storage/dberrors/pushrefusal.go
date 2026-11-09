@@ -19,9 +19,11 @@ import "strings"
 // The match is on the lowercased message, like IsAncestorPKMismatch, so it
 // survives every tier that flattens errors to text (http, proxied, embedded,
 // CLI CombinedOutput). Two look-alikes are not this refusal:
-//   - bd's pre-push fsck (dolt.ErrDanglingReference, "dangling chunk
-//     reference") aborts before the push reaches the remote, even when the
-//     fsck output it quotes repeats Dolt's phrase;
+//   - bd's pre-push fsck aborts before the push reaches the remote, even when
+//     the fsck output it quotes repeats Dolt's phrase: a finding
+//     (dolt.ErrDanglingReference, "dangling chunk reference") and a check
+//     that failed, timed out or was interrupted ("pre-push integrity check
+//     …") alike;
 //   - Dolt's NBS form, "dangling ref: found dangling references to …"
 //     (store/nbs/table_set.go), can come from the local store as well as a
 //     file-remote sink, so it is not evidence about the remote.
@@ -30,7 +32,8 @@ func IsRemoteDanglingReference(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "dangling chunk reference") {
+	if strings.Contains(msg, "dangling chunk reference") ||
+		strings.Contains(msg, "pre-push integrity check") {
 		return false
 	}
 	return strings.Count(msg, "found dangling references to") >
