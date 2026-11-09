@@ -184,6 +184,7 @@ go_test(
         "served_readycounter_test.go",
         "served_relations_test.go",
         "served_releaser_test.go",
+        "served_row_version_test.go",
         "served_test.go",
         "served_unlimited_read_test.go",
         "served_wrong_server_test.go",
