@@ -212,8 +212,10 @@ func TestPersistDependenciesClassifiesBareCrossPrefixTargetAsExternal(t *testing
 	}
 	var skipped []string
 
-	// A bare target with a different issue prefix is external. In particular,
-	// persistence must not probe either local target table before this insert.
+	// A bare target with a different prefix remains external once local
+	// issue and wisp lookups establish that no such target exists here.
+	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").WithArgs("mkt-456").WillReturnRows(sqlmock.NewRows([]string{"1"}))
+	mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\? LIMIT 1").WithArgs("mkt-456").WillReturnRows(sqlmock.NewRows([]string{"1"}))
 	mock.ExpectExec("INSERT INTO dependencies \\(id, issue_id, depends_on_external").
 		WithArgs(depid.New("sym-3su", "mkt-456"), "sym-3su", "mkt-456", types.DepRelated, "tester", sqlmock.AnyArg(), "{}", "").
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -439,8 +441,11 @@ func TestPersistDependenciesSkipsHierarchyValidationAcrossPrefixes(t *testing.T)
 		}},
 	}
 
-	// No target or ancestors query: target existence and hierarchy cannot be
-	// validated locally across rig prefixes.
+	// A foreign target is external only after checking this database.
+	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+		WithArgs("bb-target").WillReturnRows(sqlmock.NewRows([]string{"1"}))
+	mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\? LIMIT 1").
+		WithArgs("bb-target").WillReturnRows(sqlmock.NewRows([]string{"1"}))
 	mock.ExpectQuery("WITH RECURSIVE reachable").
 		WithArgs("bb-target", "aa-source").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))

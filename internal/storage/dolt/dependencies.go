@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -43,16 +42,13 @@ func (s *DoltStore) addDependencyWithOptions(ctx context.Context, dep *types.Dep
 		return s.addWispDependency(ctx, dep, actor, isCrossPrefix, addOpts.EmitEvent)
 	}
 
+	kind, err := issueops.ClassifyDepTarget(ctx, s.db, s.db, dep)
+	if err != nil {
+		return err
+	}
 	targetTable := "issues"
-	kind := issueops.DepTargetIssue
-	switch {
-	case isCrossPrefix, strings.HasPrefix(dep.DependsOnID, "external:"):
-		kind = issueops.DepTargetExternal
-	default:
-		if s.isActiveWisp(ctx, dep.DependsOnID) {
-			targetTable = "wisps"
-			kind = issueops.DepTargetWisp
-		}
+	if kind == issueops.DepTargetWisp {
+		targetTable = "wisps"
 	}
 
 	var written issueops.DependencyWriteResult

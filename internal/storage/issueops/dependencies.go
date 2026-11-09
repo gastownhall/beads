@@ -105,31 +105,51 @@ func depTargetIn(alias, placeholders string) string {
 	return depTargetExpr(alias) + " IN (" + placeholders + ")"
 }
 
-// IsExternalDepTarget reports whether a dependency target is one this database
-// cannot hold a row for. Two shapes qualify: an "external:" reference, which
-// names something outside beads entirely, and a target whose id prefix names
-// ANOTHER REPOSITORY, which lives in that rig's database and not this one.
-// Both belong in depends_on_external — the one target column carrying no
-// foreign key into issues — so this is the single rule every backend must
-// classify by, whether it writes through a tx (ClassifyDepTarget) or through
-// the domain repository (db.pickDepTargetColumn).
+// IsExternalDepTarget reports only whether a target MAY be external.
+// Prefix mismatch is a hint, not proof: shared databases can contain multiple
+// prefixes. Writers must use ClassifyDepTarget instead.
 func IsExternalDepTarget(sourceID, targetID string) bool {
 	return strings.HasPrefix(targetID, "external:") ||
 		types.ExtractPrefix(sourceID) != types.ExtractPrefix(targetID)
 }
 
-// ClassifyDepTarget picks the typed target column for an edge. isCrossPrefix is
-// an override for callers that already know the answer from a cached prefix
-// set; leaving it false is safe, because IsExternalDepTarget re-derives the
-// same comparison from the edge itself.
-func ClassifyDepTarget(ctx context.Context, tx DBTX, dep *types.Dependency, isCrossPrefix bool) DepTargetKind {
-	if isCrossPrefix || IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
+// DepTargetKindFromPresence is the single target-column classification policy.
+// A missing same-prefix target remains an issue FK error; a missing foreign-
+// prefix target remains an external reference, preserving both prior contracts.
+func DepTargetKindFromPresence(sourceID, targetID string, issueExists, wispExists bool) DepTargetKind {
+	if strings.HasPrefix(targetID, "external:") {
 		return DepTargetExternal
 	}
-	if IsActiveWispInTx(ctx, tx, dep.DependsOnID) {
+	if wispExists {
 		return DepTargetWisp
 	}
-	return DepTargetIssue
+	if issueExists || types.ExtractPrefix(sourceID) == types.ExtractPrefix(targetID) {
+		return DepTargetIssue
+	}
+	return DepTargetExternal
+}
+
+// ClassifyDepTarget resolves the target in this database before interpreting
+// a prefix mismatch as a foreign reference. Separate runners preserve visibility
+// of uncommitted wisps and regular issues in server-mode split transactions.
+func ClassifyDepTarget(ctx context.Context, issueRunner, wispRunner DBTX, dep *types.Dependency) (DepTargetKind, error) {
+	if strings.HasPrefix(dep.DependsOnID, "external:") {
+		return DepTargetExternal, nil
+	}
+	wispExists := IsActiveWispInTx(ctx, wispRunner, dep.DependsOnID)
+	issueExists := false
+	if !wispExists && types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID) {
+		var found int
+		err := issueRunner.QueryRowContext(ctx, "SELECT 1 FROM issues WHERE id = ? LIMIT 1", dep.DependsOnID).Scan(&found)
+		switch {
+		case err == nil:
+			issueExists = true
+		case errors.Is(err, sql.ErrNoRows):
+		default:
+			return DepTargetExternal, fmt.Errorf("classify dependency target %s: %w", dep.DependsOnID, err)
+		}
+	}
+	return DepTargetKindFromPresence(dep.IssueID, dep.DependsOnID, issueExists, wispExists), nil
 }
 
 // AddDependencyOpts configures AddDependencyInTx behavior.
@@ -151,8 +171,7 @@ type AddDependencyOpts struct {
 	// dependency tables; edge storage is source-routed, so same-class endpoints
 	// can still have mixed-table interior paths.
 	DepTables []string
-	// IsCrossPrefix is true when source and target have different prefixes,
-	// meaning the target lives in another rig's database.
+	// IsCrossPrefix is a legacy hint, not evidence of an external target.
 	IsCrossPrefix bool
 	// SkipCycleCheck skips the recursive pre-insert cycle check for callers
 	// that intentionally trade validation cost for bulk graph wiring speed.
@@ -262,14 +281,22 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		}
 	}
 
-	// Auto-detect target routing if not provided (skip for external/cross-prefix).
-	targetTable := opts.TargetTable
-	if targetTable == "" && !strings.HasPrefix(dep.DependsOnID, "external:") && !opts.IsCrossPrefix {
-		targetIsWisp := IsActiveWispInTx(ctx, tx, dep.DependsOnID)
-		targetTable, _, _, _ = WispTableRouting(targetIsWisp)
+	var kind DepTargetKind
+	if opts.TargetKind != nil {
+		kind = *opts.TargetKind
+	} else {
+		var err error
+		kind, err = ClassifyDepTarget(ctx, tx, tx, dep)
+		if err != nil {
+			return false, err
+		}
 	}
+	targetTable := opts.TargetTable
 	if targetTable == "" {
 		targetTable = "issues"
+		if kind == DepTargetWisp {
+			targetTable = "wisps"
+		}
 	}
 
 	depTables := opts.DepTables
@@ -298,7 +325,7 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	switch {
 	case opts.PrecheckedTarget != nil:
 		targetType = opts.PrecheckedTarget.IssueType
-	case !strings.HasPrefix(dep.DependsOnID, "external:") && !opts.IsCrossPrefix:
+	case kind != DepTargetExternal:
 		//nolint:gosec // G201: targetTable is from WispTableRouting ("issues" or "wisps")
 		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT issue_type FROM %s WHERE id = ?`, targetTable), dep.DependsOnID).Scan(&targetType); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -320,12 +347,6 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		}
 	}
 
-	var kind DepTargetKind
-	if opts.TargetKind != nil {
-		kind = *opts.TargetKind
-	} else {
-		kind = ClassifyDepTarget(ctx, tx, dep, opts.IsCrossPrefix)
-	}
 	targetCol := kind.Column()
 
 	// Check for existing dependency between the same pair. Use the resolved

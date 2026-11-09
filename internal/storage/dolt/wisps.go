@@ -624,7 +624,10 @@ func (s *DoltStore) addWispDependency(ctx context.Context, dep *types.Dependency
 	clearJournalScope := s.scopeEventsJournalTransaction(tx)
 	defer clearJournalScope()
 
-	kind := issueops.ClassifyDepTarget(ctx, tx, dep, isCrossPrefix)
+	kind, err := issueops.ClassifyDepTarget(ctx, s.db, tx, dep)
+	if err != nil {
+		return err
+	}
 	// Wisp source/event tables are dolt_ignored (committed with the SQL tx, not
 	// via selective doltAddAndCommit), so the event-written flag is not needed
 	// here; only a durable is_blocked flip needs a Dolt commit.

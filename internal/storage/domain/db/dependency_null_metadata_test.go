@@ -57,3 +57,38 @@ func TestDependencyInsertReadsNullStoredMetadataAsEmptyObject(t *testing.T) {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }
+
+func TestPickDepTargetColumnCrossPrefixLocal(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		wisp, issue bool
+		want        string
+	}{
+		{"local issue", false, true, "depends_on_issue_id"},
+		{"local wisp", true, false, "depends_on_wisp_id"},
+		{"foreign", false, false, "depends_on_external"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mock, repo := newMockDependencyRepo(t)
+			wispRows := sqlmock.NewRows([]string{"1"})
+			if tc.wisp {
+				wispRows.AddRow(1)
+			}
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps WHERE id = ? LIMIT 1")).WithArgs("b-target").WillReturnRows(wispRows)
+			if !tc.wisp {
+				issueRows := sqlmock.NewRows([]string{"1"})
+				if tc.issue {
+					issueRows.AddRow(1)
+				}
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM issues WHERE id = ? LIMIT 1")).WithArgs("b-target").WillReturnRows(issueRows)
+			}
+			got, err := repo.pickDepTargetColumn(t.Context(), "a-source", "b-target")
+			if err != nil || got != tc.want {
+				t.Fatalf("pickDepTargetColumn = %q, %v; want %q", got, err, tc.want)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

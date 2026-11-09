@@ -167,6 +167,11 @@ cycles before committing.
 
 ## Cross-Repo Dependencies
 
+A target that exists as an issue or active wisp in the **current database** is
+local even if its ID uses another prefix. Such `blocks` edges affect `bd ready`,
+`bd blocked`, and `bd ready --explain`. Only absent cross-prefix IDs and
+explicit `external:` references are stored as external targets.
+
 Dependencies can reference issues in other beads rigs:
 
 ```bash

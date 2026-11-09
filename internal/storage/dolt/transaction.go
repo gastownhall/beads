@@ -987,16 +987,13 @@ func (t *doltTransaction) AddDependencyWithOptions(ctx context.Context, dep *typ
 	}
 
 	isCrossPrefix := isCrossPrefixDep(dep.IssueID, dep.DependsOnID)
+	kind, err := issueops.ClassifyDepTarget(ctx, t.txFor("issues"), t.txFor("wisps"), dep)
+	if err != nil {
+		return err
+	}
 	targetTable := "issues"
-	kind := issueops.DepTargetIssue
-	switch {
-	case isCrossPrefix, strings.HasPrefix(dep.DependsOnID, "external:"):
-		kind = issueops.DepTargetExternal
-	default:
-		if t.isActiveWisp(ctx, dep.DependsOnID) {
-			targetTable = "wisps"
-			kind = issueops.DepTargetWisp
-		}
+	if kind == issueops.DepTargetWisp {
+		targetTable = "wisps"
 	}
 
 	opts := issueops.AddDependencyOpts{
