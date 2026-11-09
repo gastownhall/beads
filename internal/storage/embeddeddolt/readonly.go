@@ -26,3 +26,16 @@ var ErrReadOnly = errors.New("embeddeddolt: store is read-only")
 // failed preview open, which it refuses. errors.Is(err, os.ErrNotExist) alone
 // cannot: a dial to a unix socket nothing listens on satisfies it too.
 var ErrNoEmbeddedDatabase = errors.New("embeddeddolt: no embedded database")
+
+// ErrOpenTimeout is returned by OpenSQL when its retry budget —
+// BEADS_EMBEDDED_OPEN_TIMEOUT, 30s by default — runs out while another
+// process or open handle may hold the database, and the caller's context
+// carried no deadline of its own (the caller's deadline always takes
+// precedence over the budget).
+//
+// Exported, and declared here without a cgo build tag for the same reason
+// as ErrReadOnly and ErrNoEmbeddedDatabase: callers outside this package
+// have to tell "the open waited its budget and gave up" apart from every
+// other failed open, so a command can name the knob instead of surfacing
+// the driver's last lock error.
+var ErrOpenTimeout = errors.New("embeddeddolt: open retry budget exhausted")

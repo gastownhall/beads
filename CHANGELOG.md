@@ -1226,6 +1226,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An embedded open that cannot get the database no longer waits forever.**
+  In embedded mode, when another process or open handle held the database
+  (a lock, a wedged `bd serve`), an open with no deadline of its own —
+  every ordinary CLI command — waited in the driver's retry backoff until
+  the context was cancelled, which for a CLI context never happens: the
+  command hung. Embedded opens now bound their retries with a 30-second
+  budget when the caller carries no deadline, and an open that gives up
+  fails with `embeddeddolt: open retry budget exhausted`, naming the
+  database directory and the `BEADS_EMBEDDED_OPEN_TIMEOUT` variable that
+  raises the budget (durations like `2m` or bare seconds like `90`;
+  anything unset, empty, invalid or non-positive keeps the default). A
+  deadline the caller already carries stays authoritative — the budget is
+  never applied to it. The budget ends the retry loop, not a running
+  attempt: a single slow attempt (a large database's first open, a cold
+  cache) still runs undisturbed, and the open may give up before the full
+  budget is waited, on the first wait that would overshoot it.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
