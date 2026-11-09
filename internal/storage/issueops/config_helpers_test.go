@@ -2,11 +2,17 @@ package issueops
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -388,3 +394,168 @@ func TestCustomTypesYAMLFallback(t *testing.T) {
 type errSentinel string
 
 func (e errSentinel) Error() string { return string(e) }
+
+// withCustomVocabularyYAML isolates the process config with a throwaway
+// .beads/config.yaml declaring status.custom and/or types.custom, with HOME
+// and XDG_CONFIG_HOME redirected so no user-level config can leak in. The
+// config package is process-global, so these tests never run in parallel.
+func withCustomVocabularyYAML(t *testing.T, statusCSV, typesCSV string) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(dir, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
+	t.Setenv("BEADS_DIR", "")
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	var b strings.Builder
+	if statusCSV != "" {
+		fmt.Fprintf(&b, "status:\n  custom: %q\n", statusCSV)
+	}
+	if typesCSV != "" {
+		fmt.Fprintf(&b, "types:\n  custom: %q\n", typesCSV)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(b.String()), 0o644); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+	t.Chdir(dir)
+	config.ResetForTesting()
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	t.Cleanup(config.ResetForTesting)
+}
+
+const (
+	combinedStatusesQuery = "SELECT name, category FROM custom_statuses ORDER BY name"
+	combinedTypesQuery    = "SELECT name FROM custom_types ORDER BY name"
+	combinedConfigQuery   = "SELECT `key`, value FROM config WHERE `key` IN (?,?)"
+)
+
+// resolveCombined runs ResolveCustomConfigInTx over the mocked transaction,
+// rolling back and asserting every queued SQL expectation was met.
+func resolveCombined(t *testing.T, tx *sql.Tx) (statuses []types.CustomStatus, customTypes []string, err error) {
+	t.Helper()
+	statuses, customTypes, err = ResolveCustomConfigInTx(context.Background(), tx)
+	rollbackErr := tx.Rollback()
+	if rollbackErr != nil {
+		t.Errorf("rollback: %v", rollbackErr)
+	}
+	return statuses, customTypes, err
+}
+
+// TestResolveCustomConfigInTxPropagatesReadErrors pins the resolver half of
+// bd-2e1byb (GH#5581): a real read failure must surface as an error the store
+// can distinguish from a cacheable success, instead of composing into a
+// degraded-but-successful answer. Genuinely absent pre-migration tables and
+// empty tables keep the legacy config-row and YAML fallbacks.
+func TestResolveCustomConfigInTxPropagatesReadErrors(t *testing.T) {
+	expectationsMet := func(t *testing.T, mock sqlmock.Sqlmock) {
+		t.Helper()
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	}
+
+	requireResolveCause := func(t *testing.T, statuses []types.CustomStatus, customTypes []string, err error, cause error) {
+		t.Helper()
+		if !errors.Is(err, cause) {
+			t.Fatalf("err = %v, want the injected read failure", err)
+		}
+		if statuses != nil || customTypes != nil {
+			t.Fatalf("partial result escaped a failed resolve: statuses=%v customTypes=%v", statuses, customTypes)
+		}
+	}
+
+	t.Run("status table query failure returns the cause", func(t *testing.T) {
+		withCustomVocabularyYAML(t, "", "")
+		db, mock, tx := beginMockTx(t)
+		defer db.Close()
+		cause := errors.New("vocabulary read failed")
+		mock.ExpectQuery(regexp.QuoteMeta(combinedStatusesQuery)).WillReturnError(cause)
+		mock.ExpectRollback()
+
+		statuses, customTypes, err := resolveCombined(t, tx)
+		requireResolveCause(t, statuses, customTypes, err, cause)
+		expectationsMet(t, mock)
+	})
+
+	t.Run("status table query failure with yaml still returns the cause", func(t *testing.T) {
+		withCustomVocabularyYAML(t, "review:active", "spike")
+		db, mock, tx := beginMockTx(t)
+		defer db.Close()
+		cause := errors.New("vocabulary read failed")
+		mock.ExpectQuery(regexp.QuoteMeta(combinedStatusesQuery)).WillReturnError(cause)
+		mock.ExpectRollback()
+
+		statuses, customTypes, err := resolveCombined(t, tx)
+		requireResolveCause(t, statuses, customTypes, err, cause)
+		expectationsMet(t, mock)
+	})
+
+	t.Run("types table query failure after successful statuses returns the cause", func(t *testing.T) {
+		withCustomVocabularyYAML(t, "", "")
+		db, mock, tx := beginMockTx(t)
+		defer db.Close()
+		cause := errors.New("vocabulary read failed")
+		mock.ExpectQuery(regexp.QuoteMeta(combinedStatusesQuery)).
+			WillReturnRows(sqlmock.NewRows([]string{"name", "category"}).AddRow("review", "active"))
+		mock.ExpectQuery(regexp.QuoteMeta(combinedTypesQuery)).WillReturnError(cause)
+		mock.ExpectRollback()
+
+		statuses, customTypes, err := resolveCombined(t, tx)
+		requireResolveCause(t, statuses, customTypes, err, cause)
+		expectationsMet(t, mock)
+	})
+
+	t.Run("config row read failure after empty tables returns the cause", func(t *testing.T) {
+		withCustomVocabularyYAML(t, "", "")
+		db, mock, tx := beginMockTx(t)
+		defer db.Close()
+		cause := errors.New("config read failed")
+		mock.ExpectQuery(regexp.QuoteMeta(combinedStatusesQuery)).
+			WillReturnRows(sqlmock.NewRows([]string{"name", "category"}))
+		mock.ExpectQuery(regexp.QuoteMeta(combinedTypesQuery)).
+			WillReturnRows(sqlmock.NewRows([]string{"name"}))
+		mock.ExpectQuery(regexp.QuoteMeta(combinedConfigQuery)).
+			WithArgs("status.custom", "types.custom").WillReturnError(cause)
+		mock.ExpectRollback()
+
+		statuses, customTypes, err := resolveCombined(t, tx)
+		requireResolveCause(t, statuses, customTypes, err, cause)
+		expectationsMet(t, mock)
+	})
+
+	t.Run("config row read failure with yaml still returns the cause", func(t *testing.T) {
+		withCustomVocabularyYAML(t, "review:active", "spike")
+		db, mock, tx := beginMockTx(t)
+		defer db.Close()
+		cause := errors.New("config read failed")
+		mock.ExpectQuery(regexp.QuoteMeta(combinedStatusesQuery)).
+			WillReturnRows(sqlmock.NewRows([]string{"name", "category"}))
+		mock.ExpectQuery(regexp.QuoteMeta(combinedTypesQuery)).
+			WillReturnRows(sqlmock.NewRows([]string{"name"}))
+		mock.ExpectQuery(regexp.QuoteMeta(combinedConfigQuery)).
+			WithArgs("status.custom", "types.custom").WillReturnError(cause)
+		mock.ExpectRollback()
+
+		statuses, customTypes, err := resolveCombined(t, tx)
+		requireResolveCause(t, statuses, customTypes, err, cause)
+		expectationsMet(t, mock)
+	})
+
+	t.Run("status row iteration failure returns the cause", func(t *testing.T) {
+		withCustomVocabularyYAML(t, "", "")
+		db, mock, tx := beginMockTx(t)
+		defer db.Close()
+		cause := errors.New("row iteration failed")
+		mock.ExpectQuery(regexp.QuoteMeta(combinedStatusesQuery)).
+			WillReturnRows(sqlmock.NewRows([]string{"name", "category"}).AddRow("review", "active").RowError(0, cause))
+		mock.ExpectRollback()
+
+		statuses, customTypes, err := resolveCombined(t, tx)
+		requireResolveCause(t, statuses, customTypes, err, cause)
+		expectationsMet(t, mock)
+	})
+}
