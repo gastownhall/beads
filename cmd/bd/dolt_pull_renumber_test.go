@@ -42,3 +42,26 @@ To apply this (the plan is re-checked when it runs):
 		t.Errorf("no collisions printed %q, want nothing", buf.String())
 	}
 }
+
+// TestWriteChildRenumberResult is the CLI half of bd-28sb25 AC-3: a
+// renumbering pull names the commit that holds its renames and lists them.
+func TestWriteChildRenumberResult(t *testing.T) {
+	var buf bytes.Buffer
+	writeChildRenumberResult(&buf, &storage.ChildRenumberReport{
+		RenameCommit: "abc123",
+		Renames: []storage.ChildRenumber{
+			{From: "bd-p.71", To: "bd-p.74"},
+			{From: "bd-p.72", To: "bd-p.75"},
+		},
+	})
+	want := "Renumbered local children (commit abc123):\n  bd-p.71 -> bd-p.74\n  bd-p.72 -> bd-p.75\n"
+	if buf.String() != want {
+		t.Errorf("result =\n%s\nwant\n%s", buf.String(), want)
+	}
+
+	buf.Reset()
+	writeChildRenumberResult(&buf, &storage.ChildRenumberReport{})
+	if want := "No colliding children to renumber.\n"; buf.String() != want {
+		t.Errorf("no collisions printed %q, want %q", buf.String(), want)
+	}
+}

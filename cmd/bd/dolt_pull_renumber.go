@@ -46,3 +46,43 @@ func writeChildRenumberHint(w io.Writer, report *storage.ChildRenumberReport, re
 		fmt.Fprintln(w, "  bd dolt pull --renumber-children")
 	}
 }
+
+// runPullRenumberChildren is `bd dolt pull --renumber-children`: the pull
+// renames this clone's colliding children before it merges, so the remote's
+// identities win and the local issues survive under fresh ids.
+func runPullRenumberChildren(ctx context.Context, st storage.DoltStorage, remote string) error {
+	puller, ok := storage.UnwrapStore(st).(storage.ChildRenumberingPuller)
+	if !ok {
+		return HandleErrorRespectJSON("storage backend %T does not support --renumber-children", storage.UnwrapStore(st))
+	}
+	if remote != "" {
+		fmt.Printf("Pulling from Dolt remote %q, renumbering colliding children...\n", remote)
+	} else {
+		fmt.Println("Pulling from Dolt remote, renumbering colliding children...")
+	}
+	report, err := puller.PullRenumberChildren(ctx, remote, getActor())
+	if report != nil {
+		writeChildRenumberResult(os.Stdout, report)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		if report != nil && report.RenameCommit != "" {
+			fmt.Fprintf(os.Stderr, "\nThe renames are committed (%s) and kept; resolve the error and pull again.\n", report.RenameCommit)
+		}
+		return SilentExit()
+	}
+	fmt.Println("Pull complete.")
+	return nil
+}
+
+// writeChildRenumberResult reports the renames a renumbering pull made.
+func writeChildRenumberResult(w io.Writer, report *storage.ChildRenumberReport) {
+	if len(report.Renames) == 0 {
+		fmt.Fprintln(w, "No colliding children to renumber.")
+		return
+	}
+	fmt.Fprintf(w, "Renumbered local children (commit %s):\n", report.RenameCommit)
+	for _, r := range report.Renames {
+		fmt.Fprintf(w, "  %s -> %s\n", r.From, r.To)
+	}
+}
