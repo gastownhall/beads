@@ -1226,6 +1226,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A step replaced by an inline `expand` no longer loses the dependencies
+  other steps have on it.** `ApplyInlineExpansions` left the reference to the
+  replaced step dangling, `bd cook` silently dropped it, and the dependent
+  step was ready immediately; the reference now points at the last step of
+  the expansion, as `[[compose.expand]]` already does. A template step that
+  names the step it replaces in `needs` or `depends_on` without recreating it
+  is now refused with a validation error instead of silently losing that
+  blocker; a template that recreates the step keeps the references to it.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

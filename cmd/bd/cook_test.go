@@ -2210,3 +2210,199 @@ gate = { type = "human" }
 		}
 	})
 }
+
+// inlineExpandDepsReproTOML is the GH#7637 repro: a step whose needs point at
+// an inline-expanded step keeps waiting for the expansion's last step.
+const inlineExpandDepsReproTOML = `formula = "inlinedeps"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "brief"
+title = "Brief"
+
+[[steps]]
+id = "round"
+title = "Round"
+needs = ["brief"]
+expand = "round-steps"
+
+[[steps]]
+id = "land"
+title = "Land"
+needs = ["round"]
+`
+
+// roundStepsExpansionTOML is the template the round step expands into:
+// implement, then triage.
+const roundStepsExpansionTOML = `formula = "round-steps"
+version = 1
+type = "expansion"
+
+[[template]]
+id = "implement"
+title = "Implement"
+
+[[template]]
+id = "triage"
+title = "Triage"
+needs = ["implement"]
+`
+
+// twoStepExpansionTOML is a two-step expansion used inside a loop body: the
+// expanded step becomes {target}.first and then {target}.second.
+const twoStepExpansionTOML = `formula = "two-step"
+version = 1
+type = "expansion"
+
+[[template]]
+id = "{target}.first"
+title = "First"
+
+[[template]]
+id = "{target}.second"
+title = "Second"
+needs = ["{target}.first"]
+`
+
+// loopInlineExpandTOML expands a loop body step inline: each iteration's
+// work becomes work.first and then work.second.
+const loopInlineExpandTOML = `formula = "loopinline"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "brief"
+title = "Brief"
+
+[[steps]]
+id = "round"
+title = "Round"
+needs = ["brief"]
+[steps.loop]
+count = 2
+[[steps.loop.body]]
+id = "work"
+title = "Work"
+expand = "two-step"
+
+[[steps]]
+id = "land"
+title = "Land"
+needs = ["round"]
+`
+
+// TestCookFormulaToSubgraph_InlineExpandDependencies pins GH#7637 on the pour
+// cook path: a step replaced by an inline expansion keeps its dependents
+// waiting on the expansion's last step, and a template step that names the
+// step it replaces without recreating it is refused.
+func TestCookFormulaToSubgraph_InlineExpandDependencies(t *testing.T) {
+	dir := t.TempDir()
+	for name, src := range map[string]string{
+		"inlinedeps":  inlineExpandDepsReproTOML,
+		"round-steps": roundStepsExpansionTOML,
+		"two-step":    twoStepExpansionTOML,
+		"loopinline":  loopInlineExpandTOML,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name+".formula.toml"), []byte(src), 0o600); err != nil {
+			t.Fatalf("write formula %q: %v", name, err)
+		}
+	}
+	searchPaths := []string{dir}
+	cookWorkflow := func(t *testing.T, name string) *TemplateSubgraph {
+		t.Helper()
+		sg, err := resolveAndCookFormulaWithVars(name, searchPaths, nil)
+		if err != nil {
+			t.Fatalf("cook %q: %v", name, err)
+		}
+		return sg
+	}
+
+	// The round step is gone: land blocks on triage, the last step of the
+	// expansion, and implement keeps the expanded step's own prerequisite.
+	t.Run("needs_on_expanded_step", func(t *testing.T) {
+		sg := cookWorkflow(t, "inlinedeps")
+		if got := blocksEdgesFrom(sg, "inlinedeps.land"); !slices.Equal(got, []string{"inlinedeps.triage"}) {
+			t.Errorf("land blocks edges = %v, want [inlinedeps.triage] (the expansion's last step)", got)
+		}
+		if got := blocksEdgesFrom(sg, "inlinedeps.implement"); !slices.Equal(got, []string{"inlinedeps.brief"}) {
+			t.Errorf("implement blocks edges = %v, want [inlinedeps.brief] (the expanded step's own prerequisite)", got)
+		}
+	})
+
+	t.Run("dry_run", func(t *testing.T) {
+		cmd := &cobra.Command{}
+		cmd.Flags().Bool("dry-run", true, "")
+		cmd.Flags().Bool("persist", false, "")
+		cmd.Flags().Bool("force", false, "")
+		cmd.Flags().StringSlice("search-path", []string{dir}, "")
+		cmd.Flags().String("prefix", "", "")
+		cmd.Flags().StringArray("var", nil, "")
+		cmd.Flags().String("mode", "", "")
+		stdout, stderr, err := runCookCapturingOutput(t, cmd, "inlinedeps")
+		if err != nil {
+			t.Fatalf("runCook: %v; stderr = %q", err, stderr)
+		}
+		for _, want := range []string{
+			"implement: Implement [needs: brief]",
+			"triage: Triage [needs: implement]",
+			"land: Land [needs: triage]",
+		} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("dry-run stdout missing %q:\n%s", want, stdout)
+			}
+		}
+	})
+
+	// A template step that names the step it replaces without recreating it
+	// is refused on this cook path, so pour, wisp and bond report a
+	// formula.ErrValidation instead of a silently missing blocker.
+	t.Run("self_reference", func(t *testing.T) {
+		dir := t.TempDir()
+		for name, src := range map[string]string{
+			"bad-self-ref": `formula = "bad-self-ref"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "work"
+title = "Work"
+expand = "bad-round"
+`,
+			"bad-round": `formula = "bad-round"
+version = 1
+type = "expansion"
+
+[[template]]
+id = "{target}.first"
+title = "First"
+
+[[template]]
+id = "{target}.second"
+title = "Second"
+needs = ["{target}.first", "{target}"]
+`,
+		} {
+			if err := os.WriteFile(filepath.Join(dir, name+".formula.toml"), []byte(src), 0o600); err != nil {
+				t.Fatalf("write formula %q: %v", name, err)
+			}
+		}
+		_, err := resolveAndCookFormulaWithVars("bad-self-ref", []string{dir}, nil)
+		if !errors.Is(err, formula.ErrValidation) {
+			t.Fatalf("cook error = %v, want a formula.ErrValidation", err)
+		}
+	})
+
+	// An inline expansion inside a loop body: the second iteration's first
+	// expanded step waits on the first iteration's last one, and land waits
+	// on the last iteration's last step.
+	t.Run("loop_body_inline_expansion", func(t *testing.T) {
+		sg := cookWorkflow(t, "loopinline")
+		if got := blocksEdgesFrom(sg, "loopinline.round.iter2.work.first"); !slices.Equal(got, []string{"loopinline.round.iter1.work.second"}) {
+			t.Errorf("round.iter2.work.first blocks edges = %v, want [loopinline.round.iter1.work.second] (the previous iteration's last expanded step)", got)
+		}
+		if got := blocksEdgesFrom(sg, "loopinline.land"); !slices.Equal(got, []string{"loopinline.round.iter2.work.second"}) {
+			t.Errorf("land blocks edges = %v, want [loopinline.round.iter2.work.second] (the last iteration's last expanded step)", got)
+		}
+	})
+}
