@@ -1226,6 +1226,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `--dry-run` and `--inspect` no longer run the post-command auto-backup,
+  auto-export or auto-push. With `backup.enabled`, a preview on a Dolt server
+  made a real backup and wrote backup state. On an embedded workspace it
+  printed `auto-backup failed: embeddeddolt: store is read-only` and recorded
+  the attempt, so the next real command skipped its backup until the interval
+  passed. With `export.auto` or `dolt.auto-push`, a preview of a write command
+  wrote the export files or push state.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

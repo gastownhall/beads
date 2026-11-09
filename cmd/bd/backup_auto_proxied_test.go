@@ -79,6 +79,70 @@ func TestProxiedAutoBackupBackendFollowsLocality(t *testing.T) {
 	}
 }
 
+// The direct arm has the same rule as the proxied arm: a --dry-run or --inspect
+// must not run the post-command backup, export or push. A preview's embedded
+// store refuses the backup, and the failed attempt still records its time, which
+// holds off the next real backup for the whole interval. Export and push write
+// their own files and state.
+//
+// Cannot be parallel: mutates PersistentPostRunE's package globals.
+func TestPersistentPostRunDirectMaintenanceSkipsPreview(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		flag string
+		want int
+	}{
+		{name: "ordinary command", want: 1},
+		{name: "dry run", flag: "dry-run"},
+		{name: "inspect", flag: "inspect"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			t.Setenv("BEADS_DIR", "")
+
+			oldStore, oldProvider := store, uowProvider
+			oldReadonly, oldProxied := readonlyMode, proxiedServerMode
+			oldRootCtx, oldRootCancel := rootCtx, rootCancel
+			oldSpan, oldProfile, oldTrace := commandSpan, profileFile, traceFile
+			oldBackup, oldExport, oldPush := runPostRunAutoBackup, runPostRunAutoExport, runPostRunAutoPush
+			oldDidWrite := commandDidWrite.Load()
+			t.Cleanup(func() {
+				store, uowProvider = oldStore, oldProvider
+				readonlyMode, proxiedServerMode = oldReadonly, oldProxied
+				rootCtx, rootCancel = oldRootCtx, oldRootCancel
+				commandSpan, profileFile, traceFile = oldSpan, oldProfile, oldTrace
+				runPostRunAutoBackup, runPostRunAutoExport, runPostRunAutoPush = oldBackup, oldExport, oldPush
+				commandDidWrite.Store(oldDidWrite)
+			})
+
+			var backups, exports, pushes int
+			runPostRunAutoBackup = func(context.Context) { backups++ }
+			runPostRunAutoExport = func(context.Context, bool) error { exports++; return nil }
+			runPostRunAutoPush = func(context.Context) { pushes++ }
+			commandDidWrite.Store(false)
+			store, uowProvider = &strictReadonlyPostRunStore{}, nil
+			readonlyMode, proxiedServerMode = false, false
+			rootCtx, rootCancel = context.Background(), nil
+			commandSpan, profileFile, traceFile = nil, nil, nil
+
+			// A write command: export and push skip read-only ones on their own.
+			cmd := &cobra.Command{Use: "create"}
+			if tc.flag != "" {
+				cmd.Flags().Bool(tc.flag, false, "")
+				if err := cmd.Flags().Set(tc.flag, "true"); err != nil {
+					t.Fatalf("set --%s: %v", tc.flag, err)
+				}
+			}
+			if err := rootCmd.PersistentPostRunE(cmd, nil); err != nil {
+				t.Fatalf("PersistentPostRunE: %v", err)
+			}
+			if backups != tc.want || exports != tc.want || pushes != tc.want {
+				t.Fatalf("backups = %d, exports = %d, pushes = %d, want %d of each", backups, exports, pushes, tc.want)
+			}
+		})
+	}
+}
+
 // TestPersistentPostRunProxiedRunsAutoBackup pins the wiring: the proxied arm
 // of PersistentPostRunE calls the auto-backup hook, under the same gate the
 // direct arm's maintenance net uses, plus previews.
