@@ -1,5 +1,5 @@
 {
-  "recorded_from": "29472cad3 + gascity/bd-enterprise#210",
+  "recorded_from": "3ce0423afd + GH#5442 label stamps",
   "steps": [
     "create a",
     "create b blocked by a",
@@ -323,7 +323,7 @@
         "current_revision"
       ],
       "rows": 15,
-      "sha256": "1f81df40f4c4d458f20cfb6535ca13468fa03fbd10276c44752977813a4b7e20"
+      "sha256": "4629a207f5d731948582d454cabe6f148dc69fbb080aafe664230cd587a7518f"
     },
     "labels": {
       "columns": [

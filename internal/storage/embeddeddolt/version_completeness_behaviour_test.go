@@ -222,11 +222,14 @@ func TestEmbeddedEveryAcceptedLifecycleMutationMintsOneVersion(t *testing.T) {
 // TestEmbeddedMintLeavesUpdatedAtWhereHistoryOffDoes pins that minting a
 // version is not itself an edit. issues.updated_at carries ON UPDATE
 // CURRENT_TIMESTAMP, so a mint whose own UPDATE left it unassigned would move
-// it to the clock on every versioned write, including the label and
-// dependency writes that never touch it with history off. bd import's
-// stale-upsert check reads that column, so a moved updated_at would also turn
-// the source's next real edit away as stale. Each scenario runs with history
-// off first, as the control the history-on run must match.
+// it to the clock on every versioned write, including the dependency writes
+// that never touch it with history off. A live label edit is the one
+// exception (GH#5442): it stamps updated_at itself on both history settings
+// alike, before the journal and version writes, so their snapshots must carry
+// the stamped row rather than the aged one. bd import's stale-upsert check
+// reads that column, so a moved updated_at would also turn the source's next
+// real edit away as stale. Each scenario runs with history off first, as the
+// control the history-on run must match.
 func TestEmbeddedMintLeavesUpdatedAtWhereHistoryOffDoes(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	// Fixed instants well before any clock this runs under, so a mint that
@@ -243,6 +246,9 @@ func TestEmbeddedMintLeavesUpdatedAtWhereHistoryOffDoes(t *testing.T) {
 			te := newTestEnv(t, "verts")
 			ctx := t.Context()
 			te.store.SetVersionedHistoryEnabled(history.on)
+			// Journaling on, so the label half below can pin that the
+			// journal's snapshot is taken AFTER the updated_at stamp.
+			te.store.SetEventsJournalEnabled(true)
 			// With history on every step below must mint exactly one version,
 			// so a mint that never ran cannot pass for one that kept updated_at.
 			mints := 0
@@ -281,17 +287,72 @@ func TestEmbeddedMintLeavesUpdatedAtWhereHistoryOffDoes(t *testing.T) {
 				return n
 			}
 
-			// Label and dependency writes never assign updated_at themselves.
+			// A live label edit is itself an update (GH#5442): it stamps the
+			// owning row on both history settings, and the journal and version
+			// snapshots it takes afterwards must carry the stamped row — the
+			// touch runs before their writes, not after them.
+			stamped := func(step string, before int) int {
+				t.Helper()
+				var got time.Time
+				te.queryScalar(t, ctx, "SELECT updated_at FROM issues WHERE id = ?", []any{a}, &got)
+				if !got.After(aged) {
+					t.Errorf("%s: updated_at for %s is %v, want stamped past %v", step, a, got.UTC(), aged)
+				}
+				var snapshot string
+				te.queryScalar(t, ctx,
+					"SELECT issue_json FROM bd_events_journal WHERE issue_id = ? AND op = 'update' ORDER BY seq DESC LIMIT 1",
+					[]any{a}, &snapshot)
+				var journaled struct {
+					UpdatedAt time.Time `json:"updated_at"`
+				}
+				if err := json.Unmarshal([]byte(snapshot), &journaled); err != nil {
+					t.Fatalf("%s: decode journal snapshot for %s: %v", step, a, err)
+				}
+				if !journaled.UpdatedAt.Equal(got) {
+					t.Errorf("%s: journal snapshot updated_at for %s is %v, want the stamped row's %v",
+						step, a, journaled.UpdatedAt.UTC(), got.UTC())
+				}
+				m := versions()
+				if m != before+mints {
+					t.Fatalf("%s: version rows for %s = %d, want %d", step, a, m, before+mints)
+				}
+				if history.on {
+					// The mint runs after the touch too, so the version's
+					// durable_state is the stamped row, not the aged one.
+					var raw string
+					te.queryScalar(t, ctx,
+						"SELECT durable_state FROM issue_versions WHERE issue_id = ? ORDER BY revision DESC LIMIT 1",
+						[]any{a}, &raw)
+					var state map[string]any
+					if err := json.Unmarshal([]byte(raw), &state); err != nil {
+						t.Fatalf("%s: decode durable_state for %s: %v\n%s", step, a, err, raw)
+					}
+					updated, _ := state["updated_at"].(string)
+					snapshotted, err := time.Parse(time.RFC3339, updated)
+					if err != nil {
+						t.Fatalf("%s: parse durable_state updated_at for %s: %v", step, a, err)
+					}
+					if !snapshotted.Equal(got) {
+						t.Errorf("%s: durable_state updated_at for %s is %v, want the stamped row's %v",
+							step, a, snapshotted.UTC(), got.UTC())
+					}
+				}
+				return m
+			}
+
 			age()
 			n := versions()
 			if err := te.store.AddLabel(ctx, a, "l1", "actor"); err != nil {
 				t.Fatalf("AddLabel: %v", err)
 			}
-			n = check("add label", n, aged)
+			n = stamped("add label", n)
 			if err := te.store.RemoveLabel(ctx, a, "l1", "actor"); err != nil {
 				t.Fatalf("RemoveLabel: %v", err)
 			}
-			n = check("remove label", n, aged)
+			n = stamped("remove label", n)
+			// The dependency half below still exercises writes that stamp
+			// nothing of their own, so the fixture goes back to aged first.
+			age()
 			if err := te.store.AddDependency(ctx, &types.Dependency{IssueID: a, DependsOnID: b, Type: types.DepBlocks}, "actor"); err != nil {
 				t.Fatalf("AddDependency: %v", err)
 			}
