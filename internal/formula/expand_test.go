@@ -1100,6 +1100,38 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 			t.Errorf("result = %v, want [work.first work.second]", got)
 		}
 	})
+
+	// The dependent can sit anywhere in the tree relative to the expanded
+	// step, including outside the children group the target is nested in.
+	t.Run("dependents outside a group point at a nested expanded step's last step", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "report", Title: "Report", Needs: []string{"work"}}, // declared before the target
+			{ID: "team", Title: "Team", Children: []*Step{
+				{ID: "work", Title: "Work", Expand: "inline-exp"},
+			}},
+			{ID: "audit", Title: "Audit", Children: []*Step{
+				{ID: "papers", Title: "Papers", Needs: []string{"work"}},
+			}},
+		}
+
+		result, err := ApplyInlineExpansions(steps, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+
+		sm := buildStepMap(result)
+		for _, id := range []string{"report", "papers", "work.first", "work.second"} {
+			if sm[id] == nil {
+				t.Fatalf("step %q missing from result: %v", id, allStepIDs(result))
+			}
+		}
+		if got := sm["report"].Needs; !slices.Equal(got, []string{"work.second"}) {
+			t.Errorf("report.Needs = %v, want [work.second] (a dependent outside the group sees the nested expansion)", got)
+		}
+		if got := sm["papers"].Needs; !slices.Equal(got, []string{"work.second"}) {
+			t.Errorf("papers.Needs = %v, want [work.second] (a dependent in another group sees it too)", got)
+		}
+	})
 }
 
 // depSignatureOf renders each step's ID with its needs and depends_on lists,
