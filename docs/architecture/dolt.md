@@ -253,7 +253,7 @@ which this breakage does not affect. See
 ### New Project
 
 ```bash
-# Embedded mode (single writer, no server — default for standalone)
+# Embedded mode (serialized writers, no server — default for standalone)
 bd init
 
 # Server mode (multi-writer, e.g. orchestrator)
@@ -281,7 +281,7 @@ Migration creates backups automatically. Your original SQLite database is preser
 ```mermaid
 flowchart LR
     subgraph embedded["Embedded mode (default) — bd init"]
-        bd1["bd process<br/>Dolt runs in-process"] --> d1[(".beads/embeddeddolt/<br/>single writer, file-locked")]
+        bd1["bd process<br/>Dolt runs in-process"] --> d1[(".beads/embeddeddolt/<br/>serialized writers, engine-locked")]
     end
     subgraph server["Server mode — bd init --server"]
         bd2["bd (agent 1)"] --> srv["dolt sql-server"]
@@ -295,7 +295,9 @@ flowchart LR
 In-process Dolt engine — no separate server needed. This is the default for
 standalone Beads users. The `bd` binary includes everything; just `bd init` and go.
 
-- Single-writer (one process at a time)
+- Serialized writers: multiple bd processes are supported; the embedded
+  engine's lock admits one writer at a time and the rest wait (bounded by
+  each command's own deadline)
 - Data lives in `.beads/embeddeddolt/` alongside your code
 - Push to GitHub with `bd dolt push` — code and issues in one repo
 - Zero ops: no server, no ports, no PID files
@@ -704,8 +706,25 @@ If you accidentally committed a Dolt data directory:
 
 **Symptom:** "database is locked" errors.
 
-Embedded mode is single-writer (enforced via file lock). If you need concurrent
-access, switch to server mode. See [Migrating Between Backends](#migrating-between-backends).
+Embedded mode supports multiple bd processes on one workspace, serialized by
+the embedded engine's own lock: one writer at a time, the rest wait. A waiting
+process retries with backoff, bounded by its command's context — under
+sustained contention it can still time out and report the error above. bd's
+own file-level lock is init-only (one-time setup); it does not serialize
+day-to-day access.
+
+For sustained concurrent load — orchestrators, agent fleets — server or
+proxied-server mode is the better fit: one running Dolt server keeps the
+engine warm instead of every command paying engine startup, so the win is
+throughput, not the only road to shared access. See
+[Migrating Between Backends](#migrating-between-backends).
+
+One more distinction under concurrency: a write becomes visible to SQL
+readers once its transaction commits, but the Dolt history commit that
+publishes it follows a moment later — another process can write in that
+interval, and `bd doctor`'s export/history views can legitimately disagree
+with a query taken between the two. That is an ordering observation, not a
+promise that every interleaving is loss-free.
 
 ## Configuration Reference
 
