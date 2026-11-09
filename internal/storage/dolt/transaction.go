@@ -936,6 +936,12 @@ func (t *doltTransaction) ReopenIssueWithResult(ctx context.Context, id string, 
 	if result.Changed {
 		t.dirty.MarkDirty(table)
 		t.dirty.MarkDirty(eventTable)
+		// MarkDirty does not filter the empty name the way ChangedTables.Add
+		// does, so the comment table is guarded here: it is "" when no
+		// comment was written, and wisp_comments is filtered inside.
+		if result.CommentTable != "" {
+			t.dirty.MarkDirty(result.CommentTable)
+		}
 		if result.IssueRowsChanged {
 			t.markIssuesChanged(table)
 		}

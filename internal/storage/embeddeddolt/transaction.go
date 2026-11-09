@@ -153,6 +153,11 @@ func (t *embeddedTransaction) ReopenIssueWithResult(ctx context.Context, id stri
 	if result.Changed {
 		t.dirty.MarkDirty(issueTable)
 		t.dirty.MarkDirty(eventTable)
+		// Same empty-name guard as the dolt transaction twin: CommentTable is
+		// "" when no comment was written, and wisp_comments is filtered inside.
+		if result.CommentTable != "" {
+			t.dirty.MarkDirty(result.CommentTable)
+		}
 		if result.IssueRowsChanged {
 			t.dirty.MarkDirty("issues")
 		}

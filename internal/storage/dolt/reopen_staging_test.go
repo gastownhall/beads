@@ -4,7 +4,9 @@ import (
 	"context"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func TestReopenWispStagesOnlyConcreteIssueChanges(t *testing.T) {
@@ -132,6 +134,102 @@ func TestReopenWispStagesOnlyConcreteIssueChanges(t *testing.T) {
 			t.Fatalf("dirty working-set event count = %d, want 1 (the issues commit dropped it)", workingEvent)
 		}
 		assertEventsNotCommitted(ctx, t, store.db)
+	})
+}
+
+// TestReopenCommentIsCommittedWithTheReopen pins GH#5593's durable half: a
+// reasoned reopen's comment must reach the SAME Dolt commit as the reopened
+// issue on every selective staging route, with no comments-table change left
+// pending in the working set afterwards. The comment row exists in the SQL
+// working set on every route; only staging decides whether HEAD carries it.
+func TestReopenCommentIsCommittedWithTheReopen(t *testing.T) {
+	newStore := func(t *testing.T) (*DoltStore, context.Context) {
+		t.Helper()
+		store, cleanup := setupTestStore(t)
+		t.Cleanup(cleanup)
+		ctx, cancel := testContext(t)
+		t.Cleanup(cancel)
+		return store, ctx
+	}
+	seedClosed := func(t *testing.T, ctx context.Context, store *DoltStore, id string) string {
+		t.Helper()
+		createPerm(t, ctx, store, id)
+		if err := store.CloseIssue(ctx, id, "done", "tester", ""); err != nil {
+			t.Fatalf("CloseIssue: %v", err)
+		}
+		return reopenDoltHead(t, ctx, store)
+	}
+	assertReopenCommittedWithComment := func(t *testing.T, ctx context.Context, store *DoltStore, id, reason string, before string) {
+		t.Helper()
+		if after := reopenDoltHead(t, ctx, store); after == before {
+			t.Fatal("reasoned reopen did not advance HEAD")
+		}
+		var status string
+		if err := store.db.QueryRowContext(ctx,
+			"SELECT status FROM issues AS OF 'HEAD' WHERE id = ?", id).Scan(&status); err != nil {
+			t.Fatalf("read reopened issue AS OF HEAD: %v", err)
+		}
+		if types.Status(status) != types.StatusOpen {
+			t.Fatalf("issue %s at HEAD is %q, want open", id, status)
+		}
+		var committed int
+		if err := store.db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM comments AS OF 'HEAD' WHERE issue_id = ? AND author = ? AND text = ?",
+			id, "tester", reason).Scan(&committed); err != nil {
+			t.Fatalf("read reopen comment AS OF HEAD: %v", err)
+		}
+		if committed != 1 {
+			t.Fatalf("HEAD carries %d reopen comments for %s, want the one from the reopen", committed, id)
+		}
+		// The comment must not be left as a pending working-set change: it
+		// belongs to the reopen's commit, not the next writer's.
+		var pending int
+		if err := store.db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM dolt_status WHERE table_name = 'comments'").Scan(&pending); err != nil {
+			t.Fatalf("read dolt_status for comments: %v", err)
+		}
+		if pending != 0 {
+			t.Fatal("comments is still a pending working-set change after the reopen commit")
+		}
+	}
+
+	t.Run("store ReopenIssue", func(t *testing.T) {
+		store, ctx := newStore(t)
+		const id = "ro-cmt-store"
+		before := seedClosed(t, ctx, store, id)
+		if err := store.ReopenIssue(ctx, id, "regressed in QA", "tester"); err != nil {
+			t.Fatalf("ReopenIssue: %v", err)
+		}
+		assertReopenCommittedWithComment(t, ctx, store, id, "regressed in QA", before)
+	})
+
+	t.Run("lifecycle Reopen", func(t *testing.T) {
+		store, ctx := newStore(t)
+		const id = "ro-cmt-lifecycle"
+		before := seedClosed(t, ctx, store, id)
+		lifecycle, err := store.IssueLifecycle()
+		if err != nil {
+			t.Fatalf("IssueLifecycle: %v", err)
+		}
+		if _, err := lifecycle.Reopen(ctx, issueops.ReopenRequest{Actor: "tester", IssueID: id, Reason: "not fixed yet"}); err != nil {
+			t.Fatalf("lifecycle Reopen: %v", err)
+		}
+		assertReopenCommittedWithComment(t, ctx, store, id, "not fixed yet", before)
+	})
+
+	t.Run("transaction ReopenIssueWithResult", func(t *testing.T) {
+		store, ctx := newStore(t)
+		const id = "ro-cmt-tx"
+		before := seedClosed(t, ctx, store, id)
+		if err := store.RunInIssueLifecycleTransaction(ctx, "bd: reopen "+id, func(tx storage.IssueLifecycleTransaction) error {
+			if _, err := tx.ReopenIssueWithResult(ctx, id, "needs another pass", "tester"); err != nil {
+				return err
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("RunInIssueLifecycleTransaction reopen: %v", err)
+		}
+		assertReopenCommittedWithComment(t, ctx, store, id, "needs another pass", before)
 	})
 }
 

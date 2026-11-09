@@ -379,6 +379,9 @@ func ExecuteReopen(ctx context.Context, tx *sql.Tx, request publicops.ReopenRequ
 		issueTable, _, eventTable, _ := WispTableRouting(reopened.IsWisp)
 		tables.Add(issueTable, eventTable)
 	}
+	// CommentTable is "" when no comment was written; Add filters empty
+	// names and the wisp-only table, exactly the selective-staging rules.
+	tables.Add(reopened.CommentTable)
 	if reopened.IssueRowsChanged {
 		tables.Add("issues")
 	}

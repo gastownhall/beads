@@ -584,7 +584,13 @@ func (s *DoltStore) ReopenIssue(ctx context.Context, id string, reason string, a
 		}
 		switch {
 		case !res.IsWisp:
-			return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, fmt.Sprintf("bd: reopen %s", id))
+			// The reasoned reopen's comment rides the same commit as the
+			// reopened row; CommentTable is "" when no comment was written.
+			staged := []string{"issues", "events"}
+			if res.CommentTable != "" {
+				staged = append(staged, res.CommentTable)
+			}
+			return s.doltAddAndCommitInTx(ctx, tx, staged, fmt.Sprintf("bd: reopen %s", id))
 		case res.IssueRowsChanged:
 			return s.doltAddAndCommitInTx(ctx, tx, []string{"issues"}, fmt.Sprintf("bd: reopen %s", id))
 		default:
