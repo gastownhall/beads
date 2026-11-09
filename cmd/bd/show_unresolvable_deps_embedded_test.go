@@ -169,6 +169,13 @@ func TestEmbeddedShowUnresolvableDeps(t *testing.T) {
 		if v, present := details["unresolvable_dependencies"]; present {
 			t.Errorf("unresolvable_dependencies = %v on a fully local edge, want absent", v)
 		}
+		if v, present := details["unresolvable_dependency_edges"]; present {
+			t.Errorf("unresolvable_dependency_edges = %v on a fully local edge, want absent", v)
+		}
+		// The blocker has no outbound edge at all.
+		if v, present := bdShowDetails(t, bd, dir, local.ID)["unresolvable_dependency_edges"]; present {
+			t.Errorf("unresolvable_dependency_edges = %v on an issue with no outbound edge, want absent", v)
+		}
 		deps, _ := details["dependencies"].([]interface{})
 		if len(deps) != 1 {
 			t.Errorf("dependencies = %v, want the one local edge", details["dependencies"])
