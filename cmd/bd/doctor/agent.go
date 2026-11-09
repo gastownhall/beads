@@ -485,7 +485,7 @@ func enrichTestPollution(dc DoctorCheck) agentEnrichment {
 		observed:    dc.Message + "\n" + dc.Detail,
 		expected:    "No test issues in production database",
 		commands:    []string{"bd doctor --check=pollution", "bd doctor --check=pollution --clean"},
-		sourceFiles: []string{"cmd/bd/doctor/validation.go:CheckTestPollution"},
+		sourceFiles: []string{"cmd/bd/doctor/pollution.go:DetectTestPollution"},
 	}
 }
 

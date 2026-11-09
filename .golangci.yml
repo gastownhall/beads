@@ -510,6 +510,16 @@ linters:
         text: 'do not write a filter here'
         linters:
           - forbidigo
+      # The shared pollution load filter and scorer seam (GH#5025): the
+      # detailed doctor check (cmd/bd/doctor_pollution.go, excepted above) and
+      # the "Test Pollution" validation gate must load candidates through ONE
+      # filter beside the shared scorer, or their counts skew apart again —
+      # the drift this fix exists to remove. pollution.go builds that filter;
+      # validation.go declares the store seam that carries it.
+      - path: '^cmd/bd/doctor/(pollution|validation)\.go$'
+        text: 'do not write a filter here'
+        linters:
+          - forbidigo
       # One command each, no family to join.
       #
       # `count` LEFT this list when the Counter role took the filter off both

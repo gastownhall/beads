@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // openStoreDB opens the beads database and returns the underlying *sql.DB for
@@ -214,32 +215,38 @@ func checkDuplicateIssuesDB(db *sql.DB, orchestratorMode bool, orchestratorThres
 	}
 }
 
-// CheckTestPollution detects test issues that may have leaked into the database.
+// pollutionSearchStore is the store seam CheckTestPollution reads through;
+// the narrow interface keeps the check testable without a live database.
+type pollutionSearchStore interface {
+	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
+}
+
+// CheckTestPollution detects test issues that may have leaked into the
+// database. It runs the same scorer as `bd doctor --check=pollution`
+// (DetectTestPollution) over the same load, so the gate's count and the
+// detailed check's count cannot disagree (GH#5025: the old SQL title patterns
+// matched rows the scorer skipped and missed rows it reported).
 func CheckTestPollution(path string) DoctorCheck {
 	beadsDir := ResolveBeadsDirForRepo(path)
 
-	db, store, err := openStoreDB(beadsDir)
+	_, store, err := openStoreDB(beadsDir)
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Test Pollution",
-			Status:  "ok",
+			Status:  StatusOK,
 			Message: "N/A (no database)",
 		}
 	}
 	defer func() { _ = store.Close() }()
 
-	// Look for common test patterns in titles
-	query := `
-		SELECT COUNT(*) FROM issues
-		WHERE (
-			title LIKE 'test-%' OR
-			title LIKE 'Test Issue%' OR
-			title LIKE '%test issue%' OR
-			id LIKE 'test-%'
-		)
-	`
-	var count int
-	if err := db.QueryRow(query).Scan(&count); err != nil {
+	return checkTestPollutionStore(context.Background(), store)
+}
+
+// checkTestPollutionStore is CheckTestPollution's core logic, parameterized
+// on the store seam so query errors and scorer parity can be tested directly.
+func checkTestPollutionStore(ctx context.Context, s pollutionSearchStore) DoctorCheck {
+	issues, err := s.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
 		return DoctorCheck{
 			Name:    "Test Pollution",
 			Status:  StatusWarning,
@@ -247,17 +254,18 @@ func CheckTestPollution(path string) DoctorCheck {
 		}
 	}
 
+	count := len(DetectTestPollution(issues))
 	if count == 0 {
 		return DoctorCheck{
 			Name:    "Test Pollution",
-			Status:  "ok",
+			Status:  StatusOK,
 			Message: "No test pollution detected",
 		}
 	}
 
 	return DoctorCheck{
 		Name:    "Test Pollution",
-		Status:  "warning",
+		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d potential test issue(s) detected", count),
 		Detail:  "Test issues may have leaked into production database",
 		Fix:     "Run 'bd doctor --check=pollution' to review and clean test issues",
