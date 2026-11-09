@@ -266,7 +266,7 @@ func openProxiedServerUOWProvider(ctx context.Context, beadsDir, databaseOverrid
 	// say where that pull can be run, because proxied mode refuses it at the
 	// front door (proxy.dolt_pull.unsupported) and server mode does not.
 	provider, err := newSQLServerUOWProvider(ctx, beadsDir, topology, proxiedProviderOptions(opts)...)
-	armLegacyProxiedRootGuardAfterOpen(beadsDir, err)
+	armLegacyProxiedRootGuardAfterOpen(ctx, beadsDir, topology, err)
 	return provider, err
 }
 
