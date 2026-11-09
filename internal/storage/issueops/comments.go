@@ -239,7 +239,7 @@ func ImportIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, te
 }
 
 //nolint:gosec // G201: table names come from hardcoded constants
-func addIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text string, createdAt time.Time, live bool) (*types.Comment, error) {
+func addIssueCommentInTx(ctx context.Context, tx DBTX, issueID, author, text string, createdAt time.Time, live bool) (*types.Comment, error) {
 	isWisp := IsActiveWispInTx(ctx, tx, issueID)
 	issueTable, _, _, _ := WispTableRouting(isWisp)
 	commentTable := "comments"

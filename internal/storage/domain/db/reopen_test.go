@@ -142,11 +142,18 @@ func (s *testSuite) reopenAppendsComment() {
 		domain.ReopenRowParams{Reason: "regression spotted"}, "tester", domain.IssueTableOpts{})
 	s.Require().NoError(err)
 
+	// The reason is a structured comment in the thread, attributed to the
+	// reopen actor, not an audit commented event.
 	var comment string
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
-		"SELECT comment FROM events WHERE issue_id = ? AND event_type = ?",
-		"bd-ro-cmt", string(types.EventCommented)).Scan(&comment))
+		"SELECT text FROM comments WHERE issue_id = ? AND author = ?",
+		"bd-ro-cmt", "tester").Scan(&comment))
 	s.Equal("regression spotted", comment)
+	var auditEvents int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
+		"bd-ro-cmt", string(types.EventCommented)).Scan(&auditEvents))
+	s.Equal(0, auditEvents)
 }
 
 func (s *testSuite) reopenNoCommentEmptyReason() {
@@ -162,8 +169,7 @@ func (s *testSuite) reopenNoCommentEmptyReason() {
 
 	var cmtCount int
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
-		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
-		"bd-ro-nocmt", string(types.EventCommented)).Scan(&cmtCount))
+		"SELECT COUNT(*) FROM comments WHERE issue_id = ?", "bd-ro-nocmt").Scan(&cmtCount))
 	s.Equal(0, cmtCount)
 }
 
@@ -199,13 +205,17 @@ func (s *testSuite) reopenCustomDonePermanent() {
 	s.Equal("", closedBySession)
 	s.False(deferUntil.Valid, "defer_until must be cleared")
 
-	var reopened, comments int
+	var reopened, comments, auditEvents int
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?", "bd-ro-custom-done", string(types.EventReopened)).Scan(&reopened))
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
-		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?", "bd-ro-custom-done", string(types.EventCommented)).Scan(&comments))
+		"SELECT COUNT(*) FROM comments WHERE issue_id = ? AND author = ? AND text = ?",
+		"bd-ro-custom-done", "tester", "needs another pass").Scan(&comments))
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?", "bd-ro-custom-done", string(types.EventCommented)).Scan(&auditEvents))
 	s.Equal(1, reopened)
 	s.Equal(1, comments)
+	s.Equal(0, auditEvents, "the reason is a comment row, not an audit event")
 }
 
 func (s *testSuite) reopenCustomDoneWisp() {
@@ -310,14 +320,17 @@ func (s *testSuite) reopenConfigurationFailureRollsBack() {
 	s.Require().Error(err)
 
 	var status string
-	var reopened, comments int
+	var reopened, comments, auditEvents int
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT status FROM issues WHERE id = ?", "bd-ro-config-failure").Scan(&status))
 	s.Equal(customStatus, status)
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?", "bd-ro-config-failure", string(types.EventReopened)).Scan(&reopened))
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
-		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?", "bd-ro-config-failure", string(types.EventCommented)).Scan(&comments))
+		"SELECT COUNT(*) FROM comments WHERE issue_id = ?", "bd-ro-config-failure").Scan(&comments))
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?", "bd-ro-config-failure", string(types.EventCommented)).Scan(&auditEvents))
 	s.Equal(0, reopened)
-	s.Equal(0, comments)
+	s.Equal(0, comments, "the rolled-back reopen must leave no comment row")
+	s.Equal(0, auditEvents)
 }

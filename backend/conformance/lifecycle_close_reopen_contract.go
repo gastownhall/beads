@@ -3,6 +3,7 @@ package conformance
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -996,13 +997,18 @@ func assertLifecycleMissingIDRefusal(t *testing.T, verb, id string, err error) {
 
 // RunLifecycleReopenRecordsItsReason pins ReopenRequest.Reason: it "records
 // why literal closed and configured done statuses move to open", and the leaf
-// now says WHERE — the issue's event history, on the reopened entry the move
-// itself records, and nowhere on the issue or the result.
+// now says WHERE — the reopened audit entry the move itself records, and one
+// structured comment on the issue's comment thread (GH#5593). The comment is
+// the durable copy: audit events are clone-local, comments are versioned and
+// are what bd comments, bd show and export read. The reason is not ALSO
+// written as an audit commented event, and nothing lands on the issue row or
+// the result.
 //
 // The no-reason leg is what makes the location a promise rather than a
 // coincidence. It proves the reopened entry exists independently of the
 // reason, so the first leg is reading a reason carried BY that entry rather
-// than an entry minted because a reason was supplied.
+// than an entry minted because a reason was supplied. The wisp leg pins the
+// routing: a wisp's comment lands in wisp_comments, never in comments.
 func RunLifecycleReopenRecordsItsReason(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
 	t.Helper()
 
@@ -1029,6 +1035,7 @@ func RunLifecycleReopenRecordsItsReason(t *testing.T, ctx context.Context, fixtu
 	if recorded != 1 {
 		t.Errorf("reopen of %s recorded %d reopened events carrying the reason, want 1", id, recorded)
 	}
+	lifecycleReopenAssertReasonComment(t, ctx, fixture, "comments", "events", id, "writer", "regressed", 1)
 
 	quiet := fixture.IssuePrefix + "-lcr-reason-none"
 	lifecycleCloseReopenSeedIssue(t, ctx, fixture, quiet, types.StatusOpen, nil)
@@ -1054,6 +1061,81 @@ func RunLifecycleReopenRecordsItsReason(t *testing.T, ctx context.Context, fixtu
 	}
 	if carrying != 0 {
 		t.Errorf("reopen of %s with no reason recorded %d reopened events carrying one, want 0", quiet, carrying)
+	}
+	lifecycleReopenAssertReasonComment(t, ctx, fixture, "comments", "events", quiet, "writer", "", 0)
+
+	// A whitespace-only reason is no reason: no comment to read back.
+	blank := fixture.IssuePrefix + "-lcr-reason-blank"
+	lifecycleCloseReopenSeedIssue(t, ctx, fixture, blank, types.StatusOpen, nil)
+	if _, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: blank}); err != nil {
+		t.Fatalf("close %s: %v", blank, err)
+	}
+	if _, err := fixture.Lifecycle.Reopen(ctx, publicops.ReopenRequest{Actor: "writer", IssueID: blank, Reason: "   "}); err != nil {
+		t.Fatalf("reopen %s with a blank reason: %v", blank, err)
+	}
+	lifecycleReopenAssertReasonComment(t, ctx, fixture, "comments", "events", blank, "writer", "", 0)
+
+	wisp := fixture.IssuePrefix + "-lcr-reason-wisp"
+	lifecycleCloseReopenSeedWisp(t, ctx, fixture, wisp)
+	if _, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: wisp}); err != nil {
+		t.Fatalf("close wisp %s: %v", wisp, err)
+	}
+	if _, err := fixture.Lifecycle.Reopen(ctx, publicops.ReopenRequest{Actor: "reviver", IssueID: wisp, Reason: "wisp regressed"}); err != nil {
+		t.Fatalf("reopen wisp %s: %v", wisp, err)
+	}
+	var wispRecorded int
+	if err := fixture.QueryScalar(ctx,
+		"SELECT COUNT(*) FROM wisp_events WHERE issue_id = ? AND event_type = ? AND COALESCE(new_value, '') = ?",
+		[]any{wisp, string(types.EventReopened), "wisp regressed"}, &wispRecorded); err != nil {
+		t.Fatalf("count recorded reopen reasons for wisp %s: %v", wisp, err)
+	}
+	if wispRecorded != 1 {
+		t.Errorf("reopen of wisp %s recorded %d reopened events carrying the reason, want 1", wisp, wispRecorded)
+	}
+	lifecycleReopenAssertReasonComment(t, ctx, fixture, "wisp_comments", "wisp_events", wisp, "reviver", "wisp regressed", 1)
+	var leaked int
+	if err := fixture.QueryScalar(ctx, "SELECT COUNT(*) FROM comments WHERE issue_id = ?", []any{wisp}, &leaked); err != nil {
+		t.Fatalf("count durable comments for wisp %s: %v", wisp, err)
+	}
+	if leaked != 0 {
+		t.Errorf("reopen of wisp %s wrote %d rows to the durable comments table, want 0: a wisp's comment belongs in wisp_comments", wisp, leaked)
+	}
+}
+
+// lifecycleReopenAssertReasonComment checks that id's comment thread in
+// commentTable holds exactly want comments, each written by author with text
+// reason when want > 0, and that eventTable carries no audit commented event
+// for id: the reason is a structured comment, not an audit one.
+//
+//nolint:gosec // G201: both table names are plane constants the callers pass.
+func lifecycleReopenAssertReasonComment(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture, commentTable, eventTable, id, author, reason string, want int) {
+	t.Helper()
+	var total, matching int
+	if err := fixture.QueryScalar(ctx,
+		fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE issue_id = ?", commentTable), []any{id}, &total); err != nil {
+		t.Fatalf("count %s for %s: %v", commentTable, id, err)
+	}
+	if total != want {
+		t.Errorf("reopen of %s left %d rows in %s, want %d", id, total, commentTable, want)
+	}
+	if want > 0 {
+		if err := fixture.QueryScalar(ctx,
+			fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE issue_id = ? AND author = ? AND text = ?", commentTable),
+			[]any{id, author, reason}, &matching); err != nil {
+			t.Fatalf("count matching %s for %s: %v", commentTable, id, err)
+		}
+		if matching != want {
+			t.Errorf("reopen of %s left %d rows in %s by %q reading %q, want %d", id, matching, commentTable, author, reason, want)
+		}
+	}
+	var audit int
+	if err := fixture.QueryScalar(ctx,
+		fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE issue_id = ? AND event_type = ?", eventTable),
+		[]any{id, string(types.EventCommented)}, &audit); err != nil {
+		t.Fatalf("count audit commented events in %s for %s: %v", eventTable, id, err)
+	}
+	if audit != 0 {
+		t.Errorf("reopen of %s recorded %d audit commented events in %s, want 0: the reason is a structured comment", id, audit, eventTable)
 	}
 }
 

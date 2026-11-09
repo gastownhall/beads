@@ -96,11 +96,18 @@ func (s *testSuite) uccReopenReasonComment() {
 		domain.ReopenIssueParams{Reason: "qa found a regression"}, "tester")
 	s.Require().NoError(err)
 
+	// The reason is a structured comment in the thread, attributed to the
+	// reopen actor, not an audit commented event.
 	var comment string
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
-		"SELECT comment FROM events WHERE issue_id = ? AND event_type = ?",
-		"bd-ucc-ro-cmt", string(types.EventCommented)).Scan(&comment))
+		"SELECT text FROM comments WHERE issue_id = ? AND author = ?",
+		"bd-ucc-ro-cmt", "tester").Scan(&comment))
 	s.Equal("qa found a regression", comment)
+	var auditEvents int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
+		"bd-ucc-ro-cmt", string(types.EventCommented)).Scan(&auditEvents))
+	s.Equal(0, auditEvents)
 }
 
 func (s *testSuite) uccReopenCustomNonDoneReportsNotReopened() {

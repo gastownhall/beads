@@ -1,5 +1,5 @@
 {
-  "recorded_from": "29472cad3 + gascity/bd-enterprise#210",
+  "recorded_from": "473aa09fa11e + GH#5593 reopen comment (bd-1bw25e)",
   "steps": [
     "create a",
     "create b blocked by a",
@@ -112,8 +112,8 @@
         "text",
         "created_at"
       ],
-      "rows": 2,
-      "sha256": "d5870471fe72b8e50fe898978f24a80a23e07750ab538d47353acfabfb0e9aed"
+      "rows": 4,
+      "sha256": "c92f8ff735dfeb76fe73e481280e739ec2b80e9b8b4ec4d760fce9f152dab960"
     },
     "compaction_snapshots": {
       "columns": [
@@ -176,8 +176,8 @@
         "created_at",
         "id"
       ],
-      "rows": 51,
-      "sha256": "898f31694ce12dcd693f374634aea358b68239f6954fdcaae3b6342c1242f2bd"
+      "rows": 49,
+      "sha256": "f69cc40cc9fd1edfac5e93233ddbec577dade484211428dd2579d18b72ca6ca4"
     },
     "federation_peers": {
       "columns": [
@@ -431,8 +431,8 @@
         "text",
         "created_at"
       ],
-      "rows": 2,
-      "sha256": "3c5f1e3eac9ff32fb1158c4421909ddd49c9131edff756c4a0e184114da93350"
+      "rows": 3,
+      "sha256": "195d46f02f34b1e752870c212932e7831cd50d20e4f85ce621a71ff5256e7389"
     },
     "wisp_dependencies": {
       "columns": [
@@ -461,8 +461,8 @@
         "comment",
         "created_at"
       ],
-      "rows": 25,
-      "sha256": "1ee25446153c51b39c4de60d7f03bb56172a84e72d28df2dd44ff79aa5fc3b23"
+      "rows": 24,
+      "sha256": "701282c26848753b68e2688e5454729cae5591f811201c34f6e93f2c991f4149"
     },
     "wisp_labels": {
       "columns": [
