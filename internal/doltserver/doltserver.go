@@ -2217,10 +2217,15 @@ func startLocked(beadsDir string) (*State, error) {
 // seeding (issue prefix, project ID) are handled by the store layer when the
 // global database is first opened with CreateIfMissing=true.
 //
+// A non-nil expect — the same server-identity expectation the store's open
+// verifies against — is checked before anything is created: a foreign or
+// unpaired server answering on the shared port gets no beads_global database
+// (GH#4637). The refusal wraps ErrServerIdentityMismatch.
+//
 // Returns nil if the database already exists or was successfully created,
 // and an error wrapping doltversion.ErrBelowRequiredMin, before creating
 // anything, if the server is older than bd's minimum.
-func EnsureGlobalDatabase(host string, port int, user, password string) error {
+func EnsureGlobalDatabase(host string, port int, user, password string, expect *ServerIdentityExpectation) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -2248,6 +2253,15 @@ func EnsureGlobalDatabase(host string, port int, user, password string) error {
 	// (doltversion.CheckServer).
 	if err := doltversion.CheckServer(ctx, db, "dolt sql-server at "+doltutil.PrintedServerAddr(host, port), nil); err != nil {
 		return err
+	}
+
+	// Refuse a foreign or unpaired server before creating anything on it
+	// (GH#4637). The handshake and version check above may precede
+	// verification; creating beads_global may not.
+	if expect != nil {
+		if err := VerifyServerIdentity(ctx, db, *expect); err != nil {
+			return err
+		}
 	}
 
 	// CREATE DATABASE IF NOT EXISTS is idempotent — safe on every call.

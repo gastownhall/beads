@@ -2647,7 +2647,7 @@ func TestEnsureGlobalDatabaseRefusesBelowRequiredMin(t *testing.T) {
 		t.Fatal(err)
 	}
 	raiseRequiredMinForTest(t)
-	err = doltserver.EnsureGlobalDatabase("127.0.0.1", port, "root", "")
+	err = doltserver.EnsureGlobalDatabase("127.0.0.1", port, "root", "", nil)
 	if !errors.Is(err, doltversion.ErrBelowRequiredMin) {
 		t.Fatalf("EnsureGlobalDatabase = %v, want ErrBelowRequiredMin before CREATE DATABASE", err)
 	}
@@ -2668,5 +2668,230 @@ func TestEnsureGlobalDatabaseRefusesBelowRequiredMin(t *testing.T) {
 		t.Errorf("%s exists after the refused EnsureGlobalDatabase", doltserver.GlobalDatabaseName)
 	case !errors.Is(err, sql.ErrNoRows):
 		t.Fatalf("look for %s: %v", doltserver.GlobalDatabaseName, err)
+	}
+}
+
+// TestEnsureGlobalDatabaseRefusesForeignServer is the identity counterpart of
+// TestEnsureGlobalDatabaseRefusesBelowRequiredMin (GH#4637, AC-7): the shared
+// init's server-identity expectation is checked before beads_global is
+// created, so a foreign or unpaired server answering on the shared port gets
+// no global database. It runs against its own server, so beads_global cannot
+// already be there from another test.
+func TestEnsureGlobalDatabaseRefusesForeignServer(t *testing.T) {
+	server := testutil.StartIsolatedDoltContainerHandle(t)
+	port, err := strconv.Atoi(server.Port)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Isolated shared-server state: the record and the expectation below
+	// belong to this test alone.
+	sharedDir := t.TempDir()
+	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedDir)
+	t.Setenv("BEADS_DOLT_VERIFY_SERVER_IDENTITY", "")
+	expect := doltserver.SharedServerIdentityExpectation(sharedDir, "127.0.0.1", port)
+	if expect == nil {
+		t.Fatal("identity verification is unexpectedly disabled for the test")
+	}
+
+	admin, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%d)/", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	assertGlobalDBAbsent := func(label string) {
+		t.Helper()
+		var name string
+		switch err := admin.QueryRowContext(ctx, "SELECT schema_name FROM information_schema.schemata WHERE schema_name = ?", doltserver.GlobalDatabaseName).Scan(&name); {
+		case err == nil:
+			t.Fatalf("%s: %s exists after the refused EnsureGlobalDatabase", label, doltserver.GlobalDatabaseName)
+		case !errors.Is(err, sql.ErrNoRows):
+			t.Fatalf("%s: look for %s: %v", label, doltserver.GlobalDatabaseName, err)
+		}
+	}
+
+	// The answering server's real identity, so the poisoned record is a
+	// provable mismatch rather than an accident.
+	var actual string
+	if err := admin.QueryRowContext(ctx, "SELECT @@server_uuid").Scan(&actual); err != nil {
+		t.Fatalf("read the test server's @@server_uuid: %v", err)
+	}
+
+	// Mismatched record: init's shared-ensure must refuse before creating
+	// anything, naming both identities.
+	poisoned := "33333333-2222-1111-0000-999999999999"
+	if poisoned == actual {
+		t.Fatal("precondition: the poisoned record must differ from the answering server's identity")
+	}
+	if err := os.WriteFile(expect.RecordPath(), []byte(poisoned), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = doltserver.EnsureGlobalDatabase("127.0.0.1", port, "root", "", expect)
+	if !errors.Is(err, doltserver.ErrServerIdentityMismatch) {
+		t.Fatalf("EnsureGlobalDatabase = %v, want an identity refusal before CREATE DATABASE", err)
+	}
+	if !strings.Contains(err.Error(), poisoned) || !strings.Contains(err.Error(), actual) {
+		t.Errorf("refusal must name the recorded and the answering identities, got: %v", err)
+	}
+	assertGlobalDBAbsent("mismatched record")
+
+	// Absent, malformed and blank records are refused the same way: an
+	// unprovable record cannot authorize the shared server either.
+	for _, tc := range []struct {
+		label string
+		seed  string
+	}{
+		{label: "absent record", seed: ""},
+		{label: "malformed record", seed: "not a uuid"},
+		{label: "blank record", seed: "  "},
+	} {
+		if tc.seed == "" {
+			if err := os.Remove(expect.RecordPath()); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := os.WriteFile(expect.RecordPath(), []byte(tc.seed), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err = doltserver.EnsureGlobalDatabase("127.0.0.1", port, "root", "", expect)
+		if !errors.Is(err, doltserver.ErrServerIdentityMismatch) {
+			t.Fatalf("%s: EnsureGlobalDatabase = %v, want an identity refusal", tc.label, err)
+		}
+		assertGlobalDBAbsent(tc.label)
+	}
+
+	// A nil expectation is the documented bypass for the out-of-scope
+	// administrative callers: the pre-gate behavior is preserved for them.
+	if err := os.WriteFile(expect.RecordPath(), []byte(poisoned), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := doltserver.EnsureGlobalDatabase("127.0.0.1", port, "root", "", nil); err != nil {
+		t.Fatalf("nil expectation must preserve the pre-gate behavior, got: %v", err)
+	}
+
+	// A matching record creates beads_global as before.
+	if err := os.WriteFile(expect.RecordPath(), []byte(actual), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := doltserver.EnsureGlobalDatabase("127.0.0.1", port, "root", "", expect); err != nil {
+		t.Fatalf("matching identity must ensure the global database, got: %v", err)
+	}
+	var name string
+	switch err := admin.QueryRowContext(ctx, "SELECT schema_name FROM information_schema.schemata WHERE schema_name = ?", doltserver.GlobalDatabaseName).Scan(&name); {
+	case err == nil:
+		// created: expected
+	case !errors.Is(err, sql.ErrNoRows):
+		t.Fatalf("look for %s: %v", doltserver.GlobalDatabaseName, err)
+	default:
+		t.Fatalf("matching identity must have created %s", doltserver.GlobalDatabaseName)
+	}
+}
+
+// TestInitSharedServerRefusesForeignIdentity runs the same refusal through
+// bd init itself: a shared-server init whose shared server's identity record
+// names a different server must fail with the identity error and create no
+// beads_global on the answering server. The shared server stays up from a
+// first, pairing init, so the second init adopts a live listener it did not
+// prove it started — the exact foreign-listener posture.
+func TestInitSharedServerRefusesForeignIdentity(t *testing.T) {
+	skipIfNoDolt(t)
+	bd := buildBDForInitTests(t)
+
+	port, err := testutil.FindFreePort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sharedDir := t.TempDir()
+	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedDir)
+	t.Setenv("BEADS_DOLT_VERIFY_SERVER_IDENTITY", "")
+	// The cleanup reads the dir directly: the subprocesses below see the
+	// same tree only through BEADS_SHARED_SERVER_DIR, and this process
+	// never resolves its own HOME-based path.
+	stopDoltServerCleanup(t, sharedDir)
+
+	env := append(os.Environ(),
+		"BEADS_DOLT_SHARED_SERVER=1",
+		"BEADS_DOLT_SERVER_PORT="+strconv.Itoa(port),
+		"BEADS_SHARED_SERVER_DIR="+sharedDir,
+	)
+
+	// First init: bd starts the shared server (pairing its identity record
+	// along the way) and creates beads_global on it.
+	first := exec.Command(bd, "init", "--prefix", "identity", "--skip-hooks", "--quiet")
+	first.Dir = t.TempDir()
+	first.Env = env
+	if out, err := first.CombinedOutput(); err != nil {
+		t.Fatalf("first bd init (pairing) failed: %v\n%s", err, out)
+	}
+
+	expect := doltserver.SharedServerIdentityExpectation(sharedDir, "127.0.0.1", port)
+	if expect == nil {
+		t.Fatal("identity verification is unexpectedly disabled for the test")
+	}
+	recordPath := expect.RecordPath()
+
+	admin, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%d)/", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	// The paired record must name the answering server.
+	paired, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatalf("first init must have paired the identity record: %v", err)
+	}
+	var actual string
+	if err := admin.QueryRowContext(ctx, "SELECT @@server_uuid").Scan(&actual); err != nil {
+		t.Fatalf("read the shared server's @@server_uuid: %v", err)
+	}
+	if strings.TrimSpace(string(paired)) != actual {
+		t.Fatalf("first init paired %q, but the server answers as %q", string(paired), actual)
+	}
+
+	// Drop beads_global so the refused init has nothing to find, and poison
+	// the record with a different server's identity.
+	if _, err := admin.ExecContext(ctx, "DROP DATABASE IF EXISTS "+doltserver.GlobalDatabaseName); err != nil {
+		t.Fatalf("drop %s: %v", doltserver.GlobalDatabaseName, err)
+	}
+	poisoned := "33333333-2222-1111-0000-999999999999"
+	if poisoned == actual {
+		t.Fatal("precondition: the poisoned record must differ from the answering server's identity")
+	}
+	if err := os.WriteFile(recordPath, []byte(poisoned), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	second := exec.Command(bd, "init", "--prefix", "identity", "--skip-hooks", "--quiet")
+	second.Dir = t.TempDir()
+	second.Env = env
+	out, err := second.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected bd init to refuse the foreign shared server, got success:\n%s", out)
+	}
+	if !strings.Contains(string(out), "refusing to use the Dolt server") {
+		t.Fatalf("expected the identity refusal in init's output, got:\n%s", out)
+	}
+
+	// beads_global was not created by the refused init.
+	var name string
+	switch err := admin.QueryRowContext(ctx, "SELECT schema_name FROM information_schema.schemata WHERE schema_name = ?", doltserver.GlobalDatabaseName).Scan(&name); {
+	case err == nil:
+		t.Fatalf("%s exists after the refused bd init", doltserver.GlobalDatabaseName)
+	case !errors.Is(err, sql.ErrNoRows):
+		t.Fatalf("look for %s: %v", doltserver.GlobalDatabaseName, err)
+	}
+
+	// The refused init never rewrote the record.
+	got, readErr := os.ReadFile(recordPath)
+	if readErr != nil {
+		t.Fatalf("identity record must survive the refused init: %v", readErr)
+	}
+	if strings.TrimSpace(string(got)) != poisoned {
+		t.Fatalf("refused init rewrote the identity record: got %q, want %q", string(got), poisoned)
 	}
 }

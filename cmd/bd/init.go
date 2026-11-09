@@ -1769,10 +1769,18 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			if serverUser != "" {
 				globalUser = serverUser
 			}
-			if err := doltserver.EnsureGlobalDatabase(globalHost, globalPort, globalUser, ""); err != nil {
-				// A server older than bd's minimum is refused by every open,
-				// the project store's below included, so init stops here.
-				if errors.Is(err, doltversion.ErrBelowRequiredMin) {
+			// The shared server is managed, so init verifies its identity
+			// the same way the store's opens do: a foreign or unpaired
+			// listener on the shared port gets no beads_global database
+			// (GH#4637). SharedServerIdentityExpectation is nil when the
+			// operator disabled verification.
+			globalIdentity := doltserver.SharedServerIdentityExpectation(beadsDir, globalHost, globalPort)
+			if err := doltserver.EnsureGlobalDatabase(globalHost, globalPort, globalUser, "", globalIdentity); err != nil {
+				// A server older than bd's minimum, and a server whose
+				// identity cannot be verified, are both refused by every
+				// open, the project store's below included, so init stops
+				// here.
+				if errors.Is(err, doltversion.ErrBelowRequiredMin) || errors.Is(err, doltserver.ErrServerIdentityMismatch) {
 					fmt.Fprintf(os.Stderr, "Error: %s\n", remedy.PrintedMessage(err))
 					return &exitError{Code: 1}
 				}
