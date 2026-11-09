@@ -99,8 +99,8 @@ func TestDoltNew_ReadOnlyOpenReadsWithIgnoredSeriesBehind(t *testing.T) {
 	if !errors.As(err, &behind) {
 		t.Fatalf("New (read-only, clone-local series behind) = %T (%v), want *schema.CloneLocalBehindError", err, err)
 	}
-	if len(behind.MissingColumns) != 1 || behind.MissingColumns[0] != "granted_node" {
-		t.Errorf("MissingColumns = %v, want [granted_node]", behind.MissingColumns)
+	if len(behind.MissingColumns) != 1 || behind.MissingColumns[0] != "leases.granted_node" {
+		t.Errorf("MissingColumns = %v, want [leases.granted_node]", behind.MissingColumns)
 	}
 	if msg := err.Error(); !strings.Contains(msg, "bd migrate schema") {
 		t.Errorf("refusal %q does not name the per-database remedy", msg)

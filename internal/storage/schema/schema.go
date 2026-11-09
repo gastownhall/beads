@@ -367,6 +367,12 @@ func missingColumns(ctx context.Context, db DBConn, table string, columns []stri
 	if err != nil {
 		return nil, fmt.Errorf("checking table %s: %w", table, err)
 	}
+	return missingColumnsIn(ctx, db, table, exists, columns)
+}
+
+// missingColumnsIn is missingColumns once tableInCurrentDatabase has answered
+// whether table exists, for a caller that needed that answer itself.
+func missingColumnsIn(ctx context.Context, db DBConn, table string, exists bool, columns []string) ([]string, error) {
 	present := map[string]bool{}
 	if exists {
 		//nolint:gosec // G201: table is a hardcoded identifier, never user input.
@@ -1179,7 +1185,9 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	// so its work counts toward the total every return below reports: a pass
 	// whose only work was clone-local (a clone that pulled the migrated main
 	// series and then upgraded, gastownhall/beads#7038) otherwise reported 0,
-	// and its open kept the pool pinned to the pre-migration session root.
+	// and the callers that act only on a changed database skipped it — `bd
+	// migrate schema` reported "current" and left the version markers
+	// unstamped, and the migrating open skipped its pool rebuild.
 	applied += appliedIgnored
 	if err != nil {
 		return applied, fmt.Errorf("ignored migrations: %w", err)

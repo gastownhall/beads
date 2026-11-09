@@ -43,17 +43,42 @@ func expectLeaseColumns(mock sqlmock.Sqlmock, grantedNode bool) {
 	mock.ExpectQuery(regexp.QuoteMeta("SHOW COLUMNS FROM leases")).WillReturnRows(rows)
 }
 
+// expectWispsColumns primes the probe of the wisps table: the table exists
+// and SHOW COLUMNS lists the projected columns, with arrival_seq
+// (ignored/0029) only when asked.
+func expectWispsColumns(mock sqlmock.Sqlmock, arrivalSeq bool) {
+	expectCursorProbe(mock, "wisps", true)
+	rows := sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"}).
+		AddRow("id", "varchar(255)", "NO", "PRI", nil, "").
+		AddRow("row_lock", "bigint", "NO", "", "0", "").
+		AddRow("storage_class", "varchar(16)", "YES", "", nil, "")
+	if arrivalSeq {
+		rows.AddRow("arrival_seq", "bigint", "YES", "UNI", nil, "")
+	}
+	mock.ExpectQuery(regexp.QuoteMeta("SHOW COLUMNS FROM wisps")).WillReturnRows(rows)
+}
+
+// leaseOnly is the lease overlay alone, the projection most cases below
+// probe. leaseAndWisps adds the optional wisps plane, as the server-mode
+// open's projection list does.
+var (
+	leaseProjection = CloneLocalProjection{Table: "leases", Columns: []string{"lease_expires_at", "heartbeat_at", "granted_node"}}
+	wispsProjection = CloneLocalProjection{Table: "wisps", Columns: []string{"id", "row_lock", "storage_class", "arrival_seq"}, Optional: true}
+	leaseOnly       = []CloneLocalProjection{leaseProjection}
+	leaseAndWisps   = []CloneLocalProjection{leaseProjection, wispsProjection}
+)
+
 // TestCheckCloneLocalReadableAtLatestIssuesNoProbe pins the check's cost on
 // the healthy path every read-only open pays: the effective cursor is at this
-// binary's latest, so no lease-column probe runs at all. The sentinel probes
-// readCursor always issues for a non-zero cursor are stubbed present; a
-// lease probe that fired here would surface as an unmet expectation.
+// binary's latest, so no column probe runs at all, for either table. The
+// sentinel probes readCursor always issues for a non-zero cursor are stubbed
+// present; a table probe that fired here would surface as an unexpected query.
 func TestCheckCloneLocalReadableAtLatestIssuesNoProbe(t *testing.T) {
 	db, mock := newMockDB(t)
 	allSentinelsHealthy(t)
 	expectIgnoredCursor(mock, true, LatestIgnoredVersion())
 
-	if err := CheckCloneLocalReadable(context.Background(), db, "leases", []string{"lease_expires_at", "heartbeat_at", "granted_node"}); err != nil {
+	if err := CheckCloneLocalReadable(context.Background(), db, leaseAndWisps); err != nil {
 		t.Fatalf("CheckCloneLocalReadable (at latest) = %v, want nil", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -73,7 +98,7 @@ func TestCheckCloneLocalReadableBehindWithColumnsStaysReadable(t *testing.T) {
 	expectIgnoredCursor(mock, true, LatestIgnoredVersion()-1)
 	expectLeaseColumns(mock, true)
 
-	if err := CheckCloneLocalReadable(context.Background(), db, "leases", []string{"lease_expires_at", "heartbeat_at", "granted_node"}); err != nil {
+	if err := CheckCloneLocalReadable(context.Background(), db, leaseOnly); err != nil {
 		t.Fatalf("CheckCloneLocalReadable (behind, columns present) = %v, want nil", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -104,7 +129,7 @@ func TestCheckCloneLocalReadableRefusesMissingColumn(t *testing.T) {
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
 
-	err := CheckCloneLocalReadable(context.Background(), db, "leases", []string{"lease_expires_at", "heartbeat_at", "granted_node"})
+	err := CheckCloneLocalReadable(context.Background(), db, leaseOnly)
 	var e *CloneLocalBehindError
 	if !errors.As(err, &e) {
 		t.Fatalf("CheckCloneLocalReadable = %T (%v), want *CloneLocalBehindError", err, err)
@@ -115,8 +140,8 @@ func TestCheckCloneLocalReadableRefusesMissingColumn(t *testing.T) {
 	if e.LatestIgnoredVersion != LatestIgnoredVersion() || e.MainVersion != LatestVersion() || e.LatestMainVersion != LatestVersion() {
 		t.Errorf("CloneLocalBehindError versions = local %d/%d main %d/%d, want %d/%d and current main", e.DBIgnoredVersion, e.LatestIgnoredVersion, e.MainVersion, e.LatestMainVersion, LatestIgnoredVersion(), LatestVersion())
 	}
-	if len(e.MissingColumns) != 1 || e.MissingColumns[0] != "granted_node" {
-		t.Errorf("MissingColumns = %v, want [granted_node]", e.MissingColumns)
+	if len(e.MissingColumns) != 1 || e.MissingColumns[0] != "leases.granted_node" {
+		t.Errorf("MissingColumns = %v, want [leases.granted_node]", e.MissingColumns)
 	}
 	if msg := err.Error(); !strings.Contains(msg, "granted_node") || !strings.Contains(msg, "bd migrate schema") {
 		t.Errorf("refusal %q does not name the missing column and its remedy", msg)
@@ -142,7 +167,7 @@ func TestCheckCloneLocalReadableNamesMainBehindPosture(t *testing.T) {
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion()-2)
 
-	err := CheckCloneLocalReadable(context.Background(), db, "leases", []string{"lease_expires_at", "heartbeat_at", "granted_node"})
+	err := CheckCloneLocalReadable(context.Background(), db, leaseOnly)
 	var e *CloneLocalBehindError
 	if !errors.As(err, &e) {
 		t.Fatalf("CheckCloneLocalReadable = %T (%v), want *CloneLocalBehindError", err, err)
@@ -167,13 +192,98 @@ func TestCheckCloneLocalReadableMissingLeaseTable(t *testing.T) {
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
 
-	err := CheckCloneLocalReadable(context.Background(), db, "leases", []string{"lease_expires_at", "heartbeat_at", "granted_node"})
+	err := CheckCloneLocalReadable(context.Background(), db, leaseOnly)
 	var e *CloneLocalBehindError
 	if !errors.As(err, &e) {
 		t.Fatalf("CheckCloneLocalReadable (no leases table) = %T (%v), want *CloneLocalBehindError", err, err)
 	}
 	if len(e.MissingColumns) != 3 {
 		t.Errorf("MissingColumns = %v, want all three projected columns", e.MissingColumns)
+	}
+}
+
+// TestCheckCloneLocalReadableRefusesMissingWispsColumn is the shape a v1.3.x
+// consumer clone reaches after pull-then-upgrade: every v1.3.x release tops
+// the clone-local series at 26, so the leases table is complete, but the
+// wisps table lacks arrival_seq (ignored/0029), which the issue projection
+// selects there (GetIssue's wisps fallback, ready work, search). The check
+// must refuse it and name the column with its table, rather than let those
+// reads fail on the raw unknown-column error.
+func TestCheckCloneLocalReadableRefusesMissingWispsColumn(t *testing.T) {
+	const v13xCursor = 26
+	if v13xCursor >= LatestIgnoredVersion() {
+		t.Fatalf("fixture: clone-local cursor %d must be behind the latest v%d", v13xCursor, LatestIgnoredVersion())
+	}
+	db, mock := newMockDB(t)
+	allSentinelsHealthy(t)
+	expectIgnoredCursor(mock, true, v13xCursor)
+	expectLeaseColumns(mock, true)
+	expectWispsColumns(mock, false)
+	expectCursorProbe(mock, "schema_migrations", true)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+
+	err := CheckCloneLocalReadable(context.Background(), db, leaseAndWisps)
+	var e *CloneLocalBehindError
+	if !errors.As(err, &e) {
+		t.Fatalf("CheckCloneLocalReadable (wisps lacks arrival_seq) = %T (%v), want *CloneLocalBehindError", err, err)
+	}
+	if e.DBIgnoredVersion != v13xCursor {
+		t.Errorf("DBIgnoredVersion = %d, want %d", e.DBIgnoredVersion, v13xCursor)
+	}
+	if len(e.MissingColumns) != 1 || e.MissingColumns[0] != "wisps.arrival_seq" {
+		t.Errorf("MissingColumns = %v, want [wisps.arrival_seq]", e.MissingColumns)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "wisps.arrival_seq") || !strings.Contains(msg, "bd migrate schema") {
+		t.Errorf("refusal %q does not name the missing wisps column and its remedy", msg)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestCheckCloneLocalReadableNamesEveryTablesGaps pins that the refusal lists
+// the missing columns of every projected table, each qualified by its table,
+// in projection order, rather than stopping at the first table with a gap.
+func TestCheckCloneLocalReadableNamesEveryTablesGaps(t *testing.T) {
+	db, mock := newMockDB(t)
+	stubSentinelTables(t, allSentinelTables(), nil)
+	stubSentinelColumns(t, map[string]bool{"leases.granted_node": false}, nil)
+	expectIgnoredCursor(mock, true, 13)
+	expectLeaseColumns(mock, false)
+	expectWispsColumns(mock, false)
+	expectCursorProbe(mock, "schema_migrations", true)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+
+	err := CheckCloneLocalReadable(context.Background(), db, leaseAndWisps)
+	var e *CloneLocalBehindError
+	if !errors.As(err, &e) {
+		t.Fatalf("CheckCloneLocalReadable (both tables behind) = %T (%v), want *CloneLocalBehindError", err, err)
+	}
+	if got, want := strings.Join(e.MissingColumns, ", "), "leases.granted_node, wisps.arrival_seq"; got != want {
+		t.Errorf("MissingColumns = %q, want %q", got, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestCheckCloneLocalReadableAbsentOptionalTableRefusesNothing covers the
+// optional table: a database without a wisps table has no wisps to read
+// (sqlbuild.OptionalWispTable), so a behind cursor with complete leases stays
+// readable, and no SHOW COLUMNS goes to the absent table (a failing one pins
+// the pooled session's catalog, be-bv7x).
+func TestCheckCloneLocalReadableAbsentOptionalTableRefusesNothing(t *testing.T) {
+	db, mock := newMockDB(t)
+	allSentinelsHealthy(t)
+	expectIgnoredCursor(mock, true, LatestIgnoredVersion()-1)
+	expectLeaseColumns(mock, true)
+	expectCursorProbe(mock, "wisps", false)
+
+	if err := CheckCloneLocalReadable(context.Background(), db, leaseAndWisps); err != nil {
+		t.Fatalf("CheckCloneLocalReadable (no wisps table, leases complete) = %v, want nil", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
 	}
 }
 
@@ -188,7 +298,7 @@ func TestCheckCloneLocalReadableAbsentCursor(t *testing.T) {
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
 
 	var e *CloneLocalBehindError
-	err := CheckCloneLocalReadable(context.Background(), db, "leases", []string{"lease_expires_at", "heartbeat_at", "granted_node"})
+	err := CheckCloneLocalReadable(context.Background(), db, leaseOnly)
 	if !errors.As(err, &e) {
 		t.Fatalf("CheckCloneLocalReadable (cursor absent) = %T (%v), want *CloneLocalBehindError", err, err)
 	}
@@ -207,7 +317,7 @@ func TestCheckCloneLocalReadableWrapsProbeErrors(t *testing.T) {
 	stubSentinelColumns(t, nil, probeErr)
 	expectIgnoredCursor(mock, true, LatestIgnoredVersion()-1)
 
-	err := CheckCloneLocalReadable(context.Background(), db, "leases", []string{"lease_expires_at", "heartbeat_at", "granted_node"})
+	err := CheckCloneLocalReadable(context.Background(), db, leaseOnly)
 	if err == nil {
 		t.Fatalf("CheckCloneLocalReadable (probe error) = nil, want the wrapped probe failure")
 	}
@@ -232,7 +342,7 @@ func TestCheckCloneLocalReadableEscapeHatchDowngradesToWarning(t *testing.T) {
 	expectIgnoredCursor(mock, true, LatestIgnoredVersion()-1)
 	expectLeaseColumns(mock, false)
 
-	if err := CheckCloneLocalReadable(context.Background(), db, "leases", []string{"lease_expires_at", "heartbeat_at", "granted_node"}); err != nil {
+	if err := CheckCloneLocalReadable(context.Background(), db, leaseOnly); err != nil {
 		t.Fatalf("CheckCloneLocalReadable (BD_IGNORE_SCHEMA_SKEW=1) = %v, want nil: the hatch reads anyway", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -247,7 +357,7 @@ func TestCloneLocalBehindErrorGatewayWording(t *testing.T) {
 	e := &CloneLocalBehindError{
 		DBIgnoredVersion:     11,
 		LatestIgnoredVersion: LatestIgnoredVersion(),
-		MissingColumns:       []string{"granted_node"},
+		MissingColumns:       []string{"leases.granted_node"},
 		MainVersion:          LatestVersion(),
 		LatestMainVersion:    LatestVersion(),
 		Gateway:              true,

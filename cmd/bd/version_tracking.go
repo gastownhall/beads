@@ -243,9 +243,11 @@ func autoMigrateOnVersionBump(beadsDir string) {
 	// reconciliation silently never ran and the database kept its
 	// pre-upgrade clone-local schema. In server mode the factory open below
 	// decides whether the configured database exists; CreateIfMissing stays
-	// false, so no database is ever created here.
+	// false, so no database is ever created here. Server mode is resolved as
+	// that open resolves it: shared-server mode (dolt.shared-server) counts
+	// even where metadata.json still says embedded (GH#2946).
 	dbPath := cfg.DatabasePath(beadsDir)
-	serverMode := cfg.IsDoltServerMode()
+	serverMode := cfg.IsDoltServerMode() || doltserver.IsSharedServerMode()
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) && !serverMode {
 		// No database - nothing to migrate
 		debug.Logf("auto-migrate: skipping migration, database does not exist: %s", dbPath)

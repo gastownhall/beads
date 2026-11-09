@@ -6,11 +6,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/git"
 )
 
@@ -792,6 +795,58 @@ func TestAutoMigrateOnVersionBump_LocalModeStillRequiresTheLocalDatabaseDir(t *t
 	}
 	if _, err := os.Stat(doltDir); !os.IsNotExist(err) {
 		t.Errorf("local-mode reconciliation created %s from nothing", doltDir)
+	}
+}
+
+// TestAutoMigrateOnVersionBump_SharedServerModeSkipsTheLocalDirPrerequisite is
+// the shared-server shape of #7038's server-mode gate: config.yaml's
+// dolt.shared-server makes a workspace whose metadata.json still says
+// embedded a server-mode one (GH#2946), as the command's own open resolves
+// it, so the reconciliation must not stop at its absent local database
+// directory either: the database is the shared server's. The config.yaml key
+// is the case that needs doltserver.IsSharedServerMode; IsDoltServerMode
+// already honors its BEADS_DOLT_SHARED_SERVER environment twin.
+//
+// The configured database is never created, so the hook's opens fail on it
+// harmlessly after the decision under test; the debug log shows the hook got
+// as far as the server open.
+func TestAutoMigrateOnVersionBump_SharedServerModeSkipsTheLocalDirPrerequisite(t *testing.T) {
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available, skipping")
+	}
+	beadsDir, doltDir := newLocalModeBumpWorkspace(t, "1.0.0")
+	database := uniqueTestDBName(t)
+	cfg := &configfile.Config{
+		Backend:      configfile.BackendDolt,
+		DoltMode:     configfile.DoltModeEmbedded,
+		DoltDatabase: database,
+	}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("save metadata: %v", err)
+	}
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(testDoltServerPort))
+	initConfigForTest(t)
+	config.Set("dolt.shared-server", true)
+	if !doltserver.IsSharedServerMode() || cfg.IsDoltServerMode() {
+		t.Fatalf("precondition: want dolt.shared-server as the only server-mode signal (shared %v, metadata server mode %v)",
+			doltserver.IsSharedServerMode(), cfg.IsDoltServerMode())
+	}
+
+	debug.SetVerbose(true)
+	t.Cleanup(func() { debug.SetVerbose(false) })
+	logs := captureNoticeStderr(t, func() { autoMigrateOnVersionBump(beadsDir) })
+
+	if strings.Contains(logs, "auto-migrate: skipping migration, database does not exist") {
+		t.Errorf("shared-server reconciliation stopped at the absent local database directory; the database is the shared server's:\n%s", logs)
+	}
+	if !strings.Contains(logs, "auto-migrate: failed to open database") {
+		t.Errorf("shared-server reconciliation did not reach the server open:\n%s", logs)
+	}
+	if _, err := os.Stat(doltDir); !os.IsNotExist(err) {
+		t.Errorf("shared-server reconciliation created a local database directory at %s", doltDir)
 	}
 }
 

@@ -10,14 +10,14 @@ import (
 
 // CloneLocalBehindError is returned when a database is opened on a path that
 // cannot migrate it (read-only opens, gateway opens) and its clone-local
-// migration series — the dolt-ignored lane: leases and the other per-clone
-// tables — is behind this binary's and lacks a column the caller's issue
-// reads select. Clone-local DDL never replicates: `bd dolt pull` brings the
-// shared (main-series) schema only, so after following the documented
+// migration series — the dolt-ignored lane: leases, wisps and the other
+// per-clone tables — is behind this binary's and lacks a column the caller's
+// issue reads select. Clone-local DDL never replicates: `bd dolt pull` brings
+// the shared (main-series) schema only, so after following the documented
 // pull-then-upgrade recipe a consumer clone can sit at the latest shared
-// schema with an outdated lease schema, and without this check its reads fail
-// on a raw unknown-column SQL error instead of a named refusal with a remedy
-// (gastownhall/beads#7038).
+// schema with outdated clone-local tables, and without this check its reads
+// fail on a raw unknown-column SQL error instead of a named refusal with a
+// remedy (gastownhall/beads#7038).
 type CloneLocalBehindError struct {
 	// DBIgnoredVersion is the effective clone-local cursor: the raw
 	// ignored_schema_migrations value clamped by the sentinel probes, never a
@@ -25,7 +25,9 @@ type CloneLocalBehindError struct {
 	DBIgnoredVersion int
 	// LatestIgnoredVersion is this binary's latest clone-local migration.
 	LatestIgnoredVersion int
-	// MissingColumns are the projected lease columns the database lacks.
+	// MissingColumns are the projected clone-local columns the database
+	// lacks, each qualified by its table (leases.granted_node,
+	// wisps.arrival_seq).
 	MissingColumns []string
 	// MainVersion is the main-series cursor as this check read it, and
 	// LatestMainVersion this binary's latest main migration, so the message
@@ -46,7 +48,7 @@ type CloneLocalBehindError struct {
 // behind, what is missing, and why pull cannot fix it. gatewayVariant and the
 // main-series posture are layered on by Error and UserMessage.
 func (e *CloneLocalBehindError) cloneLocalBehindMessage() string {
-	return fmt.Sprintf("clone-local schema mismatch: this database's clone-local migration series (leases and the other per-clone tables) is at v%d of v%d and its leases table lacks column(s) %s, which this binary's issue reads select",
+	return fmt.Sprintf("clone-local schema mismatch: this database's clone-local migration series (leases, wisps and the other per-clone tables) is at v%d of v%d and lacks column(s) %s, which this binary's issue reads select",
 		e.DBIgnoredVersion, e.LatestIgnoredVersion, strings.Join(e.MissingColumns, ", "))
 }
 
@@ -78,8 +80,9 @@ func (e *CloneLocalBehindError) Error() string {
 func (e *CloneLocalBehindError) UserMessage() string {
 	msg := e.cloneLocalBehindMessage() + ".\n" +
 		"\n" +
-		"  Clone-local migrations (the ignored series: leases and the other per-clone\n" +
-		"  tables) never arrive with `bd dolt pull`; the pull brings only the shared schema.\n"
+		"  Clone-local migrations (the ignored series: leases, wisps and the other\n" +
+		"  per-clone tables) never arrive with `bd dolt pull`; the pull brings only the\n" +
+		"  shared schema.\n"
 	if e.Gateway {
 		msg += "\n" +
 			"  The gateway server owns this database's schema and bd never migrates it.\n" +
@@ -117,25 +120,36 @@ func IsCloneLocalBehindError(err error) bool {
 	return errors.As(err, &e)
 }
 
+// CloneLocalProjection is one clone-local table the caller's issue reads
+// select from, and the columns they select there. Optional marks a table a
+// database may legitimately lack — no wisps table reads as no wisps
+// (sqlbuild.OptionalWispTable) — so its absence refuses nothing; a required
+// table that is absent reads as every one of its columns missing.
+type CloneLocalProjection struct {
+	Table    string
+	Columns  []string
+	Optional bool
+}
+
 // CheckCloneLocalReadable is CheckReadableDrift's clone-local counterpart: it
 // guards an open that reads a database at its current clone-local schema
 // instead of migrating it (read-only and gateway opens). From one effective
 // cursor read (CurrentIgnoredVersion, sentinel-clamped) it refuses nothing
 // while the cursor is at this binary's latest clone-local version; a behind
-// cursor is only believed to matter once the table lacks one of columns, the
-// columns the caller's reads select. A behind cursor with all of them present
-// stays readable — the same tolerance CheckReadableDrift gives a behind main
-// series, and for the same reason: reads keep working through the window
-// until the operator migrates. Only a missing column, which no issue read
-// can avoid selecting, refuses, with CloneLocalBehindError's named remedy
-// instead of the raw unknown-column error the read would otherwise fail on
+// cursor is only believed to matter once one of projections' tables lacks a
+// column the caller's reads select there. A behind cursor with all of them
+// present stays readable — the same tolerance CheckReadableDrift gives a
+// behind main series, and for the same reason: reads keep working through
+// the window until the operator migrates. Only a missing column refuses,
+// with CloneLocalBehindError's named remedy instead of the raw unknown-column
+// error the reads that select it would otherwise fail on
 // (gastownhall/beads#7038). BD_IGNORE_SCHEMA_SKEW=1 downgrades the refusal
 // to a warning, mirroring behindDriftError — without widening what it
 // bypasses: the open still does not migrate, and reads touching the missing
 // column still fail.
 //
-// table is a hardcoded identifier, never user input.
-func CheckCloneLocalReadable(ctx context.Context, db DBConn, table string, columns []string) error {
+// Every table name is a hardcoded identifier, never user input.
+func CheckCloneLocalReadable(ctx context.Context, db DBConn, projections []CloneLocalProjection) error {
 	current, err := CurrentIgnoredVersion(ctx, db)
 	if err != nil {
 		return fmt.Errorf("clone-local readable-schema check: %w", err)
@@ -146,7 +160,7 @@ func CheckCloneLocalReadable(ctx context.Context, db DBConn, table string, colum
 		// contradicted schema could inflate.
 		return nil
 	}
-	missing, err := missingColumns(ctx, db, table, columns)
+	missing, err := missingProjectedColumns(ctx, db, projections)
 	if err != nil {
 		return fmt.Errorf("clone-local readable-schema check: %w", err)
 	}
@@ -170,4 +184,28 @@ func CheckCloneLocalReadable(ctx context.Context, db DBConn, table string, colum
 		MainVersion:          mainVersion,
 		LatestMainVersion:    LatestVersion(),
 	}
+}
+
+// missingProjectedColumns returns the columns projections select that the
+// database lacks, each qualified by its table, in projection order. An
+// optional table that does not exist contributes none.
+func missingProjectedColumns(ctx context.Context, db DBConn, projections []CloneLocalProjection) ([]string, error) {
+	var missing []string
+	for _, p := range projections {
+		exists, err := tableInCurrentDatabase(ctx, db, p.Table)
+		if err != nil {
+			return nil, fmt.Errorf("checking table %s: %w", p.Table, err)
+		}
+		if !exists && p.Optional {
+			continue
+		}
+		columns, err := missingColumnsIn(ctx, db, p.Table, exists, p.Columns)
+		if err != nil {
+			return nil, err
+		}
+		for _, column := range columns {
+			missing = append(missing, p.Table+"."+column)
+		}
+	}
+	return missing, nil
 }

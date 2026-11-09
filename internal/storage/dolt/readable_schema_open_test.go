@@ -232,8 +232,8 @@ func TestDoltNew_CloneLocalReadableSchema(t *testing.T) {
 		if e.MainVersion != schema.LatestVersion() || e.LatestMainVersion != schema.LatestVersion() {
 			t.Errorf("CloneLocalBehindError claims main %d of %d, want a current main series", e.MainVersion, e.LatestMainVersion)
 		}
-		if len(e.MissingColumns) != 1 || e.MissingColumns[0] != "granted_node" {
-			t.Errorf("MissingColumns = %v, want [granted_node]", e.MissingColumns)
+		if len(e.MissingColumns) != 1 || e.MissingColumns[0] != "leases.granted_node" {
+			t.Errorf("MissingColumns = %v, want [leases.granted_node]", e.MissingColumns)
 		}
 		msg := err.Error()
 		if !strings.Contains(msg, "granted_node") || !strings.Contains(msg, "bd migrate schema") {
@@ -545,5 +545,112 @@ func TestDoltNew_CloneLocalBehindCompleteProjectionNoMigration(t *testing.T) {
 		if after := cloneLocalState(t, ctx, store); after != before {
 			t.Errorf("open %d: read-only open changed the database: before %s, after %s", i+1, before, after)
 		}
+	}
+}
+
+// TestDoltNew_CloneLocalReadableSchemaWispsPlane is the clone-local shape a
+// v1.3.x consumer clone reaches after the pull-then-upgrade recipe: every
+// v1.3.x release tops the clone-local series at 26, so the leases table is
+// complete (ignored/0016 is below it), but the wisps table lacks what
+// ignored/0027-0029 add, arrival_seq among them, which the issue projection
+// selects on the wisps plane. Main 0073 adds that column to wisps only on the
+// database it migrates: wisps is dolt-ignored, so no pull brings it. The
+// fixture rebuilds that shape around one durable issue and one wisp.
+//
+// The open that does not ask for a readable schema shows what the refusal
+// stands in for: it opens, and the wisp read fails on the raw arrival_seq
+// error. The open that asks must refuse with the typed clone-local error,
+// naming the column with its table.
+func TestDoltNew_CloneLocalReadableSchemaWispsPlane(t *testing.T) {
+	skipIfNoDolt(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	const v13xCursor = 26
+	tmpDir := t.TempDir()
+	dbName := uniqueTestDBName(t)
+	store, err := New(ctx, &Config{
+		Path:            tmpDir,
+		CommitterName:   "test",
+		CommitterEmail:  "test@example.com",
+		Database:        dbName,
+		CreateIfMissing: true,
+	})
+	if err != nil {
+		t.Fatalf("New (create): %v", err)
+	}
+	defer func() {
+		dropCtx, dropCancel := context.WithTimeout(context.Background(), 5*testTimeout)
+		defer dropCancel()
+		_, _ = store.db.ExecContext(dropCtx, fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", dbName))
+		store.Close()
+	}()
+	if err := store.SetConfig(ctx, "issue_prefix", "wv"); err != nil {
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	now := time.Now()
+	for _, issue := range []*types.Issue{
+		{ID: "wv-1", Title: "durable", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+		{ID: "wv-wisp", Title: "wisp", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, Ephemeral: true, CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := store.CreateIssue(ctx, issue, "test-user"); err != nil {
+			t.Fatalf("create %s: %v", issue.ID, err)
+		}
+	}
+
+	// Every object here is dolt-ignored, so the working set stays clean.
+	for _, stmt := range []string{
+		fmt.Sprintf("DELETE FROM ignored_schema_migrations WHERE version > %d", v13xCursor),
+		"DROP TABLE IF EXISTS wisp_id_tombstones",
+		"ALTER TABLE wisps DROP INDEX uk_wisps_arrival_seq",
+		"ALTER TABLE wisps DROP COLUMN arrival_seq",
+		"ALTER TABLE wisps DROP COLUMN participation_generation",
+		"ALTER TABLE wisps DROP COLUMN current_revision",
+	} {
+		if _, err := store.db.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if v, err := schema.CurrentVersion(ctx, store.db); err != nil || v != schema.LatestVersion() {
+		t.Fatalf("precondition: main cursor = %d (%v), want the latest v%d", v, err, schema.LatestVersion())
+	}
+	if v, err := schema.CurrentIgnoredVersion(ctx, store.db); err != nil || v != v13xCursor {
+		t.Fatalf("precondition: effective clone-local cursor = %d (%v), want v%d", v, err, v13xCursor)
+	}
+	open := func(cfg *Config) (*DoltStore, error) {
+		cfg.Path = tmpDir
+		cfg.CommitterName = "test"
+		cfg.CommitterEmail = "test@example.com"
+		cfg.Database = dbName
+		return New(ctx, cfg)
+	}
+
+	ro, err := open(&Config{ReadOnly: true})
+	if err != nil {
+		t.Fatalf("New (read-only, no RequireReadableSchema) = %v, want success", err)
+	}
+	_, readErr := ro.GetIssue(ctx, "wv-wisp")
+	ro.Close()
+	if readErr == nil || !strings.Contains(readErr.Error(), "arrival_seq") {
+		t.Fatalf("GetIssue(wisp) on the v1.3.x clone-local shape = %v, want the raw arrival_seq failure the refusal stands in for", readErr)
+	}
+
+	s, err := open(&Config{ReadOnly: true, RequireReadableSchema: true})
+	if err == nil {
+		s.Close()
+	}
+	var e *schema.CloneLocalBehindError
+	if !errors.As(err, &e) {
+		t.Fatalf("New (read-only, wisps lacks arrival_seq) = %T (%v), want *schema.CloneLocalBehindError, not an open whose wisp reads fail on the raw column", err, err)
+	}
+	if e.DBIgnoredVersion != v13xCursor || e.MainVersion != schema.LatestVersion() {
+		t.Errorf("CloneLocalBehindError versions = clone-local %d, main %d; want %d and the latest main v%d", e.DBIgnoredVersion, e.MainVersion, v13xCursor, schema.LatestVersion())
+	}
+	if len(e.MissingColumns) != 1 || e.MissingColumns[0] != "wisps.arrival_seq" {
+		t.Errorf("MissingColumns = %v, want [wisps.arrival_seq]", e.MissingColumns)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "wisps.arrival_seq") || !strings.Contains(msg, "bd migrate schema") {
+		t.Errorf("refusal %q does not name the missing wisps column and the per-database remedy", msg)
 	}
 }

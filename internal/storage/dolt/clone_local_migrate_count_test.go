@@ -105,12 +105,13 @@ func TestMigrateUpCountsCloneLocalOnlyPass(t *testing.T) {
 }
 
 // TestMigratingOpenServesFirstReadAfterCloneLocalOnlyPass is the consumer
-// side of the count fix (#7038 AC-3): the open that migrates only the
-// clone-local series must rebuild its connection pool — the pool's Ping
-// pinned a connection to the pre-migration session root, and that
-// connection serves stale reads that do not self-heal on retry (be-itm5) —
-// so the first issue read through the freshly opened store selects the
-// lease column the pass just added instead of failing on it.
+// side of #7038 AC-3, end to end: an open that migrates only the clone-local
+// series serves its first issue read, which selects the lease column the pass
+// just added. It does not pin the pool rebuild the count fix now triggers
+// after such a pass: the stale session root be-itm5 describes has not been
+// reproduced for a clone-local-only pass, and this read also succeeds with
+// the count fix reverted. TestMigrateUpCountsCloneLocalOnlyPass is the test
+// that fails when the count regresses.
 func TestMigratingOpenServesFirstReadAfterCloneLocalOnlyPass(t *testing.T) {
 	skipIfNoDolt(t)
 
@@ -149,7 +150,7 @@ func TestMigratingOpenServesFirstReadAfterCloneLocalOnlyPass(t *testing.T) {
 	}
 
 	// The migrating open: not read-only, not a gateway, so it applies the
-	// pending clone-local series and then must rebuild its pool.
+	// pending clone-local series.
 	store, err := New(ctx, &Config{
 		Path:           tmpDir,
 		CommitterName:  "test",
@@ -168,7 +169,7 @@ func TestMigratingOpenServesFirstReadAfterCloneLocalOnlyPass(t *testing.T) {
 
 	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
-		t.Fatalf("SearchIssues (first read after a clone-local-only migrating open) = %v; the open's stale pinned pool still serves the pre-migration schema the pass just replaced", err)
+		t.Fatalf("SearchIssues (first read after a clone-local-only migrating open) = %v, want the read to see the clone-local series the open just applied", err)
 	}
 	found := false
 	for _, issue := range issues {
