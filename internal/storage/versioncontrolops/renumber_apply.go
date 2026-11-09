@@ -3,6 +3,7 @@ package versioncontrolops
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -186,9 +187,14 @@ func childRenumberCommitMessage(plan *storage.ChildRenumberPlan) string {
 // so a rename never touches an id a later mapping still needs under its old
 // name. Every mapped issue is renamed through issueops.UpdateIssueIDInTx with
 // unchanged text, which retains the retirement checks and carries edges,
-// leases, and the audit journal. After the renames, every allocation parent's
-// child counter is raised to the planned high-water mark, so the next local
-// create starts above the collision instead of re-minting a colliding suffix.
+// leases, and the audit journal. The rename's own follow-through runs with
+// each mapping, inside the same transaction: the issue's child-counter row —
+// the high-water mark its future children mint from — moves to the new id
+// with its value preserved, and the synced aux rows that followed the issue
+// (comments, snapshots) get their content-derived ids re-derived from the new
+// issue id. After the renames, every allocation parent's child counter is
+// raised to the planned high-water mark, so the next local create starts
+// above the collision instead of re-minting a colliding suffix.
 func applyChildRenumbersInTx(ctx context.Context, tx *sql.Tx, plan *storage.ChildRenumberPlan, actor string) error {
 	// Refuse unsupported versioned-history cases before any mutation: the
 	// rename does not migrate issue_versions rows (the table has no FK to
@@ -208,11 +214,96 @@ func applyChildRenumbersInTx(ctx context.Context, tx *sql.Tx, plan *storage.Chil
 		if err != nil {
 			return err
 		}
+		// Capture the issue's own counter BEFORE the rename: the ignored
+		// counter migration's ON UPDATE CASCADE may move the row while the
+		// rename runs, so reading it after would be reading the moved row,
+		// not capturing what to preserve.
+		counter, hasCounter, err := capturedChildCounterInTx(ctx, tx, m.OldID)
+		if err != nil {
+			return err
+		}
 		if err := issueops.UpdateIssueIDInTx(ctx, tx, m.OldID, m.NewID, issue, actor); err != nil {
 			return fmt.Errorf("renumber: rename %s -> %s: %w", m.OldID, m.NewID, err)
 		}
+		if hasCounter {
+			if err := relocateChildCounterInTx(ctx, tx, m.OldID, m.NewID, counter); err != nil {
+				return err
+			}
+		}
+		// The aux rows followed the issue by FK cascade; their content-derived
+		// ids must be re-derived from the new issue id or they stay pinned to
+		// the old one the other clone still holds.
+		if err := issueops.RekeyAuxRowsForIssueInTx(ctx, tx, m.NewID); err != nil {
+			return fmt.Errorf("renumber: rename %s -> %s: %w", m.OldID, m.NewID, err)
+		}
 	}
-	return raiseChildCounterFloorsInTx(ctx, tx, plan.CounterFloors)
+	// The floors name parents as the PLAN saw them, and a parent that was
+	// itself renamed mints its future children under the new id: remap each
+	// floor key through the mappings before raising, or the raise would try
+	// to seed a counter row under an id the rename just vacated (its row
+	// followed the issue, and the issues row is gone).
+	floors := make(map[string]int64, len(plan.CounterFloors))
+	renamed := make(map[string]string, len(plan.Mappings))
+	for _, m := range plan.Mappings {
+		renamed[m.OldID] = m.NewID
+	}
+	for parent, floor := range plan.CounterFloors {
+		if newParent, ok := renamed[parent]; ok {
+			parent = newParent
+		}
+		floors[parent] = floor
+	}
+	return raiseChildCounterFloorsInTx(ctx, tx, floors)
+}
+
+// capturedChildCounterInTx reads an issue's own child-counter row before its
+// rename: the high-water mark its future children mint from. An issue without
+// a row — its children predate the counter backfill, or it never had any —
+// reports hasCounter false and relocates nothing.
+func capturedChildCounterInTx(ctx context.Context, tx *sql.Tx, issueID string) (int64, bool, error) {
+	var last int64
+	err := tx.QueryRowContext(ctx,
+		"SELECT last_child FROM child_counters WHERE parent_id = ?", issueID).Scan(&last)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("renumber: read child counter for %s: %w", issueID, err)
+	}
+	return last, true, nil
+}
+
+// relocateChildCounterInTx moves a renamed issue's own counter row to its new
+// id with the captured high-water preserved, and verifies the postcondition:
+// the row lives ONLY under the new id with the same value, none under the
+// old. The UPDATE normally affects 0 rows — the ignored counter migration
+// restores an ON UPDATE CASCADE that moves the row when the issues row is
+// renamed — but a schema without that FK leaves the row behind, and the
+// UPDATE is what moves it. Either way the verification is the contract; a
+// mismatch fails the transaction and with it the whole repair.
+func relocateChildCounterInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, captured int64) error {
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE child_counters SET parent_id = ? WHERE parent_id = ?", newID, oldID); err != nil {
+		return fmt.Errorf("renumber: move child counter %s -> %s: %w", oldID, newID, err)
+	}
+	var got sql.NullInt64
+	if err := tx.QueryRowContext(ctx,
+		"SELECT last_child FROM child_counters WHERE parent_id = ?", newID).Scan(&got); err != nil {
+		return fmt.Errorf("renumber: read child counter for %s: %w", newID, err)
+	}
+	if !got.Valid || got.Int64 != captured {
+		return fmt.Errorf("renumber: child counter for %s = %d after rename, want the preserved high-water %d",
+			newID, got.Int64, captured)
+	}
+	var stale int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM child_counters WHERE parent_id = ?", oldID).Scan(&stale); err != nil {
+		return fmt.Errorf("renumber: check child counter for %s: %w", oldID, err)
+	}
+	if stale > 0 {
+		return fmt.Errorf("renumber: %d child counter row(s) remain for %s after the rename", stale, oldID)
+	}
+	return nil
 }
 
 // readIssueTextForRename reads the identity-carrying text UpdateIssueIDInTx
@@ -227,11 +318,11 @@ func readIssueTextForRename(ctx context.Context, tx *sql.Tx, id string) (*types.
 		return nil, fmt.Errorf("renumber: read %s for rename: %w", id, err)
 	}
 	return &types.Issue{
-		Title:             title,
-		Description:       description.String,
-		Design:            design.String,
+		Title:              title,
+		Description:        description.String,
+		Design:             design.String,
 		AcceptanceCriteria: acceptanceCriteria.String,
-		Notes:             notes.String,
+		Notes:              notes.String,
 	}, nil
 }
 

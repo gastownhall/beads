@@ -12,7 +12,10 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/rowid"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
@@ -328,5 +331,383 @@ func TestEmbeddedDoltPullRenumberChildren(t *testing.T) {
 	if head == localHead || head == result.RenameCommit {
 		t.Errorf("branch head = %s; the merge of the remote revision never advanced past the local leg (%s) or the rename commit (%s)",
 			head, localHead, result.RenameCommit)
+	}
+}
+
+// subtreeCommentID computes the content-derived id the bd-ri8bd derivation
+// mints for the fixture's identical comment under issueID at the given
+// ordinal — the same id both clones mint independently for the same content,
+// which is exactly the convergence the rename-time rekey must not break.
+func subtreeCommentID(issueID string, ordinal int) string {
+	return rowid.New("comments", ordinal, rowid.Digest([]sql.NullString{
+		{String: issueID, Valid: true},
+		{String: "tester", Valid: true},
+		{String: "identical comment", Valid: true},
+		{String: "2026-01-01 00:00:00", Valid: true},
+	}))
+}
+
+// buildOfflineChildSubtreeCollision builds the AC-4 fixture: the offline
+// divergence of buildOfflineChildCollision, one level deeper. Both clones
+// create children under the shared parent bd-rn4, and both sides' colliding
+// bd-rn4.71 roots carry their own descendants, dependency edges, comments,
+// and counter rows. The local clone additionally holds bd-rn4.72 with a
+// counter high-water of 1 and NO live children — a parent whose next create
+// must still mint suffix 2 after it is renamed.
+//
+// Returns the local leg's pinned head.
+func buildOfflineChildSubtreeCollision(t *testing.T, beadsDir string) (localHead string) {
+	t.Helper()
+	ctx := t.Context()
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+
+	store, err := embeddeddolt.Open(ctx, beadsDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("Open (create): %v", err)
+	}
+	store.Close()
+
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	// Plain defer, not t.Cleanup: the handle must be gone when this helper
+	// returns so the store-under-test can open its own (embedded engine
+	// handles serialize).
+	defer func() { _ = cleanup() }()
+
+	mustExec := func(stage, q string, args ...any) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx, q, args...); err != nil {
+			t.Fatalf("%s: %v", stage, err)
+		}
+	}
+	head := func() string {
+		t.Helper()
+		var hash string
+		if err := db.QueryRowContext(ctx, "SELECT commit_hash FROM dolt_log LIMIT 1").Scan(&hash); err != nil {
+			t.Fatalf("read head hash: %v", err)
+		}
+		return hash
+	}
+	seedChild := func(id, title string) {
+		t.Helper()
+		mustExec("seed "+id, "INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) "+
+			"VALUES (?, ?, '', '', '', '', 'open', 2, 'task')", id, title)
+	}
+	seedCounter := func(parent string, last int) {
+		t.Helper()
+		mustExec("seed counter "+parent, "INSERT INTO child_counters (parent_id, last_child) VALUES (?, ?)", parent, last)
+	}
+	seedDep := func(source, target string) {
+		t.Helper()
+		mustExec("seed dep "+source+" -> "+target,
+			"INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) "+
+				"VALUES (?, ?, ?, 'blocks', '2026-01-01 00:00:00', 'fixture')",
+			depid.New(source, target), source, target)
+	}
+	seedComment := func(id string) {
+		t.Helper()
+		mustExec("seed comment "+id,
+			"INSERT INTO comments (id, issue_id, author, text, created_at) "+
+				"VALUES (?, ?, 'tester', 'identical comment', '2026-01-01 00:00:00')", id, "bd-rn4.71")
+	}
+
+	// C0: the shared ancestor — parent with counter 70 and no children.
+	mustExec("seed parent", "INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) "+
+		"VALUES ('bd-rn4', 'parent epic', '', '', '', '', 'open', 2, 'epic')")
+	seedCounter("bd-rn4", 70)
+	mustExec("commit C0", "CALL DOLT_COMMIT('-Am', 'test: seed ancestor counter 70 (C0)')")
+	c0 := head()
+	mustExec("add remote", "CALL DOLT_REMOTE('add', 'origin', ?)", "file://"+filepath.Join(t.TempDir(), "remote"))
+	mustExec("push C0", "CALL DOLT_PUSH('origin', 'main')")
+
+	// The local clone's leg: .71 with child .71.1 and two identical comments,
+	// .72 with a high-water counter and no live children, and .73, with
+	// dependency edges both directions between .71 and .73.
+	seedChild("bd-rn4.71", "local 71")
+	seedChild("bd-rn4.71.1", "local 71.1")
+	seedChild("bd-rn4.72", "local 72")
+	seedChild("bd-rn4.73", "local 73")
+	seedCounter("bd-rn4.71", 1)
+	seedCounter("bd-rn4.72", 1)
+	mustExec("local parent counter", "UPDATE child_counters SET last_child = 73 WHERE parent_id = 'bd-rn4'")
+	seedDep("bd-rn4.71", "bd-rn4.73")
+	seedDep("bd-rn4.73", "bd-rn4.71")
+	seedComment(subtreeCommentID("bd-rn4.71", 0))
+	seedComment(subtreeCommentID("bd-rn4.71", 1))
+	mustExec("commit local leg", "CALL DOLT_COMMIT('-Am', 'test: local children 71-73 with subtree')")
+	localHead = head()
+
+	// The other clone's leg: .71 with its own child .71.1 and the SAME
+	// identical comment (same content, same derived id, under its own .71),
+	// plus .72. Counter 72.
+	mustExec("rewind to C0", "CALL DOLT_RESET('--hard', ?)", c0)
+	seedChild("bd-rn4.71", "remote 71")
+	seedChild("bd-rn4.71.1", "remote 71.1")
+	seedChild("bd-rn4.72", "remote 72")
+	seedCounter("bd-rn4.71", 1)
+	mustExec("remote parent counter", "UPDATE child_counters SET last_child = 72 WHERE parent_id = 'bd-rn4'")
+	seedComment(subtreeCommentID("bd-rn4.71", 0))
+	mustExec("commit remote leg", "CALL DOLT_COMMIT('-Am', 'test: remote children 71-72 with subtree')")
+	mustExec("push remote leg", "CALL DOLT_PUSH('origin', 'main')")
+
+	// Back on the local leg: the branch diverges from remotes/origin/main.
+	mustExec("rewind to local leg", "CALL DOLT_RESET('--hard', ?)", localHead)
+	return localHead
+}
+
+// TestEmbeddedDoltPullRenumberChildrenSubtree (GH#4796, bd-28sb25 AC-4): the
+// repair carries a colliding subtree whole. The local .71 (with child .71.1,
+// both-direction dependency edges to .73, and two identical comments) maps to
+// .74 with its descendant at .74.1; .72 — a counter high-water of 1 with no
+// live children — maps to .75. After the merge the remote keeps .71/.71.1/.72
+// while the local content lives under .74/.74.1/.75: every edge followed its
+// issue, the counter rows moved with their values preserved (the next create
+// under .74 or .75 mints suffix 2), the comments that followed the rename got
+// ids re-derived from the new issue id while the remote's identical comment
+// kept its own, and a second sync needs no repair at all.
+func TestEmbeddedDoltPullRenumberChildrenSubtree(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
+	}
+
+	ctx := context.Background()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	localHead := buildOfflineChildSubtreeCollision(t, beadsDir)
+
+	store, err := embeddeddolt.Open(ctx, beadsDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	result, err := store.PullWithChildRenumbers(ctx, "")
+	if err != nil {
+		t.Fatalf("PullWithChildRenumbers: %v", err)
+	}
+	if result == nil {
+		t.Fatal("PullWithChildRenumbers returned a nil result on success")
+	}
+	if result.RenameCommit == "" {
+		t.Fatal("result.RenameCommit is empty; the renames were not committed")
+	}
+	if result.RenameCommit == localHead {
+		t.Errorf("result.RenameCommit = localHead %s; no rename commit was created", localHead)
+	}
+	want := []storage.ChildRenumberMapping{
+		{OldID: "bd-rn4.71", NewID: "bd-rn4.74", Root: true},
+		{OldID: "bd-rn4.71.1", NewID: "bd-rn4.74.1"},
+		{OldID: "bd-rn4.72", NewID: "bd-rn4.75", Root: true},
+	}
+	if result.Plan == nil || len(result.Plan.Mappings) != len(want) {
+		t.Fatalf("result plan mappings = %+v, want %+v", result.Plan, want)
+	}
+	for i, m := range want {
+		if result.Plan.Mappings[i] != m {
+			t.Errorf("result mapping %d = %+v, want %+v", i, result.Plan.Mappings[i], m)
+		}
+	}
+
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, filepath.Join(beadsDir, "embeddeddolt"), "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL (verify): %v", err)
+	}
+	// Released explicitly below, before the store-level sync checks: the
+	// embedded engine serializes open handles, and the store must be free to
+	// act once the assertions are done.
+	releaseVerify := func() { _ = cleanup() }
+
+	// The merged database keeps both sides' identities: the remote's
+	// .71/.71.1/.72 alongside the renamed .74/.74.1/.75 and the untouched
+	// .73, each carrying its own side's content.
+	for id, title := range map[string]string{
+		"bd-rn4.71":   "remote 71",
+		"bd-rn4.71.1": "remote 71.1",
+		"bd-rn4.72":   "remote 72",
+		"bd-rn4.73":   "local 73",
+		"bd-rn4.74":   "local 71",
+		"bd-rn4.74.1": "local 71.1",
+		"bd-rn4.75":   "local 72",
+	} {
+		var got string
+		if err := db.QueryRowContext(ctx,
+			"SELECT title FROM issues WHERE id = ?", id).Scan(&got); err != nil {
+			t.Errorf("read %s after repair: %v", id, err)
+		} else if got != title {
+			t.Errorf("title of %s = %q, want %q", id, got, title)
+		}
+	}
+	var children int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM issues WHERE id LIKE 'bd-rn4.%'").Scan(&children); err != nil {
+		t.Fatalf("count children: %v", err)
+	}
+	if children != 7 {
+		t.Errorf("children after repair = %d, want 7", children)
+	}
+
+	// The dependency edges followed the identities they name: .71's outbound
+	// edge now belongs to .74, and .71's inbound edge now points at .74, both
+	// re-keyed to the deterministic depid of their new endpoints.
+	type depRow struct {
+		id, source, target string
+	}
+	var deps []depRow
+	rows, err := db.QueryContext(ctx,
+		"SELECT id, issue_id, depends_on_issue_id FROM dependencies")
+	if err != nil {
+		t.Fatalf("read dependencies: %v", err)
+	}
+	for rows.Next() {
+		var d depRow
+		if err := rows.Scan(&d.id, &d.source, &d.target); err != nil {
+			rows.Close()
+			t.Fatalf("scan dependency: %v", err)
+		}
+		deps = append(deps, d)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read dependencies: %v", err)
+	}
+	wantDeps := map[string]string{
+		"bd-rn4.74": "bd-rn4.73",
+		"bd-rn4.73": "bd-rn4.74",
+	}
+	if len(deps) != len(wantDeps) {
+		t.Errorf("dependency rows = %+v, want the two re-keyed edges %+v", deps, wantDeps)
+	}
+	for _, d := range deps {
+		target, ok := wantDeps[d.source]
+		if !ok {
+			t.Errorf("unexpected dependency %s -> %s after repair", d.source, d.target)
+			continue
+		}
+		if d.target != target {
+			t.Errorf("dependency %s -> %s, want target %s", d.source, d.target, target)
+		}
+		if wantID := depid.New(d.source, d.target); d.id != wantID {
+			t.Errorf("dependency id %s for %s -> %s, want the derived %s", d.id, d.source, d.target, wantID)
+		}
+	}
+
+	// The comments: the two that followed .71 to .74 carry ids re-derived
+	// from the NEW issue id (multiplicity preserved — ordinals 0 and 1),
+	// while the remote's identical comment under .71 kept its own id. All
+	// three coexist; nothing was silently dropped by a shared primary key.
+	for issueID, wantIDs := range map[string][]string{
+		"bd-rn4.74": {subtreeCommentID("bd-rn4.74", 0), subtreeCommentID("bd-rn4.74", 1)},
+		"bd-rn4.71": {subtreeCommentID("bd-rn4.71", 0)},
+	} {
+		var gotIDs []string
+		rows, err := db.QueryContext(ctx,
+			"SELECT id FROM comments WHERE issue_id = ? ORDER BY id", issueID)
+		if err != nil {
+			t.Fatalf("read comments for %s: %v", issueID, err)
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				t.Fatalf("scan comment id: %v", err)
+			}
+			gotIDs = append(gotIDs, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			t.Fatalf("read comments for %s: %v", issueID, err)
+		}
+		if len(gotIDs) != len(wantIDs) {
+			t.Errorf("comments under %s = %v, want %v", issueID, gotIDs, wantIDs)
+			continue
+		}
+		sort.Strings(gotIDs)
+		sortedWant := append([]string(nil), wantIDs...)
+		sort.Strings(sortedWant)
+		for i := range sortedWant {
+			if gotIDs[i] != sortedWant[i] {
+				t.Errorf("comment %d under %s = %s, want %s", i, issueID, gotIDs[i], sortedWant[i])
+			}
+		}
+	}
+	var comments int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM comments").Scan(&comments); err != nil {
+		t.Fatalf("count comments: %v", err)
+	}
+	if comments != 3 {
+		t.Errorf("comments after repair = %d, want 3 (two re-keyed under .74, one remote under .71)", comments)
+	}
+
+	// The counter rows followed the renamed parents with their high-water
+	// values preserved: .74 and .75 each hold 1 (the remote's .71 counter row
+	// arrived by merge alongside them), the parent settled at the raised
+	// floor 75, and nothing remains under a renamed-away id.
+	for parent, want := range map[string]int{
+		"bd-rn4":    75,
+		"bd-rn4.71": 1,
+		"bd-rn4.74": 1,
+		"bd-rn4.75": 1,
+	} {
+		var got int
+		if err := db.QueryRowContext(ctx,
+			"SELECT last_child FROM child_counters WHERE parent_id = ?", parent).Scan(&got); err != nil {
+			t.Fatalf("read counter for %s: %v", parent, err)
+		}
+		if got != want {
+			t.Errorf("counter for %s = %d, want %d", parent, got, want)
+		}
+	}
+	for _, parent := range []string{"bd-rn4.72"} {
+		var stale int
+		if err := db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM child_counters WHERE parent_id = ?", parent).Scan(&stale); err != nil {
+			t.Fatalf("check counter for %s: %v", parent, err)
+		}
+		if stale != 0 {
+			t.Errorf("%d counter row(s) remain for the renamed-away %s", stale, parent)
+		}
+	}
+
+	// The preserved high-water decides the next create: a parent whose
+	// counter moved with value 1 — even .75, which has no live children —
+	// mints suffix 2, never re-minting a colliding suffix.
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin next-id tx: %v", err)
+	}
+	for _, parent := range []string{"bd-rn4.74", "bd-rn4.75"} {
+		next, err := issueops.GetNextChildIDTx(ctx, tx, parent)
+		if err != nil {
+			t.Fatalf("GetNextChildIDTx(%s): %v", parent, err)
+		}
+		if want := parent + ".2"; next != want {
+			t.Errorf("next child of %s = %s, want %s (high-water preserved)", parent, next, want)
+		}
+	}
+	// The mint writes the counter; roll it back so the working set stays
+	// clean for the subsequent-sync checks.
+	_ = tx.Rollback()
+
+	var conflicts int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_conflicts").Scan(&conflicts); err != nil {
+		t.Fatalf("count dolt_conflicts: %v", err)
+	}
+	if conflicts != 0 {
+		t.Errorf("dolt_conflicts after repair = %d, want 0", conflicts)
+	}
+	releaseVerify()
+
+	// A subsequent sync is clean: the two clones converged, so a plain pull
+	// succeeds and a second repair finds nothing to rename.
+	if err := store.Pull(ctx); err != nil {
+		t.Fatalf("second plain pull: %v", err)
+	}
+	again, err := store.PullWithChildRenumbers(ctx, "")
+	if err != nil {
+		t.Fatalf("second PullWithChildRenumbers: %v", err)
+	}
+	if again != nil {
+		t.Errorf("second PullWithChildRenumbers proposed %+v; the clones converged and need no repair", again)
 	}
 }

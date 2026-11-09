@@ -12,6 +12,7 @@ go_library(
         "blocked.go",
         "blocked_consistency.go",
         "blocked_merge.go",
+        "aux_rekey_rename.go",
         "blocked_recheck.go",
         "blocked_recheck_report.go",
         "blocked_role.go",
