@@ -520,7 +520,10 @@ func ExpansionVarRefs(f *Formula, targetID string) []string {
 //
 // As with compose.Expand, a step anywhere in the tree that names an expanded
 // step in Needs or DependsOn is rewritten to name the last step of that
-// expansion, once every inline expansion has been applied (GH#7637).
+// expansion, once every inline expansion has been applied (GH#7637). The last
+// step is the last one the expansion declares, not every step that ends it.
+// When the expansion recreates the step's own ID, references to it are left
+// unchanged.
 //
 // Returns a new steps slice with inline expansions applied.
 // The original steps slice is not modified.
@@ -535,7 +538,13 @@ func ApplyInlineExpansions(steps []*Step, parser *Parser) ([]*Step, error) {
 		return nil, err
 	}
 
+	// An expansion that recreates its target as a real step keeps that ID,
+	// so references to it stay as they are.
+	surviving := collectStepIDs(result)
 	for _, r := range replaced {
+		if surviving[r.targetID] {
+			continue
+		}
 		result = UpdateDependenciesForExpansion(result, r.targetID, r.lastStepID)
 	}
 	return result, nil
