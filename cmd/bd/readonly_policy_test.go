@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,9 +20,12 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/eventsjournal"
+	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
@@ -493,4 +497,250 @@ func withoutGateLockFiles(s readonlyTreeSnapshot) readonlyTreeSnapshot {
 		}
 	}
 	return s
+}
+
+// TestPostCommandMaintenanceIsFlagAware pins the post-run half of bd-fwx149
+// (GH#8264): a classified read invoked with a write flag pays for the same
+// maintenance as any writer — auto-export, auto-push and events-journal
+// retention — while the plain listings and the --dry-run preview stay out of it.
+func TestPostCommandMaintenanceIsFlagAware(t *testing.T) {
+	originalReadonly := readonlyMode
+	t.Cleanup(func() { readonlyMode = originalReadonly })
+	readonlyMode = false
+
+	tests := []struct {
+		name         string
+		command      []string
+		export       bool
+		push         bool
+		pruneJournal bool
+	}{
+		{name: "update --claim", command: []string{"update", "x-1", "--claim"}, export: true, push: true, pruneJournal: true},
+		{name: "ready --claim", command: []string{"ready", "--claim"}, export: true, push: true, pruneJournal: true},
+		{name: "duplicates --auto-merge", command: []string{"duplicates", "--auto-merge"}, export: true, push: true, pruneJournal: true},
+		{name: "ready", command: []string{"ready"}},
+		{name: "ready --claim=false", command: []string{"ready", "--claim=false"}},
+		{name: "duplicates", command: []string{"duplicates"}},
+		{name: "duplicates --auto-merge --dry-run", command: []string{"duplicates", "--auto-merge", "--dry-run"}},
+		{name: "mol ready", command: []string{"mol", "ready"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := parseInvocationForTest(t, tc.command...)
+			if got := shouldRunPostCommandAutoExport(cmd); got != tc.export {
+				t.Errorf("shouldRunPostCommandAutoExport = %v, want %v", got, tc.export)
+			}
+			if got := shouldRunPostCommandAutoPush(cmd); got != tc.push {
+				t.Errorf("shouldRunPostCommandAutoPush = %v, want %v", got, tc.push)
+			}
+			if got := shouldAutoPruneEventsJournal(cmd); got != tc.pruneJournal {
+				t.Errorf("shouldAutoPruneEventsJournal = %v, want %v", got, tc.pruneJournal)
+			}
+		})
+	}
+}
+
+// bd-fwx149 (GH#8264): `bd ready --claim` and `bd duplicates --auto-merge`
+// write, so the per-invocation policy must treat them as writers (schema
+// gate, identity check, JSONL import, auto-export, auto-push), while the
+// plain listings stay reads.
+func TestWritingFlagsOnClassifiedReadsAreWriters(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  *cobra.Command
+		flag string
+	}{
+		{name: "ready --claim", cmd: readyCmd, flag: "claim"},
+		{name: "duplicates --auto-merge", cmd: duplicatesCmd, flag: "auto-merge"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := tc.cmd.Flags().Lookup(tc.flag)
+			if f == nil {
+				t.Fatalf("%s has no --%s flag", tc.cmd.Name(), tc.flag)
+			}
+			t.Cleanup(func() {
+				_ = tc.cmd.Flags().Set(tc.flag, f.DefValue)
+				f.Changed = false
+			})
+
+			// Plain listing stays a read.
+			if !(effectiveRootStorePolicy(tc.cmd, false).readOnly || isPreviewCommand(tc.cmd)) {
+				t.Fatalf("plain %s should stay a classified read", tc.cmd.Name())
+			}
+
+			if err := tc.cmd.Flags().Set(tc.flag, "true"); err != nil {
+				t.Fatal(err)
+			}
+			// Same decision PersistentPreRunE makes for useReadOnly.
+			useReadOnly := effectiveRootStorePolicy(tc.cmd, false).readOnly || isPreviewCommand(tc.cmd)
+			if useReadOnly {
+				t.Errorf("%s writes but opens read-only: skips the schema migrate gate, identity check and JSONL import", tc.name)
+			}
+			if !shouldRunPostCommandAutoExport(tc.cmd) {
+				t.Errorf("%s writes but skips post-command auto-export", tc.name)
+			}
+		})
+	}
+}
+
+// postRunMaintenanceRecordingStore is the post-run hook's store with the
+// events-journal maintenance capability: every pass auto-prune dispatches
+// reaches RunEventsMaintenanceTx first (its throttle read), so the count is
+// the dispatch. It never runs fn, so the pass finds nothing due.
+type postRunMaintenanceRecordingStore struct {
+	strictReadonlyPostRunStore
+	maintenancePasses int
+}
+
+func (s *postRunMaintenanceRecordingStore) RunEventsMaintenanceTx(context.Context, func(context.Context, issueops.DBTX) error) error {
+	s.maintenancePasses++
+	return nil
+}
+
+// TestPersistentPostRunMaintenanceFollowsWriteFlags pins the post-run half of
+// bd-fwx149 (GH#8264): `bd ready --claim` and `bd duplicates --auto-merge`
+// write, so the maintenance net behind a successful one (auto-export,
+// auto-push, events-journal retention) must run exactly as it does behind an
+// unclassified writer, while the plain listings and the merge's --dry-run
+// preview stay reads and skip it (GH#2191). It drives the real
+// PersistentPostRunE with the real command objects so the guard chain — not
+// just the helpers it consults — is what flips.
+func TestPersistentPostRunMaintenanceFollowsWriteFlags(t *testing.T) {
+	originalStore := store
+	originalUOWProvider := uowProvider
+	originalReadonly := readonlyMode
+	originalProxied := proxiedServerMode
+	originalRootCtx := rootCtx
+	originalRootCancel := rootCancel
+	originalCommandSpan := commandSpan
+	originalProfileFile := profileFile
+	originalTraceFile := traceFile
+	storeMutex.Lock()
+	originalStoreActive := storeActive
+	storeMutex.Unlock()
+	originalDidWrite := commandDidWrite.Load()
+	originalDidExplicitCommit := commandDidExplicitDoltCommit
+	originalDidWriteTipMetadata := commandDidWriteTipMetadata
+	originalFreeze := commandFreeze
+	originalCommit := runPostRunAutoCommit
+	originalBackup := runPostRunAutoBackup
+	originalExport := runPostRunAutoExport
+	originalPush := runPostRunAutoPush
+	t.Cleanup(func() {
+		store = originalStore
+		uowProvider = originalUOWProvider
+		readonlyMode = originalReadonly
+		proxiedServerMode = originalProxied
+		rootCtx = originalRootCtx
+		rootCancel = originalRootCancel
+		commandSpan = originalCommandSpan
+		profileFile = originalProfileFile
+		traceFile = originalTraceFile
+		storeMutex.Lock()
+		storeActive = originalStoreActive
+		storeMutex.Unlock()
+		commandDidWrite.Store(originalDidWrite)
+		commandDidExplicitDoltCommit = originalDidExplicitCommit
+		commandDidWriteTipMetadata = originalDidWriteTipMetadata
+		commandFreeze = originalFreeze
+		runPostRunAutoCommit = originalCommit
+		runPostRunAutoBackup = originalBackup
+		runPostRunAutoExport = originalExport
+		runPostRunAutoPush = originalPush
+		autoPruneOnce = sync.Once{}
+	})
+
+	// Retention enabled and bounded in an isolated config, so the pass reaches
+	// the maintenance runner whenever the classification lets it.
+	t.Chdir(t.TempDir())
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	t.Setenv(eventsjournal.EnvVar, "1")
+	t.Setenv(eventsjournal.AutoPruneEnvVar, "1")
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	config.Set("events-journal-retain-days", 7)
+
+	uowProvider = nil
+	proxiedServerMode = false
+	readonlyMode = false
+	rootCancel = nil
+	commandSpan = nil
+	profileFile = nil
+	traceFile = nil
+	commandFreeze = migration.Result{}
+	commandDidWrite.Store(false)
+	commandDidExplicitDoltCommit = false
+	commandDidWriteTipMetadata = false
+	runPostRunAutoCommit = func(context.Context, doltAutoCommitParams) error { return nil }
+	runPostRunAutoBackup = func(context.Context) {}
+
+	exportCalls, pushCalls := 0, 0
+	runPostRunAutoExport = func(context.Context, bool) error { exportCalls++; return nil }
+	runPostRunAutoPush = func(context.Context) { pushCalls++ }
+
+	setFlag := func(t *testing.T, cmd *cobra.Command, name, value string) {
+		t.Helper()
+		f := cmd.Flags().Lookup(name)
+		if f == nil {
+			t.Fatalf("%s has no --%s flag", cmd.Name(), name)
+		}
+		if err := cmd.Flags().Set(name, value); err != nil {
+			t.Fatalf("set --%s=%s on %s: %v", name, value, cmd.Name(), err)
+		}
+		t.Cleanup(func() {
+			_ = cmd.Flags().Set(name, f.DefValue)
+			f.Changed = false
+		})
+	}
+
+	for _, tc := range []struct {
+		name     string
+		cmd      *cobra.Command
+		flags    [][2]string
+		wantRuns bool
+	}{
+		{name: "plain ready stays a read", cmd: readyCmd, flags: [][2]string{{"claim", "false"}}, wantRuns: false},
+		{name: "ready --claim is a writer", cmd: readyCmd, flags: [][2]string{{"claim", "true"}}, wantRuns: true},
+		{name: "plain duplicates stays a read", cmd: duplicatesCmd, flags: [][2]string{{"auto-merge", "false"}}, wantRuns: false},
+		{name: "duplicates --auto-merge is a writer", cmd: duplicatesCmd, flags: [][2]string{{"auto-merge", "true"}}, wantRuns: true},
+		{name: "duplicates --auto-merge --dry-run previews, never writes", cmd: duplicatesCmd, flags: [][2]string{{"auto-merge", "true"}, {"dry-run", "true"}}, wantRuns: false},
+		{name: "update stays a writer", cmd: updateCmd, flags: [][2]string{{"claim", "true"}}, wantRuns: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, kv := range tc.flags {
+				setFlag(t, tc.cmd, kv[0], kv[1])
+			}
+			// PostRunE closes and clears the store and spends the
+			// once-per-process prune guard, so each case gets its own.
+			fake := &postRunMaintenanceRecordingStore{}
+			store = fake
+			storeMutex.Lock()
+			storeActive = true
+			storeMutex.Unlock()
+			rootCtx = context.Background()
+			autoPruneOnce = sync.Once{}
+			exportCalls, pushCalls = 0, 0
+			if err := rootCmd.PersistentPostRunE(tc.cmd, nil); err != nil {
+				t.Fatalf("PersistentPostRunE(%s): %v", tc.cmd.Name(), err)
+			}
+			want := 0
+			if tc.wantRuns {
+				want = 1
+			}
+			if exportCalls != want {
+				t.Errorf("auto-export dispatches = %d, want %d", exportCalls, want)
+			}
+			if pushCalls != want {
+				t.Errorf("auto-push dispatches = %d, want %d", pushCalls, want)
+			}
+			if fake.maintenancePasses != want {
+				t.Errorf("events-journal auto-prune passes = %d, want %d", fake.maintenancePasses, want)
+			}
+		})
+	}
 }

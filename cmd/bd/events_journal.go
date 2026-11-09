@@ -125,7 +125,8 @@ func eventsJournalMaintenanceRunnerFor(plumbing any) issueops.EventsMaintenanceR
 //   - runsPostCommandMaintenance excludes strict --readonly (a store opened to
 //     refuse writes) and `bd serve`, which drives the same pass from its own
 //     ticker rather than from a command boundary it does not have.
-//   - isReadOnlyCommand excludes the classified reads, and it is load-bearing
+//   - commandReadsOnly excludes the classified reads (judged per invocation,
+//     so `bd ready --claim` is a writer here too), and it is load-bearing
 //     rather than belt-and-braces: a read-only classification opens the store
 //     with OpenForReadOnlyCommand, which is "otherwise a normal writable
 //     store", so nothing underneath refuses a maintenance delete. Drop this
@@ -158,7 +159,7 @@ func shouldAutoPruneEventsJournal(cmd *cobra.Command) bool {
 	if cmd == nil {
 		return false
 	}
-	if !runsPostCommandMaintenance(cmd.Name(), readonlyMode) || isReadOnlyCommand(cmd.Name()) {
+	if !runsPostCommandMaintenance(cmd.Name(), readonlyMode) || commandReadsOnly(cmd) {
 		return false
 	}
 	if isPreviewCommand(cmd) || isEventsJournalCommand(cmd) {
