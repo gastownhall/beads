@@ -116,3 +116,35 @@ func TestEmbeddedDepAddCrossPrefixLocalTargetBlocks(t *testing.T) {
 		t.Errorf("bd blocked names blockers %v for %s, want [%s]", blockers, dependent.ID, blocker.ID)
 	}
 }
+
+// TestEmbeddedDepCrossPrefixLocalBlockerCloseAndReopen follows that blocker
+// through its lifecycle: closing it frees the dependent, and reopening it
+// blocks the dependent again, as for a same-prefix blocker.
+func TestEmbeddedDepCrossPrefixLocalBlockerCloseAndReopen(t *testing.T) {
+	skipUnlessEmbeddedCrossPrefix(t)
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", crossPrefixSourcePrefix)
+
+	blocker := bdCreate(t, bd, dir, "Blocker", "--type", "task")
+	dependent := bdCreate(t, bd, dir, "Dependent", "--type", "task", "--id", "xpa-x2", "--force")
+	bdDep(t, bd, dir, "add", dependent.ID, blocker.ID)
+
+	bdClose(t, bd, dir, blocker.ID, "--reason", "done")
+	if ready := readyIDs(t, bd, dir); !ready[dependent.ID] {
+		t.Fatalf("%s is not ready after its blocker %s closed: %v", dependent.ID, blocker.ID, ready)
+	}
+	if _, listed := blockedBy(t, bd, dir, dependent.ID); listed {
+		t.Fatalf("bd blocked still lists %s after its blocker %s closed", dependent.ID, blocker.ID)
+	}
+
+	bdReopen(t, bd, dir, blocker.ID)
+	if ready := readyIDs(t, bd, dir); ready[dependent.ID] {
+		t.Errorf("%s is ready again although its blocker %s was reopened: %v", dependent.ID, blocker.ID, ready)
+	}
+	blockers, listed := blockedBy(t, bd, dir, dependent.ID)
+	if !listed || len(blockers) != 1 || blockers[0] != blocker.ID {
+		t.Errorf("bd blocked names blockers %v (listed=%v) for %s after reopen, want [%s]", blockers, listed, dependent.ID, blocker.ID)
+	}
+}
