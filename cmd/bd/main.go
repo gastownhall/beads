@@ -744,29 +744,75 @@ func loadEnvironment() {
 	}
 }
 
+// sharedServerEmbeddedMismatchWarned is the once-per-process guard for
+// warnServerModeEmbeddedMismatch: at most one embedded/server-mode mismatch
+// notice is printed per bd invocation, whichever signal fired it. It keeps
+// its historical name so existing tests keep compiling across the
+// generalization from shared-server-only to all runtime server overrides.
 var sharedServerEmbeddedMismatchWarned bool
 
-// warnSharedServerEmbeddedMismatch detects the case where shared-server mode
-// is active but metadata.json explicitly pins dolt_mode=embedded. The
-// shared-server setting wins for this invocation (GH#2946/2949: stale embedded
-// metadata must not hide server-backed issue state), but bd never rewrites the
-// committed metadata.json — per-machine environment must not leak into shared
-// config (bd-6dnrw.5). Print guidance so the user resolves the conflict
-// explicitly.
-func warnSharedServerEmbeddedMismatch(cfg *configfile.Config) {
+// warnServerModeEmbeddedMismatch detects the case where a runtime
+// server-mode signal — shared-server activation, BEADS_DOLT_SERVER_MODE=1,
+// or a non-local BEADS_DOLT_SERVER_HOST — selects server storage even
+// though metadata.json explicitly pins dolt_mode=embedded. The runtime
+// signal wins for this invocation (GH#2946/2949: stale embedded metadata
+// must not hide server-backed issue state, and runtime env beats persisted
+// metadata), but bd never rewrites the committed metadata.json —
+// per-machine environment must not leak into shared config (bd-6dnrw.5).
+// Sessions whose environment differs can therefore read different stores
+// with no visible sign (GH#4746), so print guidance naming the deciding
+// variable and the embedded directory being bypassed. When more than one
+// signal applies, report one reason deterministically: shared-server
+// first, then the explicit server-mode env var, then the host env var —
+// mirroring the order of the checks in configfile.IsDoltServerMode.
+func warnServerModeEmbeddedMismatch(cfg *configfile.Config, beadsDir string) {
 	if cfg == nil || sharedServerEmbeddedMismatchWarned {
 		return
 	}
 	if strings.ToLower(strings.TrimSpace(cfg.DoltMode)) != configfile.DoltModeEmbedded {
 		return
 	}
-	if !doltserver.IsSharedServerMode() {
+	// The embedded store this invocation is bypassing. beadsDir is the
+	// already-resolved workspace directory, never rediscovered from cwd.
+	embeddedDir := filepath.Join(".beads", "embeddeddolt")
+	if beadsDir != "" {
+		embeddedDir = filepath.Join(beadsDir, "embeddeddolt")
+	}
+	var notice []string
+	switch {
+	case doltserver.IsSharedServerMode():
+		notice = []string{
+			"Notice: shared-server mode is enabled (BEADS_DOLT_SHARED_SERVER or dolt.shared-server in config.yaml) but .beads/metadata.json pins dolt_mode=\"embedded\". Using the shared server for this run.",
+			"  To persist server mode: set dolt_mode to \"server\" in .beads/metadata.json and commit it.",
+			"  To stay embedded: unset BEADS_DOLT_SHARED_SERVER (or remove dolt.shared-server from config.yaml).",
+		}
+	case cfg.IsDoltServerMode() && os.Getenv("BEADS_DOLT_SERVER_MODE") == "1":
+		notice = []string{
+			fmt.Sprintf("Notice: BEADS_DOLT_SERVER_MODE=1 selects server storage for this run, but .beads/metadata.json pins dolt_mode=\"embedded\"; the embedded store at %s is bypassed.", embeddedDir),
+			"  This invocation uses server storage; sessions with different mode settings can read different stores. Align all sessions on one mode.",
+			"  To persist server mode: set dolt_mode to \"server\" in .beads/metadata.json and commit it.",
+			"  To stay embedded: unset BEADS_DOLT_SERVER_MODE.",
+		}
+	case cfg.IsDoltServerMode() && cfg.HostImpliesServerMode():
+		// With an explicit dolt_mode=embedded, HostImpliesServerMode can only
+		// be true through a non-local BEADS_DOLT_SERVER_HOST (runtime env
+		// beats stale metadata, GH#2949); an embedded dolt_mode disables
+		// inference from persisted or configured hosts. A bare
+		// BEADS_DOLT_SERVER_PORT is deliberately not a signal here, matching
+		// the storage-mode resolver.
+		notice = []string{
+			fmt.Sprintf("Notice: BEADS_DOLT_SERVER_HOST=%s (non-local) selects server storage for this run, but .beads/metadata.json pins dolt_mode=\"embedded\"; the embedded store at %s is bypassed.", os.Getenv("BEADS_DOLT_SERVER_HOST"), embeddedDir),
+			"  This invocation uses server storage; sessions with different mode settings can read different stores. Align all sessions on one mode.",
+			"  To persist server mode: set dolt_mode to \"server\" in .beads/metadata.json and commit it.",
+			"  To stay embedded: unset BEADS_DOLT_SERVER_HOST.",
+		}
+	default:
 		return
 	}
 	sharedServerEmbeddedMismatchWarned = true
-	fmt.Fprintln(os.Stderr, "Notice: shared-server mode is enabled (BEADS_DOLT_SHARED_SERVER or dolt.shared-server in config.yaml) but .beads/metadata.json pins dolt_mode=\"embedded\". Using the shared server for this run.")
-	fmt.Fprintln(os.Stderr, "  To persist server mode: set dolt_mode to \"server\" in .beads/metadata.json and commit it.")
-	fmt.Fprintln(os.Stderr, "  To stay embedded: unset BEADS_DOLT_SHARED_SERVER (or remove dolt.shared-server from config.yaml).")
+	for _, line := range notice {
+		fmt.Fprintln(os.Stderr, line)
+	}
 }
 
 // loadServerModeFromBeadsDir loads the storage mode (embedded vs server vs
@@ -790,7 +836,7 @@ func loadServerModeFromBeadsDir(beadsDir string) error {
 	// env/config.yaml supply a remote host (GH#3545) — inference must not
 	// depend on metadata existing.
 	cfg = normalizeLoadedConfig(cfg)
-	warnSharedServerEmbeddedMismatch(cfg)
+	warnServerModeEmbeddedMismatch(cfg, beadsDir)
 	psm := cfg.IsDoltProxiedServerMode()
 	sm := cfg.IsDoltServerMode()
 	// GH#2946: shared-server override for stale metadata.json (no-db commands)
@@ -2162,7 +2208,7 @@ var rootCmd = &cobra.Command{
 			cfg = configfile.DefaultConfig()
 		}
 		if cfg != nil {
-			warnSharedServerEmbeddedMismatch(cfg)
+			warnServerModeEmbeddedMismatch(cfg, beadsDir)
 			doltCfg.ProxiedServer = cfg.IsDoltProxiedServerMode()
 			proxiedServerMode = doltCfg.ProxiedServer
 			if cmdCtx != nil {
