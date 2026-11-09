@@ -1839,7 +1839,7 @@ bd doctor
     |   bd doctor --check=artifacts --clean  # Delete safe-to-delete artifacts (with confirmation)
     |   bd doctor --check=conventions        # Convention drift check (lint, stale, orphans)
     |   bd doctor --check=pollution          # Show potential test issues
-    |   bd doctor --check=pollution --clean  # Delete test issues (with confirmation)
+    |   bd doctor --check=pollution --clean  # Delete high-confidence test issues (with confirmation)
     |   bd doctor --check=validate         # Data-integrity checks only
     |   bd doctor --check=validate --fix   # Auto-fix data-integrity issues
     |   bd doctor --deep             # Full graph integrity validation
@@ -1850,7 +1850,7 @@ bd doctor
   flag --agent type=bool default="false" usage="Agent-facing diagnostic mode: rich context for AI agents (ZFC-compliant)"
   flag --check type=string default="" usage="Run specific check in detail (e.g., 'pollution')"
   flag --check-health type=bool default="false" usage="Quick health check for git hooks (silent on success)"
-  flag --clean type=bool default="false" usage="For pollution check: delete detected test issues"
+  flag --clean type=bool default="false" usage="For pollution check: delete high-confidence test issues"
   flag --deep type=bool default="false" usage="Validate full graph integrity"
   flag --dry-run type=bool default="false" usage="Preview fixes without making changes"
   flag --fix type=bool default="false" usage="Automatically fix issues where possible"
