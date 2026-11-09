@@ -277,19 +277,23 @@ func newServedProviderSource(t *testing.T, prefix string) *servedProviderSource 
 }
 
 // dropServedProviderDatabase drops a case's database once nothing uses it
-// (see the file comment for why every case's database is dropped).
+// (see the file comment for why every case's database is dropped). A failed
+// drop is only logged: the drop keeps later cases' bootstrap flat, it is no
+// part of any contract, and the gated lanes do not retry, so a transient Dolt
+// error at teardown must not fail a case that passed. A server that stops
+// dropping still shows: the later cases slow down until -test.timeout fires.
 func dropServedProviderDatabase(t *testing.T, port int, database string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	admin, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%d)/", port))
 	if err != nil {
-		t.Errorf("open an admin handle to drop %s: %v", database, err)
+		t.Logf("open an admin handle to drop %s: %v", database, err)
 		return
 	}
 	defer func() { _ = admin.Close() }()
 	if _, err := admin.ExecContext(ctx, "DROP DATABASE IF EXISTS `"+database+"`"); err != nil {
-		t.Errorf("drop the provider source's database %s: %v", database, err)
+		t.Logf("drop the provider source's database %s: %v", database, err)
 	}
 }
 

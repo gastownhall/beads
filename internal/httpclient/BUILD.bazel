@@ -187,6 +187,7 @@ go_test(
         "served_relations_test.go",
         "served_releaser_test.go",
         "served_row_version_test.go",
+        "served_source_scan_test.go",
         "served_source_switch_test.go",
         "served_source_witness_test.go",
         "served_test.go",
@@ -334,6 +335,10 @@ sh_test(
 #
 # The curated -test.run is pinned in scripts/pr_risk_bazel_coverage_test.go
 # (extraRunVariants), and the env in scripts/served_provider_lane_test.go.
+# Every test it selects must reach its server through newServedEnv or
+# newServedEnvExpecting, never composition() or embeddeddolt.Open, which stay
+# on the Roles arm whatever the source; served_source_scan_test.go enforces it
+# (servedProviderCuratedRun there must equal the -test.run below).
 # -test.timeout=14m fires before the 900s large-test kill, so a hang dumps
 # every goroutine. Each case bootstraps its own database (CREATE DATABASE and
 # the migration chain), which is most of its cost; rules_go deals every

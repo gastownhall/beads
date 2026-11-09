@@ -67,11 +67,11 @@ var (
 )
 
 // TestMain owns the composition's lifetime: one embedded database and one bound
-// listener for the package, torn down after the last case. It also tears down
-// the provider source's shared proxy and dolt sql-server, when a run used them. It also judges the
-// composition's wire witness (served_protocol_seam_test.go) once, after the last
-// case: a composition that sent what the tier's protocol forbids fails the
-// package even though every case passed.
+// listener for the package, torn down after the last case, along with the
+// provider source's shared proxy and dolt sql-server when a run used them. It
+// also judges the composition's wire witness (served_protocol_seam_test.go)
+// once, after the last case: a composition that sent what the tier's protocol
+// forbids fails the package even though every case passed.
 func TestMain(m *testing.M) {
 	code := m.Run()
 	if report := compositionWitness.report(); report != "" {
