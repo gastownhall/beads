@@ -128,10 +128,12 @@ func TestDoltNew_RequireReadableSchema(t *testing.T) {
 // highest any pre-1.3.0 binary recorded. `bd dolt pull` brings the main
 // series but never this one, so nothing else moves it.
 //
-// It returns the open function for further stores on the same database and
-// the writable store whose pool the probes below read through. No step may
-// open the database writable again: that would migrate it back.
-func cloneLocalBehindFixture(t *testing.T, ctx context.Context) (func(*Config) (*DoltStore, error), *DoltStore) {
+// With keepColumn the cursor alone is behind, granted_node stays: the shape a
+// read still survives. It returns the open function for further stores on the
+// same database and the writable store whose pool the probes below read
+// through. No step may open the database writable again: that would migrate
+// it back.
+func cloneLocalBehindFixture(t *testing.T, ctx context.Context, keepColumn bool) (func(*Config) (*DoltStore, error), *DoltStore) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	dbName := uniqueTestDBName(t)
@@ -162,10 +164,11 @@ func cloneLocalBehindFixture(t *testing.T, ctx context.Context) (func(*Config) (
 	}, "test-user"); err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
-	for _, stmt := range []string{
-		"ALTER TABLE leases DROP COLUMN granted_node",
-		"DELETE FROM ignored_schema_migrations WHERE version > 13",
-	} {
+	stmts := []string{"DELETE FROM ignored_schema_migrations WHERE version > 13"}
+	if !keepColumn {
+		stmts = append(stmts, "ALTER TABLE leases DROP COLUMN granted_node")
+	}
+	for _, stmt := range stmts {
 		if _, err := store.db.ExecContext(ctx, stmt); err != nil {
 			t.Fatalf("%s: %v", stmt, err)
 		}
@@ -218,7 +221,7 @@ func TestDoltNew_CloneLocalReadableSchema(t *testing.T) {
 	ctx, cancel := testContext(t)
 	defer cancel()
 
-	open, store := cloneLocalBehindFixture(t, ctx)
+	open, store := cloneLocalBehindFixture(t, ctx, false)
 	before := cloneLocalState(t, ctx, store)
 
 	ro, err := open(&Config{ReadOnly: true, RequireReadableSchema: true})
@@ -252,5 +255,37 @@ func TestDoltNew_CloneLocalReadableSchema(t *testing.T) {
 	}
 	if after := cloneLocalState(t, ctx, store); after != before {
 		t.Errorf("refused open changed the database: before %s, after %s", before, after)
+	}
+}
+
+// TestDoltNew_CloneLocalBehindWithLeaseColumnsStaysReadable is the control
+// for TestDoltNew_CloneLocalReadableSchema: a clone-local series behind by its
+// cursor alone, with every lease column the issue reads select present, keeps
+// opening read-only and answering reads, and the open applies nothing. Only a
+// missing column makes the refusal worth its cost, as with the main series
+// (bd-578h9.5).
+func TestDoltNew_CloneLocalBehindWithLeaseColumnsStaysReadable(t *testing.T) {
+	skipIfNoDolt(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	open, store := cloneLocalBehindFixture(t, ctx, true)
+	if v, err := schema.CurrentIgnoredVersion(ctx, store.db); err != nil || v >= schema.LatestIgnoredVersion() {
+		t.Fatalf("precondition: clone-local cursor = %d (%v), want behind v%d", v, err, schema.LatestIgnoredVersion())
+	}
+	before := cloneLocalState(t, ctx, store)
+
+	ro, err := open(&Config{ReadOnly: true, RequireReadableSchema: true})
+	if err != nil {
+		t.Fatalf("New (read-only, clone-local cursor behind, lease columns present) = %v, want success", err)
+	}
+	issues, err := ro.SearchIssues(ctx, "", types.IssueFilter{})
+	ro.Close()
+	if err != nil || len(issues) != 1 {
+		t.Fatalf("SearchIssues = %d issues, %v; want cl-1", len(issues), err)
+	}
+	if after := cloneLocalState(t, ctx, store); after != before {
+		t.Errorf("read-only open changed the database: before %s, after %s", before, after)
 	}
 }
