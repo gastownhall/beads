@@ -12,12 +12,14 @@ import (
 
 // expectCompactBeforeVerify queues Compact's steps up to and including the
 // checkout of main that precedes the replay check: the replay of kept and
-// the read-back of the rebuilt chain (compact_test.go).
-func expectCompactBeforeVerify(mock sqlmock.Sqlmock, initial, boundary compactCommit, kept []compactCommit) {
+// the read-back of the rebuilt chain (compact_test.go). It returns the
+// squashed-base message.
+func expectCompactBeforeVerify(mock sqlmock.Sqlmock, initial, boundary compactCommit, kept []compactCommit) string {
 	msg := expectCompactReplay(mock, initial, boundary, kept)
 	mock.ExpectQuery(regexp.QuoteMeta(compactLogQuery)).
 		WillReturnRows(compactLogRows(compactRebuiltLog(initial, boundary, kept, msg)))
 	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_CHECKOUT('main')")).WillReturnResult(sqlmock.NewResult(0, 0))
+	return msg
 }
 
 // expectCompactCleanup queues the deferred cleanup of a failed Compact.
