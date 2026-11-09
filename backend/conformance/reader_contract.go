@@ -1497,6 +1497,96 @@ func RunReaderGetBriefDepsProjectsTheDependencyRows(t *testing.T, ctx context.Co
 	assertReaderCount(t, "DependencyCount under BriefDeps", details.DependencyCount, 1)
 }
 
+// RunReaderGetListsUnresolvableDependencyEdges pins the raw-edge half of the
+// unresolvable disclosure on the public Get contract (bd-hkpas7, #5272). The
+// hydrated Dependencies array drops every edge whose far end has no row in
+// this database — an `external:` reference or a bare id under another
+// repository's prefix — while DependencyCount keeps counting them, and
+// UnresolvableDependencies has said HOW MANY without naming any since be-lpi.
+// UnresolvableDependencyEdges is the enumeration: the raw stored rows, sorted
+// by target then type, so the count finally has a referent a caller can act
+// on. Without a case here an out-of-tree Reader can keep the count and skip
+// the member, which is the exact regression this change exists to close.
+func RunReaderGetListsUnresolvableDependencyEdges(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	subject := readerID(fixture, "uedge", "subject")
+	blocker := readerID(fixture, "uedge", "blocker")
+	externalTarget := "external:liveop:" + fixture.IssuePrefix + "-uedge-ext"
+	crossTarget := "liveop-" + fixture.IssuePrefix + "-uedge-cross"
+
+	seedReaderIssue(t, ctx, fixture, readerIssue(subject, types.TypeTask, ""))
+	seedReaderIssue(t, ctx, fixture, readerIssue(blocker, types.TypeTask, ""))
+	seed := func(target string, typ types.DependencyType) {
+		if err := fixture.AddDependency(ctx, &types.Dependency{
+			IssueID: subject, DependsOnID: target, Type: typ,
+		}, "seed"); err != nil {
+			t.Fatalf("seed the %s edge to %s: %v", typ, target, err)
+		}
+	}
+	seed(blocker, types.DepBlocks)
+	seed(externalTarget, types.DepTracks)
+	seed(crossTarget, types.DepBlocks)
+
+	details, err := fixture.Reader.Get(ctx, publicops.GetRequest{ID: subject})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	// The counts keep every stored edge; the hydrated array keeps only the
+	// local one. That skew is the fact the member resolves.
+	assertReaderCount(t, "DependencyCount", details.DependencyCount, 3)
+	if len(details.Dependencies) != 1 || details.Dependencies[0].ID != blocker {
+		t.Fatalf("Dependencies = %v, want only the local %s row",
+			readerDependencyIDs(details.Dependencies), blocker)
+	}
+	assertReaderCount(t, "UnresolvableDependencies", details.UnresolvableDependencies, 2)
+	edges := details.UnresolvableDependencyEdges
+	if len(edges) != 2 {
+		t.Fatalf("UnresolvableDependencyEdges = %+v, want the 2 raw rows the count names", edges)
+	}
+	// Raw, sorted by target then type, with the edge's own row intact — the
+	// member is the stored record, not an interpretation of it.
+	want := []struct {
+		target string
+		typ    types.DependencyType
+	}{
+		{externalTarget, types.DepTracks},
+		{crossTarget, types.DepBlocks},
+	}
+	for i, w := range want {
+		got := edges[i]
+		if got.DependsOnID != w.target || got.Type != w.typ || got.IssueID != subject {
+			t.Errorf("UnresolvableDependencyEdges[%d] = %s -> %s (%s), want %s -> %s (%s)",
+				i, got.IssueID, got.DependsOnID, got.Type, subject, w.target, w.typ)
+		}
+	}
+
+	// The negative control, and it is the load-bearing half: a fully local
+	// issue carries neither the count nor the member. Without it every
+	// assertion above is satisfied by a Reader that answers every issue
+	// with its whole raw edge list.
+	localSubject := readerID(fixture, "uedge", "local")
+	seedReaderIssue(t, ctx, fixture, readerIssue(localSubject, types.TypeTask, ""))
+	if err := fixture.AddDependency(ctx, &types.Dependency{
+		IssueID: localSubject, DependsOnID: blocker, Type: types.DepBlocks,
+	}, "seed"); err != nil {
+		t.Fatalf("seed the fully local edge: %v", err)
+	}
+	localDetails, err := fixture.Reader.Get(ctx, publicops.GetRequest{ID: localSubject})
+	if err != nil {
+		t.Fatalf("Get the fully local issue: %v", err)
+	}
+	if localDetails.UnresolvableDependencies != nil {
+		t.Errorf("UnresolvableDependencies = %d on a fully local issue, want unset", *localDetails.UnresolvableDependencies)
+	}
+	if localDetails.UnresolvableDependencyEdges != nil {
+		t.Errorf("UnresolvableDependencyEdges = %+v on a fully local issue, want unset", localDetails.UnresolvableDependencyEdges)
+	}
+	if len(localDetails.Dependencies) != 1 || localDetails.Dependencies[0].ID != blocker {
+		t.Errorf("the fully local issue must still hydrate its one edge, got %v",
+			readerDependencyIDs(localDetails.Dependencies))
+	}
+}
+
 // RunReaderGetDetailShapeMatchesTheSeededIssue pins the shape of the detail view
 // against what was actually stored (reader.go:15, reader.go:364-369): the
 // issue's own fields, its labels, its OUTGOING edges with their types, and the

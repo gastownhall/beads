@@ -104,6 +104,9 @@ func TestReaderContract(t *testing.T) {
 	t.Run("GetBriefDepsProjectsTheDependencyRows", func(t *testing.T) {
 		conformance.RunReaderGetBriefDepsProjectsTheDependencyRows(t, ctx, fixture)
 	})
+	t.Run("GetListsUnresolvableDependencyEdges", func(t *testing.T) {
+		conformance.RunReaderGetListsUnresolvableDependencyEdges(t, ctx, fixture)
+	})
 	t.Run("GetDetailShapeMatchesTheSeededIssue", func(t *testing.T) {
 		conformance.RunReaderGetDetailShapeMatchesTheSeededIssue(t, ctx, fixture)
 	})

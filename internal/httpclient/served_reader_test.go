@@ -312,6 +312,16 @@ func TestServedReaderGetBriefDepsProjectsTheDependencyRows(t *testing.T) {
 	conformance.RunReaderGetBriefDepsProjectsTheDependencyRows(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
+// TestServedReaderGetListsUnresolvableDependencyEdges carries the raw-edge
+// member across the wire: the served detail view must publish
+// unresolvable_dependency_edges with the same optional semantics the
+// store-backed readers have (absent when every edge is local), or the HTTP
+// route answers `bd show --json` with a count its caller cannot enumerate
+// (bd-hkpas7, #5272).
+func TestServedReaderGetListsUnresolvableDependencyEdges(t *testing.T) {
+	conformance.RunReaderGetListsUnresolvableDependencyEdges(t, t.Context(), servedReaderFixture(t, "rdr"))
+}
+
 func TestServedReaderGetResolvesTheExactIDAcrossBothPlanes(t *testing.T) {
 	conformance.RunReaderGetResolvesTheExactIDAcrossBothPlanes(t, t.Context(), servedReaderFixture(t, "rdr"))
 }

@@ -286,7 +286,12 @@ func (s *DoltStore) GetDependentsWithMetadata(ctx context.Context, issueID strin
 	return result, err
 }
 
-// GetDependencyRecords returns raw dependency records for an issue
+// GetDependencyRecords returns raw dependency records for an issue — the
+// stored edge rows, unhydrated, INCLUDING the edges whose far end has no row
+// in this database. This is the raw half of the display's unresolvable-edge
+// disclosure (bd-hkpas7, #5272): GetDependenciesWithMetadata drops those
+// edges by design while the counts keep them, and this read is where the
+// caller gets the rows to show for the difference. It is not a graph input.
 func (s *DoltStore) GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error) {
 	if s.isActiveWisp(ctx, issueID) {
 		return s.getWispDependencyRecords(ctx, issueID)

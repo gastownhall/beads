@@ -100,6 +100,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`unresolvable_dependency_edges` on `bd show --json`, and the raw edges
+  rendered in `bd show` text views (#5272).** An issue can carry dependency
+  edges whose far end has no row in this database — a cross-repo id or an
+  `external:` reference. Every hydrated listing drops them while the counts
+  keep them, so `unresolvable_dependencies` said HOW MANY with nothing to
+  enumerate, and `bd show` rendered no dependency at all: indistinguishable
+  from having none. The JSON detail view now carries
+  `unresolvable_dependency_edges`, the raw stored rows the count names,
+  sorted by target id then edge type (absent when every edge is local, and
+  on a failed raw read, where the count survives alone — absent is not proof
+  of no gap). The three `bd show` text renders print each unresolved edge in
+  its relationship section after the local lines, as the far id exactly as
+  stored with a heuristic classification label (`(external)`, `(cross-repo)`
+  or `(missing)`), a blank status slot, and the section's direction glyph;
+  the stderr warning now subtracts the distinct ids the render printed, so it
+  announces only what the screen did not cover. Display-fidelity only: the
+  hydrated listings still drop non-local targets, and no graph consumer
+  (gating, parent, readiness, epic progress) sees an invented issue. The
+  wire schema and digest declare the member additively, with no wire
+  revision change.
+
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same

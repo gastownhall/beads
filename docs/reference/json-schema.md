@@ -238,6 +238,19 @@ items, plus:
   decimal string compared by equality and echoed back verbatim; always present,
   including a legacy `"0"`
 - `dependencies` (object[]): Full dependency records
+- `unresolvable_dependencies` (number, optional): Count of outbound edges whose
+  far end has no row in this database — a cross-repo id or an `external:`
+  reference. The edge is stored and counted, but `dependencies` drops it
+  because there is no far issue to hydrate. Absent when every outbound edge
+  is local
+- `unresolvable_dependents` (number, optional): The inbound mirror of the
+  count above, for edges pointing at this issue whose source has no row here
+- `unresolvable_dependency_edges` (object[], optional): The outbound half of
+  `unresolvable_dependencies` as the raw rows it counts, sorted by target id
+  then edge type — the stored edge record itself, `{issue_id, depends_on_id,
+  type, ...}`, never an invented issue. Best effort: a failed raw read leaves
+  the count alone and this member absent, so absent is not proof of no gap —
+  the count says which
 - `comments` (object[]): Comment thread — present only with `--include-comments`;
   the default response returns `comment_count` only (count-only, be-ijck6q)
 - `comments_omitted` (boolean, optional): `true` only when `comment_count` is

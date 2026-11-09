@@ -164,6 +164,12 @@ func TestReaderGetBriefDepsProjectsTheDependencyRows(t *testing.T) {
 	conformance.RunReaderGetBriefDepsProjectsTheDependencyRows(t, ctx, fixture)
 }
 
+func TestReaderGetListsUnresolvableDependencyEdges(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderGetListsUnresolvableDependencyEdges(t, ctx, fixture)
+}
+
 func TestReaderGetDetailShapeMatchesTheSeededIssue(t *testing.T) {
 	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
 	defer cleanup()
