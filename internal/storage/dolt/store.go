@@ -5218,6 +5218,13 @@ func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 // so does wrapping an interrupt's "context canceled" noise as corruption
 // (same genus, observed when a background push's process group was killed).
 func classifyFSCKFailure(parentErr, fsckErr error, output string) error {
+	// A recognized integrity finding refuses the push whatever else happened:
+	// a deadline, cancellation or open-failure text alongside the report must
+	// not hide it.
+	if fsckReportedFinding(output) {
+		return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks: %s",
+			ErrDanglingReference, output)
+	}
 	// (a) Non-empty output: fsck actually reported something; route by content.
 	if output != "" {
 		if fsckCouldNotOpen(output) {
@@ -5260,6 +5267,26 @@ func classifyFSCKFailure(parentErr, fsckErr error, output string) error {
 	// (f) Generic failure with no output and no recognized context error.
 	return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks",
 		ErrDanglingReference)
+}
+
+// fsckReportedFinding reports whether dolt fsck output carries an integrity
+// finding: one of the report headers FsckReport.Print emits for corrupt chunks
+// or commit errors, or the corrupted chunk journal warning fsck prints when it
+// cannot load the journal (cmd/dolt/commands/fsck.go). The headers are wrapped
+// in ANSI color, so they are matched as substrings. Generic "corrupt" or
+// "dangling" wording is not matched: it occurs in warnings and paths, and a
+// commit-errors-only report contains neither.
+func fsckReportedFinding(output string) bool {
+	for _, marker := range []string{
+		"============ Corrupt Chunks ============",
+		"============ Commit Errors ============",
+		"WARNING: Chunk journal is corrupted",
+	} {
+		if strings.Contains(output, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // fsckCouldNotOpen reports whether dolt fsck output indicates the check

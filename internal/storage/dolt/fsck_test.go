@@ -11,6 +11,36 @@ import (
 	"time"
 )
 
+// Finding fixtures in the shape dolt fsck prints them (cmd/dolt/commands/
+// fsck.go: FsckReport.Print colors the report headers red; the corrupted
+// journal warning is printed before any scan). Each one is an integrity
+// finding that must refuse the push.
+const (
+	fsckCorruptChunksReport = "\x1b[31m============ Corrupt Chunks ============\x1b[0m\n" +
+		"chunk 5c0bt2fvhq0lmqrs4v1ns0pgt1b3m0q8: checksum mismatch\n" +
+		"============ Summary ============\n" +
+		"Files with corruption:\n" +
+		"  oldgen/2ah8d4kqmt3hbk3m7aep4t46r6ojv2j9: 1 chunk(s) with checksum errors"
+	fsckCommitErrorsReport = "\x1b[31m============ Commit Errors ============\x1b[0m\n" +
+		"error validating commit 9ujq4v7a6m1d2t0kh5u0jv0cb1d5s4mp: root tree " +
+		"q1o0b6vn5hr7s2c4t8m3l9k0j1h2g3f4: chunk not found\n" +
+		"============ Summary ============\n" +
+		"Commit objects found: 12 (12 reachable from branches/tags/stashes, 0 unreachable)"
+	fsckCorruptJournalWarning = "WARNING: Chunk journal is corrupted and some data may be lost.\n" +
+		"Run `dolt fsck --revive-journal-with-data-loss` to attempt to recover the journal by\n" +
+		"discarding invalid data blocks. Your original data will be preserved in a backup file."
+)
+
+// fsckFindingFixtures names every finding fixture for the table tests.
+var fsckFindingFixtures = []struct {
+	name   string
+	output string
+}{
+	{"corrupt chunks", fsckCorruptChunksReport},
+	{"commit errors", fsckCommitErrorsReport},
+	{"corrupted journal", fsckCorruptJournalWarning},
+}
+
 // TestPrePushFSCK_EmptyCLIDir verifies that prePushFSCK is a no-op when
 // CLIDir is empty (no local noms store configured).
 func TestPrePushFSCK_EmptyCLIDir(t *testing.T) {
@@ -110,8 +140,8 @@ func TestFsckCouldNotOpen(t *testing.T) {
 			want:   true,
 		},
 		{
-			name:   "actual dangling chunk reference (must still abort)",
-			output: "dangling chunk reference: hash abc123 referenced but not present",
+			name:   "corrupt-chunks report (must still abort)",
+			output: fsckCorruptChunksReport,
 			want:   false,
 		},
 		{
@@ -150,10 +180,10 @@ func TestClassifyFSCKFailure(t *testing.T) {
 		// (a) Non-empty output wins over context state: real dangling reference
 		//     arriving exactly at the deadline must not be masked as a timeout.
 		{
-			name:      "non-empty output + DeadlineExceeded → ErrDanglingReference, not ErrFSCKTimeout",
+			name:      "finding output + DeadlineExceeded → ErrDanglingReference, not ErrFSCKTimeout",
 			parentErr: context.DeadlineExceeded,
 			fsckErr:   context.DeadlineExceeded,
-			output:    "dangling chunk reference: hash abc123 not found",
+			output:    fsckCorruptChunksReport,
 			wantIs:    ErrDanglingReference,
 			wantIsNot: []error{ErrFSCKTimeout},
 		},
@@ -248,7 +278,7 @@ func TestClassifyFSCKFailure(t *testing.T) {
 			name:      "real corruption output stays ErrDanglingReference despite nil ctx errors",
 			parentErr: nil,
 			fsckErr:   nil,
-			output:    "dangling chunk reference: hash abc123 not found",
+			output:    fsckCorruptChunksReport,
 			wantIs:    ErrDanglingReference,
 			wantIsNot: []error{ErrFSCKTimeout},
 		},
@@ -297,6 +327,84 @@ func TestClassifyFSCKFailure(t *testing.T) {
 	}
 }
 
+// TestClassifyFSCKFailure_FindingWins verifies that a recognized fsck finding
+// refuses the push as ErrDanglingReference with the finding output, whatever
+// else happened: a deadline or cancellation, could-not-open text, or
+// cancellation phrasing printed alongside the report must not hide it.
+func TestClassifyFSCKFailure_FindingWins(t *testing.T) {
+	t.Parallel()
+	contexts := []struct {
+		name      string
+		parentErr error
+		fsckErr   error
+		extra     string
+	}{
+		{name: "no context error"},
+		{name: "parent canceled", parentErr: context.Canceled, fsckErr: context.Canceled},
+		{name: "parent deadline", parentErr: context.DeadlineExceeded, fsckErr: context.DeadlineExceeded},
+		{name: "own deadline", fsckErr: context.DeadlineExceeded},
+		{name: "could-not-open text", extra: "Could not open dolt database: oldgen: no such file or directory"},
+		{name: "context canceled text", extra: "context canceled"},
+		{name: "deadline text + own deadline", fsckErr: context.DeadlineExceeded, extra: "error: context deadline exceeded"},
+		{name: "signal text", extra: "signal: killed"},
+	}
+	for _, f := range fsckFindingFixtures {
+		for _, c := range contexts {
+			f, c := f, c
+			t.Run(f.name+"/"+c.name, func(t *testing.T) {
+				t.Parallel()
+				output := f.output
+				if c.extra != "" {
+					output = c.extra + "\n" + output
+				}
+				err := classifyFSCKFailure(c.parentErr, c.fsckErr, output)
+				if !errors.Is(err, ErrDanglingReference) {
+					t.Fatalf("errors.Is(err, ErrDanglingReference) = false; err = %v", err)
+				}
+				if errors.Is(err, ErrFSCKTimeout) || errors.Is(err, context.Canceled) {
+					t.Errorf("finding must not be reported as a timeout or interrupt; err = %v", err)
+				}
+				if !strings.Contains(err.Error(), f.output) {
+					t.Errorf("error %q does not quote the finding output", err)
+				}
+			})
+		}
+	}
+}
+
+// TestFsckReportedFinding verifies the helper recognizes dolt fsck's report
+// headers and corrupted-journal warning, including the ANSI color the headers
+// carry, and does not treat a clean summary, warnings, empty output, or
+// incidental "corrupt"/"dangling" wording as a finding.
+func TestFsckReportedFinding(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{"corrupt chunks report", fsckCorruptChunksReport, true},
+		{"commit errors report alone", fsckCommitErrorsReport, true},
+		{"corrupted journal warning", fsckCorruptJournalWarning, true},
+		{"uncolored corrupt chunks header", "============ Corrupt Chunks ============\nchunk x: missing", true},
+		{"clean summary", "============ Summary ============\nCommit objects found: 3 (3 reachable from branches/tags/stashes, 0 unreachable)\nNo problems found.", false},
+		{"unknown config warning", "Warning: Unknown global config option 'sqlserver.foo'. Use `dolt config --global --unset sqlserver.foo` to remove.", false},
+		{"global config load failure", "\x1b[31mFailed to load the global config. open /home/u/.dolt/config_global.json: permission denied\x1b[0m", false},
+		{"empty output", "", false},
+		{"incidental corrupt word in a path", "Could not open dolt database: open /srv/corrupt-backups/.dolt/noms: permission denied", false},
+		{"incidental dangling words", "dangling chunk reference: hash abc123 referenced but not present", false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := fsckReportedFinding(tc.output); got != tc.want {
+				t.Errorf("fsckReportedFinding(%q) = %v, want %v", tc.output, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestFsckOutputInterrupted verifies the helper recognizes the cancellation
 // phrasings an interrupted fsck prints, and does not classify integrity
 // findings or unrelated output as interrupts.
@@ -328,8 +436,8 @@ func TestFsckOutputInterrupted(t *testing.T) {
 			want:   true,
 		},
 		{
-			name:   "real dangling reference is not an interrupt",
-			output: "dangling chunk reference: hash abc123 referenced but not present",
+			name:   "corrupt-chunks report is not an interrupt",
+			output: fsckCorruptChunksReport,
 			want:   false,
 		},
 		{
