@@ -98,7 +98,7 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 	}
 
 	if len(mediumConfidence) > 0 {
-		fmt.Printf("Medium Confidence (score 0.7-0.9):\n")
+		fmt.Printf("Medium Confidence (score 0.7-0.9, manual review required — not eligible for --clean):\n")
 		for _, p := range mediumConfidence {
 			fmt.Printf("  %s: %q (score: %.2f)\n", p.Issue.ID, p.Issue.Title, p.Score)
 			for _, reason := range p.Reasons {
@@ -109,12 +109,20 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 	}
 
 	if !clean {
-		fmt.Printf("Run 'bd doctor --check=pollution --clean' to delete these issues (with confirmation).\n")
+		fmt.Printf("Run 'bd doctor --check=pollution --clean' to delete the high-confidence issues (with confirmation).\n")
+		return nil
+	}
+
+	// --clean deletes only high-confidence hits; medium hits stay for manual
+	// review (GH#5025: bulk deletion of weak matches destroyed real work).
+	deletable := highConfidence
+	if len(deletable) == 0 {
+		fmt.Printf("No deletable issues: every hit needs manual review. Nothing to clean up.\n")
 		return nil
 	}
 
 	if !yes {
-		fmt.Printf("\nDelete %d test issues? [y/N] ", len(polluted))
+		fmt.Printf("\nDelete %d high-confidence test issues? [y/N] ", len(deletable))
 		var response string
 		_, _ = fmt.Scanln(&response)
 		if strings.ToLower(response) != "y" {
@@ -124,14 +132,14 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 	}
 
 	backupPath := ".beads/pollution-backup.jsonl"
-	if err := backupPollutedIssues(polluted, backupPath); err != nil {
+	if err := backupPollutedIssues(deletable, backupPath); err != nil {
 		return HandleError("backing up issues: %v", err)
 	}
-	fmt.Printf("Backed up %d issues to %s\n", len(polluted), backupPath)
+	fmt.Printf("Backed up %d issues to %s\n", len(deletable), backupPath)
 
-	fmt.Printf("\nDeleting %d issues...\n", len(polluted))
+	fmt.Printf("\nDeleting %d issues...\n", len(deletable))
 	deleted := 0
-	for _, p := range polluted {
+	for _, p := range deletable {
 		if err := deleteIssue(ctx, p.Issue.ID); err != nil {
 			fmt.Fprintf(os.Stderr, "Error deleting %s: %v\n", p.Issue.ID, err)
 			continue
@@ -151,6 +159,6 @@ func init() {
 	doctorCmd.Flags().BoolVar(&checkHealthMode, "check-health", false, "Quick health check for git hooks (silent on success)")
 	doctorCmd.Flags().StringVarP(&doctorOutput, "output", "o", "", "Export diagnostics to JSON file")
 	doctorCmd.Flags().StringVar(&doctorCheckFlag, "check", "", "Run specific check in detail (e.g., 'pollution')")
-	doctorCmd.Flags().BoolVar(&doctorClean, "clean", false, "For pollution check: delete detected test issues")
+	doctorCmd.Flags().BoolVar(&doctorClean, "clean", false, "For pollution check: delete high-confidence test issues (medium hits need manual review)")
 	doctorCmd.Flags().BoolVar(&doctorDeep, "deep", false, "Validate full graph integrity")
 }
