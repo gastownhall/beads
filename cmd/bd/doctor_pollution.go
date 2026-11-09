@@ -8,7 +8,6 @@ import (
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/remedy"
-	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -23,13 +22,14 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 
 	ctx := rootCtx
 
-	// Get all issues (env-only cap via BEADS_MAX_ROWS; designer §4: doctor
-	// family is env opt-in, no operator-facing flag).
+	// Get the pollution candidates (env-only cap via BEADS_MAX_ROWS; designer
+	// §4: doctor family is env opt-in, no operator-facing flag). The load
+	// filter matches the validation gate's; the scorer re-checks eligibility.
 	maxRows, maxRowsSource := resolveMaxRowsEnvOnly()
-	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{
-		MaxRows:       maxRows,
-		MaxRowsSource: maxRowsSource,
-	})
+	filter := doctor.PollutionIssueFilter()
+	filter.MaxRows = maxRows
+	filter.MaxRowsSource = maxRowsSource
+	allIssues, err := store.SearchIssues(ctx, "", filter)
 	if err != nil {
 		if capErr := handleMaxRowsError(err); capErr != nil {
 			return capErr

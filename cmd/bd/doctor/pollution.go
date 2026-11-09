@@ -39,16 +39,16 @@ const (
 
 // Signal weights and thresholds, in integer tenths of a point.
 const (
-	pollutionTitlePrefixPoints       = 7
-	pollutionSequentialIDPoints      = 4
-	pollutionEmptyDescriptionPoints  = 2
+	pollutionTitlePrefixPoints      = 7
+	pollutionSequentialIDPoints     = 4
+	pollutionEmptyDescriptionPoints = 2
 	pollutionShortDescriptionPoints = 1
-	pollutionBulkCreatePoints        = 3
-	pollutionGenericTitlePoints      = 5
-	pollutionReportPoints            = 7
-	pollutionHighPoints              = 9
-	pollutionBulkCreateGroupSize     = 10
-	pollutionSubstantiveDescription  = 20
+	pollutionBulkCreatePoints       = 3
+	pollutionGenericTitlePoints     = 5
+	pollutionReportPoints           = 7
+	pollutionHighPoints             = 9
+	pollutionBulkCreateGroupSize    = 10
+	pollutionSubstantiveDescription = 20
 )
 
 // testTitlePrefixPattern matches common test issue title prefixes. The same
@@ -67,14 +67,31 @@ func HasTestTitlePrefix(title string) bool {
 }
 
 // PollutionCandidateFilter reports whether issue is eligible to be scored as
-// a pollution candidate at all. Closed issues and epics are never candidates:
-// closed rows are history, and an epic whose title merely starts with "Test"
-// is usually real work (the GH#5025 false positive).
+// a pollution candidate at all. Only open, non-epic, non-ephemeral issues are:
+// closed rows are history, an epic whose title merely starts with "Test" is
+// usually real work (the GH#5025 false positive), and ephemeral wisps are
+// operational state. NoHistory rows keep Ephemeral=false and stay eligible.
 func PollutionCandidateFilter(issue *types.Issue) bool {
 	if issue == nil {
 		return false
 	}
-	return issue.Status == types.StatusOpen && issue.IssueType != types.TypeEpic
+	return issue.Status == types.StatusOpen && issue.IssueType != types.TypeEpic && !issue.Ephemeral
+}
+
+// PollutionIssueFilter returns the search filter both pollution checks load
+// their candidates with: open, non-epic, non-ephemeral issues (NoHistory rows
+// included — search treats Ephemeral=false as "not ephemeral-flagged").
+// The detailed doctor check adds its env-only MaxRows cap on top; the
+// validation gate stays uncapped. The scorer repeats the eligibility per
+// issue, so a caller passing a superset cannot reintroduce false positives.
+func PollutionIssueFilter() types.IssueFilter {
+	open := types.StatusOpen
+	nonEphemeral := false
+	return types.IssueFilter{
+		Status:       &open,
+		ExcludeTypes: []types.IssueType{types.TypeEpic},
+		Ephemeral:    &nonEphemeral,
+	}
 }
 
 // DetectTestPollution scores issues and returns the ones that look like test

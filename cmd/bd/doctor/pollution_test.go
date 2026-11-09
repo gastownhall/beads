@@ -40,11 +40,49 @@ func TestDetectTestPollution_SkipsClosedAndEpics(t *testing.T) {
 	}
 }
 
+// TestDetectTestPollution_ExcludesNonOpenAndEphemeral pins AC-2: non-open and
+// ephemeral issues are excluded, while an identical open non-epic issue with
+// Ephemeral=false — including a NoHistory wisp — remains eligible.
+func TestDetectTestPollution_ExcludesNonOpenAndEphemeral(t *testing.T) {
+	mutate := func(id string, f func(*types.Issue)) *types.Issue {
+		i := pollutionFixtureIssue(id)
+		f(i)
+		return i
+	}
+	issues := []*types.Issue{
+		mutate("bd-inprog", func(i *types.Issue) { i.Status = types.StatusInProgress }),
+		mutate("bd-blocked", func(i *types.Issue) { i.Status = types.StatusBlocked }),
+		mutate("bd-defer", func(i *types.Issue) { i.Status = types.StatusDeferred }),
+		mutate("bd-eph", func(i *types.Issue) { i.Ephemeral = true }),
+		pollutionFixtureIssue("bd-open"),
+		mutate("bd-nohist", func(i *types.Issue) { i.NoHistory = true }),
+	}
+
+	reported := map[string]bool{}
+	for _, p := range DetectTestPollution(issues) {
+		reported[p.Issue.ID] = true
+	}
+	for _, id := range []string{"bd-inprog", "bd-blocked", "bd-defer", "bd-eph"} {
+		if reported[id] {
+			t.Errorf("non-open or ephemeral issue %s reported as pollution", id)
+		}
+	}
+	for _, id := range []string{"bd-open", "bd-nohist"} {
+		if !reported[id] {
+			t.Errorf("eligible open non-epic issue %s (Ephemeral=false) was not reported", id)
+		}
+	}
+}
+
 // TestPollutionCandidateFilter pins the eligibility rules issue by issue.
 func TestPollutionCandidateFilter(t *testing.T) {
-	open := pollutionFixtureIssue("bd-open")
 	epic := pollutionFixtureIssue("bd-epic")
 	epic.IssueType = types.TypeEpic
+	mutate := func(f func(*types.Issue)) *types.Issue {
+		i := pollutionFixtureIssue("bd-mut")
+		f(i)
+		return i
+	}
 
 	cases := []struct {
 		name  string
@@ -52,18 +90,37 @@ func TestPollutionCandidateFilter(t *testing.T) {
 		want  bool
 	}{
 		{"nil", nil, false},
-		{"open task", open, true},
+		{"open task", pollutionFixtureIssue("bd-open"), true},
+		{"open NoHistory wisp (Ephemeral=false)", mutate(func(i *types.Issue) { i.NoHistory = true }), true},
 		{"epic", epic, false},
-		{"closed", func() *types.Issue {
-			i := pollutionFixtureIssue("bd-closed")
-			i.Status = types.StatusClosed
-			return i
-		}(), false},
+		{"closed", mutate(func(i *types.Issue) { i.Status = types.StatusClosed }), false},
+		{"in_progress", mutate(func(i *types.Issue) { i.Status = types.StatusInProgress }), false},
+		{"blocked", mutate(func(i *types.Issue) { i.Status = types.StatusBlocked }), false},
+		{"deferred", mutate(func(i *types.Issue) { i.Status = types.StatusDeferred }), false},
+		{"ephemeral", mutate(func(i *types.Issue) { i.Ephemeral = true }), false},
 	}
 	for _, tc := range cases {
 		if got := PollutionCandidateFilter(tc.issue); got != tc.want {
 			t.Errorf("%s: PollutionCandidateFilter = %t, want %t", tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestPollutionIssueFilter pins the load filter both pollution checks share:
+// open, non-epic, non-ephemeral, and uncapped (callers add their own row cap).
+func TestPollutionIssueFilter(t *testing.T) {
+	filter := PollutionIssueFilter()
+	if filter.Status == nil || *filter.Status != types.StatusOpen {
+		t.Errorf("Status = %v, want open", filter.Status)
+	}
+	if len(filter.ExcludeTypes) != 1 || filter.ExcludeTypes[0] != types.TypeEpic {
+		t.Errorf("ExcludeTypes = %v, want [epic]", filter.ExcludeTypes)
+	}
+	if filter.Ephemeral == nil || *filter.Ephemeral {
+		t.Errorf("Ephemeral = %v, want pointer to false (excludes ephemeral, keeps NoHistory)", filter.Ephemeral)
+	}
+	if filter.MaxRows != 0 {
+		t.Errorf("MaxRows = %d, want 0 (the shared load adds no cap)", filter.MaxRows)
 	}
 }
 
@@ -78,8 +135,8 @@ func TestHasTestTitlePrefix(t *testing.T) {
 		{"Test-quality architecture", true},
 		{"TEST-1", true},
 		{"test_thing", true},
-		{"testy title", false},      // prefix must be a whole word
-		{"contest rules", false},    // no prefix at line start
+		{"testy title", false},   // prefix must be a whole word
+		{"contest rules", false}, // no prefix at line start
 		{"benchmark seed", true},
 		{"sample issue", true},
 		{"tmp note", true},

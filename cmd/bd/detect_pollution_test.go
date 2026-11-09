@@ -65,3 +65,46 @@ func TestDetectTestPollution_SkipsClosedAndEpics(t *testing.T) {
 		}
 	}
 }
+
+// TestDetectTestPollution_ExcludesNonOpenAndEphemeral pins AC-2: non-open and
+// ephemeral issues are excluded, while an identical open non-epic issue with
+// Ephemeral=false — including a NoHistory wisp — remains eligible.
+func TestDetectTestPollution_ExcludesNonOpenAndEphemeral(t *testing.T) {
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	fixture := func(id string, mutate func(*types.Issue)) *types.Issue {
+		issue := &types.Issue{
+			ID:        id,
+			Title:     "test-" + id + " leftover",
+			Status:    types.StatusOpen,
+			IssueType: types.TypeTask,
+			CreatedAt: created,
+		}
+		if mutate != nil {
+			mutate(issue)
+		}
+		return issue
+	}
+	issues := []*types.Issue{
+		fixture("bd-inprog", func(i *types.Issue) { i.Status = types.StatusInProgress }),
+		fixture("bd-blocked", func(i *types.Issue) { i.Status = types.StatusBlocked }),
+		fixture("bd-defer", func(i *types.Issue) { i.Status = types.StatusDeferred }),
+		fixture("bd-eph", func(i *types.Issue) { i.Ephemeral = true }),
+		fixture("bd-open", nil),
+		fixture("bd-nohist", func(i *types.Issue) { i.NoHistory = true }),
+	}
+
+	reported := map[string]bool{}
+	for _, p := range detectTestPollution(issues) {
+		reported[p.issue.ID] = true
+	}
+	for _, id := range []string{"bd-inprog", "bd-blocked", "bd-defer", "bd-eph"} {
+		if reported[id] {
+			t.Errorf("non-open or ephemeral issue %s reported as pollution", id)
+		}
+	}
+	for _, id := range []string{"bd-open", "bd-nohist"} {
+		if !reported[id] {
+			t.Errorf("eligible open non-epic issue %s (Ephemeral=false) was not reported", id)
+		}
+	}
+}

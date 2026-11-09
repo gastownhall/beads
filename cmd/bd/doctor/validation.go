@@ -245,7 +245,7 @@ func CheckTestPollution(path string) DoctorCheck {
 // checkTestPollutionStore is CheckTestPollution's core logic, parameterized
 // on the store seam so query errors and scorer parity can be tested directly.
 func checkTestPollutionStore(ctx context.Context, s pollutionSearchStore) DoctorCheck {
-	issues, err := s.SearchIssues(ctx, "", types.IssueFilter{})
+	issues, err := s.SearchIssues(ctx, "", PollutionIssueFilter())
 	if err != nil {
 		return DoctorCheck{
 			Name:    "Test Pollution",
