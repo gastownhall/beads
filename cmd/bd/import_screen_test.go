@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // TestImportRejectsFileMergesAndRefusesUnsafeDestinations pins the rejects
@@ -189,4 +193,92 @@ func TestWarnImportInvalidSkippedCapsPerRecordLines(t *testing.T) {
 	if !strings.Contains(out, "not saved separately; they remain in in.jsonl") {
 		t.Errorf("warning without --rejects = %q, want it to say the records remain in the source", out)
 	}
+}
+
+// vocabularyScreenFixture is an import whose rows would be screened, one of
+// them with a status only a configured vocabulary could accept.
+var vocabularyScreenFixture = []string{
+	`{"_type":"issue","id":"vc-1","title":"valid row","status":"open","priority":2,"issue_type":"task"}`,
+	`{"_type":"issue","id":"vc-2","title":"custom status row","status":"verify","priority":2,"issue_type":"task"}`,
+}
+
+func writeVocabularyScreenFixture(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "issues.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(vocabularyScreenFixture, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// assertNoQuarantine fails if the default quarantine beside source exists.
+func assertNoQuarantine(t *testing.T, source string) {
+	t.Helper()
+	if _, err := os.Stat(defaultImportRejectsPath(source)); !os.IsNotExist(err) {
+		t.Errorf("quarantine written (stat err %v), want no file writes", err)
+	}
+}
+
+// TestScreenImportRecordsVocabularyReadErrorIsNotAVerdict pins the explicit
+// import's half of AC-5 (GH#4492): a failed vocabulary read fails the screen
+// with the read error, and returns no screen - so no row is written and no
+// record is reported invalid. Ported from GLM's
+// TestApplyExplicitImportScreenVocabularyErrorAborts.
+func TestScreenImportRecordsVocabularyReadErrorIsNotAVerdict(t *testing.T) {
+	records, _, err := parseImportJSONLFile(writeVocabularyScreenFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	readErr := errors.New("dolt is on fire")
+	screen, err := screenImportRecords(context.Background(), nil, func(context.Context) ([]string, []string, error) {
+		return nil, nil, readErr
+	}, records, true)
+	if !errors.Is(err, readErr) {
+		t.Fatalf("screen error = %v, want the vocabulary read error", err)
+	}
+	if screen != nil {
+		t.Errorf("screen = %+v, want none: a read failure is not a record verdict", screen)
+	}
+}
+
+// TestPlanRecoveryImportVocabularyReadErrorWritesNothing pins AC-5 on the
+// recovery plan every recovery importer shares: an unreadable vocabulary
+// aborts the plan with the read error, before a quarantine is written and
+// without an invalid verdict. Ported from GLM's
+// TestRecoveryPlanAbortsWhenVocabularyUnreadable.
+func TestPlanRecoveryImportVocabularyReadErrorWritesNothing(t *testing.T) {
+	source := writeVocabularyScreenFixture(t)
+	readErr := errors.New("resolver offline")
+	plan, err := planRecoveryImportFile(context.Background(), func(context.Context) ([]string, []string, error) {
+		return nil, nil, readErr
+	}, source)
+	if !errors.Is(err, readErr) {
+		t.Fatalf("plan error = %v, want the vocabulary read error", err)
+	}
+	if plan != nil {
+		t.Errorf("plan = %+v, want none", plan)
+	}
+	assertNoQuarantine(t, source)
+}
+
+// noVocabularyStore has no ImportVocabulary method, directly or underneath.
+type noVocabularyStore struct {
+	storage.DoltStorage // nil: any call panics
+}
+
+// TestPlanRecoveryImportMissingVocabularyCapabilityWritesNothing pins the
+// missing-capability abort (GH#4492 AC-5): screening a store that cannot read
+// its vocabulary against built-ins alone would set aside every row with a
+// configured custom status, so the plan refuses instead, writing nothing.
+// Ported from GLM's TestRecoveryPlanAbortsWhenCapabilityMissing.
+func TestPlanRecoveryImportMissingVocabularyCapabilityWritesNothing(t *testing.T) {
+	source := writeVocabularyScreenFixture(t)
+	plan, err := planRecoveryImportFile(context.Background(), storeImportVocabulary(noVocabularyStore{}), source)
+	if err == nil || !strings.Contains(err.Error(), "cannot read the custom statuses and types") {
+		t.Fatalf("plan error = %v, want the missing-capability refusal", err)
+	}
+	if plan != nil {
+		t.Errorf("plan = %+v, want none", plan)
+	}
+	assertNoQuarantine(t, source)
 }
