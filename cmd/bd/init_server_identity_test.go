@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -39,6 +40,7 @@ func TestInitServerIdentityGlobalDatabaseRefusesForeignServer(t *testing.T) {
 			writeInitIdentityRecord(t, record, "00000000-1111-4222-8333-444444444444\n")
 		}, "00000000-1111-4222-8333-444444444444"},
 		{"absent", func(t *testing.T, record string) {}, "does not exist"},
+		{"blank", func(t *testing.T, record string) { writeInitIdentityRecord(t, record, "  \n") }, "is empty"},
 		{"malformed", func(t *testing.T, record string) { writeInitIdentityRecord(t, record, "not-a-uuid\n") }, "is malformed"},
 		{"unreadable", func(t *testing.T, record string) {
 			if err := os.Mkdir(record, 0o755); err != nil {
@@ -170,5 +172,85 @@ func TestInitServerIdentityExemptGlobalDatabase(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(record); string(got) != "00000000-1111-4222-8333-444444444444\n" {
 		t.Errorf("record = %q, want it unchanged", got)
+	}
+}
+
+// TestInitServerIdentitySharedRefusesForeignIdentity runs the refusal through
+// bd init itself: a first shared-server init starts the shared server and
+// pairs its record; with that server still up, its beads_global removed and
+// the record naming another server, a second init fails with the identity
+// error, creates no beads_global and leaves the record as it was.
+func TestInitServerIdentitySharedRefusesForeignIdentity(t *testing.T) {
+	skipIfNoDolt(t)
+	bd := buildBDForInitTests(t)
+	port, err := testutil.FindFreePort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sharedDir := t.TempDir()
+	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedDir)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv(doltserver.VerifyServerIdentityEnv, "")
+	stopDoltServerCleanup(t, sharedDir)
+	env := append(os.Environ(),
+		"BEADS_DOLT_SHARED_SERVER=1",
+		"BEADS_DOLT_SERVER_PORT="+strconv.Itoa(port),
+		"BEADS_SHARED_SERVER_DIR="+sharedDir,
+		doltserver.VerifyServerIdentityEnv+"=",
+	)
+	runInit := func() ([]byte, error) {
+		cmd := exec.Command(bd, "init", "--prefix", "identity", "--skip-hooks", "--quiet")
+		cmd.Dir = t.TempDir()
+		cmd.Env = env
+		return cmd.CombinedOutput()
+	}
+
+	if out, err := runInit(); err != nil {
+		t.Fatalf("first bd init (pairing): %v\n%s", err, out)
+	}
+	dataDir, err := doltserver.SharedDoltPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := doltserver.ServerIdentityRecordPath(dataDir)
+	paired, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatalf("first init did not pair the identity record: %v", err)
+	}
+	admin, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%d)/", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	actual, err := doltserver.QueryServerUUID(ctx, admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(paired)) != actual {
+		t.Fatalf("first init paired %q, but the shared server reports %q", paired, actual)
+	}
+
+	if _, err := admin.ExecContext(ctx, "DROP DATABASE IF EXISTS "+doltserver.GlobalDatabaseName); err != nil {
+		t.Fatalf("drop %s: %v", doltserver.GlobalDatabaseName, err)
+	}
+	const foreign = "00000000-1111-4222-8333-444444444444"
+	writeInitIdentityRecord(t, record, foreign+"\n")
+
+	out, err := runInit()
+	if err == nil {
+		t.Fatalf("second bd init succeeded against a server its record does not name:\n%s", out)
+	}
+	for _, want := range []string{"refusing the Dolt server at", foreign, actual} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("second bd init output does not name %q:\n%s", want, out)
+		}
+	}
+	if globalDatabaseExists(t, port) {
+		t.Errorf("%s exists after the refused bd init", doltserver.GlobalDatabaseName)
+	}
+	if got, _ := os.ReadFile(record); string(got) != foreign+"\n" {
+		t.Errorf("record = %q after the refused init, want it unchanged", got)
 	}
 }
