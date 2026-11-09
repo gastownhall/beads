@@ -410,6 +410,66 @@ func TestGetReadyWorkInTxLeavesOutAWispUnderADeferredParent(t *testing.T) {
 	}
 }
 
+// TestGetReadyWorkInTxHydratesACollidedIDFromWisps pins that the hydration still
+// asks which ids are wisps when the probe saw wisp rows. An id in both tables is
+// routed to its wisp record, so an empty wisp set here would print the issues copy.
+func TestGetReadyWorkInTxHydratesACollidedIDFromWisps(t *testing.T) {
+	mock, tx, _ := countedMockTx(t)
+	mock.ExpectQuery(readyProbeSQL).WillReturnRows(readyProbeRows(true, true, false, false))
+	mock.ExpectQuery(`SELECT id FROM issues`).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("dup"))
+	mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+	mock.ExpectQuery(`SELECT id FROM wisps WHERE id IN \(\?\)$`).
+		WithArgs("dup").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("dup"))
+	mock.ExpectQuery(`FROM wisps .*WHERE id IN \(\?\)`).
+		WithArgs("dup").
+		WillReturnRows(issueRows().AddRow(issueRowValues("dup", "The wisp record")...))
+	mock.ExpectQuery(`SELECT issue_id, label FROM wisp_labels`).
+		WithArgs("dup").
+		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "label"}))
+	mock.ExpectQuery(`(?s)SELECT .*id FROM wisps .*LIMIT`).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	got, err := GetReadyWorkInTx(t.Context(), tx, types.WorkFilter{Limit: 5, IncludeDeferred: true, IncludeEphemeral: true})
+	if err != nil {
+		t.Fatalf("GetReadyWorkInTx: %v", err)
+	}
+	if len(got) != 1 || got[0].Title != "The wisp record" {
+		t.Fatalf("got %+v, want the wisp record of dup", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestGetReadyWorkInTxListsWispsWithoutAWispDependencyTable pins that the wisp
+// listing is gated on wisp rows existing, not on wisp_dependencies. The counts
+// reads need that table; this listing does not, and gating on it would drop
+// every wisp from bd ready on a database that lacks the table.
+func TestGetReadyWorkInTxListsWispsWithoutAWispDependencyTable(t *testing.T) {
+	missing := errors.New("Error 1146 (HY000): table not found: wisp_dependencies")
+	mock, tx, _ := countedMockTx(t)
+	mock.ExpectQuery(readyProbeSQL).WillReturnError(missing)
+	mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).WillReturnError(missing)
+	mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+	mock.ExpectQuery(staleBlockedQueryRegex("issues")).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(`SELECT id FROM issues`).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(`(?s)SELECT .*id FROM wisps .*LIMIT`).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("w-1"))
+	mock.ExpectQuery(`FROM wisps .*WHERE id IN \(\?\)`).WillReturnRows(issueRows().AddRow(issueRowValues("w-1", "Wisp")...))
+	mock.ExpectQuery(`SELECT issue_id, label FROM wisp_labels`).WillReturnRows(sqlmock.NewRows([]string{"issue_id", "label"}))
+	mock.ExpectQuery(`SELECT id FROM wisps WHERE id IN \(\?\) AND is_blocked = 1`).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	got, err := GetReadyWorkInTx(t.Context(), tx, types.WorkFilter{Limit: 5, IncludeDeferred: true, IncludeEphemeral: true})
+	if err != nil {
+		t.Fatalf("GetReadyWorkInTx: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "w-1" {
+		t.Fatalf("got %+v, want w-1", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
 // TestGetReadyWorkInTxOnAWispsTableWithoutIsBlocked pins the two answers for a
 // wisps table lacking is_blocked: with no wisp rows the column is not needed and
 // the listing succeeds, and with wisp rows the read that needs it fails.
