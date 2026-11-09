@@ -39,12 +39,14 @@ const (
 // Signal weights and thresholds, in integer tenths of a point. Counter-mode
 // IDs (bd-123) and same-minute bulk creation are deliberately not signals:
 // issueops generates both routinely for real work, so neither is evidence of
-// a test fixture on its own (GH#5025).
+// a test fixture on its own (GH#5025). The title weights are tuned so a
+// prefixed title alone stays review-only (0.8 with an empty description) —
+// high confidence needs a second title signal, e.g. a generic title too.
 const (
-	pollutionTitlePrefixPoints      = 7
+	pollutionTitlePrefixPoints      = 6
 	pollutionEmptyDescriptionPoints = 2
 	pollutionShortDescriptionPoints = 1
-	pollutionGenericTitlePoints     = 5
+	pollutionGenericTitlePoints     = 6
 	pollutionReportPoints           = 7
 	pollutionHighPoints             = 9
 	pollutionSubstantiveDescription = 20

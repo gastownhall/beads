@@ -223,3 +223,49 @@ func TestDetectTestPollution_BulkCreateNotEvidence(t *testing.T) {
 		t.Errorf("want only the prefixed fixture reported, got %d hit(s)", len(got))
 	}
 }
+
+// TestDetectTestPollution_ScoreWeights pins AC-5's exact weights and the
+// confidence split they produce.
+func TestDetectTestPollution_ScoreWeights(t *testing.T) {
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	cases := []struct {
+		name        string
+		title       string
+		description string
+		wantScore   float64
+		wantHigh    bool
+	}{
+		{"prefixed title, empty description", "Debug sync hangs", "", 0.8, false},
+		{"prefixed generic title, empty description", "Test issue", "", 1.4, true},
+		{"prefixed title, short description", "tmp leftover", "short", 0.7, false},
+		{"prefixed generic title, short description", "test issue", "x", 1.3, true},
+		{"unprefixed title, empty description (not reported)", "Imported work item", "", 0, false},
+	}
+	for _, tc := range cases {
+		issue := &types.Issue{
+			ID:          "bd-w",
+			Title:       tc.title,
+			Description: tc.description,
+			Status:      types.StatusOpen,
+			IssueType:   types.TypeTask,
+			CreatedAt:   created,
+		}
+		hits := DetectTestPollution([]*types.Issue{issue})
+		if tc.wantScore == 0 {
+			if len(hits) != 0 {
+				t.Errorf("%s: reported with score %.2f, want unreported", tc.name, hits[0].Score)
+			}
+			continue
+		}
+		if len(hits) != 1 {
+			t.Errorf("%s: got %d hit(s), want 1", tc.name, len(hits))
+			continue
+		}
+		if hits[0].Score != tc.wantScore {
+			t.Errorf("%s: score %.2f, want %.2f (reasons %v)", tc.name, hits[0].Score, tc.wantScore, hits[0].Reasons)
+		}
+		if got := hits[0].HighConfidence(); got != tc.wantHigh {
+			t.Errorf("%s: HighConfidence = %t, want %t", tc.name, got, tc.wantHigh)
+		}
+	}
+}

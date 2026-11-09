@@ -198,3 +198,39 @@ func TestDetectTestPollution_IDAndBulkNotEvidence(t *testing.T) {
 		t.Error("control: the prefixed empty-description leftover was not reported")
 	}
 }
+
+// TestDetectTestPollution_RequiresCorroboration pins AC-5's exact weights: a
+// prefixed title alone is only medium confidence ("Debug sync hangs" scores
+// 0.8), a prefixed generic title with no description is high ("Test issue"
+// scores 1.4), and a prefixed title with a short description just clears the
+// reporting bar (0.7). No reason cites IDs or timestamps.
+func TestDetectTestPollution_RequiresCorroboration(t *testing.T) {
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	issues := []*types.Issue{
+		{ID: "bd-debug", Title: "Debug sync hangs", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: created},
+		{ID: "bd-testissue", Title: "Test issue", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: created},
+		{ID: "bd-short", Title: "tmp leftover", Description: "short", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: created},
+	}
+
+	hits := map[string]pollutionResult{}
+	for _, p := range detectTestPollution(issues) {
+		hits[p.issue.ID] = p
+		for _, reason := range p.reasons {
+			if strings.Contains(reason, "Sequential ID") || strings.Contains(reason, "same minute") {
+				t.Errorf("reported issue %s carries ID/timing reason %q", p.issue.ID, reason)
+			}
+		}
+	}
+	for id, wantScore := range map[string]float64{"bd-debug": 0.8, "bd-testissue": 1.4, "bd-short": 0.7} {
+		p, ok := hits[id]
+		if !ok {
+			t.Fatalf("issue %s not reported", id)
+		}
+		if p.score != wantScore {
+			t.Errorf("issue %s scored %.2f, want %.2f (reasons %v)", id, p.score, wantScore, p.reasons)
+		}
+	}
+	if hits["bd-debug"].score >= hits["bd-testissue"].score {
+		t.Errorf("generic-titled fixture must outscore the plain prefixed one")
+	}
+}
