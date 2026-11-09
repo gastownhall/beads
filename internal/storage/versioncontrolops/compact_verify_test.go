@@ -2,6 +2,7 @@ package versioncontrolops
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"regexp"
 	"strings"
@@ -213,6 +214,182 @@ func TestCompactCatchUpSkipsNonReplayableRange(t *testing.T) {
 			})
 			if err != nil {
 				t.Fatalf("Compact error = %v, want today's follow-up path", err)
+			}
+		})
+	}
+}
+
+// errInjected is the failure a catch-up test injects into one statement.
+var errInjected = errors.New("injected catch-up failure")
+
+// TestCompactCatchUpFailureLeavesMainUnmoved: when any statement of the
+// catch-up fails, or its read-back or tree check refuses, Compact returns
+// that error before main's soft reset, so main's HEAD and its staged and
+// working sets stay as the writers left them; the deferred cleanup returns
+// to main and deletes compact-tmp, and a committer that could not be cleared
+// discards the connection. An injected statement failure stays in the
+// returned error's chain. "none" is the whole catch-up and the swap, at
+// statement level.
+func TestCompactCatchUpFailureLeavesMainUnmoved(t *testing.T) {
+	for _, tc := range []struct {
+		failAt string
+		want   string
+	}{
+		{"none", ""},
+		{"head read", `compact step "read main's head"`},
+		{"range read", `compact step "read commits that reached main"`},
+		{"range row", `compact step "read commits that reached main"`},
+		{"range scan", `compact step "read commits that reached main"`},
+		{"checkout temp", `compact step "checkout temp for catch-up"`},
+		{"set committer", `compact step "set committer land0001"`},
+		{"cherry-pick", `compact step "cherry-pick land0002"`},
+		{"clear committer", `compact step "clear committer"`},
+		{"read back", "compact: read rebuilt log"},
+		{"read back differs", "rebuilt commit for land0002 does not preserve the original"},
+		{"checkout main", `compact step "checkout main after catch-up"`},
+		{"verify", `compact step "verify catch-up"`},
+		{"verify differs", "caught-up history differs from main's head land0003 in 2 table(s); main was not reset"},
+	} {
+		t.Run(tc.failAt, func(t *testing.T) {
+			db, mock := newMockDB(t)
+			conn, err := db.Conn(context.Background())
+			if err != nil {
+				t.Fatalf("db.Conn: %v", err)
+			}
+			defer conn.Close()
+			ok := sqlmock.NewResult(0, 0)
+			initial, boundary, kept := compactTestCommits()
+			expectCompactBeforeVerify(mock, initial, boundary, kept)
+			mock.ExpectQuery(regexp.QuoteMeta(compactVerifySQL)).WithArgs("headhash").WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+
+			chain := landedTestChain()
+			landed := chain[2].Hash
+			fails := func(step string) bool { return tc.failAt == step }
+			// queue programs the catch-up up to the failing statement and
+			// reports whether it got past it.
+			queue := func() bool {
+				head := mock.ExpectQuery(regexp.QuoteMeta(compactHeadSQL))
+				if fails("head read") {
+					head.WillReturnError(errInjected)
+					return false
+				}
+				head.WillReturnRows(sqlmock.NewRows([]string{"h"}).AddRow(landed))
+				rows := landedRows(chain[2], chain[1], chain[0])
+				if fails("range row") {
+					rows.RowError(1, errInjected)
+				}
+				if fails("range scan") {
+					// A date dolt_log could not have produced fails the
+					// scan of the second row mid-iteration.
+					rows = landedRows(chain[2])
+					c := chain[1]
+					rows.AddRow(c.Hash, c.Committer, c.CommitterEmail, "not a date", c.Author, c.AuthorEmail, "not a date",
+						c.Message, c.CommitOrder, strings.Join(c.Parents, ", "))
+				}
+				rng := mock.ExpectQuery(regexp.QuoteMeta(compactLandedSQL)).WithArgs("headhash.." + landed)
+				if fails("range read") {
+					rng.WillReturnError(errInjected)
+					return false
+				}
+				rng.WillReturnRows(rows)
+				if fails("range row") || fails("range scan") {
+					return false
+				}
+				co := mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_CHECKOUT('compact-tmp')"))
+				if fails("checkout temp") {
+					co.WillReturnError(errInjected)
+					return false
+				}
+				co.WillReturnResult(ok)
+				for i, c := range chain {
+					set := mock.ExpectExec(regexp.QuoteMeta(setCommitterQuery)).
+						WithArgs(c.Committer, c.CommitterEmail, commitDateArg(c.CommitterDate))
+					if i == 0 && fails("set committer") {
+						set.WillReturnError(errInjected)
+						mock.ExpectExec(regexp.QuoteMeta(clearCommitterQuery)).WillReturnResult(ok)
+						return false
+					}
+					set.WillReturnResult(ok)
+					pick := mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_CHERRY_PICK('--allow-empty', ?)")).WithArgs(c.Hash)
+					if i == 1 && fails("cherry-pick") {
+						pick.WillReturnError(errInjected)
+						mock.ExpectExec(regexp.QuoteMeta(clearCommitterQuery)).WillReturnResult(ok)
+						return false
+					}
+					pick.WillReturnResult(ok)
+				}
+				clr := mock.ExpectExec(regexp.QuoteMeta(clearCommitterQuery))
+				if fails("clear committer") {
+					clr.WillReturnError(errInjected)
+					return false
+				}
+				clr.WillReturnResult(ok)
+				all := append(append([]compactCommit{}, kept...), chain[0].compactCommit, chain[1].compactCommit, chain[2].compactCommit)
+				rebuilt := compactRebuiltLog(initial, boundary, all, "compact: squash 2 commits into base snapshot")
+				if fails("read back differs") {
+					rebuilt[1].Message = "rewritten" // newest first: rebuilt[1] replays land0002
+				}
+				back := mock.ExpectQuery(regexp.QuoteMeta(compactLogQuery))
+				if fails("read back") {
+					back.WillReturnError(errInjected)
+					return false
+				}
+				back.WillReturnRows(compactLogRows(rebuilt))
+				if fails("read back differs") {
+					return false
+				}
+				main := mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_CHECKOUT('main')"))
+				if fails("checkout main") {
+					main.WillReturnError(errInjected)
+					return false
+				}
+				main.WillReturnResult(ok)
+				verify := mock.ExpectQuery(regexp.QuoteMeta(compactVerifySQL)).WithArgs(landed)
+				switch {
+				case fails("verify"):
+					verify.WillReturnError(errInjected)
+					return false
+				case fails("verify differs"):
+					verify.WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(2))
+					return false
+				}
+				verify.WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+				return true
+			}
+			if queue() {
+				mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_RESET('--soft', 'compact-tmp')")).WillReturnResult(ok)
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status WHERE staged = 1")).WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+				mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_BRANCH('-D', 'compact-tmp')")).WillReturnResult(ok)
+			} else {
+				expectCompactCleanup(mock)
+				if fails("clear committer") {
+					mock.ExpectClose()
+				}
+			}
+
+			err = Compact(context.Background(), conn, initial.Hash, boundary.Hash, "headhash", 2, keptHashes(kept))
+			if merr := mock.ExpectationsWereMet(); merr != nil {
+				t.Errorf("unmet expectations (Compact returned %v): %v", err, merr)
+			}
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("Compact error = %v, want the catch-up to succeed", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Compact error = %v, want it to contain %q", err, tc.want)
+			}
+			injected := tc.failAt != "range scan" && !strings.HasSuffix(tc.failAt, " differs")
+			if injected && !errors.Is(err, errInjected) {
+				t.Fatalf("Compact error = %v, want the injected failure in its chain", err)
+			}
+			if strings.Contains(err.Error(), "reset main to compacted") {
+				t.Fatalf("Compact error = %v: main was reset after the catch-up failed", err)
+			}
+			pingErr := conn.PingContext(context.Background())
+			if discarded := errors.Is(pingErr, sql.ErrConnDone); discarded != fails("clear committer") {
+				t.Fatalf("connection discarded = %t (ping: %v), want %t", discarded, pingErr, fails("clear committer"))
 			}
 		})
 	}

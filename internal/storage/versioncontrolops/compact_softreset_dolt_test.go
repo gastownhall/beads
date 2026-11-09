@@ -30,6 +30,9 @@ type compactHookConn struct {
 
 	// beforeExec runs before each ExecContext statement is forwarded.
 	beforeExec func(query string)
+	// failExec, when it returns an error for an ExecContext statement, makes
+	// that statement fail with it without forwarding it.
+	failExec func(query string) error
 	// afterFinalReset runs after the final reset of main onto compact-tmp
 	// has been forwarded successfully: the window between the head move and
 	// the staged check, where a writer whose transaction began before the
@@ -59,6 +62,11 @@ func isFinalReset(query string) bool {
 func (c *compactHookConn) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	if c.beforeExec != nil {
 		c.beforeExec(query)
+	}
+	if c.failExec != nil {
+		if err := c.failExec(query); err != nil {
+			return nil, err
+		}
 	}
 	if !isFinalReset(query) {
 		return c.Conn.ExecContext(ctx, query, args...)
@@ -921,6 +929,55 @@ func TestCompactStraddlingWriterKeepsCaughtUpCommit(t *testing.T) {
 		}
 	}
 	f.wantStatus("config:false", "u:false")
+	f.wantPendingKept()
+	f.wantNoTempBranch()
+}
+
+// AC-4: a catch-up that fails part way returns before main moves: main's
+// HEAD is still the landed commit, its staged and working sets are as the
+// writers left them, and compact-tmp is gone.
+func TestCompactCatchUpFailureLeavesMainAsWritten(t *testing.T) {
+	port := startCompactTestServer(t)
+	f := newCompactFixture(t, port)
+	f.exec(f.db,
+		"INSERT INTO u VALUES (800, 'staged')",
+		"CALL DOLT_ADD('u')",
+	)
+	f.writePending(f.db)
+	landed := f.landRow(f.conn())
+	statusBefore := f.status()
+
+	injected := errors.New("injected catch-up cherry-pick failure")
+	var picks int
+	hook := &compactHookConn{failExec: func(query string) error {
+		if strings.Contains(query, "DOLT_CHERRY_PICK") {
+			picks++
+			if picks == len(f.recent)+1 { // the first pick after the kept commits
+				return injected
+			}
+		}
+		return nil
+	}}
+	err := f.compact(hook)
+	if !errors.Is(err, injected) {
+		t.Fatalf("Compact error = %v, want the catch-up's injected failure", err)
+	}
+	if hook.resetDone.Load() {
+		t.Fatalf("Compact reset main after the catch-up failed")
+	}
+	var head string
+	if err := f.db.QueryRowContext(f.ctx, "SELECT HASHOF('main')").Scan(&head); err != nil {
+		t.Fatalf("read main's HEAD: %v", err)
+	}
+	if head != landed {
+		t.Fatalf("main's HEAD = %s after the failed catch-up, want the landed commit %s", head, landed)
+	}
+	if got := f.status(); strings.Join(got, ",") != strings.Join(statusBefore, ",") {
+		t.Fatalf("dolt_status after the failed catch-up = %q, want it unchanged %q", got, statusBefore)
+	}
+	if n := f.count("SELECT COUNT(*) FROM u WHERE id = 800"); n != 1 {
+		t.Fatalf("staged u row 800 on main: found=%d, want 1", n)
+	}
 	f.wantPendingKept()
 	f.wantNoTempBranch()
 }
