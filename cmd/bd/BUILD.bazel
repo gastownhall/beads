@@ -930,6 +930,8 @@ go_test(
         "import_screen_embedded_test.go",
         "import_screen_unit_test.go",
         "import_shared_unit_test.go",
+        "import_skip_invalid_embedded_test.go",
+        "import_skip_invalid_unit_test.go",
         "import_sync_prefix_test.go",
         "info_embedded_test.go",
         "info_kv_exclusion_test.go",
