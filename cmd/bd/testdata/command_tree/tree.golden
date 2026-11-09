@@ -751,8 +751,14 @@ bd compact
     | the replayed history holds the same committed data main held when compact read
     | its history, and aborts without resetting main if it does not. A write that
     | reaches main while compact runs is kept, not counted as a difference:
-    | uncommitted changes stay pending, and a commit that lands meanwhile is kept in
-    | one follow-up commit.
+    | uncommitted changes stay pending. Commits that land meanwhile are replayed onto
+    | the rebuilt history with their messages, authors and dates (not their hashes)
+    | when they form one line of non-merge commits; otherwise (a merge, or a commit
+    | compact cannot replay) they are kept in one follow-up commit, and so is a
+    | commit that lands after compact caught up. Moving main is not atomic: a commit
+    | whose writer was mid-transaction while main moved can be left pending instead
+    | of committed, with its rows intact. Run 'bd dolt commit' to commit changes
+    | left pending.
     |
     | The GC pass is a full collection: Dolt storage is generational, and a default
     | GC never revisits data an earlier GC moved to the old generation. On any store
