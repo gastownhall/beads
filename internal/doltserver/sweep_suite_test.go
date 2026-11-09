@@ -41,8 +41,8 @@ func captureStderr(t *testing.T, fn func()) string {
 // exactly one of the four states — claimed by a process that is gone — is
 // debris. In particular an UNCLAIMED root is left alone, because a directory
 // that merely matches the suite's prefix cannot be proven to be this suite's,
-// and reaping it would resurrect the cross-suite killer that
-// selectOrphanTestServers' contract exists to prevent (wy-j2zc8q).
+// and reaping it would resurrect the cross-suite killer that root-scoped
+// selection exists to prevent (wy-j2zc8q).
 func TestDecideSuiteRoot(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -260,7 +260,7 @@ func TestSweepDeadSuiteRootsRefusesUnboundedGlob(t *testing.T) {
 
 	dead := func(int) bool { return false }
 	fatalSweep := func(roots ...string) []SweptServer {
-		t.Errorf("SweepOrphanedTestServers must not be called: %v", roots)
+		t.Errorf("the server sweep must not be called: %v", roots)
 		return nil
 	}
 	fatalRemove := func(path string) error {
