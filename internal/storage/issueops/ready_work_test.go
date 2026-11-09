@@ -409,3 +409,39 @@ func TestGetReadyWorkInTxLeavesOutAWispUnderADeferredParent(t *testing.T) {
 		t.Fatalf("got %d rows, want only w-ok", len(got))
 	}
 }
+
+// TestGetReadyWorkInTxOnAWispsTableWithoutIsBlocked pins the two answers for a
+// wisps table lacking is_blocked: with no wisp rows the column is not needed and
+// the listing succeeds, and with wisp rows the read that needs it fails.
+func TestGetReadyWorkInTxOnAWispsTableWithoutIsBlocked(t *testing.T) {
+	noColumn := errors.New(`Error 1105 (HY000): table "t" does not have column "is_blocked"`)
+	prime := func(mock sqlmock.Sqlmock) {
+		mock.ExpectQuery(readyProbeSQL).WillReturnError(noColumn)
+		mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).WillReturnError(sql.ErrNoRows)
+	}
+	filter := types.WorkFilter{Limit: 5, IncludeDeferred: true}
+
+	t.Run("no wisp rows", func(t *testing.T) {
+		mock, tx, _ := countedMockTx(t)
+		prime(mock)
+		mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).WillReturnError(sql.ErrNoRows)
+		mock.ExpectQuery(staleBlockedQueryRegex("issues")).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+		mock.ExpectQuery(`SELECT id FROM issues`).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+		if _, err := GetReadyWorkInTx(t.Context(), tx, filter); err != nil {
+			t.Fatalf("GetReadyWorkInTx: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+	t.Run("wisp rows", func(t *testing.T) {
+		mock, tx, _ := countedMockTx(t)
+		prime(mock)
+		mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+		mock.ExpectQuery(staleBlockedQueryRegex("issues")).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+		mock.ExpectQuery(staleBlockedQueryRegex("wisps")).WillReturnError(noColumn)
+		if _, err := GetReadyWorkInTx(t.Context(), tx, filter); !errors.Is(err, noColumn) {
+			t.Fatalf("err = %v, want the missing column reported", err)
+		}
+	})
+}
