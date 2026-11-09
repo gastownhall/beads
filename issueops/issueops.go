@@ -453,12 +453,14 @@ type ReopenRequest struct {
 	// Reason records why literal closed and configured done statuses move to
 	// open. Non-done statuses are unchanged.
 	//
-	// WHERE it is recorded is the issue's EVENT HISTORY, carried on the
-	// reopened entry the move itself records. It is not stored on a field of
-	// the issue and ReopenResult does not surface it, so a caller that wants
-	// it back reads the issue's events — the same place the Actor attribution
-	// for the reopen lives. A reopen with no reason still records that entry;
-	// it simply carries none.
+	// WHERE it is recorded is two places, in the reopen's own transaction. A
+	// nonblank reason is added verbatim to the issue's COMMENT THREAD, authored
+	// by Actor, where the comment readers, show and export see it. The reason
+	// is also carried on the reopened entry of the issue's local EVENT
+	// HISTORY, which a reopen with no reason still records (carrying none).
+	// It is not stored on a field of the issue and ReopenResult does not
+	// surface it. The reopen clears the issue's close reason; retained
+	// committed snapshots of the closed issue keep theirs.
 	Reason string
 	// ExpectedVersion requires the current row version to match and is checked
 	// before a non-done no-op.
