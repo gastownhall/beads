@@ -1163,6 +1163,11 @@ func (s *EmbeddedDoltStore) ImportJSONLData(
 			// that check cannot clobber live rows — matching the server-mode
 			// fallback's conflict-skip behavior.
 			ConflictSkip: true,
+			// The import screen (GH#4492) quarantines invalid rows before this
+			// batch, so a surviving row may reference a dependency that lived
+			// on a rejected line; its dependency rows are skipped, not fatal —
+			// a partial recovery file must still import its valid rows.
+			SkipDependencyValidationErrors: true,
 			// A row whose id a retaining sweep retired is skipped, never
 			// written; the callback names it so the count below leaves it out.
 			OnRetiredID: func(issueID string) { retired[issueID] = true },
@@ -1554,6 +1559,32 @@ func (s *EmbeddedDoltStore) GetCustomStatusesDetailed(ctx context.Context) ([]ty
 		return nil, nil
 	}
 	return result, nil
+}
+
+// ReadImportVocabulary reads the writer's supported custom status/type
+// vocabulary in one read transaction, for import-time row screening
+// (GH#4492 design §2). Unlike the public GetCustomStatuses/GetCustomTypes
+// getters it propagates the resolver errors instead of falling back to
+// config.yaml: screening rows against a masked read failure would
+// misclassify every configured-vocabulary row as invalid, so the import
+// aborts on the read error instead.
+func (s *EmbeddedDoltStore) ReadImportVocabulary(ctx context.Context) (customStatuses, customTypes []string, err error) {
+	err = s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		customStatuses, err = issueops.GetCustomStatusesTx(ctx, tx)
+		if err != nil {
+			return fmt.Errorf("read custom statuses: %w", err)
+		}
+		customTypes, err = issueops.ResolveCustomTypesInTx(ctx, tx)
+		if err != nil {
+			return fmt.Errorf("read custom types: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return customStatuses, customTypes, nil
 }
 
 func (s *EmbeddedDoltStore) GetCustomTypes(ctx context.Context) ([]string, error) {

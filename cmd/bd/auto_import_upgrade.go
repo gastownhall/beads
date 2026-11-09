@@ -25,13 +25,24 @@ type jsonlImporter interface {
 // top-level emptiness guard prevents the fallback path from running on a
 // non-empty database.
 //
-// Production builds use importFromLocalJSONLConflictSkip (GH#3955): this is
+// It receives the plan maybeAutoImportJSONL already parsed and screened
+// (planRecoveryJSONLImport) — the fallback never re-parses the file, so it
+// cannot import or quarantine a different snapshot than the one the screen
+// classified (GH#4492 design §1).
+//
+// Production builds import the plan with conflict-skip (GH#3955): this is
 // upgrade-recovery into an empty DB, so insert-if-new and UPSERT are
 // equivalent on the legitimate path — but if the emptiness guard above ever
 // regresses again (cf. PR #3630), conflict-skip makes the fallback a
 // harmless no-op instead of clobbering live rows. Explicit `bd import`,
 // `bd bootstrap`, and `bd init --from-jsonl` are unaffected and keep UPSERT.
-var fallbackImporter = importFromLocalJSONLConflictSkip
+var fallbackImporter = importRecoveredPlanConflictSkip
+
+// importRecoveredPlanConflictSkip is the production fallbackImporter: the
+// conflict-skip writer over an already-screened plan.
+func importRecoveredPlanConflictSkip(ctx context.Context, store storage.DoltStorage, plan *recoveredJSONLPlan) (*importLocalResult, error) {
+	return importRecoveredPlanWithOpts(ctx, store, plan, true)
+}
 
 type autoImportStamp struct {
 	Size        int64 `json:"size"`
@@ -74,14 +85,19 @@ func writeAutoImportStamp(beadsDir string, info os.FileInfo) {
 // fallback. Defense in depth backs each path up: the embedded
 // jsonlImporter has its own in-transaction emptiness check (and is
 // also insert-if-new, GH#3955), and the fallback path imports via
-// importFromLocalJSONLConflictSkip, which is insert-if-new rather than
-// UPSERT. So if this guard ever regresses again (cf. PR #3630), a stale
-// issues.jsonl can no longer be re-imposed on top of live Dolt rows —
-// the worst case degrades to a harmless no-op instead of clobbering
-// recent writes.
+// conflict-skip, which is insert-if-new rather than UPSERT. So if this
+// guard ever regresses again (cf. PR #3630), a stale issues.jsonl can no
+// longer be re-imposed on top of live Dolt rows — the worst case degrades
+// to a harmless no-op instead of clobbering recent writes.
 //
-// The function is best-effort: failures are logged as warnings but do not
-// prevent the store from being used.
+// Recovery imports skip invalid records instead of aborting on them
+// (GH#4492): the file is parsed and screened once
+// (planRecoveryJSONLImport), every record the writer would refuse is
+// quarantined beside the source before any database write, and the valid
+// rows (and memories) import. One stale row in a shared mirror therefore
+// costs its own quarantine entry, not the whole machine's write path. A
+// failed screen or quarantine write still stamps the attempt and warns,
+// and the outer command proceeds: auto-import is best-effort.
 func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir string) {
 	// Quick check: does the JSONL file exist and have content?
 	jsonlPath := configuredImportJSONLPath(beadsDir)
@@ -109,21 +125,25 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 		return // database is not empty — nothing to do
 	}
 
-	// Parse the JSONL file without touching the store.
-	issues, configEntries, err := parseJSONLFile(jsonlPath)
+	// Parse and screen the JSONL file, quarantining rejected records beside
+	// the source, before either importer touches the database.
+	plan, err := planRecoveryJSONLImport(ctx, s, jsonlPath)
 	if err != nil {
 		writeAutoImportStamp(beadsDir, info)
-		fmt.Fprintf(os.Stderr, "warning: auto-import: failed to parse %s: %v\n", jsonlPath, err)
+		fmt.Fprintf(os.Stderr, "warning: auto-import: failed to import %s: %v\n", jsonlPath, err)
+		fmt.Fprintf(os.Stderr, "\nYour issues are still safe in %s.\n", jsonlPath)
+		fmt.Fprintf(os.Stderr, "Try: bd init --from-jsonl   (re-initialize and import from the JSONL file)\n")
+		fmt.Fprintf(os.Stderr, "If this persists, please report at https://github.com/gastownhall/beads/issues\n\n")
 		return
 	}
-	if len(issues) == 0 {
+	if len(plan.Issues) == 0 && len(plan.Memories) == 0 && len(plan.Rejected) == 0 {
 		return // nothing to import
 	}
 
 	// Prefer single-transaction import (embedded mode) to avoid
 	// DOLT_COMMIT races with concurrent writers.
 	if importer, ok := s.(jsonlImporter); ok {
-		imported, retiredIDs, err := importer.ImportJSONLData(ctx, issues, configEntries, "auto-import")
+		imported, retiredIDs, err := importer.ImportJSONLData(ctx, plan.Issues, plan.Memories, "auto-import")
 		if err != nil {
 			writeAutoImportStamp(beadsDir, info)
 			fmt.Fprintf(os.Stderr, "warning: auto-import from %s failed: %v\n", jsonlPath, err)
@@ -132,17 +152,23 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 			fmt.Fprintf(os.Stderr, "If this persists, please report at https://github.com/gastownhall/beads/issues\n\n")
 			return
 		}
-		// A file whose every row was retired imported nothing, but it was
-		// attempted: stamp it, or every command would re-read it.
-		if imported > 0 || len(retiredIDs) > 0 {
+		// A file whose every row was retired or screened out imported
+		// nothing, but it was attempted: stamp it, or every command would
+		// re-read it. commandDidWrite stays unset for a file that wrote
+		// nothing to the database — a quarantine file or stamp alone is not
+		// a database write (GH#4492 design §4).
+		if imported > 0 || len(retiredIDs) > 0 || len(plan.Memories) > 0 || len(plan.Rejected) > 0 {
 			writeAutoImportStamp(beadsDir, info)
+		}
+		if imported > 0 || len(retiredIDs) > 0 || len(plan.Memories) > 0 {
 			// Signal PersistentPostRun to auto-commit (no explicit DOLT_COMMIT here).
 			commandDidWrite.Store(true)
 			fmt.Fprintf(os.Stderr, "auto-imported %d issues", imported)
-			if len(configEntries) > 0 {
-				fmt.Fprintf(os.Stderr, " and %d config entries", len(configEntries))
+			if len(plan.Memories) > 0 {
+				fmt.Fprintf(os.Stderr, " and %d config entries", len(plan.Memories))
 			}
 			printAutoImportRetired(len(retiredIDs))
+			printAutoImportQuarantined(len(plan.Rejected), plan.Quarantine)
 			fmt.Fprintf(os.Stderr, " from %s\n", jsonlPath)
 		}
 		return
@@ -151,7 +177,7 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 	// Fallback for stores without a single-transaction importer.
 	fmt.Fprintf(os.Stderr, "auto-importing %d bytes from %s into empty database...\n", info.Size(), jsonlPath)
 
-	result, err := fallbackImporter(ctx, s, jsonlPath)
+	result, err := fallbackImporter(ctx, s, plan)
 	if err != nil {
 		writeAutoImportStamp(beadsDir, info)
 		fmt.Fprintf(os.Stderr, "warning: auto-import from %s failed: %v\n", jsonlPath, err)
@@ -171,7 +197,7 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 		fmt.Fprintf(os.Stderr, "warning: auto-import: dolt commit failed: %v\n", err)
 		return
 	}
-	if result.Issues > 0 || result.Memories > 0 || result.Retired > 0 {
+	if result.Issues > 0 || result.Memories > 0 || result.Retired > 0 || result.Invalid > 0 {
 		writeAutoImportStamp(beadsDir, info)
 	}
 
@@ -180,6 +206,7 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 		fmt.Fprintf(os.Stderr, " and %d memories", result.Memories)
 	}
 	printAutoImportRetired(result.Retired)
+	printAutoImportQuarantined(result.Invalid, plan.Quarantine)
 	fmt.Fprintf(os.Stderr, " from %s\n", jsonlPath)
 }
 
@@ -190,5 +217,15 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 func printAutoImportRetired(retired int) {
 	if retired > 0 {
 		fmt.Fprintf(os.Stderr, " (%d retired by a retention sweep, not re-created)", retired)
+	}
+}
+
+// printAutoImportQuarantined continues the line with the records the screen
+// refused (GH#4492) and where their raw bytes were preserved, so a recovery
+// import that skipped something never looks like a clean import. A count of
+// zero prints nothing, keeping the ordinary recovery message unchanged.
+func printAutoImportQuarantined(rejected int, quarantine string) {
+	if rejected > 0 {
+		fmt.Fprintf(os.Stderr, " (%d invalid records quarantined in %s)", rejected, quarantine)
 	}
 }

@@ -29,9 +29,10 @@ func proxiedImporter() (publicops.Importer, error) {
 
 // runImportRecordsProxied is the proxied-server import pipeline over the
 // parsed records. It mirrors runImportRecordsClassic stage for stage — dedup,
-// dry-run classification, stale pre-filter, batch write, issue_prefix
-// reconciliation — through the SAME classification and reporting code, with
-// two deliberate structural differences:
+// the pre-write invalid-record screen (GH#4492), dry-run classification,
+// stale pre-filter, batch write, issue_prefix reconciliation — through the
+// SAME classification and reporting code, with two deliberate structural
+// differences:
 //
 //   - ONE COMMIT PER INVOCATION. The classic path chunks a large import into
 //     bounded transactions (a SQLite write-lock fairness measure) and commits
@@ -44,26 +45,32 @@ func proxiedImporter() (publicops.Importer, error) {
 //     its own read (reporting StaleSkippedIDs and keeping stale rows' aux data
 //     out of the batch), and RejectStaleUpserts re-checks updated_at inside
 //     the write transaction, closing the same race the classic path closes.
-func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memories []memoryRecord, source string) error {
+//
+// The screen reads the vocabulary through the UOW's ConfigUseCase — the same
+// resolvers the writer's batch context uses (ResolveCustomStatusesDetailedInTx
+// for statuses, ComposeCustomTypes for types), with the getter errors
+// propagated rather than masked — so a screen refusal means the writer would
+// refuse the row too, in both directions.
+func runImportRecordsProxied(ctx context.Context, records []importLocatedRecord, memories []memoryRecord, source string) error {
 	if uowProvider == nil {
 		return fmt.Errorf("proxied-server UOW provider not initialized")
 	}
 
 	// Dedup: skip issues whose title matches an existing open issue.
 	dedupHits := 0
-	if importDedup && len(issues) > 0 {
+	if importDedup && len(records) > 0 {
 		type dedupOutcome struct {
-			kept []*types.Issue
+			kept []importLocatedRecord
 			hits int
 		}
 		out, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (dedupOutcome, error) {
-			kept, hits := filterDuplicatesByTitle(ctx, uowImportTitleSearcher{uw: uw}, issues)
+			kept, hits := filterDuplicateRecordsByTitle(ctx, uowImportTitleSearcher{uw: uw}, records)
 			return dedupOutcome{kept: kept, hits: hits}, nil
 		})
 		if err != nil {
 			return err
 		}
-		issues = out.kept
+		records = out.kept
 		dedupHits = out.hits
 	}
 
@@ -73,9 +80,17 @@ func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memorie
 		DryRun:    importDryRun,
 	}
 
+	issues, screen, err := applyExplicitImportScreen(ctx, records, source, proxiedImportVocabulary)
+	if err != nil {
+		return err
+	}
+	applyImportScreenReport(&result, screen)
+
 	if importDryRun {
 		result.Memories = len(memories)
-		result.Skipped = dedupHits
+		// Dedup hits join the total Skipped alongside the screen's invalid
+		// count (already folded in by applyImportScreenReport).
+		result.Skipped += dedupHits
 
 		classification, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (*ImportResult, error) {
 			return classifyDryRunImport(ctx, uw.IssueUseCase(), issues, importAllowStale)
@@ -182,4 +197,32 @@ func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memorie
 	}
 
 	return renderImportOutcome(result, source, dedupHits)
+}
+
+// proxiedImportVocabulary reads the writer's supported custom status/type
+// vocabulary through the proxied UOW's read boundary (ConfigUseCase), the
+// same resolvers the batch writer's context is built from, so the screen and
+// the writer agree on what a valid status or type is. Errors propagate: a
+// masked read failure would screen every configured-vocabulary row as
+// invalid (GH#4492 design §2).
+func proxiedImportVocabulary(ctx context.Context) ([]string, []string, error) {
+	type vocab struct {
+		statuses []string
+		types    []string
+	}
+	out, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (vocab, error) {
+		detailed, err := uw.ConfigUseCase().GetCustomStatuses(ctx)
+		if err != nil {
+			return vocab{}, fmt.Errorf("read custom statuses: %w", err)
+		}
+		customTypes, err := uw.ConfigUseCase().GetCustomTypes(ctx)
+		if err != nil {
+			return vocab{}, fmt.Errorf("read custom types: %w", err)
+		}
+		return vocab{statuses: types.CustomStatusNames(detailed), types: customTypes}, nil
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("read import vocabulary: %w", err)
+	}
+	return out.statuses, out.types, nil
 }

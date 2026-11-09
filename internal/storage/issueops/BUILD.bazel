@@ -67,6 +67,7 @@ go_library(
         "history_presence.go",
         "id_retention.go",
         "identity.go",
+        "import_screen.go",
         "journal.go",
         "journal_autoprune.go",
         "journal_dependencies.go",

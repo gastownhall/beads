@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -174,6 +175,34 @@ func (s *DoltStore) loadCustomConfigCache(ctx context.Context) {
 		s.customTypeCached = true
 	}
 	s.cacheMu.Unlock()
+}
+
+// ReadImportVocabulary reads the writer's supported custom status/type
+// vocabulary in one read transaction, for import-time row screening
+// (GH#4492 design §2). Unlike the cached GetCustomStatuses/GetCustomTypes
+// getters it propagates resolver errors instead of masking them behind the
+// config.yaml fallback: screening rows against a masked read failure would
+// misclassify every configured-vocabulary row as invalid, so the import
+// aborts on the read error instead. It bypasses the getter cache for the
+// same reason — a cached value from before this import's read would screen
+// against a stale vocabulary.
+func (s *DoltStore) ReadImportVocabulary(ctx context.Context) (customStatuses, customTypes []string, err error) {
+	readErr := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var resolveErr error
+		customStatuses, resolveErr = issueops.GetCustomStatusesTx(ctx, tx)
+		if resolveErr != nil {
+			return fmt.Errorf("read custom statuses: %w", resolveErr)
+		}
+		customTypes, resolveErr = issueops.ResolveCustomTypesInTx(ctx, tx)
+		if resolveErr != nil {
+			return fmt.Errorf("read custom types: %w", resolveErr)
+		}
+		return nil
+	})
+	if readErr != nil {
+		return nil, nil, readErr
+	}
+	return customStatuses, customTypes, nil
 }
 
 func (s *DoltStore) GetCustomStatuses(ctx context.Context) ([]string, error) {

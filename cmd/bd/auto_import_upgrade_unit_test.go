@@ -41,6 +41,13 @@ func (f *fakeFallbackStore) GetStatistics(ctx context.Context) (*types.Statistic
 
 func (f *fakeFallbackStore) Commit(_ context.Context, _ string) error { return nil }
 
+// ReadImportVocabulary satisfies the import screen's vocabulary capability
+// (GH#4492): the fixture rows use only built-in statuses and types, so the
+// screen accepts them against an empty custom vocabulary.
+func (f *fakeFallbackStore) ReadImportVocabulary(context.Context) ([]string, []string, error) {
+	return nil, nil, nil
+}
+
 func writeAutoImportFixtureJSONL(t *testing.T, dir string) {
 	t.Helper()
 	writeAutoImportFixtureJSONLNamed(t, dir, "issues.jsonl")
@@ -61,7 +68,7 @@ func swapFallbackImporter(t *testing.T, returnErr error) *atomic.Int32 {
 	t.Helper()
 	orig := fallbackImporter
 	var count atomic.Int32
-	fallbackImporter = func(_ context.Context, _ storage.DoltStorage, _ string) (*importLocalResult, error) {
+	fallbackImporter = func(_ context.Context, _ storage.DoltStorage, _ *recoveredJSONLPlan) (*importLocalResult, error) {
 		count.Add(1)
 		if returnErr != nil {
 			return nil, returnErr
@@ -313,8 +320,8 @@ func TestMaybeAutoImportJSONL_UsesConfiguredImportPath(t *testing.T) {
 
 	orig := fallbackImporter
 	var gotPath string
-	fallbackImporter = func(_ context.Context, _ storage.DoltStorage, path string) (*importLocalResult, error) {
-		gotPath = path
+	fallbackImporter = func(_ context.Context, _ storage.DoltStorage, plan *recoveredJSONLPlan) (*importLocalResult, error) {
+		gotPath = plan.Source
 		return nil, errors.New("test importer: short-circuit before s.Commit")
 	}
 	t.Cleanup(func() { fallbackImporter = orig })
@@ -347,7 +354,7 @@ func TestMaybeAutoImportJSONL_SuccessStampPreventsRepeatedImport(t *testing.T) {
 	writeAutoImportFixtureJSONL(t, dir)
 	orig := fallbackImporter
 	var count atomic.Int32
-	fallbackImporter = func(_ context.Context, _ storage.DoltStorage, _ string) (*importLocalResult, error) {
+	fallbackImporter = func(_ context.Context, _ storage.DoltStorage, _ *recoveredJSONLPlan) (*importLocalResult, error) {
 		count.Add(1)
 		return &importLocalResult{Issues: 1}, nil
 	}
@@ -367,7 +374,7 @@ func TestMaybeAutoImportJSONL_ChangedJSONLBypassesSuccessStamp(t *testing.T) {
 	writeAutoImportFixtureJSONL(t, dir)
 	orig := fallbackImporter
 	var count atomic.Int32
-	fallbackImporter = func(_ context.Context, _ storage.DoltStorage, _ string) (*importLocalResult, error) {
+	fallbackImporter = func(_ context.Context, _ storage.DoltStorage, _ *recoveredJSONLPlan) (*importLocalResult, error) {
 		count.Add(1)
 		return &importLocalResult{Issues: 1}, nil
 	}
@@ -431,7 +438,7 @@ func TestMaybeAutoImportJSONL_StampsAFileWhoseEveryRowWasRetired(t *testing.T) {
 		writeAutoImportFixtureJSONL(t, dir)
 		orig := fallbackImporter
 		var count atomic.Int32
-		fallbackImporter = func(_ context.Context, _ storage.DoltStorage, _ string) (*importLocalResult, error) {
+		fallbackImporter = func(_ context.Context, _ storage.DoltStorage, _ *recoveredJSONLPlan) (*importLocalResult, error) {
 			count.Add(1)
 			return &importLocalResult{Retired: 1}, nil
 		}
@@ -479,6 +486,12 @@ func (c *captureOptsStore) SetConfig(_ context.Context, _, _ string) error {
 // CreateIssuesWithFullOptions, where the options under test are recorded.
 func (c *captureOptsStore) GetIssuesByIDs(_ context.Context, _ []string) ([]*types.Issue, error) {
 	return nil, nil
+}
+
+// ReadImportVocabulary satisfies the import screen's vocabulary capability
+// (GH#4492): the fixture rows use only built-in statuses and types.
+func (c *captureOptsStore) ReadImportVocabulary(context.Context) ([]string, []string, error) {
+	return nil, nil, nil
 }
 
 // TestImportIssuesCoreThreadsConflictSkip verifies the GH#3955 plumbing:
