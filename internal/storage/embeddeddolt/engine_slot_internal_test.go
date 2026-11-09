@@ -606,3 +606,98 @@ func TestEmbeddedEngineClose(t *testing.T) {
 		t.Fatalf("engine disposed %d times by concurrent Closes, want 1", closes)
 	}
 }
+
+// TestEmbeddedEngineSessionIsolation pins AC-6 of gastownhall/beads#5397:
+// sharing the ENGINE never means sharing a SESSION. The driver reports the
+// session invalid on connection reuse (the pool discards returned
+// connections' session state), so each operation — transaction or pinned
+// connection — starts a fresh session on the cached engine: a user variable
+// set by one operation is gone in the next, the bootstrapped database and
+// branch are what every operation lands on, and data written by one
+// transaction is visible to the next. On the base these held trivially (each
+// operation had its own engine); the pin guards them against the reuse.
+func TestEmbeddedEngineSessionIsolation(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := context.Background()
+	store, counter := engineTestStore(t, "engine_session", time.Hour)
+	if err := store.SetConfig(ctx, "issue_prefix", "si"); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+
+	// A session variable set inside one transaction does not survive into the
+	// next operation.
+	if err := store.withConn(ctx, true, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "SET @engine_slot_probe = 'one'")
+		return err
+	}); err != nil {
+		t.Fatalf("set session variable: %v", err)
+	}
+	var probe sql.NullString
+	if err := store.withConn(ctx, false, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, "SELECT @engine_slot_probe").Scan(&probe)
+	}); err != nil {
+		t.Fatalf("read session variable: %v", err)
+	}
+	if probe.Valid {
+		t.Fatalf("session variable survived the transaction: %q", probe.String)
+	}
+
+	// The same contract for pinned callbacks: the variable exists inside its
+	// own callback and is gone by the next one.
+	if err := store.withPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		if _, err := db.ExecContext(ctx, "SET @engine_slot_probe = 'pinned'"); err != nil {
+			return err
+		}
+		var v string
+		return db.QueryRowContext(ctx, "SELECT @engine_slot_probe").Scan(&v)
+	}); err != nil {
+		t.Fatalf("pinned callback set/read: %v", err)
+	}
+	if err := store.withPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var v sql.NullString
+		if err := db.QueryRowContext(ctx, "SELECT @engine_slot_probe").Scan(&v); err != nil {
+			return err
+		}
+		if v.Valid {
+			return fmt.Errorf("session variable survived the pinned callback: %q", v.String)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("pinned callback isolation: %v", err)
+	}
+
+	// Every operation lands on the bootstrapped database and branch.
+	var database string
+	if err := store.withConn(ctx, false, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&database)
+	}); err != nil {
+		t.Fatalf("read DATABASE(): %v", err)
+	}
+	if database != "engine_session" {
+		t.Fatalf("session DATABASE() = %q, want engine_session", database)
+	}
+	branch, err := store.CurrentBranch(ctx)
+	if err != nil {
+		t.Fatalf("CurrentBranch: %v", err)
+	}
+	if branch != "main" {
+		t.Fatalf("CurrentBranch = %q, want main", branch)
+	}
+
+	// Data written by one transaction is visible to the next — sharing the
+	// engine must not mean sharing snapshots.
+	if err := store.CreateIssue(ctx, &types.Issue{ID: "si-1", Title: "si-1", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	got, err := store.GetIssue(ctx, "si-1")
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	if got.Title != "si-1" {
+		t.Fatalf("GetIssue().Title = %q, want si-1", got.Title)
+	}
+
+	if opens := counter.opens.Load(); opens != 1 {
+		t.Fatalf("engine opens across session phases = %d, want 1", opens)
+	}
+}
