@@ -43,14 +43,42 @@ func pickDepTable(useWisps bool) string {
 	return "dependencies"
 }
 
-func (r *dependencySQLRepositoryImpl) pickDepTargetColumn(ctx context.Context, issueID, dependsOnID string) (string, error) {
-	kind, err := issueops.ClassifyDepTarget(ctx, r.runner, r.runner, &types.Dependency{
-		IssueID: issueID, DependsOnID: dependsOnID,
+// classifyDepTarget classifies an edge's target by the rule the in-tx store
+// bodies use, issueops.ClassifyDepTargetFrom, reading presence on the runner: a
+// target this database holds is a local edge whatever its prefix, and only an
+// "external:" reference or another prefix's id with no local row goes to
+// depends_on_external, which carries no foreign key. A deployment without a
+// wisps table reads as having no wisps; any other failed read is returned.
+func (r *dependencySQLRepositoryImpl) classifyDepTarget(ctx context.Context, issueID, dependsOnID string) (issueops.DepTargetKind, error) {
+	return issueops.ClassifyDepTargetFrom(issueID, dependsOnID, issueops.DepTargetPresence{
+		IsWisp: func(id string) (bool, error) {
+			exists, err := r.rowExists(ctx, "wisps", id)
+			if err != nil && dberrors.IsTableNotExist(err) {
+				return false, nil
+			}
+			return exists, err
+		},
+		IsIssue: func(id string) (bool, error) {
+			return r.rowExists(ctx, "issues", id)
+		},
 	})
-	if err != nil {
-		return "", err
+}
+
+// lazyDepTargetKind classifies dep's target on first use and remembers it, so
+// one Insert reads the target's presence at most once across its hierarchy
+// check and its column choice, and not at all on a path that needs neither.
+func (r *dependencySQLRepositoryImpl) lazyDepTargetKind(ctx context.Context, dep *types.Dependency) func() (issueops.DepTargetKind, error) {
+	var kind *issueops.DepTargetKind
+	return func() (issueops.DepTargetKind, error) {
+		if kind == nil {
+			k, err := r.classifyDepTarget(ctx, dep.IssueID, dep.DependsOnID)
+			if err != nil {
+				return k, err
+			}
+			kind = &k
+		}
+		return *kind, nil
 	}
-	return kind.Column(), nil
 }
 
 func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dependency, actor string, opts domain.DepInsertOpts) error {
@@ -78,8 +106,9 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 		metadata = "{}"
 	}
 
+	targetKind := r.lazyDepTargetKind(ctx, dep)
 	if !opts.HierarchyValidated {
-		if err := r.ValidateBlockingHierarchy(ctx, dep); err != nil {
+		if err := r.validateBlockingHierarchy(ctx, dep, targetKind); err != nil {
 			return err
 		}
 	}
@@ -96,8 +125,6 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 
 	var existingType string
 	var existingMetadataNS, existingThreadNS sql.NullString
-	var targetCol string
-	var reclassified bool
 	err := r.runner.QueryRowContext(ctx,
 		//nolint:gosec // G201: table and depTargetExpr are hardcoded constants
 		fmt.Sprintf("SELECT type, metadata, thread_id FROM %s WHERE issue_id = ? AND %s = ?", table, depTargetExpr),
@@ -113,98 +140,66 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 			// A re-add naming a thread the row does not carry moves it; one
 			// naming none keeps the stored thread (the issueops twin's rule).
 			thread, threadChanged := issueops.ReAddedDependencyThread(existingThreadNS, dep.ThreadID)
-			// Re-adding a pre-fix cross-prefix edge must move its existing row
-			// from the external column to the local issue/wisp FK column.
-			if !strings.HasPrefix(dep.DependsOnID, "external:") && types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID) {
-				column, classifyErr := r.pickDepTargetColumn(ctx, dep.IssueID, dep.DependsOnID)
-				if classifyErr != nil {
-					return fmt.Errorf("db: DependencySQLRepository.Insert: %w", classifyErr)
-				}
-				if column != "depends_on_external" {
-					var legacyExternal sql.NullString
-					//nolint:gosec // G201: table and depTargetExpr are fixed SQL fragments.
-					q := fmt.Sprintf("SELECT depends_on_external FROM %s WHERE issue_id = ? AND %s = ?", table, depTargetExpr)
-					if err := r.runner.QueryRowContext(ctx, q, dep.IssueID, dep.DependsOnID).Scan(&legacyExternal); err != nil {
-						return fmt.Errorf("db: DependencySQLRepository.Insert: check legacy target: %w", err)
-					}
-					if legacyExternal.Valid {
-						//nolint:gosec // G201: column comes from DepTargetKind.Column().
-						q := fmt.Sprintf("UPDATE %s SET %s = ?, depends_on_external = NULL, metadata = ?, thread_id = ? WHERE issue_id = ? AND depends_on_external = ?", table, column)
-						if _, err := r.runner.ExecContext(ctx, q, dep.DependsOnID, metadata, thread, dep.IssueID, dep.DependsOnID); err != nil {
-							return fmt.Errorf("db: DependencySQLRepository.Insert: reclassify legacy target: %w", err)
-						}
-						targetCol = column
-						reclassified = true
-					}
-				}
+			if !threadChanged && issueops.DependencyMetadataEqual(existingMetadata, metadata) {
+				// Same type, same metadata, same thread: a change-free write.
+				// Nothing is written and nothing is journaled (#5898 R3).
+				return nil
 			}
-			if !reclassified {
-				if !threadChanged && issueops.DependencyMetadataEqual(existingMetadata, metadata) {
-					// Same type, same metadata, same thread: a change-free write.
-					// Nothing is written and nothing is journaled (#5898 R3).
-					return nil
-				}
-				//nolint:gosec // G201: table and depTargetExpr are hardcoded constants
-				if _, err := r.runner.ExecContext(ctx,
-					fmt.Sprintf("UPDATE %s SET metadata = ?, thread_id = ? WHERE issue_id = ? AND %s = ?", table, depTargetExpr),
-					metadata, thread, dep.IssueID, dep.DependsOnID,
-				); err != nil {
-					return fmt.Errorf("db: DependencySQLRepository.Insert: refresh metadata: %w", err)
-				}
-				// A same-type add refreshes the edge's metadata or thread. It is an
-				// observable graph mutation, so journal the replacement edge for
-				// replay. EventDep has no thread member, so a thread-only change
-				// journals the same payload as the original add; the source's
-				// version snapshot is what records the new thread.
-				if err := issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
-					return err
-				}
-				// The metadata or thread genuinely changed, so this re-add is a
-				// real durable-state mutation of the source issue (its version
-				// snapshot carries each edge's thread_id) and mints on the same
-				// terms as a new edge (#5898 leg 2: "a same-type re-add whose
-				// metadata actually changed mints EXACTLY ONE version carrying the
-				// new state").
-				return issueops.RecordVersionInTx(ctx, r.runner, dep.IssueID, actor)
+			//nolint:gosec // G201: table and depTargetExpr are hardcoded constants
+			if _, err := r.runner.ExecContext(ctx,
+				fmt.Sprintf("UPDATE %s SET metadata = ?, thread_id = ? WHERE issue_id = ? AND %s = ?", table, depTargetExpr),
+				metadata, thread, dep.IssueID, dep.DependsOnID,
+			); err != nil {
+				return fmt.Errorf("db: DependencySQLRepository.Insert: refresh metadata: %w", err)
 			}
+			// A same-type add refreshes the edge's metadata or thread. It is an
+			// observable graph mutation, so journal the replacement edge for
+			// replay. EventDep has no thread member, so a thread-only change
+			// journals the same payload as the original add; the source's
+			// version snapshot is what records the new thread.
+			if err := issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
+				return err
+			}
+			// The metadata or thread genuinely changed, so this re-add is a
+			// real durable-state mutation of the source issue (its version
+			// snapshot carries each edge's thread_id) and mints on the same
+			// terms as a new edge (#5898 leg 2: "a same-type re-add whose
+			// metadata actually changed mints EXACTLY ONE version carrying the
+			// new state").
+			return issueops.RecordVersionInTx(ctx, r.runner, dep.IssueID, actor)
 		}
-		if !reclassified {
-			return &domain.DependencyTypeConflictError{
-				IssueID:       dep.IssueID,
-				DependsOnID:   dep.DependsOnID,
-				ExistingType:  existingType,
-				RequestedType: string(dep.Type),
-			}
+		return &domain.DependencyTypeConflictError{
+			IssueID:       dep.IssueID,
+			DependsOnID:   dep.DependsOnID,
+			ExistingType:  existingType,
+			RequestedType: string(dep.Type),
 		}
 	case errors.Is(err, sql.ErrNoRows):
 	default:
 		return fmt.Errorf("db: DependencySQLRepository.Insert: check existing: %w", err)
 	}
 
-	if targetCol == "" {
-		targetCol, err = r.pickDepTargetColumn(ctx, dep.IssueID, dep.DependsOnID)
-		if err != nil {
-			return fmt.Errorf("db: DependencySQLRepository.Insert: %w", err)
-		}
+	kind, err := targetKind()
+	if err != nil {
+		return fmt.Errorf("db: DependencySQLRepository.Insert: %w", err)
 	}
+	targetCol := kind.Column()
 
 	// Deterministic id keyed on (issue_id, target), the same derivation as the
 	// embedded/issueops path, so server-mode (use-case) dependency creation stays
 	// merge-safe across clones and works once the DEFAULT (UUID()) is dropped (#4259).
-	//nolint:gosec // G201: table is one of two hardcoded constants; targetCol is from pickDepTargetColumn
-	if !reclassified {
-		if _, err := r.runner.ExecContext(ctx, fmt.Sprintf(`
-			INSERT INTO %s (id, issue_id, %s, type, created_at, created_by, metadata, thread_id)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		`, table, targetCol),
-			depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, string(dep.Type),
-			time.Now().UTC(), actor, metadata, dep.ThreadID,
-		); err != nil {
-			if missing := r.classifyMissingEndpoint(ctx, dep, opts.UseWispsTable, targetCol, err); missing != nil {
-				return missing
-			}
-			return fmt.Errorf("db: DependencySQLRepository.Insert: %w", err)
+	//nolint:gosec // G201: table is one of two hardcoded constants; targetCol is from DepTargetKind.Column()
+	if _, err := r.runner.ExecContext(ctx, fmt.Sprintf(`
+		INSERT INTO %s (id, issue_id, %s, type, created_at, created_by, metadata, thread_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, table, targetCol),
+		depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, string(dep.Type),
+		time.Now().UTC(), actor, metadata, dep.ThreadID,
+	); err != nil {
+		if missing := r.classifyMissingEndpoint(ctx, dep, opts.UseWispsTable, targetCol, err); missing != nil {
+			return missing
 		}
+		return fmt.Errorf("db: DependencySQLRepository.Insert: %w", err)
 	}
 	if dep.Type == types.DepParentChild {
 		if err := issueops.TouchDependencyCoordinationTableInTx(ctx, r.runner, dep.DependsOnID, table); err != nil {
@@ -343,11 +338,22 @@ func (r *dependencySQLRepositoryImpl) ValidateBlockingHierarchy(ctx context.Cont
 	if dep == nil {
 		return errors.New("db: DependencySQLRepository.ValidateBlockingHierarchy: dep must not be nil")
 	}
-	column, err := r.pickDepTargetColumn(ctx, dep.IssueID, dep.DependsOnID)
-	if err != nil {
-		return err
+	return r.validateBlockingHierarchy(ctx, dep, r.lazyDepTargetKind(ctx, dep))
+}
+
+// validateBlockingHierarchy refuses a blocking edge between endpoints on one
+// hierarchy line. Only a genuinely external target is exempt — it has no local
+// hierarchy — so a local target of another prefix is checked like any other.
+// The target is classified only for a blocking edge, the one kind checked.
+func (r *dependencySQLRepositoryImpl) validateBlockingHierarchy(ctx context.Context, dep *types.Dependency, targetKind func() (issueops.DepTargetKind, error)) error {
+	if dep.Type != types.DepBlocks && dep.Type != types.DepConditionalBlocks {
+		return nil
 	}
-	if column == "depends_on_external" {
+	kind, err := targetKind()
+	if err != nil {
+		return fmt.Errorf("db: DependencySQLRepository.ValidateBlockingHierarchy: %w", err)
+	}
+	if kind == issueops.DepTargetExternal {
 		return nil
 	}
 	return issueops.CheckBlockingHierarchyInTx(ctx, r.runner, dep, nil)

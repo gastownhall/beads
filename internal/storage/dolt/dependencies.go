@@ -11,12 +11,6 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// isCrossPrefixDep returns true if the two bead IDs have different prefixes,
-// meaning the target lives in a different rig's database.
-func isCrossPrefixDep(sourceID, targetID string) bool {
-	return types.ExtractPrefix(sourceID) != types.ExtractPrefix(targetID)
-}
-
 // AddDependency adds a dependency between two issues without recording a
 // dependency_added event. Create-with-deps and structural callers use this
 // no-event default; the explicit dep verbs call AddDependencyWithOptions with
@@ -40,22 +34,14 @@ func (s *DoltStore) addDependencyWithOptions(ctx context.Context, dep *types.Dep
 		return s.addWispDependency(ctx, dep, actor, addOpts.EmitEvent)
 	}
 
-	kind, err := issueops.ClassifyDepTarget(ctx, s.db, s.db, dep)
-	if err != nil {
-		return err
-	}
-	targetTable := "issues"
-	if kind == issueops.DepTargetWisp {
-		targetTable = "wisps"
-	}
-
 	var written issueops.DependencyWriteResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		// The target is classified on this attempt's transaction
+		// (AddDependencyInTx leaves TargetKind to ClassifyDepTarget), so a
+		// retried attempt classifies against what it can see.
 		opts := issueops.AddDependencyOpts{
 			SourceTable: "issues",
-			TargetTable: targetTable,
 			WriteTable:  "dependencies",
-			TargetKind:  &kind,
 			EmitEvent:   addOpts.EmitEvent,
 		}
 		// Assigned, never merged: a retried attempt's verdict replaces the

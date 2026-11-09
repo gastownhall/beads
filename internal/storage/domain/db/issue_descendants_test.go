@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
@@ -88,16 +87,17 @@ func depTargetColumns(t *testing.T) []string {
 // TestGetDescendantsCrossPrefixParent is the behavioural half of
 // TestBuildDescendantsCTEResolvesEveryDepTargetColumn: that test pins the
 // walk's query text, this one pins that the widened COALESCE matches real rows.
-// The historical write path classified by prefix alone, so cross-prefix
-// parent-child edges could land in depends_on_external even when both ends
-// existed here. Seed those legacy rows directly: new writes correctly use the
-// local issue/wisp column, but legacy rows still need to be readable. Before
-// be-qfm the walk coalesced only the issue and wisp columns, so each child
-// below, and its subtree, was missing from the proxied bd list --parent tree.
-// Each is reached through a different CTE member (anchor/recursive,
-// issues/wisps), so dropping the external column loses a different child.
+// Before GH#8299 the write path classified a target by prefix alone, so a
+// parent-child edge between two local prefixes landed in depends_on_external,
+// and a database written then still holds such rows: the write path no longer
+// moves them. The case files its edges there the way that write path did.
+// Before be-qfm the walk coalesced only the issue and wisp columns, so each child below — and its subtree — was missing from the
+// proxied `bd list --parent` tree. Each one is reached through a different edge
+// member (issues and wisps, anchor and recursive), so dropping the column from
+// any one member loses a different child.
 func (s *testSuite) TestGetDescendantsCrossPrefixParent() {
 	r := s.issueRepo()
+	deps := s.depRepo()
 
 	const (
 		root   = "zz-xp-root"
@@ -122,22 +122,21 @@ func (s *testSuite) TestGetDescendantsCrossPrefixParent() {
 		{grand, child, false},
 		{grandW, child, true},
 	} {
-		// Intentionally seed the pre-PR shape rather than calling Insert, which
-		// now classifies these locally. This tests old rows without prescribing
-		// obsolete routing for fresh edges.
-		table := "dependencies"
-		if e.wisps {
-			table = "wisp_dependencies"
-		}
-		_, err := s.Runner().ExecContext(s.Ctx(),
-			"INSERT INTO "+table+" (id, issue_id, depends_on_external, type, created_at, created_by, metadata) VALUES (?, ?, ?, ?, UTC_TIMESTAMP(), ?, '{}')",
-			depid.New(e.child, e.parent), e.child, e.parent, string(types.DepParentChild), "tester")
-		s.Require().NoError(err)
+		s.Require().NoError(deps.Insert(s.Ctx(),
+			&types.Dependency{IssueID: e.child, DependsOnID: e.parent, Type: types.DepParentChild},
+			"tester", domain.DepInsertOpts{UseWispsTable: e.wisps}))
 	}
 
-	// Every seeded edge is deliberately in the external column,
-	// the two-column walk would find that child too and the case would pin nothing.
+	// The write path now files these local targets in their typed columns;
+	// move them to depends_on_external, where the pre-GH#8299 write path left
+	// them. Were one of them left in another column, the two-column walk would
+	// find that child too and the case would pin nothing.
 	for _, table := range []string{"dependencies", "wisp_dependencies"} {
+		_, err := s.Runner().ExecContext(s.Ctx(),
+			//nolint:gosec // G201: table is one of two hardcoded constants for tests
+			"UPDATE "+table+" SET depends_on_external = COALESCE(depends_on_issue_id, depends_on_wisp_id), depends_on_issue_id = NULL, depends_on_wisp_id = NULL WHERE issue_id LIKE ?",
+			"%-xp-%")
+		s.Require().NoError(err, table)
 		rows := s.loadDepRows(table, "%-xp-%")
 		s.Require().Len(rows, 2, table)
 		for _, d := range rows {

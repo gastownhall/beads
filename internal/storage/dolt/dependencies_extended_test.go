@@ -1,6 +1,7 @@
 package dolt
 
 import (
+	"database/sql"
 	"fmt"
 	"strings"
 	"testing"
@@ -836,31 +837,6 @@ func TestAddDependency_MultipleExternalReferences(t *testing.T) {
 // Cross-Prefix Dependency Tests
 // =============================================================================
 
-func TestIsCrossPrefixDep(t *testing.T) {
-	tests := []struct {
-		name     string
-		source   string
-		target   string
-		expected bool
-	}{
-		{"same prefix", "sh-abc", "sh-def", false},
-		{"different prefix", "sh-abc", "hq-def", true},
-		{"hq to bd", "hq-abc", "bd-def", true},
-		{"same prefix with subtype", "hq-cv-abc", "hq-xyz", false},
-		{"no prefix source", "abc", "sh-def", true},
-		{"no prefix either", "abc", "def", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isCrossPrefixDep(tt.source, tt.target)
-			if got != tt.expected {
-				t.Errorf("isCrossPrefixDep(%q, %q) = %v, want %v", tt.source, tt.target, got, tt.expected)
-			}
-		})
-	}
-}
-
 func TestAddDependency_CrossPrefix_SkipsTargetExistence(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -906,6 +882,55 @@ func TestAddDependency_CrossPrefix_SkipsTargetExistence(t *testing.T) {
 	}
 	if !found {
 		t.Error("cross-prefix dependency was not stored")
+	}
+}
+
+// TestAddDependency_CrossPrefix_LocalTargetIsLocal pins GH#8299: a target
+// whose prefix differs from its source's, but which this database holds
+// (allowed_prefixes), is a local issue. Both source tiers file it in
+// depends_on_issue_id, where the foreign key and readiness can see it.
+func TestAddDependency_CrossPrefix_LocalTargetIsLocal(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := store.SetConfig(ctx, "allowed_prefixes", "xp"); err != nil {
+		t.Fatalf("set allowed_prefixes: %v", err)
+	}
+	for _, issue := range []*types.Issue{
+		{ID: "test-xpl-src", Title: "issue source", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{ID: "test-xpl-wsrc", Title: "wisp source", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, Ephemeral: true},
+		{ID: "xp-xpl-target", Title: "cross-prefix target", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+	} {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("create %s: %v", issue.ID, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		source string
+		table  string
+	}{
+		{"test-xpl-src", "dependencies"},
+		{"test-xpl-wsrc", "wisp_dependencies"},
+	} {
+		dep := &types.Dependency{IssueID: tc.source, DependsOnID: "xp-xpl-target", Type: types.DepBlocks}
+		if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+			t.Fatalf("AddDependency %s -> xp-xpl-target: %v", tc.source, err)
+		}
+		var issueCol, wispCol, externalCol sql.NullString
+		//nolint:gosec // G201: table is one of two hardcoded names.
+		if err := store.db.QueryRowContext(ctx,
+			"SELECT depends_on_issue_id, depends_on_wisp_id, depends_on_external FROM "+tc.table+" WHERE issue_id = ?",
+			tc.source).Scan(&issueCol, &wispCol, &externalCol); err != nil {
+			t.Fatalf("read %s edge from %s: %v", tc.table, tc.source, err)
+		}
+		if issueCol.String != "xp-xpl-target" || wispCol.Valid || externalCol.Valid {
+			t.Errorf("%s edge from %s: issue=%v wisp=%v external=%v, want only depends_on_issue_id = xp-xpl-target",
+				tc.table, tc.source, issueCol, wispCol, externalCol)
+		}
 	}
 }
 

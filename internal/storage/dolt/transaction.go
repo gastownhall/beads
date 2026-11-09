@@ -986,7 +986,18 @@ func (t *doltTransaction) AddDependencyWithOptions(ctx context.Context, dep *typ
 		eventTable = "wisp_events"
 	}
 
-	kind, err := issueops.ClassifyDepTarget(ctx, t.txFor("issues"), t.txFor("wisps"), dep)
+	// Classify the target on the session that owns each table it could live
+	// in: wisps on the ignored session, issues on the regular one, so a
+	// target created earlier in this logical transaction is seen whichever
+	// tier the edge is written on.
+	kind, err := issueops.ClassifyDepTargetFrom(dep.IssueID, dep.DependsOnID, issueops.DepTargetPresence{
+		IsWisp: func(id string) (bool, error) {
+			return t.isActiveWisp(ctx, id), nil
+		},
+		IsIssue: func(id string) (bool, error) {
+			return issueops.IssueExistsInTx(ctx, t.txFor("issues"), id)
+		},
+	})
 	if err != nil {
 		return err
 	}

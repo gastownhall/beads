@@ -1254,8 +1254,9 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx DBTX, issues [
 			}
 			kind, err := lookups.classify(ctx, tx, dep)
 			if err != nil {
-				return result, fmt.Errorf("classify dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
+				return result, fmt.Errorf("failed to check dependency target %s for %s: %w", dep.DependsOnID, dep.IssueID, err)
 			}
+
 			if kind != DepTargetExternal {
 				exists, err := lookups.targetExists(ctx, tx, kind, dep.DependsOnID)
 				if err != nil {

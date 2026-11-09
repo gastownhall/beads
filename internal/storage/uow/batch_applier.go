@@ -603,6 +603,8 @@ func (r *uowApplyRun) runEndGate(ctx context.Context) error {
 	if cyclePath != "" {
 		return domain.NewCycleError("dependency cycle would be created: %s (no edges added; run 'bd dep cycles' for analysis)", cyclePath)
 	}
+	// The repository's hierarchy check exempts a genuinely external target
+	// itself, so a local target of another prefix is checked like any other.
 	for _, applied := range r.edges {
 		if err := r.uw.DependencyUseCase().ValidateBlockingHierarchy(ctx, applied.dep); err != nil {
 			return &publicops.ItemError{

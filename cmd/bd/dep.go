@@ -193,9 +193,10 @@ func refuseMalformedDepTarget(sourceID, dependsOnArg string) error {
 //     refuseMalformedDepTarget — see there for the be-gmdx5 mechanism and the
 //     message's direction/type rules.
 //  3. A bare, differently-prefixed target is passed through unchanged. This is
-//     NOT malformed: storage classifies a target absent from the current
-//     database as an external edge when its prefix differs, while an existing
-//     same-database issue or wisp is local regardless of prefix. It is the multi-rig
+//     NOT malformed: issueops.ClassifyDepTargetFrom, the single rule every
+//     backend classifies by, files a target with another prefix and no local
+//     row in depends_on_external alongside "external:" refs (a target this
+//     database does hold resolved above and never reaches here). It is the multi-rig
 //     "add now, route later" shape — a gt- bead depending on a bd- bead whose
 //     rig is not in routes.jsonl yet — and dep remove (the ExtractPrefix
 //     fallback further down this file) still addresses such an edge. Refusing

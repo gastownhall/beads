@@ -1190,7 +1190,7 @@ func insertBenchDependencies(ctx context.Context, tx *sql.Tx, depTable string, i
 			if createdAt.IsZero() {
 				createdAt = now
 			}
-			kind, err := issueops.ClassifyDepTarget(ctx, tx, tx, dep)
+			kind, err := issueops.ClassifyDepTarget(ctx, tx, dep)
 			if err != nil {
 				return err
 			}
