@@ -265,7 +265,9 @@ func openProxiedServerUOWProvider(ctx context.Context, beadsDir, databaseOverrid
 	// thing: a migration-gate refusal whose remedy is `bd dolt pull` has to
 	// say where that pull can be run, because proxied mode refuses it at the
 	// front door (proxy.dolt_pull.unsupported) and server mode does not.
-	return newSQLServerUOWProvider(ctx, beadsDir, topology, proxiedProviderOptions(opts)...)
+	provider, err := newSQLServerUOWProvider(ctx, beadsDir, topology, proxiedProviderOptions(opts)...)
+	armLegacyProxiedRootGuardAfterOpen(beadsDir, err)
+	return provider, err
 }
 
 // proxiedProviderOptions is opts plus uow.WithProxiedServerMode(), built on a
