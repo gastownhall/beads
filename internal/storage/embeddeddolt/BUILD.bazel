@@ -134,6 +134,7 @@ go_test(
         "commit_all_internal_test.go",
         "commit_nothing_to_commit_test.go",
         "concurrency_test.go",
+        "concurrent_close_persist_test.go",
         "conformance_test.go",
         "counter_contract_test.go",
         "counts_missing_table_test.go",
