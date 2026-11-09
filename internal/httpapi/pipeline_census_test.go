@@ -21,7 +21,11 @@ package httpapi
 // server, its baseline, and one that runs a stage answers that stage's
 // refusal. Rounds arm each stage alone, then every run of consecutive stages
 // after the Host check together, where the first stage an endpoint runs must
-// be the one that answers. Three layers, none of which a regeneration can
+// be the one that answers. Each round of the stages behind the credential then
+// runs again on a server that checks a credential, with every request
+// presenting it (pipelineBearer): that is the server remote clients talk to,
+// and the only one on which a request passes a credential check before it
+// reaches the stages behind it. Three layers, none of which a regeneration can
 // relax:
 //
 //  1. Behavior matches the declaration: each answer is the baseline or the
@@ -55,6 +59,9 @@ import (
 // pipelineProbe is the unknown query parameter every census request carries.
 const pipelineProbe = "pipeline_probe"
 
+// censusToken is the credential a census server checks.
+const censusToken = "census-token"
+
 // pipelineStage is one stage of the request pipeline, and how to arm it.
 type pipelineStage struct {
 	name string
@@ -83,7 +90,9 @@ type pipelineStage struct {
 // answers only (the hook runs for every routed request, liveness included);
 // booksOp is true; pipelineExemptions["hook"] lists the two unrouted answers;
 // and the census also asserts the hook ran exactly once per routed endpoint
-// that reached it and never for an unrouted one.
+// that reached it and never for an unrouted one. pipelineRounds then runs its
+// rounds behind the bearer as well, and the falsification's expected reports
+// follow the rounds.
 var pipelineStages = []pipelineStage{
 	{
 		name:    "host",
@@ -95,7 +104,7 @@ var pipelineStages = []pipelineStage{
 	},
 	{
 		name:   "auth",
-		config: func(t *testing.T, cfg *Config) { cfg.Auth = authTokenFile(t, "census-token") },
+		config: func(t *testing.T, cfg *Config) { cfg.Auth = authTokenFile(t, censusToken) },
 		exempt: func(e mountEndpoint) bool { return e.row == nil || e.row.authExempt },
 		refused: func(a pipelineAnswer) bool {
 			return a.status == http.StatusUnauthorized && a.code == string(CodeUnauthenticated)
@@ -142,6 +151,22 @@ var pipelineStages = []pipelineStage{
 		},
 		booksOp: true,
 	},
+}
+
+// pipelineBearer is not a stage: it configures the credential the auth stage
+// arms and presents it on every request, so each request passes the credential
+// check, as a remote client's does (a non-loopback server checks one unless
+// its operator waived it). The rounds that arm the auth stage present none, so
+// on their servers no request reaches the stages behind the check, and a gate
+// that skipped those stages for a request that passed it would go unseen. A
+// credential that passes refuses nothing: every endpoint skips this
+// pseudo-stage, and the first stage behind it must answer as it does on a
+// server with no credential configured.
+var pipelineBearer = pipelineStage{
+	name:    "bearer",
+	config:  func(t *testing.T, cfg *Config) { cfg.Auth = authTokenFile(t, censusToken) },
+	request: func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+censusToken) },
+	exempt:  func(mountEndpoint) bool { return true },
 }
 
 const (
@@ -308,24 +333,44 @@ func probePipeline(t *testing.T, armed []*pipelineStage, rig censusRig) ([]mount
 
 // pipelineRounds are the servers the census stands up after the baseline:
 // each stage armed alone, then every run of two or more consecutive stages
-// after the Host check, armed together. Alone, a stage shows which endpoints
-// run it; together, the first stage an endpoint runs must be the one that
-// answers, which holds route()'s order (the credential before the stamp whose
-// refusal discloses this server's project id, both before a slot) on every
-// endpoint.
+// after the Host check, armed together, and then each of those rounds that
+// arms only stages behind the credential again behind pipelineBearer. Alone,
+// a stage shows which endpoints run it; together, the first stage an endpoint
+// runs must be the one that answers, which holds route()'s order (the
+// credential before the stamp whose refusal discloses this server's project
+// id, both before a slot) on every endpoint. Behind the bearer, the same
+// holds for a request that passed the credential check.
 func pipelineRounds() [][]*pipelineStage {
-	var rounds [][]*pipelineStage
+	credential := slices.IndexFunc(pipelineStages, func(st pipelineStage) bool { return st.name == "auth" })
+	var rounds, presented [][]*pipelineStage
+	arm := func(from, to int) {
+		var armed []*pipelineStage
+		for i := from; i < to; i++ {
+			armed = append(armed, &pipelineStages[i])
+		}
+		rounds = append(rounds, armed)
+		if from > credential {
+			presented = append(presented, append([]*pipelineStage{&pipelineBearer}, armed...))
+		}
+	}
 	for i := range pipelineStages {
-		rounds = append(rounds, []*pipelineStage{&pipelineStages[i]})
+		arm(i, i+1)
 	}
 	for i := 1; i+1 < len(pipelineStages); i++ {
-		var run []*pipelineStage
-		for j := i; j < len(pipelineStages); j++ {
-			run = append(run, &pipelineStages[j])
-		}
-		rounds = append(rounds, run)
+		arm(i, len(pipelineStages))
 	}
-	return rounds
+	return append(rounds, presented...)
+}
+
+// firstRun is the first stage armed in a round that e declares it runs, which
+// is the stage that must answer it, or nil when e skips them all.
+func firstRun(armed []*pipelineStage, e mountEndpoint) *pipelineStage {
+	for _, st := range armed {
+		if !st.exempt(e) {
+			return st
+		}
+	}
+	return nil
 }
 
 // roundName is "auth" for one stage, "auth+project+wire+slot" for a run.
@@ -384,13 +429,7 @@ func censusPipeline(t *testing.T, rig censusRig) []pipelineViolation {
 			if !usable[i] {
 				continue
 			}
-			var first *pipelineStage
-			for _, st := range armed {
-				if !st.exempt(e) {
-					first = st
-					break
-				}
-			}
+			first := firstRun(armed, e)
 			a := answers[i]
 			switch {
 			case !a.logged:
@@ -440,10 +479,11 @@ func TestEveryMountedHandlerRunsTheRequestPipeline(t *testing.T) {
 
 // TestPipelineCensusCatchesABypassedStage is the census's falsification. The
 // census is green against a router written to satisfy it, so this serves a
-// router with one planted defect on each of five endpoints at once and
+// router with one planted defect on each of six endpoints at once and
 // requires the census to report exactly each defect's (round, endpoint) pairs
-// and nothing else. A Host policy that answers a foreign Host is a sixth
-// defect, run apart because it touches every endpoint.
+// and nothing else. A Host policy that answers a foreign Host is a seventh
+// defect, run apart because it touches every endpoint. The pairs are derived
+// from pipelineRounds(), so a stage added to the pipeline moves them with it.
 func TestPipelineCensusCatchesABypassedStage(t *testing.T) {
 	type defect struct {
 		name, op string
@@ -456,6 +496,19 @@ func TestPipelineCensusCatchesABypassedStage(t *testing.T) {
 			m.handler = h(s, m.rows[0])
 			return m
 		}
+	}
+	// reportedIn is the pairs a defect planted on op's endpoint owes: one for
+	// each round the defect breaks, judged from the stages the round arms and
+	// the first of them the endpoint runs (nil when it runs none).
+	reportedIn := func(op string, breaks func(armed []*pipelineStage, first *pipelineStage) bool) []string {
+		e := mountEndpoint{row: &routeTable[slices.IndexFunc(routeTable, func(rt route) bool { return rt.op == op })]}
+		var out []string
+		for _, armed := range pipelineRounds() {
+			if breaks(armed, firstRun(armed, e)) {
+				out = append(out, roundName(armed)+" "+op)
+			}
+		}
+		return out
 	}
 	defects := []defect{
 		{
@@ -477,7 +530,11 @@ func TestPipelineCensusCatchesABypassedStage(t *testing.T) {
 					rt.handler(s, w, r)
 				})
 			}),
-			want: []string{"wire " + OpListReadyWork, "slot " + OpListReadyWork, "wire+slot " + OpListReadyWork},
+			// Every round whose first stage is one the gate does not run: it
+			// runs the credential and the stamp, behind the router's Host check.
+			want: reportedIn(OpListReadyWork, func(_ []*pipelineStage, first *pipelineStage) bool {
+				return first != nil && !slices.Contains([]string{"host", "auth", "project"}, first.name)
+			}),
 		},
 		{
 			// Every stage still refuses alone; only the order shows a 401 storm
@@ -500,7 +557,36 @@ func TestPipelineCensusCatchesABypassedStage(t *testing.T) {
 					h.ServeHTTP(w, r)
 				})
 			}),
-			want: []string{"auth+project+wire+slot " + OpListBlockedIssues, "project+wire+slot " + OpListBlockedIssues, "wire+slot " + OpListBlockedIssues},
+			// Every round that arms the slot behind a stage the endpoint runs.
+			want: reportedIn(OpListBlockedIssues, func(armed []*pipelineStage, first *pipelineStage) bool {
+				return first != nil && first.name != "slot" && slices.ContainsFunc(armed, func(st *pipelineStage) bool { return st.name == "slot" })
+			}),
+		},
+		{
+			// A credential check that ends the pipeline: a request that passes
+			// it goes straight to the handler, past the stamp, the floor and the
+			// slot. A server with no credential configured still runs them all,
+			// and a request that presents none still gets its 401, so only the
+			// rounds behind the bearer can tell.
+			name: "a gate that hands an authenticated request to the handler",
+			op:   OpGetIssue,
+			plant: gate(func(s *Server, rt route) http.Handler {
+				h := s.route(rt)
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if s.auth == nil {
+						h.ServeHTTP(w, r)
+						return
+					}
+					rec := requestInfo(r.Context())
+					rec.op = rt.op
+					if s.authorize(w, r, rec) {
+						rt.handler(s, w, r)
+					}
+				})
+			}),
+			want: reportedIn(OpGetIssue, func(armed []*pipelineStage, first *pipelineStage) bool {
+				return armed[0] == &pipelineBearer && first != nil
+			}),
 		},
 		{
 			name: "an answer booked to no op",

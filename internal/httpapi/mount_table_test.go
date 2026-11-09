@@ -229,17 +229,22 @@ func TestDefaultServerMountsOnlyTheRouteTable(t *testing.T) {
 // and returning that mux behind checkHost and withRequestContext and nothing
 // else.
 //
-// Any other way onto the wire is a stray mount: a Handle or HandleFunc call
-// anywhere else (http.Handle included, which is the DefaultServeMux), a second
-// ServeMux, an http.Server whose Handler is not s.handler(), a reassigned
-// Handler, or a wrapper around the router. Each would answer requests no
-// census sees, which is how a second request pipeline ships with the whole
-// suite green. To serve something new, add it to s.mounts() with rows that
-// declare its posture; the censuses then hold it to that posture.
+// Every other way onto the wire it can see is a stray mount: a Handle or
+// HandleFunc call anywhere else (http.Handle included, which is the
+// DefaultServeMux) or one taken as a method value, a second ServeMux, an
+// http.Server whose Handler is not s.handler() (a literal with no Handler,
+// new(http.Server) and a zero http.Server serve the DefaultServeMux), a call
+// to http.Serve, http.ServeTLS, http.ListenAndServe or http.ListenAndServeTLS,
+// a reassigned Handler, or a wrapper around the router. Each would answer
+// requests no census sees, which is how a second request pipeline ships with
+// the whole suite green. To serve something new, add it to s.mounts() with
+// rows that declare its posture; the censuses then hold it to that posture.
 //
 // Structural on purpose, like TestEveryTimedProviderAccessorBindsToTheWrapper:
 // a behavioral census can only probe what it enumerates, and this is what
-// makes s.mounts() the whole enumeration.
+// makes s.mounts() the whole enumeration. It reads this package's syntax, so
+// it needs net/http imported as http, and it cannot see what code in another
+// package does with a router or a handler this package hands it.
 func TestNothingIsMountedOutsideTheMountTable(t *testing.T) {
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
@@ -275,6 +280,13 @@ func TestNothingIsMountedOutsideTheMountTable(t *testing.T) {
 // describes every other, with its position.
 func mountRegistrations(fset *token.FileSet, files map[string]*ast.File) (sanctioned int, strays []string) {
 	for _, name := range slices.Sorted(maps.Keys(files)) {
+		// Every rule below reads net/http by the name http.
+		for _, imp := range files[name].Imports {
+			if imp.Path.Value == `"net/http"` && imp.Name != nil && imp.Name.Name != "http" {
+				strays = append(strays, fmt.Sprintf("%s: net/http imported as %s, which hides every use of it from this scan: import it as http",
+					fset.Position(imp.Pos()), imp.Name.Name))
+			}
+		}
 		for _, decl := range files[name].Decls {
 			where := "a package-level declaration"
 			fn, isFunc := decl.(*ast.FuncDecl)
@@ -325,37 +337,64 @@ func mountRegistrations(fset *token.FileSet, files map[string]*ast.File) (sancti
 				}
 			}
 			newMuxes := 0
+			// The selectors a call invokes. Inspect visits a call before its
+			// function, so a Handle or HandleFunc selector missing here when the
+			// selector itself is visited is a method value: a registration whose
+			// call this scan cannot see.
+			called := map[*ast.SelectorExpr]bool{}
 			ast.Inspect(decl, func(n ast.Node) bool {
 				switch n := n.(type) {
 				case *ast.CallExpr:
+					if types.ExprString(n.Fun) == "new" && len(n.Args) == 1 && types.ExprString(n.Args[0]) == "http.Server" {
+						stray(n, "new(http.Server), which serves http.DefaultServeMux")
+					}
 					sel, ok := n.Fun.(*ast.SelectorExpr)
 					if !ok {
 						return true
 					}
-					switch {
+					called[sel] = true
+					switch fun := types.ExprString(sel); {
 					case (sel.Sel.Name == "Handle" || sel.Sel.Name == "HandleFunc") && len(n.Args) == 2:
 						if allowed[n] {
 							sanctioned++
 						} else {
-							stray(n, types.ExprString(n.Fun)+"("+types.ExprString(n.Args[0])+", ...)")
+							stray(n, fun+"("+types.ExprString(n.Args[0])+", ...)")
 						}
-					case types.ExprString(sel) == "http.NewServeMux":
+					case fun == "http.NewServeMux":
 						if newMuxes++; !isRouter || newMuxes > 1 {
 							stray(n, "a second http.NewServeMux()")
 						}
+					case slices.Contains([]string{"http.Serve", "http.ServeTLS", "http.ListenAndServe", "http.ListenAndServeTLS"}, fun):
+						// Each serves the handler it is given, and a nil one is
+						// the DefaultServeMux.
+						stray(n, "a second server, "+fun+"(...)")
 					}
 				case *ast.SelectorExpr:
-					if s := types.ExprString(n); s == "http.ServeMux" || s == "http.DefaultServeMux" {
+					switch s := types.ExprString(n); {
+					case s == "http.ServeMux" || s == "http.DefaultServeMux":
 						stray(n, s)
+					case (n.Sel.Name == "Handle" || n.Sel.Name == "HandleFunc") && !called[n]:
+						stray(n, s+" taken as a value")
 					}
 				case *ast.CompositeLit:
 					if types.ExprString(n.Type) != "http.Server" {
 						return true
 					}
+					handler := false
 					for _, elt := range n.Elts {
-						if kv, ok := elt.(*ast.KeyValueExpr); ok && types.ExprString(kv.Key) == "Handler" && types.ExprString(kv.Value) != "s.handler()" {
-							stray(kv, "an http.Server serving "+types.ExprString(kv.Value))
+						if kv, ok := elt.(*ast.KeyValueExpr); ok && types.ExprString(kv.Key) == "Handler" {
+							handler = true
+							if types.ExprString(kv.Value) != "s.handler()" {
+								stray(kv, "an http.Server serving "+types.ExprString(kv.Value))
+							}
 						}
+					}
+					if !handler {
+						stray(n, "an http.Server with no Handler, which serves http.DefaultServeMux")
+					}
+				case *ast.ValueSpec:
+					if n.Type != nil && types.ExprString(n.Type) == "http.Server" {
+						stray(n, "a zero http.Server, which serves http.DefaultServeMux")
 					}
 				case *ast.AssignStmt:
 					for _, lhs := range n.Lhs {
@@ -425,6 +464,22 @@ func Listen(cfg Config) (*Server, error) {
 		{"a second server", `func (s *Server) debug() *http.Server { return &http.Server{Handler: s.pprof()} }`, "an http.Server serving s.pprof() in (*Server).debug"},
 		{"a registration in a package-level function literal", `var mountLater = func(m interface{ Handle(string, http.Handler) }) { m.Handle("/bdp/", nil) }`,
 			`m.Handle("/bdp/", ...) in a package-level declaration`},
+		{"the DefaultServeMux on a debug port", `func (s *Server) debug() { go func() { _ = http.ListenAndServe("127.0.0.1:6060", nil) }() }`,
+			"a second server, http.ListenAndServe(...) in (*Server).debug"},
+		{"a listener served beside the router", `func (s *Server) debug(ln net.Listener) error { return http.Serve(ln, s.pprof()) }`,
+			"a second server, http.Serve(...) in (*Server).debug"},
+		{"a TLS listener served beside the router", `func (s *Server) debug(ln net.Listener) error { return http.ServeTLS(ln, s.pprof(), "cert", "key") }`,
+			"a second server, http.ServeTLS(...) in (*Server).debug"},
+		{"the DefaultServeMux over TLS", `func (s *Server) debug() error { return http.ListenAndServeTLS(":6443", "cert", "key", nil) }`,
+			"a second server, http.ListenAndServeTLS(...) in (*Server).debug"},
+		{"a server with no Handler", `func (s *Server) debug() *http.Server { return &http.Server{Addr: "127.0.0.1:6060"} }`,
+			"an http.Server with no Handler, which serves http.DefaultServeMux in (*Server).debug"},
+		{"a server from new", `func (s *Server) debug() *http.Server { return new(http.Server) }`,
+			"new(http.Server), which serves http.DefaultServeMux in (*Server).debug"},
+		{"a zero server", `func (s *Server) debug() error { var srv http.Server; return srv.ListenAndServe() }`,
+			"a zero http.Server, which serves http.DefaultServeMux in (*Server).debug"},
+		{"net/http under another name", "import nethttp \"net/http\"\nfunc (s *Server) debug() { _ = nethttp.ListenAndServe(\":6060\", nil) }",
+			"net/http imported as nethttp"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			n, strays := scan(t, map[string]string{"server.go": router, "extra.go": "package httpapi\n" + tc.src})
@@ -452,6 +507,8 @@ func Listen(cfg Config) (*Server, error) {
 		{"a loop over another list", "s.mounts()", "s.bdpMounts()", "mux.Handle(m.pattern, ...) in (*Server).handler"},
 		{"a handler wrapped at registration", "mux.Handle(m.pattern, m.handler)", "mux.Handle(m.pattern, s.gate(m.handler))",
 			"mux.Handle(m.pattern, ...) in (*Server).handler"},
+		{"a registration through a method value", "\treturn s.withRequestContext", "\tregister := mux.Handle\n\tregister(\"GET /v0/debug/raw\", nil)\n\treturn s.withRequestContext",
+			"mux.Handle taken as a value in (*Server).handler"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, strays := scan(t, map[string]string{"server.go": strings.Replace(router, tc.from, tc.to, 1)})

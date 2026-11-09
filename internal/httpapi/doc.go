@@ -18,12 +18,14 @@
 //
 // Every registration on the router is one entry of s.mounts() (server.go): a
 // route table row, the dispatcher the custom-method rows share, or the
-// catch-all. Nothing is mounted anywhere else
-// (TestNothingIsMountedOutsideTheMountTable), and
-// TestEveryMountedHandlerRunsTheRequestPipeline holds every mount to the
-// posture its rows declare: the Host policy, the bearer credential, the
-// project stamp, the wire-revision floor and a database slot, in that order.
-// A new surface is served by adding mounts there, never beside them.
+// catch-all, and nothing in this package mounts or serves a handler any other
+// way (TestNothingIsMountedOutsideTheMountTable names the shapes it rules
+// out). handler() puts the Host policy in front of the whole router, and
+// TestEveryMountedHandlerRunsTheRequestPipeline holds every mount to that
+// policy and to the posture its rows declare: the bearer credential, the
+// project stamp, the wire-revision floor and a database slot, in that order,
+// on a server that checks a credential as well as on one that does not. A new
+// surface is served by adding mounts there, never beside them.
 //
 // Two rows answer from the process itself and touch no database (GET /healthz
 // and GET /v0/beads/context); they carry bypassSemaphore for that reason, and
