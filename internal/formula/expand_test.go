@@ -1,6 +1,7 @@
 package formula
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1187,6 +1188,52 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 			t.Errorf("land.Needs = %v, want [work]", got)
 		}
 	})
+
+	// A template step that names the step it replaces without recreating it
+	// would leave a reference to a removed ID; the expansion is refused
+	// instead of silently dropping the blocker.
+	t.Run("a template naming its own target in needs without recreating it is refused", func(t *testing.T) {
+		writeFormula("self-ref-needs", selfRefNeedsExpansion)
+		steps := []*Step{
+			{ID: "work", Title: "Work", Expand: "self-ref-needs"},
+			{ID: "land", Title: "Land", Needs: []string{"work"}},
+		}
+		wantInput := depSignatureOf(steps)
+
+		_, err := ApplyInlineExpansions(steps, parser)
+		if !errors.Is(err, ErrValidation) {
+			t.Fatalf("ApplyInlineExpansions error = %v, want an ErrValidation", err)
+		}
+		for _, want := range []string{`"work"`, `"work.second"`} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %q, want it to name the target and the offending step %s", err, want)
+			}
+		}
+		if got := depSignatureOf(steps); got != wantInput {
+			t.Errorf("input steps were modified:\n got: %s\nwant: %s", got, wantInput)
+		}
+	})
+
+	t.Run("a template child naming its own target in depends_on without recreating it is refused", func(t *testing.T) {
+		writeFormula("self-ref-child", selfRefChildExpansion)
+		steps := []*Step{
+			{ID: "work", Title: "Work", Expand: "self-ref-child"},
+		}
+		wantInput := depSignatureOf(steps)
+
+		_, err := ApplyInlineExpansions(steps, parser)
+		if !errors.Is(err, ErrValidation) {
+			t.Fatalf("ApplyInlineExpansions error = %v, want an ErrValidation", err)
+		}
+		for _, want := range []string{`"work"`, `"work.first.check"`} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %q, want it to name the target and the offending step %s", err, want)
+			}
+		}
+		if got := depSignatureOf(steps); got != wantInput {
+			t.Errorf("input steps were modified:\n got: %s\nwant: %s", got, wantInput)
+		}
+	})
 }
 
 // recreateFirstExpansion recreates {target} as its first template step, so
@@ -1209,6 +1256,30 @@ const recreateLastExpansion = `{
 	"template": [
 		{"id": "{target}.prep", "title": "Prep"},
 		{"id": "{target}", "title": "Redone {target.title}"}
+	]
+}`
+
+// selfRefNeedsExpansion names {target} in needs without recreating it.
+const selfRefNeedsExpansion = `{
+	"formula": "self-ref-needs",
+	"type": "expansion",
+	"version": 1,
+	"template": [
+		{"id": "{target}.first", "title": "First"},
+		{"id": "{target}.second", "title": "Second", "needs": ["{target}.first", "{target}"]}
+	]
+}`
+
+// selfRefChildExpansion names {target} from a child template step, in
+// depends_on.
+const selfRefChildExpansion = `{
+	"formula": "self-ref-child",
+	"type": "expansion",
+	"version": 1,
+	"template": [
+		{"id": "{target}.first", "title": "First", "children": [
+			{"id": "{target}.first.check", "title": "Check", "depends_on": ["{target}"]}
+		]}
 	]
 }`
 

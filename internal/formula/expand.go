@@ -597,6 +597,20 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int, re
 				return nil, fmt.Errorf("inline expand on step %q: %w", step.ID, err)
 			}
 
+			// A template step that names the step it replaces, in needs or
+			// depends_on, without recreating that ID would leave a
+			// reference to a removed step: cook drops it and the dependent
+			// becomes ready too early. Refuse the template instead. The
+			// check runs before propagateTargetDeps so a prerequisite the
+			// replaced step inherited from elsewhere is not mistaken for a
+			// template self-reference.
+			if buildStepMap(expandedSteps)[step.ID] == nil {
+				if ref := findStepNaming(expandedSteps, step.ID); ref != "" {
+					return nil, fmt.Errorf("%w: inline expand on step %q: template step %q names the expanded step without recreating it",
+						ErrValidation, step.ID, ref)
+				}
+			}
+
 			// Propagate the original step's dependencies to root steps of the expansion
 			propagateTargetDeps(step, expandedSteps)
 
