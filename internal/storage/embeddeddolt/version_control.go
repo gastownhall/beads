@@ -197,17 +197,20 @@ func (s *EmbeddedDoltStore) CommitMergeResolution(ctx context.Context, message s
 	return err
 }
 
-// CommitConfigOnly commits the config table (GH#4078). Embedded mode is
-// single-process, so the '-Am' Commit cannot sweep a concurrent operation's
-// working set — the scoped-staging concern that exists in server mode
-// (GH#2455) does not apply here, and this aliases Commit for the same
-// reason CommitWithConfig does.
+// CommitConfigOnly commits the config table (GH#4078) by aliasing Commit, as
+// CommitWithConfig does. That is not scoped staging: embedded engine sessions
+// are serialized, not single-process, and another bd process can write
+// between this store's SQL commit and this call, so the '-Am' Commit stages
+// that process's rows in any table along with the config table — the
+// scoped-staging concern of server mode (GH#2455) is narrowed here, not ruled
+// out.
 func (s *EmbeddedDoltStore) CommitConfigOnly(ctx context.Context, message string) error {
 	return s.Commit(ctx, message)
 }
 
-// CommitConfigUserKVOnly aliases Commit for the reason CommitConfigOnly does:
-// with no concurrent writer, there is no other writer's config row to screen out.
+// CommitConfigUserKVOnly aliases Commit the way CommitConfigOnly does, with
+// the same caveat: another process's config rows written in the interval are
+// staged with this one's, not screened out.
 func (s *EmbeddedDoltStore) CommitConfigUserKVOnly(ctx context.Context, message string) error {
 	return s.Commit(ctx, message)
 }

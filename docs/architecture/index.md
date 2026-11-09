@@ -151,7 +151,7 @@ Start the Dolt server with `bd dolt start`. Check health with `bd doctor`.
 
 ### Embedded Mode (No Server)
 
-Embedded mode is the default (`bd init` with no flags): Dolt runs in-process, single-writer, with data at `.beads/embeddeddolt/` — no server process and no separate Dolt install. Server mode is opt-in via `bd init --server`; the choice is persisted in `.beads/metadata.json`.
+Embedded mode is the default (`bd init` with no flags): Dolt runs in-process, with data at `.beads/embeddeddolt/`; several `bd` processes can share it, taking turns on the engine's exclusive lock ([Lock Contention](/architecture/dolt#lock-contention-embedded-mode)) — no server process and no separate Dolt install. Server mode is opt-in via `bd init --server`; the choice is persisted in `.beads/metadata.json`.
 
 ```bash
 bd create "CI-generated issue"
