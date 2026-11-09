@@ -5,7 +5,7 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-10-26
+Last reviewed: 2026-11-09
 
 Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, `internal/config/`, `internal/configfile/`, and `internal/endpointtrust/`.
 
@@ -118,6 +118,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `dolt.auto-push-timeout` | — | `BD_DOLT_AUTO_PUSH_TIMEOUT` | `30s` | Timeout for a single auto-push attempt |
 | `dolt.local-only` | — | `BD_DOLT_LOCAL_ONLY` | `false` | Keep Dolt data off the network: skip remote wiring at `bd init`, suppress auto-push, have `bd dolt push`/`pull` and `bd sync` report remote sync as disabled without contacting a remote, and refuse `bd dolt remote add` |
 | `dolt.shared-server` | `--shared-server` | `BEADS_DOLT_SHARED_SERVER` | `false` | Share one Dolt server at `~/.beads/shared-server/` |
+| `dolt.verify-server-identity` | — | `BEADS_DOLT_VERIFY_SERVER_IDENTITY` | `true` | Refuse a bd-managed Dolt server whose identity does not match the one bd recorded when it started it (see [below](#server-identity-verification)) |
 | `dolt.max-conns` | — | `BEADS_DOLT_MAX_CONNS` | `10` | Connection pool size |
 | `git.author` | — | `BD_GIT_AUTHOR` | (none) | Override commit author for beads commits |
 | `git.no-gpg-sign` | — | `BD_GIT_NO_GPG_SIGN` | `false` | Disable GPG signing for beads commits |
@@ -277,6 +278,38 @@ How it works:
 - Last push time and commit are tracked in `.beads/push-state.json`, a per-machine file (not in the database, to avoid merge conflicts across machines).
 
 Before pushing, `bd` verifies the local chunk store with `dolt fsck --quiet`, bounded by a 30-second timeout. For large stores, raise it with the runtime-only `BEADS_FSCK_TIMEOUT` environment variable (accepts durations like `2m` or bare seconds like `90`).
+
+### Server Identity Verification
+
+When `bd` starts a Dolt server it manages, it records that server's identity
+and checks it on every later connection. If the server answering on the port is
+not the one `bd` recorded — a mirrored WSL2 listener, a docker or ssh port
+forward, or a stale port record can all answer there — `bd` refuses to use it
+rather than read from and write to a foreign server. This is on by default.
+
+The check covers **bd-managed endpoints only**: the shared server
+(`dolt.shared-server`) and the per-workspace server `bd` auto-starts.
+Everything else is exempt and connects exactly as before — a server on an
+external host `bd` never started, TLS endpoints, gateway-credential routing,
+unix sockets, ports a caller asserted explicitly, and workspaces that declare
+their server externally managed.
+
+If `bd` refuses a server you do want to use:
+
+```bash
+# The intended server, started outside bd: stop it, then start it through bd
+# so bd can pair with it.
+bd dolt start
+
+# Or deliberately trust the endpoint (only when you know what answers there):
+bd config set dolt.verify-server-identity false
+# or: export BEADS_DOLT_VERIFY_SERVER_IDENTITY=0
+```
+
+Never fix a refusal by deleting a database — the refusal is about *which
+server* answers, not about the data, and re-pairing through a deliberate stop
+and start keeps the data intact. An unrecognized value for the setting never
+disables the check.
 
 ## Actor Identity Resolution
 
@@ -543,6 +576,7 @@ Selected commonly-used variables:
 | `BEADS_GATE_WAIT_TIMEOUT` | How long an ordinary bd command waits while a maintenance operation (`bd init`, backup restore, migrate, bootstrap — on the same workspace, or on any project sharing the server in shared-server mode) holds or is queued for the workspace gate, before failing (default `30s`; accepts durations like `1m` or bare seconds like `90`; `0` fails immediately, for scripts that want the old fail-fast behavior). Queued maintenance operations run one after another and a waiting command waits for all of them; a queued one only delays a command, never fails it, and stops queueing others after 10s if it cannot get in. Git hooks always fail fast |
 | `BEADS_MIGRATION_WATCHDOG_INTERVAL` | Interval between soft WARN lines while a schema migration's SQL keeps running (default `5m`; accepts durations like `10m` or bare seconds like `90`). Observability only — it never aborts a migration |
 | `BEADS_DOLT_SERVER_MODE`, `BEADS_DOLT_SHARED_SERVER`, `BEADS_DOLT_DATA_DIR`, `BEADS_DOLT_PORT`, ... | Embedded/server Dolt overrides |
+| `BEADS_DOLT_VERIFY_SERVER_IDENTITY` | Override `dolt.verify-server-identity`: `0`/`off` deliberately trusts a bd-managed endpoint whose identity cannot be verified; any unrecognized value leaves verification on (see [Server Identity Verification](#server-identity-verification)) |
 | `BEADS_DOLT_BIN` | Pin the exact external `dolt` CLI binary managed proxied-server mode spawns, overriding PATH lookup (highest precedence; an explicit path that fails validation is an error, not a silent fallback to PATH). On Windows the executable extension may be omitted — `C:\tools\dolt` finds `C:\tools\dolt.exe` via PATHEXT, though a file at the exact spelled path wins if both exist. The binary must be dolt 2.6.0 or newer; an older one is refused |
 
 Integration secrets follow tracker-specific conventions: `LINEAR_API_KEY`, `GITHUB_TOKEN`, `GITLAB_TOKEN`, `JIRA_API_TOKEN`, `AZURE_DEVOPS_PAT`, `ANTHROPIC_API_KEY`. These are preferred over storing the value in `config.yaml` for git-tracked projects.

@@ -646,6 +646,14 @@ workspace is written, so there is nothing to run `bd migrate schema` from
 there: do step 2 from a client that is already set up, or join and migrate in
 one step with `BD_ALLOW_REMOTE_MIGRATE=1 bd init …`.
 
+If the upgrade moved or restarted the shared server outside `bd` — a new
+host, a restored data directory, a server started by hand — every client
+refuses it with `refusing to use the Dolt server` until bd can pair with the
+server it finds: stop it and start it again with `bd dolt start` from one
+client. That is a deliberate pairing, not data maintenance; do not delete any
+database to clear it (see
+[Troubleshooting](/reference/troubleshooting)).
+
 The same rules apply in **proxied-server mode**, which is a shared server
 reached through a local proxy. Three differences worth knowing:
 

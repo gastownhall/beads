@@ -415,6 +415,43 @@ bd dolt stop
 bd dolt start
 ```
 
+### "refusing to use the Dolt server" (identity mismatch)
+
+**Symptom:** Every command against a server-mode or shared-server workspace
+stops with `refusing to use the Dolt server at <addr>`, naming a recorded
+server UUID and the one the answering server reported.
+
+**Cause:** Something other than the server `bd` recorded is answering on the
+port — a mirrored WSL2 listener, a docker or ssh port forward, another
+`dolt sql-server` you started by hand, or a stale port record. A connection
+that answers is not proof it is your server, so `bd` refuses to read from or
+write to it.
+
+**Fix:** Find what holds or forwards the port (`lsof -i :<port>`, or
+`netstat -aon | findstr :<port>` on Windows), then either run the intended
+server on a separate port or stop the process answering on this one. If this
+*is* the server you want, pair with it deliberately:
+
+```bash
+bd dolt stop    # stop whatever bd manages on this data root
+bd dolt start   # bd starts the server and records its identity
+```
+
+To trust the endpoint without pairing — only when you know what answers
+there — set `dolt.verify-server-identity: false`
+(`bd config set dolt.verify-server-identity false`), or export
+`BEADS_DOLT_VERIFY_SERVER_IDENTITY=0`. An unrecognized value does not
+disable the check.
+
+Never delete a database to clear this error: the refusal is about *which
+server* answers, not about the data.
+
+<Note>
+The check covers only servers bd manages (the shared server and the
+per-workspace server it auto-starts). External servers, TLS endpoints,
+gateway routing, unix sockets, and explicitly asserted ports are exempt.
+</Note>
+
 ### "bd requires dolt 2.6.0 or newer" error
 
 `bd` refuses to run against Dolt older than **2.6.0** outside embedded mode.
