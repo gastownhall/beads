@@ -2,7 +2,6 @@ package issueops
 
 import (
 	"context"
-	"database/sql"
 	"database/sql/driver"
 	"fmt"
 	"regexp"
@@ -61,13 +60,12 @@ func TestGetDependencyTreeInTxSkipsRelatesToEdges(t *testing.T) {
 
 	mock.ExpectBegin()
 	expectIssue(mock, "root", "Root")
-	expectDependencies(mock, "root", []dependencyRow{
-		{id: "blocker", depType: string(types.DepBlocks)},
-		{id: "related", depType: string(types.DepRelatesTo)},
-	})
-	expectIssueBatch(mock, []string{"blocker", "related"})
-	expectIssue(mock, "blocker", "Blocker")
-	expectDependencies(mock, "blocker", nil)
+	expectTreeEdges(mock, []string{"root"}, false,
+		treeEdge{"root", "blocker", string(types.DepBlocks)},
+		treeEdge{"root", "related", string(types.DepRelatesTo)})
+	// The relates-to neighbor is not a tree edge, so it is never read.
+	expectTreeIssues(mock, "blocker")
+	expectTreeEdges(mock, []string{"blocker"}, false)
 	mock.ExpectRollback()
 
 	tx, err := db.BeginTx(context.Background(), nil)
@@ -97,9 +95,9 @@ func TestGetDependencyTreeInTxSkipsRelatesToEdges(t *testing.T) {
 	}
 }
 
-type dependencyRow struct {
-	id      string
-	depType string
+// treeEdge is one scripted row of a level's adjacency read.
+type treeEdge struct {
+	near, far, depType string
 }
 
 func expectIssue(mock sqlmock.Sqlmock, id, title string) {
@@ -111,32 +109,45 @@ func expectIssue(mock sqlmock.Sqlmock, id, title string) {
 		WillReturnRows(sqlmock.NewRows([]string{"label"}))
 }
 
-func expectDependencies(mock sqlmock.Sqlmock, issueID string, deps []dependencyRow) {
-	rows := sqlmock.NewRows([]string{"depends_on_id", "type"})
-	for _, dep := range deps {
-		rows.AddRow(dep.id, dep.depType)
+// expectTreeEdges scripts one level's adjacency reads, durable plane then wisp
+// plane, with every edge in the durable plane.
+func expectTreeEdges(mock sqlmock.Sqlmock, anchors []string, reverse bool, edges ...treeEdge) {
+	near, far := "issue_id", DepTargetExpr
+	if reverse {
+		near, far = DepTargetExpr, "issue_id"
 	}
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT " + DepTargetExpr + " AS depends_on_id, type FROM dependencies WHERE issue_id = ?")).
-		WithArgs(issueID).
-		WillReturnRows(rows)
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT " + DepTargetExpr + " AS depends_on_id, type FROM wisp_dependencies WHERE issue_id = ?")).
-		WithArgs(issueID).
-		WillReturnRows(sqlmock.NewRows([]string{"depends_on_id", "type"}))
+	in := strings.TrimSuffix(strings.Repeat("?,", len(anchors)), ",")
+	args := make([]driver.Value, len(anchors))
+	for i, id := range anchors {
+		args[i] = id
+	}
+	query := func(table string) string {
+		return regexp.QuoteMeta("SELECT " + near + ", " + far + ", type FROM " + table + " WHERE " + near + " IN (" + in + ")")
+	}
+	columns := []string{"near_id", "far_id", "type"}
+	rows := sqlmock.NewRows(columns)
+	for _, edge := range edges {
+		rows.AddRow(edge.near, edge.far, edge.depType)
+	}
+	mock.ExpectQuery(query("dependencies")).WithArgs(args...).WillReturnRows(rows)
+	mock.ExpectQuery(query("wisp_dependencies")).WithArgs(args...).WillReturnRows(sqlmock.NewRows(columns))
 }
 
-func expectIssueBatch(mock sqlmock.Sqlmock, ids []string) {
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps LIMIT 1")).
-		WillReturnError(sql.ErrNoRows)
-
+// expectTreeIssues scripts one level's issue read, each titled with its id
+// capitalized.
+func expectTreeIssues(mock sqlmock.Sqlmock, ids ...string) {
+	in := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	args := make([]driver.Value, len(ids))
 	rows := issueRows()
-	for _, id := range ids {
-		rows.AddRow(issueRowValues(id, id)...)
+	for i, id := range ids {
+		args[i] = id
+		rows.AddRow(issueRowValues(id, strings.ToUpper(id[:1])+id[1:])...)
 	}
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT "+IssueSelectColumns+" FROM issues "+sqlbuild.LeaseJoin("issues")+" WHERE id IN (?,?)")).
-		WithArgs(ids[0], ids[1]).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT "+IssueSelectColumns+" FROM issues "+sqlbuild.LeaseJoin("issues")+" WHERE id IN ("+in+")")).
+		WithArgs(args...).
 		WillReturnRows(rows)
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, label FROM labels WHERE issue_id IN (?,?) ORDER BY issue_id, label")).
-		WithArgs(ids[0], ids[1]).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, label FROM labels WHERE issue_id IN ("+in+") ORDER BY issue_id, label")).
+		WithArgs(args...).
 		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "label"}))
 }
 
@@ -195,6 +206,7 @@ func treeIDs(tree []*types.TreeNode) []string {
 func TestGetDependencyTreeInTxEmitsDedupedDirectBlocker(t *testing.T) {
 	for _, tt := range []struct {
 		name      string
+		mid       string
 		rootDeps  []string
 		wantIDs   []string
 		stubDepth int
@@ -204,6 +216,7 @@ func TestGetDependencyTreeInTxEmitsDedupedDirectBlocker(t *testing.T) {
 	}{
 		{
 			name:      "shared reached through mid first",
+			mid:       "mid",
 			rootDeps:  []string{"mid", "shared"},
 			wantIDs:   []string{"root", "mid", "shared", "shared"},
 			stubDepth: 1, stubFrom: "root",
@@ -211,9 +224,10 @@ func TestGetDependencyTreeInTxEmitsDedupedDirectBlocker(t *testing.T) {
 		},
 		{
 			name:      "shared reached directly first",
-			rootDeps:  []string{"shared", "mid"},
-			wantIDs:   []string{"root", "shared", "mid", "shared"},
-			stubDepth: 2, stubFrom: "mid",
+			mid:       "z-mid",
+			rootDeps:  []string{"shared", "z-mid"},
+			wantIDs:   []string{"root", "shared", "z-mid", "shared"},
+			stubDepth: 2, stubFrom: "z-mid",
 			fullDepth: 1, fullFrom: "root",
 		},
 	} {
@@ -226,24 +240,11 @@ func TestGetDependencyTreeInTxEmitsDedupedDirectBlocker(t *testing.T) {
 
 			mock.ExpectBegin()
 			expectIssue(mock, "root", "Root")
-			expectDependencies(mock, "root", []dependencyRow{
-				{id: tt.rootDeps[0], depType: string(types.DepBlocks)},
-				{id: tt.rootDeps[1], depType: string(types.DepBlocks)},
-			})
-			expectIssueBatch(mock, tt.rootDeps)
-			if tt.rootDeps[0] == "mid" {
-				expectIssue(mock, "mid", "Mid")
-				expectDependencies(mock, "mid", []dependencyRow{{id: "shared", depType: string(types.DepBlocks)}})
-				expectIssueBatchOne(mock, "shared")
-				expectIssue(mock, "shared", "Shared")
-				expectDependencies(mock, "shared", nil)
-			} else {
-				expectIssue(mock, "shared", "Shared")
-				expectDependencies(mock, "shared", nil)
-				expectIssue(mock, "mid", "Mid")
-				expectDependencies(mock, "mid", []dependencyRow{{id: "shared", depType: string(types.DepBlocks)}})
-				expectIssueBatchOne(mock, "shared")
-			}
+			expectTreeEdges(mock, []string{"root"}, false,
+				treeEdge{"root", tt.rootDeps[0], string(types.DepBlocks)},
+				treeEdge{"root", tt.rootDeps[1], string(types.DepBlocks)})
+			expectTreeIssues(mock, tt.rootDeps...)
+			expectTreeEdges(mock, tt.rootDeps, false, treeEdge{tt.mid, "shared", string(types.DepBlocks)})
 			// No expectation for the stub: it must read nothing.
 
 			tx, err := db.BeginTx(context.Background(), nil)
@@ -294,9 +295,9 @@ func TestGetDependencyTreeInTxEmitsDedupedDirectBlocker(t *testing.T) {
 
 // TestGetDependencyTreeInTxDepthCutoffBeatsStub pins that the depth bound wins
 // over the revisit: root expands x at depth 1, and the longer path root→a→b→x
-// would reach x again at depth 3 == maxDepth, where it is absent rather than a
-// stub. b sits on the last level the bound allows, so its edges, including the
-// one into x, are not read at all.
+// would reach x at depth 3 == maxDepth, where it is absent rather than a stub.
+// b sits on the last level the bound allows, so its edges, including the one
+// into x, are not read at all.
 func TestGetDependencyTreeInTxDepthCutoffBeatsStub(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -306,17 +307,12 @@ func TestGetDependencyTreeInTxDepthCutoffBeatsStub(t *testing.T) {
 
 	mock.ExpectBegin()
 	expectIssue(mock, "root", "Root")
-	expectDependencies(mock, "root", []dependencyRow{
-		{id: "x", depType: string(types.DepBlocks)},
-		{id: "a", depType: string(types.DepBlocks)},
-	})
-	expectIssueBatch(mock, []string{"x", "a"})
-	expectIssue(mock, "x", "X")
-	expectDependencies(mock, "x", nil)
-	expectIssue(mock, "a", "A")
-	expectDependencies(mock, "a", []dependencyRow{{id: "b", depType: string(types.DepBlocks)}})
-	expectIssueBatchOne(mock, "b")
-	expectIssue(mock, "b", "B")
+	expectTreeEdges(mock, []string{"root"}, false,
+		treeEdge{"root", "x", string(types.DepBlocks)},
+		treeEdge{"root", "a", string(types.DepBlocks)})
+	expectTreeIssues(mock, "a", "x")
+	expectTreeEdges(mock, []string{"a", "x"}, false, treeEdge{"a", "b", string(types.DepBlocks)})
+	expectTreeIssues(mock, "b")
 
 	tx, err := db.BeginTx(context.Background(), nil)
 	if err != nil {
@@ -334,8 +330,8 @@ func TestGetDependencyTreeInTxDepthCutoffBeatsStub(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
-	if got := treeIDs(tree); strings.Join(got, ",") != "root,x,a,b" {
-		t.Fatalf("tree = %v, want [root x a b] with no x stub", got)
+	if got := treeIDs(tree); strings.Join(got, ",") != "root,a,b,x" {
+		t.Fatalf("tree = %v, want [root a b x] with no x stub", got)
 	}
 	for _, node := range tree {
 		if node.Deduped {
@@ -361,16 +357,19 @@ func TestGetDependencyTreeInTxRecordsALastLevelNodeAsExpanded(t *testing.T) {
 
 	mock.ExpectBegin()
 	expectIssue(mock, "root", "Root")
-	expectDependencies(mock, "root", []dependencyRow{
-		{id: "a", depType: string(types.DepBlocks)},
-		{id: "b", depType: string(types.DepBlocks)},
-	})
-	expectIssueBatch(mock, []string{"a", "b"})
-	expectIssue(mock, "a", "A")
-	expectDependencies(mock, "a", []dependencyRow{{id: "b", depType: string(types.DepBlocks)}})
-	expectIssueBatchOne(mock, "b")
-	expectIssue(mock, "b", "B")
-	// No expectation for b's edges (b is on the last level) or for the stub.
+	expectTreeEdges(mock, []string{"root"}, false,
+		treeEdge{"root", "a", string(types.DepBlocks)},
+		treeEdge{"root", "b", string(types.DepBlocks)})
+	expectTreeIssues(mock, "a", "b")
+	// Both are read at level 1, where the bound still allows their edges. The
+	// walk reaches b through a at depth 2 first and must not descend from there.
+	expectTreeEdges(mock, []string{"a", "b"}, false,
+		treeEdge{"a", "b", string(types.DepBlocks)},
+		treeEdge{"b", "c", string(types.DepBlocks)})
+	expectTreeIssues(mock, "c")
+	// c was read because b sits on level 1, but the walk reaches b at depth 2
+	// first, so c would be at depth 3 and must not appear. No expectation for
+	// the stub: it must read nothing.
 
 	tx, err := db.BeginTx(context.Background(), nil)
 	if err != nil {
@@ -425,18 +424,16 @@ func TestGetDependencyTreeInTxReadsNothingPastTheDepthLimit(t *testing.T) {
 		}{
 			// The root's issue row and labels.
 			{maxDepth: 1, wantIDs: "root", wantStatements: 2},
-			// Plus the root's adjacency in both planes (2), the hydration of
-			// a (wisps probe, issue rows, labels: 3) and a's own issue row
+			// Plus the root's adjacency in both planes (2) and a's issue row
 			// and labels (2).
-			{maxDepth: 2, wantIDs: "root,a", wantStatements: 9},
+			{maxDepth: 2, wantIDs: "root,a", wantStatements: 6},
 		} {
 			t.Run(fmt.Sprintf("reverse=%v/maxDepth=%d", reverse, tt.maxDepth), func(t *testing.T) {
 				mock, tx, counts := countedMockTx(t)
 				expectIssue(mock, "root", "Root")
 				if tt.maxDepth > 1 {
-					expectAdjacency(mock, "root", reverse, "a")
-					expectIssueBatchOne(mock, "a")
-					expectIssue(mock, "a", "A")
+					expectTreeEdges(mock, []string{"root"}, reverse, treeEdge{"root", "a", string(types.DepBlocks)})
+					expectTreeIssues(mock, "a")
 				}
 
 				tree, err := GetDependencyTreeInTx(t.Context(), tx, "root", tt.maxDepth, false, reverse)
@@ -457,37 +454,6 @@ func TestGetDependencyTreeInTxReadsNothingPastTheDepthLimit(t *testing.T) {
 	}
 }
 
-// expectAdjacency scripts the two adjacency reads of anchor, durable plane
-// then wisp plane, in the direction the walk reads them, with one blocks edge
-// to each far id in the durable plane.
-func expectAdjacency(mock sqlmock.Sqlmock, anchor string, reverse bool, farIDs ...string) {
-	cols, where := DepTargetExpr+" AS depends_on_id, type", "issue_id = ?"
-	if reverse {
-		cols, where = "issue_id, type", DepTargetExpr+" = ?"
-	}
-	rows := sqlmock.NewRows([]string{"far_id", "type"})
-	for _, id := range farIDs {
-		rows.AddRow(id, string(types.DepBlocks))
-	}
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT " + cols + " FROM dependencies WHERE " + where)).
-		WithArgs(anchor).
-		WillReturnRows(rows)
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT " + cols + " FROM wisp_dependencies WHERE " + where)).
-		WithArgs(anchor).
-		WillReturnRows(sqlmock.NewRows([]string{"far_id", "type"}))
-}
-
-func expectIssueBatchOne(mock sqlmock.Sqlmock, id string) {
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps LIMIT 1")).
-		WillReturnError(sql.ErrNoRows)
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT " + IssueSelectColumns + " FROM issues " + sqlbuild.LeaseJoin("issues") + " WHERE id IN (?)")).
-		WithArgs(id).
-		WillReturnRows(issueRows().AddRow(issueRowValues(id, id)...))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, label FROM labels WHERE issue_id IN (?) ORDER BY issue_id, label")).
-		WithArgs(id).
-		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "label"}))
-}
-
 // TestGetDependencyTreeInTxTellsABackEdgeFromACrossEdge walks a cycle
 // a → b → c → a that also has a cross edge a → c. The two revisits are
 // answered differently: the back-edge into a (on the current path) adds no
@@ -496,12 +462,13 @@ func expectIssueBatchOne(mock sqlmock.Sqlmock, id string) {
 func TestGetDependencyTreeInTxTellsABackEdgeFromACrossEdge(t *testing.T) {
 	for _, tt := range []struct {
 		name     string
+		via      string // the node on the path from a to c
 		rootDeps []string
 		wantIDs  []string
 		stub     [2]string // parent, then the edge's depth as a string
 	}{
-		{name: "b first", rootDeps: []string{"b", "c"}, wantIDs: []string{"a", "b", "c", "c"}, stub: [2]string{"a", "1"}},
-		{name: "c first", rootDeps: []string{"c", "b"}, wantIDs: []string{"a", "c", "b", "c"}, stub: [2]string{"b", "2"}},
+		{name: "the path first", via: "b", rootDeps: []string{"b", "c"}, wantIDs: []string{"a", "b", "c", "c"}, stub: [2]string{"a", "1"}},
+		{name: "c first", via: "z", rootDeps: []string{"c", "z"}, wantIDs: []string{"a", "c", "z", "c"}, stub: [2]string{"z", "2"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			db, mock, err := sqlmock.New()
@@ -512,28 +479,14 @@ func TestGetDependencyTreeInTxTellsABackEdgeFromACrossEdge(t *testing.T) {
 
 			mock.ExpectBegin()
 			expectIssue(mock, "a", "A")
-			expectDependencies(mock, "a", []dependencyRow{
-				{id: tt.rootDeps[0], depType: string(types.DepBlocks)},
-				{id: tt.rootDeps[1], depType: string(types.DepBlocks)},
-			})
-			expectIssueBatch(mock, tt.rootDeps)
-			expectC := func() {
-				expectIssue(mock, "c", "C")
-				expectDependencies(mock, "c", []dependencyRow{{id: "a", depType: string(types.DepBlocks)}})
-				// The back-edge into a reads a's row for the adjacency, then stops.
-				expectIssueBatchOne(mock, "a")
-			}
-			if tt.rootDeps[0] == "b" {
-				expectIssue(mock, "b", "B")
-				expectDependencies(mock, "b", []dependencyRow{{id: "c", depType: string(types.DepBlocks)}})
-				expectIssueBatchOne(mock, "c")
-				expectC()
-			} else {
-				expectC()
-				expectIssue(mock, "b", "B")
-				expectDependencies(mock, "b", []dependencyRow{{id: "c", depType: string(types.DepBlocks)}})
-				expectIssueBatchOne(mock, "c")
-			}
+			expectTreeEdges(mock, []string{"a"}, false,
+				treeEdge{"a", tt.rootDeps[0], string(types.DepBlocks)},
+				treeEdge{"a", tt.rootDeps[1], string(types.DepBlocks)})
+			expectTreeIssues(mock, tt.rootDeps...)
+			// a is already read, so the back-edge into it reads nothing more.
+			expectTreeEdges(mock, tt.rootDeps, false,
+				treeEdge{tt.via, "c", string(types.DepBlocks)},
+				treeEdge{"c", "a", string(types.DepBlocks)})
 
 			tx, err := db.BeginTx(context.Background(), nil)
 			if err != nil {
@@ -565,5 +518,257 @@ func TestGetDependencyTreeInTxTellsABackEdgeFromACrossEdge(t *testing.T) {
 				t.Fatalf("stub of c = parent %q depth %d edge %q, want %s/%s/blocks", stub.ParentID, stub.Depth, stub.EdgeFromParent, tt.stub[0], tt.stub[1])
 			}
 		})
+	}
+}
+
+// TestGetDependencyTreeInTxReadsLevelsNotNodes pins the cost of a wide tree: a
+// root with 30 children that each have one child takes one read per level and
+// plane, however many nodes each level holds.
+func TestGetDependencyTreeInTxReadsLevelsNotNodes(t *testing.T) {
+	const fanout = 30
+	mock, tx, counts := countedMockTx(t)
+	expectIssue(mock, "root", "Root")
+
+	children := make([]string, fanout)
+	grandchildren := make([]string, fanout)
+	rootEdges := make([]treeEdge, fanout)
+	childEdges := make([]treeEdge, fanout)
+	for i := range children {
+		children[i] = fmt.Sprintf("c%02d", i)
+		grandchildren[i] = fmt.Sprintf("g%02d", i)
+		rootEdges[i] = treeEdge{"root", children[i], string(types.DepBlocks)}
+		childEdges[i] = treeEdge{children[i], grandchildren[i], string(types.DepBlocks)}
+	}
+	expectTreeEdges(mock, []string{"root"}, false, rootEdges...)
+	expectTreeIssues(mock, children...)
+	expectTreeEdges(mock, children, false, childEdges...)
+	expectTreeIssues(mock, grandchildren...)
+
+	tree, err := GetDependencyTreeInTx(t.Context(), tx, "root", 3, false, false)
+	if err != nil {
+		t.Fatalf("GetDependencyTreeInTx: %v", err)
+	}
+	if len(tree) != 1+2*fanout {
+		t.Fatalf("len(tree) = %d, want %d", len(tree), 1+2*fanout)
+	}
+	// Root (2), then adjacency (2) and issues with labels (2) for each of two levels.
+	if n := counts.Total(); n != 10 {
+		t.Fatalf("the walk sent %d statements, want 10", n)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+	// The order is depth-first: a child, then its own child, children by id.
+	if tree[1].ID != "c00" || tree[2].ID != "g00" || tree[3].ID != "c01" {
+		t.Fatalf("first rows = %v, want c00, g00, c01", treeIDs(tree[:4]))
+	}
+}
+
+// TestGetDependencyTreeInTxResolvesEachIDAsGetIssueDoes pins the two tables'
+// precedence on the batched read: an id issues holds is taken from issues, an
+// id only wisps holds is taken from wisps with its wisp_labels, and an edge
+// whose far end is in neither table adds no row and does not stop the walk.
+func TestGetDependencyTreeInTxResolvesEachIDAsGetIssueDoes(t *testing.T) {
+	mock, tx, _ := countedMockTx(t)
+	expectIssue(mock, "root", "Root")
+	expectTreeEdges(mock, []string{"root"}, false,
+		treeEdge{"root", "wisp", string(types.DepBlocks)},
+		treeEdge{"root", "external:proj:cap", string(types.DepBlocks)},
+		treeEdge{"root", "durable", string(types.DepBlocks)})
+
+	issueSQL := "SELECT " + IssueSelectColumns + " FROM %s " + "%s WHERE id IN (%s)"
+	mock.ExpectQuery(regexp.QuoteMeta(fmt.Sprintf(issueSQL, "issues", sqlbuild.LeaseJoin("issues"), "?,?,?"))).
+		WithArgs("durable", "external:proj:cap", "wisp").
+		WillReturnRows(issueRows().AddRow(issueRowValues("durable", "From issues")...))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, label FROM labels WHERE issue_id IN (?,?,?) ORDER BY issue_id, label")).
+		WithArgs("durable", "external:proj:cap", "wisp").
+		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "label"}))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps LIMIT 1")).
+		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id FROM wisps WHERE id IN (?,?)")).
+		WithArgs("external:proj:cap", "wisp").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("wisp"))
+	mock.ExpectQuery(regexp.QuoteMeta(fmt.Sprintf(issueSQL, "wisps", sqlbuild.LeaseJoin("wisps"), "?"))).
+		WithArgs("wisp").
+		WillReturnRows(issueRows().AddRow(issueRowValues("wisp", "From wisps")...))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, label FROM wisp_labels WHERE issue_id IN (?) ORDER BY issue_id, label")).
+		WithArgs("wisp").
+		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "label"}).AddRow("wisp", "ephemeral-label"))
+
+	tree, err := GetDependencyTreeInTx(t.Context(), tx, "root", 2, false, false)
+	if err != nil {
+		t.Fatalf("GetDependencyTreeInTx: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+	if got := strings.Join(treeIDs(tree), ","); got != "root,durable,wisp" {
+		t.Fatalf("tree = %s, want root,durable,wisp", got)
+	}
+	if tree[1].Title != "From issues" || tree[2].Title != "From wisps" {
+		t.Fatalf("titles = %q, %q", tree[1].Title, tree[2].Title)
+	}
+	if len(tree[2].Labels) != 1 || tree[2].Labels[0] != "ephemeral-label" {
+		t.Fatalf("wisp labels = %v", tree[2].Labels)
+	}
+}
+
+// TestGetDependencyTreeInTxToleratesAMissingWispPlane pins the adjacency read's
+// one tolerance: wisp_dependencies can be dropped by a working-set reset, and
+// its absence means no wisp-plane edges.
+func TestGetDependencyTreeInTxToleratesAMissingWispPlane(t *testing.T) {
+	mock, tx, _ := countedMockTx(t)
+	expectIssue(mock, "root", "Root")
+	columns := []string{"near_id", "far_id", "type"}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, " + DepTargetExpr + ", type FROM dependencies WHERE issue_id IN (?)")).
+		WithArgs("root").
+		WillReturnRows(sqlmock.NewRows(columns).AddRow("root", "a", string(types.DepBlocks)))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, " + DepTargetExpr + ", type FROM wisp_dependencies WHERE issue_id IN (?)")).
+		WithArgs("root").
+		WillReturnError(tableNotFound("wisp_dependencies"))
+	expectTreeIssues(mock, "a")
+
+	tree, err := GetDependencyTreeInTx(t.Context(), tx, "root", 2, false, false)
+	if err != nil {
+		t.Fatalf("GetDependencyTreeInTx: %v", err)
+	}
+	if got := strings.Join(treeIDs(tree), ","); got != "root,a" {
+		t.Fatalf("tree = %s, want root,a", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestGetDependencyTreeInTxReadsASharedChildOnce pins that two nodes of one
+// level pointing at the same unread issue read it once, and that the walk still
+// answers the second edge with a stub.
+func TestGetDependencyTreeInTxReadsASharedChildOnce(t *testing.T) {
+	mock, tx, _ := countedMockTx(t)
+	expectIssue(mock, "root", "Root")
+	expectTreeEdges(mock, []string{"root"}, false,
+		treeEdge{"root", "a", string(types.DepBlocks)},
+		treeEdge{"root", "b", string(types.DepBlocks)})
+	expectTreeIssues(mock, "a", "b")
+	expectTreeEdges(mock, []string{"a", "b"}, false,
+		treeEdge{"a", "shared", string(types.DepBlocks)},
+		treeEdge{"b", "shared", string(types.DepBlocks)})
+	expectTreeIssues(mock, "shared")
+
+	tree, err := GetDependencyTreeInTx(t.Context(), tx, "root", 3, false, false)
+	if err != nil {
+		t.Fatalf("GetDependencyTreeInTx: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+	if got := strings.Join(treeIDs(tree), ","); got != "root,a,shared,b,shared" {
+		t.Fatalf("tree = %s, want root,a,shared,b,shared", got)
+	}
+	if !tree[4].Deduped || tree[2].Deduped {
+		t.Fatalf("only the second shared row is a stub: %v, %v", tree[2].Deduped, tree[4].Deduped)
+	}
+}
+
+// TestGetDependencyTreeInTxReadsNothingForAZeroDepth pins that a walk with no
+// levels to return sends nothing, so it also cannot fail on an absent root.
+func TestGetDependencyTreeInTxReadsNothingForAZeroDepth(t *testing.T) {
+	_, tx, counts := countedMockTx(t)
+	tree, err := GetDependencyTreeInTx(t.Context(), tx, "absent", 0, false, false)
+	if err != nil || tree != nil {
+		t.Fatalf("tree = %v, err = %v, want nil, nil", tree, err)
+	}
+	if n := counts.Total(); n != 0 {
+		t.Fatalf("sent %d statements, want none", n)
+	}
+}
+
+// TestAnchorsEdgesInTxKeepsTheDurableRowOfAnEdgeInBothPlanes pins the per-anchor
+// dedup: the same far end under two anchors is two edges, and one far end in
+// both planes under one anchor is one edge with the durable row's type.
+func TestAnchorsEdgesInTxKeepsTheDurableRowOfAnEdgeInBothPlanes(t *testing.T) {
+	mock, tx, _ := countedMockTx(t)
+	columns := []string{"near_id", "far_id", "type"}
+	mock.ExpectQuery(regexp.QuoteMeta("FROM dependencies WHERE issue_id IN (?,?)")).
+		WithArgs("a", "b").
+		WillReturnRows(sqlmock.NewRows(columns).
+			AddRow("a", "x", string(types.DepBlocks)).
+			AddRow("b", "x", string(types.DepBlocks)))
+	mock.ExpectQuery(regexp.QuoteMeta("FROM wisp_dependencies WHERE issue_id IN (?,?)")).
+		WithArgs("a", "b").
+		WillReturnRows(sqlmock.NewRows(columns).
+			AddRow("a", "x", string(types.DepRelated)).
+			AddRow("a", "y", string(types.DepRelated)))
+
+	edges, err := anchorsEdgesInTx(t.Context(), tx, []string{"a", "b"}, false)
+	if err != nil {
+		t.Fatalf("anchorsEdgesInTx: %v", err)
+	}
+	want := map[string][]anchorEdge{
+		"a": {{farID: "x", depType: string(types.DepBlocks)}, {farID: "y", depType: string(types.DepRelated)}},
+		"b": {{farID: "x", depType: string(types.DepBlocks)}},
+	}
+	if fmt.Sprint(edges) != fmt.Sprint(want) {
+		t.Fatalf("edges = %v, want %v", edges, want)
+	}
+}
+
+// TestAnchorsEdgesInTxSortsEachAnchorsEdges pins that the order of an anchor's
+// edges does not follow the order the server returned them in, across planes.
+func TestAnchorsEdgesInTxSortsEachAnchorsEdges(t *testing.T) {
+	mock, tx, _ := countedMockTx(t)
+	columns := []string{"near_id", "far_id", "type"}
+	mock.ExpectQuery(regexp.QuoteMeta("FROM dependencies WHERE issue_id IN (?)")).
+		WithArgs("a").
+		WillReturnRows(sqlmock.NewRows(columns).
+			AddRow("a", "z", string(types.DepBlocks)).
+			AddRow("a", "m", string(types.DepBlocks)))
+	mock.ExpectQuery(regexp.QuoteMeta("FROM wisp_dependencies WHERE issue_id IN (?)")).
+		WithArgs("a").
+		WillReturnRows(sqlmock.NewRows(columns).AddRow("a", "c", string(types.DepBlocks)))
+
+	edges, err := anchorsEdgesInTx(t.Context(), tx, []string{"a"}, false)
+	if err != nil {
+		t.Fatalf("anchorsEdgesInTx: %v", err)
+	}
+	var got []string
+	for _, edge := range edges["a"] {
+		got = append(got, edge.farID)
+	}
+	if strings.Join(got, ",") != "c,m,z" {
+		t.Fatalf("far ends = %v, want c, m, z", got)
+	}
+}
+
+// TestAnchorsEdgesInTxBatchesLargeFrontiers pins the IN-list bound: a frontier
+// over queryBatchSize is split, in each plane, and its rows are merged.
+func TestAnchorsEdgesInTxBatchesLargeFrontiers(t *testing.T) {
+	anchors := make([]string, queryBatchSize+1)
+	for i := range anchors {
+		anchors[i] = fmt.Sprintf("n%d", i)
+	}
+	mock, tx, counts := countedMockTx(t)
+	columns := []string{"near_id", "far_id", "type"}
+	first := strings.TrimSuffix(strings.Repeat("?,", queryBatchSize), ",")
+	mock.ExpectQuery(regexp.QuoteMeta("FROM dependencies WHERE issue_id IN (" + first + ")")).
+		WillReturnRows(sqlmock.NewRows(columns).AddRow("n0", "x", string(types.DepBlocks)))
+	mock.ExpectQuery(regexp.QuoteMeta("FROM dependencies WHERE issue_id IN (?)")).
+		WithArgs(anchors[queryBatchSize]).
+		WillReturnRows(sqlmock.NewRows(columns).AddRow(anchors[queryBatchSize], "y", string(types.DepBlocks)))
+	mock.ExpectQuery(regexp.QuoteMeta("FROM wisp_dependencies WHERE issue_id IN (" + first + ")")).
+		WillReturnRows(sqlmock.NewRows(columns))
+	mock.ExpectQuery(regexp.QuoteMeta("FROM wisp_dependencies WHERE issue_id IN (?)")).
+		WithArgs(anchors[queryBatchSize]).
+		WillReturnRows(sqlmock.NewRows(columns))
+
+	edges, err := anchorsEdgesInTx(t.Context(), tx, anchors, false)
+	if err != nil {
+		t.Fatalf("anchorsEdgesInTx: %v", err)
+	}
+	if n := counts.Total(); n != 4 {
+		t.Fatalf("statements = %d, want 4", n)
+	}
+	if len(edges["n0"]) != 1 || len(edges[anchors[queryBatchSize]]) != 1 {
+		t.Fatalf("edges = %v", edges)
 	}
 }
