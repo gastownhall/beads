@@ -602,6 +602,110 @@ func TestWispPurgeClosedOrphanAccountingSpansChunks(t *testing.T) {
 	})
 }
 
+// TestWispPurgeClosedReportsScanCap pins AC-6: a forced scan that reaches
+// the raw 5000-row limit says so in the outcome (candidates_capped, plus a
+// human hint that more candidates MAY remain) without claiming an exact
+// total, and never deletes beyond the window. A window entirely occupied by
+// protected rows says so too. Below the cap, nothing changes.
+func TestWispPurgeClosedReportsScanCap(t *testing.T) {
+	t.Run("cap hit reports candidates_capped", func(t *testing.T) {
+		_, _ = useWispClosedGCStubIssues(t, wispClosedGCIssues(wispClosedGCIDs(5000), false))
+		jsonOutput = true
+
+		stdout, _, err := runWispPurgeClosedCaptured(t, false, true)
+		if err != nil {
+			t.Fatalf("forced closed purge at the cap: %v\nstdout:\n%s", err, stdout)
+		}
+		obj := decodeWispPurgeJSON(t, stdout)
+		if capped, ok := obj["candidates_capped"].(bool); !ok || !capped {
+			t.Errorf("candidates_capped = %v; want true after a 5000-row scan", obj["candidates_capped"])
+		}
+	})
+
+	t.Run("cap hit adds the human hint without a total", func(t *testing.T) {
+		// 5200 rows, of which the scan selects 5000: the hint says more MAY
+		// remain, and the outcome never claims the full 5200.
+		_, _ = useWispClosedGCStubIssues(t, wispClosedGCIssues(wispClosedGCIDs(5200), false))
+
+		stdout, _, err := runWispPurgeClosedCaptured(t, false, true)
+		if err != nil {
+			t.Fatalf("forced closed purge at the cap: %v\nstdout:\n%s", err, stdout)
+		}
+		if !strings.Contains(stdout, "more closed wisps may remain") {
+			t.Errorf("text outcome does not say more candidates may remain:\n%s", stdout)
+		}
+		if strings.Contains(stdout, "5200") {
+			t.Errorf("text outcome claims the exact remaining total:\n%s", stdout)
+		}
+	})
+
+	t.Run("below the cap reports not capped", func(t *testing.T) {
+		_, _ = useWispClosedGCStub(t, 450)
+		jsonOutput = true
+
+		stdout, _, err := runWispPurgeClosedCaptured(t, false, true)
+		if err != nil {
+			t.Fatalf("forced closed purge below the cap: %v\nstdout:\n%s", err, stdout)
+		}
+		obj := decodeWispPurgeJSON(t, stdout)
+		if capped, ok := obj["candidates_capped"].(bool); !ok || capped {
+			t.Errorf("candidates_capped = %v; want false below the cap", obj["candidates_capped"])
+		}
+	})
+
+	t.Run("deletes no more than the window", func(t *testing.T) {
+		// 5200 rows: the scan stops at 5000 and the purge deletes exactly
+		// that window — never the rows beyond it.
+		all := wispClosedGCIDs(5200)
+		s, _ := useWispClosedGCStubIssues(t, wispClosedGCIssues(all, false))
+		jsonOutput = true
+
+		stdout, _, err := runWispPurgeClosedCaptured(t, false, true)
+		if err != nil {
+			t.Fatalf("forced closed purge at the cap: %v\nstdout:\n%s", err, stdout)
+		}
+		obj := decodeWispPurgeJSON(t, stdout)
+		if got := wispPurgeIntField(t, obj, "deleted_count"); got != 5000 {
+			t.Errorf("deleted_count = %d; want 5000 (the window, not the database)", got)
+		}
+		if len(s.issues) != 200 {
+			t.Errorf("%d wisps remain; want the 200 beyond the window", len(s.issues))
+		}
+	})
+
+	t.Run("all-protected capped window still says so", func(t *testing.T) {
+		_, _ = useWispClosedGCStubIssues(t, wispClosedGCIssues(wispClosedGCIDs(5000), true))
+
+		stdout, _, err := runWispPurgeClosedCaptured(t, false, true)
+		if err != nil {
+			t.Fatalf("forced closed purge of an all-pinned window: %v\nstdout:\n%s", err, stdout)
+		}
+		if !strings.Contains(stdout, "No closed wisps to delete") {
+			t.Errorf("the all-protected window lost its empty-selection message:\n%s", stdout)
+		}
+		if !strings.Contains(stdout, "more closed wisps may remain") {
+			t.Errorf("the all-protected capped window does not say more candidates may remain:\n%s", stdout)
+		}
+	})
+
+	t.Run("all-protected capped window JSON", func(t *testing.T) {
+		_, _ = useWispClosedGCStubIssues(t, wispClosedGCIssues(wispClosedGCIDs(5000), true))
+		jsonOutput = true
+
+		stdout, _, err := runWispPurgeClosedCaptured(t, false, true)
+		if err != nil {
+			t.Fatalf("forced closed purge of an all-pinned window: %v\nstdout:\n%s", err, stdout)
+		}
+		obj := decodeWispPurgeJSON(t, stdout)
+		if got := wispPurgeIntField(t, obj, "deleted_count"); got != 0 {
+			t.Errorf("deleted_count = %d; want 0", got)
+		}
+		if capped, ok := obj["candidates_capped"].(bool); !ok || !capped {
+			t.Errorf("candidates_capped = %v; want true — the raw scan hit the limit even though every row was protected", obj["candidates_capped"])
+		}
+	})
+}
+
 // ---- proxied route: a recording transactional provider ----
 
 // wispGCProxiedStubProvider records every unit of work the proxied purge

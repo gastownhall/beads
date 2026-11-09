@@ -5391,6 +5391,14 @@ bd mol wisp gc
     | fastest way to reclaim space from accumulated wisp bloat. Safe by default:
     | requires --force to actually delete.
     |
+    | A forced --closed purge deletes in bounded batches of 200 wisps, each its
+    | own transaction: a batch that fails (or an interrupted run) keeps every
+    | batch that already committed, and the outcome reports the confirmed
+    | deletions, the unconfirmed remainder and a rerun hint (rerunning the same
+    | command reselects current data and continues). The candidate scan reads at
+    | most 5000 closed wisps; a run that reaches that window reports
+    | candidates_capped, because more closed wisps may remain beyond it.
+    |
     | Note: This uses time-based cleanup, appropriate for ephemeral wisps.
     | For graph-pressure staleness detection (blocking other work), see 'bd mol stale'.
     |

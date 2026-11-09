@@ -31,10 +31,21 @@ import (
 	"github.com/steveyegge/beads/internal/ui"
 )
 
+// wispClosedGCScanLimit is the raw closed-wisp scan cap of both purge routes.
+// It bounds the selection window, not the deletion: a run that reaches it may
+// leave more closed wisps in the database, which the outcome reports via
+// candidates_capped rather than claiming a total.
+const wispClosedGCScanLimit = 5000
+
 // wispClosedGCChunkSize is the per-chunk deletion bound: the number of ids
 // one deletion request (direct route) or one unit of work (proxied route)
 // carries. Matches the storage layer's bounded deleteWispBatch precedent.
 const wispClosedGCChunkSize = 200
+
+// wispClosedGCRerunHint is the guidance a partially failed purge reports.
+// It deliberately does not promise the failed chunk wrote nothing: counts
+// are confirmed progress, and a rerun reselects current data.
+const wispClosedGCRerunHint = "rerun the same command to reselect current data and delete the remaining closed wisps"
 
 // wispClosedGCChunk is one chunk's confirmed deletion result, normalized from
 // the direct route's issueops.DeleteResult or the proxied route's
@@ -95,7 +106,7 @@ func (p wispClosedGCProgress) orphanedAscending() []string {
 // already published (deleted, deleted_count, dependencies_removed,
 // labels_removed, events_removed, references_updated, orphaned_issues),
 // valued from confirmed chunk progress. A route adds its own extras (the
-// direct route's deleted_ids).
+// direct route's deleted_ids, both routes' candidates_capped).
 func (p wispClosedGCProgress) successFields() map[string]interface{} {
 	return map[string]interface{}{
 		"deleted":              slices.Clone(p.ConfirmedIDs),
@@ -147,10 +158,14 @@ func printWispClosedGCConfirmed(p wispClosedGCProgress) {
 	}
 }
 
-// wispClosedGCRerunHint is the guidance a partially failed purge reports.
-// It deliberately does not promise the failed chunk wrote nothing: counts
-// are confirmed progress, and a rerun reselects current data.
-const wispClosedGCRerunHint = "rerun the same command to reselect current data and delete the remaining closed wisps"
+// printWispClosedGCCapHint is the human hint a capped scan adds to a forced
+// mutation outcome. It says candidates MAY remain — the cap is a scan window,
+// not an exact-total assertion, and a window full of protected rows can pass
+// without the database being empty.
+func printWispClosedGCCapHint() {
+	fmt.Printf("%s Candidate scan reached the %d-wisp limit; more closed wisps may remain\n",
+		ui.RenderWarn("⚠"), wispClosedGCScanLimit)
+}
 
 // reportWispClosedGCPurgeFailure renders the stopped-mid-selection outcome of
 // a forced chunked purge: the confirmed progress, the original cause and a
@@ -161,13 +176,14 @@ const wispClosedGCRerunHint = "rerun the same command to reselect current data a
 // here — the returned exitError prints nothing at any outer handler — and
 // JSON mode emits exactly one stdout object, so machine consumers parse one
 // document whether the purge finished or stopped.
-func reportWispClosedGCPurgeFailure(p wispClosedGCProgress, selected int, err error, routeJSON map[string]interface{}) error {
+func reportWispClosedGCPurgeFailure(p wispClosedGCProgress, selected int, capped bool, err error, routeJSON map[string]interface{}) error {
 	remaining := selected - len(p.ConfirmedIDs)
 	if jsonOutput {
 		answer := p.successFields()
 		for key, value := range routeJSON {
 			answer[key] = value
 		}
+		answer["candidates_capped"] = capped
 		answer["remaining_count"] = remaining
 		answer["error"] = err.Error()
 		answer["hint"] = wispClosedGCRerunHint
@@ -179,6 +195,9 @@ func reportWispClosedGCPurgeFailure(p wispClosedGCProgress, selected int, err er
 	fmt.Fprintf(os.Stderr, "Error: %s\n", remedy.PrintedText(err.Error()))
 	fmt.Fprintf(os.Stderr, "Confirmed %d deletion(s) before the failure; %d of %d selected closed wisp(s) are unconfirmed.\n",
 		len(p.ConfirmedIDs), remaining, selected)
+	if capped {
+		fmt.Fprintf(os.Stderr, "Warning: candidate scan reached the %d-wisp limit; more closed wisps may remain\n", wispClosedGCScanLimit)
+	}
 	fmt.Fprintf(os.Stderr, "Hint: %s\n", wispClosedGCRerunHint)
 	return &exitError{Code: 1}
 }

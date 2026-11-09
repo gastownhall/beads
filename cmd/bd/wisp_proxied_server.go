@@ -240,13 +240,17 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 		Status:       &statusClosed,
 		Ephemeral:    &ephemeralTrue,
 		ExcludeTypes: excludeTypes,
-		Limit:        5000,
+		Limit:        wispClosedGCScanLimit,
 	}
 	closedIssues, err := r.SearchIssues(ctx, "", filter)
 	if err != nil {
 		uw.Close(ctx)
 		return HandleError("listing closed wisps: %v", err)
 	}
+	// The cap is a property of the RAW scan, captured before the pinned/infra
+	// filtering below: a window that is entirely protected rows still says the
+	// scan was capped, because more candidates may sit beyond it either way.
+	capped := len(closedIssues) >= wispClosedGCScanLimit
 
 	pinnedCount := 0
 	infraCount := 0
@@ -273,13 +277,24 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 	}
 
 	if len(closedIssues) == 0 {
+		// The empty outcome keeps its shape; a forced run whose raw scan hit
+		// the cap still says so, because a window entirely occupied by
+		// protected rows is not an empty database (GH#4684).
 		if jsonOutput {
-			return outputJSON(map[string]interface{}{
+			payload := map[string]interface{}{
 				"deleted_count": 0,
 				"message":       "No closed wisps to delete",
-			})
+			}
+			if force && !dryRun && capped {
+				payload["candidates_capped"] = true
+				payload["hint"] = fmt.Sprintf("candidate scan reached the %d-wisp limit; more closed wisps may remain", wispClosedGCScanLimit)
+			}
+			return outputJSON(payload)
 		}
 		fmt.Println("No closed wisps to delete")
+		if force && !dryRun && capped {
+			printWispClosedGCCapHint()
+		}
 		return nil
 	}
 
@@ -347,12 +362,17 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 		}, nil
 	})
 	if err != nil {
-		return reportWispClosedGCPurgeFailure(progress, len(ids), err, nil)
+		return reportWispClosedGCPurgeFailure(progress, len(ids), capped, err, nil)
 	}
 
 	if jsonOutput {
-		return outputJSON(progress.successFields())
+		answer := progress.successFields()
+		answer["candidates_capped"] = capped
+		return outputJSON(answer)
 	}
 	printWispClosedGCConfirmed(progress)
+	if capped {
+		printWispClosedGCCapHint()
+	}
 	return nil
 }

@@ -635,6 +635,14 @@ Use --closed to purge ALL closed wisps (regardless of age). This is the
 fastest way to reclaim space from accumulated wisp bloat. Safe by default:
 requires --force to actually delete.
 
+A forced --closed purge deletes in bounded batches of 200 wisps, each its
+own transaction: a batch that fails (or an interrupted run) keeps every
+batch that already committed, and the outcome reports the confirmed
+deletions, the unconfirmed remainder and a rerun hint (rerunning the same
+command reselects current data and continues). The candidate scan reads at
+most 5000 closed wisps; a run that reaches that window reports
+candidates_capped, because more closed wisps may remain beyond it.
+
 Note: This uses time-based cleanup, appropriate for ephemeral wisps.
 For graph-pressure staleness detection (blocking other work), see 'bd mol stale'.
 
@@ -859,7 +867,7 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 	filter := types.IssueFilter{
 		Ephemeral:    &ephemeralFlag,
 		ExcludeTypes: excludeTypes,
-		Limit:        5000,
+		Limit:        wispClosedGCScanLimit,
 	}
 	issues, err := r.SearchIssues(ctx, "", filter)
 	if err != nil {
@@ -953,13 +961,17 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 		Status:       &statusClosed,
 		Ephemeral:    &ephemeralTrue,
 		ExcludeTypes: excludeTypes,
-		Limit:        5000,
+		Limit:        wispClosedGCScanLimit,
 	}
 
 	closedIssues, err := store.SearchIssues(ctx, "", filter)
 	if err != nil {
 		return HandleError("listing closed wisps: %v", err)
 	}
+	// The cap is a property of the RAW scan, captured before the pinned/infra
+	// filtering below: a window that is entirely protected rows still says the
+	// scan was capped, because more candidates may sit beyond it either way.
+	capped := len(closedIssues) >= wispClosedGCScanLimit
 
 	// Filter out pinned and infra issues (protected from cleanup)
 	pinnedCount := 0
@@ -986,13 +998,24 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 	}
 
 	if len(closedIssues) == 0 {
+		// The empty outcome keeps its shape; a forced run whose raw scan hit
+		// the cap still says so, because a window entirely occupied by
+		// protected rows is not an empty database (GH#4684).
 		if jsonOutput {
-			return outputJSON(map[string]interface{}{
+			payload := map[string]interface{}{
 				"deleted_count": 0,
 				"message":       "No closed wisps to delete",
-			})
+			}
+			if force && !dryRun && capped {
+				payload["candidates_capped"] = true
+				payload["hint"] = fmt.Sprintf("candidate scan reached the %d-wisp limit; more closed wisps may remain", wispClosedGCScanLimit)
+			}
+			return outputJSON(payload)
 		}
 		fmt.Println("No closed wisps to delete")
+		if force && !dryRun && capped {
+			printWispClosedGCCapHint()
+		}
 		return nil
 	}
 
@@ -1083,16 +1106,20 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 		commandDeletedIssueIDs.add(progress.ConfirmedIDs...)
 	}
 	if err != nil {
-		return reportWispClosedGCPurgeFailure(progress, len(ids), err,
+		return reportWispClosedGCPurgeFailure(progress, len(ids), capped, err,
 			map[string]interface{}{"deleted_ids": slices.Clone(progress.ConfirmedIDs)})
 	}
 
 	if jsonOutput {
 		answer := progress.successFields()
 		answer["deleted_ids"] = slices.Clone(progress.ConfirmedIDs)
+		answer["candidates_capped"] = capped
 		return outputJSON(answer)
 	}
 	printWispClosedGCConfirmed(progress)
+	if capped {
+		printWispClosedGCCapHint()
+	}
 	fmt.Printf("\nHint: Run 'bd compact --dolt' to reclaim disk space\n")
 	return nil
 }
