@@ -738,10 +738,14 @@ bd compact
     |      committers and dates, so AS OF reads and dolt_history views at or
     |      after the newest squashed commit stay valid (an earlier time resolves
     |      to the initial commit)
-    |   4. Swaps main branch to the compacted version
-    |   5. Prunes remote-tracking refs (they would keep the old history alive;
+    |   4. Catches up commits that reached main while compact ran: when they
+    |      form a linear chain, replays them on top the same way — each keeping
+    |      its message, authors, committers and dates — so the swap below moves
+    |      main to the tree its writers already saw
+    |   5. Swaps main branch to the compacted version
+    |   6. Prunes remote-tracking refs (they would keep the old history alive;
     |      the next push or fetch re-creates them at the new tip)
-    |   6. Runs a full Dolt GC (all storage generations) to reclaim the old history
+    |   7. Runs a full Dolt GC (all storage generations) to reclaim the old history
     |
     | Compact refuses, and changes nothing, when commit dates are out of history
     | order across the cutoff: a recent commit that comes at or before an old commit
@@ -751,8 +755,12 @@ bd compact
     | the replayed history holds the same committed data main held when compact read
     | its history, and aborts without resetting main if it does not. A write that
     | reaches main while compact runs is kept, not counted as a difference:
-    | uncommitted changes stay pending, and a commit that lands meanwhile is kept in
-    | one follow-up commit.
+    | uncommitted changes stay pending, a commit that lands before the catch-up
+    | read keeps its message and identity through the replay, and a commit that
+    | lands after it — or one whose range the replay cannot carry, such as a
+    | merge — is kept in one follow-up commit. Compact does not claim atomicity
+    | with a writer that straddles the swap: its rows stay readable on main, and
+    | 'bd dolt commit' recovers any left uncommitted.
     |
     | The GC pass is a full collection: Dolt storage is generational, and a default
     | GC never revisits data an earlier GC moved to the old generation. On any store

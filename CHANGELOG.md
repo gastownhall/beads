@@ -1226,6 +1226,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd compact` no longer demotes a commit that reached `main` while it ran
+  out of `main`'s history. It swapped `main` onto the rebuilt history
+  without the landed commit, so a writer whose transaction began on that
+  commit's head and finished after the swap had its Dolt commit merged
+  against the transaction-start head — an acknowledged commit ended up as
+  uncommitted working data while `bd compact` reported success (#7502).
+  Before the swap, compact now catches up with the commits that reached
+  `main` since its read: when they form a linear chain the replay can
+  carry, it replays them onto the rebuilt history — each keeping its own
+  message, author, committer and dates — so the swap moves `main` to the
+  tree its writers already saw and a straddling writer converges on it. A
+  commit that lands after the catch-up read, or a range the replay cannot
+  carry (a merge, a gap), is kept as before in one follow-up commit without
+  its own hash, message or author. The compaction still does not claim
+  atomicity with a writer that straddles the swap after the catch-up read:
+  its rows stay readable on `main`, and `bd dolt commit` recovers any left
+  uncommitted. See
+  [Writes that reach `main` while `bd compact` runs](docs/architecture/dolt.md#maintenance--bd-prune-and-bd-purge).
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

@@ -428,12 +428,22 @@ a commit that lands on `main` while the history is being rebuilt. Builds with
 the fix listed in the CHANGELOG move `main` with a soft reset and keep both.
 The check that the rebuilt history reproduces `main`'s data compares it with
 `main` as `bd compact` read it, so such a write is not mistaken for a divergent
-replay. Working-set changes stay pending, as they were. A commit that landed during
-the rebuild is kept in one follow-up commit,
-`compact: commit changes that reached main during compaction`, so it does not
-keep its own hash, message or author on `main`; changes that were already
-staged when `bd compact` started go into that commit too. If that follow-up
-commit fails, `bd compact` stops after `main` has moved and before garbage
+replay. Working-set changes stay pending, as they were. Before the swap, the
+compaction catches up with the commits that reached `main` since its read:
+when they form a linear chain the replay can carry, it replays them onto the
+rebuilt history the same way — each keeping its own message, author,
+committer and dates — so the swap moves `main` to the tree its writers already
+saw, and a writer whose transaction straddles the swap converges on it
+instead of demoting their commit out of `main`'s history. A commit that
+lands after that catch-up read, or one whose range the replay cannot carry
+(a merge, a gap, an identity Dolt cannot rewrite), is kept in one follow-up
+commit, `compact: commit changes that reached main during compaction`, so it
+does not keep its own hash, message or author on `main`; changes that were
+already staged when `bd compact` started go into that commit too. The
+compaction does not claim atomicity with a writer that straddles the swap
+after the catch-up read: its rows stay readable on `main`, and
+`bd dolt commit` recovers any left uncommitted. If that follow-up commit
+fails, `bd compact` stops after `main` has moved and before garbage
 collection, says so, and leaves the changes staged: commit them with
 `bd dolt commit` when you are ready.
 
