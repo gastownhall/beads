@@ -339,7 +339,7 @@ func parseImportRecords(r io.Reader) ([]*types.Issue, []memoryRecord, map[*types
 
 		var peek map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(line), &peek); err != nil {
-			return nil, nil, nil, fmt.Errorf("failed to parse JSONL line: %w", err)
+			return nil, nil, nil, fmt.Errorf("failed to parse JSONL line %d: %w", lineNum, err)
 		}
 
 		// Skip the optional beads-jsonl header record (§J1.3). A canonical
@@ -359,7 +359,7 @@ func parseImportRecords(r io.Reader) ([]*types.Issue, []memoryRecord, map[*types
 			if err := json.Unmarshal(rawType, &typeStr); err == nil && typeStr == "memory" {
 				var mem memoryRecord
 				if err := json.Unmarshal([]byte(line), &mem); err != nil {
-					return nil, nil, nil, fmt.Errorf("failed to parse memory record: %w", err)
+					return nil, nil, nil, fmt.Errorf("failed to parse memory record on line %d: %w", lineNum, err)
 				}
 				if mem.Key != "" && mem.Value != "" {
 					memories = append(memories, mem)
@@ -370,7 +370,7 @@ func parseImportRecords(r io.Reader) ([]*types.Issue, []memoryRecord, map[*types
 
 		var issue types.Issue
 		if err := json.Unmarshal([]byte(line), &issue); err != nil {
-			return nil, nil, nil, fmt.Errorf("failed to parse issue from JSONL: %w", err)
+			return nil, nil, nil, fmt.Errorf("failed to parse issue record on line %d: %w", lineNum, err)
 		}
 		if issue.Status == "tombstone" {
 			continue
@@ -381,7 +381,10 @@ func parseImportRecords(r io.Reader) ([]*types.Issue, []memoryRecord, map[*types
 		sources[&issue] = importRecordSource{Line: lineNum, Raw: line}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to scan JSONL: %w", err)
+		// The failing token (e.g. a line over the 64MB buffer) was never
+		// counted, so the offending line is the one AFTER the last
+		// complete one.
+		return nil, nil, nil, fmt.Errorf("failed to scan JSONL at line %d: %w", lineNum+1, err)
 	}
 	return issues, memories, sources, nil
 }

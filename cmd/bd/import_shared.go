@@ -1534,7 +1534,7 @@ func parseJSONLFile(path string) ([]*types.Issue, map[string]string, map[*types.
 		// Peek at the record to check for _type field
 		var peek map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(line), &peek); err != nil {
-			return nil, nil, nil, fmt.Errorf("failed to parse JSONL line: %w", err)
+			return nil, nil, nil, fmt.Errorf("failed to parse JSONL line %d: %w", lineNum, err)
 		}
 
 		// Skip the optional beads-jsonl metadata/header record.
@@ -1557,7 +1557,7 @@ func parseJSONLFile(path string) ([]*types.Issue, map[string]string, map[*types.
 			if err := json.Unmarshal(rawType, &typeStr); err == nil && typeStr == "memory" {
 				var mem memoryRecord
 				if err := json.Unmarshal([]byte(line), &mem); err != nil {
-					return nil, nil, nil, fmt.Errorf("failed to parse memory record: %w", err)
+					return nil, nil, nil, fmt.Errorf("failed to parse memory record on line %d: %w", lineNum, err)
 				}
 				if mem.Key != "" && mem.Value != "" {
 					configEntries[kvPrefix+memoryPrefix+mem.Key] = mem.Value
@@ -1569,7 +1569,7 @@ func parseJSONLFile(path string) ([]*types.Issue, map[string]string, map[*types.
 		// Regular issue record
 		var issue types.Issue
 		if err := json.Unmarshal([]byte(line), &issue); err != nil {
-			return nil, nil, nil, fmt.Errorf("failed to parse issue from JSONL: %w", err)
+			return nil, nil, nil, fmt.Errorf("failed to parse issue record on line %d: %w", lineNum, err)
 		}
 		// Skip tombstone entries: these are deleted issues exported by older
 		// versions (pre-v0.50) with status "tombstone" and deleted_at set.
@@ -1585,7 +1585,10 @@ func parseJSONLFile(path string) ([]*types.Issue, map[string]string, map[*types.
 		sources[&issue] = importRecordSource{Line: lineNum, Raw: line}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to scan JSONL: %w", err)
+		// The failing token (e.g. a line over the 64MB buffer) was never
+		// counted, so the offending line is the one AFTER the last
+		// complete one.
+		return nil, nil, nil, fmt.Errorf("failed to scan JSONL at line %d: %w", lineNum+1, err)
 	}
 
 	return issues, configEntries, sources, nil
