@@ -502,6 +502,44 @@ func TestClassifyFSCKFailure(t *testing.T) {
 			wantIs:    context.Canceled,
 			wantIsNot: []error{ErrDanglingReference, ErrFSCKTimeout},
 		},
+		// (b→c) Could-not-open keeps its skip even when a context error is
+		//       present: the check never ran.
+		{
+			name:      "could-not-open + parent canceled → nil (skip preserved)",
+			parentErr: context.Canceled,
+			fsckErr:   context.Canceled,
+			output:    "Could not open dolt database: some reason",
+			wantNil:   true,
+		},
+		{
+			name:      "could-not-open + own fsck deadline → nil (skip preserved)",
+			parentErr: nil,
+			fsckErr:   context.DeadlineExceeded,
+			output:    "Could not open dolt database: some reason",
+			wantNil:   true,
+		},
+		// (b→d) Interruption phrasing + parent deadline keeps caller-timeout
+		//       guidance, not fsck's own BEADS_FSCK_TIMEOUT guidance.
+		{
+			name:         "'context deadline exceeded' output + parent deadline → caller-timeout guidance",
+			parentErr:    context.DeadlineExceeded,
+			fsckErr:      context.DeadlineExceeded,
+			output:       "context deadline exceeded",
+			wantIs:       ErrFSCKTimeout,
+			wantIsNot:    []error{ErrDanglingReference},
+			wantContains: "dolt.auto-push-timeout",
+			wantAbsent:   "BEADS_FSCK_TIMEOUT environment variable",
+		},
+		// (f) 'signal: terminated' with no context error stays an interrupt.
+		{
+			name:         "'signal: terminated' output, no ctx error → interrupted",
+			parentErr:    nil,
+			fsckErr:      nil,
+			output:       "signal: terminated",
+			wantIs:       context.Canceled,
+			wantIsNot:    []error{ErrDanglingReference, ErrFSCKTimeout},
+			wantContains: "interrupted",
+		},
 		// (a→d) Cancellation phrasing + fsck's own deadline → timeout guidance,
 		//       not a corruption report.
 		{
