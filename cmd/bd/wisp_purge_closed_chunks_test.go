@@ -308,3 +308,92 @@ func TestWispPurgeClosedSkipsPerIDResolution(t *testing.T) {
 		t.Errorf("front door made %d per-id lookups after the scan, want 0", s.lookups)
 	}
 }
+
+// failRequestContaining refuses, atomically, the request that carries id.
+func failRequestContaining(id string, err error) func(issueops.DeleteRequest) error {
+	return func(req issueops.DeleteRequest) error {
+		if slices.Contains(req.IDs, id) {
+			return err
+		}
+		return nil
+	}
+}
+
+// TestWispPurgeClosedCommitsBoundedChunks pins that a deletion request that
+// fails after earlier ones committed stops the purge without discarding them:
+// the two committed chunks stay deleted, no later request is sent, the command
+// exits nonzero, and its text names the confirmed deletions, the selected wisps
+// still unconfirmed, the cause and how to continue. With the whole selection in
+// one request, the failure took every deletion of the run with it.
+func TestWispPurgeClosedCommitsBoundedChunks(t *testing.T) {
+	s := useWispPurgeStub(t, 450)
+	s.deleter.fail = failRequestContaining(s.closed[449], context.DeadlineExceeded)
+
+	stdout, stderr, err := captureWispGC(t, func() error {
+		return runWispPurgeClosed(context.Background(), false, true, nil)
+	})
+	if err == nil {
+		t.Fatalf("runWispPurgeClosed succeeded, want a nonzero exit\nstdout:\n%s", stdout)
+	}
+	if code, ok := exitCodeFromError(err); !ok || code == 0 {
+		t.Errorf("error = %v, want an already-reported nonzero exit", err)
+	}
+	if got, want := requestSizes(s.deleter.requests), []int{200, 200, 50}; !slices.Equal(got, want) {
+		t.Errorf("request sizes = %v, want %v (no request after the failed one)", got, want)
+	}
+	if len(s.deleter.deleted) != 400 {
+		t.Errorf("deleted %d wisps, want the 400 of the two committed chunks", len(s.deleter.deleted))
+	}
+	for _, want := range []string{"Deleted 400 issue(s)"} {
+		if !bytes.Contains([]byte(stdout), []byte(want)) {
+			t.Errorf("stdout lacks %q:\n%s", want, stdout)
+		}
+	}
+	for _, want := range []string{"50", "context deadline exceeded", "bd mol wisp gc --closed --force"} {
+		if !bytes.Contains([]byte(stderr), []byte(want)) {
+			t.Errorf("stderr lacks %q:\n%s", want, stderr)
+		}
+	}
+}
+
+// TestWispPurgeClosedJSONReportsPartialProgress pins the --json half: a purge
+// stopped by a failed request prints exactly one JSON object on stdout, with
+// the success keys counting only the committed chunks plus remaining_count,
+// error and hint, and exits nonzero without a second error envelope.
+func TestWispPurgeClosedJSONReportsPartialProgress(t *testing.T) {
+	s := useWispPurgeStub(t, 450)
+	s.deleter.fail = failRequestContaining(s.closed[449], context.DeadlineExceeded)
+	jsonOutput = true
+
+	stdout, stderr, err := captureWispGC(t, func() error {
+		return runWispPurgeClosed(context.Background(), false, true, nil)
+	})
+	if err == nil {
+		t.Fatalf("runWispPurgeClosed succeeded, want a nonzero exit\nstdout:\n%s", stdout)
+	}
+	if !isReportedExit(err) {
+		t.Errorf("error = %v, want an already-reported exit (the caller must not print it again)", err)
+	}
+	if bytes.Contains([]byte(stderr), []byte("{")) {
+		t.Errorf("stderr carries a JSON value; the answer belongs in the one stdout object:\n%s", stderr)
+	}
+	obj := decodeSingleJSONObject(t, stdout)
+	if got := obj["deleted_count"]; got != float64(400) {
+		t.Errorf("deleted_count = %v, want 400", got)
+	}
+	if got, _ := obj["deleted"].([]interface{}); len(got) != 400 {
+		t.Errorf("deleted names %d ids, want 400", len(got))
+	}
+	if got, _ := obj["deleted_ids"].([]interface{}); len(got) != 400 {
+		t.Errorf("deleted_ids names %d ids, want 400", len(got))
+	}
+	if got := obj["remaining_count"]; got != float64(50) {
+		t.Errorf("remaining_count = %v, want 50", got)
+	}
+	if got, _ := obj["error"].(string); !bytes.Contains([]byte(got), []byte("context deadline exceeded")) {
+		t.Errorf("error = %q, want the cause", got)
+	}
+	if got, _ := obj["hint"].(string); !bytes.Contains([]byte(got), []byte("bd mol wisp gc --closed --force")) {
+		t.Errorf("hint = %q, want the rerun command", got)
+	}
+}
