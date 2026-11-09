@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -417,4 +418,202 @@ func TestExternalProviderRediscoversAfterProxyRetirement(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, fresh)
 	assert.NotEqual(t, old.Port, fresh.Port, "replacement proxy port")
+}
+
+// leastPrivilegeAccounts provisions the account model of
+// gastownhall/beads#5079 on the harness server: a SELECT-only reader, and a
+// DML account with full rights on the one database it uses but no global
+// CREATE — the piece no database-scoped grant can substitute for when an open
+// path issues CREATE DATABASE unconditionally.
+func leastPrivilegeAccounts(t *testing.T, ctx context.Context, admin *sql.DB, database string) {
+	t.Helper()
+	for _, stmt := range []string{
+		"CREATE USER IF NOT EXISTS 'lp_reader'@'%' IDENTIFIED BY 'readerpw'",
+		"GRANT SELECT ON `" + database + "`.* TO 'lp_reader'@'%'",
+		"CREATE USER IF NOT EXISTS 'lp_dml'@'%' IDENTIFIED BY 'dmlpw'",
+		"GRANT ALL PRIVILEGES ON `" + database + "`.* TO 'lp_dml'@'%'",
+	} {
+		_, err := admin.ExecContext(ctx, stmt)
+		require.NoErrorf(t, err, "provisioning: %s", stmt)
+	}
+	t.Cleanup(func() {
+		_, err := admin.ExecContext(context.Background(), "DROP USER IF EXISTS 'lp_reader'@'%'")
+		assert.NoError(t, err)
+		_, err = admin.ExecContext(context.Background(), "DROP USER IF EXISTS 'lp_dml'@'%'")
+		assert.NoError(t, err)
+	})
+}
+
+// lockWaiterVisible reports whether any session other than holderID is
+// currently executing a GET_LOCK — the observable signature of the reader's
+// open queuing on the migration lock the admin holds. Adapted from
+// internal/storage/dolt's migrationLockWaiterVisible (initschema_concurrent),
+// which pins the same observation for the direct stack.
+func lockWaiterVisible(ctx context.Context, observer *sql.DB, holderID int64) (bool, error) {
+	rows, err := observer.QueryContext(ctx, "SHOW PROCESSLIST")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	columns, err := rows.Columns()
+	if err != nil {
+		return false, err
+	}
+	idIndex, infoIndex := -1, -1
+	for i, column := range columns {
+		switch strings.ToLower(column) {
+		case "id":
+			idIndex = i
+		case "info":
+			infoIndex = i
+		}
+	}
+	if idIndex < 0 || infoIndex < 0 {
+		return false, fmt.Errorf("SHOW PROCESSLIST columns missing id/info: %v", columns)
+	}
+
+	values := make([]sql.NullString, len(columns))
+	scanArgs := make([]any, len(columns))
+	for i := range values {
+		scanArgs[i] = &values[i]
+	}
+	for rows.Next() {
+		for i := range values {
+			values[i] = sql.NullString{}
+		}
+		if err := rows.Scan(scanArgs...); err != nil {
+			return false, err
+		}
+		if values[idIndex].Valid {
+			if id, err := strconv.ParseInt(values[idIndex].String, 10, 64); err == nil && id == holderID {
+				continue
+			}
+		}
+		if values[infoIndex].Valid && strings.Contains(strings.ToUpper(values[infoIndex].String), "GET_LOCK") {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+// TestNewExternalDoltServerUOWProvider_LeastPrivilegeAccounts is the
+// integration regression for gastownhall/beads#5079 (AC-5): on a converged
+// database, a SELECT-only account must be able to open the provider and read
+// issues with no CREATE privilege at all — through the LOCKED path, not just
+// the converged fast path, because a peer holding the migration lock forces
+// every open through locked preparation. Before the probe, that preparation
+// issued a bare CREATE DATABASE, so the reader's open was refused before the
+// read it opened for.
+func TestNewExternalDoltServerUOWProvider_LeastPrivilegeAccounts(t *testing.T) {
+	h := newTeamServerHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	const database = "beads_least_priv"
+
+	// Provision as the administrator: an ordinary migrating open creates and
+	// converges the database, which is the quiet baseline every read expects.
+	provisioner, err := h.openProvider(ctx, database, false, "")
+	require.NoError(t, err)
+	require.NoError(t, provisioner.Close(ctx))
+
+	admin := h.directDB(t, "")
+	leastPrivilegeAccounts(t, ctx, admin, database)
+
+	openAs := func(user, password string, opts ...ProviderOption) (UnitOfWorkProvider, error) {
+		return NewExternalDoltServerUOWProvider(
+			ctx, h.storeRootDir, database, h.logPath,
+			configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: h.port},
+			user, password, 0, 0, false, "", opts...)
+	}
+
+	t.Run("read-only open forced through the locked path succeeds without CREATE", func(t *testing.T) {
+		lockName := schema.MigrationLockName(database)
+
+		// A peer holds the database's migration lock on a pinned admin
+		// connection, which forces the reader's open through the locked path
+		// instead of the converged fast path.
+		holder, err := admin.Conn(ctx)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = holder.Close() }) // closing the session releases the lock
+		var holderID int64
+		require.NoError(t, holder.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&holderID))
+		var locked sql.NullInt64
+		require.NoError(t, holder.QueryRowContext(ctx, "SELECT GET_LOCK(?, 5)", lockName).Scan(&locked))
+		require.True(t, locked.Valid && locked.Int64 == 1, "admin could not hold the migration lock")
+
+		type openResult struct {
+			provider UnitOfWorkProvider
+			err      error
+		}
+		opened := make(chan openResult, 1)
+		go func() {
+			p, err := openAs("lp_reader", "readerpw", WithReadOnly())
+			opened <- openResult{provider: p, err: err}
+		}()
+
+		// Wait until the reader is observably queuing on the lock — the proof
+		// the open really is on the locked path — then release.
+		waitDeadline := time.Now().Add(15 * time.Second)
+		visible := false
+		for time.Now().Before(waitDeadline) {
+			select {
+			case res := <-opened:
+				t.Fatalf("reader open returned before queuing on the lock: err = %v", res.err)
+			default:
+			}
+			visible, err = lockWaiterVisible(ctx, admin, holderID)
+			require.NoError(t, err)
+			if visible {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				t.Fatalf("waiting for the reader's GET_LOCK: %v", ctx.Err())
+			case <-time.After(25 * time.Millisecond):
+			}
+		}
+		require.True(t, visible, "the reader never queued on the migration lock; the locked path was not forced")
+
+		var released sql.NullInt64
+		require.NoError(t, holder.QueryRowContext(ctx, "SELECT RELEASE_LOCK(?)", lockName).Scan(&released))
+		require.True(t, released.Valid && released.Int64 == 1)
+
+		var res openResult
+		select {
+		case res = <-opened:
+		case <-ctx.Done():
+			t.Fatalf("reader open did not complete after the lock was released: %v", ctx.Err())
+		}
+		require.NoError(t, res.err, "a SELECT-only read of a converged database must not require CREATE (gastownhall/beads#5079)")
+		require.NotNil(t, res.provider)
+		t.Cleanup(func() { _ = res.provider.Close(context.Background()) })
+
+		sqlProv, ok := res.provider.(*doltSQLProvider)
+		require.True(t, ok, "expected *doltSQLProvider, got %T", res.provider)
+		var issues int
+		require.NoError(t, sqlProv.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&issues))
+	})
+
+	t.Run("unprovisioned target is refused naming both possibilities, and nothing is created", func(t *testing.T) {
+		const absent = "beads_least_priv_absent"
+		p, err := NewExternalDoltServerUOWProvider(
+			ctx, h.storeRootDir, absent, h.logPath,
+			configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: h.port},
+			"lp_reader", "readerpw", 0, 0, false, "")
+		require.Error(t, err)
+		assert.Nil(t, p)
+		// The probe said the database was not visible, so the CREATE denial
+		// cannot tell a missing database from an ungranted one: both must be
+		// named, with the administrator remedy (AC-4).
+		assert.Contains(t, err.Error(), `database "beads_least_priv_absent" is not visible to this credential and creating it was denied`)
+		assert.Contains(t, err.Error(), "either the database is not provisioned on the server or this credential has not been granted access to it")
+		assert.Contains(t, err.Error(), "ask the server administrator to provision the database and grant access")
+		// And no fallback created anything.
+		var count int
+		require.NoError(t, admin.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = ?", absent).Scan(&count))
+		assert.Zero(t, count, "the refused open must not leave a database behind")
+	})
 }
