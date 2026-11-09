@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // bdHistory runs "bd history" with the given args and returns raw stdout.
@@ -331,6 +333,38 @@ func TestEmbeddedHistory(t *testing.T) {
 		entries := bdHistoryJSON(t, bd, dir, fresh.ID)
 		if len(entries) < 1 {
 			t.Error("expected at least 1 history entry for a newly created issue")
+		}
+	})
+
+	// ===== GH#5593: a committed close's reason survives the reopen in history =====
+
+	t.Run("retained_close_reason_prints_after_reopen", func(t *testing.T) {
+		cyc := bdCreate(t, bd, dir, "Close reason retention", "--type", "task")
+		bdClose(t, bd, dir, cyc.ID, "--reason", "CLOSE_REASON_MARKER")
+		bdReopen(t, bd, dir, cyc.ID, "--reason", "regression fixed")
+
+		// The reopen cleared the current close fields...
+		shown := bdShowRaw(t, bd, dir, cyc.ID, "--json")
+		start := strings.Index(shown, "[")
+		if start < 0 {
+			t.Fatalf("no JSON array in bd show output:\n%s", shown)
+		}
+		var issues []struct {
+			Status      string `json:"status"`
+			CloseReason string `json:"close_reason"`
+		}
+		if err := json.Unmarshal([]byte(shown[start:]), &issues); err != nil {
+			t.Fatalf("parse bd show JSON: %v\n%s", err, shown[start:])
+		}
+		if len(issues) != 1 || issues[0].Status != string(types.StatusOpen) || issues[0].CloseReason != "" {
+			t.Fatalf("after reopen the issue is open with its close reason cleared, got %+v:\n%s", issues, shown)
+		}
+
+		// ...but the committed closed snapshot still carries it, and plain
+		// history says so.
+		out := bdHistory(t, bd, dir, cyc.ID)
+		if !strings.Contains(out, "Close reason: CLOSE_REASON_MARKER") {
+			t.Errorf("plain history does not print the retained close reason of the closed snapshot:\n%s", out)
 		}
 	})
 }
