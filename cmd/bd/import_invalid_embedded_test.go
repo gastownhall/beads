@@ -392,3 +392,76 @@ func TestEmbeddedRecoveryImportsReportInvalidRecords(t *testing.T) {
 		check(t, bd, dir, beadsDir, jsonlPath, fixture, "rqb", stdout.String()+stderr.String())
 	})
 }
+
+// TestEmbeddedImportCustomVocabularyAccepted pins AC-5's acceptance half: the
+// import screen validates against the workspace's configured statuses and
+// types, so rows using them import on the explicit and the auto-import path
+// instead of being refused or quarantined.
+func TestEmbeddedImportCustomVocabularyAccepted(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	// customFixture is invalidImportFixture with row 2 on the custom status
+	// "verify" and row 3 on the custom type "spike".
+	customFixture := func(t *testing.T, prefix string) string {
+		lines := strings.Split(invalidImportFixture(t, prefix, 3, 2), "\n")
+		lines[4] = strings.Replace(lines[4], `"issue_type":"task"`, `"issue_type":"spike"`, 1)
+		return strings.Join(lines, "\n")
+	}
+	configure := func(t *testing.T, dir string) {
+		t.Helper()
+		for _, kv := range [][2]string{{"status.custom", "verify"}, {"types.custom", "spike"}} {
+			cmd := exec.Command(bd, "config", "set", kv[0], kv[1])
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("bd config set %s: %v\n%s", kv[0], err, out)
+			}
+		}
+	}
+	check := func(t *testing.T, dir, beadsDir, prefix string) {
+		t.Helper()
+		got := map[string]string{}
+		for _, issue := range bdListJSON(t, bd, dir, "--all") {
+			got[issue.ID] = string(issue.Status) + "/" + string(issue.IssueType)
+		}
+		if got[prefix+"-2"] != "verify/task" || got[prefix+"-3"] != "open/spike" || got[prefix+"-1"] != "open/task" {
+			t.Errorf("issues = %v, want the custom status and type kept", got)
+		}
+		if _, err := os.Stat(filepath.Join(beadsDir, "issues.rejected.jsonl")); !os.IsNotExist(err) {
+			t.Errorf("quarantine written for configured values (stat err %v)", err)
+		}
+	}
+
+	t.Run("explicit_strict", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "cve")
+		configure(t, dir)
+		path := filepath.Join(t.TempDir(), "custom.jsonl")
+		if err := os.WriteFile(path, []byte(customFixture(t, "cve")), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if stdout, stderr, err := bdImportResult(t, bd, dir, path); err != nil {
+			t.Fatalf("strict import of configured custom values failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		check(t, dir, beadsDir, "cve")
+	})
+
+	t.Run("auto_import", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "cva")
+		configure(t, dir)
+		if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(customFixture(t, "cva")), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(bd, "create", "post-import marker", "--type", "task")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("bd create after auto-import failed: %v\n%s", err, out)
+		}
+		check(t, dir, beadsDir, "cva")
+	})
+}
