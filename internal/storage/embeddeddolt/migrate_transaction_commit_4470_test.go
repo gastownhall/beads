@@ -367,3 +367,21 @@ func TestEmbeddedStuckAt0040ConvergesUnderTransactionCommit_4800(t *testing.T) {
 		t.Fatalf("@@dolt_transaction_commit after retry = %d, want the original 1", got)
 	}
 }
+
+// TestEmbeddedStuckAt0040FailsAgainWithoutSuspension_4800 is the negative
+// control for the convergence test above: on an independent stuck store, a
+// retry that keeps automatic transaction commits on (the seam standing in for
+// a binary without GH#4470's suspension) fails at 0040 again with "nothing to
+// commit" and leaves the main cursor at 39, so the suspension, not #4504's
+// repair alone, is what converges the store.
+func TestEmbeddedStuckAt0040FailsAgainWithoutSuspension_4800(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	conn := openStuckAt0040Conn(t, ctx)
+
+	restoreSeam := schema.SetKeepTransactionCommitForTest(true)
+	t.Cleanup(restoreSeam)
+	_, err := schema.MigrateUp(ctx, conn)
+	restoreSeam()
+	requireStuckAt0040(t, ctx, conn, err)
+}
