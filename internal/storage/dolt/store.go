@@ -5182,76 +5182,77 @@ func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 	return nil
 }
 
-// classifyFSCKFailure maps a failed dolt fsck exit into one of six outcomes,
-// evaluated in priority order:
+// classifyFSCKFailure maps a failed dolt fsck exit into one of seven
+// outcomes, evaluated in priority order:
 //
-//	(a) Non-empty output → route by content: could-not-open → nil (caller logs
-//	    and skips); cancellation phrasing (fsckOutputInterrupted) → fall
-//	    through to the context-state branches below, because an interrupted
-//	    fsck prints e.g. "context canceled" before dying and that text is not
-//	    an integrity finding; a recognized finding marker
-//	    (fsckReportedFinding) → ErrDanglingReference abort, so real
-//	    corruption arriving at the deadline instant is not masked as a
-//	    timeout; any other content is non-finding noise (startup warnings,
-//	    tooling failures) and also falls through to the context-state
-//	    branches below, because a failed `dolt fsck --quiet` run can print
-//	    warnings without any integrity finding (GH#4258 genus).
+//	(a) Output containing a recognized finding marker (fsckReportedFinding:
+//	    Corrupt Chunks / Commit Errors report header, corrupted-journal
+//	    warning) → ErrDanglingReference abort. The finding wins even when
+//	    could-not-open, deadline, or cancellation phrasing appears alongside
+//	    the report: real corruption arriving at the deadline instant is not
+//	    masked as a timeout, and a report printed beside an open failure is
+//	    not skipped.
 //
-//	(b) Parent context canceled (Ctrl-C, caller abort) → plain cancellation
+//	(b) Non-finding output → route by content: could-not-open → nil (caller
+//	    logs and skips). Everything else — startup warnings, tooling noise,
+//	    cancellation phrasing (fsckOutputInterrupted) — is not an integrity
+//	    finding and falls through to the context-state branches below,
+//	    because an interrupted fsck prints e.g. "context canceled" before
+//	    dying, and a failed `dolt fsck --quiet` run can print warnings
+//	    without any integrity finding (GH#4258 genus).
+//
+//	(c) Parent context canceled (Ctrl-C, caller abort) → plain cancellation
 //	    error wrapping context.Canceled; neither ErrDanglingReference nor
 //	    ErrFSCKTimeout (the store is not implicated).
 //
-//	(c) Parent context deadline exceeded → ErrFSCKTimeout, but guidance points
+//	(d) Parent context deadline exceeded → ErrFSCKTimeout, but guidance points
 //	    at the CALLER's timeout (e.g. dolt.auto-push-timeout for auto-push)
 //	    and explicitly notes BEADS_FSCK_TIMEOUT cannot extend it. Checked
 //	    before fsck's own deadline because a fired parent context propagates
 //	    cancellation into all child contexts, making both parentErr and fsckErr
 //	    DeadlineExceeded simultaneously.
 //
-//	(d) fsck's own deadline exceeded, parent still running → ErrFSCKTimeout
+//	(e) fsck's own deadline exceeded, parent still running → ErrFSCKTimeout
 //	    with dolt gc / CALL DOLT_GC() / BEADS_FSCK_TIMEOUT guidance.
 //
-//	(e) Cancellation phrasing in output but no recognized context error — the
+//	(f) Cancellation phrasing in output but no recognized context error — the
 //	    bd process (group) was killed out from under fsck, so neither context
 //	    carries the reason. Plain cancellation error wrapping context.Canceled;
 //	    the store is not implicated.
 //
-//	(f) Any other failed exit (empty or unrecognized output, no context
+//	(g) Any other failed exit (empty or unrecognized output, no context
 //	    error) → ErrFSCKFailed abort. The execution error and raw output are
 //	    reported; the check did not complete, which proves neither
 //	    corruption nor health.
 //
-// Returning nil for the could-not-open case (branch a) distinguishes "fsck
+// Returning nil for the could-not-open case (branch b) distinguishes "fsck
 // couldn't run at all" from "fsck ran and found a problem". Wrapping an
 // open-failure as ErrDanglingReference misleads users (dolthub/dolt#10915);
 // so does wrapping an interrupt's "context canceled" noise as corruption
 // (same genus, observed when a background push's process group was killed).
 func classifyFSCKFailure(parentErr, fsckErr, runErr error, output string) error {
-	// (a) Non-empty output: fsck actually reported something; route by content.
-	if output != "" {
-		if fsckCouldNotOpen(output) {
-			return nil
-		}
-		if !fsckOutputInterrupted(output) {
-			// A recognized integrity finding is corruption even when a
-			// deadline or cancellation fired at the same instant.
-			if fsckReportedFinding(output) {
-				return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks: %s",
-					ErrDanglingReference, output)
-			}
-			// Non-finding content (startup warnings, tooling noise) is not
-			// corruption: classify by context state below, so a warning
-			// printed before a timeout is a timeout, not a false
-			// corruption report (GH#4258 genus).
-		}
-		// Cancellation phrasing: not an integrity finding — classify by
-		// context state below.
+	// (a) A recognized integrity finding wins over everything else that can
+	// appear in the same output — could-not-open phrasing, cancellation or
+	// deadline noise, startup warnings: dolt printed a corruption report, so
+	// real corruption arriving at the deadline instant, or beside an
+	// open-failure message, is not masked as a timeout or a skip.
+	if fsckReportedFinding(output) {
+		return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks: %s",
+			ErrDanglingReference, output)
 	}
-	// (b) Parent context canceled — user interrupt or caller abort.
+	// (b) Non-finding output: could-not-open means the check never ran → nil
+	// (caller logs and skips). Everything else — startup warnings, tooling
+	// noise, cancellation phrasing — is not an integrity finding: classify
+	// by context state below, so a warning printed before a timeout is a
+	// timeout, not a false corruption report (GH#4258 genus).
+	if fsckCouldNotOpen(output) {
+		return nil
+	}
+	// (c) Parent context canceled — user interrupt or caller abort.
 	if errors.Is(parentErr, context.Canceled) {
 		return fmt.Errorf("pre-push integrity check interrupted: %w", parentErr)
 	}
-	// (c) Caller's deadline expired during fsck. Point at the caller's timeout;
+	// (d) Caller's deadline expired during fsck. Point at the caller's timeout;
 	// BEADS_FSCK_TIMEOUT cannot extend a deadline imposed by the caller.
 	if errors.Is(parentErr, context.DeadlineExceeded) {
 		return fmt.Errorf("%w: the surrounding operation's deadline expired during the "+
@@ -5260,7 +5261,7 @@ func classifyFSCKFailure(parentErr, fsckErr, runErr error, output string) error 
 			"note that BEADS_FSCK_TIMEOUT cannot extend the caller deadline",
 			ErrFSCKTimeout)
 	}
-	// (d) fsck's own per-call timeout expired (parent still running).
+	// (e) fsck's own per-call timeout expired (parent still running).
 	if errors.Is(fsckErr, context.DeadlineExceeded) {
 		return fmt.Errorf("%w: fsck did not complete within the configured timeout; "+
 			"the push was aborted without checking integrity (the store is not necessarily corrupt); "+
@@ -5268,13 +5269,13 @@ func classifyFSCKFailure(parentErr, fsckErr, runErr error, output string) error 
 			"the timeout can be raised via the BEADS_FSCK_TIMEOUT environment variable",
 			ErrFSCKTimeout)
 	}
-	// (e) Interrupted fsck whose cancellation reason lives only in the output
+	// (f) Interrupted fsck whose cancellation reason lives only in the output
 	// (process group killed: both contexts look healthy from here).
 	if fsckOutputInterrupted(output) {
 		return fmt.Errorf("pre-push integrity check interrupted: %w: %s",
 			context.Canceled, output)
 	}
-	// (f) The check did not complete successfully and no recognized finding,
+	// (g) The check did not complete successfully and no recognized finding,
 	// timeout, or interruption explains it. Fail closed — but as a failed
 	// check, not as corruption: a failed process does not prove the store is
 	// corrupt, and absent report markers do not prove it is healthy (dolt's

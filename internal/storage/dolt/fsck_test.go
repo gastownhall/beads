@@ -340,6 +340,56 @@ func TestClassifyFSCKFailure(t *testing.T) {
 			wantIs:    ErrDanglingReference,
 			wantIsNot: []error{ErrFSCKTimeout},
 		},
+		// (a) A recognized finding also wins in mixed output: could-not-open
+		//     or interruption phrasing accompanying the report must not skip
+		//     or interrupt the refusal — dolt printed a corruption report.
+		{
+			name:      "finding + could-not-open text → ErrDanglingReference, not a skip",
+			parentErr: nil,
+			fsckErr:   nil,
+			output:    "Could not open dolt database: some reason\n" + fsckCorruptChunksReport,
+			wantIs:    ErrDanglingReference,
+		},
+		{
+			name:      "finding + 'context canceled' in output → ErrDanglingReference, not an interrupt",
+			parentErr: nil,
+			fsckErr:   nil,
+			output:    fsckCorruptChunksReport + "\ncontext canceled",
+			wantIs:    ErrDanglingReference,
+			wantIsNot: []error{context.Canceled},
+		},
+		{
+			name:      "finding + 'signal: killed' in output → ErrDanglingReference, not an interrupt",
+			parentErr: nil,
+			fsckErr:   nil,
+			output:    fsckCommitErrorsReport + "\nsignal: killed",
+			wantIs:    ErrDanglingReference,
+			wantIsNot: []error{context.Canceled, ErrFSCKTimeout},
+		},
+		{
+			name:      "commit-errors report + parent canceled → ErrDanglingReference",
+			parentErr: context.Canceled,
+			fsckErr:   context.Canceled,
+			output:    fsckCommitErrorsReport,
+			wantIs:    ErrDanglingReference,
+			wantIsNot: []error{context.Canceled},
+		},
+		{
+			name:      "commit-errors report + own fsck deadline → ErrDanglingReference",
+			parentErr: nil,
+			fsckErr:   context.DeadlineExceeded,
+			output:    fsckCommitErrorsReport,
+			wantIs:    ErrDanglingReference,
+			wantIsNot: []error{ErrFSCKTimeout},
+		},
+		{
+			name:      "chunk journal warning → ErrDanglingReference",
+			parentErr: nil,
+			fsckErr:   nil,
+			output:    fsckJournalWarning,
+			wantIs:    ErrDanglingReference,
+			wantIsNot: []error{ErrFSCKTimeout},
+		},
 		// Non-finding warnings must not preempt the context branches: a
 		// startup warning followed by an expired deadline or a cancellation
 		// is a timeout/interrupt, not a corruption report (GH#4258 genus).
