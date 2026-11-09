@@ -12,13 +12,13 @@ import (
 // GetDependencyTreeInTx returns a flattened dependency tree for visualization,
 // in depth-first pre-order, up to maxDepth levels.
 //
-// The reads go level by level, so their number follows the tree's depth and not
-// its size: each level costs one adjacency read per dependency plane and one
-// issue read with its labels, where walking node by node cost four to seven
-// statements per node. The depth-first walk then runs over what was read and
-// sends nothing. A node on the last level maxDepth allows is returned without
-// reading its edges: every neighbor would sit beyond the bound, where the walk
-// returns nothing.
+// The reads go level by level: each level costs one adjacency read per
+// dependency plane, one issue read and one label read, each batched by
+// queryBatchSize, with more for a far end found only in wisps. Walking node by
+// node cost four to seven statements per node. The depth-first walk then runs
+// over what was read and sends nothing. A node on the last level maxDepth
+// allows is returned without reading its edges: every neighbor would sit beyond
+// the bound, where the walk returns nothing.
 //
 // A node's edges are walked in order of the far end's id. Each issue is
 // expanded at most once. A later edge into an issue already
@@ -58,7 +58,9 @@ type dependencyTreeGraph struct {
 // readDependencyTreeGraphInTx reads the graph breadth-first from root, so an
 // issue is read at the shallowest depth any path reaches it. The walk may reach
 // it first by a longer path, but only ever at that depth or deeper, so whatever
-// the walk needs from it is already here.
+// the walk needs from it is already here. It can read a few issues the walk then
+// does not return, when a depth limit cuts the only path the walk took to them;
+// a failure reading one of those fails the whole read.
 func readDependencyTreeGraphInTx(ctx context.Context, tx DBTX, rootID string, root *types.Issue, maxDepth int, reverse bool) (*dependencyTreeGraph, error) {
 	graph := &dependencyTreeGraph{
 		issues: map[string]*types.Issue{rootID: root},

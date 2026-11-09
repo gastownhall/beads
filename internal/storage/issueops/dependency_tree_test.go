@@ -640,6 +640,35 @@ func TestGetDependencyTreeInTxToleratesAMissingWispPlane(t *testing.T) {
 	}
 }
 
+// TestGetDependencyTreeInTxOrderDecidesWhatADepthLimitKeeps pins the one way
+// edge order reaches the set of issues returned, not only their arrangement.
+// a sorts before z, so z is first reached through a at depth 2, the last level
+// maxDepth 3 allows, and its child is cut. Had the walk taken z first, at depth
+// 1, the child would be returned.
+func TestGetDependencyTreeInTxOrderDecidesWhatADepthLimitKeeps(t *testing.T) {
+	mock, tx, _ := countedMockTx(t)
+	expectIssue(mock, "root", "Root")
+	expectTreeEdges(mock, []string{"root"}, false,
+		treeEdge{"root", "z", string(types.DepBlocks)},
+		treeEdge{"root", "a", string(types.DepBlocks)})
+	expectTreeIssues(mock, "a", "z")
+	expectTreeEdges(mock, []string{"a", "z"}, false,
+		treeEdge{"a", "z", string(types.DepBlocks)},
+		treeEdge{"z", "child", string(types.DepBlocks)})
+	expectTreeIssues(mock, "child")
+
+	tree, err := GetDependencyTreeInTx(t.Context(), tx, "root", 3, false, false)
+	if err != nil {
+		t.Fatalf("GetDependencyTreeInTx: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+	if got := strings.Join(treeIDs(tree), ","); got != "root,a,z,z" {
+		t.Fatalf("tree = %s, want root,a,z,z with child cut by the depth limit", got)
+	}
+}
+
 // TestGetDependencyTreeInTxReadsASharedChildOnce pins that two nodes of one
 // level pointing at the same unread issue read it once, and that the walk still
 // answers the second edge with a stub.

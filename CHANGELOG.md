@@ -817,17 +817,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   missing or external targets, and 5 or more when at least one neighbor loads
   (server and embedded modes alike). The tree returned is
   unchanged.
-- **`bd dep tree` reads level by level, so its cost follows the tree's depth
-  rather than its size.** It read each node's issue row, labels and edges with
-  separate statements. It now reads each level with one adjacency read per
-  dependency plane and one issue read. Against a server with a 300-issue random
-  graph, `bd dep tree --direction=both` went from 1661 statements to 94, and
-  from 39.6 s to 2.5 s at a 20 ms round trip; a root with 30 children that
-  each have one child went from 401 statements to 76. A node's dependencies are
-  now walked in order of the far end's ID. That order used to follow whichever
-  index the server's plan used, and it decides which parent of a diamond is
-  expanded and which shows `(shown above)`, so such a tree can draw differently
-  from before while holding the same issues.
+- **`bd dep tree` reads level by level instead of node by node.** It read each
+  node's issue row, labels and edges with separate statements. It now reads a
+  level's edges, issues and labels in batches of 200 IDs. Against a server with
+  a 300-issue random graph, one `bd dep tree --direction=both` walk went from
+  1661 statements to 94, and from 39.6 s to 2.5 s at a 20 ms round trip; a root
+  with 30 children that each have one child went from 401 statements to 76. A
+  node's dependencies are now walked in order of the far end's ID. That order
+  used to follow whichever index the server's plan used, and it decides which
+  parent of a diamond is expanded and which shows `(shown above)`. So such a
+  tree can draw differently from before, and with a depth limit the changed
+  order can also change which descendants appear.
 - `bd serve` normalizes every RFC 3339 time bound on the issue listing and
   count (`created_*`, `updated_*`, `closed_*`, and the new `defer_*` and
   `due_*`) to UTC before it reaches storage. A bound carrying an offset
