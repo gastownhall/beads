@@ -380,3 +380,35 @@ func TestEmbeddedStuckAt0040ConvergesUnderTransactionCommit_4800(t *testing.T) {
 		t.Fatalf("@@dolt_transaction_commit after the retry = %d, want the original 1", got)
 	}
 }
+
+// TestEmbeddedStuckAt0040FailsAgainWithoutSuspension_4800 is the negative
+// control: on an independent stuck store, a retry that still does not suspend
+// the setting (through the seam) fails on 0040's nothing-to-commit again and
+// leaves the cursor at 39. The suspension is the load-bearing difference, not
+// the repair alone: the pre-0040 repair can clear the residue, but the
+// replayed INSERT is auto-committed right back and the frozen body dies on
+// its first in-body commit.
+func TestEmbeddedStuckAt0040FailsAgainWithoutSuspension_4800(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	conn := openStuckAt0040Conn(t, ctx)
+	t.Setenv(schema.AllowMigrateEnv, "1")
+
+	stuckAt0040Failure(t, ctx, conn)
+
+	restoreKeep := schema.SetKeepTransactionCommitForTest(true)
+	t.Cleanup(restoreKeep)
+	_, err := schema.MigrateUp(ctx, conn)
+	if err == nil {
+		t.Fatalf("retry without the setting suspended succeeded; want the 0040 nothing-to-commit failure again")
+	}
+	if name := "0040_ignored_tables_also_nonlocal_tables"; !strings.Contains(err.Error(), name) {
+		t.Fatalf("retry error = %q, want it to name %s", err, name)
+	}
+	if body := "nothing to commit"; !strings.Contains(strings.ToLower(err.Error()), body) {
+		t.Fatalf("retry error = %q, want it to fail with %q", err, body)
+	}
+	if got := currentMainVersion(t, ctx, conn); got != 39 {
+		t.Fatalf("main schema version after the retry = %d, want 39", got)
+	}
+}
