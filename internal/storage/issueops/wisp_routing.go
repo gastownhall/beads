@@ -8,18 +8,29 @@ import (
 	"strings"
 )
 
-// IsActiveWispInTx checks whether the given ID exists in the wisps table
-// within an existing transaction. Returns true if the ID is found.
-// This handles both auto-generated wisp IDs (containing "-wisp-") and
-// ephemeral issues created with explicit IDs that were routed to wisps.
-//
-// For hot-path callers that partition a batch of IDs by wisp status,
-// prefer WispIDSetInTx + partitionByWispSet to amortize the per-ID
-// query cost into a single scoped query over the batch.
-func IsActiveWispInTx(ctx context.Context, tx DBTX, id string) bool {
+// LookupWispInTx finds a target in the wisp plane without swallowing SQL errors.
+// A closed or pinned wisp is still in this plane: status governs blocking, not
+// which foreign-key column must hold the dependency. Only ErrNoRows is absent.
+func LookupWispInTx(ctx context.Context, tx DBTX, id string) (bool, error) {
 	var exists int
 	err := tx.QueryRowContext(ctx, "SELECT 1 FROM wisps WHERE id = ? LIMIT 1", id).Scan(&exists)
-	return err == nil
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	default:
+		return false, fmt.Errorf("probe wisp %s: %w", id, err)
+	}
+}
+
+// IsActiveWispInTx is the legacy boolean routing probe. Classification and
+// writes that must distinguish absence from an SQL failure use LookupWispInTx.
+// A row in wisps counts regardless of status, including closed/pinned rows.
+// For bulk callers, prefer WispIDSetInTx to amortize reads over the batch.
+func IsActiveWispInTx(ctx context.Context, tx DBTX, id string) bool {
+	present, _ := LookupWispInTx(ctx, tx, id)
+	return present
 }
 
 func wispsTableEmptyOrMissingInTx(ctx context.Context, tx DBTX) (bool, error) {

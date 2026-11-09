@@ -1226,6 +1226,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Same-database cross-prefix dependency targets are local, not external.**
+  When a foreign-prefix ID exists here as an issue or wisp, its blocking edge
+  now affects `bd ready` and participates in hierarchy/cycle validation;
+  re-adding a legacy external-column edge migrates the existing row. Truly
+  absent foreign-prefix targets and explicit `external:` references remain
+  external. A cross-prefix edge formerly accepted may now be refused as a
+  hierarchy conflict or cycle.
+
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
@@ -4357,9 +4365,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`bd list --parent` on a proxied-server workspace no longer drops a child
   whose prefix differs from its parent's**
   ([#6130](https://github.com/gastownhall/beads/pull/6130)). The edge to such
-  a parent is stored in `depends_on_external` — `issueops.IsExternalDepTarget`
-  routes every cross-prefix target there — but the descendant walk behind the
-  proxied tree view resolved a parent only through the issue and wisp target
+  a parent was stored in `depends_on_external` under the historical
+  prefix-only classification, even when the parent existed locally. The
+  descendant walk behind the proxied tree view resolved a parent only through
+  the issue and wisp target
   columns, so the child and its subtree were missing from the tree and from
   `--watch`, while the direct route listed them. The walk now reads all three
   target columns, as the direct route's `--parent` filter does. Nothing listed
@@ -9913,16 +9922,17 @@ never reused, per the v1.1.1 precedent.)
   `Error 1452`. No edge was written and the error named a constraint rather
   than the problem.
 
-  Both routes now classify through one named rule,
-  `issueops.IsExternalDepTarget`: a target is external if it is spelled
-  `external:...` **or** its prefix differs from the source's. That is what the
-  Dolt backends have always done, so this brings the third route into line
-  rather than inventing a policy. The foreign key itself is untouched, and a
+  At the time, both routes classified through the prefix-only predicate
+  `issueops.IsExternalDepTarget`: a target was external if it was spelled
+  `external:...` **or** its prefix differed from the source's. This matched the
+  Dolt backends at that release, but was subsequently superseded by database-
+  presence classification (see Unreleased): an existing cross-prefix issue or
+  wisp is now local. The foreign key itself is untouched, and a
   genuinely local, genuinely missing target is still refused as before. One
-  consequence beyond the failing case: a cross-prefix target that *does*
-  happen to exist in the local issues table now also lands in the external
-  column on this route, which means derived blocking no longer reads that edge
-  — again matching what the Dolt backends already produced.
+  consequence at the time: even a cross-prefix target that existed in the
+  local issues table landed in the external column, so derived blocking did
+  not read that edge. The Unreleased fix reverses that behavior for locally
+  present targets.
 
 - **A ready claim that wins an ephemeral row no longer reports a spurious
   "could not be verified" error** (bd-yby99.4). In server mode, `bd` re-reads a

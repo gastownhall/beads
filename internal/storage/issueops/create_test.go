@@ -296,6 +296,9 @@ func TestPersistDependenciesSkipsValidationErrorsWhenConfigured(t *testing.T) {
 	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
 		WithArgs("source").
 		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+		WithArgs("source").
+		WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\?").
 		WithArgs("source").
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
@@ -391,6 +394,11 @@ func TestPersistDependenciesValidatesPlannedHierarchyBeforeBlocking(t *testing.T
 		mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
 			WithArgs(pair[1]).
 			WillReturnError(sql.ErrNoRows)
+		if pair[0] == "bd-child" {
+			mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+				WithArgs(pair[1]).
+				WillReturnError(sql.ErrNoRows)
+		}
 		mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\?").
 			WithArgs(pair[1]).
 			WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
@@ -567,7 +575,9 @@ func TestReconcileChildCountersReturnsWispLookupError(t *testing.T) {
 // TestPersistDependenciesBatchValidatesPlannedHierarchyBeforeBlocking is the
 // batch-lookup twin of TestPersistDependenciesValidatesPlannedHierarchyBeforeBlocking:
 // routing and target presence come from one batch read each, edges are read
-// only for the batch's own endpoints, and the planned ancestry the
+// only for the batch's own endpoints. The grandparent has a different prefix
+// from its descendant, so a prefix-only hierarchy skip would miss the conflict.
+// The planned ancestry the
 // parent-child phase wrote is what rejects the blocks edge — with no per-edge
 // recursive query.
 func TestPersistDependenciesBatchValidatesPlannedHierarchyBeforeBlocking(t *testing.T) {
@@ -578,7 +588,7 @@ func TestPersistDependenciesBatchValidatesPlannedHierarchyBeforeBlocking(t *test
 		ID:        "bd-child",
 		IssueType: types.TypeTask,
 		Dependencies: []*types.Dependency{
-			{DependsOnID: "bd-grand", Type: types.DepBlocks}, // Deliberately first.
+			{DependsOnID: "zz-grand", Type: types.DepBlocks}, // Deliberately first.
 			{DependsOnID: "bd-parent", Type: types.DepParentChild},
 		},
 	}
@@ -586,16 +596,16 @@ func TestPersistDependenciesBatchValidatesPlannedHierarchyBeforeBlocking(t *test
 		ID:        "bd-parent",
 		IssueType: types.TypeTask,
 		Dependencies: []*types.Dependency{{
-			DependsOnID: "bd-grand",
+			DependsOnID: "zz-grand",
 			Type:        types.DepParentChild,
 		}},
 	}
 
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps LIMIT 1")).WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT id FROM issues WHERE id IN (?,?)")).
-		WithArgs("bd-grand", "bd-parent").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("bd-grand").AddRow("bd-parent"))
-	ids := []driver.Value{"bd-child", "bd-grand", "bd-parent"}
+		WithArgs("zz-grand", "bd-parent").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("zz-grand").AddRow("bd-parent"))
+	ids := []driver.Value{"bd-child", "zz-grand", "bd-parent"}
 	for _, table := range []string{"dependencies", "wisp_dependencies"} {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, " + DepTargetExpr + ", type FROM " + table + " WHERE issue_id IN (?,?,?)")).
 			WithArgs(ids...).
@@ -608,7 +618,7 @@ func TestPersistDependenciesBatchValidatesPlannedHierarchyBeforeBlocking(t *test
 				WillReturnRows(sqlmock.NewRows([]string{"issue_id", "target", "type"}))
 		}
 	}
-	for _, pair := range [][2]string{{"bd-child", "bd-parent"}, {"bd-parent", "bd-grand"}} {
+	for _, pair := range [][2]string{{"bd-child", "bd-parent"}, {"bd-parent", "zz-grand"}} {
 		mock.ExpectExec("INSERT INTO dependencies").
 			WithArgs(depid.New(pair[0], pair[1]), pair[0], pair[1], types.DepParentChild, "tester", sqlmock.AnyArg(), "{}", "").
 			WillReturnResult(sqlmock.NewResult(0, 1))

@@ -2,6 +2,7 @@ package db
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
@@ -90,5 +91,30 @@ func TestPickDepTargetColumnCrossPrefixLocal(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// TestValidateBlockingHierarchyCrossPrefixLocal pins the domain repository's
+// independent end-gate path. Prefix mismatch must not skip a parent that is
+// actually present in this database.
+func TestValidateBlockingHierarchyCrossPrefixLocal(t *testing.T) {
+	mock, repo := newMockDependencyRepo(t)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps WHERE id = ? LIMIT 1")).
+		WithArgs("other-parent").
+		WillReturnRows(sqlmock.NewRows([]string{"1"}))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM issues WHERE id = ? LIMIT 1")).
+		WithArgs("other-parent").
+		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+	mock.ExpectQuery("WITH RECURSIVE ancestors").
+		WithArgs("bd-child", "other-parent").
+		WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
+
+	dep := &types.Dependency{IssueID: "bd-child", DependsOnID: "other-parent", Type: types.DepBlocks}
+	err := repo.ValidateBlockingHierarchy(t.Context(), dep)
+	if err == nil || !strings.Contains(err.Error(), "cannot be blocked by its ancestor") {
+		t.Fatalf("ValidateBlockingHierarchy(cross-prefix local parent) = %v, want hierarchy conflict", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
 	}
 }

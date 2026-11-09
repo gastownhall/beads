@@ -35,11 +35,9 @@ func (s *DoltStore) AddDependencyWithOptions(ctx context.Context, dep *types.Dep
 }
 
 func (s *DoltStore) addDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, addOpts storage.DependencyAddOptions) error {
-	isCrossPrefix := isCrossPrefixDep(dep.IssueID, dep.DependsOnID)
-
 	// Route to wisp_dependencies if the source is an active wisp.
 	if s.isActiveWisp(ctx, dep.IssueID) {
-		return s.addWispDependency(ctx, dep, actor, isCrossPrefix, addOpts.EmitEvent)
+		return s.addWispDependency(ctx, dep, actor, addOpts.EmitEvent)
 	}
 
 	kind, err := issueops.ClassifyDepTarget(ctx, s.db, s.db, dep)
@@ -54,12 +52,11 @@ func (s *DoltStore) addDependencyWithOptions(ctx context.Context, dep *types.Dep
 	var written issueops.DependencyWriteResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		opts := issueops.AddDependencyOpts{
-			SourceTable:   "issues",
-			TargetTable:   targetTable,
-			WriteTable:    "dependencies",
-			IsCrossPrefix: isCrossPrefix,
-			TargetKind:    &kind,
-			EmitEvent:     addOpts.EmitEvent,
+			SourceTable: "issues",
+			TargetTable: targetTable,
+			WriteTable:  "dependencies",
+			TargetKind:  &kind,
+			EmitEvent:   addOpts.EmitEvent,
 		}
 		// Assigned, never merged: a retried attempt's verdict replaces the
 		// rolled-back one's.

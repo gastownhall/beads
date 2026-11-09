@@ -614,7 +614,7 @@ func (s *DoltStore) getWispsByIDs(ctx context.Context, ids []string) ([]*types.I
 }
 
 // addWispDependency adds a dependency to the wisp_dependencies table.
-func (s *DoltStore) addWispDependency(ctx context.Context, dep *types.Dependency, actor string, isCrossPrefix, emitEvent bool) error {
+func (s *DoltStore) addWispDependency(ctx context.Context, dep *types.Dependency, actor string, emitEvent bool) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -632,11 +632,10 @@ func (s *DoltStore) addWispDependency(ctx context.Context, dep *types.Dependency
 	// via selective doltAddAndCommit), so the event-written flag is not needed
 	// here; only a durable is_blocked flip needs a Dolt commit.
 	written, err := issueops.AddDependencyInTxWithResult(ctx, tx, dep, actor, issueops.AddDependencyOpts{
-		SourceTable:   "wisps",
-		WriteTable:    "wisp_dependencies",
-		IsCrossPrefix: isCrossPrefix,
-		TargetKind:    &kind,
-		EmitEvent:     emitEvent,
+		SourceTable: "wisps",
+		WriteTable:  "wisp_dependencies",
+		TargetKind:  &kind,
+		EmitEvent:   emitEvent,
 	})
 	if err != nil {
 		return err

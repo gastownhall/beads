@@ -136,7 +136,10 @@ func ClassifyDepTarget(ctx context.Context, issueRunner, wispRunner DBTX, dep *t
 	if strings.HasPrefix(dep.DependsOnID, "external:") {
 		return DepTargetExternal, nil
 	}
-	wispExists := IsActiveWispInTx(ctx, wispRunner, dep.DependsOnID)
+	wispExists, err := LookupWispInTx(ctx, wispRunner, dep.DependsOnID)
+	if err != nil {
+		return DepTargetExternal, fmt.Errorf("classify dependency target %s: %w", dep.DependsOnID, err)
+	}
 	issueExists := false
 	if !wispExists && types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID) {
 		var found int
@@ -171,8 +174,6 @@ type AddDependencyOpts struct {
 	// dependency tables; edge storage is source-routed, so same-class endpoints
 	// can still have mixed-table interior paths.
 	DepTables []string
-	// IsCrossPrefix is a legacy hint, not evidence of an external target.
-	IsCrossPrefix bool
 	// SkipCycleCheck skips the recursive pre-insert cycle check for callers
 	// that intentionally trade validation cost for bulk graph wiring speed.
 	SkipCycleCheck bool
@@ -354,6 +355,7 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	// target column cannot bypass the idempotency/conflict check.
 	var existingType string
 	var existingMetadataNS, existingThreadNS sql.NullString
+	var reclassified bool
 	//nolint:gosec // G201: writeTable from WispTableRouting; depTargetEquals has no user input.
 	err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT type, metadata, thread_id FROM %s WHERE issue_id = ? AND %s`, writeTable, depTargetEquals("")),
 		dep.IssueID, dep.DependsOnID).Scan(&existingType, &existingMetadataNS, &existingThreadNS)
@@ -367,41 +369,64 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 			// naming none keeps the stored thread rather than clearing it, so
 			// the callers that never carry a thread cannot erase one.
 			thread, threadChanged := ReAddedDependencyThread(existingThreadNS, dep.ThreadID)
-			if !threadChanged && DependencyMetadataEqual(existingMetadata, metadata) {
-				// Same type, same metadata, same thread: a change-free write.
-				// Nothing is written and nothing is journaled (#5898 R3).
-				return false, nil
+			// Legacy rows may already name this target, but in the external
+			// column. A re-add should move that exact row into the local FK
+			// column, then run the same blocked-state maintenance as an insert.
+			if kind != DepTargetExternal && types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID) {
+				var legacyExternal sql.NullString
+				//nolint:gosec // G201: writeTable and depTargetEquals are fixed SQL fragments.
+				q := fmt.Sprintf(`SELECT depends_on_external FROM %s WHERE issue_id = ? AND %s`, writeTable, depTargetEquals(""))
+				if err := tx.QueryRowContext(ctx, q, dep.IssueID, dep.DependsOnID).Scan(&legacyExternal); err != nil {
+					return false, fmt.Errorf("check legacy dependency target column: %w", err)
+				}
+				if legacyExternal.Valid {
+					//nolint:gosec // G201: targetCol comes from DepTargetKind.Column().
+					q := fmt.Sprintf(`UPDATE %s SET %s = ?, depends_on_external = NULL, metadata = ?, thread_id = ? WHERE issue_id = ? AND depends_on_external = ?`, writeTable, targetCol)
+					if _, err := tx.ExecContext(ctx, q, dep.DependsOnID, metadata, thread, dep.IssueID, dep.DependsOnID); err != nil {
+						return false, fmt.Errorf("reclassify legacy external dependency: %w", err)
+					}
+					reclassified = true
+				}
 			}
-			// Same type, different metadata or thread — idempotent; update the
-			// row in place. No event is written, so the caller must not stage
-			// the events table for this re-add.
-			//nolint:gosec // G201: writeTable from WispTableRouting; depTargetEquals has no user input.
-			if _, err := tx.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET metadata = ?, thread_id = ? WHERE issue_id = ? AND %s`, writeTable, depTargetEquals("")),
-				metadata, thread, dep.IssueID, dep.DependsOnID); err != nil {
-				return false, fmt.Errorf("failed to update dependency metadata: %w", err)
+			if !reclassified {
+				if !threadChanged && DependencyMetadataEqual(existingMetadata, metadata) {
+					// Same type, same metadata, same thread: a change-free write.
+					// Nothing is written and nothing is journaled (#5898 R3).
+					return false, nil
+				}
+				// Same type, different metadata or thread — idempotent; update the
+				// row in place. No event is written, so the caller must not stage
+				// the events table for this re-add.
+				//nolint:gosec // G201: writeTable from WispTableRouting; depTargetEquals has no user input.
+				if _, err := tx.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET metadata = ?, thread_id = ? WHERE issue_id = ? AND %s`, writeTable, depTargetEquals("")),
+					metadata, thread, dep.IssueID, dep.DependsOnID); err != nil {
+					return false, fmt.Errorf("failed to update dependency metadata: %w", err)
+				}
+				// A same-type add refreshes the edge's metadata or thread. It is an
+				// observable graph mutation, so journal the replacement edge for
+				// replay even though no audit event is written. EventDep has no
+				// thread member, so a thread-only change journals the same payload
+				// as the original add; the source's version snapshot is what
+				// records the new thread.
+				if err := RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
+					return false, err
+				}
+				// The metadata or thread genuinely changed, so — unlike the
+				// change-free branch above — this re-add is a real durable-state
+				// mutation of the source issue (its version snapshot carries each
+				// edge's thread_id) and mints on the same terms as a new edge
+				// (#5898 leg 2: "a same-type re-add whose metadata actually
+				// changed mints EXACTLY ONE version carrying the new state").
+				return false, mintDependencyVersion(ctx, tx, dep.IssueID, actor, mintVersion)
 			}
-			// A same-type add refreshes the edge's metadata or thread. It is an
-			// observable graph mutation, so journal the replacement edge for
-			// replay even though no audit event is written. EventDep has no
-			// thread member, so a thread-only change journals the same payload
-			// as the original add; the source's version snapshot is what
-			// records the new thread.
-			if err := RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
-				return false, err
-			}
-			// The metadata or thread genuinely changed, so — unlike the
-			// change-free branch above — this re-add is a real durable-state
-			// mutation of the source issue (its version snapshot carries each
-			// edge's thread_id) and mints on the same terms as a new edge
-			// (#5898 leg 2: "a same-type re-add whose metadata actually
-			// changed mints EXACTLY ONE version carrying the new state").
-			return false, mintDependencyVersion(ctx, tx, dep.IssueID, actor, mintVersion)
 		}
-		return false, &domain.DependencyTypeConflictError{
-			IssueID:       dep.IssueID,
-			DependsOnID:   dep.DependsOnID,
-			ExistingType:  existingType,
-			RequestedType: string(dep.Type),
+		if !reclassified {
+			return false, &domain.DependencyTypeConflictError{
+				IssueID:       dep.IssueID,
+				DependsOnID:   dep.DependsOnID,
+				ExistingType:  existingType,
+				RequestedType: string(dep.Type),
+			}
 		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return false, fmt.Errorf("failed to check existing dependency: %w", err)
@@ -412,11 +437,13 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	// dependencies table merges cleanly across Dolt clones (#4259). DependsOnID
 	// is the resolved target written into targetCol.
 	//nolint:gosec // G201: writeTable from WispTableRouting; targetCol from DepTargetKind.Column()
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (id, issue_id, %s, type, created_at, created_by, metadata, thread_id)
-		VALUES (?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, ?)
-	`, writeTable, targetCol), depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, dep.Type, actor, metadata, dep.ThreadID); err != nil {
-		return false, fmt.Errorf("failed to add dependency: %w", err)
+	if !reclassified {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
+			INSERT INTO %s (id, issue_id, %s, type, created_at, created_by, metadata, thread_id)
+			VALUES (?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, ?)
+		`, writeTable, targetCol), depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, dep.Type, actor, metadata, dep.ThreadID); err != nil {
+			return false, fmt.Errorf("failed to add dependency: %w", err)
+		}
 	}
 	if dep.Type == types.DepParentChild {
 		if err := TouchDependencyCoordinationTableInTx(ctx, tx, dep.DependsOnID, writeTable); err != nil {
@@ -434,7 +461,7 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	// Gated on EmitEvent so only explicit dep verbs emit; create-with-deps and
 	// structural callers wire the edge silently (parity with the proxied repo).
 	eventWritten := false
-	if opts.EmitEvent {
+	if opts.EmitEvent && !reclassified {
 		_, _, eventTable, _ := WispTableRouting(srcIsWisp)
 		if err := RecordEventInTable(ctx, tx, eventTable, dep.IssueID, types.EventDependencyAdded, actor,
 			fmt.Sprintf("Added dependency: %s %s %s", dep.IssueID, dep.Type, dep.DependsOnID)); err != nil {
@@ -714,8 +741,8 @@ func cycleDetectionTables() []string {
 }
 
 // CheckBlockingHierarchyInTx rejects blocking dependencies between an issue
-// and its own ancestor or descendant. Cross-prefix/external targets must be
-// filtered by the caller because no local hierarchy can connect them.
+// and its own ancestor or descendant. Only classified external targets (those
+// absent from this database, or explicit external: references) skip this check.
 func CheckBlockingHierarchyInTx(ctx context.Context, tx DBTX, dep *types.Dependency, depTables []string) error {
 	if dep.Type != types.DepBlocks && dep.Type != types.DepConditionalBlocks {
 		return nil

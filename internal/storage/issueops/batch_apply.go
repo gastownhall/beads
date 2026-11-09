@@ -415,7 +415,6 @@ func (r *applyBatchRun) applyDepAdd(ctx context.Context, tx *sql.Tx, index int, 
 	written, err := AddDependencyInTxWithResult(ctx, tx, dep, r.plan.Actor, AddDependencyOpts{
 		SourceTable:    sourceTable,
 		WriteTable:     depTable,
-		IsCrossPrefix:  types.ExtractPrefix(source) != types.ExtractPrefix(target),
 		SkipCycleCheck: r.plan.SkipPerEdgeCycleCheck,
 		EmitEvent:      true,
 	})

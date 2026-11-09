@@ -986,7 +986,6 @@ func (t *doltTransaction) AddDependencyWithOptions(ctx context.Context, dep *typ
 		eventTable = "wisp_events"
 	}
 
-	isCrossPrefix := isCrossPrefixDep(dep.IssueID, dep.DependsOnID)
 	kind, err := issueops.ClassifyDepTarget(ctx, t.txFor("issues"), t.txFor("wisps"), dep)
 	if err != nil {
 		return err
@@ -1000,7 +999,6 @@ func (t *doltTransaction) AddDependencyWithOptions(ctx context.Context, dep *typ
 		SourceTable:    sourceTable,
 		TargetTable:    targetTable,
 		WriteTable:     table,
-		IsCrossPrefix:  isCrossPrefix,
 		SkipCycleCheck: addOpts.SkipCycleCheck,
 		TargetKind:     &kind,
 		EmitEvent:      addOpts.EmitEvent,

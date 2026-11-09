@@ -191,6 +191,11 @@ func newUOWBatchApplyFixture(t *testing.T, ctx context.Context, prefix string) c
 		t.Fatalf("BatchApplier(): %v", err)
 	}
 	kit := newUOWRoleFixtureKit(provider, prefix)
+	// The end-gate contract seeds a parent with a different local prefix, so
+	// explicitly admit both prefixes through the provider's normal config path.
+	if err := kit.SetConfig(ctx, "allowed_prefixes", prefix+",cross"); err != nil {
+		t.Fatalf("set cross-prefix fixture policy: %v", err)
+	}
 	return conformance.BatchApplyFixture{
 		IssuePrefix:          kit.IssuePrefix,
 		BatchApplier:         applier,

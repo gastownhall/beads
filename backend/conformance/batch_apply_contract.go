@@ -493,7 +493,7 @@ func RunBatchApplyNeverReordersItsItems(t *testing.T, ctx context.Context, fixtu
 // because a hierarchy is only a conflict for an edge that GATES.
 func RunBatchApplyEndGateRefusesAHierarchyTheRequestBuilt(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
 	t.Helper()
-	grand := fixture.IssuePrefix + "-endgate-grand"
+	grand := "cross-endgate-grand"
 	parent := fixture.IssuePrefix + "-endgate-parent"
 	child := fixture.IssuePrefix + "-endgate-child"
 	for _, id := range []string{grand, parent, child} {
