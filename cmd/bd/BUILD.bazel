@@ -1415,11 +1415,16 @@ go_test(
         "//cmd/bd/doctor:go_srcs",
         "//cmd/bd/doctor/fix:go_srcs",
         "//internal/storage/embeddeddolt/cmd:go_srcs",
+        # The released bd v1.1.0 (sha256-verified @bd_releases catalog pin),
+        # whose default proxied root the legacy proxied-root guard refuses
+        # (GH#5104): TestProxiedServerLegacyRootGuardRefusesReleasedBD runs it.
+        "@bd_releases//:v1.1.0",
         "@go_sdk//:bin/gofmt",
     ],
     embed = [":bd_lib"],
     env = {
         "BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)",
+        "BEADS_TEST_BD_V1110_BIN": "$(rlocationpath @bd_releases//:v1.1.0)",
         "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
         "BEADS_TEST_COMPACT_GC_FIXTURE": "$(rlocationpath :compact_gc_fixture)",
         "BEADS_TEST_PREFLIGHT_GO": "$(rlocationpath :preflight_go_fixture)",
@@ -1696,10 +1701,12 @@ sh_test(
         ":go_srcs",
         "//:.github/scripts/proxied-cmd-test-shards.txt",
         "//:.github/scripts/proxied-test-shard.sh",
+        "@bd_releases//:v1.1.0",
         "@go_sdk//:bin/gofmt",
     ],
     env = {
         "BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)",
+        "BEADS_TEST_BD_V1110_BIN": "$(rlocationpath @bd_releases//:v1.1.0)",
         "BEADS_TEST_DOLT_SERVER": "local",
         # The jobs' "Configure Git and Dolt identity" global git identity
         # (tools/bazel/test_env.sh).
