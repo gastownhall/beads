@@ -266,9 +266,9 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 	// there is nothing converged to detect and the bootstrap path stays
 	// exactly as it was. A caller's locked preparation is skipped only once
 	// alreadyConverged has proved the database already existed and put the
-	// session on it — preparation's CREATE DATABASE would then have failed
-	// with "database exists" and captured no authority, and its USE is the
-	// statement alreadyConverged itself issued.
+	// session on it — preparation would then have found it visible, skipped
+	// CREATE DATABASE and captured no authority, and its USE is the statement
+	// alreadyConverged itself issued.
 	if o.freshBootstrapHeal == nil {
 		converged, convergedErr := alreadyConverged(ctx, conn, databaseName, o.databaseSelector)
 		switch {
