@@ -58,10 +58,13 @@ when it cannot find `uvx` on your shell's `PATH`, but writes the config anyway.
 If you installed `beads-mcp` yourself (`uv tool install beads-mcp` or
 `pip install beads-mcp`), set `"command": "beads-mcp"` and `"args": []` instead.
 
-`bd setup junie` replaces the whole file each time it runs. Configs written by
-older bd releases run `bd mcp`, a command bd does not have: re-run
-`bd setup junie` to fix one, or, if you added other MCP servers to the file,
-edit only the `beads` entry by hand to the form above.
+bd v1.3.4 and earlier write a `beads` entry that runs `bd mcp`, a command bd
+does not have. With bd v1.4.0 or later, re-running `bd setup junie` replaces
+it, but the re-run rewrites both files whole: other MCP servers you added to
+`mcp.json` and your edits to `.junie/guidelines.md` are lost, and a symlinked
+`guidelines.md` stops it before it reaches `mcp.json`. If you changed either
+file, or run v1.3.4 or earlier, edit only the `beads` entry by hand to the
+form above instead.
 
 ## Usage
 

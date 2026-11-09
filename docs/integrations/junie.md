@@ -42,8 +42,8 @@ Contains workflow instructions that Junie reads automatically:
 
 ### MCP Config (`.junie/mcp/mcp.json`)
 
-`bd setup junie` points Junie at the standalone `beads-mcp` server, launched
-with `uvx`:
+In bd v1.4.0 and later, `bd setup junie` points Junie at the standalone
+`beads-mcp` server, launched with `uvx`:
 
 ```json
 {
@@ -56,11 +56,18 @@ with `uvx`:
 }
 ```
 
+<Warning>
+bd v1.3.4 and earlier write a `beads` entry that runs `bd mcp`, a command bd
+does not have, so that config cannot start a server. With those releases,
+replace the entry with the one above by hand after running `bd setup junie`.
+</Warning>
+
 This needs:
 - **`uvx` on the `PATH` Junie starts the server with.** It ships with
-  [uv](https://docs.astral.sh/uv/getting-started/installation/). `bd setup junie`
-  prints a note when it cannot find `uvx` on your shell's `PATH`; it still
-  writes the config, since Junie may start the server with a different `PATH`.
+  [uv](https://docs.astral.sh/uv/getting-started/installation/). In v1.4.0
+  and later, `bd setup junie` prints a note when it cannot find `uvx` on your
+  shell's `PATH`; it still writes the config, since Junie may start the server
+  with a different `PATH`.
 - **Network access on first start.** `uvx` downloads `beads-mcp` and its
   Python dependencies the first time Junie starts it, then reuses its cache.
 - **`bd` reachable from the server.** `beads-mcp` runs the `bd` CLI, so `bd`
@@ -86,12 +93,14 @@ environment variables and other install options.
 
 ### Updating an existing config
 
-`bd setup junie` replaces the whole of `.junie/mcp/mcp.json` each time it
-runs. Older bd releases wrote a `beads` entry that runs `bd mcp`, a command bd
-does not have, so Junie could not start the server. If your file holds only
-that entry, re-run `bd setup junie` to replace it. If you added other MCP
-servers to the file, re-running would drop them: edit only the `beads` entry
-by hand to the `uvx` / `beads-mcp` form above instead.
+A config that runs `bd mcp` cannot start a server. With bd v1.4.0 or later,
+re-running `bd setup junie` replaces it, but the re-run rewrites both files
+whole: `.junie/mcp/mcp.json` loses any other MCP servers you added, and
+`.junie/guidelines.md` goes back to bd's template, losing your edits. If
+`guidelines.md` is a symlink, setup refuses to write through it and stops
+before it reaches `mcp.json`. If you changed either file, or run v1.3.4 or
+earlier, edit only the `beads` entry by hand to the `uvx` / `beads-mcp` form
+above instead.
 
 ## CLI Commands
 
@@ -196,8 +205,8 @@ bd setup junie
 ### MCP tools not available
 
 ```bash
-# Verify the config launches beads-mcp (not "bd mcp"); re-run
-# bd setup junie or edit the beads entry if it does not
+# Verify the config launches beads-mcp (not "bd mcp"); if it does not,
+# fix it as "Updating an existing config" above describes
 cat .junie/mcp/mcp.json
 
 # Verify the launcher and bd are on PATH
