@@ -289,3 +289,69 @@ func TestDoltNew_CloneLocalBehindWithLeaseColumnsStaysReadable(t *testing.T) {
 		t.Errorf("read-only open changed the database: before %s, after %s", before, after)
 	}
 }
+
+// TestDoltNew_CloneLocalBehindOpensNeverMigrate covers the opens with no
+// authority to apply the clone-local series against the
+// TestDoltNew_CloneLocalReadableSchema fixture. None of them migrates: a
+// gateway open that asks for a readable schema gets the typed refusal, naming
+// the server administrator rather than a command bd would refuse to run
+// there, while a preview's and a diagnostic probe's opens, which do not ask,
+// keep opening as before (bd doctor and the version-bump probe must reach
+// the database to report on it).
+func TestDoltNew_CloneLocalBehindOpensNeverMigrate(t *testing.T) {
+	skipIfNoDolt(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	open, store := cloneLocalBehindFixture(t, ctx, false)
+	before := cloneLocalState(t, ctx, store)
+	unchanged := func(t *testing.T) {
+		t.Helper()
+		if after := cloneLocalState(t, ctx, store); after != before {
+			t.Errorf("open changed the database: before %s, after %s", before, after)
+		}
+	}
+
+	t.Run("gateway open names the server administrator", func(t *testing.T) {
+		s, err := open(&Config{Gateway: true, RequireReadableSchema: true})
+		if err == nil {
+			s.Close()
+		}
+		var behind *schema.CloneLocalBehindError
+		if !errors.As(err, &behind) || !behind.Gateway {
+			t.Fatalf("New (gateway, granted_node missing) = %T (%v), want a gateway *schema.CloneLocalBehindError", err, err)
+		}
+		if !strings.Contains(err.Error(), "server administrator") || strings.Contains(err.Error(), "bd migrate schema") {
+			t.Errorf("gateway refusal %q must send the operator to the server administrator, not to `bd migrate schema`", err)
+		}
+		unchanged(t)
+	})
+
+	for _, tc := range []struct {
+		name string
+		cfg  *Config
+	}{
+		{"preview open keeps its own policy", &Config{ReadOnly: true, Preview: true}},
+		{"diagnostic probe open still opens", &Config{ReadOnly: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := open(tc.cfg)
+			if err != nil {
+				t.Fatalf("New (%+v) = %v, want success: an open that does not ask for a readable schema must still reach the database", *tc.cfg, err)
+			}
+			s.Close()
+			unchanged(t)
+		})
+	}
+
+	t.Run("the escape hatch reads anyway", func(t *testing.T) {
+		t.Setenv("BD_IGNORE_SCHEMA_SKEW", "1")
+		s, err := open(&Config{ReadOnly: true, RequireReadableSchema: true})
+		if err != nil {
+			t.Fatalf("New (read-only, BD_IGNORE_SCHEMA_SKEW=1) = %v, want success", err)
+		}
+		s.Close()
+		unchanged(t)
+	})
+}
