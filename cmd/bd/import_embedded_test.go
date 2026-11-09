@@ -449,13 +449,16 @@ type importRejectJSON struct {
 // importSkipInvalidJSON mirrors the import --json result fields the
 // skip-invalid tests assert on (importResultJSON, cmd/bd/import.go).
 type importSkipInvalidJSON struct {
-	Source      string             `json:"source"`
-	Created     int                `json:"created"`
-	Updated     int                `json:"updated"`
-	Skipped     int                `json:"skipped"`
-	Memories    int                `json:"memories"`
-	Rejected    []importRejectJSON `json:"rejected"`
-	RejectsFile string             `json:"rejects_file"`
+	Source          string             `json:"source"`
+	Created         int                `json:"created"`
+	Updated         int                `json:"updated"`
+	Unchanged       int                `json:"unchanged"`
+	Skipped         int                `json:"skipped"`
+	DedupHits       int                `json:"dedup_skipped"`
+	Memories        int                `json:"memories"`
+	StaleSkippedIDs []string           `json:"stale_skipped_ids"`
+	Rejected        []importRejectJSON `json:"rejected"`
+	RejectsFile     string             `json:"rejects_file"`
 }
 
 // bdImportBuffers runs "bd import" with the given stdin (nil for none) and
@@ -917,5 +920,164 @@ func TestEmbeddedImportInvalidRegisteredVocabulary(t *testing.T) {
 		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
 		writeJSONLFile(t, jsonlPath, registeredVocabularyRows("imreg", time.Now().UTC()))
 		assertAllImported(t, "imyal", register, jsonlPath)
+	})
+}
+
+// TestEmbeddedImportInvalidStaleRowNotScreened pins the ordering half of
+// #4492's screen: the stale filter runs FIRST, so an invalid record that is
+// about to be skipped anyway is never a reject. A stale row will not be
+// written, so it cannot be rejected either — the strict default succeeds,
+// reports the row as stale-skipped, and the stored (newer) data survives
+// untouched. Only --allow-stale, which puts that row back on the write path,
+// puts it back under the screen.
+func TestEmbeddedImportInvalidStaleRowNotScreened(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt import tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	// seedNewerRow imports a fresh valid snapshot so the workspace holds a
+	// row for id with the given (newer) timestamps, then returns the dir.
+	seedNewerRow := func(t *testing.T, prefix, id, title string, at time.Time) string {
+		t.Helper()
+		dir, _, _ := bdInit(t, bd, "--prefix", prefix)
+		seedPath := filepath.Join(t.TempDir(), "seed.jsonl")
+		writeJSONLFile(t, seedPath, []types.Issue{
+			{ID: id, Title: title, Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: at, UpdatedAt: at},
+		})
+		bdImport(t, bd, dir, seedPath)
+		return dir
+	}
+
+	t.Run("stale_invalid_row_is_stale_skipped_not_rejected", func(t *testing.T) {
+		newer := time.Now().UTC().Add(time.Hour)
+		dir := seedNewerRow(t, "imst", "imst-aaa", "Stored newer", newer)
+
+		// The incoming snapshot is older AND its imst-aaa row is invalid.
+		older := time.Now().UTC().Add(-time.Hour)
+		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+		writeJSONLFile(t, jsonlPath, []types.Issue{
+			{ID: "imst-aaa", Title: "Stale invalid", Status: types.Status("verify"), IssueType: types.TypeTask, CreatedAt: older, UpdatedAt: older},
+			{ID: "imst-bbb", Title: "Fresh valid", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: newer, UpdatedAt: newer},
+		})
+
+		stdout, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath, "--json")
+		if err != nil {
+			t.Fatalf("strict import must succeed: the invalid row is stale-skipped before the screen ever sees it;\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		var result importSkipInvalidJSON
+		if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &result); err != nil {
+			t.Fatalf("parse --json output %q: %v", stdout, err)
+		}
+		if len(result.Rejected) != 0 {
+			t.Errorf("Rejected = %+v, want none — a row that will not be written cannot be rejected", result.Rejected)
+		}
+		if len(result.StaleSkippedIDs) != 1 || result.StaleSkippedIDs[0] != "imst-aaa" {
+			t.Errorf("StaleSkippedIDs = %v, want [imst-aaa] (reported as stale-skipped, not rejected)", result.StaleSkippedIDs)
+		}
+		if result.Created != 1 {
+			t.Errorf("Created = %d, want 1 (only imst-bbb)", result.Created)
+		}
+		// The stored row is preserved: same title, same updated_at.
+		showCmd := exec.Command(bd, "show", "imst-aaa", "--json")
+		showCmd.Dir = dir
+		showCmd.Env = bdEnv(dir)
+		showOut, _, showErr := runCommandBuffers(t, showCmd)
+		if showErr != nil {
+			t.Fatalf("bd show imst-aaa: %v", showErr)
+		}
+		var shown []struct {
+			Title     string    `json:"title"`
+			UpdatedAt time.Time `json:"updated_at"`
+		}
+		if err := json.Unmarshal(showOut.Bytes(), &shown); err != nil || len(shown) != 1 {
+			t.Fatalf("parse bd show --json output %q: %v (len=%d)", showOut.String(), err, len(shown))
+		}
+		if shown[0].Title != "Stored newer" {
+			t.Errorf("stored row must keep its (newer) content; title = %q", shown[0].Title)
+		}
+		if shown[0].UpdatedAt.Unix() != newer.Unix() {
+			t.Errorf("stored row must keep its (newer) updated_at %s; got %s", newer.Format(time.RFC3339), shown[0].UpdatedAt.Format(time.RFC3339))
+		}
+	})
+
+	t.Run("dedup_hit_is_not_screened", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imdd")
+		existingID := bdCreateSilent(t, bd, dir, "Dup Title")
+
+		now := time.Now().UTC()
+		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+		writeJSONLFile(t, jsonlPath, []types.Issue{
+			{ID: "imdd-bad", Title: "Dup Title", Status: types.Status("verify"), IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+			{ID: "imdd-ccc", Title: "Fresh valid", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+		})
+
+		stdout, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath, "--dedup", "--json")
+		if err != nil {
+			t.Fatalf("strict import must succeed: the invalid row is a dedup hit, removed before the screen;\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		var result importSkipInvalidJSON
+		if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &result); err != nil {
+			t.Fatalf("parse --json output %q: %v", stdout, err)
+		}
+		if result.DedupHits != 1 {
+			t.Errorf("DedupHits = %d, want 1 (the invalid duplicate is a dedup hit, not a reject)", result.DedupHits)
+		}
+		if len(result.Rejected) != 0 {
+			t.Errorf("Rejected = %+v, want none", result.Rejected)
+		}
+		if result.Created != 1 {
+			t.Errorf("Created = %d, want 1 (only imdd-ccc)", result.Created)
+		}
+		showCmd := exec.Command(bd, "show", existingID)
+		showCmd.Dir = dir
+		showCmd.Env = bdEnv(dir)
+		if _, _, showErr := runCommandBuffers(t, showCmd); showErr != nil {
+			t.Errorf("bd show %s: %v", existingID, showErr)
+		}
+	})
+
+	t.Run("allow_stale_puts_the_row_back_under_the_screen", func(t *testing.T) {
+		newer := time.Now().UTC().Add(time.Hour)
+		dir := seedNewerRow(t, "imas", "imas-aaa", "Stored newer", newer)
+
+		older := time.Now().UTC().Add(-time.Hour)
+		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+		writeJSONLFile(t, jsonlPath, []types.Issue{
+			{ID: "imas-aaa", Title: "Stale invalid", Status: types.Status("verify"), IssueType: types.TypeTask, CreatedAt: older, UpdatedAt: older},
+			{ID: "imas-bbb", Title: "Fresh valid", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: newer, UpdatedAt: newer},
+		})
+
+		// Strict + --allow-stale: the invalid row would be written, so it is
+		// screened, and the strict default fails naming its line.
+		_, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath, "--allow-stale")
+		if err == nil {
+			t.Fatalf("strict --allow-stale import must fail on the invalid row that is about to land")
+		}
+		if !strings.Contains(stderr, "line 1") || !strings.Contains(stderr, "invalid status: verify") || !strings.Contains(stderr, "nothing was imported") {
+			t.Errorf("strict failure should name line 1, the reason, and say nothing was imported; got:\n%s", stderr)
+		}
+		if issues := bdListJSONAllowError(t, bd, dir); len(issues) != 1 {
+			t.Errorf("a failed strict import must not write anything; found %d issues", len(issues))
+		}
+
+		// Skip + --allow-stale: the row is rejected, the valid row lands.
+		rejectsPath := filepath.Join(t.TempDir(), "rejects.jsonl")
+		stdout, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath, "--allow-stale", "--skip-invalid", "--rejects", rejectsPath, "--json")
+		if err != nil {
+			t.Fatalf("bd import --allow-stale --skip-invalid should succeed; err=%v\nstderr:\n%s", err, stderr)
+		}
+		var result importSkipInvalidJSON
+		if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &result); err != nil {
+			t.Fatalf("parse --json output %q: %v", stdout, err)
+		}
+		if len(result.Rejected) != 1 || result.Rejected[0].Line != 1 || result.Rejected[0].ID != "imas-aaa" {
+			t.Errorf("Rejected = %+v, want one entry: line 1 / imas-aaa", result.Rejected)
+		}
+		if result.Created != 1 {
+			t.Errorf("Created = %d, want 1 (only imas-bbb)", result.Created)
+		}
 	})
 }
