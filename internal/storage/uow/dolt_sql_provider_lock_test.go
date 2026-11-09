@@ -688,3 +688,69 @@ func TestBootstrapPreparerBareCreateArbitrationUnchanged(t *testing.T) {
 		}
 	})
 }
+
+// TestBootstrapPreparerStickyRecreationReturnsOriginalCapability pins AC-3: a
+// preparer that previously won the bare CREATE and captured a capability, on a
+// later locked attempt that finds the database no longer visible, re-asserts
+// availability with CREATE DATABASE IF NOT EXISTS and returns the ORIGINAL
+// capability — never capturing authority over a replacement incarnation.
+func TestBootstrapPreparerStickyRecreationReturnsOriginalCapability(t *testing.T) {
+	prep, conn, mock := newPreparerMock(t)
+	// Attempt 1: create and capture.
+	expectDatabaseExistsProbe(mock, "beads", false)
+	mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `beads`")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	expectPreparationUse(mock)
+	expectPreparationCapture(mock, "beads")
+	original, err := prep.prepare(context.Background(), conn)
+	if err != nil {
+		t.Fatalf("first prepare() error = %v, want nil", err)
+	}
+	if original == nil {
+		t.Fatal("first prepare() capability = nil, want the captured authority")
+	}
+
+	// Attempt 2: the database was dropped in between (a concurrent
+	// clean-databases), so the probe cannot see it. Availability is restored
+	// with the sticky CREATE IF NOT EXISTS — which is not the bare CREATE and
+	// must not capture anything.
+	expectDatabaseExistsProbe(mock, "beads", false)
+	mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE IF NOT EXISTS `beads`")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	expectPreparationUse(mock)
+	returned, err := prep.prepare(context.Background(), conn)
+	if err != nil {
+		t.Fatalf("sticky prepare() error = %v, want nil", err)
+	}
+	if returned != original {
+		t.Fatalf("sticky prepare() capability = %v, want the original %v: authority over a replacement incarnation must never be inferred from CREATE IF NOT EXISTS", returned, original)
+	}
+	if prep.heal != original {
+		t.Error("heal replaced on the sticky re-creation")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations (the sticky re-creation must not capture): %v", err)
+	}
+}
+
+// TestBootstrapPreparerStickyCreateFailuresStayPermanent pins the unchanged
+// classifications of the sticky branch: its CREATE IF NOT EXISTS failure and
+// the USE after it are permanent, exactly as before the probe.
+func TestBootstrapPreparerStickyCreateFailuresStayPermanent(t *testing.T) {
+	t.Run("sticky CREATE failure is permanent", func(t *testing.T) {
+		prep, conn, mock := newPreparerMock(t)
+		prep.created = true
+		expectDatabaseExistsProbe(mock, "beads", false)
+		mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE IF NOT EXISTS `beads`")).
+			WillReturnError(&mysql.MySQLError{Number: 1213, Message: "Deadlock found when trying to get lock"})
+
+		_, err := prep.prepare(context.Background(), conn)
+		if err == nil {
+			t.Fatal("prepare() error = nil, want the sticky CREATE failure")
+		}
+		assertPermanentClassification(t, err)
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+}
