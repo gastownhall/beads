@@ -757,6 +757,7 @@ go_test(
         "doctor_orchestrator_guard_test.go",
         "doctor_pollution_clean_test.go",
         "doctor_pollution_select_test.go",
+        "doctor_pollution_gate_test.go",
         "doctor_repair_test.go",
         "doctor_test.go",
         "doctor_validate_test.go",

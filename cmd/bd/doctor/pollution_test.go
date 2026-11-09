@@ -1,6 +1,8 @@
 package doctor
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -267,5 +269,50 @@ func TestDetectTestPollution_ScoreWeights(t *testing.T) {
 		if got := hits[0].HighConfidence(); got != tc.wantHigh {
 			t.Errorf("%s: HighConfidence = %t, want %t", tc.name, got, tc.wantHigh)
 		}
+	}
+}
+
+// fakePollutionSearchStore is the seam double for the validation gate's core:
+// canned rows, or a failing query.
+type fakePollutionSearchStore struct {
+	issues    []*types.Issue
+	err       error
+	gotFilter types.IssueFilter
+}
+
+func (f *fakePollutionSearchStore) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
+	f.gotFilter = filter
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.issues, nil
+}
+
+// TestCheckTestPollutionStore pins the validation gate's core against the
+// store seam: zero hits are ok, hits are warnings counting the shared
+// scorer's results, and a query error degrades to N/A — never to a green
+// "no pollution".
+func TestCheckTestPollutionStore(t *testing.T) {
+	ctx := context.Background()
+
+	zero := &fakePollutionSearchStore{issues: nil}
+	got := checkTestPollutionStore(ctx, zero)
+	if got.Status != StatusOK || got.Message != "No test pollution detected" {
+		t.Errorf("zero hits: status %q message %q, want ok / \"No test pollution detected\"", got.Status, got.Message)
+	}
+	if zero.gotFilter.Status == nil || *zero.gotFilter.Status != types.StatusOpen || zero.gotFilter.Ephemeral == nil || *zero.gotFilter.Ephemeral {
+		t.Errorf("zero hits: the gate did not load through the shared pollution filter: %+v", zero.gotFilter)
+	}
+
+	one := &fakePollutionSearchStore{issues: []*types.Issue{pollutionFixtureIssue("bd-gate")}}
+	got = checkTestPollutionStore(ctx, one)
+	if got.Status != StatusWarning || got.Message != "1 potential test issue(s) detected" {
+		t.Errorf("one hit: status %q message %q, want warning / \"1 potential test issue(s) detected\"", got.Status, got.Message)
+	}
+
+	failing := &fakePollutionSearchStore{err: errors.New("connection refused")}
+	got = checkTestPollutionStore(ctx, failing)
+	if got.Status != StatusWarning || got.Message != "N/A (query failed)" {
+		t.Errorf("query error: status %q message %q, want warning / \"N/A (query failed)\"", got.Status, got.Message)
 	}
 }
