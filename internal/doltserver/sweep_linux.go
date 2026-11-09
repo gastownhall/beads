@@ -54,15 +54,15 @@ func gatherDoltServerCandidates() []serverCandidate {
 		if err != nil || len(cmdlineRaw) == 0 {
 			continue // process gone, or unreadable (permissions, kernel thread)
 		}
-		cmdline := strings.ReplaceAll(strings.Trim(string(cmdlineRaw), "\x00"), "\x00", " ")
-		if !isDoltServerCmdline(cmdline) {
+		argv := strings.Fields(strings.ReplaceAll(string(cmdlineRaw), "\x00", " "))
+		if !isDoltServerArgv(argv) {
 			continue
 		}
 
 		cwd, deleted := readProcCwd(pid)
 		candidates = append(candidates, serverCandidate{
 			pid:        pid,
-			cmdline:    cmdline,
+			argv:       argv,
 			cwd:        cwd,
 			cwdDeleted: deleted,
 		})
