@@ -1226,7 +1226,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Server and proxied-server opens no longer send `CREATE DATABASE` for a
+- Proxied-server opens and `bd serve` no longer send `CREATE DATABASE` for a
   database the account can already see
   ([#5079](https://github.com/gastownhall/beads/issues/5079)). An open that
   missed the converged fast path (a peer held the migration lock, or the

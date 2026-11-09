@@ -291,8 +291,9 @@ func TestNewExternalDoltServerUOWProvider_FreshInitSelfHealsAfterMidPassFailure(
 
 // TestNewExternalDoltServerUOWProvider_PreexistingDirtyDatabaseIsNotHealed is
 // the ownership-negative counterpart of the fresh-init self-heal: an
-// initializer that did NOT create the database (its bare CREATE DATABASE loses
-// to an existing one) must keep the #4566 guard's refusal and must not
+// initializer that did NOT create the database (its locked preparation finds
+// the database visible and never sends CREATE DATABASE, so it captures no heal
+// authority) must keep the #4566 guard's refusal and must not
 // DOLT_RESET the working set — the dirt it sees could be another actor's
 // legitimate uncommitted state, which only the proven creator may discard.
 func TestNewExternalDoltServerUOWProvider_PreexistingDirtyDatabaseIsNotHealed(t *testing.T) {

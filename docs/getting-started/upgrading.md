@@ -663,18 +663,21 @@ reached through a local proxy. Three differences worth knowing:
 ### Least-privilege accounts
 
 A proxied-server workspace can run on an account that the server
-administrator granted only on its own database. `bd` never needs `CREATE` to
-open a database that account can already see
+administrator granted only on its own database. `bd` never sends
+`CREATE DATABASE` for a database that account can already see
 ([#5079](https://github.com/gastownhall/beads/issues/5079)). On a fully
 converged database, a read command needs only `SELECT` on that database.
 
 Creating the database and migrating its schema are separate jobs, and neither
 grants the other. The administrator who provisions the database needs
 `CREATE`; the designated migrator who runs step 2 above needs the privileges
-to change the schema. A least-privilege account on a database whose schema is
-behind, with no migration consent, gets the same treatment as any other
-client: reads warn and serve the current schema, and writes are refused by
-the migration gate. An open that has schema maintenance to do, such as
+to change the schema. A newly provisioned database is empty, and the first
+open creates its tables, so run that open (usually `bd init`) as an account
+allowed to create tables in the database, such as one granted `ALL` on it. A
+least-privilege account on a database whose schema is behind, with no
+migration consent, gets the same treatment as any other client: reads warn
+and serve the current schema, and writes are refused by the migration gate.
+An open that has schema maintenance to do, such as
 seeding missing `dolt_ignore` patterns or reconciling the migration cursor,
 or that runs a consented migration, can still need more than `SELECT`.
 

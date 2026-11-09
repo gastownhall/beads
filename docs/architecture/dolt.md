@@ -380,12 +380,12 @@ on those opens and dialed TCP beside a metadata.json socket. `beads.Open`
 does not read metadata.json.
 
 **Least-privilege accounts (proxied-server mode).** `bd` creates a database
-only when the account cannot see it, so opening a visible database never needs
-`CREATE`. Reads on a fully converged database need only `SELECT` on it, as do
-reads served through the migration gate's refusal on a behind one.
-Provisioning the database, migrating its schema and some schema maintenance
-are jobs for an administrator or designated migrator with the privileges for
-them; see
+only when the account cannot see it, so opening a visible database never sends
+`CREATE DATABASE`. Reads on a fully converged database need only `SELECT` on
+it, as do reads served through the migration gate's refusal on a behind one.
+Provisioning the database, creating the tables of an empty one, migrating its
+schema and some schema maintenance are jobs for an administrator or
+designated migrator with the privileges for them; see
 [Least-privilege accounts](/getting-started/upgrading#least-privilege-accounts).
 
 Switch to server mode when you need:

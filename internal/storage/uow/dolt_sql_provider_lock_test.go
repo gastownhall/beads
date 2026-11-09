@@ -348,7 +348,13 @@ func TestSelectProbeDatabaseIssuesPreparationsUse(t *testing.T) {
 // MigrateUpWithLock hands its locked-preparation callback.
 func preparerConn(t *testing.T) (*sql.Conn, sqlmock.Sqlmock) {
 	t.Helper()
-	db, mock, err := sqlmock.New()
+	return preparerConnMatching(t, sqlmock.QueryMatcherRegexp)
+}
+
+// preparerConnMatching is preparerConn with its own query matcher.
+func preparerConnMatching(t *testing.T, matcher sqlmock.QueryMatcher) (*sql.Conn, sqlmock.Sqlmock) {
+	t.Helper()
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(matcher))
 	if err != nil {
 		t.Fatalf("create sql mock: %v", err)
 	}
@@ -359,6 +365,20 @@ func preparerConn(t *testing.T) (*sql.Conn, sqlmock.Sqlmock) {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	return conn, mock
+}
+
+// createDatabaseRecorder is sqlmock's default regexp matcher that also records
+// every CREATE DATABASE statement sqlmock matches against an expectation. An
+// unexpected statement only returns an error to its caller, so code that sent
+// a CREATE and discarded that error would still meet every expectation; the
+// record is what proves no CREATE was sent.
+type createDatabaseRecorder struct{ sent []string }
+
+func (r *createDatabaseRecorder) Match(expectedSQL, actualSQL string) error {
+	if strings.Contains(strings.ToUpper(actualSQL), "CREATE DATABASE") {
+		r.sent = append(r.sent, actualSQL)
+	}
+	return sqlmock.QueryMatcherRegexp.Match(expectedSQL, actualSQL)
 }
 
 // expectPreparationCapture mocks the fresh-bootstrap identity capture a
@@ -393,7 +413,8 @@ func TestBootstrapPreparerProbesBeforeCreate(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("initial attempt on a visible database only selects it", func(t *testing.T) {
-		conn, mock := preparerConn(t)
+		creates := &createDatabaseRecorder{}
+		conn, mock := preparerConnMatching(t, creates)
 		expectDatabaseExistsProbe(mock, "beads", true)
 		mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
 			WillReturnResult(sqlmock.NewResult(0, 0))
@@ -406,13 +427,17 @@ func TestBootstrapPreparerProbesBeforeCreate(t *testing.T) {
 		if heal != nil || b.heal != nil || b.created {
 			t.Fatalf("prepare() heal = %p, b.heal = %p, created = %t; a visible database grants no authority", heal, b.heal, b.created)
 		}
+		if len(creates.sent) > 0 {
+			t.Fatalf("prepare() sent %q for a visible database", creates.sent)
+		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("ordered SQL expectations (no CREATE DATABASE may be sent): %v", err)
 		}
 	})
 
 	t.Run("retry on a visible database keeps the captured capability", func(t *testing.T) {
-		conn, mock := preparerConn(t)
+		creates := &createDatabaseRecorder{}
+		conn, mock := preparerConnMatching(t, creates)
 		// The first attempt wins the bare CREATE and captures authority.
 		expectDatabaseExistsProbe(mock, "beads", false)
 		mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `beads`")).
@@ -429,6 +454,10 @@ func TestBootstrapPreparerProbesBeforeCreate(t *testing.T) {
 		if first == nil {
 			t.Fatal("first prepare() heal = nil, want the captured authority")
 		}
+		if len(creates.sent) != 1 {
+			t.Fatalf("first prepare() recorded %q, want exactly its bare CREATE DATABASE", creates.sent)
+		}
+		creates.sent = nil
 
 		// The retry finds it visible: no CREATE DATABASE IF NOT EXISTS, and
 		// the original capability comes back unchanged.
@@ -441,6 +470,9 @@ func TestBootstrapPreparerProbesBeforeCreate(t *testing.T) {
 		}
 		if heal != first || b.heal != first || !b.created {
 			t.Fatalf("retry prepare() heal = %p, b.heal = %p, created = %t; want the original capability %p unchanged and created kept", heal, b.heal, b.created, first)
+		}
+		if len(creates.sent) > 0 {
+			t.Fatalf("retry prepare() sent %q for a visible database", creates.sent)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("ordered SQL expectations (no CREATE form may be sent on the retry): %v", err)
@@ -496,7 +528,7 @@ func TestBootstrapPreparerProbesBeforeCreate(t *testing.T) {
 		})
 	}
 
-	t.Run("denied USE after a positive probe stays permanent", func(t *testing.T) {
+	t.Run("vanished database after a positive probe stays permanent", func(t *testing.T) {
 		conn, mock := preparerConn(t)
 		expectDatabaseExistsProbe(mock, "beads", true)
 		mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
