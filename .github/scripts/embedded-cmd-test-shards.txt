@@ -71,6 +71,7 @@
 100 18 TestEmbeddedLabelPropagateRename
 100 18 TestEmbeddedPrune_protectsBeadCitedByCustomStatusBead
 
+100 19 TestEmbeddedImportInvalidStaleRowNotScreened
 100 19 TestEmbeddedLabelConcurrent
 100 19 TestEmbeddedNewDoltStore_StrictReadOnlyRefusesWritesOnFreshDatabase
 

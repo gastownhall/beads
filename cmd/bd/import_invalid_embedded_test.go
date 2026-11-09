@@ -256,3 +256,46 @@ func TestEmbeddedImportInvalidRegisteredVocabulary(t *testing.T) {
 		t.Fatalf("created %d, rejected %+v; want 3 created, none rejected", result.Created, result.Rejected)
 	}
 }
+
+func TestEmbeddedImportInvalidStaleRowNotScreened(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt import tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "imstl")
+	tmp := t.TempDir()
+	current := time.Now().UTC().Truncate(time.Second)
+	older := current.Add(-time.Hour).Format(time.RFC3339)
+	row := func(status, updated string) string {
+		return fmt.Sprintf(`{"id":"imstl-aaa","title":"Stored","status":%q,"issue_type":"task","created_at":%q,"updated_at":%q}`, status, older, updated)
+	}
+	stored := filepath.Join(tmp, "stored.jsonl")
+	writeImportLines(t, stored, row("open", current.Format(time.RFC3339)))
+	bdImport(t, bd, dir, stored)
+
+	// The same id, older and invalid: the stale guard skips it, so it is
+	// never written and never screened.
+	stale := filepath.Join(tmp, "stale.jsonl")
+	writeImportLines(t, stale, row("verify", older))
+
+	for _, args := range [][]string{{"--json"}, {"--skip-invalid", "--json"}} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			stdout, stderr, err := bdImportRun(t, bd, dir, append(args, stale)...)
+			if err != nil {
+				t.Fatalf("bd import %v of a stale invalid row failed: %v\nstdout:\n%s\nstderr:\n%s", args, err, stdout, stderr)
+			}
+			var result importResultJSON
+			if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+				t.Fatalf("parse --json output: %v\n%s", err, stdout)
+			}
+			if !slices.Equal(result.StaleSkippedIDs, []string{"imstl-aaa"}) || len(result.Rejected) != 0 {
+				t.Fatalf("stale_skipped_ids %v, rejected %+v; want the row stale-skipped, not rejected", result.StaleSkippedIDs, result.Rejected)
+			}
+			if show := bdShowJSON(t, bd, dir, "imstl-aaa"); !strings.Contains(show, `"status":"open"`) && !strings.Contains(show, `"status": "open"`) {
+				t.Fatalf("stored row changed:\n%s", show)
+			}
+		})
+	}
+}
