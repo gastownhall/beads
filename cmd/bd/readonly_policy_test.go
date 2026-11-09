@@ -16,10 +16,12 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
@@ -422,4 +424,219 @@ func TestWritingFlagsOnClassifiedReadsAreWriters(t *testing.T) {
 			}
 		})
 	}
+}
+
+// setBoolFlagForTest points a bool flag at value and registers the restore
+// (parsed value AND Changed bit) with the test's cleanup, so a case that
+// parsed a write flag cannot leak it into the next one. These tests walk the
+// real command tree, so they must not run in parallel with anything else
+// touching it.
+func setBoolFlagForTest(t *testing.T, cmd *cobra.Command, name, value string) {
+	t.Helper()
+	flag := cmd.Flags().Lookup(name)
+	if flag == nil {
+		t.Fatalf("%s has no --%s flag", cmd.Name(), name)
+	}
+	if err := cmd.Flags().Set(name, value); err != nil {
+		t.Fatalf("set --%s=%s on %s: %v", name, value, cmd.Name(), err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Flags().Set(name, flag.DefValue)
+		flag.Changed = false
+	})
+}
+
+// resolveBdCommand finds a command in the real tree by its invocation path,
+// so the verdicts under test see the parsed flag state Cobra would have left.
+func resolveBdCommand(t *testing.T, path ...string) *cobra.Command {
+	t.Helper()
+	cmd, _, err := rootCmd.Find(path)
+	if err != nil || cmd == nil {
+		t.Fatalf("resolve bd %v in the command tree: %v (cmd=%v)", path, err, cmd)
+	}
+	return cmd
+}
+
+// TestCommandReadsOnlyIsFlagAware pins the admission-parity contract of
+// bd-fwx149 (GH#8264): parsed `bd ready --claim` and `bd duplicates
+// --auto-merge` select, through the root policy, the same writer open
+// (provider options), journal posture, eligible JSONL auto-import and
+// export/push/prune maintenance that `bd update --claim` gets — while the
+// plain listings, a false flag, a preview, a nested `bd mol ready`, an
+// unclassified writer and strict --readonly keep exactly the policies they
+// had.
+func TestCommandReadsOnlyIsFlagAware(t *testing.T) {
+	ready := resolveBdCommand(t, "ready")
+	duplicates := resolveBdCommand(t, "duplicates")
+	update := resolveBdCommand(t, "update")
+	molReady := resolveBdCommand(t, "mol", "ready")
+
+	// The JSONL auto-import eligibility reads the config layer; reset it so
+	// the default import.auto=true is what the answer depends on.
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	// shouldAutoPruneEventsJournal reads the process-wide strict-readonly
+	// verdict; pin it to the off state this contract is about.
+	originalReadonlyMode := readonlyMode
+	readonlyMode = false
+	t.Cleanup(func() { readonlyMode = originalReadonlyMode })
+
+	fakeStore := &strictReadonlyPostRunStore{}
+
+	// posture renders one invocation's admission answers end to end, from
+	// the same inputs PersistentPreRunE/PersistentPostRunE use.
+	posture := func(cmd *cobra.Command, strictReadonly bool) (readOnly, useReadOnly, autoImport, journalRetention, export, push bool) {
+		t.Helper()
+		previewMode := isPreviewCommand(cmd)
+		policy := effectiveRootStorePolicy(cmd, strictReadonly)
+		useReadOnly = policy.readOnly || previewMode
+		return policy.readOnly, useReadOnly,
+			shouldRunAutoImportJSONL(cmd, fakeStore, useReadOnly, false, false),
+			shouldAutoPruneEventsJournal(cmd),
+			shouldRunPostCommandAutoExport(cmd),
+			shouldRunPostCommandAutoPush(cmd)
+	}
+
+	assertWriterLikeUpdate := func(t *testing.T, label string, cmd *cobra.Command) {
+		t.Helper()
+		readOnly, useReadOnly, autoImport, retention, export, push := posture(cmd, false)
+		_, _, updateImport, updateRetention, _, _ := posture(update, false)
+		if readOnly || useReadOnly {
+			t.Errorf("%s: readOnly=%t useReadOnly=%t, want the writer open update --claim gets", label, readOnly, useReadOnly)
+		}
+		if !autoImport {
+			t.Errorf("%s: eligible JSONL auto-import = false, want true like update --claim (%t)", label, updateImport)
+		}
+		if !retention {
+			t.Errorf("%s: events-journal retention = false, want true like update --claim (%t)", label, updateRetention)
+		}
+		if !export || !push {
+			t.Errorf("%s: auto-export=%t auto-push=%t, want both like update --claim", label, export, push)
+		}
+		opts := rootProviderOptions(isPreviewCommand(cmd), useReadOnly, false)
+		if len(opts) != 0 {
+			t.Errorf("%s: provider options = %d, want the plain writer open (0)", label, len(opts))
+		}
+	}
+
+	assertReadLikePlainList := func(t *testing.T, label string, cmd *cobra.Command) {
+		t.Helper()
+		readOnly, useReadOnly, autoImport, retention, export, push := posture(cmd, false)
+		if !readOnly || !useReadOnly {
+			t.Errorf("%s: readOnly=%t useReadOnly=%t, want the classified-read open", label, readOnly, useReadOnly)
+		}
+		if autoImport || retention || export || push {
+			t.Errorf("%s: auto-import=%t retention=%t export=%t push=%t, want all skipped for a read", label, autoImport, retention, export, push)
+		}
+		opts := rootProviderOptions(isPreviewCommand(cmd), useReadOnly, false)
+		if len(opts) != 1 || uow.OpensForBeadWrites(opts...) {
+			t.Errorf("%s: provider options = %d (writesBeads=%t), want the single read-only open", label, len(opts), uow.OpensForBeadWrites(opts...))
+		}
+	}
+
+	t.Run("write_flag_forms_match_update_claim", func(t *testing.T) {
+		setBoolFlagForTest(t, ready, "claim", "true")
+		assertWriterLikeUpdate(t, "ready --claim", ready)
+
+		setBoolFlagForTest(t, duplicates, "auto-merge", "true")
+		assertWriterLikeUpdate(t, "duplicates --auto-merge", duplicates)
+	})
+
+	t.Run("plain_listings_stay_reads", func(t *testing.T) {
+		setBoolFlagForTest(t, ready, "claim", "false")
+		assertReadLikePlainList(t, "ready", ready)
+
+		setBoolFlagForTest(t, duplicates, "auto-merge", "false")
+		assertReadLikePlainList(t, "duplicates", duplicates)
+	})
+
+	t.Run("false_flag_by_changed_bit_only_is_still_a_read", func(t *testing.T) {
+		setBoolFlagForTest(t, ready, "claim", "false")
+		ready.Flags().Lookup("claim").Changed = true
+		assertReadLikePlainList(t, "ready --claim=false", ready)
+	})
+
+	t.Run("merge_preview_stays_a_read", func(t *testing.T) {
+		setBoolFlagForTest(t, duplicates, "auto-merge", "true")
+		setBoolFlagForTest(t, duplicates, "dry-run", "true")
+		assertReadLikePlainList(t, "duplicates --auto-merge --dry-run", duplicates)
+	})
+
+	t.Run("nested_mol_ready_never_answers_for_bd_ready", func(t *testing.T) {
+		if commandRegistryPath(molReady) != "mol ready" {
+			t.Fatalf("commandRegistryPath(mol ready) = %q", commandRegistryPath(molReady))
+		}
+		// The write flag lives on the top-level ready; mol's is a different
+		// command object the path key must never match.
+		setBoolFlagForTest(t, ready, "claim", "true")
+		if !commandReadsOnly(molReady) {
+			t.Errorf("bd mol ready became a writer because bd ready --claim was parsed: the registry key is the path, not the leaf")
+		}
+		assertReadLikePlainList(t, "mol ready", molReady)
+	})
+
+	t.Run("renamed_root_keeps_the_canonical_path", func(t *testing.T) {
+		// The registry path trims the ROOT's name, whatever it is, so the
+		// executable's naming cannot move the key.
+		root := &cobra.Command{Use: "not-bd-at-all"}
+		ready := &cobra.Command{Use: "ready"}
+		ready.Flags().Bool("claim", false, "claim the first ready issue")
+		mol := &cobra.Command{Use: "mol"}
+		molReady := &cobra.Command{Use: "ready"}
+		molReady.Flags().Bool("claim", false, "no such flag in production")
+		root.AddCommand(ready, mol)
+		mol.AddCommand(molReady)
+
+		if err := ready.Flags().Set("claim", "true"); err != nil {
+			t.Fatal(err)
+		}
+		if err := molReady.Flags().Set("claim", "true"); err != nil {
+			t.Fatal(err)
+		}
+		if commandReadsOnly(ready) {
+			t.Errorf("ready --claim under a renamed root stayed a read: the path key must not depend on the executable's name")
+		}
+		if !commandReadsOnly(molReady) {
+			t.Errorf("mol ready under a renamed root became a writer: the nested path must stay outside the write-flag table")
+		}
+	})
+
+	t.Run("unclassified_writer_unaffected", func(t *testing.T) {
+		setBoolFlagForTest(t, update, "claim", "true")
+		assertWriterLikeUpdate(t, "update --claim", update)
+	})
+
+	t.Run("strict_readonly_wins_over_everything", func(t *testing.T) {
+		setBoolFlagForTest(t, ready, "claim", "true")
+		// The retention trigger reads the process-wide strict-readonly state,
+		// not the per-invocation policy, so pin it the way a --readonly run
+		// leaves it.
+		readonlyMode = true
+		t.Cleanup(func() { readonlyMode = false })
+		policy := effectiveRootStorePolicy(ready, true)
+		if !policy.readOnly || !policy.disableAutoStart || policy.runMaintenance {
+			t.Errorf("strict --readonly on ready --claim: readOnly=%t disableAutoStart=%t runMaintenance=%t, want the mutation-free posture", policy.readOnly, policy.disableAutoStart, policy.runMaintenance)
+		}
+		if shouldAutoPruneEventsJournal(ready) {
+			t.Errorf("strict --readonly must suppress journal retention, also for a write-flag form")
+		}
+	})
+
+	t.Run("nil_contracts_fail_closed", func(t *testing.T) {
+		if commandReadsOnly(nil) {
+			t.Errorf("commandReadsOnly(nil) = true, want a writer (fail closed)")
+		}
+		if policy := effectiveRootStorePolicy(nil, false); policy.readOnly || !policy.runMaintenance {
+			t.Errorf("effectiveRootStorePolicy(nil, false) = %+v, want the unclassified writer posture", policy)
+		}
+		if !shouldRunPostCommandAutoExport(nil) || !shouldRunPostCommandAutoPush(nil) {
+			t.Errorf("nil maintenance verdicts: export=%t push=%t, want both to keep today's nil behavior (run)", shouldRunPostCommandAutoExport(nil), shouldRunPostCommandAutoPush(nil))
+		}
+		if shouldAutoPruneEventsJournal(nil) {
+			t.Errorf("shouldAutoPruneEventsJournal(nil) = true, want false")
+		}
+	})
 }
