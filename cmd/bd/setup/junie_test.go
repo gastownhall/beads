@@ -45,14 +45,15 @@ func TestJunieMCPConfig(t *testing.T) {
 		t.Fatal("beads server config missing or wrong type")
 	}
 
+	// bd has no "mcp" subcommand (GH#5563): the server is beads-mcp.
 	command, ok := beads["command"].(string)
-	if !ok || command != "bd" {
-		t.Errorf("Expected command 'bd', got %v", beads["command"])
+	if !ok || command != "uvx" {
+		t.Errorf("Expected command 'uvx', got %v", beads["command"])
 	}
 
 	args, ok := beads["args"].([]string)
-	if !ok || len(args) != 1 || args[0] != "mcp" {
-		t.Errorf("Expected args ['mcp'], got %v", beads["args"])
+	if !ok || len(args) != 1 || args[0] != "beads-mcp" {
+		t.Errorf("Expected args ['beads-mcp'], got %v", beads["args"])
 	}
 
 	// Verify it's valid JSON
@@ -118,8 +119,15 @@ func TestInstallJunie(t *testing.T) {
 			mcpServers, ok := parsed["mcpServers"].(map[string]interface{})
 			if !ok {
 				t.Error("mcpServers key missing or wrong type")
-			} else if _, ok := mcpServers["beads"]; !ok {
+			} else if beads, ok := mcpServers["beads"].(map[string]interface{}); !ok {
 				t.Error("beads server config missing")
+			} else {
+				// The written file must launch beads-mcp, never a bd
+				// subcommand that does not exist (GH#5563).
+				args, _ := beads["args"].([]interface{})
+				if beads["command"] != "uvx" || len(args) != 1 || args[0] != "beads-mcp" {
+					t.Errorf("MCP config should launch uvx beads-mcp, got command %v args %v", beads["command"], beads["args"])
+				}
 			}
 		}
 	}

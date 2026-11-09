@@ -1236,6 +1236,7 @@ go_test(
         "serve_update_proxied_integration_test.go",
         "set_state_proxied_integration_test.go",
         "setup_embedded_test.go",
+        "setup_junie_mcp_command_test.go",
         "setup_test.go",
         "shared_migrate_consent_test.go",
         "shared_server_cfgnil_test.go",
