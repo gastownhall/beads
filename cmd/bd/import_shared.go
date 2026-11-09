@@ -1320,6 +1320,11 @@ type importLocalResult struct {
 	// Retired counts the issue ids the import skipped because a retaining
 	// sweep retired them; they are not in Issues.
 	Retired int
+	// Rejected lists the rows the import skipped because they failed
+	// validation; QuarantinePath is where their lines were saved ("" when
+	// none were, or the save failed).
+	Rejected       []importRejection
+	QuarantinePath string
 }
 
 // memoryRecord represents a memory entry in the JSONL export.
@@ -1450,6 +1455,28 @@ func importFromLocalJSONLWithOpts(ctx context.Context, store storage.DoltStorage
 
 	result := &importLocalResult{}
 
+	// Plan and screen the write set before the first write. A recovery import
+	// restores what it can: rows that fail validation are skipped and their
+	// lines saved beside the source (never into it), and the valid rows still
+	// land. A vocabulary that cannot be read stops it before any write.
+	opts := ImportOptions{
+		SkipPrefixValidation: true,
+		ConflictSkip:         conflictSkip,
+	}
+	plan, err := planImportIssues(ctx, store, issues, opts)
+	if err != nil {
+		return nil, err
+	}
+	kept, rejected, err := screenImportIssues(ctx, plan.issues, recs.sources, storeImportVocabulary(store))
+	if err != nil {
+		return nil, err
+	}
+	plan.issues = kept
+	excludeRejectedFromChangePlan(&plan.changePlan, kept, rejected)
+	result.Rejected = rejected
+	result.QuarantinePath = quarantineRecoveryRejects(os.Stderr, localPath, rejected)
+	issues = withoutRejectedRows(issues, rejected)
+
 	// Import memories
 	for key, value := range configEntries {
 		if err := store.SetConfig(ctx, key, value); err != nil {
@@ -1471,11 +1498,7 @@ func importFromLocalJSONLWithOpts(ctx context.Context, store storage.DoltStorage
 			}
 		}
 
-		opts := ImportOptions{
-			SkipPrefixValidation: true,
-			ConflictSkip:         conflictSkip,
-		}
-		importResult, err := importIssuesCore(ctx, "", store, issues, opts)
+		importResult, err := writeImportPlan(ctx, store, plan, opts)
 		if err != nil {
 			return nil, err
 		}

@@ -421,3 +421,86 @@ func TestEmbeddedImportUndecodableLineNamesLine(t *testing.T) {
 		}
 	})
 }
+
+func TestEmbeddedRecoveryQuarantinesInvalidRecords(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt import tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	checkQuarantine := func(t *testing.T, source, badLine, output string) {
+		t.Helper()
+		qpath := source + ".rejected.jsonl"
+		got, err := os.ReadFile(qpath)
+		if err != nil {
+			t.Fatalf("quarantine %s: %v\noutput:\n%s", qpath, err, output)
+		}
+		if string(got) != badLine+"\n" {
+			t.Fatalf("quarantine = %q, want %q", got, badLine+"\n")
+		}
+		for _, want := range []string{"skipped 1 invalid record(s)", "line 2 (issue ", "invalid status: verify", "saved to ", filepath.Base(qpath)} {
+			if !strings.Contains(output, want) {
+				t.Fatalf("recovery warning should contain %q; got:\n%s", want, output)
+			}
+		}
+	}
+
+	t.Run("init_from_jsonl", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		beadsDir := filepath.Join(dir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		source := filepath.Join(beadsDir, "issues.jsonl")
+		bad := invalidImportLine(t, "imqi-bbb", "Invalid B", "verify")
+		writeImportLines(t, source,
+			invalidImportLine(t, "imqi-aaa", "Valid A", "open"),
+			bad,
+			invalidImportLine(t, "imqi-ccc", "Valid C", "open"),
+		)
+		before, _ := os.ReadFile(source)
+		cmd := exec.Command(bd, "init", "--from-jsonl", "--prefix", "imqi", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd init --from-jsonl failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		checkQuarantine(t, source, bad, stderr.String())
+		if ids := listedIDs(t, bd, dir); !slices.Equal(ids, []string{"imqi-aaa", "imqi-ccc"}) {
+			t.Fatalf("restored issues = %v, want imqi-aaa and imqi-ccc", ids)
+		}
+		if after, _ := os.ReadFile(source); string(after) != string(before) {
+			t.Fatal("the recovery import modified its source")
+		}
+	})
+
+	t.Run("auto_import", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "imqa")
+		source := filepath.Join(beadsDir, "issues.jsonl")
+		bad := invalidImportLine(t, "imqa-bbb", "Invalid B", "verify")
+		writeImportLines(t, source,
+			invalidImportLine(t, "imqa-aaa", "Valid A", "open"),
+			bad,
+		)
+		// A write command runs the auto-import (read-only ones skip it).
+		cmd := exec.Command(bd, "create", "post-import marker", "--type", "task", "--json")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd create failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		checkQuarantine(t, source, bad, stderr.String())
+		ids := listedIDs(t, bd, dir)
+		if len(ids) != 2 || !slices.Contains(ids, "imqa-aaa") || slices.Contains(ids, "imqa-bbb") {
+			t.Fatalf("issues after auto-import = %v, want imqa-aaa and the marker", ids)
+		}
+		if _, err := os.Stat(autoImportStampPath(beadsDir)); err != nil {
+			t.Fatalf("auto-import attempt not stamped: %v", err)
+		}
+	})
+}

@@ -1241,7 +1241,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-import. A dry run validates too, so `bd import --dry-run` of a file
   with one bad status now exits nonzero where it printed a plan and exited
   0: a dry run predicts the real run. A dry run never writes the
-  `--rejects` file. Thanks to @maphew for the original design and tests.
+  `--rejects` file. The recovery imports (`bd bootstrap`,
+  `bd init --from-jsonl` and auto-import into an empty database) restore
+  what they can instead of failing on one bad record: invalid records are
+  skipped, their lines saved beside the source as `<file>.rejected.jsonl`
+  (the source is never modified; a failed save only warns), and the valid
+  rows and memories still land. An auto-import whose every record was
+  skipped stamps the attempt so it is not retried, and commits nothing.
+  Thanks to @maphew for the original design and tests.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

@@ -27,6 +27,7 @@ type fakeFallbackStore struct {
 	statsTotalIssues    int
 	statsNil            bool
 	getStatistics       func(context.Context) (*types.Statistics, error)
+	commitHook          func(msg string)
 }
 
 func (f *fakeFallbackStore) GetStatistics(ctx context.Context) (*types.Statistics, error) {
@@ -39,7 +40,12 @@ func (f *fakeFallbackStore) GetStatistics(ctx context.Context) (*types.Statistic
 	return &types.Statistics{TotalIssues: f.statsTotalIssues}, nil
 }
 
-func (f *fakeFallbackStore) Commit(_ context.Context, _ string) error { return nil }
+func (f *fakeFallbackStore) Commit(_ context.Context, msg string) error {
+	if f.commitHook != nil {
+		f.commitHook(msg)
+	}
+	return nil
+}
 
 func writeAutoImportFixtureJSONL(t *testing.T, dir string) {
 	t.Helper()
@@ -541,4 +547,64 @@ func TestAutoImportFallbackSeamUsesConflictSkip(t *testing.T) {
 			t.Fatalf("bd bootstrap / init --from-jsonl must keep UPSERT (ConflictSkip=false); got true")
 		}
 	})
+}
+
+// TestMaybeAutoImportJSONL_FallbackImporter_AllRejectedStampsWithoutCommit
+// pins the fallback route's all-rejected behavior (GH#4492): an import whose
+// every issue record the screen rejected (nothing eligible written) warns
+// and stamps the attempt — so it is not retried — but claims no writes: no
+// empty "auto-import: 0 issues" commit, no success line.
+func TestMaybeAutoImportJSONL_FallbackImporter_AllRejectedStampsWithoutCommit(t *testing.T) {
+	dir := t.TempDir()
+	writeAutoImportFixtureJSONL(t, dir)
+
+	orig := fallbackImporter
+	var count atomic.Int32
+	fallbackImporter = func(_ context.Context, _ storage.DoltStorage, _ string) (*importLocalResult, error) {
+		count.Add(1)
+		return &importLocalResult{Rejected: make([]importRejection, 2)}, nil
+	}
+	t.Cleanup(func() { fallbackImporter = orig })
+
+	var commits []string
+	store := &fakeFallbackStore{statsTotalIssues: 0, commitHook: func(msg string) { commits = append(commits, msg) }}
+
+	maybeAutoImportJSONL(context.Background(), store, dir)
+	maybeAutoImportJSONL(context.Background(), store, dir)
+
+	if got := count.Load(); got != 1 {
+		t.Fatalf("a stamped all-rejected attempt must not be retried; fallback importer ran %d time(s)", got)
+	}
+	if len(commits) != 0 {
+		t.Errorf("an all-rejected import must not claim writes; commits: %v", commits)
+	}
+	if _, err := os.Stat(autoImportStampPath(dir)); err != nil {
+		t.Errorf("the all-rejected attempt must be stamped so it is not retried: %v", err)
+	}
+}
+
+// TestMaybeAutoImportJSONL_FallbackImporter_RejectedRowsWithMemoriesCommit
+// pins the other side: when every issue row was rejected but the file's
+// eligible memories landed, the fallback route commits them and stamps.
+func TestMaybeAutoImportJSONL_FallbackImporter_RejectedRowsWithMemoriesCommit(t *testing.T) {
+	dir := t.TempDir()
+	writeAutoImportFixtureJSONL(t, dir)
+
+	orig := fallbackImporter
+	fallbackImporter = func(_ context.Context, _ storage.DoltStorage, _ string) (*importLocalResult, error) {
+		return &importLocalResult{Memories: 1, Rejected: make([]importRejection, 2)}, nil
+	}
+	t.Cleanup(func() { fallbackImporter = orig })
+
+	var commits []string
+	store := &fakeFallbackStore{statsTotalIssues: 0, commitHook: func(msg string) { commits = append(commits, msg) }}
+
+	maybeAutoImportJSONL(context.Background(), store, dir)
+
+	if len(commits) != 1 || !strings.Contains(commits[0], "1 memories") {
+		t.Errorf("the restored memory must be committed; commits: %v", commits)
+	}
+	if _, err := os.Stat(autoImportStampPath(dir)); err != nil {
+		t.Errorf("the attempt must be stamped: %v", err)
+	}
 }

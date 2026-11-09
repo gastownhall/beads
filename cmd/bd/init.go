@@ -556,6 +556,16 @@ for viewers (bv), interchange, and issue-level migration; not backup.
 Cross-machine sync and backups use Dolt remotes/backups, not JSONL import/export.
 To enable: bd config set export.auto true
 
+A JSONL import (bootstrap, bd init --from-jsonl, and the automatic import
+into an empty database) restores what it can: records that fail validation are
+skipped, their lines are saved beside the source as <file>.rejected.jsonl
+(replacing an earlier one; the source is never modified), and a warning names
+the count and the first reason. Repair them and re-import with bd import.
+Limits: a line that cannot be parsed still stops the import before any write;
+saving the skipped lines is best-effort (a failed save only warns, and the
+lines are still in the source); and a run that skips nothing leaves an earlier
+<file>.rejected.jsonl in place.
+
 Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
   Skips all interactive prompts, using sensible defaults:
   • Role defaults to "maintainer" (override with --role)

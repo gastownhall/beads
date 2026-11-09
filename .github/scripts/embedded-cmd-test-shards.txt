@@ -168,6 +168,7 @@
 100 37 TestEmbeddedSpawnMolecule_SubstitutesTemplatedStepFields
 
 100 38 TestEmbeddedGraphConcurrent
+100 38 TestEmbeddedRecoveryQuarantineCases
 100 38 TestEmbeddedRoutedCreateJournalsIntoTheTargetWorkspace
 100 38 TestEmbeddedUnclaimIfAssigneeFlagValidation
 
@@ -175,6 +176,7 @@
 100 39 TestEmbeddedImportInvalidStaleAndDedupCases
 100 39 TestEmbeddedMaxRowsGraph
 100 39 TestEmbeddedNewDoltStoreFromConfig_NoMetadata
+100 39 TestEmbeddedRecoveryQuarantinesInvalidRecords
 
 100 40 TestEmbeddedIfRevisionOutranksReassignFenceCLI
 100 40 TestEmbeddedImportInvalidRegisteredVocabularyModes

@@ -149,6 +149,16 @@ Bootstrap auto-detects the right action:
 If sync.remote points at a git repository, bootstrap verifies refs/dolt/data
 before cloning. Bootstrap exits non-zero when it cannot set up a database.
 
+A JSONL import (bootstrap, bd init --from-jsonl, and the automatic import
+into an empty database) restores what it can: records that fail validation are
+skipped, their lines are saved beside the source as <file>.rejected.jsonl
+(replacing an earlier one; the source is never modified), and a warning names
+the count and the first reason. Repair them and re-import with bd import.
+Limits: a line that cannot be parsed still stops the import before any write;
+saving the skipped lines is best-effort (a failed save only warns, and the
+lines are still in the source); and a run that skips nothing leaves an earlier
+<file>.rejected.jsonl in place.
+
 Values starting with - in sync.remote or sync.git-remote are refused as invalid
 remote URLs: bd init returns an error naming the key; bd bootstrap restores a
 local backup or issues.jsonl when available, otherwise reports a blocked plan
