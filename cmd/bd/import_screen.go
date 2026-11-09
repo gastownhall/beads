@@ -360,18 +360,72 @@ func saveImportRejects(path string, rejected []importRejection) error {
 
 // warnImportInvalidSkipped tells the operator, on stderr in every output mode,
 // which records an import skipped as invalid and where they are kept.
-func warnImportInvalidSkipped(result importResultJSON) {
-	if result.InvalidSkipped == 0 {
+func warnImportInvalidSkipped(source string, rejected []importRejection, rejectsPath string) {
+	if len(rejected) == 0 {
 		return
 	}
 	//nolint:gosec // G705: stderr, not a browser context
-	fmt.Fprintf(os.Stderr, "warning: skipped %d invalid record(s) from %s:\n%s", result.InvalidSkipped, result.Source, formatImportRejections(result.Source, result.InvalidRecords))
+	fmt.Fprintf(os.Stderr, "warning: skipped %d invalid record(s) from %s:\n%s", len(rejected), source, formatImportRejections(source, rejected))
 	switch {
-	case result.RejectsFile != "":
-		fmt.Fprintf(os.Stderr, "  rejected records saved to %s\n", result.RejectsFile) //nolint:gosec // G705: stderr, not a browser context
-	case result.Source == "stdin":
+	case rejectsPath != "":
+		fmt.Fprintf(os.Stderr, "  rejected records saved to %s\n", rejectsPath) //nolint:gosec // G705: stderr, not a browser context
+	case source == "stdin":
 		fmt.Fprintln(os.Stderr, "  not saved separately; stdin is not kept, so rerun with --rejects <file> to keep them")
 	default:
-		fmt.Fprintf(os.Stderr, "  not saved separately; they remain in %s\n", result.Source) //nolint:gosec // G705: stderr, not a browser context
+		fmt.Fprintf(os.Stderr, "  not saved separately; they remain in %s\n", source) //nolint:gosec // G705: stderr, not a browser context
 	}
+}
+
+// parseImportJSONLFile parses the JSONL file at path (see parseImportJSONL).
+func parseImportJSONLFile(path string) ([]importRecord, []memoryRecord, error) {
+	//nolint:gosec // G304: the configured or user-named JSONL source
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read JSONL file %s: %w", path, err)
+	}
+	defer f.Close()
+	return parseImportJSONL(f, path)
+}
+
+// importMemoryConfigEntries keys the memory records by their config key; a
+// later record for a key wins.
+func importMemoryConfigEntries(memories []memoryRecord) map[string]string {
+	entries := make(map[string]string, len(memories))
+	for _, mem := range memories {
+		entries[kvPrefix+memoryPrefix+mem.Key] = mem.Value
+	}
+	return entries
+}
+
+// defaultImportRejectsPath is the quarantine a recovery import keeps the
+// invalid records of source in: <dir>/<name>.rejected.jsonl for
+// <dir>/<name>.jsonl, and source with .rejected.jsonl appended otherwise.
+func defaultImportRejectsPath(source string) string {
+	if base, ok := strings.CutSuffix(source, ".jsonl"); ok {
+		return base + ".rejected.jsonl"
+	}
+	return source + ".rejected.jsonl"
+}
+
+// screenRecoveryImport is the screen of the recovery imports (auto-import,
+// `bd init --from-jsonl`, `bd bootstrap`): they import what they can, so the
+// records the writer would refuse are skipped into the quarantine next to
+// source, which is saved before any import write. It returns the issues to
+// import, the skipped records and the quarantine they were saved to. A failed
+// vocabulary read or quarantine save fails the screen, and with it the import.
+func screenRecoveryImport(ctx context.Context, readVocabulary importVocabularyFunc, records []importRecord, source string) ([]*types.Issue, []importRejection, string, error) {
+	// No stale pre-filter here (lookup is unused under allowStale): the
+	// writer's own stale handling still applies to the accepted rows.
+	screen, err := screenImportRecords(ctx, nil, readVocabulary, records, true)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	if len(screen.Rejected) == 0 {
+		return screen.Write, nil, "", nil
+	}
+	rejectsPath := defaultImportRejectsPath(source)
+	if err := saveImportRejects(rejectsPath, screen.Rejected); err != nil {
+		return nil, nil, "", fmt.Errorf("save the %d invalid record(s) from %s to %s; nothing was imported: %w", len(screen.Rejected), source, rejectsPath, err)
+	}
+	return screen.Write, screen.Rejected, rejectsPath, nil
 }

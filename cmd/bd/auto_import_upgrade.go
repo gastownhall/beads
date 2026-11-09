@@ -110,19 +110,30 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 	}
 
 	// Parse the JSONL file without touching the store.
-	issues, configEntries, err := parseJSONLFile(jsonlPath)
+	records, memories, err := parseImportJSONLFile(jsonlPath)
 	if err != nil {
 		writeAutoImportStamp(beadsDir, info)
 		fmt.Fprintf(os.Stderr, "warning: auto-import: failed to parse %s: %v\n", jsonlPath, err)
 		return
 	}
-	if len(issues) == 0 {
+	if len(records) == 0 {
 		return // nothing to import
 	}
 
 	// Prefer single-transaction import (embedded mode) to avoid
 	// DOLT_COMMIT races with concurrent writers.
 	if importer, ok := s.(jsonlImporter); ok {
+		// Skip the records the writer would refuse into the quarantine
+		// before the import transaction (GH#4492): one of them used to roll
+		// back the whole recovery.
+		issues, rejected, rejectsPath, err := screenRecoveryImport(ctx, storeImportVocabulary(s), records, jsonlPath)
+		if err != nil {
+			writeAutoImportStamp(beadsDir, info)
+			fmt.Fprintf(os.Stderr, "warning: auto-import from %s failed: %v\n", jsonlPath, err)
+			fmt.Fprintf(os.Stderr, "\nYour issues are still safe in %s.\n", jsonlPath)
+			return
+		}
+		configEntries := importMemoryConfigEntries(memories)
 		imported, retiredIDs, err := importer.ImportJSONLData(ctx, issues, configEntries, "auto-import")
 		if err != nil {
 			writeAutoImportStamp(beadsDir, info)
@@ -132,18 +143,22 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 			fmt.Fprintf(os.Stderr, "If this persists, please report at https://github.com/gastownhall/beads/issues\n\n")
 			return
 		}
-		// A file whose every row was retired imported nothing, but it was
-		// attempted: stamp it, or every command would re-read it.
-		if imported > 0 || len(retiredIDs) > 0 {
+		// A file whose every row was retired or rejected imported nothing,
+		// but it was attempted: stamp it, or every command would re-read it.
+		if imported > 0 || len(retiredIDs) > 0 || len(rejected) > 0 {
 			writeAutoImportStamp(beadsDir, info)
-			// Signal PersistentPostRun to auto-commit (no explicit DOLT_COMMIT here).
-			commandDidWrite.Store(true)
+			// Signal PersistentPostRun to auto-commit (no explicit DOLT_COMMIT
+			// here). With every row rejected, the memories are the write.
+			if imported > 0 || len(retiredIDs) > 0 || (len(issues) == 0 && len(configEntries) > 0) {
+				commandDidWrite.Store(true)
+			}
 			fmt.Fprintf(os.Stderr, "auto-imported %d issues", imported)
 			if len(configEntries) > 0 {
 				fmt.Fprintf(os.Stderr, " and %d config entries", len(configEntries))
 			}
 			printAutoImportRetired(len(retiredIDs))
 			fmt.Fprintf(os.Stderr, " from %s\n", jsonlPath)
+			warnImportInvalidSkipped(jsonlPath, rejected, rejectsPath)
 		}
 		return
 	}
@@ -161,6 +176,14 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 		return
 	}
 
+	if result.Issues == 0 && result.Memories == 0 && result.Retired == 0 && len(result.Rejected) > 0 {
+		// Every row was rejected and there was nothing else to write: the
+		// attempt is stamped, and there is no commit to make.
+		writeAutoImportStamp(beadsDir, info)
+		warnImportInvalidSkipped(jsonlPath, result.Rejected, result.RejectsPath)
+		return
+	}
+
 	// Commit the imported data to Dolt history (fallback path only).
 	commitMsg := fmt.Sprintf("auto-import: %d issues from %s (upgrade recovery, GH#2994)", result.Issues, filepath.Base(jsonlPath))
 	if result.Memories > 0 {
@@ -171,7 +194,7 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 		fmt.Fprintf(os.Stderr, "warning: auto-import: dolt commit failed: %v\n", err)
 		return
 	}
-	if result.Issues > 0 || result.Memories > 0 || result.Retired > 0 {
+	if result.Issues > 0 || result.Memories > 0 || result.Retired > 0 || len(result.Rejected) > 0 {
 		writeAutoImportStamp(beadsDir, info)
 	}
 
@@ -181,6 +204,7 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 	}
 	printAutoImportRetired(result.Retired)
 	fmt.Fprintf(os.Stderr, " from %s\n", jsonlPath)
+	warnImportInvalidSkipped(jsonlPath, result.Rejected, result.RejectsPath)
 }
 
 // printAutoImportRetired continues an "auto-imported N issues" line with the

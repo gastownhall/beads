@@ -30,6 +30,10 @@ func (s *dependencySkipCapturingStore) CreateIssuesWithFullOptions(ctx context.C
 	return s.DoltStorage.CreateIssuesWithFullOptions(ctx, issues, actor, opts)
 }
 
+// Unwrap exposes the wrapped store's optional capabilities, such as the import
+// vocabulary the screen reads.
+func (s *dependencySkipCapturingStore) Unwrap() storage.DoltStorage { return s.DoltStorage }
+
 func TestImportFromLocalJSONL(t *testing.T) {
 	skipIfNoDolt(t)
 
