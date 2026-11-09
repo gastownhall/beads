@@ -70,6 +70,7 @@ go_test(
         "pr_risk_bazel_coverage_test.go",
         "rbe_worker_env_test.go",
         "repo_helpers_test.go",
+        "skip_census_test.go",
         "worker_env_autosync_test.go",
         "worker_env_sync_automerge_test.go",
     ],  # keep
