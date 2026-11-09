@@ -61,6 +61,7 @@ func TestWriteChildRenumberResult(t *testing.T) {
 	writeChildRenumberResult(&buf, &storage.ChildRenumberReport{
 		LocalHead:    "loc111",
 		RemoteHead:   "rem222",
+		RenameParent: "loc111",
 		RenameCommit: "abc123",
 		Head:         "fin333",
 		Merged:       true,
@@ -73,10 +74,34 @@ func TestWriteChildRenumberResult(t *testing.T) {
 		"  bd-p.72.1.3 -> bd-p.75.1.3 (under bd-p.72)\n" +
 		"  Local head:    loc111\n" +
 		"  Remote head:   rem222\n" +
+		"  Rename parent: loc111\n" +
 		"  Rename commit: abc123\n" +
 		"  Final head:    fin333\n"
 	if buf.String() != want {
 		t.Errorf("result =\n%s\nwant\n%s", buf.String(), want)
+	}
+
+	// A retry (AC-6): the kept commit's renames, its parent, and the head the
+	// retry started from, which is that commit.
+	buf.Reset()
+	writeChildRenumberResult(&buf, &storage.ChildRenumberReport{
+		LocalHead:    "abc123",
+		RemoteHead:   "rem222",
+		RenameParent: "loc111",
+		RenameCommit: "abc123",
+		Retained:     true,
+		Renames:      renames[:3],
+	})
+	want = "Local children already renumbered by an earlier pull (commit abc123, kept):\n" +
+		"  bd-p.71 -> bd-p.74\n" +
+		"  bd-p.72 -> bd-p.75\n" +
+		"  bd-p.72.1 -> bd-p.75.1 (under bd-p.72)\n" +
+		"  Local head:    abc123\n" +
+		"  Remote head:   rem222\n" +
+		"  Rename parent: loc111\n" +
+		"  Rename commit: abc123\n"
+	if buf.String() != want {
+		t.Errorf("retained =\n%s\nwant\n%s", buf.String(), want)
 	}
 
 	// Stopped before the rename commit: the same mappings, as a proposal.
@@ -190,5 +215,32 @@ func TestWriteChildRenumberMentionsAndJSON(t *testing.T) {
 	}
 	if got["error"] != "destination occupied" || got["merged"] != false || got["local_head"] != "loc111" || got["remote_head"] != "rem222" {
 		t.Errorf("pre-commit failure JSON = %v, want the plan, both heads and the error", got)
+	}
+
+	// A retry whose merge fails again: the kept commit, its renames and
+	// parent, and the error, still one object.
+	buf.Reset()
+	retained := &storage.ChildRenumberReport{
+		Remote: "origin", LocalHead: "abc123", RemoteHead: "rem222",
+		RenameParent: "loc111", RenameCommit: "abc123", Retained: true,
+		Renames: []storage.ChildRenumber{{From: "bd-p.71", To: "bd-p.74"}},
+	}
+	if err := writeChildRenumberJSON(&buf, retained, errors.New("merge conflicts in issues")); err != nil {
+		t.Fatalf("writeChildRenumberJSON: %v", err)
+	}
+	dec = json.NewDecoder(&buf)
+	got = nil
+	if err := dec.Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if dec.More() {
+		t.Errorf("more than one JSON value on stdout")
+	}
+	if got["retained"] != true || got["rename_commit"] != "abc123" || got["rename_parent"] != "loc111" ||
+		got["error"] != "merge conflicts in issues" || got["merged"] != false {
+		t.Errorf("retained failure JSON = %v, want the kept commit, its parent and the error", got)
+	}
+	if renames, _ := got["renames"].([]any); len(renames) != 1 {
+		t.Errorf("retained failure JSON renames = %v, want the kept one", got["renames"])
 	}
 }

@@ -177,6 +177,13 @@ type ChildRenumberReport struct {
 	Renames []ChildRenumber `json:"renames"`
 	// RenameCommit is the Dolt commit holding Renames, once made.
 	RenameCommit string `json:"rename_commit,omitempty"`
+	// RenameParent is the commit RenameCommit was made on: the local head
+	// before the renames.
+	RenameParent string `json:"rename_parent,omitempty"`
+	// Retained reports that RenameCommit is an earlier renumbering pull's,
+	// against this same remote head, kept when its merge failed: this pull
+	// renamed nothing, and Renames are the ones that commit records.
+	Retained bool `json:"retained,omitempty"`
 	// Merged reports that the remote head was merged after the renames.
 	Merged bool `json:"merged"`
 	// Head is the branch head the pull ended on, once merged.

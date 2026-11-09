@@ -240,6 +240,15 @@ func TestRenumberCollidingChildren(t *testing.T) {
 	if report.LocalHead != localHead {
 		t.Errorf("report.LocalHead = %s, want the pre-pull head %s", report.LocalHead, localHead)
 	}
+	if report.RenameParent != localHead {
+		t.Errorf("report.RenameParent = %s, want the pre-pull head %s", report.RenameParent, localHead)
+	}
+	if report.Retained {
+		t.Error("report.Retained = true on the first pull; no earlier rename commit exists")
+	}
+	if !report.Merged {
+		t.Error("report.Merged = false; the pinned remote head was not merged")
+	}
 
 	// The merged database: the remote's .71/.72, the renamed .74/.75, and the
 	// untouched .73, each carrying its own side's content.
@@ -283,6 +292,9 @@ func TestRenumberCollidingChildren(t *testing.T) {
 	if err := store.db.QueryRowContext(ctx,
 		"SELECT hash FROM dolt_branches WHERE name = 'main'").Scan(&head); err != nil {
 		t.Fatalf("read branch head: %v", err)
+	}
+	if report.Head != head {
+		t.Errorf("report.Head = %s, want the branch head the pull ended on %s", report.Head, head)
 	}
 	var renameParent string
 	if err := store.db.QueryRowContext(ctx,

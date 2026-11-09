@@ -89,16 +89,20 @@ func runPullRenumberChildren(ctx context.Context, st storage.DoltStorage, remote
 }
 
 // writeChildRenumberResult reports what a renumbering pull did: the renames,
-// as committed or only as planned when the pull stopped before committing
+// as committed (by this pull, or kept from an earlier one against the same
+// remote head) or only as planned when the pull stopped before committing
 // them, every descendant under its renamed root, the commits it went
 // through, and the local text that still names a renamed id.
 func writeChildRenumberResult(w io.Writer, report *storage.ChildRenumberReport) {
 	if len(report.Renames) == 0 {
 		fmt.Fprintln(w, "No colliding children to renumber.")
 	} else {
-		if report.RenameCommit != "" {
+		switch {
+		case report.Retained:
+			fmt.Fprintf(w, "Local children already renumbered by an earlier pull (commit %s, kept):\n", report.RenameCommit)
+		case report.RenameCommit != "":
 			fmt.Fprintf(w, "Renumbered local children (commit %s):\n", report.RenameCommit)
-		} else {
+		default:
 			fmt.Fprintln(w, "Planned renames, not applied:")
 		}
 		writeChildRenumberMappings(w, report.Renames)
@@ -106,6 +110,7 @@ func writeChildRenumberResult(w io.Writer, report *storage.ChildRenumberReport) 
 	for _, line := range []struct{ label, hash string }{
 		{"Local head", report.LocalHead},
 		{"Remote head", report.RemoteHead},
+		{"Rename parent", report.RenameParent},
 		{"Rename commit", report.RenameCommit},
 		{"Final head", report.Head},
 	} {

@@ -16,9 +16,17 @@ import (
 // This file is the applying half of `bd dolt pull --renumber-children`
 // (bd-28sb25, GH#4796); see childrenumber.go for the plan.
 
-// childRenumberCommitPrefix starts the message of every rename commit, which
-// is how a retry recognizes renames an earlier attempt already committed.
+// childRenumberCommitPrefix starts the message of every rename commit.
 const childRenumberCommitPrefix = "bd: renumber colliding children"
+
+// childRenumberLinePrefix starts each mapping line of a rename commit's
+// message, "renumber: <from> -> <to>", which a retry replays.
+const childRenumberLinePrefix = "renumber: "
+
+// childRenumberMarker closes a rename commit's message with the remote head
+// the renames were planned against: a retry against that same revision finds
+// the commit by it and reports the renames as already made (AC-6).
+const childRenumberMarker = "bd-renumber: remote_head="
 
 // RenumberChildrenAndMerge renames the local colliding children PlanChildRenumbers
 // finds between branch and ref (which the caller has just fetched), commits
@@ -30,6 +38,9 @@ const childRenumberCommitPrefix = "bd: renumber colliding children"
 // commit holds the renames and nothing else. When the merge fails after the
 // rename commit landed, that commit stays (the renames are valid on their
 // own) and the report comes back with the error, so the caller can name it.
+// A retry against the same remote revision finds nothing left to rename; it
+// reports the kept commit and its renames (Retained) and merges again,
+// without renaming twice or adding an empty commit.
 func RenumberChildrenAndMerge(ctx context.Context, conn *sql.Conn, branch, ref, actor string) (*storage.ChildRenumberReport, error) {
 	merging, err := mergeInProgress(ctx, conn)
 	if err != nil {
@@ -55,12 +66,15 @@ func RenumberChildrenAndMerge(ctx context.Context, conn *sql.Conn, branch, ref, 
 		if err != nil {
 			return report, err
 		}
-		commit, err := commitChildRenumbers(ctx, conn, report.Renames)
+		commit, err := commitChildRenumbers(ctx, conn, report.Renames, report.RemoteHead)
 		if err != nil {
 			return report, err
 		}
 		report.RenameCommit = commit
+		report.RenameParent = report.LocalHead
 		report.Mentions = mentions
+	} else if err := retainedChildRenumbers(ctx, conn, report); err != nil {
+		return report, err
 	}
 
 	// Merge the head the plan was made against, not the ref, so a fetch
@@ -73,6 +87,81 @@ func RenumberChildrenAndMerge(ctx context.Context, conn *sql.Conn, branch, ref, 
 		return report, fmt.Errorf("renumber children: read head after merge: %w", err)
 	}
 	return report, nil
+}
+
+// retainedChildRenumbers fills report from the rename commit an earlier
+// renumbering pull made against this same remote head and kept when its merge
+// failed: the commit, its parent and the renames its message records. Once
+// the remote head is part of the branch's history the repair completed, and
+// a marker naming it is history, not a pending result. Only commits the
+// remote head does not have are searched; the newest marker wins.
+func retainedChildRenumbers(ctx context.Context, conn *sql.Conn, report *storage.ChildRenumberReport) error {
+	if report.RemoteHead == "" || report.MergeBase == report.RemoteHead {
+		return nil
+	}
+	rows, err := conn.QueryContext(ctx,
+		"SELECT commit_hash, message FROM dolt_log('HEAD', '--not', ?)", report.RemoteHead)
+	if err != nil {
+		return fmt.Errorf("renumber children: read local commits: %w", err)
+	}
+	marker := childRenumberMarker + report.RemoteHead
+	var commit, message string
+	for rows.Next() {
+		var hash, msg string
+		if err := rows.Scan(&hash, &msg); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("renumber children: read local commits: %w", err)
+		}
+		if commit == "" && strings.HasPrefix(msg, childRenumberCommitPrefix) && hasLine(msg, marker) {
+			commit, message = hash, msg
+		}
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("renumber children: read local commits: %w", err)
+	}
+	if commit == "" {
+		return nil
+	}
+	var parent string
+	if err := conn.QueryRowContext(ctx,
+		"SELECT parent_hash FROM dolt_commit_ancestors WHERE commit_hash = ? AND parent_index = 0", commit).Scan(&parent); err != nil {
+		return fmt.Errorf("renumber children: read parent of %s: %w", commit, err)
+	}
+	report.Renames = parseChildRenumberMessage(message)
+	report.RenameCommit = commit
+	report.RenameParent = parent
+	report.Retained = true
+	return nil
+}
+
+// hasLine reports whether text holds line as one whole line.
+func hasLine(text, line string) bool {
+	for _, l := range strings.Split(text, "\n") {
+		if l == line {
+			return true
+		}
+	}
+	return false
+}
+
+// parseChildRenumberMessage replays the renames a rename commit recorded, one
+// "renumber: <from> -> <to>" line each, in the order they were made (roots
+// first).
+func parseChildRenumberMessage(message string) []storage.ChildRenumber {
+	renames := []storage.ChildRenumber{}
+	for _, line := range strings.Split(message, "\n") {
+		rest, ok := strings.CutPrefix(line, childRenumberLinePrefix)
+		if !ok {
+			continue
+		}
+		from, to, ok := strings.Cut(rest, " -> ")
+		if !ok || from == "" || to == "" {
+			continue
+		}
+		renames = append(renames, storage.ChildRenumber{From: from, To: to})
+	}
+	return renames
 }
 
 // applyChildRenumbers renames every planned identity in one transaction, so
@@ -239,7 +328,7 @@ func relocateChildCounterInTx(ctx context.Context, tx *sql.Tx, from, to string, 
 // returns its hash. It stages only the tables the renames dirtied: config is
 // never one of them, and is left out the way the pre-pull commit leaves
 // non-kv config out (GH#2455).
-func commitChildRenumbers(ctx context.Context, conn *sql.Conn, renames []storage.ChildRenumber) (string, error) {
+func commitChildRenumbers(ctx context.Context, conn *sql.Conn, renames []storage.ChildRenumber, remoteHead string) (string, error) {
 	rows, err := conn.QueryContext(ctx, "SELECT table_name FROM dolt_status")
 	if err != nil {
 		return "", fmt.Errorf("renumber children: read status: %w", err)
@@ -265,7 +354,7 @@ func commitChildRenumbers(ctx context.Context, conn *sql.Conn, renames []storage
 			return "", fmt.Errorf("renumber children: stage %s: %w", table, err)
 		}
 	}
-	if err := schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-m', ?)", childRenumberCommitMessage(renames)); err != nil {
+	if err := schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-m', ?)", childRenumberCommitMessage(renames, remoteHead)); err != nil {
 		return "", fmt.Errorf("renumber children: commit: %w", err)
 	}
 	var head string
@@ -275,13 +364,17 @@ func commitChildRenumbers(ctx context.Context, conn *sql.Conn, renames []storage
 	return head, nil
 }
 
-func childRenumberCommitMessage(renames []storage.ChildRenumber) string {
+// childRenumberCommitMessage is the rename commit's message: the summary
+// line, one mapping line per rename, and the marker naming the remote head
+// the renames were planned against.
+func childRenumberCommitMessage(renames []storage.ChildRenumber, remoteHead string) string {
 	var b strings.Builder
 	b.WriteString(childRenumberCommitPrefix)
-	b.WriteString("\n")
+	b.WriteString("\n\n")
 	for _, r := range renames {
-		fmt.Fprintf(&b, "\n%s -> %s", r.From, r.To)
+		fmt.Fprintf(&b, "%s%s -> %s\n", childRenumberLinePrefix, r.From, r.To)
 	}
+	fmt.Fprintf(&b, "%s%s\n", childRenumberMarker, remoteHead)
 	return b.String()
 }
 
