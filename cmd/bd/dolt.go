@@ -884,9 +884,13 @@ reports conflicts.`,
 			return err
 		}
 		strategy, _ := cmd.Flags().GetString("strategy")
+		renumberChildren, _ := cmd.Flags().GetBool("renumber-children")
 		if strategy != "" {
 			if err := versioncontrolops.ValidateConflictStrategy(strategy); err != nil {
 				return HandleError("%v", err)
+			}
+			if renumberChildren {
+				return HandleError("--renumber-children and --strategy are mutually exclusive: the renumber repair resolves child-id collisions itself, and --strategy speaks for conflicts the repair does not touch")
 			}
 		}
 		var puller storage.StrategicPuller
@@ -896,6 +900,42 @@ reports conflicts.`,
 			if !ok {
 				return HandleError("storage backend %T does not support --strategy pulls (#4992): only embedded storage does; on server-mode/sql-server storage, resolve conflicts with 'bd conflicts resolve' or the raw dolt CLI", storage.UnwrapStore(st))
 			}
+		}
+		if renumberChildren {
+			renumberPuller, ok := storage.UnwrapStore(st).(storage.ChildRenumberPuller)
+			if !ok {
+				return HandleError("storage backend %T does not support --renumber-children (GH#4796): it is implemented by the Dolt-backed stores", storage.UnwrapStore(st))
+			}
+			if !jsonOutput {
+				if remote != "" {
+					fmt.Printf("Pulling from Dolt remote %q with child renumbering...\n", remote)
+				} else {
+					fmt.Println("Pulling from Dolt remote with child renumbering...")
+				}
+			}
+			result, err := renumberPuller.PullWithChildRenumbers(ctx, remote)
+			if err != nil {
+				// A merge that failed after the renames carries the partial
+				// result: the rename commit is retained, so report what moved
+				// before the error, never hiding it.
+				if result != nil {
+					printChildRenumberResult(result, "merge failed after the rename; the rename commit is retained")
+				}
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				return SilentExit()
+			}
+			if jsonOutput {
+				if result == nil {
+					result = &storage.ChildRenumberResult{}
+				}
+				if err := outputJSONRaw(result); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				}
+				return nil
+			}
+			printChildRenumberResult(result, "")
+			fmt.Println("Pull complete.")
+			return nil
 		}
 		if remote != "" {
 			fmt.Printf("Pulling from Dolt remote %q...\n", remote)
@@ -959,6 +999,35 @@ reports conflicts.`,
 		fmt.Println("Pull complete.")
 		return nil
 	},
+}
+
+// printChildRenumberResult reports what one authorized --renumber-children
+// pull did: every identity change it made (or an earlier invocation retained),
+// the rename commit, and — on the partial-failure path — the note that the
+// rename survived the failed merge. With no collision to repair and nothing
+// retained it prints nothing beyond the pull's own outcome.
+func printChildRenumberResult(result *storage.ChildRenumberResult, note string) {
+	if result == nil {
+		return
+	}
+	if result.Retained {
+		fmt.Println("An earlier --renumber-children pull already renamed the local children; the rename commit is retained:")
+	} else if result.Plan != nil && len(result.Plan.Mappings) > 0 {
+		fmt.Println("Renumbered local children before merging:")
+	}
+	if result.Plan != nil {
+		for _, m := range result.Plan.Mappings {
+			if m.Root {
+				fmt.Printf("  %s -> %s\n", m.OldID, m.NewID)
+			}
+		}
+	}
+	if result.RenameCommit != "" {
+		fmt.Printf("Rename commit: %s\n", result.RenameCommit)
+	}
+	if note != "" {
+		fmt.Println(note)
+	}
 }
 
 // printChildRenumberHint reports the offline-collision repair a plain pull's
@@ -2355,6 +2424,7 @@ func init() {
 	doltPushCmd.Flags().Bool("no-adopt", false, "Never derive a Dolt remote from git origin (also BD_NO_REMOTE_ADOPT=1)")
 	doltPullCmd.Flags().String("remote", "", "Pull from a specific named remote instead of the default")
 	doltPullCmd.Flags().String("strategy", "", "Conflict resolution strategy for conflicts the auto-resolver declines: 'ours' or 'theirs' (embedded storage only, #4992)")
+	doltPullCmd.Flags().Bool("renumber-children", false, "Repair offline child-id collisions before merging: rename the colliding local children above both clones' high-water marks, then pull (GH#4796)")
 	doltCommitCmd.Flags().StringP("message", "m", "", "Commit message (default: auto-generated)")
 	doltCleanDatabasesCmd.Flags().Bool("dry-run", false, "Show what would be dropped without dropping")
 	doltCleanDatabasesCmd.Flags().Bool("purge-dropped", false, "After dropping, also run CALL DOLT_PURGE_DROPPED_DATABASES() — server-global and irreversible, see --help")

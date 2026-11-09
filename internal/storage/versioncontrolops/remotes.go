@@ -142,14 +142,7 @@ func Pull(ctx context.Context, db DBConn, remote, branch, user string) error {
 // Pull's behavior. See MergeAndSettleWithStrategy/SettleMerge for the
 // resolution logic.
 func PullWithStrategy(ctx context.Context, db DBConn, remote, branch, user, strategy string) error {
-	if err := withRemoteEnvGuards(func() error {
-		if user != "" {
-			_, err := db.ExecContext(ctx, "CALL DOLT_FETCH('--user', ?, ?, ?)", user, remote, branch)
-			return err
-		}
-		_, err := db.ExecContext(ctx, "CALL DOLT_FETCH(?, ?)", remote, branch)
-		return err
-	}); err != nil {
+	if err := fetchFromRemote(ctx, db, remote, branch, user); err != nil {
 		return fmt.Errorf("fetch from %s/%s: %w", remote, branch, err)
 	}
 	trackingRef := remote + "/" + branch

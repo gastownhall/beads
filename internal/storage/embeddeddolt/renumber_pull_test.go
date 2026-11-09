@@ -218,3 +218,115 @@ func TestEmbeddedDoltPlainPullReportsRenumberPlan(t *testing.T) {
 		t.Errorf("head after planning = %s, want %s (no rename commit)", headHash, localHead)
 	}
 }
+
+// TestEmbeddedDoltPullRenumberChildren (GH#4796, bd-28sb25 AC-3): the report
+// fixture under `bd dolt pull --renumber-children`. The colliding local
+// children bd-rnp.71/.72 are renamed to bd-rnp.74/.75 — above both clones'
+// high-water marks — in one commit, and the pinned remote revision then
+// merges clean: the remote keeps bd-rnp.71/.72, the local children survive
+// as .74/.75 plus the untouched .73, and the counter settles at the raised
+// floor 75, so the next local create cannot re-mint a colliding id.
+func TestEmbeddedDoltPullRenumberChildren(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
+	}
+
+	ctx := context.Background()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	localHead, _, _ := buildOfflineChildCollision(t, beadsDir)
+
+	store, err := embeddeddolt.Open(ctx, beadsDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	result, err := store.PullWithChildRenumbers(ctx, "")
+	if err != nil {
+		t.Fatalf("PullWithChildRenumbers: %v", err)
+	}
+	if result == nil {
+		t.Fatal("PullWithChildRenumbers returned a nil result on success")
+	}
+	if result.Retained {
+		t.Errorf("result.Retained = true; the first invocation has no earlier repair to retain")
+	}
+	if result.RenameCommit == "" {
+		t.Fatal("result.RenameCommit is empty; the renames were not committed")
+	}
+	if result.RenameCommit == localHead {
+		t.Errorf("result.RenameCommit = localHead %s; no rename commit was created", localHead)
+	}
+	want := []storage.ChildRenumberMapping{
+		{OldID: "bd-rnp.71", NewID: "bd-rnp.74", Root: true},
+		{OldID: "bd-rnp.72", NewID: "bd-rnp.75", Root: true},
+	}
+	if result.Plan == nil || len(result.Plan.Mappings) != len(want) {
+		t.Fatalf("result plan mappings = %+v, want %+v", result.Plan, want)
+	}
+	for i, m := range want {
+		if result.Plan.Mappings[i] != m {
+			t.Errorf("result mapping %d = %+v, want %+v", i, result.Plan.Mappings[i], m)
+		}
+	}
+
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, filepath.Join(beadsDir, "embeddeddolt"), "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL (verify): %v", err)
+	}
+	defer func() { _ = cleanup() }()
+
+	// The merged database: the remote's .71/.72, the renamed .74/.75, and the
+	// untouched .73, each carrying its own side's content.
+	for id, title := range map[string]string{
+		"bd-rnp.71": "remote child 71",
+		"bd-rnp.72": "remote child 72",
+		"bd-rnp.73": "local child 73",
+		"bd-rnp.74": "local child 71",
+		"bd-rnp.75": "local child 72",
+	} {
+		var got string
+		if err := db.QueryRowContext(ctx,
+			"SELECT title FROM issues WHERE id = ?", id).Scan(&got); err != nil {
+			t.Fatalf("read %s after repair: %v", id, err)
+		}
+		if got != title {
+			t.Errorf("title of %s = %q, want %q", id, got, title)
+		}
+	}
+	var children int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM issues WHERE id LIKE 'bd-rnp.%'").Scan(&children); err != nil {
+		t.Fatalf("count children: %v", err)
+	}
+	if children != 5 {
+		t.Errorf("children after repair = %d, want 5", children)
+	}
+
+	var last int
+	if err := db.QueryRowContext(ctx,
+		"SELECT last_child FROM child_counters WHERE parent_id = 'bd-rnp'").Scan(&last); err != nil {
+		t.Fatalf("read counter: %v", err)
+	}
+	if last != 75 {
+		t.Errorf("counter after repair = %d, want the raised floor 75", last)
+	}
+
+	var conflicts int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_conflicts").Scan(&conflicts); err != nil {
+		t.Fatalf("count dolt_conflicts: %v", err)
+	}
+	if conflicts != 0 {
+		t.Errorf("dolt_conflicts after repair = %d, want 0", conflicts)
+	}
+
+	var head string
+	if err := db.QueryRowContext(ctx,
+		"SELECT hash FROM dolt_branches WHERE name = 'main'").Scan(&head); err != nil {
+		t.Fatalf("read branch head: %v", err)
+	}
+	if head == localHead || head == result.RenameCommit {
+		t.Errorf("branch head = %s; the merge of the remote revision never advanced past the local leg (%s) or the rename commit (%s)",
+			head, localHead, result.RenameCommit)
+	}
+}

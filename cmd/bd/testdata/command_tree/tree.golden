@@ -2025,6 +2025,7 @@ bd dolt pull
     | server-mode/sql-server storage use 'bd conflicts resolve' after a pull that
     | reports conflicts.
   flag --remote type=string default="" usage="Pull from a specific named remote instead of the default"
+  flag --renumber-children type=bool default="false" usage="Repair offline child-id collisions before merging: rename the colliding local children above both clones' high-water marks, then pull (GH#4796)"
   flag --strategy type=string default="" usage="Conflict resolution strategy for conflicts the auto-resolver declines: 'ours' or 'theirs' (embedded storage only, #4992)"
 
 bd dolt push

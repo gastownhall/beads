@@ -22,6 +22,7 @@ go_library(
         "remoterefs.go",
         "remotes.go",
         "renumber.go",
+        "renumber_apply.go",
         "version_control.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/storage/versioncontrolops",
@@ -34,6 +35,7 @@ go_library(
         "//internal/storage/issueops",
         "//internal/storage/kvkeys",
         "//internal/storage/schema",
+        "//internal/types",
     ],
 )
 
