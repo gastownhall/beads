@@ -294,6 +294,26 @@ func TestServedDeleterRefusesAnExpectedVersionAcrossSeveralIDs(t *testing.T) {
 	conformance.RunDeleterRefusesAnExpectedVersionAcrossSeveralIDs(t, t.Context(), newServedDeleterFixture(t, "hx19"))
 }
 
+// The two single-winner races, run for real over this wire: sixteen goroutines
+// dial sixteen concurrent POST /v0/beads/issues:delete requests carrying one
+// expected_version against the same in-process server. A loser's 404 not_found
+// decodes to issueops.ErrNotFound and a 409 precondition_failed naming
+// expected_version to ErrVersionMismatch (internal/httpclient/wire/problem.go),
+// so the contract's loser check reads the same here as on a store leg.
+//
+// THIS SERVER IS THE ROLES ARM over embedded Dolt, whose engine admits one
+// writer at a time, so on this leg the race is serialized below the handler and
+// the case pins the wire's outcome and its history, not the fence. The fence a
+// production `bd serve` relies on sits under its per-request provider arm, which
+// these cases do not reach.
+func TestServedDeleterExpectedVersionSingleWinnerUnderConcurrency(t *testing.T) {
+	conformance.RunDeleterExpectedVersionSingleWinnerUnderConcurrency(t, t.Context(), newServedDeleterFixture(t, "hx25"))
+}
+
+func TestServedDeleterExpectedVersionCascadeSingleWinnerUnderConcurrency(t *testing.T) {
+	conformance.RunDeleterExpectedVersionCascadeSingleWinnerUnderConcurrency(t, t.Context(), newServedDeleterFixture(t, "hx26"))
+}
+
 // The three BLOCKED-STATE postconditions of a delete, which map onto the wire
 // whole: the request is expressible, and what they assert is what the server's
 // deleting transaction leaves behind in a column no read on this surface

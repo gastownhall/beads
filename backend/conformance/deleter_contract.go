@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,16 +34,29 @@ import (
 // inside the transaction, the history entry, and the ExpectedVersion
 // precondition.
 //
-// ONE PROMISE ABOUT ExpectedVersion IS STRUCTURAL RATHER THAN OBSERVABLE, and
-// the four version cases say so here instead of faking it: the leaf promises
-// the version read shares the deleting transaction, and a single-threaded case
-// cannot tell one transaction from two when nothing else is writing. What holds
-// it is the SHAPE of the bodies — the store legs call CheckVersionInTx on the
-// transaction they delete in, and the unit-of-work leg compares a row its own
-// existence probe loaded inside the same unit of work — so there is no
-// two-call composition to regress into. A concurrent case would be flaky at
-// three engines and buy a suite people re-run rather than a guarantee. What
-// would upgrade it is a transaction-counting seam on the fixture kit.
+// ONE PROMISE ABOUT ExpectedVersion IS ONLY OBSERVABLE UNDER CONCURRENCY: the
+// leaf promises the version read shares the deleting transaction, so the pair
+// is a true compare-and-delete, and a single-threaded case cannot tell one
+// transaction from two when nothing else is writing. The four sequential
+// version cases pin what the token means. The two race cases after them
+// (RunDeleterExpectedVersionSingleWinnerUnderConcurrency and its Cascade
+// sibling) pin the compare-and-delete itself: sixteen racers share one token,
+// exactly one deletes, every other is refused and deletes nothing, and the
+// history gains exactly one entry.
+//
+// THE RACE CASES ARE NOT FLAKY ON A CORRECT BACKEND. One winner comes from
+// construction, not timing: the per-id delete fence on a Dolt sql-server
+// (withDeleteFence, in the store body and in the unit-of-work body), or an
+// engine that admits one writer at a time. Only a broken backend depends on
+// timing, and it fails most runs. The cases can only fail where racers really
+// overlap: the unit-of-work leg, and the server-backed store's own
+// multi-connection wiring (internal/storage/dolt TestDeleterContractRaces;
+// its shared branch store has one connection and would queue them). The
+// embedded engine, and the served leg's embedded store, serialize their
+// writers, so there the cases pin the outcome and the history entry, not the
+// fence. No wiring here reaches a production `bd serve`'s per-request provider
+// arm (internal/httpapi's timedProvider over a unit-of-work provider), whose
+// fence is the subject of gastownhall/beads#8227.
 //
 // EVERY CASE NAMESPACES ITS SEEDS with fixture.IssuePrefix and its own tag: the
 // three wirings share one database across the whole role suite, and a delete
@@ -1406,6 +1420,170 @@ func RunDeleterRefusesAnExpectedVersionAcrossSeveralIDs(t *testing.T, ctx contex
 	}
 	deleterAssertIssueRows(t, ctx, fixture, 0, first)
 	deleterAssertIssueRows(t, ctx, fixture, 1, second)
+}
+
+// RunDeleterExpectedVersionSingleWinnerUnderConcurrency pins the
+// compare-and-delete promise where it can actually break: under concurrency
+// (issueops/deleter.go, Deleter.Delete: "THE VERSION READ SHARES THE DELETING
+// TRANSACTION, so the pair is a true compare-and-delete rather than a read
+// followed by a hopeful write"), for `bd delete --if-revision` and a
+// POST /v0/beads/issues:delete carrying expected_version (mc-zndi7.73,
+// gastownhall/beads#7243).
+//
+// N racers delete ONE row with the SAME token, the row's version before any of
+// them ran. Exactly one may report success; every other must be refused and
+// must delete nothing; the row is gone afterwards; and the history gains
+// exactly ONE entry, not one per racer.
+//
+// A DELETE NEEDS A RACE OF ITS OWN. The update and close races
+// (RunLifecycleUpdateExpectedVersionSingleWinnerUnderConcurrency and its
+// siblings) are held by a real write-write conflict: every winner remints
+// row_lock, so a second committer collides on that cell. A delete writes no
+// cell. Two transactions that erase the same row produce identical "row
+// absent" diffs, which Dolt's commit-time merge lands without a conflict, so a
+// body with no fence answers EVERY racer Deleted = 1 and lands one "bd: delete"
+// entry per racer. On a Dolt sql-server the per-id delete fence
+// (withDeleteFence, in both the store body and the unit-of-work body) is the
+// only thing that turns the race into a queue, and this case is its only
+// role-level pin.
+//
+// WHAT A LOSER MAY ANSWER. A racer that runs after the winner finds no row, and
+// the existence probe outranks the version precondition, so the usual refusal
+// is ErrNotFound. ErrVersionMismatch is accepted too: which of the two a loser
+// sees depends on where the backend serializes it, and the contract promises
+// only that a loser is refused and deletes nothing. A nil error is never a
+// loss. It is a claimed success, and two of them is the defect.
+//
+// IT IS DETERMINISTIC ON A CORRECT BACKEND. A fence, or an engine that admits
+// one writer at a time, produces one winner by construction and not by timing.
+// Only a broken backend depends on timing, and it fails most runs. The racers
+// wait on one start signal so they overlap as much as the backend allows.
+func RunDeleterExpectedVersionSingleWinnerUnderConcurrency(t *testing.T, ctx context.Context, fixture DeleterFixture) {
+	t.Helper()
+	target := deleterSeedIssue(t, ctx, fixture, "race", "target")
+	token := deleterRowVersion(t, ctx, fixture, "issues", target)
+	deleterRaceOneToken(t, ctx, fixture, publicops.DeleteRequest{
+		IDs:             []string{target},
+		ExpectedVersion: &token,
+	}, []string{target})
+}
+
+// RunDeleterExpectedVersionCascadeSingleWinnerUnderConcurrency is the same race
+// with Cascade set, over a three-row parent-child chain.
+//
+// IT IS A SEPARATE CASE BECAUSE THE FENCE IS A SEPARATE DECISION. Both bodies
+// take the fence on ExpectedVersion alone, whatever Cascade says
+// (DeleteRequest.ExpectedVersion: "NEITHER Cascade NOR Force BYPASSES IT"). A
+// body that skipped the fence for a cascade would pass every other case here:
+// the stale-token refusal under Cascade (RunDeleterVersionOutranksForceAndCascade)
+// is answered by the version check, not by the fence. Only a race shows it,
+// and the unforced plain race above does not send Cascade.
+//
+// The token is read AFTER the edges are seeded, so it is the root's current
+// version whatever a dependency write does to row_lock. Every winner must have
+// taken the whole closure (Deleted = 3), and the closure must be gone.
+func RunDeleterExpectedVersionCascadeSingleWinnerUnderConcurrency(t *testing.T, ctx context.Context, fixture DeleterFixture) {
+	t.Helper()
+	root := deleterSeedIssue(t, ctx, fixture, "race-cascade", "root")
+	child := deleterSeedIssue(t, ctx, fixture, "race-cascade", "child")
+	grandchild := deleterSeedIssue(t, ctx, fixture, "race-cascade", "grandchild")
+	deleterAddParentChildEdge(t, ctx, fixture, child, root)
+	deleterAddParentChildEdge(t, ctx, fixture, grandchild, child)
+	token := deleterRowVersion(t, ctx, fixture, "issues", root)
+	deleterRaceOneToken(t, ctx, fixture, publicops.DeleteRequest{
+		IDs:             []string{root},
+		Cascade:         true,
+		ExpectedVersion: &token,
+	}, []string{root, child, grandchild})
+}
+
+// deleterRacers is how many requests race one token: the count the update and
+// close races use, and no more than internal/httpapi's maxInflight, so the
+// served leg admits every racer at once rather than queueing one behind its
+// semaphore.
+const deleterRacers = 16
+
+// deleterRaceOneToken sends request from deleterRacers goroutines at once and
+// asserts the single-winner outcome: one success that deleted every row of
+// closure, every other racer refused with ErrNotFound or ErrVersionMismatch
+// and nothing deleted, closure gone, and exactly one history entry.
+//
+// Each racer gets its OWN copy of the token, so no racer can see another's
+// pointer, and its own Actor.
+//
+// The history delta is a clause, not a precondition: a backend without the two
+// history hooks still runs the race, and the clause SKIPS loudly in its own
+// subtest.
+func deleterRaceOneToken(t *testing.T, ctx context.Context, fixture DeleterFixture, request publicops.DeleteRequest, closure []string) {
+	t.Helper()
+	observable := fixture.CountHistory != nil && fixture.CommitPending != nil
+	var before int
+	if observable {
+		if err := fixture.CommitPending(ctx); err != nil {
+			t.Fatalf("CommitPending() after seeding: %v", err)
+		}
+		before = deleterHistory(t, ctx, fixture)
+	}
+
+	type outcome struct {
+		result publicops.DeleteResult
+		err    error
+	}
+	outcomes := make([]outcome, deleterRacers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(deleterRacers)
+	for i := 0; i < deleterRacers; i++ {
+		go func() {
+			defer wg.Done()
+			racer := request
+			racer.IDs = append([]string(nil), request.IDs...)
+			token := *request.ExpectedVersion
+			racer.ExpectedVersion = &token
+			racer.Actor = fmt.Sprintf("deleter-racer-%d", i)
+			<-start
+			result, err := fixture.Deleter.Delete(ctx, racer)
+			outcomes[i] = outcome{result: result, err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	winners := 0
+	for i, o := range outcomes {
+		switch {
+		case o.err == nil:
+			winners++
+			if o.result.Deleted != len(closure) {
+				t.Errorf("racer %d won and reported Deleted = %d, want %d (%v)", i, o.result.Deleted, len(closure), closure)
+			}
+		case errors.Is(o.err, publicops.ErrNotFound), errors.Is(o.err, publicops.ErrVersionMismatch):
+			if o.result.Deleted != 0 {
+				t.Errorf("racer %d was refused (%v) and reported Deleted = %d, want 0", i, o.err, o.result.Deleted)
+			}
+		default:
+			t.Errorf("racer %d: err = %v, want nil (won), ErrNotFound or ErrVersionMismatch (lost)", i, o.err)
+		}
+	}
+	if winners != 1 {
+		errs := make([]error, len(outcomes))
+		for i, o := range outcomes {
+			errs[i] = o.err
+		}
+		t.Fatalf("%d racers shared one --if-revision token %d on %v; got %d winners, want exactly 1 (errs=%v)",
+			deleterRacers, *request.ExpectedVersion, request.IDs, winners, errs)
+	}
+	deleterAssertIssueRows(t, ctx, fixture, 0, closure...)
+
+	t.Run("HistoryGainsExactlyOneEntry", func(t *testing.T) {
+		if !observable {
+			t.Skip("this backend cannot observe or settle its history, so the one-entry-per-race clause is unobservable here")
+		}
+		if after := deleterHistory(t, ctx, fixture); after != before+1 {
+			t.Errorf("history went %d -> %d across %d racers on one token, want exactly one more entry: one row was deleted once",
+				before, after, deleterRacers)
+		}
+	})
 }
 
 // deleterRowVersion reads the RowVersion token straight off the row, in the

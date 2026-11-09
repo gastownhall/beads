@@ -265,6 +265,8 @@ var roleContractCases = []roleContract{
 		RunDeleterRefusesAStaleExpectedVersion,
 		RunDeleterVersionOutranksForceAndCascade,
 		RunDeleterRefusesAnExpectedVersionAcrossSeveralIDs,
+		RunDeleterExpectedVersionSingleWinnerUnderConcurrency,
+		RunDeleterExpectedVersionCascadeSingleWinnerUnderConcurrency,
 	),
 
 	roleCases("DependencyEditor", "DependencyEditor()", oncePerRole,
