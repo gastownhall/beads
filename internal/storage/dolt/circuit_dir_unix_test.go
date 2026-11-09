@@ -70,3 +70,36 @@ func TestCircuitBreakerDir_PrivatePerUser(t *testing.T) {
 		t.Errorf("unsuffixed shared directory must not be created (stat err %v)", err)
 	}
 }
+
+// TestCircuitBreaker_SameUserInstancesShareState verifies the coordination
+// the per-user directory preserves: two independently constructed breakers
+// for one endpoint and database under one user's temp root share persisted
+// state, so a tripped breaker makes the other instance fail fast without
+// waiting out the cooldown. No sleep is needed: the state is inspected
+// immediately after the threshold with fresh timestamps.
+func TestCircuitBreaker_SameUserInstancesShareState(t *testing.T) {
+	t.Setenv("BEADS_TEST_MODE", "")
+	root := redirectTempRootForCircuitTest(t)
+
+	cb1 := maybeNewCircuitBreaker("127.0.0.1", 44444, "coord")
+	cb2 := maybeNewCircuitBreaker("127.0.0.1", 44444, "coord")
+	if cb1 == nil || cb2 == nil {
+		t.Fatal("breaker construction over a fresh private temp root must not be disabled")
+	}
+	if cb1.filePath != cb2.filePath {
+		t.Errorf("same endpoint and database must share one state file: %s vs %s", cb1.filePath, cb2.filePath)
+	}
+	if want := perUserCircuitDir(root); filepath.Dir(cb1.filePath) != want {
+		t.Errorf("shared state must live in the per-user directory %s, got %s", want, filepath.Dir(cb1.filePath))
+	}
+
+	for i := 0; i < circuitFailureThreshold; i++ {
+		cb1.RecordFailure()
+	}
+	if got := cb2.State(); got != circuitOpen {
+		t.Fatalf("second instance state = %q, want %q from persisted state", got, circuitOpen)
+	}
+	if cb2.Allow() {
+		t.Error("second instance must reject during the cooldown via the persisted state")
+	}
+}
