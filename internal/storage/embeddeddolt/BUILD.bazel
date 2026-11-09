@@ -143,6 +143,7 @@ go_test(
         "create_issue_test.go",
         "cross_prefix_batch_test.go",
         "cross_prefix_hierarchy_test.go",
+        "cross_prefix_legacy_row_test.go",
         "cross_prefix_local_target_test.go",
         "cross_prefix_readiness_test.go",
         "cross_prefix_wisp_target_test.go",

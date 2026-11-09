@@ -184,7 +184,21 @@ stored even when bd cannot find it in this database or through routes. `bd dep
 add` then warns on stderr that the ID was not found, or says why it could not
 be verified (the lookup itself failed, or the routed rig matches it only to
 other IDs), and prints the `bd dep remove` command that deletes the edge if the
-ID was a typo (`--quiet` silences the warning). Prefix routing cannot open a
+ID was a typo (`--quiet` silences the warning).
+
+A bare ID this database actually holds is a local dependency whatever its
+prefix: after `bd repo sync` hydrates another rig's issues into this
+database, `bd dep add bd-abc gt-123` stores the edge in the local target
+column, it blocks `bd ready` like any local edge, and the hierarchy and
+cycle rules apply to it. Only a target no local table holds stores as an
+unverified cross-repo reference.
+
+An edge an older bd stored as a cross-repo reference keeps that behavior
+until you remove and re-add it — a same-type re-add alone does not rewrite
+the stored column. The remove and re-add name the dependency type and
+metadata you want, as with any add.
+
+Prefix routing cannot open a
 rig in proxied-server mode yet
 ([#5861](https://github.com/gastownhall/beads/issues/5861)), so bd cannot check
 an ID routed to such a rig and stores it without a warning.

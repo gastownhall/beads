@@ -1226,6 +1226,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A dependency whose target exists in this database under a different id
+  prefix is stored as a local dependency instead of an unverified cross-repo
+  reference. `bd repo sync` hydrates another rig's issues into this database,
+  but `bd dep add` naming such an issue filed it under `depends_on_external`,
+  where no readiness, blocked-state or hierarchy reader saw it: the dependent
+  looked ready while its blocker was open, the edge dropped out of the `bd
+  show`/`bd dep tree` listings while the counts kept it, and no hierarchy or
+  cycle gate applied. Such targets now occupy the local dependency column,
+  block like any local edge, and take the same hierarchy validation on every
+  write path. A bare ID no local table holds keeps the unverified cross-repo
+  storage and warning. Edges an older bd stored external keep their previous
+  behavior until explicitly removed and re-added; a same-type re-add alone
+  does not rewrite the stored column.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
