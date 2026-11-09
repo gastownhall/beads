@@ -50,6 +50,9 @@ func RenumberChildrenAndMerge(ctx context.Context, conn *sql.Conn, branch, ref, 
 	if err != nil {
 		return nil, err
 	}
+	if report.PriorRenameCommits, err = priorRenameCommits(ctx, conn, report.RemoteHead); err != nil {
+		return report, err
+	}
 	if len(report.Renames) > 0 {
 		if err := applyChildRenumbers(ctx, conn, report.Renames, actor); err != nil {
 			return report, err
@@ -74,6 +77,35 @@ func RenumberChildrenAndMerge(ctx context.Context, conn *sql.Conn, branch, ref, 
 		return report, fmt.Errorf("renumber children: read head after merge: %w", err)
 	}
 	return report, nil
+}
+
+// priorRenameCommits lists, newest first, the rename commits an earlier
+// renumbering pull left on this branch that remoteHead does not have yet: a
+// retry after a failed merge reports them instead of renaming again.
+func priorRenameCommits(ctx context.Context, conn *sql.Conn, remoteHead string) ([]string, error) {
+	if remoteHead == "" {
+		return nil, nil
+	}
+	rows, err := conn.QueryContext(ctx,
+		"SELECT commit_hash, message FROM dolt_log('HEAD', '--not', ?)", remoteHead)
+	if err != nil {
+		return nil, fmt.Errorf("renumber children: read local commits: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var commits []string
+	for rows.Next() {
+		var hash, message string
+		if err := rows.Scan(&hash, &message); err != nil {
+			return nil, fmt.Errorf("renumber children: read local commits: %w", err)
+		}
+		if strings.HasPrefix(message, childRenumberCommitPrefix) {
+			commits = append(commits, hash)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("renumber children: read local commits: %w", err)
+	}
+	return commits, nil
 }
 
 // applyChildRenumbers renames every planned identity in one transaction, so

@@ -131,6 +131,7 @@ go_test(
         "child_renumber_graph_test.go",
         "child_renumber_mentions_test.go",
         "child_renumber_pull_test.go",
+        "child_renumber_retry_test.go",
         "child_renumber_test.go",
         "childcounters_settle_test.go",
         "claim_wrapper_smoke_test.go",

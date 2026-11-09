@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
 )
@@ -80,8 +81,14 @@ func runPullRenumberChildren(ctx context.Context, st storage.DoltStorage, remote
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		if report != nil && report.RenameCommit != "" {
-			fmt.Fprintf(os.Stderr, "\nThe renames are committed (%s) and kept; resolve the error and pull again.\n", report.RenameCommit)
+		if report != nil {
+			kept := report.PriorRenameCommits
+			if report.RenameCommit != "" {
+				kept = append([]string{report.RenameCommit}, kept...)
+			}
+			if len(kept) > 0 {
+				fmt.Fprintf(os.Stderr, "\nThe renames are committed (%s) and kept; resolve the error and pull again.\n", strings.Join(kept, ", "))
+			}
 		}
 		return SilentExit()
 	}
