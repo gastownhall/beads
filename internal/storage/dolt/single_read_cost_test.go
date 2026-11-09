@@ -288,25 +288,30 @@ func TestSingleStatementReadKeepsATransactionWithoutAutocommit(t *testing.T) {
 		}
 	})
 
-	t.Run("a temporary server error is asked again", func(t *testing.T) {
-		// Too many connections is not a connection-loss error and is not in the
-		// retry list, but it clears. Remembering it would leave the store on
-		// transaction reads for its lifetime after the server recovers.
-		store, mock, _ := vhCountedStore(t)
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT @@autocommit")).
-			WillReturnError(&mysql.MySQLError{Number: 1040, Message: "Too many connections"})
-		mock.ExpectBegin()
-		mock.ExpectQuery(query).WithArgs("issue_prefix").WillReturnRows(row())
-		mock.ExpectRollback()
-		expectAutocommit(mock, 1)
-		mock.ExpectQuery(query).WithArgs("issue_prefix").WillReturnRows(row())
-		for range 2 {
-			if got, err := store.GetConfig(context.Background(), "issue_prefix"); err != nil || got != "bd" {
-				t.Fatalf("GetConfig = %q, %v", got, err)
+	t.Run("a failure that can clear is asked again", func(t *testing.T) {
+		// None of these is a connection-loss error or in the retry list, but each
+		// can clear. Remembering one would leave the store on transaction reads
+		// for its lifetime after the server recovers.
+		for _, temporary := range []error{
+			&mysql.MySQLError{Number: 1040, Message: "Too many connections"},
+			&mysql.MySQLError{Number: 1045, Message: "Access denied for user"},
+			&mysql.MySQLError{Number: 1105, Message: "unknown error"},
+		} {
+			store, mock, _ := vhCountedStore(t)
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT @@autocommit")).WillReturnError(temporary)
+			mock.ExpectBegin()
+			mock.ExpectQuery(query).WithArgs("issue_prefix").WillReturnRows(row())
+			mock.ExpectRollback()
+			expectAutocommit(mock, 1)
+			mock.ExpectQuery(query).WithArgs("issue_prefix").WillReturnRows(row())
+			for range 2 {
+				if got, err := store.GetConfig(context.Background(), "issue_prefix"); err != nil || got != "bd" {
+					t.Fatalf("after %v: GetConfig = %q, %v", temporary, got, err)
+				}
 			}
-		}
-		if err := mock.ExpectationsWereMet(); err != nil {
-			t.Fatal(err)
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("after %v: %v", temporary, err)
+			}
 		}
 	})
 
@@ -381,6 +386,42 @@ func TestAutocommitProbeFollowsTheCircuitBreaker(t *testing.T) {
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatal(err)
+		}
+	})
+
+	t.Run("inside a write boundary the probe is sent with the breaker open", func(t *testing.T) {
+		// A write boundary has already been admitted, and its retry helpers skip
+		// the breaker check, so the probe inside it does too.
+		t.Setenv("BEADS_TEST_MODE", "")
+		store, mock, _ := vhCountedStore(t)
+		store.breaker = newTestCircuitBreaker(t)
+		for range circuitFailureThreshold {
+			store.breaker.RecordFailure()
+		}
+		expectAutocommit(mock, 1)
+		ctx := context.WithValue(context.Background(), circuitWriteContextKey{}, struct{}{})
+		if !store.serverAutocommits(ctx) {
+			t.Fatal("serverAutocommits inside a write boundary did not read the mode")
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("a probe failure that is not a lost connection does not count", func(t *testing.T) {
+		t.Setenv("BEADS_TEST_MODE", "")
+		store, mock, _ := vhCountedStore(t)
+		store.breaker = newTestCircuitBreaker(t)
+		for range circuitFailureThreshold - 1 {
+			store.breaker.RecordFailure()
+		}
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT @@autocommit")).
+			WillReturnError(&mysql.MySQLError{Number: 1064, Message: "You have an error in your SQL syntax"})
+		if store.serverAutocommits(context.Background()) {
+			t.Fatal("serverAutocommits after a refused probe reported on")
+		}
+		if state := store.breaker.State(); state != circuitClosed {
+			t.Fatalf("breaker after a refused probe = %q, want %q", state, circuitClosed)
 		}
 	})
 
