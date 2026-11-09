@@ -561,6 +561,51 @@ func TestCompactQuietRunAddsNoCommit(t *testing.T) {
 	})
 }
 
+// AC-3: a merge that reached main after the plan was read is not a line
+// the catch-up can replay, so it is skipped: main takes the soft reset and
+// one follow-up commit as before, with HEAD holding the merged tree and
+// working-only changes left pending.
+func TestCompactSkipsCatchUpOfMerge(t *testing.T) {
+	port := startCompactTestServer(t)
+	f := newCompactFixture(t, port)
+	writer := f.conn()
+	f.exec(writer,
+		"CALL DOLT_BRANCH('side')",
+		"CALL DOLT_CHECKOUT('side')",
+		"INSERT INTO t VALUES (601, 'side')",
+		"CALL DOLT_COMMIT('-Am', 'side 601')",
+		"CALL DOLT_CHECKOUT('main')",
+		"INSERT INTO t VALUES (602, 'main')",
+		"CALL DOLT_ADD('t')",
+		"CALL DOLT_COMMIT('-m', 'main 602')",
+		"CALL DOLT_MERGE('--no-ff', '-m', 'merge side', 'side')",
+	)
+	var landed string
+	if err := writer.QueryRowContext(f.ctx, "SELECT HASHOF('HEAD')").Scan(&landed); err != nil {
+		t.Fatalf("read merged head: %v", err)
+	}
+	f.writePending(f.db)
+
+	hook := &compactHookConn{}
+	var checkouts int
+	hook.beforeExec = func(query string) {
+		if strings.Contains(query, "DOLT_CHECKOUT('compact-tmp')") {
+			checkouts++
+		}
+	}
+	if err := f.compact(hook); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if checkouts != 1 {
+		t.Fatalf("Compact checked out compact-tmp %d times, want 1 (no catch-up of a merge)", checkouts)
+	}
+	f.wantFollowupLog()
+	f.wantHeadTree(landed)
+	f.wantPendingKept()
+	f.wantStatus("config:false", "u:false")
+	f.wantNoTempBranch()
+}
+
 // AC-4: when the follow-up commit fails, Compact says which step failed and
 // that main already moved, keeps the landed row staged, and removes
 // compact-tmp.
