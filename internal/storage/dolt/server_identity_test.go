@@ -252,11 +252,12 @@ func TestServerIdentityMatchingRecord(t *testing.T) {
 	}
 }
 
-// TestServerIdentityExemptEndpoints: endpoints bd does not launch, or whose
-// check the operator turned off, get no expectation, so the open makes no
-// record read or identity query; an eligible endpoint of the same shape does.
+// TestServerIdentityExemptEndpoints: endpoints bd does not launch, whose
+// workspace declares that something else runs the server, or whose check the
+// operator turned off, get no expectation, so the open makes no record read
+// or identity query; an eligible endpoint of the same shape does.
 func TestServerIdentityExemptEndpoints(t *testing.T) {
-	for _, env := range []string{"BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT", "BEADS_DOLT_SERVER_HOST"} {
+	for _, env := range []string{"BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_AUTO_START"} {
 		t.Setenv(env, "")
 	}
 	const port = 3308
@@ -283,6 +284,14 @@ func TestServerIdentityExemptEndpoints(t *testing.T) {
 			}
 		})
 	}
+	t.Run("eligible/auto-start on", func(t *testing.T) {
+		cfg, beadsDir := shared(t)
+		t.Setenv("BEADS_DOLT_AUTO_START", "1")
+		writeFile(t, filepath.Join(beadsDir, "config.yaml"), "dolt.auto-start: true\n")
+		if serverIdentityExpectation(cfg, beadsDir, beadsDir) == nil {
+			t.Fatal("auto-start on exempted the shared endpoint")
+		}
+	})
 	t.Run("eligible/invalid setting keeps the check on", func(t *testing.T) {
 		cfg, beadsDir := shared(t)
 		t.Setenv(doltserver.VerifyServerIdentityEnv, "maybe")
@@ -336,6 +345,33 @@ func TestServerIdentityExemptEndpoints(t *testing.T) {
 		}},
 		{"external server mode", owned, func(t *testing.T, _ *Config, _ string) {
 			t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+		}},
+		// A shared server that Docker, systemd or an orchestrator runs: bd
+		// never launched it, so there is no record of it to compare.
+		{"external server mode in shared mode", shared, func(t *testing.T, _ *Config, _ string) {
+			t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+		}},
+		{"auto-start off by env in shared mode", shared, func(t *testing.T, _ *Config, _ string) {
+			t.Setenv("BEADS_DOLT_AUTO_START", "0")
+		}},
+		{"auto-start off by env for an env port in shared mode", shared, func(t *testing.T, cfg *Config, _ string) {
+			cfg.ServerPortSharedServer = false
+			cfg.ServerPortSource = doltserver.PortSourceEnv
+			t.Setenv("BEADS_DOLT_AUTO_START", "0")
+		}},
+		{"auto-start off by config.yaml in shared mode", shared, func(t *testing.T, _ *Config, beadsDir string) {
+			writeFile(t, filepath.Join(beadsDir, "config.yaml"), "dolt.auto-start: false\n")
+		}},
+		{"auto-start off for an owned endpoint", owned, func(t *testing.T, _ *Config, beadsDir string) {
+			writeFile(t, filepath.Join(beadsDir, "config.yaml"), "dolt:\n  auto-start: off\n")
+		}},
+		// bd init --external, whose workspace has no config.yaml saying so
+		// yet when init opens its store.
+		{"declared managed outside bd by the caller in shared mode", shared, func(t *testing.T, cfg *Config, _ string) {
+			cfg.ServerManagedOutsideBD = true
+		}},
+		{"declared managed outside bd by the caller for an owned endpoint", owned, func(t *testing.T, cfg *Config, _ string) {
+			cfg.ServerManagedOutsideBD = true
 		}},
 		{"disabled for an owned endpoint", owned, func(t *testing.T, _ *Config, _ string) {
 			t.Setenv(doltserver.VerifyServerIdentityEnv, "off")

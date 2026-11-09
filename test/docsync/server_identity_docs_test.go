@@ -9,9 +9,13 @@ import (
 // server identity check (GH#4637) for an operator whose existing managed
 // server was started by a bd from before the check: the configuration
 // reference and the troubleshooting entry explain the refusal, how to see
-// what holds the port, the stop/start that pairs bd's own server, both
-// spellings of the setting, which endpoints are covered and which paths still
-// bypass the check, and never advise deleting or reinitializing a database.
+// what holds the port, the stop/start that pairs bd's own server, why bd
+// sets the server UUID itself (a global server_uuid names every server), how
+// to declare a server something else runs (shared or not, bd init
+// --external included) and that auto-start off exempts bd's own server too,
+// both spellings of the setting, which endpoints are covered, which hosts
+// pair on startup evidence and which paths still bypass the check, and never
+// advise deleting or reinitializing a database.
 func TestServerIdentityUpgradeGuidance(t *testing.T) {
 	configuration := readRepoDoc(t, "docs", "reference", "configuration.md")
 	troubleshooting := readRepoDoc(t, "docs", "reference", "troubleshooting.md")
@@ -33,7 +37,16 @@ func TestServerIdentityUpgradeGuidance(t *testing.T) {
 		"bd init --server-port",
 		"unix sockets, TLS connections, proxied servers and gateways",
 		"bd dolt stop && bd dolt start",
+		"dolt.auto-start: false",
+		"BEADS_DOLT_AUTO_START=0",
+		"BEADS_DOLT_SERVER_MODE=1",
+		"the shared server included",
+		"sqlserver.global.server_uuid",
+		"bd init --external",
+		"a server you then start yourself with `bd dolt start` is not checked either",
 		"WSL1",
+		"FreeBSD",
+		"prints a warning",
 		"bd doctor --fix",
 		"bd bootstrap",
 		"the working-set flush bd runs before it stops a server",
@@ -56,7 +69,11 @@ func TestServerIdentityUpgradeGuidance(t *testing.T) {
 		"bd dolt stop && bd dolt start",
 		"BEADS_DOLT_VERIFY_SERVER_IDENTITY=false",
 		"dolt.verify-server-identity: false",
-		"did not record its server identity",
+		"could not verify its server identity",
+		"dolt.auto-start: false",
+		"BEADS_DOLT_SERVER_MODE=1",
+		"bd init --external",
+		"FreeBSD",
 		"bd doctor --fix",
 		"bd bootstrap",
 		"do not delete or reinitialize anything",

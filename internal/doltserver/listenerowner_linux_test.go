@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -263,7 +264,9 @@ func fakeProcAt(t *testing.T, port int, listeners []procListener, fds map[int][]
 // TestServerIdentityListenerOwnershipAt_FakeProc: pairing counts every
 // listener that receives the endpoint's connections, so a foreign holder of
 // the dialed address (or of a wildcard covering it) is foreign even when the
-// child holds another socket on the port, which classifyListener accepts.
+// child holds another socket on the port, which classifyListener accepts. An
+// IPv6 wildcard receives an IPv4 endpoint's connections only where no IPv4
+// listener does: beside one it is IPv6-only, or loses them to it.
 func TestServerIdentityListenerOwnershipAt_FakeProc(t *testing.T) {
 	const port, child, wrapped, foreign = 41235, 777, 778, 900
 	cases := []struct {
@@ -285,8 +288,18 @@ func TestServerIdentityListenerOwnershipAt_FakeProc(t *testing.T) {
 			fds: map[int][]string{child: {"12"}, foreign: {"11"}}, pid: child, want: OwnershipForeign, portOnly: OwnershipOwned},
 		{name: "mixed holders: child and a foreign wildcard", host: "127.0.0.1", listeners: []procListener{{"127.0.0.1", "11"}, {"0.0.0.0", "12"}},
 			fds: map[int][]string{child: {"11"}, foreign: {"12"}}, pid: child, want: OwnershipForeign, portOnly: OwnershipOwned},
-		{name: "foreign IPv6 wildcard", host: "127.0.0.1", listeners: []procListener{{"127.0.0.1", "11"}, {"::", "12"}},
+		{name: "foreign IPv6 wildcard beside the child's IPv4 listener", host: "127.0.0.1", listeners: []procListener{{"127.0.0.1", "11"}, {"::", "12"}},
+			fds: map[int][]string{child: {"11"}, foreign: {"12"}}, pid: child, want: OwnershipOwned, portOnly: OwnershipOwned},
+		{name: "foreign IPv6 wildcard alone", host: "127.0.0.1", listeners: []procListener{{"::", "12"}},
+			fds: map[int][]string{child: nil, foreign: {"12"}}, pid: child, want: OwnershipForeign, portOnly: OwnershipForeign},
+		{name: "child's IPv6 wildcard alone", host: "127.0.0.1", listeners: []procListener{{"::", "11"}},
+			fds: map[int][]string{child: {"11"}}, pid: child, want: OwnershipOwned, portOnly: OwnershipOwned},
+		{name: "foreign IPv4 wildcard beside the child's IPv6 wildcard", host: "127.0.0.1", listeners: []procListener{{"::", "11"}, {"0.0.0.0", "12"}},
 			fds: map[int][]string{child: {"11"}, foreign: {"12"}}, pid: child, want: OwnershipForeign, portOnly: OwnershipOwned},
+		{name: "localhost endpoint", host: "localhost", listeners: []procListener{{"127.0.0.1", "11"}},
+			fds: map[int][]string{child: {"11"}}, pid: child, want: OwnershipOwned, portOnly: OwnershipOwned},
+		{name: "a host name has no address to match", host: "db.example", listeners: []procListener{{"127.0.0.1", "11"}},
+			fds: map[int][]string{child: {"11"}}, pid: child, want: OwnershipUnknown, portOnly: OwnershipOwned},
 		{name: "foreign on another address does not count", host: "127.0.0.1", listeners: []procListener{{"127.0.0.1", "11"}, {"192.0.2.7", "12"}},
 			fds: map[int][]string{child: {"11"}, foreign: {"12"}}, pid: child, want: OwnershipOwned, portOnly: OwnershipOwned},
 		{name: "IPv6 loopback endpoint", host: "::1", listeners: []procListener{{"::1", "11"}},
@@ -325,16 +338,74 @@ func TestServerIdentityDecodeProcNetAddr(t *testing.T) {
 		if v4 := parsed.To4(); v4 != nil {
 			parsed = v4
 		}
-		if got := decodeProcNetAddr(procNetAddr(parsed)); got != ip {
-			t.Errorf("decodeProcNetAddr(%s) = %q, want %q", procNetAddr(parsed), got, ip)
+		if got := decodeProcNetAddr(procNetAddr(parsed)); got != netip.MustParseAddr(ip) {
+			t.Errorf("decodeProcNetAddr(%s) = %v, want %s", procNetAddr(parsed), got, ip)
 		}
 	}
-	if got := decodeProcNetAddr("0100007F"); binary.NativeEndian.Uint16([]byte{1, 0}) == 1 && got != "127.0.0.1" {
-		t.Errorf("decodeProcNetAddr(0100007F) = %q on a little-endian host, want 127.0.0.1", got)
+	// A tcp6 socket bound to an IPv4-mapped address is that IPv4 address.
+	if got := decodeProcNetAddr(procNetAddr(net.ParseIP("::ffff:127.0.0.1").To16())); got != netip.MustParseAddr("127.0.0.1") {
+		t.Errorf("decodeProcNetAddr(::ffff:127.0.0.1) = %v, want 127.0.0.1", got)
+	}
+	if got := decodeProcNetAddr("0100007F"); binary.NativeEndian.Uint16([]byte{1, 0}) == 1 && got != netip.MustParseAddr("127.0.0.1") {
+		t.Errorf("decodeProcNetAddr(0100007F) = %v on a little-endian host, want 127.0.0.1", got)
 	}
 	for _, bad := range []string{"", "0100007", "zz00007F", "0100007F00"} {
-		if got := decodeProcNetAddr(bad); got != "" {
-			t.Errorf("decodeProcNetAddr(%q) = %q, want \"\"", bad, got)
+		if got := decodeProcNetAddr(bad); got.IsValid() {
+			t.Errorf("decodeProcNetAddr(%q) = %v, want the zero address", bad, got)
 		}
+	}
+}
+
+// TestServerIdentityIPv6OnlyWildcardBesideIPv4Listener runs the IPv6-only
+// case against this host's real sockets: an IPv6-only wildcard listener
+// (IPV6_V6ONLY, which Go sets for "tcp6") on the port of an IPv4 loopback
+// listener is listed in /proc beside it, receives none of the IPv4
+// endpoint's connections, and so does not count against the listener that
+// does.
+func TestServerIdentityIPv6OnlyWildcardBesideIPv4Listener(t *testing.T) {
+	v4, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = v4.Close() }()
+	port := v4.Addr().(*net.TCPAddr).Port
+	v6, err := net.Listen("tcp6", fmt.Sprintf("[::]:%d", port))
+	if err != nil {
+		t.Skipf("no IPv6-only wildcard listener on this host beside the IPv4 one: %v", err)
+	}
+	defer func() { _ = v6.Close() }()
+
+	conn, err := net.Dial("tcp4", v4.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if err := v6.(*net.TCPListener).SetDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := v6.Accept(); err == nil {
+		_ = c.Close()
+		t.Fatal("the IPv6-only wildcard accepted the IPv4 connection")
+	}
+
+	listeners, err := listeningSocketAddrs(port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addrs := make([]netip.Addr, len(listeners))
+	for i, l := range listeners {
+		addrs[i] = l.addr
+	}
+	want := map[netip.Addr]bool{netip.MustParseAddr("127.0.0.1"): true, netip.IPv6Unspecified(): false}
+	if len(addrs) != len(want) {
+		t.Fatalf("/proc lists %v on port %d, want the IPv4 loopback and the IPv6 wildcard", addrs, port)
+	}
+	for i, recv := range receivingListeners(addrs, netip.MustParseAddr("127.0.0.1")) {
+		if wantRecv, ok := want[addrs[i]]; !ok || recv != wantRecv {
+			t.Errorf("listener %v receives 127.0.0.1's connections = %v, want %v", addrs[i], recv, wantRecv)
+		}
+	}
+	if got := classifyListenerAt(os.Getpid(), "127.0.0.1", port); got != OwnershipOwned {
+		t.Errorf("classifyListenerAt(self) = %v, want %v", got, OwnershipOwned)
 	}
 }

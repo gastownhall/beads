@@ -3,6 +3,7 @@
 package doltserver
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -58,6 +60,28 @@ func findPIDOnPort(port int) int {
 		}
 	}
 	return 0
+}
+
+// processParentPIDs snapshots every process's parent PID (a Toolhelp
+// snapshot). Windows keeps a parent PID after that process exits, and may
+// give the PID to a new process; descendsFrom follows a chain only up from a
+// listener's holder, so a stale entry can at worst count a listener as the
+// launched server's when that holder's dead parent had the server's PID.
+func processParentPIDs() (map[int]int, error) {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = windows.CloseHandle(snapshot) }()
+	entry := windows.ProcessEntry32{Size: uint32(unsafe.Sizeof(windows.ProcessEntry32{}))} //nolint:gosec // G103: Toolhelp reads the entry's size from Size
+	parents := map[int]int{}
+	for err = windows.Process32First(snapshot, &entry); err == nil; err = windows.Process32Next(snapshot, &entry) {
+		parents[int(entry.ProcessID)] = int(entry.ParentProcessID)
+	}
+	if !errors.Is(err, windows.ERROR_NO_MORE_FILES) {
+		return nil, err
+	}
+	return parents, nil
 }
 
 // readDoltProcessPIDs returns PIDs of all running dolt sql-server processes.

@@ -3,6 +3,7 @@
 package doltserver
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -100,6 +101,36 @@ func splitPSField(line string) (field, rest string, ok bool) {
 	field = line[:fieldEnd]
 	rest = strings.TrimLeftFunc(line[fieldEnd:], unicode.IsSpace)
 	return field, rest, rest != ""
+}
+
+// processParentPIDs snapshots every process's parent from
+// `ps -axo pid=,ppid=`.
+func processParentPIDs() (map[int]int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), listenerLookupTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ps", "-axo", "pid=,ppid=").Output()
+	if err != nil {
+		return nil, err
+	}
+	return parsePSParents(out), nil
+}
+
+// parsePSParents reads `ps -axo pid=,ppid=` output into child -> parent.
+func parsePSParents(out []byte) map[int]int {
+	parents := map[int]int{}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		pid, err1 := strconv.Atoi(fields[0])
+		ppid, err2 := strconv.Atoi(fields[1])
+		if err1 != nil || err2 != nil || pid <= 0 {
+			continue
+		}
+		parents[pid] = ppid
+	}
+	return parents
 }
 
 // isProcessInDir checks if a process's working directory matches the given path.

@@ -2674,7 +2674,7 @@ func TestStartupProofUsesReadyLineWithoutListenerOwnership(t *testing.T) {
 	if got, ok := findLogLevel(args); !ok || got != "info" {
 		t.Fatalf("buildDoltServerArgs log level = %q, want info (args %v)", got, args)
 	}
-	body, err := buildDoltServerYAMLConfig("127.0.0.1", 3308, 0, false, "/tmp/.doltcfg")
+	body, err := buildDoltServerYAMLConfig("127.0.0.1", 3308, 0, false, "/tmp/.doltcfg", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2746,7 +2746,7 @@ func TestVerifyRemotesAPIState(t *testing.T) {
 // TestLifecycle_SharedServerSQLCommitSurvivesKill checks the running server,
 // but only where Dolt-backed integration tests run).
 func TestBuildDoltServerYAMLConfig(t *testing.T) {
-	body, err := buildDoltServerYAMLConfig("127.0.0.1", 54321, 8081, false, "/tmp/some/.doltcfg")
+	body, err := buildDoltServerYAMLConfig("127.0.0.1", 54321, 8081, false, "/tmp/some/.doltcfg", "")
 	if err != nil {
 		t.Fatalf("buildDoltServerYAMLConfig: %v", err)
 	}
@@ -2785,13 +2785,38 @@ func TestBuildDoltServerYAMLConfig(t *testing.T) {
 	if !gc.Enable() {
 		t.Error("auto-GC must remain enabled; only the archive level should change")
 	}
+	if vars := cfg.SystemVars(); len(vars) != 0 {
+		t.Errorf("SystemVars = %v, want none without a server UUID to pin", vars)
+	}
+}
+
+// TestBuildDoltServerYAMLConfig_PinsServerUUID: a server UUID to pin is set
+// as the server_uuid system variable, which Dolt's own YAML loader reads
+// back, so the server reports the identity bd keeps for its data directory
+// (GH#4637).
+func TestBuildDoltServerYAMLConfig_PinsServerUUID(t *testing.T) {
+	const pinned = "aaaaaaaa-1111-4222-8333-444444444444"
+	body, err := buildDoltServerYAMLConfig("127.0.0.1", 54321, 0, false, "/tmp/some/.doltcfg", pinned)
+	if err != nil {
+		t.Fatalf("buildDoltServerYAMLConfig: %v", err)
+	}
+	cfg, err := servercfg.NewYamlConfig(body)
+	if err != nil {
+		t.Fatalf("servercfg.NewYamlConfig could not parse generated config: %v\nconfig:\n%s", err, body)
+	}
+	if got := cfg.SystemVars()["server_uuid"]; got != pinned {
+		t.Errorf("system_variables.server_uuid = %v, want %q\nconfig:\n%s", got, pinned, body)
+	}
+	if got := cfg.Port(); got != 54321 {
+		t.Errorf("Port = %d, want 54321", got)
+	}
 }
 
 // TestBuildDoltServerYAMLConfig_DebugLogLevel asserts debug mode raises the
 // YAML config's log level the same way buildDoltServerArgs does for the
 // CLI-flag form.
 func TestBuildDoltServerYAMLConfig_DebugLogLevel(t *testing.T) {
-	body, err := buildDoltServerYAMLConfig("127.0.0.1", 54321, 0, true, "/tmp/some/.doltcfg")
+	body, err := buildDoltServerYAMLConfig("127.0.0.1", 54321, 0, true, "/tmp/some/.doltcfg", "")
 	if err != nil {
 		t.Fatalf("buildDoltServerYAMLConfig: %v", err)
 	}

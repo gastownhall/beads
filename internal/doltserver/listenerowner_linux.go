@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -163,13 +164,18 @@ func childPIDs(pid int) []int {
 }
 
 // classifyListenerAt is classifyListener for one endpoint, as pairing needs
-// it: of the TCP listeners on port, those bound to host's address or to a
-// wildcard that receives its connections must all be held by pid or its
-// descendants. It is OwnershipForeign when any of them is another
-// process's, so a child that holds some socket on the port does not make a
-// foreign listener on the dialed address its own, and OwnershipUnlisted when
-// none is listed. It is OwnershipUnknown where classifyListener is.
+// it: of the TCP listeners on port, those that receive connections dialed to
+// host (receivingListeners) must all be held by pid or its descendants. It
+// is OwnershipForeign when any of them is another process's, so a child that
+// holds some socket on the port does not make a foreign listener on the
+// dialed address its own, and OwnershipUnlisted when none is listed. It is
+// OwnershipUnknown where classifyListener is, and for a host that names no
+// address.
 func classifyListenerAt(pid int, host string, port int) Ownership {
+	want, ok := endpointAddr(host)
+	if !ok {
+		return OwnershipUnknown
+	}
 	if procRoot == "/proc" {
 		if self, err := os.Readlink("/proc/self"); err != nil || self != strconv.Itoa(os.Getpid()) {
 			return OwnershipUnknown
@@ -181,14 +187,18 @@ func classifyListenerAt(pid int, host string, port int) Ownership {
 		}
 		return OwnershipUnknown
 	}
-	addrs, err := listeningSocketAddrs(port)
+	listeners, err := listeningSocketAddrs(port)
 	if err != nil {
 		return OwnershipUnknown
 	}
+	addrs := make([]netip.Addr, len(listeners))
+	for i, l := range listeners {
+		addrs[i] = l.addr
+	}
 	matching := map[string]bool{}
-	for inode, addr := range addrs {
-		if listenAddrReceives(addr, host) {
-			matching[inode] = true
+	for i, recv := range receivingListeners(addrs, want) {
+		if recv {
+			matching[listeners[i].inode] = true
 		}
 	}
 	if len(matching) == 0 {
@@ -219,10 +229,17 @@ func classifyListenerAt(pid int, host string, port int) Ownership {
 	return OwnershipOwned
 }
 
-// listeningSocketAddrs returns the TCP listeners on port, socket inode to
-// local address, from /proc/net/tcp and /proc/net/tcp6.
-func listeningSocketAddrs(port int) (map[string]string, error) {
-	addrs := map[string]string{}
+// procSocket is one TCP listener in /proc/net/tcp{,6}: its socket inode
+// and its local address, unmapped.
+type procSocket struct {
+	inode string
+	addr  netip.Addr
+}
+
+// listeningSocketAddrs returns the TCP listeners on port, from /proc/net/tcp
+// and /proc/net/tcp6.
+func listeningSocketAddrs(port int) ([]procSocket, error) {
+	var listeners []procSocket
 	read := 0
 	for _, name := range []string{"tcp", "tcp6"} {
 		f, err := os.Open(filepath.Join(procRoot, "net", name)) //nolint:gosec // G304: fixed /proc paths
@@ -230,7 +247,7 @@ func listeningSocketAddrs(port int) (map[string]string, error) {
 			continue
 		}
 		read++
-		err = parseProcNetTCPListenerAddrs(bufio.NewScanner(f), port, addrs)
+		listeners, err = parseProcNetTCPListenerAddrs(bufio.NewScanner(f), port, listeners)
 		_ = f.Close()
 		if err != nil {
 			return nil, err
@@ -239,14 +256,14 @@ func listeningSocketAddrs(port int) (map[string]string, error) {
 	if read == 0 {
 		return nil, fmt.Errorf("no %s/net/tcp", procRoot)
 	}
-	return addrs, nil
+	return listeners, nil
 }
 
-// parseProcNetTCPListenerAddrs adds to addrs the inode and local address of
-// every row of a /proc/net/tcp{,6} table that is a listener on port. A row
-// whose address does not decode is kept with an empty address, which
-// matches no endpoint.
-func parseProcNetTCPListenerAddrs(sc *bufio.Scanner, port int, addrs map[string]string) error {
+// parseProcNetTCPListenerAddrs appends to listeners the inode and local
+// address of every row of a /proc/net/tcp{,6} table that is a listener on
+// port. A row whose address does not decode is kept with the zero address,
+// which receives no endpoint's connections.
+func parseProcNetTCPListenerAddrs(sc *bufio.Scanner, port int, listeners []procSocket) ([]procSocket, error) {
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
 		if len(fields) < 10 || fields[3] != tcpListenState {
@@ -260,22 +277,24 @@ func parseProcNetTCPListenerAddrs(sc *bufio.Scanner, port int, addrs map[string]
 		if err != nil || int(p) != port || fields[9] == "0" {
 			continue
 		}
-		addrs[fields[9]] = decodeProcNetAddr(fields[1][:i])
+		listeners = append(listeners, procSocket{inode: fields[9], addr: decodeProcNetAddr(fields[1][:i])})
 	}
-	return sc.Err()
+	return listeners, sc.Err()
 }
 
 // decodeProcNetAddr decodes a /proc/net/tcp{,6} local address: 8 (IPv4) or
-// 32 (IPv6) hex digits, printed as 32-bit words in host byte order. It
-// returns "" for anything else.
-func decodeProcNetAddr(h string) string {
+// 32 (IPv6) hex digits, printed as 32-bit words in host byte order, and
+// unmaps an IPv4-mapped IPv6 one. It returns the zero address for anything
+// else.
+func decodeProcNetAddr(h string) netip.Addr {
 	raw, err := hex.DecodeString(h)
 	if err != nil || (len(raw) != net.IPv4len && len(raw) != net.IPv6len) {
-		return ""
+		return netip.Addr{}
 	}
-	ip := make(net.IP, len(raw))
+	ip := make([]byte, len(raw))
 	for i := 0; i < len(raw); i += 4 {
 		binary.NativeEndian.PutUint32(ip[i:], binary.BigEndian.Uint32(raw[i:]))
 	}
-	return ip.String()
+	addr, _ := netip.AddrFromSlice(ip)
+	return addr.Unmap()
 }
