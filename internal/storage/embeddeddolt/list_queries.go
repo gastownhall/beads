@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -42,6 +43,18 @@ func (s *EmbeddedDoltStore) SearchDescendants(ctx context.Context, rootID string
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
 		result, err = issueops.SearchDescendantsInTx(ctx, tx, rootID, filter)
+		return err
+	})
+	return result, err
+}
+
+// ReadComponent walks the component around root on one connection
+// (storage.ComponentReader).
+func (s *EmbeddedDoltStore) ReadComponent(ctx context.Context, root *types.Issue) (*storage.Component, error) {
+	var result *storage.Component
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.ReadComponentInTx(ctx, tx, root)
 		return err
 	})
 	return result, err

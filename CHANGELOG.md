@@ -712,6 +712,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (it keeps only `**Do:**` and `**Don't:**` lines), and a rule with no such
   lines is skipped by `--auto` and refused by `--group`.
   ([#5719](https://github.com/gastownhall/beads/issues/5719))
+- **`bd graph` reads its dependency graph level by level on a remote server.**
+  It sent several statements per issue, in a transaction per read. It now
+  batches each breadth-first level in one read transaction, with SQL statements
+  growing in chunks of 200 ids, and reads each issue's edges once. `bd graph
+  --all` batches its edge read the same way. Each issue's edges now come back
+  ordered by target, as they already did on the proxied route, so the connector
+  glyphs in the default drawing can differ when an issue has several edges; the
+  issues, layers and edges are the same.
 - **`bd` requires Dolt 2.6.0 or newer outside embedded mode, and refuses
   anything older.** `doltversion.RecommendedMin` (2.5.0, a warning) is now
   `doltversion.RequiredMin` (2.6.0, an error). `bd dolt start` and

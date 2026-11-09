@@ -141,8 +141,8 @@ in total before any individual status trips it.`,
 		}
 
 		// Apply the defensive row cap (be-x42v) on the connected-component
-		// node count. loadGraphSubgraph is a BFS over GetDependents/
-		// GetDependencies (per-ID lookups, no IssueFilter to thread MaxRows
+		// node count. loadGraphSubgraph is a BFS over dependency reads (no
+		// IssueFilter to thread MaxRows
 		// through), so — like `bd dep tree` — the cap is checked post-hoc
 		// against the final node set rather than during traversal.
 		graphMaxRows, graphMaxRowsSource, err := resolveMaxRows(cmd)
@@ -395,10 +395,67 @@ func loadGraphSubgraph(ctx context.Context, s storage.DoltStorage, issueID strin
 		IssueMap: map[string]*types.Issue{root.ID: root},
 	}
 
+	// A failed component read is not the command's failure: the per-issue walk
+	// below is best-effort, and it produces the same graph when its reads work.
+	var outgoing map[string][]*types.Dependency
+	if component, ok, err := storage.ReadComponent(ctx, s, root); ok && err == nil {
+		subgraph.Issues = component.Issues
+		for _, issue := range component.Issues {
+			subgraph.IssueMap[issue.ID] = issue
+		}
+		outgoing = component.Outgoing
+	} else {
+		outgoing = walkGraphComponentPerIssue(ctx, s, subgraph)
+	}
+
+	// Load all dependencies within the subgraph
+	for _, issue := range subgraph.Issues {
+		for _, dep := range outgoing[issue.ID] {
+			// Resolve external deps via routing (bd-k0pfm)
+			if strings.HasPrefix(dep.DependsOnID, "external:") {
+				parts := strings.SplitN(dep.DependsOnID, ":", 3)
+				if len(parts) == 3 && parts[2] != "" {
+					targetID := parts[2]
+					if _, exists := subgraph.IssueMap[targetID]; !exists {
+						result, routeErr := resolveAndGetIssueWithRouting(ctx, store, targetID)
+						if routeErr == nil && result != nil && result.Issue != nil {
+							subgraph.Issues = append(subgraph.Issues, result.Issue)
+							subgraph.IssueMap[result.Issue.ID] = result.Issue
+							// Rewrite dep to use the resolved issue ID
+							dep.DependsOnID = result.Issue.ID
+							result.Close()
+						} else {
+							if result != nil {
+								result.Close()
+							}
+							continue
+						}
+					} else {
+						dep.DependsOnID = targetID
+					}
+				}
+			}
+			// Only include dependencies where both ends are in the subgraph
+			if _, ok := subgraph.IssueMap[dep.DependsOnID]; ok {
+				subgraph.Dependencies = append(subgraph.Dependencies, dep)
+			}
+		}
+	}
+
+	return subgraph, nil
+}
+
+// walkGraphComponentPerIssue adds the issues connected to subgraph.Root to
+// subgraph, one read per issue and direction, and returns each issue's stored
+// dependency rows. It serves a store with no storage.ComponentReader, such as bd
+// connect's HTTP backend. A failed read skips that issue: that backend refuses
+// the dependents read, and its front-door test pins bd graph <id> answering with
+// the root alone.
+func walkGraphComponentPerIssue(ctx context.Context, s storage.DoltStorage, subgraph *TemplateSubgraph) map[string][]*types.Dependency {
 	// BFS to find all connected issues (via any dependency type).
 	// Traverse both directions: dependents AND dependencies (GH#2145).
-	queue := []string{root.ID}
-	visited := map[string]bool{root.ID: true}
+	queue := []string{subgraph.Root.ID}
+	visited := map[string]bool{subgraph.Root.ID: true}
 
 	for len(queue) > 0 {
 		currentID := queue[0]
@@ -433,45 +490,35 @@ func loadGraphSubgraph(ctx context.Context, s storage.DoltStorage, issueID strin
 		}
 	}
 
-	// Load all dependencies within the subgraph
+	outgoing := make(map[string][]*types.Dependency, len(subgraph.Issues))
 	for _, issue := range subgraph.Issues {
 		deps, err := s.GetDependencyRecords(ctx, issue.ID)
 		if err != nil {
 			continue
 		}
-		for _, dep := range deps {
-			// Resolve external deps via routing (bd-k0pfm)
-			if strings.HasPrefix(dep.DependsOnID, "external:") {
-				parts := strings.SplitN(dep.DependsOnID, ":", 3)
-				if len(parts) == 3 && parts[2] != "" {
-					targetID := parts[2]
-					if _, exists := subgraph.IssueMap[targetID]; !exists {
-						result, routeErr := resolveAndGetIssueWithRouting(ctx, store, targetID)
-						if routeErr == nil && result != nil && result.Issue != nil {
-							subgraph.Issues = append(subgraph.Issues, result.Issue)
-							subgraph.IssueMap[result.Issue.ID] = result.Issue
-							// Rewrite dep to use the resolved issue ID
-							dep.DependsOnID = result.Issue.ID
-							result.Close()
-						} else {
-							if result != nil {
-								result.Close()
-							}
-							continue
-						}
-					} else {
-						dep.DependsOnID = targetID
-					}
-				}
-			}
-			// Only include dependencies where both ends are in the subgraph
-			if _, ok := subgraph.IssueMap[dep.DependsOnID]; ok {
-				subgraph.Dependencies = append(subgraph.Dependencies, dep)
-			}
-		}
+		outgoing[issue.ID] = deps
 	}
+	return outgoing
+}
 
-	return subgraph, nil
+// graphDependencyRecords returns the stored outgoing dependency rows of each id
+// in one batched read. When the batch fails it reads each id on its own, which
+// bd connect's HTTP backend serves although it refuses the batch; an id whose
+// own read fails has no rows, and the graph is drawn without its edges.
+func graphDependencyRecords(ctx context.Context, s storage.DoltStorage, ids []string) map[string][]*types.Dependency {
+	records, err := s.GetDependencyRecordsForIssues(ctx, ids)
+	if err == nil {
+		return records
+	}
+	records = make(map[string][]*types.Dependency, len(ids))
+	for _, id := range ids {
+		deps, err := s.GetDependencyRecords(ctx, id)
+		if err != nil {
+			continue
+		}
+		records[id] = deps
+	}
+	return records
 }
 
 // loadAllGraphSubgraphs loads all open issues and groups them by connected component
@@ -511,12 +558,13 @@ func loadAllGraphSubgraphs(ctx context.Context, s storage.DoltStorage, maxRows i
 
 	// Load all dependencies between these issues
 	allDeps := make([]*types.Dependency, 0)
+	ids := make([]string, 0, len(allIssues))
 	for _, issue := range allIssues {
-		deps, err := s.GetDependencyRecords(ctx, issue.ID)
-		if err != nil {
-			continue
-		}
-		for _, dep := range deps {
+		ids = append(ids, issue.ID)
+	}
+	records := graphDependencyRecords(ctx, s, ids)
+	for _, issue := range allIssues {
+		for _, dep := range records[issue.ID] {
 			// Resolve external deps via routing (bd-k0pfm)
 			if strings.HasPrefix(dep.DependsOnID, "external:") {
 				parts := strings.SplitN(dep.DependsOnID, ":", 3)

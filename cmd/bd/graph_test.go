@@ -1,10 +1,296 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"reflect"
+	"sort"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// graphReadFake serves the per-issue reads the bd graph loaders fall back on and
+// counts them. It answers the way GetIssuesByIDs does: durable issues by id,
+// then wisps by id, without the ids that name no issue.
+type graphReadFake struct {
+	storage.DoltStorage
+
+	issues map[string]*types.Issue
+	wisps  map[string]bool
+	edges  []*types.Dependency
+
+	// refuse makes the walk reads and the batched record read fail, as bd
+	// connect's HTTP backend does.
+	refuse bool
+
+	dependencyBatches int
+	perIssueWalkReads int
+	perIssueRecords   int
+}
+
+var errGraphReadRefused = errors.New("read refused")
+
+func newGraphReadFake(ids []string, wisps []string, edges [][2]string) *graphReadFake {
+	f := &graphReadFake{issues: make(map[string]*types.Issue), wisps: make(map[string]bool)}
+	for _, id := range ids {
+		f.issues[id] = &types.Issue{ID: id, Title: id, Status: types.StatusOpen}
+	}
+	for _, id := range wisps {
+		f.issues[id] = &types.Issue{ID: id, Title: id, Status: types.StatusOpen}
+		f.wisps[id] = true
+	}
+	for _, e := range edges {
+		f.edges = append(f.edges, &types.Dependency{IssueID: e[0], DependsOnID: e[1], Type: types.DepBlocks})
+	}
+	return f
+}
+
+func (f *graphReadFake) hydrate(ids []string) []*types.Issue {
+	var durable, wisps []string
+	for _, id := range ids {
+		if _, ok := f.issues[id]; !ok {
+			continue
+		}
+		if f.wisps[id] {
+			wisps = append(wisps, id)
+		} else {
+			durable = append(durable, id)
+		}
+	}
+	sort.Strings(durable)
+	sort.Strings(wisps)
+	var out []*types.Issue
+	for _, id := range append(durable, wisps...) {
+		out = append(out, f.issues[id])
+	}
+	return out
+}
+
+func (f *graphReadFake) GetIssue(_ context.Context, id string) (*types.Issue, error) {
+	return f.issues[id], nil
+}
+
+func (f *graphReadFake) GetDependents(_ context.Context, id string) ([]*types.Issue, error) {
+	f.perIssueWalkReads++
+	if f.refuse {
+		return nil, errGraphReadRefused
+	}
+	var far []string
+	for _, e := range f.edges {
+		if e.DependsOnID == id {
+			far = append(far, e.IssueID)
+		}
+	}
+	return f.hydrate(far), nil
+}
+
+func (f *graphReadFake) GetDependencies(_ context.Context, id string) ([]*types.Issue, error) {
+	f.perIssueWalkReads++
+	if f.refuse {
+		return nil, errGraphReadRefused
+	}
+	var far []string
+	for _, e := range f.edges {
+		if e.IssueID == id {
+			far = append(far, e.DependsOnID)
+		}
+	}
+	return f.hydrate(far), nil
+}
+
+func (f *graphReadFake) GetDependencyRecords(_ context.Context, id string) ([]*types.Dependency, error) {
+	f.perIssueRecords++
+	var out []*types.Dependency
+	for _, e := range f.edges {
+		if e.IssueID == id {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+func (f *graphReadFake) GetDependencyRecordsForIssues(_ context.Context, ids []string) (map[string][]*types.Dependency, error) {
+	f.dependencyBatches++
+	if f.refuse {
+		return nil, errGraphReadRefused
+	}
+	wanted := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		wanted[id] = true
+	}
+	out := make(map[string][]*types.Dependency)
+	for _, e := range f.edges {
+		if wanted[e.IssueID] {
+			out[e.IssueID] = append(out[e.IssueID], e)
+		}
+	}
+	return out, nil
+}
+
+func (f *graphReadFake) SearchIssues(_ context.Context, _ string, filter types.IssueFilter) ([]*types.Issue, error) {
+	if filter.Status == nil || *filter.Status != types.StatusOpen {
+		return nil, nil
+	}
+	ids := make([]string, 0, len(f.issues))
+	for id := range f.issues {
+		ids = append(ids, id)
+	}
+	return f.hydrate(ids), nil
+}
+
+// graphComponentFake adds the optional component read to graphReadFake.
+type graphComponentFake struct {
+	*graphReadFake
+	component *storage.Component
+	err       error
+	calls     int
+}
+
+func (f *graphComponentFake) ReadComponent(context.Context, *types.Issue) (*storage.Component, error) {
+	f.calls++
+	return f.component, f.err
+}
+
+func graphIssueIDs(issues []*types.Issue) []string {
+	ids := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		ids = append(ids, issue.ID)
+	}
+	return ids
+}
+
+// graphWalkFixture is a three-level component around r. r also points at gone,
+// which names no issue.
+func graphWalkFixture() *graphReadFake {
+	return newGraphReadFake(
+		[]string{"r", "m", "z", "c", "d", "s", "y", "k", "b"},
+		[]string{"aw"},
+		[][2]string{
+			{"z", "r"}, {"m", "r"}, {"r", "c"}, {"r", "aw"}, {"r", "gone"},
+			{"m", "s"}, {"m", "d"}, {"y", "z"}, {"s", "z"}, {"k", "c"}, {"aw", "b"},
+		},
+	)
+}
+
+const graphWalkFixtureEdges = 10 // every edge but the one to the missing issue
+
+var graphWalkFixtureOrder = []string{"r", "m", "z", "c", "aw", "d", "s", "y", "k", "b"}
+
+func TestLoadGraphSubgraphUsesTheComponentRead(t *testing.T) {
+	root := &types.Issue{ID: "r"}
+	child := &types.Issue{ID: "c"}
+	f := &graphComponentFake{
+		graphReadFake: graphWalkFixture(),
+		component: &storage.Component{
+			Issues: []*types.Issue{root, child},
+			Outgoing: map[string][]*types.Dependency{
+				"r": {
+					{IssueID: "r", DependsOnID: "c", Type: types.DepBlocks},
+					{IssueID: "r", DependsOnID: "elsewhere", Type: types.DepBlocks},
+				},
+			},
+		},
+	}
+	sub, err := loadGraphSubgraph(context.Background(), f, "r")
+	if err != nil {
+		t.Fatalf("loadGraphSubgraph: %v", err)
+	}
+	if got, want := graphIssueIDs(sub.Issues), []string{"r", "c"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("issues = %v, want %v", got, want)
+	}
+	if sub.IssueMap["c"] != child {
+		t.Errorf("IssueMap[c] = %v, want the issue the component read returned", sub.IssueMap["c"])
+	}
+	if len(sub.Dependencies) != 1 || sub.Dependencies[0].DependsOnID != "c" {
+		t.Errorf("dependencies = %v, want only the edge inside the component", sub.Dependencies)
+	}
+	if f.perIssueWalkReads != 0 || f.perIssueRecords != 0 {
+		t.Errorf("per-issue reads = %d walk, %d records, want none", f.perIssueWalkReads, f.perIssueRecords)
+	}
+}
+
+func TestLoadGraphSubgraphWalksPerIssueWhenTheComponentReadFails(t *testing.T) {
+	f := &graphComponentFake{graphReadFake: graphWalkFixture(), err: errGraphReadRefused}
+	sub, err := loadGraphSubgraph(context.Background(), f, "r")
+	if err != nil {
+		t.Fatalf("loadGraphSubgraph: %v", err)
+	}
+	if f.calls != 1 {
+		t.Errorf("component reads = %d, want 1", f.calls)
+	}
+	if got := graphIssueIDs(sub.Issues); !reflect.DeepEqual(got, graphWalkFixtureOrder) {
+		t.Errorf("issues = %v, want %v", got, graphWalkFixtureOrder)
+	}
+	if len(sub.Dependencies) != graphWalkFixtureEdges {
+		t.Errorf("dependencies = %d, want %d", len(sub.Dependencies), graphWalkFixtureEdges)
+	}
+}
+
+func TestLoadGraphSubgraphWalksPerIssueWithoutTheCapability(t *testing.T) {
+	sub, err := loadGraphSubgraph(context.Background(), graphWalkFixture(), "r")
+	if err != nil {
+		t.Fatalf("loadGraphSubgraph: %v", err)
+	}
+	if got := graphIssueIDs(sub.Issues); !reflect.DeepEqual(got, graphWalkFixtureOrder) {
+		t.Errorf("issues = %v, want %v", got, graphWalkFixtureOrder)
+	}
+	if len(sub.Dependencies) != graphWalkFixtureEdges {
+		t.Errorf("dependencies = %d, want %d", len(sub.Dependencies), graphWalkFixtureEdges)
+	}
+}
+
+// bd connect's HTTP backend refuses the walk reads. Its front-door test pins the
+// result: exit 0 with the root alone. A refused read must not fail the command.
+func TestLoadGraphSubgraphRefusedWalkLeavesRoot(t *testing.T) {
+	f := graphWalkFixture()
+	f.refuse = true
+	sub, err := loadGraphSubgraph(context.Background(), f, "r")
+	if err != nil {
+		t.Fatalf("loadGraphSubgraph: %v", err)
+	}
+	if got, want := graphIssueIDs(sub.Issues), []string{"r"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("issues = %v, want %v", got, want)
+	}
+}
+
+func TestLoadAllGraphSubgraphsReadsDependenciesInOneBatch(t *testing.T) {
+	f := graphWalkFixture()
+	subs, err := loadAllGraphSubgraphs(context.Background(), f, 0, "")
+	if err != nil {
+		t.Fatalf("loadAllGraphSubgraphs: %v", err)
+	}
+	if f.perIssueRecords != 0 || f.dependencyBatches != 1 {
+		t.Errorf("per-issue reads = %d, batches = %d, want 0 and 1", f.perIssueRecords, f.dependencyBatches)
+	}
+	var total int
+	for _, sub := range subs {
+		total += len(sub.Dependencies)
+	}
+	if total != graphWalkFixtureEdges {
+		t.Errorf("dependencies = %d, want %d", total, graphWalkFixtureEdges)
+	}
+}
+
+func TestLoadAllGraphSubgraphsFallsBackToPerIssueReads(t *testing.T) {
+	f := graphWalkFixture()
+	f.refuse = true
+	subs, err := loadAllGraphSubgraphs(context.Background(), f, 0, "")
+	if err != nil {
+		t.Fatalf("loadAllGraphSubgraphs: %v", err)
+	}
+	if f.perIssueRecords != len(f.issues) {
+		t.Errorf("per-issue reads = %d, want %d", f.perIssueRecords, len(f.issues))
+	}
+	var total int
+	for _, sub := range subs {
+		total += len(sub.Dependencies)
+	}
+	if total != graphWalkFixtureEdges {
+		t.Errorf("dependencies = %d, want %d", total, graphWalkFixtureEdges)
+	}
+}
 
 func TestTruncateTitle(t *testing.T) {
 	tests := []struct {
