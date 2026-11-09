@@ -385,8 +385,11 @@ func TestBazelDoltRaceIsGated(t *testing.T) {
 		t.Errorf("%s test step run changed; want exactly:\n%s\ngot:\n%s", bazelDoltRaceJobName, bazelTierTestRun(bazelDoltRaceConfig), test.Run)
 	}
 	// The members' per-lane checks, once over the union's BEP: bazel-proxied's
-	// two (bazel-doltserver has none). check_shard_coverage takes the union
-	// of the members' --suite/--whole arguments, which is bazel-proxied's.
+	// two (bazel-doltserver's one check_testcases.py step adds the skip
+	// census's report-only switch for its runner-executed modes, so it is
+	// pinned by TestSkipCensusRunsInEveryDoltTierLane, not by identity here).
+	// check_shard_coverage takes the union of the members' --suite/--whole
+	// arguments, which is bazel-proxied's.
 	for member, steps := range map[string][]string{
 		bazelProxiedJobName: {"Every target and shard ran tests", "Every listed test ran in its shard", "No test target is marked flaky"},
 	} {

@@ -4374,7 +4374,7 @@ func assertBazelTierStep(t *testing.T, job ciWorkflowJob, jobName, config string
 	assertTestStepKeepsExitStatus(t, step)
 	found := false
 	for _, s := range job.Steps {
-		if strings.TrimSpace(s.Run) == `python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/`+bep+`"` {
+		if strings.TrimSpace(s.Run) == bazelCensusCheckRun(t, job) {
 			found = true
 			if s.If != "${{ always() && steps."+id+".outcome != 'skipped' }}" || (s.ContinueOnError != nil && s.ContinueOnError != false) {
 				t.Errorf("%s: check_testcases.py for %s: if=%q continue-on-error=%v", jobName, bep, s.If, s.ContinueOnError)
@@ -4636,7 +4636,7 @@ func TestBazelEmbeddedJobRunsEmbeddedTier(t *testing.T) {
 		t.Errorf("embedded step writes no BEP for the test-count check:\n%s", test.Run)
 	}
 	count := job.step(t, "Every target and shard ran tests")
-	if strings.TrimSpace(count.Run) != `python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"` ||
+	if strings.TrimSpace(count.Run) != bazelCensusCheckRun(t, job) ||
 		count.If != "${{ always() && steps.test.outcome != 'skipped' }}" ||
 		(count.ContinueOnError != nil && count.ContinueOnError != false) {
 		t.Errorf("test-count step: if=%q continue-on-error=%v run=%q", count.If, count.ContinueOnError, count.Run)

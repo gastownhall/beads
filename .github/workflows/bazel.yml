@@ -1682,10 +1682,14 @@ jobs:
 
       # A shard the manifest assigns nothing, or a selector that matches
       # nothing, exits 0: fail if any target's or shard's test.xml lists no
-      # tests (or is missing).
+      # tests (or is missing). --skip-census runs the runtime skip census
+      # (check_skip_census.py): fail on a skipped test or subtest that
+      # tools/bazel/skip_census.txt does not list, or on a census line whose
+      # test now runs (shrink-only: unparking a case deletes its line). Every
+      # Dolt-tier lane passes it (scripts TestSkipCensusRunsInEveryDoltTierLane).
       - name: Every target and shard ran tests
         if: ${{ always() && steps.test.outcome != 'skipped' }}
-        run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"
+        run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json" --skip-census tools/bazel/skip_census.txt
 
       # This lane is the tier's only pre-merge run. The shard scripts discover tests from source, but each
       # Bazel binary holds only its target's srcs: a listed test the binary
@@ -2152,8 +2156,19 @@ jobs:
           echo "bazel test --config=doltserver: exit $rc, $(( $(date +%s) - start ))s wall" | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
+      # As in bazel-embedded (bazel-dolt-race runs the same check over these
+      # targets in mode remote). Modes cache and local execute on this
+      # runner, whose docker, filesystem and git config change which tests
+      # skip, so the census only reports there; it fails the lane where the
+      # lane executes on rbe-west (modes fork-ro and fork-rw).
+      - name: Every target and shard ran tests
+        if: ${{ always() && steps.test.outcome != 'skipped' }}
+        env:
+          SKIP_CENSUS_REPORT_ONLY: ${{ needs.rbe.outputs.enabled != 'true' && 'true' || '' }}
+        run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json" --skip-census tools/bazel/skip_census.txt ${SKIP_CENSUS_REPORT_ONLY:+--skip-census-report-only}
+
       - name: Upload test logs
-        if: ${{ failure() && steps.test.outcome == 'failure' }}
+        if: ${{ failure() && steps.test.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           overwrite: true # a job re-run is the same run: replace, not 409
@@ -2357,7 +2372,7 @@ jobs:
       # As in bazel-embedded.
       - name: Every target and shard ran tests
         if: ${{ always() && steps.test.outcome != 'skipped' }}
-        run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"
+        run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json" --skip-census tools/bazel/skip_census.txt
 
       # This lane is the tier's only pre-merge run: as in bazel-embedded, every Bazel shard must run
       # exactly the tests its shard script lists, and not only skips.
@@ -2572,14 +2587,15 @@ jobs:
           exit "$rc"
 
       # The member lanes' checks, once over the union's BEP: bazel-proxied's
-      # (the dolt-server lane has none). check_shard_coverage ignores targets
-      # it does not list; check_testcases checks every target, so it covers
-      # the dolt-server tier too, which bazel-doltserver does not check: a
-      # dolt-server shard that runs no test turns this job red.
+      # (the dolt-server lane has only the first). check_shard_coverage
+      # ignores targets it does not list; check_testcases checks every
+      # target, so it covers the dolt-server tier too: a dolt-server shard
+      # that runs no test, or skips a test the census does not list, turns
+      # this job red. No report-only switch: mode remote executes on rbe-west.
       - name: Every target and shard ran tests
         if: ${{ always() && steps.test.outcome != 'skipped' }}
         timeout-minutes: 2
-        run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"
+        run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json" --skip-census tools/bazel/skip_census.txt
 
       - name: Every listed test ran in its shard
         if: ${{ always() && steps.test.outcome != 'skipped' }}
@@ -2791,7 +2807,7 @@ jobs:
       # As in bazel-embedded.
       - name: Every target and shard ran tests
         if: ${{ always() && steps.test.outcome != 'skipped' }}
-        run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"
+        run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json" --skip-census tools/bazel/skip_census.txt
 
       # This lane is the tier's only pre-merge run: as in bazel-embedded, every full-suite shard must run
       # exactly the tests its shard script lists, and neither it nor the
@@ -3007,10 +3023,14 @@ jobs:
 
       # As in bazel-embedded: every shard of the target ran tests (the Go
       # binary shards itself over every top-level test, so together the
-      # shards run each exactly once).
+      # shards run each exactly once), and skipped only what the census
+      # lists: report-only in mode cache, which executes on this runner (see
+      # bazel-doltserver's step).
       - name: Every target and shard ran tests
         if: ${{ always() && steps.test.outcome != 'skipped' }}
-        run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json"
+        env:
+          SKIP_CENSUS_REPORT_ONLY: ${{ needs.rbe.outputs.enabled != 'true' && 'true' || '' }}
+        run: python3 tools/bazel/check_testcases.py --bep "$RUNNER_TEMP/bazel-bep.json" --skip-census tools/bazel/skip_census.txt ${SKIP_CENSUS_REPORT_ONLY:+--skip-census-report-only}
 
       - name: Upload test logs
         if: ${{ failure() && steps.test.outcome != 'skipped' }}
@@ -3280,7 +3300,9 @@ jobs:
       # carries continue-on-error so neither can fail the job by itself; the
       # classify step below folds each step's own outcome into that tier's
       # result with --check, so a cmd-dolt failure here reaches
-      # cmd_dolt_result only, same as a cmd-dolt BEP test failure does.
+      # cmd_dolt_result only, same as a cmd-dolt BEP test failure does. Each
+      # also runs the skip census (--skip-census, as in bazel-embedded) over
+      # its own tier's labels, so a census failure reaches its tier alone.
       - name: Every target and shard ran tests (server-storage)
         id: check-ss
         if: ${{ always() && steps.test.outcome != 'skipped' }}
@@ -3292,6 +3314,7 @@ jobs:
           --label //internal/storage/dolt:dolt_server_full_test
           --label //internal/storage/dolt:dolt_server_conformance_test
           --label //internal/storage/versioncontrolops:versioncontrolops_dolt_test
+          --skip-census tools/bazel/skip_census.txt
 
       - name: Every target and shard ran tests (cmd-dolt)
         id: check-cd
@@ -3303,6 +3326,7 @@ jobs:
           --bep "$RUNNER_TEMP/bazel-bep.json"
           --label //cmd/bd:bd_dolt_server_test
           --label //tests/regression:regression_test
+          --skip-census tools/bazel/skip_census.txt
 
       # bazel-server-storage's own check (cmd-dolt has none): every
       # full-suite shard ran exactly the tests its shard script lists, and
