@@ -2226,20 +2226,55 @@ var dialServer = net.DialTimeout
 // describes.
 var issueProjectionColumns = sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)
 
+// leaseProjectionColumns are the lease-overlay columns every hydrated issue
+// read selects (sqlbuild.LeaseSelectColumns), with their leases. qualifier
+// stripped for the probe. Derived from the same constant the queries render
+// from rather than re-listed, so a projection change moves the probe with it.
+var leaseProjectionColumns = stripColumnQualifiers(sqlbuild.ColumnNames(sqlbuild.LeaseSelectColumns))
+
+// stripColumnQualifiers drops each column's table qualifier ("leases." ->
+// ""), the bare names SHOW COLUMNS compares against.
+func stripColumnQualifiers(columns []string) []string {
+	out := make([]string, len(columns))
+	for i, column := range columns {
+		if idx := strings.LastIndex(column, "."); idx >= 0 {
+			column = column[idx+1:]
+		}
+		out[i] = column
+	}
+	return out
+}
+
 // checkOpenSchemaDrift is newServerMode's schema drift check. Every open
 // refuses a database ahead of this binary (schema.CheckForwardDrift). An open
 // that will not migrate and sets Config.RequireReadableSchema also refuses,
 // from the same version read, one behind it that lacks a projected column
-// (schema.CheckReadableDrift). Through a gateway that refusal names the
-// server administrator's remedy, since bd never migrates a gateway's schema.
+// (schema.CheckReadableDrift) — and, once the replicated schema is readable,
+// a clone-local series behind it that lacks a projected lease column
+// (schema.CheckCloneLocalReadable, gastownhall/beads#7038): the clone-local
+// lane never arrives with `bd dolt pull`, so the pull-then-upgrade recipe
+// leaves a consumer clone with exactly that shape, and without the check its
+// issue reads fail on a raw unknown-column error. Through a gateway both
+// refusals name the server administrator's remedy, since bd never migrates a
+// gateway's schema.
 func checkOpenSchemaDrift(ctx context.Context, db *sql.DB, cfg *Config) error {
 	if !cfg.RequireReadableSchema || (!cfg.ReadOnly && !cfg.Gateway) {
 		return schema.CheckForwardDrift(ctx, db)
 	}
+	// Main-series refusals keep precedence: a database whose replicated
+	// schema its reads cannot query is refused for that first, whatever its
+	// clone-local lane looks like.
 	err := schema.CheckReadableDrift(ctx, db, "issues", issueProjectionColumns)
+	if err == nil {
+		err = schema.CheckCloneLocalReadable(ctx, db, "leases", leaseProjectionColumns)
+	}
 	var behind *schema.SchemaBehindError
 	if cfg.Gateway && errors.As(err, &behind) {
 		behind.Gateway = true
+	}
+	var cloneLocal *schema.CloneLocalBehindError
+	if cfg.Gateway && errors.As(err, &cloneLocal) {
+		cloneLocal.Gateway = true
 	}
 	return err
 }
