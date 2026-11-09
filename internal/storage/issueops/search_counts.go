@@ -146,10 +146,26 @@ func runFilterSearchQueryInTx(ctx context.Context, tx *sql.Tx, query string, fil
 	// price is that a full 101-200-row page on a store under ~2k rows pays up
 	// to ~50 ms more than the predicate form would. Above it — an explicit
 	// large --limit, or Limit 0 under a MaxRows breaker, which pushes
-	// MaxRows+1 — the predicate form stays. So does a label filter the id
+	// MaxRows+1 — the predicate form stays, unless the probe below finds the
+	// whole match set is under the ceiling. So does a label filter the id
 	// scan's JOINs would read differently (labelJoinsMatchPredicate).
-	if eff > 0 && !goSideSort && eff <= countsIDsFirstMaxBound && labelJoinsMatchPredicate(filter) {
-		ids, err := searchTableInTxT(ctx, tx, query, filter, tables, idProjection)
+	if !goSideSort && labelJoinsMatchPredicate(filter) {
+		scan := filter
+		if eff == 0 || eff > countsIDsFirstMaxBound {
+			// AN UNBOUNDED OR ABOVE-CEILING READ PROBES FIRST. The id scan
+			// runs with LIMIT countsIDsFirstMaxBound+1 in place of the bound:
+			// at most countsIDsFirstMaxBound ids back is every match, which
+			// the predicate form's LIMIT (none, or eff, above it) would not
+			// cut either, so the read is answered ids-first like a bounded
+			// page. One more is an overflow: the probe is discarded and the
+			// predicate form runs as it did. Hot listings are label-filtered
+			// and unbounded but match a handful of rows; without the probe
+			// they pay for the whole side tables (#7643). A probe that fits
+			// cannot trip the MaxRows cap, because eff = MaxRows+1 is above
+			// it, so EnforceMaxRowsCap reads the same on both branches.
+			scan.Limit, scan.MaxRows = countsIDsFirstMaxBound+1, 0
+		}
+		ids, err := searchTableInTxT(ctx, tx, query, scan, tables, idProjection)
 		if err != nil {
 			return nil, err
 		}
@@ -164,7 +180,10 @@ func runFilterSearchQueryInTx(ctx context.Context, tx *sql.Tx, query string, fil
 			_, err := hydrateCountsByIDsInTx(ctx, tx, tables, []string{""}, includeWispReverseDeps, hydrationFor(filter))
 			return nil, err
 		}
-		return hydrateCountsByIDsInTx(ctx, tx, tables, ids, includeWispReverseDeps, hydrationFor(filter))
+		if len(ids) <= countsIDsFirstMaxBound {
+			return hydrateCountsByIDsInTx(ctx, tx, tables, ids, includeWispReverseDeps, hydrationFor(filter))
+		}
+		// The probe overflowed: discard it, and the predicate form answers.
 	}
 
 	whereClauses, args, err := BuildIssueFilterClauses(query, filter, tables)

@@ -2,7 +2,8 @@
 // issueops.SearchIssuesWithCountsInTx, returns exactly what the predicate form
 // of sqlbuild.SearchCountsSQL returns for the same request (#7635). A bounded
 // page is answered ids-first — an id scan, then the by-IDs form in batches —
-// and the predicate form is the oracle it must reproduce row for row: the same
+// and so is an unbounded read whose capped id-scan probe finds every match.
+// The predicate form is the oracle both must reproduce row for row: the same
 // rows in the same order, every column, labels and dependencies compared as
 // sets, the same issues+wisps merge and the same MaxRows refusal.
 //
@@ -71,6 +72,61 @@ func Run(t *testing.T, open Open) {
 		seedLarge(t, db, largeRows)
 		checkCases(t, db, largeCases(), true)
 	})
+	// Unbounded and above-ceiling reads around the probe's boundary: per
+	// table, matches at, one past and well past countsIDsFirstMaxBound.
+	t.Run("unbounded around the probe", func(t *testing.T) {
+		db := open(t)
+		seedLarge(t, db, largeRows)
+		plantProbeLabels(t, db)
+		checkCases(t, db, probeCases(), true)
+	})
+}
+
+// probeBound is issueops' countsIDsFirstMaxBound: the most ids the probe of
+// an unbounded read may find and still answer it ids-first.
+const probeBound = sqlbuild.QueryBatchSize
+
+// plantProbeLabels adds, in each table of the seedLarge fixture, a label on
+// exactly probeBound rows ("probe-at") and one on probeBound+1 ("probe-past").
+func plantProbeLabels(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for _, tier := range []struct{ labels, prefix string }{{"labels", "lg-i"}, {"wisp_labels", "lg-w"}} {
+		for _, l := range []struct {
+			label string
+			n     int
+		}{{"probe-at", probeBound}, {"probe-past", probeBound + 1}} {
+			var args []any
+			for k := 0; k < l.n; k++ {
+				args = append(args, fmt.Sprintf("%s%03d", tier.prefix, k), l.label)
+			}
+			exec(t, db, "INSERT INTO "+tier.labels+" (issue_id, label) VALUES "+strings.TrimSuffix(strings.Repeat("(?, ?), ", l.n), ", "), args...)
+		}
+	}
+}
+
+func probeCases() []Case {
+	at, past, bulk := []string{"probe-at"}, []string{"probe-past"}, []string{"bulk"}
+	return []Case{
+		// One table: the probe finds every match at the bound, and overflows
+		// one past it.
+		{Name: "unbounded at the bound skip wisps", Filter: types.IssueFilter{Labels: at, SortBy: "created", SkipWisps: true}, WantRows: probeBound},
+		{Name: "unbounded past the bound skip wisps", Filter: types.IssueFilter{Labels: past, SortBy: "created", SkipWisps: true}, WantRows: probeBound + 1},
+		{Name: "unbounded at the bound", Filter: types.IssueFilter{Labels: at, SortBy: "created"}, WantRows: 2 * probeBound},
+		{Name: "unbounded past the bound", Filter: types.IssueFilter{Labels: past, SortBy: "created"}, WantRows: 2 * (probeBound + 1)},
+		{Name: "unbounded at the bound default order", Filter: types.IssueFilter{Labels: at}, WantRows: 2 * probeBound},
+		{Name: "unbounded at the bound ephemeral", Filter: types.IssueFilter{Ephemeral: ptr(true), Labels: at, SortBy: "created"}, WantRows: probeBound},
+		// Well past the bound: 207 "bulk" rows and 230 rows per table.
+		{Name: "unbounded label more than the bound", Filter: types.IssueFilter{Labels: bulk, SortBy: "created"}, WantRows: 2 * 207},
+		{Name: "unbounded no label", Filter: types.IssueFilter{SortBy: "updated"}, WantRows: 2 * largeRows},
+		// A Limit above the ceiling probes too; the page is cut after the merge.
+		{Name: "limit above the ceiling at the bound", Filter: types.IssueFilter{Labels: at, SortBy: "created", Limit: 300}, WantRows: 300},
+		{Name: "limit above the ceiling past the bound", Filter: types.IssueFilter{Labels: past, SortBy: "created", Limit: 300}, WantRows: 300},
+		// MaxRows+1 is above the ceiling: a probe that fits holds the cap,
+		// and the overflowing one keeps the predicate form, which trips it.
+		{Name: "max rows at the bound holds", Filter: types.IssueFilter{Labels: at, SortBy: "created", MaxRows: probeBound, MaxRowsSource: "--max-rows", SkipWisps: true}, WantRows: probeBound},
+		{Name: "max rows past the bound trips", Filter: types.IssueFilter{Labels: past, SortBy: "created", MaxRows: probeBound, MaxRowsSource: "--max-rows", SkipWisps: true}},
+		{Name: "max rows trips on the merge", Filter: types.IssueFilter{Labels: at, SortBy: "created", MaxRows: 250, MaxRowsSource: "--max-rows"}},
+	}
 }
 
 // largeRows is the per-table row count of the ceiling scenario; with one row
@@ -136,8 +192,13 @@ func cases() []Case {
 		{Name: "offset page", Filter: types.IssueFilter{Labels: hot, SortBy: "created", Limit: 2 + 3 + 1}},
 		{Name: "bound at the ids-first ceiling", Filter: types.IssueFilter{SortBy: "created", Limit: 200}},
 		{Name: "bound above the ids-first ceiling", Filter: types.IssueFilter{SortBy: "created", Limit: 201}},
+		// Unbounded or above the ceiling with few matches: the probe finds
+		// them all and the read is answered ids-first.
 		{Name: "unbounded label", Filter: types.IssueFilter{Labels: hot, SortBy: "created"}},
 		{Name: "unbounded", Filter: types.IssueFilter{}},
+		{Name: "unbounded labelsAny", Filter: types.IssueFilter{LabelsAny: []string{"cold", "warm"}, SortBy: "priority"}},
+		{Name: "limit above the ceiling few matches", Filter: types.IssueFilter{Labels: hot, SortBy: "created", Limit: 500}},
+		{Name: "unbounded no match", Filter: types.IssueFilter{Labels: []string{"nobody"}}, NoMatch: true},
 		// MaxRows: with no Limit the breaker pushes MaxRows+1, which is a
 		// bound like any other; the cap fires on the delivered rows.
 		{Name: "max rows trips", Filter: types.IssueFilter{Labels: hot, SortBy: "created", MaxRows: 3, MaxRowsSource: "--max-rows"}},

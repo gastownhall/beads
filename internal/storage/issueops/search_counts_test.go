@@ -2,6 +2,7 @@ package issueops
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -52,7 +53,11 @@ func TestSearchIssuesWithCountsHonorsSkipWisps(t *testing.T) {
 	_, mock, tx := beginMockTx(t)
 	mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
-	mock.ExpectQuery(`(?s)FROM issues i.*ORDER BY i\.priority ASC, i\.created_at DESC, i\.id ASC`).
+	// An unbounded read probes ids-first with a capped id scan; an empty probe
+	// still runs one by-IDs statement (a sentinel id).
+	mock.ExpectQuery(fmt.Sprintf(`^SELECT issues\.id FROM issues\s+ORDER BY priority ASC, created_at DESC, id ASC\s+LIMIT %d$`, countsIDsFirstMaxBound+1)).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(`(?s)FROM issues i\s.*WHERE i\.id IN \(\?\)`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 
 	got, err := SearchIssuesWithCountsInTx(context.Background(), tx, "", types.IssueFilter{SkipWisps: true})

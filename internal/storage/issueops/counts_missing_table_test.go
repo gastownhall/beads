@@ -146,7 +146,11 @@ var countsEntryPoints = []countsEntryPoint{
 				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
 			mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).
 				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+			// An unbounded read probes ids-first; a probe that overflows the
+			// ceiling keeps the predicate form, whose wisp leg fails here.
+			mock.ExpectQuery(`^SELECT wisps\.id FROM wisps`).WillReturnRows(idRows(pageIDs("bd", countsIDsFirstMaxBound+1)...))
 			mock.ExpectQuery(`(?s)FROM wisps i`).WillReturnError(wispErr)
+			mock.ExpectQuery(`^SELECT issues\.id FROM issues`).WillReturnRows(idRows(pageIDs("bd", countsIDsFirstMaxBound+1)...))
 			mock.ExpectQuery(`(?s)FROM issues i`).WillReturnRows(emptyCountsRows())
 		},
 		run: func(ctx context.Context, tx *sql.Tx) (string, error) {
@@ -161,9 +165,13 @@ var countsEntryPoints = []countsEntryPoint{
 		prime: func(mock sqlmock.Sqlmock, wispErr error) {
 			mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).
 				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+			// An unbounded read probes ids-first; a probe that overflows the
+			// ceiling keeps the predicate form, whose wisp leg fails here.
+			mock.ExpectQuery(`^SELECT issues\.id FROM issues`).WillReturnRows(idRows(pageIDs("bd", countsIDsFirstMaxBound+1)...))
 			mock.ExpectQuery(`(?s)FROM issues i`).WillReturnRows(emptyCountsRows())
 			mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).
 				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+			mock.ExpectQuery(`^SELECT wisps\.id FROM wisps`).WillReturnRows(idRows(pageIDs("bd", countsIDsFirstMaxBound+1)...))
 			mock.ExpectQuery(`(?s)FROM wisps i`).WillReturnError(wispErr)
 		},
 		run: func(ctx context.Context, tx *sql.Tx) (string, error) {
