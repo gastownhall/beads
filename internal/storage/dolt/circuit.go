@@ -112,9 +112,11 @@ func maybeNewCircuitBreaker(host string, port int, database string) *circuitBrea
 // contain millions of entries) when cleaning up stale breaker files on
 // startup. Derived from os.TempDir() so it is correct on every platform:
 // hardcoding "/tmp" resolved to C:\tmp on Windows, silently accumulating
-// breaker files there forever (GH#4636).
+// breaker files there forever (GH#4636). On Unix the name is per-user
+// (circuitDirName): a shared directory put every local user's breaker state
+// under one owner (GH#4223).
 func circuitBreakerDir() string {
-	return filepath.Join(os.TempDir(), "beads-circuit")
+	return filepath.Join(os.TempDir(), circuitDirName())
 }
 
 const (
@@ -153,7 +155,10 @@ func newCircuitBreaker(host string, port int, database string) *circuitBreaker {
 	}
 
 	dir, _ := circuitBreakerPaths()
-	_ = os.MkdirAll(dir, 0755)
+	// 0700: the directory is per-user (GH#4223), and another ordinary user
+	// must not even learn its entries. MkdirAll never changes the mode of a
+	// directory that already exists.
+	_ = os.MkdirAll(dir, 0700)
 	return &circuitBreaker{
 		host:     host,
 		port:     port,
@@ -423,11 +428,11 @@ func CleanStaleCircuitBreakerFiles() {
 		_ = os.Remove(filepath.Join("/tmp", "beads-dolt-circuit-0.json"))
 	}
 
-	// Clean stale files in the dedicated subdirectory: open/half-open state
-	// past circuitStaleTTL, and closed files no writer has touched in
+	// Clean stale files in the dedicated per-user subdirectory: open/half-open
+	// state past circuitStaleTTL, and closed files no writer has touched in
 	// closedSweepTTL. A recently written closed file is a breaker some
 	// process is using and is left alone.
-	_ = os.MkdirAll(dir, 0755)
+	_ = os.MkdirAll(dir, 0700)
 	cleanStaleCircuitBreakerFilesIn(dir)
 
 	// Also sweep the legacy hardcoded "/tmp/beads-circuit" location

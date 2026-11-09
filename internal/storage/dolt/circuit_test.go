@@ -551,7 +551,8 @@ func TestCircuitBreakerDir_UsesSubdirectory(t *testing.T) {
 
 // TestCircuitBreakerDir_DerivedFromTempDir verifies the breaker directory is
 // derived from os.TempDir() rather than a hardcoded "/tmp", so on Windows it
-// lands under %TEMP% instead of C:\tmp (GH#4636).
+// lands under %TEMP% instead of C:\tmp (GH#4636), and carries the per-user
+// name on Unix (GH#4223).
 func TestCircuitBreakerDir_DerivedFromTempDir(t *testing.T) {
 	custom := t.TempDir()
 	// os.TempDir() honors these across platforms (TMPDIR on unix; TMP/TEMP on
@@ -561,7 +562,7 @@ func TestCircuitBreakerDir_DerivedFromTempDir(t *testing.T) {
 	t.Setenv("TEMP", custom)
 
 	got := circuitBreakerDir()
-	if want := filepath.Join(os.TempDir(), "beads-circuit"); got != want {
+	if want := filepath.Join(os.TempDir(), circuitDirName()); got != want {
 		t.Errorf("circuitBreakerDir() = %q, want %q", got, want)
 	}
 	if !strings.HasPrefix(got, os.TempDir()) {
