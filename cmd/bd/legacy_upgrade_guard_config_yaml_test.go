@@ -216,6 +216,67 @@ func TestCurrentVersionWitnessVetoesLegacyVerdictInEveryMode(t *testing.T) {
 	})
 }
 
+// TestThisBuildsBrewHeadStampVetoesLegacyVerdictInEveryMode extends the
+// current-witness safety net to a Homebrew --HEAD build's own stamp: a witness
+// exactly equal to the running binary's commit-bearing HEAD-<sha> was written
+// by this binary after the guard admitted the workspace, so it settles the era
+// in every mode, silently. Another build's stamp, or one without a commit
+// identity, is no such evidence and keeps the refusal outside server mode.
+func TestThisBuildsBrewHeadStampVetoesLegacyVerdictInEveryMode(t *testing.T) {
+	modes := []struct {
+		name     string
+		metadata string
+	}{
+		{name: "metadata-less"},
+		{name: "blank mode", metadata: `{"backend":"dolt"}`},
+		{name: "explicit embedded mode", metadata: `{"backend":"dolt","dolt_mode":"embedded"}`},
+		{name: "explicit server mode", metadata: `{"backend":"dolt","dolt_mode":"server"}`},
+	}
+	refusals := []struct {
+		name    string
+		running string
+		witness string
+	}{
+		{name: "release binary", running: "1.3.4", witness: "HEAD-f925f3f"},
+		{name: "another commit", running: "HEAD-f925f3f", witness: "HEAD-0123abc"},
+		{name: "bare HEAD", running: "HEAD", witness: "HEAD"},
+		{name: "garbage", running: "not-a-version", witness: "not-a-version"},
+	}
+
+	for _, mode := range modes {
+		for _, stamp := range []string{"HEAD-f925f3f", "HEAD-f925f3f_1"} {
+			t.Run(mode.name+"/"+stamp, func(t *testing.T) {
+				pinRunningVersion(t, stamp)
+				warnings := captureLegacyUpgradeWarnings(t)
+				beadsDir := writeDoltRootWorkspace(t, mode.metadata, "", stamp)
+
+				if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+					t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want nil", err)
+				}
+				if warnings.Len() != 0 {
+					t.Fatalf("guard warned about this build's own stamp: %q", warnings.String())
+				}
+			})
+		}
+
+		if mode.name == "explicit server mode" {
+			// Server mode warns and opens these; the witness tests pin that.
+			continue
+		}
+		for _, tt := range refusals {
+			t.Run(mode.name+"/"+tt.name+" still refuses", func(t *testing.T) {
+				pinRunningVersion(t, tt.running)
+				captureLegacyUpgradeWarnings(t)
+				beadsDir := writeDoltRootWorkspace(t, mode.metadata, "", tt.witness)
+
+				if err := guardLegacyUpgradeWorkspace(beadsDir); !isLegacyUpgradeRefusal(err) {
+					t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want migration refusal", err)
+				}
+			})
+		}
+	}
+}
+
 // TestLegacyUpgradeGuardSharedServerAdmissionSurvivesServerClassification keeps
 // the shared-server escape reachable now that a config.yaml `dolt.mode: server`
 // workspace resolves to the server arm. Before the hoist this admission lived

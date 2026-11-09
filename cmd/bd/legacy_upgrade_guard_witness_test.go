@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -327,6 +329,66 @@ func TestLegacyUpgradeGuardAdmitsBrewHeadStamp(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLegacyUpgradeGuardBrewHeadStampMatchesReleaseWitness is the identity
+// invariant of the own-stamp admission: in server and embedded mode alike, the
+// guard's outcome for the running build's own brew --HEAD stamp (error and
+// warning bytes) equals its outcome for a 1.x release witness, both admit
+// silently, and the guard leaves the witness file's hash unchanged.
+func TestLegacyUpgradeGuardBrewHeadStampMatchesReleaseWitness(t *testing.T) {
+	pinLegacyUpgradeGuardEnv(t)
+	pinRunningVersion(t, "HEAD-f925f3f")
+	type outcome struct{ err, warning string }
+	guard := func(t *testing.T, write func(*testing.T, string) string, witness string) outcome {
+		t.Helper()
+		warnings := captureLegacyUpgradeWarnings(t)
+		beadsDir := write(t, witness)
+		path := filepath.Join(beadsDir, localVersionFile)
+		hashBefore := witnessFileHash(t, path)
+		err := guardLegacyUpgradeWorkspace(beadsDir)
+		if hashAfter := witnessFileHash(t, path); hashAfter != hashBefore {
+			t.Fatalf("guard rewrote the %q witness: hash %s, want %s", witness, hashAfter, hashBefore)
+		}
+		// Each run has its own temp dir; compare outcomes with it masked.
+		got := outcome{warning: strings.ReplaceAll(warnings.String(), beadsDir, "<beads>")}
+		if err != nil {
+			got.err = strings.ReplaceAll(err.Error(), beadsDir, "<beads>")
+		}
+		return got
+	}
+	modes := []struct {
+		name  string
+		write func(*testing.T, string) string
+	}{
+		{name: "server", write: writeSelectedServerWorkspace},
+		{name: "embedded", write: func(t *testing.T, witness string) string {
+			return writeDoltRootWorkspace(t, `{"backend":"dolt"}`, "", witness)
+		}},
+	}
+	for _, mode := range modes {
+		t.Run(mode.name, func(t *testing.T) {
+			release := guard(t, mode.write, "1.1.0")
+			if release != (outcome{}) {
+				t.Fatalf("release witness outcome = %+v, want admitted without a warning", release)
+			}
+			// Identity: this build's own stamp is indistinguishable from a
+			// release witness.
+			if head := guard(t, mode.write, Version); head != release {
+				t.Fatalf("brew --HEAD outcome = %+v, want the release witness outcome %+v", head, release)
+			}
+		})
+	}
+}
+
+// witnessFileHash returns the sha256 of the version witness at path.
+func witnessFileHash(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
 // TestLegacyUpgradeGuardBrewHeadLookalikeStillWarns keeps the recognizer
