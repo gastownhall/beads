@@ -4,7 +4,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // Audit cases for the "labels-comments-events" slice. Each case pins a strange
@@ -293,6 +295,117 @@ func testAuditDirectWispLabelComment(t *testing.T, f Factory) {
 	}
 }
 
+// auditLabelClockAged is the updated_at every label-clock fixture is imported
+// with: whole-second and decades before any clock this suite runs under, so a
+// write that stamps the wall clock can never tie it.
+var auditLabelClockAged = time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+
+// auditSeedAgedIssue imports one issue (or, with wisp, one wisp) whose
+// updated_at is auditLabelClockAged and which carries labels, and returns its
+// RowVersion as stored.
+func auditSeedAgedIssue(t *testing.T, s storage.DoltStorage, id string, wisp bool, labels ...string) int64 {
+	t.Helper()
+	c := ctx()
+	must(t, s.CreateIssuesWithFullOptions(c, []*types.Issue{withDefaults(&types.Issue{
+		ID: id, Title: id, Priority: 2, Ephemeral: wisp,
+		CreatedAt: auditLabelClockAged, UpdatedAt: auditLabelClockAged,
+		Labels: labels,
+	})}, "seed", storage.BatchCreateOptions{SkipPrefixValidation: true}))
+	got, err := s.GetIssue(c, id)
+	must(t, err)
+	if !got.UpdatedAt.UTC().Equal(auditLabelClockAged) {
+		t.Fatalf("seed %s: updated_at = %v, want the imported %v", id, got.UpdatedAt.UTC(), auditLabelClockAged)
+	}
+	return got.RowVersion
+}
+
+// auditAssertLabelClock asserts id's updated_at advanced past the aged seed
+// (advanced) or still equals it, and that its RowVersion is still rowVersion:
+// a label edit is a content change for recency but not an ownership change,
+// so it must never remint the row_lock CAS token.
+func auditAssertLabelClock(t *testing.T, s storage.DoltStorage, op, id string, rowVersion int64, advanced bool) {
+	t.Helper()
+	got, err := s.GetIssue(ctx(), id)
+	must(t, err)
+	at := got.UpdatedAt.UTC()
+	switch {
+	case advanced && !at.After(auditLabelClockAged):
+		t.Errorf("%s on %s: updated_at = %v, want it advanced past the aged %v", op, id, at, auditLabelClockAged)
+	case !advanced && !at.Equal(auditLabelClockAged):
+		t.Errorf("%s on %s: updated_at = %v, want the aged %v kept (no label row changed)", op, id, at, auditLabelClockAged)
+	}
+	if got.RowVersion != rowVersion {
+		t.Errorf("%s on %s: RowVersion = %d, want %d unchanged", op, id, got.RowVersion, rowVersion)
+	}
+}
+
+// testAuditLabelEditsAdvanceUpdatedAt pins GH#5442: a label edit that really
+// changes an issue's label set advances that issue's updated_at, on both
+// planes and through every write door (the direct store methods, a
+// transaction, and a guarded labels-only update), while an idempotent re-add
+// or a removal of an absent label leaves it where it was. --updated-after,
+// stale-upsert rejection and merge recency all read that column. Neither kind
+// of edit remints RowVersion.
+func testAuditLabelEditsAdvanceUpdatedAt(t *testing.T, f Factory) {
+	for _, plane := range []struct {
+		name string
+		wisp bool
+	}{{"durable", false}, {"wisp", true}} {
+		t.Run(plane.name, func(t *testing.T) {
+			s := f(t)
+			c := ctx()
+			lifecycle, err := s.IssueLifecycle()
+			must(t, err)
+			patch := func(id string, labels publicops.LabelPatch) error {
+				_, err := lifecycle.Update(c, publicops.UpdateRequest{
+					Actor: "a", IssueID: id, Patch: publicops.IssuePatch{Labels: labels},
+				})
+				return err
+			}
+			inTx := func(fn func(tx storage.Transaction) error) error {
+				return s.RunInTransaction(c, "bd: label clock", fn)
+			}
+			cases := []struct {
+				op       string
+				labels   []string
+				advanced bool
+				run      func(id string) error
+			}{
+				{"AddLabel", nil, true, func(id string) error { return s.AddLabel(c, id, "x", "a") }},
+				{"RemoveLabel", []string{"x"}, true, func(id string) error { return s.RemoveLabel(c, id, "x", "a") }},
+				{"AddLabel re-add", []string{"x"}, false, func(id string) error { return s.AddLabel(c, id, "x", "a") }},
+				{"RemoveLabel absent", nil, false, func(id string) error { return s.RemoveLabel(c, id, "x", "a") }},
+				{"tx AddLabel", nil, true, func(id string) error {
+					return inTx(func(tx storage.Transaction) error { return tx.AddLabel(c, id, "x", "a") })
+				}},
+				{"tx RemoveLabel", []string{"x"}, true, func(id string) error {
+					return inTx(func(tx storage.Transaction) error { return tx.RemoveLabel(c, id, "x", "a") })
+				}},
+				{"tx AddLabel re-add", []string{"x"}, false, func(id string) error {
+					return inTx(func(tx storage.Transaction) error { return tx.AddLabel(c, id, "x", "a") })
+				}},
+				{"tx RemoveLabel absent", nil, false, func(id string) error {
+					return inTx(func(tx storage.Transaction) error { return tx.RemoveLabel(c, id, "x", "a") })
+				}},
+				{"labels-only update", []string{"x"}, true, func(id string) error {
+					return patch(id, publicops.LabelPatch{Add: []string{"y"}, Remove: []string{"x"}})
+				}},
+				{"labels-only update no-op", []string{"x"}, false, func(id string) error {
+					return patch(id, publicops.LabelPatch{Add: []string{"x"}, Remove: []string{"absent"}})
+				}},
+			}
+			for i, tc := range cases {
+				id := "test-" + plane.name + "-" + string(rune('a'+i))
+				rowVersion := auditSeedAgedIssue(t, s, id, plane.wisp, tc.labels...)
+				if err := tc.run(id); err != nil {
+					t.Fatalf("%s on %s: %v", tc.op, id, err)
+				}
+				auditAssertLabelClock(t, s, tc.op, id, rowVersion, tc.advanced)
+			}
+		})
+	}
+}
+
 // RunAudit_labels_comments_events runs the labels-comments-events audit cases.
 func RunAudit_labels_comments_events(t *testing.T, f Factory) {
 	t.Helper()
@@ -304,4 +417,5 @@ func RunAudit_labels_comments_events(t *testing.T, f Factory) {
 	t.Run("EventsLimitAndAll", func(t *testing.T) { testAuditEventsLimitAndAll(t, f) })
 	t.Run("ImportCommentSubSecond", func(t *testing.T) { testAuditImportCommentSubSecond(t, f) })
 	t.Run("DirectWispLabelComment", func(t *testing.T) { testAuditDirectWispLabelComment(t, f) })
+	t.Run("LabelEditsAdvanceUpdatedAt", func(t *testing.T) { testAuditLabelEditsAdvanceUpdatedAt(t, f) })
 }

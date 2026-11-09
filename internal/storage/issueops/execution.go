@@ -255,8 +255,10 @@ func executeUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 	}
 	if labelsChanged {
 		changedAny = true
-		_, labelTable, eventTable, _ := WispTableRouting(IsActiveWispInTx(ctx, tx, attempt.IssueID))
-		tables.Add(labelTable, eventTable)
+		// A real label change also advanced the owning row's updated_at
+		// (GH#5442), so that row's table is staged with the label rows.
+		issueTable, labelTable, eventTable, _ := WispTableRouting(IsActiveWispInTx(ctx, tx, attempt.IssueID))
+		tables.Add(issueTable, labelTable, eventTable)
 	}
 	parentResult, err := applyParentPatch(ctx, tx, current, attempt.Patch.ParentID, attempt.Actor, false)
 	if err != nil {

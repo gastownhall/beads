@@ -2,6 +2,7 @@ package db
 
 import (
 	"encoding/json"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -484,4 +485,38 @@ func (s *testSuite) TestEventsJournal_ReplayFromZeroReconstructsLiveSet() {
 		s.ElementsMatchf(want.Labels, got.Labels, "%s labels", id)
 	}
 	s.NotContains(replay, "bd-rp-4", "a deleted bead must not survive replay")
+}
+
+// TestEventsJournal_RemoveLabelSnapshotCapturesBumpedUpdatedAt pins GH#5442's
+// journal ordering on the uow write stack: a label removal must stamp
+// updated_at BEFORE the journal snapshot is taken, so the journaled issue_json
+// carries the row's post-touch updated_at rather than a stale one that
+// disagrees with the table. The row is aged after the seed insert, so the
+// removal's stamp is the only thing that can move it.
+func (s *testSuite) TestEventsJournal_RemoveLabelSnapshotCapturesBumpedUpdatedAt() {
+	s.enableJournalForTest()
+	ctx := s.Ctx()
+	s.seedIssueRow("bd-lbl-journal-del")
+	r := s.labelRepo()
+	s.Require().NoError(r.Insert(ctx, "bd-lbl-journal-del", "temp", "tester", domain.LabelOpts{}))
+	s.labelClockBackdate("issues", "bd-lbl-journal-del")
+
+	s.clearJournal()
+
+	s.Require().NoError(r.Delete(ctx, "bd-lbl-journal-del", "temp", "tester", domain.LabelOpts{}))
+
+	var rowUpdatedAt time.Time
+	s.Require().NoError(s.Runner().QueryRowContext(ctx,
+		"SELECT updated_at FROM issues WHERE id = ?", "bd-lbl-journal-del",
+	).Scan(&rowUpdatedAt))
+	s.True(rowUpdatedAt.After(dbAgedUpdatedAt),
+		"Delete left updated_at at %s, want a stamp after %s", rowUpdatedAt, dbAgedUpdatedAt)
+
+	got := s.readJournal()
+	s.Require().Len(got, 1, "journal rows: %+v", got)
+	s.Equal("update", got[0].Op)
+	s.Require().True(got[0].HasIssue, "remove-label journal row must carry the post-mutation issue snapshot")
+	s.True(got[0].Issue.UpdatedAt.Equal(rowUpdatedAt),
+		"journaled snapshot updated_at = %s, want the row's own post-touch updated_at %s -- the label removal must stamp updated_at before journaling",
+		got[0].Issue.UpdatedAt, rowUpdatedAt)
 }
