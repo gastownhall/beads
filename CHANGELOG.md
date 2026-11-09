@@ -804,8 +804,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row in `wisp_dependencies`, to look for a cycle the per-edge checks had
   already ruled out: each check runs in the same transaction after the
   request's earlier edges are written. The write now sends 2 fewer
-  statements (18 to 16 for the edge work of one `blocks` edge, measured on
-  embedded Dolt) and reads none of those rows.
+  statements (measured on embedded Dolt for one `blocks` edge) and reads none
+  of those rows.
   A bulk `bd dep add --file … --no-cycle-check` skips the per-edge probes and
   so still runs the whole-graph check; for a single edge the flag only skips
   the post-add cycle warning. That check and `bd dep cycles` now read only the
