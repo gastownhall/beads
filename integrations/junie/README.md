@@ -12,6 +12,10 @@ curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/inst
 bd init
 ```
 
+The MCP config below launches `beads-mcp` with `uvx`, so
+[uv](https://docs.astral.sh/uv/) needs to be on the PATH Junie starts it
+with; the server drives the `bd` CLI, which must be on that PATH too.
+
 ## Installation
 
 ```bash
@@ -34,18 +38,27 @@ Junie automatically reads this file on session start. It contains:
 
 ### MCP Config (`.junie/mcp/mcp.json`)
 
-Configures the beads MCP server so Junie can use beads tools directly:
+Configures the beads MCP server (the `beads-mcp` package, launched with `uvx`
+from [uv](https://docs.astral.sh/uv/)) so Junie can use beads tools directly:
 
 ```json
 {
   "mcpServers": {
     "beads": {
-      "command": "bd",
-      "args": ["mcp"]
+      "command": "uvx",
+      "args": ["beads-mcp"]
     }
   }
 }
 ```
+
+bd has no `mcp` subcommand, so the entry points at the separate `beads-mcp`
+server. If you install that package yourself with `uv tool install
+beads-mcp` or `pip install beads-mcp`, `{"command": "beads-mcp", "args": []}`
+works too. Re-running `bd setup junie` rewrites the whole `mcp.json`
+(replacing an older config that invoked the nonexistent `bd mcp`) but
+leaves other files under `.junie/` alone; keep other MCP servers in the
+same file by editing only the `beads` entry instead of re-running setup.
 
 ## Usage
 

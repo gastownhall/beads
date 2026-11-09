@@ -5209,6 +5209,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd setup junie` no longer writes an MCP config that runs `bd mcp`, a
+  command bd has never had**, so Junie's beads MCP server failed to start
+  (GH#5563). `.junie/mcp/mcp.json` now launches the `beads-mcp` server with
+  `uvx beads-mcp`, as the Junie integration page already advised, and the
+  install prints a note (without failing) when `uvx` is not on PATH.
+  Re-running `bd setup junie` replaces the whole file — including an older
+  config invoking `bd mcp` — but never other files under `.junie/`; if the
+  file also holds other MCP servers, edit only the `beads` entry by hand.
+
 - **`bd gate check` no longer reports an unreadable store as "pending".** The
   bead arm of the check dropped the lookup error on the floor, so with dolt
   down (or any backend or transport failure on the awaited bead's read) every
