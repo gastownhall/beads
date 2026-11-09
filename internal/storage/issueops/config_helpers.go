@@ -50,13 +50,11 @@ func ResolveCustomConfigInTx(ctx context.Context, tx DBTX) (statuses []types.Cus
 
 	cfg, err := getConfigKeysInTx(ctx, tx, "status.custom", "types.custom")
 	if err != nil {
-		if !statusesFromTable {
-			if yamlStatuses := config.GetCustomStatusesFromYAML(); len(yamlStatuses) > 0 {
-				statuses = ParseStatusFallback(yamlStatuses)
-			}
-		}
-		// The types.custom row is unreadable; the remaining layers still compose.
-		return statuses, ComposeCustomTypes(customTypes, "", config.GetCustomTypesFromYAML()), nil
+		// An unreadable config row must not compose into a success: callers
+		// (the store's custom-config cache) treat a nil error as cacheable,
+		// and a YAML-composed answer here would cache a degraded vocabulary
+		// for the store's lifetime (gastownhall/beads#5581).
+		return nil, nil, err
 	}
 
 	if !statusesFromTable {
@@ -74,6 +72,11 @@ func ResolveCustomConfigInTx(ctx context.Context, tx DBTX) (statuses []types.Cus
 func resolveCustomStatusesFromTableInTx(ctx context.Context, tx DBTX) ([]types.CustomStatus, bool, error) {
 	rows, err := tx.QueryContext(ctx, "SELECT name, category FROM custom_statuses ORDER BY name")
 	if err != nil {
+		if !isTableNotExistError(err) {
+			return nil, false, fmt.Errorf("query custom_statuses: %w", err)
+		}
+		// Pre-migration databases have no normalized table yet; the config
+		// row and YAML fallbacks in ResolveCustomConfigInTx stay authoritative.
 		return nil, false, nil
 	}
 	defer rows.Close()
@@ -97,6 +100,11 @@ func resolveCustomStatusesFromTableInTx(ctx context.Context, tx DBTX) ([]types.C
 func resolveCustomTypesFromTableInTx(ctx context.Context, tx DBTX) ([]string, bool, error) {
 	rows, err := tx.QueryContext(ctx, "SELECT name FROM custom_types ORDER BY name")
 	if err != nil {
+		if !isTableNotExistError(err) {
+			return nil, false, fmt.Errorf("query custom_types: %w", err)
+		}
+		// Pre-migration databases have no normalized table yet; the config
+		// row and YAML fallbacks in ResolveCustomConfigInTx stay authoritative.
 		return nil, false, nil
 	}
 	defer rows.Close()
