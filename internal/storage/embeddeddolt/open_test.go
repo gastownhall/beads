@@ -150,6 +150,46 @@ func initWaitBudgetDatabase(t *testing.T, dir string) {
 	}
 }
 
+// TestOpenWaitBudget covers the BEADS_EMBEDDED_OPEN_TIMEOUT resolution:
+// durations or bare seconds are accepted, and every unusable value —
+// unset, empty, whitespace, malformed, overflow, non-positive — falls back
+// to the 30s default, the same convention as the dolt store's other
+// timeout knobs.
+func TestOpenWaitBudget(t *testing.T) {
+	// No t.Parallel: t.Setenv.
+	t.Setenv("BEADS_EMBEDDED_OPEN_TIMEOUT", "")
+	if got := openWaitBudget(); got != openWaitBudgetDefault {
+		t.Fatalf("unset %s resolved to %s, want the %s default", openWaitBudgetEnv, got, openWaitBudgetDefault)
+	}
+
+	for _, tc := range []struct {
+		raw  string
+		want time.Duration
+	}{
+		{"", openWaitBudgetDefault},
+		{"   ", openWaitBudgetDefault},
+		{"90s", 90 * time.Second},
+		{" 90s ", 90 * time.Second},
+		{"90", 90 * time.Second},
+		{"500ms", 500 * time.Millisecond},
+		{"2m", 2 * time.Minute},
+		{"0", openWaitBudgetDefault},
+		{"0s", openWaitBudgetDefault},
+		{"-5s", openWaitBudgetDefault},
+		{"not-a-duration", openWaitBudgetDefault},
+		{"999999999999999999999s", openWaitBudgetDefault}, // overflow
+	} {
+		if got := parseOpenWaitBudget(tc.raw); got != tc.want {
+			t.Errorf("parseOpenWaitBudget(%q) = %s, want %s", tc.raw, got, tc.want)
+		}
+	}
+
+	t.Setenv("BEADS_EMBEDDED_OPEN_TIMEOUT", "90")
+	if got := openWaitBudget(); got != 90*time.Second {
+		t.Errorf("openWaitBudget with BEADS_EMBEDDED_OPEN_TIMEOUT=90 = %s, want 1m30s", got)
+	}
+}
+
 // manualBackOff is a scriptable policy for the exhaustedBackOff tests: it
 // hands out nexts left to right and Stop once they run out.
 type manualBackOff struct {
