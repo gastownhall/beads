@@ -1231,6 +1231,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path as its state, missed the server, and then refused to start the shared
   server with `port ... is in use by a non-dolt process`, or removed a
   healthy server's PID and port files (#7121, reported by @SimplicityGuy).
+  A server running under a debugger, whose state macOS 26 shows as just `X`,
+  is recognized too.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

@@ -59,10 +59,12 @@ func readDoltProcessPIDs() ([]int, error) {
 	return parseDoltProcessPIDs(out), nil
 }
 
-// parseDoltProcessPIDs returns matching, non-defunct Dolt server PIDs from a
+// parseDoltProcessPIDs returns matching, non-zombie Dolt server PIDs from a
 // `ps -ax -o state= -o pid= -o command=` snapshot. It preserves the source row
 // order. A row whose first field is all digits has a blank state: that field
-// is the PID and the rest is the command. State codes start with a letter.
+// is the PID and the rest is the command. A state field never starts with a
+// digit: Linux and the BSDs print a state code first, and macOS 26, which can
+// leave the state code blank, prints only its modifiers, such as s, +, < or X.
 func parseDoltProcessPIDs(snapshot []byte) []int {
 	var pids []int
 	for _, line := range strings.Split(string(snapshot), "\n") {
@@ -90,7 +92,10 @@ func parseDoltProcessPIDs(snapshot []byte) []int {
 		if err != nil || pid <= 0 {
 			continue
 		}
-		if state != "" && (state[0] == 'Z' || state[0] == 'X') {
+		// Only Z is skipped: it is a zombie on every platform. Linux's dead
+		// state X leaves no command line to match, and a leading X on macOS 26
+		// is the traced modifier of a live process whose state code is blank.
+		if strings.HasPrefix(state, "Z") {
 			continue
 		}
 
