@@ -986,6 +986,7 @@ go_test(
         "last_touched_guard_test.go",
         "last_touched_readonly_test.go",
         "last_touched_test.go",
+        "legacy_proxied_root_guard_compat_test.go",
         "legacy_proxied_root_guard_refusals_test.go",
         "legacy_proxied_root_guard_test.go",
         "legacy_upgrade_guard_config_yaml_test.go",
@@ -1418,11 +1419,18 @@ go_test(
         "//cmd/bd/doctor:go_srcs",
         "//cmd/bd/doctor/fix:go_srcs",
         "//internal/storage/embeddeddolt/cmd:go_srcs",
+        # The released bd v1.1.0 (sha256-verified @bd_releases catalog pin),
+        # the release whose silent fall-through the legacy proxied-root guard
+        # exists to stop (GH#5104): legacy_proxied_root_guard_compat_test
+        # runs it against an armed workspace. No test may run it outside that
+        # compat test.
+        "@bd_releases//:v1.1.0",
         "@go_sdk//:bin/gofmt",
     ],
     embed = [":bd_lib"],
     env = {
         "BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)",
+        "BEADS_TEST_BD_V1110_BIN": "$(rlocationpath @bd_releases//:v1.1.0)",
         "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
         "BEADS_TEST_COMPACT_GC_FIXTURE": "$(rlocationpath :compact_gc_fixture)",
         "BEADS_TEST_PREFLIGHT_GO": "$(rlocationpath :preflight_go_fixture)",
