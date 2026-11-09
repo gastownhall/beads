@@ -2104,7 +2104,7 @@ type ReopenIssueRequest struct {
 	// IT IS A STRING, and it must be the `revision` string a response carried, verbatim. A JSON number — or any other type — is a `400` naming this member. The token spans the FULL 64-bit range, so a number would be rounded past 2^53 by an IEEE-754-double parser and the guard would miss a row nothing else touched; a string round-trips exactly in every consumer.
 	ExpectedVersion *string `json:"expected_version,omitempty"`
 
-	// Reason Why the issue is being reopened. Recorded on the `reopened` EVENT this move records — not on a field of the issue, and not carried in the response, so a caller that wants it back reads the issue's events. Refused for control characters, and bounded by what the column holds rather than by the number above.
+	// Reason Why the issue is being reopened. A nonblank value is appended to the issue's comment thread as one structured comment attributed to `actor`, and the `reopened` event this move records carries it too — not a field of the issue, and not carried in the response. Refused for control characters, and bounded by what the column holds rather than by the number above.
 	Reason *string `json:"reason,omitempty"`
 }
 

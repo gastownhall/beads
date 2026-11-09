@@ -4303,11 +4303,14 @@ paths:
         ## Where the reason is recorded
 
 
-        On the `reopened` EVENT this move records, not on a field of the issue,
-        and the response does not carry it. A caller that wants it back reads
-        the issue's events — the same place the actor attribution for the
-        reopen lives. A reopen with no reason still records that entry; it
-        simply carries none.
+        TWICE. A nonblank `reason` is appended to the issue's COMMENT THREAD
+        as one structured comment attributed to `actor` — the same thread the
+        comment operations write and `bd comments`, `bd show` and issue export
+        read, on the unversioned plane for a wisp target. And the `reopened`
+        EVENT this move records carries it too, where the actor attribution
+        for the reopen lives. Neither is a field of the issue and the response
+        does not carry either back. A reopen with no reason records the entry
+        alone, with no comment.
 
 
         ## No POLICY conflict to name
@@ -12925,11 +12928,12 @@ components:
           type: string
           maxLength: 255
           description: >-
-            Why the issue is being reopened. Recorded on the `reopened` EVENT
-            this move records — not on a field of the issue, and not carried in
-            the response, so a caller that wants it back reads the issue's
-            events. Refused for control characters, and bounded by what the
-            column holds rather than by the number above.
+            Why the issue is being reopened. A nonblank value is appended to
+            the issue's comment thread as one structured comment attributed to
+            `actor`, and the `reopened` event this move records carries it too
+            — not a field of the issue, and not carried in the response.
+            Refused for control characters, and bounded by what the column
+            holds rather than by the number above.
         expected_version:
           type: string
           description: >-

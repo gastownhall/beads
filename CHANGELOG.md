@@ -1226,6 +1226,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd reopen --reason` now persists the reason as a comment.** The flag was
+  accepted and echoed but never reached the versioned comment thread, so `bd
+  comments`, `bd show` and issue export showed nothing for it (GH#5593); the
+  text survived only on the local `reopened` audit event that `bd history
+  --events` reads. A nonblank reason is now appended to the issue's comment
+  thread as one structured comment attributed to the reopen actor (a wisp
+  target's lands on the wisp plane), in the same transaction as the reopen and
+  in the same Dolt commit; the audit `commented` event the old path minted is
+  gone, and `bd history --events` still carries the reason on the `reopened`
+  event. Reopening still clears the current `close_reason`, as it always has —
+  but a previously committed close reason is now printed by plain
+  `bd history <id>` on the closed snapshot that still holds it.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
