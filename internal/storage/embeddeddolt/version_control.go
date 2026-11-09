@@ -14,30 +14,23 @@ import (
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
-// withDBConn opens a short-lived database connection configured for the
-// store's database and branch and passes it to fn. Unlike withConn, no
-// transaction is started — this is required for Dolt stored procedures
-// (CALL DOLT_BRANCH, CALL DOLT_MERGE, etc.) that cannot run inside
-// explicit SQL transactions.
+// withDBConn passes the store's cached engine to fn, serialized against every
+// other operation on it (see withEngine). Unlike withConn, no transaction is
+// started — this is required for Dolt stored procedures (CALL DOLT_BRANCH,
+// CALL DOLT_MERGE, etc.) that cannot run inside explicit SQL transactions. The
+// whole callback holds the engine slot, so a multi-statement sequence cannot
+// interleave with another operation even between its statements.
 func (s *EmbeddedDoltStore) withDBConn(ctx context.Context, fn func(db versioncontrolops.DBConn) error) (err error) {
 	if s.closed.Load() {
 		return errClosed
 	}
-
-	var db *sql.DB
-	var cleanup func() error
-	db, cleanup, err = OpenSQL(ctx, s.dataDir, s.database, s.branch)
-	if err != nil {
-		return
-	}
-	defer func() {
-		err = errors.Join(err, cleanup())
-		// Best-effort cleanup of orphaned tmp_pack_* files left by git
-		// fetch in the Dolt git-remote-cache. Rate-limited internally.
-		s.cleanGitRemoteCacheGarbage()
-	}()
-
-	return fn(db)
+	err = s.withEngine(ctx, func(h *engineHandle) error {
+		return fn(h.db)
+	})
+	// Best-effort cleanup of orphaned tmp_pack_* files left by git
+	// fetch in the Dolt git-remote-cache. Rate-limited internally.
+	s.cleanGitRemoteCacheGarbage()
+	return err
 }
 
 // withPinnedDBConn is withDBConn pinned to a single *sql.Conn, for operation
@@ -46,35 +39,33 @@ func (s *EmbeddedDoltStore) withDBConn(ctx context.Context, fn func(db versionco
 // the subsequent DOLT_MERGE and settle statements to see them (bd-6dnrw.40).
 // A *sql.DB may rotate connections between statements; a pinned conn cannot.
 //
-// The pinned conn inherits the database/branch session setup OpenSQL applied:
-// the pool holds exactly the one connection OpenSQL configured (sequential
-// Ping/USE/SET on a fresh pool), and db.Conn returns it — the same invariant
-// ApplySchemaMigrations relies on.
+// The pinned conn sees the database OpenSQL's DSN selected for the pool's
+// connections; the branch's head_ref session variable, set on the connection
+// OpenSQL bootstrapped, is session state and so does not automatically reach a
+// second pool connection. Operations serialize on the engine slot and each
+// returns its connection before the next acquires the pool, so in practice the
+// pool hands out the one bootstrapped connection; nothing here depends on that
+// — session-local state (pull flags included) stays local to this callback.
 func (s *EmbeddedDoltStore) withPinnedDBConn(ctx context.Context, fn func(db versioncontrolops.DBConn) error) (err error) {
 	if s.closed.Load() {
 		return errClosed
 	}
-
-	var db *sql.DB
-	var cleanup func() error
-	db, cleanup, err = OpenSQL(ctx, s.dataDir, s.database, s.branch)
-	if err != nil {
-		return
-	}
-	defer func() {
-		err = errors.Join(err, cleanup())
-		// Best-effort cleanup of orphaned tmp_pack_* files left by git
-		// fetch in the Dolt git-remote-cache. Rate-limited internally.
-		s.cleanGitRemoteCacheGarbage()
-	}()
-
-	conn, connErr := db.Conn(ctx)
-	if connErr != nil {
-		return fmt.Errorf("embeddeddolt: pin connection: %w", connErr)
-	}
-	defer conn.Close()
-
-	return fn(conn)
+	err = s.withEngine(ctx, func(h *engineHandle) error {
+		conn, connErr := h.db.Conn(ctx)
+		if connErr != nil {
+			// A pool that cannot serve a connection is not one to reuse.
+			_ = h.dispose()
+			return fmt.Errorf("embeddeddolt: pin connection: %w", connErr)
+		}
+		// The pinned conn is closed before the slot is released, so the pool
+		// never outlives this callback holding a checked-out connection.
+		defer conn.Close()
+		return fn(conn)
+	})
+	// Best-effort cleanup of orphaned tmp_pack_* files left by git
+	// fetch in the Dolt git-remote-cache. Rate-limited internally.
+	s.cleanGitRemoteCacheGarbage()
+	return err
 }
 
 // withMutatingDBConn is withDBConn for operations that mutate the database

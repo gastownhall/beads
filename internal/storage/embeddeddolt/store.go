@@ -40,10 +40,13 @@ var _ storage.VersionedHistoryDeferrer = (*EmbeddedDoltStore)(nil)
 var _ storage.ExternalRefHistoryQuerier = (*EmbeddedDoltStore)(nil)
 
 // EmbeddedDoltStore implements storage.DoltStorage backed by the embedded Dolt engine.
-// Each method call opens a short-lived connection, executes within an explicit
-// SQL transaction, and closes the connection immediately. This minimizes the
-// time the embedded engine's write lock is held, reducing contention when
-// multiple processes access the same database concurrently.
+// Every operation acquires the store's engine slot (engine_slot.go), runs within
+// an explicit SQL transaction or a plain pooled connection, and releases the slot
+// when it is done. The cached engine is reused across operations and disposed
+// after engineIdleAfter of idleness, a final Close, or an operation that cannot
+// prove the engine state is clean — so a command loop pays the engine's cold
+// start once instead of once per query (#5397), while operations still serialize
+// and the engine is never held while idle long enough to block another process.
 //
 // The dolthub/driver/v2 handles its own concurrency internally. File-level locking
 // is only used during bd init to protect one-time initialization steps.
@@ -54,6 +57,11 @@ type EmbeddedDoltStore struct {
 	branch        string
 	credentialKey []byte
 	closed        atomic.Bool
+	// engine owns the cached embedded engine this store reuses across
+	// operations (#5397). Safe on a zero value (lazily initialized), but the
+	// seams (opener, idleAfter) are per instance and must be installed before
+	// the first operation.
+	engine engineSlot
 	// eventsJournalEnabled activates the durable events journal for THIS store
 	// instance only (storage.EventsJournalConfigurer); never process-global.
 	eventsJournalEnabled atomic.Bool
@@ -460,16 +468,16 @@ func logBlockedRecheckFailure(pending issueops.BlockedRecheck, err error) {
 // committed unblocking write recorded, on a fresh snapshot
 // (gastownhall/beads#6716).
 //
-// Embedded transactions serialize: commitConn opens a fresh OpenSQL handle
-// per transaction, and OpenSQL (open.go) waits in a backoff with no elapsed
-// time limit for the engine, so a second handle blocks until the first has
-// been cleaned up. Two transactions therefore never run against overlapping
-// snapshots in one process, and the skew of #6716 cannot occur here; no
-// embedded reproduction exists. The recheck is kept so the embedded store
-// honors the same contract as the server store — a stale row recorded by
-// one transaction is settled after its commit — and it runs only after the
-// first handle's cleanup, so it cannot deadlock on itself. It runs no SQL
-// when nothing was recorded.
+// Embedded transactions serialize: commitConn runs on the store's engine slot
+// (engine_slot.go), which one operation at a time holds through the entire
+// transaction, and the slot is released before this recheck acquires it. Two
+// transactions therefore never run against overlapping snapshots in one
+// process, and the skew of #6716 cannot occur here; no embedded reproduction
+// exists. The recheck is kept so the embedded store honors the same contract
+// as the server store — a stale row recorded by one transaction is settled
+// after its commit — and it runs only after the first operation has released
+// the engine, so it cannot deadlock on itself. It runs no SQL when nothing
+// was recorded.
 //
 // It runs on issueops.BlockedRecheckContext: the write it follows is durable,
 // so the repair must outlive that write's cancellation, and a recheck must
@@ -490,7 +498,8 @@ func (s *EmbeddedDoltStore) recheckBlockedAfterCommit(ctx context.Context, pendi
 }
 
 // commitConn is withConn's transaction: it hands back the dependents the
-// transaction's unblocking writes recorded once it has committed.
+// transaction's unblocking writes recorded once it has committed. It runs on
+// the store's cached engine, one operation at a time (see withEngine).
 func (s *EmbeddedDoltStore) commitConn(ctx context.Context, commit bool, fn func(tx *sql.Tx) error) (pending issueops.BlockedRecheck, err error) {
 	if s.closed.Load() {
 		err = errClosed
@@ -501,68 +510,86 @@ func (s *EmbeddedDoltStore) commitConn(ctx context.Context, commit bool, fn func
 		return
 	}
 
-	var db *sql.DB
-	var cleanup func() error
-	db, cleanup, err = OpenSQL(ctx, s.dataDir, s.database, s.branch)
-	if err != nil {
-		return
-	}
-
 	committed := false
-	defer func() {
-		err = joinTransactionCleanupError(err, cleanup(), committed)
-	}()
-
-	var tx *sql.Tx
-	tx, err = db.BeginTx(ctx, nil)
-	if err != nil {
-		err = fmt.Errorf("embeddeddolt: begin tx: %w", err)
-		return
-	}
-	// The activation switch deliberately does NOT depend on the cached shape:
-	// an enabled store whose probe produced no shape writes with the canonical
-	// column list, so a table the journal cannot run against fails the write
-	// loudly instead of letting the mutation commit with no journal row
-	// (storage.EventsJournalShapeChecker). Reads (commit=false callers) are
-	// never gated by this switch — only by the shape — since ReadEventsJournal
-	// has no enabled/disabled concept of its own.
-	clearJournalScope := issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
-	defer clearJournalScope()
-	clearJournalShapeScope := issueops.ScopeEventsJournalShape(tx, s.journalShape.Load())
-	defer clearJournalShapeScope()
-	// Only a transaction that commits answers a pending switch: a read rolls
-	// back whatever it does, so the row is read inside the first write and
-	// costs a read-only command nothing. A write whose read fails is rolled
-	// back before fn runs (issueops.VersionedHistorySwitch.ResolveIn).
-	versioned := s.versionedHistory.Enabled()
-	if commit {
-		if versioned, err = s.versionedHistory.ResolveIn(ctx, tx); err != nil {
-			err = errors.Join(err, tx.Rollback())
-			return
+	err = s.withEngine(ctx, func(h *engineHandle) error {
+		tx, txErr := h.db.BeginTx(ctx, nil)
+		if txErr != nil {
+			// The engine could not even begin; do not hand the next caller a
+			// suspect engine.
+			_ = h.dispose()
+			return fmt.Errorf("embeddeddolt: begin tx: %w", txErr)
 		}
-	}
-	clearVersionScope := issueops.ScopeVersionedHistoryTransaction(tx, versioned)
-	defer clearVersionScope()
-	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
-	defer clearRecheckScope()
+		// A panic unwinds through this defer, so the transaction is always
+		// ended (and its connection returned) before withEngine disposes the
+		// engine. No-op after the explicit ends below, which answer
+		// ErrTxDone.
+		defer func() { _ = tx.Rollback() }()
+		// rollbackEnds ends the transaction, classifying the two failures
+		// together: a rollback that itself fails leaves the session wedged,
+		// so the engine is disposed and the cleanup error joins the
+		// operation's error, definitively (nothing committed).
+		rollbackEnds := func(txErr error) error {
+			if rbErr := tx.Rollback(); rbErr != nil {
+				return joinTransactionCleanupError(txErr, h.dispose(), false)
+			}
+			return txErr
+		}
 
-	if fnErr := fn(tx); fnErr != nil {
-		err = errors.Join(fnErr, tx.Rollback())
-		return
-	}
+		// The activation switch deliberately does NOT depend on the cached shape:
+		// an enabled store whose probe produced no shape writes with the canonical
+		// column list, so a table the journal cannot run against fails the write
+		// loudly instead of letting the mutation commit with no journal row
+		// (storage.EventsJournalShapeChecker). Reads (commit=false callers) are
+		// never gated by this switch — only by the shape — since ReadEventsJournal
+		// has no enabled/disabled concept of its own.
+		clearJournalScope := issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
+		defer clearJournalScope()
+		clearJournalShapeScope := issueops.ScopeEventsJournalShape(tx, s.journalShape.Load())
+		defer clearJournalShapeScope()
+		// Only a transaction that commits answers a pending switch: a read rolls
+		// back whatever it does, so the row is read inside the first write and
+		// costs a read-only command nothing. A write whose read fails is rolled
+		// back before fn runs (issueops.VersionedHistorySwitch.ResolveIn).
+		versioned := s.versionedHistory.Enabled()
+		if commit {
+			if versioned, txErr = s.versionedHistory.ResolveIn(ctx, tx); txErr != nil {
+				return rollbackEnds(txErr)
+			}
+		}
+		clearVersionScope := issueops.ScopeVersionedHistoryTransaction(tx, versioned)
+		defer clearVersionScope()
+		clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+		defer clearRecheckScope()
 
-	if !commit {
-		err = tx.Rollback()
-		return
-	}
+		if fnErr := fn(tx); fnErr != nil {
+			return rollbackEnds(fnErr)
+		}
 
-	if cErr := commitEmbeddedTx(tx); cErr != nil {
-		err = cErr
-		return
-	}
-	committed = true
-	pending = issueops.TakeBlockedRecheck(tx)
-	return
+		if !commit {
+			// The read's rollback is its normal end, not a failure: the engine
+			// is clean and stays cached.
+			return rollbackEnds(nil)
+		}
+
+		if cErr := commitEmbeddedTx(tx); cErr != nil {
+			// The engine could not confirm the commit; do not reuse it.
+			_ = h.dispose()
+			return cErr
+		}
+		committed = true
+		pending = issueops.TakeBlockedRecheck(tx)
+		// The commit landed. If it is followed immediately by engine cleanup —
+		// the store closed or the context died under the operation — a cleanup
+		// failure keeps the commit-indeterminate classification, exactly as the
+		// per-operation open's cleanup did (joinTransactionCleanupError).
+		if ctx.Err() != nil || s.engine.isClosed() {
+			if disErr := h.dispose(); disErr != nil {
+				return joinTransactionCleanupError(nil, disErr, committed)
+			}
+		}
+		return nil
+	})
+	return pending, err
 }
 
 // SetEventsJournalEnabled activates the journal for this store instance only.
@@ -594,15 +621,19 @@ func (s *EmbeddedDoltStore) SetEventsJournalEnabled(enabled bool) {
 	s.journalActivationErr.Store(nil)
 }
 
-// probeJournalShape runs issueops.ProbeJournalShape over a connection opened
-// and closed just for it.
+// probeJournalShape runs issueops.ProbeJournalShape over the store's cached
+// engine, serializing with every other operation on it (see withEngine).
 func (s *EmbeddedDoltStore) probeJournalShape(ctx context.Context) (*issueops.JournalShape, error) {
-	db, cleanup, err := OpenSQL(ctx, s.dataDir, s.database, s.branch)
+	var shape *issueops.JournalShape
+	err := s.withEngine(ctx, func(h *engineHandle) error {
+		var probeErr error
+		shape, probeErr = issueops.ProbeJournalShape(ctx, h.db)
+		return probeErr
+	})
 	if err != nil {
-		return nil, fmt.Errorf("journal: open connection to probe shape: %w", err)
+		return nil, fmt.Errorf("journal: probe shape: %w", err)
 	}
-	defer func() { _ = cleanup() }()
-	return issueops.ProbeJournalShape(ctx, db)
+	return shape, nil
 }
 
 // EventsJournalActivationError implements storage.EventsJournalShapeChecker:
@@ -650,19 +681,20 @@ func (s *EmbeddedDoltStore) ApplySchemaMigrations(ctx context.Context) (int, err
 	if s.readOnly {
 		return 0, ErrReadOnly
 	}
-	db, cleanup, err := OpenSQL(ctx, s.dataDir, s.database, s.branch)
-	if err != nil {
-		return 0, fmt.Errorf("embeddeddolt: open db: %w", err)
-	}
-	defer func() { _ = cleanup() }()
-
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("embeddeddolt: pin connection: %w", err)
-	}
-	defer conn.Close()
-
-	return schema.MigrateUp(ctx, conn)
+	var applied int
+	err := s.withEngine(ctx, func(h *engineHandle) error {
+		conn, connErr := h.db.Conn(ctx)
+		if connErr != nil {
+			// A pool that cannot serve a connection is not one to reuse.
+			_ = h.dispose()
+			return fmt.Errorf("embeddeddolt: pin connection: %w", connErr)
+		}
+		defer conn.Close()
+		var migErr error
+		applied, migErr = schema.MigrateUp(ctx, conn)
+		return migErr
+	})
+	return applied, err
 }
 
 func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
@@ -1041,8 +1073,11 @@ func (s *EmbeddedDoltStore) GetProvenanceByRef(ctx context.Context, ref string) 
 // Close decrements the reference count if this store was opened via Open (the
 // process-scoped cache). When other references remain, Close is a no-op — the
 // store stays alive for the remaining callers. When the last reference calls
-// Close (or if the store was created directly via newStore), the underlying
-// resources are released.
+// Close (or if the store was created directly via newStore), the cached engine
+// is disposed: Close waits for any operation still holding it, releases it
+// exactly once, and marks the store closed so operations queued behind the
+// close (or called after it) cannot reopen the engine. A Close that races
+// the final one waits for that disposal before returning.
 //
 // It is safe to call multiple times.
 func (s *EmbeddedDoltStore) Close() error {
@@ -1050,8 +1085,18 @@ func (s *EmbeddedDoltStore) Close() error {
 		return nil
 	}
 	if s.closed.CompareAndSwap(false, true) {
+		// The engine goes first: it is the resource another process waits on.
+		// Any cleanup error — including ones the idle timer saved for here —
+		// is this Close's to return.
+		err := s.engine.close()
+		// Preserved from the per-operation era: the ancillary remote-cache
+		// cleanup runs after disposal, and is skipped for read-only stores.
 		s.cleanGitRemoteCacheGarbage()
+		return err
 	}
+	// Another Close is final-closing (or already did); wait for its disposal
+	// so this one never returns over a still-open engine.
+	s.engine.waitClosed()
 	return nil
 }
 
