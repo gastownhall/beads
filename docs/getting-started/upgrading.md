@@ -660,6 +660,71 @@ reached through a local proxy. Three differences worth knowing:
   proxied workspace: run it on the server host first, then consent from the
   proxied workspace (see [Clone behind the remote](#clone-behind-the-remote)).
 
+### Dependency target columns
+
+bd 1.0.5 split the polymorphic dependency target column `depends_on_id` into
+three typed columns, identically on `dependencies` and `wisp_dependencies`:
+
+| Column | Holds |
+|---|---|
+| `depends_on_issue_id` | a persistent local issue id |
+| `depends_on_wisp_id` | a local wisp id |
+| `depends_on_external` | a nonlocal target — an `external:` capability reference or a cross-repository id |
+
+Each row populates exactly one of the three (`ck_dep_one_target` /
+`ck_wisp_dep_one_target`). Migration `0041` (issues) and `ignored/0003`
+(wisps) performed the split; the release then removed the temporary
+generated `depends_on_id` alias with migration `0043` (issues) and
+`ignored/0005` (wisps). Fresh databases, and databases whose migrations
+completed, have **no SQL `depends_on_id` column on either table**. A reader
+that selects it fails with:
+
+```
+Error 1105: table "dependencies" does not have column "depends_on_id"
+```
+
+Installing a newer binary alone does not prove a database's migrations
+completed: a database carries the shape its own migration cursor left it,
+not the shape of the binary that opened it.
+
+The logical name is unchanged where it was already logical: dependency JSON
+and JSONL records still carry `depends_on_id`, the Go field
+`types.Dependency.DependsOnID` keeps it, and the `bd` commands and storage
+interfaces keep accepting and printing it. Prefer the `bd dep add` command
+and the storage interfaces for writes — an edge is more than its target
+string, and only the storage layer enforces the one-target invariant and the
+derived blocked state. Direct SQL is not unsupported: `bd sql` runs a query
+in Dolt server mode, and any SQL client can reach a running server.
+
+To read every edge in the old single-name shape over the split columns:
+
+{/* doc-sql: dependency-targets */}
+
+```sql
+SELECT issue_id,
+       COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) AS depends_on_id,
+       type
+FROM dependencies
+UNION ALL
+SELECT issue_id,
+       COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) AS depends_on_id,
+       type
+FROM wisp_dependencies;
+```
+
+This recipe targets the split schema. A tool that must also read pre-1.0.5
+databases cannot send one query to both shapes: inspect each table and
+choose. For targeted lookups, prefer the indexed typed columns —
+`WHERE depends_on_issue_id = ...` — because the `COALESCE` form reads every
+row. 1.0.5 is where the transition shipped, not a universal minimum reader:
+later releases migrate databases to later schemas, and a reader — a `bd`
+binary, a `bd`-module consumer, or a third-party tool — must understand the
+store it is pointed at. When several clients share a store, see
+[Upgrade every client that shares a store, together](#upgrade-every-client-that-shares-a-store-together).
+bd sets no numeric minimum version for third-party readers here; a tool
+that issues raw SQL adopts the typed target columns or reads through the
+logical interfaces.
+
 ## Cross-era Upgrades
 
 If you're upgrading from a much older version of bd, inspect the storage layout
