@@ -16,6 +16,15 @@
 // or ask a server for it; a release cut mid-slice never advertises an operation
 // that does not work.
 //
+// Every registration on the router is one entry of s.mounts() (server.go): a
+// route table row, the dispatcher the custom-method rows share, or the
+// catch-all. Nothing is mounted anywhere else
+// (TestNothingIsMountedOutsideTheMountTable), and
+// TestEveryMountedHandlerRunsTheRequestPipeline holds every mount to the
+// posture its rows declare: the Host policy, the bearer credential, the
+// project stamp, the wire-revision floor and a database slot, in that order.
+// A new surface is served by adding mounts there, never beside them.
+//
 // Two rows answer from the process itself and touch no database (GET /healthz
 // and GET /v0/beads/context); they carry bypassSemaphore for that reason, and
 // nothing else may.

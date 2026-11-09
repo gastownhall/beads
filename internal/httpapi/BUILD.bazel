@@ -106,6 +106,7 @@ go_test(
         "metadata_cas_test.go",
         "mount_census_test.go",
         "mount_table_test.go",
+        "pipeline_census_test.go",
         "problem_test.go",
         "project_stamp_test.go",
         "reads_test.go",
