@@ -203,6 +203,12 @@ func commandOptsOutOfStore(cmd *cobra.Command) bool {
 
 // readOnlyCommands lists commands that only read from the database.
 // These commands open the store in read-only mode. See GH#804.
+//
+// This list is the leaf-name classification DATA. It cannot see flags, and two
+// of its verbs have write-flag forms (`bd ready --claim`, `bd duplicates
+// --auto-merge`) that must be admitted as writers (GH#8264), so production
+// invocation decisions go through commandReadsOnly — the same verdict minus
+// the write flags of THIS invocation — rather than through this list alone.
 var readOnlyCommands = map[string]bool{
 	"list":       true,
 	"ready":      true,
@@ -229,6 +235,54 @@ func isReadOnlyCommand(cmdName string) bool {
 	return readOnlyCommands[cmdName]
 }
 
+// commandWriteFlags maps a canonical command path (commandRegistryPath) to
+// the flag that makes the otherwise-read-only verb a writer: `bd ready
+// --claim` claims an issue and `bd duplicates --auto-merge` merges duplicate
+// groups, yet both leaf names sit on the read-only allowlist (GH#8264). The
+// key is the full path, never the leaf name — `bd mol ready` shares `ready`'s
+// leaf and must never answer for it (see commandRegistryPath).
+var commandWriteFlags = map[string]string{
+	"ready":      "claim",
+	"duplicates": "auto-merge",
+}
+
+// commandWritesByFlag reports whether this invocation of a classified-read
+// command carries its path's write flag, parsed and enabled. A false flag
+// counts as absent — the verdict reads the value Cobra parsed, not whether
+// the user typed the flag — and a preview (--dry-run, --inspect) is never a
+// write: `bd duplicates --auto-merge --dry-run` reports the merge without
+// performing it.
+func commandWritesByFlag(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	flagName, ok := commandWriteFlags[commandRegistryPath(cmd)]
+	if !ok {
+		return false
+	}
+	enabled, err := cmd.Flags().GetBool(flagName)
+	if err != nil || !enabled {
+		return false
+	}
+	return !isPreviewCommand(cmd)
+}
+
+// commandReadsOnly is the per-invocation read verdict: the leaf-name
+// allowlist minus the write flags of this invocation (GH#8264). `bd ready
+// --claim` and `bd duplicates --auto-merge` write, so every consumer of the
+// classification — the store-open mode, the migration gates, the identity
+// check, JSONL auto-import, auto-export, auto-push, journal retention —
+// must treat them like any other writer, while the plain listings stay
+// reads. nil is a writer (fail closed): an unresolvable command never slips
+// past writer admission. isReadOnlyCommand and its allowlist remain as the
+// compatibility data; this wrapper is what invocation decisions consult.
+func commandReadsOnly(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	return isReadOnlyCommand(cmd.Name()) && !commandWritesByFlag(cmd)
+}
+
 // isPreviewCommand reports whether cmd was explicitly invoked in a
 // non-mutating preview mode. Preview flags are command-local rather than
 // persistent, so checking them here after Cobra has parsed the selected
@@ -253,10 +307,13 @@ type rootStorePolicy struct {
 
 // effectiveRootStorePolicy separates strict --readonly/config policy from
 // command classification. Classified reads retain their compatibility
-// maintenance and auto-start behavior; strict readonly is mutation-free.
-func effectiveRootStorePolicy(cmdName string, strictReadonly bool) rootStorePolicy {
+// maintenance and auto-start behavior; strict readonly is mutation-free. The
+// classification half is flag-aware: the write-flag forms of otherwise-read
+// commands (`bd ready --claim`, `bd duplicates --auto-merge`) select the
+// writer policy their writes need (GH#8264).
+func effectiveRootStorePolicy(cmd *cobra.Command, strictReadonly bool) rootStorePolicy {
 	return rootStorePolicy{
-		readOnly:         strictReadonly || isReadOnlyCommand(cmdName),
+		readOnly:         strictReadonly || commandReadsOnly(cmd),
 		disableAutoStart: strictReadonly,
 		runMaintenance:   !strictReadonly,
 	}
@@ -279,7 +336,11 @@ func runsPostCommandMaintenance(cmdName string, strictReadonly bool) bool {
 	if cmdName == serveCmdName {
 		return false
 	}
-	return effectiveRootStorePolicy(cmdName, strictReadonly).runMaintenance
+	// Only the runMaintenance half is consulted here, and it depends on
+	// strictReadonly alone, so the classification input is deliberately nil:
+	// the write-flag verdict has no bearing on whether a maintenance net
+	// runs, only on which steps inside it do.
+	return effectiveRootStorePolicy(nil, strictReadonly).runMaintenance
 }
 
 // readMemoEnvVar turns the per-command http read memo off when set to "0": an
@@ -1992,7 +2053,7 @@ var rootCmd = &cobra.Command{
 		// ahead of version tracking, because that is the first step a preview
 		// has to change.
 		previewMode := isPreviewCommand(cmd)
-		policy := effectiveRootStorePolicy(cmd.Name(), readonlyMode)
+		policy := effectiveRootStorePolicy(cmd, readonlyMode)
 		useReadOnly := policy.readOnly || previewMode
 
 		// dc-6jaq: consult the migration freeze marker here, before any of
@@ -2004,7 +2065,7 @@ var rootCmd = &cobra.Command{
 		// catch a frozen write first. By then the most dangerous writes this
 		// gate exists to prevent would already be done. useReadOnly already
 		// carries the exact classification this early gate must skip (strict
-		// --readonly, or a command on the read-only allowlist) — reusing it
+		// --readonly, or a classified read — flag-aware since GH#8264) — reusing it
 		// here means there is no second, independently-maintained list of
 		// "write" commands to drift out of sync with the one useReadOnly is
 		// built from. An explicit --dry-run/--inspect preview also sets
@@ -2638,7 +2699,9 @@ var rootCmd = &cobra.Command{
 				// Auto-push: push to Dolt remote if enabled and due.
 				// Skip for read-only commands to avoid unnecessary network operations
 				// and metadata writes on commands like bd list/show/ready (GH#2191).
-				if !isReadOnlyCommand(cmd.Name()) {
+				// The write-flag forms of classified reads push like any other
+				// writer (GH#8264).
+				if shouldRunPostCommandAutoPush(cmd) {
 					runPostRunAutoPush(rootCtx)
 				}
 
@@ -2775,10 +2838,19 @@ func writeMemDiagnostics(memProfileFlag string) {
 }
 
 func shouldRunPostCommandAutoExport(cmd *cobra.Command) bool {
-	if cmd == nil {
-		return true
-	}
-	return !isReadOnlyCommand(cmd.Name())
+	// The per-invocation verdict, not the leaf-name allowlist: the write-flag
+	// forms of classified reads (`bd ready --claim`, `bd duplicates
+	// --auto-merge`) reach post-run export like any other writer, while the
+	// plain listings stay reads (GH#2191, GH#8264).
+	return !commandReadsOnly(cmd)
+}
+
+// shouldRunPostCommandAutoPush mirrors shouldRunPostCommandAutoExport: the
+// write-flag forms of classified reads push like any other writer; the plain
+// listings skip the network round trip and its metadata writes (GH#2191,
+// GH#8264).
+func shouldRunPostCommandAutoPush(cmd *cobra.Command) bool {
+	return !commandReadsOnly(cmd)
 }
 
 func shouldRunAutoImportJSONL(cmd *cobra.Command, s storage.DoltStorage, useReadOnly, globalFlag, serverMode bool) bool {

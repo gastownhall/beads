@@ -55,7 +55,11 @@ func TestEffectiveRootStorePolicy(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			policy := effectiveRootStorePolicy(tc.command, tc.strictReadonly)
+			cmd, _, err := rootCmd.Find([]string{tc.command})
+			if err != nil || cmd == nil || cmd.Name() != tc.command {
+				t.Fatalf("resolve %q in the command tree: err=%v cmd=%v", tc.command, err, cmd)
+			}
+			policy := effectiveRootStorePolicy(cmd, tc.strictReadonly)
 			if policy.readOnly != tc.wantReadOnly {
 				t.Fatalf("readOnly = %v, want %v", policy.readOnly, tc.wantReadOnly)
 			}
@@ -374,4 +378,48 @@ func withoutGateLockFiles(s readonlyTreeSnapshot) readonlyTreeSnapshot {
 		}
 	}
 	return s
+}
+
+// bd-fwx149 (GH#8264): `bd ready --claim` and `bd duplicates --auto-merge`
+// write, so the per-invocation policy must treat them as writers (schema
+// gate, identity check, JSONL import, auto-export, auto-push), while the
+// plain listings stay reads.
+func TestWritingFlagsOnClassifiedReadsAreWriters(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  *cobra.Command
+		flag string
+	}{
+		{name: "ready --claim", cmd: readyCmd, flag: "claim"},
+		{name: "duplicates --auto-merge", cmd: duplicatesCmd, flag: "auto-merge"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := tc.cmd.Flags().Lookup(tc.flag)
+			if f == nil {
+				t.Fatalf("%s has no --%s flag", tc.cmd.Name(), tc.flag)
+			}
+			t.Cleanup(func() {
+				_ = tc.cmd.Flags().Set(tc.flag, f.DefValue)
+				f.Changed = false
+			})
+
+			// Plain listing stays a read.
+			if !(effectiveRootStorePolicy(tc.cmd, false).readOnly || isPreviewCommand(tc.cmd)) {
+				t.Fatalf("plain %s should stay a classified read", tc.cmd.Name())
+			}
+
+			if err := tc.cmd.Flags().Set(tc.flag, "true"); err != nil {
+				t.Fatal(err)
+			}
+			// Same decision PersistentPreRunE makes for useReadOnly.
+			useReadOnly := effectiveRootStorePolicy(tc.cmd, false).readOnly || isPreviewCommand(tc.cmd)
+			if useReadOnly {
+				t.Errorf("%s writes but opens read-only: skips the schema migrate gate, identity check and JSONL import", tc.name)
+			}
+			if !shouldRunPostCommandAutoExport(tc.cmd) {
+				t.Errorf("%s writes but skips post-command auto-export", tc.name)
+			}
+		})
+	}
 }

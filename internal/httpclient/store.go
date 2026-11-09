@@ -165,16 +165,20 @@ func NewFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, e
 
 // NewReadOnlyFromConfig opens the workspace for a read-only command.
 //
-// It is the same store, WRITABLE, and that is the contract cmd/bd needs rather
-// than a gap. backends.Backend has one read-only hook and cmd/bd opens two
-// postures through it: the root pre-run opens every CLASSIFIED read command
-// here — `bd ready --claim` among them, which claims through the store it is
-// handed — and the non-mutating opens (previews, cross-repo hydration, doctor)
-// open here too. The embedded arm splits the two (OpenForReadOnlyCommand stays
-// writable, OpenReadOnly refuses), but a registered backend gets only this hook,
-// so refusing writes here would break `bd ready --claim` on this backend. What
-// keeps strict --readonly and a preview from writing here is cmd/bd's own
-// chokepoints (CheckReadonly, the preview RunEs), and
+// It is the same store, WRITABLE, and that is the contract this backend's
+// wire surface needs rather than a gap. backends.Backend has one read-only
+// hook and cmd/bd opens two postures through it: the root pre-run opens every
+// CLASSIFIED read command here, and the non-mutating opens (previews,
+// cross-repo hydration, doctor) open here too. Since GH#8264 the write-flag
+// forms of read commands (`bd ready --claim`) no longer open read-only on
+// the CLI, so this hook serves plain listings only from there — but the
+// writable read-open stays an API contract (the served roles claim through
+// stores opened this way against older bd servers), not a gap. The embedded
+// arm splits the two postures (OpenForReadOnlyCommand stays writable,
+// OpenReadOnly refuses), but a registered backend gets only this hook, so
+// refusing writes here would break the claim role against pre-#5510 servers.
+// What keeps strict --readonly and a preview from writing here is cmd/bd's
+// own chokepoints (CheckReadonly, the preview RunEs), and
 // openNonMutatingStoreFromConfig names this arm as the exception to its
 // refuses-writes invariant. TestReadOnlyOpenServesTheClaimBdReadyMakes pins it.
 //

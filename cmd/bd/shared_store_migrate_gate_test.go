@@ -341,3 +341,205 @@ func TestServerModeReadRefusesASchemaItsReadsCannotQuery(t *testing.T) {
 		t.Fatalf("bd list after bd migrate schema: exit %d, want the issue listed\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 	}
 }
+
+// behindSharedServerFixture builds a direct-server workspace whose database is
+// one migration behind by cursor alone — the same shape
+// TestSharedServerVersionBumpDoesNotPromoteCursor regresses — so every open
+// has to refuse to migrate it while reads keep working. Seed issues through
+// the returned store while the cursor is still current; the helper closes the
+// store and regresses the cursor afterwards.
+//
+// Deliberately NO stale .local_version is written: arming the version-bump
+// reconciliation would mix a second migration-refusal source into a test
+// about admission at open, so consent stays the only way out
+// (BD_ALLOW_REMOTE_MIGRATE=0 in the run env).
+func behindSharedServerFixture(t *testing.T, prefix string, seed func(*dolt.DoltStore)) (run func(args ...string) (string, string, int), cursor func() int, behind int) {
+	t.Helper()
+
+	repo := t.TempDir()
+	beadsDir := filepath.Join(repo, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("create .beads: %v", err)
+	}
+	database := uniqueTestDBName(t)
+	if err := (&configfile.Config{
+		Backend:        configfile.BackendDolt,
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: testDoltServerPort,
+		DoltDatabase:   database,
+	}).Save(beadsDir); err != nil {
+		t.Fatalf("save metadata: %v", err)
+	}
+
+	ctx := context.Background()
+	// SetForceAllowRemoteMigrate is deliberately NOT set: the workspace is
+	// created current, so this open migrates nothing, and every later open is
+	// expected to refuse the now-pending migration without consent.
+	store, err := dolt.New(ctx, &dolt.Config{
+		Path:            filepath.Join(beadsDir, "dolt"),
+		BeadsDir:        beadsDir,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testDoltServerPort,
+		Database:        database,
+		CreateIfMissing: true,
+	})
+	if err != nil {
+		t.Fatalf("create test store: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	seed(store)
+	if err := store.Close(); err != nil {
+		t.Fatalf("close setup store: %v", err)
+	}
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+
+	// The local dolt data dir the auto-start shape of the incident had; an
+	// empty one arms no reconciliation of its own (see the note above).
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o755); err != nil {
+		t.Fatalf("create local dolt data dir: %v", err)
+	}
+
+	admin, err := sql.Open("mysql", doltutil.ServerDSN{
+		Host: "127.0.0.1", Port: testDoltServerPort, User: "root", Database: database,
+	}.String())
+	if err != nil {
+		t.Fatalf("connect to test dolt server: %v", err)
+	}
+	t.Cleanup(func() { admin.Close() })
+
+	if _, err := admin.ExecContext(ctx,
+		"DELETE FROM schema_migrations WHERE version = ?", schema.LatestVersion()); err != nil {
+		t.Fatalf("regress schema_migrations: %v", err)
+	}
+	cursor = func() int {
+		var v int
+		if err := admin.QueryRowContext(ctx,
+			"SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&v); err != nil {
+			t.Fatalf("read schema cursor: %v", err)
+		}
+		return v
+	}
+	behind = cursor()
+
+	run = func(args ...string) (string, string, int) {
+		t.Helper()
+		cmd := exec.Command(buildBDForInitTests(t), args...)
+		cmd.Dir = repo
+		cmd.Env = append(filteredEnvForContextBinding("BEADS_DIR", "BEADS_DB", "BD_DB",
+			"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_DATABASE", schema.AllowRemoteMigrateEnv),
+			"HOME="+t.TempDir(),
+			"XDG_CONFIG_HOME="+t.TempDir(),
+			"BEADS_TEST_MODE=1",
+			"BEADS_TEST_SERVER=1",
+			"BEADS_ACTOR=tester",
+			"BEADS_DIR="+beadsDir,
+			schema.AllowRemoteMigrateEnv+"=0",
+		)
+		var stdout, stderr strings.Builder
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		code := 0
+		if err := cmd.Run(); err != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("running bd %v: %v", args, err)
+			}
+			code = exitErr.ExitCode()
+		}
+		return stdout.String(), stderr.String(), code
+	}
+	return run, cursor, behind
+}
+
+// TestSharedServerWriteFlagsOnReadCommandsAreRefused reproduces
+// gastownhall/beads#8264 end to end, through the real CLI. `bd ready --claim`
+// and `bd duplicates --auto-merge` write, but their leaf names sit on the
+// read-only allowlist, so on a shared server one migration behind they opened
+// read-only, skipped the migration gate the other writers are refused by, and
+// mutated anyway. After the fix they select the writer admission
+// `bd update --claim` already gets: same refusal, same untouched cursor, and
+// the plain listings plus the merge preview keep working through the window.
+// Consent then completes the upgrade and both forms work again on the
+// current schema.
+func TestSharedServerWriteFlagsOnReadCommandsAreRefused(t *testing.T) {
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available, skipping")
+	}
+
+	t.Run("ready_claim", func(t *testing.T) {
+		const prefix = "wfr"
+		run, cursor, behind := behindSharedServerFixture(t, prefix, func(store *dolt.DoltStore) {
+			now := time.Now()
+			for _, issue := range []*types.Issue{
+				{ID: prefix + "-1", Title: "First claimable through the window", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+				{ID: prefix + "-2", Title: "Second claimable through the window", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+			} {
+				if err := store.CreateIssue(context.Background(), issue, "test-user"); err != nil {
+					t.Fatalf("seed %s: %v", issue.ID, err)
+				}
+			}
+		})
+
+		// The plain listing keeps reading through the window.
+		stdout, stderr, code := run("ready")
+		if code != 0 {
+			t.Fatalf("bd ready exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		if !strings.Contains(stdout, "First claimable through the window") {
+			t.Errorf("bd ready did not render the seeded issue on the old schema:\n%s", stdout)
+		}
+
+		// Control: an unambiguous writer is refused with the shared-store
+		// guidance.
+		stdout, stderr, code = run("update", prefix+"-2", "--claim")
+		if code == 0 {
+			t.Fatalf("bd update --claim succeeded on a behind shared database\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if !strings.Contains(stderr, "co-resident") {
+			t.Errorf("bd update --claim refusal missing the shared-store guidance:\n%s", stderr)
+		}
+
+		// The affected write: same refusal, nothing claimed, cursor intact.
+		stdout, stderr, code = run("ready", "--claim")
+		if code == 0 {
+			t.Fatalf("bd ready --claim succeeded on a behind shared database\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if !strings.Contains(stderr, "co-resident") {
+			t.Errorf("bd ready --claim refusal missing the shared-store guidance:\n%s", stderr)
+		}
+		if got := cursor(); got != behind {
+			t.Fatalf("the refused claim promoted the schema cursor from %d to %d", behind, got)
+		}
+		for _, id := range []string{prefix + "-1", prefix + "-2"} {
+			out, _, claimCode := run("show", id, "--json")
+			if claimCode != 0 {
+				t.Fatalf("bd show %s exit = %d\n%s", id, claimCode, out)
+			}
+			if !strings.Contains(out, `"status": "open"`) {
+				t.Errorf("%s was mutated by a refused ready --claim:\n%s", id, out)
+			}
+			if strings.Contains(out, `"assignee": "tester"`) {
+				t.Errorf("%s was claimed by a refused ready --claim:\n%s", id, out)
+			}
+		}
+
+		// Consent completes the upgrade and the claim works again.
+		stdout, stderr, code = run("migrate", "schema")
+		if code != 0 {
+			t.Fatalf("bd migrate schema exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		if got := cursor(); got != schema.LatestVersion() {
+			t.Fatalf("cursor = %d after bd migrate schema, want %d", got, schema.LatestVersion())
+		}
+		stdout, stderr, code = run("ready", "--claim")
+		if code != 0 {
+			t.Fatalf("bd ready --claim on the migrated schema exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		if !strings.Contains(stdout, "Claimed issue") {
+			t.Errorf("bd ready --claim on the migrated schema did not claim:\n%s", stdout)
+		}
+	})
+}
