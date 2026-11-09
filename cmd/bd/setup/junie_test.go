@@ -1,9 +1,13 @@
 package setup
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -589,3 +593,152 @@ func TestRemoveJunieKeepsDirsItDidNotEmpty(t *testing.T) {
 		})
 	}
 }
+
+// junieGuidelinesSHA256 pins the bytes bd setup junie writes to
+// .junie/guidelines.md. GH#5563 changed only the command the MCP config
+// launches, so the guidelines file must come out byte-identical to what bd
+// wrote before that fix. An intended guidelines edit updates this hash in the
+// same change.
+const junieGuidelinesSHA256 = "15998dff7549a774df8cd7eb838f997f098fffff4a66efc22dd063a0ba66c382"
+
+func junieSHA256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// No-change proof for the paths GH#5563 does not touch: a fresh install, and
+// a re-run over the config an older bd wrote (one launching the nonexistent
+// "bd mcp"), both leave .junie/guidelines.md at the pinned bytes and leave a
+// file bd does not own under .junie as it was. Only the MCP config changes,
+// and it changes to exactly the uvx beads-mcp entry, not to any other JSON.
+func TestInstallJunieLeavesUntouchedPathsUnchanged(t *testing.T) {
+	t.Run("fresh install", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		if err := InstallJunie(); err != nil {
+			t.Fatalf("InstallJunie: %v", err)
+		}
+		got, err := os.ReadFile(".junie/guidelines.md")
+		if err != nil {
+			t.Fatalf("read guidelines: %v", err)
+		}
+		if h := junieSHA256Hex(got); h != junieGuidelinesSHA256 {
+			t.Errorf("guidelines.md sha256 = %s, want unchanged %s", h, junieGuidelinesSHA256)
+		}
+	})
+
+	t.Run("over a stale bd mcp config", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		if err := os.MkdirAll(".junie/mcp", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		stale := `{"mcpServers":{"beads":{"command":"bd","args":["mcp"]}}}`
+		userNote := "kept by the user\n"
+		for path, data := range map[string]string{
+			".junie/guidelines.md": junieGuidelinesTemplate,
+			".junie/mcp/mcp.json":  stale,
+			".junie/notes.md":      userNote,
+		} {
+			if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		if err := InstallJunie(); err != nil {
+			t.Fatalf("InstallJunie: %v", err)
+		}
+
+		got, err := os.ReadFile(".junie/guidelines.md")
+		if err != nil {
+			t.Fatalf("read guidelines: %v", err)
+		}
+		if h := junieSHA256Hex(got); h != junieGuidelinesSHA256 {
+			t.Errorf("guidelines.md sha256 = %s, want unchanged %s", h, junieGuidelinesSHA256)
+		}
+		if note, err := os.ReadFile(".junie/notes.md"); err != nil || string(note) != userNote {
+			t.Errorf(".junie/notes.md = %q, %v; want it untouched", note, err)
+		}
+		mcp, err := os.ReadFile(".junie/mcp/mcp.json")
+		if err != nil {
+			t.Fatalf("read MCP config: %v", err)
+		}
+		if string(mcp) == stale || strings.Contains(string(mcp), `"mcp"`) {
+			t.Errorf("stale bd mcp config was not replaced: %s", mcp)
+		}
+		// The replacement must be the exact uvx beads-mcp entry, so
+		// arbitrary other JSON cannot satisfy this test.
+		var gotCfg map[string]interface{}
+		if err := json.Unmarshal(mcp, &gotCfg); err != nil {
+			t.Fatalf("MCP config is not JSON: %v", err)
+		}
+		servers, _ := gotCfg["mcpServers"].(map[string]interface{})
+		entry, _ := servers["beads"].(map[string]interface{})
+		want := map[string]interface{}{"command": "uvx", "args": []interface{}{"beads-mcp"}}
+		if !reflect.DeepEqual(entry, want) {
+			t.Errorf("replaced MCP entry = %v, want exactly %v", entry, want)
+		}
+	})
+}
+
+// Identity and fingerprint invariant: GH#5563 changes what the beads MCP
+// entry launches, not which entry it is. The file stays at
+// .junie/mcp/mcp.json, holds exactly one server named "beads" (the name an
+// existing Junie setup knows it by), that entry carries only command and
+// args, the file decodes to exactly what junieMCPConfig renders, and its
+// sha256 is the same on every run, so re-running bd setup junie converges on
+// one file.
+func TestJunieMCPConfigIdentityAndFingerprintInvariant(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	if err := InstallJunie(); err != nil {
+		t.Fatalf("first InstallJunie: %v", err)
+	}
+	first, err := os.ReadFile(".junie/mcp/mcp.json")
+	if err != nil {
+		t.Fatalf("read MCP config: %v", err)
+	}
+	if err := InstallJunie(); err != nil {
+		t.Fatalf("second InstallJunie: %v", err)
+	}
+	second, err := os.ReadFile(".junie/mcp/mcp.json")
+	if err != nil {
+		t.Fatalf("read MCP config: %v", err)
+	}
+	if a, b := junieSHA256Hex(first), junieSHA256Hex(second); a != b {
+		t.Errorf("MCP config fingerprint changed across runs: %s then %s", a, b)
+	}
+
+	var got map[string]interface{}
+	if err := json.Unmarshal(first, &got); err != nil {
+		t.Fatalf("MCP config is not JSON: %v", err)
+	}
+	servers, _ := got["mcpServers"].(map[string]interface{})
+	if keys := sortedJunieKeys(servers); !reflect.DeepEqual(keys, []string{"beads"}) {
+		t.Errorf("mcpServers names = %v, want exactly [beads]", keys)
+	}
+	entry, _ := servers["beads"].(map[string]interface{})
+	if keys := sortedJunieKeys(entry); !reflect.DeepEqual(keys, []string{"args", "command"}) {
+		t.Errorf("beads entry keys = %v, want exactly [args command]", keys)
+	}
+
+	rendered, err := json.Marshal(junieMCPConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want map[string]interface{}
+	if err := json.Unmarshal(rendered, &want); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("written MCP config = %v, want what junieMCPConfig renders %v", got, want)
+	}
+}
+
+func sortedJunieKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
