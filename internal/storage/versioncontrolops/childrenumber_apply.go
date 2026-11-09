@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -58,6 +59,9 @@ func RenumberChildrenAndMerge(ctx context.Context, conn *sql.Conn, branch, ref, 
 			return report, err
 		}
 		report.RenameCommit = commit
+		if report.Mentions, err = findChildIDMentions(ctx, conn, report.Renames); err != nil {
+			return report, err
+		}
 	}
 
 	// Merge the head the plan was made against, not the ref, so a fetch
@@ -66,6 +70,9 @@ func RenumberChildrenAndMerge(ctx context.Context, conn *sql.Conn, branch, ref, 
 		return report, fmt.Errorf("merge %s (%s): %w", ref, report.RemoteHead, err)
 	}
 	report.Merged = true
+	if err := conn.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&report.Head); err != nil {
+		return report, fmt.Errorf("renumber children: read head after merge: %w", err)
+	}
 	return report, nil
 }
 
@@ -196,3 +203,108 @@ func childRenumberCommitMessage(renames []storage.ChildRenumber) string {
 	}
 	return b.String()
 }
+
+// mentionFields are the issue text fields searched for renamed ids, in the
+// column order findChildIDMentions selects them.
+var mentionFields = []string{"title", "description", "design", "acceptance_criteria", "notes"}
+
+// findChildIDMentions lists the local issue fields and comments whose text
+// names a renamed id, ordered by issue, field, comment and id. It reads the
+// committed renames, before the merge brings in the remote's text.
+func findChildIDMentions(ctx context.Context, conn *sql.Conn, renames []storage.ChildRenumber) ([]storage.ChildIDMention, error) {
+	var mentions []storage.ChildIDMention
+	issueRows, err := conn.QueryContext(ctx,
+		"SELECT id, title, description, design, acceptance_criteria, notes FROM issues")
+	if err != nil {
+		return nil, fmt.Errorf("renumber children: read text: %w", err)
+	}
+	for issueRows.Next() {
+		var id string
+		texts := make([]sql.NullString, len(mentionFields))
+		dests := []any{&id}
+		for i := range texts {
+			dests = append(dests, &texts[i])
+		}
+		if err := issueRows.Scan(dests...); err != nil {
+			_ = issueRows.Close()
+			return nil, fmt.Errorf("renumber children: read text: %w", err)
+		}
+		for i, text := range texts {
+			mentions = appendChildIDMentions(mentions, storage.ChildIDMention{IssueID: id, Field: mentionFields[i]}, text.String, renames)
+		}
+	}
+	_ = issueRows.Close()
+	if err := issueRows.Err(); err != nil {
+		return nil, fmt.Errorf("renumber children: read text: %w", err)
+	}
+
+	commentRows, err := conn.QueryContext(ctx, "SELECT id, issue_id, text FROM comments")
+	if err != nil {
+		return nil, fmt.Errorf("renumber children: read comments: %w", err)
+	}
+	for commentRows.Next() {
+		var id, issueID string
+		var text sql.NullString
+		if err := commentRows.Scan(&id, &issueID, &text); err != nil {
+			_ = commentRows.Close()
+			return nil, fmt.Errorf("renumber children: read comments: %w", err)
+		}
+		mentions = appendChildIDMentions(mentions, storage.ChildIDMention{IssueID: issueID, Field: "comment", CommentID: id}, text.String, renames)
+	}
+	_ = commentRows.Close()
+	if err := commentRows.Err(); err != nil {
+		return nil, fmt.Errorf("renumber children: read comments: %w", err)
+	}
+
+	sort.Slice(mentions, func(i, j int) bool {
+		a, b := mentions[i], mentions[j]
+		if a.IssueID != b.IssueID {
+			return a.IssueID < b.IssueID
+		}
+		if a.Field != b.Field {
+			return a.Field < b.Field
+		}
+		if a.CommentID != b.CommentID {
+			return a.CommentID < b.CommentID
+		}
+		return a.ID < b.ID
+	})
+	return mentions, nil
+}
+
+func appendChildIDMentions(mentions []storage.ChildIDMention, where storage.ChildIDMention, text string, renames []storage.ChildRenumber) []storage.ChildIDMention {
+	for _, r := range renames {
+		if namesID(text, r.From) {
+			m := where
+			m.ID, m.RenamedTo = r.From, r.To
+			mentions = append(mentions, m)
+		}
+	}
+	return mentions
+}
+
+// namesID reports whether text names id as a whole id: not inside a longer
+// token (bd-p.721) and not as the prefix of a child (bd-p.72.1). A trailing
+// sentence period still counts.
+func namesID(text, id string) bool {
+	for from := 0; ; {
+		i := strings.Index(text[from:], id)
+		if i < 0 {
+			return false
+		}
+		start, end := from+i, from+i+len(id)
+		before := start == 0 || !isIDByte(text[start-1])
+		after := end == len(text) || !isIDByte(text[end]) ||
+			(text[end] == '.' && (end+1 == len(text) || !isDigit(text[end+1])))
+		if before && after {
+			return true
+		}
+		from = start + 1
+	}
+}
+
+func isIDByte(c byte) bool {
+	return isDigit(c) || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '-' || c == '_' || c == '.'
+}
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }

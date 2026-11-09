@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -55,6 +56,19 @@ func runPullRenumberChildren(ctx context.Context, st storage.DoltStorage, remote
 	if !ok {
 		return HandleError("storage backend %T does not support --renumber-children", storage.UnwrapStore(st))
 	}
+	if jsonOutput {
+		report, err := puller.PullRenumberChildren(ctx, remote, getActor())
+		if report == nil && err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		if werr := writeChildRenumberJSON(os.Stdout, report, err); werr != nil {
+			return werr
+		}
+		if err != nil {
+			return SilentExit()
+		}
+		return nil
+	}
 	if remote != "" {
 		fmt.Printf("Pulling from Dolt remote %q, renumbering colliding children...\n", remote)
 	} else {
@@ -85,4 +99,33 @@ func writeChildRenumberResult(w io.Writer, report *storage.ChildRenumberReport) 
 	for _, r := range report.Renames {
 		fmt.Fprintf(w, "  %s -> %s\n", r.From, r.To)
 	}
+	if len(report.Mentions) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "Text naming a renamed id, left as written:")
+	for _, m := range report.Mentions {
+		if m.Field == "comment" {
+			fmt.Fprintf(w, "  %s comment %s: %s (now %s)\n", m.IssueID, m.CommentID, m.ID, m.RenamedTo)
+		} else {
+			fmt.Fprintf(w, "  %s %s: %s (now %s)\n", m.IssueID, m.Field, m.ID, m.RenamedTo)
+		}
+	}
+}
+
+// writeChildRenumberJSON writes a renumbering pull's result, and the pull's
+// error when it failed after reporting, as one JSON object.
+func writeChildRenumberJSON(w io.Writer, report *storage.ChildRenumberReport, pullErr error) error {
+	result := struct {
+		*storage.ChildRenumberReport
+		Error string `json:"error,omitempty"`
+	}{ChildRenumberReport: report}
+	if pullErr != nil {
+		result.Error = pullErr.Error()
+	}
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(wrapWithSchemaVersion(result)); err != nil {
+		return fmt.Errorf("encoding JSON: %v", err)
+	}
+	return nil
 }

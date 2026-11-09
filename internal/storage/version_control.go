@@ -179,6 +179,21 @@ type ChildRenumberReport struct {
 	RenameCommit string `json:"rename_commit,omitempty"`
 	// Merged reports that the remote head was merged after the renames.
 	Merged bool `json:"merged"`
+	// Head is the branch head the pull ended on, once merged.
+	Head string `json:"head,omitempty"`
+	// Mentions lists local text that names a renamed id. The text is left
+	// as written: after the merge such an id names the remote's issue.
+	Mentions []ChildIDMention `json:"mentions,omitempty"`
+}
+
+// ChildIDMention is one field or comment of IssueID whose text names ID, an
+// id the pull renamed to RenamedTo. CommentID is set when Field is "comment".
+type ChildIDMention struct {
+	IssueID   string `json:"issue_id"`
+	Field     string `json:"field"`
+	CommentID string `json:"comment_id,omitempty"`
+	ID        string `json:"id"`
+	RenamedTo string `json:"renamed_to"`
 }
 
 // ChildRenumberPlanner is the optional read-only half of `bd dolt pull
