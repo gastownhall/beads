@@ -252,6 +252,63 @@ func requestSizes(reqs []issueops.DeleteRequest) []int {
 	return sizes
 }
 
+// assertExportBookkeeping pins the GH#5896 handoff to auto-export: a write
+// happened, and exactly the committed ids are recorded as deleted. Without
+// it the export's orphan guard sees them as JSONL-only records and wedges.
+// (From GH#8103.)
+func assertExportBookkeeping(t *testing.T, committed, notCommitted []string) {
+	t.Helper()
+	if !commandDidWrite.Load() {
+		t.Error("commandDidWrite is false after committed batches; auto-export would skip the write")
+	}
+	for _, id := range committed {
+		if !commandDeletedIssueIDs.has(id) {
+			t.Errorf("committed id %s is not in commandDeletedIssueIDs; the export orphan guard would wedge on it", id)
+			break
+		}
+	}
+	for _, id := range notCommitted {
+		if commandDeletedIssueIDs.has(id) {
+			t.Errorf("id %s of an uncommitted batch is in commandDeletedIssueIDs", id)
+			break
+		}
+	}
+}
+
+// TestWispPurgeClosedForceCommitsInBoundedBatches is GH#8103's regression
+// test for GH#4684, on a selection that is not a multiple of the chunk size:
+// every request stays within the 200 wisps deleteWispBatch commits at once,
+// is a forced, non-cascading, real delete, and together the requests delete
+// every candidate exactly once, each recorded for auto-export.
+func TestWispPurgeClosedForceCommitsInBoundedBatches(t *testing.T) {
+	s := useWispPurgeStub(t, 401)
+
+	stdout, stderr, err := captureWispGC(t, func() error {
+		return runWispPurgeClosed(context.Background(), false, true, nil)
+	})
+	if err != nil {
+		t.Fatalf("runWispPurgeClosed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+
+	if len(s.deleter.requests) < 2 {
+		t.Fatalf("401 closed wisps went out in %d delete request(s); want one per batch of at most 200", len(s.deleter.requests))
+	}
+	var got []string
+	for i, req := range s.deleter.requests {
+		if len(req.IDs) > 200 {
+			t.Errorf("request %d carries %d wisps; one transaction must carry at most 200", i+1, len(req.IDs))
+		}
+		if !req.Force || req.Cascade || req.DryRun {
+			t.Errorf("request %d: Force=%v Cascade=%v DryRun=%v; want a forced, non-cascading, real delete", i+1, req.Force, req.Cascade, req.DryRun)
+		}
+		got = append(got, req.IDs...)
+	}
+	if !slices.Equal(got, s.closed) {
+		t.Errorf("batches deleted %d ids; want each of the %d candidates once, in order", len(got), len(s.closed))
+	}
+	assertExportBookkeeping(t, s.closed, nil)
+}
+
 // TestWispPurgeClosedSubmitsBoundedChunks pins that a forced closed purge on
 // the direct route hands the deletion role the selection in sequential
 // requests of at most 200 ids, in selection order, each forced and uncascaded,
@@ -287,6 +344,7 @@ func TestWispPurgeClosedSubmitsBoundedChunks(t *testing.T) {
 	if !bytes.Contains([]byte(stdout), []byte("Deleted 450 issue(s)")) {
 		t.Errorf("stdout does not confirm 450 deletions:\n%s", stdout)
 	}
+	assertExportBookkeeping(t, s.closed, nil)
 }
 
 // TestWispPurgeClosedSkipsPerIDResolution pins that the forced purge does not
