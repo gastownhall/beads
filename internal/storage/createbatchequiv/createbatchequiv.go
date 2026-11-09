@@ -105,7 +105,7 @@ func largeScenarios() []scenario {
 // recorded from the code BEFORE the batch-create fast paths existed
 // (ebe3b6bcb), so the check holds the current code — fast and per-row
 // bodies alike, including changes the fast-path switch does not gate — to
-// what that code stored, apart from four deliberate behavior changes since.
+// what that code stored, apart from five deliberate behavior changes since.
 //
 // First, the create role defaults an empty created_by to the request's actor
 // (issueops.PreparePublicCreateRequest), so apply.json's issues, wisps and
@@ -143,6 +143,12 @@ func largeScenarios() []scenario {
 // comes bright, and the I and J lines read eq-zI-b=open/0 eq-zI-c@w=open/0
 // where they read /1. That is what BlockedStateInvariant asks once nothing
 // outside the cycle blocks it. No row count moved.
+//
+// Fifth, waitsfor.json's comments, events and events_ids digests were
+// re-recorded when a reasoned reopen started writing its reason as a
+// structured comment instead of an audit commented event (GH#5593). Step
+// fs.c1's reopen ("again") now leaves one comments row, compared without its
+// wall-clock id, and one fewer events row; nothing else moved.
 //
 // settled.json is younger than the rest: it was recorded from the code before
 // the blocked-state settled-row shortcut (fd54802bc8), on the embedded and the
@@ -543,10 +549,12 @@ func applyScenario(t *testing.T, open Open, sc scenario, perRow bool) Outcome {
 		"wisp_dependencies": "SELECT id, issue_id, " + issueops.DepTargetExpr + ", type, created_by, metadata FROM wisp_dependencies",
 		// created_at is wall clock (and so is every id derived from it); the
 		// rest of the row, with multiplicity, is the comparable content.
-		"events":         "SELECT issue_id, event_type, actor, old_value, new_value, comment FROM events",
-		"wisp_events":    "SELECT issue_id, event_type, actor, old_value, new_value, comment FROM wisp_events",
-		"events_ids":     "SELECT COUNT(*), COUNT(DISTINCT id) FROM events",
-		"comments":       "SELECT id, issue_id, author, text FROM comments",
+		"events":      "SELECT issue_id, event_type, actor, old_value, new_value, comment FROM events",
+		"wisp_events": "SELECT issue_id, event_type, actor, old_value, new_value, comment FROM wisp_events",
+		"events_ids":  "SELECT COUNT(*), COUNT(DISTINCT id) FROM events",
+		// A live comment's created_at is wall clock, and so is the id derived
+		// from it (waitsfor's reopen comment); only stamped comments keep theirs.
+		"comments":       "SELECT CASE WHEN created_at < '2026-06-01' THEN id ELSE '' END, issue_id, author, text FROM comments",
 		"child_counters": "SELECT parent_id, last_child FROM child_counters",
 		"issue_versions": "SELECT issue_id, revision, change_actor FROM issue_versions",
 	} {

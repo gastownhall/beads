@@ -96,11 +96,12 @@ func (s *testSuite) uccReopenReasonComment() {
 		domain.ReopenIssueParams{Reason: "qa found a regression"}, "tester")
 	s.Require().NoError(err)
 
-	var comment string
+	var author, text string
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
-		"SELECT comment FROM events WHERE issue_id = ? AND event_type = ?",
-		"bd-ucc-ro-cmt", string(types.EventCommented)).Scan(&comment))
-	s.Equal("qa found a regression", comment)
+		"SELECT author, text FROM comments WHERE issue_id = ?",
+		"bd-ucc-ro-cmt").Scan(&author, &text))
+	s.Equal("tester", author)
+	s.Equal("qa found a regression", text)
 }
 
 func (s *testSuite) uccReopenCustomNonDoneReportsNotReopened() {

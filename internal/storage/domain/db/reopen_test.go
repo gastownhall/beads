@@ -142,11 +142,18 @@ func (s *testSuite) reopenAppendsComment() {
 		domain.ReopenRowParams{Reason: "regression spotted"}, "tester", domain.IssueTableOpts{})
 	s.Require().NoError(err)
 
-	var comment string
+	var author, text string
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
-		"SELECT comment FROM events WHERE issue_id = ? AND event_type = ?",
-		"bd-ro-cmt", string(types.EventCommented)).Scan(&comment))
-	s.Equal("regression spotted", comment)
+		"SELECT author, text FROM comments WHERE issue_id = ?",
+		"bd-ro-cmt").Scan(&author, &text))
+	s.Equal("tester", author)
+	s.Equal("regression spotted", text)
+
+	var auditCount int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
+		"bd-ro-cmt", string(types.EventCommented)).Scan(&auditCount))
+	s.Equal(0, auditCount)
 }
 
 func (s *testSuite) reopenNoCommentEmptyReason() {
@@ -162,8 +169,8 @@ func (s *testSuite) reopenNoCommentEmptyReason() {
 
 	var cmtCount int
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
-		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
-		"bd-ro-nocmt", string(types.EventCommented)).Scan(&cmtCount))
+		"SELECT COUNT(*) FROM comments WHERE issue_id = ?",
+		"bd-ro-nocmt").Scan(&cmtCount))
 	s.Equal(0, cmtCount)
 }
 
@@ -203,7 +210,7 @@ func (s *testSuite) reopenCustomDonePermanent() {
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?", "bd-ro-custom-done", string(types.EventReopened)).Scan(&reopened))
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
-		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?", "bd-ro-custom-done", string(types.EventCommented)).Scan(&comments))
+		"SELECT COUNT(*) FROM comments WHERE issue_id = ?", "bd-ro-custom-done").Scan(&comments))
 	s.Equal(1, reopened)
 	s.Equal(1, comments)
 }
@@ -317,7 +324,7 @@ func (s *testSuite) reopenConfigurationFailureRollsBack() {
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?", "bd-ro-config-failure", string(types.EventReopened)).Scan(&reopened))
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
-		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?", "bd-ro-config-failure", string(types.EventCommented)).Scan(&comments))
+		"SELECT COUNT(*) FROM comments WHERE issue_id = ?", "bd-ro-config-failure").Scan(&comments))
 	s.Equal(0, reopened)
 	s.Equal(0, comments)
 }

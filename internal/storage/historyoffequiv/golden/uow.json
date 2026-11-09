@@ -104,8 +104,8 @@
         "text",
         "created_at"
       ],
-      "rows": 2,
-      "sha256": "5b88b60c5a975432baff9ecfc6d0230e3bdc12275471a2db90c6f36b80ab4561"
+      "rows": 3,
+      "sha256": "773d01bf603acf3ef7b9bd81b6c177834d32fb911f8b633cf7a5426e3457c3e8"
     },
     "compaction_snapshots": {
       "columns": [
@@ -168,8 +168,8 @@
         "created_at",
         "id"
       ],
-      "rows": 39,
-      "sha256": "372c6143415ba862a0d951695e2c942670fc0a24a3b828d6755df97dbb34ade1"
+      "rows": 38,
+      "sha256": "133568ed850bdb9a027b8a8efd2dd734214f59c04aa9386df9643786e3ac1f05"
     },
     "federation_peers": {
       "columns": [
@@ -423,8 +423,8 @@
         "text",
         "created_at"
       ],
-      "rows": 2,
-      "sha256": "3c5f1e3eac9ff32fb1158c4421909ddd49c9131edff756c4a0e184114da93350"
+      "rows": 3,
+      "sha256": "195d46f02f34b1e752870c212932e7831cd50d20e4f85ce621a71ff5256e7389"
     },
     "wisp_dependencies": {
       "columns": [
@@ -453,8 +453,8 @@
         "comment",
         "created_at"
       ],
-      "rows": 27,
-      "sha256": "34d262640e93ffdc948862667d4bc5f01a9f655bc22d8e11abdfc777731a5771"
+      "rows": 26,
+      "sha256": "02b8b642c23ed2918aeab79ba9d848c774cb6dae75a47696c962c254befbcbb0"
     },
     "wisp_labels": {
       "columns": [

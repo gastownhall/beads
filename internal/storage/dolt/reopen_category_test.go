@@ -77,17 +77,21 @@ func TestReopenIssueCategorySemantics(t *testing.T) {
 			t.Fatal("permanent reopen did not create a Dolt commit")
 		}
 
-		var reopened, comments int
+		var reopened, auditComments, comments int
 		if err := store.db.QueryRowContext(ctx,
 			"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?", id, string(types.EventReopened)).Scan(&reopened); err != nil {
 			t.Fatalf("count reopened events: %v", err)
 		}
 		if err := store.db.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?", id, string(types.EventCommented)).Scan(&comments); err != nil {
+			"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?", id, string(types.EventCommented)).Scan(&auditComments); err != nil {
 			t.Fatalf("count comment events: %v", err)
 		}
-		if reopened != 1 || comments != 1 {
-			t.Fatalf("events = reopened:%d comments:%d, want 1 each", reopened, comments)
+		if err := store.db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM comments WHERE issue_id = ? AND author = ? AND text = ?", id, "tester", "needs review").Scan(&comments); err != nil {
+			t.Fatalf("count comments: %v", err)
+		}
+		if reopened != 1 || auditComments != 0 || comments != 1 {
+			t.Fatalf("reopened events:%d audit commented events:%d comments:%d, want 1, 0, 1", reopened, auditComments, comments)
 		}
 	})
 
