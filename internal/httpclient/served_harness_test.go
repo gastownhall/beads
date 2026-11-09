@@ -479,6 +479,10 @@ func servedJournalMutations(reference *embeddeddolt.EmbeddedDoltStore) conforman
 		Comment: func(ctx context.Context, id, text string) error {
 			return reference.AddComment(ctx, id, "actor", text)
 		},
+		// Every hook above acts as "actor" except Delete: the reference store's
+		// DeleteIssue takes no actor, so its record names none.
+		Actor:           "actor",
+		ActorlessDelete: true,
 	}
 }
 

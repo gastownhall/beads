@@ -471,6 +471,7 @@ var roleContractCases = []roleContract{
 		RunJournalArrivalReimportKeepsTheStamp,
 		RunJournalArrivalFirstCreateRecordStampsAnUnstampedRow,
 		RunJournalArrivalRenameKeepsTheStamp,
+		RunJournalEveryMutationKindRecordsItsActor,
 		RunJournalEveryMutationKindLandsARow,
 	),
 
