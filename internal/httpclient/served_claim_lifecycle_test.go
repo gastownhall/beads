@@ -420,6 +420,10 @@ func TestServedLifecycleCloseAndReopenRequireActorAndIssueID(t *testing.T) {
 	conformance.RunLifecycleCloseAndReopenRequireActorAndIssueID(t, t.Context(), newServedCloseReopenFixture(t, "hlra"))
 }
 
+func TestServedLifecycleEventActorMatchesTheRequest(t *testing.T) {
+	conformance.RunLifecycleEventActorMatchesTheRequest(t, t.Context(), newServedCloseReopenFixture(t, "hlea"))
+}
+
 // TestServedLifecycleReopenProvenanceLabelsHistory is PARKED: reopenIssue
 // publishes no provenance member and the server writes its own fixed label, so
 // the client refuses the field rather than letting a caller believe their label

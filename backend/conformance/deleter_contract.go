@@ -796,6 +796,72 @@ func RunDeleterRewritesReferencesInNeighbors(t *testing.T, ctx context.Context, 
 	}
 }
 
+// RunDeleterAttributesTheRewriteToTheActor pins the one place a deletion's
+// attribution SURVIVES it (issueops/deleter.go, DeleteRequest.Actor: "It DOES
+// reach the rewritten neighbors, which survive, so a workspace that cares who
+// rewrote a description passes one"): everything the deletion records in a
+// surviving neighbor's history names the request's Actor.
+//
+// THE EMPTY ACTOR IS HALF THE CASE. The role accepts one ("an empty Actor is
+// accepted"), and the served handler infers none ("NO ACTOR IS INFERRED"), so
+// the answer on every leg is a deletion that succeeds and a rewrite entry that
+// names NO ONE — never an identity the implementation made up, which a reader
+// of that history would take for a real writer. A whitespace-only actor is
+// deliberately not asserted: the store legs record it verbatim and the served
+// client omits it, and which answer is right has not been ruled.
+//
+// The deleted row's own history goes with it (DeleteResult.Events), so the
+// neighbor's is the only history a case can read the attribution from.
+func RunDeleterAttributesTheRewriteToTheActor(t *testing.T, ctx context.Context, fixture DeleterFixture) {
+	t.Helper()
+	for _, test := range []struct{ name, tag, actor string }{
+		{"a named actor", "attr", "deleter-attribution"},
+		{"an empty actor", "attr-none", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			target := deleterSeedIssue(t, ctx, fixture, test.tag, "target")
+			neighbor := deleterIssue(fixture, test.tag, "neighbor", false)
+			neighbor.Description = "blocked by " + target + "."
+			deleterSeed(t, ctx, fixture, neighbor)
+			deleterAddEdge(t, ctx, fixture, neighbor.ID, target)
+
+			total := deleterEventsBy(t, ctx, fixture, neighbor.ID, nil)
+			mine := deleterEventsBy(t, ctx, fixture, neighbor.ID, &test.actor)
+			result := deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+				IDs: []string{target}, Force: true, Actor: test.actor,
+			})
+			if result.ReferencesUpdated != 1 {
+				t.Fatalf("ReferencesUpdated = %d, want 1: the neighbor's rewrite is the history this case reads", result.ReferencesUpdated)
+			}
+			added := deleterEventsBy(t, ctx, fixture, neighbor.ID, nil) - total
+			attributed := deleterEventsBy(t, ctx, fixture, neighbor.ID, &test.actor) - mine
+			if added < 1 {
+				t.Errorf("the rewrite of %s recorded no history entry: the one surviving trace of who deleted %s is missing",
+					neighbor.ID, target)
+			}
+			if attributed != added {
+				t.Errorf("the deletion recorded %d entr(ies) on %s, %d of them attributed to the request's actor %q",
+					added, neighbor.ID, attributed, test.actor)
+			}
+		})
+	}
+}
+
+// deleterEventsBy counts id's events, all of them when actor is nil and only
+// those attributed to *actor otherwise.
+func deleterEventsBy(t *testing.T, ctx context.Context, fixture DeleterFixture, id string, actor *string) int {
+	t.Helper()
+	query, args := "SELECT COUNT(*) FROM events WHERE issue_id = ?", []any{id}
+	if actor != nil {
+		query, args = query+" AND actor = ?", append(args, *actor)
+	}
+	var got int
+	if err := fixture.QueryScalar(ctx, query, args, &got); err != nil {
+		t.Fatalf("count events for %s: %v", id, err)
+	}
+	return got
+}
+
 // RunDeleterDryRunChangesNothing pins the preview promise
 // (issueops/deleter.go, Deleter.Delete: "A DRY RUN CHANGES NOTHING"): the
 // preview reports the counts the real deletion goes on to report, rewrites

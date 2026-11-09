@@ -254,6 +254,7 @@ var roleContractCases = []roleContract{
 		RunDeleterErasesAcrossBothPlanes,
 		RunDeleterCollapsesDuplicateIDs,
 		RunDeleterRewritesReferencesInNeighbors,
+		RunDeleterAttributesTheRewriteToTheActor,
 		RunDeleterDryRunChangesNothing,
 		RunDeleterRecordsExactlyOneHistoryEntry,
 		RunDeleterDoesNotMutateTheCallerRequest,
@@ -471,6 +472,7 @@ var roleContractCases = []roleContract{
 		RunJournalArrivalReimportKeepsTheStamp,
 		RunJournalArrivalFirstCreateRecordStampsAnUnstampedRow,
 		RunJournalArrivalRenameKeepsTheStamp,
+		RunJournalEveryMutationKindRecordsItsActor,
 		RunJournalEveryMutationKindLandsARow,
 	),
 
@@ -492,6 +494,7 @@ var roleContractCases = []roleContract{
 		RunLifecycleResultsAreHydratedPostStateSnapshots,
 		RunLifecycleResultsCarryThePostWriteRowVersion,
 		RunLifecycleCloseAndReopenRequireActorAndIssueID,
+		RunLifecycleEventActorMatchesTheRequest,
 		RunLifecycleReopenProvenanceLabelsHistory,
 		RunLifecycleCloseSettlesItsTransitiveAndCrossPlaneDependers,
 		RunLifecycleCloseSettlesTheClosedRowItselfAndItsChild,
