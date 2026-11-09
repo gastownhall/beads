@@ -41,11 +41,18 @@ type PollutionMatch struct {
 }
 
 // Heuristic score points. The rendered score is the point total divided by
-// ten; the stronger bucket keeps the historical >= 0.9 split.
+// ten; the stronger bucket keeps the historical >= 0.9 split. The point
+// totals are not calibrated probabilities — they only rank presentation.
 const (
-	pollutionPrefixPoints     = 4
-	pollutionEmptyDescPoints  = 3
-	pollutionHighBucketPoints = 9
+	pollutionPrefixPoints    = 4
+	pollutionGenericPoints   = 5
+	pollutionEmptyDescPoints = 3
+	pollutionShortDescPoints = 2
+	// pollutionShortDescMaxBytes is the content ceiling for a generic test
+	// phrase to qualify an issue (a description this thin is little or no
+	// content; anything more is authored work).
+	pollutionShortDescMaxBytes = 20
+	pollutionHighBucketPoints  = 9
 )
 
 // ClassifyTestPollution applies the pollution heuristic to each issue
@@ -53,7 +60,10 @@ const (
 // which establish test provenance (a sequential ID or a same-minute batch is
 // the signature of an import as often as of pollution).
 //
-// A test-style prefix qualifies an issue only when its description is empty:
+// A test-style prefix qualifies an issue only when its description is empty;
+// a generic test phrase qualifies only when the description (if any) is
+// shorter than pollutionShortDescMaxBytes. Substantive authored fields
+// (design, acceptance criteria, notes) exclude a match regardless of title:
 // a titled, described issue about the test harness is real work, not
 // pollution.
 func ClassifyTestPollution(issues []*types.Issue) []PollutionMatch {
@@ -73,17 +83,53 @@ func PollutionScoreHighBucket(m PollutionMatch) bool {
 }
 
 func classifyPollutionIssue(issue *types.Issue) (PollutionMatch, bool) {
-	if !IsTestTitle(issue.Title) {
-		return PollutionMatch{}, false
-	}
-	if strings.TrimSpace(issue.Description) != "" {
+	// Authored substance anywhere else on the issue excludes the match: a
+	// real issue about the test suite usually carries a design or notes,
+	// and content checks trim whitespace first.
+	if strings.TrimSpace(issue.Design) != "" ||
+		strings.TrimSpace(issue.AcceptanceCriteria) != "" ||
+		strings.TrimSpace(issue.Notes) != "" {
 		return PollutionMatch{}, false
 	}
 
-	points := pollutionPrefixPoints + pollutionEmptyDescPoints
-	reasons := []string{
-		"Title starts with a test-style prefix",
-		"No description",
+	title := strings.ToLower(issue.Title)
+	prefix := testPrefixPattern.MatchString(title)
+	generic := hasGenericTestPhrase(title)
+	description := strings.TrimSpace(issue.Description)
+	emptyDesc := description == ""
+	shortDesc := len(description) < pollutionShortDescMaxBytes
+
+	// Explicit eligibility rule; the point totals below are presentation
+	// only and never decide inclusion.
+	eligible := (prefix && emptyDesc) || (generic && shortDesc)
+	if !eligible {
+		return PollutionMatch{}, false
+	}
+
+	points := 0
+	var reasons []string
+	if prefix {
+		points += pollutionPrefixPoints
+		reasons = append(reasons, "Title starts with a test-style prefix")
+	}
+	if generic {
+		points += pollutionGenericPoints
+		reasons = append(reasons, "Generic test-issue title")
+	}
+	if emptyDesc {
+		points += pollutionEmptyDescPoints
+		reasons = append(reasons, "No description")
+	} else {
+		points += pollutionShortDescPoints
+		reasons = append(reasons, "Very short description")
 	}
 	return PollutionMatch{Issue: issue, Score: float64(points) / 10, Reasons: reasons}, true
+}
+
+// hasGenericTestPhrase reports whether a lowercased title contains one of the
+// generic test-issue phrases.
+func hasGenericTestPhrase(loweredTitle string) bool {
+	return strings.Contains(loweredTitle, "issue for testing") ||
+		strings.Contains(loweredTitle, "test issue") ||
+		strings.Contains(loweredTitle, "sample issue")
 }
