@@ -3548,8 +3548,11 @@ func databaseExistsOnServer(ctx context.Context, db *sql.DB, name string) (bool,
 }
 
 // initSchemaOnDB applies pending schema migrations. schema.MigrateUp tracks
-// applied versions in schema_migrations and backfills legacy config-driven
-// tables. Returns the number of migrations applied.
+// applied versions in schema_migrations and ignored_schema_migrations and
+// backfills legacy config-driven tables. Returns the number of migrations
+// applied across BOTH series, main and clone-local (ignored) alike — a count
+// of 0 means the database is fully converged (#7038: the callers gate a
+// post-migration pool rebuild on it).
 func initSchemaOnDB(ctx context.Context, db *sql.DB) (int, error) {
 	return initSchemaOnDBWithBootstrapHeal(ctx, db, nil, "")
 }

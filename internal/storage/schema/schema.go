@@ -917,7 +917,13 @@ func MigrateUpTo(ctx context.Context, db DBConn, maxVersion int) (int, error) {
 
 // MigrateUp brings both migration sources (main and dolt-ignored) to the
 // binary's latest versions, with all open-time reconciles, guards, backfills
-// and rekeys. db must be a single session held for the whole call — pin a
+// and rekeys. The returned count is every migration this pass applied — main
+// and clone-local (ignored) alike, plus the open-time reconciles — so callers
+// gating on "did this pass change the database?" see the clone-local-only
+// pass a pull-then-upgrade consumer clone needs (#7038); a converged
+// database reports 0.
+//
+// db must be a single session held for the whole call — pin a
 // connection (database/sql *sql.Conn) the way the production callers do: the
 // pass suspends and restores @@SESSION.dolt_transaction_commit on it
 // (suspendTransactionCommit), and a pooled *sql.DB would let the SET land on
@@ -1172,6 +1178,15 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	if err != nil {
 		return applied, fmt.Errorf("ignored migrations: %w", err)
 	}
+	// #7038: the clone-local series counts toward the returned total. A pass
+	// whose only work was the ignored lane — exactly the pull-then-upgrade
+	// consumer clone — used to report 0, telling DoltStore.Open not to rebuild
+	// the pool it had pinned to the pre-migration session (be-itm5: that
+	// connection serves stale reads and does not self-heal on retry) and
+	// telling `bd migrate` the database was already current right after it
+	// applied the clone-local migrations. The converged early return below
+	// still reports 0: appliedIgnored is 0 there by its own check.
+	applied += appliedIgnored
 	if err := unstageIgnoredTables(ctx, db); err != nil {
 		return applied, fmt.Errorf("unstaging ignored migration tables: %w", err)
 	}
