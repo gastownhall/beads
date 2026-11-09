@@ -14,15 +14,21 @@ import (
 
 const ignoredMigration0031Up = "0031_restore_preflip_events.up.sql"
 
-// TestLatestIgnoredVersionIncludesMigration0031 pins the ignored slot the
-// pre-upgrade events restore claims (gastownhall/beads#7039), directly above
-// wisp_id_tombstones' (ignored 0030), and that the slot carries its repair.
+// TestLatestIgnoredVersionIncludesMigration0031 keeps the events-restore
+// fixtures in this file honest: unrecording from the marker only forces a
+// restore pass while the version stays in the series. The top-of-series pin
+// itself moved to TestLatestIgnoredVersionIncludesMigration0032
+// (dep_external_retype_test.go) when ignored 0032 claimed the next slot, the
+// same handoff TestLatestVersionIncludesMigration0074 documents for the main
+// series.
 func TestLatestIgnoredVersionIncludesMigration0031(t *testing.T) {
-	const wantIgnored = 31
-	if got := LatestIgnoredVersion(); got != wantIgnored {
-		t.Fatalf("LatestIgnoredVersion() = %d, want %d (pre-upgrade events restore)", got, wantIgnored)
+	if got := LatestIgnoredVersion(); got < 31 {
+		t.Fatalf("LatestIgnoredVersion() = %d, below the events-restore marker 31; the marker shipped "+
+			"in the v1.3.x series and cannot move, so a series that no longer reaches it means 0031 "+
+			"was renumbered or dropped -- restore it, or the fixtures in this file stop exercising "+
+			"the restore", got)
 	}
-	if _, ok := preMigrationRepairs[repairKey{ignoredSource.cursorTable, wantIgnored}]; !ok {
+	if _, ok := preMigrationRepairs[repairKey{ignoredSource.cursorTable, 31}]; !ok {
 		t.Fatalf("ignored 0031 has no pre-migration repair registered; the marker alone restores nothing")
 	}
 }

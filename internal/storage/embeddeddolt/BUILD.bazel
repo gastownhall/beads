@@ -206,6 +206,7 @@ go_test(
         "metadata_cas_contract_test.go",
         "metadata_number_fidelity_test.go",
         "migrate_consent_gate_test.go",
+        "migrate_dep_external_retype_test.go",
         "migrate_dep_rekey_dedup_test.go",
         "migrate_events_flip_test.go",
         "migrate_events_preflip_restore_test.go",

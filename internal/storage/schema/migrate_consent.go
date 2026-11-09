@@ -42,7 +42,12 @@ import (
 // own pre-upgrade history (ignored 0031, gastownhall/beads#7039; no commit, no
 // tracked-table write), and runs on every fresh clone — but when the MAIN
 // sequence is pending and unconsented, MigrateUp refuses before ANY write,
-// ignored sequence and dolt_ignore seeding included.
+// ignored sequence and dolt_ignore seeding included. Two ignored markers do
+// write tracked tables yet stay ungated, each with the same argument as the
+// forced re-key of the main series (migration 0026): the write repairs rows
+// THIS clone's own history already holds, so it is not a schema decision a
+// remote owner must make — ignored 0031 (a restore) and ignored 0032 (the
+// cross-prefix dependency re-type, gastownhall/beads#8299).
 //
 // A refusal fails the open, except for the working-set-reconcile commands
 // (bd dolt commit, bd vc commit), which commit at the current schema without

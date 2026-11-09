@@ -1,0 +1,47 @@
+-- Ignored migration 0032: clone-local marker for re-typing the legacy
+-- external rows the prefix-era dependency classifier wrote for
+-- same-database cross-prefix targets (gastownhall/beads#8299).
+--
+-- Before the presence-based classifier shipped, any blocks target whose id
+-- prefix differed from the source's was routed to depends_on_external even
+-- when THIS database held it, so the edge blocked nothing: bd ready listed
+-- the dependent while its same-database blocker was open. New writes now
+-- classify by local presence; rows written before that fix keep the legacy
+-- shape, and this marker heals them once per clone.
+--
+-- The work happens in code, not here: repairCrossPrefixExternalDeps
+-- (internal/storage/schema/dep_external_retype.go) is registered in
+-- preMigrationRepairs for this version, so it runs immediately before this
+-- marker is recorded. The whole repair — plan, convert, validate, recompute
+-- — runs inside ONE driver transaction begun on MigrateUp's pinned session
+-- (see runMigrations' repair-transaction special case), so an error or a
+-- killed process anywhere before the transaction's commit leaves no debris,
+-- keeps this marker pending, and the next open retries cleanly. A completed
+-- marker is a permanent no-op.
+--
+-- The repair resolves every external target against THIS database. Explicit
+-- external: references and targets no local table holds stay external. A
+-- resolvable target moves into its typed column and depends_on_external is
+-- cleared, preserving the row's id (already derived from the resolved
+-- target by the dependency re-key this pass runs first), type, metadata,
+-- thread and provenance. Before converting a blocking row it runs the same
+-- blocking-hierarchy validation the write path runs; a conflicting row
+-- stays external with a notice naming the source, the target and the
+-- removal command. Affected sources and their descendants are then seeded
+-- exactly the way the write path seeds them, and the shared recompute
+-- derives is_blocked — preserving updated_at.
+--
+-- The four statements below are named in this header on purpose: MigrateUp's
+-- pending-migration dirty-table guard scans the raw text of pending files,
+-- and this marker must be seen as touching its repair's write targets, so
+-- the repair never entangles a user's uncommitted edits in them. These are
+-- all the repair may write: UPDATE dependencies, UPDATE wisp_dependencies,
+-- UPDATE issues, UPDATE wisps. The guard refuses the pass before the repair
+-- mutates anything when any of them holds pre-existing dirt.
+--
+-- The cursor table is dolt-ignored, so the marker is clone-local: every
+-- clone repairs its own copy exactly once, which is safe because the
+-- resolution rule is a pure function of local table content.
+--
+-- The marker itself changes nothing.
+SELECT 1;

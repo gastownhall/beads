@@ -2545,21 +2545,30 @@ func (m *mockDB) QueryRowContext(_ context.Context, _ string, _ ...any) *sql.Row
 }
 
 // wispsAbsentDB extends mockDB's blind-success ExecContext / panicking
-// QueryContext with TWO answerable QueryRowContext queries, same pattern:
+// QueryContext with answerable QueryRowContext queries, same pattern:
 // the ignored/7 and ignored/15 pre-migration repairs (both dispatch to
 // ensureWispIsBlockedForRecompute) each probe whether wisps exists before
 // touching it, and *sql.Row has no public constructor outside a real
 // database/sql driver -- mockDB itself cannot fake a scan result. A small
-// embedded sqlmock answers exactly those two queries with "table absent"
+// embedded sqlmock answers exactly those queries with "table absent"
 // (0), so the repair takes its early no-op branch on both firings; any
 // OTHER QueryRowContext this pass might issue still surfaces loudly, via
 // sqlmock's own unmet/unexpected-call error rather than a silent success.
 // QueryContext answers the {ignored_schema_migrations, 31} repair's lookup of
 // main 0062's drop commit the same way: no such commit, so the pre-upgrade
 // events restore finds no source and changes nothing.
+//
+// The {ignored_schema_migrations, 32} repair is different: it runs inside a
+// driver transaction begun on a pinned single session (see
+// preMigrationRepairInDriverTx), so this adapter explicitly supplies one —
+// a *sql.Conn pinned off the embedded sqlmock pool, exposed through the
+// same BeginTx/Raw surface the boundary type-asserts. The repair's own
+// statements then run on that session against real sqlmock expectations
+// (Begin, both edge-table existence probes absent, Commit), while the
+// migration bodies keep riding mockDB's blind ExecContext.
 type wispsAbsentDB struct {
 	mockDB
-	real *sql.DB
+	real *sql.Conn
 }
 
 func newWispsAbsentDB(t *testing.T) *wispsAbsentDB {
@@ -2570,6 +2579,11 @@ func newWispsAbsentDB(t *testing.T) *wispsAbsentDB {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
 	// Registered twice, once per firing of the {ignored_schema_migrations, 7}
 	// and {ignored_schema_migrations, 15} repairs; go-sqlmock v1.5.2 predates
 	// ExpectedQuery.Times, so the same expectation is set up twice instead of
@@ -2582,12 +2596,22 @@ func newWispsAbsentDB(t *testing.T) *wispsAbsentDB {
 	mock.ExpectQuery(`SELECT commit_hash FROM dolt_log WHERE message = \?`).
 		WithArgs(eventsFlipDropCommitMessage).
 		WillReturnRows(sqlmock.NewRows([]string{"commit_hash"}))
+	// The {ignored_schema_migrations, 32} retype repair's transaction: it
+	// begins on the pinned session, finds neither edge table (both probes
+	// absent), writes nothing, and commits.
+	mock.ExpectBegin()
+	for _, table := range depRekeyTables {
+		mock.ExpectQuery(`(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`).
+			WithArgs(table).
+			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	}
+	mock.ExpectCommit()
 	t.Cleanup(func() {
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("wispsAbsentDB: unmet sql expectations: %v", err)
 		}
 	})
-	return &wispsAbsentDB{real: db}
+	return &wispsAbsentDB{real: conn}
 }
 
 func (w *wispsAbsentDB) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
@@ -2596,6 +2620,19 @@ func (w *wispsAbsentDB) QueryRowContext(ctx context.Context, query string, args 
 
 func (w *wispsAbsentDB) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
 	return w.real.QueryContext(ctx, query, args...)
+}
+
+// BeginTx and Raw are the pinned-session surface preMigrationRepairInDriverTx
+// asserts: delegating them to the adapter's own pinned *sql.Conn is what
+// "test adapters explicitly supply a pinned session" means for this mock.
+// The delegation is real, not decorative — the 0032 repair's transaction
+// genuinely runs on it.
+func (w *wispsAbsentDB) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
+	return w.real.BeginTx(ctx, opts)
+}
+
+func (w *wispsAbsentDB) Raw(f func(driverConn any) error) error {
+	return w.real.Raw(f)
 }
 
 func TestRunMigrationsStderrOutput(t *testing.T) {

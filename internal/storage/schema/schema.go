@@ -2320,7 +2320,11 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 			return count, fmt.Errorf("snapshotting updated_at before migration %s: %w", mf.name, err)
 		}
 
-		if err := src.preMigrationRepair(ctx, db, mf.version); err != nil {
+		if src.repairRunsInTransaction(mf.version) {
+			if err := src.preMigrationRepairInDriverTx(ctx, db, mf); err != nil {
+				return count, fmt.Errorf("pre-repair for migration %s: %w", mf.name, err)
+			}
+		} else if err := src.preMigrationRepair(ctx, db, mf.version); err != nil {
 			return count, fmt.Errorf("pre-repair for migration %s: %w", mf.name, err)
 		}
 

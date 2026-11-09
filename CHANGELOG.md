@@ -1226,6 +1226,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Same-database cross-prefix dependencies are no longer stored as external
+  and ignored by `bd ready`.** The dependency classifier filed every target
+  whose id carried a different project prefix as an external reference, so
+  an edge from `hq-1` onto the local `ops-2` blocked nothing and `bd ready`
+  listed the source as ready while its blocker was open. Targets are now
+  classified by whether THIS database holds them (a present wisp, a present
+  issue, an explicit `external:` reference, or a truly absent id). On
+  upgrade, ignored migration 0032 re-types the legacy external rows whose
+  targets the database holds — in one transaction, preserving ids,
+  provenance and timestamps — and recomputes the blocked state of the
+  affected sources and their descendants. Rows whose target no local table
+  holds stay external (the multi-rig add-now, route-later shape), and a
+  legacy row whose conversion would violate the blocking hierarchy stays
+  external with a removal notice.
+
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
