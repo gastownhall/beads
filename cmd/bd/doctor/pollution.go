@@ -58,6 +58,20 @@ func pollutionCandidate(issue *types.Issue) bool {
 	return issue.Status == types.StatusOpen && issue.IssueType != types.TypeEpic && !issue.Ephemeral
 }
 
+// minAuthoredDescription is the trimmed description length, in bytes, at
+// which an issue counts as real work whatever its title says.
+const minAuthoredDescription = 20
+
+// hasAuthoredContent reports whether issue carries prose someone wrote: a
+// substantive description or any nonblank design, acceptance criteria or
+// notes. Such an issue is never pollution, so cleanup cannot delete it.
+func hasAuthoredContent(issue *types.Issue) bool {
+	return len(strings.TrimSpace(issue.Description)) >= minAuthoredDescription ||
+		strings.TrimSpace(issue.Design) != "" ||
+		strings.TrimSpace(issue.AcceptanceCriteria) != "" ||
+		strings.TrimSpace(issue.Notes) != ""
+}
+
 // DetectTestPollution scores issues for test pollution and returns those at
 // or above the reporting threshold, in input order.
 func DetectTestPollution(issues []*types.Issue) []PollutionResult {
@@ -74,7 +88,7 @@ func DetectTestPollution(issues []*types.Issue) []PollutionResult {
 	}
 
 	for _, issue := range issues {
-		if !pollutionCandidate(issue) {
+		if !pollutionCandidate(issue) || hasAuthoredContent(issue) {
 			continue
 		}
 		score := 0.0

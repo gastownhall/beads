@@ -110,3 +110,45 @@ func TestDetectTestPollution_OnlyOpenPersistentCandidates(t *testing.T) {
 		}
 	}
 }
+
+// TestDetectTestPollution_AuthoredContentVetoes pins GH#5025's protection
+// for real work: a test-prefixed task is not reported once it carries a
+// trimmed description of at least 20 bytes or any nonblank design,
+// acceptance criteria or notes. Whitespace never counts as authored content.
+func TestDetectTestPollution_AuthoredContentVetoes(t *testing.T) {
+	desc20 := "Repro steps attached" // 20 bytes
+	desc19 := "Repro steps attache"  // 19 bytes
+	if len(desc20) != 20 || len(desc19) != 19 {
+		t.Fatalf("fixture lengths = %d/%d, want 20/19", len(desc20), len(desc19))
+	}
+	task := func(id string, edit func(*types.Issue)) *types.Issue {
+		issue := &types.Issue{ID: id, Title: "test-runner hangs on sync", Status: types.StatusOpen, IssueType: types.TypeTask}
+		edit(issue)
+		return issue
+	}
+	vetoed := []*types.Issue{
+		task("bd-desc20", func(i *types.Issue) { i.Description = desc20 }),
+		task("bd-desc20pad", func(i *types.Issue) { i.Description = "\n  " + desc20 + "  \n" }),
+		task("bd-design", func(i *types.Issue) { i.Design = "Use a bounded retry" }),
+		task("bd-accept", func(i *types.Issue) { i.AcceptanceCriteria = "Sync completes" }),
+		task("bd-notes", func(i *types.Issue) { i.Notes = "seen on CI" }),
+	}
+	reported := []*types.Issue{
+		task("bd-desc19pad", func(i *types.Issue) { i.Description = "   " + desc19 + "   " }),
+		task("bd-blankprose", func(i *types.Issue) {
+			i.Design, i.AcceptanceCriteria, i.Notes = " \t", "\n", "  "
+		}),
+	}
+
+	got := pollutedIDs(append(append([]*types.Issue{}, vetoed...), reported...))
+	for _, issue := range vetoed {
+		if p, ok := got[issue.ID]; ok {
+			t.Errorf("%s reported as pollution (score %.2f, reasons %v); authored content must veto it", issue.ID, p.score, p.reasons)
+		}
+	}
+	for _, issue := range reported {
+		if _, ok := got[issue.ID]; !ok {
+			t.Errorf("%s not reported; a 19-byte trimmed description or blank prose is not authored content", issue.ID)
+		}
+	}
+}
