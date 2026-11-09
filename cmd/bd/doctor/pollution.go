@@ -1,7 +1,6 @@
 package doctor
 
 import (
-	"fmt"
 	"regexp"
 	"strings"
 
@@ -37,17 +36,17 @@ const (
 	pollutionHighThreshold   = 0.9
 )
 
-// Signal weights and thresholds, in integer tenths of a point.
+// Signal weights and thresholds, in integer tenths of a point. Counter-mode
+// IDs (bd-123) and same-minute bulk creation are deliberately not signals:
+// issueops generates both routinely for real work, so neither is evidence of
+// a test fixture on its own (GH#5025).
 const (
 	pollutionTitlePrefixPoints      = 7
-	pollutionSequentialIDPoints     = 4
 	pollutionEmptyDescriptionPoints = 2
 	pollutionShortDescriptionPoints = 1
-	pollutionBulkCreatePoints       = 3
 	pollutionGenericTitlePoints     = 5
 	pollutionReportPoints           = 7
 	pollutionHighPoints             = 9
-	pollutionBulkCreateGroupSize    = 10
 	pollutionSubstantiveDescription = 20
 )
 
@@ -55,10 +54,6 @@ const (
 // pattern backs create/export warnings (cmd/bd's isTestIssue), so a title
 // flagged at creation is exactly what the scorer treats as a signal.
 var testTitlePrefixPattern = regexp.MustCompile(`^(test|benchmark|sample|tmp|temp|debug|dummy)[-_\s]`)
-
-// sequentialIDPattern matches counter-mode IDs (bd-123), which issueops
-// generates routinely; a match is not pollution evidence on its own.
-var sequentialIDPattern = regexp.MustCompile(`^[a-z]+-\d+$`)
 
 // HasTestTitlePrefix reports whether title starts with a common test-issue
 // prefix (test, benchmark, sample, tmp, temp, debug, dummy), case-insensitively.
@@ -119,13 +114,6 @@ func PollutionIssueFilter() types.IssueFilter {
 func DetectTestPollution(issues []*types.Issue) []PollutionResult {
 	var results []PollutionResult
 
-	// Group issues by creation time to detect rapid succession.
-	issuesByMinute := make(map[int64][]*types.Issue)
-	for _, issue := range issues {
-		minute := issue.CreatedAt.Unix() / 60
-		issuesByMinute[minute] = append(issuesByMinute[minute], issue)
-	}
-
 	for _, issue := range issues {
 		if !PollutionCandidateFilter(issue) {
 			continue
@@ -148,12 +136,6 @@ func DetectTestPollution(issues []*types.Issue) []PollutionResult {
 			reasons = append(reasons, "Title starts with test prefix")
 		}
 
-		// Sequential ID with minimal description (medium signal).
-		if sequentialIDPattern.MatchString(issue.ID) && len(issue.Description) < pollutionSubstantiveDescription {
-			points += pollutionSequentialIDPoints
-			reasons = append(reasons, "Sequential ID with minimal description")
-		}
-
 		// Generic or empty description (weak signal).
 		if len(strings.TrimSpace(issue.Description)) == 0 {
 			points += pollutionEmptyDescriptionPoints
@@ -161,13 +143,6 @@ func DetectTestPollution(issues []*types.Issue) []PollutionResult {
 		} else if len(issue.Description) < pollutionSubstantiveDescription {
 			points += pollutionShortDescriptionPoints
 			reasons = append(reasons, "Very short description")
-		}
-
-		// Created with many other issues in the same minute (bulk signature).
-		minute := issue.CreatedAt.Unix() / 60
-		if len(issuesByMinute[minute]) >= pollutionBulkCreateGroupSize {
-			points += pollutionBulkCreatePoints
-			reasons = append(reasons, fmt.Sprintf("Created with %d other issues in same minute", len(issuesByMinute[minute])-1))
 		}
 
 		// Generic test titles.

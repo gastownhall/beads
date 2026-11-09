@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -185,5 +186,40 @@ func TestHasSubstantiveContent(t *testing.T) {
 		if got := hasSubstantiveContent(tc.issue); got != tc.want {
 			t.Errorf("%s: hasSubstantiveContent = %t, want %t", tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestDetectTestPollution_BulkCreateNotEvidence pins AC-4 at the scorer: a
+// counter-ID issue with an empty description — alone or in a same-minute
+// batch of twelve — is not reported, and no reported reason ever mentions
+// the ID or the timestamp.
+func TestDetectTestPollution_BulkCreateNotEvidence(t *testing.T) {
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	issues := []*types.Issue{}
+	for i := 1; i <= 12; i++ {
+		issues = append(issues, &types.Issue{
+			ID:        fmt.Sprintf("bd-%d", i),
+			Title:     "Imported work item",
+			Status:    types.StatusOpen,
+			IssueType: types.TypeTask,
+			CreatedAt: created,
+		})
+	}
+	issues = append(issues, pollutionFixtureIssue("bd-fixture"))
+
+	for _, p := range DetectTestPollution(issues) {
+		if p.Issue.ID == "bd-fixture" {
+			for _, reason := range p.Reasons {
+				if strings.Contains(reason, "Sequential ID") || strings.Contains(reason, "same minute") {
+					t.Errorf("reported reason %q cites ID or timing evidence", reason)
+				}
+			}
+			continue
+		}
+		t.Errorf("counter-ID issue %s reported on ID/bulk evidence alone (score %.2f, reasons %v)",
+			p.Issue.ID, p.Score, p.Reasons)
+	}
+	if got := DetectTestPollution(issues); len(got) != 1 || got[0].Issue.ID != "bd-fixture" {
+		t.Errorf("want only the prefixed fixture reported, got %d hit(s)", len(got))
 	}
 }

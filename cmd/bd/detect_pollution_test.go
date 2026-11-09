@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -151,5 +152,49 @@ func TestDetectTestPollution_SubstantiveWorkNotFlagged(t *testing.T) {
 		if !reported[id] {
 			t.Errorf("control: bare fixture issue %s was not reported", id)
 		}
+	}
+}
+
+// TestDetectTestPollution_IDAndBulkNotEvidence pins AC-4: counter-mode IDs
+// (bd-123) and same-minute bulk creation are not evidence of test pollution —
+// a batch of empty-description counter-ID tasks created together stays
+// unreported, and no reported reason mentions the ID or the timestamp. Only
+// the fixture-shaped leftover among them is reported.
+func TestDetectTestPollution_IDAndBulkNotEvidence(t *testing.T) {
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	issues := []*types.Issue{}
+	for i := 1; i <= 12; i++ {
+		issues = append(issues, &types.Issue{
+			ID:        fmt.Sprintf("bd-%d", i),
+			Title:     "Imported work item",
+			Status:    types.StatusOpen,
+			IssueType: types.TypeTask,
+			CreatedAt: created,
+		})
+	}
+	issues = append(issues, &types.Issue{
+		ID:        "bd-fixture",
+		Title:     "tmp-fixture leftover",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		CreatedAt: created,
+	})
+
+	reported := map[string]bool{}
+	for _, p := range detectTestPollution(issues) {
+		reported[p.issue.ID] = true
+		for _, reason := range p.reasons {
+			if strings.Contains(reason, "Sequential ID") || strings.Contains(reason, "same minute") {
+				t.Errorf("reported issue %s carries ID/timing reason %q", p.issue.ID, reason)
+			}
+		}
+	}
+	for i := 1; i <= 12; i++ {
+		if id := fmt.Sprintf("bd-%d", i); reported[id] {
+			t.Errorf("counter-ID issue %s reported on ID/bulk evidence alone", id)
+		}
+	}
+	if !reported["bd-fixture"] {
+		t.Error("control: the prefixed empty-description leftover was not reported")
 	}
 }
