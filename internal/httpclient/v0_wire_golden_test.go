@@ -59,16 +59,14 @@ const (
 // The static census: every wire.Request literal in the two client packages.
 
 // v0WireSite is one `wire.Request{...}` composite literal in a non-test file of
-// internal/httpclient, or one `Request{...}` in internal/httpclient/wire.
+// internal/httpclient, or one `Request{...}` in internal/httpclient/wire. The
+// literal a factory returns is one site per func that calls the factory.
 type v0WireSite struct {
-	Key     string // "role_reader.go:(httpReader).Get" — file and enclosing func
+	// Key is the file and enclosing func, "role_reader.go:(httpReader).Get";
+	// a factory's caller adds itself: "list_walk.go:listRequest@(*Store).sortedPage".
+	Key     string
 	Frame   string // runtime frame name: "httpclient.httpReader.Get", "wire.(*Client).ClaimIssue"
 	OpConst string // the Op: member's constant name, "" when it is not a constant
-	// Factory is set for a func that RETURNS the literal (list_walk.go's
-	// listRequest): it is never on the stack when the request is sent, so it
-	// is attributed through the funcs that call it.
-	Factory bool
-	Callers []string // Frame names of a factory's callers
 }
 
 const v0WireModule = "github.com/steveyegge/beads/internal/httpclient"
@@ -76,13 +74,18 @@ const v0WireModule = "github.com/steveyegge/beads/internal/httpclient"
 // v0WireLiteralSites parses the non-test Go files of this package (".") and
 // of the wire package ("wire"); both are runfiles under Bazel
 // (BUILD.bazel: glob(["*.go"]) and //internal/httpclient/wire:repo_go_srcs).
+//
+// Attribution goes by function, so a function holds at most one literal: a
+// second one (say a BDP twin in a capability branch of a v0 function) fails
+// every census test until it moves to a function of its own, which no row or
+// waiver can stand in for.
 func v0WireLiteralSites(t *testing.T) map[string]*v0WireSite {
 	t.Helper()
 	sites := map[string]*v0WireSite{}
 	type pkgDir struct{ dir, pkg, typ string }
 	keyPrefix := map[string]string{".": "", "wire": "wire/"}
-	factories := map[string]*v0WireSite{} // "<pkg>.<func>" -> site
-	type call struct{ caller, callee string }
+	factories := map[string][]*v0WireSite{} // "<pkg>.<func>" -> the literals it returns
+	type call struct{ callee, display, frame string }
 	var calls []call
 	for _, d := range []pkgDir{{".", "httpclient", "wire.Request"}, {"wire", "wire", "Request"}} {
 		files, err := filepath.Glob(filepath.Join(d.dir, "*.go"))
@@ -131,7 +134,7 @@ func v0WireLiteralSites(t *testing.T) map[string]*v0WireSite {
 						if ord > 1 {
 							key += "#" + strconv.Itoa(ord)
 						}
-						s := &v0WireSite{Key: key, Frame: frame, Factory: returns}
+						s := &v0WireSite{Key: key, Frame: frame}
 						for _, el := range x.Elts {
 							if kv, ok := el.(*ast.KeyValueExpr); ok && v0WireExprText(kv.Key) == "Op" {
 								switch v := kv.Value.(type) {
@@ -142,13 +145,15 @@ func v0WireLiteralSites(t *testing.T) map[string]*v0WireSite {
 								}
 							}
 						}
-						sites[key] = s
 						if returns {
-							factories[d.pkg+"."+fd.Name.Name] = s
+							name := d.pkg + "." + fd.Name.Name
+							factories[name] = append(factories[name], s)
+						} else {
+							sites[key] = s
 						}
 					case *ast.CallExpr:
 						if id, ok := x.Fun.(*ast.Ident); ok {
-							calls = append(calls, call{caller: frame, callee: d.pkg + "." + id.Name})
+							calls = append(calls, call{callee: d.pkg + "." + id.Name, display: display, frame: frame})
 						}
 					}
 					return true
@@ -159,27 +164,34 @@ func v0WireLiteralSites(t *testing.T) map[string]*v0WireSite {
 			t.Fatalf("no non-test Go source under %s: under Bazel it must be in the test's data", d.dir)
 		}
 	}
-	for _, c := range calls {
-		if f, ok := factories[c.callee]; ok && !slices.Contains(f.Callers, c.caller) {
-			f.Callers = append(f.Callers, c.caller)
+	// A factory, a func that RETURNS the literal (list_walk.go's listRequest),
+	// is never on the stack when the request is sent. Its literal is one site
+	// per func that calls it by name, so each of those send paths needs a row
+	// of its own. A factory nobody calls by name stays one site, which no
+	// request reaches, so the census reports it rather than losing it.
+	for name, literals := range factories {
+		for _, f := range literals {
+			called := false
+			for _, c := range calls {
+				if c.callee != name {
+					continue
+				}
+				called = true
+				key := f.Key + "@" + c.display
+				sites[key] = &v0WireSite{Key: key, Frame: c.frame, OpConst: f.OpConst}
+			}
+			if !called {
+				sites[f.Key] = f
+			}
 		}
 	}
 	// Attribution is per function: each frame must name one site.
 	frames := map[string]string{}
-	claim := func(frame, key string) {
-		if prev, ok := frames[frame]; ok && prev != key {
-			t.Fatalf("%s and %s both attribute to frame %s: the census attributes a request to the function on the stack, so give each literal its own function", prev, key, frame)
-		}
-		frames[frame] = key
-	}
 	for key, s := range sites {
-		if s.Factory {
-			for _, c := range s.Callers {
-				claim(c, key)
-			}
-			continue
+		if prev, ok := frames[s.Frame]; ok && prev != key {
+			t.Fatalf("%s and %s both attribute to frame %s: the census attributes a request to the function on the stack, so give each literal its own function", prev, key, s.Frame)
 		}
-		claim(s.Frame, key)
+		frames[s.Frame] = key
 	}
 	return sites
 }
@@ -374,6 +386,14 @@ func v0WireContext(t *testing.T, without []string) string {
 
 // ---------------------------------------------------------------------------
 // Attribution: which literal site sent each request.
+//
+// A request is attributed to the innermost function on the sender's stack
+// that is a site: one that holds a literal, or calls a factory of one. That is
+// the literal that built the request everywhere but the stream door:
+// wire.(*Client).dialStream builds watchEvents with http.NewRequestWithContext,
+// and the census reaches it only through the Request{Op: OpWatchEvents} literal
+// it holds for a refused connect. Moving that literal out of dialStream
+// reports watchEvents as sent from no literal.
 
 var v0WireClosureRe = regexp.MustCompile(`\.(func|gowrap|deferwrap)?\d+$`)
 
@@ -398,12 +418,6 @@ type v0WireAttributor struct {
 func newV0WireAttributor(sites map[string]*v0WireSite) *v0WireAttributor {
 	a := &v0WireAttributor{byFrame: map[string]string{}}
 	for key, s := range sites {
-		if s.Factory {
-			for _, c := range s.Callers {
-				a.byFrame[c] = key
-			}
-			continue
-		}
 		a.byFrame[s.Frame] = key
 	}
 	return a
@@ -688,7 +702,7 @@ func v0WireCensus(sites map[string]*v0WireSite, ops map[string]string, waivers m
 	for _, r := range results {
 		for i, key := range r.sites {
 			if key == "" {
-				problems = append(problems, fmt.Sprintf("%s: request %d was sent from no wire.Request literal the census knows (a new construction pattern?)", r.row.name, i+1))
+				problems = append(problems, fmt.Sprintf("%s: request %d was sent from no wire.Request literal the census knows: no function on its stack holds one or calls a factory of one (a new construction pattern, or a literal moved out of the function that sends?)", r.row.name, i+1))
 				continue
 			}
 			exercisedSites[key] = true
@@ -891,20 +905,31 @@ func TestV0WireGoldenCatchesADrift(t *testing.T) {
 			t.Logf("%s:\n%s", tc.name, diff)
 		})
 	}
-	t.Run("a deleted row", func(t *testing.T) {
-		var kept []v0WireResult
-		for _, r := range results {
-			if r.row.name != "releaseIssue" {
-				kept = append(kept, r)
+	for _, tc := range []struct {
+		name, row string
+		want      []string
+	}{
+		{"a deleted row", "releaseIssue", []string{"site wire/writes.go:(*Client).ReleaseIssue (Op OpReleaseIssue) is driven by no row", "OpReleaseIssue (releaseIssue) is sent by no row"}},
+		// listIssues has three senders through the listRequest factory, and
+		// other rows still send the operation: what goes missing is the
+		// default `bd list` request, which only this row drives.
+		{"a deleted row behind a factory", "listIssues", []string{"site list_walk.go:listRequest@(*Store).sortedPage (Op OpListIssues) is driven by no row"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var kept []v0WireResult
+			for _, r := range results {
+				if r.row.name != tc.row {
+					kept = append(kept, r)
+				}
 			}
-		}
-		got := strings.Join(v0WireCensus(sites, ops, nil, kept), "\n")
-		for _, want := range []string{"site wire/writes.go:(*Client).ReleaseIssue (Op OpReleaseIssue) is driven by no row", "OpReleaseIssue (releaseIssue) is sent by no row"} {
-			if !strings.Contains(got, want) {
-				t.Errorf("dropping the releaseIssue row: the census lacks %q:\n%s", want, got)
+			got := strings.Join(v0WireCensus(sites, ops, nil, kept), "\n")
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("dropping the %s row: the census lacks %q:\n%s", tc.row, want, got)
+				}
 			}
-		}
-	})
+		})
+	}
 	t.Run("a request from no literal site", func(t *testing.T) {
 		r := runV0WireRow(t, sites, v0WireRoutes(t), v0WireRow{name: "getIssue.unattributed", call: func(c v0WireCall) error {
 			return c.conn.Do(c.ctx, wire.Request{Op: wire.OpGetIssue, Method: http.MethodGet, Path: "/v0/beads/issues/bd-1"}, nil)

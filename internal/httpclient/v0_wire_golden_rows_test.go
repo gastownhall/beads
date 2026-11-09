@@ -141,6 +141,12 @@ func v0WireRows() []v0WireRow {
 			_, err := reader(c).List(c.ctx, issueops.ListRequest{Status: "open", Labels: []string{"x"}, Assignee: "alice", Limit: v0WirePtr(10)})
 			return err
 		}},
+		// A negative limit is the server's to refuse: the pager sends the
+		// encoder's params as they are, with no sort.
+		{name: "listIssues.negative-limit", call: func(c v0WireCall) error {
+			_, err := reader(c).List(c.ctx, issueops.ListRequest{Status: "open", Limit: v0WirePtr(-1)})
+			return err
+		}},
 		{name: "queryIssues", call: func(c v0WireCall) error {
 			q := v0WireMust(c.store.Querier())
 			_, err := q.Query(c.ctx, issueops.QueryRequest{Expression: "type=bug AND priority<2", IncludeClosed: true, Limit: v0WirePtr(20)})
