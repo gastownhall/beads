@@ -2226,20 +2226,44 @@ var dialServer = net.DialTimeout
 // describes.
 var issueProjectionColumns = sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)
 
+// leaseProjectionColumns are the leases columns every issue read selects
+// through the lease overlay (sqlbuild.LeaseSelectColumns), unqualified.
+// leases is clone-local: the dolt-ignored migration series, not the main
+// cursor, describes its shape, so checkOpenSchemaDrift checks it against that
+// series.
+var leaseProjectionColumns = func() []string {
+	names := sqlbuild.ColumnNames(sqlbuild.LeaseSelectColumns)
+	for i, name := range names {
+		names[i] = strings.TrimPrefix(name, "leases.")
+	}
+	return names
+}()
+
 // checkOpenSchemaDrift is newServerMode's schema drift check. Every open
 // refuses a database ahead of this binary (schema.CheckForwardDrift). An open
 // that will not migrate and sets Config.RequireReadableSchema also refuses,
 // from the same version read, one behind it that lacks a projected column
-// (schema.CheckReadableDrift). Through a gateway that refusal names the
-// server administrator's remedy, since bd never migrates a gateway's schema.
+// (schema.CheckReadableDrift), and then one whose clone-local series is
+// behind with a projected lease column missing (schema.CheckCloneLocalReadable):
+// `bd dolt pull` never brings that series, so a clone current on main can
+// still be unable to read (gastownhall/beads#7038). Through a gateway either
+// refusal names the server administrator's remedy, since bd never migrates a
+// gateway's schema.
 func checkOpenSchemaDrift(ctx context.Context, db *sql.DB, cfg *Config) error {
 	if !cfg.RequireReadableSchema || (!cfg.ReadOnly && !cfg.Gateway) {
 		return schema.CheckForwardDrift(ctx, db)
 	}
 	err := schema.CheckReadableDrift(ctx, db, "issues", issueProjectionColumns)
+	if err == nil {
+		err = schema.CheckCloneLocalReadable(ctx, db, "leases", leaseProjectionColumns)
+	}
 	var behind *schema.SchemaBehindError
 	if cfg.Gateway && errors.As(err, &behind) {
 		behind.Gateway = true
+	}
+	var cloneLocal *schema.CloneLocalBehindError
+	if cfg.Gateway && errors.As(err, &cloneLocal) {
+		cloneLocal.Gateway = true
 	}
 	return err
 }

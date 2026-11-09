@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // TestDoltNew_RequireReadableSchema covers server mode's refusal of a schema
@@ -116,4 +118,139 @@ func TestDoltNew_RequireReadableSchema(t *testing.T) {
 			t.Fatalf("New (read-only, BD_IGNORE_SCHEMA_SKEW=1) = %v, want success", err)
 		}
 	})
+}
+
+// cloneLocalBehindFixture creates a database at the latest main schema, with
+// one issue, and puts its clone-local (dolt-ignored) series where a clone
+// that followed the "pull on the old binary, then upgrade" recipe leaves it
+// (gastownhall/beads#7038): ignored/0016's leases.granted_node, which every
+// issue read selects, never applied, and the ignored cursor at 13, the
+// highest any pre-1.3.0 binary recorded. `bd dolt pull` brings the main
+// series but never this one, so nothing else moves it.
+//
+// It returns the open function for further stores on the same database and
+// the writable store whose pool the probes below read through. No step may
+// open the database writable again: that would migrate it back.
+func cloneLocalBehindFixture(t *testing.T, ctx context.Context) (func(*Config) (*DoltStore, error), *DoltStore) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	dbName := uniqueTestDBName(t)
+	store, err := New(ctx, &Config{
+		Path:            tmpDir,
+		CommitterName:   "test",
+		CommitterEmail:  "test@example.com",
+		Database:        dbName,
+		CreateIfMissing: true,
+	})
+	if err != nil {
+		t.Fatalf("New (create): %v", err)
+	}
+	t.Cleanup(func() {
+		dropCtx, dropCancel := context.WithTimeout(context.Background(), 5*testTimeout)
+		defer dropCancel()
+		_, _ = store.db.ExecContext(dropCtx, fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", dbName))
+		store.Close()
+	})
+	if err := store.SetConfig(ctx, "issue_prefix", "cl"); err != nil {
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	now := time.Now()
+	if err := store.CreateIssue(ctx, &types.Issue{
+		ID: "cl-1", Title: "readable once the clone-local series applies",
+		Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask,
+		CreatedAt: now, UpdatedAt: now,
+	}, "test-user"); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	for _, stmt := range []string{
+		"ALTER TABLE leases DROP COLUMN granted_node",
+		"DELETE FROM ignored_schema_migrations WHERE version > 13",
+	} {
+		if _, err := store.db.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if v, err := schema.CurrentVersion(ctx, store.db); err != nil || v != schema.LatestVersion() {
+		t.Fatalf("precondition: main cursor = %d (%v), want the latest v%d", v, err, schema.LatestVersion())
+	}
+	open := func(cfg *Config) (*DoltStore, error) {
+		cfg.Path = tmpDir
+		cfg.CommitterName = "test"
+		cfg.CommitterEmail = "test@example.com"
+		cfg.Database = dbName
+		return New(ctx, cfg)
+	}
+	return open, store
+}
+
+// cloneLocalState is what an open that must not migrate must leave alone: the
+// raw ignored cursor, whether leases.granted_node exists, and HEAD.
+func cloneLocalState(t *testing.T, ctx context.Context, store *DoltStore) string {
+	t.Helper()
+	var cursor, columns int
+	var head string
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations").Scan(&cursor); err != nil {
+		t.Fatalf("read ignored cursor: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'leases' AND column_name = 'granted_node'").Scan(&columns); err != nil {
+		t.Fatalf("probe leases.granted_node: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, "SELECT DOLT_HASHOF('HEAD')").Scan(&head); err != nil {
+		t.Fatalf("read HEAD: %v", err)
+	}
+	return fmt.Sprintf("ignored cursor %d, granted_node columns %d, HEAD %s", cursor, columns, head)
+}
+
+// TestDoltNew_CloneLocalReadableSchema covers gastownhall/beads#7038: after
+// the documented old-binary pull and upgrade, a database has the latest main
+// schema but an older clone-local series, and leases.granted_node, which the
+// shared issue projection selects, is missing. A read-only open never
+// migrates (bd-6dnrw.32), and the main-series check passes, so the open used
+// to succeed and every list, count and search then failed on the unknown
+// column. An open that asks for a readable schema refuses it instead, with a
+// typed error naming the column and the per-database remedy, and changes
+// nothing.
+func TestDoltNew_CloneLocalReadableSchema(t *testing.T) {
+	skipIfNoDolt(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	open, store := cloneLocalBehindFixture(t, ctx)
+	before := cloneLocalState(t, ctx, store)
+
+	ro, err := open(&Config{ReadOnly: true, RequireReadableSchema: true})
+	if err == nil {
+		_, readErr := ro.SearchIssues(ctx, "", types.IssueFilter{})
+		ro.Close()
+		t.Fatalf("New (read-only, clone-local series behind, granted_node missing) succeeded; its first issue read returned %v", readErr)
+	}
+	var behind *schema.CloneLocalBehindError
+	if !errors.As(err, &behind) {
+		t.Fatalf("New (read-only, granted_node missing) = %T (%v), want *schema.CloneLocalBehindError", err, err)
+	}
+	if behind.Gateway || behind.MainVersion != schema.LatestVersion() ||
+		behind.LatestIgnoredVersion != schema.LatestIgnoredVersion() ||
+		behind.IgnoredVersion >= schema.LatestIgnoredVersion() {
+		t.Errorf("CloneLocalBehindError = %+v, want a direct (non-gateway) refusal at the latest main version with the clone-local series behind", *behind)
+	}
+	if len(behind.MissingColumns) != 1 || behind.MissingColumns[0] != "granted_node" || behind.Table != "leases" {
+		t.Errorf("CloneLocalBehindError names %s.%v, want leases.[granted_node]", behind.Table, behind.MissingColumns)
+	}
+	msg := err.Error()
+	for _, want := range []string{"granted_node", "bd dolt pull", "bd migrate schema"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal %q does not mention %q", msg, want)
+		}
+	}
+	for _, never := range []string{"--force", "re-clone"} {
+		if strings.Contains(msg, never) {
+			t.Errorf("refusal %q prescribes %q", msg, never)
+		}
+	}
+	if after := cloneLocalState(t, ctx, store); after != before {
+		t.Errorf("refused open changed the database: before %s, after %s", before, after)
+	}
 }

@@ -354,6 +354,112 @@ func CheckReadableDrift(ctx context.Context, db DBConn, table string, columns []
 	return behindDriftError(currentVersion)
 }
 
+// CloneLocalBehindError is returned when a database is opened on a path that
+// does not migrate it (a read-only open, or a gateway's) and its clone-local
+// (dolt-ignored) migration series is behind the binary's in a way its reads
+// cannot survive: a table the reads select from lacks one of their columns.
+//
+// The clone-local series is never replicated: `bd dolt pull` brings the main
+// series a migrator pushed, but every database applies its own clone-local
+// migrations, and a read-only open never does (bd-6dnrw.32). A clone that
+// pulled the migrated main series on an older binary and then upgraded is
+// therefore current on main and still behind here (gastownhall/beads#7038).
+type CloneLocalBehindError struct {
+	// IgnoredVersion is the effective (sentinel-corrected) clone-local
+	// cursor, LatestIgnoredVersion the binary's.
+	IgnoredVersion       int
+	LatestIgnoredVersion int
+	// Table and MissingColumns name what the reads select that is absent.
+	Table          string
+	MissingColumns []string
+	// MainVersion is the database's main-series version, BinaryVersion the
+	// binary's: a main series behind too must be brought current by the
+	// designated-migrator procedure first.
+	MainVersion   int
+	BinaryVersion int
+	// Gateway marks a database a gateway server serves, whose schema bd never
+	// migrates, as SchemaBehindError.Gateway does.
+	Gateway bool
+}
+
+func (e *CloneLocalBehindError) Error() string {
+	head := fmt.Sprintf("clone-local schema is behind: %s lacks %s, which issue reads select (clone-local migrations at v%d, binary expects v%d); clone-local migrations are never replicated, so `bd dolt pull` does not bring them",
+		e.Table, strings.Join(e.MissingColumns, ", "), e.IgnoredVersion, e.LatestIgnoredVersion)
+	if e.Gateway {
+		return head + " — the gateway server owns this database's schema and bd never migrates it: " + e.Remedy()
+	}
+	return head + " — " + e.Remedy()
+}
+
+// Remedy is the per-database step that clears the refusal, without the
+// diagnosis Error leads with. A gateway's is the server administrator's.
+func (e *CloneLocalBehindError) Remedy() string {
+	if e.Gateway {
+		return "ask the server administrator to apply this database's clone-local migrations, then retry"
+	}
+	if e.MainVersion < e.BinaryVersion {
+		return fmt.Sprintf("the replicated schema is behind too (database v%d, binary v%d): finish the designated-migrator procedure first (the migrator runs `bd migrate schema` and `bd dolt push`, then `bd dolt pull` here), then run `bd migrate schema` once in this database's workspace and retry",
+			e.MainVersion, e.BinaryVersion)
+	}
+	return fmt.Sprintf("the replicated schema is current (v%d), so this needs no further main-schema migration consent: run `bd migrate schema` once in this database's workspace (after any maintenance freeze is lifted), then retry, or set BD_IGNORE_SCHEMA_SKEW=1 to read anyway (reads selecting the missing columns will fail)",
+		e.MainVersion)
+}
+
+// IsCloneLocalBehindError reports whether err (or any error it wraps) is a
+// *CloneLocalBehindError.
+func IsCloneLocalBehindError(err error) bool {
+	var e *CloneLocalBehindError
+	return errors.As(err, &e)
+}
+
+// CheckCloneLocalReadable is CheckReadableDrift's counterpart for the
+// clone-local series: an open that reads a database at its current schema
+// refuses one whose clone-local series is behind the binary's and whose table
+// lacks one of columns, the columns the caller's reads select from it, with
+// *CloneLocalBehindError. The cursor is the sentinel-corrected one
+// (CurrentIgnoredVersion), so a cursor the live schema contradicts counts as
+// behind. A behind series whose table has every column stays readable, and a
+// current one costs only the cursor read. BD_IGNORE_SCHEMA_SKEW=1 downgrades
+// the refusal to a warning, as it does CheckBehindDrift's.
+//
+// It never migrates: applying the clone-local series is a write, and the
+// opens that call this are the ones that must not write.
+func CheckCloneLocalReadable(ctx context.Context, db DBConn, table string, columns []string) error {
+	current, err := CurrentIgnoredVersion(ctx, db)
+	if err != nil {
+		return fmt.Errorf("clone-local schema check: %w", err)
+	}
+	latest := LatestIgnoredVersion()
+	if current >= latest {
+		return nil
+	}
+	missing, err := missingColumns(ctx, db, table, columns)
+	if err != nil {
+		return fmt.Errorf("clone-local schema check: %w", err)
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	if os.Getenv("BD_IGNORE_SCHEMA_SKEW") == "1" {
+		fmt.Fprintf(os.Stderr,
+			"Warning: schema skew ignored — clone-local migrations (v%d) are behind binary (v%d) and %s lacks %s; reads selecting it will fail\n",
+			current, latest, table, strings.Join(missing, ", "))
+		return nil
+	}
+	mainVersion, err := CurrentVersion(ctx, db)
+	if err != nil {
+		return fmt.Errorf("clone-local schema check: %w", err)
+	}
+	return &CloneLocalBehindError{
+		IgnoredVersion:       current,
+		LatestIgnoredVersion: latest,
+		Table:                table,
+		MissingColumns:       missing,
+		MainVersion:          mainVersion,
+		BinaryVersion:        LatestVersion(),
+	}
+}
+
 // missingColumns returns the entries of columns that table lacks, all of them
 // when the table does not exist. Names compare case-insensitively, as MySQL
 // compares column names. It lists the one table with SHOW COLUMNS for
