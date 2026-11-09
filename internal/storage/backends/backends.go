@@ -133,11 +133,13 @@ type Backend struct {
 	// OpenReadOnly opens the workspace for a read-only command.
 	//
 	// cmd/bd opens two postures through this one hook: the root pre-run's
-	// CLASSIFIED read commands, which may still write (`bd ready --claim`
-	// claims through the store it returns, as the built-in embedded arm's
-	// OpenForReadOnlyCommand allows), and the non-mutating opens — previews,
-	// cross-repo hydration, doctor — which must not. A backend cannot tell the
-	// two apart here, so a caller must not assume the store refuses writes:
+	// CLASSIFIED read commands, and the non-mutating opens — previews,
+	// cross-repo hydration, doctor — which must not write. The write-flag
+	// forms of classified reads (`bd ready --claim`, `bd duplicates
+	// --auto-merge`) are writers and open through Open instead (GH#8264). A
+	// backend cannot tell the two postures apart here, and the built-in
+	// embedded arm's OpenForReadOnlyCommand returns an otherwise normal
+	// writable store, so a caller must not assume the store refuses writes:
 	// the http client backend answers with a writable one and says so.
 	OpenReadOnly func(ctx context.Context, beadsDir string) (storage.DoltStorage, error)
 

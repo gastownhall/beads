@@ -485,9 +485,10 @@ func dataBehindAdopter(readOnly bool) *schema.FastForwardAdopter {
 
 // readThroughRefusedMigration serves a read command from a database the
 // migration gate refused to migrate: warn, attach at the current schema, and
-// carry on. Writes remain refused (they open without WithReadOnly), so the
-// database cannot be quietly written at a schema this binary believes is
-// behind.
+// carry on. Writes remain refused because the CLI opens every writer without
+// WithReadOnly, including a classified read invoked with a write flag (`bd
+// ready --claim`, cmd/bd's commandReadsOnly, bd-fwx149), so the database cannot
+// be quietly written at a schema this binary believes is behind.
 //
 // This mirrors embedded mode's read-only-command intent (bd-578h9.5), and the
 // warning keeps the body-then-mode-line shape of embeddeddolt's
