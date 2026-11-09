@@ -379,4 +379,77 @@ func TestOpenSQLWaitBudget(t *testing.T) {
 			t.Fatalf("SELECT 1 = %d, want 1", one)
 		}
 	})
+
+	t.Run("parent_deadline_precedence", func(t *testing.T) {
+		// No t.Parallel: t.Setenv.
+		t.Setenv(openWaitBudgetEnv, "1s")
+		dir := t.TempDir()
+		initWaitBudgetDatabase(t, dir)
+
+		hold := holdWaitBudgetDatabase(t, dir)
+		defer func() { _ = hold() }()
+
+		// The caller's 4s deadline must win over the 1s environment
+		// budget: the open waits past the budget and ends on the
+		// caller's cancellation, never as ErrOpenTimeout.
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer cancel()
+		start := time.Now()
+		done := make(chan error, 1)
+		go func() {
+			_, cleanup, err := OpenSQL(ctx, dir, waitBudgetDatabase, "")
+			if err == nil {
+				_ = cleanup()
+				err = errors.New("open succeeded while the holder was held")
+			}
+			done <- err
+		}()
+
+		select {
+		case err := <-done:
+			if errors.Is(err, ErrOpenTimeout) {
+				t.Fatalf("the parent deadline must take precedence over the environment budget; got ErrOpenTimeout: %v", err)
+			}
+			if elapsed := time.Since(start); elapsed < 3*time.Second {
+				t.Fatalf("contended open returned after %s, before the 4s parent deadline: the 1s environment budget was applied", elapsed)
+			}
+			t.Logf("contended open ended on the caller's deadline after %s: %v", time.Since(start), err)
+		case <-time.After(15 * time.Second):
+			t.Fatalf("contended open did not end on the caller's 4s deadline within 15s")
+		}
+	})
+
+	t.Run("cancelled_parent_context", func(t *testing.T) {
+		// No t.Parallel: t.Setenv.
+		t.Setenv(openWaitBudgetEnv, "1s")
+		dir := t.TempDir()
+		initWaitBudgetDatabase(t, dir)
+
+		hold := holdWaitBudgetDatabase(t, dir)
+		defer func() { _ = hold() }()
+
+		// A caller that already cancelled must see its own cancellation,
+		// not a budget diagnosis, and must not hang.
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		done := make(chan error, 1)
+		go func() {
+			_, cleanup, err := OpenSQL(ctx, dir, waitBudgetDatabase, "")
+			if err == nil {
+				_ = cleanup()
+				err = errors.New("open succeeded while the holder was held")
+			}
+			done <- err
+		}()
+
+		select {
+		case err := <-done:
+			if errors.Is(err, ErrOpenTimeout) {
+				t.Fatalf("a cancelled caller must not be diagnosed as ErrOpenTimeout: %v", err)
+			}
+			t.Logf("open with a pre-cancelled context returned %v", err)
+		case <-time.After(15 * time.Second):
+			t.Fatalf("open with a pre-cancelled context did not return within 15s")
+		}
+	})
 }
