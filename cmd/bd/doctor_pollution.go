@@ -127,14 +127,57 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 	}
 
 	backupPath := ".beads/pollution-backup.jsonl"
-	if err := backupPollutedIssues(polluted, backupPath); err != nil {
+
+	// Post-confirmation refresh (GH#5025): the reported set was computed
+	// before the prompt. Reload exactly the originally reported IDs and
+	// rerun the classifier, so a row that became protected, connected or
+	// commented — or was deleted or edited away — between report and
+	// confirmation is skipped and reported rather than deleted, and no
+	// newly discovered ID joins an already confirmed set. This is not an
+	// atomic compare-and-delete against writes that land after the
+	// refresh.
+	reported := make([]string, len(polluted))
+	for i, p := range polluted {
+		reported[i] = p.Issue.ID
+	}
+	reloaded, err := store.SearchIssues(ctx, "", types.IssueFilter{IDs: reported})
+	if err != nil {
+		return HandleError("reloading reported issues before cleanup: %v", err)
+	}
+	fresh, err := doctor.DetectTestPollution(ctx, store, reloaded)
+	if err != nil {
+		return HandleError("re-checking reported issues before cleanup: %v", err)
+	}
+	freshByID := make(map[string]doctor.PollutionMatch, len(fresh))
+	for _, m := range fresh {
+		freshByID[m.Issue.ID] = m
+	}
+	var eligible []doctor.PollutionMatch
+	var skipped []string
+	for _, id := range reported {
+		if m, ok := freshByID[id]; ok {
+			eligible = append(eligible, m)
+		} else {
+			skipped = append(skipped, id)
+		}
+	}
+	if len(skipped) > 0 {
+		fmt.Printf("Skipping %d issue(s) that no longer qualify (closed, protected, connected, commented, edited, or deleted): %s\n",
+			len(skipped), strings.Join(skipped, ", "))
+	}
+	if len(eligible) == 0 {
+		fmt.Printf("No remaining eligible issues; nothing deleted.\n")
+		return nil
+	}
+
+	if err := backupPollutedIssues(eligible, backupPath); err != nil {
 		return HandleError("backing up issues: %v", err)
 	}
-	fmt.Printf("Backed up %d issues to %s\n", len(polluted), backupPath)
+	fmt.Printf("Backed up %d issues to %s\n", len(eligible), backupPath)
 
-	fmt.Printf("\nDeleting %d issues...\n", len(polluted))
+	fmt.Printf("\nDeleting %d issues...\n", len(eligible))
 	deleted := 0
-	for _, p := range polluted {
+	for _, p := range eligible {
 		if err := deleteIssue(ctx, p.Issue.ID); err != nil {
 			fmt.Fprintf(os.Stderr, "Error deleting %s: %v\n", p.Issue.ID, err)
 			continue
