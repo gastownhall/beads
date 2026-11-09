@@ -253,7 +253,7 @@ which this breakage does not affect. See
 ### New Project
 
 ```bash
-# Embedded mode (single writer, no server — default for standalone)
+# Embedded mode (no server; processes take turns — default for standalone)
 bd init
 
 # Server mode (multi-writer, e.g. orchestrator)
@@ -281,7 +281,7 @@ Migration creates backups automatically. Your original SQLite database is preser
 ```mermaid
 flowchart LR
     subgraph embedded["Embedded mode (default) — bd init"]
-        bd1["bd process<br/>Dolt runs in-process"] --> d1[(".beads/embeddeddolt/<br/>single writer, file-locked")]
+        bd1["bd process<br/>Dolt runs in-process"] --> d1[(".beads/embeddeddolt/<br/>processes take turns (engine lock)")]
     end
     subgraph server["Server mode — bd init --server"]
         bd2["bd (agent 1)"] --> srv["dolt sql-server"]
@@ -295,7 +295,9 @@ flowchart LR
 In-process Dolt engine — no separate server needed. This is the default for
 standalone Beads users. The `bd` binary includes everything; just `bd init` and go.
 
-- Single-writer (one process at a time)
+- Several `bd` processes can share it, one at a time: each store operation
+  holds the engine's exclusive lock only for its own short session, and the
+  others wait their turn (see [Lock Contention](#lock-contention-embedded-mode))
 - Data lives in `.beads/embeddeddolt/` alongside your code
 - Push to GitHub with `bd dolt push` — code and issues in one repo
 - Zero ops: no server, no ports, no PID files
@@ -702,10 +704,36 @@ If you accidentally committed a Dolt data directory:
 
 ### Lock Contention (Embedded Mode)
 
-**Symptom:** "database is locked" errors.
+**Symptom:** commands slow down when many agents share one workspace, or a
+command fails with "database is locked".
 
-Embedded mode is single-writer (enforced via file lock). If you need concurrent
-access, switch to server mode. See [Migrating Between Backends](#migrating-between-backends).
+Embedded mode lets several `bd` processes use one database, one at a time.
+While the embedded Dolt engine is open it holds an exclusive lock on the
+database files, and bd opens the engine only for each store operation's short
+session, then closes it. A process that finds the lock held retries with
+backoff until it gets the lock or its command's context is canceled; the wait
+is bounded by that context, not by a fixed retry limit, so under sustained
+contention a command can still fail with the error above. bd's own file
+locks do not serialize ordinary commands: one guards only `bd init`'s one-time
+setup, and the workspace gate is shared by normal commands and taken
+exclusively only by maintenance operations (mode migration, restore,
+destructive repair).
+
+A write reaches Dolt in two steps that run in separate engine sessions. The
+SQL transaction commits first: from then on the change is in the working set
+that every later command reads. The Dolt history commit that records it comes
+in a later session, and another process can run in between. SQL visibility
+therefore precedes history publication: until the history commit lands, the
+change is not in Dolt history queries. (`bd dolt push` first commits any
+pending working-set changes, then pushes.) That history commit stages whole
+tables, so it can also take in rows another process wrote in the interval.
+This is an ordering observation, not a promise that every interleaving is
+loss-free, and no scoped-commit guarantee follows from it.
+
+Every command pays engine startup and waits its turn. For sustained
+concurrent agents, server or proxied-server mode keeps one engine running and
+serves clients concurrently; see
+[Migrating Between Backends](#migrating-between-backends).
 
 ## Configuration Reference
 

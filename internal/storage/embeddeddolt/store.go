@@ -45,8 +45,16 @@ var _ storage.ExternalRefHistoryQuerier = (*EmbeddedDoltStore)(nil)
 // time the embedded engine's write lock is held, reducing contention when
 // multiple processes access the same database concurrently.
 //
-// The dolthub/driver/v2 handles its own concurrency internally. File-level locking
+// Multiple bd processes may share the database, but their engine sessions are
+// serialized: an open engine holds the database's exclusive lock, and the
+// dolthub/driver/v2 connector retries a locked open with backoff until the
+// lock frees or the context is canceled (OpenSQL). File-level locking in bd
 // is only used during bd init to protect one-time initialization steps.
+//
+// A write's SQL commit and the Dolt history commit that publishes it run in
+// separate engine sessions, so another process can run in between: its rows
+// are in the working set by then, and a history commit that stages whole
+// tables takes them in too.
 type EmbeddedDoltStore struct {
 	dataDir       string
 	beadsDir      string
