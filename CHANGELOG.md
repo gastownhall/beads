@@ -1461,8 +1461,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   automatic transaction commits on (`dolt_transaction_commit`) no longer
   fails on a fresh database with `migration 0040_ignored_tables_also_nonlocal_tables.up.sql:
   ... nothing to commit`. The migration pass now turns the setting off for
-  its own session and restores it on return. The same error at migration
-  0028, reported on bd 1.0.4, was fixed in v1.0.5 (#4470).
+  its own session and restores it on return, which also recovers a
+  database already stuck at schema v39 by the same mechanism: the failed
+  pass leaves 0040's first `dolt_nonlocal_tables` row committed behind it,
+  and a consented `bd migrate schema` now suspends the setting, clears that
+  residue with the pre-0040 repair, and records the migration (#4800,
+  reported by @dhruv-pratap). The same error at migration 0028, reported
+  on bd 1.0.4, was fixed in v1.0.5 (#4470).
 - A long-lived proxied-server or external-server connection pool, such as
   the one an embedder's unit-of-work provider keeps, now survives its local
   proxy exiting on idle. Each new connection looks the proxy up again,
