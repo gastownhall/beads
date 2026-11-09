@@ -177,6 +177,57 @@ func TestCanonicalDependencyType(t *testing.T) {
 // used by both `bd create --deps` and `bd dep add --type`. Per the intent
 // documented on types.WellKnownDependencyTypes, both commands reject
 // custom/unknown dependency types identically.
+// TestParseFormDeps pins the create form's dependency parsing (GH#5560,
+// bd-fom9ed): the --deps vocabulary and alias canonicalization, the form's
+// own direction (the new issue is always the source, blocks:<id> included)
+// pinned before dedupe, and the refusals the form's field and a direct call
+// share.
+func TestParseFormDeps(t *testing.T) {
+	blocksB := domain.DependencySpec{Type: types.DepBlocks, TargetID: "bd-b"}
+	tests := []struct {
+		name    string
+		in      []string
+		want    []domain.DependencySpec
+		wantErr string
+	}{
+		{name: "no entries", in: nil, want: nil},
+		{name: "blank entries are skipped", in: []string{" ", ""}, want: nil},
+		{name: "blocked-by alias", in: []string{"blocked-by:bd-b"}, want: []domain.DependencySpec{blocksB}},
+		{name: "depends-on alias", in: []string{"depends-on:bd-b"}, want: []domain.DependencySpec{blocksB}},
+		{
+			name: "other types name their relationship",
+			in:   []string{"discovered-from:bd-a", "related:bd-b"},
+			want: []domain.DependencySpec{
+				{Type: types.DepDiscoveredFrom, TargetID: "bd-a"},
+				{Type: types.DepRelated, TargetID: "bd-b"},
+			},
+		},
+		{name: "two types on one target", in: []string{"related:bd-b", "blocks:bd-b"}, wantErr: `cannot attach both "related" and "blocks" to the same target "bd-b"`},
+		{name: "two types on one target, blocks first", in: []string{"blocks:bd-b", "related:bd-b"}, wantErr: `cannot attach both "blocks" and "related" to the same target "bd-b"`},
+		{name: "an alias and another type on one target", in: []string{"discovered-from:bd-b", "blocked-by:bd-b"}, wantErr: `cannot attach both "discovered-from" and "blocks"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseFormDeps(tt.in)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("parseFormDeps(%q) = %+v, %v; want an error containing %q", tt.in, got, err, tt.wantErr)
+				}
+				if strings.Contains(err.Error(), "--deps") {
+					t.Errorf("parseFormDeps(%q) error %q names the --deps flag the form does not have", tt.in, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseFormDeps(%q): %v", tt.in, err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("parseFormDeps(%q) = %+v, want %+v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateDependencyType(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -69,17 +69,6 @@ func parseCreateFormInput(raw *createFormRawInput) *createFormValues {
 		}
 	}
 
-	// Parse dependencies
-	var deps []string
-	if raw.Deps != "" {
-		for _, d := range strings.Split(raw.Deps, ",") {
-			d = strings.TrimSpace(d)
-			if d != "" {
-				deps = append(deps, d)
-			}
-		}
-	}
-
 	return &createFormValues{
 		Title:              raw.Title,
 		Description:        raw.Description,
@@ -90,8 +79,48 @@ func parseCreateFormInput(raw *createFormRawInput) *createFormValues {
 		Design:             raw.Design,
 		AcceptanceCriteria: raw.Acceptance,
 		ExternalRef:        raw.ExternalRef,
-		Dependencies:       deps,
+		Dependencies:       splitFormDeps(raw.Deps),
 	}
+}
+
+// splitFormDeps splits the form's comma-separated Dependencies field into its
+// trimmed, non-empty entries. The field's validator and the values handed to
+// CreateIssueFromFormValues split it the same way.
+func splitFormDeps(raw string) []string {
+	var deps []string
+	for _, d := range strings.Split(raw, ",") {
+		d = strings.TrimSpace(d)
+		if d != "" {
+			deps = append(deps, d)
+		}
+	}
+	return deps
+}
+
+// parseFormDeps parses the form's dependency entries through the parse and
+// dedupe pair `bd create --deps` uses, so the form takes the same types,
+// canonicalizes the blocked-by/depends-on aliases to the gating blocks type,
+// collapses spellings of one edge and refuses two types on one target
+// (GH#5560). One deliberate difference: the form's blocks:<id> has always
+// made the new issue depend on <id>, where --deps' explicit blocks: reverses
+// the edge, so every spec keeps the new issue as its source. That is pinned
+// before dedupe, which keys on direction: blocks:B and depends-on:B are one
+// edge, related:B and blocks:B two types on one target.
+func parseFormDeps(deps []string) ([]domain.DependencySpec, error) {
+	var specs []domain.DependencySpec
+	for _, raw := range deps {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		spec, err := parseDepSpec(raw)
+		if err != nil {
+			return nil, err
+		}
+		spec.SwapDirection = false
+		specs = append(specs, spec)
+	}
+	return dedupeDepSpecs(specs)
 }
 
 // CreateIssueFromFormValues creates an issue from the given form values.
@@ -99,6 +128,14 @@ func parseCreateFormInput(raw *createFormRawInput) *createFormValues {
 // This function handles parent-child relationships, labels, dependencies,
 // and source_repo inheritance.
 func CreateIssueFromFormValues(ctx context.Context, s storage.DoltStorage, fv *createFormValues, actor string) (*types.Issue, error) {
+	// Check the dependencies before anything is read, reserved or written:
+	// the field's validator refuses the same input, but a caller can skip the
+	// form. The edges commit atomically with the create below.
+	depSpecs, err := parseFormDeps(fv.Dependencies)
+	if err != nil {
+		return nil, err
+	}
+
 	// If parent is specified, validate it exists and generate child ID
 	var explicitID string
 	var inheritedLabels []string
@@ -148,41 +185,11 @@ func CreateIssueFromFormValues(ctx context.Context, s storage.DoltStorage, fv *c
 
 	// If a discovered-from dependency is present, inherit source_repo from
 	// the referenced parent issue.
-	if dfParent := discoveredFromParent(fv.Dependencies); dfParent != "" {
+	if dfParent := discoveredFromParentSpec(depSpecs); dfParent != "" {
 		parentIssue, err := s.GetIssue(ctx, dfParent)
 		if err == nil && parentIssue != nil && parentIssue.SourceRepo != "" {
 			issue.SourceRepo = parentIssue.SourceRepo
 		}
-	}
-
-	// Parse dependency specs before creating anything. The form keeps its
-	// historical lenient parsing (warn and skip malformed entries), but the
-	// edges that do parse commit atomically with the create below.
-	var depSpecs []domain.DependencySpec
-	for _, depSpec := range fv.Dependencies {
-		depSpec = strings.TrimSpace(depSpec)
-		if depSpec == "" {
-			continue
-		}
-
-		var depType types.DependencyType
-		var dependsOnID string
-
-		if strings.Contains(depSpec, ":") {
-			parts := strings.SplitN(depSpec, ":", 2)
-			depType = types.DependencyType(strings.TrimSpace(parts[0]))
-			dependsOnID = strings.TrimSpace(parts[1])
-		} else {
-			depType = types.DepBlocks
-			dependsOnID = depSpec
-		}
-
-		if !depType.IsValid() {
-			fmt.Fprintf(os.Stderr, "Warning: invalid dependency type '%s' (valid: blocks, related, parent-child, discovered-from)\n", depType)
-			continue
-		}
-
-		depSpecs = append(depSpecs, domain.DependencySpec{Type: depType, TargetID: dependsOnID})
 	}
 
 	// The issue and its edges (parent-child per GH#1983, plus form deps)

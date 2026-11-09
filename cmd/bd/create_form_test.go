@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -514,6 +515,40 @@ func TestCreateIssueFromFormValues(t *testing.T) {
 		}
 	})
 
+	// GH#5560 (bd-fom9ed): two dependency types on one target are refused
+	// with the shared collision guidance before the form reads the parent,
+	// reserves a child ID or writes an issue or an edge, so a refused create
+	// consumes no child number and leaves no edge behind.
+	t.Run("InvalidDependenciesFailBeforeAnyWrite", func(t *testing.T) {
+		parent := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Refusal parent", IssueType: "epic"})
+		target := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Refusal target"})
+		for _, deps := range [][]string{
+			{"blocked-by:" + target.ID, "related:" + target.ID},
+			{"related:" + target.ID, "blocks:" + target.ID},
+			{"blocks:" + target.ID, "related:" + target.ID},
+			{"discovered-from:" + target.ID, "blocked-by:" + target.ID},
+		} {
+			fv := &createFormValues{Title: "Refused child", Priority: 2, IssueType: "task", ParentID: parent.ID, Dependencies: deps}
+			issue, err := CreateIssueFromFormValues(ctx, s, fv, "test")
+			if err == nil {
+				t.Errorf("CreateIssueFromFormValues(deps %q) created %s, want a refusal", deps, issue.ID)
+				continue
+			}
+			if !strings.Contains(err.Error(), "cannot attach both") || !strings.Contains(err.Error(), "GH#4626") {
+				t.Errorf("CreateIssueFromFormValues(deps %q) error %q, want the shared collision guidance", deps, err)
+			}
+		}
+		if dependents, err := s.GetDependents(ctx, target.ID); err != nil {
+			t.Fatalf("GetDependents %s: %v", target.ID, err)
+		} else if len(dependents) != 0 {
+			t.Errorf("refused creates left %d edges to %s", len(dependents), target.ID)
+		}
+		child := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Accepted child", ParentID: parent.ID})
+		if want := parent.ID + ".1"; child.ID != want {
+			t.Errorf("first accepted child of %s is %s, want %s: a refused create reserved a child ID", parent.ID, child.ID, want)
+		}
+	})
+
 	t.Run("AllPriorities", func(t *testing.T) {
 		for priority := 0; priority <= 4; priority++ {
 			fv := &createFormValues{
@@ -770,4 +805,54 @@ func TestFormValuesIntegration(t *testing.T) {
 			t.Errorf("expected 2 labels, got %d", len(labels))
 		}
 	})
+}
+
+// createFormIssueForTest creates an issue through CreateIssueFromFormValues,
+// defaulting the fields the dependency tests do not care about.
+func createFormIssueForTest(t *testing.T, ctx context.Context, s storage.DoltStorage, fv *createFormValues) *types.Issue {
+	t.Helper()
+	if fv.IssueType == "" {
+		fv.IssueType = "task"
+	}
+	if fv.Priority == 0 {
+		fv.Priority = 2
+	}
+	issue, err := CreateIssueFromFormValues(ctx, s, fv, "test")
+	if err != nil {
+		t.Fatalf("CreateIssueFromFormValues(%q, deps %q): %v", fv.Title, fv.Dependencies, err)
+	}
+	return issue
+}
+
+// assertFormBlocksEdge checks that from has exactly one dependency, a blocks
+// edge on to, that no edge runs the other way, and that the edge keeps from
+// out of ready work while to is open.
+func assertFormBlocksEdge(t *testing.T, ctx context.Context, s storage.DoltStorage, from, to string) {
+	t.Helper()
+	recs, err := s.GetDependencyRecords(ctx, from)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords %s: %v", from, err)
+	}
+	if len(recs) != 1 || recs[0].DependsOnID != to || recs[0].Type != types.DepBlocks {
+		for _, r := range recs {
+			t.Logf("%s -> %s (%s)", r.IssueID, r.DependsOnID, r.Type)
+		}
+		t.Errorf("%s has %d dependencies, want one blocks edge on %s", from, len(recs), to)
+	}
+	back, err := s.GetDependencyRecords(ctx, to)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords %s: %v", to, err)
+	}
+	for _, r := range back {
+		t.Errorf("reversed edge written: %s -> %s (%s)", r.IssueID, r.DependsOnID, r.Type)
+	}
+	ready, err := s.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	for _, issue := range ready {
+		if issue.ID == from {
+			t.Errorf("%s is ready while its blocker %s is open", from, to)
+		}
+	}
 }
