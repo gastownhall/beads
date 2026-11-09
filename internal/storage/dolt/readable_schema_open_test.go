@@ -353,3 +353,100 @@ func TestDoltNew_CloneLocalReadableSchema(t *testing.T) {
 		}
 	})
 }
+
+// TestDoltNew_CloneLocalBehindCompleteProjectionNoMigration is #7038's AC-5:
+// the upgrade window's other half. The pull-then-upgrade recipe leaves the
+// clone-local cursor behind, and a cursor behind is not by itself a problem
+// — the refusal exists to stop reads that cannot work, not to force
+// convergence. When every column the issue projection selects is present
+// (this fixture regresses the cursor alone; the never-dropped column is the
+// cleaner shape of the same thing the subtest above re-adds out of band),
+// the open stays readable, twice over, and the readable open migrates
+// nothing: not the cursor, not HEAD.
+//
+// A guard, green against a base with no clone-local refusal at all: it
+// exists to hold the window open against an over-firing fix, while the
+// missing-column tests above hold the refusal shut.
+func TestDoltNew_CloneLocalBehindCompleteProjectionNoMigration(t *testing.T) {
+	skipIfNoDolt(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	tmpDir := t.TempDir()
+	dbName := uniqueTestDBName(t)
+	store, err := New(ctx, &Config{
+		Path:            tmpDir,
+		CommitterName:   "test",
+		CommitterEmail:  "test@example.com",
+		Database:        dbName,
+		CreateIfMissing: true,
+	})
+	if err != nil {
+		t.Fatalf("New (create): %v", err)
+	}
+	defer func() {
+		dropCtx, dropCancel := context.WithTimeout(context.Background(), 5*testTimeout)
+		defer dropCancel()
+		_, _ = store.db.ExecContext(dropCtx, fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", dbName))
+		store.Close()
+	}()
+
+	// Behind by the cursor alone: the clone-local series' DDL stays applied,
+	// the shape a co-resident clone keeps through its own upgrade window.
+	if _, err := store.db.ExecContext(ctx,
+		"DELETE FROM ignored_schema_migrations WHERE version > 13"); err != nil {
+		t.Fatalf("regress ignored cursor: %v", err)
+	}
+	ignoredCursor := func() int {
+		var v int
+		if err := store.db.QueryRowContext(ctx,
+			"SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations").Scan(&v); err != nil {
+			t.Fatalf("read ignored cursor: %v", err)
+		}
+		return v
+	}
+	headCommit := func() string {
+		var hash string
+		if err := store.db.QueryRowContext(ctx,
+			"SELECT COMMIT_HASH FROM dolt_log LIMIT 1").Scan(&hash); err != nil {
+			t.Fatalf("read HEAD: %v", err)
+		}
+		return hash
+	}
+	rawCursor, headBefore := ignoredCursor(), headCommit()
+	if rawCursor != 13 {
+		t.Fatalf("fixture: ignored cursor = %d, want 13", rawCursor)
+	}
+	defer func() {
+		if got := ignoredCursor(); got != rawCursor {
+			t.Errorf("a readable open moved the ignored cursor from %d to %d; a read-only open never migrates", rawCursor, got)
+		}
+		if got := headCommit(); got != headBefore {
+			t.Errorf("a readable open moved HEAD from %s to %s", headBefore, got)
+		}
+	}()
+
+	// Two readable opens in a row: the window stays open for the whole
+	// upgrade, not just the first command.
+	for range 2 {
+		ro, err := New(ctx, &Config{
+			Path:                  tmpDir,
+			CommitterName:         "test",
+			CommitterEmail:        "test@example.com",
+			Database:              dbName,
+			ReadOnly:              true,
+			RequireReadableSchema: true,
+		})
+		if err != nil {
+			t.Fatalf("New (read-only, clone-local behind, columns present) = %v, want success: reads keep working through the window", err)
+		}
+		issues, err := ro.SearchIssues(ctx, "", types.IssueFilter{})
+		ro.Close()
+		if err != nil {
+			t.Errorf("SearchIssues (clone-local behind, columns present) = %v, want success", err)
+		} else if len(issues) != 0 {
+			t.Errorf("SearchIssues returned %d issues from an empty database: %+v", len(issues), issues)
+		}
+	}
+}
