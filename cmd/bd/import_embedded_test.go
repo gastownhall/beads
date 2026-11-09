@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -362,7 +363,9 @@ type staleSnapshotFixture struct {
 
 const staleSnapshotCloseReason = "closed by a worker before the stale snapshot came back"
 
-func newStaleSnapshotFixture(t *testing.T, bd, prefix string) *staleSnapshotFixture {
+// openStaleSnapshotFixture builds the workspace and the snapshot with X
+// still open; closeX closes it.
+func openStaleSnapshotFixture(t *testing.T, bd, prefix string) *staleSnapshotFixture {
 	t.Helper()
 	dir, _, _ := bdInit(t, bd, "--prefix", prefix)
 	f := &staleSnapshotFixture{dir: dir, xID: prefix + "-x", wID: prefix + "-w"}
@@ -395,7 +398,21 @@ func newStaleSnapshotFixture(t *testing.T, bd, prefix string) *staleSnapshotFixt
 	})
 	f.snapshotPath = filepath.Join(t.TempDir(), "snapshot.jsonl")
 	writeJSONLFile(t, f.snapshotPath, f.snapshot)
+	return f
+}
 
+func newStaleSnapshotFixture(t *testing.T, bd, prefix string) *staleSnapshotFixture {
+	t.Helper()
+	f := openStaleSnapshotFixture(t, bd, prefix)
+	f.closeX(t, bd, f.dir)
+	return f
+}
+
+// closeX claims and closes X through bd run in dir, records the result, and
+// checks that W is not in the store yet.
+func (f *staleSnapshotFixture) closeX(t *testing.T, bd, dir string) {
+	t.Helper()
+	snapX := findIssue(t, f.snapshot, f.xID)
 	bdUpdate(t, bd, dir, f.xID, "--claim")
 	bdClose(t, bd, dir, f.xID, "--reason", staleSnapshotCloseReason)
 	f.closed = bdShow(t, bd, dir, f.xID)
@@ -407,7 +424,6 @@ func newStaleSnapshotFixture(t *testing.T, bd, prefix string) *staleSnapshotFixt
 		t.Fatalf("closed X updated_at %s is not after the snapshot's %s", f.closed.UpdatedAt, snapX.UpdatedAt)
 	}
 	requireIssueAbsent(t, bd, dir, f.wID)
-	return f
 }
 
 // requireClosedUnchanged fails unless X, read through bd show in dir, still
@@ -524,6 +540,112 @@ func TestEmbeddedStaleSnapshotImportKeepsClose(t *testing.T) {
 		bdShow(t, bd, f.dir, f.wID)
 		if got := bdShow(t, bd, f.dir, f.xID); got.Status != types.StatusOpen {
 			t.Errorf("--allow-stale import: X status = %q, want %q", got.Status, types.StatusOpen)
+		}
+	})
+
+	t.Run("post_merge_hook_import_from_nested_worktree_keeps_close", func(t *testing.T) {
+		// The reported setup: agents in nested linked worktrees sharing the
+		// root's embedded store, with bd's git hooks importing the tracked
+		// JSONL after a merge. A branch whose JSONL still has X open (plus
+		// W) merges after X was closed; the hook's import must bring in W
+		// and leave the close alone.
+		if runtime.GOOS == "windows" {
+			t.Skip("git hooks run through sh")
+		}
+		f := openStaleSnapshotFixture(t, bd, "sthook")
+		root := f.dir
+
+		// The hooks call `bd` from PATH: put this test's binary there.
+		binDir := t.TempDir()
+		if err := os.Symlink(bd, filepath.Join(binDir, "bd")); err != nil {
+			t.Fatal(err)
+		}
+		env := func(dir string) []string {
+			return append(envWithout(bdEnv(dir), "PATH"), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		}
+		git := func(dir string, args ...string) string {
+			t.Helper()
+			cmd := gitCommand(args...)
+			cmd.Dir = dir
+			cmd.Env = env(dir)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("git %s in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
+			}
+			return string(out)
+		}
+		bdConfigSet := func(key, value string) {
+			t.Helper()
+			cmd := exec.Command(bd, "config", "set", key, value)
+			cmd.Dir = root
+			cmd.Env = bdEnv(root)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("bd config set %s %s: %v\n%s", key, value, err, out)
+			}
+		}
+
+		// Repo-local hooks, absolute so the linked worktree runs the same
+		// ones, installed by the real CLI.
+		hooksDir := filepath.Join(root, ".git", "hooks")
+		git(root, "config", "--local", "core.hooksPath", hooksDir)
+		bdHooks(t, bd, root, "install")
+		if data, err := os.ReadFile(filepath.Join(hooksDir, "post-merge")); err != nil || !strings.Contains(string(data), "bd hooks run post-merge") {
+			t.Fatalf("post-merge hook not installed in %s: %v\n%s", hooksDir, err, data)
+		}
+		bdConfigSet("import.auto", "true")
+		// Keep bd's own writes out of the tracked JSONL, so the merge is the
+		// only thing that changes it.
+		bdConfigSet("export.auto", "false")
+		if remotes := strings.TrimSpace(git(root, "remote")); remotes != "" {
+			t.Fatalf("fixture must have no sync remote, got git remotes %q", remotes)
+		}
+
+		// Base commit: the tracked JSONL holds X open (without W).
+		jsonlRel := filepath.Join(".beads", "issues.jsonl")
+		var openRows []types.Issue
+		for _, issue := range f.snapshot {
+			if issue.ID != f.wID {
+				openRows = append(openRows, issue)
+			}
+		}
+		writeJSONLFile(t, filepath.Join(root, jsonlRel), openRows)
+		if err := os.WriteFile(filepath.Join(root, ".git", "info", "exclude"), []byte(".worktrees/\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		git(root, "add", "-A")
+		for _, staged := range strings.Fields(git(root, "diff", "--cached", "--name-only")) {
+			if strings.Contains(staged, "embeddeddolt") {
+				t.Fatalf("fixture would commit the live database: %s", staged)
+			}
+		}
+		git(root, "commit", "-q", "--no-verify", "-m", "base")
+
+		// The nested linked worktree, created before W exists anywhere.
+		worktree := filepath.Join(root, ".worktrees", "agent")
+		git(root, "worktree", "add", "-q", "-b", "agent", worktree)
+
+		// A worker closes X from its worktree; both checkouts see it.
+		f.closeX(t, bd, worktree)
+		f.requireClosedUnchanged(t, bd, root)
+		requireIssueAbsent(t, bd, root, f.wID)
+
+		// The branch brings back X's pre-close row plus W, committed with
+		// --no-verify so a pre-commit export cannot replace the crafted file.
+		writeJSONLFile(t, filepath.Join(worktree, jsonlRel), f.snapshot)
+		git(worktree, "commit", "-q", "--no-verify", "-am", "stale snapshot")
+		requireIssueAbsent(t, bd, root, f.wID)
+		requireIssueAbsent(t, bd, worktree, f.wID)
+
+		mergeOut := git(root, "merge", "--no-edit", "agent")
+		if strings.Contains(mergeOut, "beads: post-merge import warning:") {
+			t.Fatalf("post-merge hook import failed:\n%s", mergeOut)
+		}
+
+		for _, dir := range []string{root, worktree} {
+			if w := bdShow(t, bd, dir, f.wID); w.Status != types.StatusOpen {
+				t.Errorf("%s: witness W status = %q, want %q (the hook import did not run?)\nmerge output:\n%s", dir, w.Status, types.StatusOpen, mergeOut)
+			}
+			f.requireClosedUnchanged(t, bd, dir)
 		}
 	})
 }
