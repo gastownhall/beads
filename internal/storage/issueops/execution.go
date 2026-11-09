@@ -377,7 +377,7 @@ func ExecuteReopen(ctx context.Context, tx *sql.Tx, request publicops.ReopenRequ
 	tables := ChangedTables{}
 	if reopened.Changed {
 		issueTable, _, eventTable, _ := WispTableRouting(reopened.IsWisp)
-		tables.Add(issueTable, eventTable)
+		tables.Add(issueTable, eventTable, reopened.CommentTable)
 	}
 	if reopened.IssueRowsChanged {
 		tables.Add("issues")

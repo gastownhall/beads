@@ -2,6 +2,8 @@ package conformance
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -196,5 +198,75 @@ func assertIssueOperationsReady(t *testing.T, ctx context.Context, fixture Issue
 	}
 	if want {
 		t.Fatalf("ready work omits %s, want present", issueID)
+	}
+}
+
+// ReopenCommentCommitFixture supplies the routes for
+// RunReopenCommentIsCommittedWithTheReopen. Each route reopens id with reason
+// as actor through one of the backend's commit paths and returns once that
+// reopen is published; a route that defers the version commit makes its own
+// explicit commit before returning.
+type ReopenCommentCommitFixture struct {
+	IssuePrefix string
+	CreateIssue func(context.Context, *types.Issue, string) error
+	CloseIssue  func(ctx context.Context, id, reason, actor, session string) error
+	Commit      func(context.Context, string) error
+	QueryScalar func(context.Context, string, []any, ...any) error
+	Routes      map[string]func(ctx context.Context, id, reason, actor string) error
+}
+
+// RunReopenCommentIsCommittedWithTheReopen proves that the comment a reasoned
+// reopen writes (GH#5593) is published with the reopen itself: HEAD shows the
+// issue open together with its reason comment, and no comments change is left
+// in the working set for a later, unrelated commit to sweep up. A route that
+// stages only the tables it knows it changed fails here when it forgets the
+// comment table, even though the row was written.
+func RunReopenCommentIsCommittedWithTheReopen(t *testing.T, ctx context.Context, fixture ReopenCommentCommitFixture) {
+	t.Helper()
+	names := make([]string, 0, len(fixture.Routes))
+	for name := range fixture.Routes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for i, name := range names {
+		reopen := fixture.Routes[name]
+		t.Run(name, func(t *testing.T) {
+			id := fmt.Sprintf("%s-reopen-commit-%d", fixture.IssuePrefix, i)
+			reason := "reopened through " + name
+			issue := &types.Issue{ID: id, Title: "reopen commit " + name, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+			if err := fixture.CreateIssue(ctx, issue, "seed"); err != nil {
+				t.Fatalf("create %s: %v", id, err)
+			}
+			if err := fixture.CloseIssue(ctx, id, "done", "closer", ""); err != nil {
+				t.Fatalf("close %s: %v", id, err)
+			}
+			if err := fixture.Commit(ctx, "seed closed issue"); err != nil {
+				t.Fatalf("commit seed: %v", err)
+			}
+
+			if err := reopen(ctx, id, reason, "reviver"); err != nil {
+				t.Fatalf("reopen %s: %v", id, err)
+			}
+
+			var status string
+			var comments int
+			if err := fixture.QueryScalar(ctx, `SELECT
+				(SELECT status FROM issues AS OF 'HEAD' WHERE id = ?),
+				(SELECT COUNT(*) FROM comments AS OF 'HEAD' WHERE issue_id = ? AND author = ? AND text = ?)`,
+				[]any{id, id, "reviver", reason}, &status, &comments); err != nil {
+				t.Fatalf("read %s AS OF HEAD: %v", id, err)
+			}
+			if status != string(types.StatusOpen) || comments != 1 {
+				t.Errorf("HEAD after reopen: status = %q with %d reason comments, want open with 1", status, comments)
+			}
+			var pending int
+			if err := fixture.QueryScalar(ctx,
+				"SELECT COUNT(*) FROM dolt_status WHERE table_name = 'comments'", nil, &pending); err != nil {
+				t.Fatalf("read dolt_status: %v", err)
+			}
+			if pending != 0 {
+				t.Errorf("reopen left the comments table changed in the working set (%d dolt_status rows), want it committed", pending)
+			}
+		})
 	}
 }

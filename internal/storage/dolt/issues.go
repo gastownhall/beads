@@ -584,7 +584,11 @@ func (s *DoltStore) ReopenIssue(ctx context.Context, id string, reason string, a
 		}
 		switch {
 		case !res.IsWisp:
-			return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, fmt.Sprintf("bd: reopen %s", id))
+			tables := []string{"issues", "events"}
+			if res.CommentTable != "" {
+				tables = append(tables, res.CommentTable)
+			}
+			return s.doltAddAndCommitInTx(ctx, tx, tables, fmt.Sprintf("bd: reopen %s", id))
 		case res.IssueRowsChanged:
 			return s.doltAddAndCommitInTx(ctx, tx, []string{"issues"}, fmt.Sprintf("bd: reopen %s", id))
 		default:

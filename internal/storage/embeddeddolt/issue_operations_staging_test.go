@@ -10,7 +10,9 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -299,4 +301,56 @@ func TestEmbeddedIssueOperationsUpdateParentStagesBlockedStateAndRollsBackFailur
 	if rollbackWorkingTitle != "rollback child" || rollbackHeadTitle != "rollback child" || !workingBlocked || !headBlocked {
 		t.Fatalf("failed parent replacement state = working (%q, %t), HEAD (%q, %t)", rollbackWorkingTitle, workingBlocked, rollbackHeadTitle, headBlocked)
 	}
+}
+
+// TestEmbeddedReopenCommentIsCommittedWithTheReopen runs the GH#5593 staging
+// contract over the embedded routes that make their own version commit, plus
+// EmbeddedDoltStore.ReopenIssue: it commits SQL only and leaves the version
+// commit to its caller, so its route flushes with CommitPending the way the
+// embedded CLI's deferred auto-commit does.
+func TestEmbeddedReopenCommentIsCommittedWithTheReopen(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "ops")
+	ctx := t.Context()
+	operations, err := embeddeddolt.NewIssueOperations(te.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycleReopen := func(ctx context.Context, id, reason, actor string) error {
+		_, err := operations.Reopen(ctx, publicops.ReopenRequest{Actor: actor, IssueID: id, Reason: reason})
+		return err
+	}
+
+	conformance.RunReopenCommentIsCommittedWithTheReopen(t, ctx, conformance.ReopenCommentCommitFixture{
+		IssuePrefix: "ops",
+		CreateIssue: te.store.CreateIssue,
+		CloseIssue:  te.store.CloseIssue,
+		Commit:      te.store.Commit,
+		QueryScalar: func(ctx context.Context, query string, args []any, dest ...any) error {
+			te.queryScalar(t, ctx, query, args, dest...)
+			return nil
+		},
+		Routes: map[string]func(ctx context.Context, id, reason, actor string) error{
+			"lifecycle Reopen": lifecycleReopen,
+			"lifecycle Reopen deferred then Commit": func(ctx context.Context, id, reason, actor string) error {
+				if err := lifecycleReopen(storageissueops.WithDeferredVersionCommit(ctx), id, reason, actor); err != nil {
+					return err
+				}
+				return te.store.Commit(ctx, "flush deferred reopen")
+			},
+			"store ReopenIssue then CommitPending": func(ctx context.Context, id, reason, actor string) error {
+				if err := te.store.ReopenIssue(ctx, id, reason, actor); err != nil {
+					return err
+				}
+				_, err := te.store.CommitPending(ctx, actor)
+				return err
+			},
+			"lifecycle transaction ReopenIssueWithResult": func(ctx context.Context, id, reason, actor string) error {
+				return te.store.RunInIssueLifecycleTransaction(ctx, "bd: reopen "+id, func(tx storage.IssueLifecycleTransaction) error {
+					_, err := tx.ReopenIssueWithResult(ctx, id, reason, actor)
+					return err
+				})
+			},
+		},
+	})
 }
