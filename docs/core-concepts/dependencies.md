@@ -42,6 +42,15 @@ space after the colon:
 issue-1, depends-on:issue-2, blocks:issue-3, discovered-from:issue-4
 ```
 
+The comma-separated Dependencies field of `bd create-form` takes the same
+types with one difference: `blocks:id` keeps the form's historical meaning,
+so a bare id, `blocks:id`, `blocked-by:id` and `depends-on:id` all make the
+new issue depend on id. The field checks its entries as you type them and
+keeps the text for you to correct: an unknown type, an entry with no id, or
+two different types on one id (`blocked-by:issue-1, related:issue-1`) is
+refused before anything is created. Spellings of the same edge collapse
+into one.
+
 ## Removing Dependencies
 
 ```bash
