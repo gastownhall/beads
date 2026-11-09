@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -349,4 +350,110 @@ func TestEmbeddedEngineBlockedRecheckOnReusedEngine(t *testing.T) {
 	if opens := counter.opens.Load(); opens != opensBefore {
 		t.Fatalf("engine opens across writes + rechecks = %d, want %d (the recheck added no open)", opens, opensBefore)
 	}
+}
+
+// TestEmbeddedEngineIdleRelease pins AC-4 of gastownhall/beads#5397: the
+// cached engine is released by an owner-independent idle timer, not held
+// until the store's Close. Inside the idle interval a follow-up operation
+// reuses the engine (the timer it rearms is what the expiry half exercises);
+// after the interval the timer disposes the engine on its own, another process
+// can open the same database (an external OpenSQL write lands), and the
+// store's next operation reopens and reads that write.
+func TestEmbeddedEngineIdleRelease(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := context.Background()
+	store, counter := engineTestStore(t, "engine_idle", 25*time.Millisecond)
+	if err := store.SetConfig(ctx, "issue_prefix", "ei"); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if err := store.CreateIssue(ctx, &types.Issue{ID: "ei-1", Title: "seeded", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if opens := counter.opens.Load(); opens != 1 {
+		t.Fatalf("engine opens after seed = %d, want 1", opens)
+	}
+
+	// Inside the idle window: reuse, no reopen.
+	if _, err := store.GetIssue(ctx, "ei-1"); err != nil {
+		t.Fatalf("GetIssue within idle window: %v", err)
+	}
+	if opens := counter.opens.Load(); opens != 1 {
+		t.Fatalf("engine opens within idle window = %d, want 1", opens)
+	}
+
+	// After the window the timer disposes the engine on its own.
+	engineWaitForCounters(t, counter, 1, 1, 5*time.Second)
+
+	// The database is released: an external engine opens and moves the row.
+	extCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	extDB, extCleanup, err := OpenSQL(extCtx, store.dataDir, store.database, store.branch)
+	if err != nil {
+		t.Fatalf("external OpenSQL after idle disposal: %v", err)
+	}
+	if _, err := extDB.ExecContext(extCtx, "UPDATE issues SET title = 'externally moved' WHERE id = 'ei-1'"); err != nil {
+		t.Fatalf("external write: %v", err)
+	}
+	if err := extCleanup(); err != nil {
+		t.Fatalf("external close: %v", err)
+	}
+
+	// The store reopens and reads the external write.
+	got, err := store.GetIssue(ctx, "ei-1")
+	if err != nil {
+		t.Fatalf("GetIssue after external write: %v", err)
+	}
+	if got.Title != "externally moved" {
+		t.Fatalf("title after external write = %q, want the external value", got.Title)
+	}
+	if opens := counter.opens.Load(); opens != 2 {
+		t.Fatalf("engine opens after idle disposal + reopen = %d, want 2", opens)
+	}
+}
+
+// TestEmbeddedEngineIdleTimerRaceBurst pins the generation-tag half of AC-4:
+// with a short idle interval and continuous operations, a timer that fires
+// while an operation holds the slot must find a newer generation and leave the
+// engine alone. Every operation succeeds, and after the final Close every
+// engine ever opened has been closed exactly once. Runs under the embedded
+// lane's race detector.
+func TestEmbeddedEngineIdleTimerRaceBurst(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := context.Background()
+	store, counter := engineTestStore(t, "engine_idle_race", 5*time.Millisecond)
+	if err := store.SetConfig(ctx, "issue_prefix", "ir"); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if err := store.CreateIssue(ctx, &types.Issue{ID: "ir-1", Title: "ir-1", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 10 {
+				if _, err := store.GetIssue(ctx, "ir-1"); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	select {
+	case err := <-errs:
+		t.Fatalf("operation during the idle-timer race burst: %v", err)
+	default:
+	}
+
+	// Every engine ever opened (the burst may have disposed and reopened it
+	// several times) is closed exactly once by the final Close.
+	opens := counter.opens.Load()
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close after burst: %v", err)
+	}
+	engineWaitForCounters(t, counter, opens, opens, 5*time.Second)
 }
