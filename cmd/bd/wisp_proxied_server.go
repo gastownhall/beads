@@ -312,24 +312,47 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 		return nil
 	}
 
-	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (domain.DeleteIssuesResult, string, error) {
-		// Cascade must stay OFF: the closed set above is already the complete
-		// purge candidate list, so cascade can only add NON-closed dependents
-		// (live molecule steps) to the batch — the patrol self-destruct bug.
-		// Mirrors runWispPurgeClosed in wisp.go.
-		res, err := uw.IssueUseCase().DeleteIssues(ctx, domain.DeleteIssuesParams{
-			IDs:                  ids,
-			Cascade:              false,
-			UpdateTextReferences: true,
-		}, currentActor())
-		if err != nil {
-			return domain.DeleteIssuesResult{}, "", err
+	// Forced mutation (GH#4684): one unit of work per bounded chunk, so a
+	// failure or an interruption keeps every chunk that already committed
+	// instead of discarding the whole purge with the one transaction that
+	// failed. Each chunk owns its transaction and its serialization retry
+	// exactly as the single transaction did; only the batch size changed.
+	progress, err := runWispClosedGCChunks(ctx, ids, func(ctx context.Context, chunkIDs []string) (wispClosedGCChunk, error) {
+		res, terr := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (domain.DeleteIssuesResult, string, error) {
+			// Cascade must stay OFF: the closed set above is already the complete
+			// purge candidate list, so cascade can only add NON-closed dependents
+			// (live molecule steps) to the batch — the patrol self-destruct bug.
+			// Mirrors runWispPurgeClosed in wisp.go.
+			res, derr := uw.IssueUseCase().DeleteIssues(ctx, domain.DeleteIssuesParams{
+				IDs:                  chunkIDs,
+				Cascade:              false,
+				UpdateTextReferences: true,
+			}, currentActor())
+			if derr != nil {
+				return domain.DeleteIssuesResult{}, "", derr
+			}
+			return res, fmt.Sprintf("bd: wisp gc --closed %d", res.DeletedCount), nil
+		})
+		if terr != nil {
+			return wispClosedGCChunk{}, terr
 		}
-		return res, fmt.Sprintf("bd: wisp gc --closed %d", res.DeletedCount), nil
+		return wispClosedGCChunk{
+			Deleted:           res.DeletedCount,
+			Dependencies:      res.DependenciesCount,
+			Labels:            res.LabelsCount,
+			Events:            res.EventsCount,
+			ReferencesUpdated: res.ReferencesUpdated,
+			Orphaned:          res.OrphanedIssues,
+			DeletedIDs:        res.DeletedIDs,
+		}, nil
 	})
 	if err != nil {
-		return HandleError("%v", err)
+		return reportWispClosedGCPurgeFailure(progress, len(ids), err, nil)
 	}
 
-	return renderWispGCDeleteResult(ids, res)
+	if jsonOutput {
+		return outputJSON(progress.successFields())
+	}
+	printWispClosedGCConfirmed(progress)
+	return nil
 }
