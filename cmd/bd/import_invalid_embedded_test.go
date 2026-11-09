@@ -465,3 +465,76 @@ func TestEmbeddedImportCustomVocabularyAccepted(t *testing.T) {
 		check(t, dir, beadsDir, "cva")
 	})
 }
+
+// TestEmbeddedRecoveryQuarantinePreservesAndFailsClosed pins AC-6 on the
+// auto-import recovery path: an existing quarantine keeps its earlier records
+// when new ones are added, and a quarantine that cannot be saved safely (here
+// a symlink out of the workspace) stops the import before it writes anything,
+// while the outer command still runs.
+func TestEmbeddedRecoveryQuarantinePreservesAndFailsClosed(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	createMarker := func(t *testing.T, dir string) string {
+		t.Helper()
+		cmd := exec.Command(bd, "create", "post-import marker", "--type", "task")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd create after auto-import failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		return stderr.String()
+	}
+
+	t.Run("keeps_earlier_records", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "qm")
+		quarantine := filepath.Join(beadsDir, "issues.rejected.jsonl")
+		old := `{"id":"qm-old","status":"verify"}`
+		if err := os.WriteFile(quarantine, []byte(old+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		fixture := invalidImportFixture(t, "qm", 3, 2)
+		if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(fixture), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		createMarker(t, dir)
+		saved, err := os.ReadFile(quarantine)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := old + "\n" + strings.Split(fixture, "\n")[3] + "\n"; string(saved) != want {
+			t.Errorf("quarantine =\n%s\nwant the earlier record and the new one\n%s", saved, want)
+		}
+	})
+
+	t.Run("unsafe_quarantine_imports_nothing", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "qf")
+		outside := filepath.Join(t.TempDir(), "elsewhere.jsonl")
+		if err := os.WriteFile(outside, []byte("elsewhere\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Join(beadsDir, "issues.rejected.jsonl")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte(invalidImportFixture(t, "qf", 3, 2)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		stderr := createMarker(t, dir)
+		if !strings.Contains(stderr, "nothing was imported") {
+			t.Errorf("stderr does not report the failed quarantine save:\n%s", stderr)
+		}
+		for _, issue := range bdListJSON(t, bd, dir, "--all") {
+			if strings.HasPrefix(issue.ID, "qf-") && issue.Title != "post-import marker" {
+				t.Errorf("issue %s imported although the quarantine could not be saved", issue.ID)
+			}
+		}
+		if got, _ := os.ReadFile(outside); string(got) != "elsewhere\n" {
+			t.Errorf("symlink target = %q, want it untouched", got)
+		}
+	})
+}

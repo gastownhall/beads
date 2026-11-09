@@ -88,6 +88,9 @@ dolt-pprof/
 # Backup data (auto-exported JSONL, local-only)
 backup/
 
+# Records an import skipped as invalid (quarantine kept for review, GH#4492)
+*.rejected.jsonl
+
 # Per-project environment file (Dolt connection config, GH#2520)
 .env
 
@@ -152,6 +155,7 @@ var requiredPatterns = []string{
 	"http_local_metadata.json",
 	".local_version",
 	"backup/",
+	"*.rejected.jsonl",
 }
 
 // CheckGitignore checks if .beads/.gitignore is up to date.
