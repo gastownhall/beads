@@ -5,6 +5,9 @@ package main
 // makes, in the shape of deleteExactStubStore in delete_exact_id_test.go: the
 // embedded nil storage.DoltStorage panics on any call the purge does not
 // make, so a wander off the tested path fails loudly.
+//
+// The real-store regression (actual persisted chunks against a Dolt server)
+// lives in wisp_gc_closed_dolt_test.go.
 
 import (
 	"context"
@@ -474,6 +477,66 @@ func TestWispPurgeClosedJSONReportsPartialProgress(t *testing.T) {
 		}
 		if msg, _ := obj["error"].(string); !strings.Contains(msg, ids[401]) {
 			t.Errorf("error = %q; want it to name the missing id", msg)
+		}
+	})
+}
+
+// TestWispPurgeClosedOrphanAccountingSpansChunks pins AC-4's orphan report
+// across chunk boundaries: a survivor orphaned by an early chunk that a later
+// chunk goes on to delete leaves the FINAL orphan report, while one the
+// later failing chunk never reached stays in it. Reference-update counts are
+// per-operation across chunks, not distinct-survivor counts.
+func TestWispPurgeClosedOrphanAccountingSpansChunks(t *testing.T) {
+	ids := wispClosedGCIDs(450)
+	liveSurvivor := "gc-live" // never selected: stays orphaned for good
+
+	newCase := func(t *testing.T) (*wispClosedGCStubStore, *wispClosedGCStubDeleter) {
+		t.Helper()
+		s, d := useWispClosedGCStubIssues(t, wispClosedGCIssues(ids, false))
+		// Deleting the first chunk's head orphans a later-chunk id and a
+		// never-selected survivor, the way the role reports live dependents.
+		d.orphanOn[ids[0]] = []string{ids[250], liveSurvivor}
+		return s, d
+	}
+
+	t.Run("later chunk deletes an earlier chunk's orphan", func(t *testing.T) {
+		_, d := newCase(t)
+		jsonOutput = true
+
+		stdout, _, err := runWispPurgeClosedCaptured(t, false, true)
+		if err != nil {
+			t.Fatalf("forced closed purge: %v\nstdout:\n%s", err, stdout)
+		}
+		obj := decodeWispPurgeJSON(t, stdout)
+		orphans := wispPurgeIDsField(t, obj, "orphaned_issues")
+		// ids[250] was deleted by its own chunk; only the survivor remains.
+		if !slices.Equal(orphans, []string{liveSurvivor}) {
+			t.Errorf("orphaned_issues = %v; want only %s (the id a later chunk deleted must leave the report)", orphans, liveSurvivor)
+		}
+		if got := wispPurgeIntField(t, obj, "references_updated"); got != len(d.requests) {
+			t.Errorf("references_updated = %d; want %d (per-operation across chunks)", got, len(d.requests))
+		}
+	})
+
+	t.Run("failing later chunk leaves its orphan in the report", func(t *testing.T) {
+		_, d := newCase(t)
+		d.failID = ids[len(ids)-1]
+		d.failErr = context.DeadlineExceeded
+		jsonOutput = true
+
+		stdout, _, err := runWispPurgeClosedCaptured(t, false, true)
+		if err == nil {
+			t.Fatal("a purge whose last chunk failed exited nil")
+		}
+		obj := decodeWispPurgeJSON(t, stdout)
+		orphans := wispPurgeIDsField(t, obj, "orphaned_issues")
+		// ids[250] was deleted by the second chunk, so it left the report;
+		// the unselected survivor the first chunk orphaned stays.
+		if !slices.Equal(orphans, []string{liveSurvivor}) {
+			t.Errorf("orphaned_issues = %v; want %q only — chunk 2 deleted the other orphan", orphans, liveSurvivor)
+		}
+		if got := wispPurgeIntField(t, obj, "deleted_count"); got != 400 {
+			t.Errorf("deleted_count = %d; want 400", got)
 		}
 	})
 }

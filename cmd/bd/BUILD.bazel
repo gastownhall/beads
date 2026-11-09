@@ -1385,6 +1385,7 @@ go_test(
         "wisp_abandoned_test.go",
         "wisp_gc_active_embedded_test.go",
         "wisp_gc_cascade_age_test.go",
+        "wisp_gc_closed_dolt_test.go",
         "wisp_gc_closed_test.go",
         "wisp_gc_purge_closed_embedded_test.go",
         "wisp_proxied_integration_test.go",

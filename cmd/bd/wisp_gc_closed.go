@@ -16,13 +16,16 @@ package main
 // route one Deleter.Delete request per chunk, the proxied route one
 // RunTxResult per chunk — so the per-route deletion contracts (cascade off,
 // orphaning, is_blocked recompute, text-reference rewrite, retry ownership)
-// are unchanged, just applied 200 rows at a time.
+// are unchanged, just applied 200 rows at a time. Progress is only what a
+// chunk CONFIRMED: a later chunk's failure keeps every earlier commit and is
+// reported as such, because a rerun reselects current data and continues.
 
 import (
 	"context"
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/ui"
@@ -54,22 +57,45 @@ type wispClosedGCProgress struct {
 	Labels            int
 	Events            int
 	ReferencesUpdated int
+	orphaned          map[string]struct{}
 }
 
-// apply folds one confirmed chunk into the aggregate.
+// apply folds one confirmed chunk into the aggregate. Orphaned is the one
+// cross-chunk interaction: a row orphaned by an early chunk may itself be
+// deleted by a later one (it too was selected), so the final orphan report
+// drops any orphan id a later chunk went on to delete.
 func (p *wispClosedGCProgress) apply(chunk wispClosedGCChunk) {
 	p.ConfirmedIDs = append(p.ConfirmedIDs, chunk.DeletedIDs...)
 	p.Dependencies += chunk.Dependencies
 	p.Labels += chunk.Labels
 	p.Events += chunk.Events
 	p.ReferencesUpdated += chunk.ReferencesUpdated
+	if p.orphaned == nil {
+		p.orphaned = make(map[string]struct{})
+	}
+	for _, id := range chunk.Orphaned {
+		p.orphaned[id] = struct{}{}
+	}
+	for _, id := range chunk.DeletedIDs {
+		delete(p.orphaned, id)
+	}
+}
+
+// orphanedAscending returns the final orphan report, ascending, deduplicated.
+func (p wispClosedGCProgress) orphanedAscending() []string {
+	out := make([]string, 0, len(p.orphaned))
+	for id := range p.orphaned {
+		out = append(out, id)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // successFields builds the per-route JSON keys both closed-GC outcomes
 // already published (deleted, deleted_count, dependencies_removed,
-// labels_removed, events_removed, references_updated), valued from
-// confirmed chunk progress. A route adds its own extras (the direct route's
-// deleted_ids).
+// labels_removed, events_removed, references_updated, orphaned_issues),
+// valued from confirmed chunk progress. A route adds its own extras (the
+// direct route's deleted_ids).
 func (p wispClosedGCProgress) successFields() map[string]interface{} {
 	return map[string]interface{}{
 		"deleted":              slices.Clone(p.ConfirmedIDs),
@@ -78,6 +104,7 @@ func (p wispClosedGCProgress) successFields() map[string]interface{} {
 		"labels_removed":       p.Labels,
 		"events_removed":       p.Events,
 		"references_updated":   p.ReferencesUpdated,
+		"orphaned_issues":      p.orphanedAscending(),
 	}
 }
 
@@ -108,6 +135,10 @@ func printWispClosedGCConfirmed(p wispClosedGCProgress) {
 	fmt.Printf("  Removed %d label(s)\n", p.Labels)
 	fmt.Printf("  Removed %d event(s)\n", p.Events)
 	fmt.Printf("  Updated text references in %d issue(s)\n", p.ReferencesUpdated)
+	if orphans := p.orphanedAscending(); len(orphans) > 0 {
+		fmt.Printf("  %s Orphaned %d issue(s): %s\n",
+			ui.RenderWarn("⚠"), len(orphans), strings.Join(orphans, ", "))
+	}
 }
 
 // wispClosedGCRerunHint is the guidance a partially failed purge reports.
