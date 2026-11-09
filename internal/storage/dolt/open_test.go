@@ -840,6 +840,56 @@ func TestConfigConstructorsRefuseHistoricalSQLiteWorkspace(t *testing.T) {
 	}
 }
 
+// TestRequireDiscoveredDoltBackendRefusesUnknownDoltMode pins GH#5104 below
+// the CLI: every metadata-driven constructor, and the pre-check
+// RequireDiscoveredDoltBackend, refuse a dolt_mode this build does not know
+// with the refusal command admission prints, before Load migrates a legacy
+// config.json and before any server is resolved, dialed or auto-started.
+func TestRequireDiscoveredDoltBackendRefusesUnknownDoltMode(t *testing.T) {
+	// If the refusal were missing, the open must fail fast on an unusable
+	// endpoint rather than reach the suite's shared test server.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	opens := map[string]func(context.Context, string) error{
+		"RequireDiscoveredDoltBackend": func(_ context.Context, beadsDir string) error {
+			return RequireDiscoveredDoltBackend(beadsDir)
+		},
+		"NewFromConfig": func(ctx context.Context, beadsDir string) error {
+			return closeOnSuccess(NewFromConfig(ctx, beadsDir))
+		},
+		"NewFromConfigWithOptions": func(ctx context.Context, beadsDir string) error {
+			return closeOnSuccess(NewFromConfigWithOptions(ctx, beadsDir, &Config{DisableAutoStart: true, CreateIfMissing: true}))
+		},
+		"NewFromConfigWithCLIOptions": func(ctx context.Context, beadsDir string) error {
+			return closeOnSuccess(NewFromConfigWithCLIOptions(ctx, beadsDir, &Config{DisableAutoStart: true, ReadOnly: true}))
+		},
+	}
+	const mode = "some-future-mode"
+	for _, file := range []string{configfile.ConfigFileName, configfile.LegacyConfigFileName} {
+		for name, open := range opens {
+			t.Run(file+"/"+name, func(t *testing.T) {
+				beadsDir := t.TempDir()
+				if err := os.MkdirAll(filepath.Join(beadsDir, "dolt", ".dolt"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				metadata := `{"backend":"dolt","dolt_mode":"` + mode + `","dolt_database":"beads_legacy","future_binding":"keep-me"}`
+				if err := os.WriteFile(filepath.Join(beadsDir, file), []byte(metadata), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				before := legacyworkspace.TreeDigest(t, beadsDir)
+				err := open(t.Context(), beadsDir)
+				if after := legacyworkspace.TreeDigest(t, beadsDir); !maps.Equal(after, before) {
+					t.Fatalf("%s changed the workspace: before %v, after %v", name, before, after)
+				}
+				want := configfile.UnknownDoltModeErrorAt(mode, beadsDir)
+				if err == nil || err.Error() != want.Error() {
+					t.Fatalf("%s error = %v, want the shared unknown-dolt_mode refusal %q", name, err, want)
+				}
+			})
+		}
+	}
+}
+
 func closeOnSuccess(store *DoltStore, err error) error {
 	if err == nil {
 		_ = store.Close()
