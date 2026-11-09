@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -172,5 +173,182 @@ func TestDoctorPollutionClean_NoHighConfidenceHits(t *testing.T) {
 	}
 	if !strings.Contains(out, "No issues eligible for cleanup") {
 		t.Errorf("output does not say nothing was eligible for cleanup:\n%s", out)
+	}
+}
+
+// pollutionEdgeCount returns how many dependency records, outgoing and
+// incoming, touch ids.
+func pollutionEdgeCount(t *testing.T, s *dolt.DoltStore, ids []string) int {
+	t.Helper()
+	ctx := context.Background()
+	out, err := s.GetDependencyRecordsForIssues(ctx, ids)
+	if err != nil {
+		t.Fatalf("GetDependencyRecordsForIssues: %v", err)
+	}
+	in, err := s.GetDependentRecordsForIssues(ctx, ids)
+	if err != nil {
+		t.Fatalf("GetDependentRecordsForIssues: %v", err)
+	}
+	n := 0
+	for _, deps := range out {
+		n += len(deps)
+	}
+	for _, deps := range in {
+		n += len(deps)
+	}
+	return n
+}
+
+// TestDoctorPollutionClean_SkipsLinkedHighConfidence pins GH#5025: the
+// backup holds issue rows only, so deleting a hit that has dependency
+// records would lose edges no restore brings back. A high-confidence hit
+// with any incoming or outgoing record, of any type and including an
+// ephemeral dependent, is neither backed up nor deleted, its edges stay,
+// and the output says the links prevented cleanup.
+func TestDoctorPollutionClean_SkipsLinkedHighConfidence(t *testing.T) {
+	tmpDir, s := pollutionCleanupWorkspace(t, "pck")
+	ctx := context.Background()
+
+	unlinked := seedPollutionIssue(t, s, "Test issue", "")
+	real := seedPollutionIssue(t, s, "Ship the billing export", "Customers need monthly CSV exports.")
+	epic := &types.Issue{Title: "Billing", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	wisp := &types.Issue{Title: "Patrol step", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true}
+	for _, issue := range []*types.Issue{epic, wisp} {
+		if err := s.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("CreateIssue(%q): %v", issue.Title, err)
+		}
+	}
+
+	linked := map[string]string{} // hit ID -> how it is linked
+	link := func(how string, edge func(hit string) *types.Dependency) {
+		hit := seedPollutionIssue(t, s, "Test issue", "")
+		if err := s.AddDependency(ctx, edge(hit), "test"); err != nil {
+			t.Fatalf("AddDependency (%s): %v", how, err)
+		}
+		linked[hit] = how
+	}
+	link("outgoing blocks", func(hit string) *types.Dependency {
+		return &types.Dependency{IssueID: hit, DependsOnID: real, Type: types.DepBlocks}
+	})
+	link("incoming blocks", func(hit string) *types.Dependency {
+		return &types.Dependency{IssueID: real, DependsOnID: hit, Type: types.DepBlocks}
+	})
+	link("child of an epic", func(hit string) *types.Dependency {
+		return &types.Dependency{IssueID: hit, DependsOnID: epic.ID, Type: types.DepParentChild}
+	})
+	link("outgoing related", func(hit string) *types.Dependency {
+		return &types.Dependency{IssueID: hit, DependsOnID: real, Type: types.DepRelated}
+	})
+	link("incoming discovered-from", func(hit string) *types.Dependency {
+		return &types.Dependency{IssueID: real, DependsOnID: hit, Type: types.DepDiscoveredFrom}
+	})
+	link("incoming from an ephemeral wisp", func(hit string) *types.Dependency {
+		return &types.Dependency{IssueID: wisp.ID, DependsOnID: hit, Type: types.DepBlocks}
+	})
+
+	var linkedIDs []string
+	for id := range linked {
+		linkedIDs = append(linkedIDs, id)
+	}
+	edgesBefore := pollutionEdgeCount(t, s, linkedIDs)
+	if edgesBefore != len(linked) {
+		t.Fatalf("seeded %d edges on linked hits, read back %d", len(linked), edgesBefore)
+	}
+
+	out, code := bdRunRaw(t, buildBDForInitTests(t), tmpDir, doctorMaxRowsEnv(), "doctor", "--check=pollution", "--clean", "--yes")
+	if code != 0 {
+		t.Fatalf("bd doctor --check=pollution --clean --yes exited %d\n%s", code, out)
+	}
+
+	if issueExists(t, s, unlinked) {
+		t.Errorf("unlinked high-confidence hit %s survived cleanup\n%s", unlinked, out)
+	}
+	for id, how := range linked {
+		if !issueExists(t, s, id) {
+			t.Errorf("hit %s (%s) was deleted; dependency links must prevent cleanup", id, how)
+		}
+		if !strings.Contains(out, "Skipping "+id+": dependency links") {
+			t.Errorf("output does not say dependency links prevented cleanup of %s (%s)", id, how)
+		}
+	}
+	if got := pollutionBackupIDs(t, tmpDir); !slices.Equal(got, []string{unlinked}) {
+		t.Errorf("backup IDs = %v, want exactly [%s]", got, unlinked)
+	}
+	if got := pollutionEdgeCount(t, s, linkedIDs); got != edgesBefore {
+		t.Errorf("edges on linked hits after cleanup = %d, want %d unchanged", got, edgesBefore)
+	}
+	if t.Failed() {
+		t.Logf("output:\n%s", out)
+	}
+}
+
+// fakePollutionEdges serves canned dependency records, or an error, to
+// selectPollutionCleanup.
+type fakePollutionEdges struct {
+	out, in       map[string][]*types.Dependency
+	outErr, inErr error
+	asked         [][]string
+}
+
+func (f *fakePollutionEdges) GetDependencyRecordsForIssues(_ context.Context, ids []string) (map[string][]*types.Dependency, error) {
+	f.asked = append(f.asked, ids)
+	return f.out, f.outErr
+}
+
+func (f *fakePollutionEdges) GetDependentRecordsForIssues(_ context.Context, ids []string) (map[string][]*types.Dependency, error) {
+	f.asked = append(f.asked, ids)
+	return f.in, f.inErr
+}
+
+// TestSelectPollutionCleanup_LinkLookup pins the link guard's selection:
+// only high-confidence hits are looked up, a hit with an outgoing or an
+// incoming record is skipped, and a failed lookup in either direction
+// selects nothing, so cleanup stops before any prompt, backup or delete.
+func TestSelectPollutionCleanup_LinkLookup(t *testing.T) {
+	hit := func(id string, score float64) pollutionResult {
+		return pollutionResult{issue: &types.Issue{ID: id}, score: score}
+	}
+	polluted := []pollutionResult{hit("h-free", 1.4), hit("h-out", 1.4), hit("h-in", 1.3), hit("m-1", 0.8)}
+	edge := func(from, to string) []*types.Dependency {
+		return []*types.Dependency{{IssueID: from, DependsOnID: to, Type: types.DepRelated}}
+	}
+
+	edges := &fakePollutionEdges{
+		out: map[string][]*types.Dependency{"h-out": edge("h-out", "ext:other:x")},
+		in:  map[string][]*types.Dependency{"h-in": edge("wisp-1", "h-in")},
+	}
+	deletable, skipped, err := selectPollutionCleanup(context.Background(), edges, polluted)
+	if err != nil {
+		t.Fatalf("selectPollutionCleanup: %v", err)
+	}
+	if len(deletable) != 1 || deletable[0].issue.ID != "h-free" {
+		t.Errorf("deletable = %v, want only h-free", deletable)
+	}
+	reasons := map[string]string{}
+	for _, skip := range skipped {
+		reasons[skip.issue.ID] = skip.reason
+	}
+	for _, id := range []string{"h-out", "h-in"} {
+		if !strings.HasPrefix(reasons[id], "dependency links") {
+			t.Errorf("%s skip reason = %q, want dependency links", id, reasons[id])
+		}
+	}
+	if !strings.Contains(reasons["m-1"], "manual review") {
+		t.Errorf("m-1 skip reason = %q, want manual review", reasons["m-1"])
+	}
+	for _, ids := range edges.asked {
+		if !slices.Equal(ids, []string{"h-free", "h-out", "h-in"}) {
+			t.Errorf("looked up %v, want the high-confidence hits only", ids)
+		}
+	}
+
+	for _, broken := range []*fakePollutionEdges{
+		{outErr: errors.New("outbound read failed")},
+		{inErr: errors.New("inbound read failed")},
+	} {
+		deletable, _, err := selectPollutionCleanup(context.Background(), broken, polluted)
+		if err == nil || len(deletable) != 0 {
+			t.Errorf("lookup failure (%v/%v): deletable %v, err %v; want nothing selected and an error", broken.outErr, broken.inErr, deletable, err)
+		}
 	}
 }
