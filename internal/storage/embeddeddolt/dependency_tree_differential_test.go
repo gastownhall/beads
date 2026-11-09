@@ -74,7 +74,8 @@ func treeRows(tree []*types.TreeNode) string {
 
 // TestDependencyTreeMatchesANodeByNodeWalk seeds a random graph on the real
 // engine, with diamonds, cycles, relates-to edges, wisps, an id held by both
-// tables and edges to external targets, and requires the rows of every walk,
+// tables, an edge held by both planes and edges to external targets, and
+// requires the rows of every walk,
 // in order, to equal the node-by-node walk's.
 func TestDependencyTreeMatchesANodeByNodeWalk(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
@@ -150,6 +151,13 @@ func TestDependencyTreeMatchesANodeByNodeWalk(t *testing.T) {
 			fmt.Sprintf("e-%04d", n), source, target, string(depTypes[rnd.Intn(len(depTypes))]), at)
 	}
 	exec("INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_by, created_at, metadata) VALUES ('e-both', ?, ?, 'blocks', 'fixture', ?, '{}')", bothTables, issueID(0), at)
+	// One edge stored in both planes with different types, from the id held by
+	// both tables. The durable row's type is the one a walk reports, in either
+	// direction.
+	const bothPlanes = "td-planes"
+	insertIssue("issues", bothPlanes, "target of an edge in both planes")
+	exec("INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_by, created_at, metadata) VALUES ('e-planes-d', ?, ?, 'blocks', 'fixture', ?, '{}')", bothTables, bothPlanes, at)
+	exec("INSERT INTO wisp_dependencies (id, issue_id, depends_on_issue_id, type, created_by, created_at, metadata) VALUES ('e-planes-w', ?, ?, 'parent-child', 'fixture', ?, '{}')", bothTables, bothPlanes, at)
 	if err := seed.Commit(); err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +168,7 @@ func TestDependencyTreeMatchesANodeByNodeWalk(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = tx.Rollback() })
 
-	roots := []string{bothTables, wispID(0), wispID(1)}
+	roots := []string{bothTables, bothPlanes, wispID(0), wispID(1)}
 	for i := 0; i < issues; i += 16 {
 		roots = append(roots, issueID(i))
 	}

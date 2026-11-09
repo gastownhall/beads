@@ -68,6 +68,9 @@ func readDependencyTreeGraphInTx(ctx context.Context, tx DBTX, rootID string, ro
 		edges:  make(map[string][]anchorEdge),
 	}
 	frontier := []string{rootID}
+	// absent holds the far ends found in neither table, so a later level that
+	// references one does not read it again. The reads share one transaction.
+	absent := make(map[string]bool)
 	for depth := 0; depth+1 < maxDepth && len(frontier) > 0; depth++ {
 		edges, err := anchorsEdgesInTx(ctx, tx, frontier, reverse)
 		if err != nil {
@@ -82,7 +85,7 @@ func readDependencyTreeGraphInTx(ctx context.Context, tx DBTX, rootID string, ro
 					continue
 				}
 				kept = append(kept, edge)
-				if _, read := graph.issues[edge.farID]; !read && !queued[edge.farID] {
+				if _, read := graph.issues[edge.farID]; !read && !queued[edge.farID] && !absent[edge.farID] {
 					queued[edge.farID] = true
 					unread = append(unread, edge.farID)
 				}
@@ -98,6 +101,8 @@ func readDependencyTreeGraphInTx(ctx context.Context, tx DBTX, rootID string, ro
 			if issue, ok := issues[id]; ok {
 				graph.issues[id] = issue
 				frontier = append(frontier, id)
+			} else {
+				absent[id] = true
 			}
 		}
 	}

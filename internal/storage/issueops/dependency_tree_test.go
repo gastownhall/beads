@@ -95,6 +95,97 @@ func TestGetDependencyTreeInTxSkipsRelatesToEdges(t *testing.T) {
 	}
 }
 
+// TestGetDependencyTreeInTxDepthBoundBeatsARevisit pins that the depth bound
+// wins over a revisit. sx is first reached on the last level, but its edges were
+// read through its shorter path from s0, so the walk has an edge from sx into
+// sm, which is already expanded. That edge is past the bound and adds no row.
+func TestGetDependencyTreeInTxDepthBoundBeatsARevisit(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	blocks := string(types.DepBlocks)
+	mock.ExpectBegin()
+	expectIssue(mock, "s0", "S0")
+	expectTreeEdges(mock, []string{"s0"}, false, treeEdge{"s0", "sa", blocks}, treeEdge{"s0", "sx", blocks})
+	expectTreeIssues(mock, "sa", "sx")
+	expectTreeEdges(mock, []string{"sa", "sx"}, false,
+		treeEdge{"sa", "sm", blocks}, treeEdge{"sa", "sx", blocks}, treeEdge{"sx", "sm", blocks})
+	expectTreeIssues(mock, "sm")
+	mock.ExpectRollback()
+
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	tree, err := GetDependencyTreeInTx(context.Background(), tx, "s0", 3, false, false)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("GetDependencyTreeInTx: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+
+	want := []string{"s0", "sa", "sm", "sx", "sx"}
+	if got := treeIDs(tree); strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("tree IDs = %v, want %v", got, want)
+	}
+	if tree[3].Deduped || !tree[4].Deduped || tree[4].Depth != 1 {
+		t.Fatalf("sx rows = %+v and %+v, want it expanded at depth 2 and stubbed at depth 1", tree[3], tree[4])
+	}
+}
+
+// TestGetDependencyTreeInTxReadsAnAbsentFarEndOnce pins that a far end in
+// neither table is looked up once, not again by each later level that names it.
+func TestGetDependencyTreeInTxReadsAnAbsentFarEndOnce(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	blocks := string(types.DepBlocks)
+	mock.ExpectBegin()
+	expectIssue(mock, "root", "Root")
+	expectTreeEdges(mock, []string{"root"}, false, treeEdge{"root", "a", blocks}, treeEdge{"root", "gone", blocks})
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT "+IssueSelectColumns+" FROM issues "+sqlbuild.LeaseJoin("issues")+" WHERE id IN (?,?)")).
+		WithArgs("a", "gone").
+		WillReturnRows(issueRows().AddRow(issueRowValues("a", "A")...))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, label FROM labels WHERE issue_id IN (?,?) ORDER BY issue_id, label")).
+		WithArgs("a", "gone").
+		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "label"}))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps LIMIT 1")).
+		WillReturnRows(sqlmock.NewRows([]string{"1"}))
+	// The second level names gone again and reads no issue.
+	expectTreeEdges(mock, []string{"a"}, false, treeEdge{"a", "gone", blocks})
+	mock.ExpectRollback()
+
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	tree, err := GetDependencyTreeInTx(context.Background(), tx, "root", 4, false, false)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("GetDependencyTreeInTx: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+	if got := treeIDs(tree); strings.Join(got, " ") != "root a" {
+		t.Fatalf("tree IDs = %v, want [root a]", got)
+	}
+}
+
 // treeEdge is one scripted row of a level's adjacency read.
 type treeEdge struct {
 	near, far, depType string

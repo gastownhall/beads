@@ -820,14 +820,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`bd dep tree` reads level by level instead of node by node.** It read each
   node's issue row, labels and edges with separate statements. It now reads a
   level's edges, issues and labels in batches of 200 IDs. Against a server with
-  a 300-issue random graph, one `bd dep tree --direction=both` walk went from
-  1661 statements to 94, and from 39.6 s to 2.5 s at a 20 ms round trip; a root
-  with 30 children that each have one child went from 401 statements to 76. A
-  node's dependencies are now walked in order of the far end's ID. That order
-  used to follow whichever index the server's plan used, and it decides which
-  parent of a diamond is expanded and which shows `(shown above)`. So such a
-  tree can draw differently from before, and with a depth limit the changed
-  order can also change which descendants appear.
+  a 300-issue random graph, one `bd dep tree --direction=both` walk sent 1567
+  fewer statements and took 37 s less at a 20 ms round trip; a root with 30
+  children that each have one child sent 325 fewer. A node's dependencies are
+  now walked in order of the far end's ID. That order used to follow whichever
+  index the server's plan used, and it decides which parent of a diamond is
+  expanded and which shows `(shown above)`. So such a tree can draw differently
+  from before, and with a depth limit the changed order can also change which
+  descendants appear. The read can now fetch an issue the walk does not return,
+  when a depth limit cuts the only path the walk took to it, and a failure
+  reading such an issue fails the tree; before, that issue went unread.
 - `bd serve` normalizes every RFC 3339 time bound on the issue listing and
   count (`created_*`, `updated_*`, `closed_*`, and the new `defer_*` and
   `due_*`) to UTC before it reaches storage. A bound carrying an offset
