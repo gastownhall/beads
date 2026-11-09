@@ -178,6 +178,51 @@ func TestDoctorPollutionClean_NoHighConfidenceHits(t *testing.T) {
 	}
 }
 
+// TestDoctorPollutionClean_PromptCanceled pins the prompt contract: without
+// --yes and with an empty stdin, cleanup is canceled before any backup or
+// delete.
+func TestDoctorPollutionClean_PromptCanceled(t *testing.T) {
+	tmpDir, s := pollutionCleanupWorkspace(t, "pcc")
+	high := seedPollutionIssue(t, s, "Test issue", "")
+
+	out, code := bdRunRaw(t, buildBDForInitTests(t), tmpDir, doctorMaxRowsEnv(), "doctor", "--check=pollution", "--clean")
+	if code != 0 {
+		t.Fatalf("canceled cleanup exited %d\n%s", code, out)
+	}
+	if !issueExists(t, s, high) {
+		t.Errorf("high-confidence hit %s was deleted without confirmation\n%s", high, out)
+	}
+	if got := pollutionBackupIDs(t, tmpDir); got != nil {
+		t.Errorf("canceled cleanup wrote a backup: %v", got)
+	}
+	if !strings.Contains(out, "Canceled") {
+		t.Errorf("output does not report the cancellation:\n%s", out)
+	}
+}
+
+// TestDoctorPollutionClean_BackupErrorDeletesNothing pins the backup-error
+// contract: when the backup file cannot be written, cleanup fails before
+// deleting anything.
+func TestDoctorPollutionClean_BackupErrorDeletesNothing(t *testing.T) {
+	tmpDir, s := pollutionCleanupWorkspace(t, "pcb")
+	high := seedPollutionIssue(t, s, "Test issue", "")
+	// A directory where the backup file would be created makes os.Create fail.
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".beads", "pollution-backup.jsonl"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, code := bdRunRaw(t, buildBDForInitTests(t), tmpDir, doctorMaxRowsEnv(), "doctor", "--check=pollution", "--clean", "--yes")
+	if code == 0 {
+		t.Fatalf("cleanup succeeded despite an unwritable backup path\n%s", out)
+	}
+	if !issueExists(t, s, high) {
+		t.Errorf("high-confidence hit %s was deleted although its backup failed\n%s", high, out)
+	}
+	if !strings.Contains(out, "backing up issues") {
+		t.Errorf("output does not report the backup failure:\n%s", out)
+	}
+}
+
 // pollutionEdgeCount returns how many dependency records, outgoing and
 // incoming, touch ids.
 func pollutionEdgeCount(t *testing.T, s *dolt.DoltStore, ids []string) int {
