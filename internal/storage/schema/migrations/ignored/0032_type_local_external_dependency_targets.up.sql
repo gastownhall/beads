@@ -1,0 +1,32 @@
+-- Ignored migration 0032: clone-local marker for typing legacy dependency rows
+-- whose target is held in this database but was filed in depends_on_external
+-- (gastownhall/beads#8299).
+--
+-- Before the fix, a dependency whose target prefix differed from its source's
+-- was stored in depends_on_external by prefix alone, even when the target was
+-- an issue or wisp in the same database (a shared ledger, a hydrated repo, a
+-- forced --id). Blocked-state maintenance only follows typed targets, so such
+-- an edge never blocked its source.
+--
+-- The work happens in code, not here: typeLocalExternalDependencyTargets
+-- (internal/storage/schema/local_external_deps_repair.go) is registered in
+-- preMigrationRepairs for this version, so it runs immediately before this
+-- marker is recorded. For every row of dependencies and wisp_dependencies whose
+-- depends_on_external is not an "external:" reference, it looks the target up
+-- the way new edges are classified (wisp first, then issue) and, when one is
+-- present, runs UPDATE dependencies (or UPDATE wisp_dependencies) to move the
+-- target into depends_on_wisp_id or depends_on_issue_id. A target this
+-- database does not hold stays external. It then recomputes is_blocked for
+-- the converted sources and their descendants, which runs
+-- UPDATE issues SET is_blocked = ..., updated_at = updated_at and
+-- UPDATE wisps SET is_blocked = ..., updated_at = updated_at.
+-- Those UPDATE statements are stated in this header on purpose: MigrateUp's
+-- pending-migration dirty-table guard scans the raw text of pending files, and
+-- this marker must be seen as touching the four tables.
+--
+-- The cursor table is dolt-ignored, so the marker is clone-local: wisp rows
+-- never replicate, so every clone types its own. Converted rows keep their id,
+-- type, created_at, created_by and metadata, and updated_at is untouched.
+--
+-- The marker itself changes nothing.
+SELECT 1;

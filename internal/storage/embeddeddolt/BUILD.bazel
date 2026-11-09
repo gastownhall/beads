@@ -213,6 +213,7 @@ go_test(
         "migrate_ignored_cursor_untrack_test.go",
         "migrate_ignored_plane_shape_test.go",
         "migrate_journal_shape_repair_test.go",
+        "migrate_local_external_deps_test.go",
         "migrate_repair_atomicity_test.go",
         "migrate_selfheal_test.go",
         "migrate_temp_intermediates_test.go",

@@ -2582,6 +2582,13 @@ func newWispsAbsentDB(t *testing.T) *wispsAbsentDB {
 	mock.ExpectQuery(`SELECT commit_hash FROM dolt_log WHERE message = \?`).
 		WithArgs(eventsFlipDropCommitMessage).
 		WillReturnRows(sqlmock.NewRows([]string{"commit_hash"}))
+	// The {ignored_schema_migrations, 32} repair probes each dependency table
+	// and, finding neither, has nothing to type or recompute.
+	for _, table := range []string{"dependencies", "wisp_dependencies"} {
+		mock.ExpectQuery(`(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`).
+			WithArgs(table).
+			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	}
 	t.Cleanup(func() {
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Errorf("wispsAbsentDB: unmet sql expectations: %v", err)
@@ -2676,8 +2683,8 @@ func TestRunMigrationsUsesProvidedSource(t *testing.T) {
 	// fail this test's own regression check for an unrelated reason.
 	// wispsAbsentDB answers both the {ignored_schema_migrations, 7} and
 	// {..., 15} repairs' probes (ensureWispIsBlockedForRecompute dispatches
-	// at both) and the {..., 31} repair's drop-commit lookup instead of
-	// dodging them.
+	// at both), the {..., 31} repair's drop-commit lookup and the {..., 32}
+	// repair's table probes instead of dodging them.
 	ignored, err := runMigrations(context.Background(), newWispsAbsentDB(t), ignoredSource, 0, 39, false)
 	if err != nil {
 		t.Fatalf("runMigrations(ignoredSource): %v", err)
