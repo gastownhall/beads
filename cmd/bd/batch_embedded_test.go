@@ -105,7 +105,7 @@ dep add tb-3 tb-2
 	}
 }
 
-// TestBatch_DepAddAliasGatesReadyWork pins bd-3073gm (GH#5560) on the classic
+// TestBatch_DepAddAliasGatesReadyWork pins bd-3073gm (GH#5585) on the classic
 // backend: a `dep add` line spelling the documented blocked-by or depends-on
 // alias stores the canonical blocks edge, which keeps its source out of ready
 // work while the target is open.
@@ -146,7 +146,7 @@ dep add tba-2 tba-3 depends-on
 	}
 }
 
-// TestBatch_DepAddUnknownTypeRollsBack pins bd-3073gm (GH#5560): a `dep add`
+// TestBatch_DepAddUnknownTypeRollsBack pins bd-3073gm (GH#5585): a `dep add`
 // line naming a type outside `bd dep add`'s vocabulary (a typo, or a custom
 // type) is refused with the accepted types, and the earlier lines of the
 // batch are rolled back with it.

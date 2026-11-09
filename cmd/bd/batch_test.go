@@ -395,7 +395,7 @@ func TestBatchCmd_Registered(t *testing.T) {
 }
 
 // TestBatchDepAddEdgeCanonicalizesAliasesAndRejectsUnknownTypes pins bd-3073gm
-// (GH#5560): a batch `dep add` line must store the alias `blocked-by` as the
+// (GH#5585): a batch `dep add` line must store the alias `blocked-by` as the
 // canonical `blocks` type that ready/blocked gating matches, and must refuse a
 // type outside the well-known vocabulary, as `bd dep add` does.
 func TestBatchDepAddEdgeCanonicalizesAliasesAndRejectsUnknownTypes(t *testing.T) {

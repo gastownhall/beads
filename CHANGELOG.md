@@ -1239,8 +1239,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the input line number, and rolls the batch back on both backends (its
   help now says so); the create form's Dependencies field validates
   entries in the field (huh keeps the value for correction), fails the
-  create before any write, and collapses canonical-equivalent repeats like
-  `blocked-by:A, depends-on:A` into one edge.
+  create before any write, refuses two different types on one target, and
+  collapses canonical-equivalent repeats like `blocked-by:A, depends-on:A`
+  into one edge. Batch and the form used to store any non-empty type of up
+  to 32 characters, so a custom type there (e.g. `owned-by`) is now refused
+  and fails the whole batch or the create; write custom edges with `bd link
+  --type`, which still accepts them. An edge an earlier version stored
+  under an alias stays inert: remove it with `bd dep remove` and add it
+  again.
 
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools

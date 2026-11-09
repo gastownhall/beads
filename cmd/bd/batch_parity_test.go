@@ -402,7 +402,7 @@ func lastNonEmptyLine(s string) string {
 }
 
 // TestProxiedServerBatchDepAddCanonicalizesAliasesAndRefusesUnknownTypes pins
-// the batch `dep add` type contract on BOTH backends (GH#5560): the documented
+// the batch `dep add` type contract on BOTH backends (GH#5585): the documented
 // aliases store the canonical blocks edge that ready/blocked gating matches,
 // and a type outside the dep-add vocabulary — a typo like `blcoks` or a custom
 // spelling like `owned-by` — is refused with the line number, the offending

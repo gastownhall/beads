@@ -515,7 +515,7 @@ func TestCreateIssueFromFormValues(t *testing.T) {
 		}
 	})
 
-	// bd-3073gm (GH#5585): every blocking spelling the form takes makes the
+	// bd-3073gm (GH#5560): every blocking spelling the form takes makes the
 	// new issue depend on its target with the canonical, gating blocks type.
 	// The form's blocks:<id> keeps its historical direction, unlike --deps'.
 	t.Run("BlockingSpellingsGateTheNewIssue", func(t *testing.T) {

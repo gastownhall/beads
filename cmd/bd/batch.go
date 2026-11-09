@@ -462,7 +462,7 @@ func batchDepAddEdge(args []string) (*types.Dependency, error) {
 	if len(args) >= 3 {
 		depType = args[2]
 	}
-	// A line takes `bd dep add --type`'s vocabulary (GH#5560): the documented
+	// A line takes `bd dep add --type`'s vocabulary (GH#5585): the documented
 	// aliases store as the canonical blocks type that ready/blocked gating
 	// matches, and a type outside the built-ins is refused, not stored.
 	dt := canonicalDependencyType(types.DependencyType(depType))

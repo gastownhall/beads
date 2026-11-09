@@ -176,7 +176,7 @@ func TestCanonicalDependencyType(t *testing.T) {
 }
 
 // TestParseFormDeps pins the create form's dependency parsing (bd-3073gm,
-// GH#5585): the --deps vocabulary and alias canonicalization, the form's own
+// GH#5560): the --deps vocabulary and alias canonicalization, the form's own
 // direction (the new issue is always the source, blocks:<id> included) pinned
 // before dedupe, and the refusals the form's field and a direct call share.
 func TestParseFormDeps(t *testing.T) {
@@ -427,24 +427,26 @@ func TestBuildWaitsFor(t *testing.T) {
 	})
 }
 
-func TestDiscoveredFromParent(t *testing.T) {
+func TestDiscoveredFromParentSpec(t *testing.T) {
+	spec := func(depType types.DependencyType, target string) domain.DependencySpec {
+		return domain.DependencySpec{Type: depType, TargetID: target}
+	}
 	tests := []struct {
 		name string
-		in   []string
+		in   []domain.DependencySpec
 		want string
 	}{
-		{"none", []string{"bd-1", "blocks:bd-2"}, ""},
-		{"present", []string{"bd-1", "discovered-from:bd-99", "blocks:bd-2"}, "bd-99"},
-		{"first wins", []string{"discovered-from:bd-7", "discovered-from:bd-8"}, "bd-7"},
-		{"empty target ignored", []string{"discovered-from:", "discovered-from:bd-9"}, "bd-9"},
-		{"whitespace trimmed", []string{"  discovered-from: bd-5 "}, "bd-5"},
+		{"none", []domain.DependencySpec{spec(types.DepBlocks, "bd-1"), spec(types.DepRelated, "bd-2")}, ""},
+		{"present", []domain.DependencySpec{spec(types.DepBlocks, "bd-1"), spec(types.DepDiscoveredFrom, "bd-99"), spec(types.DepBlocks, "bd-2")}, "bd-99"},
+		{"first wins", []domain.DependencySpec{spec(types.DepDiscoveredFrom, "bd-7"), spec(types.DepDiscoveredFrom, "bd-8")}, "bd-7"},
+		{"empty target ignored", []domain.DependencySpec{spec(types.DepDiscoveredFrom, ""), spec(types.DepDiscoveredFrom, "bd-9")}, "bd-9"},
 		{"empty input", nil, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := discoveredFromParent(tt.in)
+			got := discoveredFromParentSpec(tt.in)
 			if got != tt.want {
-				t.Errorf("discoveredFromParent(%v) = %q, want %q", tt.in, got, tt.want)
+				t.Errorf("discoveredFromParentSpec(%v) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}

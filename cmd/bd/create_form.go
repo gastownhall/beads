@@ -101,7 +101,7 @@ func splitFormDeps(raw string) []string {
 // dedupe pair `bd create --deps` uses, so the form takes the same types,
 // canonicalizes the blocked-by/depends-on aliases to the gating blocks type,
 // collapses spellings of one edge and refuses two types on one target
-// (bd-3073gm, GH#5585). One deliberate difference: the form's blocks:<id> has
+// (bd-3073gm, GH#5560). One deliberate difference: the form's blocks:<id> has
 // always made the new issue depend on <id>, where --deps' explicit blocks:
 // reverses the edge, so every spec keeps the new issue as its source. That is
 // pinned before dedupe, which keys on direction: blocks:B and depends-on:B
