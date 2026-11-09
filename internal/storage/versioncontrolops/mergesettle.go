@@ -562,8 +562,15 @@ func workingSetClean(ctx context.Context, db DBConn) bool {
 //     keeping it. A row missing on one side, or diverging columns in a
 //     supposedly immutable row, is left for the operator.
 //
+//   - child_counters: last_child is a high-water mark, so a row present on
+//     both sides with valid nonnegative values (modify/modify or add/add)
+//     settles to max(ours, theirs) (bd-28sb25, childcounters_merge.go). A row
+//     missing on one side or holding a malformed value is left for the
+//     operator.
+//
 // Any conflict on another table, or an unresolvable dependencies,
-// schema_migrations, config, issues, labels, comments, or events conflict,
+// schema_migrations, config, issues, labels, comments, events, or
+// child_counters conflict,
 // returns (false, nil) so the caller fails the pull and the operator resolves
 // it.
 //
@@ -603,6 +610,7 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 	var resolvable []string
 	var issuesPlan []issuesRowMerge
 	var unionPlans map[string][]unionRowKey
+	var countersPlan []childCounterMerge
 	for _, c := range conflicts {
 		switch c.table {
 		case "metadata":
@@ -657,6 +665,16 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 			}
 			unionPlans[c.table] = unionPlan
 			resolvable = append(resolvable, c.table)
+		case "child_counters":
+			plan, mergeable, err := childCountersConflictsAreMaxMergeable(ctx, db)
+			if err != nil {
+				return false, err
+			}
+			if !mergeable {
+				return false, nil
+			}
+			countersPlan = plan
+			resolvable = append(resolvable, "child_counters")
 		default:
 			return false, nil
 		}
@@ -696,6 +714,11 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 			}
 		case "labels", "comments", "events":
 			if err := resolveUnionConflicts(ctx, db, table, unionPlans[table]); err != nil {
+				return false, err
+			}
+		case "child_counters":
+			// Row-wise max of the high-water mark, never a table-level side.
+			if err := resolveChildCountersMax(ctx, db, countersPlan); err != nil {
 				return false, err
 			}
 		default:

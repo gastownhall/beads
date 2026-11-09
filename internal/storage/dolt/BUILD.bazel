@@ -157,6 +157,7 @@ go_test(
         "bootstrapper_contract_test.go",
         "central_config_integration_test.go",
         "checked_wrapper_smoke_test.go",
+        "child_counters_conflict_test.go",
         "circuit_test.go",
         "claim_commit_boundary_test.go",
         "claim_custom_status_test.go",

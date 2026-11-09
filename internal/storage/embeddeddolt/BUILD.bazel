@@ -126,6 +126,7 @@ go_test(
         "cache_test.go",
         "checked_wrapper_smoke_test.go",
         "child_id_test.go",
+        "childcounters_settle_test.go",
         "claim_wrapper_smoke_test.go",
         "claimer_contract_test.go",
         "commenter_contract_test.go",
