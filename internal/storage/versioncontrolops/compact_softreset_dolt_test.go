@@ -1067,6 +1067,56 @@ func TestCompactCommitAfterCatchUpJoinsFollowUp(t *testing.T) {
 	})
 }
 
+// AC-6, the residual Compact does not close: C2 lands after the catch-up
+// read main's head, W's transaction begins on the head C2 reached, and W's
+// Dolt commit finishes between the final reset and the staged check. Main's
+// head moves by a reset with no expected-head condition, so W can merge as
+// if it reverted C2. Compact still succeeds with both rows readable on main,
+// W's row committed and compact-tmp gone; C2's row may be left uncommitted
+// in main's working set, and `bd dolt commit` (here CALL DOLT_COMMIT)
+// commits it. Ported from the second subtest of the reproduction in
+// 1647899aa827, with its demand that C2 stays committed dropped.
+func TestCompactStraddlingWriterResidualKeepsRowsReadable(t *testing.T) {
+	port := startCompactTestServer(t)
+	f := newCompactFixture(t, port)
+	f.writePending(f.db)
+	lander := f.conn()
+
+	var w *straddler
+	hook := &compactHookConn{
+		beforeExec: onceBeforeFinalReset(func() {
+			f.landRow(lander)
+			w = f.beginStraddler()
+		}),
+		afterFinalReset: func() { w.finish() },
+	}
+	if err := f.compact(hook); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if w == nil || !w.committed {
+		t.Fatalf("the straddling writer never committed across the head move")
+	}
+	for _, id := range []int{600, 900} {
+		if n := f.count("SELECT COUNT(*) FROM t WHERE id = ?", id); n != 1 {
+			t.Fatalf("t row %d on main: found=%d, want 1 (status %q)", id, n, f.status())
+		}
+	}
+	if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 900"); n != 1 {
+		t.Fatalf("W's t row 900 in main's HEAD: found=%d, want 1", n)
+	}
+	f.wantPendingKept()
+	f.wantNoTempBranch()
+
+	if f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 600") == 0 {
+		// The residual: C2 was demoted to the working set. It is still on
+		// main, and committing main's working set puts it back in HEAD.
+		f.exec(f.db, "CALL DOLT_ADD('t')", "CALL DOLT_COMMIT('-m', 'recover demoted rows')")
+		if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 600"); n != 1 {
+			t.Fatalf("C2's t row 600 in main's HEAD after the recovery commit: found=%d, want 1", n)
+		}
+	}
+}
+
 // #6645 composed with a concurrent write: the replay check compares the
 // replay with the planned head, not main's current HEAD, but that must not
 // weaken it. A replay that differs from the planned head still aborts before
