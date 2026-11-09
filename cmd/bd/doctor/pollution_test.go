@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -335,5 +337,151 @@ func TestPollutionEvidenceErrors(t *testing.T) {
 				t.Fatalf("matches = %v, want none on error", matchIDs(matches))
 			}
 		})
+	}
+}
+
+// fakePollutionStore answers SearchIssues the way the SQL builder does for
+// TitleContains (case-insensitive substring) and records each filter.
+type fakePollutionStore struct {
+	fakePollutionEvidence
+	issues    []*types.Issue
+	searchErr error
+	filters   []types.IssueFilter
+}
+
+func (f *fakePollutionStore) SearchIssues(_ context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
+	f.filters = append(f.filters, filter)
+	if f.searchErr != nil {
+		return nil, f.searchErr
+	}
+	if query != "" {
+		return nil, fmt.Errorf("unexpected query %q", query)
+	}
+	var out []*types.Issue
+	for _, issue := range f.issues {
+		if filter.TitleContains == "" || strings.Contains(strings.ToLower(issue.Title), strings.ToLower(filter.TitleContains)) {
+			out = append(out, issue)
+		}
+	}
+	return out, nil
+}
+
+// TestPollutionGateMatchesFullScan pins that the full doctor run's Test
+// Pollution check, which searches candidate titles, reports the same IDs and
+// count as the classifier over every issue (bd doctor --check=pollution):
+// mixed case, duplicate search hits, a test- ID with an ordinary title and
+// protected or connected issues included.
+func TestPollutionGateMatchesFullScan(t *testing.T) {
+	t.Parallel()
+
+	ref := "gh-12"
+	issues := []*types.Issue{
+		{ID: "bd-1", Title: "Test-quality architecture", Status: types.StatusOpen, IssueType: types.TypeTask},
+		{ID: "bd-2", Title: "TEST ISSUE for a sample issue", Description: "x", Status: types.StatusOpen, IssueType: types.TypeTask},
+		{ID: "bd-3", Title: "Created an Issue For Testing", Status: types.StatusInProgress, IssueType: types.TypeBug},
+		{ID: "bd-4", Title: "DUMMY_record", Status: types.StatusOpen, IssueType: types.TypeChore},
+		{ID: "test-5", Title: "Ordinary work", Status: types.StatusOpen, IssueType: types.TypeTask},
+		{ID: "bd-6", Title: "tmp-scratch", Status: types.StatusClosed, IssueType: types.TypeTask},
+		{ID: "bd-7", Title: "temp-thing", ExternalRef: &ref, Status: types.StatusOpen, IssueType: types.TypeTask},
+		{ID: "bd-8", Title: "debug-linked", Status: types.StatusOpen, IssueType: types.TypeTask},
+		{ID: "bd-9", Title: "benchmark-commented", Status: types.StatusOpen, IssueType: types.TypeTask},
+		{ID: "bd-10", Title: "test-driver.sh clobbers env", Description: "Sourcing constants.sh overwrites exported paths.", Status: types.StatusOpen, IssueType: types.TypeBug},
+		{ID: "bd-11", Title: "Sample-run epic", Status: types.StatusOpen, IssueType: types.TypeEpic},
+	}
+	newStore := func() *fakePollutionStore {
+		return &fakePollutionStore{
+			fakePollutionEvidence: fakePollutionEvidence{
+				incoming: map[string][]*types.Dependency{"bd-8": {{IssueID: "bd-x", DependsOnID: "bd-8", Type: types.DepRelated}}},
+				comments: map[string]int{"bd-9": 2},
+			},
+			issues: issues,
+		}
+	}
+	want := []string{"bd-1", "bd-2", "bd-3", "bd-4"}
+
+	full := newStore()
+	all, err := full.SearchIssues(context.Background(), "", types.IssueFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	detailed, err := DetectTestPollution(context.Background(), full, all)
+	if err != nil {
+		t.Fatalf("DetectTestPollution: %v", err)
+	}
+	gateStore := newStore()
+	gate, err := FindTestPollution(context.Background(), gateStore)
+	if err != nil {
+		t.Fatalf("FindTestPollution: %v", err)
+	}
+	detailedIDs, gateIDs := matchIDs(detailed), matchIDs(gate)
+	slices.Sort(detailedIDs)
+	slices.Sort(gateIDs)
+	slices.Sort(want)
+	if !slices.Equal(detailedIDs, want) || !slices.Equal(gateIDs, want) {
+		t.Fatalf("detailed = %v, gate = %v, want both %v", detailedIDs, gateIDs, want)
+	}
+
+	// The searches narrow candidates only: one per test word, title only,
+	// no status, type, limit or row cap.
+	if len(gateStore.filters) != len(testTitleWords) {
+		t.Fatalf("gate ran %d searches, want %d", len(gateStore.filters), len(testTitleWords))
+	}
+	for i, filter := range gateStore.filters {
+		if !reflect.DeepEqual(filter, types.IssueFilter{TitleContains: testTitleWords[i]}) {
+			t.Errorf("search %d filter = %+v, want TitleContains %q only", i, filter, testTitleWords[i])
+		}
+	}
+	// Duplicate hits (bd-2 matches "test" and "sample") are classified once.
+	if got := gateStore.calls["comments"]; len(got) != 1 || !slices.Equal(slices.Sorted(slices.Values(got[0])), []string{"bd-1", "bd-2", "bd-3", "bd-4", "bd-8", "bd-9"}) {
+		t.Errorf("evidence lookups %v, want one call with each candidate once", got)
+	}
+
+	check := checkTestPollutionWithStore(context.Background(), newStore())
+	if check.Status != StatusWarning || !strings.HasPrefix(check.Message, fmt.Sprintf("%d ", len(want))) {
+		t.Fatalf("gate check = %q %q, want a warning counting %d", check.Status, check.Message, len(want))
+	}
+}
+
+// TestPollutionGateSearchesCoverEveryMarker pins the invariant the gate's
+// candidate searches rely on: each prefix word and generic phrase the
+// classifier recognizes contains a searched word.
+func TestPollutionGateSearchesCoverEveryMarker(t *testing.T) {
+	t.Parallel()
+
+	markers := slices.Clone(genericTestPhrases)
+	for _, word := range []string{"test", "benchmark", "sample", "tmp", "temp", "debug", "dummy"} {
+		if !testPrefixPattern.MatchString(word + "-x") {
+			t.Fatalf("prefix pattern no longer matches %q", word+"-x")
+		}
+		markers = append(markers, word)
+	}
+	for _, marker := range markers {
+		if !slices.ContainsFunc(testTitleWords, func(w string) bool { return strings.Contains(marker, w) }) {
+			t.Errorf("marker %q contains no searched title word %v", marker, testTitleWords)
+		}
+	}
+}
+
+// TestPollutionGateSearchError pins that a failed candidate search is the
+// gate's "query failed" warning, never a clean bill of health.
+func TestPollutionGateSearchError(t *testing.T) {
+	t.Parallel()
+
+	store := &fakePollutionStore{searchErr: errors.New("boom")}
+	if _, err := FindTestPollution(context.Background(), store); err == nil {
+		t.Fatal("FindTestPollution succeeded on a failed search")
+	}
+	check := checkTestPollutionWithStore(context.Background(), store)
+	if check.Status != StatusWarning || check.Message != "N/A (query failed)" {
+		t.Fatalf("check = %q %q, want warning N/A (query failed)", check.Status, check.Message)
+	}
+
+	store = &fakePollutionStore{
+		fakePollutionEvidence: fakePollutionEvidence{commentsErr: errors.New("boom")},
+		issues:                []*types.Issue{pollutionCandidate("bd-1")},
+	}
+	check = checkTestPollutionWithStore(context.Background(), store)
+	if check.Status != StatusWarning || check.Message != "N/A (query failed)" {
+		t.Fatalf("check = %q %q, want warning N/A (query failed)", check.Status, check.Message)
 	}
 }
