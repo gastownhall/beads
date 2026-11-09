@@ -47,13 +47,30 @@ func isDoltServerProcess(pid int) bool {
 	if err != nil || len(cmdlineRaw) == 0 {
 		return false
 	}
-	cmdline := strings.ReplaceAll(strings.Trim(string(cmdlineRaw), "\x00"), "\x00", " ")
-	return isDoltServerCmdline(cmdline)
+	return isDoltServerArgv(procArgv(cmdlineRaw))
 }
 
-// gatherDoltServerCandidates scans /proc for processes whose cmdline
-// mentions a dolt sql-server, resolving each one's working directory (and
-// whether that directory has been deleted) via /proc/<pid>/cwd.
+// procArgv splits the NUL-delimited argument vector in /proc/<pid>/cmdline
+// into the process's actual arguments. The kernel terminates the final
+// argument with a single NUL, and only that one is dropped: interior and
+// leading empty arguments are preserved — an empty argv[0] must never be
+// mistaken for the next argument — and an argument containing spaces stays
+// one element, which a space-joined rendering cannot guarantee (#6186).
+// Input without the final NUL (a process caught mid-exec) is split as-is;
+// empty input is no arguments at all.
+func procArgv(raw []byte) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	if raw[len(raw)-1] == 0 {
+		raw = raw[:len(raw)-1]
+	}
+	return strings.Split(string(raw), "\x00")
+}
+
+// gatherDoltServerCandidates scans /proc for processes whose argument vector
+// is a dolt sql-server invocation, resolving each one's working directory
+// (and whether that directory has been deleted) via /proc/<pid>/cwd.
 func gatherDoltServerCandidates() []serverCandidate {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -71,15 +88,15 @@ func gatherDoltServerCandidates() []serverCandidate {
 		if err != nil || len(cmdlineRaw) == 0 {
 			continue // process gone, or unreadable (permissions, kernel thread)
 		}
-		cmdline := strings.ReplaceAll(strings.Trim(string(cmdlineRaw), "\x00"), "\x00", " ")
-		if !isDoltServerCmdline(cmdline) {
+		argv := procArgv(cmdlineRaw)
+		if !isDoltServerArgv(argv) {
 			continue
 		}
 
 		cwd, deleted := readProcCwd(pid)
 		candidates = append(candidates, serverCandidate{
 			pid:        pid,
-			cmdline:    cmdline,
+			argv:       argv,
 			cwd:        cwd,
 			cwdDeleted: deleted,
 		})

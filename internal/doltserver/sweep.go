@@ -11,12 +11,15 @@ import (
 )
 
 // serverCandidate is a running process that looked like a `dolt sql-server`
-// from a coarse filter (cmdline substring match), along with enough
-// identity data to judge whether it is leaked test debris.
+// from the argv identity gate, along with enough identity data to judge
+// whether it is leaked test debris.
 type serverCandidate struct {
 	pid int
-	// cmdline is the process's command line, space-joined.
-	cmdline string
+	// argv is the process's argument vector. On linux it is the actual
+	// NUL-delimited argv from /proc (procArgv); on darwin it is the ps
+	// command column split on whitespace, which only approximates the
+	// arguments — see gatherPSCandidates.
+	argv []string
 	// cwd is the process's resolved working directory. Empty if unknown.
 	cwd string
 	// cwdDeleted is true when cwd names a directory that no longer exists
@@ -118,7 +121,7 @@ func selectServersUnderRoots(candidates []serverCandidate, roots []string) []Swe
 func selectServers(candidates []serverCandidate, want func(serverCandidate) bool) []SweptServer {
 	var selected []SweptServer
 	for _, c := range candidates {
-		if !isDoltServerCmdline(c.cmdline) || c.cwd == "" {
+		if !isDoltServerArgv(c.argv) || c.cwd == "" {
 			continue
 		}
 		if want(c) {
@@ -501,10 +504,11 @@ func canonicalRoots(roots []string) []string {
 }
 
 // isDoltServerCmdline reports whether cmdline looks like a dolt sql-server
-// invocation, for the flattened command column the platforms can hand the
-// sweep: space-joined /proc bytes on linux, `ps` output on darwin. The words
-// are split into approximate arguments, because that column carries no
-// argument boundaries — see isDoltServerArgv, which holds the actual rule.
+// invocation, for the flattened command column darwin's ps revalidation
+// probe hands the sweep. The words are split into approximate arguments,
+// because that column carries no argument boundaries — linux reads the real
+// NUL-delimited argv via procArgv instead. See isDoltServerArgv, which
+// holds the actual rule.
 func isDoltServerCmdline(cmdline string) bool {
 	return isDoltServerArgv(strings.Fields(cmdline))
 }
@@ -563,6 +567,13 @@ func isUnderDir(dir, root string) bool {
 // resolves the working directory of each dolt sql-server candidate. Darwin
 // uses this path because it has no /proc filesystem.
 //
+// The command column carries no argument boundaries, so its words are split
+// into approximate arguments with strings.Fields: a quoted argument
+// containing spaces ("dolt commit -m 'restart sql-server'") cannot be
+// recovered, and an executable path containing spaces splits into several
+// tokens. That is the platform's limit, documented here rather than hidden
+// in the identity gate.
+//
 // cwdForPID returns the resolved cwd, whether that cwd has been deleted, and
 // whether it could be determined. Keeping the command execution outside this
 // parser makes the safety-critical selection path deterministic to test.
@@ -582,8 +593,8 @@ func gatherPSCandidates(psOutput []byte, cwdForPID func(int) (string, bool, bool
 		if err != nil || pid <= 0 {
 			continue
 		}
-		cmdline = strings.TrimSpace(cmdline)
-		if !isDoltServerCmdline(cmdline) {
+		argv := strings.Fields(strings.TrimSpace(cmdline))
+		if !isDoltServerArgv(argv) {
 			continue
 		}
 
@@ -593,7 +604,7 @@ func gatherPSCandidates(psOutput []byte, cwdForPID func(int) (string, bool, bool
 		}
 		candidates = append(candidates, serverCandidate{
 			pid:        pid,
-			cmdline:    cmdline,
+			argv:       argv,
 			cwd:        cwd,
 			cwdDeleted: deleted,
 		})
