@@ -489,6 +489,21 @@ func renderTypedOpenError(err error) bool {
 		}
 		return true
 	}
+	// gastownhall/beads#7038: a read-only open refused a database whose
+	// clone-local series, which `bd dolt pull` never brings, is too old for
+	// this binary's issue reads; the block names the per-database step.
+	var cloneLocalErr *schema.CloneLocalBehindError
+	if errors.As(err, &cloneLocalErr) {
+		if jsonOutput {
+			handleCloneLocalBehindJSON(cloneLocalErr)
+		} else {
+			fmt.Fprint(os.Stderr, cloneLocalErr.UserMessage())
+			if !cloneLocalErr.Gateway {
+				printGlobalDatabaseConsentHint(os.Stderr, nil)
+			}
+		}
+		return true
+	}
 	// The migration-consent gate blocks silent in-place migration of
 	// ANY existing database (1.2 release remediation) and tells the
 	// operator how to consent.

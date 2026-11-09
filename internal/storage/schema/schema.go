@@ -405,6 +405,41 @@ func (e *CloneLocalBehindError) Remedy() string {
 		e.MainVersion)
 }
 
+// UserMessage renders the refusal as the CLI's multi-line guidance block,
+// the human counterpart of the --json error's hint (Remedy).
+func (e *CloneLocalBehindError) UserMessage() string {
+	msg := fmt.Sprintf(
+		"This database's clone-local schema is behind this bd release: %s lacks %s,\n"+
+			"which issue reads select (clone-local migrations at v%d; this release uses v%d).\n"+
+			"Clone-local migrations are never replicated, so `bd dolt pull` does not bring them.\n\n",
+		e.Table, strings.Join(e.MissingColumns, ", "), e.IgnoredVersion, e.LatestIgnoredVersion)
+	switch {
+	case e.Gateway:
+		return msg +
+			"  The gateway server owns this database's schema and bd never migrates it:\n" +
+			"  ask the server administrator to apply this database's clone-local\n" +
+			"  migrations, then retry.\n"
+	case e.MainVersion < e.BinaryVersion:
+		msg += fmt.Sprintf(
+			"  The replicated schema is behind too (database v%d, this release v%d).\n"+
+				"  Finish the designated-migrator procedure first: the migrator runs\n"+
+				"  `bd migrate schema` and `bd dolt push`, then `bd dolt pull` here.\n"+
+				"  Then, once for this database:\n",
+			e.MainVersion, e.BinaryVersion)
+	default:
+		msg += fmt.Sprintf(
+			"  The replicated schema is current (v%d), so no further main-schema\n"+
+				"  migration consent is needed. Once any maintenance freeze is lifted,\n"+
+				"  apply this database's clone-local migrations once, then retry:\n",
+			e.MainVersion)
+	}
+	return msg +
+		"      bd migrate schema\n" +
+		"\n" +
+		"  To read anyway (reads selecting the missing columns will fail):\n" +
+		"      BD_IGNORE_SCHEMA_SKEW=1 bd <command>\n"
+}
+
 // IsCloneLocalBehindError reports whether err (or any error it wraps) is a
 // *CloneLocalBehindError.
 func IsCloneLocalBehindError(err error) bool {
