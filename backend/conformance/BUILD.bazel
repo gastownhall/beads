@@ -90,6 +90,7 @@ go_library(
 go_test(
     name = "conformance_test",
     srcs = [
+        "deleter_race_probe_test.go",
         "request_field_coverage_gate_test.go",
         "request_field_coverage_scan_test.go",
         "role_bundle_test.go",
@@ -109,6 +110,7 @@ go_test(
     deps = [
         "//internal/storage",
         "//internal/testutil/bazeltest",
+        "//internal/types",
         "//issueops",
         "//journalops",
         "//memoryops",
