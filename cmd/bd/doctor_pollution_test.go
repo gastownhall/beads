@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -326,3 +327,212 @@ func TestPollutionReportWording(t *testing.T) {
 		}
 	}
 }
+
+// pollutionCommandStore drives runPollutionCheck without a database: the
+// initial full scan returns initial, and the post-confirmation refresh
+// (GetIssuesByIDs) returns only the rows still present in refresh, so a test
+// can change an issue between report and refresh like a concurrent editor.
+// Any method the pollution path should not touch panics via the nil
+// embedded interface.
+type pollutionCommandStore struct {
+	storage.DoltStorage
+	initial     []*types.Issue
+	refresh     map[string]*types.Issue
+	evidenceErr error
+	deleted     []string
+	refreshes   int
+}
+
+func (f *pollutionCommandStore) SearchIssues(context.Context, string, types.IssueFilter) ([]*types.Issue, error) {
+	return f.initial, nil
+}
+
+func (f *pollutionCommandStore) GetIssuesByIDs(_ context.Context, ids []string) ([]*types.Issue, error) {
+	f.refreshes++
+	var out []*types.Issue
+	for _, id := range ids {
+		if issue, ok := f.refresh[id]; ok {
+			out = append(out, issue)
+		}
+	}
+	return out, nil
+}
+
+func (f *pollutionCommandStore) DeleteIssue(_ context.Context, id string) error {
+	f.deleted = append(f.deleted, id)
+	return nil
+}
+
+func (f *pollutionCommandStore) GetDependencyRecordsForIssues(context.Context, []string) (map[string][]*types.Dependency, error) {
+	return nil, f.evidenceErr
+}
+
+func (f *pollutionCommandStore) GetDependentRecordsForIssues(context.Context, []string) (map[string][]*types.Dependency, error) {
+	return nil, f.evidenceErr
+}
+
+func (f *pollutionCommandStore) GetCommentCounts(context.Context, []string) (map[string]int, error) {
+	return nil, f.evidenceErr
+}
+
+// newPollutionCommandFixture reports three candidates; by the refresh one
+// is unchanged, one was closed and one was deleted.
+func newPollutionCommandFixture() *pollutionCommandStore {
+	newIssue := func(id string) *types.Issue {
+		return &types.Issue{ID: id, Title: "test leftover " + id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	}
+	stays := newIssue("pol-stays")
+	turnsClosed := newIssue("pol-closed")
+	closedCopy := *turnsClosed
+	closedCopy.Status = types.StatusClosed
+	disappears := newIssue("pol-gone")
+	return &pollutionCommandStore{
+		initial: []*types.Issue{stays, turnsClosed, disappears},
+		refresh: map[string]*types.Issue{stays.ID: stays, turnsClosed.ID: &closedCopy},
+	}
+}
+
+// pollutionCommandTestEnv installs fake as the active store in a temp
+// working directory (for the backup file).
+func pollutionCommandTestEnv(t *testing.T, fake storage.DoltStorage) {
+	t.Helper()
+	saveAndRestoreGlobals(t)
+	store = fake
+	storeMutex.Lock()
+	storeActive = true
+	storeMutex.Unlock()
+
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	origWd, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWd) })
+}
+
+// answerPollutionPrompt feeds answer to the cleanup confirmation prompt
+// through a stand-in stdin. The mutex guards only the swap: the capture
+// helpers take it too, so holding it across the run would deadlock.
+func answerPollutionPrompt(t *testing.T, answer string) {
+	t.Helper()
+	origStdin := os.Stdin
+	stdinFile, err := os.CreateTemp(t.TempDir(), "stdin")
+	if err != nil {
+		t.Fatalf("creating stand-in stdin: %v", err)
+	}
+	if _, err := stdinFile.WriteString(answer + "\n"); err != nil {
+		t.Fatalf("writing stand-in stdin: %v", err)
+	}
+	if _, err := stdinFile.Seek(0, 0); err != nil {
+		t.Fatalf("rewinding stand-in stdin: %v", err)
+	}
+	stdioMutex.Lock()
+	os.Stdin = stdinFile
+	stdioMutex.Unlock()
+	t.Cleanup(func() {
+		stdioMutex.Lock()
+		os.Stdin = origStdin
+		stdioMutex.Unlock()
+	})
+}
+
+// assertPollutionCommandCleanedFixture checks the fixture's cleanup: only the
+// unchanged candidate is backed up and deleted, after one refresh, and the
+// closed and deleted ones are reported as skipped.
+func assertPollutionCommandCleanedFixture(t *testing.T, fake *pollutionCommandStore, out string) {
+	t.Helper()
+	if !slices.Equal(fake.deleted, []string{"pol-stays"}) {
+		t.Errorf("deleted %v, want only [pol-stays] (protected and disappeared issues must be skipped)", fake.deleted)
+	}
+	if fake.refreshes != 1 {
+		t.Errorf("post-confirmation refreshes = %d, want 1", fake.refreshes)
+	}
+	if got := readPollutionBackupIDs(t, ".beads/pollution-backup.jsonl"); !slices.Equal(got, []string{"pol-stays"}) {
+		t.Errorf("backup held %v, want only [pol-stays] (the refreshed eligible rows)", got)
+	}
+	for _, skipped := range []string{"pol-closed", "pol-gone"} {
+		if !strings.Contains(out, "Skipping "+skipped) {
+			t.Errorf("cleanup output did not report skipped issue %s:\n%s", skipped, out)
+		}
+	}
+}
+
+// TestDoctorPollutionCleanRefreshesAfterConfirmation pins the
+// post-confirmation refresh through the command (GH#5025): with --yes, the
+// reported IDs are re-read and re-checked, so an issue closed or deleted
+// since the report is skipped and reported, never deleted.
+func TestDoctorPollutionCleanRefreshesAfterConfirmation(t *testing.T) {
+	fake := newPollutionCommandFixture()
+	pollutionCommandTestEnv(t, fake)
+
+	out, err := captureStdoutWithError(t, func() error { return runPollutionCheck("", true, true) })
+	if err != nil {
+		t.Fatalf("runPollutionCheck: %v", err)
+	}
+	assertPollutionCommandCleanedFixture(t, fake, out)
+}
+
+// TestDoctorPollutionCleanConfirmedAtPromptRefreshes pins the same refresh
+// when the user answers the prompt with "y" instead of passing --yes.
+func TestDoctorPollutionCleanConfirmedAtPromptRefreshes(t *testing.T) {
+	fake := newPollutionCommandFixture()
+	pollutionCommandTestEnv(t, fake)
+	answerPollutionPrompt(t, "y")
+
+	out, err := captureStdoutWithError(t, func() error { return runPollutionCheck("", true, false) })
+	if err != nil {
+		t.Fatalf("runPollutionCheck: %v", err)
+	}
+	if !strings.Contains(out, "Delete the 3 reported issues?") {
+		t.Errorf("cleanup did not prompt for the 3 reported issues:\n%s", out)
+	}
+	assertPollutionCommandCleanedFixture(t, fake, out)
+}
+
+// TestDoctorPollutionCleanDeclinedIsNonDestructive pins that a declined
+// confirmation re-reads nothing, deletes nothing and writes no backup.
+func TestDoctorPollutionCleanDeclinedIsNonDestructive(t *testing.T) {
+	fake := newPollutionCommandFixture()
+	pollutionCommandTestEnv(t, fake)
+	answerPollutionPrompt(t, "n")
+
+	out, err := captureStdoutWithError(t, func() error { return runPollutionCheck("", true, false) })
+	if err != nil {
+		t.Fatalf("runPollutionCheck: %v", err)
+	}
+	if !strings.Contains(out, "Canceled.") {
+		t.Errorf("declined cleanup did not report cancellation:\n%s", out)
+	}
+	if len(fake.deleted) != 0 || fake.refreshes != 0 {
+		t.Errorf("declined cleanup deleted %v after %d refreshes, want nothing", fake.deleted, fake.refreshes)
+	}
+	if _, err := os.Stat(".beads/pollution-backup.jsonl"); err == nil {
+		t.Error("declined cleanup wrote a backup file, want none")
+	}
+}
+
+// TestDoctorPollutionJSONReturnsBeforeClean pins the JSON mode's early
+// return: with --json the report is emitted and cleanup never runs, even
+// with --clean --yes.
+func TestDoctorPollutionJSONReturnsBeforeClean(t *testing.T) {
+	fake := newPollutionCommandFixture()
+	pollutionCommandTestEnv(t, fake)
+	prevJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = prevJSON })
+
+	out, err := captureStdoutWithError(t, func() error { return runPollutionCheck("", true, true) })
+	if err != nil {
+		t.Fatalf("runPollutionCheck: %v", err)
+	}
+	if len(fake.deleted) != 0 || fake.refreshes != 0 {
+		t.Errorf("JSON mode deleted %v after %d refreshes, want nothing (JSON returns before cleanup)", fake.deleted, fake.refreshes)
+	}
+	if !strings.Contains(out, "\"polluted_count\": 3") {
+		t.Errorf("JSON report missing polluted_count 3:\n%s", out)
+	}
+}
+
