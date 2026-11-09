@@ -27,7 +27,9 @@ import (
 // under test made through the proxy, by name and never by value (method,
 // operation, path, query parameter names, top-level request members, status).
 // testdata/transcripts/<shape>.json holds the reference-profile transcript of
-// every shape whose served run happens. A change to what bd sends for a shape fails its subtest until the golden is regenerated:
+// every shape whose served run happens; testdata/transcripts/current/ holds
+// the current-capability ones (current_capability_test.go). A change to what
+// bd sends for a shape fails its subtest until the golden is regenerated:
 //
 //	BD_UPDATE_GOLDEN=1 CGO_ENABLED=1 BEADS_TEST_EMBEDDED_DOLT=1 go test -tags gms_pure_go -run 'TestServedCorpus|TestCorpusTranscripts' ./backend/http/corpus/
 const (
@@ -54,8 +56,8 @@ type transcriptRequest struct {
 // transcript is one golden file.
 type transcript struct {
 	Shape string `json:"shape"`
-	// Exit is the served run's exit code. A reference transcript never
-	// carries it: the parts hold the outcome to the embedded run instead.
+	// Exit is the served run's exit code. Only the current-capability
+	// transcripts carry it: they have no embedded run to hold the outcome to.
 	Exit     *int                `json:"exit,omitempty"`
 	Requests []transcriptRequest `json:"requests"`
 }
@@ -314,9 +316,8 @@ func transcriptDiff(want, got []byte) string {
 }
 
 // loadTranscripts reads every golden in dir by shape. The only subdirectory
-// allowed is currentTranscriptDir, reserved for the current-capability
-// transcripts, which it does not descend into; any other directory is an
-// error, so no golden can hide in one.
+// allowed anywhere is the current-capability one, which it does not descend
+// into; any other directory is an error, so no golden can hide in one.
 func loadTranscripts(t *testing.T, dir string) map[string]transcript {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
@@ -361,7 +362,8 @@ func loadTranscripts(t *testing.T, dir string) map[string]transcript {
 // reference transcript names a corpus shape and only operations of the
 // reference profile, by their own methods; every shape that is not pending
 // has one (a pending shape's served run may not happen: its setup can fail on
-// the reference profile); and every golden is in canonical form.
+// the reference profile); the current-capability goldens are exactly
+// currentCapabilityShapes'; and every golden is in canonical form.
 func TestCorpusTranscriptsAreWellFormed(t *testing.T) {
 	c, _ := loadCorpus(t)
 	byID := map[string]shape{}
@@ -407,6 +409,15 @@ func TestCorpusTranscriptsAreWellFormed(t *testing.T) {
 	for _, s := range c.Shapes {
 		if _, ok := reference[s.ID]; !ok && s.Pending == nil {
 			t.Errorf("shape %s has no transcript in %s; regenerate with\n  %s", s.ID, transcriptDir, transcriptRegen)
+		}
+	}
+	current := check(currentTranscriptDir, loadCurrentProfile(t), true, func(id string) bool { return slices.Contains(currentCapabilityShapes, id) })
+	for _, id := range currentCapabilityShapes {
+		if _, ok := byID[id]; !ok {
+			t.Errorf("currentCapabilityShapes names %s, which is not a corpus shape", id)
+		}
+		if _, ok := current[id]; !ok {
+			t.Errorf("current-capability shape %s has no transcript in %s; regenerate with\n  %s", id, currentTranscriptDir, transcriptRegen)
 		}
 	}
 }

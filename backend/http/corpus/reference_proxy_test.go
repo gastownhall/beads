@@ -129,6 +129,12 @@ type referenceProxy struct {
 	upstream *url.URL
 	rp       *httputil.ReverseProxy
 
+	// unmasked turns every mask off: the server's own handshake, 404s and
+	// 400s pass through untouched, and profile only names the operations.
+	// It is the proxy of the current-capability transcripts
+	// (current_capability_test.go).
+	unmasked bool
+
 	// requests counts the requests the bd under test made (subjectUserAgent);
 	// foreign counts every other request that reached the proxy's port.
 	requests atomic.Int64
@@ -216,6 +222,10 @@ func (p *referenceProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w = p.wire.track(w, r, p.match(r), body)
 	} else {
 		p.foreign.Add(1)
+	}
+	if p.unmasked {
+		p.rp.ServeHTTP(w, r)
+		return
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v0/beads/context" {
 		p.serveContext(w, r)

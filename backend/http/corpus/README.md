@@ -19,6 +19,8 @@ following for its share of the shapes:
    way a deployed server is bound: `AllowNonLoopback` plus a bearer token
    file. The socket is still `127.0.0.1`, but the bind mode decides every
    behaviour the server keys on, including its refusal of unlimited reads.
+   Its roles come through the external-dependency policy decorator, and it
+   advertises `policy.external_dependencies`, as `bd serve` composes them.
 3. Puts a reference proxy in front of the server. The proxy makes it answer
    like the deployed reference server described in
    `testdata/reference_server.json`:
@@ -92,6 +94,9 @@ variables set, in the Embedded Dolt lane (`--config=embedded`; see
 `served_pinned_shards.txt` pins part k to Bazel shard k, so the parts run
 concurrently. `corpus_test` on its own sets neither variable, so it skips
 the parts.
+
+`TestServedCorpusCurrentCapabilityTranscripts` runs a handful of shapes a
+second way; see "Wire transcripts".
 
 Two environment variables change the run:
 - `BEADS_CORPUS_REPORT=<file>` writes a JSON summary with per-shape status
@@ -191,6 +196,21 @@ The engine-free checks run in every lane:
   `uncoveredReferenceOperations`, which says why each of the rest is out of
   reach. That list only shrinks: a shape that starts covering one fails the
   test until its entry is removed.
+
+### Current-capability transcripts
+
+The reference profile is bd 1.3.0, which lacks `issues.update.claim`, so
+there every `update --claim` already takes the `claimIssue` fallback, and a
+client change on the current path (always `claimIssue` plus a read-back, say)
+leaves every reference transcript as it was.
+`TestServedCorpusCurrentCapabilityTranscripts` therefore also runs the shapes
+in `currentCapabilityShapes` (`current_capability_test.go`), in corpus order,
+on one served workspace with the same seed, through an unmasked proxy: the
+server's own handshake, 404s and 400s pass through, and operation ids come
+from the OpenAPI document this tree embeds. It holds each run's requests and
+exit code to `testdata/transcripts/current/<shape>.json`. There is no
+embedded run and no output comparison; the parts hold the outcomes. It runs
+in `corpus_served_test`'s round-robin shard.
 
 ## Updating the reference profile
 
