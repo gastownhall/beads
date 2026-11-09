@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
@@ -146,5 +147,33 @@ func TestEmbeddedDepCrossPrefixLocalBlockerCloseAndReopen(t *testing.T) {
 	blockers, listed := blockedBy(t, bd, dir, dependent.ID)
 	if !listed || len(blockers) != 1 || blockers[0] != blocker.ID {
 		t.Errorf("bd blocked names blockers %v (listed=%v) for %s after reopen, want [%s]", blockers, listed, dependent.ID, blocker.ID)
+	}
+}
+
+// TestEmbeddedDepAddCrossPrefixAbsentTargetStaysExternal pins the fallback
+// the fix keeps: a cross-prefix target this database does not hold, with no
+// route to it, is stored in depends_on_external with the unresolved-target
+// warning and its removal hint, and blocks nothing here.
+func TestEmbeddedDepAddCrossPrefixAbsentTargetStaysExternal(t *testing.T) {
+	skipUnlessEmbeddedCrossPrefix(t)
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", crossPrefixSourcePrefix)
+
+	source := bdCreate(t, bd, dir, "Source", "--type", "task")
+	const absent = "zz-404"
+	_, stderr := bdRunSplit(t, bd, dir, "dep", "add", source.ID, absent)
+
+	if got := depTargetColumn(t, beadsDir, "dependencies", source.ID, absent); got != "depends_on_external" {
+		t.Fatalf("edge %s -> %s stored in %q, want depends_on_external: this database holds no %s", source.ID, absent, got, absent)
+	}
+	for _, want := range []string{"was not found in this database or through routing", "bd dep remove " + source.ID + " " + absent} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("dep add stderr lacks %q:\n%s", want, stderr)
+		}
+	}
+	if ready := readyIDs(t, bd, dir); !ready[source.ID] {
+		t.Errorf("%s is not ready although its only edge names a target outside this database: %v", source.ID, ready)
 	}
 }
