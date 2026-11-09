@@ -428,14 +428,36 @@ a commit that lands on `main` while the history is being rebuilt. Builds with
 the fix listed in the CHANGELOG move `main` with a soft reset and keep both.
 The check that the rebuilt history reproduces `main`'s data compares it with
 `main` as `bd compact` read it, so such a write is not mistaken for a divergent
-replay. Working-set changes stay pending, as they were. A commit that landed during
-the rebuild is kept in one follow-up commit,
-`compact: commit changes that reached main during compaction`, so it does not
-keep its own hash, message or author on `main`; changes that were already
-staged when `bd compact` started go into that commit too. If that follow-up
-commit fails, `bd compact` stops after `main` has moved and before garbage
-collection, says so, and leaves the changes staged: commit them with
-`bd dolt commit` when you are ready.
+replay. Working-set changes stay pending, as they were.
+
+Commits that landed on `main` during the rebuild are caught up: when they form
+one line of non-merge commits descending from the `main` that `bd compact`
+read, it replays them onto the rebuilt history with their own messages,
+authors, committers and dates (they get new hashes, as the other replayed
+commits do), checks that the result holds the data of the `main` head it read
+for the catch-up, and only then moves `main`.
+When it cannot replay them (a merge, a range that is not a single line, or a
+commit missing its author or committer), it skips the catch-up and keeps their
+changes in one follow-up commit,
+`compact: commit changes that reached main during compaction`, without their
+own hashes, messages or authors. A commit that lands after the catch-up read
+`main` joins that follow-up commit too, as do changes that were already staged
+when `bd compact` started. If the catch-up fails partway, `bd compact` stops
+without moving `main` and changes nothing a writer committed.
+
+Moving `main` is not atomic with respect to other writers. A writer whose
+transaction began before `main` moved can commit afterwards against the old
+head, and Dolt can then leave the rows of a commit that reached `main` in the
+working set, pending rather than committed. The window is not a fixed few
+milliseconds: it lasts from the catch-up's read of `main` until `main` moves.
+When the writers changed different rows, those rows stay readable; there is no
+such promise for writes to the same rows. Closing that window needs a
+conditional head move from Dolt itself. Check
+`bd vc status` after compacting a busy database and commit anything left
+pending with `bd dolt commit`. If the follow-up commit fails, `bd compact`
+stops after `main` has moved and before garbage collection, says so, and
+leaves the changes staged: commit them with `bd dolt commit` when you are
+ready.
 
 ### Why a garbage collection can reclaim nothing
 

@@ -1409,6 +1409,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   staged on `main`, for `bd dolt commit`. `bd flatten` and the merge-settle
   path are unchanged. See
   [Writes that reach `main` while `bd compact` runs](docs/architecture/dolt.md#maintenance--bd-prune-and-bd-purge).
+- `bd compact` now keeps the commits that land on `main` while it runs as
+  commits of their own. It replays them onto the rebuilt history with their
+  messages, authors, committers and dates, checks the result against the
+  `main` head it read for the catch-up, and only then moves `main`, so a
+  writer's commit is no longer folded into the follow-up commit
+  `compact: commit changes that reached main during compaction`, and a writer
+  that began on top of a caught-up commit and keeps its transaction open
+  across the move no longer demotes that commit to pending changes. Commits it cannot replay (a
+  merge, a range that is not a single line, a commit missing its author or
+  committer) still go into the follow-up commit, as does a commit that lands
+  after the catch-up read `main`; a failed catch-up stops before `main` moves.
+  Moving `main` is still not atomic, and the window lasts through the
+  catch-up: a commit from a writer whose transaction spans the move can be
+  left pending; commit it with `bd dolt commit`. When the writers changed
+  different rows their rows stay readable; there is no such promise for
+  writes to the same rows. Closing that window needs a conditional head move
+  in Dolt (#7502, reported by @csauer02-personal-user). See
+  [Writes that reach `main` while `bd compact` runs](docs/architecture/dolt.md#maintenance--bd-prune-and-bd-purge).
 - A clone that adopts the 1.3.0 `events` flip (migration 0062) by
   `bd dolt pull` or `bd bootstrap`, or clones after it, no longer starts with
   an empty `events` audit table. Only the migrating clone kept its rows. The
