@@ -312,24 +312,38 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 		return nil
 	}
 
-	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (domain.DeleteIssuesResult, string, error) {
-		// Cascade must stay OFF: the closed set above is already the complete
-		// purge candidate list, so cascade can only add NON-closed dependents
-		// (live molecule steps) to the batch — the patrol self-destruct bug.
-		// Mirrors runWispPurgeClosed in wisp.go.
-		res, err := uw.IssueUseCase().DeleteIssues(ctx, domain.DeleteIssuesParams{
-			IDs:                  ids,
-			Cascade:              false,
-			UpdateTextReferences: true,
-		}, currentActor())
+	// One unit of work per chunk of the selection (bd-d2zqqc), each its own
+	// transaction with its own retry, as the direct route sends one deletion
+	// request per chunk. A chunk's counts join the outcome only once its unit
+	// of work committed.
+	outcome := runWispPurgeChunks(ctx, ids, func(ctx context.Context, chunk []string) (wispPurgeChunk, error) {
+		res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (domain.DeleteIssuesResult, string, error) {
+			// Cascade must stay OFF: the closed set above is already the complete
+			// purge candidate list, so cascade can only add NON-closed dependents
+			// (live molecule steps) to the batch — the patrol self-destruct bug.
+			// Mirrors runWispPurgeClosed in wisp.go.
+			res, err := uw.IssueUseCase().DeleteIssues(ctx, domain.DeleteIssuesParams{
+				IDs:                  chunk,
+				Cascade:              false,
+				UpdateTextReferences: true,
+			}, currentActor())
+			if err != nil {
+				return domain.DeleteIssuesResult{}, "", err
+			}
+			return res, fmt.Sprintf("bd: wisp gc --closed %d", res.DeletedCount), nil
+		})
 		if err != nil {
-			return domain.DeleteIssuesResult{}, "", err
+			return wispPurgeChunk{}, err
 		}
-		return res, fmt.Sprintf("bd: wisp gc --closed %d", res.DeletedCount), nil
+		return wispPurgeChunk{
+			deletedIDs:        res.DeletedIDs,
+			deleted:           res.DeletedCount,
+			dependencies:      res.DependenciesCount,
+			labels:            res.LabelsCount,
+			events:            res.EventsCount,
+			referencesUpdated: res.ReferencesUpdated,
+			orphaned:          res.OrphanedIssues,
+		}, nil
 	})
-	if err != nil {
-		return HandleError("%v", err)
-	}
-
-	return renderWispGCDeleteResult(ids, res)
+	return renderWispPurgeOutcome(outcome, false)
 }
