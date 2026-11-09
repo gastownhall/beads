@@ -805,12 +805,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row it read in its own transaction instead of reading it again (two
   fewer) and skips `DELETE FROM leases` when that row has no lease (one
   fewer). Separately, a comment checks its issue's plane and existence once
-  instead of twice (two fewer). On a Dolt server with no wisps: create 20 to
-  17, close 30 to 27, reopen 24 to 21, an update that claims 20 to 17, an
-  update that claims and patches 26 to 21, a status update 15 to 9 (10 when
-  the issue holds a lease), and a comment 7 to 5. A batch apply saves three
-  per create item and six per assign update: 5274 to 4872 statements for a
-  356-item plan. The standalone claim operation is unchanged. For an ID
+  instead of twice (two fewer). On a Dolt server with no wisps, that is three
+  fewer for a create, a close, a reopen and an update that claims, five fewer
+  for an update that claims and patches, six fewer for a status update (five
+  when the issue holds a lease), and two fewer for a comment. A batch apply
+  saves three per create item and six per assign update: 402 fewer statements
+  for a 356-item plan. The standalone claim operation is unchanged. For an ID
   with a row in both `issues` and `wisps`, the result's labels and outgoing
   dependency records now come from `issues`, as its body already did; they
   used to come from the wisp row. A label that an update adds to such an ID
