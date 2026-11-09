@@ -158,6 +158,37 @@ type StrategicPuller interface {
 	PullRemoteWithStrategy(ctx context.Context, remote, strategy string) error
 }
 
+// ChildRenumber is one local identity change `bd dolt pull
+// --renumber-children` makes (or, in a plan, proposes): a colliding
+// hierarchical child, or a descendant of one, moving From -> To.
+type ChildRenumber struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// ChildRenumberReport is what a child-renumbering pull planned and did.
+type ChildRenumberReport struct {
+	Remote     string `json:"remote"`
+	Branch     string `json:"branch"`
+	LocalHead  string `json:"local_head,omitempty"`
+	RemoteHead string `json:"remote_head,omitempty"`
+	MergeBase  string `json:"merge_base,omitempty"`
+	// Renames lists roots and descendants, roots first.
+	Renames []ChildRenumber `json:"renames"`
+}
+
+// ChildRenumberPlanner is the optional read-only half of `bd dolt pull
+// --renumber-children` (bd-28sb25, GH#4796): two clones that each created
+// children under the same parent offline mint the same child ids for
+// different issues, an add/add collision the merge cannot settle.
+// PlanChildRenumbers proposes renaming the LOCAL colliding children (and
+// their subtrees) above both sides' high-water marks, against the
+// already-fetched remote-tracking ref, writing and fetching nothing. remote ""
+// means the default remote. Callers must type-assert.
+type ChildRenumberPlanner interface {
+	PlanChildRenumbers(ctx context.Context, remote string) (*ChildRenumberReport, error)
+}
+
 // VersionControl provides branch, commit, merge, and status operations.
 type VersionControl interface {
 	Branch(ctx context.Context, name string) error
