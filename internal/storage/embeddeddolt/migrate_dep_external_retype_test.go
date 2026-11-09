@@ -218,3 +218,98 @@ func TestEmbeddedDepExternalRetypeRepairsLegacyCrossPrefixRows(t *testing.T) {
 		}
 	}
 }
+
+// seedWispParentChildEdge inserts the wisp parent-child edge (wisp child ->
+// wisp parent, type 'parent-child') into wisp_dependencies. The shared
+// seedDepTable hardcodes 'blocks', and the child edge must not be one.
+func seedWispParentChildEdge(t *testing.T, ctx context.Context, conn *sql.Conn, child, parent string) {
+	t.Helper()
+	mustExecConn(t, ctx, conn, `
+INSERT INTO wisp_dependencies (id, issue_id, depends_on_wisp_id, type, created_at, created_by, metadata)
+VALUES (?, ?, ?, 'parent-child', NOW(), 'tester', JSON_OBJECT())`,
+		depid.New(child, parent), child, parent)
+}
+
+// TestEmbeddedDepRetypeKeepsHierarchyViolatingRowsExternal is AC-7: a legacy
+// blocking row whose conversion would create an edge the write path refuses
+// — the source blocking on its own descendant, on either plane — stays
+// external, while eligible rows in the same pass are repaired. The kept row
+// blocks nothing, exactly as before the upgrade.
+func TestEmbeddedDepRetypeKeepsHierarchyViolatingRowsExternal(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMigratedStore(t, ctx)
+	conn, closeConn := openDepConn(t, ctx, dataDir)
+
+	const anc = "hq-anc"
+	const kid = "hq-kid"
+	const unrelated = "ops-t2"
+	const wispAnc = "hq-wanc"
+	const wispKid = "hq-wkid"
+	seedIssue(t, ctx, conn, anc)
+	seedIssue(t, ctx, conn, kid)
+	seedIssue(t, ctx, conn, unrelated)
+	seedWisp(t, ctx, conn, wispAnc)
+	seedWisp(t, ctx, conn, wispKid)
+
+		// The hierarchy: kid under anc on the issue plane, wispKid under wispAnc
+	// on the wisp plane.
+	seedParentChildEdge(t, ctx, conn, kid, anc)
+	seedWispParentChildEdge(t, ctx, conn, wispKid, wispAnc)
+	// The legacy misfiled rows. The violating pair points DOWN the hierarchy
+	// (anc blocking on its own descendant kid) rather than up, because the
+	// derived id is a function of (source, target): an up-pointing row would
+	// collide with the hierarchy edge's id — in a real store the re-key that
+	// runs before the repair has already merged such a pair into one row.
+	// From the SAME source as the violating row, an eligible one.
+	seedDependency(t, ctx, conn, depid.New(anc, kid), anc, nil, nil, strptr(kid))
+	seedDependency(t, ctx, conn, depid.New(kid, unrelated), kid, nil, nil, strptr(unrelated))
+	seedWispDependency(t, ctx, conn, depid.New(wispAnc, wispKid), wispAnc, nil, nil, strptr(wispKid))
+
+	commitSeed(t, ctx, conn, "seed hierarchy-violating legacy external dep rows")
+	unrecordIgnoredVersionsFrom(t, ctx, conn, 32)
+	closeConn()
+
+	conn2, _ := openDepConn(t, ctx, dataDir)
+	if _, err := schema.MigrateUp(ctx, conn2); err != nil {
+		t.Fatalf("MigrateUp with ignored 0032 pending: %v", err)
+	}
+	if !ignoredVersionRecorded(t, ctx, conn2, 32) {
+		t.Fatal("ignored 0032 was not recorded despite the kept row: a hierarchy violation must not strand the marker")
+	}
+
+	got := indexDepRows(t, readDeps(t, ctx, conn2))
+	if len(got) != 3 {
+		t.Fatalf("dependencies now hold %d rows, want the three seeded: %+v", len(got), got)
+	}
+	if row := got[depid.New(anc, kid)]; row != (depRow{id: depid.New(anc, kid), issueID: anc, dependsOnExternal: kid}) {
+		t.Fatalf("hierarchy-violating row %s = %+v, want it kept external (converting it would block a source on its own descendant)", depid.New(anc, kid), row)
+	}
+	if row := got[depid.New(kid, unrelated)]; row != (depRow{id: depid.New(kid, unrelated), issueID: kid, dependsOnIssueID: unrelated}) {
+		t.Fatalf("eligible row %s = %+v, want it re-typed despite the kept sibling row", depid.New(kid, unrelated), row)
+	}
+	if row := got[depid.New(anc, kid)]; row.dependsOnIssueID != "" || row.dependsOnWispID != "" {
+		t.Fatalf("kept row %s gained a typed target: %+v", depid.New(anc, kid), row)
+	}
+
+	gotWispDeps := indexDepRows(t, readDepTable(t, ctx, conn2, "wisp_dependencies"))
+	if len(gotWispDeps) != 2 {
+		t.Fatalf("wisp_dependencies now hold %d rows, want the two seeded: %+v", len(gotWispDeps), gotWispDeps)
+	}
+	if row := gotWispDeps[depid.New(wispAnc, wispKid)]; row != (depRow{id: depid.New(wispAnc, wispKid), issueID: wispAnc, dependsOnExternal: wispKid}) {
+		t.Fatalf("hierarchy-violating wisp row %s = %+v, want it kept external", depid.New(wispAnc, wispKid), row)
+	}
+
+	// The eligible conversion still blocks its source; the kept rows block
+	// nothing, on either plane.
+	if got := scalarInt(t, ctx, conn2, "SELECT is_blocked FROM issues WHERE id = ?", kid); got != 1 {
+		t.Fatalf("issue %s is_blocked = %d, want 1: the eligible edge must block it", kid, got)
+	}
+	if got := scalarInt(t, ctx, conn2, "SELECT is_blocked FROM wisps WHERE id = ?", wispAnc); got != 0 {
+		t.Fatalf("wisp %s is_blocked = %d, want 0: its only edge was kept external and blocks nothing", wispAnc, got)
+	}
+	if got := scalarInt(t, ctx, conn2, "SELECT is_blocked FROM issues WHERE id = ?", anc); got != 0 {
+		t.Fatalf("ancestor %s is_blocked = %d, want 0: its only edge was kept external and blocks nothing", anc, got)
+	}
+}

@@ -1,11 +1,14 @@
 package schema
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/steveyegge/beads/internal/storage/depid"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 // TestLatestIgnoredVersionIncludesMigration0032 pins the ignored slot the
@@ -111,4 +114,73 @@ func TestRetypeRepairRefusesNonPinnedSession(t *testing.T) {
 			t.Fatal("expected a refusal for a supplied *sql.Tx: the boundary must not nest")
 		}
 	})
+}
+
+// TestRetypePlanKeepsHierarchyViolationsExternal pins the conflict half of
+// the 0032 plan: a legacy blocking row whose conversion would create an edge
+// the write path refuses — the target is the source's own ancestor — stays
+// external and is named in a removal notice, while an eligible row in the
+// same plan is still converted. planDepExternalRetype writes nothing, so the
+// whole population decision is observable against a statement-echo mock: the
+// Dolt semantics of the walk are AC-6's embedded test's business.
+func TestRetypePlanKeepsHierarchyViolationsExternal(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	const source = "hq-kid"
+	const ancestor = "hq-anc" // present as an issue AND the source's own ancestor
+	const eligibleSource = "hq-ok"
+	const eligibleTarget = "ops-t2"
+
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
+		WithArgs("dependencies").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(`SELECT id, issue_id, depends_on_external, type FROM dependencies`).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "issue_id", "depends_on_external", "type"}).
+			AddRow(depid.New(source, ancestor), source, ancestor, "blocks").
+			AddRow(depid.New(eligibleSource, eligibleTarget), eligibleSource, eligibleTarget, "blocks"))
+	// The violating row: a present target, then the blocker-ancestor probe
+	// fires once and settles it — the descendant probe never runs.
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM wisps`).WithArgs(ancestor).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM issues`).WithArgs(ancestor).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM ancestors WHERE node = \?`).WithArgs(source, ancestor).
+		WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
+	// The eligible row: a present target, both probes negative.
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM wisps`).WithArgs(eligibleTarget).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM issues`).WithArgs(eligibleTarget).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM ancestors WHERE node = \?`).WithArgs(eligibleSource, eligibleTarget).
+		WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(0))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM ancestors WHERE node = \?`).WithArgs(eligibleTarget, eligibleSource).
+		WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(0))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
+		WithArgs("wisp_dependencies").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+
+	var notice bytes.Buffer
+	origStderr := stderr
+	stderr = &notice
+	t.Cleanup(func() { stderr = origStderr })
+
+	rows, err := planDepExternalRetype(context.Background(), db)
+	if err != nil {
+		t.Fatalf("planDepExternalRetype: %v", err)
+	}
+	if len(rows) != 1 || rows[0].id != depid.New(eligibleSource, eligibleTarget) ||
+		rows[0].kind != issueops.DepTargetIssue || rows[0].table != "dependencies" {
+		t.Fatalf("plan = %+v, want only the eligible row re-typed to its issue target", rows)
+	}
+	if got := notice.String(); !strings.Contains(got, "keeping cross-prefix edge "+source+" -> "+ancestor+" external") ||
+		!strings.Contains(got, "bd dep remove "+source+" "+ancestor) {
+		t.Fatalf("removal notice = %q, want it to name the source, the target and the removal command", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
 }
