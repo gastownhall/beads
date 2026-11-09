@@ -280,6 +280,7 @@
 40 12 TestEmbeddedReadyClaimerAnswersTheQuestionReaderReadyLists
 40 12 TestHistoryPresenceContract
 40 12 TestLifecycleUpdateContract
+40 12 TestOpenSQLWaitBudget
 40 12 TestReaderListExcludeStatusAcceptsAWorkspaceCustomStatus
 
 40 13 TestEmbeddedActivationDoesNotOpenTheEngine
@@ -293,6 +294,7 @@
 40 13 TestEmbeddedPre0058RepairMarchesDriftedWispDependenciesToFinalShape
 40 13 TestEmbeddedRelationsDirectionSelectsTheInverseGraph
 40 13 TestGraphWalkPlansHonorJoinHints
+40 13 TestOpenSQL_BlockedOpenWithoutDeadlineIsBounded
 
 40 14 TestArrivalSeq_EmbeddedReplayedCounterSeedClearsTheStamps
 40 14 TestBatchCreatorContract
@@ -333,6 +335,7 @@
 40 16 TestExternalCapabilityBlocksEmbeddedReadyAndAppearsInTree
 40 16 TestGetReadyWorkIncludeEphemeralAppliesWispFilters
 40 16 TestMergeWithStrategy_OursKeepsLocal
+40 16 TestOpenWaitBudget
 40 16 TestWithPeerAuth_DivergedRemoteURLFailsClosed
 
 40 17 TestAddDependency
@@ -580,6 +583,7 @@
 40 33 TestEventsAutoPruneThrottleSkipsTheSecondPass
 40 33 TestFirstMintLeavesTheEpochTablesCommitted
 40 33 TestGetDependentRecordsEmbedded
+40 33 TestOpenWaitRecordsExhaustion
 40 33 TestPruneEventsBatchDeletesTheLowestSeqsOnly
 40 33 TestTreeWalkerContract
 

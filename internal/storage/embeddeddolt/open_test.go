@@ -4,8 +4,11 @@ package embeddeddolt
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -297,6 +300,83 @@ func TestOpenWaitRecordsExhaustion(t *testing.T) {
 		}
 		if !p.gaveUpWithoutCancellation(context.Background()) {
 			t.Fatal("the policy's Stop must record exhaustion")
+		}
+	})
+}
+
+// TestOpenSQLWaitBudget exercises the open retry budget against a real
+// embedded engine held by a second handle: release before exhaustion,
+// parent-deadline precedence, caller cancellation, non-retryable open
+// failures and uncontended opens must all come out classified correctly.
+// Gated like TestConcurrencyMultiProcess (concurrency_test.go): these boot
+// real engines and do not run in the short PR lane.
+func TestOpenSQLWaitBudget(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt open-budget tests")
+	}
+
+	// openWaitResult carries a synchronous OpenSQL outcome out of a
+	// goroutine so a stuck open fails the watchdog instead of hanging the
+	// test (a cleanup-only cancel cannot rescue a call that never
+	// returns).
+	type openWaitResult struct {
+		db      *sql.DB
+		cleanup func() error
+		err     error
+	}
+
+	// holdWaitBudgetDatabase opens a second handle on the initialized
+	// database in dir and holds it for the subtest's duration.
+	holdWaitBudgetDatabase := func(t *testing.T, dir string) func() error {
+		t.Helper()
+		_, hold, err := OpenSQL(context.Background(), dir, waitBudgetDatabase, "")
+		if err != nil {
+			t.Fatalf("holder OpenSQL: %v", err)
+		}
+		return hold
+	}
+
+	t.Run("release_before_exhaustion", func(t *testing.T) {
+		// No t.Parallel: t.Setenv.
+		t.Setenv(openWaitBudgetEnv, "20s")
+		dir := t.TempDir()
+		initWaitBudgetDatabase(t, dir)
+
+		hold := holdWaitBudgetDatabase(t, dir)
+		release := sync.OnceFunc(func() { _ = hold() })
+		defer release()
+
+		// The holder goes away well before the 20s budget runs out, so
+		// the waiter's retries must let it through, not time it out.
+		go func() {
+			time.Sleep(2 * time.Second)
+			release()
+		}()
+
+		done := make(chan openWaitResult, 1)
+		go func() {
+			db, cleanup, err := OpenSQL(context.Background(), dir, waitBudgetDatabase, "")
+			done <- openWaitResult{db, cleanup, err}
+		}()
+
+		var r openWaitResult
+		select {
+		case r = <-done:
+		case <-time.After(30 * time.Second):
+			t.Fatalf("waiter still blocked after 30s; release before exhaustion must let it open")
+		}
+		if r.err != nil {
+			t.Fatalf("waiter failed after holder release: %v", r.err)
+		}
+		defer func() { _ = r.cleanup() }()
+
+		// It did not just open: the handle answers queries.
+		var one int
+		if err := r.db.QueryRow("SELECT 1").Scan(&one); err != nil {
+			t.Fatalf("waiter query after open: %v", err)
+		}
+		if one != 1 {
+			t.Fatalf("SELECT 1 = %d, want 1", one)
 		}
 	})
 }
