@@ -1149,13 +1149,13 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 	}
 
 	for _, label := range params.Labels {
-		if err := u.labelRepo.Insert(ctx, issue.ID, label, actor, LabelOpts{UseWispsTable: useWisp}); err != nil {
+		if err := u.labelRepo.Insert(ctx, issue.ID, label, actor, LabelOpts{UseWispsTable: useWisp, PreserveUpdatedAt: true}); err != nil {
 			return result, fmt.Errorf("create: add label %s: %w", label, err)
 		}
 		result.PostCreateWrites = true
 	}
 	for _, label := range result.InheritedLabels {
-		if err := u.labelRepo.Insert(ctx, issue.ID, label, actor, LabelOpts{UseWispsTable: useWisp}); err != nil {
+		if err := u.labelRepo.Insert(ctx, issue.ID, label, actor, LabelOpts{UseWispsTable: useWisp, PreserveUpdatedAt: true}); err != nil {
 			return result, fmt.Errorf("create: add inherited label %s: %w", label, err)
 		}
 		result.PostCreateWrites = true

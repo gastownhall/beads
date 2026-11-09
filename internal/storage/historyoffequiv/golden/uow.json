@@ -1,5 +1,5 @@
 {
-  "recorded_from": "3ce0423afd + bd-63dd62",
+  "recorded_from": "29472cad3 + gascity/bd-enterprise#210",
   "steps": [
     "create a",
     "create b blocked by a",
@@ -315,7 +315,7 @@
         "current_revision"
       ],
       "rows": 12,
-      "sha256": "ceb2c3c6ef75c869c547dc2e3a1ce0659682b46d515fa8c7cb23bf22bbef4f0c"
+      "sha256": "92e9eb8264175b0a6723941b3e946cd796afe4539cf9927798ce62800cab67ef"
     },
     "labels": {
       "columns": [
@@ -525,7 +525,7 @@
         "is_blocked"
       ],
       "rows": 7,
-      "sha256": "c67625a329153e52a39850ade2bc35baaf45f894b3f83d570de4a9645a86305e"
+      "sha256": "f6885bac56aee7d91b48fdf56c657128ff0b530fa186fabfb52bbf271a3bc09b"
     }
   }
 }
