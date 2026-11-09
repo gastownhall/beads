@@ -233,6 +233,10 @@ func CheckTestPollution(path string) DoctorCheck {
 }
 
 // checkTestPollutionWithStore is CheckTestPollution on an open store.
+// PollutionReviewHint is the next step bd doctor gives for pollution
+// matches: review each one before deleting it.
+const PollutionReviewHint = "Run 'bd doctor --check=pollution', review each match with 'bd show <id>', and delete only confirmed leftovers"
+
 func checkTestPollutionWithStore(ctx context.Context, store PollutionStore) DoctorCheck {
 	matches, err := FindTestPollution(ctx, store)
 	if err != nil {
@@ -256,8 +260,8 @@ func checkTestPollutionWithStore(ctx context.Context, store PollutionStore) Doct
 		Name:    "Test Pollution",
 		Status:  "warning",
 		Message: fmt.Sprintf("%d potential test issue(s) detected", count),
-		Detail:  "Test issues may have leaked into production database",
-		Fix:     "Run 'bd doctor --check=pollution' to review and clean test issues",
+		Detail:  "Possible test leftovers matched by a title and content heuristic; real work with a test-style title and no description can match too, and a score is a heuristic strength, not a probability",
+		Fix:     PollutionReviewHint,
 	}
 }
 

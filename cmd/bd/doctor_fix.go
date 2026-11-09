@@ -451,7 +451,7 @@ func applyFixList(path string, fixes []doctorCheck) {
 			continue
 		case "Test Pollution":
 			// No auto-fix: test cleanup requires user review
-			fmt.Printf("  ⚠ Run 'bd doctor --check=pollution' to review and clean test issues\n")
+			fmt.Printf("  ⚠ %s\n", doctor.PollutionReviewHint)
 			continue
 		case "Git Conflicts":
 			// No auto-fix: git conflicts require manual resolution

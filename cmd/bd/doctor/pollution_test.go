@@ -485,3 +485,40 @@ func TestPollutionGateSearchError(t *testing.T) {
 		t.Fatalf("check = %q %q, want warning N/A (query failed)", check.Status, check.Message)
 	}
 }
+
+// TestPollutionGuidanceIsReviewFirst pins GH#5025's wording contract for the
+// full doctor check and its agent enrichment: matches are possible leftovers
+// to review one by one, not test artifacts with a confidence, and bulk
+// --clean is never the recommended next step.
+func TestPollutionGuidanceIsReviewFirst(t *testing.T) {
+	t.Parallel()
+
+	store := &fakePollutionStore{issues: []*types.Issue{pollutionCandidate("bd-1")}}
+	check := checkTestPollutionWithStore(context.Background(), store)
+	if check.Status != StatusWarning {
+		t.Fatalf("check status = %q, want %q", check.Status, StatusWarning)
+	}
+	enriched := enrichTestPollution(check)
+
+	guidance := strings.Join([]string{check.Detail, check.Fix, enriched.explanation, enriched.expected}, "\n")
+	for _, want := range []string{"heuristic", "review", "bd show <id>", "not a probability"} {
+		if !strings.Contains(guidance, want) {
+			t.Errorf("guidance lacks %q:\n%s", want, guidance)
+		}
+	}
+	for _, banned := range []string{"--clean", "artifacts from test runs", "confidence", "leaked into production"} {
+		if strings.Contains(strings.ToLower(guidance), strings.ToLower(banned)) {
+			t.Errorf("guidance contains %q:\n%s", banned, guidance)
+		}
+	}
+	if check.Fix != PollutionReviewHint {
+		t.Errorf("check Fix = %q, want the shared PollutionReviewHint %q", check.Fix, PollutionReviewHint)
+	}
+
+	if want := []string{"bd doctor --check=pollution", "bd show <id>", "bd delete <id>"}; !slices.Equal(enriched.commands, want) {
+		t.Errorf("agent commands = %q, want %q", enriched.commands, want)
+	}
+	if want := []string{"cmd/bd/doctor/validation.go:CheckTestPollution"}; !slices.Equal(enriched.sourceFiles, want) {
+		t.Errorf("agent sourceFiles = %q, want %q", enriched.sourceFiles, want)
+	}
+}

@@ -282,3 +282,47 @@ func TestPollutionCleanupErrorsDeleteNothing(t *testing.T) {
 		})
 	}
 }
+
+// TestPollutionReportWording pins GH#5025's human report: matches are
+// grouped as stronger and possible heuristic matches, scores are not
+// presented as probabilities, the next step is reviewing each match with
+// bd show, and the report no longer invites bulk deletion with --clean.
+func TestPollutionReportWording(t *testing.T) {
+	t.Parallel()
+
+	_, confirmed := newPollutionCleanupFixture(t)
+	var stronger, possible []doctor.PollutionMatch
+	for _, m := range confirmed {
+		if m.Strong() {
+			stronger = append(stronger, m)
+		} else {
+			possible = append(possible, m)
+		}
+	}
+
+	var out bytes.Buffer
+	writePollutionReport(&out, stronger, possible)
+	report := out.String()
+
+	for _, want := range []string{
+		"Found 5 possible test leftovers",
+		"Stronger heuristic matches (score ≥ 0.9):",
+		"Possible heuristic matches (score < 0.9):",
+		`bd-4: "Test Issue 4" (score: 1.20)`,
+		`bd-1: "test-one" (score: 0.70)`,
+		"not probabilities",
+		"bd show <id>",
+	} {
+		if !strings.Contains(report, want) {
+			t.Errorf("report lacks %q:\n%s", want, report)
+		}
+	}
+	if strings.Index(report, "Stronger heuristic") > strings.Index(report, "Possible heuristic") {
+		t.Errorf("stronger group is not listed first:\n%s", report)
+	}
+	for _, banned := range []string{"--clean", "Confidence", "delete these issues"} {
+		if strings.Contains(report, banned) {
+			t.Errorf("report contains %q:\n%s", banned, report)
+		}
+	}
+}
