@@ -340,12 +340,16 @@ sh_test(
 # top-level test of the package round-robin over the 6 shards before
 # -test.run applies, so each shard runs about a sixth of the curated set.
 #
+# Its 6 shards are 6 of the dolt-race union's one-wave test actions
+# (scripts/bazel_dolt_race_test.go bazelDoltRaceTestActions; the union's
+# --jobs=70 in .bazelrc pays for them).
+#
 # Tags:
-#   manual: WAITING ON a dolt-race one-wave budget grant (+6 actions;
-#     scripts/bazel_dolt_race_test.go bazelDoltRaceTestActions is 64 =
-#     --jobs=64), so no lane selects it yet; run it by name until then:
-#     bazel test //internal/httpclient:httpclient_served_provider_test
-#     --config=remote-exec --@rules_go//go/config:race
+#   dolt-server: starts hermetic dolt sql-servers from the pinned dolt in the
+#     test wrapper's runfiles (BEADS_TEST_DOLT_SERVER=local); excluded from
+#     --config=prcore/ci, selected by --config=doltserver. Runs remotely: no
+#     docker, and a missing server fails (REQUIRE=1) instead of skipping, so
+#     a cached pass is as good as a fresh one.
 sh_test(
     name = "httpclient_served_provider_test",
     size = "large",
@@ -370,7 +374,7 @@ sh_test(
         "GOMAXPROCS": "4",
     },
     shard_count = 6,
-    tags = ["manual"],
+    tags = ["dolt-server"],
 )
 
 # Tests that pin divergence-ledger rows, resolved by

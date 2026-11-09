@@ -64,6 +64,15 @@ func TestServedProviderVariantIsWired(t *testing.T) {
 	for _, err := range checkServedProviderRule(rule) {
 		t.Error(err)
 	}
+	// The dolt-server lane runs it, and holds it to that lane's rules (a local
+	// server, REQUIRE=1, remote-executable). The tags line stays one line, or
+	// TestBazelDoltRaceFitsTheJobsBudget cannot count its shards.
+	if !strings.Contains(rule, "\n    tags = [\"dolt-server\"],\n") {
+		t.Error(`httpclient_served_provider_test is not tagged ["dolt-server"]; no lane runs it`)
+	}
+	for _, err := range checkDoltServerRules("internal/httpclient", build) {
+		t.Error(err)
+	}
 
 	// Falsification: the check must report each pinned line's absence, and an
 	// embedded switch.
