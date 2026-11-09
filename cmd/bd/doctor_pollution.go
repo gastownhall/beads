@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -36,7 +37,7 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 		return HandleError("fetching issues: %v", err)
 	}
 
-	polluted := detectTestPollution(allIssues)
+	polluted := doctor.DetectTestPollution(allIssues)
 
 	if len(polluted) == 0 {
 		if jsonOutput {
@@ -50,11 +51,11 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 	}
 
 	// Categorize by confidence
-	highConfidence := []pollutionResult{}
-	mediumConfidence := []pollutionResult{}
+	highConfidence := []doctor.PollutionMatch{}
+	mediumConfidence := []doctor.PollutionMatch{}
 
 	for _, p := range polluted {
-		if p.score >= 0.9 {
+		if p.Strong() {
 			highConfidence = append(highConfidence, p)
 		} else {
 			mediumConfidence = append(mediumConfidence, p)
@@ -71,11 +72,11 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 
 		for _, p := range polluted {
 			result["issues"] = append(result["issues"].([]map[string]interface{}), map[string]interface{}{
-				"id":         p.issue.ID,
-				"title":      p.issue.Title,
-				"score":      p.score,
-				"reasons":    p.reasons,
-				"created_at": p.issue.CreatedAt,
+				"id":         p.Issue.ID,
+				"title":      p.Issue.Title,
+				"score":      p.Score,
+				"reasons":    p.Reasons,
+				"created_at": p.Issue.CreatedAt,
 			})
 		}
 
@@ -88,8 +89,8 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 	if len(highConfidence) > 0 {
 		fmt.Printf("High Confidence (score ≥ 0.9):\n")
 		for _, p := range highConfidence {
-			fmt.Printf("  %s: %q (score: %.2f)\n", p.issue.ID, p.issue.Title, p.score)
-			for _, reason := range p.reasons {
+			fmt.Printf("  %s: %q (score: %.2f)\n", p.Issue.ID, p.Issue.Title, p.Score)
+			for _, reason := range p.Reasons {
 				fmt.Printf("    - %s\n", reason)
 			}
 		}
@@ -99,8 +100,8 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 	if len(mediumConfidence) > 0 {
 		fmt.Printf("Medium Confidence (score 0.7-0.9):\n")
 		for _, p := range mediumConfidence {
-			fmt.Printf("  %s: %q (score: %.2f)\n", p.issue.ID, p.issue.Title, p.score)
-			for _, reason := range p.reasons {
+			fmt.Printf("  %s: %q (score: %.2f)\n", p.Issue.ID, p.Issue.Title, p.Score)
+			for _, reason := range p.Reasons {
 				fmt.Printf("    - %s\n", reason)
 			}
 		}
@@ -131,8 +132,8 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 	fmt.Printf("\nDeleting %d issues...\n", len(polluted))
 	deleted := 0
 	for _, p := range polluted {
-		if err := deleteIssue(ctx, p.issue.ID); err != nil {
-			fmt.Fprintf(os.Stderr, "Error deleting %s: %v\n", p.issue.ID, err)
+		if err := deleteIssue(ctx, p.Issue.ID); err != nil {
+			fmt.Fprintf(os.Stderr, "Error deleting %s: %v\n", p.Issue.ID, err)
 			continue
 		}
 		deleted++
