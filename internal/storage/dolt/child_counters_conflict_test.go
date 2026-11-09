@@ -101,3 +101,84 @@ func TestTryAutoResolveMergeConflicts_ChildCountersBothChangedResolvesToMax(t *t
 		t.Errorf("last_child after resolve = %d, want max(73, 72) = 73", last)
 	}
 }
+
+// TestTryAutoResolveMergeConflicts_ChildCountersDeletedSideDeclines is
+// bd-28sb25 AC-9 on the server store: a counter row the peer deleted while
+// this clone advanced it is a deletion, not a zero, so the resolver declines
+// and applies nothing. The server CLI pull path keeps its existing contract:
+// the conflict stays in the active merge for the operator.
+func TestTryAutoResolveMergeConflicts_ChildCountersDeletedSideDeclines(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	t.Cleanup(cleanup)
+	ctx, cancel := testContext(t)
+	t.Cleanup(cancel)
+	db := store.db
+
+	var currentBranch string
+	if err := db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&currentBranch); err != nil {
+		t.Fatalf("get current branch: %v", err)
+	}
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx, q, args...); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	for _, p := range []string{"bd-ccdel", "bd-ccok"} {
+		exec("INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) "+
+			"VALUES (?, 'parent epic', '', '', '', '', 'open', 2, 'epic')", p)
+		exec("INSERT INTO child_counters (parent_id, last_child) VALUES (?, 70)", p)
+	}
+	exec("CALL DOLT_COMMIT('-Am', 'seed ancestor counters')")
+	exec("UPDATE child_counters SET last_child = 73 WHERE parent_id = 'bd-ccdel'")
+	exec("UPDATE child_counters SET last_child = 71 WHERE parent_id = 'bd-ccok'")
+	exec("CALL DOLT_COMMIT('-Am', 'ours: advance both counters')")
+
+	peerBranch := currentBranch + "_ccdelpeer"
+	exec("CALL DOLT_BRANCH(?, 'HEAD~1')", peerBranch)
+	t.Cleanup(func() {
+		db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", currentBranch)
+		db.ExecContext(ctx, "CALL DOLT_BRANCH('-D', ?)", peerBranch)
+	})
+	exec("CALL DOLT_CHECKOUT(?)", peerBranch)
+	exec("DELETE FROM child_counters WHERE parent_id = 'bd-ccdel'")
+	exec("UPDATE child_counters SET last_child = 75 WHERE parent_id = 'bd-ccok'")
+	exec("CALL DOLT_COMMIT('-Am', 'theirs: delete one counter, advance the other')")
+	exec("CALL DOLT_CHECKOUT(?)", currentBranch)
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, "SET @@dolt_allow_commit_conflicts = 1"); err != nil {
+		t.Fatalf("allow commit conflicts: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, "CALL DOLT_MERGE(?)", peerBranch); err != nil {
+		t.Logf("merge returned: %v", err)
+	}
+
+	resolved, err := store.tryAutoResolveMergeConflicts(ctx, tx)
+	if err != nil {
+		t.Fatalf("resolver error: %v", err)
+	}
+	if resolved {
+		t.Fatal("a child_counters conflict with a deleted side was auto-resolved; want it left for the operator")
+	}
+	var conflicts int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_conflicts_child_counters").Scan(&conflicts); err != nil {
+		t.Fatalf("read child_counters conflicts: %v", err)
+	}
+	if conflicts != 2 {
+		t.Errorf("child_counters conflicts after decline = %d, want both still awaiting the operator", conflicts)
+	}
+	var okCounter int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT last_child FROM child_counters WHERE parent_id = 'bd-ccok'").Scan(&okCounter); err != nil {
+		t.Fatalf("read counter: %v", err)
+	}
+	if okCounter != 71 {
+		t.Errorf("valid sibling counter = %d after decline, want 71 (no partial resolution)", okCounter)
+	}
+}

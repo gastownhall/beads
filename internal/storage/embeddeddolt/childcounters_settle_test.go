@@ -94,3 +94,70 @@ func TestEmbeddedMergeAndSettleChildCountersMax(t *testing.T) {
 		t.Errorf("working set has %d dirty tables after settlement, want a committed merge", dirty)
 	}
 }
+
+// TestEmbeddedMergeAndSettleChildCounterDeletionDeclines is bd-28sb25 AC-9
+// on the embedded engine: a counter row one side deleted while the other
+// advanced it is not a high-water-mark conflict (deletion is not zero), so
+// settlement declines with a MergeConflictsError naming child_counters and
+// MergeAndSettle restores the pre-merge working set: no counter resolution
+// lands, and the other parent's valid conflict is not resolved either.
+func TestEmbeddedMergeAndSettleChildCounterDeletionDeclines(t *testing.T) {
+	te := newTestEnv(t, "ccdecl")
+	ctx := t.Context()
+	conn := openSettleConn(t, ctx, te)
+	exec := func(t *testing.T, q string, args ...any) {
+		t.Helper()
+		if _, err := conn.ExecContext(ctx, q, args...); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	peer := seedCounterDivergence(t, ctx, conn, []string{"cd-a", "cd-b"},
+		func(t *testing.T) {
+			exec(t, "UPDATE child_counters SET last_child = 73 WHERE parent_id = 'cd-a'")
+			exec(t, "UPDATE child_counters SET last_child = 71 WHERE parent_id = 'cd-b'")
+		},
+		func(t *testing.T) {
+			exec(t, "DELETE FROM child_counters WHERE parent_id = 'cd-a'")
+			exec(t, "UPDATE child_counters SET last_child = 75 WHERE parent_id = 'cd-b'")
+		})
+	var headBefore string
+	if err := conn.QueryRowContext(ctx, "SELECT DOLT_HASHOF('HEAD')").Scan(&headBefore); err != nil {
+		t.Fatalf("read HEAD: %v", err)
+	}
+
+	err := versioncontrolops.MergeAndSettle(ctx, conn, peer)
+	var mce *versioncontrolops.MergeConflictsError
+	if !errors.As(err, &mce) {
+		t.Fatalf("MergeAndSettle = %v, want a MergeConflictsError", err)
+	}
+	named := false
+	for _, c := range mce.Conflicts {
+		named = named || c.Field == "child_counters"
+	}
+	if !named {
+		t.Errorf("conflicts %+v do not name child_counters", mce.Conflicts)
+	}
+	for p, want := range map[string]int{"cd-a": 73, "cd-b": 71} {
+		if got, ok := counterValue(t, ctx, conn, p); !ok || got != want {
+			t.Errorf("counter %s = %d (present %v), want the pre-merge %d", p, got, ok, want)
+		}
+	}
+	var headAfter string
+	if err := conn.QueryRowContext(ctx, "SELECT DOLT_HASHOF('HEAD')").Scan(&headAfter); err != nil {
+		t.Fatalf("read HEAD: %v", err)
+	}
+	if headAfter != headBefore {
+		t.Errorf("HEAD moved from %s to %s on a declined merge", headBefore, headAfter)
+	}
+	var merging bool
+	if err := conn.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&merging); err != nil {
+		t.Fatalf("read merge status: %v", err)
+	}
+	var dirty int
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_status").Scan(&dirty); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if merging || dirty != 0 {
+		t.Errorf("after decline: merging=%v dirty tables=%d, want the pre-merge working set restored", merging, dirty)
+	}
+}
