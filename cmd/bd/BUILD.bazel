@@ -722,6 +722,7 @@ go_test(
         "dep_add_target_test.go",
         "dep_batch_test.go",
         "dep_bulk_role_test.go",
+        "dep_cross_prefix_hierarchy_embedded_test.go",
         "dep_cycles_test.go",
         "dep_edge_reader_test.go",
         "dep_embedded_test.go",
