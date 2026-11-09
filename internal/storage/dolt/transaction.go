@@ -1239,9 +1239,11 @@ func (t *doltTransaction) RemoveDependencyWithOptions(ctx context.Context, issue
 func (t *doltTransaction) AddLabel(ctx context.Context, issueID, label, actor string) error {
 	table := "labels"
 	eventTable := "events"
+	issueTable := "issues"
 	if t.isActiveWisp(ctx, issueID) {
 		table = "wisp_labels"
 		eventTable = "wisp_events"
+		issueTable = "wisps"
 	}
 
 	if err := issueops.AddLabelInTx(ctx, t.txFor(table), table, eventTable, issueID, label, actor); err != nil {
@@ -1249,6 +1251,12 @@ func (t *doltTransaction) AddLabel(ctx context.Context, issueID, label, actor st
 	}
 	t.dirty.MarkDirty(table)
 	t.dirty.MarkDirty(eventTable)
+	// A label row that landed stamps the owning row's updated_at (GH#5442), so
+	// the owning table joins the dirty set — routed (wisps, not a hardcoded
+	// "issues"), and through markChanged so a wisp write lands in
+	// ignoredDirty rather than staging a durable table the write never
+	// touched.
+	t.markChanged(table, issueTable)
 	return nil
 }
 
@@ -1279,9 +1287,11 @@ func (t *doltTransaction) GetLabels(ctx context.Context, issueID string) ([]stri
 func (t *doltTransaction) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
 	table := "labels"
 	eventTable := "events"
+	issueTable := "issues"
 	if t.isActiveWisp(ctx, issueID) {
 		table = "wisp_labels"
 		eventTable = "wisp_events"
+		issueTable = "wisps"
 	}
 
 	if err := issueops.RemoveLabelInTx(ctx, t.txFor(table), table, eventTable, issueID, label, actor); err != nil {
@@ -1289,6 +1299,8 @@ func (t *doltTransaction) RemoveLabel(ctx context.Context, issueID, label, actor
 	}
 	t.dirty.MarkDirty(table)
 	t.dirty.MarkDirty(eventTable)
+	// The owning row's updated_at stamp (GH#5442), routed like AddLabel's.
+	t.markChanged(table, issueTable)
 	return nil
 }
 

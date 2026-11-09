@@ -7,6 +7,12 @@ import (
 
 type LabelOpts struct {
 	UseWispsTable bool
+	// PreserveUpdatedAt skips the owning row's updated_at touch a live label
+	// edit otherwise stamps (GH#5442). It is set only by create: a create
+	// persisting its own (or inherited) labels must keep the timestamp the
+	// caller supplied, not move it to the wall clock. Live add/remove/set/
+	// inherit leave it false — those are edits and advance the timestamp.
+	PreserveUpdatedAt bool
 }
 
 type LabelSQLRepository interface {

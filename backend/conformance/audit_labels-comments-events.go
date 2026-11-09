@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -293,6 +294,103 @@ func testAuditDirectWispLabelComment(t *testing.T, f Factory) {
 	}
 }
 
+// testAuditLabelMutationsAdvanceUpdatedAt pins the GH#5442 label clock: a
+// live label edit is a change to the issue, so a real add or remove advances
+// the owning row's updated_at on both planes (durable and wisp), while an
+// idempotent re-add and a removal of an absent label leave a seeded past
+// timestamp untouched. Every operation preserves RowVersion: the touch stamps
+// only updated_at and never remints row_lock, so a concurrent whole-row CAS
+// still recognizes the row.
+func testAuditLabelMutationsAdvanceUpdatedAt(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+	// Decades before any clock this runs under, so a stamp that did not move
+	// cannot pass for one that did.
+	aged := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+
+	seed := func(t *testing.T, id string, ephemeral bool, labels []string) *types.Issue {
+		t.Helper()
+		issue := &types.Issue{
+			ID: id, Title: id, Priority: 2,
+			CreatedAt: aged, UpdatedAt: aged, Labels: labels,
+		}
+		if ephemeral {
+			issue.Ephemeral = true
+		}
+		// The import path preserves the supplied updated_at (GH#5442 AC-3),
+		// so the fixture starts at the aged instant.
+		must(t, s.CreateIssuesWithFullOptions(c, []*types.Issue{withDefaults(issue)}, "seeder",
+			storage.BatchCreateOptions{SkipPrefixValidation: true}))
+		got, err := s.GetIssue(c, id)
+		if err != nil {
+			t.Fatalf("GetIssue(%s): %v", id, err)
+		}
+		return got
+	}
+	assertAged := func(t *testing.T, id string) {
+		t.Helper()
+		got, err := s.GetIssue(c, id)
+		if err != nil {
+			t.Fatalf("GetIssue(%s): %v", id, err)
+		}
+		if !got.UpdatedAt.Equal(aged) {
+			t.Errorf("%s: updated_at = %v, want the seeded %v (a no-op label edit must not touch it)",
+				id, got.UpdatedAt.UTC(), aged)
+		}
+	}
+	// assertAdvanced checks a real edit moved updated_at off the aged instant
+	// and left RowVersion exactly where the pre-edit read had it.
+	assertAdvanced := func(t *testing.T, id string, op string, before *types.Issue) {
+		t.Helper()
+		got, err := s.GetIssue(c, id)
+		if err != nil {
+			t.Fatalf("GetIssue(%s): %v", id, err)
+		}
+		if !got.UpdatedAt.After(aged) {
+			t.Errorf("%s: updated_at after %s = %v, want a stamp after %v",
+				id, op, got.UpdatedAt.UTC(), aged)
+		}
+		if got.RowVersion != before.RowVersion {
+			t.Errorf("%s: RowVersion after %s = %d, want %d (label edits never remint row_lock)",
+				id, op, got.RowVersion, before.RowVersion)
+		}
+	}
+
+	for _, plane := range []struct {
+		name      string
+		ephemeral bool
+	}{{"durable", false}, {"wisp", true}} {
+		t.Run(plane.name, func(t *testing.T) {
+			id := "lclk-" + plane.name
+
+			// Real add, then real remove, on a clean issue.
+			before := seed(t, id, plane.ephemeral, nil)
+			must(t, s.AddLabel(c, id, "live", "actor"))
+			assertAdvanced(t, id, "add label", before)
+			before, err := s.GetIssue(c, id)
+			must(t, err)
+			must(t, s.RemoveLabel(c, id, "live", "actor"))
+			assertAdvanced(t, id, "remove label", before)
+
+			// No-ops on a freshly seeded issue: the timestamp stays aged.
+			seed(t, id+"-noop", plane.ephemeral, []string{"dup"})
+			must(t, s.AddLabel(c, id+"-noop", "dup", "actor")) // idempotent re-add
+			must(t, s.RemoveLabel(c, id+"-noop", "absent", "actor"))
+			assertAged(t, id+"-noop")
+		})
+	}
+
+	// The transaction wrapper inherits the stamp from the same issueops body.
+	t.Run("transaction", func(t *testing.T) {
+		id := "lclk-tx"
+		before := seed(t, id, false, nil)
+		must(t, s.RunInTransaction(c, "test: label add in tx", func(tx storage.Transaction) error {
+			return tx.AddLabel(c, id, "txlabel", "actor")
+		}))
+		assertAdvanced(t, id, "tx add label", before)
+	})
+}
+
 // RunAudit_labels_comments_events runs the labels-comments-events audit cases.
 func RunAudit_labels_comments_events(t *testing.T, f Factory) {
 	t.Helper()
@@ -304,4 +402,5 @@ func RunAudit_labels_comments_events(t *testing.T, f Factory) {
 	t.Run("EventsLimitAndAll", func(t *testing.T) { testAuditEventsLimitAndAll(t, f) })
 	t.Run("ImportCommentSubSecond", func(t *testing.T) { testAuditImportCommentSubSecond(t, f) })
 	t.Run("DirectWispLabelComment", func(t *testing.T) { testAuditDirectWispLabelComment(t, f) })
+	t.Run("LabelMutationsAdvanceUpdatedAt", func(t *testing.T) { testAuditLabelMutationsAdvanceUpdatedAt(t, f) })
 }

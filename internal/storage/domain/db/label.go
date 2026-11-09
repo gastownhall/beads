@@ -74,6 +74,16 @@ func (r *labelSQLRepositoryImpl) Insert(ctx context.Context, issueID, label, act
 		}
 		return nil
 	}
+	// A label row that landed is a change to the issue: stamp the owning
+	// row's updated_at (GH#5442) before the event, journal and version
+	// writes, mirroring issueops.AddLabelInTx. Create opts out: a create
+	// persisting supplied or inherited labels preserves the caller's
+	// timestamp instead.
+	if !opts.PreserveUpdatedAt {
+		if err := issueops.TouchOwnerUpdatedAtInTx(ctx, r.runner, table, issueID); err != nil {
+			return err
+		}
+	}
 	if err := r.events.Record(ctx, domain.Event{
 		IssueID:  issueID,
 		Type:     types.EventLabelAdded,
@@ -125,6 +135,14 @@ func (r *labelSQLRepositoryImpl) Delete(ctx context.Context, issueID, label, act
 	}
 	if rows == 0 {
 		return nil
+	}
+	// Mirror of Insert: a label row that actually went away advances the
+	// owning row's updated_at (GH#5442) before the event/journal/version
+	// writes; an absent-label removal matched nothing and touches nothing.
+	if !opts.PreserveUpdatedAt {
+		if err := issueops.TouchOwnerUpdatedAtInTx(ctx, r.runner, table, issueID); err != nil {
+			return err
+		}
 	}
 	if err := r.events.Record(ctx, domain.Event{
 		IssueID:  issueID,

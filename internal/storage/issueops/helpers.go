@@ -88,7 +88,9 @@ var issueUpsertColumns = []string{
 // idempotent either way — the rewrite would have written identical values.
 // Tie rows are deliberately NOT short-circuited by the staleRejected
 // pre-check in InsertIssueIfNew, so their aux data (labels/comments/deps,
-// which never bump updated_at) still merges additively.
+// which a tie row does not displace — a LIVE label edit bumps updated_at,
+// GH#5442, so only a same-second tie or an equal-timestamp snapshot reaches
+// here) still merges additively.
 func issueUpsertAssignments(table string, rejectStaleUpdate bool) string {
 	assignments := make([]string, 0, len(issueUpsertColumns))
 	for _, col := range issueUpsertColumns {

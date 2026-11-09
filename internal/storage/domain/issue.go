@@ -1148,14 +1148,17 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 		}
 	}
 
+	// Create-time label persistence preserves the row's timestamps: the issue
+	// (or its import snapshot) supplied updated_at, and a live-edit touch
+	// (GH#5442) would move it to the wall clock.
 	for _, label := range params.Labels {
-		if err := u.labelRepo.Insert(ctx, issue.ID, label, actor, LabelOpts{UseWispsTable: useWisp}); err != nil {
+		if err := u.labelRepo.Insert(ctx, issue.ID, label, actor, LabelOpts{UseWispsTable: useWisp, PreserveUpdatedAt: true}); err != nil {
 			return result, fmt.Errorf("create: add label %s: %w", label, err)
 		}
 		result.PostCreateWrites = true
 	}
 	for _, label := range result.InheritedLabels {
-		if err := u.labelRepo.Insert(ctx, issue.ID, label, actor, LabelOpts{UseWispsTable: useWisp}); err != nil {
+		if err := u.labelRepo.Insert(ctx, issue.ID, label, actor, LabelOpts{UseWispsTable: useWisp, PreserveUpdatedAt: true}); err != nil {
 			return result, fmt.Errorf("create: add inherited label %s: %w", label, err)
 		}
 		result.PostCreateWrites = true

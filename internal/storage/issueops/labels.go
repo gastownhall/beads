@@ -5,9 +5,51 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// TouchOwnerUpdatedAtInTx stamps the owning row's updated_at with the Go wall
+// clock (GH#5442): a label edit is a change to the issue, and updated_at is
+// the recency column --updated-after, stale-upsert rejection and LWW merge all
+// read. labelTable is the label table the mutation wrote ("labels" or
+// "wisp_labels"); "" routes by issueID like AddLabelInTx/RemoveLabelInTx do.
+// The stamp matches a scalar update (updateIssueInTx): time.Now().UTC(),
+// written explicitly so the column's ON UPDATE CURRENT_TIMESTAMP clause has
+// nothing to add.
+//
+// row_lock is deliberately NOT rewritten: the touch changes no cell a
+// status/ownership race cares about (the freshRowLock invariant in lease.go),
+// and reminting would fail a concurrent whole-row CAS (ExpectedVersion) that
+// still vouches for this content — the same reason the is_blocked recompute
+// preserves it (TestAllIssueRowWritesStampRowLock's exemption for this
+// function).
+func TouchOwnerUpdatedAtInTx(ctx context.Context, tx DBTX, labelTable, issueID string) error {
+	return touchOwnerUpdatedAtInTx(ctx, tx, labelTable, issueID)
+}
+
+// touchOwnerUpdatedAtInTx is TouchOwnerUpdatedAtInTx's body. It exists as a
+// separate name so the row_lock guard's exemption can name exactly this
+// function, not every future caller of the exported wrapper.
+//
+//nolint:gosec // G201: issueTable is derived from WispTableRouting ("issues" or "wisps")
+func touchOwnerUpdatedAtInTx(ctx context.Context, tx DBTX, labelTable, issueID string) error {
+	if labelTable == "" {
+		isWisp := IsActiveWispInTx(ctx, tx, issueID)
+		_, labelTable, _, _ = WispTableRouting(isWisp)
+	}
+	issueTable := "issues"
+	if labelTable == "wisp_labels" {
+		issueTable = "wisps"
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(
+		`UPDATE %s SET updated_at = ? WHERE id = ?`, issueTable),
+		time.Now().UTC(), issueID); err != nil {
+		return fmt.Errorf("touch updated_at for %s: %w", issueID, err)
+	}
+	return nil
+}
 
 // GetLabelsInTx retrieves all labels for an issue within an existing transaction.
 // Automatically routes to wisp_labels if the ID is an active wisp.
@@ -168,6 +210,19 @@ func addLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 	if err != nil {
 		return fmt.Errorf("add label: rows affected: %w", err)
 	}
+	// A label row that actually landed is a change to the issue: stamp the
+	// owning row's updated_at (GH#5442) before the derived event, journal and
+	// version writes, so the journal snapshot records the post-touch row and
+	// the minted version matches it. An idempotent re-add (inserted == 0)
+	// touches nothing: the issue did not change. The stamp runs regardless of
+	// mintVersion — a patch mints once at the end but every label row it wrote
+	// is still a real change (the final stamp wins; same-second ties are a
+	// documented precision limit).
+	if inserted > 0 {
+		if err := touchOwnerUpdatedAtInTx(ctx, tx, labelTable, issueID); err != nil {
+			return err
+		}
+	}
 	comment := "Added label: " + label
 	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
 		IssueID:   issueID,
@@ -221,6 +276,15 @@ func removeLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 	deleted, err := res.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("remove label: rows affected: %w", err)
+	}
+	// Mirror of the add branch: a label row that actually went away advances
+	// the owning row's updated_at (GH#5442) before the event/journal/version
+	// writes; a removal that matched nothing (an absent label) leaves the
+	// timestamp where it was.
+	if deleted > 0 {
+		if err := touchOwnerUpdatedAtInTx(ctx, tx, labelTable, issueID); err != nil {
+			return err
+		}
 	}
 	comment := "Removed label: " + label
 	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{

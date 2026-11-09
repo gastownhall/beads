@@ -183,6 +183,16 @@ var funcNameExemptions = map[string]string{
 	// token a second time within one transaction for no content change, the
 	// same reason recordVersionAtInTx above leaves it alone.
 	"carryParticipationInTx": "writes only participation_generation on a row the same plane move just inserted with a fresh row_lock in this transaction; reminting would double-bump the token for no content change",
+
+	// touchOwnerUpdatedAtInTx (labels.go) stamps only updated_at on the
+	// owning row of a real label add/remove (GH#5442): a label edit is a
+	// recency change, not a status/ownership one, so the reclaim/close races
+	// the invariant guards are untouched. It deliberately PRESERVES row_lock:
+	// reminting would fail a concurrent whole-row CAS (ExpectedVersion) that
+	// still vouches for content this write did not touch — the same
+	// orthogonal-cell argument as the is_blocked recompute exemption, with
+	// updated_at in place of is_blocked.
+	"touchOwnerUpdatedAtInTx": "stamps only updated_at (a recency column orthogonal to the status/assignee/started_at races); preserving row_lock keeps a concurrent whole-row CAS valid, like the is_blocked recompute",
 }
 
 // TestAllIssueRowWritesStampRowLock is the load-bearing completeness guard for

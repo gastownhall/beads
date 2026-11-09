@@ -188,6 +188,7 @@ go_test(
         "journal_truncation_test.go",
         "label_list_all_benchmark_test.go",
         "label_rename_test.go",
+        "label_updated_at_test.go",
         "large_batch_apply_measure_test.go",
         "large_graph_create_bench_test.go",
         "lease_reclaimer_contract_test.go",

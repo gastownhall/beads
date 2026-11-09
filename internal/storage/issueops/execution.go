@@ -255,8 +255,12 @@ func executeUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 	}
 	if labelsChanged {
 		changedAny = true
-		_, labelTable, eventTable, _ := WispTableRouting(IsActiveWispInTx(ctx, tx, attempt.IssueID))
-		tables.Add(labelTable, eventTable)
+		// The owning issue/wisps row changed too: a real label edit stamps its
+		// updated_at (GH#5442), so the row's table belongs in the changed-tables
+		// set alongside the label and event tables, or the transaction's commit
+		// step leaves the timestamp write unstaged.
+		issueTable, labelTable, eventTable, _ := WispTableRouting(IsActiveWispInTx(ctx, tx, attempt.IssueID))
+		tables.Add(issueTable, labelTable, eventTable)
 	}
 	parentResult, err := applyParentPatch(ctx, tx, current, attempt.Patch.ParentID, attempt.Actor, false)
 	if err != nil {

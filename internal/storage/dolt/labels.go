@@ -21,7 +21,7 @@ func (s *DoltStore) AddLabel(ctx context.Context, issueID, label, actor string) 
 		if isWisp {
 			return nil
 		}
-		return s.doltAddAndCommit(ctx, []string{"events", "labels"}, fmt.Sprintf("bd: label add %s", issueID))
+		return s.doltAddAndCommit(ctx, []string{"events", "labels", "issues"}, fmt.Sprintf("bd: label add %s", issueID))
 	})
 }
 
@@ -38,7 +38,7 @@ func (s *DoltStore) RemoveLabel(ctx context.Context, issueID, label, actor strin
 		if isWisp {
 			return nil
 		}
-		return s.doltAddAndCommit(ctx, []string{"events", "labels"}, fmt.Sprintf("bd: label remove %s", issueID))
+		return s.doltAddAndCommit(ctx, []string{"events", "labels", "issues"}, fmt.Sprintf("bd: label remove %s", issueID))
 	})
 }
 
@@ -97,7 +97,7 @@ func (s *DoltStore) RenameLabel(ctx context.Context, oldLabel, newLabel, actor s
 		if renamed == 0 {
 			return nil
 		}
-		return s.doltAddAndCommit(ctx, []string{"events", "labels"},
+		return s.doltAddAndCommit(ctx, []string{"events", "labels", "issues"},
 			fmt.Sprintf("bd: label rename '%s' -> '%s' (%d issues)", oldLabel, newLabel, renamed))
 	})
 	return renamed, merged, ids, err
