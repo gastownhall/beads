@@ -32,6 +32,9 @@ const cloneSkewPhaseTimeout = 4 * time.Minute
 //   - cursor 46 pins the historical failure: 0047's recompute reads the wisp
 //     tables and only the keyed {schema_migrations,47} pre-migration repair
 //     creates them first.
+//   - cursor latest-1 runs only the newest main migration, on a clone whose
+//     wisp tables no repair has recreated yet: a cursor-46 row cannot catch a
+//     later migration that reads them, because repair 47 already built them.
 //   - The rows run serially, sharing one producer that advances through the
 //     cursors, so the chain is replayed once.
 func TestMigrateUpCloneBelowLatestWithoutWispTables(t *testing.T) {
@@ -43,6 +46,9 @@ func TestMigrateUpCloneBelowLatestWithoutWispTables(t *testing.T) {
 	t.Setenv(schema.AllowMigrateEnv, "1")
 
 	cursors := []int{46}
+	if latest := schema.LatestVersion(); latest-1 > 46 {
+		cursors = append(cursors, latest-1)
+	}
 
 	admin, err := sql.Open("mysql", doltutil.ServerDSN{
 		Host: "127.0.0.1", Port: testServerPort, User: "root", Timeout: 10 * time.Second,
