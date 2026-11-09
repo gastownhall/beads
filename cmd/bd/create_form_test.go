@@ -478,6 +478,41 @@ func TestCreateIssueFromFormValues(t *testing.T) {
 		}
 	})
 
+	// GH#5560 (bd-fom9ed): distinct targets keep their typed edges exactly,
+	// new->A blocks and new->B related, with no reversed edge: the form's
+	// blocks:<id> keeps its historical direction, unlike --deps'.
+	t.Run("TypedDependenciesOnDistinctTargets", func(t *testing.T) {
+		a := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Typed target A"})
+		b := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Typed target B"})
+		child := createFormIssueForTest(t, ctx, s, &createFormValues{
+			Title:        "Typed child on distinct targets",
+			Dependencies: []string{"blocks:" + a.ID, "related:" + b.ID},
+		})
+		recs, err := s.GetDependencyRecords(ctx, child.ID)
+		if err != nil {
+			t.Fatalf("GetDependencyRecords %s: %v", child.ID, err)
+		}
+		if len(recs) != 2 {
+			t.Fatalf("%s has %d dependencies, want 2", child.ID, len(recs))
+		}
+		got := map[string]types.DependencyType{}
+		for _, r := range recs {
+			got[r.DependsOnID] = r.Type
+		}
+		if got[a.ID] != types.DepBlocks || got[b.ID] != types.DepRelated {
+			t.Errorf("%s edges %v, want blocks on %s and related on %s", child.ID, got, a.ID, b.ID)
+		}
+		for _, rev := range []string{a.ID, b.ID} {
+			back, err := s.GetDependencyRecords(ctx, rev)
+			if err != nil {
+				t.Fatalf("GetDependencyRecords %s: %v", rev, err)
+			}
+			for _, r := range back {
+				t.Errorf("reversed edge written: %s -> %s (%s)", r.IssueID, r.DependsOnID, r.Type)
+			}
+		}
+	})
+
 	t.Run("DiscoveredFromInheritsSourceRepo", func(t *testing.T) {
 		// Create a parent issue with a custom source_repo
 		parent := &types.Issue{

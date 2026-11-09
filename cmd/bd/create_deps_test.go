@@ -193,6 +193,8 @@ func TestParseFormDeps(t *testing.T) {
 	}{
 		{name: "no entries", in: nil, want: nil},
 		{name: "blank entries are skipped", in: []string{" ", ""}, want: nil},
+		{name: "bare id blocks the new issue", in: []string{"bd-b"}, want: []domain.DependencySpec{blocksB}},
+		{name: "explicit blocks keeps the form's direction", in: []string{" blocks:bd-b "}, want: []domain.DependencySpec{blocksB}},
 		{name: "blocked-by alias", in: []string{"blocked-by:bd-b"}, want: []domain.DependencySpec{blocksB}},
 		{name: "depends-on alias", in: []string{"depends-on:bd-b"}, want: []domain.DependencySpec{blocksB}},
 		{name: "blocks and an alias are one edge", in: []string{"blocks:bd-b", "depends-on:bd-b"}, want: []domain.DependencySpec{blocksB}},
