@@ -117,6 +117,7 @@ func assertStrings(t *testing.T, got, want []string) {
 const (
 	customStatusesQuery = "SELECT name, category FROM custom_statuses ORDER BY name"
 	customTypesQuery    = "SELECT name FROM custom_types ORDER BY name"
+	configKeysInQuery   = "SELECT `key`, value FROM config WHERE `key` IN (?,?)"
 )
 
 type statusRow struct {
@@ -139,6 +140,21 @@ func expectHealthyCustomConfigLoad(mock sqlmock.Sqlmock, statuses []statusRow, c
 		typeRows.AddRow(n)
 	}
 	mock.ExpectQuery(regexp.QuoteMeta(customTypesQuery)).WillReturnRows(typeRows)
+	mock.ExpectRollback()
+}
+
+// expectUnconfiguredCustomConfigLoad queues one combined read over empty
+// normalized tables and an empty config result: a genuinely unconfigured
+// vocabulary, which is a cacheable success.
+func expectUnconfiguredCustomConfigLoad(mock sqlmock.Sqlmock) {
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(customStatusesQuery)).
+		WillReturnRows(sqlmock.NewRows([]string{"name", "category"}))
+	mock.ExpectQuery(regexp.QuoteMeta(customTypesQuery)).
+		WillReturnRows(sqlmock.NewRows([]string{"name"}))
+	mock.ExpectQuery(regexp.QuoteMeta(configKeysInQuery)).
+		WithArgs("status.custom", "types.custom").
+		WillReturnRows(sqlmock.NewRows([]string{"key", "value"}))
 	mock.ExpectRollback()
 }
 
@@ -337,5 +353,87 @@ func TestCustomConfigGettersDoNotCacheFailedResolve(t *testing.T) {
 			t.Fatalf("GetCustomStatuses after retry: %v", err)
 		}
 		assertStrings(t, names, []string{"review"})
+	})
+
+	// AC-4: a successful resolution — including a genuinely unconfigured
+	// vocabulary — is cached and served without another read.
+	t.Run("successful unconfigured vocabulary is cached and never re-read", func(t *testing.T) {
+		withCustomVocabularyYAML(t, "", "")
+		store, mock := newCustomConfigStore(t)
+		ctx := context.Background()
+
+		expectUnconfiguredCustomConfigLoad(mock)
+		names, err := store.GetCustomStatuses(ctx)
+		if err != nil {
+			t.Fatalf("GetCustomStatuses with nothing configured: %v", err)
+		}
+		if len(names) != 0 {
+			t.Fatalf("GetCustomStatuses = %v, want empty", names)
+		}
+		gotTypes, err := store.GetCustomTypes(ctx)
+		if err != nil {
+			t.Fatalf("GetCustomTypes with nothing configured: %v", err)
+		}
+		if len(gotTypes) != 0 {
+			t.Fatalf("GetCustomTypes = %v, want empty", gotTypes)
+		}
+		if statusCached, typeCached := cacheFlagsSet(t, store); !statusCached || !typeCached {
+			t.Fatalf("successful empty resolve was not cached: statuses=%v, types=%v", statusCached, typeCached)
+		}
+
+		// Served from cache: no further SQL is expected (the cleanup asserts
+		// every queued expectation was met).
+		if _, err := store.GetCustomStatusesDetailed(ctx); err != nil {
+			t.Fatalf("GetCustomStatusesDetailed from cache: %v", err)
+		}
+		if _, err := store.GetCustomTypes(ctx); err != nil {
+			t.Fatalf("GetCustomTypes from cache: %v", err)
+		}
+	})
+
+	// AC-4: invalidating one half keeps the other half's cache available, and
+	// a failed reload of the invalidated half neither degrades the healthy
+	// half nor caches its own failure.
+	t.Run("cached half survives the other half's failed reload", func(t *testing.T) {
+		withCustomVocabularyYAML(t, "", "")
+		store, mock := newCustomConfigStore(t)
+		ctx := context.Background()
+
+		expectHealthyCustomConfigLoad(mock,
+			[]statusRow{{name: "review", category: string(types.CategoryActive)}},
+			[]string{"db-type"})
+		if _, err := store.GetCustomStatuses(ctx); err != nil {
+			t.Fatalf("initial GetCustomStatuses: %v", err)
+		}
+		if _, err := store.GetCustomTypes(ctx); err != nil {
+			t.Fatalf("initial GetCustomTypes: %v", err)
+		}
+
+		// Invalidate only the type half, as SetConfig("types.custom") does.
+		store.invalidateConfigCaches("types.custom")
+
+		// The cached status half must be served without any read.
+		detailed, err := store.GetCustomStatusesDetailed(ctx)
+		if err != nil {
+			t.Fatalf("GetCustomStatusesDetailed after invalidating types: %v", err)
+		}
+		assertCustomStatuses(t, detailed, []types.CustomStatus{
+			{Name: "review", Category: types.CategoryActive},
+		})
+
+		// The type half reloads; its failure must not be cached.
+		mock.ExpectBegin().WillReturnError(cause)
+		_, err = store.GetCustomTypes(ctx)
+		requireErrIs(t, err, cause, "GetCustomTypes after invalidation with failed reload")
+
+		// A later healthy read serves fresh database vocabulary.
+		expectHealthyCustomConfigLoad(mock,
+			[]statusRow{{name: "review", category: string(types.CategoryActive)}},
+			[]string{"db-type-2"})
+		gotTypes, err := store.GetCustomTypes(ctx)
+		if err != nil {
+			t.Fatalf("GetCustomTypes after recovery: %v", err)
+		}
+		assertStrings(t, gotTypes, []string{"db-type-2"})
 	})
 }
