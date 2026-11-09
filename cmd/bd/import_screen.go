@@ -95,13 +95,13 @@ func (v uowImportVocabulary) ReadInsertVocabulary(ctx context.Context) ([]string
 //
 // The vocabulary read is LAZY: only a row carrying a status or type outside
 // the built-ins can be rejected over vocabulary, so a file of built-in records
-// never pays the read. A store without the capability leaves the rows
-// unscreened (kept, no rejects) — the writer's own validation remains the
-// backstop. A vocabulary read that ERRORS is a hard stop for the whole import:
-// screening against a guessed vocabulary would reject records the writer
-// accepts, which is worse than the bug being fixed, so the error is reported
-// with the line and id of the row that needed the vocabulary instead of
-// rejecting that row (or any other).
+// never pays the read. A store without the capability cannot screen such a
+// record — and validating against a guessed (empty) vocabulary would reject
+// records the writer accepts, which is worse than the bug being fixed — so a
+// retained custom-value row with no vocabulary reader is a hard stop, exactly
+// like a vocabulary read that ERRORS: in both cases the error is reported with
+// the line and id of the row that needed the vocabulary instead of rejecting
+// that row (or any other).
 func screenImportRows(ctx context.Context, vocab importVocabulary, issues []*types.Issue, sources map[*types.Issue]importRecordSource) ([]*types.Issue, []importReject, error) {
 	var probe *types.Issue
 	for _, issue := range issues {
@@ -114,7 +114,11 @@ func screenImportRows(ctx context.Context, vocab importVocabulary, issues []*typ
 		}
 	}
 	var statuses, customTypes []string
-	if probe != nil && vocab != nil {
+	if probe != nil {
+		if vocab == nil {
+			src := sources[probe]
+			return nil, nil, fmt.Errorf("cannot read the status/type vocabulary to validate line %d (%s): the store offers no vocabulary reader", src.Line, probe.ID)
+		}
 		var err error
 		statuses, customTypes, err = vocab.ReadInsertVocabulary(ctx)
 		if err != nil {
