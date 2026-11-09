@@ -216,3 +216,43 @@ func TestEmbeddedImportSkipInvalid(t *testing.T) {
 		}
 	})
 }
+
+func TestEmbeddedImportInvalidRegisteredVocabulary(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt import tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "imvoc")
+	bdConfig(t, bd, dir, "set", "status.custom", "verify:active")
+	bdConfig(t, bd, dir, "set", "types.custom", "spike")
+	f, err := os.OpenFile(filepath.Join(beadsDir, "config.yaml"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("\ntypes.custom: [yamlkind]\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+	writeImportLines(t, jsonlPath,
+		invalidImportLine(t, "imvoc-st", "Registered status", "verify"),
+		fmt.Sprintf(`{"id":"imvoc-db","title":"DB type","status":"open","issue_type":"spike","created_at":%q,"updated_at":%q}`, now, now),
+		fmt.Sprintf(`{"id":"imvoc-ym","title":"YAML type","status":"open","issue_type":"yamlkind","created_at":%q,"updated_at":%q}`, now, now),
+	)
+
+	stdout, stderr, err := bdImportRun(t, bd, dir, "--skip-invalid", "--json", jsonlPath)
+	if err != nil {
+		t.Fatalf("bd import --skip-invalid failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	var result importResultJSON
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("parse --json output: %v\n%s", err, stdout)
+	}
+	if result.Created != 3 || len(result.Rejected) != 0 {
+		t.Fatalf("created %d, rejected %+v; want 3 created, none rejected", result.Created, result.Rejected)
+	}
+}

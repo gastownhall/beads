@@ -43,6 +43,7 @@
 100 9 TestEmbeddedChildrenConcurrent
 
 100 10 TestEmbeddedCreateScalarAndRelationships
+100 10 TestEmbeddedImportInvalidRegisteredVocabulary
 
 100 11 TestEmbeddedKVConcurrent
 
