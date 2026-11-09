@@ -11,7 +11,13 @@
 # To park a case: copy the line the failing step prints under "add to", keep
 # the file sorted, and delete the line again when the case is unparked.
 # Regenerate: python3 tools/bazel/check_skip_census.py --write --testlogs-dir DIR
-#   (DIR: a lane's "Upload test logs" artifact from a run on rbe-west)
+#   (DIR: a lane's "Upload test logs" artifact from a run on rbe-west; the
+#   dolt-int job uploads nothing when only the census fails, so for it copy the
+#   printed "delete from"/"add to" lines). Modes cache and local only report.
+# A skip that depends on process-global state left by earlier tests is not
+# stable: rules_go shards tests round-robin by index, so any added or removed
+# test in the package changes what ran first. Fix such a test, do not list it.
+# Only these header comments survive --write.
 # Check:      python3 tools/bazel/check_skip_census.py --lint
 
 //backend/http/corpus:corpus_served_test TestServedCorpusPart1/gc-blocked-flags other

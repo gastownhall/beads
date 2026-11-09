@@ -5,6 +5,8 @@ Run directly: python3 tools/bazel/check_skip_census_test.py
 (scripts' TestCheckSkipCensusUnitTests runs it under //scripts:scripts_test).
 """
 
+import contextlib
+import io
 import os
 import sys
 import tempfile
@@ -145,6 +147,17 @@ class JudgeTest(unittest.TestCase):
         problems, _ = run.judge(run.census(f"{SERVED} TestServedA KNOWN DIVERGENCE W-A"))
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("TestServedA ran and passed", problems[0])
+
+    def test_a_listed_test_that_fails_is_only_a_note(self):
+        # The failure already fails the lane; telling the author to delete the
+        # park line would make the next (passing-flake) run fail as unlisted.
+        run = Run(self)
+        run.xml(SERVED, [("TestServedA", "failed", "")])
+        problems, notes = run.judge(run.census(f"{SERVED} TestServedA KNOWN DIVERGENCE W-A"))
+        self.assertEqual(problems, [])
+        self.assertTrue(any("TestServedA failed instead of skipping" in n for n in notes), notes)
+        out, _, _ = csc.census_problems(run.tested, run.root, run.census(f"{SERVED} TestServedA KNOWN DIVERGENCE W-A"))
+        self.assertFalse(any("delete from" in line for line in out), out)
 
     def test_a_changed_row_is_one_problem(self):
         run = Run(self)
@@ -293,6 +306,35 @@ class WriteTest(unittest.TestCase):
             f"{UOW} TestContract/Case nil-hook Hook",
             "//other:t TestKept other",
         ])
+
+
+    def test_write_replaces_a_changed_class_in_an_incomplete_target(self):
+        run = Run(self)
+        run.xml(UOW, [("TestContract", "failed", ""), ("TestOther", "skipped", "KNOWN DIVERGENCE W-New (b): r")])
+        path = run.census(f"{UOW} TestContract/Case nil-hook Hook", f"{UOW} TestOther KNOWN DIVERGENCE W-Old")
+        header, entries, _ = csc.read_census(path)
+        obs = csc.observe({UOW: [os.path.join(run.root, UOW[2:].replace(":", "/"), "test.xml")]})
+        self.assertIn(UOW, obs.incomplete)
+        csc.write_census(path, header, entries, obs)
+        _, entries, errors = csc.read_census(path)
+        self.assertEqual(errors, [])
+        self.assertEqual([e["text"] for e in entries], [
+            f"{UOW} TestContract/Case nil-hook Hook",
+            f"{UOW} TestOther KNOWN DIVERGENCE W-New",
+        ])
+
+
+class MainTest(unittest.TestCase):
+    def test_a_missing_census_file_fails_except_under_write(self):
+        with tempfile.TemporaryDirectory() as d, \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            missing = os.path.join(d, "typo.txt")
+            self.assertEqual(csc.main(["--lint", "--census", missing]), 1)
+            run = Run(self)
+            run.xml(SERVED, [("TestServedA", "passed", "")])
+            self.assertEqual(csc.main(["--census", missing, "--testlogs-dir", run.root]), 1)
+            self.assertEqual(csc.main(["--write", "--census", missing, "--testlogs-dir", run.root]), 0)
+            self.assertTrue(os.path.exists(missing))
 
 
 class ScanTestlogsDirTest(unittest.TestCase):

@@ -618,7 +618,15 @@ case with `skipKnownDivergence` (a ledger row) or
 failing step prints, and delete the line when you unpark the case.
 `python3 tools/bazel/check_skip_census.py --write --testlogs-dir DIR`
 regenerates the lines of the targets in a lane's "Upload test logs" artifact,
-and `--lint` checks the file.
+and `--lint` checks the file. The dolt-int job uploads no test logs when only
+the census fails (its check steps are continue-on-error), so for that lane
+copy the "delete from"/"add to" lines the step prints instead. Runs that
+execute on the runner (rbe modes cache and local) only report census
+differences; they never fail on them. A skip must not depend on process-global
+state left by earlier tests in the same binary: rules_go assigns tests to
+shards round-robin by index, so adding any test elsewhere in the package
+reshuffles which tests run before it, and such a skip comes and goes on
+unrelated PRs. Make the test set up the state it needs instead.
 
 Before opening a PR:
 

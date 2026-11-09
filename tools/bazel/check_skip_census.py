@@ -17,7 +17,7 @@ skip message, and compares that with tools/bazel/skip_census.txt:
 
 - a skip the census does not list is a failure (add the printed line if the
   skip is intended);
-- a census line whose test ran and did not skip, or no longer ran at all in a
+- a census line whose test ran and passed, or no longer ran at all in a
   target whose every test.xml is present and failure-free, is a failure:
   the census only shrinks, so unparking a case means deleting its line.
 
@@ -50,7 +50,8 @@ runs pass --skip-census-report-only.
 --write regenerates the census from the given test.xml files: the lines of
 every label they cover completely are replaced by what they skipped, other
 lines are kept (a label with a missing test.xml or a failed test keeps its
-old lines plus its new skips). Feed it runs that executed on rbe-west only
+old lines plus its new skips; a new skip replaces its test's old line). Only
+the header comments (those before the first line) survive --write. Feed it runs that executed on rbe-west only
 (modes remote, fork-ro, fork-rw). --testlogs-dir reads a bazel-testlogs tree
 without a BEP, such as a lane's "Upload test logs" artifact; it lists a
 missing shard (so its target counts as incomplete) but cannot see a missing
@@ -371,6 +372,11 @@ def judge(obs, entries):
                 notes.append(f"census line {e['line']} ({e['text']}) matched no skip, but {obs.incomplete[label]}")
                 continue
             problems.append(f"census line {e['line']} ({e['text']}): no test of {label} skips that way any more")
+        elif obs.status.get((label, test)) == "failed":
+            # The lane is already red on the failure; a flaky park must keep
+            # its line, so this is not a census problem and not a delete.
+            notes.append(f"census line {e['line']} ({e['text']}): {test} failed instead of skipping")
+            continue
         elif (label, test) in obs.status:
             problems.append(f"census line {e['line']} ({e['text']}): {test} ran and {obs.status[(label, test)]} "
                             f"(the census only shrinks: delete the line when a case is unparked)")
@@ -418,7 +424,12 @@ def action_lines(census_path, add, delete):
 
 def write_census(path, header, entries, obs):
     """Rewrite path (see --write in the module docstring); return the line count."""
-    lines = {e["text"] for e in entries if e["label"] not in obs.labels or e["label"] in obs.incomplete}
+    # An incomplete label keeps its old lines, except one whose test this run
+    # saw skip: the new observation replaces it (else --write would leave two
+    # lines for one test, which --lint rejects).
+    lines = {e["text"] for e in entries
+             if e["label"] not in obs.labels
+             or (e["label"] in obs.incomplete and (e["label"], e["test"]) not in obs.skips)}
     for (label, test), (cls, _) in obs.skips.items():
         lines.add(census_line(label, test, cls))
     body = sorted(lines, key=line_key)
@@ -446,7 +457,13 @@ def main(argv=None):
     ap.add_argument("--root", default=REPO_ROOT, help="with --lint: the workspace root (default: this checkout)")
     args = ap.parse_args(argv)
 
-    header, entries, errors = read_census(args.census) if os.path.exists(args.census) else ([], [], [])
+    if os.path.exists(args.census):
+        header, entries, errors = read_census(args.census)
+    elif args.write:
+        header, entries, errors = [], [], []
+    else:
+        print(f"FAIL: {args.census}: no such census file", file=sys.stderr)
+        return 1
     if args.lint:
         errors += lint_labels(entries, args.root)
         for e in errors:

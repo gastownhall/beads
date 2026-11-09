@@ -77,6 +77,11 @@ func TestSkipCensusRunsInEveryDoltTierLane(t *testing.T) {
 			if s.If != "${{ always() && steps.test.outcome != 'skipped' }}" {
 				t.Errorf("%s step %q if = %q", name, s.Name, s.If)
 			}
+			// Report-only may only ever come from the env-gated expansion: a
+			// literal flag would quietly turn a gating lane into a reporter.
+			if lit, gated := strings.Count(s.Run, "--skip-census-report-only"), strings.Count(s.Run, bazelSkipCensusReportArg); lit != gated {
+				t.Errorf("%s step %q passes --skip-census-report-only %d times but only %d through %s:\n%s", name, s.Name, lit, gated, bazelSkipCensusReportArg, s.Run)
+			}
 			if got := strings.Contains(s.Run, bazelSkipCensusReportArg); got != local {
 				t.Errorf("%s step %q: report-only switch = %v, want %v (the job executes on the runner in some mode: %v)", name, s.Name, got, local, local)
 			}
