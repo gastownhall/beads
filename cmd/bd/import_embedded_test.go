@@ -747,7 +747,11 @@ func TestEmbeddedImportSkipInvalid(t *testing.T) {
 
 	t.Run("crlf_and_whitespace", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "imcrlf")
-		now := time.Now().UTC()
+		// Whole seconds: the file carries the same row twice, and Dolt's
+		// DATETIME(0) rounds a ≥.5 fraction up — the duplicate would then
+		// read as stale against its own first copy and the result assembly
+		// would drop both rows of the shared id.
+		now := time.Now().UTC().Truncate(time.Second)
 		valid, _ := json.Marshal(types.Issue{ID: "imcrlf-aaa", Title: "Valid A", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now})
 		invalid, _ := json.Marshal(types.Issue{ID: "imcrlf-bad", Title: "Invalid", Status: types.Status("verify"), IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now})
 		// CRLF terminators, a blank line, and a leading-whitespace line: line
