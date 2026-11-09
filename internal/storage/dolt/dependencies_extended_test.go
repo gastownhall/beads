@@ -1,11 +1,14 @@
 package dolt
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -882,6 +885,101 @@ func TestAddDependency_CrossPrefix_SkipsTargetExistence(t *testing.T) {
 	if !found {
 		t.Error("cross-prefix dependency was not stored")
 	}
+}
+
+// assertDepTargetColumns asserts which typed target column the single edge
+// source -> target occupies in table, and that it occupies exactly one.
+func assertDepTargetColumns(ctx context.Context, t *testing.T, db *sql.DB, table, source, target, wantColumn string) {
+	t.Helper()
+	var issueTgt, wispTgt, externalTgt sql.NullString
+	err := db.QueryRowContext(ctx,
+		"SELECT depends_on_issue_id, depends_on_wisp_id, depends_on_external FROM "+table+
+			" WHERE issue_id = ? AND (depends_on_issue_id = ? OR depends_on_wisp_id = ? OR depends_on_external = ?)",
+		source, target, target, target).Scan(&issueTgt, &wispTgt, &externalTgt)
+	if err != nil {
+		t.Fatalf("read %s edge %s -> %s: %v", table, source, target, err)
+	}
+	got := map[string]sql.NullString{
+		"depends_on_issue_id": issueTgt,
+		"depends_on_wisp_id":  wispTgt,
+		"depends_on_external": externalTgt,
+	}
+	for column, value := range got {
+		wantSet := column == wantColumn
+		if value.Valid != wantSet || (wantSet && value.String != target) {
+			t.Errorf("%s.%s for edge %s -> %s = %+v, want %s", table, column, source, target, value, map[bool]string{true: target, false: "NULL"}[wantSet])
+		}
+	}
+}
+
+// TestTransaction_CrossPrefixTargetCreatedInSameTx pins the server-mode half
+// of GH#8299: one logical transaction runs on two SQL sessions (regular and
+// dolt-ignored), so a cross-prefix target created earlier in that transaction
+// is visible only on its owning session. Classification must read the wisp
+// probe on the ignored session and the issue probe on the regular one, or a
+// same-transaction target is mistaken for absent and the edge files external.
+// All four tier pairings are covered; the wisp-source edge targeting a
+// regular issue additionally exercises the cross-tier precheck, which must
+// read the target on the regular session, not the write session.
+func TestTransaction_CrossPrefixTargetCreatedInSameTx(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Foreign-prefix ids are valid input in this database (allowed_prefixes),
+	// which is the shape of GH#8299.
+	if err := store.SetConfig(ctx, "allowed_prefixes", "xp"); err != nil {
+		t.Fatalf("set allowed_prefixes: %v", err)
+	}
+	for _, source := range []*types.Issue{
+		{ID: "test-cpx-src", Title: "issue source", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "test-cpx-wsrc", Title: "wisp source", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true},
+	} {
+		if err := store.CreateIssue(ctx, source, "tester"); err != nil {
+			t.Fatalf("create source %s: %v", source.ID, err)
+		}
+	}
+
+	err := store.RunInTransaction(ctx, "test: cross-prefix targets created in same tx", func(tx storage.Transaction) error {
+		// Targets on both tiers, created inside this logical transaction and
+		// named by edges added later in it.
+		for _, target := range []*types.Issue{
+			{ID: "xp-cpx-i1", Title: "issue target a", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+			{ID: "xp-cpx-i2", Title: "issue target b", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+			{ID: "xp-cpx-w1", Title: "wisp target a", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true},
+			{ID: "xp-cpx-w2", Title: "wisp target b", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true},
+		} {
+			if err := tx.CreateIssue(ctx, target, "tester"); err != nil {
+				return fmt.Errorf("create target %s: %w", target.ID, err)
+			}
+		}
+		edges := []struct {
+			source, target string
+		}{
+			{"test-cpx-src", "xp-cpx-i1"},  // issue -> regular target
+			{"test-cpx-src", "xp-cpx-w1"},  // issue -> wisp target
+			{"test-cpx-wsrc", "xp-cpx-i2"}, // wisp -> regular target (cross-tier precheck)
+			{"test-cpx-wsrc", "xp-cpx-w2"}, // wisp -> wisp target
+		}
+		for _, edge := range edges {
+			if err := tx.AddDependency(ctx, &types.Dependency{
+				IssueID: edge.source, DependsOnID: edge.target, Type: types.DepBlocks,
+			}, "tester"); err != nil {
+				return fmt.Errorf("add dependency %s -> %s: %w", edge.source, edge.target, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("RunInTransaction: %v", err)
+	}
+
+	assertDepTargetColumns(ctx, t, store.db, "dependencies", "test-cpx-src", "xp-cpx-i1", "depends_on_issue_id")
+	assertDepTargetColumns(ctx, t, store.db, "dependencies", "test-cpx-src", "xp-cpx-w1", "depends_on_wisp_id")
+	assertDepTargetColumns(ctx, t, store.db, "wisp_dependencies", "test-cpx-wsrc", "xp-cpx-i2", "depends_on_issue_id")
+	assertDepTargetColumns(ctx, t, store.db, "wisp_dependencies", "test-cpx-wsrc", "xp-cpx-w2", "depends_on_wisp_id")
 }
 
 func TestAddDependency_SamePrefix_RequiresTargetExistence(t *testing.T) {
