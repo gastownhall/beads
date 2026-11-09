@@ -116,6 +116,26 @@ func (s *EmbeddedDoltStore) GetInfraTypes(ctx context.Context) map[string]bool {
 	return result
 }
 
+// ReadInsertVocabulary reads the status and issue-type vocabularies the batch
+// writer validates inserts against (NewBatchContext → GetCustomStatusesTx +
+// ResolveCustomTypesInTx), through the same read transaction and the SAME
+// resolvers. It is the authoritative seam the import pre-screen needs
+// (GH#4492): a cached or error-swallowing vocabulary read would reject records
+// the writer accepts or wave through ones it refuses, so the screen must not
+// use one. Errors are returned, not fallen back from.
+func (s *EmbeddedDoltStore) ReadInsertVocabulary(ctx context.Context) (statuses, customTypes []string, err error) {
+	err = s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		statuses, err = issueops.GetCustomStatusesTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		customTypes, err = issueops.ResolveCustomTypesInTx(ctx, tx)
+		return err
+	})
+	return statuses, customTypes, err
+}
+
 // IsInfraTypeCtx returns true if the issue type is an infrastructure type.
 func (s *EmbeddedDoltStore) IsInfraTypeCtx(ctx context.Context, t types.IssueType) bool {
 	return s.GetInfraTypes(ctx)[string(t)]

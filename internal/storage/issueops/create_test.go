@@ -6,9 +6,11 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/steveyegge/beads/internal/storage"
@@ -952,5 +954,57 @@ func expectDepBatchReads(mock sqlmock.Sqlmock, issueTargets, ids []driver.Value,
 				WithArgs(ids...).
 				WillReturnRows(sqlmock.NewRows([]string{"issue_id", "target", "type"}))
 		}
+	}
+}
+
+// TestValidateIssueForInsertMatchesPrepare pins the import screen's contract
+// (#4492): ValidateIssueForInsert accepts and refuses exactly what
+// PrepareIssueForInsert, the writer's own check, accepts and refuses under the
+// same vocabulary, with the same message, and leaves the row untouched (the
+// writer's normalization runs on a copy).
+func TestValidateIssueForInsertMatchesPrepare(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.FixedZone("x", 3600))
+	closed := types.Issue{ID: "v-closed", Title: "Closed", Status: types.StatusClosed, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now}
+	cases := []struct {
+		name     string
+		issue    types.Issue
+		statuses []string
+		types    []string
+		wantErr  string
+	}{
+		{name: "valid", issue: types.Issue{ID: "v-ok", Title: "Ok", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now}},
+		{name: "unknown status", issue: types.Issue{ID: "v-bad", Title: "Bad", Status: types.Status("verify"), IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now}, wantErr: "validation failed for issue v-bad: invalid status: verify"},
+		{name: "registered status", issue: types.Issue{ID: "v-st", Title: "St", Status: types.Status("verify"), IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now}, statuses: []string{"verify"}},
+		// The writer refuses a type that is neither built in nor registered
+		// (types.ValidateWithCustom); the screen refuses it with the same text.
+		{name: "unregistered type", issue: types.Issue{ID: "v-ty", Title: "Ty", Status: types.StatusOpen, IssueType: types.IssueType("not-a-type"), CreatedAt: now, UpdatedAt: now}, wantErr: "validation failed for issue v-ty: invalid issue type: not-a-type"},
+		{name: "priority out of range", issue: types.Issue{ID: "v-pr", Title: "Pr", Status: types.StatusOpen, Priority: 9, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now}, wantErr: "validation failed for issue v-pr:"},
+		{name: "registered type", issue: types.Issue{ID: "v-ty2", Title: "Ty", Status: types.StatusOpen, IssueType: types.IssueType("quest"), CreatedAt: now, UpdatedAt: now}, types: []string{"quest"}},
+		{name: "missing title", issue: types.Issue{ID: "v-nt", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now}, wantErr: "validation failed for issue v-nt: title is required"},
+		// Valid only after the writer's closed_at fill: the screen must apply it.
+		{name: "closed without closed_at", issue: closed},
+		// Valid only after the writer's timestamp defaults.
+		{name: "zero timestamps", issue: types.Issue{ID: "v-zero", Title: "Zero", Status: types.StatusOpen, IssueType: types.TypeTask}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			screened := tc.issue
+			before := screened
+			screenErr := ValidateIssueForInsert(&screened, tc.statuses, tc.types)
+			if !reflect.DeepEqual(screened, before) {
+				t.Fatalf("ValidateIssueForInsert modified the row:\nbefore %+v\nafter  %+v", before, screened)
+			}
+			written := tc.issue
+			writeErr := PrepareIssueForInsert(&written, tc.statuses, tc.types)
+			if fmt.Sprint(screenErr) != fmt.Sprint(writeErr) {
+				t.Fatalf("screen and writer disagree: ValidateIssueForInsert = %v, PrepareIssueForInsert = %v", screenErr, writeErr)
+			}
+			switch {
+			case tc.wantErr == "" && screenErr != nil:
+				t.Fatalf("ValidateIssueForInsert = %v, want nil", screenErr)
+			case tc.wantErr != "" && (screenErr == nil || !strings.Contains(screenErr.Error(), tc.wantErr)):
+				t.Fatalf("ValidateIssueForInsert = %v, want an error containing %q", screenErr, tc.wantErr)
+			}
+		})
 	}
 }

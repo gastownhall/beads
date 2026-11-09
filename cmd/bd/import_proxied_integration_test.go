@@ -557,4 +557,37 @@ func TestProxiedServerImport(t *testing.T) {
 			t.Errorf("title after upsert = %q, want the imported rewrite", got)
 		}
 	})
+
+	// From @maphew's PR #5202: the proxied route must screen as well. A
+	// `"status":"verify"` record used to reach the server-side batch writer
+	// and abort the whole unit of work, with no line number. Strict mode
+	// fails up front naming the record's source line and imports nothing.
+	t.Run("skip_invalid_partitions_validation_rejects", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "impv")
+		db := openProxiedDB(t, p)
+
+		badLine := `{"id":"impv-bad","title":"Bogus status","issue_type":"task","status":"verify","priority":2}`
+		fixture := importFixtureJSONL(t, fixtureIssues("impv"), badLine)
+		path := filepath.Join(p.dir, "invalid.jsonl")
+		if err := os.WriteFile(path, []byte(fixture), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+
+		// Default (strict): fail before the batch, naming the source line
+		// (header line 1 + three fixture rows = line 5), importing nothing.
+		_, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "import", path)
+		if err == nil {
+			t.Fatal("strict import with an invalid record: want failure, got success")
+		}
+		if !strings.Contains(stderr, "line 5") {
+			t.Errorf("strict failure stderr = %q, want it to name line 5", stderr)
+		}
+		if !strings.Contains(stderr, "--skip-invalid") {
+			t.Errorf("strict failure stderr = %q, want it to advertise --skip-invalid", stderr)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM issues WHERE id LIKE 'impv-%'"); got != 0 {
+			t.Errorf("issue rows after strict failure = %d, want 0", got)
+		}
+	})
 }

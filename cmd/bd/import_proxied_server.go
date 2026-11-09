@@ -44,7 +44,8 @@ func proxiedImporter() (publicops.Importer, error) {
 //     its own read (reporting StaleSkippedIDs and keeping stale rows' aux data
 //     out of the batch), and RejectStaleUpserts re-checks updated_at inside
 //     the write transaction, closing the same race the classic path closes.
-func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memories []memoryRecord, source string) error {
+func runImportRecordsProxied(ctx context.Context, recs *importRecords, source string) error {
+	issues, memories := recs.issues, recs.memories
 	if uowProvider == nil {
 		return fmt.Errorf("proxied-server UOW provider not initialized")
 	}
@@ -77,13 +78,26 @@ func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memorie
 		result.Memories = len(memories)
 		result.Skipped = dedupHits
 
+		plan, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (importPlan, error) {
+			return planImportIssues(ctx, uw.IssueUseCase(), issues, ImportOptions{AllowStale: importAllowStale})
+		})
+		if err != nil {
+			return fmt.Errorf("dry-run: %w", err)
+		}
+		// Outside any RunTxRead: the vocabulary read opens its own.
+		_, rejected, _, err := screenImportWriteSet(ctx, plan.issues, recs.sources, proxiedImportVocabulary, true)
+		if err != nil {
+			return err
+		}
+		classifyInput := withoutRejectedRows(issues, rejected)
 		classification, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (*ImportResult, error) {
-			return classifyDryRunImport(ctx, uw.IssueUseCase(), issues, importAllowStale)
+			return classifyDryRunImport(ctx, uw.IssueUseCase(), classifyInput, importAllowStale)
 		})
 		if err != nil {
 			return fmt.Errorf("dry-run: %w", err)
 		}
 		applyImportDryRunClassification(&result, classification)
+		applyImportRejections(&result, rejected, "")
 		return renderImportDryRun(result, len(memories), source, dedupHits)
 	}
 
@@ -113,6 +127,18 @@ func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memorie
 		staleSkippedIDs = out.skipped
 		changePlan = out.plan
 	}
+
+	// Screen the write set before the batch, as the classic path does: a
+	// strict refusal or a --rejects file that cannot be written leaves the
+	// database untouched. Outside any RunTxRead: the vocabulary read opens
+	// its own.
+	kept, rejected, rejectsFile, err := screenImportWriteSet(ctx, issues, recs.sources, proxiedImportVocabulary, false)
+	if err != nil {
+		return err
+	}
+	issues = kept
+	excludeRejectedFromChangePlan(&changePlan, kept, rejected)
+	applyImportRejections(&result, rejected, rejectsFile)
 
 	memoryEntries := make([]publicops.ImportMemory, 0, len(memories))
 	for _, mem := range memories {

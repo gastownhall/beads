@@ -110,12 +110,13 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 	}
 
 	// Parse the JSONL file without touching the store.
-	issues, configEntries, err := parseJSONLFile(jsonlPath)
+	recs, configEntries, err := parseJSONLFile(jsonlPath)
 	if err != nil {
 		writeAutoImportStamp(beadsDir, info)
 		fmt.Fprintf(os.Stderr, "warning: auto-import: failed to parse %s: %v\n", jsonlPath, err)
 		return
 	}
+	issues := recs.issues
 	if len(issues) == 0 {
 		return // nothing to import
 	}

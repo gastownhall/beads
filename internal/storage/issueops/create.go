@@ -49,6 +49,17 @@ type BatchContext struct {
 	cache *createBatchCache
 }
 
+// InsertVocabularyReader is the optional store capability that reads the
+// custom statuses and types an insert validates against, through the same
+// resolvers NewBatchContext uses (GetCustomStatusesTx and
+// ResolveCustomTypesInTx), and returns a resolver error instead of falling
+// back. An importer screening rows before it writes them needs that:
+// validating against a guessed vocabulary would reject rows the writer
+// accepts.
+type InsertVocabularyReader interface {
+	ReadInsertVocabulary(ctx context.Context) (customStatuses, customTypes []string, err error)
+}
+
 // NewBatchContext reads config from the database and returns a BatchContext.
 func NewBatchContext(ctx context.Context, tx DBTX, opts storage.BatchCreateOptions) (*BatchContext, error) {
 	customStatuses, err := GetCustomStatusesTx(ctx, tx)
@@ -767,10 +778,52 @@ func createBlockedRecomputeIDs(ctx context.Context, tx DBTX, issues []*types.Iss
 
 // PrepareIssueForInsert normalizes timestamps, validates, and computes the content hash.
 func PrepareIssueForInsert(issue *types.Issue, customStatuses, customTypes []string) error {
-	if err := ValidateMetadataIfConfigured(issue.Metadata); err != nil {
+	if err := validateMetadataIfConfigured(issue.Metadata, true); err != nil {
 		return fmt.Errorf("metadata validation failed for issue %s: %w", issue.ID, err)
 	}
+	normalizeIssueForInsert(issue)
+	if err := issue.ValidateWithCustom(customStatuses, customTypes); err != nil {
+		return fmt.Errorf("validation failed for issue %s: %w", issue.ID, err)
+	}
+	if issue.ContentHash == "" {
+		issue.ContentHash = issue.ComputeContentHash()
+	}
+	// arrival_seq is assigned by storage alone, at the journal's create seam
+	// (stampArrivalSeqInTx). A value carried in from a caller, an import, or a
+	// row being moved between planes is never stored, and the struct must not
+	// claim one the row does not have; the create record hands the row's own
+	// stamp back (RecordCreateEventInTx).
+	issue.ArrivalSeq = 0
+	return nil
+}
 
+// ValidateIssueForInsert returns the error PrepareIssueForInsert would return
+// for issue under the same vocabulary, without changing issue: the timestamp
+// defaults, UTC normalization and closed_at fill the writer applies before it
+// validates run on a shallow copy (the normalizer replaces pointers rather
+// than writing through them, so the caller's timestamps stay as they were).
+// The content hash and arrival_seq are the writer's alone. Warn-mode metadata
+// schema findings are not printed here; the writer prints them once.
+//
+// It lets an importer screen rows before it writes any of them and report a
+// rejection with its source line, while the writer stays the backstop.
+func ValidateIssueForInsert(issue *types.Issue, customStatuses, customTypes []string) error {
+	if err := validateMetadataIfConfigured(issue.Metadata, false); err != nil {
+		return fmt.Errorf("metadata validation failed for issue %s: %w", issue.ID, err)
+	}
+	normalized := *issue
+	normalizeIssueForInsert(&normalized)
+	if err := normalized.ValidateWithCustom(customStatuses, customTypes); err != nil {
+		return fmt.Errorf("validation failed for issue %s: %w", issue.ID, err)
+	}
+	return nil
+}
+
+// normalizeIssueForInsert applies the timestamp rules every insert validates
+// against: created_at/updated_at default to now and are stored in UTC, the
+// optional timestamps are normalized to UTC, and a closed issue without a
+// closed_at gets one just after its last timestamp.
+func normalizeIssueForInsert(issue *types.Issue) {
 	// Normalize timestamps to UTC, defaulting to now.
 	now := time.Now().UTC()
 	if issue.CreatedAt.IsZero() {
@@ -797,20 +850,6 @@ func PrepareIssueForInsert(issue *types.Issue, customStatuses, customTypes []str
 		closedAt := maxTime.Add(time.Second)
 		issue.ClosedAt = &closedAt
 	}
-
-	if err := issue.ValidateWithCustom(customStatuses, customTypes); err != nil {
-		return fmt.Errorf("validation failed for issue %s: %w", issue.ID, err)
-	}
-	if issue.ContentHash == "" {
-		issue.ContentHash = issue.ComputeContentHash()
-	}
-	// arrival_seq is assigned by storage alone, at the journal's create seam
-	// (stampArrivalSeqInTx). A value carried in from a caller, an import, or a
-	// row being moved between planes is never stored, and the struct must not
-	// claim one the row does not have; the create record hands the row's own
-	// stamp back (RecordCreateEventInTx).
-	issue.ArrivalSeq = 0
-	return nil
 }
 
 // ValidateIssueIDPrefix validates that the issue ID matches the configured prefix
