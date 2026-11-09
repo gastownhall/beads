@@ -62,16 +62,24 @@ func TestDetectTestPollution_SkipsClosedAndEpics(t *testing.T) {
 		{ID: "bd-e1", Title: "Test issue", Status: types.StatusOpen, IssueType: types.TypeEpic},
 		{ID: "bd-e2", Title: "test-fixture data", Status: types.StatusClosed, ClosedAt: &closedAt, IssueType: types.TypeEpic},
 		{ID: "bd-o1", Title: "Test issue", Status: types.StatusOpen, IssueType: types.TypeTask},
+		// From PR #5137: the same fixture closed, as an epic, and open.
+		{ID: "bd-1", Title: "test issue fixture", Status: types.StatusClosed, IssueType: types.TypeTask},
+		{ID: "bd-2", Title: "test issue fixture", Status: types.StatusOpen, IssueType: types.TypeEpic},
+		{ID: "bd-3", Title: "test issue fixture", Status: types.StatusOpen, IssueType: types.TypeTask},
+		// From PR #5137: the GH#5025 epic, open with a real description.
+		{ID: "dcr-9f3", Title: "Test-quality architecture", Description: "Epic-scoped plan for improving component test suite quality across the monorepo.", Status: types.StatusOpen, IssueType: types.TypeEpic},
 	}
 
 	got := pollutedIDs(issues)
-	for _, id := range []string{"bd-c1", "bd-c2", "bd-e1", "bd-e2"} {
+	for _, id := range []string{"bd-c1", "bd-c2", "bd-e1", "bd-e2", "bd-1", "bd-2", "dcr-9f3"} {
 		if p, ok := got[id]; ok {
 			t.Errorf("%s (%q) reported as pollution (score %.2f, reasons %v); closed issues and epics are never candidates", id, p.issue.Title, p.score, p.reasons)
 		}
 	}
-	if _, ok := got["bd-o1"]; !ok {
-		t.Errorf("open task %q not reported; eligibility must not hide open non-epic fixtures", "Test issue")
+	for _, id := range []string{"bd-o1", "bd-3"} {
+		if _, ok := got[id]; !ok {
+			t.Errorf("open task %s not reported; eligibility must not hide open non-epic fixtures", id)
+		}
 	}
 }
 
@@ -133,6 +141,8 @@ func TestDetectTestPollution_AuthoredContentVetoes(t *testing.T) {
 		task("bd-design", func(i *types.Issue) { i.Design = "Use a bounded retry" }),
 		task("bd-accept", func(i *types.Issue) { i.AcceptanceCriteria = "Sync completes" }),
 		task("bd-notes", func(i *types.Issue) { i.Notes = "seen on CI" }),
+		// From PR #5137: a real infra bug with a test-prefixed title.
+		{ID: "dcr-lzse", Title: "test-driver.sh isolation broken — constants.sh clobbers env", Description: "Long description of a real test-harness bug with repro and expected behavior.", Status: types.StatusOpen, IssueType: types.TypeBug},
 	}
 	reported := []*types.Issue{
 		task("bd-desc19pad", func(i *types.Issue) { i.Description = "   " + desc19 + "   " }),
@@ -182,6 +192,22 @@ func TestDetectTestPollution_IDAndCreationTimeAreNotEvidence(t *testing.T) {
 		t.Errorf("batch: %s reported (score %.2f, reasons %v); same-minute creation is not evidence", id, p.score, p.reasons)
 	}
 
+	// From PR #5137: a same-minute import of test-prefixed real work.
+	var imported []*types.Issue
+	for i := 0; i < 12; i++ {
+		imported = append(imported, &types.Issue{
+			ID:          fmt.Sprintf("imp-%d", i),
+			Title:       "test-quality report item",
+			Description: "Imported engineering task from report batch with full body text here.",
+			Status:      types.StatusOpen,
+			IssueType:   types.TypeTask,
+			CreatedAt:   created,
+		})
+	}
+	for id, p := range pollutedIDs(imported) {
+		t.Errorf("import: %s reported (score %.2f, reasons %v); bulk import of real work is not evidence", id, p.score, p.reasons)
+	}
+
 	fixture := &types.Issue{ID: "bd-11", Title: "Test issue", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: created}
 	p, ok := pollutedIDs(append(batch, fixture))[fixture.ID]
 	if !ok {
@@ -213,8 +239,9 @@ func TestDetectTestPollution_ConfidenceBands(t *testing.T) {
 		{"Test issue", "wip", 1.3, true},
 		{"Write a sample issue template", "  ", 0.8, false},
 		{"Sample issue for testing", "", 1.4, true},
+		{"test-foo bare fixture", "", 0.8, false}, // from PR #5137: prefix plus empty description
 	}
-	for _, ids := range [][]string{{"bd-1", "bd-2", "bd-3", "bd-4", "bd-5", "bd-6"}, {"bd-q9x", "bd-r2k", "bd-z7m", "bd-a0p", "bd-w3c", "bd-k8d"}} {
+	for _, ids := range [][]string{{"bd-1", "bd-2", "bd-3", "bd-4", "bd-5", "bd-6", "tmp-1"}, {"bd-q9x", "bd-r2k", "bd-z7m", "bd-a0p", "bd-w3c", "bd-k8d", "bd-t4f"}} {
 		var issues []*types.Issue
 		for i, tt := range tests {
 			issues = append(issues, &types.Issue{ID: ids[i], Title: tt.title, Description: tt.desc, Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: created})

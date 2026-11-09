@@ -90,3 +90,32 @@ func TestCheckTestPollutionWithStore(t *testing.T) {
 		}
 	})
 }
+
+// TestHasTestTitlePrefix pins the prefix matcher exactly as create/export use
+// it (isTestIssue): same prefixes, same separators, case-insensitive.
+func TestHasTestTitlePrefix(t *testing.T) {
+	cases := []struct {
+		title string
+		want  bool
+	}{
+		{"test-fix login", true},
+		{"Test-quality architecture", true},
+		{"TEST-1", true},
+		{"test_thing", true},
+		{"testy title", false},   // prefix must be a whole word
+		{"contest rules", false}, // no prefix at line start
+		{"benchmark seed", true},
+		{"sample issue", true},
+		{"tmp note", true},
+		{"temp file", true},
+		{"Debug sync hangs", true},
+		{"dummy record", true},
+		{"Test-quality architecture v2", true},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := HasTestTitlePrefix(tc.title); got != tc.want {
+			t.Errorf("HasTestTitlePrefix(%q) = %t, want %t", tc.title, got, tc.want)
+		}
+	}
+}
