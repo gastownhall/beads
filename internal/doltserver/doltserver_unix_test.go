@@ -357,3 +357,45 @@ func TestParseDoltProcessPIDsEmptyStateColumn(t *testing.T) {
 		t.Fatalf("parseDoltProcessPIDs() = %v, want %v", got, want)
 	}
 }
+
+// TestReadDoltProcessPIDsListsLiveServer checks the reader against the real
+// ps: a live stand-in whose command line carries dolt sql-server must be
+// listed. Linux populates the state column, so this pins the requested
+// column format; the blank-state regression itself is covered by the
+// recorded rows above (GH#7121).
+func TestReadDoltProcessPIDsListsLiveServer(t *testing.T) {
+	if _, err := exec.LookPath("ps"); err != nil {
+		t.Skip("ps is not available")
+	}
+	// A shell blocked on stdin is a deterministic stand-in with no child
+	// processes; the selector recognizes dolt/sql-server in its command line.
+	cmd := exec.Command("/bin/sh", "-c", "read line", "dolt", "sql-server")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(exited)
+	}()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		<-exited
+	})
+
+	pids, err := readDoltProcessPIDs()
+	if err != nil {
+		t.Fatalf("readDoltProcessPIDs() error: %v", err)
+	}
+	for _, pid := range pids {
+		if pid == cmd.Process.Pid {
+			return
+		}
+	}
+	t.Errorf("readDoltProcessPIDs() = %v, want the stand-in PID %d among them", pids, cmd.Process.Pid)
+}
