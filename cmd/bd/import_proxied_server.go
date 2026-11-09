@@ -79,15 +79,15 @@ func runImportRecordsProxied(ctx context.Context, records []importRecord, memori
 	if err != nil {
 		return err
 	}
-	if len(screen.Rejected) > 0 {
-		return importRejectedError(source, screen.Rejected)
-	}
 	issues := screen.Kept(records)
 
 	result := importResultJSON{
 		Source:    source,
 		DedupHits: dedupHits,
 		DryRun:    importDryRun,
+	}
+	if err := applyImportRejections(&result, source, screen.Rejected, importSkipInvalid, importRejects); err != nil {
+		return err
 	}
 
 	if importDryRun {

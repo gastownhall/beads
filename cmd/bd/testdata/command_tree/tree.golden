@@ -3640,6 +3640,8 @@ bd import
   flag --dedup type=bool default="false" usage="Skip lines whose title matches an existing open issue"
   flag --dry-run type=bool default="false" usage="Show what would be imported without importing"
   flag --input -i type=string default="" usage="Read JSONL from a specific file"
+  flag --rejects type=string default="" usage="With --skip-invalid, save the skipped records' original lines to this file"
+  flag --skip-invalid type=bool default="false" usage="Import the valid records and skip the ones the database would refuse (e.g. an unregistered status), reporting each"
 
 bd info
   use: "info"

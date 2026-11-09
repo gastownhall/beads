@@ -571,6 +571,62 @@ func TestProxiedServerImport(t *testing.T) {
 		}
 	})
 
+	t.Run("invalid_record_skip_invalid_keeps_rejects", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "imps")
+		db := openProxiedDB(t, p)
+
+		rows := fixtureIssues("imps")
+		rows[1].Status = "verify"
+		fixture := importFixtureJSONL(t, rows, `{"_type":"memory","key":"skip-probe","value":"kept"}`)
+		path := filepath.Join(p.dir, "invalid.jsonl")
+		if err := os.WriteFile(path, []byte(fixture), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+		rejects := filepath.Join(t.TempDir(), "rejects.jsonl")
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "import", "--skip-invalid", "--rejects", rejects, "--json", path)
+		if err != nil {
+			t.Fatalf("bd import --skip-invalid failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		var report struct {
+			Created        int    `json:"created"`
+			Skipped        int    `json:"skipped"`
+			InvalidSkipped int    `json:"invalid_skipped"`
+			RejectsFile    string `json:"rejects_file"`
+			InvalidRecords []struct {
+				Line int    `json:"line"`
+				ID   string `json:"id"`
+			} `json:"invalid_records"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+			t.Fatalf("stdout is not one JSON document: %v\n%s", err, stdout)
+		}
+		// Line 1 is the _schema header, so the second issue is line 3.
+		if report.Created != 2 || report.Skipped != 1 || report.InvalidSkipped != 1 || report.RejectsFile != rejects ||
+			len(report.InvalidRecords) != 1 || report.InvalidRecords[0].Line != 3 || report.InvalidRecords[0].ID != "imps-r2" {
+			t.Errorf("report = %+v, want created=2 skipped=1 invalid_skipped=1 imps-r2 at line 3 saved to %s", report, rejects)
+		}
+		if !strings.Contains(stderr, path+":3: imps-r2") {
+			t.Errorf("stderr warning does not locate the skipped record:\n%s", stderr)
+		}
+		saved, err := os.ReadFile(rejects)
+		if err != nil {
+			t.Fatalf("read rejects file: %v", err)
+		}
+		if want := strings.Split(fixture, "\n")[2] + "\n"; string(saved) != want {
+			t.Errorf("rejects file =\n%s\nwant the original line\n%s", saved, want)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM issues WHERE id IN ('imps-r1','imps-r3')"); got != 2 {
+			t.Errorf("valid rows imported = %d, want 2", got)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM issues WHERE id = 'imps-r2'"); got != 0 {
+			t.Errorf("invalid row was imported")
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM config WHERE `key` = 'kv.memory.skip-probe'"); got != 1 {
+			t.Errorf("memory not imported")
+		}
+	})
+
 	t.Run("import_is_the_sanctioned_upsert_door", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "impf")

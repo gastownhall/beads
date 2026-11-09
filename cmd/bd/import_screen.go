@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"strings"
 
@@ -296,14 +298,14 @@ func formatImportRejections(source string, rejected []importRejection) string {
 	var b strings.Builder
 	for i, r := range rejected {
 		if i == importRejectionListLimit {
-			fmt.Fprintf(&b, "  ... and %d more\n", len(rejected)-i)
+			fmt.Fprintf(&b, "  ... and %d more\n", len(rejected)-i) //nolint:gosec // G705: terminal text, not a browser context
 			break
 		}
 		id := r.ID
 		if id == "" {
 			id = "(no id)"
 		}
-		fmt.Fprintf(&b, "  %s:%d: %s: %s\n", source, r.Line, id, r.Reason)
+		fmt.Fprintf(&b, "  %s:%d: %s: %s\n", source, r.Line, id, r.Reason) //nolint:gosec // G705: terminal text, not a browser context
 	}
 	return b.String()
 }
@@ -315,4 +317,61 @@ func importRejectedError(source string, rejected []importRejection) error {
 		"Repair the records, or register the values they use (e.g. bd config set status.custom ...), "+
 		"or rerun with --skip-invalid --rejects <file> to import the valid records and keep the invalid ones in <file>",
 		source, len(rejected), formatImportRejections(source, rejected))
+}
+
+// applyImportRejections settles the screen's rejected records for explicit
+// `bd import`. Without --skip-invalid they refuse the import. With it they are
+// reported in result, once in Skipped, and with --rejects saved to that file
+// first: a rejects file that cannot be written refuses the import before any
+// import write, so a skipped record is never dropped without the copy the
+// caller asked for.
+func applyImportRejections(result *importResultJSON, source string, rejected []importRejection, skipInvalid bool, rejectsPath string) error {
+	if len(rejected) == 0 {
+		return nil
+	}
+	if !skipInvalid {
+		return importRejectedError(source, rejected)
+	}
+	if rejectsPath != "" {
+		if err := saveImportRejects(rejectsPath, rejected); err != nil {
+			return fmt.Errorf("save the %d invalid record(s) from %s to %s; nothing was imported: %w", len(rejected), source, rejectsPath, err)
+		}
+		result.RejectsFile = rejectsPath
+	}
+	result.InvalidSkipped = len(rejected)
+	result.InvalidRecords = rejected
+	result.Skipped += len(rejected)
+	return nil
+}
+
+// saveImportRejects writes the rejected records' original lines to path, one
+// per line, through a same-directory temporary file that replaces path only
+// once it is complete (mode 0600: the records are the workspace's issue data).
+func saveImportRejects(path string, rejected []importRejection) error {
+	var b bytes.Buffer
+	for _, r := range rejected {
+		b.Write(r.Raw)
+		if !bytes.HasSuffix(r.Raw, []byte("\n")) {
+			b.WriteByte('\n')
+		}
+	}
+	return atomicWriteFile(path, b.Bytes())
+}
+
+// warnImportInvalidSkipped tells the operator, on stderr in every output mode,
+// which records an import skipped as invalid and where they are kept.
+func warnImportInvalidSkipped(result importResultJSON) {
+	if result.InvalidSkipped == 0 {
+		return
+	}
+	//nolint:gosec // G705: stderr, not a browser context
+	fmt.Fprintf(os.Stderr, "warning: skipped %d invalid record(s) from %s:\n%s", result.InvalidSkipped, result.Source, formatImportRejections(result.Source, result.InvalidRecords))
+	switch {
+	case result.RejectsFile != "":
+		fmt.Fprintf(os.Stderr, "  rejected records saved to %s\n", result.RejectsFile) //nolint:gosec // G705: stderr, not a browser context
+	case result.Source == "stdin":
+		fmt.Fprintln(os.Stderr, "  not saved separately; stdin is not kept, so rerun with --rejects <file> to keep them")
+	default:
+		fmt.Fprintf(os.Stderr, "  not saved separately; they remain in %s\n", result.Source) //nolint:gosec // G705: stderr, not a browser context
+	}
 }
