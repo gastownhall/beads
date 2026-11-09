@@ -12,9 +12,10 @@ import (
 // leaked test debris.
 type serverCandidate struct {
 	pid int
-	// argv is the process's command line split into arguments. On Darwin it
-	// is approximate: ps prints the arguments space-joined, so they are
-	// recovered with strings.Fields (see isDoltServerCmdline).
+	// argv is the process's command line split into arguments: exact on
+	// Linux (procArgv), approximate on Darwin, where ps prints the arguments
+	// space-joined and they are recovered with strings.Fields (see
+	// isDoltServerCmdline).
 	argv []string
 	// cwd is the process's resolved working directory. Empty if unknown.
 	cwd string

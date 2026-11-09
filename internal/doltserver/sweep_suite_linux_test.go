@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -158,5 +159,99 @@ func TestSweepSuiteTestServersSparesNonDoltArgv0(t *testing.T) {
 	case <-exited:
 		t.Fatal("sweep signaled a non-dolt process")
 	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// TestProcArgv pins how /proc/<pid>/cmdline bytes become argv: split on NUL
+// after dropping one terminating NUL, keeping every argument's boundaries.
+// Flattening to spaces (as the sweep once did) lets an empty argv[0] shift
+// "dolt" into its place, splits an executable path containing a space, and
+// turns words inside one argument into separate arguments.
+func TestProcArgv(t *testing.T) {
+	cases := []struct {
+		name   string
+		raw    string
+		want   []string
+		server bool
+	}{
+		{"terminating NUL", "dolt\x00sql-server\x00", []string{"dolt", "sql-server"}, true},
+		{"missing terminator", "dolt\x00sql-server", []string{"dolt", "sql-server"}, true},
+		{"path with spaces", "/Users/dev/My Tools/dolt\x00sql-server\x00", []string{"/Users/dev/My Tools/dolt", "sql-server"}, true},
+		{"empty argv[0] is kept, never shifted", "\x00dolt\x00sql-server\x00", []string{"", "dolt", "sql-server"}, false},
+		{"interior empty argument is kept", "dolt\x00\x00sql-server\x00", []string{"dolt", "", "sql-server"}, true},
+		{"trailing empty argument is kept", "dolt\x00sql-server\x00\x00", []string{"dolt", "sql-server", ""}, true},
+		{"sql-server inside a larger argument", "dolt\x00commit\x00-m\x00restart sql-server\x00", []string{"dolt", "commit", "-m", "restart sql-server"}, false},
+		{"single flattened process title", "dolt sql-server -P 1", []string{"dolt sql-server -P 1"}, false},
+		{"empty input", "", nil, false},
+		{"lone terminator", "\x00", []string{""}, false},
+	}
+	for _, tc := range cases {
+		got := procArgv([]byte(tc.raw))
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: procArgv(%q) = %q, want %q", tc.name, tc.raw, got, tc.want)
+		}
+		if server := isDoltServerArgv(got); server != tc.server {
+			t.Errorf("%s: isDoltServerArgv(procArgv(%q)) = %v, want %v", tc.name, tc.raw, server, tc.server)
+		}
+	}
+}
+
+// TestSweepReadsExactProcArgv runs real processes and checks both places the
+// Linux sweep reads /proc: candidate gathering and the pre-signal
+// revalidation (isDoltServerProcess). An executable path with a space ending
+// in /dolt is a server; a process whose only "sql-server" is inside a larger
+// argument is not.
+func TestSweepReadsExactProcArgv(t *testing.T) {
+	root := t.TempDir()
+	toolDir := filepath.Join(root, "My Tools")
+	if err := os.Mkdir(toolDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	spacedDolt := filepath.Join(toolDir, "dolt")
+	if err := os.Symlink("/bin/sh", spacedDolt); err != nil {
+		t.Fatal(err)
+	}
+
+	start := func(cmd *exec.Cmd) int {
+		t.Helper()
+		cmd.Dir = root
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		exited := make(chan struct{})
+		go func() {
+			_ = cmd.Wait()
+			close(exited)
+		}()
+		t.Cleanup(func() {
+			_ = stdin.Close()
+			_ = cmd.Process.Kill()
+			<-exited
+		})
+		waitForExecArgv(t, cmd.Process.Pid)
+		return cmd.Process.Pid
+	}
+	// argv[0] is the spaced path itself; "sql-server" is a separate argument.
+	spaced := start(exec.Command(spacedDolt, "-c", "read line", "x", "sql-server"))
+	// argv[0] is "dolt", but "sql-server" only appears inside the script body.
+	embedded := exec.Command("/bin/sh", "-c", "read line # sql-server")
+	embedded.Args[0] = "dolt"
+	inside := start(embedded)
+
+	gathered := map[int]bool{}
+	for _, c := range gatherDoltServerCandidates() {
+		gathered[c.pid] = true
+	}
+	if !gathered[spaced] || !isDoltServerProcess(spaced) {
+		t.Errorf("space-containing path ending in /dolt: gathered=%v revalidated=%v, want both true",
+			gathered[spaced], isDoltServerProcess(spaced))
+	}
+	if gathered[inside] || isDoltServerProcess(inside) {
+		t.Errorf("sql-server inside a larger argument: gathered=%v revalidated=%v, want both false",
+			gathered[inside], isDoltServerProcess(inside))
 	}
 }
