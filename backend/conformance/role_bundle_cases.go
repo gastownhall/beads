@@ -254,6 +254,7 @@ var roleContractCases = []roleContract{
 		RunDeleterErasesAcrossBothPlanes,
 		RunDeleterCollapsesDuplicateIDs,
 		RunDeleterRewritesReferencesInNeighbors,
+		RunDeleterAttributesTheRewriteToTheActor,
 		RunDeleterDryRunChangesNothing,
 		RunDeleterRecordsExactlyOneHistoryEntry,
 		RunDeleterDoesNotMutateTheCallerRequest,
