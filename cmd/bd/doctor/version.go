@@ -319,9 +319,12 @@ func CompareVersions(v1, v2 string) int {
 // IsBrewHeadVersion recognizes the version Homebrew stamps into --HEAD
 // installs of the core beads formula: HEAD-<shortsha>, a bare HEAD when the
 // head spec resolves no commit, and either shape carrying Homebrew's
-// _<revision> suffix. Such a stamp is a healthy current-era version marker,
-// not a malformed one — the binary rewrites it identically on every run, so
-// nothing the user does can "fix" it into semver.
+// _<revision> suffix. Such a stamp is a healthy version marker, not a
+// malformed one — the binary rewrites it identically on every run, so
+// nothing the user does can "fix" it into semver. Recognition says nothing
+// about the build's era: homebrew-core shipped HEAD builds while its stable
+// formula was still pre-1.0, so the shape can name an old build as easily as
+// a current one.
 //
 // This is the canonical definition; every consumer of a version stamp that
 // needs to tell a --HEAD build apart from a release delegates here so the

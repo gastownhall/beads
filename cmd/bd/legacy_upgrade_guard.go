@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -105,14 +106,19 @@ func classifyLegacyDoltWorkspace(beadsDir string, cfg *configfile.Config, modes 
 	// Positive evidence that this workspace belongs to the current era settles
 	// it for every mode. Only the ambiguity that remains after these is
 	// mode-specific, so the refusals below are the only part that branches.
-	if classifyVersionWitness(version) == witnessEraCurrent {
+	if classifyVersionWitness(version) == witnessEraCurrent || witnessIsThisHeadBuild(version) {
 		// A witness naming bd 1.0 or later can only have been written by a
 		// current-era binary, and only after this same guard admitted the
 		// workspace (PersistentPreRunE runs the guard before trackBdVersion,
 		// and doctor runs it before its own copy of that call). No legacy
-		// release could have produced it. Reading it as proof only in server
-		// mode left the escape hatch unreachable for a workspace the running
-		// binary demonstrably created itself.
+		// release could have produced it. A witness exactly equal to this
+		// binary's own commit-bearing Homebrew --HEAD stamp carries the same
+		// evidence for the same reason: only this build writes it, and only
+		// after admission — while another build's HEAD stamp carries none at
+		// all, since the shape names no era, and stays on the mode-specific
+		// arms below. Reading this evidence only in server mode left the escape
+		// hatch unreachable for a workspace the running binary demonstrably
+		// created itself.
 		return nil
 	}
 	if modes.sharedServer && !(present && legacyServerVersion(version)) {
@@ -152,14 +158,14 @@ func classifyLegacyDoltWorkspace(beadsDir string, cfg *configfile.Config, modes 
 		if present && classifyVersionWitness(version) == witnessEraUnknown {
 			// A witness that is present but unreadable — including one left
 			// blank or whitespace-only by an interrupted or disk-full
-			// best-effort write — is not evidence of a legacy workspace: every
-			// pre-1.0 bd wrote a plain X.Y.Z through the same writer, so no
-			// legacy release could have produced a witness this parse rejects.
-			// Report the ambiguity and open the workspace so the admitted
-			// command can self-heal the witness, instead of refusing every
-			// command over an advisory, gitignored file. A genuinely absent
-			// witness is not present and still refuses below, preserving the
-			// pre-1.0 guard invariant.
+			// best-effort write — is not treated as a legacy marker: this is a
+			// compatibility policy over an advisory, gitignored file, not a
+			// provenance claim that no old build could write a shape the
+			// semver parse rejects (a distributor can stamp other shapes onto
+			// an old build). Report the ambiguity and open the workspace so the
+			// admitted command can self-heal the witness, instead of refusing
+			// every command. A genuinely absent witness is not present and
+			// still refuses below, preserving the pre-1.0 guard invariant.
 			warnUnreadableVersionWitness(beadsDir, version)
 			return nil
 		}
@@ -354,6 +360,19 @@ func classifyVersionWitness(version string) witnessEra {
 		}
 	}
 	return witnessEraUnknown
+}
+
+// witnessIsThisHeadBuild reports whether version is the running binary's own
+// Homebrew --HEAD stamp. The shape alone names no era — homebrew-core shipped
+// HEAD builds while its stable formula was still pre-1.0, so a HEAD stamp can
+// name an old build as easily as a current one — but a witness exactly equal
+// to the running Version is a commit-bearing identity only this binary shares,
+// and only this guard's own admission lets it persist: the same current-era
+// evidence a semver witness carries. Identity-free shapes (bare HEAD,
+// HEAD_<revision>), another build's commit, and a different revision never
+// qualify.
+func witnessIsThisHeadBuild(version string) bool {
+	return version == Version && strings.HasPrefix(version, "HEAD-") && doctor.IsBrewHeadVersion(version)
 }
 
 // legacyVersionMinor returns the minor component of a pre-1.0 version witness.
