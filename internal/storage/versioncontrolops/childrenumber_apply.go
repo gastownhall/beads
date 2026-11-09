@@ -54,7 +54,7 @@ func RenumberChildrenAndMerge(ctx context.Context, conn *sql.Conn, branch, ref, 
 		return report, err
 	}
 	if len(report.Renames) > 0 {
-		if err := applyChildRenumbers(ctx, conn, report.Renames, actor); err != nil {
+		if err := ApplyChildRenumbers(ctx, conn, report.Renames, actor); err != nil {
 			return report, err
 		}
 		commit, err := commitChildRenumbers(ctx, conn, report.Renames)
@@ -108,9 +108,11 @@ func priorRenameCommits(ctx context.Context, conn *sql.Conn, remoteHead string) 
 	return commits, nil
 }
 
-// applyChildRenumbers renames every planned identity in one transaction, so
-// a failure part way leaves none of them.
-func applyChildRenumbers(ctx context.Context, conn *sql.Conn, renames []storage.ChildRenumber, actor string) (retErr error) {
+// ApplyChildRenumbers renames every planned identity in one transaction, so
+// a failure part way leaves none of them. Each rename is re-checked inside
+// the transaction: a plan that went stale (its destination taken since)
+// fails rather than renaming over another issue.
+func ApplyChildRenumbers(ctx context.Context, conn *sql.Conn, renames []storage.ChildRenumber, actor string) (retErr error) {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("renumber children: begin: %w", err)
@@ -122,6 +124,15 @@ func applyChildRenumbers(ctx context.Context, conn *sql.Conn, renames []storage.
 	}()
 	highWater := make(map[string]int)
 	for _, r := range renames {
+		var taken int
+		if err := tx.QueryRowContext(ctx,
+			"SELECT (SELECT COUNT(*) FROM issues WHERE id = ?) + (SELECT COUNT(*) FROM wisps WHERE id = ?)",
+			r.To, r.To).Scan(&taken); err != nil {
+			return fmt.Errorf("renumber children: check %s: %w", r.To, err)
+		}
+		if taken > 0 {
+			return fmt.Errorf("renumber children: rename %s -> %s: %s already exists; pull again to re-plan", r.From, r.To, r.To)
+		}
 		issue, err := issueops.GetIssueInTx(ctx, tx, r.From)
 		if err != nil {
 			return fmt.Errorf("renumber children: load %s: %w", r.From, err)
