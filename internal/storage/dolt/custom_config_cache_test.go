@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
@@ -110,6 +112,34 @@ func assertStrings(t *testing.T, got, want []string) {
 			t.Fatalf("got %#v, want %#v", got, want)
 		}
 	}
+}
+
+const (
+	customStatusesQuery = "SELECT name, category FROM custom_statuses ORDER BY name"
+	customTypesQuery    = "SELECT name FROM custom_types ORDER BY name"
+)
+
+type statusRow struct {
+	name     string
+	category string
+}
+
+// expectHealthyCustomConfigLoad queues one combined read in which both
+// normalized tables answer with rows, so the resolver returns early without
+// consulting the config table.
+func expectHealthyCustomConfigLoad(mock sqlmock.Sqlmock, statuses []statusRow, customTypes []string) {
+	mock.ExpectBegin()
+	statusRows := sqlmock.NewRows([]string{"name", "category"})
+	for _, s := range statuses {
+		statusRows.AddRow(s.name, s.category)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta(customStatusesQuery)).WillReturnRows(statusRows)
+	typeRows := sqlmock.NewRows([]string{"name"})
+	for _, n := range customTypes {
+		typeRows.AddRow(n)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta(customTypesQuery)).WillReturnRows(typeRows)
+	mock.ExpectRollback()
 }
 
 func TestCustomConfigGettersDoNotCacheFailedResolve(t *testing.T) {
@@ -216,5 +246,96 @@ func TestCustomConfigGettersDoNotCacheFailedResolve(t *testing.T) {
 			t.Fatalf("GetCustomTypes with type yaml fallback: %v", err)
 		}
 		assertStrings(t, gotTypes, []string{"spike"})
+	})
+
+	// AC-3: a store that previously errored retries the next call and
+	// returns the database-backed vocabulary, which is then cached.
+	t.Run("getter recovers database vocabulary after a failed read", func(t *testing.T) {
+		withCustomVocabularyYAML(t, "", "")
+		store, mock := newCustomConfigStore(t)
+		ctx := context.Background()
+
+		mock.ExpectBegin().WillReturnError(cause)
+		_, err := store.GetCustomStatuses(ctx)
+		requireErrIs(t, err, cause, "first GetCustomStatuses")
+
+		expectHealthyCustomConfigLoad(mock,
+			[]statusRow{{name: "review", category: string(types.CategoryActive)}},
+			[]string{"db-type"})
+		detailed, err := store.GetCustomStatusesDetailed(ctx)
+		if err != nil {
+			t.Fatalf("GetCustomStatusesDetailed after recovery: %v", err)
+		}
+		assertCustomStatuses(t, detailed, []types.CustomStatus{
+			{Name: "review", Category: types.CategoryActive},
+		})
+		gotTypes, err := store.GetCustomTypes(ctx)
+		if err != nil {
+			t.Fatalf("GetCustomTypes after recovery: %v", err)
+		}
+		assertStrings(t, gotTypes, []string{"db-type"})
+
+		// Both halves are cached now: further calls must not read.
+		names, err := store.GetCustomStatuses(ctx)
+		if err != nil {
+			t.Fatalf("GetCustomStatuses from cache: %v", err)
+		}
+		assertStrings(t, names, []string{"review"})
+	})
+
+	// AC-3: recovery after a YAML fallback keeps the existing composition
+	// rules: database types union with config.yaml types.
+	t.Run("getter recovers after yaml fallback and unions yaml types", func(t *testing.T) {
+		withCustomVocabularyYAML(t, "review:active", "yaml-only")
+		store, mock := newCustomConfigStore(t)
+		ctx := context.Background()
+
+		mock.ExpectBegin().WillReturnError(cause)
+		gotTypes, err := store.GetCustomTypes(ctx)
+		if err != nil {
+			t.Fatalf("GetCustomTypes with yaml fallback: %v", err)
+		}
+		assertStrings(t, gotTypes, []string{"yaml-only"})
+
+		expectHealthyCustomConfigLoad(mock,
+			[]statusRow{{name: "review", category: string(types.CategoryActive)}},
+			[]string{"db-type"})
+		gotTypes, err = store.GetCustomTypes(ctx)
+		if err != nil {
+			t.Fatalf("GetCustomTypes after recovery: %v", err)
+		}
+		assertStrings(t, gotTypes, []string{"db-type", "yaml-only"})
+
+		// The status half was resolved by the same combined read.
+		detailed, err := store.GetCustomStatusesDetailed(ctx)
+		if err != nil {
+			t.Fatalf("GetCustomStatusesDetailed after recovery: %v", err)
+		}
+		assertCustomStatuses(t, detailed, []types.CustomStatus{
+			{Name: "review", Category: types.CategoryActive},
+		})
+	})
+
+	// AC-3: a retryable error inside the read is retried by the existing
+	// withReadTx retry, without new retries of the store's own.
+	t.Run("retryable query error is retried within one call", func(t *testing.T) {
+		withCustomVocabularyYAML(t, "", "")
+		store, mock := newCustomConfigStore(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta(customStatusesQuery)).
+			WillReturnError(errors.New("invalid connection"))
+		mock.ExpectRollback()
+		expectHealthyCustomConfigLoad(mock,
+			[]statusRow{{name: "review", category: string(types.CategoryActive)}},
+			[]string{"db-type"})
+
+		names, err := store.GetCustomStatuses(ctx)
+		if err != nil {
+			t.Fatalf("GetCustomStatuses after retry: %v", err)
+		}
+		assertStrings(t, names, []string{"review"})
 	})
 }
