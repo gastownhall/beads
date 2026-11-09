@@ -25,6 +25,114 @@ import (
 // makes the refusal provable; the record is read-only to the open, so the
 // seeded value must survive the refusal byte-for-byte.
 
+// TestServerIdentityRecordStates covers the record half of the gate
+// (AC-2): a record that is absent, blank, malformed or unreadable cannot
+// authorize a server, so an already-listening server answering an open must
+// be refused — with the error blaming the record, not the server — before
+// discovery or creation, without creating or replacing the record, and
+// without creating a database.
+func TestServerIdentityRecordStates(t *testing.T) {
+	skipIfNoServer(t)
+
+	cases := []struct {
+		name    string
+		seed    func(t *testing.T, recordPath string) []byte
+		wantMsg string
+	}{
+		{
+			name:    "absent",
+			seed:    func(*testing.T, string) []byte { return nil },
+			wantMsg: "does not exist",
+		},
+		{
+			name: "blank",
+			seed: func(t *testing.T, recordPath string) []byte {
+				seeded := []byte("   \n")
+				if err := os.WriteFile(recordPath, seeded, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return seeded
+			},
+			wantMsg: "blank",
+		},
+		{
+			name: "malformed",
+			seed: func(t *testing.T, recordPath string) []byte {
+				seeded := []byte("not a uuid")
+				if err := os.WriteFile(recordPath, seeded, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return seeded
+			},
+			wantMsg: "malformed",
+		},
+		{
+			name: "unreadable",
+			seed: func(t *testing.T, recordPath string) []byte {
+				// A directory named like the record reads as an error rather
+				// than not-exist, without relying on permission bits (which
+				// do not stop a root reader).
+				if err := os.Mkdir(recordPath, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				return nil
+			},
+			wantMsg: "could not be read",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+			t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+
+			recordPath := mustSharedRecordPath(t)
+			seeded := tc.seed(t, recordPath)
+
+			dbName := fmt.Sprintf("test_identity_%s_%d", tc.name, testServerPort)
+			assertDatabaseNotExists(t, testServerPort, dbName)
+			t.Cleanup(func() { dropTestDatabase(t, testServerPort, dbName) })
+
+			_, err := New(context.Background(), sharedIdentityConfig(t, dbName))
+			if !errors.Is(err, doltserver.ErrServerIdentityMismatch) {
+				t.Fatalf("expected a server identity refusal for a %s record, got: %v", tc.name, err)
+			}
+			var mismatch *doltserver.ServerIdentityMismatchError
+			if !errors.As(err, &mismatch) {
+				t.Fatalf("refusal must be a *ServerIdentityMismatchError, got %T: %v", err, err)
+			}
+			if mismatch.Problem == "" && mismatch.ActualUUID == "" && mismatch.QueryErr == nil {
+				t.Fatalf("refusal for a %s record must blame the record, not report a clean mismatch: %v", tc.name, err)
+			}
+			if msg := err.Error(); !strings.Contains(msg, tc.wantMsg) || !strings.Contains(msg, recordPath) {
+				t.Fatalf("refusal must name the %s record at %s, got:\n%s", tc.name, recordPath, msg)
+			}
+
+			// Neither created nor replaced the record, and nothing was
+			// created on the answering server.
+			assertDatabaseNotExists(t, testServerPort, dbName)
+			switch tc.name {
+			case "absent":
+				if _, statErr := os.Stat(recordPath); !os.IsNotExist(statErr) {
+					t.Fatalf("absent record was created by the refused open: %v", statErr)
+				}
+			case "unreadable":
+				if info, statErr := os.Stat(recordPath); statErr != nil || !info.IsDir() {
+					t.Fatalf("unreadable record was replaced by the refused open: %v", statErr)
+				}
+			default:
+				got, readErr := os.ReadFile(recordPath)
+				if readErr != nil {
+					t.Fatalf("record must survive the refusal: %v", readErr)
+				}
+				if string(got) != string(seeded) || strings.Contains(string(got), serverUUID(t, testServerPort)) {
+					t.Fatalf("record was rewritten by the refused open: got %q, want the seeded %q", string(got), string(seeded))
+				}
+			}
+		})
+	}
+}
+
 // serverUUID reads the answering server's @@server_uuid on port.
 func serverUUID(t *testing.T, port int) string {
 	t.Helper()

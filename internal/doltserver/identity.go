@@ -301,12 +301,15 @@ func portOf(addr string) int {
 func VerifyServerIdentity(ctx context.Context, q doltversion.RowQuerier, exp ServerIdentityExpectation) error {
 	uuid, problem, err := readServerUUIDRecord(exp.RecordPath())
 	if problem != recordOK || err != nil {
-		// AC-1 (this commit) refuses only a proven mismatch; a record that is
-		// missing, blank, malformed or unreadable is soft-skipped so workspaces
-		// without a paired record keep opening. The next commit (AC-2) flips
-		// these states to refusals: an unprovable record cannot authorize a
-		// server either.
-		return nil
+		// An unprovable record cannot authorize a server: refuse before the
+		// identity query, blaming the record (not the answering server).
+		return (&ServerIdentityMismatchError{
+			Addr:       exp.Addr(),
+			DataRoot:   exp.DataDir,
+			RecordPath: exp.RecordPath(),
+			Problem:    problem,
+			ReadErr:    err,
+		}).withBestEffortPIDs(exp)
 	}
 	var actual sql.NullString
 	queryErr := q.QueryRowContext(ctx, "SELECT @@server_uuid").Scan(&actual)

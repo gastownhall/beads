@@ -4,12 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
@@ -456,5 +459,72 @@ func TestCreateGuard_ErrorMessage(t *testing.T) {
 	// Should suggest bd doctor
 	if !strings.Contains(errMsg, "bd doctor") {
 		t.Errorf("error should suggest 'bd doctor', got: %s", errMsg)
+	}
+}
+
+// TestSharedServer_ForeignListenerOnPort_NotSilentlyUsed reproduces bd-5nmeal
+// (GH#4637, the direct-connect path): in shared-server mode the local
+// dolt-server.pid names the server bd started, but a different process holds
+// the shared port (e.g. wslrelay.exe forwarding a WSL2 server onto the Windows
+// loopback). A successful dial must not be taken as "this is our server": the
+// open must fail, or at least warn naming both the recorded and the actual PID.
+func TestSharedServer_ForeignListenerOnPort_NotSilentlyUsed(t *testing.T) {
+	skipIfNoServer(t)
+
+	ctx := context.Background()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	serverDir := doltserver.ResolveServerDir(beadsDir)
+	if err := os.MkdirAll(serverDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	dbName := fmt.Sprintf("test_foreign_listener_%d", testServerPort)
+	t.Cleanup(func() { dropTestDatabase(t, testServerPort, dbName) })
+	seed, err := New(ctx, &Config{
+		Path: t.TempDir(), BeadsDir: beadsDir, ServerHost: "127.0.0.1", ServerPort: testServerPort,
+		Database: dbName, MaxOpenConns: 1, CreateIfMissing: true,
+	})
+	if err != nil {
+		t.Fatalf("seed database: %v", err)
+	}
+	seed.Close()
+
+	// Our recorded shared server: a live process that is NOT the listener on
+	// testServerPort (the test process itself).
+	recordedPID := os.Getpid()
+	if err := os.WriteFile(filepath.Join(serverDir, doltserver.PIDFileName),
+		[]byte(fmt.Sprintf("%d\n", recordedPID)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	origStderr := os.Stderr
+	os.Stderr = w
+	store, openErr := New(ctx, &Config{
+		Path: t.TempDir(), BeadsDir: beadsDir, ServerHost: "127.0.0.1", ServerPort: testServerPort,
+		ServerPortSharedServer: true, Database: dbName, MaxOpenConns: 1,
+	})
+	os.Stderr = origStderr
+	w.Close()
+	var buf strings.Builder
+	_, _ = io.Copy(&buf, r)
+	if openErr != nil {
+		t.Logf("open refused (expected): %v", openErr)
+		return
+	}
+	defer store.Close()
+	if !strings.Contains(buf.String(), strconv.Itoa(recordedPID)) {
+		t.Fatalf("shared-server open silently connected to a foreign listener on port %d "+
+			"(local dolt-server.pid records PID %d, which does not hold the port): "+
+			"no error and no warning naming the recorded server; stderr=%q",
+			testServerPort, recordedPID, buf.String())
 	}
 }
