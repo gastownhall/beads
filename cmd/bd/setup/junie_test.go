@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -649,4 +650,121 @@ func TestInstallJunieLeavesUntouchedPathsUnchanged(t *testing.T) {
 		}
 		requireJunieMCPConfig(t, mcp)
 	})
+
+	t.Run("over a stale bd mcp config", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		if err := os.MkdirAll(".junie/mcp", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		stale := `{"mcpServers":{"beads":{"command":"bd","args":["mcp"]}}}`
+		userNote := "kept by the user\n"
+		for path, data := range map[string]string{
+			".junie/guidelines.md": junieGuidelinesTemplate,
+			".junie/mcp/mcp.json":  stale,
+			".junie/notes.md":      userNote,
+		} {
+			if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		if err := InstallJunie(); err != nil {
+			t.Fatalf("InstallJunie: %v", err)
+		}
+
+		got, err := os.ReadFile(".junie/guidelines.md")
+		if err != nil {
+			t.Fatalf("read guidelines: %v", err)
+		}
+		if h := junieSHA256Hex(got); h != junieGuidelinesSHA256 {
+			t.Errorf("guidelines.md sha256 = %s, want unchanged %s", h, junieGuidelinesSHA256)
+		}
+		if note, err := os.ReadFile(".junie/notes.md"); err != nil || string(note) != userNote {
+			t.Errorf(".junie/notes.md = %q, %v; want it untouched", note, err)
+		}
+		mcp, err := os.ReadFile(".junie/mcp/mcp.json")
+		if err != nil {
+			t.Fatalf("read MCP config: %v", err)
+		}
+		if string(mcp) == stale || strings.Contains(string(mcp), `"mcp"`) {
+			t.Errorf("stale bd mcp config was not replaced: %s", mcp)
+		}
+		requireJunieMCPConfig(t, mcp)
+
+		// The replaced config is the converged one: a further run writes
+		// the same bytes.
+		if err := InstallJunie(); err != nil {
+			t.Fatalf("second InstallJunie: %v", err)
+		}
+		again, err := os.ReadFile(".junie/mcp/mcp.json")
+		if err != nil {
+			t.Fatalf("read MCP config: %v", err)
+		}
+		if string(again) != string(mcp) {
+			t.Errorf("MCP config changed on a further run:\n%s\nthen\n%s", mcp, again)
+		}
+	})
+}
+
+// Identity and fingerprint invariant: GH#5563 changes what the beads MCP
+// entry launches, not which entry it is. The file stays at
+// .junie/mcp/mcp.json, holds exactly one server named "beads" (the name an
+// existing Junie setup knows it by), that entry carries only command and
+// args, the file decodes to exactly what junieMCPConfig renders, and its
+// sha256 is the same on every run, so re-running bd setup junie converges on
+// one file.
+func TestJunieMCPConfigIdentityAndFingerprintInvariant(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	if err := InstallJunie(); err != nil {
+		t.Fatalf("first InstallJunie: %v", err)
+	}
+	first, err := os.ReadFile(".junie/mcp/mcp.json")
+	if err != nil {
+		t.Fatalf("read MCP config: %v", err)
+	}
+	if err := InstallJunie(); err != nil {
+		t.Fatalf("second InstallJunie: %v", err)
+	}
+	second, err := os.ReadFile(".junie/mcp/mcp.json")
+	if err != nil {
+		t.Fatalf("read MCP config: %v", err)
+	}
+	if a, b := junieSHA256Hex(first), junieSHA256Hex(second); a != b {
+		t.Errorf("MCP config fingerprint changed across runs: %s then %s", a, b)
+	}
+
+	var got map[string]interface{}
+	if err := json.Unmarshal(first, &got); err != nil {
+		t.Fatalf("MCP config is not JSON: %v", err)
+	}
+	servers, _ := got["mcpServers"].(map[string]interface{})
+	if keys := sortedJunieKeys(servers); !reflect.DeepEqual(keys, []string{"beads"}) {
+		t.Errorf("mcpServers names = %v, want exactly [beads]", keys)
+	}
+	entry, _ := servers["beads"].(map[string]interface{})
+	if keys := sortedJunieKeys(entry); !reflect.DeepEqual(keys, []string{"args", "command"}) {
+		t.Errorf("beads entry keys = %v, want exactly [args command]", keys)
+	}
+
+	rendered, err := json.Marshal(junieMCPConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want map[string]interface{}
+	if err := json.Unmarshal(rendered, &want); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("written MCP config = %v, want what junieMCPConfig renders %v", got, want)
+	}
+}
+
+func sortedJunieKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
