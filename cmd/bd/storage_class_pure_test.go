@@ -35,6 +35,13 @@ func TestResolveStorageClassExplicit(t *testing.T) {
 }
 
 func TestValidateStorageClassConfig(t *testing.T) {
+	// validateStorageClassConfig reads custom types from the package store
+	// when one is set. This test has no database, so pin the store to nil: an
+	// earlier test in the binary can leave its closed store there, and reading
+	// custom types from a closed store fails.
+	saveAndRestoreGlobals(t)
+	store = nil
+
 	if err := validateStorageClassConfig("storage-class.event", "unversioned"); err != nil {
 		t.Errorf("valid key+value rejected: %v", err)
 	}

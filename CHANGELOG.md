@@ -1233,7 +1233,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so a long-lived process could reject valid custom statuses and types
   (GH#5581). Only a successful read is cached now. While the database is
   unreadable, each call uses `config.yaml`'s vocabulary when it declares one
-  and otherwise returns the read error, so callers report the failure
+  and otherwise returns the read error, so a caller can report the failure
   instead of acting on an empty vocabulary.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
