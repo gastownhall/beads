@@ -394,9 +394,9 @@ func TestAddDependencyInTxReadsNullStoredMetadataAsEmptyObject(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_type FROM issues WHERE id = ?")).
 		WithArgs("dep-a").
 		WillReturnRows(sqlmock.NewRows([]string{"issue_type"}).AddRow("task"))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT type, metadata, thread_id FROM dependencies")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT type, metadata, thread_id, "+storedDepTargetKindExpr+" FROM dependencies")).
 		WithArgs("dep-a", "dep-b").
-		WillReturnRows(sqlmock.NewRows([]string{"type", "metadata", "thread_id"}).AddRow(string(types.DepRelated), nil, nil))
+		WillReturnRows(sqlmock.NewRows([]string{"type", "metadata", "thread_id", "target_kind"}).AddRow(string(types.DepRelated), nil, nil, int(DepTargetIssue)))
 
 	kind := DepTargetIssue
 	dep := &types.Dependency{IssueID: "dep-a", DependsOnID: "dep-b", Type: types.DepRelated}
@@ -418,5 +418,94 @@ func TestAddDependencyInTxReadsNullStoredMetadataAsEmptyObject(t *testing.T) {
 	// reads means any write this path attempted would fail the run.
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestClassifyDepTargetFrom pins the presence-first target policy (GH#8299):
+// a prefix mismatch makes a target external only when this database holds no
+// row for it, an active wisp wins whatever its prefix, and an "external:"
+// reference is classified without asking either table.
+func TestClassifyDepTargetFrom(t *testing.T) {
+	t.Parallel()
+
+	probeErr := errors.New("probe failed")
+	for _, tc := range []struct {
+		name       string
+		target     string
+		wisp       bool
+		issue      bool
+		wispErr    error
+		issueErr   error
+		want       DepTargetKind
+		wantErr    bool
+		noProbes   bool
+		noIssueAsk bool
+	}{
+		{name: "explicit external", target: "external:https://example.invalid/1", wisp: true, issue: true, want: DepTargetExternal, noProbes: true},
+		{name: "cross-prefix issue present", target: "xp-1", issue: true, want: DepTargetIssue},
+		{name: "cross-prefix wisp present", target: "xp-1", wisp: true, want: DepTargetWisp, noIssueAsk: true},
+		{name: "both present wisp wins", target: "xp-1", wisp: true, issue: true, want: DepTargetWisp, noIssueAsk: true},
+		{name: "foreign prefix absent", target: "xp-1", want: DepTargetExternal},
+		{name: "same prefix present", target: "src-2", issue: true, want: DepTargetIssue, noIssueAsk: true},
+		{name: "same prefix absent", target: "src-2", want: DepTargetIssue, noIssueAsk: true},
+		{name: "same prefix wisp", target: "src-2", wisp: true, want: DepTargetWisp, noIssueAsk: true},
+		{name: "issue probe fails", target: "xp-1", issueErr: probeErr, wantErr: true},
+		{name: "wisp probe fails", target: "xp-1", wispErr: probeErr, wantErr: true, noIssueAsk: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var wispAsks, issueAsks int
+			got, err := ClassifyDepTargetFrom("src-1", tc.target, DepTargetPresence{
+				IsWisp: func(id string) (bool, error) {
+					wispAsks++
+					return tc.wisp, tc.wispErr
+				},
+				IsIssue: func(id string) (bool, error) {
+					issueAsks++
+					return tc.issue, tc.issueErr
+				},
+			})
+			if tc.wantErr {
+				if !errors.Is(err, probeErr) {
+					t.Fatalf("error = %v, want the probe failure wrapped", err)
+				}
+			} else if err != nil {
+				t.Fatalf("ClassifyDepTargetFrom: %v", err)
+			} else if got != tc.want {
+				t.Errorf("kind = %v, want %v", got, tc.want)
+			}
+			if tc.noProbes && wispAsks+issueAsks != 0 {
+				t.Errorf("an external: reference asked %d wisp and %d issue probes, want none", wispAsks, issueAsks)
+			}
+			if tc.noIssueAsk && issueAsks != 0 {
+				t.Errorf("issue probe asked %d times, want none", issueAsks)
+			}
+		})
+	}
+}
+
+// TestAddDependencyInTxIssueProbeFailureWritesNothing pins that a failed
+// issue-presence read is an error, not "absent": taking it as absence would
+// file a local cross-prefix target as external.
+func TestAddDependencyInTxIssueProbeFailureWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps WHERE id = ? LIMIT 1")).
+		WithArgs("xp-target").
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM issues WHERE id = ? LIMIT 1")).
+		WithArgs("xp-target").
+		WillReturnError(errors.New("connection reset"))
+
+	_, err := AddDependencyInTx(context.Background(), tx, &types.Dependency{
+		IssueID: "dep-a", DependsOnID: "xp-target", Type: types.DepBlocks,
+	}, "tester", AddDependencyOpts{SourceTable: "issues", WriteTable: "dependencies"})
+	if err == nil || !strings.Contains(err.Error(), "connection reset") {
+		t.Fatalf("AddDependencyInTx error = %v, want the issue probe failure", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
 	}
 }

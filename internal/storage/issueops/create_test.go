@@ -212,8 +212,15 @@ func TestPersistDependenciesClassifiesBareCrossPrefixTargetAsExternal(t *testing
 	}
 	var skipped []string
 
-	// A bare target with a different issue prefix is external. In particular,
-	// persistence must not probe either local target table before this insert.
+	// A bare target with a different issue prefix that this database holds no
+	// row for is external: persistence reads both local tables, finds neither,
+	// and files it in depends_on_external without a target-existence check.
+	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+		WithArgs("mkt-456").
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\? LIMIT 1").
+		WithArgs("mkt-456").
+		WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec("INSERT INTO dependencies \\(id, issue_id, depends_on_external").
 		WithArgs(depid.New("sym-3su", "mkt-456"), "sym-3su", "mkt-456", types.DepRelated, "tester", sqlmock.AnyArg(), "{}", "").
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -231,6 +238,50 @@ func TestPersistDependenciesClassifiesBareCrossPrefixTargetAsExternal(t *testing
 	}
 	if !result.ChangedTables["dependencies"] {
 		t.Fatalf("ChangedTables = %#v, want dependencies changed", result.ChangedTables)
+	}
+
+	mock.ExpectRollback()
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+// TestPersistDependenciesClassifiesPresentCrossPrefixTargetAsIssue is the
+// other half of the bare cross-prefix pin (GH#8299): a target of another
+// prefix that this database holds as an issue is a local edge, filed in
+// depends_on_issue_id like any other local issue.
+func TestPersistDependenciesClassifiesPresentCrossPrefixTargetAsIssue(t *testing.T) {
+	ctx := context.Background()
+	db, mock, tx := beginMockTx(t)
+	defer db.Close()
+
+	source := &types.Issue{
+		ID:        "sym-3su",
+		IssueType: types.TypeTask,
+		Dependencies: []*types.Dependency{{
+			DependsOnID: "mkt-456",
+			Type:        types.DepRelated,
+		}},
+	}
+
+	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+		WithArgs("mkt-456").
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\? LIMIT 1").
+		WithArgs("mkt-456").
+		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+	mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\?").
+		WithArgs("mkt-456").
+		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+	mock.ExpectExec("INSERT INTO dependencies \\(id, issue_id, depends_on_issue_id").
+		WithArgs(depid.New("sym-3su", "mkt-456"), "sym-3su", "mkt-456", types.DepRelated, "tester", sqlmock.AnyArg(), "{}", "").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if _, err := PersistDependenciesWithOptionsResult(ctx, tx, []*types.Issue{source}, "tester", storage.BatchCreateOptions{}); err != nil {
+		t.Fatalf("PersistDependenciesWithOptionsResult error = %v, want nil", err)
 	}
 
 	mock.ExpectRollback()
@@ -439,8 +490,15 @@ func TestPersistDependenciesSkipsHierarchyValidationAcrossPrefixes(t *testing.T)
 		}},
 	}
 
-	// No target or ancestors query: target existence and hierarchy cannot be
-	// validated locally across rig prefixes.
+	// The target has another prefix and no local row, so it is external: after
+	// the two presence reads there is no target or ancestors query, because
+	// existence and hierarchy cannot be validated for another rig's issue.
+	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+		WithArgs("bb-target").
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\? LIMIT 1").
+		WithArgs("bb-target").
+		WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery("WITH RECURSIVE reachable").
 		WithArgs("bb-target", "aa-source").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))

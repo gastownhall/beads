@@ -87,10 +87,11 @@ func depTargetColumns(t *testing.T) []string {
 // TestGetDescendantsCrossPrefixParent is the behavioural half of
 // TestBuildDescendantsCTEResolvesEveryDepTargetColumn: that test pins the
 // walk's query text, this one pins that the widened COALESCE matches real rows.
-// The write path classifies a target by prefix alone (issueops.IsExternalDepTarget),
-// so a parent-child edge between two prefixes lands in depends_on_external even
-// when both ends are local. Before be-qfm the walk coalesced only the issue and
-// wisp columns, so each child below — and its subtree — was missing from the
+// Before GH#8299 the write path classified a target by prefix alone, so a
+// parent-child edge between two local prefixes landed in depends_on_external,
+// and a database written then still holds such rows: the write path no longer
+// moves them. The case files its edges there the way that write path did.
+// Before be-qfm the walk coalesced only the issue and wisp columns, so each child below — and its subtree — was missing from the
 // proxied `bd list --parent` tree. Each one is reached through a different edge
 // member (issues and wisps, anchor and recursive), so dropping the column from
 // any one member loses a different child.
@@ -126,9 +127,16 @@ func (s *testSuite) TestGetDescendantsCrossPrefixParent() {
 			"tester", domain.DepInsertOpts{UseWispsTable: e.wisps}))
 	}
 
-	// Were the classifier ever to route one of these edges to another column,
-	// the two-column walk would find that child too and the case would pin nothing.
+	// The write path now files these local targets in their typed columns;
+	// move them to depends_on_external, where the pre-GH#8299 write path left
+	// them. Were one of them left in another column, the two-column walk would
+	// find that child too and the case would pin nothing.
 	for _, table := range []string{"dependencies", "wisp_dependencies"} {
+		_, err := s.Runner().ExecContext(s.Ctx(),
+			//nolint:gosec // G201: table is one of two hardcoded constants for tests
+			"UPDATE "+table+" SET depends_on_external = COALESCE(depends_on_issue_id, depends_on_wisp_id), depends_on_issue_id = NULL, depends_on_wisp_id = NULL WHERE issue_id LIKE ?",
+			"%-xp-%")
+		s.Require().NoError(err, table)
 		rows := s.loadDepRows(table, "%-xp-%")
 		s.Require().Len(rows, 2, table)
 		for _, d := range rows {

@@ -43,29 +43,25 @@ func pickDepTable(useWisps bool) string {
 	return "dependencies"
 }
 
-// pickDepTargetColumn classifies an edge's target the same way the in-tx store
-// bodies do, through issueops.IsExternalDepTarget: a target this database
-// cannot hold — an "external:" reference or an issue belonging to another
-// repository — goes to depends_on_external, which carries no foreign key.
-// Only a target that could plausibly be local is probed against wisps and
-// otherwise treated as a local issue, where fk_dep_issue_target still refuses
-// an id that is genuinely missing.
-func (r *dependencySQLRepositoryImpl) pickDepTargetColumn(ctx context.Context, issueID, dependsOnID string) (string, error) {
-	if issueops.IsExternalDepTarget(issueID, dependsOnID) {
-		return "depends_on_external", nil
-	}
-	var probe int
-	err := r.runner.QueryRowContext(ctx, "SELECT 1 FROM wisps WHERE id = ? LIMIT 1", dependsOnID).Scan(&probe)
-	switch {
-	case err == nil:
-		return "depends_on_wisp_id", nil
-	case errors.Is(err, sql.ErrNoRows):
-		return "depends_on_issue_id", nil
-	case dberrors.IsTableNotExist(err):
-		return "depends_on_issue_id", nil
-	default:
-		return "", fmt.Errorf("classify dep target %s: %w", dependsOnID, err)
-	}
+// classifyDepTarget classifies an edge's target by the rule the in-tx store
+// bodies use, issueops.ClassifyDepTargetFrom, reading presence on the runner: a
+// target this database holds is a local edge whatever its prefix, and only an
+// "external:" reference or another prefix's id with no local row goes to
+// depends_on_external, which carries no foreign key. A deployment without a
+// wisps table reads as having no wisps; any other failed read is returned.
+func (r *dependencySQLRepositoryImpl) classifyDepTarget(ctx context.Context, issueID, dependsOnID string) (issueops.DepTargetKind, error) {
+	return issueops.ClassifyDepTargetFrom(issueID, dependsOnID, issueops.DepTargetPresence{
+		IsWisp: func(id string) (bool, error) {
+			exists, err := r.rowExists(ctx, "wisps", id)
+			if err != nil && dberrors.IsTableNotExist(err) {
+				return false, nil
+			}
+			return exists, err
+		},
+		IsIssue: func(id string) (bool, error) {
+			return r.rowExists(ctx, "issues", id)
+		},
+	})
 }
 
 func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dependency, actor string, opts domain.DepInsertOpts) error {
@@ -165,15 +161,16 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 		return fmt.Errorf("db: DependencySQLRepository.Insert: check existing: %w", err)
 	}
 
-	targetCol, err := r.pickDepTargetColumn(ctx, dep.IssueID, dep.DependsOnID)
+	kind, err := r.classifyDepTarget(ctx, dep.IssueID, dep.DependsOnID)
 	if err != nil {
 		return fmt.Errorf("db: DependencySQLRepository.Insert: %w", err)
 	}
+	targetCol := kind.Column()
 
 	// Deterministic id keyed on (issue_id, target), the same derivation as the
 	// embedded/issueops path, so server-mode (use-case) dependency creation stays
 	// merge-safe across clones and works once the DEFAULT (UUID()) is dropped (#4259).
-	//nolint:gosec // G201: table is one of two hardcoded constants; targetCol is from pickDepTargetColumn
+	//nolint:gosec // G201: table is one of two hardcoded constants; targetCol is from DepTargetKind.Column()
 	if _, err := r.runner.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (id, issue_id, %s, type, created_at, created_by, metadata, thread_id)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)

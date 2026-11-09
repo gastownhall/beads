@@ -109,17 +109,17 @@ func (l *depBatchLookups) isWisp(ctx context.Context, tx DBTX, id string) bool {
 }
 
 // classify is ClassifyDepTarget using the batch routing read.
-func (l *depBatchLookups) classify(ctx context.Context, tx DBTX, dep *types.Dependency, isCrossPrefix bool) DepTargetKind {
+func (l *depBatchLookups) classify(ctx context.Context, tx DBTX, dep *types.Dependency) (DepTargetKind, error) {
 	if l == nil {
-		return ClassifyDepTarget(ctx, tx, dep, isCrossPrefix)
+		return ClassifyDepTarget(ctx, tx, dep)
 	}
-	if isCrossPrefix || IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
-		return DepTargetExternal
+	if IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
+		return DepTargetExternal, nil
 	}
 	if l.isWisp(ctx, tx, dep.DependsOnID) {
-		return DepTargetWisp
+		return DepTargetWisp, nil
 	}
-	return DepTargetIssue
+	return DepTargetIssue, nil
 }
 
 // targetExists is the per-edge `SELECT 1 FROM <issues|wisps> WHERE id = ?`.

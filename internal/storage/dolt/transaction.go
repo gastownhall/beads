@@ -1003,7 +1003,6 @@ func (t *doltTransaction) AddDependencyWithOptions(ctx context.Context, dep *typ
 		SourceTable:    sourceTable,
 		TargetTable:    targetTable,
 		WriteTable:     table,
-		IsCrossPrefix:  isCrossPrefix,
 		SkipCycleCheck: addOpts.SkipCycleCheck,
 		TargetKind:     &kind,
 		EmitEvent:      addOpts.EmitEvent,
