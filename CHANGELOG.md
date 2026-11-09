@@ -1234,6 +1234,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user still share breaker state; users on one host no longer do, and old
   and new `bd` binaries keep separate state until the old ones are gone.
   Windows keeps `%TEMP%\beads-circuit\`, which is already per user.
+  If the directory already exists as a symlink, a non-directory, another
+  user's directory or one writable by group or others, `bd` runs without a
+  breaker and logs one `[circuit-breaker] disabled:` warning per process
+  instead of reading or writing state through it.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
