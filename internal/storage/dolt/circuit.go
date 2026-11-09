@@ -133,9 +133,53 @@ func circuitBreakerPaths() (dir, legacyFile string) {
 	return circuitBreakerDir(), legacyCircuitBreakerFile
 }
 
+// unsafeCircuitDirWarned holds the unsafe live directories this process has
+// already warned about: a process opens stores more than once, and one
+// warning per path says all there is to say.
+var unsafeCircuitDirWarned sync.Map
+
+// ensureCircuitBreakerDir creates the live directory (0700) when it is absent
+// and reports whether breaker state may be kept in it. An existing path that
+// is a symlink, not a directory, or (on Unix) another user's or writable by
+// others could be another local user's plant: its state would gate this
+// user's dial and its entries could redirect the state write (GH#4223). It
+// is never repaired in place, which would keep whatever was planted in it;
+// the breaker is disabled instead, with one warning per path. A directory
+// that cannot be created at all disables the breaker silently, like any
+// other breaker I/O failure. Both fail open: the server is dialed.
+func ensureCircuitBreakerDir(dir string) bool {
+	_ = os.MkdirAll(dir, 0o700)
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return false
+	}
+	problem := circuitDirProblem(info)
+	if problem == "" {
+		return true
+	}
+	if _, warned := unsafeCircuitDirWarned.LoadOrStore(dir, struct{}{}); !warned {
+		log.Printf("[circuit-breaker] disabled: %s %s; have its owner remove it, or point TMPDIR at a directory only you can write", dir, problem)
+	}
+	return false
+}
+
+// circuitDirProblem reports why the Lstat result of a live directory makes it
+// unsafe for breaker state, or "" when it is safe.
+func circuitDirProblem(info os.FileInfo) string {
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "is a symlink"
+	}
+	if !info.IsDir() {
+		return "is not a directory"
+	}
+	return circuitDirOwnershipProblem(info)
+}
+
 // newCircuitBreaker creates a circuit breaker for the given Dolt server
 // host:port:database. The database name is included in the file path so each
 // project gets independent circuit breaker state on shared servers (GH#3140).
+// It returns nil, which callers treat as no breaker, when the live directory
+// is unavailable or unsafe (see ensureCircuitBreakerDir).
 func newCircuitBreaker(host string, port int, database string) *circuitBreaker {
 	// Sanitize host and database for use in filename
 	sanitize := strings.NewReplacer(".", "-", ":", "-", "/", "-")
@@ -154,7 +198,9 @@ func newCircuitBreaker(host string, port int, database string) *circuitBreaker {
 	}
 
 	dir, _ := circuitBreakerPaths()
-	_ = os.MkdirAll(dir, 0o700)
+	if !ensureCircuitBreakerDir(dir) {
+		return nil
+	}
 	return &circuitBreaker{
 		host:     host,
 		port:     port,
@@ -427,9 +473,11 @@ func CleanStaleCircuitBreakerFiles() {
 	// Clean stale files in the dedicated subdirectory: open/half-open state
 	// past circuitStaleTTL, and closed files no writer has touched in
 	// closedSweepTTL. A recently written closed file is a breaker some
-	// process is using and is left alone.
-	_ = os.MkdirAll(dir, 0o700)
-	cleanStaleCircuitBreakerFilesIn(dir)
+	// process is using and is left alone. An unsafe live directory is not
+	// swept, as no breaker uses it (see ensureCircuitBreakerDir).
+	if ensureCircuitBreakerDir(dir) {
+		cleanStaleCircuitBreakerFilesIn(dir)
+	}
 
 	// Also sweep the legacy hardcoded "/tmp/beads-circuit" location
 	// (C:\tmp\beads-circuit on Windows) where older builds accumulated files

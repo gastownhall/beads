@@ -394,6 +394,13 @@ bd list
 On macOS, `/tmp` is a symlink to `/private/tmp`, which is not always cleared
 on restart — the state file can persist across reboots.
 
+If `bd` logs `[circuit-breaker] disabled: <dir> ...`, the breaker directory
+already exists but is unsafe to use: it is a symlink or not a directory, or
+on Linux and macOS it belongs to another user or is writable by group or
+others. `bd` does not repair it; it runs without a breaker (every command
+dials the server) and warns once per process. Have the directory's owner
+remove it, or set `TMPDIR` to a directory only you can write.
+
 ## Dolt Server Issues
 
 ### Server not starting
