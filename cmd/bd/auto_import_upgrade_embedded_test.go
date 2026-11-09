@@ -444,3 +444,33 @@ func TestEmbeddedAutoImportFallback_ConflictSkip_SkipsRetiredRows(t *testing.T) 
 		t.Errorf("fresh row %s was not imported: %v", fresh, err)
 	}
 }
+
+// TestEmbeddedAutoImportSkipsInvalidStatusRow reproduces GH#4492: one row
+// whose status the running bd no longer accepts ("verify", written by an
+// older bd) must not abort the whole auto-import; the valid rows still land.
+func TestEmbeddedAutoImportSkipsInvalidStatusRow(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+	_, beadsDir, _ := bdInit(t, bd, "--prefix", "ce")
+
+	lines := []string{
+		`{"id":"ce-1","title":"valid row","status":"open","priority":2,"issue_type":"task"}`,
+		`{"id":"ce-2","title":"stale status row","status":"verify","priority":2,"issue_type":"task"}`,
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := openStore(t, beadsDir, "ce")
+	ctx := context.Background()
+
+	maybeAutoImportJSONL(ctx, store, beadsDir)
+
+	if _, err := store.GetIssue(ctx, "ce-1"); err != nil {
+		t.Fatalf("auto-import dropped the valid row ce-1 because ce-2 has status \"verify\": %v", err)
+	}
+}
