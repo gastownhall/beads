@@ -141,6 +141,48 @@ func TestImportRejectsFileMergesAndRefusesUnsafeDestinations(t *testing.T) {
 		}
 		assertFile(t, rejects, "old-1\n")
 	})
+
+	// Ported from pr5202's TestWriteRejectFileHardening (matt wilkie).
+	t.Run("rewrite_replaces_a_lax_mode_with_0600_and_keeps_old_records", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("requires POSIX file permission semantics")
+		}
+		dir := t.TempDir()
+		source := newSource(t, dir)
+		rejects := filepath.Join(dir, "issues.rejected.jsonl")
+		if err := os.WriteFile(rejects, []byte("old-1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(rejects, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := save(source, rejects, r1); err != nil {
+			t.Fatalf("save: %v", err)
+		}
+		assertFile(t, rejects, "old-1\n"+string(r1.Raw)+"\n")
+		info, err := os.Stat(rejects)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Errorf("rejects file mode = %o, want 0600: a rewrite must not inherit the old lax mode", got)
+		}
+	})
+}
+
+// TestDefaultImportRejectsPath pins the quarantine naming rule (GH#4492):
+// beside the source, <stem>.rejected.jsonl for a .jsonl source and the
+// suffix appended to any other name. Ported from GLM's test of the same name.
+func TestDefaultImportRejectsPath(t *testing.T) {
+	for _, tc := range []struct{ source, want string }{
+		{filepath.Join("w", ".beads", "issues.jsonl"), filepath.Join("w", ".beads", "issues.rejected.jsonl")},
+		{filepath.Join("w", "backup.txt"), filepath.Join("w", "backup.txt.rejected.jsonl")},
+		{filepath.Join("w", "plain"), filepath.Join("w", "plain.rejected.jsonl")},
+	} {
+		if got := defaultImportRejectsPath(tc.source); got != tc.want {
+			t.Errorf("defaultImportRejectsPath(%q) = %q, want %q", tc.source, got, tc.want)
+		}
+	}
 }
 
 func sameFileForTest(a, b string) (bool, error) {
