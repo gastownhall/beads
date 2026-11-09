@@ -975,3 +975,204 @@ func TestEmbeddedDoltPullRenumberChildrenRetained(t *testing.T) {
 		t.Errorf("further pull reported %+v; the retained repair is spent and the result must be nil", result)
 	}
 }
+
+// buildOfflineChildNoCollision builds the AC-8 fixture: the same two-clone
+// divergence shape as buildOfflineChildCollision, but with NO colliding
+// child id — the local clone adds bd-rnn.73 under the shared parent while
+// the other clone adds an unrelated solo issue. The legs still diverge (a
+// plain pull has a real merge to run), just not in any way the repair
+// addresses.
+//
+// Returns the local leg's pinned head.
+func buildOfflineChildNoCollision(t *testing.T, beadsDir string) (localHead string) {
+	t.Helper()
+	ctx := t.Context()
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+
+	store, err := embeddeddolt.Open(ctx, beadsDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("Open (create): %v", err)
+	}
+	store.Close()
+
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	// Plain defer, not t.Cleanup: the handle must be gone when this helper
+	// returns so the store-under-test can open its own (embedded engine
+	// handles serialize).
+	defer func() { _ = cleanup() }()
+
+	mustExec := func(stage, q string, args ...any) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx, q, args...); err != nil {
+			t.Fatalf("%s: %v", stage, err)
+		}
+	}
+	head := func() string {
+		t.Helper()
+		var hash string
+		if err := db.QueryRowContext(ctx, "SELECT commit_hash FROM dolt_log LIMIT 1").Scan(&hash); err != nil {
+			t.Fatalf("read head hash: %v", err)
+		}
+		return hash
+	}
+	seedChild := func(id, title string) {
+		t.Helper()
+		mustExec("seed "+id, "INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) "+
+			"VALUES (?, ?, '', '', '', '', 'open', 2, 'task')", id, title)
+	}
+
+	// C0: the shared ancestor — the parent with counter 70 and two children
+	// both clones already share.
+	seedChild("bd-rnn", "parent epic")
+	seedChild("bd-rnn.71", "shared child 71")
+	seedChild("bd-rnn.72", "shared child 72")
+	mustExec("seed counter 70", "INSERT INTO child_counters (parent_id, last_child) VALUES ('bd-rnn', 70)")
+	mustExec("commit C0", "CALL DOLT_COMMIT('-Am', 'test: seed ancestor counter 70 (C0)')")
+	c0 := head()
+	mustExec("add remote", "CALL DOLT_REMOTE('add', 'origin', ?)", "file://"+filepath.Join(t.TempDir(), "remote"))
+	mustExec("push C0", "CALL DOLT_PUSH('origin', 'main')")
+
+	// The local clone's leg: one more child under the shared parent.
+	seedChild("bd-rnn.73", "local child 73")
+	mustExec("local counter 73", "UPDATE child_counters SET last_child = 73 WHERE parent_id = 'bd-rnn'")
+	mustExec("commit local leg", "CALL DOLT_COMMIT('-Am', 'test: local child 73')")
+	localHead = head()
+
+	// The other clone's leg: an unrelated solo issue, no child id touched.
+	mustExec("rewind to C0", "CALL DOLT_RESET('--hard', ?)", c0)
+	seedChild("bd-rnns", "remote solo issue")
+	mustExec("commit remote leg", "CALL DOLT_COMMIT('-Am', 'test: remote solo issue')")
+	mustExec("push remote leg", "CALL DOLT_PUSH('origin', 'main')")
+
+	// Back on the local leg: the branches diverge, but no hierarchical id
+	// collides.
+	mustExec("rewind to local leg", "CALL DOLT_RESET('--hard', ?)", localHead)
+	return localHead
+}
+
+// TestEmbeddedDoltPullRenumberChildrenNoCollision (GH#4796, bd-28sb25 AC-8):
+// --renumber-children on diverged clones with NO eligible hierarchical
+// add/add collision renames nothing: the result is nil, no rename commit
+// exists, no id or counter moved, and the pull's own merge — the normal
+// settlement — decides the outcome (here it succeeds, so the branch
+// advances past the local leg). A second run on the now-in-sync store
+// behaves the same.
+func TestEmbeddedDoltPullRenumberChildrenNoCollision(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
+	}
+
+	ctx := context.Background()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	localHead := buildOfflineChildNoCollision(t, beadsDir)
+
+	store, err := embeddeddolt.Open(ctx, beadsDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	result, err := store.PullWithChildRenumbers(ctx, "")
+	if err != nil {
+		t.Fatalf("PullWithChildRenumbers on a collision-free divergence: %v", err)
+	}
+	if result != nil {
+		t.Fatalf("PullWithChildRenumbers reported %+v on a collision-free divergence; no repair may run", result)
+	}
+
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, filepath.Join(beadsDir, "embeddeddolt"), "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL (verify): %v", err)
+	}
+	// Released explicitly below, before the second store-level pull: the
+	// embedded engine serializes open handles, and the store must be free to
+	// act once the assertions are done. The defer covers a t.Fatalf path
+	// (defers run before t.Cleanup closes the store).
+	released := false
+	releaseVerify := func() {
+		if !released {
+			released = true
+			_ = cleanup()
+		}
+	}
+	defer releaseVerify()
+
+	// Both legs' content arrived through the normal merge, and no identity
+	// moved: the shared children kept their ids, the local .73 is untouched,
+	// no renumbered id exists.
+	for id, title := range map[string]string{
+		"bd-rnn":    "parent epic",
+		"bd-rnn.71": "shared child 71",
+		"bd-rnn.72": "shared child 72",
+		"bd-rnn.73": "local child 73",
+		"bd-rnns":   "remote solo issue",
+	} {
+		var got string
+		if err := db.QueryRowContext(ctx,
+			"SELECT title FROM issues WHERE id = ?", id).Scan(&got); err != nil {
+			t.Fatalf("read %s after the pull: %v", id, err)
+		}
+		if got != title {
+			t.Errorf("title of %s = %q, want %q; the pull renamed an identity with no collision to repair", id, got, title)
+		}
+	}
+	var children int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM issues WHERE id LIKE 'bd-rnn.%'").Scan(&children); err != nil {
+		t.Fatalf("count children: %v", err)
+	}
+	if children != 3 {
+		t.Errorf("children after the pull = %d, want 3 (no renumbered copy joined them)", children)
+	}
+	var last int
+	if err := db.QueryRowContext(ctx,
+		"SELECT last_child FROM child_counters WHERE parent_id = 'bd-rnn'").Scan(&last); err != nil {
+		t.Fatalf("read counter: %v", err)
+	}
+	if last != 73 {
+		t.Errorf("counter after the pull = %d, want the untouched 73", last)
+	}
+	var renumbered int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_log WHERE message LIKE 'bd: renumber %'").Scan(&renumbered); err != nil {
+		t.Fatalf("count rename commits: %v", err)
+	}
+	if renumbered != 0 {
+		t.Errorf("dolt_log holds %d renumber commit(s); no repair may commit on a collision-free divergence", renumbered)
+	}
+	var head string
+	if err := db.QueryRowContext(ctx,
+		"SELECT hash FROM dolt_branches WHERE name = 'main'").Scan(&head); err != nil {
+		t.Fatalf("read branch head: %v", err)
+	}
+	if head == localHead {
+		t.Errorf("branch head = the local leg %s; the normal merge of the remote leg never ran", localHead)
+	}
+
+	// A second run on the now-in-sync store: still nothing to repair, and
+	// normal settlement (nothing to merge this time) still decides alone.
+	afterMerge := head
+	releaseVerify()
+	result, err = store.PullWithChildRenumbers(ctx, "")
+	if err != nil {
+		t.Fatalf("second PullWithChildRenumbers: %v", err)
+	}
+	if result != nil {
+		t.Errorf("second PullWithChildRenumbers reported %+v; an in-sync store has no repair to report", result)
+	}
+	db, cleanup, err = embeddeddolt.OpenSQL(ctx, filepath.Join(beadsDir, "embeddeddolt"), "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL (second verify): %v", err)
+	}
+	if err := db.QueryRowContext(ctx,
+		"SELECT hash FROM dolt_branches WHERE name = 'main'").Scan(&head); err != nil {
+		t.Fatalf("read branch head (second run): %v", err)
+	}
+	_ = cleanup()
+	if head != afterMerge {
+		t.Errorf("branch head moved %s -> %s on an in-sync second run; nothing may be committed", afterMerge, head)
+	}
+}
