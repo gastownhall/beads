@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -528,6 +529,95 @@ func TestEmbeddedStaleSnapshotImportKeepsClose(t *testing.T) {
 		}
 		if after.CloseReason != "" {
 			t.Errorf("--allow-stale kept close_reason %q, want empty", after.CloseReason)
+		}
+	})
+
+	t.Run("post_merge_hook_import_keeps_close", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("the installed git hooks are POSIX shell scripts; the merge lane is exercised on unix")
+		}
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "snapmerge")
+
+		// bd init installed its hooks and pointed core.hooksPath at them;
+		// without this the merge below would silently skip the import and
+		// the subtest would fail for the wrong reason.
+		if _, err := os.Stat(filepath.Join(beadsDir, "hooks", "post-merge")); err != nil {
+			t.Fatalf("bd init installed no post-merge hook: %v", err)
+		}
+
+		// The hooks resolve bd through PATH (generateHookSection's
+		// `command -v bd`), so every git subprocess in this subtest — the
+		// hooks' own bd included — must see the test binary first.
+		binDir := t.TempDir()
+		if err := os.Symlink(bd, filepath.Join(binDir, "bd")); err != nil {
+			t.Fatalf("symlink test bd into a PATH dir: %v", err)
+		}
+		gitEnv := append(bdEnv(dir), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		runGit := func(dir string, args ...string) string {
+			t.Helper()
+			cmd := gitCommand(args...)
+			cmd.Dir = dir
+			cmd.Env = gitEnv
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("git %s failed: %v\n%s", args[0], err, out)
+			}
+			return string(out)
+		}
+
+		seedStaleOpen(t, dir, "snapmerge-x")
+
+		// Commit X's pre-close snapshot as the tracked export; import.auto
+		// (on by default) makes the post-merge hook import it after merges.
+		// --no-verify keeps the pre-commit export from replacing the
+		// crafted file.
+		bdExport(t, bd, dir, "-o", filepath.Join(beadsDir, "issues.jsonl"))
+		runGit(dir, "add", ".beads/issues.jsonl")
+		runGit(dir, "commit", "--no-verify", "-m", "track pre-close snapshot")
+
+		// The nested linked worktree shares the root's embedded store and
+		// is created before W exists anywhere.
+		wtDir := filepath.Join(t.TempDir(), "wt")
+		runGit(dir, "worktree", "add", "-b", "snapmerge-wt", wtDir)
+
+		closed := claimAndClose(t, dir, "snapmerge-x", "closed before merge")
+		if wtView := bdShow(t, bd, wtDir, "snapmerge-x"); wtView.Status != types.StatusClosed {
+			t.Fatalf("worktree sees %s, want the shared store's closed state", wtView.Status)
+		}
+
+		// W enters only the worktree's copy of the tracked snapshot.
+		now := time.Now().UTC()
+		appendJSONLIssue(t, filepath.Join(wtDir, ".beads", "issues.jsonl"), types.Issue{
+			ID: "snapmerge-w", Title: "Branch witness", Status: types.StatusOpen,
+			IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now,
+		})
+		runGit(wtDir, "add", ".beads/issues.jsonl")
+		runGit(wtDir, "commit", "--no-verify", "-m", "add witness W to snapshot")
+
+		// Advance main so the merge is a real merge: git does not run the
+		// post-merge hook on a fast-forward.
+		if err := os.WriteFile(filepath.Join(dir, "UNRELATED.md"), []byte("merge driver\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runGit(dir, "add", "UNRELATED.md")
+		runGit(dir, "commit", "--no-verify", "-m", "advance main")
+
+		if bdShowSucceeds(t, bd, dir, "snapmerge-w") {
+			t.Fatal("witness snapmerge-w exists before the merge; the fixture leaked")
+		}
+
+		mergeOut := runGit(dir, "merge", "--no-edit", "snapmerge-wt")
+		// The hook's import must not have failed; the separate "no Dolt
+		// remote configured" advisory is this lane's expected warning.
+		if strings.Contains(mergeOut, "beads: post-merge import warning:") {
+			t.Errorf("post-merge hook import failed:\n%s", mergeOut)
+		}
+
+		for label, showDir := range map[string]string{"root": dir, "worktree": wtDir} {
+			if w := bdShow(t, bd, showDir, "snapmerge-w"); w.Status != types.StatusOpen {
+				t.Errorf("%s: witness after merge: status %s, want open", label, w.Status)
+			}
+			requireClosedUnchanged(t, label+" after merge", bdShow(t, bd, showDir, "snapmerge-x"), closed)
 		}
 	})
 }
