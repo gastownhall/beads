@@ -43,7 +43,7 @@ func TestEmbeddedReopenIssueCategorySemantics(t *testing.T) {
 			t.Fatalf("reopened issue = %+v", issue)
 		}
 	}
-	assertReopenEvents := func(id string) {
+	assertReopenEvents := func(id string, commentTable string) {
 		t.Helper()
 		events, err := te.store.GetEvents(ctx, id, 0)
 		if err != nil {
@@ -60,11 +60,17 @@ func TestEmbeddedReopenIssueCategorySemantics(t *testing.T) {
 				statusChanged++
 			}
 		}
-		if reopened != 1 || commented != 1 || statusChanged != 0 {
+		if reopened != 1 || commented != 0 || statusChanged != 0 {
 			t.Fatalf(
-				"reopen events for %s = reopened:%d commented:%d status_changed:%d, want 1, 1, 0",
+				"reopen events for %s = reopened:%d commented:%d status_changed:%d, want 1, 0, 0: the reason is a comment row, not an audit event",
 				id, reopened, commented, statusChanged,
 			)
+		}
+		// The reason lands in the plane's comment table, attributed to the actor.
+		var reason string
+		te.queryScalar(t, ctx, "SELECT text FROM "+commentTable+" WHERE issue_id = ? AND author = ?", []any{id, "tester"}, &reason)
+		if reason != "needs work" {
+			t.Fatalf("reopen comment for %s in %s = %q, want %q", id, commentTable, reason, "needs work")
 		}
 	}
 
@@ -74,12 +80,18 @@ func TestEmbeddedReopenIssueCategorySemantics(t *testing.T) {
 	setStatus("issues", "rct-permanent", "archived")
 	setStatus("wisps", "rct-wisp", "archived")
 
-	for _, id := range []string{"rct-permanent", "rct-wisp"} {
-		if err := te.store.ReopenIssue(ctx, id, "needs work", "tester"); err != nil {
-			t.Fatalf("ReopenIssue(%s): %v", id, err)
+	for _, row := range []struct {
+		id           string
+		commentTable string
+	}{
+		{id: "rct-permanent", commentTable: "comments"},
+		{id: "rct-wisp", commentTable: "wisp_comments"},
+	} {
+		if err := te.store.ReopenIssue(ctx, row.id, "needs work", "tester"); err != nil {
+			t.Fatalf("ReopenIssue(%s): %v", row.id, err)
 		}
-		assertReopened(id)
-		assertReopenEvents(id)
+		assertReopened(row.id)
+		assertReopenEvents(row.id, row.commentTable)
 	}
 
 	for _, status := range []struct {

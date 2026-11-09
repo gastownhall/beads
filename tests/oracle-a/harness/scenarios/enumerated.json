@@ -13579,7 +13579,7 @@
     "--json"
    ]
   ],
-  "pins": "reopen.go reason -> ReopenIssue; reopen.go:68-72 adds comment event when reason!=''; non-json prints '↻ Reopened ror-1: regression found'.",
+  "pins": "reopen.go reason -> ReopenIssue; since gastownhall/beads#5593 a nonblank reason is also written as a structured comment row in the issue's comment thread (visible in the show step's comments), attributed to the reopen actor, and no audit commented event is minted — the show step's extra comment entry is that change's documented intentional divergence from a pre-#5593 reference; non-json prints '↻ Reopened ror-1: regression found'.",
   "deterministic": true
  },
  {

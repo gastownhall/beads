@@ -996,13 +996,17 @@ func assertLifecycleMissingIDRefusal(t *testing.T, verb, id string, err error) {
 
 // RunLifecycleReopenRecordsItsReason pins ReopenRequest.Reason: it "records
 // why literal closed and configured done statuses move to open", and the leaf
-// now says WHERE — the issue's event history, on the reopened entry the move
-// itself records, and nowhere on the issue or the result.
+// says WHERE — twice. The reopened entry on the issue's local event history
+// carries the reason, and a nonblank reason ALSO lands in the issue's comment
+// thread as one structured comment attributed to the reopen actor, routed to
+// the plane the issue lives in. No audit commented event is minted: the
+// comment is a real thread row, not an event-table stand-in.
 //
-// The no-reason leg is what makes the location a promise rather than a
+// The no-reason leg is what makes both locations a promise rather than a
 // coincidence. It proves the reopened entry exists independently of the
 // reason, so the first leg is reading a reason carried BY that entry rather
-// than an entry minted because a reason was supplied.
+// than an entry minted because a reason was supplied — and that the reason,
+// not the move, is what mints the comment.
 func RunLifecycleReopenRecordsItsReason(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
 	t.Helper()
 
@@ -1030,6 +1034,27 @@ func RunLifecycleReopenRecordsItsReason(t *testing.T, ctx context.Context, fixtu
 		t.Errorf("reopen of %s recorded %d reopened events carrying the reason, want 1", id, recorded)
 	}
 
+	// The reason is a comment-thread row, attributed to the reopen actor.
+	var comments int
+	if err := fixture.QueryScalar(ctx,
+		"SELECT COUNT(*) FROM comments WHERE issue_id = ? AND author = ? AND text = ?",
+		[]any{id, "writer", "regressed"}, &comments); err != nil {
+		t.Fatalf("count reopen comments for %s: %v", id, err)
+	}
+	if comments != 1 {
+		t.Errorf("reopen of %s wrote %d comments carrying the reason, want exactly 1", id, comments)
+	}
+	// The comment is the thread's row, not an audit commented event.
+	var auditComments int
+	if err := fixture.QueryScalar(ctx,
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
+		[]any{id, string(types.EventCommented)}, &auditComments); err != nil {
+		t.Fatalf("count audit commented events for %s: %v", id, err)
+	}
+	if auditComments != 0 {
+		t.Errorf("reopen of %s recorded %d audit commented events, want 0: the reason is a comment row", id, auditComments)
+	}
+
 	quiet := fixture.IssuePrefix + "-lcr-reason-none"
 	lifecycleCloseReopenSeedIssue(t, ctx, fixture, quiet, types.StatusOpen, nil)
 	if _, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: quiet}); err != nil {
@@ -1038,7 +1063,7 @@ func RunLifecycleReopenRecordsItsReason(t *testing.T, ctx context.Context, fixtu
 	if _, err := fixture.Lifecycle.Reopen(ctx, publicops.ReopenRequest{Actor: "writer", IssueID: quiet}); err != nil {
 		t.Fatalf("reopen %s with no reason: %v", quiet, err)
 	}
-	var entries, carrying int
+	var entries, carrying, quietComments int
 	if err := fixture.QueryScalar(ctx,
 		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
 		[]any{quiet, string(types.EventReopened)}, &entries); err != nil {
@@ -1054,6 +1079,41 @@ func RunLifecycleReopenRecordsItsReason(t *testing.T, ctx context.Context, fixtu
 	}
 	if carrying != 0 {
 		t.Errorf("reopen of %s with no reason recorded %d reopened events carrying one, want 0", quiet, carrying)
+	}
+	if err := fixture.QueryScalar(ctx,
+		"SELECT COUNT(*) FROM comments WHERE issue_id = ?", []any{quiet}, &quietComments); err != nil {
+		t.Fatalf("count comments for %s: %v", quiet, err)
+	}
+	if quietComments != 0 {
+		t.Errorf("reopen of %s with no reason left %d comments, want 0", quiet, quietComments)
+	}
+
+	// Wisp routing: the same reason on an ephemeral issue lands in the wisp
+	// comment table, not the durable one, and mints no wisp commented event.
+	wisp := fixture.IssuePrefix + "-lcr-reason-wisp"
+	lifecycleCloseReopenSeedWisp(t, ctx, fixture, wisp)
+	if _, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: wisp}); err != nil {
+		t.Fatalf("close %s: %v", wisp, err)
+	}
+	if _, err := fixture.Lifecycle.Reopen(ctx, publicops.ReopenRequest{Actor: "writer", IssueID: wisp, Reason: "flaky again"}); err != nil {
+		t.Fatalf("reopen %s: %v", wisp, err)
+	}
+	var wispComments, wispAuditComments int
+	if err := fixture.QueryScalar(ctx,
+		"SELECT COUNT(*) FROM wisp_comments WHERE issue_id = ? AND author = ? AND text = ?",
+		[]any{wisp, "writer", "flaky again"}, &wispComments); err != nil {
+		t.Fatalf("count wisp reopen comments for %s: %v", wisp, err)
+	}
+	if wispComments != 1 {
+		t.Errorf("wisp reopen of %s wrote %d wisp_comments carrying the reason, want exactly 1", wisp, wispComments)
+	}
+	if err := fixture.QueryScalar(ctx,
+		"SELECT COUNT(*) FROM wisp_events WHERE issue_id = ? AND event_type = ?",
+		[]any{wisp, string(types.EventCommented)}, &wispAuditComments); err != nil {
+		t.Fatalf("count wisp audit commented events for %s: %v", wisp, err)
+	}
+	if wispAuditComments != 0 {
+		t.Errorf("wisp reopen of %s recorded %d audit commented events, want 0: the reason is a wisp_comments row", wisp, wispAuditComments)
 	}
 }
 

@@ -77,17 +77,26 @@ func TestReopenIssueCategorySemantics(t *testing.T) {
 			t.Fatal("permanent reopen did not create a Dolt commit")
 		}
 
-		var reopened, comments int
+		var reopened, auditComments int
 		if err := store.db.QueryRowContext(ctx,
 			"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?", id, string(types.EventReopened)).Scan(&reopened); err != nil {
 			t.Fatalf("count reopened events: %v", err)
 		}
 		if err := store.db.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?", id, string(types.EventCommented)).Scan(&comments); err != nil {
+			"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?", id, string(types.EventCommented)).Scan(&auditComments); err != nil {
 			t.Fatalf("count comment events: %v", err)
 		}
-		if reopened != 1 || comments != 1 {
-			t.Fatalf("events = reopened:%d comments:%d, want 1 each", reopened, comments)
+		if reopened != 1 || auditComments != 0 {
+			t.Fatalf("events = reopened:%d commented:%d, want 1 and 0: the reason is a comment row, not an audit event", reopened, auditComments)
+		}
+		// The reason landed in the thread, attributed to the reopen actor.
+		var comment string
+		if err := store.db.QueryRowContext(ctx,
+			"SELECT text FROM comments WHERE issue_id = ? AND author = ?", id, "tester").Scan(&comment); err != nil {
+			t.Fatalf("read reopen comment: %v", err)
+		}
+		if comment != "needs review" {
+			t.Fatalf("reopen comment = %q, want %q", comment, "needs review")
 		}
 	})
 

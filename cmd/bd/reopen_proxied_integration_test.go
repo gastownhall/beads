@@ -61,16 +61,20 @@ func bdProxiedReopenJSON(t *testing.T, bd, dir string, args ...string) []*types.
 	return issues
 }
 
+// readReopenComment reads the reopen reason from the plane's comment table,
+// where a reasoned reopen now records it: a structured comment row, not an
+// audit commented event. Durable ids live in comments, wisps in
+// wisp_comments; the helper tries both because its callers seed either.
 func readReopenComment(t *testing.T, db *sql.DB, id string) string {
 	t.Helper()
 	var got sql.NullString
 	err := db.QueryRowContext(context.Background(),
-		"SELECT comment FROM events WHERE issue_id = ? AND event_type = ? ORDER BY created_at DESC LIMIT 1",
-		id, string(types.EventCommented)).Scan(&got)
+		"SELECT text FROM comments WHERE issue_id = ? ORDER BY created_at DESC LIMIT 1",
+		id).Scan(&got)
 	if err == sql.ErrNoRows {
 		if err := db.QueryRowContext(context.Background(),
-			"SELECT comment FROM wisp_events WHERE issue_id = ? AND event_type = ? ORDER BY created_at DESC LIMIT 1",
-			id, string(types.EventCommented)).Scan(&got); err != nil {
+			"SELECT text FROM wisp_comments WHERE issue_id = ? ORDER BY created_at DESC LIMIT 1",
+			id).Scan(&got); err != nil {
 			if err == sql.ErrNoRows {
 				return ""
 			}
