@@ -310,6 +310,13 @@ server keeps the engine running (see
 damaged journal; for that, see
 [Engine won't open](/recovery/database-corruption#engine-wont-open).
 
+Within one command, bd starts the embedded engine once and reuses it for
+every operation the command runs, so a command that reads or writes many
+issues (for example `bd list --parent` walking a tree) pays the startup only
+once. The command keeps the engine open until it has been idle for 200 ms, or
+until it closes the database. Another `bd` process that needs the same
+database waits at most that long after the command's last operation.
+
 ### Server Mode (Multi-Writer / Orchestrator)
 
 Connects to a running `dolt sql-server` for multi-client access.

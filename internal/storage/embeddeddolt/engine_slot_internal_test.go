@@ -56,6 +56,8 @@ func newCountedEngineStore(t *testing.T, database string) (*EmbeddedDoltStore, *
 	t.Cleanup(func() { _ = store.Close() })
 	counter := &engineCounter{}
 	store.engine.open = counter.opener()
+	// Tests that count opens must not race the idle expiry.
+	store.engine.idle = time.Hour
 	if err := store.SetConfig(ctx, "issue_prefix", "en"); err != nil {
 		t.Fatal(err)
 	}
@@ -383,4 +385,111 @@ func TestEmbeddedEngineBlockedRecheckAfterCommit(t *testing.T) {
 	if n := counter.opens.Load(); n != 1 {
 		t.Fatalf("opened %d engines, want the recheck on the reused engine", n)
 	}
+}
+
+// waitForEngineRelease waits, boundedly, for the counter's engines to close.
+// Idle expiry is a timer, so the test waits on the outcome rather than a time.
+func waitForEngineRelease(t *testing.T, counter *engineCounter) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for counter.live() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("idle engine still open after 30s (%d open)", counter.live())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestEmbeddedEngineIdleRelease pins that a reused engine is not held for
+// the store's lifetime: once the store has been idle for its expiry, the
+// engine is released, so another opener of the same database can open and
+// write it, and the store reopens and reads that write.
+func TestEmbeddedEngineIdleRelease(t *testing.T) {
+	ctx := context.Background()
+	store, counter := newCountedEngineStore(t, "engineidle")
+	store.engine.idle = 20 * time.Millisecond
+
+	if err := store.RunInTransaction(ctx, "bd: create ei-1", func(tx storage.Transaction) error {
+		return tx.CreateIssue(ctx, engineTestIssue("ei-1"), "tester")
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	waitForEngineRelease(t, counter)
+
+	// Another opener of the same database: it could not open the engine
+	// while this store held it.
+	openCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	db, cleanup, err := OpenSQL(openCtx, store.dataDir, store.database, store.branch)
+	if err != nil {
+		t.Fatalf("external open: %v", err)
+	}
+	if _, err := db.ExecContext(openCtx, "UPDATE issues SET title = 'external' WHERE id = 'ei-1'"); err != nil {
+		_ = cleanup()
+		t.Fatalf("external write: %v", err)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatalf("external close: %v", err)
+	}
+
+	got, err := store.GetIssue(ctx, "ei-1")
+	if err != nil {
+		t.Fatalf("get after expiry: %v", err)
+	}
+	if got.Title != "external" {
+		t.Fatalf("title = %q, want the external write", got.Title)
+	}
+	if n := counter.opens.Load(); n != 2 {
+		t.Fatalf("opened %d engines, want 2 (one before expiry, one after)", n)
+	}
+
+	t.Run("long callback outlives the expiry", func(t *testing.T) {
+		before := counter.opens.Load()
+		if err := store.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+			time.Sleep(10 * store.engine.idle)
+			_, err := db.ExecContext(ctx, "SELECT 1")
+			return err
+		}); err != nil {
+			t.Fatalf("long callback: %v", err)
+		}
+		if n := counter.opens.Load() - before; n > 1 {
+			t.Fatalf("a long callback opened %d engines, want at most 1", n)
+		}
+	})
+
+	t.Run("stale timer leaves a newer engine alone", func(t *testing.T) {
+		store.engine.idle = time.Hour
+		if _, err := store.GetIssue(ctx, "ei-1"); err != nil {
+			t.Fatal(err)
+		}
+		e := store.engine
+		e.sem <- struct{}{}
+		stale := e.gen
+		<-e.sem
+		if _, err := store.GetIssue(ctx, "ei-1"); err != nil {
+			t.Fatal(err)
+		}
+		store.expireIdle(stale)
+		if counter.live() != 1 {
+			t.Fatal("a stale expiry closed the engine a later operation armed")
+		}
+		// A busy slot defers expiry to the holder, which rearms on release.
+		if err := store.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+			store.expireIdle(e.gen) // the callback holds the slot
+			_, err := db.ExecContext(ctx, "SELECT 1")
+			return err
+		}); err != nil {
+			t.Fatalf("expiry during an operation broke it: %v", err)
+		}
+		if counter.live() != 1 {
+			t.Fatal("an expiry closed the engine of an active operation")
+		}
+		e.sem <- struct{}{}
+		current := e.gen
+		<-e.sem
+		store.expireIdle(current)
+		if counter.live() != 0 {
+			t.Fatal("the current expiry did not release an idle engine")
+		}
+	})
 }
