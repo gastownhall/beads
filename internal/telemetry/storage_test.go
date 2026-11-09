@@ -165,6 +165,39 @@ type outerDecorator struct{ storage.DoltStorage }
 
 func (d outerDecorator) Unwrap() storage.DoltStorage { return d.DoltStorage }
 
+// TestGetConfigKeysSpanRecordsTheCountNotTheNames: a config key can name
+// private data, so the span carries how many keys were asked for and none of
+// their names.
+func TestGetConfigKeysSpanRecordsTheCountNotTheNames(t *testing.T) {
+	clearTelemetryEnv(t)
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	wrapped := WrapStorage(&configKeysStore{}).(*InstrumentedStorage)
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	wrapped.tracer = provider.Tracer(storageScopeName)
+
+	if _, err := wrapped.GetConfigKeys(context.Background(), "routing.mode", "kv.memory.private"); err != nil {
+		t.Fatal(err)
+	}
+	spans := recorder.Ended()
+	if len(spans) != 1 || spans[0].Name() != "storage.GetConfigKeys" {
+		t.Fatalf("ended spans = %v, want exactly one storage.GetConfigKeys", spans)
+	}
+	var count int64 = -1
+	for _, attr := range spans[0].Attributes() {
+		if attr.Key == "bd.config.key_count" {
+			count = attr.Value.AsInt64()
+		}
+		if value := attr.Value.Emit(); value == "routing.mode" || value == "kv.memory.private" {
+			t.Fatalf("span attribute %s carries a key name: %s", attr.Key, value)
+		}
+	}
+	if count != 2 {
+		t.Fatalf("bd.config.key_count = %d, want 2", count)
+	}
+}
+
 // TestSearchDescendantsIsTracedBehindDecorators pins that the `bd list
 // --parent` tree walk keeps a span with telemetry on: storage.SearchDescendants
 // offers the walk to this layer before unwrapping past it, and this layer hands
