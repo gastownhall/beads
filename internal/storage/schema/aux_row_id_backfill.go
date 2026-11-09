@@ -559,6 +559,28 @@ func isSchemaEncodingDriftErr(err error) bool {
 // but duplicates are interchangeable and the id set is identical, so the
 // merged result still converges.
 func rekeyAuxRowTable(ctx context.Context, db DBConn, t auxRekeyTable) (bool, error) {
+	return rekeyAuxRowTableWhere(ctx, db, t, "")
+}
+
+// RekeyAuxRowsForIssue re-derives the ids of issueID's rows in the re-keyed
+// tables, with the same rewrite the backfill runs. A rename moves those rows
+// to a new issue_id under the ids derived from the old one; on a renamed
+// clone that leaves the old issue's ids pointing at the new issue's rows, so
+// a peer that kept the old issue merges the two as one row and conflicts
+// (bd-28sb25). The digest covers issue_id, so the rows of issueID group only
+// with each other.
+func RekeyAuxRowsForIssue(ctx context.Context, db DBConn, issueID string) error {
+	for _, t := range auxRekeyTables {
+		if _, err := rekeyAuxRowTableWhere(ctx, db, t, issueID); err != nil {
+			return fmt.Errorf("re-key %s rows of %s: %w", t.name, issueID, err)
+		}
+	}
+	return nil
+}
+
+// rekeyAuxRowTableWhere is rekeyAuxRowTable over the rows of one issue, or of
+// the whole table when issueID is empty.
+func rekeyAuxRowTableWhere(ctx context.Context, db DBConn, t auxRekeyTable, issueID string) (bool, error) {
 	// Skip cleanly if the table or its id column isn't present (older or partial
 	// schema): nothing to re-key. After MigrateUp's main pass the id column is
 	// CHAR(36) on any schema this runs against (0037 precedes the marker).
@@ -571,7 +593,11 @@ func rekeyAuxRowTable(ctx context.Context, db DBConn, t auxRekeyTable) (bool, er
 	}
 
 	//nolint:gosec // G201: name/columns come from the hardcoded auxRekeyTables, never user input.
-	rows, err := db.QueryContext(ctx, fmt.Sprintf(`SELECT id, %s FROM %s`, t.columns, t.name))
+	query, args := fmt.Sprintf(`SELECT id, %s FROM %s`, t.columns, t.name), []any(nil)
+	if issueID != "" {
+		query, args = query+" WHERE issue_id = ?", []any{issueID}
+	}
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return false, err
 	}

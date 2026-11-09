@@ -92,6 +92,15 @@ func applyChildRenumbers(ctx context.Context, conn *sql.Conn, renames []storage.
 		if err := issueops.UpdateIssueIDInTx(ctx, tx, r.From, r.To, issue, actor); err != nil {
 			return fmt.Errorf("renumber children: rename %s -> %s: %w", r.From, r.To, err)
 		}
+		if err := moveChildCounter(ctx, tx, r.From, r.To); err != nil {
+			return err
+		}
+		// The comments, events and snapshots followed the issue by cascade but
+		// keep ids derived from the old one, which the remote's rows of that
+		// identity hold too.
+		if err := schema.RekeyAuxRowsForIssue(ctx, tx, r.To); err != nil {
+			return fmt.Errorf("renumber children: %w", err)
+		}
 		if parent, n, ok := issueops.ParseHierarchicalID(r.To); ok {
 			highWater[parent] = max(highWater[parent], n)
 		}
@@ -108,6 +117,32 @@ func applyChildRenumbers(ctx context.Context, conn *sql.Conn, renames []storage.
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("renumber children: commit transaction: %w", err)
+	}
+	return nil
+}
+
+// moveChildCounter carries a renamed issue's own child counter to its new id,
+// keeping the high-water mark: its children are numbered after it whether or
+// not they still exist. child_counters has no foreign key since migration
+// 0039, so the rename does not move the row; on a schema where it cascaded,
+// the delete finds nothing and the upsert keeps the larger value.
+func moveChildCounter(ctx context.Context, tx *sql.Tx, from, to string) error {
+	var last int
+	err := tx.QueryRowContext(ctx, "SELECT last_child FROM child_counters WHERE parent_id = ?", from).Scan(&last)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("renumber children: read child counter of %s: %w", from, err)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM child_counters WHERE parent_id = ?", from); err != nil {
+		return fmt.Errorf("renumber children: move child counter of %s: %w", from, err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"INSERT INTO child_counters (parent_id, last_child) VALUES (?, ?) "+
+			"ON DUPLICATE KEY UPDATE last_child = GREATEST(last_child, VALUES(last_child))",
+		to, last); err != nil {
+		return fmt.Errorf("renumber children: move child counter of %s to %s: %w", from, to, err)
 	}
 	return nil
 }
