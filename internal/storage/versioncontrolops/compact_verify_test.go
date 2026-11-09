@@ -14,6 +14,10 @@ import (
 // argument), not with main's current HEAD.
 const compactVerifySQL = "SELECT COUNT(*) FROM dolt_diff_summary(?, 'compact-tmp')"
 
+// compactHeadSQL is the catch-up's read of main's head, made once after the
+// replay check.
+const compactHeadSQL = "SELECT HASHOF('main')"
+
 // expectCompactBeforeVerify queues Compact's steps up to and including the
 // checkout of main that precedes the replay check: the replay of kept and
 // the read-back of the rebuilt chain (compact_test.go).
@@ -82,6 +86,7 @@ func TestCompactVerifyEqualReplayResets(t *testing.T) {
 	err := runCompactForVerify(t, func(mock sqlmock.Sqlmock) {
 		ok := sqlmock.NewResult(0, 0)
 		mock.ExpectQuery(regexp.QuoteMeta(compactVerifySQL)).WithArgs("headhash").WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+		mock.ExpectQuery(regexp.QuoteMeta(compactHeadSQL)).WillReturnRows(sqlmock.NewRows([]string{"h"}).AddRow("headhash"))
 		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_RESET('--soft', 'compact-tmp')")).WillReturnResult(ok)
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status WHERE staged = 1")).WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_BRANCH('-D', 'compact-tmp')")).WillReturnResult(ok)

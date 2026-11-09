@@ -2,10 +2,12 @@ package versioncontrolops
 
 import (
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -48,25 +50,118 @@ type compactCommit struct {
 	CommitOrder    int64
 }
 
+// compactLogColumns are the dolt_log columns a compactCommit is read from,
+// in scanCompactCommit's order.
+const compactLogColumns = "commit_hash, committer, email, date, author, author_email, author_date, message, commit_order"
+
+// scanCompactCommit scans one row of compactLogColumns, followed by extra.
+func scanCompactCommit(rows *sql.Rows, extra ...any) (compactCommit, error) {
+	var c compactCommit
+	dest := append([]any{&c.Hash, &c.Committer, &c.CommitterEmail, &c.CommitterDate,
+		&c.Author, &c.AuthorEmail, &c.AuthorDate, &c.Message, &c.CommitOrder}, extra...)
+	return c, rows.Scan(dest...)
+}
+
 // readCompactLog reads every commit of the current branch with both
 // identities (Log reads only the committer).
 func readCompactLog(ctx context.Context, conn DBConn) ([]compactCommit, error) {
-	rows, err := conn.QueryContext(ctx,
-		"SELECT commit_hash, committer, email, date, author, author_email, author_date, message, commit_order FROM dolt_log")
+	rows, err := conn.QueryContext(ctx, "SELECT "+compactLogColumns+" FROM dolt_log")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var commits []compactCommit
 	for rows.Next() {
-		var c compactCommit
-		if err := rows.Scan(&c.Hash, &c.Committer, &c.CommitterEmail, &c.CommitterDate,
-			&c.Author, &c.AuthorEmail, &c.AuthorDate, &c.Message, &c.CommitOrder); err != nil {
+		c, err := scanCompactCommit(rows)
+		if err != nil {
 			return nil, err
 		}
 		commits = append(commits, c)
 	}
 	return commits, rows.Err()
+}
+
+// landedCommit is a commit that reached main after the plan was read, with
+// its parents' hashes.
+type landedCommit struct {
+	compactCommit
+	Parents []string
+}
+
+// readLandedRange reads the commits reachable from landed but not from
+// headHash, newest first, with their parents. It reads a fixed range, so
+// a commit that reaches main after landed was read is not in it. The rows
+// are closed before it returns, so the pinned connection is free for the
+// next statement.
+func readLandedRange(ctx context.Context, conn DBConn, headHash, landed string) ([]landedCommit, error) {
+	rows, err := conn.QueryContext(ctx,
+		"SELECT "+compactLogColumns+", parents FROM dolt_log(?, '--parents')", headHash+".."+landed)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var commits []landedCommit
+	for rows.Next() {
+		var parents sql.NullString
+		c, err := scanCompactCommit(rows, &parents)
+		if err != nil {
+			return nil, err
+		}
+		l := landedCommit{compactCommit: c}
+		if parents.String != "" {
+			l.Parents = strings.Split(parents.String, ", ")
+		}
+		commits = append(commits, l)
+	}
+	return commits, rows.Err()
+}
+
+// landedChain orders the commits readLandedRange read into the chain the
+// catch-up replays, oldest first. The range is replayable only when it is
+// one line of single-parent commits from landed down to headHash, each
+// listed once, none left over, and each one Dolt can write back with its
+// identities. Anything else (a merge, a root, a gap, a cycle, a commit off
+// the line, main moved to a commit headHash is not an ancestor of, an
+// identity Dolt cannot restore) returns an error naming why, and Compact
+// skips the catch-up for it.
+func landedChain(commits []landedCommit, headHash, landed string) ([]compactCommit, error) {
+	byHash := make(map[string]landedCommit, len(commits))
+	for _, c := range commits {
+		if _, dup := byHash[c.Hash]; dup {
+			return nil, fmt.Errorf("commit %s is listed twice", commitHash8(c.Hash))
+		}
+		byHash[c.Hash] = c
+	}
+	var chain []compactCommit
+	for at := landed; at != headHash; {
+		c, ok := byHash[at]
+		if !ok {
+			// Also a cycle: a visited commit was taken out of byHash.
+			return nil, fmt.Errorf("commit %s is not on a line from %s down to %s",
+				commitHash8(at), commitHash8(landed), commitHash8(headHash))
+		}
+		delete(byHash, at)
+		switch len(c.Parents) {
+		case 0:
+			return nil, fmt.Errorf("commit %s is a root commit", commitHash8(at))
+		case 1:
+		default:
+			return nil, fmt.Errorf("commit %s is a merge", commitHash8(at))
+		}
+		if err := c.restorable(); err != nil {
+			return nil, fmt.Errorf("commit %s: %w", commitHash8(at), err)
+		}
+		chain = append(chain, c.compactCommit)
+		at = c.Parents[0]
+	}
+	if len(byHash) != 0 {
+		return nil, fmt.Errorf("%d commit(s) in the range are off the line from %s down to %s",
+			len(byHash), commitHash8(landed), commitHash8(headHash))
+	}
+	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
+		chain[i], chain[j] = chain[j], chain[i]
+	}
+	return chain, nil
 }
 
 // restorable refuses a commit the replay cannot write back as it was. Dolt
@@ -226,6 +321,65 @@ func verifyRebuilt(ctx context.Context, conn DBConn, boundary compactCommit, kep
 	return nil
 }
 
+// catchUpLanded replays, onto compact-tmp, the commits that reached main
+// after the plan was read, so main's soft reset installs a history whose
+// tree is main's current HEAD's rather than the planned head's. Without it
+// those commits come back staged and land as one follow-up commit; and a
+// writer whose transaction began on such a commit, and whose Dolt commit
+// finishes after the reset, merges against that transaction-start head, so
+// the reset reads as the writer reverting the commit and the commit's rows
+// drop out of HEAD into the working set.
+//
+// It reads main's head once. An unchanged head returns at once, so a quiet
+// compaction adds that one read. A moved head's range headHash..landed is
+// replayed only when landedChain accepts it; otherwise the catch-up is
+// skipped and the soft reset keeps those commits as before. The replayed
+// chain is read back with the kept commits (verifyRebuilt) and compact-tmp
+// must then hold landed's committed data exactly, or Compact aborts before
+// main moves. Called on main; returns on main.
+//
+// A commit that reaches main after landed was read is not caught up; the
+// soft reset keeps it, as it keeps a skipped range.
+func catchUpLanded(ctx context.Context, conn DBConn, boundary compactCommit, kept []compactCommit, headHash string) error {
+	var landed string
+	if err := conn.QueryRowContext(ctx, "SELECT HASHOF('main')").Scan(&landed); err != nil {
+		return fmt.Errorf("compact step %q: %w", "read main's head", err)
+	}
+	if landed == headHash {
+		return nil
+	}
+	commits, err := readLandedRange(ctx, conn, headHash, landed)
+	if err != nil {
+		return fmt.Errorf("compact step %q: %w", "read commits that reached main", err)
+	}
+	chain, err := landedChain(commits, headHash, landed)
+	if err != nil {
+		// Not replayable as a line of commits: the soft reset keeps them.
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT('compact-tmp')"); err != nil {
+		return fmt.Errorf("compact step %q: %w", "checkout temp for catch-up", err)
+	}
+	if err := replayKept(ctx, conn, chain); err != nil {
+		return err
+	}
+	if err := verifyRebuilt(ctx, conn, boundary, append(append([]compactCommit{}, kept...), chain...)); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT('main')"); err != nil {
+		return fmt.Errorf("compact step %q: %w", "checkout main after catch-up", err)
+	}
+	var changedTables int
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_diff_summary(?, 'compact-tmp')", landed).Scan(&changedTables); err != nil {
+		return fmt.Errorf("compact step %q: %w", "verify catch-up", err)
+	}
+	if changedTables != 0 {
+		return fmt.Errorf("compact aborted: caught-up history differs from main's head %s in %d table(s); main was not reset",
+			commitHash8(landed), changedTables)
+	}
+	return nil
+}
+
 // Compact squashes old Dolt commits into a single base commit while preserving
 // recent commits via cherry-pick, keeping each replayed commit's original
 // committer and commit date (#7294): DOLT_CHERRY_PICK stamps a replayed
@@ -250,16 +404,29 @@ func verifyRebuilt(ctx context.Context, conn DBConn, boundary compactCommit, kep
 //     dates and message, and the row below them is the base dated as the
 //     boundary; any mismatch refuses before main moves
 //  8. Checkout main, verify the temp branch's committed data equals headHash's
-//  9. Soft-reset main to the temp branch (keeps main's working set)
-//  10. Commit main's staged set, if any: a commit that reached main while
-//     the history was rebuilt
-//  11. Delete temp branch
+//  9. Catch up: read main's head once; if commits reached main after the
+//     plan was read and form a line of single-parent commits, replay them
+//     onto the temp branch the same way, read the whole replayed chain back,
+//     and verify the temp branch's committed data equals that head's
+//     (catchUpLanded); a range that is not such a line is skipped
+//  10. Soft-reset main to the temp branch (keeps main's working set)
+//  11. Commit main's staged set, if any: a commit that reached main after
+//     the catch-up read main's head, or a skipped range
+//  12. Delete temp branch
 //
 // headHash is the commit main pointed at when the caller read the log it
 // planned from (the log's highest commit_order). The replay must reproduce
 // that commit's data, not main's current HEAD's: a commit that lands on main
-// after the plan was read is a concurrent write, which step 9 keeps, not a
-// divergent replay.
+// after the plan was read is a concurrent write, which steps 9 to 11 keep,
+// not a divergent replay.
+//
+// Main's head moves by a reset that does not check where main is, so this is
+// not atomic: a commit landing after step 9 read main's head reaches HEAD
+// only through step 11's follow-up commit, and a writer whose transaction
+// began on such a commit and whose Dolt commit finishes after step 10 can
+// leave that commit's rows in main's working set, readable but uncommitted
+// until `bd dolt commit`. Closing that needs a conditional head move from
+// Dolt.
 //
 // Callers should run PruneRemoteRefs and then DoltGC afterward to reclaim disk
 // space — remote-tracking refs still anchor the pre-compact chain, and GC
@@ -342,19 +509,27 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash, headHa
 		return fmt.Errorf("compact aborted: replayed history differs from main's planned head %s in %d table(s); main was not reset",
 			headHash[:min(8, len(headHash))], changedTables)
 	}
+	// Commits that reached main since the plan was read are replayed onto
+	// compact-tmp too, each with its own message, identities and dates, so
+	// the soft reset below does not demote them (catchUpLanded). A failure
+	// aborts here, before main moves.
+	if err := catchUpLanded(ctx, conn, boundary, kept, headHash); err != nil {
+		return err
+	}
 	// --soft moves main's HEAD and keeps its staged and working sets.
-	// compact-tmp's tree equals headHash's (checked above), main's tree when
-	// the plan was read, so whatever main holds beyond it stays on main: rows
-	// its working set has that no Dolt commit holds yet (bd's window between
-	// the SQL commit and DOLT_COMMIT, or a whole batch under batched
-	// auto-commit), and a commit that reached main after the plan was read,
-	// whose rows come back staged. --hard discarded both, after their writers
-	// had been told they succeeded.
+	// compact-tmp's tree equals main's HEAD's when the catch-up read it (or
+	// headHash's, when nothing was caught up), so whatever main holds beyond
+	// it stays on main: rows its working set has that no Dolt commit holds
+	// yet (bd's window between the SQL commit and DOLT_COMMIT, or a whole
+	// batch under batched auto-commit), and a commit that reached main after
+	// the catch-up's read or in a skipped range, whose rows come back staged.
+	// --hard discarded both, after their writers had been told they
+	// succeeded.
 	if err := execSQL("reset main to compacted", "CALL DOLT_RESET('--soft', 'compact-tmp')"); err != nil {
 		return err
 	}
 
-	// A commit that reached main after the plan was read is now staged on
+	// A commit that reached main and was not caught up is now staged on
 	// main, outside HEAD and so outside a push of main. Commit the staged set
 	// only: rows that are just in the working set stay pending, as they were,
 	// so a writer's batch keeps its own commit boundary. Rows that were
