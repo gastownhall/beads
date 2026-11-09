@@ -24,19 +24,20 @@ func sweepServersUnderRoots(suiteTempRoots ...string) []SweptServer {
 // isDoltServerProcess re-reads /proc/<pid>/cmdline and reports whether pid
 // still refers to a dolt sql-server process. Used to revalidate a PID
 // immediately before signaling it, guarding against the kernel having
-// recycled the PID to an unrelated process since it was first observed.
+// recycled the PID to an unrelated process since it was first observed. It
+// judges the same exact argv (procArgv) that gathering did.
 func isDoltServerProcess(pid int) bool {
 	cmdlineRaw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
-	if err != nil || len(cmdlineRaw) == 0 {
+	if err != nil {
 		return false
 	}
-	cmdline := strings.ReplaceAll(strings.Trim(string(cmdlineRaw), "\x00"), "\x00", " ")
-	return isDoltServerCmdline(cmdline)
+	return isDoltServerArgv(procArgv(cmdlineRaw))
 }
 
-// gatherDoltServerCandidates scans /proc for processes whose cmdline
-// mentions a dolt sql-server, resolving each one's working directory (and
-// whether that directory has been deleted) via /proc/<pid>/cwd.
+// gatherDoltServerCandidates scans /proc for processes whose argv names a
+// dolt sql-server (isDoltServerArgv over procArgv), resolving each one's
+// working directory (and whether that directory has been deleted) via
+// /proc/<pid>/cwd.
 func gatherDoltServerCandidates() []serverCandidate {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -54,7 +55,7 @@ func gatherDoltServerCandidates() []serverCandidate {
 		if err != nil || len(cmdlineRaw) == 0 {
 			continue // process gone, or unreadable (permissions, kernel thread)
 		}
-		argv := strings.Fields(strings.ReplaceAll(string(cmdlineRaw), "\x00", " "))
+		argv := procArgv(cmdlineRaw)
 		if !isDoltServerArgv(argv) {
 			continue
 		}
@@ -84,4 +85,17 @@ func readProcCwd(pid int) (cwd string, deleted bool) {
 		return strings.TrimSuffix(link, deletedSuffix), true
 	}
 	return link, false
+}
+
+// procArgv splits the raw bytes of /proc/<pid>/cmdline into argv. The kernel
+// stores each argument NUL-terminated, so exactly one trailing NUL is dropped
+// before splitting; every other empty argument, including an empty argv[0],
+// is kept in place so no later argument shifts into its slot. Empty input
+// (a kernel thread, or a process gone mid-read) yields nil. A process that
+// rewrote its title into one argument stays one argument.
+func procArgv(raw []byte) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00")
 }
