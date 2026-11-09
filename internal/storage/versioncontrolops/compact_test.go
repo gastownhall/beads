@@ -194,6 +194,9 @@ func TestCompactRestoresCommitMetadata(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(regexp.QuoteMeta(compactVerifySQL)).WithArgs(plannedHead(kept)).
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	// Catch-up reads main's head once; an unchanged head ends it there.
+	mock.ExpectQuery(regexp.QuoteMeta(catchUpHeadQuery)).
+		WillReturnRows(sqlmock.NewRows([]string{"h"}).AddRow(plannedHead(kept)))
 	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_RESET('--soft', 'compact-tmp')")).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status WHERE staged = 1")).

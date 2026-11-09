@@ -276,6 +276,65 @@ func (f *compactFixture) wantFollowupLog() {
 	f.wantLog(append([]string{compactFollowupMsg}, replayedLog...))
 }
 
+// wantLandedLog checks main's history is the replayed history with each landed
+// commit replayed individually above it — oldest first, newest at the front —
+// and no follow-up commit: the landed commits keep their own messages,
+// identities and dates instead of dissolving into one compaction commit.
+func (f *compactFixture) wantLandedLog(landed ...string) {
+	f.t.Helper()
+	f.wantLog(append(append([]string{}, landed...), replayedLog...))
+}
+
+// metaOf returns one commit's dolt_log row: both identities and both dates,
+// the metadata the replay must preserve.
+func (f *compactFixture) metaOf(hash string) compactCommit {
+	f.t.Helper()
+	return f.metaWhere("commit_hash = ?", hash)
+}
+
+// metaOfMessage returns the dolt_log row of the commit with the message, as
+// the rebuilt history holds it after a compaction.
+func (f *compactFixture) metaOfMessage(msg string) compactCommit {
+	f.t.Helper()
+	return f.metaWhere("message = ?", msg)
+}
+
+func (f *compactFixture) metaWhere(where, arg string) compactCommit {
+	f.t.Helper()
+	rows, err := f.db.QueryContext(f.ctx,
+		"SELECT commit_hash, committer, email, date, author, author_email, author_date, message, commit_order FROM dolt_log WHERE "+where, arg)
+	if err != nil {
+		f.t.Fatalf("read dolt_log (%s): %v", where, err)
+	}
+	defer rows.Close()
+	var commits []compactCommit
+	for rows.Next() {
+		var c compactCommit
+		if err := rows.Scan(&c.Hash, &c.Committer, &c.CommitterEmail, &c.CommitterDate,
+			&c.Author, &c.AuthorEmail, &c.AuthorDate, &c.Message, &c.CommitOrder); err != nil {
+			f.t.Fatalf("scan dolt_log: %v", err)
+		}
+		commits = append(commits, c)
+	}
+	if err := rows.Err(); err != nil {
+		f.t.Fatalf("read dolt_log (%s): %v", where, err)
+	}
+	if len(commits) != 1 {
+		f.t.Fatalf("dolt_log WHERE %s matched %d commits, want 1", where, len(commits))
+	}
+	return commits[0]
+}
+
+// wantMetaKept checks the rebuilt commit with want.Message carries the
+// original's identities, dates and message (its hash and commit order differ
+// by construction).
+func (f *compactFixture) wantMetaKept(want compactCommit) {
+	f.t.Helper()
+	if got := f.metaOfMessage(want.Message); !got.sameMetadata(want) {
+		f.t.Fatalf("caught-up commit %q = %s, want the original %s", want.Message, got.metadata(), want.metadata())
+	}
+}
+
 func (f *compactFixture) wantStatus(want ...string) {
 	f.t.Helper()
 	if got := f.status(); strings.Join(got, ",") != strings.Join(want, ",") {
@@ -302,10 +361,35 @@ func (f *compactFixture) wantNoTempBranch() {
 // process would, and returns main's new HEAD.
 func (f *compactFixture) landRow(writer *sql.Conn) string {
 	f.t.Helper()
+	return f.landRowID(writer, 600, "landed 600")
+}
+
+// landRowID is landRow for a chosen row id and commit message.
+func (f *compactFixture) landRowID(writer *sql.Conn, id int, msg string) string {
+	f.t.Helper()
 	f.exec(writer,
-		"INSERT INTO t VALUES (600, 'landed')",
+		fmt.Sprintf("INSERT INTO t VALUES (%d, 'landed')", id),
 		"CALL DOLT_ADD('t')",
-		"CALL DOLT_COMMIT('-m', 'landed 600')",
+		fmt.Sprintf("CALL DOLT_COMMIT('-m', '%s')", msg),
+	)
+	var h string
+	if err := writer.QueryRowContext(f.ctx, "SELECT HASHOF('HEAD')").Scan(&h); err != nil {
+		f.t.Fatalf("read landed head: %v", err)
+	}
+	return h
+}
+
+// landCommit commits statements to main on writer under the committer
+// identity and date given, as a bd process with its own actor would, and
+// returns the commit's hash. The empty statement list lands an empty commit.
+func (f *compactFixture) landCommit(writer *sql.Conn, committer, email string, date time.Time, msg string, statements ...string) string {
+	f.t.Helper()
+	f.exec(writer, statements...)
+	f.exec(writer,
+		fmt.Sprintf("SET @@dolt_committer_name = '%s', @@dolt_committer_email = '%s', @@dolt_committer_date = '%s'",
+			committer, email, commitDateArg(date)),
+		fmt.Sprintf("CALL DOLT_COMMIT('-Am', '%s', '--allow-empty')", msg),
+		"SET @@dolt_committer_name = '', @@dolt_committer_email = '', @@dolt_committer_date = ''",
 	)
 	var h string
 	if err := writer.QueryRowContext(f.ctx, "SELECT HASHOF('HEAD')").Scan(&h); err != nil {
@@ -411,8 +495,11 @@ func TestCompactKeepsCommitLandingBeforeMainMoves(t *testing.T) {
 		f.wantNoTempBranch()
 	})
 
-	// Lands before the replay check, so main's HEAD differs from the replay
-	// when the check runs.
+	// Lands while the kept history is replayed: the replay check compares the
+	// rebuild with the planned head, not main's moved HEAD, and the catch-up
+	// replays the landed commit onto the rebuilt history before the reset, so
+	// it keeps its own message, identity and date instead of dissolving into
+	// the follow-up commit.
 	t.Run("landing during replay", func(t *testing.T) {
 		f := newCompactFixture(t, port)
 		f.writePending(f.db)
@@ -420,10 +507,12 @@ func TestCompactKeepsCommitLandingBeforeMainMoves(t *testing.T) {
 
 		var done bool
 		var landed string
+		var original compactCommit
 		hook := &compactHookConn{beforeExec: func(query string) {
 			if !done && strings.Contains(query, "DOLT_CHERRY_PICK") {
 				done = true
 				landed = f.landRow(writer)
+				original = f.metaOf(landed)
 			}
 		}}
 		if err := f.compact(hook); err != nil {
@@ -432,18 +521,22 @@ func TestCompactKeepsCommitLandingBeforeMainMoves(t *testing.T) {
 		if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 600"); n != 1 {
 			t.Fatalf("landed t row 600 in main's HEAD: present=false, want present=true")
 		}
-		f.wantFollowupLog()
+		f.wantLandedLog("landed 600")
+		f.wantMetaKept(original)
 		f.wantHeadTree(landed)
 		f.wantPendingKept()
 		f.wantStatus("config:false", "u:false")
+		f.wantNoTempBranch()
 	})
 
 	// Lands between the plan read and Compact's first statement, as a write
-	// can between bd compact's log read and its compaction.
+	// can between bd compact's log read and its compaction. The catch-up
+	// replays it onto the rebuilt history with its metadata intact.
 	t.Run("landing after the plan was read", func(t *testing.T) {
 		f := newCompactFixture(t, port)
 		f.writePending(f.db)
 		landed := f.landRow(f.conn())
+		original := f.metaOf(landed)
 
 		if err := f.compact(&compactHookConn{}); err != nil {
 			t.Fatalf("Compact: %v", err)
@@ -451,7 +544,8 @@ func TestCompactKeepsCommitLandingBeforeMainMoves(t *testing.T) {
 		if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 600"); n != 1 {
 			t.Fatalf("landed t row 600 in main's HEAD: present=false, want present=true")
 		}
-		f.wantFollowupLog()
+		f.wantLandedLog("landed 600")
+		f.wantMetaKept(original)
 		f.wantHeadTree(landed)
 		f.wantPendingKept()
 		f.wantStatus("config:false", "u:false")
@@ -509,6 +603,62 @@ func TestCompactKeepsCommitLandingBeforeMainMoves(t *testing.T) {
 			t.Fatalf("u row 1 on main = %q, want the unstaged edit kept", v)
 		}
 		f.wantStatus("u:false")
+	})
+}
+
+// AC-1 of the catch-up design: a restorable linear chain that reached main
+// between the planning read and catch-up replays onto the rebuilt history in
+// parent order — every commit keeping its message, identities and dates even
+// when its date sits out of order, its tables span inserts, updates, deletes
+// and a newly created table, and one member is empty — with no follow-up
+// commit, the working-only changes still pending and no temp branch left.
+func TestCompactCatchesUpLandedChain(t *testing.T) {
+	port := startCompactTestServer(t)
+
+	t.Run("chain replays in parent order with its metadata", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		writer := f.conn()
+		base := time.Now().UTC()
+
+		// Three writer commits with distinct identities and shuffled dates:
+		// "land 2" is dated before "land 1" and is empty, so only the parent
+		// order — not dates or table changes — can be the replay order.
+		c1 := f.landCommit(writer, "Wanda One", "w1@example.com", base.Add(3*time.Hour), "land 1",
+			"INSERT INTO t VALUES (600, 'landed')")
+		c2 := f.landCommit(writer, "Wanda Two", "w2@example.com", base.Add(1*time.Hour), "land 2 empty")
+		c3 := f.landCommit(writer, "Wanda Three", "w3@example.com", base.Add(2*time.Hour), "land 3",
+			"CREATE TABLE w (id INT PRIMARY KEY, v VARCHAR(32))",
+			"INSERT INTO w VALUES (1, 'new table')",
+			"UPDATE t SET v = 'landed edit' WHERE id = 600",
+			"DELETE FROM t WHERE id = 1",
+		)
+		originals := []compactCommit{f.metaOf(c1), f.metaOf(c2), f.metaOf(c3)}
+		// Working-only changes stay pending, as they were.
+		f.writePending(f.db)
+
+		if err := f.compact(&compactHookConn{}); err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+
+		f.wantLandedLog("land 3", "land 2 empty", "land 1")
+		for _, original := range originals {
+			f.wantMetaKept(original)
+		}
+		// The replayed chain carries each landed edit: the insert, the new
+		// table, the update and the delete.
+		if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 600 AND v = 'landed edit'"); n != 1 {
+			t.Fatalf("landed edit in main's HEAD: found=%d, want 1", n)
+		}
+		if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 1"); n != 0 {
+			t.Fatalf("deleted t row 1 in main's HEAD: found=%d, want 0", n)
+		}
+		if n := f.count("SELECT COUNT(*) FROM w AS OF 'HEAD' WHERE id = 1"); n != 1 {
+			t.Fatalf("new w table row in main's HEAD: found=%d, want 1", n)
+		}
+		f.wantHeadTree(c3)
+		f.wantPendingKept()
+		f.wantStatus("config:false", "u:false")
+		f.wantNoTempBranch()
 	})
 }
 
