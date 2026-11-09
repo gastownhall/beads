@@ -9,10 +9,13 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -219,5 +222,121 @@ func TestEmbeddedEngineErrorLifecycle(t *testing.T) {
 	}
 	if o := counter.opens.Load(); o != 3 {
 		t.Fatalf("opens=%d, want a fresh engine after the cancellation", o)
+	}
+}
+
+// TestEmbeddedEngineSerializesOperations pins that the engine slot, not
+// separate engines, keeps this store's operations from overlapping
+// (gastownhall/beads#6716): an operation holding a transaction, or pausing
+// between statements of a withDBConn callback, keeps every other operation
+// out until it finishes, and a waiter whose context is canceled gives up
+// with its context error without running any SQL.
+func TestEmbeddedEngineSerializesOperations(t *testing.T) {
+	ctx := context.Background()
+	store, counter := newCountedEngineStore(t, "engineserial")
+
+	var active, overlaps atomic.Int32
+	enter := func() {
+		if active.Add(1) > 1 {
+			overlaps.Add(1)
+		}
+	}
+	leave := func() { active.Add(-1) }
+
+	holders := map[string]func(entered, release chan struct{}) error{
+		"transaction": func(entered, release chan struct{}) error {
+			return store.withConn(ctx, true, func(tx *sql.Tx) error {
+				enter()
+				defer leave()
+				close(entered)
+				<-release
+				_, err := tx.ExecContext(ctx, "SELECT 1")
+				return err
+			})
+		},
+		"withDBConn statements": func(entered, release chan struct{}) error {
+			return store.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+				enter()
+				defer leave()
+				if _, err := db.ExecContext(ctx, "SELECT 1"); err != nil {
+					return err
+				}
+				close(entered)
+				<-release
+				_, err := db.ExecContext(ctx, "SELECT 2")
+				return err
+			})
+		},
+	}
+	for name, hold := range holders {
+		t.Run(name, func(t *testing.T) {
+			entered, release := make(chan struct{}), make(chan struct{})
+			releaseHolder := sync.OnceFunc(func() { close(release) })
+			t.Cleanup(releaseHolder)
+			holderDone := make(chan error, 1)
+			go func() { holderDone <- hold(entered, release) }()
+			<-entered
+
+			// A waiter that gives up returns while the holder still holds,
+			// and never reaches SQL.
+			waitCtx, cancel := context.WithCancel(ctx)
+			var canceledRan atomic.Bool
+			canceledDone := make(chan error, 1)
+			go func() {
+				canceledDone <- store.withConn(waitCtx, false, func(tx *sql.Tx) error {
+					canceledRan.Store(true)
+					return nil
+				})
+			}()
+			cancel()
+			select {
+			case err := <-canceledDone:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("canceled waiter returned %v, want context.Canceled", err)
+				}
+			case <-time.After(30 * time.Second):
+				t.Fatal("a canceled waiter is still blocked behind the holder")
+			}
+			if canceledRan.Load() {
+				t.Fatal("a canceled waiter ran its callback")
+			}
+
+			// A patient waiter does not enter until the holder finishes.
+			var waiterEntered atomic.Bool
+			waiterDone := make(chan error, 1)
+			go func() {
+				waiterDone <- store.withConn(ctx, false, func(tx *sql.Tx) error {
+					enter()
+					defer leave()
+					waiterEntered.Store(true)
+					var one int
+					return tx.QueryRowContext(ctx, "SELECT 1").Scan(&one)
+				})
+			}()
+			select {
+			case err := <-waiterDone:
+				t.Fatalf("waiter finished while the holder held the engine (err=%v)", err)
+			case <-time.After(200 * time.Millisecond):
+			}
+			if waiterEntered.Load() {
+				t.Fatal("waiter entered while the holder held the engine")
+			}
+			releaseHolder()
+			if err := <-holderDone; err != nil {
+				t.Fatalf("holder: %v", err)
+			}
+			if err := <-waiterDone; err != nil {
+				t.Fatalf("waiter: %v", err)
+			}
+			if !waiterEntered.Load() {
+				t.Fatal("waiter never ran")
+			}
+		})
+	}
+	if n := overlaps.Load(); n != 0 {
+		t.Fatalf("%d operations overlapped", n)
+	}
+	if n := counter.opens.Load(); n != 1 {
+		t.Fatalf("opened %d engines, want 1", n)
 	}
 }
