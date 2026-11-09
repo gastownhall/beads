@@ -728,10 +728,12 @@ func FindBeadsDirFrom(startDir string) string {
 			resolved := FollowRedirect(beadsDir)
 			isWorktreeRoot := repoRoot != "" && utils.PathsEqual(dir, repoRoot)
 			isJJSecondaryRoot := jjSecondaryRoot != "" && utils.PathsEqual(dir, jjSecondaryRoot)
-			if isWorktreeRoot && fallbackHasDB && !hasBeadsDatabase(resolved) {
+			redirected := !utils.PathsEqual(resolved, beadsDir)
+			if isWorktreeRoot && !redirected && fallbackHasDB && !hasBeadsDatabase(resolved) {
 				// A worktree root can contain tracked .beads metadata without
 				// owning the ignored database directory. Match FindBeadsDir by
-				// preferring the shared worktree database in that case.
+				// preferring the shared worktree database in that case. A
+				// redirect at the root still wins, as it does there.
 			} else if isJJSecondaryRoot && jjPrimaryHasDB && !hasBeadsDatabase(resolved) {
 				// A jj secondary workspace can likewise contain inherited
 				// .beads metadata without the ignored database directory.

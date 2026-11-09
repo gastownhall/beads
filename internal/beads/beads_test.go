@@ -3144,3 +3144,40 @@ func TestFindBeadsDirFromWorktreeInvalidRootRedirectUsesSharedStore(t *testing.T
 		})
 	}
 }
+
+// TestFindBeadsDirFromWorktreeRootRedirectWins checks that a valid redirect at
+// a linked worktree's root outranks the shared store even when the redirect
+// target has no local database, including a target that is the ancestor's
+// project.
+func TestFindBeadsDirFromWorktreeRootRedirectWins(t *testing.T) {
+	isolateWorktreeDiscovery(t)
+	for _, layout := range []string{"regular", "bare"} {
+		for _, tc := range []struct {
+			name   string
+			target func(t *testing.T, f linkedWorktreeUnderProject) string
+		}{
+			{"independent metadata-only project", func(t *testing.T, f linkedWorktreeUnderProject) string {
+				target := filepath.Join(t.TempDir(), ".beads")
+				writeBeadsProject(t, target, false)
+				return target
+			}},
+			{"ancestor metadata-only project", func(t *testing.T, f linkedWorktreeUnderProject) string {
+				return f.ancestor
+			}},
+		} {
+			t.Run(layout+"/"+tc.name, func(t *testing.T) {
+				f := setupLinkedWorktreeUnderProject(t, layout, true)
+				writeBeadsProject(t, f.shared, true)
+				target := tc.target(t, f)
+				rootBeads := filepath.Join(f.root, ".beads")
+				if err := os.MkdirAll(rootBeads, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(rootBeads, RedirectFileName), []byte(target+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				assertWorktreeDiscovery(t, f.root, target)
+			})
+		}
+	}
+}
