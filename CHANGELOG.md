@@ -1226,6 +1226,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Server and proxied-server opens no longer send `CREATE DATABASE` for a
+  database the account can already see
+  ([#5079](https://github.com/gastownhall/beads/issues/5079)). An open that
+  missed the converged fast path (a peer held the migration lock, or the
+  schema was behind) ran locked preparation, which issued `CREATE DATABASE`
+  first, so an account without `CREATE` was refused before a read ran.
+  Preparation now checks visibility first. When an account can neither see
+  nor create the database, the error names both possibilities (not
+  provisioned, or not granted) and asks the administrator to provision the
+  database and grant access.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
