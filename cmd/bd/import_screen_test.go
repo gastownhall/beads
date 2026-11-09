@@ -1,9 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -147,4 +149,44 @@ func sameFileForTest(a, b string) (bool, error) {
 		return false, err
 	}
 	return os.SameFile(ai, bi), nil
+}
+
+// TestWarnImportInvalidSkippedCapsPerRecordLines pins the bound on the
+// skipped-record warning (GH#4492, AC-2): the first importRejectionListLimit
+// records are named with their location, the rest are counted, and the
+// warning says where the records went. Ported from PR #5202's
+// TestReportRejectedRecordsCapsPerRecordWarnings (@maphew).
+func TestWarnImportInvalidSkippedCapsPerRecordLines(t *testing.T) {
+	var rejected []importRejection
+	for i := 1; i <= importRejectionListLimit+5; i++ {
+		rejected = append(rejected, importRejection{Line: i, ID: fmt.Sprintf("wc-%d", i), Reason: "invalid status: verify"})
+	}
+	out := captureStderr(t, func() {
+		warnImportInvalidSkipped("in.jsonl", rejected, "in.rejected.jsonl")
+	})
+
+	if got := strings.Count(out, ": invalid status: verify"); got != importRejectionListLimit {
+		t.Errorf("per-record lines = %d, want %d\ngot:\n%s", got, importRejectionListLimit, out)
+	}
+	for _, want := range []string{
+		"warning: skipped 15 invalid record(s) from in.jsonl:",
+		"  in.jsonl:1: wc-1: invalid status: verify",
+		"  ... and 5 more",
+		"  rejected records saved to in.rejected.jsonl",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("warning missing %q\ngot:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "wc-11:") {
+		t.Errorf("warning names a record past the limit:\n%s", out)
+	}
+
+	// Without a rejects file the warning says the records were not saved.
+	out = captureStderr(t, func() {
+		warnImportInvalidSkipped("in.jsonl", rejected[:1], "")
+	})
+	if !strings.Contains(out, "not saved separately; they remain in in.jsonl") {
+		t.Errorf("warning without --rejects = %q, want it to say the records remain in the source", out)
+	}
 }
