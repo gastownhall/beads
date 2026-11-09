@@ -523,7 +523,8 @@ func ExpansionVarRefs(f *Formula, targetID string) []string {
 // expansion, once every inline expansion has been applied (GH#7637). The last
 // step is the last one the expansion declares, not every step that ends it.
 // When the expansion recreates the step's own ID, references to it are left
-// unchanged.
+// unchanged; a template step that names the step it replaces without
+// recreating it is an error wrapping ErrValidation.
 //
 // Returns a new steps slice with inline expansions applied.
 // The original steps slice is not modified.
@@ -592,6 +593,16 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int, re
 			expandedSteps, err := expandStep(step, expFormula.Template, vars)
 			if err != nil {
 				return nil, fmt.Errorf("inline expand on step %q: %w", step.ID, err)
+			}
+
+			// A template step that names the target, which the expansion
+			// removes unless it recreates it, would lose that edge. Checked
+			// before the target's own dependencies are propagated.
+			if !collectStepIDs(expandedSteps)[step.ID] {
+				if selfRef := findStepNaming(expandedSteps, step.ID); selfRef != "" {
+					return nil, fmt.Errorf("%w: inline expand on step %q: expanded step %q depends on the step it replaces",
+						ErrValidation, step.ID, selfRef)
+				}
 			}
 
 			// Propagate the original step's dependencies to root steps of the expansion

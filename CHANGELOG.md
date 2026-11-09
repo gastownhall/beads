@@ -1229,7 +1229,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A step that needs (or `depends_on`) a step replaced by an inline `expand`
   now waits for the last step of that expansion, as with
   `[[compose.expand]]`. The reference was left naming the removed step, the
-  cook skipped it, and the dependent step was ready at once (GH#7637).
+  cook skipped it, and the dependent step was ready at once (GH#7637). An
+  expansion template whose step names `{target}` without recreating it is now
+  refused as an invalid formula, instead of losing that edge.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
