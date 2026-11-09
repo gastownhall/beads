@@ -271,7 +271,7 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 		},
 		{
 			name:     "case sensitive command matching",
-			snapshot: "S 105 Dolt sql-server\n106 dolt SQL-SERVER\n",
+			snapshot: "S 105 Dolt sql-server\nS 106 dolt SQL-SERVER\n",
 		},
 		{
 			name:     "zombie and dead states including modifiers are rejected",
@@ -303,6 +303,78 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 			name:     "blank state separated by a tab",
 			snapshot: "114\tdolt sql-server\n",
 			want:     []int{114},
+		},
+		{
+			name:     "blank state with bare dolt and extra spaces",
+			snapshot: "  117   dolt   sql-server  \n",
+			want:     []int{117},
+		},
+		{
+			name:     "blank state command starting with a state-like word",
+			snapshot: "116 Z dolt sql-server\n",
+			want:     []int{116},
+		},
+		{
+			name:     "blank state profiled command",
+			snapshot: "123 dolt --prof cpu sql-server\n1469 /Users/u/.nix-profile/bin/dolt --prof cpu sql-server\n",
+			want:     []int{123, 1469},
+		},
+		{
+			name:     "blank state keeps ordered case sensitive matching",
+			snapshot: "121 sql-server then dolt\n122 Dolt sql-server\n124 dolt SQL-SERVER\n",
+		},
+		{
+			name:     "mixed populated and blank states",
+			snapshot: "Ss 301 dolt sql-server\n302 dolt sql-server\nZ 303 dolt sql-server\nS 304 dolt sql-server\n",
+			want:     []int{301, 302, 304},
+		},
+		{
+			name:     "running state with modifier is accepted",
+			snapshot: "R+ 118 dolt sql-server\n",
+			want:     []int{118},
+		},
+		{
+			name:     "linux tracing-stop state t keeps a live server",
+			snapshot: "t 401 dolt sql-server\ntl 402 dolt sql-server\n",
+			want:     []int{401, 402},
+		},
+		{
+			name:     "historical and freebsd primary states L and W keep a live server",
+			snapshot: "L 403 dolt sql-server\nW 404 dolt sql-server\nLs+ 405 dolt sql-server\n",
+			want:     []int{403, 404, 405},
+		},
+		{
+			name:     "freebsd capability and jail modifiers keep a live server",
+			snapshot: "SJ 406 dolt sql-server\nSC+ 407 dolt sql-server\nSs+CJ 408 dolt sql-server\n",
+			want:     []int{406, 407, 408},
+		},
+		{
+			name: "absolute executable path containing spaces is recognised",
+			snapshot: "S 409 /Users/John Smith/bin/dolt sql-server --config x.yaml\n" +
+				"S 410 /Users/u/Library/Application Support/tools/dolt sql-server\n" +
+				"Sl 411 /Users/John Smith/bin/dolt --prof cpu sql-server\n",
+			want: []int{409, 410, 411},
+		},
+		{
+			name: "blank state with spaced executable path",
+			snapshot: "412 /Users/John Smith/bin/dolt sql-server\n" +
+				"413 /Users/u/Library/Application Support/tools/dolt sql-server --port 3307\n",
+			want: []int{412, 413},
+		},
+		{
+			name: "zombie and dead states are rejected for spaced executable path",
+			snapshot: "Z 415 /Users/John Smith/bin/dolt sql-server\n" +
+				"X< 416 /Users/u/Library/Application Support/tools/dolt sql-server\n",
+		},
+		{
+			name: "numeric-looking malformed fields are rejected",
+			snapshot: "+119 dolt sql-server\n" +
+				"-120 dolt sql-server\n" +
+				"1x2 dolt sql-server\n" +
+				"0 dolt sql-server\n" +
+				"99999999999999999999 dolt sql-server\n" +
+				"S 99999999999999999999 dolt sql-server\n" +
+				"S dolt sql-server\n",
 		},
 		{
 			name:     "preserves source order",
