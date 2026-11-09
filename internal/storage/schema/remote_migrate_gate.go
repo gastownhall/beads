@@ -527,8 +527,10 @@ func (e *RemoteMigrateGateError) userBody() string {
 			"\n" +
 			"  Several machines on one remote? Only ONE migrates. Get every other clone\n" +
 			"  fully in sync on its current binary, then after the migrator pushes run\n" +
-			"  `bd dolt pull` on each before upgrading it — its upgrade then has nothing\n" +
-			"  to migrate and needs no re-clone.\n"
+			"  `bd dolt pull` on each before upgrading it — the pull brings the migrated\n" +
+			"  replicated schema, so it needs no re-clone. Its clone-local migrations\n" +
+			"  never replicate, so after upgrading run `" + SharedConsentCommand + "` once on\n" +
+			"  each of those clones to apply them.\n"
 	}
 }
 

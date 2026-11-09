@@ -350,15 +350,23 @@ bd dolt push
 #    database while still on the CURRENT binary, then install the new binary.
 bd dolt pull
 bd version                    # after installing: confirm the new version
+bd migrate schema             # once: apply this clone's clone-local migrations
 ```
 
-The pull in step 3 brings the migrated schema down with the data, so the new
-binary finds nothing to migrate and the clone keeps its local state. Between
-that pull and the install, the old binary refuses the database (it is now
-newer than the schema the old binary knows), so install straight away. On the
-upgrade to 1.3.0 the clone's earlier `events` audit rows are the exception:
-they stop syncing with migration 0062, so after that pull they remain only in
-history.
+The pull in step 3 brings the migrated replicated schema down with the data,
+so the clone needs no re-clone and keeps its local state. Between that pull
+and the install, the old binary refuses the database (it is now newer than
+the schema the old binary knows), so install straight away. On the upgrade to
+1.3.0 the clone's earlier `events` audit rows are the exception: they stop
+syncing with migration 0062, so after that pull they remain only in history.
+
+The pull does not bring the clone-local migrations: they change tables that
+never sync (such as `leases`), so every database applies its own. Run
+`bd migrate schema` once after installing, on every clone and on every
+database a direct-server workspace reads; it does nothing when they are
+already applied. Until they are, a read that needs a clone-local column
+refuses with a message naming that command. The older workaround of running a
+write-capable command such as `bd sql "SELECT 1"` to apply them is not needed.
 
 Run `bd dolt commit` in step 1 even on a clone where you wrote nothing, so
 that the step 3 pull is a fast-forward: on 1.2.2 a pull that merges can leave

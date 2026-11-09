@@ -368,3 +368,21 @@ func TestRemoteMigrateGateAdoptFastForward(t *testing.T) {
 		t.Errorf("UserMessage should explain the fast-forward is loss-free:\n%s", msg)
 	}
 }
+
+// TestRemoteMigrateGateDefaultArmNamesCloneLocalSeries pins the multi-clone
+// recipe against gastownhall/beads#7038. Pulling the migrator's push brings
+// the replicated schema only: the clone-local series is dolt-ignored and
+// never replicates, so the upgraded binary still has migrations to apply.
+// The old text promised "its upgrade then has nothing to migrate", which sent
+// readers into a refused first read with no step that fixes it.
+func TestRemoteMigrateGateDefaultArmNamesCloneLocalSeries(t *testing.T) {
+	msg := (&RemoteMigrateGateError{CurrentVersion: 49, LatestVersion: 53, Pending: 4}).UserMessage()
+	if strings.Contains(msg, "nothing\n  to migrate") || strings.Contains(msg, "nothing to migrate") {
+		t.Errorf("default gate text still promises the post-pull upgrade has nothing to migrate:\n%s", msg)
+	}
+	for _, want := range []string{"clone-local", "never replicate", SharedConsentCommand} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("default gate text lacks %q:\n%s", want, msg)
+		}
+	}
+}
