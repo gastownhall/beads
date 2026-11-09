@@ -194,3 +194,41 @@ func TestDetectTestPollution_IDAndCreationTimeAreNotEvidence(t *testing.T) {
 		}
 	}
 }
+
+// TestDetectTestPollution_ConfidenceBands pins GH#5025's weights, in tenths:
+// a test title prefix +6, a generic test phrase +6 once, an empty trimmed
+// description +2 and a short one +1; 0.7 reports, 0.9 is high confidence.
+// One title signal is therefore review-only (medium) and only both title
+// signals reach high confidence, whatever the ID or creation time.
+func TestDetectTestPollution_ConfidenceBands(t *testing.T) {
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	tests := []struct {
+		title, desc string
+		score       float64
+		high        bool
+	}{
+		{"Debug sync hangs", "", 0.8, false},
+		{"Test issue", "", 1.4, true},
+		{"Debug sync hangs", " wip ", 0.7, false},
+		{"Test issue", "wip", 1.3, true},
+		{"Write a sample issue template", "  ", 0.8, false},
+		{"Sample issue for testing", "", 1.4, true},
+	}
+	for _, ids := range [][]string{{"bd-1", "bd-2", "bd-3", "bd-4", "bd-5", "bd-6"}, {"bd-q9x", "bd-r2k", "bd-z7m", "bd-a0p", "bd-w3c", "bd-k8d"}} {
+		var issues []*types.Issue
+		for i, tt := range tests {
+			issues = append(issues, &types.Issue{ID: ids[i], Title: tt.title, Description: tt.desc, Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: created})
+		}
+		got := pollutedIDs(issues)
+		for i, tt := range tests {
+			p, ok := got[ids[i]]
+			if !ok {
+				t.Errorf("%s %q desc %q not reported, want score %.1f", ids[i], tt.title, tt.desc, tt.score)
+				continue
+			}
+			if p.score != tt.score || p.highConfidence() != tt.high {
+				t.Errorf("%s %q desc %q: score %v high %v (reasons %v), want score %v high %v", ids[i], tt.title, tt.desc, p.score, p.highConfidence(), p.reasons, tt.score, tt.high)
+			}
+		}
+	}
+}
