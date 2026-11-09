@@ -138,13 +138,14 @@ func TestCursorRealityFloor(t *testing.T) {
 		// These two cases document the two real-world shapes the stub seam
 		// collapses: an absent leases table and a present-but-column-less leases
 		// table both drive sentinelColumnExists to false
-		// (columns["leases.granted_node"] == false), because the real probe
-		// reports a missing table (its existence read) and a missing column (its
-		// SHOW COLUMNS read) alike. They deliberately exercise the same branch —
-		// the naming records intent, not a distinct seam path; the probe itself
-		// is pinned by TestSentinelColumnProbeNeverAsksAMissingTable. Both floor
-		// at 11, which is what lets the replay heal both (0012 re-creates leases,
-		// 0016 adds the column) without reaching back to 0007.
+		// (columns["leases.granted_node"] == false), because the real probe's
+		// SHOW COLUMNS read reports a missing table (it fails with 1146) and a
+		// missing column (it finds no row) alike. They deliberately exercise the
+		// same branch — the naming records intent, not a distinct seam path; the
+		// probe itself is pinned by
+		// TestSentinelColumnProbeReadsAMissingTableAsAbsent. Both floor at 11,
+		// which is what lets the replay heal both (0012 re-creates leases, 0016
+		// adds the column) without reaching back to 0007.
 		{
 			name:        "leases table absent",
 			present:     allSentinelTables(),
@@ -745,16 +746,15 @@ func TestMigrationWorkNeededWhenLeaseGrantedNodeAbsent(t *testing.T) {
 	}
 }
 
-// TestIgnoredCursorReadWithLeasesAbsentIssuesNoFailingStatement is the
+// TestIgnoredCursorReadWithLeasesAbsentClampsToTheColumnFloor is the
 // missing-carrier shape end to end through the guarded cursor read every
 // write-capable open performs. Every released tree (v1.1.0, v1.1.2, v1.2.x)
 // has no leases table at all, and an out-of-band copy can arrive at-latest
-// without it. The ordered mock admits exactly the carrier's existence read for
-// the column sentinel: a SHOW COLUMNS sent to the absent table is unexpected,
-// and currentVersion surfaces that rather than swallowing it the way atLatest
-// does, so this fails if the probe ever issues the statement that pins a pooled
-// Dolt session (be-bv7x).
-func TestIgnoredCursorReadWithLeasesAbsentIssuesNoFailingStatement(t *testing.T) {
+// without it. The column sentinel's SHOW COLUMNS fails with 1146 on the absent
+// table, which must read as a missing column: currentVersion surfaces any other
+// failure rather than swallowing it the way atLatest does, and the cursor clamps
+// to the column's replayFloor.
+func TestIgnoredCursorReadWithLeasesAbsentClampsToTheColumnFloor(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
