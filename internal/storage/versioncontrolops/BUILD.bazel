@@ -10,6 +10,7 @@ go_library(
         "branches.go",
         "childcounters_merge.go",
         "childrenumber.go",
+        "childrenumber_apply.go",
         "clone.go",
         "commit.go",
         "compact.go",

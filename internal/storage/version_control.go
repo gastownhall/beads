@@ -175,6 +175,10 @@ type ChildRenumberReport struct {
 	MergeBase  string `json:"merge_base,omitempty"`
 	// Renames lists roots and descendants, roots first.
 	Renames []ChildRenumber `json:"renames"`
+	// RenameCommit is the Dolt commit holding Renames, once made.
+	RenameCommit string `json:"rename_commit,omitempty"`
+	// Merged reports that the remote head was merged after the renames.
+	Merged bool `json:"merged"`
 }
 
 // ChildRenumberPlanner is the optional read-only half of `bd dolt pull
@@ -187,6 +191,15 @@ type ChildRenumberReport struct {
 // means the default remote. Callers must type-assert.
 type ChildRenumberPlanner interface {
 	PlanChildRenumbers(ctx context.Context, remote string) (*ChildRenumberReport, error)
+}
+
+// ChildRenumberingPuller is the applying half of `bd dolt pull
+// --renumber-children`: fetch, rename the local colliding children in one
+// commit, then merge. The report comes back with any error once the rename
+// commit exists, since that commit is kept. Callers must type-assert.
+type ChildRenumberingPuller interface {
+	ChildRenumberPlanner
+	PullRenumberChildren(ctx context.Context, remote, actor string) (*ChildRenumberReport, error)
 }
 
 // VersionControl provides branch, commit, merge, and status operations.
