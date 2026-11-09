@@ -819,3 +819,103 @@ func TestEmbeddedImportSkipInvalid(t *testing.T) {
 		}
 	})
 }
+
+// TestEmbeddedImportInvalidRegisteredVocabulary pins the vocabulary half of
+// #4492: a record using a custom status or type the workspace actually
+// registered — in the database (bd config set) or in config.yaml — is NOT a
+// reject. The screen reads the writer's own vocabulary, so what the writer
+// accepts, the import accepts; a screen that rejected these would be worse
+// than the bug being fixed.
+func TestEmbeddedImportInvalidRegisteredVocabulary(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt import tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	// registeredVocabularyRows returns one row per custom combination: a
+	// custom status on a built-in type, a built-in status on a custom type,
+	// and both custom at once. Registered vocabulary must accept all three.
+	registeredVocabularyRows := func(prefix string, now time.Time) []types.Issue {
+		return []types.Issue{
+			{ID: prefix + "-cst", Title: "Custom status", Status: types.Status("verify"), IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+			{ID: prefix + "-ctp", Title: "Custom type", Status: types.StatusOpen, IssueType: types.IssueType("quest"), CreatedAt: now, UpdatedAt: now},
+			{ID: prefix + "-both", Title: "Both custom", Status: types.Status("verify"), IssueType: types.IssueType("quest"), CreatedAt: now, UpdatedAt: now},
+		}
+	}
+
+	// assertAllImported proves the registered-vocabulary file imports clean
+	// both ways: strictly (a registered record must not even be a reject
+	// under the default) and with --skip-invalid --rejects --json (zero
+	// rejects, empty rejects file). Each run gets a fresh workspace — with
+	// the vocabulary registered in IT, by register — so the first import
+	// cannot mask the second's counts and neither run borrows the other's
+	// registration.
+	assertAllImported := func(t *testing.T, prefix string, register func(t *testing.T, dir, beadsDir string), jsonlPath string) {
+		t.Helper()
+		strictDir, strictBeads, _ := bdInit(t, bd, "--prefix", prefix+"s")
+		register(t, strictDir, strictBeads)
+		strictOut, strictErrTxt, err := bdImportBuffers(t, bd, strictDir, nil, jsonlPath)
+		if err != nil {
+			t.Fatalf("strict import must succeed when the vocabulary is registered (a registered record is not a reject);\nstdout:\n%s\nstderr:\n%s", strictOut, strictErrTxt)
+		}
+		if issues := bdListJSONAllowError(t, bd, strictDir); len(issues) != 3 {
+			t.Errorf("strict import should land all 3 records; found %d", len(issues))
+		}
+
+		skipDir, skipBeads, _ := bdInit(t, bd, "--prefix", prefix+"k")
+		register(t, skipDir, skipBeads)
+		rejectsPath := filepath.Join(t.TempDir(), "rejects.jsonl")
+		stdout, stderr, err := bdImportBuffers(t, bd, skipDir, nil, jsonlPath, "--skip-invalid", "--rejects", rejectsPath, "--json")
+		if err != nil {
+			t.Fatalf("bd import --skip-invalid should succeed; err=%v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		var result importSkipInvalidJSON
+		if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &result); err != nil {
+			t.Fatalf("parse --json output %q: %v", stdout, err)
+		}
+		if result.Created != 3 {
+			t.Errorf("Created = %d, want 3 (registered vocabulary must not reject); result: %+v", result.Created, result)
+		}
+		if len(result.Rejected) != 0 {
+			t.Errorf("Rejected = %+v, want none — every record is in the registered vocabulary", result.Rejected)
+		}
+		saved, readErr := os.ReadFile(rejectsPath)
+		if readErr != nil {
+			t.Fatalf("read rejects file: %v", readErr)
+		}
+		if len(saved) != 0 {
+			t.Errorf("rejects file should be empty; got %q", saved)
+		}
+	}
+
+	t.Run("db_registered_status_and_type", func(t *testing.T) {
+		register := func(t *testing.T, dir, beadsDir string) {
+			t.Helper()
+			bdRunOK(t, bd, dir, "config", "set", "status.custom", "verify:active")
+			bdRunOK(t, bd, dir, "config", "set", "types.custom", "quest")
+		}
+		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+		writeJSONLFile(t, jsonlPath, registeredVocabularyRows("imreg", time.Now().UTC()))
+		assertAllImported(t, "imreg", register, jsonlPath)
+	})
+
+	t.Run("yaml_overlay_status_and_type", func(t *testing.T) {
+		register := func(t *testing.T, dir, beadsDir string) {
+			t.Helper()
+			yaml := "status:\n  custom: [verify:active]\ntypes:\n  custom: [quest]\n"
+			path := filepath.Join(beadsDir, "config.yaml")
+			existing, readErr := os.ReadFile(path)
+			if readErr != nil {
+				existing = nil // no config.yaml yet — the sections become the whole file
+			}
+			if err := os.WriteFile(path, append(existing, yaml...), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+		writeJSONLFile(t, jsonlPath, registeredVocabularyRows("imreg", time.Now().UTC()))
+		assertAllImported(t, "imyal", register, jsonlPath)
+	})
+}
