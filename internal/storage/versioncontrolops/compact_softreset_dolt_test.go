@@ -755,6 +755,52 @@ func TestCompactStraddlingWriterKeepsLandedCommit(t *testing.T) {
 	})
 }
 
+// AC-3 of the catch-up design: a landed range the replay cannot carry — here
+// a merge commit reached main — skips catch-up entirely: no replay of the
+// range, the soft reset keeps the merged rows and the staged follow-up
+// commits them, as before catch-up existed.
+func TestCompactSkipsCatchUpOnMergeRange(t *testing.T) {
+	port := startCompactTestServer(t)
+	f := newCompactFixture(t, port)
+
+	// A merge on main, built after the plan was read: a side branch commit
+	// merged over a main commit, so the range's head carries two parents.
+	f.exec(f.db,
+		"CALL DOLT_CHECKOUT('-b', 'side')",
+		"INSERT INTO t VALUES (610, 'side')",
+		"CALL DOLT_COMMIT('-Am', 'side edit')",
+		"CALL DOLT_CHECKOUT('main')",
+		"INSERT INTO t VALUES (600, 'landed')",
+		"CALL DOLT_COMMIT('-Am', 'landed 600')",
+		"CALL DOLT_MERGE('side')",
+	)
+	f.writePending(f.db)
+
+	if err := f.compact(&compactHookConn{}); err != nil {
+		t.Fatalf("Compact: %v (a merge in the landed range must fall back, not refuse)", err)
+	}
+	f.wantFollowupLog()
+	for _, id := range []int{600, 610} {
+		if n := f.count(fmt.Sprintf("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = %d", id)); n != 1 {
+			t.Fatalf("merged t row %d in main's HEAD: found=%d, want 1 (kept by the follow-up)", id, n)
+		}
+	}
+	f.wantHeadTree(f.headHashOfMain())
+	f.wantPendingKept()
+	f.wantStatus("config:false", "u:false")
+	f.wantNoTempBranch()
+}
+
+// headHashOfMain returns main's HEAD hash.
+func (f *compactFixture) headHashOfMain() string {
+	f.t.Helper()
+	var h string
+	if err := f.db.QueryRowContext(f.ctx, "SELECT HASHOF('main')").Scan(&h); err != nil {
+		f.t.Fatalf("read main's HEAD: %v", err)
+	}
+	return h
+}
+
 // AC-3: a quiet compaction keeps main's tree, replaces the old commits with
 // one squashed base and adds no follow-up commit.
 func TestCompactQuietRunAddsNoCommit(t *testing.T) {
