@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
@@ -137,6 +138,78 @@ func TestCustomConfigGettersDoNotCacheFailedResolve(t *testing.T) {
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+		})
+	}
+}
+
+const (
+	yamlCustomStatuses = "status:\n  custom: \"review:active,parked:frozen\"\n"
+	yamlCustomTypes    = "types:\n  custom: \"spike, spike,research\"\n"
+)
+
+// GH#5581: when the read fails but config.yaml declares the requested
+// vocabulary, the getter serves the parsed config.yaml vocabulary for that
+// call only; the degraded answer is never cached.
+func TestCustomConfigGettersServeUncachedYAMLFallback(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		// want maps a getter to its vocabulary; a missing getter must fail.
+		want map[string][]string
+	}{
+		{
+			name: "both vocabularies declared",
+			yaml: yamlCustomStatuses + yamlCustomTypes,
+			want: map[string][]string{
+				"GetCustomStatuses":         {"review", "parked"},
+				"GetCustomStatusesDetailed": {"review:active", "parked:frozen"},
+				"GetCustomTypes":            {"spike", "research"},
+			},
+		},
+		{
+			name: "only statuses declared",
+			yaml: yamlCustomStatuses,
+			want: map[string][]string{
+				"GetCustomStatuses":         {"review", "parked"},
+				"GetCustomStatusesDetailed": {"review:active", "parked:frozen"},
+			},
+		},
+		{
+			name: "only types declared",
+			yaml: yamlCustomTypes,
+			want: map[string][]string{
+				"GetCustomTypes": {"spike", "research"},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withCustomConfigYAML(t, tc.yaml)
+			for _, g := range customConfigGetters {
+				t.Run(g.name, func(t *testing.T) {
+					store, mock := newCustomConfigMockStore(t)
+					injected := errors.New("simulated read failure")
+					mock.ExpectBegin().WillReturnError(injected)
+
+					got, err := g.get(context.Background(), store)
+					want, ok := tc.want[g.name]
+					switch {
+					case ok && err != nil:
+						t.Fatalf("%s err = %v, want config.yaml fallback %v", g.name, err, want)
+					case ok && !slices.Equal(got, want):
+						t.Fatalf("%s = %v, want config.yaml fallback %v", g.name, got, want)
+					case !ok && (!errors.Is(err, injected) || got != nil):
+						t.Fatalf("%s = %v, %v; want no vocabulary and an error wrapping %v", g.name, got, err, injected)
+					}
+					if store.customStatusCached || store.customTypeCached ||
+						store.customStatusCache != nil || store.customStatusDetailedCache != nil || store.customTypeCache != nil {
+						t.Fatalf("%s cached the degraded config.yaml fallback", g.name)
+					}
+					if err := mock.ExpectationsWereMet(); err != nil {
+						t.Fatalf("unmet SQL expectations: %v", err)
+					}
+				})
 			}
 		})
 	}
