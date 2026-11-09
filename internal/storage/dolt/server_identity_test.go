@@ -222,3 +222,30 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+// TestServerIdentityMatchingRecord: a record that names the answering server
+// lets the shared endpoint create, write and read its database.
+func TestServerIdentityMatchingRecord(t *testing.T) {
+	skipIfNoServer(t)
+	ctx := context.Background()
+	beadsDir, dataDir := serverIdentityShared(t)
+	writeIdentityRecord(t, dataDir, testServerUUID(t)+"\n")
+	dbName := fmt.Sprintf("test_identity_match_%d", testServerPort)
+
+	cfg := sharedIdentityConfig(t, beadsDir, dbName)
+	cfg.CreateIfMissing = true
+	store, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("create on the paired server: %v", err)
+	}
+	_ = store.Close()
+	for _, readOnly := range []bool{false, true} {
+		cfg := sharedIdentityConfig(t, beadsDir, dbName)
+		cfg.ReadOnly = readOnly
+		store, err := New(ctx, cfg)
+		if err != nil {
+			t.Fatalf("open (readOnly=%v) on the paired server: %v", readOnly, err)
+		}
+		_ = store.Close()
+	}
+}

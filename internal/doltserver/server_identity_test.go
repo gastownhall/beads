@@ -265,3 +265,40 @@ func TestServerIdentityNetstatOwnership(t *testing.T) {
 		})
 	}
 }
+
+// countIdentityLookups counts the refusal diagnostics' PID lookups.
+func countIdentityLookups(t *testing.T) *int {
+	t.Helper()
+	n := 0
+	origListener, origRecorded := identityListenerPID, identityRecordedPID
+	identityListenerPID = func(int) int { n++; return 0 }
+	identityRecordedPID = func(string) int { n++; return 0 }
+	t.Cleanup(func() { identityListenerPID, identityRecordedPID = origListener, origRecorded })
+	return &n
+}
+
+// TestServerIdentityMatchingRecordNeedsNoLookups: a record that names the
+// answering server passes with no listener or process lookup, whatever the
+// record's case and trailing whitespace; only a refusal looks them up.
+func TestServerIdentityMatchingRecordNeedsNoLookups(t *testing.T) {
+	lookups := countIdentityLookups(t)
+	dataDir := t.TempDir()
+	exp := &ServerIdentityExpectation{DataDir: dataDir, ServerDir: t.TempDir(), Host: "127.0.0.1", Port: 3307}
+	if err := os.WriteFile(exp.RecordPath(), []byte(strings.ToUpper(pairedUUIDA)+"\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyServerIdentity(context.Background(), uuidRow(t, pairedUUIDA), exp); err != nil {
+		t.Fatalf("matching record: %v", err)
+	}
+	if *lookups != 0 {
+		t.Errorf("a matching check made %d PID lookups, want none", *lookups)
+	}
+
+	err := VerifyServerIdentity(context.Background(), uuidRow(t, pairedUUIDB), exp)
+	if !errors.Is(err, ErrServerIdentityMismatch) {
+		t.Fatalf("mismatch = %v, want ErrServerIdentityMismatch", err)
+	}
+	if *lookups != 2 {
+		t.Errorf("a refusal made %d PID lookups, want 2 (recorded and listener)", *lookups)
+	}
+}
