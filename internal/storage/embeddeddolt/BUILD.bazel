@@ -208,6 +208,7 @@ go_test(
         "migrate_consent_gate_test.go",
         "migrate_dep_external_retype_test.go",
         "migrate_dep_rekey_dedup_test.go",
+        "migrate_dep_retype_atomicity_test.go",
         "migrate_events_flip_test.go",
         "migrate_events_preflip_restore_test.go",
         "migrate_frozen_guard_convergence_test.go",

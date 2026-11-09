@@ -135,6 +135,17 @@ gave it during the step. The census also fails if a guarded step's UPDATE
 assigns anything but its registered column. That registry is closed: a new
 migration self-assigns instead of joining it.
 
+**A repair that runs inside the repair-transaction boundary gets one statement
+at a time.** Ignored 0032's repair (the cross-prefix re-type) runs inside a
+driver transaction begun on MigrateUp's pinned session, and that transaction is
+ONE driver connection: probing another table while a scan's result set is still
+open interleaves two statements on it. The embedded engine tolerates the
+interleave — an embedded-only test suite passes against the bug — but server
+mode's mysql driver refuses the second statement with `driver: bad connection`
+(and the rollback and lock release then fail on the same dead connection). Read
+each result set to completion and close it before the next statement: collect
+the rows, then classify (`dep_external_retype.go`'s two-phase plan).
+
 ## Testing
 
 `sqlmock` statement-echo tests cannot exercise any of the above; they assert the

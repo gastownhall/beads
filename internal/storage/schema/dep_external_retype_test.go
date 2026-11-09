@@ -142,6 +142,13 @@ func TestRetypePlanKeepsHierarchyViolationsExternal(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"id", "issue_id", "depends_on_external", "type"}).
 			AddRow(depid.New(source, ancestor), source, ancestor, "blocks").
 			AddRow(depid.New(eligibleSource, eligibleTarget), eligibleSource, eligibleTarget, "blocks"))
+	// The read phase's second half: wisp_dependencies is absent here, and the
+	// classification probes only start once both scans are closed — the
+	// plan's statements must run strictly one at a time on the repair
+	// transaction's single driver connection.
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
+		WithArgs("wisp_dependencies").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	// The violating row: a present target, then the blocker-ancestor probe
 	// fires once and settles it — the descendant probe never runs.
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM wisps`).WithArgs(ancestor).
@@ -159,9 +166,6 @@ func TestRetypePlanKeepsHierarchyViolationsExternal(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(0))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM ancestors WHERE node = \?`).WithArgs(eligibleTarget, eligibleSource).
 		WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(0))
-	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
-		WithArgs("wisp_dependencies").
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 
 	var notice bytes.Buffer
 	origStderr := stderr

@@ -178,12 +178,23 @@ func repairCrossPrefixExternalDeps(ctx context.Context, db DBConn) error {
 // any write is the same contract rekeyDependencyIDs carries: a refusal or
 // failure leaves the tables exactly as they were.
 //
+// The reads come in two strictly sequential phases — collect both tables'
+// raw rows and close their result sets, THEN classify — because the repair
+// runs inside one driver transaction on the pinned session, and probing
+// wisps or issues while a scan's rows are still open interleaves two
+// statements on the single connection the mysql driver refuses
+// ("driver: bad connection"; the embedded engine tolerates it, server mode
+// does not). Every classification statement therefore runs alone.
+//
 // Only well-formed rows participate — exactly one non-null target column,
 // the external one. A row with no target or several (ck_dep_one_target
 // drift; see depRow.mergeable for the twin gate) is left alone for
 // bd doctor to surface.
 func planDepExternalRetype(ctx context.Context, db DBConn) ([]depRetypeRow, error) {
-	var rows []depRetypeRow
+	type rawRetypeRow struct {
+		table, id, issueID, target, depType string
+	}
+	var raw []rawRetypeRow
 	for _, table := range depRekeyTables {
 		exists, err := schemaTableExists(ctx, db, table)
 		if err != nil {
@@ -213,46 +224,9 @@ func planDepExternalRetype(ctx context.Context, db DBConn) ([]depRetypeRow, erro
 				_ = scanned.Close()
 				return nil, fmt.Errorf("%s: scanning external row for the 0032 retype: %w", table, err)
 			}
-			// An explicit external reference names something outside beads
-			// entirely; it is external by definition, not misfiled.
-			if strings.HasPrefix(target.String, "external:") {
-				continue
-			}
-			kind, present, err := resolveDepRetypeTarget(ctx, db, target.String)
-			if err != nil {
-				_ = scanned.Close()
-				return nil, err
-			}
-			if !present {
-				// The multi-rig "add now, route later" shape: the target
-				// lives in another rig's database, or has not been hydrated
-				// into this one yet. Keep the legacy column.
-				continue
-			}
-			dep := &types.Dependency{IssueID: issueID, DependsOnID: target.String, Type: types.DependencyType(depType.String)}
-			if types.IsGateEdge(dep.Type) {
-				// depTables nil: CheckBlockingHierarchyInTx falls back to its
-				// own both-tables default, the same set the write path walks.
-				if err := issueops.CheckBlockingHierarchyInTx(ctx, db, dep, nil); err != nil {
-					var conflict *publicops.DependencyHierarchyConflictError
-					if !errors.As(err, &conflict) {
-						_ = scanned.Close()
-						return nil, fmt.Errorf("%s: hierarchy check before the 0032 retype of %s -> %s: %w", table, issueID, target.String, err)
-					}
-					// The write path would refuse this edge; the repair must
-					// not manufacture it. Keep the row external so it still
-					// blocks nothing, and tell the operator exactly which
-					// edge to remove.
-					fmt.Fprintf(stderr,
-						"WARN: migration 0032: keeping cross-prefix edge %s -> %s external: converting it would violate the blocking hierarchy; remove it with 'bd dep remove %s %s'\n",
-						issueID, target.String, issueID, target.String)
-					continue
-				}
-			}
-			rows = append(rows, depRetypeRow{
+			raw = append(raw, rawRetypeRow{
 				table: table, id: id, issueID: issueID,
 				target: target.String, depType: depType.String,
-				kind: kind, sourceWisp: table != "dependencies",
 			})
 		}
 		if err := scanned.Err(); err != nil {
@@ -260,6 +234,49 @@ func planDepExternalRetype(ctx context.Context, db DBConn) ([]depRetypeRow, erro
 			return nil, fmt.Errorf("%s: iterating external rows for the 0032 retype: %w", table, err)
 		}
 		_ = scanned.Close()
+	}
+
+	var rows []depRetypeRow
+	for _, r := range raw {
+		// An explicit external reference names something outside beads
+		// entirely; it is external by definition, not misfiled.
+		if strings.HasPrefix(r.target, "external:") {
+			continue
+		}
+		kind, present, err := resolveDepRetypeTarget(ctx, db, r.target)
+		if err != nil {
+			return nil, err
+		}
+		if !present {
+			// The multi-rig "add now, route later" shape: the target
+			// lives in another rig's database, or has not been hydrated
+			// into this one yet. Keep the legacy column.
+			continue
+		}
+		dep := &types.Dependency{IssueID: r.issueID, DependsOnID: r.target, Type: types.DependencyType(r.depType)}
+		if types.IsGateEdge(dep.Type) {
+			// depTables nil: CheckBlockingHierarchyInTx falls back to its
+			// own both-tables default, the same set the write path walks.
+			if err := issueops.CheckBlockingHierarchyInTx(ctx, db, dep, nil); err != nil {
+				var conflict *publicops.DependencyHierarchyConflictError
+				if !errors.As(err, &conflict) {
+					return nil, fmt.Errorf("%s: hierarchy check before the 0032 retype of %s -> %s: %w", r.table, r.issueID, r.target, err)
+				}
+				// The write path would refuse this edge; the repair must
+				// not manufacture it. Keep the row external so it still
+				// blocks nothing, and tell the operator exactly which
+				// edge to remove.
+				fmt.Fprintf(stderr,
+					"WARN: migration 0032: keeping cross-prefix edge %s -> %s external: converting it would violate the blocking hierarchy; remove it with 'bd dep remove %s %s'\n",
+					r.issueID, r.target, r.issueID, r.target)
+				continue
+			}
+		}
+		rows = append(rows, depRetypeRow{
+			table: r.table, id: r.id, issueID: r.issueID,
+			target: r.target, depType: r.depType,
+			kind: kind, sourceWisp: r.table != "dependencies",
+		})
 	}
 	// Plan order is a pure function of table content (table, then id), so two
 	// clones holding the same rows plan the same repair.
