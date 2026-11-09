@@ -68,6 +68,13 @@ func (c *dependencyCommitBoundaryConn) QueryContext(_ context.Context, query str
 		return &dependencyCommitBoundaryRows{columns: []string{"exists"}}, nil
 	case strings.Contains(query, "SELECT issue_type FROM wisps WHERE id = ?"):
 		return &dependencyCommitBoundaryRows{columns: []string{"issue_type"}, values: [][]driver.Value{{"task"}}}, nil
+	// Presence-based target classification reads the target's type and status
+	// from the wisps table (GH#8299): a hit is a typed local wisp edge.
+	case strings.Contains(query, "SELECT issue_type, status FROM wisps WHERE id = ?"):
+		if c.driver.activeWisp {
+			return &dependencyCommitBoundaryRows{columns: []string{"issue_type", "status"}, values: [][]driver.Value{{"task", "open"}}}, nil
+		}
+		return &dependencyCommitBoundaryRows{columns: []string{"issue_type", "status"}}, nil
 	// The add path's existence probe reads the stored edge's metadata and
 	// thread_id alongside its type: a same-type re-add compares both to decide
 	// whether it changes anything.

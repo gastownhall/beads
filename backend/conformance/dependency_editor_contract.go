@@ -1513,7 +1513,7 @@ func RunDependencyEditorRecordsOneHistoryEntryForAMixedPlaneRequest(t *testing.T
 }
 
 // RunDependencyEditorWritesTheTargetIntoItsTypedColumn pins the target
-// CLASSIFICATION (issueops.ClassifyDepTarget) that dependencyeditor.go:150-156
+// CLASSIFICATION (issueops.ClassifyDepTargetInTx) that dependencyeditor.go:150-156
 // only describes from the outside. A dependency row holds its target in one of
 // three typed columns — depends_on_issue_id, depends_on_wisp_id,
 // depends_on_external — and which one it is is not cosmetic: only

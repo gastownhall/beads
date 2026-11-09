@@ -36,34 +36,42 @@ func (s *DoltStore) AddDependencyWithOptions(ctx context.Context, dep *types.Dep
 }
 
 func (s *DoltStore) addDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, addOpts storage.DependencyAddOptions) error {
-	isCrossPrefix := isCrossPrefixDep(dep.IssueID, dep.DependsOnID)
-
 	// Route to wisp_dependencies if the source is an active wisp.
 	if s.isActiveWisp(ctx, dep.IssueID) {
-		return s.addWispDependency(ctx, dep, actor, isCrossPrefix, addOpts.EmitEvent)
+		return s.addWispDependency(ctx, dep, actor, addOpts.EmitEvent)
 	}
 
+	// Classify the target against THIS database before the transaction: a
+	// prefix mismatch is only a hint, not proof the target lives in another
+	// rig's database (GH#8299), so the probes decide. An explicit "external:"
+	// ref is external by definition; a target present as a wisp or issue gets
+	// its typed column; only a cross-prefix target NEITHER probe finds falls
+	// back to depends_on_external. A same-prefix miss keeps kind Issue, and
+	// AddDependencyInTx's in-tx target read raises the missing-target refusal.
 	targetTable := "issues"
 	kind := issueops.DepTargetIssue
 	switch {
-	case isCrossPrefix, strings.HasPrefix(dep.DependsOnID, "external:"):
+	case strings.HasPrefix(dep.DependsOnID, "external:"):
 		kind = issueops.DepTargetExternal
+	case s.isActiveWisp(ctx, dep.DependsOnID):
+		targetTable = "wisps"
+		kind = issueops.DepTargetWisp
+	case s.issueExists(ctx, dep.DependsOnID):
+		// kind stays DepTargetIssue.
 	default:
-		if s.isActiveWisp(ctx, dep.DependsOnID) {
-			targetTable = "wisps"
-			kind = issueops.DepTargetWisp
+		if isCrossPrefixDep(dep.IssueID, dep.DependsOnID) {
+			kind = issueops.DepTargetExternal
 		}
 	}
 
 	var written issueops.DependencyWriteResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		opts := issueops.AddDependencyOpts{
-			SourceTable:   "issues",
-			TargetTable:   targetTable,
-			WriteTable:    "dependencies",
-			IsCrossPrefix: isCrossPrefix,
-			TargetKind:    &kind,
-			EmitEvent:     addOpts.EmitEvent,
+			SourceTable: "issues",
+			TargetTable: targetTable,
+			WriteTable:  "dependencies",
+			TargetKind:  &kind,
+			EmitEvent:   addOpts.EmitEvent,
 		}
 		// Assigned, never merged: a retried attempt's verdict replaces the
 		// rolled-back one's.

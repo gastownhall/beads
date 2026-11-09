@@ -415,7 +415,6 @@ func (r *applyBatchRun) applyDepAdd(ctx context.Context, tx *sql.Tx, index int, 
 	written, err := AddDependencyInTxWithResult(ctx, tx, dep, r.plan.Actor, AddDependencyOpts{
 		SourceTable:    sourceTable,
 		WriteTable:     depTable,
-		IsCrossPrefix:  types.ExtractPrefix(source) != types.ExtractPrefix(target),
 		SkipCycleCheck: r.plan.SkipPerEdgeCycleCheck,
 		EmitEvent:      true,
 	})
@@ -605,9 +604,22 @@ func (r *applyBatchRun) runEndGate(ctx context.Context, tx *sql.Tx) error {
 			DependsOnID: applied.edge.DependsOnID,
 			Type:        applied.edge.Type,
 		}
-		// An external or cross-repository target has no local hierarchy to
-		// conflict with, and the per-edge path filters it for the same reason.
-		if IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
+		// A target stored depends_on_external has no local hierarchy to
+		// conflict with, and the per-edge path filters it for the same reason —
+		// presence-based, so a cross-prefix target THIS database holds still
+		// passes the check (GH#8299). By this point every edge's target was
+		// proven present or external at write time, so a classification refusal
+		// here names a genuine inconsistency.
+		kind, _, err := ClassifyDepTargetInTx(ctx, tx, dep)
+		if err != nil {
+			return &publicops.ItemError{
+				Index:   applied.index,
+				Kind:    publicops.ItemDepAdd,
+				IssueID: dep.IssueID,
+				Err:     err,
+			}
+		}
+		if kind == DepTargetExternal {
 			continue
 		}
 		if err := CheckBlockingHierarchyInTx(ctx, tx, dep, cycleDetectionTables()); err != nil {

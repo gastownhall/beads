@@ -3,7 +3,11 @@ package issueops
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"strings"
+
+	publicops "github.com/steveyegge/beads/issueops"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
@@ -108,46 +112,41 @@ func (l *depBatchLookups) isWisp(ctx context.Context, tx DBTX, id string) bool {
 	return ok
 }
 
-// classify is ClassifyDepTarget using the batch routing read.
-func (l *depBatchLookups) classify(ctx context.Context, tx DBTX, dep *types.Dependency, isCrossPrefix bool) DepTargetKind {
-	if l == nil {
-		return ClassifyDepTarget(ctx, tx, dep, isCrossPrefix)
-	}
-	if isCrossPrefix || IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
-		return DepTargetExternal
+// classify resolves an edge's target against THIS database, answering from the
+// batch routing read when one covers the batch, and reports whether the target
+// is a row this database holds. A prefix mismatch is only a hint: a
+// cross-prefix target the read (or the direct probe, below) finds in wisps or
+// issues is a typed local edge, and only one NEITHER finds is external
+// (GH#8299). A same-prefix miss stays (DepTargetIssue, false) so the caller
+// reports it through the shared "target not found" skip.
+func (l *depBatchLookups) classify(ctx context.Context, tx DBTX, dep *types.Dependency) (kind DepTargetKind, targetPresent bool, err error) {
+	if strings.HasPrefix(dep.DependsOnID, "external:") {
+		return DepTargetExternal, false, nil
 	}
 	if l.isWisp(ctx, tx, dep.DependsOnID) {
-		return DepTargetWisp
+		return DepTargetWisp, true, nil
 	}
-	return DepTargetIssue
-}
-
-// targetExists is the per-edge `SELECT 1 FROM <issues|wisps> WHERE id = ?`.
-//
-//nolint:gosec // G201: lookupTable is one of two hardcoded constants.
-func (l *depBatchLookups) targetExists(ctx context.Context, tx DBTX, kind DepTargetKind, id string) (bool, error) {
 	if l != nil {
-		if kind == DepTargetWisp {
-			// The wisps set IS the presence proof: classify returned
-			// DepTargetWisp only because the id is in it, and the pass writes
-			// no wisp rows, so the per-edge `SELECT 1 FROM wisps` would find it.
-			return true, nil
+		if l.issuesExists[dep.DependsOnID] {
+			return DepTargetIssue, true, nil
 		}
-		return l.issuesExists[id], nil
+		if types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID) {
+			return DepTargetExternal, false, nil
+		}
+		return DepTargetIssue, false, nil
 	}
-	lookupTable := "issues"
-	if kind == DepTargetWisp {
-		lookupTable = "wisps"
-	}
-	var exists int
-	err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT 1 FROM %s WHERE id = ?", lookupTable), id).Scan(&exists)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
+	kind, precheck, err := ClassifyDepTargetInTx(ctx, tx, dep)
 	if err != nil {
-		return false, err
+		if errors.Is(err, publicops.ErrDependencyTargetNotFound) {
+			// Same-prefix miss: keep the "target not found" answer the
+			// prefix-era per-edge probe reported as a skip.
+			return DepTargetIssue, false, nil
+		}
+		return 0, false, err
 	}
-	return true, nil
+	// A typed kind came back only because the probe found the row;
+	// an absent cross-prefix target is already DepTargetExternal here.
+	return kind, precheck != nil, nil
 }
 
 // checkHierarchy is CheckBlockingHierarchyInTx(ctx, tx, dep, nil).

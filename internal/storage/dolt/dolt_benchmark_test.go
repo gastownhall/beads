@@ -13,6 +13,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -20,6 +21,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	publicops "github.com/steveyegge/beads/issueops"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
@@ -1190,7 +1193,17 @@ func insertBenchDependencies(ctx context.Context, tx *sql.Tx, depTable string, i
 			if createdAt.IsZero() {
 				createdAt = now
 			}
-			column := issueops.ClassifyDepTarget(ctx, tx, dep, false).Column()
+			kind, _, err := issueops.ClassifyDepTargetInTx(ctx, tx, dep)
+			if err != nil {
+				// A same-prefix target the batch has not written yet keeps
+				// the same "issue column, FK settles it at insert" answer the
+				// prefix-era classifier gave.
+				if !errors.Is(err, publicops.ErrDependencyTargetNotFound) {
+					return fmt.Errorf("classify dependency target %s for %s: %w", dep.DependsOnID, dep.IssueID, err)
+				}
+				kind = issueops.DepTargetIssue
+			}
+			column := kind.Column()
 			rowsByColumn[column] = append(rowsByColumn[column], benchDependencyRow{
 				issueID:     dep.IssueID,
 				dependsOnID: dep.DependsOnID,

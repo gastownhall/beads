@@ -1146,6 +1146,7 @@ go_test(
         "race_detector_on_test.go",
         "readonly_policy_test.go",
         "readonly_test.go",
+        "ready_cross_prefix_same_db_embedded_test.go",
         "ready_embedded_test.go",
         "ready_explain_ids_test.go",
         "ready_input_test.go",

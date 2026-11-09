@@ -88,6 +88,16 @@ func (t *doltTransaction) isActiveWisp(ctx context.Context, id string) bool {
 	return err == nil
 }
 
+// issueExists checks if an ID exists in the durable issues table on the
+// transaction's regular session, so it sees issues created earlier in this
+// logical transaction. Dependency target classification probes it (GH#8299):
+// a cross-prefix target this database holds must land in its typed column.
+func (t *doltTransaction) issueExists(ctx context.Context, id string) bool {
+	var exists int
+	err := t.regularTx.QueryRowContext(ctx, "SELECT 1 FROM issues WHERE id = ? LIMIT 1", id).Scan(&exists)
+	return err == nil
+}
+
 // CreateIssueImport is the import-friendly issue creation hook.
 // Dolt does not enforce prefix validation at the storage layer, so this delegates to CreateIssue.
 func (t *doltTransaction) CreateIssueImport(ctx context.Context, issue *types.Issue, actor string, skipPrefixValidation bool) error {
@@ -986,16 +996,28 @@ func (t *doltTransaction) AddDependencyWithOptions(ctx context.Context, dep *typ
 		eventTable = "wisp_events"
 	}
 
-	isCrossPrefix := isCrossPrefixDep(dep.IssueID, dep.DependsOnID)
+	// Classify the target against THIS database, probing each target table on
+	// the session that owns it: a prefix mismatch is only a hint, not proof
+	// the target lives in another rig's database (GH#8299). An explicit
+	// "external:" ref is external by definition; a target present as a wisp
+	// (ignored session) or an issue (regular session) gets its typed column;
+	// only a cross-prefix target NEITHER probe finds falls back to
+	// depends_on_external. A same-prefix miss keeps kind Issue, and the in-tx
+	// target read — or the precheck below, for a cross-tier target — raises
+	// the missing-target refusal.
 	targetTable := "issues"
 	kind := issueops.DepTargetIssue
 	switch {
-	case isCrossPrefix, strings.HasPrefix(dep.DependsOnID, "external:"):
+	case strings.HasPrefix(dep.DependsOnID, "external:"):
 		kind = issueops.DepTargetExternal
+	case t.isActiveWisp(ctx, dep.DependsOnID):
+		targetTable = "wisps"
+		kind = issueops.DepTargetWisp
+	case t.issueExists(ctx, dep.DependsOnID):
+		// kind stays DepTargetIssue.
 	default:
-		if t.isActiveWisp(ctx, dep.DependsOnID) {
-			targetTable = "wisps"
-			kind = issueops.DepTargetWisp
+		if isCrossPrefixDep(dep.IssueID, dep.DependsOnID) {
+			kind = issueops.DepTargetExternal
 		}
 	}
 
@@ -1003,7 +1025,6 @@ func (t *doltTransaction) AddDependencyWithOptions(ctx context.Context, dep *typ
 		SourceTable:    sourceTable,
 		TargetTable:    targetTable,
 		WriteTable:     table,
-		IsCrossPrefix:  isCrossPrefix,
 		SkipCycleCheck: addOpts.SkipCycleCheck,
 		TargetKind:     &kind,
 		EmitEvent:      addOpts.EmitEvent,

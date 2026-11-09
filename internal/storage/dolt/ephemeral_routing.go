@@ -69,6 +69,18 @@ func (s *DoltStore) wispExists(ctx context.Context, id string) bool {
 	return err == nil
 }
 
+// issueExists checks if an ID exists in the durable issues table using a
+// lightweight query. Dependency target classification probes it so a target
+// this database holds lands in its typed column even when its id prefix
+// differs from the source's (GH#8299).
+func (s *DoltStore) issueExists(ctx context.Context, id string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var exists int
+	err := s.db.QueryRowContext(ctx, "SELECT 1 FROM issues WHERE id = ? LIMIT 1", id).Scan(&exists)
+	return err == nil
+}
+
 // allEphemeral returns true if all IDs in the slice are ephemeral.
 func allEphemeral(ids []string) bool {
 	for _, id := range ids {

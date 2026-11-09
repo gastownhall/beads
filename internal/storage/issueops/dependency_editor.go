@@ -175,7 +175,6 @@ func addDependencyEdgeInTx(ctx context.Context, tx *sql.Tx, request publicops.Ad
 	written, err := AddDependencyInTxWithResult(ctx, tx, dep, request.Actor, AddDependencyOpts{
 		SourceTable:    sourceTable,
 		WriteTable:     depTable,
-		IsCrossPrefix:  types.ExtractPrefix(edge.IssueID) != types.ExtractPrefix(edge.DependsOnID),
 		SkipCycleCheck: request.SkipPerEdgeCycleCheck,
 		EmitEvent:      true,
 	})
