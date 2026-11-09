@@ -39,6 +39,19 @@ const (
 	bazelProxiedMemberIf = "${{ needs.rbe.outputs.enabled == 'true' && needs.rbe.outputs.mode != 'remote' }}"
 )
 
+// bazelDoltRaceJobs is the union's own --jobs: remote exec's 64 plus the 6
+// shards of //internal/httpclient:httpclient_served_provider_test, the
+// one-wave budget TestBazelDoltRaceFitsTheJobsBudget holds the union to. It is
+// the union's only line that is not a member's (the closed #7542 pattern): the
+// members run their tiers alone, inside remote exec's 64, and --jobs is in no
+// action key, so the members' test actions stay byte-identical.
+const bazelDoltRaceJobs = 70
+
+// bazelDoltRaceNonMemberLines are the lines --config=dolt-race carries that
+// no member does; TestBazelDoltRaceConfigIsMemberUnion requires each exactly
+// once and sets them aside.
+var bazelDoltRaceNonMemberLines = []string{"test --jobs=" + strconv.Itoa(bazelDoltRaceJobs)}
+
 // bazelUnionLanes: a union job -> the gated member jobs it runs in place of
 // in mode remote (bazelDoltRaceJobIf). Each member keeps its gate id
 // (bazelLaneGateIDs) and its workflow_call output, which reads the union's
@@ -267,6 +280,9 @@ func TestBazelDoltRaceConfigIsMemberUnion(t *testing.T) {
 		}
 		var memberTags []string
 		for _, l := range lines {
+			if _, opt, _ := strings.Cut(l, " "); strings.HasPrefix(opt, "--jobs=") {
+				t.Errorf("--config=%s line %q: the members run inside remote exec's --jobs; only the union carries its own (bazelDoltRaceNonMemberLines)", m.config, l)
+			}
 			if v, ok := strings.CutPrefix(l, tagPrefix); ok {
 				memberTags = append(memberTags, v)
 				continue
@@ -289,7 +305,21 @@ func TestBazelDoltRaceConfigIsMemberUnion(t *testing.T) {
 			gotTags = append(gotTags, v)
 			continue
 		}
+		if slices.Contains(bazelDoltRaceNonMemberLines, l) {
+			continue
+		}
 		gotRest = append(gotRest, l)
+	}
+	for _, l := range bazelDoltRaceNonMemberLines {
+		n := 0
+		for _, g := range got {
+			if g == l {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("--config=%s carries %q %d times, want exactly once", bazelDoltRaceConfig, l, n)
+		}
 	}
 	if wantTag := strings.Join(tags, ","); len(gotTags) != 1 || gotTags[0] != wantTag {
 		t.Errorf("--config=%s tag filters %v, want exactly [%s]", bazelDoltRaceConfig, gotTags, wantTag)
@@ -536,13 +566,14 @@ func TestBazelDoltRaceArmsExactlyOnePerMode(t *testing.T) {
 	}
 }
 
-// bazelDoltRaceTestActions: the union's test actions, 27 dolt-server + 37
+// bazelDoltRaceTestActions: the union's test actions, 33 dolt-server + 37
 // proxied-server, each a target's shard (62 when item 5 A1b aquery-verified
-// them; 64 since bd_managed_local_test runs as 3 shards). That is exactly
-// --jobs=64, so the union has no headroom: a 4th managed-local shard, or any
-// new test action in either tier, would make 65 and needs a --jobs or
-// shard-count change first.
-const bazelDoltRaceTestActions = 64
+// them; 64 since bd_managed_local_test runs as 3 shards; 70 since
+// httpclient_served_provider_test's 6). That is exactly the union's
+// --jobs=70 (bazelDoltRaceJobs), so the union has no headroom: any new test
+// action in either tier would make 71 and needs a --jobs or shard-count change
+// first.
+const bazelDoltRaceTestActions = 70
 
 // TestBazelDoltRaceFitsTheJobsBudget pins the one-wave rule (closed PR
 // #7542): a union's total test actions must fit in the effective --jobs so

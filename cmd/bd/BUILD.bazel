@@ -536,6 +536,7 @@ go_binary(
         "//backend/http/corpus:__pkg__",
         "//cmd/bd:__subpackages__",
         "//internal/beads:__pkg__",
+        "//internal/httpclient:__pkg__",
         "//internal/storage/uow:__pkg__",
         "//test/conformance:__pkg__",
         "//tests/migration:__pkg__",
