@@ -771,8 +771,9 @@ func cycleDetectionTables() []string {
 }
 
 // CheckBlockingHierarchyInTx rejects blocking dependencies between an issue
-// and its own ancestor or descendant. Cross-prefix/external targets must be
-// filtered by the caller because no local hierarchy can connect them.
+// and its own ancestor or descendant. External targets (ClassifyDepTargetInTx)
+// must be filtered by the caller because no local hierarchy can connect them;
+// a cross-prefix target held in this database is checked like any other.
 func CheckBlockingHierarchyInTx(ctx context.Context, tx DBTX, dep *types.Dependency, depTables []string) error {
 	if dep.Type != types.DepBlocks && dep.Type != types.DepConditionalBlocks {
 		return nil

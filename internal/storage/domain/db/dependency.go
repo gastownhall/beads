@@ -313,7 +313,13 @@ func (r *dependencySQLRepositoryImpl) ValidateBlockingHierarchy(ctx context.Cont
 	if dep == nil {
 		return errors.New("db: DependencySQLRepository.ValidateBlockingHierarchy: dep must not be nil")
 	}
-	if issueops.AbsentDepTargetIsExternal(dep.IssueID, dep.DependsOnID) {
+	// Only an actual external target has no local hierarchy to conflict
+	// with; a cross-prefix target present here is checked like any other.
+	kind, _, err := issueops.ClassifyDepTargetInTx(ctx, r.runner, dep, false)
+	if err != nil {
+		return fmt.Errorf("db: DependencySQLRepository.ValidateBlockingHierarchy: classify target: %w", err)
+	}
+	if kind == issueops.DepTargetExternal {
 		return nil
 	}
 	return issueops.CheckBlockingHierarchyInTx(ctx, r.runner, dep, nil)

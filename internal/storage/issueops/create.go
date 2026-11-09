@@ -1261,7 +1261,9 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx DBTX, issues [
 				continue
 			}
 
-			if kind != DepTargetExternal && types.ExtractPrefix(dep.IssueID) == types.ExtractPrefix(dep.DependsOnID) {
+			// A local target is held to the blocking hierarchy rules whatever
+			// its prefix; only an external one has no local hierarchy.
+			if kind != DepTargetExternal {
 				if err := lookups.checkHierarchy(ctx, tx, dep); err != nil {
 					if opts.SkipDependencyValidationErrors && isDependencyValidationRefusal(err) {
 						recordSkippedDependency(opts, dep, err.Error())

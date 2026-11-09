@@ -5,6 +5,7 @@ package main
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -231,4 +232,80 @@ func TestEmbeddedDepAddCrossPrefixLocalWispTargetBlocks(t *testing.T) {
 			t.Errorf("%s is still blocked after its wisp blocker %s closed", s.id, target.ID)
 		}
 	}
+}
+
+// blocksEdgeCount counts the blocks rows from source to target in both
+// dependency tables.
+func blocksEdgeCount(t *testing.T, beadsDir, source, target string) int {
+	t.Helper()
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), crossPrefixDB, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer cleanup()
+	total := 0
+	for _, table := range []string{"dependencies", "wisp_dependencies"} {
+		var n int
+		//nolint:gosec // G201: table is one of the two hardcoded dependency tables.
+		if err := db.QueryRowContext(t.Context(),
+			"SELECT COUNT(*) FROM "+table+" WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ? AND type = 'blocks'",
+			source, target).Scan(&n); err != nil {
+			t.Fatalf("count %s blocks edges %s -> %s: %v", table, source, target, err)
+		}
+		total += n
+	}
+	return total
+}
+
+// TestEmbeddedDepCrossPrefixHierarchyConflictRefused holds a cross-prefix
+// pair held in this database to the blocking hierarchy rules: an issue may
+// not be blocked by its own ancestor whatever the ancestor's prefix. A single
+// dep add and a graph batch (whose blocks edge precedes the parent edge that
+// makes it a conflict, so only the batch's end gate can see it) both return
+// the hierarchy error and store no blocks edge.
+func TestEmbeddedDepCrossPrefixHierarchyConflictRefused(t *testing.T) {
+	skipUnlessEmbeddedCrossPrefix(t)
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", crossPrefixSourcePrefix)
+
+	grandparent := bdCreate(t, bd, dir, "Grandparent", "--type", "epic")
+	parent := bdCreate(t, bd, dir, "Parent", "--type", "task", "--parent", grandparent.ID)
+	const wantErr = "cannot be blocked by its ancestor"
+
+	t.Run("single dep add", func(t *testing.T) {
+		child := bdCreate(t, bd, dir, "Cross-prefix child", "--type", "task", "--id", "xpa-c1", "--force")
+		bdDep(t, bd, dir, "add", child.ID, parent.ID, "--type", "parent-child")
+
+		out := bdDepFail(t, bd, dir, "add", child.ID, grandparent.ID)
+		if !strings.Contains(out, wantErr) {
+			t.Errorf("dep add %s %s: want the hierarchy error %q, got:\n%s", child.ID, grandparent.ID, wantErr, out)
+		}
+		if n := blocksEdgeCount(t, beadsDir, child.ID, grandparent.ID); n != 0 {
+			t.Errorf("%d blocks edge(s) %s -> %s stored after the refusal", n, child.ID, grandparent.ID)
+		}
+	})
+
+	t.Run("graph batch", func(t *testing.T) {
+		const child = "xpa-c2"
+		plan := fmt.Sprintf(`{
+			"nodes": [{"key": "c", "id": %q, "title": "Batch cross-prefix child", "type": "task"}],
+			"edges": [
+				{"from_key": "c", "to_id": %q, "type": "blocks"},
+				{"from_key": "c", "to_id": %q, "type": "parent-child"}
+			]
+		}`, child, grandparent.ID, parent.ID)
+		planFile := filepath.Join(t.TempDir(), "plan.json")
+		if err := os.WriteFile(planFile, []byte(plan), 0o600); err != nil {
+			t.Fatalf("write plan: %v", err)
+		}
+		out := bdCreateFail(t, bd, dir, "--graph", planFile, "--force")
+		if !strings.Contains(out, wantErr) {
+			t.Errorf("create --graph: want the hierarchy error %q, got:\n%s", wantErr, out)
+		}
+		if n := blocksEdgeCount(t, beadsDir, child, grandparent.ID); n != 0 {
+			t.Errorf("%d blocks edge(s) %s -> %s stored after the refusal", n, child, grandparent.ID)
+		}
+	})
 }

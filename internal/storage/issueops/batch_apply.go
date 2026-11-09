@@ -605,9 +605,15 @@ func (r *applyBatchRun) runEndGate(ctx context.Context, tx *sql.Tx) error {
 			DependsOnID: applied.edge.DependsOnID,
 			Type:        applied.edge.Type,
 		}
-		// An external or cross-repository target has no local hierarchy to
-		// conflict with, and the per-edge path filters it for the same reason.
-		if AbsentDepTargetIsExternal(dep.IssueID, dep.DependsOnID) {
+		// An external target has no local hierarchy to conflict with, and the
+		// per-edge path filters it for the same reason. It is classified
+		// against the batch's final state, so a cross-prefix target held
+		// here — one created earlier in the batch included — is checked.
+		kind, _, err := ClassifyDepTargetInTx(ctx, tx, dep, false)
+		if err != nil {
+			return err
+		}
+		if kind == DepTargetExternal {
 			continue
 		}
 		if err := CheckBlockingHierarchyInTx(ctx, tx, dep, cycleDetectionTables()); err != nil {

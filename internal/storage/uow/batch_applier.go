@@ -603,10 +603,10 @@ func (r *uowApplyRun) runEndGate(ctx context.Context) error {
 	if cyclePath != "" {
 		return domain.NewCycleError("dependency cycle would be created: %s (no edges added; run 'bd dep cycles' for analysis)", cyclePath)
 	}
+	// ValidateBlockingHierarchy classifies each target against the request's
+	// final state and skips only an actual external one, so a cross-prefix
+	// target held in this database is checked like any other.
 	for _, applied := range r.edges {
-		if storageissueops.AbsentDepTargetIsExternal(applied.dep.IssueID, applied.dep.DependsOnID) {
-			continue
-		}
 		if err := r.uw.DependencyUseCase().ValidateBlockingHierarchy(ctx, applied.dep); err != nil {
 			return &publicops.ItemError{
 				Index:   applied.index,
