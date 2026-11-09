@@ -14,7 +14,7 @@ import (
 // issues before its HEAD read when the cursor is fully present: the be-bv7x
 // cursor-existence probe, then the content_hash column.
 func expectHeadContentHashProbes(mock sqlmock.Sqlmock) {
-	expectCursorProbe(mock, "schema_migrations", true)
+	expectTableProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(`SHOW COLUMNS FROM schema_migrations LIKE 'content_hash'`).
 		WillReturnRows(showColumnsRows("content_hash"))
 }
@@ -40,13 +40,13 @@ func TestReadMigrationContentHashesAtHeadIssuesNoFailingStatement(t *testing.T) 
 		{
 			name: "cursor table absent",
 			expect: func(mock sqlmock.Sqlmock) {
-				expectCursorProbe(mock, "schema_migrations", false)
+				expectTableProbe(mock, "schema_migrations", false)
 			},
 		},
 		{
 			name: "content_hash column absent",
 			expect: func(mock sqlmock.Sqlmock) {
-				expectCursorProbe(mock, "schema_migrations", true)
+				expectTableProbe(mock, "schema_migrations", true)
 				mock.ExpectQuery(`SHOW COLUMNS FROM schema_migrations LIKE 'content_hash'`).
 					WillReturnRows(showColumnsRows())
 			},
@@ -101,7 +101,7 @@ func TestReadMigrationContentHashesAtHeadPassesProbeErrorsThrough(t *testing.T) 
 		{
 			name: "content_hash probe fails",
 			expect: func(mock sqlmock.Sqlmock) {
-				expectCursorProbe(mock, "schema_migrations", true)
+				expectTableProbe(mock, "schema_migrations", true)
 				mock.ExpectQuery(`SHOW COLUMNS FROM schema_migrations LIKE 'content_hash'`).
 					WillReturnError(probeErr)
 			},

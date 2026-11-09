@@ -85,6 +85,33 @@ func IsMissingTable(err error, table string) bool {
 	return ok && strings.EqualFold(name, table)
 }
 
+// IsNoUsableDatabase reports whether err says the session has no usable current
+// database: none is selected, or the selected one no longer exists. That is
+// 1049 (ER_BAD_DB_ERROR), or 1105 with Dolt's "no database selected" message.
+// 1105 is Dolt's generic error code, so without that message it does not count.
+func IsNoUsableDatabase(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		switch mysqlErr.Number {
+		case 1049:
+			return true
+		case 1105:
+			return strings.Contains(strings.ToLower(mysqlErr.Message), "no database selected")
+		}
+		return false
+	}
+
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "no database selected") ||
+		strings.Contains(s, "database not found") ||
+		strings.Contains(s, "unknown database") ||
+		strings.Contains(s, "error 1049")
+}
+
 // IsAccessDenied reports whether err is a MySQL/Dolt privilege refusal: the
 // connected user lacks the right to run the statement. Covers 1044
 // (ER_DBACCESS_DENIED_ERROR), 1045 (ER_ACCESS_DENIED_ERROR), 1142

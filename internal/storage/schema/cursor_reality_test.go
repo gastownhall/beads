@@ -5,11 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"regexp"
-	"slices"
 	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	mysql "github.com/go-sql-driver/mysql"
 )
 
 // stubSentinelTables replaces the table-existence probe with a fixed answer
@@ -46,21 +46,20 @@ func stubSentinelColumns(t *testing.T, present map[string]bool, probeErr error) 
 	return &probed
 }
 
-// expectSentinelColumnProbe mocks the real column-sentinel probe in order: the
-// carrier table's existence through sentinelTableExists (a SHOW TABLES read),
-// then — only when the table is there — the SHOW COLUMNS read. An absent column
-// is an empty SHOW COLUMNS result set, not a zero count.
+// expectSentinelColumnProbe mocks the real column-sentinel probe: one SHOW
+// COLUMNS read. A missing carrier table fails it with 1146; an absent column is
+// an empty result set, not a zero count.
 func expectSentinelColumnProbe(mock sqlmock.Sqlmock, sc schemaSentinelColumn, tablePresent, columnPresent bool) {
-	expectShowTable(mock, sc.table, tablePresent)
+	query := mock.ExpectQuery(regexp.QuoteMeta("SHOW COLUMNS FROM " + sc.table + " LIKE '" + sc.column + "'"))
 	if !tablePresent {
+		query.WillReturnError(&mysql.MySQLError{Number: 1146, Message: "table not found: " + sc.table})
 		return
 	}
 	rows := sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"})
 	if columnPresent {
 		rows.AddRow(sc.column, "varchar(255)", "YES", "", nil, "")
 	}
-	mock.ExpectQuery(regexp.QuoteMeta("SHOW COLUMNS FROM " + sc.table + " LIKE '" + sc.column + "'")).
-		WillReturnRows(rows)
+	query.WillReturnRows(rows)
 }
 
 // allSentinelTables is the "everything the table sentinels ask for is present"
@@ -243,16 +242,15 @@ func TestCursorRealityFloor(t *testing.T) {
 	}
 }
 
-// mockIgnoredCursorRead stands up a database that answers exactly the two
-// queries currentVersion issues for the ignored series before it consults the
-// sentinels: the cursor-table existence probe and the MAX(version) read.
+// mockIgnoredCursorRead stands up a database that answers exactly the query
+// currentVersion issues for the ignored series before it consults the
+// sentinels: the MAX(version) read.
 func mockIgnoredCursorRead(t *testing.T, raw int) *sql.DB {
 	t.Helper()
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
-	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", raw)
 	t.Cleanup(func() {
 		if err := mock.ExpectationsWereMet(); err != nil {
@@ -693,9 +691,7 @@ func TestMigrationWorkNeededWhenWispTablesAbsent(t *testing.T) {
 	}
 	defer db.Close()
 
-	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
-	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
 	expectShowTable(mock, ignoredSource.sentinelTables[0], false)
 
@@ -722,9 +718,7 @@ func TestMigrationWorkNeededWhenLeaseGrantedNodeAbsent(t *testing.T) {
 	}
 	defer db.Close()
 
-	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
-	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
 	for _, table := range ignoredSource.sentinelTables {
 		expectShowTable(mock, table, true)
@@ -767,7 +761,6 @@ func TestIgnoredCursorReadWithLeasesAbsentIssuesNoFailingStatement(t *testing.T)
 	}
 	defer db.Close()
 
-	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
 	for _, table := range ignoredSource.sentinelTables {
 		expectShowTable(mock, table, true)
@@ -791,21 +784,15 @@ func TestIgnoredCursorReadWithLeasesAbsentIssuesNoFailingStatement(t *testing.T)
 	}
 }
 
-// TestSentinelColumnProbeNeverAsksAMissingTable pins the probe mechanism behind
-// the column sentinel, through the real sentinelColumnExists and a stubbed
-// sentinelTableExists. SHOW COLUMNS errors on a missing table, and with the
-// store's multiStatements DSN a failing statement leaves the pooled Dolt
-// session pinned to its pre-statement catalog, so tables that other
-// connections create afterwards stay invisible to it (be-bv7x; reproduced on
-// dolt 2.1.8 and 2.2.0). The carrier table must therefore be established by
-// the existence probe, which answers an empty set rather than an error, before
-// any SHOW COLUMNS is sent. The mock has no expectations: any statement at all
-// fails the probe.
-func TestSentinelColumnProbeNeverAsksAMissingTable(t *testing.T) {
+// TestSentinelColumnProbeReadsAMissingTableAsAbsent pins the column sentinel on
+// a missing carrier table, which is what a release-lineage store has (no leases
+// before ignored/0012). The one SHOW COLUMNS read fails with 1146 and reads as
+// a missing column, as the INFORMATION_SCHEMA count did. The strict mock admits
+// no listing ahead of it.
+func TestSentinelColumnProbeReadsAMissingTableAsAbsent(t *testing.T) {
 	if len(ignoredSource.sentinelColumns) == 0 {
 		t.Fatal("ignoredSource has no sentinel columns; this guard is inert")
 	}
-	probed := stubSentinelTables(t, allSentinelTables(), nil)
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
@@ -813,15 +800,13 @@ func TestSentinelColumnProbeNeverAsksAMissingTable(t *testing.T) {
 	defer db.Close()
 
 	for _, sc := range ignoredSource.sentinelColumns {
+		expectSentinelColumnProbe(mock, sc, false, false)
 		present, err := sentinelColumnExists(context.Background(), db, sc.table, sc.column)
 		if err != nil {
 			t.Fatalf("sentinelColumnExists(%s.%s) with the table absent: %v", sc.table, sc.column, err)
 		}
 		if present {
 			t.Errorf("sentinelColumnExists(%s.%s) = true with the table absent", sc.table, sc.column)
-		}
-		if !slices.Contains(*probed, sc.table) {
-			t.Errorf("carrier table %s was never probed for existence; probed %v", sc.table, *probed)
 		}
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -833,11 +818,6 @@ func TestSentinelColumnProbeNeverAsksAMissingTable(t *testing.T) {
 // the carrier exists, SHOW COLUMNS answers, and its Field is compared exactly
 // because '_' is a LIKE single-character wildcard.
 func TestSentinelColumnProbeReadsAPresentTableExactly(t *testing.T) {
-	present := allSentinelTables()
-	for _, sc := range ignoredSource.sentinelColumns {
-		present[sc.table] = true
-	}
-	probed := stubSentinelTables(t, present, nil)
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
@@ -859,43 +839,34 @@ func TestSentinelColumnProbeReadsAPresentTableExactly(t *testing.T) {
 			t.Errorf("probe %d: sentinelColumnExists = %v, want %v", i, got, want)
 		}
 	}
-	if want := []string{"leases", "leases", "leases"}; !slices.Equal(*probed, want) {
-		t.Errorf("carrier existence probes = %v, want %v (one ahead of every SHOW COLUMNS)", *probed, want)
-	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet SQL expectations: %v", err)
 	}
 }
 
-// A failed carrier probe must surface, not read as "column absent": that would
-// clamp a healthy at-latest cursor to the column's replayFloor and replay the
-// tail on a catalog nobody could read — the same rule
-// TestCursorProbeErrorIsNotTreatedAsContradicted pins for the table sentinels.
-func TestSentinelColumnCarrierProbeErrorIsNotTreatedAsContradicted(t *testing.T) {
-	boom := errors.New("information_schema unavailable")
-	present := allSentinelTables()
-	orig := sentinelTableExists
-	t.Cleanup(func() { sentinelTableExists = orig })
-	sentinelTableExists = func(_ context.Context, _ DBConn, table string) (bool, error) {
-		for _, sc := range ignoredSource.sentinelColumns {
-			if table == sc.table {
-				return false, boom
-			}
-		}
-		return present[table], nil
-	}
+// A SHOW COLUMNS that fails for any reason but a missing table must surface,
+// not read as "column absent": that would clamp a healthy at-latest cursor to
+// the column's replayFloor and replay the tail on a catalog nobody could read —
+// the same rule TestCursorProbeErrorIsNotTreatedAsContradicted pins for the
+// table sentinels.
+func TestSentinelColumnProbeErrorIsNotTreatedAsContradicted(t *testing.T) {
+	boom := errors.New("catalog unavailable")
+	stubSentinelTables(t, allSentinelTables(), nil)
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
 	}
 	defer db.Close()
+	sc := ignoredSource.sentinelColumns[0]
+	mock.ExpectQuery(regexp.QuoteMeta("SHOW COLUMNS FROM " + sc.table + " LIKE '" + sc.column + "'")).
+		WillReturnError(boom)
 
 	_, limited, err := ignoredSource.cursorRealityFloor(context.Background(), db)
 	if !errors.Is(err, boom) {
-		t.Errorf("carrier probe error was swallowed: err = %v", err)
+		t.Errorf("column probe error was swallowed: err = %v", err)
 	}
 	if limited {
-		t.Error("an unreadable carrier probe reported the cursor as contradicted")
+		t.Error("an unreadable column probe reported the cursor as contradicted")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet SQL expectations: %v", err)
@@ -928,7 +899,6 @@ func TestMigrateAppliesUnderContradictedCursor(t *testing.T) {
 			AddRow("content_hash", "char(64)", "YES", "", nil, ""))
 
 	// The guarded read: cursor claims at-latest, sentinel probe contradicts it.
-	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
 	expectShowTable(mock, ignoredSource.sentinelTables[0], false)
 
@@ -979,7 +949,6 @@ func TestMigrateStartsAboveTheFloorUnderColumnContradiction(t *testing.T) {
 
 	// The guarded read: cursor claims at-latest, both table sentinels
 	// corroborate it, and only the leases column does not.
-	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
 	for _, table := range ignoredSource.sentinelTables {
 		expectShowTable(mock, table, true)
@@ -1102,31 +1071,73 @@ func TestShowTableExistsAnswersLikeInformationSchema(t *testing.T) {
 	}
 }
 
-// TestCurrentVersionWithoutAUsableDatabaseIssuesNoFailingStatement is the
-// be-bv7x rule for the cursor probe itself, which must succeed on any session.
-// SHOW TABLES fails with no database selected (1105) and on a session whose
-// database was dropped under it (1049), and a failing statement pins the
-// pooled session to its pre-statement catalog. The schemata read answers 0 in
-// both cases instead, so the probe stops there and reads the cursor as absent,
-// exactly as the INFORMATION_SCHEMA.TABLES count did: the strict mock admits
-// nothing after it.
-func TestCurrentVersionWithoutAUsableDatabaseIssuesNoFailingStatement(t *testing.T) {
+// TestCurrentVersionReadsNoCursorFromTheFailuresThatMeanNone: the cursor is read
+// directly, so the read's failure is what says there is no cursor. A missing
+// table (1146) means that, and so does a session with no usable database: none
+// selected (1105 with Dolt's message) or the selected one dropped (1049).
+// Exactly one statement is sent, so the strict mock would refuse a probe in
+// front of the read.
+func TestCurrentVersionReadsNoCursorFromTheFailuresThatMeanNone(t *testing.T) {
+	failures := []struct {
+		name string
+		err  error
+	}{
+		{"table missing", &mysql.MySQLError{Number: 1146, Message: "table not found: x"}},
+		{"no database selected", &mysql.MySQLError{Number: 1105, Message: "no database selected"}},
+		{"database dropped", &mysql.MySQLError{Number: 1049, Message: "database not found: x"}},
+	}
 	for _, src := range []migrationSource{mainSource, ignoredSource} {
-		t.Run(src.cursorTable, func(t *testing.T) {
+		for _, failure := range failures {
+			t.Run(src.cursorTable+"/"+failure.name, func(t *testing.T) {
+				db, mock, err := sqlmock.New()
+				if err != nil {
+					t.Fatalf("sqlmock.New: %v", err)
+				}
+				defer db.Close()
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(MAX(version), 0) FROM " + src.cursorTable)).
+					WillReturnError(failure.err)
+
+				got, err := src.currentVersion(context.Background(), db)
+				if err != nil {
+					t.Fatalf("currentVersion: %v", err)
+				}
+				if got != 0 {
+					t.Errorf("currentVersion = %d, want 0", got)
+				}
+				if err := mock.ExpectationsWereMet(); err != nil {
+					t.Fatalf("unmet SQL expectations: %v", err)
+				}
+			})
+		}
+	}
+}
+
+// TestCurrentVersionSurfacesEveryOtherFailure is the other side of the same
+// classification. Reading any other failure as "no cursor" would report version
+// 0 for a database whose cursor could not be read: migrating from version 0
+// replays the whole series. 1105 is Dolt's generic error code, so it is here
+// with every message but the one that names the missing database.
+func TestCurrentVersionSurfacesEveryOtherFailure(t *testing.T) {
+	for _, failure := range []error{
+		&mysql.MySQLError{Number: 1105, Message: "lock wait timeout exceeded"},
+		&mysql.MySQLError{Number: 1105, Message: "failed to load the catalog"},
+		&mysql.MySQLError{Number: 1045, Message: "Access denied for user"},
+		&mysql.MySQLError{Number: 1054, Message: "column not found: version"},
+		sql.ErrConnDone,
+		errors.New("connection reset by peer"),
+	} {
+		t.Run(failure.Error(), func(t *testing.T) {
 			db, mock, err := sqlmock.New()
 			if err != nil {
 				t.Fatalf("sqlmock.New: %v", err)
 			}
 			defer db.Close()
-			mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = DATABASE()")).
-				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")).
+				WillReturnError(failure)
 
-			got, err := src.currentVersion(context.Background(), db)
-			if err != nil {
-				t.Fatalf("currentVersion without a usable database: %v", err)
-			}
-			if got != 0 {
-				t.Errorf("currentVersion without a usable database = %d, want 0", got)
+			got, err := mainSource.currentVersion(context.Background(), db)
+			if !errors.Is(err, failure) {
+				t.Fatalf("currentVersion = (%d, %v), want the read's failure", got, err)
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Fatalf("unmet SQL expectations: %v", err)

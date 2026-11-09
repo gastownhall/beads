@@ -8,6 +8,41 @@ import (
 	mysql "github.com/go-sql-driver/mysql"
 )
 
+func TestIsNoUsableDatabase(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil"},
+		{name: "1105 no database selected", err: &mysql.MySQLError{Number: 1105, Message: "no database selected"}, want: true},
+		{name: "1105 any case", err: &mysql.MySQLError{Number: 1105, Message: "No Database Selected"}, want: true},
+		{name: "1049 unknown database", err: &mysql.MySQLError{Number: 1049, Message: "Unknown database 'beads'"}, want: true},
+		{name: "1049 dolt wording", err: &mysql.MySQLError{Number: 1049, Message: "database not found: beads"}, want: true},
+		{name: "wrapped", err: fmt.Errorf("read: %w", &mysql.MySQLError{Number: 1049}), want: true},
+		{name: "text no database selected", err: errors.New("no database selected"), want: true},
+		{name: "text database not found", err: errors.New("database not found: beads"), want: true},
+		{name: "text error 1049", err: errors.New("Error 1049 (42000): Unknown database 'beads'"), want: true},
+
+		// 1105 is Dolt's generic error code: only the one message counts.
+		{name: "1105 generic", err: &mysql.MySQLError{Number: 1105, Message: "lock wait timeout exceeded"}},
+		{name: "1105 names a database another way", err: &mysql.MySQLError{Number: 1105, Message: "failed to read database catalog"}},
+		{name: "table missing is not this", err: &mysql.MySQLError{Number: 1146, Message: "table not found: leases"}},
+		{name: "access denied is not this", err: &mysql.MySQLError{Number: 1044, Message: "Access denied to database 'beads'"}},
+		{name: "text generic 1105", err: errors.New("Error 1105 (HY000): connection reset")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsNoUsableDatabase(tt.err); got != tt.want {
+				t.Fatalf("IsNoUsableDatabase(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestMissingTableName(t *testing.T) {
 	t.Parallel()
 

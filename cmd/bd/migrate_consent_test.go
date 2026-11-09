@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 	"testing"
 
@@ -279,10 +278,6 @@ func runLocalConsentGate(t *testing.T, cmdline string, consents bool) error {
 	}
 	defer db.Close()
 	if !consents {
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = DATABASE()")).
-			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-		mock.ExpectQuery("^SHOW TABLES$").
-			WillReturnRows(sqlmock.NewRows([]string{"Tables_in_beads"}).AddRow("schema_migrations"))
 		mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 			WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(schema.LatestVersion() - 1))
 	}

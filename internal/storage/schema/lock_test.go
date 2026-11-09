@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	mysql "github.com/go-sql-driver/mysql"
 )
 
 func TestMigrationLockNameUsesRawNameWhenBounded(t *testing.T) {
@@ -246,9 +247,7 @@ func TestMigrateUpSeedsIgnorePatternsWhenNoWorkNeeded(t *testing.T) {
 	expectIgnoredCursorHealNoop(mock)
 	// migrationWorkNeeded: both cursors at latest, both content_hash columns
 	// present, no custom backfill pending -> no work, MigrateUp short-circuits.
-	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
-	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
 	expectIgnoredSentinelProbes(mock, true)
 	expectContentHashColumnExists(mock)
@@ -291,9 +290,7 @@ func TestMigrateUpSkipsSeedCommitWhenNothingChanged(t *testing.T) {
 	// and no writes.
 	expectIgnoredCursorHealNoop(mock)
 	// migrationWorkNeeded: no work, MigrateUp short-circuits.
-	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
-	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
 	expectIgnoredSentinelProbes(mock, true)
 	expectContentHashColumnExists(mock)
@@ -325,11 +322,10 @@ func expectedIgnoreSeedCandidates(mainVersion int) []string {
 	return candidates
 }
 
-// expectIgnoreSeedProbe mocks the seed's read half: the cursor probe that
+// expectIgnoreSeedProbe mocks the seed's read half: the cursor read that
 // decides the version-gated patterns, then the single presence SELECT.
 // alreadyPresent is what dolt_ignore reports back.
 func expectIgnoreSeedProbe(mock sqlmock.Sqlmock, mainVersion int, alreadyPresent []string) {
-	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", mainVersion)
 	args := make([]driver.Value, 0, len(doltIgnorePatterns)+len(versionGatedDoltIgnorePatterns))
 	for _, pattern := range expectedIgnoreSeedCandidates(mainVersion) {
@@ -347,7 +343,7 @@ func expectIgnoreSeedProbe(mock sqlmock.Sqlmock, mainVersion int, alreadyPresent
 // expectIgnorePatternSeed mocks the dolt_ignore pattern seed MigrateUp runs
 // before anything else on an UNDER-SEEDED database: the probe finds nothing,
 // so every pattern is inserted (RowsAffected=1). mainVersion is what the
-// seed's cursor probe reports; version-gated patterns (events, >= 0062) are
+// seed's cursor read reports; version-gated patterns (events, >= 0062) are
 // only expected when it qualifies them.
 func expectIgnorePatternSeed(mock sqlmock.Sqlmock, mainVersion int) {
 	expectIgnoreSeedProbe(mock, mainVersion, nil)
@@ -388,7 +384,6 @@ func expectOnePendingMigrationAtSetting(t *testing.T, mock sqlmock.Sqlmock, tran
 	// before the no-work short-circuit. On a healthy database it is two reads
 	// and no writes.
 	expectIgnoredCursorHealNoop(mock)
-	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-1)
 	expectTransactionCommitSuspend(mock, transactionCommit)
 	expectDoltStatusRows(mock)
@@ -403,14 +398,12 @@ func expectOnePendingMigrationAtSetting(t *testing.T, mock sqlmock.Sqlmock, tran
 	// MigrateUp captures the pre-pass main cursor for the aux re-key watershed
 	// (bd-578h9.4) before the main migrations run — read up front now because the
 	// dirtyBefore exemption below is derived from it.
-	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-1)
 	// auxRekeyExemptTables scopes the aux-table dirtyBefore exemption to exactly
 	// the tables the upcoming re-key rewrites: it reads the ignored cursor to see
 	// which passes' markers are pending, then each pass's clone-local state. This
 	// mocked world has no local_metadata table, so each per-pass read stops at
 	// the existence probe and nothing is exempted.
-	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", latestIgnored)
 	expectIgnoredSentinelProbes(mock, true)
 	for range auxRekeyPasses {
@@ -420,7 +413,6 @@ func expectOnePendingMigrationAtSetting(t *testing.T, mock sqlmock.Sqlmock, tran
 	mock.ExpectExec("(?s)^CREATE TABLE IF NOT EXISTS schema_migrations").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	expectContentHashColumnExists(mock)
-	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-1)
 	if latest == 53 {
 		// The v53 pre-repair probes the six rig/agent columns on issues and
@@ -468,7 +460,6 @@ func expectOnePendingMigrationAtSetting(t *testing.T, mock sqlmock.Sqlmock, tran
 	// drift record, either of which would re-admit it; this mocked world has no
 	// local_metadata table, so each read stops at the table-existence probe and
 	// the re-key no-ops.
-	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", latestIgnored)
 	expectIgnoredSentinelProbes(mock, true)
 	for range auxRekeyPasses {
@@ -481,7 +472,6 @@ func expectOnePendingMigrationAtSetting(t *testing.T, mock sqlmock.Sqlmock, tran
 	// The applier reads the ignored cursor through the guarded currentVersion
 	// (gh 5033), so a non-zero cursor is followed by the sentinel probes here
 	// too, not just in migrationWorkNeeded.
-	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", latestIgnored)
 	expectIgnoredSentinelProbes(mock, true)
 	expectDoltStatusRows(mock)
@@ -549,12 +539,16 @@ func expectScalar(mock sqlmock.Sqlmock, query, column string, value any) {
 		WillReturnRows(sqlmock.NewRows([]string{column}).AddRow(value))
 }
 
-// expectCursorProbe mocks the existence probe that migrationSource.currentVersion
-// issues before it ever reads the cursor table: the schemata read proving the
-// session has a usable current database, then the SHOW TABLES listing. The
-// probe was added by be-bv7x so a not-yet-created cursor table never poisons
-// the pooled Dolt session with a failing statement.
-func expectCursorProbe(mock sqlmock.Sqlmock, table string, exists bool) {
+// expectCursorTableMissing mocks readCursor on a database with no cursor table
+// yet: its one read fails with 1146, which means version 0.
+func expectCursorTableMissing(mock sqlmock.Sqlmock, table string) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(MAX(version), 0) FROM " + table)).
+		WillReturnError(&mysql.MySQLError{Number: 1146, Message: "table not found: " + table})
+}
+
+// expectTableProbe mocks tableInCurrentDatabase: the schemata read proving the
+// session has a usable current database, then the SHOW TABLES listing.
+func expectTableProbe(mock sqlmock.Sqlmock, table string, exists bool) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = DATABASE()")).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	expectShowTable(mock, table, exists)
@@ -602,7 +596,6 @@ func expectDirtyGuardRefusalAtSetting(t *testing.T, mock sqlmock.Sqlmock, transa
 	// and no writes.
 	expectIgnoredCursorHealNoop(mock)
 	// migrationWorkNeeded: main cursor behind -> work needed (short-circuits).
-	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
 	expectTransactionCommitSuspend(mock, transactionCommit)
 	// dirtyBeforeAll: `events` dirty (working set only, not staged).
@@ -613,20 +606,18 @@ func expectDirtyGuardRefusalAtSetting(t *testing.T, mock sqlmock.Sqlmock, transa
 	// MigrateUp captures the pre-pass main cursor up front now (it drives the
 	// aux-rekey dirtyBefore exemption); the guard refusal is still reached
 	// before the main migrations run.
-	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
 	// auxRekeyExemptTables: read the ignored cursor, then each pass's clone-local
 	// re-key state. No ignored cursor table and no local_metadata here, so
 	// nothing is exempted — in particular the dirty `events` aux table stays in
 	// dirtyBefore and still trips the pending-0062 guard below.
-	expectCursorProbe(mock, "ignored_schema_migrations", false)
+	expectCursorTableMissing(mock, "ignored_schema_migrations")
 	for range auxRekeyPasses {
 		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	}
 	// pendingMigrationDirtyTables: cursor read, then pending 0062's SQL
 	// touches `events` -> DirtyTablesError.
-	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
 	if transactionCommit != 0 {
 		// The deferred restoration runs as the pass unwinds from the
@@ -858,9 +849,9 @@ func TestMigrateUpWithLockFreshBootstrapHealResetFailureStaysFatal(t *testing.T)
 
 // expectIgnoredSentinelProbes mocks the schema lookups currentVersion issues
 // to confirm a non-zero ignored cursor against the schema it claims (gh 5033):
-// a SHOW TABLES probe per sentinel and floored table (showTableExists), then
-// per sentinel column its carrier table's existence and a SHOW COLUMNS read
-// (expectSentinelColumnProbe). None of them uses INFORMATION_SCHEMA, whose
+// a SHOW TABLES probe per sentinel and floored table (showTableExists), then a
+// SHOW COLUMNS read per sentinel column (expectSentinelColumnProbe). None of
+// them uses INFORMATION_SCHEMA, whose
 // predicates Dolt does not push down, because all of them run on every store
 // open. They fire only for a non-zero cursor, in ignoredSource's table then
 // floored-table then column sentinel order.
@@ -1036,7 +1027,6 @@ func TestMigrateUpWithLockFreshBootstrapHealCapabilityIsOneShot(t *testing.T) {
 	// transient failure occurs.
 	expectIgnorePatternSeedNoop(mock, LatestVersion()-2)
 	expectIgnoredCursorHealNoop(mock)
-	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion()-2)
 	expectTransactionCommitRead(mock, 0)
 	mock.ExpectQuery("(?s)SELECT s\\.table_name, s\\.staged\\s+FROM dolt_status s").
@@ -1082,7 +1072,6 @@ func TestMigrateUpWithLockFreshBootstrapHealCapabilityIsOneShot(t *testing.T) {
 // held: the main cursor, once, which answers both the fresh-database exemption
 // and the pending count.
 func expectMigrateConsentReads(mock sqlmock.Sqlmock, cursor int) {
-	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
 }
 

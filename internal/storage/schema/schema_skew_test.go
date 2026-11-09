@@ -23,7 +23,6 @@ func TestCheckSchemaSkew_FreshDB_NoError(t *testing.T) {
 	}
 	defer db.Close()
 
-	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(0))
 
@@ -42,7 +41,6 @@ func TestCheckSchemaSkew_EqualVersion_NoError(t *testing.T) {
 	}
 	defer db.Close()
 
-	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(LatestVersion()))
 
@@ -62,7 +60,6 @@ func TestCheckSchemaSkew_OneAhead_ReturnsSchemaSkewError(t *testing.T) {
 	defer db.Close()
 
 	dbVersion := LatestVersion() + 1
-	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(dbVersion))
 
@@ -93,7 +90,6 @@ func TestCheckSchemaSkew_ThreeAhead_ReturnsSchemaSkewError(t *testing.T) {
 	defer db.Close()
 
 	dbVersion := LatestVersion() + 3
-	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(dbVersion))
 
@@ -126,7 +122,6 @@ func TestCheckSchemaSkew_EscapeHatch_ReturnsNilAndWarns(t *testing.T) {
 	defer db.Close()
 
 	dbVersion := LatestVersion() + 3
-	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(dbVersion))
 
@@ -176,9 +171,9 @@ func TestCheckSchemaSkew_MissingTable_NoError(t *testing.T) {
 	}
 	defer db.Close()
 
-	// With the be-bv7x probe in front, an absent cursor table is reported by
-	// the probe returning 0 rather than by the cursor read erroring out.
-	expectCursorProbe(mock, "schema_migrations", false)
+	// An absent cursor table fails the cursor read with 1146, which means
+	// version 0.
+	expectCursorTableMissing(mock, "schema_migrations")
 
 	if err := checkSchemaSkew(context.Background(), db); err != nil {
 		t.Fatalf("checkSchemaSkew = %v, want nil when schema_migrations is absent (fresh DB)", err)
@@ -207,7 +202,6 @@ func TestCheckForwardDrift_Conn_Ahead(t *testing.T) {
 	defer conn.Close()
 
 	dbVersion := LatestVersion() + 2
-	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(dbVersion))
 
@@ -301,9 +295,9 @@ func TestCheckBehindDrift_FreshDB_ReturnsSchemaBehindError(t *testing.T) {
 	}
 	defer db.Close()
 
-	// On a fresh database where schema_migrations does not exist, the cursor probe
-	// returns 0 and no bare SELECT against schema_migrations is issued.
-	expectCursorProbe(mock, "schema_migrations", false)
+	// On a fresh database where schema_migrations does not exist, the cursor read
+	// fails with 1146 and the version reads as 0.
+	expectCursorTableMissing(mock, "schema_migrations")
 
 	got := CheckBehindDrift(context.Background(), db)
 	if got == nil {
@@ -330,7 +324,6 @@ func TestCheckBehindDrift_FreshDB_ReturnsSchemaBehindError(t *testing.T) {
 var readableColumns = []string{"id", "arrival_seq"}
 
 func expectMainCursor(mock sqlmock.Sqlmock, version int) {
-	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(version))
 }
@@ -338,7 +331,7 @@ func expectMainCursor(mock sqlmock.Sqlmock, version int) {
 // expectIssuesColumns mocks missingColumns' read of issues: the table probe,
 // then the SHOW COLUMNS listing with these names in its Field column.
 func expectIssuesColumns(mock sqlmock.Sqlmock, columns ...string) {
-	expectCursorProbe(mock, "issues", true)
+	expectTableProbe(mock, "issues", true)
 	rows := sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"})
 	for _, column := range columns {
 		rows.AddRow(column, "bigint", "YES", "", nil, "")

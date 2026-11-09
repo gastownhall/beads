@@ -847,7 +847,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read the cursor for the current version and again for the pending list. Both
   answers now come from one read, which sends 3 fewer statements on each
   embedded open and on a server-mode open that is not already converged. A
-  converged server-mode open does not reach this check.
+  converged server-mode open does not reach this check. The cursor read and
+  the sentinel column read also go to their tables directly now, without a
+  probe first: a missing table, or a session with no usable database, fails
+  the read and reads as absent. The probes guarded against a failing statement
+  pinning a pooled session to its old catalog, which Dolt fixed between 2.2.0
+  and 2.4.1, and the required minimum is 2.6.0. In a trace against a Dolt 2.6.0
+  server, `bd create` sends 80 statements instead of 87, `bd update` 58 instead
+  of 65, and `bd show` 36 instead of 38.
 - **`bd gate discover` skips template gates, as `bd gate check` does.** A
   template gh:run gate is a proto that work is poured from; on the direct,
   proxied and embedded routes `bd gate discover` used to record a discovered

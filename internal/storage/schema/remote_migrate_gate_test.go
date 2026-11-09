@@ -11,14 +11,10 @@ import (
 
 const maxVersionQuery = `SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`
 
-// expectGateCurrentVersion mocks the gate's one read of the migration cursor:
-// the be-bv7x cursor-existence probe (a failed statement pins a pooled Dolt
-// session to its old catalog, so the table is probed before it is read) and
-// the MAX(version) read. The gate derives its pending versions from this one
-// read, so a test that expects it once also fails if the gate reads the cursor
-// a second time.
+// expectGateCurrentVersion mocks the gate's one read of the migration cursor.
+// The gate derives its pending versions from this one read, so a test that
+// expects it once also fails if the gate reads the cursor a second time.
 func expectGateCurrentVersion(mock sqlmock.Sqlmock, version int) {
-	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(maxVersionQuery).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(version))
 }
@@ -258,7 +254,6 @@ func TestRemoteMigrateGateCursorAdvancedAfterRead(t *testing.T) {
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 		// The peer migrates to latest here. Every read below sees latest.
 		// checkMigrateConsent reads the cursor once:
-		expectCursorProbe(mock, "schema_migrations", true)
 		expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest)
 		// The dolt_ignore seed (already complete) and the cursor-untrack
 		// reconcile (nothing to do):

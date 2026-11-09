@@ -93,7 +93,6 @@ func TestRekeyAuxRowIDsSkipsDriftedTable(t *testing.T) {
 	defer db.Close()
 	logged := captureLog(t)
 
-	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations",
 		"version", auxRekeyPassInitial.markerVersion-1)
 	expectIgnoredSentinelProbes(mock, true)
@@ -135,7 +134,6 @@ func TestRekeyAuxRowIDsSkipsDriftDuringRewrite(t *testing.T) {
 	defer db.Close()
 	captureLog(t)
 
-	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations",
 		"version", auxRekeyPassInitial.markerVersion-1)
 	expectIgnoredSentinelProbes(mock, true)
@@ -180,7 +178,6 @@ func TestRekeyAuxRowIDsAbortsOnNonDriftError(t *testing.T) {
 	defer db.Close()
 	captureLog(t)
 
-	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations",
 		"version", auxRekeyPassInitial.markerVersion-1)
 	expectIgnoredSentinelProbes(mock, true)
@@ -216,7 +213,6 @@ func TestRekeyAuxRowIDsResumesDriftedTableOnly(t *testing.T) {
 	captureLog(t)
 
 	// Marker recorded, no crash sentinel — the post-skip steady state.
-	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations",
 		"version", auxRekeyPassInitial.markerVersion)
 	expectIgnoredSentinelProbes(mock, true)
@@ -257,7 +253,6 @@ func TestRekeyAuxRowIDsResumeStaysScopedAfterCrash(t *testing.T) {
 	defer db.Close()
 	captureLog(t)
 
-	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations",
 		"version", auxRekeyPassInitial.markerVersion)
 	expectIgnoredSentinelProbes(mock, true)
@@ -306,7 +301,6 @@ func TestAuxRekeyExemptTablesScopedToRewrittenTables(t *testing.T) {
 			name:              "post-marker resume with crashed sentinel exempts only the drifted subset",
 			mainVersionBefore: auxRekeyPassDerivedInsert.shippedMainVersion,
 			setup: func(mock sqlmock.Sqlmock) {
-				expectCursorProbe(mock, "ignored_schema_migrations", true)
 				expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations",
 					"version", LatestIgnoredVersion())
 				expectIgnoredSentinelProbes(mock, true)
@@ -323,7 +317,6 @@ func TestAuxRekeyExemptTablesScopedToRewrittenTables(t *testing.T) {
 			name:              "marker-pending first pass exempts all four",
 			mainVersionBefore: auxRekeyPassInitial.shippedMainVersion - 1,
 			setup: func(mock sqlmock.Sqlmock) {
-				expectCursorProbe(mock, "ignored_schema_migrations", true)
 				expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations",
 					"version", auxRekeyPassInitial.markerVersion-1)
 				expectIgnoredSentinelProbes(mock, true)
@@ -338,7 +331,6 @@ func TestAuxRekeyExemptTablesScopedToRewrittenTables(t *testing.T) {
 			name:              "converged database exempts nothing",
 			mainVersionBefore: auxRekeyPassDerivedInsert.shippedMainVersion,
 			setup: func(mock sqlmock.Sqlmock) {
-				expectCursorProbe(mock, "ignored_schema_migrations", true)
 				expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations",
 					"version", LatestIgnoredVersion())
 				expectIgnoredSentinelProbes(mock, true)
@@ -387,7 +379,6 @@ func TestRekeyAuxRowIDsKeepsDriftRecordWhileUnrepaired(t *testing.T) {
 	defer db.Close()
 	captureLog(t)
 
-	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations",
 		"version", auxRekeyPassInitial.markerVersion)
 	expectIgnoredSentinelProbes(mock, true)

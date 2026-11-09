@@ -61,8 +61,8 @@ func alreadyConverged(ctx context.Context, db DBConn, databaseName string, selec
 	ctx = withTableListing(ctx)
 
 	// Exactly MigrateUp's own gate, and it runs first: on a fresh or
-	// mid-upgrade database it reports work needed from the cursor probe alone,
-	// before any statement that could fail against a missing table.
+	// mid-upgrade database it reports work needed from the cursor read alone,
+	// before any later statement that could fail against a missing table.
 	needed, err := migrationWorkNeeded(ctx, db)
 	if err != nil {
 		return false, fmt.Errorf("checking schema migration work: %w", err)
@@ -115,8 +115,9 @@ func alreadyConverged(ctx context.Context, db DBConn, databaseName string, selec
 		return false, nil
 	}
 
-	// Every table lookup above answered from the first listing. A peer that
-	// dropped a sentinel or left a scratch table since then and has already
+	// Every table lookup above answered from the first listing, and the cursor
+	// and sentinel column reads noted the tables they found. A peer that dropped
+	// one of those tables or left a scratch table since then and has already
 	// released the lock would pass the lock term below, so see the tables again
 	// first. A different answer for any of them declines onto the locked path.
 	unchanged, err := tableListingUnchanged(ctx, db)
@@ -239,9 +240,9 @@ func migrationLockFree(ctx context.Context, db DBConn, lockName string) (bool, e
 // returned, or empty when the session was already on the target database and
 // nothing needed selecting. dolt_ignore is a Dolt system table: it is NOT
 // listed in information_schema.tables (verified against a live dolt sql-server
-// — the cursor-table existence probe pattern from migrationSource.currentVersion
-// would report it absent and disable the fast path permanently), so this read
-// cannot get the full be-bv7x probe-before-act treatment at table granularity.
+// — an existence probe of that table would report it absent and disable the
+// fast path permanently), so this read cannot get the full be-bv7x
+// probe-before-act treatment at table granularity.
 // What it has instead: selectTargetDatabase has already proved this session is
 // on the target database (by reading DATABASE(), or by probing
 // information_schema.schemata and selecting it), Dolt materializes dolt_ignore
