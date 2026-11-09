@@ -40,12 +40,13 @@ func TestEmbeddedShowUnresolvableDeps(t *testing.T) {
 	// way, so pinning only one would leave the commoner of the two —
 	// `bd dep add ud-x liveop-y` — uncovered.
 	for _, tc := range []struct {
-		name   string
-		target string
-		depTyp string
+		name      string
+		target    string
+		depTyp    string
+		wantLabel string
 	}{
-		{"external_reference", "external:liveop:liveop-kmf", "tracks"},
-		{"cross_repo_prefix", "liveop-kmf", "blocks"},
+		{"external_reference", "external:liveop:liveop-kmf", "tracks", "(external)"},
+		{"cross_repo_prefix", "liveop-kmf", "blocks", "(cross-repo)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			subject := bdCreate(t, bd, dir, "Subject "+tc.name, "--type", "task")
@@ -90,15 +91,24 @@ func TestEmbeddedShowUnresolvableDeps(t *testing.T) {
 				t.Errorf("unresolvable_dependency_edges[0].issue_id = %v, want the subject %s", edge["issue_id"], subject.ID)
 			}
 
-			// Text mode: the notice goes to stderr, so stdout stays
-			// byte-identical for scripts. Assert on stderr alone, or
-			// this passes on a build that prints nothing anywhere.
+			// Text mode (bd-hkpas7, #5272): the raw edge now RENDERS —
+			// the target id appears in its section on stdout with its
+			// classification label, and the outbound warning is gone,
+			// because the warning counts only the gaps the screen did not
+			// cover (AC-2). Before this the id appeared nowhere on stdout
+			// and the only disclosure was the stderr count.
 			stdout, stderr := runShowSplit(t, bd, dir, subject.ID)
-			if !strings.Contains(stderr, "no row in this database") {
-				t.Errorf("bd show stderr did not disclose the unrenderable edge:\nstderr:\n%s", stderr)
+			if !strings.Contains(stdout, tc.target) {
+				t.Errorf("bd show stdout did not name the unresolvable edge target %s:\n%s", tc.target, stdout)
 			}
-			if strings.Contains(stdout, "no row in this database") {
-				t.Errorf("the notice reached stdout, which must stay unchanged:\n%s", stdout)
+			if !strings.Contains(stdout, tc.wantLabel) {
+				t.Errorf("bd show stdout did not classify the target as %s:\n%s", tc.wantLabel, stdout)
+			}
+			if strings.Contains(stderr, "no row in this database") {
+				t.Errorf("bd show still warns about an edge it just printed:\nstderr:\n%s", stderr)
+			}
+			if strings.Contains(stderr, "For raw edge records") {
+				t.Errorf("bd show still offers the raw-record recovery command for an edge it just printed:\nstderr:\n%s", stderr)
 			}
 		})
 	}

@@ -285,18 +285,54 @@ func formatDependencyLine(prefix string, dep *types.IssueWithDependencyMetadata)
 }
 
 // printDepSection prints one dependency section: bold heading, then a line per
-// edge marked with the section's direction glyph.
+// edge marked with the section's direction glyph. Raw unresolved rows print
+// after the local lines of the same section (bd-hkpas7, #5272).
 func printDepSection(sec depSection) {
 	fmt.Printf("\n%s\n", ui.RenderBold(sec.Heading))
 	for _, dep := range sec.Deps {
 		fmt.Println(formatDependencyLine(sec.Glyph, dep))
 	}
+	for _, dep := range sec.Unresolved {
+		fmt.Println(formatUnresolvedDependencyLine(sec.Glyph, dep, sec.AnchorID))
+	}
+}
+
+// classifyUnresolvedTarget names why the far end of a raw unresolved edge has
+// no row in this database: an `external:` reference points outside by
+// construction, a bare id whose prefix names another repository points across
+// repos, and anything else matches this repo's own prefix — presumably an id
+// whose row is gone (deleted, purged, or never migrated in). The label is the
+// heuristic's, stated on the line: it is a guess about a row this database
+// cannot read, not proof of remote existence or deletion.
+func classifyUnresolvedTarget(anchorID, targetID string) string {
+	if strings.HasPrefix(targetID, "external:") {
+		return "external"
+	}
+	if types.ExtractPrefix(anchorID) != types.ExtractPrefix(targetID) {
+		return "cross-repo"
+	}
+	return "missing"
+}
+
+// formatUnresolvedDependencyLine formats one raw unresolved edge row: the
+// section's direction glyph, a BLANK status slot where a local line renders
+// the far issue's status icon (the edge has no far issue to read a status
+// from, and inventing one would turn "no row" back into a lie), the far id
+// exactly as stored (printedIssueID-escaped), and the muted classification
+// label (bd-hkpas7, #5272).
+func formatUnresolvedDependencyLine(prefix string, dep *types.Dependency, anchorID string) string {
+	label := "(" + classifyUnresolvedTarget(anchorID, dep.DependsOnID) + ")"
+	return fmt.Sprintf("  %s   %s %s", prefix, printedIssueID(dep.DependsOnID), ui.RenderMuted(label))
 }
 
 // printRelatedSection prints the deduplicated RELATED section that both
-// directions of the symmetric related/relates-to edges collapse into.
-func printRelatedSection(relatedSeen map[string]*types.IssueWithDependencyMetadata) {
-	if len(relatedSeen) == 0 {
+// directions of the symmetric related/relates-to edges collapse into, and —
+// after the local lines — the section's raw unresolved rows, which
+// mergeUnresolvedDepEdges keeps out of the per-type sections for the same
+// both-directions reason it keeps the local related rows out of them
+// (bd-hkpas7, #5272).
+func printRelatedSection(relatedSeen map[string]*types.IssueWithDependencyMetadata, unresolved []*types.Dependency, anchorID string) {
+	if len(relatedSeen) == 0 && len(unresolved) == 0 {
 		return
 	}
 	fmt.Printf("\n%s\n", ui.RenderBold("RELATED"))
@@ -307,6 +343,9 @@ func printRelatedSection(relatedSeen map[string]*types.IssueWithDependencyMetada
 	sort.Strings(ids)
 	for _, id := range ids {
 		fmt.Println(formatDependencyLine("↔", relatedSeen[id]))
+	}
+	for _, dep := range unresolved {
+		fmt.Println(formatUnresolvedDependencyLine("↔", dep, anchorID))
 	}
 }
 

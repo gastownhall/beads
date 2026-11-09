@@ -12,9 +12,11 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/uimd"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 // watchCommentFormatTime is the watch path's comment timestamp formatter.
@@ -193,7 +195,13 @@ func displayShowIssueReturn(ctx context.Context, issueID string, commentsTail in
 	// Counts first — see readDepCounts for why the order matters.
 	depCountsSnapshot := readDepCounts(ctx, issueStore, issue.ID)
 	depsWithMeta, depsErr := issueStore.GetDependenciesWithMetadata(ctx, issue.ID)
-	for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
+	// The raw rows behind any positive outbound gap, printed as raw lines
+	// (bd-hkpas7, #5272); nil — and never read — when the gap is not there.
+	unresolved := gateUnresolvedDepEdges(ctx, storeUnresolvedEdgeSource{store: issueStore},
+		issue.ID, false, depCountsSnapshot, depListing{rows: len(depsWithMeta), err: depsErr}, depsWithMeta)
+	depSections := groupDepSections(depsWithMeta, true, relatedSeen)
+	depSections, relatedUnresolved := mergeUnresolvedDepEdges(depSections, unresolved, issue.ID, true)
+	for _, sec := range depSections {
 		printDepSection(sec)
 	}
 
@@ -203,17 +211,19 @@ func displayShowIssueReturn(ctx context.Context, issueID string, commentsTail in
 		printDepSection(sec)
 	}
 
+	// Related (bidirectional, deduplicated), then the warning — the warning
+	// subtracts the distinct unresolved ids the render printed, so it runs
+	// after every line that carries one is on screen.
+	printRelatedSection(relatedSeen, relatedUnresolved, issue.ID)
+
 	// Shared with the non-watch path in show.go and with proxiedRenderIssue in
 	// show_proxied_server.go, so all THREE text renders of `bd show` disclose
 	// the same fact (be-lpi). --refs and --children are deliberately out of
 	// scope: they answer an alternate query with no count beside it to
 	// contradict.
 	warnUnresolvableDepEdges(issue.ID, depCountsSnapshot,
-		depListing{rows: len(depsWithMeta), err: depsErr},
+		depListing{rows: len(depsWithMeta), err: depsErr, printedUnresolved: distinctUnresolvedTargets(unresolved)},
 		depListing{rows: len(dependentsWithMeta), err: dependentsErr})
-
-	// Related (bidirectional, deduplicated)
-	printRelatedSection(relatedSeen)
 
 	// Comments. watchCommentFormatTime hardcodes UTC — this path does not
 	// thread --local-time today (a pre-existing discrepancy from the
@@ -235,6 +245,68 @@ func displayShowIssueReturn(ctx context.Context, issueID string, commentsTail in
 type depListing struct {
 	rows int
 	err  error
+	// printedUnresolved is how many DISTINCT unresolved far ids this render
+	// put on stdout as raw edge lines (bd-hkpas7, #5272), subtracted from the
+	// gap so the warning announces only what the screen did not show.
+	// Outbound direction only: the raw read behind it is the source-keyed
+	// one, so the inbound arm of this warning never sets it.
+	printedUnresolved int
+}
+
+// unresolvedEdgeSource is the raw-edge read a text render backs its printed
+// raw lines with: the issue's stored dependency rows, unhydrated. The direct
+// routes reach it through the store (which routes by the issue's active plane
+// itself — see storeUnresolvedEdgeSource); the proxied route through the UOW
+// detail source, whose DependencyRecords routes by the isWisp it is handed.
+type unresolvedEdgeSource interface {
+	DependencyRecords(ctx context.Context, id string, isWisp bool) ([]*types.Dependency, error)
+}
+
+// storeUnresolvedEdgeSource adapts the store's raw edge read to
+// unresolvedEdgeSource. GetDependencyRecords picks the plane from the issue's
+// own state, so the isWisp this carries is a no-op here — the shape it fixes
+// is the one the proxied route needs a real answer for.
+type storeUnresolvedEdgeSource struct {
+	store storage.DoltStorage
+}
+
+func (s storeUnresolvedEdgeSource) DependencyRecords(ctx context.Context, id string, _ bool) ([]*types.Dependency, error) {
+	return s.store.GetDependencyRecords(ctx, id)
+}
+
+// gateUnresolvedDepEdges reads and filters the raw unresolved edges for one
+// text render (bd-hkpas7, #5272): nil, and never read, unless the outbound
+// gap is measurable and positive — the same gate BuildIssueDetails puts on
+// the JSON member, so a fully local issue pays nothing. Best effort like
+// every read in these renders: a failed raw read returns nil, and the
+// warning, which subtracts only what WAS printed, keeps announcing the whole
+// gap.
+func gateUnresolvedDepEdges(ctx context.Context, src unresolvedEdgeSource, issueID string, isWisp bool, counts depCounts, deps depListing, hydrated []*types.IssueWithDependencyMetadata) []*types.Dependency {
+	if src == nil || deps.err != nil || counts.deps.err != nil {
+		return nil
+	}
+	if counts.deps.n-int64(deps.rows) <= 0 {
+		return nil
+	}
+	raw, err := src.DependencyRecords(ctx, issueID, isWisp)
+	if err != nil {
+		return nil
+	}
+	return workapi.UnresolvedDepEdges(raw, hydrated)
+}
+
+// distinctUnresolvedTargets counts the distinct far ids among the raw
+// unresolved edges — the unit the outbound warning subtracts. Distinct, not
+// per-row: the design counts what a reader can no longer be in the dark
+// about, and one id printed in two sections is still one id (bd-hkpas7).
+func distinctUnresolvedTargets(unresolved []*types.Dependency) int {
+	seen := make(map[string]struct{}, len(unresolved))
+	for _, dep := range unresolved {
+		if dep != nil {
+			seen[dep.DependsOnID] = struct{}{}
+		}
+	}
+	return len(seen)
 }
 
 // depCount is one direction's aggregate, carried with its own error for the
@@ -320,7 +392,11 @@ func warnUnresolvableDepEdges(issueID string, counts depCounts, deps, dependents
 		if countErr != nil || listing.err != nil {
 			return false
 		}
-		missing := count - int64(listing.rows)
+		// What the screen did not cover: the gap minus the distinct
+		// unresolved ids the render printed as raw lines (bd-hkpas7, #5272).
+		// Zero here means every gap id is on stdout and the warning has
+		// nothing left to announce.
+		missing := count - int64(listing.rows) - int64(listing.printedUnresolved)
 		if missing <= 0 {
 			return false
 		}

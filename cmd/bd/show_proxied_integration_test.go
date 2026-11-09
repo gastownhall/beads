@@ -437,15 +437,20 @@ func TestProxiedServerShow2(t *testing.T) {
 		}
 	})
 
-	// be-lpi ROUTE COVERAGE. `bd show` has three text renders and this is the
-	// one a server-backed repo actually takes: usesProxiedServer() returns at
-	// show.go:45 before any of the direct path, and the shared issueops.Reader
-	// that carries unresolvable_dependencies is bound only for --json, so
-	// without an explicit call in proxiedRenderIssue plain text renders a
-	// cross-repo edge as no dependency at all — the exact symptom the change
-	// exists to remove, surviving on the route most exposed to it. The
-	// precedent this design follows, warnDroppedDepEdges, covers both of its
-	// own routes (dep.go:1148 and dep_proxied_server.go:457).
+	// be-lpi ROUTE COVERAGE, extended by bd-hkpas7 (#5272). `bd show` has
+	// three text renders and this is the one a server-backed repo actually
+	// takes: usesProxiedServer() returns at show.go:45 before any of the
+	// direct path, and the shared issueops.Reader that carries
+	// unresolvable_dependencies is bound only for --json, so without an
+	// explicit call in proxiedRenderIssue plain text renders a cross-repo
+	// edge as no dependency at all — the exact symptom the change exists to
+	// remove, surviving on the route most exposed to it. The precedent this
+	// design follows, warnDroppedDepEdges, covers both of its own routes
+	// (dep.go:1148 and dep_proxied_server.go:457).
+	//
+	// bd-hkpas7 moves the disclosure onto the screen: the edge now renders
+	// in its section (the target id with its classification label), and the
+	// stderr warning is suppressed because the printed id covered it.
 	t.Run("show_discloses_unresolvable_dep_edges", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "sud")
@@ -456,14 +461,17 @@ func TestProxiedServerShow2(t *testing.T) {
 		if err != nil {
 			t.Fatalf("bd show failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 		}
-		if !strings.Contains(stderr, "no row in this database") {
-			t.Errorf("proxied bd show did not disclose the unrenderable edge:\nstderr:\n%s", stderr)
+		if !strings.Contains(stdout, "liveop-kmf") {
+			t.Errorf("proxied bd show did not render the cross-repo edge target on stdout:\n%s", stdout)
 		}
-		// Same contract as the direct route: stdout stays byte-identical for
-		// scripts, so assert on the streams apart or this passes on a build
-		// that prints the notice in the wrong place.
-		if strings.Contains(stdout, "no row in this database") {
-			t.Errorf("the notice reached stdout, which must stay unchanged:\n%s", stdout)
+		if !strings.Contains(stdout, "(cross-repo)") {
+			t.Errorf("proxied bd show did not classify the cross-repo target:\n%s", stdout)
+		}
+		// Same contract as the direct route, now in its post-bd-hkpas7 shape:
+		// the printed line covers the whole gap, so the warning has nothing
+		// left to disclose and must stay silent.
+		if strings.Contains(stderr, "no row in this database") {
+			t.Errorf("proxied bd show still warns about an edge it just printed:\nstderr:\n%s", stderr)
 		}
 	})
 

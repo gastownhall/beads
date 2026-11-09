@@ -83,11 +83,22 @@ var depSectionOrder = []types.DependencyType{
 }
 
 // depSection is one printable group of dependency lines under one heading.
+//
+// Unresolved carries the raw edge rows of this section's type whose far end
+// has no row in this database (bd-hkpas7, #5272): a cross-repo id or an
+// `external:` reference the hydrated listing drops. They render AFTER the
+// local lines of the same section, as raw ids with a classification label —
+// never as invented issues. AnchorID is the section's anchor (the issue being
+// shown), which the label's cross-repo/missing heuristic compares prefixes
+// against; a zero AnchorID means no unresolved rows should exist.
 type depSection struct {
 	Type    types.DependencyType
 	Heading string
 	Glyph   string
 	Deps    []*types.IssueWithDependencyMetadata
+
+	Unresolved []*types.Dependency
+	AnchorID   string
 }
 
 // groupDepSections splits one direction's edges into printable sections, in
@@ -141,4 +152,111 @@ func groupDepSections(deps []*types.IssueWithDependencyMetadata, outgoing bool, 
 		emit(t)
 	}
 	return sections
+}
+
+// mergeUnresolvedDepEdges folds the raw unresolved edges (workapi.
+// UnresolvedDepEdges output — raw rows whose far end the hydrated listing
+// dropped) into the grouped local sections, so each prints in its own
+// relationship section after the local lines of the same type (bd-hkpas7,
+// #5272). A type with no local section gets one, in the order
+// depSectionOrder fixes and with that type's own heading — an issue whose
+// only BLOCKS edge is cross-repo still shows a BLOCKS section, not silence.
+//
+// RELATED is the one type that does not fold in: it is symmetric and prints
+// once for both directions through relatedSeen, so its unresolved rows come
+// back separately for printRelatedSection (deduplicated by far id here, so
+// a caller merging both directions cannot print one twice). That diversion
+// mirrors the one groupDepSections applies to the local rows.
+//
+// The input sections are rebuilt, not mutated: the slices a caller passes
+// are its own.
+func mergeUnresolvedDepEdges(sections []depSection, unresolved []*types.Dependency, anchorID string, outgoing bool) ([]depSection, []*types.Dependency) {
+	if len(unresolved) == 0 {
+		return sections, nil
+	}
+	byType := make(map[types.DependencyType][]*types.Dependency)
+	var related []*types.Dependency
+	seenRelated := make(map[string]struct{})
+	for _, dep := range unresolved {
+		if dep == nil {
+			continue
+		}
+		switch dep.Type {
+		case types.DepRelated, types.DepRelatesTo:
+			if _, dup := seenRelated[dep.DependsOnID]; dup {
+				continue
+			}
+			seenRelated[dep.DependsOnID] = struct{}{}
+			related = append(related, dep)
+		default:
+			byType[dep.Type] = append(byType[dep.Type], dep)
+		}
+	}
+	if len(byType) == 0 {
+		return sections, related
+	}
+
+	// Re-walk the same order groupDepSections emits — fixed types first, then
+	// custom types sorted by name — interleaving: an existing local section
+	// keeps its place and gains the rows, a type with no local section is
+	// created exactly where that order puts it. Appending the new sections at
+	// the end instead would print a created TRACKS section before an existing
+	// DEPENDS ON one, reordering the local sections this must not touch.
+	local := make(map[types.DependencyType]depSection, len(sections))
+	custom := make([]types.DependencyType, 0, len(byType))
+	noteCustom := func(t types.DependencyType) {
+		if !slices.Contains(depSectionOrder, t) && !slices.Contains(custom, t) {
+			custom = append(custom, t)
+		}
+	}
+	for _, sec := range sections {
+		local[sec.Type] = sec
+		noteCustom(sec.Type)
+	}
+	for t := range byType {
+		noteCustom(t)
+	}
+	slices.Sort(custom)
+
+	merged := make([]depSection, 0, len(sections)+len(byType))
+	emit := func(t types.DependencyType) {
+		sec, hasLocal := local[t]
+		rows := byType[t]
+		if !hasLocal {
+			if len(rows) == 0 {
+				return
+			}
+			rel := depRelationFor(t)
+			heading, glyph := rel.outHeading, rel.outGlyph
+			if !outgoing {
+				heading, glyph = rel.inHeading, rel.inGlyph
+			}
+			merged = append(merged, depSection{Type: t, Heading: heading, Glyph: glyph, Unresolved: rows, AnchorID: anchorID})
+			delete(byType, t)
+			return
+		}
+		if len(rows) > 0 {
+			sec.Unresolved = append(sec.Unresolved, rows...)
+			sec.AnchorID = anchorID
+			delete(byType, t)
+		}
+		merged = append(merged, sec)
+		delete(local, t)
+	}
+	for _, t := range depSectionOrder {
+		emit(t)
+	}
+	for _, t := range custom {
+		emit(t)
+	}
+	// Anything the walks above did not reach can only be a section a caller
+	// built by hand with a duplicate or exotic type; keep it rather than drop
+	// it, after the ordered sections.
+	for _, sec := range sections {
+		if _, ok := local[sec.Type]; ok {
+			merged = append(merged, sec)
+			delete(local, sec.Type)
+		}
+	}
+	return merged, related
 }

@@ -600,8 +600,17 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 
 	relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
 
+	// The raw rows behind any positive outbound gap, printed as raw lines
+	// (bd-hkpas7, #5272); nil — and never read — when the gap is not there.
+	// The UOW detail source routes the read by the plane isWisp names, the
+	// same routing BuildIssueDetails' JSON member uses.
+	unresolved := gateUnresolvedDepEdges(ctx, workapi.NewUOWDetailSource(uw),
+		issue.ID, isWisp, depCountsSnapshot, depListing{rows: len(depsWithMeta), err: depsErr}, depsWithMeta)
+
 	// (read above, with the header's gate decoration).
-	for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
+	depSections := groupDepSections(depsWithMeta, true, relatedSeen)
+	depSections, relatedUnresolved := mergeUnresolvedDepEdges(depSections, unresolved, issue.ID, true)
+	for _, sec := range depSections {
 		printDepSection(sec)
 	}
 
@@ -612,6 +621,8 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 			printEpicChildProgress(sec.Deps)
 		}
 	}
+
+	printRelatedSection(relatedSeen, relatedUnresolved, issue.ID)
 
 	// The THIRD text render of `bd show`, and the one the first cut of be-lpi
 	// missed. usesProxiedServer() returns at show.go:45 before any of the
@@ -624,11 +635,11 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 	// surviving on the route a server-backed repo actually uses. The
 	// precedent this design follows covers both of its own routes the same
 	// way — warnDroppedDepEdges at dep.go:1148 and dep_proxied_server.go:457.
+	// The raw lines above count against the gap through printedUnresolved
+	// (bd-hkpas7, #5272).
 	warnUnresolvableDepEdges(issue.ID, depCountsSnapshot,
-		depListing{rows: len(depsWithMeta), err: depsErr},
+		depListing{rows: len(depsWithMeta), err: depsErr, printedUnresolved: distinctUnresolvedTargets(unresolved)},
 		depListing{rows: len(dependentsWithMeta), err: dependentsErr})
-
-	printRelatedSection(relatedSeen)
 
 	comments, _ := proxiedGetComments(ctx, uw, issue.ID, isWisp)
 	printComments(comments, in.commentsTail, formatTime, issue.ID)

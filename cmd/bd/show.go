@@ -252,9 +252,18 @@ var showCmd = &cobra.Command{
 			// (relates-to is bidirectional, so we merge and show once)
 			relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
 
+			// The raw rows behind any positive outbound gap, printed as raw
+			// lines (bd-hkpas7, #5272); nil — and never read — when the gap is
+			// not there. depsWithMeta/depsErr and the counts were read above,
+			// with the header's gate decoration.
+			unresolved := gateUnresolvedDepEdges(ctx, storeUnresolvedEdgeSource{store: issueStore},
+				issue.ID, false, depCountsSnapshot, depListing{rows: len(depsWithMeta), err: depsErr}, depsWithMeta)
+
 			// Show dependencies - grouped by dependency type for clarity
 			// (read above, with the header's gate decoration).
-			for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
+			depSections := groupDepSections(depsWithMeta, true, relatedSeen)
+			depSections, relatedUnresolved := mergeUnresolvedDepEdges(depSections, unresolved, issue.ID, true)
+			for _, sec := range depSections {
 				printDepSection(sec)
 			}
 
@@ -267,17 +276,22 @@ var showCmd = &cobra.Command{
 				}
 			}
 
+			// Related (bidirectional, deduplicated), then the warning — the
+			// warning subtracts the distinct unresolved ids the render
+			// printed, so it runs after every line that carries one is on
+			// screen.
+			printRelatedSection(relatedSeen, relatedUnresolved, issue.ID)
+
 			// Both listings above drop every edge whose far end has no row in
 			// this database, so a cross-repo or `external:` dependency renders
 			// as no dependency at all — indistinguishable from having none
 			// (be-lpi). --json says so in unresolvable_dependencies; say it
 			// here too, or `bd dep add x liveop-y` reports success and then
-			// `bd show x` shows nothing.
+			// `bd show x` shows nothing — unless the raw lines above already
+			// showed the edge, which printedUnresolved subtracts (bd-hkpas7).
 			warnUnresolvableDepEdges(issue.ID, depCountsSnapshot,
-				depListing{rows: len(depsWithMeta), err: depsErr},
+				depListing{rows: len(depsWithMeta), err: depsErr, printedUnresolved: distinctUnresolvedTargets(unresolved)},
 				depListing{rows: len(dependentsWithMeta), err: dependentsErr})
-
-			printRelatedSection(relatedSeen)
 
 			// Show comments
 			comments, _ := issueStore.GetIssueComments(ctx, issue.ID) // Best effort: show issue even if comments unavailable
