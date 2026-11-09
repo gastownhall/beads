@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -338,5 +339,48 @@ func TestEmbeddedEngineSerializesOperations(t *testing.T) {
 	}
 	if n := counter.opens.Load(); n != 1 {
 		t.Fatalf("opened %d engines, want 1", n)
+	}
+}
+
+// TestEmbeddedEngineBlockedRecheckAfterCommit pins that the post-commit
+// blocked recheck (gastownhall/beads#6716) still settles is_blocked now that
+// operations share one engine: the unblocking write releases the engine slot
+// before its recheck takes it again, so the recheck runs on a snapshot taken
+// after the commit — on the same engine, without deadlocking on the write
+// that recorded it.
+func TestEmbeddedEngineBlockedRecheckAfterCommit(t *testing.T) {
+	ctx := context.Background()
+	store, counter := newCountedEngineStore(t, "enginerecheck")
+	if err := store.SetConfig(ctx, "issue_prefix", "rk"); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"rk-a", "rk-b"} {
+		if err := store.CreateIssue(ctx, engineTestIssue(id), "tester"); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	if err := store.AddDependency(ctx, &types.Dependency{IssueID: "rk-b", DependsOnID: "rk-a", Type: types.DepBlocks}, "tester"); err != nil {
+		t.Fatal(err)
+	}
+	if !embeddedIsBlocked(t, ctx, store, "rk-b") {
+		t.Fatal("rk-b is not blocked by its open blocker")
+	}
+
+	// Leave the stored flag stale inside the unblocking write itself, so only
+	// the post-commit recheck can settle it.
+	if err := store.withConn(ctx, true, func(tx *sql.Tx) error {
+		if _, err := issueops.CloseIssueInTx(ctx, tx, "rk-a", "done", "tester", ""); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, "UPDATE issues SET is_blocked = 1 WHERE id = 'rk-b'")
+		return err
+	}); err != nil {
+		t.Fatalf("unblocking write: %v", err)
+	}
+	if embeddedIsBlocked(t, ctx, store, "rk-b") {
+		t.Fatal("rk-b is still blocked after its only blocker closed and the recheck ran")
+	}
+	if n := counter.opens.Load(); n != 1 {
+		t.Fatalf("opened %d engines, want the recheck on the reused engine", n)
 	}
 }
