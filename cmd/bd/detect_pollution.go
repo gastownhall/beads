@@ -4,9 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"regexp"
-	"strings"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -20,79 +19,25 @@ type pollutionResult struct {
 	reasons []string
 }
 
-// testPrefixPattern matches common test issue title prefixes.
-// Compiled once at package level for use in isTestIssue and detectTestPollution.
-var testPrefixPattern = regexp.MustCompile(`^(test|benchmark|sample|tmp|temp|debug|dummy)[-_\s]`)
-
-// isTestIssue checks if an issue title looks like a test issue based on common test prefixes.
-// This function is used both for warnings during creation and for pollution detection.
-func isTestIssue(title string) bool {
-	return testPrefixPattern.MatchString(strings.ToLower(title))
+// highConfidence reports whether the hit scored in the high-confidence band.
+func (p pollutionResult) highConfidence() bool {
+	return doctor.PollutionResult{Score: p.score}.HighConfidence()
 }
 
+// isTestIssue checks if an issue title looks like a test issue based on common test prefixes.
+// It is the title check alone, used for warnings during creation and export;
+// pollution detection needs corroborating signals (doctor.DetectTestPollution).
+func isTestIssue(title string) bool {
+	return doctor.HasTestTitlePrefix(title)
+}
+
+// detectTestPollution runs the scorer shared with the validate gate
+// (doctor.DetectTestPollution).
 func detectTestPollution(issues []*types.Issue) []pollutionResult {
 	var results []pollutionResult
-	sequentialPattern := regexp.MustCompile(`^[a-z]+-\d+$`)
-
-	// Group issues by creation time to detect rapid succession
-	issuesByMinute := make(map[int64][]*types.Issue)
-	for _, issue := range issues {
-		minute := issue.CreatedAt.Unix() / 60
-		issuesByMinute[minute] = append(issuesByMinute[minute], issue)
+	for _, p := range doctor.DetectTestPollution(issues) {
+		results = append(results, pollutionResult{issue: p.Issue, score: p.Score, reasons: p.Reasons})
 	}
-
-	for _, issue := range issues {
-		score := 0.0
-		var reasons []string
-
-		title := strings.ToLower(issue.Title)
-
-		// Check for test prefixes (strong signal)
-		if testPrefixPattern.MatchString(title) {
-			score += 0.7
-			reasons = append(reasons, "Title starts with test prefix")
-		}
-
-		// Check for sequential numbering (medium signal)
-		if sequentialPattern.MatchString(issue.ID) && len(issue.Description) < 20 {
-			score += 0.4
-			reasons = append(reasons, "Sequential ID with minimal description")
-		}
-
-		// Check for generic/empty description (weak signal)
-		if len(strings.TrimSpace(issue.Description)) == 0 {
-			score += 0.2
-			reasons = append(reasons, "No description")
-		} else if len(issue.Description) < 20 {
-			score += 0.1
-			reasons = append(reasons, "Very short description")
-		}
-
-		// Check for rapid creation (created with many others in same minute)
-		minute := issue.CreatedAt.Unix() / 60
-		if len(issuesByMinute[minute]) >= 10 {
-			score += 0.3
-			reasons = append(reasons, fmt.Sprintf("Created with %d other issues in same minute", len(issuesByMinute[minute])-1))
-		}
-
-		// Check for generic test titles
-		if strings.Contains(title, "issue for testing") ||
-			strings.Contains(title, "test issue") ||
-			strings.Contains(title, "sample issue") {
-			score += 0.5
-			reasons = append(reasons, "Generic test title")
-		}
-
-		// Only include if score is above threshold
-		if score >= 0.7 {
-			results = append(results, pollutionResult{
-				issue:   issue,
-				score:   score,
-				reasons: reasons,
-			})
-		}
-	}
-
 	return results
 }
 
