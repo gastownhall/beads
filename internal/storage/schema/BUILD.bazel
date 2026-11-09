@@ -139,6 +139,7 @@ go_library(
         "//internal/debug",
         "//internal/storage/dberrors",
         "//internal/storage/depid",
+        "//internal/storage/domain",
         "//internal/storage/issueops",
         "//internal/storage/rowid",
         "//internal/types",

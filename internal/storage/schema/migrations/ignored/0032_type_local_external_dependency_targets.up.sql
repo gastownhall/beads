@@ -16,7 +16,9 @@
 -- the way new edges are classified (wisp first, then issue) and, when one is
 -- present, runs UPDATE dependencies (or UPDATE wisp_dependencies) to move the
 -- target into depends_on_wisp_id or depends_on_issue_id. A target this
--- database does not hold stays external. It then recomputes is_blocked for
+-- database does not hold stays external, and so does a blocking edge onto the
+-- source's own ancestor or descendant (a new one is refused), with a notice
+-- naming the bd dep remove that drops it. It then recomputes is_blocked for
 -- the converted sources and their descendants, which runs
 -- UPDATE issues SET is_blocked = ..., updated_at = updated_at and
 -- UPDATE wisps SET is_blocked = ..., updated_at = updated_at.

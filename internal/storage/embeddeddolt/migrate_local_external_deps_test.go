@@ -3,11 +3,13 @@
 package embeddeddolt_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/depid"
@@ -213,5 +215,42 @@ func TestEmbeddedMigrateTypesLegacyLocalExternalDependencies(t *testing.T) {
 	}
 	if got := doltCommitCount(t, ctx, conn); got != commits {
 		t.Fatalf("a second open made %d Dolt commits", got-commits)
+	}
+}
+
+// TestEmbeddedMigrateKeepsHierarchyConflictingLegacyDependencyExternal pins
+// the one row the repair must not type: a legacy blocks edge onto the
+// source's own ancestor, which a new edge is refused for. It stays external,
+// with a notice naming the command that removes it, while the eligible row
+// beside it is typed.
+func TestEmbeddedMigrateKeepsHierarchyConflictingLegacyDependencyExternal(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	var notice bytes.Buffer
+	defer schema.SetLocalExternalDepsNoticeOutForTest(&notice)()
+	conn, closeConn := legacyExternalDepsDB(t, ctx, []legacyExternalDep{
+		{"dependencies", "xpa-1.1", "xpb-0", "blocks"},
+		{"dependencies", "xpa-1", "xpb-1", "blocks"},
+	}, `
+INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, updated_at) VALUES
+  ('xpb-0', 'grandparent in another prefix', '', '', '', '', 'open', 2, 'epic', '`+legacyExternalDepsLegacyStamp+`');
+INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by, metadata) VALUES
+  ('`+depid.New("xpa-1", "xpb-0")+`', 'xpa-1', 'xpb-0', 'parent-child', '`+legacyExternalDepsLegacyStamp+`', 'legacy-writer', '{}');
+`)
+	defer closeConn()
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp (upgrade): %v", err)
+	}
+
+	requireDepTyped(t, ctx, conn, "dependencies", "xpa-1.1", "xpb-0", "depends_on_external")
+	requireDepTyped(t, ctx, conn, "dependencies", "xpa-1", "xpb-1", "depends_on_issue_id")
+	for _, want := range []string{"xpa-1.1", "xpb-0", "ancestor", "bd dep remove xpa-1.1 xpb-0"} {
+		if !strings.Contains(notice.String(), want) {
+			t.Fatalf("hierarchy notice %q does not mention %q", notice.String(), want)
+		}
+	}
+	if !ignoredCursorHas(t, ctx, conn, 32) {
+		t.Fatal("a kept-external conflict must not hold the 0032 marker back")
 	}
 }

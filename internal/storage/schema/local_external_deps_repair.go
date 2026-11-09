@@ -2,8 +2,12 @@ package schema
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"os"
 
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -18,6 +22,20 @@ var localExternalDepPlanes = []struct {
 	{table: "wisp_dependencies", wispSource: true},
 }
 
+// localExternalDepsNoticeOut is where the repair names the rows it kept
+// external. Like preflipEventsNoticeOut it is deliberately NOT
+// terminal-gated: a piped or served open is where the user would otherwise
+// never learn a legacy edge still does not block.
+var localExternalDepsNoticeOut io.Writer = os.Stderr
+
+// SetLocalExternalDepsNoticeOutForTest redirects the repair's notices to w
+// and returns a function that restores the previous writer. Test-only.
+func SetLocalExternalDepsNoticeOutForTest(w io.Writer) func() {
+	prev := localExternalDepsNoticeOut
+	localExternalDepsNoticeOut = w
+	return func() { localExternalDepsNoticeOut = prev }
+}
+
 // localExternalDep is one depends_on_external row the repair may type.
 type localExternalDep struct {
 	id, source, target, depType string
@@ -29,7 +47,9 @@ type localExternalDep struct {
 // database held it, so the edge never blocked. Each such row is classified the
 // way a new edge is (issueops.ClassifyDepTargetInTx: an "external:" reference
 // or an absent target stays external, a present wisp or issue is typed as
-// one) and its target moves to the typed column; the row keeps its id, which
+// one) and its target moves to the typed column, unless the edge is a block
+// on the source's own ancestor or descendant, which a new edge is refused
+// for: that row stays external with a notice. A typed row keeps its id, which
 // depid derives from the target string, and its provenance. The converted
 // sources and their descendants then have is_blocked recomputed, which keeps
 // updated_at.
@@ -54,6 +74,20 @@ func typeLocalExternalDependencyTargets(ctx context.Context, db DBConn) error {
 				return fmt.Errorf("classify %s target %s -> %s: %w", plane.table, row.source, row.target, err)
 			}
 			if kind == issueops.DepTargetExternal {
+				continue
+			}
+			// A new edge onto the source's own ancestor or descendant is
+			// refused; typing a legacy one would turn it into a block that
+			// never clears, so it stays external and the user is told how to
+			// drop it.
+			if err := issueops.CheckBlockingHierarchyInTx(ctx, db, dep, nil); err != nil {
+				var conflict *domain.DependencyHierarchyConflictError
+				if !errors.As(err, &conflict) {
+					return fmt.Errorf("check hierarchy of %s -> %s: %w", row.source, row.target, err)
+				}
+				fmt.Fprintf(localExternalDepsNoticeOut,
+					"Kept dependency %s -> %s external: %v. Remove it with: bd dep remove %s %s\n",
+					row.source, row.target, conflict, row.source, row.target)
 				continue
 			}
 			//nolint:gosec // G201: table from localExternalDepPlanes; column from DepTargetKind.Column().
