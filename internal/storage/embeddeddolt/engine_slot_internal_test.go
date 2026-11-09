@@ -385,6 +385,48 @@ func TestEmbeddedEngineBlockedRecheckAfterCommit(t *testing.T) {
 	if n := counter.opens.Load(); n != 1 {
 		t.Fatalf("opened %d engines, want the recheck on the reused engine", n)
 	}
+
+	t.Run("two blockers settle in turn", func(t *testing.T) {
+		for _, id := range []string{"rk-c", "rk-d", "rk-e"} {
+			if err := store.CreateIssue(ctx, engineTestIssue(id), "tester"); err != nil {
+				t.Fatalf("create %s: %v", id, err)
+			}
+		}
+		for _, blocker := range []string{"rk-c", "rk-d"} {
+			if err := store.AddDependency(ctx, &types.Dependency{IssueID: "rk-e", DependsOnID: blocker, Type: types.DepBlocks}, "tester"); err != nil {
+				t.Fatalf("add dependency rk-e -> %s: %v", blocker, err)
+			}
+		}
+		if !embeddedIsBlocked(t, ctx, store, "rk-e") {
+			t.Fatal("rk-e is not blocked by its open blockers")
+		}
+
+		// Closing one blocker leaves rk-e blocked by the other: the recheck
+		// runs and keeps the flag set.
+		if err := store.withConn(ctx, true, func(tx *sql.Tx) error {
+			_, err := issueops.CloseIssueInTx(ctx, tx, "rk-c", "done", "tester", "")
+			return err
+		}); err != nil {
+			t.Fatalf("close rk-c: %v", err)
+		}
+		if !embeddedIsBlocked(t, ctx, store, "rk-e") {
+			t.Fatal("rk-e unblocked while rk-d is still open")
+		}
+
+		// Closing the second blocker settles rk-e as unblocked.
+		if err := store.withConn(ctx, true, func(tx *sql.Tx) error {
+			_, err := issueops.CloseIssueInTx(ctx, tx, "rk-d", "done", "tester", "")
+			return err
+		}); err != nil {
+			t.Fatalf("close rk-d: %v", err)
+		}
+		if embeddedIsBlocked(t, ctx, store, "rk-e") {
+			t.Fatal("rk-e is still blocked after both blockers closed")
+		}
+		if n := counter.opens.Load(); n != 1 {
+			t.Fatalf("opened %d engines, want both rechecks on the reused engine", n)
+		}
+	})
 }
 
 // waitForEngineRelease waits, boundedly, for the counter's engines to close.
