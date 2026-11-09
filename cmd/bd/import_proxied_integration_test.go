@@ -627,6 +627,31 @@ func TestProxiedServerImport(t *testing.T) {
 		}
 	})
 
+	t.Run("custom_vocabulary_is_accepted", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "impv")
+		db := openProxiedDB(t, p)
+		for _, kv := range [][2]string{{"status.custom", "verify"}, {"types.custom", "spike"}} {
+			if stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "config", "set", kv[0], kv[1]); err != nil {
+				t.Fatalf("bd config set %s failed: %v\nstdout:\n%s\nstderr:\n%s", kv[0], err, stdout, stderr)
+			}
+		}
+
+		rows := fixtureIssues("impv")
+		rows[1].Status = "verify"
+		rows[2].IssueType = "spike"
+		path := filepath.Join(p.dir, "custom.jsonl")
+		if err := os.WriteFile(path, []byte(importFixtureJSONL(t, rows)), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+		if stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "import", path); err != nil {
+			t.Fatalf("strict import of configured custom values failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM issues WHERE (id = 'impv-r2' AND status = 'verify') OR (id = 'impv-r3' AND issue_type = 'spike')"); got != 2 {
+			t.Errorf("custom-vocabulary rows imported = %d, want 2", got)
+		}
+	})
+
 	t.Run("import_is_the_sanctioned_upsert_door", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "impf")

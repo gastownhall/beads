@@ -27,6 +27,7 @@ type fakeFallbackStore struct {
 	statsTotalIssues    int
 	statsNil            bool
 	getStatistics       func(context.Context) (*types.Statistics, error)
+	vocabularyErr       error
 }
 
 func (f *fakeFallbackStore) GetStatistics(ctx context.Context) (*types.Statistics, error) {
@@ -41,9 +42,10 @@ func (f *fakeFallbackStore) GetStatistics(ctx context.Context) (*types.Statistic
 
 func (f *fakeFallbackStore) Commit(_ context.Context, _ string) error { return nil }
 
-// ImportVocabulary answers the import screen with the built-in vocabulary.
+// ImportVocabulary answers the import screen with the built-in vocabulary,
+// or fails with vocabularyErr when it is set.
 func (f *fakeFallbackStore) ImportVocabulary(context.Context) ([]string, []string, error) {
-	return nil, nil, nil
+	return nil, nil, f.vocabularyErr
 }
 
 func writeAutoImportFixtureJSONL(t *testing.T, dir string) {
@@ -550,5 +552,43 @@ func TestAutoImportFallbackSeamUsesConflictSkip(t *testing.T) {
 		if s.gotOpts.ConflictSkip {
 			t.Fatalf("bd bootstrap / init --from-jsonl must keep UPSERT (ConflictSkip=false); got true")
 		}
+	})
+}
+
+// TestMaybeAutoImportJSONL_VocabularyReadErrorWritesNothing pins AC-5's
+// failure half on both auto-import paths: when the custom statuses and types
+// cannot be read, the import writes no row and no quarantine and reports the
+// read error, rather than labeling a row with a custom status invalid.
+func TestMaybeAutoImportJSONL_VocabularyReadErrorWritesNothing(t *testing.T) {
+	readErr := errors.New("probe: custom statuses unreadable")
+	line := `{"_type":"issue","id":"unit-1","title":"custom","status":"verify","priority":2,"issue_type":"task"}`
+
+	run := func(t *testing.T, store storage.DoltStorage) {
+		t.Helper()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "issues.jsonl"), []byte(line+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stderr := captureHookStderr(t, func() { maybeAutoImportJSONL(context.Background(), store, dir) })
+		if !strings.Contains(stderr, readErr.Error()) {
+			t.Errorf("stderr does not report the vocabulary read error:\n%s", stderr)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "issues.rejected.jsonl")); !os.IsNotExist(err) {
+			t.Errorf("quarantine written on a vocabulary read error (stat err %v)", err)
+		}
+	}
+
+	t.Run("single_transaction", func(t *testing.T) {
+		store := &fakeJSONLImporterStore{fakeFallbackStore: fakeFallbackStore{vocabularyErr: readErr}, imported: 1}
+		run(t, store)
+		if got := store.calls.Load(); got != 0 {
+			t.Errorf("ImportJSONLData called %d time(s) after the vocabulary read failed, want 0", got)
+		}
+	})
+
+	t.Run("fallback", func(t *testing.T) {
+		// The real fallback importer: fakeFallbackStore panics on any write,
+		// so reaching one fails the test.
+		run(t, &fakeFallbackStore{vocabularyErr: readErr})
 	})
 }
