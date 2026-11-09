@@ -795,3 +795,76 @@ func TestWispPurgeClosedReportsCappedScan(t *testing.T) {
 		}
 	})
 }
+
+// TestWispPurgeClosedPreviewDoesNotMutate pins that chunking reaches only the
+// forced purge (bd-d2zqqc): a no-force preview or a --dry-run on either route
+// deletes nothing and keeps the answer it gave before.
+func TestWispPurgeClosedPreviewDoesNotMutate(t *testing.T) {
+	preview := func(t *testing.T, stdout string) {
+		t.Helper()
+		obj := decodeSingleJSONObject(t, stdout)
+		if obj["candidates"] != float64(450) || obj["dry_run"] != true {
+			t.Errorf("preview = %v, want candidates 450 and dry_run true", obj)
+		}
+	}
+
+	t.Run("direct no force", func(t *testing.T) {
+		s := useWispPurgeStub(t, 450)
+		jsonOutput = true
+		stdout, stderr, err := captureWispGC(t, func() error {
+			return runWispPurgeClosed(context.Background(), false, false, nil)
+		})
+		if err != nil {
+			t.Fatalf("runWispPurgeClosed: %v\nstderr:\n%s", err, stderr)
+		}
+		preview(t, stdout)
+		if len(s.deleter.requests) != 0 {
+			t.Errorf("preview sent %d deletion requests", len(s.deleter.requests))
+		}
+	})
+
+	t.Run("direct dry run", func(t *testing.T) {
+		s := useWispPurgeStub(t, 450)
+		jsonOutput = true
+		stdout, stderr, err := captureWispGC(t, func() error {
+			return runWispPurgeClosed(context.Background(), true, true, nil)
+		})
+		if err != nil {
+			t.Fatalf("runWispPurgeClosed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		for i, req := range s.deleter.requests {
+			if !req.DryRun {
+				t.Errorf("dry run sent request %d without DryRun", i)
+			}
+		}
+		if len(s.deleter.deleted) != 0 {
+			t.Errorf("dry run deleted %d wisps", len(s.deleter.deleted))
+		}
+	})
+
+	for _, tc := range []struct {
+		name          string
+		dryRun, force bool
+	}{
+		{"proxied no force", false, false},
+		{"proxied dry run", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := useWispPurgeProxied(t, 450)
+			jsonOutput = true
+			stdout, stderr, err := captureWispGC(t, func() error {
+				return runWispPurgeClosedProxiedServer(context.Background(), tc.dryRun, tc.force, nil)
+			})
+			if err != nil {
+				t.Fatalf("runWispPurgeClosedProxiedServer: %v\nstderr:\n%s", err, stderr)
+			}
+			preview(t, stdout)
+			if units := p.deletionUnits(); len(units) != 0 {
+				t.Errorf("preview opened %d deletion units of work", len(units))
+			}
+			if len(p.deleted) != 0 {
+				t.Errorf("preview deleted %d wisps", len(p.deleted))
+			}
+		})
+	}
+}
