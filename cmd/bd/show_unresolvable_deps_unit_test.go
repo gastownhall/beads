@@ -3,8 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 // fakeDepCounter answers the two aggregate queries readDepCounts makes,
@@ -93,6 +97,22 @@ func TestWarnUnresolvableDepEdges(t *testing.T) {
 			counter:    fakeDepCounter{rdepCount: 5},
 			dependents: depListing{rows: 0, err: boom},
 			wantWarn:   false,
+		},
+		{
+			// #5272: the ids the render printed are shown, so the notice
+			// leaves them out; the rest are still reported.
+			name:     "printed unresolved ids cover the whole gap",
+			counter:  fakeDepCounter{depCount: 3},
+			deps:     depListing{rows: 1, printedUnresolved: 2},
+			wantWarn: false,
+		},
+		{
+			name:        "printed unresolved ids cover part of the gap",
+			counter:     fakeDepCounter{depCount: 4},
+			deps:        depListing{rows: 1, printedUnresolved: 1},
+			wantWarn:    true,
+			wantText:    "2 dependency edge(s)",
+			wantPointer: true,
 		},
 		{
 			// Symmetric: the count is what failed. It yields 0, which cannot
@@ -211,4 +231,101 @@ func TestWarnUnresolvableDepEdges(t *testing.T) {
 			t.Errorf("a concurrent add must not be reported as unresolvable, got:\n%q", out)
 		}
 	})
+}
+
+// TestShowUnresolvableDepLines pins how #5272's unresolved outbound edges
+// join the text sections: after the local lines of their relationship's
+// section, a section created in the usual order when only unresolved edges
+// have its type, related edges diverted to RELATED and deduplicated against
+// local ones, a muted classification label, an escaped id, and the distinct
+// id count the outbound notice subtracts.
+func TestShowUnresolvableDepLines(t *testing.T) {
+	local := &types.IssueWithDependencyMetadata{
+		Issue:          types.Issue{ID: "rp-2", Title: "Local", Status: types.StatusOpen, Priority: 2},
+		DependencyType: types.DepBlocks,
+	}
+	localRelated := &types.IssueWithDependencyMetadata{
+		Issue:          types.Issue{ID: "rp-3", Title: "Local related", Status: types.StatusOpen, Priority: 2},
+		DependencyType: types.DepRelated,
+	}
+	const escID = "liveop-\x1b[31mred"
+	edge := func(target string, typ types.DependencyType) *types.Dependency {
+		return &types.Dependency{IssueID: "rp-1", DependsOnID: target, Type: typ}
+	}
+	unresolved := []*types.Dependency{
+		edge("external:x:cap", types.DepTracks),
+		edge("liveop-a", types.DepBlocks),
+		edge("liveop-a", "custom-z"), // duplicate far end: only fakes can store one
+		edge(escID, types.DepBlocks),
+		edge("liveop-r", types.DepRelated),
+		edge("rp-3", types.DepRelatesTo),
+		edge("rp-gone", types.DepWaitsFor),
+	}
+
+	relatedSeen := map[string]*types.IssueWithDependencyMetadata{}
+	relatedUnresolved := map[string]*types.Dependency{}
+	sections := groupOutgoingDepSections([]*types.IssueWithDependencyMetadata{local, localRelated},
+		unresolved, relatedSeen, relatedUnresolved)
+
+	type shape struct {
+		heading string
+		local   []string
+		ids     []string
+	}
+	var got []shape
+	for _, sec := range sections {
+		sh := shape{heading: sec.Heading}
+		for _, d := range sec.Deps {
+			sh.local = append(sh.local, d.ID)
+		}
+		for _, e := range sec.Unresolved {
+			sh.ids = append(sh.ids, e.DependsOnID)
+		}
+		got = append(got, sh)
+	}
+	want := []shape{
+		{heading: "DEPENDS ON", local: []string{"rp-2"}, ids: []string{"liveop-a", escID}},
+		{heading: "WAITS FOR", ids: []string{"rp-gone"}},
+		{heading: "TRACKS", ids: []string{"external:x:cap"}},
+		{heading: "CUSTOM-Z", ids: []string{"liveop-a"}},
+	}
+	if !slices.EqualFunc(got, want, func(a, b shape) bool {
+		return a.heading == b.heading && slices.Equal(a.local, b.local) && slices.Equal(a.ids, b.ids)
+	}) {
+		t.Errorf("sections = %+v\nwant %+v", got, want)
+	}
+	if _, ok := relatedSeen["rp-3"]; !ok || len(relatedUnresolved) != 2 {
+		t.Errorf("related split: seen %v, unresolved %v; want rp-3 local and two unresolved", relatedSeen, relatedUnresolved)
+	}
+
+	for _, tc := range []struct {
+		edge *types.Dependency
+		want string
+	}{
+		{edge("external:x:cap", types.DepTracks), "  →   external:x:cap " + ui.RenderMuted("(external)")},
+		{edge("liveop-a", types.DepBlocks), "  →   liveop-a " + ui.RenderMuted("(cross-repo)")},
+		{edge("rp-gone", types.DepWaitsFor), "  →   rp-gone " + ui.RenderMuted("(missing)")},
+	} {
+		if got := formatUnresolvedDependencyLine("→", tc.edge); got != tc.want {
+			t.Errorf("formatUnresolvedDependencyLine(%s) = %q, want %q", tc.edge.DependsOnID, got, tc.want)
+		}
+	}
+	if line := formatUnresolvedDependencyLine("→", edge(escID, types.DepBlocks)); strings.Contains(line, "\x1b") ||
+		!strings.Contains(line, printedIssueID(escID)) {
+		t.Errorf("unresolved id not escaped: %q", line)
+	}
+
+	related := captureStdout(t, func() error {
+		printRelatedSection(relatedSeen, relatedUnresolved)
+		return nil
+	})
+	if strings.Count(related, "rp-3") != 1 || !strings.Contains(related, "  ↔   liveop-r "+ui.RenderMuted("(cross-repo)")+"\n") {
+		t.Errorf("RELATED section must list rp-3 once (local) then liveop-r unresolved:\n%s", related)
+	}
+
+	// liveop-a twice, the escaped id, rp-gone, external:x:cap, liveop-r; rp-3
+	// is printed as a local line, so it is not an unresolved id.
+	if n := printedUnresolvedIDs(sections, relatedSeen, relatedUnresolved); n != 5 {
+		t.Errorf("printedUnresolvedIDs = %d, want 5 distinct ids", n)
+	}
 }
