@@ -134,9 +134,72 @@ func circuitBreakerPaths() (dir, legacyFile string) {
 	return circuitBreakerDir(), legacyCircuitBreakerFile
 }
 
+// ensureCircuitDir makes dir usable for circuit breaker state: it creates
+// the directory with 0700 when absent (os.MkdirAll leaves an existing
+// directory's mode alone) and then validates what is actually on disk with
+// os.Lstat. usable is true only when the path is a real directory this
+// process can safely keep state in — a symlink or a regular file is never
+// followed, read through, or written through. reason is non-nil exactly
+// when an EXISTING path is unsafe (a symlink, a non-directory, or — on
+// Unix — another owner or group/other write permission), which the caller
+// reports once per process; a path that simply cannot be established or
+// inspected is ordinary best-effort fail-open and carries no warning
+// (GH#4223). This assumes a normal private or sticky temp parent; it is not
+// a defense against a hostile mutable ancestor.
+func ensureCircuitDir(dir string) (usable bool, reason error) {
+	_ = os.MkdirAll(dir, 0700)
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return false, nil
+	}
+	if !info.IsDir() { // Lstat: a symlink to a directory reports as a symlink
+		kind := "non-directory"
+		if info.Mode()&os.ModeSymlink != 0 {
+			kind = "symlink"
+		}
+		return false, fmt.Errorf("%s is a %s, not a directory this process can keep breaker state in", dir, kind)
+	}
+	if err := validateCircuitDirOwnership(dir, info); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+var (
+	// unsafeCircuitDirMu guards unsafeCircuitDirWarned.
+	unsafeCircuitDirMu sync.Mutex
+	// unsafeCircuitDirWarned remembers which unsafe circuit state
+	// directories this process already reported. Construction and the
+	// sweep both run on every store open, and per-open repetition would
+	// turn one planted directory into a log stream.
+	unsafeCircuitDirWarned = map[string]bool{}
+)
+
+// warnUnsafeCircuitDir reports an unsafe circuit state directory once per
+// process per path, with the reason and a remedy.
+func warnUnsafeCircuitDir(dir string, reason error) {
+	unsafeCircuitDirMu.Lock()
+	first := !unsafeCircuitDirWarned[dir]
+	if first {
+		unsafeCircuitDirWarned[dir] = true
+	}
+	unsafeCircuitDirMu.Unlock()
+	if !first {
+		return
+	}
+	log.Printf("[circuit-breaker] state directory %s is unsafe (%v); the circuit breaker is disabled for this process. "+
+		"Have the directory's owner remove it, or run bd with a private TMPDIR", dir, reason)
+}
+
 // newCircuitBreaker creates a circuit breaker for the given Dolt server
 // host:port:database. The database name is included in the file path so each
 // project gets independent circuit breaker state on shared servers (GH#3140).
+//
+// It returns nil when the per-user state directory cannot be established or
+// an existing one is unsafe (see ensureCircuitDir): every caller already
+// treats a nil breaker as "no breaker" and stays fail-open, so an unsafe
+// directory disables the breaker rather than trusting or writing state
+// through it (GH#4223).
 func newCircuitBreaker(host string, port int, database string) *circuitBreaker {
 	// Sanitize host and database for use in filename
 	sanitize := strings.NewReplacer(".", "-", ":", "-", "/", "-")
@@ -155,10 +218,13 @@ func newCircuitBreaker(host string, port int, database string) *circuitBreaker {
 	}
 
 	dir, _ := circuitBreakerPaths()
-	// 0700: the directory is per-user (GH#4223), and another ordinary user
-	// must not even learn its entries. MkdirAll never changes the mode of a
-	// directory that already exists.
-	_ = os.MkdirAll(dir, 0700)
+	usable, reason := ensureCircuitDir(dir)
+	if !usable {
+		if reason != nil {
+			warnUnsafeCircuitDir(dir, reason)
+		}
+		return nil
+	}
 	return &circuitBreaker{
 		host:     host,
 		port:     port,
