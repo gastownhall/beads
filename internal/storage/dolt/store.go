@@ -2244,6 +2244,50 @@ func checkOpenSchemaDrift(ctx context.Context, db *sql.DB, cfg *Config) error {
 	return err
 }
 
+// serverIdentityExpectation is the server identity cfg's endpoint must
+// prove before the open lists, creates or reads a database on it (GH#4637),
+// or nil when the endpoint is exempt. It applies to managed local TCP
+// endpoints: the shared server (whatever port source named it, an
+// environment port included, except a caller-explicit port outside
+// ServerPortSharedServer) and a workspace's own bd-owned server. It exempts
+// gateways and credential commands, proxied servers, unix sockets, TLS,
+// hosts bd does not run its server at, caller-explicit and environment
+// ports outside shared mode, any mode that is not owned outside shared mode,
+// and an explicit dolt.verify-server-identity: false
+// (BEADS_DOLT_VERIFY_SERVER_IDENTITY=false).
+func serverIdentityExpectation(cfg *Config, beadsDir, serverDir string) *doltserver.ServerIdentityExpectation {
+	if cfg.Gateway || cfg.ProxiedServer || cfg.ServerSocket != "" || cfg.ServerTLS ||
+		cfg.ServerPort <= 0 || !configfile.BdRunsServerAt(cfg.ServerHost) {
+		return nil
+	}
+	shared := cfg.ServerPortSharedServer ||
+		(doltserver.IsSharedServerMode() && cfg.ServerPortSource != doltserver.PortSourceCallerExplicit)
+	if !shared {
+		switch cfg.ServerPortSource {
+		case doltserver.PortSourceCallerExplicit, doltserver.PortSourceEnv, doltserver.PortSourceExternalHostDefault:
+			return nil
+		}
+		if doltserver.ResolveServerMode(beadsDir) != doltserver.ServerModeOwned {
+			return nil
+		}
+	}
+	if !doltserver.ServerIdentityVerificationEnabled(beadsDir) {
+		return nil
+	}
+	dataDir := doltserver.DoltDirPath(beadsDir)
+	if shared {
+		if dir, err := doltserver.SharedDoltPath(); err == nil {
+			dataDir = dir
+		}
+	}
+	return &doltserver.ServerIdentityExpectation{
+		DataDir:   dataDir,
+		ServerDir: serverDir,
+		Host:      cfg.ServerHost,
+		Port:      cfg.ServerPort,
+	}
+}
+
 // newServerMode creates a DoltStore connected to a running dolt sql-server.
 // This path is pure Go and does not require CGO.
 func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
@@ -2493,8 +2537,10 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		breaker.RecordSuccess()
 	}
 
-	// Server mode: connect via MySQL protocol to dolt sql-server
-	db, connStr, dbFacts, err := openServerConnection(ctx, cfg)
+	// Server mode: connect via MySQL protocol to dolt sql-server. The
+	// identity expectation is resolved here, after socket fallback and any
+	// auto-start retarget, so it describes the endpoint actually dialed.
+	db, connStr, dbFacts, err := openServerConnection(ctx, cfg, serverIdentityExpectation(cfg, resolvedBeadsDir, serverDir))
 	if err != nil {
 		return nil, err
 	}
@@ -3239,7 +3285,13 @@ func requireServerDoltVersion(ctx context.Context, q doltversion.RowQuerier, cfg
 // openServerConnection connects to (and if needed creates) the target database
 // on a dolt sql-server via MySQL protocol. See serverConnFacts for what the
 // returned facts mean and why they are not a single bool.
-func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, serverConnFacts, error) {
+//
+// identity is the managed endpoint's server identity expectation
+// (serverIdentityExpectation), or nil for an exempt endpoint. Each pool the
+// open uses is checked against it (doltserver.VerifyServerIdentity) after
+// the handshake and version check and before any discovery, creation or
+// project statement (GH#4637).
+func openServerConnection(ctx context.Context, cfg *Config, identity *doltserver.ServerIdentityExpectation) (*sql.DB, string, serverConnFacts, error) {
 	connStr := buildServerDSN(cfg, cfg.Database)
 
 	db, err := sql.Open("mysql", connStr)
@@ -3339,6 +3391,9 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 		if err := requireServerDoltVersion(ctx, db, cfg); err != nil {
 			return nil, "", serverConnFacts{}, err
 		}
+		if err := doltserver.VerifyServerIdentity(ctx, db, identity); err != nil {
+			return nil, "", serverConnFacts{}, err
+		}
 		connReady = true
 		return db, connStr, serverConnFacts{alreadyExisted: true}, nil
 	}
@@ -3363,6 +3418,10 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 
 	// Refuse an old server before this connection can CREATE DATABASE on it.
 	if err := requireServerDoltVersion(ctx, initDB, cfg); err != nil {
+		return nil, "", serverConnFacts{}, err
+	}
+	// And a foreign one, before it can list or create databases there.
+	if err := doltserver.VerifyServerIdentity(ctx, initDB, identity); err != nil {
 		return nil, "", serverConnFacts{}, err
 	}
 
@@ -3447,6 +3506,11 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 		return nil
 	}, backoff.WithContext(bo, ctx)); err != nil {
 		return nil, "", serverConnFacts{}, fmt.Errorf("database %q not available after CREATE DATABASE: %w", cfg.Database, err)
+	}
+	// The project pool dials again: check that it reached the same server
+	// before capturing bootstrap authority on it or handing it out.
+	if err := doltserver.VerifyServerIdentity(ctx, db, identity); err != nil {
+		return nil, "", serverConnFacts{}, err
 	}
 
 	var bootstrapHeal *schema.FreshBootstrapHealCapability
