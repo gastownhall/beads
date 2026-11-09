@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -286,5 +287,66 @@ func TestEmbeddedEngineSerializesOperations(t *testing.T) {
 	}
 	if closes := counter.closes.Load(); closes != 0 {
 		t.Fatalf("engine disposed %d times while the store is open, want 0", closes)
+	}
+}
+
+// TestEmbeddedEngineBlockedRecheckOnReusedEngine pins AC-3 of
+// gastownhall/beads#5397: the post-commit blocked recheck runs on the store's
+// cached engine. withConn releases the slot when the write's transaction ends,
+// the recheck opens its own transaction and reacquires the slot, and that
+// second acquisition reuses the engine instead of paying a cold start. The
+// recompute settling (still blocked after one blocker closes, unblocked after
+// both) is the observable proof the recheck ran at all.
+func TestEmbeddedEngineBlockedRecheckOnReusedEngine(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := context.Background()
+	store, counter := engineTestStore(t, "engine_recheck", time.Hour)
+	if err := store.SetConfig(ctx, "issue_prefix", "ek"); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	for _, id := range []string{"ek-a", "ek-b", "ek-c"} {
+		iss := &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	for _, blocker := range []string{"ek-a", "ek-b"} {
+		if err := store.AddDependency(ctx, &types.Dependency{IssueID: "ek-c", DependsOnID: blocker, Type: types.DepBlocks}, "tester"); err != nil {
+			t.Fatalf("add dependency ek-c -> %s: %v", blocker, err)
+		}
+	}
+	if !embeddedIsBlocked(t, ctx, store, "ek-c") {
+		t.Fatal("ek-c not blocked before the unblocking writes")
+	}
+	opensBefore := counter.opens.Load()
+
+	// Close one blocker: the write commits, then withConn's post-commit
+	// recheck recomputes ek-c on a post-commit snapshot. ek-b is still open,
+	// so ek-c stays blocked — the recheck ran and left it blocked.
+	if err := store.withConn(ctx, true, func(tx *sql.Tx) error {
+		_, err := issueops.CloseIssueInTx(ctx, tx, "ek-a", "done", "tester", "")
+		return err
+	}); err != nil {
+		t.Fatalf("close ek-a: %v", err)
+	}
+	if !embeddedIsBlocked(t, ctx, store, "ek-c") {
+		t.Fatal("ek-c unblocked in-transaction while ek-b was still open")
+	}
+
+	// Close the second blocker: this recheck recomputes ek-c as unblocked.
+	if err := store.withConn(ctx, true, func(tx *sql.Tx) error {
+		_, err := issueops.CloseIssueInTx(ctx, tx, "ek-b", "done", "tester", "")
+		return err
+	}); err != nil {
+		t.Fatalf("close ek-b: %v", err)
+	}
+	if embeddedIsBlocked(t, ctx, store, "ek-c") {
+		t.Fatal("ek-c still blocked after both blockers closed: the recheck did not settle")
+	}
+
+	// Two writes, two post-commit rechecks and three verification reads all
+	// ran on the one engine the seed opened: no reopen for the recheck.
+	if opens := counter.opens.Load(); opens != opensBefore {
+		t.Fatalf("engine opens across writes + rechecks = %d, want %d (the recheck added no open)", opens, opensBefore)
 	}
 }
