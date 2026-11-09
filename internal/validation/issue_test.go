@@ -164,6 +164,7 @@ func TestCanonicalActor(t *testing.T) {
 		{name: "exact double-hyphen separator decodes to the rig-qualified slash (ga-2vy9p2)", in: "gastown--mayor", want: "gastown/mayor"},
 		{name: "raw slash passes through unchanged", in: "gastown/mayor", want: "gastown/mayor"},
 		{name: "a hyphen run longer than two is not the exact slash spelling and falls back to generic collapse", in: "gastown---mayor", want: "gastown_mayor"},
+		{name: "session-name underscore spelling of a qualified name stays on the dotted axis", in: "gascity__bob", want: "gascity_bob"},
 	}
 
 	for _, tt := range tests {
@@ -190,6 +191,8 @@ func TestActorMatches(t *testing.T) {
 		{name: "double-hyphen and double-underscore spellings no longer widen to the same identity (ga-2vy9p2)", assignee: "gastown--mayor", actor: "gastown__mayor", want: false},
 		{name: "double-hyphen spelling matches its raw-slash identity (ga-2vy9p2)", assignee: "gastown--mayor", actor: "gastown/mayor", want: true},
 		{name: "raw slash and raw dot stay genuinely distinct identities", assignee: "gastown/mayor", actor: "gastown.mayor", want: false},
+		{name: "rig-qualified role with a dotted name matches its double-hyphen spelling", assignee: "gascity/gastown.refinery", actor: "gascity--gastown.refinery", want: true},
+		{name: "a separator-only actor never matches a real identity", assignee: "gascity/bob", actor: "/", want: false},
 	}
 
 	for _, tt := range tests {
