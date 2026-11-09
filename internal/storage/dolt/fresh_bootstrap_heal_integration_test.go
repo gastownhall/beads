@@ -85,7 +85,7 @@ func TestFreshBootstrapHealIncarnation(t *testing.T) {
 				cfg := freshBootstrapIntegrationConfig(
 					beadsDir, state.Port, "heal_creator_race", fmt.Sprintf("creator-%02d", i),
 				)
-				db, _, facts, err := openServerConnection(ctx, cfg)
+				db, _, facts, err := openServerConnection(ctx, cfg, nil)
 				if db != nil {
 					_ = db.Close()
 				}
@@ -112,7 +112,7 @@ func TestFreshBootstrapHealIncarnation(t *testing.T) {
 
 	t.Run("exact creator heals its interrupted bootstrap", func(t *testing.T) {
 		cfg := freshBootstrapIntegrationConfig(beadsDir, state.Port, "heal_exact_creator", "exact-creator")
-		db, _, facts, err := openServerConnection(ctx, cfg)
+		db, _, facts, err := openServerConnection(ctx, cfg, nil)
 		if err != nil {
 			t.Fatalf("creator open: %v", err)
 		}
@@ -161,7 +161,7 @@ func TestFreshBootstrapHealIncarnation(t *testing.T) {
 
 	t.Run("drop and recreate revokes creator capability", func(t *testing.T) {
 		cfg := freshBootstrapIntegrationConfig(beadsDir, state.Port, "heal_creator_aba", "creator-aba")
-		creatorDB, _, facts, err := openServerConnection(ctx, cfg)
+		creatorDB, _, facts, err := openServerConnection(ctx, cfg, nil)
 		if err != nil {
 			t.Fatalf("creator open: %v", err)
 		}

@@ -17,6 +17,7 @@ go_library(
         "probe.go",
         "procattr_linux.go",
         "procattr_other_unix.go",
+        "server_identity.go",
         "servermode.go",
         "startowned.go",
         "startupwatch.go",
