@@ -117,3 +117,58 @@ func globalDatabaseExists(t *testing.T, port int) bool {
 		return false
 	}
 }
+
+// TestInitServerIdentityExemptGlobalDatabase: init expects nothing of a port
+// the caller named with --server-port, a host bd does not run a server at, or
+// a shared server whose check is turned off, so beads_global is created as
+// before even though the shared data directory's record names another server.
+func TestInitServerIdentityExemptGlobalDatabase(t *testing.T) {
+	server := testutil.StartIsolatedDoltContainerHandle(t)
+	port, err := strconv.Atoi(server.Port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv(doltserver.VerifyServerIdentityEnv, "")
+	dataDir, err := doltserver.SharedDoltPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	record := doltserver.ServerIdentityRecordPath(dataDir)
+	writeInitIdentityRecord(t, record, "00000000-1111-4222-8333-444444444444\n")
+
+	if initGlobalDatabaseIdentity(beadsDir, "127.0.0.1", port, false) == nil {
+		t.Fatal("no expectation for the shared server bd runs")
+	}
+	if got := initGlobalDatabaseIdentity(beadsDir, "192.0.2.10", port, false); got != nil {
+		t.Errorf("expectation for a host bd does not run a server at = %+v, want none", *got)
+	}
+	t.Run("disabled", func(t *testing.T) {
+		t.Setenv(doltserver.VerifyServerIdentityEnv, "false")
+		if got := initGlobalDatabaseIdentity(beadsDir, "127.0.0.1", port, false); got != nil {
+			t.Errorf("expectation with the check off = %+v, want none", *got)
+		}
+	})
+
+	identity := initGlobalDatabaseIdentity(beadsDir, "127.0.0.1", port, true)
+	if identity != nil {
+		t.Fatalf("expectation for a --server-port port = %+v, want none", *identity)
+	}
+	if err := doltserver.EnsureGlobalDatabase("127.0.0.1", port, "root", "", identity); err != nil {
+		t.Fatalf("EnsureGlobalDatabase on a --server-port port: %v", err)
+	}
+	if !globalDatabaseExists(t, port) {
+		t.Errorf("%s was not created", doltserver.GlobalDatabaseName)
+	}
+	if got, _ := os.ReadFile(record); string(got) != "00000000-1111-4222-8333-444444444444\n" {
+		t.Errorf("record = %q, want it unchanged", got)
+	}
+}

@@ -136,6 +136,8 @@ var YamlOnlyKeys = map[string]bool{
 	"dolt.shared-server":   true, // Shared Dolt server at ~/.beads/shared-server/ (GH#2377)
 	"dolt.remotesapi-port": true, // Machine-global shared-server remotesapi listener (0 disables)
 
+	"dolt.verify-server-identity": true, // Refuse a managed endpoint whose server is not the recorded one (GH#4637)
+
 	"dolt.max-conns":          true, // Connection pool size override (default 10, GH#3140)
 	"dolt.pool-read-timeout":  true, // Pool per-I/O read deadline override (default 10s, bd-vz0y9)
 	"dolt.pool-write-timeout": true, // Pool per-I/O write deadline override (default 10s, bd-vz0y9)
@@ -1737,6 +1739,11 @@ func validateYamlConfigValue(key, value string) error {
 		lower := strings.ToLower(value)
 		if lower != "true" && lower != "false" {
 			return fmt.Errorf("dolt.shared-server must be \"true\" or \"false\", got %q", value)
+		}
+	case "dolt.verify-server-identity":
+		lower := strings.ToLower(value)
+		if lower != "true" && lower != "false" {
+			return fmt.Errorf("dolt.verify-server-identity must be \"true\" or \"false\", got %q", value)
 		}
 	case "dolt.remotesapi-port":
 		port, err := strconv.Atoi(strings.TrimSpace(value))

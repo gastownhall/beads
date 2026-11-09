@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/doltserver"
 )
 
@@ -247,5 +248,143 @@ func TestServerIdentityMatchingRecord(t *testing.T) {
 			t.Fatalf("open (readOnly=%v) on the paired server: %v", readOnly, err)
 		}
 		_ = store.Close()
+	}
+}
+
+// TestServerIdentityExemptEndpoints: endpoints bd does not launch, or whose
+// check the operator turned off, get no expectation, so the open makes no
+// record read or identity query; an eligible endpoint of the same shape does.
+func TestServerIdentityExemptEndpoints(t *testing.T) {
+	for _, env := range []string{"BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT", "BEADS_DOLT_SERVER_HOST"} {
+		t.Setenv(env, "")
+	}
+	const port = 3308
+
+	shared := func(t *testing.T) (*Config, string) {
+		beadsDir, _ := serverIdentityShared(t)
+		return &Config{BeadsDir: beadsDir, ServerHost: "127.0.0.1", ServerPort: port, ServerPortSharedServer: true}, beadsDir
+	}
+	owned := func(t *testing.T) (*Config, string) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+		t.Setenv(doltserver.VerifyServerIdentityEnv, "")
+		return &Config{BeadsDir: beadsDir, ServerHost: "127.0.0.1", ServerPort: port, ServerPortSource: doltserver.PortSourcePortFile}, beadsDir
+	}
+
+	for name, setup := range map[string]func(t *testing.T) (*Config, string){"shared": shared, "owned": owned} {
+		t.Run("eligible/"+name, func(t *testing.T) {
+			cfg, beadsDir := setup(t)
+			if serverIdentityExpectation(cfg, beadsDir, beadsDir) == nil {
+				t.Fatalf("no expectation for the %s endpoint bd launches", name)
+			}
+		})
+	}
+	t.Run("eligible/invalid setting keeps the check on", func(t *testing.T) {
+		cfg, beadsDir := shared(t)
+		t.Setenv(doltserver.VerifyServerIdentityEnv, "maybe")
+		if serverIdentityExpectation(cfg, beadsDir, beadsDir) == nil {
+			t.Fatalf("%s=maybe turned the check off", doltserver.VerifyServerIdentityEnv)
+		}
+	})
+
+	cases := []struct {
+		name  string
+		setup func(t *testing.T) (*Config, string)
+		edit  func(t *testing.T, cfg *Config, beadsDir string)
+	}{
+		{"gateway", shared, func(t *testing.T, cfg *Config, _ string) { cfg.Gateway = true }},
+		{"proxied", shared, func(t *testing.T, cfg *Config, _ string) { cfg.ProxiedServer = true }},
+		{"socket", shared, func(t *testing.T, cfg *Config, _ string) { cfg.ServerSocket = "/tmp/dolt.sock" }},
+		{"tls", shared, func(t *testing.T, cfg *Config, _ string) { cfg.ServerTLS = true }},
+		{"non-bd host", shared, func(t *testing.T, cfg *Config, _ string) { cfg.ServerHost = "192.0.2.10" }},
+		{"disabled by env", shared, func(t *testing.T, _ *Config, _ string) {
+			t.Setenv(doltserver.VerifyServerIdentityEnv, "false")
+		}},
+		{"disabled by config.yaml", shared, func(t *testing.T, _ *Config, beadsDir string) {
+			writeFile(t, filepath.Join(beadsDir, "config.yaml"), doltserver.VerifyServerIdentityKey+": false\n")
+		}},
+		{"disabled by bd config set", shared, func(t *testing.T, _ *Config, beadsDir string) {
+			// bd config set writes a yaml-only key to config.yaml, where the
+			// check reads it, and refuses a value it would not honor.
+			writeFile(t, filepath.Join(beadsDir, "config.yaml"), "")
+			if !config.IsYamlOnlyKey(doltserver.VerifyServerIdentityKey) {
+				t.Fatalf("%s is not yaml-only, so bd config set stores it where the check never reads it", doltserver.VerifyServerIdentityKey)
+			}
+			if err := config.SetYamlConfigInDir(beadsDir, doltserver.VerifyServerIdentityKey, "maybe"); err == nil {
+				t.Errorf("bd config set accepted %s=maybe", doltserver.VerifyServerIdentityKey)
+			}
+			if err := config.SetYamlConfigInDir(beadsDir, doltserver.VerifyServerIdentityKey, "false"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"caller-explicit port in shared mode", shared, func(t *testing.T, cfg *Config, _ string) {
+			cfg.ServerPortSharedServer = false
+			cfg.ServerPortSource = doltserver.PortSourceCallerExplicit
+		}},
+		{"caller-explicit port", owned, func(t *testing.T, cfg *Config, _ string) {
+			cfg.ServerPortSource = doltserver.PortSourceCallerExplicit
+		}},
+		{"env port outside shared mode", owned, func(t *testing.T, cfg *Config, _ string) {
+			cfg.ServerPortSource = doltserver.PortSourceEnv
+		}},
+		{"external host default port", owned, func(t *testing.T, cfg *Config, _ string) {
+			cfg.ServerPortSource = doltserver.PortSourceExternalHostDefault
+		}},
+		{"external server mode", owned, func(t *testing.T, _ *Config, _ string) {
+			t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+		}},
+		{"disabled for an owned endpoint", owned, func(t *testing.T, _ *Config, _ string) {
+			t.Setenv(doltserver.VerifyServerIdentityEnv, "off")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run("exempt/"+tc.name, func(t *testing.T) {
+			cfg, beadsDir := tc.setup(t)
+			tc.edit(t, cfg, beadsDir)
+			if got := serverIdentityExpectation(cfg, beadsDir, beadsDir); got != nil {
+				t.Fatalf("expectation = %+v, want none", *got)
+			}
+		})
+	}
+}
+
+// TestServerIdentityExemptOpenIgnoresRecord: with the check turned off, or
+// on a port the caller named, a shared endpoint whose record names another
+// server opens and creates its database as before, and the record is left
+// alone.
+func TestServerIdentityExemptOpenIgnoresRecord(t *testing.T) {
+	skipIfNoServer(t)
+	ctx := context.Background()
+	cases := []struct {
+		name string
+		edit func(t *testing.T, cfg *Config)
+	}{
+		{"disabled", func(t *testing.T, _ *Config) { t.Setenv(doltserver.VerifyServerIdentityEnv, "false") }},
+		{"caller-explicit port", func(t *testing.T, cfg *Config) {
+			cfg.ServerPortSharedServer = false
+			cfg.ServerPortSource = doltserver.PortSourceCallerExplicit
+		}},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir, dataDir := serverIdentityShared(t)
+			record := writeIdentityRecord(t, dataDir, foreignServerUUID+"\n")
+			dbName := fmt.Sprintf("test_identity_exempt_%d_%d", i, testServerPort)
+			cfg := sharedIdentityConfig(t, beadsDir, dbName)
+			cfg.CreateIfMissing = true
+			tc.edit(t, cfg)
+
+			store, err := New(ctx, cfg)
+			if err != nil {
+				t.Fatalf("exempt open: %v", err)
+			}
+			_ = store.Close()
+			if got, _ := os.ReadFile(record); string(got) != foreignServerUUID+"\n" {
+				t.Errorf("record = %q, want it unchanged", got)
+			}
+		})
 	}
 }
