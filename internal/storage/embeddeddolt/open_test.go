@@ -208,3 +208,47 @@ func TestOpenSQLWaitBudget(t *testing.T) {
 		}
 	})
 }
+
+// TestOpenWaitBudget pins how BEADS_EMBEDDED_OPEN_TIMEOUT resolves: positive
+// Go durations or bare seconds, and the 30s default for anything else.
+func TestOpenWaitBudget(t *testing.T) {
+	t.Run("unset", func(t *testing.T) {
+		t.Setenv("BEADS_EMBEDDED_OPEN_TIMEOUT", "")
+		if err := os.Unsetenv("BEADS_EMBEDDED_OPEN_TIMEOUT"); err != nil {
+			t.Fatalf("unsetenv: %v", err)
+		}
+		if got := openWaitBudget(); got != 30*time.Second {
+			t.Errorf("openWaitBudget() with the variable unset = %v, want 30s", got)
+		}
+	})
+
+	cases := []struct {
+		raw  string
+		want time.Duration
+	}{
+		{"", 30 * time.Second},
+		{"   ", 30 * time.Second},
+		{"90s", 90 * time.Second},
+		{"2m", 2 * time.Minute},
+		{"1ms", time.Millisecond},
+		{"90", 90 * time.Second},
+		{" 45s ", 45 * time.Second},
+		{"\t90\n", 90 * time.Second},
+		{"0", 30 * time.Second},
+		{"0s", 30 * time.Second},
+		{"-5s", 30 * time.Second},
+		{"-5", 30 * time.Second},
+		{"soon", 30 * time.Second},
+		{"5 s", 30 * time.Second},
+		{"99999999999999999999", 30 * time.Second},
+		{"99999999999999999999h", 30 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(strings.ReplaceAll(tc.raw, " ", "_"), func(t *testing.T) {
+			t.Setenv("BEADS_EMBEDDED_OPEN_TIMEOUT", tc.raw)
+			if got := openWaitBudget(); got != tc.want {
+				t.Errorf("openWaitBudget() with %q = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
