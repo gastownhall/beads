@@ -355,3 +355,190 @@ func TestLedgerPinRuleFires(t *testing.T) {
 		}
 	}
 }
+
+// ledgerTODOPinCeiling is how many ledger rows may carry a TODO(...) pin
+// instead of a real test. Frozen at origin/main 473aa09fa1: 85 of 236 rows
+// (all 12 F-, 36 of 39 L, 37 of 43 W-). It only ever goes down: pinning a row
+// with a real test deletes its ID from todoPinnedRowsAtFreeze and lowers this
+// by one.
+const ledgerTODOPinCeiling = 85
+
+// todoPinnedRowsAtFreeze is WHICH rows were TODO-pinned when the ratchet froze,
+// sorted. Recording the set, not just the count, means pinning one row and
+// adding a new TODO row cannot hide behind an unchanged total.
+var todoPinnedRowsAtFreeze = []string{
+	"F-blocked",
+	"F-close",
+	"F-count",
+	"F-mol-ready",
+	"F-partial-id",
+	"F-ready-explain",
+	"F-ready-gated",
+	"F-ready-mol",
+	"F-serve",
+	"F-show-children",
+	"F-show-refs",
+	"F-show-thread",
+	"L-apply-ref",
+	"L-apply-snapshot",
+	"L-batchcreate-bound",
+	"L-batchcreate-inbatch",
+	"L-batchcreate-target",
+	"L-claim-prose",
+	"L-close-cap",
+	"L-comment-author",
+	"L-config-bounds",
+	"L-create-notfound",
+	"L-create-prefix",
+	"L-cycles-tracks",
+	"L-delete-bound",
+	"L-delete-dependents",
+	"L-delete-notfound",
+	"L-dep-endpoint",
+	"L-edgecount-bound",
+	"L-events-paging",
+	"L-release-notclaimed",
+	"L-release-notowner",
+	"L-update-fieldlen",
+	"L10",
+	"L11",
+	"L13",
+	"L14",
+	"L15",
+	"L16",
+	"L18",
+	"L2",
+	"L3",
+	"L4",
+	"L5",
+	"L6",
+	"L7",
+	"L8",
+	"L9",
+	"W-AddDependenciesRequest.SkipPerEdgeCycleCheck",
+	"W-ApplyPatch.ParentID",
+	"W-BatchCreateItem.Issue",
+	"W-ClaimRequest.Wisp",
+	"W-CloseBatchRequest.ClaimNext",
+	"W-CloseRequest.ExpectedVersion",
+	"W-CreateBatchRequest.ForceIDPrefix",
+	"W-CreateBatchRequest.Provenance",
+	"W-CreateDependency.Metadata",
+	"W-CreateDependency.Reverse",
+	"W-CreateDependency.ThreadID",
+	"W-CreateItem.Issue",
+	"W-CreateRequest.IDPrefix",
+	"W-CreateRequest.Issue",
+	"W-DeleteRequest.ExpectedVersion",
+	"W-DepAddItem.HasSpawner",
+	"W-DepAddItem.ThreadID",
+	"W-IssuePatch.Assignee",
+	"W-IssuePatch.ClosedBySession",
+	"W-IssuePatch.Labels",
+	"W-IssuePatch.Metadata",
+	"W-IssuePatch.Owner",
+	"W-IssuePatch.ParentID",
+	"W-IssuePatch.Persistence",
+	"W-IssuePatch.SpecID",
+	"W-IssuePatch.Status",
+	"W-ReopenRequest.ExpectedVersion",
+	"W-ReopenRequest.Provenance",
+	"W-UpdateRequest.Claim",
+	"W-UpdateRequest.ExpectedAssignee",
+	"W-UpdateRequest.ExpectedStatus",
+	"W-UpdateRequest.ExpectedVersion",
+	"W-UpdateRequest.ForceAssigneeTransfer",
+	"W-UpdateRequest.ForceClosePolicy",
+	"W-UpdateRequest.ForceNotesOverwrite",
+	"W-UpdateRequest.IssuePlaneOnly",
+	"W-UpdateRequest.Provenance",
+}
+
+// todoPinRatchetProblems compares the TODO-pinned rows with the frozen set and
+// ceiling and returns the problems, sorted.
+func todoPinRatchetProblems(rows []Row, frozen []string, ceiling int) []string {
+	var problems []string
+	if len(frozen) != ceiling {
+		problems = append(problems, fmt.Sprintf("todoPinnedRowsAtFreeze lists %d rows but ledgerTODOPinCeiling is %d; "+
+			"they are one fact, and both only ever go down", len(frozen), ceiling))
+	}
+	onList := map[string]bool{}
+	for _, id := range frozen {
+		if onList[id] {
+			problems = append(problems, fmt.Sprintf("todoPinnedRowsAtFreeze lists %s twice", id))
+		}
+		onList[id] = true
+	}
+	todo := map[string]bool{}
+	for _, row := range rows {
+		if !isTODOPin(row.PinnedBy) {
+			continue
+		}
+		todo[row.ID] = true
+		if !onList[row.ID] {
+			problems = append(problems, fmt.Sprintf("%s is TODO-pinned and was not when the ratchet froze; a new or "+
+				"re-pinned row needs a real test as its PinnedBy (in this package, or registered in crossPackagePins)", row.ID))
+		}
+	}
+	if len(todo) > ceiling {
+		problems = append(problems, fmt.Sprintf("%d ledger rows are TODO-pinned, above the frozen ceiling of %d", len(todo), ceiling))
+	}
+	for id := range onList {
+		if !todo[id] {
+			problems = append(problems, fmt.Sprintf("%s is on todoPinnedRowsAtFreeze but is no longer TODO-pinned; "+
+				"delete it and lower ledgerTODOPinCeiling by one, so the TODO population cannot grow back", id))
+		}
+	}
+	sort.Strings(problems)
+	return problems
+}
+
+// TestLedgerTODOPinsNeverGrow freezes the TODO-pinned ledger rows, in the
+// TestPretokenBaselinesNeverGrow pattern: a ledger row whose pin is a TODO is
+// a promise, not a test, and the number of those only ever goes down. A new
+// row arrives with a real test as its pin; a row that gains one leaves the
+// frozen set and lowers the ceiling.
+func TestLedgerTODOPinsNeverGrow(t *testing.T) {
+	for _, problem := range todoPinRatchetProblems(Ledger(), todoPinnedRowsAtFreeze, ledgerTODOPinCeiling) {
+		t.Error(problem)
+	}
+}
+
+// TestLedgerTODOPinRatchetFires is the ratchet's own falsification: synthetic
+// rows prove it still catches growth, a swap (pin one, add one) and a stale
+// frozen list, independent of what the real ledger currently says.
+func TestLedgerTODOPinRatchetFires(t *testing.T) {
+	const todo = "TODO(bd-synthetic): no test yet"
+	rows := func(pins ...string) []Row {
+		out := make([]Row, 0, len(pins))
+		for i, pin := range pins {
+			out = append(out, Row{ID: string(rune('A' + i)), PinnedBy: pin})
+		}
+		return out
+	}
+	cases := []struct {
+		name    string
+		rows    []Row
+		frozen  []string
+		ceiling int
+		want    []string
+	}{
+		{name: "unchanged", rows: rows(todo, todo, "TestReal"), frozen: []string{"A", "B"}, ceiling: 2},
+		{name: "grown", rows: rows(todo, todo, todo), frozen: []string{"A", "B"}, ceiling: 2,
+			want: []string{"3 ledger rows are TODO-pinned, above the frozen ceiling of 2", "C is TODO-pinned and was not"}},
+		{name: "swap keeps the count", rows: rows(todo, "TestReal", todo), frozen: []string{"A", "B"}, ceiling: 2,
+			want: []string{"B is on todoPinnedRowsAtFreeze", "C is TODO-pinned and was not"}},
+		{name: "pinned but not removed", rows: rows(todo, "TestReal"), frozen: []string{"A", "B"}, ceiling: 2,
+			want: []string{"B is on todoPinnedRowsAtFreeze"}},
+		{name: "list and ceiling disagree", rows: []Row{{ID: "A", PinnedBy: todo}, {ID: "B", PinnedBy: todo}, {ID: "D", PinnedBy: todo}},
+			frozen: []string{"A", "B", "D"}, ceiling: 2,
+			want: []string{"3 ledger rows are TODO-pinned, above the frozen ceiling of 2", "todoPinnedRowsAtFreeze lists 3 rows but ledgerTODOPinCeiling is 2"}},
+		{name: "duplicate list entry", rows: rows(todo, todo), frozen: []string{"A", "A"}, ceiling: 2,
+			want: []string{"todoPinnedRowsAtFreeze lists A twice", "B is TODO-pinned and was not"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertProblems(t, todoPinRatchetProblems(tc.rows, tc.frozen, tc.ceiling), tc.want)
+		})
+	}
+}
