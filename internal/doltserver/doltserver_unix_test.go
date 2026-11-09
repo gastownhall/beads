@@ -305,6 +305,45 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 			want:     []int{114},
 		},
 		{
+			name:     "blank state with bare dolt and extra spaces",
+			snapshot: "  117   dolt   sql-server  \n",
+			want:     []int{117},
+		},
+		{
+			name:     "blank state command starting with a state-like word",
+			snapshot: "116 Z dolt sql-server\n",
+			want:     []int{116},
+		},
+		{
+			name:     "blank state profiled command",
+			snapshot: "123 dolt --prof cpu sql-server\n",
+			want:     []int{123},
+		},
+		{
+			name:     "blank state keeps ordered case sensitive matching",
+			snapshot: "121 sql-server then dolt\n122 Dolt sql-server\n",
+		},
+		{
+			name:     "mixed populated and blank states",
+			snapshot: "Ss 301 dolt sql-server\n302 dolt sql-server\nZ 303 dolt sql-server\nS 304 dolt sql-server\n",
+			want:     []int{301, 302, 304},
+		},
+		{
+			name:     "running state with modifier is accepted",
+			snapshot: "R+ 118 dolt sql-server\n",
+			want:     []int{118},
+		},
+		{
+			name: "numeric-looking malformed fields are rejected",
+			snapshot: "+119 dolt sql-server\n" +
+				"-120 dolt sql-server\n" +
+				"1x2 dolt sql-server\n" +
+				"0 dolt sql-server\n" +
+				"99999999999999999999 dolt sql-server\n" +
+				"S 99999999999999999999 dolt sql-server\n" +
+				"S dolt sql-server\n",
+		},
+		{
 			name:     "preserves source order",
 			snapshot: "S 202 dolt sql-server\nS 201 dolt sql-server\nR 203 dolt sql-server\n",
 			want:     []int{202, 201, 203},
