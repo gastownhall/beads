@@ -366,3 +366,147 @@ func mkdirMode(mode os.FileMode) func(t *testing.T, path string) {
 		t.Cleanup(func() { _ = os.Chmod(path, 0o700) })
 	}
 }
+
+// writeCircuitFile writes breaker state (or raw bytes) with a mode and mtime.
+func writeCircuitFile(t *testing.T, dir, name string, content []byte, mode os.FileMode, mtime time.Time) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, content, mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func circuitJSON(t *testing.T, state circuitState) []byte {
+	t.Helper()
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// The sweep applies the expiry rules in the validated live directory and in
+// the real legacy ones, leaves retained entries exactly as they were, never
+// creates an absent legacy directory and never follows a symlinked one.
+func TestSweepCircuitBreakerDirs_LiveAndLegacy(t *testing.T) {
+	captureCircuitLog(t)
+	root := t.TempDir()
+	now := time.Now()
+	old := now.Add(-closedSweepTTL - time.Hour)
+	staleOpen := circuitJSON(t, circuitState{State: circuitOpen, TrippedAt: now.Add(-circuitStaleTTL - time.Hour)})
+	staleHalfOpen := circuitJSON(t, circuitState{State: circuitHalfOpen, LastFailure: now.Add(-circuitStaleTTL - time.Hour)})
+	freshOpen := circuitJSON(t, circuitState{State: circuitOpen, TrippedAt: now})
+	closed := circuitJSON(t, circuitState{State: circuitClosed})
+
+	type entry struct {
+		path    string
+		content []byte
+		mode    os.FileMode
+	}
+	populate := func(dir string) (removed []string, kept []entry) {
+		removed = []string{
+			writeCircuitFile(t, dir, "beads-dolt-circuit-127-0-0-1-1001.json", staleOpen, 0o600, now),
+			writeCircuitFile(t, dir, "beads-dolt-circuit-127-0-0-1-1002.json", staleHalfOpen, 0o600, now),
+			writeCircuitFile(t, dir, "beads-dolt-circuit-127-0-0-1-1003.json", closed, 0o600, old),
+			writeCircuitFile(t, dir, "beads-dolt-circuit-127-0-0-1-1004.json", []byte("{corrupt"), 0o600, now),
+			writeCircuitFile(t, dir, "beads-dolt-circuit-0.json", freshOpen, 0o600, now),
+		}
+		for _, k := range []struct {
+			name    string
+			content []byte
+			mode    os.FileMode
+		}{
+			{"beads-dolt-circuit-127-0-0-1-2001.json", freshOpen, 0o600},
+			{"beads-dolt-circuit-127-0-0-1-2002.json", closed, 0o644},
+		} {
+			kept = append(kept, entry{writeCircuitFile(t, dir, k.name, k.content, k.mode, now), k.content, k.mode})
+		}
+		return removed, kept
+	}
+
+	live := filepath.Join(root, "live")
+	if err := os.Mkdir(live, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	liveRemoved, liveKept := populate(live)
+	legacy := filepath.Join(root, "legacy")
+	if err := os.Mkdir(legacy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacyRemoved, legacyKept := populate(legacy)
+	absent := filepath.Join(root, "absent")
+	linkTarget := t.TempDir()
+	linkedStale := writeCircuitFile(t, linkTarget, "beads-dolt-circuit-127-0-0-1-3001.json", staleOpen, 0o600, now)
+	linkedPort0 := writeCircuitFile(t, linkTarget, "beads-dolt-circuit-0.json", freshOpen, 0o600, now)
+	linked := filepath.Join(root, "linked")
+	if err := os.Symlink(linkTarget, linked); err != nil {
+		t.Fatal(err)
+	}
+
+	sweepCircuitBreakerDirs(live, []string{live, legacy, absent, linked, legacy})
+
+	for _, path := range append(liveRemoved, legacyRemoved...) {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("expired entry survived the sweep: %s (stat err %v)", path, err)
+		}
+	}
+	for _, k := range append(liveKept, legacyKept...) {
+		got, err := os.ReadFile(k.path)
+		if err != nil {
+			t.Errorf("retained entry removed: %s: %v", k.path, err)
+			continue
+		}
+		if !bytes.Equal(got, k.content) {
+			t.Errorf("retained entry %s content = %s, want %s", k.path, got, k.content)
+		}
+		if info, err := os.Lstat(k.path); err == nil && info.Mode().Perm() != k.mode {
+			t.Errorf("retained entry %s mode = %v, want %v", k.path, info.Mode().Perm(), k.mode)
+		}
+	}
+	if _, err := os.Lstat(absent); !os.IsNotExist(err) {
+		t.Errorf("absent legacy directory was created (stat err %v)", err)
+	}
+	for _, path := range []string{linkedStale, linkedPort0} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Errorf("sweep traversed the symlinked legacy directory and removed %s: %v", path, err)
+		}
+	}
+}
+
+// The legacy directories are the unsuffixed one under the current temp root
+// and the historical hardcoded /tmp one.
+func TestLegacyCircuitBreakerDirs(t *testing.T) {
+	root := privateCircuitTempRoot(t)
+	got := legacyCircuitBreakerDirs()
+	want := []string{filepath.Join(root, "beads-circuit"), filepath.Join("/tmp", "beads-circuit")}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("legacyCircuitBreakerDirs() = %q, want %q", got, want)
+	}
+}
+
+// The test override isolates the sweep from every legacy directory, the
+// unsuffixed one under the temp root included.
+func TestCleanStaleCircuitBreakerFiles_OverrideSkipsLegacyDirs(t *testing.T) {
+	captureCircuitLog(t)
+	root := privateCircuitTempRoot(t)
+	t.Setenv(testCircuitBreakerDirEnv, filepath.Join(t.TempDir(), "circuit"))
+	legacy := filepath.Join(root, "beads-circuit")
+	if err := os.Mkdir(legacy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := writeCircuitFile(t, legacy, "beads-dolt-circuit-127-0-0-1-4001.json",
+		circuitJSON(t, circuitState{State: circuitOpen, TrippedAt: time.Now().Add(-circuitStaleTTL - time.Hour)}), 0o600, time.Now())
+
+	CleanStaleCircuitBreakerFiles()
+
+	if _, err := os.Lstat(stale); err != nil {
+		t.Errorf("sweep under the test override reached a legacy directory: %v", err)
+	}
+}

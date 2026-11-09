@@ -401,6 +401,11 @@ others. `bd` does not repair it; it runs without a breaker (every command
 dials the server) and warns once per process. Have the directory's owner
 remove it, or set `TMPDIR` to a directory only you can write.
 
+Older `bd` versions kept this state in the shared `${TMPDIR:-/tmp}/beads-circuit/`
+(and earlier in `/tmp/beads-circuit/`). Current versions no longer read it,
+but still age out stale files there, by the same rules as above, wherever
+the directory exists and is not a symlink.
+
 ## Dolt Server Issues
 
 ### Server not starting
