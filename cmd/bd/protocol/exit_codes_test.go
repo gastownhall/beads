@@ -91,3 +91,72 @@ func TestProtocol_CloseNonexistentExitsNonZero(t *testing.T) {
 		t.Logf("output: %s", out)
 	}
 }
+
+// undeferPerIDFailureExitCode is bd undefer's exit code TODAY when an id fails
+// and the command keeps going (an id that is not deferred). Native fix C1
+// (bdp-cli-conflict-20261107-fixes-c-exit-flags) makes it 1; until that
+// ruling it is a pin, and the PR that lands C1 changes this line. The message
+// half is TestProtocol_UndeferNonDeferredReportsStatus's (lifecycle_test.go).
+const undeferPerIDFailureExitCode = 0
+
+// TestProtocol_UndeferPerIDFailureExitCode pins bd undefer's exit code on the
+// direct route when one id is not deferred, alone and beside an id that does
+// undefer: the failure is reported, the other id still runs, and the exit
+// code is undeferPerIDFailureExitCode. bd defer's write-failure twin is
+// pinned at the command seam (TestDeferAndUndeferPerIDWriteFailureExitCode
+// in cmd/bd), because nothing a real store does on demand fails one id's write.
+func TestProtocol_UndeferPerIDFailureExitCode(t *testing.T) {
+	t.Parallel()
+	w := newWorkspace(t)
+	// No t.Run: w's helpers fail through the test that made the workspace.
+	for _, tc := range []struct {
+		name     string
+		deferred bool // whether a second, deferred id rides along
+	}{
+		{name: "the only id"},
+		{name: "beside an id that undefers", deferred: true},
+	} {
+		open := w.create("--title", "Not deferred ("+tc.name+")", "--type", "task")
+		args := []string{"undefer", open}
+		var other string
+		if tc.deferred {
+			other = w.create("--title", "Deferred ("+tc.name+")", "--type", "task")
+			w.run("defer", other)
+			args = append(args, other)
+		}
+		out, err := w.tryRun(args...)
+		code := 0
+		if err != nil {
+			code = exitCodeOf(t, err, args)
+		}
+		if code != undeferPerIDFailureExitCode {
+			t.Errorf("%s: bd %s: exit %d, want %d\n%s", tc.name, strings.Join(args, " "), code, undeferPerIDFailureExitCode, out)
+		}
+		if want := open + " is not deferred (status: open)"; !strings.Contains(out, want) {
+			t.Errorf("%s: bd %s: output lacks %q\n%s", tc.name, strings.Join(args, " "), want, out)
+		}
+		assertField(t, w.showJSON(open), "status", "open")
+		if tc.deferred {
+			assertField(t, w.showJSON(other), "status", "open")
+		}
+	}
+}
+
+// TestProtocol_DeferUnresolvedIDAbortsBeforeAnyWrite pins bd defer's per-id
+// case the real binary can reach: an id that does not resolve fails the whole
+// command (exit 1) before any id is written. C1 leaves this alone; a change
+// that resolved ids one at a time inside the write loop would not.
+func TestProtocol_DeferUnresolvedIDAbortsBeforeAnyWrite(t *testing.T) {
+	t.Parallel()
+	w := newWorkspace(t)
+	id := w.create("--title", "Defer beside a missing id", "--type", "task")
+
+	out, code := w.runExpectError("defer", id, w.prefix+"-nonexistent999")
+	if code != 1 {
+		t.Errorf("bd defer with an unresolvable id: exit %d, want 1\n%s", code, out)
+	}
+	if strings.Contains(out, "Deferred") {
+		t.Errorf("bd defer reported a write before aborting:\n%s", out)
+	}
+	assertField(t, w.showJSON(id), "status", "open")
+}
