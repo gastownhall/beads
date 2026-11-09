@@ -88,6 +88,10 @@ type depSection struct {
 	Heading string
 	Glyph   string
 	Deps    []*types.IssueWithDependencyMetadata
+	// Unresolved are raw outbound edges whose far end has no row in this
+	// database (workapi.UnresolvableDependencyEdges). They print after Deps,
+	// ID-only, because there is no issue to describe.
+	Unresolved []*types.Dependency
 }
 
 // groupDepSections splits one direction's edges into printable sections, in
@@ -140,5 +144,56 @@ func groupDepSections(deps []*types.IssueWithDependencyMetadata, outgoing bool, 
 	for _, t := range custom {
 		emit(t)
 	}
+	return sections
+}
+
+// groupOutgoingDepSections is groupDepSections for an issue's own edges, with
+// the raw edges the hydrated listing could not represent placed in their
+// relationship's section after its local lines (#5272). A type that has only
+// unresolved edges still gets its section, in the usual order. Unresolved
+// related edges are diverted into relatedUnresolved, keyed by target id, the
+// way relatedSeen collects the local ones. With no unresolved edges the
+// result is groupDepSections' own.
+func groupOutgoingDepSections(deps []*types.IssueWithDependencyMetadata, unresolved []*types.Dependency, relatedSeen map[string]*types.IssueWithDependencyMetadata, relatedUnresolved map[string]*types.Dependency) []depSection {
+	sections := groupDepSections(deps, true, relatedSeen)
+	if len(unresolved) == 0 {
+		return sections
+	}
+	at := make(map[types.DependencyType]int, len(sections))
+	for i, sec := range sections {
+		at[sec.Type] = i
+	}
+	for _, edge := range unresolved {
+		t := edge.Type
+		if t == types.DepRelatesTo {
+			t = types.DepRelated
+		}
+		if t == types.DepRelated && relatedUnresolved != nil {
+			relatedUnresolved[edge.DependsOnID] = edge
+			continue
+		}
+		i, ok := at[t]
+		if !ok {
+			rel := depRelationFor(t)
+			sections = append(sections, depSection{Type: t, Heading: rel.outHeading, Glyph: rel.outGlyph})
+			i = len(sections) - 1
+			at[t] = i
+		}
+		sections[i].Unresolved = append(sections[i].Unresolved, edge)
+	}
+	// Restore groupDepSections' order: depSectionOrder, then custom types by
+	// name.
+	rank := func(t types.DependencyType) int {
+		if i := slices.Index(depSectionOrder, t); i >= 0 {
+			return i
+		}
+		return len(depSectionOrder)
+	}
+	slices.SortStableFunc(sections, func(a, b depSection) int {
+		if ra, rb := rank(a.Type), rank(b.Type); ra != rb {
+			return ra - rb
+		}
+		return strings.Compare(string(a.Type), string(b.Type))
+	})
 	return sections
 }

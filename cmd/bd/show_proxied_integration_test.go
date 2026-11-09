@@ -451,19 +451,25 @@ func TestProxiedServerShow2(t *testing.T) {
 		p := newSharedProxiedProject(t, bd, "sud")
 		subject := bdProxiedCreate(t, bd, p.dir, "Subject with a cross-repo edge", "--type", "task")
 		bdProxiedDep(t, bd, p.dir, "add", subject.ID, "liveop-kmf", "--type", "blocks")
+		bdProxiedDep(t, bd, p.dir, "add", subject.ID, "external:liveop:liveop-cap", "--type", "tracks")
 
 		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "show", subject.ID)
 		if err != nil {
 			t.Fatalf("bd show failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 		}
-		if !strings.Contains(stderr, "no row in this database") {
-			t.Errorf("proxied bd show did not disclose the unrenderable edge:\nstderr:\n%s", stderr)
+		// #5272: each edge is named by id in its relationship's section, with
+		// no invented status, title or priority, and since every missing id
+		// is printed the stderr notice has nothing left to report.
+		for _, want := range []string{
+			"DEPENDS ON\n  →   liveop-kmf (cross-repo)\n",
+			"TRACKS\n  →   external:liveop:liveop-cap (external)\n",
+		} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("proxied bd show stdout does not name the edge as %q:\n%s", want, stdout)
+			}
 		}
-		// Same contract as the direct route: stdout stays byte-identical for
-		// scripts, so assert on the streams apart or this passes on a build
-		// that prints the notice in the wrong place.
-		if strings.Contains(stdout, "no row in this database") {
-			t.Errorf("the notice reached stdout, which must stay unchanged:\n%s", stdout)
+		if strings.Contains(stderr, "no row in this database") {
+			t.Errorf("proxied bd show warned about edges it printed:\nstderr:\n%s", stderr)
 		}
 	})
 

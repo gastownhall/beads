@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -251,10 +252,16 @@ var showCmd = &cobra.Command{
 			// Collect related issues from both directions for deduplication
 			// (relates-to is bidirectional, so we merge and show once)
 			relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
+			relatedUnresolved := make(map[string]*types.Dependency)
 
 			// Show dependencies - grouped by dependency type for clarity
-			// (read above, with the header's gate decoration).
-			for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
+			// (read above, with the header's gate decoration). An edge whose
+			// far end has no row here is named in its section by id (#5272).
+			unresolvedDeps := unresolvedOutgoingEdges(ctx, depCountsSnapshot, depsWithMeta, depsErr, func(ctx context.Context) ([]*types.Dependency, error) {
+				return issueStore.GetDependencyRecords(ctx, issue.ID)
+			})
+			outSections := groupOutgoingDepSections(depsWithMeta, unresolvedDeps, relatedSeen, relatedUnresolved)
+			for _, sec := range outSections {
 				printDepSection(sec)
 			}
 
@@ -274,10 +281,11 @@ var showCmd = &cobra.Command{
 			// here too, or `bd dep add x liveop-y` reports success and then
 			// `bd show x` shows nothing.
 			warnUnresolvableDepEdges(issue.ID, depCountsSnapshot,
-				depListing{rows: len(depsWithMeta), err: depsErr},
+				depListing{rows: len(depsWithMeta), err: depsErr,
+					printedUnresolved: printedUnresolvedIDs(outSections, relatedSeen, relatedUnresolved)},
 				depListing{rows: len(dependentsWithMeta), err: dependentsErr})
 
-			printRelatedSection(relatedSeen)
+			printRelatedSection(relatedSeen, relatedUnresolved)
 
 			// Show comments
 			comments, _ := issueStore.GetIssueComments(ctx, issue.ID) // Best effort: show issue even if comments unavailable

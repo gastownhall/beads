@@ -599,9 +599,14 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 	}
 
 	relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
+	relatedUnresolved := make(map[string]*types.Dependency)
 
 	// (read above, with the header's gate decoration).
-	for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
+	unresolvedDeps := unresolvedOutgoingEdges(ctx, depCountsSnapshot, depsWithMeta, depsErr, func(ctx context.Context) ([]*types.Dependency, error) {
+		return workapi.NewUOWDetailSource(uw).DependencyRecords(ctx, issue.ID, isWisp)
+	})
+	outSections := groupOutgoingDepSections(depsWithMeta, unresolvedDeps, relatedSeen, relatedUnresolved)
+	for _, sec := range outSections {
 		printDepSection(sec)
 	}
 
@@ -625,10 +630,11 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 	// precedent this design follows covers both of its own routes the same
 	// way — warnDroppedDepEdges at dep.go:1148 and dep_proxied_server.go:457.
 	warnUnresolvableDepEdges(issue.ID, depCountsSnapshot,
-		depListing{rows: len(depsWithMeta), err: depsErr},
+		depListing{rows: len(depsWithMeta), err: depsErr,
+			printedUnresolved: printedUnresolvedIDs(outSections, relatedSeen, relatedUnresolved)},
 		depListing{rows: len(dependentsWithMeta), err: dependentsErr})
 
-	printRelatedSection(relatedSeen)
+	printRelatedSection(relatedSeen, relatedUnresolved)
 
 	comments, _ := proxiedGetComments(ctx, uw, issue.ID, isWisp)
 	printComments(comments, in.commentsTail, formatTime, issue.ID)
