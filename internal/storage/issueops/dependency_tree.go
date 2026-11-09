@@ -16,9 +16,10 @@ import (
 // dependency plane, one issue read and one label read, each batched by
 // queryBatchSize, with more for a far end found only in wisps. Walking node by
 // node cost four to seven statements per node. The depth-first walk then runs
-// over what was read and sends nothing. A node on the last level maxDepth
-// allows is returned without reading its edges: every neighbor would sit beyond
-// the bound, where the walk returns nothing.
+// over what was read and sends nothing. Edges are not read for a node whose
+// shortest path from the root reaches the last level maxDepth allows. A node the
+// walk first reaches on that level may still have had its edges read through a
+// shorter path; the walk does not follow them.
 //
 // A node's edges are walked in order of the far end's id. Each issue is
 // expanded at most once. A later edge into an issue already
