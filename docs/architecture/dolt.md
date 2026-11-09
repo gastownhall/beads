@@ -384,6 +384,51 @@ Switch to server mode when you need:
 - Orchestrator multi-rig setups
 - Federation with remote peers
 
+### Runtime mode overrides
+
+`dolt_mode` in `.beads/metadata.json` is what makes a workspace's storage
+mode durable, but per-process environment variables outrank it:
+
+| Env var | Effect |
+|---------|--------|
+| `BEADS_DOLT_SERVER_MODE=1` | Selects server storage for that process, whatever metadata says |
+| `BEADS_DOLT_SERVER_HOST` (non-local) | Selects server storage for that process |
+| `BEADS_DOLT_SERVER_PORT` | Names a port only — never selects a mode |
+| `BEADS_DOLT_SHARED_SERVER` | Selects the shared server (see below) |
+
+The override lasts one invocation and bd never rewrites metadata.json from
+your environment, so two sessions in the same repo can quietly read
+different stores: the one carrying the override reaches the server's data
+directory while its sibling stays on `.beads/embeddeddolt/`. Both sessions'
+lists look healthy; neither sees the other's writes.
+
+When metadata.json explicitly pins `dolt_mode: embedded` and one of these
+overrides selects server storage, bd prints a stderr notice — once per
+invocation — naming the deciding variable and the embedded directory being
+bypassed:
+
+```
+Notice: BEADS_DOLT_SERVER_MODE=1 selects server storage for this run, but .beads/metadata.json pins dolt_mode="embedded"; the embedded store at /repo/.beads/embeddeddolt is bypassed.
+  This invocation uses server storage; sessions with different mode settings can read different stores. Align all sessions on one mode.
+  To persist server mode: set dolt_mode to "server" in .beads/metadata.json and commit it.
+  To stay embedded: unset BEADS_DOLT_SERVER_MODE.
+```
+
+The notice is a configuration warning, not a divergence check: it fires only
+when metadata *explicitly* pins embedded mode (an implicit embedded default
+is not covered), it cannot see other sessions' environments, foreign
+`dolt sql-server` processes over your data directories, or
+worktree-specific stores, and it does not compare store contents or detect
+that stores have drifted. It diagnoses one hazard — a mode split between
+sessions — not every report of stale data.
+
+For many concurrent processes on one workspace, configure server mode
+consistently: persist `dolt_mode: server` and align host, port, socket,
+database and branch across every session. Embedded mode remains
+single-writer — concurrent embedded invocations serialize through the Dolt
+driver — but bd does not promise every many-agent topology on one shared
+embedded store.
+
 ## Maintenance — `bd prune` and `bd purge`
 
 `bd prune` permanently deletes closed non-ephemeral beads to reclaim storage

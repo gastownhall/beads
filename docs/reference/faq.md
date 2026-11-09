@@ -113,6 +113,8 @@ The default `bd init` uses **embedded mode**: Dolt runs in-process inside `bd`, 
 
 **Server mode** (`bd init --server`) connects to a running `dolt sql-server` and stores data at `.beads/dolt/`. Switch to it when multiple processes need concurrent write access to the same database — for example several agents on one machine. See [Dolt architecture](/architecture/dolt) for setup and migration between modes.
 
+One footgun: per-process environment variables (`BEADS_DOLT_SERVER_MODE=1`, a non-local `BEADS_DOLT_SERVER_HOST`) override metadata for that invocation, so two sessions in one repo can end up reading different stores with no other visible sign. When `dolt_mode: embedded` is explicit in metadata, bd prints a stderr notice when such an override selects server storage — a configuration warning, not a check that the stores agree. For many concurrent processes, persist server mode and use it in every session. See [Runtime mode overrides](/architecture/dolt#runtime-mode-overrides).
+
 ## Usage
 
 ### Should I run bd init myself or have my agent do it?
@@ -182,7 +184,7 @@ bd update bd-a1b2 --claim            # Atomically claim an issue (assignee + in_
 bd create "Found issue" --deps discovered-from:bd-a1b2   # Track discovered work
 ```
 
-In orchestrated workflows an orchestrator usually assigns work (`bd assign`); agents picking work directly should use the atomic `--claim`. For multiple concurrent processes on one machine, use server mode; for distributed setups, Dolt's cell-level merge and [federation](/multi-agent/federation) let agents work independently and merge like developers do. See [Agent Coordination](/multi-agent/coordination).
+In orchestrated workflows an orchestrator usually assigns work (`bd assign`); agents picking work directly should use the atomic `--claim`. For multiple concurrent processes on one machine, use server mode — consistently configured, because a runtime mode override on one session (for example `BEADS_DOLT_SERVER_MODE=1`) silently splits sessions across the embedded and server stores; for distributed setups, Dolt's cell-level merge and [federation](/multi-agent/federation) let agents work independently and merge like developers do. See [Agent Coordination](/multi-agent/coordination) and [Runtime mode overrides](/architecture/dolt#runtime-mode-overrides).
 
 ### Does beads work offline?
 
