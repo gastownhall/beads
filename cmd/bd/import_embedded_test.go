@@ -342,3 +342,192 @@ func TestEmbeddedImportConcurrent(t *testing.T) {
 	}
 	t.Logf("%d/%d import workers succeeded", successes, numWorkers)
 }
+
+// TestEmbeddedStaleSnapshotImportKeepsClose pins the import-side invariant
+// behind GH#4767's reported lost-close symptom: a JSONL snapshot older than
+// the store — imported explicitly, or delivered by a git merge whose
+// post-merge hook auto-imports the tracked export — must add its new rows
+// without resurrecting an issue the store already closed. The default
+// stale guard (import_shared.go: strictly-older rows are skipped;
+// same-updated_at ties keep the local row) is the contract under test;
+// --allow-stale is the deliberate escape hatch, exercised here as the
+// negative control. These are coverage regressions over the base, not a
+// runtime fix: the close-dropping mechanism GH#4767 reports remains open.
+func TestEmbeddedStaleSnapshotImportKeepsClose(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt import tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	// appendJSONLIssue adds one issue as a JSONL line to an existing
+	// snapshot file — the way a branch's export diverges from a committed
+	// one.
+	appendJSONLIssue := func(t *testing.T, path string, issue types.Issue) {
+		t.Helper()
+		line, err := json.Marshal(issue)
+		if err != nil {
+			t.Fatalf("marshal issue: %v", err)
+		}
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			t.Fatalf("open %s for append: %v", path, err)
+		}
+		defer f.Close()
+		if _, err := f.WriteString(string(line) + "\n"); err != nil {
+			t.Fatalf("append issue line: %v", err)
+		}
+	}
+
+	// readJSONLIssueByID returns the snapshot's row for one issue id.
+	readJSONLIssueByID := func(t *testing.T, path, id string) types.Issue {
+		t.Helper()
+		data, err := os.ReadFile(path) // #nosec G304 -- path is a test fixture
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			var issue types.Issue
+			if err := json.Unmarshal([]byte(line), &issue); err != nil {
+				t.Fatalf("parse JSONL line %q: %v", line, err)
+			}
+			if issue.ID == id {
+				return issue
+			}
+		}
+		t.Fatalf("no %s row in %s", id, path)
+		return types.Issue{}
+	}
+
+	// seedStaleOpen imports an open issue with an hour-old updated_at, so
+	// every later store write to that row is strictly newer without any
+	// sleeps. Returns the seed file's path (the issue's open snapshot).
+	seedStaleOpen := func(t *testing.T, dir, id string) string {
+		t.Helper()
+		old := time.Now().UTC().Add(-time.Hour)
+		seedPath := filepath.Join(t.TempDir(), "seed.jsonl")
+		writeJSONLFile(t, seedPath, []types.Issue{{
+			ID: id, Title: "Stale snapshot target", Status: types.StatusOpen,
+			IssueType: types.TypeTask, CreatedAt: old, UpdatedAt: old,
+		}})
+		bdImport(t, bd, dir, seedPath)
+		return seedPath
+	}
+
+	// claimAndClose closes an open issue the reported workflow's way —
+	// claim, then close with a reason — and returns its post-close state.
+	claimAndClose := func(t *testing.T, dir, id, reason string) *types.Issue {
+		t.Helper()
+		out, err := bdRunWithFlockRetry(t, bd, dir, "update", id, "--claim")
+		if err != nil {
+			t.Fatalf("bd update %s --claim failed: %v\n%s", id, err, out)
+		}
+		bdClose(t, bd, dir, id, "--reason", reason)
+		return bdShow(t, bd, dir, id)
+	}
+
+	// requireClosedUnchanged asserts the closure fields survived some
+	// operation (an import, a merge) byte for byte: status, close_reason,
+	// closed_at and updated_at.
+	requireClosedUnchanged := func(t *testing.T, label string, got, closed *types.Issue) {
+		t.Helper()
+		if got.Status != types.StatusClosed {
+			t.Errorf("%s: status = %s, want closed", label, got.Status)
+		}
+		if got.CloseReason != closed.CloseReason {
+			t.Errorf("%s: close_reason = %q, want %q", label, got.CloseReason, closed.CloseReason)
+		}
+		if got.ClosedAt == nil || closed.ClosedAt == nil || !got.ClosedAt.Equal(*closed.ClosedAt) {
+			t.Errorf("%s: closed_at = %v, want %v", label, got.ClosedAt, closed.ClosedAt)
+		}
+		if !got.UpdatedAt.Equal(closed.UpdatedAt) {
+			t.Errorf("%s: updated_at = %v, want %v", label, got.UpdatedAt, closed.UpdatedAt)
+		}
+	}
+
+	t.Run("explicit_import_keeps_close_adds_witness", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "snapimp")
+		seedStaleOpen(t, dir, "snapimp-x")
+
+		// A real-CLI snapshot of X open, written outside auto-export's
+		// destination (.beads/issues.jsonl): only the explicit import
+		// below can feed it to the store.
+		snapshotPath := filepath.Join(t.TempDir(), "snapshot.jsonl")
+		bdExport(t, bd, dir, "-o", snapshotPath)
+
+		// W exists only in the snapshot: its appearance after the import
+		// is the witness that the import ran at all.
+		now := time.Now().UTC()
+		appendJSONLIssue(t, snapshotPath, types.Issue{
+			ID: "snapimp-w", Title: "Snapshot-only witness", Status: types.StatusOpen,
+			IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now,
+		})
+
+		closed := claimAndClose(t, dir, "snapimp-x", "closed before snapshot import")
+
+		snapX := readJSONLIssueByID(t, snapshotPath, "snapimp-x")
+		if !snapX.UpdatedAt.Before(closed.UpdatedAt) {
+			t.Fatalf("snapshot X updated_at %v is not before the close %v: the fixture lost its ordering", snapX.UpdatedAt, closed.UpdatedAt)
+		}
+		if bdShowSucceeds(t, bd, dir, "snapimp-w") {
+			t.Fatal("witness snapimp-w exists before the import; the fixture leaked")
+		}
+
+		out := bdImport(t, bd, dir, snapshotPath)
+		if !strings.Contains(out, "1 stale skipped") {
+			t.Errorf("import did not report the stale skip for X:\n%s", out)
+		}
+		if w := bdShow(t, bd, dir, "snapimp-w"); w.Status != types.StatusOpen {
+			t.Errorf("witness after import: status %s, want open", w.Status)
+		}
+		requireClosedUnchanged(t, "after import", bdShow(t, bd, dir, "snapimp-x"), closed)
+	})
+
+	t.Run("equal_updated_at_tie_keeps_closed_row", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "snaptie")
+		seedStaleOpen(t, dir, "snaptie-x")
+		closed := claimAndClose(t, dir, "snaptie-x", "closed before tie import")
+
+		// The snapshot's X row carries the close's own updated_at but is
+		// open with empty closure fields: the tie an equal-second export
+		// produces. The default import must keep the closed local row.
+		tiePath := filepath.Join(t.TempDir(), "tie.jsonl")
+		writeJSONLFile(t, tiePath, []types.Issue{{
+			ID: "snaptie-x", Title: "Stale snapshot target", Status: types.StatusOpen,
+			IssueType: types.TypeTask, CreatedAt: closed.CreatedAt, UpdatedAt: closed.UpdatedAt,
+		}})
+
+		out := bdImport(t, bd, dir, tiePath)
+		if !strings.Contains(out, "Kept local state for 1 issue(s)") {
+			t.Errorf("import did not report the tie keep for X:\n%s", out)
+		}
+		requireClosedUnchanged(t, "after tie import", bdShow(t, bd, dir, "snaptie-x"), closed)
+	})
+
+	t.Run("allow_stale_overwrites_closed_row", func(t *testing.T) {
+		// Negative control in its own fixture: with the guard deliberately
+		// disabled, the same snapshot DOES overwrite the closure. The
+		// keep in the subtests above is the stale guard's doing, not an
+		// inability to resurrect.
+		dir, _, _ := bdInit(t, bd, "--prefix", "snapstale")
+		seedPath := seedStaleOpen(t, dir, "snapstale-x")
+		claimAndClose(t, dir, "snapstale-x", "closed before allow-stale import")
+
+		bdImport(t, bd, dir, "--allow-stale", seedPath)
+
+		after := bdShow(t, bd, dir, "snapstale-x")
+		if after.Status != types.StatusOpen {
+			t.Errorf("--allow-stale left status %s, want open (the negative control did not overwrite)", after.Status)
+		}
+		if after.ClosedAt != nil {
+			t.Errorf("--allow-stale kept closed_at %v, want empty", after.ClosedAt)
+		}
+		if after.CloseReason != "" {
+			t.Errorf("--allow-stale kept close_reason %q, want empty", after.CloseReason)
+		}
+	})
+}
