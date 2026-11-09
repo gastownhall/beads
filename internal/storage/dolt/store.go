@@ -5147,7 +5147,8 @@ func (s *DoltStore) credentialsForRemote(remote string) *remoteCredentials {
 // re-pushes that remote faithfully propagates the dangling reference.
 //
 // If CLIDir is empty or .dolt/noms does not exist, the check is skipped.
-// Six outcomes are possible when fsck exits non-zero (see classifyFSCKFailure):
+// Seven outcomes are possible when fsck exits non-zero (see
+// classifyFSCKFailure):
 //   - non-empty output, could-not-open: skipped with a log warning.
 //   - non-empty output with an integrity-finding marker: ErrDanglingReference —
 //     push aborted.
@@ -5155,6 +5156,8 @@ func (s *DoltStore) credentialsForRemote(remote string) *remoteCredentials {
 //   - parent context deadline exceeded: ErrFSCKTimeout (caller timeout) — push aborted.
 //   - fsck own timeout: ErrFSCKTimeout (raise BEADS_FSCK_TIMEOUT) — push aborted.
 //   - cancellation phrasing in output, no context error: cancellation error — push aborted.
+//   - anything else (failed or killed fsck, empty or unrecognized output):
+//     ErrFSCKFailed — push aborted; the check did not complete.
 func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 	dir := s.CLIDir()
 	if dir == "" {
@@ -5170,7 +5173,7 @@ func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		output := strings.TrimSpace(string(out))
-		if classified := classifyFSCKFailure(ctx.Err(), fsckCtx.Err(), output); classified != nil {
+		if classified := classifyFSCKFailure(ctx.Err(), fsckCtx.Err(), err, output); classified != nil {
 			return classified
 		}
 		log.Printf("pre-push fsck could not run, skipping integrity check: %s", output)
@@ -5213,14 +5216,17 @@ func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 //	    carries the reason. Plain cancellation error wrapping context.Canceled;
 //	    the store is not implicated.
 //
-//	(f) Generic non-zero exit, empty output → ErrDanglingReference abort.
+//	(f) Any other failed exit (empty or unrecognized output, no context
+//	    error) → ErrFSCKFailed abort. The execution error and raw output are
+//	    reported; the check did not complete, which proves neither
+//	    corruption nor health.
 //
 // Returning nil for the could-not-open case (branch a) distinguishes "fsck
 // couldn't run at all" from "fsck ran and found a problem". Wrapping an
 // open-failure as ErrDanglingReference misleads users (dolthub/dolt#10915);
 // so does wrapping an interrupt's "context canceled" noise as corruption
 // (same genus, observed when a background push's process group was killed).
-func classifyFSCKFailure(parentErr, fsckErr error, output string) error {
+func classifyFSCKFailure(parentErr, fsckErr, runErr error, output string) error {
 	// (a) Non-empty output: fsck actually reported something; route by content.
 	if output != "" {
 		if fsckCouldNotOpen(output) {
@@ -5268,9 +5274,22 @@ func classifyFSCKFailure(parentErr, fsckErr error, output string) error {
 		return fmt.Errorf("pre-push integrity check interrupted: %w: %s",
 			context.Canceled, output)
 	}
-	// (f) Generic failure with no output and no recognized context error.
-	return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks",
-		ErrDanglingReference)
+	// (f) The check did not complete successfully and no recognized finding,
+	// timeout, or interruption explains it. Fail closed — but as a failed
+	// check, not as corruption: a failed process does not prove the store is
+	// corrupt, and absent report markers do not prove it is healthy (dolt's
+	// unexpected-error path can exit without a report). Report the execution
+	// failure and the captured output, or say explicitly that there was none.
+	if output == "" {
+		output = "(no output)"
+	}
+	return fmt.Errorf("%w: the integrity check did not complete successfully "+
+		"(the store is not necessarily corrupt); the push was aborted. "+
+		"fsck execution error: %v; output: %s. "+
+		"To obtain the full report, run `dolt fsck` in the database directory "+
+		"(`bd dolt status` shows the data directory; run it from the database "+
+		"subdirectory named after the database)",
+		ErrFSCKFailed, runErr, output)
 }
 
 // fsckReportedFinding reports whether dolt fsck output contains one of the

@@ -104,8 +104,13 @@ whether it has every chunk the pushed data points to. The remote said it does
 not have the chunk named in the message, so Dolt refused the push. The remote
 branch was **not** moved. This is not a sign of local corruption: the check
 asks the remote, not your local store. (When bd pushes through the dolt CLI,
-its pre-push check reports local corruption separately, as
-`dangling chunk reference`.)
+its pre-push check reports local problems separately, before the push reaches
+the remote: `dangling chunk reference` when fsck found corrupt chunks, commit
+errors, or a corrupted chunk journal; `pre-push integrity check timed out`
+when the check did not finish in time — raise `BEADS_FSCK_TIMEOUT`, the store
+is not necessarily corrupt; `pre-push integrity check failed` when fsck exited
+without completing — run `dolt fsck` in the database directory, which
+`bd dolt status` shows, to get the report. All three refuse the push.)
 
 **Telling the cases apart:** under the error, bd prints this clone's HEAD
 commit hash and HEAD root hash, which it reads right after the failure:

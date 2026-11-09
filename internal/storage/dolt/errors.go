@@ -32,10 +32,12 @@ var (
 	// ErrExec indicates a database exec (INSERT/UPDATE/DELETE) failure.
 	ErrExec = errors.New("exec error")
 
-	// ErrDanglingReference indicates that the pre-push integrity check detected
-	// missing chunks in the local Dolt noms store. The push was aborted to
-	// prevent propagating the corruption to the remote. Run bd dolt verify
-	// to diagnose and recover.
+	// ErrDanglingReference indicates that the pre-push integrity check
+	// (dolt fsck) reported a recognized finding — corrupt chunks, commit
+	// errors, or a corrupted chunk journal (see fsckReportedFinding) —
+	// proving missing or unrecoverable chunks in the local Dolt noms store.
+	// The push was aborted to prevent propagating the corruption to the
+	// remote. Run bd dolt verify to diagnose and recover.
 	ErrDanglingReference = errors.New("dangling chunk reference")
 
 	// ErrFSCKTimeout indicates that the pre-push integrity check (dolt fsck) did
@@ -45,6 +47,15 @@ var (
 	// sql-server); the timeout can be raised via the BEADS_FSCK_TIMEOUT
 	// environment variable.
 	ErrFSCKTimeout = errors.New("pre-push integrity check timed out")
+
+	// ErrFSCKFailed indicates that the pre-push integrity check (dolt fsck)
+	// did not complete successfully and no recognized finding, timeout, or
+	// interruption explains the failure. The push is still aborted: a
+	// failed check proves neither corruption nor health — dolt's
+	// unexpected-error path can exit without a report on an unhealthy store,
+	// and a killed or misbehaving fsck says nothing about integrity. Run
+	// `dolt fsck` in the database directory to obtain the report.
+	ErrFSCKFailed = errors.New("pre-push integrity check failed")
 
 	// ErrCommitIndeterminate is the storage-wide no-replay sentinel. Keep this
 	// alias for server-Dolt callers while embedded Dolt returns the same value.

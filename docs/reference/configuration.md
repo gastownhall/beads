@@ -278,6 +278,12 @@ How it works:
 
 Before pushing, `bd` verifies the local chunk store with `dolt fsck --quiet`, bounded by a 30-second timeout. For large stores, raise it with the runtime-only `BEADS_FSCK_TIMEOUT` environment variable (accepts durations like `2m` or bare seconds like `90`).
 
+The check has three outcomes, and all but a clean pass refuse the push:
+
+- **A finding** (corrupt chunks, commit errors, or a corrupted chunk journal) aborts the push as `dangling chunk reference`: the store is corrupt and pushing would propagate the damage.
+- **A timeout** (`pre-push integrity check timed out`) and an interrupt abort the push without any claim of corruption; raise `BEADS_FSCK_TIMEOUT` (or the caller's timeout, e.g. `dolt.auto-push-timeout` for auto-push, when the error names it).
+- **A failed check** (`pre-push integrity check failed`) means fsck exited without completing — it proves neither corruption nor health. The push is still refused; run `dolt fsck` yourself in the database directory to get the report. `bd dolt status` shows the data directory; the database is the subdirectory named after the database.
+
 ## Actor Identity Resolution
 
 The actor name (used for `created_by` and audit trails) is resolved in this order:

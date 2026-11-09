@@ -149,6 +149,48 @@ func TestPrePushFSCK_TimeoutAfterWarningIsTimeout(t *testing.T) {
 	}
 }
 
+// TestPrePushFSCK_KilledWithoutOutputIsNotCorruption pins the silent-failure
+// half of the GH#4258 genus: fsck killed without printing anything (no
+// finding marker, no recognized context error, no interruption text) must be
+// reported as a failed check with the execution error and an explicit
+// no-output indication — not as ErrDanglingReference, which would claim an
+// integrity finding that was never observed.
+func TestPrePushFSCK_KilledWithoutOutputIsNotCorruption(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fake")
+	}
+	binDir := t.TempDir()
+	// Fake dolt: die to SIGKILL without printing anything.
+	script := "#!/bin/sh\nkill -9 $$\n"
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(script), 0o755); err != nil { // #nosec G306 -- test fixture must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	tmp := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmp, "mydb", ".dolt", "noms"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	s := &DoltStore{dbPath: tmp, database: "mydb"}
+
+	err := s.prePushFSCK(context.Background())
+	if err == nil {
+		t.Fatal("expected an error from a killed fsck, got nil")
+	}
+	if !errors.Is(err, ErrFSCKFailed) {
+		t.Errorf("errors.Is(err, ErrFSCKFailed) = false; want true (a killed check is a failed check, not a finding); err = %v", err)
+	}
+	if errors.Is(err, ErrDanglingReference) {
+		t.Errorf("errors.Is(err, ErrDanglingReference) = true; want false (no finding was reported); err = %v", err)
+	}
+	if !strings.Contains(err.Error(), "signal: killed") {
+		t.Errorf("error should report the execution failure (signal: killed); err = %v", err)
+	}
+	if !strings.Contains(err.Error(), "(no output)") {
+		t.Errorf("error should say explicitly that fsck printed nothing; err = %v", err)
+	}
+}
+
 // TestFsckReportedFinding verifies the helper recognizes exactly the
 // source-backed dolt fsck finding markers — the Corrupt Chunks and Commit
 // Errors report headers (with and without the ANSI color codes dolt wraps
@@ -250,7 +292,7 @@ func TestFsckCouldNotOpen(t *testing.T) {
 			want:   true,
 		},
 		{
-			name:   "actual dangling chunk reference (must still abort)",
+			name:   "integrity failure wording (not an open failure)",
 			output: "dangling chunk reference: hash abc123 referenced but not present",
 			want:   false,
 		},
@@ -280,6 +322,7 @@ func TestClassifyFSCKFailure(t *testing.T) {
 		name         string
 		parentErr    error
 		fsckErr      error
+		runErr       error  // execution error from CombinedOutput
 		output       string
 		wantNil      bool    // true → expect nil (could-not-open skip path)
 		wantIs       error   // positive errors.Is assertion
@@ -430,21 +473,45 @@ func TestClassifyFSCKFailure(t *testing.T) {
 			wantIs:    ErrDanglingReference,
 			wantIsNot: []error{ErrFSCKTimeout},
 		},
-		// (f) Generic non-zero exit, empty output, no context error → ErrDanglingReference.
+		// (f) Generic non-zero exit with no recognized explanation → a
+		//     failed check, not corruption: the store is neither proven
+		//     corrupt nor proven healthy.
 		{
-			name:      "generic failure (empty output, no ctx error) → ErrDanglingReference",
-			parentErr: nil,
-			fsckErr:   nil,
-			output:    "",
-			wantIs:    ErrDanglingReference,
-			wantIsNot: []error{ErrFSCKTimeout},
+			name:         "generic failure (empty output, no ctx error) → ErrFSCKFailed",
+			parentErr:    nil,
+			fsckErr:      nil,
+			runErr:       errors.New("signal: killed"),
+			output:       "",
+			wantIs:       ErrFSCKFailed,
+			wantIsNot:    []error{ErrDanglingReference, ErrFSCKTimeout},
+			wantContains: "(no output)",
+		},
+		{
+			name:         "unknown non-finding text, no ctx error → ErrFSCKFailed with execution error",
+			parentErr:    nil,
+			fsckErr:      nil,
+			runErr:       errors.New("exit status 1"),
+			output:       "some unexpected fsck failure text",
+			wantIs:       ErrFSCKFailed,
+			wantIsNot:    []error{ErrDanglingReference, ErrFSCKTimeout},
+			wantContains: "exit status 1",
+		},
+		{
+			name:         "exec not found → ErrFSCKFailed reporting the execution error",
+			parentErr:    nil,
+			fsckErr:      nil,
+			runErr:       &exec.Error{Name: "dolt", Err: exec.ErrNotFound},
+			output:       "",
+			wantIs:       ErrFSCKFailed,
+			wantIsNot:    []error{ErrDanglingReference, ErrFSCKTimeout},
+			wantContains: "executable file not found",
 		},
 	}
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := classifyFSCKFailure(tc.parentErr, tc.fsckErr, tc.output)
+			err := classifyFSCKFailure(tc.parentErr, tc.fsckErr, tc.runErr, tc.output)
 
 			if tc.wantNil {
 				if err != nil {
@@ -533,8 +600,8 @@ func TestFsckOutputInterrupted(t *testing.T) {
 func TestClassifyFSCKFailure_CallerVsOwnTimeout(t *testing.T) {
 	t.Parallel()
 
-	callerErr := classifyFSCKFailure(context.DeadlineExceeded, context.DeadlineExceeded, "")
-	ownErr := classifyFSCKFailure(nil, context.DeadlineExceeded, "")
+	callerErr := classifyFSCKFailure(context.DeadlineExceeded, context.DeadlineExceeded, nil, "")
+	ownErr := classifyFSCKFailure(nil, context.DeadlineExceeded, nil, "")
 
 	if callerErr == nil || ownErr == nil {
 		t.Fatal("both cases must return non-nil errors")
