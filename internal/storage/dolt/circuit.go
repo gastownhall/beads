@@ -112,9 +112,10 @@ func maybeNewCircuitBreaker(host string, port int, database string) *circuitBrea
 // contain millions of entries) when cleaning up stale breaker files on
 // startup. Derived from os.TempDir() so it is correct on every platform:
 // hardcoding "/tmp" resolved to C:\tmp on Windows, silently accumulating
-// breaker files there forever (GH#4636).
+// breaker files there forever (GH#4636). The directory is private to the
+// current user (see circuitBreakerDirName, GH#4223), so it is created 0700.
 func circuitBreakerDir() string {
-	return filepath.Join(os.TempDir(), "beads-circuit")
+	return filepath.Join(os.TempDir(), circuitBreakerDirName())
 }
 
 const (
@@ -153,7 +154,7 @@ func newCircuitBreaker(host string, port int, database string) *circuitBreaker {
 	}
 
 	dir, _ := circuitBreakerPaths()
-	_ = os.MkdirAll(dir, 0755)
+	_ = os.MkdirAll(dir, 0o700)
 	return &circuitBreaker{
 		host:     host,
 		port:     port,
@@ -427,7 +428,7 @@ func CleanStaleCircuitBreakerFiles() {
 	// past circuitStaleTTL, and closed files no writer has touched in
 	// closedSweepTTL. A recently written closed file is a breaker some
 	// process is using and is left alone.
-	_ = os.MkdirAll(dir, 0755)
+	_ = os.MkdirAll(dir, 0o700)
 	cleanStaleCircuitBreakerFilesIn(dir)
 
 	// Also sweep the legacy hardcoded "/tmp/beads-circuit" location

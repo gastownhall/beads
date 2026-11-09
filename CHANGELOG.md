@@ -1226,6 +1226,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Server-mode circuit-breaker state is now private to each Unix user. It
+  moved from the host-shared `${TMPDIR:-/tmp}/beads-circuit/` to
+  `${TMPDIR:-/tmp}/beads-circuit-<uid>/` (created 0700, state files 0600),
+  so another local user's breaker files can no longer block this user's
+  breaker from persisting or trip it from outside (GH#4223). Processes of one
+  user still share breaker state; users on one host no longer do, and old
+  and new `bd` binaries keep separate state until the old ones are gone.
+  Windows keeps `%TEMP%\beads-circuit\`, which is already per user.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
