@@ -331,6 +331,10 @@ func TestServedReaderGetDetailShapeMatchesTheSeededIssue(t *testing.T) {
 	conformance.RunReaderGetDetailShapeMatchesTheSeededIssue(t, t.Context(), servedReaderFixture(t, "rdr"))
 }
 
+func TestServedReaderGetListsUnresolvableDependencyEdges(t *testing.T) {
+	conformance.RunReaderGetListsUnresolvableDependencyEdges(t, t.Context(), servedReaderFixture(t, "rdr"))
+}
+
 // TestServedReaderGetPopulatesRowVersionForAGuardedWrite is HIGH 5's pin.
 //
 // types.Issue.RowVersion is json:"-" (internal/types/types.go), so a bare

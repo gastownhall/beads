@@ -286,7 +286,10 @@ func (s *DoltStore) GetDependentsWithMetadata(ctx context.Context, issueID strin
 	return result, err
 }
 
-// GetDependencyRecords returns raw dependency records for an issue
+// GetDependencyRecords returns raw dependency records for an issue: the stored
+// edge rows, unhydrated, including the edges whose far end has no row in this
+// database, which GetDependenciesWithMetadata drops. The detail view reads
+// them to enumerate what the unresolvable counts name (bd-hkpas7, #5272).
 func (s *DoltStore) GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error) {
 	if s.isActiveWisp(ctx, issueID) {
 		return s.getWispDependencyRecords(ctx, issueID)

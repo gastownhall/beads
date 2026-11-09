@@ -1385,6 +1385,15 @@ func GetIssuesByIDsInTx(ctx context.Context, tx DBTX, ids []string, wispSet map[
 // GetDependenciesWithMetadataInTx returns issues that the given issueID depends on,
 // along with the dependency type. Works within an existing transaction.
 // Queries both dependency tables to handle cross-table dependencies.
+//
+// Every edge whose far end has no row in this database — a cross-repo id or
+// an `external:` reference, the one target column with no issue to hydrate
+// (IsExternalDepTarget) — is DROPPED here, deliberately: this is the local
+// neighbor contract the graph consumers downstream rely on, and the display
+// closes the count/listing skew it creates from OUTSIDE, through the raw
+// GetDependencyRecords read plus the caller's counts (bd-hkpas7, #5272). Do
+// not hydrate placeholders here to stop the drop; that hands every graph
+// consumer an invented issue.
 func GetDependenciesWithMetadataInTx(ctx context.Context, tx DBTX, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
 	deps, err := anchorEdgesInTx(ctx, tx, issueID, false, true)
 	if err != nil {
@@ -1496,6 +1505,11 @@ func anchorEdgesInTx(ctx context.Context, tx DBTX, anchor string, inbound, withT
 
 // GetDependentsWithMetadataInTx returns issues that depend on the given issueID
 // along with the dependency type. Works within an existing transaction.
+//
+// Like its outbound sibling, it DROPS every edge whose far end (here the
+// SOURCE issue) has no row in this database, deliberately: only real, local,
+// hydrated neighbors reach the graph consumers downstream. The raw rows stay
+// reachable through the raw record reads (bd-hkpas7, #5272).
 func GetDependentsWithMetadataInTx(ctx context.Context, tx DBTX, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
 	deps, err := anchorEdgesInTx(ctx, tx, issueID, true, true)
 	if err != nil {
