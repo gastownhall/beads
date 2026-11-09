@@ -548,6 +548,48 @@ func TestCreateIssueFromFormValues(t *testing.T) {
 		assertNoFormWrites(t, ctx, s, parent.ID, target.ID)
 	})
 
+	// bd-3073gm (GH#5585): every blocking spelling the form takes makes the
+	// new issue depend on its target with the canonical, gating blocks type.
+	// The form's blocks:<id> keeps its historical direction, unlike --deps'.
+	t.Run("BlockingSpellingsGateTheNewIssue", func(t *testing.T) {
+		for _, spelling := range []string{"", "blocks:", "blocked-by:", "depends-on:"} {
+			target := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Gate target " + spelling})
+			child := createFormIssueForTest(t, ctx, s, &createFormValues{
+				Title:        "Gated by " + spelling,
+				Dependencies: []string{spelling + target.ID},
+			})
+			assertFormBlocksEdge(t, ctx, s, child.ID, target.ID)
+		}
+	})
+
+	// bd-3073gm: spellings that resolve to the same edge collapse to it
+	// instead of colliding as two types on one target.
+	t.Run("EquivalentSpellingsCollapse", func(t *testing.T) {
+		target := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Collapse target"})
+		child := createFormIssueForTest(t, ctx, s, &createFormValues{
+			Title:        "Collapse child",
+			Dependencies: []string{"blocked-by:" + target.ID, "depends-on:" + target.ID, "blocks:" + target.ID, target.ID},
+		})
+		assertFormBlocksEdge(t, ctx, s, child.ID, target.ID)
+	})
+
+	// bd-3073gm: each equivalent pair on its own stores one blocks edge, so
+	// no single pairing can collide as two types on one target.
+	t.Run("EquivalentPairsCollapse", func(t *testing.T) {
+		for _, pair := range [][2]string{
+			{"blocked-by:", "depends-on:"},
+			{"blocks:", "depends-on:"},
+			{"", "blocked-by:"},
+		} {
+			target := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Pair target " + pair[0] + pair[1]})
+			child := createFormIssueForTest(t, ctx, s, &createFormValues{
+				Title:        "Pair child " + pair[0] + pair[1],
+				Dependencies: []string{pair[0] + target.ID, pair[1] + target.ID},
+			})
+			assertFormBlocksEdge(t, ctx, s, child.ID, target.ID)
+		}
+	})
+
 	t.Run("AllPriorities", func(t *testing.T) {
 		for priority := 0; priority <= 4; priority++ {
 			fv := &createFormValues{
@@ -840,5 +882,38 @@ func assertNoFormWrites(t *testing.T, ctx context.Context, s storage.DoltStorage
 	child := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Accepted child", ParentID: parent})
 	if want := parent + ".1"; child.ID != want {
 		t.Errorf("first accepted child of %s is %s, want %s: a refused create reserved a child ID", parent, child.ID, want)
+	}
+}
+
+// assertFormBlocksEdge checks that from has exactly one dependency, a blocks
+// edge on to, that no edge runs the other way, and that the edge keeps from
+// out of ready work while to is open.
+func assertFormBlocksEdge(t *testing.T, ctx context.Context, s storage.DoltStorage, from, to string) {
+	t.Helper()
+	recs, err := s.GetDependencyRecords(ctx, from)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords %s: %v", from, err)
+	}
+	if len(recs) != 1 || recs[0].DependsOnID != to || recs[0].Type != types.DepBlocks {
+		for _, r := range recs {
+			t.Logf("%s -> %s (%s)", r.IssueID, r.DependsOnID, r.Type)
+		}
+		t.Errorf("%s has %d dependencies, want one blocks edge on %s", from, len(recs), to)
+	}
+	back, err := s.GetDependencyRecords(ctx, to)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords %s: %v", to, err)
+	}
+	for _, r := range back {
+		t.Errorf("reversed edge written: %s -> %s (%s)", r.IssueID, r.DependsOnID, r.Type)
+	}
+	ready, err := s.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	for _, issue := range ready {
+		if issue.ID == from {
+			t.Errorf("%s is ready while its blocker %s is open", from, to)
+		}
 	}
 }
