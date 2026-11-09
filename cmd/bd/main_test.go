@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
@@ -327,5 +328,195 @@ func TestSharedServerEmbeddedMismatchDoesNotRewriteMetadata(t *testing.T) {
 	stderr = captureStderr(func() { loadServerModeFromBeadsDir(beadsDir) })
 	if strings.Contains(stderr, "dolt_mode") {
 		t.Errorf("expected no repeat notice, got: %q", stderr)
+	}
+}
+
+// modeMismatchWorkspace builds an isolated .beads directory for the
+// embedded/server mismatch notice tests: metadata.json holds metadataJSON
+// verbatim, configYAML (when non-empty) becomes .beads/config.yaml, and
+// withEmbeddedDir creates .beads/embeddeddolt. Every env var the mode
+// resolvers read is cleared, HOME/XDG point at an empty temp dir, and config
+// is re-initialized from the workspace so no host or user setting leaks in.
+func modeMismatchWorkspace(t *testing.T, metadataJSON, configYAML string, withEmbeddedDir bool) string {
+	t.Helper()
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(configfile.ConfigPath(beadsDir), []byte(metadataJSON), 0o600); err != nil {
+		t.Fatalf("write metadata.json: %v", err)
+	}
+	if configYAML != "" {
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(configYAML), 0o600); err != nil {
+			t.Fatalf("write config.yaml: %v", err)
+		}
+	}
+	if withEmbeddedDir {
+		if err := os.MkdirAll(filepath.Join(beadsDir, "embeddeddolt"), 0o755); err != nil {
+			t.Fatalf("mkdir embeddeddolt: %v", err)
+		}
+	}
+
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatalf("mkdir home: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("BEADS_DIR", beadsDir)
+	for _, key := range []string{
+		"BEADS_DOLT_SHARED_SERVER",
+		"BEADS_DOLT_SERVER_MODE",
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_PORT",
+	} {
+		t.Setenv(key, "")
+	}
+	t.Chdir(root)
+
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+
+	oldServerMode, oldProxied, oldWarned := serverMode, proxiedServerMode, sharedServerEmbeddedMismatchWarned
+	t.Cleanup(func() {
+		serverMode = oldServerMode
+		proxiedServerMode = oldProxied
+		sharedServerEmbeddedMismatchWarned = oldWarned
+	})
+	sharedServerEmbeddedMismatchWarned = false
+	return beadsDir
+}
+
+// loadModeCapturingOutput runs loadServerModeFromBeadsDir with stdout and
+// stderr captured separately.
+func loadModeCapturingOutput(t *testing.T, beadsDir string) (stdout, stderr string, err error) {
+	t.Helper()
+	outR, outW, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatalf("pipe: %v", pipeErr)
+	}
+	errR, errW, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatalf("pipe: %v", pipeErr)
+	}
+	oldStdout, oldStderr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = outW, errW
+	err = loadServerModeFromBeadsDir(beadsDir)
+	os.Stdout, os.Stderr = oldStdout, oldStderr
+	_ = outW.Close()
+	_ = errW.Close()
+	outBytes, readErr := io.ReadAll(outR)
+	if readErr != nil {
+		t.Fatalf("read stdout: %v", readErr)
+	}
+	errBytes, readErr := io.ReadAll(errR)
+	if readErr != nil {
+		t.Fatalf("read stderr: %v", readErr)
+	}
+	return string(outBytes), string(errBytes), err
+}
+
+// GH#4746: a runtime server override (BEADS_DOLT_SERVER_MODE=1 or a non-local
+// BEADS_DOLT_SERVER_HOST) silently bypassed a workspace whose metadata.json
+// pins dolt_mode=embedded, so concurrent sessions with different env could
+// read different stores with no hint. The override must keep winning, but
+// say so once per process on stderr, naming the variable, the embedded
+// setting and the bypassed embedded directory, without touching metadata.
+func TestServerModeOverrideEmbeddedMismatchNotice(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata string
+		env      map[string]string
+		wantVar  string
+		otherVar string
+	}{
+		{
+			name:     "server mode env",
+			metadata: `{"backend":"dolt","dolt_mode":"embedded"}`,
+			env:      map[string]string{"BEADS_DOLT_SERVER_MODE": "1"},
+			wantVar:  "BEADS_DOLT_SERVER_MODE",
+			otherVar: "BEADS_DOLT_SERVER_HOST",
+		},
+		{
+			name:     "non-local host env",
+			metadata: `{"backend":"dolt","dolt_mode":"embedded"}`,
+			env:      map[string]string{"BEADS_DOLT_SERVER_HOST": "db.example.com"},
+			wantVar:  "BEADS_DOLT_SERVER_HOST",
+			otherVar: "BEADS_DOLT_SERVER_MODE",
+		},
+		{
+			name:     "non-local loopback host env",
+			metadata: `{"backend":"dolt","dolt_mode":"embedded"}`,
+			env:      map[string]string{"BEADS_DOLT_SERVER_HOST": "127.0.0.2"},
+			wantVar:  "BEADS_DOLT_SERVER_HOST",
+			otherVar: "BEADS_DOLT_SERVER_MODE",
+		},
+		{
+			name:     "embedded spelled with case and whitespace",
+			metadata: `{"backend":"dolt","dolt_mode":" Embedded "}`,
+			env:      map[string]string{"BEADS_DOLT_SERVER_MODE": "1"},
+			wantVar:  "BEADS_DOLT_SERVER_MODE",
+			otherVar: "BEADS_DOLT_SERVER_HOST",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			beadsDir := modeMismatchWorkspace(t, tt.metadata, "", true)
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+			before, err := os.ReadFile(configfile.ConfigPath(beadsDir))
+			if err != nil {
+				t.Fatalf("read metadata.json: %v", err)
+			}
+
+			stdout, stderr, err := loadModeCapturingOutput(t, beadsDir)
+			if err != nil {
+				t.Fatalf("loadServerModeFromBeadsDir: %v", err)
+			}
+			if !serverMode {
+				t.Error("expected the runtime override to keep selecting server mode (serverMode=true)")
+			}
+			if stdout != "" {
+				t.Errorf("stdout must stay untouched, got: %q", stdout)
+			}
+			embeddedDir := filepath.Join(beadsDir, "embeddeddolt")
+			for _, want := range []string{tt.wantVar, `dolt_mode="embedded"`, embeddedDir} {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("notice must name %q, got stderr: %q", want, stderr)
+				}
+			}
+			if strings.Contains(stderr, tt.otherVar) {
+				t.Errorf("notice must name only the deciding variable, found %q in: %q", tt.otherVar, stderr)
+			}
+			if strings.Contains(stderr, "shared-server mode is enabled") {
+				t.Errorf("shared-server notice must not fire without shared-server, got: %q", stderr)
+			}
+
+			after, err := os.ReadFile(configfile.ConfigPath(beadsDir))
+			if err != nil {
+				t.Fatalf("re-read metadata.json: %v", err)
+			}
+			if string(before) != string(after) {
+				t.Errorf("metadata.json was rewritten:\nbefore: %s\nafter: %s", before, after)
+			}
+
+			// Once per process: a second load stays quiet and keeps server mode.
+			stdout, stderr, err = loadModeCapturingOutput(t, beadsDir)
+			if err != nil {
+				t.Fatalf("second loadServerModeFromBeadsDir: %v", err)
+			}
+			if stderr != "" || stdout != "" {
+				t.Errorf("expected a silent second load, got stdout %q stderr %q", stdout, stderr)
+			}
+			if !serverMode {
+				t.Error("second load must still select server mode")
+			}
+		})
 	}
 }
