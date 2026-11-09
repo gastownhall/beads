@@ -6,6 +6,7 @@ go_test(
         "agentfiles_test.go",
         "database_corruption_recovery_test.go",
         "docsync_test.go",
+        "dolt_mode_upgrade_guidance_test.go",
         "doltpin_test.go",
         "init_safety_recovery_test.go",
     ],
