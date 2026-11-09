@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 )
 
 const junieGuidelinesTemplate = `# Beads Issue Tracking Instructions
@@ -144,6 +145,14 @@ func InstallJunie() error {
 	fmt.Printf("  MCP Config: %s (MCP server configuration)\n", mcpPath)
 	fmt.Println("\nJunie will automatically read these files on session start.")
 	fmt.Println("The MCP server (beads-mcp, launched with uvx) provides direct access to beads tools.")
+	// The config Junie launches needs uvx on Junie's own PATH. A missing
+	// one in this shell is not proof about Junie's environment, so this is
+	// only an advisory: setup still succeeds and keeps both files, and it
+	// never installs tools or runs the server.
+	if _, err := exec.LookPath("uvx"); err != nil {
+		fmt.Println("\nNote: uvx not found on PATH. Junie runs 'uvx beads-mcp';")
+		fmt.Println("install uv: https://docs.astral.sh/uv/")
+	}
 	return nil
 }
 

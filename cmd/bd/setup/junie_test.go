@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -742,3 +743,57 @@ func sortedJunieKeys(m map[string]interface{}) []string {
 	return keys
 }
 
+// The MCP config launches `uvx beads-mcp`, so a workspace whose PATH has no
+// uvx still gets both files and an advisory naming uvx and how to install
+// it; with uvx on PATH the advisory is omitted. The fixture is only looked
+// up (exec.LookPath), never run, and process-wide PATH, cwd and stdout
+// changes are why this must not parallelize.
+func TestInstallJunieWarnsWithoutUvx(t *testing.T) {
+	fixtureName := "uvx"
+	if runtime.GOOS == "windows" {
+		fixtureName = "uvx.exe"
+	}
+	for _, tc := range []struct {
+		name   string
+		fixUvx bool
+	}{
+		{name: "uvx on PATH", fixUvx: true},
+		{name: "uvx missing from PATH"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := t.TempDir()
+			t.Chdir(ws)
+			binDir := t.TempDir()
+			if tc.fixUvx {
+				if err := os.WriteFile(filepath.Join(binDir, fixtureName), []byte("#!/bin/sh\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("PATH", binDir)
+
+			out := captureProcessStdout(t, func() {
+				if err := InstallJunie(); err != nil {
+					t.Fatalf("InstallJunie: %v", err)
+				}
+			})
+
+			for _, f := range []string{".junie/guidelines.md", ".junie/mcp/mcp.json"} {
+				if !FileExists(f) {
+					t.Errorf("expected file %s to be written", f)
+				}
+			}
+			if tc.fixUvx {
+				if strings.Contains(out, "uvx not found") {
+					t.Errorf("uvx on PATH, but install printed the missing-uvx note:\n%s", out)
+				}
+				return
+			}
+			if !strings.Contains(out, "uvx not found") {
+				t.Errorf("missing uvx, but install printed no note naming it:\n%s", out)
+			}
+			if !strings.Contains(out, "https://docs.astral.sh/uv/") {
+				t.Errorf("missing-uvx note should say how to install uv:\n%s", out)
+			}
+		})
+	}
+}
