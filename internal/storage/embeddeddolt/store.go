@@ -80,6 +80,9 @@ type EmbeddedDoltStore struct {
 	// migrations) were skipped and write transactions are refused
 	// (bd-6dnrw.32).
 	readOnly bool
+	// engine is the embedded engine this store reuses across operations, and
+	// the slot that serializes them (engine_slot.go).
+	engine *engineSlot
 	// intent records why this store was opened, controlling how lenient
 	// initSchema is about pending-migration refusals it would otherwise treat
 	// as fatal. Unlike readOnly, a non-strict intent still allows writes
@@ -342,6 +345,7 @@ func newStore(ctx context.Context, beadsDir, database, branch string, intent ope
 		database: database,
 		branch:   branch,
 		intent:   intent,
+		engine:   newEngineSlot(),
 	}
 
 	if err := s.initSchema(ctx); err != nil {
@@ -403,6 +407,7 @@ func openReadOnly(ctx context.Context, beadsDir, database, branch string, checkB
 		database: database,
 		branch:   branch,
 		readOnly: true,
+		engine:   newEngineSlot(),
 	}
 
 	db, cleanup, err := OpenSQL(ctx, dataDir, database, branch)
@@ -501,67 +506,71 @@ func (s *EmbeddedDoltStore) commitConn(ctx context.Context, commit bool, fn func
 		return
 	}
 
-	var db *sql.DB
-	var cleanup func() error
-	db, cleanup, err = OpenSQL(ctx, s.dataDir, s.database, s.branch)
-	if err != nil {
-		return
-	}
-
 	committed := false
-	defer func() {
-		err = joinTransactionCleanupError(err, cleanup(), committed)
-	}()
-
-	var tx *sql.Tx
-	tx, err = db.BeginTx(ctx, nil)
-	if err != nil {
-		err = fmt.Errorf("embeddeddolt: begin tx: %w", err)
-		return
-	}
-	// The activation switch deliberately does NOT depend on the cached shape:
-	// an enabled store whose probe produced no shape writes with the canonical
-	// column list, so a table the journal cannot run against fails the write
-	// loudly instead of letting the mutation commit with no journal row
-	// (storage.EventsJournalShapeChecker). Reads (commit=false callers) are
-	// never gated by this switch — only by the shape — since ReadEventsJournal
-	// has no enabled/disabled concept of its own.
-	clearJournalScope := issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
-	defer clearJournalScope()
-	clearJournalShapeScope := issueops.ScopeEventsJournalShape(tx, s.journalShape.Load())
-	defer clearJournalShapeScope()
-	// Only a transaction that commits answers a pending switch: a read rolls
-	// back whatever it does, so the row is read inside the first write and
-	// costs a read-only command nothing. A write whose read fails is rolled
-	// back before fn runs (issueops.VersionedHistorySwitch.ResolveIn).
-	versioned := s.versionedHistory.Enabled()
-	if commit {
-		if versioned, err = s.versionedHistory.ResolveIn(ctx, tx); err != nil {
-			err = errors.Join(err, tx.Rollback())
-			return
+	var cleanupErr error
+	err, cleanupErr = s.withEngine(ctx, func(db *sql.DB) (bool, error) {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return false, fmt.Errorf("embeddeddolt: begin tx: %w", err)
 		}
-	}
-	clearVersionScope := issueops.ScopeVersionedHistoryTransaction(tx, versioned)
-	defer clearVersionScope()
-	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
-	defer clearRecheckScope()
+		// Ends the transaction before withEngine disposes the engine when fn
+		// panics; every other path below finishes tx itself.
+		finished := false
+		defer func() {
+			if !finished {
+				_ = tx.Rollback()
+			}
+		}()
+		// rollback finishes tx after a failure; the engine stays reusable
+		// when the rollback itself succeeded.
+		rollback := func(opErr error) (bool, error) {
+			finished = true
+			rbErr := tx.Rollback()
+			return rbErr == nil, errors.Join(opErr, rbErr)
+		}
+		// The activation switch deliberately does NOT depend on the cached shape:
+		// an enabled store whose probe produced no shape writes with the canonical
+		// column list, so a table the journal cannot run against fails the write
+		// loudly instead of letting the mutation commit with no journal row
+		// (storage.EventsJournalShapeChecker). Reads (commit=false callers) are
+		// never gated by this switch — only by the shape — since ReadEventsJournal
+		// has no enabled/disabled concept of its own.
+		clearJournalScope := issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
+		defer clearJournalScope()
+		clearJournalShapeScope := issueops.ScopeEventsJournalShape(tx, s.journalShape.Load())
+		defer clearJournalShapeScope()
+		// Only a transaction that commits answers a pending switch: a read rolls
+		// back whatever it does, so the row is read inside the first write and
+		// costs a read-only command nothing. A write whose read fails is rolled
+		// back before fn runs (issueops.VersionedHistorySwitch.ResolveIn).
+		versioned := s.versionedHistory.Enabled()
+		if commit {
+			if versioned, err = s.versionedHistory.ResolveIn(ctx, tx); err != nil {
+				return rollback(err)
+			}
+		}
+		clearVersionScope := issueops.ScopeVersionedHistoryTransaction(tx, versioned)
+		defer clearVersionScope()
+		clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+		defer clearRecheckScope()
 
-	if fnErr := fn(tx); fnErr != nil {
-		err = errors.Join(fnErr, tx.Rollback())
-		return
-	}
+		if fnErr := fn(tx); fnErr != nil {
+			return rollback(fnErr)
+		}
 
-	if !commit {
-		err = tx.Rollback()
-		return
-	}
+		if !commit {
+			return rollback(nil)
+		}
 
-	if cErr := commitEmbeddedTx(tx); cErr != nil {
-		err = cErr
-		return
-	}
-	committed = true
-	pending = issueops.TakeBlockedRecheck(tx)
+		finished = true
+		if cErr := commitEmbeddedTx(tx); cErr != nil {
+			return false, cErr
+		}
+		committed = true
+		pending = issueops.TakeBlockedRecheck(tx)
+		return true, nil
+	})
+	err = joinTransactionCleanupError(err, cleanupErr, committed)
 	return
 }
 
@@ -597,12 +606,18 @@ func (s *EmbeddedDoltStore) SetEventsJournalEnabled(enabled bool) {
 // probeJournalShape runs issueops.ProbeJournalShape over a connection opened
 // and closed just for it.
 func (s *EmbeddedDoltStore) probeJournalShape(ctx context.Context) (*issueops.JournalShape, error) {
-	db, cleanup, err := OpenSQL(ctx, s.dataDir, s.database, s.branch)
-	if err != nil {
+	var shape *issueops.JournalShape
+	probed := false
+	err, _ := s.withEngine(ctx, func(db *sql.DB) (bool, error) {
+		probed = true
+		var probeErr error
+		shape, probeErr = issueops.ProbeJournalShape(ctx, db)
+		return true, probeErr
+	})
+	if err != nil && !probed {
 		return nil, fmt.Errorf("journal: open connection to probe shape: %w", err)
 	}
-	defer func() { _ = cleanup() }()
-	return issueops.ProbeJournalShape(ctx, db)
+	return shape, err
 }
 
 // EventsJournalActivationError implements storage.EventsJournalShapeChecker:
@@ -650,19 +665,23 @@ func (s *EmbeddedDoltStore) ApplySchemaMigrations(ctx context.Context) (int, err
 	if s.readOnly {
 		return 0, ErrReadOnly
 	}
-	db, cleanup, err := OpenSQL(ctx, s.dataDir, s.database, s.branch)
-	if err != nil {
+	var applied int
+	opened := false
+	err, _ := s.withEngine(ctx, func(db *sql.DB) (bool, error) {
+		opened = true
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			return true, fmt.Errorf("embeddeddolt: pin connection: %w", err)
+		}
+		defer conn.Close()
+		var migrateErr error
+		applied, migrateErr = schema.MigrateUp(ctx, conn)
+		return true, migrateErr
+	})
+	if err != nil && !opened {
 		return 0, fmt.Errorf("embeddeddolt: open db: %w", err)
 	}
-	defer func() { _ = cleanup() }()
-
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("embeddeddolt: pin connection: %w", err)
-	}
-	defer conn.Close()
-
-	return schema.MigrateUp(ctx, conn)
+	return applied, err
 }
 
 func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
@@ -1050,7 +1069,9 @@ func (s *EmbeddedDoltStore) Close() error {
 		return nil
 	}
 	if s.closed.CompareAndSwap(false, true) {
+		err := s.closeEngine()
 		s.cleanGitRemoteCacheGarbage()
+		return err
 	}
 	return nil
 }
