@@ -43,6 +43,7 @@
 100 9 TestEmbeddedChildrenConcurrent
 
 100 10 TestEmbeddedCreateScalarAndRelationships
+100 10 TestEmbeddedImportInvalidRegisteredVocabulary
 
 100 11 TestEmbeddedImportSkipInvalidCases
 100 11 TestEmbeddedKVConcurrent
@@ -171,6 +172,7 @@
 100 39 TestEmbeddedNewDoltStoreFromConfig_NoMetadata
 
 100 40 TestEmbeddedIfRevisionOutranksReassignFenceCLI
+100 40 TestEmbeddedImportInvalidRegisteredVocabularyModes
 100 40 TestEmbeddedNewDoltStoreFromConfig_HyphenatedDBName
 100 40 TestEmbeddedUpdateLifecycleClaimParentCommit
 
