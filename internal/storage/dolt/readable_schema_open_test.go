@@ -506,3 +506,44 @@ func TestDoltNew_CloneLocalBehindOpensNeverMigrate(t *testing.T) {
 		unchanged(t)
 	})
 }
+
+// TestDoltNew_CloneLocalBehindCompleteProjectionNoMigration is #7038's AC-5:
+// the upgrade window's other half. The pull-then-upgrade recipe leaves the
+// clone-local cursor behind, and a behind cursor is not by itself a problem:
+// the refusal exists to stop reads that cannot work, not to force
+// convergence. With every lease column the issue projection selects present
+// (the fixture regresses the cursor alone), a read-only open that asks for a
+// readable schema keeps opening and answering reads, twice over (the window
+// stays open for the whole upgrade, not just the first command), and applies
+// nothing: not the cursor, not the lease schema, not HEAD.
+//
+// A guard, green against a base with no clone-local refusal at all: it holds
+// the window open against an over-firing fix, while the missing-column tests
+// above hold the refusal shut.
+func TestDoltNew_CloneLocalBehindCompleteProjectionNoMigration(t *testing.T) {
+	skipIfNoDolt(t)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	open, store := cloneLocalBehindFixture(t, ctx, true)
+	if v, err := schema.CurrentIgnoredVersion(ctx, store.db); err != nil || v >= schema.LatestIgnoredVersion() {
+		t.Fatalf("precondition: effective clone-local cursor = %d (%v), want behind v%d", v, err, schema.LatestIgnoredVersion())
+	}
+	before := cloneLocalState(t, ctx, store)
+
+	for i := range 2 {
+		ro, err := open(&Config{ReadOnly: true, RequireReadableSchema: true})
+		if err != nil {
+			t.Fatalf("open %d: New (read-only, clone-local cursor behind, lease columns present) = %v, want success: reads keep working through the window", i+1, err)
+		}
+		issues, err := ro.SearchIssues(ctx, "", types.IssueFilter{})
+		ro.Close()
+		if err != nil || len(issues) != 1 || issues[0].ID != "cl-1" {
+			t.Fatalf("open %d: SearchIssues = %d issues, %v; want cl-1", i+1, len(issues), err)
+		}
+		if after := cloneLocalState(t, ctx, store); after != before {
+			t.Errorf("open %d: read-only open changed the database: before %s, after %s", i+1, before, after)
+		}
+	}
+}
