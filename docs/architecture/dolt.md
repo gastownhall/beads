@@ -310,6 +310,17 @@ server keeps the engine running (see
 damaged journal; for that, see
 [Engine won't open](/recovery/database-corruption#engine-wont-open).
 
+Within one process, a store keeps a single engine open across its operations
+instead of paying the startup per query. The engine is served to one
+operation at a time, and it outlives the last operation that used it by a
+200ms idle window: after that window passes with no operation queued, the
+engine is released, so a second process opening the same database waits at
+most that long for the hand-off. A `bd` process that is still running (a
+long-lived tool embedding the library, or a test harness) therefore holds the
+database while it works, and hands it over when it goes quiet — the
+single-writer rule is enforced by hand-off, not by crashing the second
+process.
+
 ### Server Mode (Multi-Writer / Orchestrator)
 
 Connects to a running `dolt sql-server` for multi-client access.
