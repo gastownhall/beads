@@ -628,3 +628,61 @@ func TestNewExternalDoltServerUOWProvider_LeastPrivilegeMissingDatabase(t *testi
 		})
 	}
 }
+
+// TestNewExternalDoltServerUOWProvider_LeastPrivilegeBehindDatabase pins the
+// existing shared-store migration gate for CREATE-less accounts on a database
+// one migration behind with no remote and no consent: a SELECT-only read
+// warns and reads through, and a DML write open gets the shared-no-remote
+// refusal — both reached only because preparation no longer demands CREATE,
+// and neither touching the migration state.
+func TestNewExternalDoltServerUOWProvider_LeastPrivilegeBehindDatabase(t *testing.T) {
+	t.Setenv(schema.AllowRemoteMigrateEnv, "0")
+	schema.SetSharedMigrateConsent(false)
+	schema.SetForceAllowRemoteMigrate(false)
+	t.Cleanup(func() {
+		schema.SetSharedMigrateConsent(false)
+		schema.SetForceAllowRemoteMigrate(false)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	f := newLeastPrivilegeFixture(t, ctx, "beads_lp_behind")
+	f.account(t, ctx, "reader", "SELECT")
+	f.account(t, ctx, "writer", "SELECT, INSERT, UPDATE, DELETE")
+
+	// Simulate one pending migration on an otherwise latest, readable schema.
+	direct := f.h.directDB(t, f.database)
+	_, err := direct.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version = ?", schema.LatestVersion())
+	require.NoError(t, err)
+	_, err = direct.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'test: one migration behind')")
+	require.NoError(t, err)
+	before := snapshotMigrations(t, ctx, direct)
+	require.Equal(t, schema.LatestVersion()-1, before.maxVersion)
+
+	t.Run("SELECT-only read-only open warns and reads through", func(t *testing.T) {
+		var p UnitOfWorkProvider
+		var openErr error
+		stderr := captureStderr(t, func() {
+			p, openErr = f.open(ctx, f.database, "reader", WithReadOnly())
+		})
+		if p != nil {
+			t.Cleanup(func() { _ = p.Close(context.Background()) })
+		}
+		require.NoError(t, openErr)
+		assert.Contains(t, stderr, "Read-only command")
+		assert.Contains(t, stderr, "without migrating")
+		countIssues(t, ctx, p)
+		assert.Equal(t, before, snapshotMigrations(t, ctx, direct))
+	})
+
+	t.Run("DML write open is refused by the shared-store gate", func(t *testing.T) {
+		p, err := f.open(ctx, f.database, "writer")
+		if p != nil {
+			t.Cleanup(func() { _ = p.Close(context.Background()) })
+		}
+		var gateErr *schema.RemoteMigrateGateError
+		require.ErrorAs(t, err, &gateErr)
+		assert.Equal(t, "shared-no-remote", gateErr.Decision)
+		assert.Equal(t, before, snapshotMigrations(t, ctx, direct))
+	})
+}
