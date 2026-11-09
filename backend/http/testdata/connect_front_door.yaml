@@ -22,16 +22,22 @@
 #   works           the served run and the embedded twin's run both exit
 #                   `exit` (default 0) and print the same stdout under
 #                   `compare` (json, the default; text; lines; exit), after
-#                   timestamps, revisions and `ignore_fields` are dropped; then
-#                   every `verify` read answers the same JSON on both sides.
+#                   revisions and `ignore_fields` are dropped and timestamps
+#                   are scrubbed: when each side wrote does not count, but a
+#                   zeroed or missing stamp does, and a deadline (defer_until,
+#                   due_at) is compared as it is, so a case sets one to an
+#                   absolute date; then every `verify` read answers the same
+#                   JSON on both sides.
 #                   `expect_stdout` also holds the served stdout to a regexp.
 #   refuses         the served run exits `exit` (nonzero); its stderr, stdout
 #                   and the string members of any JSON object they carry match
 #                   `words` (and carry a JSON `code`, when one is given); and it
 #                   writes nothing: not the server's store (its HEAD, its
 #                   working-set status, and, by content, its config table and
-#                   its dolt_ignore'd wisps, which status cannot see) and not
-#                   the workspace's .beads. The same argv on an
+#                   its dolt_ignore'd wisps with their labels, which status
+#                   cannot see; its other dolt_ignore'd tables, such as events,
+#                   leases and the wisps' dependencies and comments, are not
+#                   compared) and not the workspace's .beads. The same argv on an
 #                   embedded oracle exits `embedded_exit` (default 0), so a
 #                   refusal is the backend's and not a broken argv; a case whose
 #                   oracle exit would depend on other cases sets skip_embedded
@@ -372,7 +378,7 @@ commands:
     cases:
       - id: comments-list
         class: works
-        note: 'a stub that always exits 1 pointing at bd comments <issue-id>; it opens the store (the context handshake) first'
+        note: 'a stub that always exits 1 pointing at bd comments <issue-id>; it never opens the store (no request)'
         args: [comments, list]
         exit: 1
         compare: text
@@ -1101,11 +1107,9 @@ commands:
         class: refuses
         native_fix: [D8]
         ledger: [L9]
-        note: 'the oracle''s key may have been cleared by kv-clear'
         args: [kv, get, fd.key, '--json']
         exit: 1
         words: 'withholds \W*kv\.fd\.key\W*: the key marks it credential-bearing'
-        skip_embedded: true
   - command: bd kv list
     cases:
       - id: kv-list
@@ -1361,7 +1365,7 @@ commands:
         class: refuses
         fresh: true
         ledger: [E-IssueFilter.noShape]
-        note: 'fresh: it moves issues out of the project database when it succeeds'
+        note: 'fresh: it moves the actor''s issues out of the project database when it succeeds; only the workspaces are fresh, and the served one still attaches to the part''s server, which the no-write check guards'
         args: [migrate-personal, '--json']
         exit: 1
         words: a raw SearchIssues call matching neither expressible shape refuses

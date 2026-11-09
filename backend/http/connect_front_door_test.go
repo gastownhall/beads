@@ -254,7 +254,10 @@ func frontDoorFormProblems(f *frontDoorFile, ledger []encode.Row, maxUnrun int) 
 		byID[r.ID] = r
 	}
 	ids := map[string]bool{}
-	cited := map[string][]frontDoorCase{}
+	// cited holds each ledger row's citing cases, with the command row each
+	// belongs to: an F- row is about one command, and only that command's
+	// cases pin it or contradict it.
+	cited := map[string][]frontDoorRun{}
 	unrun := 0
 	for _, row := range f.Commands {
 		add := func(id, format string, a ...any) {
@@ -373,8 +376,8 @@ func frontDoorFormProblems(f *frontDoorFile, ledger []encode.Row, maxUnrun int) 
 				if r.Kind == encode.KindRetired {
 					add(k.ID, "cites ledger row %s, which is retired; drop the citation", id)
 				}
-				cited[id] = append(cited[id], k)
-				if r.Kind == encode.KindRefuse && r.Command != "" && k.Class != classRefuses {
+				cited[id] = append(cited[id], frontDoorRun{command: row.Command, c: k})
+				if r.Kind == encode.KindRefuse && r.Command != "" && row.Command == "bd "+r.Command && k.Class != classRefuses {
 					disagrees = true
 					if k.LedgerDrift == "" {
 						add(k.ID, "cites %s, which says `bd %s %s` refuses, but the case is %s: fix the ledger row, or record the disagreement in ledger_drift", id, r.Command, r.Flag, k.Class)
@@ -391,13 +394,13 @@ func frontDoorFormProblems(f *frontDoorFile, ledger []encode.Row, maxUnrun int) 
 			continue
 		}
 		pinned := false
-		for _, k := range cited[r.ID] {
-			if r.Flag == "" || slices.Contains(k.Args, r.Flag) {
+		for _, run := range cited[r.ID] {
+			if run.command == "bd "+r.Command && (r.Flag == "" || slices.Contains(run.c.Args, r.Flag)) {
 				pinned = true
 			}
 		}
 		if !pinned {
-			out = append(out, fmt.Sprintf("%s: ledger row %s (`bd %s %s`) is pinned by no front-door case: cite it from a case whose args run it; %s", connectFrontDoorPath, r.ID, r.Command, r.Flag, frontDoorRemedy))
+			out = append(out, fmt.Sprintf("%s: ledger row %s (`bd %s %s`) is pinned by no front-door case: cite it from a case of row \"bd %s\" whose args run it; %s", connectFrontDoorPath, r.ID, r.Command, r.Flag, r.Command, frontDoorRemedy))
 		}
 	}
 	switch {
@@ -618,6 +621,19 @@ func testFrontDoorRulesFire(t *testing.T) {
 			return nil
 		}, `case id "c" is used twice`},
 		{"an uncited F- row", func(f *frontDoorFile) []string { caseOf(f).Ledger = nil; return nil }, "ledger row F-x (`bd admin cleanup `) is pinned by no front-door case"},
+		{"an F- row cited only from another command's case", func(f *frontDoorFile) []string {
+			caseOf(f).Ledger = nil
+			f.Commands = append(f.Commands, frontDoorCommand{Command: "bd other", Cases: []frontDoorCase{{
+				ID: "o", Class: classRefuses, Args: []string{"other"}, Exit: &one, Words: "x", Ledger: []string{"F-x"},
+			}}})
+			return nil
+		}, "ledger row F-x (`bd admin cleanup `) is pinned by no front-door case"},
+		{"another command's works case citing a refuse row is no disagreement", func(f *frontDoorFile) []string {
+			f.Commands = append(f.Commands, frontDoorCommand{Command: "bd other", Cases: []frontDoorCase{{
+				ID: "o", Class: classWorks, Args: []string{"other"}, Ledger: []string{"F-x"},
+			}}})
+			return nil
+		}, ""},
 		{"a retired citation", func(f *frontDoorFile) []string { caseOf(f).Ledger = []string{"F-x", "F-gone"}; return nil }, "F-gone, which is retired"},
 		{"an unknown citation", func(f *frontDoorFile) []string { caseOf(f).Ledger = []string{"F-x", "F-nope"}; return nil }, "F-nope, which encode.Ledger() does not define"},
 		{"a raw SearchIssues refusal without the noShape citation", func(f *frontDoorFile) []string {

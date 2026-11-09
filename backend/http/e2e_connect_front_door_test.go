@@ -10,9 +10,11 @@
 // proxy for per-case request diagnostics) and three workspaces: the served
 // workspace S, an embedded twin T and an embedded oracle O. works cases run on
 // S and T and must agree; refuses and pending-ruling cases run on S, must not
-// write it (checked: the server's HEAD and working set, and S's .beads), and
-// run on O only to prove the argv is not broken. So S and T stay identical by
-// construction and no case's outcome depends on its order in its part.
+// write it (checked: the server's HEAD and working set, its config and wisps
+// by content, and S's .beads; frontDoorStoreState says what is not compared),
+// and run on O only to prove the argv is not broken. So S and T stay
+// identical by construction and no case's outcome depends on its order in its
+// part.
 //
 // The parts are declared consecutively so the binary's round-robin sharding
 // deals them to distinct shards of //backend/http:http_served_test.
@@ -249,6 +251,9 @@ func testConnectFrontDoorMatrix(t *testing.T, part int) {
 	if err := frontDoorPartsDeclaredErr(names); err != nil {
 		t.Fatal(err)
 	}
+	if err := frontDoorCompareErr(); err != nil {
+		t.Fatal(err)
+	}
 	skipUnlessEmbeddedDolt(t)
 	f := loadConnectFrontDoor(t)
 	runs := frontDoorPart(frontDoorRuns(f), part, frontDoorParts)
@@ -340,13 +345,17 @@ func testConnectFrontDoorMatrix(t *testing.T, part int) {
 		time.Since(start).Round(100*time.Millisecond), strings.Join(slowest, " "))
 }
 
-// frontDoorStoreState is what a write to the server's store changes: its
-// HEAD (commit and root hashes), its working-set status, and the contents of
-// the two places those miss. The config table (where kv and config writes
-// land) stays dirty for the whole part, since the server's own setup and
-// seed_kv never commit, so status alone cannot see a further uncommitted
+// frontDoorStoreState is what the no-write check compares on the server's
+// store: its HEAD (commit and root hashes), its working-set status, and the
+// contents of two places those miss. The config table (where kv and config
+// writes land) stays dirty for the whole part, since the server's own setup
+// and seed_kv never commit, so status alone cannot see a further uncommitted
 // write to it; and the wisp tables are dolt_ignore'd (migration 0019), so a
-// wisp write reaches neither HEAD nor status.
+// wisp write reaches neither HEAD nor status. Of those tables only the wisps
+// and their labels are compared. The other dolt_ignore'd tables (the wisps'
+// dependencies, comments and events, events, leases, bd_events_journal and
+// bd_events_seq; internal/storage/schema's doltIgnorePatterns) are not, so a
+// refusal that wrote only to them would pass.
 type frontDoorStoreState struct{ head, status, config, wisps string }
 
 func frontDoorStoreStateOf(store *embeddeddolt.EmbeddedDoltStore) (frontDoorStoreState, error) {
@@ -741,13 +750,61 @@ func frontDoorHasCode(r frontDoorResult, code string) bool {
 	return false
 }
 
+// frontDoorClock is a timestamp's optional time of day. It is optional
+// because text renderings print bare dates ("Created: 2026-11-09"), and the
+// sides are seeded seconds apart, possibly across midnight.
+const frontDoorClock = `([T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?`
+
 var (
-	frontDoorVolatileKey = regexp.MustCompile(`(^|_)at$|^revision$|^row_version$|^expected_revision$|^current_revision$`)
-	// The time is optional: text renderings print bare dates ("Created:
-	// 2026-11-09"), and the sides are seeded seconds apart, possibly across
-	// midnight.
-	frontDoorTimestamp = regexp.MustCompile(`\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?`)
+	// frontDoorVolatileKey is a value each store keeps for itself: dropped.
+	frontDoorVolatileKey = regexp.MustCompile(`^(revision|row_version|expected_revision|current_revision)$`)
+	// frontDoorStampKey is a time bd stamps when it writes (created_at,
+	// closed_at, ...). Its value is scrubbed like any string's, so when each
+	// side wrote does not count, but whether the stamp is set, or zeroed,
+	// does. A null counts as not set.
+	frontDoorStampKey      = regexp.MustCompile(`(^|_)at$`)
+	frontDoorTimestamp     = regexp.MustCompile(`\d{4}-\d{2}-\d{2}` + frontDoorClock)
+	frontDoorZeroTimestamp = regexp.MustCompile(`0001-01-01` + frontDoorClock)
 )
+
+// frontDoorDeadlineKeys are the times a user sets (bd defer --until, bd
+// update --due): compared as they are, never scrubbed, so a case that sets one
+// gives an absolute date (a relative one resolves seconds apart on the sides).
+var frontDoorDeadlineKeys = map[string]bool{"defer_until": true, "due_at": true}
+
+// frontDoorScrubTimes replaces each timestamp in s with <ts>, or with
+// <zero-ts> for the zero time a shallow row carries instead of a real stamp.
+func frontDoorScrubTimes(s string) string {
+	return frontDoorTimestamp.ReplaceAllString(frontDoorZeroTimestamp.ReplaceAllString(s, "<zero-ts>"), "<ts>")
+}
+
+// frontDoorCompareErr falsifies the works comparator: parity must see a
+// deadline's value and a zeroed or missing stamp, and must not see when each
+// side ran. Every part runs it before the engine gate, as it does
+// frontDoorPartsDeclaredErr, so it holds in every lane without a top-level
+// test of its own (which would spend one of http_served_test's
+// unmeasured-test allowances).
+func frontDoorCompareErr() error {
+	for _, p := range []struct {
+		compare, served, embedded string
+		equal                     bool
+	}{
+		{"json", `{"defer_until":"2099-01-01T00:00:00Z"}`, `{"defer_until":"2099-02-01T00:00:00Z"}`, false},
+		{"json", `{"due_at":"2099-01-01T00:00:00Z"}`, `{"due_at":"2099-01-01"}`, false},
+		{"json", `{"created_at":"0001-01-01T00:00:00Z"}`, `{"created_at":"2026-11-09T04:20:13Z"}`, false},
+		{"json", `{"closed_at":"2026-11-09T04:20:13Z"}`, `{"closed_at":null}`, false},
+		{"lines", `{"reason":"since 0001-01-01T00:00:00Z"}`, `{"reason":"since 2026-11-09T04:20:13Z"}`, false},
+		{"text", "Created: 0001-01-01", "Created: 2026-11-09", false},
+		{"json", `[{"created_at":"2026-11-09T04:20:13Z","started_at":null,"revision":7,"note":"by 2026-11-09"}]`,
+			`[{"created_at":"2026-11-10T00:00:00.5-08:00","revision":9,"note":"by 2026-11-10"}]`, true},
+		{"text", "Created: 2026-11-09 23:59", "Created: 2026-11-10 00:00", true},
+	} {
+		if equal := frontDoorCompare(frontDoorCase{Compare: p.compare}, p.served, p.embedded) == ""; equal != p.equal {
+			return fmt.Errorf("the works comparator (compare: %s) finds served %s and embedded %s equal=%v, want %v: frontDoorNormalize and frontDoorScrubTimes must hide when each side ran, but not a deadline or a zeroed or missing stamp", p.compare, p.served, p.embedded, equal, p.equal)
+		}
+	}
+	return nil
+}
 
 // frontDoorCompare is a works case's output parity under its compare mode;
 // "" when the outputs agree.
@@ -756,8 +813,8 @@ func frontDoorCompare(c frontDoorCase, served, local string) string {
 	case "exit":
 		return ""
 	case "text":
-		a := strings.TrimSpace(frontDoorTimestamp.ReplaceAllString(served, "<ts>"))
-		b := strings.TrimSpace(frontDoorTimestamp.ReplaceAllString(local, "<ts>"))
+		a := strings.TrimSpace(frontDoorScrubTimes(served))
+		b := strings.TrimSpace(frontDoorScrubTimes(local))
 		if a != b {
 			return fmt.Sprintf("text differs\nserved:\n%s\nembedded:\n%s", frontDoorClip(a, 2500), frontDoorClip(b, 2500))
 		}
@@ -808,7 +865,8 @@ func frontDoorDrop(fields []string) map[string]bool {
 
 // frontDoorCompareJSON, frontDoorNormalize and frontDoorFirstDiff follow
 // backend/http/corpus's compareJSON/normalize/firstDiff (corpus_test.go),
-// unordered, with string timestamps scrubbed.
+// unordered, with string timestamps scrubbed (frontDoorScrubTimes) and
+// deadlines compared as they are.
 func frontDoorCompareJSON(served, local string, ignore []string) string {
 	var a, b any
 	ea := json.Unmarshal([]byte(strings.TrimSpace(served)), &a)
@@ -831,10 +889,14 @@ func frontDoorNormalize(v any, drop map[string]bool) any {
 	case map[string]any:
 		out := map[string]any{}
 		for k, val := range x {
-			if drop[k] || (frontDoorVolatileKey.MatchString(k) && k != "defer_until" && k != "due_at") {
-				continue
+			switch {
+			case drop[k] || frontDoorVolatileKey.MatchString(k):
+			case frontDoorDeadlineKeys[k]:
+				out[k] = val
+			case val == nil && frontDoorStampKey.MatchString(k):
+			default:
+				out[k] = frontDoorNormalize(val, drop)
 			}
-			out[k] = frontDoorNormalize(val, drop)
 		}
 		return out
 	case []any:
@@ -856,7 +918,7 @@ func frontDoorNormalize(v any, drop map[string]bool) any {
 		}
 		return sorted
 	case string:
-		return frontDoorTimestamp.ReplaceAllString(x, "<ts>")
+		return frontDoorScrubTimes(x)
 	default:
 		return v
 	}
