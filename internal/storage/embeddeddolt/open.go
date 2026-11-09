@@ -11,6 +11,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -27,8 +28,66 @@ const (
 	commitEmail = "beads@local"
 )
 
+// openWaitBudgetEnv names the environment variable that bounds how long
+// OpenSQL keeps retrying an open the driver reports as retryable (another
+// process or handle holding the database) when the caller set no deadline.
+const openWaitBudgetEnv = "BEADS_EMBEDDED_OPEN_TIMEOUT"
+
+// defaultOpenWaitBudget is the retry budget when openWaitBudgetEnv is unset
+// or invalid.
+const defaultOpenWaitBudget = 30 * time.Second
+
+// openWaitBudget returns the retry budget configured in openWaitBudgetEnv,
+// read on every call.
+func openWaitBudget() time.Duration {
+	d, err := time.ParseDuration(os.Getenv(openWaitBudgetEnv))
+	if err != nil || d <= 0 {
+		return defaultOpenWaitBudget
+	}
+	return d
+}
+
+// openWaitBackOff records whether the policy it wraps gave up (NextBackOff
+// returned Stop) since its last Reset. The driver owns the retries and
+// decides which errors are retryable; this only observes the policy's own
+// answer, so OpenSQL can tell an exhausted budget from any other failure.
+type openWaitBackOff struct {
+	backoff.BackOff
+	exhausted atomic.Bool
+}
+
+func (b *openWaitBackOff) NextBackOff() time.Duration {
+	next := b.BackOff.NextBackOff()
+	if next == backoff.Stop {
+		b.exhausted.Store(true)
+	}
+	return next
+}
+
+func (b *openWaitBackOff) Reset() {
+	b.exhausted.Store(false)
+	b.BackOff.Reset()
+}
+
+// classifyOpenErr marks err as ErrOpenTimeout when the retry policy ran out
+// of budget and the caller had not canceled ctx; caller cancellation takes
+// precedence, and every other error is returned unchanged.
+func classifyOpenErr(ctx context.Context, wait *openWaitBackOff, dir string, budget time.Duration, err error) error {
+	if ctx.Err() != nil || !wait.exhausted.Load() {
+		return err
+	}
+	return fmt.Errorf("%w (budget %s) at %s: another process or open handle may hold the database; retry or increase %s: %w",
+		ErrOpenTimeout, budget, dir, openWaitBudgetEnv, err)
+}
+
 // OpenSQL opens an embedded Dolt database at dir. The returned cleanup
 // function closes both the *sql.DB and the underlying connector.
+//
+// The driver retries an open it reports as retryable, such as a database
+// another process or handle holds, with an exponential backoff. The retries
+// stop after the BEADS_EMBEDDED_OPEN_TIMEOUT budget (default 30s), and the
+// open then fails with ErrOpenTimeout. The budget stops further retries; it
+// never interrupts a running attempt.
 func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func() error, error) {
 	dsn := buildDSN(dir, database)
 
@@ -37,10 +96,12 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 		return nil, nil, err
 	}
 
+	budget := openWaitBudget()
 	bo := backoff.NewExponentialBackOff()
-	bo.MaxElapsedTime = 0 // wait until ctx cancellation
+	bo.MaxElapsedTime = budget
 	bo.MaxInterval = 5 * time.Second
-	cfg.BackOff = bo
+	wait := &openWaitBackOff{BackOff: bo}
+	cfg.BackOff = wait
 
 	connector, err := doltembed.NewConnector(cfg)
 	if err != nil {
@@ -71,7 +132,7 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 	}
 
 	if err := db.PingContext(ctx); err != nil {
-		return nil, nil, errors.Join(err, cleanup())
+		return nil, nil, errors.Join(classifyOpenErr(ctx, wait, dir, budget, err), cleanup())
 	}
 
 	if strings.TrimSpace(database) != "" {
