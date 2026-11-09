@@ -936,6 +936,10 @@ func (t *doltTransaction) ReopenIssueWithResult(ctx context.Context, id string, 
 	if result.Changed {
 		t.dirty.MarkDirty(table)
 		t.dirty.MarkDirty(eventTable)
+		// MarkDirty does not drop empty names, so only a written comment counts.
+		if result.CommentTable != "" {
+			t.dirty.MarkDirty(result.CommentTable)
+		}
 		if result.IssueRowsChanged {
 			t.markIssuesChanged(table)
 		}

@@ -4,8 +4,55 @@ import (
 	"context"
 	"testing"
 
+	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/steveyegge/beads/internal/storage"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
+
+// TestReopenCommentIsCommittedWithTheReopen runs the GH#5593 staging contract
+// over every server route that stages only the tables it changed.
+func TestReopenCommentIsCommittedWithTheReopen(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	t.Cleanup(cleanup)
+	ctx, cancel := testContext(t)
+	t.Cleanup(cancel)
+	operations, err := NewIssueOperations(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycleReopen := func(ctx context.Context, id, reason, actor string) error {
+		_, err := operations.Reopen(ctx, publicops.ReopenRequest{Actor: actor, IssueID: id, Reason: reason})
+		return err
+	}
+
+	conformance.RunReopenCommentIsCommittedWithTheReopen(t, ctx, conformance.ReopenCommentCommitFixture{
+		IssuePrefix: "test",
+		CreateIssue: store.CreateIssue,
+		CloseIssue:  store.CloseIssue,
+		Commit:      store.Commit,
+		QueryScalar: func(ctx context.Context, query string, args []any, dest ...any) error {
+			return store.db.QueryRowContext(ctx, query, args...).Scan(dest...)
+		},
+		Routes: map[string]func(ctx context.Context, id, reason, actor string) error{
+			"store ReopenIssue": store.ReopenIssue,
+			"lifecycle Reopen":  lifecycleReopen,
+			"lifecycle Reopen deferred then Commit": func(ctx context.Context, id, reason, actor string) error {
+				if err := lifecycleReopen(storageissueops.WithDeferredVersionCommit(ctx), id, reason, actor); err != nil {
+					return err
+				}
+				return store.Commit(ctx, "flush deferred reopen")
+			},
+			"lifecycle transaction ReopenIssueWithResult": func(ctx context.Context, id, reason, actor string) error {
+				return store.RunInIssueLifecycleTransaction(ctx, "bd: reopen "+id, func(tx storage.IssueLifecycleTransaction) error {
+					_, err := tx.ReopenIssueWithResult(ctx, id, reason, actor)
+					return err
+				})
+			},
+		},
+	})
+}
 
 func TestReopenWispStagesOnlyConcreteIssueChanges(t *testing.T) {
 	newStore := func(t *testing.T) (*DoltStore, context.Context) {
