@@ -37,6 +37,15 @@ func TestCheckClosable(t *testing.T) {
 		// rig-qualified owner match in both directions (ga-2vy9p2).
 		{"own slash-qualified under double-hyphen", &types.Issue{Status: types.StatusOpen, Assignee: "gascity/bob"}, "gascity--bob", false, nil},
 		{"own double-hyphen under slash-qualified", &types.Issue{Status: types.StatusOpen, Assignee: "gascity--bob"}, "gascity/bob", false, nil},
+		// bd-740y4x controls: that match must not widen into a different agent,
+		// a different rig, or the dotted-alias axis (kept distinct by ga-2vy9p2).
+		{"held by a different agent in the same rig", &types.Issue{Status: types.StatusOpen, Assignee: "gascity/bob"}, "gascity/alice", false, publicops.ErrNotOwner},
+		{"held by a different agent in the same rig under double-hyphen", &types.Issue{Status: types.StatusOpen, Assignee: "gascity/bob"}, "gascity--alice", false, publicops.ErrNotOwner},
+		{"held by the same agent name in a different rig", &types.Issue{Status: types.StatusOpen, Assignee: "gascity/bob"}, "python419--bob", false, publicops.ErrNotOwner},
+		{"held slash vs dotted-axis double-underscore spelling", &types.Issue{Status: types.StatusOpen, Assignee: "gascity/bob"}, "gascity__bob", false, publicops.ErrNotOwner},
+		{"held slash vs dotted-axis dot spelling", &types.Issue{Status: types.StatusOpen, Assignee: "gascity/bob"}, "gascity.bob", false, publicops.ErrNotOwner},
+		{"held slash vs dotted-axis single-underscore spelling", &types.Issue{Status: types.StatusOpen, Assignee: "gascity/bob"}, "gascity_bob", false, publicops.ErrNotOwner},
+		{"held slash vs dotted-axis hyphen spelling", &types.Issue{Status: types.StatusOpen, Assignee: "gascity/bob"}, "gascity-bob", false, publicops.ErrNotOwner},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -49,6 +58,13 @@ func TestCheckClosable(t *testing.T) {
 			}
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("CheckClosable = %v, want %v", err, tc.want)
+			}
+			// An ownership refusal keeps the supplied assignee and actor.
+			if tc.want == publicops.ErrNotOwner {
+				var held *publicops.CloseNotAssigneeError
+				if !errors.As(err, &held) || held.IssueID != "bd-1" || held.Assignee != tc.issue.Assignee || held.Actor != tc.actor {
+					t.Fatalf("CheckClosable = %#v, want CloseNotAssigneeError{bd-1, %q, %q}", err, tc.issue.Assignee, tc.actor)
+				}
 			}
 		})
 	}

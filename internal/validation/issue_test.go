@@ -1,10 +1,12 @@
 package validation
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func TestExists(t *testing.T) {
@@ -288,6 +290,58 @@ func TestAssigneeMatches(t *testing.T) {
 			actor:   "gascity/bob",
 			wantErr: false,
 		},
+		// bd-740y4x controls: the slash/double-hyphen match must not widen into
+		// a different agent, a different rig, or the dotted-alias axis, which
+		// ga-2vy9p2 keeps deliberately distinct from the rig-qualified one.
+		{
+			name:        "different agent in the same rig stays rejected (bd-740y4x)",
+			issue:       &types.Issue{ID: "bd-test", Status: types.StatusOpen, Assignee: "gascity/bob"},
+			actor:       "gascity/alice",
+			wantErr:     true,
+			wantErrFrag: `assignee is "gascity/bob", actor is "gascity/alice"`,
+		},
+		{
+			name:        "different agent in the same rig under double-hyphen spelling stays rejected (bd-740y4x)",
+			issue:       &types.Issue{ID: "bd-test", Status: types.StatusOpen, Assignee: "gascity/bob"},
+			actor:       "gascity--alice",
+			wantErr:     true,
+			wantErrFrag: `assignee is "gascity/bob", actor is "gascity--alice"`,
+		},
+		{
+			name:        "same agent name in a different rig stays rejected (bd-740y4x)",
+			issue:       &types.Issue{ID: "bd-test", Status: types.StatusOpen, Assignee: "gascity/bob"},
+			actor:       "python419--bob",
+			wantErr:     true,
+			wantErrFrag: `assignee is "gascity/bob", actor is "python419--bob"`,
+		},
+		{
+			name:        "dotted-axis double-underscore spelling stays rejected (bd-740y4x)",
+			issue:       &types.Issue{ID: "bd-test", Status: types.StatusOpen, Assignee: "gascity/bob"},
+			actor:       "gascity__bob",
+			wantErr:     true,
+			wantErrFrag: `assignee is "gascity/bob", actor is "gascity__bob"`,
+		},
+		{
+			name:        "dotted-axis dot spelling stays rejected (bd-740y4x)",
+			issue:       &types.Issue{ID: "bd-test", Status: types.StatusOpen, Assignee: "gascity/bob"},
+			actor:       "gascity.bob",
+			wantErr:     true,
+			wantErrFrag: `assignee is "gascity/bob", actor is "gascity.bob"`,
+		},
+		{
+			name:        "dotted-axis single-underscore spelling stays rejected (bd-740y4x)",
+			issue:       &types.Issue{ID: "bd-test", Status: types.StatusOpen, Assignee: "gascity/bob"},
+			actor:       "gascity_bob",
+			wantErr:     true,
+			wantErrFrag: `assignee is "gascity/bob", actor is "gascity_bob"`,
+		},
+		{
+			name:        "dotted-axis hyphen spelling stays rejected (bd-740y4x)",
+			issue:       &types.Issue{ID: "bd-test", Status: types.StatusOpen, Assignee: "gascity/bob"},
+			actor:       "gascity-bob",
+			wantErr:     true,
+			wantErrFrag: `assignee is "gascity/bob", actor is "gascity-bob"`,
+		},
 		// The control that keeps the guard from becoming a no-op: a genuinely
 		// DIFFERENT agent must still be refused, even though its own name also
 		// contains separator characters that canonicalize.
@@ -310,6 +364,21 @@ func TestAssigneeMatches(t *testing.T) {
 			if tt.wantErrFrag != "" && err != nil {
 				if !strings.Contains(err.Error(), tt.wantErrFrag) {
 					t.Errorf("AssigneeMatches() error %q should contain %q", err.Error(), tt.wantErrFrag)
+				}
+			}
+			// bd-740y4x: every mismatch is the ownership refusal, and it keeps
+			// the supplied actor and assignee so the user sees both spellings.
+			if tt.wantErr {
+				if !errors.Is(err, issueops.ErrNotOwner) {
+					t.Errorf("AssigneeMatches() error = %v, want match for %v", err, issueops.ErrNotOwner)
+				}
+				var notAssignee *issueops.CloseNotAssigneeError
+				if !errors.As(err, &notAssignee) {
+					t.Fatalf("AssigneeMatches() error = %v, want *CloseNotAssigneeError", err)
+				}
+				if notAssignee.IssueID != "bd-test" || notAssignee.Assignee != tt.issue.Assignee || notAssignee.Actor != tt.actor {
+					t.Errorf("CloseNotAssigneeError fields = {IssueID: %q, Assignee: %q, Actor: %q}, want {%q, %q, %q}",
+						notAssignee.IssueID, notAssignee.Assignee, notAssignee.Actor, "bd-test", tt.issue.Assignee, tt.actor)
 				}
 			}
 		})
