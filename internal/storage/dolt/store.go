@@ -5225,17 +5225,9 @@ func classifyFSCKFailure(parentErr, fsckErr error, output string) error {
 		return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks: %s",
 			ErrDanglingReference, output)
 	}
-	// (a) Non-empty output: fsck actually reported something; route by content.
-	if output != "" {
-		if fsckCouldNotOpen(output) {
-			return nil
-		}
-		if !fsckOutputInterrupted(output) {
-			return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks: %s",
-				ErrDanglingReference, output)
-		}
-		// Cancellation phrasing: not an integrity finding — classify by
-		// context state below.
+	// (a) fsck could not open the database: nil, the caller logs and skips.
+	if fsckCouldNotOpen(output) {
+		return nil
 	}
 	// (b) Parent context canceled — user interrupt or caller abort.
 	if errors.Is(parentErr, context.Canceled) {
@@ -5264,7 +5256,11 @@ func classifyFSCKFailure(parentErr, fsckErr error, output string) error {
 		return fmt.Errorf("pre-push integrity check interrupted: %w: %s",
 			context.Canceled, output)
 	}
-	// (f) Generic failure with no output and no recognized context error.
+	// (f) Any other output, or a generic failure with no output.
+	if output != "" {
+		return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks: %s",
+			ErrDanglingReference, output)
+	}
 	return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks",
 		ErrDanglingReference)
 }
