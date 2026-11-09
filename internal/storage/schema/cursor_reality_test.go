@@ -1125,6 +1125,9 @@ func TestCurrentVersionSurfacesEveryOtherFailure(t *testing.T) {
 		&mysql.MySQLError{Number: 1054, Message: "column not found: version"},
 		sql.ErrConnDone,
 		errors.New("connection reset by peer"),
+		// A phrase that means "no database" when it is the whole message, quoted
+		// inside a different failure.
+		errors.New("Access denied for user 'reader' to database 'unknown database'"),
 	} {
 		t.Run(failure.Error(), func(t *testing.T) {
 			db, mock, err := sqlmock.New()

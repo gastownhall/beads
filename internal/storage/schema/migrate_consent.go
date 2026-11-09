@@ -189,8 +189,10 @@ func checkMigrateConsent(ctx context.Context, db DBConn) error {
 	if current == 0 {
 		return nil // fresh database — creating it is consent for its schema
 	}
-	// The pending list comes from the cursor just read: a second read would cost
-	// three statements and could disagree with the version reported above.
+	// The pending list comes from the cursor just read, so the version and the
+	// count agree. This reuses an autocommit read; it is not a transaction
+	// snapshot. A peer that finishes the migration just after the read leaves this
+	// open refused, the safe answer, and the next check reads the cursor again.
 	return migrateConsentDecision(current, len(mainSource.pendingAbove(current)))
 }
 

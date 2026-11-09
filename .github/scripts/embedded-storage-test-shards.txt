@@ -563,6 +563,7 @@
 40 32 TestEmbeddedIssueOperationsCreateReverseNonBlockingStagesConcreteTables
 40 32 TestEmbeddedReadyClaimerEmptyFrontIsNormal
 40 32 TestEmbeddedRecomputeAllBlockedWiring
+40 32 TestEmbeddedSchemaReadsTakeAMissingTableAsAbsent
 40 32 TestEventsJournal_EmbeddedConcurrentGaplessNoDup
 40 32 TestGetNextChildID
 40 32 TestRemoteVerbPlainRemoteKeepsAmbientEnv

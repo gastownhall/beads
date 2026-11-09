@@ -89,6 +89,10 @@ func IsMissingTable(err error, table string) bool {
 // database: none is selected, or the selected one no longer exists. That is
 // 1049 (ER_BAD_DB_ERROR), or 1105 with Dolt's "no database selected" message.
 // 1105 is Dolt's generic error code, so without that message it does not count.
+//
+// An untyped error must be one of the canonical messages in full. A caller reads
+// a true answer as "no schema cursor", so a phrase found elsewhere, such as a
+// database name quoted in an access-denied error, must not count.
 func IsNoUsableDatabase(err error) bool {
 	if err == nil {
 		return false
@@ -100,17 +104,18 @@ func IsNoUsableDatabase(err error) bool {
 		case 1049:
 			return true
 		case 1105:
-			return strings.Contains(strings.ToLower(mysqlErr.Message), "no database selected")
+			return strings.EqualFold(strings.TrimSpace(mysqlErr.Message), "no database selected")
 		}
 		return false
 	}
 
-	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "no database selected") ||
-		strings.Contains(s, "database not found") ||
-		strings.Contains(s, "unknown database") ||
-		strings.Contains(s, "error 1049")
+	return noUsableDatabasePattern.MatchString(strings.TrimSpace(err.Error()))
 }
+
+// noUsableDatabasePattern matches the whole text of an untyped no-database error,
+// with or without the driver's "Error NNNN (SQLSTATE): " prefix.
+var noUsableDatabasePattern = regexp.MustCompile(
+	`(?i)^(?:error (?:1049|1105) \([0-9a-z]+\): )?(?:no database selected|unknown database '[^']*'|database not found: \S+)$`)
 
 // IsAccessDenied reports whether err is a MySQL/Dolt privilege refusal: the
 // connected user lacks the right to run the statement. Covers 1044

@@ -32,6 +32,14 @@ func TestIsNoUsableDatabase(t *testing.T) {
 		{name: "table missing is not this", err: &mysql.MySQLError{Number: 1146, Message: "table not found: leases"}},
 		{name: "access denied is not this", err: &mysql.MySQLError{Number: 1044, Message: "Access denied to database 'beads'"}},
 		{name: "text generic 1105", err: errors.New("Error 1105 (HY000): connection reset")},
+
+		// A true answer reads as "no schema cursor", so a phrase quoted inside
+		// another failure must not count.
+		{name: "1105 quoting the phrase", err: &mysql.MySQLError{Number: 1105, Message: "query failed: no database selected for the subquery"}},
+		{name: "text access denied quoting a database name", err: errors.New("Access denied for user 'reader' to database 'unknown database'")},
+		{name: "text error 1044 quoting the phrase", err: errors.New("Error 1044 (42000): Access denied to database 'database not found'")},
+		{name: "text transport error quoting the phrase", err: errors.New("read tcp: connection reset while handling: database not found: beads")},
+		{name: "text bare 1049 number", err: errors.New("query log line mentioned error 1049")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
