@@ -982,6 +982,128 @@ func TestCompactCatchUpFailureLeavesMainAsWritten(t *testing.T) {
 	f.wantNoTempBranch()
 }
 
+// atCatchUpPick returns a beforeExec hook that runs fn once, before the
+// first cherry-pick of the catch-up (the one after f's kept commits).
+func (f *compactFixture) atCatchUpPick(fn func()) func(string) {
+	var picks int
+	return func(query string) {
+		if strings.Contains(query, "DOLT_CHERRY_PICK") {
+			picks++
+			if picks == len(f.recent)+1 {
+				fn()
+			}
+		}
+	}
+}
+
+// AC-5: C1 lands after the plan was read and is caught up; C2 lands while
+// the catch-up replays C1, after it read main's head. C2 joins main's
+// pre-staged rows in one follow-up commit above the caught-up C1, and
+// working-only changes stay pending.
+func TestCompactCommitAfterCatchUpJoinsFollowUp(t *testing.T) {
+	port := startCompactTestServer(t)
+
+	t.Run("lands during the catch-up", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		f.exec(f.db, "INSERT INTO u VALUES (800, 'staged')", "CALL DOLT_ADD('u')")
+		f.writePending(f.db)
+		writer := f.conn()
+		f.landRow(writer)
+
+		var c2 string
+		hook := &compactHookConn{beforeExec: f.atCatchUpPick(func() {
+			c2 = f.landChain(writer, landedSpec{"Ada", "ada@example.com", time.Now(), "Ada <ada@example.com>",
+				"landed 601", "t", []string{"INSERT INTO t VALUES (601, 'late')"}})
+		})}
+		if err := f.compact(hook); err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+		if c2 == "" {
+			t.Fatalf("C2 never landed during the catch-up")
+		}
+		f.wantLog(append([]string{compactFollowupMsg, "landed 600"}, replayedLog...))
+		for _, q := range []string{
+			"SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 600",
+			"SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 601",
+			"SELECT COUNT(*) FROM u AS OF 'HEAD' WHERE id = 800",
+			"SELECT COUNT(*) FROM t AS OF 'HEAD~1' WHERE id = 600",
+		} {
+			if n := f.count(q); n != 1 {
+				t.Fatalf("%s = %d, want 1", q, n)
+			}
+		}
+		if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD~1' WHERE id = 601"); n != 0 {
+			t.Fatalf("C2's t row 601 is in the caught-up commit, want it only in the follow-up")
+		}
+		f.wantPendingKept()
+		f.wantStatus("config:false", "u:false")
+		f.wantNoTempBranch()
+	})
+
+	// W's transaction begins before C1 lands, so it began on the planned
+	// head, and its Dolt commit finishes after the reset: C1 is caught up and
+	// W merges on top of it.
+	t.Run("writer begins before the caught-up commit", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		f.writePending(f.db)
+		w := f.beginStraddler()
+		f.landRow(f.conn())
+
+		hook := &compactHookConn{afterFinalReset: w.finish}
+		if err := f.compact(hook); err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+		if !w.committed {
+			t.Fatalf("the straddling writer never committed across the head move")
+		}
+		for _, id := range []int{600, 900} {
+			if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = ?", id); n != 1 {
+				t.Fatalf("t row %d in main's HEAD: found=%d, want 1 (status %q)", id, n, f.status())
+			}
+		}
+		f.wantPendingKept()
+		f.wantStatus("config:false", "u:false")
+		f.wantNoTempBranch()
+	})
+
+	// W's transaction begins before C1 lands, and its Dolt commit finishes
+	// before the final reset, after the catch-up replayed C1: Dolt merges W's
+	// commit against W's transaction-start head, demoting C1, which the
+	// rebuilt history already carries. The reset puts main back on C1's
+	// tree, so C1 keeps its own commit and only W's rows take the follow-up.
+	// Ported from GLM's TestCompactWriterFromBeforeLandedCommitJoinsFollowup.
+	t.Run("writer begins before the caught-up commit, commits before the reset", func(t *testing.T) {
+		f := newCompactFixture(t, port)
+		f.writePending(f.db)
+		w := f.beginStraddler()
+		landed := f.landRow(f.conn())
+		original := f.landedOriginals(landed, 1)[0]
+
+		hook := &compactHookConn{beforeExec: onceBeforeFinalReset(w.finish)}
+		if err := f.compact(hook); err != nil {
+			t.Fatalf("Compact: %v", err)
+		}
+		if !w.committed {
+			t.Fatalf("the straddling writer never committed before the reset")
+		}
+		for _, id := range []int{600, 900} {
+			if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = ?", id); n != 1 {
+				t.Fatalf("t row %d in main's HEAD: found=%d, want 1 (status %q)", id, n, f.status())
+			}
+		}
+		f.wantLog(append([]string{compactFollowupMsg, "landed 600"}, replayedLog...))
+		if c := f.commitsByOrder()[len(replayedLog)]; !c.sameMetadata(original) {
+			t.Fatalf("caught-up C1 does not preserve the original:\n got  %s\n want %s", c.metadata(), original.metadata())
+		}
+		if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD~1' WHERE id = 900"); n != 0 {
+			t.Fatalf("W's t row 900 is in the caught-up commit, want it only in the follow-up")
+		}
+		f.wantPendingKept()
+		f.wantStatus("config:false", "u:false")
+		f.wantNoTempBranch()
+	})
+}
+
 // #6645 composed with a concurrent write: the replay check compares the
 // replay with the planned head, not main's current HEAD, but that must not
 // weaken it. A replay that differs from the planned head still aborts before
