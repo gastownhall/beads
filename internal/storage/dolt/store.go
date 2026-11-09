@@ -5149,7 +5149,8 @@ func (s *DoltStore) credentialsForRemote(remote string) *remoteCredentials {
 // If CLIDir is empty or .dolt/noms does not exist, the check is skipped.
 // Six outcomes are possible when fsck exits non-zero (see classifyFSCKFailure):
 //   - non-empty output, could-not-open: skipped with a log warning.
-//   - non-empty output, other: ErrDanglingReference — push aborted.
+//   - non-empty output with an integrity-finding marker: ErrDanglingReference —
+//     push aborted.
 //   - parent context canceled: cancellation error — push aborted.
 //   - parent context deadline exceeded: ErrFSCKTimeout (caller timeout) — push aborted.
 //   - fsck own timeout: ErrFSCKTimeout (raise BEADS_FSCK_TIMEOUT) — push aborted.
@@ -5185,11 +5186,13 @@ func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 //	    and skips); cancellation phrasing (fsckOutputInterrupted) → fall
 //	    through to the context-state branches below, because an interrupted
 //	    fsck prints e.g. "context canceled" before dying and that text is not
-//	    an integrity finding; any other content → ErrDanglingReference abort.
-//	    Non-empty output means fsck actually ran and said something (--quiet
-//	    fsck is silent until it finds a problem), so content wins over context
-//	    state. This also closes the race where real corruption arrives at the
-//	    deadline instant and would otherwise be masked as a timeout.
+//	    an integrity finding; a recognized finding marker
+//	    (fsckReportedFinding) → ErrDanglingReference abort, so real
+//	    corruption arriving at the deadline instant is not masked as a
+//	    timeout; any other content is non-finding noise (startup warnings,
+//	    tooling failures) and also falls through to the context-state
+//	    branches below, because a failed `dolt fsck --quiet` run can print
+//	    warnings without any integrity finding (GH#4258 genus).
 //
 //	(b) Parent context canceled (Ctrl-C, caller abort) → plain cancellation
 //	    error wrapping context.Canceled; neither ErrDanglingReference nor
@@ -5224,8 +5227,16 @@ func classifyFSCKFailure(parentErr, fsckErr error, output string) error {
 			return nil
 		}
 		if !fsckOutputInterrupted(output) {
-			return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks: %s",
-				ErrDanglingReference, output)
+			// A recognized integrity finding is corruption even when a
+			// deadline or cancellation fired at the same instant.
+			if fsckReportedFinding(output) {
+				return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks: %s",
+					ErrDanglingReference, output)
+			}
+			// Non-finding content (startup warnings, tooling noise) is not
+			// corruption: classify by context state below, so a warning
+			// printed before a timeout is a timeout, not a false
+			// corruption report (GH#4258 genus).
 		}
 		// Cancellation phrasing: not an integrity finding — classify by
 		// context state below.
@@ -5260,6 +5271,33 @@ func classifyFSCKFailure(parentErr, fsckErr error, output string) error {
 	// (f) Generic failure with no output and no recognized context error.
 	return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks",
 		ErrDanglingReference)
+}
+
+// fsckReportedFinding reports whether dolt fsck output contains one of the
+// report markers dolt prints when it actually found an integrity problem:
+// the "Corrupt Chunks" and "Commit Errors" report headers (FsckReport.Print,
+// cmd/dolt/commands/fsck.go) and the corrupted chunk-journal warning printed
+// when the journal cannot be recovered (fsck.go, ErrJournalDataLoss).
+//
+// Only these markers establish a finding. `dolt fsck --quiet` is silent
+// until it has something to report, but on a failed run it also prints
+// startup noise — unknown-option and global-config-load warnings
+// (cmd/dolt/dolt.go), and its unexpected-error path can exit without a
+// report — so non-empty output alone does not prove corruption, and generic
+// "corrupt"/"dangling" wording can occur in warnings or paths while a
+// commit-error-only report would be missed. The substrings survive the
+// ANSI color codes dolt wraps around the headers.
+func fsckReportedFinding(output string) bool {
+	for _, marker := range []string{
+		"============ Corrupt Chunks ============",
+		"============ Commit Errors ============",
+		"WARNING: Chunk journal is corrupted",
+	} {
+		if strings.Contains(output, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // fsckCouldNotOpen reports whether dolt fsck output indicates the check

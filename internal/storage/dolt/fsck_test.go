@@ -6,9 +6,25 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+)
+
+// Source-backed dolt fsck finding markers (dolthub/dolt
+// cmd/dolt/commands/fsck.go): the two report headers the FsckReport.Print
+// emits (color-wrapped when color is on) and the corrupted-journal warning
+// printed before the report. Everything else dolt prints on a failing fsck —
+// startup warnings, config errors, scan failures — is not an integrity
+// finding.
+const (
+	fsckCorruptChunksReport = "============ Corrupt Chunks ============\n" +
+		"error: chunk abc123 referenced but not found"
+	fsckCommitErrorsReport = "============ Commit Errors ============"
+	fsckJournalWarning     = "WARNING: Chunk journal is corrupted and some data may be lost."
+	fsckConfigWarning      = "Warning: Unknown global config option 'foo'. " +
+		"Use dolt config --global --unset foo to remove."
 )
 
 // TestPrePushFSCK_EmptyCLIDir verifies that prePushFSCK is a no-op when
@@ -89,6 +105,130 @@ func TestPrePushFSCK_UnopenableDB(t *testing.T) {
 	}
 }
 
+// TestPrePushFSCK_TimeoutAfterWarningIsTimeout pins the GH#4258 genus: fsck
+// prints a startup warning (here dolt's unknown-config warning, printed by
+// warnIfUnknownConfigOptions), runs past its own deadline, and the warning
+// text must not be classified as an integrity finding. The classifier must
+// report ErrFSCKTimeout with its BEADS_FSCK_TIMEOUT guidance, not
+// ErrDanglingReference.
+func TestPrePushFSCK_TimeoutAfterWarningIsTimeout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fake")
+	}
+	binDir := t.TempDir()
+	// Fake dolt: emit the real unknown-config warning shape to stderr, then
+	// hang past the fsck deadline. `exec sleep` leaves no child process
+	// holding the output pipe after the context kill.
+	script := "#!/bin/sh\n" +
+		"echo \"" + fsckConfigWarning + "\" >&2\n" +
+		"exec sleep 30\n"
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(script), 0o755); err != nil { // #nosec G306 -- test fixture must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(fsckTimeoutEnv, "1s")
+
+	tmp := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmp, "mydb", ".dolt", "noms"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	s := &DoltStore{dbPath: tmp, database: "mydb"}
+
+	err := s.prePushFSCK(context.Background())
+	if err == nil {
+		t.Fatal("expected an error from a timed-out fsck, got nil")
+	}
+	if !errors.Is(err, ErrFSCKTimeout) {
+		t.Errorf("errors.Is(err, ErrFSCKTimeout) = false; want true (warning before timeout is a timeout, not corruption); err = %v", err)
+	}
+	if errors.Is(err, ErrDanglingReference) {
+		t.Errorf("errors.Is(err, ErrDanglingReference) = true; want false (no integrity finding was reported); err = %v", err)
+	}
+	if !strings.Contains(err.Error(), "BEADS_FSCK_TIMEOUT") {
+		t.Errorf("timeout guidance should name BEADS_FSCK_TIMEOUT; err = %v", err)
+	}
+}
+
+// TestFsckReportedFinding verifies the helper recognizes exactly the
+// source-backed dolt fsck finding markers — the Corrupt Chunks and Commit
+// Errors report headers (with and without the ANSI color codes dolt wraps
+// them in) and the corrupted-journal warning — and nothing else: clean
+// summaries, startup warnings, and incidental "corrupt"/"dangling" wording
+// are not findings.
+func TestFsckReportedFinding(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			name:   "corrupt chunks report header",
+			output: fsckCorruptChunksReport,
+			want:   true,
+		},
+		{
+			name:   "commit errors report header alone",
+			output: fsckCommitErrorsReport,
+			want:   true,
+		},
+		{
+			name:   "chunk journal warning",
+			output: fsckJournalWarning + "\nRun `dolt fsck --revive-journal-with-data-loss` to attempt to recover",
+			want:   true,
+		},
+		{
+			name:   "ANSI-wrapped corrupt chunks header (dolt color.RedString)",
+			output: "\x1b[31m============ Corrupt Chunks ============\x1b[0m",
+			want:   true,
+		},
+		{
+			name:   "ANSI-wrapped commit errors header",
+			output: "\x1b[31m============ Commit Errors ============\x1b[0m",
+			want:   true,
+		},
+		{
+			name:   "clean summary output is not a finding",
+			output: "Checked 500 chunks\nNo problems found.",
+			want:   false,
+		},
+		{
+			name:   "unknown-config startup warning is not a finding",
+			output: fsckConfigWarning,
+			want:   false,
+		},
+		{
+			name:   "global-config load failure is not a finding",
+			output: "Failed to load the global config. permission denied",
+			want:   false,
+		},
+		{
+			name:   "incidental 'corrupt' wording is not a finding",
+			output: "skipped corrupt-looking backup file backup.old",
+			want:   false,
+		},
+		{
+			name:   "incidental dangling phrasing without a report header is not a finding",
+			output: "dangling chunk reference: hash abc123 not found",
+			want:   false,
+		},
+		{
+			name:   "empty output",
+			output: "",
+			want:   false,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := fsckReportedFinding(tc.output); got != tc.want {
+				t.Errorf("fsckReportedFinding(%q) = %v, want %v", tc.output, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestFsckCouldNotOpen verifies the helper identifies both known dolt
 // "couldn't open" phrasings and does not classify actual integrity failures
 // (or unrelated output) as open-failures.
@@ -147,15 +287,53 @@ func TestClassifyFSCKFailure(t *testing.T) {
 		wantContains string  // substring expected in error message
 		wantAbsent   string  // substring that must NOT appear
 	}{
-		// (a) Non-empty output wins over context state: real dangling reference
+		// (a) A recognized finding wins over context state: real corruption
 		//     arriving exactly at the deadline must not be masked as a timeout.
 		{
-			name:      "non-empty output + DeadlineExceeded → ErrDanglingReference, not ErrFSCKTimeout",
+			name:      "corrupt-chunks report + DeadlineExceeded → ErrDanglingReference, not ErrFSCKTimeout",
 			parentErr: context.DeadlineExceeded,
 			fsckErr:   context.DeadlineExceeded,
-			output:    "dangling chunk reference: hash abc123 not found",
+			output:    fsckCorruptChunksReport,
 			wantIs:    ErrDanglingReference,
 			wantIsNot: []error{ErrFSCKTimeout},
+		},
+		// Non-finding warnings must not preempt the context branches: a
+		// startup warning followed by an expired deadline or a cancellation
+		// is a timeout/interrupt, not a corruption report (GH#4258 genus).
+		{
+			name:         "unknown-config warning + own fsck deadline → ErrFSCKTimeout, not ErrDanglingReference",
+			parentErr:    nil,
+			fsckErr:      context.DeadlineExceeded,
+			output:       fsckConfigWarning,
+			wantIs:       ErrFSCKTimeout,
+			wantIsNot:    []error{ErrDanglingReference},
+			wantContains: "BEADS_FSCK_TIMEOUT",
+		},
+		{
+			name:         "unknown-config warning + parent deadline → caller-timeout guidance, not corruption",
+			parentErr:    context.DeadlineExceeded,
+			fsckErr:      context.DeadlineExceeded,
+			output:       fsckConfigWarning,
+			wantIs:       ErrFSCKTimeout,
+			wantIsNot:    []error{ErrDanglingReference},
+			wantContains: "dolt.auto-push-timeout",
+		},
+		{
+			name:         "unknown-config warning + parent canceled → interrupted, not corruption",
+			parentErr:    context.Canceled,
+			fsckErr:      context.Canceled,
+			output:       fsckConfigWarning,
+			wantIs:       context.Canceled,
+			wantIsNot:    []error{ErrDanglingReference, ErrFSCKTimeout},
+			wantContains: "interrupted",
+		},
+		{
+			name:      "config-load failure + own fsck deadline → ErrFSCKTimeout, not ErrDanglingReference",
+			parentErr: nil,
+			fsckErr:   context.DeadlineExceeded,
+			output:    "Failed to load the global config. permission denied",
+			wantIs:    ErrFSCKTimeout,
+			wantIsNot: []error{ErrDanglingReference},
 		},
 		// (a) could-not-open output → nil (skip, caller logs).
 		{
@@ -242,13 +420,13 @@ func TestClassifyFSCKFailure(t *testing.T) {
 			wantIsNot:    []error{ErrDanglingReference},
 			wantContains: "BEADS_FSCK_TIMEOUT",
 		},
-		// Negative sentinel: real corruption output without cancellation
-		// phrasing must still abort.
+		// Negative sentinel: a recognized finding without cancellation
+		// phrasing must still abort as corruption.
 		{
-			name:      "real corruption output stays ErrDanglingReference despite nil ctx errors",
+			name:      "corrupt-chunks report stays ErrDanglingReference despite nil ctx errors",
 			parentErr: nil,
 			fsckErr:   nil,
-			output:    "dangling chunk reference: hash abc123 not found",
+			output:    fsckCorruptChunksReport,
 			wantIs:    ErrDanglingReference,
 			wantIsNot: []error{ErrFSCKTimeout},
 		},
