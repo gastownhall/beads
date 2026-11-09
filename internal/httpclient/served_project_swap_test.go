@@ -48,6 +48,7 @@ func serveOneProject(t *testing.T, projectID, prefix, issueID string) (*url.URL,
 
 	cfg := serveConfig(t, ref)
 	cfg.Workspace = domain.ContextInfo{ProjectID: projectID, Database: servedDatabase}
+	servedServerConfig(&cfg)
 	srv, err := httpapi.Listen(cfg)
 	if err != nil {
 		t.Fatalf("bind the server for %s: %v", projectID, err)
@@ -140,7 +141,7 @@ func TestServedReadsAndWritesRefuseAfterAPostHandshakeServerSwap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse the proxy URL: %v", err)
 	}
-	client, err := wire.New(base, nil, wire.Options{ExpectProjectID: projA})
+	client, err := wire.New(base, nil, servedWireOptions(newServedWitness(t, "the post-handshake swap client"), wire.Options{ExpectProjectID: projA}))
 	if err != nil {
 		t.Fatalf("build the client: %v", err)
 	}

@@ -178,6 +178,7 @@ go_test(
         "served_molecule_test.go",
         "served_participation_generation_test.go",
         "served_project_swap_test.go",
+        "served_protocol_seam_test.go",
         "served_querier_test.go",
         "served_reader_test.go",
         "served_ready_claimer_test.go",

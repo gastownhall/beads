@@ -124,9 +124,15 @@ func newServedEnv(t *testing.T, prefix string, opts ...func(*httpapi.Config)) *s
 // newServedEnvExpecting is newServedEnv with the client's ExpectProjectID
 // pinned. The wrong-server cases use it to arm the identity gate the plain
 // harness deliberately leaves off (ga-b8ddd.11).
+//
+// Its server config and client options go through the tier's protocol seam
+// (servedServerConfig, servedWireOptions in served_protocol_seam_test.go), and
+// the client's wire witness is judged at the case's cleanup.
 func newServedEnvExpecting(t *testing.T, prefix, expectID string, opts ...func(*httpapi.Config)) *servedEnv {
 	t.Helper()
 	skipUnlessEmbeddedDolt(t)
+	// Registered first so its check runs last, after the server shuts down.
+	witness := newServedWitness(t, "newServedEnv("+prefix+")")
 
 	template, err := servedTemplateWorkspace()
 	if err != nil {
@@ -147,6 +153,7 @@ func newServedEnvExpecting(t *testing.T, prefix, expectID string, opts ...func(*
 	}
 
 	cfg := serveConfig(t, reference)
+	servedServerConfig(&cfg)
 	for _, opt := range opts {
 		opt(&cfg)
 	}
@@ -170,7 +177,7 @@ func newServedEnvExpecting(t *testing.T, prefix, expectID string, opts ...func(*
 	if err != nil {
 		t.Fatalf("parse the bound address: %v", err)
 	}
-	client, err := wire.New(base, nil, wire.Options{ExpectProjectID: expectID})
+	client, err := wire.New(base, nil, servedWireOptions(witness, wire.Options{ExpectProjectID: expectID}))
 	if err != nil {
 		t.Fatalf("build the client: %v", err)
 	}
