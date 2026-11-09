@@ -270,22 +270,26 @@ func (t *embeddedTransaction) GetDependencyRecords(ctx context.Context, issueID 
 }
 
 func (t *embeddedTransaction) AddLabel(ctx context.Context, issueID, label, actor string) error {
-	_, labelTable, eventTable, _ := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, issueID))
+	issueTable, labelTable, eventTable, _ := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, issueID))
 	if err := issueops.AddLabelInTx(ctx, t.tx, labelTable, eventTable, issueID, label, actor); err != nil {
 		return err
 	}
 	t.dirty.MarkDirty(labelTable)
 	t.dirty.MarkDirty(eventTable)
+	// A real label change advanced the owning row's updated_at (GH#5442).
+	t.dirty.MarkDirty(issueTable)
 	return nil
 }
 
 func (t *embeddedTransaction) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
-	_, labelTable, eventTable, _ := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, issueID))
+	issueTable, labelTable, eventTable, _ := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, issueID))
 	if err := issueops.RemoveLabelInTx(ctx, t.tx, labelTable, eventTable, issueID, label, actor); err != nil {
 		return err
 	}
 	t.dirty.MarkDirty(labelTable)
 	t.dirty.MarkDirty(eventTable)
+	// A real label change advanced the owning row's updated_at (GH#5442).
+	t.dirty.MarkDirty(issueTable)
 	return nil
 }
 

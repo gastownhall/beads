@@ -222,8 +222,9 @@ func TestEmbeddedEveryAcceptedLifecycleMutationMintsOneVersion(t *testing.T) {
 // TestEmbeddedMintLeavesUpdatedAtWhereHistoryOffDoes pins that minting a
 // version is not itself an edit. issues.updated_at carries ON UPDATE
 // CURRENT_TIMESTAMP, so a mint whose own UPDATE left it unassigned would move
-// it to the clock on every versioned write, including the label and
-// dependency writes that never touch it with history off. bd import's
+// it to the clock on every versioned write, including the dependency writes
+// that never touch it with history off. A label write advances it itself
+// (GH#5442), in both settings alike. bd import's
 // stale-upsert check reads that column, so a moved updated_at would also turn
 // the source's next real edit away as stale. Each scenario runs with history
 // off first, as the control the history-on run must match.
@@ -280,18 +281,38 @@ func TestEmbeddedMintLeavesUpdatedAtWhereHistoryOffDoes(t *testing.T) {
 				}
 				return n
 			}
+			// checkAdvanced is check for a step that assigns updated_at
+			// itself: it must have moved past the aged instant.
+			checkAdvanced := func(step string, before int) int {
+				t.Helper()
+				var got time.Time
+				te.queryScalar(t, ctx, "SELECT updated_at FROM issues WHERE id = ?", []any{a}, &got)
+				if !got.UTC().After(aged) {
+					t.Errorf("%s: updated_at for %s is %v, want it advanced past %v", step, a, got.UTC(), aged)
+				}
+				n := versions()
+				if n != before+mints {
+					t.Fatalf("%s: version rows for %s = %d, want %d", step, a, n, before+mints)
+				}
+				return n
+			}
 
-			// Label and dependency writes never assign updated_at themselves.
+			// A label write is an edit of the issue: it advances updated_at
+			// with history off, and the mint must not undo that.
 			age()
 			n := versions()
 			if err := te.store.AddLabel(ctx, a, "l1", "actor"); err != nil {
 				t.Fatalf("AddLabel: %v", err)
 			}
-			n = check("add label", n, aged)
+			n = checkAdvanced("add label", n)
+			age()
 			if err := te.store.RemoveLabel(ctx, a, "l1", "actor"); err != nil {
 				t.Fatalf("RemoveLabel: %v", err)
 			}
-			n = check("remove label", n, aged)
+			n = checkAdvanced("remove label", n)
+
+			// Dependency writes never assign updated_at themselves.
+			age()
 			if err := te.store.AddDependency(ctx, &types.Dependency{IssueID: a, DependsOnID: b, Type: types.DepBlocks}, "actor"); err != nil {
 				t.Fatalf("AddDependency: %v", err)
 			}

@@ -183,6 +183,15 @@ var funcNameExemptions = map[string]string{
 	// token a second time within one transaction for no content change, the
 	// same reason recordVersionAtInTx above leaves it alone.
 	"carryParticipationInTx": "writes only participation_generation on a row the same plane move just inserted with a fresh row_lock in this transaction; reminting would double-bump the token for no content change",
+
+	// touchLabelOwnerInTx (labels.go) advances updated_at on the issue or
+	// wisp owning a label row its caller just inserted or deleted (GH#5442),
+	// so recency filters, the import stale guard and LWW merge see the label
+	// edit. It writes updated_at alone: a label set is not ownership state
+	// (status, assignee, started_at), and reminting row_lock would fail the
+	// CAS of a caller holding the row for an orthogonal edit, as the same
+	// edit made through any other label door never did.
+	"touchLabelOwnerInTx": "writes only updated_at for a label-set change; row_lock guards ownership (status/assignee/started_at), and reminting would fail a concurrent holder's CAS on an orthogonal edit",
 }
 
 // TestAllIssueRowWritesStampRowLock is the load-bearing completeness guard for
