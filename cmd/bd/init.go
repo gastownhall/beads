@@ -237,6 +237,24 @@ func shouldInitSharedGlobalDB(sharedServer, sharedServerMode, gateway bool) bool
 	return (sharedServer || sharedServerMode) && !gateway
 }
 
+// initGlobalDatabaseIdentity is what init expects of the shared server it
+// creates beads_global on (GH#4637): the server bd launched for the shared
+// data directory, or nil, no check, for a port the caller named with
+// --server-port.
+func initGlobalDatabaseIdentity(beadsDir, host string, port int, callerPort bool) *doltserver.ServerIdentityExpectation {
+	if callerPort {
+		return nil
+	}
+	return doltserver.SharedServerIdentityExpectation(beadsDir, host, port)
+}
+
+// initGlobalDatabaseFatal reports whether init stops on EnsureGlobalDatabase's
+// err rather than warning and going on without beads_global: a server older
+// than bd's minimum, or one that is not shown to be bd's shared server.
+func initGlobalDatabaseFatal(err error) bool {
+	return errors.Is(err, doltversion.ErrBelowRequiredMin) || errors.Is(err, doltserver.ErrServerIdentityMismatch)
+}
+
 // externalServerUnreachableMessage returns the message for an --external init
 // whose server could not be dialed or had no port named, or "" when err is any
 // other failure.
@@ -1769,10 +1787,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			if serverUser != "" {
 				globalUser = serverUser
 			}
-			if err := doltserver.EnsureGlobalDatabase(globalHost, globalPort, globalUser, ""); err != nil {
-				// A server older than bd's minimum is refused by every open,
-				// the project store's below included, so init stops here.
-				if errors.Is(err, doltversion.ErrBelowRequiredMin) {
+			if err := doltserver.EnsureGlobalDatabase(globalHost, globalPort, globalUser, "",
+				initGlobalDatabaseIdentity(beadsDir, globalHost, globalPort, serverPort != 0)); err != nil {
+				// A server older than bd's minimum, or one that is not bd's
+				// shared server, is refused by every open, the project
+				// store's below included, so init stops here.
+				if initGlobalDatabaseFatal(err) {
 					fmt.Fprintf(os.Stderr, "Error: %s\n", remedy.PrintedMessage(err))
 					return &exitError{Code: 1}
 				}

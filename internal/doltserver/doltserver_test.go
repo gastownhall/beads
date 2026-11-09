@@ -3239,7 +3239,7 @@ func TestGlobalDatabaseConstants(t *testing.T) {
 
 func TestEnsureGlobalDatabase_ServerNotReachable(t *testing.T) {
 	// EnsureGlobalDatabase should return an error when the server is not reachable.
-	err := EnsureGlobalDatabase("127.0.0.1", 19999, "root", "")
+	err := EnsureGlobalDatabase("127.0.0.1", 19999, "root", "", nil)
 	if err == nil {
 		t.Error("expected error when server is not reachable")
 	}

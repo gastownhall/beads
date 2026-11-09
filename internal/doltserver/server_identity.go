@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -243,6 +244,26 @@ func VerifyServerIdentity(ctx context.Context, q doltversion.RowQuerier, exp *Se
 		ierr.ListenerPID = identityListenerPID(exp.Port)
 	}
 	return ierr
+}
+
+// SharedServerIdentityExpectation is what the shared server at host:port is
+// expected to be for beadsDir's workspace: the server bd launched for the
+// shared data directory. It is nil, no check, when beadsDir turns the check
+// off, the host is not one bd runs a server at, or there is no shared
+// directory.
+func SharedServerIdentityExpectation(beadsDir, host string, port int) *ServerIdentityExpectation {
+	if port <= 0 || !configfile.BdRunsServerAt(host) || !ServerIdentityVerificationEnabled(beadsDir) {
+		return nil
+	}
+	serverDir, err := SharedServerPath()
+	if err != nil {
+		return nil
+	}
+	dataDir, err := SharedDoltPath()
+	if err != nil {
+		return nil
+	}
+	return &ServerIdentityExpectation{DataDir: dataDir, ServerDir: serverDir, Host: host, Port: port}
 }
 
 // ServerIdentityVerificationEnabled reports whether the server identity check
