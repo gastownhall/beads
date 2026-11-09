@@ -154,6 +154,71 @@ func assertImportSkipInvalidMix(t *testing.T, bd, dir, content, stdout, stderr, 
 	}
 }
 
+// skippedTargetGraph is a three-record file whose dependencies all point at
+// the one record the screen rejects: b carries status "verify" (no built-in
+// status), a is blocked by b and c is b's child. As bd export writes them,
+// each edge is saved on its dependent's line, so the writer drops both when b
+// is skipped, and only a re-import of a's and c's lines restores them.
+type skippedTargetGraph struct {
+	a, b, c string // the ids
+	bLine   string // b's line, the one the screen rejects
+	content string
+}
+
+func newSkippedTargetGraph(t *testing.T, prefix string) skippedTargetGraph {
+	t.Helper()
+	now := time.Now().UTC().Truncate(time.Second)
+	g := skippedTargetGraph{a: prefix + "-a", b: prefix + "-b", c: prefix + "-c"}
+	line := func(issue types.Issue) string {
+		raw, err := json.Marshal(issue)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", issue.ID, err)
+		}
+		return string(raw)
+	}
+	g.bLine = line(types.Issue{ID: g.b, Title: "Rejected epic", Status: types.Status("verify"), IssueType: types.TypeEpic, CreatedAt: now, UpdatedAt: now})
+	g.content = strings.Join([]string{
+		line(types.Issue{ID: g.a, Title: "Blocked by the epic", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now,
+			Dependencies: []*types.Dependency{{IssueID: g.a, DependsOnID: g.b, Type: types.DepBlocks, CreatedAt: now}}}),
+		g.bLine,
+		line(types.Issue{ID: g.c, Title: "Child of the epic", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now,
+			Dependencies: []*types.Dependency{{IssueID: g.c, DependsOnID: g.b, Type: types.DepParentChild, CreatedAt: now}}}),
+	}, "\n") + "\n"
+	return g
+}
+
+// assertEdgesIntoB checks whether a's blocks edge and c's parent-child edge
+// on b are stored (want) or not, through bd dep list.
+func (g skippedTargetGraph) assertEdgesIntoB(t *testing.T, bd, dir string, want bool) {
+	t.Helper()
+	for id, depType := range map[string]types.DependencyType{g.a: types.DepBlocks, g.c: types.DepParentChild} {
+		cmd := exec.Command(bd, "dep", "list", id, "--json")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd dep list %s --json failed: %v\nstdout:\n%s\nstderr:\n%s", id, err, stdout.String(), stderr.String())
+		}
+		// One entry per dependency: the issue depended on, with the edge's type.
+		var deps []struct {
+			ID             string               `json:"id"`
+			DependencyType types.DependencyType `json:"dependency_type"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &deps); err != nil {
+			t.Fatalf("parse bd dep list %s --json: %v\n%s", id, err, stdout.String())
+		}
+		stored := false
+		for _, dep := range deps {
+			if dep.ID == g.b && dep.DependencyType == depType {
+				stored = true
+			}
+		}
+		if stored != want {
+			t.Errorf("%s's %s dependency on %s stored = %v, want %v; bd dep list: %s", id, depType, g.b, stored, want, stdout.String())
+		}
+	}
+}
+
 // TestEmbeddedImportSkipInvalidCases extends TestEmbeddedImportSkipInvalid
 // across the inputs a --skip-invalid import meets: stdin, duplicate IDs, a
 // file with nothing valid (with and without memories), a file with nothing
@@ -386,6 +451,40 @@ func TestEmbeddedImportSkipInvalidCases(t *testing.T) {
 				t.Errorf("bd show %s should succeed after the repaired re-import: %v", id, showErr)
 			}
 		}
+	})
+
+	// Dependencies kept records declare on a skipped one are dropped with
+	// it, and the report counts them. The repair the help gives (register
+	// the status, re-import the whole source) restores both edges; the
+	// saved line alone carries neither.
+	t.Run("dependencies_on_a_skipped_record_come_back_with_the_source", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imedge")
+		g := newSkippedTargetGraph(t, "imedge")
+		jsonlPath := filepath.Join(t.TempDir(), "graph.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(g.content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		rejectsPath := filepath.Join(t.TempDir(), "rejects.jsonl")
+
+		stdout, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath, "--skip-invalid", "--rejects", rejectsPath, "--json")
+		if err != nil {
+			t.Fatalf("bd import --skip-invalid failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		var result importResultJSON
+		if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &result); err != nil {
+			t.Fatalf("parse --json output %q: %v", stdout, err)
+		}
+		if result.Created != 2 || len(result.Rejected) != 1 || result.Rejected[0].ID != g.b || len(result.SkippedDependencies) != 2 {
+			t.Fatalf("created %d, rejected %+v, skipped_dependencies %v; want 2 created, %s rejected, both edges on it skipped", result.Created, result.Rejected, result.SkippedDependencies, g.b)
+		}
+		if !strings.Contains(stderr, "Also skipped 2 dependencies other records declare on them") {
+			t.Errorf("stderr should count the dependencies skipped with the record; got:\n%s", stderr)
+		}
+		g.assertEdgesIntoB(t, bd, dir, false)
+
+		bdConfig(t, bd, dir, "set", "status.custom", "verify:active")
+		bdImport(t, bd, dir, jsonlPath)
+		g.assertEdgesIntoB(t, bd, dir, true)
 	})
 }
 
@@ -793,6 +892,50 @@ func TestEmbeddedImportInvalidDryRunCases(t *testing.T) {
 				saved, readErr := os.ReadFile(jsonlPath)
 				if readErr != nil || !strings.Contains(string(saved), "imskip-aaa") {
 					t.Errorf("the import source must survive the refusal intact; err=%v", readErr)
+				}
+				if issues := bdListJSONAllowError(t, bd, dir); len(issues) != 0 {
+					t.Errorf("the refused import must not write; found %d issues", len(issues))
+				}
+			})
+		}
+	})
+
+	// `bd import - --rejects F < F` reads F through stdin: the rejects
+	// write would replace it before the import wrote anything (with an
+	// empty file when every row is valid), so it is refused like a named
+	// input, and F stays byte for byte. A piped stdin (stdin_import above)
+	// still works.
+	t.Run("rejects_refuses_the_file_stdin_reads", func(t *testing.T) {
+		now := time.Now().UTC()
+		valid, err := json.Marshal(types.Issue{ID: "imsin-aaa", Title: "Valid A", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range []struct{ name, content string }{
+			{"mixed_rows", mixedContent()},
+			{"no_rejects", string(valid) + "\n"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				dir, _, _ := bdInit(t, bd, "--prefix", "imsin")
+				source := filepath.Join(t.TempDir(), "backup.jsonl")
+				if err := os.WriteFile(source, []byte(tc.content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				stdin, err := os.Open(source)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer stdin.Close()
+
+				_, stderr, err := bdImportBuffers(t, bd, dir, stdin, "-", "--skip-invalid", "--rejects", source)
+				if err == nil {
+					t.Fatalf("--rejects naming the file stdin reads must be refused; stderr:\n%s", stderr)
+				}
+				if !strings.Contains(stderr, "is the input file") {
+					t.Errorf("error should say --rejects is the input file; got:\n%s", stderr)
+				}
+				if got, readErr := os.ReadFile(source); readErr != nil || string(got) != tc.content {
+					t.Errorf("the input changed: err=%v content=%q, want %q", readErr, got, tc.content)
 				}
 				if issues := bdListJSONAllowError(t, bd, dir); len(issues) != 0 {
 					t.Errorf("the refused import must not write; found %d issues", len(issues))
@@ -1296,6 +1439,89 @@ func TestEmbeddedRecoveryQuarantineCases(t *testing.T) {
 		}
 		if issues := bdListJSON(t, bd, dir); len(issues) != 2 {
 			t.Fatalf("the valid records must restore despite the failed quarantine; want 2, got %d", len(issues))
+		}
+	})
+
+	// A recovery that skips a record also drops the edges kept records
+	// declare on it. The warnings count them and point at re-importing the
+	// whole source, which, once the status is registered, restores the
+	// record and both edges. Two routes: init (the writer's own report) and
+	// the embedded auto-import (counted from the rows it writes).
+	t.Run("dependencies_on_a_skipped_record", func(t *testing.T) {
+		for _, route := range []string{"init_from_jsonl", "auto_import"} {
+			t.Run(route, func(t *testing.T) {
+				var dir, jsonlPath string
+				var cmd *exec.Cmd
+				g := newSkippedTargetGraph(t, "imqd")
+				if route == "init_from_jsonl" {
+					dir = t.TempDir()
+					initGitRepoAt(t, dir)
+					if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					jsonlPath = filepath.Join(dir, ".beads", "issues.jsonl")
+					cmd = exec.Command(bd, "init", "--from-jsonl", "--prefix", "imqd", "--quiet", "--non-interactive")
+				} else {
+					var beadsDir string
+					dir, beadsDir, _ = bdInit(t, bd, "--prefix", "imqd")
+					jsonlPath = filepath.Join(beadsDir, "issues.jsonl")
+					cmd = exec.Command(bd, "create", "post-import marker", "--type", "task")
+				}
+				if err := os.WriteFile(jsonlPath, []byte(g.content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				cmd.Dir = dir
+				cmd.Env = bdEnv(dir)
+				stdout, stderr, err := runCommandBuffers(t, cmd)
+				out := stdout.String() + stderr.String()
+				if err != nil {
+					t.Fatalf("%s must skip the invalid record, not fail; output:\n%s", route, out)
+				}
+				for _, want := range []string{
+					"warning: skipped 1 invalid record",
+					"re-import it: bd import ",
+					"warning: also skipped 2 dependencies other records declare on the skipped records",
+				} {
+					if !strings.Contains(out, want) {
+						t.Errorf("%s output must contain %q; got:\n%s", route, want, out)
+					}
+				}
+				g.assertEdgesIntoB(t, bd, dir, false)
+
+				bdConfig(t, bd, dir, "set", "status.custom", "verify:active")
+				bdImport(t, bd, dir, jsonlPath)
+				g.assertEdgesIntoB(t, bd, dir, true)
+			})
+		}
+	})
+
+	// The server-mode auto-import fallback, run in process on a real store
+	// (the unit tests stub it): it quarantines the rejected record and
+	// counts the dependencies skipped with it.
+	t.Run("conflict_skip_fallback_quarantines_and_counts_dependencies", func(t *testing.T) {
+		_, beadsDir, _ := bdInit(t, bd, "--prefix", "imqs")
+		g := newSkippedTargetGraph(t, "imqs")
+		jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(g.content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		store := openStore(t, beadsDir, "imqs")
+		res, err := importFromLocalJSONLConflictSkip(t.Context(), store, jsonlPath)
+		if err != nil {
+			t.Fatalf("importFromLocalJSONLConflictSkip: %v", err)
+		}
+		if res.Issues != 2 || len(res.Rejected) != 1 || res.Rejected[0].ID != g.b || res.Rejected[0].Line != 2 || res.DependenciesOnRejected != 2 {
+			t.Fatalf("result = {Issues:%d Rejected:%+v DependenciesOnRejected:%d}, want 2 imported, %s on line 2 rejected, 2 dependencies on it skipped",
+				res.Issues, res.Rejected, res.DependenciesOnRejected, g.b)
+		}
+		if res.QuarantinePath != jsonlPath+".rejected.jsonl" {
+			t.Errorf("QuarantinePath = %q, want the quarantine beside the source", res.QuarantinePath)
+		}
+		if quarantine, err := os.ReadFile(jsonlPath + ".rejected.jsonl"); err != nil || string(quarantine) != g.bLine+"\n" {
+			t.Errorf("quarantine = %q (err %v), want the rejected line %q", quarantine, err, g.bLine+"\n")
+		}
+		if _, err := store.GetIssue(t.Context(), g.a); err != nil {
+			t.Errorf("the valid record %s was not restored: %v", g.a, err)
 		}
 	})
 }

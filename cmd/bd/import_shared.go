@@ -1325,6 +1325,10 @@ type importLocalResult struct {
 	// none were, or the save failed).
 	Rejected       []importRejection
 	QuarantinePath string
+	// DependenciesOnRejected counts the dependencies other records declare
+	// on a rejected one, which the writer skipped for want of their target
+	// (dependenciesOnRejected).
+	DependenciesOnRejected int
 }
 
 // memoryRecord represents a memory entry in the JSONL export.
@@ -1508,6 +1512,8 @@ func importFromLocalJSONLWithOpts(ctx context.Context, store storage.DoltStorage
 		// not: it is counted apart.
 		result.Issues = importResult.Created + importResult.Unchanged
 		result.Retired = len(importResult.RetiredIDs)
+		result.DependenciesOnRejected = dependenciesOnRejected(importResult.SkippedDependencies, rejected)
+		warnRecoveryDependenciesOnRejected(os.Stderr, localPath, result.DependenciesOnRejected)
 	}
 
 	return result, nil

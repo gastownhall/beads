@@ -542,11 +542,16 @@ bd bootstrap
     | into an empty database) restores what it can: records that fail validation are
     | skipped, their lines are saved beside the source as <file>.rejected.jsonl
     | (replacing an earlier one; the source is never modified), and a warning names
-    | the count and the first reason. Repair them and re-import with bd import.
-    | Limits: a line that cannot be parsed still stops the import before any write;
-    | saving the skipped lines is best-effort (a failed save only warns, and the
-    | lines are still in the source); and a run that skips nothing leaves an earlier
-    | <file>.rejected.jsonl in place.
+    | the count and the first reason. Dependencies other records declare on a
+    | skipped record are skipped too, and a second warning counts them. To restore
+    | the skipped records and those dependencies, fix the records in the source (or
+    | register the custom status or type they use) and re-import the whole source
+    | with bd import <file>; re-importing <file>.rejected.jsonl alone would leave
+    | the dependencies out, and a record changed locally in the meantime is skipped
+    | as stale, its dependencies with it. Limits: a line that cannot be parsed still
+    | stops the import before any write; saving the skipped lines is best-effort (a
+    | failed save only warns, and the lines are still in the source); and a run that
+    | skips nothing leaves an earlier <file>.rejected.jsonl in place.
     |
     | Values starting with - in sync.remote or sync.git-remote are refused as invalid
     | remote URLs: bd init returns an error naming the key; bd bootstrap restores a
@@ -3641,20 +3646,29 @@ bd import
     | uses. By default one invalid row stops the import: the error names its line
     | and the reason, and nothing is imported. --skip-invalid imports the valid
     | rows and reports the skipped ones (line, id, reason; "rejected" in --json);
-    | add --rejects <file> to save the skipped lines verbatim, ready to repair
-    | and re-import. A line that is not valid JSON, or does not decode as a
-    | record, always stops the import. Stale and unchanged rows are not written,
-    | so they are not validated.
+    | add --rejects <file> to save the skipped lines verbatim. A line that is not
+    | valid JSON, or does not decode as a record, always stops the import. Stale
+    | and unchanged rows are not written, so they are not validated.
+    |
+    | A dependency is saved on the line of the record that declares it, so one
+    | that a kept record declares on a skipped record is skipped too (stderr
+    | counts them). To restore the skipped records with those dependencies, fix
+    | them in the source (or register the custom status or type they use) and
+    | re-import the whole source: re-importing only the skipped lines restores
+    | the records but not those dependencies. A declaring record changed locally
+    | in the meantime is skipped as stale, its dependencies with it; add those
+    | with bd dep add.
     |
     | The skipped rows are listed on stderr, with --json too, and count in
     | "skipped". --rejects replaces the file on each run (an empty file when
-    | nothing was skipped; created 0600) and refuses to name the input file. It
-    | is written before the first database write, so a rejects file that cannot
-    | be written stops the import before it changes anything; it is not a
-    | receipt, though: if the import then fails partway, the file stays. A dry
-    | run validates too, so it predicts the real run: by default an invalid row
-    | fails it, and with --skip-invalid it lists the rows it would skip but
-    | writes no rejects file.
+    | nothing was skipped; created 0600) and refuses to name the input file,
+    | including the file stdin reads. It is written before the first database
+    | write, so a rejects file that cannot be written stops the import before it
+    | changes anything; it is not a receipt, though: if the import then fails
+    | partway, the file stays. A dry run validates too, so it predicts which rows
+    | the real run imports and skips: by default an invalid row fails it, and
+    | with --skip-invalid it lists the rows it would skip. It writes no rejects
+    | file, and does not check that --rejects could be written.
     |
     | EXAMPLES:
     |   bd import                        # Import from configured import.path
@@ -3737,11 +3751,16 @@ bd init
     | into an empty database) restores what it can: records that fail validation are
     | skipped, their lines are saved beside the source as <file>.rejected.jsonl
     | (replacing an earlier one; the source is never modified), and a warning names
-    | the count and the first reason. Repair them and re-import with bd import.
-    | Limits: a line that cannot be parsed still stops the import before any write;
-    | saving the skipped lines is best-effort (a failed save only warns, and the
-    | lines are still in the source); and a run that skips nothing leaves an earlier
-    | <file>.rejected.jsonl in place.
+    | the count and the first reason. Dependencies other records declare on a
+    | skipped record are skipped too, and a second warning counts them. To restore
+    | the skipped records and those dependencies, fix the records in the source (or
+    | register the custom status or type they use) and re-import the whole source
+    | with bd import <file>; re-importing <file>.rejected.jsonl alone would leave
+    | the dependencies out, and a record changed locally in the meantime is skipped
+    | as stale, its dependencies with it. Limits: a line that cannot be parsed still
+    | stops the import before any write; saving the skipped lines is best-effort (a
+    | failed save only warns, and the lines are still in the source); and a run that
+    | skips nothing leaves an earlier <file>.rejected.jsonl in place.
     |
     | Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
     |   Skips all interactive prompts, using sensible defaults:

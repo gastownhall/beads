@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -82,15 +83,22 @@ func TestRejectPathCollidesWithSource(t *testing.T) {
 		t.Fatal("sameImportFile = true for a distinct existing file")
 	}
 
-	// The flag check refuses the collision, and never applies to stdin.
+	// The flag check refuses the collision. A piped stdin is no file, so
+	// nothing collides with it (TestRejectPathCollidesWithRedirectedStdin
+	// covers a stdin that is a file).
 	origSkip, origRejects := importSkipInvalid, importRejectsPath
 	t.Cleanup(func() { importSkipInvalid, importRejectsPath = origSkip, origRejects })
 	importSkipInvalid, importRejectsPath = true, rel
-	if err := validateImportRejectsFlag(source, false); err == nil || !strings.Contains(err.Error(), "is the input file") {
+	if err := validateImportRejectsFlag(source, nil); err == nil || !strings.Contains(err.Error(), "is the input file") {
 		t.Fatalf("validateImportRejectsFlag = %v, want it to refuse the input file", err)
 	}
-	if err := validateImportRejectsFlag("", true); err != nil {
-		t.Fatalf("validateImportRejectsFlag(stdin) = %v, want nil", err)
+	pipeR, pipeW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Pipe: %v", err)
+	}
+	t.Cleanup(func() { _ = pipeR.Close(); _ = pipeW.Close() })
+	if err := validateImportRejectsFlag("", pipeR); err != nil {
+		t.Fatalf("validateImportRejectsFlag(piped stdin) = %v, want nil", err)
 	}
 
 	// A hard-link alias has a distinct canonical path but the same underlying
@@ -111,6 +119,150 @@ func TestRejectPathCollidesWithSource(t *testing.T) {
 	if !sameImportFile(symlinkPath, source) {
 		t.Fatal("sameImportFile = false for a symlink to the source")
 	}
+}
+
+// `bd import - --skip-invalid --rejects F < F` reads F through stdin, where
+// the path check above has no source path to compare, and writeImportRejects
+// would rename the rejects (an empty file when every row is valid) over F
+// before the import wrote anything. A stdin that is a regular file is the
+// input as much as a named one: --rejects naming it through any alias is
+// refused, and any other path, existing or not, is not.
+func TestRejectPathCollidesWithRedirectedStdin(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "backup.jsonl")
+	other := filepath.Join(dir, "other.jsonl")
+	for _, path := range []string{source, other} {
+		if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+	stdin, err := os.Open(source)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = stdin.Close() })
+
+	origSkip, origRejects := importSkipInvalid, importRejectsPath
+	t.Cleanup(func() { importSkipInvalid, importRejectsPath = origSkip, origRejects })
+	importSkipInvalid = true
+	check := func(rejects string, wantRefused bool) {
+		t.Helper()
+		importRejectsPath = rejects
+		err := validateImportRejectsFlag("", stdin)
+		if refused := err != nil && strings.Contains(err.Error(), "is the input file"); refused != wantRefused {
+			t.Errorf("validateImportRejectsFlag(--rejects %s, stdin from %s) = %v, want refused=%v", rejects, source, err, wantRefused)
+		}
+	}
+
+	check(source, true)
+	check(filepath.Join(dir, "..", filepath.Base(dir), "backup.jsonl"), true)
+	check(other, false)
+	check(filepath.Join(dir, "rejects.jsonl"), false) // does not exist yet
+
+	hardLink := filepath.Join(dir, "hard-link.jsonl")
+	if err := os.Link(source, hardLink); err != nil {
+		t.Skipf("hard links unsupported in this environment: %v", err)
+	}
+	check(hardLink, true)
+	symlink := filepath.Join(dir, "alias.jsonl")
+	if err := os.Symlink(source, symlink); err != nil {
+		t.Skipf("symlinks unsupported in this environment: %v", err)
+	}
+	check(symlink, true)
+}
+
+// A dependency is saved on the line of the record that declares it, so when
+// the screen rejects record B, the writer drops the edges kept records
+// declare on B ("target not found"), and only re-importing the declaring
+// lines brings them back. The import reports count them.
+func TestDependenciesOnRejected(t *testing.T) {
+	t.Run("from the writer's skipped dependencies", func(t *testing.T) {
+		rejected := []importRejection{
+			{Line: 2, ID: "tst-b", Reason: "invalid status: verify"},
+			{Line: 7, Reason: "title is required"}, // a title-only row: nothing can depend on it
+		}
+		skipped := []string{
+			"tst-a -> tst-b: target not found",
+			"tst-c -> tst-b: target not found",
+			"tst-c -> tst-x: target not found",   // a target the file never held
+			"tst-d -> tst-b.1: target not found", // a child id, not the rejected record
+		}
+		if got := dependenciesOnRejected(skipped, rejected); got != 2 {
+			t.Errorf("dependenciesOnRejected = %d, want 2 (tst-a and tst-c on tst-b)", got)
+		}
+		if got := dependenciesOnRejected(skipped, nil); got != 0 {
+			t.Errorf("dependenciesOnRejected with nothing rejected = %d, want 0", got)
+		}
+	})
+
+	t.Run("from the kept rows, for an importer that reports none", func(t *testing.T) {
+		rejected := []importRejection{{Line: 2, ID: "tst-b"}, {Line: 9, ID: "oth-b"}, {Line: 11, ID: "tst-e"}}
+		kept := []*types.Issue{
+			{ID: "tst-a", Dependencies: []*types.Dependency{{DependsOnID: "tst-b", Type: types.DepBlocks}}},
+			{ID: "tst-c", Dependencies: []*types.Dependency{
+				{IssueID: "tst-c", DependsOnID: "tst-b", Type: types.DepParentChild},
+				{DependsOnID: "oth-b", Type: types.DepBlocks}, // another prefix: external, never looked up
+			}},
+			// tst-e has a rejected row, but this kept duplicate writes it.
+			{ID: "tst-d", Dependencies: []*types.Dependency{{DependsOnID: "tst-e", Type: types.DepBlocks}}},
+			{ID: "tst-e"},
+			// A retaining sweep retired tst-r: the import does not write it.
+			{ID: "tst-r", Dependencies: []*types.Dependency{{DependsOnID: "tst-b", Type: types.DepBlocks}}},
+		}
+		if got := declaredDependenciesOnRejected(kept, rejected, []string{"tst-r"}); got != 2 {
+			t.Errorf("declaredDependenciesOnRejected = %d, want 2 (tst-a and tst-c on tst-b)", got)
+		}
+	})
+}
+
+// The rejection reports name the dependencies lost with the skipped records,
+// and the remedy that restores both: the records fixed in the source (or
+// their status or type registered) and the whole source re-imported. The
+// saved lines alone would not do it, since they do not carry the edges other
+// records declare on them.
+func TestRejectionReportsPointAtTheSource(t *testing.T) {
+	rejected := []importRejection{{Line: 2, ID: "tst-b", Reason: "invalid status: verify", raw: []byte(`{"id":"tst-b"}`)}}
+	skipped := []string{"tst-a -> tst-b: target not found", "tst-c -> tst-b: target not found"}
+
+	t.Run("bd import", func(t *testing.T) {
+		var out strings.Builder
+		renderImportRejections(&out, importResultJSON{Rejected: rejected, RejectsFile: "r.jsonl", SkippedDependencies: skipped})
+		for _, want := range []string{"line 2 (issue tst-b)", "Skipped lines saved to r.jsonl", "Also skipped 2 dependencies", "fix the skipped records in the original input", "re-import all of it"} {
+			if !strings.Contains(out.String(), want) {
+				t.Errorf("rejection report missing %q:\n%s", want, out.String())
+			}
+		}
+		out.Reset()
+		renderImportRejections(&out, importResultJSON{Rejected: rejected})
+		if strings.Contains(out.String(), "dependencies") {
+			t.Errorf("a run that skipped no dependency on the rejected records reports one:\n%s", out.String())
+		}
+	})
+
+	t.Run("recovery", func(t *testing.T) {
+		source := filepath.Join(t.TempDir(), "issues.jsonl")
+		var out strings.Builder
+		if got := quarantineRecoveryRejects(&out, source, rejected); got != source+".rejected.jsonl" {
+			t.Fatalf("quarantineRecoveryRejects = %q, want the quarantine beside the source", got)
+		}
+		warnRecoveryDependenciesOnRejected(&out, source, 2)
+		warnRecoveryDependenciesOnRejected(&out, source, 0)
+		text := out.String()
+		arg, note := remedy.CommandArg(runtime.GOOS, source, "<file>")
+		for _, want := range []string{
+			"saved to " + source + ".rejected.jsonl",
+			"fix them in " + source,
+			"re-import it: bd import " + arg + note + "\n",
+			"also skipped 2 dependencies other records declare on the skipped records; re-importing " + source,
+		} {
+			if !strings.Contains(text, want) {
+				t.Errorf("recovery warning missing %q:\n%s", want, text)
+			}
+		}
+		if strings.Count(text, "dependencies other records declare") != 1 {
+			t.Errorf("want exactly one dependency warning (none for a count of 0):\n%s", text)
+		}
+	})
 }
 
 // TestWriteRejectFileHardening pins the write-path properties of the rejects

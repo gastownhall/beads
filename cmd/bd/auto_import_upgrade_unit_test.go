@@ -583,6 +583,64 @@ func TestMaybeAutoImportJSONL_FallbackImporter_AllRejectedStampsWithoutCommit(t 
 	}
 }
 
+// fakeVocabularyErrorStore is a fakeJSONLImporterStore whose custom
+// status/type vocabulary cannot be read.
+type fakeVocabularyErrorStore struct {
+	fakeJSONLImporterStore
+	readErr error
+	reads   atomic.Int32
+}
+
+func (f *fakeVocabularyErrorStore) ReadInsertVocabulary(context.Context) ([]string, []string, error) {
+	f.reads.Add(1)
+	return nil, nil, f.readErr
+}
+
+// TestMaybeAutoImportJSONL_VocabularyReadErrorWarnsAndStamps pins the
+// auto-import half of AC-8 (GH#4492) on the single-transaction path: when the
+// screen cannot read the custom statuses and types a row needs, nothing is
+// imported and the row is not rejected; the warning names the row and the
+// read error, and the attempt is stamped, so the outer command goes on and
+// the next one does not read the file again.
+func TestMaybeAutoImportJSONL_VocabularyReadErrorWarnsAndStamps(t *testing.T) {
+	prev := commandDidWrite.Load()
+	commandDidWrite.Store(false)
+	t.Cleanup(func() { commandDidWrite.Store(prev) })
+
+	dir := t.TempDir()
+	line := `{"id":"unit-1","title":"custom status","status":"verify","issue_type":"task"}`
+	if err := os.WriteFile(filepath.Join(dir, "issues.jsonl"), []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &fakeVocabularyErrorStore{fakeJSONLImporterStore: fakeJSONLImporterStore{imported: 1}, readErr: errors.New("custom_types unreadable")}
+
+	stderr := captureStderr(t, func() {
+		maybeAutoImportJSONL(context.Background(), store, dir)
+		maybeAutoImportJSONL(context.Background(), store, dir)
+	})
+
+	if got := store.calls.Load(); got != 0 {
+		t.Errorf("ImportJSONLData ran %d time(s); a vocabulary that cannot be read must stop the import before it writes", got)
+	}
+	if got := store.reads.Load(); got != 1 {
+		t.Errorf("the vocabulary was read %d time(s), want 1: the stamped attempt must not be retried", got)
+	}
+	for _, want := range []string{"auto-import from", "line 1 (issue unit-1)", "custom_types unreadable", "Your issues are still safe in"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want it to contain %q", stderr, want)
+		}
+	}
+	if strings.Contains(stderr, "invalid record") {
+		t.Errorf("a row whose vocabulary could not be read was reported as rejected: %q", stderr)
+	}
+	if _, err := os.Stat(autoImportStampPath(dir)); err != nil {
+		t.Errorf("the attempt must be stamped: %v", err)
+	}
+	if commandDidWrite.Load() {
+		t.Error("an import that wrote nothing claimed a write")
+	}
+}
+
 // TestMaybeAutoImportJSONL_FallbackImporter_RejectedRowsWithMemoriesCommit
 // pins the other side: when every issue row was rejected but the file's
 // eligible memories landed, the fallback route commits them and stamps.

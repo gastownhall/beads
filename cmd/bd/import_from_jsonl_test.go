@@ -700,6 +700,44 @@ func TestImportFromLocalJSONL(t *testing.T) {
 			t.Error("NoHistory bead must not be ephemeral=true after import")
 		}
 	})
+
+	t.Run("screens against the server store's registered statuses", func(t *testing.T) {
+		// GH#4492 was reported on a server-mode store: the recovery screen
+		// reads its vocabulary through DoltStore.ReadInsertVocabulary. A
+		// status registered in the database is accepted; an unregistered one
+		// is quarantined, with the dependency declared on it counted.
+		tmpDir := t.TempDir()
+		store := newTestStore(t, filepath.Join(tmpDir, "dolt"))
+		ctx := context.Background()
+		if err := store.SetConfig(ctx, "status.custom", "registered:active"); err != nil {
+			t.Fatalf("SetConfig(status.custom): %v", err)
+		}
+
+		const badLine = `{"id":"test-bad","title":"Unregistered status","status":"verify","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}`
+		jsonlContent := `{"id":"test-reg","title":"Registered status","status":"registered","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+` + badLine + `
+{"id":"test-dep","title":"Blocked by the rejected one","status":"open","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z","dependencies":[{"issue_id":"test-dep","depends_on_id":"test-bad","type":"blocks","created_at":"2025-01-01T00:00:00Z"}]}
+`
+		jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(jsonlContent), 0644); err != nil {
+			t.Fatalf("Failed to write JSONL file: %v", err)
+		}
+
+		result, err := importFromLocalJSONLFull(ctx, store, jsonlPath)
+		if err != nil {
+			t.Fatalf("importFromLocalJSONLFull failed: %v", err)
+		}
+		if result.Issues != 2 || len(result.Rejected) != 1 || result.Rejected[0].ID != "test-bad" || result.Rejected[0].Line != 2 || result.DependenciesOnRejected != 1 {
+			t.Fatalf("result = {Issues:%d Rejected:%+v DependenciesOnRejected:%d}, want 2 imported, test-bad on line 2 rejected, 1 dependency on it skipped",
+				result.Issues, result.Rejected, result.DependenciesOnRejected)
+		}
+		if issue, err := store.GetIssue(ctx, "test-reg"); err != nil || issue.Status != types.Status("registered") {
+			t.Errorf("the record with a database-registered status was not imported as is: issue=%+v err=%v", issue, err)
+		}
+		if quarantine, err := os.ReadFile(jsonlPath + ".rejected.jsonl"); err != nil || string(quarantine) != badLine+"\n" {
+			t.Errorf("quarantine = %q (err %v), want the rejected line", quarantine, err)
+		}
+	})
 }
 
 func TestImportFromLocalJSONL_LegacyFormats(t *testing.T) {

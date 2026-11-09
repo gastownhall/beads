@@ -96,20 +96,29 @@ with the same checks (and the same custom statuses and types) a create
 uses. By default one invalid row stops the import: the error names its line
 and the reason, and nothing is imported. --skip-invalid imports the valid
 rows and reports the skipped ones (line, id, reason; "rejected" in --json);
-add --rejects <file> to save the skipped lines verbatim, ready to repair
-and re-import. A line that is not valid JSON, or does not decode as a
-record, always stops the import. Stale and unchanged rows are not written,
-so they are not validated.
+add --rejects <file> to save the skipped lines verbatim. A line that is not
+valid JSON, or does not decode as a record, always stops the import. Stale
+and unchanged rows are not written, so they are not validated.
+
+A dependency is saved on the line of the record that declares it, so one
+that a kept record declares on a skipped record is skipped too (stderr
+counts them). To restore the skipped records with those dependencies, fix
+them in the source (or register the custom status or type they use) and
+re-import the whole source: re-importing only the skipped lines restores
+the records but not those dependencies. A declaring record changed locally
+in the meantime is skipped as stale, its dependencies with it; add those
+with bd dep add.
 
 The skipped rows are listed on stderr, with --json too, and count in
 "skipped". --rejects replaces the file on each run (an empty file when
-nothing was skipped; created 0600) and refuses to name the input file. It
-is written before the first database write, so a rejects file that cannot
-be written stops the import before it changes anything; it is not a
-receipt, though: if the import then fails partway, the file stays. A dry
-run validates too, so it predicts the real run: by default an invalid row
-fails it, and with --skip-invalid it lists the rows it would skip but
-writes no rejects file.
+nothing was skipped; created 0600) and refuses to name the input file,
+including the file stdin reads. It is written before the first database
+write, so a rejects file that cannot be written stops the import before it
+changes anything; it is not a receipt, though: if the import then fails
+partway, the file stays. A dry run validates too, so it predicts which rows
+the real run imports and skips: by default an invalid row fails it, and
+with --skip-invalid it lists the rows it would skip. It writes no rejects
+file, and does not check that --rejects could be written.
 
 EXAMPLES:
   bd import                        # Import from configured import.path
@@ -211,7 +220,7 @@ func runImportInner(args []string) error {
 	fromStdin := importInput == "-" || (len(args) > 0 && args[0] == "-")
 
 	if fromStdin {
-		if err := validateImportRejectsFlag("", true); err != nil {
+		if err := validateImportRejectsFlag("", os.Stdin); err != nil {
 			return err
 		}
 		return runImportFromReader(ctx, os.Stdin, "stdin")
@@ -244,7 +253,7 @@ func runImportInner(args []string) error {
 		}
 	}
 
-	if err := validateImportRejectsFlag(jsonlPath, false); err != nil {
+	if err := validateImportRejectsFlag(jsonlPath, nil); err != nil {
 		return err
 	}
 
@@ -535,7 +544,7 @@ func applyImportRejections(result *importResultJSON, rejected []importRejection,
 // modes. The rows the screen would skip are listed on stderr first, in both
 // modes, so a --json caller still sees them where a person would.
 func renderImportDryRun(result importResultJSON, memoriesCount int, source string, dedupHits int) error {
-	renderImportRejections(os.Stderr, result.Rejected, "", true)
+	renderImportRejections(os.Stderr, result)
 	if jsonOutput {
 		return outputJSON(result)
 	}
@@ -565,7 +574,7 @@ func renderImportDryRun(result importResultJSON, memoriesCount int, source strin
 // first, in both modes, so a --json caller still sees them where a person
 // would.
 func renderImportOutcome(result importResultJSON, source string, dedupHits int) error {
-	renderImportRejections(os.Stderr, result.Rejected, result.RejectsFile, false)
+	renderImportRejections(os.Stderr, result)
 	if jsonOutput {
 		return outputJSON(result)
 	}

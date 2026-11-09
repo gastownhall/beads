@@ -10,9 +10,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/uow"
@@ -162,8 +164,14 @@ func storeImportVocabulary(st storage.DoltStorage) importVocabularyReader {
 }
 
 // proxiedImportVocabulary reads the vocabulary through the proxied-server unit
-// of work's config use case: the same table/config/YAML composition its
-// ImportBatch validates against, errors returned.
+// of work's config use case: the table/config/YAML composition its
+// ImportBatch validates against (issueops.ComposeCustomTypes), errors
+// returned. It fails closed where the writer's resolver
+// (issueops.ResolveCustomTypesInTx) reads on: a custom_types query that fails
+// for a reason other than a missing table, a row that does not scan, or a
+// types.custom read that fails is an error here, so the import stops before
+// writing anything, while ImportBatch would have fallen back and validated
+// the rows.
 func proxiedImportVocabulary(ctx context.Context) ([]string, []string, error) {
 	if uowProvider == nil {
 		return nil, nil, errors.New("proxied-server UOW provider not initialized")
@@ -316,21 +324,37 @@ var (
 // without --skip-invalid (an output flag must not silently change which rows
 // are imported), or naming the input itself, through any alias — the same
 // cleaned path, a symlink to it, or a hard link — since writing it would
-// destroy the source being read.
-func validateImportRejectsFlag(source string, fromStdin bool) error {
+// destroy the source being read. stdin is non-nil when the import reads it
+// (`bd import -`; source is then unused): a pipe has no file a path can name,
+// but `bd import - < file` reads a regular file, which is the input too.
+func validateImportRejectsFlag(source string, stdin *os.File) error {
 	if importRejectsPath == "" {
 		return nil
 	}
 	if !importSkipInvalid {
 		return errors.New("--rejects requires --skip-invalid (it writes the lines --skip-invalid sets aside)")
 	}
-	if fromStdin {
-		return nil
+	var collides bool
+	if stdin != nil {
+		collides = stdinReadsFile(stdin, importRejectsPath)
+	} else {
+		collides = sameImportFile(source, importRejectsPath)
 	}
-	if sameImportFile(source, importRejectsPath) {
+	if collides {
 		return fmt.Errorf("--rejects %s is the input file; choose a different path", importRejectsPath)
 	}
 	return nil
+}
+
+// stdinReadsFile reports whether stdin is the regular file at path: the same
+// file (os.SameFile), so a symlink or a hard link to it counts as well.
+func stdinReadsFile(stdin *os.File, path string) bool {
+	in, err := stdin.Stat()
+	if err != nil || !in.Mode().IsRegular() {
+		return false
+	}
+	out, err := os.Stat(path)
+	return err == nil && os.SameFile(in, out)
 }
 
 // sameImportFile reports whether two paths name the same file: equal once
@@ -420,14 +444,17 @@ func screenImportWriteSet(ctx context.Context, writeSet []*types.Issue, sources 
 	return kept, rejected, importRejectsPath, nil
 }
 
-// renderImportRejections lists the rejected rows on stderr: the first
-// importRejectsShown of them, then the total.
-func renderImportRejections(w io.Writer, rejected []importRejection, rejectsFile string, dryRun bool) {
+// renderImportRejections lists the rows an import's screen rejected on
+// stderr: the first importRejectsShown of them, then the total, where
+// --rejects saved them, and how many dependencies on them the import skipped
+// as well.
+func renderImportRejections(w io.Writer, result importResultJSON) {
+	rejected := result.Rejected
 	if len(rejected) == 0 {
 		return
 	}
 	verb := "Skipped"
-	if dryRun {
+	if result.DryRun {
 		verb = "Would skip"
 	}
 	fmt.Fprintf(w, "%s %d invalid record(s):\n", verb, len(rejected))
@@ -438,9 +465,85 @@ func renderImportRejections(w io.Writer, rejected []importRejection, rejectsFile
 		}
 		fmt.Fprintf(w, "  %s: %s\n", r.describe(), r.Reason) //nolint:gosec // G705: stderr, not a browser context
 	}
-	if rejectsFile != "" {
-		fmt.Fprintf(w, "Skipped lines saved to %s\n", rejectsFile) //nolint:gosec // G705: stderr, not a browser context
+	if result.RejectsFile != "" {
+		fmt.Fprintf(w, "Skipped lines saved to %s\n", result.RejectsFile) //nolint:gosec // G705: stderr, not a browser context
 	}
+	if n := dependenciesOnRejected(result.SkippedDependencies, rejected); n > 0 {
+		fmt.Fprintf(w, "Also skipped %d dependencies other records declare on them: to restore those too, fix the skipped records in the original input (or register the custom status or type they use) and re-import all of it\n", n)
+	}
+}
+
+// dependenciesOnRejected counts the dependencies an import skipped (as it
+// reports them: "<issue> -> <target>: <reason>") whose target is a rejected
+// record: edges kept records declare on a skipped one. An edge is saved on
+// the line of the record that declares it, so re-importing only the skipped
+// lines would not restore these; re-importing the whole source once the
+// records are valid does.
+func dependenciesOnRejected(skippedDependencies []string, rejected []importRejection) int {
+	targets := rejectedRecordIDs(rejected)
+	n := 0
+	for _, skipped := range skippedDependencies {
+		_, edge, _ := strings.Cut(skipped, " -> ")
+		target, _, _ := strings.Cut(edge, ": ")
+		if _, onRejected := targets[target]; onRejected {
+			n++
+		}
+	}
+	return n
+}
+
+// declaredDependenciesOnRejected counts the dependencies the kept rows an
+// import wrote (all but retiredIDs, which it skipped) declare on a rejected
+// record no kept row writes, external targets (which the writer never looks
+// up) aside. It is dependenciesOnRejected for an importer that reports no
+// skipped dependencies and writes only into an empty database (the embedded
+// auto-import), where each of these is an edge the writer drops for want of
+// its target.
+func declaredDependenciesOnRejected(kept []*types.Issue, rejected []importRejection, retiredIDs []string) int {
+	targets := rejectedRecordIDs(rejected)
+	retired := make(map[string]struct{}, len(retiredIDs))
+	for _, id := range retiredIDs {
+		retired[id] = struct{}{}
+	}
+	written := make([]*types.Issue, 0, len(kept))
+	for _, issue := range kept {
+		if issue == nil {
+			continue
+		}
+		delete(targets, issue.ID)
+		if _, skipped := retired[issue.ID]; !skipped {
+			written = append(written, issue)
+		}
+	}
+	n := 0
+	for _, issue := range written {
+		for _, dep := range issue.Dependencies {
+			if dep == nil {
+				continue
+			}
+			// The writer's rule: an edge with no issue_id belongs to its row.
+			from := dep.IssueID
+			if from == "" {
+				from = issue.ID
+			}
+			if _, onRejected := targets[dep.DependsOnID]; onRejected && !issueops.IsExternalDepTarget(from, dep.DependsOnID) {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// rejectedRecordIDs returns the ids of the rejected rows. A title-only row
+// has none, and nothing can depend on it.
+func rejectedRecordIDs(rejected []importRejection) map[string]struct{} {
+	ids := make(map[string]struct{}, len(rejected))
+	for _, r := range rejected {
+		if r.ID != "" {
+			ids[r.ID] = struct{}{}
+		}
+	}
+	return ids
 }
 
 // recoveryQuarantinePath is where a recovery import (bootstrap, init
@@ -452,21 +555,41 @@ func recoveryQuarantinePath(source string) string {
 
 // quarantineRecoveryRejects saves a recovery import's rejected lines to
 // <source>.rejected.jsonl (replacing an earlier quarantine) and warns on
-// stderr with the count, a representative line and reason, and where they
-// went. With nothing rejected it does nothing, leaving any earlier quarantine
-// alone. A quarantine that cannot be written is a warning, not a failure: the
-// source still holds every line, and the valid rows are still restored. It
-// returns the path written, or "" when nothing was saved.
+// stderr with the count, a representative line and reason, where they went,
+// and how to restore them: fix them in the source (or register the custom
+// status or type they use) and re-import the whole source, which also
+// restores the dependencies other records declare on them; re-importing the
+// quarantine alone would not, since an edge travels on the line of the record
+// that declares it. With nothing rejected it does nothing, leaving any earlier
+// quarantine alone. A quarantine that cannot be written is a warning, not a
+// failure: the source still holds every line, and the valid rows are still
+// restored. It returns the path written, or "" when nothing was saved.
 func quarantineRecoveryRejects(w io.Writer, source string, rejected []importRejection) string {
 	if len(rejected) == 0 {
 		return ""
 	}
 	qpath := recoveryQuarantinePath(source)
-	fmt.Fprintf(w, "warning: skipped %d invalid record(s) from %s; first: %s: %s\n", len(rejected), source, rejected[0].describe(), rejected[0].Reason) //nolint:gosec // G705: stderr, not a browser context
+	fmt.Fprintf(w, "warning: skipped %d invalid record(s) from %s; first: %s: %s\n", len(rejected), remedy.PrintedValue(source), rejected[0].describe(), rejected[0].Reason) //nolint:gosec // G705: stderr, not a browser context
+	saved := qpath
 	if err := writeImportRejects(qpath, rejected); err != nil {
-		fmt.Fprintf(w, "warning: could not save the skipped lines to %s: %v; they are still in %s\n", qpath, err, source) //nolint:gosec // G705: stderr, not a browser context
-		return ""
+		fmt.Fprintf(w, "warning: could not save the skipped lines to %s: %v; they are still in %s\n", remedy.PrintedValue(qpath), err, remedy.PrintedValue(source)) //nolint:gosec // G705: stderr, not a browser context
+		saved = ""
+	} else {
+		fmt.Fprintf(w, "  the skipped lines were saved to %s\n", remedy.PrintedValue(qpath)) //nolint:gosec // G705: stderr, not a browser context
 	}
-	fmt.Fprintf(w, "  the skipped lines were saved to %s; repair them (or register the custom status/type they use) and re-import with: bd import %s\n", qpath, qpath) //nolint:gosec // G705: stderr, not a browser context
-	return qpath
+	arg, note := remedy.CommandArg(runtime.GOOS, source, "<file>")
+	fmt.Fprintf(w, "  to restore them, fix them in %s (or register the custom status or type they use) and re-import it: bd import %s%s\n", remedy.PrintedValue(source), arg, note) //nolint:gosec // G705: stderr, not a browser context
+	return saved
+}
+
+// warnRecoveryDependenciesOnRejected follows a recovery import that skipped n
+// dependencies other records declare on its rejected records
+// (dependenciesOnRejected) with a warning that the re-import of source
+// quarantineRecoveryRejects describes restores them too. n == 0 prints
+// nothing.
+func warnRecoveryDependenciesOnRejected(w io.Writer, source string, n int) {
+	if n == 0 {
+		return
+	}
+	fmt.Fprintf(w, "warning: also skipped %d dependencies other records declare on the skipped records; re-importing %s once they are fixed restores them\n", n, remedy.PrintedValue(source)) //nolint:gosec // G705: stderr, not a browser context
 }

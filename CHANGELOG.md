@@ -1237,17 +1237,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first offending record's line and reason with nothing imported.
   `--skip-invalid` imports the valid records and lists the skipped ones on
   stderr (also under `--json`, which gains `rejected` and `rejects_file`);
-  `--rejects <file>` saves the skipped lines verbatim for repair and
-  re-import. A dry run validates too, so `bd import --dry-run` of a file
-  with one bad status now exits nonzero where it printed a plan and exited
-  0: a dry run predicts the real run. A dry run never writes the
-  `--rejects` file. The recovery imports (`bd bootstrap`,
-  `bd init --from-jsonl` and auto-import into an empty database) restore
-  what they can instead of failing on one bad record: invalid records are
-  skipped, their lines saved beside the source as `<file>.rejected.jsonl`
-  (the source is never modified; a failed save only warns), and the valid
-  rows and memories still land. An auto-import whose every record was
-  skipped stamps the attempt so it is not retried, and commits nothing.
+  `--rejects <file>` saves the skipped lines verbatim, and refuses a path
+  that names the input, including the file `bd import - < file` reads. A
+  dry run validates too, so `bd import --dry-run` of a file with one bad
+  status now exits nonzero where it printed a plan and exited 0: a dry run
+  predicts which rows the real run imports and skips. A dry run never
+  writes the `--rejects` file, and does not check that it can be written.
+  The recovery imports (`bd bootstrap`, `bd init --from-jsonl` and
+  auto-import into an empty database) restore what they can instead of
+  failing on one bad record: invalid records are skipped, their lines saved
+  beside the source as `<file>.rejected.jsonl` (the source is never
+  modified; a failed save only warns; `.beads/.gitignore` ignores the
+  file, and `bd doctor --fix` adds the pattern to an existing one), and
+  the valid rows and memories still land. An auto-import whose every
+  record was skipped stamps the attempt so it is not retried, and commits
+  nothing. A dependency is saved on the line of the record that declares
+  it, so the dependencies other records declare on a skipped record are
+  skipped with it; every route counts them on stderr. To restore the
+  skipped records and those dependencies, fix the records in the source
+  (or register the custom status or type they use) and re-import the whole
+  source: re-importing only the skipped lines would leave the dependencies
+  out.
   Thanks to @maphew for the original design and tests.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools

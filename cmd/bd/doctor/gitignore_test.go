@@ -1670,6 +1670,35 @@ func TestGitignore_ContainsDoltServerConfig(t *testing.T) {
 	}
 }
 
+// TestGitignore_ContainsImportQuarantine verifies that the quarantine a
+// recovery import writes beside its source (<source>.rejected.jsonl, see
+// recoveryQuarantinePath in cmd/bd) is ignored: bd init --from-jsonl stages
+// .beads/ for its commit right after the import, and the quarantine is a
+// local repair artifact repeating lines the source already holds. It must be
+// in requiredPatterns too, so bd doctor --fix heals an existing
+// .beads/.gitignore.
+func TestGitignore_ContainsImportQuarantine(t *testing.T) {
+	const pattern = "*.rejected.jsonl"
+
+	if !containsGitignorePattern(GitignoreTemplate, pattern) {
+		t.Errorf("GitignoreTemplate should contain %q", pattern)
+	}
+	if missing := missingGitignorePatterns(GitignoreTemplate); len(missing) != 0 {
+		t.Errorf("GitignoreTemplate is missing required patterns %v", missing)
+	}
+
+	found := false
+	for _, p := range requiredPatterns {
+		if p == pattern {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("requiredPatterns should include %q", pattern)
+	}
+}
+
 // TestGitignore_ContainsHTTPTarget verifies that the http backend's activation
 // sidecar is ignored like proxied_server_client_info.json, the per-user
 // sidecar it follows. It names the server the bearer ladder authorizes

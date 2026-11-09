@@ -152,6 +152,9 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 			fmt.Fprintf(os.Stderr, "If this persists, please report at https://github.com/gastownhall/beads/issues\n\n")
 			return
 		}
+		if imported > 0 {
+			warnRecoveryDependenciesOnRejected(os.Stderr, jsonlPath, declaredDependenciesOnRejected(kept, rejected, retiredIDs))
+		}
 		// A file whose every row was retired or rejected imported nothing,
 		// but it was attempted: stamp it, or every command would re-read it.
 		// Only what was written is reported (and committed).

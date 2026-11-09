@@ -560,11 +560,16 @@ A JSONL import (bootstrap, bd init --from-jsonl, and the automatic import
 into an empty database) restores what it can: records that fail validation are
 skipped, their lines are saved beside the source as <file>.rejected.jsonl
 (replacing an earlier one; the source is never modified), and a warning names
-the count and the first reason. Repair them and re-import with bd import.
-Limits: a line that cannot be parsed still stops the import before any write;
-saving the skipped lines is best-effort (a failed save only warns, and the
-lines are still in the source); and a run that skips nothing leaves an earlier
-<file>.rejected.jsonl in place.
+the count and the first reason. Dependencies other records declare on a
+skipped record are skipped too, and a second warning counts them. To restore
+the skipped records and those dependencies, fix the records in the source (or
+register the custom status or type they use) and re-import the whole source
+with bd import <file>; re-importing <file>.rejected.jsonl alone would leave
+the dependencies out, and a record changed locally in the meantime is skipped
+as stale, its dependencies with it. Limits: a line that cannot be parsed still
+stops the import before any write; saving the skipped lines is best-effort (a
+failed save only warns, and the lines are still in the source); and a run that
+skips nothing leaves an earlier <file>.rejected.jsonl in place.
 
 Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
   Skips all interactive prompts, using sensible defaults:
