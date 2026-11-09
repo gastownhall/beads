@@ -557,3 +557,134 @@ func TestInitSchemaReadOnlyOpenOfExistingDatabaseIssuesNoCreateDatabase(t *testi
 		t.Fatalf("unmet SQL expectations: %v", err)
 	}
 }
+
+// TestBootstrapPreparerBareCreateArbitrationUnchanged pins that the probe did
+// not disturb the #5012 fresh-bootstrap ownership proof on an invisible
+// database (AC-2): the bare CREATE still arbitrates creation atomically, only
+// its success captures authority, an already-exists race proceeds without
+// authority, and the creation-error classifications are exactly what they
+// were.
+func TestBootstrapPreparerBareCreateArbitrationUnchanged(t *testing.T) {
+	t.Run("successful bare CREATE captures authority", func(t *testing.T) {
+		prep, conn, mock := newPreparerMock(t)
+		expectDatabaseExistsProbe(mock, "beads", false)
+		mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `beads`")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		expectPreparationUse(mock)
+		expectPreparationCapture(mock, "beads")
+
+		capability, err := prep.prepare(context.Background(), conn)
+		if err != nil {
+			t.Fatalf("prepare() error = %v, want nil", err)
+		}
+		if capability == nil {
+			t.Fatal("prepare() capability = nil, want the captured authority: this attempt won the bare CREATE")
+		}
+		if !prep.created {
+			t.Error("created = false after a successful bare CREATE")
+		}
+		if prep.heal != capability {
+			t.Error("heal does not match the captured capability")
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	t.Run("already-exists race proceeds without authority", func(t *testing.T) {
+		prep, conn, mock := newPreparerMock(t)
+		expectDatabaseExistsProbe(mock, "beads", false)
+		mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `beads`")).
+			WillReturnError(&mysql.MySQLError{Number: 1007, Message: "Can't create database 'beads'; database exists"})
+		expectPreparationUse(mock)
+
+		capability, err := prep.prepare(context.Background(), conn)
+		if err != nil {
+			t.Fatalf("prepare() error = %v, want nil: 1007 is the lost create race, not a failure", err)
+		}
+		if capability != nil {
+			t.Fatal("prepare() capability = non-nil; a database the bare CREATE did not win carries no authority")
+		}
+		if prep.created {
+			t.Error("created = true after losing the create race")
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	t.Run("bare CREATE serialization keeps its retryable classification", func(t *testing.T) {
+		prep, conn, mock := newPreparerMock(t)
+		expectDatabaseExistsProbe(mock, "beads", false)
+		mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `beads`")).
+			WillReturnError(&mysql.MySQLError{Number: 1213, Message: "Deadlock found when trying to get lock"})
+
+		_, err := prep.prepare(context.Background(), conn)
+		if err == nil {
+			t.Fatal("prepare() error = nil, want the CREATE failure surfaced")
+		}
+		var permanentErr *backoff.PermanentError
+		if errors.As(classifyInitSchemaError(err), &permanentErr) {
+			t.Fatalf("classifyInitSchemaError(%v) is permanent; only the bare CREATE keeps the serialization retry", err)
+		}
+		if !prep.created {
+			// Not an assertion of the contract, just a sanity check that the
+			// failed CREATE did not record creation.
+			t.Log("created stays false after the failed CREATE")
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	t.Run("other bare CREATE failures stay permanent", func(t *testing.T) {
+		prep, conn, mock := newPreparerMock(t)
+		expectDatabaseExistsProbe(mock, "beads", false)
+		mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `beads`")).
+			WillReturnError(errors.New("Error 1105 (HY000): the server is read-only"))
+
+		_, err := prep.prepare(context.Background(), conn)
+		if err == nil || !strings.Contains(err.Error(), "the server is read-only") {
+			t.Fatalf("prepare() error = %v, want the CREATE failure surfaced", err)
+		}
+		assertPermanentClassification(t, err)
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	t.Run("a failed capture stays failed: no recapture on a later visible attempt", func(t *testing.T) {
+		prep, conn, mock := newPreparerMock(t)
+		// The bare CREATE won, but the identity capture failed.
+		expectDatabaseExistsProbe(mock, "beads", false)
+		mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `beads`")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		expectPreparationUse(mock)
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT DATABASE(), @@server_uuid, DOLT_HASHOF('HEAD')")).
+			WillReturnError(errors.New("capture transport broke"))
+		_, err := prep.prepare(context.Background(), conn)
+		if err == nil || !strings.Contains(err.Error(), "capture") {
+			t.Fatalf("prepare() error = %v, want the capture failure surfaced", err)
+		}
+		assertPermanentClassification(t, err)
+
+		// The retry finds the database its own CREATE left behind: visible, so
+		// no CREATE and no capture. Authority stays unissued, and the open can
+		// still complete without it.
+		expectDatabaseExistsProbe(mock, "beads", true)
+		expectPreparationUse(mock)
+		capability, err := prep.prepare(context.Background(), conn)
+		if err != nil {
+			t.Fatalf("retry prepare() error = %v, want nil: a visible database must not need a capture to open", err)
+		}
+		if capability != nil {
+			t.Fatal("retry prepare() capability = non-nil; a failed capture must never be retried on a later attempt")
+		}
+		if !prep.created {
+			t.Error("created = false; the prior CREATE's creation state must survive the retry")
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations (the retry must not re-run the capture): %v", err)
+		}
+	})
+}
