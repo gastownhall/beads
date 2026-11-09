@@ -134,7 +134,7 @@ bd doctor [path] [flags]
       --agent                                   Agent-facing diagnostic mode: rich context for AI agents (ZFC-compliant)
       --check string                            Run specific check in detail (e.g., 'pollution')
       --check-health                            Quick health check for git hooks (silent on success)
-      --clean                                   For pollution check: delete high-confidence test issues
+      --clean                                   For pollution check: delete unlinked high-confidence test issues
       --deep                                    Validate full graph integrity
       --dry-run                                 Preview fixes without making changes
       --fix                                     Automatically fix issues where possible

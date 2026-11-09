@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"runtime"
@@ -108,11 +109,14 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 	}
 
 	if !clean {
-		fmt.Printf("Run 'bd doctor --check=pollution --clean' to delete the high-confidence issues (with confirmation); medium-confidence issues are for manual review.\n")
+		fmt.Printf("Run 'bd doctor --check=pollution --clean' to delete the high-confidence issues that have no dependency links (with confirmation); the rest are for manual review.\n")
 		return nil
 	}
 
-	deletable, skipped := selectPollutionCleanup(polluted)
+	deletable, skipped, err := selectPollutionCleanup(ctx, store, polluted)
+	if err != nil {
+		return HandleError("checking dependency links before cleanup: %v", err)
+	}
 	for _, skip := range skipped {
 		fmt.Printf("Skipping %s: %s\n", skip.issue.ID, skip.reason)
 	}
@@ -159,19 +163,54 @@ type pollutionSkip struct {
 	reason string
 }
 
+// pollutionEdgeReader is the batched dependency read the cleanup guard needs.
+type pollutionEdgeReader interface {
+	GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error)
+	GetDependentRecordsForIssues(ctx context.Context, targetIDs []string) (map[string][]*types.Dependency, error)
+}
+
 // selectPollutionCleanup splits reported hits into those cleanup may back up
 // and delete and those it leaves for review. Only high-confidence hits are
 // deletable: a medium-confidence hit rests on a single title signal, which
-// real work can carry (GH#5025).
-func selectPollutionCleanup(polluted []pollutionResult) (deletable []pollutionResult, skipped []pollutionSkip) {
+// real work can carry. A high-confidence hit with any dependency record, in
+// either direction and of any type, is skipped too: the backup holds issue
+// rows only, so deleting it would lose edges no restore brings back
+// (GH#5025). A failed lookup selects nothing. The guard covers the hits as
+// read here; it does not lock out a concurrent edit.
+func selectPollutionCleanup(ctx context.Context, edges pollutionEdgeReader, polluted []pollutionResult) (deletable []pollutionResult, skipped []pollutionSkip, err error) {
+	var high []pollutionResult
+	var highIDs []string
 	for _, p := range polluted {
 		if !p.highConfidence() {
 			skipped = append(skipped, pollutionSkip{issue: p.issue, reason: "medium confidence; left for manual review"})
 			continue
 		}
+		high = append(high, p)
+		highIDs = append(highIDs, p.issue.ID)
+	}
+	if len(high) == 0 {
+		return nil, skipped, nil
+	}
+
+	outgoing, err := edges.GetDependencyRecordsForIssues(ctx, highIDs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading outgoing dependencies: %w", err)
+	}
+	incoming, err := edges.GetDependentRecordsForIssues(ctx, highIDs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading incoming dependencies: %w", err)
+	}
+	for _, p := range high {
+		if n := len(outgoing[p.issue.ID]) + len(incoming[p.issue.ID]); n > 0 {
+			skipped = append(skipped, pollutionSkip{
+				issue:  p.issue,
+				reason: fmt.Sprintf("dependency links prevent cleanup (%d link(s)); review manually", n),
+			})
+			continue
+		}
 		deletable = append(deletable, p)
 	}
-	return deletable, skipped
+	return deletable, skipped, nil
 }
 
 func init() {
@@ -180,6 +219,6 @@ func init() {
 	doctorCmd.Flags().BoolVar(&checkHealthMode, "check-health", false, "Quick health check for git hooks (silent on success)")
 	doctorCmd.Flags().StringVarP(&doctorOutput, "output", "o", "", "Export diagnostics to JSON file")
 	doctorCmd.Flags().StringVar(&doctorCheckFlag, "check", "", "Run specific check in detail (e.g., 'pollution')")
-	doctorCmd.Flags().BoolVar(&doctorClean, "clean", false, "For pollution check: delete high-confidence test issues")
+	doctorCmd.Flags().BoolVar(&doctorClean, "clean", false, "For pollution check: delete unlinked high-confidence test issues")
 	doctorCmd.Flags().BoolVar(&doctorDeep, "deep", false, "Validate full graph integrity")
 }
