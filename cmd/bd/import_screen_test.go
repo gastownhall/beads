@@ -324,3 +324,64 @@ func TestPlanRecoveryImportMissingVocabularyCapabilityWritesNothing(t *testing.T
 	}
 	assertNoQuarantine(t, source)
 }
+
+// TestApplyImportRejectionsDryRunLeavesTheRejectsFileAlone pins AC-7's
+// dry-run rule (GH#4492): a --dry-run --skip-invalid --rejects run, clean or
+// with records to skip, leaves an earlier run's rejects file byte for byte as
+// it was, and a rejected dry run still reports what it would skip. Ported
+// from pr5202's TestResolveImportRejectsDryRunLeavesRejectsFileAlone
+// (matt wilkie).
+func TestApplyImportRejectionsDryRunLeavesTheRejectsFileAlone(t *testing.T) {
+	rejected := []importRejection{{Line: 3, ID: "dr-1", Reason: "invalid status: verify", Raw: []byte(`{"id":"dr-1","status":"verify"}`)}}
+	for _, tc := range []struct {
+		name     string
+		rejected []importRejection
+	}{
+		{name: "clean"},
+		{name: "rejected", rejected: rejected},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rejectsPath := filepath.Join(t.TempDir(), "rejects.jsonl")
+			const keep = "previous run's quarantine content\n"
+			if err := os.WriteFile(rejectsPath, []byte(keep), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			result := importResultJSON{DryRun: true}
+			if err := applyImportRejections(&result, "fixture.jsonl", tc.rejected, true, rejectsPath); err != nil {
+				t.Fatalf("applyImportRejections: %v", err)
+			}
+			if got, err := os.ReadFile(rejectsPath); err != nil || string(got) != keep {
+				t.Errorf("rejects file after a dry run = %q (err %v), want %q unchanged", got, err, keep)
+			}
+			if result.RejectsFile != "" {
+				t.Errorf("rejects_file = %q, want empty: a dry run saves nothing", result.RejectsFile)
+			}
+			if result.InvalidSkipped != len(tc.rejected) {
+				t.Errorf("invalid_skipped = %d, want %d", result.InvalidSkipped, len(tc.rejected))
+			}
+		})
+	}
+}
+
+// TestPlanRecoveryImportUndecodableLineReportsPhysicalLocation pins AC-7's
+// undecodable-line rule on the recovery plan: a line that cannot decode is
+// fatal and named by its physical line - blank lines counted - before any
+// write, so no plan is returned and no quarantine exists. Ported from GLM's
+// TestRecoveryPlanUndecodableLineReportsPhysicalLocation.
+func TestPlanRecoveryImportUndecodableLineReportsPhysicalLocation(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "issues.jsonl")
+	if err := os.WriteFile(source, []byte(vocabularyScreenFixture[0]+"\n\n"+vocabularyScreenFixture[1]+"\n"+`{"_type":"issue","id": not json`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := planRecoveryImportFile(context.Background(), func(context.Context) ([]string, []string, error) {
+		t.Error("vocabulary read for a file that does not decode")
+		return nil, nil, nil
+	}, source)
+	if err == nil || !strings.Contains(err.Error(), source+":4:") {
+		t.Fatalf("plan error = %v, want the physical location %s:4", err, source)
+	}
+	if plan != nil {
+		t.Errorf("plan = %+v, want none", plan)
+	}
+	assertNoQuarantine(t, source)
+}
