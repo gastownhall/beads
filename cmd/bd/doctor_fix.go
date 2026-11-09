@@ -450,8 +450,8 @@ func applyFixList(path string, fixes []doctorCheck) {
 			fmt.Printf("  ⚠ Run 'bd duplicates' to review and merge duplicates\n")
 			continue
 		case "Test Pollution":
-			// No auto-fix: test cleanup requires user review
-			fmt.Printf("  ⚠ Run 'bd doctor --check=pollution' to review and clean test issues\n")
+			// No auto-fix: heuristic matches require user review before deletion
+			fmt.Printf("  ⚠ Run 'bd doctor --check=pollution' to review possible test leftovers\n")
 			continue
 		case "Git Conflicts":
 			// No auto-fix: git conflicts require manual resolution

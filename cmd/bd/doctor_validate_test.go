@@ -347,8 +347,8 @@ func TestValidateCheck_PollutionGateMatchesSharedClassifier(t *testing.T) {
 		if cr.check.Status != statusWarning {
 			t.Errorf("Test Pollution status = %q, want %q", cr.check.Status, statusWarning)
 		}
-		if cr.check.Message != "1 potential test issue(s) detected" {
-			t.Errorf("Test Pollution message = %q, want %q (the gate and the shared classifier must agree on the flagged set)", cr.check.Message, "1 potential test issue(s) detected")
+		if cr.check.Message != "1 possible test leftover(s) matched by heuristic" {
+			t.Errorf("Test Pollution message = %q, want %q (the gate and the shared classifier must agree on the flagged set)", cr.check.Message, "1 possible test leftover(s) matched by heuristic")
 		}
 		return
 	}

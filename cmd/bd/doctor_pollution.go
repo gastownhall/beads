@@ -53,23 +53,25 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 		return nil
 	}
 
-	// Categorize by confidence
-	highConfidence := []doctor.PollutionMatch{}
-	mediumConfidence := []doctor.PollutionMatch{}
+	// Categorize for presentation. The buckets are heuristic strengths,
+	// not probabilities, and confer no deletion privilege: cleanup treats
+	// both buckets identically.
+	stronger := []doctor.PollutionMatch{}
+	possible := []doctor.PollutionMatch{}
 
 	for _, p := range polluted {
 		if doctor.PollutionScoreHighBucket(p) {
-			highConfidence = append(highConfidence, p)
+			stronger = append(stronger, p)
 		} else {
-			mediumConfidence = append(mediumConfidence, p)
+			possible = append(possible, p)
 		}
 	}
 
 	if jsonOutput {
 		result := map[string]interface{}{
 			"polluted_count":    len(polluted),
-			"high_confidence":   len(highConfidence),
-			"medium_confidence": len(mediumConfidence),
+			"high_confidence":   len(stronger),
+			"medium_confidence": len(possible),
 			"issues":            []map[string]interface{}{},
 		}
 
@@ -86,33 +88,38 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 		return outputJSON(result)
 	}
 
-	// Human-readable output
-	fmt.Printf("Found %d potential test issues:\n\n", len(polluted))
+	// Human-readable output. These are heuristic matches on title shape and
+	// thin content, not verdicts: real work about the test suite can still
+	// carry a matching title, so review comes before any deletion.
+	fmt.Printf("Found %d possible test leftovers:\n\n", len(polluted))
+	fmt.Printf("Heuristic matches on test-style titles and thin content; title-only work\n")
+	fmt.Printf("can still match. Review each issue with 'bd show <id>' before deleting anything.\n\n")
 
-	if len(highConfidence) > 0 {
-		fmt.Printf("High Confidence (score ≥ 0.9):\n")
-		for _, p := range highConfidence {
-			fmt.Printf("  %s: %q (score: %.2f)\n", p.Issue.ID, p.Issue.Title, p.Score)
+	if len(stronger) > 0 {
+		fmt.Printf("Stronger heuristic matches:\n")
+		for _, p := range stronger {
+			fmt.Printf("  %s: %q\n", p.Issue.ID, p.Issue.Title)
 			for _, reason := range p.Reasons {
 				fmt.Printf("    - %s\n", reason)
 			}
 		}
-		fmt.Printf("  (Total: %d issues)\n\n", len(highConfidence))
+		fmt.Printf("\n  (Total: %d issues)\n\n", len(stronger))
 	}
 
-	if len(mediumConfidence) > 0 {
-		fmt.Printf("Medium Confidence (score 0.7-0.9):\n")
-		for _, p := range mediumConfidence {
-			fmt.Printf("  %s: %q (score: %.2f)\n", p.Issue.ID, p.Issue.Title, p.Score)
+	if len(possible) > 0 {
+		fmt.Printf("Possible heuristic matches:\n")
+		for _, p := range possible {
+			fmt.Printf("  %s: %q\n", p.Issue.ID, p.Issue.Title)
 			for _, reason := range p.Reasons {
 				fmt.Printf("    - %s\n", reason)
 			}
 		}
-		fmt.Printf("  (Total: %d issues)\n\n", len(mediumConfidence))
+		fmt.Printf("\n  (Total: %d issues)\n\n", len(possible))
 	}
 
 	if !clean {
-		fmt.Printf("Run 'bd doctor --check=pollution --clean' to delete these issues (with confirmation).\n")
+		fmt.Printf("'bd doctor --check=pollution --clean' deletes confirmed leftovers after a\n")
+		fmt.Printf("confirmation prompt; it is never run automatically.\n")
 		return nil
 	}
 

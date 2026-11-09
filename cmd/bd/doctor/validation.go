@@ -252,9 +252,9 @@ func CheckTestPollution(path string) DoctorCheck {
 	return DoctorCheck{
 		Name:    "Test Pollution",
 		Status:  "warning",
-		Message: fmt.Sprintf("%d potential test issue(s) detected", len(matches)),
-		Detail:  "Test issues may have leaked into production database",
-		Fix:     "Run 'bd doctor --check=pollution' to review and clean test issues",
+		Message: fmt.Sprintf("%d possible test leftover(s) matched by heuristic", len(matches)),
+		Detail:  "Heuristic matches on test-style titles and thin content; title-only work can still match",
+		Fix:     "Run 'bd doctor --check=pollution' to review the matched issues before deleting anything",
 	}
 }
 

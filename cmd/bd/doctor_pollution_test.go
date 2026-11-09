@@ -269,6 +269,44 @@ func TestDoctorPollutionJSONReturnsBeforeClean(t *testing.T) {
 	}
 }
 
+// TestDoctorPollutionReportWordingIsReviewFirst pins the AC-8 human guidance:
+// matches are presented as possible leftovers in review-first wording, the
+// buckets are heuristic strengths rather than confidences, users are pointed
+// at 'bd show <id>' first, and the non-clean report never invites an
+// unconditional deletion pass.
+func TestDoctorPollutionReportWordingIsReviewFirst(t *testing.T) {
+	stronger := &types.Issue{ID: "pol-strong", Title: "test issue for review", Description: "", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	possible := &types.Issue{ID: "pol-possible", Title: "test leftover word", Description: "", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	fake := &fakePollutionCleanupStore{
+		initial: []*types.Issue{stronger, possible},
+	}
+	pollutionCleanupTestEnv(t, fake)
+
+	out, err := captureStdoutWithError(t, func() error { return runPollutionCheck("", false, false) })
+	if err != nil {
+		t.Fatalf("report-only pollution check returned an error: %v", err)
+	}
+	for _, want := range []string{
+		"possible test leftovers",
+		"Stronger heuristic matches:",
+		"Possible heuristic matches:",
+		"bd show <id>",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("pollution report missing review-first wording %q:\n%s", want, out)
+		}
+	}
+	for _, banned := range []string{
+		"Confidence",
+		"score",
+		"to delete these issues",
+	} {
+		if strings.Contains(out, banned) {
+			t.Errorf("pollution report contains banned score/invitation wording %q:\n%s", banned, out)
+		}
+	}
+}
+
 // fakeFailingEvidenceStore wraps fakePollutionCleanupStore with injectable
 // failures for the cleanup paths' store reads.
 type fakeFailingEvidenceStore struct {

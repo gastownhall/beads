@@ -410,3 +410,35 @@ func TestPollutionDetectSkipsEvidenceWithoutCandidates(t *testing.T) {
 		t.Errorf("evidence queried %d times with no candidates, want 0", len(evidence.outCalls)+len(evidence.inCalls)+len(evidence.commentCall))
 	}
 }
+
+// TestEnrichTestPollutionGuidesReviewFirst pins the AC-8 agent guidance: the
+// enrichment presents heuristic matches as possible leftovers that need
+// individual review, never as artifacts with an established cleanup failure,
+// and it does not recommend the bulk --clean deletion.
+func TestEnrichTestPollutionGuidesReviewFirst(t *testing.T) {
+	enrichment := enrichTestPollution(DoctorCheck{
+		Name:    "Test Pollution",
+		Status:  "warning",
+		Message: "2 possible test leftover(s) matched by heuristic",
+		Detail:  "Heuristic matches on test-style titles and thin content",
+	})
+
+	for _, want := range []string{"Possible test leftovers", "review", "bd show <id>"} {
+		if !strings.Contains(enrichment.explanation, want) {
+			t.Errorf("agent enrichment explanation missing %q: %q", want, enrichment.explanation)
+		}
+	}
+	for _, banned := range []string{"didn't clean up", "artifacts from test runs"} {
+		if strings.Contains(enrichment.explanation, banned) {
+			t.Errorf("agent enrichment overstates the finding with %q: %q", banned, enrichment.explanation)
+		}
+	}
+	for _, cmd := range enrichment.commands {
+		if strings.Contains(cmd, "--clean") {
+			t.Errorf("agent guidance recommends bulk deletion %q; deletion must stay review-gated", cmd)
+		}
+	}
+	if len(enrichment.commands) == 0 {
+		t.Error("agent guidance offers no commands")
+	}
+}
