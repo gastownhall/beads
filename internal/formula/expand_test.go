@@ -1128,6 +1128,73 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 			t.Errorf("result = %v, want [work.first work.second]", got)
 		}
 	})
+
+	// The replacement applies to the whole tree, so a dependent outside the
+	// group that holds the target is rewritten too, in either direction.
+	t.Run("a dependent in another part of the children tree names the last step", func(t *testing.T) {
+		t.Run("nested dependent", func(t *testing.T) {
+			steps := []*Step{
+				{ID: "work", Title: "Work", Expand: "inline-exp"},
+				{ID: "group", Title: "Group", Children: []*Step{
+					{ID: "child", Title: "Child", Needs: []string{"work"}},
+					{ID: "sibling", Title: "Sibling", DependsOn: []string{"work"}},
+				}},
+			}
+			before := snapshotStepDeps(steps)
+
+			result, err := ApplyInlineExpansions(steps, parser)
+			if err != nil {
+				t.Fatalf("ApplyInlineExpansions failed: %v", err)
+			}
+			if after := snapshotStepDeps(steps); after != before {
+				t.Errorf("input steps modified:\nbefore %s\nafter  %s", before, after)
+			}
+			byID := buildStepMap(result)
+			if got, want := byID["child"].Needs, []string{"work.second"}; !slices.Equal(got, want) {
+				t.Errorf("child.Needs = %v, want %v", got, want)
+			}
+			if got, want := byID["sibling"].DependsOn, []string{"work.second"}; !slices.Equal(got, want) {
+				t.Errorf("sibling.DependsOn = %v, want %v", got, want)
+			}
+		})
+
+		t.Run("nested target", func(t *testing.T) {
+			steps := []*Step{
+				{ID: "before", Title: "Before", Needs: []string{"work"}},
+				{ID: "group-a", Title: "Group A", Children: []*Step{
+					{ID: "work", Title: "Work", Expand: "inline-exp"},
+				}},
+				{ID: "land", Title: "Land", Needs: []string{"work"}},
+				{ID: "group-b", Title: "Group B", Children: []*Step{
+					{ID: "other", Title: "Other", DependsOn: []string{"work"}},
+				}},
+			}
+			before := snapshotStepDeps(steps)
+
+			result, err := ApplyInlineExpansions(steps, parser)
+			if err != nil {
+				t.Fatalf("ApplyInlineExpansions failed: %v", err)
+			}
+			if after := snapshotStepDeps(steps); after != before {
+				t.Errorf("input steps modified:\nbefore %s\nafter  %s", before, after)
+			}
+			byID := buildStepMap(result)
+			if _, ok := byID["work"]; ok {
+				t.Fatalf("work still present after expansion: %v", collectStepIDsForTest(result))
+			}
+			if got, want := collectStepIDsForTest(byID["group-a"].Children), []string{"work.first", "work.second"}; !slices.Equal(got, want) {
+				t.Errorf("group-a children = %v, want %v", got, want)
+			}
+			for _, id := range []string{"before", "land"} {
+				if got, want := byID[id].Needs, []string{"work.second"}; !slices.Equal(got, want) {
+					t.Errorf("%s.Needs = %v, want %v", id, got, want)
+				}
+			}
+			if got, want := byID["other"].DependsOn, []string{"work.second"}; !slices.Equal(got, want) {
+				t.Errorf("other.DependsOn = %v, want %v", got, want)
+			}
+		})
+	})
 }
 
 // snapshotStepDeps renders the IDs, Needs and DependsOn of a step tree, to
