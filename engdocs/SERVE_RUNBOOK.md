@@ -1,6 +1,6 @@
 # `bd serve` operator runbook
 
-Last reviewed: 2026-08-10
+Last reviewed: 2026-11-09
 
 Freshness source: `internal/httpapi/server.go`,
 `internal/httpapi/events_watch.go`, `cmd/bd/serve.go` and
@@ -153,15 +153,16 @@ authenticating reverse proxy in front is still a reasonable shape; the token
 file is what stops the origin being open if it is bypassed.
 
 **The Host allowlist is what a service deployment trips over first.** The
-DNS-rebinding check answers only to loopback spellings and the bind address, so
-a client dialing a service DNS name gets a `400` on every request. Enumerate
-the names it dials with `--allowed-host` (repeatable, matched exactly, no
-wildcards). The `event=startup` line prints the effective allowlist.
+DNS-rebinding check answers only to loopback spellings and the bind address (on
+a wildcard bind, any numeric IP literal), so a client dialing a service DNS name
+gets a `400` on every request. Enumerate the names it dials with
+`--allowed-host` (repeatable, matched exactly, no wildcards). The
+`event=startup` line prints the effective allowlist.
 
 One behavioral difference follows `--allow-non-loopback`: `limit=0` (unlimited)
-is refused on both list operations with 400 `invalid_argument` /
-`reason: "invalid_value"`, whether or not a token is configured. Clients must
-page.
+is refused on the ready, list and query operations with 400
+`invalid_argument` / `reason: "invalid_value"`, whether or not a token is
+configured. Clients must page.
 
 The blocked listing (`GET /v0/beads/blocked`, behind `blocked.list`) is the
 exception, on every bind: like `bd blocked`, it takes no `limit` and no cursor,
@@ -251,9 +252,9 @@ The shape behind those numbers:
 
 So `max_connections` on a shared server must cover roughly `22 × (number of bd
 serve processes)` plus every other `bd` process pointed at the same server,
-each of which claims its own. Idle connections are reclaimed after 5 minutes and
-recycled after an hour, so a bursty deployment settles below the worst case —
-but size for the worst case.
+each of which claims its own. Idle connections are reclaimed after 20 seconds
+and recycled after an hour, so a bursty deployment settles below the worst
+case — but size for the worst case.
 
 Those pool limits are applied only if the unit-of-work provider exposes the
 knob. If it does not, `bd serve` says so at startup with
@@ -460,7 +461,7 @@ gives the shape, the `request_error` line gives the cause.
 | `--auth-token-file: token file <path>: open <path>: no such file or directory` | The token file is unreadable. Also `is a directory`, `contains no tokens`, and `is larger than 1048576 bytes; that is a mis-pointed path, not a token file`. All four are refusals at startup, never a server that binds anyway. |
 | `address already in use` | The fixed-port mutual exclusion working as intended: a second server is already on that port. |
 
-The five auth and bind refusals above are raised by `resolveServeConfig` before
+The six auth and bind refusals above are raised by `resolveServeConfig` before
 serve opens its database source or listener, independent of the workspace, so
 they read the same in every workspace mode. (The root command's
 `PersistentPreRunE` still resolves the workspace first, so a directory with no
