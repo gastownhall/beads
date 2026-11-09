@@ -1424,3 +1424,23 @@ func TestPortImpliesServerMode(t *testing.T) {
 		})
 	}
 }
+
+// TestLoadKeepsUnknownDoltMode pins that the metadata loaders stay permissive
+// about dolt_mode vocabulary: refusing an unknown mode is storage admission's
+// job (IsKnownDoltMode), so doctor and the refusal itself can still read the
+// metadata and name the value.
+func TestLoadKeepsUnknownDoltMode(t *testing.T) {
+	beadsDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(beadsDir, ConfigFileName), []byte(`{"backend":"dolt","dolt_mode":"some-future-mode"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, load := range map[string]func(string) (*Config, error){"Load": Load, "LoadForDiscovery": LoadForDiscovery} {
+		cfg, err := load(beadsDir)
+		if err != nil || cfg == nil || cfg.DoltMode != "some-future-mode" {
+			t.Fatalf("%s = %+v, %v; want the metadata with dolt_mode kept as written", name, cfg, err)
+		}
+		if IsKnownDoltMode(cfg.DoltMode) {
+			t.Fatalf("%s: IsKnownDoltMode(%q) = true", name, cfg.DoltMode)
+		}
+	}
+}
