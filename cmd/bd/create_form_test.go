@@ -590,6 +590,32 @@ func TestCreateIssueFromFormValues(t *testing.T) {
 		}
 	})
 
+	// bd-3073gm: a type outside the --deps vocabulary or an entry with no
+	// target fails a direct call with the parser's diagnostic before it
+	// reserves a child ID or writes an issue or an edge.
+	t.Run("InvalidDependenciesFailBeforeAnyWrite", func(t *testing.T) {
+		parent := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Refusal parent", IssueType: "epic"})
+		target := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Refusal target"})
+		for _, tt := range []struct {
+			deps    []string
+			wantErr string
+		}{
+			{[]string{"frobs:" + target.ID}, `unknown dependency type "frobs"`},
+			{[]string{"owned-by:" + target.ID}, `unknown dependency type "owned-by"`},
+			{[]string{":" + target.ID}, `invalid dependency type ""`},
+			{[]string{"blocks:"}, `dependency "blocks:" names no issue`},
+		} {
+			fv := &createFormValues{Title: "Refused child", Priority: 2, IssueType: "task", ParentID: parent.ID, Dependencies: tt.deps}
+			issue, err := CreateIssueFromFormValues(ctx, s, fv, "test")
+			if err == nil {
+				t.Errorf("CreateIssueFromFormValues(deps %q) created %s, want a refusal", tt.deps, issue.ID)
+			} else if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("CreateIssueFromFormValues(deps %q) error %q, want it to contain %q", tt.deps, err, tt.wantErr)
+			}
+		}
+		assertNoFormWrites(t, ctx, s, parent.ID, target.ID)
+	})
+
 	t.Run("AllPriorities", func(t *testing.T) {
 		for priority := 0; priority <= 4; priority++ {
 			fv := &createFormValues{
