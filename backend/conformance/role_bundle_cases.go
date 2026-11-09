@@ -493,6 +493,7 @@ var roleContractCases = []roleContract{
 		RunLifecycleResultsAreHydratedPostStateSnapshots,
 		RunLifecycleResultsCarryThePostWriteRowVersion,
 		RunLifecycleCloseAndReopenRequireActorAndIssueID,
+		RunLifecycleEventActorMatchesTheRequest,
 		RunLifecycleReopenProvenanceLabelsHistory,
 		RunLifecycleCloseSettlesItsTransitiveAndCrossPlaneDependers,
 		RunLifecycleCloseSettlesTheClosedRowItselfAndItsChild,
