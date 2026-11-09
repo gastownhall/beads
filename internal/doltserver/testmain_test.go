@@ -69,9 +69,9 @@ func runTests(m *testing.M) int {
 
 	code := m.Run()
 
-	// Suite-scoped, never the global SweepOrphanedTestServers arm: that one is
-	// deprecated for TestMain precisely because it can reap a still-running
-	// foreign suite's servers and consume that suite's leak evidence.
+	// Suite-scoped only: reaping outside the roots this run owns would take a
+	// still-running foreign suite's servers and consume that suite's leak
+	// evidence.
 	if killed := doltserver.SweepSuiteTestServers(root); len(killed) > 0 {
 		fmt.Fprintf(os.Stderr, "doltserver tests: swept %d orphaned dolt sql-server process(es)\n", len(killed))
 	}

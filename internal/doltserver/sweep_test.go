@@ -5,201 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
+	"runtime"
+	"strings"
 	"testing"
 )
-
-// TestSelectOrphanTestServerPIDs pins down the safety-critical selection
-// logic used by SweepOrphanedTestServers: only cmdlines that look like a
-// dolt sql-server are candidates at all, and a *live* (non-deleted-cwd) one
-// is only reaped when its cwd is nested under a root the caller explicitly
-// vouches for as its own suite — never merely because it sits somewhere
-// under a shared/global temp dir. That distinction is the whole point: a
-// parallel test run (scripts/test.sh -p N) has many suites with live
-// servers all living under os.TempDir(), and only a suite's own scoped
-// root may reap its own debris, not everyone else's (gastownhall/beads
-// mybd-q6cz).
-//
-// The second bound is on the deleted-cwd arm: a deleted working directory
-// only counts as debris when the path it named was under a TEMP root. A
-// production server is spawned with cmd.Dir = <workspace>/.beads/dolt, so
-// without that bound a moved workspace or an unmounted volume would make a
-// developer's live server look exactly like test debris (wy-j2zc8q).
-func TestSelectOrphanTestServerPIDs(t *testing.T) {
-	cases := []struct {
-		name       string
-		candidates []serverCandidate
-		suiteRoots []string
-		tempRoots  []string
-		want       []int
-	}{
-		{
-			name: "deleted cwd is reaped even with no suite roots at all",
-			candidates: []serverCandidate{
-				{pid: 100, argv: []string{"dolt", "sql-server", "-H", "127.0.0.1", "-P", "12345"}, cwd: "/tmp/beads-bd-tests-xyz/.beads/dolt", cwdDeleted: true},
-			},
-			suiteRoots: nil,
-			tempRoots:  []string{"/tmp"},
-			want:       []int{100},
-		},
-		{
-			name: "live server under the caller's own scoped root is reaped",
-			candidates: []serverCandidate{
-				{pid: 101, argv: []string{"dolt", "sql-server", "-H", "127.0.0.1", "-P", "12345"}, cwd: "/tmp/my-suite-root/.beads/dolt"},
-			},
-			suiteRoots: []string{"/tmp/my-suite-root"},
-			tempRoots:  []string{"/tmp"},
-			want:       []int{101},
-		},
-		{
-			name: "live server under a DIFFERENT suite's temp dir is NOT reaped, even though both sit under the same global temp dir",
-			candidates: []serverCandidate{
-				{pid: 102, argv: []string{"dolt", "sql-server", "-H", "127.0.0.1", "-P", "12345"}, cwd: "/tmp/other-suite-xyz/.beads/dolt"},
-			},
-			suiteRoots: []string{"/tmp/my-suite-root"},
-			tempRoots:  []string{"/tmp"},
-			want:       nil,
-		},
-		{
-			name: "debug-mode cmdline with flags before sql-server is still matched when under the scoped root",
-			candidates: []serverCandidate{
-				{pid: 103, argv: []string{"dolt", "--prof", "cpu", "--prof-path", "/tmp/my-suite-root/dolt-pprof", "sql-server", "-H", "127.0.0.1", "-P", "12345"}, cwd: "/tmp/my-suite-root/.beads/dolt"},
-			},
-			suiteRoots: []string{"/tmp/my-suite-root"},
-			tempRoots:  []string{"/tmp"},
-			want:       []int{103},
-		},
-		{
-			name: "production server outside any suite root is never reaped",
-			candidates: []serverCandidate{
-				{pid: 200, argv: []string{"dolt", "sql-server", "-H", "127.0.0.1", "-P", "3307"}, cwd: "/home/dev/project/.beads/dolt"},
-			},
-			suiteRoots: []string{"/tmp/my-suite-root"},
-			tempRoots:  []string{"/tmp"},
-			want:       nil,
-		},
-		{
-			name: "non-dolt process under the scoped root is ignored",
-			candidates: []serverCandidate{
-				{pid: 201, argv: []string{"some-other-binary", "--flag"}, cwd: "/tmp/my-suite-root/whatever"},
-			},
-			suiteRoots: []string{"/tmp/my-suite-root"},
-			tempRoots:  []string{"/tmp"},
-			want:       nil,
-		},
-		{
-			name: "dolt process without sql-server subcommand is ignored",
-			candidates: []serverCandidate{
-				{pid: 202, argv: []string{"dolt", "status"}, cwd: "/tmp/my-suite-root/whatever"},
-			},
-			suiteRoots: []string{"/tmp/my-suite-root"},
-			tempRoots:  []string{"/tmp"},
-			want:       nil,
-		},
-		{
-			name: "empty cwd and not deleted is left alone (unknown, not provably debris)",
-			candidates: []serverCandidate{
-				{pid: 203, argv: []string{"dolt", "sql-server", "-H", "127.0.0.1", "-P", "12345"}, cwd: ""},
-			},
-			suiteRoots: []string{"/tmp/my-suite-root"},
-			tempRoots:  []string{"/tmp"},
-			want:       nil,
-		},
-		{
-			name: "scoped-root sibling path is not treated as under the root",
-			candidates: []serverCandidate{
-				{pid: 204, argv: []string{"dolt", "sql-server", "-H", "127.0.0.1", "-P", "12345"}, cwd: "/tmp/my-suite-root2/evil"},
-			},
-			suiteRoots: []string{"/tmp/my-suite-root"},
-			tempRoots:  []string{"/tmp"},
-			want:       nil,
-		},
-		{
-			name: "no suite roots configured: only the deleted-cwd signal reaps anything",
-			candidates: []serverCandidate{
-				{pid: 205, argv: []string{"dolt", "sql-server", "-H", "127.0.0.1", "-P", "12345"}, cwd: "/tmp/some-suite/.beads/dolt"},
-			},
-			suiteRoots: nil,
-			tempRoots:  []string{"/tmp"},
-			want:       nil,
-		},
-		{
-			name: "mixed candidates: production dir, another suite's live server, this suite's live server, and a deleted-cwd orphan",
-			candidates: []serverCandidate{
-				{pid: 300, argv: []string{"dolt", "sql-server", "-P", "1"}, cwd: "/home/dev/real-project/.beads/dolt"},
-				{pid: 301, argv: []string{"dolt", "sql-server", "-P", "2"}, cwd: "/tmp/other-suite-abc/.beads/dolt"},
-				{pid: 302, argv: []string{"dolt", "sql-server", "-P", "3"}, cwd: "/tmp/my-suite-root/.beads/dolt"},
-				{pid: 303, argv: []string{"dolt", "sql-server", "-P", "4"}, cwdDeleted: true, cwd: "/tmp/whatever-else/.beads/dolt"},
-			},
-			suiteRoots: []string{"/tmp/my-suite-root"},
-			tempRoots:  []string{"/tmp"},
-			want:       []int{302, 303},
-		},
-		{
-			name: "a PRODUCTION server whose workspace was moved or deleted is left alone",
-			candidates: []serverCandidate{
-				{pid: 400, argv: []string{"dolt", "sql-server", "--config", "/Users/dev/project/.beads/dolt-server-config.yaml"}, cwd: "/Users/dev/project/.beads/dolt", cwdDeleted: true},
-			},
-			suiteRoots: []string{"/tmp/my-suite-root"},
-			tempRoots:  []string{"/tmp", "/private/var/folders/c1/xx/T"},
-			want:       nil,
-		},
-		{
-			name: "a production server on an unmounted volume is left alone",
-			candidates: []serverCandidate{
-				{pid: 401, argv: []string{"dolt", "sql-server", "-P", "3307"}, cwd: "/Volumes/external/work/.beads/dolt", cwdDeleted: true},
-			},
-			suiteRoots: nil,
-			tempRoots:  []string{"/tmp"},
-			want:       nil,
-		},
-		{
-			name: "the observed orphan: deleted cwd under the macOS private temp form is reaped with no suite roots",
-			candidates: []serverCandidate{
-				{pid: 402, argv: []string{"dolt", "sql-server", "--config", "/private/var/folders/c1/xx/T/TestUOWDependencyEditorContract1/003/config.yaml"}, cwd: "/private/var/folders/c1/xx/T/TestUOWDependencyEditorContract1/002", cwdDeleted: true},
-			},
-			suiteRoots: nil,
-			tempRoots:  []string{"/var/folders/c1/xx/T", "/private/var/folders/c1/xx/T"},
-			want:       []int{402},
-		},
-		{
-			name: "the same orphan reported in the unresolved /var form is reaped too",
-			candidates: []serverCandidate{
-				{pid: 403, argv: []string{"dolt", "sql-server", "-P", "1"}, cwd: "/var/folders/c1/xx/T/TestUOWDependencyEditorContract1/002", cwdDeleted: true},
-			},
-			suiteRoots: nil,
-			tempRoots:  []string{"/var/folders/c1/xx/T", "/private/var/folders/c1/xx/T"},
-			want:       []int{403},
-		},
-		{
-			name: "a deleted cwd inside the caller's own suite root needs no temp root at all",
-			candidates: []serverCandidate{
-				{pid: 404, argv: []string{"dolt", "sql-server", "-P", "1"}, cwd: "/opt/scratch/my-suite-root/.beads/dolt", cwdDeleted: true},
-			},
-			suiteRoots: []string{"/opt/scratch/my-suite-root"},
-			tempRoots:  nil,
-			want:       []int{404},
-		},
-		{
-			name: "no temp roots at all disables the deleted-cwd arm entirely",
-			candidates: []serverCandidate{
-				{pid: 405, argv: []string{"dolt", "sql-server", "-P", "1"}, cwd: "/tmp/some-suite/.beads/dolt", cwdDeleted: true},
-			},
-			suiteRoots: []string{"/tmp/my-suite-root"},
-			tempRoots:  nil,
-			want:       nil,
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := sweptPIDs(selectOrphanTestServers(tc.candidates, tc.suiteRoots, tc.tempRoots))
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("selectOrphanTestServers() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
 
 func TestIsUnderDir(t *testing.T) {
 	cases := []struct {
@@ -259,29 +68,15 @@ not-a-pid dolt sql-server
 
 	// The darwin ps/lsof path must hand the selection a cwd for every
 	// survivor, because that cwd is what the sweep's report prints
-	// (wy-j2zc8q). Assert the whole SweptServer, not just the PIDs.
-	gotServers := selectOrphanTestServers(candidates, []string{"/tmp/my-suite"}, []string{"/tmp"})
+	// (wy-j2zc8q). Assert the whole SweptServer, not just the PIDs. Only the
+	// candidate under the vouched root survives the root-scoped selection.
+	gotServers := selectServersUnderRoots(candidates, []string{"/tmp/my-suite"})
 	wantServers := []SweptServer{
 		{PID: 101, Cwd: "/tmp/my-suite/.beads/dolt"},
-		{PID: 103, Cwd: "/tmp/deleted-suite/.beads/dolt"},
 	}
 	if !reflect.DeepEqual(gotServers, wantServers) {
 		t.Errorf("darwin ps selection path = %v, want %v", gotServers, wantServers)
 	}
-}
-
-// sweptPIDs projects a selection result down to its PIDs so the big tables
-// above can stay readable. The cwd every entry carries is pinned directly by
-// TestGatherPSCandidates and TestSweptServerNamesItsDirectory.
-func sweptPIDs(servers []SweptServer) []int {
-	if len(servers) == 0 {
-		return nil
-	}
-	pids := make([]int, 0, len(servers))
-	for _, server := range servers {
-		pids = append(pids, server.PID)
-	}
-	return pids
 }
 
 // TestSweptServerNamesItsDirectory pins the rendering both sweep stderr lines
@@ -316,6 +111,16 @@ func TestSelectServersUnderSuiteRoots(t *testing.T) {
 		{pid: 504, argv: []string{"dolt", "sql-server", "-P", "5"}, cwd: "/Users/dev/project/.beads/dolt", cwdDeleted: true},
 		{pid: 505, argv: []string{"not-dolt", "--flag"}, cwd: "/tmp/dead-root/whatever"},
 		{pid: 506, argv: []string{"dolt", "sql-server", "-P", "6"}, cwd: ""},
+		// Ported from the removed global-sweep selector table (#6186): a
+		// live production workspace, a dolt without the server subcommand,
+		// and a sibling path that merely shares the root's prefix.
+		{pid: 507, argv: []string{"dolt", "sql-server", "-H", "127.0.0.1", "-P", "3307"}, cwd: "/home/dev/project/.beads/dolt"},
+		{pid: 508, argv: []string{"dolt", "status"}, cwd: "/tmp/dead-root/whatever"},
+		{pid: 509, argv: []string{"dolt", "sql-server", "-P", "7"}, cwd: "/tmp/dead-root2/evil"},
+		// The deleted-cwd path in its symlink-resolved form, as macOS's lsof
+		// reports it: selected when the caller vouches for both forms of the
+		// owning root, which is what canonicalRoots hands the selector.
+		{pid: 510, argv: []string{"dolt", "sql-server", "--config", "/private/var/folders/c1/xx/T/TestUOWDependencyEditorContract1/003/config.yaml"}, cwd: "/private/var/folders/c1/xx/T/TestUOWDependencyEditorContract1/002", cwdDeleted: true},
 	}
 
 	got := selectServersUnderRoots(candidates, []string{"/tmp/dead-root"})
@@ -325,6 +130,16 @@ func TestSelectServersUnderSuiteRoots(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("selectServersUnderRoots() = %v, want %v", got, want)
+	}
+
+	// Both spellings of the owning root (canonicalRoots' expansion) select
+	// the deleted-cwd candidate reported in its resolved form.
+	got = selectServersUnderRoots(candidates, []string{"/var/folders/c1/xx/T", "/private/var/folders/c1/xx/T"})
+	want = []SweptServer{
+		{PID: 510, Cwd: "/private/var/folders/c1/xx/T/TestUOWDependencyEditorContract1/002"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("selectServersUnderRoots() over both root forms = %v, want %v", got, want)
 	}
 
 	if got := selectServersUnderRoots(candidates, nil); got != nil {
@@ -365,739 +180,6 @@ func TestCanonicalRootsForSweep(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("canonicalRoots() = %v, want %v", got, want)
 	}
-}
-
-// TestTempDirRootsBoundTheOrphanArm checks that the deleted-cwd bound
-// actually covers the directory this process's own t.TempDir() lands in —
-// if it did not, the arm would silently never fire.
-func TestTempDirRootsBoundTheOrphanArm(t *testing.T) {
-	roots := tempDirRoots()
-	if len(roots) == 0 {
-		t.Fatalf("tempDirRoots() is empty (%s); the deleted-cwd arm could never fire", rootsWitnesses())
-	}
-	dir := t.TempDir()
-	resolved, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		resolved = dir
-	}
-	if !underAnyRoot(dir, roots) && !underAnyRoot(resolved, roots) {
-		t.Errorf("t.TempDir() %q (resolved %q) is under none of tempDirRoots() %v (%s)",
-			dir, resolved, roots, rootsWitnesses())
-	}
-	if underAnyRoot("/Users/dev/project/.beads/dolt", roots) {
-		t.Errorf("a production workspace path matched tempDirRoots() %v", roots)
-	}
-}
-
-// TestTempDirRootsRejectsOverbroadTMPDIR covers the bound on the bound.
-// TMPDIR is an ordinary environment variable, so os.TempDir() can be handed
-// "/" or a home directory; either would put every workspace on the box back
-// inside the deleted-cwd arm, which is precisely what tempDirRoots exists to
-// prevent. /tmp and the real per-user temp dir must survive that filter.
-func TestTempDirRootsRejectsOverbroadTMPDIR(t *testing.T) {
-	// A real, non-temp home. The ambient one cannot be trusted for these
-	// expectations: CI (scripts/ci/lib/test-env.sh) runs the suite with HOME
-	// under /tmp, where "a workspace under the home directory" and "a path
-	// under /tmp" are the same path.
-	const home = "/home/beads-fixture"
-	t.Setenv("HOME", home)
-
-	t.Run("normal TMPDIR keeps a usable root", func(t *testing.T) {
-		roots := tempDirRoots()
-		if len(roots) == 0 {
-			t.Fatal("tempDirRoots() is empty for the ambient TMPDIR")
-		}
-		for _, root := range roots {
-			if root == string(filepath.Separator) {
-				t.Errorf("tempDirRoots() = %v, which includes the filesystem root", roots)
-			}
-			if isUnderDir(filepath.Clean(home), root) {
-				t.Errorf("tempDirRoots() root %q contains the home directory %q", root, home)
-			}
-		}
-	})
-
-	t.Run("TMPDIR=/ is dropped", func(t *testing.T) {
-		t.Setenv("TMPDIR", "/")
-		roots := tempDirRoots()
-		for _, root := range roots {
-			if filepath.Clean(root) == string(filepath.Separator) {
-				t.Fatalf("tempDirRoots() = %v, want the filesystem root dropped", roots)
-			}
-		}
-		// The hardcoded /tmp fallback still has to come through, or the
-		// deleted-cwd arm would quietly stop working.
-		if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
-			t.Errorf("tempDirRoots() = %v, want /tmp still covered", roots)
-		}
-		if underAnyRoot(filepath.Join(home, "project", ".beads", "dolt"), roots) {
-			t.Errorf("tempDirRoots() = %v still covers a path under the home directory", roots)
-		}
-	})
-
-	t.Run("TMPDIR=$HOME is dropped", func(t *testing.T) {
-		t.Setenv("TMPDIR", home)
-		roots := tempDirRoots()
-		if underAnyRoot(filepath.Join(home, "project", ".beads", "dolt"), roots) {
-			t.Errorf("tempDirRoots() = %v covers a workspace under the home directory", roots)
-		}
-		if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
-			t.Errorf("tempDirRoots() = %v, want /tmp still covered", roots)
-		}
-	})
-
-	// The CI shape: HOME is a throwaway directory under /tmp. /tmp contains
-	// it, and must survive anyway — this is the case that emptied
-	// tempDirRoots on every Linux runner and disabled the arm there.
-	t.Run("sandbox HOME under /tmp keeps /tmp", func(t *testing.T) {
-		sandbox := "/tmp/beads-test-env-abc123/home"
-		t.Setenv("HOME", sandbox)
-		roots := tempDirRoots()
-		if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
-			t.Errorf("tempDirRoots() = %v with HOME=%s, want /tmp still covered", roots, sandbox)
-		}
-		for _, root := range roots {
-			if filepath.Clean(root) == string(filepath.Separator) {
-				t.Errorf("tempDirRoots() = %v, which includes the filesystem root", roots)
-			}
-		}
-	})
-
-	// TMPDIR=$HOME with a sandbox home: the root IS the home, so it is
-	// dropped even though a sandbox home is otherwise ignored.
-	t.Run("TMPDIR=sandbox HOME is dropped", func(t *testing.T) {
-		sandbox := "/tmp/beads-test-env-abc123/home"
-		t.Setenv("HOME", sandbox)
-		t.Setenv("TMPDIR", sandbox)
-		for _, root := range tempDirRoots() {
-			if filepath.Clean(root) == sandbox {
-				t.Errorf("tempDirRoots() kept %q, the sandbox home itself", root)
-			}
-		}
-	})
-}
-
-// TestTempDirRootsCoverGOTMPDIR pins the deleted-cwd bound to where Go puts a
-// test's temp dirs. Since Go 1.26, testing.T.TempDir creates them under
-// GOTMPDIR when it is set, whatever TMPDIR says, while os.TempDir() still
-// reads TMPDIR alone. A host that EXPORTS GOTMPDIR as a disk path and leaves
-// TMPDIR unset therefore puts every t.TempDir() outside both os.TempDir() and
-// /tmp, and unless GOTMPDIR is itself a root the arm can never fire there.
-// (`go env -w GOTMPDIR` does not produce that shape: cmd/go keeps the config
-// value out of the test binary's environment, so testing.T.TempDir ignores it
-// too.) GOTMPDIR is as much an environment variable as TMPDIR, so it gets the
-// same bound on the bound.
-//
-// Only "GOTMPDIR outside TMPDIR is covered" discriminates this change: the
-// unset case and the four drop cases pass against the old tempDirRoots() as
-// well, and guard isCredibleTempRoot against a future widening rather than
-// pinning the new root.
-func TestTempDirRootsCoverGOTMPDIR(t *testing.T) {
-	const home = "/home/beads-fixture"
-	const gotmp = "/var/tmp/gotmp"
-	t.Setenv("HOME", home)
-	// Empty TMPDIR sends os.TempDir() to /tmp: the shape that strands a
-	// GOTMPDIR-rooted t.TempDir() outside every TMPDIR-derived root.
-	t.Setenv("TMPDIR", "")
-
-	t.Run("GOTMPDIR outside TMPDIR is covered", func(t *testing.T) {
-		t.Setenv("GOTMPDIR", gotmp)
-		roots := tempDirRoots()
-		if !underAnyRoot(filepath.Join(gotmp, "TestSomething1234", "001", ".beads", "dolt"), roots) {
-			t.Errorf("tempDirRoots() = %v with GOTMPDIR=%s, want GOTMPDIR covered", roots, gotmp)
-		}
-		if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
-			t.Errorf("tempDirRoots() = %v, want /tmp still covered", roots)
-		}
-	})
-
-	t.Run("unset GOTMPDIR adds no root", func(t *testing.T) {
-		t.Setenv("GOTMPDIR", "")
-		roots := tempDirRoots()
-		if underAnyRoot(filepath.Join(gotmp, "TestSomething1234", "001", ".beads", "dolt"), roots) {
-			t.Errorf("tempDirRoots() = %v covers %s with GOTMPDIR unset", roots, gotmp)
-		}
-	})
-
-	for _, tc := range []struct{ name, gotmpdir string }{
-		{"GOTMPDIR=/ is dropped", "/"},
-		{"GOTMPDIR=$HOME is dropped", home},
-		{"GOTMPDIR containing HOME is dropped", "/home"},
-		{"relative GOTMPDIR is dropped", "gotmp"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("GOTMPDIR", tc.gotmpdir)
-			roots := tempDirRoots()
-			if underAnyRoot(filepath.Join(home, "project", ".beads", "dolt"), roots) {
-				t.Errorf("tempDirRoots() = %v with GOTMPDIR=%q covers a workspace under the home directory", roots, tc.gotmpdir)
-			}
-			for _, root := range roots {
-				if !filepath.IsAbs(root) || filepath.Clean(root) == string(filepath.Separator) {
-					t.Errorf("tempDirRoots() = %v with GOTMPDIR=%q, want no relative or filesystem-root entry", roots, tc.gotmpdir)
-				}
-			}
-			if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
-				t.Errorf("tempDirRoots() = %v with GOTMPDIR=%q, want /tmp still covered", roots, tc.gotmpdir)
-			}
-		})
-	}
-}
-
-// TestIsCredibleTempRoot tables the predicate directly, including the shapes
-// no environment on this box can produce.
-func TestIsCredibleTempRoot(t *testing.T) {
-	const home = "/Users/dev"
-	cases := []struct {
-		root string
-		want bool
-	}{
-		{"/tmp", true},
-		{"/private/tmp", true},
-		{"/var/folders/c1/xx/T", true},
-		{"/var/folders/c1/xx/T/beads-bd-tests-1", true},
-		{"/", false},
-		{"//", false},
-		{"", false},
-		{".", false},
-		{"relative/tmp", false},
-		{home, false},
-		{home + "/", false},
-		{"/Users", false},
-		{"/Users/dev/tmp", true},
-		{"/Users/other", true},
-	}
-	for _, tc := range cases {
-		if got := isCredibleTempRoot(tc.root, home, "", false, nil); got != tc.want {
-			t.Errorf("isCredibleTempRoot(%q, %q) = %v, want %v", tc.root, home, got, tc.want)
-		}
-	}
-
-	// A sandbox home (CI's HOME under /tmp) does not disqualify the roots
-	// that contain it; the root that IS the home is still out, and a real
-	// home under an overbroad TMPDIR still rejects that TMPDIR.
-	const sandbox = "/tmp/beads-test-env-abc123/home"
-	sandboxCases := []struct {
-		root, home string
-		want       bool
-	}{
-		{"/tmp", sandbox, true},
-		{"/tmp/beads-test-env-abc123", sandbox, true},
-		{sandbox, sandbox, false},
-		{sandbox + "/", sandbox, false},
-		{"/", sandbox, false},
-		{"/home", "/home/runner", false},
-		{"/tmp", "/tmp", false},
-	}
-	for _, tc := range sandboxCases {
-		if got := isCredibleTempRoot(tc.root, tc.home, "", false, nil); got != tc.want {
-			t.Errorf("isCredibleTempRoot(%q, %q) = %v, want %v", tc.root, tc.home, got, tc.want)
-		}
-	}
-
-	// With no home known, only the structural rejections apply.
-	if !isCredibleTempRoot("/Users/dev", "", "", false, nil) {
-		t.Error("isCredibleTempRoot with no home should accept an ordinary absolute path")
-	}
-	if isCredibleTempRoot("/", "", "", false, nil) {
-		t.Error("isCredibleTempRoot must reject the filesystem root even with no home")
-	}
-}
-
-// TestSandboxHomeUnderPerUserTempRoot is the macOS half of the sandbox-home
-// carve-out. On Linux the throwaway HOME lands under /tmp; on macOS os.TempDir()
-// is a per-user tree under /var/folders, so a suite that pins HOME to a
-// t.TempDir() (cmd/bd/test_repo_beads_guard_test.go:128,
-// internal/beads/testmain_test.go:50) puts HOME *inside* os.TempDir(). Judging
-// sandbox-ness against /tmp alone made that home disqualify os.TempDir()
-// itself, tempDirRoots() dropped to [/tmp /private/tmp], and the deleted-cwd
-// arm went inert on every Mac (wy-j2zc8q).
-func TestSandboxHomeUnderPerUserTempRoot(t *testing.T) {
-	// The platform table, exercised from any platform: goos is a parameter so
-	// the darwin row is pinned on Linux CI too, not skipped there.
-	t.Run("fixed temp roots by platform", func(t *testing.T) {
-		cases := []struct {
-			path string
-			goos string
-			want bool
-		}{
-			{"/var/folders/zz/qqqqqqqq/T/fake-home", "darwin", true},
-			{"/private/var/folders/zz/qqqqqqqq/T/fake-home", "darwin", true},
-			{"/var/folders/zz/qqqqqqqq/T/fake-home", "linux", false},
-			{"/tmp/beads-test-env-abc123/home", "darwin", true},
-			{"/tmp/beads-test-env-abc123/home", "linux", true},
-			// The invariant the bound exists for: a real home is never a
-			// sandbox home, whatever TMPDIR says.
-			{"/home/runner", "linux", false},
-			{"/home/runner", "darwin", false},
-			{"/Users/dev", "darwin", false},
-		}
-		for _, tc := range cases {
-			if got := isUnderFixedTempRoots(tc.path, tc.goos); got != tc.want {
-				t.Errorf("isUnderFixedTempRoots(%q, %q) = %v, want %v", tc.path, tc.goos, got, tc.want)
-			}
-		}
-
-		// The rows above are only host-independent because the darwin table
-		// spells the symlink-resolved forms out. canonicalRoots would add
-		// them via EvalSymlinks on a Mac and NOT on Linux, so without the
-		// literals the /private/… rows pass here and fail on Linux CI — the
-		// exact split this assertion closes (wy-j2zc8q).
-		darwinRoots := fixedTempRoots("darwin")
-		for _, want := range []string{"/tmp", "/private/tmp", "/var/folders", "/private/var/folders"} {
-			if !slices.Contains(darwinRoots, want) {
-				t.Errorf("fixedTempRoots(%q) = %v, missing the literal %q", "darwin", darwinRoots, want)
-			}
-		}
-	})
-
-	// End to end on THIS platform: HOME inside the real os.TempDir() must not
-	// cost us os.TempDir() as a root. The HOME takes the shape this package's
-	// TestMain builds: a root made under os.TempDir() and claimed with this
-	// process's owner marker. On macOS and on a /tmp host the fixed-location
-	// witness vouches for it alone; on a host whose TMPDIR is a disk path such
-	// as /data/tmp only the marker does (TestSandboxHomeUnderNonStandardTMPDIR).
-	t.Run("HOME inside the real os.TempDir keeps it a root", func(t *testing.T) {
-		home, err := os.MkdirTemp("", "beads-sandbox-home-probe-")
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = os.RemoveAll(home) })
-		if err := WriteSuiteOwnerMarker(home); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("HOME", home)
-		roots := tempDirRoots()
-		if len(roots) == 0 {
-			t.Fatalf("tempDirRoots() is empty (%s); the deleted-cwd arm could never fire", rootsWitnesses())
-		}
-		if !underAnyRoot(filepath.Join(os.TempDir(), "beads-bd-tests-xyz", ".beads", "dolt"), roots) {
-			t.Errorf("tempDirRoots() = %v (%s), want os.TempDir() %q still covered",
-				roots, rootsWitnesses(), os.TempDir())
-		}
-	})
-}
-
-// TestSandboxHomeUnderVarTmpTMPDIR is the /var/tmp counterpart to
-// TestSandboxHomeUnderPerUserTempRoot: a Linux gate host can point TMPDIR at
-// a disk-backed /var/tmp path instead of a tmpfs /tmp, and
-// scripts/ci/lib/test-env.sh mktemp -ds the sandbox HOME under WHATEVER
-// TMPDIR is, not a hardcoded /tmp. Judging sandbox-ness against /tmp alone
-// left that HOME disqualifying os.TempDir() itself, so tempDirRoots()
-// collapsed to [/tmp] and stranded every t.TempDir() actually rooted under
-// TMPDIR (TestTempDirRootsBoundTheOrphanArm, be-n9ile / be-35sef).
-func TestSandboxHomeUnderVarTmpTMPDIR(t *testing.T) {
-	t.Run("fixed temp roots include /var/tmp", func(t *testing.T) {
-		cases := []struct {
-			path string
-			goos string
-			want bool
-		}{
-			{"/var/tmp/beads-test-env-abc123/home", "linux", true},
-			{"/var/tmp/beads-test-env-abc123/home", "darwin", true},
-			{"/private/var/tmp/beads-test-env-abc123/home", "darwin", true},
-			// The invariant still holds: a real home is never a sandbox
-			// home, whatever TMPDIR says.
-			{"/home/runner", "linux", false},
-			{"/home/runner", "darwin", false},
-		}
-		for _, tc := range cases {
-			if got := isUnderFixedTempRoots(tc.path, tc.goos); got != tc.want {
-				t.Errorf("isUnderFixedTempRoots(%q, %q) = %v, want %v", tc.path, tc.goos, got, tc.want)
-			}
-		}
-
-		linuxRoots := fixedTempRoots("linux")
-		if !slices.Contains(linuxRoots, "/var/tmp") {
-			t.Errorf("fixedTempRoots(%q) = %v, missing %q", "linux", linuxRoots, "/var/tmp")
-		}
-		darwinRoots := fixedTempRoots("darwin")
-		if !slices.Contains(darwinRoots, "/private/var/tmp") {
-			t.Errorf("fixedTempRoots(%q) = %v, missing the literal %q", "darwin", darwinRoots, "/private/var/tmp")
-		}
-	})
-
-	// The bound on the carve-out, tabled from any platform: an entry may
-	// vouch for a sandbox HOME without ever becoming a sweep root itself.
-	// /tmp is the one deliberate opt-out — tempDirRoots() hardcodes it, so
-	// excluding it here widens nothing (see sharedTempRoots).
-	t.Run("shared temp roots by platform", func(t *testing.T) {
-		cases := []struct {
-			root string
-			goos string
-			want bool
-		}{
-			{"/var/tmp", "linux", true},
-			{"/var/tmp", "darwin", true},
-			{"/private/var/tmp", "darwin", true},
-			{"/var/folders", "darwin", true},
-			{"/private/var/folders", "darwin", true},
-			// Nested inside a shared root: still rescuable, which is the
-			// whole point — this is the shape test-env.sh builds.
-			{"/var/tmp/beads-gate-probe", "linux", false},
-			{"/var/folders/zz/qqqqqqqq/T", "darwin", false},
-			// The /tmp family is excluded on purpose.
-			{"/tmp", "linux", false},
-			{"/tmp", "darwin", false},
-			{"/private/tmp", "darwin", false},
-		}
-		for _, tc := range cases {
-			if got := isSharedTempRoot(tc.root, tc.goos); got != tc.want {
-				t.Errorf("isSharedTempRoot(%q, %q) = %v, want %v", tc.root, tc.goos, got, tc.want)
-			}
-		}
-	})
-
-	// End to end: TMPDIR pointed at a disk-backed /var/tmp path, with the
-	// sandbox HOME nested under it exactly the way test-env.sh builds one.
-	// os.TempDir() must survive as a root, or the deleted-cwd arm goes inert
-	// on every host that sets TMPDIR this way.
-	t.Run("HOME inside a /var/tmp-rooted TMPDIR keeps it a root", func(t *testing.T) {
-		const tmpdir = "/var/tmp/beads-gate-probe"
-		t.Setenv("TMPDIR", tmpdir)
-		t.Setenv("HOME", tmpdir+"/beads-test-env-abc123/home")
-
-		roots := tempDirRoots()
-		if len(roots) == 0 {
-			t.Fatal("tempDirRoots() is empty; the deleted-cwd arm could never fire")
-		}
-		if !underAnyRoot(tmpdir+"/beads-bd-tests-xyz/.beads/dolt", roots) {
-			t.Errorf("tempDirRoots() = %v with TMPDIR=%s, want it still covered", roots, tmpdir)
-		}
-		// The rescue is scoped to this TMPDIR, not to /var/tmp at large.
-		// Note this assertion does not by itself pin the widening: under a
-		// SUBdirectory TMPDIR the sibling is out of range at base too. The
-		// bare-TMPDIR subtest below is the pin.
-		const sibling = "/var/tmp/some-other-users-production-server/.beads/dolt"
-		if underAnyRoot(sibling, roots) {
-			t.Errorf("tempDirRoots() = %v credited unrelated sibling path %q", roots, sibling)
-		}
-	})
-
-	// Safety bound: crediting the process's OWN TMPDIR-rooted sandbox must
-	// not widen the arm into crediting every /var/tmp path on the box. The
-	// degenerate case is a BARE TMPDIR=/var/tmp, where mktemp -d lands the
-	// sandbox HOME directly under the shared root — so the carve-out is
-	// asked to spare /var/tmp itself, and another user's production server
-	// with a deleted cwd would come into range of the kill arm. Adding
-	// /var/tmp to fixedTempRoots without isSharedTempRoot does exactly
-	// that; this is the subtest that catches it.
-	t.Run("a sandbox HOME never rescues bare /var/tmp as a root", func(t *testing.T) {
-		t.Setenv("TMPDIR", "/var/tmp")
-		t.Setenv("HOME", "/var/tmp/tmp.abc123/home")
-
-		roots := tempDirRoots()
-		for _, root := range roots {
-			if filepath.Clean(root) == "/var/tmp" {
-				t.Errorf("tempDirRoots() = %v kept the shared root /var/tmp", roots)
-			}
-		}
-		const sibling = "/var/tmp/some-other-users-production-server/.beads/dolt"
-		if underAnyRoot(sibling, roots) {
-			t.Errorf("tempDirRoots() = %v credited unrelated sibling path %q", roots, sibling)
-		}
-		// Bounded, not disabled: the hardcoded /tmp fallback still has to
-		// come through, or the arm would be inert rather than scoped.
-		if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
-			t.Errorf("tempDirRoots() = %v, want /tmp still covered", roots)
-		}
-	})
-}
-
-// pinAccountHome replaces accountHomeDir for the duration of t, so the
-// account-database bound is deterministic whatever host runs the test.
-func pinAccountHome(t *testing.T, home string) {
-	t.Helper()
-	orig := accountHomeDir
-	accountHomeDir = func() string { return home }
-	t.Cleanup(func() { accountHomeDir = orig })
-}
-
-// pinSuiteHome makes homeIsSuiteRoot claim exactly home for the duration of t,
-// as this process's owner marker in it would, for suite roots at paths no test
-// can create (/srv/...).
-func pinSuiteHome(t *testing.T, home string) {
-	t.Helper()
-	orig := homeIsSuiteRoot
-	homeIsSuiteRoot = func(h string) bool { return h == home }
-	t.Cleanup(func() { homeIsSuiteRoot = orig })
-}
-
-// rootsWitnesses names what tempDirRoots judged its roots by, for failure
-// messages: HOME, whether this process claimed it as its suite root, and the
-// account home.
-func rootsWitnesses() string {
-	home, _ := os.UserHomeDir()
-	claimed := home != "" && homeIsSuiteRoot(home)
-	return fmt.Sprintf("HOME %q, suite root %v, account home %q", home, claimed, accountHomeDir())
-}
-
-// TestSandboxHomeUnderNonStandardTMPDIR is the general case behind
-// TestSandboxHomeUnderVarTmpTMPDIR: a gate host can point TMPDIR at ANY
-// disk-backed directory (e.g. /data/tmp), not just one under /var/tmp, and
-// this package's TestMain makes its suite root under TMPDIR and points HOME at
-// it. The fixed-location witness cannot vouch for that HOME, so previously it
-// disqualified os.TempDir() itself and tempDirRoots() collapsed to [/tmp],
-// failing TestTempDirRootsBoundTheOrphanArm and the end-to-end subtest of
-// TestSandboxHomeUnderPerUserTempRoot on such hosts.
-//
-// The suite's owner marker is the second witness: it names this very process,
-// so it proves HOME is the throwaway root TestMain claimed. A HOME that merely
-// points away from the account home proves nothing: the root user with
-// HOME=/srv/apps/svc under TMPDIR=/srv/apps looks just the same, and a dolt
-// server whose workspace there was deleted must stay out of the kill arm. Even
-// a claimed HOME rescues only a TMPDIR nested below a top-level directory, and
-// never a root that holds the account home.
-func TestSandboxHomeUnderNonStandardTMPDIR(t *testing.T) {
-	const account = "/home/beads-fixture"
-
-	t.Run("credibility table", func(t *testing.T) {
-		const suiteRoot = "/data/tmp/beads-doltserver-tests-abc123"
-		cases := []struct {
-			name, root, home, account, tmpdir string
-			claimed, want                     bool
-		}{
-			{"suite-claimed HOME under a non-standard TMPDIR keeps it", "/data/tmp", suiteRoot, account, "/data/tmp", true, true},
-			{"unclaimed HOME: conservative, as before", "/data/tmp", suiteRoot, account, "/data/tmp", false, false},
-			{"re-pointed persistent HOME under a nested TMPDIR is not a sandbox", "/srv/apps", "/srv/apps/svc", "/root", "/srv/apps", false, false},
-			{"witness never rescues a root that is not TMPDIR", "/data/tmp", suiteRoot, account, "/srv/beads-gate-probe/tmp", true, false},
-			{"GOTMPDIR containing a fixture HOME is still dropped", "/home", "/home/beads-fixture", "/root", "/tmp/bbt.abc123/tmp", true, false},
-			{"re-pointed persistent HOME under a top-level TMPDIR is not a sandbox", "/home", "/home/runner", "/root", "/home", false, false},
-			{"a top-level TMPDIR never gets the witness", "/data", "/data/beads-doltserver-tests-abc123", account, "/data", true, false},
-			{"HOME is the account home: TMPDIR cannot vote", "/home", "/home/runner", "/home/runner", "/home", false, false},
-			{"root containing the account home is never credible", "/data/users", "/data/users/beads-doltserver-tests-abc123", "/data/users/dev", "/data/users", true, false},
-			{"root containing the account home, no HOME known", "/home", "", account, "/home", false, false},
-			{"root that IS the account home", account, "", account, account, false, false},
-			{"unclaimed HOME nested in the account home is not a sandbox", account + "/tmp", account + "/tmp/x/home", account, account + "/tmp", false, false},
-			{"suite-claimed HOME under a TMPDIR inside the account home keeps it", account + "/tmp", account + "/tmp/beads-doltserver-tests-abc123", account, account + "/tmp", true, true},
-			{"root inside the account home, HOME is the account home", account + "/tmp", account, account, account + "/tmp", false, true},
-			{"root that IS the suite-claimed HOME", suiteRoot, suiteRoot, account, suiteRoot, true, false},
-			{"shared root stays bounded", "/var/tmp", "/var/tmp/tmp.abc123/home", account, "/var/tmp", true, false},
-			{"filesystem root stays out", "/", suiteRoot, account, "/", true, false},
-		}
-		for _, tc := range cases {
-			if got := isCredibleTempRoot(tc.root, tc.home, tc.account, tc.claimed, []string{tc.tmpdir}); got != tc.want {
-				t.Errorf("%s: isCredibleTempRoot(%q, %q, %q, %v, %q) = %v, want %v",
-					tc.name, tc.root, tc.home, tc.account, tc.claimed, tc.tmpdir, got, tc.want)
-			}
-		}
-
-		// Every form of TMPDIR counts: a TMPDIR=/home that resolves to
-		// /data/home gets no witness under its nested, resolved name either,
-		// not even for a HOME this suite claimed.
-		const home = "/data/home/beads-doltserver-tests-abc123"
-		tmpdirs := []string{"/home", "/data/home"}
-		if isCredibleTempRoot("/data/home", home, "/root", true, tmpdirs) {
-			t.Errorf("isCredibleTempRoot(%q, %q, %q, true, %q) = true, want a top-level TMPDIR refused under its resolved name too",
-				"/data/home", home, "/root", tmpdirs)
-		}
-	})
-
-	// The claim is read from disk, and only a marker naming THIS process
-	// counts: a root another run claimed, or that nobody claimed, vouches for
-	// nothing.
-	t.Run("only this process's owner marker claims HOME", func(t *testing.T) {
-		root := t.TempDir()
-		if homeIsSuiteRoot(root) {
-			t.Errorf("homeIsSuiteRoot(%q) = true with no owner marker", root)
-		}
-		if err := writeSuiteOwnerMarkerPID(root, os.Getpid()+1); err != nil {
-			t.Fatal(err)
-		}
-		if homeIsSuiteRoot(root) {
-			t.Errorf("homeIsSuiteRoot(%q) = true for a marker naming another process", root)
-		}
-		if err := WriteSuiteOwnerMarker(root); err != nil {
-			t.Fatal(err)
-		}
-		if !homeIsSuiteRoot(root) {
-			t.Errorf("homeIsSuiteRoot(%q) = false for a root this process claimed", root)
-		}
-	})
-
-	// End to end: the exact shape this package's TestMain builds under
-	// TMPDIR=/data/tmp, with a TMPDIR path that is under no fixed temp
-	// location.
-	const tmpdir = "/srv/beads-gate-probe/tmp"
-	const suiteRoot = tmpdir + "/beads-doltserver-tests-abc123"
-	t.Run("HOME the suite claimed inside a non-standard TMPDIR keeps it a root", func(t *testing.T) {
-		pinAccountHome(t, account)
-		pinSuiteHome(t, suiteRoot)
-		t.Setenv("TMPDIR", tmpdir)
-		t.Setenv("GOTMPDIR", "")
-		t.Setenv("HOME", suiteRoot)
-
-		roots := tempDirRoots()
-		if !underAnyRoot(tmpdir+"/beads-bd-tests-xyz/.beads/dolt", roots) {
-			t.Errorf("tempDirRoots() = %v with TMPDIR=%s, want it still covered", roots, tmpdir)
-		}
-		const sibling = "/srv/beads-gate-probe/production/.beads/dolt"
-		if underAnyRoot(sibling, roots) {
-			t.Errorf("tempDirRoots() = %v credited unrelated sibling path %q", roots, sibling)
-		}
-		if underAnyRoot(account+"/project/.beads/dolt", roots) {
-			t.Errorf("tempDirRoots() = %v covers a workspace under the account home", roots)
-		}
-	})
-
-	// A nested TMPDIR holding a persistent HOME is the case the account home
-	// cannot settle: the root user with HOME=/srv/apps/svc has pointed HOME
-	// away from the account home exactly as a harness does. Nothing claimed
-	// that HOME, so TMPDIR is judged as it always was, and a server whose
-	// workspace under the HOME was deleted stays out of the kill arm.
-	t.Run("re-pointed persistent HOME under a nested TMPDIR is still dropped", func(t *testing.T) {
-		pinAccountHome(t, "/root")
-		t.Setenv("TMPDIR", "/srv/apps")
-		t.Setenv("GOTMPDIR", "")
-		t.Setenv("HOME", "/srv/apps/svc")
-
-		roots := tempDirRoots()
-		candidates := []serverCandidate{
-			{pid: 601, argv: []string{"dolt", "sql-server", "-P", "3307"}, cwd: "/srv/apps/svc/project/.beads/dolt", cwdDeleted: true},
-		}
-		if got := selectOrphanTestServers(candidates, nil, roots); got != nil {
-			t.Errorf("selectOrphanTestServers() = %v with tempDirRoots() = %v, want the server under the persistent HOME left alone", got, roots)
-		}
-		if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
-			t.Errorf("tempDirRoots() = %v, want /tmp still covered", roots)
-		}
-	})
-
-	// The CI shape that caught an earlier draft of this fix: under Bazel the
-	// account home is not under /home. GOTMPDIR=/home must be dropped even if
-	// the fixture HOME in it were this suite's own root, because the witness
-	// only ever rescues TMPDIR's own root. TMPDIR is the nested one
-	// tools/bazel/test_env.sh exports, which the witness does consider.
-	t.Run("GOTMPDIR containing a fixture HOME is still dropped", func(t *testing.T) {
-		pinAccountHome(t, "/root")
-		pinSuiteHome(t, "/home/beads-fixture")
-		t.Setenv("TMPDIR", "/tmp/bbt.abc123/tmp")
-		t.Setenv("GOTMPDIR", "/home")
-		t.Setenv("HOME", "/home/beads-fixture")
-
-		roots := tempDirRoots()
-		if underAnyRoot("/home/beads-fixture/project/.beads/dolt", roots) {
-			t.Errorf("tempDirRoots() = %v covers a workspace under the fixture home", roots)
-		}
-	})
-
-	// A top-level TMPDIR holds the homes of the whole box, so it gets no
-	// witness even around a HOME this suite really claimed.
-	t.Run("a top-level TMPDIR is dropped around the suite's own HOME", func(t *testing.T) {
-		const home = "/home/beads-doltserver-tests-abc123"
-		pinAccountHome(t, "/root")
-		pinSuiteHome(t, home)
-		t.Setenv("TMPDIR", "/home")
-		t.Setenv("GOTMPDIR", "")
-		t.Setenv("HOME", home)
-
-		roots := tempDirRoots()
-		if underAnyRoot("/home/runner/project/.beads/dolt", roots) {
-			t.Errorf("tempDirRoots() = %v covers a workspace under another home in /home", roots)
-		}
-		if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
-			t.Errorf("tempDirRoots() = %v, want /tmp still covered", roots)
-		}
-	})
-
-	// TMPDIR=/home with the user's REAL home: unchanged by the new witness.
-	t.Run("TMPDIR containing the real home is still dropped", func(t *testing.T) {
-		pinAccountHome(t, "/home/runner")
-		t.Setenv("TMPDIR", "/home")
-		t.Setenv("GOTMPDIR", "")
-		t.Setenv("HOME", "/home/runner")
-
-		roots := tempDirRoots()
-		if underAnyRoot("/home/runner/project/.beads/dolt", roots) {
-			t.Errorf("tempDirRoots() = %v covers a workspace under the real home", roots)
-		}
-		if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
-			t.Errorf("tempDirRoots() = %v, want /tmp still covered", roots)
-		}
-	})
-
-	// The same TMPDIR=/home, but HOME is a persistent home re-pointed away
-	// from the account home: the root user running with HOME=/home/runner.
-	// HOME is outside the account home, yet it is no sandbox, and a server
-	// whose workspace under it was deleted must stay out of the kill arm.
-	t.Run("re-pointed persistent HOME under a top-level TMPDIR is still dropped", func(t *testing.T) {
-		pinAccountHome(t, "/root")
-		t.Setenv("TMPDIR", "/home")
-		t.Setenv("GOTMPDIR", "")
-		t.Setenv("HOME", "/home/runner")
-
-		roots := tempDirRoots()
-		candidates := []serverCandidate{
-			{pid: 600, argv: []string{"dolt", "sql-server", "-P", "3307"}, cwd: "/home/runner/project/.beads/dolt", cwdDeleted: true},
-		}
-		if got := selectOrphanTestServers(candidates, nil, roots); got != nil {
-			t.Errorf("selectOrphanTestServers() = %v with tempDirRoots() = %v, want the server under the re-pointed HOME left alone", got, roots)
-		}
-		if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
-			t.Errorf("tempDirRoots() = %v, want /tmp still covered", roots)
-		}
-	})
-
-	// A CGO-free build's user.Current() answers with $HOME itself for a uid
-	// missing from /etc/passwd (with $USER set), so the account home can BE
-	// the sandbox HOME. Trusted, it would refuse /tmp for holding the account
-	// home and leave tempDirRoots() empty; tempDirRoots ignores an account
-	// home in a fixed temp location instead.
-	t.Run("an account home that echoes a sandbox HOME is ignored", func(t *testing.T) {
-		const sandbox = "/tmp/beads-test-env-abc123/home"
-		pinAccountHome(t, sandbox)
-		t.Setenv("TMPDIR", "")
-		t.Setenv("GOTMPDIR", "")
-		t.Setenv("HOME", sandbox)
-
-		roots := tempDirRoots()
-		if !underAnyRoot("/tmp/beads-bd-tests-xyz/.beads/dolt", roots) {
-			t.Errorf("tempDirRoots() = %v with the account home pinned to HOME=%s, want /tmp still covered", roots, sandbox)
-		}
-	})
-
-	// The same echo where the HOME is this suite's own root under a
-	// non-standard TMPDIR: that root is the directory os.MkdirTemp made for
-	// this run, so it cannot be a real account home either. Trusted, it would
-	// refuse TMPDIR for holding the account home.
-	t.Run("an account home that echoes the suite's own HOME is ignored", func(t *testing.T) {
-		pinAccountHome(t, suiteRoot)
-		pinSuiteHome(t, suiteRoot)
-		t.Setenv("TMPDIR", tmpdir)
-		t.Setenv("GOTMPDIR", "")
-		t.Setenv("HOME", suiteRoot)
-
-		roots := tempDirRoots()
-		if !underAnyRoot(tmpdir+"/beads-bd-tests-xyz/.beads/dolt", roots) {
-			t.Errorf("tempDirRoots() = %v with the account home pinned to HOME=%s, want TMPDIR %s still covered", roots, suiteRoot, tmpdir)
-		}
-	})
-
-	// The echo test judges every form of the account home, given as a path
-	// and its symlink-resolved name, so a home that reaches /tmp through a
-	// symlink counts as the temp location it really is. A real account home
-	// is never discarded, not even when it is HOME itself (the ordinary case).
-	t.Run("echoed account homes", func(t *testing.T) {
-		cases := []struct {
-			name    string
-			forms   []string
-			home    string
-			claimed bool
-			want    bool
-		}{
-			{"a real account home that is HOME", []string{"/home/ci"}, "/home/ci", false, false},
-			{"a real account home beside the suite's own HOME", []string{"/home/ci"}, suiteRoot, true, false},
-			{"an echo of a sandbox HOME under /tmp", []string{"/tmp/beads-test-env-abc123/home"}, "/tmp/beads-test-env-abc123/home", false, true},
-			{"a home that reaches /tmp through a symlink", []string{"/home/ci", "/tmp/ci-home"}, "/home/ci", false, true},
-			{"an echo of the suite's own HOME", []string{suiteRoot}, suiteRoot, true, true},
-			{"the same path as an unclaimed HOME", []string{suiteRoot}, suiteRoot, false, false},
-		}
-		for _, tc := range cases {
-			if got := isEchoedAccountHome(tc.forms, tc.home, tc.claimed); got != tc.want {
-				t.Errorf("%s: isEchoedAccountHome(%q, %q, %v) = %v, want %v",
-					tc.name, tc.forms, tc.home, tc.claimed, got, tc.want)
-			}
-		}
-	})
 }
 
 // TestIsDoltServerCmdlineRequiresDoltArgv0AndSqlServerArg pins the tightened
@@ -1158,6 +240,51 @@ func TestIsDoltServerArgv(t *testing.T) {
 	for _, tc := range cases {
 		if got := isDoltServerArgv(tc.argv); got != tc.want {
 			t.Errorf("%s: isDoltServerArgv(%q) = %v, want %v", tc.name, tc.argv, got, tc.want)
+		}
+	}
+}
+
+// TestDeprecatedGlobalSweepEntryPointsAreGone guards the removal of the
+// deprecated global sweep (#6186): SweepOrphanedTestServers and the
+// temp-root heuristics only it used (tempDirRoots and its credibility
+// witnesses) had no callers at main, and they were the last path by which
+// the sweep could signal a process outside the roots a caller vouches for.
+// The surviving sweeps are strictly root-scoped (selectServersUnderRoots);
+// this test scans the package's non-test sources so a resurrection of the
+// global arm cannot slip back in unnoticed.
+func TestDeprecatedGlobalSweepEntryPointsAreGone(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	packageDir := filepath.Dir(thisFile)
+	if !filepath.IsAbs(packageDir) {
+		// Under Bazel the compile-time path is workspace-relative; the test
+		// binary runs from the package's runfiles tree, where the sources
+		// arrive as data (repo_go_srcs in BUILD.bazel).
+		packageDir = "."
+	}
+	sources := []string{
+		"sweep.go", "sweep_darwin.go", "sweep_linux.go", "sweep_other.go",
+		"sweep_suite.go", "sweep_suite_other.go", "sweep_suite_unix.go",
+		"doltserver.go", "doltserver_unix.go", "doltserver_windows.go",
+	}
+	removed := []string{
+		"SweepOrphanedTestServers", "selectOrphanTestServers", "tempDirRoots",
+		"isCredibleTempRoot", "isSandboxHome", "isUnderFixedTempRoots",
+		"fixedTempRoots", "isSharedTempRoot", "sharedTempRoots",
+		"isEchoedAccountHome", "accountHomeDir", "homeIsSuiteRoot",
+		"suiteHomeWitness", "isTopLevelDir",
+	}
+	for _, name := range sources {
+		data, err := os.ReadFile(filepath.Join(packageDir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		for _, ident := range removed {
+			if strings.Contains(string(data), ident) {
+				t.Errorf("%s still references the removed global-sweep identifier %s", name, ident)
+			}
 		}
 	}
 }

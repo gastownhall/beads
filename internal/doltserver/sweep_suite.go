@@ -63,8 +63,8 @@ func writeSuiteOwnerMarkerPID(root string, pid int) error {
 // plausible PID — all of which mean "owner unknown", never "owner dead".
 func readSuiteOwnerMarker(root string) (pid int, ok bool) {
 	// #nosec G304 -- the path is this package's own constant joined to a
-	// temp root the caller vouches for, or to $HOME when homeIsSuiteRoot asks
-	// whether HOME is one; either way only a PID is parsed from the file.
+	// temp root the caller vouches for; either way only a PID is parsed
+	// from the file.
 	data, err := os.ReadFile(filepath.Join(root, SuiteOwnerMarkerName))
 	if err != nil {
 		return 0, false
@@ -215,10 +215,10 @@ func sweepDeadSuiteRoots(
 // Every root must belong exclusively to this suite; never pass a shared temp
 // directory. No roots means no servers are selected.
 //
-// Unlike SweepOrphanedTestServers, it never reaps deleted-cwd debris outside
-// those roots: a foreign suite may still be running and must retain its own
-// leak evidence. Use SweepDeadSuiteRoots separately at startup to clean up
-// abandoned runs without charging their leaks to the current run.
+// It never reaps deleted-cwd debris outside those roots: a foreign suite may
+// still be running and must retain its own leak evidence. Use
+// SweepDeadSuiteRoots separately at startup to clean up abandoned runs
+// without charging their leaks to the current run.
 func SweepSuiteTestServers(suiteTempRoots ...string) []SweptServer {
 	return sweepServersUnderRoots(suiteTempRoots...)
 }

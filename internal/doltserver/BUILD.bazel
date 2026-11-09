@@ -94,6 +94,11 @@ go_test(
         "testmain_test.go",
     ],
     embed = [":doltserver"],
+    data = [
+        # TestDeprecatedGlobalSweepEntryPointsAreGone scans the package's
+        # non-test sources; under Bazel they reach the test only as data.
+        ":repo_go_srcs",
+    ],
     deps = [
         "//internal/config",
         "//internal/configfile",
