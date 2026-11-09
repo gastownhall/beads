@@ -46,7 +46,9 @@ func TestSearchIssuesWithCountsAppliesLimitToEachSourceQuery(t *testing.T) {
 // Regression for bd-6dnrw.42: SkipWisps must suppress the wisps probe and
 // merge, matching SearchIssuesInTx and the domain/db counts path. sqlmock
 // rejects any query without a matching expectation, so only the
-// wisp_dependencies probe and the issues query may run.
+// wisp_dependencies probe and the issues leg's statements may run: the
+// capped id-scan probe of an unbounded read and, as it finds nothing, the
+// sentinel by-IDs statement.
 func TestSearchIssuesWithCountsHonorsSkipWisps(t *testing.T) {
 	t.Parallel()
 

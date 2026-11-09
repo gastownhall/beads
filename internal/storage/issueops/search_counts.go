@@ -109,6 +109,11 @@ func hydrationFor(filter types.IssueFilter) sqlbuild.CountsHydration {
 // predicate form. See runFilterSearchQueryInTx for why there is a ceiling.
 const countsIDsFirstMaxBound = sqlbuild.QueryBatchSize
 
+// CountsIDsFirstMaxBound is countsIDsFirstMaxBound, exported for the
+// counts-search equivalence suite (internal/storage/searchcountsequiv), whose
+// probe-boundary cases must sit exactly on it.
+const CountsIDsFirstMaxBound = countsIDsFirstMaxBound
+
 func runFilterSearchQueryInTx(ctx context.Context, tx *sql.Tx, query string, filter types.IssueFilter, tables FilterTables, includeWispReverseDeps bool) ([]*types.IssueWithCounts, error) {
 	// A PAGE BOUND IS ONLY EVER PUSHED UNDER AN ORDER THE QUERY CAN EXPRESS —
 	// the same rule searchTableInTxT applies on the plain seam. sqlbuild.OrderBy
@@ -161,8 +166,10 @@ func runFilterSearchQueryInTx(ctx context.Context, tx *sql.Tx, query string, fil
 			// predicate form runs as it did. Hot listings are label-filtered
 			// and unbounded but match a handful of rows; without the probe
 			// they pay for the whole side tables (#7643). A probe that fits
-			// cannot trip the MaxRows cap, because eff = MaxRows+1 is above
-			// it, so EnforceMaxRowsCap reads the same on both branches.
+			// hydrates exactly the rows the predicate leg would return (eff
+			// is 0 or above countsIDsFirstMaxBound, which is at least the
+			// match count), so the merge and the trim-then-cap finish see
+			// identical input.
 			scan.Limit, scan.MaxRows = countsIDsFirstMaxBound+1, 0
 		}
 		ids, err := searchTableInTxT(ctx, tx, query, scan, tables, idProjection)
@@ -180,6 +187,9 @@ func runFilterSearchQueryInTx(ctx context.Context, tx *sql.Tx, query string, fil
 			_, err := hydrateCountsByIDsInTx(ctx, tx, tables, []string{""}, includeWispReverseDeps, hydrationFor(filter))
 			return nil, err
 		}
+		// The overflow test counts ids, so it relies on the id scan being
+		// DISTINCT (or over the main table alone): searchTableInTxT's Go-side
+		// dedupe must never collapse countsIDsFirstMaxBound+1 rows to fewer.
 		if len(ids) <= countsIDsFirstMaxBound {
 			return hydrateCountsByIDsInTx(ctx, tx, tables, ids, includeWispReverseDeps, hydrationFor(filter))
 		}

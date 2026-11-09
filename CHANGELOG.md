@@ -514,18 +514,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stores that still hold a dependency row with two targets. (#7635)
 - **An unbounded `bd list` that matches few rows is answered ids-first too.**
   On the local backends (embedded and server), when the sort is one SQL can
-  express, with `--limit 0`, or a bound above 200 (an explicit large `--limit`, or a
-  `--max-rows` breaker), bd first selects up to 201 matching ids. When at
-  most 200 come back they are every match, so bd loads labels, counts,
-  parent and dependencies for those ids only, as it does for a page. When
-  201 come back it discards them and runs the previous query. A label-filtered
-  `--limit 0` listing over a few matches no longer pays for every label,
-  dependency and comment row in the store: with the two query shapes run by
-  hand against a store holding 3.9M label rows, 11 matches took 3-13 s the
-  old way and 0.06-0.10 s ids-first. Wide unbounded reads pay for one extra
-  id scan: its `LIMIT 201` caps the rows returned, not the rows the filter
-  examines, so an expensive filter (a text query, a large id list) is
-  evaluated twice on a read that overflows the probe. The rows returned are unchanged. (#7643 follow-up)
+  express, a read with `--limit 0` or a bound above 200 (an explicit large
+  `--limit`, or a `--max-rows` breaker) first selects up to 201 matching ids.
+  When at most 200 come back they are every match, so bd loads labels,
+  counts, parent and dependencies for those ids only, as it does for a page.
+  When 201 come back it discards them and runs the previous query. A
+  label-filtered `--limit 0` listing over a few matches no longer pays for
+  every label, dependency and comment row in the store: with the two query
+  shapes built and run by hand against a store holding 3.9M (mostly
+  orphaned) label rows, 11 matches took 3-13 s the old way and 0.06-0.10 s
+  ids-first. Wide unbounded reads pay for one extra id scan: its `LIMIT 201`
+  caps the rows returned, not the rows the filter examines, so an expensive
+  filter (a text query, a large id list) is evaluated twice on a read that
+  overflows the probe. The rows returned are unchanged. (#7643 follow-up)
 - `bd preflight --fix --json` no longer returns a `Version sync` fix result:
   version updates must keep all release surfaces aligned via `scripts/update-versions.sh`.
 - Release-tag pushes require Go and reject batches containing different release versions.

@@ -82,9 +82,9 @@ func Run(t *testing.T, open Open) {
 	})
 }
 
-// probeBound is issueops' countsIDsFirstMaxBound: the most ids the probe of
-// an unbounded read may find and still answer it ids-first.
-const probeBound = sqlbuild.QueryBatchSize
+// probeBound is the most ids the probe of an unbounded read may find and
+// still answer it ids-first.
+const probeBound = issueops.CountsIDsFirstMaxBound
 
 // plantProbeLabels adds, in each table of the seedLarge fixture, a label on
 // exactly probeBound rows ("probe-at") and one on probeBound+1 ("probe-past").
@@ -124,8 +124,8 @@ func probeCases() []Case {
 		// MaxRows+1 is above the ceiling: a probe that fits holds the cap,
 		// and the overflowing one keeps the predicate form, which trips it.
 		{Name: "max rows at the bound holds", Filter: types.IssueFilter{Labels: at, SortBy: "created", MaxRows: probeBound, MaxRowsSource: "--max-rows", SkipWisps: true}, WantRows: probeBound},
-		{Name: "max rows past the bound trips", Filter: types.IssueFilter{Labels: past, SortBy: "created", MaxRows: probeBound, MaxRowsSource: "--max-rows", SkipWisps: true}},
-		{Name: "max rows trips on the merge", Filter: types.IssueFilter{Labels: at, SortBy: "created", MaxRows: 250, MaxRowsSource: "--max-rows"}},
+		{Name: "max rows past the bound trips", Filter: types.IssueFilter{Labels: past, SortBy: "created", MaxRows: probeBound, MaxRowsSource: "--max-rows", SkipWisps: true}, WantErr: true},
+		{Name: "max rows trips on the merge", Filter: types.IssueFilter{Labels: at, SortBy: "created", MaxRows: 250, MaxRowsSource: "--max-rows"}, WantErr: true},
 	}
 }
 
@@ -155,13 +155,16 @@ func largeCases() []Case {
 // Case is one search request. NoMatch marks a case the full fixture answers
 // with no rows on purpose; WantRows, when set, is the exact number of rows
 // the reference must deliver, so a page that came back short fails on the
-// premise rather than passing as two equal short answers.
+// premise rather than passing as two equal short answers. WantErr marks a
+// case the reference must refuse (a MaxRows trip), so a cap that stops
+// firing fails on the premise rather than passing as two equal answers.
 type Case struct {
 	Name     string
 	Query    string
 	Filter   types.IssueFilter
 	NoMatch  bool
 	WantRows int
+	WantErr  bool
 }
 
 func cases() []Case {
@@ -201,7 +204,7 @@ func cases() []Case {
 		{Name: "unbounded no match", Filter: types.IssueFilter{Labels: []string{"nobody"}}, NoMatch: true},
 		// MaxRows: with no Limit the breaker pushes MaxRows+1, which is a
 		// bound like any other; the cap fires on the delivered rows.
-		{Name: "max rows trips", Filter: types.IssueFilter{Labels: hot, SortBy: "created", MaxRows: 3, MaxRowsSource: "--max-rows"}},
+		{Name: "max rows trips", Filter: types.IssueFilter{Labels: hot, SortBy: "created", MaxRows: 3, MaxRowsSource: "--max-rows"}, WantErr: true},
 		{Name: "max rows holds", Filter: types.IssueFilter{Labels: hot, SortBy: "created", MaxRows: 40}},
 		{Name: "limit under max rows", Filter: types.IssueFilter{Labels: hot, SortBy: "created", Limit: 2, MaxRows: 5}},
 		{Name: "limit over max rows", Filter: types.IssueFilter{Labels: hot, SortBy: "created", Limit: 9, MaxRows: 4}},
@@ -252,6 +255,9 @@ func checkCases(t *testing.T, db *sql.DB, cs []Case, requireRows bool) {
 			}
 			if requireRows && !c.NoMatch && wantErr == nil && len(want) == 0 {
 				t.Fatalf("fixture premise: the reference matched nothing, so the comparison would be vacuous")
+			}
+			if c.WantErr && wantErr == nil {
+				t.Fatalf("fixture premise: the reference delivered %d rows, want a refusal", len(want))
 			}
 			if c.WantRows > 0 && len(want) != c.WantRows {
 				t.Fatalf("fixture premise: the reference delivered %d rows, want %d", len(want), c.WantRows)

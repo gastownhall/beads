@@ -270,13 +270,12 @@ func TestSearchIssuesWithCountsEmptyIDScanStillResolvesTables(t *testing.T) {
 }
 
 // TestSearchIssuesWithCountsPredicateFormWhenNotIDsFirst pins the cases that
-// keep the predicate form: an unbounded read (no LIMIT to push, so ids-first
-// would hydrate the whole match set in batches, which measured slower), a
-// Go-side sort (no SQL order to cut a page under), a bound above
-// countsIDsFirstMaxBound (a MaxRows breaker with no Limit renders one), and
-// a label filter with an empty entry, which the id scan's label JOINs would
-// drop (labelJoinsMatchPredicate). The unbounded and above-ceiling reads get
-// there through a probe that overflowed: countsIDsFirstMaxBound+1 ids back.
+// keep the predicate form: an unbounded read, or one bounded above
+// countsIDsFirstMaxBound (a MaxRows breaker with no Limit renders one), whose
+// probe overflowed — countsIDsFirstMaxBound+1 ids back, a match set ids-first
+// would hydrate in batches, which measured slower; a Go-side sort (no SQL
+// order to cut a page under); and a label filter with an empty entry, which
+// the id scan's label JOINs would drop (labelJoinsMatchPredicate).
 func TestSearchIssuesWithCountsPredicateFormWhenNotIDsFirst(t *testing.T) {
 	const oneLabel = `id IN \(SELECT issue_id FROM labels WHERE label = \?\)`
 	for _, tc := range []struct {
@@ -375,5 +374,28 @@ func TestSearchIssuesWithCountsProbeFitsGoesIDsFirst(t *testing.T) {
 				t.Fatalf("unmet sql expectations: %v", err)
 			}
 		})
+	}
+}
+
+// TestSearchIssuesWithCountsProbeFitsOnBothLegs pins the probe on a merged
+// read: each table family runs its own capped id scan, and each that fits is
+// hydrated by-IDs, so neither leg falls back to the predicate form.
+func TestSearchIssuesWithCountsProbeFitsOnBothLegs(t *testing.T) {
+	_, mock, tx := beginMockTx(t)
+	issueIDs, wispIDs := pageIDs("bd", 4), pageIDs("bw", 3)
+
+	mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).WillReturnRows(probeRow())
+	mock.ExpectQuery(idScanSQL("issues", "labels", countsIDsFirstMaxBound+1)).WithArgs("hot").WillReturnRows(idRows(issueIDs...))
+	mock.ExpectQuery(byIDsSQL("issues", len(issueIDs))).WithArgs(byIDsArgs(IssuesFilterTables, issueIDs, true)...).WillReturnRows(emptyCountsRows())
+	mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).WillReturnRows(probeRow())
+	mock.ExpectQuery(idScanSQL("wisps", "wisp_labels", countsIDsFirstMaxBound+1)).WithArgs("hot").WillReturnRows(idRows(wispIDs...))
+	mock.ExpectQuery(byIDsSQL("wisps", len(wispIDs))).WithArgs(byIDsArgs(WispsFilterTables, wispIDs, true)...).WillReturnRows(emptyCountsRows())
+
+	filter := types.IssueFilter{Labels: []string{"hot"}, SortBy: "created"}
+	if _, err := SearchIssuesWithCountsInTx(context.Background(), tx, "", filter); err != nil {
+		t.Fatalf("SearchIssuesWithCountsInTx: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }
