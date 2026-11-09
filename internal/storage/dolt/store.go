@@ -3282,6 +3282,9 @@ func requireServerDoltVersion(ctx context.Context, q doltversion.RowQuerier, cfg
 	})
 }
 
+// verifyServerIdentity is doltserver.VerifyServerIdentity; tests observe it.
+var verifyServerIdentity = doltserver.VerifyServerIdentity
+
 // openServerConnection connects to (and if needed creates) the target database
 // on a dolt sql-server via MySQL protocol. See serverConnFacts for what the
 // returned facts mean and why they are not a single bool.
@@ -3391,7 +3394,7 @@ func openServerConnection(ctx context.Context, cfg *Config, identity *doltserver
 		if err := requireServerDoltVersion(ctx, db, cfg); err != nil {
 			return nil, "", serverConnFacts{}, err
 		}
-		if err := doltserver.VerifyServerIdentity(ctx, db, identity); err != nil {
+		if err := verifyServerIdentity(ctx, db, identity); err != nil {
 			return nil, "", serverConnFacts{}, err
 		}
 		connReady = true
@@ -3421,7 +3424,7 @@ func openServerConnection(ctx context.Context, cfg *Config, identity *doltserver
 		return nil, "", serverConnFacts{}, err
 	}
 	// And a foreign one, before it can list or create databases there.
-	if err := doltserver.VerifyServerIdentity(ctx, initDB, identity); err != nil {
+	if err := verifyServerIdentity(ctx, initDB, identity); err != nil {
 		return nil, "", serverConnFacts{}, err
 	}
 
@@ -3509,7 +3512,7 @@ func openServerConnection(ctx context.Context, cfg *Config, identity *doltserver
 	}
 	// The project pool dials again: check that it reached the same server
 	// before capturing bootstrap authority on it or handing it out.
-	if err := doltserver.VerifyServerIdentity(ctx, db, identity); err != nil {
+	if err := verifyServerIdentity(ctx, db, identity); err != nil {
 		return nil, "", serverConnFacts{}, err
 	}
 
