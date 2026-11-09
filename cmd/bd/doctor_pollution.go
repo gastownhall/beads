@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"runtime"
@@ -8,8 +9,50 @@ import (
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
+
+// pollutionEdgeReader is the store seam the pollution cleanup needs: the two
+// batched dependency lookups that decide whether a hit is safe to delete.
+type pollutionEdgeReader interface {
+	GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error)
+	GetDependentRecordsForIssues(ctx context.Context, targetIDs []string) (map[string][]*types.Dependency, error)
+}
+
+// selectDeletablePollution filters high-confidence hits down to the ones
+// --clean may delete: those with no dependency edges at all, in input order.
+// A hit with any edge — outbound or inbound, any type, the ephemeral wisp
+// tables included — is skipped: its links cannot be restored from the
+// issue-object backup, so the operator removes them by hand first. A lookup
+// error returns no selection at all: the caller must abort before any prompt,
+// backup or delete rather than guess which hits are linked.
+func selectDeletablePollution(ctx context.Context, reader pollutionEdgeReader, hits []doctor.PollutionResult) (deletable, linked []doctor.PollutionResult, err error) {
+	if len(hits) == 0 {
+		return nil, nil, nil
+	}
+	ids := make([]string, 0, len(hits))
+	for _, p := range hits {
+		ids = append(ids, p.Issue.ID)
+	}
+	outbound, err := reader.GetDependencyRecordsForIssues(ctx, ids)
+	if err != nil {
+		return nil, nil, fmt.Errorf("fetching outbound dependencies: %w", err)
+	}
+	inbound, err := reader.GetDependentRecordsForIssues(ctx, ids)
+	if err != nil {
+		return nil, nil, fmt.Errorf("fetching inbound dependencies: %w", err)
+	}
+	for _, p := range hits {
+		id := p.Issue.ID
+		if len(outbound[id]) > 0 || len(inbound[id]) > 0 {
+			linked = append(linked, p)
+			continue
+		}
+		deletable = append(deletable, p)
+	}
+	return deletable, linked, nil
+}
 
 // runPollutionCheck runs detailed test pollution detection
 // This integrates the detect-pollution command functionality into doctor.
@@ -113,9 +156,21 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 		return nil
 	}
 
-	// --clean deletes only high-confidence hits; medium hits stay for manual
-	// review (GH#5025: bulk deletion of weak matches destroyed real work).
-	deletable := highConfidence
+	// --clean deletes only high-confidence hits whose dependency graph is
+	// empty; medium hits stay for manual review (GH#5025: bulk deletion of
+	// weak matches destroyed real work), and linked hits keep their edges
+	// (the issue-object backup cannot restore them).
+	deletable, linked, err := selectDeletablePollution(ctx, store, highConfidence)
+	if err != nil {
+		return HandleError("%v", err)
+	}
+	if len(linked) > 0 {
+		fmt.Printf("Skipped %d high-confidence issue(s) with a dependency link — their edges cannot be restored from the backup; remove the links first:\n", len(linked))
+		for _, p := range linked {
+			fmt.Printf("  %s: %q (score: %.2f)\n", p.Issue.ID, p.Issue.Title, p.Score)
+		}
+		fmt.Println()
+	}
 	if len(deletable) == 0 {
 		fmt.Printf("No deletable issues: every hit needs manual review. Nothing to clean up.\n")
 		return nil

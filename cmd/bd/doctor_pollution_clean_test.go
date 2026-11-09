@@ -54,6 +54,21 @@ func pollutionCleanCreateIssue(t *testing.T, store *dolt.DoltStore, issue *types
 	}
 }
 
+// pollutionCleanAddDependency seeds one dependency edge.
+func pollutionCleanAddDependency(t *testing.T, store *dolt.DoltStore, issueID, dependsOnID string, depType types.DependencyType) {
+	t.Helper()
+	dep := &types.Dependency{
+		IssueID:     issueID,
+		DependsOnID: dependsOnID,
+		Type:        depType,
+		CreatedAt:   time.Now(),
+		CreatedBy:   "test",
+	}
+	if err := store.AddDependency(context.Background(), dep, "test"); err != nil {
+		t.Fatalf("seeding dependency %s -> %s (%s): %v", issueID, dependsOnID, depType, err)
+	}
+}
+
 // pollutionCleanRun runs the real bd binary's pollution cleanup in the
 // workspace and requires a zero exit.
 func pollutionCleanRun(t *testing.T, tmpDir string, args ...string) string {
@@ -135,6 +150,64 @@ func TestDoctorPollutionClean_DeletesOnlyUnlinkedHighConfidence(t *testing.T) {
 	}
 	if !strings.Contains(out, "dpcl-med") || !strings.Contains(out, "manual review") {
 		t.Errorf("output does not explain that the medium hit needs manual review:\n%s", out)
+	}
+}
+
+// TestDoctorPollutionClean_LinkedHighConfidenceKept pins AC-7: a
+// high-confidence hit with any dependency record — outgoing or incoming, any
+// type, including an incoming ephemeral wisp edge — is neither backed up nor
+// deleted, its edges stay intact, and the output says dependency links
+// prevented cleanup. An unlinked high hit in the same run is still deleted.
+func TestDoctorPollutionClean_LinkedHighConfidenceKept(t *testing.T) {
+	tmpDir, beads, store := newPollutionCleanWorkspace(t, "dplk")
+
+	pollutionCleanCreateIssue(t, store, &types.Issue{ID: "dplk-linked", Title: "Test issue", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask})
+	pollutionCleanCreateIssue(t, store, &types.Issue{ID: "dplk-free", Title: "sample issue cleanup", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask})
+	pollutionCleanCreateIssue(t, store, &types.Issue{ID: "dplk-victim", Title: "Blocked release task", Description: "A real issue blocked by the linked hit.", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask})
+	pollutionCleanCreateIssue(t, store, &types.Issue{ID: "dplk-friend", Title: "Related infra task", Description: "Loosely related to the linked hit.", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask})
+	pollutionCleanCreateIssue(t, store, &types.Issue{ID: "dplk-dep", Title: "Dependent cleanup task", Description: "Depends on the linked fixture hit.", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask})
+	pollutionCleanCreateIssue(t, store, &types.Issue{ID: "dplk-wisp", Title: "Ephemeral dependent", Status: types.StatusOpen, Priority: 3, IssueType: types.TypeTask, Ephemeral: true})
+	pollutionCleanCreateIssue(t, store, &types.Issue{ID: "dplk-linked.1", Title: "Child of the linked hit", Status: types.StatusOpen, Priority: 3, IssueType: types.TypeTask, NoHistory: true})
+
+	// Outgoing edges of the linked hit: blocks and a loose association.
+	pollutionCleanAddDependency(t, store, "dplk-linked", "dplk-victim", types.DepBlocks)
+	pollutionCleanAddDependency(t, store, "dplk-linked", "dplk-friend", types.DepRelatesTo)
+	// Incoming edges: a durable dependent, an incoming ephemeral wisp edge,
+	// and a parent-child relationship (the linked hit is the parent target).
+	pollutionCleanAddDependency(t, store, "dplk-dep", "dplk-linked", types.DepBlocks)
+	pollutionCleanAddDependency(t, store, "dplk-wisp", "dplk-linked", types.DepDiscoveredFrom)
+	pollutionCleanAddDependency(t, store, "dplk-linked.1", "dplk-linked", types.DepParentChild)
+
+	out := pollutionCleanRun(t, tmpDir, "--yes")
+
+	pollutionCleanIssueSurvived(t, store, "dplk-linked")
+	pollutionCleanIssueDeleted(t, store, "dplk-free")
+	for _, id := range []string{"dplk-victim", "dplk-friend", "dplk-dep"} {
+		pollutionCleanIssueSurvived(t, store, id)
+	}
+	if got := pollutionCleanBackupIDs(t, beads); len(got) != 1 || got[0] != "dplk-free" {
+		t.Errorf("backup IDs = %v, want exactly [dplk-free] (the linked hit must not be backed up)", got)
+	}
+	if !strings.Contains(out, "dplk-linked") || !strings.Contains(out, "dependency link") {
+		t.Errorf("output does not explain that dependency links kept dplk-linked:\n%s", out)
+	}
+
+	// The linked hit's edges must be intact: same outbound and inbound rows
+	// as before the run.
+	ctx := context.Background()
+	outbound, err := store.GetDependencyRecordsForIssues(ctx, []string{"dplk-linked"})
+	if err != nil {
+		t.Fatalf("reading outbound records: %v", err)
+	}
+	inbound, err := store.GetDependentRecordsForIssues(ctx, []string{"dplk-linked"})
+	if err != nil {
+		t.Fatalf("reading inbound records: %v", err)
+	}
+	if got := len(outbound["dplk-linked"]); got != 2 {
+		t.Errorf("dplk-linked outbound edges = %d, want 2 (unchanged)", got)
+	}
+	if got := len(inbound["dplk-linked"]); got != 3 {
+		t.Errorf("dplk-linked inbound edges = %d, want 3 (durable dependent, wisp edge, parent-child — unchanged)", got)
 	}
 }
 
