@@ -345,6 +345,27 @@ func TestClassifyFSCKFailure(t *testing.T) {
 			wantIsNot:    []error{ErrDanglingReference},
 			wantContains: "BEADS_FSCK_TIMEOUT",
 		},
+		// (a→c) Interruption phrasing + parent deadline keeps caller-timeout
+		//       guidance, not fsck's own BEADS_FSCK_TIMEOUT guidance.
+		{
+			name:         "output 'context deadline exceeded' + parent deadline → caller-timeout guidance",
+			parentErr:    context.DeadlineExceeded,
+			fsckErr:      context.DeadlineExceeded,
+			output:       "context deadline exceeded",
+			wantIs:       ErrFSCKTimeout,
+			wantIsNot:    []error{ErrDanglingReference},
+			wantContains: "dolt.auto-push-timeout",
+			wantAbsent:   "BEADS_FSCK_TIMEOUT environment variable",
+		},
+		// (a→b) Could-not-open keeps its skip even when the parent context is
+		//       canceled: the check never ran.
+		{
+			name:      "could-not-open + parent canceled → nil (skip preserved)",
+			parentErr: context.Canceled,
+			fsckErr:   context.Canceled,
+			output:    "Could not open dolt database: some reason",
+			wantNil:   true,
+		},
 		// (d) A non-finding warning printed before fsck's own deadline must
 		//     not preempt the timeout classification.
 		{
