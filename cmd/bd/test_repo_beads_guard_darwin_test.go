@@ -7,6 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,19 +56,39 @@ func TestRunTestsAndSweepReapsOrphanedServer(t *testing.T) {
 			if err := os.MkdirAll(serverDir, 0o755); err != nil {
 				t.Fatalf("mkdir server dir: %v", err)
 			}
-			script := filepath.Join(testTempRoot, "dolt")
-			if err := os.WriteFile(script, []byte("#!/bin/sh\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n"), 0o755); err != nil {
-				t.Fatalf("write fake dolt: %v", err)
-			}
 
 			var cmd *exec.Cmd
 			runner := sweepTestRunner{run: func() int {
-				cmd = exec.Command(script, "sql-server")
+				// The stand-in must satisfy the sweep's tightened identity
+				// gate (#6186): argv[0] basename "dolt" plus an argument
+				// exactly "sql-server". Executing /bin/bash directly — not
+				// through a shebang script, whose argv[0] the kernel
+				// replaces with the interpreter's path — and overriding
+				// Args[0] keeps that shape on the ps command column the
+				// darwin sweep tokenizes; /bin/bash avoids macOS's /bin/sh
+				// trampoline. The first argument after -c is the shell's $0,
+				// which is why "sql-server" rides as a later argument.
+				cmd = exec.Command("/bin/bash", "-c", "trap 'exit 0' TERM; while :; do sleep 1; done", "sql-server")
+				cmd.Args[0] = "dolt"
 				cmd.Dir = serverDir
 				if err := cmd.Start(); err != nil {
 					t.Fatalf("start fake dolt sql-server: %v", err)
 				}
 				t.Cleanup(func() { _ = cmd.Process.Kill() })
+
+				// Verify the stand-in is observable the way the sweep will
+				// see it, so a broken fixture cannot make the test vacuous.
+				// This mirrors the production revalidation probe: ps's
+				// command column, tokenized, must present argv[0] "dolt" and
+				// an exact "sql-server" argument.
+				out, err := exec.Command("ps", "-p", strconv.Itoa(cmd.Process.Pid), "-o", "command=").Output()
+				if err != nil {
+					t.Fatalf("ps -p %d: %v", cmd.Process.Pid, err)
+				}
+				fields := strings.Fields(string(out))
+				if len(fields) < 2 || fields[0] != "dolt" || !slices.Contains(fields[1:], "sql-server") {
+					t.Fatalf("darwin ps reports the stand-in as %q; the sweep's identity gate would not recognize it", out)
+				}
 				return 0
 			}}
 

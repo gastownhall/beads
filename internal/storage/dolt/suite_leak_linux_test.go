@@ -7,6 +7,9 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -16,13 +19,41 @@ import (
 	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
+// leakStandInCmd builds the deterministic leaked-server stand-in: a real
+// /bin/sh blocked on stdin, with argv[0] "dolt" and an argument exactly
+// "sql-server", the shape the sweep's tightened identity gate recognizes
+// (#6186). Overriding Args[0] keeps the executable a real shell path while
+// presenting the basename the gate requires.
+func leakStandInCmd() *exec.Cmd {
+	cmd := exec.Command("/bin/sh", "-c", "read line", "sql-server")
+	cmd.Args[0] = "dolt"
+	return cmd
+}
+
+// assertStandInIdentity pins, straight from /proc, that the stand-in is what
+// the sweep's identity gate looks for — argv[0] basename "dolt" plus an exact
+// "sql-server" argument — so a broken fixture cannot produce a vacuous pass.
+// This package cannot call doltserver's probe (unexported), so it reads the
+// same bytes the probe does.
+func assertStandInIdentity(t *testing.T, pid int) {
+	t.Helper()
+	raw, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
+	if err != nil {
+		t.Fatalf("read /proc/%d/cmdline: %v", pid, err)
+	}
+	argv := strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00")
+	if len(argv) < 2 || filepath.Base(argv[0]) != "dolt" || !slices.Contains(argv[1:], "sql-server") {
+		t.Fatalf("stand-in pid %d has argv %q; want argv[0] basename dolt and an exact sql-server argument", pid, argv)
+	}
+}
+
 // This process boundary exercises the real TestMain allocation and exit policy,
 // not just the selector: an ordinary t.TempDir fixture must belong to the suite.
 // A shell blocked on stdin supplies a real process without requiring Dolt.
 func TestSuiteFixtureLeakFailsOwningSuite(t *testing.T) {
 	if os.Getenv("BEADS_SUITE_LEAK_PROBE") == "1" {
 		cwd := t.TempDir()
-		cmd := exec.Command("/bin/sh", "-c", "read line", "dolt", "sql-server")
+		cmd := leakStandInCmd()
 		cmd.Dir = cwd
 		// The parent owns the write end. Closing it also stops the stand-in
 		// if this child fails before TestMain reaches the sweep.
@@ -30,6 +61,7 @@ func TestSuiteFixtureLeakFailsOwningSuite(t *testing.T) {
 		if err := cmd.Start(); err != nil {
 			t.Fatal(err)
 		}
+		assertStandInIdentity(t, cmd.Process.Pid)
 		go func() { _ = cmd.Wait() }()
 		// Intentionally omit fixture shutdown. t.TempDir removes cwd before
 		// m.Run returns, so the TestMain sweep must find the deleted-cwd leak.
@@ -37,7 +69,7 @@ func TestSuiteFixtureLeakFailsOwningSuite(t *testing.T) {
 	}
 
 	// A foreign suite's deleted-cwd process must survive the child's sweep.
-	foreign := exec.Command("/bin/sh", "-c", "read line", "dolt", "sql-server")
+	foreign := leakStandInCmd()
 	foreign.Dir = t.TempDir()
 	stdin, err := foreign.StdinPipe()
 	if err != nil {
@@ -56,6 +88,7 @@ func TestSuiteFixtureLeakFailsOwningSuite(t *testing.T) {
 		_ = foreign.Process.Kill()
 		<-exited
 	})
+	assertStandInIdentity(t, foreign.Process.Pid)
 	if err := os.Remove(foreign.Dir); err != nil {
 		t.Fatal(err)
 	}

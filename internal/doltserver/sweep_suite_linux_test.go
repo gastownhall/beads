@@ -20,9 +20,12 @@ func TestSweepSuiteTestServersPreservesForeignLeak(t *testing.T) {
 	if err := os.Mkdir(cwd, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// The selector recognizes dolt/sql-server in the command line. A shell
-	// blocked on stdin is a deterministic stand-in with no child processes.
-	cmd := exec.Command("/bin/sh", "-c", "read line", "dolt", "sql-server")
+	// A shell blocked on stdin is a deterministic stand-in with no child
+	// processes. Its argv[0] is "dolt" while the executable stays a real
+	// /bin/sh path: the tightened identity gate (#6186) requires the
+	// executable's basename to be dolt plus an argument exactly sql-server.
+	cmd := exec.Command("/bin/sh", "-c", "read line", "sql-server")
+	cmd.Args[0] = "dolt"
 	cmd.Dir = cwd
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -41,6 +44,12 @@ func TestSweepSuiteTestServersPreservesForeignLeak(t *testing.T) {
 		_ = cmd.Process.Kill()
 		<-exited
 	})
+	// The stand-in must look like a dolt server to the identity probe the
+	// sweep consults before signaling, or the owning-suite half below would
+	// vacuously pass.
+	if !isDoltServerProcess(cmd.Process.Pid) {
+		t.Fatalf("stand-in pid %d failed the identity probe; the owning-suite sweep would vacuously pass", cmd.Process.Pid)
+	}
 	if err := os.Remove(cwd); err != nil {
 		t.Fatal(err)
 	}
