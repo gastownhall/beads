@@ -2185,6 +2185,23 @@ func startLocked(beadsDir string) (*State, error) {
 			pid, cfg.RemotesAPIPort, err, logPath(beadsDir))
 	}
 
+	// Pair the identity record with the child this launch proved it owns
+	// (GH#4637): the only writer of <doltDir>/.bd-server-uuid, so a normal
+	// open can refuse a foreign listener on the same port instead of
+	// silently using it. Skipped entirely when the operator explicitly
+	// disabled verification. A refusal kills only the child bd launched —
+	// never a foreign listener — and leaves any prior record untouched, so
+	// the workspace stays verifiable once the operator frees the port and
+	// restarts. Only the actual-launch path reaches here: the
+	// already-running and adoption returns above cannot pair.
+	if !VerifyServerIdentityDisabled(beadsDir) {
+		if err := pairServerIdentity(started, cfg.Host, actualPort, doltDir); err != nil {
+			started.killAndWait()
+			removeServerStateFiles(beadsDir)
+			return nil, err
+		}
+	}
+
 	return &State{
 		Running:        true,
 		PID:            pid,
