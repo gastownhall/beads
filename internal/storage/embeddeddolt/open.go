@@ -38,9 +38,20 @@ const openWaitBudgetEnv = "BEADS_EMBEDDED_OPEN_TIMEOUT"
 const defaultOpenWaitBudget = 30 * time.Second
 
 // openWaitBudget returns the retry budget configured in openWaitBudgetEnv,
-// read on every call.
+// read on every call. It accepts positive time.ParseDuration strings ("2m",
+// "90s") or bare numbers of seconds ("90"), surrounding whitespace ignored,
+// and falls back to defaultOpenWaitBudget when the value is empty,
+// unparsable, out of range or non-positive, as the server store's
+// timeoutFromEnv does.
 func openWaitBudget() time.Duration {
-	d, err := time.ParseDuration(os.Getenv(openWaitBudgetEnv))
+	raw := strings.TrimSpace(os.Getenv(openWaitBudgetEnv))
+	if raw == "" {
+		return defaultOpenWaitBudget
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		d, err = time.ParseDuration(raw + "s")
+	}
 	if err != nil || d <= 0 {
 		return defaultOpenWaitBudget
 	}

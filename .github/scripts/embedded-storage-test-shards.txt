@@ -280,6 +280,7 @@
 40 12 TestEmbeddedReadyClaimerAnswersTheQuestionReaderReadyLists
 40 12 TestHistoryPresenceContract
 40 12 TestLifecycleUpdateContract
+40 12 TestOpenWaitBudget
 40 12 TestReaderListExcludeStatusAcceptsAWorkspaceCustomStatus
 
 40 13 TestEmbeddedActivationDoesNotOpenTheEngine
