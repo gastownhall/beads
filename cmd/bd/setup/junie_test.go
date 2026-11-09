@@ -1,9 +1,12 @@
 package setup
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -45,14 +48,15 @@ func TestJunieMCPConfig(t *testing.T) {
 		t.Fatal("beads server config missing or wrong type")
 	}
 
+	// bd has no "mcp" subcommand (GH#5563): the server is beads-mcp.
 	command, ok := beads["command"].(string)
-	if !ok || command != "bd" {
-		t.Errorf("Expected command 'bd', got %v", beads["command"])
+	if !ok || command != "uvx" {
+		t.Errorf("Expected command 'uvx', got %v", beads["command"])
 	}
 
 	args, ok := beads["args"].([]string)
-	if !ok || len(args) != 1 || args[0] != "mcp" {
-		t.Errorf("Expected args ['mcp'], got %v", beads["args"])
+	if !ok || len(args) != 1 || args[0] != "beads-mcp" {
+		t.Errorf("Expected args ['beads-mcp'], got %v", beads["args"])
 	}
 
 	// Verify it's valid JSON
@@ -118,8 +122,15 @@ func TestInstallJunie(t *testing.T) {
 			mcpServers, ok := parsed["mcpServers"].(map[string]interface{})
 			if !ok {
 				t.Error("mcpServers key missing or wrong type")
-			} else if _, ok := mcpServers["beads"]; !ok {
+			} else if beads, ok := mcpServers["beads"].(map[string]interface{}); !ok {
 				t.Error("beads server config missing")
+			} else {
+				// The written file must launch beads-mcp, never a bd
+				// subcommand that does not exist (GH#5563).
+				args, _ := beads["args"].([]interface{})
+				if beads["command"] != "uvx" || len(args) != 1 || args[0] != "beads-mcp" {
+					t.Errorf("MCP config should launch uvx beads-mcp, got command %v args %v", beads["command"], beads["args"])
+				}
 			}
 		}
 	}
@@ -580,4 +591,62 @@ func TestRemoveJunieKeepsDirsItDidNotEmpty(t *testing.T) {
 			}
 		})
 	}
+}
+
+// junieGuidelinesSHA256 pins the bytes bd setup junie writes to
+// .junie/guidelines.md. GH#5563 changed only the command the MCP config
+// launches, so the guidelines file must come out byte-identical to what bd
+// wrote before that fix. An intended guidelines edit updates this hash in the
+// same change.
+const junieGuidelinesSHA256 = "15998dff7549a774df8cd7eb838f997f098fffff4a66efc22dd063a0ba66c382"
+
+func junieSHA256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// junieWantMCPConfig is the exact .junie/mcp/mcp.json bd setup junie writes:
+// one server named "beads" that launches the separate beads-mcp server through
+// uvx (GH#5563), never a bd subcommand.
+const junieWantMCPConfig = `{"mcpServers":{"beads":{"command":"uvx","args":["beads-mcp"]}}}`
+
+// requireJunieMCPConfig fails unless data decodes to exactly
+// junieWantMCPConfig: no other server, key or argument.
+func requireJunieMCPConfig(t *testing.T, data []byte) {
+	t.Helper()
+	var got, want interface{}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("MCP config is not JSON: %v\n%s", err, data)
+	}
+	if err := json.Unmarshal([]byte(junieWantMCPConfig), &want); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("MCP config = %s, want exactly %s", data, junieWantMCPConfig)
+	}
+}
+
+// No-change proof for the paths GH#5563 does not touch: a fresh install, and
+// a re-run over the config an older bd wrote (one launching the nonexistent
+// "bd mcp"), both leave .junie/guidelines.md at the pinned bytes and leave a
+// file bd does not own under .junie as it was. Only the MCP config changes.
+func TestInstallJunieLeavesUntouchedPathsUnchanged(t *testing.T) {
+	t.Run("fresh install", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+		if err := InstallJunie(); err != nil {
+			t.Fatalf("InstallJunie: %v", err)
+		}
+		got, err := os.ReadFile(".junie/guidelines.md")
+		if err != nil {
+			t.Fatalf("read guidelines: %v", err)
+		}
+		if h := junieSHA256Hex(got); h != junieGuidelinesSHA256 {
+			t.Errorf("guidelines.md sha256 = %s, want unchanged %s", h, junieGuidelinesSHA256)
+		}
+		mcp, err := os.ReadFile(".junie/mcp/mcp.json")
+		if err != nil {
+			t.Fatalf("read MCP config: %v", err)
+		}
+		requireJunieMCPConfig(t, mcp)
+	})
 }
