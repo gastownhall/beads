@@ -635,6 +635,14 @@ Use --closed to purge ALL closed wisps (regardless of age). This is the
 fastest way to reclaim space from accumulated wisp bloat. Safe by default:
 requires --force to actually delete.
 
+--closed --force deletes in batches of 200 wisps, each committed on its own,
+so a failure keeps the batches already committed. The summary then reports
+only the deletions that committed, plus remaining_count, error and hint in
+--json output, and the command exits nonzero; rerun it to delete the rest.
+A scan reads at most 5000 closed wisps: when it reaches that limit the output
+says more may remain (candidates_capped in --json), even if every wisp it
+read was excluded.
+
 Note: This uses time-based cleanup, appropriate for ephemeral wisps.
 For graph-pressure staleness detection (blocking other work), see 'bd mol stale'.
 
@@ -953,13 +961,14 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 		Status:       &statusClosed,
 		Ephemeral:    &ephemeralTrue,
 		ExcludeTypes: excludeTypes,
-		Limit:        5000,
+		Limit:        wispPurgeScanLimit,
 	}
 
 	closedIssues, err := store.SearchIssues(ctx, "", filter)
 	if err != nil {
 		return HandleError("listing closed wisps: %v", err)
 	}
+	scanCapped := len(closedIssues) >= wispPurgeScanLimit
 
 	// Filter out pinned and infra issues (protected from cleanup)
 	pinnedCount := 0
@@ -986,14 +995,7 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 	}
 
 	if len(closedIssues) == 0 {
-		if jsonOutput {
-			return outputJSON(map[string]interface{}{
-				"deleted_count": 0,
-				"message":       "No closed wisps to delete",
-			})
-		}
-		fmt.Println("No closed wisps to delete")
-		return nil
+		return renderNoClosedWisps(force && !dryRun && scanCapped)
 	}
 
 	ids := make([]string, len(closedIssues))
@@ -1041,11 +1043,40 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 	if err != nil {
 		return HandleError("%v", err)
 	}
-	if err := renderWispPurgeOutcome(outcome, true); err != nil {
+	if err := renderWispPurgeOutcome(outcome, scanCapped, true); err != nil {
 		return err
 	}
 	if !jsonOutput {
 		fmt.Printf("\nHint: Run 'bd compact --dolt' to reclaim disk space\n")
+	}
+	return nil
+}
+
+// wispPurgeScanLimit caps how many closed wisps one `bd mol wisp gc --closed`
+// scans. A scan that comes back full may have left more behind; a forced run
+// says so (candidates_capped) without claiming how many.
+const wispPurgeScanLimit = 5000
+
+// wispPurgeCappedNote is the text a forced run prints when its scan was full.
+var wispPurgeCappedNote = fmt.Sprintf("Note: the scan stopped at its %d-wisp limit, so more closed wisps may remain; run the command again to continue.", wispPurgeScanLimit)
+
+// renderNoClosedWisps prints the empty-selection answer. capped is set only
+// for a forced run whose full scan held nothing deletable (every row pinned or
+// infra), which is not the same as nothing being left.
+func renderNoClosedWisps(capped bool) error {
+	if jsonOutput {
+		answer := map[string]interface{}{
+			"deleted_count": 0,
+			"message":       "No closed wisps to delete",
+		}
+		if capped {
+			answer["candidates_capped"] = true
+		}
+		return outputJSON(answer)
+	}
+	fmt.Println("No closed wisps to delete")
+	if capped {
+		fmt.Println(wispPurgeCappedNote)
 	}
 	return nil
 }
@@ -1188,13 +1219,14 @@ func purgeClosedWispsDirect(ctx context.Context, ids []string) (wispPurgeOutcome
 }
 
 // renderWispPurgeOutcome prints a forced closed purge's result with the keys
-// each route has always printed; withDeletedIDs adds the direct route's
+// each route has always printed, plus candidates_capped (scanCapped: the scan
+// came back full, so more may remain); withDeletedIDs adds the direct route's
 // deleted_ids. A purge a failure stopped prints the same summary of what its
 // committed chunks deleted, then the cause and the rerun hint, and returns an
 // already-reported exit: under --json all of it is one stdout object
 // (remaining_count, error and hint beside the success keys), so a caller that
 // reads one JSON value still gets the progress.
-func renderWispPurgeOutcome(out wispPurgeOutcome, withDeletedIDs bool) error {
+func renderWispPurgeOutcome(out wispPurgeOutcome, scanCapped, withDeletedIDs bool) error {
 	if jsonOutput {
 		answer := map[string]interface{}{
 			"deleted":              out.confirmed,
@@ -1204,6 +1236,7 @@ func renderWispPurgeOutcome(out wispPurgeOutcome, withDeletedIDs bool) error {
 			"events_removed":       out.events,
 			"references_updated":   out.referencesUpdated,
 			"orphaned_issues":      out.orphaned,
+			"candidates_capped":    scanCapped,
 		}
 		if withDeletedIDs {
 			answer["deleted_ids"] = out.deletedIDs
@@ -1233,6 +1266,9 @@ func renderWispPurgeOutcome(out wispPurgeOutcome, withDeletedIDs bool) error {
 	if len(out.orphaned) > 0 {
 		fmt.Printf("  %s Orphaned %d issue(s): %s\n",
 			ui.RenderWarn("⚠"), len(out.orphaned), strings.Join(out.orphaned, ", "))
+	}
+	if scanCapped {
+		fmt.Printf("\n%s\n", wispPurgeCappedNote)
 	}
 	if out.err != nil {
 		// The counts above are what committed chunks confirmed. The failed
