@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 // TestPullRenumberChildren is bd-28sb25 AC-3 on the server store: GH#4796's
@@ -526,5 +527,135 @@ func TestPullRenumberChildrenRefusesDestinationCounter(t *testing.T) {
 	}
 	if dirty != 0 {
 		t.Errorf("%d tables left dirty by a refused repair", dirty)
+	}
+}
+
+// TestApplyChildRenumbersRefusesConcurrentWrites is bd-28sb25 AC-7 on the
+// server: the plan is made on one pinned session, then a second session
+// commits a new child at a planned destination (HEAD moves) or leaves an
+// unrelated uncommitted edit. The apply, re-validating inside its
+// transaction, refuses either way: nothing is renamed, no rename commit
+// lands, and the other session's work is kept as it left it.
+func TestApplyChildRenumbersRefusesConcurrentWrites(t *testing.T) {
+	cases := []struct {
+		name    string
+		between func(exec func(q string, args ...any), p string)
+		wantErr string
+		wantIDs []string
+		dirty   bool
+	}{
+		{
+			name: "head_moved",
+			between: func(exec func(q string, args ...any), p string) {
+				exec("INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) "+
+					"VALUES (?, 'concurrent 74', '', '', '', '', 'open', 2, 'task')", p+".74")
+				exec("CALL DOLT_COMMIT('-Am', 'concurrent child P.74')")
+			},
+			wantErr: "the branch moved since the plan",
+			wantIDs: []string{".71", ".72", ".73", ".74"},
+		},
+		{
+			name: "unrelated_dirty_write",
+			between: func(exec func(q string, args ...any), p string) {
+				exec("UPDATE issues SET notes = 'written after the plan' WHERE id = ?", p)
+			},
+			wantErr: "uncommitted changes",
+			wantIDs: []string{".71", ".72", ".73"},
+			dirty:   true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store, cleanup := setupTestStore(t)
+			t.Cleanup(cleanup)
+			ctx, cancel := testContext(t)
+			t.Cleanup(cancel)
+
+			const p = "rnc-p"
+			seedServerChildCollision(t, ctx, store, p, nil)
+			// The store's pool holds one session, which conn pins; the other
+			// writer is a raw session on the same test branch.
+			peer := rawTestConn(t, testServerPort)
+			defer func() { _ = peer.Close() }()
+			other, err := peer.Conn(ctx)
+			if err != nil {
+				t.Fatalf("open second session: %v", err)
+			}
+			defer func() { _ = other.Close() }()
+			exec := func(q string, args ...any) {
+				t.Helper()
+				if _, err := other.ExecContext(ctx, q, args...); err != nil {
+					t.Fatalf("%s: %v", q, err)
+				}
+			}
+			exec("USE `" + testSharedDB + "/" + store.branch + "`")
+			conn, err := store.db.Conn(ctx)
+			if err != nil {
+				t.Fatalf("pin session: %v", err)
+			}
+			defer func() { _ = conn.Close() }()
+
+			report, err := versioncontrolops.PlanChildRenumbers(ctx, conn, store.branch, store.remote+"/"+store.branch)
+			if err != nil {
+				t.Fatalf("PlanChildRenumbers: %v", err)
+			}
+			if want := []storage.ChildRenumber{{From: p + ".71", To: p + ".74"}, {From: p + ".72", To: p + ".75"}}; !reflect.DeepEqual(report.Renames, want) {
+				t.Fatalf("plan = %v, want %v", report.Renames, want)
+			}
+			tc.between(exec, p)
+			var before string
+			if err := conn.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&before); err != nil {
+				t.Fatalf("read HEAD: %v", err)
+			}
+
+			err = versioncontrolops.ApplyChildRenumbers(ctx, conn, report, "tester")
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("ApplyChildRenumbers = %v, want an error naming %q", err, tc.wantErr)
+			}
+			// Release conn so the reads below can use the store's pool.
+			_ = conn.Close()
+			var after string
+			if err := store.db.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&after); err != nil {
+				t.Fatalf("read HEAD: %v", err)
+			}
+			if after != before {
+				t.Errorf("HEAD moved from %s to %s on a refused repair", before, after)
+			}
+			var ids []string
+			rows, err := store.db.QueryContext(ctx, "SELECT id FROM issues WHERE id LIKE CONCAT(?, '.%') ORDER BY id", p)
+			if err != nil {
+				t.Fatalf("read ids: %v", err)
+			}
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err != nil {
+					t.Fatalf("scan id: %v", err)
+				}
+				ids = append(ids, strings.TrimPrefix(id, p))
+			}
+			_ = rows.Close()
+			if !reflect.DeepEqual(ids, tc.wantIDs) {
+				t.Errorf("ids = %v, want %v", ids, tc.wantIDs)
+			}
+			if got, want := serverCounters(t, ctx, store, p), map[string]int{p: 73}; !reflect.DeepEqual(got, want) {
+				t.Errorf("counters = %v, want unchanged %v", got, want)
+			}
+			var dirty int
+			if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_status").Scan(&dirty); err != nil {
+				t.Fatalf("read status: %v", err)
+			}
+			if (dirty > 0) != tc.dirty {
+				t.Errorf("%d dirty tables after the refusal, want dirty=%v", dirty, tc.dirty)
+			}
+			if tc.dirty {
+				var notes string
+				if err := store.db.QueryRowContext(ctx, "SELECT notes FROM issues WHERE id = ?", p).Scan(&notes); err != nil {
+					t.Fatalf("read notes: %v", err)
+				}
+				if notes != "written after the plan" {
+					t.Errorf("the other session's uncommitted edit = %q, want it kept", notes)
+				}
+			}
+		})
 	}
 }

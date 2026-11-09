@@ -128,6 +128,7 @@ go_test(
         "cache_test.go",
         "checked_wrapper_smoke_test.go",
         "child_id_test.go",
+        "child_renumber_abort_test.go",
         "child_renumber_counter_test.go",
         "child_renumber_graph_test.go",
         "child_renumber_mentions_test.go",
