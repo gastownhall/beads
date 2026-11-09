@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -514,6 +515,39 @@ func TestCreateIssueFromFormValues(t *testing.T) {
 		}
 	})
 
+	// GH#5560: the reporter's pair names one target with two types. The
+	// form refuses it with the shared GH#4626 guidance before it reserves a
+	// child ID or writes an issue or an edge, instead of failing late in
+	// storage after the child number is spent.
+	t.Run("ReporterPairRefusedBeforeAnyWrite", func(t *testing.T) {
+		parent := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Reporter pair parent", IssueType: "epic"})
+		target := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Reporter pair target"})
+		for _, tt := range []struct {
+			deps    []string
+			wantErr string
+		}{
+			{[]string{"blocked-by:" + target.ID, "related:" + target.ID}, `cannot attach both "blocks" and "related" to the same target`},
+			{[]string{"related:" + target.ID, "blocks:" + target.ID}, `cannot attach both "related" and "blocks" to the same target`},
+			{[]string{"discovered-from:" + target.ID, "blocked-by:" + target.ID}, `cannot attach both "discovered-from" and "blocks" to the same target`},
+		} {
+			fv := &createFormValues{Title: "Reporter pair child", Priority: 2, IssueType: "task", ParentID: parent.ID, Dependencies: tt.deps}
+			issue, err := CreateIssueFromFormValues(ctx, s, fv, "test")
+			if err == nil {
+				t.Errorf("CreateIssueFromFormValues(deps %q) created %s, want a refusal", tt.deps, issue.ID)
+				continue
+			}
+			for _, want := range []string{tt.wantErr, "GH#4626"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("CreateIssueFromFormValues(deps %q) error %q, want it to contain %q", tt.deps, err, want)
+				}
+			}
+			if strings.Contains(err.Error(), "--deps") {
+				t.Errorf("CreateIssueFromFormValues(deps %q) error %q names the --deps flag the form does not have", tt.deps, err)
+			}
+		}
+		assertNoFormWrites(t, ctx, s, parent.ID, target.ID)
+	})
+
 	t.Run("AllPriorities", func(t *testing.T) {
 		for priority := 0; priority <= 4; priority++ {
 			fv := &createFormValues{
@@ -770,4 +804,41 @@ func TestFormValuesIntegration(t *testing.T) {
 			t.Errorf("expected 2 labels, got %d", len(labels))
 		}
 	})
+}
+
+// createFormIssueForTest creates an issue through CreateIssueFromFormValues,
+// defaulting the fields the dependency tests do not care about.
+func createFormIssueForTest(t *testing.T, ctx context.Context, s storage.DoltStorage, fv *createFormValues) *types.Issue {
+	t.Helper()
+	if fv.IssueType == "" {
+		fv.IssueType = "task"
+	}
+	if fv.Priority == 0 {
+		fv.Priority = 2
+	}
+	issue, err := CreateIssueFromFormValues(ctx, s, fv, "test")
+	if err != nil {
+		t.Fatalf("CreateIssueFromFormValues(%q, deps %q): %v", fv.Title, fv.Dependencies, err)
+	}
+	return issue
+}
+
+// assertNoFormWrites checks that refused form creates under parent left no
+// child, no edge on target and no reserved child number: the next accepted
+// child of parent is parent.1.
+func assertNoFormWrites(t *testing.T, ctx context.Context, s storage.DoltStorage, parent, target string) {
+	t.Helper()
+	for _, id := range []string{parent, target} {
+		dependents, err := s.GetDependents(ctx, id)
+		if err != nil {
+			t.Fatalf("GetDependents %s: %v", id, err)
+		}
+		for _, d := range dependents {
+			t.Errorf("refused create left %s depending on %s", d.ID, id)
+		}
+	}
+	child := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Accepted child", ParentID: parent})
+	if want := parent + ".1"; child.ID != want {
+		t.Errorf("first accepted child of %s is %s, want %s: a refused create reserved a child ID", parent, child.ID, want)
+	}
 }
