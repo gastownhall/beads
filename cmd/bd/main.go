@@ -761,8 +761,10 @@ var sharedServerEmbeddedMismatchWarned bool
 // BEADS_DOLT_SERVER_MODE=1, then a non-local BEADS_DOLT_SERVER_HOST. The last
 // two bypass the workspace's embedded store, so sessions whose environments
 // differ can read different stores (GH#4746); their notice names the bypassed
-// directory. Implicit/default embedded mode is not covered: only an explicit
-// metadata setting can contradict a runtime override.
+// directory, and its remedy names every active override, since removing only
+// the deciding one leaves the other selecting server mode. Implicit/default
+// embedded mode is not covered: only an explicit metadata setting can
+// contradict a runtime override.
 func warnEmbeddedModeMismatch(beadsDir string, cfg *configfile.Config) {
 	if cfg == nil || sharedServerEmbeddedMismatchWarned {
 		return
@@ -782,14 +784,14 @@ func warnEmbeddedModeMismatch(beadsDir string, cfg *configfile.Config) {
 	if !cfg.IsDoltServerMode() {
 		return
 	}
-	var reason, override string
+	modeOverride := os.Getenv("BEADS_DOLT_SERVER_MODE") == "1"
+	hostOverride := os.Getenv("BEADS_DOLT_SERVER_HOST") != "" && cfg.HostImpliesServerMode()
+	var reason string
 	switch {
-	case os.Getenv("BEADS_DOLT_SERVER_MODE") == "1":
+	case modeOverride:
 		reason = "BEADS_DOLT_SERVER_MODE=1 selects server mode"
-		override = "BEADS_DOLT_SERVER_MODE"
-	case os.Getenv("BEADS_DOLT_SERVER_HOST") != "" && cfg.HostImpliesServerMode():
+	case hostOverride:
 		reason = "BEADS_DOLT_SERVER_HOST names a non-local host, which selects server mode"
-		override = "BEADS_DOLT_SERVER_HOST"
 	default:
 		return
 	}
@@ -798,7 +800,29 @@ func warnEmbeddedModeMismatch(beadsDir string, cfg *configfile.Config) {
 		reason, configfile.ConfigPath(beadsDir), filepath.Join(beadsDir, "embeddeddolt"))
 	fmt.Fprintln(os.Stderr, "  Sessions with different mode settings can read different stores; align every session on the intended mode.")
 	fmt.Fprintln(os.Stderr, "  To persist server mode: set dolt_mode to \"server\" in .beads/metadata.json and commit it.")
-	fmt.Fprintf(os.Stderr, "  To stay embedded: unset %s.\n", override)
+	if hostOverride {
+		// Persisted server mode alone dials the host the workspace config
+		// names (127.0.0.1 by default), not the one this environment names.
+		fmt.Fprintln(os.Stderr, "  Persist the server host as well (dolt_server_host in .beads/metadata.json, or dolt.host in config.yaml), so sessions without BEADS_DOLT_SERVER_HOST reach the same server.")
+	}
+	var remedies []string
+	if modeOverride {
+		remedies = append(remedies, overrideRemovalRemedy("BEADS_DOLT_SERVER_MODE"))
+	}
+	if hostOverride {
+		remedies = append(remedies, overrideRemovalRemedy("BEADS_DOLT_SERVER_HOST"))
+	}
+	fmt.Fprintf(os.Stderr, "  To stay embedded: %s.\n", strings.Join(remedies, " and "))
+}
+
+// overrideRemovalRemedy says how to drop the server-mode override name. A
+// value bd imported from .beads/.env is not set in the user's shell, so
+// "unset" would leave it selecting server mode on the next run.
+func overrideRemovalRemedy(name string) string {
+	if config.IsDotenvKey(name) {
+		return "remove " + name + " from .beads/.env"
+	}
+	return "unset " + name
 }
 
 // loadServerModeFromBeadsDir loads the storage mode (embedded vs server vs

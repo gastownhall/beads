@@ -25,6 +25,7 @@ func TestModeSelectionGuidanceForConcurrentAgents(t *testing.T) {
 		where := "dolt.md " + sessionStoreHeading
 		requirePhrases(t, where, section,
 			"BEADS_DOLT_SHARED_SERVER",
+			"dolt.shared-server",
 			"BEADS_DOLT_SERVER_MODE=1",
 			"BEADS_DOLT_SERVER_HOST",
 			`"dolt_mode": "embedded"`,
@@ -32,7 +33,10 @@ func TestModeSelectionGuidanceForConcurrentAgents(t *testing.T) {
 			"different stores",
 			"prints a notice to stderr, once per process",
 			"names the deciding variable and the embedded directory it bypasses",
+			"its remedy lists every active override",
 			"align every session on the intended mode",
+			"persist that host too",
+			"remove it from that file",
 			"does not fire when the workspace leaves the mode implicit",
 			"foreign dolt sql-server",
 			"worktrees",
@@ -40,7 +44,9 @@ func TestModeSelectionGuidanceForConcurrentAgents(t *testing.T) {
 			"same workspace, mode, database and branch",
 			"for many concurrent processes on one machine, use server mode, configured the same way for every session",
 		)
-		forbidPhrases(t, where, section, "fixes stale reads", "prevents stale reads")
+		// Embedded mode opens a short-lived connection per operation and
+		// holds no lock between them (internal/storage/embeddeddolt).
+		forbidPhrases(t, where, section, "fixes stale reads", "prevents stale reads", "one process at a time")
 	})
 
 	t.Run("FAQ", func(t *testing.T) {

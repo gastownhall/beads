@@ -334,11 +334,13 @@ func TestSharedServerEmbeddedMismatchDoesNotRewriteMetadata(t *testing.T) {
 // modeMismatchWorkspace builds an isolated .beads directory for the
 // embedded/server mismatch notice tests: metadata.json holds metadataJSON
 // verbatim, configYAML (when non-empty) becomes .beads/config.yaml, and
-// withEmbeddedDir creates .beads/embeddeddolt. Every env var the mode
-// resolvers read is cleared, HOME/XDG point at an empty temp dir, and config
-// is re-initialized from the workspace so no host or user setting leaks in.
+// withEmbeddedDir creates .beads/embeddeddolt. clonePortTestEnv clears every
+// mode and endpoint env var (the BD_* config aliases too) and isolates HOME,
+// and config is re-initialized from the workspace so no host or user setting
+// leaks in.
 func modeMismatchWorkspace(t *testing.T, metadataJSON, configYAML string, withEmbeddedDir bool) string {
 	t.Helper()
+	clonePortTestEnv(t)
 	root := t.TempDir()
 	beadsDir := filepath.Join(root, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -358,26 +360,9 @@ func modeMismatchWorkspace(t *testing.T, metadataJSON, configYAML string, withEm
 		}
 	}
 
-	home := filepath.Join(root, "home")
-	if err := os.MkdirAll(home, 0o755); err != nil {
-		t.Fatalf("mkdir home: %v", err)
-	}
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("BEADS_DIR", beadsDir)
-	for _, key := range []string{
-		"BEADS_DOLT_SHARED_SERVER",
-		"BEADS_DOLT_SERVER_MODE",
-		"BEADS_DOLT_SERVER_HOST",
-		"BEADS_DOLT_SERVER_PORT",
-		"BEADS_DOLT_PORT",
-	} {
-		t.Setenv(key, "")
-	}
 	t.Chdir(root)
 
-	config.ResetForTesting()
-	t.Cleanup(config.ResetForTesting)
 	if err := config.Initialize(); err != nil {
 		t.Fatalf("config.Initialize: %v", err)
 	}
@@ -425,43 +410,66 @@ func loadModeCapturingOutput(t *testing.T, beadsDir string) (stdout, stderr stri
 // BEADS_DOLT_SERVER_HOST) silently bypassed a workspace whose metadata.json
 // pins dolt_mode=embedded, so concurrent sessions with different env could
 // read different stores with no hint. The override must keep winning, but
-// say so once per process on stderr, naming the variable, the embedded
-// setting and the bypassed embedded directory, without touching metadata.
-func TestServerModeOverrideEmbeddedMismatchNotice(t *testing.T) {
+// say so once per process on stderr, naming the variable, the resolved
+// metadata path, the embedded setting and the bypassed embedded directory,
+// with a remedy that changes the next run, without touching metadata.
+func TestWarnEmbeddedModeMismatchRuntimeOverride(t *testing.T) {
+	const (
+		modeRemedy = "  To stay embedded: unset BEADS_DOLT_SERVER_MODE.\n"
+		hostRemedy = "  To stay embedded: unset BEADS_DOLT_SERVER_HOST.\n"
+		// Persisting dolt_mode alone sends sessions without the host env
+		// to the default host, so the host case says to persist it too.
+		hostPersist = "Persist the server host as well (dolt_server_host in .beads/metadata.json, or dolt.host in config.yaml)"
+	)
 	tests := []struct {
-		name     string
-		metadata string
-		env      map[string]string
-		wantVar  string
-		otherVar string
+		name         string
+		metadata     string
+		env          map[string]string
+		wantVar      string
+		otherVar     string
+		wantRemedies []string
 	}{
 		{
-			name:     "server mode env",
-			metadata: `{"backend":"dolt","dolt_mode":"embedded"}`,
-			env:      map[string]string{"BEADS_DOLT_SERVER_MODE": "1"},
-			wantVar:  "BEADS_DOLT_SERVER_MODE",
-			otherVar: "BEADS_DOLT_SERVER_HOST",
+			name:         "server mode env",
+			metadata:     `{"backend":"dolt","dolt_mode":"embedded"}`,
+			env:          map[string]string{"BEADS_DOLT_SERVER_MODE": "1"},
+			wantVar:      "BEADS_DOLT_SERVER_MODE",
+			otherVar:     "BEADS_DOLT_SERVER_HOST",
+			wantRemedies: []string{modeRemedy},
 		},
 		{
-			name:     "non-local host env",
-			metadata: `{"backend":"dolt","dolt_mode":"embedded"}`,
-			env:      map[string]string{"BEADS_DOLT_SERVER_HOST": "db.example.com"},
-			wantVar:  "BEADS_DOLT_SERVER_HOST",
-			otherVar: "BEADS_DOLT_SERVER_MODE",
+			name:         "non-local host env",
+			metadata:     `{"backend":"dolt","dolt_mode":"embedded"}`,
+			env:          map[string]string{"BEADS_DOLT_SERVER_HOST": "db.example.com"},
+			wantVar:      "BEADS_DOLT_SERVER_HOST",
+			otherVar:     "BEADS_DOLT_SERVER_MODE",
+			wantRemedies: []string{hostPersist, hostRemedy},
 		},
 		{
-			name:     "non-local loopback host env",
-			metadata: `{"backend":"dolt","dolt_mode":"embedded"}`,
-			env:      map[string]string{"BEADS_DOLT_SERVER_HOST": "127.0.0.2"},
-			wantVar:  "BEADS_DOLT_SERVER_HOST",
-			otherVar: "BEADS_DOLT_SERVER_MODE",
+			name:         "non-local loopback host env",
+			metadata:     `{"backend":"dolt","dolt_mode":"embedded"}`,
+			env:          map[string]string{"BEADS_DOLT_SERVER_HOST": "127.0.0.2"},
+			wantVar:      "BEADS_DOLT_SERVER_HOST",
+			otherVar:     "BEADS_DOLT_SERVER_MODE",
+			wantRemedies: []string{hostPersist, hostRemedy},
 		},
 		{
-			name:     "embedded spelled with case and whitespace",
-			metadata: `{"backend":"dolt","dolt_mode":" Embedded "}`,
-			env:      map[string]string{"BEADS_DOLT_SERVER_MODE": "1"},
-			wantVar:  "BEADS_DOLT_SERVER_MODE",
-			otherVar: "BEADS_DOLT_SERVER_HOST",
+			// Only "1" selects server mode, so a set but non-"1" mode env
+			// must neither be blamed nor listed beside the host that decides.
+			name:         "non-1 server mode env beside a non-local host env",
+			metadata:     `{"backend":"dolt","dolt_mode":"embedded"}`,
+			env:          map[string]string{"BEADS_DOLT_SERVER_MODE": "true", "BEADS_DOLT_SERVER_HOST": "db.example.com"},
+			wantVar:      "BEADS_DOLT_SERVER_HOST",
+			otherVar:     "BEADS_DOLT_SERVER_MODE",
+			wantRemedies: []string{hostPersist, hostRemedy},
+		},
+		{
+			name:         "embedded spelled with case and whitespace",
+			metadata:     `{"backend":"dolt","dolt_mode":" Embedded "}`,
+			env:          map[string]string{"BEADS_DOLT_SERVER_MODE": "1"},
+			wantVar:      "BEADS_DOLT_SERVER_MODE",
+			otherVar:     "BEADS_DOLT_SERVER_HOST",
+			wantRemedies: []string{modeRemedy},
 		},
 	}
 	for _, tt := range tests {
@@ -486,13 +494,18 @@ func TestServerModeOverrideEmbeddedMismatchNotice(t *testing.T) {
 				t.Errorf("stdout must stay untouched, got: %q", stdout)
 			}
 			embeddedDir := filepath.Join(beadsDir, "embeddeddolt")
-			for _, want := range []string{tt.wantVar, `dolt_mode="embedded"`, embeddedDir} {
+			for _, want := range []string{tt.wantVar, configfile.ConfigPath(beadsDir), `dolt_mode="embedded"`, embeddedDir} {
 				if !strings.Contains(stderr, want) {
 					t.Errorf("notice must name %q, got stderr: %q", want, stderr)
 				}
 			}
 			if strings.Contains(stderr, tt.otherVar) {
 				t.Errorf("notice must name only the deciding variable, found %q in: %q", tt.otherVar, stderr)
+			}
+			for _, remedy := range tt.wantRemedies {
+				if !strings.Contains(stderr, remedy) {
+					t.Errorf("expected remedy %q, got stderr: %q", remedy, stderr)
+				}
 			}
 			if strings.Contains(stderr, "shared-server mode is enabled") {
 				t.Errorf("shared-server notice must not fire without shared-server, got: %q", stderr)
@@ -519,6 +532,37 @@ func TestServerModeOverrideEmbeddedMismatchNotice(t *testing.T) {
 			}
 		})
 	}
+
+	// bd imports BEADS_DOLT_SERVER_MODE from .beads/.env into its own
+	// environment, where "unset" in the user's shell changes nothing: the
+	// remedy must name the file instead.
+	t.Run("server mode env imported from .beads/.env", func(t *testing.T) {
+		beadsDir := modeMismatchWorkspace(t, `{"backend":"dolt","dolt_mode":"embedded"}`, "", true)
+		if err := os.WriteFile(filepath.Join(beadsDir, ".env"), []byte("BEADS_DOLT_SERVER_MODE=1\n"), 0o600); err != nil {
+			t.Fatalf("write .env: %v", err)
+		}
+		// The import fills only a variable the environment lacks entirely;
+		// clonePortTestEnv's t.Setenv restores this one on cleanup.
+		os.Unsetenv("BEADS_DOLT_SERVER_MODE")
+		loadBeadsEnvFile(beadsDir)
+		if got := os.Getenv("BEADS_DOLT_SERVER_MODE"); got != "1" {
+			t.Fatalf("BEADS_DOLT_SERVER_MODE = %q after the .env import, want %q", got, "1")
+		}
+
+		stdout, stderr, err := loadModeCapturingOutput(t, beadsDir)
+		if err != nil {
+			t.Fatalf("loadServerModeFromBeadsDir: %v", err)
+		}
+		if !serverMode || stdout != "" {
+			t.Errorf("expected server mode and an empty stdout, got serverMode=%v stdout %q", serverMode, stdout)
+		}
+		if want := "  To stay embedded: remove BEADS_DOLT_SERVER_MODE from .beads/.env.\n"; !strings.Contains(stderr, want) {
+			t.Errorf("expected remedy %q, got stderr: %q", want, stderr)
+		}
+		if strings.Contains(stderr, "unset BEADS_DOLT_SERVER_MODE") {
+			t.Errorf("a value imported from .beads/.env cannot be unset in the shell, got: %q", stderr)
+		}
+	})
 }
 
 // GH#4746: the runtime-override notice must stay inside its stated
@@ -526,7 +570,7 @@ func TestServerModeOverrideEmbeddedMismatchNotice(t *testing.T) {
 // configurations that do not pit a runtime override against an explicit
 // embedded metadata setting stay silent, and every case keeps the resolver's
 // existing mode selection, an empty stdout and a nil error.
-func TestServerModeOverrideEmbeddedMismatchNoticeScope(t *testing.T) {
+func TestWarnEmbeddedModeMismatchScope(t *testing.T) {
 	const (
 		embedded      = `{"backend":"dolt","dolt_mode":"embedded"}`
 		sharedNotice  = "shared-server mode is enabled"
@@ -571,13 +615,20 @@ func TestServerModeOverrideEmbeddedMismatchNoticeScope(t *testing.T) {
 			wantRemedies: []string{"To persist server mode", "unset BEADS_DOLT_SHARED_SERVER (or remove dolt.shared-server from config.yaml)"},
 		},
 		{
-			name:         "server mode env outranks host env",
-			metadata:     embedded,
-			embeddedDir:  true,
-			env:          map[string]string{"BEADS_DOLT_SERVER_MODE": "1", "BEADS_DOLT_SERVER_HOST": "db.example.com"},
-			wantServer:   true,
-			wantNotice:   modeEnvNotice,
-			wantRemedies: []string{"To persist server mode", "unset BEADS_DOLT_SERVER_MODE."},
+			// The mode env decides the reason, but unsetting it alone
+			// leaves the host selecting server mode, so the remedies name
+			// both overrides and the host to persist.
+			name:        "server mode env outranks host env",
+			metadata:    embedded,
+			embeddedDir: true,
+			env:         map[string]string{"BEADS_DOLT_SERVER_MODE": "1", "BEADS_DOLT_SERVER_HOST": "db.example.com"},
+			wantServer:  true,
+			wantNotice:  modeEnvNotice,
+			wantRemedies: []string{
+				"To persist server mode",
+				"Persist the server host as well (dolt_server_host in .beads/metadata.json, or dolt.host in config.yaml)",
+				"To stay embedded: unset BEADS_DOLT_SERVER_MODE and unset BEADS_DOLT_SERVER_HOST.\n",
+			},
 		},
 		{
 			name:       "explicit server metadata",
