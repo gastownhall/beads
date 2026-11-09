@@ -108,18 +108,24 @@ func (l *depBatchLookups) isWisp(ctx context.Context, tx DBTX, id string) bool {
 	return ok
 }
 
-// classify is ClassifyDepTarget using the batch routing read.
-func (l *depBatchLookups) classify(ctx context.Context, tx DBTX, dep *types.Dependency, isCrossPrefix bool) DepTargetKind {
+// classify is ClassifyDepTarget using the batch routing read: the wisps set
+// and the issues-exists map answer the presence reads per edge without
+// per-edge SQL, on the same presence-first order (GH#8299) — a local
+// cross-prefix target is a local edge, and only a bare foreign-prefix id
+// absent from both maps is external.
+func (l *depBatchLookups) classify(ctx context.Context, tx DBTX, dep *types.Dependency) (DepTargetKind, error) {
 	if l == nil {
-		return ClassifyDepTarget(ctx, tx, dep, isCrossPrefix)
+		return ClassifyDepTarget(ctx, tx, dep)
 	}
-	if isCrossPrefix || IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
-		return DepTargetExternal
-	}
-	if l.isWisp(ctx, tx, dep.DependsOnID) {
-		return DepTargetWisp
-	}
-	return DepTargetIssue
+	return ClassifyDepTargetFrom(ctx, dep.IssueID, dep.DependsOnID, DepTargetPresence{
+		WispActive: func(_ context.Context, id string) bool {
+			_, ok := l.wisps[id]
+			return ok
+		},
+		IssueExists: func(_ context.Context, id string) (bool, error) {
+			return l.issuesExists[id], nil
+		},
+	})
 }
 
 // targetExists is the per-edge `SELECT 1 FROM <issues|wisps> WHERE id = ?`.

@@ -1253,7 +1253,10 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx DBTX, issues [
 				continue
 			}
 			isCrossPrefix := types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID)
-			kind := lookups.classify(ctx, tx, dep, isCrossPrefix)
+			kind, err := lookups.classify(ctx, tx, dep)
+			if err != nil {
+				return result, fmt.Errorf("failed to classify dependency target %s for %s: %w", dep.DependsOnID, dep.IssueID, err)
+			}
 
 			if kind != DepTargetExternal {
 				exists, err := lookups.targetExists(ctx, tx, kind, dep.DependsOnID)
@@ -1266,7 +1269,7 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx DBTX, issues [
 				}
 			}
 
-			if kind != DepTargetExternal && types.ExtractPrefix(dep.IssueID) == types.ExtractPrefix(dep.DependsOnID) {
+			if kind != DepTargetExternal && !isCrossPrefix {
 				if err := lookups.checkHierarchy(ctx, tx, dep); err != nil {
 					if opts.SkipDependencyValidationErrors && isDependencyValidationRefusal(err) {
 						recordSkippedDependency(opts, dep, err.Error())

@@ -4,19 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
-
-// isCrossPrefixDep returns true if the two bead IDs have different prefixes,
-// meaning the target lives in a different rig's database.
-func isCrossPrefixDep(sourceID, targetID string) bool {
-	return types.ExtractPrefix(sourceID) != types.ExtractPrefix(targetID)
-}
 
 // AddDependency adds a dependency between two issues without recording a
 // dependency_added event. Create-with-deps and structural callers use this
@@ -36,34 +29,25 @@ func (s *DoltStore) AddDependencyWithOptions(ctx context.Context, dep *types.Dep
 }
 
 func (s *DoltStore) addDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, addOpts storage.DependencyAddOptions) error {
-	isCrossPrefix := isCrossPrefixDep(dep.IssueID, dep.DependsOnID)
-
 	// Route to wisp_dependencies if the source is an active wisp.
 	if s.isActiveWisp(ctx, dep.IssueID) {
-		return s.addWispDependency(ctx, dep, actor, isCrossPrefix, addOpts.EmitEvent)
-	}
-
-	targetTable := "issues"
-	kind := issueops.DepTargetIssue
-	switch {
-	case isCrossPrefix, strings.HasPrefix(dep.DependsOnID, "external:"):
-		kind = issueops.DepTargetExternal
-	default:
-		if s.isActiveWisp(ctx, dep.DependsOnID) {
-			targetTable = "wisps"
-			kind = issueops.DepTargetWisp
-		}
+		return s.addWispDependency(ctx, dep, actor, addOpts.EmitEvent)
 	}
 
 	var written issueops.DependencyWriteResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		// Classify inside the attempt, on its transaction: the target's
+		// presence decides its column (GH#8299), and a retried attempt
+		// re-reads presence rather than trusting a rolled-back read.
+		kind, err := issueops.ClassifyDepTarget(ctx, tx, dep)
+		if err != nil {
+			return err
+		}
 		opts := issueops.AddDependencyOpts{
-			SourceTable:   "issues",
-			TargetTable:   targetTable,
-			WriteTable:    "dependencies",
-			IsCrossPrefix: isCrossPrefix,
-			TargetKind:    &kind,
-			EmitEvent:     addOpts.EmitEvent,
+			SourceTable: "issues",
+			WriteTable:  "dependencies",
+			TargetKind:  &kind,
+			EmitEvent:   addOpts.EmitEvent,
 		}
 		// Assigned, never merged: a retried attempt's verdict replaces the
 		// rolled-back one's.

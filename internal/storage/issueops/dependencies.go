@@ -105,31 +105,97 @@ func depTargetIn(alias, placeholders string) string {
 	return depTargetExpr(alias) + " IN (" + placeholders + ")"
 }
 
-// IsExternalDepTarget reports whether a dependency target is one this database
-// cannot hold a row for. Two shapes qualify: an "external:" reference, which
-// names something outside beads entirely, and a target whose id prefix names
-// ANOTHER REPOSITORY, which lives in that rig's database and not this one.
-// Both belong in depends_on_external — the one target column carrying no
-// foreign key into issues — so this is the single rule every backend must
-// classify by, whether it writes through a tx (ClassifyDepTarget) or through
-// the domain repository (db.pickDepTargetColumn).
+// IsExternalDepTarget is the prefix-only shape test the classification rule
+// predates GH#8299: an "external:" reference, or a bare foreign-prefix id. It
+// cannot see presence, so it is only the answer for targets absent from both
+// local tables; write legs classify through ClassifyDepTargetFrom instead, and
+// the remaining read-side callers are being migrated off it.
 func IsExternalDepTarget(sourceID, targetID string) bool {
 	return strings.HasPrefix(targetID, "external:") ||
 		types.ExtractPrefix(sourceID) != types.ExtractPrefix(targetID)
 }
 
-// ClassifyDepTarget picks the typed target column for an edge. isCrossPrefix is
-// an override for callers that already know the answer from a cached prefix
-// set; leaving it false is safe, because IsExternalDepTarget re-derives the
-// same comparison from the edge itself.
-func ClassifyDepTarget(ctx context.Context, tx DBTX, dep *types.Dependency, isCrossPrefix bool) DepTargetKind {
-	if isCrossPrefix || IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
-		return DepTargetExternal
+// DepTargetPresence supplies the local-presence reads a classification makes,
+// from whatever can see the target: a transaction, a domain runner, or the
+// lookup maps a batch preloaded. WispActive keeps IsActiveWispInTx's
+// error tolerance — a missing or unreadable wisps table means "no wisp", not
+// a refusal — while IssueExists propagates its errors, because a failed
+// issues read must never be read as absence (that would file a local
+// cross-prefix target as external, the very bug GH#8299 fixes). A nil
+// callback skips that read: classification then never returns DepTargetWisp
+// (nil WispActive) or, for a foreign-prefix id, never returns DepTargetIssue
+// (nil IssueExists).
+type DepTargetPresence struct {
+	WispActive  func(ctx context.Context, id string) bool
+	IssueExists func(ctx context.Context, id string) (bool, error)
+}
+
+// ClassifyDepTargetFrom resolves an edge's typed target column from presence
+// facts rather than the ids' prefixes (GH#8299): a target that exists in this
+// database is local whatever its prefix, so readiness and blocked-state see
+// it. The order is:
+//
+//   - an "external:" reference is external with no target read at all;
+//   - an active wisp row wins, regardless of prefix;
+//   - a same-prefix id is an issue without probing issues (it belongs to this
+//     database by the same multi-prefix rule that created it,
+//     ValidateIssueIDPrefix), which keeps the ordinary edge's read count;
+//   - a differently-prefixed id that exists as an issue row is an issue;
+//   - a differently-prefixed id absent from both tables stays external —
+//     the multi-rig "add now, route later" edge (GH#6556).
+func ClassifyDepTargetFrom(ctx context.Context, sourceID, targetID string, presence DepTargetPresence) (DepTargetKind, error) {
+	if strings.HasPrefix(targetID, "external:") {
+		return DepTargetExternal, nil
 	}
-	if IsActiveWispInTx(ctx, tx, dep.DependsOnID) {
-		return DepTargetWisp
+	if presence.WispActive != nil && presence.WispActive(ctx, targetID) {
+		return DepTargetWisp, nil
 	}
-	return DepTargetIssue
+	if types.ExtractPrefix(sourceID) == types.ExtractPrefix(targetID) {
+		return DepTargetIssue, nil
+	}
+	if presence.IssueExists == nil {
+		return DepTargetExternal, nil
+	}
+	exists, err := presence.IssueExists(ctx, targetID)
+	if err != nil {
+		return DepTargetExternal, fmt.Errorf("classify dependency target %s: %w", targetID, err)
+	}
+	if exists {
+		return DepTargetIssue, nil
+	}
+	return DepTargetExternal, nil
+}
+
+// IssueExistsInTx reports whether id names an issues row in tx. Unlike the
+// wisp probe it returns its errors: classification treats a failed read as a
+// failure, never as absence.
+func IssueExistsInTx(ctx context.Context, tx DBTX, id string) (bool, error) {
+	var exists int
+	err := tx.QueryRowContext(ctx, "SELECT 1 FROM issues WHERE id = ? LIMIT 1", id).Scan(&exists)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
+// ClassifyDepTarget picks the typed target column for an edge, reading the
+// target's presence from tx. Callers whose transaction cannot see the target
+// (server mode splits one logical transaction across two sessions) classify
+// through ClassifyDepTargetFrom on the session that can, and pass the answer
+// in AddDependencyOpts.TargetKind.
+func ClassifyDepTarget(ctx context.Context, tx DBTX, dep *types.Dependency) (DepTargetKind, error) {
+	return ClassifyDepTargetFrom(ctx, dep.IssueID, dep.DependsOnID, DepTargetPresence{
+		WispActive: func(ctx context.Context, id string) bool {
+			return IsActiveWispInTx(ctx, tx, id)
+		},
+		IssueExists: func(ctx context.Context, id string) (bool, error) {
+			return IssueExistsInTx(ctx, tx, id)
+		},
+	})
 }
 
 // AddDependencyOpts configures AddDependencyInTx behavior.
@@ -141,9 +207,6 @@ type AddDependencyOpts struct {
 	// SourceTable is the table to validate the source issue exists in.
 	// Auto-detected via wisp routing if empty.
 	SourceTable string
-	// TargetTable is the table to validate the target issue exists in.
-	// Auto-detected via wisp routing if empty. Ignored when target validation is skipped.
-	TargetTable string
 	// WriteTable is the dependency table to insert/update/check existing deps in.
 	// Auto-detected from source wisp routing if empty.
 	WriteTable string
@@ -151,13 +214,14 @@ type AddDependencyOpts struct {
 	// dependency tables; edge storage is source-routed, so same-class endpoints
 	// can still have mixed-table interior paths.
 	DepTables []string
-	// IsCrossPrefix is true when source and target have different prefixes,
-	// meaning the target lives in another rig's database.
-	IsCrossPrefix bool
 	// SkipCycleCheck skips the recursive pre-insert cycle check for callers
 	// that intentionally trade validation cost for bulk graph wiring speed.
 	SkipCycleCheck bool
-	TargetKind     *DepTargetKind
+	// TargetKind, when non-nil, is the target's classification the caller
+	// resolved on the transaction that can see it (server mode splits one
+	// logical transaction across two SQL sessions, so the write tx cannot
+	// always see the target). Nil classifies on tx here.
+	TargetKind *DepTargetKind
 	// PrecheckedTarget, when non-nil, replaces the in-tx target read: the
 	// target is known to exist with this type and status. Callers that set
 	// it must also set TargetKind, since target classification otherwise
@@ -214,27 +278,35 @@ type DepTargetPrecheck struct {
 // same terms; only a genuinely change-free re-add (identical type and metadata,
 // no new thread) mints nothing.
 func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts) (bool, error) {
-	return addDependencyInTx(ctx, tx, dep, actor, opts, nil, true)
+	return addDependencyInTx(ctx, tx, dep, actor, opts, nil, nil, true)
 }
 
 // DependencyWriteResult is what a dependency write reports to a caller that
 // stages tables for a Dolt commit: whether an audit event row was recorded,
-// and which blocked-state tables had rows flipped. A blocking edge flips the
-// source's (or a descendant's) is_blocked in the same transaction, so a
-// caller that commits selectively stages `issues` when
-// Blocked.IssueRowsChanged — and only then, so a write that changed no
-// issues row cannot sweep unrelated pending issues edits into its commit
-// (GH#6647, GH#2455).
+// which blocked-state tables had rows flipped, and which typed target column
+// the persisted row carries. A blocking edge flips the source's (or a
+// descendant's) is_blocked in the same transaction, so a caller that commits
+// selectively stages `issues` when Blocked.IssueRowsChanged — and only then,
+// so a write that changed no issues row cannot sweep unrelated pending issues
+// edits into its commit (GH#6647, GH#2455).
 type DependencyWriteResult struct {
 	EventWritten bool
 	Blocked      RecomputeIsBlockedResult
+	// TargetKind describes the PERSISTED row: the kind an insert wrote, and
+	// on an idempotent existing-row branch the column that row already
+	// occupies, which a legacy edge may file differently than a fresh
+	// classification would (a re-add does not migrate the row, GH#8299).
+	// Batch end gates use it to decide which edges need hierarchy
+	// re-validation, instead of re-deriving the answer from the prefixes.
+	TargetKind DepTargetKind
 }
 
 // AddDependencyInTxWithResult is AddDependencyInTx reporting the blocked-state
-// tables the add changed alongside the event verdict.
+// tables the add changed alongside the event verdict and the persisted row's
+// target kind.
 func AddDependencyInTxWithResult(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts) (DependencyWriteResult, error) {
 	var result DependencyWriteResult
-	eventWritten, err := addDependencyInTx(ctx, tx, dep, actor, opts, &result.Blocked, true)
+	eventWritten, err := addDependencyInTx(ctx, tx, dep, actor, opts, &result.Blocked, &result.TargetKind, true)
 	result.EventWritten = eventWritten
 	return result, err
 }
@@ -243,7 +315,9 @@ func AddDependencyInTxWithResult(ctx context.Context, tx *sql.Tx, dep *types.Dep
 // whether a new edge mints the source's version row here: the exported entry
 // point always does, while a parent patch (applyParentPatch) rewires several
 // edges for one caller-visible mutation and mints once after the last of them.
-func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts, recomputeResult *RecomputeIsBlockedResult, mintVersion bool) (bool, error) {
+// kindOut, when non-nil, receives the persisted row's target kind (see
+// DependencyWriteResult.TargetKind).
+func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts, recomputeResult *RecomputeIsBlockedResult, kindOut *DepTargetKind, mintVersion bool) (bool, error) {
 	if strings.HasPrefix(dep.DependsOnID, "external:") && dep.Type == types.DepParentChild {
 		return false, fmt.Errorf("external capability dependencies cannot use parent-child edges")
 	}
@@ -262,14 +336,28 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		}
 	}
 
-	// Auto-detect target routing if not provided (skip for external/cross-prefix).
-	targetTable := opts.TargetTable
-	if targetTable == "" && !strings.HasPrefix(dep.DependsOnID, "external:") && !opts.IsCrossPrefix {
-		targetIsWisp := IsActiveWispInTx(ctx, tx, dep.DependsOnID)
-		targetTable, _, _, _ = WispTableRouting(targetIsWisp)
+	// Resolve the target's kind before target-table selection and validation
+	// (GH#8299): every non-external kind validates the target against the
+	// table its class names, and an external one skips validation entirely.
+	// Callers whose tx cannot see the target (server mode splits one logical
+	// transaction across two SQL sessions) pass TargetKind; everyone else
+	// classifies on tx here.
+	var kind DepTargetKind
+	if opts.TargetKind != nil {
+		kind = *opts.TargetKind
+	} else {
+		var classifyErr error
+		kind, classifyErr = ClassifyDepTarget(ctx, tx, dep)
+		if classifyErr != nil {
+			return false, classifyErr
+		}
 	}
-	if targetTable == "" {
-		targetTable = "issues"
+	if kindOut != nil {
+		*kindOut = kind
+	}
+	targetTable := "issues"
+	if kind == DepTargetWisp {
+		targetTable = "wisps"
 	}
 
 	depTables := opts.DepTables
@@ -292,14 +380,16 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		return false, fmt.Errorf("failed to check issue existence: %w", err)
 	}
 
-	// Validate target issue exists (skip for external and cross-prefix refs,
-	// and for targets the caller already read on their own transaction).
+	// Validate target issue exists (skip for external refs, which carry no
+	// local row, and for targets the caller already read on their own
+	// transaction).
 	var targetType string
 	switch {
 	case opts.PrecheckedTarget != nil:
 		targetType = opts.PrecheckedTarget.IssueType
-	case !strings.HasPrefix(dep.DependsOnID, "external:") && !opts.IsCrossPrefix:
-		//nolint:gosec // G201: targetTable is from WispTableRouting ("issues" or "wisps")
+	case kind == DepTargetExternal:
+	default:
+		//nolint:gosec // G201: targetTable is from the resolved kind ("issues" or "wisps")
 		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT issue_type FROM %s WHERE id = ?`, targetTable), dep.DependsOnID).Scan(&targetType); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return false, MissingDependencyTarget(dep.IssueID, dep.DependsOnID)
@@ -320,12 +410,6 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		}
 	}
 
-	var kind DepTargetKind
-	if opts.TargetKind != nil {
-		kind = *opts.TargetKind
-	} else {
-		kind = ClassifyDepTarget(ctx, tx, dep, opts.IsCrossPrefix)
-	}
 	targetCol := kind.Column()
 
 	// Check for existing dependency between the same pair. Use the resolved
@@ -333,10 +417,17 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	// target column cannot bypass the idempotency/conflict check.
 	var existingType string
 	var existingMetadataNS, existingThreadNS sql.NullString
+	var existingIssueTgt, existingWispTgt sql.NullString
 	//nolint:gosec // G201: writeTable from WispTableRouting; depTargetEquals has no user input.
-	err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT type, metadata, thread_id FROM %s WHERE issue_id = ? AND %s`, writeTable, depTargetEquals("")),
-		dep.IssueID, dep.DependsOnID).Scan(&existingType, &existingMetadataNS, &existingThreadNS)
+	err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT type, metadata, thread_id, depends_on_issue_id, depends_on_wisp_id FROM %s WHERE issue_id = ? AND %s`, writeTable, depTargetEquals("")),
+		dep.IssueID, dep.DependsOnID).Scan(&existingType, &existingMetadataNS, &existingThreadNS, &existingIssueTgt, &existingWispTgt)
 	if err == nil {
+		// The persisted row, not the fresh classification, is what an
+		// idempotent branch leaves behind: a re-add never migrates the row's
+		// typed column (GH#8299), so report the column the row occupies.
+		if kindOut != nil {
+			*kindOut = kindFromTypedTargets(existingIssueTgt, existingWispTgt)
+		}
 		existingMetadata := existingMetadataNS.String
 		if !existingMetadataNS.Valid {
 			existingMetadata = "{}"
@@ -1276,6 +1367,22 @@ func mergeRecomputeIsBlockedResult(target *RecomputeIsBlockedResult, source Reco
 	}
 	target.IssueRowsChanged = target.IssueRowsChanged || source.IssueRowsChanged
 	target.WispRowsChanged = target.WispRowsChanged || source.WispRowsChanged
+}
+
+// kindFromTypedTargets reads the target kind a persisted dependency row
+// carries from its typed columns, following DepTargetExpr's precedence
+// (issue, then wisp, then external) — the same identity depid and the unique
+// keys resolve. ck_dep_one_target guarantees exactly one column is set, so an
+// issue or wisp value decides and anything else is external.
+func kindFromTypedTargets(issueTgt, wispTgt sql.NullString) DepTargetKind {
+	switch {
+	case issueTgt.Valid:
+		return DepTargetIssue
+	case wispTgt.Valid:
+		return DepTargetWisp
+	default:
+		return DepTargetExternal
+	}
 }
 
 // GetIssuesByIDsInTx retrieves multiple issues by ID within an existing

@@ -1190,7 +1190,11 @@ func insertBenchDependencies(ctx context.Context, tx *sql.Tx, depTable string, i
 			if createdAt.IsZero() {
 				createdAt = now
 			}
-			column := issueops.ClassifyDepTarget(ctx, tx, dep, false).Column()
+			kind, err := issueops.ClassifyDepTarget(ctx, tx, dep)
+			if err != nil {
+				return fmt.Errorf("classify dependency target %s for %s: %w", dep.DependsOnID, dep.IssueID, err)
+			}
+			column := kind.Column()
 			rowsByColumn[column] = append(rowsByColumn[column], benchDependencyRow{
 				issueID:     dep.IssueID,
 				dependsOnID: dep.DependsOnID,
