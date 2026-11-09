@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -149,6 +150,47 @@ func TestDetectTestPollution_AuthoredContentVetoes(t *testing.T) {
 	for _, issue := range reported {
 		if _, ok := got[issue.ID]; !ok {
 			t.Errorf("%s not reported; a 19-byte trimmed description or blank prose is not authored content", issue.ID)
+		}
+	}
+}
+
+// TestDetectTestPollution_IDAndCreationTimeAreNotEvidence pins GH#5025:
+// counter-mode IDs (bd-1, bd-2, ...) and same-minute batch creation are how
+// ordinary work and imports look, so neither is pollution evidence. Ten
+// ordinary-title counter-ID tasks with empty descriptions created together
+// are not reported, alone or as a batch, and no reported hit cites an ID or
+// creation-time reason.
+func TestDetectTestPollution_IDAndCreationTimeAreNotEvidence(t *testing.T) {
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	var batch []*types.Issue
+	for i := 1; i <= 10; i++ {
+		batch = append(batch, &types.Issue{
+			ID:        fmt.Sprintf("bd-%d", i),
+			Title:     fmt.Sprintf("Import billing ledger %d", i),
+			Status:    types.StatusOpen,
+			IssueType: types.TypeTask,
+			CreatedAt: created,
+		})
+	}
+
+	for _, issue := range batch {
+		if p, ok := pollutedIDs([]*types.Issue{issue})[issue.ID]; ok {
+			t.Errorf("alone: %s reported (score %.2f, reasons %v); counter IDs are not evidence", issue.ID, p.score, p.reasons)
+		}
+	}
+	for id, p := range pollutedIDs(batch) {
+		t.Errorf("batch: %s reported (score %.2f, reasons %v); same-minute creation is not evidence", id, p.score, p.reasons)
+	}
+
+	fixture := &types.Issue{ID: "bd-11", Title: "Test issue", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: created}
+	p, ok := pollutedIDs(append(batch, fixture))[fixture.ID]
+	if !ok {
+		t.Fatalf("%s (%q) not reported", fixture.ID, fixture.Title)
+	}
+	for _, reason := range p.reasons {
+		if strings.Contains(reason, "Sequential") || strings.Contains(reason, "same minute") {
+			t.Errorf("%s reasons %v cite ID or creation time", fixture.ID, p.reasons)
+			break
 		}
 	}
 }

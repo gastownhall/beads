@@ -28,8 +28,6 @@ func (p PollutionResult) HighConfidence() bool {
 // testPrefixPattern matches common test issue title prefixes.
 var testPrefixPattern = regexp.MustCompile(`^(test|benchmark|sample|tmp|temp|debug|dummy)[-_\s]`)
 
-var sequentialIDPattern = regexp.MustCompile(`^[a-z]+-\d+$`)
-
 // HasTestTitlePrefix reports whether title starts with a common test prefix.
 // bd create and bd export use it on its own; the pollution scorer treats it
 // as one signal among several.
@@ -73,20 +71,11 @@ func hasAuthoredContent(issue *types.Issue) bool {
 }
 
 // DetectTestPollution scores issues for test pollution and returns those at
-// or above the reporting threshold, in input order.
+// or above the reporting threshold, in input order. Only the issue's own
+// title and prose count: counter-mode IDs and same-minute batch creation are
+// how ordinary work and imports look, not evidence of a test run (GH#5025).
 func DetectTestPollution(issues []*types.Issue) []PollutionResult {
 	var results []PollutionResult
-
-	// Group issues by creation time to detect rapid succession
-	issuesByMinute := make(map[int64][]*types.Issue)
-	for _, issue := range issues {
-		if !pollutionCandidate(issue) {
-			continue
-		}
-		minute := issue.CreatedAt.Unix() / 60
-		issuesByMinute[minute] = append(issuesByMinute[minute], issue)
-	}
-
 	for _, issue := range issues {
 		if !pollutionCandidate(issue) || hasAuthoredContent(issue) {
 			continue
@@ -102,12 +91,6 @@ func DetectTestPollution(issues []*types.Issue) []PollutionResult {
 			reasons = append(reasons, "Title starts with test prefix")
 		}
 
-		// Check for sequential numbering (medium signal)
-		if sequentialIDPattern.MatchString(issue.ID) && len(issue.Description) < 20 {
-			score += 0.4
-			reasons = append(reasons, "Sequential ID with minimal description")
-		}
-
 		// Check for generic/empty description (weak signal)
 		if len(strings.TrimSpace(issue.Description)) == 0 {
 			score += 0.2
@@ -115,13 +98,6 @@ func DetectTestPollution(issues []*types.Issue) []PollutionResult {
 		} else if len(issue.Description) < 20 {
 			score += 0.1
 			reasons = append(reasons, "Very short description")
-		}
-
-		// Check for rapid creation (created with many others in same minute)
-		minute := issue.CreatedAt.Unix() / 60
-		if len(issuesByMinute[minute]) >= 10 {
-			score += 0.3
-			reasons = append(reasons, fmt.Sprintf("Created with %d other issues in same minute", len(issuesByMinute[minute])-1))
 		}
 
 		// Check for generic test titles
