@@ -287,52 +287,66 @@ func TestLegacyUpgradeGuardWarnsInsteadOfRefusingUnreadableWitness(t *testing.T)
 // TestLegacyUpgradeGuardWarningIsSelfHealing models the PersistentPreRunE
 // order — guard, then trackBdVersion — to show the warning is one-shot: the
 // admitted command rewrites the witness with this binary's own version, so the
-// next command reads it cleanly. Only a stamp bd rewrites identically every
-// run (a Homebrew --HEAD build, GH#5603) can warn repeatedly.
+// next command reads it cleanly. That includes a Homebrew --HEAD build
+// (GH#5603): the first command warns over another build's stamp, persists this
+// build's stamp, and the next command admits silently. The write is the
+// command's to make — preview, read-only and frozen commands leave the witness
+// alone — so the silence below is conditional on persistence succeeding, not
+// guaranteed by admission alone.
 func TestLegacyUpgradeGuardWarningIsSelfHealing(t *testing.T) {
 	pinLegacyUpgradeGuardEnv(t)
-	warnings := captureLegacyUpgradeWarnings(t)
-	beadsDir := writeSelectedServerWorkspace(t, "not-a-version")
 
-	if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
-		t.Fatalf("first guardLegacyUpgradeWorkspace() = %v, want nil", err)
-	}
-	if warnings.Len() == 0 {
-		t.Fatal("guard admitted an unreadable witness without warning")
-	}
+	t.Run("garbage witness heals to the running release", func(t *testing.T) {
+		warnings := captureLegacyUpgradeWarnings(t)
+		beadsDir := writeSelectedServerWorkspace(t, "not-a-version")
 
-	// trackBdVersion rewrites the witness whenever it differs from Version.
-	if err := writeLocalVersion(filepath.Join(beadsDir, localVersionFile), Version); err != nil {
-		t.Fatal(err)
-	}
+		if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+			t.Fatalf("first guardLegacyUpgradeWorkspace() = %v, want nil", err)
+		}
+		if warnings.Len() == 0 {
+			t.Fatal("guard admitted an unreadable witness without warning")
+		}
 
-	warnings.Reset()
-	if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
-		t.Fatalf("second guardLegacyUpgradeWorkspace() = %v, want nil", err)
-	}
-	if warnings.Len() != 0 {
-		t.Fatalf("guard warned again after the witness healed: %q", warnings.String())
-	}
-}
+		// trackBdVersion rewrites the witness whenever it differs from Version.
+		if err := writeLocalVersion(filepath.Join(beadsDir, localVersionFile), Version); err != nil {
+			t.Fatal(err)
+		}
 
-// TestLegacyUpgradeGuardAdmitsBrewHeadStamp covers the reporter's scenario in
-// GH#5603: Homebrew stamps HEAD-<shortsha> into main.Version for --HEAD
-// installs, bd writes it verbatim, and the workspace must still open. The
-// unknown era admits it. Silencing the repeated warning for that stable stamp
-// needs the shape recognizer in GH#5625 (anisoptera), which this does not
-// duplicate.
-func TestLegacyUpgradeGuardAdmitsBrewHeadStamp(t *testing.T) {
-	pinLegacyUpgradeGuardEnv(t)
-	for _, stamp := range []string{"HEAD-f925f3f", "HEAD", "HEAD-f925f3f_1"} {
-		t.Run(stamp, func(t *testing.T) {
-			captureLegacyUpgradeWarnings(t)
-			beadsDir := writeSelectedServerWorkspace(t, stamp)
+		warnings.Reset()
+		if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+			t.Fatalf("second guardLegacyUpgradeWorkspace() = %v, want nil", err)
+		}
+		if warnings.Len() != 0 {
+			t.Fatalf("guard warned again after the witness healed: %q", warnings.String())
+		}
+	})
 
-			if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
-				t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want nil", err)
-			}
-		})
-	}
+	t.Run("another build's HEAD stamp heals to this build's stamp", func(t *testing.T) {
+		pinGuardVersion(t, "HEAD-f925f3f")
+		warnings := captureLegacyUpgradeWarnings(t)
+		beadsDir := writeSelectedServerWorkspace(t, "HEAD-0123abc")
+
+		if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+			t.Fatalf("first guardLegacyUpgradeWorkspace() = %v, want nil", err)
+		}
+		if warnings.Len() == 0 {
+			t.Fatal("guard admitted another build's HEAD stamp without warning")
+		}
+
+		// trackBdVersion persists this build's stamp once the admitted command
+		// runs; model that write and check it succeeds.
+		if err := writeLocalVersion(filepath.Join(beadsDir, localVersionFile), Version); err != nil {
+			t.Fatalf("writeLocalVersion() = %v, want nil", err)
+		}
+
+		warnings.Reset()
+		if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+			t.Fatalf("second guardLegacyUpgradeWorkspace() = %v, want nil", err)
+		}
+		if warnings.Len() != 0 {
+			t.Fatalf("guard warned again after the witness healed to this build's stamp: %q", warnings.String())
+		}
+	})
 }
 
 // TestLegacyUpgradeGuardAdmitsBrewHeadStamp covers the reporter's scenario in

@@ -673,20 +673,34 @@ server selection is not overridden by a stale `.beads/embeddeddolt/` repository.
 |---|---|
 | Current embedded metadata with `.beads/embeddeddolt/` and no explicit server selection | Direct current-era upgrade |
 | Explicit server metadata plus `.local_version` from v0.55.4 through v0.62.0, whether or not `.beads/dolt/` exists | Explicit legacy Dolt export/import |
-| Explicit server metadata plus `.beads/dolt/` and a witness whose major version is 1 or newer | Normal current server-mode upgrade |
+| Explicit server metadata plus `.beads/dolt/` and a witness naming bd 1.0 or later, or exactly matching the running build's own Homebrew `--HEAD` stamp | Normal current server-mode upgrade |
 | Explicit server metadata plus `.beads/dolt/` and a missing or pre-v1 witness | Explicit legacy Dolt export/import |
 | Explicit server metadata plus `.beads/dolt/` and a witness that is present but unreadable | Normal current server-mode upgrade, with a warning |
 | Explicit server metadata without `.beads/dolt/`, and a missing, malformed, or non-historical witness | Normal current server-mode compatibility path |
-| `.beads/dolt/` with missing metadata or persisted `dolt_mode` blank/`embedded` | Explicit legacy Dolt export/import, except for the configured shared-server compatibility path described below |
+| `.beads/dolt/` with missing metadata or persisted `dolt_mode` blank/`embedded` | Explicit legacy Dolt export/import, except for the shared-server compatibility path and the current-evidence witness rows above |
 | One `.beads/*.db` file, such as `beads.db` or `vc.db` | Sealed SQLite bridge |
 
 The witness is whatever `bd` held in its own version string when it last touched
 the workspace, so it may be a plain release, a release candidate, a build
-carrying metadata, or a Go pseudo-version; all of those are read as the version
-they name. A witness that is present but unreadable is not treated as a legacy
-marker — no pre-v1 `bd` could have written one — so `bd` warns and continues
-rather than refusing every command. A *missing* witness stays ambiguous and is
-still refused.
+carrying metadata, a Go pseudo-version, or a Homebrew `--HEAD` stamp
+(`HEAD-<commit>`, with Homebrew's `_<revision>` suffix once the formula carries
+a revision). Releases, candidates, metadata builds and pseudo-versions are read
+as the version they name. A `--HEAD` stamp names no release era by shape —
+homebrew-core shipped `--HEAD` builds while its stable formula was still pre-1.0
+— but a witness exactly equal to the *running* build's own stamp is
+current-era evidence all the same: only that build writes it, and only after
+the guard already admitted the workspace. Such a witness admits silently in
+every mode; any other `--HEAD` witness follows the mode-specific rows above,
+where a present-but-unreadable witness warns and opens in explicit server mode
+(a compatibility policy over the advisory, gitignored file) and the non-server
+layouts fail closed. A *missing* witness stays ambiguous and is still refused.
+
+A `--HEAD` witness left by a *different* build becomes silent only after an
+admitted command successfully persists the running build's own stamp:
+preview, read-only and frozen commands leave `.local_version` alone, and a
+failed write leaves the warning in place. Bare `HEAD`, which every `--HEAD`
+install shares, can still warn on every command; only the running build's
+commit-bearing identity is trusted.
 
 Current `bd` refuses recognized historical SQLite and legacy Dolt layouts before
 opening storage or rewriting metadata. This is intentional: preserve the source
@@ -741,10 +755,11 @@ sealed-copy helper below does not start or manage a Dolt SQL server.
 
 Explicit server metadata with a v0.55.4–v0.62.0 witness is always refused,
 including when there is no local `.beads/dolt/` root. When that root does exist,
-the guard admits explicit server mode only with a syntactically valid witness
-whose major version is 1 or newer; a missing, malformed, or pre-v1 witness fails
-closed. Without the local root, a missing, malformed, or non-historical witness
-is admitted only as a compatibility layout.
+the guard admits explicit server mode with a witness naming bd 1.0 or later —
+or one exactly matching the running build's own Homebrew `--HEAD` stamp — and
+warns and opens over a present but unreadable witness; a missing or pre-v1
+witness fails closed. Without the local root, a missing, malformed, or
+non-historical witness is admitted only as a compatibility layout.
 
 The configured shared-server compatibility path applies only when persisted
 metadata is missing or leaves `dolt_mode` blank/`embedded`; it does not override

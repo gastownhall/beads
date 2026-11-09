@@ -1226,6 +1226,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A Homebrew `--HEAD` build no longer warns on every command about its own
+  `.local_version` stamp, and no longer refuses a same-build workspace beside
+  a local Dolt root outside server mode (#5603, reported by anisoptera, whose
+  shape recognizer and design carried the fix). The cross-era guard admitted a
+  `HEAD-<sha>` witness only through the warn-and-open arm, so a build that
+  rewrites its own stamp identically on every run warned once per command —
+  version tracking cannot heal a witness that already equals `main.Version` —
+  and a metadata-less, blank-mode or embedded workspace with a populated
+  `.beads/dolt/` root was refused outright. A witness exactly equal to the
+  running binary's own commit-bearing stamp now admits silently in every mode.
+  Another build's stamp and the identity-free shapes (bare `HEAD`,
+  `HEAD_<revision>`) keep their warning/refusal boundary: the stamp's shape
+  names no era, since homebrew-core shipped `--HEAD` builds while its stable
+  formula was still pre-1.0.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
