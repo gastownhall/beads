@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // dbAgedUpdatedAt is decades before any clock these tests run under, so a
@@ -137,5 +138,79 @@ func (s *testSuite) labelClockRename() {
 	}
 	if got := s.labelClockUpdatedAt("issues", "bd-lclk-rn-nc"); !got.Equal(dbAgedUpdatedAt) {
 		s.T().Errorf("rename moved non-carrier updated_at to %v, want it preserved at %v", got, dbAgedUpdatedAt)
+	}
+}
+
+// TestLabelClockCreatePreservation pins the uow create half of GH#5442 AC-3:
+// a create persisting supplied (own or inherited) labels is a create, not a
+// live label edit — the caller's timestamp T survives it. The live-edit touch
+// fires only on edits (AC-1); LabelOpts.PreserveUpdatedAt is the seam.
+func (s *testSuite) TestLabelClockCreatePreservation() {
+	s.Run("OwnLabelsPreserveSuppliedTimestamp", s.labelClockCreateOwn)
+	s.Run("InheritedLabelsPreserveSuppliedTimestamp", s.labelClockCreateInherit)
+	s.Run("WispCreateWithLabelsPreservesSuppliedTimestamp", s.labelClockCreateWisp)
+}
+
+func (s *testSuite) labelClockCreateOwn() {
+	s.resetMintConfig("bd", "")
+	uc := s.issueUseCase()
+	_, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		ExplicitID: "bd-lclk-cr",
+		Issue: &types.Issue{
+			Title: "create clock", Status: types.StatusOpen,
+			Priority: 2, IssueType: types.TypeTask, UpdatedAt: dbAgedUpdatedAt,
+		},
+		Labels: []string{"own"},
+	}, "tester")
+	s.Require().NoError(err)
+	if got := s.labelClockUpdatedAt("issues", "bd-lclk-cr"); !got.Equal(dbAgedUpdatedAt) {
+		s.T().Errorf("create with own labels moved updated_at to %v, want the supplied %v preserved",
+			got, dbAgedUpdatedAt)
+	}
+}
+
+func (s *testSuite) labelClockCreateInherit() {
+	s.resetMintConfig("bd", "")
+	uc := s.issueUseCase()
+	_, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		ExplicitID: "bd-lclk-par",
+		Issue: &types.Issue{
+			Title: "parent", Status: types.StatusOpen,
+			Priority: 2, IssueType: types.TypeTask,
+		},
+		Labels: []string{"shared"},
+	}, "tester")
+	s.Require().NoError(err)
+
+	res, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		ParentID: "bd-lclk-par", InheritLabelsFromParent: true,
+		Issue: &types.Issue{
+			Title: "child", Status: types.StatusOpen,
+			Priority: 2, IssueType: types.TypeTask, UpdatedAt: dbAgedUpdatedAt,
+		},
+	}, "tester")
+	s.Require().NoError(err)
+	s.Require().NotEmpty(res.InheritedLabels)
+	if got := s.labelClockUpdatedAt("issues", res.Issue.ID); !got.Equal(dbAgedUpdatedAt) {
+		s.T().Errorf("create with inherited labels moved updated_at to %v, want the supplied %v preserved",
+			got, dbAgedUpdatedAt)
+	}
+}
+
+func (s *testSuite) labelClockCreateWisp() {
+	s.resetMintConfig("bd", "")
+	uc := s.issueUseCase()
+	_, err := uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+		ExplicitID: "bd-lclk-wcr",
+		Issue: &types.Issue{
+			Title: "wisp create clock", Status: types.StatusOpen,
+			Priority: 2, IssueType: types.TypeTask, UpdatedAt: dbAgedUpdatedAt,
+		},
+		Labels: []string{"own"},
+	}, "tester")
+	s.Require().NoError(err)
+	if got := s.labelClockUpdatedAt("wisps", "bd-lclk-wcr"); !got.Equal(dbAgedUpdatedAt) {
+		s.T().Errorf("wisp create with own labels moved updated_at to %v, want the supplied %v preserved",
+			got, dbAgedUpdatedAt)
 	}
 }
