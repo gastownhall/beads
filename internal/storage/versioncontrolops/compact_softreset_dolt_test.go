@@ -1063,3 +1063,60 @@ func TestCompactWriterFromBeforeLandedCommitJoinsFollowup(t *testing.T) {
 	f.wantStatus("config:false", "u:false")
 	f.wantNoTempBranch()
 }
+
+// AC-6 of the catch-up design: the residual window. C2 lands after the
+// catch-up's snapshot — nothing replays it — and a writer whose transaction
+// begins on C2's head finishes its Dolt commit after the reset moved main
+// onto the compacted history. Compact still reports success, every row stays
+// readable on main, the straddler's own row is committed in main's HEAD, and
+// C2's row may sit in the working set; the contract's recovery — one explicit
+// commit — brings it into HEAD. The catch-up narrows the window to the
+// snapshot; closing it needs a conditional head move Dolt does not offer.
+func TestCompactResidualStraddlerRecoversWithCommit(t *testing.T) {
+	port := startCompactTestServer(t)
+	f := newCompactFixture(t, port)
+	writer := f.conn()
+
+	// C2 lands just before the reset — after catch-up's snapshot — and W's
+	// transaction begins on C2's head at once.
+	var wtx *sql.Tx
+	hook := &compactHookConn{
+		beforeExec: onceBeforeFinalReset(func() {
+			f.landRowID(writer, 601, "landed 601")
+			tx, err := writer.BeginTx(f.ctx, nil)
+			if err != nil {
+				f.t.Fatalf("begin writer transaction: %v", err)
+			}
+			wtx = tx
+			if _, err := wtx.ExecContext(f.ctx, "INSERT INTO t VALUES (900, 'writer')"); err != nil {
+				f.t.Fatalf("writer insert t 900: %v", err)
+			}
+		}),
+		afterFinalReset: func() {
+			f.exec(wtx, "CALL DOLT_ADD('t')", "CALL DOLT_COMMIT('-m', 'writer 900')")
+			if err := wtx.Commit(); err != nil {
+				f.t.Fatalf("writer commit: %v", err)
+			}
+		},
+	}
+	if err := f.compact(hook); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	// Every row is readable on main and the straddler's own commit holds.
+	for _, id := range []int{601, 900} {
+		if n := f.count("SELECT COUNT(*) FROM t WHERE id = ?", id); n != 1 {
+			t.Fatalf("t row %d on main: found=%d, want 1 (status %q)", id, n, f.status())
+		}
+	}
+	if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 900"); n != 1 {
+		t.Fatalf("straddler t row 900 in main's HEAD: found=%d, want 1 (status %q)", n, f.status())
+	}
+	// C2's row is the residual: present on main, and the contract's recovery
+	// commit — `bd dolt commit` at the CLI — brings it into HEAD.
+	f.exec(f.db, "CALL DOLT_COMMIT('-Am', 'recovery: commit C2 after the straddle')")
+	if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = 601"); n != 1 {
+		t.Fatalf("C2 t row 601 in main's HEAD after the recovery commit: found=%d, want 1 (status %q)", n, f.status())
+	}
+	f.wantNoTempBranch()
+}

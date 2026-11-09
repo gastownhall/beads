@@ -396,6 +396,20 @@ func TestProxiedServerCompactKeepsPendingWrite(t *testing.T) {
 		t.Errorf("after compact: working title = %q, HEAD title = %q; want the pending %q kept uncommitted over %q",
 			working, head, "pending title", "committed title")
 	}
+
+	// The residual contract's recovery: an explicit `bd dolt commit` through
+	// the same proxied front door lands the pending write in HEAD — the path
+	// the docs promise a writer whose rows the compaction left uncommitted.
+	stdout, stderr, err = bdProxiedRunBuffers(t, bd, p.dir, "dolt", "commit", "-m", "recovery: commit the pending write")
+	if err != nil {
+		t.Fatalf("dolt commit recovery failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if err := db.QueryRowContext(ctx, "SELECT title FROM issues AS OF 'HEAD' WHERE id = ?", issue.ID).Scan(&head); err != nil {
+		t.Fatalf("read HEAD title after recovery: %v", err)
+	}
+	if head != "pending title" {
+		t.Errorf("HEAD title after `bd dolt commit` = %q, want the recovered %q", head, "pending title")
+	}
 }
 
 func proxiedCommitCount(t *testing.T, bd string, p proxiedProject) int {
