@@ -505,8 +505,12 @@ linters:
         text: 'do not write a filter here'
         linters:
           - forbidigo
-      # doctor's diagnostics and the fixes that follow them.
-      - path: '^cmd/bd/doctor_(conventions|pollution)\.go$|^cmd/bd/doctor/(maintenance|fix/maintenance|fix/migrate)\.go$'
+      # doctor's diagnostics and the fixes that follow them. The pollution
+      # classifier's gate scan (doctor/pollution.go) is the one filter-writing
+      # site in the doctor package: its seven TitleContains candidate
+      # searches are unrestricted by status/type on purpose, so the shared
+      # classifier alone owns the exclusions.
+      - path: '^cmd/bd/doctor_(conventions|pollution)\.go$|^cmd/bd/doctor/(maintenance|pollution|fix/maintenance|fix/migrate)\.go$'
         text: 'do not write a filter here'
         linters:
           - forbidigo

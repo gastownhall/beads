@@ -196,3 +196,44 @@ func DetectTestPollution(ctx context.Context, evidence PollutionEvidence, issues
 	}
 	return matches, nil
 }
+
+// pollutionPrefixWords are the seven title words every pollution marker is
+// built from: each test-style prefix starts with one of them and each generic
+// phrase contains "test" or "sample". The gate searches titles for these
+// words to find its candidate rows; the classifier alone decides which of
+// them match. TestPollutionStoreParity pins that invariant.
+var pollutionPrefixWords = []string{"test", "benchmark", "sample", "tmp", "temp", "debug", "dummy"}
+
+// PollutionStore is the seam the doctor Test Pollution gate reads: a store
+// that can search titles for the candidate rows and answer the evidence
+// queries. storage.DoltStorage satisfies it.
+type PollutionStore interface {
+	PollutionEvidence
+	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
+}
+
+// PollutionGateScan returns the pollution matches for a full-doctor gate run
+// over the whole store: seven candidate title searches (one per prefix word,
+// deduplicated by ID, unrestricted by status or type so the shared classifier
+// alone owns exclusions, with no result limit), then the shared classifier
+// with evidence. The SQL builder lowercases title and query
+// (internal/storage/sqlbuild), so the searches are case-insensitive where the
+// old raw-SQL gate was not.
+func PollutionGateScan(ctx context.Context, store PollutionStore) ([]PollutionMatch, error) {
+	seen := make(map[string]bool)
+	var candidates []*types.Issue
+	for _, word := range pollutionPrefixWords {
+		issues, err := store.SearchIssues(ctx, "", types.IssueFilter{TitleContains: word})
+		if err != nil {
+			return nil, fmt.Errorf("searching titles for %q: %w", word, err)
+		}
+		for _, issue := range issues {
+			if seen[issue.ID] {
+				continue
+			}
+			seen[issue.ID] = true
+			candidates = append(candidates, issue)
+		}
+	}
+	return DetectTestPollution(ctx, store, candidates)
+}
