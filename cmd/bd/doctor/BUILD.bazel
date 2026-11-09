@@ -41,6 +41,7 @@ go_library(
         "nocow_other.go",
         "perf.go",
         "perf_dolt.go",
+        "pollution.go",
         "quick.go",
         "remotes.go",
         "role.go",

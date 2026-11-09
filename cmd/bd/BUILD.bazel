@@ -754,6 +754,7 @@ go_test(
         "doctor_migrate_fix_test.go",
         "doctor_mutation_gate_test.go",
         "doctor_orchestrator_guard_test.go",
+        "doctor_pollution_test.go",
         "doctor_repair_test.go",
         "doctor_test.go",
         "doctor_validate_test.go",
