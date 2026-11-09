@@ -1226,6 +1226,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A Homebrew `--HEAD` build of bd no longer warns
+  `unreadable version witness "HEAD-<sha>"` on every command in a server
+  workspace it already stamped, and no longer refuses that workspace as legacy
+  when metadata is missing or selects embedded mode beside a populated
+  `.beads/dolt/` (GH#5603). A `.local_version` witness that exactly equals the
+  running build's own `HEAD-<sha>` stamp (with any `_<revision>` suffix) now
+  counts like a v1 or newer witness in every mode. Another build's HEAD stamp
+  keeps the existing rules: it warns and opens in server mode until an admitted
+  command writes the current stamp, and is refused outside server mode. A bare
+  `HEAD` names no commit and still warns. Thanks to @anisoptera for the report
+  and the brew HEAD stamp recognizer.
+
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

@@ -48,6 +48,13 @@ func TestClassifyVersionWitness(t *testing.T) {
 		{name: "whitespace only", version: "   ", want: witnessEraUnknown},
 		{name: "genuine garbage", version: "not-a-version", want: witnessEraUnknown},
 		{name: "truncated binary noise", version: "\x00\x01\x02", want: witnessEraUnknown},
+
+		// A Homebrew --HEAD stamp names a commit, not a release, and
+		// homebrew-core built pre-1.0 bd from HEAD too, so its shape carries
+		// no era. Only the guard's own-build check admits one silently.
+		{name: "brew head stamp", version: "HEAD-f925f3f", want: witnessEraUnknown},
+		{name: "brew head stamp with revision", version: "HEAD-f925f3f_1", want: witnessEraUnknown},
+		{name: "bare brew head", version: "HEAD", want: witnessEraUnknown},
 	}
 
 	for _, tt := range tests {
@@ -296,20 +303,24 @@ func TestLegacyUpgradeGuardWarningIsSelfHealing(t *testing.T) {
 }
 
 // TestLegacyUpgradeGuardAdmitsBrewHeadStamp covers the reporter's scenario in
-// GH#5603: Homebrew stamps HEAD-<shortsha> into main.Version for --HEAD
-// installs, bd writes it verbatim, and the workspace must still open. The
-// unknown era admits it. Silencing the repeated warning for that stable stamp
-// needs the shape recognizer in GH#5625 (anisoptera), which this does not
-// duplicate.
+// GH#5603 from a binary that is not the build that wrote the stamp: Homebrew
+// stamps HEAD-<shortsha> into main.Version for --HEAD installs, bd writes it
+// verbatim, and the workspace must still open. The unknown era admits it with
+// the unreadable-witness warning; only the build whose own stamp it is reads it
+// silently (TestLegacyUpgradeGuardTrustsThisBuildsBrewHeadStamp).
 func TestLegacyUpgradeGuardAdmitsBrewHeadStamp(t *testing.T) {
 	pinLegacyUpgradeGuardEnv(t)
+	pinRunningVersion(t, "1.3.4")
 	for _, stamp := range []string{"HEAD-f925f3f", "HEAD", "HEAD-f925f3f_1"} {
 		t.Run(stamp, func(t *testing.T) {
-			captureLegacyUpgradeWarnings(t)
+			warnings := captureLegacyUpgradeWarnings(t)
 			beadsDir := writeSelectedServerWorkspace(t, stamp)
 
 			if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
 				t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want nil", err)
+			}
+			if !strings.Contains(warnings.String(), stamp) {
+				t.Fatalf("guard warning = %q, want the unreadable-witness warning naming %q", warnings.String(), stamp)
 			}
 		})
 	}
@@ -349,6 +360,77 @@ func TestVersionWitnessRoundTrip(t *testing.T) {
 			}
 			if got := classifyVersionWitness(witness); got != witnessEraCurrent {
 				t.Fatalf("classifyVersionWitness(%q) = %v, want %v", witness, got, witnessEraCurrent)
+			}
+		})
+	}
+}
+
+// pinRunningVersion makes the running binary report version for the duration
+// of a test, the way a Homebrew --HEAD build carries its stamp in main.Version.
+func pinRunningVersion(t *testing.T, version string) {
+	t.Helper()
+	previous := Version
+	Version = version
+	t.Cleanup(func() { Version = previous })
+}
+
+// TestLegacyUpgradeGuardTrustsThisBuildsBrewHeadStamp covers the repeated
+// warning in GH#5603: a Homebrew --HEAD build writes its own HEAD-<sha> stamp
+// and rewrites it identically on every run, so a guard that treats that stamp
+// as unreadable warns on every command. A witness that exactly equals the
+// running binary's commit-bearing stamp is this build's own mark and admits
+// silently. HEAD syntax alone does not identify an era (homebrew-core built
+// pre-1.0 bd from HEAD too), so every other stamp keeps the unknown-witness
+// boundary.
+func TestLegacyUpgradeGuardTrustsThisBuildsBrewHeadStamp(t *testing.T) {
+	pinLegacyUpgradeGuardEnv(t)
+	for _, stamp := range []string{"HEAD-f925f3f", "HEAD-f925f3f_1"} {
+		t.Run(stamp, func(t *testing.T) {
+			pinRunningVersion(t, stamp)
+			warnings := captureLegacyUpgradeWarnings(t)
+			beadsDir := writeSelectedServerWorkspace(t, stamp)
+
+			for run := 1; run <= 2; run++ {
+				if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+					t.Fatalf("run %d: guardLegacyUpgradeWorkspace() = %v, want nil", run, err)
+				}
+				if warnings.Len() != 0 {
+					t.Fatalf("run %d: guard warned about this build's own stamp: %q", run, warnings.String())
+				}
+			}
+		})
+	}
+
+	// Stamps that do not carry this build's commit identity, or name another
+	// build, still warn and open in server mode.
+	boundaries := []struct {
+		name    string
+		running string
+		witness string
+	}{
+		{name: "release binary reads a HEAD stamp", running: "1.3.4", witness: "HEAD-f925f3f"},
+		{name: "another commit", running: "HEAD-f925f3f", witness: "HEAD-0123abc"},
+		{name: "different revision suffix", running: "HEAD-f925f3f_1", witness: "HEAD-f925f3f_2"},
+		{name: "revision suffix added", running: "HEAD-f925f3f", witness: "HEAD-f925f3f_1"},
+		{name: "case differs", running: "HEAD-f925f3f", witness: "HEAD-F925F3F"},
+		{name: "bare HEAD matches", running: "HEAD", witness: "HEAD"},
+		{name: "bare HEAD with revision matches", running: "HEAD_1", witness: "HEAD_1"},
+		{name: "short hex tail matches", running: "HEAD-abc", witness: "HEAD-abc"},
+		{name: "non-hex tail matches", running: "HEAD-zzzzzzz", witness: "HEAD-zzzzzzz"},
+		{name: "malformed revision matches", running: "HEAD-f925f3f_x", witness: "HEAD-f925f3f_x"},
+		{name: "garbage matches", running: "not-a-version", witness: "not-a-version"},
+	}
+	for _, tt := range boundaries {
+		t.Run(tt.name, func(t *testing.T) {
+			pinRunningVersion(t, tt.running)
+			warnings := captureLegacyUpgradeWarnings(t)
+			beadsDir := writeSelectedServerWorkspace(t, tt.witness)
+
+			if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+				t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want nil", err)
+			}
+			if !strings.Contains(warnings.String(), tt.witness) {
+				t.Fatalf("guard warning = %q, want the unreadable-witness warning naming %q", warnings.String(), tt.witness)
 			}
 		})
 	}

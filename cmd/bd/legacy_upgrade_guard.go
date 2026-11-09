@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -105,14 +106,16 @@ func classifyLegacyDoltWorkspace(beadsDir string, cfg *configfile.Config, modes 
 	// Positive evidence that this workspace belongs to the current era settles
 	// it for every mode. Only the ambiguity that remains after these is
 	// mode-specific, so the refusals below are the only part that branches.
-	if classifyVersionWitness(version) == witnessEraCurrent {
+	if classifyVersionWitness(version) == witnessEraCurrent || witnessIsThisHeadBuild(version) {
 		// A witness naming bd 1.0 or later can only have been written by a
 		// current-era binary, and only after this same guard admitted the
 		// workspace (PersistentPreRunE runs the guard before trackBdVersion,
 		// and doctor runs it before its own copy of that call). No legacy
 		// release could have produced it. Reading it as proof only in server
 		// mode left the escape hatch unreachable for a workspace the running
-		// binary demonstrably created itself.
+		// binary demonstrably created itself. A Homebrew --HEAD stamp names no
+		// release, so it is the same evidence only when it is this binary's
+		// own commit-bearing stamp; another build's HEAD stamp is not.
 		return nil
 	}
 	if modes.sharedServer && !(present && legacyServerVersion(version)) {
@@ -152,14 +155,15 @@ func classifyLegacyDoltWorkspace(beadsDir string, cfg *configfile.Config, modes 
 		if present && classifyVersionWitness(version) == witnessEraUnknown {
 			// A witness that is present but unreadable — including one left
 			// blank or whitespace-only by an interrupted or disk-full
-			// best-effort write — is not evidence of a legacy workspace: every
-			// pre-1.0 bd wrote a plain X.Y.Z through the same writer, so no
-			// legacy release could have produced a witness this parse rejects.
-			// Report the ambiguity and open the workspace so the admitted
-			// command can self-heal the witness, instead of refusing every
-			// command over an advisory, gitignored file. A genuinely absent
-			// witness is not present and still refuses below, preserving the
-			// pre-1.0 guard invariant.
+			// best-effort write, or another build's Homebrew --HEAD stamp — is
+			// admitted as a compatibility policy, not as proof of era: release
+			// builds of pre-1.0 bd wrote a plain X.Y.Z, though a homebrew-core
+			// --HEAD build of that era could have stamped HEAD-<sha>. Report the
+			// ambiguity and open the workspace so the admitted command can
+			// self-heal the witness, instead of refusing every command over an
+			// advisory, gitignored file. A genuinely absent witness is not
+			// present and still refuses below, preserving the pre-1.0 guard
+			// invariant.
 			warnUnreadableVersionWitness(beadsDir, version)
 			return nil
 		}
@@ -354,6 +358,17 @@ func classifyVersionWitness(version string) witnessEra {
 		}
 	}
 	return witnessEraUnknown
+}
+
+// witnessIsThisHeadBuild reports whether version is the running binary's own
+// Homebrew --HEAD stamp carrying a commit (HEAD-<sha>, with or without a
+// _<revision> suffix). bd rewrites that stamp identically on every run, so the
+// witness only equals it after this binary was admitted and wrote it. A bare
+// HEAD names no commit, so unrelated builds share it and it never qualifies.
+// The witness is advisory, not an attestation: this is the same strength of
+// evidence as a current semver witness, nothing more.
+func witnessIsThisHeadBuild(version string) bool {
+	return version == Version && strings.HasPrefix(version, "HEAD-") && doctor.IsBrewHeadVersion(version)
 }
 
 // legacyVersionMinor returns the minor component of a pre-1.0 version witness.
