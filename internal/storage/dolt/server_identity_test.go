@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/doltversion"
 )
 
 // Server identity gate (GH#4637): a managed endpoint whose answering server
@@ -384,6 +385,70 @@ func TestServerIdentityExemptOpenIgnoresRecord(t *testing.T) {
 			_ = store.Close()
 			if got, _ := os.ReadFile(record); string(got) != foreignServerUUID+"\n" {
 				t.Errorf("record = %q, want it unchanged", got)
+			}
+		})
+	}
+}
+
+// TestServerIdentityDisabledOpenPerformsNoGateOperations: with the check
+// turned off, an open of an endpoint that would be checked hands the gate
+// no expectation, so it reads no record and queries no server UUID, and
+// the open succeeds as before. Enabled, and with a value that does not
+// parse, the same open runs the check and refuses the unpaired server.
+func TestServerIdentityDisabledOpenPerformsNoGateOperations(t *testing.T) {
+	skipIfNoServer(t)
+	gateOps := 0
+	orig := verifyServerIdentity
+	verifyServerIdentity = func(ctx context.Context, q doltversion.RowQuerier, exp *doltserver.ServerIdentityExpectation) error {
+		if exp != nil {
+			gateOps++
+		}
+		return orig(ctx, q, exp)
+	}
+	t.Cleanup(func() { verifyServerIdentity = orig })
+
+	cases := []struct {
+		name    string
+		value   string
+		refused bool
+	}{
+		{"enabled", "", true},
+		{"disabled", "0", false},
+		{"invalid value", "not-a-boolean", true},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir, dataDir := serverIdentityShared(t)
+			t.Setenv(doltserver.VerifyServerIdentityEnv, tc.value)
+			dbName := fmt.Sprintf("test_identity_gate_ops_%d_%d", i, testServerPort)
+			assertDatabaseNotExists(t, testServerPort, dbName)
+			t.Cleanup(func() { dropTestDatabase(t, testServerPort, dbName) })
+			cfg := sharedIdentityConfig(t, beadsDir, dbName)
+			cfg.CreateIfMissing = true
+			gateOps = 0
+
+			store, err := New(context.Background(), cfg)
+			if store != nil {
+				_ = store.Close()
+			}
+			if tc.refused {
+				if !errors.Is(err, doltserver.ErrServerIdentityMismatch) {
+					t.Fatalf("open = %v, want ErrServerIdentityMismatch for the unpaired server", err)
+				}
+				if gateOps != 1 {
+					t.Errorf("the check ran %d times, want 1 (refusing on the first pool)", gateOps)
+				}
+				assertDatabaseNotExists(t, testServerPort, dbName)
+			} else {
+				if err != nil {
+					t.Fatalf("open with the check off: %v", err)
+				}
+				if gateOps != 0 {
+					t.Errorf("the check ran %d times with verification off, want none", gateOps)
+				}
+			}
+			if _, err := os.Stat(doltserver.ServerIdentityRecordPath(dataDir)); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("the open created an identity record: %v", err)
 			}
 		})
 	}
