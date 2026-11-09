@@ -2569,7 +2569,7 @@ func init() {
 	initCmd.Flags().Bool("reinit-local", false, "Re-initialize local .beads/ over existing local data. Does NOT authorize remote divergence (see --discard-remote) or recreating a missing server-mode database (see --recreate-missing).")
 	initCmd.Flags().Bool("discard-remote", false, "Authorize discarding the configured remote's Dolt history when re-initializing. Requires --destroy-token in non-interactive mode; see 'bd help init-safety'.")
 	initCmd.Flags().Bool("recreate-missing", false, "Explicitly authorize creating a fresh, empty database when this project's configured server-mode database is missing or unreachable. Opt-in per invocation only; never implied by --force, config, or env (see 'bd help init-safety').")
-	initCmd.Flags().Bool("from-jsonl", false, "Import issues from configured import.path; refuses remote history unless --discard-remote authorizes replacement")
+	initCmd.Flags().Bool("from-jsonl", false, "Import issues from configured import.path, skipping any record the database would refuse into <name>.rejected.jsonl beside it; refuses remote history unless --discard-remote authorizes replacement")
 	initCmd.Flags().Bool("init-if-missing", false, "If the workspace is already initialized, skip init and exit 0 instead of failing (idempotent init for scaffolds)")
 	initCmd.Flags().String("destroy-token", "", "Explicit confirmation token for destructive re-init in non-interactive mode (format: 'DESTROY-<prefix>')")
 	initCmd.Flags().String("agents-template", "", "Path to custom AGENTS.md template (overrides embedded default)")

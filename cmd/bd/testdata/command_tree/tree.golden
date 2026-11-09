@@ -529,7 +529,8 @@ bd bootstrap
     |   • If sync.remote is configured: clones from the remote
     |   • If git origin has Dolt data (refs/dolt/data): clones from git and wires origin for future push/pull
     |   • If .beads/backup/*.jsonl exists: restores from backup
-    |   • If .beads/issues.jsonl exists: imports from git-tracked JSONL
+    |   • If .beads/issues.jsonl exists: imports from git-tracked JSONL, skipping any
+    |     record the database would refuse into issues.rejected.jsonl beside it
     |   • If no database exists: creates a fresh one — unless the workspace was already
     |     initialized (metadata.json has a project_id) and its server-mode database is
     |     missing, in which case bootstrap refuses rather than strand the existing data
@@ -3733,7 +3734,7 @@ bd init
   flag --discard-remote type=bool default="false" usage="Authorize discarding the configured remote's Dolt history when re-initializing. Requires --destroy-token in non-interactive mode; see 'bd help init-safety'."
   flag --external type=bool default="false" usage="Server is externally managed (skip server startup); use with --shared-server or --server"
   flag --force type=bool default="false" usage="Deprecated alias for --reinit-local. Bypasses only the LOCAL data-safety guard; does NOT authorize remote divergence or recreating a missing server-mode database (see 'bd help init-safety')."
-  flag --from-jsonl type=bool default="false" usage="Import issues from configured import.path; refuses remote history unless --discard-remote authorizes replacement"
+  flag --from-jsonl type=bool default="false" usage="Import issues from configured import.path, skipping any record the database would refuse into <name>.rejected.jsonl beside it; refuses remote history unless --discard-remote authorizes replacement"
   flag --init-if-missing type=bool default="false" usage="If the workspace is already initialized, skip init and exit 0 instead of failing (idempotent init for scaffolds)"
   flag --mysql-database type=string default="" hidden usage="Legacy MySQL database (removed backend compatibility only)"
   flag --mysql-url type=string default="" hidden usage="Legacy MySQL connection URL (removed backend compatibility only)"

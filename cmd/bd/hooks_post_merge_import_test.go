@@ -167,54 +167,113 @@ func TestRunPostCheckoutHook_FileModeSkipsImport(t *testing.T) {
 // TestImportJSONLForSyncSkipsInvalidAndForwardsTheWarning pins the hook lane
 // of GH#4492 (AC-4): the post-merge import skips a record the database would
 // refuse into the quarantine next to the source, and because that import
-// succeeds, the warning naming the skipped record would be lost unless the
-// hook forwards it. A stub `bd` stands in for the subprocess.
+// succeeds - or ends in the tolerated "nothing to commit" - the warning
+// naming the skipped record would be lost unless the hook forwards it. The
+// whole warning block is forwarded once, indented details included, while
+// the import's other output stays quiet. A stub `bd` stands in for the
+// subprocess.
 func TestImportJSONLForSyncSkipsInvalidAndForwardsTheWarning(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-script stub binary is POSIX-only")
 	}
-	beadsDir, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
-	// BEADS_DIR is only honored for a directory that looks like a project.
-	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(jsonlPath, []byte(`{"id":"bd-1","status":"verify"}`+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	for _, tc := range []struct {
+		name string
+		exit string
+	}{
+		{name: "success", exit: "exit 0"},
+		{name: "nothing to commit", exit: "echo 'Error: nothing to commit' >&2; exit 1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+			// BEADS_DIR is only honored for a directory that looks like a project.
+			if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(jsonlPath, []byte(`{"id":"bd-1","status":"verify"}`+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
 
-	binDir := t.TempDir()
-	sentinel := filepath.Join(binDir, "invocations")
-	stub := "#!/bin/sh\n" +
-		`printf '%s\n' "$*" >> '` + sentinel + "'\n" +
-		`printf '%s\n' 'warning: skipped 1 invalid record(s) from issues.jsonl:' '  issues.jsonl:1: bd-1: invalid status: verify' >&2` + "\n" +
-		"exit 0\n"
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(stub), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("BEADS_DIR", beadsDir)
-	t.Setenv("GIT_DIR", "")
+			binDir := t.TempDir()
+			sentinel := filepath.Join(binDir, "invocations")
+			stub := "#!/bin/sh\n" +
+				`printf '%s\n' "$*" >> '` + sentinel + "'\n" +
+				`printf '%s\n' 'Imported 1 issue' 'warning: stdout is not forwarded'` + "\n" +
+				`printf '%s\n' 'warning: skipped 1 invalid record(s) from issues.jsonl:' '  issues.jsonl:1: bd-1: invalid status: verify' '  rejected records saved to issues.rejected.jsonl' 'progress line' '  indented but not a warning' >&2` + "\n" +
+				tc.exit + "\n"
+			if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(stub), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("BEADS_DIR", beadsDir)
+			t.Setenv("GIT_DIR", "")
 
-	initConfigForTest(t)
-	config.Set("import.auto", true)
-	config.Set("sync.remote", "")
-	config.Set("sync.git-remote", "")
+			initConfigForTest(t)
+			config.Set("import.auto", true)
+			config.Set("sync.remote", "")
+			config.Set("sync.git-remote", "")
 
-	stderr := captureHookStderr(t, func() { importJSONLForSync("post-merge") })
+			stderr := captureHookStderr(t, func() { importJSONLForSync("post-merge") })
 
-	got, err := os.ReadFile(sentinel)
-	if err != nil {
-		t.Fatalf("stub bd was not run: %v", err)
+			got, err := os.ReadFile(sentinel)
+			if err != nil {
+				t.Fatalf("stub bd was not run: %v", err)
+			}
+			want := "import --quiet --skip-invalid --rejects " + filepath.Join(beadsDir, "issues.rejected.jsonl") + " " + jsonlPath + "\n"
+			if string(got) != want {
+				t.Errorf("import subprocess = %q, want %q", got, want)
+			}
+			wantStderr := "beads: post-merge import warning: skipped 1 invalid record(s) from issues.jsonl:\n" +
+				"beads: post-merge import warning:   issues.jsonl:1: bd-1: invalid status: verify\n" +
+				"beads: post-merge import warning:   rejected records saved to issues.rejected.jsonl\n"
+			if stderr != wantStderr {
+				t.Errorf("hook stderr = %q, want only the forwarded warning block %q", stderr, wantStderr)
+			}
+		})
 	}
-	want := "import --quiet --skip-invalid --rejects " + filepath.Join(beadsDir, "issues.rejected.jsonl") + " " + jsonlPath + "\n"
-	if string(got) != want {
-		t.Errorf("import subprocess = %q, want %q", got, want)
+}
+
+// TestSyncImportArgs pins the legacy git-hook sync importer's argv
+// (GH#4492 AC-4): quiet, skip-invalid, and the default quarantine beside the
+// source file - the hook must never run a strict import that one stale row
+// could wedge the pull with. Ported from GLM's test of the same name.
+func TestSyncImportArgs(t *testing.T) {
+	got := syncImportArgs(filepath.Join("w", "issues.jsonl"))
+	want := []string{
+		"import", "--quiet", "--skip-invalid",
+		"--rejects", filepath.Join("w", "issues.rejected.jsonl"),
+		filepath.Join("w", "issues.jsonl"),
 	}
-	if !strings.Contains(stderr, "issues.jsonl:1: bd-1: invalid status: verify") {
-		t.Errorf("hook did not forward the skipped-record warning; stderr:\n%s", stderr)
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("syncImportArgs() = %q, want %q", got, want)
+	}
+}
+
+// TestForwardImportSyncWarnings pins the hook's warning forwarding
+// (GH#4492 AC-4): every "warning:" line and the indented lines that continue
+// it are relayed with the hook's prefix, and nothing else - normal output
+// stays suppressed and a later indented line outside a warning is dropped.
+// Ported from GLM's test of the same name.
+func TestForwardImportSyncWarnings(t *testing.T) {
+	stderr := captureHookStderr(t, func() {
+		forwardImportSyncWarnings("post-merge", []byte(strings.Join([]string{
+			"warning: skipped 12 invalid record(s) from issues.jsonl:",
+			"  issues.jsonl:2: ce-2: invalid status: verify",
+			"  ... and 11 more",
+			"imported 1 issues from issues.jsonl",
+			"  not part of a warning",
+			"warning: second block",
+			"",
+		}, "\n")))
+	})
+	want := "beads: post-merge import warning: skipped 12 invalid record(s) from issues.jsonl:\n" +
+		"beads: post-merge import warning:   issues.jsonl:2: ce-2: invalid status: verify\n" +
+		"beads: post-merge import warning:   ... and 11 more\n" +
+		"beads: post-merge import warning: second block\n"
+	if stderr != want {
+		t.Errorf("forwarded warnings = %q, want %q", stderr, want)
 	}
 }
