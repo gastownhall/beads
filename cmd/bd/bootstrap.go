@@ -1301,7 +1301,7 @@ func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *conf
 		return fmt.Errorf("commit init: %w", err)
 	}
 
-	count, err := importFromLocalJSONL(ctx, s, plan.JSONLFile)
+	imported, err := importFromLocalJSONLFull(ctx, s, plan.JSONLFile)
 	if err != nil {
 		return fmt.Errorf("import from JSONL: %w", err)
 	}
@@ -1311,7 +1311,8 @@ func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *conf
 	}
 
 	wireBootstrapDoltRemote(ctx, s, plan)
-	fmt.Fprintf(os.Stderr, "Imported %d issues from %s\n", count, plan.JSONLFile)
+	fmt.Fprintf(os.Stderr, "Imported %d issues from %s\n", imported.Issues, plan.JSONLFile)
+	warnImportInvalidSkipped(plan.JSONLFile, imported.Rejected, imported.RejectsPath)
 	return nil
 }
 

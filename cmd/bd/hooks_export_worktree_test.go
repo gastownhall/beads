@@ -363,7 +363,7 @@ func TestHookLanesUseTheWorktreeJSONL(t *testing.T) {
 		// BD_GIT_HOOK=1 is half the assertion: clearing it lets the import
 		// subprocess's own PersistentPostRun auto-export write the primary's
 		// JSONL from the worktree's branch state (GH#6680, second symptom).
-		if got, want := readFileForWorktreeTest(t, sentinel), "import --quiet "+worktreeJSONL+" BD_GIT_HOOK=1\n"; got != want {
+		if got, want := readFileForWorktreeTest(t, sentinel), "import --quiet --skip-invalid --rejects "+filepath.Join(worktree, ".beads", "issues.rejected.jsonl")+" "+worktreeJSONL+" BD_GIT_HOOK=1\n"; got != want {
 			t.Fatalf("import subprocess = %q, want %q", got, want)
 		}
 	})

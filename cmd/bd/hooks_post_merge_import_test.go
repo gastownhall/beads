@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -160,5 +161,60 @@ func TestRunPostCheckoutHook_FileModeSkipsImport(t *testing.T) {
 	// Short args (legacy git versions): treat as no-op.
 	if exit := runPostCheckoutHook([]string{}); exit != 0 {
 		t.Errorf("empty-args post-checkout returned %d, want 0", exit)
+	}
+}
+
+// TestImportJSONLForSyncSkipsInvalidAndForwardsTheWarning pins the hook lane
+// of GH#4492 (AC-4): the post-merge import skips a record the database would
+// refuse into the quarantine next to the source, and because that import
+// succeeds, the warning naming the skipped record would be lost unless the
+// hook forwards it. A stub `bd` stands in for the subprocess.
+func TestImportJSONLForSyncSkipsInvalidAndForwardsTheWarning(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub binary is POSIX-only")
+	}
+	beadsDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	// BEADS_DIR is only honored for a directory that looks like a project.
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(jsonlPath, []byte(`{"id":"bd-1","status":"verify"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	sentinel := filepath.Join(binDir, "invocations")
+	stub := "#!/bin/sh\n" +
+		`printf '%s\n' "$*" >> '` + sentinel + "'\n" +
+		`printf '%s\n' 'warning: skipped 1 invalid record(s) from issues.jsonl:' '  issues.jsonl:1: bd-1: invalid status: verify' >&2` + "\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(stub), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("GIT_DIR", "")
+
+	initConfigForTest(t)
+	config.Set("import.auto", true)
+	config.Set("sync.remote", "")
+	config.Set("sync.git-remote", "")
+
+	stderr := captureHookStderr(t, func() { importJSONLForSync("post-merge") })
+
+	got, err := os.ReadFile(sentinel)
+	if err != nil {
+		t.Fatalf("stub bd was not run: %v", err)
+	}
+	want := "import --quiet --skip-invalid --rejects " + filepath.Join(beadsDir, "issues.rejected.jsonl") + " " + jsonlPath + "\n"
+	if string(got) != want {
+		t.Errorf("import subprocess = %q, want %q", got, want)
+	}
+	if !strings.Contains(stderr, "issues.jsonl:1: bd-1: invalid status: verify") {
+		t.Errorf("hook did not forward the skipped-record warning; stderr:\n%s", stderr)
 	}
 }
