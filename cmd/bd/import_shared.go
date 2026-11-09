@@ -184,13 +184,93 @@ func planClassicImport(ctx context.Context, lookup importIssueLookup, issues []*
 		}
 		plan.Issues, plan.StaleSkippedIDs, plan.ChangePlan = filtered, skippedIDs, cp
 	}
-	kept, rejects, err := screenImportRows(ctx, importVocabularyOf(lookupToDoltStorage(lookup)), plan.Issues, sources)
+	// The screen sees the post-stale-filter set; the change plan above was
+	// built over it, so the rejected rows must be dropped from the plan too.
+	preScreen := plan.Issues
+	kept, rejects, err := screenImportRows(ctx, importVocabularyOf(lookupToDoltStorage(lookup)), preScreen, sources)
 	if err != nil {
 		return nil, err
 	}
 	plan.Issues = kept
 	plan.Rejects = rejects
+	excludeRejectedFromChangePlan(plan, preScreen)
 	return plan, nil
+}
+
+// excludeRejectedFromChangePlan drops the rows the record screen rejected
+// from the plan's write classification (bd-8mz4zq / GH#4492). The change plan
+// is built over the pre-screen set — the stale filter runs first so a stale
+// row is never screened — so a rejected row otherwise still counts as a
+// planned create or update, and the dry-run preview, which reads the plan
+// directly, would disagree with the import it previews. The write path
+// reports created rows from the kept set (assembleImportResult); this keeps
+// the plan's own counts equally honest.
+func excludeRejectedFromChangePlan(plan *importRunPlan, preScreen []*types.Issue) {
+	if len(plan.Rejects) == 0 {
+		return
+	}
+	keptPtrs := make(map[*types.Issue]struct{}, len(plan.Issues))
+	keptIDs := make(map[string]struct{}, len(plan.Issues))
+	for _, issue := range plan.Issues {
+		keptPtrs[issue] = struct{}{}
+		if issue != nil && issue.ID != "" {
+			keptIDs[issue.ID] = struct{}{}
+		}
+	}
+	for _, issue := range preScreen {
+		if issue == nil {
+			continue
+		}
+		if _, kept := keptPtrs[issue]; kept {
+			continue
+		}
+		dropRejectedRowFromChangePlan(&plan.ChangePlan, issue.ID, keptIDs)
+	}
+}
+
+// dropRejectedRowFromChangePlan removes ONE row's classification from the
+// plan. Each row occupies exactly one bucket (new, update, tie-kept or
+// unchanged), so removing the id's first list entry drops precisely this
+// row even when a duplicate-id sibling holds another entry in the same
+// bucket. A new-classified row also decrements the authoritative row
+// count; its id stays listed only while a duplicate-id sibling survived
+// the screen and still writes.
+func dropRejectedRowFromChangePlan(cp *importChangePlan, id string, keptIDs map[string]struct{}) {
+	if id == "" {
+		// An ID-less row only ever reaches the row count: NewIDs excludes
+		// title-only rows.
+		cp.NewCount--
+		return
+	}
+	if removeImportChangeByID(&cp.Updates, id) ||
+		removeImportPlanID(&cp.TieKeptLocal, id) ||
+		removeImportPlanID(&cp.Unchanged, id) {
+		return
+	}
+	if _, stillWriting := keptIDs[id]; !stillWriting {
+		removeImportPlanID(&cp.NewIDs, id)
+	}
+	cp.NewCount--
+}
+
+func removeImportChangeByID(changes *[]ImportChange, id string) bool {
+	for i, change := range *changes {
+		if change.ID == id {
+			*changes = append((*changes)[:i], (*changes)[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+func removeImportPlanID(ids *[]string, id string) bool {
+	for i, existing := range *ids {
+		if existing == id {
+			*ids = append((*ids)[:i], (*ids)[i+1:]...)
+			return true
+		}
+	}
+	return false
 }
 
 // lookupToDoltStorage recovers the classic store behind the import lookup seam

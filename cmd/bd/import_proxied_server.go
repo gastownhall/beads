@@ -205,11 +205,15 @@ func planProxiedImport(ctx context.Context, uw uow.UnitOfWork, issues []*types.I
 		}
 		plan.Issues, plan.StaleSkippedIDs, plan.ChangePlan = filtered, skippedIDs, cp
 	}
-	kept, rejects, err := screenImportRows(ctx, uowImportVocabulary{uw: uw}, plan.Issues, sources)
+	// The screen sees the post-stale-filter set; the change plan above was
+	// built over it, so the rejected rows must be dropped from the plan too.
+	preScreen := plan.Issues
+	kept, rejects, err := screenImportRows(ctx, uowImportVocabulary{uw: uw}, preScreen, sources)
 	if err != nil {
 		return nil, err
 	}
 	plan.Issues = kept
 	plan.Rejects = rejects
+	excludeRejectedFromChangePlan(plan, preScreen)
 	return plan, nil
 }
