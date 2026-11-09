@@ -562,10 +562,17 @@ func workingSetClean(ctx context.Context, db DBConn) bool {
 //     keeping it. A row missing on one side, or diverging columns in a
 //     supposedly immutable row, is left for the operator.
 //
+//   - child_counters: a high-water mark, not an editable field. A conflict
+//     where both sides present a counter for the same parent (two offline
+//     clones each minted children under it, GH#4796) is settled at
+//     max(ours, theirs); a row missing on one side, differing parent keys,
+//     or a last_child that does not parse as a nonnegative integer is left
+//     for the operator.
+//
 // Any conflict on another table, or an unresolvable dependencies,
-// schema_migrations, config, issues, labels, comments, or events conflict,
-// returns (false, nil) so the caller fails the pull and the operator resolves
-// it.
+// schema_migrations, config, issues, labels, comments, events, or
+// child_counters conflict, returns (false, nil) so the caller fails the pull
+// and the operator resolves it.
 //
 // The resolved tables are staged but NOT committed: the caller must run
 // CommitResolvedConflicts after the FK cascade repair, because DOLT_COMMIT
@@ -602,6 +609,7 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 	// not safely resolvable, resolve nothing and let the pull fail.
 	var resolvable []string
 	var issuesPlan []issuesRowMerge
+	var counterPlans []childCounterMax
 	var unionPlans map[string][]unionRowKey
 	for _, c := range conflicts {
 		switch c.table {
@@ -657,6 +665,16 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 			}
 			unionPlans[c.table] = unionPlan
 			resolvable = append(resolvable, c.table)
+		case "child_counters":
+			plan, safe, err := childCountersConflictsAreMaxMergeable(ctx, db)
+			if err != nil {
+				return false, err
+			}
+			if !safe {
+				return false, nil
+			}
+			counterPlans = plan
+			resolvable = append(resolvable, "child_counters")
 		default:
 			return false, nil
 		}
@@ -698,6 +716,13 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 			if err := resolveUnionConflicts(ctx, db, table, unionPlans[table]); err != nil {
 				return false, err
 			}
+		case "child_counters":
+			// Row-wise max, not a table-level --ours/--theirs: taking either
+			// side's whole counter would lower the high-water mark below
+			// children the other side already minted.
+			if err := resolveChildCountersMaxConflicts(ctx, db, counterPlans); err != nil {
+				return false, err
+			}
 		default:
 			//nolint:gosec // G201: table is one of the hardcoded constants above.
 			if err := schema.DrainCall(ctx, db, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', '"+table+"')"); err != nil {
@@ -727,7 +752,7 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 // (bd-578h9.14).
 func CommitResolvedConflicts(ctx context.Context, db DBConn) error {
 	if err := concludeMerge(ctx, db,
-		"auto-resolve merge conflicts: metadata, dependencies, schema_migrations, config, issues (field-level three-way merge), labels/comments/events (union)", ""); err != nil {
+		"auto-resolve merge conflicts: metadata, dependencies, schema_migrations, config, issues (field-level three-way merge), labels/comments/events (union), child_counters (high-water max)", ""); err != nil {
 		return fmt.Errorf("failed to commit resolved conflicts: %w", err)
 	}
 	return nil
