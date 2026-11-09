@@ -172,6 +172,16 @@ func TestEmbeddedShowUnresolvableDeps(t *testing.T) {
 	// must leave the field unset and stderr silent. Without it every
 	// assertion above is satisfied by a build that reports every issue as
 	// having unresolvable edges.
+	//
+	// It is also the AC-4 preservation guard (bd-hkpas7, #5272): a fully
+	// local issue stays BYTE-IDENTICAL. The local line below is pinned to its
+	// exact pre-change spelling — glyph, status icon, id, title, priority —
+	// and no raw-line artifact may appear anywhere. The no-extra-read half of
+	// AC-4 is pinned one tier down, where a counter can see it:
+	// TestShowUnresolvableDepLines' "no gap means no raw read" gate case and
+	// TestBuildIssueDetails_UnresolvableDependencyEdges' countingSource case.
+	// A guard passes at the parent by construction; its job is to fail the
+	// first edit that breaks the promise, not to prove a change.
 	t.Run("fully_local_control", func(t *testing.T) {
 		bdDep(t, bd, dir, "add", anchor.ID, local.ID, "--type", "blocks")
 
@@ -179,14 +189,44 @@ func TestEmbeddedShowUnresolvableDeps(t *testing.T) {
 		if v, present := details["unresolvable_dependencies"]; present {
 			t.Errorf("unresolvable_dependencies = %v on a fully local edge, want absent", v)
 		}
+		if v, present := details["unresolvable_dependency_edges"]; present {
+			t.Errorf("unresolvable_dependency_edges = %v on a fully local edge, want the member omitted", v)
+		}
 		deps, _ := details["dependencies"].([]interface{})
 		if len(deps) != 1 {
 			t.Errorf("dependencies = %v, want the one local edge", details["dependencies"])
 		}
 
-		_, stderr := runShowSplit(t, bd, dir, anchor.ID)
+		stdout, stderr := runShowSplit(t, bd, dir, anchor.ID)
 		if strings.Contains(stderr, "no row in this database") {
 			t.Errorf("bd show warned about a fully local edge:\nstderr:\n%s", stderr)
+		}
+		// Byte identity, normalized to the ids this run minted: the local
+		// line is exactly what the base render printed.
+		wantLine := "  → ○ " + local.ID + ": Fully local blocker P"
+		if !strings.Contains(stdout, wantLine) {
+			t.Errorf("the fully local line changed:\nwant: %s...\ngot:\n%s", wantLine, stdout)
+		}
+		for _, label := range []string{"(external)", "(cross-repo)", "(missing)"} {
+			if strings.Contains(stdout, label) {
+				t.Errorf("a fully local render must not carry the raw-line label %s:\n%s", label, stdout)
+			}
+		}
+
+		// The no-edges half of the same guard: nothing at all to say.
+		bare := bdCreate(t, bd, dir, "No edges at all", "--type", "task")
+		bareDetails := bdShowDetails(t, bd, dir, bare.ID)
+		for _, member := range []string{"unresolvable_dependencies", "unresolvable_dependency_edges", "dependencies"} {
+			if v, present := bareDetails[member]; present {
+				t.Errorf("%s = %v on an issue with no edges, want absent", member, v)
+			}
+		}
+		bareOut, bareErr := runShowSplit(t, bd, dir, bare.ID)
+		if strings.Contains(bareOut, "DEPENDS ON") {
+			t.Errorf("an issue with no edges must not gain a dependency section:\n%s", bareOut)
+		}
+		if bareErr != "" {
+			t.Errorf("an issue with no edges must leave stderr silent:\n%s", bareErr)
 		}
 	})
 }
