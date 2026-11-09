@@ -214,3 +214,84 @@ func TestCustomConfigGettersServeUncachedYAMLFallback(t *testing.T) {
 		})
 	}
 }
+
+// GH#5581: after a failed read returned an error or the config.yaml fallback,
+// the next call on the same store reads the database again, returns the
+// database-backed vocabulary composed with config.yaml as usual, and caches it.
+func TestCustomConfigGettersRecoverAfterFailedResolve(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		// before is each getter's answer to the failed read; nil means an error.
+		before map[string][]string
+		after  map[string][]string
+	}{
+		{
+			name: "after an error",
+			yaml: "",
+			after: map[string][]string{
+				"GetCustomStatuses":         {"review"},
+				"GetCustomStatusesDetailed": {"review:active"},
+				"GetCustomTypes":            {"db-type"},
+			},
+		},
+		{
+			name: "after the config.yaml fallback",
+			yaml: yamlCustomStatuses + yamlCustomTypes,
+			before: map[string][]string{
+				"GetCustomStatuses":         {"review", "parked"},
+				"GetCustomStatusesDetailed": {"review:active", "parked:frozen"},
+				"GetCustomTypes":            {"spike", "research"},
+			},
+			// The normalized status table wins over config.yaml; custom
+			// types are the database set unioned with config.yaml's, so the
+			// database-only db-type proves the database was read again.
+			after: map[string][]string{
+				"GetCustomStatuses":         {"review"},
+				"GetCustomStatusesDetailed": {"review:active"},
+				"GetCustomTypes":            {"db-type", "spike", "research"},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withCustomConfigYAML(t, tc.yaml)
+			for _, g := range customConfigGetters {
+				t.Run(g.name, func(t *testing.T) {
+					store, mock := newCustomConfigMockStore(t)
+					ctx := context.Background()
+					injected := errors.New("simulated read failure")
+					mock.ExpectBegin().WillReturnError(injected)
+					expectCustomConfigRead(mock, [][2]string{{"review", "active"}}, []string{"db-type"})
+
+					got, err := g.get(ctx, store)
+					if want := tc.before[g.name]; want == nil {
+						if !errors.Is(err, injected) {
+							t.Fatalf("failed read: %s err = %v, want it to wrap %v", g.name, err, injected)
+						}
+					} else if err != nil || !slices.Equal(got, want) {
+						t.Fatalf("failed read: %s = %v, %v; want %v", g.name, got, err, want)
+					}
+
+					want := tc.after[g.name]
+					got, err = g.get(ctx, store)
+					if err != nil || !slices.Equal(got, want) {
+						t.Fatalf("recovered read: %s = %v, %v; want %v", g.name, got, err, want)
+					}
+					if !g.cached(store) {
+						t.Fatalf("recovered read: %s did not cache the database vocabulary", g.name)
+					}
+					// A third call is served from the cache: any read would
+					// hit sqlmock with no expectation left and fail.
+					got, err = g.get(ctx, store)
+					if err != nil || !slices.Equal(got, want) {
+						t.Fatalf("cached read: %s = %v, %v; want %v", g.name, got, err, want)
+					}
+					if err := mock.ExpectationsWereMet(); err != nil {
+						t.Fatalf("unmet SQL expectations: %v", err)
+					}
+				})
+			}
+		})
+	}
+}
