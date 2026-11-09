@@ -6,10 +6,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+// fsckUnknownConfigWarning is the warning dolt prints to stderr before running
+// any command when a config file holds an option it does not know
+// (cmd/dolt/dolt.go). It is not an integrity finding.
+const fsckUnknownConfigWarning = "Warning: Unknown global config option 'sqlserver.foo'. " +
+	"Use `dolt config --global --unset sqlserver.foo` to remove."
 
 // Finding fixtures in the shape dolt fsck prints them (cmd/dolt/commands/
 // fsck.go: FsckReport.Print colors the report headers red; the corrupted
@@ -116,6 +123,47 @@ func TestPrePushFSCK_UnopenableDB(t *testing.T) {
 	s := &DoltStore{dbPath: tmp, database: "mydb"}
 	if err := s.prePushFSCK(context.Background()); err != nil {
 		t.Fatalf("expected nil when fsck cannot open db (should warn and proceed), got %v", err)
+	}
+}
+
+// installFakeDolt puts an executable `dolt` running script first on PATH and
+// returns a store whose CLI directory holds a .dolt/noms, so prePushFSCK runs
+// the fake. Callers must not be parallel (t.Setenv).
+func installFakeDolt(t *testing.T, script string) *DoltStore {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fake")
+	}
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte("#!/bin/sh\n"+script), 0o755); err != nil { // #nosec G306 -- test fixture must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	tmp := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmp, "mydb", ".dolt", "noms"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return &DoltStore{dbPath: tmp, database: "mydb"}
+}
+
+// TestPrePushFSCK_TimeoutAfterWarningIsTimeout verifies that an fsck which
+// prints a startup warning and then runs past its own deadline is refused as
+// ErrFSCKTimeout with BEADS_FSCK_TIMEOUT guidance, not reported as a dangling
+// chunk reference: the warning is not an integrity finding.
+func TestPrePushFSCK_TimeoutAfterWarningIsTimeout(t *testing.T) {
+	// exec keeps sleep as the killed process, so no child holds the pipe.
+	s := installFakeDolt(t, "echo \""+strings.ReplaceAll(fsckUnknownConfigWarning, "`", "\\`")+"\" >&2\nexec sleep 30\n")
+	t.Setenv(fsckTimeoutEnv, "1s")
+
+	err := s.prePushFSCK(context.Background())
+	if errors.Is(err, ErrDanglingReference) {
+		t.Fatalf("warning before the fsck deadline reported as corruption: %v", err)
+	}
+	if !errors.Is(err, ErrFSCKTimeout) {
+		t.Fatalf("errors.Is(err, ErrFSCKTimeout) = false; err = %v", err)
+	}
+	if !strings.Contains(err.Error(), "BEADS_FSCK_TIMEOUT") {
+		t.Errorf("timeout error %q does not name BEADS_FSCK_TIMEOUT", err)
 	}
 }
 
@@ -268,6 +316,17 @@ func TestClassifyFSCKFailure(t *testing.T) {
 			parentErr:    nil,
 			fsckErr:      context.DeadlineExceeded,
 			output:       "context deadline exceeded",
+			wantIs:       ErrFSCKTimeout,
+			wantIsNot:    []error{ErrDanglingReference},
+			wantContains: "BEADS_FSCK_TIMEOUT",
+		},
+		// (d) A non-finding warning printed before fsck's own deadline must
+		//     not preempt the timeout classification.
+		{
+			name:         "warning output + own fsck timeout → ErrFSCKTimeout, not dangling",
+			parentErr:    nil,
+			fsckErr:      context.DeadlineExceeded,
+			output:       fsckUnknownConfigWarning,
 			wantIs:       ErrFSCKTimeout,
 			wantIsNot:    []error{ErrDanglingReference},
 			wantContains: "BEADS_FSCK_TIMEOUT",
