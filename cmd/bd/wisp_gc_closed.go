@@ -111,12 +111,18 @@ func (p wispClosedGCProgress) successFields() map[string]interface{} {
 // runWispClosedGCChunks deletes ids sequentially in chunks of at most
 // wispClosedGCChunkSize, in selection order, through deleteChunk.
 //
-// A chunk error stops the run: no later chunk is sent, no shrink-and-retry
-// is attempted, and the confirmed progress is returned beside the original
-// cause for the caller to report.
+// The supplied context is checked before EVERY chunk, so a cancellation that
+// lands between chunks stops the purge with the earlier commits intact
+// instead of issuing another request. A chunk error — cancellation, a
+// missing-id refusal, anything — stops the run the same way: no later chunk
+// is sent, no shrink-and-retry is attempted (a rerun reselects), and the
+// confirmed progress is returned beside the original cause.
 func runWispClosedGCChunks(ctx context.Context, ids []string, deleteChunk func(ctx context.Context, chunk []string) (wispClosedGCChunk, error)) (wispClosedGCProgress, error) {
 	var progress wispClosedGCProgress
 	for start := 0; start < len(ids); start += wispClosedGCChunkSize {
+		if err := ctx.Err(); err != nil {
+			return progress, err
+		}
 		end := min(start+wispClosedGCChunkSize, len(ids))
 		chunk, err := deleteChunk(ctx, ids[start:end])
 		if err != nil {

@@ -1074,15 +1074,18 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 			DeletedIDs:        res.DeletedIDs,
 		}, nil
 	})
+	if len(progress.ConfirmedIDs) > 0 {
+		// The bookkeeping deleteBatch did for its whole request, done for the
+		// chunks that actually committed: a purge that stops partway still
+		// tells auto-export these ids are supposed to be gone (GH#5896), and
+		// still counts as a write for the post-run flush.
+		commandDidWrite.Store(true)
+		commandDeletedIssueIDs.add(progress.ConfirmedIDs...)
+	}
 	if err != nil {
 		return reportWispClosedGCPurgeFailure(progress, len(ids), err,
 			map[string]interface{}{"deleted_ids": slices.Clone(progress.ConfirmedIDs)})
 	}
-
-	// The bookkeeping deleteBatch did for its whole request (GH#5896), and
-	// the post-run flush's write marker.
-	commandDidWrite.Store(true)
-	commandDeletedIssueIDs.add(progress.ConfirmedIDs...)
 
 	if jsonOutput {
 		answer := progress.successFields()

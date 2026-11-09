@@ -481,6 +481,67 @@ func TestWispPurgeClosedJSONReportsPartialProgress(t *testing.T) {
 	})
 }
 
+// TestWispPurgeClosedStopsBeforeNextChunkOnCancellation pins the
+// between-chunks context check: a cancellation that lands after a committed
+// chunk stops the purge before any further request is issued, the committed
+// ids stay in the command's deletion bookkeeping (the auto-export handoff,
+// GH#5896), and the error reports the confirmed progress with rerun
+// guidance. A cancellation ahead of the first chunk stops the purge with no
+// request at all.
+func TestWispPurgeClosedStopsBeforeNextChunkOnCancellation(t *testing.T) {
+	ids := wispClosedGCIDs(450)
+
+	t.Run("cancelled between chunks", func(t *testing.T) {
+		_, d := useWispClosedGCStubIssues(t, wispClosedGCIssues(ids, false))
+		ctx, cancel := context.WithCancel(context.Background())
+		rootCtx = ctx
+		d.onCommitted = cancel
+
+		_, stderr, err := runWispPurgeClosedCaptured(t, false, true)
+		if err == nil {
+			t.Fatal("a cancelled purge exited nil")
+		}
+		if got := len(d.requests); got != 1 {
+			t.Errorf("deleter saw %d requests; want exactly 1 — no further request after cancellation", got)
+		}
+		for _, id := range ids[:200] {
+			if !commandDeletedIssueIDs.has(id) {
+				t.Errorf("confirmed id %s missing from command deletion bookkeeping", id)
+			}
+		}
+		if !commandDidWrite.Load() {
+			t.Error("a purge with one committed chunk did not mark the command as a write")
+		}
+		if !strings.Contains(stderr, "Confirmed 200 deletion(s)") || !strings.Contains(stderr, "250 of 450") {
+			t.Errorf("stderr does not report the confirmed progress and the remainder:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, "Hint:") || !strings.Contains(strings.ToLower(stderr), "rerun") {
+			t.Errorf("stderr does not carry rerun guidance:\n%s", stderr)
+		}
+	})
+
+	t.Run("cancelled before the first chunk", func(t *testing.T) {
+		_, d := useWispClosedGCStubIssues(t, wispClosedGCIssues(ids, false))
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		rootCtx = ctx
+
+		_, stderr, err := runWispPurgeClosedCaptured(t, false, true)
+		if err == nil {
+			t.Fatal("a purge cancelled before its first chunk exited nil")
+		}
+		if got := len(d.requests); got != 0 {
+			t.Errorf("deleter saw %d requests; want 0 — the cancelled context stops the purge before the first request", got)
+		}
+		if !strings.Contains(stderr, "Confirmed 0 deletion(s)") {
+			t.Errorf("stderr does not report zero confirmed progress:\n%s", stderr)
+		}
+		if commandDidWrite.Load() {
+			t.Error("a purge that deleted nothing marked the command as a write")
+		}
+	})
+}
+
 // TestWispPurgeClosedOrphanAccountingSpansChunks pins AC-4's orphan report
 // across chunk boundaries: a survivor orphaned by an early chunk that a later
 // chunk goes on to delete leaves the FINAL orphan report, while one the
