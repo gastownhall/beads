@@ -223,6 +223,67 @@ func TestCreateIssuesRejectStaleUpserts(t *testing.T) {
 		}
 	})
 
+	t.Run("local_label_removal_makes_older_snapshot_stale", func(t *testing.T) {
+		// GH#5442: removing a label locally is a live edit, so it advances
+		// updated_at — an export taken before the removal is now a stale
+		// snapshot and must be skipped whole, label included. Without the
+		// label touch the local row keeps its old timestamp, the snapshot
+		// compares newer, and the import silently restores the removed label.
+		te := newTestEnv(t, "rsl")
+		ctx := t.Context()
+
+		// The local row carries the label at time U0.
+		err := te.store.CreateIssuesWithFullOptions(ctx, []*types.Issue{{
+			ID: "rsl-1", Title: "local title", Status: types.StatusOpen,
+			Priority: 2, IssueType: types.TypeTask,
+			CreatedAt: base, UpdatedAt: base,
+			Labels: []string{"exported"},
+		}}, "tester", storage.BatchCreateOptions{SkipPrefixValidation: true})
+		if err != nil {
+			t.Fatalf("seed issue: %v", err)
+		}
+
+		// A snapshot exported at U1 (strictly after U0) still carries the label.
+		snapshot := &types.Issue{
+			ID: "rsl-1", Title: "local title", Status: types.StatusOpen,
+			Priority: 2, IssueType: types.TypeTask,
+			CreatedAt: base, UpdatedAt: base.Add(30 * time.Minute),
+			Labels: []string{"exported"},
+		}
+
+		// The label is removed locally, at a time strictly after U1 the
+		// clock can represent.
+		if err := te.store.RemoveLabel(ctx, "rsl-1", "exported", "tester"); err != nil {
+			t.Fatalf("remove label: %v", err)
+		}
+
+		var rejected []string
+		err = te.store.CreateIssuesWithFullOptions(ctx, []*types.Issue{snapshot}, "tester",
+			storage.BatchCreateOptions{
+				SkipPrefixValidation: true,
+				RejectStaleUpserts:   true,
+				OnStaleRejected:      func(id string) { rejected = append(rejected, id) },
+			})
+		if err != nil {
+			t.Fatalf("import stale snapshot: %v", err)
+		}
+
+		if len(rejected) != 1 || rejected[0] != "rsl-1" {
+			t.Fatalf("OnStaleRejected = %v, want [rsl-1] (the removal made the snapshot stale)", rejected)
+		}
+		var labelCount int
+		te.queryScalar(t, ctx, "SELECT COUNT(*) FROM labels WHERE issue_id = ?", []any{"rsl-1"}, &labelCount)
+		if labelCount != 0 {
+			t.Fatalf("import restored the locally removed label: %d label rows, want 0", labelCount)
+		}
+		var gotUpdated time.Time
+		te.queryScalar(t, ctx, "SELECT updated_at FROM issues WHERE id = ?", []any{"rsl-1"}, &gotUpdated)
+		if !gotUpdated.UTC().After(base.Add(30 * time.Minute)) {
+			t.Fatalf("updated_at = %v, want the local removal's stamp (after the snapshot's %v)",
+				gotUpdated.UTC(), base.Add(30*time.Minute))
+		}
+	})
+
 	t.Run("without_flag_stale_overwrites", func(t *testing.T) {
 		// --allow-stale path: plain UPSERT semantics, older snapshot wins.
 		te := newTestEnv(t, "rsd")
