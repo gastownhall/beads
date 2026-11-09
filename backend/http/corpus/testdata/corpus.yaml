@@ -368,6 +368,11 @@ shapes:
     args: [list, --label, "lane:a"]
     compare: text
     requests: 4
+  # requests: 5 is getContext, listSettings, listIssues and two
+  # listDependencies: the client reads edges in chunks of 100 ids
+  # (roles_graph.go maxEdgeReadAnchors) and piped `bd list` is unlimited, so
+  # the two chunks are the ~190 seed rows it lists. Growing the seed past 200
+  # listed rows adds a third; that is data volume, not a list change.
   - id: mc-list-plain
     source: mc scripts (bare bd list)
     args: [list]
@@ -937,7 +942,8 @@ shapes:
   # closes anything; the embedded run closes e2e-t-cnx and claims e2e-t-cn,
   # the P0 its setup makes the top of the ready queue. Until the served run
   # does the same, the two sides' stores differ after this shape, so it stays
-  # the last shape of the corpus: nothing in its part runs after it.
+  # the last shape of the corpus: nothing in its part runs after it
+  # (TestCorpusFileIsWellFormed fails while it is pending and not last).
   - id: gc-close-claim-next
     source: bd close --claim-next (close the finished bead and claim the next ready one)
     setup: [[create, "claim-next candidate", -t, task, --id, e2e-t-cn, --priority, "0", --json], [create, "claim-next target", -t, task, --id, e2e-t-cnx, --json]]

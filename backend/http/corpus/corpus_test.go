@@ -239,7 +239,46 @@ func TestCorpusFileIsWellFormed(t *testing.T) {
 			t.Errorf("asset %s needs exactly one of content and bulk", a.Name)
 		}
 	}
+	if msg := lastShapeProblem(c.Shapes); msg != "" {
+		t.Error(msg)
+	}
 	loadReferenceProfile(t)
+}
+
+// mustRunLastWhilePending is the shape that has to be the corpus's last while
+// it is pending: until its served run does what the embedded one does, the
+// two sides' stores differ after it, and a later shape of its part that reads
+// the rows it touches would fail parity for no reason of its own. Shapes are
+// dealt round robin, so only the corpus's last shape is last in its part.
+const mustRunLastWhilePending = "gc-close-claim-next"
+
+// lastShapeProblem reports a pending mustRunLastWhilePending that is not the
+// corpus's last shape, or "".
+func lastShapeProblem(shapes []shape) string {
+	for i, s := range shapes {
+		if s.ID != mustRunLastWhilePending || s.Pending == nil || i == len(shapes)-1 {
+			continue
+		}
+		return fmt.Sprintf("shape %s is pending, so it must stay the last shape of testdata/corpus.yaml (see the \"close --claim-next (keep last)\" comment there), but %s follows it; add new shapes above that section", s.ID, shapes[i+1].ID)
+	}
+	return ""
+}
+
+func TestLastShapeRuleFires(t *testing.T) {
+	mark := &pending{Slice: "x", Reason: "y"}
+	last := shape{ID: mustRunLastWhilePending, Pending: mark}
+	other := shape{ID: "other"}
+	if msg := lastShapeProblem([]shape{other, last}); msg != "" {
+		t.Errorf("last and pending: %s", msg)
+	}
+	if msg := lastShapeProblem([]shape{last, other}); !strings.Contains(msg, "but other follows it") {
+		t.Errorf("pending and not last: got %q", msg)
+	}
+	unmarked := last
+	unmarked.Pending = nil
+	if msg := lastShapeProblem([]shape{unmarked, other}); msg != "" {
+		t.Errorf("not pending: any place is fine, got %q", msg)
+	}
 }
 
 // side is one workspace the corpus runs in.
@@ -509,10 +548,13 @@ func runShape(t *testing.T, bin string, s shape, served, local *side, allow map[
 	args := expand(context.Background(), t, bin, served, s.Args)
 	proxy.wire.start()
 	sr := runBD(t, bin, served.dir, served.env, s.Stdin, args...)
-	wire = proxy.wire.stop()
+	wire, expired := proxy.wire.stop()
 	wireRefusals := proxy.takeRefusals()
 	lr := runBD(t, bin, local.dir, local.env, s.Stdin, expand(context.Background(), t, bin, local, s.Args)...)
 	t.Logf("bd %s\nserved: %s\nembedded: exit=%d", strings.Join(s.Args, " "), sr, lr.code)
+	if expired > 0 {
+		t.Logf("%d read(s) the read memo let through only for its TTL were left out of the transcript", expired)
+	}
 	if len(wireRefusals) > 0 {
 		t.Logf("reference-profile refusals on the wire: %v", wireRefusals)
 	}

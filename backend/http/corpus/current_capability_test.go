@@ -90,10 +90,6 @@ func loadCurrentProfile(t *testing.T) *referenceProfile {
 func TestServedCorpusCurrentCapabilityTranscripts(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	c, _ := loadCorpus(t)
-	byID := map[string]shape{}
-	for _, s := range c.Shapes {
-		byID[s.ID] = s
-	}
 	var shapes []shape
 	for _, s := range c.Shapes {
 		if slices.Contains(currentCapabilityShapes, s.ID) {
@@ -123,9 +119,12 @@ func TestServedCorpusCurrentCapabilityTranscripts(t *testing.T) {
 			args := expand(context.Background(), t, bin, served, s.Args)
 			proxy.wire.start()
 			r := runBD(t, bin, served.dir, served.env, s.Stdin, args...)
-			wire := proxy.wire.stop()
+			wire, expired := proxy.wire.stop()
 			exit := r.code
 			t.Logf("bd %v: %s", s.Args, r)
+			if expired > 0 {
+				t.Logf("%d read(s) the read memo let through only for its TTL were left out of the transcript", expired)
+			}
 			if drift := checkTranscript(t, currentTranscriptDir, transcript{Shape: s.ID, Exit: &exit, Requests: maskMintedIDs(wire, known)}, true); drift != "" {
 				t.Error(drift)
 			}

@@ -169,23 +169,30 @@ Two things a served run's requests would otherwise depend on are pinned:
   runs one `bd ready` after the seed, so every shape runs with the cache warm,
   as gc's polling finds it, and no transcript depends on which shape of its
   part ran first or on how long the part took.
-- **The read memo.** One `bd` process answers an identical read from memory
-  for 5s (`wire.ReadMemoTTL`). A command stalled longer than that between two
-  identical reads would send one more; the `requests` pins on the `show`
-  shapes have always relied on the same memo.
+- **The read memo.** One `bd` process answers an identical `getIssue`,
+  `getSetting` or `listSettings` read from memory for 5s (`wire.ReadMemoTTL`)
+  unless it wrote in between. On a loaded host a long command (a `mol current`
+  walk) can take longer than that between two identical reads and send one
+  more. The recorder therefore leaves out a memoable read of a URI that was
+  answered 2xx at least `wire.ReadMemoTTL` earlier in the same run with no
+  write since, and logs how many it left out
+  (`TestExpiredMemoReadRuleFires`). A memo regression re-reads within
+  milliseconds, so it is still recorded and still drifts.
 
 Regenerate the transcripts after an intended change, and review the diff:
 
 ```
 BD_UPDATE_GOLDEN=1 CGO_ENABLED=1 BEADS_TEST_EMBEDDED_DOLT=1 \
-  go test -tags gms_pure_go -run 'TestServedCorpus|TestCorpusTranscripts' ./backend/http/corpus/
+  go test -tags gms_pure_go -count=1 -timeout 40m -run 'TestServedCorpus|TestCorpusTranscripts' ./backend/http/corpus/
 ```
 
 Do not set `BEADS_CORPUS_SKIP_PENDING` while regenerating: a skipped shape's
 transcript is left as it was. A `requests` pin is not rewritten; update it in
-`corpus.yaml` with the transcript, in the same review.
+`corpus.yaml` with the transcript, in the same review. `-count=1` matters:
+`bd` is built in a subprocess, so go test's result cache cannot see a change
+to `cmd/bd` alone and would replay a cached pass.
 
-The engine-free checks run in every lane:
+The engine-free checks run in every cgo lane:
 - `TestCorpusTranscriptsAreWellFormed`: every transcript names a shape and
   only operations of its profile, is in canonical form, and every shape that
   is not pending has one.

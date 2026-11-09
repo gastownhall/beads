@@ -217,9 +217,10 @@ func (p *referenceProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "reference proxy: read body: "+err.Error(), http.StatusBadGateway)
 		return
 	}
+	op := p.match(r)
 	if subjectUserAgent(r.UserAgent()) {
 		p.requests.Add(1)
-		w = p.wire.track(w, r, p.match(r), body)
+		w = p.wire.track(w, r, op, body)
 	} else {
 		p.foreign.Add(1)
 	}
@@ -231,7 +232,6 @@ func (p *referenceProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.serveContext(w, r)
 		return
 	}
-	op := p.match(r)
 	if op == nil {
 		p.noteRefusal(r, "operation not published by the reference server")
 		detail := "no such route on this server"

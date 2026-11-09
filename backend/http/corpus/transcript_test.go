@@ -21,6 +21,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/httpclient/wire"
 )
 
 // The served run of every shape leaves a wire transcript: each request the bd
@@ -29,13 +32,15 @@ import (
 // testdata/transcripts/<shape>.json holds the reference-profile transcript of
 // every shape whose served run happens; testdata/transcripts/current/ holds
 // the current-capability ones (current_capability_test.go). A change to what
-// bd sends for a shape fails its subtest until the golden is regenerated:
+// bd sends for a shape fails its subtest until the golden is regenerated
+// (-count=1 because bd is built in a subprocess, which go test's result cache
+// cannot see; a serial run of every part takes several minutes):
 //
-//	BD_UPDATE_GOLDEN=1 CGO_ENABLED=1 BEADS_TEST_EMBEDDED_DOLT=1 go test -tags gms_pure_go -run 'TestServedCorpus|TestCorpusTranscripts' ./backend/http/corpus/
+//	BD_UPDATE_GOLDEN=1 CGO_ENABLED=1 BEADS_TEST_EMBEDDED_DOLT=1 go test -tags gms_pure_go -count=1 -timeout 40m -run 'TestServedCorpus|TestCorpusTranscripts' ./backend/http/corpus/
 const (
 	transcriptDir        = "testdata/transcripts"
 	currentTranscriptDir = "testdata/transcripts/current"
-	transcriptRegen      = "BD_UPDATE_GOLDEN=1 CGO_ENABLED=1 BEADS_TEST_EMBEDDED_DOLT=1 go test -tags gms_pure_go -run 'TestServedCorpus|TestCorpusTranscripts' ./backend/http/corpus/"
+	transcriptRegen      = "BD_UPDATE_GOLDEN=1 CGO_ENABLED=1 BEADS_TEST_EMBEDDED_DOLT=1 go test -tags gms_pure_go -count=1 -timeout 40m -run 'TestServedCorpus|TestCorpusTranscripts' ./backend/http/corpus/"
 )
 
 // transcriptRequest is one request of a served run. It carries names, never
@@ -66,27 +71,86 @@ type transcript struct {
 // A request is appended when it arrives and its status is filled in when the
 // proxy writes the response header, which is before the client can see the
 // answer, so stop never races a request bd has already been answered.
+//
+// It leaves out a read that only reached the wire because the client's read
+// memo had expired (expiredMemoRead), so no transcript depends on how fast
+// the host ran the command.
 type transcriptRecorder struct {
 	mu       sync.Mutex
 	on       bool
 	requests []*transcriptRequest
+	// now is the clock memo ages are measured on; nil is time.Now.
+	now func() time.Time
+	// answered is when each memoable read, by its full request URI, was last
+	// answered 2xx in this window since the subject's last write: what the
+	// client's memo would hold (wire/read_memo.go).
+	answered map[string]time.Time
+	// gen counts the windows and the subject's writes, as the memo's own
+	// generation does: an answer to a read that overlapped a write, or that
+	// lands after its window, is not stored.
+	gen uint64
+	// expired counts the reads left out because the memo would have answered
+	// them but for its TTL.
+	expired int
+}
+
+func (rec *transcriptRecorder) clock() time.Time {
+	if rec.now != nil {
+		return rec.now()
+	}
+	return time.Now()
 }
 
 func (rec *transcriptRecorder) start() {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
-	rec.on, rec.requests = true, nil
+	rec.on, rec.requests, rec.answered, rec.expired = true, nil, map[string]time.Time{}, 0
+	rec.gen++
 }
 
-func (rec *transcriptRecorder) stop() []transcriptRequest {
+// stop ends the window and returns its requests and how many memo-expired
+// reads it left out of them.
+func (rec *transcriptRecorder) stop() ([]transcriptRequest, int) {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	out := make([]transcriptRequest, 0, len(rec.requests))
 	for _, r := range rec.requests {
 		out = append(out, *r)
 	}
-	rec.on, rec.requests = false, nil
-	return out
+	expired := rec.expired
+	rec.on, rec.requests, rec.answered, rec.expired = false, nil, nil, 0
+	rec.gen++
+	return out, expired
+}
+
+// memoableTranscriptOps are the operations the client's read memo answers
+// (wire/read_memo.go memoableOps).
+var memoableTranscriptOps = map[string]bool{
+	wire.OpGetIssue:     true,
+	wire.OpGetSetting:   true,
+	wire.OpListSettings: true,
+}
+
+// expiredMemoRead reports whether r is a read bd's read memo would have
+// answered, but for its TTL: a memoable GET of a URI the server answered 2xx
+// at least wire.ReadMemoTTL ago in this window, with no write by the subject
+// since (every write clears the memo). The memo measures an entry's age from
+// when the client stored the answer, which is after the proxy wrote its
+// status, so a read the memo let through for age is always caught here, and
+// a regression that re-reads within the TTL (milliseconds later, in
+// practice) is still recorded and still drifts. The window is one bd
+// process, whose memo starts empty, like this map. Caller holds rec.mu.
+func (rec *transcriptRecorder) expiredMemoRead(r *http.Request, op *referenceOperation) bool {
+	if r.Method != http.MethodGet {
+		clear(rec.answered)
+		rec.gen++
+		return false
+	}
+	if op == nil || !memoableTranscriptOps[op.OperationID] {
+		return false
+	}
+	at, ok := rec.answered[r.URL.RequestURI()]
+	return ok && rec.clock().Sub(at) >= wire.ReadMemoTTL
 }
 
 // track records r while recording is on and returns the writer that fills in
@@ -97,15 +161,27 @@ func (rec *transcriptRecorder) track(w http.ResponseWriter, r *http.Request, op 
 	if !rec.on {
 		return w
 	}
+	key := r.URL.RequestURI()
+	memoable := r.Method == http.MethodGet && op != nil && memoableTranscriptOps[op.OperationID]
 	entry := &transcriptRequest{Method: r.Method, Path: r.URL.EscapedPath(), Query: queryNames(r.URL), Body: memberNames(body)}
 	if op != nil {
 		entry.OperationID = op.OperationID
 	}
-	rec.requests = append(rec.requests, entry)
+	if rec.expiredMemoRead(r, op) {
+		rec.expired++
+	} else {
+		rec.requests = append(rec.requests, entry)
+	}
+	gen := rec.gen
 	return &statusWriter{ResponseWriter: w, set: func(code int) {
 		rec.mu.Lock()
 		defer rec.mu.Unlock()
 		entry.Status = code
+		// The client stores a memoable read's 2xx answer, fresh, on every
+		// miss (a hit never reaches the wire), unless a write overlapped it.
+		if memoable && code >= 200 && code < 300 && gen == rec.gen {
+			rec.answered[key] = rec.clock()
+		}
 	}}
 }
 
@@ -327,7 +403,7 @@ func loadTranscripts(t *testing.T, dir string) map[string]transcript {
 	out := map[string]transcript{}
 	for _, e := range entries {
 		if e.IsDir() {
-			if sub := filepath.Join(dir, e.Name()); sub != currentTranscriptDir {
+			if sub := filepath.ToSlash(filepath.Join(dir, e.Name())); sub != currentTranscriptDir {
 				t.Errorf("%s is a directory; %s is the only one allowed under %s", sub, currentTranscriptDir, transcriptDir)
 			}
 			continue
@@ -594,7 +670,10 @@ func TestReferenceProxyRecordsOnlyTheSubject(t *testing.T) {
 	send(subject, http.MethodPatch, "/v0/beads/issues/e2e-r1", `{"actor":"worker","expected_version":"7341","patch":{"due_at":"2031-01-02T03:04:05Z"}}`)
 	send(subject, http.MethodGet, "/v0/beads/issues?bogus=2031-01-02", "")
 	send(subject, http.MethodGet, "/v0/beads/nonsense", "")
-	got := proxy.wire.stop()
+	got, expired := proxy.wire.stop()
+	if expired != 0 {
+		t.Errorf("expired memo reads = %d, want 0", expired)
+	}
 	if refused := proxy.takeRefusals(); len(refused) != 2 {
 		t.Errorf("refusals noted = %q, want the subject's 400 and 404 only, not the host's GET /", refused)
 	}
@@ -673,5 +752,92 @@ func TestTranscriptDriftNamesTheChangedRequest(t *testing.T) {
 	}
 	if bytes.Equal(base, d7) || bytes.Equal(base, dup) {
 		t.Error("renderings of different transcripts are equal")
+	}
+}
+
+// TestExpiredMemoReadRuleFires drives the recorder on a fake clock: a re-read
+// the read memo let through only because its entry aged out is left out (and
+// counted), while every re-read the memo should have answered, as a memo
+// regression would send it, is still recorded, as is any re-read the memo
+// could not answer (after a write, after a non-2xx answer, of a different
+// URI, or of an operation the memo does not serve).
+func TestExpiredMemoReadRuleFires(t *testing.T) {
+	ops := map[string]*referenceOperation{
+		"getIssue":    {Method: http.MethodGet, OperationID: wire.OpGetIssue},
+		"getSetting":  {Method: http.MethodGet, OperationID: wire.OpGetSetting},
+		"listIssues":  {Method: http.MethodGet, OperationID: "listIssues"},
+		"updateIssue": {Method: http.MethodPatch, OperationID: "updateIssue"},
+	}
+	clock := time.Unix(1_800_000_000, 0)
+	rec := &transcriptRecorder{now: func() time.Time { return clock }}
+	type step struct {
+		advance time.Duration
+		op      string
+		target  string
+		status  int
+	}
+	run := func(steps []step) (paths []string, expired int) {
+		rec.start()
+		for _, s := range steps {
+			clock = clock.Add(s.advance)
+			op := ops[s.op]
+			r := httptest.NewRequest(op.Method, s.target, nil)
+			w := rec.track(httptest.NewRecorder(), r, op, nil)
+			w.WriteHeader(s.status)
+		}
+		got, expired := rec.stop()
+		for _, g := range got {
+			paths = append(paths, g.OperationID+" "+g.Path)
+		}
+		return paths, expired
+	}
+	const (
+		i1 = "/v0/beads/issues/e2e-a"
+		i2 = "/v0/beads/issues/e2e-b"
+	)
+	ttl := wire.ReadMemoTTL
+	for _, tc := range []struct {
+		name        string
+		steps       []step
+		wantPaths   int
+		wantExpired int
+	}{
+		{"a re-read within the TTL is a memo regression: recorded", []step{
+			{0, "getIssue", i1, 200}, {time.Millisecond, "getIssue", i1, 200},
+		}, 2, 0},
+		{"a re-read the TTL let through: left out", []step{
+			{0, "getIssue", i1, 200}, {ttl + time.Millisecond, "getIssue", i1, 200},
+		}, 1, 1},
+		{"the age runs from the latest answer, as the memo re-stores each miss", []step{
+			{0, "getIssue", i1, 200}, {ttl, "getIssue", i1, 200}, {time.Second, "getIssue", i1, 200},
+		}, 2, 1},
+		{"settings reads are memoized too", []step{
+			{0, "getSetting", "/v0/beads/settings/k", 200}, {2 * ttl, "getSetting", "/v0/beads/settings/k", 200},
+		}, 1, 1},
+		{"a write in between clears the memo: recorded", []step{
+			{0, "getIssue", i1, 200}, {ttl, "updateIssue", i1, 200}, {time.Millisecond, "getIssue", i1, 200},
+		}, 3, 0},
+		{"a non-2xx answer is never memoized: recorded", []step{
+			{0, "getIssue", i1, 404}, {2 * ttl, "getIssue", i1, 200},
+		}, 2, 0},
+		{"another query is another key: recorded", []step{
+			{0, "getIssue", i1, 200}, {2 * ttl, "getIssue", i1 + "?include_comments=true", 200},
+		}, 2, 0},
+		{"another row: recorded", []step{
+			{0, "getIssue", i1, 200}, {2 * ttl, "getIssue", i2, 200},
+		}, 2, 0},
+		{"listings are not memoized: recorded", []step{
+			{0, "listIssues", "/v0/beads/issues", 200}, {2 * ttl, "listIssues", "/v0/beads/issues", 200},
+		}, 2, 0},
+	} {
+		paths, expired := run(tc.steps)
+		if len(paths) != tc.wantPaths || expired != tc.wantExpired {
+			t.Errorf("%s: recorded %q and left out %d, want %d recorded and %d left out", tc.name, paths, expired, tc.wantPaths, tc.wantExpired)
+		}
+	}
+	// A window starts with the memo empty, as each bd process does.
+	run([]step{{0, "getIssue", i1, 200}})
+	if paths, expired := run([]step{{2 * ttl, "getIssue", i1, 200}}); len(paths) != 1 || expired != 0 {
+		t.Errorf("a read in a new window was left out (%q, %d); the memo does not outlive the process", paths, expired)
 	}
 }

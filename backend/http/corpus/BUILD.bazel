@@ -25,6 +25,7 @@ go_test(
         "//internal/httpapi/apigen",
         "//internal/httpapi/spec",
         "//internal/httpclient",
+        "//internal/httpclient/wire",
         "//internal/storage",
         "//internal/storage/domain",
         "//internal/storage/embeddeddolt",
@@ -51,9 +52,11 @@ go_test(
 # 5th shard runs the package's other tests through the binary's
 # round-robin (the engine-free ones, plus
 # TestServedGateCheckOverAwaitTypedGates, which seeds its own small served
-# store). Each part pays the setup again, though it seeds the served
-# and embedded sides concurrently (~62-76s on the lane's executors), so a
-# part's shard is that plus ~60s of shapes: 114-146s measured. Three parts
+# store, and TestServedCorpusCurrentCapabilityTranscripts, which builds bd
+# and seeds the full corpus on one served side, ~40-130s). Each part pays
+# the setup again, though it seeds the served and embedded sides
+# concurrently (~62-76s on the lane's executors), so a part's shard is that
+# plus ~60s of shapes: 114-146s measured. Three parts
 # ran 170-180s each; they save one setup (~75 test-seconds a run) but
 # lengthen the lane's served long pole, which is on the gate's critical
 # path, by ~34s.
