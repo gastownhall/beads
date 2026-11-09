@@ -142,6 +142,7 @@ go_test(
         "create_batch_participation_generation_test.go",
         "create_issue_test.go",
         "cross_prefix_local_target_test.go",
+        "cross_prefix_readiness_test.go",
         "cross_record_invariant_contract_test.go",
         "cross_table_id_collision_test.go",
         "cycle_detector_contract_test.go",
