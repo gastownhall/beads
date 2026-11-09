@@ -558,4 +558,91 @@ func TestResolveCustomConfigInTxPropagatesReadErrors(t *testing.T) {
 		requireResolveCause(t, statuses, customTypes, err, cause)
 		expectationsMet(t, mock)
 	})
+
+	t.Run("missing tables keep the legacy config fallback", func(t *testing.T) {
+		withCustomVocabularyYAML(t, "", "yaml-only")
+		db, mock, tx := beginMockTx(t)
+		defer db.Close()
+		mock.ExpectQuery(regexp.QuoteMeta(combinedStatusesQuery)).
+			WillReturnError(errors.New("Error 1146 (42S02): Table 'beads.custom_statuses' doesn't exist"))
+		mock.ExpectQuery(regexp.QuoteMeta(combinedTypesQuery)).
+			WillReturnError(errors.New("Error 1146 (42S02): Table 'beads.custom_types' doesn't exist"))
+		mock.ExpectQuery(regexp.QuoteMeta(combinedConfigQuery)).
+			WithArgs("status.custom", "types.custom").
+			WillReturnRows(sqlmock.NewRows([]string{"key", "value"}).
+				AddRow("status.custom", "review:active").
+				AddRow("types.custom", "spike"))
+		mock.ExpectRollback()
+
+		statuses, customTypes, err := resolveCombined(t, tx)
+		if err != nil {
+			t.Fatalf("missing tables with readable config: %v", err)
+		}
+		if len(statuses) != 1 || statuses[0] != (types.CustomStatus{Name: "review", Category: types.CategoryActive}) {
+			t.Fatalf("statuses = %+v, want review:active from the config row", statuses)
+		}
+		if len(customTypes) != 2 || customTypes[0] != "spike" || customTypes[1] != "yaml-only" {
+			t.Fatalf("customTypes = %v, want [spike yaml-only]", customTypes)
+		}
+		expectationsMet(t, mock)
+	})
+
+	t.Run("empty tables and absent config rows keep the yaml fallback", func(t *testing.T) {
+		withCustomVocabularyYAML(t, "review:active", "yaml-only")
+		db, mock, tx := beginMockTx(t)
+		defer db.Close()
+		mock.ExpectQuery(regexp.QuoteMeta(combinedStatusesQuery)).
+			WillReturnRows(sqlmock.NewRows([]string{"name", "category"}))
+		mock.ExpectQuery(regexp.QuoteMeta(combinedTypesQuery)).
+			WillReturnRows(sqlmock.NewRows([]string{"name"}))
+		mock.ExpectQuery(regexp.QuoteMeta(combinedConfigQuery)).
+			WithArgs("status.custom", "types.custom").
+			WillReturnRows(sqlmock.NewRows([]string{"key", "value"}))
+		mock.ExpectRollback()
+
+		statuses, customTypes, err := resolveCombined(t, tx)
+		if err != nil {
+			t.Fatalf("empty tables with absent config rows: %v", err)
+		}
+		if len(statuses) != 1 || statuses[0] != (types.CustomStatus{Name: "review", Category: types.CategoryActive}) {
+			t.Fatalf("statuses = %+v, want review:active from yaml", statuses)
+		}
+		if len(customTypes) != 1 || customTypes[0] != "yaml-only" {
+			t.Fatalf("customTypes = %v, want [yaml-only]", customTypes)
+		}
+		expectationsMet(t, mock)
+	})
+
+	t.Run("legacy rows keep status categories and type composition", func(t *testing.T) {
+		withCustomVocabularyYAML(t, "", "yaml-only,spike")
+		db, mock, tx := beginMockTx(t)
+		defer db.Close()
+		mock.ExpectQuery(regexp.QuoteMeta(combinedStatusesQuery)).
+			WillReturnRows(sqlmock.NewRows([]string{"name", "category"}).
+				AddRow("review", "active").
+				AddRow("archived", "done"))
+		mock.ExpectQuery(regexp.QuoteMeta(combinedTypesQuery)).
+			WillReturnRows(sqlmock.NewRows([]string{"name"}))
+		mock.ExpectQuery(regexp.QuoteMeta(combinedConfigQuery)).
+			WithArgs("status.custom", "types.custom").
+			WillReturnRows(sqlmock.NewRows([]string{"key", "value"}).
+				AddRow("types.custom", "spike"))
+		mock.ExpectRollback()
+
+		statuses, customTypes, err := resolveCombined(t, tx)
+		if err != nil {
+			t.Fatalf("mixed table and config sources: %v", err)
+		}
+		want := []types.CustomStatus{
+			{Name: "review", Category: types.CategoryActive},
+			{Name: "archived", Category: types.CategoryDone},
+		}
+		if len(statuses) != len(want) || statuses[0] != want[0] || statuses[1] != want[1] {
+			t.Fatalf("statuses = %+v, want %+v", statuses, want)
+		}
+		if len(customTypes) != 2 || customTypes[0] != "spike" || customTypes[1] != "yaml-only" {
+			t.Fatalf("customTypes = %v, want [spike yaml-only]", customTypes)
+		}
+		expectationsMet(t, mock)
+	})
 }
