@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -259,98 +257,45 @@ type importResultJSON struct {
 }
 
 func runImportFromReader(ctx context.Context, r io.Reader, source string) error {
-	issues, memories, err := parseImportRecords(r)
+	records, memories, err := parseImportJSONL(r, source)
 	if err != nil {
 		return err
 	}
 
 	if usesProxiedServer() {
-		return runImportRecordsProxied(ctx, issues, memories, source)
+		return runImportRecordsProxied(ctx, records, memories, source)
 	}
 
 	if store == nil {
 		return fmt.Errorf("no database — run 'bd init' or 'bd bootstrap' first")
 	}
-	return runImportRecordsClassic(ctx, issues, memories, source)
-}
-
-// parseImportRecords scans one JSONL stream into issue rows and memory
-// records — the `bd import` / `bd import -` parse loop, shared by the classic
-// and proxied modes. Same record vocabulary as parseJSONLFile (the bootstrap
-// reader): the optional _schema header and tombstones are skipped, and the
-// "wisp_plane" boolean is honored as the explicit wisps-plane marker (and
-// the legacy "wisp" alias for "ephemeral") via applyImportWispPlane.
-func parseImportRecords(r io.Reader) ([]*types.Issue, []memoryRecord, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 64*1024*1024)
-
-	var issues []*types.Issue
-	var memories []memoryRecord
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
-		var peek map[string]json.RawMessage
-		if err := json.Unmarshal([]byte(line), &peek); err != nil {
-			return nil, nil, fmt.Errorf("failed to parse JSONL line: %w", err)
-		}
-
-		// Skip the optional beads-jsonl header record (§J1.3). A canonical
-		// export may prepend a provenance line, e.g.
-		// {"_schema":"beads-jsonl/1","_dolt_branch":"main","_sort":"stable-v1"}.
-		// It carries no _type and no issue fields; without this guard it falls
-		// through to the issue path, unmarshals into an empty Issue, and aborts
-		// the whole import with "title is required". parseJSONLFile (the
-		// bootstrap reader) has always skipped it; this loop — the one `bd
-		// import` and `bd import -` run through — did not.
-		if _, isHeader := peek["_schema"]; isHeader {
-			continue
-		}
-
-		if rawType, ok := peek["_type"]; ok {
-			var typeStr string
-			if err := json.Unmarshal(rawType, &typeStr); err == nil && typeStr == "memory" {
-				var mem memoryRecord
-				if err := json.Unmarshal([]byte(line), &mem); err != nil {
-					return nil, nil, fmt.Errorf("failed to parse memory record: %w", err)
-				}
-				if mem.Key != "" && mem.Value != "" {
-					memories = append(memories, mem)
-				}
-				continue
-			}
-		}
-
-		var issue types.Issue
-		if err := json.Unmarshal([]byte(line), &issue); err != nil {
-			return nil, nil, fmt.Errorf("failed to parse issue from JSONL: %w", err)
-		}
-		if issue.Status == "tombstone" {
-			continue
-		}
-		applyImportWispPlane(peek, &issue)
-		issue.SetDefaults()
-		issues = append(issues, &issue)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, nil, fmt.Errorf("failed to scan JSONL: %w", err)
-	}
-	return issues, memories, nil
+	return runImportRecordsClassic(ctx, records, memories, source)
 }
 
 // runImportRecordsClassic is the classic (embedded/direct store) import
-// pipeline over the parsed records: dedup, dry-run classification, memory
-// writes, the batch issue import, the final commit and the issue_prefix
-// reconciliation.
-func runImportRecordsClassic(ctx context.Context, issues []*types.Issue, memories []memoryRecord, source string) error {
+// pipeline over the parsed records: dedup, the import screen, dry-run
+// classification, memory writes, the batch issue import, the final commit and
+// the issue_prefix reconciliation.
+func runImportRecordsClassic(ctx context.Context, records []importRecord, memories []memoryRecord, source string) error {
 	// Dedup: skip issues whose title matches an existing open issue
 	dedupHits := 0
-	if importDedup && len(issues) > 0 {
-		issues, dedupHits = filterDuplicatesByTitle(ctx, store, issues)
+	if importDedup && len(records) > 0 {
+		var kept []*types.Issue
+		kept, dedupHits = filterDuplicatesByTitle(ctx, store, importRecordIssues(records))
+		records = keepImportRecords(records, kept)
 	}
+
+	// The screen runs before the dry run and before every import write — the
+	// prefix seed, the memories, the first chunk — so a strict refusal leaves
+	// this import phase's writes undone rather than half done.
+	screen, err := screenImportRecords(ctx, store, storeImportVocabulary(store), records, importAllowStale)
+	if err != nil {
+		return err
+	}
+	if len(screen.Rejected) > 0 {
+		return importRejectedError(source, screen.Rejected)
+	}
+	issues := screen.Kept(records)
 
 	result := importResultJSON{
 		Source:    source,
@@ -417,8 +362,8 @@ func runImportRecordsClassic(ctx context.Context, issues []*types.Issue, memorie
 
 	// Import issues
 	if len(issues) > 0 {
-		opts := ImportOptions{SkipPrefixValidation: true, AllowStale: importAllowStale}
-		importResult, err := importIssuesCore(ctx, "", store, issues, opts)
+		opts := ImportOptions{SkipPrefixValidation: true, AllowStale: importAllowStale, Screened: screen}
+		importResult, err := importIssuesCore(ctx, "", store, screen.Write, opts)
 		if err != nil {
 			return fmt.Errorf("import failed: %w", err)
 		}

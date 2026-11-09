@@ -243,3 +243,17 @@ func (s *DoltStore) GetInfraTypes(ctx context.Context) map[string]bool {
 
 	return result
 }
+
+// ImportVocabulary returns the custom statuses and custom types a batch import
+// validates its rows against, read in one transaction through the resolvers
+// the writer's NewBatchContext uses. Unlike the cached GetCustomStatuses and
+// GetCustomTypes it returns a read failure instead of an empty vocabulary: an
+// import screen must report the failure, not screen with a guess.
+func (s *DoltStore) ImportVocabulary(ctx context.Context) (customStatuses, customTypes []string, err error) {
+	err = s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var txErr error
+		customStatuses, customTypes, txErr = issueops.ReadImportVocabularyInTx(ctx, tx)
+		return txErr
+	})
+	return customStatuses, customTypes, err
+}

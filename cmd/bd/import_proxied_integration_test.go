@@ -535,6 +535,42 @@ func TestProxiedServerImport(t *testing.T) {
 		}
 	})
 
+	// GH#4492: a record the writer refuses fails a strict import before any
+	// write, with its line, id, reason and the way forward.
+	t.Run("invalid_record_strict_refuses", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "impv")
+		db := openProxiedDB(t, p)
+
+		rows := fixtureIssues("impv")
+		rows[1].Status = "verify"
+		fixture := importFixtureJSONL(t, rows, `{"_type":"memory","key":"strict-probe","value":"never"}`)
+		path := filepath.Join(p.dir, "invalid.jsonl")
+		if err := os.WriteFile(path, []byte(fixture), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+		head := proxiedDoltHead(t, db)
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "import", path)
+		if err == nil {
+			t.Fatalf("strict import of an invalid record succeeded\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		// Line 1 is the _schema header, so the second issue is line 3.
+		for _, want := range []string{path + ":3:", "impv-r2", "verify", "nothing was imported", "--skip-invalid"} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("refusal does not mention %q:\n%s", want, stderr)
+			}
+		}
+		if n := proxiedDoltCommitCountSince(t, db, head); n != 0 {
+			t.Errorf("refused import made %d commits, want 0", n)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM issues WHERE id LIKE 'impv-r%'"); got != 0 {
+			t.Errorf("refused import wrote %d rows, want 0", got)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM config WHERE `key` = 'kv.memory.strict-probe'"); got != 0 {
+			t.Errorf("refused import wrote the memory, want none")
+		}
+	})
+
 	t.Run("import_is_the_sanctioned_upsert_door", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "impf")
