@@ -232,15 +232,23 @@ func autoMigrateOnVersionBump(beadsDir string) {
 		return
 	}
 
-	// Check if database exists at the backend-appropriate path
+	// Check if database exists at the backend-appropriate path. A server-mode
+	// workspace usually keeps no local copy: its database lives on the server,
+	// so a missing directory proves nothing there. The opens below never create
+	// the database (CreateIfMissing stays false), so a missing one still fails
+	// them, quietly (gastownhall/beads#7038).
 	dbPath := cfg.DatabasePath(beadsDir)
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		// No database - nothing to migrate
-		debug.Logf("auto-migrate: skipping migration, database does not exist: %s", dbPath)
-		return
+		if !cfg.IsDoltServerMode() {
+			// No database - nothing to migrate
+			debug.Logf("auto-migrate: skipping migration, database does not exist: %s", dbPath)
+			return
+		}
+		debug.Logf("auto-migrate: no local database at %s, migrating the server database", dbPath)
+	} else {
+		// Pre-0.56 recovery rebuilds a local directory; there is none to rebuild.
+		recoverPreV56IfNeeded(previousVersion, dbPath)
 	}
-
-	recoverPreV56IfNeeded(previousVersion, dbPath)
 
 	// Open database using factory (respects backend config from metadata.json)
 	// Use rootCtx if available and not canceled, otherwise use Background
