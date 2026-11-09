@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -151,5 +152,113 @@ func TestShowWatchRenderLeavesLocalOnlyOutputAlone(t *testing.T) {
 	}
 	if strings.Contains(stdout, "DEPENDS ON") || strings.Contains(stderr, "no row in this database") {
 		t.Errorf("edgeless render grew a dependency section or notice:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+}
+
+// faultyDepStore fails or truncates one of the three reads behind the
+// unresolvable-edge disclosure, for the failure rules of #5272.
+type faultyDepStore struct {
+	storage.DoltStorage
+	failCount, failListing, failRecords bool
+	keepRecords                         int // >0: return only the first n raw records
+	reads                               atomic.Int32
+}
+
+func (s *faultyDepStore) CountDependencies(ctx context.Context, issueID string) (int64, error) {
+	if s.failCount {
+		return 0, errors.New("count read failed")
+	}
+	return s.DoltStorage.CountDependencies(ctx, issueID)
+}
+
+func (s *faultyDepStore) GetDependenciesWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
+	if s.failListing {
+		return nil, errors.New("listing read failed")
+	}
+	return s.DoltStorage.GetDependenciesWithMetadata(ctx, issueID)
+}
+
+func (s *faultyDepStore) GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error) {
+	s.reads.Add(1)
+	if s.failRecords {
+		return nil, errors.New("raw read failed")
+	}
+	records, err := s.DoltStorage.GetDependencyRecords(ctx, issueID)
+	if err == nil && s.keepRecords > 0 && len(records) > s.keepRecords {
+		records = records[:s.keepRecords]
+	}
+	return records, err
+}
+
+// TestShowWatchRenderUnresolvableDepFailureRules pins #5272's failure rules on
+// a subject with three unresolved edges: a failed count or listing keeps the
+// base rule (no raw read, no lines, no outbound notice); a failed raw read
+// prints nothing and leaves the whole measured gap to the notice; partial raw
+// coverage prints what was read and the notice counts only the rest.
+func TestShowWatchRenderUnresolvableDepFailureRules(t *testing.T) {
+	testDB := filepath.Join(t.TempDir(), ".beads", "beads.db")
+	s := newTestStoreWithPrefix(t, testDB, "ud")
+	ctx := context.Background()
+
+	subject := &types.Issue{ID: "ud-subject", Title: "Subject", Status: types.StatusOpen,
+		Priority: 2, IssueType: types.TypeTask, CreatedAt: time.Now()}
+	if err := s.CreateIssue(ctx, subject, "test"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	for _, dep := range []*types.Dependency{
+		{IssueID: subject.ID, DependsOnID: "liveop-a", Type: types.DepBlocks},
+		{IssueID: subject.ID, DependsOnID: "liveop-b", Type: types.DepBlocks},
+		{IssueID: subject.ID, DependsOnID: "external:liveop:liveop-c", Type: types.DepTracks},
+	} {
+		if err := s.AddDependency(ctx, dep, "test"); err != nil {
+			t.Fatalf("AddDependency %s: %v", dep.DependsOnID, err)
+		}
+	}
+	records, err := s.GetDependencyRecords(ctx, subject.ID)
+	if err != nil || len(records) != 3 {
+		t.Fatalf("GetDependencyRecords = %v, %v; want the three raw edges", records, err)
+	}
+
+	oldStore, oldDBPath := store, dbPath
+	t.Cleanup(func() { store, dbPath = oldStore, oldDBPath })
+
+	for _, tc := range []struct {
+		name      string
+		store     *faultyDepStore
+		wantReads int32
+		wantLines int    // unresolved id lines printed
+		wantWarn  string // "" means no outbound notice
+	}{
+		{"count read fails", &faultyDepStore{failCount: true}, 0, 0, ""},
+		{"listing read fails", &faultyDepStore{failListing: true}, 0, 0, ""},
+		{"raw read fails", &faultyDepStore{failRecords: true}, 1, 0, "has 3 dependency edge(s)"},
+		{"partial raw coverage", &faultyDepStore{keepRecords: 1}, 1, 1, "has 2 dependency edge(s)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.store.DoltStorage = s
+			store, dbPath = tc.store, testDB
+			stdioMutex.Lock()
+			stdout, stderr := captureStdio(t, func() {
+				if got := displayShowIssueReturn(ctx, subject.ID, 0); got == nil {
+					t.Errorf("displayShowIssueReturn(%s) = nil", subject.ID)
+				}
+			})
+			stdioMutex.Unlock()
+
+			if got := tc.store.reads.Load(); got != tc.wantReads {
+				t.Errorf("raw edge-record reads = %d, want %d", got, tc.wantReads)
+			}
+			lines := strings.Count(stdout, " (cross-repo)\n") + strings.Count(stdout, " (external)\n")
+			if lines != tc.wantLines {
+				t.Errorf("printed %d unresolved id lines, want %d:\n%s", lines, tc.wantLines, stdout)
+			}
+			if tc.wantWarn == "" {
+				if strings.Contains(stderr, "dependency edge(s)") {
+					t.Errorf("outbound notice printed, want none:\n%s", stderr)
+				}
+			} else if !strings.Contains(stderr, tc.wantWarn) || !strings.Contains(stderr, "bd dep list") {
+				t.Errorf("stderr lacks %q and the bd dep list pointer:\n%s", tc.wantWarn, stderr)
+			}
+		})
 	}
 }
