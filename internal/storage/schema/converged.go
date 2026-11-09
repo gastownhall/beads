@@ -145,10 +145,9 @@ func alreadyConverged(ctx context.Context, db DBConn, databaseName string, selec
 //
 // Selecting is also what makes skipping a caller's locked bootstrap
 // preparation safe: preparation creates the database and USEs it, and both
-// have provably happened here — the database existed before we touched it (so
-// preparation's bare CREATE DATABASE could only have failed with "database
-// exists" and captured no heal authority), and the selector issues the same
-// USE preparation would.
+// have provably happened here — the database was visible before we touched it
+// (so preparation's own visibility probe would skip CREATE DATABASE and capture
+// no heal authority), and the selector issues the same USE preparation would.
 //
 // The existence probe is not decoration. A Dolt session that issues a FAILING
 // statement stays pinned to its pre-statement catalog snapshot, so a USE of a
@@ -166,14 +165,11 @@ func selectTargetDatabase(ctx context.Context, db DBConn, databaseName string, s
 		return false, "", nil
 	}
 
-	var exists int
-	if err := db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = ?",
-		databaseName,
-	).Scan(&exists); err != nil {
-		return false, "", fmt.Errorf("probing database %q existence: %w", databaseName, err)
+	exists, err := DatabaseExists(ctx, db, databaseName)
+	if err != nil {
+		return false, "", err
 	}
-	if exists == 0 {
+	if !exists {
 		return false, "", nil
 	}
 
@@ -185,6 +181,23 @@ func selectTargetDatabase(ctx context.Context, db DBConn, databaseName string, s
 		return false, "", fmt.Errorf("selecting database %q: selector returned no quoted name", databaseName)
 	}
 	return true, quoted, nil
+}
+
+// DatabaseExists reports whether databaseName is visible to the connected
+// credential. It is one parameterized catalog read that always succeeds, so a
+// missing name never costs the session a failing statement (see
+// selectTargetDatabase). False means "not visible to this credential", not
+// proof of global absence: a server hides databases a credential has not been
+// granted.
+func DatabaseExists(ctx context.Context, db DBConn, databaseName string) (bool, error) {
+	var exists int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = ?",
+		databaseName,
+	).Scan(&exists); err != nil {
+		return false, fmt.Errorf("probing database %q existence: %w", databaseName, err)
+	}
+	return exists > 0, nil
 }
 
 // migrationLockFree reports whether the database-scoped migration lock is
