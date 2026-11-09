@@ -350,11 +350,14 @@ func pairServerIdentity(beadsDir string, srv *startedServer, host string, port i
 }
 
 // listenerOwnershipAt is who holds the TCP listener at host:port relative to
-// pid: classifyListener on linux and darwin, and on Windows netstat's
-// listeners on host's address (or a wildcard) and port.
+// pid: the listeners on host's address (or a wildcard that receives its
+// connections) and port, from /proc on linux, lsof on darwin and netstat on
+// Windows. Unlike classifyListener, which asks only whether pid holds some
+// listener on the port, every listener that receives the endpoint's
+// connections must be pid's.
 func listenerOwnershipAt(pid int, host string, port int) Ownership {
 	if runtime.GOOS != "windows" {
-		return classifyListener(pid, port)
+		return classifyListenerAt(pid, host, port)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), pairTimeout)
 	defer cancel()
@@ -372,7 +375,6 @@ func listenerOwnershipAt(pid int, host string, port int) Ownership {
 // none. Unlike findPIDOnPort it matches the address, not just a ":port"
 // suffix, and it does not stop at the first PID.
 func classifyNetstatListeners(out string, pid int, host string, port int) Ownership {
-	want := normalizedListenHost(host)
 	seen, foreign := false, false
 	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Fields(line)
@@ -383,8 +385,7 @@ func classifyNetstatListeners(out string, pid int, host string, port int) Owners
 		if err != nil || p != strconv.Itoa(port) {
 			continue
 		}
-		h = normalizedListenHost(h)
-		if h != want && !receivesFor(h, want) {
+		if !listenAddrReceives(h, host) {
 			continue
 		}
 		holder, err := strconv.Atoi(fields[4])
@@ -417,6 +418,14 @@ func normalizedListenHost(host string) string {
 		return ip.String()
 	}
 	return strings.ToLower(host)
+}
+
+// listenAddrReceives reports whether a TCP listener bound to listen receives
+// connections to host: it is bound to host's address, or to a wildcard that
+// covers it.
+func listenAddrReceives(listen, host string) bool {
+	l, want := normalizedListenHost(listen), normalizedListenHost(host)
+	return l == want || receivesFor(l, want)
 }
 
 // receivesFor reports whether a listener bound to the wildcard address

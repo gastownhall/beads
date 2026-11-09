@@ -1,3 +1,5 @@
+//go:build !windows
+
 package doltserver
 
 import (
@@ -220,6 +222,39 @@ func TestServerIdentityPairingRefusesExitedChild(t *testing.T) {
 	if _, err := os.Stat(ServerIdentityRecordPath(dataDir)); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("pairing wrote a record: %v", err)
 	}
+}
+
+// TestServerIdentityPairingRefusesChildExitedDuringQuery: a child that exits
+// while its UUID is being read is not paired, although it held the listener
+// before the query and the query answered: the UUID may have come from
+// whatever took the port over. The previous record is left as it was.
+func TestServerIdentityPairingRefusesChildExitedDuringQuery(t *testing.T) {
+	exited := make(chan struct{})
+	fake := &fakePairing{owner: always(OwnershipOwned), next: func() (string, error) {
+		close(exited)
+		return pairedUUIDB, nil
+	}}
+	fake.install(t)
+	writes := 0
+	origWrite := writeServerIdentityFile
+	writeServerIdentityFile = func(dataDir, uuid string) error { writes++; return origWrite(dataDir, uuid) }
+	t.Cleanup(func() { writeServerIdentityFile = origWrite })
+	dataDir := t.TempDir()
+	if err := writeServerIdentityRecord(dataDir, pairedUUIDA); err != nil {
+		t.Fatal(err)
+	}
+
+	err := pairServerIdentity(t.TempDir(), &startedServer{pid: 4242, exited: exited}, "127.0.0.1", 3307, dataDir)
+	if err == nil || !strings.Contains(err.Error(), "still holds the listener after reading its UUID: it exited") {
+		t.Fatalf("pairServerIdentity = %v, want a refusal because the child exited during the UUID query", err)
+	}
+	if fake.queries != 1 {
+		t.Errorf("pairing read the UUID %d times, want 1", fake.queries)
+	}
+	if writes != 0 {
+		t.Errorf("pairing attempted %d record writes, want none", writes)
+	}
+	assertRecord(t, ServerIdentityRecordPath(dataDir), pairedUUIDA)
 }
 
 // TestServerIdentityNetstatOwnership: on Windows the listener is matched to
