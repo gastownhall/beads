@@ -569,3 +569,76 @@ func TestBootstrapPreparerCreatesOnlyWhenNotVisible(t *testing.T) {
 		})
 	}
 }
+
+// TestBootstrapPreparerStickyRecreateKeepsOriginalCapability pins the
+// availability re-creation on retry: a database this preparer created that has
+// since vanished is re-created with IF NOT EXISTS, and the original capability
+// comes back unchanged — never authority over the replacement incarnation.
+func TestBootstrapPreparerStickyRecreateKeepsOriginalCapability(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("vanished database is re-created without recapture", func(t *testing.T) {
+		conn, mock := preparerConn(t)
+		expectDatabaseExistsProbe(mock, "beads", false)
+		mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE IF NOT EXISTS `beads`")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		prior := &schema.FreshBootstrapHealCapability{}
+		b := &bootstrapPreparer{provider: &doltSQLProvider{serverEndpoint: "tcp:127.0.0.1:3306"}, database: "beads", created: true, heal: prior}
+		heal, err := b.prepare(ctx, conn)
+		if err != nil {
+			t.Fatalf("prepare() error = %v, want nil", err)
+		}
+		if heal != prior || b.heal != prior || !b.created {
+			t.Fatalf("prepare() heal = %p, b.heal = %p, created = %t; want the prior capability %p", heal, b.heal, b.created, prior)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("ordered SQL expectations (no capture of the replacement): %v", err)
+		}
+	})
+
+	t.Run("a failed initial capture is never retried", func(t *testing.T) {
+		conn, mock := preparerConn(t)
+		expectDatabaseExistsProbe(mock, "beads", false)
+		mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE IF NOT EXISTS `beads`")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		b := &bootstrapPreparer{provider: &doltSQLProvider{serverEndpoint: "tcp:127.0.0.1:3306"}, database: "beads", created: true}
+		heal, err := b.prepare(ctx, conn)
+		if err != nil {
+			t.Fatalf("prepare() error = %v, want nil", err)
+		}
+		if heal != nil || b.heal != nil {
+			t.Fatalf("prepare() heal = %p, b.heal = %p; a retry must not capture authority", heal, b.heal)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	t.Run("sticky CREATE failure stays permanent", func(t *testing.T) {
+		conn, mock := preparerConn(t)
+		expectDatabaseExistsProbe(mock, "beads", false)
+		createErr := &mysql.MySQLError{Number: 1213, Message: "deadlock"}
+		mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE IF NOT EXISTS `beads`")).
+			WillReturnError(createErr)
+
+		prior := &schema.FreshBootstrapHealCapability{}
+		b := &bootstrapPreparer{provider: &doltSQLProvider{}, database: "beads", created: true, heal: prior}
+		_, err := b.prepare(ctx, conn)
+		var prepErr *bootstrapPreparationError
+		if !errors.As(err, &prepErr) || prepErr.retryable {
+			t.Fatalf("prepare() error = %T %v, want a permanent *bootstrapPreparationError", err, err)
+		}
+		if !errors.Is(err, createErr) || b.heal != prior {
+			t.Fatalf("prepare() error = %v, b.heal = %p; want the wrapped sticky CREATE failure and the prior capability kept", err, b.heal)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+}
