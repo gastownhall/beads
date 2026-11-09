@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -639,4 +640,122 @@ func TestCommandReadsOnlyIsFlagAware(t *testing.T) {
 			t.Errorf("shouldAutoPruneEventsJournal(nil) = true, want false")
 		}
 	})
+}
+// TestPersistentPostRunMaintenanceFollowsWriteFlags pins the post-run half of
+// bd-fwx149 (GH#8264): `bd ready --claim` and `bd duplicates --auto-merge`
+// write, so the maintenance net behind a successful one (auto-export,
+// auto-push) must run exactly as it does behind an unclassified writer, while
+// the plain listings and the merge's --dry-run preview stay reads and skip it
+// (GH#2191). It drives the real PersistentPostRunE with the real command
+// objects so the guard chain — not just the helpers it consults — is what
+// flips.
+func TestPersistentPostRunMaintenanceFollowsWriteFlags(t *testing.T) {
+	originalStore := store
+	originalReadonly := readonlyMode
+	originalProxied := proxiedServerMode
+	originalRootCtx := rootCtx
+	originalRootCancel := rootCancel
+	originalCommandSpan := commandSpan
+	originalProfileFile := profileFile
+	originalTraceFile := traceFile
+	storeMutex.Lock()
+	originalStoreActive := storeActive
+	storeMutex.Unlock()
+	originalDidWrite := commandDidWrite.Load()
+	originalDidExplicitCommit := commandDidExplicitDoltCommit
+	originalDidWriteTipMetadata := commandDidWriteTipMetadata
+	originalFreeze := commandFreeze
+	originalCommit := runPostRunAutoCommit
+	originalBackup := runPostRunAutoBackup
+	originalExport := runPostRunAutoExport
+	originalPush := runPostRunAutoPush
+	t.Cleanup(func() {
+		store = originalStore
+		readonlyMode = originalReadonly
+		proxiedServerMode = originalProxied
+		rootCtx = originalRootCtx
+		rootCancel = originalRootCancel
+		commandSpan = originalCommandSpan
+		profileFile = originalProfileFile
+		traceFile = originalTraceFile
+		storeMutex.Lock()
+		storeActive = originalStoreActive
+		storeMutex.Unlock()
+		commandDidWrite.Store(originalDidWrite)
+		commandDidExplicitDoltCommit = originalDidExplicitCommit
+		commandDidWriteTipMetadata = originalDidWriteTipMetadata
+		commandFreeze = originalFreeze
+		runPostRunAutoCommit = originalCommit
+		runPostRunAutoBackup = originalBackup
+		runPostRunAutoExport = originalExport
+		runPostRunAutoPush = originalPush
+	})
+
+	store = &strictReadonlyPostRunStore{}
+	proxiedServerMode = false
+	readonlyMode = false
+	rootCtx = context.Background()
+	rootCancel = nil
+	commandSpan = nil
+	profileFile = nil
+	traceFile = nil
+	commandFreeze = migration.Result{}
+	commandDidWrite.Store(false)
+	commandDidExplicitDoltCommit = false
+	commandDidWriteTipMetadata = false
+	runPostRunAutoCommit = func(context.Context, doltAutoCommitParams) error { return nil }
+	runPostRunAutoBackup = func(context.Context) {}
+
+	exportCalls, pushCalls := 0, 0
+	runPostRunAutoExport = func(context.Context, bool) error { exportCalls++; return nil }
+	runPostRunAutoPush = func(context.Context) { pushCalls++ }
+
+	setFlag := func(t *testing.T, cmd *cobra.Command, name, value string) {
+		t.Helper()
+		f := cmd.Flags().Lookup(name)
+		if f == nil {
+			t.Fatalf("%s has no --%s flag", cmd.Name(), name)
+		}
+		if err := cmd.Flags().Set(name, value); err != nil {
+			t.Fatalf("set --%s=%s on %s: %v", name, value, cmd.Name(), err)
+		}
+		t.Cleanup(func() {
+			_ = cmd.Flags().Set(name, f.DefValue)
+			f.Changed = false
+		})
+	}
+
+	for _, tc := range []struct {
+		name     string
+		cmd      *cobra.Command
+		flags    [][2]string
+		wantRuns bool
+	}{
+		{name: "plain ready stays a read", cmd: readyCmd, flags: [][2]string{{"claim", "false"}}, wantRuns: false},
+		{name: "ready --claim is a writer", cmd: readyCmd, flags: [][2]string{{"claim", "true"}}, wantRuns: true},
+		{name: "plain duplicates stays a read", cmd: duplicatesCmd, flags: [][2]string{{"auto-merge", "false"}}, wantRuns: false},
+		{name: "duplicates --auto-merge is a writer", cmd: duplicatesCmd, flags: [][2]string{{"auto-merge", "true"}}, wantRuns: true},
+		{name: "duplicates --auto-merge --dry-run previews, never writes", cmd: duplicatesCmd, flags: [][2]string{{"auto-merge", "true"}, {"dry-run", "true"}}, wantRuns: false},
+		{name: "update stays a writer", cmd: updateCmd, flags: [][2]string{{"claim", "true"}}, wantRuns: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, kv := range tc.flags {
+				setFlag(t, tc.cmd, kv[0], kv[1])
+			}
+			exportCalls, pushCalls = 0, 0
+			if err := rootCmd.PersistentPostRunE(tc.cmd, nil); err != nil {
+				t.Fatalf("PersistentPostRunE(%s): %v", tc.cmd.Name(), err)
+			}
+			want := 0
+			if tc.wantRuns {
+				want = 1
+			}
+			if exportCalls != want {
+				t.Errorf("auto-export dispatches = %d, want %d", exportCalls, want)
+			}
+			if pushCalls != want {
+				t.Errorf("auto-push dispatches = %d, want %d", pushCalls, want)
+			}
+		})
+	}
 }
