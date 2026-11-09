@@ -3,8 +3,10 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -94,6 +96,67 @@ func TestEmbeddedShowUnresolvableDeps(t *testing.T) {
 			}
 		})
 	}
+
+	// #5272 MIXED: local and unresolved targets on one issue. The local
+	// issue keeps the hydrated array and prints exactly the line it prints
+	// with no unresolved neighbours; the unresolved edges appear only in the
+	// new member and as id lines after the local ones.
+	t.Run("mixed_local_and_unresolved", func(t *testing.T) {
+		blocker := bdCreate(t, bd, dir, "Mixed local blocker", "--type", "task")
+		control := bdCreate(t, bd, dir, "Local-only control", "--type", "task")
+		bdDep(t, bd, dir, "add", control.ID, blocker.ID, "--type", "blocks")
+		mixed := bdCreate(t, bd, dir, "Mixed subject", "--type", "task")
+		bdDep(t, bd, dir, "add", mixed.ID, blocker.ID, "--type", "blocks")
+		bdDep(t, bd, dir, "add", mixed.ID, "liveop-mix", "--type", "blocks")
+		bdDep(t, bd, dir, "add", mixed.ID, "external:liveop:liveop-mix", "--type", "tracks")
+
+		details := bdShowDetails(t, bd, dir, mixed.ID)
+		deps, _ := details["dependencies"].([]interface{})
+		if len(deps) != 1 {
+			t.Fatalf("dependencies = %v, want only the local blocker", details["dependencies"])
+		}
+		if dep, _ := deps[0].(map[string]interface{}); dep["id"] != blocker.ID {
+			t.Errorf("dependencies[0].id = %v, want %s", dep["id"], blocker.ID)
+		}
+		if n, _ := details["dependency_count"].(float64); n != 3 {
+			t.Errorf("dependency_count = %v, want 3", details["dependency_count"])
+		}
+		if n, _ := details["unresolvable_dependencies"].(float64); n != 2 {
+			t.Errorf("unresolvable_dependencies = %v, want 2", details["unresolvable_dependencies"])
+		}
+		edges, _ := details["unresolvable_dependency_edges"].([]interface{})
+		var got []string
+		for _, e := range edges {
+			edge, _ := e.(map[string]interface{})
+			got = append(got, fmt.Sprintf("%v/%v", edge["depends_on_id"], edge["type"]))
+		}
+		if want := []string{"external:liveop:liveop-mix/tracks", "liveop-mix/blocks"}; !slices.Equal(got, want) {
+			t.Errorf("unresolvable_dependency_edges = %v, want %v", got, want)
+		}
+
+		controlOut, _ := runShowSplit(t, bd, dir, control.ID)
+		var localLine string
+		for _, line := range strings.Split(controlOut, "\n") {
+			if strings.Contains(line, blocker.ID) {
+				localLine = line
+			}
+		}
+		if localLine == "" {
+			t.Fatalf("control render has no line for %s:\n%s", blocker.ID, controlOut)
+		}
+		stdout, stderr := runShowSplit(t, bd, dir, mixed.ID)
+		for _, want := range []string{
+			"DEPENDS ON\n" + localLine + "\n  →   liveop-mix (cross-repo)\n",
+			"TRACKS\n  →   external:liveop:liveop-mix (external)\n",
+		} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("mixed render lacks %q:\n%s", want, stdout)
+			}
+		}
+		if strings.Contains(stderr, "no row in this database") {
+			t.Errorf("bd show warned about edges it printed:\nstderr:\n%s", stderr)
+		}
+	})
 
 	// NEGATIVE CONTROL, and it is the load-bearing half: a fully local edge
 	// must leave the field unset and stderr silent. Without it every
