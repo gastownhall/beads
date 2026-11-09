@@ -352,13 +352,26 @@ bd dolt pull
 bd version                    # after installing: confirm the new version
 ```
 
-The pull in step 3 brings the migrated schema down with the data, so the new
-binary finds nothing to migrate and the clone keeps its local state. Between
-that pull and the install, the old binary refuses the database (it is now
-newer than the schema the old binary knows), so install straight away. On the
-upgrade to 1.3.0 the clone's earlier `events` audit rows are the exception:
-they stop syncing with migration 0062, so after that pull they remain only in
-history.
+The pull in step 3 brings the migrated **shared** schema down with the data —
+the main migration series replicates, so the new binary has no *shared* schema
+left to migrate and the clone keeps its local state. The **clone-local**
+migration series (leases and the other per-clone tables) never replicates, so
+`bd dolt pull` cannot bring it: after installing the new binary, run
+`bd migrate schema` once on each consumer clone, for that clone's own database,
+and the lease schema catches up there. The upgraded binary's one-shot
+version-bump maintenance applies that series on the first command after the
+upgrade when nothing blocks it (strict `--readonly`, a maintenance freeze), so
+it may already be done — that is not guaranteed, so run `bd migrate schema`
+regardless and read what it applied; the command is per-database, safe to
+repeat, and never re-applies a completed migration. Do not read anything into
+`bd sql "SELECT 1"` succeeding — the workaround from before the typed
+clone-local refusal existed, it still answers on a clone-local-behind database
+because it never queries the leases projection; only an actual read proves the
+schema. Between that pull and the install, the old binary refuses the
+database (it is now newer than the schema the old binary knows), so install
+straight away. On the upgrade to 1.3.0 the clone's earlier `events` audit rows
+are the exception: they stop syncing with migration 0062, so after that pull
+they remain only in history.
 
 Run `bd dolt commit` in step 1 even on a clone where you wrote nothing, so
 that the step 3 pull is a fast-forward: on 1.2.2 a pull that merges can leave
