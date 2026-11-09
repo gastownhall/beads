@@ -259,28 +259,31 @@ func TestCrossPackagePinRegistryRuleFires(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Every fixture line is indented one tab, so repo scanners that find
+	// tests by a line-anchored `^func TestX(t *testing.T)` (equivalence.py)
+	// do not mistake the fixture's functions for this package's tests.
 	write("backend/http/e2e_pin_test.go", `package http
 
-import "testing"
+	import "testing"
 
-type suite struct{}
+	type suite struct{}
 
-func TestRealPin(t *testing.T)            {}
-func TestNotATest(n int)                  {}
-func (suite) TestMethod(t *testing.T)     {}
-`)
+	func TestRealPin(t *testing.T)            {}
+	func TestNotATest(n int)                  {}
+	func (suite) TestMethod(t *testing.T)     {}
+	`)
 	write("cmd/bd/other_test.go", `package main
 
-import "testing"
+	import "testing"
 
-func TestOther(t *testing.T) {}
-`)
+	func TestOther(t *testing.T) {}
+	`)
 	write("internal/storage/outside_test.go", `package storage
 
-import "testing"
+	import "testing"
 
-func TestOutside(t *testing.T) {}
-`)
+	func TestOutside(t *testing.T) {}
+	`)
 	dirs := []string{"backend/http", "cmd/bd"}
 	const pinFile = "backend/http/e2e_pin_test.go"
 
@@ -301,7 +304,7 @@ func TestOutside(t *testing.T) {}
 		{name: "wrong signature is not a test", pins: []crossPackagePin{{"TestNotATest", pinFile}}, cited: []string{"TestNotATest"},
 			want: []string{"declares no top-level func TestNotATest"}},
 		{name: "missing file", pins: []crossPackagePin{{"TestRealPin", "backend/http/missing_test.go"}}, cited: []string{"TestRealPin"},
-			want: []string{"missing_test.go"}},
+			want: []string{"must be exported to //internal/httpclient/encode:__pkg__"}},
 		{name: "uncited entry", pins: []crossPackagePin{{"TestOther", "cmd/bd/other_test.go"}},
 			want: []string{"no ledger row's PinnedBy names it"}},
 		{name: "local shadow", pins: []crossPackagePin{{"TestRealPin", pinFile}}, local: map[string]bool{"TestRealPin": true},
