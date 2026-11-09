@@ -9,11 +9,13 @@ import (
 	"reflect"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/rowid"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // sharedRowTime is when both clones wrote their identical comment and edge.
@@ -21,16 +23,18 @@ const sharedRowTime = "2026-01-02 03:04:05"
 
 // TestEmbeddedPullRenumberChildrenCarriesGraph is bd-28sb25 AC-4. Both clones
 // add P.71 and P.72 (the report shape, plus a colliding descendant P.72.1)
-// and give each the same derived-id rows: an identical comment, and the same
-// outbound edge P.71 -> X. Locally P.71 also has an inbound edge and a
-// child counter of 1 with no live child; P.72 has the counter 1 its child
-// P.72.1 set.
+// and give each the same derived-id rows: an identical comment, the same
+// provenance event, and the same outbound edge P.71 -> X. Locally P.71 also
+// has an inbound edge and a child counter of 1 with no live child; P.72 has
+// the counter 1 its child P.72.1 set, and a provenance event of its own,
+// keyed by when it occurred.
 //
 // After the repair the local graph follows the local identities (P.74,
 // P.75, P.75.1) and the remote's keeps the remote ones; every derived key
 // matches its row, so the result merges and pushes without conflicts or
-// duplicates; and each renamed node's counter moved with it, so the next
-// child of P.74 is P.74.2.
+// duplicates; each renamed node's counter moved with it, so the next child of
+// P.74 is P.74.2; and the event only the local P.72 had can be recorded for
+// the remote's P.72, whose id the moved row no longer holds.
 func TestEmbeddedPullRenumberChildrenCarriesGraph(t *testing.T) {
 	te := newTestEnv(t, "rn")
 	ctx := t.Context()
@@ -66,6 +70,8 @@ func TestEmbeddedPullRenumberChildrenCarriesGraph(t *testing.T) {
 			addDep(p+".72.1", p+".72", "parent-child")
 			addDep(p+".71", "rn-x", "related")
 			addComment(p + ".71")
+			exec("INSERT INTO provenance_events (id, issue_id, kind, ref, ref_kind, source, created_at) "+
+				"VALUES (?, ?, 'claim', 'work-1', 'work-id', 'orch', ?)", provenanceRowID(claimByRef(p+".71")), p+".71", sharedRowTime)
 			exec("INSERT INTO child_counters (parent_id, last_child) VALUES (?, 1)", p+".72")
 		}
 
@@ -93,6 +99,8 @@ func TestEmbeddedPullRenumberChildrenCarriesGraph(t *testing.T) {
 			commentRowID(p+".71", 1), p+".71", sharedRowTime)
 		insertIssue(p+".73", "local 73")
 		addDep("rn-x", p+".71", "blocks")
+		exec("INSERT INTO provenance_events (id, issue_id, kind, source, occurred_at, created_at) "+
+			"VALUES (?, ?, 'claim', 'orch', ?, ?)", provenanceRowID(claimAt(p+".72")), p+".72", sharedRowTime, sharedRowTime)
 		exec("INSERT INTO child_counters (parent_id, last_child) VALUES (?, 1)", p+".71")
 		exec("UPDATE child_counters SET last_child = 73 WHERE parent_id = ?", p)
 		exec("CALL DOLT_COMMIT('-Am', 'local clone')")
@@ -157,6 +165,31 @@ func TestEmbeddedPullRenumberChildrenCarriesGraph(t *testing.T) {
 			t.Errorf("comment ids = %v, want %v", commentIDs, wantComments)
 		}
 
+		// The remote's event stays on P.71; the local copy of it and the event
+		// only the local P.72 had moved to P.74 and P.75, each keyed by the id
+		// it derives for its new issue.
+		rows, err = conn.QueryContext(ctx, "SELECT id, issue_id FROM provenance_events")
+		if err != nil {
+			t.Fatalf("read provenance events: %v", err)
+		}
+		provenanceIDs := map[string]string{}
+		for rows.Next() {
+			var id, issueID string
+			if err := rows.Scan(&id, &issueID); err != nil {
+				t.Fatalf("scan provenance event: %v", err)
+			}
+			provenanceIDs[id] = issueID
+		}
+		_ = rows.Close()
+		wantProvenance := map[string]string{
+			provenanceRowID(claimByRef(p + ".71")): p + ".71",
+			provenanceRowID(claimByRef(p + ".74")): p + ".74",
+			provenanceRowID(claimAt(p + ".75")):    p + ".75",
+		}
+		if !reflect.DeepEqual(provenanceIDs, wantProvenance) {
+			t.Errorf("provenance events (id -> issue) = %v, want %v", provenanceIDs, wantProvenance)
+		}
+
 		wantCounters := map[string]int{p: 75, p + ".72": 1, p + ".74": 1, p + ".75": 1}
 		for parent, want := range wantCounters {
 			if n, ok := counterValue(t, ctx, conn, parent); !ok || n != want {
@@ -186,6 +219,35 @@ func TestEmbeddedPullRenumberChildrenCarriesGraph(t *testing.T) {
 	if err := te.store.Pull(ctx); err != nil {
 		t.Fatalf("pull after repair: %v", err)
 	}
+
+	// The remote's P.72 never had the local P.72's event, and recording it
+	// there is a new row: the moved row no longer holds its id.
+	id, inserted, err := te.store.RecordProvenanceEvent(ctx, claimAt(p+".72"))
+	if err != nil {
+		t.Fatalf("record provenance event on %s: %v", p+".72", err)
+	}
+	if !inserted || id != provenanceRowID(claimAt(p+".72")) {
+		t.Errorf("recording the event on %s = (%s, inserted %v), want a new row %s", p+".72", id, inserted, provenanceRowID(claimAt(p+".72")))
+	}
+}
+
+// claimByRef is the fixture's provenance event on issueID keyed by its ref,
+// which both clones record on P.71.
+func claimByRef(issueID string) types.ProvenanceEvent {
+	ref, refKind := "work-1", "work-id"
+	return types.ProvenanceEvent{IssueID: issueID, Kind: types.ProvClaim, Ref: &ref, RefKind: &refKind, Source: "orch"}
+}
+
+// claimAt is the fixture's ref-less provenance event on issueID, keyed by when
+// it occurred, which only the local clone records on P.72.
+func claimAt(issueID string) types.ProvenanceEvent {
+	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) // sharedRowTime
+	return types.ProvenanceEvent{IssueID: issueID, Kind: types.ProvClaim, Source: "orch", OccurredAt: &at}
+}
+
+// provenanceRowID is the id the store derives for ev.
+func provenanceRowID(ev types.ProvenanceEvent) string {
+	return issueops.ProvenanceEventID(ev)
 }
 
 // renumberedEdges lists the dependency edges touching the fixture as

@@ -9,7 +9,9 @@ import (
 	"testing"
 	"time"
 
+	mysql "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
@@ -472,7 +474,7 @@ func TestPullRenumberChildrenCarriesCounters(t *testing.T) {
 // relocated. The stray row needs a schema without the counter's foreign key,
 // so the fixture drops it; with no cascade, it is the transaction's rollback
 // that puts P.71's counter back: HEAD, ids and every counter row are as they
-// were.
+// were, and the journal, on for the repair, keeps none of P.71's rename.
 func TestPullRenumberChildrenRefusesDestinationCounter(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	t.Cleanup(cleanup)
@@ -485,6 +487,8 @@ func TestPullRenumberChildrenRefusesDestinationCounter(t *testing.T) {
 		exec("INSERT INTO child_counters (parent_id, last_child) VALUES (?, 1)", p+".71")
 		exec("INSERT INTO child_counters (parent_id, last_child) VALUES (?, 9)", p+".75")
 	})
+	enableJournalForTest(t, store)
+	clearJournal(t, store)
 	var before string
 	if err := store.db.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&before); err != nil {
 		t.Fatalf("read HEAD: %v", err)
@@ -493,6 +497,9 @@ func TestPullRenumberChildrenRefusesDestinationCounter(t *testing.T) {
 	_, err := store.PullRenumberChildren(ctx, "", "tester")
 	if err == nil || !strings.Contains(err.Error(), "destination "+p+".75 already has a child counter row") {
 		t.Fatalf("PullRenumberChildren err = %v, want the destination-counter refusal", err)
+	}
+	if rows := readJournalRows(t, store); len(rows) != 0 {
+		t.Errorf("journal rows after a refused repair = %+v, want none", rows)
 	}
 	var after string
 	if err := store.db.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&after); err != nil {
@@ -527,6 +534,92 @@ func TestPullRenumberChildrenRefusesDestinationCounter(t *testing.T) {
 	}
 	if dirty != 0 {
 		t.Errorf("%d tables left dirty by a refused repair", dirty)
+	}
+}
+
+// TestPullRenumberChildrenJournalsRenames is bd-28sb25 on the server store
+// with the events journal on: each rename journals as `bd rename` does
+// (TestEventsJournal_SeamEntryPoints), its edges removed and re-added around
+// the old node's delete and the new node's create. The rename transaction is
+// the repair's own, so it journals only because the store scopes it.
+func TestPullRenumberChildrenJournalsRenames(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	t.Cleanup(cleanup)
+	ctx, cancel := testContext(t)
+	t.Cleanup(cancel)
+
+	const p = "rnj-p"
+	seedServerChildCollision(t, ctx, store, p, func(exec func(q string, args ...any)) {
+		exec("INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) " +
+			"VALUES ('rnj-x', 'outside', '', '', '', '', 'open', 2, 'task')")
+		exec("INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by, metadata, thread_id) "+
+			"VALUES (?, ?, 'rnj-x', 'related', '2026-01-02 03:04:05', 'tester', '{}', '')", depid.New(p+".71", "rnj-x"), p+".71")
+	})
+	enableJournalForTest(t, store)
+	clearJournal(t, store)
+
+	if _, err := store.PullRenumberChildren(ctx, "", "tester"); err != nil {
+		t.Fatalf("PullRenumberChildren: %v", err)
+	}
+	want := []string{
+		"dep_remove:" + p + ".71->rnj-x:related", "delete:" + p + ".71", "create:" + p + ".74", "dep_add:" + p + ".74->rnj-x:related",
+		"delete:" + p + ".72", "create:" + p + ".75",
+	}
+	if got := journalDepDeltas(t, store); !reflect.DeepEqual(got, want) {
+		t.Errorf("journal = %v, want %v", got, want)
+	}
+}
+
+// TestPullRenumberChildrenFetchesOverLongTimeoutConn pins the server store's
+// renumbering fetch to a dedicated long-timeout connection, the route the
+// plain pull's SQL transport and refreshTrackingRef take, never a pooled
+// session with its 10s read timeout. store.connStr, which only that
+// dedicated connection reads, is pointed at an address that cannot resolve
+// while the pool stays healthy: a fetch over the pool would succeed and
+// repair, the dedicated route fails before anything is renamed.
+func TestPullRenumberChildrenFetchesOverLongTimeoutConn(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	t.Cleanup(cleanup)
+	ctx, cancel := testContext(t)
+	t.Cleanup(cancel)
+
+	const p = "rnt-p"
+	seedServerChildCollision(t, ctx, store, p, nil)
+	var before string
+	if err := store.db.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&before); err != nil {
+		t.Fatalf("read HEAD: %v", err)
+	}
+	// An RFC 2606 .invalid name fails DNS fast and for good (see
+	// TestHistory_UsesDedicatedLongTimeoutConnection).
+	const unreachable = "bd-28sb25-fetch-route.invalid"
+	cfg, err := mysql.ParseDSN(store.connStr)
+	if err != nil {
+		t.Fatalf("parse store.connStr: %v", err)
+	}
+	connStr := store.connStr
+	cfg.Addr = unreachable + ":3306"
+	store.connStr = cfg.FormatDSN()
+
+	_, err = store.PullRenumberChildren(ctx, "", "tester")
+	store.connStr = connStr
+	// The is_blocked recompute after a merge dials the same address, so the
+	// error must be the fetch's own.
+	if err == nil || !strings.Contains(err.Error(), "fetch from "+store.remote) || !strings.Contains(err.Error(), unreachable) {
+		t.Fatalf("PullRenumberChildren = %v, want the fetch to fail dialing %s: it must not run on the pool", err, unreachable)
+	}
+	var after string
+	if err := store.db.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&after); err != nil {
+		t.Fatalf("read HEAD: %v", err)
+	}
+	if after != before {
+		t.Errorf("HEAD moved from %s to %s on a failed fetch", before, after)
+	}
+	var renamed int
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE id IN (?, ?)", p+".74", p+".75").Scan(&renamed); err != nil {
+		t.Fatalf("count renamed children: %v", err)
+	}
+	if renamed != 0 {
+		t.Errorf("%d children renamed although the fetch failed", renamed)
 	}
 }
 
@@ -608,7 +701,7 @@ func TestApplyChildRenumbersRefusesConcurrentWrites(t *testing.T) {
 				t.Fatalf("read HEAD: %v", err)
 			}
 
-			err = versioncontrolops.ApplyChildRenumbers(ctx, conn, report, "tester")
+			err = versioncontrolops.ApplyChildRenumbers(ctx, conn, report, "tester", store.scopeEventsJournalTransaction)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("ApplyChildRenumbers = %v, want an error naming %q", err, tc.wantErr)
 			}

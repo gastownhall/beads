@@ -77,6 +77,36 @@ func TestEmbeddedPullRenumberChildren(t *testing.T) {
 	})
 }
 
+// TestEmbeddedPullRenumberChildrenJournalsRenames is bd-28sb25 on the
+// embedded store with the events journal on: each rename journals as `bd
+// rename` does, the old node's delete and the new node's create. The rename
+// transaction runs on the store's pinned connection, outside withConn, so it
+// journals only because the store passes its scoping in.
+func TestEmbeddedPullRenumberChildrenJournalsRenames(t *testing.T) {
+	te := newTestEnv(t, "rn")
+	ctx := t.Context()
+	p := childCollisionParent
+	withRawConn(t, te.dataDir, te.database, func(conn *sql.Conn) {
+		seedChildCollision(t, ctx, conn)
+	})
+	te.store.SetEventsJournalEnabled(true)
+
+	if _, err := te.store.PullRenumberChildren(ctx, "", "tester"); err != nil {
+		t.Fatalf("PullRenumberChildren: %v", err)
+	}
+	var got []string
+	for _, r := range readJournalOpActors(t, te) {
+		got = append(got, r.op+":"+r.id+":"+r.actor)
+	}
+	want := []string{
+		"delete:" + p + ".71:tester", "create:" + p + ".74:tester",
+		"delete:" + p + ".72:tester", "create:" + p + ".75:tester",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("journal = %v, want %v", got, want)
+	}
+}
+
 // TestEmbeddedPullRenumberChildrenRefusesDirtyWorkingSet pins the C2 clean
 // state requirement for bd-28sb25 AC-3: unlike a plain pull,
 // `--renumber-children` never commits pending changes into history. Over the

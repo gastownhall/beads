@@ -415,12 +415,14 @@ go_test(
         "workspace_config_contract_test.go",
     ],
     # Source-scan guards (journal/version scope completeness, helper sentinel
-    # census) parse this package and ../issueops at test time; the PR4107 and
-    # migration replay tests (server-backed) read ../schema/migrations.
+    # census) parse this package, ../issueops and ../versioncontrolops at test
+    # time; the PR4107 and migration replay tests (server-backed) read
+    # ../schema/migrations.
     data = [
         ":go_srcs",
         "//internal/storage/issueops:go_srcs",
         "//internal/storage/schema:migrations",
+        "//internal/storage/versioncontrolops:go_srcs",
     ],
     embed = [":dolt"],
     deps = [

@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -20,8 +21,10 @@ import (
 // made on one session; then a second session changes the database in the
 // window before the apply, or the rename set fails part way inside the
 // transaction. Each case leaves none of the renames, counter moves, rename
-// events or a rename commit behind, HEAD where the other writer left it, and
-// the other writer's data as it wrote it.
+// events, journal rows or a rename commit behind, HEAD where the other writer
+// left it, and the other writer's data as it wrote it. The journal is on for
+// the apply, so a rename that ran before the failure journaled inside the
+// transaction the abort rolls back.
 func TestEmbeddedApplyChildRenumbersAbortsWhole(t *testing.T) {
 	p := childCollisionParent
 	cases := []struct {
@@ -144,7 +147,8 @@ func TestEmbeddedApplyChildRenumbersAbortsWhole(t *testing.T) {
 			}
 			before := headHash(t, ctx, conn)
 
-			err = versioncontrolops.ApplyChildRenumbers(ctx, conn, report, "tester")
+			journalOn := func(tx *sql.Tx) func() { return issueops.ScopeEventsJournalTransaction(tx, true) }
+			err = versioncontrolops.ApplyChildRenumbers(ctx, conn, report, "tester", journalOn)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("ApplyChildRenumbers = %v, want an error naming %q", err, tc.wantErr)
 			}
@@ -176,6 +180,13 @@ func TestEmbeddedApplyChildRenumbersAbortsWhole(t *testing.T) {
 			}
 			if renamed != 0 {
 				t.Errorf("%d rename events persisted", renamed)
+			}
+			var journaled int
+			if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM bd_events_journal").Scan(&journaled); err != nil {
+				t.Fatalf("read journal: %v", err)
+			}
+			if journaled != 0 {
+				t.Errorf("%d journal rows persisted", journaled)
 			}
 			var renameCommits int
 			if err := conn.QueryRowContext(ctx,

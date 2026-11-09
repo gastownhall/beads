@@ -5377,7 +5377,8 @@ func (s *DoltStore) PushRemote(ctx context.Context, remote string, force bool) e
 
 // logRouteDecision records which transport a push/pull operation used --
 // CLI subprocess or in-process SQL -- so the route taken is discoverable
-// without reading source (be-9i0yq.2 item 2). op is "push" or "pull".
+// without reading source (be-9i0yq.2 item 2). op is "push", "pull" or
+// "fetch" (the renumbering pull's, fetchRemote).
 //
 // Scope: main-remote transports only. The federation peer plane in
 // federation.go (pushRefToPeer, pullFromPeer, Fetch) makes the same

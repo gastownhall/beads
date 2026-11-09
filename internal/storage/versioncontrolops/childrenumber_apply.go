@@ -28,11 +28,19 @@ const childRenumberLinePrefix = "renumber: "
 // the commit by it and reports the renames as already made (AC-6).
 const childRenumberMarker = "bd-renumber: remote_head="
 
+// TxScope binds a store's per-transaction state to a transaction begun on a
+// session the store handed over, and returns the function that releases it.
+// The stores pass their events-journal scoping: the renames journal through
+// UpdateIssueIDInTx, which records nothing in a transaction the store never
+// scoped.
+type TxScope func(tx *sql.Tx) (release func())
+
 // RenumberChildrenAndMerge renames the local colliding children PlanChildRenumbers
 // finds between branch and ref (which the caller has just fetched), commits
 // the renames as one Dolt commit, and merges the pinned remote head through
 // MergeAndSettle. conn must be a single session: the rename transaction, the
-// commit and the merge's session flags all run on it.
+// commit and the merge's session flags all run on it. scopeTx is the store's
+// scoping for the rename transaction (see ApplyChildRenumbers).
 //
 // It refuses to start mid-merge or over uncommitted changes, so the rename
 // commit holds the renames and nothing else. When the merge fails after the
@@ -41,7 +49,7 @@ const childRenumberMarker = "bd-renumber: remote_head="
 // A retry against the same remote revision finds nothing left to rename; it
 // reports the kept commit and its renames (Retained) and merges again,
 // without renaming twice or adding an empty commit.
-func RenumberChildrenAndMerge(ctx context.Context, conn *sql.Conn, branch, ref, actor string) (*storage.ChildRenumberReport, error) {
+func RenumberChildrenAndMerge(ctx context.Context, conn *sql.Conn, branch, ref, actor string, scopeTx TxScope) (*storage.ChildRenumberReport, error) {
 	merging, err := mergeInProgress(ctx, conn)
 	if err != nil {
 		return nil, err
@@ -62,7 +70,7 @@ func RenumberChildrenAndMerge(ctx context.Context, conn *sql.Conn, branch, ref, 
 		return nil, err
 	}
 	if len(report.Renames) > 0 {
-		if err := ApplyChildRenumbers(ctx, conn, report, actor); err != nil {
+		if err := ApplyChildRenumbers(ctx, conn, report, actor, scopeTx); err != nil {
 			return report, err
 		}
 	} else if err := retainedChildRenumbers(ctx, conn, report); err != nil {
@@ -168,7 +176,11 @@ func parseChildRenumberMessage(message string) []storage.ChildRenumber {
 // "pull again to re-plan" instead of renaming over newer data, and because
 // the working set was clean when the transaction began, the commit stages
 // only what the renames changed.
-func ApplyChildRenumbers(ctx context.Context, conn *sql.Conn, report *storage.ChildRenumberReport, actor string) (retErr error) {
+//
+// scopeTx is called on the transaction before anything runs in it: it binds
+// the store's events-journal activation and shape, so the renames journal as
+// any other rename on that store does. It must not be nil.
+func ApplyChildRenumbers(ctx context.Context, conn *sql.Conn, report *storage.ChildRenumberReport, actor string, scopeTx TxScope) (retErr error) {
 	renames := report.Renames
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
@@ -179,6 +191,7 @@ func ApplyChildRenumbers(ctx context.Context, conn *sql.Conn, report *storage.Ch
 			_ = tx.Rollback()
 		}
 	}()
+	defer scopeTx(tx)()
 	var head string
 	if err := tx.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&head); err != nil {
 		return fmt.Errorf("renumber children: read head: %w", err)
@@ -252,11 +265,8 @@ func ApplyChildRenumbers(ctx context.Context, conn *sql.Conn, report *storage.Ch
 				return err
 			}
 		}
-		// The comments, events and snapshots followed the issue by cascade but
-		// keep ids derived from the old one, which the remote's rows of that
-		// identity hold too.
-		if err := schema.RekeyAuxRowsForIssue(ctx, tx, r.To); err != nil {
-			return fmt.Errorf("renumber children: %w", err)
+		if err := rekeyRenamedRowsInTx(ctx, tx, r); err != nil {
+			return err
 		}
 		// A descendant keeps its suffix under its renamed parent, whose own
 		// counter (relocated above, or absent) already covers it; a counter is
@@ -291,6 +301,22 @@ func ApplyChildRenumbers(ctx context.Context, conn *sql.Conn, report *storage.Ch
 	report.RenameCommit = commit
 	report.RenameParent = head
 	report.Mentions = mentions
+	return nil
+}
+
+// rekeyRenamedRowsInTx re-derives the ids of the rows a rename moved to r.To.
+// The comments, events, snapshots and provenance events followed the issue by
+// cascade but keep ids derived from the old one, which the remote's rows of
+// that identity hold too. The aux tables derive from a content digest
+// (schema.RekeyAuxRowsForIssue); provenance events have a derivation of their
+// own (issueops.RekeyProvenanceEventsInTx).
+func rekeyRenamedRowsInTx(ctx context.Context, tx *sql.Tx, r storage.ChildRenumber) error {
+	if err := schema.RekeyAuxRowsForIssue(ctx, tx, r.To); err != nil {
+		return fmt.Errorf("renumber children: %w", err)
+	}
+	if err := issueops.RekeyProvenanceEventsInTx(ctx, tx, r.From, r.To); err != nil {
+		return fmt.Errorf("renumber children: re-key provenance events of %s: %w", r.To, err)
+	}
 	return nil
 }
 
