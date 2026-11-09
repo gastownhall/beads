@@ -542,4 +542,82 @@ func TestSharedServerWriteFlagsOnReadCommandsAreRefused(t *testing.T) {
 			t.Errorf("bd ready --claim on the migrated schema did not claim:\n%s", stdout)
 		}
 	})
+
+	t.Run("duplicates_auto_merge", func(t *testing.T) {
+		const prefix = "wfm"
+		run, cursor, behind := behindSharedServerFixture(t, prefix, func(store *dolt.DoltStore) {
+			now := time.Now()
+			for _, id := range []string{prefix + "-1", prefix + "-2"} {
+				if err := store.CreateIssue(context.Background(), &types.Issue{
+					ID:        id,
+					Title:     "Same title through the window",
+					Status:    types.StatusOpen,
+					Priority:  1,
+					IssueType: types.TypeTask,
+					CreatedAt: now,
+					UpdatedAt: now,
+				}, "test-user"); err != nil {
+					t.Fatalf("seed %s: %v", id, err)
+				}
+			}
+		})
+
+		// The plain listing and the merge preview keep reading through the
+		// window.
+		stdout, stderr, code := run("duplicates")
+		if code != 0 {
+			t.Fatalf("bd duplicates exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		if !strings.Contains(stdout, prefix+"-1") || !strings.Contains(stdout, prefix+"-2") {
+			t.Errorf("bd duplicates did not report the group on the old schema:\n%s", stdout)
+		}
+		stdout, stderr, code = run("duplicates", "--auto-merge", "--dry-run", "--json")
+		if code != 0 {
+			t.Fatalf("bd duplicates --auto-merge --dry-run exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		if !strings.Contains(stdout, "merge_commands") {
+			t.Errorf("the dry-run preview did not report the group:\n%s", stdout)
+		}
+		if strings.Contains(stdout, "merge_results") {
+			t.Errorf("the dry-run preview performed merges:\n%s", stdout)
+		}
+
+		// The affected write: same refusal as other writers, nothing merged,
+		// cursor intact.
+		stdout, stderr, code = run("duplicates", "--auto-merge")
+		if code == 0 {
+			t.Fatalf("bd duplicates --auto-merge succeeded on a behind shared database\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if !strings.Contains(stderr, "co-resident") {
+			t.Errorf("bd duplicates --auto-merge refusal missing the shared-store guidance:\n%s", stderr)
+		}
+		if got := cursor(); got != behind {
+			t.Fatalf("the refused merge promoted the schema cursor from %d to %d", behind, got)
+		}
+		for _, id := range []string{prefix + "-1", prefix + "-2"} {
+			out, _, showCode := run("show", id, "--json")
+			if showCode != 0 {
+				t.Fatalf("bd show %s exit = %d\n%s", id, showCode, out)
+			}
+			if !strings.Contains(out, `"status": "open"`) {
+				t.Errorf("%s was mutated by a refused duplicates --auto-merge:\n%s", id, out)
+			}
+		}
+
+		// Consent completes the upgrade and the merge works again.
+		stdout, stderr, code = run("migrate", "schema")
+		if code != 0 {
+			t.Fatalf("bd migrate schema exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		if got := cursor(); got != schema.LatestVersion() {
+			t.Fatalf("cursor = %d after bd migrate schema, want %d", got, schema.LatestVersion())
+		}
+		stdout, stderr, code = run("duplicates", "--auto-merge")
+		if code != 0 {
+			t.Fatalf("bd duplicates --auto-merge on the migrated schema exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		if !strings.Contains(stdout, "Merged") {
+			t.Errorf("bd duplicates --auto-merge on the migrated schema did not merge:\n%s", stdout)
+		}
+	})
 }

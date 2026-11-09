@@ -146,6 +146,14 @@ bd migrate schema
 bd migrate --yes
 ```
 
+While a schema migration is pending on a shared database, every write is
+refused until `bd migrate schema` has run — including the write-flag forms
+of otherwise read-only commands: `bd ready --claim` and `bd duplicates
+--auto-merge` are admitted as writes and get the same refusal as
+`bd update --claim`. The plain listings (`bd ready`, `bd duplicates`) and the
+`bd duplicates --auto-merge --dry-run` preview keep working against the
+current schema through the window.
+
 ### Upgrading to 1.3.0
 
 A 1.2.2 or 1.1.x database sits at schema v53, and 1.3.0 knows v66. That is more
