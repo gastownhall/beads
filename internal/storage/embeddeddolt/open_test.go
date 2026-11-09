@@ -264,17 +264,24 @@ func TestOpenSQLWaitBudget(t *testing.T) {
 		// Well past the budget, the handle still serves queries on more
 		// than one connection: the budget bounds the open's retries only.
 		time.Sleep(100 * time.Millisecond)
-		conn, err := db.Conn(context.Background())
+		conn, err := db.Conn(ctx)
 		if err != nil {
 			t.Fatalf("first connection after the budget: %v", err)
 		}
 		defer func() { _ = conn.Close() }()
 		var n int
-		if err := conn.QueryRowContext(context.Background(), "SELECT 1").Scan(&n); err != nil {
+		if err := conn.QueryRowContext(ctx, "SELECT 1").Scan(&n); err != nil {
 			t.Fatalf("query on the first connection: %v", err)
 		}
-		if err := db.QueryRowContext(context.Background(), "SELECT 1").Scan(&n); err != nil {
+		if n != 1 {
+			t.Fatalf("SELECT 1 on the first connection = %d, want 1", n)
+		}
+		n = 0
+		if err := db.QueryRowContext(ctx, "SELECT 1").Scan(&n); err != nil {
 			t.Fatalf("query on a second connection: %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("SELECT 1 on a second connection = %d, want 1", n)
 		}
 		if err := ctx.Err(); err != nil {
 			t.Fatalf("caller's context ended after the open: %v", err)
@@ -369,6 +376,30 @@ func TestOpenSQLWaitBudget(t *testing.T) {
 		if errors.Is(err, ErrOpenTimeout) {
 			t.Errorf("OpenSQL on a missing directory returned ErrOpenTimeout: %v", err)
 		}
+	})
+
+	t.Run("non_retryable_open_error", func(t *testing.T) {
+		t.Setenv("BEADS_EMBEDDED_OPEN_TIMEOUT", "1s")
+
+		// A directory that is a regular file fails the open for good:
+		// the driver does not retry it, so no budget can be diagnosed.
+		file := filepath.Join(t.TempDir(), "not-a-directory")
+		if err := os.WriteFile(file, nil, 0o644); err != nil {
+			t.Fatalf("write blocker file: %v", err)
+		}
+		start := time.Now()
+		_, cleanup, err := OpenSQL(context.Background(), file, "testdb", "")
+		if err == nil {
+			_ = cleanup()
+			t.Fatalf("open on a file-as-directory unexpectedly succeeded")
+		}
+		if errors.Is(err, ErrOpenTimeout) {
+			t.Fatalf("a non-retryable open failure must not be diagnosed as ErrOpenTimeout: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed > 10*time.Second {
+			t.Fatalf("non-retryable open failure retried for %s; want an immediate error", elapsed)
+		}
+		t.Logf("open on a file-as-directory failed after %s: %v", time.Since(start), err)
 	})
 }
 
