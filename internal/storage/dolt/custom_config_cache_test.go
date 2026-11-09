@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"slices"
 	"testing"
+	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/steveyegge/beads/internal/config"
@@ -370,4 +371,28 @@ func TestCustomConfigGettersCacheSuccessfulResolve(t *testing.T) {
 			t.Fatalf("unmet SQL expectations: %v", err)
 		}
 	})
+}
+
+// A transient query error inside the combined read now reaches withReadTx,
+// whose existing retry runs the read again, instead of the resolver taking it
+// for a missing table and caching an empty vocabulary.
+func TestCustomConfigReadRetriesTransientQueryError(t *testing.T) {
+	withCustomConfigYAML(t, "")
+	store, mock := newCustomConfigMockStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT name, category FROM custom_statuses ORDER BY name")).
+		WillReturnError(errors.New("invalid connection"))
+	mock.ExpectRollback()
+	expectCustomConfigRead(mock, [][2]string{{"review", "active"}}, []string{"spike"})
+
+	got, err := store.GetCustomStatuses(ctx)
+	if err != nil || !slices.Equal(got, []string{"review"}) {
+		t.Fatalf("GetCustomStatuses = %v, %v; want [review] after the retried read", got, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
 }

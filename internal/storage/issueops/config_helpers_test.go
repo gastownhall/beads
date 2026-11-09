@@ -3,10 +3,13 @@ package issueops
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"regexp"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -388,3 +391,136 @@ func TestCustomTypesYAMLFallback(t *testing.T) {
 type errSentinel string
 
 func (e errSentinel) Error() string { return string(e) }
+
+// withYAMLCustomConfig points the process config at a throwaway
+// .beads/config.yaml holding yaml, with HOME and XDG_CONFIG_HOME isolated.
+func withYAMLCustomConfig(t *testing.T, yaml string) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(dir, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
+	t.Setenv("BEADS_DIR", "")
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+	t.Chdir(dir)
+	config.ResetForTesting()
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	t.Cleanup(config.ResetForTesting)
+}
+
+const (
+	customStatusesQuery = "SELECT name, category FROM custom_statuses ORDER BY name"
+	customTypesQuery    = "SELECT name FROM custom_types ORDER BY name"
+	customConfigQuery   = "SELECT `key`, value FROM config WHERE `key` IN (?,?)"
+	customConfigYAML    = "status:\n  custom: \"review:active\"\ntypes:\n  custom: \"spike\"\n"
+)
+
+func statusRows(rows ...[2]string) *sqlmock.Rows {
+	r := sqlmock.NewRows([]string{"name", "category"})
+	for _, row := range rows {
+		r.AddRow(row[0], row[1])
+	}
+	return r
+}
+
+func typeRows(names ...string) *sqlmock.Rows {
+	r := sqlmock.NewRows([]string{"name"})
+	for _, n := range names {
+		r.AddRow(n)
+	}
+	return r
+}
+
+// GH#5581: a read failure in either normalized table (other than the table
+// not existing) or in the fallback config rows must reach the caller, even
+// when config.yaml could fill in, so a degraded vocabulary is never cached
+// as the database's.
+func TestResolveCustomConfigInTxPropagatesReadErrors(t *testing.T) {
+	injected := errors.New("connection reset by peer")
+	cases := []struct {
+		name   string
+		expect func(mock sqlmock.Sqlmock)
+	}{
+		{
+			name: "custom_statuses query fails",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(regexp.QuoteMeta(customStatusesQuery)).WillReturnError(injected)
+			},
+		},
+		{
+			name: "custom_statuses row iteration fails",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(regexp.QuoteMeta(customStatusesQuery)).
+					WillReturnRows(statusRows([2]string{"review", "active"}).RowError(0, injected))
+			},
+		},
+		{
+			name: "custom_types query fails after statuses resolved",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(regexp.QuoteMeta(customStatusesQuery)).
+					WillReturnRows(statusRows([2]string{"review", "active"}))
+				mock.ExpectQuery(regexp.QuoteMeta(customTypesQuery)).WillReturnError(injected)
+			},
+		},
+		{
+			name: "custom_types row iteration fails",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(regexp.QuoteMeta(customStatusesQuery)).
+					WillReturnRows(statusRows([2]string{"review", "active"}))
+				mock.ExpectQuery(regexp.QuoteMeta(customTypesQuery)).
+					WillReturnRows(typeRows("spike").RowError(0, injected))
+			},
+		},
+		{
+			name: "config rows query fails after empty tables",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(regexp.QuoteMeta(customStatusesQuery)).WillReturnRows(statusRows())
+				mock.ExpectQuery(regexp.QuoteMeta(customTypesQuery)).WillReturnRows(typeRows())
+				mock.ExpectQuery(regexp.QuoteMeta(customConfigQuery)).WillReturnError(injected)
+			},
+		},
+		{
+			name: "config rows iteration fails after one table resolved",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(regexp.QuoteMeta(customStatusesQuery)).
+					WillReturnRows(statusRows([2]string{"review", "active"}))
+				mock.ExpectQuery(regexp.QuoteMeta(customTypesQuery)).WillReturnRows(typeRows())
+				mock.ExpectQuery(regexp.QuoteMeta(customConfigQuery)).
+					WillReturnRows(sqlmock.NewRows([]string{"key", "value"}).
+						AddRow("types.custom", "spike").RowError(0, injected))
+			},
+		},
+	}
+	for _, yaml := range []struct{ name, content string }{
+		{"without config.yaml", ""},
+		{"with config.yaml", customConfigYAML},
+	} {
+		t.Run(yaml.name, func(t *testing.T) {
+			withYAMLCustomConfig(t, yaml.content)
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					_, mock, tx := beginMockTx(t)
+					tc.expect(mock)
+
+					statuses, customTypes, err := ResolveCustomConfigInTx(context.Background(), tx)
+					if !errors.Is(err, injected) {
+						t.Fatalf("err = %v, want it to wrap %v", err, injected)
+					}
+					if statuses != nil || customTypes != nil {
+						t.Fatalf("partial vocabulary escaped the failure: statuses=%v types=%v", statuses, customTypes)
+					}
+					if err := mock.ExpectationsWereMet(); err != nil {
+						t.Fatalf("unmet SQL expectations: %v", err)
+					}
+				})
+			}
+		})
+	}
+}

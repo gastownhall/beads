@@ -35,6 +35,10 @@ func ParseCommaSeparatedList(value string) []string {
 	return workapi.ParseCommaSeparatedList(value)
 }
 
+// ResolveCustomConfigInTx resolves the custom statuses and custom types in one
+// transaction, with the same fallbacks as ResolveCustomStatusesDetailedInTx
+// and ResolveCustomTypesInTx. A missing pre-migration table falls back to the
+// config rows; any other read failure is returned with no partial result.
 func ResolveCustomConfigInTx(ctx context.Context, tx DBTX) (statuses []types.CustomStatus, customTypes []string, err error) {
 	statuses, statusesFromTable, err := resolveCustomStatusesFromTableInTx(ctx, tx)
 	if err != nil {
@@ -48,15 +52,12 @@ func ResolveCustomConfigInTx(ctx context.Context, tx DBTX) (statuses []types.Cus
 		return statuses, ComposeCustomTypes(customTypes, "", config.GetCustomTypesFromYAML()), nil
 	}
 
+	// An unreadable config row is an error even when config.yaml could fill
+	// in: callers cache a successful result, so a degraded one must not pass
+	// for it (GH#5581).
 	cfg, err := getConfigKeysInTx(ctx, tx, "status.custom", "types.custom")
 	if err != nil {
-		if !statusesFromTable {
-			if yamlStatuses := config.GetCustomStatusesFromYAML(); len(yamlStatuses) > 0 {
-				statuses = ParseStatusFallback(yamlStatuses)
-			}
-		}
-		// The types.custom row is unreadable; the remaining layers still compose.
-		return statuses, ComposeCustomTypes(customTypes, "", config.GetCustomTypesFromYAML()), nil
+		return nil, nil, err
 	}
 
 	if !statusesFromTable {
@@ -74,7 +75,10 @@ func ResolveCustomConfigInTx(ctx context.Context, tx DBTX) (statuses []types.Cus
 func resolveCustomStatusesFromTableInTx(ctx context.Context, tx DBTX) ([]types.CustomStatus, bool, error) {
 	rows, err := tx.QueryContext(ctx, "SELECT name, category FROM custom_statuses ORDER BY name")
 	if err != nil {
-		return nil, false, nil
+		if isTableNotExistError(err) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("query custom_statuses: %w", err)
 	}
 	defer rows.Close()
 	var result []types.CustomStatus
@@ -97,7 +101,10 @@ func resolveCustomStatusesFromTableInTx(ctx context.Context, tx DBTX) ([]types.C
 func resolveCustomTypesFromTableInTx(ctx context.Context, tx DBTX) ([]string, bool, error) {
 	rows, err := tx.QueryContext(ctx, "SELECT name FROM custom_types ORDER BY name")
 	if err != nil {
-		return nil, false, nil
+		if isTableNotExistError(err) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("query custom_types: %w", err)
 	}
 	defer rows.Close()
 	var result []string
