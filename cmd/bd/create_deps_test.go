@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"reflect"
 	"strings"
@@ -233,6 +234,53 @@ func TestParseFormDeps(t *testing.T) {
 				t.Errorf("parseFormDeps(%q) = %+v, want %+v", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestFormDependencyValidation drives the create form's real Dependencies
+// field (bd-3073gm, GH#5560): input the form would refuse is reported on the
+// field when it loses focus, with the typed text left in place, and the
+// accessible prompt re-asks until the entry is corrected.
+func TestFormDependencyValidation(t *testing.T) {
+	for _, tt := range []struct {
+		value   string
+		wantErr string
+	}{
+		{value: "bd-a, blocks:bd-b", wantErr: ""},
+		{value: "blocked-by:bd-b, depends-on:bd-b, blocks:bd-b", wantErr: ""},
+		{value: "", wantErr: ""},
+		{value: "bd-a, frobs:bd-b", wantErr: `unknown dependency type "frobs"`},
+		{value: "blocks:", wantErr: "names no issue"},
+		{value: "related:bd-b, blocks:bd-b", wantErr: "cannot attach both"},
+		{value: "blocked-by:bd-b, related:bd-b", wantErr: `cannot attach both "blocks" and "related"`},
+	} {
+		value := tt.value
+		field := newFormDepsInput(&value)
+		field.Blur()
+		err := field.Error()
+		switch {
+		case tt.wantErr == "" && err != nil:
+			t.Errorf("Dependencies field %q: %v, want it accepted", tt.value, err)
+		case tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)):
+			t.Errorf("Dependencies field %q error = %v, want %q", tt.value, err, tt.wantErr)
+		}
+		if value != tt.value {
+			t.Errorf("Dependencies field %q holds %q after validation, want the entered text kept", tt.value, value)
+		}
+	}
+
+	var value string
+	var out bytes.Buffer
+	field := newFormDepsInput(&value)
+	in := strings.NewReader("blocked-by:bd-b, related:bd-b\nrelated:bd-b, blocked-by:bd-c\n")
+	if err := field.RunAccessible(&out, in); err != nil {
+		t.Fatalf("RunAccessible: %v", err)
+	}
+	if !strings.Contains(out.String(), `cannot attach both "blocks" and "related"`) {
+		t.Errorf("accessible prompt output %q does not report the conflict", out.String())
+	}
+	if value != "related:bd-b, blocked-by:bd-c" {
+		t.Errorf("Dependencies field = %q, want the corrected entry", value)
 	}
 }
 

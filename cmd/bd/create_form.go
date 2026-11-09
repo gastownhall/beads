@@ -126,6 +126,25 @@ func parseFormDeps(deps []string) ([]domain.DependencySpec, error) {
 	return dedupeDepSpecs(specs)
 }
 
+// validateFormDeps is the Dependencies field's validator: it refuses what
+// CreateIssueFromFormValues would, while the entered text is still in the
+// field to correct. It does not resolve the targets; an unknown issue is
+// still reported when the issue is created.
+func validateFormDeps(raw string) error {
+	_, err := parseFormDeps(splitFormDeps(raw))
+	return err
+}
+
+// newFormDepsInput builds the form's Dependencies field over value.
+func newFormDepsInput(value *string) *huh.Input {
+	return huh.NewInput().
+		Title("Dependencies").
+		Description("Comma-separated, optional. id, blocks:id, blocked-by:id and depends-on:id all mean this issue depends on id; other types (related:id, discovered-from:id, ...) name that relationship to id").
+		Placeholder("e.g., discovered-from:bd-20, blocks:bd-15").
+		Value(value).
+		Validate(validateFormDeps)
+}
+
 // CreateIssueFromFormValues creates an issue from the given form values.
 // It returns the created issue and any error that occurred.
 // This function handles parent-child relationships, labels, dependencies,
@@ -356,11 +375,7 @@ func runCreateForm(cmd *cobra.Command) error {
 		),
 
 		huh.NewGroup(
-			huh.NewInput().
-				Title("Dependencies").
-				Description("Format: type:id or just id (optional)").
-				Placeholder("e.g., discovered-from:bd-20, blocks:bd-15").
-				Value(&raw.Deps),
+			newFormDepsInput(&raw.Deps),
 
 			huh.NewConfirm().
 				Title("Create this issue?").
