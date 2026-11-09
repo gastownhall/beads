@@ -2185,6 +2185,17 @@ func startLocked(beadsDir string) (*State, error) {
 			pid, cfg.RemotesAPIPort, err, logPath(beadsDir))
 	}
 
+	// Record the identity of the server this launch proved its own, so a
+	// later open can tell it from a foreign one on the same port (GH#4637).
+	// Only this path pairs: an adopted or already-running server never does.
+	if ServerIdentityVerificationEnabled(beadsDir) {
+		if err := pairServerIdentity(beadsDir, started, cfg.Host, actualPort, doltDir); err != nil {
+			started.killAndWait()
+			removeServerStateFiles(beadsDir)
+			return nil, err
+		}
+	}
+
 	return &State{
 		Running:        true,
 		PID:            pid,
