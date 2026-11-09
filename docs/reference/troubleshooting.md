@@ -415,6 +415,56 @@ bd dolt stop
 bd dolt start
 ```
 
+### Refusing the Dolt server: its identity cannot be verified
+
+**Symptom (server mode):** commands fail before touching any data with
+`refusing the Dolt server at 127.0.0.1:<port>: it is not the server bd
+launched for this data directory`, or `its identity cannot be verified
+because the server identity record ... does not exist` (or `is empty`, `is
+malformed`, `could not be read`). bd says it read and wrote nothing on that
+server.
+
+**Cause:** bd records the UUID of each Dolt server it starts in
+`.bd-server-uuid` in the server's data directory, and checks it on every open
+(see [Dolt server identity](/reference/configuration#dolt-server-identity)).
+Either another process answers on the port (another bd, such as one in WSL2
+whose loopback ports Windows shares, a port forward or a container), or the
+server was started by a bd from before the check and was never recorded.
+
+**Fix:** first find what holds the port:
+
+```bash
+lsof -i :3308                    # macOS / Linux
+netstat -aon | findstr :3308     # Windows
+```
+
+If it is this machine's own bd server (the PID bd reports from its PID file,
+or a server started before you upgraded bd), restart it so bd records its
+identity:
+
+```bash
+bd dolt stop && bd dolt start
+```
+
+If it is another process, give the two servers separate ports
+(`BEADS_DOLT_SERVER_PORT` or `dolt.port`). If the server is one bd is not
+meant to manage, use external mode (`BEADS_DOLT_SERVER_MODE=1`), or turn the
+check off with `BEADS_DOLT_VERIFY_SERVER_IDENTITY=false` or
+`dolt.verify-server-identity: false` in `config.yaml`. None of these touch
+your databases; do not delete or reinitialize anything to get past this
+error.
+
+`bd dolt start` itself fails with `did not record its server identity` when
+bd cannot show that the server it launched holds the port: another process
+took the port, or the platform cannot show which process holds a listener
+(WSL1, platforms other than Linux, macOS and Windows). bd stops the server it
+started and leaves the record unchanged. Use a free port, or turn the check
+off on such a host.
+
+The check guards bd's store opens and the shared `beads_global` creation in
+`bd init`. `bd doctor --fix`'s metadata and remote repairs, `bd bootstrap`,
+and the working-set flush before a server stop still connect without it.
+
 ### "bd requires dolt 2.6.0 or newer" error
 
 `bd` refuses to run against Dolt older than **2.6.0** outside embedded mode.
