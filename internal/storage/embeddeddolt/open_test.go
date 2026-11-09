@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cenkalti/backoff/v4"
 )
 
 func TestBuildDSN_SpacesInPath(t *testing.T) {
@@ -207,6 +209,96 @@ func TestOpenSQLWaitBudget(t *testing.T) {
 			t.Fatalf("query after reopen: %v", err)
 		}
 	})
+
+	t.Run("parent_deadline_takes_precedence", func(t *testing.T) {
+		t.Setenv("BEADS_EMBEDDED_OPEN_TIMEOUT", "1s")
+		dir := initOpenWaitDB(t)
+		holdOpenWaitDB(t, dir)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		results, join := startOpenWait(t, ctx, cancel, dir)
+
+		select {
+		case r := <-results:
+			if r.err == nil {
+				_ = r.cleanup()
+			}
+			t.Fatalf("OpenSQL with a 4s caller deadline returned after %v (err %v); want it to wait past the 1s budget for the deadline", r.elapsed, r.err)
+		case <-time.After(3 * time.Second):
+		}
+
+		var r openWaitResult
+		select {
+		case r = <-results:
+		case <-time.After(30 * time.Second):
+			join()
+			t.Fatalf("OpenSQL still waiting 30s after its 4s caller deadline")
+		}
+		if r.err == nil {
+			_ = r.cleanup()
+			t.Fatalf("OpenSQL succeeded after %v while the database was held", r.elapsed)
+		}
+		t.Logf("OpenSQL failed after %v: %v", r.elapsed, r.err)
+		if errors.Is(r.err, ErrOpenTimeout) {
+			t.Errorf("OpenSQL ended by its caller's deadline returned ErrOpenTimeout: %v", r.err)
+		}
+	})
+
+	t.Run("caller_cancellation_is_not_a_timeout", func(t *testing.T) {
+		t.Setenv("BEADS_EMBEDDED_OPEN_TIMEOUT", "20s")
+		dir := initOpenWaitDB(t)
+		holdOpenWaitDB(t, dir)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		results, join := startOpenWait(t, ctx, cancel, dir)
+		time.Sleep(500 * time.Millisecond)
+		cancel()
+
+		var r openWaitResult
+		select {
+		case r = <-results:
+		case <-time.After(30 * time.Second):
+			join()
+			t.Fatalf("OpenSQL still waiting 30s after its caller canceled")
+		}
+		if r.err == nil {
+			_ = r.cleanup()
+			t.Fatalf("OpenSQL succeeded after %v while the database was held", r.elapsed)
+		}
+		if errors.Is(r.err, ErrOpenTimeout) {
+			t.Errorf("canceled OpenSQL returned ErrOpenTimeout: %v", r.err)
+		}
+	})
+
+	t.Run("already_canceled_caller_is_not_a_timeout", func(t *testing.T) {
+		t.Setenv("BEADS_EMBEDDED_OPEN_TIMEOUT", "1ms")
+		dir := initOpenWaitDB(t)
+		holdOpenWaitDB(t, dir)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		db, cleanup, err := OpenSQL(ctx, dir, "testdb", "")
+		if err == nil {
+			_ = cleanup()
+			t.Fatalf("OpenSQL with a canceled context succeeded on a held database (db %v)", db)
+		}
+		if errors.Is(err, ErrOpenTimeout) {
+			t.Errorf("OpenSQL with a canceled context returned ErrOpenTimeout: %v", err)
+		}
+	})
+
+	t.Run("non_retryable_error_is_not_a_timeout", func(t *testing.T) {
+		t.Setenv("BEADS_EMBEDDED_OPEN_TIMEOUT", "1ms")
+		missing := filepath.Join(t.TempDir(), "missing")
+		db, cleanup, err := OpenSQL(context.Background(), missing, "testdb", "")
+		if err == nil {
+			_ = cleanup()
+			t.Fatalf("OpenSQL on a missing directory succeeded (db %v)", db)
+		}
+		if errors.Is(err, ErrOpenTimeout) {
+			t.Errorf("OpenSQL on a missing directory returned ErrOpenTimeout: %v", err)
+		}
+	})
 }
 
 // TestOpenWaitBudget pins how BEADS_EMBEDDED_OPEN_TIMEOUT resolves: positive
@@ -251,4 +343,186 @@ func TestOpenWaitBudget(t *testing.T) {
 			}
 		})
 	}
+}
+
+// openWaitClock is a manual backoff.Clock.
+type openWaitClock struct{ now time.Time }
+
+func (c *openWaitClock) Now() time.Time { return c.now }
+
+// openWaitTimer is a backoff.Timer that fires at once, advancing clock by
+// the interval it was started with instead of sleeping.
+type openWaitTimer struct {
+	clock *openWaitClock
+	c     chan time.Time
+}
+
+func (t *openWaitTimer) Start(d time.Duration) {
+	t.clock.now = t.clock.now.Add(d)
+	t.c = make(chan time.Time, 1)
+	t.c <- t.clock.now
+}
+
+func (t *openWaitTimer) Stop() {}
+
+func (t *openWaitTimer) C() <-chan time.Time { return t.c }
+
+// retryOpenWait runs backoff.Retry's loop on clock, without real sleeps.
+func retryOpenWait(clock *openWaitClock, op backoff.Operation, b backoff.BackOff) error {
+	return backoff.RetryNotifyWithTimer(op, b, nil, &openWaitTimer{clock: clock})
+}
+
+// newOpenWaitTestBackOff returns an openWaitBackOff over a deterministic
+// exponential policy: 1s initial interval doubling, no randomization, and
+// the given budget, read from clock.
+func newOpenWaitTestBackOff(clock *openWaitClock, budget time.Duration) *openWaitBackOff {
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = time.Second
+	bo.RandomizationFactor = 0
+	bo.Multiplier = 2
+	bo.MaxInterval = 5 * time.Second
+	bo.MaxElapsedTime = budget
+	bo.Clock = clock
+	wait := &openWaitBackOff{BackOff: bo}
+	wait.Reset()
+	return wait
+}
+
+// TestOpenWaitRecordsExhaustion pins the retry-policy wrapper OpenSQL hands
+// the driver and how its record classifies an open error.
+func TestOpenWaitRecordsExhaustion(t *testing.T) {
+	errLocked := errors.New("the database is locked by another dolt process")
+
+	t.Run("stop_is_recorded_and_reset_clears_it", func(t *testing.T) {
+		clock := &openWaitClock{now: time.Unix(0, 0)}
+		wait := newOpenWaitTestBackOff(clock, 10*time.Second)
+
+		if next := wait.NextBackOff(); next != time.Second {
+			t.Fatalf("first NextBackOff = %v, want 1s", next)
+		}
+		if wait.exhausted.Load() {
+			t.Fatalf("exhaustion recorded within the budget")
+		}
+		clock.now = clock.now.Add(11 * time.Second)
+		if next := wait.NextBackOff(); next != backoff.Stop {
+			t.Fatalf("NextBackOff past the budget = %v, want Stop", next)
+		}
+		if !wait.exhausted.Load() {
+			t.Fatalf("Stop not recorded as exhaustion")
+		}
+		wait.Reset()
+		if wait.exhausted.Load() {
+			t.Fatalf("Reset did not clear the recorded exhaustion")
+		}
+		if next := wait.NextBackOff(); next != time.Second {
+			t.Fatalf("NextBackOff after Reset = %v, want 1s", next)
+		}
+	})
+
+	t.Run("stops_before_an_interval_that_overshoots_the_budget", func(t *testing.T) {
+		clock := &openWaitClock{now: time.Unix(0, 0)}
+		wait := newOpenWaitTestBackOff(clock, 2500*time.Millisecond)
+
+		if next := wait.NextBackOff(); next != time.Second { // elapsed 0 + 1s <= 2.5s
+			t.Fatalf("first NextBackOff = %v, want 1s", next)
+		}
+		clock.now = clock.now.Add(time.Second)
+		// elapsed 1s + next 2s overshoots 2.5s: the policy stops early.
+		if next := wait.NextBackOff(); next != backoff.Stop {
+			t.Fatalf("NextBackOff whose interval overshoots the budget = %v, want Stop", next)
+		}
+		if !wait.exhausted.Load() {
+			t.Fatalf("early Stop not recorded as exhaustion")
+		}
+	})
+
+	t.Run("caller_cancellation_records_nothing", func(t *testing.T) {
+		clock := &openWaitClock{now: time.Unix(0, 0)}
+		wait := newOpenWaitTestBackOff(clock, 10*time.Second)
+		ctx, cancel := context.WithCancel(context.Background())
+		attempts := 0
+		err := retryOpenWait(clock, func() error {
+			attempts++
+			cancel()
+			clock.now = clock.now.Add(time.Minute)
+			return errLocked
+		}, backoff.WithContext(wait, ctx))
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Retry after cancellation = %v, want context.Canceled", err)
+		}
+		if attempts != 1 {
+			t.Fatalf("attempts = %d, want 1", attempts)
+		}
+		if wait.exhausted.Load() {
+			t.Fatalf("exhaustion recorded for a canceled caller")
+		}
+		if got := classifyOpenErr(ctx, wait, "/db", 10*time.Second, errLocked); got != errLocked {
+			t.Fatalf("classifyOpenErr for a canceled caller = %v, want the error unchanged", got)
+		}
+	})
+
+	t.Run("permanent_error_records_nothing", func(t *testing.T) {
+		clock := &openWaitClock{now: time.Unix(0, 0)}
+		wait := newOpenWaitTestBackOff(clock, time.Nanosecond)
+		errBad := errors.New("not a dolt database")
+		err := retryOpenWait(clock, func() error {
+			clock.now = clock.now.Add(time.Minute)
+			return backoff.Permanent(errBad)
+		}, wait)
+		if !errors.Is(err, errBad) {
+			t.Fatalf("Retry with a permanent error = %v, want it", err)
+		}
+		if wait.exhausted.Load() {
+			t.Fatalf("exhaustion recorded for a permanent error")
+		}
+		if got := classifyOpenErr(context.Background(), wait, "/db", time.Nanosecond, errBad); got != errBad {
+			t.Fatalf("classifyOpenErr for a permanent error = %v, want the error unchanged", got)
+		}
+	})
+
+	t.Run("success_after_the_budget_stays_successful", func(t *testing.T) {
+		clock := &openWaitClock{now: time.Unix(0, 0)}
+		wait := newOpenWaitTestBackOff(clock, time.Second)
+		err := retryOpenWait(clock, func() error {
+			clock.now = clock.now.Add(time.Minute)
+			return nil
+		}, wait)
+		if err != nil {
+			t.Fatalf("Retry of a successful attempt that outlasted the budget = %v, want nil", err)
+		}
+		if wait.exhausted.Load() {
+			t.Fatalf("exhaustion recorded for a successful attempt")
+		}
+	})
+
+	t.Run("exhaustion_with_a_live_caller_is_a_timeout", func(t *testing.T) {
+		clock := &openWaitClock{now: time.Unix(0, 0)}
+		wait := newOpenWaitTestBackOff(clock, 2*time.Second)
+		err := retryOpenWait(clock, func() error {
+			clock.now = clock.now.Add(time.Second)
+			return errLocked
+		}, wait)
+		if !errors.Is(err, errLocked) {
+			t.Fatalf("Retry past the budget = %v, want the last attempt's error", err)
+		}
+		if !wait.exhausted.Load() {
+			t.Fatalf("exhaustion not recorded")
+		}
+
+		got := classifyOpenErr(context.Background(), wait, "/data/db", 2*time.Second, errLocked)
+		if !errors.Is(got, ErrOpenTimeout) || !errors.Is(got, errLocked) {
+			t.Fatalf("classifyOpenErr = %v, want ErrOpenTimeout wrapping the driver error", got)
+		}
+		for _, want := range []string{"budget 2s", "/data/db", "BEADS_EMBEDDED_OPEN_TIMEOUT", errLocked.Error()} {
+			if !strings.Contains(got.Error(), want) {
+				t.Errorf("classifyOpenErr message %q does not contain %q", got, want)
+			}
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if got := classifyOpenErr(ctx, wait, "/data/db", 2*time.Second, errLocked); got != errLocked {
+			t.Errorf("classifyOpenErr with a canceled caller = %v, want the error unchanged: cancellation takes precedence", got)
+		}
+	})
 }

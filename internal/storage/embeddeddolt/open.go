@@ -97,8 +97,9 @@ func classifyOpenErr(ctx context.Context, wait *openWaitBackOff, dir string, bud
 // The driver retries an open it reports as retryable, such as a database
 // another process or handle holds, with an exponential backoff. The retries
 // stop after the BEADS_EMBEDDED_OPEN_TIMEOUT budget (default 30s), and the
-// open then fails with ErrOpenTimeout. The budget stops further retries; it
-// never interrupts a running attempt.
+// open then fails with ErrOpenTimeout. The budget applies only when ctx has
+// no deadline; a caller's deadline replaces it. The budget stops further
+// retries; it never interrupts a running attempt.
 func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func() error, error) {
 	dsn := buildDSN(dir, database)
 
@@ -110,6 +111,9 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 	budget := openWaitBudget()
 	bo := backoff.NewExponentialBackOff()
 	bo.MaxElapsedTime = budget
+	if _, ok := ctx.Deadline(); ok {
+		bo.MaxElapsedTime = 0 // the caller's deadline bounds the wait
+	}
 	bo.MaxInterval = 5 * time.Second
 	wait := &openWaitBackOff{BackOff: bo}
 	cfg.BackOff = wait
