@@ -117,20 +117,31 @@ func TestBuildIssueDetails_UnresolvableDependencyEdges(t *testing.T) {
 
 		// A failed count read never establishes a gap, and neither does a
 		// failed listing: both must stay off the raw path for the same reason
-		// they leave the count unset.
+		// they leave the count unset (AC-5, bd-hkpas7: failed reads publish
+		// NO member — a gap an error produced is not a gap the data owns).
 		failedCount := &countingSource{src: skewSource{issue: issue, depCountErr: boom, depCount: 3}}
-		if _, err := BuildIssueDetails(ctx, failedCount, issue, false, DetailOptions{}); err != nil {
+		failedCountDetails, err := BuildIssueDetails(ctx, failedCount, issue, false, DetailOptions{})
+		if err != nil {
 			t.Fatalf("BuildIssueDetails: %v", err)
 		}
 		if failedCount.calls != 0 {
 			t.Errorf("DependencyRecords called %d times beside a failed count read, want 0", failedCount.calls)
 		}
+		if failedCountDetails.UnresolvableDependencies != nil || failedCountDetails.UnresolvableDependencyEdges != nil {
+			t.Errorf("a failed count read must publish neither the count nor the member, got %v / %v",
+				failedCountDetails.UnresolvableDependencies, failedCountDetails.UnresolvableDependencyEdges)
+		}
 		failedList := &countingSource{src: skewSource{issue: issue, depsErr: boom, depCount: 3}}
-		if _, err := BuildIssueDetails(ctx, failedList, issue, false, DetailOptions{}); err != nil {
+		failedListDetails, err := BuildIssueDetails(ctx, failedList, issue, false, DetailOptions{})
+		if err != nil {
 			t.Fatalf("BuildIssueDetails: %v", err)
 		}
 		if failedList.calls != 0 {
 			t.Errorf("DependencyRecords called %d times beside a failed listing, want 0", failedList.calls)
+		}
+		if failedListDetails.UnresolvableDependencies != nil || failedListDetails.UnresolvableDependencyEdges != nil {
+			t.Errorf("a failed listing must publish neither the count nor the member, got %v / %v",
+				failedListDetails.UnresolvableDependencies, failedListDetails.UnresolvableDependencyEdges)
 		}
 	})
 

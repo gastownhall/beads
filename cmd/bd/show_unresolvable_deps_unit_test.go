@@ -527,4 +527,51 @@ func TestShowUnresolvableDepLines(t *testing.T) {
 			t.Errorf("distinctUnresolvedTargets(nil) = %d, want 0", n)
 		}
 	})
+
+	// The failure rules that tie the gate and the warning together (AC-5,
+	// bd-hkpas7, #5272). The three renders compose exactly these calls —
+	// gate, then warn with what the render printed — so these compose them
+	// too, at the seam no CLI test can reach: a backend that fails only the
+	// raw read, or prints only part of the gap.
+	t.Run("render failure composition", func(t *testing.T) {
+		t.Run("a failed raw read leaves the whole gap to the warning", func(t *testing.T) {
+			src := &fakeUnresolvedEdgeSource{rawErr: boom}
+			counts := depCounts{deps: depCount{n: 2}}
+			unresolved := gateUnresolvedDepEdges(context.Background(), src, "rp-1", false, counts, depListing{rows: 0}, nil)
+			if unresolved != nil {
+				t.Fatalf("a failed raw read must publish no edges, got %v", unresolved)
+			}
+			if src.calls != 1 {
+				t.Errorf("the raw read should have been attempted once, ran %d times", src.calls)
+			}
+			out := captureStderr(t, func() {
+				warnUnresolvableDepEdges("rp-1", counts,
+					depListing{rows: 0, printedUnresolved: distinctUnresolvedTargets(unresolved)},
+					depListing{rows: 0})
+			})
+			// The render disclosed less, not nothing: the warning still names
+			// the full measured gap and the command that can show it.
+			if !strings.Contains(out, "2 dependency edge(s)") || !strings.Contains(out, "For raw edge records") {
+				t.Errorf("a failed raw read must leave the whole gap to the warning, got:\n%s", out)
+			}
+		})
+		t.Run("a printed gap goes silent end to end", func(t *testing.T) {
+			src := &fakeUnresolvedEdgeSource{raw: []*types.Dependency{
+				{IssueID: "rp-1", DependsOnID: "liveop-9", Type: types.DepBlocks},
+			}}
+			counts := depCounts{deps: depCount{n: 1}}
+			unresolved := gateUnresolvedDepEdges(context.Background(), src, "rp-1", false, counts, depListing{rows: 0}, nil)
+			if len(unresolved) != 1 {
+				t.Fatalf("the gap edge must come back for printing, got %v", unresolved)
+			}
+			out := captureStderr(t, func() {
+				warnUnresolvableDepEdges("rp-1", counts,
+					depListing{rows: 0, printedUnresolved: distinctUnresolvedTargets(unresolved)},
+					depListing{rows: 0})
+			})
+			if out != "" {
+				t.Errorf("a fully printed gap must leave the warning silent, got:\n%s", out)
+			}
+		})
+	})
 }
