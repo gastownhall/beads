@@ -1,0 +1,9 @@
+{
+  "shape": "gc-show-json-batch",
+  "requests": [
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-r1","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-a1","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-blk","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-mol","status":200}
+  ]
+}
