@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -79,12 +80,38 @@ func TestEmbeddedReopen(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Reason reopen", "--type", "task")
 		bdClose(t, bd, dir, issue.ID)
 
-		out := bdReopen(t, bd, dir, issue.ID, "--reason", "Not actually done")
+		out := bdReopen(t, bd, dir, issue.ID, "--actor", "alice", "--reason", "Not actually done")
 		if !strings.Contains(out, "Reopened") {
 			t.Errorf("expected 'Reopened' in output: %s", out)
 		}
 		if !strings.Contains(out, "Not actually done") {
 			t.Logf("reason may not appear in text output: %s", out)
+		}
+
+		// GH#5593: the reason must survive on a surface a user can read
+		// back — the comment thread, attributed to the reopen actor.
+		raw := bdComments(t, bd, dir, issue.ID, "--json")
+		start := strings.Index(raw, "[")
+		if start < 0 {
+			t.Fatalf("no JSON array in bd comments output:\n%s", raw)
+		}
+		var comments []types.Comment
+		if err := json.Unmarshal([]byte(raw[start:]), &comments); err != nil {
+			t.Fatalf("parse comments JSON: %v\n%s", err, raw[start:])
+		}
+		if len(comments) != 1 {
+			t.Fatalf("comment thread has %d comments after a reasoned reopen, want exactly 1:\n%s", len(comments), raw)
+		}
+		if comments[0].Text != "Not actually done" || comments[0].Author != "alice" {
+			t.Errorf("reopen comment = {text: %q, author: %q}, want {text: %q, author: %q}",
+				comments[0].Text, comments[0].Author, "Not actually done", "alice")
+		}
+
+		if shown := bdShowRaw(t, bd, dir, issue.ID); !strings.Contains(shown, "Not actually done") {
+			t.Errorf("bd show does not carry the reopen reason in the comment thread:\n%s", shown)
+		}
+		if exported := bdExport(t, bd, dir, "--all"); !strings.Contains(exported, "Not actually done") {
+			t.Errorf("bd export --all does not carry the reopen reason in the issue's comments:\n%s", exported)
 		}
 	})
 
@@ -222,5 +249,30 @@ func TestEmbeddedReopenConcurrent(t *testing.T) {
 		if got.Status != types.StatusOpen {
 			t.Errorf("expected %s to be open after reopen, got %s", id, got.Status)
 		}
+	}
+}
+
+// TestEmbeddedReopenReasonIsReadable pins GH#5593: `bd reopen --reason` must
+// leave the reason on a surface a user can read back. The reopen path calls it
+// a "reopen comment", so `bd comments` is where it belongs.
+func TestEmbeddedReopenReasonIsReadable(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "rr")
+
+	issue := bdCreate(t, bd, dir, "probe issue", "--type", "task")
+	bdClose(t, bd, dir, issue.ID, "--reason", "CLOSE_REASON_MARKER")
+	out := bdReopen(t, bd, dir, issue.ID, "--reason", "REOPEN_REASON_MARKER")
+	if !strings.Contains(out, "REOPEN_REASON_MARKER") {
+		t.Fatalf("reopen did not echo the reason: %s", out)
+	}
+
+	comments := bdComments(t, bd, dir, issue.ID, "--json")
+	if !strings.Contains(comments, "REOPEN_REASON_MARKER") {
+		t.Errorf("reopen reason was echoed but is not in `bd comments %s --json`:\n%s", issue.ID, comments)
 	}
 }

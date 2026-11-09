@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -18,6 +19,11 @@ type ReopenResult struct {
 	// IssueRowsChanged is the concrete SQL fact that at least one issues row
 	// changed in this transaction, either the reopened row or a recomputed row.
 	IssueRowsChanged bool
+	// CommentTable names the comment table a nonblank reason wrote its
+	// structured comment to ("comments" or "wisp_comments"), and is empty
+	// when no comment was written. Selective staging routes stage it so the
+	// comment reaches the same Dolt commit as the reopened row.
+	CommentTable string
 }
 
 // ReopenIssueInTx reopens only statuses in the done category. It leaves all
@@ -105,8 +111,19 @@ func reopenIssueInTx(ctx context.Context, tx DBTX, id, reason, actor string, ret
 		return nil, fmt.Errorf("record reopen event: %w", err)
 	}
 
-	if reason != "" {
-		if err := AddCommentEventInTx(ctx, tx, id, actor, reason); err != nil {
+	// A nonblank reason lands in the issue's comment thread as a real,
+	// versioned comment — the same surface `bd comment` writes — attributed
+	// to the reopen actor and routed to the plane the issue lives in. The
+	// helper's journal record (CommentSourceStructured) replaces the audit
+	// commented event this used to mint; the reopened event above still
+	// carries the reason for the local audit trail.
+	commentTable := ""
+	if strings.TrimSpace(reason) != "" {
+		commentTable = "comments"
+		if isWisp {
+			commentTable = "wisp_comments"
+		}
+		if _, err := addIssueCommentInTx(ctx, tx, id, actor, reason, time.Now().UTC().Truncate(time.Second), true); err != nil {
 			return nil, fmt.Errorf("add reopen comment: %w", err)
 		}
 	}
@@ -131,5 +148,6 @@ func reopenIssueInTx(ctx context.Context, tx DBTX, id, reason, actor string, ret
 		IsWisp:           isWisp,
 		Changed:          true,
 		IssueRowsChanged: !isWisp || recompute.IssueRowsChanged,
+		CommentTable:     commentTable,
 	}, nil
 }
