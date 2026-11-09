@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Circuit breaker state is no longer shared across local users.** On Unix,
+  bd stored per-server circuit breaker state in a shared
+  `<temp>/beads-circuit` directory, so on a multi-user host one user's
+  `0600` state files were unreadable and unwritable by every other user —
+  silently discarding their breaker state — and readable state in a shared
+  location could be planted or replaced by any local user. State now lives
+  in `<TMPDIR>/beads-circuit-<uid>`, created `0700` and validated before
+  use: an existing directory that is a symlink, a non-directory,
+  foreign-owned, or writable by group/others disables the breaker for the
+  process (fail-open, one warning per process) instead of reading or
+  writing state through it. Same-user processes still coordinate through
+  the directory; cross-user coordination is deliberately dropped.
+  `bd doctor`'s Circuit Breaker check follows the new location, stale
+  files in the legacy directories are still cleaned by the existing
+  rules (never migrated, never through a symlinked legacy directory), and
+  Windows keeps `%TEMP%\beads-circuit`, which is already per-user. The
+  historical report of an `EACCES` breaker file failing the open closed
+  does not reproduce at current versions — an unreadable state file
+  already failed open — but the shared-directory defects above did not
+  depend on it.
+
 - **Telemetry no longer exports the raw command line.** With telemetry on
   (`BD_OTEL_ENABLED=true`), the OTel resource attached to every exported
   metric and span carried `process.command_args`, the unscrubbed `os.Args`,

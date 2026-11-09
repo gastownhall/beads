@@ -356,10 +356,28 @@ tracking the same work twice.
 persisting across repeated invocations.
 
 **Cause:** The circuit breaker tripped after repeated connection failures.
-Its state lives in a file under `/tmp/beads-circuit/` (named
-`beads-dolt-circuit-<host>-<port>[-<db>].json`, keyed on host:port) and is
-shared across all `bd` processes. Once tripped, all commands to that host:port
-are rejected until a successful probe resets it.
+Its state lives in a file (named
+`beads-dolt-circuit-<host>-<port>[-<db>].json`, keyed on host:port) in a
+per-user directory under the temp root:
+
+- Linux/macOS: `${TMPDIR:-/tmp}/beads-circuit-$(id -u)`
+- Windows: `%TEMP%\beads-circuit`
+
+Every `bd` process of the same user shares state through that directory;
+users do not share breaker state with each other, so one local user cannot
+trip or reset another user's breaker. Once tripped, all commands to that
+host:port are rejected until a successful probe resets it.
+
+If bd logs a warning that the state directory is unsafe (a symlink, a
+foreign-owned directory, or one writable by group or others), it disables
+the circuit breaker for that process and connects anyway rather than trust
+or write state through it. Have the directory's owner remove it, or run bd
+with a private `TMPDIR`.
+
+Older bd releases stored state in the shared `/tmp/beads-circuit`
+directory. bd still removes stale files there by the same rules, but never
+creates it, never follows a symlinked legacy directory, and never migrates
+its state into the per-user directory.
 
 For beads-managed local servers, `bd dolt status` reports from the server's
 PID file — a "running" status does not guarantee the server is actually
@@ -368,8 +386,8 @@ accepting connections on the expected port.
 **Diagnosis:**
 
 ```bash
-# Check circuit breaker state
-cat /tmp/beads-circuit/beads-dolt-circuit-*.json
+# Check circuit breaker state (Linux/macOS)
+cat "${TMPDIR:-/tmp}/beads-circuit-$(id -u)/beads-dolt-circuit-"*.json
 
 # Check if the Dolt server is actually listening
 lsof -i :<port>
@@ -381,7 +399,7 @@ cat .beads/metadata.json | grep port
 **Fix:**
 
 ```bash
-rm /tmp/beads-circuit/beads-dolt-circuit-*.json
+rm "${TMPDIR:-/tmp}/beads-circuit-$(id -u)/beads-dolt-circuit-"*.json
 bd dolt stop
 bd dolt start
 bd list
