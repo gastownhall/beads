@@ -192,6 +192,15 @@ func warnUnsafeCircuitDir(dir string, reason error) {
 		"Have the directory's owner remove it, or run bd with a private TMPDIR", dir, reason)
 }
 
+// CircuitBreakerStateDir returns the directory circuit breaker state files
+// are written to, honoring the BEADS_TEST_CIRCUIT_DIR test override.
+// cmd/bd/doctor reads it so diagnosis follows the same per-user location
+// the storage layer writes (GH#4223).
+func CircuitBreakerStateDir() string {
+	dir, _ := circuitBreakerPaths()
+	return dir
+}
+
 // newCircuitBreaker creates a circuit breaker for the given Dolt server
 // host:port:database. The database name is included in the file path so each
 // project gets independent circuit breaker state on shared servers (GH#3140).
