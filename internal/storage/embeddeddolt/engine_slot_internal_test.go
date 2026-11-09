@@ -711,3 +711,38 @@ func TestEmbeddedEngineSessionIsolation(t *testing.T) {
 		t.Fatalf("opened %d engines, want every read above on one reused engine", n)
 	}
 }
+
+// TestEmbeddedEngineSameDirectoryStoresAlternate pins that idle release keeps
+// independent openers of one database making progress: two stores on the
+// same directory (as two bd processes are) each hold the engine only while
+// busy and briefly after, so alternating writes all complete and each store
+// reads the other's.
+func TestEmbeddedEngineSameDirectoryStoresAlternate(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	stores := make([]*EmbeddedDoltStore, 2)
+	for i := range stores {
+		s, err := newStore(ctx, beadsDir, "enginealternate", "main", openStrict)
+		if err != nil {
+			t.Fatalf("store %d: %v", i, err)
+		}
+		t.Cleanup(func() { _ = s.Close() })
+		stores[i] = s
+	}
+	if err := stores[0].SetConfig(ctx, "issue_prefix", "ea"); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 6 {
+		writer, reader := stores[i%2], stores[(i+1)%2]
+		id := fmt.Sprintf("ea-%d", i)
+		if err := writer.RunInTransaction(ctx, "bd: create "+id, func(tx storage.Transaction) error {
+			return tx.CreateIssue(ctx, engineTestIssue(id), "tester")
+		}); err != nil {
+			t.Fatalf("store %d create %s: %v", i%2, id, err)
+		}
+		if _, err := reader.GetIssue(ctx, id); err != nil {
+			t.Fatalf("store %d read %s: %v", (i+1)%2, id, err)
+		}
+	}
+}
