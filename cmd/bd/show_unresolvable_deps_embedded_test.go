@@ -113,6 +113,61 @@ func TestEmbeddedShowUnresolvableDeps(t *testing.T) {
 		})
 	}
 
+	// AC-3 (bd-hkpas7, #5272): MIXED local and unresolved targets on one
+	// issue. The count covers both edges; the hydrated array and the text's
+	// local line carry the local one alone — byte for byte what they were
+	// before, title and priority and status icon all in place; the
+	// unresolved edge appears only in the new member and its raw text line,
+	// printed after the local line of the section the two share.
+	t.Run("mixed_local_and_unresolved", func(t *testing.T) {
+		subject := bdCreate(t, bd, dir, "Subject mixed edges", "--type", "task")
+		local := bdCreate(t, bd, dir, "Mixed local blocker", "--type", "task")
+		bdDep(t, bd, dir, "add", subject.ID, local.ID, "--type", "blocks")
+		bdDep(t, bd, dir, "add", subject.ID, "liveop-kmf", "--type", "blocks")
+
+		details := bdShowDetails(t, bd, dir, subject.ID)
+		depCount, ok := details["dependency_count"].(float64)
+		if !ok || depCount != 2 {
+			t.Fatalf("dependency_count = %v, want 2 — both edges are stored and counted",
+				details["dependency_count"])
+		}
+		deps, _ := details["dependencies"].([]interface{})
+		if len(deps) != 1 {
+			t.Fatalf("dependencies = %v, want only the local edge hydrated", details["dependencies"])
+		}
+		localRow, _ := deps[0].(map[string]interface{})
+		if localRow["id"] != local.ID {
+			t.Errorf("dependencies[0] = %v, want the local issue %s", deps[0], local.ID)
+		}
+		edges, present := details["unresolvable_dependency_edges"].([]interface{})
+		if !present || len(edges) != 1 {
+			t.Fatalf("unresolvable_dependency_edges = %v, want the one cross-repo edge alone",
+				details["unresolvable_dependency_edges"])
+		}
+		edge, _ := edges[0].(map[string]interface{})
+		if edge["depends_on_id"] != "liveop-kmf" || edge["type"] != "blocks" {
+			t.Errorf("unresolvable_dependency_edges[0] = %v, want the liveop-kmf blocks edge", edges[0])
+		}
+
+		stdout, stderr := runShowSplit(t, bd, dir, subject.ID)
+		// The local line is unchanged: the same id, title and priority slot a
+		// fully local issue renders.
+		if !strings.Contains(stdout, local.ID+": Mixed local blocker P") {
+			t.Errorf("the local line must render exactly as it always did:\n%s", stdout)
+		}
+		// The raw line renders too, in the same section, after the local one.
+		localAt, rawAt := strings.Index(stdout, local.ID+": Mixed local blocker"), strings.Index(stdout, "liveop-kmf")
+		if rawAt < 0 || localAt < 0 || rawAt < localAt {
+			t.Errorf("the raw edge line must print after the local line of its section:\n%s", stdout)
+		}
+		if !strings.Contains(stdout, "(cross-repo)") {
+			t.Errorf("the raw edge line must carry its classification label:\n%s", stdout)
+		}
+		if strings.Contains(stderr, "no row in this database") {
+			t.Errorf("the printed raw edge must come off the warning gap:\nstderr:\n%s", stderr)
+		}
+	})
+
 	// NEGATIVE CONTROL, and it is the load-bearing half: a fully local edge
 	// must leave the field unset and stderr silent. Without it every
 	// assertion above is satisfied by a build that reports every issue as
