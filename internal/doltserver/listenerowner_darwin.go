@@ -3,18 +3,26 @@
 package doltserver
 
 import (
+	"context"
 	"errors"
 	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
-// The two process reads classifyListener makes on darwin; tests replace them.
+// The process reads classifyListener and classifyListenerAt make on darwin;
+// tests replace them.
 var (
-	listeningPIDs  = lsofListeningPIDs
-	processParents = psParentPIDs
+	listeningPIDs    = lsofListeningPIDs
+	listeningSockets = lsofListeningSockets
+	processParents   = psParentPIDs
 )
+
+// listenerLookupTimeout bounds each lsof or ps run, so a hung tool cannot
+// stall startup.
+const listenerLookupTimeout = 10 * time.Second
 
 var listenerOwnershipChecked = true
 
@@ -94,7 +102,9 @@ func descendsFrom(p, ancestor int, parents map[int]int) bool {
 // nothing matches, which is reported as no listener, not as an error, so the
 // caller treats both the same way.
 func lsofListeningPIDs(port int) ([]int, error) {
-	out, err := exec.Command("lsof", "-nP", "-t", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN").Output() //nolint:gosec // G702: port is an internal int, not user input
+	ctx, cancel := context.WithTimeout(context.Background(), listenerLookupTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "lsof", "-nP", "-t", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN").Output() //nolint:gosec // G702: port is an internal int, not user input
 	if err != nil && len(out) == 0 {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
@@ -118,7 +128,9 @@ func parseLsofPIDs(out []byte) []int {
 
 // psParentPIDs snapshots every process's parent from `ps -axo pid=,ppid=`.
 func psParentPIDs() (map[int]int, error) {
-	out, err := exec.Command("ps", "-axo", "pid=,ppid=").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), listenerLookupTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ps", "-axo", "pid=,ppid=").Output()
 	if err != nil {
 		return nil, err
 	}
@@ -141,4 +153,103 @@ func parsePSParents(out []byte) map[int]int {
 		parents[pid] = ppid
 	}
 	return parents
+}
+
+// classifyListenerAt is classifyListener for one endpoint, as pairing needs
+// it: of the TCP listeners on port, those bound to host's address or to a
+// wildcard that receives its connections must all be held by pid or its
+// descendants. It is OwnershipForeign when any of them is another
+// process's, so a child that holds some socket on the port does not make a
+// foreign listener on the dialed address its own, and OwnershipUnlisted when
+// lsof lists none. It is OwnershipUnknown where classifyListener is.
+func classifyListenerAt(pid int, host string, port int) Ownership {
+	if !processExists(pid) {
+		return OwnershipForeign
+	}
+	sockets, err := listeningSockets(port)
+	if err != nil {
+		return OwnershipUnknown
+	}
+	var holders []int
+	for _, s := range sockets {
+		if listenAddrReceives(s.addr, host) {
+			holders = append(holders, s.pid)
+		}
+	}
+	if len(holders) == 0 {
+		return OwnershipUnlisted
+	}
+	parents, err := processParents()
+	if err != nil || len(parents) == 0 {
+		return OwnershipUnknown
+	}
+	for _, holder := range holders {
+		if !descendsFrom(holder, pid, parents) {
+			return OwnershipForeign
+		}
+	}
+	return OwnershipOwned
+}
+
+// lsofListener is one TCP listener lsof lists: its process and local
+// address.
+type lsofListener struct {
+	pid  int
+	addr string
+}
+
+// lsofListeningSockets lists the TCP listeners on port with their local
+// addresses. Like lsofListeningPIDs, an lsof that exits 1 with no output
+// lists none.
+func lsofListeningSockets(port int) ([]lsofListener, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), listenerLookupTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "lsof", "-nP", "-F", "ptn", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN").Output() //nolint:gosec // G702: port is an internal int, not user input
+	if err != nil && len(out) == 0 {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return parseLsofListeners(out, port), nil
+}
+
+// parseLsofListeners reads `lsof -F ptn` output: a "p<pid>" line starts a
+// process, and each of its files has an "f<fd>" line, a "t<IPv4|IPv6>" line
+// and an "n<addr>:<port>" line. lsof prints a wildcard address as "*" for
+// either family; an IPv6 one becomes "::" here. Names on another port are
+// skipped.
+func parseLsofListeners(out []byte, port int) []lsofListener {
+	var listeners []lsofListener
+	pid, family := 0, ""
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		switch line[0] {
+		case 'p':
+			pid, _ = strconv.Atoi(line[1:])
+			family = ""
+		case 'f':
+			family = ""
+		case 't':
+			family = line[1:]
+		case 'n':
+			i := strings.LastIndexByte(line, ':')
+			if pid <= 0 || i < 1 || line[i+1:] != strconv.Itoa(port) {
+				continue
+			}
+			addr := strings.Trim(line[1:i], "[]")
+			if addr == "*" {
+				addr = "0.0.0.0"
+				if family == "IPv6" {
+					addr = "::"
+				}
+			}
+			listeners = append(listeners, lsofListener{pid: pid, addr: addr})
+		}
+	}
+	return listeners
 }

@@ -320,8 +320,8 @@ bd dolt stop && bd dolt start
 ```
 
 bd records the UUID only when it can show that the process it launched holds
-the port: through `/proc` on Linux, `lsof` on macOS, and `netstat -aon` on
-Windows. Where it cannot (WSL1, other platforms), the launch fails and leaves
+every listener on the address and port it dialed: through `/proc` on Linux,
+`lsof` on macOS, and `netstat -aon` on Windows. Where it cannot (WSL1, other platforms), the launch fails and leaves
 the record unchanged; turn the check off there. See
 [Troubleshooting](/reference/troubleshooting#refusing-the-dolt-server-its-identity-cannot-be-verified).
 

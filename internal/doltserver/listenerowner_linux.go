@@ -4,9 +4,12 @@ package doltserver
 
 import (
 	"bufio"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -157,4 +160,122 @@ func childPIDs(pid int) []int {
 		}
 	}
 	return out
+}
+
+// classifyListenerAt is classifyListener for one endpoint, as pairing needs
+// it: of the TCP listeners on port, those bound to host's address or to a
+// wildcard that receives its connections must all be held by pid or its
+// descendants. It is OwnershipForeign when any of them is another
+// process's, so a child that holds some socket on the port does not make a
+// foreign listener on the dialed address its own, and OwnershipUnlisted when
+// none is listed. It is OwnershipUnknown where classifyListener is.
+func classifyListenerAt(pid int, host string, port int) Ownership {
+	if procRoot == "/proc" {
+		if self, err := os.Readlink("/proc/self"); err != nil || self != strconv.Itoa(os.Getpid()) {
+			return OwnershipUnknown
+		}
+	}
+	if _, err := os.ReadDir(filepath.Join(procRoot, strconv.Itoa(pid), "fd")); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return OwnershipForeign
+		}
+		return OwnershipUnknown
+	}
+	addrs, err := listeningSocketAddrs(port)
+	if err != nil {
+		return OwnershipUnknown
+	}
+	matching := map[string]bool{}
+	for inode, addr := range addrs {
+		if listenAddrReceives(addr, host) {
+			matching[inode] = true
+		}
+	}
+	if len(matching) == 0 {
+		return OwnershipUnlisted
+	}
+	held := map[string]bool{}
+	seen := map[int]bool{}
+	queue := []int{pid}
+	for len(queue) > 0 {
+		p := queue[0]
+		queue = queue[1:]
+		if p <= 0 || seen[p] {
+			continue
+		}
+		seen[p] = true
+		for inode := range matching {
+			if !held[inode] && processHoldsSocket(p, map[string]bool{inode: true}) {
+				held[inode] = true
+			}
+		}
+		queue = append(queue, childPIDs(p)...)
+	}
+	for inode := range matching {
+		if !held[inode] {
+			return OwnershipForeign
+		}
+	}
+	return OwnershipOwned
+}
+
+// listeningSocketAddrs returns the TCP listeners on port, socket inode to
+// local address, from /proc/net/tcp and /proc/net/tcp6.
+func listeningSocketAddrs(port int) (map[string]string, error) {
+	addrs := map[string]string{}
+	read := 0
+	for _, name := range []string{"tcp", "tcp6"} {
+		f, err := os.Open(filepath.Join(procRoot, "net", name)) //nolint:gosec // G304: fixed /proc paths
+		if err != nil {
+			continue
+		}
+		read++
+		err = parseProcNetTCPListenerAddrs(bufio.NewScanner(f), port, addrs)
+		_ = f.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if read == 0 {
+		return nil, fmt.Errorf("no %s/net/tcp", procRoot)
+	}
+	return addrs, nil
+}
+
+// parseProcNetTCPListenerAddrs adds to addrs the inode and local address of
+// every row of a /proc/net/tcp{,6} table that is a listener on port. A row
+// whose address does not decode is kept with an empty address, which
+// matches no endpoint.
+func parseProcNetTCPListenerAddrs(sc *bufio.Scanner, port int, addrs map[string]string) error {
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) < 10 || fields[3] != tcpListenState {
+			continue
+		}
+		i := strings.LastIndexByte(fields[1], ':')
+		if i < 0 {
+			continue
+		}
+		p, err := strconv.ParseUint(fields[1][i+1:], 16, 16)
+		if err != nil || int(p) != port || fields[9] == "0" {
+			continue
+		}
+		addrs[fields[9]] = decodeProcNetAddr(fields[1][:i])
+	}
+	return sc.Err()
+}
+
+// decodeProcNetAddr decodes a /proc/net/tcp{,6} local address: 8 (IPv4) or
+// 32 (IPv6) hex digits, printed as 32-bit words in host byte order. It
+// returns "" for anything else.
+func decodeProcNetAddr(h string) string {
+	raw, err := hex.DecodeString(h)
+	if err != nil || (len(raw) != net.IPv4len && len(raw) != net.IPv6len) {
+		return ""
+	}
+	ip := make(net.IP, len(raw))
+	for i := 0; i < len(raw); i += 4 {
+		binary.NativeEndian.PutUint32(ip[i:], binary.BigEndian.Uint32(raw[i:]))
+	}
+	return ip.String()
 }

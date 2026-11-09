@@ -11,3 +11,10 @@ var listenerOwnershipChecked = false
 func classifyListener(pid, port int) Ownership {
 	return OwnershipUnknown
 }
+
+// classifyListenerAt cannot tell which process holds a listener on this
+// platform either, so bd cannot pair a server it launches here. Windows
+// pairs through netstat instead (listenerOwnershipAt).
+func classifyListenerAt(pid int, host string, port int) Ownership {
+	return OwnershipUnknown
+}

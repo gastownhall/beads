@@ -175,3 +175,60 @@ func TestListenerOwnershipProvable(t *testing.T) {
 		}
 	})
 }
+
+// TestServerIdentityListenerOwnershipAt_FakeReads: pairing counts every
+// listener that receives the endpoint's connections, so a foreign holder of
+// the dialed address (or of a wildcard covering it) is foreign even when the
+// child holds another socket on the port, which classifyListener accepts.
+func TestServerIdentityListenerOwnershipAt_FakeReads(t *testing.T) {
+	self := os.Getpid()
+	tree := map[int]int{self: 1, 501: self, 600: 1}
+	cases := []struct {
+		name      string
+		host      string
+		sockets   []lsofListener
+		socketErr error
+		parents   map[int]int
+		want      Ownership
+	}{
+		{name: "child holds the address", host: "127.0.0.1", sockets: []lsofListener{{self, "127.0.0.1"}}, parents: tree, want: OwnershipOwned},
+		{name: "wrapper's child holds the address", host: "127.0.0.1", sockets: []lsofListener{{501, "127.0.0.1"}}, parents: tree, want: OwnershipOwned},
+		{name: "foreign holds the address, child another", host: "127.0.0.1", sockets: []lsofListener{{600, "127.0.0.1"}, {self, "::1"}}, parents: tree, want: OwnershipForeign},
+		{name: "mixed holders on the address", host: "127.0.0.1", sockets: []lsofListener{{self, "127.0.0.1"}, {600, "0.0.0.0"}}, parents: tree, want: OwnershipForeign},
+		{name: "foreign IPv6 wildcard", host: "127.0.0.1", sockets: []lsofListener{{self, "127.0.0.1"}, {600, "::"}}, parents: tree, want: OwnershipForeign},
+		{name: "foreign on another address does not count", host: "127.0.0.1", sockets: []lsofListener{{self, "127.0.0.1"}, {600, "192.0.2.7"}}, parents: tree, want: OwnershipOwned},
+		{name: "only another address listed", host: "127.0.0.1", sockets: []lsofListener{{600, "192.0.2.7"}}, parents: tree, want: OwnershipUnlisted},
+		{name: "lsof fails", host: "127.0.0.1", socketErr: errors.New("lsof: timed out"), parents: tree, want: OwnershipUnknown},
+		{name: "ps fails", host: "127.0.0.1", sockets: []lsofListener{{self, "127.0.0.1"}}, want: OwnershipUnknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			origSockets, origParents := listeningSockets, processParents
+			listeningSockets = func(int) ([]lsofListener, error) { return tc.sockets, tc.socketErr }
+			processParents = func() (map[int]int, error) {
+				if tc.parents == nil {
+					return nil, errors.New("ps: timed out")
+				}
+				return tc.parents, nil
+			}
+			t.Cleanup(func() { listeningSockets, processParents = origSockets, origParents })
+			if got := classifyListenerAt(self, tc.host, 3307); got != tc.want {
+				t.Errorf("classifyListenerAt = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseLsofListeners(t *testing.T) {
+	out := "p4100\nf5\ntIPv4\nn127.0.0.1:3307\nf6\ntIPv6\nn[::1]:3307\np9876\nf7\ntIPv6\nn*:3307\nf8\ntIPv4\nn*:3307\nf9\ntIPv4\nn127.0.0.1:13307\n"
+	got := parseLsofListeners([]byte(out), 3307)
+	want := []lsofListener{{4100, "127.0.0.1"}, {4100, "::1"}, {9876, "::"}, {9876, "0.0.0.0"}}
+	if len(got) != len(want) {
+		t.Fatalf("parseLsofListeners = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("listener %d = %v, want %v", i, got[i], want[i])
+		}
+	}
+}
