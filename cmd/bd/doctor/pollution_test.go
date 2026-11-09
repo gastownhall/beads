@@ -1,7 +1,10 @@
 package doctor
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -47,7 +50,11 @@ func TestPollutionSparesLegitimateWork(t *testing.T) {
 		issue.CreatedAt = created
 	}
 
-	if matches := DetectTestPollution(issues); len(matches) != 0 {
+	matches, err := DetectTestPollution(context.Background(), &fakePollutionEvidence{}, issues)
+	if err != nil {
+		t.Fatalf("DetectTestPollution: %v", err)
+	}
+	if len(matches) != 0 {
 		for _, m := range matches {
 			t.Errorf("legitimate issue %s %q matched (score %.2f, reasons %v)", m.Issue.ID, m.Issue.Title, m.Score, m.Reasons)
 		}
@@ -113,7 +120,10 @@ func TestPollutionTitleAndContentRule(t *testing.T) {
 				issue := issue
 				issue.ID = variant.id
 				issue.CreatedAt = variant.created
-				matches := DetectTestPollution([]*types.Issue{&issue})
+				matches, err := DetectTestPollution(context.Background(), &fakePollutionEvidence{}, []*types.Issue{&issue})
+				if err != nil {
+					t.Fatalf("variant %d: DetectTestPollution: %v", i, err)
+				}
 				if !tt.wantMatch {
 					if len(matches) != 0 {
 						t.Fatalf("variant %d: matched %+v, want no match", i, matches[0])
@@ -133,6 +143,196 @@ func TestPollutionTitleAndContentRule(t *testing.T) {
 				if fmt.Sprint(m.Reasons) != fmt.Sprint(tt.wantReasons) {
 					t.Errorf("variant %d: reasons %q, want %q", i, m.Reasons, tt.wantReasons)
 				}
+			}
+		})
+	}
+}
+
+// fakePollutionEvidence is a PollutionEvidence whose rows, counts and errors
+// a test sets, and which records the IDs each lookup received.
+type fakePollutionEvidence struct {
+	outgoing    map[string][]*types.Dependency
+	incoming    map[string][]*types.Dependency
+	comments    map[string]int
+	outgoingErr error
+	incomingErr error
+	commentsErr error
+	calls       map[string][][]string
+}
+
+func (f *fakePollutionEvidence) record(method string, ids []string) {
+	if f.calls == nil {
+		f.calls = map[string][][]string{}
+	}
+	f.calls[method] = append(f.calls[method], slices.Clone(ids))
+}
+
+func (f *fakePollutionEvidence) GetDependencyRecordsForIssues(_ context.Context, ids []string) (map[string][]*types.Dependency, error) {
+	f.record("outgoing", ids)
+	return f.outgoing, f.outgoingErr
+}
+
+func (f *fakePollutionEvidence) GetDependentRecordsForIssues(_ context.Context, ids []string) (map[string][]*types.Dependency, error) {
+	f.record("incoming", ids)
+	return f.incoming, f.incomingErr
+}
+
+func (f *fakePollutionEvidence) GetCommentCounts(_ context.Context, ids []string) (map[string]int, error) {
+	f.record("comments", ids)
+	return f.comments, f.commentsErr
+}
+
+// pollutionCandidate returns an issue the title and content rule matches.
+func pollutionCandidate(id string) *types.Issue {
+	return &types.Issue{ID: id, Title: "test-" + id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+}
+
+func matchIDs(matches []PollutionMatch) []string {
+	var ids []string
+	for _, m := range matches {
+		ids = append(ids, m.Issue.ID)
+	}
+	return ids
+}
+
+// TestPollutionExcludesProtectedIssues pins that an otherwise matching issue
+// is never a pollution match when it is closed, an epic, pinned, a template
+// or owned by another tracker or system; other statuses stay eligible.
+func TestPollutionExcludesProtectedIssues(t *testing.T) {
+	t.Parallel()
+
+	ref := "gh-9"
+	blank := "  "
+	tests := []struct {
+		name      string
+		mutate    func(*types.Issue)
+		wantMatch bool
+	}{
+		{name: "open", mutate: func(*types.Issue) {}, wantMatch: true},
+		{name: "in progress", mutate: func(i *types.Issue) { i.Status = types.StatusInProgress }, wantMatch: true},
+		{name: "blocked", mutate: func(i *types.Issue) { i.Status = types.StatusBlocked }, wantMatch: true},
+		{name: "deferred", mutate: func(i *types.Issue) { i.Status = types.StatusDeferred }, wantMatch: true},
+		{name: "blank external ref", mutate: func(i *types.Issue) { i.ExternalRef = &blank }, wantMatch: true},
+		{name: "closed", mutate: func(i *types.Issue) { i.Status = types.StatusClosed }},
+		{name: "epic", mutate: func(i *types.Issue) { i.IssueType = types.TypeEpic }},
+		{name: "pinned flag", mutate: func(i *types.Issue) { i.Pinned = true }},
+		{name: "pinned status", mutate: func(i *types.Issue) { i.Status = types.StatusPinned }},
+		{name: "template", mutate: func(i *types.Issue) { i.IsTemplate = true }},
+		{name: "external ref", mutate: func(i *types.Issue) { i.ExternalRef = &ref }},
+		{name: "source system", mutate: func(i *types.Issue) { i.SourceSystem = "jira" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			issue := pollutionCandidate("bd-1")
+			tt.mutate(issue)
+			evidence := &fakePollutionEvidence{}
+			matches, err := DetectTestPollution(context.Background(), evidence, []*types.Issue{issue})
+			if err != nil {
+				t.Fatalf("DetectTestPollution: %v", err)
+			}
+			if got := len(matches) == 1; got != tt.wantMatch {
+				t.Fatalf("matched = %v, want %v", got, tt.wantMatch)
+			}
+			if !tt.wantMatch && len(evidence.calls) != 0 {
+				t.Fatalf("evidence lookups %v for a protected issue, want none", evidence.calls)
+			}
+		})
+	}
+}
+
+// TestPollutionExcludesConnectedIssues pins that any raw dependency row in
+// either direction, whatever its type and whether or not its other end
+// resolves, and any comment rule a candidate out.
+func TestPollutionExcludesConnectedIssues(t *testing.T) {
+	t.Parallel()
+
+	dep := func(from, to string, typ types.DependencyType) *types.Dependency {
+		return &types.Dependency{IssueID: from, DependsOnID: to, Type: typ}
+	}
+	tests := []struct {
+		name     string
+		evidence fakePollutionEvidence
+	}{
+		{name: "outgoing blocks", evidence: fakePollutionEvidence{outgoing: map[string][]*types.Dependency{"bd-1": {dep("bd-1", "bd-9", types.DepBlocks)}}}},
+		{name: "outgoing parent-child", evidence: fakePollutionEvidence{outgoing: map[string][]*types.Dependency{"bd-1": {dep("bd-1", "bd-9", types.DepParentChild)}}}},
+		{name: "outgoing related", evidence: fakePollutionEvidence{outgoing: map[string][]*types.Dependency{"bd-1": {dep("bd-1", "bd-9", types.DepRelated)}}}},
+		{name: "outgoing external", evidence: fakePollutionEvidence{outgoing: map[string][]*types.Dependency{"bd-1": {dep("bd-1", "external:other:cap", types.DepBlocks)}}}},
+		{name: "outgoing unresolved", evidence: fakePollutionEvidence{outgoing: map[string][]*types.Dependency{"bd-1": {dep("bd-1", "gone-404", types.DepRelated)}}}},
+		{name: "incoming blocks", evidence: fakePollutionEvidence{incoming: map[string][]*types.Dependency{"bd-1": {dep("bd-9", "bd-1", types.DepBlocks)}}}},
+		{name: "incoming parent-child", evidence: fakePollutionEvidence{incoming: map[string][]*types.Dependency{"bd-1": {dep("bd-9", "bd-1", types.DepParentChild)}}}},
+		{name: "incoming discovered-from", evidence: fakePollutionEvidence{incoming: map[string][]*types.Dependency{"bd-1": {dep("bd-9", "bd-1", types.DepDiscoveredFrom)}}}},
+		{name: "comment", evidence: fakePollutionEvidence{comments: map[string]int{"bd-1": 1}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			evidence := tt.evidence
+			issues := []*types.Issue{pollutionCandidate("bd-1"), pollutionCandidate("bd-2")}
+			matches, err := DetectTestPollution(context.Background(), &evidence, issues)
+			if err != nil {
+				t.Fatalf("DetectTestPollution: %v", err)
+			}
+			if got := matchIDs(matches); !slices.Equal(got, []string{"bd-2"}) {
+				t.Fatalf("matches = %v, want [bd-2]", got)
+			}
+		})
+	}
+}
+
+// TestPollutionEvidenceLookups pins that evidence is read once per method,
+// batched over the preliminary candidates only, and not at all when no
+// issue passes the title, content and protection rules.
+func TestPollutionEvidenceLookups(t *testing.T) {
+	t.Parallel()
+
+	closed := pollutionCandidate("bd-3")
+	closed.Status = types.StatusClosed
+	issues := []*types.Issue{
+		pollutionCandidate("bd-1"),
+		{ID: "bd-real", Title: "Fix login", Status: types.StatusOpen, IssueType: types.TypeBug},
+		closed,
+		pollutionCandidate("bd-2"),
+	}
+	evidence := &fakePollutionEvidence{}
+	if _, err := DetectTestPollution(context.Background(), evidence, issues); err != nil {
+		t.Fatalf("DetectTestPollution: %v", err)
+	}
+	for _, method := range []string{"outgoing", "incoming", "comments"} {
+		if got := evidence.calls[method]; len(got) != 1 || !slices.Equal(got[0], []string{"bd-1", "bd-2"}) {
+			t.Errorf("%s lookups = %v, want one call with [bd-1 bd-2]", method, got)
+		}
+	}
+
+	evidence = &fakePollutionEvidence{}
+	matches, err := DetectTestPollution(context.Background(), evidence, []*types.Issue{issues[1], closed})
+	if err != nil || len(matches) != 0 {
+		t.Fatalf("DetectTestPollution = %v, %v; want no matches", matches, err)
+	}
+	if len(evidence.calls) != 0 {
+		t.Fatalf("evidence lookups %v with no candidates, want none", evidence.calls)
+	}
+}
+
+// TestPollutionEvidenceErrors pins that a failure in any evidence lookup
+// returns an error and no matches, never an unchecked candidate.
+func TestPollutionEvidenceErrors(t *testing.T) {
+	t.Parallel()
+
+	boom := errors.New("boom")
+	for name, evidence := range map[string]*fakePollutionEvidence{
+		"outgoing": {outgoingErr: boom},
+		"incoming": {incomingErr: boom},
+		"comments": {commentsErr: boom},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			matches, err := DetectTestPollution(context.Background(), evidence, []*types.Issue{pollutionCandidate("bd-1")})
+			if !errors.Is(err, boom) {
+				t.Fatalf("err = %v, want %v", err, boom)
+			}
+			if matches != nil {
+				t.Fatalf("matches = %v, want none on error", matchIDs(matches))
 			}
 		})
 	}
