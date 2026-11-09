@@ -724,8 +724,7 @@ SQL transaction commits first: from then on the change is in the working set
 that every later command reads. The Dolt history commit that records it comes
 in a later session, and another process can run in between. SQL visibility
 therefore precedes history publication: until the history commit lands, the
-change is not in Dolt history queries. (`bd dolt push` first commits any
-pending working-set changes, then pushes.) That history commit stages whole
+change is not in Dolt history queries. That history commit stages whole
 tables, so it can also take in rows another process wrote in the interval.
 This is an ordering observation, not a promise that every interleaving is
 loss-free, and no scoped-commit guarantee follows from it.

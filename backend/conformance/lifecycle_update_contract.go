@@ -920,12 +920,14 @@ func RunLifecycleUpdateConditionalGuardsGateOrdinaryEdits(t *testing.T, ctx cont
 // torn write belonging to neither the seed nor any one racer.
 //
 // THIS IS A GENUINE CONCURRENCY TEST, not N sequential attempts dressed up as
-// parallel ones. cmd/bd's embedded-mode backend admits only one `bd` process
-// at a time (an exclusive flock — see acquireEmbeddedLock in
-// cmd/bd/store_factory.go), which would make "exactly one winner" trivially
-// true even of a buggy read-then-write implementation with no atomicity at
-// all, because no second process could ever observe the first one's
-// in-flight state. That is why the CLI-level --if-revision tests
+// parallel ones. cmd/bd's embedded-mode backend serializes engine sessions
+// across `bd` processes (an open embedded engine holds the database's
+// exclusive lock, and each store operation runs in a session of its own;
+// the acquireEmbeddedLock flock in cmd/bd/store_factory.go guards only
+// `bd init`), which would make "exactly one winner" trivially true even of
+// a buggy read-then-write implementation with no atomicity at all, because
+// no second process could ever observe the first one's in-flight state.
+// That is why the CLI-level --if-revision tests
 // (cmd/bd/if_revision_embedded_test.go) assert the match/mismatch CONTRACT
 // sequentially and leave the race to this fixture: goroutines sharing one
 // already-open Lifecycle are the one shape in this suite that can actually

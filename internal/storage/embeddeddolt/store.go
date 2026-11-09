@@ -48,8 +48,10 @@ var _ storage.ExternalRefHistoryQuerier = (*EmbeddedDoltStore)(nil)
 // Multiple bd processes may share the database, but their engine sessions are
 // serialized: an open engine holds the database's exclusive lock, and the
 // dolthub/driver/v2 connector retries a locked open with backoff until the
-// lock frees or the context is canceled (OpenSQL). File-level locking in bd
-// is only used during bd init to protect one-time initialization steps.
+// lock frees or the context is canceled (OpenSQL). bd's own file locks do not
+// serialize store operations: one guards only bd init's one-time setup, and
+// the workspace gate is shared by normal commands and taken exclusively only
+// by maintenance operations.
 //
 // A write's SQL commit and the Dolt history commit that publishes it run in
 // separate engine sessions, so another process can run in between: its rows

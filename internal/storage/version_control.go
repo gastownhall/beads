@@ -201,8 +201,9 @@ type VersionControl interface {
 	// commit for intentional config writes (bd config set) in server mode.
 	// There, unlike CommitWithConfig ('-Am'), it never stages other tables, so
 	// a concurrent operation's dirty working set is not swept (GH#2455).
-	// Embedded mode has no concurrent writer to sweep and commits the whole
-	// working set, as its CommitWithConfig does.
+	// Embedded mode commits the whole working set, as its CommitWithConfig
+	// does: its engine sessions are serialized, not single-process, so rows
+	// another bd process wrote since this store's SQL commit are swept in.
 	// GH#4078: without this, server-mode config writes strand the working
 	// set dirty — generic Commit() excludes config and silently no-ops.
 	CommitConfigOnly(ctx context.Context, message string) error

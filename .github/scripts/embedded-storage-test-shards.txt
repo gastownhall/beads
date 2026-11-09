@@ -280,6 +280,7 @@
 40 12 TestEmbeddedReadyClaimerAnswersTheQuestionReaderReadyLists
 40 12 TestHistoryPresenceContract
 40 12 TestLifecycleUpdateContract
+40 12 TestMultiProcessClosePersists
 40 12 TestReaderListExcludeStatusAcceptsAWorkspaceCustomStatus
 
 40 13 TestEmbeddedActivationDoesNotOpenTheEngine
@@ -569,6 +570,7 @@
 40 32 TestRowVersionContract
 40 32 TestWithPeerAuth_MissingRemoteFailsClosed
 
+40 33 TestClosePersistHelperProcess
 40 33 TestEmbeddedBatchCloserDuplicateItemRecloseAtItsOwnIndex
 40 33 TestEmbeddedDependencyEditorClosedChildAddSatisfiesAnAnyChildrenGate
 40 33 TestEmbeddedDependencyEditorValidationRefusalsWriteNothing
