@@ -1016,6 +1016,128 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 			t.Errorf("work.first.Needs = %v, want %v", got, want)
 		}
 	})
+
+	t.Run("dependencies on the expanded step point at its last step", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "work", Title: "Work", Expand: "inline-exp"},
+			{ID: "land", Title: "Land", Needs: []string{"work"}},
+			{ID: "notify", Title: "Notify", DependsOn: []string{"work"}},
+			{
+				ID:    "group",
+				Title: "Group",
+				Children: []*Step{
+					{ID: "child", Title: "Child", Needs: []string{"work"}},
+				},
+			},
+		}
+
+		result, err := ApplyInlineExpansions(steps, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+
+		stepMap := buildStepMap(result)
+		if got := stepMap["land"].Needs; len(got) != 1 || got[0] != "work.second" {
+			t.Errorf("land.Needs = %v, want [work.second]", got)
+		}
+		if got := stepMap["notify"].DependsOn; len(got) != 1 || got[0] != "work.second" {
+			t.Errorf("notify.DependsOn = %v, want [work.second]", got)
+		}
+		if got := stepMap["child"].Needs; len(got) != 1 || got[0] != "work.second" {
+			t.Errorf("child.Needs = %v, want [work.second]", got)
+		}
+		if got := steps[1].Needs; len(got) != 1 || got[0] != "work" {
+			t.Errorf("input land.Needs = %v, want [work] unchanged", got)
+		}
+	})
+
+	// GH#7637: a step that names an inline-expanded step in needs or
+	// depends_on waits for the expansion's last step, in the same list
+	// position, as with [[compose.expand]]. The expansion roots keep the
+	// target's own prerequisites, and the input steps are not modified.
+	t.Run("needs and depends_on on an inline-expanded step are retargeted in place", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "setup", Title: "Setup"},
+			{ID: "prepare", Title: "Prepare"},
+			{ID: "land", Title: "Land", Needs: []string{"setup", "work", "prepare"}},
+			{ID: "work", Title: "Work", Needs: []string{"setup", "prepare"}, DependsOn: []string{"prepare"}, Expand: "inline-exp"},
+			{ID: "notify", Title: "Notify", DependsOn: []string{"prepare", "work"}},
+			{ID: "other", Title: "Other", Needs: []string{"setup"}},
+		}
+		before := snapshotStepDeps(steps)
+
+		result, err := ApplyInlineExpansions(steps, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+		if after := snapshotStepDeps(steps); after != before {
+			t.Errorf("input steps modified:\nbefore %s\nafter  %s", before, after)
+		}
+
+		byID := buildStepMap(result)
+		if _, ok := byID["work"]; ok {
+			t.Fatalf("work still present after expansion: %v", collectStepIDsForTest(result))
+		}
+		if got, want := byID["land"].Needs, []string{"setup", "work.second", "prepare"}; !slices.Equal(got, want) {
+			t.Errorf("land.Needs = %v, want %v", got, want)
+		}
+		if got, want := byID["notify"].DependsOn, []string{"prepare", "work.second"}; !slices.Equal(got, want) {
+			t.Errorf("notify.DependsOn = %v, want %v", got, want)
+		}
+		if got, want := byID["other"].Needs, []string{"setup"}; !slices.Equal(got, want) {
+			t.Errorf("other.Needs = %v, want %v", got, want)
+		}
+		if got, want := byID["work.first"].Needs, []string{"setup", "prepare"}; !slices.Equal(got, want) {
+			t.Errorf("work.first.Needs = %v, want %v (work's own prerequisites)", got, want)
+		}
+		if got, want := byID["work.first"].DependsOn, []string{"prepare"}; !slices.Equal(got, want) {
+			t.Errorf("work.first.DependsOn = %v, want %v (work's own prerequisites)", got, want)
+		}
+		if got, want := byID["work.second"].Needs, []string{"work.first"}; !slices.Equal(got, want) {
+			t.Errorf("work.second.Needs = %v, want %v", got, want)
+		}
+	})
+
+	// Two expanded steps where the second needs the first: the second's
+	// roots inherit that need, and it names the first's last step.
+	t.Run("a need between two inline-expanded steps names the first's last step", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "a", Title: "A", Expand: "inline-exp"},
+			{ID: "b", Title: "B", Needs: []string{"a"}, Expand: "inline-exp"},
+		}
+
+		result, err := ApplyInlineExpansions(steps, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+		byID := buildStepMap(result)
+		if got, want := byID["b.first"].Needs, []string{"a.second"}; !slices.Equal(got, want) {
+			t.Errorf("b.first.Needs = %v, want %v", got, want)
+		}
+		if got, want := byID["b.second"].Needs, []string{"b.first"}; !slices.Equal(got, want) {
+			t.Errorf("b.second.Needs = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("an expanded step with no dependents", func(t *testing.T) {
+		result, err := ApplyInlineExpansions([]*Step{{ID: "work", Title: "Work", Expand: "inline-exp"}}, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+		if got := collectStepIDsForTest(result); !slices.Equal(got, []string{"work.first", "work.second"}) {
+			t.Errorf("result = %v, want [work.first work.second]", got)
+		}
+	})
+}
+
+// snapshotStepDeps renders the IDs, Needs and DependsOn of a step tree, to
+// check that a transform left its input unmodified.
+func snapshotStepDeps(steps []*Step) string {
+	var b strings.Builder
+	for _, s := range steps {
+		fmt.Fprintf(&b, "%s needs=%v depends_on=%v children=[%s] ", s.ID, s.Needs, s.DependsOn, snapshotStepDeps(s.Children))
+	}
+	return b.String()
 }
 
 func TestFindDuplicateStepIDs(t *testing.T) {
