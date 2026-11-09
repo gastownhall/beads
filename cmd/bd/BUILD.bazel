@@ -928,6 +928,7 @@ go_test(
         "import_promoted_wisp_embedded_test.go",
         "import_proxied_integration_test.go",
         "import_reject_test.go",
+        "import_screen_test.go",
         "import_shared_unit_test.go",
         "import_sync_prefix_test.go",
         "info_embedded_test.go",
