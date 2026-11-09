@@ -1,6 +1,7 @@
 package formula
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1241,6 +1242,66 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 					if !slices.Equal(s.Needs, want) {
 						t.Errorf("%s.Needs = %v, want %v", id, s.Needs, want)
 					}
+				}
+			})
+		}
+	})
+
+	// A template step that names {target} without the template recreating
+	// it would depend on a step the expansion removes: the edge is lost, and
+	// retargeting it to the last step could make a step wait on itself. The
+	// expansion is refused as an invalid formula instead.
+	t.Run("a template step naming its own removed target is refused", func(t *testing.T) {
+		dir := t.TempDir()
+		templates := map[string]string{
+			"self-needs": `[
+				{"id": "{target}.a", "title": "A"},
+				{"id": "{target}.b", "title": "B", "needs": ["{target}.a", "{target}"]}
+			]`,
+			"self-depends-on": `[
+				{"id": "{target}.a", "title": "A"},
+				{"id": "{target}.b", "title": "B", "depends_on": ["{target}"]}
+			]`,
+			"self-child": `[
+				{"id": "{target}.group", "title": "Group", "children": [
+					{"id": "{target}.child", "title": "Child", "needs": ["{target}"]}
+				]}
+			]`,
+		}
+		for name, template := range templates {
+			src := fmt.Sprintf(`{"formula": %q, "type": "expansion", "version": 1, "template": %s}`, name, template)
+			if err := os.WriteFile(filepath.Join(dir, name+".formula.json"), []byte(src), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		selfParser := NewParser(dir)
+
+		for _, tt := range []struct{ expand, offender string }{
+			{"self-needs", "work.b"},
+			{"self-depends-on", "work.b"},
+			{"self-child", "work.child"},
+		} {
+			t.Run(tt.expand, func(t *testing.T) {
+				steps := []*Step{
+					{ID: "setup", Title: "Setup"},
+					{ID: "group", Title: "Group", Children: []*Step{
+						{ID: "work", Title: "Work", Needs: []string{"setup"}, Expand: tt.expand},
+					}},
+					{ID: "land", Title: "Land", Needs: []string{"work"}},
+				}
+				before := snapshotStepDeps(steps)
+
+				_, err := ApplyInlineExpansions(steps, selfParser)
+				if !errors.Is(err, ErrValidation) {
+					t.Fatalf("ApplyInlineExpansions error = %v, want an ErrValidation", err)
+				}
+				for _, want := range []string{`inline expand on step "work"`, fmt.Sprintf("%q", tt.offender)} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error = %q, want it to contain %s", err, want)
+					}
+				}
+				if after := snapshotStepDeps(steps); after != before {
+					t.Errorf("input steps modified:\nbefore %s\nafter  %s", before, after)
 				}
 			})
 		}
