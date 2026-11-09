@@ -391,3 +391,44 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 		})
 	}
 }
+
+// TestReadDoltProcessPIDsListsLiveServer runs the reader against the system
+// ps, so the parser is held to the column format the reader requests. A shell
+// blocked on stdin, with dolt and sql-server in its arguments, stands in for
+// a server. Linux populates the state column, so this pins the requested
+// column format; the blank-state regression itself is covered by the
+// recorded rows in TestParseDoltProcessPIDs (GH#7121).
+func TestReadDoltProcessPIDsListsLiveServer(t *testing.T) {
+	if _, err := exec.LookPath("ps"); err != nil {
+		t.Skip("ps not available")
+	}
+	cmd := exec.Command("/bin/sh", "-c", "read line", "dolt", "sql-server")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(exited)
+	}()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		<-exited
+	})
+
+	pids, err := readDoltProcessPIDs()
+	if err != nil {
+		t.Fatalf("readDoltProcessPIDs() error = %v", err)
+	}
+	for _, pid := range pids {
+		if pid == cmd.Process.Pid {
+			return
+		}
+	}
+	t.Fatalf("readDoltProcessPIDs() = %v, want it to include stand-in PID %d", pids, cmd.Process.Pid)
+}
