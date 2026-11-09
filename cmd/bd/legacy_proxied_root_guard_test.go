@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -347,21 +348,26 @@ func errString(err error) string {
 }
 
 // TestLegacyProxiedRootGuardAfterOpen pins the wiring: the guard arms only
-// after a successful managed-local proxied open; an external topology or a
-// failed open leaves the legacy root alone.
+// after a successful managed-local proxied open that is not a preview; an
+// external topology, a failed open or a --dry-run/--inspect preview leaves the
+// legacy root alone, and the next ordinary open arms it.
 func TestLegacyProxiedRootGuardAfterOpen(t *testing.T) {
+	managed := sqlServerUOWTopology{database: "beads"}
 	for name, tc := range map[string]struct {
 		topology sqlServerUOWTopology
+		opts     []uow.ProviderOption
 		openErr  error
 		armed    bool
 	}{
-		"managed-local success": {topology: sqlServerUOWTopology{database: "beads"}, armed: true},
-		"managed-local failure": {topology: sqlServerUOWTopology{database: "beads"}, openErr: errors.New("open failed")},
-		"external success":      {topology: sqlServerUOWTopology{database: "beads", external: &configfile.ExternalDoltConfig{}}},
+		"managed-local success":           {topology: managed, armed: true},
+		"managed-local read-only success": {topology: managed, opts: rootProviderOptions(false, true, false), armed: true},
+		"managed-local preview success":   {topology: managed, opts: rootProviderOptions(true, true, false)},
+		"managed-local failure":           {topology: managed, openErr: errors.New("open failed")},
+		"external success":                {topology: sqlServerUOWTopology{database: "beads", external: &configfile.ExternalDoltConfig{}}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			repo, beadsDir := legacyGuardWorkspace(t, doctor.GitignoreTemplate)
-			armLegacyProxiedRootGuardAfterOpen(t.Context(), beadsDir, tc.topology, tc.openErr)
+			armLegacyProxiedRootGuardAfterOpen(t.Context(), beadsDir, tc.topology, tc.opts, tc.openErr)
 			if tc.armed {
 				assertLegacyRootArmed(t, repo, beadsDir)
 			} else {
@@ -369,4 +375,12 @@ func TestLegacyProxiedRootGuardAfterOpen(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("preview, then an ordinary open", func(t *testing.T) {
+		repo, beadsDir := legacyGuardWorkspace(t, doctor.GitignoreTemplate)
+		armLegacyProxiedRootGuardAfterOpen(t.Context(), beadsDir, managed, rootProviderOptions(true, false, false), nil)
+		assertLegacyRootAbsent(t, beadsDir)
+		armLegacyProxiedRootGuardAfterOpen(t.Context(), beadsDir, managed, rootProviderOptions(false, false, false), nil)
+		assertLegacyRootArmed(t, repo, beadsDir)
+	})
 }

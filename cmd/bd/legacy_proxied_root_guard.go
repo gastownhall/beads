@@ -11,15 +11,16 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/storage/uow"
 )
 
-// legacyProxiedRootName is the proxied-server data root bd releases up to
-// v1.2.x defaulted to (<beadsDir>/proxieddb) when no environment variable or
-// sidecar named another. Current builds resolve the default root through
-// doltserver.ResolveDoltDir (<beadsDir>/dolt), and default proxied init
-// writes no sidecar, so an older bd run in a workspace this build created
-// finds nothing at proxieddb, initializes a fresh database there, and
-// reports "No issues found." with exit 0 (GH#5104).
+// legacyProxiedRootName is the proxied-server data root bd v1.0.5, v1.1.0
+// through v1.1.2 and v1.2.2 defaulted to (<beadsDir>/proxieddb) when no
+// environment variable or sidecar named another. Current builds resolve the
+// default root through doltserver.ResolveDoltDir (<beadsDir>/dolt), and
+// default proxied init writes no sidecar, so an older bd run in a workspace
+// this build created finds nothing at proxieddb, initializes a fresh database
+// there, and reports "No issues found." with exit 0 (GH#5104).
 const legacyProxiedRootName = "proxieddb"
 
 // legacyProxiedRootGitTimeout bounds the read-only git check-ignore the guard
@@ -104,9 +105,11 @@ func armLegacyProxiedRootGuard(ctx context.Context, beadsDir string) {
 // armLegacyProxiedRootGuardAfterOpen arms the guard after a successful
 // managed-local proxied-server open, the only topology whose default root an
 // older bd would have resolved to proxieddb. An external topology has no local
-// root, and a failed open leaves the workspace as it found it.
-func armLegacyProxiedRootGuardAfterOpen(ctx context.Context, beadsDir string, topology sqlServerUOWTopology, openErr error) {
-	if openErr != nil || topology.external != nil {
+// root, a failed open leaves the workspace as it found it, and a preview open
+// (opts carry uow.WithPreview: --dry-run, --inspect) writes nothing before its
+// command runs; the next ordinary open arms it.
+func armLegacyProxiedRootGuardAfterOpen(ctx context.Context, beadsDir string, topology sqlServerUOWTopology, opts []uow.ProviderOption, openErr error) {
+	if openErr != nil || topology.external != nil || uow.OpensForPreview(opts...) {
 		return
 	}
 	armLegacyProxiedRootGuard(ctx, beadsDir)

@@ -876,7 +876,8 @@ managed local server, and only when all of these hold:
   re-includes it.
 
 A workspace whose proxied server is an external server has no local data
-directory, so `bd` writes no file there.
+directory, so `bd` writes no file there. A `--dry-run` or `--inspect` preview
+writes none either; the next ordinary command does.
 
 What the file does not cover:
 

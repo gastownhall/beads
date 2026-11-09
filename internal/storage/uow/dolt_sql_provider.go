@@ -250,6 +250,14 @@ func OpensForBeadWrites(opts ...ProviderOption) bool {
 	return !resolved.preview && !resolved.readOnly && !resolved.workingSetReconcile
 }
 
+// OpensForPreview reports whether a provider opened with opts is a
+// non-mutating preview (WithPreview). A caller that writes workspace files
+// after a successful open reads it to skip them, as the open itself skips
+// creating and migrating the database.
+func OpensForPreview(opts ...ProviderOption) bool {
+	return applyProviderOptions(opts).preview
+}
+
 // WithProxiedServerMode marks the open as belonging to a proxied-server-mode
 // workspace. See providerOptions.proxiedServerMode: only the refusal guidance
 // depends on it, and only the proxied CLI open may set it.

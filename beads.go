@@ -102,13 +102,16 @@ func configuredBackendUnavailable(backend, beadsDir string, cfg *configfile.Conf
 // checkDiscoveredBackend refuses a workspace that OpenBestAvailableWith cannot
 // open, reading its metadata as configfile.LoadForDiscovery does, which never
 // rewrites the workspace: a historical SQLite workspace
-// (configfile.LoadDiscoveredForOpen), or a removed or unrecognized backend
-// (configuredBackendUnavailable). It runs before configfile.Load, which
-// migrates a legacy config.json into metadata.json and drops the keys Config
-// does not know, and before anything that creates a database or gate file, as
-// the CLI's command admission checks the same read before any Load. Metadata
-// that does not load is left to Load to report; no metadata at all (and no
-// SQLite database) selects Dolt.
+// (configfile.LoadDiscoveredForOpen), a removed or unrecognized backend
+// (configuredBackendUnavailable), or a Dolt workspace whose dolt_mode this
+// build does not recognize (configfile.IsKnownDoltMode), which the mode
+// predicates would read as embedded and open an empty store in its place
+// (GH#5104). It runs before configfile.Load, which migrates a legacy
+// config.json into metadata.json and drops the keys Config does not know, and
+// before anything that creates a database or gate file, as the CLI's command
+// admission checks the same read before any Load. Metadata that does not load
+// is left to Load to report; no metadata at all (and no SQLite database)
+// selects Dolt.
 func checkDiscoveredBackend(beadsDir string) error {
 	cfg, err := configfile.LoadDiscoveredForOpen(beadsDir)
 	if err != nil {
@@ -116,6 +119,11 @@ func checkDiscoveredBackend(beadsDir string) error {
 	}
 	if cfg != nil && !configfile.IsSupportedBackend(cfg.Backend) {
 		return configuredBackendUnavailable(cfg.Backend, beadsDir, cfg)
+	}
+	// Only Dolt reads dolt_mode: a registered backend ignores it, as command
+	// admission does.
+	if cfg != nil && (cfg.Backend == "" || cfg.Backend == configfile.BackendDolt) && !configfile.IsKnownDoltMode(cfg.DoltMode) {
+		return configfile.UnknownDoltModeErrorAt(cfg.DoltMode, beadsDir)
 	}
 	return nil
 }
@@ -394,7 +402,8 @@ func AllowSharedSchemaMigration(allow bool) {
 // The workspace holding dbPath (its parent directory) is refused, before
 // anything is written there, when bd run in it would refuse it from its
 // contents (checkDiscoveredBackend): a historical SQLite workspace
-// (*LegacyWorkspaceError), or a removed or unknown backend. An existing
+// (*LegacyWorkspaceError), a removed or unknown backend, or a dolt_mode this
+// build does not recognize. An existing
 // database whose project ID differs from the one in that workspace's
 // metadata.json is refused as well, with an untyped PROJECT IDENTITY
 // MISMATCH error (GH#5559).

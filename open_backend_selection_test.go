@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/testutil/legacyworkspace"
@@ -583,6 +584,79 @@ func TestPublicOpensRefuseUnsupportedBackendBeforeWriting(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestPublicOpensRefuseUnknownDoltModeBeforeWriting pins GH#5104 in the
+// library: every public open refuses a Dolt workspace whose dolt_mode this
+// build does not recognize, with the refusal command admission prints, before
+// it writes anything, whichever file holds the mode. Without it
+// OpenBestAvailable and OpenBestAvailableWith read the mode as embedded,
+// migrated a legacy config.json into metadata.json (dropping the keys Config
+// does not know) and returned a new, empty embedded store, and Open dialed the
+// server. A registered backend ignores dolt_mode, as command admission does,
+// so the opens that dispatch to the registry still reach it.
+func TestPublicOpensRefuseUnknownDoltModeBeforeWriting(t *testing.T) {
+	// If the refusal were missing, a server-mode open must fail fast rather
+	// than reach TestMain's shared test server.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	const mode = "some-future-mode"
+	writeWorkspace := func(t *testing.T, file, backend string) (root, beadsDir string) {
+		t.Helper()
+		root = t.TempDir()
+		beadsDir = filepath.Join(root, ".beads")
+		if err := os.MkdirAll(filepath.Join(beadsDir, "dolt", ".dolt"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		metadata := `{"backend":"` + backend + `","dolt_mode":"` + mode + `","dolt_database":"beads_legacy","future_binding":"keep-me"}`
+		if err := os.WriteFile(filepath.Join(beadsDir, file), []byte(metadata), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return root, beadsDir
+	}
+	for _, file := range []string{"config.json", "metadata.json"} {
+		for _, backend := range []string{"dolt", ""} {
+			for name, open := range publicOpens {
+				t.Run(file+"/backend="+backend+"/"+name, func(t *testing.T) {
+					root, beadsDir := writeWorkspace(t, file, backend)
+					before := workspaceTreeDigest(t, root)
+
+					store, err := open(t.Context(), beadsDir)
+					if err == nil {
+						_ = store.Close()
+						t.Fatalf("%s opened a workspace whose %s names dolt_mode %q", name, file, mode)
+					}
+					// The tree first: a regression that migrates config.json
+					// or creates an embedded store must report the write.
+					if after := workspaceTreeDigest(t, root); !maps.Equal(after, before) {
+						t.Fatalf("%s changed the workspace: before %v, after %v", name, before, after)
+					}
+					if store != nil {
+						t.Fatalf("%s returned a non-nil %T with its refusal", name, store)
+					}
+					if want := configfile.UnknownDoltModeErrorAt(mode, beadsDir).Error(); err.Error() != want {
+						t.Fatalf("%s error = %v, want the shared unknown-dolt_mode refusal %q", name, err, want)
+					}
+				})
+			}
+		}
+	}
+
+	const registered = "registry-unknown-dolt-mode"
+	registerWorkspaceBackend(t, registered)
+	for _, name := range []string{"OpenBestAvailable", "OpenBestAvailableWith"} {
+		t.Run("registered/"+name, func(t *testing.T) {
+			_, beadsDir := writeWorkspace(t, "metadata.json", registered)
+			store, err := publicOpens[name](t.Context(), beadsDir)
+			if store != nil {
+				_ = store.Close()
+				t.Fatalf("%s returned a store instead of the registered backend's own result", name)
+			}
+			if !errors.Is(err, errRegistryBackendOpen) {
+				t.Fatalf("%s error = %v, want the registered backend's Open result", name, err)
+			}
+		})
 	}
 }
 

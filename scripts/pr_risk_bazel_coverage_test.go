@@ -978,7 +978,8 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 		"//cmd/bd:bd_proxied_test": {
 			[]string{"$(rootpath //:.github/scripts/proxied-test-shard.sh)", "BEADS_TEST_CMD_BINARY", "$(rootpath :bd_test)"},
 			map[string]string{
-				"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)", "BEADS_TEST_DOLT_SERVER": "local", "BEADS_TEST_GIT_IDENTITY": "1",
+				"BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)", "BEADS_TEST_BD_V1110_BIN": "$(rlocationpath @bd_releases//:v1.1.0)",
+				"BEADS_TEST_DOLT_SERVER": "local", "BEADS_TEST_GIT_IDENTITY": "1",
 				"BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)", "BEADS_TEST_PROXIED_SERVER": "1",
 				"BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1", "BEADS_TEST_REQUIRE_SOCAT": "1", "GOMAXPROCS": "4",
 			},

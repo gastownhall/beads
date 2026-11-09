@@ -42,8 +42,8 @@ func TestProxiedServerLegacyRootGuardArmsOnInit(t *testing.T) {
 // TestProxiedServerLegacyRootGuardRefusesReleasedBD pins the point of the
 // marker against a real older release: run in a workspace the current build
 // initialized, a released bd whose default proxied-server root is
-// .beads/proxieddb (v1.1.0 through v1.2.x) refuses with "not a directory"
-// instead of reporting an empty, freshly created database.
+// .beads/proxieddb (v1.0.5, v1.1.0 through v1.1.2 and v1.2.2) refuses with
+// "not a directory" instead of reporting an empty, freshly created database.
 //
 // The released bd is v1.1.0 from the @bd_releases catalog (sha256-pinned,
 // declared as test data; see releasedBD1110).

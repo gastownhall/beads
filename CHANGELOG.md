@@ -1231,26 +1231,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.beads/config.json`) that this build does not know, such as a mode a newer
   bd wrote or a typo, used to fall through to embedded mode, so `bd list`
   could print an empty, freshly created database with exit 0. Command
-  startup, `bd doctor` and the Go library constructors now refuse first, with
-  the value, the metadata path, the supported modes, and the remedy: upgrade
-  every bd that opens the workspace, or restore the mode it was initialized
-  with. Nothing is opened, migrated or created. Mode case still does not
-  matter, and an empty mode is still the default.
+  startup, `bd doctor` and every public Go library open (`Open`,
+  `OpenBestAvailable`, `OpenBestAvailableWith`, `OpenFromConfig` and
+  `OpenGated`) now refuse first, with the value, the metadata path, the
+  supported modes, and the remedy: upgrade every bd that opens the
+  workspace, or restore the mode it was initialized with. Nothing is opened,
+  migrated or created. Mode case still does not matter, and an empty mode is
+  still the default.
 - **Older bd refuses a proxied-server workspace instead of minting an empty
-  database in `.beads/proxieddb` (GH#5104).** bd 1.1.0 through 1.2.x
-  defaulted the proxied-server root to `.beads/proxieddb`; current bd uses
-  `.beads/dolt`. After a successful managed-local proxied-server open, bd now
-  writes a regular marker file at `.beads/proxieddb` when nothing exists
-  there, `.beads/.gitignore` lists `proxieddb` on its own line and
-  `git check-ignore` confirms it is ignored, so such an older bd fails with
-  `proxieddb: not a directory` (bd 1.1.0 printed `[]` from `bd list --json`
-  with exit 0 and panicked in `bd stats`). The `.beads/.gitignore` template
-  now ignores `proxieddb` as a path rather than `proxieddb/`, and
-  `bd doctor --fix` adds the line. Existing .beads/proxieddb directories are
-  not protected or repaired, and bd releases from before proxied-server mode
-  are not stopped by the marker. This is a different error from an
-  unrecognized `dolt_mode`: see "Troubleshooting Upgrades" in
-  `docs/getting-started/upgrading.md`.
+  database in `.beads/proxieddb` (GH#5104).** bd 1.0.5, 1.1.0 through 1.1.2
+  and 1.2.2 defaulted the proxied-server root to `.beads/proxieddb`; current
+  bd, like 1.2.0, 1.2.1 and 1.3.x, uses `.beads/dolt`. After a successful
+  managed-local proxied-server open that is not a `--dry-run` or `--inspect`
+  preview, bd now writes a regular marker file at `.beads/proxieddb` when
+  nothing exists there, `.beads/.gitignore` lists `proxieddb` on its own line
+  and `git check-ignore` confirms it is ignored, so such an older bd fails
+  with `proxieddb: not a directory` (bd 1.1.0 printed `[]` from
+  `bd list --json` with exit 0 and panicked in `bd stats`). The
+  `.beads/.gitignore` template now ignores `proxieddb` as a path rather than
+  `proxieddb/`, and `bd doctor --fix` adds the line. Existing
+  .beads/proxieddb directories are not protected or repaired, and bd
+  releases from before proxied-server mode are not stopped by the marker.
+  This is a different error from an unrecognized `dolt_mode`: see
+  "Troubleshooting Upgrades" in `docs/getting-started/upgrading.md`.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
