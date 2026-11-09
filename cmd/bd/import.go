@@ -507,7 +507,7 @@ func renderImportDryRun(result importResultJSON, memoriesCount int, source strin
 // renderImportOutcome reports a completed import (JSON or stderr),
 // identically in both modes.
 func renderImportOutcome(result importResultJSON, source string, dedupHits int) error {
-	warnImportInvalidSkipped(result)
+	warnImportInvalidSkipped(result.Source, result.InvalidRecords, result.RejectsFile)
 	if jsonOutput {
 		return outputJSON(result)
 	}

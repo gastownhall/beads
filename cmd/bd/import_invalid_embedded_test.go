@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -202,4 +203,110 @@ func TestEmbeddedImportInvalidRecordSkipKeepsRejects(t *testing.T) {
 			t.Errorf("--rejects alone: err=%v stderr=%s, want a refusal naming --skip-invalid", err, stderr)
 		}
 	})
+}
+
+// unwrapOnlyStore hides the single-transaction importer of the store it wraps,
+// so maybeAutoImportJSONL takes the fallback path over a real store, while
+// Unwrap still reaches the store's other capabilities.
+type unwrapOnlyStore struct{ storage.DoltStorage }
+
+func (u unwrapOnlyStore) Unwrap() storage.DoltStorage { return u.DoltStorage }
+
+// TestEmbeddedAutoImportSkipsInvalidRowsAndQuarantines pins auto-import's
+// recovery of an empty database from a JSONL file with an invalid record
+// (AC-3, GH#4492), on both paths: the valid records and the memory import,
+// the invalid record is kept byte for byte in .beads/issues.rejected.jsonl
+// with a warning that locates it, the file is stamped as attempted, and the
+// command that triggered the import goes on.
+func TestEmbeddedAutoImportSkipsInvalidRowsAndQuarantines(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	t.Run("single_transaction", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "aq")
+		jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+		fixture := invalidImportFixture(t, "aq", 3, 2)
+		if err := os.WriteFile(jsonlPath, []byte(fixture), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		// A write command runs auto-import in its pre-run, then goes on.
+		cmd := exec.Command(bd, "create", "post-import marker", "--type", "task")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdoutBuf, stderrBuf, err := runCommandBuffers(t, cmd)
+		stdout, stderr := stdoutBuf.String(), stderrBuf.String()
+		if err != nil {
+			t.Fatalf("bd create after auto-import failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		for _, want := range []string{"auto-imported 2 issues", jsonlPath + ":4: aq-2", "issues.rejected.jsonl"} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("stderr does not mention %q:\n%s", want, stderr)
+			}
+		}
+
+		ids := map[string]bool{}
+		for _, issue := range bdListJSON(t, bd, dir) {
+			ids[issue.ID] = true
+		}
+		if len(ids) != 3 || !ids["aq-1"] || !ids["aq-3"] || ids["aq-2"] {
+			t.Errorf("issues = %v, want aq-1, aq-3 and the marker, not aq-2", ids)
+		}
+		assertAutoImportQuarantined(t, beadsDir, jsonlPath, strings.Split(fixture, "\n")[3])
+
+		store := openStore(t, beadsDir, "aq")
+		if got, _ := store.GetConfig(context.Background(), kvPrefix+memoryPrefix+"probe"); got != "kept" {
+			t.Errorf("memory = %q, want kept", got)
+		}
+	})
+
+	t.Run("fallback", func(t *testing.T) {
+		_, beadsDir, _ := bdInit(t, bd, "--prefix", "aqf")
+		jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+		fixture := invalidImportFixture(t, "aqf", 3, 2)
+		if err := os.WriteFile(jsonlPath, []byte(fixture), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		store := openStore(t, beadsDir, "aqf")
+		ctx := context.Background()
+		maybeAutoImportJSONL(ctx, unwrapOnlyStore{store}, beadsDir)
+
+		for _, id := range []string{"aqf-1", "aqf-3"} {
+			if _, err := store.GetIssue(ctx, id); err != nil {
+				t.Errorf("valid record %s not imported: %v", id, err)
+			}
+		}
+		if _, err := store.GetIssue(ctx, "aqf-2"); err == nil {
+			t.Errorf("invalid record aqf-2 was imported")
+		}
+		if got, _ := store.GetConfig(ctx, kvPrefix+memoryPrefix+"probe"); got != "kept" {
+			t.Errorf("memory = %q, want kept", got)
+		}
+		assertAutoImportQuarantined(t, beadsDir, jsonlPath, strings.Split(fixture, "\n")[3])
+	})
+}
+
+// assertAutoImportQuarantined checks that auto-import kept the rejected line
+// in the quarantine next to jsonlPath and stamped jsonlPath as attempted.
+func assertAutoImportQuarantined(t *testing.T, beadsDir, jsonlPath, rejectedLine string) {
+	t.Helper()
+	saved, err := os.ReadFile(filepath.Join(beadsDir, "issues.rejected.jsonl"))
+	if err != nil {
+		t.Fatalf("read quarantine: %v", err)
+	}
+	if string(saved) != rejectedLine+"\n" {
+		t.Errorf("quarantine =\n%s\nwant the original line\n%s", saved, rejectedLine)
+	}
+	info, err := os.Stat(jsonlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !autoImportStampMatches(beadsDir, info) {
+		t.Errorf("%s was not stamped as attempted", jsonlPath)
+	}
 }

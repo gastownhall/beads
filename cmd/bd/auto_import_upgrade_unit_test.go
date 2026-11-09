@@ -41,6 +41,11 @@ func (f *fakeFallbackStore) GetStatistics(ctx context.Context) (*types.Statistic
 
 func (f *fakeFallbackStore) Commit(_ context.Context, _ string) error { return nil }
 
+// ImportVocabulary answers the import screen with the built-in vocabulary.
+func (f *fakeFallbackStore) ImportVocabulary(context.Context) ([]string, []string, error) {
+	return nil, nil, nil
+}
+
 func writeAutoImportFixtureJSONL(t *testing.T, dir string) {
 	t.Helper()
 	writeAutoImportFixtureJSONLNamed(t, dir, "issues.jsonl")
@@ -472,6 +477,11 @@ func (c *captureOptsStore) GetConfig(_ context.Context, _ string) (string, error
 
 func (c *captureOptsStore) SetConfig(_ context.Context, _, _ string) error {
 	return nil
+}
+
+// ImportVocabulary answers the import screen with the built-in vocabulary.
+func (c *captureOptsStore) ImportVocabulary(context.Context) ([]string, []string, error) {
+	return nil, nil, nil
 }
 
 // GetIssuesByIDs reports no existing rows so importIssuesCore's stale-import
