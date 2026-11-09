@@ -11,12 +11,6 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// isCrossPrefixDep returns true if the two bead IDs have different prefixes,
-// meaning the target lives in a different rig's database.
-func isCrossPrefixDep(sourceID, targetID string) bool {
-	return types.ExtractPrefix(sourceID) != types.ExtractPrefix(targetID)
-}
-
 // AddDependency adds a dependency between two issues without recording a
 // dependency_added event. Create-with-deps and structural callers use this
 // no-event default; the explicit dep verbs call AddDependencyWithOptions with

@@ -374,3 +374,69 @@ func TestRunInTransactionCrossTierNonSchedulingEdgeIsNotGated(t *testing.T) {
 	assertDepEdge(ctx, t, store, wisp.ID, regular.ID)
 	assertDepEdge(ctx, t, store, regular.ID, wisp.ID)
 }
+
+// TestTransaction_CrossPrefixTargetCreatedInSameTx pins GH#8299 on the
+// two-session seam: a target of another prefix created earlier in the same
+// logical transaction is uncommitted on its owning session, and classification
+// must read it there and file it in its local typed column. The wisp-source
+// arm onto a new issue is the one a single-session read gets wrong: the edge
+// is written on the ignored session while the target lives on the regular one.
+func TestTransaction_CrossPrefixTargetCreatedInSameTx(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := store.SetConfig(ctx, "allowed_prefixes", "xp"); err != nil {
+		t.Fatalf("set allowed_prefixes: %v", err)
+	}
+	issueSource := crossTierRegularIssue("test-xptx-src", "issue source")
+	wispSource := crossTierWispIssue("test-xptx-wsrc", "wisp source")
+	for _, issue := range []*types.Issue{issueSource, wispSource} {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", issue.ID, err)
+		}
+	}
+
+	issueTarget := crossTierRegularIssue("xp-xptx-target", "cross-prefix issue target")
+	wispTarget := crossTierWispIssue("xp-xptx-wtarget", "cross-prefix wisp target")
+	edges := []struct {
+		source, target, table, column string
+	}{
+		{issueSource.ID, issueTarget.ID, "dependencies", "depends_on_issue_id"},
+		{wispSource.ID, issueTarget.ID, "wisp_dependencies", "depends_on_issue_id"},
+		{issueSource.ID, wispTarget.ID, "dependencies", "depends_on_wisp_id"},
+		{wispSource.ID, wispTarget.ID, "wisp_dependencies", "depends_on_wisp_id"},
+	}
+	if err := store.RunInTransaction(ctx, "test: cross-prefix targets created in the transaction", func(tx storage.Transaction) error {
+		for _, target := range []*types.Issue{issueTarget, wispTarget} {
+			if err := tx.CreateIssue(ctx, target, "tester"); err != nil {
+				return err
+			}
+		}
+		for _, e := range edges {
+			if err := tx.AddDependency(ctx, &types.Dependency{IssueID: e.source, DependsOnID: e.target, Type: types.DepBlocks}, "tester"); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("RunInTransaction create cross-prefix targets + blocks edges: %v", err)
+	}
+
+	for _, e := range edges {
+		var target sql.NullString
+		//nolint:gosec // G201: table and column are hardcoded above.
+		if err := store.db.QueryRowContext(ctx,
+			"SELECT "+e.column+" FROM "+e.table+" WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?",
+			e.source, e.target).Scan(&target); err != nil {
+			t.Fatalf("read %s edge %s -> %s: %v", e.table, e.source, e.target, err)
+		}
+		if target.String != e.target {
+			t.Errorf("%s edge %s -> %s: %s = %v, want the target there", e.table, e.source, e.target, e.column, target)
+		}
+	}
+	assertCrossTierIsBlocked(ctx, t, store.db, "issues", issueSource.ID, true)
+	assertCrossTierIsBlocked(ctx, t, store.db, "wisps", wispSource.ID, true)
+}

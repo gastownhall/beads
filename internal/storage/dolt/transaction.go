@@ -986,17 +986,24 @@ func (t *doltTransaction) AddDependencyWithOptions(ctx context.Context, dep *typ
 		eventTable = "wisp_events"
 	}
 
-	isCrossPrefix := isCrossPrefixDep(dep.IssueID, dep.DependsOnID)
+	// Classify the target on the session that owns each table it could live
+	// in: wisps on the ignored session, issues on the regular one, so a
+	// target created earlier in this logical transaction is seen whichever
+	// tier the edge is written on.
+	kind, err := issueops.ClassifyDepTargetFrom(dep.IssueID, dep.DependsOnID, issueops.DepTargetPresence{
+		IsWisp: func(id string) (bool, error) {
+			return t.isActiveWisp(ctx, id), nil
+		},
+		IsIssue: func(id string) (bool, error) {
+			return issueops.IssueExistsInTx(ctx, t.txFor("issues"), id)
+		},
+	})
+	if err != nil {
+		return err
+	}
 	targetTable := "issues"
-	kind := issueops.DepTargetIssue
-	switch {
-	case isCrossPrefix, strings.HasPrefix(dep.DependsOnID, "external:"):
-		kind = issueops.DepTargetExternal
-	default:
-		if t.isActiveWisp(ctx, dep.DependsOnID) {
-			targetTable = "wisps"
-			kind = issueops.DepTargetWisp
-		}
+	if kind == issueops.DepTargetWisp {
+		targetTable = "wisps"
 	}
 
 	opts := issueops.AddDependencyOpts{
