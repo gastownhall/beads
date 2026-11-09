@@ -107,7 +107,8 @@ func TestGetReadyWorkInTx_PropagatesDeferredParentChildError(t *testing.T) {
 
 	_, mock, tx := beginMockTx(t)
 	childErr := errors.New("dolt transient dependency read failure")
-	mock.ExpectQuery(deferredParentProbeRegex("issues")).WillReturnError(childErr)
+	mock.ExpectQuery(readyProbeSQL).WillReturnRows(readyProbeRows(false, true, false, false, true, false))
+	mock.ExpectQuery(deferredChildrenQueryRegex("dependencies", "issues")).WillReturnError(childErr)
 
 	_, err := GetReadyWorkInTx(
 		context.Background(),
@@ -254,12 +255,9 @@ func TestGetReadyWorkInTxOpenIncludesCustomActive(t *testing.T) {
 	t.Parallel()
 
 	_, mock, tx := beginMockTx(t)
-	mock.ExpectQuery(deferredParentProbeRegex("issues")).WillReturnError(sql.ErrNoRows)
-	mock.ExpectQuery(deferredParentProbeRegex("wisps")).WillReturnError(sql.ErrNoRows)
-	mock.ExpectQuery(staleBlockedQueryRegex("issues")).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(readyProbeSQL).WillReturnRows(readyProbeRows(false, true, false, false, false, false))
 	mock.ExpectQuery(`SELECT id FROM issues\s+WHERE \(status = \? OR status IN \(SELECT name FROM custom_statuses WHERE category = 'active'\)\)`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
-	mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).WillReturnError(sql.ErrNoRows)
 
 	got, err := GetReadyWorkInTx(
 		context.Background(),
@@ -281,12 +279,9 @@ func TestGetReadyWorkInTxStatusesSingleQuery(t *testing.T) {
 	t.Parallel()
 
 	_, mock, tx := beginMockTx(t)
-	mock.ExpectQuery(deferredParentProbeRegex("issues")).WillReturnError(sql.ErrNoRows)
-	mock.ExpectQuery(deferredParentProbeRegex("wisps")).WillReturnError(sql.ErrNoRows)
-	mock.ExpectQuery(staleBlockedQueryRegex("issues")).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(readyProbeSQL).WillReturnRows(readyProbeRows(false, true, false, false, false, false))
 	mock.ExpectQuery(`SELECT id FROM issues\s+WHERE status IN \(\?,\?\)`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
-	mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).WillReturnError(sql.ErrNoRows)
 
 	got, err := GetReadyWorkInTx(
 		context.Background(),
@@ -314,5 +309,103 @@ func TestReadyWorkWispIssueFilterPropagatesStatuses(t *testing.T) {
 	want := []types.Status{"open", "blocked"}
 	if !reflect.DeepEqual(filter.Statuses, want) {
 		t.Fatalf("wisp filter Statuses = %v, want %v", filter.Statuses, want)
+	}
+}
+
+// TestGetReadyWorkInTxAsksAboutTheWispPlaneOnce pins the listing's cost on a
+// database with no wisp rows: the probe, the page and its hydration, with no
+// further question about the wisp plane.
+func TestGetReadyWorkInTxAsksAboutTheWispPlaneOnce(t *testing.T) {
+	mock, tx, counts := countedMockTx(t)
+	mock.ExpectQuery(readyProbeSQL).WillReturnRows(readyProbeRows(false, true, false, false, false, false))
+	mock.ExpectQuery(`SELECT id FROM issues`).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("a"))
+	mock.ExpectQuery(`FROM issues .*WHERE id IN \(\?\)`).
+		WithArgs("a").
+		WillReturnRows(issueRows().AddRow(issueRowValues("a", "A")...))
+	mock.ExpectQuery(`SELECT issue_id, label FROM labels`).
+		WithArgs("a").
+		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "label"}))
+
+	got, err := GetReadyWorkInTx(t.Context(), tx, types.WorkFilter{Limit: 5})
+	if err != nil {
+		t.Fatalf("GetReadyWorkInTx: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "a" {
+		t.Fatalf("got %v, want a", got)
+	}
+	if n := counts.Total(); n != 4 {
+		t.Fatalf("sent %d statements, want 4", n)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestGetReadyWorkInTxReadsAroundAStaleWispFlagFromTheProbe pins that the wisp
+// family's stale-flagged rows reach the blocked filter: a wisp whose is_blocked
+// flag is stale stays ready, and one with a live flag does not.
+func TestGetReadyWorkInTxReadsAroundAStaleWispFlagFromTheProbe(t *testing.T) {
+	mock, tx, _ := countedMockTx(t)
+	mock.ExpectQuery(readyProbeSQL).WillReturnRows(readyProbeRows(true, true, false, true))
+	mock.ExpectQuery(staleBlockedQueryRegex("wisps")).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("w-stale"))
+	mock.ExpectQuery(`SELECT id FROM issues`).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(`(?s)SELECT .*id FROM wisps .*LIMIT`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("w-stale").AddRow("w-live"))
+	wispPage := issueRows().AddRow(issueRowValues("w-stale", "Stale")...).AddRow(issueRowValues("w-live", "Live")...)
+	mock.ExpectQuery(`FROM wisps .*WHERE id IN \(\?,\?\)`).WillReturnRows(wispPage)
+	mock.ExpectQuery(`SELECT issue_id, label FROM wisp_labels`).WillReturnRows(sqlmock.NewRows([]string{"issue_id", "label"}))
+	mock.ExpectQuery(`SELECT id FROM wisps WHERE id IN \(\?,\?\) AND is_blocked = 1`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("w-stale").AddRow("w-live"))
+
+	got, err := GetReadyWorkInTx(t.Context(), tx, types.WorkFilter{Limit: 5, IncludeDeferred: true, IncludeEphemeral: true})
+	if err != nil {
+		t.Fatalf("GetReadyWorkInTx: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "w-stale" {
+		t.Fatalf("got %d rows, want only w-stale", len(got))
+	}
+}
+
+// TestGetReadyWorkInTxRendersThePredicateFromTheProbe pins that the ID sets the
+// probe resolved reach the issues page query: a stale-flagged issue is read
+// around, and a child of a future-deferred parent is left out.
+func TestGetReadyWorkInTxRendersThePredicateFromTheProbe(t *testing.T) {
+	mock, tx, _ := countedMockTx(t)
+	mock.ExpectQuery(readyProbeSQL).WillReturnRows(readyProbeRows(false, true, true, false, true, false))
+	mock.ExpectQuery(deferredChildrenQueryRegex("dependencies", "issues")).
+		WillReturnRows(sqlmock.NewRows([]string{"issue_id"}).AddRow("child-of-deferred"))
+	mock.ExpectQuery(staleBlockedQueryRegex("issues")).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("stale-issue"))
+	mock.ExpectQuery(`(?s)SELECT id FROM issues.*\(is_blocked = 0 OR id IN \(\?\)\).*id NOT IN \(\?\)`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	if _, err := GetReadyWorkInTx(t.Context(), tx, types.WorkFilter{Limit: 5}); err != nil {
+		t.Fatalf("GetReadyWorkInTx: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestGetReadyWorkInTxLeavesOutAWispUnderADeferredParent pins that the probe's
+// deferred children reach the wisp leg, which filters them in Go.
+func TestGetReadyWorkInTxLeavesOutAWispUnderADeferredParent(t *testing.T) {
+	mock, tx, _ := countedMockTx(t)
+	mock.ExpectQuery(readyProbeSQL).WillReturnRows(readyProbeRows(true, true, false, false, true, false))
+	mock.ExpectQuery(deferredChildrenQueryRegex("dependencies", "issues")).
+		WillReturnRows(sqlmock.NewRows([]string{"issue_id"}).AddRow("w-child"))
+	mock.ExpectQuery(`SELECT id FROM issues`).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(`(?s)SELECT .*id FROM wisps .*LIMIT`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("w-child").AddRow("w-ok"))
+	mock.ExpectQuery(`FROM wisps .*WHERE id IN \(\?,\?\)`).
+		WillReturnRows(issueRows().AddRow(issueRowValues("w-child", "Child")...).AddRow(issueRowValues("w-ok", "OK")...))
+	mock.ExpectQuery(`SELECT issue_id, label FROM wisp_labels`).WillReturnRows(sqlmock.NewRows([]string{"issue_id", "label"}))
+	mock.ExpectQuery(`SELECT id FROM wisps WHERE id IN \(\?,\?\) AND is_blocked = 1`).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	got, err := GetReadyWorkInTx(t.Context(), tx, types.WorkFilter{Limit: 5, IncludeEphemeral: true})
+	if err != nil {
+		t.Fatalf("GetReadyWorkInTx: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "w-ok" {
+		t.Fatalf("got %d rows, want only w-ok", len(got))
 	}
 }

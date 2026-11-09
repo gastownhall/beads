@@ -833,6 +833,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`timeout cannot be negative`); the direct, proxied and embedded routes
   used to store it. A `--type` longer than 32 characters fails with the same
   typed validation error instead of a raw Dolt column error.
+- **`bd ready` asks about the wisp plane and stale flags once.** The listing
+  sent separate statements for future-deferred parents in each table, stale
+  `is_blocked` flags and whether wisps exist, and asked the last of these
+  twice. It now uses the single probe statement `bd ready --json` already used,
+  and hydrates without asking again when there are no wisps. `bd ready` and
+  `bd ready --claim` send 6 fewer statements in a workspace with wisps and a
+  deferred issue. The rows listed are unchanged.
 - **`bd gate create` and `bd gate add-waiter` follow `dolt.auto-commit`
   like every other role write.** Under `dolt.auto-commit=off` `bd gate
   create` no longer makes its own Dolt commit on the direct and embedded
