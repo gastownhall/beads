@@ -1226,6 +1226,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Server and proxied-server mode no longer require the global `CREATE`
+  privilege to read a database that already exists
+  ([#5079](https://github.com/gastownhall/beads/issues/5079)). Locked
+  bootstrap preparation issued `CREATE DATABASE` unconditionally, so a
+  least-privilege account was refused before the command it opened for — a
+  read — ever ran. Preparation now probes the database's visibility first
+  and only creates what the probe cannot see, so a converged database needs
+  database-scoped `SELECT` alone. When a credential can neither see nor
+  create the database, the refusal names both possibilities — not
+  provisioned, or not granted — and the administrator remedy, instead of
+  claiming the server provisions databases server-side.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

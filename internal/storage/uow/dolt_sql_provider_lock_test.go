@@ -754,3 +754,56 @@ func TestBootstrapPreparerStickyCreateFailuresStayPermanent(t *testing.T) {
 		}
 	})
 }
+
+// TestBootstrapPreparerDeniedCreateReportsBothPossibilities pins AC-4. After a
+// negative probe, a denied CREATE cannot distinguish a database that is not
+// provisioned from one this credential has not been granted, so the refusal
+// must name both possibilities and the administrator remedy — not the old
+// blanket claim that the server provisions databases server-side, and not a
+// re-run-init instruction an existing-database reader cannot act on.
+func TestBootstrapPreparerDeniedCreateReportsBothPossibilities(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		deny error
+	}{
+		{name: "database-scoped denial", deny: &mysql.MySQLError{Number: 1044, Message: "Access denied for user 'reader'@'%' to database 'beads'"}},
+		{name: "command denial", deny: &mysql.MySQLError{Number: 1142, Message: "CREATE command denied to user 'reader'@'%'"}},
+		{name: "dolt generic 1105 command denial", deny: &mysql.MySQLError{Number: 1105, Message: "command denied to user 'reader'@'%'"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prep, conn, mock := newPreparerMock(t)
+			expectDatabaseExistsProbe(mock, "beads", false)
+			mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `beads`")).
+				WillReturnError(tc.deny)
+
+			_, err := prep.prepare(context.Background(), conn)
+			if err == nil {
+				t.Fatal("prepare() error = nil, want the refusal")
+			}
+			for _, want := range []string{
+				`database "beads" is not visible to this credential and creating it was denied`,
+				"either the database is not provisioned on the server or this credential has not been granted access to it",
+				"ask the server administrator to provision the database and grant access",
+			} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("refusal missing %q:\n%s", want, err)
+				}
+			}
+			for _, forbidden := range []string{"provisions databases server-side", "re-run init"} {
+				if strings.Contains(err.Error(), forbidden) {
+					t.Errorf("refusal still claims %q:\n%s", forbidden, err)
+				}
+			}
+			var mysqlErr *mysql.MySQLError
+			if !errors.As(err, &mysqlErr) || mysqlErr != tc.deny {
+				t.Fatalf("prepare() error = %v, want the underlying driver error preserved", err)
+			}
+			assertPermanentClassification(t, err)
+			// Only the probe and the CREATE were primed: no USE and no
+			// CREATE IF NOT EXISTS fallback may follow the refusal.
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations (a denial must not fall back): %v", err)
+			}
+		})
+	}
+}

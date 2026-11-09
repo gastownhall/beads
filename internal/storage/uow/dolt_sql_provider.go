@@ -802,12 +802,14 @@ func (b *bootstrapPreparer) prepare(ctx context.Context, conn *sql.Conn) (*schem
 				retryable: true,
 			}
 		case isAccessDeniedError(err):
-			// A server that provisions databases itself denies CREATE to the
-			// credentials it hands out. Say so instead of surfacing the raw
-			// driver error, and do not retry or fall back: bd must not go
+			// The probe could not see the database, so this denial cannot tell
+			// a database that is not provisioned from one this credential has
+			// not been granted — information_schema hides both alike. Name
+			// the two possibilities and the administrator remedy, preserve
+			// the driver error, and do not retry or fall back: bd must not go
 			// looking for another way to create a database it was refused.
 			return nil, &bootstrapPreparationError{err: fmt.Errorf(
-				"uow: creating database %q was denied for this credential — this server provisions databases server-side; ask the server administrator to provision it, then re-run init: %w",
+				"uow: database %q is not visible to this credential and creating it was denied — either the database is not provisioned on the server or this credential has not been granted access to it; ask the server administrator to provision the database and grant access: %w",
 				b.database, err)}
 		default:
 			return nil, &bootstrapPreparationError{err: fmt.Errorf("uow: creating database: %w", err)}

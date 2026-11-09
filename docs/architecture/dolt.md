@@ -379,6 +379,17 @@ caller passes directly. Earlier releases read only `BEADS_DOLT_SERVER_SOCKET`
 on those opens and dialed TCP beside a metadata.json socket. `beads.Open`
 does not read metadata.json.
 
+**Least-privilege credentials.** Every open probes the target database's
+visibility before it acts, so what a credential needs depends on what it
+finds: a database the credential can see is only selected, never created,
+and a seat that only reads an already-provisioned database needs
+database-scoped `SELECT` and nothing more
+([#5079](https://github.com/gastownhall/beads/issues/5079)). Creating the
+database — and migrating it — belongs to the server administrator or the
+designated migrator. A credential that can neither see the database nor
+create it is refused with both possibilities named, because after that
+probe an unprovisioned database and an ungranted credential look the same.
+
 Switch to server mode when you need:
 - Multiple agents writing simultaneously
 - Orchestrator multi-rig setups

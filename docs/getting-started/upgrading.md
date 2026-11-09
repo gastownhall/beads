@@ -660,6 +660,20 @@ reached through a local proxy. Three differences worth knowing:
   proxied workspace: run it on the server host first, then consent from the
   proxied workspace (see [Clone behind the remote](#clone-behind-the-remote)).
 
+**Server accounts.** A seat that only reads needs far less than one that
+provisions or migrates. Reading a database that is already provisioned
+requires database-scoped `SELECT` alone: the open probes whether the
+credential can see the database before it does anything, and a visible
+database is only selected, never created
+([#5079](https://github.com/gastownhall/beads/issues/5079)). Creating the
+database in the first place — and consenting to its migrations, step 2
+above — are the administrator's or designated migrator's job. When a
+credential can neither see the database nor create it, `bd` refuses naming
+both possibilities, because after that probe the two are indistinguishable:
+either the database is not provisioned on the server, or the credential has
+not been granted access to it. Ask the server administrator to provision the
+database and grant access.
+
 ## Cross-era Upgrades
 
 If you're upgrading from a much older version of bd, inspect the storage layout
