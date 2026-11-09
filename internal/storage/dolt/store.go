@@ -48,7 +48,6 @@ import (
 	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
@@ -1223,15 +1222,22 @@ func (s *DoltStore) serverAutocommits(ctx context.Context) bool {
 }
 
 // autocommitProbeRefused reports whether err is the server definitely refusing
-// SELECT @@autocommit, which asking again will not change: an unknown system
-// variable (1193), a statement it cannot parse (1064, a proxy that does not speak
-// the syntax), or a privilege refusal.
+// SELECT @@autocommit, which asking again will not change: a statement it cannot
+// parse (1064, a proxy that does not speak the syntax), a privilege refusal for
+// this statement (1142, 1143, 1227), or an unknown system variable (1193, from
+// another MySQL-speaking server). Dolt reports an unknown variable as the generic
+// 1105, which is not listed because it covers failures that clear. A login
+// refusal (1044, 1045) says nothing about this statement, so it is asked again.
 func autocommitProbeRefused(err error) bool {
 	var mysqlErr *mysql.MySQLError
-	if errors.As(err, &mysqlErr) && (mysqlErr.Number == 1193 || mysqlErr.Number == 1064) {
+	if !errors.As(err, &mysqlErr) {
+		return false
+	}
+	switch mysqlErr.Number {
+	case 1064, 1142, 1143, 1193, 1227:
 		return true
 	}
-	return dberrors.IsAccessDenied(err)
+	return false
 }
 
 // execer is satisfied by both *sql.DB and *sql.Conn, letting pinStoreBranch
