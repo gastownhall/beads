@@ -577,6 +577,7 @@
 40 33 TestEmbeddedMoveIssuePersistenceEphemeralNoHistorySmoke
 40 33 TestEmbeddedRelationsResolvesTheAnchorIDExactly
 40 33 TestEmbeddedSyncCommitsConfigBeforeMerge
+40 33 TestEmbeddedUpgradeGuideDependencyRecipeMatchesStorage_5107
 40 33 TestEventsAutoPruneThrottleSkipsTheSecondPass
 40 33 TestFirstMintLeavesTheEpochTablesCommitted
 40 33 TestGetDependentRecordsEmbedded

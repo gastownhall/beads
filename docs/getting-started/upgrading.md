@@ -663,25 +663,42 @@ reached through a local proxy. Three differences worth knowing:
 ### Dependency target columns
 
 bd 1.0.5 split the single SQL column `depends_on_id` into three typed target
-columns, in both dependency tables: `dependencies` (edges from persistent
-issues) and `wisp_dependencies` (edges from wisps). Migrations `0041` and
-`ignored/0003` perform the split and briefly keep `depends_on_id` as a
-generated column; migrations `0043` and `ignored/0005`, in the same release,
-then drop it. A store created by bd 1.0.5 or later, and one that has finished
-migrating to it, has no `depends_on_id` column in either table. Installing a
-newer binary does not by itself mean the store has migrated: run
-`bd migrate --inspect --json` to see what is still pending.
+columns, in both dependency tables. An edge's table follows the table that
+holds its source bead: `dependencies` holds the edges from beads in the
+`issues` table, and `wisp_dependencies` the edges from beads in the `wisps`
+table, which stores wisps and also the permanent beads created with
+`--no-history`. Migrations `0041` and `ignored/0003` perform the split and
+briefly keep `depends_on_id` as a generated column; migrations `0043` and
+`ignored/0005`, in the same release, then drop it. A store created by bd 1.0.5
+or later, and one that has finished migrating to it, has no `depends_on_id`
+column in either table. Installing a newer binary does not by itself mean the
+store has migrated. To see whether a table still has the old column, list its
+columns with `bd sql 'SHOW COLUMNS FROM dependencies'` (and the same for
+`wisp_dependencies`). `bd migrate schema` applies pending migrations; on a
+remote-backed database only the designated migrator runs it (see
+[Remote-backed databases and multiple clones](#remote-backed-databases-and-multiple-clones)).
 
 Each row now fills exactly one target column:
 
 | Column | Holds |
 |---|---|
-| `depends_on_issue_id` | a persistent issue in this database |
-| `depends_on_wisp_id` | a wisp in this database |
-| `depends_on_external` | anything this database holds no row for: an `external:<project>:<capability>` reference, or an id from another repository |
+| `depends_on_issue_id` | a bead with the source's id prefix, stored in the `issues` table |
+| `depends_on_wisp_id` | a bead with the source's id prefix, stored in the `wisps` table |
+| `depends_on_external` | an `external:<project>:<capability>` reference, or an id whose prefix differs from the source's |
+
+The id prefix is the part before the first hyphen (`bd` in `bd-a1b2`). Whether
+a target counts as external depends only on the ids: one with another prefix
+goes to `depends_on_external` even when this database holds that bead, for
+example one that `bd repo sync` hydrated. Rows from before the split are the
+exception. The migrations sorted those by the table that held the target, so an
+older edge can keep a bead from another repository in `depends_on_issue_id` or
+`depends_on_wisp_id`.
 
 A tool that still selects `depends_on_id` from either table fails with an error
-such as `table "wisp_dependencies" does not have column "depends_on_id"`.
+such as `column "depends_on_id" could not be found in any table in scope`, or
+`table "wisp_dependencies" does not have column "depends_on_id"` when the query
+qualifies the column with its table. An `INSERT` that names the column fails
+with `Unknown column 'depends_on_id' in 'wisp_dependencies'`.
 
 The logical name is unchanged everywhere outside the SQL tables: dependency
 records in bd's JSON output, in `.beads/issues.jsonl`, and the Go
@@ -710,9 +727,14 @@ FROM wisp_dependencies;
   have not migrated yet should check each table's columns before choosing a
   query; a store part-way through migrating can have one table split and the
   other not.
-- To look up one target, filter on the typed column for its kind (for example
-  `WHERE depends_on_issue_id = ?`): those columns are indexed and the
-  `COALESCE` expression is not.
+- To find every edge into one bead, look its id up in all three typed columns
+  of both tables, for example with one lookup per column and table
+  (`WHERE depends_on_issue_id = ?`, and so on) joined by `UNION ALL`. Each
+  lookup can use its column's index; a filter on the `COALESCE` expression
+  cannot. One column is not enough, because the column an edge uses depends
+  on its source too: an edge from a source with another prefix holds the bead
+  in `depends_on_external`, and an edge from before the split can hold a bead
+  from another repository in `depends_on_issue_id` or `depends_on_wisp_id`.
 - Do not write dependency rows with SQL. Filling one target column is not
   enough to make a valid edge (row ids, blocked state and other derived data
   depend on it); use `bd dep add` or the storage interfaces.
