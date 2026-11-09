@@ -6,8 +6,8 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/remedy"
-	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -22,13 +22,12 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 
 	ctx := rootCtx
 
-	// Get all issues (env-only cap via BEADS_MAX_ROWS; designer §4: doctor
-	// family is env opt-in, no operator-facing flag).
-	maxRows, maxRowsSource := resolveMaxRowsEnvOnly()
-	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{
-		MaxRows:       maxRows,
-		MaxRowsSource: maxRowsSource,
-	})
+	// Get the pollution candidates the validate gate also scores (env-only
+	// cap via BEADS_MAX_ROWS; designer §4: doctor family is env opt-in, no
+	// operator-facing flag).
+	filter := doctor.PollutionCandidateFilter()
+	filter.MaxRows, filter.MaxRowsSource = resolveMaxRowsEnvOnly()
+	allIssues, err := store.SearchIssues(ctx, "", filter)
 	if err != nil {
 		if capErr := handleMaxRowsError(err); capErr != nil {
 			return capErr
@@ -54,7 +53,7 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 	mediumConfidence := []pollutionResult{}
 
 	for _, p := range polluted {
-		if p.score >= 0.9 {
+		if p.highConfidence() {
 			highConfidence = append(highConfidence, p)
 		} else {
 			mediumConfidence = append(mediumConfidence, p)
