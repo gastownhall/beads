@@ -133,6 +133,14 @@ func circuitBreakerPaths() (dir, legacyFile string) {
 	return circuitBreakerDir(), legacyCircuitBreakerFile
 }
 
+// CircuitBreakerDir returns the live directory breaker state is kept in, so
+// bd doctor inspects the directory the storage layer uses. It honors the
+// test override, as the breaker does.
+func CircuitBreakerDir() string {
+	dir, _ := circuitBreakerPaths()
+	return dir
+}
+
 // unsafeCircuitDirWarned holds the unsafe live directories this process has
 // already warned about: a process opens stores more than once, and one
 // warning per path says all there is to say.
