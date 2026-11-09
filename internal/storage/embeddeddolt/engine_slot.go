@@ -60,16 +60,24 @@ func (e *engineSlot) dispose() error {
 // error, kept apart from fn's so callers can classify it (a cleanup failure
 // after a SQL commit is indeterminate, not a failed write).
 //
-// Callers check s.closed and the read-only guard first; withEngine rechecks
-// closed once it holds the slot, so an operation queued behind a final Close
-// never reopens the engine.
+// A caller waiting for the slot gives up with ctx's error, running no SQL,
+// once ctx is done. Callers check s.closed and the read-only guard first;
+// withEngine rechecks closed once it holds the slot, so an operation queued
+// behind a final Close never reopens the engine.
 func (s *EmbeddedDoltStore) withEngine(ctx context.Context, fn func(db *sql.DB) (reusable bool, err error)) (err, cleanupErr error) {
 	e := s.engine
-	e.sem <- struct{}{}
+	select {
+	case e.sem <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err(), nil
+	}
 	defer func() { <-e.sem }()
 
 	if s.closed.Load() {
 		return errClosed, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err, nil
 	}
 	if e.db == nil {
 		db, cleanup, openErr := e.open(ctx, s.dataDir, s.database, s.branch)
