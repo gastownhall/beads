@@ -73,6 +73,7 @@ go_test(
         "gc_config_test.go",
         "host_ownership_test.go",
         "identity_lifecycle_integration_test.go",
+        "identity_pairing_test.go",
         "lifecycle_integration_test.go",
         "listenerowner_darwin_test.go",
         "listenerowner_linux_test.go",
