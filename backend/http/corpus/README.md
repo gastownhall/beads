@@ -35,7 +35,9 @@ following for its share of the shapes:
    The embedded side is initialized and seeded on its own goroutine while
    steps 2 and 3 run and the served side is seeded (`prepareSide`): the two
    sides share no directory, env or process, and each runs the seed in
-   order, so the seeded data does not depend on the overlap.
+   order, so the seeded data does not depend on the overlap. The served side
+   then runs one `bd ready` to warm its policy cache (see "Wire
+   transcripts").
 5. Runs each of its shapes as a subtest, on both sides. The embedded run must
    exit with the shape's `expect_exit` and match its `expect_stderr`. If it does
    not, the shape is wrong or bd changed, and the subtest fails as a corpus
@@ -48,7 +50,10 @@ following for its share of the shapes:
      `due_at`: a shape sets those itself, as absolute dates, and they must
      match exactly);
    - for writes, give the same JSON from every `verify` read on both sides
-     afterwards.
+     afterwards;
+   - send exactly the requests in its wire transcript,
+     `testdata/transcripts/<shape>.json`. This holds for a pending or
+     allowlisted shape too: a mark excuses a shape's outcome, never its wire.
 
 A part takes its own server, workspaces and seed, so no shape can see
 another part's writes. That is safe because no shape depends on another
@@ -117,7 +122,7 @@ Each shape in `corpus.yaml` has these fields:
 | `ignore_fields` | JSON keys dropped, at any depth, before a `json` comparison and before `verify` output is compared; for example comment ids, which each workspace mints itself |
 | `expect_exit`, `expect_stderr` | expected outcome on both sides (exit 0 by default). An allowlisted shape must state `expect_exit`; only its embedded run is held to these |
 | `pending` | a known failure |
-| `requests` | exactly how many requests the served run of `args` makes through the reference proxy, not counting `setup`, `verify` or `{rev:ID}` reads. Each request is a sequential round trip, so the count is the shape's latency floor over a gateway. A change that makes the shape cheaper updates the pin |
+| `requests` | exactly how many requests the served run of `args` makes through the reference proxy, not counting `setup`, `verify` or `{rev:ID}` reads, nor any request without bd's User-Agent. Each request is a sequential round trip, so the count is the shape's latency floor over a gateway. A change that makes the shape cheaper updates the pin. The pin must equal the length of the shape's transcript (`TestCorpusRequestPinsMatchTranscripts`), which is how a pending shape's pin is held |
 
 `pending: {slice, reason}` marks a known failure and names the slice or
 slices that fix it, for example `S6c+S15`. A pending shape **still runs**:
@@ -129,6 +134,64 @@ slices that fix it, for example `S6c+S15`. A pending shape **still runs**:
 So removing a mark is how a slice proves itself, and any other failure is
 unexpected and fails the suite.
 
+## Wire transcripts
+
+Every shape's served run of `args` is recorded, request by request, and held
+to `testdata/transcripts/<shape>.json`. Each request is one line: the method,
+the `operation_id` it matched in the reference profile (`""` for a request
+the proxy answered with its unrouted 404), the path, the sorted query
+parameter names, the sorted top-level request member names, and the status.
+Values are never recorded, so no timestamp, revision token or cursor can make
+two runs differ. The path is the one value kept: an id the corpus does not
+name anywhere (one the run minted, such as a gate's hash id) becomes
+`<minted-N>`, numbered in the order the run first sent it.
+
+What counts as a request:
+- Only requests with bd's User-Agent (`bd/<version> bd-http-backend/v0`).
+  Other processes on the host do probe the proxy's loopback port (a
+  `GET /` with Go's default User-Agent reached every listener in local runs);
+  those are passed through, counted apart, and logged per part.
+- Only the served run of `args`, the same window as `requests`: not `setup`,
+  `verify` or `{rev:ID}` reads.
+- A shape whose `setup` fails on the reference profile has no served run, so
+  it has no transcript (only a pending shape may lack one).
+
+Two things a served run's requests would otherwise depend on are pinned:
+- **The policy cache.** `bd ready` asks the server whether it enforces the
+  external-dependency policy, and remembers the answer for
+  `BEADS_HTTP_POLICY_CACHE_TTL` (5m by default) in the user cache directory,
+  which is the served workspace here. The served side sets the TTL to 24h and
+  runs one `bd ready` after the seed, so every shape runs with the cache warm,
+  as gc's polling finds it, and no transcript depends on which shape of its
+  part ran first or on how long the part took.
+- **The read memo.** One `bd` process answers an identical read from memory
+  for 5s (`wire.ReadMemoTTL`). A command stalled longer than that between two
+  identical reads would send one more; the `requests` pins on the `show`
+  shapes have always relied on the same memo.
+
+Regenerate the transcripts after an intended change, and review the diff:
+
+```
+BD_UPDATE_GOLDEN=1 CGO_ENABLED=1 BEADS_TEST_EMBEDDED_DOLT=1 \
+  go test -tags gms_pure_go -run 'TestServedCorpus|TestCorpusTranscripts' ./backend/http/corpus/
+```
+
+Do not set `BEADS_CORPUS_SKIP_PENDING` while regenerating: a skipped shape's
+transcript is left as it was. A `requests` pin is not rewritten; update it in
+`corpus.yaml` with the transcript, in the same review.
+
+The engine-free checks run in every lane:
+- `TestCorpusTranscriptsAreWellFormed`: every transcript names a shape and
+  only operations of its profile, is in canonical form, and every shape that
+  is not pending has one.
+- `TestCorpusRequestPinsMatchTranscripts`: every `requests` pin equals its
+  transcript's length.
+- `TestCorpusTranscriptsCoverTheReferenceOperations`: the operations some
+  transcript got a 2xx from cover `reference_server.json`'s operations, less
+  `uncoveredReferenceOperations`, which says why each of the rest is out of
+  reach. That list only shrinks: a shape that starts covering one fails the
+  test until its entry is removed.
+
 ## Updating the reference profile
 
 `reference_server.json` was derived from two things:
@@ -138,10 +201,14 @@ unexpected and fails the suite.
   parameter names, and the top-level request members.
 
 When the deployed server is upgraded (SRV-1), regenerate the file the same
-way. Then remove the `SRV-1` pending marks that now pass.
+way. Then remove the `SRV-1` pending marks that now pass, and regenerate the
+wire transcripts: a new profile changes the request paths bd takes.
 
 ## Known fidelity limits
 
+- Transcripts record names, not values: a request that sends a different
+  value under the same names changes no transcript, and is caught only if
+  the output or a `verify` read differs.
 - Responses pass through unfiltered. A response member the reference server
   would not send still reaches the client.
 - Only top-level request members are checked; nested members (for example

@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/steveyegge/beads/internal/httpclient"
 )
 
 // corpusFile is testdata/corpus.yaml.
@@ -330,12 +332,7 @@ func testServedCorpus(t *testing.T, part int) {
 	profile := loadReferenceProfile(t)
 	bin := buildBD(t)
 
-	common := []string{
-		"BEADS_ACTOR=worker",
-		"CLAUDE_SESSION_ID=corpus-session-s23",
-		"BD_BACKUP_ENABLED=false",
-		"BD_EXPORT_AUTO=false",
-	}
+	common := corpusCommonEnv
 
 	// The embedded side needs no server: init and seed it on a goroutine
 	// while this one starts the server and seeds the served side. Each side
@@ -364,10 +361,8 @@ func testServedCorpus(t *testing.T, part int) {
 	serverAddr := startCorpusServer(t)
 	proxy := newReferenceProxy(t, profile, serverAddr)
 	proxyAddr := startProxy(t, proxy)
-	served := &side{name: "served", dir: t.TempDir(), files: t.TempDir(),
-		env: append([]string{"BEADS_HTTP_TOKEN=" + proxyAddr + "=" + corpusToken}, common...)}
-	servedErr := prepareSide(ctx, t, bin, c, served,
-		[]string{"connect", "http://" + proxyAddr, "--expect-project-id", corpusProjectID, "--json"})
+	served := &side{name: "served", dir: t.TempDir(), files: t.TempDir(), env: servedEnv(proxyAddr)}
+	servedErr := prepareSide(ctx, t, bin, c, served, connectArgs(proxyAddr))
 	if servedErr != nil {
 		cancel()
 	}
@@ -379,8 +374,10 @@ func testServedCorpus(t *testing.T, part int) {
 			t.Fatal(err)
 		}
 	}
+	warmPolicyCache(t, bin, served)
 	t.Logf("part %d setup (server start and both sides seeded concurrently): %s", part, time.Since(setupStart).Round(100*time.Millisecond))
 	proxy.takeRefusals()
+	known := knownCorpusIDs(t, c)
 
 	skipPending := os.Getenv("BEADS_CORPUS_SKIP_PENDING") == "1"
 	var outcomes []outcome
@@ -394,8 +391,9 @@ func testServedCorpus(t *testing.T, part int) {
 				t.Skipf("pending %s: %s", s.Pending.Slice, s.Pending.Reason)
 			}
 			before := proxy.requests.Load()
-			failures := runShape(t, bin, s, served, local, allow, proxy)
+			failures, wire, ran := runShape(t, bin, s, served, local, allow, proxy)
 			o.requests = proxy.requests.Load() - before
+			drift := checkTranscript(t, transcriptDir, transcript{Shape: s.ID, Requests: maskMintedIDs(wire, known)}, ran)
 			entry, allowed := allow[s.ID]
 			switch {
 			case hasCorpusBug(failures):
@@ -406,6 +404,21 @@ func testServedCorpus(t *testing.T, part int) {
 				o.detail = failures[0]
 				for _, f := range failures {
 					t.Error(f)
+				}
+				if drift != "" {
+					t.Error(drift)
+				}
+			case drift != "":
+				// What bd sent changed. A pending mark or an allowlist entry
+				// excuses a shape's outcome, never its wire: those shapes'
+				// requests are pinned like every other shape's.
+				o.status = "FAIL(transcript)"
+				o.detail = drift
+				t.Error(drift)
+				if s.Pending == nil {
+					for _, f := range failures {
+						t.Error(f)
+					}
 				}
 			case s.Pending != nil && len(failures) == 0:
 				o.status = "FAIL(pending-now-passes)"
@@ -429,35 +442,74 @@ func testServedCorpus(t *testing.T, part int) {
 		})
 	}
 
+	if n := proxy.foreign.Load(); n > 0 {
+		t.Logf("part %d: %d request(s) from other processes reached the proxy and were neither counted nor recorded", part, n)
+	}
 	summarize(t, part, len(c.Shapes), outcomes)
+}
+
+// corpusCommonEnv is both sides' environment beyond minimalBDEnv.
+var corpusCommonEnv = []string{
+	"BEADS_ACTOR=worker",
+	"CLAUDE_SESSION_ID=corpus-session-s23",
+	"BD_BACKUP_ENABLED=false",
+	"BD_EXPORT_AUTO=false",
+}
+
+// servedEnv is a served side's environment for the proxy at proxyAddr. The
+// policy-cache TTL outlasts any run: whether a bd ready dials a handshake to
+// learn the server's external-dependency policy depends on that cache
+// (httpclient/policy_cache.go, 5m by default), and a part that ran past the
+// default would see its later shapes send a request its earlier ones did not.
+func servedEnv(proxyAddr string) []string {
+	return append([]string{
+		"BEADS_HTTP_TOKEN=" + proxyAddr + "=" + corpusToken,
+		httpclient.PolicyCacheTTLEnv + "=24h",
+	}, corpusCommonEnv...)
+}
+
+func connectArgs(proxyAddr string) []string {
+	return []string{"connect", "http://" + proxyAddr, "--expect-project-id", corpusProjectID, "--json"}
+}
+
+// warmPolicyCache answers the served side's policy cache once, after the
+// seed, so every shape runs with it warm, as gc's polling bd ready does: no
+// shape's requests depend on which shape of its part happened to run first.
+func warmPolicyCache(t *testing.T, bin string, sd *side) {
+	t.Helper()
+	if r := runBD(t, bin, sd.dir, sd.env, "", "ready", "--limit", "1", "--json"); r.code != 0 {
+		t.Fatalf("warm the %s side's policy cache: %s", sd.name, r)
+	}
 }
 
 // runShape runs one shape on both sides and returns every way the served run
 // fell short. It never calls t.Error itself, so the caller can turn a pending
 // shape's failures into a skip.
-func runShape(t *testing.T, bin string, s shape, served, local *side, allow map[string]allowEntry, proxy *referenceProxy) []string {
+//
+// It also returns the requests the served run of Args made (wire) and whether
+// that run happened at all: a failed setup step stops the shape before it.
+func runShape(t *testing.T, bin string, s shape, served, local *side, allow map[string]allowEntry, proxy *referenceProxy) (fails []string, wire []transcriptRequest, ran bool) {
 	t.Helper()
-	var fails []string
 	failf := func(format string, a ...any) { fails = append(fails, fmt.Sprintf(format, a...)) }
 	wantStderr, err := regexp.Compile(s.ExpectStderr)
 	if err != nil {
 		failf("CORPUS BUG: expect_stderr %q: %v", s.ExpectStderr, err)
-		return fails
+		return fails, nil, false
 	}
 
 	for _, args := range s.Setup {
 		for _, sd := range []*side{served, local} {
 			if r := runBD(t, bin, sd.dir, sd.env, "", expand(context.Background(), t, bin, sd, args)...); r.code != 0 {
 				failf("setup %v failed on %s: %s", args, sd.name, r)
-				return fails
+				return fails, nil, false
 			}
 		}
 	}
 	proxy.takeRefusals()
 	args := expand(context.Background(), t, bin, served, s.Args)
-	before := proxy.requests.Load()
+	proxy.wire.start()
 	sr := runBD(t, bin, served.dir, served.env, s.Stdin, args...)
-	servedRequests := proxy.requests.Load() - before
+	wire = proxy.wire.stop()
 	wireRefusals := proxy.takeRefusals()
 	lr := runBD(t, bin, local.dir, local.env, s.Stdin, expand(context.Background(), t, bin, local, s.Args)...)
 	t.Logf("bd %s\nserved: %s\nembedded: exit=%d", strings.Join(s.Args, " "), sr, lr.code)
@@ -470,25 +522,25 @@ func runShape(t *testing.T, bin string, s shape, served, local *side, allow map[
 	// wrong or bd changed, whatever the served run did.
 	if lr.code != s.wantExit() {
 		failf("CORPUS BUG: the embedded run exited %d, want %d; the shape itself is wrong or bd changed: %s", lr.code, s.wantExit(), lr)
-		return fails
+		return fails, wire, true
 	}
 	if s.ExpectStderr != "" && !wantStderr.MatchString(lr.stderr) {
 		failf("CORPUS BUG: embedded stderr does not match %q: %s", s.ExpectStderr, lr.stderr)
-		return fails
+		return fails, wire, true
 	}
 
 	if entry, ok := allow[s.ID]; ok {
 		re, err := regexp.Compile(entry.Refusal)
 		if err != nil {
 			failf("allowlist refusal regexp for %s: %v", s.ID, err)
-			return fails
+			return fails, wire, true
 		}
 		if sr.code == 0 {
 			failf("allowlisted (%s) but the served run SUCCEEDED; drop it from testdata/allowlist.yaml and give it a comparison", entry.Reason)
 		} else if !re.MatchString(sr.stderr + sr.stdout) {
 			failf("allowlisted refusal did not match %q (a different failure than the one allowed): %s", entry.Refusal, sr)
 		}
-		return fails
+		return fails, wire, true
 	}
 
 	if m := refusalMarkers.FindString(sr.stderr + sr.stdout); m != "" {
@@ -502,11 +554,11 @@ func runShape(t *testing.T, bin string, s shape, served, local *side, allow map[
 	if s.ExpectStderr != "" && !wantStderr.MatchString(sr.stderr) {
 		failf("served stderr does not match %q (embedded does): %s", s.ExpectStderr, sr)
 	}
-	if s.Requests != nil && servedRequests != int64(*s.Requests) {
-		failf("the served run made %d requests, want exactly %d (requests); a change that saves one updates the pin", servedRequests, *s.Requests)
+	if s.Requests != nil && len(wire) != *s.Requests {
+		failf("the served run made %d requests, want exactly %d (requests); a change that saves one updates the pin", len(wire), *s.Requests)
 	}
 	if len(fails) > 0 {
-		return fails
+		return fails, wire, true
 	}
 	if len(s.PrefixOf) > 0 {
 		vs := runBD(t, bin, served.dir, served.env, "", expand(context.Background(), t, bin, served, s.PrefixOf)...)
@@ -533,7 +585,7 @@ func runShape(t *testing.T, bin string, s shape, served, local *side, allow map[
 			failf("verify %v diverged after the write: %s", args, d)
 		}
 	}
-	return fails
+	return fails, wire, true
 }
 
 func hasCorpusBug(failures []string) bool {
@@ -900,6 +952,15 @@ func writeAssets(assets []corpusAsset, dir string) error {
 	return nil
 }
 
+// bulkIDs are the ids a bulk graph creates, IDPrefix-001 onward.
+func bulkIDs(b bulkGraph) []string {
+	ids := make([]string, 0, b.Count)
+	for i := 1; i <= b.Count; i++ {
+		ids = append(ids, fmt.Sprintf("%s-%03d", b.IDPrefix, i))
+	}
+	return ids
+}
+
 func bulkPlan(b bulkGraph) string {
 	type node struct {
 		Key       string            `json:"key"`
@@ -914,8 +975,7 @@ func bulkPlan(b bulkGraph) string {
 		CommitMessage string `json:"commit_message"`
 		Nodes         []node `json:"nodes"`
 	}{CommitMessage: "corpus bulk " + b.IDPrefix}
-	for i := 1; i <= b.Count; i++ {
-		id := fmt.Sprintf("%s-%03d", b.IDPrefix, i)
+	for _, id := range bulkIDs(b) {
 		plan.Nodes = append(plan.Nodes, node{Key: id, ID: id, Title: "bulk " + id, Type: "task",
 			Priority: b.Priority, Ephemeral: b.Ephemeral, Metadata: b.Metadata})
 	}
