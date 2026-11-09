@@ -88,6 +88,68 @@ func TestCommandStartupRejectsUnknownBackendBeforeLocalWrites(t *testing.T) {
 	}
 }
 
+// TestCommandStartupRejectsUnknownDoltModeBeforeLocalWrites pins GH#5104: a
+// Dolt workspace whose metadata names a dolt_mode this build does not know
+// (as a newer bd can write) must refuse with the mode-specific guidance, not
+// fall through to the embedded store, which reads as "No issues found." with
+// exit 0, and must create no local storage.
+func TestCommandStartupRejectsUnknownDoltModeBeforeLocalWrites(t *testing.T) {
+	bd := buildBDForInitTests(t)
+	for _, args := range [][]string{{"list", "--json"}, {"stats"}} {
+		t.Run(args[0], func(t *testing.T) {
+			root := t.TempDir()
+			beadsDir := filepath.Join(root, ".beads")
+			if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+				t.Fatalf("create .beads: %v", err)
+			}
+			if err := (&configfile.Config{Backend: configfile.BackendDolt, DoltMode: "some-future-mode", DoltDatabase: "beads"}).Save(beadsDir); err != nil {
+				t.Fatalf("save unknown-mode metadata: %v", err)
+			}
+			metadataPath := filepath.Join(beadsDir, configfile.ConfigFileName)
+			before, err := os.ReadFile(metadataPath)
+			if err != nil {
+				t.Fatalf("read metadata: %v", err)
+			}
+
+			cmd := exec.Command(bd, args...)
+			cmd.Dir = root
+			cmd.Env = append(removedBackendTestEnv(beadsDir), "BEADS_DOLT_AUTO_START=0", "BD_DISABLE_METRICS=1")
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("bd %s on an unknown dolt_mode exited 0:\n%s", strings.Join(args, " "), out)
+			}
+			message := string(out)
+			for _, want := range []string{
+				`dolt_mode "some-future-mode"`,
+				metadataPath,
+				`"embedded", "server" and "proxied-server"`,
+				configfile.BackendNotOpenedGuarantee,
+				"upgrade every bd",
+				"if it is a typo",
+			} {
+				if !strings.Contains(message, want) {
+					t.Errorf("bd %s error missing %q:\n%s", strings.Join(args, " "), want, out)
+				}
+			}
+			if strings.Contains(message, "panic") {
+				t.Errorf("bd %s panicked:\n%s", strings.Join(args, " "), out)
+			}
+			for _, name := range []string{"embeddeddolt", "dolt", "proxieddb", "beads.db", ".local_version"} {
+				if _, statErr := os.Stat(filepath.Join(beadsDir, name)); !os.IsNotExist(statErr) {
+					t.Fatalf("unknown dolt_mode created %s (stat error: %v)", name, statErr)
+				}
+			}
+			after, err := os.ReadFile(metadataPath)
+			if err != nil {
+				t.Fatalf("read metadata after refusal: %v", err)
+			}
+			if string(after) != string(before) {
+				t.Fatalf("refusal rewrote metadata.json: before %q, after %q", before, after)
+			}
+		})
+	}
+}
+
 func TestInitGuardRejectsCorruptMetadataBeforeWorkspaceWrites(t *testing.T) {
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	if err := os.MkdirAll(beadsDir, 0o700); err != nil {

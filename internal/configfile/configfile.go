@@ -353,6 +353,22 @@ const (
 	DoltModeProxiedServer = "proxied-server"
 )
 
+// IsKnownDoltMode reports whether mode is a dolt_mode this build can open: the
+// empty string (no explicit mode, so host/env/config.yaml inference decides)
+// or one of the mode constants in any ASCII case, exactly as the mode
+// predicates (IsDoltServerMode, IsDoltProxiedServerMode, GetDoltMode) compare
+// it. Any other value is a mode written by a newer bd, or a typo: the
+// predicates would read it as neither server nor proxied-server and open the
+// embedded store, which reads as an empty tracker (GH#5104). It does not trim
+// or fold Unicode, since the predicates do neither.
+func IsKnownDoltMode(mode string) bool {
+	switch strings.ToLower(mode) {
+	case "", DoltModeEmbedded, DoltModeServer, DoltModeProxiedServer:
+		return true
+	}
+	return false
+}
+
 // Default Dolt server settings
 const (
 	DefaultDoltServerHost     = "127.0.0.1"

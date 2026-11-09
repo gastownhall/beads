@@ -301,3 +301,56 @@ func TestMetadataFilePath(t *testing.T) {
 		t.Errorf("both files: MetadataFilePath = %q, want %q", got, want)
 	}
 }
+
+// TestIsKnownDoltMode pins the dolt_mode vocabulary admission accepts: empty
+// (inference decides) and the three modes in any ASCII case, exactly as the
+// mode predicates compare them. Whitespace, Unicode case variants (long s
+// folds to "s" under EqualFold but not under ToLower) and other strings are
+// refused, since the predicates would read them as embedded (GH#5104).
+func TestIsKnownDoltMode(t *testing.T) {
+	for _, mode := range []string{"", "embedded", "server", "proxied-server", "Server", "EMBEDDED", "Proxied-Server"} {
+		if !IsKnownDoltMode(mode) {
+			t.Errorf("IsKnownDoltMode(%q) = false, want true", mode)
+		}
+	}
+	for _, mode := range []string{"some-future-mode", "proxied", "servr", " server", "server ", "   ", "\u017ferver", "server\nembedded", "embedded\x00"} {
+		if IsKnownDoltMode(mode) {
+			t.Errorf("IsKnownDoltMode(%q) = true, want false", mode)
+		}
+	}
+}
+
+// TestUnknownDoltModeErrorAt pins the refusal's contents: the value (quoted,
+// so an injected line break cannot forge a second line), the metadata file it
+// came from (a legacy config.json when that is what holds it), the supported
+// modes, the no-storage-open guarantee and both remedies, and no advice to
+// delete the field.
+func TestUnknownDoltModeErrorAt(t *testing.T) {
+	beadsDir := t.TempDir()
+	legacyPath := filepath.Join(beadsDir, LegacyConfigFileName)
+	if err := os.WriteFile(legacyPath, []byte(`{"dolt_mode":"x"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	msg := UnknownDoltModeErrorAt("future\nmode", beadsDir).Error()
+	for _, want := range []string{
+		`dolt_mode "future\nmode"`,
+		legacyPath,
+		`"embedded", "server" and "proxied-server"`,
+		BackendNotOpenedGuarantee,
+		"upgrade every bd",
+		"if it is a typo, restore dolt_mode",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("UnknownDoltModeErrorAt missing %q:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "\n") {
+		t.Errorf("UnknownDoltModeErrorAt printed a raw line break:\n%s", msg)
+	}
+	if strings.Contains(msg, "delete the field") && !strings.Contains(msg, "do not delete the field") {
+		t.Errorf("UnknownDoltModeErrorAt advises deleting dolt_mode:\n%s", msg)
+	}
+	if got := UnknownDoltModeErrorAt("m", filepath.Join(t.TempDir(), "absent")).Error(); !strings.Contains(got, ConfigFileName) {
+		t.Errorf("UnknownDoltModeErrorAt without a legacy file should name %s: %s", ConfigFileName, got)
+	}
+}
