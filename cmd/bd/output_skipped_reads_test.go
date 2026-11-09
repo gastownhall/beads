@@ -15,7 +15,9 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	internalissueops "github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -310,6 +312,76 @@ func TestReadyPlainSkipsParentEpicReads(t *testing.T) {
 			t.Errorf("bd ready output lacks the parent epic's title:\n%s", out)
 		}
 	})
+}
+
+// proxiedEpicReadSpy is a unit of work serving one ready child of one epic and
+// counting the reads the parent-epic column costs.
+type proxiedEpicReadSpy struct {
+	uow.UnitOfWork
+	depReads   int
+	issueReads int
+}
+
+func (s *proxiedEpicReadSpy) IssueUseCase() domain.IssueUseCase {
+	return proxiedEpicIssues{spy: s}
+}
+
+func (s *proxiedEpicReadSpy) DependencyUseCase() domain.DependencyUseCase {
+	return proxiedEpicDeps{spy: s}
+}
+
+type proxiedEpicIssues struct {
+	domain.IssueUseCase
+	spy *proxiedEpicReadSpy
+}
+
+func (u proxiedEpicIssues) GetReadyWork(context.Context, types.WorkFilter) (domain.SearchPage, error) {
+	return domain.SearchPage{Items: []*types.Issue{{ID: "rp-child", Title: "Child task", Priority: 2, IssueType: types.TypeTask}}}, nil
+}
+
+func (u proxiedEpicIssues) GetIssue(_ context.Context, id string) (*types.Issue, error) {
+	u.spy.issueReads++
+	return &types.Issue{ID: id, Title: "Parent epic title", IssueType: types.TypeEpic}, nil
+}
+
+type proxiedEpicDeps struct {
+	domain.DependencyUseCase
+	spy *proxiedEpicReadSpy
+}
+
+func (u proxiedEpicDeps) GetForIssueIDs(context.Context, []string) (map[string][]*types.Dependency, error) {
+	u.spy.depReads++
+	return map[string][]*types.Dependency{
+		"rp-child": {{IssueID: "rp-child", DependsOnID: "rp-epic", Type: types.DepParentChild}},
+	}, nil
+}
+
+// TestProxiedReadyPlainSkipsParentEpicReads is
+// TestReadyPlainSkipsParentEpicReads for the proxied route, which builds the
+// same column through the unit of work.
+func TestProxiedReadyPlainSkipsParentEpicReads(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		in             readyInput
+		wantDepReads   int
+		wantIssueReads int
+		wantInOutput   string
+	}{
+		{name: "plain", in: readyInput{plainFormat: true}, wantInOutput: "rp-child"},
+		{name: "pretty turned off", in: readyInput{}, wantInOutput: "rp-child"},
+		{name: "pretty", in: readyInput{prettyFormat: true}, wantDepReads: 1, wantIssueReads: 1, wantInOutput: "Parent epic title"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			spy := &proxiedEpicReadSpy{}
+			out := captureStdout(t, func() error { return runReadyProxiedList(t.Context(), spy, tt.in) })
+			if spy.depReads != tt.wantDepReads || spy.issueReads != tt.wantIssueReads {
+				t.Errorf("read %d dependency sets and %d parents, want %d and %d", spy.depReads, spy.issueReads, tt.wantDepReads, tt.wantIssueReads)
+			}
+			if !strings.Contains(out, tt.wantInOutput) {
+				t.Errorf("output lacks %q:\n%s", tt.wantInOutput, out)
+			}
+		})
+	}
 }
 
 // TestPriorityAndNoteTextTakeTitleFromTheResolvedIssue pins that the text

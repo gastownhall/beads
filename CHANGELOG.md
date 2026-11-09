@@ -888,6 +888,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `await_id` and `waiters`, so it checks those two. The over-width values
   previously failed with a raw Dolt driver error. There is no `await_type` vocabulary, no gate-type-only rule
   and no waiter deduplication.
+- **`bd ready --plain` skips the parent-epic reads over a proxied server too.**
+  The route read each listed issue's parent edges and each parent before it
+  chose how to print, and only the pretty view shows the parent epic.
 - **Over an http workspace, a bd command answers its repeated reads of a row
   or setting from one response.** `bd show <id> --json` makes one request
   instead of three, text `bd show` three instead of six, and `bd update`,
