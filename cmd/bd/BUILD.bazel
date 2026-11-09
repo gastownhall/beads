@@ -1885,6 +1885,14 @@ exports_files(
     visibility = ["//internal/httpapi:__pkg__"],
 )
 
+# The command tree golden, read as data by //backend/http's bd connect
+# front-door classifier (TestConnectFrontDoorClassifiesEveryCommand), which
+# fails on a runnable command its matrix does not classify.
+exports_files(
+    ["testdata/command_tree/tree.golden"],
+    visibility = ["//backend/http:__pkg__"],
+)
+
 # //scripts:android_release_docs_test: the comment counting the CGO_ENABLED=0
 # release targets.
 exports_files(
