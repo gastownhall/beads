@@ -57,9 +57,11 @@ func (m PollutionMatch) Strong() bool {
 
 // DetectTestPollution returns the issues that look like leftovers of test
 // runs, in input order. Each issue is judged on its own title and content:
-// a test-style title is required, and so is a thin description. Creation
-// time and ID shape are not evidence (a bulk import creates many issues in
-// one minute, and sequential IDs are ordinary).
+// (a generic test phrase and a description shorter than 20 bytes) or (a
+// test-prefix title and no description), with no design, acceptance
+// criteria or notes. Creation time and ID shape are not evidence (a bulk
+// import creates many issues in one minute, and sequential IDs are
+// ordinary).
 func DetectTestPollution(issues []*types.Issue) []PollutionMatch {
 	var matches []PollutionMatch
 	for _, issue := range issues {
@@ -87,7 +89,12 @@ func classifyPollution(issue *types.Issue) (PollutionMatch, bool) {
 	}
 	description := strings.TrimSpace(issue.Description)
 
-	if !(prefix || generic) || len(description) >= shortDescriptionBytes {
+	// A test prefix alone is an ordinary way to name test-infrastructure
+	// work, so it needs an empty description; a generic test phrase may
+	// carry a few bytes. Any authored design, acceptance criteria or notes
+	// mean someone wrote the issue up.
+	eligible := (generic && len(description) < shortDescriptionBytes) || (prefix && description == "")
+	if !eligible || hasAuthoredDetail(issue) {
 		return PollutionMatch{}, false
 	}
 
@@ -109,4 +116,15 @@ func classifyPollution(issue *types.Issue) (PollutionMatch, bool) {
 	}
 	m.Score = float64(m.points) / 10
 	return m, true
+}
+
+// hasAuthoredDetail reports whether the issue carries any nonblank design,
+// acceptance criteria or notes.
+func hasAuthoredDetail(issue *types.Issue) bool {
+	for _, field := range []string{issue.Design, issue.AcceptanceCriteria, issue.Notes} {
+		if strings.TrimSpace(field) != "" {
+			return true
+		}
+	}
+	return false
 }
