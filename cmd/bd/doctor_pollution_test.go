@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -224,5 +225,60 @@ func TestPollutionCleanupDeletedCandidateAndNothingLeft(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Skipping bd-1:") || !strings.Contains(out.String(), "nothing deleted") {
 		t.Fatalf("output = %q, want skip report and nothing deleted", out.String())
+	}
+}
+
+// TestPollutionCleanupErrorsDeleteNothing pins that --clean deletes nothing
+// when it cannot re-read the confirmed issues, cannot read their dependency
+// or comment evidence, or cannot write the backup.
+func TestPollutionCleanupErrorsDeleteNothing(t *testing.T) {
+	t.Parallel()
+
+	failure := errors.New("store unavailable")
+	tests := []struct {
+		name      string
+		breakIt   func(*fakePollutionCleanupStore)
+		backupDir func(t *testing.T) string
+		wantErr   string
+	}{
+		{"refresh", func(f *fakePollutionCleanupStore) { f.getErr = failure }, nil, "re-reading confirmed issues"},
+		{"dependencies", func(f *fakePollutionCleanupStore) { f.outgoingErr = failure }, nil, "re-checking confirmed issues"},
+		{"dependents", func(f *fakePollutionCleanupStore) { f.incomingErr = failure }, nil, "re-checking confirmed issues"},
+		{"comments", func(f *fakePollutionCleanupStore) { f.commentsErr = failure }, nil, "re-checking confirmed issues"},
+		{"backup", func(*fakePollutionCleanupStore) {}, func(t *testing.T) string {
+			return filepath.Join(t.TempDir(), "missing")
+		}, "backing up issues"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store, confirmed := newPollutionCleanupFixture(t)
+			tt.breakIt(store)
+			dir := t.TempDir()
+			if tt.backupDir != nil {
+				dir = tt.backupDir(t)
+			}
+			backup := filepath.Join(dir, "pollution-backup.jsonl")
+
+			var out bytes.Buffer
+			cleanup := pollutionCleanup{store: store, out: &out, backupPath: backup}
+			err := cleanup.run(context.Background(), confirmed)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("run error = %v, want one containing %q", err, tt.wantErr)
+			}
+			if tt.name != "backup" && !errors.Is(err, failure) {
+				t.Fatalf("run error = %v, want it to wrap %v", err, failure)
+			}
+			if len(store.deleted) != 0 {
+				t.Fatalf("deleted %v after %s failure, want nothing", store.deleted, tt.name)
+			}
+			if _, statErr := os.Stat(backup); !os.IsNotExist(statErr) {
+				t.Fatalf("backup written after %s failure (stat err %v)", tt.name, statErr)
+			}
+			if len(store.issues) != 6 {
+				t.Fatalf("store holds %d issues after %s failure, want all 6", len(store.issues), tt.name)
+			}
+		})
 	}
 }
