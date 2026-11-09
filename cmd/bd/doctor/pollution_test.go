@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -149,6 +150,40 @@ func TestHasTestTitlePrefix(t *testing.T) {
 	for _, tc := range cases {
 		if got := HasTestTitlePrefix(tc.title); got != tc.want {
 			t.Errorf("HasTestTitlePrefix(%q) = %t, want %t", tc.title, got, tc.want)
+		}
+	}
+}
+
+// TestHasSubstantiveContent pins the substantive-content veto exactly: the
+// description threshold is 20 trimmed bytes, whitespace does not count, and
+// each prose field (Design, AcceptanceCriteria, Notes) counts on its own.
+func TestHasSubstantiveContent(t *testing.T) {
+	mk := func(mutate func(*types.Issue)) *types.Issue {
+		i := pollutionFixtureIssue("bd-veto")
+		if mutate != nil {
+			mutate(i)
+		}
+		return i
+	}
+	cases := []struct {
+		name  string
+		issue *types.Issue
+		want  bool
+	}{
+		{"no content at all", mk(nil), false},
+		{"description of 19 bytes", mk(func(i *types.Issue) { i.Description = strings.Repeat("x", 19) }), false},
+		{"description of 20 bytes", mk(func(i *types.Issue) { i.Description = strings.Repeat("x", 20) }), true},
+		{"description padded past 20 but 19 once trimmed", mk(func(i *types.Issue) { i.Description = "  " + strings.Repeat("x", 19) + "  " }), false},
+		{"description padded past 20, still 20 once trimmed", mk(func(i *types.Issue) { i.Description = "   " + strings.Repeat("x", 20) + "  " }), true},
+		{"whitespace-only description", mk(func(i *types.Issue) { i.Description = " \n\t " }), false},
+		{"design", mk(func(i *types.Issue) { i.Design = "Step 1: reproduce; step 2: fix" }), true},
+		{"acceptance criteria", mk(func(i *types.Issue) { i.AcceptanceCriteria = "gate stays green" }), true},
+		{"notes", mk(func(i *types.Issue) { i.Notes = "tracked in the ledger" }), true},
+		{"blank prose fields", mk(func(i *types.Issue) { i.Design = " \n\t"; i.AcceptanceCriteria = "\t "; i.Notes = "  " }), false},
+	}
+	for _, tc := range cases {
+		if got := hasSubstantiveContent(tc.issue); got != tc.want {
+			t.Errorf("%s: hasSubstantiveContent = %t, want %t", tc.name, got, tc.want)
 		}
 	}
 }

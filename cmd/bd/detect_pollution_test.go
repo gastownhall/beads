@@ -108,3 +108,48 @@ func TestDetectTestPollution_ExcludesNonOpenAndEphemeral(t *testing.T) {
 		}
 	}
 }
+
+// TestDetectTestPollution_SubstantiveWorkNotFlagged pins AC-3: a prefixed open
+// task with real content — a trimmed description of >= 20 bytes, or nonblank
+// design, acceptance criteria, or notes — is never reported, however testy
+// its title looks.
+func TestDetectTestPollution_SubstantiveWorkNotFlagged(t *testing.T) {
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	fixture := func(id string, mutate func(*types.Issue)) *types.Issue {
+		issue := &types.Issue{
+			ID:        id,
+			Title:     "test-" + id + " leftover",
+			Status:    types.StatusOpen,
+			IssueType: types.TypeTask,
+			CreatedAt: created,
+		}
+		if mutate != nil {
+			mutate(issue)
+		}
+		return issue
+	}
+	issues := []*types.Issue{
+		fixture("bd-desc20", func(i *types.Issue) { i.Description = strings.Repeat("Fix the parser bug", 2) }),
+		fixture("bd-descpad", func(i *types.Issue) { i.Description = "   " + strings.Repeat("Investigate flaky gate", 2) + "  " }),
+		fixture("bd-design", func(i *types.Issue) { i.Design = "Step 1: reproduce; step 2: fix the harness" }),
+		fixture("bd-accept", func(i *types.Issue) { i.AcceptanceCriteria = "bd doctor --check=pollution stays green" }),
+		fixture("bd-notes", func(i *types.Issue) { i.Notes = "Follow-up tracked in the ledger" }),
+		fixture("bd-desc19", func(i *types.Issue) { i.Description = "parser bug in gate" }),
+		fixture("bd-blank", func(i *types.Issue) { i.Design = " \n\t"; i.Notes = "   " }),
+	}
+
+	reported := map[string]bool{}
+	for _, p := range detectTestPollution(issues) {
+		reported[p.issue.ID] = true
+	}
+	for _, id := range []string{"bd-desc20", "bd-descpad", "bd-design", "bd-accept", "bd-notes"} {
+		if reported[id] {
+			t.Errorf("issue %s with substantive content flagged as pollution", id)
+		}
+	}
+	for _, id := range []string{"bd-desc19", "bd-blank"} {
+		if !reported[id] {
+			t.Errorf("control: bare fixture issue %s was not reported", id)
+		}
+	}
+}

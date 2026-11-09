@@ -78,6 +78,23 @@ func PollutionCandidateFilter(issue *types.Issue) bool {
 	return issue.Status == types.StatusOpen && issue.IssueType != types.TypeEpic && !issue.Ephemeral
 }
 
+// hasSubstantiveContent reports whether issue carries real work: a
+// description of at least pollutionSubstantiveDescription bytes once trimmed,
+// or any nonblank prose in Design, AcceptanceCriteria, or Notes. Fixture
+// leftovers rarely have any of these; real work almost always does — every
+// false positive in GH#5025 had a substantive description.
+func hasSubstantiveContent(issue *types.Issue) bool {
+	if len(strings.TrimSpace(issue.Description)) >= pollutionSubstantiveDescription {
+		return true
+	}
+	for _, prose := range []string{issue.Design, issue.AcceptanceCriteria, issue.Notes} {
+		if strings.TrimSpace(prose) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // PollutionIssueFilter returns the search filter both pollution checks load
 // their candidates with: open, non-epic, non-ephemeral issues (NoHistory rows
 // included — search treats Ephemeral=false as "not ephemeral-flagged").
@@ -111,6 +128,12 @@ func DetectTestPollution(issues []*types.Issue) []PollutionResult {
 
 	for _, issue := range issues {
 		if !PollutionCandidateFilter(issue) {
+			continue
+		}
+
+		// Substantive content vetoes every signal: an issue with a real
+		// description or any prose fields is someone's work, not residue.
+		if hasSubstantiveContent(issue) {
 			continue
 		}
 
