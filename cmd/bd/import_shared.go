@@ -71,6 +71,10 @@ type ImportOptions struct {
 	// guard otherwise silently no-ops per row (bd-6dnrw.9). Only settable
 	// via explicit `bd import --allow-stale`; auto-import paths never set it.
 	AllowStale bool
+	// Screened is the import screen the caller already ran over these rows
+	// (screenImportRecords). When it ran the stale pre-filter, the rows are
+	// its write set and its outcome is reported as is, not filtered again.
+	Screened *importScreen
 }
 
 // ImportResult describes what an import operation did.
@@ -149,8 +153,15 @@ var errImportRelationsUnavailable = errors.New("import relation lookup unavailab
 // importIssuesCore imports issues into the Dolt store.
 // This is a bridge function that delegates to the Dolt store's batch creation.
 func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, issues []*types.Issue, opts ImportOptions) (*ImportResult, error) {
-	if opts.DryRun || len(issues) == 0 {
+	if opts.DryRun {
 		return &ImportResult{Skipped: len(issues)}, nil
+	}
+	if opts.Screened != nil && opts.Screened.Prefiltered && len(issues) == 0 {
+		screened := opts.Screened
+		return &ImportResult{Skipped: len(screened.StaleSkippedIDs), StaleSkippedIDs: screened.StaleSkippedIDs, Unchanged: len(screened.Plan.Unchanged)}, nil
+	}
+	if len(issues) == 0 {
+		return &ImportResult{}, nil
 	}
 
 	// The stale guard has two halves (bd-pkim8). This pre-filter reports the
@@ -161,7 +172,9 @@ func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, 
 	// re-checking updated_at inside the upsert itself.
 	var staleSkippedIDs []string
 	var changePlan importChangePlan
-	if !opts.AllowStale {
+	if opts.Screened != nil && opts.Screened.Prefiltered {
+		staleSkippedIDs, changePlan = opts.Screened.StaleSkippedIDs, opts.Screened.Plan
+	} else if !opts.AllowStale {
 		filtered, skipped, plan, err := filterStaleImportIssues(ctx, store, issues)
 		if err != nil {
 			return nil, err

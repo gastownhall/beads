@@ -1692,3 +1692,17 @@ func (s *EmbeddedDoltStore) GetStaleIssues(ctx context.Context, filter types.Sta
 // assertion in internal/storage/dolt/versioned.go for why it lives in the
 // leg's own package.
 var _ storage.VersionLister = (*EmbeddedDoltStore)(nil)
+
+// ImportVocabulary returns the custom statuses and custom types a batch import
+// validates its rows against, read in one transaction through the resolvers
+// the writer's NewBatchContext uses. Unlike GetCustomStatuses and
+// GetCustomTypes it does not fall back to config.yaml when the read fails: an
+// import screen must report the failure, not screen with a guess.
+func (s *EmbeddedDoltStore) ImportVocabulary(ctx context.Context) (customStatuses, customTypes []string, err error) {
+	err = s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var txErr error
+		customStatuses, customTypes, txErr = issueops.ReadImportVocabularyInTx(ctx, tx)
+		return txErr
+	})
+	return customStatuses, customTypes, err
+}
