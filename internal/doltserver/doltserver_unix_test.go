@@ -252,50 +252,54 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 	}{
 		{
 			name:     "ordinary command",
-			snapshot: "  101 S /usr/local/bin/dolt sql-server --port 3306\n",
+			snapshot: "S 101 /usr/local/bin/dolt sql-server --port 3306\n",
 			want:     []int{101},
 		},
 		{
 			name:     "profiled command",
-			snapshot: "102 Sl dolt --prof cpu --prof-path /tmp/dolt-pprof sql-server\n",
+			snapshot: "Sl 102 dolt --prof cpu --prof-path /tmp/dolt-pprof sql-server\n",
 			want:     []int{102},
 		},
 		{
 			name:     "ordered loose false positive",
-			snapshot: "103 S some-tool says dolt then sql-server\n",
+			snapshot: "S 103 some-tool says dolt then sql-server\n",
 			want:     []int{103},
 		},
 		{
 			name:     "sql server before dolt is rejected",
-			snapshot: "104 S sql-server then dolt\n",
+			snapshot: "S 104 sql-server then dolt\n",
 		},
 		{
 			name:     "case sensitive command matching",
-			snapshot: "105 S Dolt sql-server\n106 S dolt SQL-SERVER\n",
+			snapshot: "S 105 Dolt sql-server\nS 106 dolt SQL-SERVER\n",
 		},
 		{
 			name:     "zombie and dead states including modifiers are rejected",
-			snapshot: "107 Z dolt sql-server\n108 Z+ dolt sql-server\n109 X dolt sql-server\n110 X< dolt sql-server\n",
+			snapshot: "Z 107 dolt sql-server\nZ+ 108 dolt sql-server\nX 109 dolt sql-server\nX< 110 dolt sql-server\n",
 		},
 		{
 			name:     "valid state prefix with modifier is accepted",
-			snapshot: "111 S+ dolt sql-server\n",
+			snapshot: "S+ 111 dolt sql-server\n",
 			want:     []int{111},
+		},
+		{
+			name:     "blank state row with tab separator",
+			snapshot: "114\tdolt sql-server\n",
+			want:     []int{114},
 		},
 		{
 			name: "malformed and invalid rows are rejected",
 			snapshot: "\n" +
-				"not-a-pid S dolt sql-server\n" +
-				"0 S dolt sql-server\n" +
-				"-1 S dolt sql-server\n" +
+				"S not-a-pid dolt sql-server\n" +
+				"S 0 dolt sql-server\n" +
+				"S -1 dolt sql-server\n" +
 				"112\n" +
-				"113 S\n" +
-				"114\tdolt sql-server\n" +
+				"S 113\n" +
 				"115 S \n",
 		},
 		{
 			name:     "preserves source order",
-			snapshot: "202 S dolt sql-server\n201 S dolt sql-server\n203 R dolt sql-server\n",
+			snapshot: "S 202 dolt sql-server\nS 201 dolt sql-server\nR 203 dolt sql-server\n",
 			want:     []int{202, 201, 203},
 		},
 	}
@@ -306,5 +310,16 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 				t.Fatalf("parseDoltProcessPIDs() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestParseDoltProcessPIDsEmptyStateColumn reproduces GH#7121: on macOS 26
+// `ps` prints an empty state column for many processes, so the row is
+// "<pid> <spaces> <command>". A live dolt sql-server must still be
+// recognised.
+func TestParseDoltProcessPIDsEmptyStateColumn(t *testing.T) {
+	snapshot := " 1466      /Users/u/.nix-profile/bin/dolt sql-server --config /Users/u/.beads/shared-server/dolt-server-config.yaml\n"
+	if got, want := parseDoltProcessPIDs([]byte(snapshot)), []int{1466}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseDoltProcessPIDs() = %v, want %v", got, want)
 	}
 }

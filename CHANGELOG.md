@@ -1226,6 +1226,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A running shared dolt server is no longer misidentified as a non-dolt
+  process when `ps` prints an empty state column.** On macOS 26, `ps` leaves
+  the state column blank for many processes; bd split the `pid=,state=,command=`
+  listing positionally, so the binary path was taken for the state and the
+  command shifted left. A live `dolt sql-server` then dropped out of the
+  recognized PID list: `bd` refused to start the shared server ("port ... is
+  in use by a non-dolt process") and could remove a healthy server's pid and
+  port tracking files. bd now requests the state column before the PID and
+  reads a row that starts with a decimal PID as having a blank state.
+  (#7121, reported by @SimplicityGuy)
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

@@ -48,7 +48,13 @@ func findPIDOnPort(port int) int {
 // could not be read (ps can be refused, e.g. inside a macOS sandbox), which
 // is not the same as there being no dolt processes.
 func readDoltProcessPIDs() ([]int, error) {
-	out, err := exec.Command("ps", "-axo", "pid=,state=,command=").Output()
+	// The state column is requested before the PID because ps can print it
+	// empty (macOS 26 does so for many processes, GH#7121): with the PID
+	// first, the blank column shifted the fields left, the binary path was
+	// taken for the state and a live dolt sql-server went unrecognized.
+	// With the state first, a row whose leading field is a decimal PID is
+	// simply one with a blank state.
+	out, err := exec.Command("ps", "-ax", "-o", "state=", "-o", "pid=", "-o", "command=").Output()
 	if err != nil {
 		return nil, fmt.Errorf("listing processes: %w", err)
 	}
@@ -56,7 +62,10 @@ func readDoltProcessPIDs() ([]int, error) {
 }
 
 // parseDoltProcessPIDs returns matching, non-defunct Dolt server PIDs from a
-// `ps -axo pid=,state=,command=` snapshot. It preserves the source row order.
+// `ps -ax -o state= -o pid= -o command=` snapshot. Rows start with the
+// state, but a blank state column (GH#7121) leaves the row starting with its
+// decimal PID instead; the command stays a single untokenized tail. It
+// preserves the source row order.
 func parseDoltProcessPIDs(snapshot []byte) []int {
 	var pids []int
 	for _, line := range strings.Split(string(snapshot), "\n") {
@@ -65,20 +74,29 @@ func parseDoltProcessPIDs(snapshot []byte) []int {
 			continue
 		}
 
-		pidText, rest, ok := splitPSField(line)
+		first, rest, ok := splitPSField(line)
 		if !ok {
 			continue
 		}
-		state, command, ok := splitPSField(rest)
-		if !ok {
-			continue
+
+		// ps state codes never start with a digit while PIDs are decimal
+		// numbers, so a fully numeric first field is a PID with a blank
+		// state, not a state followed by a PID.
+		var state, pidText, command string
+		if isASCIIDigits(first) {
+			state, pidText, command = "", first, rest
+		} else {
+			state = first
+			if pidText, command, ok = splitPSField(rest); !ok {
+				continue
+			}
 		}
 
 		pid, err := strconv.Atoi(pidText)
 		if err != nil || pid <= 0 {
 			continue
 		}
-		if state[0] == 'Z' || state[0] == 'X' {
+		if state != "" && (state[0] == 'Z' || state[0] == 'X') {
 			continue
 		}
 
@@ -88,6 +106,21 @@ func parseDoltProcessPIDs(snapshot []byte) []int {
 		}
 	}
 	return pids
+}
+
+// isASCIIDigits reports whether s is nonempty and made only of ASCII digits.
+// Unlike strconv.Atoi it accepts no sign, so it can tell a decimal PID from
+// a ps state code without guessing at command text.
+func isASCIIDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // splitPSField separates the next whitespace-delimited ps field from the
