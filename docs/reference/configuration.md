@@ -281,16 +281,23 @@ Before pushing, `bd` verifies the local chunk store with `dolt fsck --quiet`, bo
 
 ## Dolt Server Identity
 
-When bd starts a Dolt server, it records that server's UUID
-(`@@server_uuid`) in `.bd-server-uuid` in the server's data directory:
+bd gives each Dolt server data directory a server UUID (`@@server_uuid`) of
+its own, kept in `.bd-server-uuid` in that directory:
 `.beads/dolt/.bd-server-uuid` for a project's own server,
-`~/.beads/shared-server/dolt/.bd-server-uuid` for the shared server. Every
-later open of that endpoint asks the answering server for its UUID and
-refuses, before it lists, creates, reads or writes any database there, when
-it is not the recorded one or there is no usable record. Without the check,
-another process on the same port (another bd, for example one in WSL2 whose
-loopback ports Windows shares, a port forward or a container) would receive
-your project's databases without any error.
+`~/.beads/shared-server/dolt/.bd-server-uuid` for the shared server. bd
+starts the server there with that UUID, and every later open of that
+endpoint asks the answering server for its UUID and refuses, before it
+lists, creates, reads or writes any database there, when it is not the
+recorded one or there is no usable record. Without the check, another
+process on the same port (another bd, for example one in WSL2 whose loopback
+ports Windows shares, a port forward or a container) would receive your
+project's databases without any error.
+
+bd sets the UUID itself because Dolt's own does not tell servers apart on
+every host: a `server_uuid` persisted in your global Dolt config
+(`sqlserver.global.server_uuid`, which one `dolt sql-server` run in a
+directory of several databases writes) is the UUID every server on that host
+reports.
 
 The check covers the endpoints bd manages:
 
@@ -300,29 +307,60 @@ The check covers the endpoints bd manages:
 
 It does not apply to endpoints bd does not start:
 
-- external server mode (`BEADS_DOLT_SERVER_MODE=1`, a remote
-  `dolt.host`, or a `BEADS_DOLT_SERVER_PORT` outside shared mode)
+- a server that something other than bd runs (Docker, systemd, an
+  orchestrator), the shared server included, which you declare by turning
+  auto-start off (`dolt.auto-start: false` or `BEADS_DOLT_AUTO_START=0`) or
+  with external server mode (`BEADS_DOLT_SERVER_MODE=1`);
+  `bd init --external` declares it for you by writing
+  `dolt.auto-start: false` to the workspace's `config.yaml`, which git
+  tracks, so clones of the project inherit it; to declare it on one machine
+  only, remove that line and set `BEADS_DOLT_AUTO_START=0` in the gitignored
+  `.beads/.env`
+- external server mode that the configuration implies (a remote `dolt.host`,
+  or a `BEADS_DOLT_SERVER_PORT` outside shared mode)
 - a port you name yourself, such as `bd init --server-port`
 - unix sockets, TLS connections, proxied servers and gateways
+
+Turning auto-start off exempts every endpoint of the workspace, so a server
+you then start yourself with `bd dolt start` is not checked either.
 
 Turn it off with `dolt.verify-server-identity: false` in `config.yaml`
 (`bd config set dolt.verify-server-identity false`) or
 `BEADS_DOLT_VERIFY_SERVER_IDENTITY=false`. The environment variable wins over
 `config.yaml`. Only `false`, `0`, `off` and the other false spellings turn it
-off; a value bd cannot read leaves it on.
+off; a value bd cannot read leaves it on. With the check off, bd records no
+UUID but still starts its server with the one already recorded for the data
+directory, so a server started with the check off, for one command or by a
+project on the shared server whose `config.yaml` turns it off, passes the
+check of later commands.
 
-**Upgrading:** a server started by an older bd has no record, so the first
-command after the upgrade is refused. Stop it and start it again so bd records
-its identity:
+**Upgrading:** a server started by an older bd does not report the UUID bd
+keeps for its data directory, so the first command after the upgrade is
+refused. Stop it and start it again so bd starts it with that UUID:
 
 ```bash
 bd dolt stop && bd dolt start
 ```
 
-bd records the UUID only when it can show that the process it launched holds
-every listener on the address and port it dialed: through `/proc` on Linux,
-`lsof` on macOS, and `netstat -aon` on Windows. Where it cannot (WSL1, other platforms), the launch fails and leaves
-the record unchanged; turn the check off there. See
+The same goes for any server started on that data directory without bd's
+UUID, such as a `dolt sql-server` you run there yourself. A server that
+something other than bd runs never gets a record: declare it as above
+(auto-start off or external server mode) instead of restarting it.
+
+When bd starts a server, it checks that the server reports the data
+directory's UUID, and it looks up which processes hold the listeners that
+receive connections to the address and port it dialed: through `/proc` on
+Linux, `lsof` and `ps` on macOS, and `netstat -aon` and the process tree on
+Windows. Each must be the server or a process it started, such as the real
+`dolt.exe` behind a launcher shim; when another process holds one, or the
+server reports another UUID, the launch fails. Where the host cannot show
+which process holds a listener (FreeBSD and other platforms with no such
+lookup, WSL1, a sandbox whose `/proc` lists no sockets), the UUID check
+decides alone. If bd cannot tell the version of your `dolt` binary, it
+starts the server with command-line flags, which cannot set the UUID: it
+then records the UUID the server reports, and where the host cannot show a
+listener's owner it does so on the evidence of the server's startup and
+prints a warning. See
 [Troubleshooting](/reference/troubleshooting#refusing-the-dolt-server-its-identity-cannot-be-verified).
 
 The check runs when bd opens its store and when `bd init` creates

@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -28,14 +32,20 @@ import (
 // data root: under WSL2's mirrored networking a Windows bd dials a WSL
 // server on the same loopback port and, without a check, reads and writes
 // the wrong project's databases. bd therefore keeps, inside the data root it
-// expects the server to serve, the @@server_uuid of the dolt sql-server it
-// last launched there and proved owned its listener (pairServerIdentity),
-// and a store open or shared init against a managed endpoint compares the
-// answering server's @@server_uuid with that record before it lists,
-// creates or reads any database (VerifyServerIdentity).
+// expects the server to serve, a server UUID of that data root's own, starts
+// the dolt sql-server it launches there with that @@server_uuid
+// (pinServerIdentity) and checks that the launched server reports it and
+// holds its listener (pairServerIdentity), and a store open or shared init
+// against a managed endpoint compares the answering server's @@server_uuid
+// with that record before it lists, creates or reads any database
+// (VerifyServerIdentity). Dolt's own @@server_uuid does not name a data
+// root: a value persisted in the user's global Dolt config
+// (sqlserver.global.server_uuid, which one multi-database dolt sql-server run
+// writes) wins over each data root's, so every server on such a host reports
+// the same UUID.
 
 // ServerIdentityFileName is the record, inside the server's data root, of the
-// @@server_uuid of the dolt sql-server bd last launched there.
+// @@server_uuid of the dolt sql-server bd launches there.
 const ServerIdentityFileName = ".bd-server-uuid"
 
 // VerifyServerIdentityKey is the config.yaml setting that turns the server
@@ -174,10 +184,11 @@ func (e *ServerIdentityError) Error() string {
 		b.WriteString("  - If this is this machine's own bd server, started before bd verified server identity, " +
 			"stop it and start it again so bd records its identity: bd dolt stop && bd dolt start\n")
 	} else {
-		b.WriteString("  - If it should be this machine's own bd server, stop it and start it again so bd records its identity: " +
+		b.WriteString("  - If it should be this machine's own bd server, stop it and start it again so it runs with the identity bd recorded: " +
 			"bd dolt stop && bd dolt start\n")
 	}
-	b.WriteString("  - If the server is meant to be one bd does not manage, use external mode (BEADS_DOLT_SERVER_MODE=1), " +
+	b.WriteString("  - If something other than bd runs this server (Docker, systemd, an orchestrator), say so: " +
+		"dolt.auto-start: false (BEADS_DOLT_AUTO_START=0) or external mode (BEADS_DOLT_SERVER_MODE=1), " +
 		"or turn the check off: " + VerifyServerIdentityEnv + "=false or " + VerifyServerIdentityKey + ": false")
 	return b.String()
 }
@@ -249,10 +260,11 @@ func VerifyServerIdentity(ctx context.Context, q doltversion.RowQuerier, exp *Se
 // SharedServerIdentityExpectation is what the shared server at host:port is
 // expected to be for beadsDir's workspace: the server bd launched for the
 // shared data directory. It is nil, no check, when beadsDir turns the check
-// off, the host is not one bd runs a server at, or there is no shared
-// directory.
+// off or declares its server managed outside bd (ServerManagedOutsideBD),
+// the host is not one bd runs a server at, or there is no shared directory.
 func SharedServerIdentityExpectation(beadsDir, host string, port int) *ServerIdentityExpectation {
-	if port <= 0 || !configfile.BdRunsServerAt(host) || !ServerIdentityVerificationEnabled(beadsDir) {
+	if port <= 0 || !configfile.BdRunsServerAt(host) || !ServerIdentityVerificationEnabled(beadsDir) ||
+		ServerManagedOutsideBD(beadsDir) {
 		return nil
 	}
 	serverDir, err := SharedServerPath()
@@ -283,6 +295,56 @@ func ServerIdentityVerificationEnabled(beadsDir string) bool {
 	return !isFalsyBool(config.GetString(VerifyServerIdentityKey))
 }
 
+// ServerManagedOutsideBD reports whether beadsDir's workspace declares that
+// something other than bd runs its Dolt server, the shared server included:
+// external mode (BEADS_DOLT_SERVER_MODE=1), or auto-start off
+// (BEADS_DOLT_AUTO_START, dolt.auto-start in beadsDir's config.yaml or the
+// loaded configuration), which bd dolt start already reads as a server
+// managed outside bd. Docker, systemd and orchestrators such as Gas City run
+// such a server, so bd has no launch of its own to compare it with and the
+// server identity check does not apply to it.
+func ServerManagedOutsideBD(beadsDir string) bool {
+	if os.Getenv("BEADS_DOLT_SERVER_MODE") == "1" || isFalsyBool(os.Getenv("BEADS_DOLT_AUTO_START")) {
+		return true
+	}
+	if beadsDir != "" && isFalsyBool(config.GetStringFromDir(beadsDir, "dolt.auto-start")) {
+		return true
+	}
+	return isFalsyBool(config.GetString("dolt.auto-start"))
+}
+
+// newServerUUID mints a data root's server UUID; tests replace it.
+var newServerUUID = uuid.NewString
+
+// pinServerIdentity is the server UUID startLocked gives the dolt sql-server
+// it launches for dataDir (the server_uuid system variable of the server's
+// config), or "" when it gives none. It is the UUID dataDir's record names,
+// so every restart keeps it, with the check on or off for beadsDir: a server
+// started with the check off (for one command, or by a project on the shared
+// server whose config turns it off) still passes the check of every later
+// open. When there is no usable record it is a new one, recorded before the
+// launch so that a store open reaching the server while it starts finds it
+// there, but only with the check on; with it off it is "" and dataDir is left
+// alone. A launch that passes CLI flags (configLaunch false) cannot set it,
+// so it is "" there.
+func pinServerIdentity(beadsDir, dataDir string, configLaunch bool) (string, error) {
+	if !configLaunch {
+		return "", nil
+	}
+	if recorded, problem := readServerIdentityRecord(dataDir); problem == "" {
+		return recorded, nil
+	}
+	if !ServerIdentityVerificationEnabled(beadsDir) {
+		return "", nil
+	}
+	id := newServerUUID()
+	if err := writeServerIdentityFile(dataDir, id); err != nil {
+		return "", fmt.Errorf("recording the server identity of the server bd starts: writing %s: %w",
+			remedy.PrintedValue(ServerIdentityRecordPath(dataDir)), err)
+	}
+	return id, nil
+}
+
 // pairTimeout bounds each step of pairing: an ownership lookup and the UUID
 // query.
 const pairTimeout = 10 * time.Second
@@ -290,71 +352,101 @@ const pairTimeout = 10 * time.Second
 // Pairing seams; tests replace them.
 var (
 	// pairListenerOwnership is who holds the TCP listener at host:port
-	// relative to pid. Only OwnershipOwned lets bd pair.
+	// relative to pid.
 	pairListenerOwnership = listenerOwnershipAt
 	// pairQueryServerUUID reads @@server_uuid from the server at host:port.
 	pairQueryServerUUID = queryServerUUIDAt
 	// writeServerIdentityFile records uuid in dataDir.
 	writeServerIdentityFile = writeServerIdentityRecord
+	// pairWarnings receives the warning of a pairing the host could not
+	// prove.
+	pairWarnings io.Writer = os.Stderr
 )
 
-// pairServerIdentity records, in dataDir, the @@server_uuid of srv, the dolt
-// sql-server startLocked has just launched and found ready on host:port. It
-// records nothing unless srv is alive and positively owns that listener both
-// before and after the UUID is read: a greeting alone, an unknown or unlisted
-// holder, or another process's listener does not count, so a foreign server
-// that answers on the port is never trusted. On failure the previous record
-// is left as it was.
-func pairServerIdentity(beadsDir string, srv *startedServer, host string, port int, dataDir string) error {
-	owned := func() error {
+// pairServerIdentity checks that srv, the dolt sql-server startLocked has
+// just launched for dataDir and found ready on host:port, is the server
+// dataDir's record names, recording its @@server_uuid there when the record
+// does not name it yet. It accepts srv only if srv is alive and no lookup
+// refutes that it holds that listener, both before and after the UUID is
+// read: another process's listener, or no listener listed on a host that
+// lists this process's own (ListenerOwnershipProvable), refutes it, so a
+// foreign server that answers on the port is never trusted where the host can
+// tell. When startLocked pinned the UUID (pinned, from pinServerIdentity), srv
+// must also report that one: the record already names it, and a server that
+// reports another is not one bd started for dataDir. A launch with nothing
+// pinned (the CLI-flag launch) records the UUID srv reports; where the host
+// cannot show which process holds a listener (a platform with no lookup, such
+// as FreeBSD; WSL1; a sandbox whose /proc lists no sockets), it does so on the
+// evidence the startup wait accepted (awaitOwnedListener) and prints a
+// warning. Pairing never changes a record on failure.
+func pairServerIdentity(beadsDir string, srv *startedServer, host string, port int, dataDir, pinned string) error {
+	// ownership is whether srv holds the listener: shown (true, nil),
+	// refuted (an error), or not shown by this host (false, nil).
+	ownership := func() (bool, error) {
 		if srv.hasExited() {
-			return fmt.Errorf("it exited")
+			return false, fmt.Errorf("it exited")
 		}
-		switch o := pairListenerOwnership(srv.pid, host, port); o {
+		switch pairListenerOwnership(srv.pid, host, port) {
 		case OwnershipOwned:
-			return nil
+			return true, nil
 		case OwnershipForeign:
-			return fmt.Errorf("another process holds the listener")
+			return false, fmt.Errorf("another process holds the listener")
 		case OwnershipUnlisted:
-			return fmt.Errorf("no listener on the port is listed for any process on this host")
-		default:
-			return fmt.Errorf("this host cannot show which process holds the listener")
+			if listenerOwnershipProvable() {
+				return false, fmt.Errorf("no listener on the port is listed for any process on this host")
+			}
 		}
+		return false, nil
 	}
 	fail := func(reason error) error {
-		return fmt.Errorf("bd started dolt sql-server (PID %d) at %s but did not record its server identity: %w; "+
-			"bd stopped the server it started and left %s unchanged.\n\n"+
+		return fmt.Errorf("bd started dolt sql-server (PID %d) at %s but could not verify its server identity: %w; "+
+			"bd stopped the server it started.\n\n"+
 			"To proceed:\n"+
 			"  - Find what holds the port: %s\n"+
 			"  - Give bd's server a free port (BEADS_DOLT_SERVER_PORT or dolt.port) and start it again: bd dolt start\n"+
-			"  - If this host cannot show which process holds a port, turn the check off: %s=false or %s: false",
-			srv.pid, doltutil.PrintedServerAddr(host, port), reason, remedy.PrintedValue(ServerIdentityRecordPath(dataDir)),
+			"  - To start it without the check, turn the check off: %s=false or %s: false",
+			srv.pid, doltutil.PrintedServerAddr(host, port), reason,
 			fmt.Sprintf(portConflictHint, port), VerifyServerIdentityEnv, VerifyServerIdentityKey)
 	}
-	if err := owned(); err != nil {
+	shown, err := ownership()
+	if err != nil {
 		return fail(fmt.Errorf("could not prove it holds the listener: %w", err))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), pairTimeout)
 	defer cancel()
-	uuid, err := pairQueryServerUUID(ctx, beadsDir, host, port)
+	reported, err := pairQueryServerUUID(ctx, beadsDir, host, port)
 	if err != nil {
 		return fail(err)
 	}
-	if err := owned(); err != nil {
+	stillShown, err := ownership()
+	if err == nil && shown && !stillShown {
+		err = fmt.Errorf("this host no longer shows which process holds the listener")
+	}
+	if err != nil {
 		return fail(fmt.Errorf("could not prove it still holds the listener after reading its UUID: %w", err))
 	}
-	if err := writeServerIdentityFile(dataDir, uuid); err != nil {
-		return fail(fmt.Errorf("writing %s: %w", remedy.PrintedValue(ServerIdentityRecordPath(dataDir)), err))
+	if pinned != "" && reported != pinned {
+		return fail(fmt.Errorf("it reports server UUID %s, not the %s bd started it with", reported, pinned))
+	}
+	if recorded, _ := readServerIdentityRecord(dataDir); recorded != reported {
+		if err := writeServerIdentityFile(dataDir, reported); err != nil {
+			return fail(fmt.Errorf("writing %s: %w", remedy.PrintedValue(ServerIdentityRecordPath(dataDir)), err))
+		}
+	}
+	if !shown && pinned == "" {
+		_, _ = fmt.Fprintf(pairWarnings, "Warning: this host cannot show which process holds the listener at %s, so bd recorded "+
+			"the server identity of the dolt sql-server it started (PID %d) in %s on the evidence of its startup alone.\n",
+			doltutil.PrintedServerAddr(host, port), srv.pid, remedy.PrintedValue(ServerIdentityRecordPath(dataDir)))
 	}
 	return nil
 }
 
 // listenerOwnershipAt is who holds the TCP listener at host:port relative to
-// pid: the listeners on host's address (or a wildcard that receives its
-// connections) and port, from /proc on linux, lsof on darwin and netstat on
+// pid: the listeners on port that receive connections dialed to host
+// (receivingListeners), from /proc on linux, lsof on darwin and netstat on
 // Windows. Unlike classifyListener, which asks only whether pid holds some
 // listener on the port, every listener that receives the endpoint's
-// connections must be pid's.
+// connections must be pid's or a descendant's.
 func listenerOwnershipAt(pid int, host string, port int) Ownership {
 	if runtime.GOOS != "windows" {
 		return classifyListenerAt(pid, host, port)
@@ -368,81 +460,165 @@ func listenerOwnershipAt(pid int, host string, port int) Ownership {
 	return classifyNetstatListeners(string(out), pid, host, port)
 }
 
-// classifyNetstatListeners classifies `netstat -aon` output: the LISTENING
-// TCP sockets on port whose local address is host's, or a wildcard that also
-// receives host's connections. Owned when there is at least one and every
-// one is pid's, Foreign when any is another process's, Unlisted when there is
-// none. Unlike findPIDOnPort it matches the address, not just a ":port"
-// suffix, and it does not stop at the first PID.
+// classifyNetstatListeners classifies `netstat -aon` output: the TCP
+// listeners on port that receive connections dialed to host
+// (receivingListeners), each held by pid or a descendant of it
+// (classifyHolders). A listener is told by its foreign address, the
+// unspecified address with port 0 (a connection's is its peer's), not by the
+// state column, which netstat prints in the system's language (LISTENING,
+// ABHÖREN, ...), in more than one word in some, before the PID column. It is
+// OwnershipUnknown when a holder's PID does not parse. Unlike
+// findPIDOnPort it matches the address, not just a ":port" suffix, and it
+// does not stop at the first PID.
 func classifyNetstatListeners(out string, pid int, host string, port int) Ownership {
-	seen, foreign := false, false
+	want, ok := endpointAddr(host)
+	if !ok {
+		return OwnershipUnknown
+	}
+	var addrs []netip.Addr
+	var holders []string
 	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) != 5 || !strings.EqualFold(fields[0], "TCP") || fields[3] != "LISTENING" {
+		if len(fields) < 5 || !strings.EqualFold(fields[0], "TCP") || !netstatListener(fields[2]) {
 			continue
 		}
 		h, p, err := net.SplitHostPort(fields[1])
 		if err != nil || p != strconv.Itoa(port) {
 			continue
 		}
-		if !listenAddrReceives(h, host) {
+		addr, err := netip.ParseAddr(h)
+		if err != nil {
 			continue
 		}
-		holder, err := strconv.Atoi(fields[4])
+		addrs, holders = append(addrs, addr.Unmap()), append(holders, fields[len(fields)-1])
+	}
+	var receivers []int
+	for i, recv := range receivingListeners(addrs, want) {
+		if !recv {
+			continue
+		}
+		holder, err := strconv.Atoi(holders[i])
 		if err != nil {
 			return OwnershipUnknown
 		}
-		seen = true
-		if holder != pid {
-			foreign = true
-		}
+		receivers = append(receivers, holder)
 	}
-	switch {
-	case foreign:
-		return OwnershipForeign
-	case seen:
-		return OwnershipOwned
-	}
-	return OwnershipUnlisted
+	return classifyHolders(receivers, pid)
 }
 
-// normalizedListenHost is host as a canonical IP string where it is one,
-// with localhost as 127.0.0.1 and an empty host as 127.0.0.1 (bd's default
-// bind address).
-func normalizedListenHost(host string) string {
-	host = strings.Trim(host, "[]")
-	if host == "" || strings.EqualFold(host, "localhost") {
-		return "127.0.0.1"
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.String()
-	}
-	return strings.ToLower(host)
-}
-
-// listenAddrReceives reports whether a TCP listener bound to listen receives
-// connections to host: it is bound to host's address, or to a wildcard that
-// covers it.
-func listenAddrReceives(listen, host string) bool {
-	l, want := normalizedListenHost(listen), normalizedListenHost(host)
-	return l == want || receivesFor(l, want)
-}
-
-// receivesFor reports whether a listener bound to the wildcard address
-// listen also receives connections to want.
-func receivesFor(listen, want string) bool {
-	wantIP := net.ParseIP(want)
-	if wantIP == nil {
+// netstatListener reports whether a netstat TCP row's foreign address is a
+// listener's: the unspecified address with port 0.
+func netstatListener(foreign string) bool {
+	h, p, err := net.SplitHostPort(foreign)
+	if err != nil || p != "0" {
 		return false
 	}
-	switch listen {
-	case "0.0.0.0", "*":
-		return wantIP.To4() != nil
-	case "::":
-		return true
+	addr, err := netip.ParseAddr(h)
+	return err == nil && addr.IsUnspecified()
+}
+
+// bdServerAddr is the address bd's own Dolt server binds (DefaultConfig's
+// host).
+var bdServerAddr = netip.MustParseAddr(configfile.DefaultDoltServerHost)
+
+// endpointAddr is the address a dial to host reaches, to match against
+// listeners' local addresses: bd's server address for every spelling of it
+// (configfile.BdRunsServerAt), else host's own address when it is one. ok
+// is false for a name.
+func endpointAddr(host string) (addr netip.Addr, ok bool) {
+	if configfile.BdRunsServerAt(host) {
+		return bdServerAddr, true
+	}
+	addr, err := netip.ParseAddr(configfile.UnbracketHost(host))
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return addr.Unmap(), true
+}
+
+// receivingListeners reports which of addrs, the unmapped local addresses of
+// the TCP listeners on one port, receive connections dialed to want there:
+// those bound to want or to the unspecified address of want's family, and,
+// for an IPv4 want, those bound to the IPv6 unspecified address only when no
+// IPv4 listener does. An IPv4 listener takes an IPv4 connection before an
+// IPv6 wildcard does, and an IPv6-only wildcard (IPV6_V6ONLY), which /proc,
+// lsof and netstat do not tell from a dual-stack one, takes none, so beside
+// an IPv4 listener an IPv6 wildcard receives nothing of want's.
+func receivingListeners(addrs []netip.Addr, want netip.Addr) []bool {
+	recv := make([]bool, len(addrs))
+	ipv4 := false
+	for i, a := range addrs {
+		if a == want || (a.IsUnspecified() && a.Is4() == want.Is4()) {
+			recv[i] = true
+			ipv4 = ipv4 || a.Is4()
+		}
+	}
+	if want.Is4() && !ipv4 {
+		for i, a := range addrs {
+			if a.Is6() && a.IsUnspecified() {
+				recv[i] = true
+			}
+		}
+	}
+	return recv
+}
+
+// classifyHolders is who holds an endpoint's listeners, the PIDs holders,
+// relative to pid: OwnershipUnlisted when there are none, OwnershipOwned when
+// each is pid or one of its descendants, OwnershipForeign when one is not,
+// and OwnershipUnknown when the process tree a holder other than pid needs
+// cannot be read (processParents).
+func classifyHolders(holders []int, pid int) Ownership {
+	if len(holders) == 0 {
+		return OwnershipUnlisted
+	}
+	var parents map[int]int
+	for _, holder := range holders {
+		if holder == pid {
+			continue
+		}
+		if parents == nil {
+			var err error
+			if parents, err = processParents(); err != nil || len(parents) == 0 {
+				return OwnershipUnknown
+			}
+		}
+		if !descendsFrom(holder, pid, parents) {
+			return OwnershipForeign
+		}
+	}
+	return OwnershipOwned
+}
+
+// descendsFrom reports whether p is ancestor itself or one of its
+// descendants, walking p's parent chain through parents (child -> parent).
+// A chain that reaches a pid the snapshot does not list, pid 0, or a cycle
+// (a stale snapshot) is not a match.
+func descendsFrom(p, ancestor int, parents map[int]int) bool {
+	seen := map[int]bool{}
+	for p > 0 && !seen[p] {
+		if p == ancestor {
+			return true
+		}
+		seen[p] = true
+		next, ok := parents[p]
+		if !ok {
+			return false
+		}
+		p = next
 	}
 	return false
 }
+
+// listenerLookupTimeout bounds each lsof or ps run, so a hung tool cannot
+// stall startup.
+const listenerLookupTimeout = 10 * time.Second
+
+// processParents snapshots every process's parent, child to parent, for the
+// descendant walks of the darwin and Windows listener lookups
+// (processParentPIDs: ps on Unix, a Toolhelp snapshot on Windows); tests
+// replace it.
+var processParents = processParentPIDs
 
 // queryServerUUIDAt reads @@server_uuid from the server at host:port as the
 // managed server's user.

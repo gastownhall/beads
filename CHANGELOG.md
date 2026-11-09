@@ -703,6 +703,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **bd refuses a Dolt server it manages when the server answering its port
+  is not the one bd started there.** Under WSL2's mirrored networking a
+  Windows bd reached the WSL server on the same loopback port and read and
+  wrote the wrong project's databases without an error. bd now keeps a
+  server UUID for each Dolt server data directory in `.bd-server-uuid`
+  there and starts its server with it as `@@server_uuid` (Dolt's own UUID
+  is the same for every server on a host whose global Dolt config persists
+  one), and every store open of that endpoint, and `bd init`'s creation of
+  `beads_global` on the shared server, compares the answering server's UUID
+  with the record before it lists, creates, reads or writes a database. The
+  check covers the shared server and a project's own server on
+  `127.0.0.1`. It skips a server that something other than bd runs, which
+  you declare by turning auto-start off (`dolt.auto-start: false` or
+  `BEADS_DOLT_AUTO_START=0`) or with `BEADS_DOLT_SERVER_MODE=1`, the shared
+  server included, so orchestrated rigs that turn auto-start off, as Gas
+  City does, are unaffected; `bd init --external` now declares it by
+  writing `dolt.auto-start: false` to the workspace's `config.yaml`. With
+  auto-start off the check skips a server you start with `bd dolt start`
+  too. It also skips ports you name (`bd init --server-port`), remote
+  hosts, unix sockets, TLS, proxied servers and gateways. Upgrading: a
+  server an older bd started does not report its data directory's UUID, so
+  commands against it are refused until you restart it with
+  `bd dolt stop && bd dolt start` (in shared mode the restart interrupts
+  every project on the host). Where the host cannot show which process
+  holds a listener (FreeBSD and other platforms without such a lookup,
+  WSL1), the UUID check decides alone. Turn the check off with
+  `dolt.verify-server-identity: false` or
+  `BEADS_DOLT_VERIFY_SERVER_IDENTITY=false`.
+  ([#4637](https://github.com/gastownhall/beads/issues/4637))
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add

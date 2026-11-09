@@ -558,6 +558,13 @@ type Config struct {
 	// defaults would enable it. Diagnostic paths use this to stay read-only.
 	DisableAutoStart bool
 
+	// ServerManagedOutsideBD declares that something other than bd runs the
+	// endpoint's server (bd init --external), as external mode or auto-start
+	// off in the configuration do (doltserver.ServerManagedOutsideBD), so the
+	// server identity check does not apply to it (GH#4637). AutoStart false
+	// does not say this: it is false for other reasons too.
+	ServerManagedOutsideBD bool
+
 	// MaxOpenConns overrides the connection pool size (0 = default 10).
 	// Set to 1 for branch isolation in tests (DOLT_CHECKOUT is session-level).
 	MaxOpenConns int
@@ -2251,13 +2258,17 @@ func checkOpenSchemaDrift(ctx context.Context, db *sql.DB, cfg *Config) error {
 // environment port included, except a caller-explicit port outside
 // ServerPortSharedServer) and a workspace's own bd-owned server. It exempts
 // gateways and credential commands, proxied servers, unix sockets, TLS,
-// hosts bd does not run its server at, caller-explicit and environment
-// ports outside shared mode, any mode that is not owned outside shared mode,
-// and an explicit dolt.verify-server-identity: false
+// hosts bd does not run its server at, a server declared managed outside bd
+// (cfg.ServerManagedOutsideBD, bd init --external; or the workspace's
+// doltserver.ServerManagedOutsideBD: external mode or auto-start off, the
+// shared server included), caller-explicit and environment ports outside
+// shared mode, any mode that is not owned outside shared mode, and an
+// explicit dolt.verify-server-identity: false
 // (BEADS_DOLT_VERIFY_SERVER_IDENTITY=false).
 func serverIdentityExpectation(cfg *Config, beadsDir, serverDir string) *doltserver.ServerIdentityExpectation {
 	if cfg.Gateway || cfg.ProxiedServer || cfg.ServerSocket != "" || cfg.ServerTLS ||
-		cfg.ServerPort <= 0 || !configfile.BdRunsServerAt(cfg.ServerHost) {
+		cfg.ServerPort <= 0 || !configfile.BdRunsServerAt(cfg.ServerHost) ||
+		cfg.ServerManagedOutsideBD || doltserver.ServerManagedOutsideBD(beadsDir) {
 		return nil
 	}
 	shared := cfg.ServerPortSharedServer ||
