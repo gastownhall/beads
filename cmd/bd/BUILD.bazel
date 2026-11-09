@@ -959,6 +959,7 @@ go_test(
         "init_role_routing_test.go",
         "init_safety_test.go",
         "init_server_flags_test.go",
+        "init_server_identity_test.go",
         "init_stealth_test.go",
         "init_team_server_test.go",
         "init_test.go",
