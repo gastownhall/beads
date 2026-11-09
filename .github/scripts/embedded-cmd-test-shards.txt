@@ -69,6 +69,7 @@
 100 17 TestEmbeddedMigratePersonal_planningDatabaseIgnoresLauncherOverride
 100 17 TestEmbeddedReopen
 
+100 18 TestEmbeddedImportInvalidDryRun
 100 18 TestEmbeddedLabelPropagateRename
 100 18 TestEmbeddedPrune_protectsBeadCitedByCustomStatusBead
 
@@ -103,6 +104,7 @@
 
 100 26 TestEmbeddedDoltRemoteAdd_JSON_AllowGitOrigin_WarningOnStderr
 100 26 TestEmbeddedExternalMutationPolicy
+100 26 TestEmbeddedImportInvalidDryRunCases
 100 26 TestEmbeddedPersistentPreRunLogsAndSkipsIdentityCheckForFreshEmbeddedWorkspace
 
 100 27 TestEmbeddedDoltRemoteAdd_GitOriginCollision_RefusalMessageCopy

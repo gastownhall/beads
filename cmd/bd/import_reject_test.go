@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // GH#4492: a JSONL import aborted in its entirety on the first record the
@@ -192,6 +195,81 @@ func TestWriteRejectFileHardening(t *testing.T) {
 		}
 		if len(entries) != 1 {
 			t.Errorf("directory holds %d entries, want only the rejects file (no temp file left behind)", len(entries))
+		}
+	})
+}
+
+// TestResolveImportRejectsDryRunLeavesRejectsFileAlone pins the --dry-run
+// filesystem contract (adapted from @maphew's PR #5202): a dry run reports
+// what it would set aside but never creates, rewrites or removes the
+// --rejects file, whether or not it found anything to reject, and a strict
+// refusal stops before the filesystem is touched at all.
+func TestResolveImportRejectsDryRunLeavesRejectsFileAlone(t *testing.T) {
+	origSkip, origRejects := importSkipInvalid, importRejectsPath
+	t.Cleanup(func() { importSkipInvalid, importRejectsPath = origSkip, origRejects })
+
+	ctx := context.Background()
+	noCustom := func(context.Context) ([]string, []string, error) { return nil, nil, nil }
+	bad := &types.Issue{ID: "tst-x", Title: "Bad", Status: types.Status("verify"), IssueType: types.TypeTask}
+	sources := map[*types.Issue]importSource{bad: {line: 3, raw: []byte(`{"id":"tst-x"}`)}}
+	rejectsPath := filepath.Join(t.TempDir(), "rejects.jsonl")
+	importRejectsPath = rejectsPath
+
+	t.Run("dry run with rejects creates no file", func(t *testing.T) {
+		importSkipInvalid = true
+		_, rejected, rejectsFile, err := screenImportWriteSet(ctx, []*types.Issue{bad}, sources, noCustom, true)
+		if err != nil {
+			t.Fatalf("screenImportWriteSet: %v", err)
+		}
+		if len(rejected) != 1 || rejected[0].Line != 3 {
+			t.Errorf("rejected = %+v, want the line-3 row", rejected)
+		}
+		if rejectsFile != "" {
+			t.Errorf("rejectsFile = %q, want empty on a dry run", rejectsFile)
+		}
+		if _, statErr := os.Stat(rejectsPath); !os.IsNotExist(statErr) {
+			t.Errorf("dry run wrote the rejects file (stat err: %v)", statErr)
+		}
+	})
+
+	const keep = "previous run's quarantine content\n"
+	if err := os.WriteFile(rejectsPath, []byte(keep), 0o600); err != nil {
+		t.Fatalf("seed rejects file: %v", err)
+	}
+	assertKept := func(t *testing.T) {
+		t.Helper()
+		data, err := os.ReadFile(rejectsPath)
+		if err != nil {
+			t.Fatalf("pre-existing rejects file gone after dry run: %v", err)
+		}
+		if string(data) != keep {
+			t.Errorf("pre-existing rejects file content changed: %q", data)
+		}
+	}
+
+	t.Run("dry run without rejects preserves a pre-existing file", func(t *testing.T) {
+		importSkipInvalid = true
+		if _, _, _, err := screenImportWriteSet(ctx, nil, nil, noCustom, true); err != nil {
+			t.Fatalf("screenImportWriteSet: %v", err)
+		}
+		assertKept(t)
+	})
+
+	t.Run("dry run with rejects preserves a pre-existing file", func(t *testing.T) {
+		importSkipInvalid = true
+		if _, _, _, err := screenImportWriteSet(ctx, []*types.Issue{bad}, sources, noCustom, true); err != nil {
+			t.Fatalf("screenImportWriteSet: %v", err)
+		}
+		assertKept(t)
+	})
+
+	t.Run("strict refusal leaves the file alone", func(t *testing.T) {
+		importSkipInvalid = false
+		for _, dryRun := range []bool{true, false} {
+			if _, _, _, err := screenImportWriteSet(ctx, []*types.Issue{bad}, sources, noCustom, dryRun); err == nil || !strings.Contains(err.Error(), "line 3") {
+				t.Fatalf("dryRun=%v: err = %v, want the strict refusal naming line 3", dryRun, err)
+			}
+			assertKept(t)
 		}
 	})
 }
