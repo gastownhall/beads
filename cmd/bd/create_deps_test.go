@@ -195,6 +195,11 @@ func TestParseFormDeps(t *testing.T) {
 		{name: "blank entries are skipped", in: []string{" ", ""}, want: nil},
 		{name: "blocked-by alias", in: []string{"blocked-by:bd-b"}, want: []domain.DependencySpec{blocksB}},
 		{name: "depends-on alias", in: []string{"depends-on:bd-b"}, want: []domain.DependencySpec{blocksB}},
+		{name: "blocks and an alias are one edge", in: []string{"blocks:bd-b", "depends-on:bd-b"}, want: []domain.DependencySpec{blocksB}},
+		{name: "both aliases are one edge", in: []string{"blocked-by:bd-b", "depends-on:bd-b"}, want: []domain.DependencySpec{blocksB}},
+		{name: "a bare id and an alias are one edge", in: []string{"bd-b", "blocked-by:bd-b"}, want: []domain.DependencySpec{blocksB}},
+		{name: "an identical repeat is one edge", in: []string{"related:bd-b", "related:bd-b"}, want: []domain.DependencySpec{{Type: types.DepRelated, TargetID: "bd-b"}}},
+		{name: "every blocking spelling is one edge", in: []string{"bd-b", "blocked-by:bd-b", "blocks:bd-b", "depends-on:bd-b"}, want: []domain.DependencySpec{blocksB}},
 		{
 			name: "other types name their relationship",
 			in:   []string{"discovered-from:bd-a", "related:bd-b"},

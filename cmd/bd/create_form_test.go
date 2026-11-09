@@ -549,6 +549,48 @@ func TestCreateIssueFromFormValues(t *testing.T) {
 		}
 	})
 
+	// GH#5560 (bd-fom9ed): every blocking spelling the form takes makes the
+	// new issue depend on its target with the canonical, gating blocks type.
+	// The form's blocks:<id> keeps its historical direction, unlike --deps'.
+	t.Run("BlockingSpellingsGateTheNewIssue", func(t *testing.T) {
+		for _, spelling := range []string{"", "blocks:", "blocked-by:", "depends-on:"} {
+			target := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Gate target " + spelling})
+			child := createFormIssueForTest(t, ctx, s, &createFormValues{
+				Title:        "Gated by " + spelling,
+				Dependencies: []string{spelling + target.ID},
+			})
+			assertFormBlocksEdge(t, ctx, s, child.ID, target.ID)
+		}
+	})
+
+	// GH#5560 (bd-fom9ed): spellings that resolve to the same edge collapse
+	// to it instead of colliding as two types on one target.
+	t.Run("EquivalentSpellingsCollapse", func(t *testing.T) {
+		target := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Collapse target"})
+		child := createFormIssueForTest(t, ctx, s, &createFormValues{
+			Title:        "Collapse child",
+			Dependencies: []string{"blocked-by:" + target.ID, "depends-on:" + target.ID, "blocks:" + target.ID, target.ID},
+		})
+		assertFormBlocksEdge(t, ctx, s, child.ID, target.ID)
+	})
+
+	// GH#5560 (bd-fom9ed): each equivalent pair on its own stores one blocks
+	// edge, so no single pairing can collide as two types on one target.
+	t.Run("EquivalentPairsCollapse", func(t *testing.T) {
+		for _, pair := range [][2]string{
+			{"blocked-by:", "depends-on:"},
+			{"blocks:", "depends-on:"},
+			{"", "blocked-by:"},
+		} {
+			target := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Pair target " + pair[0] + pair[1]})
+			child := createFormIssueForTest(t, ctx, s, &createFormValues{
+				Title:        "Pair child " + pair[0] + pair[1],
+				Dependencies: []string{pair[0] + target.ID, pair[1] + target.ID},
+			})
+			assertFormBlocksEdge(t, ctx, s, child.ID, target.ID)
+		}
+	})
+
 	t.Run("AllPriorities", func(t *testing.T) {
 		for priority := 0; priority <= 4; priority++ {
 			fv := &createFormValues{
