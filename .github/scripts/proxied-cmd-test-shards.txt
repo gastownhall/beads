@@ -162,6 +162,7 @@
 34 17 TestProxiedServerPrime
 34 17 TestProxiedServerSQLDatabaseFlag
 34 17 TestProxiedServerServeModeGate
+34 17 TestProxiedServerTemplateGuardAcrossWriteVerbs
 
 34 18 TestProxiedServerClose3
 34 18 TestProxiedServerCount
