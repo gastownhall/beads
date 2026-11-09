@@ -1093,6 +1093,12 @@ type wispPurgeOutcome struct {
 func runWispPurgeChunks(ctx context.Context, ids []string, deleteChunk func(context.Context, []string) (wispPurgeChunk, error)) wispPurgeOutcome {
 	out := wispPurgeOutcome{selected: len(ids), confirmed: []string{}, deletedIDs: []string{}, orphaned: []string{}}
 	for chunk := range slices.Chunk(ids, wispPurgeChunkSize) {
+		// A canceled command sends no further chunk, whether or not the
+		// role it would reach checks the context itself.
+		if err := ctx.Err(); err != nil {
+			out.err = err
+			break
+		}
 		res, err := deleteChunk(ctx, chunk)
 		if err != nil {
 			out.err = err

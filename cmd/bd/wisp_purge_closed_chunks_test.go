@@ -658,3 +658,46 @@ func TestWispPurgeClosedOrphanReportDropsLaterChunkDeletions(t *testing.T) {
 		}
 	})
 }
+
+// TestWispPurgeClosedStopsOnCancellationBetweenChunks pins that a purge whose
+// context is canceled after a chunk committed sends no further request, keeps
+// the committed ids in this command's deletion bookkeeping (what its own
+// auto-export reads, GH#5896), and reports the confirmed progress with the
+// rerun hint. A role that does not happen to check the context must not be
+// the only thing standing between a canceled command and another write.
+func TestWispPurgeClosedStopsOnCancellationBetweenChunks(t *testing.T) {
+	s := useWispPurgeStub(t, 450)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.deleter.committed = func(issueops.DeleteRequest) { cancel() }
+
+	stdout, stderr, err := captureWispGC(t, func() error {
+		return runWispPurgeClosed(ctx, false, true, nil)
+	})
+	if err == nil {
+		t.Fatalf("runWispPurgeClosed succeeded after cancellation\nstdout:\n%s", stdout)
+	}
+	if got := len(s.deleter.requests); got != 1 {
+		t.Fatalf("sent %d requests, want 1 (none after the cancellation)", got)
+	}
+	first := s.deleter.requests[0].IDs
+	if !commandDidWrite.Load() {
+		t.Error("commandDidWrite not set after a committed chunk")
+	}
+	for _, id := range []string{first[0], first[len(first)-1]} {
+		if !commandDeletedIssueIDs.has(id) {
+			t.Errorf("committed id %s missing from the deletion bookkeeping", id)
+		}
+	}
+	if commandDeletedIssueIDs.has(s.closed[449]) {
+		t.Errorf("unsent id %s recorded as deleted", s.closed[449])
+	}
+	if !bytes.Contains([]byte(stdout), []byte("Deleted 200 issue(s)")) {
+		t.Errorf("stdout does not report the 200 confirmed deletions:\n%s", stdout)
+	}
+	for _, want := range []string{"250", "context canceled", "bd mol wisp gc --closed --force"} {
+		if !bytes.Contains([]byte(stderr), []byte(want)) {
+			t.Errorf("stderr lacks %q:\n%s", want, stderr)
+		}
+	}
+}
