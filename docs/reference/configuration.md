@@ -349,6 +349,17 @@ bd config set types.custom "agent,molecule,event"
 
 Use `bd statuses` and `bd types` to list everything configured.
 
+An open store reads custom statuses and types from the database once and
+caches them for its lifetime (until `bd config set` changes them). If that
+read fails, the call falls back to `status.custom`/`types.custom` in
+config.yaml; when the requested vocabulary has no config.yaml fallback
+either, the read failure surfaces as an error instead of an empty
+vocabulary. A failed read is never cached: the next lookup reads the
+database again, so a transient outage cannot leave a long-running process
+serving a degraded vocabulary until it restarts. A config.yaml fallback does
+not prove the database vocabulary is complete: during an outage it may be
+partial.
+
 ### Sequential Counter IDs
 
 By default, beads generates hash-based IDs (e.g. `bd-a3f2`). For projects that prefer short sequential IDs (`bd-1`, `bd-2`, ...), enable counter mode:
