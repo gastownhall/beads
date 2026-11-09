@@ -1229,10 +1229,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An embedded-mode open no longer waits forever for a database another
   process or open handle holds. bd retried the open until the command was
   interrupted, so a stuck holder hung every other command on the workspace.
-  The retries now stop after 30 seconds and the command fails with
+  The retries now stop after 5 minutes and the command fails with
   `embedded open retry budget exhausted`, naming the database directory;
-  raise the budget with `BEADS_EMBEDDED_OPEN_TIMEOUT` (a duration such as
-  `2m`, or bare seconds). A caller that sets its own deadline keeps it
+  change the budget with `BEADS_EMBEDDED_OPEN_TIMEOUT` (a duration such as
+  `10m`, or bare seconds). Waiting commands do not queue for the database,
+  so on a busy workspace a budget under a minute can fail commands that are
+  only waiting their turn. A caller that sets its own deadline keeps it
   instead. The budget stops further retries only: it does not interrupt an
   open attempt already running.
 - With several stores open in one process, the `bd.db.pool_open`,

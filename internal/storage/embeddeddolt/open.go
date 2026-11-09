@@ -34,8 +34,12 @@ const (
 const openWaitBudgetEnv = "BEADS_EMBEDDED_OPEN_TIMEOUT"
 
 // defaultOpenWaitBudget is the retry budget when openWaitBudgetEnv is unset
-// or invalid.
-const defaultOpenWaitBudget = 30 * time.Second
+// or invalid. Waiters do not queue for the database: a retry polls the lock
+// only briefly and then backs off for up to 7.5s, while a running command
+// reopens at once, so ten bd commands on one workspace have kept a waiter
+// out for over 30s (TestEmbeddedCloseConcurrent). Minutes end the wait on a
+// stuck holder without failing a command that is only waiting its turn.
+const defaultOpenWaitBudget = 5 * time.Minute
 
 // openWaitBudget returns the retry budget configured in openWaitBudgetEnv,
 // read on every call. It accepts positive time.ParseDuration strings ("2m",
@@ -96,7 +100,7 @@ func classifyOpenErr(ctx context.Context, wait *openWaitBackOff, dir string, bud
 //
 // The driver retries an open it reports as retryable, such as a database
 // another process or handle holds, with an exponential backoff. The retries
-// stop after the BEADS_EMBEDDED_OPEN_TIMEOUT budget (default 30s), and the
+// stop after the BEADS_EMBEDDED_OPEN_TIMEOUT budget (default 5m), and the
 // open then fails with ErrOpenTimeout. The budget applies only when ctx has
 // no deadline; a caller's deadline replaces it. The budget stops further
 // retries; it never interrupts a running attempt.

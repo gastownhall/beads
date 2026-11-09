@@ -353,6 +353,9 @@ func TestOpenSQLWaitBudget(t *testing.T) {
 		dir := initOpenWaitDB(t)
 		holdOpenWaitDB(t, dir)
 
+		// database/sql returns a canceled context's error before it dials
+		// the connector, so the driver's retries never run: this pins that
+		// a caller canceled up front gets that error, never ErrOpenTimeout.
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		db, cleanup, err := OpenSQL(ctx, dir, "testdb", "")
@@ -367,6 +370,10 @@ func TestOpenSQLWaitBudget(t *testing.T) {
 
 	t.Run("non_retryable_error_is_not_a_timeout", func(t *testing.T) {
 		t.Setenv("BEADS_EMBEDDED_OPEN_TIMEOUT", "1ms")
+		// The driver rejects a missing directory while it parses the DSN,
+		// before any retry policy exists, so this pins path validation.
+		// TestOpenWaitRecordsExhaustion pins a permanent error met inside
+		// the retries.
 		missing := filepath.Join(t.TempDir(), "missing")
 		db, cleanup, err := OpenSQL(context.Background(), missing, "testdb", "")
 		if err == nil {
@@ -381,8 +388,10 @@ func TestOpenSQLWaitBudget(t *testing.T) {
 	t.Run("non_retryable_open_error", func(t *testing.T) {
 		t.Setenv("BEADS_EMBEDDED_OPEN_TIMEOUT", "1s")
 
-		// A directory that is a regular file fails the open for good:
-		// the driver does not retry it, so no budget can be diagnosed.
+		// A directory that is a regular file fails the open for good. Like
+		// the missing directory, the driver rejects it while it parses the
+		// DSN, before any retry policy exists, so this too pins path
+		// validation rather than a permanent error inside the retries.
 		file := filepath.Join(t.TempDir(), "not-a-directory")
 		if err := os.WriteFile(file, nil, 0o644); err != nil {
 			t.Fatalf("write blocker file: %v", err)
@@ -404,15 +413,15 @@ func TestOpenSQLWaitBudget(t *testing.T) {
 }
 
 // TestOpenWaitBudget pins how BEADS_EMBEDDED_OPEN_TIMEOUT resolves: positive
-// Go durations or bare seconds, and the 30s default for anything else.
+// Go durations or bare seconds, and the 5m default for anything else.
 func TestOpenWaitBudget(t *testing.T) {
 	t.Run("unset", func(t *testing.T) {
 		t.Setenv("BEADS_EMBEDDED_OPEN_TIMEOUT", "")
 		if err := os.Unsetenv("BEADS_EMBEDDED_OPEN_TIMEOUT"); err != nil {
 			t.Fatalf("unsetenv: %v", err)
 		}
-		if got := openWaitBudget(); got != 30*time.Second {
-			t.Errorf("openWaitBudget() with the variable unset = %v, want 30s", got)
+		if got := openWaitBudget(); got != 5*time.Minute {
+			t.Errorf("openWaitBudget() with the variable unset = %v, want 5m", got)
 		}
 	})
 
@@ -420,22 +429,22 @@ func TestOpenWaitBudget(t *testing.T) {
 		raw  string
 		want time.Duration
 	}{
-		{"", 30 * time.Second},
-		{"   ", 30 * time.Second},
+		{"", 5 * time.Minute},
+		{"   ", 5 * time.Minute},
 		{"90s", 90 * time.Second},
 		{"2m", 2 * time.Minute},
 		{"1ms", time.Millisecond},
 		{"90", 90 * time.Second},
 		{" 45s ", 45 * time.Second},
 		{"\t90\n", 90 * time.Second},
-		{"0", 30 * time.Second},
-		{"0s", 30 * time.Second},
-		{"-5s", 30 * time.Second},
-		{"-5", 30 * time.Second},
-		{"soon", 30 * time.Second},
-		{"5 s", 30 * time.Second},
-		{"99999999999999999999", 30 * time.Second},
-		{"99999999999999999999h", 30 * time.Second},
+		{"0", 5 * time.Minute},
+		{"0s", 5 * time.Minute},
+		{"-5s", 5 * time.Minute},
+		{"-5", 5 * time.Minute},
+		{"soon", 5 * time.Minute},
+		{"5 s", 5 * time.Minute},
+		{"99999999999999999999", 5 * time.Minute},
+		{"99999999999999999999h", 5 * time.Minute},
 	}
 	for _, tc := range cases {
 		t.Run(strings.ReplaceAll(tc.raw, " ", "_"), func(t *testing.T) {
