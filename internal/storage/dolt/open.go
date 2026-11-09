@@ -124,7 +124,9 @@ func FillServerEndpoint(beadsDir string, fileCfg *configfile.Config, cfg *Config
 // identifiers deliberately remain recognizable in metadata so this check can fail
 // closed instead of opening a new, empty Dolt database. beadsDir is the workspace
 // the config came from, so the refusal can offer the metadata heal when that
-// workspace already holds a Dolt database.
+// workspace already holds a Dolt database. It refuses an unrecognized dolt_mode
+// with the same shared text command admission prints (GH#5104): such a mode
+// selected no store and fell through to an empty embedded database.
 func requireDoltBackend(fileCfg *configfile.Config, beadsDir string) error {
 	switch fileCfg.Backend {
 	case configfile.BackendPostgres, configfile.BackendMySQL, configfile.BackendSQLite:
@@ -136,6 +138,9 @@ func requireDoltBackend(fileCfg *configfile.Config, beadsDir string) error {
 	backend := fileCfg.GetBackend()
 	if backend != configfile.BackendDolt {
 		return fmt.Errorf("configured storage backend %q cannot be opened as Dolt", backend)
+	}
+	if !configfile.IsKnownDoltMode(fileCfg.DoltMode) {
+		return configfile.UnknownDoltModeErrorAt(fileCfg.DoltMode, beadsDir)
 	}
 	return nil
 }
