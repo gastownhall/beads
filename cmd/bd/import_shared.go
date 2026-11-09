@@ -1483,6 +1483,13 @@ type importLocalResult struct {
 	// Retired counts the issue ids the import skipped because a retaining
 	// sweep retired them; they are not in Issues.
 	Retired int
+	// Rejected counts the records the pre-write screen set aside (GH#4492):
+	// they never reach the store on a recovery import.
+	Rejected int
+	// QuarantinePath is the <source>.rejected.jsonl file the rejects were
+	// saved to; empty when there were no rejects or the save failed (a
+	// failed save only warns — the valid rows still restore).
+	QuarantinePath string
 }
 
 // memoryRecord represents a memory entry in the JSONL export.
@@ -1507,8 +1514,6 @@ func importFromLocalJSONL(ctx context.Context, store storage.DoltStorage, localP
 // entries (memories) and each issue row's physical source (line number and
 // raw bytes, keyed by the row's pointer — see parseImportRecords). Pure
 // function — no store I/O.
-//
-//nolint:unparam // the recovery path's quarantine (bd-8mz4zq AC-7) consumes the sources map
 func parseJSONLFile(path string) ([]*types.Issue, map[string]string, map[*types.Issue]importRecordSource, error) {
 	//nolint:gosec // G304: path from user-provided CLI argument
 	data, err := os.ReadFile(path)
@@ -1674,13 +1679,27 @@ func importFromLocalJSONLConflictSkip(ctx context.Context, store storage.DoltSto
 // memory records (lines with "_type":"memory") and imports them via
 // SetConfig, while routing regular issue records through the normal path.
 // conflictSkip selects insert-if-new (true) vs UPSERT (false) for issue rows.
+//
+// The pre-write record screen (GH#4492) runs before the FIRST write — before
+// the memories and the prefix seed — so an invalid record can no longer
+// abort a recovery halfway. Recovery always skips (there is no strict mode
+// here): rejects are quarantined beside the source and the valid rows
+// restore. A vocabulary read error is fatal while nothing has been written.
 func importFromLocalJSONLWithOpts(ctx context.Context, store storage.DoltStorage, localPath string, conflictSkip bool) (*importLocalResult, error) {
-	issues, configEntries, _, err := parseJSONLFile(localPath)
+	issues, configEntries, sources, err := parseJSONLFile(localPath)
 	if err != nil {
 		return nil, err
 	}
 
 	result := &importLocalResult{}
+
+	kept, rejects, err := screenImportRows(ctx, importVocabularyOf(store), issues, sources)
+	if err != nil {
+		return nil, err
+	}
+	result.Rejected = len(rejects)
+	result.QuarantinePath = quarantineRecoveryRejects(localPath, rejects)
+	issues = kept
 
 	// Import memories
 	for key, value := range configEntries {

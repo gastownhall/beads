@@ -280,3 +280,28 @@ func reportImportRejects(result importResultJSON) {
 		fmt.Fprintf(os.Stderr, "Rejected records saved to %s; repair them and re-import that file on its own.\n", result.RejectsFile) //nolint:gosec // G705: stderr, not a browser context
 	}
 }
+
+// quarantineRecoveryRejects saves a screened recovery import's rejects to
+// <source>.rejected.jsonl (GH#4492) and reports them: how many records were
+// set aside, the first one's line/id/reason, where they were saved, and the
+// repair hint. The quarantine is best-effort by design — a write failure only
+// warns, naming both the file it could not write and the source, and never
+// claims a save; the valid rows still restore. No rejects leaves any
+// previous quarantine untouched, and the source itself is never rewritten.
+// Returns the quarantine path actually written, "" when there was nothing
+// to save or the save failed.
+func quarantineRecoveryRejects(source string, rejects []importReject) string {
+	if len(rejects) == 0 {
+		return ""
+	}
+	quarantinePath := source + ".rejected.jsonl"
+	first := rejects[0]
+	if err := writeImportRejects(quarantinePath, rejects); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: skipped %d invalid record(s) from %s (first: line %d, %s: %s); could not save them to %s: %v\n",
+			len(rejects), source, first.Line, first.ID, first.Reason, quarantinePath, err) //nolint:gosec // G705: stderr, not a browser context
+		return ""
+	}
+	fmt.Fprintf(os.Stderr, "warning: skipped %d invalid record(s) from %s (first: line %d, %s: %s); saved to %s — repair them and re-import\n",
+		len(rejects), source, first.Line, first.ID, first.Reason, quarantinePath) //nolint:gosec // G705: stderr, not a browser context
+	return quarantinePath
+}

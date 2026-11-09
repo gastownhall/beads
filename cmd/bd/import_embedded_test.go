@@ -1435,3 +1435,211 @@ func TestEmbeddedImportUndecodableLineNamesLine(t *testing.T) {
 		}
 	})
 }
+
+// TestEmbeddedRecoveryQuarantinesInvalidRecords pins AC-7 of GH#4492: the
+// recovery imports (bd init --from-jsonl, and auto-import on an empty
+// database) screen their records before writing, quarantine the rejects
+// beside the source as <source>.rejected.jsonl, warn with count, first
+// line/id/reason and the quarantine path, and restore the valid rows. A
+// quarantine that cannot be written only warns — the valid rows still
+// restore, with no false "saved" claim. An auto-import whose issue records
+// were all rejected warns, stamps the attempt, and claims no writes.
+func TestEmbeddedRecoveryQuarantinesInvalidRecords(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt import tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	now := time.Now().UTC()
+	rowJSON := func(id, title string, status types.Status) string {
+		b, err := json.Marshal(types.Issue{ID: id, Title: title, Status: status, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now})
+		if err != nil {
+			t.Fatalf("marshaling issue %s: %v", id, err)
+		}
+		return string(b)
+	}
+	validRow := func(id, title string) string { return rowJSON(id, title, types.StatusOpen) }
+	badRow := func(id string) string { return rowJSON(id, "Invalid", types.Status("verify")) }
+	const memoryRow = `{"_type":"memory","key":"recovery-key","value":"kept memory"}`
+
+	// valid, invalid, valid, memory: the invalid row is line 2, the memory
+	// line 4 — eligible memories must survive a quarantined import.
+	mixContent := strings.Join([]string{
+		validRow("imq-aaa", "Valid A"),
+		badRow("imq-bad"),
+		validRow("imq-ccc", "Valid C"),
+		memoryRow,
+	}, "\n") + "\n"
+	wantQuarantine := badRow("imq-bad") + "\n"
+
+	t.Run("init_from_jsonl_quarantines_rejects", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		jsonlPath := filepath.Join(dir, ".beads", "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(mixContent), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(bd, "init", "--from-jsonl", "--prefix", "imq", "--quiet", "--non-interactive")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		out := stdout.String() + stderr.String()
+		if err != nil {
+			t.Fatalf("bd init --from-jsonl must skip invalid records, not fail; output:\n%s", out)
+		}
+		for _, want := range []string{"warning: skipped 1 invalid record", "line 2", "imq-bad", "invalid status: verify", "issues.jsonl.rejected.jsonl"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("the recovery warning must identify %q; got:\n%s", want, out)
+			}
+		}
+		issues := bdListJSON(t, bd, dir)
+		if len(issues) != 2 {
+			t.Fatalf("the valid records must restore; want 2 issues, got %d", len(issues))
+		}
+		quarantine, err := os.ReadFile(jsonlPath + ".rejected.jsonl")
+		if err != nil {
+			t.Fatalf("the rejects must be quarantined beside the source: %v", err)
+		}
+		if string(quarantine) != wantQuarantine {
+			t.Errorf("quarantine content = %q, want the rejected line verbatim %q", quarantine, wantQuarantine)
+		}
+		// The eligible memory restores alongside the valid rows.
+		recall := exec.Command(bd, "recall", "recovery-key")
+		recall.Dir = dir
+		recall.Env = bdEnv(dir)
+		memOut, memErr, err := runCommandBuffers(t, recall)
+		if err != nil {
+			t.Fatalf("bd recall of the imported memory must succeed; output:\n%s%s", memOut.String(), memErr.String())
+		}
+		if !strings.Contains(memOut.String(), "kept memory") {
+			t.Errorf("the memory record must survive the quarantined import; got:\n%s", memOut.String())
+		}
+	})
+
+	t.Run("auto_import_quarantines_rejects", func(t *testing.T) {
+		dstDir, dstBeadsDir, _ := bdInit(t, bd, "--prefix", "imq")
+		jsonlPath := filepath.Join(dstBeadsDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(mixContent), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(bd, "create", "post-import marker", "--type", "task")
+		cmd.Dir = dstDir
+		cmd.Env = bdEnv(dstDir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		out := stdout.String() + stderr.String()
+		if err != nil {
+			t.Fatalf("the outer command must survive quarantined auto-import rejects; output:\n%s", out)
+		}
+		for _, want := range []string{"warning: skipped 1 invalid record", "auto-imported 2 issues", "issues.jsonl.rejected.jsonl"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("auto-import must report %q; got:\n%s", want, out)
+			}
+		}
+		if issues := bdListJSON(t, bd, dstDir); len(issues) != 3 {
+			t.Fatalf("want 3 issues (2 imported + 1 created), got %d", len(issues))
+		}
+		quarantine, err := os.ReadFile(jsonlPath + ".rejected.jsonl")
+		if err != nil {
+			t.Fatalf("the rejects must be quarantined beside the source: %v", err)
+		}
+		if string(quarantine) != wantQuarantine {
+			t.Errorf("quarantine content = %q, want %q", quarantine, wantQuarantine)
+		}
+		// The attempt is stamped: a later command neither retries the
+		// import nor re-warns about the same rejects.
+		cmd2 := exec.Command(bd, "create", "second marker", "--type", "task")
+		cmd2.Dir = dstDir
+		cmd2.Env = bdEnv(dstDir)
+		stdout2, stderr2, err2 := runCommandBuffers(t, cmd2)
+		if err2 != nil {
+			t.Fatalf("the second command must succeed; output:\n%s%s", stdout2.String(), stderr2.String())
+		}
+		if out2 := stdout2.String() + stderr2.String(); strings.Contains(out2, "auto-import") {
+			t.Errorf("a stamped attempt must not be retried; got:\n%s", out2)
+		}
+	})
+
+	t.Run("all_rejected_auto_import_warns_and_stamps", func(t *testing.T) {
+		dstDir, dstBeadsDir, _ := bdInit(t, bd, "--prefix", "imq")
+		jsonlPath := filepath.Join(dstBeadsDir, "issues.jsonl")
+		allBad := badRow("imq-bad1") + "\n" + badRow("imq-bad2") + "\n"
+		if err := os.WriteFile(jsonlPath, []byte(allBad), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(bd, "create", "post-import marker", "--type", "task")
+		cmd.Dir = dstDir
+		cmd.Env = bdEnv(dstDir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		out := stdout.String() + stderr.String()
+		if err != nil {
+			t.Fatalf("the outer command must survive an all-rejected source; output:\n%s", out)
+		}
+		if !strings.Contains(out, "warning: skipped 2 invalid record") {
+			t.Errorf("an all-rejected import must warn with the count; got:\n%s", out)
+		}
+		if strings.Contains(out, "auto-imported") {
+			t.Errorf("an import that wrote no issues must not claim writes; got:\n%s", out)
+		}
+		if issues := bdListJSON(t, bd, dstDir); len(issues) != 1 {
+			t.Fatalf("want only the created marker (nothing imported), got %d", len(issues))
+		}
+		quarantine, err := os.ReadFile(jsonlPath + ".rejected.jsonl")
+		if err != nil {
+			t.Fatalf("the rejects must be quarantined: %v", err)
+		}
+		if string(quarantine) != allBad {
+			t.Errorf("quarantine content = %q, want %q", quarantine, allBad)
+		}
+		// Stamped: the next command does not retry.
+		cmd2 := exec.Command(bd, "create", "second marker", "--type", "task")
+		cmd2.Dir = dstDir
+		cmd2.Env = bdEnv(dstDir)
+		stdout2, stderr2, err2 := runCommandBuffers(t, cmd2)
+		if err2 != nil {
+			t.Fatalf("the second command must succeed; output:\n%s%s", stdout2.String(), stderr2.String())
+		}
+		if out2 := stdout2.String() + stderr2.String(); strings.Contains(out2, "auto-import") || strings.Contains(out2, "invalid record") {
+			t.Errorf("a stamped all-rejected attempt must not be retried; got:\n%s", out2)
+		}
+	})
+
+	t.Run("quarantine_write_failure_still_restores", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		jsonlPath := filepath.Join(dir, ".beads", "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(mixContent), 0644); err != nil {
+			t.Fatal(err)
+		}
+		// A directory where the quarantine file would land makes the
+		// atomic rename fail: the import must still restore the valid rows.
+		if err := os.Mkdir(jsonlPath+".rejected.jsonl", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(bd, "init", "--from-jsonl", "--prefix", "imq", "--quiet", "--non-interactive")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		out := stdout.String() + stderr.String()
+		if err != nil {
+			t.Fatalf("a quarantine-write failure must not abort the recovery; output:\n%s", out)
+		}
+		// The command runs with its own working directory, so the warning
+		// names the source relative to it.
+		if !strings.Contains(out, "could not save them to") || !strings.Contains(out, "issues.jsonl.rejected.jsonl") {
+			t.Errorf("the warning must say the rejects could not be saved and name the path; got:\n%s", out)
+		}
+		if strings.Contains(out, "saved to") {
+			t.Errorf("a failed quarantine must not claim a save; got:\n%s", out)
+		}
+		if issues := bdListJSON(t, bd, dir); len(issues) != 2 {
+			t.Fatalf("the valid records must restore despite the failed quarantine; want 2, got %d", len(issues))
+		}
+	})
+}
