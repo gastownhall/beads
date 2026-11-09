@@ -13,11 +13,15 @@ import (
 	"github.com/steveyegge/beads/internal/remedy"
 )
 
-// GitignoreTemplate is the canonical .beads/.gitignore content
+// GitignoreTemplate is the canonical .beads/.gitignore content.
+//
+// proxieddb is listed WITHOUT a trailing slash: the legacy proxied-root
+// guard (GH#5104) writes a regular-file marker at .beads/proxieddb, and a
+// directory-only `proxieddb/` pattern does not ignore a regular file.
 const GitignoreTemplate = `# Dolt database (managed by Dolt, not git)
 dolt/
 embeddeddolt/
-proxieddb/
+proxieddb
 
 # Runtime files
 bd.sock
@@ -135,7 +139,11 @@ var requiredPatterns = []string{
 	"last_pull",
 	"dolt/",
 	"embeddeddolt/",
-	"proxieddb/",
+	// Standalone form, not proxieddb/: the legacy proxied-root guard's
+	// marker at .beads/proxieddb is a regular file (GH#5104), and the
+	// directory-only form does not ignore it. The append-only repair
+	// adds this line beside any existing proxieddb/ one.
+	"proxieddb",
 	"ephemeral.sqlite3",
 	"dolt-server.pid",
 	"dolt-server.log",
