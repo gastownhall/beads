@@ -457,6 +457,14 @@ func renameLabelInPlane(ctx context.Context, tx DBTX, labelTable, eventTable, ol
 	// per-call cost for their one issue today, and this loop is exactly that
 	// cost repeated once per touched issue. Left as a disclosed limitation.
 	for _, id := range oldIDs {
+		// Every carrier's label set changed, so stamp its owning row's
+		// updated_at (GH#5442) before the event/journal/version writes for
+		// this id — the journal snapshot must record the post-touch row and
+		// the minted version must match it. Non-carriers were never in
+		// oldIDs and keep their timestamps.
+		if err := touchOwnerUpdatedAtInTx(ctx, tx, labelTable, id); err != nil {
+			return 0, 0, nil, fmt.Errorf("rename label: touch %s: %w", id, err)
+		}
 		if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
 			IssueID:   id,
 			EventType: types.EventLabelRenamed,

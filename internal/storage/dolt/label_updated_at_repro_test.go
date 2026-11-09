@@ -144,6 +144,22 @@ func TestLabelEditsCommitUpdatedAt(t *testing.T) {
 		t.Fatalf("transaction AddLabel: %v", err)
 	}
 	assertOp("transaction AddLabel")
+
+	// A rename is one label edit per carrier: its stamp must land in the
+	// commit the rename itself publishes (the commit list carries the owning
+	// table), not stay behind in the working set.
+	if err := store.AddLabel(ctx, issue.ID, "rnold", "tester"); err != nil {
+		t.Fatalf("seed AddLabel for rename: %v", err)
+	}
+	backdate()
+	renamed, merged, _, err := store.RenameLabel(ctx, "rnold", "rnnew", "tester")
+	if err != nil {
+		t.Fatalf("RenameLabel: %v", err)
+	}
+	if renamed != 1 || merged != 0 {
+		t.Fatalf("RenameLabel counts = (%d, %d), want (1, 0)", renamed, merged)
+	}
+	assertOp("RenameLabel")
 }
 
 // TestLabelsOnlyPatchStampsUpdatedAndStagesOwningTable covers the `bd update

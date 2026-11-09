@@ -389,6 +389,31 @@ func testAuditLabelMutationsAdvanceUpdatedAt(t *testing.T, f Factory) {
 		}))
 		assertAdvanced(t, id, "tx add label", before)
 	})
+
+	// A rename is a label edit on every carrier at once: each carrier's
+	// updated_at advances (a merge target's set changes too — it loses the
+	// old label), while non-carriers and a rename nothing carries stamp
+	// nothing. RenameLabel sweeps both planes, so the wisp carrier advances
+	// with the durable one.
+	t.Run("rename", func(t *testing.T) {
+		carrier := seed(t, "lclk-rn-a", false, []string{"old"})
+		wispCarrier := seed(t, "lclk-rn-w", true, []string{"old"})
+		mergeTarget := seed(t, "lclk-rn-m", false, []string{"new", "old"})
+		seed(t, "lclk-rn-nc", false, []string{"keep"})
+
+		_, _, _, err := s.RenameLabel(c, "old", "new", "actor")
+		must(t, err)
+		assertAdvanced(t, "lclk-rn-a", "rename carrier (durable)", carrier)
+		assertAdvanced(t, "lclk-rn-w", "rename carrier (wisp)", wispCarrier)
+		assertAdvanced(t, "lclk-rn-m", "rename merge target", mergeTarget)
+		assertAged(t, "lclk-rn-nc")
+
+		// A rename nothing carries touches no owning row.
+		seed(t, "lclk-rn-ghost", false, nil)
+		_, _, _, err = s.RenameLabel(c, "never-carried", "phantom", "actor")
+		must(t, err)
+		assertAged(t, "lclk-rn-ghost")
+	})
 }
 
 // RunAudit_labels_comments_events runs the labels-comments-events audit cases.

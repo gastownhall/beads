@@ -22,6 +22,7 @@ func (s *testSuite) TestLabelClock() {
 	s.Run("WispInsertAdvancesUpdatedAt", s.labelClockWispInsert)
 	s.Run("SetLabelsDiffAdvancesUpdatedAt", s.labelClockSetLabelsDiff)
 	s.Run("SetLabelsSameSetPreservesUpdatedAt", s.labelClockSetLabelsSame)
+	s.Run("RenameAdvancesCarriersPreservesNonCarrier", s.labelClockRename)
 }
 
 func (s *testSuite) labelClockBackdate(table, id string) {
@@ -109,5 +110,32 @@ func (s *testSuite) labelClockSetLabelsSame() {
 	s.Require().NoError(uc.SetLabels(s.Ctx(), "bd-lclk-same", []string{"x"}, "tester"))
 	if got := s.labelClockUpdatedAt("issues", "bd-lclk-same"); !got.Equal(dbAgedUpdatedAt) {
 		s.T().Errorf("SetLabels (same set) moved updated_at to %v, want it preserved at %v", got, dbAgedUpdatedAt)
+	}
+}
+
+func (s *testSuite) labelClockRename() {
+	s.seedIssueRow("bd-lclk-rn-a")
+	s.seedWispRow("bd-lclk-rn-w")
+	s.seedIssueRow("bd-lclk-rn-nc")
+	r := s.labelRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), "bd-lclk-rn-a", "old", "tester", domain.LabelOpts{}))
+	s.Require().NoError(r.Insert(s.Ctx(), "bd-lclk-rn-w", "old", "tester", domain.LabelOpts{UseWispsTable: true}))
+	s.labelClockBackdate("issues", "bd-lclk-rn-a")
+	s.labelClockBackdate("wisps", "bd-lclk-rn-w")
+	s.labelClockBackdate("issues", "bd-lclk-rn-nc")
+
+	_, _, _, err := s.labelUseCase().RenameLabel(s.Ctx(), "old", "new", "tester")
+	s.Require().NoError(err)
+
+	for _, tc := range []struct{ table, id string }{
+		{"issues", "bd-lclk-rn-a"}, {"wisps", "bd-lclk-rn-w"},
+	} {
+		if got := s.labelClockUpdatedAt(tc.table, tc.id); !got.After(dbAgedUpdatedAt) {
+			s.T().Errorf("rename left %s/%s updated_at at %v, want a stamp after %v",
+				tc.table, tc.id, got, dbAgedUpdatedAt)
+		}
+	}
+	if got := s.labelClockUpdatedAt("issues", "bd-lclk-rn-nc"); !got.Equal(dbAgedUpdatedAt) {
+		s.T().Errorf("rename moved non-carrier updated_at to %v, want it preserved at %v", got, dbAgedUpdatedAt)
 	}
 }
