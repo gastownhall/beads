@@ -5,6 +5,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -500,12 +501,32 @@ func canonicalRoots(roots []string) []string {
 }
 
 // isDoltServerCmdline reports whether cmdline looks like a dolt sql-server
-// invocation. Mirrors the substring check in listDoltProcessPIDs (both
-// "dolt" and "sql-server" must appear) rather than an exact match, since
-// debug mode inserts flags between the binary name and the subcommand
-// (e.g. `dolt --prof cpu --prof-path … sql-server …`).
+// invocation, for the flattened command column the platforms can hand the
+// sweep: space-joined /proc bytes on linux, `ps` output on darwin. The words
+// are split into approximate arguments, because that column carries no
+// argument boundaries — see isDoltServerArgv, which holds the actual rule.
 func isDoltServerCmdline(cmdline string) bool {
-	return strings.Contains(cmdline, "dolt") && strings.Contains(cmdline, "sql-server")
+	return isDoltServerArgv(strings.Fields(cmdline))
+}
+
+// isDoltServerArgv reports whether argv looks like a `dolt sql-server`
+// invocation: at least two elements, an argv[0] whose basename is exactly
+// "dolt", and a later argument exactly "sql-server" — searched across every
+// later element, so global flags and profiling options between the binary and
+// the subcommand (e.g. `dolt --prof cpu … sql-server …`) keep matching.
+//
+// This is the sweep's identity gate, consulted before every signal, and it is
+// deliberately stricter than the substring listing in parseDoltProcessPIDs
+// (doltserver_unix.go): the sweep signals on identity alone, so a
+// `tail -f dolt-sql-server.log` under a suite root must not read as a server
+// (#6186). `dolt.exe`, prefix matches, shell wrappers and renamed binaries
+// are not accepted. It is a lexical predicate — not a parser of dolt's flag
+// grammar, and not executable authentication.
+func isDoltServerArgv(argv []string) bool {
+	if len(argv) < 2 || filepath.Base(argv[0]) != "dolt" {
+		return false
+	}
+	return slices.Contains(argv[1:], "sql-server")
 }
 
 // underAnyRoot reports whether dir is equal to, or nested under, any of

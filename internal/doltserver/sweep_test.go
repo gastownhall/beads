@@ -228,6 +228,8 @@ not-a-pid dolt sql-server
   102 dolt status
   103 /opt/dolt --prof cpu sql-server -P 12346
   104 dolt sql-server -P 12347
+  105 tail -f /tmp/my-suite/dolt/sql-server.log
+  106 vim /tmp/my-suite/dolt/sql-server.yaml
 `)
 	cwds := map[int]struct {
 		dir     string
@@ -237,12 +239,16 @@ not-a-pid dolt sql-server
 		101: {dir: "/tmp/my-suite/.beads/dolt", ok: true},
 		103: {dir: "/tmp/deleted-suite/.beads/dolt", deleted: true, ok: true},
 		104: {ok: false},
+		105: {dir: "/tmp/my-suite/logs", ok: true},
+		106: {dir: "/tmp/my-suite/logs", ok: true},
 	}
 
 	candidates := gatherPSCandidates(psOutput, func(pid int) (string, bool, bool) {
 		cwd := cwds[pid]
 		return cwd.dir, cwd.deleted, cwd.ok
 	})
+	// Rows 105/106 mention both words but are not dolt binaries: the gather
+	// filter must drop them before any cwd is even asked for (#6186).
 	wantCandidates := []serverCandidate{
 		{pid: 101, cmdline: "dolt sql-server -H 127.0.0.1 -P 12345", cwd: "/tmp/my-suite/.beads/dolt"},
 		{pid: 103, cmdline: "/opt/dolt --prof cpu sql-server -P 12346", cwd: "/tmp/deleted-suite/.beads/dolt", cwdDeleted: true},
@@ -1092,4 +1098,66 @@ func TestSandboxHomeUnderNonStandardTMPDIR(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestIsDoltServerCmdlineRequiresDoltArgv0AndSqlServerArg pins the tightened
+// predicate from #6186: argv[0] basename must be "dolt" and one argument must
+// be exactly "sql-server"; a substring hit anywhere in the cmdline is not a
+// dolt server.
+func TestIsDoltServerCmdlineRequiresDoltArgv0AndSqlServerArg(t *testing.T) {
+	cases := []struct {
+		cmdline string
+		want    bool
+	}{
+		{"dolt sql-server --port 3307", true},
+		{"/usr/local/bin/dolt sql-server -H 127.0.0.1", true},
+		{"dolt --prof cpu --prof-path /tmp/p sql-server --port 1", true},
+		{"vim /tmp/dolt/sql-server.log", false},
+		{"tail -f $HOME/.beads/dolt/sql-server.log", false},
+		{"/opt/dolthub-tools/run sql-server", false},
+		{"dolt sql-server-helper", false},
+	}
+	for _, tc := range cases {
+		if got := isDoltServerCmdline(tc.cmdline); got != tc.want {
+			t.Errorf("isDoltServerCmdline(%q) = %v, want %v", tc.cmdline, got, tc.want)
+		}
+	}
+}
+
+// TestIsDoltServerArgv tables the argv identity gate itself, including the
+// shapes no single command line can produce (nil, a bare executable).
+func TestIsDoltServerArgv(t *testing.T) {
+	cases := []struct {
+		name string
+		argv []string
+		want bool
+	}{
+		{"bare dolt", []string{"dolt", "sql-server"}, true},
+		{"relative dolt", []string{"./dolt", "sql-server", "--port", "3306"}, true},
+		{"absolute dolt", []string{"/usr/local/bin/dolt", "sql-server", "-H", "127.0.0.1"}, true},
+		{"global flags before the subcommand", []string{"dolt", "--prof", "cpu", "--prof-path", "/tmp/p", "sql-server"}, true},
+		{"executable path containing spaces", []string{"/opt/my tools/dolt", "sql-server"}, true},
+		// A separate positional argument named sql-server still passes by
+		// design: the predicate is lexical, not a parser of dolt's grammar.
+		{"sql-server as an ordinary positional argument", []string{"dolt", "checkout", "sql-server"}, true},
+		{"nil argv", nil, false},
+		{"single element", []string{"dolt"}, false},
+		{"empty argv[0]", []string{"", "sql-server"}, false},
+		{"windows binary name", []string{`C:\dolt\dolt.exe`, "sql-server"}, false},
+		{"test binary named like the server", []string{"doltserver.test", "sql-server"}, false},
+		{"log tailer", []string{"tail", "-f", "dolt-sql-server.log"}, false},
+		{"log viewer under a dolt dir", []string{"vim", "/tmp/dolt/sql-server.log"}, false},
+		{"shell body mentioning the words", []string{"/bin/sh", "-c", "echo dolt; exec tail sql-server.log"}, false},
+		{"watching a dolt server", []string{"watch", "dolt", "sql-server"}, false},
+		{"grepping for dolt servers", []string{"grep", "dolt.*sql-server", "ps.txt"}, false},
+		{"dolt without the server subcommand", []string{"dolt", "status"}, false},
+		{"plural subcommand", []string{"dolt", "sql-servers"}, false},
+		{"substring inside a flag value", []string{"dolt", "--config", "sql-server.yaml"}, false},
+		{"sql-server only inside a larger argument", []string{"dolt", "-m", "restart sql-server"}, false},
+	}
+	for _, tc := range cases {
+		if got := isDoltServerArgv(tc.argv); got != tc.want {
+			t.Errorf("%s: isDoltServerArgv(%q) = %v, want %v", tc.name, tc.argv, got, tc.want)
+		}
+	}
 }

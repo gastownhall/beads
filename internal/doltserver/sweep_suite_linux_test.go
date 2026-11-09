@@ -80,3 +80,62 @@ func TestSweepSuiteTestServersPreservesForeignLeak(t *testing.T) {
 		t.Fatal("owning suite left its leaked server running")
 	}
 }
+
+// TestSweepSuiteTestServersSparesNonDoltArgv0 is the reported regression
+// (#6186): a live process whose command line merely MENTIONS dolt and
+// sql-server is not a dolt server, even when it sits under a root the caller
+// vouches for. The old substring identity selected it and signaled it; the
+// tightened predicate must spare it. The public sweep and the real signal
+// path are exercised, so this fails behaviorally at the base.
+func TestSweepSuiteTestServersSparesNonDoltArgv0(t *testing.T) {
+	t.Setenv(AllowLeakEnv, "")
+	root := t.TempDir()
+	cwd := filepath.Join(root, "log-tailer")
+	if err := os.Mkdir(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// /bin/sh is the executable; the words appear only in the arguments, the
+	// exact shape of `tail -f dolt-sql-server.log` run by a helper script.
+	cmd := exec.Command("/bin/sh", "-c", "read line", "dolt", "sql-server")
+	cmd.Dir = cwd
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(exited)
+	}()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		<-exited
+	})
+	select {
+	case <-exited:
+		t.Fatal("stand-in exited before the sweep ran")
+	default:
+	}
+
+	var swept []SweptServer
+	var code int
+	out := captureStderr(t, func() {
+		swept = SweepSuiteTestServers(root)
+		code = ApplyLeakPolicy("spare suite", 0, swept)
+	})
+	if len(swept) != 0 || code != 0 || out != "" {
+		t.Fatalf("sweep of non-dolt argv[0]: swept=%v code=%d stderr=%q; want nothing reported", swept, code, out)
+	}
+	if isDoltServerProcess(cmd.Process.Pid) {
+		t.Error("isDoltServerProcess() = true for a /bin/sh stand-in, want false")
+	}
+	select {
+	case <-exited:
+		t.Fatal("the sweep killed a non-dolt process whose command line mentioned dolt and sql-server")
+	default:
+	}
+}
