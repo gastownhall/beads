@@ -216,6 +216,60 @@ func TestCurrentVersionWitnessVetoesLegacyVerdictInEveryMode(t *testing.T) {
 	})
 }
 
+// TestThisBuildsBrewHeadStampVetoesLegacyVerdictInEveryMode extends
+// TestCurrentVersionWitnessVetoesLegacyVerdictInEveryMode to the second kind of
+// positive evidence: a witness exactly equal to the running binary's own
+// commit-bearing Homebrew HEAD stamp settles the era in every mode, not only in
+// server mode — the same-build refusal outside server mode was the second
+// residual defect in GH#5603. Another build's stamp keeps the mode-specific
+// boundary: the non-server layouts still refuse it.
+func TestThisBuildsBrewHeadStampVetoesLegacyVerdictInEveryMode(t *testing.T) {
+	pinGuardVersion(t, "HEAD-f925f3f")
+
+	modes := []struct {
+		name     string
+		metadata string
+	}{
+		{name: "metadata-less"},
+		{name: "blank mode", metadata: `{"backend":"dolt"}`},
+		{name: "explicit embedded mode", metadata: `{"backend":"dolt","dolt_mode":"embedded"}`},
+		{name: "explicit server mode", metadata: `{"backend":"dolt","dolt_mode":"server"}`},
+	}
+
+	for _, mode := range modes {
+		t.Run(mode.name+"/trusts this build's stamp", func(t *testing.T) {
+			warnings := captureLegacyUpgradeWarnings(t)
+			beadsDir := writeDoltRootWorkspace(t, mode.metadata, "", "HEAD-f925f3f")
+
+			if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+				t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want nil", err)
+			}
+			if warnings.Len() != 0 {
+				t.Fatalf("guard warned about this build's own stamp: %q", warnings.String())
+			}
+		})
+
+		t.Run(mode.name+"/still distrusts another build's stamp", func(t *testing.T) {
+			warnings := captureLegacyUpgradeWarnings(t)
+			beadsDir := writeDoltRootWorkspace(t, mode.metadata, "", "HEAD-0123abc")
+
+			err := guardLegacyUpgradeWorkspace(beadsDir)
+			if mode.name == "explicit server mode" {
+				if err != nil {
+					t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want nil", err)
+				}
+				if warnings.Len() == 0 {
+					t.Fatal("guard admitted another build's stamp without warning")
+				}
+				return
+			}
+			if !isLegacyUpgradeRefusal(err) {
+				t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want migration refusal", err)
+			}
+		})
+	}
+}
+
 // TestLegacyUpgradeGuardSharedServerAdmissionSurvivesServerClassification keeps
 // the shared-server escape reachable now that a config.yaml `dolt.mode: server`
 // workspace resolves to the server arm. Before the hoist this admission lived
