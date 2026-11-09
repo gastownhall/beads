@@ -361,6 +361,17 @@ func preparerConn(t *testing.T) (*sql.Conn, sqlmock.Sqlmock) {
 	return conn, mock
 }
 
+// expectHealCapture mocks CaptureFreshBootstrapHealCapability's reads on a
+// database this preparer just created.
+func expectHealCapture(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT DATABASE(), @@server_uuid, DOLT_HASHOF('HEAD')")).
+		WillReturnRows(sqlmock.NewRows([]string{"database", "server_uuid", "head"}).AddRow("beads", "server-uuid", "initial-head"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_log")).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status")).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+}
+
 // TestBootstrapPreparerProbesBeforeCreate is the gastownhall/beads#5079
 // regression at its source: locked bootstrap preparation looks before it
 // leaps. A database this credential can already see needs only the USE, so a
@@ -474,4 +485,87 @@ func TestBootstrapPreparerProbesBeforeCreate(t *testing.T) {
 			t.Fatalf("unmet SQL expectations: %v", err)
 		}
 	})
+}
+
+// TestBootstrapPreparerCreatesOnlyWhenNotVisible pins the fresh-bootstrap
+// ownership proof (gastownhall/beads#5012) under the probe: only a database
+// this credential cannot see is created, and only the attempt that wins the
+// bare CREATE captures heal authority.
+func TestBootstrapPreparerCreatesOnlyWhenNotVisible(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("winning the bare CREATE captures authority", func(t *testing.T) {
+		conn, mock := preparerConn(t)
+		expectDatabaseExistsProbe(mock, "beads", false)
+		mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `beads`")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		expectHealCapture(mock)
+
+		b := &bootstrapPreparer{provider: &doltSQLProvider{serverEndpoint: "tcp:127.0.0.1:3306"}, database: "beads"}
+		heal, err := b.prepare(ctx, conn)
+		if err != nil {
+			t.Fatalf("prepare() error = %v, want nil", err)
+		}
+		if heal == nil || heal != b.heal || !b.created {
+			t.Fatalf("prepare() heal = %p, b.heal = %p, created = %t; want a captured capability", heal, b.heal, b.created)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	t.Run("losing the create race proceeds without authority", func(t *testing.T) {
+		conn, mock := preparerConn(t)
+		expectDatabaseExistsProbe(mock, "beads", false)
+		mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `beads`")).
+			WillReturnError(&mysql.MySQLError{Number: 1007, Message: "Can't create database beads; database exists"})
+		mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		b := &bootstrapPreparer{provider: &doltSQLProvider{serverEndpoint: "tcp:127.0.0.1:3306"}, database: "beads"}
+		heal, err := b.prepare(ctx, conn)
+		if err != nil {
+			t.Fatalf("prepare() error = %v, want nil", err)
+		}
+		if heal != nil || b.heal != nil || b.created {
+			t.Fatalf("prepare() heal = %p, b.heal = %p, created = %t; a lost race grants no authority", heal, b.heal, b.created)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	for _, tt := range []struct {
+		name      string
+		createErr error
+		retryable bool
+	}{
+		{name: "bare CREATE serialization failure keeps its retry", createErr: &mysql.MySQLError{Number: 1213, Message: "deadlock"}, retryable: true},
+		{name: "other bare CREATE failure stays permanent", createErr: errors.New("disk full")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			conn, mock := preparerConn(t)
+			expectDatabaseExistsProbe(mock, "beads", false)
+			mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `beads`")).
+				WillReturnError(tt.createErr)
+
+			b := &bootstrapPreparer{provider: &doltSQLProvider{}, database: "beads"}
+			_, err := b.prepare(ctx, conn)
+			var prepErr *bootstrapPreparationError
+			if !errors.As(err, &prepErr) || prepErr.retryable != tt.retryable {
+				t.Fatalf("prepare() error = %T %v, want *bootstrapPreparationError retryable=%t", err, err, tt.retryable)
+			}
+			if !errors.Is(err, tt.createErr) || !strings.Contains(err.Error(), "uow: creating database") {
+				t.Fatalf("prepare() error = %v, want the wrapped CREATE failure", err)
+			}
+			if b.created {
+				t.Fatal("prepare() marked a failed CREATE as created")
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+		})
+	}
 }
