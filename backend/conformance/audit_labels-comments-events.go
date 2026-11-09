@@ -406,6 +406,49 @@ func testAuditLabelEditsAdvanceUpdatedAt(t *testing.T, f Factory) {
 	}
 }
 
+// testAuditLabelRenameAdvancesCarriers pins the rename half of GH#5442: every
+// issue and wisp that carried the renamed label, including one that already
+// carried the new name (the merge), advances its updated_at; an issue that
+// never carried it keeps its own. RowVersion stays put throughout.
+func testAuditLabelRenameAdvancesCarriers(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+	type fixture struct {
+		id       string
+		wisp     bool
+		labels   []string
+		advanced bool
+	}
+	fixtures := []fixture{
+		{"test-carrier", false, []string{"old"}, true},
+		{"test-merge", false, []string{"old", "new"}, true},
+		{"test-wisp-carrier", true, []string{"old"}, true},
+		{"test-bystander", false, []string{"other"}, false},
+		{"test-wisp-bystander", true, nil, false},
+	}
+	rowVersions := make(map[string]int64, len(fixtures))
+	for _, fx := range fixtures {
+		rowVersions[fx.id] = auditSeedAgedIssue(t, s, fx.id, fx.wisp, fx.labels...)
+	}
+	renamed, merged, _, err := s.RenameLabel(c, "old", "new", "a")
+	must(t, err)
+	if renamed != 3 || merged != 1 {
+		t.Fatalf("RenameLabel = renamed %d merged %d, want 3 and 1", renamed, merged)
+	}
+	for _, fx := range fixtures {
+		auditAssertLabelClock(t, s, "RenameLabel", fx.id, rowVersions[fx.id], fx.advanced)
+	}
+
+	// A rename nothing carries touches no owning row.
+	ghostVersion := auditSeedAgedIssue(t, s, "test-ghost", false, "keep")
+	renamed, _, _, err = s.RenameLabel(c, "never-carried", "phantom", "a")
+	must(t, err)
+	if renamed != 0 {
+		t.Fatalf("RenameLabel of an uncarried label renamed %d, want 0", renamed)
+	}
+	auditAssertLabelClock(t, s, "RenameLabel (no carriers)", "test-ghost", ghostVersion, false)
+}
+
 // RunAudit_labels_comments_events runs the labels-comments-events audit cases.
 func RunAudit_labels_comments_events(t *testing.T, f Factory) {
 	t.Helper()
@@ -418,4 +461,5 @@ func RunAudit_labels_comments_events(t *testing.T, f Factory) {
 	t.Run("ImportCommentSubSecond", func(t *testing.T) { testAuditImportCommentSubSecond(t, f) })
 	t.Run("DirectWispLabelComment", func(t *testing.T) { testAuditDirectWispLabelComment(t, f) })
 	t.Run("LabelEditsAdvanceUpdatedAt", func(t *testing.T) { testAuditLabelEditsAdvanceUpdatedAt(t, f) })
+	t.Run("LabelRenameAdvancesCarriers", func(t *testing.T) { testAuditLabelRenameAdvancesCarriers(t, f) })
 }
