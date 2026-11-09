@@ -200,6 +200,13 @@ func runInUserGlobalHome(t *testing.T, home, dir string, env map[string]string, 
 	rootCmd.SetArgs(args)
 	execErr := rootCmd.Execute()
 	rootCmd.SetArgs(nil)
+	// Cobra skips PersistentPostRunE, and with it the store's close, when RunE
+	// fails; a bd process exits then, but this one runs on. Close the store as
+	// PostRunE would, while the fixture directory still exists: an embedded
+	// engine left open is released on its idle timer, and Dolt aborts the
+	// process if the directory is gone by then.
+	closeStoreBeforeGateRelease()
+	releaseWorkspaceGates()
 
 	os.Stdout, os.Stderr = oldStdout, oldStderr
 	_ = wOut.Close()
