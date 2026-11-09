@@ -1,6 +1,8 @@
 package doctor
 
 import (
+	"context"
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -83,6 +85,18 @@ func PollutionScoreHighBucket(m PollutionMatch) bool {
 }
 
 func classifyPollutionIssue(issue *types.Issue) (PollutionMatch, bool) {
+	// Protected issues never match, in either doctor path: closed work,
+	// epics, pinned rows (flag or status), templates, and anything with an
+	// external identity or a federated source are real or imported state,
+	// not cleanup targets.
+	if issue.Status == types.StatusClosed || issue.Status == types.StatusPinned ||
+		issue.Pinned || issue.IsTemplate ||
+		issue.IssueType == types.TypeEpic ||
+		(issue.ExternalRef != nil && strings.TrimSpace(*issue.ExternalRef) != "") ||
+		strings.TrimSpace(issue.SourceSystem) != "" {
+		return PollutionMatch{}, false
+	}
+
 	// Authored substance anywhere else on the issue excludes the match: a
 	// real issue about the test suite usually carries a design or notes,
 	// and content checks trim whitespace first.
@@ -132,4 +146,53 @@ func hasGenericTestPhrase(loweredTitle string) bool {
 	return strings.Contains(loweredTitle, "issue for testing") ||
 		strings.Contains(loweredTitle, "test issue") ||
 		strings.Contains(loweredTitle, "sample issue")
+}
+
+// PollutionEvidence is the narrow store seam DetectTestPollution reads to
+// learn whether a candidate carries relationships: any outgoing dependency
+// record, any incoming dependency record, or any comment excludes it from
+// the results, counts and cleanup. Raw edge records protect unresolved and
+// external links that resolved issue objects could miss.
+type PollutionEvidence interface {
+	GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error)
+	GetDependentRecordsForIssues(ctx context.Context, targetIDs []string) (map[string][]*types.Dependency, error)
+	GetCommentCounts(ctx context.Context, issueIDs []string) (map[string]int, error)
+}
+
+// DetectTestPollution classifies the issues (ClassifyTestPollution) and then
+// excludes every candidate with an outgoing or incoming dependency record or
+// a comment, querying evidence only for the preliminary candidates, batched
+// over their IDs. An evidence error returns no usable matches: callers must
+// treat it as "cannot decide", never as a clean result.
+func DetectTestPollution(ctx context.Context, evidence PollutionEvidence, issues []*types.Issue) ([]PollutionMatch, error) {
+	candidates := ClassifyTestPollution(issues)
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, len(candidates))
+	for i, c := range candidates {
+		ids[i] = c.Issue.ID
+	}
+
+	outgoing, err := evidence.GetDependencyRecordsForIssues(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("querying outgoing dependencies: %w", err)
+	}
+	incoming, err := evidence.GetDependentRecordsForIssues(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("querying incoming dependencies: %w", err)
+	}
+	comments, err := evidence.GetCommentCounts(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("querying comment counts: %w", err)
+	}
+
+	var matches []PollutionMatch
+	for _, c := range candidates {
+		if len(outgoing[c.Issue.ID]) > 0 || len(incoming[c.Issue.ID]) > 0 || comments[c.Issue.ID] > 0 {
+			continue
+		}
+		matches = append(matches, c)
+	}
+	return matches, nil
 }

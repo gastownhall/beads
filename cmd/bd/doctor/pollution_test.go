@@ -1,6 +1,8 @@
 package doctor
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -206,5 +208,205 @@ func TestIsTestTitleMatchesPrefixesCaseInsensitively(t *testing.T) {
 		if got := IsTestTitle(tt.title); got != tt.want {
 			t.Errorf("IsTestTitle(%q) = %v, want %v", tt.title, got, tt.want)
 		}
+	}
+}
+
+func TestPollutionClassifyExcludesProtectedFields(t *testing.T) {
+	t.Parallel()
+
+	externalRef := "gh-9"
+	base := func() *types.Issue {
+		return &types.Issue{ID: "tst-9", Title: "test leftover", Description: "", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	}
+
+	tests := []struct {
+		name  string
+		mutcr func(*types.Issue)
+	}{
+		{name: "closed status", mutcr: func(i *types.Issue) { i.Status = types.StatusClosed }},
+		{name: "epic type", mutcr: func(i *types.Issue) { i.IssueType = types.TypeEpic }},
+		{name: "pinned flag", mutcr: func(i *types.Issue) { i.Pinned = true }},
+		{name: "pinned status", mutcr: func(i *types.Issue) { i.Status = types.StatusPinned }},
+		{name: "template", mutcr: func(i *types.Issue) { i.IsTemplate = true }},
+		{name: "external ref", mutcr: func(i *types.Issue) { i.ExternalRef = &externalRef }},
+		{name: "source system", mutcr: func(i *types.Issue) { i.SourceSystem = "gh-importer" }},
+	}
+
+	for _, tt := range tests {
+		issue := base()
+		tt.mutcr(issue)
+		if matches := ClassifyTestPollution([]*types.Issue{issue}); len(matches) != 0 {
+			t.Errorf("%s: ClassifyTestPollution matched %s, want no match (protected issue)", tt.name, issue.ID)
+		}
+	}
+
+	// The unprotected baseline still matches, so the exclusions above are
+	// what made the difference.
+	if matches := ClassifyTestPollution([]*types.Issue{base()}); len(matches) != 1 {
+		t.Errorf("unprotected baseline: %d matches, want 1", len(matches))
+	}
+
+	// A blank external ref is not protection: only a nonblank one is.
+	blankRef := base()
+	spaces := "  "
+	blankRef.ExternalRef = &spaces
+	if matches := ClassifyTestPollution([]*types.Issue{blankRef}); len(matches) != 1 {
+		t.Errorf("blank external ref: %d matches, want 1 (a blank ref does not protect)", len(matches))
+	}
+
+	// Other statuses stay eligible under the same rule; the classifier is
+	// not an open/in-progress allowlist.
+	inProgress := base()
+	inProgress.Status = types.StatusInProgress
+	if matches := ClassifyTestPollution([]*types.Issue{inProgress}); len(matches) != 1 {
+		t.Errorf("in-progress issue: %d matches, want 1 (only closed/pinned are protected statuses)", len(matches))
+	}
+}
+
+// fakePollutionEvidence records every call so tests can pin the batch shape:
+// which IDs were queried, how many times, and which method errored.
+type fakePollutionEvidence struct {
+	outgoing   map[string][]*types.Dependency
+	incoming   map[string][]*types.Dependency
+	comments   map[string]int
+	outErr     error
+	inErr      error
+	commentErr error
+
+	outCalls    [][]string
+	inCalls     [][]string
+	commentCall [][]string
+}
+
+func (f *fakePollutionEvidence) GetDependencyRecordsForIssues(_ context.Context, issueIDs []string) (map[string][]*types.Dependency, error) {
+	f.outCalls = append(f.outCalls, append([]string(nil), issueIDs...))
+	if f.outErr != nil {
+		return nil, f.outErr
+	}
+	return f.outgoing, nil
+}
+
+func (f *fakePollutionEvidence) GetDependentRecordsForIssues(_ context.Context, targetIDs []string) (map[string][]*types.Dependency, error) {
+	f.inCalls = append(f.inCalls, append([]string(nil), targetIDs...))
+	if f.inErr != nil {
+		return nil, f.inErr
+	}
+	return f.incoming, nil
+}
+
+func (f *fakePollutionEvidence) GetCommentCounts(_ context.Context, issueIDs []string) (map[string]int, error) {
+	f.commentCall = append(f.commentCall, append([]string(nil), issueIDs...))
+	if f.commentErr != nil {
+		return nil, f.commentErr
+	}
+	return f.comments, nil
+}
+
+func pollutionCandidate(title, id string) *types.Issue {
+	return &types.Issue{ID: id, Title: title, Description: "", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+}
+
+func TestPollutionDetectExcludesConnectedAndCommentedIssues(t *testing.T) {
+	t.Parallel()
+
+	candidates := []*types.Issue{
+		pollutionCandidate("test candidate outgoing", "cand-out"),
+		pollutionCandidate("test candidate incoming", "cand-in"),
+		pollutionCandidate("test candidate commented", "cand-com"),
+		pollutionCandidate("test candidate isolated", "cand-iso"),
+	}
+	// An ineligible issue in the input must never reach the evidence seam.
+	ineligible := pollutionCandidate("test candidate with description", "cand-desc")
+	ineligible.Description = "Substantive description makes this real work."
+
+	evidence := &fakePollutionEvidence{
+		outgoing: map[string][]*types.Dependency{
+			"cand-out": {{IssueID: "cand-out", DependsOnID: "some-other", Type: types.DepBlocks}},
+		},
+		incoming: map[string][]*types.Dependency{
+			// Any edge type protects, not only blocking ones.
+			"cand-in": {{IssueID: "some-other", DependsOnID: "cand-in", Type: types.DepRelated}},
+		},
+		comments: map[string]int{"cand-com": 2},
+	}
+
+	matches, err := DetectTestPollution(context.Background(), evidence, append(candidates, ineligible))
+	if err != nil {
+		t.Fatalf("DetectTestPollution: %v", err)
+	}
+	if len(matches) != 1 || matches[0].Issue.ID != "cand-iso" {
+		var got []string
+		for _, m := range matches {
+			got = append(got, m.Issue.ID)
+		}
+		t.Fatalf("DetectTestPollution matched %v, want [cand-iso]", got)
+	}
+
+	// Every evidence query carried exactly the preliminary candidate IDs,
+	// once, and never the ineligible row.
+	want := []string{"cand-out", "cand-in", "cand-com", "cand-iso"}
+	for name, calls := range map[string][][]string{
+		"outgoing": evidence.outCalls,
+		"incoming": evidence.inCalls,
+		"comments": evidence.commentCall,
+	} {
+		if len(calls) != 1 {
+			t.Errorf("%s: %d calls, want 1", name, len(calls))
+			continue
+		}
+		if strings.Join(calls[0], ",") != strings.Join(want, ",") {
+			t.Errorf("%s: called with %v, want %v", name, calls[0], want)
+		}
+	}
+}
+
+func TestPollutionDetectEvidenceErrorsReturnNoMatches(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		evidence  *fakePollutionEvidence
+		wantInErr string
+	}{
+		{name: "outgoing error", evidence: &fakePollutionEvidence{outErr: errors.New("out boom")}, wantInErr: "querying outgoing dependencies: out boom"},
+		{name: "incoming error", evidence: &fakePollutionEvidence{inErr: errors.New("in boom")}, wantInErr: "querying incoming dependencies: in boom"},
+		{name: "comment error", evidence: &fakePollutionEvidence{commentErr: errors.New("com boom")}, wantInErr: "querying comment counts: com boom"},
+	}
+	for _, tt := range tests {
+		// One candidate would match on classification; the evidence error
+		// must keep it out of the results entirely.
+		matches, err := DetectTestPollution(context.Background(), tt.evidence, []*types.Issue{pollutionCandidate("test candidate", "cand-1")})
+		if err == nil {
+			t.Errorf("%s: DetectTestPollution error = nil, want failure", tt.name)
+			continue
+		}
+		if !strings.Contains(err.Error(), tt.wantInErr) {
+			t.Errorf("%s: error = %q, want it to contain %q", tt.name, err.Error(), tt.wantInErr)
+		}
+		if len(matches) != 0 {
+			t.Errorf("%s: %d matches escaped an evidence error, want none", tt.name, len(matches))
+		}
+	}
+}
+
+func TestPollutionDetectSkipsEvidenceWithoutCandidates(t *testing.T) {
+	t.Parallel()
+
+	// No eligible candidates: the store must not be queried at all.
+	ineligible := []*types.Issue{
+		pollutionCandidate("test candidate with description", "cand-desc"),
+	}
+	ineligible[0].Description = "Substantive description makes this real work."
+
+	evidence := &fakePollutionEvidence{}
+	matches, err := DetectTestPollution(context.Background(), evidence, ineligible)
+	if err != nil {
+		t.Fatalf("DetectTestPollution: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Errorf("DetectTestPollution matched %d, want 0", len(matches))
+	}
+	if len(evidence.outCalls)+len(evidence.inCalls)+len(evidence.commentCall) != 0 {
+		t.Errorf("evidence queried %d times with no candidates, want 0", len(evidence.outCalls)+len(evidence.inCalls)+len(evidence.commentCall))
 	}
 }

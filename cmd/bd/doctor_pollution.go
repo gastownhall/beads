@@ -37,7 +37,10 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 		return HandleError("fetching issues: %v", err)
 	}
 
-	polluted := doctor.ClassifyTestPollution(allIssues)
+	polluted, err := doctor.DetectTestPollution(ctx, store, allIssues)
+	if err != nil {
+		return HandleError("detecting test pollution: %v", err)
+	}
 
 	if len(polluted) == 0 {
 		if jsonOutput {
