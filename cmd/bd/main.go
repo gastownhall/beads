@@ -2686,7 +2686,7 @@ var rootCmd = &cobra.Command{
 				// Auto-push: push to Dolt remote if enabled and due.
 				// Skip for read-only commands to avoid unnecessary network operations
 				// and metadata writes on commands like bd list/show/ready (GH#2191).
-				if !isReadOnlyCommand(cmd.Name()) {
+				if shouldRunPostCommandAutoPush(cmd) {
 					runPostRunAutoPush(rootCtx)
 				}
 
@@ -2822,11 +2822,22 @@ func writeMemDiagnostics(memProfileFlag string) {
 	}
 }
 
+// shouldRunPostCommandAutoExport and shouldRunPostCommandAutoPush skip the
+// classified reads, judged per invocation by commandReadsOnly: `bd ready
+// --claim` writes, so it exports and pushes like `bd update --claim`
+// (bd-fwx149).
 func shouldRunPostCommandAutoExport(cmd *cobra.Command) bool {
 	if cmd == nil {
 		return true
 	}
-	return !isReadOnlyCommand(cmd.Name())
+	return !commandReadsOnly(cmd)
+}
+
+func shouldRunPostCommandAutoPush(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return true
+	}
+	return !commandReadsOnly(cmd)
 }
 
 func shouldRunAutoImportJSONL(cmd *cobra.Command, s storage.DoltStorage, useReadOnly, globalFlag, serverMode bool) bool {
