@@ -2166,14 +2166,15 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				_ = store.Close()
 				return fmt.Errorf("--from-jsonl specified but %s does not exist", localJSONLPath)
 			}
-			issueCount, importErr := importFromLocalJSONL(ctx, store, localJSONLPath)
+			imported, importErr := importFromLocalJSONLFull(ctx, store, localJSONLPath)
 			if importErr != nil {
 				_ = store.Close()
 				return fmt.Errorf("failed to import from JSONL: %v", importErr)
 			}
 			if !quiet {
-				fmt.Printf("  Imported %d issues from %s\n", issueCount, localJSONLPath)
+				fmt.Printf("  Imported %d issues from %s\n", imported.Issues, localJSONLPath)
 			}
+			warnImportInvalidSkipped(localJSONLPath, imported.Rejected, imported.RejectsPath)
 		}
 
 		// projectRoleRepo is isInitRoleGitRepo held to keepHomeClean. The role,

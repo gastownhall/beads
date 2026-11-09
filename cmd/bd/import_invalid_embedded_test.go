@@ -310,3 +310,85 @@ func assertAutoImportQuarantined(t *testing.T, beadsDir, jsonlPath, rejectedLine
 		t.Errorf("%s was not stamped as attempted", jsonlPath)
 	}
 }
+
+// TestEmbeddedRecoveryImportsReportInvalidRecords pins AC-4 for the two
+// recovery imports: `bd init --from-jsonl` and `bd bootstrap` import the valid
+// records, keep the invalid one in .beads/issues.rejected.jsonl, and name it by
+// its physical line instead of failing or dropping it silently.
+func TestEmbeddedRecoveryImportsReportInvalidRecords(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	// recoveryDir is a git repo whose .beads holds only metadata.json and the
+	// mixed issues.jsonl.
+	recoveryDir := func(t *testing.T, prefix string) (dir, beadsDir, jsonlPath, fixture string) {
+		t.Helper()
+		dir = t.TempDir()
+		initGitRepoAt(t, dir)
+		beadsDir = filepath.Join(dir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		jsonlPath = filepath.Join(beadsDir, "issues.jsonl")
+		fixture = invalidImportFixture(t, prefix, 3, 2)
+		if err := os.WriteFile(jsonlPath, []byte(fixture), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return dir, beadsDir, jsonlPath, fixture
+	}
+
+	check := func(t *testing.T, bd, dir, beadsDir, jsonlPath, fixture, prefix, output string) {
+		t.Helper()
+		for _, want := range []string{"skipped 1 invalid record", jsonlPath + ":4: " + prefix + "-2", "issues.rejected.jsonl"} {
+			if !strings.Contains(output, want) {
+				t.Errorf("output does not mention %q:\n%s", want, output)
+			}
+		}
+		ids := map[string]bool{}
+		for _, issue := range bdListJSON(t, bd, dir) {
+			ids[issue.ID] = true
+		}
+		if len(ids) != 2 || !ids[prefix+"-1"] || !ids[prefix+"-3"] {
+			t.Errorf("issues = %v, want %s-1 and %s-3", ids, prefix, prefix)
+		}
+		saved, err := os.ReadFile(filepath.Join(beadsDir, "issues.rejected.jsonl"))
+		if err != nil {
+			t.Fatalf("read quarantine: %v", err)
+		}
+		if want := strings.Split(fixture, "\n")[3] + "\n"; string(saved) != want {
+			t.Errorf("quarantine =\n%s\nwant\n%s", saved, want)
+		}
+	}
+
+	t.Run("init_from_jsonl", func(t *testing.T) {
+		dir, beadsDir, jsonlPath, fixture := recoveryDir(t, "rqi")
+		cmd := exec.Command(bd, "init", "--prefix", "rqi", "--from-jsonl", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("init --from-jsonl failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		check(t, bd, dir, beadsDir, jsonlPath, fixture, "rqi", stdout.String()+stderr.String())
+	})
+
+	t.Run("bootstrap", func(t *testing.T) {
+		dir, beadsDir, jsonlPath, fixture := recoveryDir(t, "rqb")
+		cmd := exec.Command(bd, "bootstrap")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		cmd.Stdin = strings.NewReader("y\n")
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bootstrap failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		check(t, bd, dir, beadsDir, jsonlPath, fixture, "rqb", stdout.String()+stderr.String())
+	})
+}

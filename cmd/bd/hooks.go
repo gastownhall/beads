@@ -2358,12 +2358,20 @@ func importJSONLForSync(reason string) {
 	// checkout's tracked file: GH#6680's second symptom, from the fix for its
 	// first. Keeping the marker also suppresses the subprocess's auto-backup,
 	// matching the export lane (hookSubprocessEnv).
-	cmd := exec.Command("bd", "import", "--quiet", fullPath)
+	//
+	// --skip-invalid with the quarantine next to the source: a record the
+	// database would refuse (an unregistered status, GH#4492) is kept there
+	// instead of failing the whole import, and the warning that names it is
+	// forwarded even though the import succeeded.
+	cmd := exec.Command("bd", "import", "--quiet", "--skip-invalid", "--rejects", defaultImportRejectsPath(fullPath), fullPath)
 	cmd.Dir = exportSubprocessDir(beadsDir)
 	cmd.Env = hookSubprocessEnv(os.Environ())
 
 	out, err := cmd.CombinedOutput()
 	if err == nil {
+		if strings.Contains(string(out), "warning: skipped") {
+			fmt.Fprintf(os.Stderr, "beads: %s import warning:\n%s", reason, out)
+		}
 		return
 	}
 	// Tolerate the no-op case: when JSONL matches Dolt exactly, bd import
