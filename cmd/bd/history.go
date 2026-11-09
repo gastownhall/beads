@@ -118,6 +118,11 @@ func runHistory(ctx context.Context, backend historyBackend, issueID string, lim
 				entry.Issue.Title,
 				entry.Issue.Priority,
 				entry.Issue.Status)
+			// Reopen clears the live close_reason (GH#5593); the snapshot
+			// committed while the issue was closed still carries it.
+			if entry.Issue.CloseReason != "" {
+				fmt.Printf("  Close reason: %s\n", entry.Issue.CloseReason)
+			}
 		}
 
 		if i < len(history)-1 {
