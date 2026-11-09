@@ -117,6 +117,9 @@ func parseFormDeps(deps []string) ([]domain.DependencySpec, error) {
 		if err != nil {
 			return nil, err
 		}
+		if spec.TargetID == "" {
+			return nil, fmt.Errorf("dependency %q names no issue, expected 'type:id' or 'id'", raw)
+		}
 		spec.SwapDirection = false
 		specs = append(specs, spec)
 	}

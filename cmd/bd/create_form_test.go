@@ -518,24 +518,36 @@ func TestCreateIssueFromFormValues(t *testing.T) {
 	// GH#5560 (bd-fom9ed): two dependency types on one target are refused
 	// with the shared collision guidance before the form reads the parent,
 	// reserves a child ID or writes an issue or an edge, so a refused create
-	// consumes no child number and leaves no edge behind.
+	// consumes no child number and leaves no edge behind. An unknown type or
+	// a typed entry with no target is refused the same way, with the parser's
+	// own diagnostic.
 	t.Run("InvalidDependenciesFailBeforeAnyWrite", func(t *testing.T) {
 		parent := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Refusal parent", IssueType: "epic"})
 		target := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Refusal target"})
-		for _, deps := range [][]string{
-			{"blocked-by:" + target.ID, "related:" + target.ID},
-			{"related:" + target.ID, "blocks:" + target.ID},
-			{"blocks:" + target.ID, "related:" + target.ID},
-			{"discovered-from:" + target.ID, "blocked-by:" + target.ID},
+		for _, tc := range []struct {
+			deps    []string
+			wantErr string
+			wantGH  bool // the shared GH#4626 collision guidance
+		}{
+			{deps: []string{"blocked-by:" + target.ID, "related:" + target.ID}, wantErr: "cannot attach both", wantGH: true},
+			{deps: []string{"related:" + target.ID, "blocks:" + target.ID}, wantErr: "cannot attach both", wantGH: true},
+			{deps: []string{"blocks:" + target.ID, "related:" + target.ID}, wantErr: "cannot attach both", wantGH: true},
+			{deps: []string{"discovered-from:" + target.ID, "blocked-by:" + target.ID}, wantErr: "cannot attach both", wantGH: true},
+			{deps: []string{"frobs:" + target.ID}, wantErr: `unknown dependency type "frobs"`},
+			{deps: []string{"owned-by:" + target.ID}, wantErr: `unknown dependency type "owned-by"`},
+			{deps: []string{"blocks:"}, wantErr: `dependency "blocks:" names no issue`},
 		} {
-			fv := &createFormValues{Title: "Refused child", Priority: 2, IssueType: "task", ParentID: parent.ID, Dependencies: deps}
+			fv := &createFormValues{Title: "Refused child", Priority: 2, IssueType: "task", ParentID: parent.ID, Dependencies: tc.deps}
 			issue, err := CreateIssueFromFormValues(ctx, s, fv, "test")
 			if err == nil {
-				t.Errorf("CreateIssueFromFormValues(deps %q) created %s, want a refusal", deps, issue.ID)
+				t.Errorf("CreateIssueFromFormValues(deps %q) created %s, want a refusal", tc.deps, issue.ID)
 				continue
 			}
-			if !strings.Contains(err.Error(), "cannot attach both") || !strings.Contains(err.Error(), "GH#4626") {
-				t.Errorf("CreateIssueFromFormValues(deps %q) error %q, want the shared collision guidance", deps, err)
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("CreateIssueFromFormValues(deps %q) error %q, want %q", tc.deps, err, tc.wantErr)
+			}
+			if tc.wantGH && !strings.Contains(err.Error(), "GH#4626") {
+				t.Errorf("CreateIssueFromFormValues(deps %q) error %q, want the shared GH#4626 guidance", tc.deps, err)
 			}
 		}
 		if dependents, err := s.GetDependents(ctx, target.ID); err != nil {
