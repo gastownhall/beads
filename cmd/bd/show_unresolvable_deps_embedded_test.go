@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -155,6 +156,91 @@ func TestEmbeddedShowUnresolvableDeps(t *testing.T) {
 		}
 		if strings.Contains(stderr, "no row in this database") {
 			t.Errorf("bd show warned about edges it printed:\nstderr:\n%s", stderr)
+		}
+	})
+
+	// #5272 GRAPH CONSUMERS: unresolved parent-child and blocks edges are
+	// named in the display member and nowhere else. The parent, the hydrated
+	// dependencies, dep list, readiness and the local epic's progress and
+	// close eligibility read exactly what they read before the edges existed.
+	t.Run("graph_consumers_unchanged", func(t *testing.T) {
+		epic := bdCreate(t, bd, dir, "Local epic", "--type", "epic")
+		child := bdCreate(t, bd, dir, "Child with unresolved graph edges", "--type", "task")
+		bdDep(t, bd, dir, "add", child.ID, epic.ID, "--type", "parent-child")
+
+		graph := func() (epicShow, epicStatus, depList string) {
+			epicShow, _ = runShowSplit(t, bd, dir, epic.ID)
+			epicStatus, _ = bdRunSplit(t, bd, dir, "epic", "status", "--json")
+			depList, _ = bdRunSplit(t, bd, dir, "dep", "list", child.ID, "--json")
+			return epicShow, epicStatus, depList
+		}
+		// The ready rows embed their raw dependency records, so readiness
+		// is compared by membership, not bytes.
+		readyIDs := func() []string {
+			out, _ := bdRunSplit(t, bd, dir, "ready", "--json", "--parent", epic.ID, "--limit", "0")
+			var rows []struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal([]byte(out), &rows); err != nil {
+				t.Fatalf("parse bd ready --json: %v\n%s", err, out)
+			}
+			var ids []string
+			for _, r := range rows {
+				ids = append(ids, r.ID)
+			}
+			return ids
+		}
+		beforeShow, beforeStatus, beforeDeps := graph()
+		beforeReady := readyIDs()
+		if !slices.Contains(beforeReady, child.ID) {
+			t.Fatalf("control: %s is not ready before the unresolved edges: %v", child.ID, beforeReady)
+		}
+
+		bdDep(t, bd, dir, "add", child.ID, "liveop-epic", "--type", "parent-child")
+		bdDep(t, bd, dir, "add", child.ID, "liveop-gate", "--type", "blocks")
+
+		afterShow, afterStatus, afterDeps := graph()
+		if afterReady := readyIDs(); !slices.Equal(afterReady, beforeReady) {
+			t.Errorf("bd ready --parent changed with unresolved edges: before %v, after %v", beforeReady, afterReady)
+		}
+		for _, c := range []struct{ name, before, after string }{
+			{"bd show <epic>", beforeShow, afterShow},
+			{"bd epic status --json", beforeStatus, afterStatus},
+			{"bd dep list --json", beforeDeps, afterDeps},
+		} {
+			if c.before != c.after {
+				t.Errorf("%s changed with unresolved edges:\nbefore:\n%s\nafter:\n%s", c.name, c.before, c.after)
+			}
+		}
+		_, depListStderr := bdRunSplit(t, bd, dir, "dep", "list", child.ID)
+		for _, want := range []string{"liveop-epic via parent-child", "liveop-gate via blocks"} {
+			if !strings.Contains(depListStderr, want) {
+				t.Errorf("bd dep list stderr lacks %q:\n%s", want, depListStderr)
+			}
+		}
+
+		details := bdShowDetails(t, bd, dir, child.ID)
+		if details["parent"] != epic.ID {
+			t.Errorf("parent = %v, want the local epic %s", details["parent"], epic.ID)
+		}
+		if v, present := details["gated_by"]; present {
+			t.Errorf("gated_by = %v, want absent", v)
+		}
+		deps, _ := details["dependencies"].([]interface{})
+		if len(deps) != 1 {
+			t.Fatalf("dependencies = %v, want only the local epic", details["dependencies"])
+		}
+		if dep, _ := deps[0].(map[string]interface{}); dep["id"] != epic.ID {
+			t.Errorf("dependencies[0].id = %v, want %s", dep["id"], epic.ID)
+		}
+		edges, _ := details["unresolvable_dependency_edges"].([]interface{})
+		var got []string
+		for _, e := range edges {
+			edge, _ := e.(map[string]interface{})
+			got = append(got, fmt.Sprintf("%v/%v", edge["depends_on_id"], edge["type"]))
+		}
+		if want := []string{"liveop-epic/parent-child", "liveop-gate/blocks"}; !slices.Equal(got, want) {
+			t.Errorf("unresolvable_dependency_edges = %v, want %v", got, want)
 		}
 	})
 
