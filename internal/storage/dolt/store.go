@@ -3538,7 +3538,8 @@ func databaseExistsOnServer(ctx context.Context, db *sql.DB, name string) (bool,
 
 // initSchemaOnDB applies pending schema migrations. schema.MigrateUp tracks
 // applied versions in schema_migrations and backfills legacy config-driven
-// tables. Returns the number of migrations applied.
+// tables. Returns the pass's work count (schema.MigrateUp): main and
+// clone-local migrations applied plus reconciles, 0 when nothing changed.
 func initSchemaOnDB(ctx context.Context, db *sql.DB) (int, error) {
 	return initSchemaOnDBWithBootstrapHeal(ctx, db, nil, "")
 }

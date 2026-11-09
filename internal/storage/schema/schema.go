@@ -1063,6 +1063,12 @@ func MigrateUpTo(ctx context.Context, db DBConn, maxVersion int) (int, error) {
 // pass suspends and restores @@SESSION.dolt_transaction_commit on it
 // (suspendTransactionCommit), and a pooled *sql.DB would let the SET land on
 // one connection while the migrations run on another.
+//
+// It returns the pass's work: the numbered migrations it applied from both
+// sources, main and clone-local, plus the open-time reconciles that changed
+// the database (see migrateUpConsented). 0 means the pass changed nothing,
+// which callers rely on to skip a pool rebuild or a write; a partial count
+// comes back with an error.
 func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 	// Consent gate first, before ANY write — dolt_ignore seeding included: an
 	// existing database with pending main-sequence migrations must stay
@@ -1310,6 +1316,12 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	}
 
 	appliedIgnored, ignoredColumnAdded, err := ignoredSource.migrate(ctx, db, 0)
+	// The clone-local series changes the schema as much as the main one does,
+	// so its work counts toward the total every return below reports: a pass
+	// whose only work was clone-local (a clone that pulled the migrated main
+	// series and then upgraded, gastownhall/beads#7038) otherwise reported 0,
+	// and its open kept the pool pinned to the pre-migration session root.
+	applied += appliedIgnored
 	if err != nil {
 		return applied, fmt.Errorf("ignored migrations: %w", err)
 	}
@@ -1317,7 +1329,7 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 		return applied, fmt.Errorf("unstaging ignored migration tables: %w", err)
 	}
 
-	if applied == 0 && !backfilled && appliedIgnored == 0 && !mainColumnAdded && !ignoredColumnAdded {
+	if applied == 0 && !backfilled && !mainColumnAdded && !ignoredColumnAdded {
 		return applied, nil
 	}
 	changedDirtyTables, err := changedDirtyTableSignatures(ctx, db, dirtyBeforeSignatures)
