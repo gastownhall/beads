@@ -1313,6 +1313,9 @@ type importLocalResult struct {
 	// RejectsPath before the import wrote anything (GH#4492).
 	Rejected    []importRejection
 	RejectsPath string
+	// SkippedDependencies lists the dependency edges the writer skipped
+	// ("issue -> target: reason"), such as an edge to a rejected record.
+	SkippedDependencies []string
 }
 
 // memoryRecord represents a memory entry in the JSONL export.
@@ -1409,25 +1412,30 @@ func importFromLocalJSONLConflictSkip(ctx context.Context, store storage.DoltSto
 	return importFromLocalJSONLWithOpts(ctx, store, localPath, true)
 }
 
-// importFromLocalJSONLWithOpts is the shared implementation. It detects
-// memory records (lines with "_type":"memory") and imports them via
-// SetConfig, while routing regular issue records through the normal path.
+// importFromLocalJSONLWithOpts parses and screens the file at localPath
+// (planRecoveryImportFile), then imports the plan (importRecoveryPlan).
 // conflictSkip selects insert-if-new (true) vs UPSERT (false) for issue rows.
 func importFromLocalJSONLWithOpts(ctx context.Context, store storage.DoltStorage, localPath string, conflictSkip bool) (*importLocalResult, error) {
-	records, memories, err := parseImportJSONLFile(localPath)
+	plan, err := planRecoveryImportFile(ctx, storeImportVocabulary(store), localPath)
 	if err != nil {
 		return nil, err
 	}
-	configEntries := importMemoryConfigEntries(memories)
+	return importRecoveryPlan(ctx, store, plan, conflictSkip)
+}
 
-	// The screen, and the quarantine of what it skips, come before the first
-	// write: a record the writer would refuse no longer fails the recovery.
-	issues, rejected, rejectsPath, err := screenRecoveryImport(ctx, storeImportVocabulary(store), records, localPath)
-	if err != nil {
-		return nil, err
-	}
+// importRecoveryPlanConflictSkip is the production fallbackImporter: the
+// insert-if-new import of an auto-import's plan (GH#3955).
+func importRecoveryPlanConflictSkip(ctx context.Context, store storage.DoltStorage, plan *recoveryImportPlan) (*importLocalResult, error) {
+	return importRecoveryPlan(ctx, store, plan, true)
+}
 
-	result := &importLocalResult{Rejected: rejected, RejectsPath: rejectsPath}
+// importRecoveryPlan imports an already-screened recovery plan: the memories
+// via SetConfig, even when the screen rejected every issue, and the accepted
+// issue rows through the normal batch path. It never reads the source again.
+// conflictSkip selects insert-if-new (true) vs UPSERT (false) for issue rows.
+func importRecoveryPlan(ctx context.Context, store storage.DoltStorage, plan *recoveryImportPlan, conflictSkip bool) (*importLocalResult, error) {
+	issues, configEntries := plan.Issues, plan.ConfigEntries
+	result := &importLocalResult{Rejected: plan.Rejected, RejectsPath: plan.RejectsPath}
 
 	// Import memories
 	for key, value := range configEntries {
@@ -1464,6 +1472,7 @@ func importFromLocalJSONLWithOpts(ctx context.Context, store storage.DoltStorage
 		// not: it is counted apart.
 		result.Issues = importResult.Created + importResult.Unchanged
 		result.Retired = len(importResult.RetiredIDs)
+		result.SkippedDependencies = importResult.SkippedDependencies
 	}
 
 	return result, nil

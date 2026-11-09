@@ -1313,6 +1313,7 @@ func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *conf
 	wireBootstrapDoltRemote(ctx, s, plan)
 	fmt.Fprintf(os.Stderr, "Imported %d issues from %s\n", imported.Issues, plan.JSONLFile)
 	warnImportInvalidSkipped(plan.JSONLFile, imported.Rejected, imported.RejectsPath)
+	warnImportSkippedDependencies(imported.SkippedDependencies)
 	return nil
 }
 

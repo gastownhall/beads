@@ -1107,11 +1107,12 @@ func (s *EmbeddedDoltStore) ListTags(ctx context.Context) ([]string, error) {
 
 // ImportJSONLData atomically checks if the database is empty and, if so,
 // imports parsed issues and config key/value pairs in a single transaction.
-// Returns the count of issues imported and, deduplicated in file order, the
-// ids it skipped because a retaining retention sweep retired them (an import
-// never resurrects a swept row, and they are not counted as imported), or 0
-// and nil if the database was not empty. A database holding only tombstones
-// has no issue rows, so it counts as empty.
+// Returns the count of issues imported, deduplicated in file order the ids it
+// skipped because a retaining retention sweep retired them (an import never
+// resurrects a swept row, and they are not counted as imported), and the
+// dependency edges it skipped ("issue -> target: reason", as bd import reports
+// them), or 0 and nil if the database was not empty. A database holding only
+// tombstones has no issue rows, so it counts as empty.
 // Does NOT issue DOLT_COMMIT — the caller is responsible for committing
 // (e.g. via the PersistentPostRun auto-commit hook).
 func (s *EmbeddedDoltStore) ImportJSONLData(
@@ -1119,10 +1120,13 @@ func (s *EmbeddedDoltStore) ImportJSONLData(
 	issues []*types.Issue,
 	configEntries map[string]string,
 	actor string,
-) (int, []string, error) {
+) (int, []string, []string, error) {
 	var imported int
-	var retiredIDs []string
+	var retiredIDs, skippedDependencies []string
 	err := s.withConn(ctx, true, func(tx *sql.Tx) error {
+		// The transaction may retry: report only the last attempt's skips.
+		skippedDependencies = nil
+		skippedSet := make(map[string]bool)
 		// Atomically check: is the database empty?
 		stats := &types.Statistics{}
 		if err := issueops.ScanIssueCountsInTx(ctx, tx, stats); err != nil {
@@ -1163,6 +1167,19 @@ func (s *EmbeddedDoltStore) ImportJSONLData(
 			// that check cannot clobber live rows — matching the server-mode
 			// fallback's conflict-skip behavior.
 			ConflictSkip: true,
+			// The caller's screen (GH#4492) may have set aside a row another
+			// row depends on: an edge whose target is absent, or that the
+			// writer refuses as a cycle or a hierarchy conflict, is skipped
+			// and reported as bd import does, not fatal to the recovery. A
+			// failed validation query still fails the import.
+			SkipDependencyValidationErrors: true,
+			OnSkippedDependency: func(issueID, dependsOnID, reason string) {
+				skipped := fmt.Sprintf("%s -> %s: %s", issueID, dependsOnID, reason)
+				if !skippedSet[skipped] {
+					skippedSet[skipped] = true
+					skippedDependencies = append(skippedDependencies, skipped)
+				}
+			},
 			// A row whose id a retaining sweep retired is skipped, never
 			// written; the callback names it so the count below leaves it out.
 			OnRetiredID: func(issueID string) { retired[issueID] = true },
@@ -1182,7 +1199,7 @@ func (s *EmbeddedDoltStore) ImportJSONLData(
 		}
 		return nil
 	})
-	return imported, retiredIDs, err
+	return imported, retiredIDs, skippedDependencies, err
 }
 
 // Flatten squashes all Dolt commit history into a single commit.

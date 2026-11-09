@@ -14,24 +14,27 @@ import (
 // jsonlImporter is implemented by stores that support single-transaction
 // JSONL import (currently EmbeddedDoltStore). Stores that don't implement
 // this fall back to the multi-call path. ImportJSONLData returns the issues
-// it wrote and the ids it skipped because a retaining sweep retired them.
+// it wrote, the ids it skipped because a retaining sweep retired them, and
+// the dependency edges it skipped.
 type jsonlImporter interface {
-	ImportJSONLData(ctx context.Context, issues []*types.Issue, configEntries map[string]string, actor string) (int, []string, error)
+	ImportJSONLData(ctx context.Context, issues []*types.Issue, configEntries map[string]string, actor string) (int, []string, []string, error)
 }
 
 // fallbackImporter is the function maybeAutoImportJSONL invokes for stores
 // that do not implement jsonlImporter (server-mode dolt). It exists as a
 // package-level variable so tests can substitute a counter and verify the
 // top-level emptiness guard prevents the fallback path from running on a
-// non-empty database.
+// non-empty database. It imports the plan maybeAutoImportJSONL already
+// parsed and screened, never the file again, so it cannot import a snapshot
+// other than the one whose invalid records were quarantined (GH#4492).
 //
-// Production builds use importFromLocalJSONLConflictSkip (GH#3955): this is
+// Production builds use importRecoveryPlanConflictSkip (GH#3955): this is
 // upgrade-recovery into an empty DB, so insert-if-new and UPSERT are
 // equivalent on the legitimate path — but if the emptiness guard above ever
 // regresses again (cf. PR #3630), conflict-skip makes the fallback a
 // harmless no-op instead of clobbering live rows. Explicit `bd import`,
 // `bd bootstrap`, and `bd init --from-jsonl` are unaffected and keep UPSERT.
-var fallbackImporter = importFromLocalJSONLConflictSkip
+var fallbackImporter = importRecoveryPlanConflictSkip
 
 type autoImportStamp struct {
 	Size        int64 `json:"size"`
@@ -74,7 +77,7 @@ func writeAutoImportStamp(beadsDir string, info os.FileInfo) {
 // fallback. Defense in depth backs each path up: the embedded
 // jsonlImporter has its own in-transaction emptiness check (and is
 // also insert-if-new, GH#3955), and the fallback path imports via
-// importFromLocalJSONLConflictSkip, which is insert-if-new rather than
+// importRecoveryPlanConflictSkip, which is insert-if-new rather than
 // UPSERT. So if this guard ever regresses again (cf. PR #3630), a stale
 // issues.jsonl can no longer be re-imposed on top of live Dolt rows —
 // the worst case degrades to a harmless no-op instead of clobbering
@@ -120,21 +123,22 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 		return // nothing to import
 	}
 
+	// Skip the records the writer would refuse into the quarantine before
+	// either importer writes (GH#4492): one of them used to roll back the
+	// whole recovery. Both importers take this one plan.
+	plan, err := planRecoveryImport(ctx, storeImportVocabulary(s), records, memories, jsonlPath)
+	if err != nil {
+		writeAutoImportStamp(beadsDir, info)
+		fmt.Fprintf(os.Stderr, "warning: auto-import from %s failed: %v\n", jsonlPath, err)
+		fmt.Fprintf(os.Stderr, "\nYour issues are still safe in %s.\n", jsonlPath)
+		return
+	}
+	issues, configEntries, rejected := plan.Issues, plan.ConfigEntries, plan.Rejected
+
 	// Prefer single-transaction import (embedded mode) to avoid
 	// DOLT_COMMIT races with concurrent writers.
 	if importer, ok := s.(jsonlImporter); ok {
-		// Skip the records the writer would refuse into the quarantine
-		// before the import transaction (GH#4492): one of them used to roll
-		// back the whole recovery.
-		issues, rejected, rejectsPath, err := screenRecoveryImport(ctx, storeImportVocabulary(s), records, jsonlPath)
-		if err != nil {
-			writeAutoImportStamp(beadsDir, info)
-			fmt.Fprintf(os.Stderr, "warning: auto-import from %s failed: %v\n", jsonlPath, err)
-			fmt.Fprintf(os.Stderr, "\nYour issues are still safe in %s.\n", jsonlPath)
-			return
-		}
-		configEntries := importMemoryConfigEntries(memories)
-		imported, retiredIDs, err := importer.ImportJSONLData(ctx, issues, configEntries, "auto-import")
+		imported, retiredIDs, skippedDependencies, err := importer.ImportJSONLData(ctx, issues, configEntries, "auto-import")
 		if err != nil {
 			writeAutoImportStamp(beadsDir, info)
 			fmt.Fprintf(os.Stderr, "warning: auto-import from %s failed: %v\n", jsonlPath, err)
@@ -158,7 +162,8 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 			}
 			printAutoImportRetired(len(retiredIDs))
 			fmt.Fprintf(os.Stderr, " from %s\n", jsonlPath)
-			warnImportInvalidSkipped(jsonlPath, rejected, rejectsPath)
+			warnImportInvalidSkipped(jsonlPath, rejected, plan.RejectsPath)
+			warnImportSkippedDependencies(skippedDependencies)
 		}
 		return
 	}
@@ -166,7 +171,7 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 	// Fallback for stores without a single-transaction importer.
 	fmt.Fprintf(os.Stderr, "auto-importing %d bytes from %s into empty database...\n", info.Size(), jsonlPath)
 
-	result, err := fallbackImporter(ctx, s, jsonlPath)
+	result, err := fallbackImporter(ctx, s, plan)
 	if err != nil {
 		writeAutoImportStamp(beadsDir, info)
 		fmt.Fprintf(os.Stderr, "warning: auto-import from %s failed: %v\n", jsonlPath, err)
@@ -205,6 +210,7 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 	printAutoImportRetired(result.Retired)
 	fmt.Fprintf(os.Stderr, " from %s\n", jsonlPath)
 	warnImportInvalidSkipped(jsonlPath, result.Rejected, result.RejectsPath)
+	warnImportSkippedDependencies(result.SkippedDependencies)
 }
 
 // printAutoImportRetired continues an "auto-imported N issues" line with the

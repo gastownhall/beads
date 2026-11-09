@@ -68,7 +68,7 @@ func swapFallbackImporter(t *testing.T, returnErr error) *atomic.Int32 {
 	t.Helper()
 	orig := fallbackImporter
 	var count atomic.Int32
-	fallbackImporter = func(_ context.Context, _ storage.DoltStorage, _ string) (*importLocalResult, error) {
+	fallbackImporter = func(_ context.Context, _ storage.DoltStorage, _ *recoveryImportPlan) (*importLocalResult, error) {
 		count.Add(1)
 		if returnErr != nil {
 			return nil, returnErr
@@ -320,8 +320,8 @@ func TestMaybeAutoImportJSONL_UsesConfiguredImportPath(t *testing.T) {
 
 	orig := fallbackImporter
 	var gotPath string
-	fallbackImporter = func(_ context.Context, _ storage.DoltStorage, path string) (*importLocalResult, error) {
-		gotPath = path
+	fallbackImporter = func(_ context.Context, _ storage.DoltStorage, plan *recoveryImportPlan) (*importLocalResult, error) {
+		gotPath = plan.Source
 		return nil, errors.New("test importer: short-circuit before s.Commit")
 	}
 	t.Cleanup(func() { fallbackImporter = orig })
@@ -354,7 +354,7 @@ func TestMaybeAutoImportJSONL_SuccessStampPreventsRepeatedImport(t *testing.T) {
 	writeAutoImportFixtureJSONL(t, dir)
 	orig := fallbackImporter
 	var count atomic.Int32
-	fallbackImporter = func(_ context.Context, _ storage.DoltStorage, _ string) (*importLocalResult, error) {
+	fallbackImporter = func(_ context.Context, _ storage.DoltStorage, _ *recoveryImportPlan) (*importLocalResult, error) {
 		count.Add(1)
 		return &importLocalResult{Issues: 1}, nil
 	}
@@ -374,7 +374,7 @@ func TestMaybeAutoImportJSONL_ChangedJSONLBypassesSuccessStamp(t *testing.T) {
 	writeAutoImportFixtureJSONL(t, dir)
 	orig := fallbackImporter
 	var count atomic.Int32
-	fallbackImporter = func(_ context.Context, _ storage.DoltStorage, _ string) (*importLocalResult, error) {
+	fallbackImporter = func(_ context.Context, _ storage.DoltStorage, _ *recoveryImportPlan) (*importLocalResult, error) {
 		count.Add(1)
 		return &importLocalResult{Issues: 1}, nil
 	}
@@ -400,11 +400,15 @@ type fakeJSONLImporterStore struct {
 	imported int
 	retired  []string
 	calls    atomic.Int32
+	// gotIssues and gotConfig record the last call's arguments.
+	gotIssues []*types.Issue
+	gotConfig map[string]string
 }
 
-func (f *fakeJSONLImporterStore) ImportJSONLData(_ context.Context, _ []*types.Issue, _ map[string]string, _ string) (int, []string, error) {
+func (f *fakeJSONLImporterStore) ImportJSONLData(_ context.Context, issues []*types.Issue, configEntries map[string]string, _ string) (int, []string, []string, error) {
 	f.calls.Add(1)
-	return f.imported, f.retired, nil
+	f.gotIssues, f.gotConfig = issues, configEntries
+	return f.imported, f.retired, nil, nil
 }
 
 // TestMaybeAutoImportJSONL_StampsAFileWhoseEveryRowWasRetired pins both
@@ -438,7 +442,7 @@ func TestMaybeAutoImportJSONL_StampsAFileWhoseEveryRowWasRetired(t *testing.T) {
 		writeAutoImportFixtureJSONL(t, dir)
 		orig := fallbackImporter
 		var count atomic.Int32
-		fallbackImporter = func(_ context.Context, _ storage.DoltStorage, _ string) (*importLocalResult, error) {
+		fallbackImporter = func(_ context.Context, _ storage.DoltStorage, _ *recoveryImportPlan) (*importLocalResult, error) {
 			count.Add(1)
 			return &importLocalResult{Retired: 1}, nil
 		}
@@ -591,4 +595,123 @@ func TestMaybeAutoImportJSONL_VocabularyReadErrorWritesNothing(t *testing.T) {
 		// so reaching one fails the test.
 		run(t, &fakeFallbackStore{vocabularyErr: readErr})
 	})
+}
+
+// recoveryScreenFixture is a mixed recovery source: one valid row, one whose
+// status the writer refuses, and one memory record, on known physical lines.
+var recoveryScreenFixture = []string{
+	`{"_type":"issue","id":"ce-1","title":"valid row","status":"open","priority":2,"issue_type":"task"}`,
+	`{"_type":"issue","id":"ce-2","title":"stale status row","status":"verify","priority":2,"issue_type":"task"}`,
+	`{"_type":"memory","key":"hint","value":"beware"}`,
+}
+
+func writeRecoveryScreenFixture(t *testing.T, dir string, lines ...string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "issues.jsonl"), []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestMaybeAutoImportJSONL_FallbackImportsTheScreenedPlan pins the fallback
+// half of AC-3 (GH#4492): the fallback importer is handed the plan the
+// auto-import already parsed and screened, never the path to read again, with
+// the invalid row quarantined beside the source and the attempt stamped.
+// Adapted from GLM's TestMaybeAutoImportJSONL_FallbackQuarantinesInvalidRows.
+func TestMaybeAutoImportJSONL_FallbackImportsTheScreenedPlan(t *testing.T) {
+	dir := t.TempDir()
+	writeRecoveryScreenFixture(t, dir, recoveryScreenFixture...)
+
+	orig := fallbackImporter
+	var plan *recoveryImportPlan
+	fallbackImporter = func(_ context.Context, _ storage.DoltStorage, p *recoveryImportPlan) (*importLocalResult, error) {
+		plan = p
+		// The source changing under the importer must not matter: it
+		// imports the plan, not the file.
+		if err := os.WriteFile(p.Source, []byte("not json\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return &importLocalResult{Issues: len(p.Issues), Memories: len(p.ConfigEntries), Rejected: p.Rejected, RejectsPath: p.RejectsPath}, nil
+	}
+	t.Cleanup(func() { fallbackImporter = orig })
+
+	maybeAutoImportJSONL(context.Background(), &fakeFallbackStore{}, dir)
+
+	if plan == nil {
+		t.Fatal("fallback importer was not invoked")
+	}
+	if want := filepath.Join(dir, "issues.jsonl"); plan.Source != want {
+		t.Errorf("plan source = %q, want %q", plan.Source, want)
+	}
+	if len(plan.Issues) != 1 || plan.Issues[0].ID != "ce-1" {
+		t.Errorf("plan issues = %v, want only ce-1", plan.Issues)
+	}
+	if plan.ConfigEntries[kvPrefix+memoryPrefix+"hint"] != "beware" {
+		t.Errorf("plan config entries = %v, want the hint memory", plan.ConfigEntries)
+	}
+	if len(plan.Rejected) != 1 || plan.Rejected[0].ID != "ce-2" || plan.Rejected[0].Line != 2 {
+		t.Errorf("plan rejects = %+v, want ce-2 on line 2", plan.Rejected)
+	}
+	saved, err := os.ReadFile(filepath.Join(dir, "issues.rejected.jsonl"))
+	if err != nil {
+		t.Fatalf("read quarantine: %v", err)
+	}
+	if string(saved) != recoveryScreenFixture[1]+"\n" {
+		t.Errorf("quarantine = %q, want ce-2's exact bytes", saved)
+	}
+	if _, err := os.Stat(autoImportStampPath(dir)); err != nil {
+		t.Errorf("attempt was not stamped: %v", err)
+	}
+}
+
+// TestMaybeAutoImportJSONL_AllRejectedFileIsStampedNotWritten pins AC-3's
+// all-rejected rule on the single-transaction path: a file whose every issue
+// row is invalid quarantines the rows and stamps the attempt, so the next
+// command does not read it again, and signals a database write only for the
+// memories it still imports. Adapted from GLM's test of the same name.
+func TestMaybeAutoImportJSONL_AllRejectedFileIsStampedNotWritten(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		lines     []string
+		wantWrite bool
+	}{
+		{name: "no memories", lines: recoveryScreenFixture[1:2]},
+		{name: "memories still import", lines: recoveryScreenFixture[1:3], wantWrite: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prev := commandDidWrite.Load()
+			commandDidWrite.Store(false)
+			t.Cleanup(func() { commandDidWrite.Store(prev) })
+
+			dir := t.TempDir()
+			writeRecoveryScreenFixture(t, dir, tc.lines...)
+			store := &fakeJSONLImporterStore{}
+			stderr := captureStderr(t, func() {
+				maybeAutoImportJSONL(context.Background(), store, dir)
+				maybeAutoImportJSONL(context.Background(), store, dir)
+			})
+
+			if got := store.calls.Load(); got != 1 {
+				t.Fatalf("ImportJSONLData invoked %d time(s), want 1: the all-rejected attempt must be stamped", got)
+			}
+			if len(store.gotIssues) != 0 {
+				t.Errorf("ImportJSONLData got issues %v, want none", store.gotIssues)
+			}
+			if got, want := len(store.gotConfig), len(tc.lines)-1; got != want {
+				t.Errorf("ImportJSONLData got %d config entries, want %d", got, want)
+			}
+			if got := commandDidWrite.Load(); got != tc.wantWrite {
+				t.Errorf("commandDidWrite = %v, want %v: a quarantine file or stamp alone is not a database write", got, tc.wantWrite)
+			}
+			if !strings.Contains(stderr, "ce-2: invalid status: verify") {
+				t.Errorf("stderr does not name the skipped record:\n%s", stderr)
+			}
+			saved, err := os.ReadFile(filepath.Join(dir, "issues.rejected.jsonl"))
+			if err != nil {
+				t.Fatalf("read quarantine: %v", err)
+			}
+			if string(saved) != recoveryScreenFixture[1]+"\n" {
+				t.Errorf("quarantine = %q, want ce-2's exact bytes", saved)
+			}
+		})
+	}
 }

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -667,6 +668,118 @@ func TestEmbeddedImportInvalidRecordDryRun(t *testing.T) {
 			if issue.Title != "post-import marker" {
 				t.Errorf("auto-import wrote %s from a file it could not decode", issue.ID)
 			}
+		}
+	})
+}
+
+// skippedDependencyFixture is a recovery source in which <prefix>-1 depends on
+// <prefix>-2, whose status the writer refuses, and on target, which is either
+// a valid row of the same file or an issue the store already holds.
+func skippedDependencyFixture(t *testing.T, prefix, target string, withTargetRow bool) string {
+	t.Helper()
+	when := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	row := func(id, status string, deps ...string) []byte {
+		issue := types.Issue{ID: id, Title: "row " + id, Status: types.Status(status), Priority: 2, IssueType: types.TypeTask, CreatedAt: when, UpdatedAt: when}
+		for _, dep := range deps {
+			issue.Dependencies = append(issue.Dependencies, &types.Dependency{IssueID: id, DependsOnID: dep, Type: types.DepBlocks})
+		}
+		line, err := json.Marshal(issue)
+		if err != nil {
+			t.Fatalf("marshal fixture row %s: %v", id, err)
+		}
+		return line
+	}
+	lines := [][]byte{
+		row(prefix+"-1", "open", prefix+"-2", target),
+		row(prefix+"-2", "verify"),
+	}
+	if withTargetRow {
+		lines = append(lines, row(target, "open"))
+	}
+	return string(bytes.Join(lines, []byte("\n"))) + "\n"
+}
+
+// assertOnlyDependsOn fails unless id's only dependency edge points at want.
+func assertOnlyDependsOn(t *testing.T, store storage.DoltStorage, id, want string) {
+	t.Helper()
+	deps, err := store.GetDependencyRecords(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords(%s): %v", id, err)
+	}
+	var got []string
+	for _, dep := range deps {
+		got = append(got, dep.DependsOnID)
+	}
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("%s depends on %v, want only %s", id, got, want)
+	}
+}
+
+// TestEmbeddedRecoveryImportReportsSkippedDependencies pins AC-3's dependency
+// rule (GH#4492): a kept record's edge to a record the screen rejected is
+// skipped and reported on its own line, while its edge to a valid target - in
+// the same file or already in the store - is kept. Both recovery importers
+// report the same edge.
+func TestEmbeddedRecoveryImportReportsSkippedDependencies(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name string
+		wrap func(storage.DoltStorage) storage.DoltStorage
+	}{
+		{name: "single_transaction", wrap: func(s storage.DoltStorage) storage.DoltStorage { return s }},
+		{name: "fallback", wrap: func(s storage.DoltStorage) storage.DoltStorage { return unwrapOnlyStore{s} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prefix := map[string]string{"single_transaction": "sds", "fallback": "sdf"}[tc.name]
+			_, beadsDir, _ := bdInit(t, bd, "--prefix", prefix)
+			jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+			if err := os.WriteFile(jsonlPath, []byte(skippedDependencyFixture(t, prefix, prefix+"-3", true)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			store := openStore(t, beadsDir, prefix)
+			stderr := captureStderr(t, func() {
+				maybeAutoImportJSONL(ctx, tc.wrap(store), beadsDir)
+			})
+
+			if _, err := store.GetIssue(ctx, prefix+"-1"); err != nil {
+				t.Fatalf("valid record %s-1 not imported: %v\nstderr:\n%s", prefix, err, stderr)
+			}
+			assertOnlyDependsOn(t, store, prefix+"-1", prefix+"-3")
+			if want := fmt.Sprintf("Skipped dependency: %s-1 -> %s-2", prefix, prefix); !strings.Contains(stderr, want) {
+				t.Errorf("stderr does not report %q:\n%s", want, stderr)
+			}
+			if strings.Contains(stderr, prefix+"-1 -> "+prefix+"-3") {
+				t.Errorf("stderr reports the kept edge as skipped:\n%s", stderr)
+			}
+		})
+	}
+
+	t.Run("existing_target", func(t *testing.T) {
+		_, beadsDir, _ := bdInit(t, bd, "--prefix", "sde")
+		store := openStore(t, beadsDir, "sde")
+		now := time.Now().UTC()
+		if err := store.CreateIssue(ctx, &types.Issue{ID: "sde-9", Title: "already here", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now}, "tester"); err != nil {
+			t.Fatalf("create existing target: %v", err)
+		}
+		jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(skippedDependencyFixture(t, "sde", "sde-9", false)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		result, err := importFromLocalJSONLFull(ctx, store, jsonlPath)
+		if err != nil {
+			t.Fatalf("recovery import: %v", err)
+		}
+		assertOnlyDependsOn(t, store, "sde-1", "sde-9")
+		if len(result.SkippedDependencies) != 1 || !strings.HasPrefix(result.SkippedDependencies[0], "sde-1 -> sde-2") {
+			t.Errorf("skipped dependencies = %q, want only sde-1 -> sde-2", result.SkippedDependencies)
 		}
 	})
 }

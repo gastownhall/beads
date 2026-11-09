@@ -455,25 +455,61 @@ func defaultImportRejectsPath(source string) string {
 	return source + ".rejected.jsonl"
 }
 
-// screenRecoveryImport is the screen of the recovery imports (auto-import,
-// `bd init --from-jsonl`, `bd bootstrap`): they import what they can, so the
-// records the writer would refuse are skipped into the quarantine next to
-// source, which is saved before any import write. It returns the issues to
-// import, the skipped records and the quarantine they were saved to. A failed
-// vocabulary read or quarantine save fails the screen, and with it the import.
-func screenRecoveryImport(ctx context.Context, readVocabulary importVocabularyFunc, records []importRecord, source string) ([]*types.Issue, []importRejection, string, error) {
+// recoveryImportPlan is a recovery import's one parse and screen of its
+// source (auto-import, `bd init --from-jsonl`, `bd bootstrap`): the issues to
+// import, the memories as config entries, and the records skipped into the
+// quarantine. The importers take the plan rather than the path, so none of
+// them reads the source again and imports a snapshot the screen never saw.
+type recoveryImportPlan struct {
+	Source        string
+	Issues        []*types.Issue
+	ConfigEntries map[string]string
+	// Rejected lists the records the screen skipped as invalid, saved to
+	// RejectsPath before the plan was returned.
+	Rejected    []importRejection
+	RejectsPath string
+}
+
+// planRecoveryImport screens a recovery import's parsed source. A recovery
+// imports what it can, so the records the writer would refuse are skipped
+// into the quarantine next to source, which is saved before any import write.
+// A failed vocabulary read or quarantine save fails the plan, and with it the
+// import.
+func planRecoveryImport(ctx context.Context, readVocabulary importVocabularyFunc, records []importRecord, memories []memoryRecord, source string) (*recoveryImportPlan, error) {
+	plan := &recoveryImportPlan{Source: source, ConfigEntries: importMemoryConfigEntries(memories)}
 	// No stale pre-filter here (lookup is unused under allowStale): the
 	// writer's own stale handling still applies to the accepted rows.
 	screen, err := screenImportRecords(ctx, nil, readVocabulary, records, true)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, err
 	}
+	plan.Issues = screen.Write
 	if len(screen.Rejected) == 0 {
-		return screen.Write, nil, "", nil
+		return plan, nil
 	}
 	rejectsPath := defaultImportRejectsPath(source)
 	if err := saveImportRejects(rejectsPath, source, screen.Rejected); err != nil {
-		return nil, nil, "", fmt.Errorf("save the %d invalid record(s) from %s to %s; nothing was imported: %w", len(screen.Rejected), source, rejectsPath, err)
+		return nil, fmt.Errorf("save the %d invalid record(s) from %s to %s; nothing was imported: %w", len(screen.Rejected), source, rejectsPath, err)
 	}
-	return screen.Write, screen.Rejected, rejectsPath, nil
+	plan.Rejected, plan.RejectsPath = screen.Rejected, rejectsPath
+	return plan, nil
+}
+
+// planRecoveryImportFile parses the JSONL file at path and plans its recovery
+// import (planRecoveryImport).
+func planRecoveryImportFile(ctx context.Context, readVocabulary importVocabularyFunc, path string) (*recoveryImportPlan, error) {
+	records, memories, err := parseImportJSONLFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return planRecoveryImport(ctx, readVocabulary, records, memories, path)
+}
+
+// warnImportSkippedDependencies names, on stderr, the dependency edges a
+// recovery import skipped, in bd import's words: an edge to a record the
+// screen set aside, say.
+func warnImportSkippedDependencies(skipped []string) {
+	for _, edge := range skipped {
+		fmt.Fprintf(os.Stderr, "Skipped dependency: %s\n", edge) //nolint:gosec // G705: stderr, not a browser context
+	}
 }

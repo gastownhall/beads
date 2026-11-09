@@ -2175,6 +2175,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				fmt.Printf("  Imported %d issues from %s\n", imported.Issues, localJSONLPath)
 			}
 			warnImportInvalidSkipped(localJSONLPath, imported.Rejected, imported.RejectsPath)
+			warnImportSkippedDependencies(imported.SkippedDependencies)
 		}
 
 		// projectRoleRepo is isInitRoleGitRepo held to keepHomeClean. The role,
