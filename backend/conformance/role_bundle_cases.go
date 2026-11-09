@@ -718,6 +718,14 @@ var roleContractCases = []roleContract{
 		RunReleaserDoesNotMutateTheCallerRequest,
 	),
 
+	// The revision-token matrix (row_version_contract.go): one fixture
+	// carrying every write role whose effect on RowVersion it classifies.
+	roleCases("RowVersion", "IssueLifecycle(), MetadataCAS(), IssueClaimer(), Releaser(), Heartbeater(), DependencyEditor(), Commenter() and BatchApplier()", oncePerRole,
+		func(b RoleContractBundle) func(t *testing.T) *RowVersionFixture { return b.RowVersion },
+		RunLifecycleRowVersionAdvancesPerMutationKind,
+		RunLifecycleUpdateLabelOnlyPatchLeavesRowVersion,
+	),
+
 	roleCases("StatsReporter", "StatsReporter()", oncePerRole,
 		func(b RoleContractBundle) func(t *testing.T) *StatsReporterFixture { return b.StatsReporter },
 		RunStatsReporterCountsEveryDurableRowByStatus,

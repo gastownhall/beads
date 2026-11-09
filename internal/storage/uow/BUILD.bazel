@@ -170,6 +170,7 @@ go_test(
         "releaser_contract_test.go",
         "retention_epoch_contract_test.go",
         "role_fixture_kit_test.go",
+        "row_version_contract_test.go",
         "server_version_floor_test.go",
         "session_database_test.go",
         "shared_server_cleanup_guard_test.go",

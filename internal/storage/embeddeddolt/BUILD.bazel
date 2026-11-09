@@ -249,6 +249,7 @@ go_test(
         "retention_epoch_contract_test.go",
         "role_fixture_kit_test.go",
         "role_test_helpers_test.go",
+        "row_version_contract_test.go",
         "schema_test.go",
         "search_missing_table_test.go",
         "stats_reporter_contract_test.go",
