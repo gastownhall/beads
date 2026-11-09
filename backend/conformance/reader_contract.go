@@ -1546,6 +1546,66 @@ func RunReaderGetDetailShapeMatchesTheSeededIssue(t *testing.T, ctx context.Cont
 	assertReaderCount(t, "CommentCount", details.CommentCount, 0)
 }
 
+// RunReaderGetListsUnresolvableDependencyEdges pins the optional raw-edge member
+// of the detail view (#5272) on the public Get contract. An outgoing edge whose
+// far end has no row in this database is counted and absent from Dependencies;
+// UnresolvableDependencyEdges names it as the stored record, sorted by target
+// then type, while Dependencies keeps only the local neighbor. An issue whose
+// every edge resolves leaves the member unset, so a Reader that always filled
+// it (or never did) fails here rather than in one command's output.
+func RunReaderGetListsUnresolvableDependencyEdges(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	subject := readerID(fixture, "unresedges", "subject")
+	blocker := readerID(fixture, "unresedges", "blocker")
+	// A target whose prefix names another repository, and an external
+	// reference: the two shapes the store accepts without a row behind them.
+	crossRepo := "zzremote-" + readerID(fixture, "unresedges", "gone")
+	external := "external:zzremote:" + readerID(fixture, "unresedges", "cap")
+	seedReaderIssue(t, ctx, fixture, readerIssue(subject, types.TypeTask, ""))
+	seedReaderIssue(t, ctx, fixture, readerIssue(blocker, types.TypeTask, ""))
+	for _, dep := range []*types.Dependency{
+		{IssueID: subject, DependsOnID: blocker, Type: types.DepBlocks},
+		{IssueID: subject, DependsOnID: crossRepo, Type: types.DepBlocks},
+		{IssueID: subject, DependsOnID: external, Type: types.DepTracks},
+	} {
+		if err := fixture.AddDependency(ctx, dep, "seed"); err != nil {
+			t.Fatalf("seed the edge to %s: %v", dep.DependsOnID, err)
+		}
+	}
+
+	details, err := fixture.Reader.Get(ctx, publicops.GetRequest{ID: subject})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := readerDependencyIDs(details.Dependencies); !slices.Equal(got, []string{blocker}) {
+		t.Errorf("Dependencies = %v, want only the local edge to %s", got, blocker)
+	}
+	assertReaderCount(t, "DependencyCount", details.DependencyCount, 3)
+	assertReaderCount(t, "UnresolvableDependencies", details.UnresolvableDependencies, 2)
+	var got []string
+	for _, edge := range details.UnresolvableDependencyEdges {
+		if edge == nil {
+			got = append(got, "<nil>")
+			continue
+		}
+		if edge.IssueID != subject {
+			t.Errorf("unresolvable edge to %s has IssueID %q, want %q", edge.DependsOnID, edge.IssueID, subject)
+		}
+		got = append(got, edge.DependsOnID+"/"+string(edge.Type))
+	}
+	if want := []string{external + "/" + string(types.DepTracks), crossRepo + "/" + string(types.DepBlocks)}; !slices.Equal(got, want) {
+		t.Errorf("UnresolvableDependencyEdges = %v, want %v", got, want)
+	}
+
+	local, err := fixture.Reader.Get(ctx, publicops.GetRequest{ID: blocker})
+	if err != nil {
+		t.Fatalf("Get the fully local issue: %v", err)
+	}
+	if local.UnresolvableDependencyEdges != nil {
+		t.Errorf("UnresolvableDependencyEdges = %v on an issue with no unresolved edge, want unset", local.UnresolvableDependencyEdges)
+	}
+}
+
 // RunReaderDoesNotMutateTheCallerRequest is the role's single request-snapshot
 // tripwire (reader.go:392-393). One case for the whole role, not one per
 // method: the promise is a property of the shared implementation, and every
