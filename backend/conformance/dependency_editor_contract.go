@@ -1513,7 +1513,7 @@ func RunDependencyEditorRecordsOneHistoryEntryForAMixedPlaneRequest(t *testing.T
 }
 
 // RunDependencyEditorWritesTheTargetIntoItsTypedColumn pins the target
-// CLASSIFICATION (issueops.ClassifyDepTarget) that dependencyeditor.go:150-156
+// CLASSIFICATION (issueops.ClassifyDepTargetInTx) that dependencyeditor.go:150-156
 // only describes from the outside. A dependency row holds its target in one of
 // three typed columns — depends_on_issue_id, depends_on_wisp_id,
 // depends_on_external — and which one it is is not cosmetic: only
@@ -1572,7 +1572,7 @@ func RunDependencyEditorWritesTheTargetIntoItsTypedColumn(t *testing.T, ctx cont
 		{"dependencies", issue, external, "depends_on_external",
 			"an external: reference names something outside this database entirely"},
 		{"dependencies", issue, foreign, "depends_on_external",
-			"another repository's id lives in that rig's database, not this one"},
+			"another repository's id this database holds no row for lives in that rig's database"},
 		{"wisp_dependencies", wisp, wispTarget, "depends_on_wisp_id",
 			"the ephemeral plane classifies its targets by the same rule"},
 		{"wisp_dependencies", wisp, issueTarget, "depends_on_issue_id",

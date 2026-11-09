@@ -108,46 +108,32 @@ func (l *depBatchLookups) isWisp(ctx context.Context, tx DBTX, id string) bool {
 	return ok
 }
 
-// classify is ClassifyDepTarget using the batch routing read.
-func (l *depBatchLookups) classify(ctx context.Context, tx DBTX, dep *types.Dependency, isCrossPrefix bool) DepTargetKind {
-	if l == nil {
-		return ClassifyDepTarget(ctx, tx, dep, isCrossPrefix)
-	}
-	if isCrossPrefix || IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
-		return DepTargetExternal
-	}
-	if l.isWisp(ctx, tx, dep.DependsOnID) {
-		return DepTargetWisp
-	}
-	return DepTargetIssue
-}
-
-// targetExists is the per-edge `SELECT 1 FROM <issues|wisps> WHERE id = ?`.
+// classify is ClassifyDepTargetInTx using the batch routing read, and
+// reports whether the target is present: a local target is typed by the
+// plane that holds it whatever its prefix, and only an absent one falls back
+// to depends_on_external when AbsentDepTargetIsExternal permits it.
 //
-//nolint:gosec // G201: lookupTable is one of two hardcoded constants.
-func (l *depBatchLookups) targetExists(ctx context.Context, tx DBTX, kind DepTargetKind, id string) (bool, error) {
-	if l != nil {
-		if kind == DepTargetWisp {
-			// The wisps set IS the presence proof: classify returned
-			// DepTargetWisp only because the id is in it, and the pass writes
-			// no wisp rows, so the per-edge `SELECT 1 FROM wisps` would find it.
-			return true, nil
-		}
-		return l.issuesExists[id], nil
+// The wisps set IS the wisp presence proof, and issuesExists the issue one:
+// the pass writes no issue or wisp rows, so the per-edge probes would find
+// exactly what the batch reads found.
+func (l *depBatchLookups) classify(ctx context.Context, tx DBTX, dep *types.Dependency) (DepTargetKind, bool, error) {
+	if l == nil {
+		kind, target, err := ClassifyDepTargetInTx(ctx, tx, dep, false)
+		return kind, target != nil, err
 	}
-	lookupTable := "issues"
-	if kind == DepTargetWisp {
-		lookupTable = "wisps"
+	if IsExplicitExternalDepRef(dep.DependsOnID) {
+		return DepTargetExternal, false, nil
 	}
-	var exists int
-	err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT 1 FROM %s WHERE id = ?", lookupTable), id).Scan(&exists)
-	if err == sql.ErrNoRows {
-		return false, nil
+	if _, ok := l.wisps[dep.DependsOnID]; ok {
+		return DepTargetWisp, true, nil
 	}
-	if err != nil {
-		return false, err
+	if l.issuesExists[dep.DependsOnID] {
+		return DepTargetIssue, true, nil
 	}
-	return true, nil
+	if AbsentDepTargetIsExternal(dep.IssueID, dep.DependsOnID) {
+		return DepTargetExternal, false, nil
+	}
+	return DepTargetIssue, false, nil
 }
 
 // checkHierarchy is CheckBlockingHierarchyInTx(ctx, tx, dep, nil).

@@ -44,28 +44,18 @@ func pickDepTable(useWisps bool) string {
 }
 
 // pickDepTargetColumn classifies an edge's target the same way the in-tx store
-// bodies do, through issueops.IsExternalDepTarget: a target this database
-// cannot hold — an "external:" reference or an issue belonging to another
-// repository — goes to depends_on_external, which carries no foreign key.
-// Only a target that could plausibly be local is probed against wisps and
-// otherwise treated as a local issue, where fk_dep_issue_target still refuses
-// an id that is genuinely missing.
+// bodies do, through issueops.ClassifyDepTargetInTx: a target present in this
+// database is typed by the plane that holds it (wisp first, then issue),
+// whatever its prefix. Only an "external:" reference, or a cross-prefix
+// target this database holds no row for, goes to depends_on_external, which
+// carries no foreign key; an absent same-prefix target is treated as a local
+// issue, where fk_dep_issue_target still refuses the genuinely missing id.
 func (r *dependencySQLRepositoryImpl) pickDepTargetColumn(ctx context.Context, issueID, dependsOnID string) (string, error) {
-	if issueops.IsExternalDepTarget(issueID, dependsOnID) {
-		return "depends_on_external", nil
-	}
-	var probe int
-	err := r.runner.QueryRowContext(ctx, "SELECT 1 FROM wisps WHERE id = ? LIMIT 1", dependsOnID).Scan(&probe)
-	switch {
-	case err == nil:
-		return "depends_on_wisp_id", nil
-	case errors.Is(err, sql.ErrNoRows):
-		return "depends_on_issue_id", nil
-	case dberrors.IsTableNotExist(err):
-		return "depends_on_issue_id", nil
-	default:
+	kind, _, err := issueops.ClassifyDepTargetInTx(ctx, r.runner, &types.Dependency{IssueID: issueID, DependsOnID: dependsOnID}, false)
+	if err != nil {
 		return "", fmt.Errorf("classify dep target %s: %w", dependsOnID, err)
 	}
+	return kind.Column(), nil
 }
 
 func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dependency, actor string, opts domain.DepInsertOpts) error {
@@ -323,7 +313,7 @@ func (r *dependencySQLRepositoryImpl) ValidateBlockingHierarchy(ctx context.Cont
 	if dep == nil {
 		return errors.New("db: DependencySQLRepository.ValidateBlockingHierarchy: dep must not be nil")
 	}
-	if issueops.IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
+	if issueops.AbsentDepTargetIsExternal(dep.IssueID, dep.DependsOnID) {
 		return nil
 	}
 	return issueops.CheckBlockingHierarchyInTx(ctx, r.runner, dep, nil)

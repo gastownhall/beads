@@ -986,24 +986,19 @@ func (t *doltTransaction) AddDependencyWithOptions(ctx context.Context, dep *typ
 		eventTable = "wisp_events"
 	}
 
-	isCrossPrefix := isCrossPrefixDep(dep.IssueID, dep.DependsOnID)
-	targetTable := "issues"
-	kind := issueops.DepTargetIssue
-	switch {
-	case isCrossPrefix, strings.HasPrefix(dep.DependsOnID, "external:"):
-		kind = issueops.DepTargetExternal
-	default:
-		if t.isActiveWisp(ctx, dep.DependsOnID) {
-			targetTable = "wisps"
-			kind = issueops.DepTargetWisp
-		}
+	// The target is classified by where it lives, each plane probed on the
+	// session that owns it so a target created earlier in this logical
+	// transaction is found: a cross-prefix target held in this database is
+	// typed like any other, and only an absent one is stored external.
+	kind, targetTable, target, err := t.classifyDepTarget(ctx, dep)
+	if err != nil {
+		return err
 	}
 
 	opts := issueops.AddDependencyOpts{
 		SourceTable:    sourceTable,
 		TargetTable:    targetTable,
 		WriteTable:     table,
-		IsCrossPrefix:  isCrossPrefix,
 		SkipCycleCheck: addOpts.SkipCycleCheck,
 		TargetKind:     &kind,
 		EmitEvent:      addOpts.EmitEvent,
@@ -1013,15 +1008,11 @@ func (t *doltTransaction) AddDependencyWithOptions(ctx context.Context, dep *typ
 	// the edge's write table and its target issue live in different tiers,
 	// target reads on the write tx cannot see a target created earlier in
 	// this same logical transaction (e.g. `bd create --deps blocks:<id>`
-	// swapping the new issue into the target slot). Read the target on its
-	// own tx and hand the row to AddDependencyInTx.
+	// swapping the new issue into the target slot). Hand the row read on the
+	// target's own session to AddDependencyInTx.
 	crossTierTarget := kind != issueops.DepTargetExternal && t.txFor(targetTable) != t.txFor(table)
-	if crossTierTarget {
-		precheck, err := t.readDepTargetForPrecheck(ctx, dep.IssueID, targetTable, dep.DependsOnID)
-		if err != nil {
-			return err
-		}
-		opts.PrecheckedTarget = precheck
+	if crossTierTarget && target != nil {
+		opts.PrecheckedTarget = target
 	}
 
 	// The single-session in-tx cycle check only sees its own session's
@@ -1111,22 +1102,34 @@ func (t *doltTransaction) addWispDepSuspendingIssueTargetFK(ctx context.Context,
 	return written, addErr
 }
 
-// readDepTargetForPrecheck validates a dependency target on the transaction
-// that owns its table and returns the row fields AddDependencyInTx needs when
-// it cannot read the target itself (cross-tier edges).
-func (t *doltTransaction) readDepTargetForPrecheck(ctx context.Context, sourceID, targetTable, id string) (*issueops.DepTargetPrecheck, error) {
-	var p issueops.DepTargetPrecheck
-	//nolint:gosec // G201: targetTable is "issues" or "wisps"
-	err := t.txFor(targetTable).QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT issue_type, status FROM %s WHERE id = ?`, targetTable), id,
-	).Scan(&p.IssueType, &p.Status)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, issueops.MissingDependencyTarget(sourceID, id)
+// classifyDepTarget classifies a dependency target the way
+// issueops.ClassifyDepTargetInTx does — an "external:" reference is external,
+// then a present wisp, then a present issue, and only an absent target falls
+// back by shape — but probes each plane on the session that owns it. It
+// returns the kind, the table that holds a local target, and the row read
+// there (nil for an external or absent target).
+func (t *doltTransaction) classifyDepTarget(ctx context.Context, dep *types.Dependency) (issueops.DepTargetKind, string, *issueops.DepTargetPrecheck, error) {
+	if issueops.IsExplicitExternalDepRef(dep.DependsOnID) {
+		return issueops.DepTargetExternal, "issues", nil, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to check target issue existence: %w", err)
+	for _, plane := range []struct {
+		table string
+		kind  issueops.DepTargetKind
+	}{{"wisps", issueops.DepTargetWisp}, {"issues", issueops.DepTargetIssue}} {
+		target, err := issueops.ProbeDepTargetInTx(ctx, t.txFor(plane.table), plane.table, dep.DependsOnID)
+		if err != nil {
+			return plane.kind, plane.table, nil, fmt.Errorf("failed to check target issue existence: %w", err)
+		}
+		if target != nil {
+			return plane.kind, plane.table, target, nil
+		}
 	}
-	return &p, nil
+	if issueops.AbsentDepTargetIsExternal(dep.IssueID, dep.DependsOnID) {
+		return issueops.DepTargetExternal, "issues", nil, nil
+	}
+	// Absent and same-prefix: AddDependencyInTx refuses it as missing, after
+	// its source check, as it always has.
+	return issueops.DepTargetIssue, "issues", nil, nil
 }
 
 // checkCrossTierSchedulingCycle rejects a scheduling edge that would close a

@@ -604,7 +604,7 @@ func (r *uowApplyRun) runEndGate(ctx context.Context) error {
 		return domain.NewCycleError("dependency cycle would be created: %s (no edges added; run 'bd dep cycles' for analysis)", cyclePath)
 	}
 	for _, applied := range r.edges {
-		if storageissueops.IsExternalDepTarget(applied.dep.IssueID, applied.dep.DependsOnID) {
+		if storageissueops.AbsentDepTargetIsExternal(applied.dep.IssueID, applied.dep.DependsOnID) {
 			continue
 		}
 		if err := r.uw.DependencyUseCase().ValidateBlockingHierarchy(ctx, applied.dep); err != nil {

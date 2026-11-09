@@ -1252,18 +1252,13 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx DBTX, issues [
 			if (dep.Type == types.DepParentChild) != parentPhase {
 				continue
 			}
-			isCrossPrefix := types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID)
-			kind := lookups.classify(ctx, tx, dep, isCrossPrefix)
-
-			if kind != DepTargetExternal {
-				exists, err := lookups.targetExists(ctx, tx, kind, dep.DependsOnID)
-				if err != nil {
-					return result, fmt.Errorf("failed to check dependency target %s for %s: %w", dep.DependsOnID, dep.IssueID, err)
-				}
-				if !exists {
-					recordSkippedDependency(opts, dep, "target not found")
-					continue
-				}
+			kind, present, err := lookups.classify(ctx, tx, dep)
+			if err != nil {
+				return result, fmt.Errorf("failed to check dependency target %s for %s: %w", dep.DependsOnID, dep.IssueID, err)
+			}
+			if kind != DepTargetExternal && !present {
+				recordSkippedDependency(opts, dep, "target not found")
+				continue
 			}
 
 			if kind != DepTargetExternal && types.ExtractPrefix(dep.IssueID) == types.ExtractPrefix(dep.DependsOnID) {

@@ -87,16 +87,16 @@ func depTargetColumns(t *testing.T) []string {
 // TestGetDescendantsCrossPrefixParent is the behavioural half of
 // TestBuildDescendantsCTEResolvesEveryDepTargetColumn: that test pins the
 // walk's query text, this one pins that the widened COALESCE matches real rows.
-// The write path classifies a target by prefix alone (issueops.IsExternalDepTarget),
-// so a parent-child edge between two prefixes lands in depends_on_external even
-// when both ends are local. Before be-qfm the walk coalesced only the issue and
-// wisp columns, so each child below — and its subtree — was missing from the
-// proxied `bd list --parent` tree. Each one is reached through a different edge
+// Before bd-6jk1y2 the write path classified a target by prefix alone, so a
+// parent-child edge between two prefixes landed in depends_on_external even
+// when both ends were local; databases written then still hold such rows, so
+// the edges below are seeded in that legacy shape. Before be-qfm the walk
+// coalesced only the issue and wisp columns, so each child below — and its
+// subtree — was missing from the proxied `bd list --parent` tree. Each one is reached through a different edge
 // member (issues and wisps, anchor and recursive), so dropping the column from
 // any one member loses a different child.
 func (s *testSuite) TestGetDescendantsCrossPrefixParent() {
 	r := s.issueRepo()
-	deps := s.depRepo()
 
 	const (
 		root   = "zz-xp-root"
@@ -121,13 +121,20 @@ func (s *testSuite) TestGetDescendantsCrossPrefixParent() {
 		{grand, child, false},
 		{grandW, child, true},
 	} {
-		s.Require().NoError(deps.Insert(s.Ctx(),
-			&types.Dependency{IssueID: e.child, DependsOnID: e.parent, Type: types.DepParentChild},
-			"tester", domain.DepInsertOpts{UseWispsTable: e.wisps}))
+		table := "dependencies"
+		if e.wisps {
+			table = "wisp_dependencies"
+		}
+		//nolint:gosec // G202: table is one of two hardcoded constants for tests
+		_, err := s.Runner().ExecContext(s.Ctx(), `
+			INSERT INTO `+table+` (id, issue_id, depends_on_external, type, created_at, created_by, metadata)
+			VALUES (UUID(), ?, ?, 'parent-child', NOW(), 'tester', '{}')
+		`, e.child, e.parent)
+		s.Require().NoError(err)
 	}
 
-	// Were the classifier ever to route one of these edges to another column,
-	// the two-column walk would find that child too and the case would pin nothing.
+	// Were a seeded edge ever in another column, the two-column walk would
+	// find that child too and the case would pin nothing.
 	for _, table := range []string{"dependencies", "wisp_dependencies"} {
 		rows := s.loadDepRows(table, "%-xp-%")
 		s.Require().Len(rows, 2, table)

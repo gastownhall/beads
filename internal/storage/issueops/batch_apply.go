@@ -607,7 +607,7 @@ func (r *applyBatchRun) runEndGate(ctx context.Context, tx *sql.Tx) error {
 		}
 		// An external or cross-repository target has no local hierarchy to
 		// conflict with, and the per-edge path filters it for the same reason.
-		if IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
+		if AbsentDepTargetIsExternal(dep.IssueID, dep.DependsOnID) {
 			continue
 		}
 		if err := CheckBlockingHierarchyInTx(ctx, tx, dep, cycleDetectionTables()); err != nil {

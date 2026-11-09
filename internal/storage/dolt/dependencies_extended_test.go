@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -853,9 +854,9 @@ func TestIsCrossPrefixDep(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isCrossPrefixDep(tt.source, tt.target)
+			got := issueops.AbsentDepTargetIsExternal(tt.source, tt.target)
 			if got != tt.expected {
-				t.Errorf("isCrossPrefixDep(%q, %q) = %v, want %v", tt.source, tt.target, got, tt.expected)
+				t.Errorf("AbsentDepTargetIsExternal(%q, %q) = %v, want %v", tt.source, tt.target, got, tt.expected)
 			}
 		})
 	}

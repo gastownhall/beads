@@ -1226,6 +1226,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A blocker whose prefix differs from its dependent's now blocks when both
+  live in the same database**
+  ([#8299](https://github.com/gastownhall/beads/issues/8299)). `bd dep add`
+  filed every cross-prefix target in `depends_on_external` by its prefix
+  alone, so an edge onto an open local blocker (a forced `--id`, a shared
+  ledger, a hydrated repo) never blocked: `bd ready` listed the dependent and
+  `bd blocked` did not. A target is now typed by where it lives: an
+  `external:` reference stays external, a target this database holds as a
+  wisp or an issue is stored as one and blocks by its status, and only a
+  cross-prefix target this database does not hold falls back to
+  `depends_on_external`, with the existing warning.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
