@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // Wisp commands - manage ephemeral molecules
@@ -1029,12 +1030,145 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 	// Without cascade, closed wisps are deleted and live dependents are
 	// orphaned (edges dropped, is_blocked recomputed) — the same semantics as
 	// a plain `bd delete`.
-	if err := deleteBatch(nil, ids, force, dryRun, false, jsonOutput, false, nil, "wisp gc --closed"); err != nil {
-		return HandleError("%v", err)
+	if dryRun {
+		if err := deleteBatch(nil, ids, force, dryRun, false, jsonOutput, false, nil, "wisp gc --closed"); err != nil {
+			return HandleError("%v", err)
+		}
+		return nil
 	}
 
-	if !dryRun && force && !jsonOutput {
+	outcome, err := purgeClosedWispsDirect(ctx, ids)
+	if err != nil {
+		return HandleError("%v", err)
+	}
+	if err := renderWispPurgeOutcome(outcome, true); err != nil {
+		return err
+	}
+	if !jsonOutput {
 		fmt.Printf("\nHint: Run 'bd compact --dolt' to reclaim disk space\n")
+	}
+	return nil
+}
+
+// wispPurgeChunkSize bounds each deletion request a forced
+// `bd mol wisp gc --closed` sends (bd-d2zqqc, GH#4684). The role runs a
+// request as one transaction, so a whole 5000-wisp selection in one request
+// is one transaction that does all the work or none of it. The same bound as
+// the store's own deleteWispBatch.
+const wispPurgeChunkSize = 200
+
+// wispPurgeChunk is what one committed deletion request reported.
+type wispPurgeChunk struct {
+	deletedIDs        []string
+	deleted           int
+	dependencies      int
+	labels            int
+	events            int
+	referencesUpdated int
+	orphaned          []string
+}
+
+// wispPurgeOutcome sums the chunks a forced closed purge committed. confirmed
+// names the selected ids whose request committed.
+type wispPurgeOutcome struct {
+	selected          int
+	confirmed         []string
+	deletedIDs        []string
+	deleted           int
+	dependencies      int
+	labels            int
+	events            int
+	referencesUpdated int
+	orphaned          []string
+}
+
+// runWispPurgeChunks sends ids to deleteChunk in sequential chunks of
+// wispPurgeChunkSize, in selection order, and stops at the first error.
+func runWispPurgeChunks(ctx context.Context, ids []string, deleteChunk func(context.Context, []string) (wispPurgeChunk, error)) (wispPurgeOutcome, error) {
+	out := wispPurgeOutcome{selected: len(ids), confirmed: []string{}, deletedIDs: []string{}, orphaned: []string{}}
+	for chunk := range slices.Chunk(ids, wispPurgeChunkSize) {
+		res, err := deleteChunk(ctx, chunk)
+		if err != nil {
+			return out, err
+		}
+		out.confirmed = append(out.confirmed, chunk...)
+		out.deletedIDs = append(out.deletedIDs, res.deletedIDs...)
+		out.deleted += res.deleted
+		out.dependencies += res.dependencies
+		out.labels += res.labels
+		out.events += res.events
+		out.referencesUpdated += res.referencesUpdated
+		out.orphaned = append(out.orphaned, res.orphaned...)
+	}
+	return out, nil
+}
+
+// purgeClosedWispsDirect deletes ids, which this store's own scan just
+// selected, through its deletion role. The ids go to the role as they are: the
+// front door's per-id resolution (deleteBatch) would re-read each one to learn
+// what the scan already said.
+func purgeClosedWispsDirect(ctx context.Context, ids []string) (wispPurgeOutcome, error) {
+	deleter, err := store.Deleter()
+	if err != nil {
+		return wispPurgeOutcome{}, err
+	}
+	opsCtx, err := issueOpsContext(ctx)
+	if err != nil {
+		return wispPurgeOutcome{}, err
+	}
+	requestActor := currentActor()
+	return runWispPurgeChunks(opsCtx, ids, func(ctx context.Context, chunk []string) (wispPurgeChunk, error) {
+		res, err := deleter.Delete(ctx, issueops.DeleteRequest{
+			Actor: requestActor,
+			IDs:   chunk,
+			Force: true,
+		})
+		if err != nil {
+			return wispPurgeChunk{}, err
+		}
+		// The bookkeeping deleteBatch does for a successful request, done per
+		// committed chunk: see the comment there (GH#5896).
+		commandDidWrite.Store(true)
+		commandDeletedIssueIDs.add(chunk...)
+		return wispPurgeChunk{
+			deletedIDs:        res.DeletedIDs,
+			deleted:           res.Deleted,
+			dependencies:      res.Dependencies,
+			labels:            res.Labels,
+			events:            res.Events,
+			referencesUpdated: res.ReferencesUpdated,
+			orphaned:          res.Orphaned,
+		}, nil
+	})
+}
+
+// renderWispPurgeOutcome prints a forced closed purge's result with the keys
+// each route has always printed; withDeletedIDs adds the direct route's
+// deleted_ids.
+func renderWispPurgeOutcome(out wispPurgeOutcome, withDeletedIDs bool) error {
+	if jsonOutput {
+		answer := map[string]interface{}{
+			"deleted":              out.confirmed,
+			"deleted_count":        out.deleted,
+			"dependencies_removed": out.dependencies,
+			"labels_removed":       out.labels,
+			"events_removed":       out.events,
+			"references_updated":   out.referencesUpdated,
+			"orphaned_issues":      out.orphaned,
+		}
+		if withDeletedIDs {
+			answer["deleted_ids"] = out.deletedIDs
+		}
+		return outputJSON(answer)
+	}
+	fmt.Printf("%s Deleted %d issue(s)\n", ui.RenderPass("✓"), out.deleted)
+	fmt.Printf("  Removed %d dependency link(s)\n", out.dependencies)
+	fmt.Printf("  Removed %d label(s)\n", out.labels)
+	fmt.Printf("  Removed %d event(s)\n", out.events)
+	fmt.Printf("  Updated text references in %d issue(s)\n", out.referencesUpdated)
+	if len(out.orphaned) > 0 {
+		fmt.Printf("  %s Orphaned %d issue(s): %s\n",
+			ui.RenderWarn("⚠"), len(out.orphaned), strings.Join(out.orphaned, ", "))
 	}
 	return nil
 }
