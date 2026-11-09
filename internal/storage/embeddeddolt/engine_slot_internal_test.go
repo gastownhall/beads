@@ -638,3 +638,76 @@ func requireEngineReleased(t *testing.T, store *EmbeddedDoltStore) {
 		t.Fatalf("raw close: %v", err)
 	}
 }
+
+// TestEmbeddedEngineSessionIsolation pins that reusing the engine does not
+// reuse sessions: session-local state one transaction or pinned callback
+// sets is gone in the next, and the database and branch an operation sees on
+// the reused engine are the ones it saw on a freshly opened one.
+func TestEmbeddedEngineSessionIsolation(t *testing.T) {
+	ctx := context.Background()
+	store, counter := newCountedEngineStore(t, "enginesession")
+
+	type sessionView struct {
+		database, branch string
+		leaked           sql.NullInt64
+		allowConflicts   int
+	}
+	readTx := func() sessionView {
+		t.Helper()
+		var v sessionView
+		if err := store.withConn(ctx, false, func(tx *sql.Tx) error {
+			return tx.QueryRowContext(ctx, "SELECT DATABASE(), active_branch(), @leaked, @@dolt_allow_commit_conflicts").
+				Scan(&v.database, &v.branch, &v.leaked, &v.allowConflicts)
+		}); err != nil {
+			t.Fatalf("read session: %v", err)
+		}
+		return v
+	}
+	readPinned := func() sessionView {
+		t.Helper()
+		var v sessionView
+		if err := store.withPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+			return db.QueryRowContext(ctx, "SELECT DATABASE(), active_branch(), @leaked, @@dolt_allow_commit_conflicts").
+				Scan(&v.database, &v.branch, &v.leaked, &v.allowConflicts)
+		}); err != nil {
+			t.Fatalf("read pinned session: %v", err)
+		}
+		return v
+	}
+
+	fresh := readTx()
+	if fresh.database != "enginesession" || fresh.branch != "main" || fresh.leaked.Valid || fresh.allowConflicts != 0 {
+		t.Fatalf("fresh engine session = %+v", fresh)
+	}
+
+	if err := store.withConn(ctx, false, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "SET @leaked = 42")
+		return err
+	}); err != nil {
+		t.Fatalf("set in transaction: %v", err)
+	}
+	if got := readTx(); got != fresh {
+		t.Fatalf("after a transaction set session state, the next transaction saw %+v, want %+v", got, fresh)
+	}
+
+	// The pull path's session flags (bd-6dnrw.40) stay local to their own
+	// pinned callback.
+	if err := store.withPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		if _, err := db.ExecContext(ctx, "SET @leaked = 7"); err != nil {
+			return err
+		}
+		_, err := db.ExecContext(ctx, "SET @@dolt_allow_commit_conflicts = 1")
+		return err
+	}); err != nil {
+		t.Fatalf("set in pinned callback: %v", err)
+	}
+	if got := readPinned(); got != fresh {
+		t.Fatalf("after a pinned callback set session state, the next one saw %+v, want %+v", got, fresh)
+	}
+	if got := readTx(); got != fresh {
+		t.Fatalf("after a pinned callback set session state, the next transaction saw %+v, want %+v", got, fresh)
+	}
+	if n := counter.opens.Load(); n != 1 {
+		t.Fatalf("opened %d engines, want every read above on one reused engine", n)
+	}
+}

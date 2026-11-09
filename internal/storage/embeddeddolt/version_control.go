@@ -39,10 +39,10 @@ func (s *EmbeddedDoltStore) withDBConn(ctx context.Context, fn func(db versionco
 // the subsequent DOLT_MERGE and settle statements to see them (bd-6dnrw.40).
 // A *sql.DB may rotate connections between statements; a pinned conn cannot.
 //
-// The pinned conn inherits the database/branch session setup OpenSQL applied:
-// the pool holds exactly the one connection OpenSQL configured (sequential
-// Ping/USE/SET on a fresh pool), and db.Conn returns it — the same invariant
-// ApplySchemaMigrations relies on.
+// The pinned conn is a fresh driver session on the store's reused engine
+// (dolthub/driver never reuses a session), opened on the database the
+// connector's DSN names, so session state a callback sets (the pull path's
+// merge flags, for one) ends with the callback.
 func (s *EmbeddedDoltStore) withPinnedDBConn(ctx context.Context, fn func(db versioncontrolops.DBConn) error) (err error) {
 	if s.closed.Load() {
 		return errClosed

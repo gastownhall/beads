@@ -40,10 +40,12 @@ var _ storage.VersionedHistoryDeferrer = (*EmbeddedDoltStore)(nil)
 var _ storage.ExternalRefHistoryQuerier = (*EmbeddedDoltStore)(nil)
 
 // EmbeddedDoltStore implements storage.DoltStorage backed by the embedded Dolt engine.
-// Each method call opens a short-lived connection, executes within an explicit
-// SQL transaction, and closes the connection immediately. This minimizes the
-// time the embedded engine's write lock is held, reducing contention when
-// multiple processes access the same database concurrently.
+// Each method call takes a short-lived connection (a fresh driver session) on
+// the store's engine, executes within an explicit SQL transaction, and closes
+// the connection immediately. The store reuses one engine across calls and
+// releases it once idle (engine_slot.go), which keeps the time it holds the
+// embedded engine short, reducing contention when multiple processes access
+// the same database concurrently.
 //
 // The dolthub/driver/v2 handles its own concurrency internally. File-level locking
 // is only used during bd init to protect one-time initialization steps.
@@ -58,8 +60,8 @@ type EmbeddedDoltStore struct {
 	// instance only (storage.EventsJournalConfigurer); never process-global.
 	eventsJournalEnabled atomic.Bool
 	// journalShape caches the ONE INFORMATION_SCHEMA probe SetEventsJournalEnabled
-	// runs on activation (issueops.ProbeJournalShape, PR A1), over a short-lived
-	// connection since this store has no persistent db handle. Nil means the
+	// runs on activation (issueops.ProbeJournalShape, PR A1), as one operation
+	// on the store's engine. Nil means the
 	// journal is disabled or the probe produced no shape; transactions then get
 	// the canonical column list — see journalActivationErr.
 	journalShape atomic.Pointer[issueops.JournalShape]
@@ -576,9 +578,8 @@ func (s *EmbeddedDoltStore) commitConn(ctx context.Context, commit bool, fn func
 // SetEventsJournalEnabled activates the journal for this store instance only.
 //
 // Activating probes bd_events_journal's actual shape ONCE
-// (issueops.ProbeJournalShape, PR A1), over a short-lived connection opened
-// and closed just for the probe since this store keeps no persistent db
-// handle, and caches the result for this instance's lifetime;
+// (issueops.ProbeJournalShape, PR A1), as one operation on the store's
+// engine, and caches the result for this instance's lifetime;
 // EventsJournalActivationError reports whether that probe found a shape the
 // journal cannot run against. The open and the probe share one
 // issueops.JournalShapeProbeTimeout, and either failing to run degrades to
