@@ -120,7 +120,8 @@ func FillServerEndpoint(beadsDir string, fileCfg *configfile.Config, cfg *Config
 }
 
 // requireDoltBackend keeps metadata-driven callers from bypassing the storage
-// factory and interpreting another backend's workspace as Dolt. Removed backend
+// factory and interpreting another backend's workspace, or a dolt_mode this
+// build does not know, as Dolt. Removed backend
 // identifiers deliberately remain recognizable in metadata so this check can fail
 // closed instead of opening a new, empty Dolt database. beadsDir is the workspace
 // the config came from, so the refusal can offer the metadata heal when that
@@ -136,6 +137,11 @@ func requireDoltBackend(fileCfg *configfile.Config, beadsDir string) error {
 	backend := fileCfg.GetBackend()
 	if backend != configfile.BackendDolt {
 		return fmt.Errorf("configured storage backend %q cannot be opened as Dolt", backend)
+	}
+	// A dolt_mode this build does not know reads as embedded to the mode
+	// predicates, which would open a different, empty database (GH#5104).
+	if !configfile.IsKnownDoltMode(fileCfg.DoltMode) {
+		return configfile.UnknownDoltModeErrorAt(fileCfg.DoltMode, beadsDir)
 	}
 	return nil
 }
