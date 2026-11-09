@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -179,8 +180,10 @@ func (s *DoltStore) loadCustomConfigCache(ctx context.Context) (statuses []types
 
 // customStatusVocabulary returns the status half of the custom config cache,
 // re-resolving through the combined loader when this half is not cached. A
-// failed resolve must not be cached: the error wraps the resolve failure so
-// callers can tell an unreadable vocabulary from an empty one.
+// failed resolve serves the config.yaml statuses per call without caching
+// them, so the next call retries the database; with no YAML fallback the
+// resolve error wraps the failure so callers can tell an unreadable
+// vocabulary from an empty one.
 func (s *DoltStore) customStatusVocabulary(ctx context.Context) ([]types.CustomStatus, error) {
 	s.cacheMu.Lock()
 	if s.customStatusCached {
@@ -192,6 +195,10 @@ func (s *DoltStore) customStatusVocabulary(ctx context.Context) ([]types.CustomS
 
 	statuses, _, err := s.loadCustomConfigCache(ctx)
 	if err != nil {
+		if yamlStatuses := config.GetCustomStatusesFromYAML(); len(yamlStatuses) > 0 {
+			log.Printf("warning: failed to resolve custom statuses from the database, serving uncached YAML fallback: %v", err)
+			return issueops.ParseStatusFallback(yamlStatuses), nil
+		}
 		return nil, fmt.Errorf("resolve custom statuses: %w", err)
 	}
 	return statuses, nil
@@ -218,8 +225,10 @@ func (s *DoltStore) GetCustomStatusesDetailed(ctx context.Context) ([]types.Cust
 
 // customTypeVocabulary returns the type half of the custom config cache,
 // re-resolving through the combined loader when this half is not cached. A
-// failed resolve must not be cached: the error wraps the resolve failure so
-// callers can tell an unreadable vocabulary from an empty one.
+// failed resolve serves the config.yaml types per call without caching them,
+// so the next call retries the database; with no YAML fallback the resolve
+// error wraps the failure so callers can tell an unreadable vocabulary from
+// an empty one.
 func (s *DoltStore) customTypeVocabulary(ctx context.Context) ([]string, error) {
 	s.cacheMu.Lock()
 	if s.customTypeCached {
@@ -231,6 +240,10 @@ func (s *DoltStore) customTypeVocabulary(ctx context.Context) ([]string, error) 
 
 	_, customTypes, err := s.loadCustomConfigCache(ctx)
 	if err != nil {
+		if yamlTypes := config.GetCustomTypesFromYAML(); len(yamlTypes) > 0 {
+			log.Printf("warning: failed to resolve custom types from the database, serving uncached YAML fallback: %v", err)
+			return issueops.ComposeCustomTypes(nil, "", yamlTypes), nil
+		}
 		return nil, fmt.Errorf("resolve custom types: %w", err)
 	}
 	return customTypes, nil

@@ -12,6 +12,7 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // bd-2e1byb (GH#5581): the custom vocabulary getters must never cache a
@@ -87,6 +88,30 @@ func cacheFlagsSet(t *testing.T, store *DoltStore) (statusCached, typeCached boo
 	return store.customStatusCached, store.customTypeCached
 }
 
+func assertCustomStatuses(t *testing.T, got []types.CustomStatus, want []types.CustomStatus) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("statuses = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("statuses = %+v, want %+v", got, want)
+		}
+	}
+}
+
+func assertStrings(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %#v, want %#v", got, want)
+		}
+	}
+}
+
 func TestCustomConfigGettersDoNotCacheFailedResolve(t *testing.T) {
 	cause := errors.New("simulated read failure")
 
@@ -120,5 +145,76 @@ func TestCustomConfigGettersDoNotCacheFailedResolve(t *testing.T) {
 		if statusCached, typeCached := cacheFlagsSet(t, store); statusCached || typeCached {
 			t.Fatalf("failed resolve was cached: statuses=%v, types=%v", statusCached, typeCached)
 		}
+	})
+
+	// AC-2: with the vocabulary declared in config.yaml, a failed resolve
+	// serves the parsed YAML with a nil error — and does not cache it.
+	t.Run("failed resolve with yaml serves fallback without caching", func(t *testing.T) {
+		withCustomVocabularyYAML(t, "review:active,qa", "spike,yaml-only,spike")
+		store, mock := newCustomConfigStore(t)
+		ctx := context.Background()
+
+		mock.ExpectBegin().WillReturnError(cause)
+		mock.ExpectBegin().WillReturnError(cause)
+		mock.ExpectBegin().WillReturnError(cause)
+
+		names, err := store.GetCustomStatuses(ctx)
+		if err != nil {
+			t.Fatalf("GetCustomStatuses with yaml fallback: %v", err)
+		}
+		assertStrings(t, names, []string{"review", "qa"})
+		detailed, err := store.GetCustomStatusesDetailed(ctx)
+		if err != nil {
+			t.Fatalf("GetCustomStatusesDetailed with yaml fallback: %v", err)
+		}
+		assertCustomStatuses(t, detailed, []types.CustomStatus{
+			{Name: "review", Category: types.CategoryActive},
+			{Name: "qa", Category: types.CategoryUnspecified},
+		})
+		gotTypes, err := store.GetCustomTypes(ctx)
+		if err != nil {
+			t.Fatalf("GetCustomTypes with yaml fallback: %v", err)
+		}
+		assertStrings(t, gotTypes, []string{"spike", "yaml-only"})
+
+		if statusCached, typeCached := cacheFlagsSet(t, store); statusCached || typeCached {
+			t.Fatalf("yaml fallback was cached: statuses=%v, types=%v", statusCached, typeCached)
+		}
+	})
+
+	// AC-2: the fallback is per getter: YAML statuses do not mask a failed
+	// type resolve, and YAML types do not mask a failed status resolve.
+	t.Run("failed resolve with only status yaml errors for types", func(t *testing.T) {
+		withCustomVocabularyYAML(t, "review:active", "")
+		store, mock := newCustomConfigStore(t)
+		ctx := context.Background()
+
+		mock.ExpectBegin().WillReturnError(cause)
+		mock.ExpectBegin().WillReturnError(cause)
+
+		names, err := store.GetCustomStatuses(ctx)
+		if err != nil {
+			t.Fatalf("GetCustomStatuses with status yaml fallback: %v", err)
+		}
+		assertStrings(t, names, []string{"review"})
+		_, err = store.GetCustomTypes(ctx)
+		requireErrIs(t, err, cause, "GetCustomTypes with no type yaml fallback")
+	})
+
+	t.Run("failed resolve with only types yaml errors for statuses", func(t *testing.T) {
+		withCustomVocabularyYAML(t, "", "spike")
+		store, mock := newCustomConfigStore(t)
+		ctx := context.Background()
+
+		mock.ExpectBegin().WillReturnError(cause)
+		mock.ExpectBegin().WillReturnError(cause)
+
+		_, err := store.GetCustomStatuses(ctx)
+		requireErrIs(t, err, cause, "GetCustomStatuses with no status yaml fallback")
+		gotTypes, err := store.GetCustomTypes(ctx)
+		if err != nil {
+			t.Fatalf("GetCustomTypes with type yaml fallback: %v", err)
+		}
+		assertStrings(t, gotTypes, []string{"spike"})
 	})
 }
