@@ -246,6 +246,41 @@ func TestOpenSQLWaitBudget(t *testing.T) {
 		}
 	})
 
+	t.Run("uncontended_open_with_a_tiny_budget", func(t *testing.T) {
+		t.Setenv("BEADS_EMBEDDED_OPEN_TIMEOUT", "1ms")
+		dir := initOpenWaitDB(t)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		db, cleanup, err := OpenSQL(ctx, dir, "testdb", "")
+		if err != nil {
+			t.Fatalf("uncontended OpenSQL with a 1ms budget: %v", err)
+		}
+		defer func() { _ = cleanup() }()
+		if _, ok := ctx.Deadline(); ok {
+			t.Fatalf("OpenSQL gave the caller's context a deadline")
+		}
+
+		// Well past the budget, the handle still serves queries on more
+		// than one connection: the budget bounds the open's retries only.
+		time.Sleep(100 * time.Millisecond)
+		conn, err := db.Conn(context.Background())
+		if err != nil {
+			t.Fatalf("first connection after the budget: %v", err)
+		}
+		defer func() { _ = conn.Close() }()
+		var n int
+		if err := conn.QueryRowContext(context.Background(), "SELECT 1").Scan(&n); err != nil {
+			t.Fatalf("query on the first connection: %v", err)
+		}
+		if err := db.QueryRowContext(context.Background(), "SELECT 1").Scan(&n); err != nil {
+			t.Fatalf("query on a second connection: %v", err)
+		}
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("caller's context ended after the open: %v", err)
+		}
+	})
+
 	t.Run("parent_deadline_takes_precedence", func(t *testing.T) {
 		t.Setenv("BEADS_EMBEDDED_OPEN_TIMEOUT", "1s")
 		dir := initOpenWaitDB(t)
