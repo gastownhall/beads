@@ -536,3 +536,26 @@ func TestDoctorPollutionJSONReturnsBeforeClean(t *testing.T) {
 	}
 }
 
+// TestDoctorPollutionCleanEvidenceFailureDeletesNothing pins that an
+// evidence-query failure during the initial detection fails the command
+// before any prompt, backup or deletion, rather than reporting a clean bill
+// of health.
+func TestDoctorPollutionCleanEvidenceFailureDeletesNothing(t *testing.T) {
+	fake := newPollutionCommandFixture()
+	fake.evidenceErr = errors.New("evidence store unreachable")
+	pollutionCommandTestEnv(t, fake)
+
+	out, err := captureStdoutWithError(t, func() error { return runPollutionCheck("", true, true) })
+	if err == nil {
+		t.Error("cleanup with a failing evidence query returned nil, want an error")
+	}
+	if strings.Contains(out, "No test pollution detected") {
+		t.Errorf("failing evidence query reported a clean result:\n%s", out)
+	}
+	if len(fake.deleted) != 0 || fake.refreshes != 0 {
+		t.Errorf("cleanup with a failing evidence query deleted %v after %d refreshes, want nothing", fake.deleted, fake.refreshes)
+	}
+	if _, statErr := os.Stat(".beads/pollution-backup.jsonl"); statErr == nil {
+		t.Error("cleanup with a failing evidence query wrote a backup, want none")
+	}
+}
