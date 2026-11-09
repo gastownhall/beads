@@ -74,9 +74,12 @@ func (r *labelSQLRepositoryImpl) Insert(ctx context.Context, issueID, label, act
 		}
 		return nil
 	}
-	// A real label change advances the owning row's updated_at (GH#5442).
-	if err := issueops.TouchLabelOwnerInTx(ctx, r.runner, table, issueID); err != nil {
-		return fmt.Errorf("db: LabelSQLRepository.Insert %s/%s: %w", issueID, label, err)
+	// A real label change advances the owning row's updated_at (GH#5442),
+	// except a label the create itself persists (opts.PreserveUpdatedAt).
+	if !opts.PreserveUpdatedAt {
+		if err := issueops.TouchLabelOwnerInTx(ctx, r.runner, table, issueID); err != nil {
+			return fmt.Errorf("db: LabelSQLRepository.Insert %s/%s: %w", issueID, label, err)
+		}
 	}
 	if err := r.events.Record(ctx, domain.Event{
 		IssueID:  issueID,

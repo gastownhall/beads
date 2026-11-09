@@ -173,3 +173,48 @@ func TestLabelRenameCommitsUpdatedAt(t *testing.T) {
 		t.Errorf("issues left dirty after the rename commit")
 	}
 }
+
+// TestCreateWithLabelsPreservesSuppliedTimestamp (GH#5442 AC-3): the
+// create/import path persists the caller's updated_at verbatim. Labels
+// supplied at create are part of the create — they must not take the live
+// label-edit touch, or an imported snapshot would arrive pre-stamped and
+// stop looking stale.
+func TestCreateWithLabelsPreservesSuppliedTimestamp(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	for _, plane := range []struct {
+		id        string
+		ephemeral bool
+	}{{"lbl-create-dur", false}, {"lbl-create-wisp", true}} {
+		issue := &types.Issue{
+			ID: plane.id, Title: "create clock probe",
+			Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+			UpdatedAt: labelClockAged, Labels: []string{"own"},
+		}
+		if plane.ephemeral {
+			issue.Ephemeral = true
+		}
+		if err := store.CreateIssuesWithFullOptions(ctx, []*types.Issue{issue}, "seeder",
+			storage.BatchCreateOptions{SkipPrefixValidation: true}); err != nil {
+			t.Fatalf("create %s: %v", plane.id, err)
+		}
+		got, err := store.GetIssue(ctx, plane.id)
+		if err != nil {
+			t.Fatalf("get %s: %v", plane.id, err)
+		}
+		if !got.UpdatedAt.Equal(labelClockAged) {
+			t.Errorf("%s: create-with-labels moved updated_at to %v, want the supplied %v preserved",
+				plane.id, got.UpdatedAt.UTC(), labelClockAged)
+		}
+		labels, err := store.GetLabels(ctx, plane.id)
+		if err != nil {
+			t.Fatalf("labels %s: %v", plane.id, err)
+		}
+		if len(labels) != 1 || labels[0] != "own" {
+			t.Errorf("%s: labels after create = %v, want [own]", plane.id, labels)
+		}
+	}
+}
