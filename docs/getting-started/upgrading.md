@@ -803,6 +803,43 @@ Dolt and ambiguous layouts, retains a sealed source copy, and compares the
 candidate export with the canonical historical export. Activate the cutover
 manually only after reviewing those retained artifacts.
 
+### Mixed-version operation of a proxied-server workspace
+
+A proxied-server workspace is the layout most sensitive to running an older
+`bd` in it, because two different mixed-version failures look superficially
+alike. They have different causes and different remedies:
+
+| An older bd prints | What happened | Remedy |
+|---|---|---|
+| `dolt_mode "..." in .beads/metadata.json is not recognized by this bd` | A newer bd wrote a `dolt_mode` value this build's storage selectors do not know, so the older bd refuses the workspace rather than guessing. | Upgrade the older bd. Or edit the file back to the `dolt_mode` the workspace was initialized with — never delete the field and never substitute `embedded`, which can point the workspace at a different, empty database. |
+| `... .beads/proxieddb: not a directory` | This bd is older than the current proxied root layout, and the workspace carries the legacy proxied-root guard: a small, git-ignored marker file current bd writes at `.beads/proxieddb` (see below). | Upgrade the older bd. The marker is inert for every current bd; do not delete it, commit it, or replace it with a directory. |
+
+The second refusal exists because an older bd would otherwise resolve the
+proxied root to `.beads/proxieddb`, find no database there, and silently
+report the workspace's real tracker as empty — `bd list` printing
+"No issues found." with exit 0, and `bd stats` failing outright — which is
+much worse than an error you can read. The guard file makes those releases
+stop at the first step instead.
+
+Current bd writes the guard automatically, once a managed-local
+proxied-server open has succeeded, but only when it is safe to:
+
+- the path `.beads/proxieddb` is absent (an existing file, directory, or
+  symlink — including one an older release actually used — is never replaced);
+- the workspace is inside a Git worktree, and git itself already considers
+  `.beads/proxieddb` ignored and untracked there, which requires the
+  standalone `proxieddb` line in `.beads/.gitignore` (the directory-only
+  `proxieddb/` line does not ignore a regular file).
+
+If your workspace predates that ignore line, run `bd doctor --fix` (or
+re-run `bd init` in the project) to bring `.beads/.gitignore` up to date;
+the next proxied-server command then writes the guard. The guard repairs
+nothing on its own, and it does not protect everything: workspaces that
+live outside a Git worktree, workspaces whose `.beads/proxieddb` already
+holds something, and bd releases older than proxied-server mode itself are
+outside its reach — the marker protects a workspace against old binaries,
+it does not repair an old workspace for current ones.
+
 ## Troubleshooting Upgrades
 
 ### Hooks out of date

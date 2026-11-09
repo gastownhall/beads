@@ -243,6 +243,61 @@ If you previously used the removed legacy sync-branch feature, also delete
 its branch and worktrees — see
 [Worktrees: Legacy Cleanup](/reference/worktrees#legacy-cleanup).
 
+### `dolt_mode "..." is not recognized by this bd`
+
+**Symptom:** Every `bd` command in one project fails with an error like
+
+```
+Error: dolt_mode "future-mode" in .beads/metadata.json is not recognized
+by this bd; the supported dolt_mode values are "embedded", "server" and
+"proxied-server", or no dolt_mode at all; no storage database was opened
+or modified; upgrade bd if a newer bd wrote this workspace, or edit the
+file and restore the dolt_mode this workspace was initialized with — do
+not delete the "dolt_mode" field and do not substitute "embedded", which
+can point this workspace at a different, empty database
+```
+
+**Cause:** You are running an older `bd` in a workspace a newer `bd`
+initialized (or edited). The newer bd recorded a storage mode this build
+does not know. Refusing is the safe outcome: an older bd that kept going
+would fall through to the embedded store and read your workspace's real
+database as an empty tracker.
+
+**Fix:** Upgrade `bd` on this machine — that is the remedy for the common
+case, and the error never means your data is gone (no storage was opened
+or modified). As a stopgap you can edit `.beads/metadata.json` (or
+`.beads/config.json` on an older workspace) and restore the `dolt_mode`
+value the workspace was initialized with. Do not delete the `dolt_mode`
+field, and do not substitute `"embedded"`: both can point this workspace
+at a different, empty database.
+
+### An older bd fails with `proxieddb: not a directory`
+
+**Symptom:** An older `bd` (one that predates the current proxied root
+layout) fails in a proxied-server workspace with
+
+```
+Error: ... .beads/proxieddb: not a directory
+```
+
+while the current `bd` works in the same workspace.
+
+**Cause:** That small file is the **legacy proxied-root guard**, which
+current bd writes after a successful proxied-server open. bd releases that
+predate the current proxied root layout resolved the workspace's root to
+`.beads/proxieddb` and, finding no database there, silently reported your
+workspace as empty — `bd list` printed "No issues found." and exited 0.
+The guard file makes those releases stop with an error you can read
+instead. It is git-ignored, and current bd never consults it.
+
+**Fix:** Upgrade the older bd; the workspace needs no change. Do not delete
+the guard file, do not commit it, and do not replace it with a directory —
+doing so re-arms the silent failure for every other machine still running
+the older release. If the file is missing and you want it back, make sure
+`bd doctor --fix` has brought `.beads/.gitignore` up to date (it must carry
+the standalone `proxieddb` line, not `proxieddb/`), then run any
+proxied-server command.
+
 ### `bd` shows 0 issues but the database has data
 
 **Symptom (server mode):** All `bd` commands return empty results even though

@@ -100,6 +100,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The legacy proxied-root guard** (GH#5104). After a successful
+  managed-local proxied-server open, bd writes a guard at
+  `.beads/proxieddb`: a small, git-ignored regular file whose content
+  names the bd build that wrote it and says what it protects against. bd
+  releases that predate the current proxied root layout resolved that path
+  as the workspace's proxied root and, finding no database there, silently
+  reported the workspace's real tracker as empty (`bd list` printing "No
+  issues found." with exit 0, `bd stats` failing); the guard file makes
+  those releases refuse with `proxieddb: not a directory` instead, before
+  they open or create any storage. Arming is deliberately conservative: it
+  only ever creates the path (an existing file, directory, or symlink an
+  older release may actually be using is left untouched), and it runs only
+  where git itself already considers the path ignored and untracked —
+  which requires the standalone `proxieddb` line in `.beads/.gitignore`,
+  now written by `bd init` and by `bd doctor --fix` (the directory-only
+  `proxieddb/` line does not ignore a regular file). The guard repairs
+  nothing itself: a workspace whose `.beads/.gitignore` predates the line
+  is armed only after doctor or a fresh init writes it, and workspaces
+  outside a Git worktree, workspaces whose `.beads/proxieddb` already
+  holds something, and bd releases older than proxied-server mode itself
+  are outside the guard's reach. The marker is inert for current bd; do
+  not delete it, commit it, or replace it with a directory. External-server
+  proxied workspaces are not armed (their database lives on another
+  machine).
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same
@@ -1226,6 +1250,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An unrecognized `dolt_mode` is refused fail-closed instead of silently
+  opening an empty tracker** (GH#5104). A workspace whose metadata names a
+  `dolt_mode` value this build's storage selectors do not recognize — a
+  value a newer bd wrote, or a typo — matched no selector, so storage
+  selection fell through to the embedded store and read the workspace's
+  real database as an empty tracker: `bd list` printed "No issues found."
+  and exited 0, and `bd stats` panicked. Command startup, `bd doctor`, the
+  store factories and the Dolt library constructors now refuse such a
+  workspace before any storage is opened, created, or migrated, with one
+  shared message that names the value, the file it was read from, the
+  supported values (`embedded`, `server`, `proxied-server`, or no
+  `dolt_mode` at all), the guarantee that no storage database was opened
+  or modified, and the remedy: upgrade bd if a newer bd wrote the
+  workspace, or edit the file and restore the `dolt_mode` it was
+  initialized with — never delete the field and never substitute
+  `embedded`, either of which can point the workspace at a different,
+  empty database. A legacy `config.json` workspace is refused in place,
+  byte-identical, before the migration to `metadata.json` could rewrite
+  it, and is named as the file to fix. Values and paths that do not print
+  as themselves are escaped in the message, so a value cannot split or
+  forge it. Parsing stays permissive — the loaders report malformed
+  metadata only — and nothing else about mode selection changes: a
+  registered non-Dolt backend still dispatches, removed-backend and
+  unknown-backend errors keep their precedence, and a runtime server
+  override still selects server mode for a workspace with no explicit
+  mode. The companion guard against pre-layout releases is in Added
+  above.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
