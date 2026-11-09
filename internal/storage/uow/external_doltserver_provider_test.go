@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -417,4 +418,84 @@ func TestExternalProviderRediscoversAfterProxyRetirement(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, fresh)
 	assert.NotEqual(t, old.Port, fresh.Port, "replacement proxy port")
+}
+
+// leastPrivilegeFixture is an external server holding one beads database
+// provisioned by root, plus scratch accounts whose grants never include
+// CREATE — the accounts gastownhall/beads#5079 could not use at all.
+type leastPrivilegeFixture struct {
+	h        *teamServerHarness
+	database string
+	admin    *sql.DB
+}
+
+func newLeastPrivilegeFixture(t *testing.T, ctx context.Context, database string) *leastPrivilegeFixture {
+	t.Helper()
+	h := newTeamServerHarness(t)
+	provisioner, err := h.openProvider(ctx, database, false, "")
+	require.NoError(t, err, "root must provision the database")
+	require.NoError(t, provisioner.Close(ctx))
+	return &leastPrivilegeFixture{h: h, database: database, admin: h.directDB(t, "")}
+}
+
+// account creates user with the given database-scoped privileges on the
+// fixture's database and nothing else: no global CREATE.
+func (f *leastPrivilegeFixture) account(t *testing.T, ctx context.Context, user, privileges string) {
+	t.Helper()
+	_, err := f.admin.ExecContext(ctx, "CREATE USER '"+user+"'@'%' IDENTIFIED BY 'pw'")
+	require.NoError(t, err)
+	_, err = f.admin.ExecContext(ctx, "GRANT "+privileges+" ON `"+f.database+"`.* TO '"+user+"'@'%'")
+	require.NoError(t, err)
+}
+
+func (f *leastPrivilegeFixture) open(ctx context.Context, database, user string, opts ...ProviderOption) (UnitOfWorkProvider, error) {
+	return NewExternalDoltServerUOWProvider(ctx, f.h.storeRootDir, database, f.h.logPath,
+		configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: f.h.port},
+		user, "pw", 0, 0, false, "", opts...)
+}
+
+// TestNewExternalDoltServerUOWProvider_LeastPrivilegeMissingDatabase pins the
+// refusal a CREATE-less account gets for a database it cannot see — absent, or
+// present but not granted, which the server deliberately makes look the same:
+// a permanent, honest error naming both and the administrator remedy, and no
+// database created behind its back.
+func TestNewExternalDoltServerUOWProvider_LeastPrivilegeMissingDatabase(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	f := newLeastPrivilegeFixture(t, ctx, "beads_lp")
+	f.account(t, ctx, "reader", "SELECT")
+
+	for _, tc := range []struct {
+		name     string
+		database string
+		exists   bool
+	}{
+		{name: "absent database", database: "beads_lp_absent"},
+		// The container pre-creates beads_test; reader has no grant on it.
+		{name: "ungranted existing database", database: "beads_test", exists: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := f.open(ctx, tc.database, "reader", WithReadOnly())
+			if p != nil {
+				t.Cleanup(func() { _ = p.Close(context.Background()) })
+			}
+			require.Error(t, err)
+			assert.Nil(t, p)
+			msg := err.Error()
+			assert.Contains(t, msg, strconv.Quote(tc.database)+" is not visible to this credential and creating it was denied")
+			assert.Contains(t, msg, "not provisioned")
+			assert.Contains(t, msg, "not been granted")
+			assert.Contains(t, msg, "ask the server administrator to provision the database and grant access")
+			assert.Contains(t, strings.ToLower(msg), "denied to user", "the driver error must be preserved")
+
+			var n int
+			require.NoError(t, f.admin.QueryRowContext(ctx,
+				"SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = ?", tc.database).Scan(&n))
+			want := 0
+			if tc.exists {
+				want = 1
+			}
+			assert.Equal(t, want, n, "a refused open must not create the database")
+		})
+	}
 }
