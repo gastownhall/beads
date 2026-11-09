@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -13,6 +14,8 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/depid"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -842,5 +845,71 @@ func TestProxiedServerReadyClaimConcurrent(t *testing.T) {
 	}
 	if final.Assignee == "" {
 		t.Error("final Assignee empty")
+	}
+}
+
+// TestProxiedServerReadyClaimRefusedWhileMigrationPending is the proxied
+// leg of bd-fwx149 (gastownhall/beads#8264). A proxied read command whose
+// provider open hits a refused migration reads through the refusal and
+// carries on (bd-mfsky); `bd ready --claim` is a write, so it must NOT read
+// through — the writer open is refused, nothing is claimed, and the plain
+// listing keeps working through the window. `bd duplicates --auto-merge`
+// stays refused by its capability front door, which never reaches this
+// question.
+func TestProxiedServerReadyClaimRefusedWhileMigrationPending(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	p := newSharedProxiedProject(t, bd, "wfx")
+
+	claimable := bdProxiedCreate(t, bd, p.dir, "Claimable through the window", "--priority", "0")
+
+	// Regress the project's database one migration by cursor only — the
+	// physical schema stays current, so reads keep working — as the shard's
+	// root user. Scoped-user sessions would be revoking a privilege they need.
+	admin, err := sql.Open("mysql", doltutil.ServerDSN{
+		Host: "127.0.0.1", Port: sharedProxiedServerPort(t), User: "root", Database: p.database,
+	}.String())
+	if err != nil {
+		t.Fatalf("connect to the shard server: %v", err)
+	}
+	t.Cleanup(func() { admin.Close() })
+	if _, err := admin.Exec("DELETE FROM schema_migrations WHERE version = ?", schema.LatestVersion()); err != nil {
+		t.Fatalf("regress schema_migrations: %v", err)
+	}
+
+	// Plain ready reads through the refusal and keeps listing.
+	stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "ready")
+	if err != nil {
+		t.Fatalf("bd ready through a pending migration failed; reads must keep working\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Claimable through the window") {
+		t.Errorf("bd ready did not render the seeded issue:\n%s", stdout)
+	}
+
+	// The claim is a write: writer admission refuses instead of reading
+	// through the refusal and persisting a claim.
+	stdout, stderr, err = bdProxiedRunBuffers(t, bd, p.dir, "ready", "--claim")
+	if err == nil {
+		t.Fatalf("bd ready --claim claimed through a refused migration\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if !strings.Contains(stdout+stderr, "bd migrate schema") && !strings.Contains(stdout+stderr, "co-resident") {
+		t.Errorf("bd ready --claim refusal missing the migration guidance:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	show, showStderr, showErr := bdProxiedRunBuffers(t, bd, p.dir, "show", claimable.ID, "--json")
+	if showErr != nil {
+		t.Fatalf("bd show %s through a pending migration failed\nstdout:\n%s\nstderr:\n%s", claimable.ID, show, showStderr)
+	}
+	if !strings.Contains(show, `"status": "open"`) {
+		t.Errorf("%s was claimed by a refused ready --claim:\n%s", claimable.ID, show)
+	}
+
+	// The merge form keeps its own front-door refusal on this backend.
+	mergeOut, mergeErr := bdProxiedRun(t, bd, p.dir, "duplicates", "--auto-merge")
+	if mergeErr == nil {
+		t.Fatalf("bd duplicates --auto-merge was not refused by the proxied front door:\n%s", mergeOut)
+	}
+	if !strings.Contains(string(mergeOut), "not supported in proxied-server mode") {
+		t.Errorf("unexpected duplicates --auto-merge refusal:\n%s", mergeOut)
 	}
 }
