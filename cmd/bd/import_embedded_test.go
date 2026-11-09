@@ -204,7 +204,7 @@ func TestEmbeddedImportUpsertAndPrefixSync(t *testing.T) {
 		// strictly newer than the created row's second-granularity
 		// updated_at: equal-timestamp rows keep the local row (bd-hj85c).
 		jsonlPath := filepath.Join(t.TempDir(), "upsert.jsonl")
-		now := time.Now().UTC().Add(time.Hour)
+		now := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
 		writeJSONLFile(t, jsonlPath, []types.Issue{
 			{ID: id, Title: "Updated Title", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
 		})
@@ -953,11 +953,11 @@ func TestEmbeddedImportInvalidStaleRowNotScreened(t *testing.T) {
 	}
 
 	t.Run("stale_invalid_row_is_stale_skipped_not_rejected", func(t *testing.T) {
-		newer := time.Now().UTC().Add(time.Hour)
+		newer := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
 		dir := seedNewerRow(t, "imst", "imst-aaa", "Stored newer", newer)
 
 		// The incoming snapshot is older AND its imst-aaa row is invalid.
-		older := time.Now().UTC().Add(-time.Hour)
+		older := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
 		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
 		writeJSONLFile(t, jsonlPath, []types.Issue{
 			{ID: "imst-aaa", Title: "Stale invalid", Status: types.Status("verify"), IssueType: types.TypeTask, CreatedAt: older, UpdatedAt: older},
@@ -1041,10 +1041,10 @@ func TestEmbeddedImportInvalidStaleRowNotScreened(t *testing.T) {
 	})
 
 	t.Run("allow_stale_puts_the_row_back_under_the_screen", func(t *testing.T) {
-		newer := time.Now().UTC().Add(time.Hour)
+		newer := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
 		dir := seedNewerRow(t, "imas", "imas-aaa", "Stored newer", newer)
 
-		older := time.Now().UTC().Add(-time.Hour)
+		older := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
 		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
 		writeJSONLFile(t, jsonlPath, []types.Issue{
 			{ID: "imas-aaa", Title: "Stale invalid", Status: types.Status("verify"), IssueType: types.TypeTask, CreatedAt: older, UpdatedAt: older},
