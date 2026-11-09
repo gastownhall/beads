@@ -183,13 +183,15 @@ An ID with another prefix that this database holds (a database with several
 `allowed_prefixes`, or an issue imported from another rig) is a local
 dependency like any other: it blocks, `bd blocked` names it, and cycle and
 parent-child checks apply to it. Beads decides by whether the ID is in this
-database when the edge is written, not by its prefix. An edge written before
-beads followed this rule still points at such a target as an unverified
-external ID and does not block; adding the same edge again leaves it as it is,
-so run `bd dep remove` and then `bd dep add` with the same `--type` to make it
-local. The re-add writes a new edge: one that carried dependency metadata (set
-through the API or an import) must be re-added with that metadata too, or the
-repaired edge has none.
+database when the edge is written, not by its prefix. When `bd repo remove`
+drops an imported rig's issues, an edge from one of your own issues onto one of
+them with another prefix stays, as an unverified external ID that no longer
+blocks. An edge written before beads followed this rule still points at such a
+target as an unverified external ID and does not block; adding the same edge
+again leaves it as it is, so run `bd dep remove` and then `bd dep add` with
+the same `--type` to make it local. The re-add writes a new edge: one that
+carried dependency metadata (set through the API or an import) must be
+re-added with that metadata too, or the repaired edge has none.
 
 A bare ID whose prefix names another rig (`bd dep add bd-abc gt-123`) is
 stored even when bd cannot find it in this database or through routes. `bd dep

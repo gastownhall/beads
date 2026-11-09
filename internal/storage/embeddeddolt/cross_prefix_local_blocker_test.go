@@ -4,12 +4,16 @@ package embeddeddolt_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -218,6 +222,124 @@ func TestEmbeddedCrossPrefixImportBatchTargetAfterSources(t *testing.T) {
 
 	assertCrossPrefixEdgeColumn(t, ctx, te, "dependencies", "a-isrc1", "b-pre", "depends_on_issue_id")
 	assertCrossPrefixEdgeColumn(t, ctx, te, "dependencies", "a-isrc2", "b-itgt", "depends_on_issue_id")
+}
+
+// TestEmbeddedCrossPrefixRepoRemoveKeepsEdgesOntoItsIssues: `bd repo remove`
+// (DeleteIssuesBySourceRepo) drops a hydrated repo's issues from this
+// database, not from the repo. An edge from this database's own issue or wisp
+// onto one of them with another prefix is local while the issue is here
+// (GH#8299), and outlives it as the unverified external edge every such edge
+// was before: the row keeps its id, type and metadata, its source stops being
+// blocked by it, and no dep_remove is journaled for it. Re-syncing the repo
+// could not restore it, since the repo's export does not carry it. An edge
+// onto a removed issue of the source's own prefix still cascades, as do the
+// removed issues' own edges, and each of those is journaled as removed.
+func TestEmbeddedCrossPrefixRepoRemoveKeepsEdgesOntoItsIssues(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "a")
+	ctx := t.Context()
+	te.store.SetEventsJournalEnabled(true)
+	if err := te.store.EventsJournalActivationError(); err != nil {
+		t.Fatalf("activate the events journal: %v", err)
+	}
+
+	const repo = "../repo-b"
+	const ownIssue, ownWisp, ownSame = "a-rown1", "a-rownw1", "a-rown2"
+	const hydrated, hydratedSame = "b-rhyd1", "a-rhyd2"
+	for _, seed := range []struct {
+		id        string
+		ephemeral bool
+	}{{ownIssue, false}, {ownWisp, true}, {ownSame, false}} {
+		issue := &types.Issue{ID: seed.id, Title: seed.id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: seed.ephemeral}
+		if err := te.store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", seed.id, err)
+		}
+	}
+	// Hydrate the way `bd repo sync` does: the repo's own ids, whatever their
+	// prefix, tagged with the repo they came from.
+	if err := te.store.CreateIssuesWithFullOptions(ctx, []*types.Issue{
+		{ID: hydrated, Title: hydrated, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, SourceRepo: repo},
+		{ID: hydratedSame, Title: hydratedSame, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, SourceRepo: repo},
+	}, "repo-sync", storage.BatchCreateOptions{SkipPrefixValidation: true}); err != nil {
+		t.Fatalf("hydrate %s: %v", repo, err)
+	}
+	for _, dep := range []*types.Dependency{
+		{IssueID: ownIssue, DependsOnID: hydrated, Type: types.DepBlocks, Metadata: `{"origin":"primary"}`},
+		{IssueID: ownWisp, DependsOnID: hydrated, Type: types.DepBlocks},
+		{IssueID: ownSame, DependsOnID: hydratedSame, Type: types.DepBlocks},
+		{IssueID: hydrated, DependsOnID: ownSame, Type: types.DepBlocks},
+	} {
+		if err := te.store.AddDependency(ctx, dep, "tester"); err != nil {
+			t.Fatalf("AddDependency %s -> %s: %v", dep.IssueID, dep.DependsOnID, err)
+		}
+	}
+	assertCrossPrefixEdgeColumn(t, ctx, te, "dependencies", ownIssue, hydrated, "depends_on_issue_id")
+	assertCrossPrefixIsBlocked(t, ctx, te, "issues", ownIssue, 1)
+	assertCrossPrefixIsBlocked(t, ctx, te, "wisps", ownWisp, 1)
+
+	edgeRows := func(table, source, target string) int {
+		t.Helper()
+		var n int
+		te.queryScalar(t, ctx,
+			"SELECT COUNT(*) FROM "+table+" WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?",
+			[]any{source, target}, &n)
+		return n
+	}
+	before, err := te.store.ReadEventsJournalPage(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("ReadEventsJournalPage: %v", err)
+	}
+	n, err := te.store.DeleteIssuesBySourceRepo(ctx, repo)
+	if err != nil {
+		t.Fatalf("DeleteIssuesBySourceRepo: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("DeleteIssuesBySourceRepo removed %d issue(s), want 2", n)
+	}
+
+	for _, kept := range []struct{ table, source string }{{"dependencies", ownIssue}, {"wisp_dependencies", ownWisp}} {
+		if rows := edgeRows(kept.table, kept.source, hydrated); rows != 1 {
+			t.Fatalf("%s edge %s -> %s has %d row(s) after %s was removed, want 1", kept.table, kept.source, hydrated, rows, repo)
+		}
+		assertCrossPrefixEdgeColumn(t, ctx, te, kept.table, kept.source, hydrated, "depends_on_external")
+	}
+	var id, depType, metadata string
+	te.queryScalar(t, ctx,
+		"SELECT id, type, metadata FROM dependencies WHERE issue_id = ? AND depends_on_external = ?",
+		[]any{ownIssue, hydrated}, &id, &depType, &metadata)
+	if want := depid.New(ownIssue, hydrated); id != want {
+		t.Errorf("kept edge id = %s, want %s (depid of its source and target)", id, want)
+	}
+	if depType != string(types.DepBlocks) || !strings.Contains(metadata, "primary") {
+		t.Errorf("kept edge type = %q, metadata = %q, want blocks with its {\"origin\":\"primary\"}", depType, metadata)
+	}
+	assertCrossPrefixIsBlocked(t, ctx, te, "issues", ownIssue, 0)
+	assertCrossPrefixIsBlocked(t, ctx, te, "wisps", ownWisp, 0)
+	for _, edge := range [][2]string{{ownSame, hydratedSame}, {hydrated, ownSame}} {
+		if rows := edgeRows("dependencies", edge[0], edge[1]); rows != 0 {
+			t.Errorf("edge %s -> %s has %d row(s) after %s was removed, want it cascaded", edge[0], edge[1], rows, repo)
+		}
+	}
+
+	page, err := te.store.ReadEventsJournalPage(ctx, before.Head, 0)
+	if err != nil {
+		t.Fatalf("ReadEventsJournalPage after the removal: %v", err)
+	}
+	var removals []string
+	for _, row := range page.Rows {
+		if row.Op != string(issueops.EventDepRemove) {
+			continue
+		}
+		var dep issueops.EventDep
+		if err := json.Unmarshal([]byte(row.DepJSON), &dep); err != nil {
+			t.Fatalf("decode dep_remove payload %q: %v", row.DepJSON, err)
+		}
+		removals = append(removals, row.IssueID+" -> "+dep.Target)
+	}
+	slices.Sort(removals)
+	if want := []string{ownSame + " -> " + hydratedSame, hydrated + " -> " + ownSame}; !slices.Equal(removals, want) {
+		t.Errorf("journaled dep_remove = %v, want %v (the kept edges record no removal)", removals, want)
+	}
 }
 
 // TestEmbeddedCrossPrefixCreateRefusesABlockerInItsOwnHierarchy: a create
