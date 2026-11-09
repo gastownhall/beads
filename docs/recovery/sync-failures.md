@@ -14,6 +14,9 @@ This runbook helps you recover from Dolt sync failures.
 - `bd dolt push`, `bd sync` or dolt auto-push fails with "Found dangling
   references to HashSet" — see
   [Push fails with "Found dangling references"](#push-fails-with-found-dangling-references)
+- `bd dolt push` fails with `dangling chunk reference`, `pre-push integrity
+  check timed out` or `pre-push integrity check failed` — see
+  [Push refused by the pre-push integrity check](#push-refused-by-the-pre-push-integrity-check)
 - A pull, `bd sync` or merge after migration 0062 refuses with `local changes
   would be stomped by merge: events` or `the table(s) events have schema
   conflicts` — see
@@ -79,6 +82,7 @@ bd doctor
 | Corrupted state | Back up, then `bd doctor --fix` |
 | Merge conflicts | See [Merge Conflicts](/recovery/merge-conflicts) |
 | Remote refused a chunk ("Found dangling references") | See [Push fails with "Found dangling references"](#push-fails-with-found-dangling-references) |
+| Local `dolt fsck` refused the push | See [Push refused by the pre-push integrity check](#push-refused-by-the-pre-push-integrity-check) |
 
 ## Push fails with "Found dangling references"
 
@@ -104,8 +108,8 @@ whether it has every chunk the pushed data points to. The remote said it does
 not have the chunk named in the message, so Dolt refused the push. The remote
 branch was **not** moved. This is not a sign of local corruption: the check
 asks the remote, not your local store. (When bd pushes through the dolt CLI,
-its pre-push check reports local corruption separately, as
-`dangling chunk reference`.)
+its pre-push check reports local problems separately; see
+[Push refused by the pre-push integrity check](#push-refused-by-the-pre-push-integrity-check).)
 
 **Telling the cases apart:** under the error, bd prints this clone's HEAD
 commit hash and HEAD root hash, which it reads right after the failure:
@@ -182,6 +186,40 @@ bd sql "SELECT dolt_hashof('HEAD') AS head_commit, dolt_hashof_db('HEAD') AS hea
    the remote type, the output of `bd version` (and of `dolt version` in server
    mode: embedded mode runs the Dolt engine built into bd), and the UTC times
    of the failures (DoltHub can match them to its manifest logs).
+
+## Push refused by the pre-push integrity check
+
+When `bd` pushes through the dolt CLI, it first runs `dolt fsck --quiet` on
+the local database, bounded by `BEADS_FSCK_TIMEOUT` (default 30 seconds). It
+refuses the push in three different ways; only the first is a report of
+local corruption:
+
+- **`dangling chunk reference: aborting push to prevent propagating corrupt
+  chunks: …`** — fsck reported a finding: a `Corrupt Chunks` or
+  `Commit Errors` report, or a corrupted chunk journal. The local store is
+  damaged; do not work around the check. Recover it first: see
+  [Database Corruption](/recovery/database-corruption).
+- **`pre-push integrity check timed out: …`** — fsck did not finish in time.
+  The store is not necessarily corrupt. Shrink it with `dolt gc` (or
+  `CALL DOLT_GC()` on a running sql-server) or raise `BEADS_FSCK_TIMEOUT`
+  (for example `BEADS_FSCK_TIMEOUT=2m bd dolt push`). If the message says the
+  surrounding operation's deadline expired, raise that caller's timeout
+  instead (for auto-push, `dolt.auto-push-timeout`).
+- **`pre-push integrity check failed: …`** — fsck exited with an error but
+  reported no finding: for example dolt could not start, printed only a
+  warning, or was killed. The message quotes the error and fsck's output (or
+  `(no output)`). The store is not necessarily corrupt, but bd has no verdict
+  on it, so it still refuses the push. Fix what the quoted output names, then
+  run fsck yourself in the database directory: `bd dolt status` shows the
+  data directory, and the database is its subdirectory of the same name:
+
+  ```bash
+  cd <data directory>/<database>
+  dolt fsck
+  ```
+
+  If it ends with `No problems found.`, re-run `bd dolt push`. If it prints
+  a `Corrupt Chunks` or `Commit Errors` report, treat it as the first case.
 
 ## Merge blocked on the events table (migration 0062)
 

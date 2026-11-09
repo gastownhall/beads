@@ -167,6 +167,30 @@ func TestPrePushFSCK_TimeoutAfterWarningIsTimeout(t *testing.T) {
 	}
 }
 
+// TestPrePushFSCK_KilledWithoutOutputIsNotCorruption verifies that an fsck
+// killed out from under bd with no output, while bd's own context is live, is
+// not reported as a dangling chunk reference: nothing fsck said implicates the
+// store.
+func TestPrePushFSCK_KilledWithoutOutputIsNotCorruption(t *testing.T) {
+	s := installFakeDolt(t, "kill -9 $$\n")
+
+	err := s.prePushFSCK(context.Background())
+	if err == nil {
+		t.Fatal("a killed fsck must refuse the push, got nil")
+	}
+	if errors.Is(err, ErrDanglingReference) {
+		t.Fatalf("killed fsck with no output reported as corruption: %v", err)
+	}
+	if !errors.Is(err, ErrFSCKFailed) {
+		t.Fatalf("errors.Is(err, ErrFSCKFailed) = false; err = %v", err)
+	}
+	for _, want := range []string{"signal: killed", "(no output)", "not necessarily corrupt", "dolt fsck"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
+		}
+	}
+}
+
 // TestFsckCouldNotOpen verifies the helper identifies both known dolt
 // "couldn't open" phrasings and does not classify actual integrity failures
 // (or unrelated output) as open-failures.
@@ -218,6 +242,7 @@ func TestClassifyFSCKFailure(t *testing.T) {
 		name         string
 		parentErr    error
 		fsckErr      error
+		runErr       error // the fsck execution error
 		output       string
 		wantNil      bool    // true → expect nil (could-not-open skip path)
 		wantIs       error   // positive errors.Is assertion
@@ -341,21 +366,73 @@ func TestClassifyFSCKFailure(t *testing.T) {
 			wantIs:    ErrDanglingReference,
 			wantIsNot: []error{ErrFSCKTimeout},
 		},
-		// (f) Generic non-zero exit, empty output, no context error → ErrDanglingReference.
+		// (f) A failure with no finding, no recognized context error and no
+		//     interruption or could-not-open output → ErrFSCKFailed: the push
+		//     is still refused, but not reported as corruption.
 		{
-			name:      "generic failure (empty output, no ctx error) → ErrDanglingReference",
-			parentErr: nil,
-			fsckErr:   nil,
-			output:    "",
-			wantIs:    ErrDanglingReference,
-			wantIsNot: []error{ErrFSCKTimeout},
+			name:         "generic failure (empty output, no ctx error) → ErrFSCKFailed",
+			parentErr:    nil,
+			fsckErr:      nil,
+			runErr:       errors.New("exit status 1"),
+			output:       "",
+			wantIs:       ErrFSCKFailed,
+			wantIsNot:    []error{ErrDanglingReference, ErrFSCKTimeout},
+			wantContains: "exit status 1",
+		},
+		{
+			name:         "generic failure reports explicit no-output",
+			runErr:       errors.New("exit status 1"),
+			output:       "",
+			wantIs:       ErrFSCKFailed,
+			wantIsNot:    []error{ErrDanglingReference},
+			wantContains: "(no output)",
+		},
+		{
+			name:         "global config load failure → ErrFSCKFailed with the output",
+			runErr:       errors.New("exit status 1"),
+			output:       "\x1b[31mFailed to load the global config. open /home/u/.dolt/config_global.json: permission denied\x1b[0m",
+			wantIs:       ErrFSCKFailed,
+			wantIsNot:    []error{ErrDanglingReference, ErrFSCKTimeout},
+			wantContains: "Failed to load the global config",
+		},
+		{
+			name:         "unknown output → ErrFSCKFailed, not corruption",
+			runErr:       errors.New("exit status 1"),
+			output:       "failed during full chunk scan: read oldgen/abc: input/output error",
+			wantIs:       ErrFSCKFailed,
+			wantIsNot:    []error{ErrDanglingReference, ErrFSCKTimeout},
+			wantContains: "failed during full chunk scan",
+		},
+		{
+			name:         "unknown output quoting dangling words → ErrFSCKFailed",
+			runErr:       errors.New("exit status 1"),
+			output:       "dangling chunk reference: hash abc123 not found",
+			wantIs:       ErrFSCKFailed,
+			wantIsNot:    []error{ErrDanglingReference},
+			wantContains: "not necessarily corrupt",
+		},
+		{
+			name:         "dolt not on PATH → ErrFSCKFailed naming the exec error",
+			runErr:       &exec.Error{Name: "dolt", Err: exec.ErrNotFound},
+			output:       "",
+			wantIs:       ErrFSCKFailed,
+			wantIsNot:    []error{ErrDanglingReference, ErrFSCKTimeout},
+			wantContains: "executable file not found",
+		},
+		{
+			name:         "warning output alone → ErrFSCKFailed, not corruption",
+			runErr:       errors.New("exit status 1"),
+			output:       fsckUnknownConfigWarning,
+			wantIs:       ErrFSCKFailed,
+			wantIsNot:    []error{ErrDanglingReference, ErrFSCKTimeout},
+			wantContains: "Unknown global config option",
 		},
 	}
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := classifyFSCKFailure(tc.parentErr, tc.fsckErr, tc.output)
+			err := classifyFSCKFailure(tc.parentErr, tc.fsckErr, tc.runErr, tc.output)
 
 			if tc.wantNil {
 				if err != nil {
@@ -416,7 +493,7 @@ func TestClassifyFSCKFailure_FindingWins(t *testing.T) {
 				if c.extra != "" {
 					output = c.extra + "\n" + output
 				}
-				err := classifyFSCKFailure(c.parentErr, c.fsckErr, output)
+				err := classifyFSCKFailure(c.parentErr, c.fsckErr, nil, output)
 				if !errors.Is(err, ErrDanglingReference) {
 					t.Fatalf("errors.Is(err, ErrDanglingReference) = false; err = %v", err)
 				}
@@ -470,7 +547,7 @@ func TestClassifyFSCKFailure_NonFindingKeepsKind(t *testing.T) {
 			}
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
-				err := classifyFSCKFailure(tc.parentErr, tc.fsckErr, output)
+				err := classifyFSCKFailure(tc.parentErr, tc.fsckErr, nil, output)
 				if tc.wantNil {
 					if err != nil {
 						t.Fatalf("want nil (skip), got %v", err)
@@ -585,8 +662,8 @@ func TestFsckOutputInterrupted(t *testing.T) {
 func TestClassifyFSCKFailure_CallerVsOwnTimeout(t *testing.T) {
 	t.Parallel()
 
-	callerErr := classifyFSCKFailure(context.DeadlineExceeded, context.DeadlineExceeded, "")
-	ownErr := classifyFSCKFailure(nil, context.DeadlineExceeded, "")
+	callerErr := classifyFSCKFailure(context.DeadlineExceeded, context.DeadlineExceeded, nil, "")
+	ownErr := classifyFSCKFailure(nil, context.DeadlineExceeded, nil, "")
 
 	if callerErr == nil || ownErr == nil {
 		t.Fatal("both cases must return non-nil errors")
