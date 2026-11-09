@@ -254,8 +254,9 @@ fi
 # creates the table first (preMigrationRepairs in
 # internal/storage/schema/migration_repairs.go, e.g. the one before 0047).
 # This check does not look for those; the Dolt-server regression test is
-# internal/storage/dolt/clone_skew_0047_wisps_test.go, whose latest-minus-one
-# clone runs the newest main migration without the tables.
+# internal/storage/dolt/clone_skew_0047_wisps_test.go. Its cursor-47 clone
+# runs every main migration after 0047 without wisps or wisp_dependencies,
+# and its latest-minus-one clone runs the newest one without them.
 #
 # The table list mirrors internal/storage/schema/schema.go's
 # doltIgnorePatterns + versionGatedDoltIgnorePatterns. The engine-level

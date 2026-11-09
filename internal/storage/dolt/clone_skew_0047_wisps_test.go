@@ -29,12 +29,17 @@ const cloneSkewPhaseTimeout = 4 * time.Minute
 // dolt_ignore, not a hand-maintained DROP list, decides what the consumer
 // lacks:
 //
-//   - cursor 46 pins the historical failure: 0047's recompute reads the wisp
-//     tables and only the keyed {schema_migrations,47} pre-migration repair
-//     creates them first.
-//   - cursor latest-1 runs only the newest main migration, on a clone whose
-//     wisp tables no repair has recreated yet: a cursor-46 row cannot catch a
-//     later migration that reads them, because repair 47 already built them.
+//   - cursor 46 pins the historical failure: 0047's recompute reads wisps
+//     and wisp_dependencies, and only the keyed {schema_migrations,47}
+//     pre-migration repair creates them first. It recreates only those two;
+//     the other clone-local tables stay absent in this row too.
+//   - cursor 47 starts past that repair, so every later main migration, 0048
+//     through the newest, runs without wisps or wisp_dependencies: the
+//     cursor-46 row cannot catch a later migration that reads them, because
+//     repair 47 already built them.
+//   - cursor latest-1 runs only the newest main migration, which keeps it
+//     covered even if a table-creating repair is later keyed below it: the
+//     cursor-47 row would then reach the newest with the tables rebuilt.
 //   - The rows run serially, sharing one producer that advances through the
 //     cursors, so the chain is replayed once.
 func TestMigrateUpCloneBelowLatestWithoutWispTables(t *testing.T) {
@@ -45,8 +50,8 @@ func TestMigrateUpCloneBelowLatestWithoutWispTables(t *testing.T) {
 	// a consent refusal is not evidence about the missing tables.
 	t.Setenv(schema.AllowMigrateEnv, "1")
 
-	cursors := []int{46}
-	if latest := schema.LatestVersion(); latest-1 > 46 {
+	cursors := []int{46, 47}
+	if latest := schema.LatestVersion(); latest-1 > 47 {
 		cursors = append(cursors, latest-1)
 	}
 
@@ -62,7 +67,7 @@ func TestMigrateUpCloneBelowLatestWithoutWispTables(t *testing.T) {
 		defer dropCancel()
 		_, _ = admin.ExecContext(dropCtx, "DROP DATABASE IF EXISTS `"+name+"`")
 	}
-	openDatabase := func(name string) *sql.DB {
+	openDatabase := func(t *testing.T, name string) *sql.DB {
 		t.Helper()
 		db, err := sql.Open("mysql", doltutil.ServerDSN{
 			Host: "127.0.0.1", Port: testServerPort, User: "root", Database: name, Timeout: 10 * time.Second,
@@ -80,7 +85,7 @@ func TestMigrateUpCloneBelowLatestWithoutWispTables(t *testing.T) {
 	if _, err := admin.ExecContext(setupCtx, "CREATE DATABASE `"+producerName+"`"); err != nil {
 		t.Fatalf("create producer database: %v", err)
 	}
-	producerDB := openDatabase(producerName)
+	producerDB := openDatabase(t, producerName)
 	t.Cleanup(func() { producerDB.Close() })
 	producer, err := producerDB.Conn(setupCtx)
 	if err != nil {
@@ -118,7 +123,7 @@ func TestMigrateUpCloneBelowLatestWithoutWispTables(t *testing.T) {
 			if _, err := producer.ExecContext(ctx, "CALL DOLT_CLONE(?, ?)", remoteURL, consumerName); err != nil {
 				t.Fatalf("clone consumer: %v", err)
 			}
-			consumer := openDatabase(consumerName)
+			consumer := openDatabase(t, consumerName)
 			t.Cleanup(func() { consumer.Close() })
 
 			// Preconditions: what a real behind-cursor clone receives.
