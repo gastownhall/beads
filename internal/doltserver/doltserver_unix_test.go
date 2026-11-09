@@ -244,6 +244,38 @@ func TestAliveAfterSignalZero(t *testing.T) {
 	}
 }
 
+// TestSweepPredicateIsSubsetOfProductionMatch pins the intended relationship
+// between the two dolt-server predicates (#6186): production's
+// parseDoltProcessPIDs is a deliberately loose ordered-substring listing that
+// only nominates PIDs for closer, ownership-gated inspection, while the
+// sweep's isDoltServerArgv gates a signal and is exact-argv. Every invocation
+// the sweep accepts must still be listed by production when its arguments
+// are rendered as an ordinary (non-zombie) ps row — otherwise the sweep and
+// the listing would disagree about what a dolt server even is. This is a
+// claim about ordinary command output, not about argv carrying embedded
+// newlines, which a ps row cannot represent.
+func TestSweepPredicateIsSubsetOfProductionMatch(t *testing.T) {
+	positives := [][]string{
+		{"dolt", "sql-server", "--port", "3306"},
+		{"./dolt", "sql-server"},
+		{"/usr/local/bin/dolt", "sql-server", "-H", "127.0.0.1"},
+		{"dolt", "--prof", "cpu", "--prof-path", "/tmp/p", "sql-server"},
+		{"/opt/my tools/dolt", "sql-server"},
+		// A positional argument named sql-server passes the sweep by design.
+		{"dolt", "checkout", "sql-server"},
+	}
+	for _, argv := range positives {
+		if !isDoltServerArgv(argv) {
+			t.Errorf("fixture %q is not a sweep-accepted invocation", argv)
+			continue
+		}
+		row := "123 S " + strings.Join(argv, " ")
+		if got := parseDoltProcessPIDs([]byte(row)); !reflect.DeepEqual(got, []int{123}) {
+			t.Errorf("parseDoltProcessPIDs(%q) = %v, want [123]: the listing dropped a sweep-accepted invocation", row, got)
+		}
+	}
+}
+
 func TestParseDoltProcessPIDs(t *testing.T) {
 	tests := []struct {
 		name     string

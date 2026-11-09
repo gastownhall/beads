@@ -57,6 +57,16 @@ func readDoltProcessPIDs() ([]int, error) {
 
 // parseDoltProcessPIDs returns matching, non-defunct Dolt server PIDs from a
 // `ps -axo pid=,state=,command=` snapshot. It preserves the source row order.
+//
+// This is the PRODUCTION listing behind KillStaleServers and IsRunning, and
+// it is deliberately a looser ordered-substring match than the sweep's
+// identity gate (isDoltServerArgv in sweep.go): it only nominates PIDs worth
+// a closer look — the callers gate any signal on the state files and the
+// process's working directory — never which process to signal on identity
+// alone, as the sweep does (#6186). The two predicates must not drift
+// apart: every invocation the sweep accepts must also be listed here when
+// rendered as an ordinary ps row, which
+// TestSweepPredicateIsSubsetOfProductionMatch pins.
 func parseDoltProcessPIDs(snapshot []byte) []int {
 	var pids []int
 	for _, line := range strings.Split(string(snapshot), "\n") {
