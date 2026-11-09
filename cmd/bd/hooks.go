@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -2358,21 +2359,64 @@ func importJSONLForSync(reason string) {
 	// checkout's tracked file: GH#6680's second symptom, from the fix for its
 	// first. Keeping the marker also suppresses the subprocess's auto-backup,
 	// matching the export lane (hookSubprocessEnv).
-	cmd := exec.Command("bd", "import", "--quiet", fullPath)
+	//
+	// The import skips invalid records instead of failing on them
+	// (GH#4492): a legacy mirror whose tracked JSONL carries one stale
+	// row must not wedge the whole pull/merge/checkout, and the refused
+	// records are quarantined beside the source rather than dropped.
+	cmd := exec.Command("bd", syncImportArgs(fullPath)...)
 	cmd.Dir = exportSubprocessDir(beadsDir)
 	cmd.Env = hookSubprocessEnv(os.Environ())
 
-	out, err := cmd.CombinedOutput()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	out := append(stdout.Bytes(), stderr.Bytes()...)
 	if err == nil {
+		// Quiet on success, except the screen's warnings: skipped invalid
+		// records are a change the operator must hear about even when the
+		// import otherwise succeeded (GH#4492 design §4).
+		forwardImportSyncWarnings(reason, stderr.Bytes())
 		return
 	}
 	// Tolerate the no-op case: when JSONL matches Dolt exactly, bd import
 	// produces "nothing to commit" from the underlying Dolt commit. That
 	// is success for our purposes.
 	if strings.Contains(string(out), "nothing to commit") {
+		forwardImportSyncWarnings(reason, stderr.Bytes())
 		return
 	}
 	fmt.Fprintf(os.Stderr, "beads: %s import warning: %v\n%s", reason, err, out)
+}
+
+// syncImportArgs is the `bd import` argument list the legacy git-hook sync
+// importer runs: quiet, skip-invalid, with rejected records preserved beside
+// the source in the default quarantine (GH#4492 design §4). --quiet keeps
+// normal output out of the hook's terminal; the screen's "warning:" lines
+// are forwarded separately (forwardImportSyncWarnings).
+func syncImportArgs(jsonlPath string) []string {
+	return []string{
+		"import",
+		"--quiet",
+		"--skip-invalid",
+		"--rejects", defaultImportRejectsPath(jsonlPath),
+		jsonlPath,
+	}
+}
+
+// forwardImportSyncWarnings relays the import screen's warnings — every
+// stderr line the subprocess prefixed with "warning: " (GH#4492) — to the
+// hook's stderr, bounded to the screen's own limit plus its remainder line,
+// so a clean pull stays quiet while a skipped-record pull still names the
+// records and where they were preserved. Failure output is handled by the
+// caller; these are success-path warnings only.
+func forwardImportSyncWarnings(reason string, stderrBytes []byte) {
+	for _, line := range strings.Split(string(stderrBytes), "\n") {
+		if rest, ok := strings.CutPrefix(line, "warning: "); ok {
+			fmt.Fprintf(os.Stderr, "beads: %s import: %s\n", reason, rest)
+		}
+	}
 }
 
 func warnJSONLWithoutDoltRemote(reason string) {
