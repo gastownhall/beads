@@ -37,8 +37,11 @@ func (c *engineCounter) opener() sqlOpener {
 		}
 		c.opens.Add(1)
 		return db, func() error {
+			// Count the close only once cleanup has run, so a test waiting on
+			// the counts observes a completed disposal.
+			err := cleanup()
 			c.closes.Add(1)
-			return cleanup()
+			return err
 		}, nil
 	}
 }
@@ -534,6 +537,51 @@ func TestEmbeddedEngineIdleRelease(t *testing.T) {
 			t.Fatal("the current expiry did not release an idle engine")
 		}
 	})
+}
+
+// TestEmbeddedEngineIdleTimerRaceBurst pins the generation tag under load:
+// with a short idle expiry and continuous operations from several goroutines,
+// a timer that fires while an operation holds the slot leaves the engine
+// alone. Every operation succeeds, and after the final Close every engine
+// ever opened has been closed exactly once.
+func TestEmbeddedEngineIdleTimerRaceBurst(t *testing.T) {
+	ctx := context.Background()
+	store, counter := newCountedEngineStore(t, "engineidlerace")
+	if err := store.CreateIssue(ctx, engineTestIssue("en-1"), "tester"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	store.engine.idle = 5 * time.Millisecond
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 10 {
+				if _, err := store.GetIssue(ctx, "en-1"); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	select {
+	case err := <-errs:
+		t.Fatalf("operation during the idle-timer burst: %v", err)
+	default:
+	}
+
+	// The burst may have disposed and reopened the engine several times;
+	// the final Close leaves none open, each closed once.
+	if err := store.Close(); err != nil {
+		t.Fatalf("close after burst: %v", err)
+	}
+	waitForEngineRelease(t, counter)
+	if opens, closes := counter.opens.Load(), counter.closes.Load(); opens != closes {
+		t.Fatalf("opened %d engines but closed %d", opens, closes)
+	}
 }
 
 // TestEmbeddedEngineClose pins the final Close: it waits for the active

@@ -310,12 +310,14 @@ server keeps the engine running (see
 damaged journal; for that, see
 [Engine won't open](/recovery/database-corruption#engine-wont-open).
 
-Within one command, bd starts the embedded engine once and reuses it for
-every operation the command runs, so a command that reads or writes many
-issues (for example `bd list --parent` walking a tree) pays the startup only
-once. The command keeps the engine open until it has been idle for 200 ms, or
-until it closes the database. Another `bd` process that needs the same
-database waits at most that long after the command's last operation.
+Within one process, a store starts the embedded engine once and reuses it
+across a burst of operations, serving it to one operation at a time, instead
+of paying the startup per operation. bd releases the engine once the store
+has been idle for about 200 ms, or when it closes the database, so another
+`bd` process can open the same database between bursts. That 200 ms targets
+idle time, not how long another process waits: scheduling, engine cleanup and
+contention can extend the wait, and a store that stays busy keeps the engine
+until it goes idle.
 
 ### Server Mode (Multi-Writer / Orchestrator)
 

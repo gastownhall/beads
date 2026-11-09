@@ -11,8 +11,11 @@ import (
 
 // defaultEngineIdle is how long a store keeps its engine open after its last
 // operation. It is long enough to carry a command's back-to-back operations on
-// one engine and short enough that another process waiting to open the same
-// database (OpenSQL waits for the engine) is not held up noticeably.
+// one engine; once it passes with no operation running, an owner-independent
+// timer disposes the engine so another process can open the same database
+// without waiting for this store's Close. Continuous activity may retain the
+// engine indefinitely: the expiry bounds idle time only, not fairness between
+// waiters.
 const defaultEngineIdle = 200 * time.Millisecond
 
 // sqlOpener opens an embedded engine the way OpenSQL does. It is a per-store
