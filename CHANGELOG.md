@@ -3249,6 +3249,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   committed without the edge and exited 0. Such an error now fails the
   import. Refused edges are still skipped as before.
 
+- `bd rename` now accepts a target ID whose prefix has digits, uppercase
+  letters or underscores, as `bd init` produces (#6068).
+
 - **A bare hash that two prefixes share is reported as ambiguous instead of
   resolving to one of them.** With `hacker-news-abc123` and `ops-abc123` in
   one workspace (under `allowed_prefixes`, say), `abc123` matched both
