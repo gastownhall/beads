@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -78,5 +79,74 @@ func TestSweepSuiteTestServersPreservesForeignLeak(t *testing.T) {
 	case <-exited:
 	case <-time.After(5 * time.Second):
 		t.Fatal("owning suite left its leaked server running")
+	}
+}
+
+// waitForExecArgv waits until pid's /proc/<pid>/cmdline is non-empty. Go's
+// cmd.Start returns once exec has closed its close-on-exec pipe, which the
+// kernel does before it sets up the new image's argument area, so a read
+// right after Start can briefly see an empty command line.
+func waitForExecArgv(t *testing.T, pid int) {
+	t.Helper()
+	path := filepath.Join("/proc", strconv.Itoa(pid), "cmdline")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("process %d never exposed its argv in %s", pid, path)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestSweepSuiteTestServersSparesNonDoltArgv0 is the #6186 hazard: a process
+// that is not dolt but whose command line mentions both "dolt" and
+// "sql-server" (here a shell, as a `tail -f dolt-sql-server.log` would be)
+// sits inside a suite-owned root. The cwd gate admits it, so only the
+// identity check stands between it and SIGTERM/SIGKILL.
+func TestSweepSuiteTestServersSparesNonDoltArgv0(t *testing.T) {
+	t.Setenv(AllowLeakEnv, "")
+	root := t.TempDir()
+	cmd := exec.Command("/bin/sh", "-c", "read line", "dolt", "sql-server")
+	cmd.Dir = root
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(exited)
+	}()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		<-exited
+	})
+	pid := cmd.Process.Pid
+	waitForExecArgv(t, pid)
+	if cwd, _ := readProcCwd(pid); cwd == "" {
+		t.Fatalf("stand-in %d has no readable cwd; the sweep could not have reached it", pid)
+	}
+
+	var swept []SweptServer
+	captureStderr(t, func() { swept = SweepSuiteTestServers(root) })
+	for _, s := range swept {
+		if s.PID == pid {
+			t.Errorf("sweep reported non-dolt process %d: %v", pid, swept)
+		}
+	}
+	if isDoltServerProcess(pid) {
+		t.Errorf("isDoltServerProcess(%d) = true for argv[0] /bin/sh", pid)
+	}
+	select {
+	case <-exited:
+		t.Fatal("sweep signaled a non-dolt process")
+	case <-time.After(500 * time.Millisecond):
 	}
 }

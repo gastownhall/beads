@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -35,6 +36,9 @@ not-a-pid dolt sql-server
   102 dolt status
   103 /opt/dolt --prof cpu sql-server -P 12346
   104 dolt sql-server -P 12347
+  105 tail -f /tmp/my-suite/dolt/sql-server.log
+  106 /bin/sh -c read line dolt sql-server
+  107 /opt/dolthub/run-dolt sql-server
 `)
 	cwds := map[int]struct {
 		dir     string
@@ -44,6 +48,11 @@ not-a-pid dolt sql-server
 		101: {dir: "/tmp/my-suite/.beads/dolt", ok: true},
 		103: {dir: "/tmp/deleted-suite/.beads/dolt", deleted: true, ok: true},
 		104: {ok: false},
+		// Non-dolt executables mentioning both words sit in the suite's own
+		// root, so only the identity check keeps them out (#6186).
+		105: {dir: "/tmp/my-suite", ok: true},
+		106: {dir: "/tmp/my-suite", ok: true},
+		107: {dir: "/tmp/my-suite", ok: true},
 	}
 
 	candidates := gatherPSCandidates(psOutput, func(pid int) (string, bool, bool) {
@@ -51,8 +60,8 @@ not-a-pid dolt sql-server
 		return cwd.dir, cwd.deleted, cwd.ok
 	})
 	wantCandidates := []serverCandidate{
-		{pid: 101, cmdline: "dolt sql-server -H 127.0.0.1 -P 12345", cwd: "/tmp/my-suite/.beads/dolt"},
-		{pid: 103, cmdline: "/opt/dolt --prof cpu sql-server -P 12346", cwd: "/tmp/deleted-suite/.beads/dolt", cwdDeleted: true},
+		{pid: 101, argv: strings.Fields("dolt sql-server -H 127.0.0.1 -P 12345"), cwd: "/tmp/my-suite/.beads/dolt"},
+		{pid: 103, argv: strings.Fields("/opt/dolt --prof cpu sql-server -P 12346"), cwd: "/tmp/deleted-suite/.beads/dolt", cwdDeleted: true},
 	}
 	if !reflect.DeepEqual(candidates, wantCandidates) {
 		t.Fatalf("gatherPSCandidates() = %#v, want %#v", candidates, wantCandidates)
@@ -114,20 +123,20 @@ func TestSweptServerNamesItsDirectory(t *testing.T) {
 // mybd-q6cz, wy-j2zc8q).
 func TestSelectServersUnderSuiteRoots(t *testing.T) {
 	candidates := []serverCandidate{
-		{pid: 500, cmdline: "dolt sql-server -P 1", cwd: "/tmp/dead-root/.beads/dolt"},
-		{pid: 501, cmdline: "dolt sql-server -P 2", cwd: "/tmp/dead-root/nested/deeper/dolt", cwdDeleted: true},
-		{pid: 502, cmdline: "dolt sql-server -P 3", cwd: "/tmp/live-sibling-root/.beads/dolt"},
-		{pid: 503, cmdline: "dolt sql-server -P 4", cwd: "/tmp/some-other-suite/.beads/dolt", cwdDeleted: true},
-		{pid: 504, cmdline: "dolt sql-server -P 5", cwd: "/Users/dev/project/.beads/dolt", cwdDeleted: true},
-		{pid: 505, cmdline: "not-dolt --flag", cwd: "/tmp/dead-root/whatever"},
-		{pid: 506, cmdline: "dolt sql-server -P 6", cwd: ""},
-		{pid: 507, cmdline: "dolt --prof cpu --prof-path /tmp/dead-root/dolt-pprof sql-server -P 7", cwd: "/tmp/dead-root/.beads/dolt"},
-		{pid: 508, cmdline: "dolt status", cwd: "/tmp/dead-root/whatever"},
-		{pid: 509, cmdline: "dolt sql-server -P 9", cwd: "/tmp/dead-root2/evil"},
-		{pid: 510, cmdline: "dolt sql-server -P 10", cwd: "/home/dev/project/.beads/dolt"},
-		{pid: 511, cmdline: "dolt sql-server -P 11", cwd: "/Volumes/external/work/.beads/dolt", cwdDeleted: true},
-		{pid: 512, cmdline: "dolt sql-server -P 12", cwd: "/private/var/folders/c1/xx/T/TestUOWDependencyEditorContract1/002", cwdDeleted: true},
-		{pid: 513, cmdline: "dolt sql-server -P 13", cwd: "/var/tmp/beads-bd-tests-xyz/.beads/dolt", cwdDeleted: true},
+		{pid: 500, argv: strings.Fields("dolt sql-server -P 1"), cwd: "/tmp/dead-root/.beads/dolt"},
+		{pid: 501, argv: strings.Fields("dolt sql-server -P 2"), cwd: "/tmp/dead-root/nested/deeper/dolt", cwdDeleted: true},
+		{pid: 502, argv: strings.Fields("dolt sql-server -P 3"), cwd: "/tmp/live-sibling-root/.beads/dolt"},
+		{pid: 503, argv: strings.Fields("dolt sql-server -P 4"), cwd: "/tmp/some-other-suite/.beads/dolt", cwdDeleted: true},
+		{pid: 504, argv: strings.Fields("dolt sql-server -P 5"), cwd: "/Users/dev/project/.beads/dolt", cwdDeleted: true},
+		{pid: 505, argv: strings.Fields("not-dolt --flag"), cwd: "/tmp/dead-root/whatever"},
+		{pid: 506, argv: strings.Fields("dolt sql-server -P 6"), cwd: ""},
+		{pid: 507, argv: strings.Fields("dolt --prof cpu --prof-path /tmp/dead-root/dolt-pprof sql-server -P 7"), cwd: "/tmp/dead-root/.beads/dolt"},
+		{pid: 508, argv: strings.Fields("dolt status"), cwd: "/tmp/dead-root/whatever"},
+		{pid: 509, argv: strings.Fields("dolt sql-server -P 9"), cwd: "/tmp/dead-root2/evil"},
+		{pid: 510, argv: strings.Fields("dolt sql-server -P 10"), cwd: "/home/dev/project/.beads/dolt"},
+		{pid: 511, argv: strings.Fields("dolt sql-server -P 11"), cwd: "/Volumes/external/work/.beads/dolt", cwdDeleted: true},
+		{pid: 512, argv: strings.Fields("dolt sql-server -P 12"), cwd: "/private/var/folders/c1/xx/T/TestUOWDependencyEditorContract1/002", cwdDeleted: true},
+		{pid: 513, argv: strings.Fields("dolt sql-server -P 13"), cwd: "/var/tmp/beads-bd-tests-xyz/.beads/dolt", cwdDeleted: true},
 	}
 
 	got := selectServersUnderRoots(candidates, []string{"/tmp/dead-root"})
@@ -184,5 +193,77 @@ func TestCanonicalRootsForSweep(t *testing.T) {
 	want := []string{link, resolved}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("canonicalRoots() = %v, want %v", got, want)
+	}
+}
+
+// TestIsDoltServerArgv pins the sweep's identity gate (gastownhall/beads#6186):
+// argv[0]'s basename is exactly "dolt" and a later argument is exactly
+// "sql-server". Mentioning both words anywhere in the command line, as the
+// substring check it replaced accepted, is not enough.
+func TestIsDoltServerArgv(t *testing.T) {
+	cases := []struct {
+		name string
+		argv []string
+		want bool
+	}{
+		{"bare dolt", []string{"dolt", "sql-server"}, true},
+		{"relative path", []string{"./bin/dolt", "sql-server", "-P", "1"}, true},
+		{"absolute path", []string{"/usr/local/bin/dolt", "sql-server", "-H", "127.0.0.1"}, true},
+		{"global flags before the subcommand", []string{"dolt", "--prof", "cpu", "--prof-path", "/tmp/p", "sql-server", "--port", "1"}, true},
+		{"executable path containing spaces", []string{"/Users/dev/My Tools/dolt", "sql-server"}, true},
+		// Lexical by design: a separate positional argument still passes.
+		{"positional sql-server argument", []string{"dolt", "checkout", "sql-server"}, true},
+
+		{"nil argv", nil, false},
+		{"dolt alone", []string{"dolt"}, false},
+		{"single flattened title", []string{"dolt sql-server"}, false},
+		{"empty argv[0]", []string{"", "dolt", "sql-server"}, false},
+		{"dolt.exe", []string{"dolt.exe", "sql-server"}, false},
+		{"test binary prefix", []string{"/tmp/doltserver.test", "sql-server"}, false},
+		{"tail of the server log", []string{"tail", "-f", "dolt-sql-server.log"}, false},
+		{"tail with both words as path parts", []string{"tail", "-f", "/tmp/dolt/sql-server.log"}, false},
+		{"shell body naming both", []string{"/bin/sh", "-c", "dolt sql-server"}, false},
+		{"shell positional args naming both", []string{"/bin/sh", "-c", "read line", "dolt", "sql-server"}, false},
+		{"watch", []string{"watch", "dolt", "sql-server"}, false},
+		{"grep", []string{"grep", "dolt", "sql-server"}, false},
+		{"wrapper", []string{"/opt/dolthub-tools/run", "sql-server"}, false},
+		{"dolt without the subcommand", []string{"dolt", "status"}, false},
+		{"sql-servers", []string{"dolt", "sql-servers"}, false},
+		{"subcommand prefix", []string{"dolt", "sql-server-helper"}, false},
+		{"flag value containing the word", []string{"dolt", "--config=/tmp/sql-server.yaml", "status"}, false},
+		{"message argument containing the word", []string{"dolt", "commit", "-m", "restart sql-server"}, false},
+	}
+	for _, tc := range cases {
+		if got := isDoltServerArgv(tc.argv); got != tc.want {
+			t.Errorf("%s: isDoltServerArgv(%q) = %v, want %v", tc.name, tc.argv, got, tc.want)
+		}
+	}
+}
+
+// TestIsDoltServerCmdlineRequiresDoltArgv0AndSqlServerArg pins the tightened
+// predicate from #6186 on the space-joined form Darwin's ps reports: argv[0]
+// basename must be "dolt" and one argument must be exactly "sql-server"; a
+// substring hit anywhere in the cmdline is not a dolt server.
+func TestIsDoltServerCmdlineRequiresDoltArgv0AndSqlServerArg(t *testing.T) {
+	cases := []struct {
+		cmdline string
+		want    bool
+	}{
+		{"dolt sql-server --port 3307", true},
+		{"/usr/local/bin/dolt sql-server -H 127.0.0.1", true},
+		{"dolt --prof cpu --prof-path /tmp/p sql-server --port 1", true},
+		{"vim /tmp/dolt/sql-server.log", false},
+		{"tail -f $HOME/.beads/dolt/sql-server.log", false},
+		{"/opt/dolthub-tools/run sql-server", false},
+		{"dolt sql-server-helper", false},
+		// Darwin limitation: the quoted message's boundary is gone once ps
+		// joins argv, so `dolt commit -m "restart sql-server"` reads as a
+		// separate sql-server argument. Linux reads exact argv from /proc.
+		{"dolt commit -m restart sql-server", true},
+	}
+	for _, tc := range cases {
+		if got := isDoltServerCmdline(tc.cmdline); got != tc.want {
+			t.Errorf("isDoltServerCmdline(%q) = %v, want %v", tc.cmdline, got, tc.want)
+		}
 	}
 }

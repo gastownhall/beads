@@ -7,12 +7,14 @@ import (
 )
 
 // serverCandidate is a running process that looked like a `dolt sql-server`
-// from a coarse filter (cmdline substring match), along with enough
-// identity data to judge whether it is leaked test debris.
+// (isDoltServerArgv), along with enough identity data to judge whether it is
+// leaked test debris.
 type serverCandidate struct {
 	pid int
-	// cmdline is the process's command line, space-joined.
-	cmdline string
+	// argv is the process's command line split into arguments. On Darwin it
+	// is approximate: ps prints the arguments space-joined, so they are
+	// recovered with strings.Fields (see isDoltServerCmdline).
+	argv []string
 	// cwd is the process's resolved working directory. Empty if unknown.
 	cwd string
 	// cwdDeleted is true when cwd names a directory that no longer exists
@@ -74,7 +76,7 @@ func selectServersUnderRoots(candidates []serverCandidate, roots []string) []Swe
 func selectServers(candidates []serverCandidate, want func(serverCandidate) bool) []SweptServer {
 	var selected []SweptServer
 	for _, c := range candidates {
-		if !isDoltServerCmdline(c.cmdline) || c.cwd == "" {
+		if !isDoltServerArgv(c.argv) || c.cwd == "" {
 			continue
 		}
 		if want(c) {
@@ -113,13 +115,45 @@ func canonicalRoots(roots []string) []string {
 	return out
 }
 
-// isDoltServerCmdline reports whether cmdline looks like a dolt sql-server
-// invocation. Mirrors the substring check in listDoltProcessPIDs (both
-// "dolt" and "sql-server" must appear) rather than an exact match, since
-// debug mode inserts flags between the binary name and the subcommand
-// (e.g. `dolt --prof cpu --prof-path … sql-server …`).
+// isDoltServerArgv reports whether argv looks like a dolt sql-server
+// invocation: the executable's basename is exactly "dolt" and some later
+// argument is exactly "sql-server". Any later argument counts, not just
+// argv[1], because debug mode inserts flags between the binary name and the
+// subcommand (e.g. `dolt --prof cpu --prof-path … sql-server …`).
+//
+// This is the identity gate in front of SIGTERM/SIGKILL, so it is strict on
+// purpose (gastownhall/beads#6186): a process that merely mentions both words
+// (`tail -f dolt-sql-server.log`, a shell whose body or arguments name them,
+// `dolt status`) is not a server, and neither is a wrapper, a renamed binary,
+// `dolt.exe` or a prefix match. It is a lexical check, not a parser of Dolt's
+// grammar: a positional `sql-server` (`dolt checkout sql-server`) still
+// passes, and argv is whatever the process presents, not proof of which
+// executable it runs.
+//
+// It deliberately diverges from parseDoltProcessPIDs in doltserver_unix.go,
+// which feeds production server management and keeps its looser ordered
+// substring match; every argv accepted here is also accepted there
+// (TestSweepPredicateIsSubsetOfProductionMatch), never the reverse.
+func isDoltServerArgv(argv []string) bool {
+	if len(argv) < 2 || filepath.Base(argv[0]) != "dolt" {
+		return false
+	}
+	for _, arg := range argv[1:] {
+		if arg == "sql-server" {
+			return true
+		}
+	}
+	return false
+}
+
+// isDoltServerCmdline applies isDoltServerArgv to a command line that is
+// already space-joined, as Darwin's ps prints it. strings.Fields only
+// approximates the original arguments: an executable path containing a space
+// splits apart (and is rejected), and a quoted argument such as the message in
+// `dolt commit -m "restart sql-server"` cannot be told from a separate
+// `sql-server` argument. Linux reads exact argument boundaries from /proc.
 func isDoltServerCmdline(cmdline string) bool {
-	return strings.Contains(cmdline, "dolt") && strings.Contains(cmdline, "sql-server")
+	return isDoltServerArgv(strings.Fields(cmdline))
 }
 
 // underAnyRoot reports whether dir is equal to, or nested under, any of
@@ -154,7 +188,8 @@ func isUnderDir(dir, root string) bool {
 
 // gatherPSCandidates parses the output of `ps -axo pid=,command=` and
 // resolves the working directory of each dolt sql-server candidate. Darwin
-// uses this path because it has no /proc filesystem.
+// uses this path because it has no /proc filesystem. The command column is
+// split with strings.Fields, so its argv is approximate (isDoltServerCmdline).
 //
 // cwdForPID returns the resolved cwd, whether that cwd has been deleted, and
 // whether it could be determined. Keeping the command execution outside this
@@ -175,8 +210,8 @@ func gatherPSCandidates(psOutput []byte, cwdForPID func(int) (string, bool, bool
 		if err != nil || pid <= 0 {
 			continue
 		}
-		cmdline = strings.TrimSpace(cmdline)
-		if !isDoltServerCmdline(cmdline) {
+		argv := strings.Fields(cmdline)
+		if !isDoltServerArgv(argv) {
 			continue
 		}
 
@@ -186,7 +221,7 @@ func gatherPSCandidates(psOutput []byte, cwdForPID func(int) (string, bool, bool
 		}
 		candidates = append(candidates, serverCandidate{
 			pid:        pid,
-			cmdline:    cmdline,
+			argv:       argv,
 			cwd:        cwd,
 			cwdDeleted: deleted,
 		})
