@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -308,5 +309,210 @@ func TestRenumberCollidingChildren(t *testing.T) {
 	if !parents[report.RenameCommit] || !parents[report.RemoteHead] || len(parents) != 2 {
 		t.Errorf("merge %s parents = %v, want the rename commit %s and the pinned remote head %s",
 			head, parents, report.RenameCommit, report.RemoteHead)
+	}
+}
+
+// seedServerChildCollision builds GH#4796's report shape on the test's own
+// branch with a uniquely named file:// remote, as TestPullRenumberChildren
+// does: base P (counter 70) published, the remote clone's P.71/P.72 (counter
+// 72) published, then the branch rewound and the local clone's
+// P.71/P.72/P.73 (counter 73) committed after localLeg adds its own rows.
+// It points store at the remote and returns exec for further setup.
+func seedServerChildCollision(t *testing.T, ctx context.Context, store *DoltStore, p string, localLeg func(exec func(q string, args ...any))) (exec func(q string, args ...any)) {
+	t.Helper()
+	db := store.db
+	exec = func(q string, args ...any) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx, q, args...); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	insertIssue := func(id, title string) {
+		t.Helper()
+		exec("INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) "+
+			"VALUES (?, ?, '', '', '', '', 'open', 2, 'task')", id, title)
+	}
+	var branch string
+	if err := db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&branch); err != nil {
+		t.Fatalf("read branch: %v", err)
+	}
+	remote := fmt.Sprintf("rn%d", time.Now().UnixNano())
+	t.Cleanup(func() { _, _ = db.ExecContext(context.Background(), "CALL DOLT_REMOTE('remove', ?)", remote) })
+
+	insertIssue(p, "epic")
+	exec("INSERT INTO child_counters (parent_id, last_child) VALUES (?, 70)", p)
+	exec("CALL DOLT_COMMIT('-Am', 'seed: counter 70')")
+	var base string
+	if err := db.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&base); err != nil {
+		t.Fatalf("read base: %v", err)
+	}
+	exec("CALL DOLT_REMOTE('add', ?, ?)", remote, "file://"+filepath.Join(t.TempDir(), "remote"))
+	exec("CALL DOLT_PUSH(?, ?)", remote, branch)
+
+	insertIssue(p+".71", "remote 71")
+	insertIssue(p+".72", "remote 72")
+	exec("UPDATE child_counters SET last_child = 72 WHERE parent_id = ?", p)
+	exec("CALL DOLT_COMMIT('-Am', 'remote clone: P.71 P.72')")
+	exec("CALL DOLT_PUSH(?, ?)", remote, branch)
+
+	exec("CALL DOLT_RESET('--hard', ?)", base)
+	insertIssue(p+".71", "local 71")
+	insertIssue(p+".72", "local 72")
+	insertIssue(p+".73", "local 73")
+	exec("UPDATE child_counters SET last_child = 73 WHERE parent_id = ?", p)
+	if localLeg != nil {
+		localLeg(exec)
+	}
+	exec("CALL DOLT_COMMIT('-Am', 'local clone: P.71 P.72 P.73')")
+
+	store.remote = remote
+	store.branch = branch
+	return exec
+}
+
+// serverCounters reads every child_counters row under p.
+func serverCounters(t *testing.T, ctx context.Context, store *DoltStore, p string) map[string]int {
+	t.Helper()
+	rows, err := store.db.QueryContext(ctx, "SELECT parent_id, last_child FROM child_counters WHERE parent_id = ? OR parent_id LIKE CONCAT(?, '.%')", p, p)
+	if err != nil {
+		t.Fatalf("read counters: %v", err)
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var parent string
+		var n int
+		if err := rows.Scan(&parent, &n); err != nil {
+			t.Fatalf("scan counter: %v", err)
+		}
+		out[parent] = n
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read counters: %v", err)
+	}
+	return out
+}
+
+// TestPullRenumberChildrenCarriesCounters is bd-28sb25 AC-4 on the server
+// store, covering #4844's high-water and durable-subtree cases (Robin
+// Carswell, @rjc123) and the no-counter case together. Locally P.73 was
+// deleted (counter stays 73), a session wisp holds P.74, P.71 has child
+// P.71.1 and its own counter 1, and P.72 has child P.72.1 but no counter.
+// The renames land above the deleted slot and the wisp (P.75, P.76), P.71's
+// counter moves to P.75 with its value, and no counter is synthesized for
+// P.76 or the moved descendants.
+func TestPullRenumberChildrenCarriesCounters(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	t.Cleanup(cleanup)
+	ctx, cancel := testContext(t)
+	t.Cleanup(cancel)
+
+	const p = "rnc-p"
+	exec := seedServerChildCollision(t, ctx, store, p, func(exec func(q string, args ...any)) {
+		for _, id := range []string{p + ".71.1", p + ".72.1"} {
+			exec("INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) "+
+				"VALUES (?, ?, '', '', '', '', 'open', 2, 'task')", id, "local "+strings.TrimPrefix(id, p+"."))
+		}
+		exec("INSERT INTO child_counters (parent_id, last_child) VALUES (?, 1)", p+".71")
+	})
+	exec("DELETE FROM issues WHERE id = ?", p+".73")
+	exec("CALL DOLT_COMMIT('-Am', 'local deletes P.73, counter stays 73')")
+	exec("INSERT INTO wisps (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) "+
+		"VALUES (?, 'wisp sibling', '', '', '', '', 'open', 2, 'task')", p+".74")
+
+	report, err := store.PullRenumberChildren(ctx, "", "tester")
+	if err != nil {
+		t.Fatalf("PullRenumberChildren: %v", err)
+	}
+	want := []storage.ChildRenumber{
+		{From: p + ".71", To: p + ".75"}, {From: p + ".72", To: p + ".76"},
+		{From: p + ".71.1", To: p + ".75.1"}, {From: p + ".72.1", To: p + ".76.1"},
+	}
+	if !reflect.DeepEqual(report.Renames, want) {
+		t.Fatalf("renames = %v, want %v", report.Renames, want)
+	}
+	wantCounters := map[string]int{p: 76, p + ".75": 1}
+	if got := serverCounters(t, ctx, store, p); !reflect.DeepEqual(got, wantCounters) {
+		t.Errorf("counters = %v, want %v", got, wantCounters)
+	}
+	var issueAt74, wispAt74, conflicts int
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE id = ?", p+".74").Scan(&issueAt74); err != nil {
+		t.Fatalf("count issue P.74: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM wisps WHERE id = ?", p+".74").Scan(&wispAt74); err != nil {
+		t.Fatalf("count wisp P.74: %v", err)
+	}
+	if issueAt74 != 0 || wispAt74 != 1 {
+		t.Errorf("P.74: %d issues, %d wisps, want the wisp alone", issueAt74, wispAt74)
+	}
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_conflicts").Scan(&conflicts); err != nil {
+		t.Fatalf("read conflicts: %v", err)
+	}
+	if conflicts != 0 {
+		t.Errorf("%d tables still conflicted", conflicts)
+	}
+}
+
+// TestPullRenumberChildrenRefusesDestinationCounter is bd-28sb25 AC-4 on the
+// server store: a stray counter row under P.75, the destination of the
+// counterless P.72, is refused after P.71 was already renamed and its counter
+// relocated. The stray row needs a schema without the counter's foreign key,
+// so the fixture drops it; with no cascade, it is the transaction's rollback
+// that puts P.71's counter back: HEAD, ids and every counter row are as they
+// were.
+func TestPullRenumberChildrenRefusesDestinationCounter(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	t.Cleanup(cleanup)
+	ctx, cancel := testContext(t)
+	t.Cleanup(cancel)
+
+	const p = "rnd-p"
+	seedServerChildCollision(t, ctx, store, p, func(exec func(q string, args ...any)) {
+		exec("ALTER TABLE child_counters DROP FOREIGN KEY fk_counter_parent")
+		exec("INSERT INTO child_counters (parent_id, last_child) VALUES (?, 1)", p+".71")
+		exec("INSERT INTO child_counters (parent_id, last_child) VALUES (?, 9)", p+".75")
+	})
+	var before string
+	if err := store.db.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&before); err != nil {
+		t.Fatalf("read HEAD: %v", err)
+	}
+
+	_, err := store.PullRenumberChildren(ctx, "", "tester")
+	if err == nil || !strings.Contains(err.Error(), "destination "+p+".75 already has a child counter row") {
+		t.Fatalf("PullRenumberChildren err = %v, want the destination-counter refusal", err)
+	}
+	var after string
+	if err := store.db.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&after); err != nil {
+		t.Fatalf("read HEAD: %v", err)
+	}
+	if after != before {
+		t.Errorf("HEAD moved from %s to %s on a refused repair", before, after)
+	}
+	wantCounters := map[string]int{p: 73, p + ".71": 1, p + ".75": 9}
+	if got := serverCounters(t, ctx, store, p); !reflect.DeepEqual(got, wantCounters) {
+		t.Errorf("counters = %v, want unchanged %v", got, wantCounters)
+	}
+	var ids []string
+	rows, err := store.db.QueryContext(ctx, "SELECT id FROM issues WHERE id LIKE CONCAT(?, '.%') ORDER BY id", p)
+	if err != nil {
+		t.Fatalf("read ids: %v", err)
+	}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan id: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	_ = rows.Close()
+	if want := []string{p + ".71", p + ".72", p + ".73"}; !reflect.DeepEqual(ids, want) {
+		t.Errorf("ids = %v, want unchanged %v", ids, want)
+	}
+	var dirty int
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_status").Scan(&dirty); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if dirty != 0 {
+		t.Errorf("%d tables left dirty by a refused repair", dirty)
 	}
 }
