@@ -1,0 +1,223 @@
+{
+  "catalogVersion": 1,
+  "scenarios": [
+    {
+      "id": "callables.cb-1",
+      "title": "Discovery advertises the capability at version `\"1\"` with empty detail",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/profiles/callables/callables.md",
+          "anchor": "#11-conformance-rows-for-preview-1",
+          "selectedText": "Discovery advertises the capability at version `\"1\"` with empty detail"
+        }
+      ]
+    },
+    {
+      "id": "callables.cb-2",
+      "title": "Each reachable name resolves to a Bead affiliated with `callable-query` or `callable-batch` whose properties satisfy §§2",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/profiles/callables/callables.md",
+          "anchor": "#11-conformance-rows-for-preview-1",
+          "selectedText": "Each reachable name resolves to a Bead affiliated with `callable-query` or `callable-batch` whose properties satisfy §§2.2–2.5; for a compiled declaration, its operation rebuilds to properties that do"
+        }
+      ]
+    },
+    {
+      "id": "callables.cb-3",
+      "title": "`POST` to a mount with valid `arguments` returns 200 and a `callableResult`",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/profiles/callables/callables.md",
+          "anchor": "#11-conformance-rows-for-preview-1",
+          "selectedText": "`POST` to a mount with valid `arguments` returns 200 and a `callableResult`"
+        }
+      ]
+    },
+    {
+      "id": "callables.cb-4",
+      "title": "An unknown argument member is rejected as `validation-failed` naming it",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/profiles/callables/callables.md",
+          "anchor": "#11-conformance-rows-for-preview-1",
+          "selectedText": "An unknown argument member is rejected as `validation-failed` naming it"
+        }
+      ]
+    },
+    {
+      "id": "callables.cb-5",
+      "title": "A missing required parameter is rejected as `validation-failed`; an omitted defaulted parameter runs with its default",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/profiles/callables/callables.md",
+          "anchor": "#11-conformance-rows-for-preview-1",
+          "selectedText": "A missing required parameter is rejected as `validation-failed`; an omitted defaulted parameter runs with its default"
+        }
+      ]
+    },
+    {
+      "id": "callables.cb-6",
+      "title": "`POST` to a mount with no reachable Callable is `callable-not-found`",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/profiles/callables/callables.md",
+          "anchor": "#11-conformance-rows-for-preview-1",
+          "selectedText": "`POST` to a mount with no reachable Callable is `callable-not-found`"
+        }
+      ]
+    },
+    {
+      "id": "callables.cb-7",
+      "title": "Under `idempotency`, a CallableBatch `POST` without `Idempotency-Key` is rejected and a replay with the same key returns",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/profiles/callables/callables.md",
+          "anchor": "#11-conformance-rows-for-preview-1",
+          "selectedText": "Under `idempotency`, a CallableBatch `POST` without `Idempotency-Key` is rejected and a replay with the same key returns the original `callableResult`. Without it, repeating an invocation of a declaration marked `idempotent` has no further effect"
+        }
+      ]
+    },
+    {
+      "id": "callables.cb-8",
+      "title": "A CallableQuery invocation leaves every Resource revision in the Scope unchanged",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/profiles/callables/callables.md",
+          "anchor": "#11-conformance-rows-for-preview-1",
+          "selectedText": "A CallableQuery invocation leaves every Resource revision in the Scope unchanged"
+        }
+      ]
+    },
+    {
+      "id": "callables.cb-9",
+      "title": "A reachable Callable with no working implementation answers `callable-unavailable`",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/profiles/callables/callables.md",
+          "anchor": "#11-conformance-rows-for-preview-1",
+          "selectedText": "A reachable Callable with no working implementation answers `callable-unavailable`"
+        }
+      ]
+    },
+    {
+      "id": "callables.cb-10",
+      "title": "A `callable-error` is HTTP 409 with an `error` member, valid against the declaration's `errorSchema` when there is one",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/profiles/callables/callables.md",
+          "anchor": "#11-conformance-rows-for-preview-1",
+          "selectedText": "A `callable-error` is HTTP 409 with an `error` member, valid against the declaration's `errorSchema` when there is one"
+        }
+      ]
+    },
+    {
+      "id": "callables.cb-11",
+      "title": "`GET` of a declaration Bead's canonical URL returns the ordinary Bead record",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/profiles/callables/callables.md",
+          "anchor": "#11-conformance-rows-for-preview-1",
+          "selectedText": "`GET` of a declaration Bead's canonical URL returns the ordinary Bead record"
+        }
+      ]
+    },
+    {
+      "id": "callables.cb-12",
+      "title": "On a Scope with a root Bead at `sys/callables`, a declaration with no live Link from it is `callable-not-found`, and cre",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/profiles/callables/callables.md",
+          "anchor": "#11-conformance-rows-for-preview-1",
+          "selectedText": "On a Scope with a root Bead at `sys/callables`, a declaration with no live Link from it is `callable-not-found`, and creating that Link makes it reachable"
+        }
+      ]
+    },
+    {
+      "id": "callables.cb-13",
+      "title": "A Problem from a declaration marked `atomic` leaves every Resource revision in the Scope unchanged",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/profiles/callables/callables.md",
+          "anchor": "#11-conformance-rows-for-preview-1",
+          "selectedText": "A Problem from a declaration marked `atomic` leaves every Resource revision in the Scope unchanged"
+        }
+      ]
+    },
+    {
+      "id": "callables.cb-14",
+      "title": "`GET <scope>/bdp/call` returns an OpenAPI document with one operation per Callable reachable by the caller, each matchin",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/profiles/callables/callables.md",
+          "anchor": "#11-conformance-rows-for-preview-1",
+          "selectedText": "`GET <scope>/bdp/call` returns an OpenAPI document with one operation per Callable reachable by the caller, each matching its declaration under §14"
+        }
+      ]
+    },
+    {
+      "id": "callables.mount-method-and-media",
+      "title": "A mount admits POST only, and the base media before interpretation",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/profiles/callables/callables.md",
+          "anchor": "#3-invocation",
+          "selectedText": "A mount admits `POST` only and answers other methods with a bodyless 405 and `Allow: POST`."
+        },
+        {
+          "source": "specs/profiles/callables/callables.md",
+          "anchor": "#3-invocation",
+          "selectedText": "a missing or generic `application/json` body is rejected with 415 `unsupported-media-type` before interpretation, for both kinds."
+        }
+      ]
+    },
+    {
+      "id": "callables.invocation-closed",
+      "title": "The invocation body is closed, and a query takes no key and no provenance",
+      "kind": "normative",
+      "requiredProfile": "read",
+      "requirements": [
+        {
+          "source": "specs/profiles/callables/callables.md",
+          "anchor": "#3-invocation",
+          "selectedText": "Unknown members, duplicate JSON members and invalid strings are rejected as `malformed-request`."
+        },
+        {
+          "source": "specs/profiles/callables/callables.md",
+          "anchor": "#3-invocation",
+          "selectedText": "CallableQuery invocation carries no key and is rejected as `malformed-request` if it does."
+        }
+      ]
+    }
+  ]
+}

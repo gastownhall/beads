@@ -24,3 +24,12 @@ engdocs/adr/0002-init-safety-invariants.md  @gastownhall/beads-maintainers
 # protection has "require review from Code Owners" enabled (bd-6dnrw.23).
 internal/storage/schema/migrations/  @gastownhall/beads-maintainers
 scripts/check-migration-hygiene.sh   @gastownhall/beads-maintainers
+
+# BDP pin and vendored copy (engdocs/design/bdp.md). Only
+# scripts/bdp-vendor.sh writes them: at a new checkpoint in a pin-bump PR
+# approved by Julian Knutsen, or at the same pin in the PR that adds a
+# consumer of another bdp file. Advisory: as the NOTE above says, GitHub
+# enforces CODEOWNERS only when the branch rules require Code Owner review,
+# and main's do not.
+/third_party/bdp/         @julianknutsen
+/scripts/bdp-vendor.sh    @julianknutsen

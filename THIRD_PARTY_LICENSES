@@ -27,6 +27,14 @@ Repository: https://github.com/dolthub/driver
 License: Apache License 2.0
 Copyright: Copyright 2019-2026 DoltHub, Inc.
 
+--------------------------------------------------------------------------------
+gastownhall/bdp (third_party/bdp/spec/)
+--------------------------------------------------------------------------------
+
+Repository: https://github.com/gastownhall/bdp
+License: MIT License (text in third_party/bdp/spec/LICENSE)
+Copyright: Copyright (c) 2026 Gas City Inc.
+
 ================================================================================
 Apache License 2.0
 ================================================================================
