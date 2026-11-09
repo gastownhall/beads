@@ -108,10 +108,12 @@ EXAMPLES:
 }
 
 var (
-	importDryRun     bool
-	importDedup      bool
-	importAllowStale bool
-	importInput      string
+	importDryRun      bool
+	importDedup       bool
+	importAllowStale  bool
+	importSkipInvalid bool
+	importRejects     string
+	importInput       string
 )
 
 func init() {
@@ -119,6 +121,8 @@ func init() {
 	importCmd.Flags().BoolVar(&importDryRun, "dry-run", false, "Show what would be imported without importing")
 	importCmd.Flags().BoolVar(&importDedup, "dedup", false, "Skip lines whose title matches an existing open issue")
 	importCmd.Flags().BoolVar(&importAllowStale, "allow-stale", false, "Import rows even when older than the local issue (required to restore an older snapshot)")
+	importCmd.Flags().BoolVar(&importSkipInvalid, "skip-invalid", false, "Import the valid records and skip the ones the database would refuse (e.g. an unregistered status), reporting each")
+	importCmd.Flags().StringVar(&importRejects, "rejects", "", "With --skip-invalid, save the skipped records' original lines to this file")
 	rootCmd.AddCommand(importCmd)
 }
 
@@ -184,6 +188,9 @@ func runImportInner(args []string) error {
 	if importInput != "" && len(args) > 0 {
 		return fmt.Errorf("use either --input or a positional file, not both")
 	}
+	if importRejects != "" && !importSkipInvalid {
+		return fmt.Errorf("--rejects requires --skip-invalid")
+	}
 
 	fromStdin := importInput == "-" || (len(args) > 0 && args[0] == "-")
 
@@ -240,20 +247,23 @@ func runImportInner(args []string) error {
 }
 
 type importResultJSON struct {
-	Source              string         `json:"source"`
-	Created             int            `json:"created"`
-	Updated             int            `json:"updated,omitempty"`
-	Unchanged           int            `json:"unchanged,omitempty"`
-	Skipped             int            `json:"skipped"`
-	DedupHits           int            `json:"dedup_skipped,omitempty"`
-	Memories            int            `json:"memories,omitempty"`
-	IDs                 []string       `json:"ids,omitempty"`
-	UpdatedIssues       []ImportChange `json:"updated_issues,omitempty"`
-	TieKeptLocalIDs     []string       `json:"tie_kept_local_ids,omitempty"`
-	StaleSkippedIDs     []string       `json:"stale_skipped_ids,omitempty"`
-	RetiredIDs          []string       `json:"retired_ids,omitempty"`
-	SkippedDependencies []string       `json:"skipped_dependencies,omitempty"`
-	DryRun              bool           `json:"dry_run,omitempty"`
+	Source              string            `json:"source"`
+	Created             int               `json:"created"`
+	Updated             int               `json:"updated,omitempty"`
+	Unchanged           int               `json:"unchanged,omitempty"`
+	Skipped             int               `json:"skipped"`
+	DedupHits           int               `json:"dedup_skipped,omitempty"`
+	Memories            int               `json:"memories,omitempty"`
+	IDs                 []string          `json:"ids,omitempty"`
+	UpdatedIssues       []ImportChange    `json:"updated_issues,omitempty"`
+	TieKeptLocalIDs     []string          `json:"tie_kept_local_ids,omitempty"`
+	StaleSkippedIDs     []string          `json:"stale_skipped_ids,omitempty"`
+	RetiredIDs          []string          `json:"retired_ids,omitempty"`
+	SkippedDependencies []string          `json:"skipped_dependencies,omitempty"`
+	InvalidSkipped      int               `json:"invalid_skipped,omitempty"`
+	InvalidRecords      []importRejection `json:"invalid_records,omitempty"`
+	RejectsFile         string            `json:"rejects_file,omitempty"`
+	DryRun              bool              `json:"dry_run,omitempty"`
 }
 
 func runImportFromReader(ctx context.Context, r io.Reader, source string) error {
@@ -292,15 +302,15 @@ func runImportRecordsClassic(ctx context.Context, records []importRecord, memori
 	if err != nil {
 		return err
 	}
-	if len(screen.Rejected) > 0 {
-		return importRejectedError(source, screen.Rejected)
-	}
 	issues := screen.Kept(records)
 
 	result := importResultJSON{
 		Source:    source,
 		DedupHits: dedupHits,
 		DryRun:    importDryRun,
+	}
+	if err := applyImportRejections(&result, source, screen.Rejected, importSkipInvalid, importRejects); err != nil {
+		return err
 	}
 
 	if importDryRun {
@@ -497,6 +507,7 @@ func renderImportDryRun(result importResultJSON, memoriesCount int, source strin
 // renderImportOutcome reports a completed import (JSON or stderr),
 // identically in both modes.
 func renderImportOutcome(result importResultJSON, source string, dedupHits int) error {
+	warnImportInvalidSkipped(result)
 	if jsonOutput {
 		return outputJSON(result)
 	}
@@ -509,7 +520,10 @@ func renderImportOutcome(result importResultJSON, source string, dedupHits int) 
 	if dedupHits > 0 {
 		fmt.Fprintf(os.Stderr, " (%d duplicates skipped)", dedupHits) //nolint:gosec // G705: stderr, not a browser context
 	}
-	if staleSkipped := result.Skipped - dedupHits; staleSkipped > 0 {
+	if result.InvalidSkipped > 0 {
+		fmt.Fprintf(os.Stderr, " (%d invalid skipped)", result.InvalidSkipped) //nolint:gosec // G705: stderr, not a browser context
+	}
+	if staleSkipped := result.Skipped - dedupHits - result.InvalidSkipped; staleSkipped > 0 {
 		fmt.Fprintf(os.Stderr, " (%d stale skipped; use --allow-stale to restore older rows)", staleSkipped) //nolint:gosec // G705: stderr, not a browser context
 	}
 	if result.Unchanged > 0 {
