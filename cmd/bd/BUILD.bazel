@@ -986,6 +986,7 @@ go_test(
         "last_touched_guard_test.go",
         "last_touched_readonly_test.go",
         "last_touched_test.go",
+        "legacy_proxied_root_guard_refusals_test.go",
         "legacy_proxied_root_guard_test.go",
         "legacy_upgrade_guard_config_yaml_test.go",
         "legacy_upgrade_guard_e2e_test.go",

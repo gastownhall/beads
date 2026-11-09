@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/gitenv"
 )
 
@@ -52,12 +51,16 @@ var runLegacyProxiedRootGitProbe = func(dir string, args ...string) ([]byte, err
 //   - it only ever CREATES the path (O_CREATE|O_EXCL, 0600): an existing
 //     entry — a directory a legacy release actually used, a dangling symlink,
 //     another writer's file — is left exactly as it is;
-//   - the path must first be effectively git-ignored where it lives: the
-//     workspace's .beads/.gitignore carries the standalone `proxieddb`
-//     pattern (EnsureGitignoreForBeadsDir repairs it in place), and a real
-//     `git check-ignore -q` must agree — which also refuses the arming
-//     outside a Git worktree, under a negation rule, or when git itself
-//     fails — and `git ls-files` must not report the path tracked;
+//   - the path must ALREADY be effectively git-ignored where it lives: the
+//     workspace's .beads/.gitignore must carry the standalone `proxieddb`
+//     pattern (the directory-only `proxieddb/` form does not ignore a regular
+//     file), and a real `git check-ignore -q` must agree — which also
+//     refuses the arming when the ignore rules negate the pattern, outside a
+//     Git worktree, or when git itself fails — and `git ls-files` must not
+//     report the path tracked. The guard never repairs the .gitignore
+//     itself: making a file git would offer to commit is a write the guard
+//     has no business making, and doctor's append-only repair plus new
+//     inits put the pattern there first;
 //   - a file that is created but cannot be written (a full disk, a hostile
 //     mount) is left in place: an empty regular file stops the old release
 //     just as well.
@@ -74,15 +77,11 @@ func armLegacyProxiedRootGuardAt(beadsDir string) {
 		return
 	}
 
-	// Gate 2: the workspace's own .gitignore must carry the standalone
-	// pattern. The repair is doctor's append-only one; its failure is not
-	// fatal here, because the authoritative test is the check-ignore probe
-	// below.
-	_ = doctor.EnsureGitignoreForBeadsDir(beadsDir)
-
-	// Gate 3: git must consider the marker path ignored where it lives.
+	// Gate 2: git must consider the marker path ignored where it lives.
 	// check-ignore exits 0 only when a pattern matches, which is also the
-	// answer for a workspace whose ignore rules negate the pattern, for a
+	// answer for a workspace whose .beads/.gitignore predates the standalone
+	// pattern (a directory-only proxieddb/ line does not ignore a regular
+	// file), for a workspace whose ignore rules negate the pattern, for a
 	// directory outside any Git worktree, and for a git that cannot run.
 	repoDir := filepath.Dir(beadsDir)
 	relGuard := filepath.ToSlash(filepath.Join(filepath.Base(beadsDir), legacyProxiedRootGuardName))
@@ -96,7 +95,7 @@ func armLegacyProxiedRootGuardAt(beadsDir string) {
 		return
 	}
 
-	// Gate 4: create-or-nothing. O_EXCL means a concurrent arming, or any
+	// Gate 3: create-or-nothing. O_EXCL means a concurrent arming, or any
 	// entry that appeared since the Lstat, leaves the other writer's file
 	// alone; a creation failure (a read-only .beads, a full disk) is the
 	// same silent skip as every other unmet precondition.
