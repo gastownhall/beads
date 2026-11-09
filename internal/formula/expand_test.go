@@ -1195,6 +1195,75 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 			}
 		})
 	})
+
+	// A template that recreates {target} as a real step keeps that ID, so
+	// references to it, inside the expansion and outside, stay as they are:
+	// rewriting them would give the recreated step's dependents (or the
+	// step itself) a needless or self-referencing edge.
+	t.Run("references to a target the expansion recreates are unchanged", func(t *testing.T) {
+		dir := t.TempDir()
+		for name, template := range map[string]string{
+			"recreate-first": `[
+				{"id": "{target}", "title": "{target.title}"},
+				{"id": "{target}.review", "title": "Review {target.title}", "needs": ["{target}"]}
+			]`,
+			"recreate-last": `[
+				{"id": "{target}.prep", "title": "Prep {target.title}"},
+				{"id": "{target}", "title": "{target.title}", "needs": ["{target}.prep"]}
+			]`,
+		} {
+			src := fmt.Sprintf(`{"formula": %q, "type": "expansion", "version": 1, "template": %s}`, name, template)
+			if err := os.WriteFile(filepath.Join(dir, name+".formula.json"), []byte(src), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		recreateParser := NewParser(dir)
+
+		tests := []struct {
+			expand string
+			want   map[string][]string // step ID -> Needs
+		}{
+			{"recreate-first", map[string][]string{
+				"work":        {"setup"},
+				"work.review": {"work"},
+				"land":        {"work"},
+				"child":       {"work"},
+			}},
+			{"recreate-last", map[string][]string{
+				"work.prep": {"setup"},
+				"work":      {"work.prep"},
+				"land":      {"work"},
+				"child":     {"work"},
+			}},
+		}
+		for _, tt := range tests {
+			t.Run(tt.expand, func(t *testing.T) {
+				steps := []*Step{
+					{ID: "setup", Title: "Setup"},
+					{ID: "work", Title: "Work", Needs: []string{"setup"}, Expand: tt.expand},
+					{ID: "land", Title: "Land", Needs: []string{"work"}},
+					{ID: "group", Title: "Group", Children: []*Step{
+						{ID: "child", Title: "Child", Needs: []string{"work"}},
+					}},
+				}
+
+				result, err := ApplyInlineExpansions(steps, recreateParser)
+				if err != nil {
+					t.Fatalf("ApplyInlineExpansions failed: %v", err)
+				}
+				byID := buildStepMap(result)
+				for id, want := range tt.want {
+					s := byID[id]
+					if s == nil {
+						t.Fatalf("step %q missing from result: %v", id, collectStepIDsForTest(result))
+					}
+					if !slices.Equal(s.Needs, want) {
+						t.Errorf("%s.Needs = %v, want %v", id, s.Needs, want)
+					}
+				}
+			})
+		}
+	})
 }
 
 // snapshotStepDeps renders the IDs, Needs and DependsOn of a step tree, to
