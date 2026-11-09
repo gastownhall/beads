@@ -131,3 +131,97 @@ func TestEmbeddedImportInvalidRecordNamesLine(t *testing.T) {
 		}
 	})
 }
+
+func TestEmbeddedImportSkipInvalid(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt import tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "imskip")
+	tmp := t.TempDir()
+	jsonlPath := filepath.Join(tmp, "import.jsonl")
+	bad1 := invalidImportLine(t, "imskip-bbb", "Invalid B", "verify")
+	bad2 := invalidImportLine(t, "imskip-ddd", "Invalid D", "bogus")
+	// CRLF on a rejected line: the saved line drops the terminator only.
+	if err := os.WriteFile(jsonlPath, []byte(strings.Join([]string{
+		invalidImportLine(t, "imskip-aaa", "Valid A", "open"),
+		bad1,
+		importMemoryLine,
+		invalidImportLine(t, "imskip-ccc", "Valid C", "open"),
+		bad2 + "\r",
+	}, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rejectsPath := filepath.Join(tmp, "rejects.jsonl")
+	if err := os.WriteFile(rejectsPath, []byte("stale content from an earlier run\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := bdImportRun(t, bd, dir, "--skip-invalid", "--rejects", rejectsPath, "--json", jsonlPath)
+	if err != nil {
+		t.Fatalf("bd import --skip-invalid failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	var result importResultJSON
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("parse --json output: %v\n%s", err, stdout)
+	}
+	if result.Created != 2 || result.Skipped != 2 || result.Memories != 1 {
+		t.Fatalf("created %d, skipped %d, memories %d; want 2, 2, 1\n%s", result.Created, result.Skipped, result.Memories, stdout)
+	}
+	if len(result.Rejected) != 2 ||
+		result.Rejected[0].Line != 2 || result.Rejected[0].ID != "imskip-bbb" || !strings.Contains(result.Rejected[0].Reason, "invalid status: verify") ||
+		result.Rejected[1].Line != 5 || result.Rejected[1].ID != "imskip-ddd" || !strings.Contains(result.Rejected[1].Reason, "invalid status: bogus") {
+		t.Fatalf("rejected = %+v; want line 2 imskip-bbb and line 5 imskip-ddd with their reasons", result.Rejected)
+	}
+	if result.RejectsFile != rejectsPath {
+		t.Fatalf("rejects_file = %q, want %q", result.RejectsFile, rejectsPath)
+	}
+	saved, err := os.ReadFile(rejectsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := bad1 + "\n" + bad2 + "\n"; string(saved) != want {
+		t.Fatalf("rejects file =\n%q\nwant\n%q", saved, want)
+	}
+	if ids := listedIDs(t, bd, dir); !slices.Equal(ids, []string{"imskip-aaa", "imskip-ccc"}) {
+		t.Fatalf("imported issues = %v, want imskip-aaa and imskip-ccc", ids)
+	}
+	if mem := bdMemories(t, bd, dir); !strings.Contains(mem, "screened-memory") {
+		t.Fatalf("the memory was not imported:\n%s", mem)
+	}
+
+	// The saved lines, repaired, re-import cleanly.
+	repaired := strings.ReplaceAll(strings.ReplaceAll(string(saved), `"verify"`, `"open"`), `"bogus"`, `"open"`)
+	repairedPath := filepath.Join(tmp, "repaired.jsonl")
+	if err := os.WriteFile(repairedPath, []byte(repaired), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bdImport(t, bd, dir, repairedPath)
+	if ids := listedIDs(t, bd, dir); len(ids) != 4 {
+		t.Fatalf("after re-importing the repaired rejects, issues = %v, want 4", ids)
+	}
+
+	t.Run("rejects_requires_skip_invalid", func(t *testing.T) {
+		_, stderr, err := bdImportRun(t, bd, dir, "--rejects", filepath.Join(tmp, "x.jsonl"), jsonlPath)
+		if err == nil || !strings.Contains(stderr, "--rejects requires --skip-invalid") {
+			t.Fatalf("--rejects without --skip-invalid: err %v, stderr:\n%s", err, stderr)
+		}
+	})
+
+	t.Run("rejects_refuses_the_input", func(t *testing.T) {
+		link := filepath.Join(tmp, "alias.jsonl")
+		if err := os.Symlink(jsonlPath, link); err != nil {
+			t.Fatal(err)
+		}
+		before, _ := os.ReadFile(jsonlPath)
+		_, stderr, err := bdImportRun(t, bd, dir, "--skip-invalid", "--rejects", link, jsonlPath)
+		if err == nil || !strings.Contains(stderr, "is the input file") {
+			t.Fatalf("--rejects naming the input: err %v, stderr:\n%s", err, stderr)
+		}
+		if after, _ := os.ReadFile(jsonlPath); string(after) != string(before) {
+			t.Fatal("the input file changed")
+		}
+	})
+}

@@ -289,7 +289,7 @@ empty or false:
 - `created` (number): Issues created
 - `updated` (number, optional): Existing issues updated
 - `unchanged` (number, optional): Rows identical to local state, untouched
-- `skipped` (number): Issues skipped (stale rows + dedup)
+- `skipped` (number): Issues skipped (stale rows + dedup + rows `--skip-invalid` set aside)
 - `dedup_skipped` (number, optional): Issues skipped by `--dedup` title match
 - `memories` (number, optional): Memory records imported
 - `ids` (string[], optional): IDs of created issues
@@ -298,6 +298,15 @@ empty or false:
 - `stale_skipped_ids` (string[], optional): Rows older than the local issue, skipped
 - `skipped_dependencies` (string[], optional): Dependency edges whose target id was absent
 - `dry_run` (boolean, optional): Present (`true`) only when `--dry-run` was active
+- `rejected` (object[], optional): Records `--skip-invalid` skipped because they
+  failed validation, in source order, each with `line` (the physical line in
+  the input), `id` and `reason`; on a dry run, the records it would skip. The
+  same records are listed on stderr.
+- `rejects_file` (string, optional): Path the skipped lines were saved to
+  verbatim (`--rejects`); absent on a dry run, which writes no file
+
+Without `--skip-invalid`, an invalid record fails the import (and a dry run)
+with a nonzero exit, naming its line and reason, and nothing is imported.
 
 ### bd export --json
 

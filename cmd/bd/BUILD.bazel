@@ -920,6 +920,7 @@ go_test(
         "import_embedded_test.go",
         "import_from_jsonl_test.go",
         "import_global_prefix_isolation_test.go",
+        "import_invalid_cases_embedded_test.go",
         "import_invalid_embedded_test.go",
         "import_missing_config_prefix_test.go",
         "import_orphan_embedded_test.go",

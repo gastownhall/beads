@@ -101,6 +101,16 @@ and re-import. A line that is not valid JSON, or does not decode as a
 record, always stops the import. Stale and unchanged rows are not written,
 so they are not validated.
 
+The skipped rows are listed on stderr, with --json too, and count in
+"skipped". --rejects replaces the file on each run (an empty file when
+nothing was skipped; created 0600) and refuses to name the input file. It
+is written before the first database write, so a rejects file that cannot
+be written stops the import before it changes anything; it is not a
+receipt, though: if the import then fails partway, the file stays. A dry
+run validates too, so it predicts the real run: by default an invalid row
+fails it, and with --skip-invalid it lists the rows it would skip but
+writes no rejects file.
+
 EXAMPLES:
   bd import                        # Import from configured import.path
   bd import backup.jsonl           # Import from a specific file
@@ -522,8 +532,10 @@ func applyImportRejections(result *importResultJSON, rejected []importRejection,
 }
 
 // renderImportDryRun reports a dry run (JSON or stderr), identically in both
-// modes.
+// modes. The rows the screen would skip are listed on stderr first, in both
+// modes, so a --json caller still sees them where a person would.
 func renderImportDryRun(result importResultJSON, memoriesCount int, source string, dedupHits int) error {
+	renderImportRejections(os.Stderr, result.Rejected, "", true)
 	if jsonOutput {
 		return outputJSON(result)
 	}
@@ -545,13 +557,15 @@ func renderImportDryRun(result importResultJSON, memoriesCount int, source strin
 		fmt.Fprintf(os.Stderr, " (%d retired by a retention sweep, would not be re-created)", len(result.RetiredIDs)) //nolint:gosec // G705: stderr, not a browser context
 	}
 	fmt.Fprintln(os.Stderr)
-	renderImportRejections(os.Stderr, result.Rejected, "", true)
 	return nil
 }
 
 // renderImportOutcome reports a completed import (JSON or stderr),
-// identically in both modes.
+// identically in both modes. The rows the screen skipped are listed on stderr
+// first, in both modes, so a --json caller still sees them where a person
+// would.
 func renderImportOutcome(result importResultJSON, source string, dedupHits int) error {
+	renderImportRejections(os.Stderr, result.Rejected, result.RejectsFile, false)
 	if jsonOutput {
 		return outputJSON(result)
 	}
@@ -587,7 +601,6 @@ func renderImportOutcome(result importResultJSON, source string, dedupHits int) 
 	for _, skipped := range result.SkippedDependencies {
 		fmt.Fprintf(os.Stderr, "Skipped dependency: %s\n", skipped)
 	}
-	renderImportRejections(os.Stderr, result.Rejected, result.RejectsFile, false)
 	return nil
 }
 

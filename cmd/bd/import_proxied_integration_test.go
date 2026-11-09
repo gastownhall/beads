@@ -561,7 +561,8 @@ func TestProxiedServerImport(t *testing.T) {
 	// From @maphew's PR #5202: the proxied route must screen as well. A
 	// `"status":"verify"` record used to reach the server-side batch writer
 	// and abort the whole unit of work, with no line number. Strict mode
-	// fails up front naming the record's source line and imports nothing.
+	// fails up front naming the record's source line and imports nothing;
+	// --skip-invalid imports the valid records around it.
 	t.Run("skip_invalid_partitions_validation_rejects", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "impv")
@@ -588,6 +589,30 @@ func TestProxiedServerImport(t *testing.T) {
 		}
 		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM issues WHERE id LIKE 'impv-%'"); got != 0 {
 			t.Errorf("issue rows after strict failure = %d, want 0", got)
+		}
+
+		// --skip-invalid: the three valid records import, the bad one is
+		// saved verbatim via --rejects.
+		rejects := filepath.Join(p.dir, "rejects.jsonl")
+		report := bdProxiedImport(t, bd, p.dir, path, "--skip-invalid", "--rejects", rejects)
+		if !strings.Contains(report, "Imported 3 issues") {
+			t.Errorf("skip-invalid report = %q, want 'Imported 3 issues'", report)
+		}
+		if !strings.Contains(report, "line 5 (issue impv-bad)") {
+			t.Errorf("skip-invalid report = %q, want it to list line 5 (issue impv-bad)", report)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM issues WHERE id LIKE 'impv-r%'"); got != 3 {
+			t.Errorf("issue rows = %d, want 3", got)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM issues WHERE id = 'impv-bad'"); got != 0 {
+			t.Errorf("impv-bad rows = %d, want 0 (validation-invalid record must be skipped)", got)
+		}
+		data, rerr := os.ReadFile(rejects)
+		if rerr != nil {
+			t.Fatalf("rejects file not written: %v", rerr)
+		}
+		if got := string(data); got != badLine+"\n" {
+			t.Errorf("rejects content = %q, want the rejected line verbatim %q", got, badLine+"\n")
 		}
 	})
 }

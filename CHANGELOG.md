@@ -1226,6 +1226,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd import` reports which record was invalid, and `--skip-invalid` imports
+  the rest of the file around it (#4492, #5202). A single record the writer
+  would refuse (for example `"status":"verify"` without that custom status
+  configured) used to abort the import inside the write: earlier chunks,
+  memories and the prefix seed had already landed, and the error named no
+  line and no way past it. The importer now validates every row it would
+  write up front, on the classic and proxied-server routes, with the
+  writer's own checks and custom vocabulary, and by default fails naming the
+  first offending record's line and reason with nothing imported.
+  `--skip-invalid` imports the valid records and lists the skipped ones on
+  stderr (also under `--json`, which gains `rejected` and `rejects_file`);
+  `--rejects <file>` saves the skipped lines verbatim for repair and
+  re-import. A dry run validates too, so `bd import --dry-run` of a file
+  with one bad status now exits nonzero where it printed a plan and exited
+  0: a dry run predicts the real run. A dry run never writes the
+  `--rejects` file. Thanks to @maphew for the original design and tests.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

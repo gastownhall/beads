@@ -3636,6 +3636,16 @@ bd import
     | record, always stops the import. Stale and unchanged rows are not written,
     | so they are not validated.
     |
+    | The skipped rows are listed on stderr, with --json too, and count in
+    | "skipped". --rejects replaces the file on each run (an empty file when
+    | nothing was skipped; created 0600) and refuses to name the input file. It
+    | is written before the first database write, so a rejects file that cannot
+    | be written stops the import before it changes anything; it is not a
+    | receipt, though: if the import then fails partway, the file stays. A dry
+    | run validates too, so it predicts the real run: by default an invalid row
+    | fails it, and with --skip-invalid it lists the rows it would skip but
+    | writes no rejects file.
+    |
     | EXAMPLES:
     |   bd import                        # Import from configured import.path
     |   bd import backup.jsonl           # Import from a specific file
