@@ -477,6 +477,18 @@ func renderTypedOpenError(err error) bool {
 		}
 		return true
 	}
+	// #7038: a read-only or gateway open of a database whose clone-local
+	// series is behind refuses with the per-database migration remedy — the
+	// same actionable-block treatment the main-series skew refusal gets.
+	var cloneLocalErr *schema.CloneLocalBehindError
+	if errors.As(err, &cloneLocalErr) {
+		if jsonOutput {
+			handleCloneLocalBehindJSON(cloneLocalErr)
+		} else {
+			fmt.Fprint(os.Stderr, cloneLocalErr.UserMessage())
+		}
+		return true
+	}
 	// #4259 / #5920: the migrate gate blocks a silent in-place migration and
 	// tells the operator to migrate, adopt, or consent.
 	var gateErr *schema.RemoteMigrateGateError
