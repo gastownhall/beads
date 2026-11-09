@@ -773,3 +773,54 @@ func TestBootstrapPreparerStickyRecreateKeepsOriginalCapability(t *testing.T) {
 		}
 	})
 }
+
+// TestBootstrapPreparerDeniedCreateNamesProvisioningAndGrants pins the refusal
+// a least-privilege account sees for a database it cannot see: bd cannot tell
+// "never provisioned" from "not granted to you" (the server hides one as the
+// other), so it names both, sends the operator to the administrator, keeps the
+// driver error, and neither retries nor falls through to USE.
+func TestBootstrapPreparerDeniedCreateNamesProvisioningAndGrants(t *testing.T) {
+	ctx := context.Background()
+	for _, tt := range []struct {
+		name string
+		err  error
+	}{
+		{name: "1044 database access denied", err: &mysql.MySQLError{Number: 1044, Message: "Access denied for user 'reader'@'%' to database 'beads'"}},
+		{name: "1142 command denied", err: &mysql.MySQLError{Number: 1142, Message: "CREATE command denied to user 'reader'@'%'"}},
+		{name: "1105 dolt command denied", err: &mysql.MySQLError{Number: 1105, Message: "command denied to user 'reader'@'%'"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			conn, mock := preparerConn(t)
+			expectDatabaseExistsProbe(mock, "beads", false)
+			mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `beads`")).
+				WillReturnError(tt.err)
+
+			b := &bootstrapPreparer{provider: &doltSQLProvider{}, database: "beads"}
+			_, err := b.prepare(ctx, conn)
+			var prepErr *bootstrapPreparationError
+			if !errors.As(err, &prepErr) || prepErr.retryable {
+				t.Fatalf("prepare() error = %T %v, want a permanent *bootstrapPreparationError", err, err)
+			}
+			if !errors.Is(err, tt.err) {
+				t.Fatalf("prepare() error = %v, want it to wrap the driver error", err)
+			}
+			msg := err.Error()
+			for _, want := range []string{
+				`database "beads" is not visible to this credential and creating it was denied`,
+				"not provisioned",
+				"not been granted",
+				"ask the server administrator to provision the database and grant access",
+			} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("prepare() error missing %q:\n%s", want, msg)
+				}
+			}
+			if strings.Contains(msg, "re-run init") {
+				t.Errorf("prepare() error tells a reader to re-run init:\n%s", msg)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("ordered SQL expectations (no USE or fallback after a denial): %v", err)
+			}
+		})
+	}
+}
