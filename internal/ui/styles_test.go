@@ -333,6 +333,7 @@ func TestRenderStatusIconWithCategory(t *testing.T) {
 func TestIsAgentMode(t *testing.T) {
 	// Test default (no env vars) - t.Setenv automatically restores after test
 	t.Setenv("BD_AGENT_MODE", "")
+	t.Setenv("CLAUDECODE", "")
 	t.Setenv("CLAUDE_CODE", "")
 	if IsAgentMode() {
 		t.Fatal("expected false with no env vars")
@@ -340,13 +341,24 @@ func TestIsAgentMode(t *testing.T) {
 
 	// Test BD_AGENT_MODE=1
 	t.Setenv("BD_AGENT_MODE", "1")
+	t.Setenv("CLAUDECODE", "")
 	t.Setenv("CLAUDE_CODE", "")
 	if !IsAgentMode() {
 		t.Fatal("expected true with BD_AGENT_MODE=1")
 	}
 
-	// Test CLAUDE_CODE auto-detection
+	// Test CLAUDECODE auto-detection (this is the variable Claude Code itself
+	// actually sets; see beads#8296)
 	t.Setenv("BD_AGENT_MODE", "")
+	t.Setenv("CLAUDECODE", "1")
+	t.Setenv("CLAUDE_CODE", "")
+	if !IsAgentMode() {
+		t.Fatal("expected true with CLAUDECODE set")
+	}
+
+	// Test CLAUDE_CODE auto-detection (legacy/alternate, regression guard)
+	t.Setenv("BD_AGENT_MODE", "")
+	t.Setenv("CLAUDECODE", "")
 	t.Setenv("CLAUDE_CODE", "something")
 	if !IsAgentMode() {
 		t.Fatal("expected true with CLAUDE_CODE set")
