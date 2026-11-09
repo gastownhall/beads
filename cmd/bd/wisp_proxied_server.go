@@ -240,13 +240,14 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 		Status:       &statusClosed,
 		Ephemeral:    &ephemeralTrue,
 		ExcludeTypes: excludeTypes,
-		Limit:        5000,
+		Limit:        wispPurgeScanLimit,
 	}
 	closedIssues, err := r.SearchIssues(ctx, "", filter)
 	if err != nil {
 		uw.Close(ctx)
 		return HandleError("listing closed wisps: %v", err)
 	}
+	scanCapped := len(closedIssues) >= wispPurgeScanLimit
 
 	pinnedCount := 0
 	infraCount := 0
@@ -273,14 +274,7 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 	}
 
 	if len(closedIssues) == 0 {
-		if jsonOutput {
-			return outputJSON(map[string]interface{}{
-				"deleted_count": 0,
-				"message":       "No closed wisps to delete",
-			})
-		}
-		fmt.Println("No closed wisps to delete")
-		return nil
+		return renderNoClosedWisps(force && !dryRun && scanCapped)
 	}
 
 	ids := make([]string, len(closedIssues))
@@ -345,5 +339,5 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 			orphaned:          res.OrphanedIssues,
 		}, nil
 	})
-	return renderWispPurgeOutcome(outcome, false)
+	return renderWispPurgeOutcome(outcome, scanCapped, false)
 }
