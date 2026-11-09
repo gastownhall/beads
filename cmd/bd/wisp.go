@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // Wisp commands - manage ephemeral molecules
@@ -1020,6 +1021,30 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 		fmt.Println()
 	}
 
+	if dryRun {
+		// Detailed preview: the shared front door, unchanged — it resolves and
+		// previews without mutating. GH#4684's bounded-chunk change is
+		// confined to the forced mutation below.
+		if err := deleteBatch(nil, ids, force, dryRun, false, jsonOutput, false, nil, "wisp gc --closed"); err != nil {
+			return HandleError("%v", err)
+		}
+		return nil
+	}
+
+	// Forced mutation (GH#4684): bounded chunks, each its own deletion request,
+	// so a failure or an interruption keeps every chunk that already committed
+	// instead of discarding the whole purge with the one request that failed.
+	// The ids come from the selection above — unique, exact, locally selected —
+	// so deleteBatch's per-id front-door resolution is redundant here and is
+	// skipped: the role gets the ids the scan already resolved.
+	deleter, err := store.Deleter()
+	if err != nil {
+		return HandleError("%v", err)
+	}
+	opsCtx, err := issueOpsContext(ctx)
+	if err != nil {
+		return HandleError("%v", err)
+	}
 	// Cascade must stay OFF here. The closed set above is already the complete
 	// purge candidate list, so cascade can only ever add NON-closed dependents
 	// to the batch. In a linear molecule DAG a closed step's transitive
@@ -1029,13 +1054,42 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 	// Without cascade, closed wisps are deleted and live dependents are
 	// orphaned (edges dropped, is_blocked recomputed) — the same semantics as
 	// a plain `bd delete`.
-	if err := deleteBatch(nil, ids, force, dryRun, false, jsonOutput, false, nil, "wisp gc --closed"); err != nil {
+	progress, err := runWispClosedGCChunks(ctx, ids, func(_ context.Context, chunkIDs []string) (wispClosedGCChunk, error) {
+		res, derr := deleter.Delete(opsCtx, issueops.DeleteRequest{
+			Actor:   currentActor(),
+			IDs:     chunkIDs,
+			Force:   true,
+			Cascade: false,
+		})
+		if derr != nil {
+			return wispClosedGCChunk{}, derr
+		}
+		return wispClosedGCChunk{
+			Deleted:           res.Deleted,
+			Dependencies:      res.Dependencies,
+			Labels:            res.Labels,
+			Events:            res.Events,
+			ReferencesUpdated: res.ReferencesUpdated,
+			Orphaned:          res.Orphaned,
+			DeletedIDs:        res.DeletedIDs,
+		}, nil
+	})
+	if err != nil {
 		return HandleError("%v", err)
 	}
 
-	if !dryRun && force && !jsonOutput {
-		fmt.Printf("\nHint: Run 'bd compact --dolt' to reclaim disk space\n")
+	// The bookkeeping deleteBatch did for its whole request (GH#5896), and
+	// the post-run flush's write marker.
+	commandDidWrite.Store(true)
+	commandDeletedIssueIDs.add(progress.ConfirmedIDs...)
+
+	if jsonOutput {
+		answer := progress.successFields()
+		answer["deleted_ids"] = slices.Clone(progress.ConfirmedIDs)
+		return outputJSON(answer)
 	}
+	printWispClosedGCConfirmed(progress)
+	fmt.Printf("\nHint: Run 'bd compact --dolt' to reclaim disk space\n")
 	return nil
 }
 
