@@ -265,6 +265,15 @@ exports_files(
     visibility = ["//internal/httpclient/encode:__pkg__"],
 )
 
+# //internal/storage/embeddeddolt:embeddeddolt_test executes the upgrade
+# guide's marked dependency-target SQL recipe verbatim against a real store
+# (TestEmbeddedUpgradeGuideDependencyRecipeMatchesStorage_5107), so the guide
+# must be readable as data under `bazel test`.
+exports_files(
+    ["docs/getting-started/upgrading.md"],
+    visibility = ["//internal/storage/embeddeddolt:__pkg__"],
+)
+
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(

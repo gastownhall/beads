@@ -261,6 +261,7 @@ go_test(
         "transaction_wisp_lifecycle_persistence_test.go",
         "tree_walker_contract_test.go",
         "update_mergeops_test.go",
+        "upgrade_guide_dependency_recipe_test.go",
         "version_completeness_behaviour_test.go",
         "version_reconciler_contract_test.go",
         "version_subsecond_test.go",
@@ -269,6 +270,10 @@ go_test(
         "wisp_plane_states_test.go",
         "workspace_config_contract_test.go",
     ],
+    # The upgrade guide's marked dependency-target recipe, executed verbatim
+    # by TestEmbeddedUpgradeGuideDependencyRecipeMatchesStorage_5107; exported
+    # for this package by the root BUILD file.
+    data = ["//:docs/getting-started/upgrading.md"],
     embed = [":embeddeddolt"],
     shard_count = 9,
     deps = [
