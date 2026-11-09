@@ -1321,6 +1321,7 @@ go_test(
         "test_repo_beads_guard_darwin_test.go",
         "test_repo_beads_guard_test.go",
         "test_repo_git_guard_test.go",
+        "test_title_predicate_guard_test.go",
         "test_wait_helper_test.go",
         "thread_test.go",
         "tips_example_test.go",
