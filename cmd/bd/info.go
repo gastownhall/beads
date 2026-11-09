@@ -460,7 +460,7 @@ var versionChanges = []VersionChange{
 		Version: "1.0.5",
 		Date:    "2026-05-28",
 		Changes: []string{
-			"CHANGE: dependencies.depends_on_id is now a STORED generated column — writes must target exactly one of depends_on_issue_id/depends_on_wisp_id/depends_on_external (enforced by ck_dep_one_target); inserting into depends_on_id fails. Migrations 0041–0042 are intentionally irreversible (restore from a prior Dolt commit to roll back).",
+			"CHANGE: the depends_on_id SQL column is gone from both dependencies and wisp_dependencies — each row now fills exactly one of depends_on_issue_id/depends_on_wisp_id/depends_on_external (enforced by ck_dep_one_target), and migrations 0043 and ignored/0005 drop the temporary generated depends_on_id, so SQL that reads or writes depends_on_id fails. Read COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) instead (upgrade guide: Dependency target columns); JSON and JSONL records still name the field depends_on_id. Migrations 0041–0043 are intentionally irreversible (restore from a prior Dolt commit to roll back).",
 			"CHANGE: JSONL auto-export and auto-staging are now opt-in — set export.auto=true and export.git-add=true to keep the old behavior. Dolt is the canonical store; use bd dolt push/pull for sync and bd backup for restorable backups.",
 			"CHANGE: Foreign keys with ON DELETE/UPDATE CASCADE now span issue and wisp tables, so parent delete/rename cascades automatically.",
 			"NEW: dolt.mode config key (server|embedded) with validation; bd init warns on ambiguous configs and hard-fails when dolt.host/dolt.port are set without server mode.",
