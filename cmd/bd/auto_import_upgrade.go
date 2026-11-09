@@ -124,7 +124,19 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 	// Prefer single-transaction import (embedded mode) to avoid
 	// DOLT_COMMIT races with concurrent writers.
 	if importer, ok := s.(jsonlImporter); ok {
-		imported, retiredIDs, err := importer.ImportJSONLData(ctx, issues, configEntries, "auto-import")
+		// Screen before the import transaction, as every recovery import
+		// does: invalid rows are skipped and saved beside the file, so one
+		// bad row no longer keeps every valid one out. The database is
+		// empty here, so every row is in the write set.
+		kept, rejected, err := screenImportIssues(ctx, issues, recs.sources, storeImportVocabulary(s))
+		if err != nil {
+			writeAutoImportStamp(beadsDir, info)
+			fmt.Fprintf(os.Stderr, "warning: auto-import from %s failed: %v\n", jsonlPath, err)
+			fmt.Fprintf(os.Stderr, "\nYour issues are still safe in %s.\n", jsonlPath)
+			return
+		}
+		quarantineRecoveryRejects(os.Stderr, jsonlPath, rejected)
+		imported, retiredIDs, err := importer.ImportJSONLData(ctx, kept, configEntries, "auto-import")
 		if err != nil {
 			writeAutoImportStamp(beadsDir, info)
 			fmt.Fprintf(os.Stderr, "warning: auto-import from %s failed: %v\n", jsonlPath, err)
@@ -133,9 +145,9 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 			fmt.Fprintf(os.Stderr, "If this persists, please report at https://github.com/gastownhall/beads/issues\n\n")
 			return
 		}
-		// A file whose every row was retired imported nothing, but it was
-		// attempted: stamp it, or every command would re-read it.
-		if imported > 0 || len(retiredIDs) > 0 {
+		// A file whose every row was retired or rejected imported nothing,
+		// but it was attempted: stamp it, or every command would re-read it.
+		if imported > 0 || len(retiredIDs) > 0 || len(rejected) > 0 {
 			writeAutoImportStamp(beadsDir, info)
 			// Signal PersistentPostRun to auto-commit (no explicit DOLT_COMMIT here).
 			commandDidWrite.Store(true)
@@ -172,7 +184,7 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 		fmt.Fprintf(os.Stderr, "warning: auto-import: dolt commit failed: %v\n", err)
 		return
 	}
-	if result.Issues > 0 || result.Memories > 0 || result.Retired > 0 {
+	if result.Issues > 0 || result.Memories > 0 || result.Retired > 0 || len(result.Rejected) > 0 {
 		writeAutoImportStamp(beadsDir, info)
 	}
 
