@@ -126,7 +126,7 @@
 # newly-discovered names, onto whichever shard is currently lightest, so
 # two unrelated PRs that each add one test do not textually conflict or
 # silently invalidate each other's packing. Pass --repack to force a full
-# from-scratch rebalance instead (a deliberate, separate change — expect a
+# from-scratch rebalance instead (a deliberate, separate change â€” expect a
 # large diff). --check only verifies every discovered name is listed here
 # exactly once (no stale or duplicate entries); it does NOT verify the
 # packing is still well-balanced.
