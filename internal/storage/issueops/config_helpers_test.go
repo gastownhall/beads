@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -558,4 +559,107 @@ func TestResolveCustomConfigInTxPropagatesReadErrors(t *testing.T) {
 		requireResolveCause(t, statuses, customTypes, err, cause)
 		expectationsMet(t, mock)
 	})
+}
+
+// Missing pre-migration tables and empty normalized tables still fall back to
+// the legacy config rows and then config.yaml, with status categories and the
+// custom-type composition (database layer unioned with config.yaml) intact.
+func TestResolveCustomConfigInTxPreservesFallbacks(t *testing.T) {
+	statusesMissing := errors.New("Error 1146 (42S02): Table 'beads.custom_statuses' doesn't exist")
+	typesMissing := errors.New("Error 1146 (42S02): table not found: custom_types")
+	cases := []struct {
+		name         string
+		yaml         string
+		expect       func(mock sqlmock.Sqlmock)
+		wantStatuses []types.CustomStatus
+		wantTypes    []string
+	}{
+		{
+			name: "missing tables use legacy config rows",
+			yaml: "types:\n  custom: \"extra\"\n",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(regexp.QuoteMeta(customStatusesQuery)).WillReturnError(statusesMissing)
+				mock.ExpectQuery(regexp.QuoteMeta(customTypesQuery)).WillReturnError(typesMissing)
+				mock.ExpectQuery(regexp.QuoteMeta(customConfigQuery)).
+					WillReturnRows(sqlmock.NewRows([]string{"key", "value"}).
+						AddRow("status.custom", "review:active,parked:frozen").
+						AddRow("types.custom", "spike,research"))
+			},
+			wantStatuses: []types.CustomStatus{
+				{Name: "review", Category: types.CategoryActive},
+				{Name: "parked", Category: types.CategoryFrozen},
+			},
+			wantTypes: []string{"spike", "research", "extra"},
+		},
+		{
+			name: "empty tables and no config rows use config.yaml",
+			yaml: "status:\n  custom: \"triage:wip\"\ntypes:\n  custom: \"extra, extra\"\n",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(regexp.QuoteMeta(customStatusesQuery)).WillReturnRows(statusRows())
+				mock.ExpectQuery(regexp.QuoteMeta(customTypesQuery)).WillReturnRows(typeRows())
+				mock.ExpectQuery(regexp.QuoteMeta(customConfigQuery)).
+					WillReturnRows(sqlmock.NewRows([]string{"key", "value"}))
+			},
+			wantStatuses: []types.CustomStatus{{Name: "triage", Category: types.CategoryWIP}},
+			wantTypes:    []string{"extra"},
+		},
+		{
+			name: "nothing configured anywhere",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(regexp.QuoteMeta(customStatusesQuery)).WillReturnRows(statusRows())
+				mock.ExpectQuery(regexp.QuoteMeta(customTypesQuery)).WillReturnRows(typeRows())
+				mock.ExpectQuery(regexp.QuoteMeta(customConfigQuery)).
+					WillReturnRows(sqlmock.NewRows([]string{"key", "value"}))
+			},
+		},
+		{
+			name: "populated tables union config.yaml types",
+			yaml: "status:\n  custom: \"ignored:done\"\ntypes:\n  custom: \"extra,spike\"\n",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(regexp.QuoteMeta(customStatusesQuery)).
+					WillReturnRows(statusRows([2]string{"archived", "done"}, [2]string{"review", "active"}))
+				mock.ExpectQuery(regexp.QuoteMeta(customTypesQuery)).WillReturnRows(typeRows("spike"))
+			},
+			wantStatuses: []types.CustomStatus{
+				{Name: "archived", Category: types.CategoryDone},
+				{Name: "review", Category: types.CategoryActive},
+			},
+			wantTypes: []string{"spike", "extra"},
+		},
+		{
+			name: "status table resolved, missing type table uses its config row",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(regexp.QuoteMeta(customStatusesQuery)).
+					WillReturnRows(statusRows([2]string{"review", "active"}))
+				mock.ExpectQuery(regexp.QuoteMeta(customTypesQuery)).WillReturnError(typesMissing)
+				mock.ExpectQuery(regexp.QuoteMeta(customConfigQuery)).
+					WillReturnRows(sqlmock.NewRows([]string{"key", "value"}).
+						AddRow("status.custom", "ignored:done").
+						AddRow("types.custom", "legacy"))
+			},
+			wantStatuses: []types.CustomStatus{{Name: "review", Category: types.CategoryActive}},
+			wantTypes:    []string{"legacy"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withYAMLCustomConfig(t, tc.yaml)
+			_, mock, tx := beginMockTx(t)
+			tc.expect(mock)
+
+			statuses, customTypes, err := ResolveCustomConfigInTx(context.Background(), tx)
+			if err != nil {
+				t.Fatalf("ResolveCustomConfigInTx: %v", err)
+			}
+			if !reflect.DeepEqual(statuses, tc.wantStatuses) {
+				t.Fatalf("statuses = %v, want %v", statuses, tc.wantStatuses)
+			}
+			if !reflect.DeepEqual(customTypes, tc.wantTypes) {
+				t.Fatalf("types = %v, want %v", customTypes, tc.wantTypes)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+		})
+	}
 }
