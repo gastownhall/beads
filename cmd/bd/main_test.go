@@ -520,3 +520,202 @@ func TestServerModeOverrideEmbeddedMismatchNotice(t *testing.T) {
 		})
 	}
 }
+
+// GH#4746: the runtime-override notice must stay inside its stated
+// conditions. The shared-server notice keeps priority and its remedies,
+// configurations that do not pit a runtime override against an explicit
+// embedded metadata setting stay silent, and every case keeps the resolver's
+// existing mode selection, an empty stdout and a nil error.
+func TestServerModeOverrideEmbeddedMismatchNoticeScope(t *testing.T) {
+	const (
+		embedded      = `{"backend":"dolt","dolt_mode":"embedded"}`
+		sharedNotice  = "shared-server mode is enabled"
+		modeEnvNotice = "BEADS_DOLT_SERVER_MODE=1 selects server mode"
+		hostNotice    = "BEADS_DOLT_SERVER_HOST names a non-local host"
+	)
+	tests := []struct {
+		name         string
+		metadata     string
+		configYAML   string
+		embeddedDir  bool
+		env          map[string]string
+		wantServer   bool
+		wantProxied  bool
+		wantNotice   string // "" means stderr must be empty
+		wantRemedies []string
+	}{
+		{
+			name:         "shared-server env outranks both overrides",
+			metadata:     embedded,
+			embeddedDir:  true,
+			env:          map[string]string{"BEADS_DOLT_SHARED_SERVER": "1", "BEADS_DOLT_SERVER_MODE": "1", "BEADS_DOLT_SERVER_HOST": "db.example.com"},
+			wantServer:   true,
+			wantNotice:   sharedNotice,
+			wantRemedies: []string{"To persist server mode", "unset BEADS_DOLT_SHARED_SERVER (or remove dolt.shared-server from config.yaml)"},
+		},
+		{
+			name:         "shared-server from config.yaml without an embedded dir",
+			metadata:     embedded,
+			configYAML:   "dolt.shared-server: true\n",
+			env:          map[string]string{"BEADS_DOLT_SERVER_MODE": "1"},
+			wantServer:   true,
+			wantNotice:   sharedNotice,
+			wantRemedies: []string{"To persist server mode", "unset BEADS_DOLT_SHARED_SERVER (or remove dolt.shared-server from config.yaml)"},
+		},
+		{
+			name:         "server mode env outranks host env",
+			metadata:     embedded,
+			embeddedDir:  true,
+			env:          map[string]string{"BEADS_DOLT_SERVER_MODE": "1", "BEADS_DOLT_SERVER_HOST": "db.example.com"},
+			wantServer:   true,
+			wantNotice:   modeEnvNotice,
+			wantRemedies: []string{"To persist server mode", "unset BEADS_DOLT_SERVER_MODE."},
+		},
+		{
+			name:       "explicit server metadata",
+			metadata:   `{"backend":"dolt","dolt_mode":"server"}`,
+			env:        map[string]string{"BEADS_DOLT_SERVER_MODE": "1"},
+			wantServer: true,
+		},
+		{
+			name:        "proxied-server metadata",
+			metadata:    `{"backend":"dolt","dolt_mode":"proxied-server"}`,
+			env:         map[string]string{"BEADS_DOLT_SERVER_MODE": "1", "BEADS_DOLT_SERVER_HOST": "db.example.com"},
+			wantServer:  true,
+			wantProxied: true,
+		},
+		{
+			name:        "non-Dolt backend",
+			metadata:    `{"backend":"sqlite","dolt_mode":"embedded"}`,
+			embeddedDir: true,
+			env:         map[string]string{"BEADS_DOLT_SERVER_MODE": "1", "BEADS_DOLT_SERVER_HOST": "db.example.com"},
+		},
+		{
+			name:        "implicit embedded mode with server mode env",
+			metadata:    `{"backend":"dolt"}`,
+			embeddedDir: true,
+			env:         map[string]string{"BEADS_DOLT_SERVER_MODE": "1"},
+			wantServer:  true,
+		},
+		{
+			name:        "implicit embedded mode with host env",
+			metadata:    `{"backend":"dolt"}`,
+			embeddedDir: true,
+			env:         map[string]string{"BEADS_DOLT_SERVER_HOST": "db.example.com"},
+			wantServer:  true,
+		},
+		{
+			name:        "localhost host env",
+			metadata:    embedded,
+			embeddedDir: true,
+			env:         map[string]string{"BEADS_DOLT_SERVER_HOST": "localhost"},
+		},
+		{
+			name:        "loopback host env",
+			metadata:    embedded,
+			embeddedDir: true,
+			env:         map[string]string{"BEADS_DOLT_SERVER_HOST": "127.0.0.1"},
+		},
+		{
+			name:        "empty host env",
+			metadata:    embedded,
+			embeddedDir: true,
+			env:         map[string]string{"BEADS_DOLT_SERVER_HOST": ""},
+		},
+		{
+			name:        "bare server port env",
+			metadata:    embedded,
+			embeddedDir: true,
+			env:         map[string]string{"BEADS_DOLT_SERVER_PORT": "3307"},
+		},
+		{
+			name:        "server mode env true is not 1",
+			metadata:    embedded,
+			embeddedDir: true,
+			env:         map[string]string{"BEADS_DOLT_SERVER_MODE": "true"},
+		},
+		{
+			name:        "server mode env 0",
+			metadata:    embedded,
+			embeddedDir: true,
+			env:         map[string]string{"BEADS_DOLT_SERVER_MODE": "0"},
+		},
+		{
+			name:        "persisted non-local host under explicit embedded",
+			metadata:    `{"backend":"dolt","dolt_mode":"embedded","dolt_server_host":"db.example.com"}`,
+			embeddedDir: true,
+		},
+		{
+			name:       "persisted non-local host without a mode",
+			metadata:   `{"backend":"dolt","dolt_server_host":"db.example.com"}`,
+			wantServer: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			beadsDir := modeMismatchWorkspace(t, tt.metadata, tt.configYAML, tt.embeddedDir)
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+			before, err := os.ReadFile(configfile.ConfigPath(beadsDir))
+			if err != nil {
+				t.Fatalf("read metadata.json: %v", err)
+			}
+
+			stdout, stderr, err := loadModeCapturingOutput(t, beadsDir)
+			if err != nil {
+				t.Fatalf("loadServerModeFromBeadsDir: %v", err)
+			}
+			if serverMode != tt.wantServer || proxiedServerMode != tt.wantProxied {
+				t.Errorf("mode selection changed: serverMode=%v proxiedServerMode=%v, want %v/%v",
+					serverMode, proxiedServerMode, tt.wantServer, tt.wantProxied)
+			}
+			if stdout != "" {
+				t.Errorf("stdout must stay untouched, got: %q", stdout)
+			}
+			if tt.wantNotice == "" {
+				if stderr != "" {
+					t.Errorf("expected no notice, got stderr: %q", stderr)
+				}
+			} else {
+				if strings.Count(stderr, "Notice:") != 1 || !strings.Contains(stderr, tt.wantNotice) {
+					t.Errorf("expected exactly one %q notice, got stderr: %q", tt.wantNotice, stderr)
+				}
+				for _, remedy := range tt.wantRemedies {
+					if !strings.Contains(stderr, remedy) {
+						t.Errorf("expected remedy %q, got stderr: %q", remedy, stderr)
+					}
+				}
+			}
+			after, err := os.ReadFile(configfile.ConfigPath(beadsDir))
+			if err != nil {
+				t.Fatalf("re-read metadata.json: %v", err)
+			}
+			if string(before) != string(after) {
+				t.Errorf("metadata.json was rewritten:\nbefore: %s\nafter: %s", before, after)
+			}
+		})
+	}
+
+	// The once-per-process guard is set only by a printed notice: a quiet
+	// load must not consume it, so a later conflicting load still warns.
+	t.Run("quiet load then conflicting load", func(t *testing.T) {
+		beadsDir := modeMismatchWorkspace(t, embedded, "", true)
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "true")
+		_, stderr, err := loadModeCapturingOutput(t, beadsDir)
+		if err != nil {
+			t.Fatalf("quiet load: %v", err)
+		}
+		if stderr != "" || serverMode {
+			t.Fatalf("expected a quiet embedded load, got serverMode=%v stderr %q", serverMode, stderr)
+		}
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+		_, stderr, err = loadModeCapturingOutput(t, beadsDir)
+		if err != nil {
+			t.Fatalf("conflicting load: %v", err)
+		}
+		if !serverMode || !strings.Contains(stderr, modeEnvNotice) {
+			t.Errorf("expected server mode and the override notice, got serverMode=%v stderr %q", serverMode, stderr)
+		}
+	})
+}
