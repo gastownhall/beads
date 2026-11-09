@@ -26,6 +26,9 @@
 -- pending-migration dirty-table guard scans the raw text of pending files, and
 -- this marker must be seen as touching the four tables.
 --
+-- The repair runs in one SQL transaction, so an interrupted repair leaves
+-- nothing behind and the next open retries it.
+--
 -- The cursor table is dolt-ignored, so the marker is clone-local: wisp rows
 -- never replicate, so every clone types its own. Converted rows keep their id,
 -- type, created_at, created_by and metadata, and updated_at is untouched.

@@ -39,7 +39,7 @@ var preMigrationRepairs = map[repairKey]func(context.Context, DBConn) error{
 	{"ignored_schema_migrations", 7}:  ensureWispIsBlockedForRecompute,
 	{"ignored_schema_migrations", 15}: ensureWispIsBlockedForRecompute,
 	{"ignored_schema_migrations", 31}: seedEventsFromPreflipHistory,
-	{"ignored_schema_migrations", 32}: typeLocalExternalDependencyTargets,
+	{"ignored_schema_migrations", 32}: inRepairTx(typeLocalExternalDependencyTargets),
 }
 
 // preMigrationRepair dispatches any repair registered for (source, version).
@@ -48,6 +48,37 @@ func (m migrationSource) preMigrationRepair(ctx context.Context, db DBConn, vers
 		return repair(ctx, db)
 	}
 	return nil
+}
+
+// inRepairTx runs repair in one SQL transaction on the pass's pinned
+// connection, so an error or kill partway through leaves none of its writes
+// and the next open retries it whole. The pass holds
+// @@dolt_transaction_commit suspended, so the transaction's COMMIT makes no
+// Dolt commit: the repaired rows land in the working set ahead of the
+// migration's cursor row and ride the pass's own schema commit, in the same
+// order as an unwrapped repair. Embedded and server opens both migrate on a
+// pinned *sql.Conn; any other DBConn (a pooled *sql.DB, whose BeginTx could
+// pick a session without the suspension, or a caller's own *sql.Tx) runs the
+// repair as is.
+func inRepairTx(repair func(context.Context, DBConn) error) func(context.Context, DBConn) error {
+	return func(ctx context.Context, db DBConn) error {
+		conn, ok := db.(*sql.Conn)
+		if !ok {
+			return repair(ctx, db)
+		}
+		tx, err := conn.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin repair transaction: %w", err)
+		}
+		if err := repair(ctx, tx); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit repair transaction: %w", err)
+		}
+		return nil
+	}
 }
 
 // repairV53RigAndSplitTargets is the pre-0053 repair: it backfills the issues

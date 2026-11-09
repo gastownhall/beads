@@ -36,6 +36,27 @@ func SetLocalExternalDepsNoticeOutForTest(w io.Writer) func() {
 	return func() { localExternalDepsNoticeOut = prev }
 }
 
+// localExternalDepsFaultHook, when set by a test, runs at each named stage of
+// the repair ("typed" after the row UPDATEs, "recomputed" after the
+// is_blocked recompute); an error aborts the repair there, emulating an
+// interruption before its transaction commits. Production leaves it nil.
+var localExternalDepsFaultHook func(stage string) error
+
+// SetLocalExternalDepsFaultHookForTest installs fn as the repair's fault hook
+// and returns a function that restores the previous value. Test-only.
+func SetLocalExternalDepsFaultHookForTest(fn func(stage string) error) func() {
+	prev := localExternalDepsFaultHook
+	localExternalDepsFaultHook = fn
+	return func() { localExternalDepsFaultHook = prev }
+}
+
+func localExternalDepsFault(stage string) error {
+	if localExternalDepsFaultHook == nil {
+		return nil
+	}
+	return localExternalDepsFaultHook(stage)
+}
+
 // localExternalDep is one depends_on_external row the repair may type.
 type localExternalDep struct {
 	id, source, target, depType string
@@ -109,10 +130,13 @@ func typeLocalExternalDependencyTargets(ctx context.Context, db DBConn) error {
 			affectedWisps = append(affectedWisps, wisps...)
 		}
 	}
+	if err := localExternalDepsFault("typed"); err != nil {
+		return err
+	}
 	if err := issueops.RecomputeIsBlockedInTx(ctx, db, uniqueStrings(affectedIssues), uniqueStrings(affectedWisps)); err != nil {
 		return fmt.Errorf("recompute is_blocked after typing local dependency targets: %w", err)
 	}
-	return nil
+	return localExternalDepsFault("recomputed")
 }
 
 // readLocalExternalDeps reads every row of table whose depends_on_external is

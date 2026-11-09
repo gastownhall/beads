@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -252,5 +253,74 @@ INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, c
 	}
 	if !ignoredCursorHas(t, ctx, conn, 32) {
 		t.Fatal("a kept-external conflict must not hold the 0032 marker back")
+	}
+}
+
+// TestEmbeddedMigrateLocalExternalDepsRepairIsAtomic pins that the repair
+// commits all or nothing: interrupted after its UPDATEs or after the
+// is_blocked recompute, it leaves no typed row, no recomputed flag, no marker
+// and no Dolt commit, and the next open retries it to completion. The
+// successful retry adds exactly the pass's own schema commit, which carries
+// the typed rows: the repair's SQL COMMIT, made while the pass has
+// dolt_transaction_commit suspended, makes no Dolt commit of its own.
+func TestEmbeddedMigrateLocalExternalDepsRepairIsAtomic(t *testing.T) {
+	requireEmbedded(t)
+	errInjected := errors.New("injected interruption")
+	for _, stage := range []string{"typed", "recomputed"} {
+		t.Run(stage, func(t *testing.T) {
+			ctx := t.Context()
+			conn, closeConn := legacyExternalDepsDB(t, ctx, []legacyExternalDep{
+				{"dependencies", "xpa-1", "xpb-1", "blocks"},
+				{"dependencies", "xpa-2", "xpb-w1", "blocks"},
+				{"wisp_dependencies", "xpa-w2", "xpb-1", "blocks"},
+			}, "")
+			defer closeConn()
+			before := legacyRowsSnapshot(t, ctx, conn)
+			commits := doltCommitCount(t, ctx, conn)
+
+			restore := schema.SetLocalExternalDepsFaultHookForTest(func(at string) error {
+				if at == stage {
+					return errInjected
+				}
+				return nil
+			})
+			_, err := schema.MigrateUp(ctx, conn)
+			restore()
+			if !errors.Is(err, errInjected) {
+				t.Fatalf("MigrateUp with the repair interrupted %s = %v, want the injected error", stage, err)
+			}
+			if after := legacyRowsSnapshot(t, ctx, conn); !reflect.DeepEqual(after, before) {
+				t.Fatalf("the interrupted repair left debris:\n before %v\n after  %v", before, after)
+			}
+			if ignoredCursorHas(t, ctx, conn, 32) {
+				t.Fatal("the interrupted repair recorded the 0032 marker")
+			}
+			if got := doltCommitCount(t, ctx, conn); got != commits {
+				t.Fatalf("the interrupted repair made %d Dolt commits", got-commits)
+			}
+
+			if _, err := schema.MigrateUp(ctx, conn); err != nil {
+				t.Fatalf("MigrateUp (retry): %v", err)
+			}
+			requireDepTyped(t, ctx, conn, "dependencies", "xpa-1", "xpb-1", "depends_on_issue_id")
+			requireDepTyped(t, ctx, conn, "dependencies", "xpa-2", "xpb-w1", "depends_on_wisp_id")
+			requireDepTyped(t, ctx, conn, "wisp_dependencies", "xpa-w2", "xpb-1", "depends_on_issue_id")
+			if !isBlockedRow(t, ctx, conn, "issues", "xpa-1") || !isBlockedRow(t, ctx, conn, "wisps", "xpa-w2") {
+				t.Fatal("the retried repair did not recompute is_blocked")
+			}
+			if !ignoredCursorHas(t, ctx, conn, 32) {
+				t.Fatal("the retried repair did not record the 0032 marker")
+			}
+			if got := doltCommitCount(t, ctx, conn); got != commits+1 {
+				t.Fatalf("the retried pass made %d Dolt commits, want its one schema commit", got-commits)
+			}
+			if msg := scalarString(t, ctx, conn, "SELECT message FROM dolt_log LIMIT 1"); msg != "schema: apply migrations" {
+				t.Fatalf("newest Dolt commit = %q, want the pass's schema commit", msg)
+			}
+			if n := scalarInt(t, ctx, conn,
+				"SELECT COUNT(*) FROM dolt_status WHERE table_name IN ('issues', 'dependencies')"); n != 0 {
+				t.Fatalf("the retried repair left %d versioned tables outside the schema commit", n)
+			}
+		})
 	}
 }
