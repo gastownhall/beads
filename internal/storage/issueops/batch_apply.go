@@ -185,10 +185,13 @@ type applyBatchRun struct {
 	result publicops.ApplyBatchResult
 }
 
-// appliedEdge is one edge the request wrote, paired with its item's index.
+// appliedEdge is one edge the request wrote, paired with its item's index and
+// the target kind the write resolved, so the end gate skips edges by what the
+// persisted row actually is rather than by re-deriving it from the prefixes.
 type appliedEdge struct {
 	index int
 	edge  publicops.DependencyEdge
+	kind  DepTargetKind
 }
 
 // apply runs the three phases in order: the items, the metadata splice, the end
@@ -440,6 +443,7 @@ func (r *applyBatchRun) applyDepAdd(ctx context.Context, tx *sql.Tx, index int, 
 	r.edges = append(r.edges, appliedEdge{
 		index: index,
 		edge:  publicops.DependencyEdge{IssueID: source, DependsOnID: target, Type: item.Type},
+		kind:  written.TargetKind,
 	})
 	r.result.Items[index] = publicops.ItemResult{
 		Kind:        publicops.ItemDepAdd,
@@ -604,9 +608,11 @@ func (r *applyBatchRun) runEndGate(ctx context.Context, tx *sql.Tx) error {
 			DependsOnID: applied.edge.DependsOnID,
 			Type:        applied.edge.Type,
 		}
-		// An external or cross-repository target has no local hierarchy to
-		// conflict with, and the per-edge path filters it for the same reason.
-		if IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
+		// An external target has no local hierarchy to conflict with, and the
+		// per-edge path filters it for the same reason. The kind is the one
+		// the write itself resolved (GH#8299): a target that exists locally
+		// under a foreign prefix is a local edge and stays in the gate.
+		if applied.kind == DepTargetExternal {
 			continue
 		}
 		if err := CheckBlockingHierarchyInTx(ctx, tx, dep, cycleDetectionTables()); err != nil {

@@ -55,6 +55,7 @@ go_test(
         "delete_repo_test.go",
         "dependency_event_consistency_test.go",
         "dependency_extras_test.go",
+        "dependency_hierarchy_cross_prefix_test.go",
         "dependency_metadata_test.go",
         "dependency_null_metadata_test.go",
         "dependency_test.go",

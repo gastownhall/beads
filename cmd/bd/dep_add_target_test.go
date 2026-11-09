@@ -14,7 +14,6 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
-	storeissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -33,10 +32,10 @@ import (
 //     bogus external reference. That is bd-gmdx5, and it is a real bug.
 //
 //   - A bare, differently-prefixed target (e.g. "xy-999" from a "be-" issue) is
-//     NOT a bug. storeissueops.IsExternalDepTarget defines exactly this shape as
-//     belonging in depends_on_external, and calls that the single rule every
-//     backend classifies by. It is the multi-rig "add now, route later" shape,
-//     and `bd dep remove` still addresses such an edge. dep add must keep
+//     NOT a bug when nothing local resolves it: a target absent from both local
+//     tables is external no matter its prefix (GH#8299), and depends_on_external
+//     is the column that holds it. It is the multi-rig "add now, route later"
+//     shape, and `bd dep remove` still addresses such an edge. dep add must keep
 //     accepting it, or it would refuse to create an edge the store holds and
 //     dep remove can still delete.
 func TestResolveUnresolvedDepTarget(t *testing.T) {
@@ -239,12 +238,14 @@ func TestResolveUnresolvedDepTarget(t *testing.T) {
 }
 
 // TestResolveUnresolvedDepTargetMatchesStorageClassification pins the CLI's
-// accept/refuse decision to the storage layer's own definition of an external
-// dependency target. Every target dep add passes through here must be one
-// IsExternalDepTarget classifies as external — i.e. one depends_on_external can
-// actually hold. If these two ever disagree, dep add is writing edges a backend
-// will route to the wrong column (or refusing edges it would have held fine),
-// which is the failure this whole change is about.
+// accept/refuse decision to the storage layer's presence-first definition of
+// an external dependency target. Every target dep add passes through here must
+// be one depends_on_external can actually hold: either an explicit "external:"
+// reference, or a bare foreign-prefix id the lookup found nothing for — the
+// absent-presence fact that makes it external whatever its prefix (GH#8299).
+// If these two ever disagree, dep add is writing edges a backend will route
+// to the wrong column (or refusing edges it would have held fine), which is
+// the failure this whole change is about.
 func TestResolveUnresolvedDepTargetMatchesStorageClassification(t *testing.T) {
 	resolveErr := errors.New("issue not found")
 
@@ -269,9 +270,10 @@ func TestResolveUnresolvedDepTargetMatchesStorageClassification(t *testing.T) {
 			if (miss != nil) != tc.unverified {
 				t.Errorf("resolveUnresolvedDepTarget(%q, %q): miss = %v, want unverified %v", sourceID, target, miss, tc.unverified)
 			}
-			if !storeissueops.IsExternalDepTarget(sourceID, toID) {
-				t.Errorf("dep add accepted %q but storage would not classify it as an external dep target; "+
-					"the edge would be written to a column that cannot hold it", toID)
+			if !strings.HasPrefix(toID, "external:") && miss == nil {
+				t.Errorf("dep add accepted %q as an external dep target without either an explicit external: reference "+
+					"or a lookup that found nothing; a locally resolved target is a local edge (GH#8299), "+
+					"and the edge would be written to a column that cannot hold it", toID)
 			}
 		})
 	}

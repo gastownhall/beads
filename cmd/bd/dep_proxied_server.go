@@ -162,11 +162,10 @@ func proxiedLookupTitle(ctx context.Context, uw uow.UnitOfWork, id string) strin
 
 // proxiedDepTargetMiss asks, once a proxied write has stored an edge, the
 // question the direct route asks before its write: does the target exist?
-// The proxied writers resolve no IDs, and the server files a target whose
-// prefix differs from its source's under depends_on_external without looking
-// it up (IsExternalDepTarget in internal/storage/issueops, the rule the
-// domain repository classifies by), so a typo is stored there with a success
-// line (GH#6556).
+// The proxied writers resolve no IDs, and the server files a target nothing
+// locally holds under depends_on_external (the presence-first rule the
+// domain repository classifies by, GH#8299), so a typo is stored there with
+// a success line (GH#6556).
 //
 // It returns the lookup error that left the target unverified, the miss
 // warnUnresolvedDepTarget reads, and nil when the target was found or was not

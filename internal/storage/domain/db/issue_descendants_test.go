@@ -87,8 +87,8 @@ func depTargetColumns(t *testing.T) []string {
 // TestGetDescendantsCrossPrefixParent is the behavioural half of
 // TestBuildDescendantsCTEResolvesEveryDepTargetColumn: that test pins the
 // walk's query text, this one pins that the widened COALESCE matches real rows.
-// The write path classifies a target by prefix alone (issueops.IsExternalDepTarget),
-// so a parent-child edge between two prefixes lands in depends_on_external even
+// The write path once classified a target by prefix alone, so legacy
+// parent-child edges between two prefixes landed in depends_on_external even
 // when both ends are local. Before be-qfm the walk coalesced only the issue and
 // wisp columns, so each child below — and its subtree — was missing from the
 // proxied `bd list --parent` tree. Each one is reached through a different edge

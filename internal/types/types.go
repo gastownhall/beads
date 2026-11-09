@@ -1327,7 +1327,8 @@ type IssueDetails struct {
 	// Dependents slices could not represent, because the issue on the far
 	// end has no row in this database: a cross-repo id or an `external:`
 	// reference, both of which live in the one dependency target column
-	// carrying no foreign key into issues (issueops.IsExternalDepTarget).
+	// carrying no foreign key into issues (depends_on_external, the column a
+	// presence-first classification files every absent target in, GH#8299).
 	// The edge is real and correctly stored; only its far end is
 	// unreachable from here, so the enumeration drops it while the count
 	// keeps it.

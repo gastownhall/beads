@@ -510,7 +510,7 @@ func RunRelationsLeavesTheCallersRequestAlone(t *testing.T, ctx context.Context,
 // decides: "It is an ISSUE and can be nothing else ... Related leaves it out,
 // with no placeholder row and no error" (relations.go:12-17).
 //
-// The two seeds are the two shapes issueops.IsExternalDepTarget names — an
+// The two seeds are the two shapes the presence-first rule names — an
 // "external:" reference and a target whose id prefix belongs to another
 // repository — because each reaches depends_on_external by a different rule and
 // a backend can implement one and miss the other, which is exactly what

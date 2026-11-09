@@ -434,7 +434,7 @@ func TestPersistDependenciesValidatesPlannedHierarchyBeforeBlocking(t *testing.T
 	}
 }
 
-func TestPersistDependenciesSkipsHierarchyValidationAcrossPrefixes(t *testing.T) {
+func TestPersistDependenciesSkipsHierarchyValidationForExternalTargets(t *testing.T) {
 	ctx := context.Background()
 	db, mock, tx := beginMockTx(t)
 	defer db.Close()
@@ -449,8 +449,10 @@ func TestPersistDependenciesSkipsHierarchyValidationAcrossPrefixes(t *testing.T)
 
 	// Both presence probes come up empty, so the bare foreign-prefix target
 	// files external (GH#8299): no issue row to validate existence against,
-	// and the hierarchy walk is skipped for the same reason as before — its
-	// CTE resolves targets through the typed columns of one local graph.
+	// and the hierarchy walk is skipped because the target is EXTERNAL — a
+	// cross-prefix target this database holds takes the walk like any local
+	// one. Its CTE resolves targets through the typed columns of one local
+	// graph.
 	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
 		WithArgs("bb-target").
 		WillReturnError(sql.ErrNoRows)

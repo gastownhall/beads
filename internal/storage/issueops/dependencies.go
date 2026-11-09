@@ -105,17 +105,7 @@ func depTargetIn(alias, placeholders string) string {
 	return depTargetExpr(alias) + " IN (" + placeholders + ")"
 }
 
-// IsExternalDepTarget is the prefix-only shape test the classification rule
-// predates GH#8299: an "external:" reference, or a bare foreign-prefix id. It
-// cannot see presence, so it is only the answer for targets absent from both
-// local tables; write legs classify through ClassifyDepTargetFrom instead, and
-// the remaining read-side callers are being migrated off it.
-func IsExternalDepTarget(sourceID, targetID string) bool {
-	return strings.HasPrefix(targetID, "external:") ||
-		types.ExtractPrefix(sourceID) != types.ExtractPrefix(targetID)
-}
-
-// DepTargetPresence supplies the local-presence reads a classification makes,
+// DepTargetPresence supplies the local-presence reads a classification makes,// DepTargetPresence supplies the local-presence reads a classification makes,
 // from whatever can see the target: a transaction, a domain runner, or the
 // lookup maps a batch preloaded. WispActive keeps IsActiveWispInTx's
 // error tolerance — a missing or unreadable wisps table means "no wisp", not

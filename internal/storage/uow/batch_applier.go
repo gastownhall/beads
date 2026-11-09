@@ -604,9 +604,9 @@ func (r *uowApplyRun) runEndGate(ctx context.Context) error {
 		return domain.NewCycleError("dependency cycle would be created: %s (no edges added; run 'bd dep cycles' for analysis)", cyclePath)
 	}
 	for _, applied := range r.edges {
-		if storageissueops.IsExternalDepTarget(applied.dep.IssueID, applied.dep.DependsOnID) {
-			continue
-		}
+		// No prefix-only skip here: the repository's hierarchy validator itself
+		// decides which targets sit outside every local hierarchy (GH#8299),
+		// so a locally-present foreign-prefix target stays in the gate.
 		if err := r.uw.DependencyUseCase().ValidateBlockingHierarchy(ctx, applied.dep); err != nil {
 			return &publicops.ItemError{
 				Index:   applied.index,
