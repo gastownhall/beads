@@ -40,17 +40,22 @@ func HasTestTitlePrefix(title string) bool {
 // PollutionCandidateFilter selects the issues the pollution scorer considers.
 // Callers add their own row cap; DetectTestPollution applies the same
 // eligibility again, so a caller that loads a superset gets the same result.
+// Ephemeral=false still loads NoHistory rows, which stay eligible.
 func PollutionCandidateFilter() types.IssueFilter {
+	open := types.StatusOpen
+	persistent := false
 	return types.IssueFilter{
-		ExcludeStatus: []types.Status{types.StatusClosed},
-		ExcludeTypes:  []types.IssueType{types.TypeEpic},
+		Status:       &open,
+		ExcludeTypes: []types.IssueType{types.TypeEpic},
+		Ephemeral:    &persistent,
 	}
 }
 
-// pollutionCandidate reports whether issue may be scored at all: closed
-// issues and epics are never pollution (GH#5025).
+// pollutionCandidate reports whether issue may be scored at all: only open,
+// non-ephemeral issues that are not epics. Closed issues, epics and active or
+// parked work are never pollution (GH#5025).
 func pollutionCandidate(issue *types.Issue) bool {
-	return issue.Status != types.StatusClosed && issue.IssueType != types.TypeEpic
+	return issue.Status == types.StatusOpen && issue.IssueType != types.TypeEpic && !issue.Ephemeral
 }
 
 // DetectTestPollution scores issues for test pollution and returns those at
