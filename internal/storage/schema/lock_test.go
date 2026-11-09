@@ -1333,3 +1333,47 @@ func TestMigrateUpWithLockMigrationGate(t *testing.T) {
 		}
 	})
 }
+
+// TestMigrateUpWithLockAsksForTheSessionDatabaseOnlyWhenItMust pins what
+// WithSessionOnDatabase skips: with it the convergence probe does not open with
+// SELECT DATABASE(), and without it the probe still does.
+func TestMigrateUpWithLockAsksForTheSessionDatabaseOnlyWhenItMust(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		opts []MigrateLockOption
+		want bool
+	}{
+		{name: "the caller read it from this session", opts: []MigrateLockOption{WithSessionOnDatabase()}, want: false},
+		{name: "the caller did not", want: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var sent []string
+			db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherFunc(func(_, actual string) error {
+				sent = append(sent, actual)
+				return nil
+			})))
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			stop := errors.New("stop here")
+			mock.ExpectQuery("first").WillReturnError(stop)
+			mock.ExpectQuery("second").WillReturnError(stop)
+
+			conn, err := db.Conn(t.Context())
+			if err != nil {
+				t.Fatalf("Conn: %v", err)
+			}
+			defer conn.Close()
+			if _, err := MigrateUpWithLock(t.Context(), conn, "testdb", tt.opts...); err == nil {
+				t.Fatal("MigrateUpWithLock() error = nil, want the scripted failure")
+			}
+			if len(sent) == 0 {
+				t.Fatal("no statement was sent")
+			}
+			if got := strings.Contains(sent[0], "SELECT DATABASE()"); got != tt.want {
+				t.Fatalf("first statement = %q; asked for the session database = %v, want %v", sent[0], got, tt.want)
+			}
+		})
+	}
+}

@@ -846,7 +846,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The migration consent check reads the schema cursor once.** `MigrateUp`
   read the cursor for the current version and again for the pending list, when
   the check reached the pending list. Both answers now come from one read. A
-  converged server-mode open does not reach this check. The cursor read and
+  converged server-mode open does not reach this check. A direct server open
+  also asks its session for the database name once instead of twice. The cursor read and
   the sentinel column read also go to their tables directly now, without a
   probe first: both read a missing table as absent, and the cursor read also
   treats a session with no usable database as having no cursor. The probes guarded against a failing statement

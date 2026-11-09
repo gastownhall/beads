@@ -3458,7 +3458,8 @@ func initSchemaOnDBWithBootstrapHeal(
 		return 0, fmt.Errorf("schema: read database name: %w", err)
 	}
 
-	var opts []schema.MigrateLockOption
+	// dbName is this session's own answer, read just above.
+	opts := []schema.MigrateLockOption{schema.WithSessionOnDatabase()}
 	if bootstrapHeal != nil {
 		opts = append(opts, schema.WithFreshBootstrapHeal(bootstrapHeal, endpoint))
 	}

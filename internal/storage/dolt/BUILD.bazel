@@ -257,6 +257,7 @@ go_test(
         "id_retention_contract_test.go",
         "identity_mismatch_message_test.go",
         "indeterminate_commit_test.go",
+        "init_schema_session_database_test.go",
         "initschema_0067_versioned_beads_replay_test.go",
         "initschema_0069_datetime_precision_replay_test.go",
         "initschema_concurrent_test.go",

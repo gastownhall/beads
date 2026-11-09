@@ -54,7 +54,13 @@ func alreadyConverged(ctx context.Context, db DBConn, databaseName string, selec
 	if !onTarget {
 		return false, nil
 	}
+	return convergedOnTarget(ctx, db, databaseName, qualifier)
+}
 
+// convergedOnTarget is the rest of alreadyConverged, for a session already known
+// to be on databaseName. qualifier is what selectTargetDatabase returned, empty
+// when nothing had to be selected.
+func convergedOnTarget(ctx context.Context, db DBConn, databaseName, qualifier string) (bool, error) {
 	// This probe writes nothing, so its table lookups share one listing instead
 	// of sending a dozen. tableListingUnchanged below re-reads it before the lock
 	// term, so the listing is no older than the lookups' last answer used to be.
