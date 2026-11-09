@@ -1541,6 +1541,7 @@ func RunDependencyEditorWritesTheTargetIntoItsTypedColumn(t *testing.T, ctx cont
 	// hold several prefixes (allowed_prefixes), so the prefix alone does not
 	// say the target lives in another rig's database (GH#8299).
 	crossIssueTarget := "x" + fixture.IssuePrefix + "-tcol-issuetgt"
+	crossWispTarget := "x" + fixture.IssuePrefix + "-tcol-wisptgt"
 	const external = "external:https://example.invalid/tracker/61"
 	const foreign = "othertcol-9001"
 	seedDependencyEditorIssue(t, ctx, fixture, issue)
@@ -1548,6 +1549,7 @@ func RunDependencyEditorWritesTheTargetIntoItsTypedColumn(t *testing.T, ctx cont
 	seedDependencyEditorIssue(t, ctx, fixture, crossIssueTarget)
 	seedDependencyEditorWisp(t, ctx, fixture, wisp)
 	seedDependencyEditorWisp(t, ctx, fixture, wispTarget)
+	seedDependencyEditorWisp(t, ctx, fixture, crossWispTarget)
 
 	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
 		Actor: "writer",
@@ -1560,6 +1562,8 @@ func RunDependencyEditorWritesTheTargetIntoItsTypedColumn(t *testing.T, ctx cont
 			{IssueID: wisp, DependsOnID: issueTarget, Type: publicops.DepRelated},
 			{IssueID: issue, DependsOnID: crossIssueTarget, Type: publicops.DepBlocks},
 			{IssueID: wisp, DependsOnID: crossIssueTarget, Type: publicops.DepRelated},
+			{IssueID: issue, DependsOnID: crossWispTarget, Type: publicops.DepRelated},
+			{IssueID: wisp, DependsOnID: crossWispTarget, Type: publicops.DepBlocks},
 		},
 	}); err != nil {
 		t.Fatalf("AddDependencies over the four target classes: %v", err)
@@ -1588,6 +1592,10 @@ func RunDependencyEditorWritesTheTargetIntoItsTypedColumn(t *testing.T, ctx cont
 			"a local issue of another prefix is still a local issue, not another rig's"},
 		{"wisp_dependencies", wisp, crossIssueTarget, "depends_on_issue_id",
 			"a wisp-sourced edge classifies a local cross-prefix issue the same way"},
+		{"dependencies", issue, crossWispTarget, "depends_on_wisp_id",
+			"an active wisp of another prefix is still a local wisp"},
+		{"wisp_dependencies", wisp, crossWispTarget, "depends_on_wisp_id",
+			"a wisp-sourced edge classifies a local cross-prefix wisp the same way"},
 	} {
 		assertDependencyEditorTargetColumn(t, ctx, fixture, want.table, want.source, want.target, want.column, want.why)
 	}

@@ -98,3 +98,52 @@ func crossPrefixReady(t *testing.T, ctx context.Context, te *testEnv, id string)
 	}
 	return slices.ContainsFunc(ready, func(issue *types.Issue) bool { return issue.ID == id })
 }
+
+// TestEmbeddedCrossPrefixWispTargetBlocksLikeASamePrefixWisp: an active wisp of
+// another prefix is a local wisp target (GH#8299). From an issue source and
+// from a wisp source the edge files it in depends_on_wisp_id, and the source's
+// blocked state follows it exactly as it follows a same-prefix wisp.
+func TestEmbeddedCrossPrefixWispTargetBlocksLikeASamePrefixWisp(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "a")
+	ctx := t.Context()
+
+	const crossWisp, sameWisp = "b-xw1", "a-sw1"
+	type pair struct {
+		source, table, sourceTable, target string
+	}
+	pairs := []pair{
+		{"a-xi1", "dependencies", "issues", crossWisp},
+		{"a-xws1", "wisp_dependencies", "wisps", crossWisp},
+		{"a-si1", "dependencies", "issues", sameWisp},
+		{"a-sws1", "wisp_dependencies", "wisps", sameWisp},
+	}
+	for _, seed := range []struct {
+		id        string
+		ephemeral bool
+	}{
+		{crossWisp, true}, {sameWisp, true},
+		{"a-xi1", false}, {"a-xws1", true}, {"a-si1", false}, {"a-sws1", true},
+	} {
+		issue := &types.Issue{ID: seed.id, Title: seed.id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: seed.ephemeral}
+		if err := te.store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", seed.id, err)
+		}
+	}
+	for _, p := range pairs {
+		if err := te.store.AddDependency(ctx, &types.Dependency{IssueID: p.source, DependsOnID: p.target, Type: types.DepBlocks}, "tester"); err != nil {
+			t.Fatalf("AddDependency %s -> %s: %v", p.source, p.target, err)
+		}
+		assertCrossPrefixEdgeColumn(t, ctx, te, p.table, p.source, p.target, "depends_on_wisp_id")
+		assertCrossPrefixIsBlocked(t, ctx, te, p.sourceTable, p.source, 1)
+	}
+
+	for _, id := range []string{crossWisp, sameWisp} {
+		if err := te.store.CloseIssue(ctx, id, "done", "tester", ""); err != nil {
+			t.Fatalf("CloseIssue %s: %v", id, err)
+		}
+	}
+	for _, p := range pairs {
+		assertCrossPrefixIsBlocked(t, ctx, te, p.sourceTable, p.source, 0)
+	}
+}
