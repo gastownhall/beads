@@ -322,7 +322,7 @@ func newPreviewStoreFromConfig(ctx context.Context, beadsDir string) (storage.Do
 //
 // The registry arm is the exception: it returns whatever the backend's
 // OpenReadOnly means, and that one hook also serves the root pre-run's
-// classified reads, `bd ready --claim` included, so it may be writable. The
+// classified reads, whose contract is a writable store. The
 // http client backend's read-only open is (httpclient.NewReadOnlyFromConfig),
 // and a write through it reaches its bd serve. The journal exemption still
 // holds there: recording that write is the business of the server that applies

@@ -16,17 +16,20 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 func TestEffectiveRootStorePolicy(t *testing.T) {
 	tests := []struct {
 		name             string
-		command          string
+		command          []string
 		strictReadonly   bool
 		wantReadOnly     bool
 		wantDisableStart bool
@@ -34,18 +37,18 @@ func TestEffectiveRootStorePolicy(t *testing.T) {
 	}{
 		{
 			name:            "ordinary write command",
-			command:         "create",
+			command:         []string{"create"},
 			wantMaintenance: true,
 		},
 		{
 			name:            "classified read keeps compatibility maintenance",
-			command:         "search",
+			command:         []string{"search"},
 			wantReadOnly:    true,
 			wantMaintenance: true,
 		},
 		{
 			name:             "strict readonly governs unclassified command",
-			command:          "create",
+			command:          []string{"create"},
 			strictReadonly:   true,
 			wantReadOnly:     true,
 			wantDisableStart: true,
@@ -55,7 +58,7 @@ func TestEffectiveRootStorePolicy(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			policy := effectiveRootStorePolicy(tc.command, tc.strictReadonly)
+			policy := effectiveRootStorePolicy(parseInvocationForTest(t, tc.command...), tc.strictReadonly)
 			if policy.readOnly != tc.wantReadOnly {
 				t.Fatalf("readOnly = %v, want %v", policy.readOnly, tc.wantReadOnly)
 			}
@@ -67,6 +70,122 @@ func TestEffectiveRootStorePolicy(t *testing.T) {
 			}
 		})
 	}
+}
+
+// parseInvocationForTest resolves args against the real command tree and
+// parses the leaf's flags the way cobra does before the root pre-run, then
+// restores every flag it set: the commands are package-level singletons.
+func parseInvocationForTest(t *testing.T, args ...string) *cobra.Command {
+	t.Helper()
+	return parseInvocationInTreeForTest(t, rootCmd, args...)
+}
+
+func parseInvocationInTreeForTest(t *testing.T, root *cobra.Command, args ...string) *cobra.Command {
+	t.Helper()
+	target, rest, err := root.Find(args)
+	if err != nil {
+		t.Fatalf("resolve %v: %v", args, err)
+	}
+	t.Cleanup(func() {
+		target.Flags().VisitAll(func(f *pflag.Flag) {
+			if !f.Changed {
+				return
+			}
+			_ = f.Value.Set(f.DefValue)
+			f.Changed = false
+		})
+	})
+	if err := target.ParseFlags(rest); err != nil {
+		t.Fatalf("parse flags %v: %v", args, err)
+	}
+	return target
+}
+
+// TestCommandReadsOnlyIsFlagAware pins the per-invocation classification of
+// bd-fwx149 (GH#8264): `bd ready --claim` and `bd duplicates --auto-merge`
+// write, so they are admitted exactly like `bd update --claim` — writer open,
+// identity check, journal admission and JSONL import — while the plain
+// listings, false flags, previews, `bd mol ready` and strict readonly keep the
+// policies they had.
+func TestCommandReadsOnlyIsFlagAware(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("import.auto", true)
+
+	// A tree whose root is not named bd: classification keys on the command
+	// path below the root, never on the executable's name.
+	renamed := &cobra.Command{Use: "beads"}
+	renamedReady := &cobra.Command{Use: "ready", Run: func(*cobra.Command, []string) {}}
+	renamedReady.Flags().Bool("claim", false, "")
+	renamed.AddCommand(renamedReady)
+
+	tests := []struct {
+		name       string
+		root       *cobra.Command
+		args       []string
+		strict     bool
+		wantWriter bool
+	}{
+		{name: "update --claim is the writer control", args: []string{"update", "x-1", "--claim"}, wantWriter: true},
+		{name: "plain ready reads", args: []string{"ready"}},
+		{name: "ready --claim writes", args: []string{"ready", "--claim"}, wantWriter: true},
+		{name: "ready --claim=false reads", args: []string{"ready", "--claim=false"}},
+		{name: "ready with an unrelated flag reads", args: []string{"ready", "--limit", "3"}},
+		{name: "plain duplicates reads", args: []string{"duplicates"}},
+		{name: "duplicates --auto-merge writes", args: []string{"duplicates", "--auto-merge"}, wantWriter: true},
+		{name: "duplicates --auto-merge=false reads", args: []string{"duplicates", "--auto-merge=false"}},
+		{name: "duplicates --auto-merge --dry-run is a preview", args: []string{"duplicates", "--auto-merge", "--dry-run"}},
+		{name: "duplicates --auto-merge --dry-run=false writes", args: []string{"duplicates", "--auto-merge", "--dry-run=false"}, wantWriter: true},
+		{name: "mol ready is not bd ready", args: []string{"mol", "ready"}},
+		{name: "renamed root ready reads", root: renamed, args: []string{"ready"}},
+		{name: "renamed root ready --claim writes", root: renamed, args: []string{"ready", "--claim"}, wantWriter: true},
+		{name: "strict readonly still governs ready --claim", args: []string{"ready", "--claim"}, strict: true},
+		{name: "strict readonly still governs update --claim", args: []string{"update", "x-1", "--claim"}, strict: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := tc.root
+			if root == nil {
+				root = rootCmd
+			}
+			cmd := parseInvocationInTreeForTest(t, root, tc.args...)
+			if !tc.strict {
+				if got := commandReadsOnly(cmd); got == tc.wantWriter {
+					t.Errorf("commandReadsOnly(%v) = %t, want %t", tc.args, got, !tc.wantWriter)
+				}
+			}
+
+			// The root pre-run's decision, as it makes it.
+			previewMode := isPreviewCommand(cmd)
+			policy := effectiveRootStorePolicy(cmd, tc.strict)
+			useReadOnly := policy.readOnly || previewMode
+			if wantReadOnly := !tc.wantWriter; useReadOnly != wantReadOnly {
+				t.Errorf("useReadOnly(%v) = %t, want %t: the open, freeze gate, identity check and journal admission all follow it", tc.args, useReadOnly, wantReadOnly)
+			}
+			// Classification never moves auto-start or maintenance; only
+			// strict readonly does.
+			if policy.disableAutoStart != tc.strict || policy.runMaintenance == tc.strict {
+				t.Errorf("policy(%v, strict=%t) = %+v: auto-start/maintenance must follow strict readonly alone", tc.args, tc.strict, policy)
+			}
+			// Proxied open posture: a writer opens for bead writes, so it takes
+			// the migration gate's refusal instead of the read-through.
+			if got := uow.OpensForBeadWrites(rootProviderOptions(previewMode, useReadOnly, false)...); got != tc.wantWriter {
+				t.Errorf("proxied provider opens for bead writes = %t, want %t", got, tc.wantWriter)
+			}
+			// Empty-database JSONL recovery runs for writers only.
+			if got := shouldRunAutoImportJSONL(cmd, &fakeFallbackStore{}, useReadOnly, false, false); got != tc.wantWriter {
+				t.Errorf("shouldRunAutoImportJSONL = %t, want %t", got, tc.wantWriter)
+			}
+		})
+	}
+
+	t.Run("nil classifies nothing as a read", func(t *testing.T) {
+		if commandReadsOnly(nil) || commandWritesByFlag(nil) {
+			t.Fatal("a nil command must be neither a classified read nor a flag writer")
+		}
+		if policy := effectiveRootStorePolicy(nil, false); policy.readOnly || policy.disableAutoStart || !policy.runMaintenance {
+			t.Fatalf("effectiveRootStorePolicy(nil, false) = %+v", policy)
+		}
+	})
 }
 
 type strictReadonlyPostRunStore struct {

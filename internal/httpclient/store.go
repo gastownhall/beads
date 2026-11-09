@@ -165,15 +165,17 @@ func NewFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, e
 
 // NewReadOnlyFromConfig opens the workspace for a read-only command.
 //
-// It is the same store, WRITABLE, and that is the contract cmd/bd needs rather
-// than a gap. backends.Backend has one read-only hook and cmd/bd opens two
-// postures through it: the root pre-run opens every CLASSIFIED read command
-// here — `bd ready --claim` among them, which claims through the store it is
-// handed — and the non-mutating opens (previews, cross-repo hydration, doctor)
-// open here too. The embedded arm splits the two (OpenForReadOnlyCommand stays
-// writable, OpenReadOnly refuses), but a registered backend gets only this hook,
-// so refusing writes here would break `bd ready --claim` on this backend. What
-// keeps strict --readonly and a preview from writing here is cmd/bd's own
+// It is the same store, WRITABLE, and that is the API contract rather than a
+// gap. backends.Backend has one read-only hook and cmd/bd opens two postures
+// through it: the root pre-run opens every CLASSIFIED read command here, and
+// the non-mutating opens (previews, cross-repo hydration, doctor) open here
+// too. A write flag on a classified read (`bd ready --claim`, `bd duplicates
+// --auto-merge`) makes that invocation a writer, which the root pre-run opens
+// read-write instead (commandReadsOnly, bd-fwx149); a caller that claims
+// through a store opened here must still work, because the hook's contract is
+// a writable store. The embedded arm splits the two (OpenForReadOnlyCommand
+// stays writable, OpenReadOnly refuses), but a registered backend gets only
+// this hook. What keeps strict --readonly and a preview from writing here is cmd/bd's own
 // chokepoints (CheckReadonly, the preview RunEs), and
 // openNonMutatingStoreFromConfig names this arm as the exception to its
 // refuses-writes invariant. TestReadOnlyOpenServesTheClaimBdReadyMakes pins it.

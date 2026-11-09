@@ -202,7 +202,9 @@ func commandOptsOutOfStore(cmd *cobra.Command) bool {
 }
 
 // readOnlyCommands lists commands that only read from the database.
-// These commands open the store in read-only mode. See GH#804.
+// These commands open the store in read-only mode. See GH#804. The leaf name
+// is only the default verdict: an invocation decision goes through
+// commandReadsOnly, which also honors commandWriteFlags.
 var readOnlyCommands = map[string]bool{
 	"list":       true,
 	"ready":      true,
@@ -227,6 +229,48 @@ var readOnlyCommands = map[string]bool{
 // that would trigger file watchers. See GH#804.
 func isReadOnlyCommand(cmdName string) bool {
 	return readOnlyCommands[cmdName]
+}
+
+// commandWriteFlags names, by command path (commandRegistryPath), the boolean
+// flags that turn an allowlisted read into a write. `bd ready --claim` claims
+// an issue and `bd duplicates --auto-merge` closes duplicates, so either one
+// must be admitted as a writer: the migration and freeze gates, the identity
+// check, journal admission, JSONL import and the post-command export, push and
+// prune all key on the same classification (bd-fwx149, GH#8264). Keyed by path
+// rather than leaf name so `bd mol ready` is not mistaken for `bd ready`.
+var commandWriteFlags = map[string][]string{
+	"ready":      {"claim"},
+	"duplicates": {"auto-merge"},
+}
+
+// commandWritesByFlag reports whether this parsed invocation enabled one of
+// its command's write flags. A preview (--dry-run/--inspect) does not write,
+// so `bd duplicates --auto-merge --dry-run` stays a read.
+func commandWritesByFlag(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	names := commandWriteFlags[commandRegistryPath(cmd)]
+	if len(names) == 0 || isPreviewCommand(cmd) {
+		return false
+	}
+	for _, name := range names {
+		if enabled, err := cmd.Flags().GetBool(name); err == nil && enabled {
+			return true
+		}
+	}
+	return false
+}
+
+// commandReadsOnly is the read classification of one parsed invocation: an
+// allowlisted read (isReadOnlyCommand) that did not enable a write flag. Every
+// per-invocation decision keyed on "is this a read" goes through it, so the
+// pre-run's store open and the post-run's maintenance cannot disagree.
+func commandReadsOnly(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	return isReadOnlyCommand(cmd.Name()) && !commandWritesByFlag(cmd)
 }
 
 // isPreviewCommand reports whether cmd was explicitly invoked in a
@@ -254,9 +298,11 @@ type rootStorePolicy struct {
 // effectiveRootStorePolicy separates strict --readonly/config policy from
 // command classification. Classified reads retain their compatibility
 // maintenance and auto-start behavior; strict readonly is mutation-free.
-func effectiveRootStorePolicy(cmdName string, strictReadonly bool) rootStorePolicy {
+// cmd is the parsed invocation (see commandReadsOnly); nil classifies nothing
+// as a read, leaving only the strict policy.
+func effectiveRootStorePolicy(cmd *cobra.Command, strictReadonly bool) rootStorePolicy {
 	return rootStorePolicy{
-		readOnly:         strictReadonly || isReadOnlyCommand(cmdName),
+		readOnly:         strictReadonly || commandReadsOnly(cmd),
 		disableAutoStart: strictReadonly,
 		runMaintenance:   !strictReadonly,
 	}
@@ -279,7 +325,8 @@ func runsPostCommandMaintenance(cmdName string, strictReadonly bool) bool {
 	if cmdName == serveCmdName {
 		return false
 	}
-	return effectiveRootStorePolicy(cmdName, strictReadonly).runMaintenance
+	// runMaintenance depends on strict readonly alone, not on classification.
+	return effectiveRootStorePolicy(nil, strictReadonly).runMaintenance
 }
 
 // readMemoEnvVar turns the per-command http read memo off when set to "0": an
@@ -1992,7 +2039,7 @@ var rootCmd = &cobra.Command{
 		// ahead of version tracking, because that is the first step a preview
 		// has to change.
 		previewMode := isPreviewCommand(cmd)
-		policy := effectiveRootStorePolicy(cmd.Name(), readonlyMode)
+		policy := effectiveRootStorePolicy(cmd, readonlyMode)
 		useReadOnly := policy.readOnly || previewMode
 
 		// dc-6jaq: consult the migration freeze marker here, before any of
@@ -2004,7 +2051,8 @@ var rootCmd = &cobra.Command{
 		// catch a frozen write first. By then the most dangerous writes this
 		// gate exists to prevent would already be done. useReadOnly already
 		// carries the exact classification this early gate must skip (strict
-		// --readonly, or a command on the read-only allowlist) — reusing it
+		// --readonly, or a command on the read-only allowlist invoked without
+		// a write flag, see commandReadsOnly) — reusing it
 		// here means there is no second, independently-maintained list of
 		// "write" commands to drift out of sync with the one useReadOnly is
 		// built from. An explicit --dry-run/--inspect preview also sets
