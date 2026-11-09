@@ -177,3 +177,58 @@ func TestEmbeddedDepAddCrossPrefixAbsentTargetStaysExternal(t *testing.T) {
 		t.Errorf("%s is not ready although its only edge names a target outside this database: %v", source.ID, ready)
 	}
 }
+
+// isBlocked reads the stored is_blocked flag of id from table.
+func isBlocked(t *testing.T, beadsDir, table, id string) bool {
+	t.Helper()
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), crossPrefixDB, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer cleanup()
+	var blocked bool
+	//nolint:gosec // G201: table is one of the two issue tables named by the caller.
+	if err := db.QueryRowContext(t.Context(), "SELECT is_blocked FROM "+table+" WHERE id = ?", id).Scan(&blocked); err != nil {
+		t.Fatalf("read %s.is_blocked for %s: %v", table, id, err)
+	}
+	return blocked
+}
+
+// TestEmbeddedDepAddCrossPrefixLocalWispTargetBlocks covers the wisp plane:
+// a cross-prefix target held here as a wisp is typed depends_on_wisp_id in
+// the table the source routes to (dependencies for an issue source,
+// wisp_dependencies for a wisp source), and both sources are blocked while
+// the wisp is open and freed once it closes.
+func TestEmbeddedDepAddCrossPrefixLocalWispTargetBlocks(t *testing.T) {
+	skipUnlessEmbeddedCrossPrefix(t)
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", crossPrefixSourcePrefix)
+
+	target := bdCreate(t, bd, dir, "Wisp blocker", "--type", "task", "--ephemeral", "--id", "xpa-w1", "--force")
+	issueSource := bdCreate(t, bd, dir, "Issue source", "--type", "task")
+	wispSource := bdCreate(t, bd, dir, "Wisp source", "--type", "task", "--ephemeral")
+	bdDep(t, bd, dir, "add", issueSource.ID, target.ID)
+	bdDep(t, bd, dir, "add", wispSource.ID, target.ID)
+
+	sources := []struct{ id, issueTable, depTable string }{
+		{issueSource.ID, "issues", "dependencies"},
+		{wispSource.ID, "wisps", "wisp_dependencies"},
+	}
+	for _, s := range sources {
+		if got := depTargetColumn(t, beadsDir, s.depTable, s.id, target.ID); got != "depends_on_wisp_id" {
+			t.Errorf("%s edge %s -> %s stored in %q, want depends_on_wisp_id: the target is a wisp in this database", s.depTable, s.id, target.ID, got)
+		}
+		if !isBlocked(t, beadsDir, s.issueTable, s.id) {
+			t.Errorf("%s is not blocked while its wisp blocker %s is open", s.id, target.ID)
+		}
+	}
+
+	bdClose(t, bd, dir, target.ID, "--reason", "done")
+	for _, s := range sources {
+		if isBlocked(t, beadsDir, s.issueTable, s.id) {
+			t.Errorf("%s is still blocked after its wisp blocker %s closed", s.id, target.ID)
+		}
+	}
+}
