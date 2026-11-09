@@ -150,7 +150,8 @@ Three rules for choosing the interval:
   and name each replica with `bd config set node_id <name>` so the
   cross-replica reclaim guard arms.
 - **A longer interval means more conflicts, not just staler data.**
-  `updated_at` is touched by *every* bd mutation, so two replicas editing the
+  `updated_at` is touched by *every* bd mutation — including a bare label
+  add, remove or rename — so two replicas editing the
   same issue between syncs conflict even when the fields they changed are
   disjoint. Disjoint edits to *different* issues merge cleanly at any cadence.
 

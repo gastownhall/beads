@@ -1353,7 +1353,7 @@ bd count
   flag --title type=string default="" usage="Filter by title text (case-insensitive substring match)"
   flag --title-contains type=string default="" usage="Filter by title substring"
   flag --type -t type=string default="" usage="Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)"
-  flag --updated-after type=string default="" usage="Filter issues updated after date (YYYY-MM-DD or RFC3339)"
+  flag --updated-after type=string default="" usage="Filter issues updated after date (YYYY-MM-DD or RFC3339); label edits count as updates"
   flag --updated-before type=string default="" usage="Filter issues updated before date (YYYY-MM-DD or RFC3339)"
 
 bd create
@@ -4432,7 +4432,7 @@ bd list
   flag --title-contains type=string default="" usage="Filter by title substring (case-insensitive)"
   flag --tree type=bool default="true" usage="Hierarchical tree format (default: true; use --flat to disable)"
   flag --type -t type=string default="" usage="Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate, convoy). Aliases: mr→merge-request, feat→feature, mol→molecule, dec/adr→decision"
-  flag --updated-after type=string default="" usage="Filter issues updated after date (YYYY-MM-DD or RFC3339)"
+  flag --updated-after type=string default="" usage="Filter issues updated after date (YYYY-MM-DD or RFC3339); label edits count as updates"
   flag --updated-before type=string default="" usage="Filter issues updated before date (YYYY-MM-DD or RFC3339)"
   flag --watch -w type=bool default="false" usage="Watch for changes and auto-update display (implies --pretty)"
   flag --wisp-type type=string default="" usage="Filter by wisp type: heartbeat, ping, patrol, gc_report, recovery, error, escalation"
@@ -6505,7 +6505,7 @@ bd search
   flag --sort type=string default="" usage="Sort by field: priority, created, updated, closed, status, id, title, type, assignee"
   flag --status -s type=string default="" usage="Filter by stored status (comma-separated for OR; open, in_progress, blocked, deferred, closed, all). Default searches all statuses including closed. Note: dependency-blocked issues use 'bd blocked'"
   flag --type -t type=string default="" usage="Filter by type (bug, feature, task, epic, chore, decision, message, molecule, gate, spike, story, milestone); custom types require types.custom config, and an unknown type is an error. Aliases: feat/enhancement→feature, mol→molecule, dec/adr→decision, mr→merge-request"
-  flag --updated-after type=string default="" usage="Filter issues updated after date (YYYY-MM-DD or RFC3339)"
+  flag --updated-after type=string default="" usage="Filter issues updated after date (YYYY-MM-DD or RFC3339); label edits count as updates"
   flag --updated-before type=string default="" usage="Filter issues updated before date (YYYY-MM-DD or RFC3339)"
 
 bd send-metrics

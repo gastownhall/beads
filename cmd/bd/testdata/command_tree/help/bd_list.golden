@@ -66,7 +66,7 @@ Flags:
       --title-contains string        Filter by title substring (case-insensitive)
       --tree                         Hierarchical tree format (default: true; use --flat to disable) (default true)
   -t, --type string                  Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate, convoy). Aliases: mr→merge-request, feat→feature, mol→molecule, dec/adr→decision
-      --updated-after string         Filter issues updated after date (YYYY-MM-DD or RFC3339)
+      --updated-after string         Filter issues updated after date (YYYY-MM-DD or RFC3339); label edits count as updates
       --updated-before string        Filter issues updated before date (YYYY-MM-DD or RFC3339)
   -w, --watch                        Watch for changes and auto-update display (implies --pretty)
       --wisp-type string             Filter by wisp type: heartbeat, ping, patrol, gc_report, recovery, error, escalation
