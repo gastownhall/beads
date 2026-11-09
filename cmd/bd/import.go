@@ -45,7 +45,8 @@ missing title, an unsatisfiable field rule) fails the import up front with the
 record's line number and the validator's reason, and nothing is imported —
 not even the valid records around it. To import the valid records anyway and
 set the invalid ones aside, re-run with --skip-invalid; the invalid records
-are then listed on stderr instead of aborting the import.
+are then listed on stderr instead of aborting the import, and --rejects
+<file> saves the skipped lines verbatim for repair and re-import.
 
 Common fields:
   title                  Required. Short summary.
@@ -118,11 +119,12 @@ EXAMPLES:
 }
 
 var (
-	importDryRun     bool
-	importDedup      bool
-	importAllowStale bool
-	importInput      string
+	importDryRun      bool
+	importDedup       bool
+	importAllowStale  bool
+	importInput       string
 	importSkipInvalid bool
+	importRejects     string
 )
 
 func init() {
@@ -131,6 +133,7 @@ func init() {
 	importCmd.Flags().BoolVar(&importDedup, "dedup", false, "Skip lines whose title matches an existing open issue")
 	importCmd.Flags().BoolVar(&importAllowStale, "allow-stale", false, "Import rows even when older than the local issue (required to restore an older snapshot)")
 	importCmd.Flags().BoolVar(&importSkipInvalid, "skip-invalid", false, "Skip invalid records (listed on stderr) instead of failing the import on the first one")
+	importCmd.Flags().StringVar(&importRejects, "rejects", "", "With --skip-invalid, save the skipped records verbatim to this file for repair and re-import")
 	rootCmd.AddCommand(importCmd)
 }
 
@@ -196,6 +199,13 @@ func runImportInner(args []string) error {
 	if importInput != "" && len(args) > 0 {
 		return fmt.Errorf("use either --input or a positional file, not both")
 	}
+	// --rejects has no meaning on its own: a strict import stops at the first
+	// invalid record, so there is never a reject list to save. Refusing the
+	// combination here (rather than silently ignoring --rejects) keeps the
+	// flag from implying a mode it cannot deliver.
+	if importRejects != "" && !importSkipInvalid {
+		return fmt.Errorf("--rejects requires --skip-invalid: without it the import stops at the first invalid record, so there are no skipped records to save")
+	}
 
 	fromStdin := importInput == "-" || (len(args) > 0 && args[0] == "-")
 
@@ -228,6 +238,14 @@ func runImportInner(args []string) error {
 		} else {
 			jsonlPath = configuredImportJSONLPath(beadsDir)
 		}
+	}
+
+	// The rejects file must not name the source: writing it replaces the
+	// file the import is reading, and an operator following the repair loop
+	// would lose every valid record around the rejected ones. Both spellings
+	// of the same inode count (symlinks, hardlinks — importRejectsAliasesInput).
+	if importRejectsAliasesInput(importRejects, jsonlPath) {
+		return fmt.Errorf("--rejects %s names the import source %s itself; save the skipped records to a different file", importRejects, jsonlPath)
 	}
 
 	info, err := os.Stat(jsonlPath)
@@ -269,7 +287,10 @@ type importResultJSON struct {
 	// --skip-invalid, with their source line, id and the validator's reason
 	// (GH#4492).
 	Rejected []importReject `json:"rejected,omitempty"`
-	DryRun   bool           `json:"dry_run,omitempty"`
+	// RejectsFile names the file the skipped records were saved to, set only
+	// after the save actually succeeded (--skip-invalid --rejects <path>).
+	RejectsFile string `json:"rejects_file,omitempty"`
+	DryRun      bool   `json:"dry_run,omitempty"`
 }
 
 func runImportFromReader(ctx context.Context, r io.Reader, source string) error {
@@ -410,6 +431,15 @@ func runImportRecordsClassic(ctx context.Context, issues []*types.Issue, memorie
 		}
 		applyImportDryRunClassification(&result, classification)
 		return renderImportDryRun(result, len(memories), source, dedupHits)
+	}
+
+	// The rejects file lands BEFORE any database change (GH#4492): whatever
+	// the import does next, the operator already holds the skipped records,
+	// and an unwritable output aborts the import while the database is still
+	// untouched. A dry run never reaches here — it previews the rejects
+	// without writing the file.
+	if err := saveImportRejects(&result, plan.Rejects); err != nil {
+		return err
 	}
 
 	// ONE value for both prefix writers on this path — the seed just below and
@@ -567,6 +597,7 @@ func applyImportOutcome(result *importResultJSON, importResult *ImportResult) {
 // renderImportDryRun reports a dry run (JSON or stderr), identically in both
 // modes.
 func renderImportDryRun(result importResultJSON, memoriesCount int, source string, dedupHits int) error {
+	reportImportRejects(result)
 	if jsonOutput {
 		return outputJSON(result)
 	}
@@ -594,6 +625,7 @@ func renderImportDryRun(result importResultJSON, memoriesCount int, source strin
 // renderImportOutcome reports a completed import (JSON or stderr),
 // identically in both modes.
 func renderImportOutcome(result importResultJSON, source string, dedupHits int) error {
+	reportImportRejects(result)
 	if jsonOutput {
 		return outputJSON(result)
 	}

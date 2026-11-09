@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -154,6 +157,126 @@ func errStrictImportRejected(reject importReject) error {
 		fmt.Fprintf(&b, " (%s)", reject.ID) //nolint:gosec // G705: plain-text error for the terminal, not HTML output
 	}
 	fmt.Fprintf(&b, ": %s\n", reject.Reason) //nolint:gosec // G705: plain-text error for the terminal, not HTML output
-	b.WriteString("nothing was imported. To import the valid records and set the invalid ones aside,\nre-run with --skip-invalid.")
+	b.WriteString("nothing was imported. To import the valid records and set the invalid ones aside,\nre-run with --skip-invalid; add --rejects <file> to keep the skipped lines for repair.")
 	return fmt.Errorf("%s", b.String())
+}
+
+// importRejectsAliasesInput reports whether the --rejects output names the
+// import source itself — the one file the import is still reading from.
+// Refusing the alias protects the operator from a repair loop that destroys
+// its own input: the rejects file replaces whatever it names, and a source
+// clobbered with only its invalid lines loses every valid record around them.
+//
+// Two checks, in widening order: a canonical-path comparison (EvalSymlinks
+// resolves symlinks in the file and every directory on the way, and a
+// not-yet-existing output falls back to Abs+Clean) and os.SameFile for paths
+// that both exist but spell the same inode differently (hardlinks, and any
+// symlink case the canonical pass could not resolve).
+func importRejectsAliasesInput(rejectsPath, inputPath string) bool {
+	if rejectsPath == "" || inputPath == "" {
+		return false
+	}
+	if rejectsPath == inputPath {
+		return true
+	}
+	canonical := func(p string) string {
+		if resolved, err := filepath.EvalSymlinks(p); err == nil {
+			return resolved
+		}
+		if abs, err := filepath.Abs(p); err == nil {
+			return abs
+		}
+		return filepath.Clean(p)
+	}
+	if canonical(rejectsPath) == canonical(inputPath) {
+		return true
+	}
+	rejectsInfo, rejectsErr := os.Stat(rejectsPath)
+	inputInfo, inputErr := os.Stat(inputPath)
+	return rejectsErr == nil && inputErr == nil && os.SameFile(rejectsInfo, inputInfo)
+}
+
+// writeImportRejects atomically saves the rejected records' raw source lines
+// to path: verbatim (never re-serialized), one per line in source order, so
+// the file diffs cleanly against the source it came from and a repaired copy
+// re-imports on its own. The temp-then-rename keeps a failed write from
+// leaving a half-written file behind; an empty rejects list still writes an
+// empty file, so the operator gets a definite artifact rather than silence.
+func writeImportRejects(path string, rejects []importReject) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".bd-import-rejects-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	writeErr := func() error {
+		w := bufio.NewWriter(tmp)
+		for _, reject := range rejects {
+			if _, err := w.WriteString(reject.raw + "\n"); err != nil {
+				return err
+			}
+		}
+		return w.Flush()
+	}()
+	closeErr := tmp.Close()
+	if writeErr != nil {
+		os.Remove(tmpName) //nolint:gosec,errcheck // best-effort cleanup of our own temp file; the write error is what we report
+		return writeErr
+	}
+	if closeErr != nil {
+		os.Remove(tmpName) //nolint:gosec,errcheck // best-effort cleanup of our own temp file; the close error is what we report
+		return closeErr
+	}
+	if err := os.Chmod(tmpName, 0644); err != nil { //nolint:gosec // the rejects file is operator data, not a secret
+		os.Remove(tmpName) //nolint:gosec,errcheck // best-effort cleanup of our own temp file; the chmod error is what we report
+		return err
+	}
+	return os.Rename(tmpName, path) // atomic within the directory
+}
+
+// saveImportRejects writes the rejects file for an import running with
+// --skip-invalid --rejects <path>, after the plan has settled the reject
+// list and BEFORE any database change: whatever happens to the import next,
+// the operator holds the artifact, and an unwritable path aborts the import
+// while the database is still untouched. The saved path is recorded in the
+// result only on success — the JSON surface must never claim a saved file
+// that is not on disk.
+func saveImportRejects(result *importResultJSON, rejects []importReject) error {
+	if importRejects == "" || !importSkipInvalid {
+		return nil
+	}
+	if err := writeImportRejects(importRejects, rejects); err != nil {
+		return fmt.Errorf("cannot write the rejects file %s (nothing was imported): %w", importRejects, err)
+	}
+	result.RejectsFile = importRejects
+	return nil
+}
+
+// importRejectsStderrLimit caps the per-run reject listing on stderr; past
+// it the list says how many more there are instead of scrolling them all.
+const importRejectsStderrLimit = 20
+
+// reportImportRejects lists the records the screen skipped under
+// --skip-invalid on stderr — line, id, the validator's own reason — with the
+// total, the first 20, and where the skipped lines were saved. It runs in
+// both --json and plain-text modes: the listing goes to stderr, so the JSON
+// stream on stdout stays parseable.
+func reportImportRejects(result importResultJSON) {
+	if len(result.Rejected) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Skipped %d invalid record(s):\n", len(result.Rejected)) //nolint:gosec // G705: stderr, not a browser context
+	for i, reject := range result.Rejected {
+		if i == importRejectsStderrLimit {
+			fmt.Fprintf(os.Stderr, "  ... and %d more (run with --json or --rejects to see them all)\n", len(result.Rejected)-i) //nolint:gosec // G705: stderr, not a browser context
+			break
+		}
+		if reject.ID != "" {
+			fmt.Fprintf(os.Stderr, "  line %d (%s): %s\n", reject.Line, reject.ID, reject.Reason) //nolint:gosec // G705: stderr, not a browser context
+		} else {
+			fmt.Fprintf(os.Stderr, "  line %d: %s\n", reject.Line, reject.Reason) //nolint:gosec // G705: stderr, not a browser context
+		}
+	}
+	if result.RejectsFile != "" {
+		fmt.Fprintf(os.Stderr, "Rejected records saved to %s; repair them and re-import that file on its own.\n", result.RejectsFile) //nolint:gosec // G705: stderr, not a browser context
+	}
 }

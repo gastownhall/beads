@@ -105,6 +105,15 @@ func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memorie
 		return renderImportDryRun(result, len(memories), source, dedupHits)
 	}
 
+	// The rejects file lands BEFORE the batch is submitted (GH#4492): whatever
+	// the import does next, the operator already holds the skipped records,
+	// and an unwritable output aborts the import before anything is written
+	// on the server either. A dry run never reaches here — it previews the
+	// rejects without writing the file.
+	if err := saveImportRejects(&result, plan.Rejects); err != nil {
+		return err
+	}
+
 	memoryEntries := make([]publicops.ImportMemory, 0, len(memories))
 	for _, mem := range memories {
 		memoryEntries = append(memoryEntries, publicops.ImportMemory{
