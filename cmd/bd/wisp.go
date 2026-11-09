@@ -1107,6 +1107,30 @@ func runWispPurgeChunks(ctx context.Context, ids []string, deleteChunk func(cont
 		out.referencesUpdated += res.referencesUpdated
 		out.orphaned = append(out.orphaned, res.orphaned...)
 	}
+	out.orphaned = survivingOrphans(out.orphaned, out.confirmed, out.deletedIDs)
+	return out
+}
+
+// survivingOrphans is the orphan report of a chunked purge: each chunk names
+// the survivors that depended on what it deleted, and a selected wisp whose
+// dependency sat in an earlier chunk is one of them until its own chunk
+// deletes it. Anything this run deleted leaves the report, and a row two
+// chunks orphaned is named once, in ascending order as the role names them.
+func survivingOrphans(orphaned []string, deleted ...[]string) []string {
+	gone := make(map[string]bool)
+	for _, ids := range deleted {
+		for _, id := range ids {
+			gone[id] = true
+		}
+	}
+	out := []string{}
+	for _, id := range orphaned {
+		if !gone[id] {
+			out = append(out, id)
+			gone[id] = true
+		}
+	}
+	slices.Sort(out)
 	return out
 }
 
