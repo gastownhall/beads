@@ -143,10 +143,10 @@ func expectTreeIssues(mock sqlmock.Sqlmock, ids ...string) {
 		args[i] = id
 		rows.AddRow(issueRowValues(id, strings.ToUpper(id[:1])+id[1:])...)
 	}
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT "+IssueSelectColumns+" FROM issues "+sqlbuild.LeaseJoin("issues")+" WHERE id IN ("+in+")")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT " + IssueSelectColumns + " FROM issues " + sqlbuild.LeaseJoin("issues") + " WHERE id IN (" + in + ")")).
 		WithArgs(args...).
 		WillReturnRows(rows)
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, label FROM labels WHERE issue_id IN ("+in+") ORDER BY issue_id, label")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, label FROM labels WHERE issue_id IN (" + in + ") ORDER BY issue_id, label")).
 		WithArgs(args...).
 		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "label"}))
 }
