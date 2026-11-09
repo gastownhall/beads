@@ -283,6 +283,40 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 			want:     []int{111},
 		},
 		{
+			name:     "reporter's blank state row with an absolute path",
+			snapshot: " 1466      /Users/u/.nix-profile/bin/dolt sql-server --config /Users/u/.beads/shared-server/dolt-server-config.yaml\n",
+			want:     []int{1466},
+		},
+		{
+			name:     "blank state with bare dolt",
+			snapshot: "201 dolt sql-server\n",
+			want:     []int{201},
+		},
+		{
+			name:     "blank state with extra spaces",
+			snapshot: "   202    dolt sql-server\n",
+			want:     []int{202},
+		},
+		{
+			name:     "blank state with a command starting with a state-like word",
+			snapshot: "116 Z dolt sql-server\n",
+			want:     []int{116},
+		},
+		{
+			name:     "mixed populated and blank states",
+			snapshot: "Ss 301 dolt sql-server\n 302 dolt sql-server\nZ 303 dolt sql-server\nS 304 dolt sql-server\n",
+			want:     []int{301, 302, 304},
+		},
+		{
+			name:     "running state with modifier is accepted",
+			snapshot: "R+ 305 dolt sql-server\n",
+			want:     []int{305},
+		},
+		{
+			name:     "numeric first field cannot smuggle an invalid pid",
+			snapshot: "0 dolt sql-server\n-1 dolt sql-server\n99999999999999999999 dolt sql-server\n",
+		},
+		{
 			name:     "blank state row with tab separator",
 			snapshot: "114\tdolt sql-server\n",
 			want:     []int{114},
