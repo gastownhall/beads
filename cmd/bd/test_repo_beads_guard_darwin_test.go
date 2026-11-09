@@ -7,6 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,19 +56,37 @@ func TestRunTestsAndSweepReapsOrphanedServer(t *testing.T) {
 			if err := os.MkdirAll(serverDir, 0o755); err != nil {
 				t.Fatalf("mkdir server dir: %v", err)
 			}
-			script := filepath.Join(testTempRoot, "dolt")
-			if err := os.WriteFile(script, []byte("#!/bin/sh\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n"), 0o755); err != nil {
-				t.Fatalf("write fake dolt: %v", err)
-			}
-
+			// The sweep recognizes argv[0] dolt with a sql-server argument
+			// (gastownhall/beads#6186). A shebang script would show up in ps as
+			// `/bin/sh <script> sql-server`, so run bash directly under the
+			// argv[0] "dolt", blocked on a stdin pipe the test owns (no child
+			// processes). /bin/bash rather than /bin/sh: macOS's /bin/sh is a
+			// trampoline that re-execs another shell.
 			var cmd *exec.Cmd
 			runner := sweepTestRunner{run: func() int {
-				cmd = exec.Command(script, "sql-server")
+				cmd = exec.Command("/bin/bash", "-c", "read line", "dolt", "sql-server")
+				cmd.Args[0] = "dolt"
 				cmd.Dir = serverDir
+				stdin, err := cmd.StdinPipe()
+				if err != nil {
+					t.Fatalf("stdin pipe: %v", err)
+				}
 				if err := cmd.Start(); err != nil {
 					t.Fatalf("start fake dolt sql-server: %v", err)
 				}
-				t.Cleanup(func() { _ = cmd.Process.Kill() })
+				t.Cleanup(func() {
+					_ = stdin.Close()
+					_ = cmd.Process.Kill()
+				})
+				// A fake the sweep cannot recognize would let the leak go
+				// unreported for the wrong reason.
+				out, err := exec.Command("ps", "-p", strconv.Itoa(cmd.Process.Pid), "-o", "command=").Output()
+				if err != nil {
+					t.Fatalf("ps fake dolt sql-server: %v", err)
+				}
+				if fields := strings.Fields(string(out)); len(fields) == 0 || fields[0] != "dolt" || !slices.Contains(fields[1:], "sql-server") {
+					t.Fatalf("ps shows fake dolt sql-server as %q; the sweep would not recognize it", out)
+				}
 				return 0
 			}}
 

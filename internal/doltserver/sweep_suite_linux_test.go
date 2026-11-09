@@ -21,9 +21,11 @@ func TestSweepSuiteTestServersPreservesForeignLeak(t *testing.T) {
 	if err := os.Mkdir(cwd, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// The selector recognizes dolt/sql-server in the command line. A shell
-	// blocked on stdin is a deterministic stand-in with no child processes.
+	// The sweep recognizes argv[0] dolt with a sql-server argument. A shell
+	// blocked on stdin, started under the argv[0] "dolt", is a deterministic
+	// stand-in with no child processes.
 	cmd := exec.Command("/bin/sh", "-c", "read line", "dolt", "sql-server")
+	cmd.Args[0] = "dolt"
 	cmd.Dir = cwd
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -42,11 +44,17 @@ func TestSweepSuiteTestServersPreservesForeignLeak(t *testing.T) {
 		_ = cmd.Process.Kill()
 		<-exited
 	})
+	waitForExecArgv(t, cmd.Process.Pid)
 	if err := os.Remove(cwd); err != nil {
 		t.Fatal(err)
 	}
 	if got, deleted := readProcCwd(cmd.Process.Pid); !deleted || got == "" {
 		t.Fatalf("stand-in cwd = %q, deleted = %v; want a deleted cwd", got, deleted)
+	}
+	// A stand-in the sweep cannot recognize would make every "not swept"
+	// assertion below pass vacuously.
+	if !isDoltServerProcess(cmd.Process.Pid) {
+		t.Fatalf("stand-in %d is not recognized as a dolt sql-server", cmd.Process.Pid)
 	}
 
 	for _, roots := range [][]string{nil, {rootB}} {
