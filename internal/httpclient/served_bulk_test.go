@@ -251,6 +251,10 @@ func TestServedDeleterRewritesReferencesInNeighbors(t *testing.T) {
 	conformance.RunDeleterRewritesReferencesInNeighbors(t, t.Context(), newServedDeleterFixture(t, "hx12"))
 }
 
+func TestServedDeleterAttributesTheRewriteToTheActor(t *testing.T) {
+	conformance.RunDeleterAttributesTheRewriteToTheActor(t, t.Context(), newServedDeleterFixture(t, "hxat"))
+}
+
 func TestServedDeleterDryRunChangesNothing(t *testing.T) {
 	conformance.RunDeleterDryRunChangesNothing(t, t.Context(), newServedDeleterFixture(t, "hx13"))
 }

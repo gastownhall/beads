@@ -178,12 +178,14 @@ go_test(
         "served_molecule_test.go",
         "served_participation_generation_test.go",
         "served_project_swap_test.go",
+        "served_protocol_seam_test.go",
         "served_querier_test.go",
         "served_reader_test.go",
         "served_ready_claimer_test.go",
         "served_readycounter_test.go",
         "served_relations_test.go",
         "served_releaser_test.go",
+        "served_row_version_test.go",
         "served_test.go",
         "served_unlimited_read_test.go",
         "served_wrong_server_test.go",
@@ -192,6 +194,8 @@ go_test(
         "target_test.go",
         "unlimited_read_test.go",
         "update_persistence_test.go",
+        "v0_wire_golden_rows_test.go",
+        "v0_wire_golden_test.go",
         "watch_test.go",
         "wave2b_roles_test.go",
         "wave2c_claimnext_test.go",
@@ -211,7 +215,13 @@ go_test(
     # //internal/httpclient/encode's own go_test does for the same reason.
     # Gazelle does not manage `data` on this rule, so this survives
     # `make bazel-sync` (the directive just says so).
-    data = glob(["*.go"]),
+    # v0_wire_golden_test.go reads the same *.go for its wire.Request literal
+    # census, the wire package's non-test source
+    # (//internal/httpclient/wire:repo_go_srcs), and its goldens under
+    # testdata/v0_wire.
+    data = glob(["*.go"]) + glob(["testdata/v0_wire/*.golden"]) + [
+        "//internal/httpclient/wire:repo_go_srcs",
+    ],
     embed = [":httpclient"],
     shard_count = 2,
     deps = [
@@ -298,6 +308,17 @@ sh_test(
     },
     shard_count = 26,
     tags = ["embedded"],
+)
+
+# Tests that pin divergence-ledger rows, resolved by
+# //internal/httpclient/encode:encode_test's crossPackagePins registry
+# (internal/httpclient/encode/ledger_pins_test.go).
+exports_files(
+    [
+        "bulk_roles_test.go",
+        "gate_fields_test.go",
+    ],
+    visibility = ["//internal/httpclient/encode:__pkg__"],
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

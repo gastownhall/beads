@@ -83,6 +83,44 @@ This link check is separate from full macOS gate portability: the Linux-only
 timeout test backends remain tracked in upstream issue #7362. Run the full
 `make test` gate on its supported Linux platform as well.
 
+### Flame Graphs of a CI Lane
+
+Every `bazel.yml` lane job except `bazel-dolt-int` uploads its Bazel JSON
+trace profiles (`--profile`), gzipped, as the artifact
+`bazel-profile-<lane>-<attempt>`, kept 7 days. The lane name is the CI
+analytics `LANE` (`test`, `pure`, `embedded`, ...). `bazel-pure` has one file
+per invocation (`bazel-profile-pure-build-wasm.json.gz`, `-build-pure`,
+`-test-pure`, `-test-bd`). `bazel-dolt-int` has no room left in its job
+timeout. To see where a slow lane spent its time:
+
+```bash
+gh run download <run-id> -R gastownhall/beads -p 'bazel-profile-*' -D /tmp/prof
+```
+
+Open a `.json.gz` in <https://ui.perfetto.dev> ("Open trace file"; it reads
+gzip directly and parses in the browser, nothing is uploaded) or in
+`chrome://tracing` ("Load"). For text, run
+`python3 tools/bazel/critpath.py <(zcat /tmp/prof/bazel-profile-test-1/bazel-profile-test.json.gz)`
+(one file: the `test` lane's attempt 1; critpath.py reads one profile) or
+`bazel analyze-profile`. Locally, Bazel already keeps the last five
+profiles of each output base as `$(bazel info output_base)/command-<id>.profile.gz`.
+
+These artifacts are public, like every artifact of this repo. A profile
+holds timings, mnemonics, target labels and the runner's output base path,
+and also external fetch URLs and the command line of each repository rule's
+command, with any environment a rule passes on it
+(`tools/bazel/go_repository_tools.bzl` runs go as `env -i KEY=value … go …`,
+`PATH` and `GOPROXY` among the keys). So the prepare step's scan, not the
+profile format, keeps secrets out: it refuses a profile with anything
+secret-shaped (credentials in a URL, a PEM block,
+`token=`/`secret=`/`password=`/`api_key=` in any case, a GitHub
+(`ghs_`/`ghp_`/`gho_`/`ghu_`/`ghr_`/`github_pat_`), AWS (`AKIA…`) or Slack
+(`xox[abp]-`) token, a JWT, an `ops.gascity.com` host). Keep credentials off
+repository rules' command lines: the scan is the only check between them and
+a public artifact. The step also caps a lane at 20 MB gzipped, with a
+warning. The upload never fails or holds up a lane (`continue-on-error`,
+1-minute bounds); `TestBazelProfileArtifactStepsAreSafeAndBounded` pins that.
+
 ## Choose the Smallest Useful Test
 
 Test at the lowest seam that can fail for the user-visible reason. Add a
@@ -568,6 +606,27 @@ make that reason apparent.
 already listed, report it rather than silently broadening the skip. Before
 adding a new skip, record the issue it tracks and remove the skip when the
 underlying failure is fixed.
+
+The Dolt-tier lanes (embedded, dolt-server, proxied-server, server-Dolt
+storage and cmd/bd Dolt-server) run a runtime skip census: every test or
+subtest they skip is a line of `tools/bazel/skip_census.txt`
+(`<label> <test path> <class>`), and each lane's "Every target and shard ran
+tests" step (`check_testcases.py --skip-census`) fails on a skip the census
+does not list and on a listed skip whose test now runs. Park a conformance
+case with `skipKnownDivergence` (a ledger row) or
+`t.Skip("WAITING ON <PR or slice> (<what it waits for>)")`, add the line the
+failing step prints, and delete the line when you unpark the case.
+`python3 tools/bazel/check_skip_census.py --write --testlogs-dir DIR`
+regenerates the lines of the targets in a lane's "Upload test logs" artifact,
+and `--lint` checks the file. The dolt-int job uploads no test logs when only
+the census fails (its check steps are continue-on-error), so for that lane
+copy the "delete from"/"add to" lines the step prints instead. Runs that
+execute on the runner (rbe modes cache and local) only report census
+differences; they never fail on them. A skip must not depend on process-global
+state left by earlier tests in the same binary: rules_go assigns tests to
+shards round-robin by index, so adding any test elsewhere in the package
+reshuffles which tests run before it, and such a skip comes and goes on
+unrelated PRs. Make the test set up the state it needs instead.
 
 Before opening a PR:
 

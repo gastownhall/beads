@@ -62,6 +62,7 @@ go_library(
         "retention_epoch_contract.go",
         "role_bundle.go",
         "role_bundle_cases.go",
+        "row_version_contract.go",
         "search_paging.go",
         "stats_reporter_contract.go",
         "sweeper_contract.go",
@@ -89,6 +90,8 @@ go_library(
 go_test(
     name = "conformance_test",
     srcs = [
+        "request_field_coverage_gate_test.go",
+        "request_field_coverage_scan_test.go",
         "role_bundle_test.go",
         "role_coverage_gate_test.go",
         "role_coverage_scan_test.go",

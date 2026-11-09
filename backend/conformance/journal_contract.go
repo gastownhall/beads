@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"sort"
+	"strconv"
 	"testing"
 
 	storeops "github.com/steveyegge/beads/internal/storage/issueops"
@@ -156,6 +157,21 @@ type JournalMutations struct {
 	// one the engine journals and the wire never carries; see
 	// RunJournalEveryMutationKindLandsARow.
 	Comment func(ctx context.Context, id, text string) error
+
+	// Actor is the acting identity every hook above passes to the verb it
+	// drives — the comment's author, for Comment. It is what
+	// RunJournalEveryMutationKindRecordsItsActor holds each record to, because
+	// journalops.Row.Actor is "the acting identity that performed the
+	// mutation". It must not be empty: a kit that acted as nobody proves
+	// nothing about attribution.
+	Actor string
+	// ActorlessDelete says the Delete hook drives a verb with NO actor
+	// parameter — storage.DeleteIssue, which both store kits and the served
+	// kit's reference store call — so its record is held to the empty actor
+	// journalops.Row reserves for "a path that genuinely has no actor" rather
+	// than to Actor. A kit whose delete verb takes the actor (the unit of
+	// work's IssueUseCase().DeleteIssue) leaves it false.
+	ActorlessDelete bool
 }
 
 // RunJournalPagesAreSeqAscendingAndSinceExclusive pins the two properties a
@@ -855,6 +871,74 @@ func RunJournalArrivalRenameKeepsTheStamp(t *testing.T, ctx context.Context, fix
 	}
 }
 
+// RunJournalEveryMutationKindRecordsItsActor pins WHO each record names:
+// every op the kit drives lands a record carrying the identity that performed
+// it (journalops.Row.Actor), read back through the role.
+//
+// It is the attribution sibling of RunJournalEveryMutationKindLandsARow and
+// drives the same kit, so the two cannot disagree about which mutations exist.
+// It is a separate case rather than more assertions inside that one because a
+// leg can carry one and not the other: the served client reads every record
+// and drops its actor (internal/httpclient/journal.go journalRow), and parking
+// the completeness case to park the attribution half would give up the only
+// proof that every op kind crosses that wire. TestEventsJournal_ActorMatrixOnEmbedded
+// pins the stored column on one engine; this pins what a READER of the role
+// gets, on every leg.
+//
+// Two rules, and the second is the one with reach. The mutation's own record
+// — its op, naming its subject — carries the kit's Actor (the empty actor for
+// a delete verb that has none, JournalMutations.ActorlessDelete). And NOTHING
+// in the window the mutation opened names anyone else: derived maintenance
+// (an is_blocked recompute journals as an unattributed update) may name no
+// one, but a record naming an identity no mutation used is a misattribution a
+// consumer reconciling writers cannot tell from a real conflicting writer.
+//
+// It is declared BEFORE RunJournalEveryMutationKindLandsARow, which stays last
+// for the reason its own doc gives; this one rebaselines like every case here
+// and needs no particular journal state.
+func RunJournalEveryMutationKindRecordsItsActor(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	journalBaseline(t, ctx, fixture)
+	actor := fixture.Mutations.Actor
+	if actor == "" {
+		t.Fatalf("JournalMutations.Actor is empty: name the identity this leg's hooks pass to their verbs, " +
+			"or this case would hold every record to nobody")
+	}
+	subject := fixture.IssuePrefix + "-actor-subject"
+	other := fixture.IssuePrefix + "-actor-other"
+
+	kit := journalMutationKit(fixture, subject, other)
+	journalRequireKitCoversTheVocabulary(t, kit)
+
+	for _, mutation := range kit {
+		want := actor
+		if mutation.op == storeops.EventDelete && fixture.Mutations.ActorlessDelete {
+			want = ""
+		}
+		before := journalHead(t, ctx, fixture)
+		if err := mutation.run(ctx); err != nil {
+			t.Fatalf("%s: %v", mutation.what, err)
+		}
+		page := journalRead(t, ctx, fixture, before, 0)
+		attributed := false
+		for _, row := range page.Rows {
+			if row.Op == string(mutation.op) && row.IssueID == mutation.subject && row.Actor == want {
+				attributed = true
+			}
+			if row.Actor != "" && row.Actor != want {
+				t.Errorf("%s: the record %s(%s) at seq %d names actor %q, want %q or none: a record naming an "+
+					"identity no mutation used reads as a conflicting writer", mutation.what, row.Op, row.IssueID,
+					row.Seq, row.Actor, want)
+			}
+		}
+		if !attributed {
+			t.Errorf("%s recorded no %q for %s naming actor %q; the journal above seq %d holds %v. The actor "+
+				"is the one member a consumer reconciling writers reads, and a reader that gets it empty reads "+
+				"system/unknown", mutation.what, mutation.op, mutation.subject, want, before,
+				journalActorsOf(page.Rows))
+		}
+	}
+}
+
 // RunJournalEveryMutationKindLandsARow pins the journal's completeness: every
 // op the engine journals is one a reader actually receives.
 //
@@ -1097,6 +1181,16 @@ func journalOpsOf(rows []journalops.Row) []string {
 		ops = append(ops, row.Op+"("+row.IssueID+")")
 	}
 	return ops
+}
+
+// journalActorsOf renders a window's ops with the actor each names, for the
+// attribution case's failure message.
+func journalActorsOf(rows []journalops.Row) []string {
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row.Op+"("+row.IssueID+")="+strconv.Quote(row.Actor))
+	}
+	return out
 }
 
 // journalFirstSeq is the first record's seq, or 0 for an empty page, so a

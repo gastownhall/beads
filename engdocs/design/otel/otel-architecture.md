@@ -19,7 +19,7 @@ Beads uses OpenTelemetry (OTel) for structured observability of all database ope
 | Core OTel initialization | ✅ Implemented | `telemetry.Init()`, providers setup |
 | Metrics export (counters) | ✅ Implemented | Storage operations, Dolt operations |
 | Metrics export (histograms) | ✅ Implemented | Operation durations, query latency |
-| Traces (stdout only) | ✅ Implemented | OTLP traces via stdout (dev mode) |
+| Traces (console only) | ✅ Implemented | Spans to stderr via the console exporter (dev mode) |
 | Storage layer instrumentation | ✅ Implemented | `InstrumentedStorage` wrapper for all storage ops |
 | Command lifecycle tracing | ✅ Implemented | Per-command spans with arguments |
 | Dolt version control tracing | ✅ Implemented | Commit, push, pull, merge operations |
@@ -147,11 +147,11 @@ defer telemetry.Shutdown(ctx)
 
 **Providers:**
 - **Metrics**: Any OTLP-compatible metrics backend via `otlpmetrichttp` exporter
-- **Traces**: Stdout only (local debug). No remote trace backend in default stack.
+- **Traces**: Console (stderr) only (local debug). No remote trace backend in default stack.
 
 **Default endpoints** (when `BD_OTEL_METRICS_URL` is not set):
 - Metrics: `http://localhost:8428/opentelemetry/api/v1/push`
-- Traces: stdout (via `BD_OTEL_STDOUT=true`)
+- Traces: stderr (via `OTEL_TRACES_EXPORTER=console`, or the legacy `BD_OTEL_STDOUT=true`)
 
 > **Note**: These defaults target VictoriaMetrics for local development convenience. Beads uses standard OTLP — you can override endpoints to use any OTLP v1.x+ compatible backend (Prometheus, Grafana Mimir, Datadog, New Relic, Grafana Cloud, Loki, OpenTelemetry Collector, etc.).
 
@@ -163,8 +163,10 @@ defer telemetry.Shutdown(ctx)
 **Resource attributes** (set at init time):
 - `service.name`: "bd"
 - `service.version`: bd binary version
-- `host`: system hostname
-- `os`: system OS info
+- `host.name`: system hostname
+- `process.pid`, `process.executable.name`, `process.runtime.*`
+- never `process.command_args`, `process.executable.path` or `process.owner`
+  (the raw argv can hold secrets; see `buildResource`)
 
 **Custom resource attributes** (via `OTEL_RESOURCE_ATTRIBUTES` env var or `BEADS_ACTOR`):
 - `bd.actor`: Actor identity (from git config or env) — set after actor resolution
@@ -515,10 +517,10 @@ Every factual claim in this document is backed by a specific source location. Th
 |-------|--------|
 | `Init` signature — returns only `error` | `telemetry.go:64` |
 | `Enabled()` — true when `BD_OTEL_METRICS_URL` set or `BD_OTEL_STDOUT=true` | `telemetry.go:53-55` |
-| Traces: stdout only when `BD_OTEL_STDOUT=true` | `telemetry.go:84-93` |
+| Traces: console (stderr) only when `OTEL_TRACES_EXPORTER=console` | `telemetry.go:84-93` |
 | Metrics: HTTP OTLP when `BD_OTEL_METRICS_URL` set | `telemetry.go:131-139` |
 | Resource: `service.name`, `service.version` | `telemetry.go:73-75` |
-| Resource: `WithHost()`, `WithProcess()` | `telemetry.go:76-77` |
+| Resource: `WithHost()` plus explicit process detectors (no command args, path or owner) | `telemetry.go` `buildResource` |
 | `Shutdown(ctx)` signature | `telemetry.go:162` |
 | `Init` called in `PersistentPreRun` | `main.go:256` |
 | Command span started with `bd.command`, `bd.version`, `bd.args` | `main.go:262-266` |

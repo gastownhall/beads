@@ -254,6 +254,7 @@ var roleContractCases = []roleContract{
 		RunDeleterErasesAcrossBothPlanes,
 		RunDeleterCollapsesDuplicateIDs,
 		RunDeleterRewritesReferencesInNeighbors,
+		RunDeleterAttributesTheRewriteToTheActor,
 		RunDeleterDryRunChangesNothing,
 		RunDeleterRecordsExactlyOneHistoryEntry,
 		RunDeleterDoesNotMutateTheCallerRequest,
@@ -471,6 +472,7 @@ var roleContractCases = []roleContract{
 		RunJournalArrivalReimportKeepsTheStamp,
 		RunJournalArrivalFirstCreateRecordStampsAnUnstampedRow,
 		RunJournalArrivalRenameKeepsTheStamp,
+		RunJournalEveryMutationKindRecordsItsActor,
 		RunJournalEveryMutationKindLandsARow,
 	),
 
@@ -492,6 +494,7 @@ var roleContractCases = []roleContract{
 		RunLifecycleResultsAreHydratedPostStateSnapshots,
 		RunLifecycleResultsCarryThePostWriteRowVersion,
 		RunLifecycleCloseAndReopenRequireActorAndIssueID,
+		RunLifecycleEventActorMatchesTheRequest,
 		RunLifecycleReopenProvenanceLabelsHistory,
 		RunLifecycleCloseSettlesItsTransitiveAndCrossPlaneDependers,
 		RunLifecycleCloseSettlesTheClosedRowItselfAndItsChild,
@@ -713,6 +716,14 @@ var roleContractCases = []roleContract{
 		RunReleaserRecordsExactlyOneHistoryEntry,
 		RunReleaserReleasesAWispClaimWithoutVersioning,
 		RunReleaserDoesNotMutateTheCallerRequest,
+	),
+
+	// The revision-token matrix (row_version_contract.go): one fixture
+	// carrying every write role whose effect on RowVersion it classifies.
+	roleCases("RowVersion", "IssueLifecycle(), MetadataCAS(), IssueClaimer(), Releaser(), Heartbeater(), DependencyEditor(), Commenter() and BatchApplier()", oncePerRole,
+		func(b RoleContractBundle) func(t *testing.T) *RowVersionFixture { return b.RowVersion },
+		RunLifecycleRowVersionAdvancesPerMutationKind,
+		RunLifecycleUpdateLabelOnlyPatchLeavesRowVersion,
 	),
 
 	roleCases("StatsReporter", "StatsReporter()", oncePerRole,

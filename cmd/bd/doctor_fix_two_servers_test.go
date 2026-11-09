@@ -25,13 +25,15 @@ import (
 // the Dolt server at the resolved port, and beside it a live unix socket that
 // metadata.json names (as bd dolt set socket writes it) on a server that
 // refuses the login, in a fresh clone (no .beads/dolt). The repair imports
-// issues.jsonl through the library store open, which dials TCP at the port
-// and never metadata.json's socket. The check dialed the socket, reported
-// the server unreachable ("not a fresh clone"), and --fix imported the
-// tracked copy over the live row at the port all the same (#7874 review).
-// The check reads the server the repair writes and finds the database there,
-// and --fix, which imports only a fresh clone the check found
-// (doctor.FreshCloneDetected), changes nothing.
+// issues.jsonl through the library store open, which dials that live socket
+// first, as the CLI's store does. When that open dialed TCP at the port and
+// never metadata.json's socket, the check dialed the socket, reported the
+// server unreachable ("not a fresh clone"), and --fix imported the tracked
+// copy over the live row at the port all the same (#7874 review). The check
+// reads the server the repair writes, the socket's, which refuses the login:
+// it warns naming unix:<socket>, finds no fresh clone
+// (doctor.FreshCloneDetected), and --fix, which imports only a fresh clone
+// the check found, leaves the row at the port as it is.
 func TestDoctorFixFreshCloneLeavesTheServerAtThePortUnchanged(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix socket fixture")
@@ -61,11 +63,12 @@ func TestDoctorFixFreshCloneLeavesTheServerAtThePortUnchanged(t *testing.T) {
 	}
 
 	socketServer := newFakeMySQLLoginOn(t, "unix", diagnosticSocketPath(t))
+	socket := socketServer.ln.Addr().String()
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil || cfg == nil {
 		t.Fatalf("load metadata: %v", err)
 	}
-	cfg.DoltServerSocket = socketServer.ln.Addr().String()
+	cfg.DoltServerSocket = socket
 	if err := cfg.Save(beadsDir); err != nil {
 		t.Fatal(err)
 	}
@@ -91,8 +94,14 @@ func TestDoctorFixFreshCloneLeavesTheServerAtThePortUnchanged(t *testing.T) {
 	if got.Title != "live title" {
 		t.Errorf("bd doctor --fix overwrote the live row at the port: title %q, want %q\nFresh Clone: %s %s\n%s", got.Title, "live title", check.Status, check.Message, out)
 	}
-	if check.Status != statusOK || !strings.Contains(check.Message, "Database exists") {
-		t.Errorf("Fresh Clone = %s %q, want the database found on the server its repair writes", check.Status, check.Message)
+	if check.Status != statusWarning || !strings.Contains(check.Message, "unix:"+socket) || doctor.FreshCloneDetected(check.Message) {
+		t.Errorf("Fresh Clone = %s %q, want a warning naming unix:%s, the server its repair writes, and no fresh clone", check.Status, check.Message, socket)
+	}
+	if len(socketServer.Logins()) == 0 {
+		t.Errorf("Fresh Clone never logged in on the socket %s, the server its repair writes", socket)
+	}
+	if !strings.Contains(out, "Fix summary: 0 fixed, 1 skipped, 0 errors") {
+		t.Errorf("bd doctor --fix does not report the Fresh Clone repair it withheld as skipped:\n%s", out)
 	}
 }
 

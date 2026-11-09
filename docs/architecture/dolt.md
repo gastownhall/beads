@@ -368,6 +368,17 @@ control is simpler than network allowlists. The Dolt server must be started
 with `dolt sql-server --socket <path>`. Auto-start is not supported in socket
 mode.
 
+`bd init --server-socket` records the path as `dolt_server_socket` in
+`.beads/metadata.json`. `BEADS_DOLT_SERVER_SOCKET` wins over it. The socket is
+a preference, not a requirement: if it does not answer but the TCP host and
+port do, bd connects over TCP. If neither answers, the error names the socket.
+In releases after v1.3.2, opens that read metadata.json (`beads.OpenFromConfig`
+and the other config-based library opens, `bd doctor` and its repairs, and
+routed stores) take the socket the same way, after a socket the library
+caller passes directly. Earlier releases read only `BEADS_DOLT_SERVER_SOCKET`
+on those opens and dialed TCP beside a metadata.json socket. `beads.Open`
+does not read metadata.json.
+
 Switch to server mode when you need:
 - Multiple agents writing simultaneously
 - Orchestrator multi-rig setups
@@ -912,6 +923,56 @@ bd dolt status
 # Show full configuration including shared mode
 bd dolt show
 ```
+
+#### Durability and Dolt history
+
+Saving a write and recording it in Dolt history are separate steps:
+
+- **SQL commit (saved).** When a `bd` write succeeds, its SQL transaction has
+  committed and Dolt has synced it to the shared server's local data
+  directory through its chunk journal. With supported journal-backed Dolt and
+  the journal left at its default (enabled), the write survives the server
+  being killed (SIGKILL, out-of-memory, an ungraceful logout) and is there
+  after the next start. Surviving power loss also depends on the filesystem
+  and device honoring sync. A write still in an open transaction when the
+  server dies is lost, as in any database.
+- **Dolt commit (history).** A Dolt commit records saved changes in version
+  history: what `bd history` shows and what `bd dolt push` sends. With
+  `dolt.auto-commit` set to `batch` or `off`, saved changes wait in the working
+  set (`bd doctor` reports them under "Dolt Status") until you record them
+  yourself:
+
+  ```bash
+  bd dolt commit -m "record pending changes"
+  ```
+
+  A graceful `bd dolt stop` also records them, best-effort. A crash does not
+  discard them: they are still pending after the restart.
+
+A local commit of either kind is not a backup. To keep a copy off the
+machine, push history to a remote, or point `bd backup` at a separate or
+off-machine destination: run `bd backup init <path-or-url>` once, then
+`bd backup sync`. Only `bd backup sync` writes to that destination, so run it
+again to bring the copy up to date.
+
+bd does not turn on Dolt's `behavior.dolt_transaction_commit`, and saving
+writes does not need it. It would turn every SQL transaction into its own Dolt
+commit: history grows faster, Dolt's generic transaction commits take the
+place of bd's per-command messages and authors, and `batch` and `off` modes
+stop batching.
+
+**Server config file.** For a server bd launches with its default
+configuration, bd writes the shared server's config to
+`~/.beads/shared-server/dolt-server-config.yaml` and passes it with
+`--config`. bd rewrites it on every start, so edits to it do not last. With a
+Dolt too old for that config, bd passes command-line flags instead, and Dolt
+then writes a template to `~/.beads/shared-server/dolt/config.yaml` that
+records those flag values and leaves its other settings commented out. The
+bd-launched server does not read that template, so its server settings have no
+effect. bd itself still reads the template's `listener.port` when it resolves
+the shared server's port: after `BEADS_DOLT_SERVER_PORT` and bd's port file,
+ahead of `dolt.port` in config.yaml. Servers you configure and run yourself
+(external or proxied) use whatever config you give them.
 
 ### Data Location (Orchestrator)
 

@@ -67,9 +67,18 @@ var (
 )
 
 // TestMain owns the composition's lifetime: one embedded database and one bound
-// listener for the package, torn down after the last case.
+// listener for the package, torn down after the last case. It also judges the
+// composition's wire witness (served_protocol_seam_test.go) once, after the last
+// case: a composition that sent what the tier's protocol forbids fails the
+// package even though every case passed.
 func TestMain(m *testing.M) {
 	code := m.Run()
+	if report := compositionWitness.report(); report != "" {
+		fmt.Fprintln(os.Stderr, "FAIL: "+report)
+		if code == 0 {
+			code = 1
+		}
+	}
 	if compositionStop != nil {
 		compositionStop()
 	}
@@ -126,6 +135,7 @@ func startServedComposition() (*servedComposition, func(), error) {
 	cfg.Addr = "127.0.0.1:0"
 	cfg.Stdout = io.Discard
 	cfg.Stderr = io.Discard
+	servedServerConfig(&cfg)
 	srv, err := httpapi.Listen(cfg)
 	if err != nil {
 		return fail(fmt.Errorf("bind the in-process bd serve: %w", err))
@@ -139,7 +149,7 @@ func startServedComposition() (*servedComposition, func(), error) {
 	if err != nil {
 		return fail(err)
 	}
-	transport, err := wire.New(base, nil, wire.Options{})
+	transport, err := wire.New(base, nil, servedWireOptions(compositionWitness, wire.Options{}))
 	if err != nil {
 		return fail(fmt.Errorf("build the wire client: %w", err))
 	}
@@ -285,7 +295,7 @@ func (c *servedComposition) tamperedClient(t *testing.T, tamper func(*wire.Reque
 	if err != nil {
 		t.Fatalf("parse the composition base URL: %v", err)
 	}
-	transport, err := wire.New(base, nil, wire.Options{})
+	transport, err := wire.New(base, nil, servedWireOptions(newServedWitness(t, "tamperedClient"), wire.Options{}))
 	if err != nil {
 		t.Fatalf("build a second wire client: %v", err)
 	}
