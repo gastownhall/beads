@@ -322,7 +322,7 @@ func TestClassifyFSCKFailure(t *testing.T) {
 		name         string
 		parentErr    error
 		fsckErr      error
-		runErr       error  // execution error from CombinedOutput
+		runErr       error // execution error from CombinedOutput
 		output       string
 		wantNil      bool    // true → expect nil (could-not-open skip path)
 		wantIs       error   // positive errors.Is assertion

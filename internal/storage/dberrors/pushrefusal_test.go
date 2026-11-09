@@ -1,6 +1,7 @@
 package dberrors
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -45,6 +46,9 @@ func TestIsRemoteDanglingReference_NotOtherFailures(t *testing.T) {
 		{"nil", nil},
 		{"pre-push fsck", fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks: %s", errors.New("dangling chunk reference"), "chunk abc missing")},
 		{"pre-push fsck quoting dolt", fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks: %s", errors.New("dangling chunk reference"), "Found dangling references to HashSet {\n  e564v1teutmhp289qspj9ba1lhrvit00\n}")},
+		{"pre-push fsck timed out quoting dolt", fmt.Errorf("%w: fsck did not complete within the configured timeout; the push was aborted without checking integrity; fsck output: %s", errors.New("pre-push integrity check timed out"), "Found dangling references to HashSet {\n  e564v1teutmhp289qspj9ba1lhrvit00\n}")},
+		{"pre-push fsck failed quoting dolt", fmt.Errorf("%w: the integrity check did not complete successfully; the push was aborted; output: %s", errors.New("pre-push integrity check failed"), "Found dangling references to HashSet {\n  e564v1teutmhp289qspj9ba1lhrvit00\n}")},
+		{"pre-push fsck interrupted quoting dolt", fmt.Errorf("pre-push integrity check interrupted: %w: %s", context.Canceled, "Found dangling references to HashSet {\n  e564v1teutmhp289qspj9ba1lhrvit00\n}")},
 		{"local nbs", errors.New("dangling ref: found dangling references to HashSet {\n  e564v1teutmhp289qspj9ba1lhrvit00\n}")},
 		{"diverged history", errors.New("failed to push to origin/main: no common ancestor")},
 		{"pk mismatch", errors.New("error: cannot merge because table dependencies has different primary keys in its common ancestor")},
