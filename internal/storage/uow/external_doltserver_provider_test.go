@@ -454,6 +454,106 @@ func (f *leastPrivilegeFixture) open(ctx context.Context, database, user string,
 		user, "pw", 0, 0, false, "", opts...)
 }
 
+func countIssues(t *testing.T, ctx context.Context, p UnitOfWorkProvider) int {
+	t.Helper()
+	sqlProv, ok := p.(*doltSQLProvider)
+	require.True(t, ok, "expected *doltSQLProvider, got %T", p)
+	var n int
+	require.NoError(t, sqlProv.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&n))
+	return n
+}
+
+// waitForUserGetLock waits, bounded, until a session of user is visibly
+// blocked in GET_LOCK on the server.
+func waitForUserGetLock(t *testing.T, ctx context.Context, observer *sql.DB, user string, done <-chan struct{}) {
+	t.Helper()
+	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			t.Fatalf("the %s open finished before it was seen waiting in GET_LOCK", user)
+		default:
+		}
+		rows, err := observer.QueryContext(waitCtx, "SELECT user, info FROM information_schema.processlist")
+		require.NoError(t, err)
+		seen := false
+		for rows.Next() {
+			var who, info sql.NullString
+			require.NoError(t, rows.Scan(&who, &info))
+			if who.String == user && strings.Contains(strings.ToUpper(info.String), "GET_LOCK") {
+				seen = true
+			}
+		}
+		require.NoError(t, rows.Err())
+		require.NoError(t, rows.Close())
+		if seen {
+			return
+		}
+		select {
+		case <-waitCtx.Done():
+			t.Fatalf("timed out waiting for the %s open to block in GET_LOCK", user)
+		case <-ticker.C:
+		}
+	}
+}
+
+// TestNewExternalDoltServerUOWProvider_LeastPrivilegeAccounts is the
+// gastownhall/beads#5079 integration regression: a SELECT-only account reads
+// a converged database even when a peer holding the migration lock forces its
+// open off the lock-free fast path and through locked bootstrap preparation,
+// which used to send CREATE DATABASE and be refused.
+func TestNewExternalDoltServerUOWProvider_LeastPrivilegeAccounts(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	f := newLeastPrivilegeFixture(t, ctx, "beads_lp")
+	f.account(t, ctx, "reader", "SELECT")
+
+	// Quiet baseline: the converged fast path never reaches preparation.
+	baseline, err := f.open(ctx, f.database, "reader", WithReadOnly())
+	require.NoError(t, err, "a quiet converged open needs no CREATE")
+	countIssues(t, ctx, baseline)
+	require.NoError(t, baseline.Close(ctx))
+
+	// A peer holds the migration lock, so the reader's convergence probe
+	// declines and its open queues on GET_LOCK, then runs locked preparation.
+	holder, err := f.admin.Conn(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = holder.Close() })
+	lockName := schema.MigrationLockName(f.database)
+	require.NoError(t, schema.AcquireMigrationLock(ctx, holder, lockName))
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			_ = schema.ReleaseMigrationLock(holder, lockName)
+		}
+	})
+
+	type result struct {
+		p   UnitOfWorkProvider
+		err error
+	}
+	done := make(chan struct{})
+	resCh := make(chan result, 1)
+	go func() {
+		defer close(done)
+		p, err := f.open(ctx, f.database, "reader", WithReadOnly())
+		resCh <- result{p, err}
+	}()
+	waitForUserGetLock(t, ctx, f.admin, "reader", done)
+	require.NoError(t, schema.ReleaseMigrationLock(holder, lockName))
+	released = true
+
+	res := <-resCh
+	if res.p != nil {
+		t.Cleanup(func() { _ = res.p.Close(context.Background()) })
+	}
+	require.NoError(t, res.err, "a SELECT-only read through the locked path must not need CREATE")
+	countIssues(t, ctx, res.p)
+}
+
 // TestNewExternalDoltServerUOWProvider_LeastPrivilegeMissingDatabase pins the
 // refusal a CREATE-less account gets for a database it cannot see — absent, or
 // present but not granted, which the server deliberately makes look the same:

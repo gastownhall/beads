@@ -660,6 +660,29 @@ reached through a local proxy. Three differences worth knowing:
   proxied workspace: run it on the server host first, then consent from the
   proxied workspace (see [Clone behind the remote](#clone-behind-the-remote)).
 
+### Least-privilege accounts
+
+A proxied-server workspace can run on an account that the server
+administrator granted only on its own database. `bd` never needs `CREATE` to
+open a database that account can already see: on a database whose schema is
+current, a read command needs only `SELECT` on that database, and a write
+command needs only the privileges the write itself uses
+([#5079](https://github.com/gastownhall/beads/issues/5079)).
+
+Creating the database and migrating its schema are separate jobs, and neither
+grants the other. The administrator who provisions the database needs
+`CREATE`; the designated migrator who runs step 2 above needs the privileges
+to change the schema. A least-privilege account on a database whose schema is
+behind gets the same treatment as any other client: reads warn and serve the
+current schema, and writes are refused by the migration gate.
+
+When the database is not visible to the account, `bd` tries to create it. If
+that is denied, the error says the database `is not visible to this credential
+and creating it was denied`. The server answers the same way whether the
+database was never provisioned or the account was never granted access to it,
+so `bd` cannot tell the two apart: ask the administrator to provision the
+database and grant the account access.
+
 ## Cross-era Upgrades
 
 If you're upgrading from a much older version of bd, inspect the storage layout
