@@ -87,8 +87,10 @@ var issueUpsertColumns = []string{
 // populated local value (bd-hj85c). Re-importing an identical snapshot stays
 // idempotent either way — the rewrite would have written identical values.
 // Tie rows are deliberately NOT short-circuited by the staleRejected
-// pre-check in InsertIssueIfNew, so their aux data (labels/comments/deps,
-// which never bump updated_at) still merges additively.
+// pre-check in InsertIssueIfNew, so their aux data (labels/comments/deps)
+// still merges additively. A local label edit advances updated_at (GH#5442),
+// so an older snapshot is rejected rather than tied; comments and deps never
+// move it.
 func issueUpsertAssignments(table string, rejectStaleUpdate bool) string {
 	assignments := make([]string, 0, len(issueUpsertColumns))
 	for _, col := range issueUpsertColumns {

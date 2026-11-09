@@ -15,8 +15,9 @@ import (
 // Dolt merges disjoint writes cleanly, but beads stamps `issues.updated_at` on
 // EVERY mutation, so any two edits to the same issue on two replicas between
 // syncs collide on that cell — even when the semantic fields are disjoint
-// (machine A adds a comment, machine B adds a label, and the issues row
-// conflicts on nothing but the timestamp both bumped). The observed conflict
+// (machine A edits the description, machine B adds a label, and the issues
+// row conflicts on nothing but the timestamp both bumped; a label edit
+// advances updated_at since GH#5442, while comments and dependencies do not). The observed conflict
 // rate is therefore far higher than the semantic-conflict rate, and the
 // original row-level LWW resolver could only take the safe half of it: it
 // declined whenever BOTH sides had moved updated_at past the merge base,
