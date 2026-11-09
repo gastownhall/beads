@@ -356,10 +356,14 @@ tracking the same work twice.
 persisting across repeated invocations.
 
 **Cause:** The circuit breaker tripped after repeated connection failures.
-Its state lives in a file under `/tmp/beads-circuit/` (named
-`beads-dolt-circuit-<host>-<port>[-<db>].json`, keyed on host:port) and is
-shared across all `bd` processes. Once tripped, all commands to that host:port
-are rejected until a successful probe resets it.
+Its state lives in a file under `${TMPDIR:-/tmp}/beads-circuit-$(id -u)/` on
+Linux and macOS, or `%TEMP%\beads-circuit\` on Windows (named
+`beads-dolt-circuit-<host>-<port>[-<db>].json`, keyed on host:port and
+database). The directory is private to your user (mode 0700), so it is
+shared by all of your `bd` processes that use the same temp directory, but
+not with other users on the host: each user's breaker trips on its own
+failures. Once tripped, that user's commands to that host:port are rejected
+until a successful probe resets it.
 
 For beads-managed local servers, `bd dolt status` reports from the server's
 PID file — a "running" status does not guarantee the server is actually
@@ -369,7 +373,7 @@ accepting connections on the expected port.
 
 ```bash
 # Check circuit breaker state
-cat /tmp/beads-circuit/beads-dolt-circuit-*.json
+cat "${TMPDIR:-/tmp}/beads-circuit-$(id -u)"/beads-dolt-circuit-*.json
 
 # Check if the Dolt server is actually listening
 lsof -i :<port>
@@ -381,7 +385,7 @@ cat .beads/metadata.json | grep port
 **Fix:**
 
 ```bash
-rm /tmp/beads-circuit/beads-dolt-circuit-*.json
+rm -f "${TMPDIR:-/tmp}/beads-circuit-$(id -u)"/beads-dolt-circuit-*.json
 bd dolt stop
 bd dolt start
 bd list
