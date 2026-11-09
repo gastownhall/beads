@@ -3,6 +3,7 @@ package uow
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -616,4 +617,89 @@ func TestNewExternalDoltServerUOWProvider_LeastPrivilegeAccounts(t *testing.T) {
 			"SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = ?", absent).Scan(&count))
 		assert.Zero(t, count, "the refused open must not leave a database behind")
 	})
+}
+
+// TestNewExternalDoltServerUOWProvider_BehindDatabaseReadThroughAndWriteRefusal
+// is the integration regression for the AC-6 half of gastownhall/beads#5079's
+// fix: a readable database one migration behind, with no remote and no
+// migration consent, must keep its existing gate behavior for restricted
+// accounts — the SELECT-only reader is warned and served at the current
+// schema, the database-DML writer is refused with the shared-no-remote gate
+// error — and neither open may change migration state.
+func TestNewExternalDoltServerUOWProvider_BehindDatabaseReadThroughAndWriteRefusal(t *testing.T) {
+	h := newTeamServerHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	// No consent, and restore the package's global consent state afterwards.
+	t.Setenv(schema.AllowRemoteMigrateEnv, "0")
+	t.Cleanup(func() {
+		schema.SetSharedMigrateConsent(false)
+		schema.SetForceAllowRemoteMigrate(false)
+	})
+
+	const database = "beads_behind_rw"
+
+	// Provision as the administrator, then roll the cursor back one version:
+	// the latest schema (every column present, so reads work), one migration
+	// behind, no remote — the readable pending-migration shape.
+	provisioner, err := h.openProvider(ctx, database, false, "")
+	require.NoError(t, err)
+	require.NoError(t, provisioner.Close(ctx))
+
+	direct := h.directDB(t, database)
+	var maxVersion int
+	var savedHash sql.NullString
+	require.NoError(t, direct.QueryRowContext(ctx,
+		"SELECT MAX(version) FROM schema_migrations").Scan(&maxVersion))
+	require.NoError(t, direct.QueryRowContext(ctx,
+		"SELECT content_hash FROM schema_migrations WHERE version = ?", maxVersion).Scan(&savedHash))
+	_, err = direct.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version = ?", maxVersion)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := direct.ExecContext(context.Background(),
+			"INSERT INTO schema_migrations (version, content_hash) VALUES (?, ?)", maxVersion, savedHash)
+		assert.NoError(t, err)
+	})
+
+	admin := h.directDB(t, "")
+	leastPrivilegeAccounts(t, ctx, admin, database)
+	before := snapshotMigrations(t, ctx, direct)
+	require.Less(t, before.maxVersion, maxVersion, "fixture must be one migration behind")
+
+	// The SELECT-only reader opens read-only and is served at the current
+	// schema, with the existing warning.
+	var readerErr error
+	var readerProvider UnitOfWorkProvider
+	warning := captureStderr(t, func() {
+		readerProvider, readerErr = NewExternalDoltServerUOWProvider(
+			ctx, h.storeRootDir, database, h.logPath,
+			configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: h.port},
+			"lp_reader", "readerpw", 0, 0, false, "", WithReadOnly())
+	})
+	require.NoError(t, readerErr, "a SELECT-only read-only open must read through the refused migration")
+	t.Cleanup(func() { _ = readerProvider.Close(context.Background()) })
+	for _, want := range []string{"Read-only command", "without migrating"} {
+		assert.Contains(t, warning, want)
+	}
+	sqlProv, ok := readerProvider.(*doltSQLProvider)
+	require.True(t, ok, "expected *doltSQLProvider, got %T", readerProvider)
+	var issues int
+	require.NoError(t, sqlProv.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&issues))
+	assert.Equal(t, before, snapshotMigrations(t, ctx, direct),
+		"the read-through must not change migration state")
+
+	// The database-DML writer is refused with the existing shared-no-remote
+	// gate error — the denial the bare CREATE used to mask.
+	_, writeErr := NewExternalDoltServerUOWProvider(
+		ctx, h.storeRootDir, database, h.logPath,
+		configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: h.port},
+		"lp_dml", "dmlpw", 0, 0, false, "")
+	require.Error(t, writeErr, "a write open behind a migration must keep the shared-no-remote refusal")
+	var gateErr *schema.RemoteMigrateGateError
+	require.Truef(t, errors.As(writeErr, &gateErr),
+		"write open error = %T (%v), want *schema.RemoteMigrateGateError", writeErr, writeErr)
+	assert.Equal(t, "shared-no-remote", gateErr.Decision)
+	assert.Equal(t, before, snapshotMigrations(t, ctx, direct),
+		"the refused write open must not change migration state")
 }
