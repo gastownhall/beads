@@ -4297,17 +4297,22 @@ paths:
         Reopening CLEARS `close_reason` and `closed_by_session`, because they
         describe a closure that no longer holds. That is what makes the close's
         first-close-wins rule survivable: the way to write a new reason is to
-        reopen and close again, not to re-close.
+        reopen and close again, not to re-close. The cleared values are not
+        lost: retained committed history keeps every snapshot taken while the
+        issue was closed, close reason included (`bd history`).
 
 
         ## Where the reason is recorded
 
 
-        On the `reopened` EVENT this move records, not on a field of the issue,
-        and the response does not carry it. A caller that wants it back reads
-        the issue's events — the same place the actor attribution for the
-        reopen lives. A reopen with no reason still records that entry; it
-        simply carries none.
+        In two places, in the same transaction as the move, and on no field of
+        the issue; the response carries neither. A nonblank reason is added
+        verbatim to the issue's COMMENT THREAD, authored by `actor`, where
+        `GET /v0/beads/issues/{id}/comments`, show and export read it. The
+        reason is also carried on the `reopened` EVENT this move records in
+        the issue's local audit history, beside the actor attribution for the
+        reopen. A reopen with no reason adds no comment and still records that
+        event; it simply carries none.
 
 
         ## No POLICY conflict to name
@@ -12925,11 +12930,12 @@ components:
           type: string
           maxLength: 255
           description: >-
-            Why the issue is being reopened. Recorded on the `reopened` EVENT
-            this move records — not on a field of the issue, and not carried in
-            the response, so a caller that wants it back reads the issue's
-            events. Refused for control characters, and bounded by what the
-            column holds rather than by the number above.
+            Why the issue is being reopened. A nonblank reason is added to the
+            issue's comment thread, authored by `actor`, and is also recorded
+            on the `reopened` event in the issue's local audit history — not
+            on a field of the issue, and not carried in the response. Refused
+            for control characters, and bounded by what the column holds
+            rather than by the number above.
         expected_version:
           type: string
           description: >-

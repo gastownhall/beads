@@ -20,6 +20,17 @@ var reopenCmd = &cobra.Command{
 	Long: `Reopen closed issues by setting status to 'open' and clearing the closed_at timestamp.
 This is more explicit than 'bd update --status open' and emits a Reopened event.
 
+Reopening clears the current close fields (closed_at, close_reason,
+closed_by_session). Retained committed history keeps them: each snapshot
+committed while the issue was closed still holds its close reason, and plain
+'bd history <id>' prints it.
+
+--reason is recorded in two places: as a comment on the issue's thread,
+authored by the reopening actor (read it with 'bd comments <id>',
+'bd show <id>' or 'bd export'), and on the reopened audit event in this
+clone's local event log ('bd history <id> --events'). A blank reason adds no
+comment.
+
 Exit codes: 1 for general failures; 13 when the failure is a stale
 --if-revision guard (the precondition no longer held, nothing was written —
 another actor won the race, so retrying the same guard is pointless).`,
@@ -211,7 +222,7 @@ func reopenStatusOf(post, pre *types.Issue) types.Status {
 }
 
 func init() {
-	reopenCmd.Flags().StringP("reason", "r", "", "Reason for reopening")
+	reopenCmd.Flags().StringP("reason", "r", "", "Reason for reopening: added as a comment by the reopening actor and kept on the local reopened audit event")
 	// beads#4682: not part of #7203's original four verbs (update/close/
 	// assign/delete); reopen gets the same guard since it is the same kind
 	// of single-id lifecycle write.
