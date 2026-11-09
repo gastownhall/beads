@@ -8,16 +8,20 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/remedy"
 )
 
 // unknownDoltModeWantSubstrings returns the guidance substrings every
 // unknown-dolt_mode rejection must carry: the field, the offending value,
 // the file it was read from, the supported vocabulary, the data-safety
-// guarantee and the upgrade-or-correct remedy.
+// guarantee and the upgrade-or-correct remedy. The value is wanted as
+// remedy.PrintedValue spells it, the way the refusal prints it: a value
+// that does not print as itself (a tab, a line break) appears in the
+// message only spelled, never raw.
 func unknownDoltModeWantSubstrings(mode string) []string {
 	return []string{
 		"dolt_mode",
-		mode,
+		remedy.PrintedValue(mode),
 		"not recognized",
 		"embedded",
 		"server",
