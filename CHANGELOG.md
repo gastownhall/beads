@@ -1258,6 +1258,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd_storage_operation_duration_ms` and `bd_storage_errors_total` gain
   `db_operation`.
 
+- **Concurrent guarded deletes through `bd serve` have one winner.** A
+  `POST /v0/beads/issues:delete` carrying `expected_version`, which is what
+  `bd delete --if-revision` sends from a `bd connect` workspace, never took the
+  per-issue delete fence #7244 added: the fence lookup could not see through
+  `bd serve`'s per-request wrapper. N concurrent deletes of one issue with the
+  same token all answered 200 `deleted: 1` (every `bd delete --if-revision`
+  exited 0), and each landed its own `bd: delete` commit. Now exactly one
+  succeeds and the rest answer 404 `not_found`, which `bd delete --if-revision`
+  reports as exit 13 `precondition failed: issue no longer exists`, as the
+  proxied-server and shared-server routes already did. A guarded delete that
+  cannot find the fence is now refused instead of running without it (#7243).
 - `bd config set`, `bd config unset`, `bd repo add` and `bd repo remove` now
   replace an existing `config.yaml` in one step (temp file in the same
   directory, fsync, rename) instead of truncating and rewriting it in place.
