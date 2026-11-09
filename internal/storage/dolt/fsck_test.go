@@ -431,6 +431,69 @@ func TestClassifyFSCKFailure_FindingWins(t *testing.T) {
 	}
 }
 
+// TestClassifyFSCKFailure_NonFindingKeepsKind verifies that the supported
+// skip, timeout and interruption outcomes keep their error kind and guidance
+// when fsck output carries no finding, whether or not a non-finding warning
+// precedes it: could-not-open still skips, a parent cancellation is still an
+// interrupt, a caller deadline still points at the caller's timeout, fsck's
+// own deadline still names BEADS_FSCK_TIMEOUT, and cancellation phrasing with
+// healthy contexts is still an interrupt.
+func TestClassifyFSCKFailure_NonFindingKeepsKind(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name         string
+		parentErr    error
+		fsckErr      error
+		output       string
+		wantNil      bool
+		wantIs       error
+		wantContains string
+		wantAbsent   string
+	}{
+		{name: "could-not-open", output: "Could not open dolt database: some reason", wantNil: true},
+		{name: "could-not-open + own deadline", fsckErr: context.DeadlineExceeded, output: "Could not open dolt database: some reason", wantNil: true},
+		{name: "invalid repository state + parent canceled", parentErr: context.Canceled, fsckErr: context.Canceled, output: "The current directories repository state is invalid", wantNil: true},
+		{name: "parent canceled", parentErr: context.Canceled, fsckErr: context.Canceled, wantIs: context.Canceled, wantContains: "interrupted"},
+		{name: "parent deadline", parentErr: context.DeadlineExceeded, fsckErr: context.DeadlineExceeded, wantIs: ErrFSCKTimeout, wantContains: "dolt.auto-push-timeout", wantAbsent: "BEADS_FSCK_TIMEOUT environment variable"},
+		{name: "own deadline", fsckErr: context.DeadlineExceeded, wantIs: ErrFSCKTimeout, wantContains: "BEADS_FSCK_TIMEOUT environment variable", wantAbsent: "dolt.auto-push-timeout"},
+		{name: "context canceled text", output: "context canceled", wantIs: context.Canceled, wantContains: "interrupted"},
+		{name: "signal terminated text", output: "signal: terminated", wantIs: context.Canceled, wantContains: "interrupted"},
+	}
+	for _, tc := range cases {
+		for _, warn := range []bool{false, true} {
+			tc, warn := tc, warn
+			name := tc.name
+			output := tc.output
+			if warn {
+				name += " after warning"
+				output = strings.TrimSpace(fsckUnknownConfigWarning + "\n" + output)
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				err := classifyFSCKFailure(tc.parentErr, tc.fsckErr, output)
+				if tc.wantNil {
+					if err != nil {
+						t.Fatalf("want nil (skip), got %v", err)
+					}
+					return
+				}
+				if !errors.Is(err, tc.wantIs) {
+					t.Fatalf("errors.Is(err, %v) = false; err = %v", tc.wantIs, err)
+				}
+				if errors.Is(err, ErrDanglingReference) {
+					t.Errorf("non-finding output reported as corruption: %v", err)
+				}
+				if tc.wantContains != "" && !strings.Contains(err.Error(), tc.wantContains) {
+					t.Errorf("error %q does not contain %q", err, tc.wantContains)
+				}
+				if tc.wantAbsent != "" && strings.Contains(err.Error(), tc.wantAbsent) {
+					t.Errorf("error %q must not contain %q", err, tc.wantAbsent)
+				}
+			})
+		}
+	}
+}
+
 // TestFsckReportedFinding verifies the helper recognizes dolt fsck's report
 // headers and corrupted-journal warning, including the ANSI color the headers
 // carry, and does not treat a clean summary, warnings, empty output, or
