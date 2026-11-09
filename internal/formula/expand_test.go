@@ -1016,6 +1016,129 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 			t.Errorf("work.first.Needs = %v, want %v", got, want)
 		}
 	})
+
+	// A step replaced by an inline expansion keeps its dependents: they now
+	// reference the last step of the expansion, as compose.Expand already
+	// does (GH#7637). The reference keeps its position in the list, the
+	// expansion roots keep the step's own prerequisites, and the caller's
+	// steps are not modified.
+	t.Run("dependents of an inline-expanded step point at its last step", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "unrelated", Title: "Unrelated"},
+			{ID: "setup", Title: "Setup"},
+			{ID: "work", Title: "Work", Needs: []string{"setup"}, Expand: "inline-exp"},
+			{ID: "land", Title: "Land", Needs: []string{"unrelated", "work"}},
+			{ID: "notify", Title: "Notify", DependsOn: []string{"work"}},
+			{ID: "group", Title: "Group", Children: []*Step{
+				{ID: "child", Title: "Child", Needs: []string{"work"}},
+			}},
+		}
+		wantInput := depSignatureOf(steps)
+
+		result, err := ApplyInlineExpansions(steps, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+
+		if got := depSignatureOf(steps); got != wantInput {
+			t.Errorf("input steps were modified:\n got: %s\nwant: %s", got, wantInput)
+		}
+
+		sm := buildStepMap(result)
+		for _, id := range []string{"work.first", "work.second", "land", "notify", "child"} {
+			if sm[id] == nil {
+				t.Fatalf("step %q missing from result: %v", id, allStepIDs(result))
+			}
+		}
+		if got := sm["work.first"].Needs; !slices.Equal(got, []string{"setup"}) {
+			t.Errorf("work.first.Needs = %v, want [setup] (the expanded step's own prerequisite stays on the root)", got)
+		}
+		if got := sm["work.second"].Needs; !slices.Equal(got, []string{"work.first"}) {
+			t.Errorf("work.second.Needs = %v, want [work.first]", got)
+		}
+		if got := sm["land"].Needs; !slices.Equal(got, []string{"unrelated", "work.second"}) {
+			t.Errorf("land.Needs = %v, want [unrelated work.second] (the reference keeps its position)", got)
+		}
+		if got := sm["notify"].DependsOn; !slices.Equal(got, []string{"work.second"}) {
+			t.Errorf("notify.DependsOn = %v, want [work.second]", got)
+		}
+		if got := sm["child"].Needs; !slices.Equal(got, []string{"work.second"}) {
+			t.Errorf("child.Needs = %v, want [work.second] (a dependent nested in children is retargeted too)", got)
+		}
+	})
+
+	// A dependency inherited from an expanded step's own needs: two's root
+	// step still references one, which is no longer there.
+	t.Run("a dependency between two expanded steps points at the first one's last step", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "one", Title: "One", Expand: "inline-exp"},
+			{ID: "two", Title: "Two", Needs: []string{"one"}, Expand: "inline-exp"},
+		}
+
+		result, err := ApplyInlineExpansions(steps, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+
+		if got := topLevelIDs(result); !slices.Equal(got, []string{"one.first", "one.second", "two.first", "two.second"}) {
+			t.Fatalf("result = %v, want [one.first one.second two.first two.second]", got)
+		}
+		if got := result[2].Needs; !slices.Equal(got, []string{"one.second"}) {
+			t.Errorf("two.first.Needs = %v, want [one.second]", got)
+		}
+		if got := result[0].Needs; len(got) != 0 {
+			t.Errorf("one.first.Needs = %v, want []", got)
+		}
+	})
+
+	t.Run("an expanded step with no dependents", func(t *testing.T) {
+		result, err := ApplyInlineExpansions([]*Step{{ID: "work", Title: "Work", Expand: "inline-exp"}}, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+		if got := topLevelIDs(result); !slices.Equal(got, []string{"work.first", "work.second"}) {
+			t.Errorf("result = %v, want [work.first work.second]", got)
+		}
+	})
+}
+
+// depSignatureOf renders each step's ID with its needs and depends_on lists,
+// children included: enough of a step tree to notice ApplyInlineExpansions
+// modifying the caller's steps.
+func depSignatureOf(steps []*Step) string {
+	var b strings.Builder
+	var walk func([]*Step)
+	walk = func(ss []*Step) {
+		for _, s := range ss {
+			fmt.Fprintf(&b, "%s needs=%v depends_on=%v\n", s.ID, s.Needs, s.DependsOn)
+			walk(s.Children)
+		}
+	}
+	walk(steps)
+	return b.String()
+}
+
+// topLevelIDs returns the IDs of the top-level steps, in order.
+func topLevelIDs(steps []*Step) []string {
+	ids := make([]string, len(steps))
+	for i, s := range steps {
+		ids[i] = s.ID
+	}
+	return ids
+}
+
+// allStepIDs returns every ID in the tree, children included, in order.
+func allStepIDs(steps []*Step) []string {
+	var ids []string
+	var walk func([]*Step)
+	walk = func(ss []*Step) {
+		for _, s := range ss {
+			ids = append(ids, s.ID)
+			walk(s.Children)
+		}
+	}
+	walk(steps)
+	return ids
 }
 
 func TestFindDuplicateStepIDs(t *testing.T) {
