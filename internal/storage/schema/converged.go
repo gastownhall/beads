@@ -174,10 +174,9 @@ func convergedOnTarget(ctx context.Context, db DBConn, databaseName, qualifier s
 // exists" and captured no heal authority), and the selector issues the same
 // USE preparation would.
 //
-// The existence probe is not decoration. A Dolt session that issues a FAILING
-// statement stays pinned to its pre-statement catalog snapshot, so a USE of a
-// not-yet-created database would poison this pooled connection for the rest of
-// its life (be-bv7x). Probe with a query that always succeeds, then act.
+// The existence probe is not decoration: a USE of a not-yet-created database
+// fails, and that is an expected state here rather than an error. Probe with a
+// query that always succeeds, then act.
 func selectTargetDatabase(ctx context.Context, db DBConn, databaseName string, selector DatabaseSelector) (bool, string, error) {
 	var current sql.NullString
 	if err := db.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&current); err != nil {
@@ -247,8 +246,8 @@ func migrationLockFree(ctx context.Context, db DBConn, lockName string) (bool, e
 // nothing needed selecting. dolt_ignore is a Dolt system table: it is NOT
 // listed in information_schema.tables (verified against a live dolt sql-server
 // — an existence probe of that table would report it absent and disable the
-// fast path permanently), so this read cannot get the full be-bv7x
-// probe-before-act treatment at table granularity.
+// fast path permanently), so this read cannot be probed first at table
+// granularity.
 // What it has instead: selectTargetDatabase has already proved this session is
 // on the target database (by reading DATABASE(), or by probing
 // information_schema.schemata and selecting it), Dolt materializes dolt_ignore

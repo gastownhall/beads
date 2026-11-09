@@ -358,8 +358,7 @@ type updatedAtChange struct {
 // took 0.1 s at 300 (see showColumnExists for the same finding on the
 // content-hash probe).
 //
-// SHOW COLUMNS fails on a missing table, and a failed statement pins a
-// pooled Dolt session to its catalog snapshot (be-bv7x), so the table's
+// SHOW COLUMNS fails on a missing table, so the table's
 // existence is read first with showTableExists, whose listing succeeds
 // whether or not the table is there; a clone without wisps reads as absent
 // without ever sending a failing statement. Names compare case-insensitively

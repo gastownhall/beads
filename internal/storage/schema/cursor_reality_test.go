@@ -1122,6 +1122,8 @@ func TestCurrentVersionSurfacesEveryOtherFailure(t *testing.T) {
 		&mysql.MySQLError{Number: 1105, Message: "lock wait timeout exceeded"},
 		&mysql.MySQLError{Number: 1105, Message: "failed to load the catalog"},
 		&mysql.MySQLError{Number: 1045, Message: "Access denied for user"},
+		// Dolt's refusal to a user with SELECT on other tables only.
+		&mysql.MySQLError{Number: 1105, Message: "Access denied for user 'reader'@'%' to table 'schema_migrations'"},
 		&mysql.MySQLError{Number: 1054, Message: "column not found: version"},
 		sql.ErrConnDone,
 		errors.New("connection reset by peer"),

@@ -853,8 +853,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   treats a session with no usable database as having no cursor. The probes guarded against a failing statement
   pinning a pooled session to its old catalog, which Dolt fixed between 2.2.0
   and 2.4.1, and the required minimum is 2.6.0. In a trace against a Dolt 2.6.0
-  server, `bd create` sends 80 statements instead of 87, `bd update` 58 instead
-  of 65, and `bd show` 36 instead of 38.
+  server, `bd create` and `bd update` each send 8 fewer statements and `bd show`
+  2 fewer. A SQL user granted `SELECT` on some tables but not on
+  `schema_migrations` used to see the cursor table as absent, so the database
+  looked fresh and the consent check was skipped; the open now reports the
+  access-denied error.
 - **`bd gate discover` skips template gates, as `bd gate check` does.** A
   template gh:run gate is a proto that work is poured from; on the direct,
   proxied and embedded routes `bd gate discover` used to record a discovered

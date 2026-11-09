@@ -359,9 +359,8 @@ func CheckReadableDrift(ctx context.Context, db DBConn, table string, columns []
 // compares column names. It lists the one table with SHOW COLUMNS for
 // showColumnExists's reason (Dolt answers INFORMATION_SCHEMA.COLUMNS by
 // scanning every database on the server), and only after
-// tableInCurrentDatabase has found the table, because a SHOW COLUMNS that
-// fails pins the pooled session to its catalog snapshot (be-bv7x). table is
-// a hardcoded identifier, never user input.
+// tableInCurrentDatabase has found the table, because SHOW COLUMNS fails on a
+// missing table. table is a hardcoded identifier, never user input.
 func missingColumns(ctx context.Context, db DBConn, table string, columns []string) ([]string, error) {
 	exists, err := tableInCurrentDatabase(ctx, db, table)
 	if err != nil {
@@ -1968,8 +1967,8 @@ func tableListingUnchanged(ctx context.Context, db DBConn) (bool, error) {
 }
 
 // tableInCurrentDatabase is showTableExists for a session that may have no
-// usable database, for the checks that must not send a failing statement
-// (be-bv7x: a failing statement pinning a pooled session to its old catalog).
+// usable database, for the checks that answer without sending a failing
+// statement.
 // SHOW TABLES fails with no database selected (1105) and on a session whose
 // database was dropped under it (1049); the schemata read answers 0 in both
 // cases instead, which reads the table as absent, exactly as the
@@ -1977,7 +1976,7 @@ func tableListingUnchanged(ctx context.Context, db DBConn) (bool, error) {
 // reads are one round trip each.
 //
 // The guard is check-then-act, not atomic: a DROP DATABASE landing between the
-// two reads still fails the SHOW TABLES and pins the session. On a *sql.DB the
+// two reads can still make SHOW TABLES fail. On a *sql.DB the
 // two reads may also land on different pooled connections, so the guard holds
 // only when every connection in the pool is on the same database (a DSN that
 // names it).

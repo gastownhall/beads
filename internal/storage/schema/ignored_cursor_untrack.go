@@ -95,11 +95,10 @@ func (s ignoredCursorState) reconcileNeeded() bool {
 // database that is two SHOW TABLES listings, HEAD's and the working set's (which
 // alreadyConverged already holds, see withTableListing); a dolt_ignore read
 // joins them only when the cursor is tracked at HEAD. None of
-// them may fail, and that is not incidental: a Dolt session that issues a
-// FAILING statement stays pinned to its pre-statement catalog snapshot for the
-// rest of its pooled life (be-bv7x), and this runs on every writable open and
-// every lock-free fast-path evaluation. A SHOW TABLES listing fails with no
-// database selected (1105) and on a session whose database was dropped (1049),
+// them should fail on a healthy database, because this runs on every writable
+// open and every lock-free fast-path evaluation, and a statement that fails
+// every time is a server warning on each of them. A SHOW TABLES listing fails
+// with no database selected (1105) and on a session whose database was dropped (1049),
 // so both callers must already have the session on the target database; a
 // session that may have no usable database needs tableInCurrentDatabase.
 //
@@ -258,11 +257,9 @@ func ignoredCursorNeedsUntrack(ctx context.Context, db DBConn, qualifier string)
 //
 // It asks by LISTING HEAD rather than by selecting from the table itself. The
 // direct spelling (`SELECT … AS OF 'HEAD'`, table-not-found means untracked)
-// is the one the field diagnosed with and is unambiguous, but as a probe it is
-// exactly the mistake be-bv7x cost us: a Dolt session that issues a FAILING
-// statement stays pinned to its pre-statement catalog snapshot for the rest of
-// its pooled life, and on a healthy database that probe fails EVERY time, on
-// EVERY open. The LIKE form always succeeds and returns at most one row, so
+// is the one the field diagnosed with and is unambiguous, but as a probe it
+// fails EVERY time on a healthy database, on EVERY open, and leaves a server
+// warning each time. The LIKE form always succeeds and returns at most one row, so
 // this costs the same as every other steady-state scalar probe.
 //
 // The returned name is compared exactly rather than trusted from the LIKE:

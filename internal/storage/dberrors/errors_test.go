@@ -38,6 +38,7 @@ func TestIsNoUsableDatabase(t *testing.T) {
 		// A true answer reads as "no schema cursor", so a phrase quoted inside
 		// another failure must not count.
 		{name: "1105 quoting the phrase", err: &mysql.MySQLError{Number: 1105, Message: "query failed: no database selected for the subquery"}},
+		{name: "text beginning with the phrase", err: errors.New("no database selected for the subquery")},
 		{name: "text access denied quoting a database name", err: errors.New("Access denied for user 'reader' to database 'unknown database'")},
 		{name: "text error 1044 quoting the phrase", err: errors.New("Error 1044 (42000): Access denied to database 'database not found'")},
 		{name: "text transport error quoting the phrase", err: errors.New("read tcp: connection reset while handling: database not found: beads")},
