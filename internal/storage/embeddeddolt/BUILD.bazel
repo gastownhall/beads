@@ -141,6 +141,7 @@ go_test(
         "create_batch_equivalence_test.go",
         "create_batch_participation_generation_test.go",
         "create_issue_test.go",
+        "cross_prefix_batch_test.go",
         "cross_prefix_local_target_test.go",
         "cross_prefix_readiness_test.go",
         "cross_prefix_wisp_target_test.go",
