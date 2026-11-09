@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -614,6 +615,38 @@ func TestCreateIssueFromFormValues(t *testing.T) {
 			}
 		}
 		assertNoFormWrites(t, ctx, s, parent.ID, target.ID)
+	})
+
+	// GH#5560: dependencies on distinct targets keep their own types, each
+	// running from the new issue to its target.
+	t.Run("DistinctTargetsKeepTheirTypes", func(t *testing.T) {
+		a := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Distinct target A"})
+		b := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Distinct target B"})
+		child := createFormIssueForTest(t, ctx, s, &createFormValues{
+			Title:        "Distinct child",
+			Dependencies: []string{"blocks:" + a.ID, "related:" + b.ID},
+		})
+		recs, err := s.GetDependencyRecords(ctx, child.ID)
+		if err != nil {
+			t.Fatalf("GetDependencyRecords %s: %v", child.ID, err)
+		}
+		got := make(map[string]types.DependencyType, len(recs))
+		for _, r := range recs {
+			got[r.DependsOnID] = r.Type
+		}
+		want := map[string]types.DependencyType{a.ID: types.DepBlocks, b.ID: types.DepRelated}
+		if len(recs) != 2 || !reflect.DeepEqual(got, want) {
+			t.Errorf("%s dependencies = %v (%d records), want %v", child.ID, got, len(recs), want)
+		}
+		for _, target := range []string{a.ID, b.ID} {
+			back, err := s.GetDependencyRecords(ctx, target)
+			if err != nil {
+				t.Fatalf("GetDependencyRecords %s: %v", target, err)
+			}
+			for _, r := range back {
+				t.Errorf("reversed edge written: %s -> %s (%s)", r.IssueID, r.DependsOnID, r.Type)
+			}
+		}
 	})
 
 	t.Run("AllPriorities", func(t *testing.T) {
