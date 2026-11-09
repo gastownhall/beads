@@ -17,7 +17,7 @@ import (
 //
 // Declined (the operator's) shapes, in the pre-screen below: a row missing on
 // one side (deletion is not zero), parent keys that differ, and a last_child
-// that does not parse as an integer. The decline leaves dolt_conflicts intact
+// that is not a nonnegative integer. The decline leaves dolt_conflicts intact
 // so the caller builds the MergeConflictsError that names child_counters.
 
 // childCounterKeyColumns are child_counters' primary-key columns, used both
@@ -34,7 +34,7 @@ type childCounterMax struct {
 // mergeChildCountersConflictRow decides one child_counters conflict row.
 // ok is false when the row is not a both-present same-parent counter
 // conflict: a side without a row (deletion is not zero), parent keys that
-// disagree, or a last_child that does not parse as an integer.
+// disagree, or a last_child that is not a nonnegative integer.
 //
 // It is pure, so every rule is unit-testable without a database.
 func mergeChildCountersConflictRow(row rawConflictRow) (childCounterMax, bool) {
@@ -67,9 +67,12 @@ func mergeChildCountersConflictRow(row rawConflictRow) (childCounterMax, bool) {
 	return childCounterMax{parentID: *ourParentStr, lastChild: max}, true
 }
 
-// parseChildCounterValue reads one side's last_child cell as an integer.
-// ok is false for NULL (the side deleted the row or the column is missing)
-// and for any value that does not parse as one.
+// parseChildCounterValue reads one side's last_child cell as a nonnegative
+// integer. ok is false for NULL (the side deleted the row or the column is
+// missing), for any value that does not parse as an integer, and for a
+// negative one: a negative high-water mark is a corrupted or synthetic value,
+// not a counter bd's write paths can produce, and "max" with one is as likely
+// to lower a healthy counter as to raise a broken one.
 func parseChildCounterValue(row rawConflictRow, side, col string) (int64, bool) {
 	v, has := row.value(side, col)
 	if !has || v == nil {
@@ -80,7 +83,7 @@ func parseChildCounterValue(row rawConflictRow, side, col string) (int64, bool) 
 		return 0, false
 	}
 	n, err := strconv.ParseInt(*s, 10, 64)
-	if err != nil {
+	if err != nil || n < 0 {
 		return 0, false
 	}
 	return n, true

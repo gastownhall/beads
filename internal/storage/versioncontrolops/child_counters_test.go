@@ -78,6 +78,16 @@ func TestMergeChildCountersConflictRow(t *testing.T) {
 			wantOK: false,
 		},
 		{
+			name:   "our last_child negative",
+			row:    counterConflictRow("bd-cc", "bd-cc", "bd-cc", 70, -5, 72),
+			wantOK: false,
+		},
+		{
+			name:   "their last_child negative",
+			row:    counterConflictRow("bd-cc", "bd-cc", "bd-cc", 70, 73, -1),
+			wantOK: false,
+		},
+		{
 			name:   "parent keys differ",
 			row:    counterConflictRow("bd-cc", "bd-cc", "bd-other", 70, 73, 72),
 			wantOK: false,
