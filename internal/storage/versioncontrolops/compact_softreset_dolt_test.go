@@ -30,6 +30,11 @@ type compactHookConn struct {
 
 	// beforeExec runs before each ExecContext statement is forwarded.
 	beforeExec func(query string)
+	// afterFinalReset runs after the final reset of main onto compact-tmp
+	// has been forwarded successfully: the window between the head move and
+	// the staged check, where a writer whose transaction began before the
+	// move can finish its Dolt commit.
+	afterFinalReset func()
 	// beforeFollowUp runs after the staged check, just before the follow-up
 	// commit is forwarded.
 	beforeFollowUp func()
@@ -55,10 +60,15 @@ func (c *compactHookConn) ExecContext(ctx context.Context, query string, args ..
 	if c.beforeExec != nil {
 		c.beforeExec(query)
 	}
-	if isFinalReset(query) {
-		c.resetDone.Store(true)
+	if !isFinalReset(query) {
+		return c.Conn.ExecContext(ctx, query, args...)
 	}
-	return c.Conn.ExecContext(ctx, query, args...)
+	c.resetDone.Store(true)
+	res, err := c.Conn.ExecContext(ctx, query, args...)
+	if err == nil && c.afterFinalReset != nil {
+		c.afterFinalReset()
+	}
+	return res, err
 }
 
 func (c *compactHookConn) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
@@ -805,6 +815,69 @@ func (f *compactFixture) landedOriginals(rev string, n int) []compactCommit {
 	}
 	sort.Slice(commits, func(i, j int) bool { return commits[i].CommitOrder < commits[j].CommitOrder })
 	return commits[len(commits)-n:]
+}
+
+// straddler is a writer W whose SQL transaction spans main's head move, as
+// bd's own transactions run: the SQL writes land inside the transaction, the
+// Dolt commit at its end. Ported from the reproduction in 1647899aa827.
+type straddler struct {
+	f         *compactFixture
+	tx        *sql.Tx
+	committed bool
+}
+
+// beginStraddler opens W's transaction on its own session and inserts t 900.
+func (f *compactFixture) beginStraddler() *straddler {
+	f.t.Helper()
+	tx, err := f.conn().BeginTx(f.ctx, nil)
+	if err != nil {
+		f.t.Fatalf("begin writer transaction: %v", err)
+	}
+	if _, err := tx.ExecContext(f.ctx, "INSERT INTO t VALUES (900, 'writer')"); err != nil {
+		f.t.Fatalf("writer insert t 900: %v", err)
+	}
+	return &straddler{f: f, tx: tx}
+}
+
+// finish runs W's Dolt commit inside its still-open transaction and then
+// commits the SQL transaction, so W's commit finishes on whatever head main
+// has then.
+func (w *straddler) finish() {
+	w.f.t.Helper()
+	w.f.exec(w.tx, "CALL DOLT_ADD('t')", "CALL DOLT_COMMIT('-m', 'writer 900')")
+	if err := w.tx.Commit(); err != nil {
+		w.f.t.Fatalf("writer commit: %v", err)
+	}
+	w.committed = true
+}
+
+// AC-2: C1 lands after the plan was read and is caught up; W's transaction
+// begins on the head C1 reached, and W's Dolt commit finishes between the
+// final reset and the staged check. Both rows are in main's HEAD and t holds
+// no leftover working change: the reset installed C1's tree, so W's merge
+// against its transaction-start head does not read as W reverting C1.
+func TestCompactStraddlingWriterKeepsCaughtUpCommit(t *testing.T) {
+	port := startCompactTestServer(t)
+	f := newCompactFixture(t, port)
+	f.writePending(f.db)
+	f.landRow(f.conn())
+
+	w := f.beginStraddler()
+	hook := &compactHookConn{afterFinalReset: w.finish}
+	if err := f.compact(hook); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if !w.committed {
+		t.Fatalf("the straddling writer never committed across the head move")
+	}
+	for _, id := range []int{600, 900} {
+		if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = ?", id); n != 1 {
+			t.Fatalf("t row %d in main's HEAD: found=%d, want 1 (status %q)", id, n, f.status())
+		}
+	}
+	f.wantStatus("config:false", "u:false")
+	f.wantPendingKept()
+	f.wantNoTempBranch()
 }
 
 // #6645 composed with a concurrent write: the replay check compares the
