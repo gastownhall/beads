@@ -660,6 +660,72 @@ reached through a local proxy. Three differences worth knowing:
   proxied workspace: run it on the server host first, then consent from the
   proxied workspace (see [Clone behind the remote](#clone-behind-the-remote)).
 
+### Dependency target columns
+
+bd 1.0.5 split the single SQL column `depends_on_id` into three typed target
+columns, in both dependency tables: `dependencies` (edges from persistent
+issues) and `wisp_dependencies` (edges from wisps). Migrations `0041` and
+`ignored/0003` perform the split and briefly keep `depends_on_id` as a
+generated column; migrations `0043` and `ignored/0005`, in the same release,
+then drop it. A store created by bd 1.0.5 or later, and one that has finished
+migrating to it, has no `depends_on_id` column in either table. Installing a
+newer binary does not by itself mean the store has migrated: run
+`bd migrate --inspect --json` to see what is still pending.
+
+Each row now fills exactly one target column:
+
+| Column | Holds |
+|---|---|
+| `depends_on_issue_id` | a persistent issue in this database |
+| `depends_on_wisp_id` | a wisp in this database |
+| `depends_on_external` | anything this database holds no row for: an `external:<project>:<capability>` reference, or an id from another repository |
+
+A tool that still selects `depends_on_id` from either table fails with an error
+such as `table "wisp_dependencies" does not have column "depends_on_id"`.
+
+The logical name is unchanged everywhere outside the SQL tables: dependency
+records in bd's JSON output, in `.beads/issues.jsonl`, and the Go
+`types.Dependency.DependsOnID` field still say `depends_on_id`. Reading
+dependencies through `bd` commands or the Go storage interfaces is the most
+stable route.
+
+If you read the tables directly (through `bd sql` or your own SQL client),
+rebuild the old column from the typed ones:
+
+{/* doc-sql: dependency-targets */}
+
+```sql
+SELECT issue_id,
+       COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) AS depends_on_id,
+       type
+FROM dependencies
+UNION ALL
+SELECT issue_id,
+       COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) AS depends_on_id,
+       type
+FROM wisp_dependencies;
+```
+
+- The recipe is for the split schema. A tool that must also read stores which
+  have not migrated yet should check each table's columns before choosing a
+  query; a store part-way through migrating can have one table split and the
+  other not.
+- To look up one target, filter on the typed column for its kind (for example
+  `WHERE depends_on_issue_id = ?`): those columns are indexed and the
+  `COALESCE` expression is not.
+- Do not write dependency rows with SQL. Filling one target column is not
+  enough to make a valid edge (row ids, blocked state and other derived data
+  depend on it); use `bd dep add` or the storage interfaces.
+
+**Which readers work.** 1.0.5 introduced the split, but being at least 1.0.5
+does not make a reader compatible with every later store: a bd binary, or a
+program built on the beads Go module, must also know the store's full schema
+(see
+[Upgrade every client that shares a store, together](#upgrade-every-client-that-shares-a-store-together)).
+Other tools that query these tables directly need a release that reads the
+typed columns or goes through bd; check that tool's own release notes. Do not downgrade bd or
+skip migration consent to work around an old reader: upgrade the reader.
+
 ## Cross-era Upgrades
 
 If you're upgrading from a much older version of bd, inspect the storage layout
