@@ -48,8 +48,15 @@ func (c *engineOpenCounter) open(ctx context.Context, dir, database, branch stri
 // outside the count: only opens the engine slot makes are counted.
 func engineTestStore(t *testing.T, database string, linger time.Duration) (*EmbeddedDoltStore, *engineOpenCounter) {
 	t.Helper()
+	return engineTestStoreAt(t, filepath.Join(t.TempDir(), ".beads"), database, linger)
+}
+
+// engineTestStoreAt is engineTestStore for a caller-chosen beads directory, for
+// tests that open a second reference to the same store through the cache.
+func engineTestStoreAt(t *testing.T, dir, database string, linger time.Duration) (*EmbeddedDoltStore, *engineOpenCounter) {
+	t.Helper()
 	skipUnlessEmbeddedDolt(t)
-	store, err := Open(context.Background(), filepath.Join(t.TempDir(), ".beads"), database, "main")
+	store, err := Open(context.Background(), dir, database, "main")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -456,4 +463,146 @@ func TestEmbeddedEngineIdleTimerRaceBurst(t *testing.T) {
 		t.Fatalf("Close after burst: %v", err)
 	}
 	engineWaitForCounters(t, counter, opens, opens, 5*time.Second)
+}
+
+// TestEmbeddedEngineClose pins AC-5 of gastownhall/beads#5397: the final Close
+// and the cached engine interact safely in both directions.
+//
+//   - Close waits for an operation still holding the engine instead of
+//     disposing underneath it, and returns only after the disposal; a queued
+//     operation then cannot reopen (errClosed, no new open).
+//   - The disposal is real: an external OpenSQL open succeeds right after
+//     Close returned (it would block on a still-held engine).
+//   - A non-final Close (other references remain through the open cache) keeps
+//     the store usable and retains the engine; the last reference's Close
+//     disposes it.
+//   - Concurrent final Closes wait for each other and dispose exactly once.
+func TestEmbeddedEngineClose(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := context.Background()
+	store, counter := engineTestStore(t, "engine_close", time.Hour)
+	if err := store.SetConfig(ctx, "issue_prefix", "ec"); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if err := store.CreateIssue(ctx, &types.Issue{ID: "ec-1", Title: "ec-1", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if opens := counter.opens.Load(); opens != 1 {
+		t.Fatalf("engine opens after seed = %d, want 1", opens)
+	}
+
+	// Close waits for an operation that still holds the engine.
+	paused := make(chan struct{})
+	resume := make(chan struct{})
+	opErr := make(chan error, 1)
+	go func() {
+		opErr <- store.withConn(ctx, false, func(tx *sql.Tx) error {
+			var one int
+			if err := tx.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
+				return err
+			}
+			paused <- struct{}{}
+			<-resume
+			return nil
+		})
+	}()
+	<-paused
+	closeErr := make(chan error, 1)
+	go func() { closeErr <- store.Close() }()
+	select {
+	case err := <-closeErr:
+		// Release the paused operation so the goroutines drain before the
+		// test exits; the engine half then reports against the drained run.
+		close(resume)
+		if opErr := <-opErr; opErr != nil {
+			t.Errorf("operation running across Close: %v", opErr)
+		}
+		t.Fatalf("Close returned while an operation held the engine: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(resume)
+	if err := <-opErr; err != nil {
+		t.Fatalf("operation running across Close: %v", err)
+	}
+	if err := <-closeErr; err != nil {
+		t.Fatalf("Close after the active operation: %v", err)
+	}
+	// Post-close: refused with errClosed, no reopen.
+	if _, err := store.GetIssue(ctx, "ec-1"); !errors.Is(err, errClosed) {
+		t.Fatalf("post-close GetIssue error = %v, want errClosed", err)
+	}
+	if opens := counter.opens.Load(); opens != 1 {
+		t.Fatalf("post-close engine opens = %d, want 1", opens)
+	}
+	// The disposal is real: an external engine opens right away.
+	extCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	extDB, extCleanup, err := OpenSQL(extCtx, store.dataDir, store.database, store.branch)
+	if err != nil {
+		t.Fatalf("external OpenSQL after Close: %v", err)
+	}
+	var one int
+	if err := extDB.QueryRowContext(extCtx, "SELECT 1").Scan(&one); err != nil {
+		t.Fatalf("external query after Close: %v", err)
+	}
+	if err := extCleanup(); err != nil {
+		t.Fatalf("external close: %v", err)
+	}
+	if closes := counter.closes.Load(); closes != 1 {
+		t.Fatalf("engine disposed %d times across Close, want 1", closes)
+	}
+
+	// A non-final Close (the cache holds another reference) keeps the store
+	// usable and retains the engine.
+	dir := filepath.Join(t.TempDir(), ".beads")
+	store1, counter1 := engineTestStoreAt(t, dir, "engine_close_refs", time.Hour)
+	if err := store1.SetConfig(ctx, "issue_prefix", "cr"); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if err := store1.CreateIssue(ctx, &types.Issue{ID: "cr-1", Title: "cr-1", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	store2, err := Open(ctx, dir, "engine_close_refs", "main")
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	if store2 != store1 {
+		t.Fatalf("second Open returned a different store instance")
+	}
+	if err := store1.Close(); err != nil {
+		t.Fatalf("non-final Close: %v", err)
+	}
+	if _, err := store2.GetIssue(ctx, "cr-1"); err != nil {
+		t.Fatalf("GetIssue after non-final Close: %v", err)
+	}
+	if opens := counter1.opens.Load(); opens != 1 {
+		t.Fatalf("engine opens after non-final Close = %d, want 1 (retained)", opens)
+	}
+	if closes := counter1.closes.Load(); closes != 0 {
+		t.Fatalf("engine disposed %d times by a non-final Close, want 0", closes)
+	}
+	if err := store2.Close(); err != nil {
+		t.Fatalf("final Close: %v", err)
+	}
+	engineWaitForCounters(t, counter1, 1, 1, 5*time.Second)
+
+	// Concurrent final Closes: one disposes, the others wait for that disposal
+	// before returning — so by the time both have returned, the engine is
+	// gone, exactly once.
+	store3, counter3 := engineTestStore(t, "engine_close_concurrent", time.Hour)
+	if err := store3.SetConfig(ctx, "issue_prefix", "cc"); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	concurrent := make(chan error, 2)
+	for range 2 {
+		go func() { concurrent <- store3.Close() }()
+	}
+	for range 2 {
+		if err := <-concurrent; err != nil {
+			t.Fatalf("concurrent Close: %v", err)
+		}
+	}
+	if closes := counter3.closes.Load(); closes != 1 {
+		t.Fatalf("engine disposed %d times by concurrent Closes, want 1", closes)
+	}
 }
