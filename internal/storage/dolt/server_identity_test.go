@@ -146,3 +146,79 @@ func TestServerIdentityForeignSharedEndpoint(t *testing.T) {
 		})
 	}
 }
+
+// TestServerIdentityUnusableRecord: a server already listens on the shared
+// endpoint but the record that should name it is absent, blank, malformed or
+// unreadable. The open is refused with an error that says which, and neither
+// a record nor the database is created.
+func TestServerIdentityUnusableRecord(t *testing.T) {
+	skipIfNoServer(t)
+	ctx := context.Background()
+	actual := testServerUUID(t)
+
+	cases := []struct {
+		name    string
+		prepare func(t *testing.T, record string)
+		problem string
+	}{
+		{"absent", func(t *testing.T, record string) {}, "does not exist"},
+		{"blank", func(t *testing.T, record string) { writeFile(t, record, " \n") }, "is empty"},
+		{"malformed", func(t *testing.T, record string) { writeFile(t, record, "not-a-uuid\n") }, "is malformed"},
+		{"unreadable", func(t *testing.T, record string) {
+			if err := os.Mkdir(record, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, "could not be read"},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir, dataDir := serverIdentityShared(t)
+			record := doltserver.ServerIdentityRecordPath(dataDir)
+			tc.prepare(t, record)
+			before, beforeErr := os.Lstat(record)
+			var beforeContent []byte
+			if beforeErr == nil && before.Mode().IsRegular() {
+				beforeContent, _ = os.ReadFile(record)
+			}
+
+			dbName := fmt.Sprintf("test_identity_record_%d_%d", i, testServerPort)
+			cfg := sharedIdentityConfig(t, beadsDir, dbName)
+			cfg.CreateIfMissing = true
+			store, err := New(ctx, cfg)
+			if err == nil {
+				_ = store.Close()
+				t.Fatalf("open with a %s identity record succeeded", tc.name)
+			}
+			if !errors.Is(err, doltserver.ErrServerIdentityMismatch) {
+				t.Fatalf("open error = %v, want ErrServerIdentityMismatch", err)
+			}
+			for _, want := range []string{tc.problem, record, actual, "bd dolt stop && bd dolt start"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("open error does not name %q:\n%v", want, err)
+				}
+			}
+			assertDatabaseNotExists(t, testServerPort, dbName)
+
+			after, afterErr := os.Lstat(record)
+			switch {
+			case beforeErr != nil:
+				if afterErr == nil {
+					t.Errorf("open created the identity record %s", record)
+				}
+			case afterErr != nil || after.Mode() != before.Mode():
+				t.Errorf("open replaced the identity record %s", record)
+			case before.Mode().IsRegular():
+				if got, _ := os.ReadFile(record); string(got) != string(beforeContent) {
+					t.Errorf("record = %q, want it unchanged (%q)", got, beforeContent)
+				}
+			}
+		})
+	}
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
