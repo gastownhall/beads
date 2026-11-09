@@ -293,6 +293,49 @@ func TestPersistDependenciesClassifiesPresentCrossPrefixTargetAsIssue(t *testing
 	}
 }
 
+// TestPersistDependenciesBatchClassifiesCrossPrefixTargetsFromPresenceMaps pins
+// the batch half of GH#8299: two edges onto local issues of another prefix are
+// filed in depends_on_issue_id, and classification answers from the batch
+// presence reads (the wisps probe and the one issues IN read) — the strict
+// expectation order leaves no room for a per-edge presence statement.
+func TestPersistDependenciesBatchClassifiesCrossPrefixTargetsFromPresenceMaps(t *testing.T) {
+	ctx := context.Background()
+	db, mock, tx := beginMockTx(t)
+	defer db.Close()
+
+	source := &types.Issue{
+		ID:        "sym-1",
+		IssueType: types.TypeTask,
+		Dependencies: []*types.Dependency{
+			{DependsOnID: "mkt-1", Type: types.DepRelated},
+			{DependsOnID: "ops-2", Type: types.DepRelated},
+		},
+	}
+
+	mock.ExpectQuery("SELECT 1 FROM wisps LIMIT 1").
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT id FROM issues WHERE id IN \\(\\?,\\?\\)").
+		WithArgs("mkt-1", "ops-2").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("mkt-1").AddRow("ops-2"))
+	for _, target := range []string{"mkt-1", "ops-2"} {
+		mock.ExpectExec("INSERT INTO dependencies \\(id, issue_id, depends_on_issue_id").
+			WithArgs(depid.New("sym-1", target), "sym-1", target, types.DepRelated, "tester", sqlmock.AnyArg(), "{}", "").
+			WillReturnResult(sqlmock.NewResult(0, 1))
+	}
+
+	if _, err := PersistDependenciesWithOptionsResult(ctx, tx, []*types.Issue{source}, "tester", storage.BatchCreateOptions{}); err != nil {
+		t.Fatalf("PersistDependenciesWithOptionsResult error = %v, want nil", err)
+	}
+
+	mock.ExpectRollback()
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
 func TestPersistDependenciesReturnsTargetLookupErrors(t *testing.T) {
 	ctx := context.Background()
 	db, mock, tx := beginMockTx(t)

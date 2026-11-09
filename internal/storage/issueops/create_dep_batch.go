@@ -108,18 +108,22 @@ func (l *depBatchLookups) isWisp(ctx context.Context, tx DBTX, id string) bool {
 	return ok
 }
 
-// classify is ClassifyDepTarget using the batch routing read.
+// classify is ClassifyDepTarget answered from the batch presence maps: the
+// wisps set and the issue-target set newDepBatchLookups read cover every
+// target the pass classifies, so it adds no per-edge statement.
 func (l *depBatchLookups) classify(ctx context.Context, tx DBTX, dep *types.Dependency) (DepTargetKind, error) {
 	if l == nil {
 		return ClassifyDepTarget(ctx, tx, dep)
 	}
-	if IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
-		return DepTargetExternal, nil
-	}
-	if l.isWisp(ctx, tx, dep.DependsOnID) {
-		return DepTargetWisp, nil
-	}
-	return DepTargetIssue, nil
+	return ClassifyDepTargetFrom(dep.IssueID, dep.DependsOnID, DepTargetPresence{
+		IsWisp: func(id string) (bool, error) {
+			_, ok := l.wisps[id]
+			return ok, nil
+		},
+		IsIssue: func(id string) (bool, error) {
+			return l.issuesExists[id], nil
+		},
+	})
 }
 
 // targetExists is the per-edge `SELECT 1 FROM <issues|wisps> WHERE id = ?`.

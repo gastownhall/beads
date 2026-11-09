@@ -147,3 +147,39 @@ func TestEmbeddedCrossPrefixWispTargetBlocksLikeASamePrefixWisp(t *testing.T) {
 		assertCrossPrefixIsBlocked(t, ctx, te, p.sourceTable, p.source, 0)
 	}
 }
+
+// TestEmbeddedCrossPrefixBatchCreate: a batch create whose edges target local
+// issues of another prefix — one created earlier, one created in the same
+// batch — files both in depends_on_issue_id, so they gate readiness (GH#8299).
+func TestEmbeddedCrossPrefixBatchCreate(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "a")
+	ctx := t.Context()
+
+	const existing, inBatch, source = "c-pre1", "b-new1", "a-bsrc1"
+	// Batch create validates explicit ids against the configured prefixes.
+	if err := te.store.SetConfig(ctx, "allowed_prefixes", "b,c"); err != nil {
+		t.Fatalf("SetConfig allowed_prefixes: %v", err)
+	}
+	if err := te.store.CreateIssue(ctx, &types.Issue{ID: existing, Title: existing, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "tester"); err != nil {
+		t.Fatalf("CreateIssue %s: %v", existing, err)
+	}
+	batch := []*types.Issue{
+		{ID: inBatch, Title: inBatch, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: source, Title: source, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Dependencies: []*types.Dependency{
+			{DependsOnID: existing, Type: types.DepBlocks},
+			{DependsOnID: inBatch, Type: types.DepBlocks},
+		}},
+	}
+	if err := te.store.CreateIssues(ctx, batch, "tester"); err != nil {
+		t.Fatalf("CreateIssues: %v", err)
+	}
+
+	for _, target := range []string{existing, inBatch} {
+		assertCrossPrefixEdgeColumn(t, ctx, te, "dependencies", source, target, "depends_on_issue_id")
+	}
+	assertCrossPrefixIsBlocked(t, ctx, te, "issues", source, 1)
+	if crossPrefixReady(t, ctx, te, source) {
+		t.Fatalf("%s is ready while its local blockers %s and %s are open", source, existing, inBatch)
+	}
+}
