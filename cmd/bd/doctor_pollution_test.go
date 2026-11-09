@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -113,9 +114,9 @@ func (f *fakePollutionCleanupStore) GetCommentCounts(_ context.Context, _ []stri
 	return map[string]int{}, nil
 }
 
-// pollutionCleanupTestEnv installs fake as the active store in a temp working
-// directory (for the backup file) and returns the fake.
-func pollutionCleanupTestEnv(t *testing.T, fake *fakePollutionCleanupStore) *fakePollutionCleanupStore {
+// pollutionCleanupTestEnv installs fake as the active store in a temp
+// working directory (for the backup file).
+func pollutionCleanupTestEnv(t *testing.T, fake storage.DoltStorage) {
 	t.Helper()
 	saveAndRestoreGlobals(t)
 	store = fake
@@ -132,7 +133,6 @@ func pollutionCleanupTestEnv(t *testing.T, fake *fakePollutionCleanupStore) *fak
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(origWd) })
-	return fake
 }
 
 // backupIDs reads the JSONL cleanup backup and returns the issue IDs it holds.
@@ -173,10 +173,11 @@ func TestDoctorPollutionCleanRefreshesAfterConfirmation(t *testing.T) {
 	closedCopy.Status = types.StatusClosed
 	disappears := newIssue("pol-gone")
 
-	fake := pollutionCleanupTestEnv(t, &fakePollutionCleanupStore{
+	fake := &fakePollutionCleanupStore{
 		initial: []*types.Issue{stays, turnsClosed, disappears},
 		refresh: map[string]*types.Issue{stays.ID: stays, turnsClosed.ID: &closedCopy},
-	})
+	}
+	pollutionCleanupTestEnv(t, fake)
 
 	out := captureStdout(t, func() error { return runPollutionCheck("", true, true) })
 
@@ -203,10 +204,11 @@ func TestDoctorPollutionCleanDeclinedIsNonDestructive(t *testing.T) {
 		return &types.Issue{ID: id, Title: "test leftover " + id, Description: "", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
 	}
 	candidate := newIssue("pol-decline")
-	fake := pollutionCleanupTestEnv(t, &fakePollutionCleanupStore{
+	fake := &fakePollutionCleanupStore{
 		initial: []*types.Issue{candidate},
 		refresh: map[string]*types.Issue{candidate.ID: candidate},
-	})
+	}
+	pollutionCleanupTestEnv(t, fake)
 
 	// Answer the confirmation prompt with "n" through a stand-in stdin.
 	// The mutex guards only the swap: captureStdout takes it too, so
@@ -249,10 +251,11 @@ func TestDoctorPollutionJSONReturnsBeforeClean(t *testing.T) {
 		return &types.Issue{ID: id, Title: "test leftover " + id, Description: "", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
 	}
 	candidate := newIssue("pol-json")
-	fake := pollutionCleanupTestEnv(t, &fakePollutionCleanupStore{
+	fake := &fakePollutionCleanupStore{
 		initial: []*types.Issue{candidate},
 		refresh: map[string]*types.Issue{candidate.ID: candidate},
-	})
+	}
+	pollutionCleanupTestEnv(t, fake)
 	jsonOutput = true
 	t.Cleanup(func() { jsonOutput = false })
 
@@ -263,5 +266,111 @@ func TestDoctorPollutionJSONReturnsBeforeClean(t *testing.T) {
 	}
 	if !strings.Contains(out, "\"polluted_count\": 1") {
 		t.Errorf("JSON report missing polluted_count:\n%s", out)
+	}
+}
+
+// fakeFailingEvidenceStore wraps fakePollutionCleanupStore with injectable
+// failures for the cleanup paths' store reads.
+type fakeFailingEvidenceStore struct {
+	fakePollutionCleanupStore
+	evidenceErr error
+	reloadErr   error
+}
+
+func (f *fakeFailingEvidenceStore) GetDependencyRecordsForIssues(_ context.Context, _ []string) (map[string][]*types.Dependency, error) {
+	return nil, f.evidenceErr
+}
+
+func (f *fakeFailingEvidenceStore) GetDependentRecordsForIssues(_ context.Context, _ []string) (map[string][]*types.Dependency, error) {
+	return nil, f.evidenceErr
+}
+
+func (f *fakeFailingEvidenceStore) GetCommentCounts(_ context.Context, _ []string) (map[string]int, error) {
+	return nil, f.evidenceErr
+}
+
+func (f *fakeFailingEvidenceStore) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
+	if len(filter.IDs) > 0 && f.reloadErr != nil {
+		return nil, f.reloadErr
+	}
+	return f.fakePollutionCleanupStore.SearchIssues(ctx, query, filter)
+}
+
+// TestDoctorPollutionCleanEvidenceFailureDeletesNothing pins that an
+// evidence-query failure during detection aborts cleanup with an error
+// rather than deleting anything.
+func TestDoctorPollutionCleanEvidenceFailureDeletesNothing(t *testing.T) {
+	candidate := &types.Issue{ID: "pol-evfail", Title: "test leftover evfail", Description: "", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	fake := &fakeFailingEvidenceStore{
+		fakePollutionCleanupStore: fakePollutionCleanupStore{
+			initial: []*types.Issue{candidate},
+			refresh: map[string]*types.Issue{candidate.ID: candidate},
+		},
+		evidenceErr: errors.New("evidence store unreachable"),
+	}
+	pollutionCleanupTestEnv(t, fake)
+
+	_, err := captureStdoutWithError(t, func() error { return runPollutionCheck("", true, true) })
+	if err == nil {
+		t.Error("cleanup with a failing evidence query returned nil, want an error")
+	}
+	if len(fake.deleted) != 0 {
+		t.Errorf("cleanup with a failing evidence query deleted %v, want nothing", fake.deleted)
+	}
+	if _, statErr := os.Stat(".beads/pollution-backup.jsonl"); statErr == nil {
+		t.Error("cleanup with a failing evidence query wrote a backup, want none")
+	}
+}
+
+// TestDoctorPollutionCleanRefreshFailureDeletesNothing pins that a failure to
+// reload or recheck the reported set after confirmation aborts before any
+// backup or deletion.
+func TestDoctorPollutionCleanRefreshFailureDeletesNothing(t *testing.T) {
+	candidate := &types.Issue{ID: "pol-rlfail", Title: "test leftover rlfail", Description: "", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	fake := &fakeFailingEvidenceStore{
+		fakePollutionCleanupStore: fakePollutionCleanupStore{
+			initial: []*types.Issue{candidate},
+			refresh: map[string]*types.Issue{candidate.ID: candidate},
+		},
+		reloadErr: errors.New("reload store unreachable"),
+	}
+	pollutionCleanupTestEnv(t, fake)
+
+	_, err := captureStdoutWithError(t, func() error { return runPollutionCheck("", true, true) })
+	if err == nil {
+		t.Error("cleanup with a failing refresh returned nil, want an error")
+	}
+	if len(fake.deleted) != 0 {
+		t.Errorf("cleanup with a failing refresh deleted %v, want nothing", fake.deleted)
+	}
+	if _, statErr := os.Stat(".beads/pollution-backup.jsonl"); statErr == nil {
+		t.Error("cleanup with a failing refresh wrote a backup, want none")
+	}
+}
+
+// TestDoctorPollutionCleanBackupFailureDeletesNothing pins that a backup
+// failure prevents every deletion.
+func TestDoctorPollutionCleanBackupFailureDeletesNothing(t *testing.T) {
+	candidate := &types.Issue{ID: "pol-bkfail", Title: "test leftover bkfail", Description: "", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	fake := &fakePollutionCleanupStore{
+		initial: []*types.Issue{candidate},
+		refresh: map[string]*types.Issue{candidate.ID: candidate},
+	}
+	pollutionCleanupTestEnv(t, fake)
+	// Occupy the .beads path with a regular file so the backup file cannot
+	// be created under it.
+	if err := os.Remove(".beads"); err != nil {
+		t.Fatalf("removing .beads dir: %v", err)
+	}
+	if err := os.WriteFile(".beads", []byte("not a dir"), 0o644); err != nil {
+		t.Fatalf("planting .beads file: %v", err)
+	}
+
+	_, err := captureStdoutWithError(t, func() error { return runPollutionCheck("", true, true) })
+	if err == nil {
+		t.Error("cleanup with a failing backup returned nil, want an error")
+	}
+	if len(fake.deleted) != 0 {
+		t.Errorf("cleanup with a failing backup deleted %v, want nothing", fake.deleted)
 	}
 }
