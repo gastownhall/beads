@@ -2213,8 +2213,11 @@ func startLocked(beadsDir string) (*State, error) {
 //
 // Returns nil if the database already exists or was successfully created,
 // and an error wrapping doltversion.ErrBelowRequiredMin, before creating
-// anything, if the server is older than bd's minimum.
-func EnsureGlobalDatabase(host string, port int, user, password string) error {
+// anything, if the server is older than bd's minimum. With a non-nil
+// identity it first checks that the server is the one identity's record
+// names (VerifyServerIdentity), and refuses with an error wrapping
+// ErrServerIdentityMismatch, before creating anything, when it is not.
+func EnsureGlobalDatabase(host string, port int, user, password string, identity *ServerIdentityExpectation) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -2241,6 +2244,10 @@ func EnsureGlobalDatabase(host string, port int, user, password string) error {
 	// empty database behind. A version it cannot determine is not refused
 	// (doltversion.CheckServer).
 	if err := doltversion.CheckServer(ctx, db, "dolt sql-server at "+doltutil.PrintedServerAddr(host, port), nil); err != nil {
+		return err
+	}
+	// And a server that is not bd's shared server (GH#4637).
+	if err := VerifyServerIdentity(ctx, db, identity); err != nil {
 		return err
 	}
 
