@@ -72,6 +72,7 @@ go_test(
         "fdleak_integration_test.go",
         "gc_config_test.go",
         "host_ownership_test.go",
+        "identity_gate_integration_test.go",
         "identity_lifecycle_integration_test.go",
         "identity_pairing_test.go",
         "lifecycle_integration_test.go",
