@@ -4797,7 +4797,7 @@ Examples:
   bd doctor --check=artifacts --clean  # Delete safe-to-delete artifacts (with confirmation)
   bd doctor --check=conventions        # Convention drift check (lint, stale, orphans)
   bd doctor --check=pollution          # Show potential test issues
-  bd doctor --check=pollution --clean  # Delete high-confidence test issues (with confirmation)
+  bd doctor --check=pollution --clean  # Delete test issues (with confirmation)
   bd doctor --check=validate         # Data-integrity checks only
   bd doctor --check=validate --fix   # Auto-fix data-integrity issues
   bd doctor --deep             # Full graph integrity validation
@@ -4816,7 +4816,7 @@ bd doctor [path] [flags]
       --agent                                   Agent-facing diagnostic mode: rich context for AI agents (ZFC-compliant)
       --check string                            Run specific check in detail (e.g., 'pollution')
       --check-health                            Quick health check for git hooks (silent on success)
-      --clean                                   For pollution check: delete unlinked high-confidence test issues
+      --clean                                   For pollution check: delete detected test issues
       --deep                                    Validate full graph integrity
       --dry-run                                 Preview fixes without making changes
       --fix                                     Automatically fix issues where possible
