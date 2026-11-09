@@ -4,9 +4,12 @@ package embeddeddolt_test
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -181,5 +184,75 @@ func TestEmbeddedCrossPrefixBatchCreate(t *testing.T) {
 	assertCrossPrefixIsBlocked(t, ctx, te, "issues", source, 1)
 	if crossPrefixReady(t, ctx, te, source) {
 		t.Fatalf("%s is ready while its local blockers %s and %s are open", source, existing, inBatch)
+	}
+}
+
+// TestEmbeddedCrossPrefixCreateRefusesABlockerInItsOwnHierarchy: a create
+// batch whose blocking edge targets a local grandparent of another prefix —
+// an ancestry the same batch completes with parent-child edges declared after
+// it — is a hierarchy conflict like any other (GH#8299). Without the skip
+// option the batch is refused and writes nothing; with it, only the blocking
+// edge is skipped and reported.
+func TestEmbeddedCrossPrefixCreateRefusesABlockerInItsOwnHierarchy(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "a")
+	ctx := t.Context()
+	if err := te.store.SetConfig(ctx, "allowed_prefixes", "b"); err != nil {
+		t.Fatalf("SetConfig allowed_prefixes: %v", err)
+	}
+
+	const grand, parent, child = "b-hg1", "a-hp1", "a-hc1"
+	batch := func() []*types.Issue {
+		return []*types.Issue{
+			{ID: child, Title: child, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Dependencies: []*types.Dependency{
+				{DependsOnID: grand, Type: types.DepBlocks},
+				{DependsOnID: parent, Type: types.DepParentChild},
+			}},
+			{ID: parent, Title: parent, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Dependencies: []*types.Dependency{
+				{DependsOnID: grand, Type: types.DepParentChild},
+			}},
+			{ID: grand, Title: grand, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeEpic},
+		}
+	}
+	countEdge := func(source, target string) int {
+		t.Helper()
+		var n int
+		te.queryScalar(t, ctx,
+			"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?",
+			[]any{source, target}, &n)
+		return n
+	}
+
+	err := te.store.CreateIssues(ctx, batch(), "tester")
+	var conflict *domain.DependencyHierarchyConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("CreateIssues error = %v, want *DependencyHierarchyConflictError", err)
+	}
+	if conflict.IssueID != child || conflict.BlockerID != grand || !conflict.BlockerIsAncestor {
+		t.Errorf("conflict = %#v, want %s gated on its ancestor %s", conflict, child, grand)
+	}
+	if n := countEdge(child, grand); n != 0 {
+		t.Fatalf("refused batch stored %d blocking edge(s) %s -> %s, want 0", n, child, grand)
+	}
+
+	var skipped []string
+	if err := te.store.CreateIssuesWithFullOptions(ctx, batch(), "tester", storage.BatchCreateOptions{
+		SkipDependencyValidationErrors: true,
+		OnSkippedDependency: func(issueID, dependsOnID, _ string) {
+			skipped = append(skipped, issueID+" -> "+dependsOnID)
+		},
+	}); err != nil {
+		t.Fatalf("CreateIssuesWithFullOptions(skip validation errors): %v", err)
+	}
+	if want := []string{child + " -> " + grand}; !slices.Equal(skipped, want) {
+		t.Errorf("skipped edges = %v, want %v", skipped, want)
+	}
+	if n := countEdge(child, grand); n != 0 {
+		t.Errorf("skip-mode batch stored %d blocking edge(s) %s -> %s, want 0", n, child, grand)
+	}
+	for _, edge := range [][2]string{{child, parent}, {parent, grand}} {
+		if n := countEdge(edge[0], edge[1]); n != 1 {
+			t.Errorf("parent-child edge %s -> %s stored %d time(s), want 1", edge[0], edge[1], n)
+		}
 	}
 }

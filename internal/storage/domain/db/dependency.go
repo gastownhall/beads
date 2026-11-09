@@ -64,6 +64,23 @@ func (r *dependencySQLRepositoryImpl) classifyDepTarget(ctx context.Context, iss
 	})
 }
 
+// lazyDepTargetKind classifies dep's target on first use and remembers it, so
+// one Insert reads the target's presence at most once across its hierarchy
+// check and its column choice, and not at all on a path that needs neither.
+func (r *dependencySQLRepositoryImpl) lazyDepTargetKind(ctx context.Context, dep *types.Dependency) func() (issueops.DepTargetKind, error) {
+	var kind *issueops.DepTargetKind
+	return func() (issueops.DepTargetKind, error) {
+		if kind == nil {
+			k, err := r.classifyDepTarget(ctx, dep.IssueID, dep.DependsOnID)
+			if err != nil {
+				return k, err
+			}
+			kind = &k
+		}
+		return *kind, nil
+	}
+}
+
 func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dependency, actor string, opts domain.DepInsertOpts) error {
 	if dep == nil {
 		return errors.New("db: DependencySQLRepository.Insert: dep must not be nil")
@@ -89,8 +106,9 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 		metadata = "{}"
 	}
 
+	targetKind := r.lazyDepTargetKind(ctx, dep)
 	if !opts.HierarchyValidated {
-		if err := r.ValidateBlockingHierarchy(ctx, dep); err != nil {
+		if err := r.validateBlockingHierarchy(ctx, dep, targetKind); err != nil {
 			return err
 		}
 	}
@@ -161,7 +179,7 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 		return fmt.Errorf("db: DependencySQLRepository.Insert: check existing: %w", err)
 	}
 
-	kind, err := r.classifyDepTarget(ctx, dep.IssueID, dep.DependsOnID)
+	kind, err := targetKind()
 	if err != nil {
 		return fmt.Errorf("db: DependencySQLRepository.Insert: %w", err)
 	}
@@ -320,7 +338,22 @@ func (r *dependencySQLRepositoryImpl) ValidateBlockingHierarchy(ctx context.Cont
 	if dep == nil {
 		return errors.New("db: DependencySQLRepository.ValidateBlockingHierarchy: dep must not be nil")
 	}
-	if issueops.IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
+	return r.validateBlockingHierarchy(ctx, dep, r.lazyDepTargetKind(ctx, dep))
+}
+
+// validateBlockingHierarchy refuses a blocking edge between endpoints on one
+// hierarchy line. Only a genuinely external target is exempt — it has no local
+// hierarchy — so a local target of another prefix is checked like any other.
+// The target is classified only for a blocking edge, the one kind checked.
+func (r *dependencySQLRepositoryImpl) validateBlockingHierarchy(ctx context.Context, dep *types.Dependency, targetKind func() (issueops.DepTargetKind, error)) error {
+	if dep.Type != types.DepBlocks && dep.Type != types.DepConditionalBlocks {
+		return nil
+	}
+	kind, err := targetKind()
+	if err != nil {
+		return fmt.Errorf("db: DependencySQLRepository.ValidateBlockingHierarchy: %w", err)
+	}
+	if kind == issueops.DepTargetExternal {
 		return nil
 	}
 	return issueops.CheckBlockingHierarchyInTx(ctx, r.runner, dep, nil)

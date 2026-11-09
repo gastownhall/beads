@@ -930,11 +930,23 @@ func RunDependencyEditorAcceptsAForeignRepoTarget(t *testing.T, ctx context.Cont
 // Both directions are asserted because they are two construction sites of the
 // same typed sentinel, and the flag that distinguishes them is part of the
 // value a caller reads.
+//
+// The case runs twice: once with every endpoint in the fixture's prefix, and
+// once with a grandparent of another prefix that this database holds. A local
+// issue is local whatever its prefix (GH#8299), so the hierarchy between them
+// refuses the blocking edge the same way.
 func RunDependencyEditorRefusesBlockingEdgeAcrossItsOwnHierarchy(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
 	t.Helper()
-	grand := fixture.IssuePrefix + "-hier-grand"
-	parent := fixture.IssuePrefix + "-hier-parent"
-	child := fixture.IssuePrefix + "-hier-child"
+	for _, grandPrefix := range []string{fixture.IssuePrefix, "x" + fixture.IssuePrefix} {
+		refuseBlockingEdgeAcrossItsOwnHierarchy(t, ctx, fixture, grandPrefix)
+	}
+}
+
+func refuseBlockingEdgeAcrossItsOwnHierarchy(t *testing.T, ctx context.Context, fixture DependencyEditorFixture, grandPrefix string) {
+	t.Helper()
+	grand := grandPrefix + "-hier-grand"
+	parent := fixture.IssuePrefix + "-hier-parent-" + grandPrefix
+	child := fixture.IssuePrefix + "-hier-child-" + grandPrefix
 	for _, id := range []string{grand, parent, child} {
 		seedDependencyEditorIssue(t, ctx, fixture, id)
 	}
