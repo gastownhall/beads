@@ -294,3 +294,80 @@ func TestCustomConfigGettersRecoverAfterFailedResolve(t *testing.T) {
 		})
 	}
 }
+
+// A successful read, including one that finds no custom vocabulary at all, is
+// cached until SetConfig invalidates the corresponding key; a failed reload of
+// one invalidated half leaves the other cached half intact.
+func TestCustomConfigGettersCacheSuccessfulResolve(t *testing.T) {
+	withCustomConfigYAML(t, "")
+
+	t.Run("unconfigured vocabulary is cached", func(t *testing.T) {
+		for _, g := range customConfigGetters {
+			t.Run(g.name, func(t *testing.T) {
+				store, mock := newCustomConfigMockStore(t)
+				ctx := context.Background()
+				expectCustomConfigRead(mock, nil, nil)
+				for i := 0; i < 2; i++ {
+					got, err := g.get(ctx, store)
+					if err != nil || got != nil {
+						t.Fatalf("call %d: %s = %v, %v; want no vocabulary and nil error", i+1, g.name, got, err)
+					}
+				}
+				if !store.customStatusCached || !store.customTypeCached {
+					t.Fatalf("successful empty read not cached: status=%v type=%v", store.customStatusCached, store.customTypeCached)
+				}
+				if err := mock.ExpectationsWereMet(); err != nil {
+					t.Fatalf("unmet SQL expectations: %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("invalidation rereads only the invalidated half", func(t *testing.T) {
+		store, mock := newCustomConfigMockStore(t)
+		ctx := context.Background()
+		expectCustomConfigRead(mock, [][2]string{{"review", "active"}}, []string{"spike"})
+		expectCustomConfigRead(mock, [][2]string{{"triage", "wip"}}, []string{"research"})
+
+		if got, err := store.GetCustomTypes(ctx); err != nil || !slices.Equal(got, []string{"spike"}) {
+			t.Fatalf("GetCustomTypes = %v, %v; want [spike]", got, err)
+		}
+		store.invalidateConfigCaches("types.custom")
+		if got, err := store.GetCustomTypes(ctx); err != nil || !slices.Equal(got, []string{"research"}) {
+			t.Fatalf("GetCustomTypes after invalidation = %v, %v; want [research]", got, err)
+		}
+		// The status half was never invalidated, so it keeps the first read.
+		if got, err := store.GetCustomStatuses(ctx); err != nil || !slices.Equal(got, []string{"review"}) {
+			t.Fatalf("GetCustomStatuses = %v, %v; want the cached [review]", got, err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	t.Run("failed reload keeps the other cached half", func(t *testing.T) {
+		store, mock := newCustomConfigMockStore(t)
+		ctx := context.Background()
+		injected := errors.New("simulated read failure")
+		expectCustomConfigRead(mock, [][2]string{{"review", "active"}}, []string{"spike"})
+		mock.ExpectBegin().WillReturnError(injected)
+
+		if _, err := store.GetCustomStatuses(ctx); err != nil {
+			t.Fatalf("GetCustomStatuses: %v", err)
+		}
+		store.invalidateConfigCaches("types.custom")
+		if got, err := store.GetCustomTypes(ctx); !errors.Is(err, injected) || got != nil {
+			t.Fatalf("GetCustomTypes after failed reload = %v, %v; want an error wrapping %v", got, err, injected)
+		}
+		if store.customTypeCached {
+			t.Fatal("failed reload cached the type half")
+		}
+		got, err := store.GetCustomStatusesDetailed(ctx)
+		if err != nil || len(got) != 1 || got[0].Name != "review" || got[0].Category != "active" {
+			t.Fatalf("GetCustomStatusesDetailed = %v, %v; want the cached [review:active]", got, err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+}
