@@ -1,6 +1,8 @@
 package doctor
 
 import (
+	"context"
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -55,6 +57,16 @@ func (m PollutionMatch) Strong() bool {
 	return m.points >= strongPollutionPoints
 }
 
+// PollutionEvidence is the store surface DetectTestPollution reads to rule
+// out connected issues: raw dependency rows in both directions (unresolved
+// and external targets included) and comment counts, each batched over the
+// candidate IDs.
+type PollutionEvidence interface {
+	GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error)
+	GetDependentRecordsForIssues(ctx context.Context, targetIDs []string) (map[string][]*types.Dependency, error)
+	GetCommentCounts(ctx context.Context, issueIDs []string) (map[string]int, error)
+}
+
 // DetectTestPollution returns the issues that look like leftovers of test
 // runs, in input order. Each issue is judged on its own title and content:
 // (a generic test phrase and a description shorter than 20 bytes) or (a
@@ -62,22 +74,72 @@ func (m PollutionMatch) Strong() bool {
 // criteria or notes. Creation time and ID shape are not evidence (a bulk
 // import creates many issues in one minute, and sequential IDs are
 // ordinary).
-func DetectTestPollution(issues []*types.Issue) []PollutionMatch {
-	var matches []PollutionMatch
+//
+// Closed issues, epics, pinned issues, templates and issues from an
+// external tracker or another system are never matched, nor is a candidate
+// with any dependency row in either direction or any comment. An evidence
+// error returns no matches.
+func DetectTestPollution(ctx context.Context, evidence PollutionEvidence, issues []*types.Issue) ([]PollutionMatch, error) {
+	var candidates []PollutionMatch
+	var ids []string
 	for _, issue := range issues {
+		if isPollutionProtected(issue) {
+			continue
+		}
 		if m, ok := classifyPollution(issue); ok {
-			matches = append(matches, m)
+			candidates = append(candidates, m)
+			ids = append(ids, issue.ID)
 		}
 	}
-	return matches
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	outgoing, err := evidence.GetDependencyRecordsForIssues(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("reading dependencies of pollution candidates: %w", err)
+	}
+	incoming, err := evidence.GetDependentRecordsForIssues(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("reading dependents of pollution candidates: %w", err)
+	}
+	comments, err := evidence.GetCommentCounts(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("reading comments of pollution candidates: %w", err)
+	}
+
+	var matches []PollutionMatch
+	for _, m := range candidates {
+		id := m.Issue.ID
+		if len(outgoing[id]) > 0 || len(incoming[id]) > 0 || comments[id] > 0 {
+			continue
+		}
+		matches = append(matches, m)
+	}
+	return matches, nil
+}
+
+// isPollutionProtected reports whether an issue is never a pollution match
+// whatever its title: closed work, epics, pinned context, templates, and
+// issues another tracker or system owns.
+func isPollutionProtected(issue *types.Issue) bool {
+	if issue == nil {
+		return true
+	}
+	switch {
+	case issue.Status == types.StatusClosed,
+		issue.IssueType == types.TypeEpic,
+		issue.Pinned || issue.Status == types.StatusPinned,
+		issue.IsTemplate,
+		issue.ExternalRef != nil && strings.TrimSpace(*issue.ExternalRef) != "",
+		strings.TrimSpace(issue.SourceSystem) != "":
+		return true
+	}
+	return false
 }
 
 // classifyPollution applies the title and content rule to one issue.
 func classifyPollution(issue *types.Issue) (PollutionMatch, bool) {
-	if issue == nil {
-		return PollutionMatch{}, false
-	}
-
 	title := strings.ToLower(issue.Title)
 	prefix := testPrefixPattern.MatchString(title)
 	generic := false
