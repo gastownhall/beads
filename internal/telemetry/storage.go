@@ -634,25 +634,13 @@ func (s *InstrumentedStorage) GetAllConfig(ctx context.Context) (map[string]stri
 	return v, err
 }
 
-// GetConfigByPrefix forwards the domain.ConfigPrefixReader optional fast
-// path when the wrapped store provides it, and otherwise falls back to
-// instrumented GetAllConfig filtered in-process — so wrapping a store never
-// costs it the capability.
-//
-// cmd/bd discovers that capability with storage.UnwrapStore, the repo's
-// standard idiom, which peels all the way to the raw store: on that path the
-// inner method is called directly and this span does not fire. The forwarder
-// is kept deliberately rather than deleted — it preserves the capability for
-// any caller holding the instrumented store, and it is the layer a
-// peel-until-implements discovery would stop at if spans on prefix reads ever
-// justify that non-standard peel.
 // GetConfigKeys forwards the domain.ConfigKeysReader optional fast path when
 // the wrapped store provides it, and otherwise picks the keys out of
 // instrumented GetAllConfig, so wrapping a store never costs it the capability.
 // The fallback selects exact keys; a store's own read keeps its database
-// collation and key remapping. As with GetConfigByPrefix, cmd/bd unwraps to the raw store, so this span fires
-// only for a caller that holds the instrumented store. The span records how many
-// keys were asked for, not their names.
+// collation and key remapping. As with GetConfigByPrefix, cmd/bd unwraps to the
+// raw store, so this span fires only for a caller that holds the instrumented
+// store. The span records how many keys were asked for, not their names.
 func (s *InstrumentedStorage) GetConfigKeys(ctx context.Context, keys ...string) (map[string]string, error) {
 	if kr, ok := s.inner.(interface {
 		GetConfigKeys(ctx context.Context, keys ...string) (map[string]string, error)
@@ -678,6 +666,18 @@ func (s *InstrumentedStorage) GetConfigKeys(ctx context.Context, keys ...string)
 	return out, nil
 }
 
+// GetConfigByPrefix forwards the domain.ConfigPrefixReader optional fast
+// path when the wrapped store provides it, and otherwise falls back to
+// instrumented GetAllConfig filtered in-process — so wrapping a store never
+// costs it the capability.
+//
+// cmd/bd discovers that capability with storage.UnwrapStore, the repo's
+// standard idiom, which peels all the way to the raw store: on that path the
+// inner method is called directly and this span does not fire. The forwarder
+// is kept deliberately rather than deleted — it preserves the capability for
+// any caller holding the instrumented store, and it is the layer a
+// peel-until-implements discovery would stop at if spans on prefix reads ever
+// justify that non-standard peel.
 func (s *InstrumentedStorage) GetConfigByPrefix(ctx context.Context, prefix string) (map[string]string, error) {
 	attrs := []attribute.KeyValue{attribute.String("bd.config.prefix", prefix)}
 	if pr, ok := s.inner.(interface {
