@@ -544,3 +544,40 @@ func TestSharedServerReadyClaimIsRefusedWhileMigrationPending(t *testing.T) {
 		t.Fatalf("after migrating, bd ready --claim left rcl-1 at %s, want in_progress/tester", got)
 	}
 }
+
+// TestSharedServerDuplicatesAutoMergeIsRefusedWhileMigrationPending is the
+// same window for `bd duplicates --auto-merge`: it closes the duplicates, so it
+// is refused, while plain `bd duplicates` and the merge's --dry-run preview
+// keep reporting the group (bd-fwx149, gastownhall/beads#8264).
+func TestSharedServerDuplicatesAutoMergeIsRefusedWhileMigrationPending(t *testing.T) {
+	w := newBehindSharedServerWorkspace(t, "dup", []*types.Issue{
+		behindFixtureIssue("dup-1", "Same title", 2),
+		behindFixtureIssue("dup-2", "Same title", 2),
+	})
+
+	for _, args := range [][]string{{"duplicates"}, {"duplicates", "--auto-merge", "--dry-run"}} {
+		stdout, stderr, code := w.run(args...)
+		if code != 0 || !strings.Contains(stdout, "dup-1") || !strings.Contains(stdout, "dup-2") {
+			t.Fatalf("bd %v must keep reporting the group on the behind schema: exit %d\nstdout:\n%s\nstderr:\n%s", args, code, stdout, stderr)
+		}
+	}
+
+	w.requireSharedRefusal(t, []string{"update", "dup-1", "--claim"}, "dup-1", "dup-2")
+	w.requireSharedRefusal(t, []string{"duplicates", "--auto-merge"}, "dup-1", "dup-2")
+
+	if stdout, stderr, code := w.run("migrate", "schema"); code != 0 {
+		t.Fatalf("bd migrate schema exit = %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if stdout, stderr, code := w.run("duplicates", "--auto-merge"); code != 0 {
+		t.Fatalf("bd duplicates --auto-merge on the current schema exit = %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	closed := 0
+	for _, id := range []string{"dup-1", "dup-2"} {
+		if strings.HasPrefix(w.issueState(t, id), "closed/") {
+			closed++
+		}
+	}
+	if closed != 1 {
+		t.Fatalf("after migrating, bd duplicates --auto-merge closed %d of the pair, want 1", closed)
+	}
+}
