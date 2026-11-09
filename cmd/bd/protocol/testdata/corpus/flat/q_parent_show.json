@@ -1,0 +1,41 @@
+[
+  {
+    "comment_count": 0,
+    "created_at": "<TS>",
+    "dependencies": [
+      {
+        "created_at": "<TS>",
+        "created_by": "protocol-test",
+        "dependency_type": "parent-child",
+        "description": "deterministic corpus-parent",
+        "id": "corpus-parent",
+        "issue_type": "task",
+        "labels": [
+          "corpus-native"
+        ],
+        "metadata": {
+          "corpus": "native"
+        },
+        "notes": "corpus-parent notes",
+        "owner": "test@protocol.test",
+        "priority": 3,
+        "status": "open",
+        "title": "Corpus parent subject",
+        "updated_at": "<TS>"
+      }
+    ],
+    "dependency_count": 1,
+    "dependent_count": 0,
+    "id": "corpus-parent.1",
+    "issue_type": "task",
+    "labels": [
+      "corpus-native"
+    ],
+    "parent": "corpus-parent",
+    "priority": 2,
+    "revision": "<REVISION>",
+    "status": "open",
+    "title": "Corpus quick child",
+    "updated_at": "<TS>"
+  }
+]
