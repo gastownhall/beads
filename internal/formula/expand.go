@@ -522,7 +522,10 @@ func ExpansionVarRefs(f *Formula, targetID string) []string {
 // depends_on ends up referencing the last top-level step of the expansion,
 // wherever in the tree the referencing step sits. The retarget runs once,
 // over the whole step list, so a dependent outside the children group an
-// expansion happened in is rewritten too.
+// expansion happened in is rewritten too. A template that recreates the
+// expanded step's ID leaves that ID in the tree: references to it stay as
+// they are, so the recreated step does not gain a dependency on its own
+// expansion.
 //
 // Returns a new steps slice with inline expansions applied.
 // The original steps slice is not modified.
@@ -540,8 +543,16 @@ func ApplyInlineExpansions(steps []*Step, parser *Parser) ([]*Step, error) {
 		return nil, err
 	}
 
-	for removed, lastID := range replacements {
-		result = UpdateDependenciesForExpansion(result, removed, lastID)
+	if len(replacements) > 0 {
+		surviving := buildStepMap(result)
+		for removed, lastID := range replacements {
+			// A template that recreates {target} keeps the original ID in
+			// the tree: references to it stay valid as they are.
+			if _, ok := surviving[removed]; ok {
+				continue
+			}
+			result = UpdateDependenciesForExpansion(result, removed, lastID)
+		}
 	}
 
 	return result, nil

@@ -948,6 +948,15 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 
 	parser := NewParser(tmpDir)
 
+	// writeFormula adds an expansion formula to the parser's directory for
+	// the subtests that need their own template.
+	writeFormula := func(name, src string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(tmpDir, name+".formula.json"), []byte(src), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	t.Run("inline expand preserves needs on expanded step", func(t *testing.T) {
 		steps := []*Step{
 			{ID: "setup", Title: "Setup"},
@@ -1132,7 +1141,76 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 			t.Errorf("papers.Needs = %v, want [work.second] (a dependent in another group sees it too)", got)
 		}
 	})
+
+	// A template that recreates {target} keeps the original ID in the tree:
+	// references to it stay as they are, instead of the recreated step
+	// gaining a dependency on its own expansion.
+	t.Run("a template recreating its target keeps references to it", func(t *testing.T) {
+		writeFormula("recreate-first", recreateFirstExpansion)
+		steps := []*Step{
+			{ID: "work", Title: "Work", Expand: "recreate-first"},
+			{ID: "land", Title: "Land", Needs: []string{"work"}},
+		}
+
+		result, err := ApplyInlineExpansions(steps, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+
+		if got := topLevelIDs(result); !slices.Equal(got, []string{"work", "work.review", "land"}) {
+			t.Fatalf("result = %v, want [work work.review land]", got)
+		}
+		if got := result[1].Needs; !slices.Equal(got, []string{"work"}) {
+			t.Errorf("work.review.Needs = %v, want [work] (the template's own reference to the recreated target stays)", got)
+		}
+		if got := result[2].Needs; !slices.Equal(got, []string{"work"}) {
+			t.Errorf("land.Needs = %v, want [work] (an external reference to the recreated target stays)", got)
+		}
+	})
+
+	t.Run("a template ending in its target keeps references to it", func(t *testing.T) {
+		writeFormula("recreate-last", recreateLastExpansion)
+		steps := []*Step{
+			{ID: "work", Title: "Work", Expand: "recreate-last"},
+			{ID: "land", Title: "Land", Needs: []string{"work"}},
+		}
+
+		result, err := ApplyInlineExpansions(steps, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+
+		if got := topLevelIDs(result); !slices.Equal(got, []string{"work.prep", "work", "land"}) {
+			t.Fatalf("result = %v, want [work.prep work land]", got)
+		}
+		if got := result[2].Needs; !slices.Equal(got, []string{"work"}) {
+			t.Errorf("land.Needs = %v, want [work]", got)
+		}
+	})
 }
+
+// recreateFirstExpansion recreates {target} as its first template step, so
+// the target ID survives the expansion and references to it stay valid.
+const recreateFirstExpansion = `{
+	"formula": "recreate-first",
+	"type": "expansion",
+	"version": 1,
+	"template": [
+		{"id": "{target}", "title": "Redone {target.title}"},
+		{"id": "{target}.review", "title": "Review", "needs": ["{target}"]}
+	]
+}`
+
+// recreateLastExpansion ends in {target} instead.
+const recreateLastExpansion = `{
+	"formula": "recreate-last",
+	"type": "expansion",
+	"version": 1,
+	"template": [
+		{"id": "{target}.prep", "title": "Prep"},
+		{"id": "{target}", "title": "Redone {target.title}"}
+	]
+}`
 
 // depSignatureOf renders each step's ID with its needs and depends_on lists,
 // children included: enough of a step tree to notice ApplyInlineExpansions
