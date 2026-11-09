@@ -40,12 +40,14 @@ func TestEmbeddedShowUnresolvableDeps(t *testing.T) {
 	// way, so pinning only one would leave the commoner of the two —
 	// `bd dep add ud-x liveop-y` — uncovered.
 	for _, tc := range []struct {
-		name   string
-		target string
-		depTyp string
+		name    string
+		target  string
+		depTyp  string
+		heading string
+		label   string
 	}{
-		{"external_reference", "external:liveop:liveop-kmf", "tracks"},
-		{"cross_repo_prefix", "liveop-kmf", "blocks"},
+		{"external_reference", "external:liveop:liveop-kmf", "tracks", "TRACKS", "external"},
+		{"cross_repo_prefix", "liveop-kmf", "blocks", "DEPENDS ON", "cross-repo"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			subject := bdCreate(t, bd, dir, "Subject "+tc.name, "--type", "task")
@@ -68,15 +70,27 @@ func TestEmbeddedShowUnresolvableDeps(t *testing.T) {
 					details["unresolvable_dependencies"])
 			}
 
-			// Text mode: the notice goes to stderr, so stdout stays
-			// byte-identical for scripts. Assert on stderr alone, or
-			// this passes on a build that prints nothing anywhere.
-			stdout, stderr := runShowSplit(t, bd, dir, subject.ID)
-			if !strings.Contains(stderr, "no row in this database") {
-				t.Errorf("bd show stderr did not disclose the unrenderable edge:\nstderr:\n%s", stderr)
+			// #5272: the raw edge is named, not just counted, and the
+			// hydrated array still holds only local issues.
+			edges, _ := details["unresolvable_dependency_edges"].([]interface{})
+			if len(edges) != 1 {
+				t.Fatalf("unresolvable_dependency_edges = %v, want the one raw edge", details["unresolvable_dependency_edges"])
 			}
-			if strings.Contains(stdout, "no row in this database") {
-				t.Errorf("the notice reached stdout, which must stay unchanged:\n%s", stdout)
+			edge, _ := edges[0].(map[string]interface{})
+			if edge["depends_on_id"] != tc.target || edge["type"] != tc.depTyp {
+				t.Errorf("unresolvable_dependency_edges[0] = %v, want %s/%s", edge, tc.target, tc.depTyp)
+			}
+
+			// Text mode: the edge is printed by id in its relationship's
+			// section, with no status, title or priority, and because it
+			// is shown the stderr notice has nothing left to report.
+			stdout, stderr := runShowSplit(t, bd, dir, subject.ID)
+			want := tc.heading + "\n  →   " + tc.target + " (" + tc.label + ")\n"
+			if !strings.Contains(stdout, want) {
+				t.Errorf("bd show stdout does not name the edge as %q:\n%s", want, stdout)
+			}
+			if strings.Contains(stderr, "no row in this database") {
+				t.Errorf("bd show warned about an edge it printed:\nstderr:\n%s", stderr)
 			}
 		})
 	}

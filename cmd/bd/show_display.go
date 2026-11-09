@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/uimd"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 // watchCommentFormatTime is the watch path's comment timestamp formatter.
@@ -190,10 +191,15 @@ func displayShowIssueReturn(ctx context.Context, issueID string, commentsTail in
 
 	// Dependencies (what this issue depends on)
 	relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
+	relatedUnresolved := make(map[string]*types.Dependency)
 	// Counts first — see readDepCounts for why the order matters.
 	depCountsSnapshot := readDepCounts(ctx, issueStore, issue.ID)
 	depsWithMeta, depsErr := issueStore.GetDependenciesWithMetadata(ctx, issue.ID)
-	for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
+	unresolvedDeps := unresolvedOutgoingEdges(ctx, depCountsSnapshot, depsWithMeta, depsErr, func(ctx context.Context) ([]*types.Dependency, error) {
+		return issueStore.GetDependencyRecords(ctx, issue.ID)
+	})
+	outSections := groupOutgoingDepSections(depsWithMeta, unresolvedDeps, relatedSeen, relatedUnresolved)
+	for _, sec := range outSections {
 		printDepSection(sec)
 	}
 
@@ -209,11 +215,12 @@ func displayShowIssueReturn(ctx context.Context, issueID string, commentsTail in
 	// scope: they answer an alternate query with no count beside it to
 	// contradict.
 	warnUnresolvableDepEdges(issue.ID, depCountsSnapshot,
-		depListing{rows: len(depsWithMeta), err: depsErr},
+		depListing{rows: len(depsWithMeta), err: depsErr,
+			printedUnresolved: printedUnresolvedIDs(outSections, relatedSeen, relatedUnresolved)},
 		depListing{rows: len(dependentsWithMeta), err: dependentsErr})
 
 	// Related (bidirectional, deduplicated)
-	printRelatedSection(relatedSeen)
+	printRelatedSection(relatedSeen, relatedUnresolved)
 
 	// Comments. watchCommentFormatTime hardcodes UTC — this path does not
 	// thread --local-time today (a pre-existing discrepancy from the
@@ -235,6 +242,10 @@ func displayShowIssueReturn(ctx context.Context, issueID string, commentsTail in
 type depListing struct {
 	rows int
 	err  error
+	// printedUnresolved is how many distinct ids of raw unresolvable edges
+	// the render printed in their sections (#5272); they are shown, so the
+	// notice leaves them out.
+	printedUnresolved int
 }
 
 // depCount is one direction's aggregate, carried with its own error for the
@@ -311,6 +322,15 @@ func readDepCounts(ctx context.Context, store unresolvableDepCounter, issueID st
 	return c
 }
 
+// unresolvedOutgoingEdges names the outbound edges the hydrated listing could
+// not represent, for the three text renders, through the same gate and
+// selector the JSON detail view uses (workapi.UnresolvableDependencyEdges): a
+// raw read only when both reads succeeded and the count exceeds the listing,
+// and nil on any failure, which leaves the notice to report the gap.
+func unresolvedOutgoingEdges(ctx context.Context, counts depCounts, deps []*types.IssueWithDependencyMetadata, depsErr error, read func(context.Context) ([]*types.Dependency, error)) []*types.Dependency {
+	return workapi.UnresolvableDependencyEdges(ctx, counts.deps.n, counts.deps.err, deps, depsErr, read)
+}
+
 func warnUnresolvableDepEdges(issueID string, counts depCounts, deps, dependents depListing) {
 	report := func(kind string, count int64, countErr error, listing depListing) bool {
 		// BOTH reads have to have succeeded. The count alone cannot tell a
@@ -320,7 +340,7 @@ func warnUnresolvableDepEdges(issueID string, counts depCounts, deps, dependents
 		if countErr != nil || listing.err != nil {
 			return false
 		}
-		missing := count - int64(listing.rows)
+		missing := count - int64(listing.rows) - int64(listing.printedUnresolved)
 		if missing <= 0 {
 			return false
 		}

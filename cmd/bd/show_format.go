@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/uimd"
@@ -284,19 +285,48 @@ func formatDependencyLine(prefix string, dep *types.IssueWithDependencyMetadata)
 	return fmt.Sprintf("  %s %s %s: %s%s %s", prefix, statusIcon, idStr, typeStr, dep.Title, priorityTag)
 }
 
+// unresolvedDepLabel classifies a far end this database has no row for. The
+// label is the routing rule's reading of the id (issueops.IsExternalDepTarget),
+// not evidence: "cross-repo" does not prove the other repository has the
+// issue, and "missing" does not prove it was deleted.
+func unresolvedDepLabel(edge *types.Dependency) string {
+	switch {
+	case strings.HasPrefix(edge.DependsOnID, "external:"):
+		return "external"
+	case issueops.IsExternalDepTarget(edge.IssueID, edge.DependsOnID):
+		return "cross-repo"
+	default:
+		return "missing"
+	}
+}
+
+// formatUnresolvedDependencyLine formats an edge whose far end could not be
+// read: the direction glyph, a blank status slot, the id and a muted label.
+// Status, title and priority are left out rather than invented.
+func formatUnresolvedDependencyLine(prefix string, edge *types.Dependency) string {
+	return fmt.Sprintf("  %s   %s %s", prefix, printedIssueID(edge.DependsOnID),
+		ui.RenderMuted("("+unresolvedDepLabel(edge)+")"))
+}
+
 // printDepSection prints one dependency section: bold heading, then a line per
-// edge marked with the section's direction glyph.
+// edge marked with the section's direction glyph, local issues first.
 func printDepSection(sec depSection) {
 	fmt.Printf("\n%s\n", ui.RenderBold(sec.Heading))
 	for _, dep := range sec.Deps {
 		fmt.Println(formatDependencyLine(sec.Glyph, dep))
 	}
+	for _, edge := range sec.Unresolved {
+		fmt.Println(formatUnresolvedDependencyLine(sec.Glyph, edge))
+	}
 }
 
 // printRelatedSection prints the deduplicated RELATED section that both
-// directions of the symmetric related/relates-to edges collapse into.
-func printRelatedSection(relatedSeen map[string]*types.IssueWithDependencyMetadata) {
-	if len(relatedSeen) == 0 {
+// directions of the symmetric related/relates-to edges collapse into, then the
+// outbound related edges whose far end has no row here (#5272), skipping any
+// id a local line already printed.
+func printRelatedSection(relatedSeen map[string]*types.IssueWithDependencyMetadata, relatedUnresolved map[string]*types.Dependency) {
+	unresolved := unresolvedRelatedIDs(relatedSeen, relatedUnresolved)
+	if len(relatedSeen) == 0 && len(unresolved) == 0 {
 		return
 	}
 	fmt.Printf("\n%s\n", ui.RenderBold("RELATED"))
@@ -308,6 +338,38 @@ func printRelatedSection(relatedSeen map[string]*types.IssueWithDependencyMetada
 	for _, id := range ids {
 		fmt.Println(formatDependencyLine("↔", relatedSeen[id]))
 	}
+	for _, id := range unresolved {
+		fmt.Println(formatUnresolvedDependencyLine("↔", relatedUnresolved[id]))
+	}
+}
+
+// unresolvedRelatedIDs is the sorted set of unresolved related ids the RELATED
+// section prints: those no local line covers.
+func unresolvedRelatedIDs(relatedSeen map[string]*types.IssueWithDependencyMetadata, relatedUnresolved map[string]*types.Dependency) []string {
+	ids := make([]string, 0, len(relatedUnresolved))
+	for id := range relatedUnresolved {
+		if _, local := relatedSeen[id]; !local {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// printedUnresolvedIDs counts the distinct unresolved ids the outgoing
+// sections and the RELATED section print, which is what the outbound warning
+// may subtract: an edge named on stdout needs no stderr notice.
+func printedUnresolvedIDs(outgoing []depSection, relatedSeen map[string]*types.IssueWithDependencyMetadata, relatedUnresolved map[string]*types.Dependency) int {
+	seen := make(map[string]bool)
+	for _, sec := range outgoing {
+		for _, edge := range sec.Unresolved {
+			seen[edge.DependsOnID] = true
+		}
+	}
+	for _, id := range unresolvedRelatedIDs(relatedSeen, relatedUnresolved) {
+		seen[id] = true
+	}
+	return len(seen)
 }
 
 // printEpicChildProgress summarizes how much of an epic its children have

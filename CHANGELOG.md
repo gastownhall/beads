@@ -1226,6 +1226,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd show` names a dependency whose far end has no row in this database (a
+  cross-repo id or an `external:` reference) instead of only counting it
+  (#5272). The text renders print the id in its relationship's section,
+  labeled `cross-repo`, `external` or `missing`, and `--json` adds
+  `unresolvable_dependency_edges`, the raw edge records. The stderr notice
+  now counts only the edges it could not name.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
