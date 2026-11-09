@@ -55,3 +55,32 @@ func TestCircuitBreakerDir_PrivatePerUser(t *testing.T) {
 		t.Errorf("shared beads-circuit directory was created (stat err %v)", err)
 	}
 }
+
+// The per-user directory keeps the breaker's purpose for one user: a process
+// that trips it makes every other process of that user fail fast through the
+// persisted state until the cooldown elapses.
+func TestCircuitBreaker_SameUserInstancesSharePersistedState(t *testing.T) {
+	privateCircuitTempRoot(t)
+	t.Setenv("BEADS_TEST_MODE", "") // need real breaker behavior
+
+	tripper := maybeNewCircuitBreaker("127.0.0.1", 44445, "shared_db")
+	reader := maybeNewCircuitBreaker("127.0.0.1", 44445, "shared_db")
+	if tripper == nil || reader == nil {
+		t.Fatal("maybeNewCircuitBreaker returned nil for a private temp root")
+	}
+	if tripper == reader || tripper.filePath != reader.filePath {
+		t.Fatalf("want two instances on one state file, got %q and %q", tripper.filePath, reader.filePath)
+	}
+	if !reader.Allow() {
+		t.Fatal("a fresh breaker should allow")
+	}
+	for i := 0; i < circuitFailureThreshold; i++ {
+		tripper.RecordFailure()
+	}
+	if reader.Allow() {
+		t.Fatal("the other instance allowed a request during the cooldown of a tripped breaker")
+	}
+	if got := reader.State(); got != circuitOpen {
+		t.Errorf("other instance state = %q, want %q", got, circuitOpen)
+	}
+}
