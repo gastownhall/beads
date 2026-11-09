@@ -210,6 +210,42 @@ func TestOpenSQLWaitBudget(t *testing.T) {
 		}
 	})
 
+	t.Run("holder_release_before_exhaustion_opens", func(t *testing.T) {
+		t.Setenv("BEADS_EMBEDDED_OPEN_TIMEOUT", "20s")
+		dir := initOpenWaitDB(t)
+		_, release := holdOpenWaitDB(t, dir)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		results, join := startOpenWait(t, ctx, cancel, dir)
+
+		select {
+		case r := <-results:
+			if r.err == nil {
+				_ = r.cleanup()
+			}
+			t.Fatalf("OpenSQL returned after %v (err %v) while the database was still held", r.elapsed, r.err)
+		case <-time.After(1500 * time.Millisecond):
+		}
+		release()
+
+		var r openWaitResult
+		select {
+		case r = <-results:
+		case <-time.After(15 * time.Second):
+			join()
+			t.Fatalf("OpenSQL still waiting 15s after the holder released the database")
+		}
+		if r.err != nil {
+			t.Fatalf("OpenSQL after the holder released = %v, want success", r.err)
+		}
+		defer func() { _ = r.cleanup() }()
+		t.Logf("OpenSQL opened after %v", r.elapsed)
+		var n int
+		if err := r.db.QueryRow("SELECT 1").Scan(&n); err != nil {
+			t.Fatalf("query on the waiter's handle: %v", err)
+		}
+	})
+
 	t.Run("parent_deadline_takes_precedence", func(t *testing.T) {
 		t.Setenv("BEADS_EMBEDDED_OPEN_TIMEOUT", "1s")
 		dir := initOpenWaitDB(t)
