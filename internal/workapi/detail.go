@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -38,6 +40,16 @@ type DetailSource interface {
 
 	Labels(ctx context.Context, id string, isWisp bool) ([]string, error)
 	Dependencies(ctx context.Context, id string, isWisp bool) ([]*types.IssueWithDependencyMetadata, error)
+
+	// DependencyRecords reads the raw outbound edge rows whose source is id,
+	// without hydrating or filtering their far ends. It backs
+	// IssueDetails.UnresolvableDependencyEdges (bd-hkpas7, #5272): the
+	// hydrated Dependencies slice drops an edge whose target has no row in
+	// this database, and this is the read that can still name it. Like the
+	// store's own seam, it selects the source's ACTIVE plane; the counts and
+	// hydrated reads may see both, so a caller cannot treat its absence of
+	// unlisted edges as exhaustive.
+	DependencyRecords(ctx context.Context, id string, isWisp bool) ([]*types.Dependency, error)
 
 	CountDependencies(ctx context.Context, id string, isWisp bool) (int64, error)
 	CountDependents(ctx context.Context, id string, isWisp bool) (int64, error)
@@ -160,9 +172,20 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 	// therefore disagree by exactly the cross-repo and `external:` edges,
 	// which is real stored data rather than a phantom count (be-lpi).
 	// Publish the difference instead of leaving the caller to infer it.
+	//
+	// And publish the EDGES themselves, not only their number (bd-hkpas7,
+	// #5272): the raw records behind the gap, so a caller can see where the
+	// unreachable edges point. Gated on the same successful count/list reads
+	// as the count — a failed raw read leaves the count alone, exactly as a
+	// failed count read leaves it unset — and read only here, in the
+	// positive-delta branch, so a fully local issue pays no extra query (the
+	// raw read is one more statement the local case never runs).
 	if depsErr == nil && dependencyCountErr == nil {
 		if n := dependencyCount - int64(len(details.Dependencies)); n > 0 {
 			details.UnresolvableDependencies = &n
+			if raw, rawErr := src.DependencyRecords(ctx, id, isWisp); rawErr == nil {
+				details.UnresolvableDependencyEdges = UnresolvedDepEdges(raw, details.Dependencies)
+			}
 		}
 	}
 
@@ -240,6 +263,51 @@ func shallowDep(item *types.IssueWithDependencyMetadata) *types.IssueWithDepende
 		},
 		DependencyType: item.DependencyType,
 	}
+}
+
+// UnresolvedDepEdges selects, from the raw outbound edge rows, the ones the
+// hydrated listing could not represent: those whose far end has no row in
+// this database (a cross-repo id or an `external:` reference — the same gap
+// IssueDetails.UnresolvableDependencies counts, bd-hkpas7/#5272). The result
+// is sorted by target id, then edge type, for a stable wire order.
+//
+// Shared by BuildIssueDetails and the CLI text renders, so the JSON member and
+// the printed lines name the same edges. Best effort by contract: raw rows
+// missing from the input (a failed read, or the source-plane-only scope of
+// the raw-record reads, which cannot see an opposite-plane remnant the count
+// can) are simply not enumerated — an empty result is never proof that no gap
+// exists. Neither input slice is mutated; the raw records are returned as-is
+// in a new slice.
+func UnresolvedDepEdges(raw []*types.Dependency, hydrated []*types.IssueWithDependencyMetadata) []*types.Dependency {
+	if len(raw) == 0 {
+		return nil
+	}
+	resolved := make(map[string]struct{}, len(hydrated))
+	for _, dep := range hydrated {
+		if dep != nil {
+			resolved[dep.ID] = struct{}{}
+		}
+	}
+	var out []*types.Dependency
+	for _, dep := range raw {
+		if dep == nil {
+			continue
+		}
+		if _, ok := resolved[dep.DependsOnID]; ok {
+			continue
+		}
+		out = append(out, dep)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	slices.SortFunc(out, func(a, b *types.Dependency) int {
+		if c := strings.Compare(a.DependsOnID, b.DependsOnID); c != 0 {
+			return c
+		}
+		return strings.Compare(string(a.Type), string(b.Type))
+	})
+	return out
 }
 
 // collectDependents streams the dependents and keeps only the
@@ -339,6 +407,7 @@ type StoreDetailReader interface {
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)
 	GetLabels(ctx context.Context, issueID string) ([]string, error)
 	GetDependenciesWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error)
+	GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error)
 	CountDependencies(ctx context.Context, issueID string) (int64, error)
 	CountDependents(ctx context.Context, issueID string) (int64, error)
 	CountIssueComments(ctx context.Context, issueID string) (int64, error)
@@ -373,6 +442,13 @@ func (s storeDetailSource) Labels(ctx context.Context, id string, _ bool) ([]str
 
 func (s storeDetailSource) Dependencies(ctx context.Context, id string, _ bool) ([]*types.IssueWithDependencyMetadata, error) {
 	return s.store.GetDependenciesWithMetadata(ctx, id)
+}
+
+// DependencyRecords routes through the store's own GetDependencyRecords, which
+// resolves the source's plane (issue or wisp) internally — the same reason the
+// other methods here ignore isWisp.
+func (s storeDetailSource) DependencyRecords(ctx context.Context, id string, _ bool) ([]*types.Dependency, error) {
+	return s.store.GetDependencyRecords(ctx, id)
 }
 
 func (s storeDetailSource) CountDependencies(ctx context.Context, id string, _ bool) (int64, error) {
@@ -416,6 +492,8 @@ type (
 		IterWispWithIssueMetadata(ctx context.Context, wispID string, filter domain.DepListFilter) (storage.Iter[types.IssueWithDependencyMetadata], error)
 		CountByIssueID(ctx context.Context, issueID string, filter domain.DepListFilter) (int64, error)
 		CountByWispID(ctx context.Context, wispID string, filter domain.DepListFilter) (int64, error)
+		GetIssueDependencyRecords(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error)
+		GetWispDependencyRecords(ctx context.Context, wispIDs []string) (map[string][]*types.Dependency, error)
 	}
 
 	detailCommentReader interface {
@@ -463,6 +541,23 @@ func (u useCaseDetailSource) Dependencies(ctx context.Context, id string, isWisp
 		return u.deps.ListWispWithIssueMetadata(ctx, id, filter)
 	}
 	return u.deps.ListWithIssueMetadata(ctx, id, filter)
+}
+
+// DependencyRecords reads the source plane's raw edge rows through the
+// batched use-case reads — one call for the one id a detail view assembles.
+func (u useCaseDetailSource) DependencyRecords(ctx context.Context, id string, isWisp bool) ([]*types.Dependency, error) {
+	if isWisp {
+		records, err := u.deps.GetWispDependencyRecords(ctx, []string{id})
+		if err != nil {
+			return nil, fmt.Errorf("wisp dependency records %s: %w", id, err)
+		}
+		return records[id], nil
+	}
+	records, err := u.deps.GetIssueDependencyRecords(ctx, []string{id})
+	if err != nil {
+		return nil, fmt.Errorf("issue dependency records %s: %w", id, err)
+	}
+	return records[id], nil
 }
 
 func (u useCaseDetailSource) CountDependencies(ctx context.Context, id string, isWisp bool) (int64, error) {

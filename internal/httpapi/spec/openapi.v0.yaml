@@ -8413,6 +8413,28 @@ components:
             reads dependents unconditionally and therefore always discloses
             the inbound direction on stderr, while a client of this field sees
             it only when it asked for `include_dependents`.
+        unresolvable_dependency_edges:
+          type: array
+          description: >-
+            The raw stored edges behind `unresolvable_dependencies` (#5272):
+            one Dependency record per edge the hydrated `dependencies` slice
+            could not represent, so the count is navigable rather than a
+            number with no referent. Each entry's `depends_on_id` is the
+            unreachable far end — a cross-repo id or an `external:` reference,
+            never an issue in this database.
+
+
+            Sorted by target id, then edge type, for a stable order. BEST
+            EFFORT and OUTBOUND-ONLY: the raw-record read selects the source's
+            active plane while the counts and the hydrated slices may see
+            both, so an opposite-plane remnant can leave the count higher
+            than hydrated rows plus these edges. An ABSENT member is
+            therefore not proof that no gap exists, only that none was
+            enumerated — the residual difference stays disclosed by the
+            counts. Absent, never empty, when there is nothing to report,
+            and absent too when the count, listing or raw read FAILED rather
+            than came back short.
+          items: { $ref: '#/components/schemas/Dependency' }
         epic_total_children:
           type: integer
         epic_closed_children:

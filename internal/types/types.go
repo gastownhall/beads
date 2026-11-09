@@ -1354,6 +1354,32 @@ type IssueDetails struct {
 	UnresolvableDependencies *int64 `json:"unresolvable_dependencies,omitempty"`
 	UnresolvableDependents   *int64 `json:"unresolvable_dependents,omitempty"`
 
+	// UnresolvableDependencyEdges is the outbound half of the two counts
+	// above, as the raw rows they count (bd-hkpas7, #5272): the stored
+	// Dependency records whose far end Dependencies could not represent.
+	// The count alone was a number with no referent — a caller could not
+	// tell WHERE the unrepresentable edge pointed, only that one existed —
+	// and `bd dep list <id> <id>` (raw records) remained the only place the
+	// target id ever printed.
+	//
+	// BEST EFFORT AND OUTBOUND-ONLY, on the same terms as the counts and one
+	// further one they do not share: the raw-record read selects the source's
+	// ACTIVE plane (dolt GetDependencyRecords routes by is-wisp;
+	// issueops raw reads select one table), while the counts and the hydrated
+	// slices may inspect both planes, so an opposite-plane remnant can leave
+	// the count higher than hydrated rows plus these edges. A member absent
+	// is therefore NOT proof that no gap exists, only that none was
+	// enumerated; the residual difference stays disclosed by the counts. The
+	// edges are sorted by target id, then edge type, so a JSON consumer gets
+	// a stable order; each entry is the raw record (its DependsOnID is the
+	// unreachable far end, never an Issue in this database).
+	//
+	// Set under the same gate as UnresolvableDependencies: only when the
+	// count and hydrated reads both succeeded AND came back short, and only
+	// when the raw read itself succeeded. "Could not be represented" and
+	// "was never fetched" do not collapse into one signal.
+	UnresolvableDependencyEdges []*Dependency `json:"unresolvable_dependency_edges,omitempty"`
+
 	// Epic progress fields (populated only for issue_type=epic with children)
 	EpicTotalChildren  *int  `json:"epic_total_children,omitempty"`
 	EpicClosedChildren *int  `json:"epic_closed_children,omitempty"`

@@ -45,6 +45,7 @@ go_test(
         "delete_test.go",
         "detail_test.go",
         "detail_unresolvable_test.go",
+        "detail_unresolved_edges_test.go",
         "list_comments_test.go",
         "list_ephemeral_test.go",
         "list_golden_test.go",

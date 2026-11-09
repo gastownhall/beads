@@ -68,6 +68,28 @@ func TestEmbeddedShowUnresolvableDeps(t *testing.T) {
 					details["unresolvable_dependencies"])
 			}
 
+			// The member that makes the count navigable (bd-hkpas7, #5272):
+			// the raw stored edge itself, sorted and typed, beside the count
+			// that until now was a number with no referent. Generic decode —
+			// pinning the wire member, not a struct the compiler could make
+			// this pass against.
+			edges, present := details["unresolvable_dependency_edges"].([]interface{})
+			if !present || len(edges) != 1 {
+				t.Fatalf("unresolvable_dependency_edges = %v, want the one raw edge the count names",
+					details["unresolvable_dependency_edges"])
+			}
+			edge, isMap := edges[0].(map[string]interface{})
+			if !isMap || edge["depends_on_id"] != tc.target {
+				t.Errorf("unresolvable_dependency_edges[0] = %v, want depends_on_id %s",
+					edges[0], tc.target)
+			}
+			if edge["type"] != tc.depTyp {
+				t.Errorf("unresolvable_dependency_edges[0].type = %v, want %s", edge["type"], tc.depTyp)
+			}
+			if edge["issue_id"] != subject.ID {
+				t.Errorf("unresolvable_dependency_edges[0].issue_id = %v, want the subject %s", edge["issue_id"], subject.ID)
+			}
+
 			// Text mode: the notice goes to stderr, so stdout stays
 			// byte-identical for scripts. Assert on stderr alone, or
 			// this passes on a build that prints nothing anywhere.

@@ -125,6 +125,15 @@ func (f fakeStoreReader) GetDependenciesWithMetadata(_ context.Context, id strin
 	return f.fx.deps[id], nil
 }
 
+// GetDependencyRecords stays empty on this fixture: it derives its counts and
+// its hydrated rows from one slice, so no positive unresolvable delta can
+// exist here and the detail build never reaches the raw read. The
+// skew-bearing sources live in detail_unresolvable_test.go and
+// detail_unresolved_edges_test.go, where counts and rows are set apart.
+func (f fakeStoreReader) GetDependencyRecords(_ context.Context, _ string) ([]*types.Dependency, error) {
+	return nil, nil
+}
+
 func (f fakeStoreReader) CountDependencies(_ context.Context, id string) (int64, error) {
 	return int64(len(f.fx.deps[id])), nil
 }
@@ -254,6 +263,16 @@ func (f fakeDepUC) CountByIssueID(ctx context.Context, id string, filter domain.
 func (f fakeDepUC) CountByWispID(ctx context.Context, id string, filter domain.DepListFilter) (int64, error) {
 	rows, err := f.ListWispWithIssueMetadata(ctx, id, filter)
 	return int64(len(rows)), err
+}
+
+// Same rationale as fakeStoreReader.GetDependencyRecords: the fixture cannot
+// produce a positive unresolvable delta, so the raw batch reads stay empty.
+func (f fakeDepUC) GetIssueDependencyRecords(_ context.Context, _ []string) (map[string][]*types.Dependency, error) {
+	return nil, nil
+}
+
+func (f fakeDepUC) GetWispDependencyRecords(_ context.Context, _ []string) (map[string][]*types.Dependency, error) {
+	return nil, nil
 }
 
 type fakeCommentUC struct{ fx *detailFixture }
