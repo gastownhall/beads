@@ -333,7 +333,7 @@ func applyImportRejections(result *importResultJSON, source string, rejected []i
 		return importRejectedError(source, rejected)
 	}
 	if rejectsPath != "" {
-		if err := saveImportRejects(rejectsPath, rejected); err != nil {
+		if err := saveImportRejects(rejectsPath, source, rejected); err != nil {
 			return fmt.Errorf("save the %d invalid record(s) from %s to %s; nothing was imported: %w", len(rejected), source, rejectsPath, err)
 		}
 		result.RejectsFile = rejectsPath
@@ -344,16 +344,50 @@ func applyImportRejections(result *importResultJSON, source string, rejected []i
 	return nil
 }
 
-// saveImportRejects writes the rejected records' original lines to path, one
-// per line, through a same-directory temporary file that replaces path only
-// once it is complete (mode 0600: the records are the workspace's issue data).
-func saveImportRejects(path string, rejected []importRejection) error {
+// saveImportRejects adds the rejected records' original lines to the rejects
+// file at path, one per line, keeping every record an earlier save left there
+// and skipping a line the file already holds byte for byte. It refuses a path
+// that is a symlink, a directory or another non-regular file, and one that is
+// the import source itself (or a hardlink to it), since replacing either would
+// lose data. The merged file goes through a same-directory temporary file that
+// replaces path only once it is complete (mode 0600: the records are the
+// workspace's issue data), so a failed save leaves the earlier file intact.
+func saveImportRejects(path, source string, rejected []importRejection) error {
 	var b bytes.Buffer
-	for _, r := range rejected {
-		b.Write(r.Raw)
-		if !bytes.HasSuffix(r.Raw, []byte("\n")) {
+	seen := map[string]bool{}
+	info, err := os.Lstat(path)
+	switch {
+	case os.IsNotExist(err):
+	case err != nil:
+		return err
+	case info.Mode()&os.ModeSymlink != 0:
+		return fmt.Errorf("%s is a symlink; name a regular file", path)
+	case !info.Mode().IsRegular():
+		return fmt.Errorf("%s is not a regular file", path)
+	default:
+		if sourceInfo, err := os.Stat(source); err == nil && os.SameFile(info, sourceInfo) {
+			return fmt.Errorf("%s is the import source %s", path, source)
+		}
+		existing, err := os.ReadFile(path) //nolint:gosec // G304: the operator's rejects path
+		if err != nil {
+			return err
+		}
+		b.Write(existing)
+		if len(existing) > 0 && !bytes.HasSuffix(existing, []byte("\n")) {
 			b.WriteByte('\n')
 		}
+		for _, line := range bytes.Split(existing, []byte("\n")) {
+			seen[string(line)] = true
+		}
+	}
+	for _, r := range rejected {
+		line := bytes.TrimSuffix(r.Raw, []byte("\n"))
+		if seen[string(line)] {
+			continue
+		}
+		seen[string(line)] = true
+		b.Write(line)
+		b.WriteByte('\n')
 	}
 	return atomicWriteFile(path, b.Bytes())
 }
@@ -424,7 +458,7 @@ func screenRecoveryImport(ctx context.Context, readVocabulary importVocabularyFu
 		return screen.Write, nil, "", nil
 	}
 	rejectsPath := defaultImportRejectsPath(source)
-	if err := saveImportRejects(rejectsPath, screen.Rejected); err != nil {
+	if err := saveImportRejects(rejectsPath, source, screen.Rejected); err != nil {
 		return nil, nil, "", fmt.Errorf("save the %d invalid record(s) from %s to %s; nothing was imported: %w", len(screen.Rejected), source, rejectsPath, err)
 	}
 	return screen.Write, screen.Rejected, rejectsPath, nil
