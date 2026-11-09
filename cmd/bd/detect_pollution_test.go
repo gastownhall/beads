@@ -73,3 +73,40 @@ func TestDetectTestPollution_SkipsClosedAndEpics(t *testing.T) {
 		t.Errorf("open task %q not reported; eligibility must not hide open non-epic fixtures", "Test issue")
 	}
 }
+
+// TestDetectTestPollution_OnlyOpenPersistentCandidates pins GH#5025's
+// eligibility: only open, non-ephemeral issues are pollution candidates.
+// Active or parked work (in progress, blocked, deferred, pinned, hooked) and
+// ephemeral wisps are skipped, while the identical fixture as an open
+// Ephemeral=false task, NoHistory included, is still reported.
+func TestDetectTestPollution_OnlyOpenPersistentCandidates(t *testing.T) {
+	fixture := func(id string, status types.Status) *types.Issue {
+		return &types.Issue{ID: id, Title: "Test issue", Status: status, IssueType: types.TypeTask}
+	}
+	ephemeral := fixture("bd-eph", types.StatusOpen)
+	ephemeral.Ephemeral = true
+	noHistory := fixture("bd-nohist", types.StatusOpen)
+	noHistory.NoHistory = true
+	issues := []*types.Issue{
+		fixture("bd-inprog", types.StatusInProgress),
+		fixture("bd-blocked", types.StatusBlocked),
+		fixture("bd-deferred", types.StatusDeferred),
+		fixture("bd-pinned", types.StatusPinned),
+		fixture("bd-hooked", types.StatusHooked),
+		ephemeral,
+		fixture("bd-open", types.StatusOpen),
+		noHistory,
+	}
+
+	got := pollutedIDs(issues)
+	for _, id := range []string{"bd-inprog", "bd-blocked", "bd-deferred", "bd-pinned", "bd-hooked", "bd-eph"} {
+		if p, ok := got[id]; ok {
+			t.Errorf("%s reported as pollution (score %.2f, reasons %v); only open, non-ephemeral issues are candidates", id, p.score, p.reasons)
+		}
+	}
+	for _, id := range []string{"bd-open", "bd-nohist"} {
+		if _, ok := got[id]; !ok {
+			t.Errorf("%s (open, Ephemeral=false) not reported; it must stay eligible", id)
+		}
+	}
+}
