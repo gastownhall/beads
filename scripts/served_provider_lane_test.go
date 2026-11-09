@@ -52,6 +52,29 @@ func checkServedProviderRule(rule string) []string {
 	return errs
 }
 
+// servedProviderBDVisibility is the line //cmd/bd:bd_for_tests's visibility
+// needs for the variant's data dependency on it to pass Bazel analysis. Nothing
+// else text-based notices its absence: the rule's own lines are all present,
+// and only `bazel build` refuses the target, which the dolt-server tag puts in
+// every //... lane.
+const servedProviderBDVisibility = `"//internal/httpclient:__pkg__",`
+
+// checkBDForTestsVisibility reports whether cmd/bd/BUILD.bazel's bd_for_tests
+// rule lets //internal/httpclient depend on it.
+func checkBDForTestsVisibility(cmdBuild string) []string {
+	rule := bazelRuleBlock(cmdBuild, "bd_for_tests")
+	if rule == "" {
+		return []string{"cmd/bd/BUILD.bazel has no bd_for_tests rule"}
+	}
+	for _, line := range strings.Split(rule, "\n") {
+		if strings.TrimSpace(line) == servedProviderBDVisibility {
+			return nil
+		}
+	}
+	return []string{"//cmd/bd:bd_for_tests's visibility lacks " + servedProviderBDVisibility +
+		" so //internal/httpclient:httpclient_served_provider_test fails Bazel analysis"}
+}
+
 // TestServedProviderVariantIsWired pins the provider-source variant's env, data
 // and wrapper, and proves the check fires by dropping each pinned line from the
 // real rule.
@@ -71,6 +94,10 @@ func TestServedProviderVariantIsWired(t *testing.T) {
 		t.Error(`httpclient_served_provider_test is not tagged ["dolt-server"]; no lane runs it`)
 	}
 	for _, err := range checkDoltServerRules("internal/httpclient", build) {
+		t.Error(err)
+	}
+	cmdBuild := readPolicyFile(t, sourceRepoRoot(t), "cmd/bd/BUILD.bazel")
+	for _, err := range checkBDForTestsVisibility(cmdBuild) {
 		t.Error(err)
 	}
 
@@ -96,5 +123,12 @@ func TestServedProviderVariantIsWired(t *testing.T) {
 	}
 	if len(checkServedProviderRule("")) == 0 {
 		t.Error("a missing rule went unreported")
+	}
+	hidden := strings.Replace(cmdBuild, "\n        "+servedProviderBDVisibility, "", 1)
+	if hidden == cmdBuild {
+		t.Fatal("the hidden-bd_for_tests mutation did not apply")
+	}
+	if len(checkBDForTestsVisibility(hidden)) == 0 {
+		t.Error("dropping //internal/httpclient from bd_for_tests's visibility went unreported")
 	}
 }
