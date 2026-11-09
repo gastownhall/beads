@@ -1226,6 +1226,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The `bd create-form` Dependencies field now takes the same dependency
+  vocabulary as `bd create --deps` (GH#5560). The `blocked-by` and
+  `depends-on` aliases are stored as the canonical, gating `blocks` type
+  instead of an inert literal custom edge, spellings of one edge collapse
+  instead of colliding, and two types on one target, an unknown or custom
+  type, or a typed entry with no target (`blocks:`) are refused in the
+  field while the text is still editable and by a direct create before
+  anything is written. Previously a type conflict or an empty target failed
+  the create late with a wrapped storage error after a child number was
+  consumed, and an unknown type was accepted and stored. The form's
+  `blocks:<id>` keeps its historical direction (this issue depends on
+  `<id>`), unlike `--deps`' explicit `blocks:`.
+
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
