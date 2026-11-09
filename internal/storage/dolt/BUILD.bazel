@@ -14,6 +14,7 @@ go_library(
         "blockingannotator.go",
         "bootstrap.go",
         "bootstrapper.go",
+        "child_renumber.go",
         "circuit.go",
         "claim_verify.go",
         "commenter.go",

@@ -9,6 +9,7 @@ go_library(
         "blocked_recompute.go",
         "branches.go",
         "childcounters_merge.go",
+        "childrenumber.go",
         "clone.go",
         "commit.go",
         "compact.go",

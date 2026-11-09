@@ -915,6 +915,8 @@ reports conflicts.`,
 					printAncestorPKMismatchGuidance(err)
 				} else if isDivergedHistoryErr(err) {
 					printDivergedHistoryGuidance("pull")
+				} else {
+					printChildRenumberHint(ctx, st, remote)
 				}
 				return SilentExit()
 			}
@@ -945,6 +947,8 @@ reports conflicts.`,
 				printAncestorPKMismatchGuidance(err)
 			} else if isDivergedHistoryErr(err) {
 				printDivergedHistoryGuidance("pull")
+			} else {
+				printChildRenumberHint(ctx, st, "")
 			}
 			return SilentExit()
 		}
