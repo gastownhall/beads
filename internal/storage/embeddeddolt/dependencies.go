@@ -97,6 +97,20 @@ func (s *EmbeddedDoltStore) DetectCycles(ctx context.Context) ([][]*types.Issue,
 	return result, err
 }
 
+// ReadInsertVocabulary reads the custom status and type names an insert
+// validates against (issueops.InsertVocabularyReader). Unlike
+// GetCustomStatuses/GetCustomTypes it does not fall back to config.yaml on a
+// read failure: the error is returned, so an import screening rows never
+// validates them against a vocabulary the writer would not use.
+func (s *EmbeddedDoltStore) ReadInsertVocabulary(ctx context.Context) (customStatuses, customTypes []string, err error) {
+	err = s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var txErr error
+		customStatuses, customTypes, txErr = issueops.ReadInsertVocabularyInTx(ctx, tx)
+		return txErr
+	})
+	return customStatuses, customTypes, err
+}
+
 // RetiredIssueIDs returns which of ids a retaining retention sweep retired,
 // with the closed_at each tombstone recorded (issueops.RetiredIDsInTx). The
 // import dry run reads it so its preview skips a retired row as the real

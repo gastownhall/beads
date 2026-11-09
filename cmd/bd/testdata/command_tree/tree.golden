@@ -3626,6 +3626,16 @@ bd import
     | re-running the same import is safe and converges (rows upsert,
     | labels/comments/dependencies deduplicate).
     |
+    | Every row the import would write is validated before anything is written,
+    | with the same checks (and the same custom statuses and types) a create
+    | uses. By default one invalid row stops the import: the error names its line
+    | and the reason, and nothing is imported. --skip-invalid imports the valid
+    | rows and reports the skipped ones (line, id, reason; "rejected" in --json);
+    | add --rejects <file> to save the skipped lines verbatim, ready to repair
+    | and re-import. A line that is not valid JSON, or does not decode as a
+    | record, always stops the import. Stale and unchanged rows are not written,
+    | so they are not validated.
+    |
     | EXAMPLES:
     |   bd import                        # Import from configured import.path
     |   bd import backup.jsonl           # Import from a specific file
@@ -3635,11 +3645,14 @@ bd import
     |   bd import --dry-run              # Show what would be imported
     |   bd import --dedup                # Skip issues with duplicate titles
     |   bd import --allow-stale old.jsonl # Restore an older snapshot (overwrites newer local rows)
+    |   bd import --skip-invalid --rejects bad.jsonl backup.jsonl  # Import the valid rows, save the rest
     |   bd import --json                 # Structured output with created and skipped IDs
   flag --allow-stale type=bool default="false" usage="Import rows even when older than the local issue (required to restore an older snapshot)"
   flag --dedup type=bool default="false" usage="Skip lines whose title matches an existing open issue"
   flag --dry-run type=bool default="false" usage="Show what would be imported without importing"
   flag --input -i type=string default="" usage="Read JSONL from a specific file"
+  flag --rejects type=string default="" usage="With --skip-invalid, save the skipped lines verbatim to this file for repair (replaced on each run)"
+  flag --skip-invalid type=bool default="false" usage="Import the valid records and skip (and report) those that fail validation, instead of importing nothing"
 
 bd info
   use: "info"
