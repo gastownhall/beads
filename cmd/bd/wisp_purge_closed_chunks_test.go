@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -396,4 +398,209 @@ func TestWispPurgeClosedJSONReportsPartialProgress(t *testing.T) {
 	if got, _ := obj["hint"].(string); !bytes.Contains([]byte(got), []byte("bd mol wisp gc --closed --force")) {
 		t.Errorf("hint = %q, want the rerun command", got)
 	}
+}
+
+// wispPurgeProxiedProvider is the proxied route's unit-of-work provider. Every
+// NewUOW opens a unit of work; the closed-wisp scan reads through one, and
+// each deletion is one more. Only a unit of work that commits applies its
+// deletions, so an aborted transaction leaves no rows gone and no counts.
+type wispPurgeProxiedProvider struct {
+	closed  []string
+	deleted map[string]bool
+	// units is every unit of work opened, in order.
+	units []*wispPurgeProxiedUOW
+	// fail, when it returns an error, refuses a DeleteIssues call.
+	fail func(ids []string) error
+}
+
+func (p *wispPurgeProxiedProvider) NewUOW(context.Context) (uow.UnitOfWork, error) {
+	u := &wispPurgeProxiedUOW{p: p}
+	p.units = append(p.units, u)
+	return u, nil
+}
+
+func (p *wispPurgeProxiedProvider) Close(context.Context) error { return nil }
+
+// deletionUnits is the units of work that asked to delete, in order.
+func (p *wispPurgeProxiedProvider) deletionUnits() []*wispPurgeProxiedUOW {
+	var out []*wispPurgeProxiedUOW
+	for _, u := range p.units {
+		if u.params != nil {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+type wispPurgeProxiedUOW struct {
+	uow.UnitOfWork
+	p         *wispPurgeProxiedProvider
+	params    *domain.DeleteIssuesParams
+	committed bool
+	message   string
+}
+
+func (u *wispPurgeProxiedUOW) Close(context.Context) {}
+
+func (u *wispPurgeProxiedUOW) Commit(_ context.Context, message string) error {
+	u.committed, u.message = true, message
+	if u.params != nil {
+		for _, id := range u.params.IDs {
+			u.p.deleted[id] = true
+		}
+	}
+	return nil
+}
+
+func (u *wispPurgeProxiedUOW) IssueUseCase() domain.IssueUseCase {
+	return wispPurgeProxiedIssues{u: u}
+}
+
+func (u *wispPurgeProxiedUOW) ConfigUseCase() domain.ConfigUseCase {
+	return wispPurgeProxiedConfig{}
+}
+
+type wispPurgeProxiedIssues struct {
+	domain.IssueUseCase
+	u *wispPurgeProxiedUOW
+}
+
+func (s wispPurgeProxiedIssues) SearchIssues(_ context.Context, _ string, filter types.IssueFilter) (domain.SearchPage, error) {
+	var page domain.SearchPage
+	for _, id := range s.u.p.closed {
+		if s.u.p.deleted[id] {
+			continue
+		}
+		if filter.Limit > 0 && len(page.Items) == filter.Limit {
+			page.HasMore = true
+			break
+		}
+		page.Items = append(page.Items, &types.Issue{ID: id, Status: types.StatusClosed, Ephemeral: true, IssueType: types.TypeTask})
+	}
+	return page, nil
+}
+
+func (s wispPurgeProxiedIssues) DeleteIssues(_ context.Context, params domain.DeleteIssuesParams, _ string) (domain.DeleteIssuesResult, error) {
+	s.u.params = &params
+	if s.u.p.fail != nil {
+		if err := s.u.p.fail(params.IDs); err != nil {
+			return domain.DeleteIssuesResult{}, err
+		}
+	}
+	return domain.DeleteIssuesResult{
+		DeletedCount:      len(params.IDs),
+		DependenciesCount: len(params.IDs),
+		LabelsCount:       2 * len(params.IDs),
+		EventsCount:       3 * len(params.IDs),
+		ReferencesUpdated: 1,
+	}, nil
+}
+
+type wispPurgeProxiedConfig struct {
+	domain.ConfigUseCase
+}
+
+func (wispPurgeProxiedConfig) IsInfraTypeCtx(_ context.Context, t types.IssueType) (bool, error) {
+	return t == "agent", nil
+}
+
+// useWispPurgeProxied installs a proxied provider holding n closed wisps.
+func useWispPurgeProxied(t *testing.T, n int) *wispPurgeProxiedProvider {
+	t.Helper()
+	ensureCleanGlobalState(t)
+	saveAndRestoreGlobals(t)
+	t.Setenv("BEADS_DIR", t.TempDir())
+
+	oldProvider, oldJSON, oldQuiet, oldActor := uowProvider, jsonOutput, quietFlag, actor
+	t.Cleanup(func() {
+		uowProvider, jsonOutput, quietFlag, actor = oldProvider, oldJSON, oldQuiet, oldActor
+	})
+	p := &wispPurgeProxiedProvider{closed: wispPurgeIDs(n), deleted: map[string]bool{}}
+	uowProvider, jsonOutput, quietFlag, actor = p, false, false, "test"
+	return p
+}
+
+// TestWispPurgeClosedProxiedBoundsEachUnitOfWork pins the proxied route's
+// half of bd-d2zqqc: every deletion unit of work carries at most 200 of the
+// selected ids, uncascaded, and when a later unit fails the ones that
+// committed before it stay deleted and stay counted in the one JSON answer.
+func TestWispPurgeClosedProxiedBoundsEachUnitOfWork(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		p := useWispPurgeProxied(t, 450)
+		jsonOutput = true
+
+		stdout, stderr, err := captureWispGC(t, func() error {
+			return runWispPurgeClosedProxiedServer(context.Background(), false, true, nil)
+		})
+		if err != nil {
+			t.Fatalf("runWispPurgeClosedProxiedServer: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		units := p.deletionUnits()
+		var sizes []int
+		var sent []string
+		for i, u := range units {
+			sizes = append(sizes, len(u.params.IDs))
+			sent = append(sent, u.params.IDs...)
+			if u.params.Cascade || !u.params.UpdateTextReferences || !u.committed {
+				t.Errorf("unit %d: Cascade %v UpdateTextReferences %v committed %v, want uncascaded, rewriting references, committed",
+					i, u.params.Cascade, u.params.UpdateTextReferences, u.committed)
+			}
+		}
+		if want := []int{200, 200, 50}; !slices.Equal(sizes, want) {
+			t.Fatalf("deletion unit sizes = %v, want %v", sizes, want)
+		}
+		if !slices.Equal(sent, p.closed) {
+			t.Errorf("deletion units did not carry the selection once each in selection order")
+		}
+		obj := decodeSingleJSONObject(t, stdout)
+		if got := obj["deleted_count"]; got != float64(450) {
+			t.Errorf("deleted_count = %v, want 450", got)
+		}
+		if got := obj["references_updated"]; got != float64(3) {
+			t.Errorf("references_updated = %v, want 3 (one per unit, summed)", got)
+		}
+	})
+
+	t.Run("later unit fails", func(t *testing.T) {
+		p := useWispPurgeProxied(t, 450)
+		jsonOutput = true
+		boom := fmt.Errorf("injected deletion failure")
+		last := p.closed[449]
+		p.fail = func(ids []string) error {
+			if slices.Contains(ids, last) {
+				return boom
+			}
+			return nil
+		}
+
+		stdout, _, err := captureWispGC(t, func() error {
+			return runWispPurgeClosedProxiedServer(context.Background(), false, true, nil)
+		})
+		if err == nil || !isReportedExit(err) {
+			t.Fatalf("error = %v, want an already-reported nonzero exit\nstdout:\n%s", err, stdout)
+		}
+		units := p.deletionUnits()
+		if len(units) != 3 {
+			t.Fatalf("opened %d deletion units, want 3 (none after the failed one)", len(units))
+		}
+		if units[2].committed {
+			t.Error("the failed unit of work committed")
+		}
+		if len(p.deleted) != 400 {
+			t.Errorf("%d wisps deleted, want the 400 of the two committed units", len(p.deleted))
+		}
+		obj := decodeSingleJSONObject(t, stdout)
+		if got := obj["deleted_count"]; got != float64(400) {
+			t.Errorf("deleted_count = %v, want 400 (the failed unit's counts are not published)", got)
+		}
+		if got := obj["remaining_count"]; got != float64(50) {
+			t.Errorf("remaining_count = %v, want 50", got)
+		}
+		if got, _ := obj["error"].(string); !bytes.Contains([]byte(got), []byte(boom.Error())) {
+			t.Errorf("error = %q, want the cause", got)
+		}
+		if _, ok := obj["deleted_ids"]; ok {
+			t.Error("proxied answer gained deleted_ids, which that route has never printed")
+		}
+	})
 }
