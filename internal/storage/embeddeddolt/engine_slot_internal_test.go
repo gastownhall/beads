@@ -5,6 +5,7 @@ package embeddeddolt
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync/atomic"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -159,6 +161,128 @@ func TestEmbeddedEngineReusedAcrossTransactions(t *testing.T) {
 
 	if opens := counter.opens.Load(); opens != 1 {
 		t.Fatalf("engine opened %d times across the store's operations, want 1", opens)
+	}
+	if closes := counter.closes.Load(); closes != 0 {
+		t.Fatalf("engine disposed %d times while the store is open, want 0", closes)
+	}
+}
+
+// TestEmbeddedEngineSerializesOperations pins AC-2 of gastownhall/beads#5397:
+// the cached engine is served one operation at a time. The base's
+// engine-open exclusion already serialized operations; the slot must not
+// regress that when the engine is now shared. Two contracts:
+//
+//   - an operation paused mid-body (a transaction between statements, or a
+//     withDBConn between two stored procedures) keeps the slot for its whole
+//     callback, so a queued operation cannot touch the engine in the meantime;
+//   - a waiter whose context is canceled while queued returns its context
+//     error without opening the engine or running any SQL.
+//
+// The not-entered bounds are one-sided: on the cached engine a queued read
+// finishes in single-digit milliseconds, so 50ms without completion can only
+// mean it never entered.
+func TestEmbeddedEngineSerializesOperations(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := context.Background()
+	store, counter := engineTestStore(t, "engine_serialize", time.Hour)
+	if err := store.SetConfig(ctx, "issue_prefix", "es"); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if err := store.CreateIssue(ctx, &types.Issue{ID: "es-1", Title: "es-1", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if opens := counter.opens.Load(); opens != 1 {
+		t.Fatalf("engine opens after seed = %d, want 1", opens)
+	}
+
+	// Phase 1: a transaction paused between statements holds the slot across
+	// the pause; the queued search cannot enter.
+	paused := make(chan struct{})
+	resume := make(chan struct{})
+	txResult := make(chan error, 1)
+	go func() {
+		txResult <- store.withConn(ctx, false, func(tx *sql.Tx) error {
+			var one int
+			if err := tx.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
+				return err
+			}
+			paused <- struct{}{}
+			<-resume
+			return tx.QueryRowContext(ctx, "SELECT 1").Scan(&one)
+		})
+	}()
+	<-paused
+	searchResult := make(chan error, 1)
+	go func() {
+		issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+		if err == nil && len(issues) != 1 {
+			err = fmt.Errorf("found %d issues, want 1", len(issues))
+		}
+		searchResult <- err
+	}()
+	select {
+	case err := <-searchResult:
+		t.Fatalf("queued search finished while a transaction held the engine: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(resume)
+	if err := <-txResult; err != nil {
+		t.Fatalf("paused transaction: %v", err)
+	}
+	if err := <-searchResult; err != nil {
+		t.Fatalf("queued search after release: %v", err)
+	}
+
+	// Phase 2: a withDBConn paused between statements holds the slot the same
+	// way — the whole-callback hold is what a multi-statement sequence needs.
+	dbPaused := make(chan struct{})
+	dbResume := make(chan struct{})
+	dbResult := make(chan error, 1)
+	go func() {
+		dbResult <- store.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+			var one int
+			if err := db.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
+				return err
+			}
+			dbPaused <- struct{}{}
+			<-dbResume
+			return db.QueryRowContext(ctx, "SELECT 1").Scan(&one)
+		})
+	}()
+	<-dbPaused
+	blocked := make(chan error, 1)
+	go func() {
+		issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+		if err == nil && len(issues) != 1 {
+			err = fmt.Errorf("found %d issues, want 1", len(issues))
+		}
+		blocked <- err
+	}()
+	select {
+	case err := <-blocked:
+		t.Fatalf("queued search finished while a withDBConn held the engine: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	// While the slot is still held: a waiter canceled in the queue returns
+	// its context error without opening the engine (opens stays 1).
+	cancelCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
+	defer cancel()
+	if _, err := store.GetIssue(cancelCtx, "es-1"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("canceled waiter error = %v, want context.DeadlineExceeded", err)
+	}
+	if opens := counter.opens.Load(); opens != 1 {
+		t.Fatalf("engine opens after canceled waiter = %d, want 1", opens)
+	}
+	close(dbResume)
+	if err := <-dbResult; err != nil {
+		t.Fatalf("paused withDBConn: %v", err)
+	}
+	if err := <-blocked; err != nil {
+		t.Fatalf("queued search after release: %v", err)
+	}
+
+	if opens := counter.opens.Load(); opens != 1 {
+		t.Fatalf("engine opens after serial phases = %d, want 1", opens)
 	}
 	if closes := counter.closes.Load(); closes != 0 {
 		t.Fatalf("engine disposed %d times while the store is open, want 0", closes)
