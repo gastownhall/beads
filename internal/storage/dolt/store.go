@@ -2493,8 +2493,14 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		breaker.RecordSuccess()
 	}
 
+	// Server identity gate (GH#4637): resolve eligibility now, after the
+	// socket fallback and any auto-start retarget have fixed the endpoint,
+	// so the gate verifies exactly the server this open will use. A nil
+	// expectation exempts the open entirely.
+	serverIdentity := serverIdentityExpectation(cfg, resolvedBeadsDir)
+
 	// Server mode: connect via MySQL protocol to dolt sql-server
-	db, connStr, dbFacts, err := openServerConnection(ctx, cfg)
+	db, connStr, dbFacts, err := openServerConnection(ctx, cfg, serverIdentity)
 	if err != nil {
 		return nil, err
 	}
@@ -3239,7 +3245,12 @@ func requireServerDoltVersion(ctx context.Context, q doltversion.RowQuerier, cfg
 // openServerConnection connects to (and if needed creates) the target database
 // on a dolt sql-server via MySQL protocol. See serverConnFacts for what the
 // returned facts mean and why they are not a single bool.
-func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, serverConnFacts, error) {
+//
+// expect is the server-identity expectation for a managed endpoint, or nil
+// for an exempt one; it is verified after the version metadata and before any
+// discovery, database creation or project statement, on each distinct pool
+// this open uses (GH#4637). A refusal fails the open terminally.
+func openServerConnection(ctx context.Context, cfg *Config, expect *doltserver.ServerIdentityExpectation) (*sql.DB, string, serverConnFacts, error) {
 	connStr := buildServerDSN(cfg, cfg.Database)
 
 	db, err := sql.Open("mysql", connStr)
@@ -3339,6 +3350,15 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 		if err := requireServerDoltVersion(ctx, db, cfg); err != nil {
 			return nil, "", serverConnFacts{}, err
 		}
+		// Verify the answering server's identity before this pool is handed
+		// to the caller: a successful connect to the configured endpoint is
+		// not proof the server is bd's for this data root (GH#4637). The
+		// handshake and version metadata above may precede verification; the
+		// discovery and project statements the caller runs through this pool
+		// may not.
+		if err := verifyOpenServerIdentity(ctx, db, expect); err != nil {
+			return nil, "", serverConnFacts{}, err
+		}
 		connReady = true
 		return db, connStr, serverConnFacts{alreadyExisted: true}, nil
 	}
@@ -3363,6 +3383,13 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 
 	// Refuse an old server before this connection can CREATE DATABASE on it.
 	if err := requireServerDoltVersion(ctx, initDB, cfg); err != nil {
+		return nil, "", serverConnFacts{}, err
+	}
+
+	// Verify the answering server's identity on this admin pool before it
+	// probes or creates anything (GH#4637): SHOW DATABASES is discovery, and
+	// CREATE DATABASE on a foreign server is a write to the wrong server.
+	if err := verifyOpenServerIdentity(ctx, initDB, expect); err != nil {
 		return nil, "", serverConnFacts{}, err
 	}
 
@@ -3451,6 +3478,12 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 
 	var bootstrapHeal *schema.FreshBootstrapHealCapability
 	if created {
+		// The project pool is a distinct set of connections from the admin
+		// pool verified above; verify it too before bootstrap-heal capture or
+		// newServerMode take it over (GH#4637).
+		if err := verifyOpenServerIdentity(ctx, db, expect); err != nil {
+			return nil, "", serverConnFacts{}, err
+		}
 		conn, connErr := db.Conn(ctx)
 		if connErr != nil {
 			return nil, "", serverConnFacts{}, fmt.Errorf("capture fresh database identity: pin connection: %w", connErr)

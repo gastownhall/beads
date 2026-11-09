@@ -8,6 +8,7 @@ go_library(
         "doltserver_windows.go",
         "endpoint.go",
         "gc_config.go",
+        "identity.go",
         "listenerowner_darwin.go",
         "listenerowner_linux.go",
         "listenerowner_other.go",
