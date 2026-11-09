@@ -1069,9 +1069,11 @@ type wispPurgeChunk struct {
 }
 
 // wispPurgeOutcome sums the chunks a forced closed purge committed. confirmed
-// names the selected ids whose request committed.
+// names the selected ids whose request committed; err is the failure that
+// stopped the purge before the rest of the selection, nil when none did.
 type wispPurgeOutcome struct {
 	selected          int
+	err               error
 	confirmed         []string
 	deletedIDs        []string
 	deleted           int
@@ -1083,13 +1085,18 @@ type wispPurgeOutcome struct {
 }
 
 // runWispPurgeChunks sends ids to deleteChunk in sequential chunks of
-// wispPurgeChunkSize, in selection order, and stops at the first error.
-func runWispPurgeChunks(ctx context.Context, ids []string, deleteChunk func(context.Context, []string) (wispPurgeChunk, error)) (wispPurgeOutcome, error) {
+// wispPurgeChunkSize, in selection order, and stops at the first error. The
+// chunks committed before it stay committed and stay counted: a later failure
+// no longer takes every deletion of the run with it, and a rerun reselects
+// whatever is still there. No chunk is retried here; retrying a transaction is
+// the role's business.
+func runWispPurgeChunks(ctx context.Context, ids []string, deleteChunk func(context.Context, []string) (wispPurgeChunk, error)) wispPurgeOutcome {
 	out := wispPurgeOutcome{selected: len(ids), confirmed: []string{}, deletedIDs: []string{}, orphaned: []string{}}
 	for chunk := range slices.Chunk(ids, wispPurgeChunkSize) {
 		res, err := deleteChunk(ctx, chunk)
 		if err != nil {
-			return out, err
+			out.err = err
+			break
 		}
 		out.confirmed = append(out.confirmed, chunk...)
 		out.deletedIDs = append(out.deletedIDs, res.deletedIDs...)
@@ -1100,8 +1107,16 @@ func runWispPurgeChunks(ctx context.Context, ids []string, deleteChunk func(cont
 		out.referencesUpdated += res.referencesUpdated
 		out.orphaned = append(out.orphaned, res.orphaned...)
 	}
-	return out, nil
+	return out
 }
+
+// remaining is how many selected ids no committed chunk confirmed.
+func (o wispPurgeOutcome) remaining() int {
+	return o.selected - len(o.confirmed)
+}
+
+// wispPurgeRerunHint is how a stopped purge tells its caller to continue.
+const wispPurgeRerunHint = "Rerun 'bd mol wisp gc --closed --force' to continue: it reselects the closed wisps that remain."
 
 // purgeClosedWispsDirect deletes ids, which this store's own scan just
 // selected, through its deletion role. The ids go to the role as they are: the
@@ -1139,12 +1154,16 @@ func purgeClosedWispsDirect(ctx context.Context, ids []string) (wispPurgeOutcome
 			referencesUpdated: res.ReferencesUpdated,
 			orphaned:          res.Orphaned,
 		}, nil
-	})
+	}), nil
 }
 
 // renderWispPurgeOutcome prints a forced closed purge's result with the keys
 // each route has always printed; withDeletedIDs adds the direct route's
-// deleted_ids.
+// deleted_ids. A purge a failure stopped prints the same summary of what its
+// committed chunks deleted, then the cause and the rerun hint, and returns an
+// already-reported exit: under --json all of it is one stdout object
+// (remaining_count, error and hint beside the success keys), so a caller that
+// reads one JSON value still gets the progress.
 func renderWispPurgeOutcome(out wispPurgeOutcome, withDeletedIDs bool) error {
 	if jsonOutput {
 		answer := map[string]interface{}{
@@ -1159,9 +1178,24 @@ func renderWispPurgeOutcome(out wispPurgeOutcome, withDeletedIDs bool) error {
 		if withDeletedIDs {
 			answer["deleted_ids"] = out.deletedIDs
 		}
-		return outputJSON(answer)
+		if out.err != nil {
+			answer["remaining_count"] = out.remaining()
+			answer["error"] = out.err.Error()
+			answer["hint"] = wispPurgeRerunHint
+		}
+		if err := outputJSON(answer); err != nil {
+			return err
+		}
+		if out.err != nil {
+			return SilentExit()
+		}
+		return nil
 	}
-	fmt.Printf("%s Deleted %d issue(s)\n", ui.RenderPass("✓"), out.deleted)
+	mark := ui.RenderPass("✓")
+	if out.err != nil {
+		mark = ui.RenderWarn("⚠")
+	}
+	fmt.Printf("%s Deleted %d issue(s)\n", mark, out.deleted)
 	fmt.Printf("  Removed %d dependency link(s)\n", out.dependencies)
 	fmt.Printf("  Removed %d label(s)\n", out.labels)
 	fmt.Printf("  Removed %d event(s)\n", out.events)
@@ -1169,6 +1203,13 @@ func renderWispPurgeOutcome(out wispPurgeOutcome, withDeletedIDs bool) error {
 	if len(out.orphaned) > 0 {
 		fmt.Printf("  %s Orphaned %d issue(s): %s\n",
 			ui.RenderWarn("⚠"), len(out.orphaned), strings.Join(out.orphaned, ", "))
+	}
+	if out.err != nil {
+		// The counts above are what committed chunks confirmed. The failed
+		// chunk is not claimed either way: an error at a commit boundary does
+		// not prove nothing was written, which is why the hint reselects.
+		return HandleErrorWithHint(fmt.Sprintf("wisp gc --closed stopped after deleting %d of %d selected wisp(s); %d not confirmed deleted: %v",
+			len(out.confirmed), out.selected, out.remaining(), out.err), wispPurgeRerunHint)
 	}
 	return nil
 }
