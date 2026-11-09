@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -33,7 +34,8 @@ const (
 	commandTreeGoldenPath = "../../cmd/bd/testdata/command_tree/tree.golden"
 	// frontDoorParts is how many TestE2E_ConnectFrontDoorMatrixPart<k> tests
 	// split the cases. Changing it means declaring or deleting Part tests in
-	// e2e_connect_front_door_test.go (frontDoorPartNameErr checks).
+	// e2e_connect_front_door_test.go and listing them in frontDoorPartTests
+	// (frontDoorPartNameErr and frontDoorPartsDeclaredErr check).
 	frontDoorParts = 4
 	// maxUnrunPendingRulings is the number of pending-ruling rows that run no
 	// case (a tracker's network, a TTY). It may only shrink: to give such a
@@ -329,7 +331,7 @@ func frontDoorFormProblems(f *frontDoorFile, ledger []encode.Row, maxUnrun int) 
 				if k.Compare != "" || len(k.IgnoreFields) > 0 || k.ExpectStdout != "" || len(k.Verify) > 0 || k.Observed != nil || k.Ruling != "" {
 					add(k.ID, "refuses takes no compare, ignore_fields, expect_stdout, verify, observed or ruling")
 				}
-				if strings.Contains(k.Words, noShapeWords) && !contains(k.Ledger, noShapeRow) {
+				if strings.Contains(k.Words, noShapeWords) && !slices.Contains(k.Ledger, noShapeRow) {
 					add(k.ID, "a raw SearchIssues refusal cites ledger row %s", noShapeRow)
 				}
 			case classPendingRuling:
@@ -390,7 +392,7 @@ func frontDoorFormProblems(f *frontDoorFile, ledger []encode.Row, maxUnrun int) 
 		}
 		pinned := false
 		for _, k := range cited[r.ID] {
-			if r.Flag == "" || contains(k.Args, r.Flag) {
+			if r.Flag == "" || slices.Contains(k.Args, r.Flag) {
 				pinned = true
 			}
 		}
@@ -405,15 +407,6 @@ func frontDoorFormProblems(f *frontDoorFile, ledger []encode.Row, maxUnrun int) 
 		out = append(out, fmt.Sprintf("%s: %d pending-ruling rows run no case, fewer than maxUnrunPendingRulings (%d): lower the constant to %d so the count cannot grow back", connectFrontDoorPath, unrun, maxUnrun, unrun))
 	}
 	return out
-}
-
-func contains(xs []string, x string) bool {
-	for _, s := range xs {
-		if s == x {
-			return true
-		}
-	}
-	return false
 }
 
 // frontDoorRuns flattens the cases in file order.
@@ -449,8 +442,9 @@ func frontDoorPart(runs []frontDoorRun, part, parts int) []frontDoorRun {
 var frontDoorPartNameRe = regexp.MustCompile(`^TestE2E_ConnectFrontDoorMatrixPart([1-9][0-9]*)$`)
 
 // frontDoorPartNameErr checks that the test running part k is named for it
-// and that k is one of frontDoorParts, so a Part test added or dropped
-// without changing the constant fails instead of skipping or doubling cases.
+// and that k is one of frontDoorParts, so a Part test added without raising
+// the constant fails instead of doubling cases. The other direction (the
+// constant raised, or a Part test dropped) is frontDoorPartsDeclaredErr's.
 func frontDoorPartNameErr(name string, part int) error {
 	m := frontDoorPartNameRe.FindStringSubmatch(name)
 	if m == nil || m[1] != fmt.Sprint(part) {
@@ -458,6 +452,21 @@ func frontDoorPartNameErr(name string, part int) error {
 	}
 	if part < 1 || part > frontDoorParts {
 		return fmt.Errorf("%s runs part %d, but frontDoorParts is %d: raise the constant with the new Part test", name, part, frontDoorParts)
+	}
+	return nil
+}
+
+// frontDoorPartsDeclaredErr checks the declared Part tests (their function
+// names, in order) are exactly Part1..frontDoorParts, so raising the constant
+// without declaring the new Part, or dropping one, cannot silently leave a
+// part's cases unrun.
+func frontDoorPartsDeclaredErr(names []string) error {
+	var want []string
+	for k := 1; k <= frontDoorParts; k++ {
+		want = append(want, fmt.Sprintf("TestE2E_ConnectFrontDoorMatrixPart%d", k))
+	}
+	if !slices.Equal(names, want) {
+		return fmt.Errorf("frontDoorPartTests lists %q, but frontDoorParts is %d, which needs %q: declare (or delete) Part tests to match the constant and list them all", names, frontDoorParts, want)
 	}
 	return nil
 }
@@ -532,11 +541,24 @@ func TestConnectFrontDoorClassifiesEveryCommand(t *testing.T) {
 				t.Errorf("case %s runs in %d parts, want exactly 1", r.c.ID, seen[r.c.ID])
 			}
 		}
-		if err := frontDoorPartNameErr("TestE2E_ConnectFrontDoorMatrixPart9", frontDoorParts+1); err == nil {
+		if err := frontDoorPartNameErr(fmt.Sprintf("TestE2E_ConnectFrontDoorMatrixPart%d", frontDoorParts+1), frontDoorParts+1); err == nil {
 			t.Errorf("frontDoorPartNameErr accepts a part beyond frontDoorParts")
 		}
 		if err := frontDoorPartNameErr("TestE2E_ConnectFrontDoorMatrixPart2", 1); err == nil {
 			t.Errorf("frontDoorPartNameErr accepts a test named for another part")
+		}
+		var all []string
+		for k := 1; k <= frontDoorParts; k++ {
+			all = append(all, fmt.Sprintf("TestE2E_ConnectFrontDoorMatrixPart%d", k))
+		}
+		if err := frontDoorPartsDeclaredErr(all); err != nil {
+			t.Errorf("frontDoorPartsDeclaredErr rejects Part1..frontDoorParts: %v", err)
+		}
+		if err := frontDoorPartsDeclaredErr(all[:len(all)-1]); err == nil {
+			t.Errorf("frontDoorPartsDeclaredErr accepts one Part test fewer than frontDoorParts")
+		}
+		if err := frontDoorPartsDeclaredErr(append(all[:len(all):len(all)], fmt.Sprintf("TestE2E_ConnectFrontDoorMatrixPart%d", frontDoorParts+1))); err == nil {
+			t.Errorf("frontDoorPartsDeclaredErr accepts one Part test more than frontDoorParts")
 		}
 	})
 }
@@ -566,6 +588,12 @@ func testFrontDoorRulesFire(t *testing.T) {
 	}
 	twoRows := []string{"bd", "bd admin cleanup"}
 	caseOf := func(f *frontDoorFile) *frontDoorCase { return &f.Commands[1].Cases[0] }
+	pending := func(f *frontDoorFile) *frontDoorCase {
+		k := caseOf(f)
+		k.Class, k.Exit, k.Words, k.LedgerDrift = classPendingRuling, nil, "", "x"
+		k.Ruling, k.Observed = "D9", &frontDoorObserved{Exit: &zero, Writes: "none"}
+		return k
+	}
 	for _, tc := range []struct {
 		name string
 		// mut breaks f and returns the runnable list for a coverage check, or
@@ -613,6 +641,32 @@ func testFrontDoorRulesFire(t *testing.T) {
 			f.Commands = append(f.Commands, frontDoorCommand{Command: "bd z", Class: classPendingRuling, Reason: "tty"})
 			return nil
 		}, "1 pending-ruling rows run no case, more than maxUnrunPendingRulings (0)"},
+		{"a pending ruling that passes", func(f *frontDoorFile) []string { pending(f); return nil }, ""},
+		{"observed with neither exit nor listens", func(f *frontDoorFile) []string { pending(f).Observed.Exit = nil; return nil }, "exactly one of exit and listens"},
+		{"observed with both exit and listens", func(f *frontDoorFile) []string { pending(f).Observed.Listens = true; return nil }, "exactly one of exit and listens"},
+		{"observed writes something else", func(f *frontDoorFile) []string { pending(f).Observed.Writes = "remote"; return nil }, `observed writes must be none or local, not "remote"`},
+		{"a pending ruling without its ruling", func(f *frontDoorFile) []string { pending(f).Ruling = ""; return nil }, "pending-ruling needs ruling and observed"},
+		{"a pending ruling with an exit", func(f *frontDoorFile) []string { pending(f).Exit = &one; return nil }, "pending-ruling pins its behavior in observed"},
+		{"a works case with words", func(f *frontDoorFile) []string {
+			k := caseOf(f)
+			k.Class, k.Exit, k.LedgerDrift = classWorks, nil, "x"
+			return nil
+		}, "works takes no words"},
+		{"a refusal with a compare mode", func(f *frontDoorFile) []string { caseOf(f).Compare = "text"; return nil }, "refuses takes no compare"},
+		{"an unknown compare mode", func(f *frontDoorFile) []string {
+			k := caseOf(f)
+			k.Class, k.Exit, k.Words, k.LedgerDrift, k.Compare = classWorks, nil, "", "x", "yaml"
+			return nil
+		}, `compare "yaml" is not json, text, lines or exit`},
+		{"an unknown case class", func(f *frontDoorFile) []string { caseOf(f).Class = "maybe"; return nil }, `class "maybe": a case is works, refuses or pending-ruling`},
+		{"a malformed native_fix", func(f *frontDoorFile) []string { caseOf(f).NativeFix = []string{"fix-1"}; return nil }, `native_fix "fix-1" is not a native-fix decision id`},
+		{"env without a value", func(f *frontDoorFile) []string { caseOf(f).Env = []string{"BD_X"}; return nil }, `env "BD_X" is not KEY=VALUE`},
+		{"a case id that is not kebab-case", func(f *frontDoorFile) []string { caseOf(f).ID = "Case_1"; return nil }, `case id "Case_1" is not kebab-case`},
+		{"a bad regexp", func(f *frontDoorFile) []string { caseOf(f).Words = "("; return nil }, `regexp "(":`},
+		{"a row command not under bd", func(f *frontDoorFile) []string { f.Commands[0].Command = "git"; return nil }, `a row's command is a tree.golden path starting with "bd"`},
+		{"a row without cases or a valid class", func(f *frontDoorFile) []string { f.Commands[0].Class = classWorks; return nil }, `a row without cases must be class local-only or pending-ruling, not "works"`},
+		{"a row without cases or a reason", func(f *frontDoorFile) []string { f.Commands[0].Reason = " "; return nil }, "class local-only needs a reason"},
+		{"a row with cases and a class", func(f *frontDoorFile) []string { f.Commands[1].Class = classRefuses; return nil }, "a row with cases takes its classes from them"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := base()
@@ -635,6 +689,11 @@ func testFrontDoorRulesFire(t *testing.T) {
 			}
 			t.Errorf("the rule did not fire: want a problem containing %q, got %q", tc.want, got)
 		})
+	}
+
+	// The ratchet's other direction: fewer unrun rows than the constant.
+	if got, want := strings.Join(frontDoorFormProblems(base(), ledger, 1), "\n"), "0 pending-ruling rows run no case, fewer than maxUnrunPendingRulings (1)"; !strings.Contains(got, want) {
+		t.Errorf("the shrunk unrun ratchet did not fire: want a problem containing %q, got %q", want, got)
 	}
 
 	// The schema itself: an unknown field fails the load.

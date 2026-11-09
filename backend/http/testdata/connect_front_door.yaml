@@ -9,8 +9,13 @@
 # (embedded lane, e2e_connect_front_door_test.go) run every case.
 #
 # A row is one command path. It has cases, or a class and a reason:
-#   local-only      not run: the command never reaches the issue store through
-#                   the backend (help, local files, local processes).
+#   local-only      not run: the command reads and writes no issue-store data
+#                   through the backend (help, local files, local processes).
+#                   It may still open the store, which over connect is one
+#                   GET /v0/beads/context handshake; a reason that says "never
+#                   opens the issue store" means the command is exempt from
+#                   bd's store gate (noDbCommands or bd:skip_store), and one
+#                   that says "opens the store" names the handshake.
 #   pending-ruling  not run: the matrix cannot run it (a tracker's network, a
 #                   TTY). This count may only shrink (maxUnrunPendingRulings).
 # A case is one argv with one class:
@@ -23,8 +28,10 @@
 #   refuses         the served run exits `exit` (nonzero); its stderr, stdout
 #                   and the string members of any JSON object they carry match
 #                   `words` (and carry a JSON `code`, when one is given); and it
-#                   writes nothing: neither the server's store (HEAD and
-#                   working set) nor the workspace's .beads. The same argv on an
+#                   writes nothing: not the server's store (its HEAD, its
+#                   working-set status, and, by content, its config table and
+#                   its dolt_ignore'd wisps, which status cannot see) and not
+#                   the workspace's .beads. The same argv on an
 #                   embedded oracle exits `embedded_exit` (default 0), so a
 #                   refusal is the backend's and not a broken argv; a case whose
 #                   oracle exit would depend on other cases sets skip_embedded
@@ -130,7 +137,9 @@ files:
         {"key": "tbond2", "id": "e2e-tbond2", "title": "FD target bond2", "type": "molecule"},
         {"key": "tswarm", "id": "e2e-tswarm", "title": "FD target swarm", "type": "epic"},
         {"key": "tswarm.1", "id": "e2e-tswarm.1", "title": "FD target swarm.1", "type": "task", "parent_key": "tswarm"},
-        {"key": "tship", "id": "e2e-tship", "title": "FD target ship", "type": "task", "labels": ["export:fd-cap"]}
+        {"key": "tship", "id": "e2e-tship", "title": "FD target ship", "type": "task", "labels": ["export:fd-cap"]},
+        {"key": "thread", "id": "e2e-fdthread", "title": "FD thread root", "type": "task"},
+        {"key": "reply", "id": "e2e-fdreply", "title": "FD thread reply", "type": "task", "deps": [{"target": "thread", "type": "replies-to"}]}
       ]}
   - name: graph-extra.json
     content: |
@@ -234,10 +243,15 @@ commands:
         verify: [[show, e2e-tassign, '--json']]
   - command: bd audit label
     class: local-only
-    reason: labels an entry of the workspace-local .beads/interactions.jsonl audit sidecar; never writes the issue store
+    reason: 'opens the store (the context handshake), then labels an entry of the workspace-local .beads/interactions.jsonl audit sidecar; writes no the issue store'
   - command: bd audit record
-    class: local-only
-    reason: appends to the workspace-local .beads/interactions.jsonl audit sidecar; never writes the issue store
+    cases:
+      - id: audit-record
+        class: works
+        note: 'appends to the workspace-local .beads/interactions.jsonl audit sidecar; it opens the store (the context handshake) first'
+        env: [BD_AUDIT_ENABLED=1]
+        args: [audit, record, '--kind', tool_call, '--tool-name', fd-front-door, '--exit-code', '0']
+        compare: exit
   - command: bd backup init
     cases:
       - id: backup-init
@@ -355,8 +369,13 @@ commands:
         ignore_fields: [id]
         verify: [[comments, e2e-tcomments, '--json']]
   - command: bd comments list
-    class: local-only
-    reason: 'a stub that always exits 1 pointing at bd comments <issue-id>; never opens the issue store'
+    cases:
+      - id: comments-list
+        class: works
+        note: 'a stub that always exits 1 pointing at bd comments <issue-id>; it opens the store (the context handshake) first'
+        args: [comments, list]
+        exit: 1
+        compare: text
   - command: bd compact
     cases:
       - id: compact
@@ -378,10 +397,10 @@ commands:
     reason: prints a shell completion script; never opens the issue store
   - command: bd config apply
     class: local-only
-    reason: 'reconciles the local checkout (git hooks, Dolt remotes) with config.yaml; no issue-store state'
+    reason: 'opens the store (the context handshake), then reconciles the local checkout (git hooks, Dolt remotes) with config.yaml; no issue-store state'
   - command: bd config drift
     class: local-only
-    reason: 'inspects the local checkout (git hooks, Dolt remotes) against config.yaml; no issue-store state'
+    reason: 'opens the store (the context handshake), then inspects the local checkout (git hooks, Dolt remotes) against config.yaml; no issue-store state. Not a works case: its checks read how each workspace was attached, not the backend (the embedded twin reports missing git hooks and exits 1; the served workspace reports no git repository and exits 0)'
   - command: bd config get
     cases:
       - id: config-get
@@ -1043,8 +1062,12 @@ commands:
         embedded_exit: 1
         observed: {exit: 0, writes: local}
   - command: bd init-safety
-    class: local-only
-    reason: 'prints how bd init''s destructive flags work; never opens the issue store'
+    cases:
+      - id: init-safety
+        class: works
+        note: 'prints how bd init''s destructive flags work; it opens the store (the context handshake) first'
+        args: [init-safety]
+        compare: text
   - command: bd jira pull
     class: pending-ruling
     reason: 'tracker integration: it needs a configured Jira project and its network API, which no test lane has, so its behavior over bd connect is unexercised'
@@ -1204,7 +1227,7 @@ commands:
         skip_embedded: true
   - command: bd mail
     class: local-only
-    reason: runs the external mail program mail.delegate names; never the issue store
+    reason: 'opens the store (the context handshake), then runs the external mail program mail.delegate names; no issue-store state'
   - command: bd memories
     cases:
       - id: memories
@@ -1306,7 +1329,7 @@ commands:
         embedded_exit: 1
   - command: bd migrate hooks
     class: local-only
-    reason: 'plans or applies the local git hooks'' migration; no issue-store state'
+    reason: 'opens the store (the context handshake), then plans or applies the local git hooks'' migration; no issue-store state'
   - command: bd migrate issues
     class: pending-ruling
     reason: 'moves issues between two repositories'' stores (--from/--to), which needs a second workspace the matrix does not build'
@@ -1490,7 +1513,7 @@ commands:
         ignore_fields: [query_ms, total_ms]
   - command: bd preflight
     class: local-only
-    reason: 'the local checkout''s PR-readiness checklist; no issue-store state'
+    reason: 'opens the store (the context handshake), then runs the local checkout''s PR-readiness checklist; no issue-store state'
   - command: bd prime
     cases:
       - id: prime
@@ -1741,10 +1764,12 @@ commands:
         args: [show, e2e-fdalpha]
         compare: text
       - id: show-thread
-        class: works
+        class: pending-ruling
         ledger: [F-show-thread]
-        ledger_drift: F-show-thread says the flag refuses; it answers like an embedded workspace
-        args: [show, e2e-fdalpha, '--thread', '--json']
+        ledger_drift: F-show-thread says the flag refuses; it answers, with shallow reply rows
+        ruling: 'over connect --thread answers its reply rows shallow (no created_by, zeroed timestamps): findReplies reads GetDependentsWithMetadata, which the http backend answers from the shallow dependents projection; no native fix names it (D6 hydrates only --refs and --children)'
+        args: [show, e2e-fdthread, '--thread', '--json']
+        observed: {exit: 0, stdout: e2e-fdreply, stdout_absent: '(?s)"created_by".*"created_by"', writes: none}
       - id: show-refs
         class: pending-ruling
         native_fix: [D6]
@@ -1932,13 +1957,16 @@ commands:
         verify: [[show, e2e-tclaim, '--json']]
   - command: bd upgrade ack
     class: local-only
-    reason: 'the bd version this workspace last acknowledged, kept in the local metadata.json; no issue-store state'
+    reason: 'opens the store (the context handshake), then reads or writes the bd version this workspace last acknowledged, kept in the local metadata.json; no issue-store state'
   - command: bd upgrade review
     class: local-only
-    reason: 'the bd version this workspace last acknowledged, kept in the local metadata.json; no issue-store state'
+    reason: 'opens the store (the context handshake), then reads or writes the bd version this workspace last acknowledged, kept in the local metadata.json; no issue-store state'
   - command: bd upgrade status
-    class: local-only
-    reason: 'the bd version this workspace last acknowledged, kept in the local metadata.json; no issue-store state'
+    cases:
+      - id: upgrade-status
+        class: works
+        note: 'the bd version this workspace last acknowledged, kept in the local metadata.json; it opens the store (the context handshake) first'
+        args: [upgrade, status, '--json']
   - command: bd vc commit
     cases:
       - id: vc-commit

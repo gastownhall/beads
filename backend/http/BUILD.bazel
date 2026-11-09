@@ -79,6 +79,7 @@ go_test(
         "//internal/storage/issueops",
         "//internal/testutil/bazeltest",
         "//internal/testutil/legacyworkspace",
+        "//internal/types",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )

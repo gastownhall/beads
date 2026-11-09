@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -39,12 +40,32 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func TestE2E_ConnectFrontDoorMatrixPart1(t *testing.T) { testConnectFrontDoorMatrix(t, 1) }
 func TestE2E_ConnectFrontDoorMatrixPart2(t *testing.T) { testConnectFrontDoorMatrix(t, 2) }
 func TestE2E_ConnectFrontDoorMatrixPart3(t *testing.T) { testConnectFrontDoorMatrix(t, 3) }
 func TestE2E_ConnectFrontDoorMatrixPart4(t *testing.T) { testConnectFrontDoorMatrix(t, 4) }
+
+// frontDoorPartTests lists the Part tests above, in order. Every part checks
+// it against frontDoorParts (frontDoorPartsDeclaredErr) before the engine
+// gate, so raising the constant without declaring the new Part test, or
+// dropping a Part test, fails instead of silently not running its cases.
+// (A function, not a var: the Part tests call back into the check.)
+func frontDoorPartTests() []func(*testing.T) {
+	return []func(*testing.T){
+		TestE2E_ConnectFrontDoorMatrixPart1,
+		TestE2E_ConnectFrontDoorMatrixPart2,
+		TestE2E_ConnectFrontDoorMatrixPart3,
+		TestE2E_ConnectFrontDoorMatrixPart4,
+	}
+}
+
+func frontDoorFuncName(fn func(*testing.T)) string {
+	name := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
+	return name[strings.LastIndex(name, ".")+1:]
+}
 
 const (
 	// frontDoorBDTimeout bounds every bd run; a hung command reports exit -1.
@@ -221,6 +242,13 @@ func testConnectFrontDoorMatrix(t *testing.T, part int) {
 	if err := frontDoorPartNameErr(t.Name(), part); err != nil {
 		t.Fatal(err)
 	}
+	var names []string
+	for _, fn := range frontDoorPartTests() {
+		names = append(names, frontDoorFuncName(fn))
+	}
+	if err := frontDoorPartsDeclaredErr(names); err != nil {
+		t.Fatal(err)
+	}
 	skipUnlessEmbeddedDolt(t)
 	f := loadConnectFrontDoor(t)
 	runs := frontDoorPart(frontDoorRuns(f), part, frontDoorParts)
@@ -233,34 +261,44 @@ func testConnectFrontDoorMatrix(t *testing.T, part int) {
 	m.twin = newFrontDoorSide(t, "embedded twin")
 	m.oracle = newFrontDoorSide(t, "embedded oracle")
 
+	// The sides prepare concurrently; the first failure cancels the others,
+	// whose runs then die (exit -1), so only that first failure is reported.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	var (
+		firstMu  sync.Mutex
+		firstErr error
+	)
+	fail := func(err error) {
+		if err == nil {
+			return
+		}
+		firstMu.Lock()
+		defer firstMu.Unlock()
+		if firstErr == nil {
+			firstErr = err
+			cancel()
+		}
+	}
 	var wg sync.WaitGroup
-	errs := make([]error, 3)
-	for i, sd := range []*frontDoorSide{m.twin, m.oracle} {
+	for _, sd := range []*frontDoorSide{m.twin, m.oracle} {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if errs[i] = frontDoorPrepare(ctx, bin, f, sd, frontDoorInitArgs, true, true); errs[i] != nil {
-				cancel()
-			}
+			fail(frontDoorPrepare(ctx, bin, f, sd, frontDoorInitArgs, true, true))
 		}()
 	}
-	errs[2] = frontDoorPrepare(ctx, bin, f, m.served, frontDoorConnectArgs(m.proxy), true, false)
+	err := frontDoorPrepare(ctx, bin, f, m.served, frontDoorConnectArgs(m.proxy), true, false)
 	for _, kv := range f.SeedKV {
-		if errs[2] != nil {
+		if err != nil {
 			break
 		}
-		errs[2] = m.store.SetConfig(context.Background(), "kv."+kv.Key, kv.Value)
+		err = m.store.SetConfig(context.Background(), "kv."+kv.Key, kv.Value)
 	}
-	if errs[2] != nil {
-		cancel()
-	}
+	fail(err)
 	wg.Wait()
-	for _, err := range errs {
-		if err != nil && !errors.Is(err, context.Canceled) {
-			t.Fatalf("MATRIX BUG: part %d setup: %v", part, err)
-		}
+	if firstErr != nil {
+		t.Fatalf("MATRIX BUG: part %d setup: %v", part, firstErr)
 	}
 	setup := time.Since(start)
 
@@ -302,9 +340,14 @@ func testConnectFrontDoorMatrix(t *testing.T, part int) {
 		time.Since(start).Round(100*time.Millisecond), strings.Join(slowest, " "))
 }
 
-// frontDoorStoreState is the server store's HEAD (commit and root hashes)
-// and working-set status: what a write changes.
-type frontDoorStoreState struct{ head, status string }
+// frontDoorStoreState is what a write to the server's store changes: its
+// HEAD (commit and root hashes), its working-set status, and the contents of
+// the two places those miss. The config table (where kv and config writes
+// land) stays dirty for the whole part, since the server's own setup and
+// seed_kv never commit, so status alone cannot see a further uncommitted
+// write to it; and the wisp tables are dolt_ignore'd (migration 0019), so a
+// wisp write reaches neither HEAD nor status.
+type frontDoorStoreState struct{ head, status, config, wisps string }
 
 func frontDoorStoreStateOf(store *embeddeddolt.EmbeddedDoltStore) (frontDoorStoreState, error) {
 	ctx := context.Background()
@@ -316,11 +359,55 @@ func frontDoorStoreStateOf(store *embeddeddolt.EmbeddedDoltStore) (frontDoorStor
 	if err != nil {
 		return frontDoorStoreState{}, err
 	}
-	raw, err := json.Marshal(st)
+	status, err := json.Marshal(st)
 	if err != nil {
 		return frontDoorStoreState{}, err
 	}
-	return frontDoorStoreState{head: commit + "/" + root, status: string(raw)}, nil
+	cfg, err := store.GetAllConfig(ctx)
+	if err != nil {
+		return frontDoorStoreState{}, err
+	}
+	config, err := json.Marshal(cfg) // map keys marshal sorted
+	if err != nil {
+		return frontDoorStoreState{}, err
+	}
+	wisps, err := store.ListWisps(ctx, types.WispFilter{IncludeClosed: true})
+	if err != nil {
+		return frontDoorStoreState{}, err
+	}
+	ids := make([]string, 0, len(wisps))
+	for _, w := range wisps {
+		ids = append(ids, w.ID)
+	}
+	labels, err := store.GetLabelsForIssues(ctx, ids)
+	if err != nil {
+		return frontDoorStoreState{}, err
+	}
+	sort.Slice(wisps, func(i, j int) bool { return wisps[i].ID < wisps[j].ID })
+	wispState, err := json.Marshal(struct {
+		Issues []*types.Issue
+		Labels map[string][]string
+	}{wisps, labels})
+	if err != nil {
+		return frontDoorStoreState{}, err
+	}
+	return frontDoorStoreState{head: commit + "/" + root, status: string(status), config: string(config), wisps: string(wispState)}, nil
+}
+
+// frontDoorStoreDiff names what changed between two states; "" when nothing.
+func frontDoorStoreDiff(before, after frontDoorStoreState) string {
+	var out []string
+	for _, f := range []struct{ name, a, b string }{
+		{"HEAD", before.head, after.head},
+		{"status", before.status, after.status},
+		{"config", before.config, after.config},
+		{"wisps", before.wisps, after.wisps},
+	} {
+		if f.a != f.b {
+			out = append(out, fmt.Sprintf("%s %s -> %s", f.name, frontDoorClip(f.a, 1500), frontDoorClip(f.b, 1500)))
+		}
+	}
+	return strings.Join(out, "; ")
 }
 
 // frontDoorLocalVolatile is what a command may rewrite in .beads without
@@ -448,8 +535,8 @@ func (m *frontDoorMatrix) runCase(t *testing.T, r frontDoorRun) []string {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if after != before {
-			failf("the served run wrote the server's store (HEAD %s -> %s; status %s -> %s)", before.head, after.head, before.status, after.status)
+		if d := frontDoorStoreDiff(before, after); d != "" {
+			failf("the served run wrote the server's store: %s", d)
 		}
 		if d := frontDoorSnapshotDiff(beforeLocal, frontDoorLocalSnapshot(served.dir)); checkLocal && len(d) > 0 {
 			failf("the served run wrote the workspace's .beads: %v", d)
@@ -656,7 +743,10 @@ func frontDoorHasCode(r frontDoorResult, code string) bool {
 
 var (
 	frontDoorVolatileKey = regexp.MustCompile(`(^|_)at$|^revision$|^row_version$|^expected_revision$|^current_revision$`)
-	frontDoorTimestamp   = regexp.MustCompile(`\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?`)
+	// The time is optional: text renderings print bare dates ("Created:
+	// 2026-11-09"), and the sides are seeded seconds apart, possibly across
+	// midnight.
+	frontDoorTimestamp = regexp.MustCompile(`\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?`)
 )
 
 // frontDoorCompare is a works case's output parity under its compare mode;
