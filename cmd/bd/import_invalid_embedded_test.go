@@ -299,3 +299,52 @@ func TestEmbeddedImportInvalidStaleRowNotScreened(t *testing.T) {
 		})
 	}
 }
+
+func TestEmbeddedImportInvalidDryRun(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt import tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "imdr")
+	tmp := t.TempDir()
+	jsonlPath := filepath.Join(tmp, "import.jsonl")
+	writeImportLines(t, jsonlPath,
+		invalidImportLine(t, "imdr-aaa", "Valid A", "open"),
+		invalidImportLine(t, "imdr-bbb", "Invalid B", "verify"),
+	)
+	rejectsPath := filepath.Join(tmp, "rejects.jsonl")
+	const earlier = "an earlier run's rejects\n"
+	if err := os.WriteFile(rejectsPath, []byte(earlier), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("strict", func(t *testing.T) {
+		stdout, stderr, err := bdImportRun(t, bd, dir, "--dry-run", jsonlPath)
+		if err == nil || !strings.Contains(stdout+stderr, "line 2 (issue imdr-bbb)") {
+			t.Fatalf("strict dry run should fail naming line 2 (issue imdr-bbb); err %v, output:\n%s%s", err, stdout, stderr)
+		}
+	})
+
+	t.Run("skip_invalid", func(t *testing.T) {
+		stdout, stderr, err := bdImportRun(t, bd, dir, "--dry-run", "--skip-invalid", "--rejects", rejectsPath, "--json", jsonlPath)
+		if err != nil {
+			t.Fatalf("dry run --skip-invalid failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		var result importResultJSON
+		if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+			t.Fatalf("parse --json output: %v\n%s", err, stdout)
+		}
+		if !result.DryRun || result.Created != 1 || len(result.Rejected) != 1 || result.Rejected[0].Line != 2 || result.RejectsFile != "" {
+			t.Fatalf("dry run result = %+v; want 1 would-create, line 2 rejected, no rejects file", result)
+		}
+	})
+
+	if ids := listedIDs(t, bd, dir); len(ids) != 0 {
+		t.Fatalf("a dry run wrote issues %v", ids)
+	}
+	if got, _ := os.ReadFile(rejectsPath); string(got) != earlier {
+		t.Fatalf("a dry run rewrote the rejects file: %q", got)
+	}
+}

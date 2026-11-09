@@ -45,6 +45,7 @@
 100 10 TestEmbeddedCreateScalarAndRelationships
 100 10 TestEmbeddedImportInvalidRegisteredVocabulary
 
+100 11 TestEmbeddedImportInvalidDryRun
 100 11 TestEmbeddedKVConcurrent
 
 100 12 TestEmbeddedAutoImportFallback_ConflictSkip_SkipsRetiredRows
