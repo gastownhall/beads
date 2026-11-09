@@ -230,16 +230,13 @@ func captureWispGC(t *testing.T, fn func() error) (stdout, stderr string, err er
 }
 
 // decodeSingleJSONObject decodes the whole of out as exactly one JSON object:
-// a second object (an error envelope printed after the answer) fails.
+// a second object (an error envelope printed after the answer) or any stray
+// text around it fails.
 func decodeSingleJSONObject(t *testing.T, out string) map[string]interface{} {
 	t.Helper()
-	dec := json.NewDecoder(bytes.NewBufferString(out))
 	var obj map[string]interface{}
-	if err := dec.Decode(&obj); err != nil {
-		t.Fatalf("decoding stdout as one JSON object: %v\nstdout:\n%s", err, out)
-	}
-	if dec.More() {
-		t.Fatalf("stdout holds more than one JSON value:\n%s", out)
+	if err := json.Unmarshal([]byte(out), &obj); err != nil {
+		t.Fatalf("stdout is not exactly one JSON object: %v\nstdout:\n%s", err, out)
 	}
 	return obj
 }
@@ -409,53 +406,93 @@ func TestWispPurgeClosedCommitsBoundedChunks(t *testing.T) {
 			t.Errorf("stdout lacks %q:\n%s", want, stdout)
 		}
 	}
-	for _, want := range []string{"50", "context deadline exceeded", "bd mol wisp gc --closed --force"} {
+	for _, want := range []string{"50", "context deadline exceeded", "Rerun the same command"} {
 		if !bytes.Contains([]byte(stderr), []byte(want)) {
 			t.Errorf("stderr lacks %q:\n%s", want, stderr)
 		}
 	}
+	assertExportBookkeeping(t, s.closed[:400], s.closed[400:])
 }
 
 // TestWispPurgeClosedJSONReportsPartialProgress pins the --json half: a purge
 // stopped by a failed request prints exactly one JSON object on stdout, with
 // the success keys counting only the committed chunks plus remaining_count,
-// error and hint, and exits nonzero without a second error envelope.
+// error and hint, and exits nonzero without a second error envelope. A
+// missing-id refusal mid-run is diagnosed the same way: no retry, no shrink,
+// no phantom deletes.
 func TestWispPurgeClosedJSONReportsPartialProgress(t *testing.T) {
-	s := useWispPurgeStub(t, 450)
-	s.deleter.fail = failRequestContaining(s.closed[449], context.DeadlineExceeded)
-	jsonOutput = true
+	t.Run("injected deadline failure", func(t *testing.T) {
+		s := useWispPurgeStub(t, 450)
+		s.deleter.fail = failRequestContaining(s.closed[449], context.DeadlineExceeded)
+		jsonOutput = true
 
-	stdout, stderr, err := captureWispGC(t, func() error {
-		return runWispPurgeClosed(context.Background(), false, true, nil)
+		stdout, stderr, err := captureWispGC(t, func() error {
+			return runWispPurgeClosed(context.Background(), false, true, nil)
+		})
+		if err == nil {
+			t.Fatalf("runWispPurgeClosed succeeded, want a nonzero exit\nstdout:\n%s", stdout)
+		}
+		if !isReportedExit(err) {
+			t.Errorf("error = %v, want an already-reported exit (the caller must not print it again)", err)
+		}
+		if bytes.Contains([]byte(stderr), []byte("{")) {
+			t.Errorf("stderr carries a JSON value; the answer belongs in the one stdout object:\n%s", stderr)
+		}
+		obj := decodeSingleJSONObject(t, stdout)
+		if got := obj["deleted_count"]; got != float64(400) {
+			t.Errorf("deleted_count = %v, want 400", got)
+		}
+		if got, _ := obj["deleted"].([]interface{}); len(got) != 400 {
+			t.Errorf("deleted names %d ids, want 400", len(got))
+		}
+		if got, _ := obj["deleted_ids"].([]interface{}); len(got) != 400 {
+			t.Errorf("deleted_ids names %d ids, want 400", len(got))
+		}
+		if got := obj["remaining_count"]; got != float64(50) {
+			t.Errorf("remaining_count = %v, want 50", got)
+		}
+		if got, _ := obj["error"].(string); !bytes.Contains([]byte(got), []byte("context deadline exceeded")) {
+			t.Errorf("error = %q, want the cause", got)
+		}
+		if got, _ := obj["hint"].(string); got != wispPurgeRerunHint {
+			t.Errorf("hint = %q, want the same-command rerun guidance %q", got, wispPurgeRerunHint)
+		}
+		if _, ok := obj["dependencies_removed"].(float64); !ok {
+			t.Errorf("dependencies_removed missing from the partial-failure object: %v", obj)
+		}
+		assertExportBookkeeping(t, s.closed[:400], s.closed[400:])
 	})
-	if err == nil {
-		t.Fatalf("runWispPurgeClosed succeeded, want a nonzero exit\nstdout:\n%s", stdout)
-	}
-	if !isReportedExit(err) {
-		t.Errorf("error = %v, want an already-reported exit (the caller must not print it again)", err)
-	}
-	if bytes.Contains([]byte(stderr), []byte("{")) {
-		t.Errorf("stderr carries a JSON value; the answer belongs in the one stdout object:\n%s", stderr)
-	}
-	obj := decodeSingleJSONObject(t, stdout)
-	if got := obj["deleted_count"]; got != float64(400) {
-		t.Errorf("deleted_count = %v, want 400", got)
-	}
-	if got, _ := obj["deleted"].([]interface{}); len(got) != 400 {
-		t.Errorf("deleted names %d ids, want 400", len(got))
-	}
-	if got, _ := obj["deleted_ids"].([]interface{}); len(got) != 400 {
-		t.Errorf("deleted_ids names %d ids, want 400", len(got))
-	}
-	if got := obj["remaining_count"]; got != float64(50) {
-		t.Errorf("remaining_count = %v, want 50", got)
-	}
-	if got, _ := obj["error"].(string); !bytes.Contains([]byte(got), []byte("context deadline exceeded")) {
-		t.Errorf("error = %q, want the cause", got)
-	}
-	if got, _ := obj["hint"].(string); !bytes.Contains([]byte(got), []byte("bd mol wisp gc --closed --force")) {
-		t.Errorf("hint = %q, want the rerun command", got)
-	}
+
+	t.Run("missing id stops without retries", func(t *testing.T) {
+		s := useWispPurgeStub(t, 450)
+		missing := s.closed[401]
+		s.deleter.fail = failRequestContaining(missing, &issueops.NotFoundError{IDs: []string{missing}})
+		jsonOutput = true
+
+		stdout, _, err := captureWispGC(t, func() error {
+			return runWispPurgeClosed(context.Background(), false, true, nil)
+		})
+		if err == nil {
+			t.Fatalf("a missing-id refusal exited nil\nstdout:\n%s", stdout)
+		}
+		if got := len(s.deleter.requests); got != 3 {
+			t.Errorf("deleter saw %d requests; want exactly 3 (two committed, one refused): no shrink-and-retry loop", got)
+		}
+		if len(s.deleter.deleted) != 400 {
+			t.Errorf("deleted %d wisps, want the 400 of the two committed chunks", len(s.deleter.deleted))
+		}
+		obj := decodeSingleJSONObject(t, stdout)
+		if got := obj["deleted_count"]; got != float64(400) {
+			t.Errorf("deleted_count = %v, want 400 confirmed before the refusal", got)
+		}
+		if got := obj["remaining_count"]; got != float64(50) {
+			t.Errorf("remaining_count = %v, want 50", got)
+		}
+		if msg, _ := obj["error"].(string); !bytes.Contains([]byte(msg), []byte(missing)) {
+			t.Errorf("error = %q; want it to name the missing id", msg)
+		}
+		assertExportBookkeeping(t, s.closed[:400], s.closed[400:])
+	})
 }
 
 // wispPurgeProxiedProvider is the proxied route's unit-of-work provider. Every
@@ -753,7 +790,7 @@ func TestWispPurgeClosedStopsOnCancellationBetweenChunks(t *testing.T) {
 	if !bytes.Contains([]byte(stdout), []byte("Deleted 200 issue(s)")) {
 		t.Errorf("stdout does not report the 200 confirmed deletions:\n%s", stdout)
 	}
-	for _, want := range []string{"250", "context canceled", "bd mol wisp gc --closed --force"} {
+	for _, want := range []string{"250", "context canceled", "Rerun the same command"} {
 		if !bytes.Contains([]byte(stderr), []byte(want)) {
 			t.Errorf("stderr lacks %q:\n%s", want, stderr)
 		}

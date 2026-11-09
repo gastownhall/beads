@@ -1176,8 +1176,10 @@ func (o wispPurgeOutcome) remaining() int {
 	return o.selected - len(o.confirmed)
 }
 
-// wispPurgeRerunHint is how a stopped purge tells its caller to continue.
-const wispPurgeRerunHint = "Rerun 'bd mol wisp gc --closed --force' to continue: it reselects the closed wisps that remain."
+// wispPurgeRerunHint is how a stopped purge tells its caller to continue. It
+// names no command line, so the caller keeps its own flags (--type, --json),
+// and it does not promise the failed chunk wrote nothing: a rerun reselects.
+const wispPurgeRerunHint = "Rerun the same command to reselect current data and delete the remaining closed wisps."
 
 // purgeClosedWispsDirect deletes ids, which this store's own scan just
 // selected, through its deletion role. The ids go to the role as they are: the
