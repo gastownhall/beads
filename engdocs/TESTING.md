@@ -607,6 +607,19 @@ already listed, report it rather than silently broadening the skip. Before
 adding a new skip, record the issue it tracks and remove the skip when the
 underlying failure is fixed.
 
+The Dolt-tier lanes (embedded, dolt-server, proxied-server, server-Dolt
+storage and cmd/bd Dolt-server) run a runtime skip census: every test or
+subtest they skip is a line of `tools/bazel/skip_census.txt`
+(`<label> <test path> <class>`), and each lane's "Every target and shard ran
+tests" step (`check_testcases.py --skip-census`) fails on a skip the census
+does not list and on a listed skip whose test now runs. Park a conformance
+case with `skipKnownDivergence` (a ledger row) or
+`t.Skip("WAITING ON <PR or slice> (<what it waits for>)")`, add the line the
+failing step prints, and delete the line when you unpark the case.
+`python3 tools/bazel/check_skip_census.py --write --testlogs-dir DIR`
+regenerates the lines of the targets in a lane's "Upload test logs" artifact,
+and `--lint` checks the file.
+
 Before opening a PR:
 
 1. For docs-only changes, run the applicable docs, link, freshness, and diff
