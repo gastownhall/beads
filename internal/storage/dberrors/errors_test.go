@@ -25,6 +25,8 @@ func TestIsNoUsableDatabase(t *testing.T) {
 		{name: "text no database selected", err: errors.New("no database selected"), want: true},
 		{name: "text database not found", err: errors.New("database not found: beads"), want: true},
 		{name: "text error 1049", err: errors.New("Error 1049 (42000): Unknown database 'beads'"), want: true},
+		{name: "1046 no database selected", err: &mysql.MySQLError{Number: 1046, Message: "No database selected"}, want: true},
+		{name: "text error 1046", err: errors.New("Error 1046 (3D000): No database selected"), want: true},
 
 		// 1105 is Dolt's generic error code: only the one message counts.
 		{name: "1105 generic", err: &mysql.MySQLError{Number: 1105, Message: "lock wait timeout exceeded"}},
