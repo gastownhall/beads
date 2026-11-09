@@ -959,7 +959,9 @@ bd does not turn on Dolt's `behavior.dolt_transaction_commit`, and saving
 writes does not need it. It would turn every SQL transaction into its own Dolt
 commit: history grows faster, Dolt's generic transaction commits take the
 place of bd's per-command messages and authors, and `batch` and `off` modes
-stop batching.
+stop batching. A server whose sessions start with it on can also wedge schema
+migration 0040; see
+[Troubleshooting](/reference/troubleshooting#migration-0040-fails-with-nothing-to-commit).
 
 **Server config file.** For a server bd launches with its default
 configuration, bd writes the shared server's config to

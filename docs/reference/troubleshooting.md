@@ -487,6 +487,84 @@ with a version is used without the check (logged under `BD_DEBUG`). In
 proxied-server mode a genuinely missing or broken `dolt` binary (not found,
 not executable, or the probe itself fails/times out) is a hard error.
 
+### Migration 0040 fails with nothing to commit
+
+`bd migrate schema` dies with an error like:
+
+```
+migration 0040_ignored_tables_also_nonlocal_tables.up.sql: Error 1105: nothing to commit
+```
+
+and the database stays at schema version 39: bd reports the version gap on
+every command and the migration never records, so the store never advances.
+
+One possible cause is Dolt's automatic transaction commits. An
+administrator can turn them on as a server default —
+`behavior.dolt_transaction_commit: true` in Dolt's configuration, or a
+global default — and bd itself never turns them on. With the setting on,
+every SQL statement commits on its own, so the statements migration 0040
+pairs with in-body `DOLT_COMMIT` calls arrive with their diff already
+committed and the in-body commit finds `nothing to commit`. Check what the
+server defaults to and what bd's own session runs:
+
+```sql
+SELECT @@GLOBAL.dolt_transaction_commit, @@SESSION.dolt_transaction_commit;
+```
+
+A `1` in the GLOBAL column sets the default for new sessions; a `1` in the
+SESSION column means the connection bd is using has it on.
+
+This is separate from the Dolt version floor above: the floor refuses old
+Dolt binaries, while this failure needs only a server whose sessions start
+with the setting on.
+
+**With a current bd** (a build containing
+[#8055](https://github.com/gastownhall/beads/pull/8055)) and a supported
+Dolt version, nothing here needs doing: the migration pass turns the
+setting off for its own session and restores it on return, so an
+operator-authorized migration completes even on a server that defaults the
+setting on:
+
+```bash
+bd migrate schema
+```
+
+**With an older bd** that does not suspend the setting, an administrator
+can run the migration through a session that does not have it on:
+
+1. Disable the server default, so new sessions start with it off (sessions
+   already open keep their value):
+
+   ```sql
+   SET GLOBAL dolt_transaction_commit = 0;
+   ```
+
+   A GLOBAL change affects new sessions from every client of that server
+   and does not survive a restart. If the default comes from
+   `behavior.dolt_transaction_commit` in Dolt's configuration, a config
+   change needs the restart to take effect at all.
+2. Run the migration; bd opens its own new connection, which now starts
+   with the setting off:
+
+   ```bash
+   bd migrate schema
+   ```
+
+   The retry needs a bd build containing the pre-0040 repair
+   ([#4504](https://github.com/gastownhall/beads/pull/4504); v1.2.0 and
+   newer have it): the failed pass leaves 0040's first
+   `dolt_nonlocal_tables` row committed behind it, and the repair clears
+   that residue before the migration replays.
+3. Restore the previous default if you changed it:
+
+   ```sql
+   SET GLOBAL dolt_transaction_commit = 1;  -- only if it was on before
+   ```
+
+bd never changes the GLOBAL default itself: the setting can be a
+deliberate choice for other clients on the same server, so this workaround
+stays manual and administrator-authorized.
+
 ### Prefix routing: "proxy server store needs to be uow provider"
 
 A lookup routed through the orchestrator's `routes.jsonl` prefix routes
