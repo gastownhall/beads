@@ -276,7 +276,7 @@ How it works:
 - Push failures are warnings only (non-fatal), and failed attempts are throttled too.
 - Last push time and commit are tracked in `.beads/push-state.json`, a per-machine file (not in the database, to avoid merge conflicts across machines).
 
-Before pushing, `bd` verifies the local chunk store with `dolt fsck --quiet`, bounded by a 30-second timeout. For large stores, raise it with the runtime-only `BEADS_FSCK_TIMEOUT` environment variable (accepts durations like `2m` or bare seconds like `90`).
+Before pushing, `bd` verifies the local chunk store with `dolt fsck --quiet`, bounded by a 30-second timeout. For large stores, raise it with the runtime-only `BEADS_FSCK_TIMEOUT` environment variable (accepts durations like `2m` or bare seconds like `90`). A timed-out check refuses the push as `pre-push integrity check timed out`, and an fsck that fails without reporting a finding refuses it as `pre-push integrity check failed`; neither means the store is corrupt. Only a reported finding is refused as `dangling chunk reference`. See [Push refused by the pre-push integrity check](/recovery/sync-failures#push-refused-by-the-pre-push-integrity-check).
 
 ## Actor Identity Resolution
 
