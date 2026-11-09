@@ -270,6 +270,33 @@ and that `metadata.json` points at the right server and port. If a stale
 it can shadow the real database — confirm your real data lives on the server
 before removing the stale directory.
 
+### Unrecognized `dolt_mode`
+
+**Symptom:** commands fail with `dolt_mode "..." in .../.beads/metadata.json is
+not recognized or supported by this bd build`, before anything is opened.
+
+**Cause:** the workspace names a storage mode this `bd` does not know: a newer
+`bd` wrote it, or the file was edited by hand.
+
+**Fix:** upgrade every `bd` that opens the workspace, or restore the mode the
+workspace was initialized with. Do not delete the field or switch it to
+`"embedded"`. See
+[Upgrading: Troubleshooting Upgrades](/getting-started/upgrading#troubleshooting-upgrades).
+
+### Older bd fails with `proxieddb: not a directory`
+
+**Symptom (proxied-server mode):** one `bd` works in the workspace while
+another fails with `.beads/proxieddb: not a directory`.
+
+**Cause:** the failing `bd` is too old for this workspace. It looks for its data
+in `.beads/proxieddb`, where the current `bd` keeps a small marker file so that
+an older `bd` refuses instead of creating an empty database there.
+
+**Fix:** upgrade every `bd` that opens the workspace: on `PATH`, in git hooks,
+in CI and agent tooling. Leave the `proxieddb` file in place. The marker's
+prerequisites, and what it does not protect, are in
+[Upgrading: Troubleshooting Upgrades](/getting-started/upgrading#troubleshooting-upgrades).
+
 ### Configured server unreachable (auto-start disabled)
 
 **Symptom (server mode):** commands fail with "Dolt server unreachable at
