@@ -13,10 +13,12 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 )
 
-// TestDiscoveredBackendRefusesUnrecognizedDoltMode pins GH#5104: a workspace
-// whose metadata.json names a dolt_mode this build does not know (as
-// proxied-server was to bd 1.1.0) must be refused before any store opens,
-// not routed to the embedded store, where it reads as an empty tracker.
+// TestDiscoveredBackendRefusesUnrecognizedDoltMode pins GH#5104's admission
+// half: a workspace whose metadata.json names a dolt_mode this build does not
+// know (one a newer build wrote, or a typo) must be refused before any store
+// opens, not routed to the embedded store, where it reads as an empty
+// tracker. (bd 1.1.0 itself knew proxied-server; its empty result came from
+// the older default root, which the legacy proxied-root guard covers.)
 func TestDiscoveredBackendRefusesUnrecognizedDoltMode(t *testing.T) {
 	beadsDir := t.TempDir()
 	meta := `{"backend":"dolt","dolt_mode":"some-future-mode","dolt_database":"beads"}`
