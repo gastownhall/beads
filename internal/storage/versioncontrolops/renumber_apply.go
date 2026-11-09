@@ -137,7 +137,8 @@ func applyAndMergeChildRenumbers(ctx context.Context, db DBConn, plan *storage.C
 	if err != nil {
 		return nil, fmt.Errorf("renumber: begin rename transaction: %w", err)
 	}
-	if err := applyChildRenumbersInTx(ctx, tx, plan, author); err != nil {
+	mentions, err := applyChildRenumbersInTx(ctx, tx, plan, author)
+	if err != nil {
 		// The transaction's writes die with it: no issue, reference, or
 		// counter rename survives a mid-repair failure (AC-7).
 		_ = tx.Rollback()
@@ -161,6 +162,7 @@ func applyAndMergeChildRenumbers(ctx context.Context, db DBConn, plan *storage.C
 	result := &storage.ChildRenumberResult{
 		Plan:         plan,
 		RenameCommit: renameCommit,
+		Mentions:     mentions,
 	}
 	// Merge the pinned revision — the tracking ref the plan read, untouched by
 	// any second fetch. The rename commit is already in history, so a failure
@@ -195,7 +197,7 @@ func childRenumberCommitMessage(plan *storage.ChildRenumberPlan) string {
 // issue id. After the renames, every allocation parent's child counter is
 // raised to the planned high-water mark, so the next local create starts
 // above the collision instead of re-minting a colliding suffix.
-func applyChildRenumbersInTx(ctx context.Context, tx *sql.Tx, plan *storage.ChildRenumberPlan, actor string) error {
+func applyChildRenumbersInTx(ctx context.Context, tx *sql.Tx, plan *storage.ChildRenumberPlan, actor string) ([]storage.ChildRenumberMention, error) {
 	// Refuse unsupported versioned-history cases before any mutation: the
 	// rename does not migrate issue_versions rows (the table has no FK to
 	// issues), so an issue carrying versions would keep them under its old id.
@@ -203,16 +205,16 @@ func applyChildRenumbersInTx(ctx context.Context, tx *sql.Tx, plan *storage.Chil
 		var versions int
 		if err := tx.QueryRowContext(ctx,
 			"SELECT COUNT(*) FROM issue_versions WHERE issue_id = ?", m.OldID).Scan(&versions); err != nil {
-			return fmt.Errorf("renumber: check versioned history for %s: %w", m.OldID, err)
+			return nil, fmt.Errorf("renumber: check versioned history for %s: %w", m.OldID, err)
 		}
 		if versions > 0 {
-			return fmt.Errorf("renumber: %s carries %d issue_versions row(s); renaming an issue with versioned history is not supported", m.OldID, versions)
+			return nil, fmt.Errorf("renumber: %s carries %d issue_versions row(s); renaming an issue with versioned history is not supported", m.OldID, versions)
 		}
 	}
 	for _, m := range plan.Mappings {
 		issue, err := readIssueTextForRename(ctx, tx, m.OldID)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		// Capture the issue's own counter BEFORE the rename: the ignored
 		// counter migration's ON UPDATE CASCADE may move the row while the
@@ -220,22 +222,30 @@ func applyChildRenumbersInTx(ctx context.Context, tx *sql.Tx, plan *storage.Chil
 		// not capturing what to preserve.
 		counter, hasCounter, err := capturedChildCounterInTx(ctx, tx, m.OldID)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if err := issueops.UpdateIssueIDInTx(ctx, tx, m.OldID, m.NewID, issue, actor); err != nil {
-			return fmt.Errorf("renumber: rename %s -> %s: %w", m.OldID, m.NewID, err)
+			return nil, fmt.Errorf("renumber: rename %s -> %s: %w", m.OldID, m.NewID, err)
 		}
 		if hasCounter {
 			if err := relocateChildCounterInTx(ctx, tx, m.OldID, m.NewID, counter); err != nil {
-				return err
+				return nil, err
 			}
 		}
 		// The aux rows followed the issue by FK cascade; their content-derived
 		// ids must be re-derived from the new issue id or they stay pinned to
 		// the old one the other clone still holds.
 		if err := issueops.RekeyAuxRowsForIssueInTx(ctx, tx, m.NewID); err != nil {
-			return fmt.Errorf("renumber: rename %s -> %s: %w", m.OldID, m.NewID, err)
+			return nil, fmt.Errorf("renumber: rename %s -> %s: %w", m.OldID, m.NewID, err)
 		}
+	}
+	// The prose that names a renamed id does not follow the rename: report
+	// every exact-boundary mention for manual review. Read-only, and run
+	// after the renames so the comment ids it reports are the final
+	// re-derived ones.
+	mentions, err := collectChildRenumberMentionsInTx(ctx, tx, plan.Mappings)
+	if err != nil {
+		return nil, err
 	}
 	// The floors name parents as the PLAN saw them, and a parent that was
 	// itself renamed mints its future children under the new id: remap each
@@ -253,7 +263,10 @@ func applyChildRenumbersInTx(ctx context.Context, tx *sql.Tx, plan *storage.Chil
 		}
 		floors[parent] = floor
 	}
-	return raiseChildCounterFloorsInTx(ctx, tx, floors)
+	if err := raiseChildCounterFloorsInTx(ctx, tx, floors); err != nil {
+		return nil, err
+	}
+	return mentions, nil
 }
 
 // capturedChildCounterInTx reads an issue's own child-counter row before its

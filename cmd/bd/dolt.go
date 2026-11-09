@@ -1025,6 +1025,16 @@ func printChildRenumberResult(result *storage.ChildRenumberResult, note string) 
 	if result.RenameCommit != "" {
 		fmt.Printf("Rename commit: %s\n", result.RenameCommit)
 	}
+	if len(result.Mentions) > 0 {
+		fmt.Println("Mentions of the renamed ids (text left unchanged — review and update by hand):")
+		for _, mention := range result.Mentions {
+			if mention.CommentID != "" {
+				fmt.Printf("  %s comment %s: %s -> %s\n", mention.IssueID, mention.CommentID, mention.MatchedID, mention.NewID)
+			} else {
+				fmt.Printf("  %s %s: %s -> %s\n", mention.IssueID, mention.Field, mention.MatchedID, mention.NewID)
+			}
+		}
+	}
 	if note != "" {
 		fmt.Println(note)
 	}

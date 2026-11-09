@@ -23,6 +23,7 @@ go_library(
         "remotes.go",
         "renumber.go",
         "renumber_apply.go",
+        "renumber_mentions.go",
         "version_control.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/storage/versioncontrolops",
