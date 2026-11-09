@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -38,6 +39,10 @@ type DetailSource interface {
 
 	Labels(ctx context.Context, id string, isWisp bool) ([]string, error)
 	Dependencies(ctx context.Context, id string, isWisp bool) ([]*types.IssueWithDependencyMetadata, error)
+	// DependencyRecords returns the issue's outbound edges as stored, far
+	// ends unhydrated. It names the edges Dependencies cannot represent and
+	// is read only when the count says some exist (UnresolvableDependencyEdges).
+	DependencyRecords(ctx context.Context, id string, isWisp bool) ([]*types.Dependency, error)
 
 	CountDependencies(ctx context.Context, id string, isWisp bool) (int64, error)
 	CountDependents(ctx context.Context, id string, isWisp bool) (int64, error)
@@ -165,6 +170,14 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 			details.UnresolvableDependencies = &n
 		}
 	}
+	// And name them (#5272). The gate is the one that set the count above, so
+	// a fully local issue pays no extra read; the raw read follows the count
+	// and listing, keeping the counts-first order intact.
+	details.UnresolvableDependencyEdges = UnresolvableDependencyEdges(ctx,
+		dependencyCount, dependencyCountErr, details.Dependencies, depsErr,
+		func(ctx context.Context) ([]*types.Dependency, error) {
+			return src.DependencyRecords(ctx, id, isWisp)
+		})
 
 	if opts.IncludeDependents {
 		dependents, err := collectDependents(ctx, src, id, isWisp)
@@ -219,6 +232,55 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 		details.Dependencies = brief
 	}
 	return details, nil
+}
+
+// UnresolvableDependencyEdges is the one gate and selector every detail render
+// uses to name the outbound edges a hydrated listing could not represent: the
+// JSON detail view above and the three text renders of `bd show`.
+//
+// It reads the raw records only when the count and the listing BOTH succeeded
+// and the count exceeds the listing, which is the condition under which
+// UnresolvableDependencies is published; any other case returns nil without
+// calling read. A failed raw read also returns nil, so the caller keeps the
+// bare count and never publishes a partial answer as a complete one.
+//
+// The result is the raw rows whose target id is absent from hydrated, sorted
+// by target id then type, as copies the caller may keep. It can be shorter
+// than the delta: the raw read covers the issue's own plane only, and the
+// store-backed sources read without a shared snapshot.
+func UnresolvableDependencyEdges(ctx context.Context, count int64, countErr error, hydrated []*types.IssueWithDependencyMetadata, hydratedErr error, read func(context.Context) ([]*types.Dependency, error)) []*types.Dependency {
+	if countErr != nil || hydratedErr != nil || count-int64(len(hydrated)) <= 0 {
+		return nil
+	}
+	records, err := read(ctx)
+	if err != nil {
+		return nil
+	}
+	return selectUnresolvableEdges(hydrated, records)
+}
+
+func selectUnresolvableEdges(hydrated []*types.IssueWithDependencyMetadata, records []*types.Dependency) []*types.Dependency {
+	local := make(map[string]bool, len(hydrated))
+	for _, dep := range hydrated {
+		if dep != nil {
+			local[dep.ID] = true
+		}
+	}
+	var out []*types.Dependency
+	for _, rec := range records {
+		if rec == nil || local[rec.DependsOnID] {
+			continue
+		}
+		edge := *rec
+		out = append(out, &edge)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].DependsOnID != out[j].DependsOnID {
+			return out[i].DependsOnID < out[j].DependsOnID
+		}
+		return out[i].Type < out[j].Type
+	})
+	return out
 }
 
 // shallowDep keeps the identity-and-shape fields callers consume and drops the
@@ -339,6 +401,7 @@ type StoreDetailReader interface {
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)
 	GetLabels(ctx context.Context, issueID string) ([]string, error)
 	GetDependenciesWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error)
+	GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error)
 	CountDependencies(ctx context.Context, issueID string) (int64, error)
 	CountDependents(ctx context.Context, issueID string) (int64, error)
 	CountIssueComments(ctx context.Context, issueID string) (int64, error)
@@ -373,6 +436,10 @@ func (s storeDetailSource) Labels(ctx context.Context, id string, _ bool) ([]str
 
 func (s storeDetailSource) Dependencies(ctx context.Context, id string, _ bool) ([]*types.IssueWithDependencyMetadata, error) {
 	return s.store.GetDependenciesWithMetadata(ctx, id)
+}
+
+func (s storeDetailSource) DependencyRecords(ctx context.Context, id string, _ bool) ([]*types.Dependency, error) {
+	return s.store.GetDependencyRecords(ctx, id)
 }
 
 func (s storeDetailSource) CountDependencies(ctx context.Context, id string, _ bool) (int64, error) {
@@ -416,6 +483,8 @@ type (
 		IterWispWithIssueMetadata(ctx context.Context, wispID string, filter domain.DepListFilter) (storage.Iter[types.IssueWithDependencyMetadata], error)
 		CountByIssueID(ctx context.Context, issueID string, filter domain.DepListFilter) (int64, error)
 		CountByWispID(ctx context.Context, wispID string, filter domain.DepListFilter) (int64, error)
+		GetIssueDependencyRecords(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error)
+		GetWispDependencyRecords(ctx context.Context, wispIDs []string) (map[string][]*types.Dependency, error)
 	}
 
 	detailCommentReader interface {
@@ -463,6 +532,18 @@ func (u useCaseDetailSource) Dependencies(ctx context.Context, id string, isWisp
 		return u.deps.ListWispWithIssueMetadata(ctx, id, filter)
 	}
 	return u.deps.ListWithIssueMetadata(ctx, id, filter)
+}
+
+func (u useCaseDetailSource) DependencyRecords(ctx context.Context, id string, isWisp bool) ([]*types.Dependency, error) {
+	read := u.deps.GetIssueDependencyRecords
+	if isWisp {
+		read = u.deps.GetWispDependencyRecords
+	}
+	byID, err := read(ctx, []string{id})
+	if err != nil {
+		return nil, err
+	}
+	return byID[id], nil
 }
 
 func (u useCaseDetailSource) CountDependencies(ctx context.Context, id string, isWisp bool) (int64, error) {

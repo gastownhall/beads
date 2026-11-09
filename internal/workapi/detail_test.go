@@ -25,6 +25,10 @@ type detailFixture struct {
 	deps       map[string][]*types.IssueWithDependencyMetadata
 	dependents map[string][]*types.IssueWithDependencyMetadata
 	comments   map[string][]*types.Comment
+	// records are the raw outbound edges, read only for an issue whose count
+	// exceeds its hydrated rows; the shared fixture is fully local and leaves
+	// it empty.
+	records map[string][]*types.Dependency
 }
 
 func newDetailFixture() *detailFixture {
@@ -123,6 +127,10 @@ func (f fakeStoreReader) GetLabels(_ context.Context, id string) ([]string, erro
 
 func (f fakeStoreReader) GetDependenciesWithMetadata(_ context.Context, id string) ([]*types.IssueWithDependencyMetadata, error) {
 	return f.fx.deps[id], nil
+}
+
+func (f fakeStoreReader) GetDependencyRecords(_ context.Context, id string) ([]*types.Dependency, error) {
+	return f.fx.records[id], nil
 }
 
 func (f fakeStoreReader) CountDependencies(_ context.Context, id string) (int64, error) {
@@ -244,6 +252,28 @@ func (f fakeDepUC) IterWispWithIssueMetadata(ctx context.Context, id string, fil
 		return nil, err
 	}
 	return storage.NewSliceIter(rows), nil
+}
+
+func (f fakeDepUC) GetIssueDependencyRecords(_ context.Context, ids []string) (map[string][]*types.Dependency, error) {
+	out := make(map[string][]*types.Dependency, len(ids))
+	for _, id := range ids {
+		if f.fx.isWisp(id) {
+			return nil, fmt.Errorf("GetIssueDependencyRecords called for wisp %s", id)
+		}
+		out[id] = f.fx.records[id]
+	}
+	return out, nil
+}
+
+func (f fakeDepUC) GetWispDependencyRecords(_ context.Context, ids []string) (map[string][]*types.Dependency, error) {
+	out := make(map[string][]*types.Dependency, len(ids))
+	for _, id := range ids {
+		if !f.fx.isWisp(id) {
+			return nil, fmt.Errorf("GetWispDependencyRecords called for durable issue %s", id)
+		}
+		out[id] = f.fx.records[id]
+	}
+	return out, nil
 }
 
 func (f fakeDepUC) CountByIssueID(ctx context.Context, id string, filter domain.DepListFilter) (int64, error) {
