@@ -809,12 +809,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `info`, `kv get`, `memories`, `history` and `epic status` now take the same
   read-only open as `bd list`, and skip the post-command auto-export,
   auto-push and events-journal prune. Against a Dolt server whose schema is
-  current, each sends 42 fewer SQL statements and opens 3 fewer connections
-  (`bd status`: 55 statements and 5 connections before, 13 and 2 after).
+  current, each opens 3 fewer connections and sends up to 42 fewer SQL
+  statements; the saving is what the writable open still costs, so it is
+  smaller once other changes have trimmed that open.
   Like `bd list`, they no longer import `.beads/issues.jsonl` into an empty
   embedded database first; a write command or `bd import` still does.
-  `bd prime` opens its store read-only too (42 statements and 3 connections
-  before, 10 and 2 after). On embedded Dolt that store refuses writes, so
+  `bd prime` opens its store read-only too (1 fewer connection and up to 32
+  fewer statements). On embedded Dolt that store refuses writes, so
   `bd prime` no longer attempts the post-command auto-backup, and in a
   workspace whose database has not been created yet it reports the memory
   section as unavailable instead of creating an empty database. Its read-only
@@ -822,8 +823,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workspace that still has one, `bd prime` reports the memory section as
   unavailable until any other bd command renames it. `bd info
   --thanks`, `bd info --whats-new` and `bd types --sections` no longer open
-  the database at all (49 statements before, none after), so they work while
-  it is unreachable. In direct server mode the read-only open does not
+  the database at all, so they work while it is unreachable. In direct server mode the read-only open does not
   migrate, so on a database whose schema is behind the binary these commands
   fail with a schema error when a column they read is missing, as `bd list`
   does. For the eleven commands above, the migration that runs after a `bd`
