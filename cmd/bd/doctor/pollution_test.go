@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -520,5 +521,96 @@ func TestPollutionGuidanceIsReviewFirst(t *testing.T) {
 	}
 	if want := []string{"cmd/bd/doctor/validation.go:CheckTestPollution"}; !slices.Equal(enriched.sourceFiles, want) {
 		t.Errorf("agent sourceFiles = %q, want %q", enriched.sourceFiles, want)
+	}
+}
+
+// The four tests below are ported from PR #5137 (@vishnujayvel), which fixed
+// the same GH#5025 false positives in the old scorer. Their fixtures and
+// assertions are kept; only the call moved to DetectTestPollution.
+
+func mkPollutionIssue(id, title, desc string, status types.Status, typ types.IssueType) *types.Issue {
+	return &types.Issue{
+		ID:          id,
+		Title:       title,
+		Description: desc,
+		Status:      status,
+		IssueType:   typ,
+		CreatedAt:   time.Now(),
+	}
+}
+
+func detectWithoutEvidence(t *testing.T, issues []*types.Issue) []PollutionMatch {
+	t.Helper()
+	got, err := DetectTestPollution(context.Background(), &fakePollutionEvidence{}, issues)
+	if err != nil {
+		t.Fatalf("DetectTestPollution: %v", err)
+	}
+	return got
+}
+
+func TestDetectTestPollution_PrefixAloneNotEnough(t *testing.T) {
+	t.Parallel()
+	// Real infra bug titles: prefix + substantive description → not pollution.
+	issues := []*types.Issue{
+		mkPollutionIssue("dcr-lzse", "test-driver.sh isolation broken — constants.sh clobbers env",
+			"Long description of a real test-harness bug with repro and expected behavior.",
+			types.StatusOpen, types.TypeBug),
+		mkPollutionIssue("dcr-9f3", "Test-quality architecture",
+			"Epic-scoped plan for improving component test suite quality across the monorepo.",
+			types.StatusOpen, types.TypeEpic),
+	}
+	got := detectWithoutEvidence(t, issues)
+	if len(got) != 0 {
+		t.Fatalf("prefix-only real work flagged: %+v", got)
+	}
+}
+
+func TestDetectTestPollution_BulkCreateNotEvidence(t *testing.T) {
+	t.Parallel()
+	// Many issues same minute with substantive titles/descriptions must not flag.
+	var issues []*types.Issue
+	now := time.Now()
+	for i := 0; i < 12; i++ {
+		iss := mkPollutionIssue(
+			"imp-"+strconv.Itoa(i),
+			"test-quality report item",
+			"Imported engineering task from report batch with full body text here.",
+			types.StatusOpen,
+			types.TypeTask,
+		)
+		iss.CreatedAt = now
+		issues = append(issues, iss)
+	}
+	got := detectWithoutEvidence(t, issues)
+	if len(got) != 0 {
+		t.Fatalf("bulk import of real work flagged as pollution: %d hits", len(got))
+	}
+}
+
+func TestDetectTestPollution_BarePrefixNormalDescriptionStillNotFlagged(t *testing.T) {
+	t.Parallel()
+	// A bare test prefix with a normal-length description must stay unflagged.
+	issues := []*types.Issue{
+		mkPollutionIssue("bd-9f3", "test-migration cleanup",
+			"Removes the legacy migration path once the new one is verified stable.",
+			types.StatusOpen, types.TypeTask),
+	}
+	got := detectWithoutEvidence(t, issues)
+	if len(got) != 0 {
+		t.Fatalf("bare prefix + normal-length description flagged as pollution: %+v", got)
+	}
+}
+
+func TestDetectTestPollution_SequentialIDShortDescriptionNoPrefixNotFlagged(t *testing.T) {
+	t.Parallel()
+	// Counter-mode/--id IDs (NextCounterIDTx, cmd/bd/create.go) look
+	// sequential on real issues too, so ID shape with a short description and
+	// no test-style title must not match.
+	issues := []*types.Issue{
+		mkPollutionIssue("bd-42", "Fix login redirect bug", "See logs", types.StatusOpen, types.TypeBug),
+	}
+	got := detectWithoutEvidence(t, issues)
+	if len(got) != 0 {
+		t.Fatalf("ordinary issue with sequential ID + short description flagged as pollution: %+v", got)
 	}
 }
