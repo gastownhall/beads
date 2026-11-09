@@ -130,6 +130,7 @@ go_test(
         "child_id_test.go",
         "child_renumber_counter_test.go",
         "child_renumber_graph_test.go",
+        "child_renumber_mentions_test.go",
         "child_renumber_pull_test.go",
         "child_renumber_test.go",
         "childcounters_settle_test.go",
