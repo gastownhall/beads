@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -767,4 +768,52 @@ func sortedJunieKeys(m map[string]interface{}) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// bd setup junie writes a config that runs uvx, so it looks uvx up on PATH
+// after writing and prints a note when it is missing; it never fails setup or
+// skips a file over it, and never runs uvx. The fixture is only looked up.
+func TestInstallJunieWarnsWithoutUvx(t *testing.T) {
+	const note = "uvx not found on PATH"
+	for _, tt := range []struct {
+		name     string
+		withUvx  bool
+		wantNote bool
+	}{
+		{name: "uvx missing", wantNote: true},
+		{name: "uvx on PATH", withUvx: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			bin := t.TempDir()
+			if tt.withUvx {
+				name := "uvx"
+				if runtime.GOOS == "windows" {
+					name = "uvx.exe"
+					t.Setenv("PATHEXT", ".EXE")
+				}
+				if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("PATH", bin)
+			t.Chdir(t.TempDir())
+
+			var err error
+			out := captureProcessStdout(t, func() { err = InstallJunie() })
+			if err != nil {
+				t.Fatalf("InstallJunie: %v", err)
+			}
+			for _, path := range []string{".junie/guidelines.md", ".junie/mcp/mcp.json"} {
+				if !FileExists(path) {
+					t.Errorf("%s was not written", path)
+				}
+			}
+			if got := strings.Contains(out, note); got != tt.wantNote {
+				t.Errorf("note %q printed = %v, want %v; output:\n%s", note, got, tt.wantNote, out)
+			}
+			if tt.wantNote && !strings.Contains(out, "https://docs.astral.sh/uv/") {
+				t.Errorf("missing-uvx note does not say how to install uv; output:\n%s", out)
+			}
+		})
+	}
 }
