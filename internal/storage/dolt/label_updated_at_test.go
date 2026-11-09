@@ -148,3 +148,28 @@ func TestExecuteUpdateLabelsReportOwningTable(t *testing.T) {
 		}
 	}
 }
+
+// TestLabelRenameCommitsUpdatedAt is the rename leg of
+// TestLabelEditsCommitUpdatedAt: RenameLabel advances each carrier's
+// updated_at, and its commit has to carry that, not leave issues dirty.
+func TestLabelRenameCommitsUpdatedAt(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	store.SetVersionedHistoryEnabled(false)
+
+	seedAgedLabelIssue(t, ctx, store, "lur-a", false, "rename-me")
+	if dirtyTables(t, store)["issues"] {
+		t.Fatalf("precondition: issues dirty after seeding")
+	}
+	if _, _, _, err := store.RenameLabel(ctx, "rename-me", "renamed", "a"); err != nil {
+		t.Fatalf("RenameLabel: %v", err)
+	}
+	if at := headUpdatedAt(t, ctx, store, "lur-a"); !at.After(labelClockAged) {
+		t.Errorf("HEAD updated_at = %v, want it advanced past %v", at, labelClockAged)
+	}
+	if dirtyTables(t, store)["issues"] {
+		t.Errorf("issues left dirty after the rename commit")
+	}
+}

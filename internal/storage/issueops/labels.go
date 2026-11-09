@@ -310,8 +310,9 @@ var ErrRenameLabelSameName = errors.New("rename label: old and new label are the
 // counts the subset of renamed where that happened. oldLabel carried by
 // nothing is an honest no-op (renamed, merged both 0, err nil). ids lists
 // every touched issue and wisp id, both planes concatenated. Each touched
-// durable issue mints one version row (its label set changed); a no-op
-// rename mints nothing. oldLabel and
+// issue and wisp advances its updated_at, and each touched durable issue
+// mints one version row (its label set changed); a no-op rename does
+// neither. oldLabel and
 // newLabel equal after trimming is refused with ErrRenameLabelSameName
 // rather than treated as a no-op -- see that error's doc for why silently
 // proceeding would wipe the label instead of leaving it alone.
@@ -435,6 +436,11 @@ func renameLabelInPlane(ctx context.Context, tx DBTX, labelTable, eventTable, ol
 	// per-call cost for their one issue today, and this loop is exactly that
 	// cost repeated once per touched issue. Left as a disclosed limitation.
 	for _, id := range oldIDs {
+		// Every id here changed its label set, so it advances updated_at
+		// like a single add or remove does (GH#5442).
+		if err := touchLabelOwnerInTx(ctx, tx, labelTable, id); err != nil {
+			return 0, 0, nil, fmt.Errorf("rename label: %s: %w", id, err)
+		}
 		if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
 			IssueID:   id,
 			EventType: types.EventLabelRenamed,
