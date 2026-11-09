@@ -821,3 +821,192 @@ func TestEmbeddedImportInvalidDryRunCases(t *testing.T) {
 		}
 	})
 }
+
+// TestEmbeddedImportUndecodableLineCases pins AC-6 of GH#4492: a
+// malformed or undecodable line stops every import route before any issue
+// or memory write, and the error names the offending physical line —
+// counted across headers, blanks, memories and tombstones, in both readers
+// (bd import's parseImportRecords, recovery's parseJSONLFile). The
+// auto-import route is the exception by design: best-effort, it warns,
+// stamps the attempt and lets the outer command continue.
+func TestEmbeddedImportUndecodableLineCases(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt import tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	now := time.Now().UTC()
+	issueJSON := func(id, title string) string {
+		b, err := json.Marshal(types.Issue{ID: id, Title: title, Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now})
+		if err != nil {
+			t.Fatalf("marshaling issue %s: %v", id, err)
+		}
+		return string(b)
+	}
+	tombstoneJSON := func(id string) string {
+		b, err := json.Marshal(types.Issue{ID: id, Title: "Gone", Status: types.Status("tombstone"), IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now})
+		if err != nil {
+			t.Fatalf("marshaling tombstone %s: %v", id, err)
+		}
+		return string(b)
+	}
+
+	// The counting gauntlet: a header, a blank, a memory and a tombstone
+	// all precede the undecodable line, so a loop that numbers records
+	// instead of physical lines reports the wrong one. A valid row behind
+	// the garbage proves the import stops at the read, not mid-write.
+	undecodableContent := strings.Join([]string{
+		`{"_schema":"beads-jsonl/1","_dolt_branch":"main","_sort":"stable-v1"}`, // line 1: header
+		``,                                // line 2: blank
+		issueJSON("imund-aaa", "Valid A"), // line 3
+		`{"_type":"memory","key":"skip-me","value":"mem"}`, // line 4
+		tombstoneJSON("imund-gone"),                        // line 5
+		`<<<<<<< HEAD`,                                     // line 6: undecodable (merge-conflict marker)
+		issueJSON("imund-bbb", "Valid B"),                  // line 7
+	}, "\n") + "\n"
+
+	t.Run("file_import_names_line_and_writes_nothing", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imund")
+		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(undecodableContent), 0644); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath)
+		out := stdout + stderr
+		if err == nil {
+			t.Fatalf("import with an undecodable line must fail; output:\n%s", out)
+		}
+		if !strings.Contains(out, "line 6") {
+			t.Errorf("the error must name the undecodable physical line (line 6); got:\n%s", out)
+		}
+		if issues := bdListJSONAllowError(t, bd, dir); len(issues) != 0 {
+			t.Errorf("a parse failure must not leave rows behind; found %d issues", len(issues))
+		}
+		for _, id := range []string{"imund-aaa", "imund-bbb"} {
+			cmd := exec.Command(bd, "show", id)
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			if _, _, err := runCommandBuffers(t, cmd); err == nil {
+				t.Errorf("bd show %s must fail; the row must not exist", id)
+			}
+		}
+	})
+
+	t.Run("stdin_import_names_line", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imund")
+		stdout, stderr, err := bdImportBuffers(t, bd, dir, strings.NewReader(undecodableContent), "-")
+		out := stdout + stderr
+		if err == nil {
+			t.Fatalf("bd import - with an undecodable line must fail")
+		}
+		if !strings.Contains(out, "line 6") {
+			t.Errorf("the stdin reader must name the undecodable physical line too; got:\n%s", out)
+		}
+		if issues := bdListJSONAllowError(t, bd, dir); len(issues) != 0 {
+			t.Errorf("a parse failure must not leave rows behind; found %d issues", len(issues))
+		}
+	})
+
+	t.Run("valid_json_that_cannot_decode_as_a_record_names_line", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imund")
+		content := issueJSON("imund-ccc", "Valid C") + "\n" + `{"title": {"nested": true}}` + "\n"
+		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath)
+		out := stdout + stderr
+		if err == nil {
+			t.Fatalf("valid JSON that cannot decode as a record must fail the import; output:\n%s", out)
+		}
+		if !strings.Contains(out, "line 2") {
+			t.Errorf("the error must name the record-shaped-but-undecodable line (line 2); got:\n%s", out)
+		}
+		if issues := bdListJSONAllowError(t, bd, dir); len(issues) != 0 {
+			t.Errorf("a decode failure must not leave rows behind; found %d issues", len(issues))
+		}
+	})
+
+	t.Run("memory_record_decode_error_names_line", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imund")
+		content := issueJSON("imund-mem", "Valid M") + "\n" + `{"_type":"memory","key":123}` + "\n"
+		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath)
+		out := stdout + stderr
+		if err == nil {
+			t.Fatalf("a memory record that cannot decode must fail the import; output:\n%s", out)
+		}
+		if !strings.Contains(out, "line 2") {
+			t.Errorf("the error must name the undecodable memory record's line (line 2); got:\n%s", out)
+		}
+		if issues := bdListJSONAllowError(t, bd, dir); len(issues) != 0 {
+			t.Errorf("a decode failure must not leave rows behind; found %d issues", len(issues))
+		}
+	})
+
+	t.Run("init_from_jsonl_propagates_the_line_error", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		content := issueJSON("imund-init", "Valid I") + "\n" + `not-json-at-all` + "\n"
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "issues.jsonl"), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(bd, "init", "--from-jsonl", "--prefix", "imund", "--quiet", "--non-interactive")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		out := stdout.String() + stderr.String()
+		if err == nil {
+			t.Fatalf("bd init --from-jsonl with an undecodable line must fail; output:\n%s", out)
+		}
+		if !strings.Contains(out, "line 2") {
+			t.Errorf("the recovery import must name the undecodable line (line 2); got:\n%s", out)
+		}
+	})
+
+	t.Run("auto_import_warns_stamps_and_the_command_continues", func(t *testing.T) {
+		dstDir, dstBeadsDir, _ := bdInit(t, bd, "--prefix", "imund")
+		content := issueJSON("imund-ai", "Auto Import") + "\n" + `{"broken"` + "\n"
+		if err := os.WriteFile(filepath.Join(dstBeadsDir, "issues.jsonl"), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		cmd := exec.Command(bd, "create", "post-import marker", "--type", "task")
+		cmd.Dir = dstDir
+		cmd.Env = bdEnv(dstDir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		out := stdout.String() + stderr.String()
+		if err != nil {
+			t.Fatalf("the outer command must survive an undecodable auto-import source; output:\n%s", out)
+		}
+		if !strings.Contains(out, "warning: auto-import") {
+			t.Errorf("the failed auto-import must warn; got:\n%s", out)
+		}
+		if !strings.Contains(out, "line 2") {
+			t.Errorf("the auto-import warning must name the undecodable line (line 2); got:\n%s", out)
+		}
+		if issues := bdListJSON(t, bd, dstDir); len(issues) != 1 {
+			t.Fatalf("expected only the created marker issue (the import must have written nothing), got %d", len(issues))
+		}
+
+		// The failed attempt is stamped: a later command must not re-read
+		// (and re-warn about) the same broken source.
+		cmd2 := exec.Command(bd, "create", "second marker", "--type", "task")
+		cmd2.Dir = dstDir
+		cmd2.Env = bdEnv(dstDir)
+		stdout2, stderr2, err2 := runCommandBuffers(t, cmd2)
+		if err2 != nil {
+			t.Fatalf("the second command must succeed; output:\n%s%s", stdout2.String(), stderr2.String())
+		}
+		if out2 := stdout2.String() + stderr2.String(); strings.Contains(out2, "auto-import") {
+			t.Errorf("a stamped failed attempt must not be retried; got:\n%s", out2)
+		}
+	})
+}

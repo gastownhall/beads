@@ -360,3 +360,64 @@ func TestEmbeddedImportInvalidDryRun(t *testing.T) {
 		t.Fatalf("a dry run rewrote the rejects file: %q", got)
 	}
 }
+
+func TestEmbeddedImportUndecodableLineNamesLine(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt import tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	cases := []struct {
+		name, line string
+	}{
+		{"conflict_marker", "<<<<<<< HEAD"},
+		{"wrong_field_type", `{"id":"imund-x","title":5}`},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prefix := fmt.Sprintf("imund%d", i)
+			dir, _, _ := bdInit(t, bd, "--prefix", prefix)
+			jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+			writeImportLines(t, jsonlPath,
+				`{"_schema":"beads-jsonl/1"}`,
+				"",
+				importMemoryLine,
+				invalidImportLine(t, prefix+"-aaa", "Valid A", "open"),
+				tc.line,
+				invalidImportLine(t, prefix+"-ccc", "Valid C", "open"),
+			)
+			// --skip-invalid does not skip an undecodable line.
+			stdout, stderr, err := bdImportRun(t, bd, dir, "--skip-invalid", jsonlPath)
+			if err == nil || !strings.Contains(stdout+stderr, "line 5") {
+				t.Fatalf("bd import should fail naming line 5; err %v, output:\n%s%s", err, stdout, stderr)
+			}
+			if ids := listedIDs(t, bd, dir); len(ids) != 0 {
+				t.Fatalf("an undecodable file wrote issues %v", ids)
+			}
+			if mem := bdMemories(t, bd, dir); strings.Contains(mem, "screened-memory") {
+				t.Fatalf("an undecodable file wrote its memory:\n%s", mem)
+			}
+		})
+	}
+
+	t.Run("init_from_jsonl", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		beadsDir := filepath.Join(dir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeImportLines(t, filepath.Join(beadsDir, "issues.jsonl"),
+			invalidImportLine(t, "imundi-aaa", "Valid A", "open"),
+			"<<<<<<< HEAD",
+		)
+		cmd := exec.Command(bd, "init", "--from-jsonl", "--prefix", "imundi", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err == nil || !strings.Contains(stdout.String()+stderr.String(), "line 2") {
+			t.Fatalf("bd init --from-jsonl should fail naming line 2; err %v, output:\n%s%s", err, stdout.String(), stderr.String())
+		}
+	})
+}

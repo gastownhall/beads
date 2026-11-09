@@ -99,6 +99,7 @@
 100 24 TestEmbeddedWispGCProtectsActiveWisps
 
 100 25 TestEmbeddedDoltRemoteAdd_LocalOnly_FiresBeforeGuard
+100 25 TestEmbeddedImportUndecodableLineCases
 100 25 TestEmbeddedMaxRowsListBasic
 100 25 TestEmbeddedRemovedBackendHealRejectionPerBackend
 
@@ -377,6 +378,7 @@
 100 70 TestEmbeddedRoutedMutatingSiblingAssignTagDepTag
 
 100 71 TestEmbeddedCloseJSONReportsMoleculeAutoClose
+100 71 TestEmbeddedImportUndecodableLineNamesLine
 100 71 TestEmbeddedInitRoleRoutingExplicitDefault
 100 71 TestEmbeddedPrimeChangeDirRedirectNoticeFollowsTarget
 100 71 TestEmbeddedRoutedCreateHonorsTheEnvOverrideOverTheTargetsConfig
