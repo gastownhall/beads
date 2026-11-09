@@ -350,15 +350,31 @@ bd dolt push
 #    database while still on the CURRENT binary, then install the new binary.
 bd dolt pull
 bd version                    # after installing: confirm the new version
+bd migrate schema             # once: apply this clone's clone-local migrations
 ```
 
-The pull in step 3 brings the migrated schema down with the data, so the new
-binary finds nothing to migrate and the clone keeps its local state. Between
-that pull and the install, the old binary refuses the database (it is now
-newer than the schema the old binary knows), so install straight away. On the
-upgrade to 1.3.0 the clone's earlier `events` audit rows are the exception:
-they stop syncing with migration 0062, so after that pull they remain only in
-history.
+The pull in step 3 brings the migrated replicated schema down with the data,
+so the clone needs no re-clone and keeps its local state. Between that pull
+and the install, the old binary refuses the database (it is now newer than
+the schema the old binary knows), so install straight away. On the upgrade to
+1.3.0 the clone's earlier `events` audit rows are the exception: they stop
+syncing with migration 0062, so after that pull they remain only in history.
+
+The pull does not bring the clone-local migrations: they change tables that
+never sync (such as `leases`), so every database applies its own. Run
+`bd migrate schema` once after installing, on every clone and on every
+database a direct-server workspace reads; it does nothing when they are
+already applied. The new binary's one-shot upgrade maintenance may already
+have applied them on the first command after the install, but that is not
+guaranteed (strict `--readonly` and a maintenance freeze skip it), so run the
+command anyway. It follows the usual migration rules: run it once any
+maintenance freeze is lifted, and it bypasses no consent gate. Until the
+clone-local migrations are applied, a read that needs one of their columns
+refuses with a message naming that command. Running a write-capable command
+such as `bd sql "SELECT 1"` was the older workaround: it applied them only as
+a side effect of opening the database for writing, so it is neither a
+clone-local-only step nor a check that reads work. Use `bd migrate schema`
+instead.
 
 Run `bd dolt commit` in step 1 even on a clone where you wrote nothing, so
 that the step 3 pull is a fast-forward: on 1.2.2 a pull that merges can leave
