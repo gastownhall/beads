@@ -59,6 +59,7 @@
 
 100 15 TestEmbeddedPurgeWispsPlaneRetention
 100 15 TestEmbeddedTemplateGuardAcrossWriteVerbs
+100 15 TestEmbeddedUpdatedAfterSeesLabelEdits
 
 100 16 TestEmbeddedMemoryConcurrent
 100 16 TestEmbeddedMigratePersonal_refusesIssueAlreadyInPlanningRepo
