@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -491,5 +492,65 @@ func TestOpenSQLWaitBudget(t *testing.T) {
 		case <-time.After(15 * time.Second):
 			t.Fatalf("open with a pre-cancelled context did not return within 15s")
 		}
+	})
+
+	t.Run("uncontended_tiny_budget", func(t *testing.T) {
+		// No t.Parallel: t.Setenv.
+		t.Setenv(openWaitBudgetEnv, "1ms")
+		dir := t.TempDir()
+		initWaitBudgetDatabase(t, dir)
+
+		// A 1ms budget must not disturb an uncontended open: exhaustion
+		// only ever ends retries, and a first attempt that succeeds never
+		// consults the policy. The caller keeps its context and handle:
+		// no new deadline is imposed on either.
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		db, cleanup, err := OpenSQL(ctx, dir, waitBudgetDatabase, "")
+		if err != nil {
+			t.Fatalf("uncontended open with a 1ms budget: %v", err)
+		}
+		defer func() { _ = cleanup() }()
+
+		var one int
+		if err := db.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
+			t.Fatalf("query after a 1ms-budget open: %v", err)
+		}
+		if one != 1 {
+			t.Fatalf("SELECT 1 = %d, want 1", one)
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("OpenSQL must not cancel or deadline the caller's context")
+		default:
+		}
+		if _, hasDeadline := ctx.Deadline(); hasDeadline {
+			t.Fatal("OpenSQL must not add a deadline to the caller's context")
+		}
+	})
+
+	t.Run("non_retryable_open_error", func(t *testing.T) {
+		// No t.Parallel: t.Setenv.
+		t.Setenv(openWaitBudgetEnv, "1s")
+
+		// A directory that is a regular file fails the open for good:
+		// the driver does not retry it, so no budget can be diagnosed.
+		file := filepath.Join(t.TempDir(), "not-a-directory")
+		if err := os.WriteFile(file, nil, 0o644); err != nil {
+			t.Fatalf("write blocker file: %v", err)
+		}
+		start := time.Now()
+		_, cleanup, err := OpenSQL(context.Background(), file, waitBudgetDatabase, "")
+		if err == nil {
+			_ = cleanup()
+			t.Fatalf("open on a file-as-directory unexpectedly succeeded")
+		}
+		if errors.Is(err, ErrOpenTimeout) {
+			t.Fatalf("a non-retryable open failure must not be diagnosed as ErrOpenTimeout: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed > 10*time.Second {
+			t.Fatalf("non-retryable open failure retried for %s; want an immediate error", elapsed)
+		}
+		t.Logf("open on a file-as-directory failed after %s: %v", time.Since(start), err)
 	})
 }
