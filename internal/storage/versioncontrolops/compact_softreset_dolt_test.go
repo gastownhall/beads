@@ -961,3 +961,105 @@ func TestCompactRefusesDivergentReplayWhileMainMoves(t *testing.T) {
 	f.wantStatus("config:false", "u:false")
 	f.wantNoTempBranch()
 }
+
+// AC-5 of the catch-up design: the snapshot is fixed. C1 lands after the
+// plan was read, so the catch-up replays it; C2 lands while C1's replay is
+// cherry-picked — after catch-up's snapshot read main's head — so C2 is
+// outside catch-up by contract, and its rows must still reach main's HEAD:
+// the soft reset keeps them staged and the follow-up commits them above the
+// caught-up history, while C1 keeps its own message and pre-staged rows
+// join the follow-up as they always have.
+func TestCompactCommitAfterCatchUpSnapshotJoinsFollowup(t *testing.T) {
+	port := startCompactTestServer(t)
+	f := newCompactFixture(t, port)
+	writer := f.conn()
+
+	landed := f.landRow(f.conn())
+	original := f.metaOf(landed)
+	f.exec(f.db,
+		"INSERT INTO u VALUES (800, 'staged')",
+		"CALL DOLT_ADD('u')",
+	)
+	f.writePending(f.db)
+
+	// The caught commit's cherry-pick is the run's (len(recent)+1)th pick:
+	// after the two kept picks, inside catch-up, after the snapshot.
+	var picks int
+	hook := &compactHookConn{beforeExec: func(query string) {
+		if strings.Contains(query, "DOLT_CHERRY_PICK") {
+			picks++
+			if picks == len(f.recent)+1 {
+				f.landRowID(writer, 601, "landed 601")
+			}
+		}
+	}}
+	if err := f.compact(hook); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	for _, id := range []int{600, 601} {
+		if n := f.count(fmt.Sprintf("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = %d", id)); n != 1 {
+			t.Fatalf("landed t row %d in main's HEAD: found=%d, want 1 (status %q)", id, n, f.status())
+		}
+	}
+	if n := f.count("SELECT COUNT(*) FROM u AS OF 'HEAD' WHERE id = 800"); n != 1 {
+		t.Fatalf("pre-staged u row 800 in main's HEAD: found=%d, want 1 (the follow-up carries it)", n)
+	}
+	f.wantLog(append([]string{compactFollowupMsg, "landed 600"}, replayedLog...))
+	f.wantMetaKept(original)
+	f.wantPendingKept()
+	f.wantStatus("config:false", "u:false")
+	f.wantNoTempBranch()
+}
+
+// AC-5 of the catch-up design: a writer whose transaction begins before the
+// landed commit C1, and whose Dolt commit finishes before the final reset,
+// has its commit merged against the transaction-start head — demoting C1
+// from main's ancestry after the catch-up already replayed C1 onto the
+// rebuilt history. The reset then puts main back on the tree C1 left, so
+// only the writer's own rows need the follow-up: C1 keeps its own message
+// and identity, the writer's rows reach HEAD through the follow-up, and t
+// holds no leftover working change.
+func TestCompactWriterFromBeforeLandedCommitJoinsFollowup(t *testing.T) {
+	port := startCompactTestServer(t)
+	f := newCompactFixture(t, port)
+	writer := f.conn()
+
+	// W's transaction begins on the planned head, before C1 lands.
+	wtx, err := writer.BeginTx(f.ctx, nil)
+	if err != nil {
+		t.Fatalf("begin writer transaction: %v", err)
+	}
+	if _, err := wtx.ExecContext(f.ctx, "INSERT INTO t VALUES (601, 'writer')"); err != nil {
+		t.Fatalf("writer insert t 601: %v", err)
+	}
+	// C1 lands after the plan was read, while W's transaction is open.
+	landed := f.landRow(f.conn())
+	original := f.metaOf(landed)
+	f.writePending(f.db)
+
+	// W finishes its Dolt commit just before the final reset, after the
+	// catch-up replayed C1: Dolt merges W's commit against W's
+	// transaction-start head, demoting C1 — which the rebuilt history
+	// already carries.
+	hook := &compactHookConn{beforeExec: onceBeforeFinalReset(func() {
+		f.exec(wtx, "CALL DOLT_ADD('t')", "CALL DOLT_COMMIT('-m', 'writer 601')")
+		if err := wtx.Commit(); err != nil {
+			f.t.Fatalf("writer commit: %v", err)
+		}
+	})}
+	if err := f.compact(hook); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	for _, id := range []int{600, 601} {
+		if n := f.count("SELECT COUNT(*) FROM t AS OF 'HEAD' WHERE id = ?", id); n != 1 {
+			t.Fatalf("writer t row %d in main's HEAD: found=%d, want 1 (status %q)", id, n, f.status())
+		}
+	}
+	f.wantLog(append([]string{compactFollowupMsg, "landed 600"}, replayedLog...))
+	f.wantMetaKept(original)
+	f.wantPendingKept()
+	f.wantStatus("config:false", "u:false")
+	f.wantNoTempBranch()
+}
