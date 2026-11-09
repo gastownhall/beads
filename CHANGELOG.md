@@ -1462,7 +1462,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails on a fresh database with `migration 0040_ignored_tables_also_nonlocal_tables.up.sql:
   ... nothing to commit`. The migration pass now turns the setting off for
   its own session and restores it on return. The same error at migration
-  0028, reported on bd 1.0.4, was fixed in v1.0.5 (#4470).
+  0028, reported on bd 1.0.4, was fixed in v1.0.5 (#4470). An existing
+  database that an earlier bd left at schema version 39 after that 0040
+  failure also converges once its migration is requested (`bd migrate
+  schema`): the leftover 0040 row is cleared and 0040 runs again with the
+  setting off (#4800, reported by @dhruv-pratap).
 - A long-lived proxied-server or external-server connection pool, such as
   the one an embedder's unit-of-work provider keeps, now survives its local
   proxy exiting on idle. Each new connection looks the proxy up again,
