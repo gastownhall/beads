@@ -604,3 +604,57 @@ func TestWispPurgeClosedProxiedBoundsEachUnitOfWork(t *testing.T) {
 		}
 	})
 }
+
+// TestWispPurgeClosedOrphanReportDropsLaterChunkDeletions pins the orphan
+// report across chunk boundaries. Each request names the survivors that
+// depended on what it deleted, and a selected wisp in a later chunk is such a
+// survivor when its dependency sits in an earlier one; once its own chunk
+// deletes it, it is no longer orphaned and must leave the report. A live
+// dependent stays, once, however many chunks orphan it; a selected wisp whose
+// chunk never committed stays too, because it is still there.
+func TestWispPurgeClosedOrphanReportDropsLaterChunkDeletions(t *testing.T) {
+	const live = "fx-live-step"
+
+	t.Run("all chunks commit", func(t *testing.T) {
+		s := useWispPurgeStub(t, 450)
+		jsonOutput = true
+		// closed[300] (chunk 2) and the live step depend on closed[10]
+		// (chunk 1); the live step depends on closed[420] (chunk 3) too.
+		s.deleter.dependents[s.closed[10]] = []string{s.closed[300], live}
+		s.deleter.dependents[s.closed[420]] = []string{live}
+
+		stdout, stderr, err := captureWispGC(t, func() error {
+			return runWispPurgeClosed(context.Background(), false, true, nil)
+		})
+		if err != nil {
+			t.Fatalf("runWispPurgeClosed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		obj := decodeSingleJSONObject(t, stdout)
+		got, _ := obj["orphaned_issues"].([]interface{})
+		if len(got) != 1 || got[0] != live {
+			t.Errorf("orphaned_issues = %v, want only the live step %s, once", got, live)
+		}
+	})
+
+	t.Run("later chunk fails", func(t *testing.T) {
+		s := useWispPurgeStub(t, 450)
+		jsonOutput = true
+		s.deleter.dependents[s.closed[10]] = []string{s.closed[420], live}
+		s.deleter.fail = failRequestContaining(s.closed[449], context.Canceled)
+
+		stdout, _, err := captureWispGC(t, func() error {
+			return runWispPurgeClosed(context.Background(), false, true, nil)
+		})
+		if err == nil {
+			t.Fatalf("runWispPurgeClosed succeeded, want the injected failure\nstdout:\n%s", stdout)
+		}
+		obj := decodeSingleJSONObject(t, stdout)
+		got, _ := obj["orphaned_issues"].([]interface{})
+		want := []interface{}{s.closed[420], live}
+		sort.Slice(got, func(i, j int) bool { return got[i].(string) < got[j].(string) })
+		sort.Slice(want, func(i, j int) bool { return want[i].(string) < want[j].(string) })
+		if !slices.Equal(got, want) {
+			t.Errorf("orphaned_issues = %v, want %v (the unconfirmed wisp survived)", got, want)
+		}
+	})
+}
