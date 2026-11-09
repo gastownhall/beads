@@ -706,6 +706,58 @@ func TestWispPurgeClosedReportsScanCap(t *testing.T) {
 	})
 }
 
+// TestWispPurgeClosedPreviewAndDryRunDoNotMutate pins AC-7: the no-force
+// preview and the explicit dry run perform no mutation and keep their
+// current output shapes — GH#4684's chunking is confined to the forced
+// mutation path.
+func TestWispPurgeClosedPreviewAndDryRunDoNotMutate(t *testing.T) {
+	t.Run("no-force preview", func(t *testing.T) {
+		s, d := useWispClosedGCStub(t, 450)
+		jsonOutput = true
+
+		stdout, _, err := runWispPurgeClosedCaptured(t, false, false)
+		if err != nil {
+			t.Fatalf("no-force preview: %v\nstdout:\n%s", err, stdout)
+		}
+		if len(d.requests) != 0 {
+			t.Errorf("the preview reached the deleter %d times; want 0", len(d.requests))
+		}
+		if len(s.issues) != 450 {
+			t.Errorf("the preview deleted %d wisps; want 0", 450-len(s.issues))
+		}
+		obj := decodeWispPurgeJSON(t, stdout)
+		if got := wispPurgeIntField(t, obj, "candidates"); got != 450 {
+			t.Errorf("candidates = %d; want 450 (the preview shape is unchanged)", got)
+		}
+		if dry, ok := obj["dry_run"].(bool); !ok || !dry {
+			t.Errorf("dry_run = %v; want true (the preview shape is unchanged)", obj["dry_run"])
+		}
+	})
+
+	t.Run("dry-run detailed preview", func(t *testing.T) {
+		s, d := useWispClosedGCStub(t, 450)
+		jsonOutput = true
+
+		stdout, _, err := runWispPurgeClosedCaptured(t, true, true)
+		if err != nil {
+			t.Fatalf("dry-run preview: %v\nstdout:\n%s", err, stdout)
+		}
+		if len(d.requests) != 1 || !d.requests[0].DryRun {
+			t.Errorf("dry run handed the deleter %d non-preview request(s); want exactly one DryRun preview", len(d.requests))
+		}
+		if len(s.issues) != 450 {
+			t.Errorf("the dry run deleted %d wisps; want 0", 450-len(s.issues))
+		}
+		obj := decodeWispPurgeJSON(t, stdout)
+		if dry, ok := obj["dry_run"].(bool); !ok || !dry {
+			t.Errorf("dry_run = %v; want true (the preview shape is unchanged)", obj["dry_run"])
+		}
+		if preview, ok := obj["preview"].(bool); !ok || !preview {
+			t.Errorf("preview = %v; want true (the preview shape is unchanged)", obj["preview"])
+		}
+	})
+}
+
 // ---- proxied route: a recording transactional provider ----
 
 // wispGCProxiedStubProvider records every unit of work the proxied purge
@@ -870,6 +922,37 @@ func TestWispPurgeClosedProxiedCommitsBoundedChunks(t *testing.T) {
 		}
 		if got := wispPurgeIntField(t, obj, "dependencies_removed"); got != 400 {
 			t.Errorf("dependencies_removed = %d; want 400 — the failed unit's counters are not published", got)
+		}
+	})
+
+	t.Run("previews mutate nothing", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			dryRun bool
+			force  bool
+		}{
+			{name: "no-force preview", dryRun: false, force: false},
+			{name: "dry run", dryRun: true, force: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				p := useWispGCProxiedStub(t, 450)
+				jsonOutput = true
+
+				stdout, _, err := runWispPurgeClosedProxiedCaptured(t, tc.dryRun, tc.force)
+				if err != nil {
+					t.Fatalf("proxied %s: %v\nstdout:\n%s", tc.name, err, stdout)
+				}
+				if len(p.deleteCalls) != 0 {
+					t.Errorf("the proxied %s attempted %d deletion(s); want 0", tc.name, len(p.deleteCalls))
+				}
+				obj := decodeWispPurgeJSON(t, stdout)
+				if got := wispPurgeIntField(t, obj, "candidates"); got != 450 {
+					t.Errorf("candidates = %d; want 450 (the preview shape is unchanged)", got)
+				}
+				if dry, ok := obj["dry_run"].(bool); !ok || !dry {
+					t.Errorf("dry_run = %v; want true (the preview shape is unchanged)", obj["dry_run"])
+				}
+			})
 		}
 	})
 }
