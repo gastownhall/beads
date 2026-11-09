@@ -92,8 +92,9 @@ type Issue struct {
 	// compare-and-set that lands, and every update or batch-apply update item
 	// that changes a column (a same-value patch writes nothing and leaves it).
 	// It does NOT change on writes that leave the issue row alone or touch only
-	// a derived cell: label edits (a label-only update included), dependency
-	// edits (a ParentID-only update included), comments, a heartbeat refresh,
+	// updated_at or a derived cell: label edits (a label-only update included;
+	// a real label change stamps only updated_at), dependency edits (a
+	// ParentID-only update included), comments, a heartbeat refresh,
 	// the is_blocked recompute a write settles on OTHER rows (a closed
 	// blocker's dependents included), and the direct-UPDATE paths that rewrite
 	// text without touching row_lock (RestoreFromSnapshotInTx, the compaction
