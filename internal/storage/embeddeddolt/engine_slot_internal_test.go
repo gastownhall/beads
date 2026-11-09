@@ -493,3 +493,148 @@ func TestEmbeddedEngineIdleRelease(t *testing.T) {
 		}
 	})
 }
+
+// TestEmbeddedEngineClose pins the final Close: it waits for the active
+// operation, releases the engine exactly once, and keeps operations queued
+// behind it, later operations and concurrent Closes from reopening it, each
+// Close returning only once the engine is released. A non-final Close of an
+// Open-cached store leaves it usable.
+func TestEmbeddedEngineClose(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("final close waits and releases once", func(t *testing.T) {
+		store, counter := newCountedEngineStore(t, "engineclose")
+		entered, release := make(chan struct{}), make(chan struct{})
+		releaseOnce := sync.OnceFunc(func() { close(release) })
+		holderDone, holderExited := make(chan error, 1), make(chan struct{})
+		// On failure, end the holder before the store's directory goes.
+		t.Cleanup(func() { releaseOnce(); <-holderExited })
+		go func() {
+			defer close(holderExited)
+			holderDone <- store.withConn(ctx, false, func(tx *sql.Tx) error {
+				close(entered)
+				<-release
+				var one int
+				return tx.QueryRowContext(ctx, "SELECT 1").Scan(&one)
+			})
+		}()
+		<-entered
+
+		queuedDone := make(chan error, 1)
+		go func() {
+			queuedDone <- store.withConn(ctx, false, func(tx *sql.Tx) error { return nil })
+		}()
+		closes := make(chan error, 2)
+		for range 2 {
+			go func() { closes <- store.Close() }()
+		}
+		select {
+		case err := <-closes:
+			t.Fatalf("Close returned (err=%v) while an operation held the engine", err)
+		case <-time.After(200 * time.Millisecond):
+		}
+		releaseOnce()
+		if err := <-holderDone; err != nil {
+			t.Fatalf("active operation: %v", err)
+		}
+		for range 2 {
+			if err := <-closes; err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+		}
+		if err := <-queuedDone; !errors.Is(err, errClosed) {
+			t.Fatalf("queued operation returned %v, want errClosed", err)
+		}
+		if _, err := store.GetIssue(ctx, "x"); !errors.Is(err, errClosed) {
+			t.Fatalf("later operation returned %v, want errClosed", err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatalf("repeated Close: %v", err)
+		}
+		if o, c := counter.opens.Load(), counter.closes.Load(); o != 1 || c != 1 {
+			t.Fatalf("opens=%d closes=%d, want one engine opened and released once", o, c)
+		}
+		requireEngineReleased(t, store)
+	})
+
+	t.Run("cached, read-only and preview stores", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		first, err := Open(ctx, beadsDir, "enginecached", "main")
+		if err != nil {
+			t.Fatal(err)
+		}
+		counter := &engineCounter{}
+		first.engine.open = counter.opener()
+		first.engine.idle = time.Hour
+		if err := first.SetConfig(ctx, "issue_prefix", "ec"); err != nil {
+			t.Fatal(err)
+		}
+		second, err := Open(ctx, beadsDir, "enginecached", "main")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if second != first {
+			t.Fatal("Open did not return the cached store")
+		}
+		if err := first.RunInTransaction(ctx, "bd: create ec-1", func(tx storage.Transaction) error {
+			return tx.CreateIssue(ctx, engineTestIssue("ec-1"), "tester")
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := second.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := first.GetIssue(ctx, "ec-1"); err != nil {
+			t.Fatalf("store unusable after a non-final Close: %v", err)
+		}
+		if counter.live() != 1 {
+			t.Fatalf("a non-final Close changed the engine (%d open)", counter.live())
+		}
+		if err := first.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if counter.live() != 0 {
+			t.Fatal("the final Close of a cached store left its engine open")
+		}
+		requireEngineReleased(t, first)
+
+		for name, open := range map[string]func(context.Context, string, string, string) (*EmbeddedDoltStore, error){
+			"read-only": OpenReadOnly,
+			"preview":   OpenForPreviewCommand,
+		} {
+			ro, err := open(ctx, beadsDir, "enginecached", "main")
+			if err != nil {
+				t.Fatalf("%s open: %v", name, err)
+			}
+			roCounter := &engineCounter{}
+			ro.engine.open = roCounter.opener()
+			ro.engine.idle = time.Hour
+			if _, err := ro.GetIssue(ctx, "ec-1"); err != nil {
+				t.Fatalf("%s read: %v", name, err)
+			}
+			if err := ro.Close(); err != nil {
+				t.Fatalf("%s close: %v", name, err)
+			}
+			if o, c := roCounter.opens.Load(), roCounter.closes.Load(); o != 1 || c != 1 {
+				t.Fatalf("%s store: opens=%d closes=%d, want 1/1", name, o, c)
+			}
+			requireEngineReleased(t, ro)
+		}
+	})
+}
+
+// requireEngineReleased proves with a raw OpenSQL that nothing in this
+// process still holds the store's engine: the open would otherwise wait out
+// its context in the driver's backoff.
+func requireEngineReleased(t *testing.T, store *EmbeddedDoltStore) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, cleanup, err := OpenSQL(ctx, store.dataDir, store.database, store.branch)
+	if err != nil {
+		t.Fatalf("raw open after Close: %v", err)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatalf("raw close: %v", err)
+	}
+}

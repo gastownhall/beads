@@ -53,6 +53,9 @@ type engineSlot struct {
 	// idleErr keeps the errors of idle disposals, which have no caller, for
 	// the store's Close to report.
 	idleErr error
+	// disposed is closed once the final Close has disposed the engine, for
+	// concurrent Closes to wait on.
+	disposed chan struct{}
 
 	// open is the engine opener (OpenSQL outside tests) and idle the expiry
 	// (defaultEngineIdle outside tests).
@@ -61,7 +64,7 @@ type engineSlot struct {
 }
 
 func newEngineSlot() *engineSlot {
-	return &engineSlot{sem: make(chan struct{}, 1), open: OpenSQL, idle: defaultEngineIdle}
+	return &engineSlot{sem: make(chan struct{}, 1), disposed: make(chan struct{}), open: OpenSQL, idle: defaultEngineIdle}
 }
 
 // dispose closes the cached engine, if any. Callers hold sem.
@@ -122,9 +125,7 @@ func (s *EmbeddedDoltStore) withEngine(ctx context.Context, fn func(db *sql.DB) 
 
 	reusable := false
 	defer func() {
-		// A final Close that found the slot busy left the engine for this
-		// operation to dispose.
-		if !reusable || ctx.Err() != nil || s.closed.Load() {
+		if !reusable || ctx.Err() != nil {
 			cleanupErr = errors.Join(cleanupErr, e.dispose())
 		}
 	}()
@@ -148,17 +149,14 @@ func (s *EmbeddedDoltStore) expireIdle(gen uint64) {
 	}
 }
 
-// closeEngine disposes the cached engine on the store's final Close. Callers
-// have already marked the store closed, so operations queued behind it return
-// errClosed; when an operation holds the slot, it disposes the engine as it
-// releases it.
+// closeEngine disposes the cached engine on the store's final Close, after
+// waiting for the active operation to finish. Callers have already marked the
+// store closed, so operations queued behind it return errClosed instead of
+// reopening the engine.
 func (s *EmbeddedDoltStore) closeEngine() error {
 	e := s.engine
-	select {
-	case e.sem <- struct{}{}:
-	default:
-		return nil
-	}
+	defer close(e.disposed)
+	e.sem <- struct{}{}
 	defer func() { <-e.sem }()
 	e.gen++
 	if e.timer != nil {

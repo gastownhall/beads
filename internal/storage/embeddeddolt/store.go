@@ -1060,7 +1060,12 @@ func (s *EmbeddedDoltStore) GetProvenanceByRef(ctx context.Context, ref string) 
 // process-scoped cache). When other references remain, Close is a no-op — the
 // store stays alive for the remaining callers. When the last reference calls
 // Close (or if the store was created directly via newStore), the underlying
-// resources are released.
+// resources are released: the final Close waits for the operation in
+// progress, if any, then releases the engine, and Closes racing it return
+// once it has. Operations still waiting to start fail with a closed-store
+// error. Because Close waits for running operations, it must not be called
+// from inside one of the store's own callbacks (a RunInTransaction function,
+// for one): that operation cannot finish until Close returns.
 //
 // It is safe to call multiple times.
 func (s *EmbeddedDoltStore) Close() error {
@@ -1072,6 +1077,7 @@ func (s *EmbeddedDoltStore) Close() error {
 		s.cleanGitRemoteCacheGarbage()
 		return err
 	}
+	<-s.engine.disposed
 	return nil
 }
 
