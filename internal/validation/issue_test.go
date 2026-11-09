@@ -280,7 +280,10 @@ func TestAssigneeMatches(t *testing.T) {
 		// bd-740y4x (PR #5644): a rig-qualified owner stored as "gascity/bob"
 		// and resolved by a layer that cannot carry "/" as "gascity--bob" is
 		// one principal; the exact "--" decodes to "/" (ga-2vy9p2), so the
-		// owner closes its own bead without --force, in either direction.
+		// pair matches in either direction. No bd close route calls
+		// AssigneeMatches: these rows are the expected-value oracle for
+		// ActorMatches. The close guard is CheckClosable in
+		// internal/storage/issueops, and TestCheckClosable pins the same pair.
 		{
 			name:    "rig-qualified owner under double-hyphen spelling passes (bd-740y4x)",
 			issue:   &types.Issue{ID: "bd-test", Status: types.StatusOpen, Assignee: "gascity/bob"},
