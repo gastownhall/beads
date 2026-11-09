@@ -101,14 +101,11 @@ func DetectTestPollution(issues []*types.Issue) []PollutionResult {
 		title := strings.ToLower(issue.Title)
 
 		// Title signals: either one alone is review-only (medium); both
-		// are high confidence.
+		// are high confidence. Reasons keep their historical order:
+		// prefix, description, generic title.
 		if testPrefixPattern.MatchString(title) {
 			points += titleSignalPoints
 			reasons = append(reasons, "Title starts with test prefix")
-		}
-		if genericTestTitle(title) {
-			points += titleSignalPoints
-			reasons = append(reasons, "Generic test title")
 		}
 
 		// Description signal (weak). hasAuthoredContent has already
@@ -119,6 +116,11 @@ func DetectTestPollution(issues []*types.Issue) []PollutionResult {
 		} else {
 			points++
 			reasons = append(reasons, "Very short description")
+		}
+
+		if genericTestTitle(title) {
+			points += titleSignalPoints
+			reasons = append(reasons, "Generic test title")
 		}
 
 		if points >= reportPoints {

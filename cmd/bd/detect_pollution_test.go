@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -257,5 +258,64 @@ func TestDetectTestPollution_ConfidenceBands(t *testing.T) {
 				t.Errorf("%s %q desc %q: score %v high %v (reasons %v), want score %v high %v", ids[i], tt.title, tt.desc, p.score, p.highConfidence(), p.reasons, tt.score, tt.high)
 			}
 		}
+	}
+}
+
+// TestDetectTestPollution_ReasonOrder pins the order reasons are reported in
+// (prefix, description, generic title), so JSON consumers see them in the
+// same relative order as before GH#5025's reweighting.
+func TestDetectTestPollution_ReasonOrder(t *testing.T) {
+	issue := &types.Issue{ID: "bd-r1", Title: "Test issue", Status: types.StatusOpen, IssueType: types.TypeTask}
+	p, ok := pollutedIDs([]*types.Issue{issue})[issue.ID]
+	if !ok {
+		t.Fatalf("%q not reported", issue.Title)
+	}
+	want := []string{"Title starts with test prefix", "No description", "Generic test title"}
+	if !slices.Equal(p.reasons, want) {
+		t.Errorf("reasons = %v, want %v", p.reasons, want)
+	}
+}
+
+// TestDetectTestPollution_PR5137Boundaries keeps PR #5137's boundary
+// regressions at GH#5025's approved weights (title signal 0.6, empty
+// description 0.2, short description 0.1). The PR pinned a test-prefixed
+// sequential ID with a thin description at >= 0.9; IDs are no longer
+// evidence, so that fixture is now exactly 0.7 (review-only).
+func TestDetectTestPollution_PR5137Boundaries(t *testing.T) {
+	tests := []struct {
+		name, id, title, desc string
+		score                 float64 // 0: not reported
+		high                  bool
+	}{
+		// Prefix 0.6 + short description 0.1 clears the 0.7 reporting bar.
+		{"short description dead zone closed", "bd-1hao", "test-foo", "x", 0.7, false},
+		// A normal-length description is authored content: never reported.
+		{"bare prefix, normal description", "bd-9f3", "test-migration cleanup", "Removes the legacy migration path once the new one is verified stable.", 0, false},
+		// No title signal: a counter ID plus a short description is 0.1.
+		{"sequential ID, short description, no prefix", "bd-42", "Fix login redirect bug", "See logs", 0, false},
+		// Prefix 0.6 + short description 0.1; the ID adds nothing.
+		{"prefix, sequential ID, short description", "test-42", "test-42 fixture", "wip", 0.7, false},
+		// Prefix 0.6 + short description 0.1 on a hash ID: review, not cleanup.
+		{"prefix, hash ID, thin description", "dcr-a3f9", "test-driver.sh isolation broken — constants.sh clobbers env", "Broke isolation", 0.7, false},
+		// Generic phrase 0.6 + empty description 0.2 stays below the 0.9 cleanup band.
+		{"generic title substring alone", "dcr-b7e1", "Fix test issue detection regression", "", 0.8, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issue := &types.Issue{ID: tt.id, Title: tt.title, Description: tt.desc, Status: types.StatusOpen, IssueType: types.TypeBug}
+			p, ok := pollutedIDs([]*types.Issue{issue})[tt.id]
+			if tt.score == 0 {
+				if ok {
+					t.Fatalf("reported (score %.2f, reasons %v), want unreported", p.score, p.reasons)
+				}
+				return
+			}
+			if !ok {
+				t.Fatalf("not reported, want score %.1f", tt.score)
+			}
+			if p.score != tt.score || p.highConfidence() != tt.high {
+				t.Errorf("score %v high %v (reasons %v), want score %v high %v", p.score, p.highConfidence(), p.reasons, tt.score, tt.high)
+			}
+		})
 	}
 }
