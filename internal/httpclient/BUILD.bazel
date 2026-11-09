@@ -300,6 +300,17 @@ sh_test(
     tags = ["embedded"],
 )
 
+# Tests that pin divergence-ledger rows, resolved by
+# //internal/httpclient/encode:encode_test's crossPackagePins registry
+# (internal/httpclient/encode/ledger_pins_test.go).
+exports_files(
+    [
+        "bulk_roles_test.go",
+        "gate_fields_test.go",
+    ],
+    visibility = ["//internal/httpclient/encode:__pkg__"],
+)
+
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(
