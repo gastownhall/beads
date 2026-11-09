@@ -20,9 +20,16 @@ type PollutionResult struct {
 	Reasons []string
 }
 
+// Scores are summed in integer tenths so the band edges are exact.
+const (
+	titleSignalPoints = 6 // test title prefix, or generic test phrase
+	reportPoints      = 7 // Score 0.7: reported for review
+	highPoints        = 9 // Score 0.9: high confidence, eligible for cleanup
+)
+
 // HighConfidence reports whether the hit scored in the high-confidence band.
 func (p PollutionResult) HighConfidence() bool {
-	return p.Score >= 0.9
+	return p.Score >= float64(highPoints)/10
 }
 
 // testPrefixPattern matches common test issue title prefixes.
@@ -33,6 +40,14 @@ var testPrefixPattern = regexp.MustCompile(`^(test|benchmark|sample|tmp|temp|deb
 // as one signal among several.
 func HasTestTitlePrefix(title string) bool {
 	return testPrefixPattern.MatchString(strings.ToLower(title))
+}
+
+// genericTestTitle reports whether the lowercased title contains a generic
+// test phrase such as "test issue".
+func genericTestTitle(title string) bool {
+	return strings.Contains(title, "issue for testing") ||
+		strings.Contains(title, "test issue") ||
+		strings.Contains(title, "sample issue")
 }
 
 // PollutionCandidateFilter selects the issues the pollution scorer considers.
@@ -80,39 +95,36 @@ func DetectTestPollution(issues []*types.Issue) []PollutionResult {
 		if !pollutionCandidate(issue) || hasAuthoredContent(issue) {
 			continue
 		}
-		score := 0.0
+		points := 0
 		var reasons []string
 
 		title := strings.ToLower(issue.Title)
 
-		// Check for test prefixes (strong signal)
+		// Title signals: either one alone is review-only (medium); both
+		// are high confidence.
 		if testPrefixPattern.MatchString(title) {
-			score += 0.7
+			points += titleSignalPoints
 			reasons = append(reasons, "Title starts with test prefix")
 		}
-
-		// Check for generic/empty description (weak signal)
-		if len(strings.TrimSpace(issue.Description)) == 0 {
-			score += 0.2
-			reasons = append(reasons, "No description")
-		} else if len(issue.Description) < 20 {
-			score += 0.1
-			reasons = append(reasons, "Very short description")
-		}
-
-		// Check for generic test titles
-		if strings.Contains(title, "issue for testing") ||
-			strings.Contains(title, "test issue") ||
-			strings.Contains(title, "sample issue") {
-			score += 0.5
+		if genericTestTitle(title) {
+			points += titleSignalPoints
 			reasons = append(reasons, "Generic test title")
 		}
 
-		// Only include if score is above threshold
-		if score >= 0.7 {
+		// Description signal (weak). hasAuthoredContent has already
+		// skipped any issue whose description is substantive.
+		if strings.TrimSpace(issue.Description) == "" {
+			points += 2
+			reasons = append(reasons, "No description")
+		} else {
+			points++
+			reasons = append(reasons, "Very short description")
+		}
+
+		if points >= reportPoints {
 			results = append(results, PollutionResult{
 				Issue:   issue,
-				Score:   score,
+				Score:   float64(points) / 10,
 				Reasons: reasons,
 			})
 		}
