@@ -17,7 +17,10 @@ import (
 const GitignoreTemplate = `# Dolt database (managed by Dolt, not git)
 dolt/
 embeddeddolt/
-proxieddb/
+# Legacy proxied-server root (bd <= 1.2.x). No trailing slash: current bd may
+# place a regular file here so an older bd refuses this workspace instead of
+# creating an empty database in it.
+proxieddb
 
 # Runtime files
 bd.sock
@@ -135,7 +138,7 @@ var requiredPatterns = []string{
 	"last_pull",
 	"dolt/",
 	"embeddeddolt/",
-	"proxieddb/",
+	"proxieddb",
 	"ephemeral.sqlite3",
 	"dolt-server.pid",
 	"dolt-server.log",
