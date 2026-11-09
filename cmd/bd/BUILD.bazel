@@ -935,6 +935,7 @@ go_test(
         "import_skip_invalid_embedded_test.go",
         "import_skip_invalid_unit_test.go",
         "import_sync_prefix_test.go",
+        "import_vocabulary_unit_test.go",
         "info_embedded_test.go",
         "info_kv_exclusion_test.go",
         "info_proxied_integration_test.go",
