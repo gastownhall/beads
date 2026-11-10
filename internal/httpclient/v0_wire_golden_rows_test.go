@@ -305,6 +305,12 @@ func v0WireRows() []v0WireRow {
 			_, err := lifecycle(c).Update(c.ctx, issueops.UpdateRequest{Actor: v0WireActor, IssueID: "bd-1", Claim: true})
 			return err
 		}},
+		// The claim's own bypass (GH#7049): one more optional boolean, sent
+		// only when true, beside the claim it requires.
+		{name: "updateIssue.claim-force-claim-blocked", call: func(c v0WireCall) error {
+			_, err := lifecycle(c).Update(c.ctx, issueops.UpdateRequest{Actor: v0WireActor, IssueID: "bd-1", Claim: true, ForceClaimBlocked: true})
+			return err
+		}},
 		// A server without issues.update.claim: a claim-only update becomes
 		// the template pre-read, claimIssue and the hydrating re-read.
 		{name: "claimIssue.update-claim-legacy", withoutCaps: []string{"issues.update.claim"}, call: func(c v0WireCall) error {

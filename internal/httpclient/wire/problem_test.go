@@ -192,6 +192,62 @@ func TestNotClosableUsesOpenChildrenPresenceAsTheDiscriminator(t *testing.T) {
 	})
 }
 
+// TestNotClaimableUsesBlockersPresenceAsTheDiscriminator is not_closable's
+// rule on the claim's code: one code, two refusals, and the `blockers` member
+// is what tells them apart. Present means the LOCAL-BLOCKER refusal — a claim
+// of an issue with a live blocker — and the typed BlockedError comes back
+// whole, wrapping ErrClaimBlocked exactly as the embedded store's own claim
+// refusal does; absent is the status's own not_claimable and stays the
+// ClaimConflictError.
+func TestNotClaimableUsesBlockersPresenceAsTheDiscriminator(t *testing.T) {
+	t.Run("present means a live local blocker", func(t *testing.T) {
+		err := refuseWith(t, 409, `{"status":409,"code":"not_claimable","param":"claim",`+
+			`"blockers":[{"id":"ga-2","kind":"local","type":"blocks"},{"id":"ga-3","kind":"local","type":"waits-for"}]}`, nil, Request{
+			Op: OpUpdateIssue, Method: http.MethodPatch,
+			Path: "/v0/beads/issues/ga-1", IssueID: "ga-1",
+		})
+		var blocked *issueops.BlockedError
+		if !errors.As(err, &blocked) {
+			t.Fatalf("err is %T (%v), want *issueops.BlockedError", err, err)
+		}
+		if blocked.IssueID != "ga-1" {
+			t.Errorf("IssueID = %q, want ga-1, which the request supplied", blocked.IssueID)
+		}
+		if len(blocked.Blockers) != 2 {
+			t.Fatalf("Blockers = %v, want the two the wire named", blocked.Blockers)
+		}
+		if blocked.Blockers[0].ID != "ga-2" || blocked.Blockers[0].Type != types.DepBlocks {
+			t.Errorf("blockers[0] = %+v, want ga-2 blocks", blocked.Blockers[0])
+		}
+		if blocked.Blockers[1].ID != "ga-3" || blocked.Blockers[1].Type != types.DepWaitsFor {
+			t.Errorf("blockers[1] = %+v, want ga-3 waits-for", blocked.Blockers[1])
+		}
+		if !errors.Is(err, issueops.ErrClaimBlocked) {
+			t.Error("the wrapped sentinel does not match ErrClaimBlocked")
+		}
+		if errors.Is(err, issueops.ErrNotClaimable) {
+			t.Error("the local-blocker refusal classified as the status refusal")
+		}
+	})
+
+	t.Run("absent means the status refusal", func(t *testing.T) {
+		err := refuseWith(t, 409, `{"status":409,"code":"not_claimable","param":"claim","issue_status":"closed"}`, nil, Request{
+			Op: OpUpdateIssue, Method: http.MethodPatch,
+			Path: "/v0/beads/issues/ga-1", IssueID: "ga-1",
+		})
+		var conflict *issueops.ClaimConflictError
+		if !errors.As(err, &conflict) {
+			t.Fatalf("err is %T (%v), want *issueops.ClaimConflictError", err, err)
+		}
+		if !errors.Is(err, issueops.ErrNotClaimable) {
+			t.Errorf("the wrapped sentinel does not match ErrNotClaimable: %v", err)
+		}
+		if errors.Is(err, issueops.ErrClaimBlocked) {
+			t.Error("the status refusal classified as the local-blocker refusal")
+		}
+	})
+}
+
 func TestDependencyCycleUsesIssueIDPresenceAsTheDiscriminator(t *testing.T) {
 	// The hierarchy refusal and the scheduling cycle share one code because they
 	// share one recovery. The typed distinction rides on the extension members.

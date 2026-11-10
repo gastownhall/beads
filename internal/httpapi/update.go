@@ -39,7 +39,7 @@ const (
 var (
 	updateRequestMembers = []string{
 		"actor", updateClaimMember, "expected_assignee", "expected_status", "expected_version",
-		"force_assignee_transfer", "force_close_policy", "force_notes_overwrite", "allow_template",
+		"force_assignee_transfer", "force_claim_blocked", "force_close_policy", "force_notes_overwrite", "allow_template",
 		updatePatchMember,
 	}
 	issuePatchMembers = []string{
@@ -183,6 +183,20 @@ func (s *Server) updateRequest(w http.ResponseWriter, r *http.Request, id string
 	if !ok {
 		return issueops.UpdateRequest{}, false
 	}
+	// force_claim_blocked is the claim's own bypass, so it is claim-only —
+	// the force_notes_overwrite rule, applied to a request-level member: a
+	// member that bypasses a refusal the request cannot earn is refused HERE
+	// rather than silently ignored, so a caller that meant `claim` never
+	// believes a bypass that did nothing.
+	forceClaimBlocked, ok := s.booleanMember(w, r, members, "force_claim_blocked")
+	if !ok {
+		return issueops.UpdateRequest{}, false
+	}
+	if forceClaimBlocked && !claim {
+		s.fail(w, r, InvalidArgument("force_claim_blocked", ReasonInvalidValue,
+			"`force_claim_blocked` bypasses the fence on a CLAIM; send `claim` with it"))
+		return issueops.UpdateRequest{}, false
+	}
 	// allow_template is passed through: the role owns the template guard and
 	// what standing it down means.
 	allowTemplate, ok := s.booleanMember(w, r, members, "allow_template")
@@ -251,6 +265,7 @@ func (s *Server) updateRequest(w http.ResponseWriter, r *http.Request, id string
 		ExpectedAssignee:      expectedAssignee,
 		ForceClosePolicy:      forceClosePolicy,
 		ForceAssigneeTransfer: forceAssigneeTransfer,
+		ForceClaimBlocked:     forceClaimBlocked,
 		ForceNotesOverwrite:   forceNotesOverwrite,
 		AllowTemplate:         allowTemplate,
 		Provenance:            updateProvenance,
@@ -608,6 +623,22 @@ func (s *Server) failUpdate(w http.ResponseWriter, r *http.Request, request issu
 	// `patch.assignee` and steers toward a force this request cannot send.
 	case request.Claim && (errors.Is(err, storage.ErrAlreadyClaimed) || errors.Is(err, storage.ErrNotClaimable)):
 		s.fail(w, r, named(claimRefusal(err), updateClaimMember))
+
+	// The claim's LOCAL-BLOCKER refusal, the third way a claim is answered:
+	// `not_claimable` naming `claim` with the blockers in the `blockers`
+	// member — the member that tells a client which refusal this is, where the
+	// status's own not_claimable carries `issue_status` instead. Matched as
+	// its own arm because it shares NEITHER sentinel with the close-policy
+	// refusal below (ErrCloseBlocked) nor the claim-conflict vocabulary above:
+	// the same BlockedError type carries all three families' blockers, and the
+	// sentinel is the only thing that tells them apart. `force_claim_blocked`
+	// is the bypass, and it never gets here: the role skips the guard when the
+	// request sends it.
+	case request.Claim && errors.Is(err, storage.ErrClaimBlocked):
+		refused()
+		s.fail(w, r, named(claimBlockedResult(err,
+			"clear the blocker, or send `force_claim_blocked`"),
+			updateClaimMember))
 
 	case errors.Is(err, issueops.ErrCloseOpenChildren):
 		res := named(newResult(CodeNotClosable,

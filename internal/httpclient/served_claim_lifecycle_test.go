@@ -1624,3 +1624,193 @@ func TestServedUpdateFieldLengthBoundsAreTheServersAndNotThisClients(t *testing.
 			"if the two legs now classify it alike, L-update-fieldlen has retired and this pin should go with it", refErr)
 	}
 }
+
+// forceClaimBlockedTransport passes every request through to the in-process
+// server unchanged and counts the updateIssue PATCHes, so a case can tell a
+// claim rode ONE update rather than a fallback, and a refused one dialed
+// nothing at all. Unlike predatesUpdateClaimTransport it plays no server from
+// another era: the masking that varies is in the HANDSHAKE, not the transport.
+type forceClaimBlockedTransport struct {
+	next        http.RoundTripper
+	updateDials atomic.Int32
+}
+
+func (p *forceClaimBlockedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method == http.MethodPatch {
+		p.updateDials.Add(1)
+	}
+	return p.next.RoundTrip(req)
+}
+
+// forceClaimBlockedSubject is updateClaimSubject's twin for the
+// issues.update.forceClaimBlocked token: a client store over env's server
+// through the counting transport above, carrying the served handshake as is
+// when advertised and without that one token otherwise — the server a build
+// from before the claim's local-blocker refusal looks like to this client.
+func (env *servedEnv) forceClaimBlockedSubject(t *testing.T, advertised bool) (*Store, *forceClaimBlockedTransport) {
+	t.Helper()
+	snapshot, err := env.subject.snapshot(t.Context())
+	if err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+	if !slices.Contains(snapshot.Capabilities, wire.CapIssuesUpdateForceClaimBlocked) {
+		t.Fatalf("the served build does not advertise %q, though its updateIssue refuses a blocked claim", wire.CapIssuesUpdateForceClaimBlocked)
+	}
+	masked := *snapshot
+	transport := &forceClaimBlockedTransport{next: http.DefaultTransport}
+	if !advertised {
+		masked.Capabilities = slices.DeleteFunc(slices.Clone(snapshot.Capabilities), func(token string) bool {
+			return token == wire.CapIssuesUpdateForceClaimBlocked
+		})
+	}
+	// Deliberately v0 and outside the protocol seam; servedDialsOutsideTheSwitch
+	// records why.
+	client, err := wire.New(env.subject.target.BaseURL, nil, wire.Options{HTTPClient: &http.Client{Transport: transport}})
+	if err != nil {
+		t.Fatalf("build the client: %v", err)
+	}
+	return New(env.subject.target, client, &masked), transport
+}
+
+// TestServedUpdateClaimRefusesALocalBlockedIssue is the served pin of the
+// claim's live-blocker refusal: an unforced claim of an issue with a live
+// local blocker comes back as the TYPED BlockedError wrapping ErrClaimBlocked,
+// blockers included, and the row is untouched — the same typed error the
+// embedded store's own claim returns, reconstructed from the problem's
+// `blockers` member rather than parsed out of prose.
+func TestServedUpdateClaimRefusesALocalBlockedIssue(t *testing.T) {
+	env := newServedEnv(t, "hlcb")
+	ctx := t.Context()
+	const blocker, blocked = "hlcb-blocker", "hlcb-blocked"
+	if err := env.createIssue(ctx, &types.Issue{
+		ID: blocker, Title: blocker, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+	}, "seed"); err != nil {
+		t.Fatalf("seed the blocker %s: %v", blocker, err)
+	}
+	if err := env.createIssue(ctx, &types.Issue{
+		ID: blocked, Title: blocked, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+	}, "seed"); err != nil {
+		t.Fatalf("seed the blocked issue %s: %v", blocked, err)
+	}
+	if err := env.addDependency(ctx, &types.Dependency{IssueID: blocked, DependsOnID: blocker, Type: types.DepBlocks}, "seed"); err != nil {
+		t.Fatalf("seed the blocking edge: %v", err)
+	}
+
+	lifecycle, err := env.subject.IssueLifecycle()
+	if err != nil {
+		t.Fatalf("IssueLifecycle(): %v", err)
+	}
+	_, err = lifecycle.Update(ctx, issueops.UpdateRequest{Actor: "claimant", IssueID: blocked, Claim: true})
+	if !errors.Is(err, issueops.ErrClaimBlocked) {
+		t.Fatalf("claim of a blocked issue returned %v, want the typed ErrClaimBlocked refusal", err)
+	}
+	var refused *issueops.BlockedError
+	if !errors.As(err, &refused) {
+		t.Fatalf("err is %T (%v), want *issueops.BlockedError", err, err)
+	}
+	if refused.IssueID != blocked {
+		t.Errorf("IssueID = %q, want %q", refused.IssueID, blocked)
+	}
+	if len(refused.Blockers) != 1 || refused.Blockers[0].ID != blocker {
+		t.Errorf("Blockers = %v, want the one live blocker %q", refused.Blockers, blocker)
+	}
+	if errors.Is(err, issueops.ErrNotClaimable) {
+		t.Error("the local-blocker refusal classified as the status refusal")
+	}
+
+	// The refusal is the same no-mutation guarantee the direct route gives:
+	// still open, still unassigned.
+	row, err := env.reference.GetIssue(ctx, blocked)
+	if err != nil {
+		t.Fatalf("read the blocked issue back: %v", err)
+	}
+	if row.Status != types.StatusOpen || row.Assignee != "" {
+		t.Errorf("the refused claim left %s as %s/%q, want open/unassigned", blocked, row.Status, row.Assignee)
+	}
+}
+
+// TestServedUpdateClaimForceOverridesALocalBlocker is the bypass's served pin:
+// `force_claim_blocked` claims the blocked issue anyway — ONE updateIssue
+// call, the blocker's row untouched by the claim.
+func TestServedUpdateClaimForceOverridesALocalBlocker(t *testing.T) {
+	env := newServedEnv(t, "hlcf")
+	ctx := t.Context()
+	const blocker, blocked = "hlcf-blocker", "hlcf-blocked"
+	for _, issue := range []string{blocker, blocked} {
+		if err := env.createIssue(ctx, &types.Issue{
+			ID: issue, Title: issue, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		}, "seed"); err != nil {
+			t.Fatalf("seed %s: %v", issue, err)
+		}
+	}
+	if err := env.addDependency(ctx, &types.Dependency{IssueID: blocked, DependsOnID: blocker, Type: types.DepBlocks}, "seed"); err != nil {
+		t.Fatalf("seed the blocking edge: %v", err)
+	}
+
+	subject, transport := env.forceClaimBlockedSubject(t, true)
+	lifecycle, err := subject.IssueLifecycle()
+	if err != nil {
+		t.Fatalf("IssueLifecycle(): %v", err)
+	}
+	if _, err := lifecycle.Update(ctx, issueops.UpdateRequest{
+		Actor: "claimant", IssueID: blocked, Claim: true, ForceClaimBlocked: true,
+	}); err != nil {
+		t.Fatalf("forced claim of a blocked issue: %v", err)
+	}
+	if got := transport.updateDials.Load(); got != 1 {
+		t.Errorf("the forced claim dialed %d updateIssue calls, want 1", got)
+	}
+	row, err := env.reference.GetIssue(ctx, blocked)
+	if err != nil {
+		t.Fatalf("read the blocked issue back: %v", err)
+	}
+	if row.Status != types.StatusInProgress || row.Assignee != "claimant" {
+		t.Errorf("the forced claim left %s as %s/%q, want in_progress/claimant", blocked, row.Status, row.Assignee)
+	}
+	blockerRow, err := env.reference.GetIssue(ctx, blocker)
+	if err != nil {
+		t.Fatalf("read the blocker back: %v", err)
+	}
+	if blockerRow.Status != types.StatusOpen {
+		t.Errorf("the claim closed or moved the blocker %s to %q", blocker, blockerRow.Status)
+	}
+}
+
+// TestServedUpdateForceClaimBlockedNeedsTheToken is the pre-dial refusal: a
+// server without issues.update.forceClaimBlocked predates the member, so the
+// client cannot know whether its refusal vocabulary exists at all — it refuses
+// the request with ErrUnsupported naming the token and NOTHING is dialed, the
+// row neither claimed nor patched.
+func TestServedUpdateForceClaimBlockedNeedsTheToken(t *testing.T) {
+	env := newServedEnv(t, "hlct2")
+	ctx := t.Context()
+	const id = "hlct2-issue"
+	if err := env.createIssue(ctx, &types.Issue{
+		ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+	}, "seed"); err != nil {
+		t.Fatalf("seed %s: %v", id, err)
+	}
+
+	predating, transport := env.forceClaimBlockedSubject(t, false)
+	lifecycle, err := predating.IssueLifecycle()
+	if err != nil {
+		t.Fatalf("IssueLifecycle(): %v", err)
+	}
+	_, err = lifecycle.Update(ctx, issueops.UpdateRequest{
+		Actor: "claimant", IssueID: id, Claim: true, ForceClaimBlocked: true,
+	})
+	var unsupported *storage.ErrUnsupported
+	if !errors.As(err, &unsupported) || unsupported.Capability != wire.CapIssuesUpdateForceClaimBlocked {
+		t.Fatalf("forced claim without the token returned %v, want ErrUnsupported naming %s", err, wire.CapIssuesUpdateForceClaimBlocked)
+	}
+	if got := transport.updateDials.Load(); got != 0 {
+		t.Errorf("the refused request dialed %d updateIssue calls, want 0", got)
+	}
+	row, err := env.reference.GetIssue(ctx, id)
+	if err != nil {
+		t.Fatalf("read the issue back: %v", err)
+	}
+	if row.Status != types.StatusOpen || row.Assignee != "" {
+		t.Errorf("the refused request left %s as %s/%q, want it untouched", id, row.Status, row.Assignee)
+	}
+}
