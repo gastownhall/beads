@@ -126,6 +126,7 @@ go_test(
         "testdoltserver_env_test.go",
         "testdoltserver_unreachable_test.go",
         "tmpfs_test.go",
+        "waitforserver_probe_test.go",
     ],
     data = glob(["testdata/**"]),
     embed = [":testutil"],
