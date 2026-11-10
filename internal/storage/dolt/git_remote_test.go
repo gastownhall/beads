@@ -2342,3 +2342,34 @@ func TestGitProtocolPullDeclinedConflictAbortsMerge(t *testing.T) {
 		t.Errorf("reconciled issue title = %q, want the peer's %q (theirs)", issue.Title, "peer title")
 	}
 }
+
+// TestGitProtocolPeerPullDeclinedConflictIsAbortedAndReported pins the
+// federation contract (PullFrom) on the same CLI route: equivalent
+// divergence, no existing merge, and the declined peer pull must return the
+// CAPTURED conflicts with a nil error — like the SQL route's
+// MergeConflictsError contract (bd-578h9.15) — while leaving no open merge or
+// live conflict rows behind.
+func TestGitProtocolPeerPullDeclinedConflictIsAbortedAndReported(t *testing.T) {
+	f := setupGitProtocolDeclineFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	store := f.store
+
+	createLocalIssue(t, ctx, store, "gh-fed", "local federation title")
+	sourceInsertIssue(t, f.peerDir, "gh-fed", "peer federation title")
+	sourceCommitAndPush(t, f.peerDir, "add gh-fed")
+	waitOutGitRemoteReadCache()
+
+	conflicts, err := store.PullFrom(ctx, "origin")
+	if err != nil {
+		t.Fatalf("PullFrom error = %v, want captured conflicts with a nil error", err)
+	}
+	if len(conflicts) != 1 || conflicts[0].Field != "issues" {
+		t.Errorf("PullFrom conflicts = %v, want the declined issues conflict", conflicts)
+	}
+	assertNoOpenMerge(t, ctx, store)
+
+	// With the merge aborted the database still accepts writes — the
+	// conflict is reported as data, not left wedging the working set.
+	createLocalIssue(t, ctx, store, "gh-fed-after", "created after the aborted peer pull")
+}
