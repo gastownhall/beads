@@ -4,9 +4,11 @@ package embeddeddolt
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -125,6 +127,124 @@ func TestPushCommitsPendingChangesFirst(t *testing.T) {
 			}
 			if afterPush == beforePush {
 				t.Fatalf("%s must commit pending changes before pushing (#5433): HEAD did not move (%s), the created issue is still uncommitted", tc.name, afterPush)
+			}
+		})
+	}
+}
+
+// TestRemoteOperationsRejectUncommittedChanges is the GH#5433 remote half:
+// with an enabled pattern covering the tracked issues table and its latest
+// write stranded in the working set, every push and pull verb's
+// CommitPending guard returns the typed residual finding and stops there,
+// before any remote entry point runs. PushTo and PullFrom included: their
+// nonexistent-peer failure must not preempt the finding. Each verb gets its
+// own store so one verb's outcome cannot mask another's.
+func TestRemoteOperationsRejectUncommittedChanges(t *testing.T) {
+	ctx := t.Context()
+
+	cases := []struct {
+		name string
+		call func(*EmbeddedDoltStore) error
+	}{
+		{name: "Push", call: func(s *EmbeddedDoltStore) error { return s.Push(ctx) }},
+		{name: "ForcePush", call: func(s *EmbeddedDoltStore) error { return s.ForcePush(ctx) }},
+		{name: "PushRemote", call: func(s *EmbeddedDoltStore) error { return s.PushRemote(ctx, defaultRemote, false) }},
+		{name: "PushRemoteForce", call: func(s *EmbeddedDoltStore) error { return s.PushRemote(ctx, defaultRemote, true) }},
+		{name: "PushTo", call: func(s *EmbeddedDoltStore) error { return s.PushTo(ctx, "no-such-peer") }},
+		{name: "Pull", call: func(s *EmbeddedDoltStore) error { return s.Pull(ctx) }},
+		{name: "PullWithStrategy", call: func(s *EmbeddedDoltStore) error { return s.PullWithStrategy(ctx, "ours") }},
+		{name: "PullRemote", call: func(s *EmbeddedDoltStore) error { return s.PullRemote(ctx, defaultRemote) }},
+		{name: "PullRemoteWithStrategy", call: func(s *EmbeddedDoltStore) error { return s.PullRemoteWithStrategy(ctx, defaultRemote, "theirs") }},
+		{name: "PullFrom", call: func(s *EmbeddedDoltStore) error { _, err := s.PullFrom(ctx, "no-such-peer"); return err }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir := filepath.Join(t.TempDir(), ".beads")
+			const database = "stallrem"
+			store, err := Open(ctx, beadsDir, database, "main")
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+
+			rawSQL := func(t *testing.T, query string, args []any, dest ...any) {
+				t.Helper()
+				db, cleanup, err := OpenSQL(ctx, filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+				if err != nil {
+					t.Fatalf("OpenSQL: %v", err)
+				}
+				defer func() { _ = cleanup() }()
+				if len(dest) == 0 {
+					_, err = db.ExecContext(ctx, query, args...)
+				} else {
+					err = db.QueryRowContext(ctx, query, args...).Scan(dest...)
+				}
+				if err != nil {
+					t.Fatalf("%q: %v", query, err)
+				}
+			}
+
+			if err := store.SetConfig(ctx, "issue_prefix", "stall"); err != nil {
+				t.Fatalf("SetConfig(issue_prefix): %v", err)
+			}
+			if err := store.Commit(ctx, "bd init"); err != nil {
+				t.Fatalf("Commit(bd init): %v", err)
+			}
+
+			// The stall fixture: a tracked issue, a noncanonical pattern over
+			// issues, and a write the pattern keeps out of every staging.
+			issue := &types.Issue{
+				ID:        "stall-" + tc.name,
+				Title:     "tracked at head",
+				Status:    types.StatusOpen,
+				Priority:  2,
+				IssueType: types.TypeTask,
+			}
+			if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+				t.Fatalf("CreateIssue: %v", err)
+			}
+			if err := store.Commit(ctx, "test: track the issue"); err != nil {
+				t.Fatalf("Commit(track the issue): %v", err)
+			}
+			rawSQL(t, "INSERT INTO dolt_ignore (pattern, ignored) VALUES ('issues', true)", nil)
+			if err := store.Commit(ctx, "test: register ignore pattern"); err != nil {
+				t.Fatalf("Commit(register ignore pattern): %v", err)
+			}
+			rawSQL(t, "UPDATE issues SET title = 'stranded' WHERE id = ?", []any{issue.ID})
+
+			headBefore, err := store.GetCurrentCommit(ctx)
+			if err != nil {
+				t.Fatalf("GetCurrentCommit: %v", err)
+			}
+
+			var got presentedAuth
+			captureRemoteEntryPoints(t, &got)
+
+			verbErr := tc.call(store)
+			var residual *storage.UncommittedChangesError
+			if !errors.As(verbErr, &residual) {
+				t.Fatalf("%s in the stall = %v, want the typed residual finding through the guard", tc.name, verbErr)
+			}
+			if errors.Is(verbErr, errStopRemote) || got.remote != "" {
+				t.Fatalf("%s reached its remote entry point (remote %q) despite the stall; the CommitPending guard must stop it before transport", tc.name, got.remote)
+			}
+			if len(residual.Tables) != 1 || residual.Tables[0] != "issues" || residual.Committed {
+				t.Fatalf("%s residual = %+v, want exactly [issues] with Committed=false", tc.name, residual)
+			}
+
+			headAfter, err := store.GetCurrentCommit(ctx)
+			if err != nil {
+				t.Fatalf("GetCurrentCommit after %s: %v", tc.name, err)
+			}
+			if headAfter != headBefore {
+				t.Fatalf("%s moved HEAD across the refusal: %s -> %s", tc.name, headBefore, headAfter)
+			}
+			var working, head string
+			rawSQL(t, "SELECT title FROM issues WHERE id = ?", []any{issue.ID}, &working)
+			rawSQL(t, "SELECT title FROM issues AS OF 'HEAD' WHERE id = ?", []any{issue.ID}, &head)
+			if working != "stranded" || head != "tracked at head" {
+				t.Fatalf("after %s issue title working=%q HEAD=%q, want working=stranded HEAD=%q", tc.name, working, head, "tracked at head")
 			}
 		})
 	}

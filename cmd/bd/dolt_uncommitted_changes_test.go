@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -82,18 +83,22 @@ func TestDoltCommitReportsUncommittedChanges(t *testing.T) {
 	}
 }
 
-// TestDoltPushRejectsUncommittedChanges: an embedded push stops at its
-// CommitPending guard when the commit left tracked changes behind, so the
-// push fails with the report and never prints "Push complete.".
+// TestDoltPushRejectsUncommittedChanges: an embedded push, plain or
+// --force, stops at its CommitPending guard when the commit left tracked
+// changes behind, so the push fails with the report and never prints
+// "Push complete.".
 func TestDoltPushRejectsUncommittedChanges(t *testing.T) {
-	for _, remote := range []string{"", "backup"} {
-		t.Run("remote="+remote, func(t *testing.T) {
+	for _, tc := range []struct {
+		remote string
+		force  bool
+	}{{"", false}, {"backup", false}, {"", true}, {"backup", true}} {
+		t.Run(fmt.Sprintf("remote=%s/force=%v", tc.remote, tc.force), func(t *testing.T) {
 			st := &failingPushStore{pushErr: misleadingResidual(true)}
 			saveAndRestoreGlobals(t)
 			resetCommandContext()
 			pinStorageMode(t, false)
 			store = st
-			for name, value := range map[string]string{"force": "false", "yes": "false", "no-adopt": "true", "remote": remote} {
+			for name, value := range map[string]string{"force": fmt.Sprint(tc.force), "yes": "false", "no-adopt": "true", "remote": tc.remote} {
 				if err := doltPushCmd.Flags().Set(name, value); err != nil {
 					t.Fatalf("set --%s: %v", name, err)
 				}
@@ -101,6 +106,7 @@ func TestDoltPushRejectsUncommittedChanges(t *testing.T) {
 			t.Cleanup(func() {
 				_ = doltPushCmd.Flags().Set("remote", "")
 				_ = doltPushCmd.Flags().Set("no-adopt", "false")
+				_ = doltPushCmd.Flags().Set("force", "false")
 			})
 			var runErr error
 			stdout, stderr := captureStdio(t, func() { runErr = doltPushCmd.RunE(doltPushCmd, nil) })
