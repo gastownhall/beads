@@ -200,6 +200,24 @@ func TestEmbeddedDeferAutoWake(t *testing.T) {
 		}
 	})
 
+	t.Run("frozen_list_ready_leaves_expired_defer_asleep", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Frozen snooze (list --ready)", "--type", "task")
+		bdDefer(t, bd, dir, issue.ID, "--until", "2020-01-01")
+		before, _ := embeddedDeferWakeMessagesSince(t, beadsDir, "")
+
+		ids := bdReadIDsWithEnv(t, bd, dir, deferWakeFreezeEnv(t, markerDir, true), "list", "--ready", "--json")
+		if ids[issue.ID] {
+			t.Errorf("frozen bd list --ready listed %s: the sweep woke it during a freeze", issue.ID)
+		}
+		if after, commits := embeddedDeferWakeMessagesSince(t, beadsDir, before); after != before {
+			t.Errorf("frozen bd list --ready moved HEAD %s -> %s (commits %q)", before, after, commits)
+		}
+		status, deferUntil := showDeferState(t, bd, dir, issue.ID)
+		if status != "deferred" || deferUntil == nil {
+			t.Errorf("frozen bd list --ready changed %s to status=%q defer_until=%v, want deferred with its date", issue.ID, status, deferUntil)
+		}
+	})
+
 	t.Run("dateless_defer_never_wakes", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Indefinite icebox", "--type", "task")
 		bdDefer(t, bd, dir, issue.ID)
