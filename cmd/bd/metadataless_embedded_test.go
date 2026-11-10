@@ -115,6 +115,18 @@ func metadatalessListIDs(t *testing.T, stdout, stderr string) []string {
 	return ids
 }
 
+// metadatalessCopyDatabase copies one embedded database directory under a
+// new name, building a second, real candidate for the selection tests. The
+// copy runs between bd processes, so the source database is settled on disk.
+func metadatalessCopyDatabase(t *testing.T, beadsDir, from, to string) {
+	t.Helper()
+	src := filepath.Join(beadsDir, "embeddeddolt", from)
+	dst := filepath.Join(beadsDir, "embeddeddolt", to)
+	if err := os.CopyFS(dst, os.DirFS(src)); err != nil {
+		t.Fatalf("copy database %q to %q: %v", from, to, err)
+	}
+}
+
 // metadatalessShowStatus reports the status bd show prints for id, parsed
 // from its --json payload (a JSON array, like bd list --json).
 func metadatalessShowStatus(t *testing.T, bd, dir string, extraEnv []string, args ...string) string {
@@ -134,6 +146,27 @@ func metadatalessShowStatus(t *testing.T, bd, dir string, extraEnv []string, arg
 		t.Fatalf("parse bd show %v: %v\nstdout:\n%s\nstderr:\n%s", args, jsonErr, stdout, stderr)
 	}
 	return shown[0].Status
+}
+
+// metadatalessRequireRefusal asserts a metadata-less selection refusal: the
+// command must fail, emit no issue payload, and name every want substring
+// (candidates, remedies) in its output. A --json command carries the refusal
+// as a JSON error envelope on stdout (the bd JSON contract); a plain command
+// prints it on stderr. Neither stream may carry a success payload.
+func metadatalessRequireRefusal(t *testing.T, what string, stdout, stderr string, err error, want ...string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("%s succeeded on a workspace whose database selection is ambiguous; stdout:\n%s", what, stdout)
+	}
+	if strings.Contains(stdout, "\"id\"") {
+		t.Errorf("%s printed an issue payload despite refusing:\n%s", what, stdout)
+	}
+	output := stdout + "\n" + stderr
+	for _, wantSub := range want {
+		if !strings.Contains(output, wantSub) {
+			t.Errorf("%s refusal does not name %q:\nstdout:\n%s\nstderr:\n%s", what, wantSub, stdout, stderr)
+		}
+	}
 }
 
 // TestEmbeddedMetadatalessWorkspaceAdoptsSoleDatabase pins the selection rule
@@ -235,5 +268,43 @@ func TestEmbeddedMetadatalessWorkspaceCloseAfterExportFixturePersistsToSoleDatab
 	metadatalessRestoreMetadata(t, beadsDir, saved)
 	if status := metadatalessShowStatus(t, bd, dir, nil, id, "--json"); status != "closed" {
 		t.Fatalf("issue %s status = %q after list-then-close on a metadata-less workspace, want closed (the acknowledged close went to a phantom database)", id, status)
+	}
+}
+
+// TestEmbeddedMetadatalessWorkspaceRefusesSeveralDatabases pins GH#4135 AC-3:
+// a metadata-less embedded workspace holding several databases, with no
+// BEADS_DOLT_SERVER_DATABASE selection, refuses the open before touching
+// storage — for reads and writes alike — leaving both candidates and their
+// issue states exactly as they were.
+func TestEmbeddedMetadatalessWorkspaceRefusesSeveralDatabases(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir := metadatalessInit(t, bd, "gh4135")
+	id := metadatalessCreate(t, bd, dir, "ambiguous workspace issue")
+	metadatalessCopyDatabase(t, beadsDir, "gh4135", "gh4135b")
+	saved := metadatalessRemoveMetadata(t, beadsDir)
+	metadatalessRequireDatabases(t, beadsDir, "gh4135", "gh4135b")
+
+	stdout, stderr, err := metadatalessRun(t, bd, dir, nil, "list", "--json")
+	metadatalessRequireRefusal(t, "bd list --json", stdout, stderr, err,
+		"gh4135", "gh4135b", "BEADS_DOLT_SERVER_DATABASE", "metadata.json")
+
+	stdout, stderr, err = metadatalessRun(t, bd, dir, nil, "close", id, "-r", "must refuse")
+	metadatalessRequireRefusal(t, "bd close", stdout, stderr, err,
+		"gh4135", "gh4135b", "BEADS_DOLT_SERVER_DATABASE", "metadata.json")
+
+	// No database was created, removed, or renamed, and neither candidate's
+	// issue state changed: read the original through restored metadata and
+	// the copy through the environment override (metadata-backed selection
+	// honors BEADS_DOLT_SERVER_DATABASE first).
+	metadatalessRequireDatabases(t, beadsDir, "gh4135", "gh4135b")
+	metadatalessRestoreMetadata(t, beadsDir, saved)
+	if status := metadatalessShowStatus(t, bd, dir, nil, id, "--json"); status != "open" {
+		t.Fatalf("issue %s status = %q in gh4135 after refused commands, want open", id, status)
+	}
+	if status := metadatalessShowStatus(t, bd, dir, []string{"BEADS_DOLT_SERVER_DATABASE=gh4135b"}, id, "--json"); status != "open" {
+		t.Fatalf("issue %s status = %q in gh4135b after refused commands, want open", id, status)
 	}
 }
