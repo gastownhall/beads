@@ -2351,7 +2351,9 @@ func importJSONLForSync(reason string) {
 	warnJSONLWithoutDoltRemote(reason + " JSONL import")
 
 	// Shell out to `bd import` — same pattern as exportJSONLForCommit,
-	// including BD_GIT_HOOK=1 (which also keeps the subprocess's workspace
+	// including re-executing this process's own bd (hookSubprocessBinary)
+	// rather than whatever bd PATH selects (GH#5922), and BD_GIT_HOOK=1
+	// (which also keeps the subprocess's workspace
 	// gate acquisition fail-fast; see hookSubprocessEnv). No import path
 	// consults that variable to decide whether to import, so clearing it
 	// suppressed nothing the import needs; all it did was let the
@@ -2363,7 +2365,7 @@ func importJSONLForSync(reason string) {
 	// checkout's tracked file: GH#6680's second symptom, from the fix for its
 	// first. Keeping the marker also suppresses the subprocess's auto-backup,
 	// matching the export lane (hookSubprocessEnv).
-	cmd := exec.Command("bd", "import", "--quiet", fullPath)
+	cmd := exec.Command(hookSubprocessBinary(), "import", "--quiet", fullPath)
 	cmd.Dir = exportSubprocessDir(beadsDir)
 	cmd.Env = hookSubprocessEnv(os.Environ())
 

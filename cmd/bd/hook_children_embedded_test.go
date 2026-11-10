@@ -12,12 +12,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/testutil"
 )
@@ -216,4 +218,89 @@ func TestEmbeddedHookChildrenRunTheHookBinary(t *testing.T) {
 			t.Errorf("staged JSONL lacks the pending issue (not staged into the commit):\n%s", staged)
 		}
 	})
+
+	// importHookLane covers one sync lane end to end: put a newer revision of
+	// an existing issue in the tracked JSONL, run the real bd's hook with the
+	// decoy first on PATH, and assert the revision landed in the store without
+	// the decoy ever running.
+	importHookLane := func(t *testing.T, hookName, warning string) {
+		t.Helper()
+		dir, beadsDir, _ := bdInit(t, f.bd, "--prefix", "hci")
+		issueID := bdCreateSilent(t, f.bd, dir, "import child original title", "--type", "task")
+		bdExport(t, f.bd, dir, "-o", filepath.Join(".beads", "issues.jsonl"))
+		f.setBDConfig(t, dir, "import.auto", "true")
+
+		revisedTitle := "import child revised by " + hookName
+		reviseJSONLIssue(t, filepath.Join(beadsDir, "issues.jsonl"), issueID,
+			revisedTitle, time.Now().UTC().Add(2*time.Second))
+
+		f.resetDecoy(t)
+		hookArgs := []string{"hooks", "run", hookName}
+		if hookName == "post-checkout" {
+			// git passes [previous-HEAD, new-HEAD, flag]; the import lane runs
+			// only for a branch checkout (flag=1).
+			head := strings.TrimSpace(f.runGit(t, dir, "rev-parse", "HEAD"))
+			hookArgs = append(hookArgs, head, head, "1")
+		}
+		_, stderr, err := f.runBD(dir, f.hookChildEnv(dir), hookArgs...)
+
+		if f.decoyRan(t) {
+			t.Errorf("the decoy bd ran: the %s import child resolved 'bd' from PATH instead of the running binary (GH#5922)", hookName)
+		}
+		if strings.Contains(stderr, warning) {
+			t.Errorf("the %s import failed:\n%s", hookName, stderr)
+		}
+		if err != nil {
+			t.Errorf("bd hooks run %s: %v\n%s", hookName, err, stderr)
+		}
+
+		got := bdShow(t, f.bd, dir, issueID)
+		if got.Title != revisedTitle {
+			t.Errorf("store title after %s = %q, want the JSONL's newer revision %q", hookName, got.Title, revisedTitle)
+		}
+	}
+
+	t.Run("post-merge import", func(t *testing.T) {
+		importHookLane(t, "post-merge", "post-merge import warning")
+	})
+
+	t.Run("post-checkout import", func(t *testing.T) {
+		importHookLane(t, "post-checkout", "post-checkout import warning")
+	})
+}
+
+// reviseJSONLIssue rewrites one issue's line in the exported JSONL: a new
+// title and an updated_at strictly newer than the store's, which is the shape
+// the upsert import applies.
+func reviseJSONLIssue(t *testing.T, path, issueID, title string, updatedAt time.Time) {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	found := false
+	for i, line := range lines {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("JSONL line %d is not JSON: %v\n%s", i, err, line)
+		}
+		if rec["id"] != issueID {
+			continue
+		}
+		rec["title"] = title
+		rec["updated_at"] = updatedAt.Format(time.RFC3339)
+		out, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines[i] = string(out)
+		found = true
+	}
+	if !found {
+		t.Fatalf("fixture: issue %s is not in %s", issueID, path)
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
