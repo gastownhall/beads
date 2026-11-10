@@ -702,3 +702,65 @@ func TestIsBlocked_ConditionalBlocksInsertOntoClosedTarget(t *testing.T) {
 		}
 	}
 }
+
+// TestIsBlocked_ConditionalBlocksReasonEditFlipsDependent edits only a closed
+// target's close reason through UpdateIssue: crossing between a non-failure
+// and a failure reason flips the conditional dependent's stored bit in the
+// same write, without touching the dependent's updated_at.
+func TestIsBlocked_ConditionalBlocksReasonEditFlipsDependent(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	updatedAt := func(id string) string {
+		t.Helper()
+		var s string
+		if err := store.db.QueryRowContext(ctx, "SELECT CAST(updated_at AS CHAR) FROM issues WHERE id = ?", id).Scan(&s); err != nil {
+			t.Fatalf("read updated_at for %s: %v", id, err)
+		}
+		return s
+	}
+
+	for i, targetWisp := range []bool{false, true} {
+		suffix := string(rune('0' + i))
+		a, b := "isb-cbr-a"+suffix, "isb-cbr-b"+suffix
+		if targetWisp {
+			createWisp(t, ctx, store, a)
+		} else {
+			createPerm(t, ctx, store, a)
+		}
+		createPerm(t, ctx, store, b)
+		if err := store.AddDependency(ctx, &types.Dependency{
+			IssueID: b, DependsOnID: a, Type: types.DepConditionalBlocks,
+		}, "tester"); err != nil {
+			t.Fatalf("AddDependency: %v", err)
+		}
+		if err := store.CloseIssue(ctx, a, "completed successfully", "tester", ""); err != nil {
+			t.Fatalf("CloseIssue: %v", err)
+		}
+		if !getIsBlocked(t, ctx, store, "issues", b) {
+			t.Fatalf("target wisp=%v: success close should leave %s blocked", targetWisp, b)
+		}
+		before := updatedAt(b)
+
+		steps := []struct {
+			reason      string
+			wantBlocked bool
+		}{
+			{"failed downstream", false},
+			{"done after all", true},
+		}
+		for _, step := range steps {
+			if err := store.UpdateIssue(ctx, a, map[string]interface{}{"close_reason": step.reason}, "tester"); err != nil {
+				t.Fatalf("UpdateIssue close_reason %q: %v", step.reason, err)
+			}
+			if got := getIsBlocked(t, ctx, store, "issues", b); got != step.wantBlocked {
+				t.Errorf("target wisp=%v: reason edited to %q: stored is_blocked(%s) = %v, want %v", targetWisp, step.reason, b, got, step.wantBlocked)
+			}
+			if after := updatedAt(b); after != before {
+				t.Errorf("target wisp=%v: reason edit to %q touched %s updated_at: %s -> %s", targetWisp, step.reason, b, before, after)
+			}
+		}
+	}
+}
