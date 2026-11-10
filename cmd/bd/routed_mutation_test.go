@@ -886,6 +886,42 @@ func TestAutoRouteResolvesPlanningRepoMirrorToOwner(t *testing.T) {
 			t.Fatalf("project copy comments = %+v, want it left without any", copyComments)
 		}
 	})
+
+	t.Run("read (resolveAndGetIssueWithRouting)", func(t *testing.T) {
+		primaryStore, _, planningDir := setupAutoRouteWithHydratedCopy(t, "maintainer", "routing.maintainer")
+		ctx := context.Background()
+
+		// Diverge the owner from the copy, the way any planning-side change
+		// does: bd show of the copy must answer with the owner's current
+		// state, not the stale mirror.
+		planningStore, err := openForeignStore(ctx, filepath.Join(planningDir, ".beads"), foreignWrite)
+		if err != nil {
+			t.Fatalf("open the planning store for the diverging update: %v", err)
+		}
+		if err := planningStore.UpdateIssue(ctx, "shared-hub", map[string]interface{}{"title": "planning moved on"}, "test"); err != nil {
+			t.Fatalf("update the planning row: %v", err)
+		}
+		if err := planningStore.Close(); err != nil {
+			t.Fatalf("close the planning store: %v", err)
+		}
+
+		result, err := resolveAndGetIssueWithRouting(ctx, primaryStore, "shared-hub")
+		if err != nil {
+			t.Fatalf("resolveAndGetIssueWithRouting of a hydrated copy: %v", err)
+		}
+		defer result.Close()
+		requireRedirectedCopy(t, "show", result, planningDir)
+		if result.Issue.Title != "planning moved on" {
+			t.Fatalf("resolved title = %q, want the planning owner's current state %q", result.Issue.Title, "planning moved on")
+		}
+		copyRow, err := primaryStore.GetIssue(ctx, "shared-hub")
+		if err != nil {
+			t.Fatalf("reread the project copy: %v", err)
+		}
+		if copyRow.Title != "test issue shared-hub" {
+			t.Fatalf("project copy title = %q after the routed read, want it left %q", copyRow.Title, "test issue shared-hub")
+		}
+	})
 }
 
 // committedIssue returns id as the HEAD commit of beadsDir's database holds
