@@ -86,6 +86,16 @@ type EmbeddedDoltStore struct {
 	// (e.g. the post-command autocommit net, or the commit itself) - only the
 	// migration step is skipped.
 	intent openIntent
+
+	// migrationsAppliedAtOpen records how many schema migrations THIS store's
+	// open-time initSchema pass applied (#7283): the migrating verb grants
+	// consent before the open, so the open applies the pending migrations
+	// and the later ApplySchemaMigrations pass counts zero. Set once during
+	// initSchema, before the constructor publishes the store; read-only and
+	// preview opens skip initSchema entirely and keep the zero value. A store
+	// handed back by the Open cache shares its creator's count: the cache
+	// returns the instance whose construction did the migrating.
+	migrationsAppliedAtOpen int
 }
 
 // lenientSharedGateGuidance is the blunt migrate-or-adopt block shared by the
@@ -665,6 +675,13 @@ func (s *EmbeddedDoltStore) ApplySchemaMigrations(ctx context.Context) (int, err
 	return schema.MigrateUp(ctx, conn)
 }
 
+// MigrationsAppliedAtOpen reports how many schema migrations this store's
+// open-time pass applied (#7283). Implements storage.SchemaMigrator; see the
+// interface for why the count is construction-time and immutable.
+func (s *EmbeddedDoltStore) MigrationsAppliedAtOpen() int {
+	return s.migrationsAppliedAtOpen
+}
+
 func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 	db, cleanup, err := OpenSQL(ctx, s.dataDir, "", "")
 	if err != nil {
@@ -772,7 +789,14 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 
 	// Embedded mode relies on the dolthub/driver/v2's local file/concurrency
 	// controls; schema.MigrateUpWithLock requires a sql-server session lock.
-	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+	//
+	// The pass's count is retained on the store before the error handling
+	// below (#7283): a tolerated refusal keeps whatever work actually landed
+	// (zero for today's refusals, which fire before any migration applies),
+	// and this is the only place the open-time count exists.
+	applied, err := schema.MigrateUp(ctx, conn)
+	s.migrationsAppliedAtOpen = applied
+	if err != nil {
 		var consentErr *schema.MigrateConsentError
 		if s.toleratesConsentRefusal() && errors.As(err, &consentErr) {
 			fmt.Fprint(os.Stderr, consentErr.WorkingSetWarning())

@@ -4623,6 +4623,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   just `bd show`'s DESCRIPTION field. An explicit `GLAMOUR_STYLE` override
   still takes priority over the detected background.
 
+- **`bd migrate schema` now reports the migrations the open applied, and
+  stamps the workspace version on every successful run**
+  ([#7283](https://github.com/gastownhall/beads/issues/7283), reported by
+  @csells). On a shared server the migrating verb grants its consent before
+  the store opens, so the open applies the pending migrations and the
+  command's own pass counts zero: the run that actually migrated printed
+  `✓ Schema already at v66` (or `"status": "current"` with `--json`),
+  skipped the version-marker stamp that `bd doctor` and the git-hook health
+  check read, and never marked the command as a writer. The command now
+  totals its own pass, the open's pass, and the version-bump maintenance
+  pass that ran before the open, and reports that: the migrating run says
+  `✓ Applied N schema migration(s)`, `--json` reports
+  `"status": "applied"` with the real count, and a following run on a
+  current database still says `✓ Schema already at vN`. Marker
+  reconciliation also runs on a run that applied nothing — a stale marker
+  left by an earlier refusal is repaired — but marker-only repair no longer
+  counts as a write, so it never triggers an auto-commit of unrelated
+  uncommitted edits.
+
 ### Added
 
 - **`POST /v0/beads/issues:batchApply` accepts up to 1000 items, up from 100.**

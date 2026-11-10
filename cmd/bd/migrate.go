@@ -653,8 +653,14 @@ func handleSchemaMigrate() error {
 	}
 
 	latest := schema.LatestVersion()
+	// This verb's consent lets the main store's open apply the pending
+	// migrations before this pass runs (#7283, #5920), so the explicit pass's
+	// own count is zero on the very run that migrated. Total it with the
+	// open's count — the work is real, and this command caused it — and drive
+	// status, text and write tracking from the total.
+	total := applied + migrator.MigrationsAppliedAtOpen()
 	status := "current"
-	if applied > 0 {
+	if total > 0 {
 		status = "applied"
 		commandDidWrite.Store(true)
 		// Stamp the version markers the refused version-bump reconciliation
@@ -670,16 +676,16 @@ func handleSchemaMigrate() error {
 	if jsonOutput {
 		return outputJSON(map[string]interface{}{
 			"status":         status,
-			"applied":        applied,
+			"applied":        total,
 			"latest_version": latest,
 		})
 	}
 
-	if applied == 0 {
+	if total == 0 {
 		fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Schema already at v%d", latest)))
 		return nil
 	}
-	fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Applied %d schema migration(s); schema now at v%d", applied, latest)))
+	fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Applied %d schema migration(s); schema now at v%d", total, latest)))
 	return nil
 }
 

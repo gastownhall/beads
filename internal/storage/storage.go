@@ -861,6 +861,16 @@ type RemoteRefPruner interface {
 
 type SchemaMigrator interface {
 	ApplySchemaMigrations(ctx context.Context) (applied int, err error)
+	// MigrationsAppliedAtOpen reports how many schema migrations THIS store's
+	// open-time pass applied while constructing it (gastownhall/beads#7283).
+	// On a shared server the `bd migrate schema` verb grants consent before
+	// the open, so the open applies the pending migrations and a later
+	// ApplySchemaMigrations pass counts zero — without this count the run
+	// that migrated reported "already at" and skipped its version stamp.
+	// The count is immutable after construction: a bypassed (read-only,
+	// gateway) or refused open leaves zero, and a later explicit apply pass
+	// never updates it.
+	MigrationsAppliedAtOpen() int
 }
 
 // Compactor squashes old Dolt commits while preserving recent ones.

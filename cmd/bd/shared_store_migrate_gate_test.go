@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -199,6 +200,12 @@ func TestSharedServerVersionBumpDoesNotPromoteCursor(t *testing.T) {
 	if got := cursor(); got != schema.LatestVersion() {
 		t.Fatalf("cursor = %d after bd migrate schema, want %d", got, schema.LatestVersion())
 	}
+	// #7283: the run above migrated during the open (its own explicit pass
+	// counted zero), so it must say so — not the "already at vN" no-op line
+	// that used to hide the work on the very run that did it.
+	if !strings.Contains(stdout, "Applied 1 schema migration(s)") {
+		t.Errorf("bd migrate schema reported %q, want the Applied/1 line (gastownhall/beads#7283):\n%s", stdout, stdout)
+	}
 }
 
 // TestServerModeReadRefusesASchemaItsReadsCannotQuery is the other half of the
@@ -339,5 +346,104 @@ func TestServerModeReadRefusesASchemaItsReadsCannotQuery(t *testing.T) {
 	stdout, stderr, code = run("list")
 	if code != 0 || !strings.Contains(stdout, "rdb-1") {
 		t.Fatalf("bd list after bd migrate schema: exit %d, want the issue listed\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+}
+
+// TestSharedServerMigrateSchemaReportsTheMigrationsItApplied reproduces
+// gastownhall/beads#7283: on a shared server `bd migrate schema` applies the
+// pending migrations during the store open (under the verb's consent), so
+// runMigrateSchema's own ApplySchemaMigrations counts 0, reports "current",
+// and skips the applied branch that stamps the workspace version.
+func TestSharedServerMigrateSchemaReportsTheMigrationsItApplied(t *testing.T) {
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available, skipping")
+	}
+
+	repo := t.TempDir()
+	beadsDir := filepath.Join(repo, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o755); err != nil {
+		t.Fatalf("create .beads: %v", err)
+	}
+	database := uniqueTestDBName(t)
+	if err := (&configfile.Config{
+		Backend:        configfile.BackendDolt,
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: testDoltServerPort,
+		DoltDatabase:   database,
+	}).Save(beadsDir); err != nil {
+		t.Fatalf("save metadata: %v", err)
+	}
+
+	ctx := context.Background()
+	store, err := dolt.New(ctx, &dolt.Config{
+		Path:            filepath.Join(beadsDir, "dolt"),
+		BeadsDir:        beadsDir,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testDoltServerPort,
+		Database:        database,
+		CreateIfMissing: true,
+	})
+	if err != nil {
+		t.Fatalf("create test store: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "shr"); err != nil {
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close setup store: %v", err)
+	}
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+
+	admin, err := sql.Open("mysql", doltutil.ServerDSN{
+		Host: "127.0.0.1", Port: testDoltServerPort, User: "root", Database: database,
+	}.String())
+	if err != nil {
+		t.Fatalf("connect to test dolt server: %v", err)
+	}
+	t.Cleanup(func() { admin.Close() })
+	if _, err := admin.ExecContext(ctx,
+		"DELETE FROM schema_migrations WHERE version = ?", schema.LatestVersion()); err != nil {
+		t.Fatalf("regress schema_migrations: %v", err)
+	}
+
+	bd := buildBDForInitTests(t)
+	cmd := exec.Command(bd, "migrate", "schema", "--json")
+	cmd.Dir = repo
+	cmd.Env = append(filteredEnvForContextBinding("BEADS_DIR", "BEADS_DB", "BD_DB",
+		"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_DATABASE", schema.AllowRemoteMigrateEnv),
+		"HOME="+t.TempDir(),
+		"XDG_CONFIG_HOME="+t.TempDir(),
+		"BEADS_TEST_MODE=1",
+		"BEADS_TEST_SERVER=1",
+		"BEADS_DIR="+beadsDir,
+		schema.AllowRemoteMigrateEnv+"=0",
+	)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("bd migrate schema --json: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	var cursor int
+	if err := admin.QueryRowContext(ctx,
+		"SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&cursor); err != nil {
+		t.Fatalf("read schema cursor: %v", err)
+	}
+	if cursor != schema.LatestVersion() {
+		t.Fatalf("cursor = %d after bd migrate schema, want %d", cursor, schema.LatestVersion())
+	}
+
+	var result struct {
+		Status  string `json:"status"`
+		Applied int    `json:"applied"`
+	}
+	if err := json.Unmarshal([]byte(stdout.String()), &result); err != nil {
+		t.Fatalf("parse --json output %q: %v", stdout.String(), err)
+	}
+	if result.Status != "applied" || result.Applied < 1 {
+		t.Fatalf("bd migrate schema migrated the database (cursor now v%d) but reported status=%q applied=%d; want status=\"applied\" applied>=1 (gastownhall/beads#7283)\nstdout:\n%s\nstderr:\n%s",
+			cursor, result.Status, result.Applied, stdout.String(), stderr.String())
 	}
 }

@@ -397,6 +397,14 @@ type DoltStore struct {
 	// createdDatabase reports whether this store's open created its database
 	// (serverConnFacts.created); see CreatedDatabase.
 	createdDatabase bool
+
+	// migrationsAppliedAtOpen records how many schema migrations THIS store's
+	// open-time initSchema pass applied (#7283): on a shared server the
+	// migrating verb grants consent before the open, so the open applies the
+	// pending migrations and the later ApplySchemaMigrations pass counts
+	// zero. Immutable after construction — read-only/gateway opens and
+	// tolerated refusals leave it at zero.
+	migrationsAppliedAtOpen int
 }
 
 // Config holds Dolt database configuration
@@ -2602,6 +2610,13 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// binary.
 	if !cfg.ReadOnly && !cfg.Gateway {
 		applied, err := store.initSchema(ctx, dbFacts.bootstrapHeal)
+		// Retain what the open applied before anything else can discard it
+		// (#7283): this is the only place the migrating open's count exists,
+		// and the reporting pass that needs it runs after this constructor
+		// returns. A tolerated refusal reports what the aborted pass applied
+		// (zero for every tolerated refusal today, since each refuses before
+		// migrating), so the pool rebuild below stays correct either way.
+		store.migrationsAppliedAtOpen = applied
 		if err != nil {
 			tolerated := (cfg.LenientOpen && warnLenientOpenRefusal(err)) ||
 				(cfg.RemoteSyncOpen && warnRemoteSyncOpenRefusal(err))
@@ -3803,6 +3818,13 @@ func (s *DoltStore) ApplySchemaMigrations(ctx context.Context) (int, error) {
 	}
 	defer migDB.Close()
 	return initSchemaOnDBWithRetry(ctx, migDB)
+}
+
+// MigrationsAppliedAtOpen reports how many schema migrations this store's
+// open-time pass applied (#7283). Implements storage.SchemaMigrator; see the
+// interface for why the count is construction-time and immutable.
+func (s *DoltStore) MigrationsAppliedAtOpen() int {
+	return s.migrationsAppliedAtOpen
 }
 
 // openMigrationDB opens a one-off connection pool for schema migrations with no
