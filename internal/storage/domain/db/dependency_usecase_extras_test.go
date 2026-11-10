@@ -1,6 +1,7 @@
 package db
 
 import (
+	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -25,6 +26,7 @@ func (s *testSuite) TestDependencyUseCase_Extras() {
 		s.Run("SelfEdgeReturnsSelfDependency", s.ducAddBulkSelfEdge)
 		s.Run("InsertsEdgesAndReturnsAdded", s.ducAddBulkInserts)
 		s.Run("RejectsHierarchyBlockingButAllowsSiblings", s.ducAddBulkHierarchyBlocking)
+		s.Run("RejectsCrossPrefixLocalHierarchyBlocking", s.ducAddBulkCrossPrefixHierarchyBlocking)
 		s.Run("PerEdgeCycleCheckBlocksCycleCreation", s.ducAddBulkPerEdgeCycle)
 		s.Run("SkipPerEdgeStillRunsFinalCheck", s.ducAddBulkFinalCycleCheck)
 		s.Run("SkipPerEdgeAcceptsAcyclicBulk", s.ducAddBulkSkipPerEdgeAcyclic)
@@ -404,4 +406,35 @@ func (s *testSuite) countDepRows(table, sourceID string) int {
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM "+table+" WHERE issue_id = ?", sourceID).Scan(&count))
 	return count
+}
+
+// ducAddBulkCrossPrefixHierarchyBlocking is GH#8299 at the repository gate:
+// a parent and child of different prefixes held in this database have a local
+// hierarchy, so a blocking edge between them is refused whichever way it
+// points. Only a target the database does not hold skips the check.
+func (s *testSuite) ducAddBulkCrossPrefixHierarchyBlocking() {
+	const (
+		parent = "xb-duc-hier-parent"
+		child  = "xa-duc-hier-child"
+	)
+	s.seedIssueRow(parent)
+	s.seedIssueRow(child)
+	_, err := s.Runner().ExecContext(s.Ctx(),
+		"INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by, metadata) VALUES (?, ?, ?, ?, NOW(), 'tester', '{}')",
+		depid.New(child, parent), child, parent, string(types.DepParentChild))
+	s.Require().NoError(err)
+
+	repo := NewDependencySQLRepository(s.Runner())
+	err = repo.ValidateBlockingHierarchy(s.Ctx(), newDep(child, parent, types.DepBlocks))
+	s.Require().Error(err, "%s is %s's local ancestor", parent, child)
+	s.Contains(err.Error(), "cannot be blocked by its ancestor")
+
+	_, err = s.depUseCase().AddDependencies(s.Ctx(), []*types.Dependency{
+		newDep(parent, child, types.DepBlocks),
+	}, "tester", domain.BulkAddDepsOpts{})
+	s.Require().Error(err, "%s is %s's local descendant", child, parent)
+	s.Contains(err.Error(), "cannot be blocked by its descendant")
+
+	s.Require().NoError(repo.ValidateBlockingHierarchy(s.Ctx(), newDep(child, "zz-duc-hier-unheld", types.DepBlocks)),
+		"a target this database does not hold has no local hierarchy")
 }

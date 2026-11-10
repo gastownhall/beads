@@ -512,7 +512,7 @@ func RunBatchCreatorRefusesAnAbsentEdgeTarget(t *testing.T, ctx context.Context,
 // going to hold is not a miss.
 //
 // Both shapes are asserted because they are one rule with two spellings
-// (issueops.IsExternalDepTarget). A role that refused either would make a plan
+// (issueops.DepTargetKindFor, for a target this database does not hold). A role that refused either would make a plan
 // naming work in a sibling rig uncreatable, which is a thing `bd dep add` has
 // always allowed.
 func RunBatchCreatorAcceptsAForeignEdgeTarget(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {

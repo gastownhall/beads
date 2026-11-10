@@ -133,15 +133,6 @@ func DepTargetKindFor(sourceID, targetID string, heldAsWisp, heldAsIssue bool) D
 	}
 }
 
-// IsExternalDepTarget reports whether a dependency target is an "external:"
-// reference or carries another repository's prefix. It is a prefix-only
-// verdict and no longer decides where an edge is written (DepTargetKindFor
-// does); the batch hierarchy end gates still consult it.
-func IsExternalDepTarget(sourceID, targetID string) bool {
-	return strings.HasPrefix(targetID, "external:") ||
-		types.ExtractPrefix(sourceID) != types.ExtractPrefix(targetID)
-}
-
 // ClassifyDepTarget picks the typed target column for an edge by looking the
 // target up in tx and applying DepTargetKindFor. A read failure is returned
 // rather than read as absence: routing a local target to depends_on_external
@@ -776,8 +767,9 @@ func cycleDetectionTables() []string {
 }
 
 // CheckBlockingHierarchyInTx rejects blocking dependencies between an issue
-// and its own ancestor or descendant. Cross-prefix/external targets must be
-// filtered by the caller because no local hierarchy can connect them.
+// and its own ancestor or descendant. Targets this database does not hold
+// (DepTargetExternal) must be filtered by the caller because no local
+// hierarchy can connect them; a held target is checked whatever its prefix.
 func CheckBlockingHierarchyInTx(ctx context.Context, tx DBTX, dep *types.Dependency, depTables []string) error {
 	if dep.Type != types.DepBlocks && dep.Type != types.DepConditionalBlocks {
 		return nil

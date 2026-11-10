@@ -312,7 +312,13 @@ func (r *dependencySQLRepositoryImpl) ValidateBlockingHierarchy(ctx context.Cont
 	if dep == nil {
 		return errors.New("db: DependencySQLRepository.ValidateBlockingHierarchy: dep must not be nil")
 	}
-	if issueops.IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
+	// Only a target this database does not hold has no local hierarchy to
+	// conflict with; a held one is checked whatever its prefix (GH#8299).
+	col, err := r.pickDepTargetColumn(ctx, dep.IssueID, dep.DependsOnID)
+	if err != nil {
+		return err
+	}
+	if col == issueops.DepTargetExternal.Column() {
 		return nil
 	}
 	return issueops.CheckBlockingHierarchyInTx(ctx, r.runner, dep, nil)

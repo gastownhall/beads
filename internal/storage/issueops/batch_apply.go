@@ -189,6 +189,9 @@ type applyBatchRun struct {
 type appliedEdge struct {
 	index int
 	edge  publicops.DependencyEdge
+	// kind is the target's class as the write resolved it, so the end gate
+	// skips exactly the targets this database does not hold.
+	kind DepTargetKind
 }
 
 // apply runs the three phases in order: the items, the metadata splice, the end
@@ -412,9 +415,14 @@ func (r *applyBatchRun) applyDepAdd(ctx context.Context, tx *sql.Tx, index int, 
 		Metadata:    metadata,
 		ThreadID:    item.ThreadID,
 	}
+	kind, err := ClassifyDepTarget(ctx, tx, dep)
+	if err != nil {
+		return itemErr(err)
+	}
 	written, err := AddDependencyInTxWithResult(ctx, tx, dep, r.plan.Actor, AddDependencyOpts{
 		SourceTable:    sourceTable,
 		WriteTable:     depTable,
+		TargetKind:     &kind,
 		SkipCycleCheck: r.plan.SkipPerEdgeCycleCheck,
 		EmitEvent:      true,
 	})
@@ -440,6 +448,7 @@ func (r *applyBatchRun) applyDepAdd(ctx context.Context, tx *sql.Tx, index int, 
 	r.edges = append(r.edges, appliedEdge{
 		index: index,
 		edge:  publicops.DependencyEdge{IssueID: source, DependsOnID: target, Type: item.Type},
+		kind:  kind,
 	})
 	r.result.Items[index] = publicops.ItemResult{
 		Kind:        publicops.ItemDepAdd,
@@ -604,9 +613,10 @@ func (r *applyBatchRun) runEndGate(ctx context.Context, tx *sql.Tx) error {
 			DependsOnID: applied.edge.DependsOnID,
 			Type:        applied.edge.Type,
 		}
-		// An external or cross-repository target has no local hierarchy to
+		// A target this database does not hold has no local hierarchy to
 		// conflict with, and the per-edge path filters it for the same reason.
-		if IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
+		// A held one is checked whatever its prefix (GH#8299).
+		if applied.kind == DepTargetExternal {
 			continue
 		}
 		if err := CheckBlockingHierarchyInTx(ctx, tx, dep, cycleDetectionTables()); err != nil {
