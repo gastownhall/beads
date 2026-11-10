@@ -205,6 +205,9 @@ func TestBatchApplyContract(t *testing.T) {
 	t.Run("CarriesTheGateMembers", func(t *testing.T) {
 		conformance.RunBatchApplyCarriesTheGateMembers(t, ctx, fixture)
 	})
+	t.Run("StateChangeOnATemplateHonorsAllowTemplate", func(t *testing.T) {
+		conformance.RunBatchApplyStateChangeOnATemplateHonorsAllowTemplate(t, ctx, fixture)
+	})
 }
 
 // newEmbeddedBatchApplyFixture composes the frozen role kit with this backend's
