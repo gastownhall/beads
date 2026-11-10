@@ -711,9 +711,11 @@ access, switch to server mode. See [Migrating Between Backends](#migrating-betwe
 
 **Symptom:** on Windows, terminal windows flash or steal focus while bd runs,
 most often when bd is started by something with no console of its own (an
-editor, an agent host, a GUI hook runner, a scheduled task). Some short-lived
-children (`git config`, `dolt version`) fail with exit status `0x800700E8`
-("The pipe is being closed").
+editor, an agent host, a GUI hook runner, a scheduled task). A window can also
+show Windows Terminal's own launch error, such as
+`[error 2147942632 (0x800700E8) when launching ...dolt.exe init]` ("The pipe
+is being closed"): a short-lived child exited before Windows Terminal attached
+to it.
 
 **Cause:** a console program started by a process without a console gets a
 brand-new console. With Windows Terminal as the default terminal, each new
@@ -744,10 +746,19 @@ these files starts a command without `execwin.Hide` or the exact pin above:
   `internal/storage/dbproxy`, `internal/storage/dolt` and
   `internal/storage/doltutil`
 - the single files `cmd/bd/{agent_hook,compact,export_auto,gate,hooks,main,prime,proxied_server}.go`,
+  `internal/config/config.go` (the `git rev-parse` bd runs at startup when it
+  finds no `.beads/config.yaml` and `BEADS_DIR` is unset),
   `internal/hooks/hooks_windows.go` and `internal/metrics/spawn.go`
 
 Files outside that list, such as editor, pager, credential and setup paths, are
 not covered. That does not mean they are never run without a console.
+
+**Prompts:** a child of a bd with no console has no window to show a prompt in.
+A command that stops to ask for input, such as an SSH host-key or passphrase
+prompt or git asking for credentials in the terminal, waits for an answer
+nobody can give, and bd waits with it until that command's timeout, if it has
+one. Give such tools their credentials non-interactively (an SSH agent, a git
+credential manager) when bd runs without a console.
 
 **If you still see windows:** bd cannot hide its own first window; whatever
 launched bd owns that one. To find a window's source, record its parent

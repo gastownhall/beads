@@ -635,6 +635,7 @@ var consoleSpawnScopes = []string{
 	"cmd/bd/main.go",
 	"cmd/bd/prime.go",
 	"cmd/bd/proxied_server.go",
+	"internal/config/config.go",
 	"internal/hooks/hooks_windows.go",
 	"internal/metrics/spawn.go",
 }
@@ -1039,6 +1040,7 @@ func TestConsoleSpawnScope(t *testing.T) {
 		{"cmd/bd/hooks.go", "cmd/bd/hooks.go"},
 		{"cmd/bd/export_auto.go", "cmd/bd/export_auto.go"},
 		{"cmd/bd/gate.go", "cmd/bd/gate.go"},
+		{"internal/config/config.go", "internal/config/config.go"},
 		{"internal/hooks/hooks_windows.go", "internal/hooks/hooks_windows.go"},
 		{"internal/metrics/spawn.go", "internal/metrics/spawn.go"},
 	}
@@ -1057,6 +1059,7 @@ func TestConsoleSpawnScope(t *testing.T) {
 		"cmd/bd/export.go",
 		"cmd/bd/gate_check.go",
 		"cmd/bd/prime_stealth.go",
+		"internal/config/yaml_config.go",
 		"internal/hooks/hooks.go",
 		"internal/hooks/hooks_unix.go",
 		"internal/metrics/metrics.go",
