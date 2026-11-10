@@ -31,11 +31,12 @@ A `config.local.yaml` next to the project `config.yaml` is also merged in last f
 
 ### Missing `metadata.json`
 
-`.beads/metadata.json` names the workspace's Dolt database. Your issues live in that database; `.beads/issues.jsonl` is only an export of them and never stands in for it. If `metadata.json` is missing from an embedded workspace, bd does not fall back to a new, empty database:
+`.beads/metadata.json` names the workspace's Dolt database. Your issues live in that database; `.beads/issues.jsonl` is only an export of them and never stands in for it. If `metadata.json` is missing from an embedded workspace, bd does not fall back to a new, empty database beside the ones the workspace already holds:
 
 - With exactly one database under `.beads/embeddeddolt/`, bd uses it and names it on stderr.
 - With several, bd refuses to pick one: the command fails before opening any database, lists the candidates, and suggests restoring `metadata.json` or naming the database for the command with `BEADS_DOLT_SERVER_DATABASE=<name> bd ...`.
 - When the workspace holds databases, `BEADS_DOLT_SERVER_DATABASE` must name one of them; a name that matches none is refused rather than created.
+- With none, bd opens the default database, `beads`, or the one `BEADS_DOLT_SERVER_DATABASE` names.
 
 ## Precedence
 
@@ -100,7 +101,7 @@ Plus these individual keys:
 
 `json`, `db`, `actor`, `identity`, `no-push`, `no-git-ops`, `agent.profile`, `create.require-description`, `import.auto`, `import.path`, `prime.max-memories`, `prime.max-memory-chars`, `prime.disabled`, `memories.budget-chars`, and the secret keys `github.token`, `gitlab.token`, `jira.api_token`, `ado.pat`, `linear.api_key`, `linear.oauth_client_id`, `linear.oauth_client_secret`, `notion.token`.
 
-`no-db` is obsolete: the JSONL-only mode it selected is gone, and issues always live in the Dolt database. `bd config set no-db` is refused; an old `no-db: true` in `config.yaml` (or `BD_NO_DB=true`) is ignored with a warning on stderr. Remove it with `bd config unset no-db`.
+`no-db` is obsolete: the JSONL-only mode it selected is gone, and issues always live in the Dolt database. `bd config set no-db` is refused; an old `no-db: true` in any `config.yaml` or `config.local.yaml` (or `BD_NO_DB=true`) is ignored with a warning on stderr. `bd config unset no-db` removes it from the workspace's own `config.yaml`; delete an entry in a user-level `config.yaml` or in `config.local.yaml` (see [Configuration Locations](#configuration-locations)) by hand.
 
 Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `password` is treated as a secret: it is refused on git-tracked `config.yaml` files unless you pass `--force-git-tracked`. Prefer exporting the value as an environment variable instead (e.g. `LINEAR_API_KEY`).
 
