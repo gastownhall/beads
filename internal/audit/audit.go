@@ -187,6 +187,25 @@ func LogFieldChange(issueID, field, oldValue, newValue, actor, reason string) {
 	})
 }
 
+// LogClaimed logs a returned claim (`bd ready --claim`, `bd close
+// --claim-next`) to the optional JSONL sidecar when it is enabled, as one
+// "claimed" entry whose extra carries the claimed issue's post-claim status
+// and assignee. Those claim paths return no pre-image, so unlike
+// LogFieldChange there are no old values: the entry records the outcome the
+// command reported, not a transition. Best-effort: errors are silently
+// ignored so sidecar logging never blocks operations.
+func LogClaimed(issueID, actor, status, assignee string) {
+	_, _ = AppendIfEnabled(&Entry{
+		Kind:    "claimed",
+		IssueID: issueID,
+		Actor:   actor,
+		Extra: map[string]any{
+			"status":   status,
+			"assignee": assignee,
+		},
+	})
+}
+
 func newID() (string, error) {
 	// 16 bytes (128-bit) of entropy — birthday probability for 8000 IDs is ~9e-32.
 	var b [16]byte
