@@ -703,6 +703,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd migrate schema` is refused on proxied-server workspaces unless you
+  pass `--force`.** On those workspaces opening the store applies the
+  migration, which changed the schema underneath every library client
+  connected to the proxy's backend without warning; the proxy does not track
+  those clients. The bare command now exits 1 with the typed refusal
+  `proxy.migrate.unsupported` (`mutates: false`, reason `design`) before
+  anything is opened, and `BD_ALLOW_REMOTE_MIGRATE=1` does not get past it.
+  Stop the clients, run `bd migrate schema --force`, then restart them; the
+  forced command prints a generic reminder to stderr and leaves stdout to its
+  report. CI jobs that ran the bare command as a proxied check must stop
+  doing so. The forced `--json` report still has no `applied` count; treat
+  its absence as unknown, not zero. The shared-server consent guidance names
+  the forced command on proxied workspaces. Direct workspaces are unchanged.
+  ([#6656](https://github.com/gastownhall/beads/issues/6656))
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add
