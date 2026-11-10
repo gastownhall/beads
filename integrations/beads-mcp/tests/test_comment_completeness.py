@@ -160,3 +160,68 @@ async def test_blocked_without_metadata_stays_unknown() -> None:
     assert result[0].comment_count is None
     assert result[0].comments_omitted is None
     assert result[0].comments is None
+
+
+# AC-5: field projections admit the comment fields; selecting comments also
+# reports whether bodies were omitted, and collections never fetch extra data.
+
+
+async def _collection(tool: str, rec: _Recorder, **kwargs: Any) -> Any:
+    with rec.patched(), rec.tools_patched():
+        if tool == "list":
+            return await server.list_issues(**kwargs)
+        return await server.ready_work(**kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["list", "ready"])
+async def test_collection_fields_accept_comment_names(tool: str) -> None:
+    rec = _Recorder([_issue(comment_count=2, comments_omitted=True), _issue(id="bd-2")])
+
+    rows = await _collection(tool, rec, fields=["id", "comment_count", "comments_omitted"])
+
+    assert rows == [
+        {"id": "bd-1", "comment_count": 2, "comments_omitted": True},
+        {"id": "bd-2", "comment_count": None, "comments_omitted": None},
+    ]
+    assert len(rec.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["list", "ready"])
+async def test_collection_comments_selection_carries_omission(tool: str) -> None:
+    rec = _Recorder([_issue(comment_count=2), _issue(id="bd-2"), _issue(id="bd-3", comment_count=0)])
+
+    rows = await _collection(tool, rec, fields=["id", "comments"])
+
+    assert rows == [
+        {"id": "bd-1", "comments": None, "comments_omitted": True},
+        {"id": "bd-2", "comments": None, "comments_omitted": None},
+        {"id": "bd-3", "comments": None, "comments_omitted": False},
+    ]
+    # Collections use only their original CLI response: no hydration reads.
+    assert len(rec.calls) == 1
+    assert "--include-comments" not in rec.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_show_fields_accept_count_and_marker() -> None:
+    rec = _Recorder([_issue(comment_count=2, comments_omitted=True)])
+
+    with rec.patched(), rec.tools_patched():
+        result = await server.show_issue(issue_id="bd-1", fields=["comment_count", "comments_omitted"])
+
+    assert result == {"comment_count": 2, "comments_omitted": True}
+    assert len(rec.calls) == 1
+    assert "--include-comments" not in rec.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_non_comment_projection_and_invalid_fields_unchanged() -> None:
+    rec = _Recorder([_issue(comment_count=2, comments_omitted=True)])
+
+    rows = await _collection("list", rec, fields=["id", "title"])
+    assert rows == [{"id": "bd-1", "title": "Comment completeness"}]
+
+    with pytest.raises(ValueError, match="Invalid field"):
+        await _collection("list", rec, fields=["id", "comment_bodies"])
