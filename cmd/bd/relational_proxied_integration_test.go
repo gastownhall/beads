@@ -96,6 +96,30 @@ func TestProxiedServerLink(t *testing.T) {
 		}
 	})
 
+	// A custom type is kept as given and does not gate on its own.
+	t.Run("link_custom_type_kept", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "lc")
+		a := bdProxiedCreate(t, bd, p.dir, "Custom from")
+		b := bdProxiedCreate(t, bd, p.dir, "Custom to")
+		out, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "link", a.ID, b.ID, "--type", "owned-by")
+		if err != nil {
+			t.Fatalf("link --type owned-by failed: %v\nstderr:\n%s", err, stderr)
+		}
+		if !strings.Contains(out, "(owned-by)") {
+			t.Errorf("link --type owned-by output = %q, want the stored (owned-by) type", out)
+		}
+		db := openProxiedDB(t, p)
+		assertProxiedDepExistsWithType(t, db, a.ID, b.ID, "owned-by")
+		ready, _, err := bdProxiedRunBuffers(t, bd, p.dir, "ready", "--json", "--limit", "0")
+		if err != nil {
+			t.Fatalf("ready --json: %v", err)
+		}
+		if !proxiedIDSet(t, ready)[a.ID] {
+			t.Errorf("an owned-by link alone took %s out of ready work: %s", a.ID, ready)
+		}
+	})
+
 	t.Run("link_invalid_type_rejected", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "li")

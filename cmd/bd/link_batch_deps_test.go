@@ -124,3 +124,37 @@ func TestCLI_Link_TypeBlockedByAliasGates(t *testing.T) {
 		}
 	}
 }
+
+// TestCLI_Link_CustomTypeKeptAndDoesNotGate pins the other half of bd link's
+// type contract (GH#5585): a custom type outside the built-ins is stored and
+// reported exactly as given, and that edge alone never takes its source out
+// of ready work.
+func TestCLI_Link_CustomTypeKeptAndDoesNotGate(t *testing.T) {
+	bd, dir := linkBatchInit(t)
+
+	from := createDepsExtractID(t, runCreateDepsBD(t, bd, dir, "create", "Custom From", "-p", "1", "--json"))
+	to := createDepsExtractID(t, runCreateDepsBD(t, bd, dir, "create", "Custom To", "-p", "1", "--json"))
+
+	out := runCreateDepsBD(t, bd, dir, "link", from, to, "--type", "owned-by", "--json")
+	var res struct {
+		Type string `json:"type"`
+	}
+	if start := strings.Index(out, "{"); start < 0 || json.Unmarshal([]byte(out[start:]), &res) != nil {
+		t.Fatalf("bd link --type owned-by --json: unparseable output:\n%s", out)
+	}
+	if res.Type != "owned-by" {
+		t.Errorf("bd link --type owned-by --json reports type %q, want owned-by", res.Type)
+	}
+	if gotType := linkBatchDepType(t, bd, dir, from, to); gotType != "owned-by" {
+		t.Errorf("bd link --type owned-by stored type %q, want owned-by unchanged", gotType)
+	}
+	if !linkBatchIDSet(t, bd, dir, "ready", "--limit", "0", "--json")[from] {
+		t.Errorf("%s left ready work after an owned-by link alone; a custom type must not gate", from)
+	}
+
+	textFrom := createDepsExtractID(t, runCreateDepsBD(t, bd, dir, "create", "Custom Text From", "-p", "1", "--json"))
+	textTo := createDepsExtractID(t, runCreateDepsBD(t, bd, dir, "create", "Custom Text To", "-p", "1", "--json"))
+	if text := runCreateDepsBD(t, bd, dir, "link", textFrom, textTo, "--type", "owned-by"); !strings.Contains(text, "(owned-by)") {
+		t.Errorf("bd link --type owned-by output = %q, want the stored (owned-by) type", text)
+	}
+}
