@@ -466,3 +466,91 @@ func TestUserConfigReadsNeverProbeNativeWhenDocumentedExists(t *testing.T) {
 		}
 	})
 }
+
+// GH#8113: when the documented user config exists it shadows the native one
+// outright: native-only keys contribute neither effective nor private values,
+// while legacy values keep applying beneath documented values.
+func TestInitializeIgnoresNativeUserConfigWhenDocumentedExists(t *testing.T) {
+	candidates := isolateUserConfigCandidates(t)
+	writeUserYamlConfig(t, candidates.legacy, "actor: legacy\njira:\n  url: https://legacy.example\n")
+	writeUserYamlConfig(t, candidates.native, "actor: native\ngithub:\n  url: https://native.example\nnode_id: native-node\n")
+	writeUserYamlConfig(t, candidates.documented, "jira:\n  url: https://documented.example\n")
+
+	ResetForTesting()
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	if got := GetString("actor"); got != "legacy" {
+		t.Errorf("actor = %q, want %q (legacy applies; native actor must not survive)", got, "legacy")
+	}
+	if got := GetString("jira.url"); got != "https://documented.example" {
+		t.Errorf("jira.url = %q, want %q (documented over legacy)", got, "https://documented.example")
+	}
+	if got := GetString("github.url"); got != "" {
+		t.Errorf("github.url = %q, want empty (native-only key must not apply)", got)
+	}
+	if got := NodeID(); got != "" {
+		t.Errorf("NodeID() = %q, want empty (native-only node_id must not apply)", got)
+	}
+	if got := PrivateConfigValue("github.url"); got != "" {
+		t.Errorf("private github.url = %q, want empty", got)
+	}
+	if got := PrivateConfigValue("node_id"); got != "" {
+		t.Errorf("private node_id = %q, want empty", got)
+	}
+	if got := PrivateConfigValue("jira.url"); got != "https://documented.example" {
+		t.Errorf("private jira.url = %q, want %q", got, "https://documented.example")
+	}
+	if IsFromProjectConfig("jira.url") {
+		t.Error("documented jira.url classified as project-controlled")
+	}
+
+	// The documented file still wins over legacy where both define a key.
+	writeUserYamlConfig(t, candidates.documented, "actor: documented\njira:\n  url: https://documented.example\n")
+	ResetForTesting()
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	if got := GetString("actor"); got != "documented" {
+		t.Errorf("actor = %q, want %q (documented over legacy)", got, "documented")
+	}
+}
+
+// GH#8113: when the documented <home>/.config/bd/config.yaml exists, Initialize
+// must not consult the native os.UserConfigDir()/bd/config.yaml at all (on
+// macOS touching that directory raises a permission prompt on every launch).
+func TestInitializeSkipsNativeConfigWhenDocumentedExists(t *testing.T) {
+	ResetForTesting()
+	t.Cleanup(ResetForTesting)
+	restore := envSnapshot(t)
+	defer restore()
+
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	nativeRoot := filepath.Join(root, "native-config")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("APPDATA", nativeRoot)
+	t.Setenv("XDG_CONFIG_HOME", nativeRoot)
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "")
+	t.Chdir(root)
+
+	candidates := currentUserConfigYamlCandidates()
+	if candidates.native == "" || candidates.documented == "" || candidates.native == candidates.documented {
+		t.Fatalf("test requires distinct native and documented paths: %#v", candidates)
+	}
+	writeConfigActor(t, candidates.documented, "documented")
+	if err := os.MkdirAll(filepath.Dir(candidates.native), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(candidates.native, []byte("repro-native-marker: from-native\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	assertInitializedActor(t, "documented")
+	if got := GetString("repro-native-marker"); got != "" {
+		t.Fatalf("native config %s was read although documented %s exists: repro-native-marker = %q",
+			candidates.native, candidates.documented, got)
+	}
+}
