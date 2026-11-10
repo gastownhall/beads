@@ -1280,6 +1280,7 @@ go_test(
         "state_history_embedded_test.go",
         "state_proxied_integration_test.go",
         "state_test.go",
+        "state_wisp_plane_embedded_test.go",
         "status_embedded_test.go",
         "status_proxied_integration_test.go",
         "status_suppressed_test.go",
