@@ -251,6 +251,25 @@ func TestSharedServerVersionBumpDoesNotPromoteCursor(t *testing.T) {
 	if got := versionMarker(); got != Version {
 		t.Errorf("bd_version marker = %q after bd migrate schema, want %q (gastownhall/beads#7283)", got, Version)
 	}
+
+	// The same repair must not depend on migrations being pending: a stale
+	// marker on an already-current database is healed by a no-op run too.
+	// A count-based stamp could not (another client migrated while this
+	// workspace stood refused, and the upgrade signal is consumed).
+	if _, err := admin.ExecContext(ctx,
+		"UPDATE local_metadata SET value = '1.0.0' WHERE `key` = 'bd_version'"); err != nil {
+		t.Fatalf("regress bd_version marker: %v", err)
+	}
+	stdout, stderr, code = run("migrate", "schema")
+	if code != 0 {
+		t.Fatalf("second bd migrate schema exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if want := fmt.Sprintf("Schema already at v%d", schema.LatestVersion()); !strings.Contains(stdout, want) {
+		t.Errorf("second bd migrate schema output = %q, want the no-op line %q", stdout, want)
+	}
+	if got := versionMarker(); got != Version {
+		t.Errorf("bd_version marker = %q after the no-op bd migrate schema, want %q (gastownhall/beads#7283)", got, Version)
+	}
 }
 
 // TestSharedServerMigrateSchemaCountsVersionBumpOpen is gastownhall/beads#7283
