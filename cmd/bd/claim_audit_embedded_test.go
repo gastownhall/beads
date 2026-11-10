@@ -9,8 +9,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // sidecarEntry is one parsed .beads/interactions.jsonl row, every kind kept.
@@ -75,6 +78,19 @@ func requireFieldChange(t *testing.T, e sidecarEntry, actor, field, oldValue, ne
 	}
 }
 
+// requireClaimed fails unless e is a claimed row by actor carrying exactly
+// the returned status and assignee, and no prior values.
+func requireClaimed(t *testing.T, e sidecarEntry, actor string, claimed *types.Issue) {
+	t.Helper()
+	if e.Kind != "claimed" || e.IssueID != claimed.ID || e.Actor != actor || e.Reason != "" {
+		t.Fatalf("row %+v: want a claimed row for %s by %q", e, claimed.ID, actor)
+	}
+	want := map[string]any{"status": string(claimed.Status), "assignee": claimed.Assignee}
+	if !reflect.DeepEqual(e.Extra, want) {
+		t.Fatalf("claimed row extra = %v, want exactly %v", e.Extra, want)
+	}
+}
+
 // bdAuditRun runs bd in dir as actor alice with the sidecar enabled and
 // returns stdout.
 func bdAuditRun(t *testing.T, bd, dir string, args ...string) string {
@@ -91,7 +107,9 @@ func bdAuditRun(t *testing.T, bd, dir string, args ...string) string {
 
 // TestEmbeddedClaimPathsJournalSidecar: GH#6146 — the CLI claim paths write
 // the opt-in interactions.jsonl sidecar. `bd update --claim` journals the
-// status and assignee field_change rows the equivalent explicit update would.
+// status and assignee field_change rows the equivalent explicit update would;
+// `bd ready --claim` and `bd close --claim-next`, which have no pre-image,
+// journal one post-state-only claimed row.
 func TestEmbeddedClaimPathsJournalSidecar(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
@@ -132,5 +150,64 @@ func TestEmbeddedClaimPathsJournalSidecar(t *testing.T) {
 		}
 		requireFieldChange(t, rows[0], "alice", "status", "open", "blocked")
 		requireFieldChange(t, rows[1], "alice", "assignee", "", "alice")
+	})
+
+	// readyClaim runs `bd ready --claim --json` and returns the one issue it
+	// claimed.
+	readyClaim := func(t *testing.T, dir string) *types.IssueWithCounts {
+		t.Helper()
+		out := bdAuditRun(t, bd, dir, "ready", "--claim", "--json")
+		var claimed []*types.IssueWithCounts
+		if err := json.Unmarshal([]byte(out[strings.Index(out, "["):]), &claimed); err != nil {
+			t.Fatalf("parse bd ready --claim --json: %v\n%s", err, out)
+		}
+		if len(claimed) != 1 {
+			t.Fatalf("bd ready --claim claimed %d issues, want 1: %s", len(claimed), out)
+		}
+		return claimed[0]
+	}
+
+	t.Run("ready_claim_open", func(t *testing.T) {
+		t.Parallel()
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ro")
+		x := bdCreate(t, bd, dir, "Ready open issue")
+
+		claimed := readyClaim(t, dir)
+		if claimed.ID != x.ID {
+			t.Fatalf("bd ready --claim claimed %s, want %s", claimed.ID, x.ID)
+		}
+		rows := sidecarEntriesFor(readSidecarEntries(t, beadsDir), x.ID)
+		if len(rows) != 1 {
+			t.Fatalf("bd ready --claim journaled %d rows for %s, want 1 claimed row: %+v", len(rows), x.ID, rows)
+		}
+		requireClaimed(t, rows[0], "alice", claimed.Issue)
+
+		// An empty ready front claims nothing and journals nothing.
+		out := bdAuditRun(t, bd, dir, "ready", "--claim", "--json")
+		if strings.TrimSpace(out) != "[]" {
+			t.Fatalf("second bd ready --claim = %q, want []", out)
+		}
+		if all := readSidecarEntries(t, beadsDir); len(all) != 1 {
+			t.Fatalf("empty bd ready --claim journaled more rows: %+v", all)
+		}
+	})
+
+	t.Run("ready_claim_custom_active", func(t *testing.T) {
+		t.Parallel()
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ra")
+		bdConfig(t, bd, dir, "set", "status.custom", "triaging:active")
+		x := bdCreate(t, bd, dir, "Ready triaging issue")
+		bdAuditRun(t, bd, dir, "update", x.ID, "--status", "triaging")
+		before := len(sidecarEntriesFor(readSidecarEntries(t, beadsDir), x.ID))
+
+		claimed := readyClaim(t, dir)
+		if claimed.ID != x.ID {
+			t.Fatalf("bd ready --claim claimed %s, want %s", claimed.ID, x.ID)
+		}
+		rows := sidecarEntriesFor(readSidecarEntries(t, beadsDir), x.ID)[before:]
+		if len(rows) != 1 {
+			t.Fatalf("bd ready --claim journaled %d rows for %s, want 1 claimed row: %+v", len(rows), x.ID, rows)
+		}
+		requireClaimed(t, rows[0], "alice", claimed.Issue)
 	})
 }
