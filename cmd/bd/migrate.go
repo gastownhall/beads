@@ -887,8 +887,14 @@ remote-migrate gate still applies: --force confirms you are the single
 designated migrator. Migrating is one-way: bd releases built for an older
 schema refuse the migrated database.
 
+On a proxied-server workspace this command is refused without --force: the
+provider open applies the migrations beneath library clients the proxy
+cannot see. Close the co-resident clients, run 'bd migrate schema --force',
+then restart them; the forced run prints the same warning.
+
 On an up-to-date database this is a no-op, so it is safe to run in CI,
-release gates, and recovery scenarios.
+release gates, and recovery scenarios — except on a proxied-server
+workspace, where the unforced refusal fires before that check.
 
 Example:
   bd migrate schema

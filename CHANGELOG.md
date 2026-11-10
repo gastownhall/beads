@@ -703,6 +703,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd migrate schema` is refused without `--force` on a proxied-server
+  workspace.** On every proxied shape — managed local, external TCP, external
+  Unix, team server, and a workspace whose topology cannot be classified — the
+  provider open applies pending schema migrations beneath library clients the
+  proxy cannot see, so the unforced verb is now refused typed before any
+  provider work (`proxy.migrate.unsupported`, exit 1, JSON `mutates: false`,
+  `reason: design`). `bd migrate schema --force` is the one route through: it
+  lifts the refusal and prints a generic warning to close the co-resident
+  library clients first — generic because the proxy is a byte pump and cannot
+  name them — and the forced run then applies the migration on the provider
+  open as before. The bypass reads the flag's value, not its presence: a
+  missing or set-but-false `--force` keeps the refusal, and `--force` on the
+  bare `bd migrate` parent does not lift it (each registry row declares its
+  own escape route). `BD_ALLOW_REMOTE_MIGRATE=1` still consents scripted
+  writes on a proxied workspace but does not unlock the migrate verb itself.
+  Guidance that prescribed the bare verb for proxied workspaces now
+  prescribes the forced form: the shared-no-remote gate block, its JSON
+  `expected` field and options, the version-bump notice, the `--global`
+  consent hint, and the init join guidance. Direct, embedded and non-proxied
+  server-mode workspaces are unchanged.
+  ([#6656](https://github.com/gastownhall/beads/issues/6656))
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add

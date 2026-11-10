@@ -581,7 +581,9 @@ bd migrate schema --force        # then, from the proxied workspace
 ```
 
 Nothing in the proxied workspace enforces that order. It refuses the bare
-`bd migrate` verb but not `bd migrate schema --force`, and
+`bd migrate` verb and the bare `bd migrate schema` — unforced schema migration
+is refused on proxied workspaces, see
+[Shared servers](#shared-servers) — but not `bd migrate schema --force`, and
 `BD_ALLOW_REMOTE_MIGRATE=1` grants the same consent to any command. Both are
 honored before this stop is reached, so the stop never sees them: run either
 one before the pull and it migrates the database while it is still behind.
@@ -611,6 +613,13 @@ bd migrate schema              # add --global for the shared global database
 # 3. Confirm.
 bd doctor
 ```
+
+From a **proxied-server** workspace, step 2 is refused without `--force`: the
+provider open applies the migration beneath library clients the proxy cannot
+see, so `bd` requires the explicit declaration that they are closed. Close the
+co-resident library clients, run `bd migrate schema --force` (add `--global`
+for the shared global database), then restart them. The forced run prints the
+same warning before doing anything.
 
 Between steps 1 and 2, an upgraded client reads normally and its writes are
 refused with the gate's guidance. Nothing is silently promoted, so there is no
@@ -647,7 +656,7 @@ there: do step 2 from a client that is already set up, or join and migrate in
 one step with `BD_ALLOW_REMOTE_MIGRATE=1 bd init …`.
 
 The same rules apply in **proxied-server mode**, which is a shared server
-reached through a local proxy. Three differences worth knowing:
+reached through a local proxy. Four differences worth knowing:
 
 - read commands print a warning and keep serving the current schema, rather
   than the read simply not touching it;
@@ -656,6 +665,10 @@ reached through a local proxy. Three differences worth knowing:
   first with step 2, then start the daemon — or, for an unattended service,
   put `BD_ALLOW_REMOTE_MIGRATE=1` in its environment as an explicit, auditable
   standing consent;
+- the consent verb of step 2 is refused without `--force`: the proxy cannot
+  see the library clients sharing the server, so `bd` demands the explicit
+  close-clients declaration that `bd migrate schema --force` is. Close the
+  co-resident library clients, run the forced verb, then restart them;
 - the data-behind stop's remedy, `bd dolt pull`, cannot be run from the
   proxied workspace: run it on the server host first, then consent from the
   proxied workspace (see [Clone behind the remote](#clone-behind-the-remote)).
