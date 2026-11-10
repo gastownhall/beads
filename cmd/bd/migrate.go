@@ -627,6 +627,11 @@ func handleSchemaMigrate() error {
 
 	applied, err := migrator.ApplySchemaMigrations(rootCtx)
 	if err != nil {
+		// The same refusal the store-open paths render, ahead of the generic
+		// failure output so it is printed once.
+		if renderSchemaEncodingDrift(err) {
+			return SilentExit()
+		}
 		if jsonOutput {
 			if jerr := outputJSON(map[string]interface{}{
 				"error":   "schema_migration_failed",
