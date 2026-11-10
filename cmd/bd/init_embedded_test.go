@@ -2090,8 +2090,10 @@ func TestEmbeddedInitGitOriginAdoptionWithConsent(t *testing.T) {
 			cmd.Env = append(envWithout(bdEnv(cloneDir), "BD_NON_INTERACTIVE"), tc.env...)
 			cmd.Stdin = strings.NewReader(tc.stdin)
 			// combined interleaves both streams in write order, so the
-			// disclosure can be ordered against the bootstrap line.
-			var stdout, stderr, combined bytes.Buffer
+			// disclosure can be ordered against the bootstrap line; the two
+			// stream copiers write it concurrently, hence the lock.
+			var stdout, stderr bytes.Buffer
+			var combined syncBuffer
 			cmd.Stdout = io.MultiWriter(&stdout, &combined)
 			cmd.Stderr = io.MultiWriter(&stderr, &combined)
 			if err := cmd.Run(); err != nil {
