@@ -14,16 +14,28 @@ import (
 
 const ignoredMigration0031Up = "0031_restore_preflip_events.up.sql"
 
-// TestLatestIgnoredVersionIncludesMigration0031 pins the ignored slot the
-// pre-upgrade events restore claims (gastownhall/beads#7039), directly above
-// wisp_id_tombstones' (ignored 0030), and that the slot carries its repair.
-func TestLatestIgnoredVersionIncludesMigration0031(t *testing.T) {
-	const wantIgnored = 31
+// TestLatestIgnoredVersionIncludesMigration0032 pins the ignored slot the
+// cross-prefix dependency-target repair claims (gastownhall/beads#8299),
+// directly above the pre-upgrade events restore's (ignored 0031). A hardcoded
+// literal for the same reason the earlier pins carried one: a drift to 32 for
+// the wrong reason is caught by the repair's own tests failing to find their
+// pending marker. It supersedes TestLatestIgnoredVersionIncludesMigration0031's
+// LatestIgnoredVersion pin, which moved here when ignored 0032 claimed the
+// next slot; 0031's repair registration stays pinned by its own test below.
+func TestLatestIgnoredVersionIncludesMigration0032(t *testing.T) {
+	const wantIgnored = 32
 	if got := LatestIgnoredVersion(); got != wantIgnored {
-		t.Fatalf("LatestIgnoredVersion() = %d, want %d (pre-upgrade events restore)", got, wantIgnored)
+		t.Fatalf("LatestIgnoredVersion() = %d, want %d (cross-prefix dependency-target repair)", got, wantIgnored)
 	}
-	if _, ok := preMigrationRepairs[repairKey{ignoredSource.cursorTable, wantIgnored}]; !ok {
-		t.Fatalf("ignored 0031 has no pre-migration repair registered; the marker alone restores nothing")
+}
+
+// TestMigration0031RegistersItsPreflipRepair is the half of the superseded
+// TestLatestIgnoredVersionIncludesMigration0031 that stays 0031's own: the
+// marker alone restores nothing, so its pre-migration repair must stay
+// registered.
+func TestMigration0031RegistersItsPreflipRepair(t *testing.T) {
+	if _, ok := preMigrationRepairs[repairKey{ignoredSource.cursorTable, 31}]; !ok {
+		t.Fatal("ignored 0031 has no pre-migration repair registered; the marker alone restores nothing")
 	}
 }
 

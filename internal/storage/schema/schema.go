@@ -1133,6 +1133,20 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	}
 	backfilled = backfilled || rekeyed
 
+	// GH#8299 / bd-6jk1y2: heal the edge rows the old prefix-comparing
+	// classifier stored in depends_on_external even though this database holds
+	// the target, so readiness and the close gates see them. It sits above
+	// ignoredSource.migrate for the same reason the re-key does: ignored
+	// migration 0032 is what forces this pass once on every already-converged
+	// clone, and the marker records only if the repair returned, so an aborted
+	// repair is retried on the next open instead of the database claiming it
+	// migrated.
+	repaired, err := repairCrossPrefixDepTargets(ctx, db)
+	if err != nil {
+		return applied, fmt.Errorf("repair cross-prefix dependency targets: %w", err)
+	}
+	backfilled = backfilled || repaired
+
 	// bd-6dnrw.2: converge the events/comments/snapshots primary keys that
 	// migration 0037 randomized per-clone, the same hazard class on the aux
 	// tables. Gated on the clone-local ignored marker (recorded later in this

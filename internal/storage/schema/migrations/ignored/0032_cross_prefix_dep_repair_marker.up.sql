@@ -1,0 +1,32 @@
+-- Ignored migration 0032: clone-local marker that forces one cross-prefix
+-- dependency-target repair pass (gastownhall/beads#8299).
+--
+-- Before the #8299 write-path fix, the dependency classifier compared id
+-- prefixes instead of asking the database: any cross-prefix target was
+-- classified External before a single read, so a blocker this database held
+-- under another rig's prefix was stored in depends_on_external as an
+-- unresolvable string -- it never gated readiness and never answered
+-- `bd close`. The write path now classifies by evidence, but rows the old
+-- classifier already wrote still sit misclassified.
+--
+-- The work happens in code, not here: repairCrossPrefixDepTargets
+-- (internal/storage/schema/cross_prefix_dep_repair.go) moves each legacy
+-- external-only row into the typed column this database's own evidence names
+-- (dependencies only trusts evidence that syncs; the clone-local
+-- wisp_dependencies plane trusts wisp evidence first), then recomputes the
+-- blocked state the misclassification froze. It runs from MigrateUp
+-- immediately above this marker's recording, the same slot ignored/0026 gave
+-- the dependency-id re-key, for the same two reasons: while this version is
+-- pending, migrationWorkNeeded returns true, so every already-converged clone
+-- runs exactly one more pass and the repair reaches databases whose cursors
+-- are all at latest; and because the marker records only after the repair
+-- returned, an aborted repair stays pending and the next open retries it.
+--
+-- The repair refuses, before writing anything, when the edge table or the
+-- issues table carries uncommitted user changes, so this marker deliberately
+-- states no table-touching statement of its own: the plan-time refusal, not
+-- the pending-file text scan, is what keeps the repair out of a dirty working
+-- set.
+--
+-- The marker itself changes nothing.
+SELECT 1;

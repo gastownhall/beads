@@ -647,6 +647,13 @@ linters:
         linters:
           - unparam
         text: 'getLinearConfig'
+      # unparam: columnExists column param kept general — it reads
+      # INFORMATION_SCHEMA for any column; every current caller (dep re-key,
+      # aux re-key, cross-prefix repair) happens to ask for "id"
+      - path: 'internal/storage/schema/dep_id_backfill\.go'
+        linters:
+          - unparam
+        text: 'column always receives "id"'
       # misspell: "cancelled" is intentional - matching GitHub API response values
       - path: 'cmd/bd/gate\.go'
         linters:

@@ -464,6 +464,11 @@ func expectOnePendingMigrationAtSetting(t *testing.T, mock sqlmock.Sqlmock, tran
 	// no-ops without scanning/updating rows.
 	expectColumnExists(mock, false)
 	expectColumnExists(mock, false)
+	// repairCrossPrefixDepTargets probes the same two edge tables for their id
+	// column; both are absent in this mocked world, so the repair no-ops
+	// without scanning rows.
+	expectColumnExists(mock, false)
+	expectColumnExists(mock, false)
 	// rekeyAuxRowIDsAllPasses reads the ignored cursor to see whether any
 	// pass's clone-local marker is pending; at latest none is. Each pass then
 	// reads the clone-local re-key state — its crash sentinel and the #4380
