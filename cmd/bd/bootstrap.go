@@ -1681,7 +1681,7 @@ func finalizeSyncedBootstrap(beadsDir, syncRemote string, cfg *configfile.Config
 		return fmt.Errorf("write metadata.json: %w", err)
 	}
 
-	if err := createConfigYaml(beadsDir, false, ""); err != nil {
+	if err := createConfigYaml(beadsDir); err != nil {
 		return fmt.Errorf("create config.yaml: %w", err)
 	}
 	if err := ensureBeadsGitignore(beadsDir); err != nil {
