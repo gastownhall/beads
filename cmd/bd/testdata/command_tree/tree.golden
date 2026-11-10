@@ -4934,6 +4934,21 @@ bd mol bond
     |   conditional, which has no safe degradation - omit --ref to bond a
     |   conditional arm as a sibling.
     |
+    |   A conditional arm is released only when A closes with a failure reason
+    |   (failed, rejected, wontfix, ...). A molecule's root auto-closes with "all
+    |   steps complete", which is not one. To run the arm, close the root yourself
+    |   (bd close <root> --reason "failed: ..."); if it already auto-closed, run
+    |   bd reopen <root> first, because a second close keeps the first reason.
+    |   If A succeeds, close the arm's steps in dependency order and then the arm,
+    |   or run bd delete <arm> --cascade --force. Never force-close the arm over
+    |   open steps or remove its dependency: either puts the steps in bd ready.
+    |   Deleting A runs the arm too, because the arm's dependency goes with A,
+    |   whether A is the molecule or a step of it. bd mol squash, bd mol wisp gc
+    |   and bd purge keep a success-closed A while the arm waits. Every other
+    |   delete of A (bd delete, bd mol burn, bd prune, bd gc, bd admin cleanup,
+    |   the stale-closed-issues bd doctor --fix) does not, so dispose of an unused
+    |   arm first.
+    |
     | Phase control:
     |   By default, spawned protos follow the target's phase:
     |   - Attaching to mol (Ephemeral=false) → spawns as persistent (Ephemeral=false)
@@ -5234,6 +5249,14 @@ bd mol squash
     |   5. Clears Wisp flag on children (promotes to persistent)
     |      OR keeps them with --keep-children (default: delete)
     |
+    | Squash never deletes a closed child that a live bead still waits on. A
+    | conditional-blocks target closed with a reason that is not a failure holds its
+    | fallback back (for example a step that 'bd mol bond <arm> <step> --type
+    | conditional' bonded an arm onto), and deleting it would put the fallback in
+    | 'bd ready' as if the step had failed. Squash keeps such a child, still
+    | summarized in the digest, and lists it as kept; close or delete the unused
+    | fallback, and 'bd mol wisp gc --closed' collects it.
+    |
     | AGENT INTEGRATION:
     | Use --summary to provide an AI-generated summary. This keeps bd as a pure
     | tool - the calling agent (orchestrator worker, Claude Code, etc.) is responsible
@@ -5390,6 +5413,17 @@ bd mol wisp gc
     | Use --closed to purge ALL closed wisps (regardless of age). This is the
     | fastest way to reclaim space from accumulated wisp bloat. Safe by default:
     | requires --force to actually delete.
+    |
+    | Neither mode deletes a closed wisp that a live bead still waits on: a
+    | conditional-blocks target closed with a reason that is not a failure holds its
+    | fallback back, and deleting it would put the fallback in 'bd ready' as if the
+    | wisp had failed. 'bd blocked' names such a wisp as the fallback's blocker;
+    | close or delete the unused fallback, and the next gc collects the wisp.
+    | gc learns what a fallback waits on from 'bd blocked', which reads the stored
+    | blocked state. After upgrading from a bd that released fallbacks on any
+    | close, run 'bd recompute-blocked' (or 'bd doctor --fix') before the next gc:
+    | gc would otherwise delete the wisp a released fallback waits on, and the
+    | repair could no longer block that fallback again.
     |
     | Note: This uses time-based cleanup, appropriate for ephemeral wisps.
     | For graph-pressure staleness detection (blocking other work), see 'bd mol stale'.
@@ -5806,6 +5840,11 @@ bd prune
     | Deletes: issues, dependencies, labels, events, and comments for matching beads.
     | Skips: pinned beads (protected), open/in-progress beads, and ephemeral beads.
     |
+    | It does not skip closed beads that live beads depend on. Pruning a bead a
+    | conditional-blocks fallback still waits on (closed with a reason that is not a
+    | failure) drops the edge and puts the fallback in `bd ready` as if the bead had
+    | failed: close or delete an unused fallback before pruning what it waits on.
+    |
     | Also skips closed beads whose ID appears in the description, notes, or
     | comments of any open / in-progress bead. This protects ADR / decision /
     | verification trails that downstream beads still cite. Use
@@ -5855,8 +5894,10 @@ bd purge
     |
     | Deletes: issues, dependencies, labels, events, and comments for matching beads.
     | Skips: pinned beads, and closed beads a live bead still depends on through a
-    | parent-child, tracks or blocks edge (a closed molecule root whose step is open,
-    | a closed bead a live convoy tracks). Live means any status that is not done.
+    | parent-child, tracks, blocks or conditional-blocks edge (a closed molecule root
+    | whose step is open, a closed bead a live convoy tracks, a closed molecule whose
+    | conditional arm still waits on it: deleting that root would run the arm). Live
+    | means any status that is not done.
     | Without --retain-ids it also skips beads whose type the workspace's
     | types.retained setting names (their ids are idempotency keys); --json reports
     | them as retention_required.

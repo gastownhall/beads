@@ -9,12 +9,16 @@ import (
 )
 
 // cascadeAgeReader is a minimal molReader covering only the calls
-// findAbandonedWisps makes. The embedded nil interface makes any other call
-// panic loudly rather than return a silent zero value.
+// findAbandonedWisps and selectClosedWispsForGC make. The embedded nil
+// interface makes any other call panic loudly rather than return a silent zero
+// value. blocked is the blocked listing it answers, and infra the one issue
+// type it reports as a configured infra type.
 type cascadeAgeReader struct {
 	molReader
 	issues   []*types.Issue
 	children map[string]bool
+	blocked  []*types.BlockedIssue
+	infra    types.IssueType
 }
 
 func (r *cascadeAgeReader) SearchIssues(context.Context, string, types.IssueFilter) ([]*types.Issue, error) {
@@ -22,14 +26,16 @@ func (r *cascadeAgeReader) SearchIssues(context.Context, string, types.IssueFilt
 }
 
 func (r *cascadeAgeReader) GetBlockedIssues(context.Context, types.WorkFilter) ([]*types.BlockedIssue, error) {
-	return nil, nil
+	return r.blocked, nil
 }
 
 func (r *cascadeAgeReader) GetCustomStatusesDetailed(context.Context) ([]types.CustomStatus, error) {
 	return nil, nil
 }
 
-func (r *cascadeAgeReader) IsInfraTypeCtx(context.Context, types.IssueType) bool { return false }
+func (r *cascadeAgeReader) IsInfraTypeCtx(_ context.Context, t types.IssueType) bool {
+	return r.infra != "" && t == r.infra
+}
 
 func (r *cascadeAgeReader) FindWispDependentsRecursive(context.Context, []string) (map[string]bool, error) {
 	return r.children, nil
@@ -214,6 +220,110 @@ func TestWispGCCascadeChildAgesAtStoragePrecision(t *testing.T) {
 		if collected[step.ID] != tc.wantStep {
 			t.Errorf("findAbandonedWisps(--age %s) at %s, closed step updated_at 12:00:01: collected=%v, want %v",
 				tc.threshold, tc.now.Format("15:04:05.000"), collected[step.ID], tc.wantStep)
+		}
+	}
+}
+
+// heldFallbackListing is the blocked listing of a live conditional-blocks
+// fallback whose target closed with a reason that is not a failure: the
+// listing names the closed target as the fallback's blocker (GH#5577).
+func heldFallbackListing(fallback *types.Issue, target string) []*types.BlockedIssue {
+	return []*types.BlockedIssue{{Issue: *fallback, BlockedByCount: 1, BlockedBy: []string{target}}}
+}
+
+// TestWispGCKeepsAClosedWispAFallbackWaitsOn pins that the age GC never
+// collects a closed wisp a live fallback still waits on: deleting a
+// conditional-blocks target closed with a reason that is not a failure drops
+// the edge and puts the fallback in ready work after a success (GH#5577). It
+// holds on both of the GC's paths to a closed wisp, the parent scan under
+// --all and the cascade from an abandoned parent, which takes closed
+// dependents even without --all. A closed wisp the listing does not name is
+// still collected on each path.
+func TestWispGCKeepsAClosedWispAFallbackWaitsOn(t *testing.T) {
+	now := time.Now()
+	stale := now.Add(-48 * time.Hour)
+	closedWisp := func(id string) *types.Issue {
+		return &types.Issue{ID: id, Status: types.StatusClosed, CloseReason: "all steps complete", UpdatedAt: stale}
+	}
+	fallback := &types.Issue{ID: "gc-fallback", Status: types.StatusOpen, UpdatedAt: stale}
+
+	t.Run("parent scan under --all", func(t *testing.T) {
+		held, done := closedWisp("gc-held"), closedWisp("gc-done")
+		r := &cascadeAgeReader{
+			issues:  []*types.Issue{held, done, fallback},
+			blocked: heldFallbackListing(fallback, held.ID),
+		}
+		got, err := findAbandonedWisps(context.Background(), r, true, time.Hour, nil)
+		if err != nil {
+			t.Fatalf("findAbandonedWisps(--all): %v", err)
+		}
+		assertWispGCCollected(t, got, []string{done.ID}, []string{held.ID, fallback.ID})
+	})
+
+	t.Run("cascade from an abandoned parent", func(t *testing.T) {
+		parent := &types.Issue{ID: "gc-stale-parent", Status: types.StatusOpen, UpdatedAt: stale}
+		held, done := closedWisp("gc-held-step"), closedWisp("gc-done-step")
+		r := &cascadeAgeReader{
+			issues:   []*types.Issue{parent, held, done, fallback},
+			children: map[string]bool{held.ID: true, done.ID: true},
+			blocked:  heldFallbackListing(fallback, held.ID),
+		}
+		got, err := findAbandonedWisps(context.Background(), r, false, time.Hour, nil)
+		if err != nil {
+			t.Fatalf("findAbandonedWisps: %v", err)
+		}
+		assertWispGCCollected(t, got, []string{parent.ID, done.ID}, []string{held.ID, fallback.ID})
+	})
+}
+
+// TestSelectClosedWispsForGCKeepsAClosedWispAFallbackWaitsOn pins the same
+// rule for `bd mol wisp gc --closed`, on the selection both of its routes
+// share: a closed wisp the blocked listing names as a live fallback's blocker
+// is kept and counted beside the pinned and infra skips, and a closed wisp
+// whose failure close released its fallback (so the listing does not name it)
+// is deleted.
+func TestSelectClosedWispsForGCKeepsAClosedWispAFallbackWaitsOn(t *testing.T) {
+	held := &types.Issue{ID: "gc-held", Status: types.StatusClosed, CloseReason: "all steps complete"}
+	failed := &types.Issue{ID: "gc-failed", Status: types.StatusClosed, CloseReason: "failed: smoke test red"}
+	pinned := &types.Issue{ID: "gc-pinned", Status: types.StatusClosed, Pinned: true}
+	infra := &types.Issue{ID: "gc-infra", Status: types.StatusClosed, IssueType: types.IssueType("agent")}
+	fallback := &types.Issue{ID: "gc-fallback", Status: types.StatusOpen}
+
+	r := &cascadeAgeReader{
+		issues:  []*types.Issue{held, failed, pinned, infra},
+		blocked: heldFallbackListing(fallback, held.ID),
+		infra:   infra.IssueType,
+	}
+	kept, skips, err := selectClosedWispsForGC(context.Background(), r, nil)
+	if err != nil {
+		t.Fatalf("selectClosedWispsForGC: %v", err)
+	}
+	if len(kept) != 1 || kept[0].ID != failed.ID {
+		ids := make([]string, len(kept))
+		for i, issue := range kept {
+			ids[i] = issue.ID
+		}
+		t.Errorf("kept %v, want only %s: a closed wisp a live fallback waits on must not be deleted", ids, failed.ID)
+	}
+	if want := (closedWispGCSkips{pinned: 1, infra: 1, holding: 1}); skips != want {
+		t.Errorf("skips = %+v, want %+v", skips, want)
+	}
+}
+
+func assertWispGCCollected(t *testing.T, got []*types.Issue, want, spared []string) {
+	t.Helper()
+	collected := make(map[string]bool, len(got))
+	for _, issue := range got {
+		collected[issue.ID] = true
+	}
+	for _, id := range want {
+		if !collected[id] {
+			t.Errorf("%s not collected; collected=%v", id, collected)
+		}
+	}
+	for _, id := range spared {
+		if collected[id] {
+			t.Errorf("%s collected; a closed wisp a live fallback waits on, and the blocked fallback itself, must survive (GH#5577); collected=%v", id, collected)
 		}
 	}
 }

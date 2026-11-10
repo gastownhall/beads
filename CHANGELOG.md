@@ -1223,6 +1223,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd init` and `bd bootstrap` missing-database refusals and `bd init`'s
   already-initialized refusals, and the `bd list` example in the latter, are
   no longer colored.
+- **A `conditional-blocks` fallback now runs only when its target fails
+  (GH#5577).** The edge (and `bd mol bond --type conditional`) promised "B
+  runs only if A fails", but any close of A released B. B is now released
+  only when A closes with a failure reason, one containing a keyword such as
+  `failed`, `rejected`, `wontfix` or `aborted` (the full list is in the
+  dependencies guide). The default `Closed`, an empty reason and any other
+  text keep B blocked, and `bd blocked` names A as B's blocker: close B
+  yourself once it is not needed, after closing any open children of B (an
+  arm's steps) in dependency order, or delete B with
+  `bd delete B --cascade --force`. Removing the dependency, or force-closing
+  B over open children, puts that work in `bd ready`. Pinning A still
+  releases B, and changing only A's close reason decides B again. A
+  molecule's root auto-closes with `all steps complete`, which is not a
+  failure reason, so an arm bonded with `bd mol bond --type conditional`
+  stays blocked when the molecule completes (to run it, `bd reopen` the root
+  and close it with a failure reason: a second close keeps the first reason),
+  and a fallback step whose sibling succeeded must be closed before its
+  molecule can complete. Deleting A also releases B, so the cleanup verbs
+  keep A while B waits on it: `bd purge` keeps a closed bead a live bead
+  depends on through `conditional-blocks`, as it does for `blocks`, and
+  counts it in `live_dependent_skipped` (`issueops.SweepLiveDependentEdgeTypes`
+  now lists the type); both `bd mol wisp gc` modes keep a closed wisp that
+  `bd blocked` names as a live bead's blocker; and `bd mol squash` keeps a
+  step whose success close still holds a live bead back through
+  `conditional-blocks` (such as a step a rollback arm was bonded onto),
+  summarizes it in the digest as before, and lists it in `kept_ids`.
+  `bd delete`, `bd mol burn`, `bd prune`, `bd gc`, `bd admin cleanup` and
+  the stale-closed-issues `bd doctor --fix` still release B, so dispose of
+  an unused B before deleting A that way. No migration runs: after
+  upgrading, `bd doctor --fix` or `bd recompute-blocked` blocks again the
+  fallbacks an older bd released. Run it before the next `bd mol wisp gc`,
+  which keeps only the wisps `bd blocked` names and so would delete the A of
+  a fallback that is still released, after which the repair cannot block
+  that fallback again. Upgrade every bd that writes to a shared database
+  together, because an older binary releases such fallbacks again.
 
 ### Fixed
 

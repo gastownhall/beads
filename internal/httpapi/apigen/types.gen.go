@@ -2207,7 +2207,7 @@ type SweepRequest struct {
 	// Pattern Keep only beads whose id matches this shell glob (`*`, `?`, `[...]`, `\` escapes; `*` also crosses `-` and `.`, since an id is not a path). Absent matches every bead in the tier. A MALFORMED glob is a `400`, never a pattern that matches nothing.
 	Pattern *string `json:"pattern,omitempty"`
 
-	// ProtectLiveDependents Skip a closed candidate that a LIVE (not-done) bead depends on through a parent/child, tracks, or blocks edge, so closing a dependent's dependency does not erase the row a live bead still points at. Protection is TRANSITIVE and crosses the ephemeral/durable plane boundary. Behind the `issues.sweep.liveDependents` behavior token: an older server answers `unknown_parameter` for this name.
+	// ProtectLiveDependents Skip a closed candidate that a LIVE (not-done) bead depends on through a parent/child, tracks, blocks, or conditional-blocks edge, so closing a dependent's dependency does not erase the row a live bead still points at, and deleting a conditional fallback's precondition does not release the fallback. Protection is TRANSITIVE and crosses the ephemeral/durable plane boundary. Behind the `issues.sweep.liveDependents` behavior token: an older server answers `unknown_parameter` for this name.
 	ProtectLiveDependents *bool `json:"protect_live_dependents,omitempty"`
 
 	// ProtectReferenced Skip candidates whose id is CITED — as a literal, at word boundaries — in the description, notes or comments of any bead that is not done, so a decision trail a live bead still points at is not deleted out from under it.

@@ -24,6 +24,11 @@ Use ` + "`--pattern '*'`" + ` if you really do want to sweep everything closed.
 Deletes: issues, dependencies, labels, events, and comments for matching beads.
 Skips: pinned beads (protected), open/in-progress beads, and ephemeral beads.
 
+It does not skip closed beads that live beads depend on. Pruning a bead a
+conditional-blocks fallback still waits on (closed with a reason that is not a
+failure) drops the edge and puts the fallback in ` + "`bd ready`" + ` as if the bead had
+failed: close or delete an unused fallback before pruning what it waits on.
+
 Also skips closed beads whose ID appears in the description, notes, or
 comments of any open / in-progress bead. This protects ADR / decision /
 verification trails that downstream beads still cite. Use

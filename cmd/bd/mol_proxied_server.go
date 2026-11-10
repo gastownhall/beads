@@ -379,7 +379,11 @@ func runMolSquashProxiedServer(ctx context.Context, in molSquashInput) error {
 			fmt.Printf("No ephemeral children found for molecule %s\n", moleculeID)
 			return nil
 		}
-		renderSquashDryRun(moleculeID, subgraph, wispChildren, in.keepChildren)
+		kept, err := squashKeptSteps(ctx, r, wispChildren, in.keepChildren)
+		if err != nil {
+			return HandleErrorRespectJSON("squashing molecule: %v", err)
+		}
+		renderSquashDryRun(moleculeID, subgraph, wispChildren, kept, in.keepChildren)
 		return nil
 	}
 
@@ -399,7 +403,11 @@ func runMolSquashProxiedServer(ctx context.Context, in molSquashInput) error {
 			return &SquashResult{MoleculeID: moleculeID, SquashedCount: 0}, "", nil
 		}
 
-		result, err := squashMoleculeInto(ctx, w, subgraph.Root, wispChildren, in.keepChildren, in.summary, currentActor())
+		kept, err := squashKeptSteps(ctx, w, wispChildren, in.keepChildren)
+		if err != nil {
+			return nil, "", fmt.Errorf("squashing molecule: %w", err)
+		}
+		result, err := squashMoleculeInto(ctx, w, subgraph.Root, wispChildren, kept, in.keepChildren, in.summary, currentActor())
 		if err != nil {
 			return nil, "", fmt.Errorf("squashing molecule: %w", err)
 		}

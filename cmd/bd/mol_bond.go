@@ -49,6 +49,21 @@ Bond types:
   conditional, which has no safe degradation - omit --ref to bond a
   conditional arm as a sibling.
 
+  A conditional arm is released only when A closes with a failure reason
+  (failed, rejected, wontfix, ...). A molecule's root auto-closes with "all
+  steps complete", which is not one. To run the arm, close the root yourself
+  (bd close <root> --reason "failed: ..."); if it already auto-closed, run
+  bd reopen <root> first, because a second close keeps the first reason.
+  If A succeeds, close the arm's steps in dependency order and then the arm,
+  or run bd delete <arm> --cascade --force. Never force-close the arm over
+  open steps or remove its dependency: either puts the steps in bd ready.
+  Deleting A runs the arm too, because the arm's dependency goes with A,
+  whether A is the molecule or a step of it. bd mol squash, bd mol wisp gc
+  and bd purge keep a success-closed A while the arm waits. Every other
+  delete of A (bd delete, bd mol burn, bd prune, bd gc, bd admin cleanup,
+  the stale-closed-issues bd doctor --fix) does not, so dispose of an unused
+  arm first.
+
 Phase control:
   By default, spawned protos follow the target's phase:
   - Attaching to mol (Ephemeral=false) → spawns as persistent (Ephemeral=false)

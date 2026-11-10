@@ -99,13 +99,27 @@ bd close A                                   # default reason "Closed": B stays 
 - Pinning A releases B; reopening A blocks B again. Changing only A's close
   reason re-decides B.
 - `bd blocked` names a success-closed A as B's blocker. When A succeeded and B
-  is no longer needed, close B yourself (no `--force` needed) or remove the
-  dependency.
+  is no longer needed, close B yourself (no `--force` needed). Do not remove
+  the dependency instead: that releases B into `bd ready`.
+- If B has open children, such as the steps of a molecule arm, close them
+  first, in dependency order, and then B, or delete B and its children with
+  `bd delete B --cascade --force`. Never `bd close B --force` over open
+  children: a closed parent no longer holds its children, so they enter
+  `bd ready`.
+- Deleting A releases B too, because the edge is deleted with A. `bd purge`,
+  `bd mol wisp gc` and `bd mol squash` keep a closed A that a live B still
+  waits on; purge and wisp gc collect it once B is closed. Every other
+  delete of A (`bd delete`, `bd mol burn`, `bd prune`, `bd gc`,
+  `bd admin cleanup`, the stale-closed-issues `bd doctor --fix`) puts B in
+  `bd ready`, so dispose of an unused B first.
 - Older bd releases released B on any close. After upgrading, `bd doctor`
   reports fallbacks they left unblocked and `bd doctor --fix` or
-  `bd recompute-blocked` blocks them again; no migration runs. Upgrade every
-  bd that writes to a shared database together, because an older binary
-  writing to it can release such fallbacks again.
+  `bd recompute-blocked` blocks them again; no migration runs. Run the
+  repair before the next `bd mol wisp gc`: gc keeps only an A that
+  `bd blocked` names, so it deletes the A of a fallback that is still
+  released, and the repair can then no longer block that fallback. Upgrade
+  every bd that writes to a shared database together, because an older
+  binary writing to it can release such fallbacks again.
 
 ## Finding Ready Work
 

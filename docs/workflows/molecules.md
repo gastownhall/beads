@@ -263,6 +263,53 @@ Spawned issues follow the target's phase (persistent or ephemeral) by
 default. Override with `--pour` (force persistent) or `--ephemeral` (force
 ephemeral) — see [Wisps](/workflows/wisps).
 
+### Conditional Bonds
+
+A conditional arm is released only when the work it waits on closes with a
+[failure reason](/core-concepts/dependencies#conditional-blocks) such as
+`failed`; any other close keeps it blocked. Two molecule shapes need a hand to
+finish:
+
+- **An arm bonded onto a molecule** waits on the molecule's root. The root
+  auto-closes with `all steps complete`, which is not a failure reason, even
+  when a step closed as failed, so the arm stays blocked. To take the failure
+  path, close the root yourself with a failure reason. If the root already
+  auto-closed, reopen it first: closing a closed issue again keeps its first
+  reason, so the arm stays blocked even though `bd close` reports success.
+- **A fallback step inside a molecule** waits on a sibling step. When that
+  step succeeds, the fallback stays open and blocked: `bd ready --mol` never
+  offers it, and the root cannot auto-close while it is open. Close the unused
+  fallback and the molecule completes.
+
+An unused arm, like any unused fallback with steps of its own, is disposed of
+from the bottom up, because its blocked root is what holds its steps back.
+Close the steps in dependency order, then the arm, or delete the arm with its
+steps. Never `bd close <arm> --force` while steps are open, and never remove
+the arm's dependency: either way its steps enter `bd ready` and run after a
+success.
+
+Cleanup keeps the root or step an arm waits on. `bd purge`, `bd mol wisp gc`
+and `bd mol squash` leave such a closed root or step in place while its arm
+is unused (squash lists the steps it kept), and `bd purge` and
+`bd mol wisp gc` collect it once the arm is disposed of. Any other delete of
+it (`bd delete`, `bd mol burn`, `bd prune`, `bd gc`, `bd admin cleanup`, the
+stale-closed-issues `bd doctor --fix`) drops the arm's dependency and runs
+it, so dispose of the arm first.
+
+```bash
+# The molecule failed: release its conditional arm
+bd close bd-xyz --reason "failed: smoke test red" --force   # steps still open
+bd reopen bd-xyz && bd close bd-xyz --reason "failed: smoke test red"   # already auto-closed
+
+# The molecule succeeded: dispose of its unused arm bd-arm
+bd close bd-arm.1 bd-arm.2 --reason "skipped: bd-xyz succeeded"   # blockers first
+bd close bd-arm --reason "skipped: bd-xyz succeeded"   # unless it closed with its last step
+bd delete bd-arm --cascade --force   # or delete the arm and its steps instead
+
+# The step succeeded: close its unused fallback
+bd close bd-xyz.4 --reason "skipped: deploy succeeded"
+```
+
 ### Dynamic Bonding
 
 When the number of children isn't known until runtime, bond in a loop with
