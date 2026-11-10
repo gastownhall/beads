@@ -9,7 +9,11 @@ import (
 	"github.com/steveyegge/beads/internal/utils"
 )
 
-var errRefuseSymlinkWrite = errors.New("refusing to write through symlink")
+var (
+	errRefuseSymlinkWrite    = errors.New("refusing to write through symlink")
+	errRefuseNonRegularWrite = errors.New("refusing to write a path that is not a regular file")
+	errRefuseReadOnlyWrite   = errors.New("refusing to replace a file you cannot write")
+)
 
 // atomicWriteFile writes data to a file atomically using a unique temporary file.
 // This prevents race conditions when multiple processes write to the same file.
@@ -17,6 +21,9 @@ var errRefuseSymlinkWrite = errors.New("refusing to write through symlink")
 // write-through behavior should use atomicWriteFileFollowingSymlink.
 // An optional permissions argument sets the file mode. Without one, a file that
 // already exists keeps its permission bits and a new file gets 0644.
+//
+// An existing target must be a regular file the current process can write:
+// see atomicWriteFileFollowingSymlink.
 //
 //nolint:unparam // perm is intentionally variadic for callers that need non-default permissions
 func atomicWriteFile(path string, data []byte, perm ...os.FileMode) error {
@@ -32,23 +39,54 @@ func atomicWriteFile(path string, data []byte, perm ...os.FileMode) error {
 // atomicWriteFileFollowingSymlink writes atomically to the resolved target.
 // Keep this helper named at call sites so symlink write-through is explicit.
 // The file mode is chosen as atomicWriteFile describes, from the target.
+//
+// The rename below needs only a writable directory, so without a check the
+// writer would silently replace a file the process cannot write, keeping its
+// mode (a read-only AGENTS.md, say). It therefore probes an existing target
+// with a non-truncating write-open first, and refuses when that is denied,
+// naming the file. A target that is not a regular file is refused before the
+// probe: an open for writing on a FIFO blocks until a reader appears.
 func atomicWriteFileFollowingSymlink(path string, data []byte, perm ...os.FileMode) error {
 	targetPath, err := utils.ResolveForWrite(path)
 	if err != nil {
 		return fmt.Errorf("resolve path: %w", err)
 	}
 
+	info, statErr := os.Stat(targetPath)
+	if statErr != nil && !os.IsNotExist(statErr) {
+		return fmt.Errorf("inspect path: %w", statErr)
+	}
+	if statErr == nil && !info.Mode().IsRegular() {
+		return fmt.Errorf("%w: %s", errRefuseNonRegularWrite, targetPath)
+	}
+
 	mode := os.FileMode(0644)
 	if len(perm) > 0 {
 		mode = perm[0]
-	} else if info, err := os.Stat(targetPath); err == nil {
+	} else if statErr == nil {
 		// The rename below puts a new file in place of the old one. Give it
 		// the old one's permission bits, or every rewrite resets a mode the
 		// owner narrowed (a 0600 ~/.gemini/GEMINI.md holding Gemini CLI's
 		// saved memories, say) to 0644.
 		mode = info.Mode().Perm()
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("inspect path: %w", err)
+	}
+
+	if statErr == nil {
+		switch perr := probeWritableTarget(targetPath); {
+		case perr == nil:
+			// The process can write the file; replace it as before.
+		case os.IsNotExist(perr):
+			// It vanished after its stat. Write it as a new file, with the
+			// explicit mode, or the default for one that carries none.
+			if len(perm) == 0 {
+				mode = 0644
+			}
+		case os.IsPermission(perr):
+			// The rename would replace this file whatever its mode says.
+			return fmt.Errorf("%w: %s (left unchanged; make it writable and rerun): %w", errRefuseReadOnlyWrite, targetPath, perr)
+		default:
+			return fmt.Errorf("probe path: %w", perr)
+		}
 	}
 
 	dir := filepath.Dir(targetPath)
@@ -85,6 +123,18 @@ func atomicWriteFileFollowingSymlink(path string, data []byte, perm ...os.FileMo
 	}
 
 	return nil
+}
+
+// probeWritableTarget reports whether the current process can write the file
+// at path, opening it for writing without truncating, creating or writing
+// anything, and closing the handle at once. It is a best-effort preflight,
+// not a promise of protection against a concurrent chmod or replacement.
+func probeWritableTarget(path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY, 0) // #nosec G304 -- the resolved destination bd itself chose to write
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 // DirExists checks if a directory exists

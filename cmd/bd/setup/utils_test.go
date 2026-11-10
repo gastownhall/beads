@@ -1,11 +1,15 @@
 package setup
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestAtomicWriteFile(t *testing.T) {
@@ -489,4 +493,103 @@ func TestRemoveEmptyDir(t *testing.T) {
 			tt.check(t, path)
 		})
 	}
+}
+
+// requireWriteOpenDenied skips the test unless the current process really
+// cannot open path for writing: a privileged identity (root, a capability)
+// sails past the denial this policy exists to handle, and permission behavior
+// must not be counted as verified under one.
+func requireWriteOpenDenied(t *testing.T, path string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-style write refusal is not exercised on Windows")
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err == nil {
+		_ = f.Close()
+		t.Skipf("write-open of %s succeeded: the test identity is privileged, so a read-only refusal cannot be exercised here", path)
+	}
+	if !os.IsPermission(err) {
+		t.Fatalf("write-open of %s: got %v, want a permission error", path, err)
+	}
+}
+
+// seedReadOnlyFileWithOldMtime seeds content at path as a file the current
+// process cannot write, backdates its mtime, and returns the stat a test
+// compares against to prove the file was left alone.
+func seedReadOnlyFileWithOldMtime(t *testing.T, path, content string) os.FileInfo {
+	t.Helper()
+	seedFileMode(t, path, content, 0o444)
+	old := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatalf("backdate %s: %v", path, err)
+	}
+	requireWriteOpenDenied(t, path)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info
+}
+
+// assertReadOnlyFilePreserved fails unless path still holds content with the
+// identity, mtime and permission mode of the seed captured before the call.
+func assertReadOnlyFilePreserved(t *testing.T, path, content string, seed os.FileInfo) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if string(data) != content {
+		t.Errorf("%s changed:\n got: %q\nwant: %q", path, data, content)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if !os.SameFile(seed, info) {
+		t.Errorf("%s was replaced by a new file", path)
+	}
+	if !info.ModTime().Equal(seed.ModTime()) {
+		t.Errorf("%s was rewritten: mtime %v, want %v", path, info.ModTime(), seed.ModTime())
+	}
+	if got, want := info.Mode().Perm(), seed.Mode().Perm(); got != want {
+		t.Errorf("%s mode = %04o, want %04o", path, got, want)
+	}
+}
+
+// assertNoTempResidue fails unless no temporary file is left in dir.
+func assertNoTempResidue(t *testing.T, dir string) {
+	t.Helper()
+	residue, err := filepath.Glob(filepath.Join(dir, ".*.tmp"))
+	if err != nil {
+		t.Fatalf("glob %s: %v", dir, err)
+	}
+	if len(residue) != 0 {
+		t.Errorf("temporary files left behind: %v", residue)
+	}
+}
+
+// The shared writer renames a temp file into place, which needs only a
+// writable directory: on a file the process cannot write it used to silently
+// replace what was made read-only, keeping the mode. It must refuse instead,
+// naming the file and leaving it — and the directory — untouched.
+func TestAtomicWriteFileRefusesAReadOnlyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "AGENTS.md")
+	content := "# My project\nSome user text.\n"
+	seed := seedReadOnlyFileWithOldMtime(t, path, content)
+
+	err := atomicWriteFile(path, []byte("# My project\nSome user text.\nplus beads\n"))
+	if err == nil {
+		t.Fatal("atomicWriteFile replaced a file the process cannot write instead of refusing")
+	}
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("the refusal must carry the underlying permission error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("the refusal must name the file, got: %v", err)
+	}
+	assertReadOnlyFilePreserved(t, path, content, seed)
+	assertNoTempResidue(t, dir)
 }
