@@ -575,6 +575,14 @@ func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, op
 		}, nil
 	}
 
+	// The blocked-claim refusal, at the same point as the primary path's: after
+	// the CAS won, before any bookkeeping. The unit of work rolls the CAS back.
+	if opts.RefuseBlocked {
+		if err := issueops.EnforceClaimPolicyInTx(ctx, r.runner, id, false); err != nil {
+			return domain.ClaimRowResult{}, err
+		}
+	}
+
 	// Grant the lease in the ephemeral leases table, mirroring
 	// issueops.ClaimIssueInTx. Wisps are never leased. This dual must stay in
 	// lockstep with the primary path (see the row_lock comment above).
