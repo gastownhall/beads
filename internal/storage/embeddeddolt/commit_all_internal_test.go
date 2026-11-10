@@ -359,3 +359,154 @@ func TestCommitAllReportsVerificationFailureWhenRequiredReadFails(t *testing.T) 
 		})
 	}
 }
+
+// stallFixtureStore returns a real store in the GH#5433 stall: an enabled
+// operator pattern over the tracked issues table, its latest write stranded
+// in the working set — so a tolerant full commit would answer the typed
+// residual finding.
+func stallFixtureStore(t *testing.T, database string) *EmbeddedDoltStore {
+	t.Helper()
+	ctx := t.Context()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	store, err := Open(ctx, beadsDir, database, "main")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.SetConfig(ctx, "issue_prefix", "fpp"); err != nil {
+		t.Fatalf("SetConfig(issue_prefix): %v", err)
+	}
+	if err := store.Commit(ctx, "bd init"); err != nil {
+		t.Fatalf("Commit(bd init): %v", err)
+	}
+	issue := &types.Issue{
+		ID:        "fpp-1",
+		Title:     "tracked at head",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if err := store.Commit(ctx, "test: track the issue"); err != nil {
+		t.Fatalf("Commit(track the issue): %v", err)
+	}
+	// Raw-SQL writes go through short-lived handles that close before the
+	// next store operation: a handle kept open across store.Commit holds
+	// the engine's database lock and wedges the commit path's own open in
+	// its lock-retry loop (the pattern every te.exec fixture follows).
+	execStallSQL := func(query string) {
+		t.Helper()
+		db, cleanup, err := OpenSQL(ctx, filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		defer func() { _ = cleanup() }()
+		if _, err := db.ExecContext(ctx, query); err != nil {
+			t.Fatalf("exec %q: %v", query, err)
+		}
+	}
+	execStallSQL("INSERT INTO dolt_ignore (pattern, ignored) VALUES ('issues', true)")
+	if err := store.Commit(ctx, "test: register ignore pattern"); err != nil {
+		t.Fatalf("Commit(register ignore pattern): %v", err)
+	}
+	execStallSQL("UPDATE issues SET title = 'stranded' WHERE id = 'fpp-1'")
+	return store
+}
+
+// headAndDirtyRows reads HEAD and the dolt_status row count for issues on a
+// fresh, live context.
+func headAndDirtyRows(t *testing.T, store *EmbeddedDoltStore) (head string, dirtyRows int) {
+	t.Helper()
+	ctx := t.Context()
+	head, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit: %v", err)
+	}
+	db, cleanup, err := OpenSQL(ctx, store.dataDir, store.database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer func() { _ = cleanup() }()
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_status WHERE table_name = 'issues'").Scan(&dirtyRows); err != nil {
+		t.Fatalf("read dolt_status: %v", err)
+	}
+	return head, dirtyRows
+}
+
+// TestCommitAllKeepsOperationalFailurePrecedenceAndNonTolerantBehavior pins
+// GH#5433 AC-6: the residual finding may only ever attach to a commit whose
+// SQL publication was confirmed. A publication/operation failure keeps its
+// own error and its indeterminate classification — never the typed finding,
+// never a claimed success — and the non-tolerant merge-resolution path keeps
+// its pre-existing refusal rather than growing the tolerant classification.
+func TestCommitAllKeepsOperationalFailurePrecedenceAndNonTolerantBehavior(t *testing.T) {
+	issueopsStillRefuses := func(t *testing.T, err error) {
+		t.Helper()
+		var residual *storage.UncommittedChangesError
+		if errors.As(err, &residual) {
+			t.Fatalf("error = typed residual finding %v, want the operational failure to retain precedence", err)
+		}
+		var verification *storage.CommitVerificationError
+		if errors.As(err, &verification) {
+			t.Fatalf("error = typed verification finding %v, want the operational failure to retain precedence", err)
+		}
+		if errors.Is(err, storage.ErrCommitVerificationFailed) {
+			t.Fatalf("error = verification sentinel %v, want the operational failure", err)
+		}
+	}
+
+	t.Run("canceled context keeps the operational failure, no replay", func(t *testing.T) {
+		store := stallFixtureStore(t, "fppcancel")
+		headBefore, dirtyBefore := headAndDirtyRows(t, store)
+		if dirtyBefore == 0 {
+			t.Fatal("fixture did not strand the issues write")
+		}
+
+		canceled, cancel := context.WithCancel(context.Background())
+		cancel()
+		committed, commitErr := store.CommitAll(canceled, "test: canceled commit")
+		issueopsStillRefuses(t, commitErr)
+		if committed {
+			t.Fatal("CommitAll claimed committed=true on a canceled context")
+		}
+		if !errors.Is(commitErr, context.Canceled) {
+			t.Fatalf("CommitAll error = %v, want the canceled-context operational failure", commitErr)
+		}
+
+		// Nothing moved and nothing was replayed: the stranded write is
+		// still exactly the working set it was.
+		headAfter, dirtyAfter := headAndDirtyRows(t, store)
+		if headAfter != headBefore {
+			t.Fatalf("HEAD moved across the failed commit: %s -> %s", headBefore, headAfter)
+		}
+		if dirtyAfter != dirtyBefore {
+			t.Fatalf("issues dolt_status rows changed across the failed commit: %d -> %d", dirtyBefore, dirtyAfter)
+		}
+	})
+
+	t.Run("non-tolerant merge resolution keeps the Dolt refusal", func(t *testing.T) {
+		store := stallFixtureStore(t, "fppmerge")
+		headBefore, dirtyBefore := headAndDirtyRows(t, store)
+		if dirtyBefore == 0 {
+			t.Fatal("fixture did not strand the issues write")
+		}
+
+		err := store.CommitMergeResolution(t.Context(), "test: merge resolution")
+		issueopsStillRefuses(t, err)
+		// The non-tolerant contract: DOLT_COMMIT's nothing-to-commit refusal
+		// is returned as the failure it is, not reclassified as a tolerant
+		// no-op and not decorated with the tolerant paths' typed finding.
+		if !issueops.IsNothingToCommitError(err) {
+			t.Fatalf("CommitMergeResolution error = %v, want the preserved non-tolerant nothing-to-commit refusal", err)
+		}
+		headAfter, dirtyAfter := headAndDirtyRows(t, store)
+		if headAfter != headBefore {
+			t.Fatalf("HEAD moved across the refused merge resolution: %s -> %s", headBefore, headAfter)
+		}
+		if dirtyAfter != dirtyBefore {
+			t.Fatalf("issues dolt_status rows changed across the refused merge resolution: %d -> %d", dirtyBefore, dirtyAfter)
+		}
+	})
+}
