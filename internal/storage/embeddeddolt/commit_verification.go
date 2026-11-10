@@ -5,7 +5,6 @@ package embeddeddolt
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"slices"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -53,7 +52,7 @@ func commitAllThrough(ctx context.Context, withTx func(func(*sql.Tx) error) erro
 func verifyCommitComplete(ctx context.Context, tx *sql.Tx, committed bool) error {
 	tables, err := readStatusTables(ctx, tx)
 	if err != nil {
-		return err
+		return verificationFailed(committed, "read dolt_status", err)
 	}
 	if len(tables) == 0 {
 		return nil
@@ -62,7 +61,7 @@ func verifyCommitComplete(ctx context.Context, tx *sql.Tx, committed bool) error
 	// costs one status query.
 	policy, err := schema.LoadOwnedIgnorePolicy(ctx, tx)
 	if err != nil {
-		return err
+		return verificationFailed(committed, "read bd-owned ignore policy", err)
 	}
 	remaining := slices.DeleteFunc(tables, policy.OwnsTable)
 	if len(remaining) == 0 {
@@ -75,22 +74,34 @@ func verifyCommitComplete(ctx context.Context, tx *sql.Tx, committed bool) error
 	}
 }
 
+// verificationFailed reports a required read after DOLT_COMMIT that failed:
+// the store cannot say whether the working set is clean, so it neither
+// reports the commit as complete nor tolerates it as a no-op. The payload
+// keeps what DOLT_COMMIT itself answered.
+func verificationFailed(committed bool, operation string, cause error) error {
+	outcome := storage.CommitOutcomeNothingToCommit
+	if committed {
+		outcome = storage.CommitOutcomeSucceeded
+	}
+	return &storage.CommitVerificationError{Outcome: outcome, Operation: operation, Cause: cause}
+}
+
 func readStatusTables(ctx context.Context, tx *sql.Tx) ([]string, error) {
 	rows, err := tx.QueryContext(ctx, "SELECT table_name FROM dolt_status")
 	if err != nil {
-		return nil, fmt.Errorf("read dolt_status: %w", err)
+		return nil, err
 	}
 	defer rows.Close()
 	var tables []string
 	for rows.Next() {
 		var table string
 		if err := rows.Scan(&table); err != nil {
-			return nil, fmt.Errorf("read dolt_status: %w", err)
+			return nil, err
 		}
 		tables = append(tables, table)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read dolt_status: %w", err)
+		return nil, err
 	}
 	slices.Sort(tables)
 	return slices.Compact(tables), nil

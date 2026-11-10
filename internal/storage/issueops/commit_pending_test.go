@@ -20,6 +20,17 @@ func TestIsNothingToCommitErrorRejectsVerificationErrors(t *testing.T) {
 			Tables:         []string{"nothing to commit", "no changes to commit"},
 			IgnorePatterns: []string{"nothing to commit%"},
 		},
+		"unverified no-op": &storage.CommitVerificationError{
+			Outcome:   storage.CommitOutcomeNothingToCommit,
+			Operation: "read dolt_status",
+			Cause:     errors.New("nothing to commit"),
+		},
+		"unverified commit": &storage.CommitVerificationError{
+			Outcome:   storage.CommitOutcomeSucceeded,
+			Operation: "read dolt_status",
+			Cause:     errors.New("no changes to commit"),
+		},
+		"sentinel": fmt.Errorf("%w: nothing to commit", storage.ErrCommitVerificationFailed),
 	}
 	for name, residual := range residuals {
 		for wrapName, err := range map[string]error{

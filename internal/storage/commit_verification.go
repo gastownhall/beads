@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -40,4 +41,55 @@ func (e *UncommittedChangesError) Error() string {
 	}
 	b.WriteString("; the writes may still be saved in the working set: back up the store, inspect and correct any unwanted configuration, then retry the commit; do not replay the mutations")
 	return b.String()
+}
+
+// ErrCommitVerificationFailed marks a commit whose completeness could not be
+// checked: a required read after DOLT_COMMIT failed, so the store cannot
+// claim the working set is clean. Match it with errors.Is; the payload is a
+// *CommitVerificationError.
+var ErrCommitVerificationFailed = errors.New("commit verification failed")
+
+// CommitOutcome records what DOLT_COMMIT itself reported before the
+// verification read failed.
+type CommitOutcome string
+
+const (
+	// CommitOutcomeSucceeded: DOLT_COMMIT reported a new commit.
+	CommitOutcomeSucceeded CommitOutcome = "commit_succeeded"
+	// CommitOutcomeNothingToCommit: DOLT_COMMIT reported nothing to commit.
+	CommitOutcomeNothingToCommit CommitOutcome = "nothing_to_commit"
+)
+
+// CommitVerificationError is the payload of ErrCommitVerificationFailed. It
+// never claims the mutation failed: the SQL transaction carrying DOLT_COMMIT
+// was published, and only the completeness check after it is unknown.
+type CommitVerificationError struct {
+	// Outcome is DOLT_COMMIT's own response.
+	Outcome CommitOutcome
+	// Operation names the required read that failed.
+	Operation string
+	// Cause is the read's error.
+	Cause error
+}
+
+func (e *CommitVerificationError) Error() string {
+	var head string
+	switch e.Outcome {
+	case CommitOutcomeSucceeded:
+		head = "DOLT_COMMIT reported success; the commit may have landed, but completeness could not be verified"
+	default:
+		head = "DOLT_COMMIT reported nothing to commit; working-set cleanliness could not be verified, so the completeness outcome is unknown"
+	}
+	return fmt.Sprintf("%s: %s (%s: %v); inspect the working set and history before retrying the commit; do not replay the mutations",
+		ErrCommitVerificationFailed, head, e.Operation, e.Cause)
+}
+
+// Is matches ErrCommitVerificationFailed.
+func (e *CommitVerificationError) Is(target error) bool {
+	return target == ErrCommitVerificationFailed
+}
+
+// Unwrap exposes the failed read's error.
+func (e *CommitVerificationError) Unwrap() error {
+	return e.Cause
 }

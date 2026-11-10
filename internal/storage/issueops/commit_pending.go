@@ -133,17 +133,19 @@ func BuildBatchCommitMessage(ctx context.Context, db SQLQuerier, actor string) s
 // IsNothingToCommitError returns true if the error indicates there was nothing
 // to commit (Dolt may report this even when dolt_status showed changes).
 //
-// A *storage.UncommittedChangesError anywhere in the chain is never the
-// no-op, whatever its text says: it reports changes a commit left behind
-// (GH#5433), and every caller that tolerates "nothing to commit" would
-// otherwise swallow it. It is checked before the message is matched, since
-// table or pattern names in it may contain the matched words.
+// A *storage.UncommittedChangesError or storage.ErrCommitVerificationFailed
+// (the *storage.CommitVerificationError payload matches it) anywhere in the
+// chain is never the no-op, whatever its text says: it reports changes a
+// commit left behind or a cleanliness check that could not run (GH#5433),
+// and every caller that tolerates "nothing to commit" would otherwise
+// swallow it. It is checked before the message is matched, since its text,
+// table names or pattern names may contain the matched words.
 func IsNothingToCommitError(err error) bool {
 	if err == nil {
 		return false
 	}
 	var residual *storage.UncommittedChangesError
-	if errors.As(err, &residual) {
+	if errors.As(err, &residual) || errors.Is(err, storage.ErrCommitVerificationFailed) {
 		return false
 	}
 	s := strings.ToLower(err.Error())
