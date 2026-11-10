@@ -656,9 +656,12 @@ func handleSchemaMigrate() error {
 	// This verb's consent lets the main store's open apply the pending
 	// migrations before this pass runs (#7283, #5920), so the explicit pass's
 	// own count is zero on the very run that migrated. Total it with the
-	// open's count — the work is real, and this command caused it — and drive
-	// status, text and write tracking from the total.
-	total := applied + migrator.MigrationsAppliedAtOpen()
+	// open's count — and with the pre-open autoMigrateOnVersionBump
+	// maintenance's count, which closes its store before this command's main
+	// open and whose migrations are likewise this command's doing — the work
+	// is real, and this command caused it — and drive status, text and write
+	// tracking from the total.
+	total := applied + migrator.MigrationsAppliedAtOpen() + versionBumpMigrationsApplied
 	status := "current"
 	if total > 0 {
 		status = "applied"

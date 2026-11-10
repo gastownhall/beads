@@ -483,3 +483,121 @@ func TestSharedServerMigrateSchemaReportsTheMigrationsItApplied(t *testing.T) {
 			cursor, result.Status, result.Applied, stdout.String(), stderr.String())
 	}
 }
+
+// TestSharedServerMigrateSchemaCountsVersionBumpOpen pins the third surface of
+// gastownhall/beads#7283: the same shared-server open-time migration, but
+// performed by the pre-open autoMigrateOnVersionBump maintenance rather than
+// the main open. A fresh install upgrades the binary and — armed by the
+// stale .local_version the previous release left — runs `bd migrate schema`
+// as its very first command. The maintenance open migrates under the verb's
+// consent and closes before the main open, so neither the main open's count
+// nor the explicit pass sees it: only the maintenance's return value can
+// total it into the report, which used to say "already at vN" on the very run
+// that migrated.
+func TestSharedServerMigrateSchemaCountsVersionBumpOpen(t *testing.T) {
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available, skipping")
+	}
+
+	repo := t.TempDir()
+	beadsDir := filepath.Join(repo, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o755); err != nil {
+		t.Fatalf("create .beads: %v", err)
+	}
+	database := uniqueTestDBName(t)
+	if err := (&configfile.Config{
+		Backend:        configfile.BackendDolt,
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: testDoltServerPort,
+		DoltDatabase:   database,
+	}).Save(beadsDir); err != nil {
+		t.Fatalf("save metadata: %v", err)
+	}
+
+	ctx := context.Background()
+	store, err := dolt.New(ctx, &dolt.Config{
+		Path:            filepath.Join(beadsDir, "dolt"),
+		BeadsDir:        beadsDir,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testDoltServerPort,
+		Database:        database,
+		CreateIfMissing: true,
+	})
+	if err != nil {
+		t.Fatalf("create test store: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "vbo"); err != nil {
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close setup store: %v", err)
+	}
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+
+	admin, err := sql.Open("mysql", doltutil.ServerDSN{
+		Host: "127.0.0.1", Port: testDoltServerPort, User: "root", Database: database,
+	}.String())
+	if err != nil {
+		t.Fatalf("connect to test dolt server: %v", err)
+	}
+	t.Cleanup(func() { admin.Close() })
+
+	// One migration behind, and a stale workspace marker so the maintenance's
+	// read-only probe does not skip the writable open — the marker is also
+	// what the migration has to reconcile once it runs.
+	if _, err := admin.ExecContext(ctx,
+		"DELETE FROM schema_migrations WHERE version = ?", schema.LatestVersion()); err != nil {
+		t.Fatalf("regress schema_migrations: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx,
+		"UPDATE local_metadata SET value = '1.0.0' WHERE `key` = 'bd_version'"); err != nil {
+		t.Fatalf("regress bd_version marker: %v", err)
+	}
+
+	// The one-shot upgrade signal that arms autoMigrateOnVersionBump for the
+	// very command under test. The local dolt data dir above is what makes
+	// the maintenance's precondition (DatabasePath exists) hold on a shared
+	// server workspace.
+	if err := os.WriteFile(filepath.Join(beadsDir, localVersionFile), []byte("1.0.0\n"), 0o600); err != nil {
+		t.Fatalf("write stale %s: %v", localVersionFile, err)
+	}
+
+	bd := buildBDForInitTests(t)
+	cmd := exec.Command(bd, "migrate", "schema")
+	cmd.Dir = repo
+	cmd.Env = append(filteredEnvForContextBinding("BEADS_DIR", "BEADS_DB", "BD_DB",
+		"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_DATABASE", schema.AllowRemoteMigrateEnv),
+		"HOME="+t.TempDir(),
+		"XDG_CONFIG_HOME="+t.TempDir(),
+		"BEADS_TEST_MODE=1",
+		"BEADS_TEST_SERVER=1",
+		"BEADS_DIR="+beadsDir,
+		schema.AllowRemoteMigrateEnv+"=0",
+	)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("bd migrate schema: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	// The maintenance's open is the one that migrated (the main open found
+	// the database current), so its shared-store warning is the witness.
+	if !strings.Contains(stderr.String(), "applying 1 pending schema migration(s) to a shared server database") {
+		t.Errorf("the maintenance open did not migrate under the verb's consent, or its warning is missing:\nstderr:\n%s", stderr.String())
+	}
+	// And the command that caused it must say so, not "already at vN".
+	if !strings.Contains(stdout.String(), "Applied 1 schema migration(s)") {
+		t.Errorf("bd migrate schema reported %q, want the Applied/1 line (gastownhall/beads#7283):\n%s", stdout.String(), stdout.String())
+	}
+
+	var cursor int
+	if err := admin.QueryRowContext(ctx,
+		"SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&cursor); err != nil {
+		t.Fatalf("read schema cursor: %v", err)
+	}
+	if cursor != schema.LatestVersion() {
+		t.Fatalf("cursor = %d after bd migrate schema, want %d", cursor, schema.LatestVersion())
+	}
+}

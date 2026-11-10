@@ -139,6 +139,14 @@ var (
 	// Thread-safe via atomic.Bool to avoid data races in concurrent flush operations.
 	commandDidWrite atomic.Bool
 
+	// versionBumpMigrationsApplied is the in-process handoff from the
+	// pre-open autoMigrateOnVersionBump maintenance to the migrate verb: how
+	// many schema migrations that maintenance's own store open applied before
+	// the command's main open (#7283). `bd migrate schema` totals it into its
+	// report so the run that consented to — and performed — the migrations
+	// does not report "current"/0.
+	versionBumpMigrationsApplied int
+
 	// commandMayEmptyJSONLExport is set by destructive maintenance commands
 	// after they actually delete rows, allowing post-run auto-export to record
 	// an intentional empty JSONL artifact instead of treating it as ambiguous.
@@ -1378,6 +1386,7 @@ var rootCmd = &cobra.Command{
 		commandDidWriteTipMetadata = false
 		commandTipIDsShown = make(map[string]struct{})
 		commandFreeze = migration.Result{}
+		versionBumpMigrationsApplied = 0
 
 		// Set up signal-aware context with batch commit flush on shutdown.
 		// Unlike signal.NotifyContext, this also handles SIGHUP and flushes
@@ -2101,7 +2110,7 @@ var rootCmd = &cobra.Command{
 		// dry-run plan. frozenForMaintenance excludes it for the same reason
 		// as the trackBdVersion call above — see that comment.
 		if policy.runMaintenance && !previewMode && !frozenForMaintenance {
-			autoMigrateOnVersionBump(beadsDir)
+			versionBumpMigrationsApplied = autoMigrateOnVersionBump(beadsDir)
 		}
 
 		// Initialize direct storage access
