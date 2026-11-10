@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -137,8 +138,17 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 	// throttle: when there are no changes, there is nothing to throttle.
 	currentCommit, err := storeStateHash(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to get current commit: %v\n", err)
-		return nil
+		// A backend that cannot hash its state at all (the HTTP client's
+		// typed refusal) is missing a capability, not failing an export:
+		// that stays a warning-only skip. Any other failure means this
+		// command's writes may never reach the JSONL, so the caller must
+		// see it (GH#6163).
+		var unsupported *storage.ErrUnsupported
+		if errors.As(err, &unsupported) {
+			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to get current commit: %v\n", err)
+			return nil
+		}
+		return fmt.Errorf("auto-export to %s: read store state hash: %w", fullPath, err)
 	}
 	if currentCommit == state.LastDoltCommit && state.LastDoltCommit != "" {
 		debug.Logf("auto-export: no changes since last export\n")
