@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/git"
 )
 
@@ -1838,4 +1839,32 @@ func TestInstallHooks_MissingHooksPathRefusal(t *testing.T) {
 			assertStaleNotCreated(t, missing)
 		})
 	}
+}
+
+// TestDoctorGitHooks_RelocatedHooksPath: the doctor Git Hooks check names the
+// missing core.hooksPath instead of missing hook files, and its fix dispatch
+// does not force-install hooks into the stale destination (GH#5853).
+func TestDoctorGitHooks_RelocatedHooksPath(t *testing.T) {
+	t.Setenv("BEADS_DIR", "")
+	repo := newGitRepo(t)
+	stale, _ := strandRepoHooksPath(t, repo)
+
+	runInDir(t, repo, func() {
+		check := doctor.CheckGitHooks(Version)
+		if check.Status != doctor.StatusWarning || !strings.Contains(check.Message+check.Detail, "core.hooksPath") {
+			t.Errorf("Git Hooks check = %q %q / %q, want a warning naming core.hooksPath", check.Status, check.Message, check.Detail)
+		}
+		if !strings.Contains(check.Detail, stale) {
+			t.Errorf("Git Hooks detail %q does not name %s", check.Detail, stale)
+		}
+
+		out := captureStdout(t, func() error {
+			applyFixList(repo, []doctorCheck{{Name: "Git Hooks", Status: statusWarning, Message: check.Message}})
+			return nil
+		})
+		if !strings.Contains(out, "core.hooksPath") || strings.Contains(out, "Error") {
+			t.Errorf("Git Hooks fix dispatch did not name the config fault:\n%s", out)
+		}
+	})
+	assertStaleNotCreated(t, stale)
 }
