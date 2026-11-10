@@ -14,6 +14,7 @@ import (
 	"unicode"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -224,6 +225,12 @@ type ProblemError struct {
 	// polarities, so it is a pointer for the reason BlockerIsAncestor is one:
 	// absence has to mean "this refusal was not about a key", never false.
 	DeclaredLater *bool
+
+	// Blockers are the live blockers a refusal names, read from the typed
+	// `blockers` member rather than parsed out of `detail`. Their PRESENCE
+	// discriminates `not_claimable`: a claim refused for a live blocker carries
+	// them, the status refusal does not. Nil when the member was absent.
+	Blockers []issueops.Blocker
 
 	// The journal-truncation window, with `events_journal_truncated`: the
 	// checkpoint the window begins after, the lowest seq still retained, and the
@@ -437,6 +444,7 @@ func mapProblem(t target, status int, header http.Header, body []byte, maxRetryA
 		ItemKey:       stripControlRunesPtr(p.ItemKey),
 		ItemIssueID:   stripControlRunesPtr(p.ItemIssueId),
 		DeclaredLater: p.DeclaredLater,
+		Blockers:      problemBlockers(p.Blockers),
 	}
 	legacyRevisionFields(body, e)
 
@@ -621,7 +629,14 @@ var codeSentinel = map[string]func(*ProblemError, target) error{
 	"already_claimed": func(e *ProblemError, t target) error {
 		return claimConflict(e, t, issueops.ErrAlreadyClaimed)
 	},
+	// Member PRESENCE again: a claim refused for a live blocker carries
+	// `blockers` and reconstructs the local store's *issueops.BlockedError, so
+	// errors.Is(err, issueops.ErrClaimBlocked) holds on both transports; the
+	// status refusal carries none.
 	"not_claimable": func(e *ProblemError, t target) error {
+		if len(e.Blockers) > 0 {
+			return &issueops.BlockedError{IssueID: refusedIssueID(e, t), Blockers: e.Blockers, Err: issueops.ErrClaimBlocked}
+		}
 		return claimConflict(e, t, issueops.ErrNotClaimable)
 	},
 
@@ -801,6 +816,23 @@ func claimConflict(e *ProblemError, t target, sentinel error) error {
 // transaction. Without this fallback every conflict rebuilt from a plan named
 // the empty string, which reads as "the server did not say" when the server
 // said it plainly.
+// problemBlockers types the `blockers` member, stripping each server-controlled
+// string like every other problem field. An absent member stays nil; a blocker
+// whose type was not reported keeps an empty Type.
+func problemBlockers(in *[]apigen.Blocker) []issueops.Blocker {
+	if in == nil {
+		return nil
+	}
+	out := make([]issueops.Blocker, 0, len(*in))
+	for _, b := range *in {
+		out = append(out, issueops.Blocker{
+			ID:   stripControlRunes(b.Id),
+			Type: types.DependencyType(stripControlRunes(deref(b.Type))),
+		})
+	}
+	return out
+}
+
 func refusedIssueID(e *ProblemError, t target) string {
 	if t.issueID != "" {
 		return t.issueID

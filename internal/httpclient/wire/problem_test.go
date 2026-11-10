@@ -146,6 +146,52 @@ func TestClaimConflictsReconstructFromTheirExtensionMembers(t *testing.T) {
 	}
 }
 
+// TestNotClaimableUsesBlockersPresenceAsTheDiscriminator: a claim refused for a
+// live local blocker shares `not_claimable` with the status refusal, and the
+// typed `blockers` member is what tells them apart. Present, the client rebuilds
+// the blocked-claim refusal from it — never from `detail` — and keeps the
+// problem envelope reachable beside it; absent, it is the status refusal.
+func TestNotClaimableUsesBlockersPresenceAsTheDiscriminator(t *testing.T) {
+	update := Request{Op: OpUpdateIssue, Method: http.MethodPatch, Path: "/v0/beads/issues/ga-1", IssueID: "ga-1"}
+
+	t.Run("present means a live blocker", func(t *testing.T) {
+		err := refuseWith(t, 409, `{"status":409,"code":"not_claimable","param":"claim","request_id":"r9",`+
+			`"detail":"unparseable prose","blockers":[{"id":"ga-2","kind":"local","type":"blocks"},`+
+			`{"id":"ga-3","kind":"local","type":"waits-for"},{"id":"ga-4\u001b[31m","kind":"local"}]}`, nil, update)
+		if !errors.Is(err, issueops.ErrClaimBlocked) {
+			t.Fatalf("err = %v, want ErrClaimBlocked", err)
+		}
+		if errors.Is(err, issueops.ErrNotClaimable) || errors.Is(err, issueops.ErrCloseBlocked) {
+			t.Errorf("err = %v also matches the status or close refusal, want only ErrClaimBlocked", err)
+		}
+		var blocked *issueops.BlockedError
+		if !errors.As(err, &blocked) {
+			t.Fatalf("err is %T (%v), want *issueops.BlockedError", err, err)
+		}
+		if blocked.IssueID != "ga-1" {
+			t.Errorf("IssueID = %q, want the request's ga-1", blocked.IssueID)
+		}
+		want := []issueops.Blocker{{ID: "ga-2", Type: types.DepBlocks}, {ID: "ga-3", Type: types.DepWaitsFor}, {ID: "ga-4[31m"}}
+		if fmt.Sprint(blocked.Blockers) != fmt.Sprint(want) {
+			t.Errorf("Blockers = %+v, want %+v", blocked.Blockers, want)
+		}
+		var problem *ProblemError
+		if !errors.As(err, &problem) || problem.Param != "claim" || problem.RequestID != "r9" {
+			t.Errorf("problem envelope = %+v, want param claim and request_id r9 retained", problem)
+		}
+	})
+
+	t.Run("absent means the status refusal", func(t *testing.T) {
+		err := refuseWith(t, 409, `{"status":409,"code":"not_claimable","param":"claim","issue_status":"closed"}`, nil, update)
+		if !errors.Is(err, issueops.ErrNotClaimable) {
+			t.Fatalf("err = %v, want ErrNotClaimable", err)
+		}
+		if errors.Is(err, issueops.ErrClaimBlocked) {
+			t.Error("a status refusal classified as a blocked claim")
+		}
+	})
+}
+
 func TestNotClosableUsesOpenChildrenPresenceAsTheDiscriminator(t *testing.T) {
 	// One code, two refusals. Member PRESENCE tells them apart; `detail` is
 	// never read.

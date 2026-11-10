@@ -333,6 +333,17 @@ const CapIssuesUpdatePersistence = "issues.update.persistence"
 // covers both planes: no server has served `claim` on one plane only.
 const CapIssuesUpdateClaim = "issues.update.claim"
 
+// CapIssuesUpdateForceClaimBlocked is the behavior capability that advertises
+// UpdateIssueRequest's `force_claim_blocked` member: beside `claim`, it lets the
+// claim through an open local blocker, which an unforced claim is refused for
+// with 409 `not_claimable` carrying the typed `blockers`. It waives nothing
+// else — not a live foreign holder, not a non-claimable status, not an
+// `external:` reference. An older server answers the member with `400
+// invalid_argument`/`unknown_parameter`; a client that does not see this token
+// refuses the forced claim before the dial, naming the token, rather than
+// sending it or dropping it.
+const CapIssuesUpdateForceClaimBlocked = "issues.update.forceClaimBlocked"
+
 // CapIssuesCreateDefaultPriority is the behavior capability that advertises
 // that issues.create, issues.batchCreate and issues.batchApply's create items
 // store the create default priority (P2) for a request whose `priority` member
@@ -1191,7 +1202,7 @@ var behaviorCapabilities = []string{
 	CapIssuesCloseAutoCloseMolecule, CapIssuesListSearch,
 	CapIssuesListNoAssignee, CapIssuesListTitle, CapListIDs, CapIssuesUpdatePersistence, CapDependenciesBlockingIsBlocked, CapIssuesUpdateClaim,
 	CapIssuesCreateGates, CapIssuesUpdateGates, CapIssuesListFilters,
-	CapIssuesArrivalSeq, CapIssuesDeleteContainmentCascade,
+	CapIssuesArrivalSeq, CapIssuesDeleteContainmentCascade, CapIssuesUpdateForceClaimBlocked,
 }
 
 // Capabilities lists what this build advertises in ContextResponse.capabilities:

@@ -337,6 +337,14 @@ const CapIssuesUpdatePersistence = "issues.update.persistence"
 // ErrUnsupported naming it.
 const CapIssuesUpdateClaim = "issues.update.claim"
 
+// CapIssuesUpdateForceClaimBlocked is the behavior capability announcing that
+// updateIssue accepts `force_claim_blocked` beside `claim`, spelled exactly as
+// httpapi's constant of the same name. Lifecycle.Update reads it from the
+// cached handshake before the dial and refuses a forced claim to a server
+// without it, naming the token: dropping the member would turn the override
+// into an unforced claim, which the blocker refuses.
+const CapIssuesUpdateForceClaimBlocked = "issues.update.forceClaimBlocked"
+
 // CapIssuesCreateGates and CapIssuesUpdateGates are the behavior capabilities
 // announcing the gate members, spelled exactly as
 // httpapi's constants of the same names: await_type, await_id, timeout and
@@ -511,7 +519,7 @@ var behaviorCapabilities = []string{
 	CapCloseAutoCloseMolecule, CapListSearch,
 	CapListNoAssignee, CapListTitle, CapListIDs, CapIssuesUpdatePersistence, CapBlockingIsBlocked, CapIssuesUpdateClaim,
 	CapIssuesCreateGates, CapIssuesUpdateGates, CapListFilters,
-	CapArrivalSeq, CapDeleteContainmentCascade,
+	CapArrivalSeq, CapDeleteContainmentCascade, CapIssuesUpdateForceClaimBlocked,
 }
 
 // CapabilityFor reports the capability token gating op, and whether op is on

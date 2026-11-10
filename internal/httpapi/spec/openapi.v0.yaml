@@ -3294,8 +3294,9 @@ paths:
             answers them: `already_claimed` when another actor holds the issue
             (with the `assignee` extension member when the refusing transaction
             reported the holder), `not_claimable` when its status is not
-            claimable (with `issue_status`). Nothing was written, the patch
-            included.
+            claimable (with `issue_status`) or when an open local blocker
+            refuses the claim (with `blockers` instead; `force_claim_blocked`
+            bypasses it). Nothing was written, the patch included.
 
 
             `precondition_failed` is `expected_version`, `expected_status` or
@@ -9236,7 +9237,12 @@ components:
             parent-child descendants and orphans every other dependent (see
             `DeleteIssuesRequest.cascade`; a server without it deletes every
             transitive dependent, so a client refuses to send `cascade` to
-            one). One behavior token is
+            one), and `issues.update.forceClaimBlocked`, which announces that
+            `PATCH /v0/beads/issues/{id}` accepts `force_claim_blocked` beside
+            `claim` (see `UpdateIssueRequest`) rather than a `400` naming the
+            member unknown; a client refuses to send it to a server without
+            the token, because dropping it would send an unforced claim. One
+            behavior token is
             CONDITIONAL rather than build-level: `policy.external_dependencies`
             announces that this server's ready, blocked-listing, claim,
             claim-next, close, blocking and dependency-tree operations already
@@ -13104,10 +13110,11 @@ components:
             applies, so a `patch.assignee` or `patch.status` overrides the
             claim's value. Eligibility is `{id}:claim`'s: a claimable status,
             and unassigned, already held by `actor`, or held by a configured
-            claim pool. Held by `actor` and `in_progress` already is an
-            idempotent success. A refusal is `409 already_claimed` or `409
-            not_claimable` naming `claim`, and writes nothing — the patch
-            included. With `claim: true` the `patch` may be empty. It must not
+            claim pool; and no open blocker unless `force_claim_blocked` is
+            sent. Held by `actor` and `in_progress` already is an idempotent
+            success. A refusal is `409 already_claimed` or `409
+            not_claimable` naming `claim` (a live blocker's carries
+            `blockers`), and writes nothing — the patch included. With `claim: true` the `patch` may be empty. It must not
             be combined with `expected_assignee`, `expected_status` or
             `force_assignee_transfer`; a request that does is a `400` naming
             `claim`. The id resolves on both planes, so a wisp is claimable
@@ -13188,6 +13195,18 @@ components:
             `expected_assignee` exemption: there is no compare-and-set that
             authorizes a notes overwrite, so combining the two is legal and
             each answers its own question.
+        force_claim_blocked:
+          type: boolean
+          default: false
+          description: >-
+            Bypasses ONLY the claim's refusal for an open local blocker
+            (`bd update <id> --claim --force`). It requires `claim` — a request
+            setting it without one is a `400` naming `force_claim_blocked` —
+            and waives nothing else: not a foreign holder, not a non-claimable
+            status, and not an `external:` reference, which only shipping the
+            capability clears. Advertised by the
+            `issues.update.forceClaimBlocked` capability token; a server that
+            predates the member refuses it as an unknown parameter.
         allow_template:
           type: boolean
           default: false
@@ -13948,7 +13967,11 @@ components:
             blockers that refused the close, in the order the refusing check
             reported them, read from the refusal's typed list rather than
             parsed out of any message. Never present together with
-            `open_children`.
+            `open_children`. With `not_claimable` on `updateIssue`, and ONLY
+            on the live-blocker refusal of a `claim`: the live local blockers
+            that refused it, so its presence tells that refusal from the
+            status one (which carries `issue_status`); the detail then begins
+            `cannot claim blocked issue: <id> is blocked by [...]`.
 
 
             A client renders the direct CLI's sentence from it: `cannot close

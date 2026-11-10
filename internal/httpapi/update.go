@@ -39,8 +39,8 @@ const (
 var (
 	updateRequestMembers = []string{
 		"actor", updateClaimMember, "expected_assignee", "expected_status", "expected_version",
-		"force_assignee_transfer", "force_close_policy", "force_notes_overwrite", "allow_template",
-		updatePatchMember,
+		"force_assignee_transfer", "force_close_policy", "force_notes_overwrite", "force_claim_blocked",
+		"allow_template", updatePatchMember,
 	}
 	issuePatchMembers = []string{
 		"title", "description", "design", "acceptance_criteria",
@@ -183,6 +183,10 @@ func (s *Server) updateRequest(w http.ResponseWriter, r *http.Request, id string
 	if !ok {
 		return issueops.UpdateRequest{}, false
 	}
+	forceClaimBlocked, ok := s.booleanMember(w, r, members, "force_claim_blocked")
+	if !ok {
+		return issueops.UpdateRequest{}, false
+	}
 	// allow_template is passed through: the role owns the template guard and
 	// what standing it down means.
 	allowTemplate, ok := s.booleanMember(w, r, members, "allow_template")
@@ -192,6 +196,11 @@ func (s *Server) updateRequest(w http.ResponseWriter, r *http.Request, id string
 	if forceNotesOverwrite && !patch.Notes.Set {
 		s.fail(w, r, InvalidArgument("force_notes_overwrite", ReasonInvalidValue,
 			"`force_notes_overwrite` bypasses the fence on a NOTES REPLACEMENT; send `patch.notes` with it"))
+		return issueops.UpdateRequest{}, false
+	}
+	if forceClaimBlocked && !claim {
+		s.fail(w, r, InvalidArgument("force_claim_blocked", ReasonInvalidValue,
+			"`force_claim_blocked` bypasses the blocker check on a CLAIM; send `claim` with it"))
 		return issueops.UpdateRequest{}, false
 	}
 	// The role refuses a claim beside the assignee and status guards, and a
@@ -252,6 +261,7 @@ func (s *Server) updateRequest(w http.ResponseWriter, r *http.Request, id string
 		ForceClosePolicy:      forceClosePolicy,
 		ForceAssigneeTransfer: forceAssigneeTransfer,
 		ForceNotesOverwrite:   forceNotesOverwrite,
+		ForceClaimBlocked:     forceClaimBlocked,
 		AllowTemplate:         allowTemplate,
 		Provenance:            updateProvenance,
 	}, true
@@ -608,6 +618,12 @@ func (s *Server) failUpdate(w http.ResponseWriter, r *http.Request, request issu
 	// `patch.assignee` and steers toward a force this request cannot send.
 	case request.Claim && (errors.Is(err, storage.ErrAlreadyClaimed) || errors.Is(err, storage.ErrNotClaimable)):
 		s.fail(w, r, named(claimRefusal(err), updateClaimMember))
+
+	// A claim refused for a live local blocker. It shares `not_claimable` with
+	// the status refusal above, and the typed `blockers` member is what tells
+	// the two apart; the detail names the override this operation accepts.
+	case request.Claim && errors.Is(err, issueops.ErrClaimBlocked):
+		s.fail(w, r, named(claimBlockedResult(err), updateClaimMember))
 
 	case errors.Is(err, issueops.ErrCloseOpenChildren):
 		res := named(newResult(CodeNotClosable,

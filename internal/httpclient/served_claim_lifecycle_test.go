@@ -990,6 +990,27 @@ func TestServedLifecycleUpdateClosePolicy(t *testing.T) {
 	conformance.RunLifecycleUpdateClosePolicy(t, t.Context(), newServedUpdateFixture(t, "hlcp"))
 }
 
+// TestServedLifecycleUpdateClaimRefusesALiveBlocker: the server answers a claim
+// refused for a live local blocker with not_claimable and its typed `blockers`,
+// and the client rebuilds the same BlockedError wrapping ErrClaimBlocked the
+// local role returns, issue id and blocker types included.
+func TestServedLifecycleUpdateClaimRefusesALiveBlocker(t *testing.T) {
+	conformance.RunLifecycleUpdateClaimRefusesALiveBlocker(t, t.Context(), newServedUpdateFixture(t, "hlcb"))
+}
+
+// TestServedLifecycleUpdateForceClaimBlockedClaimsPastALiveBlocker: the
+// override travels as `force_claim_blocked` beside `claim`, in one updateIssue,
+// to a server advertising issues.update.forceClaimBlocked.
+func TestServedLifecycleUpdateForceClaimBlockedClaimsPastALiveBlocker(t *testing.T) {
+	conformance.RunLifecycleUpdateForceClaimBlockedClaimsPastALiveBlocker(t, t.Context(), newServedUpdateFixture(t, "hlfb"))
+}
+
+// TestServedLifecycleUpdateForceClaimBlockedRequiresAClaim: the override
+// without a claim is refused as a validation error and writes nothing.
+func TestServedLifecycleUpdateForceClaimBlockedRequiresAClaim(t *testing.T) {
+	conformance.RunLifecycleUpdateForceClaimBlockedRequiresAClaim(t, t.Context(), newServedUpdateFixture(t, "hlfn"))
+}
+
 // TestServedLifecycleUpdatePersistentPreservesUnversionedClass RUNS since
 // issues.update.persistence (S21b): IssuePatchBody publishes `persistence` and
 // the client sends it, so the restatement is the server's own role call.

@@ -1293,6 +1293,23 @@ func closeBlockedResult(err error, subject, hint string) Result {
 	return res
 }
 
+// claimBlockedResult is the blocked-claim refusal as a problem document:
+// `not_claimable`, whose `blockers` member is what separates it from the status
+// refusal sharing the code. The detail is the typed error's own sentence —
+// "cannot claim blocked issue: <id> is blocked by [<blockers>]", the direct
+// CLI's — and the list travels typed, never parsed out of a message. A refusal
+// that named no blockers keeps a generic detail and no member.
+func claimBlockedResult(err error) Result {
+	const hint = "clear the blocker, or send `force_claim_blocked`"
+	var blocked *issueops.BlockedError
+	if !errors.As(err, &blocked) || !errors.Is(blocked.Err, issueops.ErrClaimBlocked) || len(blocked.Blockers) == 0 {
+		return newResult(CodeNotClaimable, "`claim` takes a blocked issue; "+hint)
+	}
+	res := newResult(CodeNotClaimable, blocked.Error()+"; "+hint)
+	res.Problem.Blockers = wireBlockers(blocked.Blockers)
+	return res
+}
+
 // WithDependencyTypeConflict attaches the two `dependency_exists` extension
 // members: the type the pair already carries and the type the request asked
 // for. Populate them from *issueops.DependencyTypeConflictError's fields — the

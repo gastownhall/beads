@@ -290,6 +290,9 @@ func writeShapes() []writeShape {
 				"Claim":                 member("claim"),
 				// The template guard's stand-down (bd label, bd set-state).
 				"AllowTemplate": member("allow_template"),
+				// The blocked-claim override (bd update --claim --force), sent
+				// only to a server advertising issues.update.forceClaimBlocked.
+				"ForceClaimBlocked": member("force_claim_blocked"),
 			},
 		},
 		{

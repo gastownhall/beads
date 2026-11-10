@@ -3,6 +3,7 @@ package httpapi
 import (
 	"fmt"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -1217,7 +1218,7 @@ func TestUpdateForwardsTheClaimMember(t *testing.T) {
 		body      string
 		wantTitle bool
 	}{
-		{"beside a patch", `{"actor":"alice","claim":true,"expected_version":"7","force_close_policy":true,"patch":{"title":"t"}}`, true},
+		{"beside a patch", `{"actor":"alice","claim":true,"expected_version":"7","force_close_policy":true,"force_claim_blocked":true,"patch":{"title":"t"}}`, true},
 		{"alone, with an empty patch", `{"actor":"alice","claim":true,"patch":{}}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1250,6 +1251,10 @@ func TestUpdateForwardsTheClaimMember(t *testing.T) {
 				if !req.ForceClosePolicy {
 					t.Error("force_close_policy was dropped beside the claim")
 				}
+			}
+			// The blocked-claim override reaches the role only when sent.
+			if req.ForceClaimBlocked != tc.wantTitle {
+				t.Errorf("ForceClaimBlocked = %v, want %v", req.ForceClaimBlocked, tc.wantTitle)
 			}
 		})
 	}
@@ -1292,6 +1297,10 @@ func TestUpdateRefusesTheClaimShapesTheRoleRefuses(t *testing.T) {
 		{"claim beside force_assignee_transfer", `{"actor":"alice","claim":true,"patch":{"assignee":"bob"},"force_assignee_transfer":true}`, "claim"},
 		{"null claim", `{"actor":"alice","claim":null,"patch":{"title":"t"}}`, "claim"},
 		{"claim is a string", `{"actor":"alice","claim":"yes","patch":{"title":"t"}}`, "claim"},
+		// The blocked-claim override waives a CLAIM's refusal, so it needs one.
+		{"force_claim_blocked without claim", `{"actor":"alice","force_claim_blocked":true,"patch":{"title":"t"}}`, "force_claim_blocked"},
+		{"null force_claim_blocked", `{"actor":"alice","claim":true,"force_claim_blocked":null,"patch":{}}`, "force_claim_blocked"},
+		{"force_claim_blocked is a string", `{"actor":"alice","claim":true,"force_claim_blocked":"yes","patch":{}}`, "force_claim_blocked"},
 		// The claim does not relax the patch's own rules.
 		{"claim with a null patch", `{"actor":"alice","claim":true,"patch":null}`, "patch"},
 		{"claim with no patch", `{"actor":"alice","claim":true}`, "patch"},
@@ -1332,6 +1341,8 @@ func TestUpdateAnswersARefusedClaimAsTheClaimDoes(t *testing.T) {
 		wantCode     Code
 		wantAssignee any
 		wantStatus   any
+		wantBlockers any
+		wantForce    bool
 	}{
 		{
 			name: "held by another actor",
@@ -1360,6 +1371,21 @@ func TestUpdateAnswersARefusedClaimAsTheClaimDoes(t *testing.T) {
 			err:      fmt.Errorf("update: %w: issue bd-1 is assigned to %q", storage.ErrAlreadyClaimed, "bob"),
 			wantCode: CodeAlreadyClaimed,
 		},
+		{
+			// A live local blocker is not_claimable too, told apart by the
+			// typed `blockers` member, and its detail names the override.
+			name: "a live local blocker",
+			body: `{"actor":"alice","claim":true,"patch":{"title":"t"}}`,
+			err: fmt.Errorf("update: %w", &issueops.BlockedError{IssueID: "bd-1",
+				Blockers: []issueops.Blocker{{ID: "bd-2", Type: types.DepBlocks}, {ID: "bd-3", Type: types.DepWaitsFor}},
+				Err:      issueops.ErrClaimBlocked}),
+			wantCode: CodeNotClaimable,
+			wantBlockers: []any{
+				map[string]any{"id": "bd-2", "kind": "local", "type": "blocks"},
+				map[string]any{"id": "bd-3", "kind": "local", "type": "waits-for"},
+			},
+			wantForce: true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			lifecycle := &roleLifecycle{updateErr: tc.err}
@@ -1384,6 +1410,12 @@ func TestUpdateAnswersARefusedClaimAsTheClaimDoes(t *testing.T) {
 			}
 			if detail, _ := body["detail"].(string); strings.Contains(detail, "force_assignee_transfer") || strings.Contains(detail, "by bob") {
 				t.Errorf("detail = %q; a refused claim must neither steer to the fence's force nor quote the role", detail)
+			}
+			if !reflect.DeepEqual(body["blockers"], tc.wantBlockers) {
+				t.Errorf("blockers = %v, want %v", body["blockers"], tc.wantBlockers)
+			}
+			if detail, _ := body["detail"].(string); strings.Contains(detail, "force_claim_blocked") != tc.wantForce {
+				t.Errorf("detail = %q; it names force_claim_blocked only for a blocked claim", detail)
 			}
 		})
 	}

@@ -404,6 +404,13 @@ func (l *httpLifecycle) Update(ctx context.Context, req issueops.UpdateRequest) 
 			return issueops.UpdateResult{}, err
 		}
 	}
+	if req.ForceClaimBlocked {
+		// Dropping the override would send an unforced claim, which the
+		// blocker refuses: a server without the token refuses before the dial.
+		if err := l.store.requireCapabilityBeforeDial(ctx, wire.OpUpdateIssue, wire.CapIssuesUpdateForceClaimBlocked); err != nil {
+			return issueops.UpdateResult{}, err
+		}
+	}
 	if req.Claim {
 		served, err := l.store.servesCapability(ctx, wire.CapIssuesUpdateClaim)
 		if err != nil {
@@ -461,7 +468,7 @@ func updateGuards(req issueops.UpdateRequest) wire.UpdateGuards {
 	return guards
 }
 
-// updateFlags carries the claim and the three force overrides onto the wire.
+// updateFlags carries the claim and the four force overrides onto the wire.
 // The wire sends each only when true, so a request that sets none of them is
 // byte-identical to one built before any of them was carried.
 func updateFlags(req issueops.UpdateRequest) wire.UpdateFlags {
@@ -470,6 +477,7 @@ func updateFlags(req issueops.UpdateRequest) wire.UpdateFlags {
 		ForceAssigneeTransfer: req.ForceAssigneeTransfer,
 		ForceClosePolicy:      req.ForceClosePolicy,
 		ForceNotesOverwrite:   req.ForceNotesOverwrite,
+		ForceClaimBlocked:     req.ForceClaimBlocked,
 		AllowTemplate:         req.AllowTemplate,
 	}
 }
@@ -883,6 +891,7 @@ func isClaimOnlyUpdate(req issueops.UpdateRequest) bool {
 		!req.ForceAssigneeTransfer &&
 		!req.ForceClosePolicy &&
 		!req.ForceNotesOverwrite &&
+		!req.ForceClaimBlocked &&
 		!req.AllowTemplate &&
 		!req.IssuePlaneOnly &&
 		req.Provenance == "" &&
