@@ -55,6 +55,9 @@ class IssueMinimal(BaseModel):
     labels: list[str] = Field(default_factory=list)
     dependency_count: int = 0
     dependent_count: int = 0
+    # Comment completeness without the bodies; None means unknown.
+    comment_count: int | None = None
+    comments_omitted: bool | None = None
 
     @field_validator("priority")
     @classmethod

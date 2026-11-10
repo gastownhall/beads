@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 import pytest
 
 from beads_mcp.models import CompactedResult, Issue, IssueMinimal
+from beads_mcp.server import _to_minimal
 
 
 @pytest.fixture
@@ -341,11 +342,14 @@ class TestConversionToMinimal:
             labels=["urgent", "backend"],
             dependency_count=2,
             dependent_count=1,
+            comment_count=3,
             created_at=datetime.now(UTC),
             updated_at=datetime.now(UTC),
         )
 
-        minimal = _to_minimal_test(issue)
+        # The server's own projection, not the copy above: it carries the
+        # comment completeness fields.
+        minimal = _to_minimal(issue)
 
         # Check minimal has only expected fields
         assert minimal.id == "bd-123"
@@ -357,6 +361,8 @@ class TestConversionToMinimal:
         assert minimal.labels == ["urgent", "backend"]
         assert minimal.dependency_count == 2
         assert minimal.dependent_count == 1
+        assert minimal.comment_count == 3
+        assert minimal.comments_omitted is True
 
         # Check it doesn't have full Issue fields
         assert not hasattr(minimal, "description") or minimal.description is None

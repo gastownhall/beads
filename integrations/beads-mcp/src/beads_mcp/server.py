@@ -769,6 +769,26 @@ def _context_show() -> str:
 # =============================================================================
 
 
+def _minimal_comments_omitted(issue: Issue) -> bool | None:
+    """The comments_omitted a minimal row must report about itself.
+
+    A minimal row never carries bodies, so it must say whether it dropped
+    any: an explicit true stays true, positive evidence (a count above zero
+    or bodies the projection is removing) means true, a known zero without
+    positive evidence means false, and anything else keeps whatever the
+    source said — including unknown. This adjusts the projection only; the
+    source Issue is never rewritten.
+    """
+    if issue.comments_omitted is True:
+        return True
+    bodies = issue.comments or []
+    if (issue.comment_count is not None and issue.comment_count > 0) or bodies:
+        return True
+    if issue.comment_count == 0 and not bodies:
+        return False
+    return issue.comments_omitted
+
+
 def _to_minimal(issue: Issue) -> IssueMinimal:
     """Convert full Issue to minimal format for context efficiency."""
     return IssueMinimal(
@@ -781,6 +801,8 @@ def _to_minimal(issue: Issue) -> IssueMinimal:
         labels=issue.labels,
         dependency_count=issue.dependency_count,
         dependent_count=issue.dependent_count,
+        comment_count=issue.comment_count,
+        comments_omitted=_minimal_comments_omitted(issue),
     )
 
 
