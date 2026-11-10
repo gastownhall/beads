@@ -75,6 +75,7 @@
 100 19 TestEmbeddedNewDoltStore_StrictReadOnlyRefusesWritesOnFreshDatabase
 
 100 20 TestEmbeddedInitRoleRoutingRetainedFork
+100 20 TestEmbeddedInitWarnsWhenPATHSelectsAnotherBD
 100 20 TestEmbeddedMigrateSchema_IdentityMismatchRefusesBeforeApplying
 
 100 21 TestEmbeddedArrivalSeqOnEveryJSONRead

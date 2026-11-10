@@ -812,6 +812,7 @@ Installed hooks:
 				fmt.Printf("  - %s\n", hookName)
 			}
 		}
+		warnHookPATHBinary()
 		return nil
 	},
 }

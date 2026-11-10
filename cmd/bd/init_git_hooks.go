@@ -52,6 +52,7 @@ func runEmbeddedInitHooks(ctx context.Context, workDir, beadsDir string, skip, q
 			fmt.Fprintf(os.Stderr, "You can try again with: %s\n\n", ui.RenderAccent("bd doctor --fix"))
 		} else if !quiet {
 			fmt.Printf("  Hooks installed (jujutsu mode - no staging)\n")
+			warnHookPATHBinary()
 		}
 	} else {
 		if err := installHooksWithContext(managedHookNames, false, false, false, true, hooks); err != nil && !quiet {
@@ -59,6 +60,7 @@ func runEmbeddedInitHooks(ctx context.Context, workDir, beadsDir string, skip, q
 			fmt.Fprintf(os.Stderr, "You can try again with: %s\n\n", ui.RenderAccent("bd hooks install --beads"))
 		} else if !quiet {
 			fmt.Printf("  Hooks installed to: .beads/hooks/\n")
+			warnHookPATHBinary()
 		}
 	}
 }
