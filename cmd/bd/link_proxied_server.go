@@ -18,13 +18,12 @@ func runLinkProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 	id2 := args[1]
 	depType, _ := cmd.Flags().GetString("type")
 
-	dt := types.DependencyType(depType)
-	if err := issueops.CheckDottedChildDependency(id1, id2, dt); err != nil {
+	dt, err := linkDependencyType(depType)
+	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
-
-	if !dt.IsValid() {
-		return HandleErrorRespectJSON("invalid dependency type %q: must be non-empty and at most %d characters", depType, types.MaxDependencyTypeLen)
+	if err := issueops.CheckDottedChildDependency(id1, id2, dt); err != nil {
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	if uowProvider == nil {
@@ -58,13 +57,13 @@ func runLinkProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 			"status":        "added",
 			"issue_id":      id1,
 			"depends_on_id": id2,
-			"type":          depType,
+			"type":          dt,
 		})
 	}
 	fmt.Printf("%s Linked: %s depends on %s (%s)\n",
 		ui.RenderPass("✓"),
 		formatFeedbackIDParen(id1, res.fromTitle),
 		formatFeedbackIDParen(id2, res.toTitle),
-		depType)
+		dt)
 	return nil
 }
