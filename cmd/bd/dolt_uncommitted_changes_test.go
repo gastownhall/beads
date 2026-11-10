@@ -19,6 +19,17 @@ func misleadingResidual(committed bool) *storage.UncommittedChangesError {
 	return &storage.UncommittedChangesError{Tables: []string{"nothing to commit"}, Committed: committed}
 }
 
+// verificationFailure is the GH#5433 finding for a cleanliness check that
+// could not run after Dolt answered "nothing to commit"; its message repeats
+// those words.
+func verificationFailure() *storage.CommitVerificationError {
+	return &storage.CommitVerificationError{
+		Outcome:   storage.CommitOutcomeNothingToCommit,
+		Operation: "read dolt_status",
+		Cause:     errors.New("connection reset"),
+	}
+}
+
 // commitAllStore answers CommitAll with a fixed result.
 type commitAllStore struct {
 	storage.DoltStorage
@@ -133,5 +144,102 @@ func TestMaybeAutoCommitStoreSurfacesUncommittedChanges(t *testing.T) {
 	}
 	if fake.commitCalls != 1 {
 		t.Fatalf("Commit calls = %d, want 1", fake.commitCalls)
+	}
+}
+
+// importCommitStore takes an import's memory writes and answers its commit
+// with a fixed error.
+type importCommitStore struct {
+	storage.DoltStorage
+	commitErr error
+}
+
+func (s *importCommitStore) SetConfig(context.Context, string, string) error { return nil }
+func (s *importCommitStore) Commit(context.Context, string) error            { return s.commitErr }
+
+// restoreCommitStore restores successfully and answers the restore's commit
+// with a fixed error. It refuses the backup-remote registration, which only
+// warns, so the restore never writes a dolt-backup.json.
+type restoreCommitStore struct {
+	storage.DoltStorage
+	commitErr error
+}
+
+func (s *restoreCommitStore) RestoreDatabase(context.Context, string, bool) error { return nil }
+func (s *restoreCommitStore) BackupAdd(context.Context, string, string) error {
+	return errors.New("backup remote not registered")
+}
+func (s *restoreCommitStore) BackupSync(context.Context, string) error     { return nil }
+func (s *restoreCommitStore) BackupRemove(context.Context, string) error   { return nil }
+func (s *restoreCommitStore) BackupDatabase(context.Context, string) error { return nil }
+func (s *restoreCommitStore) Commit(context.Context, string) error         { return s.commitErr }
+
+// TestImportAndRestoreReportCommitFindings: bd import and bd backup restore
+// (bd bootstrap's restore too) fail on a commit finding whose text holds
+// Dolt's no-op words, instead of reporting success, and still treat Dolt's
+// own "nothing to commit" as a no-op.
+func TestImportAndRestoreReportCommitFindings(t *testing.T) {
+	restore := func(t *testing.T, commitErr error) error {
+		t.Helper()
+		var err error
+		captureStdio(t, func() {
+			err = runBackupRestore(context.Background(), &restoreCommitStore{commitErr: commitErr}, t.TempDir(), false)
+		})
+		return err
+	}
+	for _, tc := range []struct {
+		name    string
+		finding error
+	}{
+		{"verification failed", verificationFailure()},
+		{"residual", misleadingResidual(false)},
+	} {
+		t.Run("import/"+tc.name, func(t *testing.T) {
+			saveStorageMode(t)
+			oldDryRun := importDryRun
+			t.Cleanup(func() { importDryRun = oldDryRun })
+			importDryRun = false
+			store = &importCommitStore{commitErr: tc.finding}
+			err := runImportRecordsClassic(context.Background(), nil, []memoryRecord{{Key: "k", Value: "v"}}, "issues.jsonl")
+			if !errors.Is(err, tc.finding) {
+				t.Fatalf("runImportRecordsClassic error = %v, want %v", err, tc.finding)
+			}
+		})
+		t.Run("restore/"+tc.name, func(t *testing.T) {
+			if err := restore(t, tc.finding); !errors.Is(err, tc.finding) {
+				t.Fatalf("runBackupRestore error = %v, want %v", err, tc.finding)
+			}
+		})
+	}
+	t.Run("restore/dolt no-op", func(t *testing.T) {
+		if err := restore(t, errors.New("Error 1105: nothing to commit")); err != nil {
+			t.Fatalf("runBackupRestore error = %v, want nil for Dolt's no-op", err)
+		}
+	})
+}
+
+// TestImportOutputIsNoOpRejectsCommitFindings: the git-hook JSONL import
+// still tolerates a `bd import` that failed on Dolt's no-op, but warns about
+// one that printed a commit finding whose text holds the same words.
+func TestImportOutputIsNoOpRejectsCommitFindings(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"dolt no-op", errors.New("Error 1105: nothing to commit"), true},
+		{"verification failed", verificationFailure(), false},
+		{"residual", misleadingResidual(false), false},
+		{"partial commit residual", misleadingResidual(true), false},
+		{"other failure", errors.New("import failed: invalid JSON"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// What `bd import` prints when runImportRecordsClassic returns
+			// the commit error.
+			out := fmt.Sprintf("Error: commit: %v\n", tc.err)
+			if got := importOutputIsNoOp([]byte(out)); got != tc.want {
+				t.Fatalf("importOutputIsNoOp(%q) = %v, want %v", out, got, tc.want)
+			}
+		})
 	}
 }

@@ -19,12 +19,13 @@ import (
 // without this check the store reported that as clean and every push sent
 // nothing.
 //
-// The check runs inside the same transaction, but its finding is returned
-// only after withTx has published it: returning the finding from the
-// callback would roll the transaction back, undoing a partial commit Dolt
-// already made. A publication or cleanup error from withTx wins over the
-// finding, so an unconfirmed commit is never reported as a confirmed partial
-// one. CommitMergeResolution's non-tolerant call is left as it was.
+// The check runs on the same handle, after DOLT_COMMIT has published its own
+// SQL transaction (on success and on "nothing to commit" alike), so nothing
+// after it can roll that commit back. The finding is returned only after
+// withTx so that a failure of the trailing COMMIT or of cleanup still wins as
+// storage.ErrCommitIndeterminate: an unconfirmed commit is never reported as
+// a confirmed partial one. CommitMergeResolution's non-tolerant call is left
+// as it was.
 func commitAllThrough(ctx context.Context, withTx func(func(*sql.Tx) error) error, message string, tolerateEmpty bool) (bool, error) {
 	var committed bool
 	var finding error

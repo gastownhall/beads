@@ -45,13 +45,13 @@ again to check that nothing is left. Two errors come out of that check.
 
 ## What the errors carry
 
-Programs that use beads as a library can match both errors instead of
-parsing messages:
+Programs that use beads as a library (`github.com/steveyegge/beads`) can
+match both errors instead of parsing messages:
 
 | Error | Match with | Fields |
 |-------|------------|--------|
-| `*storage.UncommittedChangesError` | `errors.As` | `Tables` (dirty `dolt_status` table names, sorted; a rename keeps Dolt's `old -> new` form), `IgnorePatterns` (enabled `dolt_ignore` patterns outside bd's canonical clone-local set: a hint at the cause, not proof of it or of who added them; empty when there are none or they could not be read), `Committed` (a partial commit was created) |
-| `*storage.CommitVerificationError` | `errors.Is(err, storage.ErrCommitVerificationFailed)`, `errors.As` | `Outcome` (`commit_succeeded` or `nothing_to_commit`: what Dolt itself answered), `Operation` (the read that failed), `Cause` (its error, also reachable with `errors.Is`) |
+| `*beads.UncommittedChangesError` | `errors.As` | `Tables` (dirty `dolt_status` table names, sorted; a rename keeps Dolt's `old -> new` form), `IgnorePatterns` (enabled `dolt_ignore` patterns outside bd's canonical clone-local set: a hint at the cause, not proof of it or of who added them; empty when there are none or they could not be read), `Committed` (a partial commit was created) |
+| `*beads.CommitVerificationError` | `errors.Is(err, beads.ErrCommitVerificationFailed)`, `errors.As` | `Outcome` (a `beads.CommitOutcome`, `commit_succeeded` or `nothing_to_commit`: what Dolt itself answered), `Operation` (the read that failed), `Cause` (its error, also reachable with `errors.Is`) |
 
 Neither error means the write failed. Treat `commit incomplete` as "saved,
 not committed" and `commit verification failed` as "commit state unknown",
@@ -59,22 +59,40 @@ never as a signal to retry the write.
 
 ## Diagnosis
 
+Only embedded-mode storage reports these errors, and `bd sql` does not run
+in embedded mode, so read the database with the
+[Dolt CLI](https://docs.dolthub.com/cli-reference/cli) instead. Embedded
+mode does not need the CLI otherwise, so install it if it is missing: any
+recent `dolt` release works, and these commands need no `dolt config`
+setup. Run the `dolt` commands in the database directory,
+`.beads/embeddeddolt/<db>`, where `<db>` is the `dolt_database` value in
+`.beads/metadata.json` (`beads` if it has none), and only while no `bd`
+command is running:
+
 ```bash
-# Current branch, HEAD, and uncommitted changes
+# From the project directory: the branch and HEAD commit bd works on
+# (it does not list uncommitted changes)
 bd vc status
 
-# The database and branch the check ran against
-bd sql 'SELECT DATABASE(), active_branch()'
+cd .beads/embeddeddolt/<db>
+
+# The database and branch these commands read: expect <db> and main, the
+# branch bd uses in embedded mode
+dolt sql -q "SELECT DATABASE(), active_branch()"
 
 # Which tables are dirty, and which ignore patterns are enabled
-bd sql 'SELECT table_name, staged, status FROM dolt_status'
-bd sql 'SELECT pattern, ignored FROM dolt_ignore WHERE ignored = 1'
+dolt sql -q "SELECT table_name, staged, status FROM dolt_status"
+dolt sql -q "SELECT pattern, ignored FROM dolt_ignore WHERE ignored = 1"
 
-# Recent commits, to see whether a commit landed
-bd sql 'SELECT commit_hash, message, date FROM dolt_log LIMIT 5'
+# Recent commits, to see whether a commit landed (the newest hash starts
+# with the commit bd vc status printed)
+dolt sql -q "SELECT commit_hash, message, date FROM dolt_log LIMIT 5"
 
 # What a dirty table holds in the working set but not in HEAD
-bd sql "SELECT * FROM dolt_diff('HEAD', 'WORKING', 'issues')"
+dolt sql -q "SELECT * FROM dolt_diff('HEAD', 'WORKING', 'issues')"
+
+# Back to the project directory
+cd ../../..
 ```
 
 The usual cause of `commit incomplete` is an enabled `dolt_ignore` pattern
@@ -99,8 +117,8 @@ What the check cannot see:
 
 ## Solution
 
-**Step 1:** Stop every `bd` process using this database (in server mode, run
-`bd dolt stop`), then back up the whole `.beads` directory:
+**Step 1:** Stop every `bd` process using this database (none may run
+while you use the Dolt CLI), then back up the whole `.beads` directory:
 
 ```bash
 cp -r .beads ".beads.backup-$(date +%Y%m%d%H%M%S)"
@@ -113,28 +131,36 @@ find which ignore pattern covers it. Then decide whether that pattern is
 wanted. Do not change anything you have not confirmed.
 
 **Step 3:** If a pattern you confirmed as unwanted covers a tracked table,
-turn it off (this example uses the pattern `issues`):
+turn it off in the database directory (this example uses the pattern
+`issues`):
 
 ```bash
-bd sql "UPDATE dolt_ignore SET ignored = 0 WHERE pattern = 'issues'"
+cd .beads/embeddeddolt/<db>
+dolt sql -q "UPDATE dolt_ignore SET ignored = 0 WHERE pattern = 'issues'"
+cd ../../..
 ```
 
 For `commit verification failed`, follow
 [If the error is commit verification failed](#if-the-error-is-commit-verification-failed)
 instead of assuming a pattern is at fault.
 
-**Step 4:** Retry the commit:
+**Step 4:** From the project directory, retry the commit with bd, so that
+its check runs again:
 
 ```bash
 bd dolt commit -m "Commit changes left in the working set"
 ```
 
-**Step 5:** Verify the history: `bd vc status` should show no uncommitted
-tracked changes, and the commit should appear in `dolt_log`. Then push:
+**Step 5:** Verify the history in the database directory: `dolt_status`
+should list no table outside bd's clone-local set (listed under
+[Diagnosis](#diagnosis)), and the commit should appear in `dolt_log`. Then
+push from the project directory:
 
 ```bash
-bd vc status
-bd sql 'SELECT commit_hash, message FROM dolt_log LIMIT 3'
+cd .beads/embeddeddolt/<db>
+dolt sql -q "SELECT table_name, staged, status FROM dolt_status"
+dolt sql -q "SELECT commit_hash, message FROM dolt_log LIMIT 3"
+cd ../../..
 bd dolt push
 ```
 
@@ -161,11 +187,13 @@ trying to save.
 The commit ran; the read after it that checks `dolt_status` and bd's ignore
 policy did not. The error names that read (`Operation`) and its error
 (`Cause`), and `Outcome` records what Dolt answered. Back up and inspect as
-in Steps 1 and 2, then go by what you find:
+in Steps 1 and 2, including the Dolt CLI `dolt_status` query: the working
+set is clean when it lists nothing but bd's clone-local tables (listed
+under [Diagnosis](#diagnosis)). Then go by what you find:
 
-- **`bd vc status` still lists tracked tables.** Treat it as
-  `commit incomplete`: confirm the covering pattern, correct it only if it
-  is unwanted, retry the commit, and verify the history.
+- **`dolt_status` still lists tracked tables outside that set.** Treat it
+  as `commit incomplete`: confirm the covering pattern, correct it only if
+  it is unwanted, retry the commit, and verify the history.
 - **The working set is clean and `dolt_log` shows the commit.** The commit
   completed and nothing was left behind; nothing needs retrying.
 - **The working set is clean and Dolt answered `nothing_to_commit`.**

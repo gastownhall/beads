@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
@@ -119,7 +118,7 @@ func runBackupRestore(ctx context.Context, s storage.DoltStorage, dir string, fo
 	registerBackupRemote(ctx, bs, dir)
 
 	if err := s.Commit(ctx, "bd backup restore"); err != nil {
-		if !strings.Contains(err.Error(), "nothing to commit") {
+		if !isDoltNothingToCommit(err) {
 			return fmt.Errorf("failed to commit restore: %w", err)
 		}
 	}

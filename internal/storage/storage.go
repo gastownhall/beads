@@ -1074,7 +1074,8 @@ type LifecycleManager interface {
 }
 
 // PendingCommitter provides the ability to commit pending (dirty) changes.
-// Used by auto-commit and auto-push flows.
+// Used by auto-commit and auto-push flows. CommitPending follows
+// VersionControl.CommitPending's contract: check err before committed.
 type PendingCommitter interface {
 	CommitPending(ctx context.Context, actor string) (bool, error)
 }

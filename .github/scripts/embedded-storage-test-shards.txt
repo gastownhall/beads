@@ -270,6 +270,7 @@
 40 11 TestMemoriesContract
 40 11 TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPasswordStored
 
+40 12 TestCommitVerificationPreservesTransactionOutcome
 40 12 TestCounterExcludeStatusAcceptsAWorkspaceCustomStatusWithoutIncludeInfra
 40 12 TestEmbeddedClaimerAcceptsAConfiguredActiveStatusAndRefusesAConfiguredWipOne
 40 12 TestEmbeddedClaimerRefusesAWispIDAsNotFound
@@ -282,6 +283,7 @@
 40 12 TestLifecycleUpdateContract
 40 12 TestReaderListExcludeStatusAcceptsAWorkspaceCustomStatus
 
+40 13 TestCommitAllReportsPartialCommit
 40 13 TestEmbeddedActivationDoesNotOpenTheEngine
 40 13 TestEmbeddedDepRekeyConvergesRenameChain
 40 13 TestEmbeddedDependencyEditorAppliesParentChildBeforeBlockingEdges
@@ -322,6 +324,7 @@
 40 15 TestMoleculeContract
 40 15 TestReadyWorkPageTotalFilterMatrix
 
+40 16 TestCommitAllReportsTrackedTableSkippedByIgnorePattern
 40 16 TestDescendantWalkReachesEveryTargetKindAndStopsOnCycles
 40 16 TestEmbeddedDeferredActivationRecordsFromTheFirstWrite
 40 16 TestEmbeddedDependencyEditorAddedEchoesTheRequestOrder
@@ -336,6 +339,7 @@
 40 16 TestWithPeerAuth_DivergedRemoteURLFailsClosed
 
 40 17 TestAddDependency
+40 17 TestCommitAllToleratesOwnedCloneLocalChanges
 40 17 TestEmbeddedBatchCloserWispItemClosesAndEarnsTheClaim
 40 17 TestEmbeddedDependencyEditorSameTypeReAddWithChangedThreadMintsOneVersion
 40 17 TestEmbeddedIgnoredMigration0031OpensAShallowClone
@@ -537,6 +541,7 @@
 40 30 TestEmbeddedReaderReadySortPoliciesOrderTheSameRows
 40 30 TestEmbeddedTransactionStandaloneWispMutationDoesNotPublishUnrelatedDurableChanges
 40 30 TestLegacyTrackedIgnoredCursorUnwedgesPull
+40 30 TestRemoteOperationsRejectUncommittedChanges
 40 30 TestUpdateMergeOps_DoltEngine_TwoIssues
 
 40 31 TestBumpEpochCarryingWritesOneCarryRowPerLiveIDNamingTheLineageRoot
@@ -569,6 +574,7 @@
 40 32 TestRowVersionContract
 40 32 TestWithPeerAuth_MissingRemoteFailsClosed
 
+40 33 TestCommitAllVerificationKeepsIndeterminateAndNonTolerantOutcomes
 40 33 TestEmbeddedBatchCloserDuplicateItemRecloseAtItsOwnIndex
 40 33 TestEmbeddedDependencyEditorClosedChildAddSatisfiesAnAnyChildrenGate
 40 33 TestEmbeddedDependencyEditorValidationRefusalsWriteNothing

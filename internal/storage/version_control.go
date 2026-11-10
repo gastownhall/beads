@@ -189,7 +189,12 @@ type VersionControl interface {
 	// was created: (false, nil) means nothing was committable (clean working
 	// set, or only dolt_ignore'd tables such as wisps were dirty), so callers
 	// can print "Nothing to commit" instead of claiming a commit that never
-	// happened. GH#2455's config exclusion is about AUTOMATIC commits sweeping
+	// happened. A verifying implementation (the embedded store, GH#5433)
+	// narrows that to bd's own clone-local tables: tracked changes the commit
+	// left behind come back as an *UncommittedChangesError, with committed
+	// true when Dolt still made a partial commit, and a check that could not
+	// run as a *CommitVerificationError. Check err before trusting committed.
+	// GH#2455's config exclusion is about AUTOMATIC commits sweeping
 	// a concurrent writer's half-applied config change; an operator explicitly
 	// asking to commit everything is the same trust level as CommitPending.
 	// The committed bool is the atomic signal whose absence forced the CLI's
@@ -213,6 +218,9 @@ type VersionControl interface {
 	// *ConfigCommitRefusedError naming those keys. Embedded mode behaves as
 	// CommitConfigOnly.
 	CommitConfigUserKVOnly(ctx context.Context, message string) error
+	// CommitPending commits every pending change and reports whether a commit
+	// landed, under CommitAll's contract: a verifying implementation can
+	// return committed true together with its finding, so check err first.
 	CommitPending(ctx context.Context, actor string) (bool, error)
 	CommitExists(ctx context.Context, commitHash string) (bool, error)
 	GetCurrentCommit(ctx context.Context) (string, error)
