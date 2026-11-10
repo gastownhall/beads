@@ -730,3 +730,79 @@ func TestFixHooksPath_ManagedPathDeletedInPlaceStillUnsets(t *testing.T) {
 		t.Errorf("core.hooksPath = %q after FixHooksPath, want unset: the GH#4440 in-place deletion contract is unchanged", got)
 	}
 }
+
+// TestFixHooksPath_RelocatedLinkedWorktree pins AC-7 of the GH#5853 design:
+// repairing an eligible stranded core.hooksPath from a linked worktree
+// repoints it to the main repository's hooks directory (or its effective
+// storage), and git actually reaches the repaired directory from both the
+// linked worktree and the main worktree — verified by running a harmless
+// sentinel hook through a real commit, not by file presence alone.
+func TestFixHooksPath_RelocatedLinkedWorktree(t *testing.T) {
+	repoDir := t.TempDir()
+	setupGitRepoInDir(t, repoDir)
+	// A linked worktree needs at least one commit to exist at all.
+	if err := os.WriteFile(filepath.Join(repoDir, "README.md"), []byte("# repo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "README.md"}, {"commit", "-m", "initial"}} {
+		cmd := gitCommand(args...)
+		cmd.Dir = repoDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v (%s)", args, err, strings.TrimSpace(string(out)))
+		}
+	}
+	worktree := filepath.Join(t.TempDir(), "linked-wt")
+	wtCmd := gitCommand("worktree", "add", worktree)
+	wtCmd.Dir = repoDir
+	if out, err := wtCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add failed: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+
+	current := filepath.Join(repoDir, ".beads", "hooks")
+	writeRecognizedHooks(t, current)
+	stale := filepath.Join(t.TempDir(), "moved-away", ".beads", "hooks")
+	setGitConfig(t, repoDir, "core.hooksPath", stale)
+
+	runInDir(t, worktree, func() {
+		check := CheckHooksPath()
+		if check.Status != StatusWarning {
+			t.Fatalf("expected the relocated warning from the linked worktree, got %+v", check)
+		}
+		if !strings.Contains(check.Detail, current) {
+			t.Errorf("detail must name the current target %q from a linked worktree, got: %s", current, check.Detail)
+		}
+		if err := FixHooksPath(); err != nil {
+			t.Fatalf("FixHooksPath failed: %v", err)
+		}
+	})
+
+	if got := getGitConfig(t, worktree, "core.hooksPath"); got != current {
+		t.Fatalf("core.hooksPath = %q after repair from the worktree, want the main repository's %q", got, current)
+	}
+
+	// End-to-end: a harmless sentinel hook written into the repaired
+	// directory must fire from a real commit in both worktrees. The sentinel
+	// keeps the bd-shim marker so it remains recognized bd hook content.
+	for _, tc := range []struct {
+		name, dir string
+	}{
+		{"from_linked_worktree", worktree},
+		{"from_main_worktree", repoDir},
+	} {
+		marker := filepath.Join(t.TempDir(), "marker-"+tc.name)
+		hook := "#!/bin/sh\n# bd-shim sentinel\ntouch " + marker + "\n"
+		for _, name := range []string{"pre-commit", "prepare-commit-msg"} {
+			if err := os.WriteFile(filepath.Join(current, name), []byte(hook), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		cmd := gitCommand("commit", "--allow-empty", "-m", "sentinel "+tc.name)
+		cmd.Dir = tc.dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git commit %s failed: %v (%s)", tc.name, err, strings.TrimSpace(string(out)))
+		}
+		if _, err := os.Stat(marker); err != nil {
+			t.Errorf("the sentinel hook did not run for a commit %s: git is not using the repaired hooks directory (stat: %v)", tc.name, err)
+		}
+	}
+}
