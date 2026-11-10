@@ -317,3 +317,152 @@ func assertInitializedActor(t *testing.T, want string) {
 		t.Fatalf("actor = %q, want %q", got, want)
 	}
 }
+
+// isolateUserConfigCandidates isolates the user-config environment the way
+// TestInitializeUserConfigPrecedence does: a fresh home, a native user-config
+// root distinct from the documented location, cleared BD_*/BEADS_* variables,
+// and a cwd with no .beads. It returns the resolved candidate paths.
+func isolateUserConfigCandidates(t *testing.T) userConfigYamlCandidates {
+	t.Helper()
+	ResetForTesting()
+	t.Cleanup(ResetForTesting)
+	restore := envSnapshot(t)
+	t.Cleanup(restore)
+
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	nativeRoot := filepath.Join(root, "native-config")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("APPDATA", nativeRoot)
+	t.Setenv("XDG_CONFIG_HOME", nativeRoot)
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "")
+	t.Chdir(root)
+
+	candidates := currentUserConfigYamlCandidates()
+	if candidates.legacy == "" || candidates.native == "" || candidates.documented == "" {
+		t.Fatalf("test environment did not resolve all user config candidates: %#v", candidates)
+	}
+	if candidates.native == candidates.documented {
+		t.Fatalf("test requires distinct native and documented paths, both were %q", candidates.native)
+	}
+	return candidates
+}
+
+func writeUserYamlConfig(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// recordUserConfigPathStats replaces statUserConfigPath with a recorder that
+// delegates to the real probe and counts calls per path. The original probe is
+// restored via t.Cleanup.
+func recordUserConfigPathStats(t *testing.T) map[string]int {
+	t.Helper()
+	probes := map[string]int{}
+	saved := statUserConfigPath
+	statUserConfigPath = func(name string) (os.FileInfo, error) {
+		probes[name]++
+		return saved(name)
+	}
+	t.Cleanup(func() { statUserConfigPath = saved })
+	return probes
+}
+
+// GH#8113: with the documented <home>/.config/bd/config.yaml present, no
+// user-config read path may probe the native os.UserConfigDir()/bd/config.yaml
+// location (on macOS, touching that directory raises a per-launch
+// "access data from other apps" permission prompt).
+func TestUserConfigReadsNeverProbeNativeWhenDocumentedExists(t *testing.T) {
+	candidates := isolateUserConfigCandidates(t)
+	writeUserConfigPath(t, candidates.documented)
+	writeUserConfigPath(t, candidates.native)
+
+	t.Run("Initialize never probes native", func(t *testing.T) {
+		probes := recordUserConfigPathStats(t)
+		ResetForTesting()
+		if err := Initialize(); err != nil {
+			t.Fatalf("Initialize: %v", err)
+		}
+		if got := probes[candidates.native]; got != 0 {
+			t.Errorf("Initialize probed native config %q %d times, want 0", candidates.native, got)
+		}
+		if got := probes[candidates.documented]; got == 0 {
+			t.Errorf("Initialize never probed documented config %q", candidates.documented)
+		}
+	})
+
+	t.Run("UserConfigYamlPath never probes native", func(t *testing.T) {
+		probes := recordUserConfigPathStats(t)
+		path, err := UserConfigYamlPath()
+		if err != nil {
+			t.Fatalf("UserConfigYamlPath: %v", err)
+		}
+		if path != candidates.documented {
+			t.Errorf("UserConfigYamlPath() = %q, want documented %q", path, candidates.documented)
+		}
+		if got := probes[candidates.native]; got != 0 {
+			t.Errorf("UserConfigYamlPath probed native config %q %d times, want 0", candidates.native, got)
+		}
+		if got := probes[candidates.documented]; got == 0 {
+			t.Errorf("UserConfigYamlPath never probed documented config %q", candidates.documented)
+		}
+	})
+
+	t.Run("GetUserYamlConfig never probes native", func(t *testing.T) {
+		probes := recordUserConfigPathStats(t)
+		if got := GetUserYamlConfig("actor"); got != "test" {
+			t.Errorf("GetUserYamlConfig(actor) = %q, want %q from documented config", got, "test")
+		}
+		if got := probes[candidates.native]; got != 0 {
+			t.Errorf("GetUserYamlConfig probed native config %q %d times, want 0", candidates.native, got)
+		}
+		if got := probes[candidates.documented]; got == 0 {
+			t.Errorf("GetUserYamlConfig never probed documented config %q", candidates.documented)
+		}
+	})
+
+	t.Run("empty documented file still shadows native", func(t *testing.T) {
+		if err := os.WriteFile(candidates.documented, []byte{}, 0o600); err != nil {
+			t.Fatalf("write %s: %v", candidates.documented, err)
+		}
+		probes := recordUserConfigPathStats(t)
+		ResetForTesting()
+		if err := Initialize(); err != nil {
+			t.Fatalf("Initialize: %v", err)
+		}
+		if got := probes[candidates.native]; got != 0 {
+			t.Errorf("Initialize probed native config %q %d times behind an empty documented file", candidates.native, got)
+		}
+		if got := GetString("actor"); got != "" {
+			t.Errorf("actor = %q, want empty (empty documented file shadows native)", got)
+		}
+	})
+
+	t.Run("coincident native and documented paths are probed once", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", filepath.Dir(filepath.Dir(candidates.documented)))
+		coincident := currentUserConfigYamlCandidates()
+		if coincident.native != coincident.documented {
+			t.Skipf("os.UserConfigDir() does not follow XDG_CONFIG_HOME here: native %q, documented %q",
+				coincident.native, coincident.documented)
+		}
+		writeUserConfigPath(t, coincident.documented)
+		probes := recordUserConfigPathStats(t)
+		ResetForTesting()
+		if err := Initialize(); err != nil {
+			t.Fatalf("Initialize: %v", err)
+		}
+		if got := probes[coincident.native]; got != 1 {
+			t.Errorf("coincident user config probed %d times, want exactly 1", got)
+		}
+		if got := GetString("actor"); got != "test" {
+			t.Errorf("actor = %q, want %q", got, "test")
+		}
+	})
+}

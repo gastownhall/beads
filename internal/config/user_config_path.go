@@ -123,10 +123,17 @@ func userConfigYamlDisplayPath(candidates userConfigYamlCandidates) string {
 	return userConfigYamlDisplayFallback
 }
 
+// statUserConfigPath is the filesystem probe behind user config selection.
+// It is a variable so tests can record which user-level paths bd probes:
+// touching the native os.UserConfigDir()/bd directory is user-visible on
+// macOS (a per-launch "access data from other apps" permission prompt), so
+// which paths are probed is part of the tested contract (GH#8113).
+var statUserConfigPath = os.Stat
+
 func userConfigPathExists(path string) bool {
 	if path == "" {
 		return false
 	}
-	_, err := os.Stat(path)
+	_, err := statUserConfigPath(path)
 	return err == nil
 }

@@ -132,8 +132,12 @@ func initialize(beadsDirSetting string) error {
 	//
 	// Precedence (highest to lowest):
 	//   BEADS_DIR/config.yaml > project .beads/config.yaml > documented
-	//   <home>/.config/bd/config.yaml > native os.UserConfigDir()/bd/config.yaml
-	//   > legacy <home>/.beads/config.yaml
+	//   <home>/.config/bd/config.yaml > legacy <home>/.beads/config.yaml
+	//
+	// The native os.UserConfigDir()/bd/config.yaml location is a fallback,
+	// consulted only when the documented user config is absent, so a machine
+	// with a documented config never touches the native app-data directory
+	// (on macOS that access raises a per-launch permission prompt, GH#8113).
 	//
 	// Previously, only ONE config file was loaded (the highest-priority match),
 	// which meant user-level config was silently ignored when project-level
@@ -159,9 +163,15 @@ func initialize(beadsDirSetting string) error {
 		configPaths = append(configPaths, path)
 	}
 
-	// Lowest to highest user-level precedence: legacy, native, documented.
+	// Lowest to highest user-level precedence: legacy, then documented — or,
+	// only when the documented file is absent, the native location as the
+	// fallback. The native probe is conditional so the native user-config
+	// directory is never touched when the documented config exists.
 	appendExistingUserConfig(userConfigPaths.legacy)
-	appendExistingUserConfig(userConfigPaths.native)
+	if userConfigPaths.native != userConfigPaths.documented &&
+		!userConfigPathExists(userConfigPaths.documented) {
+		appendExistingUserConfig(userConfigPaths.native)
+	}
 	appendExistingUserConfig(userConfigPaths.documented)
 	userConfigPathCount := len(configPaths)
 
