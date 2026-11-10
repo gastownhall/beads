@@ -278,11 +278,15 @@ func TestLoadPushState_CorruptJSON(t *testing.T) {
 // panicking on the nil embed.
 type fakeAutoPushStore struct {
 	storage.DoltStorage
-	commit    string
-	pushCalls int
+	commit      string
+	pushCalls   int
+	commitCalls int
 }
 
-func (f *fakeAutoPushStore) GetCurrentCommit(context.Context) (string, error) { return f.commit, nil }
+func (f *fakeAutoPushStore) GetCurrentCommit(context.Context) (string, error) {
+	f.commitCalls++
+	return f.commit, nil
+}
 func (f *fakeAutoPushStore) HasRemote(_ context.Context, _ string) (bool, error) {
 	return true, nil
 }
@@ -435,6 +439,66 @@ func TestPushedCommitForState(t *testing.T) {
 		target := &fakeAutoPushTarget{commit: "after", commitErr: errors.New("engine closed")}
 		if got := pushedCommitForState(ctx, target, "before"); got != "before" {
 			t.Fatalf("pushedCommitForState() = %q, want %q (pre-push fallback)", got, "before")
+		}
+	})
+}
+
+// TestMaybeAutoPush_NoPushSuppressesAutoPush reproduces GH#7876 item 1:
+// no-push: true must stop dolt.auto-push exactly as it stops `bd dolt push`.
+// The no-push=false control proves the same fixture really pushes, so the
+// zero-call assertion cannot pass on a debounce or config error.
+func TestMaybeAutoPush_NoPushSuppressesAutoPush(t *testing.T) {
+	// Cannot be parallel: mutates env vars, config, and the store global.
+	t.Run("config_yaml", func(t *testing.T) {
+		t.Setenv("BD_NO_PUSH", "")
+		os.Unsetenv("BD_NO_PUSH")
+		beadsDir, fake := setupNoGitOpsAutoPushWorkspace(t, "no-git-ops: true\nno-push: true\ndolt:\n  auto-push: true\n")
+		if !config.GetBool("no-push") || !config.GetBool("dolt.auto-push") {
+			t.Fatal("precondition: no-push and dolt.auto-push must be read from the workspace config.yaml")
+		}
+
+		maybeAutoPush(context.Background())
+
+		if fake.pushCalls != 0 {
+			t.Errorf("Push calls = %d, want 0 (no-push: true must suppress dolt.auto-push)", fake.pushCalls)
+		}
+		if fake.commitCalls != 0 {
+			t.Errorf("GetCurrentCommit calls = %d, want 0 (no-push must skip before querying the store)", fake.commitCalls)
+		}
+		if _, err := os.Stat(filepath.Join(beadsDir, "push-state.json")); err == nil {
+			t.Error("push-state.json was created although no-push is set")
+		}
+	})
+
+	t.Run("env_var", func(t *testing.T) {
+		t.Setenv("BD_NO_PUSH", "true")
+		beadsDir, fake := setupNoGitOpsAutoPushWorkspace(t, "no-git-ops: true\ndolt:\n  auto-push: true\n")
+		if !config.GetBool("no-push") {
+			t.Fatal("precondition: BD_NO_PUSH=true must set no-push")
+		}
+
+		maybeAutoPush(context.Background())
+
+		if fake.pushCalls != 0 || fake.commitCalls != 0 {
+			t.Errorf("Push calls = %d, GetCurrentCommit calls = %d, want 0/0 (BD_NO_PUSH must suppress dolt.auto-push)", fake.pushCalls, fake.commitCalls)
+		}
+		if _, err := os.Stat(filepath.Join(beadsDir, "push-state.json")); err == nil {
+			t.Error("push-state.json was created although BD_NO_PUSH is set")
+		}
+	})
+
+	t.Run("no_push_false_control", func(t *testing.T) {
+		t.Setenv("BD_NO_PUSH", "")
+		os.Unsetenv("BD_NO_PUSH")
+		beadsDir, fake := setupNoGitOpsAutoPushWorkspace(t, "no-git-ops: true\nno-push: false\ndolt:\n  auto-push: true\n")
+
+		maybeAutoPush(context.Background())
+
+		if fake.pushCalls != 1 {
+			t.Fatalf("Push calls = %d, want 1 (control: no-push=false must still auto-push)", fake.pushCalls)
+		}
+		if _, err := os.Stat(filepath.Join(beadsDir, "push-state.json")); err != nil {
+			t.Fatalf("push-state.json must exist after a successful auto-push: %v", err)
 		}
 	})
 }

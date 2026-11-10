@@ -129,6 +129,12 @@ func maybeAutoPush(ctx context.Context) {
 		debug.Logf("dolt auto-push: skipped (dolt.local-only=true)\n")
 		return
 	}
+	// no-push stops auto-push exactly as it stops `bd dolt push` and `bd sync`
+	// (GH#7876): skip before touching the store or the push state.
+	if config.GetBool("no-push") {
+		debug.Logf("dolt auto-push: skipped (no-push=true)\n")
+		return
+	}
 	if !isDoltAutoPushEnabled(ctx) {
 		return
 	}
