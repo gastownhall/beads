@@ -59,7 +59,7 @@ Dependencies have a type that determines whether they block work.
 |------|---------|---------|
 | `blocks` (default) | B cannot start until A closes | Task ordering |
 | `parent-child` | Children blocked when parent blocked | Epic hierarchies |
-| `conditional-blocks` | B runs only if A fails | Error handling paths |
+| `conditional-blocks` | B runs only if A fails: B is released only when A closes with a failure reason (e.g. `failed`, `rejected`, `wontfix`); a success close keeps B blocked | Error handling paths |
 | `waits-for` | B waits for all of A's children | Fanout aggregation |
 
 **Non-blocking types** (graph annotations only):
@@ -79,6 +79,33 @@ Specify with `--type`:
 bd dep add issue-2 issue-1 --type tracks
 bd dep add issue-2 issue-1 --type caused-by
 ```
+
+### Conditional blocks
+
+A `conditional-blocks` edge from fallback B to precondition A releases B only
+when A closes with a **failure reason**: one that contains, in any case, one
+of `failed`, `rejected`, `wontfix`, `won't fix`, `canceled`, `cancelled`,
+`abandoned`, `blocked`, `error`, `timeout` or `aborted`.
+
+```bash
+bd close A --reason "failed: upstream 500"   # releases B
+bd close A                                   # default reason "Closed": B stays blocked
+```
+
+- Every other reason holds B: the default `Closed`, an empty reason (such as
+  `bd update A --status closed`), and duplicate or superseded text without a
+  keyword. The match is a plain substring test, so "Fixed error message"
+  counts as a failure.
+- Pinning A releases B; reopening A blocks B again. Changing only A's close
+  reason re-decides B.
+- `bd blocked` names a success-closed A as B's blocker. When A succeeded and B
+  is no longer needed, close B yourself (no `--force` needed) or remove the
+  dependency.
+- Older bd releases released B on any close. After upgrading, `bd doctor`
+  reports fallbacks they left unblocked and `bd doctor --fix` or
+  `bd recompute-blocked` blocks them again; no migration runs. Upgrade every
+  bd that writes to a shared database together, because an older binary
+  writing to it can release such fallbacks again.
 
 ## Finding Ready Work
 

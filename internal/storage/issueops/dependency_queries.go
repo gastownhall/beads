@@ -1100,6 +1100,12 @@ type blockerEdge struct {
 // pinned, in edge order. An edge naming no row (an `external:` reference, a
 // dangling id) is dropped: the external-dependency policy reports those itself.
 // It is the one filter both the single and the batch read apply.
+//
+// These are live blockers, not the full explanation GetBlockedIssuesInTx
+// gives: a conditional-blocks target closed with a non-failure reason still
+// holds its source (the stored bit stays set, and the blocked listing names
+// it) but is not live here, so the close guards that read this list let the
+// unused fallback be closed without force.
 func liveBlockers(edges []blockerEdge, statusByID map[string]types.Status) []publicops.Blocker {
 	var blockers []publicops.Blocker
 	for _, e := range edges {

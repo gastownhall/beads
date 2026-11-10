@@ -50,16 +50,19 @@ func TestBlockingDepths(t *testing.T) {
 func TestAnalyzeMoleculeConditionalBlocksFollowsTheCloseReason(t *testing.T) {
 	for _, tc := range []struct {
 		depType   types.DependencyType
+		status    types.Status
 		reason    string
 		wantReady bool
 	}{
-		{types.DepConditionalBlocks, "completed successfully", false},
-		{types.DepConditionalBlocks, "", false},
-		{types.DepConditionalBlocks, "failed: upstream 500", true},
-		{types.DepBlocks, "completed successfully", true},
+		{types.DepConditionalBlocks, types.StatusClosed, "completed successfully", false},
+		{types.DepConditionalBlocks, types.StatusClosed, "", false},
+		{types.DepConditionalBlocks, types.StatusClosed, "failed: upstream 500", true},
+		{types.DepBlocks, types.StatusClosed, "completed successfully", true},
+		// A pinned conditional target releases its fallback, as in the union.
+		{types.DepConditionalBlocks, types.StatusPinned, "", true},
 	} {
 		root := &types.Issue{ID: "root", Status: types.StatusOpen}
-		primary := &types.Issue{ID: "primary", Status: types.StatusClosed, CloseReason: tc.reason}
+		primary := &types.Issue{ID: "primary", Status: tc.status, CloseReason: tc.reason}
 		fallback := &types.Issue{ID: "fallback", Status: types.StatusOpen}
 		sibling := &types.Issue{ID: "sibling", Status: types.StatusOpen}
 		g := &MoleculeGraph{
@@ -73,20 +76,20 @@ func TestAnalyzeMoleculeConditionalBlocksFollowsTheCloseReason(t *testing.T) {
 		analysis := AnalyzeMolecule(g)
 		info := analysis.Steps["fallback"]
 		if info.IsReady != tc.wantReady {
-			t.Errorf("%s closed %q: fallback ready = %v, want %v (blocked by %v)", tc.depType, tc.reason, info.IsReady, tc.wantReady, info.BlockedBy)
+			t.Errorf("%s %s %q: fallback ready = %v, want %v (blocked by %v)", tc.depType, tc.status, tc.reason, info.IsReady, tc.wantReady, info.BlockedBy)
 		}
 		wantBlockedBy := 0
 		if !tc.wantReady {
 			wantBlockedBy = 1
 		}
 		if len(info.BlockedBy) != wantBlockedBy {
-			t.Errorf("%s closed %q: fallback blocked by %v, want %d blocker(s)", tc.depType, tc.reason, info.BlockedBy, wantBlockedBy)
+			t.Errorf("%s %s %q: fallback blocked by %v, want %d blocker(s)", tc.depType, tc.status, tc.reason, info.BlockedBy, wantBlockedBy)
 		}
 		// Parallel depth: a released fallback sits at depth 0 and shares the
 		// sibling's group; a held one sits one level deeper, alone.
 		sameGroup := info.ParallelGroup != "" && info.ParallelGroup == analysis.Steps["sibling"].ParallelGroup
 		if sameGroup != tc.wantReady {
-			t.Errorf("%s closed %q: fallback in sibling's parallel group = %v, want %v", tc.depType, tc.reason, sameGroup, tc.wantReady)
+			t.Errorf("%s %s %q: fallback in sibling's parallel group = %v, want %v", tc.depType, tc.status, tc.reason, sameGroup, tc.wantReady)
 		}
 	}
 }
