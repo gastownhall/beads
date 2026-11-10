@@ -277,6 +277,9 @@ func TestReadyWorkStatementBudget(t *testing.T) {
 		// + one statement for every deferred-parent child leg
 		{"wisps_deferred_parent/limit0", readyTotalWorld{wisps: true, deferredParent: true}, 0, 4},
 		{"wisps_deferred_parent/limit1", readyTotalWorld{wisps: true, deferredParent: true}, 1, 6},
+		// An undated deferred parent (GH#7300) costs no more than a dated one.
+		{"wisps_undated_deferred_parent/limit0", readyTotalWorld{wisps: true, deferredParent: true, undated: true}, 0, 4},
+		{"wisps_undated_deferred_parent/limit1", readyTotalWorld{wisps: true, deferredParent: true, undated: true}, 1, 6},
 		// + the overlap count, only because an ID sits in both tables
 		{"wisps_collision/limit1", readyTotalWorld{wisps: true, collision: true}, 1, 6},
 	}
@@ -305,6 +308,59 @@ func TestReadyWorkStatementBudget(t *testing.T) {
 			} else if len(stmts) < tc.want {
 				t.Logf("page+total issued %d statements, under budget %d by %d; consider tightening:\n  %s",
 					len(stmts), tc.want, tc.want-len(stmts), strings.Join(stmts, "\n  "))
+			}
+		})
+	}
+}
+
+// TestReadyWorkStatementBudgetUndatedDeferredParent reads two worlds that
+// differ only in how their one deferred parent is deferred: a future
+// defer_until, or plain `bd defer` (status deferred, no date; GH#7300). The
+// undated world must hide the same rows and issue no more statements than the
+// dated one. A budget alone would pass on a probe that never saw the undated
+// parent (it skips the child scan), so the exclusion is asserted with it.
+func TestReadyWorkStatementBudgetUndatedDeferredParent(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+
+	want := []string{"blocker", "r0", "r1", "r2", "r3", "r4", "w0", "w1", "w2"}
+	for _, limit := range []int{0, 1} {
+		t.Run(fmt.Sprintf("limit%d", limit), func(t *testing.T) {
+			stmts := map[bool]int{}
+			for _, undated := range []bool{false, true} {
+				prefix := fmt.Sprintf("ru%d", limit)
+				if undated {
+					prefix += "u"
+				}
+				te := newTestEnv(t, prefix)
+				seedReadyTotalWorld(t, te, prefix, readyTotalWorld{wisps: true, deferredParent: true, undated: undated})
+
+				filter := types.WorkFilter{IncludeEphemeral: true, Limit: limit}
+				var page []*types.IssueWithCounts
+				var total int
+				stmts[undated] = len(withCountingReadTx(t, te, func(tx issueops.DBTX) error {
+					var err error
+					page, total, err = issueops.GetReadyWorkWithCountsAndTotalInTx(t.Context(), tx, filter)
+					return err
+				}))
+				if total != len(want) {
+					t.Errorf("undated=%v: total = %d, want %d", undated, total, len(want))
+				}
+				got := readyIDs(page)
+				if limit == 0 {
+					if g, w := sortedIDs(got), prefixed(prefix, want); strings.Join(g, ",") != strings.Join(w, ",") {
+						t.Errorf("undated=%v: page = %v, want %v", undated, g, w)
+					}
+				} else if len(got) != limit {
+					t.Errorf("undated=%v: page = %v, want %d rows", undated, got, limit)
+				}
+				for _, id := range got {
+					if strings.Contains(id, "dchild") || strings.HasSuffix(id, "-dparent") {
+						t.Errorf("undated=%v: %s listed although its parent (or itself) is deferred: %v", undated, id, got)
+					}
+				}
+			}
+			if stmts[true] > stmts[false] {
+				t.Errorf("undated deferred parent issued %d statements, dated %d", stmts[true], stmts[false])
 			}
 		})
 	}
