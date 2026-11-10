@@ -2110,3 +2110,235 @@ func TestPushPullAtAHostBdDoesNotRunMoveTheServersData(t *testing.T) {
 		t.Fatalf("the server lacks the remote's lo-third after Pull: %v", err)
 	}
 }
+
+// gitProtocolDeclineFixture is a served git-protocol pull fixture for the
+// declined-merge settlement tests (GH#7839): a dolt sql-server sharing this
+// process's filesystem, its testdb configured with a git+file:// origin (a
+// bare git repo), a store over the served database whose pulls take the CLI
+// subprocess route, and a peer clone of the same remote for creating real
+// divergence. The fixture leaves the store and the peer on shared history
+// with a clean working set, so each test drives its own conflict.
+type gitProtocolDeclineFixture struct {
+	store   *DoltStore
+	peerDir string
+}
+
+// setupGitProtocolDeclineFixture builds the gitProtocolDeclineFixture: common
+// history (one base issue the store pushed to origin, which the peer cloned)
+// and a store whose Pull must route through the CLI subprocess. The
+// precondition check pins that routing — a fixture silently taking the SQL
+// route would pass its conflicts through settleMergeInTx and test the wrong
+// path entirely.
+func setupGitProtocolDeclineFixture(t *testing.T) *gitProtocolDeclineFixture {
+	t.Helper()
+	testutil.RequireDoltBinary(t)
+	skipIfNoGit(t)
+
+	baseDir := t.TempDir()
+	remoteDir := filepath.Join(baseDir, "remote.git")
+	runCmd(t, baseDir, "git", "init", "--bare", "-b", "main", remoteDir)
+	seedDir := filepath.Join(baseDir, "seed")
+	if err := os.MkdirAll(seedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runCmd(t, seedDir, "git", "init", "-b", "main")
+	// A local identity: the runner's environment may carry no global git
+	// config, and the seed commit needs an author.
+	runCmd(t, seedDir, "git", "config", "user.name", "test")
+	runCmd(t, seedDir, "git", "config", "user.email", "test@test.com")
+	runCmd(t, seedDir, "git", "commit", "--allow-empty", "-m", "init")
+	runCmd(t, seedDir, "git", "push", remoteDir, "main")
+	remoteURL := "git+file://" + remoteDir
+
+	serverDataDir := filepath.Join(baseDir, "server")
+	if err := os.MkdirAll(serverDataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runCmd(t, serverDataDir, "dolt", "init", "--name", "test", "--email", "test@test.com")
+	dbDir := filepath.Join(serverDataDir, "testdb")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runCmd(t, dbDir, "dolt", "init", "--name", "test", "--email", "test@test.com")
+	runCmd(t, dbDir, "dolt", "remote", "add", "origin", remoteURL)
+
+	port, _ := startLocalDoltServer(t, serverDataDir)
+
+	for _, env := range []string{"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT", "BEADS_TEST_MODE"} {
+		if prev, ok := os.LookupEnv(env); ok {
+			t.Cleanup(func() { os.Setenv(env, prev) })
+		} else {
+			t.Cleanup(func() { os.Unsetenv(env) })
+		}
+		os.Unsetenv(env)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	store, err := New(ctx, &Config{
+		Path:            serverDataDir,
+		Database:        "testdb",
+		ServerHost:      "127.0.0.1",
+		ServerPort:      port,
+		ServerUser:      "root",
+		CommitterName:   "test",
+		CommitterEmail:  "test@test.com",
+		AutoStart:       false,
+		CreateIfMissing: false,
+		Remote:          "origin",
+	})
+	if err != nil {
+		t.Fatalf("failed to create DoltStore over the served testdb: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	if err := store.SetConfig(ctx, "issue_prefix", "gh"); err != nil {
+		t.Fatalf("SetConfig issue_prefix: %v", err)
+	}
+	if _, err := store.CommitAll(ctx, "genesis"); err != nil {
+		t.Fatalf("CommitAll genesis: %v", err)
+	}
+	issue := &types.Issue{ID: "gh-base", Title: "base", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue gh-base: %v", err)
+	}
+	if err := store.Commit(ctx, "add gh-base"); err != nil {
+		t.Fatalf("Commit gh-base: %v", err)
+	}
+	if err := store.Push(ctx); err != nil {
+		t.Fatalf("Push base history: %v", err)
+	}
+
+	peerDir := filepath.Join(baseDir, "peer")
+	doltClone(t, remoteURL, peerDir)
+
+	useCLI, err := store.prepareCLIRouteForGitProtocol(ctx, "origin")
+	if err != nil {
+		t.Fatalf("prepareCLIRouteForGitProtocol: %v", err)
+	}
+	if !useCLI {
+		t.Fatal("precondition: the git+file:// origin must route pulls through the CLI subprocess")
+	}
+	return &gitProtocolDeclineFixture{store: store, peerDir: peerDir}
+}
+
+// createLocalIssue creates and commits an issue on the served store.
+func createLocalIssue(t *testing.T, ctx context.Context, store *DoltStore, id, title string) {
+	t.Helper()
+	issue := &types.Issue{ID: id, Title: title, IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue %s: %v", id, err)
+	}
+	if err := store.Commit(ctx, "add "+id); err != nil {
+		t.Fatalf("Commit %s: %v", id, err)
+	}
+}
+
+// assertNoOpenMerge fails when the served database still has an open merge or
+// live conflict rows — the wedge GH#7839 describes: is_merging=1 blocks every
+// later write and pull until an operator runs DOLT_MERGE('--abort') by hand.
+func assertNoOpenMerge(t *testing.T, ctx context.Context, store *DoltStore) {
+	t.Helper()
+	var merging bool
+	if err := store.db.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&merging); err != nil {
+		t.Fatalf("read dolt_merge_status: %v", err)
+	}
+	if merging {
+		t.Error("the declined CLI pull left the merge open (dolt_merge_status.is_merging=1); want it aborted")
+	}
+	var conflicts int
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_conflicts").Scan(&conflicts); err != nil {
+		t.Fatalf("count dolt_conflicts: %v", err)
+	}
+	if conflicts != 0 {
+		t.Errorf("%d conflicted table(s) remain live in the working set; want the merge aborted", conflicts)
+	}
+}
+
+// TestGitProtocolPullDeclinedConflictAbortsMerge is the end-to-end GH#7839
+// regression: a real CLI-routed pull (git+file:// origin, served sql-server)
+// whose merge the resolver declines must abort that merge and report the
+// captured conflicts the way the SQL route does — leaving it open instead
+// wedged every later write and pull. It then pins the recovery contract: an
+// unrelated write succeeds, a retry reports the same semantic conflict (not a
+// commit-before-pull failure), an explicit strategy reconciliation settles
+// the divergence, and the next pull succeeds.
+func TestGitProtocolPullDeclinedConflictAbortsMerge(t *testing.T) {
+	f := setupGitProtocolDeclineFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	store := f.store
+
+	// Diverge: the same issue id created on both sides with different titles.
+	// add/add has no merge base row, so the auto-resolver always declines it
+	// (GH#4698) — the fixture must never silently auto-resolve.
+	createLocalIssue(t, ctx, store, "gh-x", "local title")
+	sourceInsertIssue(t, f.peerDir, "gh-x", "peer title")
+	sourceCommitAndPush(t, f.peerDir, "add gh-x")
+	waitOutGitRemoteReadCache()
+
+	preHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("read pre-pull head: %v", err)
+	}
+
+	err = store.Pull(ctx)
+	var mce *versioncontrolops.MergeConflictsError
+	if !errors.As(err, &mce) {
+		t.Fatalf("Pull error = %v, want *MergeConflictsError carrying the declined conflicts", err)
+	}
+	if len(mce.Conflicts) != 1 || mce.Conflicts[0].Field != "issues" {
+		t.Errorf("MergeConflictsError.Conflicts = %v, want the declined issues conflict", mce.Conflicts)
+	}
+	if mce.MergeErr == nil {
+		t.Error("the conflicts error does not wrap the CLI pull's own error")
+	}
+	assertNoOpenMerge(t, ctx, store)
+
+	// The abort restored the pre-pull state: same head, our side of the
+	// divergent issue intact.
+	if got, err := store.GetCurrentCommit(ctx); err != nil {
+		t.Fatalf("read head after the aborted pull: %v", err)
+	} else if got != preHead {
+		t.Errorf("head = %s after the aborted pull, want the pre-pull head %s", got, preHead)
+	}
+	if issue, err := store.GetIssue(ctx, "gh-x"); err != nil {
+		t.Fatalf("read local issue after the aborted pull: %v", err)
+	} else if issue.Title != "local title" {
+		t.Errorf("local issue title = %q after the abort, want the pre-pull value %q", issue.Title, "local title")
+	}
+
+	// Write recovery: with the merge aborted, an unrelated issue creation
+	// succeeds — the wedge GH#7839 reports is that it used to fail.
+	createLocalIssue(t, ctx, store, "gh-after", "created after the aborted pull")
+
+	// The retry reports the same semantic conflict, not a failure to commit
+	// pending changes before the pull.
+	err = store.Pull(ctx)
+	if !errors.As(err, &mce) {
+		t.Fatalf("retry Pull error = %v, want the same *MergeConflictsError", err)
+	}
+	if len(mce.Conflicts) != 1 || mce.Conflicts[0].Field != "issues" {
+		t.Errorf("retry conflicts = %v, want the declined issues conflict", mce.Conflicts)
+	}
+	assertNoOpenMerge(t, ctx, store)
+
+	// Explicit strategy reconciliation settles the divergence; the next pull
+	// succeeds.
+	conn, err := store.UnderlyingDB().Conn(ctx)
+	if err != nil {
+		t.Fatalf("acquire reconciliation connection: %v", err)
+	}
+	defer conn.Close()
+	if _, err := versioncontrolops.MergeWithStrategy(ctx, conn, "origin/main", "test <test@test.com>", "theirs"); err != nil {
+		t.Fatalf("reconcile the divergence with --strategy theirs: %v", err)
+	}
+	if err := store.Pull(ctx); err != nil {
+		t.Fatalf("pull after strategy reconciliation: %v", err)
+	}
+	if issue, err := store.GetIssue(ctx, "gh-x"); err != nil {
+		t.Fatalf("read reconciled issue: %v", err)
+	} else if issue.Title != "peer title" {
+		t.Errorf("reconciled issue title = %q, want the peer's %q (theirs)", issue.Title, "peer title")
+	}
+}
