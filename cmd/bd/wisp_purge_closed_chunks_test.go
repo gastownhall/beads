@@ -29,6 +29,7 @@ type wispPurgeStubStore struct {
 	storage.DoltStorage
 	closed  []string
 	infra   map[string]bool
+	pinned  map[string]bool
 	deleter *wispPurgeStubDeleter
 	scanned bool
 	lookups int
@@ -39,7 +40,7 @@ func (s *wispPurgeStubStore) issue(id string) *types.Issue {
 	if s.infra[id] {
 		issueType = "agent"
 	}
-	return &types.Issue{ID: id, Title: "wisp " + id, Status: types.StatusClosed, Ephemeral: true, IssueType: issueType}
+	return &types.Issue{ID: id, Title: "wisp " + id, Status: types.StatusClosed, Ephemeral: true, IssueType: issueType, Pinned: s.pinned[id]}
 }
 
 func (s *wispPurgeStubStore) SearchIssues(_ context.Context, _ string, filter types.IssueFilter) ([]*types.Issue, error) {
@@ -183,6 +184,7 @@ func useWispPurgeStub(t *testing.T, n int) *wispPurgeStubStore {
 	s := &wispPurgeStubStore{
 		closed:  wispPurgeIDs(n),
 		infra:   map[string]bool{},
+		pinned:  map[string]bool{},
 		deleter: &wispPurgeStubDeleter{deleted: map[string]bool{}, dependents: map[string][]string{}},
 	}
 	store, rootCtx, jsonOutput, quietFlag, proxiedServerMode, actor = s, context.Background(), false, false, false, "test"
@@ -870,6 +872,25 @@ func TestWispPurgeClosedReportsCappedScan(t *testing.T) {
 		}
 	})
 
+	t.Run("deletes no more than the window", func(t *testing.T) {
+		// 5200 rows: the scan stops at 5000 and the purge deletes exactly
+		// that window, never the rows beyond it, and claims no total.
+		s := useWispPurgeStub(t, 5200)
+		stdout, _ := run(t, s, false)
+		if len(s.deleter.deleted) != 5000 {
+			t.Errorf("deleted %d wisps, want the 5000 of the window", len(s.deleter.deleted))
+		}
+		for _, id := range s.closed[5000:] {
+			if s.deleter.deleted[id] {
+				t.Errorf("deleted %s, beyond the scanned window", id)
+				break
+			}
+		}
+		if bytes.Contains([]byte(stdout), []byte("5200")) {
+			t.Errorf("text outcome claims how many remain:\n%s", stdout)
+		}
+	})
+
 	t.Run("scan below the limit", func(t *testing.T) {
 		s := useWispPurgeStub(t, 450)
 		stdout, _ := run(t, s, true)
@@ -899,6 +920,42 @@ func TestWispPurgeClosedReportsCappedScan(t *testing.T) {
 		}
 		if len(s.deleter.requests) != 0 {
 			t.Errorf("sent %d deletion requests for a fully protected window", len(s.deleter.requests))
+		}
+	})
+
+	t.Run("window entirely pinned", func(t *testing.T) {
+		s := useWispPurgeStub(t, 5000)
+		for _, id := range s.closed {
+			s.pinned[id] = true
+		}
+		stdout, _ := run(t, s, false)
+		if !bytes.Contains([]byte(stdout), []byte("No closed wisps to delete")) {
+			t.Errorf("the all-pinned window lost its empty-selection message:\n%s", stdout)
+		}
+		if !bytes.Contains([]byte(stdout), []byte(mayRemain)) {
+			t.Errorf("the all-pinned capped window does not say more may remain:\n%s", stdout)
+		}
+		if bytes.Contains([]byte(stdout), []byte("again")) || bytes.Contains([]byte(stdout), []byte("continue")) {
+			t.Errorf("the all-pinned window promises a rerun gets past it:\n%s", stdout)
+		}
+
+		s2 := useWispPurgeStub(t, 5000)
+		for _, id := range s2.closed {
+			s2.pinned[id] = true
+		}
+		stdout, _ = run(t, s2, true)
+		obj := decodeSingleJSONObject(t, stdout)
+		if got := obj["deleted_count"]; got != float64(0) {
+			t.Errorf("deleted_count = %v, want 0", got)
+		}
+		if got := obj["candidates_capped"]; got != true {
+			t.Errorf("candidates_capped = %v, want true: the raw scan hit the limit though every row was pinned", got)
+		}
+		if got, _ := obj["hint"].(string); !bytes.Contains([]byte(got), []byte(mayRemain)) {
+			t.Errorf("hint = %q, want it to say more closed wisps may remain", got)
+		}
+		if len(s2.deleter.requests) != 0 {
+			t.Errorf("sent %d deletion requests for a fully pinned window", len(s2.deleter.requests))
 		}
 	})
 

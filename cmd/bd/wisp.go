@@ -1057,8 +1057,10 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 // says so (candidates_capped) without claiming how many.
 const wispPurgeScanLimit = 5000
 
-// wispPurgeCappedNote is the text a forced run prints when its scan was full.
-var wispPurgeCappedNote = fmt.Sprintf("Note: the scan stopped at its %d-wisp limit, so more closed wisps may remain; run the command again to continue.", wispPurgeScanLimit)
+// wispPurgeCappedHint is what a forced run says when its scan was full. It
+// says only that more MAY remain: the cap is a scan window, not a total, and
+// a rerun cannot promise to get past a window that protected rows fill.
+var wispPurgeCappedHint = fmt.Sprintf("candidate scan reached the %d-wisp limit; more closed wisps may remain", wispPurgeScanLimit)
 
 // renderNoClosedWisps prints the empty-selection answer. capped is set only
 // for a forced run whose full scan held nothing deletable (every row pinned or
@@ -1071,12 +1073,13 @@ func renderNoClosedWisps(capped bool) error {
 		}
 		if capped {
 			answer["candidates_capped"] = true
+			answer["hint"] = wispPurgeCappedHint
 		}
 		return outputJSON(answer)
 	}
 	fmt.Println("No closed wisps to delete")
 	if capped {
-		fmt.Println(wispPurgeCappedNote)
+		fmt.Printf("Note: %s.\n", wispPurgeCappedHint)
 	}
 	return nil
 }
@@ -1270,7 +1273,7 @@ func renderWispPurgeOutcome(out wispPurgeOutcome, scanCapped, withDeletedIDs boo
 			ui.RenderWarn("⚠"), len(out.orphaned), strings.Join(out.orphaned, ", "))
 	}
 	if scanCapped {
-		fmt.Printf("\n%s\n", wispPurgeCappedNote)
+		fmt.Printf("\nNote: %s.\n", wispPurgeCappedHint)
 	}
 	if out.err != nil {
 		// The counts above are what committed chunks confirmed. The failed
