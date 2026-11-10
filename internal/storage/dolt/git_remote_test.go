@@ -2112,10 +2112,10 @@ func TestPushPullAtAHostBdDoesNotRunMoveTheServersData(t *testing.T) {
 }
 
 // TestGitProtocolPullAddAddConflictAbortsAndRepeatsCleanly is the
-// contributor's regression test for #7839 (PR #7849): a CLI `dolt pull` over a
+// contributor's regression test for #7839 (PR #7849): a CLI-routed pull over a
 // git-protocol remote (git+file://) that hits a conflict the auto-resolver
-// declines must abort the merge and restore the working set — exactly like the SQL DOLT_PULL route already does via
-// versioncontrolops.SettleMerge — instead of leaving
+// declines must restore the working set — exactly like the SQL DOLT_PULL route
+// already does by rolling its settle transaction back — instead of leaving
 // dolt_merge_status.is_merging=1 open on the server, which then fails every
 // later write and pull until an operator aborts it by hand.
 //
@@ -2159,7 +2159,7 @@ func TestGitProtocolPullAddAddConflictAbortsAndRepeatsCleanly(t *testing.T) {
 	runCmd(t, seedDir, "git", "push", "-u", "origin", "main")
 
 	// Writer A: a DoltStore served by its own local sql-server, with the
-	// remote added as git+file:// so Pull routes through finishCLIPull (the
+	// remote added as git+file:// so Pull routes through runCLIPull (the
 	// CLI path under test) rather than the SQL DOLT_PULL path.
 	doltDir := filepath.Join(baseDir, "writer-a")
 	if err := os.MkdirAll(doltDir, 0o755); err != nil {

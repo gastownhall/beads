@@ -883,9 +883,10 @@ func TestRunSyncLoopConflictAfterPushRaceRecordsPulled(t *testing.T) {
 }
 
 // Whether the conflicted merge was aborted or left live in the working set is
-// read from WHICH detection source fired, never assumed: the SQL pull route
-// aborts and restores, while the CLI/git-protocol route deliberately leaves the
-// conflict rows in place for the operator (finishCLIPull).
+// read from WHICH detection source fired, never assumed: both pull routes merge
+// in bd's own transaction and roll back a conflicted merge they opened, which
+// restores the working set, but a merge another client left open stays live
+// (see mergeFetchedInTx).
 func TestRunSyncLoopConflictLivenessComesFromTheSource(t *testing.T) {
 	t.Run("captured-only conflicts were aborted away", func(t *testing.T) {
 		r := &syncOpsRecorder{pullConflicts: [][]string{{"issues"}}}

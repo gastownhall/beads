@@ -126,12 +126,8 @@ func createCommitted(ctx context.Context, t *testing.T, store *DoltStore, id, ti
 // conflict rows.
 func assertNoMergeLeft(ctx context.Context, t *testing.T, store *DoltStore) {
 	t.Helper()
-	var merging bool
-	if err := store.db.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&merging); err != nil {
-		t.Fatalf("read dolt_merge_status: %v", err)
-	}
-	if merging {
-		t.Fatal("declined CLI pull left the merge open (dolt_merge_status.is_merging=1); want it aborted")
+	if isMerging(ctx, t, store.db) {
+		t.Fatal("declined CLI pull left the merge open (dolt_merge_status.is_merging=1); want it rolled back")
 	}
 	var conflicts int
 	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_conflicts").Scan(&conflicts); err != nil {
@@ -144,8 +140,10 @@ func assertNoMergeLeft(ctx context.Context, t *testing.T, store *DoltStore) {
 
 // TestGitProtocolPullDeclinedConflictAbortsMerge pins GH#7839 end to end on
 // the git-protocol CLI route: a pull whose add/add issues conflict the
-// resolver declines must abort the merge the `dolt pull` subprocess opened
-// and report the conflict as the SQL route's typed error (AC-1).
+// resolver declines must leave no merge open — the `dolt fetch` subprocess
+// brings the peer's commit in, and bd's own transaction merges it and rolls
+// the declined merge back — and report the conflict as the SQL route's typed
+// error (AC-1).
 func TestGitProtocolPullDeclinedConflictAbortsMerge(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
@@ -159,17 +157,13 @@ func TestGitProtocolPullDeclinedConflictAbortsMerge(t *testing.T) {
 	}
 
 	// AC-1: the declined conflict comes back as the SQL route's typed error,
-	// naming issues and wrapping the subprocess's own failure, and nothing of
-	// the merge is left behind.
+	// naming issues, and nothing of the merge is left behind.
 	var mce *versioncontrolops.MergeConflictsError
 	if !errors.As(pullErr, &mce) {
 		t.Fatalf("Pull error = %v, want *MergeConflictsError", pullErr)
 	}
 	if tables := declinedTables(mce.Conflicts); !slices.Contains(tables, "issues") {
 		t.Fatalf("MergeConflictsError names %v, want issues", tables)
-	}
-	if mce.MergeErr == nil || errors.Unwrap(pullErr) != mce.MergeErr {
-		t.Fatalf("MergeConflictsError does not wrap the CLI pull's error (MergeErr=%v)", mce.MergeErr)
 	}
 	assertNoMergeLeft(ctx, t, store)
 	if head, err := store.GetCurrentCommit(ctx); err != nil || head != fx.preHead {
@@ -258,4 +252,51 @@ func TestGitProtocolPeerPullDeclinedConflictAbortsMerge(t *testing.T) {
 	// With the merge aborted the store still accepts writes: the conflict
 	// came back as data, not as a working set wedged on an open merge.
 	createCommitted(ctx, t, store, "dc-peer-after", "unrelated work after the aborted peer pull")
+}
+
+// TestGitProtocolPullLeavesAnotherClientsMergeAlone is the race of PR #7849's
+// second review (GH#7839): while this store's CLI pull fetches, another
+// client pulls the same remote ref into the same branch with the dolt CLI and
+// leaves its declined merge open. That merge is not this pull's: the pull
+// must leave it exactly as it is (not merged over, settled or aborted), say
+// so, and commit nothing.
+func TestGitProtocolPullLeavesAnotherClientsMergeAlone(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	fx := setupCLIPullDeclineFixture(ctx, t)
+	store := fx.store
+
+	_, pullErr := store.runCLIPull(ctx, "origin", func() error {
+		cmd, _, cancelCmd, err := store.prepareDoltCLITransfer(ctx, "origin", nil, "pull", "origin", "main")
+		if err != nil {
+			t.Fatalf("prepare the other client's dolt pull: %v", err)
+		}
+		out, otherErr := cmd.CombinedOutput()
+		cancelCmd()
+		if otherErr == nil || !isMerging(ctx, t, store.db) {
+			t.Fatalf("the other client's dolt pull left no conflicted merge open (err %v):\n%s", otherErr, out)
+		}
+		return store.doltCLIFetchBranch(ctx, "dolt fetch", "origin", nil)
+	})
+
+	var mce *versioncontrolops.MergeConflictsError
+	if pullErr == nil || errors.As(pullErr, &mce) {
+		t.Fatalf("pull = %v; another client's open merge must be refused, not settled", pullErr)
+	}
+	if want := "a merge of refs/remotes/origin/main into refs/heads/main is already open"; !strings.Contains(pullErr.Error(), want) {
+		t.Fatalf("pull error %q does not mention %q", pullErr, want)
+	}
+	if !isMerging(ctx, t, store.db) {
+		t.Fatal("the other client's merge is closed; want it still open")
+	}
+	var conflicts int
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_conflicts").Scan(&conflicts); err != nil {
+		t.Fatalf("count dolt_conflicts: %v", err)
+	}
+	if conflicts == 0 {
+		t.Fatal("the other client's conflicts are gone; want them left for that client")
+	}
+	if head, err := store.GetCurrentCommit(ctx); err != nil || head != fx.preHead {
+		t.Fatalf("HEAD after the refused pull = %q (err %v), want the pre-pull %q", head, err, fx.preHead)
+	}
 }

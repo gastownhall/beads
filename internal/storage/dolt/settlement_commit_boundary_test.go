@@ -95,47 +95,30 @@ func TestServerSettlementSQLCommitResponseLossIsIndeterminate(t *testing.T) {
 		}
 	})
 
-	t.Run("CLI conflict repair", func(t *testing.T) {
+	t.Run("CLI pull merge settlement", func(t *testing.T) {
 		db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 		if err != nil {
 			t.Fatalf("sqlmock.New: %v", err)
 		}
 		t.Cleanup(func() { _ = db.Close() })
 
-		mock.ExpectExec(regexp.QuoteMeta("SET @@dolt_allow_commit_conflicts = 1")).
-			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectBegin()
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT `table`, num_conflicts FROM dolt_conflicts")).
-			WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}).AddRow("metadata", 1))
-		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'metadata')")).
-			WillReturnRows(sqlmock.NewRows([]string{"status"}))
-		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('metadata')")).
-			WillReturnRows(sqlmock.NewRows([]string{"status"}))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT `table` FROM dolt_constraint_violations WHERE num_violations > 0")).
-			WillReturnRows(sqlmock.NewRows([]string{"table"}))
-		// GH#7811: CommitResolvedConflicts now concludes with the FULL merge
-		// result — it reads the open merge's source commit, then the unstaged
-		// tables that differ between HEAD and it (none here) — before the
-		// same DOLT_COMMIT.
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT source_commit FROM dolt_merge_status WHERE is_merging")).
-			WillReturnRows(sqlmock.NewRows([]string{"source_commit"}).AddRow("0123456789abcdefghijklmnopqrstuv"))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT DISTINCT CASE WHEN s.table_name = CONCAT(d.from_table_name, ' -> ', d.to_table_name) THEN d.to_table_name ELSE s.table_name END FROM dolt_status s JOIN (SELECT from_table_name, to_table_name FROM dolt_diff_summary('HEAD', '0123456789abcdefghijklmnopqrstuv') UNION SELECT from_table_name, to_table_name FROM dolt_schema_diff('HEAD', '0123456789abcdefghijklmnopqrstuv')) d ON s.table_name IN (d.from_table_name, d.to_table_name, CONCAT(d.from_table_name, ' -> ', d.to_table_name)) WHERE s.staged = 0")).
-			WillReturnRows(sqlmock.NewRows([]string{"table_name"}))
-		// concludeMerge passes the commit message as a bind arg, not a
-		// string-interpolated literal, and drains the CALL (schema.DrainCall).
-		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
-			WithArgs("auto-resolve merge conflicts: metadata, dependencies, schema_migrations, config, issues (field-level three-way merge), labels/comments/events (union)").
-			WillReturnRows(sqlmock.NewRows([]string{"status"}))
-		responseLoss := errors.New("CLI repair SQL commit response lost")
-		mock.ExpectCommit().WillReturnError(responseLoss)
-		mock.ExpectExec(regexp.QuoteMeta("SET @@dolt_allow_commit_conflicts = 0")).
-			WillReturnResult(sqlmock.NewResult(0, 0))
-
-		store := &DoltStore{db: db}
-		resolved, err := store.autoResolveConflictsAfterCLIPull(t.Context())
-		if resolved {
-			t.Fatal("autoResolveConflictsAfterCLIPull() resolved = true after lost SQL commit response")
+		tx, err := db.BeginTx(t.Context(), nil)
+		if err != nil {
+			t.Fatalf("BeginTx: %v", err)
 		}
+		// The CLI routes merge what their fetch brought in inside this
+		// transaction (mergeFetchedInTx), and settle it like the SQL route.
+		expectNoOpenMerge(mock)
+		expectFetchedMerge(mock, 1, "conflicts found")
+		expectMetadataRepairUpToCommit(mock)
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
+			WillReturnRows(sqlmock.NewRows([]string{"status"}))
+		responseLoss := errors.New("CLI pull merge SQL commit response lost")
+		mock.ExpectCommit().WillReturnError(responseLoss)
+
+		store := &DoltStore{db: db, branch: "main"}
+		_, err = store.mergeFetchedInTx(t.Context(), tx, "origin/main")
 		assertPublicCommitIndeterminate(t, err, responseLoss)
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("unmet sqlmock expectations: %v", err)

@@ -80,8 +80,8 @@ type syncOutcome struct {
 	// set right now rather than having been aborted away. It is read from
 	// which detection source fired, never assumed: a pull aborts a conflicted
 	// merge it opened and restores the working set (on every route since
-	// GH#7839), but a merge that was already open, or whose abort bd could not
-	// confirm, stays live for the operator.
+	// GH#7839), but a merge it did not open, another client's that was already
+	// open in the working set, stays live for the operator.
 	ConflictsLive bool `json:"conflicts_live,omitempty"`
 	RowsCorrected int  `json:"rows_corrected"`
 	// Pulled reports whether an earlier attempt in this run already completed a
@@ -283,10 +283,10 @@ func runSyncLoop(ctx context.Context, ops syncOps, maxAttempts int) (*syncOutcom
 			// Which source fired decides what the operator is told about the
 			// state of the database, and the two answers are opposites. Live
 			// rows mean the conflict is sitting in the working set right now:
-			// a merge the pull did not open, or one whose abort could not be
-			// confirmed (see settleCLIPull). Captured-only means the settle pass
-			// aborted the merge and restored the working set. Guessing either
-			// way sends the operator looking in the wrong place.
+			// a merge the pull did not open, which it leaves alone (see
+			// mergeFetchedInTx). Captured-only means the settle pass aborted
+			// the merge and restored the working set. Guessing either way
+			// sends the operator looking in the wrong place.
 			out.ConflictsLive = len(live) > 0
 			// pullErr only describes the conflict itself when the merge
 			// captured it (merged is non-empty). If merged is empty, this
@@ -683,8 +683,8 @@ audit-only dependency rows, and last-write-wins on issue cells. Anything beyond
 those halts here.) A conflicted merge the pull itself opened is aborted and the
 working set restored, so there are no conflict rows to resolve: reconcile the two
 histories with 'bd vc merge <remote>/<branch> --strategy ours|theirs', then sync
-again. A merge bd did not abort (it was already open, or the abort could not be
-confirmed) stays live; the halt message reports which case applies.
+again. A merge bd did not open (another client's, already open in the working
+set) stays live; the halt message reports which case applies.
 
 Exit codes (a sync timer can branch on these without parsing output):
 
@@ -1024,9 +1024,9 @@ func syncConflictMessage(out *syncOutcome) []string {
 	case out.ConflictsLive:
 		lines = append(lines,
 			"The conflict rows above are LIVE in the working set — the merge is still open (bd",
-			"did not abort it, or could not confirm the abort). The database is conflicted right",
-			"now, and Dolt will refuse to merge over it, so every later sync halts here until you",
-			"resolve it. Nothing was pushed.",
+			"did not open it, so it left it alone). The database is conflicted right now, and",
+			"Dolt will refuse to merge over it, so every later sync halts here until you resolve",
+			"it. Nothing was pushed.",
 			"Inspect with: bd conflicts list / bd conflicts show",
 			conflictsResolveHint)
 	default:

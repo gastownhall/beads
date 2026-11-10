@@ -13,9 +13,20 @@ import (
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
+// mergeAsCLIPull runs the CLI routes' merge of ref (mergeFetchedInTx) on the
+// test store's own branch, in a transaction with the session flags
+// beginPullSettleTx sets. Production opens that transaction on a fresh
+// connection, which would sit on the database's default branch rather than
+// the test's.
+func mergeAsCLIPull(ctx context.Context, t *testing.T, store *DoltStore, ref string) (pullReport, error) {
+	t.Helper()
+	return store.mergeFetchedInTx(ctx, beginForcedMergeTx(ctx, t, store.db), ref)
+}
+
 // persistPeerMerge merges peerBranch into the current branch and commits the
-// result with its conflicts (and, with force, its constraint violations), so
-// the working set is what a CLI `dolt pull` leaves behind for settleCLIPull.
+// result with its conflicts (and, with force, its constraint violations): a
+// merge another client left open in the working set, as a hand-run `dolt
+// pull` or an older bd's CLI pull does.
 func persistPeerMerge(ctx context.Context, t *testing.T, db *sql.DB, peerBranch string, force bool) {
 	t.Helper()
 	tx, err := db.BeginTx(ctx, nil)
@@ -39,17 +50,17 @@ func persistPeerMerge(ctx context.Context, t *testing.T, db *sql.DB, peerBranch 
 		t.Fatalf("persist merged working set: %v", err)
 	}
 	if !isMerging(ctx, t, db) {
-		t.Fatal("fixture merge is not open in the working set; nothing for the CLI settle pass to decline")
+		t.Fatal("fixture merge is not open in the working set")
 	}
 }
 
 // assertMergeAborted fails unless the working set holds no merge, conflict or
-// constraint violation and HEAD is still preHead: the declined merge was
-// aborted and nothing was committed on top of the pre-pull history.
+// constraint violation and HEAD is still preHead: the declined merge rolled
+// back and nothing was committed on top of the pre-pull history.
 func assertMergeAborted(ctx context.Context, t *testing.T, db *sql.DB, preHead string) {
 	t.Helper()
 	if isMerging(ctx, t, db) {
-		t.Fatal("declined merge is still open (dolt_merge_status.is_merging=1); want it aborted")
+		t.Fatal("declined merge is still open (dolt_merge_status.is_merging=1); want it rolled back")
 	}
 	var conflicts, violations int
 	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_conflicts").Scan(&conflicts); err != nil {
@@ -63,6 +74,38 @@ func assertMergeAborted(ctx context.Context, t *testing.T, db *sql.DB, preHead s
 	}
 	if head := readHead(ctx, t, db); head != preHead {
 		t.Fatalf("HEAD moved from %s to %s; the declined merge must not be committed", preHead, head)
+	}
+}
+
+// assertOtherClientsMergeLeftAlone fails unless the merge another client left
+// open is still open with its conflicts, nothing was committed over it, and
+// err refuses the pull without claiming a rollback of that merge.
+func assertOtherClientsMergeLeftAlone(ctx context.Context, t *testing.T, db *sql.DB, preHead string, err error, peerBranch string) {
+	t.Helper()
+	var mce *versioncontrolops.MergeConflictsError
+	if err == nil || errors.As(err, &mce) {
+		t.Fatalf("merge = %v; another client's open merge must be refused, not settled", err)
+	}
+	var branch string
+	if qErr := db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&branch); qErr != nil {
+		t.Fatalf("read active branch: %v", qErr)
+	}
+	want := "a merge of " + peerBranch + " into refs/heads/" + branch + " is already open"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("merge error %q does not mention %q", err, want)
+	}
+	if !isMerging(ctx, t, db) {
+		t.Fatal("the other client's merge is closed; want it still open")
+	}
+	var conflicts int
+	if qErr := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_conflicts").Scan(&conflicts); qErr != nil {
+		t.Fatalf("count dolt_conflicts: %v", qErr)
+	}
+	if conflicts == 0 {
+		t.Fatal("the other client's conflicts are gone; want them left for that client")
+	}
+	if head := readHead(ctx, t, db); head != preHead {
+		t.Fatalf("HEAD moved from %s to %s; nothing may be committed over another client's merge", preHead, head)
 	}
 }
 
@@ -92,134 +135,102 @@ func declinedTables(conflicts []storage.Conflict) []string {
 	return tables
 }
 
-// TestCLIPullDeclinedSettlement pins GH#7839 on persisted CLI-pull merges: a
-// merge the resolver declines is aborted back to the pre-pull HEAD, with row
-// conflicts reported as *MergeConflictsError (AC-1) and unrepairable FK
-// violations as a non-conflict error naming their table (AC-4).
+// TestCLIPullDeclinedSettlement pins GH#7839 on the CLI routes' merge
+// (mergeFetchedInTx), which runs in bd's own transaction: a merge the
+// resolver declines rolls back to the pre-pull HEAD and leaves nothing open,
+// with row conflicts reported as *MergeConflictsError (AC-1) and unrepairable
+// FK violations as a non-conflict error (AC-4). A merge another client left
+// open in the working set is not this pull's: it is neither merged over,
+// settled nor aborted.
 func TestCLIPullDeclinedSettlement(t *testing.T) {
 	t.Run("declined dependency conflict", func(t *testing.T) {
-		for _, tc := range []struct {
-			name    string
-			pullErr error
-		}{
-			{"pull reported failure", errors.New("dolt pull: merge conflicts")},
-			{"pull reported success", nil},
-		} {
-			t.Run(tc.name, func(t *testing.T) {
-				store, peerBranch := setupDependencyMergeConflict(t, "blocks", "alice", "related", "alice")
-				ctx, cancel := testContext(t)
-				defer cancel()
-				db := store.db
-				preHead := readHead(ctx, t, db)
-				persistPeerMerge(ctx, t, db, peerBranch, false)
+		store, peerBranch := setupDependencyMergeConflict(t, "blocks", "alice", "related", "alice")
+		ctx, cancel := testContext(t)
+		defer cancel()
+		db := store.db
+		preHead := readHead(ctx, t, db)
 
-				err := store.finishCLIPull(ctx, tc.pullErr)
-				var mce *versioncontrolops.MergeConflictsError
-				if !errors.As(err, &mce) {
-					t.Fatalf("finishCLIPull = %v, want *MergeConflictsError", err)
-				}
-				if !slices.Contains(declinedTables(mce.Conflicts), "dependencies") {
-					t.Fatalf("MergeConflictsError names %v, want dependencies", declinedTables(mce.Conflicts))
-				}
-				if mce.MergeErr != tc.pullErr {
-					t.Fatalf("MergeConflictsError.MergeErr = %v, want the pull's error %v", mce.MergeErr, tc.pullErr)
-				}
-				assertMergeAborted(ctx, t, db, preHead)
-				var depType string
-				if err := db.QueryRowContext(ctx, "SELECT type FROM dependencies WHERE id = ?",
-					depid.New("depc-x", "depc-y")).Scan(&depType); err != nil {
-					t.Fatalf("read local edge: %v", err)
-				}
-				if depType != "blocks" {
-					t.Fatalf("local edge type = %q after the abort, want the pre-pull %q", depType, "blocks")
-				}
-			})
+		report, err := mergeAsCLIPull(ctx, t, store, peerBranch)
+		var mce *versioncontrolops.MergeConflictsError
+		if !errors.As(err, &mce) {
+			t.Fatalf("merge = %v, want *MergeConflictsError", err)
+		}
+		if !slices.Contains(declinedTables(mce.Conflicts), "dependencies") {
+			t.Fatalf("MergeConflictsError names %v, want dependencies", declinedTables(mce.Conflicts))
+		}
+		if !report.Conflicted {
+			t.Fatalf("merge report = %+v; DOLT_MERGE reported no conflict", report)
+		}
+		assertMergeAborted(ctx, t, db, preHead)
+		var depType string
+		if err := db.QueryRowContext(ctx, "SELECT type FROM dependencies WHERE id = ?",
+			depid.New("depc-x", "depc-y")).Scan(&depType); err != nil {
+			t.Fatalf("read local edge: %v", err)
+		}
+		if depType != "blocks" {
+			t.Fatalf("local edge type = %q after the rollback, want the pre-pull %q", depType, "blocks")
 		}
 	})
 
 	t.Run("unrepairable FK violation", func(t *testing.T) {
-		for _, tc := range []struct {
-			name    string
-			pullErr error
+		store, cleanup := setupTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+		db := store.db
+
+		// A test-local FK outside the cascade repair's allowlist: the current
+		// branch deletes the parent the peer branch gives a new child.
+		var currentBranch string
+		if err := db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&currentBranch); err != nil {
+			t.Fatalf("get current branch: %v", err)
+		}
+		peerBranch := currentBranch + "_fkdecline"
+		for _, step := range []struct {
+			query string
+			args  []any
 		}{
-			{"pull reported failure", errors.New("dolt pull failed: exit status 1")},
-			{"pull reported success", nil},
+			{"CREATE TABLE cpd_parent (id VARCHAR(32) PRIMARY KEY)", nil},
+			{"CREATE TABLE cpd_child (id VARCHAR(32) PRIMARY KEY, parent_id VARCHAR(32), " +
+				"CONSTRAINT fk_cpd_child_parent FOREIGN KEY (parent_id) REFERENCES cpd_parent (id))", nil},
+			{"INSERT INTO cpd_parent (id) VALUES ('p1')", nil},
+			{"CALL DOLT_COMMIT('-Am', 'seed cpd tables')", nil},
+			{"CALL DOLT_BRANCH(?, 'HEAD')", []any{peerBranch}},
+			{"DELETE FROM cpd_parent WHERE id = 'p1'", nil},
+			{"CALL DOLT_COMMIT('-Am', 'delete parent')", nil},
+			{"CALL DOLT_CHECKOUT(?)", []any{peerBranch}},
+			{"INSERT INTO cpd_child (id, parent_id) VALUES ('c1', 'p1')", nil},
+			{"CALL DOLT_COMMIT('-Am', 'peer adds child')", nil},
+			{"CALL DOLT_CHECKOUT(?)", []any{currentBranch}},
 		} {
-			t.Run(tc.name, func(t *testing.T) {
-				store, cleanup := setupTestStore(t)
-				defer cleanup()
-				ctx, cancel := testContext(t)
-				defer cancel()
-				db := store.db
+			if _, err := db.ExecContext(ctx, step.query, step.args...); err != nil {
+				t.Fatalf("%s: %v", step.query, err)
+			}
+		}
+		t.Cleanup(func() {
+			db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", currentBranch)
+			db.ExecContext(ctx, "CALL DOLT_BRANCH('-Df', ?)", peerBranch)
+		})
+		preHead := readHead(ctx, t, db)
 
-				// A test-local FK outside the cascade repair's allowlist: the current
-				// branch deletes the parent the peer branch gives a new child.
-				var currentBranch string
-				if err := db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&currentBranch); err != nil {
-					t.Fatalf("get current branch: %v", err)
-				}
-				peerBranch := currentBranch + "_fkdecline"
-				for _, step := range []struct {
-					query string
-					args  []any
-				}{
-					{"CREATE TABLE cpd_parent (id VARCHAR(32) PRIMARY KEY)", nil},
-					{"CREATE TABLE cpd_child (id VARCHAR(32) PRIMARY KEY, parent_id VARCHAR(32), " +
-						"CONSTRAINT fk_cpd_child_parent FOREIGN KEY (parent_id) REFERENCES cpd_parent (id))", nil},
-					{"INSERT INTO cpd_parent (id) VALUES ('p1')", nil},
-					{"CALL DOLT_COMMIT('-Am', 'seed cpd tables')", nil},
-					{"CALL DOLT_BRANCH(?, 'HEAD')", []any{peerBranch}},
-					{"DELETE FROM cpd_parent WHERE id = 'p1'", nil},
-					{"CALL DOLT_COMMIT('-Am', 'delete parent')", nil},
-					{"CALL DOLT_CHECKOUT(?)", []any{peerBranch}},
-					{"INSERT INTO cpd_child (id, parent_id) VALUES ('c1', 'p1')", nil},
-					{"CALL DOLT_COMMIT('-Am', 'peer adds child')", nil},
-					{"CALL DOLT_CHECKOUT(?)", []any{currentBranch}},
-				} {
-					if _, err := db.ExecContext(ctx, step.query, step.args...); err != nil {
-						t.Fatalf("%s: %v", step.query, err)
-					}
-				}
-				t.Cleanup(func() {
-					db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", currentBranch)
-					db.ExecContext(ctx, "CALL DOLT_BRANCH('-Df', ?)", peerBranch)
-				})
-				preHead := readHead(ctx, t, db)
-				persistPeerMerge(ctx, t, db, peerBranch, true)
-				var violating string
-				if err := db.QueryRowContext(ctx,
-					"SELECT `table` FROM dolt_constraint_violations WHERE num_violations > 0").Scan(&violating); err != nil {
-					t.Fatalf("precondition: read violating table: %v", err)
-				}
-				if violating != "cpd_child" {
-					t.Fatalf("precondition: violating table = %q, want cpd_child", violating)
-				}
-
-				err := store.finishCLIPull(ctx, tc.pullErr)
-				if err == nil {
-					t.Fatal("finishCLIPull = nil for an unrepairable FK violation")
-				}
-				var mce *versioncontrolops.MergeConflictsError
-				if errors.As(err, &mce) {
-					t.Fatalf("finishCLIPull = %v; FK violations without row conflicts are not a MergeConflictsError", err)
-				}
-				if tc.pullErr != nil && !errors.Is(err, tc.pullErr) {
-					t.Fatalf("finishCLIPull error %v does not wrap the pull's error %v", err, tc.pullErr)
-				}
-				for _, want := range []string{"constraint violations", "cpd_child", "merge aborted"} {
-					if !strings.Contains(err.Error(), want) {
-						t.Fatalf("finishCLIPull error %q does not mention %q", err, want)
-					}
-				}
-				assertMergeAborted(ctx, t, db, preHead)
-				var childRows int
-				if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM cpd_child").Scan(&childRows); err != nil {
-					t.Fatalf("count child rows after the abort: %v", err)
-				}
-				if childRows != 0 {
-					t.Fatalf("%d cpd_child row(s) survive the abort; want the pre-pull working set restored", childRows)
-				}
-			})
+		_, err := mergeAsCLIPull(ctx, t, store, peerBranch)
+		if err == nil {
+			t.Fatal("merge = nil for an unrepairable FK violation")
+		}
+		var mce *versioncontrolops.MergeConflictsError
+		if errors.As(err, &mce) {
+			t.Fatalf("merge = %v; FK violations without row conflicts are not a MergeConflictsError", err)
+		}
+		if !strings.Contains(err.Error(), "constraint violations") {
+			t.Fatalf("merge error %q does not mention the constraint violations", err)
+		}
+		assertMergeAborted(ctx, t, db, preHead)
+		var childRows int
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM cpd_child").Scan(&childRows); err != nil {
+			t.Fatalf("count child rows after the rollback: %v", err)
+		}
+		if childRows != 0 {
+			t.Fatalf("%d cpd_child row(s) survive the rollback; want the pre-pull working set", childRows)
 		}
 	})
 
@@ -268,17 +279,61 @@ func TestCLIPullDeclinedSettlement(t *testing.T) {
 			db.ExecContext(ctx, "CALL DOLT_BRANCH('-Df', ?)", peerBranch)
 		})
 		preHead := readHead(ctx, t, db)
-		persistPeerMerge(ctx, t, db, peerBranch, true)
 
-		err := store.finishCLIPull(ctx, nil)
+		_, err := mergeAsCLIPull(ctx, t, store, peerBranch)
 		var mce *versioncontrolops.MergeConflictsError
 		if !errors.As(err, &mce) {
-			t.Fatalf("finishCLIPull = %v, want *MergeConflictsError for the declined edge", err)
+			t.Fatalf("merge = %v, want *MergeConflictsError for the declined edge", err)
 		}
 		if !slices.Contains(declinedTables(mce.Conflicts), "dependencies") {
 			t.Fatalf("MergeConflictsError names %v, want dependencies", declinedTables(mce.Conflicts))
 		}
 		// The FK repair must not settle the merge around the declined conflict.
 		assertMergeAborted(ctx, t, db, preHead)
+	})
+
+	t.Run("declined merge another client opened is left alone", func(t *testing.T) {
+		// The merge open in the working set is the fixture's merge of a local
+		// branch, another client's work: the pull, which merges origin's main,
+		// must refuse before it merges anything. Its conflicts must survive,
+		// unaborted.
+		store, peerBranch := setupDependencyMergeConflict(t, "blocks", "alice", "related", "alice")
+		ctx, cancel := testContext(t)
+		defer cancel()
+		db := store.db
+		preHead := readHead(ctx, t, db)
+		persistPeerMerge(ctx, t, db, peerBranch, false)
+
+		_, err := mergeAsCLIPull(ctx, t, store, "origin/main")
+		assertOtherClientsMergeLeftAlone(ctx, t, db, preHead, err, peerBranch)
+		if _, err := db.ExecContext(ctx, "CALL DOLT_MERGE('--abort')"); err != nil {
+			t.Fatalf("clean up the fixture merge: %v", err)
+		}
+	})
+
+	t.Run("auto-resolvable merge another client opened is not settled", func(t *testing.T) {
+		// An audit-only edge conflict the resolver settles on its own when the
+		// pull's own merge raises it (TestCLIPullMergeAutoResolvesAuditOnlyDependency):
+		// in another client's open merge it is that client's to settle, so the
+		// pull must not resolve and commit it either.
+		store, peerBranch := setupDependencyMergeConflict(t, "blocks", "alice", "blocks", "bob")
+		ctx, cancel := testContext(t)
+		defer cancel()
+		db := store.db
+		preHead := readHead(ctx, t, db)
+		persistPeerMerge(ctx, t, db, peerBranch, false)
+		var n int
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_conflicts_dependencies").Scan(&n); err != nil {
+			t.Fatalf("count dependency conflicts: %v", err)
+		}
+		if n == 0 {
+			t.Skip("merge auto-resolved without persisted conflicts — nothing for the pull to leave alone")
+		}
+
+		_, err := mergeAsCLIPull(ctx, t, store, "origin/main")
+		assertOtherClientsMergeLeftAlone(ctx, t, db, preHead, err, peerBranch)
+		if _, err := db.ExecContext(ctx, "CALL DOLT_MERGE('--abort')"); err != nil {
+			t.Fatalf("clean up the fixture merge: %v", err)
+		}
 	})
 }

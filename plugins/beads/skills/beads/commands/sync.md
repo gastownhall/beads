@@ -45,7 +45,7 @@ pull itself opened is aborted and the working set restored, on every pull route,
 so there are no conflict rows to resolve: reconcile the two histories by merging
 the fetched remote branch with an explicit side,
 `bd vc merge <remote>/<branch> --strategy ours|theirs`, then sync again. A merge
-bd did not abort — already open, or an abort it could not confirm — stays
+bd did not open — another client's, already open in the working set — stays
 **live** for `bd conflicts resolve`. A conflict that was already live when sync
 started — from an earlier halted sync or a hand-run merge — halts before the pull
 instead, and says that too.

@@ -164,7 +164,6 @@ go_test(
         "claim_wrapper_smoke_test.go",
         "claimer_contract_test.go",
         "cli_mirror_ref_test.go",
-        "cli_pull_commit_boundary_test.go",
         "cli_pull_decline_integration_test.go",
         "cli_pull_decline_test.go",
         "cli_pull_settlement_safety_test.go",

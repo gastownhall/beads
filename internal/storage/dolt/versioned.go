@@ -283,8 +283,7 @@ func (s *DoltStore) GetMergeBlockers(ctx context.Context) (storage.MergeBlockers
 // land on a different connection that never saw them.
 // The flags it sets are session-scoped, so they are reset before the
 // connection goes back to the pool; if the reset fails the connection is
-// discarded rather than returned dirty (the discipline
-// autoResolveConflictsAfterCLIPull already follows, store.go:3323).
+// discarded rather than returned dirty.
 func (s *DoltStore) ResolveConflictRows(ctx context.Context, table string, keys []string, strategy string) (int, error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {

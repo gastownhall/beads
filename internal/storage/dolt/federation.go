@@ -98,7 +98,7 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 
 	// bd-578h9.3: every peer-pull route funnels through the same settle
 	// machinery as the default-remote pull (pullTransport): the CLI routes
-	// through finishCLIPull, the SQL route through pullWithAutoResolve. A bare
+	// through runCLIPull, the SQL route through pullWithAutoResolve. A bare
 	// peer pull used to leave non-convergent merges behind — an FK
 	// delete-vs-insert divergence rolls the merge back with nothing in
 	// dolt_conflicts, and mixed-vintage schema_migrations rows conflict on
@@ -109,7 +109,7 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 		return nil, routeErr
 	} else if useCLI {
 		err = s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
-			pullErr := s.runCLIPull(ctx, func() error { return s.doltCLIPullFromPeer(ctx, peer, creds) })
+			_, pullErr := s.runCLIPull(ctx, peer, func() error { return s.doltCLIFetchBranch(ctx, "fetch from peer "+peer, peer, creds) })
 			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
 		})
 		return s.finishPeerPull(ctx, conflicts, err, preHead)
@@ -119,7 +119,7 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 		if useCLI, err := s.prepareCLIRouteForPeerCredentials(ctx, peer, creds); err != nil {
 			return err
 		} else if useCLI {
-			pullErr := s.runCLIPull(ctx, func() error { return s.doltCLIPullFromPeer(ctx, peer, creds) })
+			_, pullErr := s.runCLIPull(ctx, peer, func() error { return s.doltCLIFetchBranch(ctx, "fetch from peer "+peer, peer, creds) })
 			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
 		}
 		return withEnvCredentials(creds, func() error {
@@ -132,12 +132,12 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 
 // peerPullOutcome converts a settled peer pull's result into PullFrom's
 // contract: conflicts the settle machinery could not auto-resolve are returned
-// as data for the caller, anything else stays an error. Both routes abort a
-// conflicted merge they opened, so those conflicts arrive only via
-// MergeConflictsError, captured before the rollback (bd-578h9.15) or, on the
-// CLI route, before the abort (GH#7839). GetConflicts still finds a merge the
-// CLI route left open: one already open before the pull, or one whose abort
-// could not be confirmed.
+// as data for the caller, anything else stays an error. Both routes merge in
+// bd's own transaction and roll a conflicted merge back, so those conflicts
+// arrive only via MergeConflictsError, captured before the rollback
+// (bd-578h9.15; on the CLI route since GH#7839). GetConflicts still finds a
+// merge another client left open in the working set, which a pull neither
+// settles nor aborts.
 func (s *DoltStore) peerPullOutcome(ctx context.Context, peer string, pullErr error, conflicts *[]storage.Conflict) error {
 	if pullErr == nil {
 		return nil
@@ -719,22 +719,6 @@ func (s *DoltStore) doltCLIPushRefToPeer(ctx context.Context, peer string, refsp
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return cliTransferError(fmt.Sprintf("push to peer %s", peer), peer, transferCtx, out, err)
-	}
-	return nil
-}
-
-// doltCLIPullFromPeer shells out to `dolt pull` for a specific peer remote.
-// Used for git-protocol remotes where CALL DOLT_PULL times out through the SQL connection.
-// Credentials are set on the subprocess environment only via cmd.Env.
-func (s *DoltStore) doltCLIPullFromPeer(ctx context.Context, peer string, creds *remoteCredentials) error {
-	cmd, transferCtx, cancel, err := s.prepareDoltCLITransfer(ctx, peer, creds, "pull", peer, s.branch)
-	if err != nil {
-		return err
-	}
-	defer cancel()
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return cliTransferError(fmt.Sprintf("pull from peer %s", peer), peer, transferCtx, out, err)
 	}
 	return nil
 }
