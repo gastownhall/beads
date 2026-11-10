@@ -76,6 +76,7 @@
 
 100 20 TestEmbeddedInitRoleRoutingRetainedFork
 100 20 TestEmbeddedMigrateSchema_IdentityMismatchRefusesBeforeApplying
+100 20 TestEmbeddedWispGCAgeForceDeletesSelection
 
 100 21 TestEmbeddedArrivalSeqOnEveryJSONRead
 100 21 TestEmbeddedConfigGetIsReadOnly

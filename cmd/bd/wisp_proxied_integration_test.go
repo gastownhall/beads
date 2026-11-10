@@ -333,6 +333,42 @@ func TestProxiedServerWispGC(t *testing.T) {
 		}
 	})
 
+	t.Run("age_force_with_dry_run_deletes_nothing", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "wgd")
+		abandoned := bdProxiedCreate(t, bd, p.dir, "Abandoned wisp", "--ephemeral")
+
+		db := openProxiedDB(t, p)
+		if _, err := db.Exec("UPDATE wisps SET updated_at = ? WHERE id = ?",
+			time.Now().UTC().Add(-2*time.Hour), abandoned.ID); err != nil {
+			t.Fatalf("backdate wisp: %v", err)
+		}
+
+		out, err := bdProxiedRun(t, bd, p.dir, "mol", "wisp", "gc", "--age", "1h", "--force", "--dry-run", "--json")
+		if err != nil {
+			t.Fatalf("bd mol wisp gc --age 1h --force --dry-run --json: %v\n%s", err, out)
+		}
+		var got struct {
+			CleanedIDs   []string `json:"cleaned_ids"`
+			DryRun       bool     `json:"dry_run"`
+			DeletedCount int      `json:"deleted_count"`
+		}
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("unmarshal: %v\n%s", err, out)
+		}
+		if !got.DryRun || got.DeletedCount != 0 || len(got.CleanedIDs) != 1 || got.CleanedIDs[0] != abandoned.ID {
+			t.Errorf("--force --dry-run = %+v, want a preview naming only %s", got, abandoned.ID)
+		}
+
+		var count int
+		if err := db.QueryRow("SELECT COUNT(*) FROM wisps WHERE id = ?", abandoned.ID).Scan(&count); err != nil {
+			t.Fatalf("query wisp: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("--force --dry-run deleted %s", abandoned.ID)
+		}
+	})
+
 	t.Run("cascade_respects_age_for_dependent_step_wisps", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "wgc")
