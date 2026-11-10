@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/remedy"
@@ -45,10 +46,23 @@ func resolveMetadatalessEmbeddedDatabase(beadsDir string) (metadatalessDatabaseS
 // names them) and the BEADS_DOLT_SERVER_DATABASE value (override).
 //
 // Several databases and no override name nothing safe to open, not even when
-// one of them is the default: it is refused, before any database opens.
+// one of them is the default, and an override that names none of the
+// databases the workspace holds would create another beside them: both are
+// refused, before any database opens. An override is matched as written,
+// then as sanitizeDBName spells it, and selects the database as it is named
+// on disk, so no open maps an existing database to a different, missing one.
 func selectMetadatalessEmbeddedDatabase(beadsDir string, existing []string, override string) (metadatalessDatabaseSelection, error) {
 	if override != "" {
-		return metadatalessDatabaseSelection{Database: override, Source: metadatalessDatabaseFromEnv}, nil
+		if len(existing) == 0 {
+			return metadatalessDatabaseSelection{Database: override, Source: metadatalessDatabaseFromEnv}, nil
+		}
+		for _, name := range []string{override, sanitizeDBName(override)} {
+			if slices.Contains(existing, name) {
+				return metadatalessDatabaseSelection{Database: name, Source: metadatalessDatabaseFromEnv}, nil
+			}
+		}
+		return metadatalessDatabaseSelection{}, fmt.Errorf("BEADS_DOLT_SERVER_DATABASE=%s names none of the databases in %s (%s), which has no %s; refusing to create another.\n%s",
+			remedy.PrintedValue(override), remedy.PrintedValue(beadsDir), remedy.PrintedList(existing, ", "), configfile.ConfigFileName, metadatalessSelectionRemedy(beadsDir))
 	}
 	switch len(existing) {
 	case 0:

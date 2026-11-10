@@ -223,3 +223,66 @@ func TestEmbeddedMetadatalessWorkspaceRefusesSeveralDatabases(t *testing.T) {
 		}
 	}
 }
+
+// TestEmbeddedMetadatalessWorkspaceEnvVarSelectsDatabase: in a workspace that
+// lost metadata.json, BEADS_DOLT_SERVER_DATABASE selects one of the databases
+// it holds, for the identity preview and the real open alike, and one it does
+// not hold is refused rather than created.
+func TestEmbeddedMetadatalessWorkspaceEnvVarSelectsDatabase(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	bd := buildEmbeddedBD(t)
+
+	t.Run("matching", func(t *testing.T) {
+		dir, beadsDir, saved, ownID, secondID := severalDatabasesFixture(t, bd, "second")
+		env := []string{"BEADS_DOLT_SERVER_DATABASE=second"}
+
+		run := runBDMetadataless(t, bd, dir, env, "list", "--json")
+		if run.err != nil {
+			t.Fatalf("bd list --json failed: %v\nstdout:\n%s\nstderr:\n%s", run.err, run.stdout, run.stderr)
+		}
+		if !strings.Contains(run.stdout, `"`+secondID+`"`) || strings.Contains(run.stdout, `"`+ownID+`"`) {
+			t.Fatalf("bd list --json did not read the selected database \"second\":\n%s", run.stdout)
+		}
+		if !strings.Contains(run.stderr, `"second"`) || !strings.Contains(run.stderr, "BEADS_DOLT_SERVER_DATABASE") {
+			t.Fatalf("stderr does not name the selected database and its source:\n%s", run.stderr)
+		}
+
+		run = runBDMetadataless(t, bd, dir, env, "close", secondID)
+		if run.err != nil {
+			t.Fatalf("bd close %s failed: %v\nstdout:\n%s\nstderr:\n%s", secondID, run.err, run.stdout, run.stderr)
+		}
+		assertEmbeddedDatabases(t, beadsDir, "gh4135", "second")
+		assertMetadataAbsent(t, beadsDir)
+
+		restoreMetadata(t, beadsDir, saved)
+		assertIssueStatusIn(t, bd, dir, "second", secondID, "closed")
+		assertIssueStatusIn(t, bd, dir, "gh4135", ownID, "open")
+	})
+
+	t.Run("nonmatching", func(t *testing.T) {
+		dir, beadsDir, saved, ownID, secondID := severalDatabasesFixture(t, bd, "second")
+		env := []string{"BEADS_DOLT_SERVER_DATABASE=missing"}
+
+		for _, args := range [][]string{{"list", "--json"}, {"close", ownID, "--json"}} {
+			run := runBDMetadataless(t, bd, dir, env, args...)
+			if run.err == nil {
+				t.Fatalf("bd %s succeeded with an override naming no database:\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), run.stdout, run.stderr)
+			}
+			if strings.TrimSpace(run.stdout) != "" {
+				t.Fatalf("refused bd %s printed a payload:\n%s", strings.Join(args, " "), run.stdout)
+			}
+			for _, want := range []string{"BEADS_DOLT_SERVER_DATABASE=missing", "gh4135", "second"} {
+				if !strings.Contains(run.stderr, want) {
+					t.Fatalf("refusal of bd %s does not mention %q:\n%s", strings.Join(args, " "), want, run.stderr)
+				}
+			}
+			assertEmbeddedDatabases(t, beadsDir, "gh4135", "second")
+		}
+
+		restoreMetadata(t, beadsDir, saved)
+		assertIssueStatusIn(t, bd, dir, "gh4135", ownID, "open")
+		assertIssueStatusIn(t, bd, dir, "second", secondID, "open")
+	})
+}
