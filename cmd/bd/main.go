@@ -2157,6 +2157,7 @@ var rootCmd = &cobra.Command{
 		// never consulted it. IsDoltServerMode is a superset of
 		// HostImpliesServerMode, so nothing that reached server mode before
 		// stops reaching it now.
+		metadataAbsent := false
 		if cfg == nil && configfile.DefaultConfig().IsDoltServerMode() {
 			logConfigDiscovery(beadsDir, "no metadata.json; env/config.yaml select server mode")
 			cfg = configfile.DefaultConfig()
@@ -2194,14 +2195,9 @@ var rootCmd = &cobra.Command{
 			}
 		} else if cfgErr == nil {
 			logConfigDiscovery(beadsDir, "config discovery")
-			// Load returned (nil, nil) — no config file found.
-			// Fall back to the canonical default database name; matches the
-			// behavior of newDoltStoreFromConfig / newReadOnlyStoreFromConfig
-			// (see store_factory.go). Without this, embeddeddolt.New rejects
-			// the empty database name with "database name must not be empty
-			// (caller should default to \"beads\")".
-			fmt.Fprintf(os.Stderr, "warning: no beads configuration found in %s; using default database name %q\n", beadsDir, configfile.DefaultDoltDatabase)
-			doltCfg.Database = configfile.DefaultDoltDatabase
+			// Load returned (nil, nil) — no config file found. The database
+			// is named below, once shared-server mode has had its say.
+			metadataAbsent = true
 		}
 		// Honor shared-server mode even when no project config was found
 		// (cfg == nil) or the parse failed. The override inside the
@@ -2216,6 +2212,24 @@ var rootCmd = &cobra.Command{
 			if cmdCtx != nil {
 				cmdCtx.ServerMode = doltCfg.ServerMode
 			}
+		}
+		if metadataAbsent {
+			// An embedded workspace without metadata.json opens the database
+			// resolveMetadatalessEmbeddedDatabase names — the same one the
+			// identity preview and the store factories resolve — rather than
+			// the literal default, which created a second database beside
+			// the workspace's own (GH#4135). Server mode keeps the default
+			// name. Without a name embeddeddolt.New rejects the open with
+			// "database name must not be empty".
+			selection := metadatalessDatabaseSelection{Database: configfile.DefaultDoltDatabase, Source: "the default"}
+			if !doltCfg.ServerMode && !doltCfg.ProxiedServer {
+				var err error
+				if selection, err = resolveMetadatalessEmbeddedDatabase(beadsDir); err != nil {
+					return HandleError("%v", err)
+				}
+			}
+			fmt.Fprintf(os.Stderr, "warning: no beads configuration found in %s; using database %q (%s)\n", remedy.PrintedValue(beadsDir), selection.Database, selection.Source)
+			doltCfg.Database = selection.Database
 		}
 		// Defensive: embeddeddolt.New rejects an empty database name, so
 		// default it even on paths that never set one.
