@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	storeissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
@@ -209,6 +210,10 @@ Force: Delete and orphan dependents
 
 		commandDidWrite.Store(true)
 
+		if routedResult.RedirectedCopy {
+			printRetainedCopyNote(issueID, routedResult.RedirectedCopyOwner)
+		}
+
 		// NO COMMIT COMPENSATION HERE. The role versions its own deletion on
 		// every backend now, including the embedded one, which publishes the
 		// entry after its SQL commit — and it does so on the store the rows
@@ -378,6 +383,7 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 	issues := make(map[string]*types.Issue)
 	resolvedIDs := make([]string, 0, len(issueIDs))
 	notFound := []string{}
+	retainedCopies := []retainedCopy{}
 	var routedStore storage.DoltStorage
 	for _, id := range issueIDs {
 		result, err := resolveAndGetIssueForMutationExact(ctx, store, id)
@@ -392,6 +398,9 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 		} else {
 			issues[result.ResolvedID] = result.Issue
 			resolvedIDs = append(resolvedIDs, result.ResolvedID)
+			if result.RedirectedCopy {
+				retainedCopies = append(retainedCopies, retainedCopy{id: result.ResolvedID, owner: result.RedirectedCopyOwner})
+			}
 			if result.Routed && routedStore == nil {
 				routedStore = result.Store
 			} else {
@@ -486,6 +495,12 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 
 	commandDidWrite.Store(true)
 
+	// A delete redirected from a hydrated copy removed the owner's row only;
+	// tell the user which copy that leaves behind, one note per deleted copy.
+	for _, c := range retainedCopies {
+		printRetainedCopyNote(c.id, c.owner)
+	}
+
 	// Tell this command's own auto-export that these ids are supposed to be
 	// gone. Without it the export's orphan guard sees them as JSONL-only
 	// records absent from the store, refuses to overwrite, and never saves
@@ -535,6 +550,33 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 		}
 	}
 	return nil
+}
+
+// retainedCopy records one id whose delete was redirected from a hydrated
+// project copy to the auto-route owner: the id, and the owner store whose row
+// the delete actually removed. The note about the copy this leaves behind is
+// printed after the delete commits, one per id.
+type retainedCopy struct {
+	id    string
+	owner string
+}
+
+// printRetainedCopyNote tells the user that a delete redirected from a
+// hydrated copy removed the owner's row only, and names the copy it leaves
+// behind. Without it the copy looks deleted from this command while `bd list`
+// (which stays local) keeps showing it — the same silent-split confusion
+// GH#6058 is about, one delete later.
+//
+// Suppressed by --quiet like every other non-error stderr note in this
+// package (see printContributorRoutingNotice), and never in --json, where
+// callers parse stdout and the delete result already carries the truth.
+func printRetainedCopyNote(issueID, ownerPath string) {
+	if isQuiet() || jsonOutput {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "note: deleted %s from the auto-routed store at %s; the copy this project holds of it remains\n",
+		printedIssueID(issueID), remedy.PrintedValue(ownerPath))
+	fmt.Fprintf(os.Stderr, "  The copy is local data now: bd delete %s --force here deletes it\n", printedIssueID(issueID))
 }
 
 // outputDeletionPreview renders a deletion preview without exposing issue
