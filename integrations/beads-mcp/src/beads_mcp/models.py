@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Type aliases for issue statuses, types, and dependencies
 #
@@ -183,6 +183,23 @@ class Issue(IssueBase):
     comment_count: int | None = None
     comments_omitted: bool | None = None
     comments: list[Comment] | None = None
+
+    @model_validator(mode="after")
+    def _derive_comment_completeness(self) -> "Issue":
+        """Fill in missing completeness fields, never overwrite supplied ones.
+
+        A bodies array implies its own count (older CLIs omit comment_count),
+        and a known count says whether bodies were withheld when the CLI sent
+        none. Absent count and absent bodies stay unknown (None): this never
+        guesses, repairs inconsistent CLI data, or promises snapshot
+        consistency. Revalidation is idempotent — derived values are written
+        once and then treated as explicit.
+        """
+        if self.comment_count is None and self.comments is not None:
+            self.comment_count = len(self.comments)
+        if self.comments_omitted is None and self.comment_count is not None:
+            self.comments_omitted = self.comment_count > len(self.comments or [])
+        return self
 
 
 class Dependency(BaseModel):
