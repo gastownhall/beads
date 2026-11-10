@@ -67,15 +67,62 @@ func TestProxiedServerUpdate(t *testing.T) {
 		}
 	})
 
+	t.Run("notes_overwrite_requires_force", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "unf")
+		issue := bdProxiedCreate(t, bd, p.dir, "Notes force", "--notes", "original notes")
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir,
+			"update", "--json", issue.ID, "--notes", "replacement notes")
+		if err == nil {
+			t.Fatalf("expected --notes overwrite without --force to fail\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		wantErr := wantNotesRefusal(issue.ID)
+		if !strings.Contains(stderr, wantErr) {
+			t.Errorf("expected stderr to contain %q, got: %s", wantErr, stderr)
+		}
+		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Notes != "original notes" {
+			t.Errorf("notes: got %q, want %q", got.Notes, "original notes")
+		}
+	})
+
+	t.Run("notes_overwrite_with_if_assignee_requires_force", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "unfa")
+		issue := bdProxiedCreate(t, bd, p.dir, "Notes force if-assignee", "--notes", "original notes")
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir,
+			"update", "--json", issue.ID, "--if-assignee", "", "--notes", "replacement notes")
+		if err == nil {
+			t.Fatalf("expected --notes overwrite without --force to fail\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		wantErr := wantNotesRefusal(issue.ID)
+		if !strings.Contains(stderr, wantErr) {
+			t.Errorf("expected stderr to contain %q, got: %s", wantErr, stderr)
+		}
+		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Notes != "original notes" {
+			t.Errorf("notes: got %q, want %q", got.Notes, "original notes")
+		}
+	})
+
+	t.Run("notes_overwrite_with_if_assignee_and_force_succeeds", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "unfaf")
+		issue := bdProxiedCreate(t, bd, p.dir, "Notes force if-assignee force", "--notes", "original notes")
+		updated := bdProxiedUpdateOne(t, bd, p.dir, issue.ID,
+			"--if-assignee", "", "--notes", "replacement notes", "--force")
+		if updated.Notes != "replacement notes" {
+			t.Errorf("notes: got %q, want %q", updated.Notes, "replacement notes")
+		}
+	})
+
 	t.Run("notes_overwrite_warns_on_stderr", func(t *testing.T) {
 		p := bdProxiedInit(t, bd, "unw")
 		issue := bdProxiedCreate(t, bd, p.dir, "Notes overwrite", "--notes", "original notes")
 		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir,
-			"update", "--json", issue.ID, "--notes", "replacement notes")
+			"update", "--json", issue.ID, "--notes", "replacement notes", "--force")
 		if err != nil {
 			t.Fatalf("overwrite notes: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 		}
-		warning := fmt.Sprintf("warning: %s: --notes replaced existing notes (use --append-notes to preserve history)", issue.ID)
+		warning := fmt.Sprintf("warning: %s: --force replaced existing notes (--append-notes preserves history)", issue.ID)
 		if !strings.Contains(stderr, warning) {
 			t.Errorf("expected stderr to contain %q, got: %s", warning, stderr)
 		}
@@ -84,6 +131,30 @@ func TestProxiedServerUpdate(t *testing.T) {
 		}
 		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Notes != "replacement notes" {
 			t.Errorf("notes: got %q, want %q", got.Notes, "replacement notes")
+		}
+	})
+
+	t.Run("empty_notes_refused_clear_notes_clears", func(t *testing.T) {
+		// GH#6021 on the proxied route: the empty-notes refusal fires in
+		// gatherUpdateInput, before any request leaves the CLI, and the
+		// --clear-notes verb (not --force) authorizes the erase.
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "unc")
+		issue := bdProxiedCreate(t, bd, p.dir, "Notes clear guard", "--notes", "original notes")
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir,
+			"update", issue.ID, "--notes", "")
+		if err == nil {
+			t.Fatalf("expected --notes \"\" to fail\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if !strings.Contains(stderr, "--clear-notes") {
+			t.Errorf("expected stderr to name --clear-notes, got: %s", stderr)
+		}
+		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Notes != "original notes" {
+			t.Errorf("notes: got %q, want %q", got.Notes, "original notes")
+		}
+		updated := bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--clear-notes")
+		if updated.Notes != "" {
+			t.Errorf("notes: got %q, want cleared", updated.Notes)
 		}
 	})
 
@@ -142,6 +213,14 @@ func TestProxiedServerUpdate(t *testing.T) {
 			t.Errorf("lost issue %s assignee = %q, want alice (unchanged)", lost.ID, gotLost.Assignee)
 		}
 	})
+}
+
+// TestProxiedServerUpdateB holds more of TestProxiedServerUpdate's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerUpdateB(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	// Parity with the non-proxied TestMultiIDUpdatePartialFailureExitsNonzero:
 	// a generic per-ID failure (a bogus ID) between two good IDs must exit
@@ -217,6 +296,54 @@ func TestProxiedServerUpdate(t *testing.T) {
 		}
 		if len(report.Failed) != 1 || report.Failed[0].ID != bogus {
 			t.Errorf("JSON failure report failed list = %+v, want exactly one entry for %s", report.Failed, bogus)
+		}
+	})
+
+	// A refused --claim under --json on the proxied path: the batch report is
+	// the only JSON document the command prints, and its failed entry names the
+	// already-claimed class and the holder — the direct route's contract,
+	// pinned by protocol.TestProtocol_ErrorClass_ClaimFailures_StructuredJSON
+	// (wy-kxgf4).
+	t.Run("claim_conflict_json_reports_holder_in_failed_entry", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "uccj")
+		issue := bdProxiedCreate(t, bd, p.dir, "Contested JSON")
+		bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--claim", "--actor", "alice")
+
+		stdout, stderr, err := bdProxiedUpdateRaw(t, bd, p.dir, "--json", issue.ID, "--claim", "--actor", "bob")
+		if err == nil {
+			t.Fatalf("proxied --json claim of an issue alice holds exited 0, want non-zero\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+
+		// A JSON document starts at column 0, whether compact or indented, so
+		// count those lines across both streams: one, not one per refusal.
+		docs := 0
+		for _, line := range strings.Split(stdout+"\n"+stderr, "\n") {
+			if strings.HasPrefix(line, "{") {
+				docs++
+			}
+		}
+		if docs != 1 {
+			t.Errorf("output carries %d JSON documents, want exactly 1 (the batch report)\nstdout:\n%s\nstderr:\n%s", docs, stdout, stderr)
+		}
+
+		lines := strings.Split(strings.TrimSpace(stderr), "\n")
+		last := lines[len(lines)-1]
+		var report struct {
+			Error  string `json:"error"`
+			Failed []struct {
+				ID    string `json:"id"`
+				Error string `json:"error"`
+			} `json:"failed"`
+		}
+		if uerr := json.Unmarshal([]byte(last), &report); uerr != nil {
+			t.Fatalf("last stderr line is not a JSON failure report: %v\nstderr:\n%s", uerr, stderr)
+		}
+		if len(report.Failed) != 1 || report.Failed[0].ID != issue.ID {
+			t.Fatalf("JSON failure report failed list = %+v, want exactly one entry for %s", report.Failed, issue.ID)
+		}
+		if msg := report.Failed[0].Error; !strings.Contains(msg, "already claimed") || !strings.Contains(msg, "alice") {
+			t.Errorf("failed entry error = %q, want the already-claimed class naming the holder alice", msg)
 		}
 	})
 
@@ -308,6 +435,14 @@ func TestProxiedServerUpdate(t *testing.T) {
 			t.Errorf("dependent should be unblocked after blocker closes")
 		}
 	})
+}
+
+// TestProxiedServerUpdateC holds more of TestProxiedServerUpdate's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerUpdateC(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("invalid_status_rejected", func(t *testing.T) {
 		t.Parallel()
@@ -441,7 +576,6 @@ func TestProxiedServerUpdate(t *testing.T) {
 				before, after)
 		}
 	})
-
 }
 
 func TestProxiedServerUpdate2(t *testing.T) {
@@ -537,14 +671,15 @@ func TestProxiedServerUpdate2(t *testing.T) {
 		db := openProxiedDB(t, p)
 		bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--no-history")
 
-		var noHistory int
-		if err := db.QueryRowContext(context.Background(),
-			"SELECT no_history FROM issues WHERE id = ?", issue.ID).Scan(&noHistory); err != nil {
-			t.Fatalf("read no_history: %v", err)
+		// --no-history selects a WISP RETENTION MODE, so the aggregate moves to
+		// the ephemeral plane rather than flipping a column on the durable row
+		// (issueops.IssuePatch.Persistence). The proxied route flipped the
+		// column in place until it joined the contract, which left a durable
+		// row that the wisp-plane reads could not see (bd-xt6de).
+		if got := readPersistenceFlag(t, db, "wisps", "no_history", issue.ID); got != 1 {
+			t.Errorf("wisps.no_history: got %d, want 1 after --no-history", got)
 		}
-		if noHistory != 1 {
-			t.Errorf("no_history: got %d, want 1 after --no-history", noHistory)
-		}
+		assertRowAbsent(t, db, "issues", issue.ID)
 	})
 
 	t.Run("update_persistent", func(t *testing.T) {
@@ -565,6 +700,14 @@ func TestProxiedServerUpdate2(t *testing.T) {
 			t.Errorf("ephemeral: got %d, want 0 after --persistent", ephemeral)
 		}
 	})
+}
+
+// TestProxiedServerUpdate2B holds more of TestProxiedServerUpdate2's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerUpdate2B(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("update_ephemeral", func(t *testing.T) {
 		t.Parallel()
@@ -574,14 +717,12 @@ func TestProxiedServerUpdate2(t *testing.T) {
 		db := openProxiedDB(t, p)
 		bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--ephemeral")
 
-		var ephemeral int
-		if err := db.QueryRowContext(context.Background(),
-			"SELECT ephemeral FROM issues WHERE id = ?", issue.ID).Scan(&ephemeral); err != nil {
-			t.Fatalf("read ephemeral: %v", err)
+		// The demotion moves the aggregate to the wisp plane; see
+		// update_no_history above for the clause and the history.
+		if got := readPersistenceFlag(t, db, "wisps", "ephemeral", issue.ID); got != 1 {
+			t.Errorf("wisps.ephemeral: got %d, want 1 after --ephemeral", got)
 		}
-		if ephemeral != 1 {
-			t.Errorf("ephemeral: got %d, want 1 after --ephemeral", ephemeral)
-		}
+		assertRowAbsent(t, db, "issues", issue.ID)
 	})
 
 	t.Run("reopen_reblocks_dependents", func(t *testing.T) {
@@ -691,6 +832,14 @@ func TestProxiedServerUpdate2(t *testing.T) {
 			t.Errorf("metadata[keep]: got %v, want %q", got["keep"], "yes")
 		}
 	})
+}
+
+// TestProxiedServerUpdate2C holds more of TestProxiedServerUpdate2's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerUpdate2C(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("update_set_metadata", func(t *testing.T) {
 		t.Parallel()
@@ -707,8 +856,8 @@ func TestProxiedServerUpdate2(t *testing.T) {
 		if got["tier"] != "gold" {
 			t.Errorf("metadata[tier]: got %v, want %q", got["tier"], "gold")
 		}
-		if got["score"] != "99" {
-			t.Errorf("metadata[score]: got %v, want %q (--set-metadata always stores string values)", got["score"], "99")
+		if got["score"] != float64(99) {
+			t.Errorf("metadata[score]: got %#v, want the JSON number 99 (--set-metadata infers scalar types)", got["score"])
 		}
 	})
 
@@ -815,7 +964,6 @@ func TestProxiedServerUpdate2(t *testing.T) {
 			t.Errorf("defer_until: got nil, want non-nil (defer still applied)")
 		}
 	})
-
 }
 
 func TestProxiedServerUpdate3(t *testing.T) {
@@ -947,7 +1095,7 @@ func TestProxiedServerUpdate3(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "un")
 		issue := bdProxiedCreate(t, bd, p.dir, "Notes test", "--notes", "first")
-		updated := bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--notes", "replacement")
+		updated := bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--notes", "replacement", "--force")
 		if updated.Notes != "replacement" {
 			t.Errorf("notes: got %q, want %q", updated.Notes, "replacement")
 		}
@@ -1034,26 +1182,40 @@ func TestProxiedServerUpdateHooks(t *testing.T) {
 		}
 	})
 
-	t.Run("on_close_fires_when_status_transitions_to_closed", func(t *testing.T) {
+	// An update that CROSSES to closed fires on_update and nothing else, which
+	// is what `bd update -s closed` has always done on the embedded plumbing
+	// (HookFiringStore.UpdateIssue fires on_update; hookIssueOperations.Update
+	// fires the update hook). Proxied mode used to fire on_close as well, from
+	// a hook call wired into the update COMMAND rather than into the write
+	// plumbing. That call is gone: one firing site per plumbing, and the same
+	// events from both. `bd close` is what fires on_close.
+	t.Run("status_crossing_update_fires_on_update_only", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
-		markerPath := filepath.Join(dir, "on_close_marker")
-		hookBody := "#!/bin/sh\necho \"$1\" > " + markerPath + "\n"
+		updateMarker := filepath.Join(dir, "on_update_marker")
+		closeMarker := filepath.Join(dir, "on_close_marker")
 
 		p := newSharedProxiedProjectWithHooks(t, bd, "uphc", map[string]string{
-			"on_close": hookBody,
+			"on_update": "#!/bin/sh\necho \"$1\" > " + updateMarker + "\n",
+			"on_close":  "#!/bin/sh\necho \"$1\" > " + closeMarker + "\n",
 		})
 		issue := bdProxiedCreate(t, bd, p.dir, "Hook close test")
 
-		_ = os.Remove(markerPath)
+		_ = os.Remove(updateMarker)
+		_ = os.Remove(closeMarker)
 		bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "-s", "closed")
 
-		gotID, err := waitForMarker(markerPath, 5*time.Second)
+		gotID, err := waitForMarker(updateMarker, 5*time.Second)
 		if err != nil {
-			t.Fatalf("on_close hook did not fire within timeout: %v", err)
+			t.Fatalf("on_update hook did not fire within timeout: %v", err)
 		}
 		if strings.TrimSpace(gotID) != issue.ID {
-			t.Errorf("on_close marker: got %q, want issue ID %q", strings.TrimSpace(gotID), issue.ID)
+			t.Errorf("on_update marker: got %q, want issue ID %q", strings.TrimSpace(gotID), issue.ID)
+		}
+		// The update hook has landed, so anything the same command was going to
+		// fire has had its chance.
+		if data, err := os.ReadFile(closeMarker); err == nil {
+			t.Errorf("on_close fired for an update that crossed to closed: %q", string(data))
 		}
 	})
 }
@@ -1236,6 +1398,19 @@ func TestProxiedServerUpdateWisp(t *testing.T) {
 	})
 }
 
+// readPersistenceFlag reads one persistence column off whichever plane the row
+// lives on. A persistence change is an aggregate MOVE, so the column and the
+// table it is read from are one assertion, not two.
+func readPersistenceFlag(t *testing.T, db *sql.DB, table, column, id string) int {
+	t.Helper()
+	var got int
+	q := "SELECT " + column + " FROM " + table + " WHERE id = ?"
+	if err := db.QueryRowContext(context.Background(), q, id).Scan(&got); err != nil {
+		t.Fatalf("read %s.%s for %s: %v", table, column, id, err)
+	}
+	return got
+}
+
 func assertRowExists(t *testing.T, db *sql.DB, table, id string) {
 	t.Helper()
 	var count int
@@ -1363,12 +1538,13 @@ func TestProxiedServerUpdateConcurrentClaim(t *testing.T) {
 // the SAME issue. Every writer that exits 0 must have its key in the final
 // metadata, and the seed key must survive.
 //
-// Before the fix this route lost writes two ways: buildUpdateSpecForIssue
+// Before the fix this route lost writes two ways: the spec it built by hand
 // merged metadata from the unit of work's MVCC snapshot (erasing keys a
 // concurrent writer committed after the snapshot), and when Dolt's commit-time
 // merge rolled the loser back, uow.CommitWithRetries re-committed the
 // now-empty session — Dolt said "nothing to commit", the handler swallowed it,
-// printed "✓ Updated", and exited 0 with the write gone.
+// printed "✓ Updated", and exited 0 with the write gone. Both fixes now belong
+// to issueops.Lifecycle, which is what this route calls.
 func TestProxiedServerUpdateConcurrentMetadata(t *testing.T) {
 	requireProxiedServerEnv(t)
 	bd := buildEmbeddedBD(t)

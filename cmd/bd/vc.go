@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -147,7 +149,8 @@ Examples:
 			for _, conflict := range conflicts {
 				fmt.Printf("  - %s\n", conflict.Field)
 			}
-			fmt.Printf("\nResolve conflicts with: bd vc merge %s --strategy [ours|theirs]\n\n", branchName)
+			branch, note := remedy.CommandArg(runtime.GOOS, branchName, "<branch>")
+			fmt.Printf("\nResolve conflicts with: bd vc merge %s --strategy [ours|theirs]%s\n\n", branch, note)
 			return nil
 		}
 
@@ -179,7 +182,10 @@ Examples:
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if usesProxiedServer() {
-			return HandleErrorRespectJSON("vc commit is not supported in proxied-server mode")
+			// There IS a commit point on this route now — `bd dolt commit`
+			// is the proxied flush point dolt.auto-commit=batch/off defers
+			// to (GH#4995) — so name it rather than leaving a dead end.
+			return HandleErrorRespectJSON("vc commit is not supported in proxied-server mode; use 'bd dolt commit' instead")
 		}
 		evt := metrics.NewCommandEvent("vc-commit")
 		defer func() {
@@ -206,15 +212,28 @@ Examples:
 		}
 
 		commandDidExplicitDoltCommit = true
-		if err := store.Commit(ctx, vcCommitMessage); err != nil {
+		// CommitAll, not Commit: the explicit command promises "all current
+		// changes", so it must sweep in out-of-band writes (config above all,
+		// which server-mode Commit excludes per GH#2455) and must report an
+		// honest no-op instead of printing "Created commit" against the
+		// unchanged HEAD. Its committed bool is the atomic signal the old
+		// HEAD-before/HEAD-after comparison approximated (the mybd-z9h7j
+		// threading: CommitPending already had the shape), so the concurrent-
+		// writer misattribution race that comparison carried is gone.
+		committed, err := store.CommitAll(ctx, vcCommitMessage)
+		if err != nil {
 			if isDoltNothingToCommit(err) {
-				if jsonOutput {
-					return outputJSON(map[string]interface{}{"committed": false, "message": "nothing to commit"})
-				}
-				fmt.Println("Nothing to commit")
-				return nil
+				committed = false
+			} else {
+				return HandleErrorRespectJSON("failed to commit: %v", err)
 			}
-			return HandleErrorRespectJSON("failed to commit: %v", err)
+		}
+		if !committed {
+			if jsonOutput {
+				return outputJSON(map[string]interface{}{"committed": false, "message": "nothing to commit"})
+			}
+			fmt.Println("Nothing to commit")
+			return nil
 		}
 
 		hash, err := store.GetCurrentCommit(ctx)

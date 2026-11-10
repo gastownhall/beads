@@ -1,4 +1,7 @@
-//go:build e2e
+//go:build e2e || integration
+
+// Built under e2e (scripts/conformance.sh) or integration (Bazel's
+// --config=integration lane, //test/conformance:conformance_test).
 
 package conformance
 
@@ -15,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 // scenario is a named sequence of bd CLI invocations. IDs are pinned with --id so
@@ -86,7 +91,7 @@ var corpus = []scenario{
 		{"create", "st", "--id", "cf-st1", "-t", "task"},
 		{"stale", "--days", "1", "--json"},
 	}},
-	// Promote a wisp to a durable issue (PromoteFromEphemeral) — CLI-level differential
+	// Promote a wisp to a durable issue (issueops.Promote) — CLI-level differential
 	// for one of the backfilled writes.
 	{name: "promote", steps: [][]string{
 		{"create", "w", "--id", "cf-pw1", "-t", "task", "--ephemeral"},
@@ -205,16 +210,17 @@ var corpus = []scenario{
 		{"blocked", "--json"},
 	}},
 
-	// bd search --desc-contains (LOWER(description) LIKE) + default closed-exclusion.
-	// Lowercase 'endpoint' matches stored 'ENDPOINT' -> [cf-sd1]; plain search hides
-	// closed cf-sd3 -> []; --status all surfaces it -> [cf-sd3].
+	// bd search --desc-contains (LOWER(description) LIKE) + status defaulting.
+	// Lowercase 'endpoint' matches stored 'ENDPOINT' -> [cf-sd1]; plain search
+	// INCLUDES closed cf-sd3 by default (bd-t5yex) -> [cf-sd3]; --status open
+	// excludes it -> [].
 	{name: "search-desc-contains-and-status", steps: [][]string{
 		{"create", "alpha", "--id", "cf-sd1", "-t", "task", "--description", "Login ENDPOINT here"},
 		{"create", "gamma", "--id", "cf-sd3", "-t", "task"},
 		{"close", "cf-sd3"},
 		{"search", "alpha", "--desc-contains", "endpoint", "--json"},
 		{"search", "gamma", "--json"},
-		{"search", "gamma", "--status", "all", "--json"},
+		{"search", "gamma", "--status", "open", "--json"},
 	}},
 
 	// bd list --parent <id> --flat: non-recursive ParentID filter (deps parent-child
@@ -478,6 +484,12 @@ func TestMain(m *testing.M) {
 func buildBD(t *testing.T) string {
 	t.Helper()
 	buildOnce.Do(func() {
+		// Under Bazel the binary is injected (//cmd/bd:bd_for_tests); there is
+		// no toolchain or module tree to build from. Plain go test is unchanged.
+		if bazeltest.IsBazel() {
+			bdBin, bdErr = bazeltest.PrebuiltBD()
+			return
+		}
 		dir, err := os.MkdirTemp("", "bd-e2e")
 		if err != nil {
 			bdErr = fmt.Errorf("mkdir temp for bd binary: %v", err)

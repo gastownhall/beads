@@ -53,17 +53,23 @@ Examples:
 
 		beadsDir := resolveWhereBeadsDir(cmd)
 		if beadsDir == "" {
+			hint := whereDiagHint()
+			if note := skippedUserGlobalBeadsNote(); note != "" {
+				// GH#4402: name the user-level ~/.beads discovery passed
+				// over, in the hint both for text and --json output.
+				hint += "\n" + note
+			}
 			if jsonOutput {
 				if jerr := outputJSON(map[string]string{
 					"error":   "no_beads_directory",
 					"message": activeWorkspaceNotFoundMessage(),
-					"hint":    whereDiagHint(),
+					"hint":    hint,
 				}); jerr != nil {
 					return jerr
 				}
 				return SilentExit()
 			}
-			return HandleErrorWithHint(activeWorkspaceNotFoundMessage(), whereDiagHint())
+			return HandleErrorWithHint(activeWorkspaceNotFoundMessage(), hint)
 		}
 
 		result.Path = beadsDir
@@ -132,7 +138,7 @@ func shouldReadWherePrefixFromStore(beadsDir string) bool {
 		return false
 	}
 
-	cfg, err := configfile.Load(beadsDir)
+	cfg, err := configfile.LoadForDiscovery(beadsDir)
 	if err != nil || cfg == nil {
 		return true
 	}
@@ -170,8 +176,9 @@ func findOriginalBeadsDir() string {
 		}
 	}
 
-	// Walk up directory tree looking for .beads with redirect
-	for dir := cwd; dir != "/" && dir != "."; {
+	// Walk up directory tree looking for .beads with redirect.
+	walk := beads.NewAncestorDirWalk(cwd, cwd)
+	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			redirectFile := filepath.Join(beadsDir, beads.RedirectFileName)
@@ -182,15 +189,6 @@ func findOriginalBeadsDir() string {
 			return ""
 		}
 
-		// Move up one directory
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			// Reached filesystem root (works on both Unix and Windows)
-			// On Unix: filepath.Dir("/") returns "/"
-			// On Windows: filepath.Dir("C:\\") returns "C:\\"
-			break
-		}
-		dir = parent
 	}
 
 	return ""

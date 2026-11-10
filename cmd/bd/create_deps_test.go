@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -11,10 +13,11 @@ import (
 
 func TestParseDepSpecs(t *testing.T) {
 	tests := []struct {
-		name    string
-		in      []string
-		want    []domain.DependencySpec
-		wantErr bool
+		name              string
+		in                []string
+		want              []domain.DependencySpec
+		wantErr           bool
+		wantErrSubstrings []string
 	}{
 		{
 			name: "empty input",
@@ -78,9 +81,10 @@ func TestParseDepSpecs(t *testing.T) {
 			},
 		},
 		{
-			name:    "unknown type rejected",
-			in:      []string{"nonsense:bd-1"},
-			wantErr: true,
+			name:              "unknown type rejected",
+			in:                []string{"nonsense:bd-1"},
+			wantErr:           true,
+			wantErrSubstrings: []string{"unknown dependency type", "blocked-by", "depends-on"},
 		},
 		{
 			name:    "empty type rejected",
@@ -123,6 +127,11 @@ func TestParseDepSpecs(t *testing.T) {
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("parseDepSpecs(%v) = %v, want error", tt.in, got)
+				}
+				for _, want := range tt.wantErrSubstrings {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("parseDepSpecs(%v) error = %q, want to contain %q", tt.in, err, want)
+					}
 				}
 				return
 			}
@@ -275,6 +284,45 @@ func TestDiscoveredFromParent(t *testing.T) {
 				t.Errorf("discoveredFromParent(%v) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestResolveDepSpecTargetsNormalizesBareSlug(t *testing.T) {
+	st := &createAtomicFakeStore{}
+	specs := []domain.DependencySpec{
+		{Type: types.DepDiscoveredFrom, TargetID: "8vezf"},
+		{Type: types.DepBlocks, TargetID: "fake-already-full"},
+		{Type: types.DepRelated, TargetID: "external:other-system/42"},
+	}
+	got, err := resolveDepSpecTargets(context.Background(), st, specs)
+	if err != nil {
+		t.Fatalf("resolveDepSpecTargets: %v", err)
+	}
+	if got[0].TargetID != "fake-8vezf" {
+		t.Errorf("bare slug resolved to %q, want fake-8vezf (GH#5005)", got[0].TargetID)
+	}
+	if got[1].TargetID != "fake-already-full" {
+		t.Errorf("full id became %q, want unchanged", got[1].TargetID)
+	}
+	if got[2].TargetID != "external:other-system/42" {
+		t.Errorf("external target became %q, want unchanged", got[2].TargetID)
+	}
+	// Types / swap flags must be preserved.
+	if got[0].Type != types.DepDiscoveredFrom || got[1].Type != types.DepBlocks {
+		t.Errorf("types mutated: %#v", got)
+	}
+}
+
+func TestResolveDepSpecTargetsRejectsEmptyTarget(t *testing.T) {
+	st := &createAtomicFakeStore{}
+	_, err := resolveDepSpecTargets(context.Background(), st, []domain.DependencySpec{
+		{Type: types.DepBlocks, TargetID: "  "},
+	})
+	if err == nil {
+		t.Fatal("expected error for empty target")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("error should mention empty target, got: %v", err)
 	}
 }
 

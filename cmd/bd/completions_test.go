@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -17,6 +16,7 @@ import (
 )
 
 func TestIssueIDCompletion(t *testing.T) {
+	saveAndRestoreGlobals(t)
 	// Save original store and restore after test
 	originalStore := store
 	originalRootCtx := rootCtx
@@ -34,6 +34,11 @@ func TestIssueIDCompletion(t *testing.T) {
 	testDB := filepath.Join(tmpDir, "test.db")
 	testStore := newTestStoreWithPrefix(t, testDB, "bd")
 	store = testStore
+	// issueIDCompletion resolves a database path before it looks at the
+	// open store (an unresolvable path means no completions), as the CLI
+	// does; point it at this store's (dbPath is restored by
+	// saveAndRestoreGlobals above).
+	dbPath = testDB
 
 	// Create test issues
 	now := time.Now()
@@ -239,7 +244,7 @@ func TestIssueIDCompletion_UsesWorktreeFallbackWhenStoreNil(t *testing.T) {
 
 	run := func(dir string, args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = dir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v failed: %v\n%s", args, err, out)
@@ -256,19 +261,22 @@ func TestIssueIDCompletion_UsesWorktreeFallbackWhenStoreNil(t *testing.T) {
 	run(mainRepoDir, "commit", "-m", "Initial commit")
 
 	worktreeDir := filepath.Join(tmpDir, "worktree")
-	cmd := exec.Command("git", "worktree", "add", worktreeDir, "HEAD")
+	cmd := gitCommand("worktree", "add", worktreeDir, "HEAD")
 	cmd.Dir = mainRepoDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git worktree add failed: %v\n%s", err, out)
 	}
 	t.Cleanup(func() {
-		cleanupCmd := exec.Command("git", "worktree", "remove", "--force", worktreeDir)
+		cleanupCmd := gitCommand("worktree", "remove", "--force", worktreeDir)
 		cleanupCmd.Dir = mainRepoDir
 		_ = cleanupCmd.Run()
 	})
 
 	testDB := filepath.Join(mainRepoDir, ".beads", "beads.db")
-	testStore := newTestStoreWithPrefix(t, testDB, "wt")
+	// Its own database, not a branch of the shared one: completion reopens
+	// the store from .beads/metadata.json, which can name a database but not
+	// a test branch.
+	testStore := newTestStoreIsolatedDB(t, testDB, "wt")
 	if err := testStore.CreateIssue(ctx, &types.Issue{
 		ID:        "wt-abc1",
 		Title:     "Worktree completion target",

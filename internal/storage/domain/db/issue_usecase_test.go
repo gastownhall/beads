@@ -2,8 +2,12 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"strings"
+	"time"
 
+	"github.com/steveyegge/beads/internal/idgen"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -15,7 +19,12 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("IssuePrefixOverrideHonored", s.useCaseMintRespectsPrefixOverride)
 	s.Run("IDPrefixSubprefixHonored", s.useCaseMintRespectsIDPrefix)
 	s.Run("WispUsesWispPrefix", s.useCaseMintWispPrefix)
+	s.Run("HashModePassesOverTheOtherPlanesIDs", s.useCaseMintPassesOverTheOtherPlane)
+	s.Run("MintPassesOverClaimedIDs", s.useCaseMintPassesOverClaimedIDs)
 	s.Run("MissingConfigPrefixErrors", s.useCaseMintMissingPrefix)
+	s.Run("ExplicitIDRequiresConfiguredPrefixUnlessForced", s.useCaseExplicitIDPrefixGuard)
+	s.Run("CreateOnlyRefusesOccupiedID", s.useCaseCreateOnlyRefusesOccupiedID)
+	s.Run("CreateAttachesNormalizedComments", s.useCaseCreateAttachesNormalizedComments)
 }
 
 func (s *testSuite) issueUseCase() domain.IssueUseCase {
@@ -142,6 +151,85 @@ func (s *testSuite) useCaseMintWispPrefix() {
 	s.True(strings.HasPrefix(res.Issue.ID, "bd-wisp-"), "expected bd-wisp- prefix, got %q", res.Issue.ID)
 }
 
+// useCaseMintPassesOverTheOtherPlane pins that a hash mint never hands out an
+// id the OTHER plane holds: issues and wisps share one id space. It occupies
+// the nonce-0 candidate the mint tries first, at every length it can start at,
+// in the plane the create is not bound for. A minted create is not create-only
+// here, so before the two-plane probe the id landed silently beside the
+// occupant, one id in both tables (GH#5106).
+func (s *testSuite) useCaseMintPassesOverTheOtherPlane() {
+	s.resetMintConfig("xp", "")
+	uc := s.issueUseCase()
+	at := time.Date(2022, time.January, 2, 3, 4, 5, 678901234, time.UTC)
+	firstCandidates := func(prefix, title string) []string {
+		var ids []string
+		for length := 3; length <= 8; length++ {
+			ids = append(ids, idgen.GenerateHashID(prefix, title, "", "tester", at, length, 0))
+		}
+		return ids
+	}
+	occupy := func(ids []string, wisp bool) {
+		for _, id := range ids {
+			params := domain.CreateIssueParams{
+				Issue:      &types.Issue{Title: "occupant", IssueType: types.TypeTask, Priority: 2, Ephemeral: wisp},
+				ExplicitID: id,
+				CreateOnly: true,
+			}
+			var err error
+			if wisp {
+				_, err = uc.CreateWisp(s.Ctx(), params, "seeder")
+			} else {
+				_, err = uc.CreateIssue(s.Ctx(), params, "seeder")
+			}
+			s.Require().NoError(err, "occupy %s", id)
+		}
+	}
+
+	heldByWisps := firstCandidates("xp", "issue over wisp")
+	occupy(heldByWisps, true)
+	issue, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "issue over wisp", IssueType: types.TypeTask, Priority: 2, CreatedAt: at},
+	}, "tester")
+	s.Require().NoError(err)
+	s.NotContains(heldByWisps, issue.Issue.ID, "minted an issue id a wisp holds")
+
+	heldByIssues := firstCandidates("xp-wisp", "wisp over issue")
+	occupy(heldByIssues, false)
+	wisp, err := uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "wisp over issue", IssueType: types.TypeTask, Priority: 2, Ephemeral: true, CreatedAt: at},
+	}, "tester")
+	s.Require().NoError(err)
+	s.NotContains(heldByIssues, wisp.Issue.ID, "minted a wisp id an issue holds")
+}
+
+// useCaseMintPassesOverClaimedIDs pins CreateIssueParams.ClaimedIDs, the ids a
+// caller's batch will write in a LATER item and so are in no table yet: the
+// mint passes over them in both modes, as it passes over a held id.
+func (s *testSuite) useCaseMintPassesOverClaimedIDs() {
+	uc := s.issueUseCase()
+
+	s.resetMintConfig("cl", "")
+	at := time.Date(2022, time.January, 2, 3, 4, 5, 678901234, time.UTC)
+	claimed := map[string]bool{}
+	for length := 3; length <= 8; length++ {
+		claimed[idgen.GenerateHashID("cl", "claimed", "", "tester", at, length, 0)] = true
+	}
+	hashed, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "claimed", IssueType: types.TypeTask, Priority: 2, CreatedAt: at},
+		ClaimedIDs: claimed,
+	}, "tester")
+	s.Require().NoError(err)
+	s.False(claimed[hashed.Issue.ID], "hash mode minted the claimed %s", hashed.Issue.ID)
+
+	s.resetMintConfig("clc", "counter")
+	counted, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "counted", IssueType: types.TypeTask, Priority: 2},
+		ClaimedIDs: map[string]bool{"clc-1": true},
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal("clc-2", counted.Issue.ID, "counter mode must pass over the claimed clc-1")
+}
+
 func (s *testSuite) useCaseMintMissingPrefix() {
 	s.resetMintConfig("", "")
 	uc := s.issueUseCase()
@@ -150,6 +238,91 @@ func (s *testSuite) useCaseMintMissingPrefix() {
 	}, "tester")
 	s.Require().Error(err)
 	s.Contains(err.Error(), "issue_prefix")
+}
+
+func (s *testSuite) useCaseExplicitIDPrefixGuard() {
+	s.resetMintConfig("prefixguard", "")
+	uc := s.issueUseCase()
+
+	upsert, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "foreign upsert", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "foreign-upsert-1",
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal("foreign-upsert-1", upsert.Issue.ID)
+
+	_, err = uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "foreign", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "foreign-1",
+		CreateOnly: true,
+	}, "tester")
+	s.Require().Error(err)
+	s.True(errors.Is(err, storage.ErrPrefixMismatch), "want ErrPrefixMismatch, got %v", err)
+	s.Require().NoError(NewConfigSQLRepository(s.Runner()).SetConfig(s.Ctx(), "allowed_prefixes", "allowed"))
+
+	allowed, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "allowed", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "allowed-1",
+		CreateOnly: true,
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal("allowed-1", allowed.Issue.ID)
+
+	created, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:       &types.Issue{Title: "forced", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID:  "foreign-1",
+		ForcePrefix: true,
+		CreateOnly:  true,
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal("foreign-1", created.Issue.ID)
+}
+
+func (s *testSuite) useCaseCreateOnlyRefusesOccupiedID() {
+	s.resetMintConfig("createonly", "")
+	uc := s.issueUseCase()
+	params := domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "first", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "createonly-1",
+		CreateOnly: true,
+	}
+	_, err := uc.CreateIssue(s.Ctx(), params, "tester")
+	s.Require().NoError(err)
+
+	params.Issue = &types.Issue{Title: "replacement", IssueType: types.TypeTask, Priority: 2}
+	_, err = uc.CreateIssue(s.Ctx(), params, "tester")
+	s.Require().Error(err)
+	s.True(errors.Is(err, storage.ErrAlreadyExists), "want ErrAlreadyExists, got %v", err)
+
+	stored, err := uc.GetIssue(s.Ctx(), "createonly-1")
+	s.Require().NoError(err)
+	s.Equal("first", stored.Title)
+}
+
+func (s *testSuite) useCaseCreateAttachesNormalizedComments() {
+	s.resetMintConfig("comments", "")
+	createdAt := time.Date(2025, time.February, 3, 4, 5, 6, 0, time.UTC)
+	params := domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "with comments", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "comments-1",
+		Comments: []*types.Comment{
+			{Text: "defaulted"},
+			{ID: "imported-comment", Author: "importer", Text: "preserved", CreatedAt: createdAt},
+		},
+	}
+
+	created, err := s.issueUseCase().CreateIssue(s.Ctx(), params, "actor")
+	s.Require().NoError(err)
+	s.Require().Len(created.Issue.Comments, 2)
+	s.Equal("comments-1", created.Issue.Comments[0].IssueID)
+	s.Equal("actor", created.Issue.Comments[0].Author)
+	s.NotEmpty(created.Issue.Comments[0].ID)
+	s.False(created.Issue.Comments[0].CreatedAt.IsZero())
+	s.Equal("imported-comment", created.Issue.Comments[1].ID)
+	s.Equal("importer", created.Issue.Comments[1].Author)
+	s.Equal(createdAt, created.Issue.Comments[1].CreatedAt)
+
+	s.Equal("", params.Comments[0].IssueID, "create must not mutate caller comments")
 }
 
 func (s *testSuite) TestIssueUseCase_ApplyGraph() {
@@ -171,6 +344,33 @@ func (s *testSuite) TestIssueUseCase_ApplyGraph() {
 func (s *testSuite) TestIssueUseCase_MixedParentChildRouting() {
 	s.Run("WispChildOfRegularParent", s.mixedWispChildOfRegularParent)
 	s.Run("DepTargetClassification", s.mixedDepTargetClassification)
+	s.Run("ReverseDependencyUsesResultingSourceTierAndPreservesThread", s.mixedReverseDependencySourceTier)
+}
+
+func (s *testSuite) mixedReverseDependencySourceTier() {
+	s.resetMintConfig("reverse", "")
+	uc := s.issueUseCase()
+	regular, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "regular source", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+
+	wisp, err := uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "wisp target", IssueType: types.TypeTask, Priority: 2, Ephemeral: true},
+		Dependencies: []domain.DependencySpec{{
+			Type:          types.DepRelated,
+			TargetID:      regular.Issue.ID,
+			SwapDirection: true,
+			ThreadID:      "thread-1",
+		}},
+	}, "tester")
+	s.Require().NoError(err)
+
+	records, err := s.depUseCase().GetIssueDependencyRecords(s.Ctx(), []string{regular.Issue.ID})
+	s.Require().NoError(err)
+	s.Require().Len(records[regular.Issue.ID], 1)
+	s.Equal(wisp.Issue.ID, records[regular.Issue.ID][0].DependsOnID)
+	s.Equal("thread-1", records[regular.Issue.ID][0].ThreadID)
 }
 
 func (s *testSuite) mixedWispChildOfRegularParent() {

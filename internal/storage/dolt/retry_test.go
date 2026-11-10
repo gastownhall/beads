@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	mysql "github.com/go-sql-driver/mysql"
 )
 
 func TestIsRetryableError(t *testing.T) {
@@ -86,6 +88,26 @@ func TestIsRetryableError(t *testing.T) {
 			name:     "no root value found in session",
 			err:      errors.New("Error 1105 (HY000): no root value found in session"),
 			expected: true,
+		},
+		{
+			name:     "typed no root value found in session",
+			err:      &mysql.MySQLError{Number: 1105, Message: "no root value found in session"},
+			expected: true,
+		},
+		{
+			name:     "typed database is read only",
+			err:      &mysql.MySQLError{Number: 1105, Message: "cannot update manifest: database is read only"},
+			expected: true,
+		},
+		{
+			name:     "untyped Dolt merge conflict does not enter general retry loop",
+			err:      errors.New("dolt commit: Error 1105 (HY000): Merge conflict detected, @autocommit transaction rolled back"),
+			expected: false,
+		},
+		{
+			name:     "typed 1105 with connection-like wording is not retryable",
+			err:      &mysql.MySQLError{Number: 1105, Message: "connection lost while validating commit"},
+			expected: false,
 		},
 		{
 			name:     "syntax error - not retryable",
@@ -181,5 +203,22 @@ func TestWithRetry_NonRetryableError(t *testing.T) {
 	}
 	if callCount != 1 {
 		t.Errorf("expected 1 call for non-retryable error, got %d", callCount)
+	}
+}
+
+func TestWithRetry_DoesNotReplayDoltMergeConflict(t *testing.T) {
+	store := &DoltStore{}
+
+	callCount := 0
+	err := store.withRetry(context.Background(), func() error {
+		callCount++
+		return errors.New("dolt commit: Error 1105 (HY000): Merge conflict detected, @autocommit transaction rolled back")
+	})
+
+	if err == nil {
+		t.Fatal("withRetry() error = nil, want the definite rollback error")
+	}
+	if callCount != 1 {
+		t.Errorf("expected 1 call at the general retry boundary, got %d", callCount)
 	}
 }

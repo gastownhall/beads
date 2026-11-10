@@ -6,11 +6,30 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/viper"
+	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"gopkg.in/yaml.v3"
+)
+
+const (
+	// ProjectConfigFileName is the tracked per-workspace config file, read from
+	// a .beads directory.
+	ProjectConfigFileName = "config.yaml"
+	// LocalConfigFileName sits beside ProjectConfigFileName and is merged LAST
+	// by Initialize, so it overrides the tracked file. It is the documented
+	// place for machine-specific settings that must not be committed
+	// (docs/reference/configuration.md). Named here so Initialize's own local
+	// merge (in the file-loading block at the end of Initialize) and the
+	// workspace-scoped reader in WorkspaceYamlValueStrictWithLocal cannot
+	// drift onto different files. ProjectConfigFileName binds the two
+	// workspace-scoped strict readers to each other; Initialize still spells
+	// config.yaml literally in the several places it probes for one.
+	LocalConfigFileName = "config.local.yaml"
 )
 
 var v *viper.Viper
@@ -18,11 +37,91 @@ var v *viper.Viper
 // overriddenKeys tracks keys explicitly set via Set() at runtime, so
 // GetValueSource can distinguish them from Viper defaults.
 var overriddenKeys = map[string]bool{}
+var projectConfigKeys = map[string]bool{}
+var userConfigValues = map[string]string{}
+var projectConfigPath string
+
+var (
+	dotenvMu          sync.RWMutex
+	dotenvVars        = map[string]string{}
+	workspaceBeadsDir string
+)
+
+var explicitEnvBindings = map[string][]string{
+	"identity": {"BEADS_IDENTITY"},
+	"node_id":  {"BEADS_NODE_ID", "BD_NODE_ID"},
+}
+
+// ignoredConfigKey normalizes a config path into the single form the
+// BEADS_TEST_IGNORE_REPO_CONFIG ignore set is keyed by, so that membership does
+// not depend on which alias of a directory the caller happened to hold.
+//
+// The set is built from os.Getwd(), which honors $PWD and therefore reports the
+// path the process was given rather than the one the kernel resolved. The
+// BEADS_DIR that is tested against it is written by the CLI's own dispatch from
+// beads.FindBeadsDir, which runs utils.CanonicalizePath (filepath.EvalSymlinks).
+// Comparing those two strings directly misses whenever the workspace is reached
+// through a symlink, the ignore is not applied, and the repo config is merged
+// after all — which is exactly what the flag exists to prevent.
+//
+// On macOS that is not an edge case, it is every temp workspace: $TMPDIR is
+// /var/folders/... and /var is a symlink to /private/var, so every t.TempDir()
+// has two names and the two sides pick different ones.
+//
+// Symlinks are resolved on the directory, not the file: callers pass candidate
+// config paths that may not exist, and EvalSymlinks fails on a missing leaf.
+// When the directory cannot be resolved either, fall back to a lexical clean —
+// applied identically on both insert and lookup, so the two still agree.
+func ignoredConfigKey(path string) string {
+	if path == "" {
+		return ""
+	}
+	dir, base := filepath.Split(filepath.Clean(path))
+	resolvedDir, err := filepath.EvalSymlinks(filepath.Clean(dir))
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	return filepath.Clean(filepath.Join(resolvedDir, base))
+}
 
 // Initialize sets up the viper configuration singleton
 // Should be called once at application startup
 func Initialize() error {
+	return initialize(os.Getenv("BEADS_DIR"))
+}
+
+// WithBeadsDir runs fn with the configuration Initialize loads when BEADS_DIR
+// is beadsDir, which is how the bd CLI loads it for every command in a
+// workspace it found, and then puts the loaded configuration back. A command
+// about to create beadsDir uses it to read what every later command there
+// will read: beadsDir's own config.yaml over the user config files, with the
+// BD_* variables on top, and never an enclosing workspace's config.yaml that
+// the directory walk loaded at startup. The process environment is not
+// changed.
+//
+// fn runs even when loading fails, with what did load, as a command runs
+// after a failed Initialize; the error is returned. Like Initialize, it
+// replaces the process-wide configuration while fn runs, so nothing may read
+// configuration concurrently.
+func WithBeadsDir(beadsDir string, fn func()) error {
+	saved, savedOverrides := v, overriddenKeys
+	savedProjectKeys, savedUserValues, savedProjectPath := projectConfigKeys, userConfigValues, projectConfigPath
+	defer func() {
+		v, overriddenKeys = saved, savedOverrides
+		projectConfigKeys, userConfigValues, projectConfigPath = savedProjectKeys, savedUserValues, savedProjectPath
+	}()
+	overriddenKeys = map[string]bool{}
+	err := initialize(beadsDir)
+	fn()
+	return err
+}
+
+// initialize is Initialize for a process whose BEADS_DIR is beadsDirSetting.
+func initialize(beadsDirSetting string) error {
 	v = viper.New()
+	projectConfigKeys = map[string]bool{}
+	userConfigValues = map[string]string{}
+	projectConfigPath = ""
 
 	// Set config type to yaml (we only load config.yaml, not config.json)
 	v.SetConfigType("yaml")
@@ -32,79 +131,82 @@ func Initialize() error {
 	// subsequent file so higher-priority values overwrite lower-priority ones.
 	//
 	// Precedence (highest to lowest):
-	//   BEADS_DIR/config.yaml > project .beads/config.yaml > ~/.config/bd/config.yaml > ~/.beads/config.yaml
+	//   BEADS_DIR/config.yaml > project .beads/config.yaml > documented
+	//   <home>/.config/bd/config.yaml > native os.UserConfigDir()/bd/config.yaml
+	//   > legacy <home>/.beads/config.yaml
 	//
 	// Previously, only ONE config file was loaded (the highest-priority match),
 	// which meant user-level config was silently ignored when project-level
 	// config existed — e.g., the idle-monitor daemon with BEADS_DIR set (GH#2375).
 	var configPaths []string     // ordered lowest priority first
 	var primaryConfigPath string // project-level config (for config.local.yaml and SaveConfigValue)
+	var localConfigPath string
 
-	// 3. Legacy: ~/.beads/config.yaml (lowest priority)
-	if homeDir, err := os.UserHomeDir(); err == nil {
-		p := filepath.Join(homeDir, ".beads", "config.yaml")
-		if _, err := os.Stat(p); err == nil {
-			configPaths = append(configPaths, p)
+	// User-level paths are built once through the same absolute-native-path
+	// gate used by direct reads and writes. Invalid roots are silently skipped
+	// here because Initialize is an implicit read path: absent user config is a
+	// supported state, while a relative root must never reach os.Stat.
+	userConfigPaths := currentUserConfigYamlCandidates()
+	appendExistingUserConfig := func(path string) {
+		if !userConfigPathExists(path) {
+			return
 		}
-	}
-
-	// 2. User: ~/.config/bd/config.yaml
-	if configDir, err := os.UserConfigDir(); err == nil {
-		p := filepath.Join(configDir, "bd", "config.yaml")
-		if _, err := os.Stat(p); err == nil {
-			configPaths = append(configPaths, p)
-		}
-	}
-
-	// Also check ~/.config/bd/config.yaml explicitly. On macOS,
-	// os.UserConfigDir() returns ~/Library/Application Support, not ~/.config.
-	// This ensures the documented path works on all platforms.
-	if homeDir, err := os.UserHomeDir(); err == nil {
-		xdgPath := filepath.Join(homeDir, ".config", "bd", "config.yaml")
-		alreadyAdded := false
 		for _, existing := range configPaths {
-			if filepath.Clean(existing) == filepath.Clean(xdgPath) {
-				alreadyAdded = true
-				break
+			if filepath.Clean(existing) == path {
+				return
 			}
 		}
-		if !alreadyAdded {
-			if _, err := os.Stat(xdgPath); err == nil {
-				configPaths = append(configPaths, xdgPath)
-			}
-		}
+		configPaths = append(configPaths, path)
 	}
+
+	// Lowest to highest user-level precedence: legacy, native, documented.
+	appendExistingUserConfig(userConfigPaths.legacy)
+	appendExistingUserConfig(userConfigPaths.native)
+	appendExistingUserConfig(userConfigPaths.documented)
+	userConfigPathCount := len(configPaths)
 
 	// 1. Project: walk up from CWD to find .beads/config.yaml
-	beadsDirEnv := strings.TrimSpace(os.Getenv("BEADS_DIR"))
+	beadsDirEnv := strings.TrimSpace(beadsDirSetting)
 	beadsEnvConfigPath := ""
 	if beadsDirEnv != "" {
 		beadsEnvConfigPath = filepath.Clean(filepath.Join(beadsDirEnv, "config.yaml"))
 	}
+	// A beads checkout usually has its own `.beads/config.yaml` (untracked developer
+	// state) that sets non-default values. In `go test` — especially for `cmd/bd` —
+	// we want to avoid unintentionally picking up that repo-local config, while still
+	// allowing tests to load config.yaml from temp repos.
+	//
+	// If BEADS_TEST_IGNORE_REPO_CONFIG is set, we ignore the config at
+	// <module-root>/.beads/config.yaml (where module-root is the nearest parent
+	// containing go.mod) and at the worktree fallback location.
+	//
+	// The ignore set applies to every source that can name those paths, including
+	// BEADS_DIR below. BEADS_DIR used to bypass the flag, and because in-process CLI
+	// dispatch sets BEADS_DIR at the checkout's own .beads via a raw os.Setenv with no
+	// restore, that bypass re-imported the repo config into every later Initialize in
+	// the same test binary (ga-e6h6i). A test that genuinely wants the repo config
+	// unsets the flag.
+	ignoreRepoConfig := os.Getenv("BEADS_TEST_IGNORE_REPO_CONFIG") != ""
+	ignoredRepoConfigPaths := map[string]bool{}
+
 	cwd, err := os.Getwd()
 	if err == nil {
-		// In the beads repo, `.beads/config.yaml` is tracked and may set non-default config values.
-		// In `go test` (especially for `cmd/bd`), we want to avoid unintentionally picking up
-		// the repo-local config, while still allowing tests to load config.yaml from temp repos.
-		//
-		// If BEADS_TEST_IGNORE_REPO_CONFIG is set, we will ignore the config at
-		// <module-root>/.beads/config.yaml (where module-root is the nearest parent containing go.mod).
-		ignoreRepoConfig := os.Getenv("BEADS_TEST_IGNORE_REPO_CONFIG") != ""
+		// BEADS_CEILING_DIRECTORIES bounds both upward walks below.
+		bound := ceiling.For(cwd)
 		var moduleRoot string
-		ignoredRepoConfigPaths := map[string]bool{}
 		if ignoreRepoConfig {
 			// Find module root by walking up to go.mod.
-			for dir := cwd; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+			for dir := cwd; dir != filepath.Dir(dir) && !bound.Excludes(dir); dir = filepath.Dir(dir) {
 				if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
 					moduleRoot = dir
 					break
 				}
 			}
 			if moduleRoot != "" {
-				ignoredRepoConfigPaths[filepath.Clean(filepath.Join(moduleRoot, ".beads", "config.yaml"))] = true
+				ignoredRepoConfigPaths[ignoredConfigKey(filepath.Join(moduleRoot, ".beads", "config.yaml"))] = true
 			}
 			if fallbackPath := worktreeFallbackConfigPath(cwd); fallbackPath != "" {
-				ignoredRepoConfigPaths[filepath.Clean(fallbackPath)] = true
+				ignoredRepoConfigPaths[ignoredConfigKey(fallbackPath)] = true
 			}
 		}
 
@@ -115,7 +217,7 @@ func Initialize() error {
 			if _, err := os.Stat(path); err != nil {
 				return false
 			}
-			if ignoreRepoConfig && ignoredRepoConfigPaths[filepath.Clean(path)] {
+			if ignoreRepoConfig && ignoredRepoConfigPaths[ignoredConfigKey(path)] {
 				return false
 			}
 			configPaths = append(configPaths, path)
@@ -124,7 +226,7 @@ func Initialize() error {
 		}
 
 		// Walk up parent directories to find .beads/config.yaml.
-		for dir := cwd; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+		for dir := cwd; dir != filepath.Dir(dir) && !bound.Excludes(dir); dir = filepath.Dir(dir) {
 			p := filepath.Join(dir, ".beads", "config.yaml")
 			if _, err := os.Stat(p); err == nil {
 				// When BEADS_DIR points at a different runtime workspace, do not
@@ -137,6 +239,13 @@ func Initialize() error {
 					break
 				}
 			}
+			if ignoreRepoConfig && moduleRoot != "" && dir == moduleRoot {
+				// Don't walk above the test module root: anything further up is
+				// outside this repo entirely (e.g. an outer orchestration
+				// project's own unrelated .beads/config.yaml) and must never
+				// leak into a beads-under-test process (be-yjp4z).
+				break
+			}
 		}
 
 		// Worktree/shared fallback: the active workspace may live outside the
@@ -148,9 +257,15 @@ func Initialize() error {
 	}
 
 	// 0. BEADS_DIR: highest priority
-	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
+	if beadsDir := beadsDirSetting; beadsDir != "" {
 		p := filepath.Join(beadsDir, "config.yaml")
-		if _, err := os.Stat(p); err == nil {
+		// Honor the test ignore set here too, and skip primaryConfigPath along with
+		// the merge so ConfigFileUsed does not name the ignored repo config. This
+		// fences the read and merge path only: SaveConfigValue falls back to the
+		// caller-supplied beadsDir when ConfigFileUsed is empty, so where a write
+		// lands is still the caller's choice, not this flag's.
+		ignored := ignoreRepoConfig && ignoredRepoConfigPaths[ignoredConfigKey(p)]
+		if _, err := os.Stat(p); err == nil && !ignored {
 			// Avoid duplicate if BEADS_DIR points to same config as CWD walk
 			if primaryConfigPath == "" || filepath.Clean(p) != filepath.Clean(primaryConfigPath) {
 				configPaths = append(configPaths, p)
@@ -171,7 +286,46 @@ func Initialize() error {
 	// Set defaults for all flags
 	v.SetDefault("json", false)
 	v.SetDefault("events-export", false)
+	// Durable events journal (bd_events_journal). OFF by default because it
+	// costs a snapshot write on every mutation and exists only for a consumer
+	// that is actually tailing it. Enable per workspace with
+	// `bd config set events-journal true` or BD_EVENTS_JOURNAL=1; read it with
+	// `bd events tail/export`.
+	v.SetDefault("events-journal", false)
+	// Retention floors. retain-days keeps rows younger than N days; retain-rows
+	// always keeps the newest N rows. They bound every prune, whether an
+	// operator asked for it (`bd events prune`) or maintenance applied it
+	// (events-journal-auto-prune). Both default ON: a journal is only ever
+	// enabled because something is consuming it, and with both floors at 0 a
+	// single `bd events prune --before <large>` deletes the whole journal,
+	// stranding a consumer whose checkpoint is now below the floor with no way
+	// to recover the lost span. The defaults buy a consumer a week of downtime,
+	// or 100k mutations of backlog, whichever is larger. Setting either to 0
+	// explicitly disables that floor.
+	// Env: BD_EVENTS_JOURNAL_RETAIN_DAYS / BD_EVENTS_JOURNAL_RETAIN_ROWS.
+	v.SetDefault("events-journal-retain-days", 7)
+	v.SetDefault("events-journal-retain-rows", 100000)
+	// Automatic retention, ON by default: after a mutating command commits, and
+	// on a timer inside `bd serve`, bd deletes the journal prefix the floors
+	// above do not protect. Enabling the journal therefore yields a BOUNDED
+	// feed, which is what makes it safe to turn on and forget. Turning both
+	// floors to 0 is the deliberate way to keep every record forever; this key
+	// is for a consumer that wants the floors respected on reads but wants to
+	// own deletion itself. Env: BD_EVENTS_JOURNAL_AUTO_PRUNE.
+	v.SetDefault("events-journal-auto-prune", true)
 	v.SetDefault("audit.enabled", false)
+	// versioned-history.enabled activates the dual-write issue-version history
+	// (issue_versions, issues.current_revision) that migrations 0067+ provision.
+	// Default OFF: with it off the writer short-circuits and a store is
+	// byte-identical to one built without the feature, which is the contract
+	// gastownhall/beads#6135 ships under. Env: BD_VERSIONED_HISTORY_ENABLED.
+	//
+	// The flag is single-writer-only until the version_id primary key lands
+	// (design section 16.3 steps 1-5): issue_versions.revision and
+	// issues.current_revision are per-store ordinals, so two disconnected
+	// clones can both mint revision 8 for the same issue. Do not enable it on
+	// a store that more than one writer mutates.
+	v.SetDefault("versioned-history.enabled", false)
 	v.SetDefault("no-db", false)
 	v.SetDefault("no-hooks", false)
 	v.SetDefault("db", "")
@@ -250,6 +404,17 @@ func Initialize() error {
 	// Backup configuration defaults (JSONL export to .beads/backup/)
 	v.SetDefault("backup.enabled", false)
 	v.SetDefault("backup.interval", "15m")
+	// size-cap-mb pauses auto-backup once the destination exceeds this size
+	// (ga-y6gjv). BackupSync only ever transfers new chunks — it never
+	// prunes ones that became unreachable on the source DB — and Dolt
+	// exposes no way to GC a backup destination in place (it is a bare
+	// chunk-store directory with no .dolt repo-root marker, so neither the
+	// standalone dolt CLI nor CALL DOLT_GC can operate on it directly), so
+	// without a hard cap the directory can only grow forever. Default
+	// 2048MB; size-warn-interval throttles how often the pause is
+	// re-announced once the cap is hit, so it doesn't spam every command.
+	v.SetDefault("backup.size-cap-mb", 2048)
+	v.SetDefault("backup.size-warn-interval", "24h")
 	v.SetDefault("backup.git-push", false)
 	v.SetDefault("backup.git-repo", "")
 
@@ -269,6 +434,7 @@ func Initialize() error {
 
 	// AI configuration defaults
 	v.SetDefault("ai.model", "claude-haiku-4-5-20251001")
+	v.SetDefault("ai.base_url", "")
 
 	// List command defaults
 	v.SetDefault("list.limit", 50)
@@ -304,22 +470,56 @@ func Initialize() error {
 
 		// Merge local config overrides if present (config.local.yaml)
 		// This allows machine-specific settings without polluting tracked config
-		localConfigPath := filepath.Join(filepath.Dir(primaryConfigPath), "config.local.yaml")
-		if _, err := os.Stat(localConfigPath); err == nil {
-			v.SetConfigFile(localConfigPath)
-			if err := v.MergeInConfig(); err != nil {
-				return fmt.Errorf("error merging local config file: %w", err)
+		if primaryConfigPath != "" {
+			localConfigPath = filepath.Join(filepath.Dir(primaryConfigPath), LocalConfigFileName)
+			if _, err := os.Stat(localConfigPath); err == nil {
+				v.SetConfigFile(localConfigPath)
+				if err := v.MergeInConfig(); err != nil {
+					return fmt.Errorf("error merging local config file: %w", err)
+				}
+				debug.Logf("Debug: merged local config from %s\n", localConfigPath)
+				// Restore primary as ConfigFileUsed
+				v.SetConfigFile(primaryConfigPath)
 			}
-			debug.Logf("Debug: merged local config from %s\n", localConfigPath)
-			// Restore primary as ConfigFileUsed
-			v.SetConfigFile(primaryConfigPath)
 		}
 	} else {
 		// No config.yaml found - use defaults and environment variables
 		debug.Logf("Debug: no config.yaml found; using defaults and environment variables\n")
 	}
 
+	projectConfigPath = primaryConfigPath
+	projectPaths := append([]string{}, configPaths[userConfigPathCount:]...)
+	// A workspace .beads directory can double as a user config location —
+	// ~/.beads/config.yaml is the legacy user path — so the workspace's own
+	// config.yaml can land in the user slice too. The project role wins:
+	// committed configuration must never confirm itself as private.
+	if primaryConfigPath != "" {
+		projectPaths = append(projectPaths, primaryConfigPath)
+	}
+	if localConfigPath != "" {
+		projectPaths = append(projectPaths, localConfigPath)
+	}
+	projectConfigKeys = configKeys(projectPaths...)
+	userConfigValues = configStringValues(dropProjectPaths(configPaths[:userConfigPathCount], projectPaths)...)
 	return nil
+}
+
+// dropProjectPaths returns userPaths minus any entry naming the same file as
+// a project path, compared the way ignoredConfigKey normalizes paths.
+func dropProjectPaths(userPaths, projectPaths []string) []string {
+	project := map[string]bool{}
+	for _, p := range projectPaths {
+		if k := ignoredConfigKey(p); k != "" {
+			project[k] = true
+		}
+	}
+	var out []string
+	for _, p := range userPaths {
+		if !project[ignoredConfigKey(p)] {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // ResetForTesting clears the config state, allowing Initialize() to be called again.
@@ -328,6 +528,188 @@ func Initialize() error {
 func ResetForTesting() {
 	v = nil
 	overriddenKeys = map[string]bool{}
+	projectConfigKeys = map[string]bool{}
+	userConfigValues = map[string]string{}
+	projectConfigPath = ""
+	dotenvMu.Lock()
+	dotenvVars = map[string]string{}
+	workspaceBeadsDir = ""
+	dotenvMu.Unlock()
+}
+
+func configKeys(paths ...string) map[string]bool {
+	keys := map[string]bool{}
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		fileConfig := viper.New()
+		fileConfig.SetConfigFile(path)
+		if err := fileConfig.ReadInConfig(); err != nil {
+			continue
+		}
+		for _, key := range fileConfig.AllKeys() {
+			keys[strings.ToLower(key)] = true
+		}
+	}
+	return keys
+}
+
+func configStringValues(paths ...string) map[string]string {
+	values := map[string]string{}
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		fileConfig := viper.New()
+		fileConfig.SetConfigFile(path)
+		if err := fileConfig.ReadInConfig(); err != nil {
+			continue
+		}
+		for _, key := range fileConfig.AllKeys() {
+			k := strings.ToLower(key)
+			if val := strings.TrimSpace(fileConfig.GetString(key)); val != "" {
+				values[k] = val
+			}
+		}
+	}
+	return values
+}
+
+// MarkDotenvValue records that key was populated from a project .beads/.env file
+// rather than the caller's process environment.
+func MarkDotenvValue(key, value string) {
+	if key == "" {
+		return
+	}
+	dotenvMu.Lock()
+	dotenvVars[strings.ToUpper(key)] = value
+	dotenvMu.Unlock()
+}
+
+// IsDotenvKey reports whether key's current non-empty environment value was
+// imported from a project .beads/.env file.
+func IsDotenvKey(key string) bool {
+	val := os.Getenv(key)
+	if val == "" {
+		return false
+	}
+	dotenvMu.RLock()
+	dotenvVal, ok := dotenvVars[strings.ToUpper(key)]
+	dotenvMu.RUnlock()
+	return ok && val == dotenvVal
+}
+
+// GTRootFromProjectEnvMarker names the environment variable bd sets to the
+// imported value when it takes GT_ROOT from a project .beads/.env file. It lives
+// in the environment rather than in process memory so a bd started by this one
+// (a hook, gt, a mail delegate) inherits the provenance instead of seeing an
+// already-exported GT_ROOT and treating it as the caller's own.
+const GTRootFromProjectEnvMarker = "BD_GT_ROOT_FROM_DOTENV"
+
+// MarkGTRootFromProjectEnv records that GT_ROOT was set to value from a project
+// .beads/.env file because the caller's environment did not set it.
+func MarkGTRootFromProjectEnv(value string) {
+	_ = os.Setenv(GTRootFromProjectEnvMarker, value)
+}
+
+// GTRootFromProjectEnv reports whether the current GT_ROOT value was imported
+// from a project .beads/.env file (by this process or a bd that started it)
+// rather than exported by the caller. A GT_ROOT the caller exports themselves,
+// or changes after the import, is not reported.
+func GTRootFromProjectEnv() bool {
+	gtRoot := os.Getenv("GT_ROOT")
+	return gtRoot != "" && os.Getenv(GTRootFromProjectEnvMarker) == gtRoot
+}
+
+// PrivateGetenv returns os.Getenv(key) only when the value came from the caller's
+// process environment rather than a project .beads/.env file.
+func PrivateGetenv(key string) string {
+	val := os.Getenv(key)
+	if val == "" || IsDotenvKey(key) {
+		return ""
+	}
+	return val
+}
+
+// RecordWorkspaceBeadsDir records the workspace .beads directory bd discovered
+// on its own. Callers skip it for a directory a .beads/.env BEADS_DIR line
+// selected, so endpoint pins stay keyed to the workspace holding that file.
+func RecordWorkspaceBeadsDir(beadsDir string) {
+	if beadsDir == "" {
+		return
+	}
+	dotenvMu.Lock()
+	workspaceBeadsDir = beadsDir
+	dotenvMu.Unlock()
+}
+
+// WorkspaceBeadsDir returns the recorded workspace .beads directory, or empty.
+func WorkspaceBeadsDir() string {
+	dotenvMu.RLock()
+	defer dotenvMu.RUnlock()
+	return workspaceBeadsDir
+}
+
+// ProjectConfigFileUsed returns the project-level config.yaml path loaded by
+// Initialize, or empty when no project config.yaml was loaded (even if a
+// user-level global config file was loaded).
+func ProjectConfigFileUsed() string {
+	return projectConfigPath
+}
+
+// PrivateConfigValue returns the value of key from a private source — a
+// non-dotenv process environment variable or a user-level global config file —
+// or empty string when no private source defines key.
+func PrivateConfigValue(key string) string {
+	key = strings.ToLower(key)
+	envKey := "BD_" + strings.ToUpper(strings.NewReplacer(".", "_", "-", "_").Replace(key))
+	if value := PrivateGetenv(envKey); value != "" {
+		return value
+	}
+	for _, boundKey := range explicitEnvBindings[key] {
+		if value := PrivateGetenv(boundKey); value != "" {
+			return value
+		}
+	}
+	return userConfigValues[key]
+}
+
+// IsFromProjectConfig reports whether key is defined by project configuration
+// (.beads/config.yaml, .beads/config.local.yaml, or .beads/.env) and has not
+// been confirmed by a private environment variable or user-level global config.
+func IsFromProjectConfig(key string) bool {
+	key = strings.ToLower(key)
+	envKey := "BD_" + strings.ToUpper(strings.NewReplacer(".", "_", "-", "_").Replace(key))
+	if value := PrivateGetenv(envKey); value != "" {
+		return false
+	}
+	for _, boundKey := range explicitEnvBindings[key] {
+		if value := PrivateGetenv(boundKey); value != "" {
+			return false
+		}
+	}
+	if IsDotenvKey(envKey) {
+		return true
+	}
+	for _, boundKey := range explicitEnvBindings[key] {
+		if IsDotenvKey(boundKey) {
+			return true
+		}
+	}
+	if !projectConfigKeys[key] {
+		return false
+	}
+	if userVal := userConfigValues[key]; userVal != "" && userVal == strings.TrimSpace(GetString(key)) {
+		return false
+	}
+	return true
 }
 
 func worktreeFallbackConfigPath(repoPath string) string {
@@ -345,6 +727,17 @@ func worktreeFallbackConfigPath(repoPath string) string {
 
 func gitDirsForRepo(repoPath string) (gitDir, commonDir string, ok bool) {
 	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "--git-dir", "--git-common-dir")
+	// repoPath is the authority for this probe. Inherited Git routing such as
+	// GIT_DIR overrides -C and can make startup read another repository's
+	// shared-worktree config before command dispatch has begun. Scrubbing also
+	// drops an inherited GIT_CEILING_DIRECTORIES, which widens rather than
+	// narrows discovery: -C repoPath fixes where the search starts, not where it
+	// stops, so dropping discovery ceilings can select a containing parent
+	// repository above repoPath. That is the intended trade, and it applies here
+	// too -- repoPath is the process working directory, not a proven repository
+	// root. An explicit BEADS_CEILING_DIRECTORIES is the exception: it is
+	// reapplied as the git ceiling (a no-op when unset).
+	cmd.Env = ceiling.GitEnv(gitenv.ScrubRouting(os.Environ()))
 	output, err := cmd.Output()
 	if err != nil {
 		return "", "", false
@@ -628,6 +1021,11 @@ func GetStringFromDir(beadsDir, key string) string {
 	if err := yaml.Unmarshal(data, &root); err != nil {
 		return ""
 	}
+	// Match Viper's precedence: an exact top-level key wins over dotted-path
+	// descent when a file contains both spellings.
+	if val, ok := root[key]; ok {
+		return configValueString(val)
+	}
 	parts := strings.SplitN(key, ".", 2)
 	node := root
 	for len(parts) == 2 {
@@ -646,6 +1044,10 @@ func GetStringFromDir(beadsDir, key string) string {
 	if !ok {
 		return ""
 	}
+	return configValueString(val)
+}
+
+func configValueString(val interface{}) string {
 	switch s := val.(type) {
 	case string:
 		return s
@@ -701,6 +1103,80 @@ func Set(key string, value interface{}) {
 // Override via: bd config set ai.model "model-name" or BD_AI_MODEL=model-name
 func DefaultAIModel() string {
 	return GetString("ai.model")
+}
+
+// DefaultAIModelFor returns the model for Anthropic-compatible AI calls,
+// accounting for which provider the resolved key selects: an explicitly
+// configured ai.model always wins; otherwise a MiniMax-selected key gets a
+// MiniMax-served default (MINIMAX_MODEL env > MiniMaxDefaultModel), since
+// MiniMax does not serve the Claude default model.
+func DefaultAIModelFor(keySource AIAPIKeySource) string {
+	if GetValueSource("ai.model") != SourceDefault {
+		return GetString("ai.model")
+	}
+	if keySource == AIAPIKeySourceMiniMaxEnv {
+		if m := os.Getenv("MINIMAX_MODEL"); m != "" {
+			return m
+		}
+		return MiniMaxDefaultModel
+	}
+	return GetString("ai.model")
+}
+
+// AIAPIKeySource identifies where the active Anthropic-compatible API key came from.
+type AIAPIKeySource string
+
+const (
+	AIAPIKeySourceNone         AIAPIKeySource = ""
+	AIAPIKeySourceAnthropicEnv AIAPIKeySource = "ANTHROPIC_API_KEY" //nolint:gosec // Environment variable name, not a credential.
+	AIAPIKeySourceMiniMaxEnv   AIAPIKeySource = "MINIMAX_API_KEY"   //nolint:gosec // Environment variable name, not a credential.
+	AIAPIKeySourceConfig       AIAPIKeySource = "ai.api_key"
+	AIAPIKeySourceExplicit     AIAPIKeySource = "explicit"
+
+	MiniMaxDefaultBaseURL = "https://api.minimax.io/anthropic"
+
+	// MiniMaxDefaultModel is used when MINIMAX_API_KEY selected the key and
+	// the user did not configure ai.model: MiniMax's Anthropic-compatible
+	// endpoint does not serve the Claude default model, so key-only setup
+	// must route to a model MiniMax actually hosts. Override with
+	// MINIMAX_MODEL or ai.model.
+	MiniMaxDefaultModel = "MiniMax-M2"
+)
+
+// ResolveAIAPIKey returns the API key for Anthropic-compatible AI calls.
+//
+// Precedence: ANTHROPIC_API_KEY > MINIMAX_API_KEY > ai.api_key > explicit.
+func ResolveAIAPIKey(explicit string) (string, AIAPIKeySource) {
+	if envKey := os.Getenv("ANTHROPIC_API_KEY"); envKey != "" {
+		return envKey, AIAPIKeySourceAnthropicEnv
+	}
+	if envKey := os.Getenv("MINIMAX_API_KEY"); envKey != "" {
+		return envKey, AIAPIKeySourceMiniMaxEnv
+	}
+	if configKey := GetString("ai.api_key"); configKey != "" {
+		return configKey, AIAPIKeySourceConfig
+	}
+	if explicit != "" {
+		return explicit, AIAPIKeySourceExplicit
+	}
+	return "", AIAPIKeySourceNone
+}
+
+// DefaultAIBaseURL returns the configured base URL for Anthropic-compatible AI calls.
+//
+// Precedence: ai.base_url (or BD_AI_BASE_URL) > MINIMAX_BASE_URL > MiniMax default
+// when MINIMAX_API_KEY selected the key. Empty means use the SDK's Anthropic default.
+func DefaultAIBaseURL(keySource AIAPIKeySource) string {
+	if baseURL := GetString("ai.base_url"); baseURL != "" {
+		return baseURL
+	}
+	if keySource == AIAPIKeySourceMiniMaxEnv {
+		if baseURL := os.Getenv("MINIMAX_BASE_URL"); baseURL != "" {
+			return baseURL
+		}
+		return MiniMaxDefaultBaseURL
+	}
+	return ""
 }
 
 // AllSettings returns all configuration settings as a map
@@ -855,7 +1331,9 @@ func ResolveExternalProjectPath(projectName string) string {
 //  3. git config user.name
 //  4. hostname
 //
-// This is used as the sender field in bd mail commands.
+// The Git lookup discards custom GIT_CONFIG_GLOBAL paths and other routing
+// overrides, while retaining explicit config suppression. Set user.name in
+// the default global config location when global config is enabled.
 func GetIdentity(flagValue string) string {
 	// 1. Command-line flag takes precedence
 	if flagValue != "" {
@@ -869,6 +1347,7 @@ func GetIdentity(flagValue string) string {
 
 	// 3. git config user.name
 	cmd := exec.Command("git", "config", "user.name")
+	cmd.Env = gitenv.ScrubRouting(os.Environ())
 	if output, err := cmd.Output(); err == nil {
 		if gitUser := strings.TrimSpace(string(output)); gitUser != "" {
 			return gitUser
@@ -946,6 +1425,28 @@ func GetCustomTypesFromYAML() []string {
 // Returns nil if no infra types are configured in config.yaml (caller should use defaults).
 func GetInfraTypesFromYAML() []string {
 	return getConfigList("types.infra")
+}
+
+// GetRetainedTypesFromYAML reports a types.retained key in config.yaml (or
+// BD_TYPES_RETAINED). The setting is read from the workspace database ONLY —
+// a sweep never consults this layer, because the rule must be the same for
+// every client of a shared workspace — so the one use of this value is to warn
+// that it is ignored. Returns nil if the key is absent.
+func GetRetainedTypesFromYAML() []string {
+	return getConfigList("types.retained")
+}
+
+// RetainedTypesYAMLWarning is the warning for a types.retained key in
+// config.yaml (or BD_TYPES_RETAINED), or "" when there is none. Every command
+// that honors the setting prints it before it selects: the key here would
+// otherwise look like protection while protecting nothing.
+func RetainedTypesYAMLWarning() string {
+	names := GetRetainedTypesFromYAML()
+	if len(names) == 0 {
+		return ""
+	}
+	list := strings.Join(names, ",")
+	return fmt.Sprintf("types.retained in config.yaml (%s) is ignored: it is read from the workspace database only; set it with `bd config set types.retained %s`", list, list)
 }
 
 // GetCustomStatusesFromYAML retrieves custom statuses from config.yaml.

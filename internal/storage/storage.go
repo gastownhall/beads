@@ -10,70 +10,115 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
+	"github.com/steveyegge/beads/journalops"
+	"github.com/steveyegge/beads/memoryops"
 )
 
-// ErrAlreadyClaimed is returned when attempting to claim an issue that is already
-// claimed by another user. The error message contains the current assignee.
-var ErrAlreadyClaimed = errors.New("issue already claimed")
+// The guarded issue-operation error vocabulary is declared and documented by
+// the public contract package, github.com/steveyegge/beads/issueops. These are
+// the same values, so every storage.ErrX reference and every errors.Is site
+// keeps matching the identical error.
+var (
+	ErrAlreadyClaimed    = issueops.ErrAlreadyClaimed
+	ErrNotClaimable      = issueops.ErrNotClaimable
+	ErrAssigneeMismatch  = issueops.ErrAssigneeMismatch
+	ErrNotFound          = issueops.ErrNotFound
+	ErrValidation        = issueops.ErrValidation
+	ErrNotInitialized    = issueops.ErrNotInitialized
+	ErrPrefixMismatch    = issueops.ErrPrefixMismatch
+	ErrCloseBlocked      = issueops.ErrCloseBlocked
+	ErrCloseOpenChildren = issueops.ErrCloseOpenChildren
+	ErrAlreadyExists     = issueops.ErrAlreadyExists
+	// ErrIdempotencyExpired matches a create refused because a retaining
+	// retention sweep retired its id (issueops.IdempotencyExpiredError).
+	ErrIdempotencyExpired = issueops.ErrIdempotencyExpired
+	ErrAlreadyIdentified  = issueops.ErrAlreadyIdentified
+	ErrVersionMismatch    = issueops.ErrVersionMismatch
+	ErrStatusMismatch     = issueops.ErrStatusMismatch
+	ErrNotesOverwrite     = issueops.ErrNotesOverwrite
+)
 
-// ErrNotClaimable is returned when attempting to claim an issue that is not in a
-// claimable state, such as closed, deferred, or already in progress without the
-// same actor owning the claim.
-var ErrNotClaimable = errors.New("issue not claimable")
+// CloseOpenChildrenError reports the issue and open-child count that refused a
+// guarded close. See issueops.CloseOpenChildrenError.
+type CloseOpenChildrenError = issueops.CloseOpenChildrenError
+
+// VersionMismatchError reports the expected and current row versions that
+// refused a guarded write. See issueops.VersionMismatchError.
+type VersionMismatchError = issueops.VersionMismatchError
 
 // ErrNotOwner is returned when an actor tries to unclaim an issue that is claimed
 // by a different actor. Releasing another actor's claim requires the force
 // escape hatch (bd unclaim --force), reserved for admin/reaper use.
-var ErrNotOwner = errors.New("issue claimed by a different actor")
+//
+// It is an ALIAS of issueops.ErrNotOwner, which now declares it: a refusal the
+// public Releaser role raises has to be classifiable by a caller that cannot
+// import this package. The identity is preserved, so every errors.Is site in
+// the tree keeps matching the same value.
+var ErrNotOwner = issueops.ErrNotOwner
 
-// ErrAssigneeMismatch is returned by UnclaimIssueIfAssignee when the issue's
-// current assignee does not match the expected assignee (including when the
-// issue is no longer assigned at all). The caller's view of the claim was
-// stale; the issue is left untouched.
-var ErrAssigneeMismatch = errors.New("assignee mismatch")
+// ErrCommitIndeterminate marks a write error whose durable outcome may be
+// unknown. Such errors must not be replayed because the write may already have
+// landed; retry layers must check this sentinel before classifying a wrapped
+// cause as transient.
+var ErrCommitIndeterminate = errors.New("write commit result indeterminate")
 
 // ClaimedByFragment and NotClaimableStatusFragment are the exact message
-// fragments the claim path (issueops/claim.go) appends after the sentinel to
-// carry the conflicting assignee/status: ErrAlreadyClaimed is wrapped as
-// "<sentinel> by <assignee>" and ErrNotClaimable as "<sentinel>: status
-// <status>". They are the single source of truth for that format so producer
-// (claim.go) and consumer (beads.ParseClaimConflict) cannot drift: the consumer
-// reconstructs its marker as ErrAlreadyClaimed.Error()+ClaimedByFragment rather
-// than hardcoding the literal.
+// fragments a claim refusal puts after the sentinel to carry the conflicting
+// assignee/status: ErrAlreadyClaimed reads "<sentinel> by <assignee>" and
+// ErrNotClaimable reads "<sentinel>: status <status>". They are the single
+// source of truth for that format so producer and consumer
+// (beads.ParseClaimConflict) cannot drift: the consumer reconstructs its marker
+// as ErrAlreadyClaimed.Error()+ClaimedByFragment rather than hardcoding the
+// literal.
+//
+// The producers are the two claim bodies —
+// internal/storage/issueops.ClaimIssueInTx and
+// internal/storage/domain.issueUseCaseImpl.claim — which compose the message
+// before wrapping it in an issueops.ClaimConflictError. That type's Error() is
+// a PASSTHROUGH, so the fragments must be in the wrapped error; a caller
+// reading the type's FIELDS needs none of this. These stay for the parser, and
+// the conformance suite's RunClaimRefusalMessagesCarryTheirFragments plus the
+// root-package ParseClaimConflict tests are the tripwires that producer and
+// consumer still agree character for character.
+//
+// One refusal deliberately omits the " by <assignee>" tail: an OPEN issue held
+// by someone else answers with holder-steering copy instead (wy-yuclk), so its
+// assignee is recovered from the typed field rather than the prose.
 const (
 	ClaimedByFragment          = " by "
 	NotClaimableStatusFragment = ": status "
 )
 
-// ErrNotFound is returned when a requested entity does not exist in the database.
-var ErrNotFound = errors.New("not found")
+// ErrCredentialKeyMismatch is returned when a stored federation peer's password
+// cannot be decrypted with the local credential key. federation_peers rows
+// travel with the database, but the key file is machine-local and gitignored,
+// so a database pulled from another machine carries peer passwords this
+// machine's key cannot read. Callers errors.Is it to tell that local key
+// problem apart from an unreachable peer.
+var ErrCredentialKeyMismatch = errors.New("stored peer credentials cannot be decrypted with this machine's credential key")
 
-// ErrNotInitialized is returned when the database has not been initialized
-// (e.g., issue_prefix config is missing).
-var ErrNotInitialized = errors.New("database not initialized")
-
-// ErrPrefixMismatch is returned when an issue ID does not match the configured prefix.
-var ErrPrefixMismatch = errors.New("prefix mismatch")
-
-// ErrCloseBlocked is returned by CloseIssueChecked when an issue cannot be
-// closed because it is still blocked (is_blocked=1: an open blocking dependency
-// or an open blocking gate). Bypass with CloseIssueOptions.Force.
-var ErrCloseBlocked = errors.New("cannot close blocked issue")
-
-// ErrVersionMismatch is returned by a *Checked op given an ExpectedVersion that
-// no longer matches the row's current version (row_lock) — an optimistic
-// concurrency failure. Callers errors.Is it to distinguish a lost-update
-// precondition from other errors.
-var ErrVersionMismatch = errors.New("version mismatch")
-
-// ErrStatusMismatch is returned by UpdateIssueChecked given an ExpectedStatus
-// that no longer matches the issue's current status. The caller's view of the
-// issue was stale; the issue is left untouched. The assignee analog is
-// ErrAssigneeMismatch, shared with UnclaimIssueIfAssignee.
-var ErrStatusMismatch = errors.New("status mismatch")
+// CredentialKeyMismatchError wraps a federation password decrypt failure with
+// the ErrCredentialKeyMismatch sentinel, the machine-local nature of keyFile,
+// and the command that re-stores the password on this machine. Both backends
+// (dolt, embeddeddolt) call it with their own credentialKeyFile so the operator
+// reads one wording whichever store answered.
+//
+// The machine-local key is context, not an asserted cause: an AES-GCM open also
+// fails on a tampered or truncated blob and on a row still encrypted under the
+// pre-migration legacy key. Re-adding the peer is the fix in every one of those
+// cases, so the remediation holds even where the parenthetical does not.
+//
+// cause stays wrapped, so the raw cipher error remains readable and both the
+// sentinel and cause are reachable through errors.Is / errors.As.
+func CredentialKeyMismatchError(keyFile string, cause error) error {
+	return fmt.Errorf("%w (the key file %s is machine-local and does not replicate with the database); re-run 'bd federation add-peer <name> <url> --user <user>' on this machine: %w",
+		ErrCredentialKeyMismatch, keyFile, cause)
+}
 
 // CommentPageCursor is the resume position for a keyset page of an issue's
 // comments: the (created_at, id) of the last comment already returned. The zero
@@ -97,6 +142,281 @@ type CommentPageCursor struct {
 // implementations; such additions are called out in CHANGELOG.md and the
 // examples/library-usage guide so implementers have a migration path.
 type Storage interface {
+	// IssueLifecycle returns the guarded issue-lifecycle surface for this
+	// store. Every decorator in a store's chain answers for itself and layers
+	// its own behavior onto the inner result, so the returned Lifecycle carries
+	// the same hook and telemetry layers the store itself carries.
+	//
+	// A capability the lifecycle role does not cover gets its own role
+	// interface and its own accessor here; it does not get appended to
+	// issueops.Lifecycle.
+	IssueLifecycle() (issueops.Lifecycle, error)
+
+	// IssueReader returns the guarded issue-query surface for this store: the
+	// read counterpart of IssueLifecycle, and its own role rather than four
+	// more methods on that one. Like the lifecycle accessor, every decorator
+	// in a store's chain answers for itself, so the returned Reader carries the
+	// same layers the store itself carries.
+	//
+	// Reads fire no hooks, so the hook decorator's answer is its inner store's
+	// unchanged. The accessor exists on it anyway: a seam a caller has to
+	// reason about decorator-by-decorator is not a seam.
+	IssueReader() (issueops.Reader, error)
+
+	// IssueClaimer returns the guarded atomic-claim surface for this store:
+	// its own role beside IssueLifecycle and IssueReader rather than a fifth
+	// verb on the lifecycle. Like the other two accessors, every decorator in
+	// a store's chain answers for itself and layers its own behavior onto the
+	// inner result.
+	IssueClaimer() (issueops.Claimer, error)
+
+	// ReadyClaimer returns the guarded take-ready-work surface for this store.
+	// It is its own role rather than a fifth verb on IssueLifecycle because
+	// the caller names a question and the implementation picks the answer, so
+	// selection is part of the operation and not a patch. Like the other
+	// accessors, every decorator in a store's chain answers for itself.
+	ReadyClaimer() (issueops.ReadyClaimer, error)
+
+	// BatchCloser returns the guarded close-many surface for this store: the
+	// role whose REQUEST is the transaction boundary, so N closes land as one
+	// durable act instead of N. It is its own role rather than a Close
+	// overload because a batch reports per-item outcomes that a single close
+	// has nowhere to put.
+	BatchCloser() (issueops.BatchCloser, error)
+
+	// BatchCreator returns the guarded create-many surface for this store: the
+	// other role whose REQUEST is the transaction boundary. It is its own role
+	// rather than a Create overload because a batch is ALL OR NOTHING where a
+	// batch close keeps its survivors.
+	BatchCreator() (issueops.BatchCreator, error)
+
+	// DependencyEditor returns the guarded dependency-edge surface for this
+	// store. It is its own role rather than more IssueLifecycle verbs because
+	// an edge has two endpoints and every refusal it raises is a statement
+	// about the graph they sit in, which a patch has nowhere to put.
+	DependencyEditor() (issueops.DependencyEditor, error)
+
+	// Commenter returns the guarded add-comment surface for this store. It is
+	// its own role because a comment appends to a thread the issue owns and
+	// changes no field of the issue, so an IssuePatch has nothing to carry.
+	Commenter() (issueops.Commenter, error)
+
+	// Counter returns the guarded issue-count surface for this store. It is
+	// its own role rather than a fourth IssueReader method because a count is
+	// a NUMBER about a set where the reader answers with pages of issues:
+	// there is no order, no page and no cursor in the question.
+	//
+	// Reads fire no hooks, as for IssueReader.
+	Counter() (issueops.Counter, error)
+
+	// StatsReporter returns the guarded summary-statistics surface for this
+	// store — `bd status` and its `bd stats` alias. Its own role rather than a
+	// sixth Counter dimension because its numbers are dependency-aware.
+	StatsReporter() (issueops.StatsReporter, error)
+
+	// IssueRelations returns the guarded neighbor-query surface for this
+	// store: the read counterpart of DependencyEditor. It is its own role
+	// rather than a fourth IssueReader method because it answers a question
+	// about EDGES — anchored on one issue, directed, and carrying the edge
+	// type — where the reader answers with pages of issues.
+	//
+	// Reads fire no hooks, so the hook decorator's answer is its inner store's
+	// unchanged, as it is for IssueReader.
+	IssueRelations() (issueops.Relations, error)
+
+	// WorkspaceConfig returns the guarded workspace-settings surface for this
+	// store: the durable key-value plane `bd config` reads and writes. It is
+	// its own role rather than more verbs elsewhere because it answers about
+	// the WORKSPACE rather than about an issue, and because a write here can
+	// re-project a value into a normalized lookup table.
+	WorkspaceConfig() (issueops.WorkspaceConfig, error)
+
+	// Memories returns the guarded persistent-memory surface for this store:
+	// the keyed notes `bd remember`, `bd recall`, `bd forget` and `bd memories`
+	// work with, and that `bd prime` injects.
+	//
+	// IT IS NOT MORE WorkspaceConfig VERBS, and the rule forbidding that is the
+	// least of the reasons. Memories ride in the config table but they are user
+	// data in a reserved namespace, they are their own MERGE CLASS — a config
+	// conflict auto-resolves with --theirs only when every conflicted key is a
+	// memory — they have their own validation vocabulary (content, derived
+	// keys) and they have a found/not-found user contract the settings plane
+	// deliberately does not have. A settings enumeration that carried them
+	// would be answering a different question in the same list.
+	//
+	// Its hook decorator recurses UNWRAPPED for the vocabulary reason Sweeper's
+	// does: remembering is a write, but the hook vocabulary is on_create,
+	// on_update and on_close and each hands a script an ISSUE. See
+	// hook_memories.go.
+	Memories() (memoryops.Memories, error)
+
+	// VersionReconciler returns the clone-local version markers for this store:
+	// the dolt-ignored pair recording which bd binary last opened this
+	// workspace and the highest one that ever has. It is its own role rather
+	// than two more keys on WorkspaceConfig because settings are durable and
+	// travel with the database while these two are deliberately per-clone.
+	VersionReconciler() (issueops.VersionReconciler, error)
+
+	// CycleDetector returns the guarded cycle-report surface for this store: its
+	// own role because it is asked of the WHOLE graph and answers with paths,
+	// where every Relations request names one anchor and answers with that
+	// anchor's neighbors. Reads fire no hooks, as for IssueReader.
+	CycleDetector() (issueops.CycleDetector, error)
+	// EdgeReader returns the guarded stored-edge surface for this store: raw
+	// dependency rows for many anchors at once, keyed by source, with a
+	// per-anchor miss. Its own role rather than a second IssueRelations method,
+	// which is single-anchor, answers with hydrated issues, and refuses a
+	// missing anchor outright. Reads fire no hooks, as for IssueReader.
+	EdgeReader() (issueops.EdgeReader, error)
+	// BlockingAnnotator returns the guarded blocking-decoration surface for this
+	// store: the open blockers, the issues blocked and the parent of a page of
+	// ids, which is what a listing prints beside each row. Its own role rather
+	// than a second EdgeReader method because that one answers with STORED ROWS
+	// where this one answers a DERIVED summary of two edge types with closed
+	// blockers dropped. Reads fire no hooks, as for IssueReader.
+	BlockingAnnotator() (issueops.BlockingAnnotator, error)
+	// TreeWalker returns the guarded dependency-tree surface for this store: the
+	// recursive walk from ONE root that `bd dep tree` renders. Its own role
+	// rather than a mode of IssueRelations or EdgeReader because a recursive
+	// walk has a depth, a cycle policy and a node shape of its own. Reads fire
+	// no hooks, as for IssueReader.
+	TreeWalker() (issueops.TreeWalker, error)
+	// GraphCounter returns the guarded edge-count surface for this store: how
+	// many dependency edges each of several anchors has, in one named
+	// direction, spanning both dependency planes. Its own role rather than a
+	// third Counter method (that one's predicate is a filter over the issues
+	// table and says nothing about an edge) and rather than a counted
+	// EdgeReader (that one answers with the stored ROWS, outbound only). Reads
+	// fire no hooks, as for IssueReader.
+	GraphCounter() (issueops.GraphCounter, error)
+	// BatchGetter returns the guarded batch-read surface for this store: many
+	// issues by id, hydrated, in ONE snapshot. Its own role rather than a mode
+	// of IssueReader because a miss here is a RESULT FIELD (Missing) and not
+	// ErrNotFound — a batch GET is a set read, not a precondition on every
+	// member succeeding. Reads fire no hooks, as for IssueReader.
+	BatchGetter() (issueops.BatchGetter, error)
+	// ReadyCounter returns the guarded ready-count surface for this store: the
+	// size of the ready set, which is the number `bd ready`'s pagination
+	// publishes and which no other role answers. Counter's predicate is a
+	// filter over one table where the ready predicate is blocker-aware.
+	//
+	// Reads fire no hooks, as for IssueReader.
+	ReadyCounter() (issueops.ReadyCounter, error)
+	// Querier returns the guarded boolean-query surface for this store: `bd
+	// query`'s expression language, which has OR, NOT and parentheses. Its own
+	// role rather than a mode of IssueReader because a ListRequest is a
+	// CONJUNCTION and expresses no disjunction. Reads fire no hooks, as for
+	// IssueReader.
+	Querier() (issueops.Querier, error)
+	// Sweeper returns the guarded bulk-clearance surface for this store —
+	// `bd purge` and `bd prune`, which are one capability over two disjoint
+	// tiers rather than two. Its own role because it describes a SET and then
+	// acts on it: no Lifecycle patch names a set, and composing a count with a
+	// delete would reopen the window this role exists to close.
+	//
+	// It is the one WRITE role whose hook decorator recurses UNWRAPPED: there
+	// is no on_delete hook to fire (internal/hooks publishes create, update
+	// and close), and the rows a sweep would name it with are gone. See
+	// hook_sweeper.go.
+	Sweeper() (issueops.Sweeper, error)
+	// Deleter returns the named-row erasure surface for this store —
+	// `bd delete`. Its own role rather than a Sweeper mode because Sweeper
+	// erases a set the caller DESCRIBED and this one erases rows the caller
+	// NAMED: a named row with a dependent the request did not name is refused
+	// unless the caller says cascade or force.
+	//
+	// Its hook decorator recurses UNWRAPPED for the same reason Sweeper's
+	// does: there is no on_delete hook to fire and the rows are gone. See
+	// hook_deleter.go.
+	Deleter() (issueops.Deleter, error)
+	// Bootstrapper returns the guarded identity-seeding surface for this store:
+	// the one-time write that turns a database bd can connect to into a
+	// workspace bd can use. It is its own role rather than more keys on
+	// WorkspaceConfig because it REFUSES an already-identified substrate, which
+	// is a guard no settings write has anywhere to express.
+	//
+	// Its hook decorator recurses unwrapped for the vocabulary reason Sweeper's
+	// does: a bootstrap names no issue, and on a workspace this new the hooks
+	// are not installed yet. See hook_bootstrapper.go.
+	Bootstrapper() (issueops.Bootstrapper, error)
+	// InitVerifier returns the guarded identity-read surface for this store: the
+	// prefix and project id `bd init` adopts, reconciles against, or refuses to
+	// invent. It is NOT Bootstrapper's read half: bd reads this identity on
+	// paths where it is forbidden to write one — a bts-provisioned team
+	// database, a gateway whose credential may be read-only — and a caller that
+	// must not write must not be handed the writer.
+	//
+	// Reads fire no hooks, as for IssueReader.
+	InitVerifier() (issueops.InitVerifier, error)
+	// MetadataCAS returns the conditional single-key metadata write for this
+	// store: set metadata[key] only if it currently holds the value the caller
+	// expected. It is its own role rather than another Lifecycle guard because
+	// Lifecycle's ExpectedVersion/Assignee/Status gate an ordinary edit on the
+	// row's LIFECYCLE, and coordination state that is not a claim lives on keys
+	// the caller invented, which no lifecycle guard can name.
+	//
+	// It is a WRITE role and its hook decorator WRAPS: a swap that lands is an
+	// update to an issue, which is a hook the vocabulary publishes. See
+	// hook_metadata_cas.go.
+	MetadataCAS() (issueops.MetadataCAS, error)
+	// BatchApplier returns the guarded apply-many surface for this store:
+	// a HETEROGENEOUS list of creates, updates, closes and edges applied in
+	// declaration order as one durable act. It is its own role rather than a
+	// fifth batch verb because its unit is a PLAN — create these, wire them,
+	// close the step that spawned them — and each of BatchCreator, BatchCloser
+	// and DependencyEditor is one verb repeated, so composing two of them means
+	// two transactions with a window in between.
+	//
+	// It is a WRITE role and its hook decorator WRAPS: every landed item is an
+	// event the hook vocabulary publishes. See hook_batch_applier.go.
+	BatchApplier() (issueops.BatchApplier, error)
+	// Releaser returns the claim-release surface for this store: give up the
+	// claim on one issue, optionally only while a named holder still has it.
+	// It is its own role beside IssueClaimer rather than a method on it,
+	// because a caller entitled to release its own work is often not entitled
+	// to take new work, and a surface carrying both hands it a capability it
+	// should not be able to reach.
+	//
+	// It is a WRITE role and its hook decorator WRAPS: a release changes
+	// assignee and status, which is on_update — the same event the journal
+	// already records for it. See hook_releaser.go.
+	Releaser() (issueops.Releaser, error)
+	// LeaseReclaimer returns the lease-sweep surface for this store: revert
+	// every lease that has been held past its deadline back to its
+	// pre-claim state, for a caller that is a clock rather than a human or a
+	// request.
+	//
+	// It is a WRITE role and its hook decorator WRAPS: a reclaim changes
+	// assignee and status per reverted row, which is on_update, the same
+	// event Releaser fires. See hook_lease_reclaimer.go.
+	LeaseReclaimer() (issueops.LeaseReclaimer, error)
+	// Heartbeater returns the lease-refresh surface for this store: push the
+	// lease the caller holds on one issue forward by the store's TTL.
+	//
+	// It is a WRITE role and its hook decorator WRAPS: a refresh writes only
+	// the ephemeral lease row and fires nothing, but a re-arm (a live claim
+	// with no lease row, HeartbeatResult.Rearmed) is recorded as a mutation
+	// and fires on_update once. That is why RoleFiresHooks answers true for
+	// it, and a server must take it off a peeled store. See
+	// hook_heartbeater.go.
+	Heartbeater() (issueops.Heartbeater, error)
+	// BlockedLister returns the blocked-listing surface for this store: what
+	// `bd blocked` prints. It is a READ role and its hook decorator passes it
+	// through (hook_blocked_lister.go); the external-dependency decorator
+	// overrides it so the listing names unsatisfied external blockers, as its
+	// GetBlockedIssues does.
+	BlockedLister() (issueops.BlockedLister, error)
+
+	// MoleculeStepper returns the advance-a-molecule surface for this store:
+	// find a molecule's next ready step after one closed and, on request,
+	// claim it — the operation behind `bd close --continue`. Every local
+	// backend answers issueops.NewMoleculeStepper composed over its own
+	// roles; a remote backend serves it over its wire.
+	//
+	// It is a WRITE role and its hook decorator WRAPS: a claimed step fires
+	// on_update, as every claim does.
+	MoleculeStepper() (issueops.MoleculeStepper, error)
+
 	// Issue CRUD
 	CreateIssue(ctx context.Context, issue *types.Issue, actor string) error
 	CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error
@@ -116,9 +436,13 @@ type Storage interface {
 	// when the current assignee differs.
 	UnclaimIssueIfAssignee(ctx context.Context, id string, actor string, expectedAssignee string) error
 	UpdateIssueType(ctx context.Context, id string, issueType string, actor string) error
+	// CloseIssue is the raw close: it applies neither the close guards nor
+	// close policy, except over HTTP, where it closes with force and a template
+	// — the one guard force never bypasses — still refuses.
 	CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error
-	// CloseIssueChecked closes an issue, but refuses with ErrCloseBlocked when
-	// the issue has a live direct blocker (an open blocks/waits-for/
+	// CloseIssueChecked closes an issue, but refuses with ErrCloseOpenChildren
+	// when it has open parent-child dependents, or ErrCloseBlocked when it has a
+	// live direct blocker (an open blocks/waits-for/
 	// conditional-blocks edge) unless opts.Force is set — the historical
 	// `bd close` guard. A bare is_blocked=1 with no live direct blocker (a purely
 	// transitive parent-child block, or a stale column) is not refused. The
@@ -126,9 +450,16 @@ type Storage interface {
 	// (no TOCTOU). When opts.ExpectedVersion is non-nil it adds an orthogonal
 	// optimistic-concurrency precondition: the close proceeds only if the issue's
 	// current RowVersion still equals *opts.ExpectedVersion, else it refuses with
-	// ErrVersionMismatch atomically (Force does NOT bypass this check). Already-
-	// closed is an idempotent success with Unchanged=true; a missing issue returns
-	// ErrNotFound.
+	// ErrVersionMismatch atomically (Force does NOT bypass this check). After
+	// the version check and before the child and blocker policy it applies the
+	// close guards in the same transaction: a template refuses with
+	// *issueops.TemplateReadOnlyError whatever Force says, and unless Force is
+	// set a pinned issue refuses with *issueops.PinnedError and one assigned to
+	// someone other than actor with *issueops.CloseNotAssigneeError. Already-
+	// closed is an idempotent success with Unchanged=true and skips the guards;
+	// a missing issue returns ErrNotFound. CloseIssue above is the raw close and
+	// applies neither the guards nor the policy, except that over HTTP, where
+	// the template guard has no bypass on the wire, a template still refuses.
 	CloseIssueChecked(ctx context.Context, id string, actor string, opts CloseIssueOptions) (CloseIssueResult, error)
 	DeleteIssue(ctx context.Context, id string) error
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
@@ -137,6 +468,29 @@ type Storage interface {
 	// returns only matching issue IDs. Use when full row hydration is wasted
 	// (e.g., partial-ID resolution in internal/utils/id_parser.go).
 	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
+	// SearchIssueSummaries is a narrow-projection variant of SearchIssues that
+	// returns []*types.IssueSummary instead of full issues, for list-shaped
+	// rendering paths that never dereference TEXT/JSON columns. SortBy/SortDesc
+	// are honored identically to SearchIssues — including SortBy=="id", which
+	// both paths deliberately leave to the caller: sqlbuild.OrderBy emits no
+	// ORDER BY for it (sqlbuild.IsGoSideSort), so storage orders id-sorted rows
+	// only where the issues+wisps merge re-sorts them (sqlbuild.LessSummary,
+	// mirroring sqlbuild.Less for SearchIssues). The user-facing id order is
+	// cmd/bd's, applied post-call via utils.NaturalCompareIDs — numeric-aware
+	// and intentionally different from the lexicographic storage comparator, so
+	// a storage-side id sorter here would diverge from SearchIssues rather than
+	// complete it.
+	//
+	// Two filter fields behave differently here than on SearchIssues, both
+	// because types.IssueSummary has no Dependencies field to populate:
+	// IncludeDependencies is a silent no-op (SearchIssues hydrates dependency
+	// records; this path has nowhere to put them, so a caller that needs them
+	// must use SearchIssues), while SkipLabels is honored exactly as it is
+	// there. Wisps are NOT excluded: the issues+wisps merge runs for any filter
+	// that does not set SkipWisps, and types.IssueSummary carries the four
+	// wisp-plane markers so a merged wisp row serializes identically to the one
+	// SearchIssues would return.
+	SearchIssueSummaries(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueSummary, error)
 
 	// Dependencies
 	AddDependency(ctx context.Context, dep *types.Dependency, actor string) error
@@ -162,10 +516,29 @@ type Storage interface {
 	RemoveLabel(ctx context.Context, issueID, label, actor string) error
 	GetLabels(ctx context.Context, issueID string) ([]string, error)
 	GetIssuesByLabel(ctx context.Context, label string) ([]*types.Issue, error)
+	// RenameLabel renames a label across every issue and wisp that carries
+	// it. An issue that already carries newLabel is a merge (the stale
+	// oldLabel row is dropped, no error) rather than a duplicate-key
+	// conflict. renamed is the count of issues and wisps that carried
+	// oldLabel; merged is the subset that already had newLabel; ids lists
+	// every touched id, both planes together. oldLabel carried by nothing is
+	// an honest no-op: renamed and merged are 0, ids is nil, err is nil.
+	// oldLabel and newLabel equal after trimming is refused with
+	// issueops.ErrRenameLabelSameName instead of treated as a no-op - the
+	// merge branch above would otherwise wipe the label instead of leaving
+	// it alone (every carrier already "has newLabel", so the stale-row drop
+	// removes every row).
+	RenameLabel(ctx context.Context, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, err error)
 
 	// Work queries
 	GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error)
 	GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, error)
+	// GetReadyWorkWithCountsAndTotal is GetReadyWorkWithCounts plus the size
+	// of the whole ready set the page was cut from — the same number
+	// ReadyWorkCounter.CountReadyWork(filter) answers — resolved in the same
+	// read transaction and statements as the page. It is what lets
+	// `bd ready --limit N` print "Showing N of M" without a second pass.
+	GetReadyWorkWithCountsAndTotal(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, int, error)
 	GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error)
 	GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error)
 
@@ -205,6 +578,13 @@ type Storage interface {
 	GetIssueCommentsPage(ctx context.Context, issueID string, after CommentPageCursor, limit int) ([]*types.Comment, error)
 	GetEvents(ctx context.Context, issueID string, limit int) ([]*types.Event, error)
 	GetAllEventsSince(ctx context.Context, since time.Time) ([]*types.Event, error)
+
+	// Provenance is an append-only event log binding issues to opaque external
+	// artifacts (git SHAs, PRs, work-ids). Record is idempotent on a
+	// deterministic id; there is deliberately no update or delete operation.
+	RecordProvenanceEvent(ctx context.Context, ev types.ProvenanceEvent) (id string, inserted bool, err error)
+	GetProvenanceEvents(ctx context.Context, issueID string, kindFilter string) ([]types.ProvenanceEvent, error)
+	GetProvenanceByRef(ctx context.Context, ref string) ([]types.ProvenanceEvent, error)
 
 	// Aggregate counts — cheaper than materializing rows when only cardinality is needed.
 	// Filter.Limit and Filter.Offset are ignored by CountIssues; all others apply.
@@ -271,7 +651,11 @@ type Storage interface {
 	SetLocalMetadata(ctx context.Context, key, value string) error
 	GetLocalMetadata(ctx context.Context, key string) (string, error)
 
-	// Transactions
+	// RunInTransaction may retry setup failures before fn is entered. Once fn
+	// starts, it is invoked at most once for this public call: callers retry
+	// explicitly when repeating their work is safe. An error wrapping
+	// ErrCommitIndeterminate means the durable outcome may be unknown and must
+	// not be blindly replayed.
 	RunInTransaction(ctx context.Context, commitMsg string, fn func(tx Transaction) error) error
 
 	// MergeSlot — serialized conflict resolution primitive.
@@ -302,14 +686,14 @@ type Storage interface {
 type CloseIssueOptions struct {
 	Reason  string
 	Session string
-	Force   bool // bypass the is_blocked guard (mirrors `bd close --force`)
+	Force   bool // bypass close policy and the pin and assignee guards, never the template (mirrors `bd close --force`)
 	// ExpectedVersion, when non-nil, gates the close on an optimistic-concurrency
 	// check: the close proceeds only if the issue's current RowVersion (the
 	// row_lock token) equals *ExpectedVersion, otherwise it refuses with
 	// ErrVersionMismatch atomically (the version read and the close share one
 	// transaction). nil disables the check, leaving behavior unchanged. It is a
 	// pointer, not an int64, so nil ("no check") is distinct from a caller that
-	// requires version 0. Force bypasses only the is_blocked guard, not this
+	// requires version 0. Force bypasses child and blocker policy, not this
 	// version check.
 	//
 	// RowVersion tracks lifecycle/ownership writes only — it is rewritten by
@@ -324,7 +708,8 @@ type CloseIssueOptions struct {
 
 // CloseIssueResult reports the outcome of CloseIssueChecked.
 type CloseIssueResult struct {
-	Unchanged bool // true when the issue was ALREADY closed (idempotent no-op)
+	Unchanged    bool // true when the issue was ALREADY closed (idempotent no-op)
+	OpenChildren int  // nonzero when Force encountered open children, including idempotent re-closes
 }
 
 // UpdateIssueOptions carries the optional inputs to UpdateIssueChecked.
@@ -390,6 +775,7 @@ type FastStatisticsStore interface {
 // EmbeddedDoltStore satisfy this interface.
 type DoltStorage interface {
 	Storage
+	IssueLifecycleStore
 	VersionControl
 	HistoryViewer
 	RemoteStore
@@ -427,10 +813,31 @@ type ActiveDatabaseSizer interface {
 	ActiveDatabaseSize(ctx context.Context) (int64, error)
 }
 
+// ExternalGCLocator supplies the authoritative local working directory for
+// the active database's external garbage-collection tool. Implementations
+// return *ErrUnsupported when this instance cannot authorize that operation.
+// Neither a readable size nor a general store path grants this capability.
+type ExternalGCLocator interface {
+	ExternalGCPath(ctx context.Context) (string, error)
+}
+
 // GarbageCollector provides Dolt garbage collection capability.
 // Callers that need to reclaim disk space should type-assert to this interface.
 type GarbageCollector interface {
 	DoltGC(ctx context.Context) error
+}
+
+// FullGarbageCollector provides a full Dolt garbage collection, which collects
+// the old generation as well as the new one.
+//
+// Dolt GC is generational: each pass promotes the chunks reachable at that
+// moment into the old generation, and DoltGC only visits the new generation.
+// After a history rewrite (Flatten, Compact) the orphaned commit chain usually
+// lives in the old generation, so DoltGC reclaims nothing and callers must use
+// DoltGCFull. Prefer DoltGC for periodic hygiene, where a full pass costs
+// minutes on large stores for no extra reclaim.
+type FullGarbageCollector interface {
+	DoltGCFull(ctx context.Context) error
 }
 
 // Flattener squashes all Dolt commit history into a single commit.
@@ -458,8 +865,10 @@ type SchemaMigrator interface {
 
 // Compactor squashes old Dolt commits while preserving recent ones.
 // Callers should type-assert to this interface for selective history compaction.
+// headHash is main's HEAD in the log the plan was read from; the replay is
+// verified against it (see versioncontrolops.Compact).
 type Compactor interface {
-	Compact(ctx context.Context, initialHash, boundaryHash string, oldCommits int, recentHashes []string) error
+	Compact(ctx context.Context, initialHash, boundaryHash, headHash string, oldCommits int, recentHashes []string) error
 }
 
 // BlockedRecomputer recomputes the denormalized is_blocked column for every
@@ -485,6 +894,180 @@ type StateHasher interface {
 	GetStateHash(ctx context.Context) (string, error)
 }
 
+// HeadHasher reads the hash of the HEAD commit and of the root value it
+// records: DOLT_HASHOF('HEAD') and DOLT_HASHOF_DB('HEAD'). They are the two
+// chunks of a push that a remote can report missing while it is still
+// registering them, so the guidance for Dolt's "Found dangling references"
+// push refusal prints them beside the hash the refusal names. Both Dolt
+// stores implement it, the embedded one included, where bd sql does not run.
+// Callers type-assert.
+type HeadHasher interface {
+	GetHeadHashes(ctx context.Context) (commit, root string, err error)
+}
+
+// The durable mutation journal's vocabulary lives in the journalops leaf, and
+// these four names are ALIASES of it — not copies, and not a compatibility
+// shim to be deleted later. The canon is journalops: what a record carries,
+// what a page promises and what a truncation means are stated there, once, and
+// every citation in this tree points at those symbols rather than repeating
+// them here.
+//
+// THE ALIAS DIRECTION IS THE LOAD-BEARING PART. journalops imports context and
+// fmt and nothing else, so it cannot name anything in this package; this
+// package can name it. Declaring the canon down there and aliasing up here is
+// what makes the leaf a leaf. And because a Go alias is the SAME TYPE, every
+// existing implementation, every errors.As site and every caller compiles
+// unchanged across the move — which is why the journal became a role without a
+// line of behavior changing.
+//
+// The two interfaces BELOW these aliases stay declared here on purpose. They
+// are the operator's half of the plane — retention and per-instance activation
+// — and journalops states why they are deliberately not on the role.
+type (
+	// EventsJournalRow is journalops.Row: one raw bd_events_journal record.
+	EventsJournalRow = journalops.Row
+	// EventsJournalPage is journalops.Page: rows plus the journal head.
+	EventsJournalPage = journalops.Page
+	// EventsJournalTruncatedError is journalops.TruncatedError: a checkpoint
+	// below the retained window, carrying the window that can still be served.
+	EventsJournalTruncatedError = journalops.TruncatedError
+	// EventsJournalCursor is journalops.Journal: the role a consumer holds to
+	// page through the journal from a checkpoint.
+	EventsJournalCursor = journalops.Journal
+)
+
+// EventsJournalTruncatedCode is journalops.TruncatedCode: the stable wire
+// spelling of a truncation.
+const EventsJournalTruncatedCode = journalops.TruncatedCode
+
+// EventsJournalAccessor reads and prunes the durable events journal
+// (bd_events_journal) through the store's own transaction machinery. Unlike
+// RawDBAccessor — which only the server-mode store provides — this works on the
+// embedded store too, which owns its connections and exposes no stable *sql.DB.
+//
+// IT IS THE OPERATOR SURFACE, and it is deliberately not the role. Retention is
+// a decision the workspace makes, so a caller that only READS the journal asks
+// for EventsJournalCursor — journalops.Journal — instead, and a surface
+// documented never to retain then cannot prune rather than merely promising not
+// to. journalops' package doc states the split; this is the half it excludes.
+//
+// ReadEventsJournal is also a SECOND read body, not a narrowing of the role's:
+// it pays for the head read only in the cases where the truncation verdict is
+// ambiguous, because `bd events tail --follow` runs it every second. The two
+// share the row query and the verdict (issueops.ComputeEventsTruncation) and
+// differ in exactly that, so they are pinned separately.
+type EventsJournalAccessor interface {
+	// ReadEventsJournal returns rows with seq greater than since, ordered by
+	// seq ascending, optionally capped by limit (0 = no cap). It returns
+	// *EventsJournalTruncatedError when since sits below the retained window,
+	// on the terms journalops.Journal.ReadEventsJournalPage states.
+	ReadEventsJournal(ctx context.Context, since int64, limit int) ([]EventsJournalRow, error)
+	// PruneEventsJournal deletes rows with seq below before, honoring the
+	// retain-days / retain-rows floors (0 = floor disabled), and returns the
+	// number of rows deleted.
+	PruneEventsJournal(ctx context.Context, before int64, retainDays, retainRows int) (int64, error)
+}
+
+// EventsJournalConfigurer controls durable events journal activation on ONE
+// storage instance. Implementations must never use process-global state: a
+// process can hold several stores at once (multiple projects, a test binary's
+// parallel fixtures), and opening one with the journal enabled must not turn it
+// on for any other. Callers type-assert; a store that does not implement it
+// simply cannot journal.
+//
+// Activation is operator surface for the reason retention is: it is the
+// workspace's answer to "do we record at all", read from the workspace's own
+// config, and a consumer holding the read role has no business changing it.
+type EventsJournalConfigurer interface {
+	SetEventsJournalEnabled(enabled bool)
+}
+
+// EventsJournalShapeChecker reports whether the LAST SetEventsJournalEnabled
+// call on this instance found a table shape the journal cannot run against.
+//
+// It exists because SetEventsJournalEnabled itself stays void: dozens of
+// tests across three backends already call it as a bare statement, and
+// adaptive I/O (PR A1) must not force every one of them to start checking an
+// error it never had before. Instead, enabling the journal probes the table's
+// shape internally and caches the verdict; this is the seam a factory's open
+// path checks immediately afterward. Only a typed shape verdict
+// (issueops.JournalShapeError: a missing required column, or a missing table)
+// is reported. A probe that could not run at all says nothing about the
+// table, so it degrades to the canonical shape with a warning and reports nil.
+//
+// The journal stays enabled either way, and an enabled store with an
+// unsupported shape is NOT a no-op for writes: it writes with the canonical
+// column list, so each journaled write fails loudly on its INSERT and rolls
+// back with the mutation it records — never a mutation committed with no
+// journal row. eventsjournal.Apply turns the verdict into a refused open for
+// an open that is going to write beads, so that path fails once, at open,
+// instead of on every write (the gci failure mode this interface exists to
+// avoid); an open that writes no beads is not refused. Reads are never gated
+// by the enabled flag: a table that cannot answer fails the read with a loud
+// SQL error, never a silently wrong answer.
+//
+// A store that does not implement it is assumed never to fail activation
+// (today, every implementation does).
+type EventsJournalShapeChecker interface {
+	EventsJournalActivationError() error
+}
+
+// VersionedHistoryConfigurer controls dual-write issue-version history
+// activation on ONE storage instance. Implementations must never use
+// process-global state, for the same reason as EventsJournalConfigurer:
+// a process can hold several stores at once, and enabling history on one must
+// not turn it on for any other. Callers type-assert; a store that does not
+// implement it simply cannot record version history.
+//
+// SINGLE WRITER ONLY until the version_id primary-key swap lands.
+// issue_versions is keyed PRIMARY KEY (issue_id, revision), and revision is
+// a local ordinal (MAX(revision)+1 inside the writing transaction), so two
+// disconnected writers that each mint the same ordinal for the same issue
+// collide on merge — and TryAutoResolveMergeConflicts
+// (versioncontrolops/mergesettle.go) fails the pull for a table it does not
+// know. Enabling versioned history is therefore safe only with a SINGLE
+// writer per store until migration 0068 steps 1-3 (UUID version_id primary
+// key, ordinal demoted to an index) land; those steps follow as their own
+// PR. "Single writer" means one writer at a time per store, not merely one
+// clone: MAX(revision)+1 is not a safe allocator for two concurrent
+// transactions in one store either (gastownhall/beads#6379, item 4). See
+// issueops/version_history.go for why the ordinal is never an address.
+type VersionedHistoryConfigurer interface {
+	SetVersionedHistoryEnabled(enabled bool)
+}
+
+// VersionedHistoryDeferrer is a VersionedHistoryConfigurer that can take the
+// store-plane half of the switch as a read to make later instead of an
+// answer now (internal/versionedhistory's ActivateStore and
+// ActivateProvider).
+//
+// It calls resolve inside the first write transaction it begins (a
+// unit-of-work provider: its first unit of work, read or write), before that
+// transaction's body runs, and then behaves as if
+// SetVersionedHistoryEnabled(answer) had been called at that point. The answer
+// is the row as that transaction reads it, not as it stood at open.
+// Until then it records nothing, which is all a plumbing that has not written
+// can have recorded. Asked this way, a plumbing that never writes never reads
+// the row, and one that does pays one statement inside a transaction it
+// opened anyway, rather than a transaction (on the embedded store, an engine
+// open) of its own at every open.
+//
+// A resolve that returns an error has not answered: the transaction it ran in
+// fails with that error before its body runs, so it writes nothing, and the
+// next write asks again. Like Apply, DeferVersionedHistory never turns an
+// enabled instance off; SetVersionedHistoryEnabled after it replaces the
+// pending read.
+type VersionedHistoryDeferrer interface {
+	VersionedHistoryConfigurer
+	DeferVersionedHistory(resolve VersionedHistoryResolver)
+}
+
+// VersionedHistoryResolver answers the versioned-history switch from the
+// plumbing's own config table. readConfig reads one config row inside the
+// transaction the answer first governs, returning "" and a nil error for a
+// row that is not there.
+type VersionedHistoryResolver func(ctx context.Context, readConfig func(ctx context.Context, key string) (string, error)) (enabled bool, err error)
+
 // LifecycleManager provides lifecycle inspection beyond Close().
 type LifecycleManager interface {
 	IsClosed() bool
@@ -494,6 +1077,16 @@ type LifecycleManager interface {
 // Used by auto-commit and auto-push flows.
 type PendingCommitter interface {
 	CommitPending(ctx context.Context, actor string) (bool, error)
+}
+
+// PendingChangeDetector reports whether the working set holds changes a
+// commit would capture. Unlike VersionControl.Status, this excludes
+// dolt_ignore'd tables (wisp and lease tables appear in dolt_status but
+// cannot be staged), so it answers "would CommitPending mint a commit?"
+// without committing. Callers that must refuse to act on a dirty working
+// set (bd dolt remote reset-data) should type-assert to this interface.
+type PendingChangeDetector interface {
+	HasCommittablePending(ctx context.Context) (bool, error)
 }
 
 // BackupStore provides Dolt backup operations (CALL DOLT_BACKUP) for
@@ -514,12 +1107,188 @@ type BackupStore interface {
 // ReadyWorkCounter sizes the total ready-work count for a filter without
 // materializing the counts mega-query. It is identical to
 // len(GetReadyWorkWithCounts(filter with Limit=0)) but computed with cheap
-// indexed COUNT(*)s over the ready predicate. `bd ready --json` type-asserts to
-// this (via UnwrapStore) to render the "Showing X of N" total when a page is
-// capped, and falls back to the unbounded GetReadyWorkWithCounts when a store
-// does not implement it.
+// indexed COUNT(*)s over the ready predicate.
+//
+// THAT IDENTITY IS THIS INTERFACE'S WHOLE CONTRACT. issueops.ReadyCounter
+// states it for every backend, and the store-backed body behind ReadyCounter()
+// (internal/workapi/storereadycounter) is this method plus the shared filter
+// builder. `bd ready`'s "Showing X of N" reaches it that way on both routes; it
+// no longer type-asserts for the capability itself, so a store that cannot
+// answer fails to compile rather than falling back to an unbounded query.
 type ReadyWorkCounter interface {
 	CountReadyWork(ctx context.Context, filter types.WorkFilter) (int, error)
+}
+
+// ExternalDependencyQueryStore returns the narrow set of explicit external
+// blocking edges. Policy decorators use this instead of scanning every graph
+// edge on each ready-work query.
+type ExternalDependencyQueryStore interface {
+	GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
+}
+
+// BlockersBatchStore is IsBlocked for many ids in a bounded number of reads.
+// The answer holds exactly the ids IsBlocked reports blocked, each mapped to
+// the blocker list IsBlocked returns for it (nil when it has none); an id
+// IsBlocked reports unblocked, or that names no row, is absent. Decorators
+// that annotate a page of ids (the external-dependency policy's
+// BlockingAnnotator) use it instead of one IsBlocked per id, and fall back to
+// that loop on a store without it. It answers for the raw store alone, with no
+// external-dependency policy applied (no `external:` blocker is ever in it), so
+// it is meant to be called from inside that policy's decorator, not probed
+// through UnwrapStore by a caller holding the decorated store.
+type BlockersBatchStore interface {
+	IsBlockedWithBlockersBatch(ctx context.Context, ids []string) (map[string][]string, error)
+}
+
+// RemoteBackendStore is implemented by a DoltStorage that is a pure network
+// client of a remote bd serve process (a registered backend whose
+// backends.Backend.Remote is true — see internal/storage/backends). It is
+// metadata about the store's transport, not a policy decision. Such a store
+// serves its ROLES natively and only a slice of the legacy DoltStorage
+// method seam, so a decorator that builds role views must compose over the
+// inner store's roles rather than rebuild them from that seam: the
+// external-deps decorator consults it for exactly that (remote_roles.go).
+// It never decides whether a policy runs — the decorator asks
+// ExternalDependencyPolicyProber whether to skip its client-side enforcement.
+type RemoteBackendStore interface {
+	IsRemoteBackendStore() bool
+}
+
+// CallerAttributionLimitedStore is implemented by a DoltStorage whose write
+// transport cannot carry two caller-authored attribution members:
+//
+//   - a history entry's Provenance label (UpdateRequest.Provenance,
+//     ReopenRequest.Provenance), because the serving process labels the
+//     entries it writes itself;
+//   - a patch's ClosedBySession, which only the close operation carries.
+//
+// Its role implementations refuse those members rather than drop them, since a
+// library caller may mean them. A front door that knows its own value is
+// derivable or advisory — `bd reopen`'s fixed "bd: reopen <id>" label, the
+// ambient CLAUDE_SESSION_ID on `bd update -s closed` — omits it for such a
+// store instead of failing the write; cmd/bd/remote_backend.go records
+// which members it omits and why.
+type CallerAttributionLimitedStore interface {
+	CallerAttributionLimited() bool
+}
+
+// Pinger is implemented by a DoltStorage whose cheapest honest liveness check
+// is not an issue query. `bd ping` uses it when present and falls back to a
+// one-row SearchIssues otherwise. A remote store implements it with its
+// authenticated handshake read, which reaches the serving process and checks
+// the credential and the workspace pin without touching an issue table its
+// legacy method seam may not serve at all.
+type Pinger interface {
+	Ping(ctx context.Context) error
+}
+
+// ExternalDependencyPolicyProber is implemented by a DoltStorage that can
+// answer whether the remote server it talks to already enforces bd's
+// external-dependency policy itself (design 3.6, "External-dependency server
+// policy": upstream's storage.ServerEnforcedPolicy / PolicyEnforcedByServer).
+// The external-deps decorator consults this — never RemoteBackendStore, which
+// only shapes how it composes its roles — before skipping its own client-side
+// enforcement: a remote store whose
+// server advertises the capability (httpapi's policy.external_dependencies)
+// has already enforced the policy before answering, so a second client-side
+// pass would be redundant. A store that does not implement this interface, or
+// that implements it and reports false — including a remote store whose
+// server is silent on the capability — gets the ordinary client-side
+// enforcement. The policy is never silently skipped merely because the store
+// is remote.
+type ExternalDependencyPolicyProber interface {
+	ServerEnforcesExternalDependencyPolicy(ctx context.Context) (bool, error)
+}
+
+type livePolicyProbeKey struct{}
+
+// WithLivePolicyProbe marks ctx as carrying a claim or a close: an
+// ExternalDependencyPolicyProber asked under it must answer from the server,
+// never from a cache another process wrote. A read can tolerate a cached
+// answer for its TTL; a write guard cannot, since a stale "the server
+// enforces it" would skip the client-side refusal of externally blocked work.
+func WithLivePolicyProbe(ctx context.Context) context.Context {
+	return context.WithValue(ctx, livePolicyProbeKey{}, true)
+}
+
+// LivePolicyProbe reports whether ctx was marked by WithLivePolicyProbe.
+func LivePolicyProbe(ctx context.Context) bool {
+	live, _ := ctx.Value(livePolicyProbeKey{}).(bool)
+	return live
+}
+
+// MoleculeAutoCloseProber is implemented by a DoltStorage whose closes may not
+// accept issueops.CloseRequest.AutoCloseMolecule — today exactly
+// httpclient.Store, whose server advertises it with
+// issues.close.autoCloseMolecule. Every local backend runs the auto-close in
+// the close's own transaction and does not implement this.
+//
+// A server that does not advertise it (an older bd serve, or a server whose
+// orchestrator owns the molecule lifecycle, as gc does) is answered false, and
+// the caller closes WITHOUT the flag: asking for it there is refused before
+// dialing, and the molecule's auto-close is that server's to run.
+type MoleculeAutoCloseProber interface {
+	ServesMoleculeAutoClose(ctx context.Context) (bool, error)
+}
+
+// ServesMoleculeAutoClose reports whether closes through s may set
+// issueops.CloseRequest.AutoCloseMolecule (MoleculeAutoCloseProber, looked up
+// through every decorator). A store that does not implement the prober runs
+// the auto-close itself and is answered true. A probe that fails is answered
+// true as well: the close dials the same handshake and reports its failure,
+// so nothing is hidden by asking for the auto-close.
+func ServesMoleculeAutoClose(ctx context.Context, s DoltStorage) bool {
+	prober, ok := UnwrapStore(s).(MoleculeAutoCloseProber)
+	if !ok {
+		return true
+	}
+	served, err := prober.ServesMoleculeAutoClose(ctx)
+	return err != nil || served
+}
+
+// MoleculeAdvanceProber is implemented by a DoltStorage whose MoleculeStepper
+// may not be served — today exactly httpclient.Store, whose server advertises
+// it with issues.advanceMolecule. Every local backend composes the stepper
+// over its own roles and does not implement this.
+type MoleculeAdvanceProber interface {
+	ServesMoleculeAdvance(ctx context.Context) (bool, error)
+}
+
+// ServesMoleculeAdvance reports whether s's MoleculeStepper can run
+// (MoleculeAdvanceProber, looked up through every decorator). A store that
+// does not implement the prober runs the advance itself and is answered true.
+// A probe that fails returns its error.
+//
+// `bd close --continue` asks BEFORE it closes: the advance is a second
+// operation after the close commits, so refusing it only then would leave
+// the step closed and the next step unclaimed. That is also why a failed
+// probe is not answered true, as ServesMoleculeAutoClose answers it: the
+// close would commit and only the advance, dialing the same handshake, would
+// fail — the half-done state the question exists to avoid.
+func ServesMoleculeAdvance(ctx context.Context, s DoltStorage) (bool, error) {
+	prober, ok := UnwrapStore(s).(MoleculeAdvanceProber)
+	if !ok {
+		return true, nil
+	}
+	return prober.ServesMoleculeAdvance(ctx)
+}
+
+// ExcludeIDsUnsupportedStore is implemented by a DoltStorage whose ready-work
+// reads cannot express types.WorkFilter.ExcludeIDs over their own transport.
+// Today that is exactly httpclient.Store: the v0 wire's listReadyWork and
+// countReadyWork operations publish no id-exclusion parameter, so the http
+// bridge refuses rather than silently widening the result set whenever a
+// filter carries any (design 3.6 / L12, "every field it cannot express
+// refuses").
+//
+// The external-deps decorator consults this before deciding how to apply its
+// OWN additional exclusions (issues blocked by an unsatisfied
+// external:<project>:<capability> dependency): a store that answers true here
+// gets those exclusions applied client-side in Go instead of folded into the
+// filter handed down, so the policy still runs — design 3.6 says it is never
+// silently skipped — without tripping the wire's own refusal.
+type ExcludeIDsUnsupportedStore interface {
+	ExcludeIDsUnsupported() bool
 }
 
 // Transaction provides atomic multi-operation support within a single database transaction.
@@ -683,6 +1452,22 @@ type Transaction interface {
 	// (created_at ASC, id ASC) and bounded by limit; issueID scopes the feed to
 	// one issue's history ("" = all issues). Durable events table only.
 	EventsSince(ctx context.Context, cursor EventCursor, issueID string, limit int) ([]*types.Event, error)
+}
+
+// IssueLifecycleTransaction is the internal transaction lane for lifecycle
+// transitions that must retain the backend's durable publication semantics.
+// It deliberately extends neither Storage nor Transaction: ordinary callers
+// continue to use the stable generic transaction contract.
+type IssueLifecycleTransaction interface {
+	Transaction
+	ReopenIssueWithResult(ctx context.Context, id string, reason string, actor string) (bool, error)
+}
+
+// IssueLifecycleStore runs a lifecycle-aware transaction. It is an internal
+// companion to Storage for code that must close or reopen within one durable
+// operation and observe the result before committing.
+type IssueLifecycleStore interface {
+	RunInIssueLifecycleTransaction(ctx context.Context, commitMsg string, fn func(tx IssueLifecycleTransaction) error) error
 }
 
 // DependencyAddOptions controls dependency insertion for both the store-level

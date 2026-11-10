@@ -53,8 +53,10 @@ func (c *Client) WithHTTPClient(httpClient *http.Client) *Client {
 	}
 }
 
-// WithEndpoint returns a new client configured to use a custom API endpoint.
+// WithEndpoint returns a new client pointed at a different instance web root.
 // This is useful for testing with mock servers or self-hosted GitLab instances.
+// It sets BaseURL, so endpoint carries the same contract: the web root, without
+// the /api/v4 suffix buildURL appends per request.
 func (c *Client) WithEndpoint(endpoint string) *Client {
 	return &Client{
 		Token:      c.Token,
@@ -379,7 +381,14 @@ func (c *Client) UpdateIssue(ctx context.Context, iid int, updates map[string]in
 
 // GetIssueLinks retrieves issue links for the specified issue IID.
 func (c *Client) GetIssueLinks(ctx context.Context, iid int) ([]IssueLink, error) {
-	urlStr := c.buildURL("/projects/"+c.projectPath()+"/issues/"+strconv.Itoa(iid)+"/links", nil)
+	return c.GetProjectIssueLinks(ctx, c.ProjectID, iid)
+}
+
+// GetProjectIssueLinks retrieves the links of issue iid in projectID, which
+// need not be the configured project: a group listing spans the group's
+// projects, and IIDs repeat across them.
+func (c *Client) GetProjectIssueLinks(ctx context.Context, projectID string, iid int) ([]IssueLink, error) {
+	urlStr := c.buildURL("/projects/"+url.PathEscape(projectID)+"/issues/"+strconv.Itoa(iid)+"/links", nil)
 	respBody, _, err := c.doRequest(ctx, http.MethodGet, urlStr, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get issue links: %w", err)
@@ -670,6 +679,22 @@ func (c *Client) GetWorkItemGID(ctx context.Context, projectPath string, iid int
 		return "", fmt.Errorf("work item with IID %d not found", iid)
 	}
 	return resp.Project.WorkItems.Nodes[0].ID, nil
+}
+
+// GetProject retrieves the configured project.
+func (c *Client) GetProject(ctx context.Context) (*Project, error) {
+	urlStr := c.buildURL("/projects/"+c.projectPath(), nil)
+	respBody, _, err := c.doRequest(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get project: %w", err)
+	}
+
+	var project Project
+	if err := json.Unmarshal(respBody, &project); err != nil {
+		return nil, fmt.Errorf("failed to parse project response: %w", err)
+	}
+
+	return &project, nil
 }
 
 // ListProjects retrieves projects accessible to the authenticated user.

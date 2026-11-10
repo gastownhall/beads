@@ -4,10 +4,69 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 )
+
+// TestNormalizeOptionalTimestampsToUTCCoversEveryPointerTimestamp is the drift
+// tripwire for NormalizeOptionalTimestampsToUTC's hand-written field list. The
+// helper enumerates its *time.Time fields explicitly to keep the insert hot path
+// free of reflection, so a *time.Time field added to Issue later would be skipped
+// silently and would reintroduce #5765 for that field. This walks Issue by
+// reflection, sets every pointer timestamp to a fixed non-UTC zone, and fails on
+// any field the helper leaves off UTC — keeping the explicit list honest without
+// driving the production path by reflection.
+func TestNormalizeOptionalTimestampsToUTCCoversEveryPointerTimestamp(t *testing.T) {
+	est := time.FixedZone("EST", -5*60*60)
+	// 2026-03-07T22:06:41-05:00 == 2026-03-08T03:06:41Z.
+	zoned := time.Date(2026, 3, 7, 22, 6, 41, 0, est)
+	const wantWall = "2026-03-08T03:06:41Z"
+
+	ptrTime := reflect.TypeOf((*time.Time)(nil))
+	issue := &Issue{}
+	v := reflect.ValueOf(issue).Elem()
+
+	var pinned []string
+	for i := 0; i < v.NumField(); i++ {
+		if v.Type().Field(i).Type != ptrTime {
+			continue
+		}
+		ts := zoned
+		v.Field(i).Set(reflect.ValueOf(&ts))
+		pinned = append(pinned, v.Type().Field(i).Name)
+	}
+	if len(pinned) == 0 {
+		t.Fatal("no *time.Time fields found on Issue: the reflection walk is vacuous")
+	}
+
+	issue.NormalizeOptionalTimestampsToUTC()
+
+	for i := 0; i < v.NumField(); i++ {
+		field := v.Type().Field(i)
+		if field.Type != ptrTime {
+			continue
+		}
+		got, _ := v.Field(i).Interface().(*time.Time)
+		if got == nil {
+			t.Errorf("%s: became nil", field.Name)
+			continue
+		}
+		if got.Location() != time.UTC {
+			t.Errorf("%s: location = %v, want UTC (field missing from NormalizeOptionalTimestampsToUTC's list?)",
+				field.Name, got.Location())
+		}
+		// Wall-clock digits, not just the label: a relabel without conversion
+		// would keep Location()==UTC but report the pre-shift digits.
+		if wall := got.Format("2006-01-02T15:04:05Z07:00"); wall != wantWall {
+			t.Errorf("%s: = %s, want %s", field.Name, wall, wantWall)
+		}
+	}
+	t.Logf("pinned %d pointer timestamps: %v", len(pinned), pinned)
+}
 
 func TestIssueValidation(t *testing.T) {
 	tests := []struct {
@@ -679,7 +738,11 @@ func TestIssueCompoundHelpers(t *testing.T) {
 }
 
 func TestDependencyTypeIsValid(t *testing.T) {
-	// IsValid now accepts any non-empty string up to 50 chars (Decision 004)
+	// IsValid accepts any non-empty string the type column can hold (Decision
+	// 004 for the open vocabulary; MaxDependencyTypeLen for the bound). The
+	// boundary cases below are the load-bearing ones: at the limit the type is
+	// storable and must be accepted, one past it no edge could carry it and a
+	// filter built from it would match nothing, so it is refused up front.
 	tests := []struct {
 		depType DependencyType
 		valid   bool
@@ -698,6 +761,8 @@ func TestDependencyTypeIsValid(t *testing.T) {
 		{DependencyType("custom-type"), true}, // Custom types are now valid
 		{DependencyType("any-string"), true},  // Any non-empty string is valid
 		{DependencyType(""), false},           // Empty is still invalid
+		{DependencyType(strings.Repeat("x", MaxDependencyTypeLen)), true},                            // Exactly the column width
+		{DependencyType(strings.Repeat("x", MaxDependencyTypeLen+1)), false},                         // One past it: unstorable
 		{DependencyType("this-is-a-very-long-dependency-type-that-exceeds-fifty-characters"), false}, // Too long
 	}
 
@@ -776,6 +841,30 @@ func TestDependencyTypeAffectsReadyWork(t *testing.T) {
 				t.Errorf("DependencyType(%q).AffectsReadyWork() = %v, want %v", tt.depType, got, tt.affects)
 			}
 		})
+	}
+}
+
+// TestReadyAffectingDependencyTypes pins that the list SQL renders (the ready
+// read guard) is exactly the set AffectsReadyWork classifies as blocking, in
+// both directions, so the two cannot drift.
+func TestReadyAffectingDependencyTypes(t *testing.T) {
+	listed := make(map[DependencyType]bool)
+	for _, d := range ReadyAffectingDependencyTypes() {
+		if listed[d] {
+			t.Errorf("ReadyAffectingDependencyTypes() lists %q twice", d)
+		}
+		listed[d] = true
+		if !d.AffectsReadyWork() {
+			t.Errorf("ReadyAffectingDependencyTypes() lists %q, but AffectsReadyWork() is false", d)
+		}
+	}
+	for _, d := range append(WellKnownDependencyTypes(), DependencyType("custom-type")) {
+		if d.AffectsReadyWork() && !listed[d] {
+			t.Errorf("%q affects ready work but ReadyAffectingDependencyTypes() omits it", d)
+		}
+	}
+	if len(listed) == 0 {
+		t.Fatal("ReadyAffectingDependencyTypes() is empty")
 	}
 }
 
@@ -939,13 +1028,13 @@ func TestIssueLeaseJSONSerialization(t *testing.T) {
 	}
 }
 
-// TestRowVersionNeverSerialized locks in the Go-only decision for RowVersion:
-// it is a live Go field (library call sites build an optimistic-concurrency
-// token from it) but json:"-", so its random-per-write value never reaches any
-// bd --json surface or bd export. Serializing it would break stable protocol
-// goldens and export round-trips because the value is regenerated on every
-// write. The value must be absent from the bare Issue and from the two
-// embedding wrappers that back show/list/ready (IssueDetails, IssueWithCounts).
+// TestRowVersionNeverSerialized locks in the storage/interchange boundary:
+// RowVersion stays absent from generic Issue JSON and from the LIST/INTERCHANGE
+// wrapper, whatever the detail view publishes. IssueWithCounts is the row
+// `bd export` writes to JSONL, so a token there would put a per-write-random
+// value into a git-tracked file; the detail view neither lists nor
+// interchanges, which is why it is the one shape allowed to project the token
+// (see TestNewIssueDetailsProjectsTheRevisionToken).
 func TestRowVersionNeverSerialized(t *testing.T) {
 	iss := Issue{ID: "test-1", Title: "Versioned", Status: StatusOpen, RowVersion: 123456789}
 
@@ -959,7 +1048,6 @@ func TestRowVersionNeverSerialized(t *testing.T) {
 		v    any
 	}{
 		{"Issue", iss},
-		{"IssueDetails", IssueDetails{Issue: iss}},
 		{"IssueWithCounts", IssueWithCounts{Issue: &iss}},
 	}
 	for _, tc := range surfaces {
@@ -972,6 +1060,150 @@ func TestRowVersionNeverSerialized(t *testing.T) {
 			if strings.Contains(s, forbidden) {
 				t.Errorf("%s JSON must not contain %q, got: %s", tc.name, forbidden, s)
 			}
+		}
+	}
+}
+
+// TestNewIssueDetailsProjectsTheRevisionToken pins the constructor that is the
+// only door to the published token: it reads RowVersion off the row and writes
+// it under the storage-neutral wire name, always present and never under a
+// storage spelling.
+//
+// The zero case is not a formality. 0 is the migration-0054 backfill token, a
+// legitimate value a guarded client must be able to send, so `revision` carries
+// no omitempty and an absent member never stands in for a legacy-zero row.
+func TestNewIssueDetailsProjectsTheRevisionToken(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		token int64
+		want  string
+	}{
+		{"a mutated row", 123456789, `"revision":"123456789"`},
+		{"a legacy un-mutated row", 0, `"revision":"0"`},
+		{"a negative token", -3819021935081927, `"revision":"-3819021935081927"`},
+		{"a token past 2^53", 9007199254740993, `"revision":"9007199254740993"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			details := NewIssueDetails(Issue{ID: "test-1", Title: "Versioned", RowVersion: tc.token})
+			if details.Revision != RevisionToken(tc.token) {
+				t.Errorf("Revision = %q, want %q", details.Revision, RevisionToken(tc.token))
+			}
+
+			b, err := json.Marshal(details)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			s := string(b)
+			if !strings.Contains(s, tc.want) {
+				t.Errorf("IssueDetails JSON missing %s, got: %s", tc.want, s)
+			}
+			for _, forbidden := range []string{"row_version", "RowVersion", "row_lock"} {
+				if strings.Contains(s, forbidden) {
+					t.Errorf("IssueDetails JSON leaked storage field %q: %s", forbidden, s)
+				}
+			}
+		})
+	}
+}
+
+// TestRevisionTokenIsAJSONString is the JS-safety pin: whatever the token, the
+// marshaled member is a QUOTED decimal, so no consumer that decodes JSON numbers
+// as IEEE-754 doubles can round it.
+//
+// It matches the bytes with a regexp rather than comparing a decoded value,
+// because a decoded value is exactly what the defect hides behind — Go's own
+// `any` decode of a JSON number is a float64 too, so a test that unmarshaled and
+// compared would agree with the broken wire shape for small tokens and disagree
+// with it for large ones for the wrong reason.
+func TestRevisionTokenIsAJSONString(t *testing.T) {
+	member := regexp.MustCompile(`"revision":"-?\d+"`)
+	for _, token := range []int64{0, 1, -1, 123456789, math.MaxInt64, math.MinInt64, 1 << 53, (1 << 53) + 1} {
+		b, err := json.Marshal(NewIssueDetails(Issue{ID: "test-1", Title: "Versioned", RowVersion: token}))
+		if err != nil {
+			t.Fatalf("marshal with token %d: %v", token, err)
+		}
+		if !member.Match(b) {
+			t.Errorf("token %d marshaled to %s, want a quoted decimal `revision` member", token, b)
+		}
+	}
+}
+
+// TestRevisionTokenRoundTrips pins that the wire spelling is lossless across the
+// whole int64 range — the property the string exists for. A JSON number would
+// fail this above 2^53 in any double-based consumer.
+func TestRevisionTokenRoundTrips(t *testing.T) {
+	for _, token := range []int64{
+		math.MinInt64, -3819021935081927, -(1 << 53) - 1, -1, 0, 1,
+		1 << 53, (1 << 53) + 1, 9007199254740993, math.MaxInt64,
+	} {
+		got, err := ParseRevisionToken(RevisionToken(token))
+		if err != nil {
+			t.Errorf("ParseRevisionToken(RevisionToken(%d)): %v", token, err)
+			continue
+		}
+		if got != token {
+			t.Errorf("ParseRevisionToken(RevisionToken(%d)) = %d, want %d", token, got, token)
+		}
+	}
+}
+
+// TestRevisionTokenSurvivesAJavaScriptRealisticParse walks the round trip a
+// browser client actually performs — marshal, decode the member as the string it
+// is, parse it back — and proves the token that motivated this shape survives it.
+//
+// The float64 leg is the control: it is what a consumer got when the member was
+// a JSON number, and it is WRONG by 1 for this token. Without it the test would
+// pass on a broken wire shape too.
+func TestRevisionTokenSurvivesAJavaScriptRealisticParse(t *testing.T) {
+	const token = int64(9007199254740993) // 2^53 + 1, the smallest int64 a double cannot hold
+
+	b, err := json.Marshal(NewIssueDetails(Issue{ID: "test-1", Title: "Versioned", RowVersion: token}))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded struct {
+		Revision string `json:"revision"`
+	}
+	if err := json.Unmarshal(b, &decoded); err != nil {
+		t.Fatalf("decode revision as a string: %v (a number-typed member would fail here): %s", err, b)
+	}
+	got, err := ParseRevisionToken(decoded.Revision)
+	if err != nil {
+		t.Fatalf("ParseRevisionToken(%q): %v", decoded.Revision, err)
+	}
+	if got != token {
+		t.Errorf("round trip gave %d, want %d", got, token)
+	}
+	if lossy := int64(float64(token)); lossy == token {
+		t.Fatalf("the control is broken: %d survives a float64 round trip, so this test proves nothing", token)
+	}
+}
+
+// TestParseRevisionTokenRejectsMalformedTokens pins that the string<->int64
+// boundary is strict in both directions: ParseRevisionToken accepts exactly
+// the decimal integer spelling RevisionToken emits (plain digits, an optional
+// leading "-", no fractional part, no exponent, no surrounding whitespace, no
+// value outside int64) and refuses everything else rather than guessing —
+// the same "a token it cannot read is a server this client cannot follow"
+// posture ParseRevisionToken's own doc comment describes, now pinned against
+// the inputs a float-typed or lenient parser would have let through.
+//
+// "007" and "-0" pin the exact-inverse-of-FormatInt rule specifically:
+// FormatInt never pads a digit string with a leading zero (so "007" is not a
+// token any revision ever produced, even though strconv.ParseInt alone would
+// accept it as 7), and FormatInt(0, 10) is always "0", never "-0".
+func TestParseRevisionTokenRejectsMalformedTokens(t *testing.T) {
+	for _, token := range []string{
+		"", "1.0", "1.5", "1e10", "1e0", "+1", " 1", "1 ", "0x1", "abc",
+		"9223372036854775808",  // math.MaxInt64 + 1, one past the boundary
+		"-9223372036854775809", // math.MinInt64 - 1, one past the boundary
+		"NaN", "Infinity", "１", // fullwidth digit, not ASCII
+		"007",  // leading zero FormatInt never pads in
+		"-007", // leading zero on the negative digit run
+		"-0",   // FormatInt(0, 10) is "0", never "-0"
+	} {
+		if got, err := ParseRevisionToken(token); err == nil {
+			t.Errorf("ParseRevisionToken(%q) = %d, nil, want an error", token, got)
 		}
 	}
 }
@@ -1835,5 +2067,38 @@ func TestCheckFieldLen(t *testing.T) {
 	err := CheckFieldLen("assignee", strings.Repeat("é", MaxFieldLen+1))
 	if !errors.Is(err, ErrFieldTooLong) {
 		t.Errorf("CheckFieldLen(256 runes) = %v, want errors.Is(ErrFieldTooLong)", err)
+	}
+}
+
+// TestArrivalSeqSerializesOnlyWhenStamped pins the wire shape of the stamp the
+// journal's create seam writes on a wisp row: absent when there is none (so
+// every unstamped row, and every reader that predates the member, sees exactly
+// what it saw before), the number when there is one, and no part of the
+// content identity — a stamp is assigned by storage, not authored.
+func TestArrivalSeqSerializesOnlyWhenStamped(t *testing.T) {
+	unstamped, err := json.Marshal(Issue{ID: "test-1", Title: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(unstamped), "arrival_seq") {
+		t.Errorf("an unstamped issue serializes arrival_seq: %s", unstamped)
+	}
+	stamped, err := json.Marshal(Issue{ID: "test-1", Title: "t", ArrivalSeq: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(stamped), `"arrival_seq":42`) {
+		t.Errorf("a stamped issue does not serialize arrival_seq 42: %s", stamped)
+	}
+	var back Issue
+	if err := json.Unmarshal(stamped, &back); err != nil || back.ArrivalSeq != 42 {
+		t.Errorf("round trip = %d, %v; want 42", back.ArrivalSeq, err)
+	}
+
+	a := Issue{ID: "test-1", Title: "t", Status: StatusOpen}
+	b := a
+	b.ArrivalSeq = 7
+	if a.ComputeContentHash() != b.ComputeContentHash() {
+		t.Error("arrival_seq changed the content hash; it is storage-assigned metadata, not content")
 	}
 }

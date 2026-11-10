@@ -75,6 +75,9 @@ func TestEmbeddedSupersede(t *testing.T) {
 		if issue.Status != "closed" {
 			t.Errorf("expected status=closed, got %s", issue.Status)
 		}
+		if issue.ClosedAt == nil {
+			t.Error("expected supersede close to set closed_at")
+		}
 	})
 
 	// ===== Creates supersedes link =====

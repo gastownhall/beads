@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pre-commit hook: auto-format with gofmt and lint with golangci-lint.
+# Pre-commit hook: auto-format with gofmt, then lint and vet with nogo.
 # Installed via: git config core.hooksPath .githooks
 # See also: make install (sets hooksPath automatically)
 
@@ -9,56 +9,91 @@ set -euo pipefail
 # the beads section at the bottom must run for non-Go commits too.
 staged_go_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.go')
 if [ -n "$staged_go_files" ]; then
-    # Use go run so golangci-lint is always built with the project's Go
-    # toolchain, avoiding version-mismatch panics from a stale global binary.
-    GOLANGCI_LINT="go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1"
-
-    # Auto-format and re-stage
-    echo "$staged_go_files" | xargs gofmt -w
+    # Auto-format and re-stage, through the go.mod-pinned gofmt. A bare PATH
+    # gofmt belongs to the host toolchain, and on a host newer than the go
+    # directive it rewrites and re-stages files into a form CI's gofmt rejects
+    # -- silently, on every Go commit. See scripts/ci/gofmt-bin.sh.
+    gofmt_bin="$(./scripts/ci/gofmt-bin.sh)"
+    echo "$staged_go_files" | xargs "$gofmt_bin" -w
     echo "$staged_go_files" | xargs git add
 
-    # Lint changed code with auto-fix; block on remaining issues.
-    # CGO_ENABLED=0 avoids typecheck failures from CGO-only dependencies
-    # (e.g., dolthub/go-icu-regex) that require system headers not always present.
-    CGO_ENABLED=0 $GOLANGCI_LINT run --new-from-rev=HEAD --fix || exit 1
-
-    # Re-stage any auto-fixes from the linter
-    echo "$staged_go_files" | xargs git add
+    # Lint and vet: nogo (//tools/nogo) over the staged files' Bazel packages,
+    # the analyzers bazel.yml gates on (go test's vet checks plus the
+    # golangci-lint linters .golangci.yml enables). Findings fail the commit;
+    # nogo prints a `patch -p1` command for the ones with suggested fixes.
+    # Needs bazel (or bazelisk) on PATH; the windows/darwin passes run in CI
+    # and in `make lint`.
+    make lint-changed LINT_CHANGED_SCOPE=staged || exit 1
 fi
 
-# The managed section below captures exit codes to tolerate timeouts and an
-# uninitialized bd database; set -e would abort before that handling runs.
-set +e
-
-# --- BEGIN BEADS INTEGRATION v1.1.0 ---
+# --- BEGIN BEADS INTEGRATION v1.3.4 ---
 # This section is managed by beads. Do not remove these markers.
 if command -v bd >/dev/null 2>&1; then
   export BD_GIT_HOOK=1
   _bd_timeout=${BEADS_HOOK_TIMEOUT:-300}
-  _bd_used_perl=0
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$_bd_timeout" bd hooks run pre-commit "$@"
-    _bd_exit=$?
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$_bd_timeout" bd hooks run pre-commit "$@"
-    _bd_exit=$?
+  case "$_bd_timeout" in
+    *[!0-9]*|'') _bd_timeout_invalid=1 ;;
+    *[1-9]*) _bd_timeout_invalid=0 ;;
+    *) _bd_timeout_invalid=1 ;;
+  esac
+  if [ "$_bd_timeout_invalid" -eq 1 ]; then
+    echo >&2 "beads: invalid BEADS_HOOK_TIMEOUT; using 300 seconds"
+    _bd_timeout=300
+  fi
+  _bd_timeout_backend=none
+  _bd_timeout_command=
+  for _bd_timeout_candidate in timeout gtimeout; do
+    if command -v "$_bd_timeout_candidate" >/dev/null 2>&1; then
+      if _bd_timeout_version="$("$_bd_timeout_candidate" --version 2>/dev/null)"; then
+        case "$_bd_timeout_version" in
+          "timeout (GNU coreutils) "*|"timeout (uutils coreutils) "*) _bd_timeout_command=$_bd_timeout_candidate; break ;;
+        esac
+      fi
+    fi
+  done
+  if [ -n "$_bd_timeout_command" ]; then
+    _bd_timeout_backend=coreutils
+    if "$_bd_timeout_command" -- "$_bd_timeout" bd hooks run pre-commit "$@"; then
+      _bd_exit=0
+    else
+      _bd_exit=$?
+    fi
   elif command -v perl >/dev/null 2>&1; then
-    _bd_used_perl=1
-    perl -e 'alarm shift; exec @ARGV' "$_bd_timeout" bd hooks run pre-commit "$@"
-    _bd_exit=$?
+    _bd_timeout_backend=perl
+    if perl -e '
+      my $t = shift;
+      my $pid = fork;
+      defined $pid or die "beads: fork failed: $!\n";
+      if (!$pid) { setpgrp(0, 0); exec { $ARGV[0] } @ARGV; warn "beads: cannot run $ARGV[0]: $!\n"; exit 127 }
+      my ($sig, $sent, $done) = ("TERM", 0, 0);
+      $SIG{ALRM} = sub { return if $done; kill $sig, -$pid; ($sig, $sent) = ("KILL", 1); alarm 2 };
+      $SIG{$_} = sub { kill $_[0], -$pid unless $done } for qw(HUP INT TERM);
+      alarm $t;
+      $done = waitpid $pid, 0;
+      alarm 0;
+      exit 142 if $sent;
+      exit($? & 127 ? 128 + ($? & 127) : $? >> 8);
+    ' -- "$_bd_timeout" bd hooks run pre-commit "$@"; then
+      _bd_exit=0
+    else
+      _bd_exit=$?
+    fi
   else
     echo >&2 "beads: hook 'pre-commit' running without timeout; install coreutils or perl to enable BEADS_HOOK_TIMEOUT"
-    bd hooks run pre-commit "$@"
-    _bd_exit=$?
+    if bd hooks run pre-commit "$@"; then
+      _bd_exit=0
+    else
+      _bd_exit=$?
+    fi
   fi
-  if [ $_bd_exit -eq 124 ] || { [ $_bd_used_perl -eq 1 ] && [ $_bd_exit -eq 142 ]; }; then
+  if { [ "$_bd_timeout_backend" = coreutils ] && [ "$_bd_exit" -eq 124 ]; } || { [ "$_bd_timeout_backend" = perl ] && [ "$_bd_exit" -eq 142 ]; }; then
     echo >&2 "beads: hook 'pre-commit' timed out after ${_bd_timeout}s — continuing without beads"
     _bd_exit=0
   fi
-  if [ $_bd_exit -eq 3 ]; then
+  if [ "$_bd_exit" -eq 3 ]; then
     echo >&2 "beads: database not initialized — skipping hook 'pre-commit'"
     _bd_exit=0
   fi
-  if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi
+  if [ "$_bd_exit" -ne 0 ]; then exit "$_bd_exit"; fi
 fi
-# --- END BEADS INTEGRATION v1.1.0 ---
+# --- END BEADS INTEGRATION v1.3.4 ---

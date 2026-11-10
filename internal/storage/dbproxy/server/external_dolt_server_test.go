@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"net"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -14,13 +16,30 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// testPlatformPath makes a POSIX-shaped fixture path absolute on the running
+// platform: Windows filepath.IsAbs rejects a bare leading "/" (no volume), so
+// POSIX literals cannot satisfy ExternalDoltConfig.Validate there. Inputs and
+// the matching DSN expectation both go through it, keeping assertions literal
+// instead of rebuilt from the code under test.
+func testPlatformPath(t testing.TB, p string) string {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return p
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("resolve volume for platform path fixture: %v", err)
+	}
+	return filepath.VolumeName(wd) + filepath.FromSlash(p)
+}
+
 func TestExternalDoltConfigValidate(t *testing.T) {
 	t.Run("tcp endpoint with host+port", func(t *testing.T) {
 		require.NoError(t, configfile.ExternalDoltConfig{Host: "db.internal", Port: 3306}.Validate())
 	})
 
 	t.Run("unix socket endpoint", func(t *testing.T) {
-		require.NoError(t, configfile.ExternalDoltConfig{Socket: "/var/run/dolt.sock"}.Validate())
+		require.NoError(t, configfile.ExternalDoltConfig{Socket: testPlatformPath(t, "/var/run/dolt.sock")}.Validate())
 	})
 
 	t.Run("tcp endpoint with tls required and no cert/key", func(t *testing.T) {
@@ -36,8 +55,8 @@ func TestExternalDoltConfigValidate(t *testing.T) {
 			Host:        "hosted-dolt.example.com",
 			Port:        3306,
 			TLSRequired: true,
-			TLSCert:     "/etc/beads/client.pem",
-			TLSKey:      "/etc/beads/client.key",
+			TLSCert:     testPlatformPath(t, "/etc/beads/client.pem"),
+			TLSKey:      testPlatformPath(t, "/etc/beads/client.key"),
 		}.Validate())
 	})
 
@@ -56,13 +75,13 @@ func TestExternalDoltConfigValidate(t *testing.T) {
 	})
 
 	t.Run("socket and host together rejected", func(t *testing.T) {
-		err := configfile.ExternalDoltConfig{Host: "db", Port: 3306, Socket: "/var/run/dolt.sock"}.Validate()
+		err := configfile.ExternalDoltConfig{Host: "db", Port: 3306, Socket: testPlatformPath(t, "/var/run/dolt.sock")}.Validate()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "either Socket OR (Host, Port)")
 	})
 
 	t.Run("socket and port together rejected", func(t *testing.T) {
-		err := configfile.ExternalDoltConfig{Port: 3306, Socket: "/var/run/dolt.sock"}.Validate()
+		err := configfile.ExternalDoltConfig{Port: 3306, Socket: testPlatformPath(t, "/var/run/dolt.sock")}.Validate()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "either Socket OR (Host, Port)")
 	})
@@ -104,13 +123,13 @@ func TestExternalDoltConfigValidate(t *testing.T) {
 	})
 
 	t.Run("tls cert without key rejected", func(t *testing.T) {
-		err := configfile.ExternalDoltConfig{Host: "db", Port: 3306, TLSCert: "/etc/beads/client.pem"}.Validate()
+		err := configfile.ExternalDoltConfig{Host: "db", Port: 3306, TLSCert: testPlatformPath(t, "/etc/beads/client.pem")}.Validate()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "TLSCert set without TLSKey")
 	})
 
 	t.Run("tls key without cert rejected", func(t *testing.T) {
-		err := configfile.ExternalDoltConfig{Host: "db", Port: 3306, TLSKey: "/etc/beads/client.key"}.Validate()
+		err := configfile.ExternalDoltConfig{Host: "db", Port: 3306, TLSKey: testPlatformPath(t, "/etc/beads/client.key")}.Validate()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "TLSKey set without TLSCert")
 	})
@@ -120,7 +139,7 @@ func TestExternalDoltConfigValidate(t *testing.T) {
 			Host:    "db",
 			Port:    3306,
 			TLSCert: "client.pem",
-			TLSKey:  "/etc/beads/client.key",
+			TLSKey:  testPlatformPath(t, "/etc/beads/client.key"),
 		}.Validate()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "TLSCert")
@@ -131,7 +150,7 @@ func TestExternalDoltConfigValidate(t *testing.T) {
 		err := configfile.ExternalDoltConfig{
 			Host:    "db",
 			Port:    3306,
-			TLSCert: "/etc/beads/client.pem",
+			TLSCert: testPlatformPath(t, "/etc/beads/client.pem"),
 			TLSKey:  "client.key",
 		}.Validate()
 		require.Error(t, err)
@@ -180,7 +199,7 @@ func TestExternalDoltServer_ID(t *testing.T) {
 	t.Run("socket and tcp produce different ids even when notation overlaps", func(t *testing.T) {
 		a, err := NewExternalDoltServer(configfile.ExternalDoltConfig{Host: "db", Port: 3306})
 		require.NoError(t, err)
-		b, err := NewExternalDoltServer(configfile.ExternalDoltConfig{Socket: "/var/run/dolt.sock"})
+		b, err := NewExternalDoltServer(configfile.ExternalDoltConfig{Socket: testPlatformPath(t, "/var/run/dolt.sock")})
 		require.NoError(t, err)
 		assert.NotEqual(t, a.ID(context.Background()), b.ID(context.Background()))
 	})
@@ -198,8 +217,8 @@ func TestExternalDoltServerID_AuthFieldsDoNotChangeID(t *testing.T) {
 	withAuth := base
 	withAuth.User = "beads"
 	withAuth.TLSRequired = true
-	withAuth.TLSCert = "/etc/beads/client.pem"
-	withAuth.TLSKey = "/etc/beads/client.key"
+	withAuth.TLSCert = testPlatformPath(t, "/etc/beads/client.pem")
+	withAuth.TLSKey = testPlatformPath(t, "/etc/beads/client.key")
 	assert.Equal(t, ExternalDoltServerID(base), ExternalDoltServerID(withAuth))
 }
 
@@ -221,10 +240,10 @@ func TestExternalDoltServer_DSN(t *testing.T) {
 	})
 
 	t.Run("unix socket", func(t *testing.T) {
-		s, err := NewExternalDoltServer(configfile.ExternalDoltConfig{Socket: "/var/run/dolt.sock"})
+		s, err := NewExternalDoltServer(configfile.ExternalDoltConfig{Socket: testPlatformPath(t, "/var/run/dolt.sock")})
 		require.NoError(t, err)
 		dsn := s.DSN(context.Background(), "beads", "root", "")
-		assert.Contains(t, dsn, "unix(/var/run/dolt.sock)")
+		assert.Contains(t, dsn, "unix("+testPlatformPath(t, "/var/run/dolt.sock")+")")
 		assert.NotContains(t, dsn, "tcp(")
 	})
 
@@ -545,4 +564,46 @@ func TestExternalDoltServer_ConcurrentDial(t *testing.T) {
 	for i, e := range errs {
 		require.NoError(t, e, "concurrent Dial %d failed", i)
 	}
+}
+
+// An IPv6 external host may arrive bracketed ("[::1]", the spelling a user can
+// configure for the CLI) as well as bare. Both must name and dial the same
+// server: on main the bracketed spelling was joined into "[[::1]]:P" and the
+// dial failed with "missing port in address", so `bd serve` and a proxied
+// external backend could not reach a server the CLI reached.
+func TestExternalDoltServer_IPv6HostEitherSpelling(t *testing.T) {
+	ln, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("IPv6 loopback not available: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port := ln.Addr().(*net.TCPAddr).Port
+	go func() {
+		for {
+			c, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+
+	var ids []string
+	for _, host := range []string{"::1", "[::1]"} {
+		t.Run(host, func(t *testing.T) {
+			s, err := NewExternalDoltServer(configfile.ExternalDoltConfig{Host: host, Port: port})
+			require.NoError(t, err)
+			ids = append(ids, s.ID(context.Background()))
+
+			conn, err := s.Dial(context.Background())
+			require.NoError(t, err, "host %q must dial [::1]:%d", host, port)
+			_ = conn.Close()
+
+			dsn := s.DSN(context.Background(), "beads", "root", "")
+			assert.Contains(t, dsn, "tcp([::1]:", "host %q", host)
+			assert.NotContains(t, dsn, "[[::1]]", "host %q", host)
+		})
+	}
+	require.Len(t, ids, 2)
+	assert.Equal(t, ids[0], ids[1], "both spellings name the same server, so they must share one id")
 }

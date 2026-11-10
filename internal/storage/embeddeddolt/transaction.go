@@ -14,25 +14,67 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// RunInTransaction executes a function within a database transaction.
-// After the SQL transaction commits, dirty tables are selectively staged
-// and a Dolt version commit is created with the given message.
+// RunInTransaction executes a function within a database transaction. Its
+// callback is invoked at most once per call; callers retry explicitly after a
+// callback has started when their operation is safe to repeat. An error
+// wrapping storage.ErrCommitIndeterminate must not be blindly replayed.
+// After the SQL transaction commits, dirty tables are selectively staged and a
+// Dolt version commit is created with the given message.
 func (s *EmbeddedDoltStore) RunInTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {
+	return s.runTransaction(ctx, commitMsg, func(tx *embeddedTransaction) error { return fn(tx) })
+}
+
+// RunInIssueLifecycleTransaction keeps lifecycle work on the embedded store's
+// one transaction and stages only durable rows changed by that work.
+func (s *EmbeddedDoltStore) RunInIssueLifecycleTransaction(ctx context.Context, commitMsg string, fn func(tx storage.IssueLifecycleTransaction) error) error {
+	return s.runTransaction(ctx, commitMsg, func(tx *embeddedTransaction) error { return fn(tx) })
+}
+
+func (s *EmbeddedDoltStore) runTransaction(ctx context.Context, commitMsg string, fn func(tx *embeddedTransaction) error) error {
+	return s.runTransactionWithMessage(ctx, func(tx *embeddedTransaction) (string, error) {
+		return commitMsg, fn(tx)
+	})
+}
+
+// runTransactionWithMessage is runTransaction for work whose commit message is
+// only known once the body has run. A ready claim names the id it won, and
+// nothing outside the transaction can predict which one that is.
+func (s *EmbeddedDoltStore) runTransactionWithMessage(ctx context.Context, fn func(tx *embeddedTransaction) (string, error)) error {
 	var tracker versioncontrolops.DirtyTableTracker
+	var commitMsg string
 
 	if err := s.withConn(ctx, true, func(tx *sql.Tx) error {
-		return fn(&embeddedTransaction{tx: tx, dirty: &tracker})
+		var err error
+		commitMsg, err = fn(&embeddedTransaction{tx: tx, dirty: &tracker})
+		return err
 	}); err != nil {
 		return err
 	}
+	afterSQLCommit()
+
+	// Anything the body minted ran with versioned history scoped on this
+	// store's transaction (withConn), so its version rows must be staged with
+	// the mutation they describe rather than left dirty in the working set.
+	tracker.MarkVersionedHistoryDirty(s.versionedHistory.Enabled())
 
 	// Create a Dolt version commit from the working set changes.
 	if commitMsg != "" && len(tracker.DirtyTables()) > 0 {
-		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		if err := s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 			return versioncontrolops.StageAndCommit(ctx, db, tracker.DirtyTables(), commitMsg, commitAuthor)
-		})
+		}); err != nil {
+			return wrapCommitIndeterminate("embeddeddolt: stage and commit after SQL commit", err)
+		}
 	}
 	return nil
+}
+
+// afterSQLCommit runs between runTransactionWithMessage's SQL commit and the
+// Dolt commit that publishes it. It is a no-op outside tests, which use it to
+// fail the publication of a write whose rows have already landed.
+var afterSQLCommit = func() {}
+
+func wrapCommitIndeterminate(op string, err error) error {
+	return fmt.Errorf("%s: %w: %w", op, err, storage.ErrCommitIndeterminate)
 }
 
 type embeddedTransaction struct {
@@ -57,7 +99,6 @@ func (t *embeddedTransaction) CreateIssue(ctx context.Context, issue *types.Issu
 
 func (t *embeddedTransaction) CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error {
 	result, err := issueops.CreateIssuesInTxWithResult(ctx, t.tx, issues, actor, storage.BatchCreateOptions{
-		OrphanHandling:       storage.OrphanAllow,
 		SkipPrefixValidation: true,
 	})
 	if err != nil {
@@ -70,26 +111,73 @@ func (t *embeddedTransaction) CreateIssues(ctx context.Context, issues []*types.
 }
 
 func (t *embeddedTransaction) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
-	t.dirty.MarkDirty("issues")
-	t.dirty.MarkDirty("events")
-	_, err := issueops.UpdateIssueInTx(ctx, t.tx, id, updates, actor)
-	return err
+	issueTable, _, eventTable, _ := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, id))
+	result, err := issueops.UpdateIssueInTx(ctx, t.tx, id, updates, actor)
+	if err != nil {
+		return err
+	}
+	if !result.Changed {
+		return nil
+	}
+	t.dirty.MarkDirty(issueTable)
+	t.dirty.MarkDirty(eventTable)
+	// A wisp's status change can recompute a durable dependent.
+	if result.IssueRowsChanged {
+		t.dirty.MarkDirty("issues")
+	}
+	return nil
 }
 
 func (t *embeddedTransaction) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {
-	t.dirty.MarkDirty("issues")
-	t.dirty.MarkDirty("events")
-	_, err := issueops.CloseIssueInTx(ctx, t.tx, id, reason, actor, session)
-	return err
+	issueTable, _, eventTable, _ := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, id))
+	result, err := issueops.CloseIssueInTx(ctx, t.tx, id, reason, actor, session)
+	if err != nil || result.AlreadyClosed {
+		return err
+	}
+	t.dirty.MarkDirty(issueTable)
+	t.dirty.MarkDirty(eventTable)
+	if result.IssueRowsChanged {
+		t.dirty.MarkDirty("issues")
+	}
+	return nil
+}
+
+// ReopenIssueWithResult lets transaction-scoped callers preserve lifecycle
+// semantics when an update crosses the done boundary.
+func (t *embeddedTransaction) ReopenIssueWithResult(ctx context.Context, id string, reason string, actor string) (bool, error) {
+	issueTable, _, eventTable, _ := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, id))
+	result, err := issueops.ReopenIssueInTx(ctx, t.tx, id, reason, actor)
+	if err != nil {
+		return false, err
+	}
+	if result.Changed {
+		t.dirty.MarkDirty(issueTable)
+		t.dirty.MarkDirty(eventTable)
+		if result.IssueRowsChanged {
+			t.dirty.MarkDirty("issues")
+		}
+	}
+	return result.Changed, nil
 }
 
 func (t *embeddedTransaction) DeleteIssue(ctx context.Context, id string) error {
-	t.dirty.MarkDirty("issues")
-	t.dirty.MarkDirty("dependencies")
-	t.dirty.MarkDirty("labels")
-	t.dirty.MarkDirty("comments")
-	t.dirty.MarkDirty("events")
-	return issueops.DeleteIssueInTx(ctx, t.tx, id)
+	// Shared with the dolt path so the two cannot drift again; the hand-listed
+	// set here previously omitted child_counters and the snapshot tables, which
+	// the cascade also empties.
+	for _, cascaded := range issueops.DeleteCascadeTables(issueops.IsActiveWispInTx(ctx, t.tx, id)) {
+		t.dirty.MarkDirty(cascaded)
+	}
+	// storage.Tx.DeleteIssue carries no actor, so the journal rows record none.
+	result, err := issueops.DeleteIssueInTxWithResult(ctx, t.tx, id, "")
+	if err != nil {
+		return err
+	}
+	// Deleting a wisp can unblock a durable dependent; that row is committed
+	// with the delete (GH#6647).
+	if result.IssueRowsChanged {
+		t.dirty.MarkDirty("issues")
+	}
+	return nil
 }
 
 func (t *embeddedTransaction) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
@@ -111,7 +199,7 @@ func (t *embeddedTransaction) AddDependency(ctx context.Context, dep *types.Depe
 
 func (t *embeddedTransaction) AddDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, addOpts storage.DependencyAddOptions) error {
 	_, _, eventTable, depTable := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, dep.IssueID))
-	eventWritten, err := issueops.AddDependencyInTx(ctx, t.tx, dep, actor, issueops.AddDependencyOpts{
+	written, err := issueops.AddDependencyInTxWithResult(ctx, t.tx, dep, actor, issueops.AddDependencyOpts{
 		IsCrossPrefix:  types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID),
 		SkipCycleCheck: addOpts.SkipCycleCheck,
 		EmitEvent:      addOpts.EmitEvent,
@@ -123,8 +211,13 @@ func (t *embeddedTransaction) AddDependencyWithOptions(ctx context.Context, dep 
 	// AddDependencyInTx records a dependency_added event on the source's event
 	// table only for a genuine emit (explicit verb + new edge); stage it so the
 	// event commits with the edge. A structural or idempotent add writes no event.
-	if eventWritten {
+	if written.EventWritten {
 		t.dirty.MarkDirty(eventTable)
+	}
+	// A blocking edge flips the source's or a descendant's is_blocked; a
+	// durable row it flipped is committed with the edge (GH#6647).
+	if written.Blocked.IssueRowsChanged {
+		t.dirty.MarkDirty("issues")
 	}
 	return nil
 }
@@ -148,7 +241,7 @@ func (t *embeddedTransaction) RemoveDependencyWithOptions(ctx context.Context, i
 	// Route dirty marking on the source's wisp status: a wisp-source remove
 	// stages wisp_dependencies/wisp_events, a permanent one dependencies/events.
 	_, _, eventTable, depTable := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, issueID))
-	eventWritten, err := issueops.RemoveDependencyInTx(ctx, t.tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
+	written, err := issueops.RemoveDependencyInTxWithResult(ctx, t.tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
 	if err != nil {
 		return err
 	}
@@ -157,8 +250,13 @@ func (t *embeddedTransaction) RemoveDependencyWithOptions(ctx context.Context, i
 	// event table only for a genuine emit (explicit verb + edge removal); stage
 	// it so it commits with the edge. A structural or missing-edge remove writes
 	// no event.
-	if eventWritten {
+	if written.EventWritten {
 		t.dirty.MarkDirty(eventTable)
+	}
+	// The removal's recompute can clear the source's or a descendant's
+	// is_blocked; that unblock is committed with the removal (GH#6647).
+	if written.Blocked.IssueRowsChanged {
+		t.dirty.MarkDirty("issues")
 	}
 	return nil
 }
@@ -172,13 +270,23 @@ func (t *embeddedTransaction) GetDependencyRecords(ctx context.Context, issueID 
 }
 
 func (t *embeddedTransaction) AddLabel(ctx context.Context, issueID, label, actor string) error {
-	t.dirty.MarkDirty("labels")
-	return issueops.AddLabelInTx(ctx, t.tx, "", "", issueID, label, actor)
+	_, labelTable, eventTable, _ := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, issueID))
+	if err := issueops.AddLabelInTx(ctx, t.tx, labelTable, eventTable, issueID, label, actor); err != nil {
+		return err
+	}
+	t.dirty.MarkDirty(labelTable)
+	t.dirty.MarkDirty(eventTable)
+	return nil
 }
 
 func (t *embeddedTransaction) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
-	t.dirty.MarkDirty("labels")
-	return issueops.RemoveLabelInTx(ctx, t.tx, "", "", issueID, label, actor)
+	_, labelTable, eventTable, _ := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, issueID))
+	if err := issueops.RemoveLabelInTx(ctx, t.tx, labelTable, eventTable, issueID, label, actor); err != nil {
+		return err
+	}
+	t.dirty.MarkDirty(labelTable)
+	t.dirty.MarkDirty(eventTable)
+	return nil
 }
 
 func (t *embeddedTransaction) GetLabels(ctx context.Context, issueID string) ([]string, error) {
@@ -191,17 +299,12 @@ func (t *embeddedTransaction) SetConfig(ctx context.Context, key, value string) 
 		return err
 	}
 	// Sync normalized tables when config keys change
-	switch key {
-	case "status.custom":
-		t.dirty.MarkDirty("custom_statuses")
-		if err := issueops.SyncCustomStatusesTable(ctx, t.tx, value); err != nil {
-			return fmt.Errorf("syncing custom_statuses table: %w", err)
-		}
-	case "types.custom":
-		t.dirty.MarkDirty("custom_types")
-		if err := issueops.SyncCustomTypesTable(ctx, t.tx, value); err != nil {
-			return fmt.Errorf("syncing custom_types table: %w", err)
-		}
+	table, err := issueops.SyncConfigTables(ctx, t.tx, key, value)
+	if err != nil {
+		return err
+	}
+	if table != "" {
+		t.dirty.MarkDirty(table)
 	}
 	return nil
 }

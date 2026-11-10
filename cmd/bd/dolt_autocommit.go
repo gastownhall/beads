@@ -23,27 +23,101 @@ func transact(ctx context.Context, s storage.DoltStorage, commitMsg string, fn f
 }
 
 // transactHonoringAutoCommit wraps transactional CLI writes whose Dolt commit is
-// part of command auto-commit policy. In embedded batch/off modes the SQL
-// transaction still commits, but no Dolt version commit is created.
+// part of command auto-commit policy. In batch/off modes the SQL transaction
+// still commits, but no Dolt version commit is created — the blank message
+// makes StageAndCommit a no-op, in embedded and SQL-server mode alike
+// (bd-4wamg: batch used to be silently inert in server mode).
 func transactHonoringAutoCommit(ctx context.Context, s storage.DoltStorage, commitMsg string, fn func(tx storage.Transaction) error) error {
 	msg := commitMsg
 	committedExplicitly := strings.TrimSpace(msg) != ""
-	if isEmbeddedMode() {
-		mode, err := getDoltAutoCommitMode()
-		if err != nil {
-			return err
-		}
-		if mode != doltAutoCommitOn {
-			msg = ""
-			committedExplicitly = false
-		}
+	commitNow, err := writesCommitNow()
+	if err != nil {
+		return err
+	}
+	if !commitNow {
+		msg = ""
+		committedExplicitly = false
 	}
 
-	err := s.RunInTransaction(ctx, msg, fn)
+	err = s.RunInTransaction(ctx, msg, fn)
 	if err == nil && committedExplicitly {
 		commandDidExplicitDoltCommit = true
 	}
 	return err
+}
+
+// writesCommitNow reports whether a CLI write should create its Dolt version
+// commit as part of the write (mode "on"), rather than leaving it in the
+// working set for a later explicit commit point (batch/off; bd dolt commit).
+// An unset value means no Dolt store resolved a default (e.g. a non-Dolt
+// backend), where per-write version commits are the only behavior that
+// exists — treat it as "on".
+func writesCommitNow() (bool, error) {
+	if strings.TrimSpace(doltAutoCommit) == "" {
+		return true, nil
+	}
+	mode, err := getDoltAutoCommitMode()
+	if err != nil {
+		return false, err
+	}
+	return mode == doltAutoCommitOn, nil
+}
+
+// embeddedWritesCommitNow is writesCommitNow for the embedded-only commit
+// points (the PersistentPostRun working-set flush and create's post-write
+// flush). In SQL-server mode those flushes never run — mode "on" writes
+// version themselves inside the storage layer.
+func embeddedWritesCommitNow() (bool, error) {
+	if !isEmbeddedMode() {
+		return false, nil
+	}
+	return writesCommitNow()
+}
+
+// issueOpsContext applies command auto-commit policy to the context a write verb
+// hands the issue-operations facade. The facade creates its Dolt version commit
+// inside the storage layer, so batch mode cannot blank a commit message the way
+// transactHonoringAutoCommit does — it has to say so on the context instead.
+// This is mode-driven, not embedded-only: in SQL-server mode the storage
+// layer's per-write commit sites honor the same deferral (bd-4wamg).
+func issueOpsContext(ctx context.Context) (context.Context, error) {
+	commitNow, err := writesCommitNow()
+	if err != nil {
+		return nil, err
+	}
+	if commitNow {
+		return ctx, nil
+	}
+	return issueops.WithDeferredVersionCommit(ctx), nil
+}
+
+// explicitCommitPointContext clears the dolt.auto-commit deferral for a proxied
+// dual whose direct-route twin is an explicit commit point.
+//
+// The direct route encodes two commit classes, and it encodes them by which
+// wrapper a verb picks: writes whose Dolt commit is auto-commit policy go
+// through transactHonoringAutoCommit or issueOpsContext above, while the
+// explicit commit points go through transact and mint a Dolt commit carrying
+// the caller's message whatever the policy says. The proxied route has no such
+// choice to make per verb — it applies the policy ONCE, to rootCtx in the root
+// pre-run (GH#4995) — so the second class has to opt back out here, or
+// doltServerTx.Commit blanks the message it was given: a proxied
+// `bd batch -m "release batch"` under dolt.auto-commit=batch would persist the
+// rows, discard the message and mint nothing, while the identical command and
+// config on the direct route commits it.
+//
+// Scope is the intersection of two in-tree lists: the transact() call sites,
+// and the paths the proxied front door permits (proxyPermittedPaths in
+// capability_registry.go). That is batch, mol bond/pour/squash, mol wisp create
+// and the WISP half of mol burn; cook and migrate issues also call transact but
+// are refused in proxied mode, so they have no dual to exempt.
+//
+// Membership is per commit site, not per command: mol burn's persistent half
+// reaches deleteBatch -> issueOpsContext on the direct route, which is the
+// policy-honoring class, so runMolBurnProxiedServer exempts only the wisp
+// transaction. TestProxiedDualsExemptTheirExplicitCommitPoints pins both arms.
+func explicitCommitPointContext(ctx context.Context) context.Context {
+	return issueops.WithImmediateVersionCommit(ctx)
 }
 
 type doltAutoCommitParams struct {
@@ -79,6 +153,77 @@ func commitPendingIfEmbedded(ctx context.Context, st storage.DoltStorage, actor 
 		p.MessageOverride = formatDoltAutoCommitMessage(p.Command, actor, p.IssueIDs)
 	}
 	return maybeAutoCommitStore(ctx, st, p)
+}
+
+// commitConfigWrite creates the Dolt commit for an intentional config-table
+// write on the direct SQL-server route (bd config set/unset/set-many; bd
+// remember/forget go through commitMemoryWrite). Nothing else commits it there
+// (GH#4078): the store-level writes those verbs reach through their roles
+// commit the SQL transaction only, maybeAutoCommit returns early off the
+// embedded route, and plain Commit excludes config anyway (GH#2455).
+// CommitConfigOnly stages ONLY the config table, so a concurrent operation's
+// other dirty tables are never swept.
+//
+// It is a no-op wherever something else already owns that commit: embedded
+// mode (the PersistentPostRun auto-commit stages config with everything
+// else), the proxied route (the role's unit of work commits each write), and
+// dolt.auto-commit batch/off, which defer it to `bd dolt commit` (CommitAll,
+// config included) exactly as they defer every other server-mode write.
+//
+// Unlike commitMemoryWrite it does not screen other dirty config rows: the
+// operator is writing config on purpose, the trust level of `bd dolt commit`.
+// The config verbs return a failed commit as the command's failure, where
+// remember and forget only warn: a memory commit is refused whenever another
+// writer left an internal key dirty, so exit 1 there would be routine for a
+// write that landed, while this commit is never refused and fails only on a
+// genuine error, which its "committing config write" prefix attributes to the
+// commit rather than the write. (config unset's delete of a leaked secret row
+// warns too: the YAML unset is that command's contract.)
+// rename-prefix and migrate also write config (issue_prefix, sync.branch) and
+// are deliberately not wired here: they are multi-step operations, and when
+// their config row should become a commit is the GH#2455 question itself.
+// `bd kv set`/`clear` and the kv.memory rows `bd import` writes are not wired
+// here yet either, so on this route they stay in the working set until a later
+// commit stages config, such as `bd dolt commit`.
+func commitConfigWrite(ctx context.Context, st storage.DoltStorage, command string) error {
+	if err := commitConfigTable(ctx, st, command, storage.DoltStorage.CommitConfigOnly); err != nil {
+		return fmt.Errorf("committing config write: %w", err)
+	}
+	return nil
+}
+
+// commitMemoryWrite is commitConfigWrite for bd remember/forget. A memory is
+// user kv.* data, so its commit takes only kv.* config rows with it
+// (CommitConfigUserKVOnly): a dirty internal key is refused, not swept in. The
+// refusal is a *storage.ConfigCommitRefusedError naming the keys, and the
+// callers report it as a warning: by then the memory write has landed.
+func commitMemoryWrite(ctx context.Context, st storage.DoltStorage, command string) error {
+	if err := commitConfigTable(ctx, st, command, storage.DoltStorage.CommitConfigUserKVOnly); err != nil {
+		return fmt.Errorf("committing memory write: %w", err)
+	}
+	return nil
+}
+
+func commitConfigTable(ctx context.Context, st storage.DoltStorage, command string,
+	commit func(storage.DoltStorage, context.Context, string) error) error {
+	if isEmbeddedMode() || usesProxiedServer() || st == nil {
+		return nil
+	}
+	commitNow, err := writesCommitNow()
+	if err != nil {
+		return err
+	}
+	if !commitNow {
+		return nil
+	}
+	if lm, ok := storage.UnwrapStore(st).(storage.LifecycleManager); ok && lm.IsClosed() {
+		return nil
+	}
+	msg := formatDoltAutoCommitMessage(command, getActor(), nil)
+	if err := commit(st, ctx, msg); err != nil && !isDoltNothingToCommit(err) {
+		return err
+	}
+	return nil
 }
 
 func maybeAutoCommitStore(ctx context.Context, st storage.DoltStorage, p doltAutoCommitParams) error {

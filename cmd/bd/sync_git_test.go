@@ -2,8 +2,8 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -186,12 +186,58 @@ func TestGitURLToDoltRemote(t *testing.T) {
 func runGitForSyncTest(t *testing.T, dir string, args ...string) {
 	t.Helper()
 
-	cmd := exec.Command("git", args...)
+	cmd := gitCommand(args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v failed: %v\n%s", args, err, string(output))
+	}
+}
+
+// TestGitRemoteHasDoltDataRefStatusSurfacesGitStderr proves the probe failure a
+// user actually sees carries git's own diagnosis. exec.ExitError.Error() is
+// only "exit status 128"; git's complaint sits unread in ExitError.Stderr, and
+// bootstrap's blocked message is built from this error (#5743).
+func TestGitRemoteHasDoltDataRefStatusSurfacesGitStderr(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "not-a-repo")
+
+	hasData, err := gitRemoteHasDoltDataRefStatus(missing)
+
+	if err == nil {
+		t.Fatalf("probe of %q returned hasData=%v and no error; want a failure", missing, hasData)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "ls-remote") {
+		t.Errorf("error %q does not name the command that failed", msg)
+	}
+	// Whatever git's exact wording, the message must be more than the bare
+	// exit status — that is the whole point of reading ExitError.Stderr.
+	if msg == "git ls-remote: exit status 128" {
+		t.Errorf("error %q carries no stderr detail; the ExitError.Stderr thread-through regressed", msg)
+	}
+	if !strings.Contains(msg, "repository") && !strings.Contains(msg, "fatal") {
+		t.Errorf("error %q does not look like it carries git's stderr", msg)
+	}
+}
+
+// A committed config.yaml can set sync.remote, so a value git would read as
+// --upload-pack or -u must never reach `git ls-remote` as an option.
+func TestGitRemoteHasDoltDataRefStatusRejectsOptionRemote(t *testing.T) {
+	for _, prefix := range []string{"", "git+", "GIT+"} {
+		for _, opt := range []string{"--upload-pack=", "-u"} {
+			pwned := filepath.Join(t.TempDir(), "pwned")
+			remote := prefix + opt + "touch " + pwned + ";false #.git"
+
+			_, err := gitRemoteHasDoltDataRefStatus(remote)
+
+			if err == nil || !strings.Contains(err.Error(), "must not start with '-'") {
+				t.Errorf("probe of %q: err = %v, want a leading-dash rejection", remote, err)
+			}
+			if _, statErr := os.Stat(pwned); statErr == nil {
+				t.Fatalf("probe of %q ran the injected upload-pack command", remote)
+			}
+		}
 	}
 }

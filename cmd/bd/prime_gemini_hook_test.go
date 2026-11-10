@@ -50,7 +50,8 @@ func runPrimeBinary(t *testing.T, binPath, workDir string, args ...string) (stdo
 // .beads/ directory so FindBeadsDir succeeds.
 func initBeadsWorkspace(t *testing.T, binPath, workDir string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// 2m, not 30s: a -race bd under a loaded CI host has taken >30s for one init.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binPath, "init", "--prefix", "test")
 	cmd.Dir = workDir
@@ -86,41 +87,93 @@ func parseEnvelope(t *testing.T, raw []byte) primeEnvelope {
 	return env
 }
 
-// TestPrime_HookJSON_DefaultPath: with --hook-json and no PRIME.md
-// override, output is the JSON envelope wrapping the generated workflow
-// context.
-func TestPrime_HookJSON_DefaultPath(t *testing.T) {
+func writePrimeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write PRIME.md: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			t.Errorf("remove PRIME.md: %v", err)
+		}
+	})
+}
+
+// TestPrimeBinaryPortfolio runs the binary-level Prime scenarios sequentially
+// against shared workspaces. The scenarios retain their individual names as
+// subtests because each remains an independently observable CLI contract.
+func TestPrimeBinaryPortfolio(t *testing.T) {
 	binPath := buildBDUnderTest(t)
-	workDir := t.TempDir()
-	initBeadsWorkspace(t, binPath, workDir)
+	localWorkDir := t.TempDir()
+	initBeadsWorkspace(t, binPath, localWorkDir)
+	redirectedRoot := t.TempDir()
+	initBeadsWorkspace(t, binPath, redirectedRoot)
+	redirectedBeads := filepath.Join(redirectedRoot, ".beads")
+	noWorkspaceWorkDir := t.TempDir()
 
-	stdout, _ := runPrimeBinary(t, binPath, workDir, "--hook-json")
-	env := parseEnvelope(t, stdout)
+	t.Run("TestPrime_HookJSON_DefaultPath", func(t *testing.T) {
+		stdout, _ := runPrimeBinary(t, binPath, localWorkDir, "--hook-json")
+		env := parseEnvelope(t, stdout)
 
-	if env.HookSpecificOutput.AdditionalContext == "" {
-		t.Fatal("expected non-empty additionalContext for default path")
-	}
-	// Sanity-check that the generated content actually flowed through.
-	// The CLI/MCP variants both lead with one of these phrases.
-	ctx := env.HookSpecificOutput.AdditionalContext
-	if !strings.Contains(ctx, "Beads") {
-		t.Errorf("additionalContext should contain generated bd prime markdown, got: %q", firstN(ctx, 200))
-	}
+		if env.HookSpecificOutput.AdditionalContext == "" {
+			t.Fatal("expected non-empty additionalContext for default path")
+		}
+		// Sanity-check that the generated content actually flowed through.
+		// The CLI/MCP variants both lead with one of these phrases.
+		ctx := env.HookSpecificOutput.AdditionalContext
+		if !strings.Contains(ctx, "Beads") {
+			t.Errorf("additionalContext should contain generated bd prime markdown, got: %q", firstN(ctx, 200))
+		}
+	})
+
+	t.Run("TestPrime_HookJSON_LocalPrimeOverride", func(t *testing.T) {
+		primeScenarioHookJSONLocalPrimeOverride(t, binPath, localWorkDir)
+	})
+	t.Run("TestPrime_HookJSON_NotJSON_WithoutFlag", func(t *testing.T) {
+		primeScenarioHookJSONNotJSONWithoutFlag(t, binPath, localWorkDir)
+	})
+	t.Run("TestPrime_HookJSON_StealthCompose", func(t *testing.T) {
+		primeScenarioHookJSONStealthCompose(t, binPath, localWorkDir)
+	})
+	t.Run("TestPrime_HookJSON_GlobalPrimeOverride", func(t *testing.T) {
+		primeScenarioHookJSONGlobalPrimeOverride(t, binPath, localWorkDir)
+	})
+	t.Run("TestPrime_HookJSON_RedirectedPrimeOverride", func(t *testing.T) {
+		primeScenarioHookJSONRedirectedPrimeOverride(t, binPath, noWorkspaceWorkDir, redirectedBeads)
+	})
+	t.Run("TestPrime_HookJSON_NoBeadsWorkspace", func(t *testing.T) {
+		primeScenarioHookJSONNoBeadsWorkspace(t, binPath, noWorkspaceWorkDir)
+	})
+	t.Run("TestPrime_NoTelemetryInIsolatedHome", func(t *testing.T) {
+		primeScenarioNoTelemetryInIsolatedHome(t, binPath, localWorkDir)
+	})
+
+	rememberInWorkspace(t, binPath, localWorkDir, "prime-mem-key", "remember this insight")
+
+	t.Run("TestPrime_CustomPrimeMd_AppendsMemories", func(t *testing.T) {
+		primeScenarioCustomPrimeMdAppendsMemories(t, binPath, localWorkDir)
+	})
+	t.Run("TestPrime_MemoriesOnly_WithCustomPrimeMd", func(t *testing.T) {
+		primeScenarioMemoriesOnlyWithCustomPrimeMd(t, binPath, localWorkDir)
+	})
+	t.Run("TestPrime_NoMemories_DefaultPath", func(t *testing.T) {
+		primeScenarioNoMemoriesDefaultPath(t, binPath, localWorkDir)
+	})
+	t.Run("TestPrime_NoMemories_CustomPrimeMd", func(t *testing.T) {
+		primeScenarioNoMemoriesCustomPrimeMd(t, binPath, localWorkDir)
+	})
+	t.Run("TestPrime_NoMemories_MemoriesOnlyWins", func(t *testing.T) {
+		primeScenarioNoMemoriesMemoriesOnlyWins(t, binPath, localWorkDir)
+	})
 }
 
 // TestPrime_HookJSON_LocalPrimeOverride: with --hook-json and a
 // .beads/PRIME.md file present, output is the JSON envelope with that file's
 // contents in additionalContext (verbatim).
-func TestPrime_HookJSON_LocalPrimeOverride(t *testing.T) {
-	binPath := buildBDUnderTest(t)
-	workDir := t.TempDir()
-	initBeadsWorkspace(t, binPath, workDir)
-
+func primeScenarioHookJSONLocalPrimeOverride(t *testing.T, binPath, workDir string) {
 	const custom = "# Custom local PRIME.md override\nBe excellent.\n"
 	primePath := filepath.Join(workDir, ".beads", "PRIME.md")
-	if err := os.WriteFile(primePath, []byte(custom), 0o644); err != nil {
-		t.Fatalf("write PRIME.md: %v", err)
-	}
+	writePrimeFile(t, primePath, custom)
 
 	stdout, _ := runPrimeBinary(t, binPath, workDir, "--hook-json")
 	env := parseEnvelope(t, stdout)
@@ -134,11 +187,7 @@ func TestPrime_HookJSON_LocalPrimeOverride(t *testing.T) {
 // --hook-json, prime output is raw markdown — NOT a JSON envelope.
 // This is the binary-level companion to the in-process unit test in
 // prime_test.go and protects the existing Claude/CLI contract.
-func TestPrime_HookJSON_NotJSON_WithoutFlag(t *testing.T) {
-	binPath := buildBDUnderTest(t)
-	workDir := t.TempDir()
-	initBeadsWorkspace(t, binPath, workDir)
-
+func primeScenarioHookJSONNotJSONWithoutFlag(t *testing.T, binPath, workDir string) {
 	stdout, _ := runPrimeBinary(t, binPath, workDir)
 	out := strings.TrimSpace(string(stdout))
 	if strings.HasPrefix(out, "{") {
@@ -153,11 +202,7 @@ func TestPrime_HookJSON_NotJSON_WithoutFlag(t *testing.T) {
 // TestPrime_HookJSON_StealthCompose: --hook-json composed with --stealth
 // emits the JSON envelope, and additionalContext is in stealth mode (no raw
 // `git push` instructions in the close protocol).
-func TestPrime_HookJSON_StealthCompose(t *testing.T) {
-	binPath := buildBDUnderTest(t)
-	workDir := t.TempDir()
-	initBeadsWorkspace(t, binPath, workDir)
-
+func primeScenarioHookJSONStealthCompose(t *testing.T, binPath, workDir string) {
 	stdout, _ := runPrimeBinary(t, binPath, workDir, "--hook-json", "--stealth")
 	env := parseEnvelope(t, stdout)
 
@@ -177,47 +222,62 @@ func TestPrime_HookJSON_StealthCompose(t *testing.T) {
 	}
 }
 
-// TestPrime_HookJSON_GlobalPrimeOverride: with --hook-json and a
-// ~/.config/beads/PRIME.md file present (XDG path), output is the JSON
-// envelope wrapping that file's contents. This exercises the third
-// custom-PRIME.md path through the wrapper.
-func TestPrime_HookJSON_GlobalPrimeOverride(t *testing.T) {
-	binPath := buildBDUnderTest(t)
-	workDir := t.TempDir()
-	initBeadsWorkspace(t, binPath, workDir)
+// isolatedGlobalPrimeConfigFixture creates a complete temporary user profile,
+// asks the current platform where its user config directory is, and returns a
+// child environment that resolves to the same directory.
+func isolatedGlobalPrimeConfigFixture(t *testing.T) (string, []string) {
+	t.Helper()
 
-	const custom = "# Global PRIME override\nGreetings from XDG.\n"
+	profileRoot := t.TempDir()
+	profileVars := []struct {
+		key   string
+		value string
+	}{
+		{key: "HOME", value: filepath.Join(profileRoot, "home")},
+		{key: "USERPROFILE", value: filepath.Join(profileRoot, "home")},
+		{key: "APPDATA", value: filepath.Join(profileRoot, "appdata", "roaming")},
+		{key: "LOCALAPPDATA", value: filepath.Join(profileRoot, "appdata", "local")},
+		{key: "XDG_CONFIG_HOME", value: filepath.Join(profileRoot, "xdg-config")},
+	}
 
-	// resolveGlobalPrimePath uses os.UserConfigDir, which on Linux honors
-	// XDG_CONFIG_HOME. On macOS it returns ~/Library/Application Support
-	// regardless of XDG, so we set HOME and also stage the macOS path to
-	// be cross-platform-safe.
-	xdg := t.TempDir()
-	home := t.TempDir()
+	for _, variable := range profileVars {
+		if err := os.MkdirAll(variable.value, 0o755); err != nil {
+			t.Fatalf("create isolated %s directory: %v", variable.key, err)
+		}
+		t.Setenv(variable.key, variable.value)
+	}
 
-	xdgBeadsDir := filepath.Join(xdg, "beads")
-	if err := os.MkdirAll(xdgBeadsDir, 0o755); err != nil {
-		t.Fatalf("mkdir xdg beads dir: %v", err)
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("resolve isolated user config dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(xdgBeadsDir, "PRIME.md"), []byte(custom), 0o644); err != nil {
-		t.Fatalf("write xdg PRIME.md: %v", err)
+	rel, err := filepath.Rel(profileRoot, configDir)
+	if err != nil || !filepath.IsLocal(rel) {
+		t.Fatalf("isolated user config dir %q escaped profile root %q", configDir, profileRoot)
 	}
-	// Cross-platform staging for macOS UserConfigDir.
-	macConfigDir := filepath.Join(home, "Library", "Application Support", "beads")
-	if err := os.MkdirAll(macConfigDir, 0o755); err != nil {
-		t.Fatalf("mkdir mac config dir: %v", err)
+
+	return configDir, os.Environ()
+}
+
+// TestPrime_HookJSON_GlobalPrimeOverride: with --hook-json and a PRIME.md in
+// the platform-native user config directory, output is the JSON envelope
+// wrapping that file's contents. This exercises the third custom-PRIME.md path
+// through the wrapper.
+func primeScenarioHookJSONGlobalPrimeOverride(t *testing.T, binPath, workDir string) {
+	const custom = "# Global PRIME override\nGreetings from isolated config.\n"
+
+	configDir, childEnv := isolatedGlobalPrimeConfigFixture(t)
+	beadsConfigDir := filepath.Join(configDir, "beads")
+	if err := os.MkdirAll(beadsConfigDir, 0o755); err != nil {
+		t.Fatalf("mkdir global beads config dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(macConfigDir, "PRIME.md"), []byte(custom), 0o644); err != nil {
-		t.Fatalf("write mac PRIME.md: %v", err)
-	}
+	writePrimeFile(t, filepath.Join(beadsConfigDir, "PRIME.md"), custom)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binPath, "prime", "--hook-json")
 	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(),
-		"HOME="+home,
-		"XDG_CONFIG_HOME="+xdg,
+	cmd.Env = append(childEnv,
 		"BEADS_TEST_IGNORE_REPO_CONFIG=1",
 		"BEADS_DIR=",
 		"BEADS_DB=",
@@ -242,24 +302,9 @@ func TestPrime_HookJSON_GlobalPrimeOverride(t *testing.T) {
 // envelope wrapping that file's contents. This exercises the redirected
 // path independently from the local path so DoD #2 ("ALL FOUR output paths
 // wrap correctly") is fully covered end-to-end.
-func TestPrime_HookJSON_RedirectedPrimeOverride(t *testing.T) {
-	binPath := buildBDUnderTest(t)
-
-	// CWD has no .beads/ at all — the local override can't fire.
-	workDir := t.TempDir()
-
-	// Stage the relocated beads dir at a sibling path. We can't `bd init`
-	// straight into it (init resolves to ./.beads), so we init in a separate
-	// dir and copy the .beads/ into our target. That gives FindBeadsDir
-	// what it needs to validate the dir.
-	relocatedRoot := t.TempDir()
-	initBeadsWorkspace(t, binPath, relocatedRoot)
-	relocatedBeads := filepath.Join(relocatedRoot, ".beads")
-
+func primeScenarioHookJSONRedirectedPrimeOverride(t *testing.T, binPath, workDir, relocatedBeads string) {
 	const custom = "# Redirected PRIME override\nFrom a relocated beadsDir.\n"
-	if err := os.WriteFile(filepath.Join(relocatedBeads, "PRIME.md"), []byte(custom), 0o644); err != nil {
-		t.Fatalf("write redirected PRIME.md: %v", err)
-	}
+	writePrimeFile(t, filepath.Join(relocatedBeads, "PRIME.md"), custom)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -289,11 +334,9 @@ func TestPrime_HookJSON_RedirectedPrimeOverride(t *testing.T) {
 // TestPrime_HookJSON_NoBeadsWorkspace: when bd prime would otherwise emit
 // nothing (no beads workspace resolved), --hook-json still emits the empty
 // JSON envelope so Gemini's strict stdout-must-be-JSON contract is honored.
-func TestPrime_HookJSON_NoBeadsWorkspace(t *testing.T) {
-	binPath := buildBDUnderTest(t)
-	// Use a freshly created tmpdir with NO beads workspace and HOME isolated
-	// so FindBeadsDir cannot walk up into the test repo.
-	workDir := t.TempDir()
+func primeScenarioHookJSONNoBeadsWorkspace(t *testing.T, binPath, workDir string) {
+	// workDir is a freshly created tmpdir with NO beads workspace, so
+	// FindBeadsDir cannot walk up into the test repo.
 	home := t.TempDir()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -347,17 +390,10 @@ func rememberInWorkspace(t *testing.T, binPath, workDir, key, content string) {
 // TestPrime_CustomPrimeMd_AppendsMemories: a custom .beads/PRIME.md replaces the
 // default workflow text, but persistent memories must still be appended so
 // `bd remember` keeps working under a custom template (GH#3941).
-func TestPrime_CustomPrimeMd_AppendsMemories(t *testing.T) {
-	binPath := buildBDUnderTest(t)
-	workDir := t.TempDir()
-	initBeadsWorkspace(t, binPath, workDir)
-	rememberInWorkspace(t, binPath, workDir, "prime-mem-key", "remember this insight")
-
+func primeScenarioCustomPrimeMdAppendsMemories(t *testing.T, binPath, workDir string) {
 	const custom = "# Custom local PRIME.md override\nBe excellent.\n"
 	primePath := filepath.Join(workDir, ".beads", "PRIME.md")
-	if err := os.WriteFile(primePath, []byte(custom), 0o644); err != nil {
-		t.Fatalf("write PRIME.md: %v", err)
-	}
+	writePrimeFile(t, primePath, custom)
 
 	stdout, _ := runPrimeBinary(t, binPath, workDir)
 	out := string(stdout)
@@ -377,17 +413,10 @@ func TestPrime_CustomPrimeMd_AppendsMemories(t *testing.T) {
 // memories section even when a custom PRIME.md exists; the PRIME.md content must
 // NOT leak into the output (GH#3941). This is the primary memory-injection path
 // for PreCompact hooks, which a custom PRIME.md previously broke.
-func TestPrime_MemoriesOnly_WithCustomPrimeMd(t *testing.T) {
-	binPath := buildBDUnderTest(t)
-	workDir := t.TempDir()
-	initBeadsWorkspace(t, binPath, workDir)
-	rememberInWorkspace(t, binPath, workDir, "prime-mem-key", "remember this insight")
-
+func primeScenarioMemoriesOnlyWithCustomPrimeMd(t *testing.T, binPath, workDir string) {
 	const custom = "# Custom local PRIME.md override\nBe excellent.\n"
 	primePath := filepath.Join(workDir, ".beads", "PRIME.md")
-	if err := os.WriteFile(primePath, []byte(custom), 0o644); err != nil {
-		t.Fatalf("write PRIME.md: %v", err)
-	}
+	writePrimeFile(t, primePath, custom)
 
 	stdout, _ := runPrimeBinary(t, binPath, workDir, "--memories-only")
 	out := string(stdout)
@@ -403,12 +432,7 @@ func TestPrime_MemoriesOnly_WithCustomPrimeMd(t *testing.T) {
 // TestPrime_NoMemories_DefaultPath: --no-memories omits the persistent memories
 // section from the default (generated) prime output. A control run without the
 // flag confirms the memory is otherwise present, so the assertion has signal.
-func TestPrime_NoMemories_DefaultPath(t *testing.T) {
-	binPath := buildBDUnderTest(t)
-	workDir := t.TempDir()
-	initBeadsWorkspace(t, binPath, workDir)
-	rememberInWorkspace(t, binPath, workDir, "prime-mem-key", "remember this insight")
-
+func primeScenarioNoMemoriesDefaultPath(t *testing.T, binPath, workDir string) {
 	// Control: without --no-memories, the memory is injected.
 	ctrl, _ := runPrimeBinary(t, binPath, workDir, "--full")
 	if !strings.Contains(string(ctrl), "remember this insight") {
@@ -432,16 +456,9 @@ func TestPrime_NoMemories_DefaultPath(t *testing.T) {
 
 // TestPrime_NoMemories_CustomPrimeMd: --no-memories suppresses the memories that
 // GH#3941 appends under a custom PRIME.md; the custom content itself is unaffected.
-func TestPrime_NoMemories_CustomPrimeMd(t *testing.T) {
-	binPath := buildBDUnderTest(t)
-	workDir := t.TempDir()
-	initBeadsWorkspace(t, binPath, workDir)
-	rememberInWorkspace(t, binPath, workDir, "prime-mem-key", "remember this insight")
-
+func primeScenarioNoMemoriesCustomPrimeMd(t *testing.T, binPath, workDir string) {
 	const custom = "# Custom local PRIME.md override\nBe excellent.\n"
-	if err := os.WriteFile(filepath.Join(workDir, ".beads", "PRIME.md"), []byte(custom), 0o644); err != nil {
-		t.Fatalf("write PRIME.md: %v", err)
-	}
+	writePrimeFile(t, filepath.Join(workDir, ".beads", "PRIME.md"), custom)
 
 	stdout, _ := runPrimeBinary(t, binPath, workDir, "--no-memories")
 	out := string(stdout)
@@ -455,12 +472,7 @@ func TestPrime_NoMemories_CustomPrimeMd(t *testing.T) {
 
 // TestPrime_NoMemories_MemoriesOnlyWins: when both --memories-only and
 // --no-memories are set, --memories-only wins and memories are still returned.
-func TestPrime_NoMemories_MemoriesOnlyWins(t *testing.T) {
-	binPath := buildBDUnderTest(t)
-	workDir := t.TempDir()
-	initBeadsWorkspace(t, binPath, workDir)
-	rememberInWorkspace(t, binPath, workDir, "prime-mem-key", "remember this insight")
-
+func primeScenarioNoMemoriesMemoriesOnlyWins(t *testing.T, binPath, workDir string) {
 	stdout, _ := runPrimeBinary(t, binPath, workDir, "--memories-only", "--no-memories")
 	out := string(stdout)
 	if !strings.Contains(out, "remember this insight") {
@@ -484,11 +496,7 @@ func TestPrime_NoMemories_MemoriesOnlyWins(t *testing.T) {
 // metrics.Init creates the eventsData dir eagerly (and synchronously, in the
 // parent) whenever metrics are enabled, so its absence proves the flusher was
 // never armed.
-func TestPrime_NoTelemetryInIsolatedHome(t *testing.T) {
-	binPath := buildBDUnderTest(t)
-	workDir := t.TempDir()
-	initBeadsWorkspace(t, binPath, workDir)
-
+func primeScenarioNoTelemetryInIsolatedHome(t *testing.T, binPath, workDir string) {
 	home := t.TempDir()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

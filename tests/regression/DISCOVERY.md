@@ -96,8 +96,8 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 | BUG-67 | **PROTOCOL** | PASS (correct) | — |
 | BUG-68 | **PROTOCOL** | PASS (correct) | — |
 | BUG-69 | **BUG** | OPEN (not PR'd yet) | — |
-| BUG-70 | **BUG** | OPEN (not PR'd yet) | — |
-| BUG-71 | **BUG** | OPEN (not PR'd yet) | — |
+| BUG-70 | **FIX PR** | **PR OPEN** | PR #6742 |
+| BUG-71 | **FIX PR** | **PR OPEN** | PR #6742 |
 | BUG-72 | **PROTOCOL** | PASS (correct) | — |
 
 ### Shipped fix PRs (all include protocol tests)
@@ -1169,6 +1169,7 @@ exist." Same class of bug as BUG-59 (children nonexistent parent).
 ### BUG-70: `bd label remove` on nonexistent label reports success (NEW — session 8c)
 
 **Severity: LOW** — False positive confirmation (same class as BUG-42)
+**Status: FIXED — PR #6742** (GH#5988)
 **Discovered:** Session 8c discovery, test
 **File:** `cmd/bd/label.go` (no existence check before remove)
 **Test:** `TestDiscovery_LabelRemoveNonexistentSilentSuccess`
@@ -1181,6 +1182,7 @@ was never on the issue. Same pattern as BUG-42 (dep rm nonexistent says "Removed
 ### BUG-71: `bd label add` duplicate reports "Added" when already exists (NEW — session 8c)
 
 **Severity: LOW** — Misleading success message
+**Status: FIXED — PR #6742** (GH#5988)
 **Discovered:** Session 8c discovery, test
 **File:** `cmd/bd/label.go:99-102` (no existence check before add)
 **Test:** `TestDiscovery_LabelAddDuplicateReportsAdded`

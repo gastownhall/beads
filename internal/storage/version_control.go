@@ -2,7 +2,11 @@ package storage
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
+
+	"github.com/steveyegge/beads/internal/storage/kvkeys"
 )
 
 // CommitInfo represents a version control commit.
@@ -12,6 +16,11 @@ type CommitInfo struct {
 	Email   string
 	Date    time.Time
 	Message string
+	// CommitOrder is Dolt's ancestry-derived position of the commit in the
+	// history graph (dolt_log.commit_order): a parent always has a lower value
+	// than its children, regardless of commit dates, which are not required to
+	// be monotonic along the parent chain.
+	CommitOrder int64
 }
 
 // StatusEntry represents a changed table in the working set.
@@ -158,7 +167,9 @@ type VersionControl interface {
 	ListBranches(ctx context.Context) ([]string, error)
 	Commit(ctx context.Context, message string) error
 	// CommitWithConfig is like Commit but includes the config table.
-	// Use after intentional config writes (bd init, bd config set, bd rename-prefix).
+	// Use after intentional config writes (bd init, bd rename-prefix). Its '-Am'
+	// stages every dirty table, so a command committing only its own config
+	// write should use CommitConfigOnly or CommitConfigUserKVOnly instead.
 	// GH#3216: bootstrap paths must use this to commit issue_prefix.
 	CommitWithConfig(ctx context.Context, message string) error
 	// CommitMergeResolution concludes a merge whose conflicts the operator
@@ -168,6 +179,40 @@ type VersionControl interface {
 	// data syncs through config — would be dropped, leaving the merge unconcluded
 	// and re-wedging the next pull/sync (GH#2474).
 	CommitMergeResolution(ctx context.Context, message string) error
+	// CommitAll commits the ENTIRE working set — every dirty non-ignored table,
+	// config included — with the given message. It is the storage entry point
+	// for the explicit operator commands (bd vc commit, bd dolt commit), which
+	// promise "all current changes": out-of-band writes (tables modified outside
+	// a tracked bd transaction, config above all) must be swept in here, or the
+	// doctor's dirty-working-set warning can never be cleared by its own
+	// recommended remedy. Unlike Commit, it reports honestly whether a commit
+	// was created: (false, nil) means nothing was committable (clean working
+	// set, or only dolt_ignore'd tables such as wisps were dirty), so callers
+	// can print "Nothing to commit" instead of claiming a commit that never
+	// happened. GH#2455's config exclusion is about AUTOMATIC commits sweeping
+	// a concurrent writer's half-applied config change; an operator explicitly
+	// asking to commit everything is the same trust level as CommitPending.
+	// The committed bool is the atomic signal whose absence forced the CLI's
+	// racy HEAD-before/HEAD-after comparison (the interface threading tracked
+	// as bd mybd-z9h7j; CommitPending already had the shape).
+	CommitAll(ctx context.Context, message string) (bool, error)
+	// CommitConfigOnly commits the config table, with the lookup tables
+	// SetConfig projects from it (custom_statuses, custom_types) — the scoped
+	// commit for intentional config writes (bd config set) in server mode.
+	// There, unlike CommitWithConfig ('-Am'), it never stages other tables, so
+	// a concurrent operation's dirty working set is not swept (GH#2455).
+	// Embedded mode has no concurrent writer to sweep and commits the whole
+	// working set, as its CommitWithConfig does.
+	// GH#4078: without this, server-mode config writes strand the working
+	// set dirty — generic Commit() excludes config and silently no-ops.
+	CommitConfigOnly(ctx context.Context, message string) error
+	// CommitConfigUserKVOnly is the scoped commit for writes of user kv.* data
+	// (bd remember, bd forget). In server mode it stages the config table alone
+	// and refuses, committing nothing, when any dirty config row is outside
+	// kv.*, the screen the pre-pull auto-commit applies. The refusal is a
+	// *ConfigCommitRefusedError naming those keys. Embedded mode behaves as
+	// CommitConfigOnly.
+	CommitConfigUserKVOnly(ctx context.Context, message string) error
 	CommitPending(ctx context.Context, actor string) (bool, error)
 	CommitExists(ctx context.Context, commitHash string) (bool, error)
 	GetCurrentCommit(ctx context.Context) (string, error)
@@ -176,4 +221,22 @@ type VersionControl interface {
 	Merge(ctx context.Context, branch string) ([]Conflict, error)
 	GetConflicts(ctx context.Context) ([]Conflict, error)
 	ResolveConflicts(ctx context.Context, table string, strategy string) error
+}
+
+// ConfigCommitRefusedError is CommitConfigUserKVOnly's refusal. Keys are the
+// config rows outside the user kv.* namespace that were dirty, or that a
+// concurrent writer dirtied while the commit staged: committing the user write
+// would have swept them into it (GH#2455). Nothing was committed, and what the
+// commit staged was unstaged again unless the error also reports that the
+// unstage failed. The user write itself stays in the working set, so a caller
+// whose write already landed reports the refusal rather than failing the write.
+type ConfigCommitRefusedError struct {
+	Keys []string
+}
+
+func (e *ConfigCommitRefusedError) Error() string {
+	return fmt.Sprintf("refusing to commit %d dirty internal config key(s) with a user %s* write: %s; "+
+		"only user %s* rows commit with it (GH#2455). The %s* write itself is saved in the "+
+		"working set: `bd dolt commit` publishes it together with those keys, or revert the "+
+		"keys first", len(e.Keys), kvkeys.Prefix, strings.Join(e.Keys, ", "), kvkeys.Prefix, kvkeys.Prefix)
 }

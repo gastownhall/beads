@@ -20,6 +20,8 @@ rather than teach concepts (that's [How Beads Works](/core-concepts/index)).
   other power-user operations.
 - [JSON Output Schema Contract](/reference/json-schema) — the stability
   contract behind every `--json` flag.
+- [Events Journal](/reference/events-journal) — the durable, replayable record
+  of committed mutations that external tooling tails, and its boundaries.
 - [Observability (OpenTelemetry)](/reference/observability) — traces and
   metrics bd can emit, and how to point them at a collector.
 - [Troubleshooting](/reference/troubleshooting) — symptom-first fixes for

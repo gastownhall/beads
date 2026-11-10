@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/storage/backendnames"
 	"github.com/steveyegge/beads/internal/storage/domain"
 )
 
@@ -53,11 +54,33 @@ func TestContextRepository_BackendConfig(t *testing.T) {
 
 		got, err := repo.BackendConfig(context.Background())
 		require.NoError(t, err)
+		require.Equal(t, configfile.BackendDolt, got.Backend)
 		require.Equal(t, configfile.DoltModeEmbedded, got.DoltMode)
 		require.Equal(t, configfile.DefaultDoltDatabase, got.Database)
 		require.Empty(t, got.ProjectID)
 		require.False(t, got.IsServerMode)
 		require.False(t, got.IsProxiedServerMode)
+	})
+
+	// The backend NAME is what tells the projection above whether the Dolt
+	// fields beside it describe this workspace at all. Reading it here, from
+	// the same config the store open dispatches on, is what keeps the answer
+	// one source of truth rather than a second opinion.
+	t.Run("RegisteredBackendIsNamed", func(t *testing.T) {
+		// backendnames is the set configfile.GetBackend classifies against —
+		// the backends registry writes it on Register — so this is the same
+		// question the store open asks, without dragging the typed registry
+		// and its storage dependency into a config-reading test.
+		const name = "acme-context"
+		backendnames.Add(name)
+		t.Cleanup(func() { backendnames.Remove(name) })
+
+		_, beadsDir, repo := newContextRepoForTest(t)
+		writeMetadata(t, beadsDir, &configfile.Config{Backend: name})
+
+		got, err := repo.BackendConfig(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, name, got.Backend)
 	})
 
 	t.Run("EmbeddedWithExplicitValues", func(t *testing.T) {
@@ -234,6 +257,15 @@ func TestContextRepository_RepoContextAndRole(t *testing.T) {
 	beadsDir := filepath.Join(workDir, ".beads")
 	require.NoError(t, os.MkdirAll(beadsDir, 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte("{}"), 0o600))
+
+	// Run from a second, unrelated git repo so BEADS_DIR is external to the
+	// CWD repo. Relying on the test's own CWD being inside a checkout breaks
+	// under Bazel, whose runfiles tree is not a git repository.
+	cwdRepo := t.TempDir()
+	cmd = exec.Command("git", "init")
+	cmd.Dir = cwdRepo
+	require.NoError(t, cmd.Run())
+	t.Chdir(cwdRepo)
 
 	t.Setenv("BEADS_DIR", beadsDir)
 	beads.ResetCaches()

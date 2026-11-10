@@ -10,9 +10,19 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/gitenv"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
 )
+
+// planningGitCommand keeps writes in the chosen planning repository.
+func planningGitCommand(planningPath string, args ...string) *exec.Cmd {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = planningPath
+	cmd.Env = gitenv.ScrubRouting(os.Environ())
+	return cmd
+}
 
 // runContributorWizard guides the user through OSS contributor setup
 func runContributorWizard(ctx context.Context, store storage.DoltStorage) error {
@@ -153,8 +163,7 @@ func runContributorWizard(ctx context.Context, store storage.DoltStorage) error 
 		}
 
 		// Initialize git repo in planning directory
-		cmd := exec.Command("git", "init")
-		cmd.Dir = planningPath
+		cmd := planningGitCommand(planningPath, "init")
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("failed to initialize git in planning repo: %w", err)
 		}
@@ -189,12 +198,10 @@ Created by: bd init --contributor
 		}
 
 		// Initial commit in planning repo
-		cmd = exec.Command("git", "add", ".")
-		cmd.Dir = planningPath
+		cmd = planningGitCommand(planningPath, "add", ".")
 		_ = cmd.Run()
 
-		cmd = exec.Command("git", "commit", "-m", "Initial commit: beads planning repository")
-		cmd.Dir = planningPath
+		cmd = planningGitCommand(planningPath, "commit", "-m", "Initial commit: beads planning repository")
 		_ = cmd.Run()
 
 		fmt.Printf("%s Planning repository created\n", ui.RenderPass("✓"))
@@ -286,7 +293,7 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 	if existing, err := store.GetConfig(ctx, "routing.contributor"); err == nil && existing != "" {
 		if !quiet {
 			fmt.Printf("\n  %s Fork detected (upstream: %s)\n", ui.RenderWarn("⚠"), upstreamURL)
-			fmt.Printf("    Contributor routing already configured → %s\n", existing)
+			fmt.Printf("    Contributor routing already configured → %s\n", remedy.PrintedValue(existing))
 			fmt.Printf("    Skipping auto-setup. To reconfigure: bd init --contributor\n")
 		}
 		return nil
@@ -295,7 +302,7 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 		if yamlVal := strings.TrimSpace(config.GetString("routing.contributor")); yamlVal != "" {
 			if !quiet {
 				fmt.Printf("\n  %s Fork detected (upstream: %s)\n", ui.RenderWarn("⚠"), upstreamURL)
-				fmt.Printf("    Contributor routing configured via config.yaml → %s\n", yamlVal)
+				fmt.Printf("    Contributor routing configured via config.yaml → %s\n", remedy.PrintedValue(yamlVal))
 				fmt.Printf("    Skipping auto-setup. To reconfigure: bd init --contributor\n")
 			}
 			return nil
@@ -314,8 +321,7 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 		if err := os.MkdirAll(planningPath, 0750); err != nil {
 			return fmt.Errorf("failed to create planning repo: %w", err)
 		}
-		gitInit := exec.Command("git", "init")
-		gitInit.Dir = planningPath
+		gitInit := planningGitCommand(planningPath, "init")
 		if err := gitInit.Run(); err != nil {
 			return fmt.Errorf("failed to init git in planning repo: %w", err)
 		}
@@ -323,8 +329,11 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 		if err := os.MkdirAll(planningBeadsDir, 0750); err != nil {
 			return fmt.Errorf("failed to create .beads in planning repo: %w", err)
 		}
-		// Initialize the planning Dolt schema so commands like bd migrate-personal
-		// can open the store immediately without hitting an uninitialized DB.
+		// Initialize a planning Dolt schema so the repo has a store on disk
+		// before first use. The first routed bd create, and bd
+		// migrate-personal, adopt this database, writing the metadata.json
+		// that names it, rather than creating another beside it
+		// (ensureBeadsDirForPath).
 		// Non-fatal: no-CGO and server-mode builds skip this silently; the schema
 		// initializes on first use once a Dolt server is running for that path.
 		if planningStore, storeErr := newDoltStoreFromConfig(ctx, planningBeadsDir); storeErr == nil {
@@ -342,7 +351,12 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 		return fmt.Errorf("failed to set sync.remote: %w", err)
 	}
 
-	_ = exec.Command("git", "config", "beads.role", "contributor").Run()
+	// setBeadsRole carries the shared role-authority boundary: an inherited
+	// GIT_DIR or a suppressed config file would otherwise land this write in a
+	// different repository than every beads.role reader consults.
+	if err := setBeadsRole("contributor"); err != nil && !quiet {
+		fmt.Fprintf(os.Stderr, "Warning: failed to set beads.role=contributor: %v\n", err)
+	}
 
 	if configPath, err := config.FindConfigYAMLPath(); err == nil {
 		if addErr := config.AddRepo(configPath, planningPath); addErr != nil && !strings.Contains(addErr.Error(), "already exists") {
@@ -367,6 +381,7 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 // detectForkSetup checks if we're in a fork by looking for upstream remote
 func detectForkSetup() (isFork bool, upstreamURL string) {
 	cmd := exec.Command("git", "remote", "get-url", "upstream")
+	cmd.Env = gitenv.ScrubRouting(os.Environ())
 	output, err := cmd.Output()
 	if err != nil {
 		// No upstream remote found
@@ -381,6 +396,7 @@ func detectForkSetup() (isFork bool, upstreamURL string) {
 func checkPushAccess() (hasPush bool, originURL string) {
 	// Get origin URL
 	cmd := exec.Command("git", "remote", "get-url", "origin")
+	cmd.Env = gitenv.ScrubRouting(os.Environ())
 	output, err := cmd.Output()
 	if err != nil {
 		return false, ""

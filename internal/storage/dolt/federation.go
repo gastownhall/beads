@@ -2,21 +2,30 @@ package dolt
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
+	mysql "github.com/go-sql-driver/mysql"
+	"github.com/google/uuid"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
-// federationStagingBranch is the temporary branch used to filter excluded
-// issue types before pushing to a federation peer.
-const federationStagingBranch = "__federation_push_staging"
+// federationStagingBranchPrefix identifies temporary filtered-push branches.
+// Each operation appends a UUID so concurrent pushes cannot collide.
+const federationStagingBranchPrefix = "__federation_push_staging_"
+
+// federationStagingCleanupTimeout bounds best-effort cleanup after the caller
+// has canceled or its deadline has expired.
+const federationStagingCleanupTimeout = 30 * time.Second
 
 // FederatedStorage implementation for DoltStore
 // These methods enable peer-to-peer synchronization between workspaces.
@@ -58,6 +67,16 @@ func (s *DoltStore) pushRefToPeer(ctx context.Context, peer string, refspec stri
 // For git-protocol remotes, uses CLI `dolt pull` to avoid MySQL connection timeouts.
 // Returns any merge conflicts if present.
 func (s *DoltStore) PullFrom(ctx context.Context, peer string) ([]storage.Conflict, error) {
+	var conflicts []storage.Conflict
+	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		var err error
+		conflicts, err = s.pullFromPeer(ctx, peer)
+		return err
+	})
+	return conflicts, err
+}
+
+func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Conflict, error) {
 	// GH#2474: Auto-commit pending changes before pull to prevent
 	// "cannot merge with uncommitted changes" errors.
 	if !s.readOnly {
@@ -188,18 +207,25 @@ func (s *DoltStore) ListRemotes(ctx context.Context) ([]storage.RemoteInfo, erro
 // directly so a cold-start open cannot miss the remote and migrate the shared
 // database in place.
 //
+// Unlike HasPersistedRemote, it reads those directories whatever server the
+// store dials: for this gate a remote recorded there is a reason for caution,
+// not a claim about the server's remotes that a caller acts on.
+//
 // The probe reads repo_state.json itself (no dolt CLI subprocess), so a
 // missing dolt binary can no longer disable the gate. A directory that is not
 // a dolt repository is a definite "no remote here"; a read/parse failure still
 // fails open (migration is not wedged on unrelated corruption) but is logged,
 // never swallowed (bd-6dnrw.33).
 func (s *DoltStore) hasPersistedCLIRemote() bool {
-	return s.HasPersistedRemote()
+	_, remotes := s.persistedRemotesOnDisk()
+	return len(remotes) > 0
 }
 
 // HasPersistedRemote is the exported on-disk probe for callers that must not
-// trust an empty dolt_remotes table at cold start: the remote-migrate gate
-// and the push/pull "no remote configured" exit-0 skip (bd-578h9.10).
+// trust an empty dolt_remotes table at cold start: the push/pull "no remote
+// configured" exit-0 skip (bd-578h9.10). Like PersistedRemoteInfos, it counts
+// only remotes recorded where the workspace's Dolt root is proven served by
+// the server bd dials.
 func (s *DoltStore) HasPersistedRemote() bool {
 	return len(s.PersistedRemoteInfos()) > 0
 }
@@ -213,11 +239,55 @@ func (s *DoltStore) HasPersistedRemote() bool {
 // Callers in the GH#2118 cold-start window use this to RECOVER the invisible
 // remote rather than merely detect it: a freshly (auto-)started sql-server
 // can report an empty dolt_remotes even though the remote is persisted on
-// disk, so an empty listing is a reporting artifact, not an unconfigured rig
-// (wy-6k7f7). Read/parse failures are logged and skipped, matching the old
-// HasPersistedRemote behavior — callers only consult this after a SUCCESSFUL
-// (empty) ListRemotes, so a read failure here never masquerades as evidence.
+// disk (wy-6k7f7). That listing, not the state file, is the set of remotes
+// the server pushes and pulls with: the server reads the file only when it
+// loads the database, so a remote recorded only there stays out of every
+// SQL operation until a restart or a SQL add. `bd dolt remote add` makes
+// that add for a recorded remote whose URL matches, with its recorded URL
+// and git ref, unless the record carries parameters SQL cannot set
+// (RemoteInfo.CLIOnlyParams), and still asks before replacing a differing
+// one. Other callers, `bd config apply` among them, take the recorded
+// remote as configured without registering it. Read/parse failures are
+// logged and skipped, matching the old HasPersistedRemote behavior — callers
+// only consult this after a SUCCESSFUL (empty) ListRemotes, so a read
+// failure here never masquerades as evidence.
+//
+// Those are the server's remotes only where the workspace's Dolt root is
+// proven served by the server bd dials (cliDirServesServer). Elsewhere, as
+// for a server bd does not run or a copy no live server on the dialed port
+// serves, a database there is at best a copy whose remotes say nothing about
+// the server's, so none are returned: a copy that lists origin must not make
+// `bd dolt remote add` or `bd config apply` take the remote as already
+// configured on a server that lists none. LeftoverRemotes returns such a
+// copy's remotes instead.
 func (s *DoltStore) PersistedRemoteInfos() []storage.RemoteInfo {
+	if !s.cliDirServesServer() {
+		return nil
+	}
+	_, remotes := s.persistedRemotesOnDisk()
+	return remotes
+}
+
+// LeftoverRemotes returns the remotes PersistedRemoteInfos leaves out, those
+// recorded where the workspace's Dolt root is not proven served by the
+// server bd dials (cliDirServesServer), and the directory that records them;
+// none where it is. They are not the server's remotes, but they are the
+// remotes the operator set up, such as the origin of the clone bd init
+// --server --remote leaves for a gateway: a server that lists no remote
+// beside them is not a workspace without one, so the push/pull no-remote
+// decision (hasConfiguredRemote in cmd/bd) names them and the command that
+// adds each on the server instead of reporting that no remote is configured.
+func (s *DoltStore) LeftoverRemotes() (string, []storage.RemoteInfo) {
+	if s.cliDirServesServer() {
+		return "", nil
+	}
+	return s.persistedRemotesOnDisk()
+}
+
+// persistedRemotesOnDisk is PersistedRemoteInfos for any server: the remotes
+// recorded in the database CLI directory, else in the dolt server root, and
+// the directory that records them.
+func (s *DoltStore) persistedRemotesOnDisk() (string, []storage.RemoteInfo) {
 	cliDir := s.CLIDir()
 	dirs := []string{cliDir}
 	if s.dbPath != "" && s.dbPath != cliDir {
@@ -235,10 +305,10 @@ func (s *DoltStore) PersistedRemoteInfos() []storage.RemoteInfo {
 			continue
 		}
 		if len(remotes) > 0 {
-			return remotes
+			return dir, remotes
 		}
 	}
-	return nil
+	return "", nil
 }
 
 // RemoveRemote removes a configured remote.
@@ -430,38 +500,95 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 // The special type "wisp" matches issues with ephemeral=true in the committed
 // issues table. Wisps normally live in dolt_ignore'd tables and are not pushed,
 // so this acts as a defense-in-depth safety net.
-func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, excludeTypes []string) error {
+func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, excludeTypes []string) (retErr error) {
 	if len(excludeTypes) == 0 {
 		return s.PushTo(ctx, peer)
 	}
-
-	// Pin a single connection for session-scoped branch operations.
-	conn, err := s.db.Conn(ctx)
+	sourceBranch := s.branch
+	operationID, err := uuid.NewRandom()
 	if err != nil {
-		return fmt.Errorf("federation filter: acquire connection: %w", err)
+		return fmt.Errorf("federation filter: generate staging branch: %w", err)
+	}
+	stagingBranch := federationStagingBranchPrefix + operationID.String()
+
+	// Pin a single long-timeout connection for the session-scoped staging
+	// operation. RecomputeAllIsBlockedInTx can exceed the shared pool's
+	// 10-second I/O deadline, and branch state is connection-scoped.
+	//
+	// Audited for be-b0am's fresh-connection branch hazard: safe. Unlike
+	// recomputeAllBlocked/recomputeBlockedTx, this never depends on the
+	// fresh connection's default checkout — it explicitly creates
+	// stagingBranch FROM sourceBranch (CALL DOLT_BRANCH(stagingBranch,
+	// sourceBranch) in stageFilteredBranch) and checks that out by name, so
+	// the source ref is named, not inherited.
+	db, err := s.openLongTimeoutConn()
+	if err != nil {
+		return fmt.Errorf("federation filter: open long-timeout connection: %w", err)
+	}
+	defer db.Close()
+	db.SetMaxIdleConns(0)
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("federation filter: acquire long-timeout connection: %w", err)
 	}
 	defer conn.Close()
 
-	// Clean up any leftover staging branch from a previous failed run.
-	_, _ = conn.ExecContext(ctx, "CALL DOLT_BRANCH('-Df', ?)", federationStagingBranch)
+	// Arm cleanup before creating the branch: a lost create response can make
+	// the branch exist even when the call fails, and canceling an in-flight
+	// query makes go-sql-driver/mysql invalidate the operation connection, so
+	// cleanup reopens a fresh one.
+	defer func() {
+		if cleanupErr := cleanupFilteredStaging(ctx, db, conn, sourceBranch, stagingBranch); cleanupErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("federation filter: cleanup: %w", cleanupErr))
+		}
+	}()
 
-	// Create staging branch from the current branch.
-	if _, err := conn.ExecContext(ctx, "CALL DOLT_BRANCH(?, ?)", federationStagingBranch, s.branch); err != nil {
+	if err := s.stageFilteredBranch(ctx, conn, sourceBranch, stagingBranch, excludeTypes); err != nil {
+		return err
+	}
+
+	// Push staging branch to peer, mapped to the peer's expected branch name.
+	refspec := stagingBranch + ":" + sourceBranch
+	return s.pushRefToPeer(ctx, peer, refspec)
+}
+
+// stageFilteredBranch creates the UUID staging branch from sourceBranch on the
+// pinned connection, deletes the excluded issue types on it, recomputes and
+// commits is_blocked when any rows were removed, and restores sourceBranch so
+// the caller can push the staging ref. Branch state is session-scoped, so every
+// step stays on conn.
+func (s *DoltStore) stageFilteredBranch(ctx context.Context, conn *sql.Conn, sourceBranch, stagingBranch string, excludeTypes []string) error {
+	// Create staging branch from the current branch. Cleanup is already armed:
+	// a lost response can make this call fail after Dolt created the branch.
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_BRANCH(?, ?)", stagingBranch, sourceBranch); err != nil {
 		return fmt.Errorf("federation filter: create staging branch: %w", err)
 	}
 
-	// Ensure cleanup: restore original branch and delete staging.
-	defer func() {
-		_, _ = conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", s.branch)
-		_, _ = conn.ExecContext(ctx, "CALL DOLT_BRANCH('-Df', ?)", federationStagingBranch)
-	}()
-
 	// Checkout staging branch.
-	if err := versioncontrolops.CheckoutBranch(ctx, conn, federationStagingBranch); err != nil {
+	if err := versioncontrolops.CheckoutBranch(ctx, conn, stagingBranch); err != nil {
 		return fmt.Errorf("federation filter: checkout staging: %w", err)
 	}
 
-	// Delete excluded issues from the committed issues table.
+	if deleteExcludedIssues(ctx, conn, excludeTypes) {
+		if err := s.commitFilteredStaging(ctx, conn); err != nil {
+			return err
+		}
+	}
+
+	// Restore original branch context before pushing.
+	if err := versioncontrolops.CheckoutBranch(ctx, conn, sourceBranch); err != nil {
+		return fmt.Errorf("federation filter: restore branch %s: %w", sourceBranch, err)
+	}
+	return nil
+}
+
+// deleteExcludedIssues removes issues matching excludeTypes from the committed
+// issues table on conn's current (staging) branch and reports whether any rows
+// were deleted. The special type "wisp" matches ephemeral rows. A DELETE error
+// is intentionally ignored (deleted stays false for that type), preserving the
+// pre-existing best-effort filtering behavior; the caller only recomputes and
+// commits when something was actually removed.
+func deleteExcludedIssues(ctx context.Context, conn *sql.Conn, excludeTypes []string) bool {
 	deleted := false
 	for _, excludeType := range excludeTypes {
 		var result interface{ RowsAffected() (int64, error) }
@@ -477,22 +604,68 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 			}
 		}
 	}
+	return deleted
+}
 
-	if deleted {
-		if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?)",
-			"federation: exclude private issue types"); err != nil {
-			return fmt.Errorf("federation filter: commit filtered state: %w", err)
+// cleanupFilteredStaging discards the operation connection (an in-flight cancel
+// invalidates it), then restores sourceBranch and deletes stagingBranch on a
+// fresh, uncanceled, bounded connection. Errors are joined; a non-nil result is
+// wrapped by the caller with the "federation filter: cleanup" context.
+func cleanupFilteredStaging(ctx context.Context, db *sql.DB, conn *sql.Conn, sourceBranch, stagingBranch string) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), federationStagingCleanupTimeout)
+	defer cancel()
+	var cleanupErr error
+	if err := conn.Close(); err != nil {
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("discard operation connection: %w", err))
+	}
+	cleanupConn, err := db.Conn(cleanupCtx)
+	if err != nil {
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("acquire cleanup connection: %w", err))
+	} else {
+		defer cleanupConn.Close()
+		if err := schema.DrainCall(cleanupCtx, cleanupConn, "CALL DOLT_CHECKOUT(?)", sourceBranch); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("restore branch %s: %w", sourceBranch, err))
+		}
+		if err := deleteFederationStagingBranch(cleanupCtx, cleanupConn, stagingBranch); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("delete staging branch: %w", err))
 		}
 	}
+	return cleanupErr
+}
 
-	// Restore original branch context before pushing.
-	if err := versioncontrolops.CheckoutBranch(ctx, conn, s.branch); err != nil {
-		return fmt.Errorf("federation filter: restore branch %s: %w", s.branch, err)
+func deleteFederationStagingBranch(ctx context.Context, conn *sql.Conn, stagingBranch string) error {
+	err := schema.DrainCall(ctx, conn, "CALL DOLT_BRANCH('-Df', ?)", stagingBranch)
+	var mysqlErr *mysql.MySQLError
+	// Dolt reports a missing branch as generic error 1105; match the message as
+	// a case-insensitive substring (as RemoteRefUnavailableErr does) because
+	// Dolt may append the branch/ref name to this class of error.
+	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1105 &&
+		strings.Contains(strings.ToLower(mysqlErr.Message), "branch not found") {
+		return nil
 	}
+	return err
+}
 
-	// Push staging branch to peer, mapped to the peer's expected branch name.
-	refspec := federationStagingBranch + ":" + s.branch
-	return s.pushRefToPeer(ctx, peer, refspec)
+// commitFilteredStaging repairs and commits the filtered graph on the staging
+// branch selected by conn. Dolt branch state is session-scoped, so every step
+// stays on that pinned connection.
+func (s *DoltStore) commitFilteredStaging(ctx context.Context, conn *sql.Conn) error {
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("federation filter: begin staged is_blocked recompute: %w", err)
+	}
+	if _, err := issueops.RecomputeAllIsBlockedInTx(ctx, tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("federation filter: recompute staged is_blocked: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("federation filter: commit staged is_blocked recompute: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?)",
+		"federation: exclude private issue types"); err != nil {
+		return fmt.Errorf("federation filter: commit filtered state: %w", err)
+	}
+	return nil
 }
 
 // prepareCLIRouteForPeerGitProtocol reports whether the SQL-visible peer
@@ -514,7 +687,7 @@ func (s *DoltStore) prepareCLIRouteForPeerGitProtocol(ctx context.Context, peer 
 			if !doltutil.IsGitProtocolURL(r.URL) {
 				return false, nil
 			}
-			if err := s.ensureMatchingCLIRemote(peer, r.URL); err != nil {
+			if err := s.ensureMatchingCLIRemote(peer, r.URL, r.Ref); err != nil {
 				return false, fmt.Errorf("peer remote %q uses git protocol and requires CLI routing: %w", peer, err)
 			}
 			return true, nil
@@ -530,10 +703,16 @@ func (s *DoltStore) shouldUseCLIForPeerGitProtocol(ctx context.Context, peer str
 // doltCLIPushRefToPeer shells out to `dolt push` with a specific refspec.
 // The refspec can be a branch name or a "local:remote" mapping.
 func (s *DoltStore) doltCLIPushRefToPeer(ctx context.Context, peer string, refspec string, creds *remoteCredentials) error {
+	if err := requireCLIDoltBinary(); err != nil {
+		return fmt.Errorf("dolt push: %w", err)
+	}
 	if err := s.prePushFSCK(ctx); err != nil {
 		return err
 	}
-	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "push", peer, refspec)
+	cmd, transferCtx, cancel, err := s.prepareDoltCLITransfer(ctx, peer, creds, "push", peer, refspec)
+	if err != nil {
+		return err
+	}
 	defer cancel()
 	applyNoGitHooksToCmd(cmd) // GH#3724
 	out, err := cmd.CombinedOutput()
@@ -547,7 +726,10 @@ func (s *DoltStore) doltCLIPushRefToPeer(ctx context.Context, peer string, refsp
 // Used for git-protocol remotes where CALL DOLT_PULL times out through the SQL connection.
 // Credentials are set on the subprocess environment only via cmd.Env.
 func (s *DoltStore) doltCLIPullFromPeer(ctx context.Context, peer string, creds *remoteCredentials) error {
-	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "pull", peer, s.branch)
+	cmd, transferCtx, cancel, err := s.prepareDoltCLITransfer(ctx, peer, creds, "pull", peer, s.branch)
+	if err != nil {
+		return err
+	}
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -560,7 +742,10 @@ func (s *DoltStore) doltCLIPullFromPeer(ctx context.Context, peer string, creds 
 // Used for git-protocol remotes where CALL DOLT_FETCH times out through the SQL connection.
 // Credentials are set on the subprocess environment only via cmd.Env.
 func (s *DoltStore) doltCLIFetchFromPeer(ctx context.Context, peer string, creds *remoteCredentials) error {
-	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "fetch", peer)
+	cmd, transferCtx, cancel, err := s.prepareDoltCLITransfer(ctx, peer, creds, "fetch", peer)
+	if err != nil {
+		return err
+	}
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {

@@ -11,6 +11,19 @@ import (
 	"strings"
 )
 
+// RepoIDSource identifies how a repo fingerprint was derived.
+type RepoIDSource string
+
+const (
+	// RepoIDSourceRemote means the fingerprint hashes the canonicalized
+	// remote.origin.url — the same value on every host that clones the repo.
+	RepoIDSourceRemote RepoIDSource = "remote"
+	// RepoIDSourcePath means no origin remote was configured and the
+	// fingerprint hashes the local repo root path — a host-local value that
+	// can never match a remote-derived fingerprint stored by another host.
+	RepoIDSourcePath RepoIDSource = "path"
+)
+
 // ComputeRepoID generates a unique identifier for this git repository
 func ComputeRepoID() (string, error) {
 	return ComputeRepoIDForPath("")
@@ -18,13 +31,24 @@ func ComputeRepoID() (string, error) {
 
 // ComputeRepoIDForPath generates a unique identifier for the git repository
 // rooted at or containing repoPath. An empty repoPath uses the current cwd.
+func ComputeRepoIDForPath(repoPath string) (string, error) {
+	id, _, err := ComputeRepoIDForPathWithSource(repoPath)
+	return id, err
+}
+
+// ComputeRepoIDForPathWithSource is ComputeRepoIDForPath plus which derivation
+// produced the fingerprint, so callers (bd doctor, bd migrate --update-repo-id)
+// can tell a canonical remote-derived fingerprint from the path fallback
+// (bd-46vla: on a synced clone without the canonical origin remote, a
+// path-fallback mismatch against the stored id is cosmetic, and stamping the
+// local value into the versioned metadata table propagates it to every clone).
 //
 // GH#2867: When running from a git worktree, the path-based fallback (no remote)
 // uses the main repository root instead of the worktree root. This ensures all
 // worktrees sharing a database produce the same fingerprint. Without this,
 // worktree operations would compute a different repo_id and bd doctor would
 // report a fingerprint mismatch.
-func ComputeRepoIDForPath(repoPath string) (string, error) {
+func ComputeRepoIDForPathWithSource(repoPath string) (string, RepoIDSource, error) {
 	output, err := runGitInRepo(repoPath, "config", "--get", "remote.origin.url")
 	if err != nil {
 		// No remote configured — fall back to path-based fingerprint.
@@ -32,22 +56,22 @@ func ComputeRepoIDForPath(repoPath string) (string, error) {
 		// worktrees produce the same fingerprint as the main checkout.
 		repoRoot, rootErr := mainRepoRootForPath(repoPath)
 		if rootErr != nil {
-			return "", fmt.Errorf("not a git repository")
+			return "", "", fmt.Errorf("not a git repository")
 		}
 
 		normalized := normalizedRepoPath(repoRoot)
 		hash := sha256.Sum256([]byte(normalized))
-		return hex.EncodeToString(hash[:16]), nil
+		return hex.EncodeToString(hash[:16]), RepoIDSourcePath, nil
 	}
 
 	repoURL := strings.TrimSpace(string(output))
 	canonical, err := canonicalizeGitURL(repoURL)
 	if err != nil {
-		return "", fmt.Errorf("failed to canonicalize URL: %w", err)
+		return "", "", fmt.Errorf("failed to canonicalize URL: %w", err)
 	}
 
 	hash := sha256.Sum256([]byte(canonical))
-	return hex.EncodeToString(hash[:16]), nil
+	return hex.EncodeToString(hash[:16]), RepoIDSourceRemote, nil
 }
 
 func canonicalizeGitURL(rawURL string) (string, error) {

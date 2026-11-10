@@ -19,6 +19,159 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 )
 
+// hermeticInitEnv sets sync.remote via BD_SYNC_REMOTE (viper AutomaticEnv,
+// config.go:165-169), stripped of inherited BD_*/BEADS_* vars and
+// HOME-isolated so ambient ~/.beads or ~/.config/bd config can't leak in.
+//
+// BD_DISABLE_METRICS and BD_DISABLE_EVENT_FLUSH are re-added after the strip:
+// they are not ambient user config, they are fixed harness guards this test
+// package owns (test_repo_beads_guard_test.go:139-140), and dropping them
+// re-arms the detached-flusher race that test_repo_beads_guard_test.go:118-135
+// documents — the subprocess's homeDir is a t.TempDir() that gets RemoveAll'd
+// while the orphaned `bd send-metrics` child still holds files open under it.
+func hermeticInitEnv(homeDir string, extra ...string) []string {
+	var env []string
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "BD_") || strings.HasPrefix(e, "BEADS_") {
+			continue
+		}
+		env = append(env, e)
+	}
+	env = append(env, "HOME="+homeDir, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+		"BD_DISABLE_METRICS=1", "BD_DISABLE_EVENT_FLUSH=1")
+	return append(env, extra...)
+}
+
+// TestInitReinitLocalConfiguredRemoteWithoutDoltDataSucceeds is the
+// caller-level regression test for GH#4861: sync.remote (via BD_SYNC_REMOTE,
+// not --remote, to hit initSyncRemoteConfigured) has no refs/dolt/data, so
+// `bd init --reinit-local` must succeed rather than refuse. Supersedes
+// TestCheckRemoteSafety_ConfiguredRemoteWithoutDoltData, which called the
+// unmodified CheckRemoteSafety directly and tested nothing about this fix
+// (both its cases are already in TestCheckRemoteSafety_GuardMatrix).
+func TestInitReinitLocalConfiguredRemoteWithoutDoltDataSucceeds(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	bareDir := filepath.Join(t.TempDir(), "bare.git")
+	runGitForBootstrapTest(t, "", "init", "--bare", bareDir)
+	// bareDir has ordinary git plumbing but no refs/dolt/data (GH#4861 shape).
+
+	workDir := t.TempDir()
+	runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+
+	homeDir := t.TempDir() // must differ from workDir: metrics.go caches to $HOME/.beads
+
+	cmd := exec.Command(bdBin, "init", "--reinit-local", "--prefix", "cfg", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+	cmd.Dir = workDir
+	cmd.Env = hermeticInitEnv(homeDir, "BD_SYNC_REMOTE="+bareDir)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("bd init --reinit-local with a Dolt-data-free sync.remote failed: %v\nstderr:\n%s", err, stderr.String())
+	}
+
+	beadsDir := filepath.Join(workDir, ".beads")
+	if _, err := os.Stat(beadsDir); err != nil {
+		t.Fatalf(".beads should have been created by a successful init: %v", err)
+	}
+}
+
+// TestInitFreshWithUnreachableGitOriginSucceeds pins the plain-init arm of
+// the tri-state probe: a git origin the probe cannot reach at all (exit 128 —
+// the credential-less private-remote shape every CI container has) resolves
+// to UNKNOWN, which fails closed for the refusal gate but must NOT convert a
+// plain `bd init` into a bootstrap clone against that same unreachable
+// origin. There is no local history to protect here, and the clone can only
+// fail the same way the probe did, so init falls back to a fresh local
+// database — the behavior this path always had before the probe existed.
+// Regression: #5136 broke TestE2E_InitDoltMetadataRoundtrip (Main-lane only,
+// so its PR ran green) exactly this way.
+func TestInitFreshWithUnreachableGitOriginSucceeds(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	workDir := t.TempDir()
+	runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+	// An origin whose probe errors (missing path -> git ls-remote exit 128),
+	// not one that answers "no refs/dolt/data".
+	runGitForBootstrapTest(t, workDir, "remote", "add", "origin",
+		filepath.Join(t.TempDir(), "does-not-exist.git"))
+
+	homeDir := t.TempDir() // must differ from workDir: metrics.go caches to $HOME/.beads
+
+	cmd := exec.Command(bdBin, "init", "--backend", "dolt", "--prefix", "org", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+	cmd.Dir = workDir
+	cmd.Env = hermeticInitEnv(homeDir)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		lower := strings.ToLower(out.String())
+		if strings.Contains(lower, "dolt") && (strings.Contains(lower, "not supported") || strings.Contains(lower, "not available") || strings.Contains(lower, "unknown")) {
+			t.Skipf("dolt backend not available: %s", out.String())
+		}
+		t.Fatalf("bd init with an unreachable git origin failed: %v\noutput:\n%s", err, out.String())
+	}
+
+	if _, err := os.Stat(filepath.Join(workDir, ".beads")); err != nil {
+		t.Fatalf(".beads should have been created by a successful init: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(homeDir, ".beads", "eventsData")); !os.IsNotExist(err) {
+		t.Errorf("metrics queue dir was created under the isolated HOME (err=%v); "+
+			"the detached send-metrics child will race t.TempDir cleanup "+
+			"(see test_repo_beads_guard_test.go:118)", err)
+	}
+}
+
+// TestInitReinitLocalConfiguredRemoteWithDoltDataRefuses is the sibling case:
+// sync.remote (again via BD_SYNC_REMOTE, not --remote) points at a bare repo
+// that DOES have refs/dolt/data pushed to it. `bd init --reinit-local` must
+// still refuse with ExitRemoteDivergenceRefused (10) — this is the ADR-0002
+// invariant the GH#4861 fix must not weaken while closing the false positive.
+func TestInitReinitLocalConfiguredRemoteWithDoltDataRefuses(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	bareDir := filepath.Join(t.TempDir(), "bare.git")
+	runGitForBootstrapTest(t, "", "init", "--bare", bareDir)
+
+	sourceDir := t.TempDir()
+	runGitForBootstrapTest(t, sourceDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, sourceDir, "config", "user.email", "test@test.com")
+	runGitForBootstrapTest(t, sourceDir, "config", "user.name", "Test User")
+	runGitForBootstrapTest(t, sourceDir, "commit", "--allow-empty", "-m", "init")
+	runGitForBootstrapTest(t, sourceDir, "remote", "add", "origin", bareDir)
+	runGitForBootstrapTest(t, sourceDir, "push", "origin", "HEAD:refs/dolt/data")
+
+	workDir := t.TempDir()
+	runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+	homeDir := t.TempDir() // see collision note in the sibling test above
+
+	cmd := exec.Command(bdBin, "init", "--reinit-local", "--prefix", "cfg", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+	cmd.Dir = workDir
+	cmd.Env = hermeticInitEnv(homeDir, "BD_SYNC_REMOTE="+bareDir)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("bd init --reinit-local succeeded; expected refusal (sync.remote has Dolt history). stderr:\n%s", stderr.String())
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("non-exec-exit error: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if code := exitErr.ExitCode(); code != ExitRemoteDivergenceRefused {
+		t.Errorf("exit code = %d, want %d (ExitRemoteDivergenceRefused)", code, ExitRemoteDivergenceRefused)
+	}
+
+	beadsDir := filepath.Join(workDir, ".beads")
+	if _, err := os.Stat(beadsDir); err == nil {
+		t.Errorf("refusal should not have created %s", beadsDir)
+	}
+}
+
 func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -126,6 +279,52 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 			RemoteSafetyInput{RemoteHasDoltData: true, DiscardRemote: true, IsInteractive: true},
 			ActionProceedWithDivergence, 0,
 		},
+
+		// INTERACTIVE with a supplied-but-WRONG token (#6480): the token must
+		// still be validated. The caller's typed-confirmation prompt only
+		// fires when NO token was supplied, so skipping validation here would
+		// discard the remote with no confirmation of any kind.
+		{
+			"remote/discard-remote/interactive/wrong-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, DiscardRemote: true, IsInteractive: true,
+				DestroyToken: "WRONG", ExpectedToken: "DESTROY-bd",
+			},
+			ActionRequireDestroyToken, ExitDestroyTokenMissing,
+		},
+		// INTERACTIVE with a token but no expected token to compare against:
+		// nothing can validate it, so refuse rather than fall to the prompt.
+		// DEFENSIVE: unreachable from current callers — all three call sites
+		// pass ExpectedToken: FormatDestroyToken(prefix), which is never
+		// empty. This pins the fail-closed arm of a pure function; it is not
+		// evidence about any live path (only wrong-token above is).
+		{
+			"remote/discard-remote/interactive/token-without-expected",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, DiscardRemote: true, IsInteractive: true,
+				DestroyToken: "WRONG",
+			},
+			ActionRequireDestroyToken, ExitDestroyTokenMissing,
+		},
+		// INTERACTIVE with a MATCHING token: the token is the authorization.
+		{
+			"remote/discard-remote/interactive/matching-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, DiscardRemote: true, IsInteractive: true,
+				DestroyToken: "DESTROY-bd", ExpectedToken: "DESTROY-bd",
+			},
+			ActionProceedWithDivergence, 0,
+		},
+		// INTERACTIVE with NO token supplied (expected token known): unchanged
+		// — the decision defers to the TTY typed-confirmation prompt.
+		{
+			"remote/discard-remote/interactive/no-token-with-expected",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, DiscardRemote: true, IsInteractive: true,
+				ExpectedToken: "DESTROY-bd",
+			},
+			ActionProceedWithDivergence, 0,
+		},
 	}
 
 	for _, tc := range cases {
@@ -140,6 +339,196 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 			// Refusal actions must populate UserMessage (per ADR text contract).
 			if (tc.want == ActionRefuseDivergence || tc.want == ActionRequireDestroyToken) && got.UserMessage == "" {
 				t.Errorf("refusal action %v returned empty UserMessage", tc.want)
+			}
+		})
+	}
+}
+
+// TestCheckRemoteSafety_TokenRefusalDistinguishesPresence pins which refusal
+// text each exit-12 path gets. The distinction is load-bearing, not cosmetic:
+// the missing-token message tells the user to "re-run interactively ... and
+// confirm at the prompt", and that remedy only works when NO token was
+// supplied, because the caller's typed-confirmation prompt is gated on
+// destroyToken == "" (init.go:3139). Handing it to a user who supplied a
+// wrong token sends them around the identical refusal forever.
+func TestCheckRemoteSafety_TokenRefusalDistinguishesPresence(t *testing.T) {
+	cases := []struct {
+		name         string
+		in           RemoteSafetyInput
+		wantReason   string
+		wantSupplied bool
+	}{
+		{
+			"non-interactive/no-token",
+			RemoteSafetyInput{RemoteHasDoltData: true, DiscardRemote: true, ExpectedToken: "DESTROY-bd"},
+			"destroy-token-missing", false,
+		},
+		{
+			"non-interactive/wrong-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, DiscardRemote: true,
+				DestroyToken: "WRONG", ExpectedToken: "DESTROY-bd",
+			},
+			"destroy-token-mismatch", true,
+		},
+		{
+			"interactive/wrong-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, DiscardRemote: true, IsInteractive: true,
+				DestroyToken: "WRONG", ExpectedToken: "DESTROY-bd",
+			},
+			"destroy-token-mismatch", true,
+		},
+		{
+			// Defensive arm (see the guard matrix): a token was still
+			// supplied, so it gets the mismatch text.
+			"interactive/token-without-expected",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, DiscardRemote: true, IsInteractive: true,
+				DestroyToken: "WRONG",
+			},
+			"destroy-token-mismatch", true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CheckRemoteSafety(tc.in)
+			if got.Action != ActionRequireDestroyToken {
+				t.Fatalf("Action = %v, want ActionRequireDestroyToken", got.Action)
+			}
+			if got.Reason != tc.wantReason {
+				t.Errorf("Reason = %q, want %q", got.Reason, tc.wantReason)
+			}
+			wantMsg := refusalMessageTokenMissing()
+			if tc.wantSupplied {
+				wantMsg = refusalMessageTokenMismatch()
+			}
+			if got.UserMessage != wantMsg {
+				t.Errorf("UserMessage =\n%s\n\nwant\n%s", got.UserMessage, wantMsg)
+			}
+			// The defect this pins: the "re-run interactively and confirm
+			// at the prompt" remedy must never reach a caller who supplied
+			// a token, since the prompt cannot fire for them.
+			if tc.wantSupplied && got.UserMessage == refusalMessageTokenMissing() {
+				t.Errorf("token-supplied refusal got the missing-token text, whose remedy is unreachable here:\n%s", got.UserMessage)
+			}
+		})
+	}
+
+	if refusalMessageTokenMissing() == refusalMessageTokenMismatch() {
+		t.Error("the two token refusals are identical, so token presence is not actually carried")
+	}
+	// The mismatch remedy must name the reachable escape: drop the flag to
+	// be prompted. Without this the message is merely vaguer, not correct.
+	if !strings.Contains(refusalMessageTokenMismatch(), "drop --destroy-token") {
+		t.Errorf("mismatch refusal does not offer the reachable remedy (drop the flag, get prompted):\n%s", refusalMessageTokenMismatch())
+	}
+}
+
+// TestCheckRemoteSafety_TokenRefusalTextNoEcho extends the ADR error-message
+// contract to both destroy-token refusals. TestCheckRemoteSafety_RefusalTextNoEcho
+// below covers only the divergence message, whose assertions (bd bootstrap,
+// --from-jsonl) are specific to it.
+func TestCheckRemoteSafety_TokenRefusalTextNoEcho(t *testing.T) {
+	msgs := map[string]string{
+		"missing":  refusalMessageTokenMissing(),
+		"mismatch": refusalMessageTokenMismatch(),
+	}
+	bannedEchoes := []string{
+		"bd init --force --discard-remote --destroy-token",
+		"bd init --reinit-local --discard-remote --destroy-token",
+		"DESTROY-",
+	}
+	for name, msg := range msgs {
+		for _, banned := range bannedEchoes {
+			if strings.Contains(msg, banned) {
+				t.Errorf("%s refusal contains destructive echo %q:\n%s", name, banned, msg)
+			}
+		}
+		if !strings.Contains(msg, "bd help init-safety") {
+			t.Errorf("%s refusal does not point to 'bd help init-safety':\n%s", name, msg)
+		}
+	}
+}
+
+// TestHandleRemoteSafetyDecision_RefusalSeam pins the caller half of the
+// #6480 composition. CheckRemoteSafety's guard matrix proves the decision;
+// this proves the decision is honored at the seam — that a refusal aborts
+// with its exit code and never reaches the typed-confirmation prompt, and
+// that it leaves the cross-checkpoint *confirmed latch alone. Before this,
+// handleRemoteSafetyDecision had zero test references repo-wide.
+//
+// Not covered here: the token-ABSENT prompt arm (init.go:3139). It is gated
+// on term.IsTerminal(os.Stdin), which is false under `go test`, so asserting
+// "no prompt" for it would pass no matter what the token gate said — a
+// vacuous pin. Reaching it needs a PTY or a TTY-detection seam; both exceed
+// this change. The arms below discriminate without one.
+func TestHandleRemoteSafetyDecision_RefusalSeam(t *testing.T) {
+	cases := []struct {
+		name          string
+		decision      RemoteSafetyDecision
+		wantBootstrap bool
+		wantExit      int // 0 = expect nil error
+	}{
+		{
+			"require-destroy-token aborts with 12",
+			RemoteSafetyDecision{
+				Action: ActionRequireDestroyToken, Reason: "destroy-token-mismatch",
+				ExitCode: ExitDestroyTokenMissing, UserMessage: "refusal",
+			},
+			false, ExitDestroyTokenMissing,
+		},
+		{
+			"refuse-divergence aborts with 10",
+			RemoteSafetyDecision{
+				Action: ActionRefuseDivergence, Reason: "force-without-discard-remote",
+				ExitCode: ExitRemoteDivergenceRefused, UserMessage: "refusal",
+			},
+			false, ExitRemoteDivergenceRefused,
+		},
+		{
+			"bootstrap adopts the remote",
+			RemoteSafetyDecision{Action: ActionBootstrap, Reason: "bootstrap-from-remote"},
+			true, 0,
+		},
+		{
+			// A matching token IS the authorization: proceed, no abort.
+			"authorized divergence proceeds",
+			RemoteSafetyDecision{Action: ActionProceedWithDivergence, Reason: "authorized-divergence"},
+			false, 0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			confirmed := false
+			// destroyToken non-empty keeps the prompt arm shut on its own
+			// terms rather than relying on the harness lacking a TTY.
+			bootstrap, err := handleRemoteSafetyDecision(
+				tc.decision, "bd", "git+https://example.invalid/repo.git",
+				"DESTROY-bd", nil, true, &confirmed,
+			)
+			if bootstrap != tc.wantBootstrap {
+				t.Errorf("bootstrap = %v, want %v", bootstrap, tc.wantBootstrap)
+			}
+			if tc.wantExit == 0 {
+				if err != nil {
+					t.Errorf("err = %v, want nil", err)
+				}
+			} else {
+				code, ok := exitCodeFromError(err)
+				if !ok {
+					t.Fatalf("err = %v, want an *exitError with code %d", err, tc.wantExit)
+				}
+				if code != tc.wantExit {
+					t.Errorf("exit code = %d, want %d", code, tc.wantExit)
+				}
+			}
+			// A refusal must not silently satisfy a later checkpoint's
+			// "already confirmed" short-circuit.
+			if confirmed {
+				t.Error("confirmed latch was set without a typed confirmation")
 			}
 		})
 	}
@@ -205,6 +594,12 @@ func TestShouldWireInitRemote(t *testing.T) {
 			want:              false,
 		},
 		{
+			// Keep this true. The URL is the supported pre-first-push wiring:
+			// the first `bd dolt push` creates refs/dolt/data on that same git
+			// remote, and bootstrap resolves the persisted value by probing
+			// for that ref (#5743). Do not "fix" a bootstrap failure by
+			// un-persisting here — that leaves every already-committed
+			// .beads/config.yaml in the wild broken.
 			name:           "plain git origin without dolt data",
 			syncURL:        "git+https://github.com/org/plain-source.git",
 			syncURLFromGit: true,

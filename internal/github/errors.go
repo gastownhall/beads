@@ -3,6 +3,7 @@ package github
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -22,6 +23,27 @@ const (
 	headerRateLimitLimit     = "X-RateLimit-Limit"
 	headerRateLimitResource  = "X-RateLimit-Resource"
 )
+
+// APIError is a non-retryable GitHub API failure that carries the HTTP status
+// code, so callers can branch on it instead of matching error strings (e.g.
+// treating 404 from the relationship endpoints as "unavailable here" rather
+// than as a hard failure). Its message is unchanged from the untyped error it
+// replaces.
+type APIError struct {
+	StatusCode int
+	Body       string
+	URL        string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("API error: %s (status %d)", e.Body, e.StatusCode)
+}
+
+// IsNotFound reports whether err is, or wraps, a GitHub 404.
+func IsNotFound(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
+}
 
 // AuthError indicates a GitHub 403/401 that is not a rate limit (bad token,
 // missing scopes, IP allowlist, etc.). Auth errors are not retried.

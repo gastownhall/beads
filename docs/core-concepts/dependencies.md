@@ -24,6 +24,24 @@ bd dep add issue-2 --depends-on issue-1
 When issue-1 is open, issue-2 won't appear in `bd ready`. Once issue-1
 is closed, issue-2 unblocks automatically.
 
+To add dependencies while creating an issue, `bd create --deps` and the
+`### Dependencies` (or `### Deps`) section of a `bd create --file` batch take
+the same entries:
+
+- a bare id, `depends-on:id` or `blocked-by:id`: the new issue depends on id
+- `blocks:id`: id depends on the new issue
+- any other type from the table below, written `type:id`
+
+In a file, entries are separated by commas, spaces or newlines, so write no
+space after the colon:
+
+```markdown
+## Ship the parser
+
+### Deps
+issue-1, depends-on:issue-2, blocks:issue-3, discovered-from:issue-4
+```
+
 ## Removing Dependencies
 
 ```bash
@@ -53,7 +71,7 @@ Dependencies have a type that determines whether they block work.
 | `discovered-from` | Found during work on another issue |
 | `caused-by` | Root cause link |
 | `validates` | Test or verification link |
-| `supersedes` | Replaces another issue |
+| `supersedes` | Replaced by a different issue (`bd supersede old --with new`) |
 
 Specify with `--type`:
 
@@ -152,11 +170,24 @@ cycles before committing.
 Dependencies can reference issues in other beads rigs:
 
 ```bash
-bd dep add local-issue external:other-project:remote-issue
+bd dep add local-issue external:other-project:checkout-ready
 ```
 
-External dependencies always block. When the remote issue closes,
-`bd ready` reflects the change (checked at query time).
+Configure the project path under `external_projects`, then label a target
+project issue `provides:checkout-ready`. The dependency blocks until an issue
+with that label is closed. `bd ready`, `bd blocked`, and `bd dep tree` resolve
+the capability at query time; an unconfigured or unavailable project remains
+blocking.
+
+A bare ID whose prefix names another rig (`bd dep add bd-abc gt-123`) is
+stored even when bd cannot find it in this database or through routes. `bd dep
+add` then warns on stderr that the ID was not found, or says why it could not
+be verified (the lookup itself failed, or the routed rig matches it only to
+other IDs), and prints the `bd dep remove` command that deletes the edge if the
+ID was a typo (`--quiet` silences the warning). Prefix routing cannot open a
+rig in proxied-server mode yet
+([#5861](https://github.com/gastownhall/beads/issues/5861)), so bd cannot check
+an ID routed to such a rig and stores it without a warning.
 
 ## Gates
 

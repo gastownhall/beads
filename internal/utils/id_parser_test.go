@@ -1,23 +1,25 @@
 //go:build cgo
 
-package utils
+package utils_test
 
 import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 func newTestStore(t *testing.T) *dolt.DoltStore {
 	t.Helper()
 	testutil.RequireDoltBinary(t)
-	if testServerPort == 0 {
+	if utils.DoltTestServerPort == 0 {
 		t.Skip("Test Dolt server not running, skipping test")
 	}
 	ctx := context.Background()
@@ -25,7 +27,7 @@ func newTestStore(t *testing.T) *dolt.DoltStore {
 	store, err := dolt.New(ctx, &dolt.Config{
 		Path:            t.TempDir(),
 		Database:        dbName,
-		ServerPort:      testServerPort,
+		ServerPort:      utils.DoltTestServerPort,
 		CreateIfMissing: true, // test creates fresh database
 	})
 	if err != nil {
@@ -46,61 +48,6 @@ func uniqueTestDBName(t *testing.T) string {
 		t.Fatalf("failed to generate random bytes: %v", err)
 	}
 	return fmt.Sprintf("testdb_%s", hex.EncodeToString(buf))
-}
-
-func TestParseIssueID(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		prefix   string
-		expected string
-	}{
-		{
-			name:     "already has prefix",
-			input:    "bd-a3f8e9",
-			prefix:   "bd-",
-			expected: "bd-a3f8e9",
-		},
-		{
-			name:     "missing prefix",
-			input:    "a3f8e9",
-			prefix:   "bd-",
-			expected: "bd-a3f8e9",
-		},
-		{
-			name:     "hierarchical with prefix",
-			input:    "bd-a3f8e9.1.2",
-			prefix:   "bd-",
-			expected: "bd-a3f8e9.1.2",
-		},
-		{
-			name:     "hierarchical without prefix",
-			input:    "a3f8e9.1.2",
-			prefix:   "bd-",
-			expected: "bd-a3f8e9.1.2",
-		},
-		{
-			name:     "custom prefix with ID",
-			input:    "ticket-123",
-			prefix:   "ticket-",
-			expected: "ticket-123",
-		},
-		{
-			name:     "custom prefix without ID",
-			input:    "123",
-			prefix:   "ticket-",
-			expected: "ticket-123",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := parseIssueID(tt.input, tt.prefix)
-			if result != tt.expected {
-				t.Errorf("parseIssueID(%q, %q) = %q; want %q", tt.input, tt.prefix, result, tt.expected)
-			}
-		})
-	}
 }
 
 func TestResolvePartialID(t *testing.T) {
@@ -276,20 +223,20 @@ func TestResolvePartialID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := ResolvePartialID(ctx, store, tt.input)
+			result, err := utils.ResolvePartialID(ctx, store, tt.input)
 
 			if tt.shouldError {
 				if err == nil {
-					t.Errorf("ResolvePartialID(%q) expected error containing %q, got nil", tt.input, tt.errorMsg)
+					t.Errorf("utils.ResolvePartialID(%q) expected error containing %q, got nil", tt.input, tt.errorMsg)
 				} else if tt.errorMsg != "" && !contains(err.Error(), tt.errorMsg) {
-					t.Errorf("ResolvePartialID(%q) error = %q; want error containing %q", tt.input, err.Error(), tt.errorMsg)
+					t.Errorf("utils.ResolvePartialID(%q) error = %q; want error containing %q", tt.input, err.Error(), tt.errorMsg)
 				}
 			} else {
 				if err != nil {
-					t.Errorf("ResolvePartialID(%q) unexpected error: %v", tt.input, err)
+					t.Errorf("utils.ResolvePartialID(%q) unexpected error: %v", tt.input, err)
 				}
 				if result != tt.expected {
-					t.Errorf("ResolvePartialID(%q) = %q; want %q", tt.input, result, tt.expected)
+					t.Errorf("utils.ResolvePartialID(%q) = %q; want %q", tt.input, result, tt.expected)
 				}
 			}
 		})
@@ -357,22 +304,22 @@ func TestResolvePartialIDs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := ResolvePartialIDs(ctx, store, tt.inputs)
+			result, err := utils.ResolvePartialIDs(ctx, store, tt.inputs)
 
 			if tt.shouldError {
 				if err == nil {
-					t.Errorf("ResolvePartialIDs(%v) expected error, got nil", tt.inputs)
+					t.Errorf("utils.ResolvePartialIDs(%v) expected error, got nil", tt.inputs)
 				}
 			} else {
 				if err != nil {
-					t.Errorf("ResolvePartialIDs(%v) unexpected error: %v", tt.inputs, err)
+					t.Errorf("utils.ResolvePartialIDs(%v) unexpected error: %v", tt.inputs, err)
 				}
 				if len(result) != len(tt.expected) {
-					t.Errorf("ResolvePartialIDs(%v) returned %d results; want %d", tt.inputs, len(result), len(tt.expected))
+					t.Errorf("utils.ResolvePartialIDs(%v) returned %d results; want %d", tt.inputs, len(result), len(tt.expected))
 				}
 				for i := range result {
 					if result[i] != tt.expected[i] {
-						t.Errorf("ResolvePartialIDs(%v)[%d] = %q; want %q", tt.inputs, i, result[i], tt.expected[i])
+						t.Errorf("utils.ResolvePartialIDs(%v)[%d] = %q; want %q", tt.inputs, i, result[i], tt.expected[i])
 					}
 				}
 			}
@@ -398,13 +345,13 @@ func TestResolvePartialID_NoConfig(t *testing.T) {
 	}
 
 	// Don't set config - should use default "bd" prefix
-	result, err := ResolvePartialID(ctx, store, "1")
+	result, err := utils.ResolvePartialID(ctx, store, "1")
 	if err != nil {
 		t.Fatalf("ResolvePartialID failed with default config: %v", err)
 	}
 
 	if result != "bd-1" {
-		t.Errorf("ResolvePartialID(\"1\") with default config = %q; want \"bd-1\"", result)
+		t.Errorf("utils.ResolvePartialID(\"1\") with default config = %q; want \"bd-1\"", result)
 	}
 }
 
@@ -412,7 +359,7 @@ func TestResolvePartialID_NilStorage(t *testing.T) {
 	ctx := context.Background()
 
 	// Test that nil storage returns an error instead of panicking
-	_, err := ResolvePartialID(ctx, nil, "bd-123")
+	_, err := utils.ResolvePartialID(ctx, nil, "bd-123")
 	if err == nil {
 		t.Fatal("ResolvePartialID with nil storage should return error, got nil")
 	}
@@ -559,9 +506,9 @@ func TestExtractIssuePrefix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := ExtractIssuePrefix(tt.issueID)
+			result := utils.ExtractIssuePrefix(tt.issueID)
 			if result != tt.expected {
-				t.Errorf("ExtractIssuePrefix(%q) = %q; want %q", tt.issueID, result, tt.expected)
+				t.Errorf("utils.ExtractIssuePrefix(%q) = %q; want %q", tt.issueID, result, tt.expected)
 			}
 		})
 	}
@@ -632,9 +579,9 @@ func TestExtractIssuePrefixKnown(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := ExtractIssuePrefixKnown(tt.issueID, tt.knownPrefixes)
+			result := utils.ExtractIssuePrefixKnown(tt.issueID, tt.knownPrefixes)
 			if result != tt.expected {
-				t.Errorf("ExtractIssuePrefixKnown(%q, %v) = %q; want %q",
+				t.Errorf("utils.ExtractIssuePrefixKnown(%q, %v) = %q; want %q",
 					tt.issueID, tt.knownPrefixes, result, tt.expected)
 			}
 		})
@@ -696,9 +643,9 @@ func TestExtractIssueNumber(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := ExtractIssueNumber(tt.issueID)
+			result := utils.ExtractIssueNumber(tt.issueID)
 			if result != tt.expected {
-				t.Errorf("ExtractIssueNumber(%q) = %d; want %d", tt.issueID, result, tt.expected)
+				t.Errorf("utils.ExtractIssueNumber(%q) = %d; want %d", tt.issueID, result, tt.expected)
 			}
 		})
 	}
@@ -800,18 +747,18 @@ func TestResolvePartialID_CrossPrefix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := ResolvePartialID(ctx, store, tt.input)
+			result, err := utils.ResolvePartialID(ctx, store, tt.input)
 
 			if tt.shouldError {
 				if err == nil {
-					t.Errorf("ResolvePartialID(%q) expected error, got nil", tt.input)
+					t.Errorf("utils.ResolvePartialID(%q) expected error, got nil", tt.input)
 				}
 			} else {
 				if err != nil {
-					t.Errorf("ResolvePartialID(%q) unexpected error: %v", tt.input, err)
+					t.Errorf("utils.ResolvePartialID(%q) unexpected error: %v", tt.input, err)
 				}
 				if result != tt.expected {
-					t.Errorf("ResolvePartialID(%q) = %q; want %q", tt.input, result, tt.expected)
+					t.Errorf("utils.ResolvePartialID(%q) = %q; want %q", tt.input, result, tt.expected)
 				}
 			}
 		})
@@ -906,12 +853,12 @@ func TestResolvePartialID_AllowedPrefixes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := ResolvePartialID(ctx, store, tt.input)
+			result, err := utils.ResolvePartialID(ctx, store, tt.input)
 			if err != nil {
-				t.Errorf("ResolvePartialID(%q) unexpected error: %v", tt.input, err)
+				t.Errorf("utils.ResolvePartialID(%q) unexpected error: %v", tt.input, err)
 			}
 			if result != tt.expected {
-				t.Errorf("ResolvePartialID(%q) = %q; want %q", tt.input, result, tt.expected)
+				t.Errorf("utils.ResolvePartialID(%q) = %q; want %q", tt.input, result, tt.expected)
 			}
 		})
 	}
@@ -968,12 +915,12 @@ func TestResolvePartialID_Wisp(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := ResolvePartialID(ctx, store, tt.input)
+			result, err := utils.ResolvePartialID(ctx, store, tt.input)
 			if err != nil {
-				t.Errorf("ResolvePartialID(%q) unexpected error: %v", tt.input, err)
+				t.Errorf("utils.ResolvePartialID(%q) unexpected error: %v", tt.input, err)
 			}
 			if result != tt.expected {
-				t.Errorf("ResolvePartialID(%q) = %q; want %q", tt.input, result, tt.expected)
+				t.Errorf("utils.ResolvePartialID(%q) = %q; want %q", tt.input, result, tt.expected)
 			}
 		})
 	}
@@ -1015,45 +962,171 @@ func TestResolvePartialID_TitleFalsePositive(t *testing.T) {
 	}
 
 	// Search for "abc12" — should find bd-abc12, NOT bd-xyz99
-	result, err := ResolvePartialID(ctx, store, "abc12")
+	result, err := utils.ResolvePartialID(ctx, store, "abc12")
 	if err != nil {
-		t.Fatalf("ResolvePartialID(%q) unexpected error: %v", "abc12", err)
+		t.Fatalf("utils.ResolvePartialID(%q) unexpected error: %v", "abc12", err)
 	}
 	if result != "bd-abc12" {
-		t.Errorf("ResolvePartialID(%q) = %q; want %q (title match should be rejected)", "abc12", result, "bd-abc12")
+		t.Errorf("utils.ResolvePartialID(%q) = %q; want %q (title match should be rejected)", "abc12", result, "bd-abc12")
 	}
 }
 
-// TestLooksLikePrefixedID tests the helper function for detecting prefixed IDs
-func TestLooksLikePrefixedID(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected bool
-	}{
-		{"aap-4ar", true},
-		{"bd-abc123", true},
-		{"hq-xyz", true},
-		{"cr-99", true},
-		{"myproj-task1", true},
-		{"a-b", true},        // minimal valid prefix
-		{"abc12345-x", true}, // 8-char prefix (max)
+// TestResolvePartialID_WispSubstringCollision is a regression test for gcy-g4o:
+// a real bead (gcy-oqf) and an ephemeral wisp (gcy-wisp-goqfo) coexist, and a
+// lookup of gcy-oqf that missed the exact-ID fast path fell through to partial
+// matching, where the wisp's hash "wisp-goqfo" contains the substring "oqf".
+// Partial matching has been leading-prefix only since #4939 (strings.HasPrefix
+// replaced strings.Contains at both call sites), and neither "wisp-goqfo" nor
+// the stripped "goqfo" starts with "oqf". With only the wisp stored, nothing
+// short-circuits the partial path, so both forms of the id must come back not
+// found. Once the real bead exists, the exact-ID fast path returns it before
+// partial matching runs.
+func TestResolvePartialID_WispSubstringCollision(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
 
-		// Invalid cases
-		{"abc", false},         // no hyphen
-		{"", false},            // empty
-		{"-abc", false},        // hyphen at start
-		{"ABC-123", false},     // uppercase
-		{"abcdefghi-x", false}, // prefix too long (9 chars)
-		{"abc-", false},        // empty suffix
-		{"abc--def", false},    // suffix starts with hyphen
+	real := &types.Issue{
+		ID:        "gcy-oqf",
+		Title:     "Real bug bead",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeBug,
+	}
+	wisp := &types.Issue{
+		ID:        "gcy-wisp-goqfo",
+		Title:     "Order wisp",
+		Status:    types.StatusClosed,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Ephemeral: true,
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			result := looksLikePrefixedID(tt.input)
-			if result != tt.expected {
-				t.Errorf("looksLikePrefixedID(%q) = %v; want %v", tt.input, result, tt.expected)
+	if err := store.CreateIssue(ctx, wisp, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "gcy"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The wisp alone must not answer for gcy-oqf: this is the lookup gcy-g4o
+	// silently resolved to the wisp.
+	for _, input := range []string{"gcy-oqf", "oqf"} {
+		if got, err := utils.ResolvePartialID(ctx, store, input); err == nil {
+			t.Errorf("utils.ResolvePartialID(%q) = %q; want not found (wisp substring collision)", input, got)
+		}
+	}
+
+	if err := store.CreateIssue(ctx, real, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The real bead must still resolve to itself. This lookup is answered by
+	// the exact-ID fast path, so it passes under any partial matcher; the
+	// wisp-only loop above is the substring-collision assertion.
+	result, err := utils.ResolvePartialID(ctx, store, "gcy-oqf")
+	if err != nil {
+		t.Fatalf("utils.ResolvePartialID(%q) unexpected error: %v", "gcy-oqf", err)
+	}
+	if result != "gcy-oqf" {
+		t.Errorf("utils.ResolvePartialID(%q) = %q; want %q (the exact ID must resolve to itself)", "gcy-oqf", result, "gcy-oqf")
+	}
+}
+
+// TestResolvePartialID_WispLastSegment verifies that a bare wisp hash resolves
+// to its wisp ("t3st" finds "bd-wisp-t3st") as an exact hash match, even
+// beside a longer wisp hash it abbreviates. The Dolt store merges wisps into
+// the unfiltered search, so a matcher that let the first loop claim
+// "wisp-t3st" as an abbreviation of "t3st" would make this lookup ambiguous
+// with bd-wisp-t3stzz instead of exact. The wisp fallback then lists the wisp
+// a second time, and it must still count once.
+func TestResolvePartialID_WispLastSegment(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	wisp := &types.Issue{
+		ID:        "bd-wisp-t3st",
+		Title:     "Test wisp",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Ephemeral: true,
+	}
+	sibling := &types.Issue{
+		ID:        "bd-wisp-t3stzz",
+		Title:     "Sibling wisp",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Ephemeral: true,
+	}
+	if err := store.CreateIssue(ctx, wisp, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateIssue(ctx, sibling, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
+		t.Fatal(err)
+	}
+
+	// "t3st" is exactly the hash of bd-wisp-t3st and must resolve to it.
+	result, err := utils.ResolvePartialID(ctx, store, "t3st")
+	if err != nil {
+		t.Fatalf("utils.ResolvePartialID(%q) unexpected error: %v", "t3st", err)
+	}
+	if result != "bd-wisp-t3st" {
+		t.Errorf("utils.ResolvePartialID(%q) = %q; want %q", "t3st", result, "bd-wisp-t3st")
+	}
+}
+
+// TestResolvePartialID_SharedHashAcrossPrefixes is the Dolt-store side of the
+// fake-store test of the same name (mc-ke8mg). A hash that two prefixes share
+// is ambiguous for both resolvers, whether the candidates are two issues or an
+// issue and a wisp. The store merges wisps into the resolver's first search,
+// so that is where the issue and the wisp meet. A hash only one wisp uses
+// still resolves, though both searches list that wisp.
+func TestResolvePartialID_SharedHashAcrossPrefixes(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	for _, iss := range []*types.Issue{
+		{ID: "hacker-news-abc123", Title: "Issue sharing a hash"},
+		{ID: "ops-abc123", Title: "Issue sharing a hash"},
+		{ID: "ops-t3st", Title: "Issue sharing a hash with a wisp"},
+		{ID: "hacker-news-wisp-t3st", Title: "Wisp sharing a hash with an issue", Ephemeral: true},
+		{ID: "ops-wisp-x9y8", Title: "Wisp with a hash of its own", Ephemeral: true},
+	} {
+		iss.Status = types.StatusOpen
+		iss.Priority = 2
+		iss.IssueType = types.TypeTask
+		if err := store.CreateIssue(ctx, iss, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.SetConfig(ctx, "allowed_prefixes", "hacker-news,ops"); err != nil {
+		t.Fatal(err)
+	}
+
+	resolvers := []struct {
+		name    string
+		resolve func(context.Context, utils.PartialIDResolverStore, string) (string, error)
+	}{
+		{"ResolvePartialID", utils.ResolvePartialID},
+		{"ResolvePartialIDExact", utils.ResolvePartialIDExact},
+	}
+	ambiguous := map[string]string{
+		"abc123": "ambiguous issue ID: \"abc123\" matches 2 issues: [hacker-news-abc123 ops-abc123]\nUse the full ID to disambiguate",
+		"t3st":   "ambiguous issue ID: \"t3st\" matches 2 issues: [hacker-news-wisp-t3st ops-t3st]\nUse the full ID to disambiguate",
+	}
+	for _, r := range resolvers {
+		for input, want := range ambiguous {
+			got, err := r.resolve(ctx, store, input)
+			if !errors.Is(err, utils.ErrAmbiguousID) || err.Error() != want {
+				t.Errorf("%s(%q) = (%q, %v); want error %q", r.name, input, got, err, want)
 			}
-		})
+		}
+		if got, err := r.resolve(ctx, store, "x9y8"); err != nil || got != "ops-wisp-x9y8" {
+			t.Errorf("%s(%q) = (%q, %v); want (%q, nil)", r.name, "x9y8", got, err, "ops-wisp-x9y8")
+		}
 	}
 }

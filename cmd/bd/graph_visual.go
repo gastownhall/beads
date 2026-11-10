@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -14,23 +15,23 @@ type dagEdgeInfo struct {
 	targetRow int
 }
 
-// renderGraphVisual renders a terminal-native DAG with nodes arranged in
-// layer columns (left-to-right) and box-drawing edges between them.
-// Each layer is a vertical column of node boxes, with edges drawn in
-// gutter areas between columns.
-func renderGraphVisual(layout *GraphLayout, subgraph *TemplateSubgraph) {
+// renderGraphVisual renders a terminal-native DAG to the supplied writer, with
+// nodes arranged in layer columns and box-drawing edges between them.
+func renderGraphVisual(out io.Writer, layout *GraphLayout, subgraph *TemplateSubgraph) error {
+	w := &graphExportWriter{out: out}
+
 	if len(layout.Nodes) == 0 {
-		fmt.Println("Empty graph")
-		return
+		w.println("Empty graph")
+		return w.wrapError("graph")
 	}
 
-	fmt.Printf("\n%s Dependency graph for %s:\n\n", ui.RenderAccent("📊"), layout.RootID)
-	fmt.Println("  Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
-	fmt.Println()
+	w.printf("\n%s Dependency graph for %s:\n\n", ui.RenderAccent("📊"), layout.RootID)
+	w.println("  Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
+	w.println()
 
 	numLayers := len(layout.Layers)
 	if numLayers == 0 {
-		return
+		return w.wrapError("graph")
 	}
 
 	// Calculate consistent node box width
@@ -75,8 +76,8 @@ func renderGraphVisual(layout *GraphLayout, subgraph *TemplateSubgraph) {
 			headerLine.WriteString(strings.Repeat(" ", gutterW))
 		}
 	}
-	fmt.Println(headerLine.String())
-	fmt.Println()
+	w.println(headerLine.String())
+	w.println()
 
 	// Render each output line
 	for y := 0; y < totalLines; y++ {
@@ -108,10 +109,10 @@ func renderGraphVisual(layout *GraphLayout, subgraph *TemplateSubgraph) {
 			}
 		}
 
-		fmt.Println(strings.TrimRight(line.String(), " "))
+		w.println(strings.TrimRight(line.String(), " "))
 	}
 
-	fmt.Println()
+	w.println()
 
 	// Summary
 	blocksDeps := 0
@@ -121,9 +122,10 @@ func renderGraphVisual(layout *GraphLayout, subgraph *TemplateSubgraph) {
 		}
 	}
 	if blocksDeps > 0 {
-		fmt.Printf("  Dependencies: %d blocking relationships\n", blocksDeps)
+		w.printf("  Dependencies: %d blocking relationships\n", blocksDeps)
 	}
-	fmt.Printf("  Total: %d issues across %d layers\n\n", len(layout.Nodes), len(layout.Layers))
+	w.printf("  Total: %d issues across %d layers\n\n", len(layout.Nodes), len(layout.Layers))
+	return w.wrapError("graph")
 }
 
 // computeDAGNodeWidth calculates a consistent width for all DAG node boxes

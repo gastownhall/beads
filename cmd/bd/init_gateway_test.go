@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/testutil/credentialcmd"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // Gateway mode: a configured credential command resolves its token into the
@@ -16,19 +20,18 @@ import (
 // store skip the SHOW/CREATE DATABASE probe (openServerConnection keys that on
 // cfg.Gateway). ServerMode is set because gateway init always targets a server.
 func TestApplyInitGatewayCredentialAdoptsToken(t *testing.T) {
-	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "printf tok-init")
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", credentialcmd.Emit(t, "tok-init"))
 	doltCfg := &dolt.Config{ServerMode: true, AutoStart: true}
+	want := *doltCfg
+	want.ServerUser = "tok-init"
+	want.Gateway = true
+	want.AutoStart = false
+	want.DisableAutoStart = true
 	if err := applyInitGatewayCredential(context.Background(), t.TempDir(), doltCfg); err != nil {
 		t.Fatalf("applyInitGatewayCredential: %v", err)
 	}
-	if doltCfg.ServerUser != "tok-init" {
-		t.Fatalf("ServerUser = %q, want tok-init (never root)", doltCfg.ServerUser)
-	}
-	if !doltCfg.Gateway {
-		t.Fatal("Gateway must be true so the store skips SHOW/CREATE DATABASE")
-	}
-	if doltCfg.AutoStart {
-		t.Fatal("AutoStart must be disabled in gateway mode (server is externally managed)")
+	if *doltCfg != want {
+		t.Fatalf("gateway config = %+v, want %+v", *doltCfg, want)
 	}
 }
 
@@ -36,17 +39,19 @@ func TestApplyInitGatewayCredentialAdoptsToken(t *testing.T) {
 // BEADS_DOLT_CREDENTIAL_COMMAND is ambient on the host. This is the FIX-1
 // regression guard: the canonical open path gates the command on server mode
 // ("a command exported in the environment must not run (or fail) an embedded
-// open"), so init must too. The command here (`false`) would error if it ran;
-// the helper returning nil with the config untouched proves it did not.
+// open"), so init must too. The marker helper makes non-invocation observable.
 func TestApplyInitGatewayCredentialSkipsEmbeddedMode(t *testing.T) {
-	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "false")
+	marker := filepath.Join(t.TempDir(), "credential-invoked")
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", credentialcmd.Marker(t, marker))
 	doltCfg := &dolt.Config{AutoStart: true} // ServerMode defaults to false
+	want := *doltCfg
 	if err := applyInitGatewayCredential(context.Background(), t.TempDir(), doltCfg); err != nil {
 		t.Fatalf("embedded init must not run the credential command: %v", err)
 	}
-	if doltCfg.Gateway || doltCfg.ServerUser != "" || !doltCfg.AutoStart {
-		t.Fatalf("embedded config must be left untouched: %+v", doltCfg)
+	if *doltCfg != want {
+		t.Fatalf("embedded config = %+v, want untouched %+v", *doltCfg, want)
 	}
+	credentialcmd.AssertMarkerAbsent(t, marker)
 }
 
 // Server mode, but no command configured: a strict no-op. The hand-built config is
@@ -54,39 +59,48 @@ func TestApplyInitGatewayCredentialSkipsEmbeddedMode(t *testing.T) {
 func TestApplyInitGatewayCredentialNoopWithoutCommand(t *testing.T) {
 	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "")
 	doltCfg := &dolt.Config{ServerMode: true, AutoStart: true}
+	want := *doltCfg
 	if err := applyInitGatewayCredential(context.Background(), t.TempDir(), doltCfg); err != nil {
 		t.Fatalf("applyInitGatewayCredential: %v", err)
 	}
-	if doltCfg.ServerUser != "" || doltCfg.Gateway || !doltCfg.AutoStart {
-		t.Fatalf("config must be untouched without a command: %+v", doltCfg)
+	if *doltCfg != want {
+		t.Fatalf("config without a command = %+v, want untouched %+v", *doltCfg, want)
 	}
 }
 
 // Fail-closed: in server mode a configured-but-failing command aborts init and
 // never leaves a fallback (root) user behind.
 func TestApplyInitGatewayCredentialFailsClosed(t *testing.T) {
-	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "false")
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", credentialcmd.Exit23(t))
 	doltCfg := &dolt.Config{ServerMode: true, AutoStart: true}
+	want := *doltCfg
 	err := applyInitGatewayCredential(context.Background(), t.TempDir(), doltCfg)
 	if err == nil {
 		t.Fatal("expected an error when the credential command fails")
 	}
-	if doltCfg.ServerUser != "" || doltCfg.Gateway {
-		t.Fatalf("config must be untouched on failure: %+v", doltCfg)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 23 {
+		t.Fatalf("credential failure = %v, want helper exit code 23", err)
+	}
+	if *doltCfg != want {
+		t.Fatalf("config after failure = %+v, want untouched %+v", *doltCfg, want)
 	}
 }
 
 // A caller/flag-preset --server-user wins over the credential command (the
 // command is not run). Mirrors ApplyGatewayCredential's preset short-circuit.
 func TestApplyInitGatewayCredentialPresetWins(t *testing.T) {
-	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "false")
+	marker := filepath.Join(t.TempDir(), "credential-invoked")
+	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", credentialcmd.Marker(t, marker))
 	doltCfg := &dolt.Config{ServerMode: true, ServerUser: "preset", AutoStart: true}
+	want := *doltCfg
 	if err := applyInitGatewayCredential(context.Background(), t.TempDir(), doltCfg); err != nil {
 		t.Fatalf("preset should short-circuit before running the command: %v", err)
 	}
-	if doltCfg.ServerUser != "preset" || doltCfg.Gateway || !doltCfg.AutoStart {
-		t.Fatalf("preset user must be preserved untouched: %+v", doltCfg)
+	if *doltCfg != want {
+		t.Fatalf("preset config = %+v, want untouched %+v", *doltCfg, want)
 	}
+	credentialcmd.AssertMarkerAbsent(t, marker)
 }
 
 // issue_prefix resolution.
@@ -94,7 +108,7 @@ func TestApplyInitGatewayCredentialPresetWins(t *testing.T) {
 // Gateway with no server-provisioned issue_prefix is a provisioning-contract
 // violation: bd refuses to choose one for a hosted database.
 func TestResolveInitIssuePrefixGatewayMissing(t *testing.T) {
-	value, write, err := resolveInitIssuePrefix(true, "", "myhosteddb", "fallback", nil)
+	value, err := resolveInitIssuePrefix(true, "", "myhosteddb", "fallback", nil)
 	if err == nil {
 		t.Fatal("expected a provisioning-contract error for a hosted db with no issue_prefix")
 	}
@@ -102,8 +116,8 @@ func TestResolveInitIssuePrefixGatewayMissing(t *testing.T) {
 		!strings.Contains(err.Error(), "myhosteddb") {
 		t.Fatalf("error should name the db and the contract violation, got: %v", err)
 	}
-	if write || value != "" {
-		t.Fatalf("nothing must be written on violation: value=%q write=%v", value, write)
+	if value != "" {
+		t.Fatalf("nothing must be set on violation: value=%q", value)
 	}
 }
 
@@ -112,7 +126,7 @@ func TestResolveInitIssuePrefixGatewayMissing(t *testing.T) {
 // simply failed to read it.
 func TestResolveInitIssuePrefixGatewayReadError(t *testing.T) {
 	readErr := errors.New("dial tcp: connection refused")
-	value, write, err := resolveInitIssuePrefix(true, "", "myhosteddb", "fallback", readErr)
+	value, err := resolveInitIssuePrefix(true, "", "myhosteddb", "fallback", readErr)
 	if err == nil {
 		t.Fatal("expected the read error to be surfaced")
 	}
@@ -122,19 +136,19 @@ func TestResolveInitIssuePrefixGatewayReadError(t *testing.T) {
 	if strings.Contains(err.Error(), "provisioning-contract violation") {
 		t.Fatalf("a transient read error must not be reported as a contract violation, got: %v", err)
 	}
-	if write || value != "" {
-		t.Fatalf("nothing must be written on a read error: value=%q write=%v", value, write)
+	if value != "" {
+		t.Fatalf("nothing must be set on a read error: value=%q", value)
 	}
 }
 
 // Gateway with an already-provisioned issue_prefix: adopt it (no write).
 func TestResolveInitIssuePrefixGatewayAdopts(t *testing.T) {
-	value, write, err := resolveInitIssuePrefix(true, "hq", "myhosteddb", "fallback", nil)
+	value, err := resolveInitIssuePrefix(true, "hq", "myhosteddb", "fallback", nil)
 	if err != nil {
 		t.Fatalf("adoption must not error: %v", err)
 	}
-	if write || value != "" {
-		t.Fatalf("adoption must not write: value=%q write=%v", value, write)
+	if value != "" {
+		t.Fatalf("adoption must not set a prefix: value=%q", value)
 	}
 }
 
@@ -142,23 +156,23 @@ func TestResolveInitIssuePrefixGatewayAdopts(t *testing.T) {
 // This is the byte-identical legacy behavior — and a read error is ignored here,
 // exactly as legacy init ignored it (the guard is gateway-only).
 func TestResolveInitIssuePrefixNonGatewaySets(t *testing.T) {
-	value, write, err := resolveInitIssuePrefix(false, "", "mydb", "GPUPolynomials.jl", errors.New("ignored"))
+	value, err := resolveInitIssuePrefix(false, "", "mydb", "GPUPolynomials.jl", errors.New("ignored"))
 	if err != nil {
 		t.Fatalf("non-gateway set must not error even with a read error: %v", err)
 	}
-	if !write || value != "GPUPolynomials_jl" {
-		t.Fatalf("value=%q write=%v, want (GPUPolynomials_jl, true)", value, write)
+	if value != "GPUPolynomials_jl" {
+		t.Fatalf("value=%q, want GPUPolynomials_jl", value)
 	}
 }
 
 // Non-gateway with an existing prefix: no-op (do not clobber a shared db).
 func TestResolveInitIssuePrefixNonGatewayExisting(t *testing.T) {
-	value, write, err := resolveInitIssuePrefix(false, "existing", "mydb", "prefix", nil)
+	value, err := resolveInitIssuePrefix(false, "existing", "mydb", "prefix", nil)
 	if err != nil {
 		t.Fatalf("non-gateway existing must not error: %v", err)
 	}
-	if write || value != "" {
-		t.Fatalf("existing prefix must be preserved: value=%q write=%v", value, write)
+	if value != "" {
+		t.Fatalf("existing prefix must be preserved: value=%q", value)
 	}
 }
 
@@ -424,6 +438,53 @@ func TestShouldWriteInitDoltRemote(t *testing.T) {
 			if got != tt.want {
 				t.Fatalf("shouldWriteInitDoltRemote(%v, %q, %v, %v, %v, %v) = %v, want %v",
 					tt.gateway, tt.syncURL, tt.syncFromRemote, tt.syncURLFromConfig, tt.syncURLFromGitOrigin, tt.localOnly, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestWarnHalfIdentifiedSubstrate pins that init SAYS SO when the database
+// carries one identity marker and not the other.
+//
+// Bootstrapper refuses to complete a half-identified substrate on purpose, so
+// init cannot fix this state — which makes silence the failure. With no
+// _project_id to adopt, every clone's init mints a different local one and the
+// first `bd doctor --fix` turns that divergence into a hard PROJECT IDENTITY
+// MISMATCH for every other clone, with recovery advice that names the wrong
+// cause.
+func TestWarnHalfIdentifiedSubstrate(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		found issueops.VerifyIdentityResult
+		want  []string
+	}{
+		{
+			name:  "prefix without a project identity",
+			found: issueops.VerifyIdentityResult{Prefix: "app"},
+			want:  []string{"no project identity", "app", "PROJECT IDENTITY MISMATCH", "bd doctor --fix"},
+		},
+		{
+			name:  "project identity without a prefix",
+			found: issueops.VerifyIdentityResult{ProjectID: "proj-xyz"},
+			want:  []string{"no issue prefix", "uninitialized", "bd config set issue_prefix"},
+		},
+		{
+			name:  "fully identified says nothing",
+			found: issueops.VerifyIdentityResult{Prefix: "app", ProjectID: "proj-xyz"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stderr := captureStderr(t, func() { warnHalfIdentifiedSubstrate(tc.found) })
+			if len(tc.want) == 0 {
+				if strings.TrimSpace(stderr) != "" {
+					t.Fatalf("an identified substrate warned anyway: %s", stderr)
+				}
+				return
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("warning does not mention %q:\n%s", want, stderr)
+				}
 			}
 		})
 	}

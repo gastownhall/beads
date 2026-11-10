@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -13,7 +12,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
-	"github.com/steveyegge/beads/internal/idgen"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
@@ -22,14 +20,22 @@ import (
 // CreateIssue creates a new issue.
 // Delegates SQL work to issueops; handles Dolt versioning for non-ephemeral issues.
 func (s *DoltStore) CreateIssue(ctx context.Context, issue *types.Issue, actor string) error {
+	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		return s.createIssue(ctx, issue, actor)
+	})
+}
+
+func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor string) error {
 	if issue == nil {
 		return fmt.Errorf("issue must not be nil")
 	}
 
-	// Route to wisps table if ephemeral, no-history, or infra type.
-	useWispsTable := issue.Ephemeral || issue.NoHistory || s.IsInfraTypeCtx(ctx, issue.IssueType)
+	// Route to wisps table if ephemeral, no-history, wisp-typed, or infra type.
+	// A wisp_type is a claim of ephemerality: minted without the flag it lands
+	// in the issues plane where no TTL, GC, or purge tier owns it.
+	useWispsTable := issue.Ephemeral || issue.NoHistory || issue.WispType != "" || s.IsInfraTypeCtx(ctx, issue.IssueType)
 	if useWispsTable && !issue.NoHistory {
-		issue.Ephemeral = true // infra types get marked ephemeral (legacy behavior)
+		issue.Ephemeral = true // infra and wisp types get marked ephemeral (legacy behavior)
 	}
 
 	var result issueops.CreateIssueResult
@@ -81,7 +87,6 @@ func sortedDirtyTables(dirty map[string]bool) []string {
 // CreateIssues creates multiple issues in a single transaction
 func (s *DoltStore) CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error {
 	return s.CreateIssuesWithFullOptions(ctx, issues, actor, storage.BatchCreateOptions{
-		OrphanHandling:       storage.OrphanAllow,
 		SkipPrefixValidation: false,
 	})
 }
@@ -89,22 +94,37 @@ func (s *DoltStore) CreateIssues(ctx context.Context, issues []*types.Issue, act
 // CreateIssuesWithFullOptions creates multiple issues with full options control.
 // Delegates SQL work to issueops; handles Dolt versioning for non-ephemeral batches.
 func (s *DoltStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) error {
+	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		return s.createIssuesWithFullOptions(ctx, issues, actor, opts)
+	})
+}
+
+func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) error {
 	if len(issues) == 0 {
 		return nil
 	}
 
 	// All-wisps fast path: one SQL transaction, no Dolt versioning.
 	// Covers both ephemeral issues and no-history issues (both skip DOLT_COMMIT).
+	// A create-time edge can still flip a durable row's is_blocked (a waiter
+	// on a wisp's durable spawner), and that row is committed (GH#6647).
 	if issueops.AllWisps(issues) {
 		for _, issue := range issues {
 			if !issue.NoHistory {
 				issue.Ephemeral = true
 			}
 		}
-		return s.withRetryTx(ctx, func(tx *sql.Tx) error {
-			_, err := issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
+		var result issueops.CreateIssuesResult
+		if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+			var err error
+			result, err = issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
 			return err
-		})
+		}); err != nil {
+			return err
+		}
+		s.commitWispDurable(ctx, wispDurable{issues: result.ChangedTables["issues"]},
+			fmt.Sprintf("bd: create %d issue(s)", len(issues)))
+		return nil
 	}
 
 	var result issueops.CreateIssuesResult
@@ -181,6 +201,12 @@ func checkExpectedVersionInTx(ctx context.Context, tx *sql.Tx, id string, expect
 // Delegates SQL work to issueops.UpdateIssueInTx; handles Dolt-specific concerns
 // (metadata validation, DemoteToWisp, DOLT_ADD/COMMIT, cache invalidation).
 func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
+	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		return s.updateIssue(ctx, id, updates, actor)
+	})
+}
+
+func (s *DoltStore) updateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
 	// Validate metadata against schema before wisp routing (GH#1416 Phase 2).
 	if err := validateUpdateMetadata(updates); err != nil {
 		return err
@@ -208,19 +234,16 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 	// (https://www.dolthub.com/blog/2023-10-23-hold-my-beer/) — so retry is the
 	// only safety net. withRetryTx owns BeginTx and the final Commit.
 	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
-		if _, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor); err != nil {
+		result, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor)
+		if err != nil {
 			return err
 		}
+		if !result.Changed {
+			return nil
+		}
 
-		for _, table := range []string{"issues", "events"} {
-			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-		}
 		commitMsg := fmt.Sprintf("bd: update %s", id)
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-			return fmt.Errorf("dolt commit: %w", err)
-		}
-		return nil
+		return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
 	})
 }
 
@@ -235,6 +258,12 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 // validation, wisp routing, DemoteToWisp, DOLT_ADD/COMMIT); UpdateIssue is the
 // hot path and is left untouched.
 func (s *DoltStore) UpdateIssueChecked(ctx context.Context, id string, updates map[string]interface{}, actor string, opts storage.UpdateIssueOptions) error {
+	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		return s.updateIssueChecked(ctx, id, updates, actor, opts)
+	})
+}
+
+func (s *DoltStore) updateIssueChecked(ctx context.Context, id string, updates map[string]interface{}, actor string, opts storage.UpdateIssueOptions) error {
 	// Validate metadata against schema before wisp routing (GH#1416 Phase 2).
 	if err := validateUpdateMetadata(updates); err != nil {
 		return err
@@ -282,19 +311,16 @@ func (s *DoltStore) UpdateIssueChecked(ctx context.Context, id string, updates m
 			if err := issueops.CheckExpectedFieldsInTx(ctx, tx, id, opts.ExpectedAssignee, opts.ExpectedStatus); err != nil {
 				return err
 			}
-			if _, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor); err != nil {
+			result, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor)
+			if err != nil {
 				return err
 			}
+			if !result.Changed {
+				return nil
+			}
 
-			for _, table := range []string{"issues", "events"} {
-				_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-			}
 			commitMsg := fmt.Sprintf("bd: update %s", id)
-			if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-				commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-				return fmt.Errorf("dolt commit: %w", err)
-			}
-			return nil
+			return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
 		})
 	}
 
@@ -316,6 +342,12 @@ func (s *DoltStore) UpdateIssueChecked(ctx context.Context, id string, updates m
 // Delegates SQL work to issueops.ClaimIssueInTx; handles Dolt-specific concerns
 // (wisp routing, DOLT_ADD/COMMIT, cache invalidation).
 func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) error {
+	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		return s.claimIssue(ctx, id, actor)
+	})
+}
+
+func (s *DoltStore) claimIssue(ctx context.Context, id string, actor string) error {
 	// Route ephemeral IDs to wisps table (falls through for promoted wisps).
 	// Wisps skip DOLT_COMMIT since they live in dolt_ignored tables.
 	if s.isActiveWisp(ctx, id) {
@@ -337,17 +369,8 @@ func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) err
 				return err
 			}
 
-			// Dolt versioning for permanent issues.
-			// GH#2455: Stage only the tables we modified, then commit without -A.
-			for _, table := range []string{"issues", "events"} {
-				_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-			}
 			commitMsg := fmt.Sprintf("bd: claim %s", id)
-			if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-				commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-				return fmt.Errorf("dolt commit: %w", err)
-			}
-			return nil
+			return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
 		})
 	})
 }
@@ -361,117 +384,110 @@ func (s *DoltStore) ClaimReadyIssue(ctx context.Context, filter types.WorkFilter
 	// no real row locking — FOR UPDATE / SKIP LOCKED are parse-only no-ops
 	// (https://www.dolthub.com/blog/2023-10-23-hold-my-beer/) — so retry is the
 	// safety net. withRetryTx owns BeginTx and the final Commit.
-	write := func() (*types.Issue, error) {
-		var claimed *types.Issue
-		err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
-			var err error
-			claimed, err = issueops.ClaimReadyIssueInTx(ctx, tx, filter, actor)
-			if err != nil {
-				return err
-			}
-			if claimed == nil {
-				return nil
-			}
+	//
+	// The write and its verify sit under withCircuitWrite so terminal circuit
+	// success is recorded once at the boundary, only after verifiedReadyClaim
+	// confirms the claim landed — not the instant withRetryTx's SQL commit
+	// returns. A commit that reports success but fails verification must leave
+	// the breaker untouched (matching ClaimIssue).
+	var claimed *types.Issue
+	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		write := func() (*types.Issue, error) {
+			var got *types.Issue
+			werr := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+				var err error
+				got, err = issueops.ClaimReadyIssueInTx(ctx, tx, filter, actor)
+				if err != nil {
+					return err
+				}
+				if got == nil {
+					return nil
+				}
 
-			for _, table := range []string{"issues", "events"} {
-				_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-			}
-			commitMsg := fmt.Sprintf("bd: claim ready %s", claimed.ID)
-			if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-				commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-				return fmt.Errorf("dolt commit: %w", err)
-			}
-			return nil
-		})
-		return claimed, err
+				commitMsg := fmt.Sprintf("bd: claim ready %s", got.ID)
+				return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
+			})
+			return got, werr
+		}
+		var verr error
+		claimed, verr = s.verifiedReadyClaim(ctx, actor, write)
+		return verr
+	})
+	if err != nil {
+		return nil, err
 	}
-	return s.verifiedReadyClaim(ctx, actor, write)
+	return claimed, nil
 }
 
 // verifiedReadyClaim resolves a ready-claim write by verify-by-re-read
 // (bd-zccb9): the claimed ID is only known once the write body has run, so
 // this cannot ride verifiedClaimWrite's id parameter — but the resolution
-// protocol is the same. A replay after a verified rollback re-scans the ready
-// front and may legitimately claim a different issue. Split from
-// ClaimReadyIssue so injection tests can drive the write seam directly, the
-// same way the verifiedClaimWrite tests do.
+// protocol is the same. Split from ClaimReadyIssue so injection tests can
+// drive the write seam directly, the same way the verifiedClaimWrite tests do.
+//
+// Successful ready claims verify the winning plane because IncludeEphemeral
+// may select a wisp. An indeterminate commit response remains indeterminate:
+// assignee and status cannot prove the lease and actor-attributed event landed.
 func (s *DoltStore) verifiedReadyClaim(ctx context.Context, actor string, write func() (*types.Issue, error)) (*types.Issue, error) {
 	claimed, err := write()
-	if err != nil && !(errors.Is(err, errCommitPhase) && claimed != nil && s.serverMode) {
+	if err != nil {
 		return nil, err
 	}
 	if claimed == nil || !s.serverMode {
 		return claimed, err
 	}
-	for attempt := 0; ; attempt++ {
-		assignee, status, verr := s.readClaimState(ctx, claimed.ID)
-		if verr != nil {
-			if err != nil {
-				return nil, err // the honest indeterminate error from withRetryTx
-			}
-			return nil, fmt.Errorf("ready claim of %s reported success but could not be verified (server degraded?): %w — re-read the issue before trusting the claim",
-				claimed.ID, verr)
-		}
-		post := claimedBy(actor)
-		if post.want(assignee, status) {
-			if err != nil {
-				doltMetrics.claimVerifyRecovered.Add(ctx, 1, metric.WithAttributes(
-					attribute.String("op", "ready-claim"), attribute.String("outcome", "applied")))
-			}
-			return claimed, nil
-		}
-		if err != nil && attempt < 1 {
-			// Verified rolled back: nothing landed, safe to replay once.
-			doltMetrics.claimVerifyRecovered.Add(ctx, 1, metric.WithAttributes(
-				attribute.String("op", "ready-claim"), attribute.String("outcome", "replayed")))
-			claimed, err = write()
-			// The replay carries the same commit-phase ambiguity as the first
-			// attempt: an errCommitPhase with a selection made must fall
-			// through to the verify pass — attempt is past the replay budget
-			// now, so a second verified rollback still exhausts with the
-			// honest "did not land" error — never surface the raw
-			// indeterminate error, which would reintroduce the wy-x543k
-			// false-failure and could orphan an applied claim on a DIFFERENT
-			// ready issue than the first attempt selected.
-			if err != nil && !(errors.Is(err, errCommitPhase) && claimed != nil) {
-				return nil, err
-			}
-			if claimed == nil {
-				if err != nil {
-					// Commit-phase loss before anything was selected: nothing
-					// to verify, honest indeterminate error.
-					return nil, err
-				}
-				return nil, nil
-			}
-			continue
-		}
-		if err != nil {
-			return nil, fmt.Errorf("ready claim of %s did not land (connection lost during commit; rollback verified by re-read): %w", claimed.ID, err)
-		}
-		doltMetrics.claimVerifyLost.Add(ctx, 1, metric.WithAttributes(
-			attribute.String("op", "ready-claim")))
-		return nil, fmt.Errorf("ready claim of %s reported success but did not land (found assignee=%q status=%q, want %s) — server likely degraded; treat the claim as NOT applied",
-			claimed.ID, assignee, status, post.desc)
+	assignee, status, verr := s.readReadyClaimState(ctx, claimed.ID)
+	if verr != nil {
+		return nil, fmt.Errorf("ready claim of %s reported success but could not be verified (server degraded?): %w — re-read the issue before trusting the claim",
+			claimed.ID, verr)
 	}
+	post := claimedBy(actor)
+	if post.want(assignee, status) {
+		return claimed, nil
+	}
+	doltMetrics.claimVerifyLost.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("op", "ready-claim")))
+	return nil, fmt.Errorf("ready claim of %s reported success but did not land (found assignee=%q status=%q, want %s) — server likely degraded; treat the claim as NOT applied",
+		claimed.ID, assignee, status, post.desc)
 }
 
 // HeartbeatIssue refreshes the lease on an issue actor holds in_progress,
 // pushing lease_expires_at forward on its row in the ephemeral leases table
-// (see issueops.lease). Deliberately NO DOLT_ADD/DOLT_COMMIT: the leases
-// table is dolt_ignored, so a heartbeat mints no commit and no history — this
-// is the whole point of bd-lrgn1 (fleet heartbeats were the dominant source
-// of unbounded reachable history). Wrapped in withRetryTx so a heartbeat that
-// loses Dolt's optimistic merge to a concurrent reclaim/close on the same
-// lease row is replayed against a fresh snapshot rather than surfaced.
+// (see issueops.lease). A REFRESH stages nothing: the leases table is
+// dolt_ignored, so it mints no Dolt commit and no history — the whole point of
+// bd-lrgn1 (fleet heartbeats were the dominant source of unbounded reachable
+// history). A RE-ARM (a live claim with no lease row the caller holds) is
+// recorded as a mutation and gets the one version-control commit
+// issueops.LeaseRearmVersionCommit names. Wrapped in withRetryTx so a
+// heartbeat that loses Dolt's optimistic merge to a concurrent reclaim/close
+// on the same lease row is replayed against a fresh snapshot rather than
+// surfaced.
 func (s *DoltStore) HeartbeatIssue(ctx context.Context, id, actor string) error {
 	if s.isActiveWisp(ctx, id) {
 		// Wisps are ephemeral and never leased; nothing to heartbeat.
 		return fmt.Errorf("%w: %s is ephemeral", storage.ErrNotClaimable, id)
 	}
-	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
-		return issueops.HeartbeatIssueInTx(ctx, tx, id, actor)
-	})
+	// A refusal that read the issue row COMMITS (it may have deleted the
+	// caller's orphaned lease row) and is returned after; one whose issue read
+	// failed is returned from the callback, so its transaction rolls back
+	// (issueops.LeaseRenewalRefusalCommits).
+	var refusal error
+	if err := s.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (issueops.ChangedTables, string, error) {
+		renewal, err := issueops.RenewLeaseInTx(ctx, tx, id, actor)
+		refusal = nil
+		if issueops.LeaseRenewalRefusalCommits(err) {
+			refusal = err
+			return nil, "", nil
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		tables, msg := issueops.LeaseRearmVersionCommit(id, renewal.Rearmed)
+		return tables, msg, nil
+	}); err != nil {
+		return err
+	}
+	return refusal
 }
 
 // ReclaimExpiredLeases reverts in_progress issues whose lease expired more than
@@ -490,15 +506,8 @@ func (s *DoltStore) ReclaimExpiredLeases(ctx context.Context, olderThan time.Dur
 		if len(reclaimed) == 0 {
 			return nil
 		}
-		for _, table := range []string{"issues", "events"} {
-			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-		}
 		commitMsg := fmt.Sprintf("bd: reclaim %d expired lease(s)", len(reclaimed))
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-			return fmt.Errorf("dolt commit: %w", err)
-		}
-		return nil
+		return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
 	})
 	if err != nil {
 		return nil, err
@@ -518,22 +527,20 @@ func (s *DoltStore) ReclaimExpiredLeases(ctx context.Context, olderThan time.Dur
 func (s *DoltStore) UnclaimIssue(ctx context.Context, id string, actor string, force bool) error {
 	// verify-by-re-read (bd-zccb9): a phantom unclaim leaves the caller
 	// believing the issue is released while it still holds the claim.
-	return s.verifiedClaimWrite(ctx, id, unclaimed(), func() error {
-		return s.withRetryTx(ctx, func(tx *sql.Tx) error {
-			if err := issueops.UnclaimIssueInTx(ctx, tx, id, actor, force); err != nil {
-				return err
-			}
+	//
+	// withCircuitWrite wraps the write and its verification so circuit success
+	// is recorded once at the boundary, only after verifiedClaimWrite confirms
+	// the release landed — never the moment withRetryTx's SQL commit returns.
+	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		return s.verifiedClaimWrite(ctx, id, unclaimed(), func() error {
+			return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+				if err := issueops.UnclaimIssueInTx(ctx, tx, id, actor, force); err != nil {
+					return err
+				}
 
-			// Dolt versioning for permanent issues.
-			for _, table := range []string{"issues", "events"} {
-				_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-			}
-			commitMsg := fmt.Sprintf("bd: unclaim %s", id)
-			if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-				commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-				return fmt.Errorf("dolt commit: %w", err)
-			}
-			return nil
+				commitMsg := fmt.Sprintf("bd: unclaim %s", id)
+				return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
+			})
 		})
 	})
 }
@@ -546,44 +553,44 @@ func (s *DoltStore) UnclaimIssue(ctx context.Context, id string, actor string, f
 // UnclaimIssue so a concurrent writer that loses Dolt's optimistic commit-time
 // merge is retried rather than surfaced as a hard failure.
 func (s *DoltStore) UnclaimIssueIfAssignee(ctx context.Context, id string, actor string, expectedAssignee string) error {
-	// verify-by-re-read (bd-zccb9), same reasoning as UnclaimIssue.
-	return s.verifiedClaimWrite(ctx, id, unclaimed(), func() error {
-		return s.withRetryTx(ctx, func(tx *sql.Tx) error {
-			if err := issueops.UnclaimIssueIfAssigneeInTx(ctx, tx, id, actor, expectedAssignee); err != nil {
-				return err
-			}
+	// verify-by-re-read (bd-zccb9), same reasoning as UnclaimIssue: the write
+	// and its verification sit under withCircuitWrite so circuit success is
+	// recorded once at the boundary, only after verifiedClaimWrite confirms the
+	// release landed.
+	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		return s.verifiedClaimWrite(ctx, id, unclaimed(), func() error {
+			return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+				if err := issueops.UnclaimIssueIfAssigneeInTx(ctx, tx, id, actor, expectedAssignee); err != nil {
+					return err
+				}
 
-			// Dolt versioning for permanent issues.
-			for _, table := range []string{"issues", "events"} {
-				_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-			}
-			commitMsg := fmt.Sprintf("bd: unclaim %s", id)
-			if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-				commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-				return fmt.Errorf("dolt commit: %w", err)
-			}
-			return nil
+				commitMsg := fmt.Sprintf("bd: unclaim %s", id)
+				return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
+			})
 		})
 	})
 }
 
-// ReopenIssue reopens a closed issue, setting status to open and clearing
-// closed_at and defer_until. If reason is non-empty, it is recorded as a comment.
-// Wraps UpdateIssue for Dolt-specific concerns (wisp routing, DOLT_COMMIT, etc.).
+// ReopenIssue reopens a done-category issue atomically and stages only the
+// versioned tables that this transaction concretely changed.
 func (s *DoltStore) ReopenIssue(ctx context.Context, id string, reason string, actor string) error {
-	updates := map[string]interface{}{
-		"status":      string(types.StatusOpen),
-		"defer_until": nil,
-	}
-	if err := s.UpdateIssue(ctx, id, updates, actor); err != nil {
-		return err
-	}
-	if reason != "" {
-		if err := s.AddComment(ctx, id, actor, reason); err != nil {
-			return fmt.Errorf("reopen comment: %w", err)
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		res, err := issueops.ReopenIssueInTx(ctx, tx, id, reason, actor)
+		if err != nil {
+			return err
 		}
-	}
-	return nil
+		if !res.Changed {
+			return nil
+		}
+		switch {
+		case !res.IsWisp:
+			return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, fmt.Sprintf("bd: reopen %s", id))
+		case res.IssueRowsChanged:
+			return s.doltAddAndCommitInTx(ctx, tx, []string{"issues"}, fmt.Sprintf("bd: reopen %s", id))
+		default:
+			return nil
+		}
+	})
 }
 
 // UpdateIssueType changes the issue_type field of an issue.
@@ -596,6 +603,12 @@ func (s *DoltStore) UpdateIssueType(ctx context.Context, id string, issueType st
 // Delegates SQL work to issueops.CloseIssueInTx; handles Dolt-specific concerns
 // (wisp routing, DOLT_ADD/COMMIT, cache invalidation).
 func (s *DoltStore) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {
+	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		return s.closeIssue(ctx, id, reason, actor, session)
+	})
+}
+
+func (s *DoltStore) closeIssue(ctx context.Context, id string, reason string, actor string, session string) error {
 	// Route ephemeral IDs to wisps table (falls through for promoted wisps).
 	// Wisps skip DOLT_COMMIT since they live in dolt_ignored tables.
 	if s.isActiveWisp(ctx, id) {
@@ -613,17 +626,8 @@ func (s *DoltStore) CloseIssue(ctx context.Context, id string, reason string, ac
 			return err
 		}
 
-		// Dolt versioning for permanent issues.
-		// GH#2455: Stage only the tables we modified, then commit without -A.
-		for _, table := range []string{"issues", "events"} {
-			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-		}
 		commitMsg := fmt.Sprintf("bd: close %s", id)
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-			return fmt.Errorf("dolt commit: %w", err)
-		}
-		return nil
+		return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
 	})
 }
 
@@ -631,10 +635,22 @@ func (s *DoltStore) CloseIssue(ctx context.Context, id string, reason string, ac
 // when it has a live direct blocker unless opts.Force is set, and — when
 // opts.ExpectedVersion is non-nil — with storage.ErrVersionMismatch when the
 // row's current RowVersion no longer matches (an orthogonal CAS that Force does
-// not bypass). Both checks and the close share one transaction, so they are
-// atomic (no TOCTOU). Mirrors CloseIssue's Dolt-specific concerns (wisp routing,
+// not bypass). The close guards (template, pin, assignee; see
+// issueops.CloseIssueCheckedInTx) refuse first, the template whatever Force
+// says. Every check and the close share one transaction, so they are atomic
+// (no TOCTOU). Mirrors CloseIssue's Dolt-specific concerns (wisp routing,
 // DOLT_ADD/COMMIT).
 func (s *DoltStore) CloseIssueChecked(ctx context.Context, id string, actor string, opts storage.CloseIssueOptions) (storage.CloseIssueResult, error) {
+	var result storage.CloseIssueResult
+	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		var err error
+		result, err = s.closeIssueChecked(ctx, id, actor, opts)
+		return err
+	})
+	return result, err
+}
+
+func (s *DoltStore) closeIssueChecked(ctx context.Context, id string, actor string, opts storage.CloseIssueOptions) (storage.CloseIssueResult, error) {
 	// Route ephemeral IDs to wisps table (falls through for promoted wisps).
 	// Wisps skip DOLT_COMMIT since they live in dolt_ignored tables.
 	if s.isActiveWisp(ctx, id) {
@@ -653,19 +669,10 @@ func (s *DoltStore) CloseIssueChecked(ctx context.Context, id string, actor stri
 		if err != nil {
 			return err
 		}
-		result = storage.CloseIssueResult{Unchanged: res.AlreadyClosed}
+		result = storage.CloseIssueResult{Unchanged: res.AlreadyClosed, OpenChildren: res.OpenChildren}
 
-		// Dolt versioning for permanent issues.
-		// GH#2455: Stage only the tables we modified, then commit without -A.
-		for _, table := range []string{"issues", "events"} {
-			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-		}
 		commitMsg := fmt.Sprintf("bd: close %s", id)
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-			return fmt.Errorf("dolt commit: %w", err)
-		}
-		return nil
+		return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
 	}); err != nil {
 		return storage.CloseIssueResult{}, err
 	}
@@ -674,33 +681,36 @@ func (s *DoltStore) CloseIssueChecked(ctx context.Context, id string, actor stri
 
 // DeleteIssue permanently removes an issue
 func (s *DoltStore) DeleteIssue(ctx context.Context, id string) error {
+	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		return s.deleteIssue(ctx, id)
+	})
+}
+
+func (s *DoltStore) deleteIssue(ctx context.Context, id string) error {
 	// Route ephemeral IDs to wisps table (falls through for promoted wisps)
 	if s.isActiveWisp(ctx, id) {
 		return s.deleteWisp(ctx, id)
 	}
 
 	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
-		if err := issueops.DeleteIssueInTx(ctx, tx, id); err != nil {
+		// storage.DeleteIssue carries no actor, so the journal rows record none.
+		if err := issueops.DeleteIssueInTx(ctx, tx, id, ""); err != nil {
 			return err
 		}
 
-		for _, table := range []string{"issues", "dependencies", "labels", "comments", "events", "child_counters", "issue_snapshots", "compaction_snapshots"} {
-			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-		}
 		commitMsg := fmt.Sprintf("bd: delete %s", id)
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-			return fmt.Errorf("dolt commit: %w", err)
-		}
-		return nil
+		return s.doltAddAndCommitInTx(ctx, tx,
+			[]string{"issues", "dependencies", "labels", "comments", "events", "provenance_events", "child_counters", "issue_snapshots", "compaction_snapshots"},
+			commitMsg)
 	}); err != nil {
-		return err
+		return s.recordDoltPublicationFailure(ctx, err)
 	}
 	return nil
 }
 
 // DeleteIssues deletes multiple issues in a single transaction.
-// If cascade is true, recursively deletes dependents.
+// If cascade is true, also deletes their parent-child descendants and orphans
+// every other dependent.
 // If cascade is false but force is true, deletes issues and orphans dependents.
 // If both are false, returns an error if any issue has dependents.
 // If dryRun is true, only computes statistics without deleting.
@@ -719,6 +729,16 @@ const maxRecursiveResults = 10000
 const queryBatchSize = 200
 
 func (s *DoltStore) DeleteIssues(ctx context.Context, ids []string, cascade bool, force bool, dryRun bool) (*types.DeleteIssuesResult, error) {
+	var result *types.DeleteIssuesResult
+	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		var err error
+		result, err = s.deleteIssues(ctx, ids, cascade, force, dryRun)
+		return err
+	})
+	return result, err
+}
+
+func (s *DoltStore) deleteIssues(ctx context.Context, ids []string, cascade bool, force bool, dryRun bool) (*types.DeleteIssuesResult, error) {
 	if len(ids) == 0 {
 		return &types.DeleteIssuesResult{}, nil
 	}
@@ -728,8 +748,8 @@ func (s *DoltStore) DeleteIssues(ctx context.Context, ids []string, cascade bool
 	// to avoid write timeout on large sets — see bd-2ehd, ff-tqm).
 	ephIDs, regularIDs := s.partitionByWispStatus(ctx, ids)
 	wispDeleteCount := 0
+	var activeWispIDs []string
 	if len(ephIDs) > 0 {
-		var activeWispIDs []string
 		for _, eid := range ephIDs {
 			if s.isActiveWisp(ctx, eid) {
 				activeWispIDs = append(activeWispIDs, eid)
@@ -751,7 +771,10 @@ func (s *DoltStore) DeleteIssues(ctx context.Context, ids []string, cascade bool
 
 	var result *types.DeleteIssuesResult
 	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
-		r, err := issueops.DeleteIssuesInTx(ctx, tx, ids, cascade, force, dryRun)
+		// storage.DeleteIssues carries no actor, so the journal rows record none.
+		// The wisps peeled off above stay part of the request for the
+		// dependents guard, in a dry run too, where they are not deleted first.
+		r, err := issueops.DeleteIssuesBesideWispsInTx(ctx, tx, ids, activeWispIDs, cascade, force, dryRun, "")
 		if err != nil {
 			result = r
 			return err
@@ -761,21 +784,16 @@ func (s *DoltStore) DeleteIssues(ctx context.Context, ids []string, cascade bool
 			return nil
 		}
 
-		for _, table := range []string{"issues", "dependencies", "labels", "comments", "events", "child_counters", "issue_snapshots", "compaction_snapshots"} {
-			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-		}
 		commitMsg := fmt.Sprintf("bd: delete %d issue(s)", result.DeletedCount)
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-			return fmt.Errorf("dolt commit: %w", err)
-		}
-		return nil
+		return s.doltAddAndCommitInTx(ctx, tx,
+			[]string{"issues", "dependencies", "labels", "comments", "events", "provenance_events", "child_counters", "issue_snapshots", "compaction_snapshots"},
+			commitMsg)
 	}); err != nil {
 		// Preserve partial result (e.g., OrphanedIssues) on error.
 		if result != nil {
 			result.DeletedCount += wispDeleteCount
 		}
-		return result, err
+		return result, s.recordDoltPublicationFailure(ctx, err)
 	}
 	result.DeletedCount += wispDeleteCount
 
@@ -798,150 +816,12 @@ func doltBuildSQLInClause(ids []string) (string, []interface{}) {
 // =============================================================================
 
 func recordEvent(ctx context.Context, tx *sql.Tx, issueID string, eventType types.EventType, actor, oldValue, newValue string) error {
-	_, err := tx.ExecContext(ctx, `
-		INSERT INTO events (id, issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, issueops.NewEventID(), issueID, eventType, actor, oldValue, newValue)
-	return wrapExecError("record event", err)
-}
-
-// seedCounterFromExistingIssuesTx scans existing issues to find the highest numeric suffix
-// for the given prefix, then seeds the issue_counter table if no row exists yet.
-// This is called when counter mode is first enabled on a repo that already has issues,
-// to prevent counter collisions with manually-created sequential IDs (GH#2002).
-// It is idempotent: if a counter row already exists for this prefix, it does nothing.
-func seedCounterFromExistingIssuesTx(ctx context.Context, tx *sql.Tx, prefix string) error {
-	// Check whether a counter row already exists for this prefix.
-	// If it does, we must not overwrite it (the counter may already be in use).
-	var existing int
-	err := tx.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&existing)
-	if err == nil {
-		// Row exists - counter is already initialized, nothing to do.
-		return nil
-	}
-	if err != sql.ErrNoRows {
-		return fmt.Errorf("failed to check issue_counter for prefix %q: %w", prefix, err)
-	}
-
-	// No counter row yet. Scan existing issues to find the highest numeric suffix.
-	likePattern := prefix + "-%"
-	rows, err := tx.QueryContext(ctx, "SELECT id FROM issues WHERE id LIKE ?", likePattern)
-	if err != nil {
-		return fmt.Errorf("failed to query existing issues for prefix %q: %w", prefix, err)
-	}
-	defer rows.Close()
-
-	maxNum := 0
-	prefixDash := prefix + "-"
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return fmt.Errorf("failed to scan issue id: %w", err)
-		}
-		// Strip the prefix and attempt to parse the remainder as an integer.
-		suffix := strings.TrimPrefix(id, prefixDash)
-		if suffix == id {
-			// id did not start with prefix- (should not happen given LIKE, but be safe)
-			continue
-		}
-		var num int
-		if _, parseErr := fmt.Sscanf(suffix, "%d", &num); parseErr == nil && fmt.Sprintf("%d", num) == suffix {
-			if num > maxNum {
-				maxNum = num
-			}
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("failed to iterate existing issues for prefix %q: %w", prefix, err)
-	}
-
-	// Only insert a seed row if we found at least one numeric ID.
-	// If no numeric IDs exist, the counter will naturally start at 1 on first use.
-	if maxNum > 0 {
-		_, err = tx.ExecContext(ctx,
-			"INSERT INTO issue_counter (prefix, last_id) VALUES (?, ?)",
-			prefix, maxNum)
-		if err != nil {
-			return fmt.Errorf("failed to seed issue_counter for prefix %q at %d: %w", prefix, maxNum, err)
-		}
-	}
-
-	return nil
-}
-
-// nextCounterIDTx atomically increments and returns the next sequential issue ID
-// for the given prefix within an existing transaction. Returns the full ID string
-// (e.g., "bd-1"). Used by both generateIssueID and generateIssueIDInTable.
-func nextCounterIDTx(ctx context.Context, tx *sql.Tx, prefix string) (string, error) {
-	// Increment atomically at the DB level to avoid duplicate IDs under
-	// concurrent transactions (GH#2002). "last_id = last_id + 1" is evaluated
-	// by the DB engine atomically within Dolt's MVCC.
-
-	// Attempt atomic increment of an existing counter row.
-	res, err := tx.ExecContext(ctx, "UPDATE issue_counter SET last_id = last_id + 1 WHERE prefix = ?", prefix)
-	if err != nil {
-		return "", fmt.Errorf("failed to increment issue counter for prefix %q: %w", prefix, err)
-	}
-
-	rowsAffected, err := res.RowsAffected()
-	if err != nil {
-		return "", fmt.Errorf("failed to check rows affected for issue counter prefix %q: %w", prefix, err)
-	}
-
-	if rowsAffected == 0 {
-		// No counter row yet - seed from existing issues before proceeding to
-		// avoid collisions with manually-created sequential IDs (GH#2002).
-		if seedErr := seedCounterFromExistingIssuesTx(ctx, tx, prefix); seedErr != nil {
-			return "", fmt.Errorf("failed to seed issue counter for prefix %q: %w", prefix, seedErr)
-		}
-		// Retry the atomic increment after seeding.
-		res, err = tx.ExecContext(ctx, "UPDATE issue_counter SET last_id = last_id + 1 WHERE prefix = ?", prefix)
-		if err != nil {
-			return "", fmt.Errorf("failed to increment issue counter after seeding for prefix %q: %w", prefix, err)
-		}
-		rowsAffected, err = res.RowsAffected()
-		if err != nil {
-			return "", fmt.Errorf("failed to check rows affected after seeding for prefix %q: %w", prefix, err)
-		}
-		if rowsAffected == 0 {
-			// Seeding found no existing numeric IDs -- insert the initial row.
-			_, err = tx.ExecContext(ctx, "INSERT INTO issue_counter (prefix, last_id) VALUES (?, 1)", prefix)
-			if err != nil {
-				return "", fmt.Errorf("failed to insert initial issue counter for prefix %q: %w", prefix, err)
-			}
-		}
-	}
-
-	// Read back the value that was atomically set by the DB engine.
-	var nextID int
-	err = tx.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&nextID)
-	if err != nil {
-		return "", fmt.Errorf("failed to read issue counter after increment for prefix %q: %w", prefix, err)
-	}
-	return fmt.Sprintf("%s-%d", prefix, nextID), nil
-}
-
-// isCounterModeTx checks whether issue_id_mode=counter is configured.
-func isCounterModeTx(ctx context.Context, tx *sql.Tx) (bool, error) {
-	var idMode string
-	err := tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "issue_id_mode").Scan(&idMode)
-	if err != nil && err != sql.ErrNoRows {
-		return false, fmt.Errorf("failed to read issue_id_mode config: %w", err)
-	}
-	return idMode == "counter", nil
-}
-
-// generateHashID creates a hash-based ID for a top-level issue.
-// Uses base36 encoding (0-9, a-z) for better information density than hex.
-func generateHashID(prefix, title, description, creator string, timestamp time.Time, length, nonce int) string {
-	return idgen.GenerateHashID(prefix, title, description, creator, timestamp, length, nonce)
+	return wrapExecError("record event", issueops.RecordFullEventInTable(ctx, tx, "events", issueID, eventType, actor, oldValue, newValue))
 }
 
 // Thin wrappers around exported issueops functions, kept for internal callers.
 var (
 	isAllowedUpdateField = issueops.IsAllowedUpdateField
-	manageClosedAt       = issueops.ManageClosedAt
-	determineEventType   = issueops.DetermineEventType
 )
 
 // Aliases for shared nullable helpers from issueops.

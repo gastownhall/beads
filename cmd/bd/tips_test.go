@@ -1,37 +1,102 @@
-//go:build cgo
-
 package main
 
 import (
 	"context"
+	"errors"
+	"math/rand"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/steveyegge/beads/cmd/bd/setup"
 )
 
-func TestTipSelection(t *testing.T) {
-	// Reset doltAutoCommit to prevent test interference (prior tests may set it to "on"
-	// via rootCmd.Execute, causing recordTipShown to defer writes instead of persisting)
-	oldDoltAutoCommit := doltAutoCommit
-	doltAutoCommit = ""
-	t.Cleanup(func() { doltAutoCommit = oldDoltAutoCommit })
+type tipMetadataWrite struct {
+	key   string
+	value string
+}
 
-	// Set deterministic seed for testing
-	os.Setenv("BEADS_TIP_SEED", "12345")
-	defer os.Unsetenv("BEADS_TIP_SEED")
+// tipMetadataRecorder is a scripted recording double. It deliberately does
+// not apply writes to reads; storage owns that persistence behavior.
+type tipMetadataRecorder struct {
+	values   map[string]string
+	readErr  error
+	writeErr error
+	readKeys []string
+	writes   []tipMetadataWrite
+}
 
-	// Reset RNG
-	tipRandOnce = sync.Once{}
-	initTipRand()
+func (r *tipMetadataRecorder) GetLocalMetadata(_ context.Context, key string) (string, error) {
+	r.readKeys = append(r.readKeys, key)
+	if r.readErr != nil {
+		return "", r.readErr
+	}
+	return r.values[key], nil
+}
 
-	// Reset tip registry for testing
+func (r *tipMetadataRecorder) SetLocalMetadata(_ context.Context, key, value string) error {
+	r.writes = append(r.writes, tipMetadataWrite{key: key, value: value})
+	return r.writeErr
+}
+
+func resetTipTestState(t *testing.T) {
+	t.Helper()
 	tipsMutex.Lock()
-	tips = []Tip{}
+	originalTips := append([]Tip(nil), tips...)
+	tips = nil
 	tipsMutex.Unlock()
 
-	store := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
+	originalRand := tipRand
+	originalRandWasInitialized := originalRand != nil
+	tipRand = nil
+	tipRandOnce = sync.Once{}
+	originalJSONOutput := jsonOutput
+	jsonOutput = false
+	originalQuietFlag := quietFlag
+	quietFlag = false
+	originalDoltAutoCommit := doltAutoCommit
+	doltAutoCommit = ""
+	originalDidWrite := commandDidWriteTipMetadata
+	commandDidWriteTipMetadata = false
+	originalTipIDsWereNil := commandTipIDsShown == nil
+	originalTipIDs := make(map[string]struct{}, len(commandTipIDsShown))
+	for id := range commandTipIDsShown {
+		originalTipIDs[id] = struct{}{}
+	}
+	commandTipIDsShown = nil
+
+	t.Cleanup(func() {
+		tipsMutex.Lock()
+		tips = originalTips
+		tipsMutex.Unlock()
+		tipRand = originalRand
+		tipRandOnce = sync.Once{}
+		if originalRandWasInitialized {
+			tipRandOnce.Do(func() {})
+		}
+		jsonOutput = originalJSONOutput
+		quietFlag = originalQuietFlag
+		doltAutoCommit = originalDoltAutoCommit
+		commandDidWriteTipMetadata = originalDidWrite
+		if originalTipIDsWereNil {
+			commandTipIDsShown = nil
+		} else {
+			commandTipIDsShown = originalTipIDs
+		}
+	})
+}
+
+func TestTipSelection(t *testing.T) {
+	resetTipTestState(t)
+	t.Setenv("BEADS_TIP_SEED", "12345")
+	initTipRand()
+	store := &tipMetadataRecorder{values: map[string]string{}}
 
 	// Test 1: No tips registered
 	tip := selectNextTip(store)
@@ -60,7 +125,7 @@ func TestTipSelection(t *testing.T) {
 	}
 
 	// Test 3: Frequency limit - should not show again immediately
-	recordTipShown(store, "test_tip_1")
+	store.values["tip_test_tip_1_last_shown"] = time.Now().Format(time.RFC3339)
 	tip = selectNextTip(store)
 	if tip != nil {
 		t.Errorf("Expected nil due to frequency limit, got %v", tip)
@@ -114,15 +179,44 @@ func TestTipSelection(t *testing.T) {
 	if tip != nil {
 		t.Errorf("Expected nil due to condition=false, got %v", tip)
 	}
+
+	for _, test := range []struct {
+		name string
+		tips []Tip
+		want string
+	}{
+		{
+			name: "lower priority wins after higher probability misses",
+			tips: []Tip{
+				{ID: "low", Condition: func() bool { return true }, Priority: 10, Probability: 1},
+				{ID: "high", Condition: func() bool { return true }, Priority: 100, Probability: 0},
+			},
+			want: "low",
+		},
+		{
+			name: "second equal priority tip wins after first probability misses",
+			tips: []Tip{
+				{ID: "first", Condition: func() bool { return true }, Priority: 50, Probability: 0},
+				{ID: "second", Condition: func() bool { return true }, Priority: 50, Probability: 1},
+			},
+			want: "second",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tipsMutex.Lock()
+			tips = test.tips
+			tipsMutex.Unlock()
+			got := selectNextTip(store)
+			if got == nil || got.ID != test.want {
+				t.Fatalf("selectNextTip() = %#v, want ID %q", got, test.want)
+			}
+		})
+	}
 }
 
 func TestTipProbability(t *testing.T) {
-	// Set deterministic seed
-	os.Setenv("BEADS_TIP_SEED", "99999")
-	defer os.Unsetenv("BEADS_TIP_SEED")
-
-	// Reset RNG by creating a new Once
-	tipRandOnce = sync.Once{}
+	resetTipTestState(t)
+	t.Setenv("BEADS_TIP_SEED", "99999")
 	initTipRand()
 
 	tipsMutex.Lock()
@@ -138,81 +232,116 @@ func TestTipProbability(t *testing.T) {
 	}
 	tipsMutex.Unlock()
 
-	store := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
+	store := &tipMetadataRecorder{values: map[string]string{}}
 
 	// Run selection multiple times
 	shownCount := 0
 	for i := 0; i < 100; i++ {
-		// Clear last shown timestamp to make tip eligible
-		_ = store.SetMetadata(context.Background(), "tip_rare_tip_last_shown", "")
-
 		tip := selectNextTip(store)
 		if tip != nil {
 			shownCount++
 		}
 	}
 
-	// With 1% probability, we expect ~1 show out of 100
-	// Allow some variance (0-10 is reasonable for low probability)
-	if shownCount > 10 {
-		t.Errorf("Expected ~1 tip shown with 1%% probability, got %d", shownCount)
+	if shownCount != 1 {
+		t.Errorf("shown count = %d, want 1 for seed 99999", shownCount)
 	}
 }
 
 func TestGetLastShown(t *testing.T) {
-	store := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
-
-	// Test 1: Never shown
-	lastShown := getLastShown(store, "never_shown")
-	if !lastShown.IsZero() {
-		t.Errorf("Expected zero time for never shown tip, got %v", lastShown)
-	}
-
-	// Test 2: Recently shown
-	now := time.Now()
-	_ = store.SetMetadata(context.Background(), "tip_test_last_shown", now.Format(time.RFC3339))
-
-	lastShown = getLastShown(store, "test")
-	if lastShown.IsZero() {
-		t.Error("Expected non-zero time for shown tip")
-	}
-
-	// Should be within 1 second (accounting for rounding)
-	diff := now.Sub(lastShown)
-	if diff < 0 {
-		diff = -diff
-	}
-	if diff > time.Second {
-		t.Errorf("Expected last shown time to be close to now, got diff %v", diff)
+	resetTipTestState(t)
+	shown := time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name  string
+		value string
+		err   error
+		want  time.Time
+	}{
+		{name: "missing"},
+		{name: "valid", value: shown.Format(time.RFC3339), want: shown},
+		{name: "malformed", value: "not-a-time"},
+		{name: "read failure", err: errors.New("read failed")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := &tipMetadataRecorder{values: map[string]string{"tip_test_last_shown": test.value}, readErr: test.err}
+			if got := getLastShown(store, "test"); !got.Equal(test.want) {
+				t.Fatalf("getLastShown() = %v, want %v", got, test.want)
+			}
+			if len(store.readKeys) != 1 || store.readKeys[0] != "tip_test_last_shown" {
+				t.Fatalf("read keys = %v, want [tip_test_last_shown]", store.readKeys)
+			}
+		})
 	}
 }
 
 func TestRecordTipShown(t *testing.T) {
-	// Reset doltAutoCommit to prevent test interference
-	oldDoltAutoCommit := doltAutoCommit
-	doltAutoCommit = ""
-	t.Cleanup(func() { doltAutoCommit = oldDoltAutoCommit })
-
-	store := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
-
-	recordTipShown(store, "test_tip")
-
-	// Verify it was recorded
-	lastShown := getLastShown(store, "test_tip")
-	if lastShown.IsZero() {
-		t.Error("Expected tip to be recorded as shown")
+	resetTipTestState(t)
+	for _, test := range []struct {
+		name string
+		mode string
+	}{
+		{name: "unset", mode: ""},
+		{name: "off", mode: "off"},
+		{name: "batch", mode: "batch"},
+		{name: "invalid", mode: "invalid"},
+	} {
+		t.Run("immediate write with auto commit "+test.name, func(t *testing.T) {
+			commandDidWriteTipMetadata = false
+			commandTipIDsShown = nil
+			doltAutoCommit = test.mode
+			store := &tipMetadataRecorder{}
+			callStarted := time.Now().Truncate(time.Second)
+			recordTipShown(store, "test_tip")
+			callFinished := time.Now().Truncate(time.Second)
+			if len(store.writes) != 1 || store.writes[0].key != "tip_test_tip_last_shown" {
+				t.Fatalf("writes = %#v", store.writes)
+			}
+			writtenAt, err := time.Parse(time.RFC3339, store.writes[0].value)
+			if err != nil {
+				t.Fatalf("written timestamp %q: %v", store.writes[0].value, err)
+			}
+			if writtenAt.Before(callStarted) || writtenAt.After(callFinished) {
+				t.Fatalf("written timestamp %v outside call window [%v, %v]", writtenAt, callStarted, callFinished)
+			}
+			_, tracked := commandTipIDsShown["test_tip"]
+			if !commandDidWriteTipMetadata || len(commandTipIDsShown) != 1 || !tracked {
+				t.Fatalf("tip write tracking = %t, %#v", commandDidWriteTipMetadata, commandTipIDsShown)
+			}
+		})
 	}
-
-	// Should be very recent
-	if time.Since(lastShown) > time.Second {
-		t.Errorf("Expected recent timestamp, got %v", lastShown)
-	}
+	t.Run("write failure is not tracked", func(t *testing.T) {
+		commandDidWriteTipMetadata = false
+		commandTipIDsShown = nil
+		store := &tipMetadataRecorder{writeErr: errors.New("write failed")}
+		recordTipShown(store, "test_tip")
+		if len(store.writes) != 1 || commandDidWriteTipMetadata || commandTipIDsShown != nil {
+			t.Fatalf("writes = %#v, tracking = %t, %#v", store.writes, commandDidWriteTipMetadata, commandTipIDsShown)
+		}
+	})
+	t.Run("nil and empty IDs do not write", func(t *testing.T) {
+		recordTipShown(nil, "test_tip")
+		store := &tipMetadataRecorder{}
+		recordTipShown(store, "")
+		if len(store.writes) != 0 {
+			t.Fatalf("writes = %#v", store.writes)
+		}
+	})
+	t.Run("auto commit defers write", func(t *testing.T) {
+		commandDidWriteTipMetadata = false
+		commandTipIDsShown = nil
+		doltAutoCommit = "on"
+		store := &tipMetadataRecorder{}
+		recordTipShown(store, "test_tip")
+		_, tracked := commandTipIDsShown["test_tip"]
+		if len(store.writes) != 0 || !commandDidWriteTipMetadata || len(commandTipIDsShown) != 1 || !tracked {
+			t.Fatalf("writes = %#v, tracking = %t, %#v", store.writes, commandDidWriteTipMetadata, commandTipIDsShown)
+		}
+	})
 }
 
 func TestMaybeShowTip_RespectsFlags(t *testing.T) {
-	// Set deterministic seed
-	os.Setenv("BEADS_TIP_SEED", "54321")
-	defer os.Unsetenv("BEADS_TIP_SEED")
+	resetTipTestState(t)
+	t.Setenv("BEADS_TIP_SEED", "54321")
 
 	tipsMutex.Lock()
 	tips = []Tip{
@@ -227,29 +356,34 @@ func TestMaybeShowTip_RespectsFlags(t *testing.T) {
 	}
 	tipsMutex.Unlock()
 
-	store := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
+	store := &tipMetadataRecorder{values: map[string]string{}}
 
 	// Test 1: Should not show in JSON mode
 	jsonOutput = true
-	maybeShowTip(store) // Should not panic or show output
+	output := captureStdout(t, func() error { maybeShowTip(store); return nil })
+	if output != "" || tipRand != nil || len(store.readKeys) != 0 || len(store.writes) != 0 {
+		t.Fatalf("JSON mode output=%q rand=%v reads=%v writes=%v", output, tipRand, store.readKeys, store.writes)
+	}
 	jsonOutput = false
 
 	// Test 2: Should not show in quiet mode
 	quietFlag = true
-	maybeShowTip(store) // Should not panic or show output
+	output = captureStdout(t, func() error { maybeShowTip(store); return nil })
+	if output != "" || tipRand != nil || len(store.readKeys) != 0 || len(store.writes) != 0 {
+		t.Fatalf("quiet mode output=%q rand=%v reads=%v writes=%v", output, tipRand, store.readKeys, store.writes)
+	}
 	quietFlag = false
 
-	// Test 3: Should show in normal mode (no assertions, just testing it doesn't panic)
-	maybeShowTip(store)
+	output = captureStdout(t, func() error { maybeShowTip(store); return nil })
+	if output != "\n💡 Tip: Always show tip\n" || tipRand == nil || len(store.readKeys) != 1 || len(store.writes) != 1 {
+		t.Fatalf("normal mode output=%q rand=%v reads=%v writes=%v", output, tipRand, store.readKeys, store.writes)
+	}
 }
 
 func TestTipFrequency(t *testing.T) {
-	// Reset doltAutoCommit to prevent test interference
-	oldDoltAutoCommit := doltAutoCommit
-	doltAutoCommit = ""
-	t.Cleanup(func() { doltAutoCommit = oldDoltAutoCommit })
-
-	store := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
+	resetTipTestState(t)
+	tipRand = rand.New(rand.NewSource(1))
+	store := &tipMetadataRecorder{values: map[string]string{}}
 
 	tipsMutex.Lock()
 	tips = []Tip{
@@ -270,8 +404,8 @@ func TestTipFrequency(t *testing.T) {
 		t.Fatal("Expected tip to be selected")
 	}
 
-	// Record it as shown
-	recordTipShown(store, tip.ID)
+	// A recorder does not apply writes to reads, so script the persisted value.
+	store.values["tip_frequent_tip_last_shown"] = time.Now().Format(time.RFC3339)
 
 	// Should not show again immediately (within frequency window)
 	tip = selectNextTip(store)
@@ -281,7 +415,7 @@ func TestTipFrequency(t *testing.T) {
 
 	// Manually set last shown to past (simulate time passing)
 	past := time.Now().Add(-10 * time.Second)
-	_ = store.SetMetadata(context.Background(), "tip_frequent_tip_last_shown", past.Format(time.RFC3339))
+	store.values["tip_frequent_tip_last_shown"] = past.Format(time.RFC3339)
 
 	// Should show again now
 	tip = selectNextTip(store)
@@ -291,17 +425,11 @@ func TestTipFrequency(t *testing.T) {
 }
 
 func TestInjectTip(t *testing.T) {
-	// Reset tip registry for testing
-	tipsMutex.Lock()
-	tips = []Tip{}
-	tipsMutex.Unlock()
-
-	store := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
+	resetTipTestState(t)
+	store := &tipMetadataRecorder{values: map[string]string{}}
 
 	// Set deterministic seed for testing
-	os.Setenv("BEADS_TIP_SEED", "11111")
-	defer os.Unsetenv("BEADS_TIP_SEED")
-	tipRandOnce = sync.Once{}
+	t.Setenv("BEADS_TIP_SEED", "11111")
 	initTipRand()
 
 	// Test 1: Inject a new tip
@@ -406,6 +534,7 @@ func TestInjectTip(t *testing.T) {
 }
 
 func TestRemoveTip(t *testing.T) {
+	resetTipTestState(t)
 	// Reset tip registry for testing
 	tipsMutex.Lock()
 	tips = []Tip{}
@@ -470,6 +599,7 @@ func TestRemoveTip(t *testing.T) {
 }
 
 func TestInjectTipConcurrency(t *testing.T) {
+	resetTipTestState(t)
 	// Reset tip registry for testing
 	tipsMutex.Lock()
 	tips = []Tip{}
@@ -602,6 +732,7 @@ func TestIsClaudeSetupComplete(t *testing.T) {
 }
 
 func TestClaudeSetupTipRegistered(t *testing.T) {
+	resetTipTestState(t)
 	// Reset tip registry with fresh default tips
 	tipsMutex.Lock()
 	tips = []Tip{}
@@ -636,9 +767,9 @@ func TestClaudeSetupTipRegistered(t *testing.T) {
 }
 
 func TestClaudeSetupTipCondition(t *testing.T) {
-	// Save original env vars
-	origClaudeCode := os.Getenv("CLAUDE_CODE")
-	defer os.Setenv("CLAUDE_CODE", origClaudeCode)
+	resetTipTestState(t)
+	t.Setenv("CLAUDE_CODE", "")
+	t.Setenv("ANTHROPIC_CLI", "")
 
 	// Reset tip registry with fresh default tips
 	tipsMutex.Lock()
@@ -675,4 +806,119 @@ func TestClaudeSetupTipCondition(t *testing.T) {
 	// If setup is complete, should be false; if not complete, should be true
 	// Just verify it returns a valid boolean
 	_ = conditionResult
+}
+
+// TestClaudeSetupReadersAgree pins that bd doctor's Claude Integration check
+// and the claude_setup tip read Claude Code's settings as bd setup claude
+// --check does, on the same fixtures: the beads plugin by Claude Code's
+// settings precedence (managed settings, the repository root's local
+// settings, the current directory's, the project's, then the user's), and
+// only a plugin named beads; and a bd prime hook in the project's settings,
+// the repository root's local settings or the user's as well (#7774's
+// review). bd doctor reports the same for the directory it checks when it
+// runs elsewhere, in a separate checkout or in the repository that encloses
+// a nested one, whose cached git context is not that directory's (#7802's
+// review).
+func TestClaudeSetupReadersAgree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git not available: %v", err)
+	}
+	const (
+		on       = `{"enabledPlugins": {"beads@beads-marketplace": true}}`
+		off      = `{"enabledPlugins": {"beads@beads-marketplace": false}}`
+		decoy    = `{"enabledPlugins": {"design-to-beads@xexr-marketplace": true}}`
+		hook     = `{"hooks": {"SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "bd prime --hook-json"}]}]}}`
+		offHook  = `{"enabledPlugins": {"beads@beads-marketplace": false}, "hooks": {"SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "bd prime --hook-json"}]}]}}`
+		user     = "home/.claude/settings.json"
+		project  = "repo/.claude/settings.json"
+		local    = "repo/.claude/settings.local.json"
+		managed  = "managed/managed-settings.json"
+		repoDir  = "repo"
+		subDir   = "repo/sub"
+		nested   = "repo/nested"
+		otherDir = "other"
+		pluginOn = "Plugin installed"
+	)
+	cases := []struct {
+		name  string
+		files map[string]string
+		dir   string
+		// plugin: the beads plugin runs bd prime in dir. hooks: bd prime
+		// runs there, from the plugin or a hook.
+		plugin, hooks bool
+	}{
+		{"the local settings turn off a user plugin", map[string]string{user: on, local: off}, repoDir, false, false},
+		{"the project's settings turn off a user plugin", map[string]string{user: on, project: off}, repoDir, false, false},
+		{"managed settings enable it", map[string]string{managed: on}, repoDir, true, true},
+		{"managed settings turn off a user plugin", map[string]string{managed: off, user: on}, repoDir, false, false},
+		{"the repository root's local settings enable it in a subdirectory", map[string]string{local: on}, subDir, true, true},
+		{"a hook only in the repository root's local settings, in a subdirectory", map[string]string{local: hook}, subDir, false, true},
+		{"a nested repository does not read the enclosing one's local settings", map[string]string{user: on, local: off}, nested, true, true},
+		{"a plugin named design-to-beads is not the beads plugin", map[string]string{user: decoy}, repoDir, false, false},
+		{"the project's settings enable it", map[string]string{project: on}, repoDir, true, true},
+		{"a project hook where the project turns off a user plugin", map[string]string{user: on, project: offHook}, repoDir, false, true},
+		{"the hook bd setup claude --global writes", map[string]string{user: hook}, repoDir, false, true},
+		{"no settings", nil, repoDir, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.dir == subDir && runtime.GOOS == "windows" {
+				t.Skip("Claude Code keeps settings.local.json beside settings.json on Windows")
+			}
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatalf("resolve temp dir: %v", err)
+			}
+			for _, dir := range []string{"home", subDir} {
+				if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+			}
+			for _, repo := range []string{repoDir, nested, otherDir} {
+				if out, err := exec.Command("git", "init", "-q", filepath.Join(root, repo)).CombinedOutput(); err != nil {
+					t.Fatalf("git init: %v\n%s", err, out)
+				}
+			}
+			for path, body := range tc.files {
+				path = filepath.Join(root, path)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+					t.Fatalf("write %s: %v", path, err)
+				}
+			}
+			t.Setenv("HOME", filepath.Join(root, "home"))
+			t.Setenv("USERPROFILE", filepath.Join(root, "home"))
+			t.Cleanup(setup.SetClaudeManagedSettingsDirForTest(filepath.Join(root, "managed")))
+			dir := filepath.Join(root, tc.dir)
+			t.Chdir(dir)
+			resetRepoCachesForTest(t)
+
+			check := captureStdout(t, func() error {
+				_ = setup.CheckClaude() // a missing hook or CLAUDE.md section is an error; the output says which
+				return nil
+			})
+			if got := strings.Contains(check, "Hooks provided by beads plugin"); got != tc.plugin {
+				t.Errorf("--check reports the plugin = %v, want %v:\n%s", got, tc.plugin, check)
+			}
+			if got := !strings.Contains(check, "No hooks installed"); got != tc.hooks {
+				t.Errorf("--check reports hooks = %v, want %v:\n%s", got, tc.hooks, check)
+			}
+			if got := isClaudeSetupComplete(); got != tc.hooks {
+				t.Errorf("the claude_setup tip counts setup complete = %v, want %v", got, tc.hooks)
+			}
+			for _, from := range []string{tc.dir, otherDir, repoDir} {
+				t.Chdir(filepath.Join(root, from))
+				resetRepoCaches()
+				msg := doctor.CheckClaude(dir).Message
+				if got := msg == pluginOn; got != tc.plugin {
+					t.Errorf("bd doctor run in %s reports the plugin = %v (%q), want %v", from, got, msg, tc.plugin)
+				}
+				if got := msg == pluginOn || msg == "Hooks installed (CLI mode)"; got != tc.hooks {
+					t.Errorf("bd doctor run in %s reports hooks = %v (%q), want %v", from, got, msg, tc.hooks)
+				}
+			}
+		})
+	}
 }

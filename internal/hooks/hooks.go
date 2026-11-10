@@ -3,12 +3,18 @@
 package hooks
 
 import (
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
+
+var errHookExecutionUnsupported = errors.New("hook execution is not supported on js/wasm")
 
 // Event types
 const (
@@ -28,6 +34,11 @@ const (
 type Runner struct {
 	hooksDir string
 	timeout  time.Duration
+	// inFlight counts the hooks Run started and has not finished. A bd
+	// command is short: it fires its hooks after the commit and returns, and
+	// the process exit takes every goroutine with it — including one that has
+	// not reached exec yet. Wait is how a caller gives them their moment.
+	inFlight sync.WaitGroup
 }
 
 // NewRunner creates a new hook runner.
@@ -65,11 +76,57 @@ func (r *Runner) Run(event string, issue *types.Issue) {
 		return // Not executable, skip
 	}
 
-	// Run asynchronously (ignore error as this is fire-and-forget)
+	r.runAsync(hookPath, event, issue, os.Stderr)
+}
+
+// runAsync owns the fire-and-forget boundary after Run has established that a
+// configured executable hook exists. The mutation still cannot fail because a
+// hook did, but a platform capability refusal must not disappear with the
+// discarded error.
+// Both async and sync use the same runHook body, with the same per-hook timeout
+// and platform-specific cleanup on expiry.
+func (r *Runner) runAsync(hookPath, event string, issue *types.Issue, stderr io.Writer) {
+	r.inFlight.Add(1)
 	go func() {
-		_ = r.runHook(hookPath, event, issue) // Best effort: hook failures should not block the triggering operation
+		defer r.inFlight.Done()
+		if err := r.runHook(hookPath, event, issue); errors.Is(err, errHookExecutionUnsupported) {
+			_, _ = fmt.Fprintf(stderr, "warning: hook %q was not run: %v\n", hookPath, err)
+		}
 	}()
 }
+
+// Wait blocks until every hook Run started has finished, or until timeout,
+// and reports whether they all finished.
+//
+// It exists because fire-and-forget is a promise about the MUTATION, not about
+// the hook: a committed write must never fail because a script did, but a
+// script that never ran at all is a hook that silently did not fire. A CLI
+// process fires its hooks after the commit and then returns from main, and the
+// exit takes the goroutines with it. Calling this at teardown gives them the
+// window; the timeout is what keeps the promise, since a hung script must delay
+// the command's exit by a bounded amount rather than forever.
+//
+// Callers should pass a budget no larger than the per-hook timeout: a hook that
+// outlives its own timeout is being killed anyway.
+func (r *Runner) Wait(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		r.inFlight.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+// Timeout is the per-hook budget, which is also the largest budget Wait can
+// usefully be given.
+func (r *Runner) Timeout() time.Duration { return r.timeout }
 
 // RunSync executes a hook synchronously and returns any error.
 // Useful for testing or when you need to wait for the hook.

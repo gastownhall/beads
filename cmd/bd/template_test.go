@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -16,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/validation"
 )
 
 // =============================================================================
@@ -82,6 +84,447 @@ func TestSubstituteVariables(t *testing.T) {
 				t.Errorf("substituteVariables(%q, %v) = %q, want %q", tt.input, tt.vars, result, tt.expected)
 			}
 		})
+	}
+}
+
+// TestSubstituteMetadataVars covers the SF2 follow-up and GH#5110: step
+// metadata (`[steps.metadata]`) and a gate step's `repo` selector
+// ("repo": "{{gate_repo}}") are stored literally in the persisted proto's
+// metadata by cook --persist (compile-time mode never substitutes), so
+// substitution must happen at the same point other var-bearing issue fields
+// (Title, Description, Assignee, Labels, AwaitID, ...) are substituted: here,
+// when a proto is cloned/poured into real issues.
+func TestSubstituteMetadataVars(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		metadata string
+		vars     map[string]string
+		want     string
+	}{
+		{
+			name:     "substitutes repo variable",
+			metadata: `{"repo":"{{gate_repo}}"}`,
+			vars:     map[string]string{"gate_repo": "srobroek/agentic-packages"},
+			want:     `{"repo":"srobroek/agentic-packages"}`,
+		},
+		{
+			// GH#5110: general step metadata, not a gate repo selector.
+			name:     "substitutes arbitrary metadata key",
+			metadata: `{"ado_id":"{{ado_id}}","domain":"team/{{domain}}"}`,
+			vars:     map[string]string{"ado_id": "731878", "domain": "payroll"},
+			want:     `{"ado_id":"731878","domain":"team/payroll"}`,
+		},
+		{
+			name:     "substitutes nested and array values",
+			metadata: `{"outer":{"inner":"{{v}}"},"list":["{{v}}","static"]}`,
+			vars:     map[string]string{"v": "resolved"},
+			want:     `{"outer":{"inner":"resolved"},"list":["resolved","static"]}`,
+		},
+		{
+			name:     "missing var leaves placeholder",
+			metadata: `{"repo":"{{gate_repo}}"}`,
+			vars:     map[string]string{},
+			want:     `{"repo":"{{gate_repo}}"}`,
+		},
+		{
+			name:     "no placeholder untouched",
+			metadata: `{"other":"value"}`,
+			vars:     map[string]string{"gate_repo": "srobroek/agentic-packages"},
+			want:     `{"other":"value"}`,
+		},
+		{
+			name:     "empty metadata untouched",
+			metadata: "",
+			vars:     map[string]string{"gate_repo": "srobroek/agentic-packages"},
+			want:     "",
+		},
+		{
+			name:     "null repo left for check-time validation",
+			metadata: `{"repo":null}`,
+			vars:     map[string]string{"gate_repo": "srobroek/agentic-packages"},
+			want:     `{"repo":null}`,
+		},
+		{
+			// Supersedes the earlier SF4 gh:*-only rule. That restriction
+			// existed because reading a `repo` key AS a GitHub selector is
+			// only correct on a gh:* gate - but resolving a {{var}} in it
+			// interprets the key not at all, and a bead poured with a literal
+			// `{{gate_repo}}` in its metadata is broken whatever the gate type.
+			name:     "non-github gate metadata also substitutes",
+			metadata: `{"repo":"{{gate_repo}}"}`,
+			vars:     map[string]string{"gate_repo": "srobroek/agentic-packages"},
+			want:     `{"repo":"srobroek/agentic-packages"}`,
+		},
+		{
+			name:     "object keys are never rewritten",
+			metadata: `{"{{key}}":"{{val}}"}`,
+			vars:     map[string]string{"key": "k", "val": "v"},
+			want:     `{"{{key}}":"v"}`,
+		},
+		{
+			name:     "malformed metadata returned untouched",
+			metadata: `{not json`,
+			vars:     map[string]string{"v": "x"},
+			want:     `{not json`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var metadata json.RawMessage
+			if tt.metadata != "" {
+				metadata = json.RawMessage(tt.metadata)
+			}
+			got := substituteMetadataVars(metadata, tt.vars)
+			if tt.want == "" {
+				if len(got) != 0 {
+					t.Errorf("substituteMetadataVars(%q, %v) = %q, want empty", tt.metadata, tt.vars, got)
+				}
+				return
+			}
+			if !json.Valid([]byte(tt.want)) {
+				// Malformed input: assert the bytes came back verbatim.
+				if string(got) != tt.want {
+					t.Errorf("substituteMetadataVars(%q, %v) = %s, want %s", tt.metadata, tt.vars, got, tt.want)
+				}
+				return
+			}
+			// Compare parsed JSON to avoid brittleness over key ordering.
+			var gotObj, wantObj map[string]interface{}
+			if err := json.Unmarshal(got, &gotObj); err != nil {
+				t.Fatalf("result %s is not valid JSON: %v", got, err)
+			}
+			if err := json.Unmarshal([]byte(tt.want), &wantObj); err != nil {
+				t.Fatalf("want %s is not valid JSON: %v", tt.want, err)
+			}
+			gotJSON, _ := json.Marshal(gotObj)
+			wantJSON, _ := json.Marshal(wantObj)
+			if string(gotJSON) != string(wantJSON) {
+				t.Errorf("substituteMetadataVars(%q, %v) = %s, want %s", tt.metadata, tt.vars, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSubstituteMetadataVars_DepthLimit verifies the recursion bound holds and
+// that a value nested past the limit is returned untouched rather than
+// panicking the pour.
+func TestSubstituteMetadataVars_DepthLimit(t *testing.T) {
+	t.Parallel()
+	deep := `"{{v}}"`
+	for i := 0; i < maxMetadataSubstitutionDepth+5; i++ {
+		deep = `{"a":` + deep + `}`
+	}
+	got := substituteMetadataVars(json.RawMessage(deep), map[string]string{"v": "resolved"})
+	if !json.Valid(got) {
+		t.Fatalf("result is not valid JSON: %s", got)
+	}
+	if !strings.Contains(string(got), "{{v}}") {
+		t.Errorf("expected the past-limit placeholder to survive untouched, got %s", got)
+	}
+}
+
+// TestSubstituteLabels covers GH#5110: a step's labels are carried onto the
+// proto literally by processStepToIssue, so they must resolve at pour time
+// like Title and Description do. An unsubstituted label doesn't error - it
+// just silently stops matching every label query downstream.
+func TestSubstituteLabels(t *testing.T) {
+	t.Parallel()
+	vars := map[string]string{"widget_id": "my_widget", "domain": "payroll"}
+	got := substituteLabels([]string{"qa-run", "widget:{{widget_id}}", "domain:{{domain}}", "{{unset}}"}, vars)
+	want := []string{"qa-run", "widget:my_widget", "domain:payroll", "{{unset}}"}
+	if !slices.Equal(got, want) {
+		t.Errorf("substituteLabels() = %v, want %v", got, want)
+	}
+	if got := substituteLabels(nil, vars); got != nil {
+		t.Errorf("substituteLabels(nil) = %v, want nil", got)
+	}
+}
+
+// TestSubstituteMetadataVars_PreservesUnrelatedValuesByteIdentical covers the
+// round-trip-fidelity half of the SF2/SF4 follow-up: the walk must decode into
+// map[string]json.RawMessage, not map[string]interface{}, so a sibling key's
+// value survives untouched when another value is substituted - a decode into
+// interface{} would mangle a JSON number to float64 (losing its original
+// formatting/precision on re-encode), reorder a nested object's keys, and
+// HTML-escape '<'/'>'/'&' inside string values that were never touched by the
+// substitution.
+func TestSubstituteMetadataVars_PreservesUnrelatedValuesByteIdentical(t *testing.T) {
+	t.Parallel()
+	metadata := json.RawMessage(`{"repo":"{{gate_repo}}","count":123456789012345,"nested":{"z":1,"a":2,"m":3},"note":"a <b> & c"}`)
+
+	got := substituteMetadataVars(metadata, map[string]string{"gate_repo": "srobroek/agentic-packages"})
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(got, &raw); err != nil {
+		t.Fatalf("result %s is not valid JSON: %v", got, err)
+	}
+
+	if string(raw["count"]) != "123456789012345" {
+		t.Errorf(`metadata["count"] = %s, want 123456789012345 (byte-identical, not float64-mangled)`, raw["count"])
+	}
+	if string(raw["nested"]) != `{"z":1,"a":2,"m":3}` {
+		t.Errorf(`metadata["nested"] = %s, want {"z":1,"a":2,"m":3} (byte-identical key order)`, raw["nested"])
+	}
+	if string(raw["note"]) != `"a <b> & c"` {
+		t.Errorf(`metadata["note"] = %s, want "a <b> & c" (no HTML-escaping)`, raw["note"])
+	}
+	var repo string
+	if err := json.Unmarshal(raw["repo"], &repo); err != nil {
+		t.Fatalf("metadata[\"repo\"] = %s is not a JSON string: %v", raw["repo"], err)
+	}
+	if repo != "srobroek/agentic-packages" {
+		t.Errorf(`metadata["repo"] = %q, want "srobroek/agentic-packages"`, repo)
+	}
+}
+
+// TestCloneSubgraph_SubstitutesGateRepoMetadata is the end-to-end regression
+// test for the cook --persist -> pour path: a gate issue persisted with
+// metadata.repo="{{gate_repo}}" (as createGateIssue/persistCookFormula would
+// write it for `repo = "{{gate_repo}}"` in the formula) must have that
+// placeholder substituted when the proto is cloned/poured with
+// --var gate_repo=..., exactly like it would be if the repo selector were an
+// AwaitID or Title placeholder instead.
+func TestCloneSubgraph_SubstitutesGateRepoMetadata(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	s := newTestStore(t, testDB)
+	ctx := context.Background()
+	h := &templateTestHelper{s: s, ctx: ctx, t: t}
+
+	epic := h.createIssue("Release {{version}}", "", types.TypeEpic, 1)
+	h.addLabel(epic.ID, BeadsTemplateLabel)
+
+	gate := &types.Issue{
+		Title:     "Gate: gh:run",
+		IssueType: "gate",
+		Status:    types.StatusOpen,
+		AwaitType: "gh:run",
+		AwaitID:   "release.yml",
+		Metadata:  json.RawMessage(`{"repo":"{{gate_repo}}"}`),
+	}
+	if err := s.CreateIssue(ctx, gate, "test-user"); err != nil {
+		t.Fatalf("Failed to create gate issue: %v", err)
+	}
+	h.addParentChild(gate.ID, epic.ID)
+
+	subgraph, err := loadTemplateSubgraph(ctx, s, epic.ID)
+	if err != nil {
+		t.Fatalf("loadTemplateSubgraph failed: %v", err)
+	}
+
+	vars := map[string]string{"version": "2.0.0", "gate_repo": "srobroek/agentic-packages"}
+	opts := CloneOptions{Vars: vars, Actor: "test-user"}
+	result, err := cloneSubgraph(ctx, s, subgraph, opts)
+	if err != nil {
+		t.Fatalf("cloneSubgraph failed: %v", err)
+	}
+
+	newGateID, ok := result.IDMapping[gate.ID]
+	if !ok {
+		t.Fatalf("IDMapping missing entry for gate %s: %+v", gate.ID, result.IDMapping)
+	}
+	newGate, err := s.GetIssue(ctx, newGateID)
+	if err != nil {
+		t.Fatalf("Failed to get cloned gate issue: %v", err)
+	}
+
+	var metadata struct {
+		Repo string `json:"repo"`
+	}
+	if err := json.Unmarshal(newGate.Metadata, &metadata); err != nil {
+		t.Fatalf("newGate.Metadata = %s, not valid JSON: %v", newGate.Metadata, err)
+	}
+	if metadata.Repo != "srobroek/agentic-packages" {
+		t.Errorf("cloned gate metadata.repo = %q, want %q (repo = \"{{gate_repo}}\" must be substituted at pour time, same as AwaitID/Title)", metadata.Repo, "srobroek/agentic-packages")
+	}
+}
+
+// TestCloneSubgraph_SubstitutesLabelsAssigneeAndMetadata is the end-to-end
+// regression test for GH#5110 and GH#5754: a proto step persisted with
+// templated labels, assignee, and metadata (as cook writes them - compile-time
+// mode keeps placeholders so the proto stays reusable across pours) must have
+// all three resolved when the proto is poured, exactly like Title and
+// Description are.
+//
+// The assignee assertion goes through validation.AssigneeMatches rather than
+// just comparing strings: an unsubstituted assignee is not a cosmetic defect,
+// it makes the poured bead unclosable by the actor that poured it, so every
+// step of the molecule is dead on arrival.
+func TestCloneSubgraph_SubstitutesLabelsAssigneeAndMetadata(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	s := newTestStore(t, testDB)
+	ctx := context.Background()
+	h := &templateTestHelper{s: s, ctx: ctx, t: t}
+
+	const actor = "design-agent"
+
+	epic := h.createIssue("QA {{widget_id}}", "", types.TypeEpic, 1)
+	h.addLabel(epic.ID, BeadsTemplateLabel)
+
+	step := &types.Issue{
+		Title:     "API-contract QA: {{widget_id}}",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Assignee:  "{{agent}}",
+		Labels:    []string{"qa-run", "widget:{{widget_id}}", "domain:{{domain}}"},
+		Metadata:  json.RawMessage(`{"ado_id":"{{ado_id}}"}`),
+	}
+	if err := s.CreateIssue(ctx, step, "test-user"); err != nil {
+		t.Fatalf("Failed to create step issue: %v", err)
+	}
+	h.addParentChild(step.ID, epic.ID)
+
+	subgraph, err := loadTemplateSubgraph(ctx, s, epic.ID)
+	if err != nil {
+		t.Fatalf("loadTemplateSubgraph failed: %v", err)
+	}
+
+	vars := map[string]string{
+		"widget_id": "my_widget",
+		"domain":    "payroll",
+		"agent":     actor,
+		"ado_id":    "731878",
+	}
+	result, err := cloneSubgraph(ctx, s, subgraph, CloneOptions{Vars: vars, Actor: actor})
+	if err != nil {
+		t.Fatalf("cloneSubgraph failed: %v", err)
+	}
+
+	newStepID, ok := result.IDMapping[step.ID]
+	if !ok {
+		t.Fatalf("IDMapping missing entry for step %s: %+v", step.ID, result.IDMapping)
+	}
+	newStep, err := s.GetIssue(ctx, newStepID)
+	if err != nil {
+		t.Fatalf("Failed to get poured step: %v", err)
+	}
+
+	// GH#5110: labels. An unsubstituted label doesn't error - it just stops
+	// matching every label-based query and automation downstream.
+	gotLabels := slices.Clone(newStep.Labels)
+	sort.Strings(gotLabels)
+	wantLabels := []string{"domain:payroll", "qa-run", "widget:my_widget"}
+	if !slices.Equal(gotLabels, wantLabels) {
+		t.Errorf("poured step labels = %v, want %v", gotLabels, wantLabels)
+	}
+
+	// GH#5110: general step metadata, not just a gh:* gate's repo selector.
+	var metadata struct {
+		ADOID string `json:"ado_id"`
+	}
+	if err := json.Unmarshal(newStep.Metadata, &metadata); err != nil {
+		t.Fatalf("poured step metadata = %s, not valid JSON: %v", newStep.Metadata, err)
+	}
+	if metadata.ADOID != "731878" {
+		t.Errorf("poured step metadata.ado_id = %q, want %q", metadata.ADOID, "731878")
+	}
+
+	// GH#5754: assignee, and the symptom that makes it severe.
+	if newStep.Assignee != actor {
+		t.Errorf("poured step assignee = %q, want %q", newStep.Assignee, actor)
+	}
+	if err := validation.AssigneeMatches(actor, false)(newStepID, newStep); err != nil {
+		t.Errorf("poured step is not closable by the pouring actor %q: %v", actor, err)
+	}
+}
+
+// TestCloneSubgraph_AssigneeOverrideBeatsSubstitution pins the precedence
+// between an explicit `bd mol pour --assignee` and a templated Step.assignee:
+// the flag is a literal value supplied on the command line and wins on the
+// root, while the steps still resolve their own placeholder (GH#5754).
+func TestCloneSubgraph_AssigneeOverrideBeatsSubstitution(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	s := newTestStore(t, testDB)
+	ctx := context.Background()
+	h := &templateTestHelper{s: s, ctx: ctx, t: t}
+
+	epic := &types.Issue{
+		Title:     "Root",
+		IssueType: types.TypeEpic,
+		Status:    types.StatusOpen,
+		Assignee:  "{{agent}}",
+	}
+	if err := s.CreateIssue(ctx, epic, "test-user"); err != nil {
+		t.Fatalf("Failed to create epic: %v", err)
+	}
+	h.addLabel(epic.ID, BeadsTemplateLabel)
+
+	step := &types.Issue{
+		Title:     "Step",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Assignee:  "{{agent}}",
+	}
+	if err := s.CreateIssue(ctx, step, "test-user"); err != nil {
+		t.Fatalf("Failed to create step: %v", err)
+	}
+	h.addParentChild(step.ID, epic.ID)
+
+	subgraph, err := loadTemplateSubgraph(ctx, s, epic.ID)
+	if err != nil {
+		t.Fatalf("loadTemplateSubgraph failed: %v", err)
+	}
+
+	opts := CloneOptions{
+		Vars:     map[string]string{"agent": "from-var"},
+		Assignee: "from-flag",
+		Actor:    "test-user",
+	}
+	result, err := cloneSubgraph(ctx, s, subgraph, opts)
+	if err != nil {
+		t.Fatalf("cloneSubgraph failed: %v", err)
+	}
+
+	newEpic, err := s.GetIssue(ctx, result.IDMapping[epic.ID])
+	if err != nil {
+		t.Fatalf("Failed to get poured epic: %v", err)
+	}
+	if newEpic.Assignee != "from-flag" {
+		t.Errorf("poured root assignee = %q, want %q (--assignee overrides the template)", newEpic.Assignee, "from-flag")
+	}
+
+	newStep, err := s.GetIssue(ctx, result.IDMapping[step.ID])
+	if err != nil {
+		t.Fatalf("Failed to get poured step: %v", err)
+	}
+	if newStep.Assignee != "from-var" {
+		t.Errorf("poured step assignee = %q, want %q (override applies to the root only)", newStep.Assignee, "from-var")
+	}
+}
+
+// TestExtractAllVariables_CoversSubstitutedFields pins the scan side of
+// GH#5110/GH#5754: pour must demand every variable it is going to resolve. A
+// var appearing only in an assignee, label, metadata value, or await ID used
+// to go undemanded, so a declared-but-unsupplied var silently shipped a
+// literal placeholder onto the poured bead.
+func TestExtractAllVariables_CoversSubstitutedFields(t *testing.T) {
+	t.Parallel()
+	subgraph := &TemplateSubgraph{
+		Issues: []*types.Issue{
+			{
+				Title:    "Step {{in_title}}",
+				Assignee: "{{in_assignee}}",
+				Labels:   []string{"static", "widget:{{in_label}}"},
+				Metadata: json.RawMessage(`{"ado_id":"{{in_metadata}}","nested":{"k":"{{in_nested_metadata}}"}}`),
+				AwaitID:  "{{in_await_id}}",
+			},
+		},
+	}
+
+	got := extractAllVariables(subgraph)
+	for _, want := range []string{
+		"in_title", "in_assignee", "in_label", "in_metadata", "in_nested_metadata", "in_await_id",
+	} {
+		if !slices.Contains(got, want) {
+			t.Errorf("extractAllVariables() = %v, missing %q", got, want)
+		}
 	}
 }
 
@@ -912,6 +1355,152 @@ func TestExtractRequiredVariables_IgnoresUndeclaredVars(t *testing.T) {
 			for _, v := range got {
 				if !wantMap[v] {
 					t.Errorf("extractRequiredVariables() has unexpected var %q, want %v", v, tt.wantRequired)
+				}
+			}
+		})
+	}
+}
+
+// stubConfigReader serves config values from a map for
+// flattenUnregisteredIssueTypes tests.
+type stubConfigReader map[string]string
+
+func (s stubConfigReader) GetConfig(_ context.Context, key string) (string, error) {
+	return s[key], nil
+}
+
+// TestFlattenUnregisteredIssueTypes verifies that pour/cook honor built-in
+// and already-registered custom types but never auto-register: an
+// unregistered type degrades (with a warning) instead of silently growing
+// types.custom — to epic when the issue has children, task otherwise.
+func TestFlattenUnregisteredIssueTypes(t *testing.T) {
+	cfg := stubConfigReader{"types.custom": `["duty"]`}
+	issues := []*types.Issue{
+		{ID: "f.a", IssueType: types.TypeBug},
+		{ID: "f.b", IssueType: types.IssueType("gate")}, // built-in orchestrator type
+		{ID: "f.c", IssueType: types.IssueType("duty")}, // registered custom type
+		{ID: "f.d", IssueType: types.IssueType("typo")}, // unregistered leaf — flattens to task
+		{ID: "f.e", IssueType: ""},
+		{ID: "f.p", IssueType: types.IssueType("typo")}, // unregistered parent — flattens to epic
+	}
+	deps := []*types.Dependency{
+		{IssueID: "f.d", DependsOnID: "f.p", Type: types.DepParentChild},
+	}
+
+	if err := flattenUnregisteredIssueTypes(context.Background(), cfg, issues, deps); err != nil {
+		t.Fatalf("flattenUnregisteredIssueTypes: %v", err)
+	}
+
+	want := []types.IssueType{
+		types.TypeBug,
+		types.IssueType("gate"),
+		types.IssueType("duty"),
+		types.TypeTask,
+		"",
+		types.TypeEpic,
+	}
+	for i, issue := range issues {
+		if issue.IssueType != want[i] {
+			t.Errorf("issues[%d] (%s) IssueType = %q, want %q", i, issue.ID, issue.IssueType, want[i])
+		}
+	}
+}
+
+// TestBuildAttachCloneOpts_VarResolutionMatchesPour pins that `bd mol bond`
+// resolves variables exactly the way pour and wisp do, rather than demanding
+// every handlebar the subgraph mentions.
+//
+// buildAttachCloneOpts used the unfiltered extractAllVariables and applied no
+// defaults, so widening the scanned field set to assignee/labels/metadata
+// (GH#5110, GH#5754) would have widened bond's hard refusal along with it: a
+// proto whose label or metadata carried an undeclared documentation handlebar
+// would newly fail with "missing required variables". It now runs
+// applyVariableDefaults + extractRequiredVariables, matching cmd/bd/pour.go
+// and cmd/bd/wisp.go.
+func TestBuildAttachCloneOpts_VarResolutionMatchesPour(t *testing.T) {
+	t.Parallel()
+
+	mol := &types.Issue{ID: "mol-host", Title: "Host molecule"}
+
+	tests := []struct {
+		name        string
+		issues      []*types.Issue
+		varDefs     map[string]formula.VarDef
+		vars        map[string]string
+		wantErr     string
+		wantVarVals map[string]string
+	}{
+		{
+			name: "undeclared handlebars in the widened fields do not block the bond",
+			issues: []*types.Issue{{
+				Title:    "Review {{component}}",
+				Assignee: "{{reviewer_placeholder}}",
+				Labels:   []string{"owner:{{team_placeholder}}"},
+				Metadata: json.RawMessage(`{"runbook":"see {{runbook_placeholder}}"}`),
+			}},
+			varDefs:     map[string]formula.VarDef{"component": {Required: true}},
+			vars:        map[string]string{"component": "api"},
+			wantVarVals: map[string]string{"component": "api"},
+		},
+		{
+			name: "a declared var that only has a default is filled, not demanded",
+			issues: []*types.Issue{{
+				Title:    "Deploy {{component}} to {{env}}",
+				Assignee: "{{agent}}",
+			}},
+			varDefs: map[string]formula.VarDef{
+				"component": {Required: true},
+				"env":       {Default: formula.StringPtr("prod")},
+				"agent":     {Default: formula.StringPtr("deploy-agent")},
+			},
+			vars: map[string]string{"component": "api"},
+			wantVarVals: map[string]string{
+				"component": "api",
+				"env":       "prod",
+				"agent":     "deploy-agent",
+			},
+		},
+		{
+			name:        "a declared var with no default is still demanded",
+			issues:      []*types.Issue{{Title: "Deploy {{component}}"}},
+			varDefs:     map[string]formula.VarDef{"component": {Required: true}},
+			vars:        map[string]string{},
+			wantErr:     "missing required variables: component",
+			wantVarVals: nil,
+		},
+		{
+			name:        "a legacy template with no VarDefs still requires every var it mentions",
+			issues:      []*types.Issue{{Title: "Deploy {{component}}", Assignee: "{{agent}}"}},
+			varDefs:     nil,
+			vars:        map[string]string{"component": "api"},
+			wantErr:     "missing required variables: agent",
+			wantVarVals: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			subgraph := &TemplateSubgraph{Issues: tt.issues, VarDefs: tt.varDefs}
+			opts, err := buildAttachCloneOpts(subgraph, mol, types.BondTypeSequential, tt.vars, "", "actor", false, false)
+
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error %q, got nil", tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %q, want it to contain %q", err.Error(), tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildAttachCloneOpts: %v", err)
+			}
+			// The defaults have to land in opts.Vars too, not just in the
+			// missing-var check - cloneSubgraphInto substitutes from this map.
+			for name, want := range tt.wantVarVals {
+				if got := opts.Vars[name]; got != want {
+					t.Errorf("opts.Vars[%q] = %q, want %q", name, got, want)
 				}
 			}
 		})

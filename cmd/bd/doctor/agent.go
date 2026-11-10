@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -33,7 +34,20 @@ type agentEnrichment struct {
 type enricher func(dc DoctorCheck) agentEnrichment
 
 // EnrichForAgent converts a DoctorCheck into an AgentDiagnostic with rich context.
-func EnrichForAgent(dc DoctorCheck) AgentDiagnostic {
+//
+// Enrichers hardcode their own remediation commands (many are literally
+// `bd doctor --fix`) and never read the already-sanitized dc.Fix, so the gate
+// is applied to the finished Commands here, after enrichment (GH#4993). An
+// agent is the consumer most likely to execute that list unattended.
+func EnrichForAgent(dc DoctorCheck, gate FixGate) AgentDiagnostic {
+	ad := enrichForAgent(dc)
+	for i, c := range ad.Commands {
+		ad.Commands[i] = SanitizeFixRecommendation(c, gate)
+	}
+	return ad
+}
+
+func enrichForAgent(dc DoctorCheck) AgentDiagnostic {
 	ad := AgentDiagnostic{
 		Name:     dc.Name,
 		Status:   dc.Status,
@@ -88,6 +102,19 @@ func buildGenericExplanation(dc DoctorCheck) string {
 	return s
 }
 
+// AgentEnricherNames returns every check name with a specialized agent
+// enricher, sorted. Enrichers hardcode their own remediation commands, so
+// tests that assert on agent output must cover each one rather than a
+// hand-picked name that may fall through to the generic path (GH#4993).
+func AgentEnricherNames() []string {
+	names := make([]string, 0, len(agentEnrichers))
+	for name := range agentEnrichers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // agentEnrichers maps check names to specialized enrichment functions.
 var agentEnrichers = map[string]enricher{
 	"Installation":                 enrichInstallation,
@@ -117,6 +144,7 @@ var agentEnrichers = map[string]enricher{
 	"Duplicate Issues":             enrichDuplicateIssues,
 	"Test Pollution":               enrichTestPollution,
 	"Orphaned Dependencies":        enrichOrphanedDeps,
+	"Clone-Local FKs":              enrichCloneLocalFKs,
 	"Child-Parent Dependencies":    enrichChildParentDeps,
 	"Classic Artifacts":            enrichClassicArtifacts,
 	"Pending Migrations":           enrichPendingMigrations,
@@ -170,12 +198,25 @@ func enrichDatabase(dc DoctorCheck) agentEnrichment {
 		observed:    dc.Message,
 		sourceFiles: []string{"cmd/bd/doctor/database.go:CheckDatabaseVersion", "internal/storage/dolt/migrations.go"},
 	}
-	if dc.Status == StatusError {
+	switch {
+	case dc.Status == StatusError && dc.Message == "Unable to open database":
+		// 'bd doctor --fix' only reopens an existing store, so a store that
+		// did not open gets the check's own Fix instead: it tells server
+		// configuration from damage and links the preservation-first runbook
+		// (GH#4521).
+		e.severity = "blocking"
+		e.explanation = fmt.Sprintf("The Dolt database did not open: %s. A failed open is often server configuration, not damage, and 'bd doctor --fix' does not rebuild a store the engine refuses to open.", dc.Message)
+		if dc.Fix != "" {
+			e.explanation += " " + dc.Fix
+		}
+		e.expected = "Dolt database opens successfully and contains bd_version metadata matching CLI version"
+		e.commands = []string{"bd dolt status"}
+	case dc.Status == StatusError:
 		e.severity = "blocking"
 		e.explanation = fmt.Sprintf("The Dolt database is broken or missing: %s. Without a working database, no beads commands will function.", dc.Message)
 		e.expected = "Dolt database opens successfully and contains bd_version metadata matching CLI version"
 		e.commands = []string{"bd doctor --fix", "bd dolt status"}
-	} else {
+	default:
 		e.severity = "degraded"
 		e.explanation = fmt.Sprintf("Database version mismatch: %s. The database was last written by a different bd version. Auto-migration should resolve this.", dc.Message)
 		e.expected = "Database bd_version metadata matches CLI version"
@@ -215,7 +256,7 @@ func enrichLargeDatabase(dc DoctorCheck) agentEnrichment {
 		explanation: fmt.Sprintf("The database has accumulated many closed issues: %s. This may cause performance degradation in list/search operations. Pruning is optional and destructive.", dc.Message),
 		observed:    dc.Message,
 		expected:    "Closed issue count below configured threshold",
-		commands:    []string{"bd cleanup --older-than 90"},
+		commands:    []string{"bd prune --older-than 90d"},
 		sourceFiles: []string{"cmd/bd/doctor/database.go:CheckDatabaseSize"},
 	}
 }
@@ -459,6 +500,17 @@ func enrichOrphanedDeps(dc DoctorCheck) agentEnrichment {
 	}
 }
 
+func enrichCloneLocalFKs(dc DoctorCheck) agentEnrichment {
+	return agentEnrichment{
+		severity:    "advisory",
+		explanation: fmt.Sprintf("Severed clone-local FK(s): %s. A hard reset (flatten/compact squash, merge abort, migration error recovery) silently drops foreign keys from dolt_ignored tables onto the tracked plane; enforcement stays off across server restarts and orphaned rows accumulate until the constraint is re-added.", dc.Message),
+		observed:    dc.Message + "\n" + dc.Detail,
+		expected:    "Every FK on clone-local tables (events, wisp_dependencies, wisp_labels, wisp_comments, wisp_events, wisp_child_counters) present and enforcing",
+		commands:    []string{"bd doctor --fix"},
+		sourceFiles: []string{"cmd/bd/doctor/clone_local_fks.go:CheckCloneLocalFKs"},
+	}
+}
+
 func enrichChildParentDeps(dc DoctorCheck) agentEnrichment {
 	return agentEnrichment{
 		severity:    "advisory",
@@ -473,9 +525,9 @@ func enrichChildParentDeps(dc DoctorCheck) agentEnrichment {
 func enrichClassicArtifacts(dc DoctorCheck) agentEnrichment {
 	return agentEnrichment{
 		severity:    "advisory",
-		explanation: fmt.Sprintf("Classic (pre-Dolt) artifacts found: %s. These are leftover files from the SQLite/JSONL era that are no longer needed after Dolt migration.", dc.Message),
+		explanation: fmt.Sprintf("Classic (pre-Dolt) artifacts found: %s. 'bd doctor --check=artifacts --clean' removes only those marked safe to delete; the rest are databases, files a redirect-only .beads holds beyond bd's runtime leftovers (such as what the repository tracks there), or sit in a .beads whose backend doctor cannot establish, and need a human decision before anything is deleted.", dc.Message),
 		observed:    dc.Message + "\n" + dc.Detail,
-		expected:    "No classic artifacts present (JSONL files, SQLite database, cruft directories)",
+		expected:    "No classic artifacts present (leftover SQLite files, cruft directories)",
 		commands:    []string{"bd doctor --check=artifacts", "bd doctor --check=artifacts --clean"},
 		sourceFiles: []string{"cmd/bd/doctor/artifacts.go:CheckClassicArtifacts"},
 	}
@@ -509,7 +561,7 @@ func enrichStaleClosedIssues(dc DoctorCheck) agentEnrichment {
 		explanation: fmt.Sprintf("Stale closed issues: %s. Old closed issues can be pruned to reduce database size and improve query performance.", dc.Message),
 		observed:    dc.Message + "\n" + dc.Detail,
 		expected:    "Closed issues are within acceptable age/count thresholds",
-		commands:    []string{"bd cleanup --older-than 90"},
+		commands:    []string{"bd prune --older-than 90d"},
 		sourceFiles: []string{"cmd/bd/doctor/maintenance.go:CheckStaleClosedIssues"},
 	}
 }

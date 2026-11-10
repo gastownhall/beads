@@ -25,3 +25,21 @@ func TestDoltGCDisablesArchiveCompression(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestDoltGCFullCollectsAllGenerations(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_GC('--full', '--archive-level', '0')")).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := DoltGCFull(context.Background(), db); err != nil {
+		t.Fatalf("DoltGCFull: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}

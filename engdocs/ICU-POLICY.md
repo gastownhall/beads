@@ -55,10 +55,10 @@ Every build path that produces a binary for users must include `-tags gms_pure_g
 | PR CI | `.github/workflows/pr.yml`, `.github/workflows/pr-risk.yml` |
 | Main CI test matrix | `.github/workflows/main.yml` (Linux, macOS, Windows) |
 | macOS release | `.github/workflows/release.yml` |
-| Migration tests | `.github/workflows/migration-test.yml` |
+| Migration tests | `//tests/migration/...` (Bazel, `bazel.yml` `bazel-test`) |
 | Nightly tests | `.github/workflows/nightly.yml` |
-| Cross-version smoke | `.github/workflows/cross-version-smoke.yml` |
-| Regression tests | `.github/workflows/regression.yml` |
+| Cross-version smoke | `//tests/upgrade_smoke/...` (Bazel, `bazel.yml` `bazel-test`) |
+| Regression tests | `//tests/regression:regression_test` (Bazel, `bazel.yml` `bazel-cmd-dolt`) |
 
 ### Canonical pattern: source `.buildflags`
 
@@ -86,7 +86,7 @@ passes the tag inline (`-tags gms_pure_go`).
 
 CI runs `scripts/check-build-tags.sh` on every PR (see the `Check build-tag
 policy` job in `.github/workflows/pr.yml`). It fails if any tracked shell script,
-CI workflow, git hook, or the Makefile contains a
+git hook, or the Makefile contains a
 `go build|test|run|generate|install` invocation that:
 
 - does not carry `-tags=...gms_pure_go`, AND
@@ -95,8 +95,19 @@ CI workflow, git hook, or the Makefile contains a
   value contains `gms_pure_go`, AND
 - is not a third-party tool install (`go install X@version` / `go run X@version`).
 
-This is the source-time companion to `scripts/verify-cgo.sh` (runtime).
-Between the two, an ICU regression cannot reach a release binary.
+The required policy wrapper separately parses GitHub Actions YAML and checks
+the first recognizable direct first-party Go command on each logical line in
+`jobs.*.steps[*].run`. Each such command declares the literal `gms_pure_go` tag
+in its own `-tags` argument;
+sources and variables elsewhere in a workflow do not establish that source
+convention. This is deliberately not shell control-flow analysis: dynamic
+payloads, later compound-command segments, command substitutions, and
+sourced-script internals are outside the check's contract. The pinned-tool
+exception covers the repository's simple `go install path@version` and
+`go run path@version` source forms.
+
+These source-time guards complement `scripts/verify-cgo.sh`, which checks the
+release binary at runtime.
 
 To intentionally opt a file out (e.g. because it tests the ICU path),
 add `# build-tags: allow-bare` within the first five lines of the file.

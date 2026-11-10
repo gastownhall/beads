@@ -2,14 +2,22 @@ package issueops
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 //nolint:gosec // G201: table names are hardcoded constants
-func PromoteFromEphemeralInTx(ctx context.Context, tx *sql.Tx, id string, actor string) error {
+func PromoteFromEphemeralInTx(ctx context.Context, tx DBTX, id string, actor string) error {
+	// Promotion re-inserts the wisp into the issues plane, so it takes the
+	// id's create coordination cell before it reads the wisp, for the reason
+	// moveIssuePersistenceInTx gives: a retaining sweep of the same wisp
+	// either commits first, and the read below finds no wisp, or conflicts
+	// and retries.
+	if err := CoordinateIDCreatesInTx(ctx, tx, []string{id}); err != nil {
+		return err
+	}
 	if !IsActiveWispInTx(ctx, tx, id) {
 		return fmt.Errorf("wisp %s not found", id)
 	}
@@ -22,19 +30,49 @@ func PromoteFromEphemeralInTx(ctx context.Context, tx *sql.Tx, id string, actor 
 		return fmt.Errorf("wisp %s not found", id)
 	}
 
+	// A promoted wisp is fully durable: clear BOTH wisp-plane flags, not just
+	// Ephemeral. A no-history wisp (Ephemeral=false, NoHistory=true) promoted
+	// with NoHistory intact lands in the issues table still flag-marked as
+	// wisp-plane state, and everything that infers the plane from flags —
+	// most damagingly import's table routing — silently re-planes it back
+	// into the (default-export-excluded) wisps table, dropping its relations
+	// on the way (bd-r9uce). Post-promotion the flag has no meaning.
 	issue.Ephemeral = false
+	issue.NoHistory = false
+	// Promotion clears an explicit ephemeral class marker to select normalized
+	// versioned storage (same rule as types.NormalizePersistenceMode); with
+	// both plane flags cleared, a lingering explicit ephemeral class would
+	// fail validation in PrepareIssueForInsert below.
+	if issue.StorageClass == types.StorageClassEphemeral {
+		issue.StorageClass = ""
+	}
 
-	bc, err := NewBatchContext(ctx, tx, storage.BatchCreateOptions{
-		SkipPrefixValidation: true,
-	})
+	// Read the custom-status/type config directly (NewBatchContext needs a
+	// *sql.Tx; promote only uses these two fields of it, and the DBTX forms
+	// let the proxied-server repository share this exact implementation).
+	customStatuses, err := ResolveCustomStatusesDetailedInTx(ctx, tx)
 	if err != nil {
-		return fmt.Errorf("new batch context: %w", err)
+		return fmt.Errorf("failed to get custom statuses: %w", err)
 	}
-	if err := PrepareIssueForInsert(issue, bc.CustomStatuses, bc.CustomTypes); err != nil {
+	customTypes, err := ResolveCustomTypesInTx(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("failed to get custom types: %w", err)
+	}
+	if err := PrepareIssueForInsert(issue, types.CustomStatusNames(customStatuses), customTypes); err != nil {
 		return fmt.Errorf("promote wisp to issues: %w", err)
 	}
-	if _, _, err := InsertIssueIfNew(ctx, tx, "issues", issue, storage.BatchCreateOptions{}); err != nil {
+	isNew, _, err := InsertIssueIfNew(ctx, tx, "issues", issue, storage.BatchCreateOptions{})
+	if err != nil {
 		return fmt.Errorf("promote wisp to issues: %w", err)
+	}
+	// Restore the participation a demotion recorded on the wisps row, while
+	// that row still exists. Only an issues row this promotion inserted takes
+	// it: an existing one (dual presence, below) keeps its own.
+	restored := false
+	if isNew {
+		if restored, err = carryParticipationInTx(ctx, tx, id, false); err != nil {
+			return err
+		}
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -108,5 +146,29 @@ func PromoteFromEphemeralInTx(ctx context.Context, tx *sql.Tx, id string, actor 
 	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return fmt.Errorf("recompute is_blocked after promote for %s: %w", id, err)
 	}
-	return nil
+
+	// The bead keeps its ID across promotion; only its plane changes. Journal
+	// one update carrying the now-durable snapshot, after derived blocked-state
+	// maintenance has settled — and mint its first version: the promoted row
+	// is new durable state on the issues plane (a wisp is never versioned, so
+	// nothing precedes it), minted once after its labels, dependencies and
+	// comments have been copied across. That makes the mint create-shaped
+	// (design §16.2b): the issues row inserted above has no
+	// participation_generation, since a row that began as a wisp never
+	// declares one, and the update-shaped entry would read that NULL as legacy
+	// and skip this mint and every later one. Two exceptions mint
+	// update-shaped. An id the issues plane already held (GH#4455 records such
+	// dual presence): GetIssueInTx read that row, the upsert resolved to it,
+	// and it keeps whatever participation it had, as finishCreateIssueInTx's
+	// mint does for a create that resolved to an existing row. And a row a
+	// demotion took off the issues plane while history was on: its
+	// participation was restored above, so a legacy row stays legacy. Stamping
+	// either would promote a legacy record (R2.3).
+	if err := RecordEventInTx(ctx, tx, EventUpdate, id, actor); err != nil {
+		return err
+	}
+	if isNew && !restored {
+		return RecordVersionForCreateInTx(ctx, tx, id, actor)
+	}
+	return RecordVersionInTx(ctx, tx, id, actor)
 }

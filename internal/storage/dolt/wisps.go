@@ -42,70 +42,6 @@ func scanIssueFromTable(ctx context.Context, db *sql.DB, table, id string) (*typ
 	return issue, nil
 }
 
-// generateIssueIDInTable generates a unique ID, checking for collisions
-// in the specified table. Supports counter mode for non-ephemeral issues.
-//
-//nolint:gosec // G201: table is a hardcoded constant
-func generateIssueIDInTable(ctx context.Context, tx *sql.Tx, table, prefix string, issue *types.Issue, actor string) (string, error) {
-	// Counter mode only applies to the issues table (not wisps).
-	if table == "issues" {
-		counterMode, err := isCounterModeTx(ctx, tx)
-		if err != nil {
-			return "", err
-		}
-		if counterMode {
-			return nextCounterIDTx(ctx, tx, prefix)
-		}
-	}
-
-	baseLength := getAdaptiveIDLengthFromTable(ctx, tx, table, prefix)
-
-	var err error
-	maxLength := 8
-	if baseLength > maxLength {
-		baseLength = maxLength
-	}
-
-	for length := baseLength; length <= maxLength; length++ {
-		for nonce := 0; nonce < 10; nonce++ {
-			candidate := generateHashID(prefix, issue.Title, issue.Description, actor, issue.CreatedAt, length, nonce)
-
-			var count int
-			err = tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = ?`, table), candidate).Scan(&count) //nolint:gosec // G201
-			if err != nil {
-				return "", fmt.Errorf("failed to check for ID collision: %w", err)
-			}
-
-			if count == 0 {
-				return candidate, nil
-			}
-		}
-	}
-
-	return "", fmt.Errorf("failed to generate unique ID after trying lengths %d-%d with 10 nonces each", baseLength, maxLength)
-}
-
-// getAdaptiveIDLengthFromTable returns the adaptive ID length based on table size.
-//
-//nolint:gosec // G201: table is a hardcoded constant
-func getAdaptiveIDLengthFromTable(ctx context.Context, tx *sql.Tx, table, prefix string) int {
-	var count int
-	if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id LIKE ?`, table), prefix+"%").Scan(&count); err != nil {
-		return 4 // Default for wisps (small tables)
-	}
-
-	switch {
-	case count < 100:
-		return 4
-	case count < 1000:
-		return 5
-	case count < 10000:
-		return 6
-	default:
-		return 7
-	}
-}
-
 // insertIssueTxIntoTable is the transaction-context version for inserting into a named table.
 // Delegates to insertIssueIntoTable to ensure all columns are written.
 func insertIssueTxIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *types.Issue) error {
@@ -183,8 +119,9 @@ func (s *DoltStore) getWispLabels(ctx context.Context, issueID string) ([]string
 }
 
 // updateWisp updates fields on a wisp in the wisps table.
-// Delegates SQL work to issueops.UpdateIssueInTx; no Dolt versioning needed
-// since wisps live in dolt_ignored tables.
+// Delegates SQL work to issueops.UpdateIssueInTx. The wisp needs no Dolt
+// versioning since wisps live in dolt_ignored tables; a status change that
+// recomputed a durable dependent commits that row (commitWispTxAndRecheck).
 func (s *DoltStore) updateWisp(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -192,11 +129,17 @@ func (s *DoltStore) updateWisp(ctx context.Context, id string, updates map[strin
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor); err != nil {
+	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	defer clearJournalScope()
+	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+	defer clearRecheckScope()
+
+	result, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor)
+	if err != nil {
 		return err
 	}
 
-	return wrapTransactionError("commit update wisp", tx.Commit())
+	return s.commitWispTxAndRecheck(ctx, "commit update wisp", tx, wispDurable{issues: result.IssueRowsChanged}, fmt.Sprintf("bd: update %s", id))
 }
 
 // updateWispChecked updates a wisp with the optional atomic preconditions of
@@ -208,13 +151,19 @@ func (s *DoltStore) updateWisp(ctx context.Context, id string, updates map[strin
 // deferred Rollback discards the transaction (a true compare-and-swap). Like
 // updateWisp it uses a bare BeginTx/Commit with no withRetryTx (consistent with
 // the rest of the wisp write path — do not add one here); wisps live in
-// dolt_ignored tables, so there is no DOLT_COMMIT.
+// dolt_ignored tables, so the only DOLT_COMMIT is the one updateWisp also
+// makes, for a durable dependent the update recomputed.
 func (s *DoltStore) updateWispChecked(ctx context.Context, id string, updates map[string]interface{}, actor string, opts storage.UpdateIssueOptions) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	defer clearJournalScope()
+	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+	defer clearRecheckScope()
 
 	if opts.ExpectedVersion != nil {
 		if err := issueops.CheckVersionInTx(ctx, tx, id, *opts.ExpectedVersion); err != nil {
@@ -224,16 +173,18 @@ func (s *DoltStore) updateWispChecked(ctx context.Context, id string, updates ma
 	if err := issueops.CheckExpectedFieldsInTx(ctx, tx, id, opts.ExpectedAssignee, opts.ExpectedStatus); err != nil {
 		return err
 	}
-	if _, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor); err != nil {
+	result, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor)
+	if err != nil {
 		return err
 	}
 
-	return wrapTransactionError("commit update wisp", tx.Commit())
+	return s.commitWispTxAndRecheck(ctx, "commit update wisp", tx, wispDurable{issues: result.IssueRowsChanged}, fmt.Sprintf("bd: update %s", id))
 }
 
 // closeWisp closes a wisp in the wisps table.
-// Delegates SQL work to issueops.CloseIssueInTx; no Dolt versioning needed
-// since wisps live in dolt_ignored tables.
+// Delegates SQL work to issueops.CloseIssueInTx. The wisp needs no Dolt
+// versioning since wisps live in dolt_ignored tables; a durable dependent the
+// close unblocked commits its row (commitWispTxAndRecheck).
 func (s *DoltStore) closeWisp(ctx context.Context, id string, reason string, actor string, session string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -241,11 +192,17 @@ func (s *DoltStore) closeWisp(ctx context.Context, id string, reason string, act
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := issueops.CloseIssueInTx(ctx, tx, id, reason, actor, session); err != nil {
+	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	defer clearJournalScope()
+	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+	defer clearRecheckScope()
+
+	result, err := issueops.CloseIssueInTx(ctx, tx, id, reason, actor, session)
+	if err != nil {
 		return err
 	}
 
-	return wrapTransactionError("commit close wisp", tx.Commit())
+	return s.commitWispTxAndRecheck(ctx, "commit close wisp", tx, wispDurable{issues: result.IssueRowsChanged}, fmt.Sprintf("bd: close %s", id))
 }
 
 // closeWispChecked closes a wisp with the is_blocked guard, mirroring closeWisp
@@ -253,8 +210,9 @@ func (s *DoltStore) closeWisp(ctx context.Context, id string, reason string, act
 // unless opts.Force is set — and, when opts.ExpectedVersion is non-nil, with
 // storage.ErrVersionMismatch when the row's RowVersion no longer matches (an
 // orthogonal CAS that Force does not bypass). The checks and the close share the
-// same transaction; wisps live in dolt_ignored tables, so there is no
-// DOLT_COMMIT. On any rejection the deferred Rollback discards the transaction —
+// same transaction; wisps live in dolt_ignored tables, so the only DOLT_COMMIT
+// is the one closeWisp also makes, for a durable dependent the close
+// unblocked. On any rejection the deferred Rollback discards the transaction —
 // no close or event is written.
 //
 // Unlike the permanent path, the wisp close uses a bare BeginTx/Commit with no
@@ -271,18 +229,25 @@ func (s *DoltStore) closeWispChecked(ctx context.Context, id string, actor strin
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	defer clearJournalScope()
+	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+	defer clearRecheckScope()
+
 	res, err := issueops.CloseIssueCheckedInTx(ctx, tx, id, opts.Reason, actor, opts.Session, opts.Force, opts.ExpectedVersion)
 	if err != nil {
 		return storage.CloseIssueResult{}, err
 	}
 
-	if err := wrapTransactionError("commit close wisp", tx.Commit()); err != nil {
+	if err := s.commitWispTxAndRecheck(ctx, "commit close wisp", tx, wispDurable{issues: res.IssueRowsChanged}, fmt.Sprintf("bd: close %s", id)); err != nil {
 		return storage.CloseIssueResult{}, err
 	}
-	return storage.CloseIssueResult{Unchanged: res.AlreadyClosed}, nil
+	return storage.CloseIssueResult{Unchanged: res.AlreadyClosed, OpenChildren: res.OpenChildren}, nil
 }
 
-// deleteWisp permanently removes a wisp and its related data.
+// deleteWisp permanently removes a wisp and its related data. The wisp needs
+// no Dolt versioning, but the durable edges that pointed at it and a durable
+// dependent its delete unblocked commit their rows (commitWispTxAndRecheck).
 func (s *DoltStore) deleteWisp(ctx context.Context, id string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -290,9 +255,22 @@ func (s *DoltStore) deleteWisp(ctx context.Context, id string) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	defer clearJournalScope()
+	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+	defer clearRecheckScope()
+
 	affectedIssues, affectedWisps, aerr := issueops.AffectedByDeletionInTx(ctx, tx, nil, []string{id})
 	if aerr != nil {
 		return fmt.Errorf("affected by wisp delete for %s: %w", id, aerr)
+	}
+
+	// Edges are journaled before the row goes, while their source snapshots can
+	// still be read. An active wisp is a bead like any other, so its delete is
+	// a journalled mutation, not silent cleanup.
+	// The wisp delete surface carries no actor, so these record none.
+	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, tx, []string{id}, ""); err != nil {
+		return fmt.Errorf("journal dependency removals for wisp %s: %w", id, err)
 	}
 
 	result, err := tx.ExecContext(ctx, "DELETE FROM wisps WHERE id = ?", id)
@@ -307,16 +285,29 @@ func (s *DoltStore) deleteWisp(ctx context.Context, id string) error {
 	if rows == 0 {
 		return fmt.Errorf("wisp not found: %s", id)
 	}
-
-	if err := issueops.DeleteWispFromDependenciesInTx(ctx, tx, id); err != nil {
+	// The rows==0 return above keeps this actually-deleted-only. The wisp
+	// delete surface carries no actor, so the row records none.
+	if err := issueops.RecordDeleteInTx(ctx, tx, id, ""); err != nil {
 		return err
 	}
 
-	if err := issueops.RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
-		return fmt.Errorf("recompute is_blocked after wisp delete for %s: %w", id, err)
+	edgesDeleted, err := issueops.DeleteWispFromDependenciesInTx(ctx, tx, id)
+	if err != nil {
+		return err
 	}
 
-	return wrapTransactionError("commit delete wisp", tx.Commit())
+	if err := issueops.DeleteWispAuxRowsInTx(ctx, tx, []string{id}); err != nil {
+		return fmt.Errorf("delete wisp aux rows for %s: %w", id, err)
+	}
+
+	recompute, err := issueops.RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
+	if err != nil {
+		return fmt.Errorf("recompute is_blocked after wisp delete for %s: %w", id, err)
+	}
+	issueops.NoteDeleteBlockedRecheck(tx, []string{id}, "", affectedIssues, affectedWisps)
+
+	return s.commitWispTxAndRecheck(ctx, "commit delete wisp", tx,
+		wispDurable{issues: recompute.IssueRowsChanged, dependencies: edgesDeleted}, fmt.Sprintf("bd: delete %s", id))
 }
 
 // deleteWispBatch permanently removes multiple wisps using one transaction per
@@ -354,7 +345,7 @@ func (s *DoltStore) deleteWispBatch(ctx context.Context, ids []string) (int, err
 }
 
 // deleteWispBatchTx deletes one batch of wisps inside its own transaction.
-// Keeping each transaction to ≤200 wisps (6 DELETE statements) ensures it
+// Keeping each transaction to ≤200 wisps (8 DELETE statements) ensures it
 // completes well within Dolt's 10 s write timeout.
 func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -363,9 +354,30 @@ func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, e
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	defer clearJournalScope()
+	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+	defer clearRecheckScope()
+
 	affectedIssues, affectedWisps, aerr := issueops.AffectedByDeletionInTx(ctx, tx, nil, ids)
 	if aerr != nil {
 		return 0, fmt.Errorf("affected by batched wisp delete: %w", aerr)
+	}
+
+	// Resolve WHICH wisps this batch actually removes before the DELETE runs:
+	// afterwards they are gone, and RowsAffected reports a count, not a set.
+	// GC hands this path ids it scanned earlier, so an already-collected wisp is
+	// a routine case, and a phantom delete record would tell a consumer to drop
+	// a bead this transaction never touched.
+	deletedIDs, err := issueops.ExistingIssueIDsInTableInTx(ctx, tx, "wisps", ids)
+	if err != nil {
+		return 0, fmt.Errorf("resolve existing wisps for batch delete: %w", err)
+	}
+	// Edges are journaled before the rows go, while their source snapshots can
+	// still be read.
+	// The batched wisp delete surface carries no actor, so these record none.
+	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, tx, deletedIDs, ""); err != nil {
+		return 0, fmt.Errorf("journal dependency removals for batched wisp delete: %w", err)
 	}
 
 	inClause, args := doltBuildSQLInClause(ids)
@@ -379,16 +391,32 @@ func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, e
 	}
 	rowsAffected, _ := result.RowsAffected()
 
-	if err := issueops.DeleteWispsFromDependenciesInTx(ctx, tx, ids); err != nil {
+	// The batched wisp delete surface carries no actor, so the rows record none.
+	for _, id := range deletedIDs {
+		if err := issueops.RecordDeleteInTx(ctx, tx, id, ""); err != nil {
+			return 0, err
+		}
+	}
+
+	edgesDeleted, err := issueops.DeleteWispsFromDependenciesInTx(ctx, tx, ids)
+	if err != nil {
 		return 0, err
 	}
 
-	if err := issueops.RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
-		return 0, fmt.Errorf("recompute is_blocked after batched wisp delete: %w", err)
+	if err := issueops.DeleteWispAuxRowsInTx(ctx, tx, ids); err != nil {
+		return 0, fmt.Errorf("delete wisp aux rows: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("failed to commit batch wisp delete: %w", err)
+	recompute, err := issueops.RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
+	if err != nil {
+		return 0, fmt.Errorf("recompute is_blocked after batched wisp delete: %w", err)
+	}
+	issueops.NoteDeleteBlockedRecheck(tx, ids, "", affectedIssues, affectedWisps)
+
+	if err := s.commitWispTxAndRecheck(ctx, "commit batch wisp delete", tx,
+		wispDurable{issues: recompute.IssueRowsChanged, dependencies: edgesDeleted},
+		fmt.Sprintf("bd: delete %d wisp(s)", len(deletedIDs))); err != nil {
+		return 0, err
 	}
 
 	return int(rowsAffected), nil
@@ -404,11 +432,14 @@ func (s *DoltStore) claimWisp(ctx context.Context, id string, actor string) erro
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	defer clearJournalScope()
+
 	if _, err := issueops.ClaimIssueInTx(ctx, tx, id, actor); err != nil {
 		return err
 	}
 
-	return wrapTransactionError("commit claim wisp", tx.Commit())
+	return s.commitSQLTx(ctx, "commit claim wisp", tx)
 }
 
 // ListWisps returns ephemeral issues matching the filter.
@@ -590,20 +621,29 @@ func (s *DoltStore) addWispDependency(ctx context.Context, dep *types.Dependency
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	clearJournalScope := s.scopeEventsJournalTransaction(tx)
+	defer clearJournalScope()
+
 	kind := issueops.ClassifyDepTarget(ctx, tx, dep, isCrossPrefix)
 	// Wisp source/event tables are dolt_ignored (committed with the SQL tx, not
-	// via selective doltAddAndCommit), so the event-written flag is not needed here.
-	if _, err := issueops.AddDependencyInTx(ctx, tx, dep, actor, issueops.AddDependencyOpts{
+	// via selective doltAddAndCommit), so the event-written flag is not needed
+	// here; only a durable is_blocked flip needs a Dolt commit.
+	written, err := issueops.AddDependencyInTxWithResult(ctx, tx, dep, actor, issueops.AddDependencyOpts{
 		SourceTable:   "wisps",
 		WriteTable:    "wisp_dependencies",
 		IsCrossPrefix: isCrossPrefix,
 		TargetKind:    &kind,
 		EmitEvent:     emitEvent,
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
 
-	return wrapTransactionError("commit add wisp dependency", tx.Commit())
+	if err := s.commitSQLTx(ctx, "commit add wisp dependency", tx); err != nil {
+		return err
+	}
+	s.commitWispDurable(ctx, wispDurable{issues: written.Blocked.IssueRowsChanged}, "dependency: add "+string(dep.Type)+" "+dep.IssueID+" -> "+dep.DependsOnID)
+	return nil
 }
 
 // getWispDependencies retrieves issues that a wisp depends on.

@@ -3,7 +3,6 @@ package dolt
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"log"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -19,22 +18,26 @@ func (s *DoltStore) SetConfig(ctx context.Context, key, value string) error {
 			return err
 		}
 		// Sync normalized tables when config keys change
-		switch key {
-		case "status.custom":
-			if err := issueops.SyncCustomStatusesTable(ctx, tx, value); err != nil {
-				return fmt.Errorf("syncing custom_statuses table: %w", err)
-			}
-		case "types.custom":
-			if err := issueops.SyncCustomTypesTable(ctx, tx, value); err != nil {
-				return fmt.Errorf("syncing custom_types table: %w", err)
-			}
-		}
-		return nil
+		_, err := issueops.SyncConfigTables(ctx, tx, key, value)
+		return err
 	}); err != nil {
 		return err
 	}
 
 	// Invalidate caches for keys that affect cached data
+	s.invalidateConfigCaches(key)
+
+	return nil
+}
+
+// invalidateConfigCaches drops the store-level caches derived from a config
+// key. Every path that writes config — store-level SetConfig and
+// doltTransaction.SetConfig alike — must call this, or a long-lived process
+// (server/daemon) keeps serving the pre-write set from GetCustomTypes /
+// GetCustomStatuses / GetInfraTypes until restart. Invalidating for a
+// transaction that later rolls back is harmless: the lazy reload just
+// re-reads the committed state.
+func (s *DoltStore) invalidateConfigCaches(key string) {
 	s.cacheMu.Lock()
 	switch key {
 	case "status.custom":
@@ -49,8 +52,6 @@ func (s *DoltStore) SetConfig(ctx context.Context, key, value string) error {
 		s.infraTypeCache = nil
 	}
 	s.cacheMu.Unlock()
-
-	return nil
 }
 
 // GetConfig retrieves a configuration value
@@ -70,6 +71,23 @@ func (s *DoltStore) GetAllConfig(ctx context.Context) (map[string]string, error)
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		result, err = issueops.GetAllConfigInTx(ctx, tx)
+		return err
+	})
+	return result, err
+}
+
+// Callers discover the capability below by type assertion, which degrades
+// silently to a full scan when the method set drifts. This pin turns that
+// drift into a compile error instead.
+var _ domain.ConfigPrefixReader = (*DoltStore)(nil)
+
+// GetConfigByPrefix retrieves the configuration values whose key starts with
+// prefix, filtered in SQL (the domain.ConfigPrefixReader optional fast path).
+func (s *DoltStore) GetConfigByPrefix(ctx context.Context, prefix string) (map[string]string, error) {
+	var result map[string]string
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetConfigByPrefixInTx(ctx, tx, prefix)
 		return err
 	})
 	return result, err

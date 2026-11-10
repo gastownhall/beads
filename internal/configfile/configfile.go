@@ -11,13 +11,14 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage/backendnames"
 )
 
 const ConfigFileName = "metadata.json"
 
 type Config struct {
 	Database string `json:"database"`
-	Backend  string `json:"backend,omitempty"` // Storage backend: "dolt" (default); legacy "postgres"/"mysql"/"sqlite" values are rejection tombstones. Read via GetBackend().
+	Backend  string `json:"backend,omitempty"` // Storage backend: "dolt" (default), a registered extension, or a legacy rejection tombstone. Read via GetBackend().
 
 	// Deletions configuration
 	DeletionsRetentionDays int `json:"deletions_retention_days,omitempty"` // 0 means use default (3 days)
@@ -34,6 +35,7 @@ type Config struct {
 	DoltServerTLS      bool   `json:"dolt_server_tls,omitempty"`      // Enable TLS for server connections (required for Hosted Dolt)
 	DoltDataDir        string `json:"dolt_data_dir,omitempty"`        // Custom dolt data directory (absolute path; default: .beads/dolt)
 	DoltRemotesAPIPort int    `json:"dolt_remotesapi_port,omitempty"` // Dolt remotesapi port for federation (default: 8080)
+	DoltTeamServer     bool   `json:"dolt_team_server,omitempty"`     // Schema is managed by beads-team-server (bts); bd never runs migrations (proxied-server mode only)
 	// Note: Password should be set via BEADS_DOLT_PASSWORD env var for security
 
 	// Deprecated backend fields are retained only to round-trip metadata written by
@@ -77,13 +79,39 @@ func ConfigPath(beadsDir string) string {
 	return filepath.Join(beadsDir, ConfigFileName)
 }
 
+// LegacyConfigFileName is the pre-metadata.json name of a workspace's
+// metadata file. Load migrates it into metadata.json; LoadForDiscovery reads
+// it in place.
+const LegacyConfigFileName = "config.json"
+
+// MetadataFilePath returns the path of the file beadsDir's metadata is read
+// from: the legacy config.json when metadata.json is absent and config.json
+// exists (the file LoadForDiscovery reads, and Load would migrate), and
+// ConfigPath otherwise. Messages that name the file holding a setting use it,
+// so a refusal made before any migration names the file the user must edit.
+// It only stats; an empty beadsDir returns ConfigPath("").
+func MetadataFilePath(beadsDir string) string {
+	path := ConfigPath(beadsDir)
+	if beadsDir == "" {
+		return path
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		return path
+	}
+	legacyPath := filepath.Join(beadsDir, LegacyConfigFileName)
+	if _, err := os.Stat(legacyPath); err == nil {
+		return legacyPath
+	}
+	return path
+}
+
 func Load(beadsDir string) (*Config, error) {
 	configPath := ConfigPath(beadsDir)
 
 	data, err := os.ReadFile(configPath) // #nosec G304 - controlled path from config
 	if os.IsNotExist(err) {
 		// Try legacy config.json location (migration path)
-		legacyPath := filepath.Join(beadsDir, "config.json")
+		legacyPath := filepath.Join(beadsDir, LegacyConfigFileName)
 		data, err = os.ReadFile(legacyPath) // #nosec G304 - controlled path from config
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -117,6 +145,35 @@ func Load(beadsDir string) (*Config, error) {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 
+	return &cfg, nil
+}
+
+// LoadForDiscovery reads workspace metadata without migrating or rewriting it.
+//
+// Store admission uses this only to classify a workspace before a command can
+// open storage. In particular, legacy config.json remains in place so a failed
+// admission cannot turn a recoverable old workspace into a partially migrated
+// one. Unknown JSON fields remain tolerated here because callers use the
+// result only to decide whether to issue a conservative refusal; normal store
+// selection keeps its existing validation.
+func LoadForDiscovery(beadsDir string) (*Config, error) {
+	data, err := os.ReadFile(ConfigPath(beadsDir)) // #nosec G304 -- beadsDir is caller-selected workspace state
+	if os.IsNotExist(err) {
+		data, err = os.ReadFile(filepath.Join(beadsDir, LegacyConfigFileName)) // #nosec G304 -- legacy workspace state
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading legacy config: %w", err)
+		}
+	} else if err != nil {
+		return nil, fmt.Errorf("reading config: %w", err)
+	}
+
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
 	return &cfg, nil
 }
 
@@ -248,19 +305,21 @@ func (c *Config) GetCapabilities() BackendCapabilities {
 	return CapabilitiesForBackend(backend)
 }
 
-// IsSupportedBackend reports whether backend selects an implementation shipped by
-// beads. The empty value is the legacy/default spelling of Dolt.
+// IsSupportedBackend reports whether backend selects Dolt or a backend
+// registered by this binary. The empty value is the legacy/default spelling
+// of Dolt. OSS registers no alternate backends.
 func IsSupportedBackend(backend string) bool {
-	return backend == "" || backend == BackendDolt
+	return backend == "" || backend == BackendDolt || backendnames.Has(backend)
 }
 
 // GetBackend returns the configured storage backend. PostgreSQL, MySQL, and
 // SQLite remain recognizable here so workspaces created by earlier builds can
 // fail loudly at store selection instead of silently falling back to an empty
 // Dolt database.
-// Empty and explicit Dolt retain the established Dolt behavior. GetBackend keeps
-// the historical Dolt fallback for unknown values, so storage-selection callers
-// must check IsSupportedBackend(c.Backend) before opening or creating storage.
+// Registered extension names are returned unchanged. Empty and explicit Dolt
+// retain the established Dolt behavior. GetBackend keeps the historical Dolt
+// fallback for unknown values, so storage-selection callers must check
+// IsSupportedBackend(c.Backend) before opening or creating storage.
 func (c *Config) GetBackend() string {
 	if c != nil {
 		switch c.Backend {
@@ -270,6 +329,9 @@ func (c *Config) GetBackend() string {
 			return BackendMySQL
 		case BackendSQLite:
 			return BackendSQLite
+		}
+		if backendnames.Has(c.Backend) {
+			return c.Backend
 		}
 	}
 	return BackendDolt
@@ -306,8 +368,22 @@ const (
 // Checks (in priority order):
 //  1. BEADS_DOLT_SERVER_MODE=1 env var
 //  2. BEADS_DOLT_SHARED_SERVER env var (shared-server implies server mode)
-//  3. dolt_mode field in metadata.json (project-local, explicit)
-//  4. dolt.mode in config.yaml (user-global fallback, only when metadata.json has no mode)
+//  3. BEADS_DOLT_SERVER_HOST env var set to a non-localhost value (GH#3545):
+//     an operator who configures a remote host but forgets the mode flag
+//     would otherwise silently fall through to embedded storage. Setting
+//     the env var to an explicit localhost value (or empty string) is
+//     treated as a deliberate suppression of host-based inference, not
+//     merely "no signal" — it also suppresses the struct/config.yaml host
+//     inference below.
+//  4. dolt_mode field in metadata.json (project-local, explicit) — always
+//     wins over any persisted or configured host, since it is the
+//     operator's explicit statement of intent.
+//  5. Non-localhost DoltServerHost persisted in metadata.json (GH#3545),
+//     when no explicit dolt_mode is set and env didn't suppress inference.
+//  6. dolt.mode in config.yaml (user-global fallback, only when
+//     metadata.json has no mode)
+//  7. Non-localhost dolt.host in config.yaml (GH#3545), gated the same way
+//     as (5) — a configured host must mean server mode.
 //
 // Runtime env vars take precedence over persisted metadata.json to prevent
 // stale dolt_mode=embedded from overriding active server intent (GH#2949).
@@ -323,15 +399,128 @@ func (c *Config) IsDoltServerMode() bool {
 	if v := os.Getenv("BEADS_DOLT_SHARED_SERVER"); v == "1" || strings.EqualFold(v, "true") {
 		return true
 	}
-	if c.DoltMode != "" {
-		// metadata.json has an explicit mode — respect it over config.yaml
-		return strings.ToLower(c.DoltMode) == DoltModeServer
-	}
-	// Fall back to config.yaml dolt.mode setting (no metadata.json mode set)
-	if mode := config.GetYamlConfig("dolt.mode"); strings.EqualFold(mode, "server") {
+	// Host-based inference (GH#3545): a configured non-localhost host
+	// implies server mode. Centralized in HostImpliesServerMode so the
+	// storage-mode resolver (here) and the lifecycle resolver
+	// (doltserver.ResolveServerMode) cannot disagree.
+	if c.HostImpliesServerMode() {
 		return true
 	}
+	if c.DoltMode != "" {
+		// metadata.json has an explicit mode — respect it over any
+		// persisted host and over config.yaml.
+		return strings.ToLower(c.DoltMode) == DoltModeServer
+	}
+	// NOTE: deliberately no PortImpliesServerMode call here. This resolver
+	// selects the storage backend for every data command, so honoring a bare
+	// BEADS_DOLT_SERVER_PORT here has a materially wider blast radius than the
+	// lifecycle-only question doltserver.resolveServerMode's check 2c answers.
+	// The two therefore still disagree for an unset/embedded dolt_mode plus a
+	// bare port env var and no other server signal. That gap is real, narrow
+	// and tracked: GH#6181 owns whether this resolver should extend to the
+	// port signal, after the call-site audit such a change needs.
+	// Fall back to config.yaml dolt.mode setting (no metadata.json mode set)
+	return strings.EqualFold(config.GetYamlConfig("dolt.mode"), "server")
+}
+
+// HostImpliesServerMode evaluates host-based server-mode inference
+// (GH#3545) against the EFFECTIVE host precedence chain (env >
+// metadata.json > config.yaml, mirroring GetDoltServerHost), so that a
+// lower-priority host that GetDoltServerHost would ignore can never
+// drive the inference. Rules, in order:
+//
+//   - Proxied-server workspaces are exempt: IsDoltServerMode and
+//     IsDoltProxiedServerMode are mutually exclusive (the
+//     proxied-to-server migration depends on it).
+//   - A non-empty BEADS_DOLT_SERVER_HOST decides alone: a non-localhost
+//     value implies server mode even over explicit dolt_mode=embedded
+//     (runtime env beats stale metadata, GH#2949); an explicit
+//     localhost value suppresses inference from lower-priority hosts —
+//     matching GetDoltServerHost, which then dials locally. An EMPTY
+//     env value is ignored (behaves as unset), again matching
+//     GetDoltServerHost: treating empty as suppression would select
+//     embedded storage while the effective dial host stays remote —
+//     exactly the split-storage failure this inference fixes.
+//   - An explicit metadata.json dolt_mode disables inference from
+//     persisted/configured hosts.
+//   - A metadata.json dolt_server_host, when set, decides alone (a
+//     lower-priority config.yaml dolt.host is not consulted, matching
+//     GetDoltServerHost precedence).
+//   - An explicit config.yaml dolt.mode disables inference from the
+//     config.yaml dolt.host.
+//
+// "Localhost" here is IsLocalHostString, the machine-locality question, not
+// the ownership one (BdRunsServerAt): the IPv6 loopback in any spelling is
+// this machine and infers nothing, while another loopback address such as
+// 127.0.0.2 infers server mode, as a host on another machine does.
+func (c *Config) HostImpliesServerMode() bool {
+	if strings.EqualFold(c.DoltMode, DoltModeProxiedServer) {
+		return false
+	}
+	if h := os.Getenv("BEADS_DOLT_SERVER_HOST"); h != "" {
+		return !IsLocalHostString(h)
+	}
+	if c.DoltMode != "" {
+		return false
+	}
+	if c.DoltServerHost != "" {
+		return !IsLocalHostString(c.DoltServerHost)
+	}
+	if config.GetYamlConfig("dolt.mode") != "" {
+		return false
+	}
+	if h := config.GetYamlConfig("dolt.host"); h != "" {
+		return !IsLocalHostString(h)
+	}
 	return false
+}
+
+// PortImpliesServerMode evaluates port-based server-mode inference: an
+// explicitly named server port means an orchestrator is pointing this
+// workspace at a server address it manages, so beads cannot own that
+// server's lifecycle. Rules, in order, mirroring HostImpliesServerMode:
+//
+//   - Proxied-server workspaces are exempt. A proxied workspace reaches its
+//     server through the proxy, so an ambient port does not describe its
+//     lifecycle and must not reclassify it.
+//   - Otherwise the env vars decide, BEADS_DOLT_SERVER_PORT first and the
+//     legacy BEADS_DOLT_PORT second, matching GetDoltServerPort's own
+//     precedence. A live env var in the current process outranks an explicit
+//     dolt_mode, exactly as the host env var does in HostImpliesServerMode --
+//     the env check there also runs before the DoltMode suppression and can
+//     return first (GH#2949: runtime env beats stale persisted metadata).
+//
+// There is deliberately no persisted-port tier here. HostImpliesServerMode
+// suppresses its weaker persisted/config.yaml host signals on an explicit
+// DoltMode; the port equivalent, metadata.json's dolt_server_port, is read by
+// a later check in doltserver.resolveServerMode that an explicit
+// dolt_mode=embedded already returns before. There is nothing for a
+// downstream guard to protect.
+//
+// NOTE: IsDoltServerMode does NOT consult this predicate. See the note there.
+func (c *Config) PortImpliesServerMode() bool {
+	if strings.EqualFold(c.DoltMode, DoltModeProxiedServer) {
+		return false
+	}
+	return doltServerPortFromEnv() > 0
+}
+
+// doltServerPortFromEnv returns the server port named by
+// BEADS_DOLT_SERVER_PORT or, failing that, the legacy BEADS_DOLT_PORT --
+// mirroring Config.GetDoltServerPort's env precedence without needing a
+// loaded Config. Returns 0 when neither names a valid positive integer.
+func doltServerPortFromEnv() int {
+	if p := os.Getenv("BEADS_DOLT_SERVER_PORT"); p != "" {
+		if port, err := strconv.Atoi(p); err == nil && port > 0 {
+			return port
+		}
+	}
+	if p := os.Getenv("BEADS_DOLT_PORT"); p != "" {
+		if port, err := strconv.Atoi(p); err == nil && port > 0 {
+			return port
+		}
+	}
+	return 0
 }
 
 func (c *Config) IsDoltProxiedServerMode() bool {
@@ -341,9 +530,23 @@ func (c *Config) IsDoltProxiedServerMode() bool {
 	return strings.ToLower(c.DoltMode) == DoltModeProxiedServer
 }
 
+// IsTeamServerManaged reports whether the database's schema and identity are
+// owned by beads-team-server (bts). Only meaningful in proxied-server mode.
+func (c *Config) IsTeamServerManaged() bool {
+	return c.IsDoltProxiedServerMode() && c.DoltTeamServer
+}
+
 // GetDoltMode returns the Dolt connection mode, defaulting to server.
+// GetDoltMode returns the EFFECTIVE mode: when no mode is persisted but
+// host-based inference (GH#3545) selects server mode, it reports
+// "server" so effective-context consumers (bd context, integrations)
+// agree with IsDoltServerMode instead of advertising an embedded mode
+// next to a remote server endpoint.
 func (c *Config) GetDoltMode() string {
 	if c.DoltMode == "" {
+		if c.HostImpliesServerMode() {
+			return DoltModeServer
+		}
 		return DoltModeEmbedded
 	}
 	return c.DoltMode
@@ -470,14 +673,18 @@ func (c *Config) GetDoltServerPassword() string {
 // doltserver port file says 3307 (local), causing the credentials file lookup
 // to use the wrong [host:port] section.
 func (c *Config) GetDoltServerPasswordForPort(port int) string {
+	return ServerPasswordFor(c.GetDoltServerHost(), port)
+}
+
+// ServerPasswordFor is the password for the Dolt server at host and port:
+// BEADS_DOLT_PASSWORD when set, else the credentials-file entry for exactly
+// [host:port] (either spelling of an IPv6 host, see CredentialsSectionKeys),
+// else "". doltserver.Endpoint.Password calls it once the port is final.
+func ServerPasswordFor(host string, port int) string {
 	if p := os.Getenv("BEADS_DOLT_PASSWORD"); p != "" {
 		return p
 	}
-	host := c.GetDoltServerHost()
-	if p := LookupCredentialsPassword(host, port); p != "" {
-		return p
-	}
-	return ""
+	return LookupCredentialsPassword(host, port)
 }
 
 // GetDoltServerTLS returns whether TLS is enabled for server connections.
@@ -494,10 +701,15 @@ func (c *Config) GetDoltServerTLS() bool {
 // When set, dolt stores its data in this directory instead of .beads/dolt/.
 // This is useful on WSL where the project lives on a slow NTFS mount (9P)
 // but dolt data can be placed on native ext4 for significantly better I/O.
-// Checks BEADS_DOLT_DATA_DIR env var first, then config.
+// Checks BEADS_DOLT_DATA_DIR env var first, then config. Nil-safe, like
+// GetBackend: rejection paths resolve the data dir for workspaces whose config
+// may not have loaded, and the env override still applies to those.
 func (c *Config) GetDoltDataDir() string {
 	if d := os.Getenv("BEADS_DOLT_DATA_DIR"); d != "" {
 		return d
+	}
+	if c == nil {
+		return ""
 	}
 	return c.DoltDataDir
 }

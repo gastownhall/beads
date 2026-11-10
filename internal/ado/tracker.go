@@ -11,13 +11,16 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/endpointtrust"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// Compile-time interface check.
-var _ tracker.IssueTracker = (*Tracker)(nil)
+// Compile-time interface checks.
+var (
+	_ tracker.IssueTracker             = (*Tracker)(nil)
+	_ tracker.SinceGranularityProvider = (*Tracker)(nil)
+)
 
 func init() {
 	tracker.Register("ado", func() tracker.IssueTracker {
@@ -37,7 +40,7 @@ var adoShorthandPattern = regexp.MustCompile(`^ado:([1-9]\d*)$`)
 // ADO and the local beads database.
 type Tracker struct {
 	client   *Client
-	store    storage.Storage
+	store    tracker.Store
 	mapper   tracker.FieldMapper
 	baseURL  string // Resolved base URL for external ref matching
 	org      string
@@ -75,8 +78,13 @@ func (t *Tracker) ConfigPrefix() string { return "ado" }
 
 // Init initializes the tracker with configuration from the beads config store.
 // No network calls are made during initialization.
-func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
+func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 	t.store = store
+
+	customURL := t.getConfig(ctx, "ado.url", "AZURE_DEVOPS_URL")
+	if err := endpointtrust.Check(endpointtrust.WorkspaceKey(), "ado", customURL, endpointtrust.PrivateMatch("ado.url", "AZURE_DEVOPS_URL", customURL)); err != nil {
+		return err
+	}
 
 	pat := t.getConfig(ctx, "ado.pat", "AZURE_DEVOPS_PAT")
 	if pat == "" {
@@ -84,8 +92,6 @@ func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
 	}
 
 	t.org = t.getConfig(ctx, "ado.org", "AZURE_DEVOPS_ORG")
-	customURL := t.getConfig(ctx, "ado.url", "AZURE_DEVOPS_URL")
-
 	if t.org == "" && customURL == "" {
 		return fmt.Errorf("Azure DevOps organization not configured (set ado.org or AZURE_DEVOPS_ORG)")
 	}
@@ -158,6 +164,11 @@ func (t *Tracker) ADOClient() *Client { return t.client }
 // SetFilters configures pull filters for WIQL queries.
 // When set, FetchIssues will only return work items matching these filters.
 func (t *Tracker) SetFilters(f *PullFilters) { t.filters = f }
+
+// SinceGranularity reports that FetchIssues matches Since to the UTC day:
+// its WIQL compares System.ChangedDate with a date-only literal
+// (formatWIQLDate).
+func (t *Tracker) SinceGranularity() time.Duration { return 24 * time.Hour }
 
 // FetchIssues retrieves work items from Azure DevOps. If opts.Since is set,
 // only work items changed after that time are fetched (incremental sync);

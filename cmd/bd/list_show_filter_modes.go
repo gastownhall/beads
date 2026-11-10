@@ -1,0 +1,326 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/uow"
+	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/internal/workapi"
+)
+
+// The modes of `bd list` and `bd show` that consume the FILTER ITSELF rather
+// than the page a query answers with, gathered here because that is exactly
+// what the guard on the rest of cmd/bd is a statement about.
+//
+// A forbidigo rule in .golangci.yml makes NAMING types.IssueFilter or
+// types.WorkFilter a lint failure anywhere under cmd/bd, and this file is one
+// of the exceptions the config lists by name with its reason. So no file
+// implementing `bd list` or `bd show` can WRITE a filter — it takes one back
+// from a workapi builder instead — and that keeps holding for a file those
+// commands are split or renamed into tomorrow, which is why the rule is deny
+// by default rather than a list of filenames. What it does NOT establish is
+// that every filter over there came from a builder: an inferred assignment
+// names no type, so a helper in this file could hand one back.
+//
+// What lives here is everything that genuinely needs the filter as a value:
+// the recursive --parent tree walk, which re-parents a copy of it at every
+// level; the --watch poll loop, which re-runs the same filter after every poll
+// interval; the proxied route's builder call, which has to name the type to
+// hand the filter back; and --current, which resolves an id from a deliberately BARE filter
+// that must not pick up the default listing's exclusions.
+//
+// The list is SHORTER by everything it no longer holds. `bd list`'s page is
+// issueops.Reader.List's on both routes, and the two filter-consuming modes
+// above are what is left over — so this file is now the exception's whole
+// remaining reason rather than one of several. It did not leave the config's
+// exception list with this commit, and the count in issueops/reader.go's claim
+// is unchanged for that reason: three modes here still name the type.
+//
+// Widening the hole is an edit in the config and a diff a reviewer sees.
+
+// getHierarchicalChildren handles the --tree --parent combination logic.
+// baseFilter carries CLI filters (--type, --status, etc.) through the recursive walk.
+func getHierarchicalChildren(ctx context.Context, store storage.DoltStorage, dbPath string, parentID string, baseFilter types.IssueFilter) ([]*types.Issue, error) {
+	// Accept a short/partial parent ID the same way `bd history <id>` does
+	// (GH#4868's mechanism, not applied here before). Not-found IDs fall
+	// through unchanged so the existing "parent issue '%s' not found" path
+	// below still fires with the id the user actually typed.
+	if resolved, err := utils.ResolvePartialID(ctx, store, parentID); err == nil {
+		parentID = resolved
+	} else if errors.Is(err, utils.ErrAmbiguousID) {
+		return nil, err
+	}
+
+	// First verify that the parent issue exists
+	var parentIssue *types.Issue
+	err := withStorage(ctx, store, dbPath, func(s storage.DoltStorage) error {
+		var err error
+		parentIssue, err = s.GetIssue(ctx, parentID)
+		return err
+	})
+	if errors.Is(err, storage.ErrNotFound) || (err == nil && parentIssue == nil) {
+		return nil, fmt.Errorf("parent issue '%s' not found", parentID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("error checking parent issue: %v", err)
+	}
+
+	// Use recursive search to find all descendants using the same logic as --parent filter.
+	// The parent itself is NOT included in the result set — only actual children and
+	// their descendants. This matches the behavior of --json and --flat (GH#3349).
+	allDescendants := make(map[string]*types.Issue)
+
+	err = findAllDescendants(ctx, store, dbPath, parentID, baseFilter, allDescendants)
+	if err != nil {
+		return nil, fmt.Errorf("error finding descendants: %v", err)
+	}
+
+	if len(allDescendants) == 0 {
+		return nil, nil
+	}
+
+	// Include the parent as the tree root only when descendants exist,
+	// so the tree renderer can draw the hierarchy with the parent at the top.
+	allDescendants[parentID] = parentIssue
+
+	treeIssues := make([]*types.Issue, 0, len(allDescendants))
+	for _, issue := range allDescendants {
+		treeIssues = append(treeIssues, issue)
+	}
+
+	return treeIssues, nil
+}
+
+// findAllDescendants finds all descendants using parent filtering, adding each
+// to result the first time it is seen. baseFilter carries CLI filters (--type,
+// --status, etc.) so the tree respects them. The walk is
+// storage.SearchDescendants: one read transaction on a store that offers it
+// (the embedded and Dolt server stores), so a `bd list --watch --parent`
+// refresh opens the embedded engine once rather than once per tree node and
+// leaves room for other bd commands (GH#3415); node by node otherwise.
+func findAllDescendants(ctx context.Context, store storage.DoltStorage, dbPath string, parentID string, baseFilter types.IssueFilter, result map[string]*types.Issue) error {
+	var found []*types.Issue
+	err := withStorage(ctx, store, dbPath, func(s storage.DoltStorage) error {
+		var err error
+		found, err = storage.SearchDescendants(ctx, s, parentID, baseFilter)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	for _, issue := range found {
+		if _, ok := result[issue.ID]; !ok {
+			result[issue.ID] = issue
+		}
+	}
+	return nil
+}
+
+func loadWatchedIssues(ctx context.Context, store storage.DoltStorage, filter types.IssueFilter, ready bool, parentID string, sortBy string, reverse bool) ([]*types.Issue, error) {
+	if ready {
+		issues, err := store.GetReadyWork(ctx, workapi.ReadyFilterFromIssueFilter(workapi.WithFetchOneExtra(filter)))
+		if err != nil {
+			return nil, err
+		}
+		workapi.SortIssues(issues, sortBy, reverse)
+		return issues, nil
+	}
+
+	if parentID != "" {
+		issues, err := getHierarchicalChildren(ctx, store, "", parentID, filter)
+		if err != nil {
+			return nil, err
+		}
+		// getHierarchicalChildren builds its result from a map, so normalize the
+		// slice before snapshot comparison to avoid spurious redraws.
+		workapi.SortIssues(issues, "id", false)
+		return issues, nil
+	}
+
+	issues, err := store.SearchIssues(ctx, "", workapi.WithFetchOneExtra(filter))
+	if err != nil {
+		return nil, err
+	}
+	workapi.SortIssues(issues, sortBy, reverse)
+	return issues, nil
+}
+
+// readyFiltered carries watchIssues' own --ready state so the refreshed summary
+// names its scope instead of asserting an in-progress count the ready filter
+// forced to zero. A watch loop is where a stale "0 in progress" is most likely
+// to be read as a live fact, so this is the path that most needs it.
+//
+// The tree reads only the displayed issues' edges (listDependencyRecords), the
+// read the proxied watch makes too, so a redraw does not reload every edge in
+// the store.
+func displayWatchedIssueList(ctx context.Context, store listEdgeSource, issues []*types.Issue, truncated, readyFiltered bool, statusSelector, sortBy string, reverse bool) {
+	var allDeps map[string][]*types.Dependency
+	if store != nil {
+		deps, err := listDependencyRecords(ctx, store, issues)
+		if err == nil {
+			allDeps = deps
+		}
+	}
+	// No gate decoration (the nil gated map): --watch deliberately renders a
+	// gated bead undecorated, on both routes; see runListProxiedWatch.
+	displayPrettyListWithDepsMode(issues, true, allDeps, "", truncated, readyFiltered, statusSelector, sortBy, reverse, nil)
+}
+
+// watchIssues polls for changes and re-displays (GH#654)
+// Uses polling instead of fsnotify because Dolt stores data in a server-side
+// database, not files — file watchers never fire.
+//
+// watchIssues returns an error only for the initial query — a failure there
+// means bd list --watch never displayed anything, so (unlike a mid-poll
+// refresh failure, which just logs and keeps the last good snapshot on
+// screen) it must propagate to the caller. In particular this lets
+// runListCore route a MaxRows cap violation through handleMaxRowsError for
+// exit-code-2 semantics instead of watchIssues swallowing it and exiting 0
+// (be-x42v.4 follow-up, review MUST-FIX 5).
+func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.IssueFilter, ready bool, parentID string, sortBy string, reverse bool, effectiveLimit int, statusSelector string) error {
+	// Initial display
+	issues, err := loadWatchedIssues(ctx, store, filter, ready, parentID, sortBy, reverse)
+	if err != nil {
+		return err
+	}
+	// The order is already loadWatchedIssues', which the snapshot comparison
+	// below depends on; what is left is the cut and its verdict, and those are
+	// the shared epilogue's on every other listing this command has.
+	issues, truncated := workapi.FinishPage(issues, "", false, effectiveLimit, false)
+	displayWatchedIssueList(ctx, store, issues, truncated, ready, statusSelector, sortBy, reverse)
+	printTruncationHint(truncated, effectiveLimit)
+	lastSnapshot := issueSnapshot(issues)
+
+	fmt.Fprintf(os.Stderr, "\nWatching for changes... (Press Ctrl+C to exit)\n")
+
+	// Handle Ctrl+C — deferred Stop prevents signal handler leak
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
+
+	listWatchLoop(sigChan, func() <-chan time.Time { return time.After(listWatchPollInterval) }, lastSnapshot,
+		func() ([]*types.Issue, bool, error) {
+			issues, err := loadWatchedIssues(ctx, store, filter, ready, parentID, sortBy, reverse)
+			if err != nil {
+				return nil, false, err
+			}
+			issues, truncated := workapi.FinishPage(issues, "", false, effectiveLimit, false)
+			return issues, truncated, nil
+		},
+		func(issues []*types.Issue, truncated bool) {
+			displayWatchedIssueList(ctx, store, issues, truncated, ready, statusSelector, sortBy, reverse)
+			printTruncationHint(truncated, effectiveLimit)
+		})
+	return nil
+}
+
+// listWatchPollInterval is how long `bd list --watch` waits after each
+// refresh, on both routes.
+const listWatchPollInterval = 2 * time.Second
+
+// listWatchLoop is `bd list --watch`'s refresh loop on both routes
+// (watchIssues and proxiedListWatchLoop). poll is called each time the loop
+// starts waiting, which is after the previous refresh (and any redraw) has
+// returned, so every refresh is followed by a full poll interval. A
+// fixed-rate ticker instead started the next refresh the moment a slow one
+// returned, and a large watched --parent tree then kept the embedded store
+// busy almost continuously, stalling every other bd command (GH#3415). It also
+// means a stop that arrives during a refresh always wins: the wait requested
+// after that refresh has not fired yet.
+//
+// A refresh that fails reports on stderr and keeps the last snapshot on
+// screen; one whose snapshot changed is redrawn, followed by the banner.
+func listWatchLoop(stop <-chan os.Signal, poll func() <-chan time.Time, lastSnapshot string,
+	refresh func() ([]*types.Issue, bool, error), redraw func(issues []*types.Issue, truncated bool)) {
+	for {
+		select {
+		case <-stop:
+			fmt.Fprintf(os.Stderr, "\nStopped watching.\n")
+			return
+		case <-poll():
+			issues, truncated, err := refresh()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error refreshing issues: %s\n", remedy.PrintedMessage(err))
+				continue
+			}
+			snap := issueSnapshot(issues)
+			if snap != lastSnapshot {
+				lastSnapshot = snap
+				redraw(issues, truncated)
+				fmt.Fprintf(os.Stderr, "\nWatching for changes... (Press Ctrl+C to exit)\n")
+			}
+		}
+	}
+}
+
+func openAndPrepare(ctx context.Context, in listInput) (uow.UnitOfWork, types.IssueFilter, error) {
+	uw, err := openProxiedListUOW(ctx)
+	if err != nil {
+		return nil, types.IssueFilter{}, err
+	}
+	cfg, err := workapi.LoadUOWListConfig(ctx, uw)
+	if err != nil {
+		uw.Close(ctx)
+		return nil, types.IssueFilter{}, err
+	}
+	filter, err := workapi.BuildListFilter(in.ListRequest, cfg)
+	if err != nil {
+		uw.Close(ctx)
+		return nil, types.IssueFilter{}, err
+	}
+	return uw, filter, nil
+}
+
+func runListProxiedHierarchicalParent(ctx context.Context, uw uow.UnitOfWork, in listInput, filter types.IssueFilter) error {
+	treeIssues, err := gatherProxiedHierarchical(ctx, uw, in.ParentID, filter)
+	if err != nil {
+		return err
+	}
+	if len(treeIssues) == 0 {
+		fmt.Printf("Issue '%s' has no children\n", in.ParentID) //nolint:forbidigo // Pretty/tree output is outside the --format contract.
+		return nil
+	}
+
+	depsByIssueID, err := loadDepsForIssues(ctx, uw, treeIssues)
+	if err != nil {
+		return err
+	}
+
+	// Hierarchical --parent walks use an unlimited per-level query; never page-truncated.
+	displayPrettyListWithDepsMode(treeIssues, false, depsByIssueID, in.depsMode, false, in.ReadyFlag, in.Status, in.SortBy, in.Reverse,
+		proxiedGatedIssueIDs(ctx, uw, treeIssues, depsByIssueID))
+	printSkipLabelsFooter(in.SkipLabels)
+	return nil
+}
+
+func gatherProxiedHierarchical(ctx context.Context, uw uow.UnitOfWork, parentID string, baseFilter types.IssueFilter) ([]*types.Issue, error) {
+	parent, err := uw.IssueUseCase().GetIssue(ctx, parentID)
+	if err != nil {
+		return nil, fmt.Errorf("error checking parent issue: %w", err)
+	}
+	if parent == nil {
+		return nil, fmt.Errorf("parent issue %q not found", parentID)
+	}
+
+	descendants, err := uw.IssueUseCase().GetDescendants(ctx, parentID, baseFilter)
+	if err != nil {
+		return nil, fmt.Errorf("error finding descendants: %w", err)
+	}
+	if len(descendants) == 0 {
+		return nil, nil
+	}
+
+	out := make([]*types.Issue, 0, len(descendants)+1)
+	out = append(out, parent)
+	out = append(out, descendants...)
+	return out, nil
+}

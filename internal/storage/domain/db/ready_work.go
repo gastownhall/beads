@@ -24,11 +24,17 @@ func buildReadyWorkOrder(policy types.SortPolicy) sqlbuild.ReadyWorkOrder {
 }
 
 // buildReadyWorkPredicates computes the ID sets the ready-work WHERE clause
-// needs (children of deferred parents, parent descendants), then delegates
-// the clause text to sqlbuild so both stacks share ready semantics. Unlike
-// the classic stack, ORDER BY and LIMIT are applied at the UNION outer query.
+// needs (children of deferred parents, parent descendants, the family's
+// stale-flagged rows), then delegates the clause text to sqlbuild so both
+// stacks share ready semantics. Unlike the classic stack, ORDER BY and LIMIT
+// are applied at the UNION outer query.
 func (r *issueSQLRepositoryImpl) buildReadyWorkPredicates(ctx context.Context, filter types.WorkFilter, tables filterTables) (*readyWorkPredicates, error) {
 	var inputs sqlbuild.ReadyWorkWhereInputs
+	staleIDs, err := r.staleBlockedIDs(ctx, tables)
+	if err != nil {
+		return nil, fmt.Errorf("get ready work: stale blocked flags in %s: %w", tables.Main, err)
+	}
+	inputs.StaleBlockedIDs = map[string][]string{tables.Main: staleIDs}
 	if !filter.IncludeDeferred {
 		deferredChildIDs, dcErr := r.getChildrenOfDeferredParents(ctx)
 		if dcErr != nil {
@@ -49,6 +55,26 @@ func (r *issueSQLRepositoryImpl) buildReadyWorkPredicates(ctx context.Context, f
 		return nil, err
 	}
 	return &readyWorkPredicates{whereSQL: whereSQL, args: args}, nil
+}
+
+// staleBlockedIDs reads sqlbuild.StaleBlockedIDsSQL for one table family:
+// the rows whose is_blocked flag no ready-affecting edge of their own
+// explains, which ready work reads around (GH#3268). A database without the
+// wisp dependency table has nothing to read around in wisps, so the flag
+// decides there as it always did.
+func (r *issueSQLRepositoryImpl) staleBlockedIDs(ctx context.Context, tables filterTables) ([]string, error) {
+	rows, err := r.runner.QueryContext(ctx, sqlbuild.StaleBlockedIDsSQL(tables))
+	if err != nil {
+		if tables.Main == wispsFilterTables.Main && missingOptionalWispTable(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var ids []string
+	if err := scanStringsInto(rows, &ids); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 type deferredParentEdge struct {
@@ -103,7 +129,13 @@ func (r *issueSQLRepositoryImpl) descendantsOfFutureDeferredParents(ctx context.
 		`, e.depTable, e.issueTable, e.targetCol)
 		rows, err := r.runner.QueryContext(ctx, q)
 		if err != nil {
-			if dberrors.IsTableNotExist(err) {
+			// Each edge joins a dependency table to an issue table. Only one of
+			// the four pairs is entirely durable, but three of them name at
+			// least one required table. Classified by error class alone this
+			// swallowed the edges naming a missing dependencies or issues and
+			// let the rest answer, returning an incomplete set of deferred
+			// children with a nil error.
+			if missingOptionalWispTable(err) {
 				continue
 			}
 			return nil, fmt.Errorf("deferred parents: %s/%s: %w", e.depTable, e.issueTable, err)
@@ -127,44 +159,15 @@ func scanStringsInto(rows *sql.Rows, out *[]string) error {
 	return rows.Err()
 }
 
-//nolint:gosec // G201: depTable is hardcoded.
 func (r *issueSQLRepositoryImpl) getDescendantIDs(ctx context.Context, rootID string, maxDepth int) ([]string, error) {
 	if rootID == "" {
 		return nil, nil
 	}
 
 	queryDescendants := func(includeWisps bool) ([]string, bool, error) {
-		edgeQuery := fmt.Sprintf(`
-			SELECT issue_id, %s FROM dependencies WHERE type = 'parent-child'
-		`, depTargetExpr)
-		if includeWisps {
-			edgeQuery += fmt.Sprintf(`
-			UNION ALL
-			SELECT issue_id, %s FROM wisp_dependencies WHERE type = 'parent-child'
-		`, depTargetExpr)
-		}
-
-		//nolint:gosec // G201: edgeQuery is built from hardcoded SQL plus depTargetExpr (no user input)
-		query := fmt.Sprintf(`
-			WITH RECURSIVE
-			parent_edges(issue_id, depends_on_id) AS (
-				%s
-			),
-			descendants(id, depth, path) AS (
-				SELECT issue_id, 1, CONCAT(',', ?, ',', issue_id, ',')
-				FROM parent_edges
-				WHERE depends_on_id = ?
-				UNION ALL
-				SELECT e.issue_id, d.depth + 1, CONCAT(d.path, e.issue_id, ',')
-				FROM parent_edges e
-				JOIN descendants d ON e.depends_on_id = d.id
-				WHERE (? <= 0 OR d.depth < ?)
-				  AND LOCATE(CONCAT(',', e.issue_id, ','), d.path) = 0
-			)
-			SELECT id, depth FROM descendants WHERE id <> ?
-		`, edgeQuery)
-
-		rows, err := r.runner.QueryContext(ctx, query, rootID, rootID, maxDepth, maxDepth, rootID)
+		rows, err := r.runner.QueryContext(ctx,
+			sqlbuild.DescendantWalkQuery(includeWisps),
+			sqlbuild.DescendantWalkArgs(rootID, maxDepth, includeWisps)...)
 		if err != nil {
 			return nil, false, err
 		}

@@ -1,0 +1,1203 @@
+package conformance
+
+import (
+	"context"
+	"errors"
+	"math"
+	"sort"
+	"strconv"
+	"testing"
+
+	storeops "github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/journalops"
+)
+
+// This file holds the contract every implementation of journalops.Journal must
+// satisfy. Each case asserts what journalops/journal.go PROMISES rather than
+// what any one backend happens to do today.
+//
+// THE VOTE COUNT. Three wirings — the server-backed store, the embedded store
+// and the unit-of-work provider — and ONE body between them: all three bottom
+// out in issueops.ReadEventsPageInTx, the two stores through a five-line
+// accessor around their own transaction helper and the unit of work through
+// domain.EventsJournalUseCase. So this is one reading plus an engine check, the
+// arrangement issueops.TreeWalker was the first to have, and the cases are
+// written for it: they assert the typed error's FIELDS and the page's members
+// rather than message text, because what a per-leg failure would actually BE
+// here is a wrapper that loses a transaction, drops the head, or breaks
+// errors.As across the alias.
+//
+// THAT LAST ONE IS WHY THE TRUNCATION CASE MATTERS MORE THAN IT LOOKS.
+// storage.EventsJournalCursor, storage.EventsJournalRow, storage.EventsJournalPage
+// and storage.EventsJournalTruncatedError are ALIASES of the journalops names,
+// so every leg still returns the type it always returned. These cases hold the
+// role's own spelling — journalops.TruncatedError — against three
+// implementations that never name it, which is the alias identity checked at
+// runtime rather than argued from the language spec.
+//
+// WHAT THIS CONTRACT DELIBERATELY DOES NOT PIN, and the reason, so a later
+// reader does not mistake the gap for an oversight:
+//
+//   - THE HEAD AND THE ROWS COMING FROM ONE INSTANT. It is the promise the Page
+//     type exists for, and it is not black-box observable here. That was
+//     MEASURED rather than assumed: reordering ReadEventsPageInTx to read the
+//     head BEFORE the rows — the exact regression the promise forbids — leaves
+//     all six cases green, because a single-threaded case has nothing to commit
+//     in the gap it opens. A concurrent case would be flaky at three engines and
+//     would buy a suite people re-run rather than a guarantee.
+//
+//     What IS observable is the OTHER way a head goes wrong, and both are
+//     pinned: a head derived from the page (RunJournalLimitCapsRowsNotHead) and
+//     a head derived from the surviving rows instead of the counter
+//     (RunJournalHeadSurvivesAFullPrune). The one-instant promise itself is held
+//     by the SHAPE of the body — both reads are inside the caller's transaction
+//     and there is no two-call composition to regress into without deleting it —
+//     and by review. Do not fake it with sleeps.
+//   - THE COMMIT-ORDER PROPERTY OF SEQ. That seqs are gapless and ordered by
+//     COMMIT rather than by insert is a claim about concurrent writers
+//     (issueops.nextEventSeq), and the leg that can actually violate it is the
+//     shared SQL server. It is pinned where the concurrency actually lives:
+//     internal/storage/domain/db/journal_seq_test.go, whose
+//     TestEventsJournal_CommitOrderedGaplessSeq drives two OVERLAPPING
+//     transactions on independent connections and whose
+//     TestEventsJournal_ConcurrentWritersGaplessNoDup drives a racing batch,
+//     plus embeddeddolt/journal_concurrency_test.go for the embedded engine.
+//     Not the dolt package's own journal tests, which exercise the same
+//     server-mode plumbing but are single-threaded, and not here, where every
+//     case is one writer.
+//   - RETENTION POLICY. The retain-days and retain-rows floors are the
+//     operator's surface (storage.EventsJournalAccessor), deliberately not on
+//     this role. The fixture's Prune hook exists to CREATE the truncation the
+//     read contract has to answer, and the cases pass both floors disabled; how
+//     a floor resolves is pinned beside the prune bodies.
+//
+// SEEDING DISCIPLINE: EVERY CASE REBASELINES. The journal is append-only and
+// workspace-global, the fixture is built once per role, and two of these cases
+// PRUNE — one of them to nothing. So no case may assume an empty journal or a
+// seq of its own choosing. Each takes the live head first (journalHead), drives
+// its own mutations, and asserts about the window above that baseline. A case
+// written against absolute seqs would pass in isolation and fail the moment it
+// ran second, which is the shape of a contract nobody can reorder.
+
+// JournalFixture supplies adapter-specific access for the journal assertions:
+// the role under test, the activation switch its rows depend on, the prune that
+// creates a truncation, and the mutation kit that makes records exist.
+type JournalFixture struct {
+	// IssuePrefix namespaces the ids each case seeds. Ids are global to a
+	// workspace and every case here shares one, so a case that reused another's
+	// id would read another's journal rows.
+	IssuePrefix string
+	// Journal is the role under test, reached through whatever the backend
+	// hands it out by — a type assertion on the store, or the unit-of-work
+	// provider's EventsJournalCursor accessor. Never a constructor: the
+	// accessor, or the assertion, is what a front door actually holds.
+	Journal journalops.Journal
+	// SetJournalEnabled turns durable journaling on for the workspace under
+	// test (storage.EventsJournalConfigurer). It is OPERATOR surface and
+	// deliberately not on the role, which is exactly why the fixture has to
+	// carry it: the cases need records to exist, and a workspace that never
+	// opted in records nothing while every read still succeeds emptily.
+	//
+	// Every case calls it with true before it seeds, rather than trusting a
+	// wiring to have done so. It is idempotent, it costs nothing, and a leg
+	// that forgot would otherwise fail with "no rows" in six places instead of
+	// naming the one thing that was wrong.
+	SetJournalEnabled func(enabled bool)
+	// Prune deletes journal records below before, honoring the retain-days and
+	// retain-rows floors (0 disables a floor), and reports how many it removed
+	// (storage.EventsJournalAccessor.PruneEventsJournal, or the unit of work's
+	// EventsJournalUseCase.Prune).
+	//
+	// It is here to MANUFACTURE the condition the read contract has to answer,
+	// not to be tested. Both truncation cases pass both floors disabled, so the
+	// bound is exactly what they ask for.
+	Prune func(ctx context.Context, before int64, retainDays, retainRows int) (int64, error)
+	// Mutations is one hook per journaled op — see JournalMutations, which
+	// states why the kit is exhaustive rather than a sample.
+	Mutations JournalMutations
+	// Arrival drives the arrival_seq cases (journal_arrival_contract.go): the
+	// create sequence the journal stamps on a wisp-plane row. nil skips every
+	// one of them, by name.
+	Arrival *JournalArrivalHooks
+}
+
+// JournalMutations is the mutation kit: one hook per op the engine journals,
+// each driving the backend's own front-door verb for it.
+//
+// IT IS EXHAUSTIVE BY CONSTRUCTION, and that is the point of naming the hooks
+// as fields rather than accepting a list. The journaled vocabulary is closed
+// and declared once (issueops.WireEventOps and issueops.EngineOnlyEventOps),
+// RunJournalEveryMutationKindLandsARow checks this kit against it, and a leg
+// that supplied a sample would prove the journal records the ops it happens to
+// have thought of. An op added to the engine vocabulary without a hook here
+// fails that case rather than quietly joining the set nothing drives.
+//
+// EVERY HOOK DRIVES THE BACKEND'S OWN VERB, never the journal. Emission lives
+// at a seam beneath all of these (issueops.RecordEventInTx and its siblings),
+// so a hook that inserted a record directly would assert that this test can
+// write a row.
+type JournalMutations struct {
+	// Create creates a durable issue with the given id.
+	Create func(ctx context.Context, id string) error
+	// Update mutates a scalar field of an existing issue.
+	Update func(ctx context.Context, id string) error
+	// Close closes an existing open issue.
+	Close func(ctx context.Context, id string) error
+	// Delete removes an existing issue. Its record carries no issue snapshot —
+	// there is no surviving row to take one from.
+	Delete func(ctx context.Context, id string) error
+	// AddDependency adds one blocking edge from an existing issue to another.
+	// The record is the SOURCE's: from is the id the row names.
+	AddDependency func(ctx context.Context, from, to string) error
+	// RemoveDependency removes that edge again, and its record is the source's
+	// for the same reason.
+	RemoveDependency func(ctx context.Context, from, to string) error
+	// Comment writes one structured comment on an existing issue. Its op is the
+	// one the engine journals and the wire never carries; see
+	// RunJournalEveryMutationKindLandsARow.
+	Comment func(ctx context.Context, id, text string) error
+
+	// Actor is the acting identity every hook above passes to the verb it
+	// drives — the comment's author, for Comment. It is what
+	// RunJournalEveryMutationKindRecordsItsActor holds each record to, because
+	// journalops.Row.Actor is "the acting identity that performed the
+	// mutation". It must not be empty: a kit that acted as nobody proves
+	// nothing about attribution.
+	Actor string
+	// ActorlessDelete says the Delete hook drives a verb with NO actor
+	// parameter — storage.DeleteIssue, which both store kits and the served
+	// kit's reference store call — so its record is held to the empty actor
+	// journalops.Row reserves for "a path that genuinely has no actor" rather
+	// than to Actor. A kit whose delete verb takes the actor (the unit of
+	// work's IssueUseCase().DeleteIssue) leaves it false.
+	ActorlessDelete bool
+}
+
+// RunJournalPagesAreSeqAscendingAndSinceExclusive pins the two properties a
+// resuming consumer's correctness rests on: the checkpoint it hands back is
+// EXCLUSIVE, and what it gets back is in seq order.
+//
+// The exclusivity is asserted twice, and the second one is the load-bearing
+// half. A read from the caller's own baseline could start at baseline+1 under
+// either boundary if nothing sits exactly at baseline, so the case also reads
+// from a seq it has just been SERVED — a row that provably exists — and
+// requires that row to be absent from the answer. An inclusive boundary
+// replays one record per poll forever, which is silent duplication rather than
+// a visible failure.
+func RunJournalPagesAreSeqAscendingAndSinceExclusive(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	baseline := journalBaseline(t, ctx, fixture)
+	ids := journalSeedCreates(t, ctx, fixture, "asc", 3)
+
+	page := journalRead(t, ctx, fixture, baseline, 0)
+	if len(page.Rows) != len(ids) {
+		t.Fatalf("read %d records above the baseline, want the %d this case created: %+v",
+			len(page.Rows), len(ids), journalOpsOf(page.Rows))
+	}
+	if page.Rows[0].Seq != baseline+1 {
+		t.Errorf("first record seq = %d, want %d: the answer begins immediately after the checkpoint",
+			page.Rows[0].Seq, baseline+1)
+	}
+	for i, row := range page.Rows {
+		if row.Seq <= baseline {
+			t.Errorf("record %d has seq %d, at or below the checkpoint %d: since is EXCLUSIVE",
+				i, row.Seq, baseline)
+		}
+		if i > 0 && row.Seq <= page.Rows[i-1].Seq {
+			t.Errorf("record %d has seq %d, not above its predecessor's %d: records are seq-ASCENDING",
+				i, row.Seq, page.Rows[i-1].Seq)
+		}
+		if row.IssueID != ids[i] {
+			t.Errorf("record %d names %q, want %q: the order records arrive in is the order the "+
+				"mutations committed in", i, row.IssueID, ids[i])
+		}
+	}
+
+	// Resume from a record the caller has been served. Under an inclusive
+	// boundary this answer repeats it.
+	resumed := journalRead(t, ctx, fixture, page.Rows[0].Seq, 0)
+	if len(resumed.Rows) != len(ids)-1 {
+		t.Fatalf("resuming from seq %d returned %d records, want %d",
+			page.Rows[0].Seq, len(resumed.Rows), len(ids)-1)
+	}
+	if resumed.Rows[0].Seq == page.Rows[0].Seq {
+		t.Errorf("resuming from seq %d served that same record again: a consumer storing the seq it "+
+			"processed and handing it back would replay one record on every poll", page.Rows[0].Seq)
+	}
+	if resumed.Rows[0].Seq != page.Rows[1].Seq {
+		t.Errorf("resuming from seq %d began at %d, want %d: the next record and nothing before it",
+			page.Rows[0].Seq, resumed.Rows[0].Seq, page.Rows[1].Seq)
+	}
+}
+
+// RunJournalHeadArrivesWithItsRowsAndDetectsCaughtUp pins what a poller reads
+// to decide between asking again and waiting.
+//
+// Three facts, and the third is what the whole role is for: the head describes
+// the journal's history, it moves with the records, and a checkpoint that has
+// reached it is CAUGHT UP — no records, no error, the same head. A checkpoint
+// ABOVE the head is caught up too, which is not a curiosity: it is what makes
+// the head safe to probe, and every other case in this file relies on it.
+func RunJournalHeadArrivesWithItsRowsAndDetectsCaughtUp(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	baseline := journalBaseline(t, ctx, fixture)
+	journalSeedCreates(t, ctx, fixture, "head", 2)
+
+	page := journalRead(t, ctx, fixture, baseline, 0)
+	if len(page.Rows) != 2 {
+		t.Fatalf("read %d records, want the 2 this case created: %+v", len(page.Rows), journalOpsOf(page.Rows))
+	}
+	last := page.Rows[len(page.Rows)-1].Seq
+	if page.Head < last {
+		t.Fatalf("head = %d, below the last record served (%d): a consumer reads that as being past the "+
+			"end of the journal and stops polling", page.Head, last)
+	}
+	if page.Head != last {
+		t.Errorf("head = %d, want %d: nothing else wrote, so the head is the last record", page.Head, last)
+	}
+
+	caughtUp := journalRead(t, ctx, fixture, page.Head, 0)
+	if len(caughtUp.Rows) != 0 {
+		t.Errorf("reading from the head returned %d records, want none", len(caughtUp.Rows))
+	}
+	if caughtUp.Head != page.Head {
+		t.Errorf("head moved from %d to %d with nothing written between the two reads", page.Head, caughtUp.Head)
+	}
+
+	// A checkpoint the journal has never reached is caught up, not an error.
+	// This is the property journalHead is built on.
+	beyond := journalRead(t, ctx, fixture, page.Head+1000, 0)
+	if len(beyond.Rows) != 0 || beyond.Head != page.Head {
+		t.Errorf("reading from a checkpoint above the head = %d records and head %d, want none and %d",
+			len(beyond.Rows), beyond.Head, page.Head)
+	}
+
+	// One more mutation, and the head follows it.
+	journalSeedCreates(t, ctx, fixture, "head-again", 1)
+	advanced := journalRead(t, ctx, fixture, page.Head, 0)
+	if len(advanced.Rows) != 1 {
+		t.Fatalf("read %d records after one more mutation, want 1", len(advanced.Rows))
+	}
+	if advanced.Head != advanced.Rows[0].Seq || advanced.Head <= page.Head {
+		t.Errorf("head = %d after a record at seq %d (was %d): the head has to move with what it describes",
+			advanced.Head, advanced.Rows[0].Seq, page.Head)
+	}
+}
+
+// RunJournalLimitCapsRowsNotHead pins the difference between the page and the
+// journal, which is the whole reason Page carries two members.
+//
+// A head derived from the records in hand is the plausible implementation and
+// the broken one: every bounded read would then report a head equal to its last
+// record, a consumer would read "caught up", and it would stall however far
+// behind it happened to be. So the case takes a page NARROWER than the backlog
+// and requires the head to be ahead of it. It also pins limit 0 as uncapped,
+// because a role that quietly imposed a ceiling of its own would make the same
+// consumer stall at a boundary nothing documents.
+func RunJournalLimitCapsRowsNotHead(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	baseline := journalBaseline(t, ctx, fixture)
+	ids := journalSeedCreates(t, ctx, fixture, "limit", 4)
+
+	bounded := journalRead(t, ctx, fixture, baseline, 2)
+	if len(bounded.Rows) != 2 {
+		t.Fatalf("a limit of 2 returned %d records, want 2", len(bounded.Rows))
+	}
+	lastServed := bounded.Rows[len(bounded.Rows)-1].Seq
+	if bounded.Head <= lastServed {
+		t.Errorf("a bounded page reported head %d with its last record at %d: the head describes the "+
+			"JOURNAL, not the page, and a consumer reads this one as caught up while %d records wait",
+			bounded.Head, lastServed, len(ids)-2)
+	}
+	if bounded.Head != baseline+int64(len(ids)) {
+		t.Errorf("bounded head = %d, want %d: the head of everything this case wrote",
+			bounded.Head, baseline+int64(len(ids)))
+	}
+
+	uncapped := journalRead(t, ctx, fixture, baseline, 0)
+	if len(uncapped.Rows) != len(ids) {
+		t.Fatalf("a limit of 0 returned %d records, want all %d: 0 means uncapped, and any ceiling on "+
+			"this read belongs to a front door rather than to the role", len(uncapped.Rows), len(ids))
+	}
+	if uncapped.Head != bounded.Head {
+		t.Errorf("head = %d uncapped and %d bounded; the limit must not reach it", uncapped.Head, bounded.Head)
+	}
+
+	// The bounded page is a PREFIX of the uncapped answer, not a sample of it.
+	for i, row := range bounded.Rows {
+		if row.Seq != uncapped.Rows[i].Seq {
+			t.Errorf("bounded record %d is seq %d, want %d: a limit takes the first n, so paging with "+
+				"one loses nothing", i, row.Seq, uncapped.Rows[i].Seq)
+		}
+	}
+}
+
+// RunJournalTruncationIsTypedAndNamesTheWindow pins the failure the journal
+// exists to make loud.
+//
+// A checkpoint below the retained window cannot be answered with records, and
+// the two silent alternatives are both data loss: an empty success strands the
+// consumer forever, and skipping to the current floor drops every record in
+// between without saying so. So the read FAILS, with a typed error naming a
+// window the caller can act on — and the case proves the window is actually
+// resumable rather than merely printed, by resuming from it.
+//
+// The type is asserted through journalops.TruncatedError, which no leg names:
+// they all return the storage alias. errors.As matching across that is the
+// alias identity, checked rather than assumed.
+func RunJournalTruncationIsTypedAndNamesTheWindow(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	baseline := journalBaseline(t, ctx, fixture)
+	journalSeedCreates(t, ctx, fixture, "trunc", 4)
+	head := baseline + 4
+	// Prune the first two of the four, floors disabled so the bound is exactly
+	// what this case asks for. The delete is a prefix, so everything earlier
+	// cases wrote goes with them.
+	firstRetained := baseline + 3
+	journalPrune(t, ctx, fixture, firstRetained)
+
+	trunc := journalRequireTruncated(t, "reading from a pruned checkpoint",
+		journalReadErr(ctx, fixture, baseline, 0))
+	if trunc.Since != baseline {
+		t.Errorf("Since = %d, want the caller's own checkpoint %d: the nearest hole is the one a "+
+			"consumer has to decide about first", trunc.Since, baseline)
+	}
+	if trunc.Floor != firstRetained {
+		t.Errorf("Floor = %d, want %d: the lowest seq still retained", trunc.Floor, firstRetained)
+	}
+	if trunc.Head != head {
+		t.Errorf("Head = %d, want %d: the highest seq ever assigned, which a prune does not move",
+			trunc.Head, head)
+	}
+
+	// The window is RESUMABLE: Floor-1 is a checkpoint the implementation can
+	// serve, and it serves everything retained.
+	resumed := journalRead(t, ctx, fixture, trunc.Floor-1, 0)
+	if len(resumed.Rows) != 2 || resumed.Rows[0].Seq != trunc.Floor {
+		t.Fatalf("resuming from Floor-1 (%d) returned %d records starting at %d, want 2 starting at %d: "+
+			"a window a caller cannot resume from is a window that told it nothing",
+			trunc.Floor-1, len(resumed.Rows), journalFirstSeq(resumed), trunc.Floor)
+	}
+
+	// A full export from the beginning of history must not present the
+	// surviving suffix as a complete one.
+	exported := journalRequireTruncated(t, "exporting from the beginning of history",
+		journalReadErr(ctx, fixture, 0, 0))
+	if exported.Floor != firstRetained {
+		t.Errorf("export Floor = %d, want %d", exported.Floor, firstRetained)
+	}
+
+	// And a BOUNDED read from the same checkpoint takes the same decision, with
+	// the same window. A limit that returned the first retained records as a
+	// success would be the silent skip, reintroduced by the paging path.
+	bounded := journalRequireTruncated(t, "reading a bounded page from a pruned checkpoint",
+		journalReadErr(ctx, fixture, baseline, 2))
+	if bounded.Since != trunc.Since || bounded.Floor != trunc.Floor || bounded.Head != trunc.Head {
+		t.Errorf("a bounded read reported the window [%d..%d] after %d and an unbounded one [%d..%d] "+
+			"after %d; the limit bounds the ANSWER, never the verdict",
+			bounded.Floor, bounded.Head, bounded.Since, trunc.Floor, trunc.Head, trunc.Since)
+	}
+}
+
+// RunJournalHeadSurvivesAFullPrune pins the one state where records and history
+// disagree, and it is the state that decides whether a consumer can ever stop
+// polling.
+//
+// Prune deletes records; it never touches the counter. So a journal with
+// nothing left in it still knows how far it got, which is what lets it answer
+// "you are at the end of my history" instead of "I have nothing" — the two are
+// the same empty result set at the SQL level, and a head derived from the
+// surviving records cannot tell them apart. The case also pins the consequence
+// on the write side: seq does not reset, so the next mutation continues the
+// history rather than colliding with a consumer's dedupe window.
+func RunJournalHeadSurvivesAFullPrune(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	baseline := journalBaseline(t, ctx, fixture)
+	journalSeedCreates(t, ctx, fixture, "prune", 2)
+	head := baseline + 2
+
+	journalPrune(t, ctx, fixture, head+1)
+
+	emptied := journalRead(t, ctx, fixture, head, 0)
+	if len(emptied.Rows) != 0 {
+		t.Fatalf("a fully pruned journal returned %d records", len(emptied.Rows))
+	}
+	if emptied.Head != head {
+		t.Errorf("head = %d after every record was pruned, want %d: the head is the journal's HISTORY, "+
+			"and a head derived from the surviving records would drop to nothing here", emptied.Head, head)
+	}
+
+	// A consumer that had not reached the head is told, and the window it is
+	// told about is the empty one: Floor above Head means "fully pruned".
+	trunc := journalRequireTruncated(t, "reading a fully pruned journal from below its head",
+		journalReadErr(ctx, fixture, baseline, 0))
+	if trunc.Floor != head+1 || trunc.Head != head {
+		t.Errorf("fully pruned window = [%d..%d], want [%d..%d]: Floor above Head is how a caller reads "+
+			"'nothing retained, caught up to Head'", trunc.Floor, trunc.Head, head+1, head)
+	}
+
+	// Seq continues from the counter, not from the (now empty) table.
+	journalSeedCreates(t, ctx, fixture, "prune-after", 1)
+	next := journalRead(t, ctx, fixture, head, 0)
+	if len(next.Rows) != 1 {
+		t.Fatalf("read %d records after a post-prune mutation, want 1", len(next.Rows))
+	}
+	if next.Rows[0].Seq != head+1 {
+		t.Errorf("the first record after a full prune is seq %d, want %d: a seq that restarted would "+
+			"hand a consumer numbers it has already processed", next.Rows[0].Seq, head+1)
+	}
+}
+
+// THE ARRIVAL CASES. The twelve cases below pin the arrival_seq stamp; their
+// hooks, helpers and the contract's statement are in
+// journal_arrival_contract.go. They are declared HERE, between the pruning
+// cases and RunJournalEveryMutationKindLandsARow, because the role table runs
+// cases in declaration order and that case must stay last.
+
+// RunJournalArrivalStampsAWispCreateWithItsRecordSeq pins the definition: a
+// wisp created while the workspace journals carries the seq of its own create
+// record, the record's post-image carries the same value, and successive
+// creates are stamped in the order they committed.
+func RunJournalArrivalStampsAWispCreateWithItsRecordSeq(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	baseline := journalBaseline(t, ctx, fixture)
+	ids := arrivalIDs(fixture, "stamp", 3)
+	for _, id := range ids {
+		created := arrivalCreateWisp(t, ctx, hooks, id)
+		if created.ArrivalSeq == 0 {
+			t.Errorf("creating wisp %s returned no arrival_seq: the create's own result is what a caller "+
+				"caches, and an unstamped one leaves it at 0 until its next read", id)
+		}
+	}
+	page := journalRead(t, ctx, fixture, baseline, 0)
+	var prev int64
+	for _, id := range ids {
+		record := arrivalCreateRecord(t, page.Rows, id)
+		got := arrivalGet(t, ctx, hooks, id).ArrivalSeq
+		if got != record.Seq {
+			t.Errorf("%s arrival_seq = %d, want %d: the stamp IS the seq of the row's create record", id, got, record.Seq)
+		}
+		if post := arrivalPostImage(t, record); post != record.Seq {
+			t.Errorf("%s create record (seq %d) carries arrival_seq %d in its post-image: the record must "+
+				"describe the row it stamped", id, record.Seq, post)
+		}
+		if got <= prev {
+			t.Errorf("%s arrival_seq = %d, not above its predecessor's %d: stamps follow commit order", id, got, prev)
+		}
+		prev = got
+	}
+}
+
+// RunJournalArrivalOrdersABatchByItem pins the order inside one transaction:
+// a batch stamps its items in the order the caller listed them, not in id
+// order and not in any order the engine finds convenient. Ids are chosen so
+// that the two disagree.
+func RunJournalArrivalOrdersABatchByItem(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	if hooks.CreateWispBatch == nil {
+		t.Skip("this leg supplies no batch wisp create (JournalArrivalHooks.CreateWispBatch)")
+	}
+	baseline := journalBaseline(t, ctx, fixture)
+	ids := []string{
+		fixture.IssuePrefix + "-batch-c",
+		fixture.IssuePrefix + "-batch-a",
+		fixture.IssuePrefix + "-batch-b",
+	}
+	if err := hooks.CreateWispBatch(ctx, ids); err != nil {
+		t.Fatalf("batch-creating %v: %v", ids, err)
+	}
+	page := journalRead(t, ctx, fixture, baseline, 0)
+	var prev int64
+	for _, id := range ids {
+		got := arrivalGet(t, ctx, hooks, id).ArrivalSeq
+		if record := arrivalCreateRecord(t, page.Rows, id); got != record.Seq {
+			t.Errorf("%s arrival_seq = %d, want its create record's seq %d", id, got, record.Seq)
+		}
+		if got <= prev {
+			t.Errorf("batch item %s arrival_seq = %d, not above the previous item's %d: a batch stamps in "+
+				"item order", id, got, prev)
+		}
+		prev = got
+	}
+}
+
+// RunJournalArrivalIsOnEveryReadPath pins that the stamp is a property of the
+// ROW, so every way of reading the row returns it: the create's own result, a
+// get, a full and a brief list, and the post-image of a later record.
+func RunJournalArrivalIsOnEveryReadPath(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	baseline := journalBaseline(t, ctx, fixture)
+	id := fixture.IssuePrefix + "-reads-a"
+	created := arrivalCreateWisp(t, ctx, hooks, id)
+	want := arrivalCreateRecord(t, journalRead(t, ctx, fixture, baseline, 0).Rows, id).Seq
+
+	if created.ArrivalSeq != want {
+		t.Errorf("the create result carries arrival_seq %d, want %d", created.ArrivalSeq, want)
+	}
+	if got := arrivalGet(t, ctx, hooks, id).ArrivalSeq; got != want {
+		t.Errorf("get: arrival_seq = %d, want %d", got, want)
+	}
+	for _, brief := range []bool{false, true} {
+		items, err := hooks.List(ctx, []string{id}, brief)
+		if err != nil {
+			t.Fatalf("listing %s (brief %v): %v", id, brief, err)
+		}
+		if len(items) != 1 {
+			t.Fatalf("listing %s (brief %v) returned %d rows", id, brief, len(items))
+		}
+		if items[0].ArrivalSeq != want {
+			t.Errorf("list (brief %v): arrival_seq = %d, want %d", brief, items[0].ArrivalSeq, want)
+		}
+	}
+
+	before := journalHead(t, ctx, fixture)
+	if err := hooks.Update(ctx, id); err != nil {
+		t.Fatalf("updating %s: %v", id, err)
+	}
+	updated := journalRead(t, ctx, fixture, before, 0)
+	var sawUpdate bool
+	for _, row := range updated.Rows {
+		if row.IssueID != id || row.Op != "update" {
+			continue
+		}
+		sawUpdate = true
+		if got := arrivalPostImage(t, row); got != want {
+			t.Errorf("the update record (seq %d) post-image carries arrival_seq %d, want %d", row.Seq, got, want)
+		}
+	}
+	if !sawUpdate {
+		t.Fatalf("updating %s journaled no update record: %v", id, journalOpsOf(updated.Rows))
+	}
+}
+
+// RunJournalArrivalNeverChanges pins that nothing after the create moves the
+// stamp: not an update, a close, a reopen, a comment, nor a dependency edge
+// arriving and leaving. A stamp that moved would reorder a consumer's queue
+// every time a row was touched.
+func RunJournalArrivalNeverChanges(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	journalBaseline(t, ctx, fixture)
+	subject := fixture.IssuePrefix + "-still-a"
+	other := fixture.IssuePrefix + "-still-b"
+	arrivalCreateWisp(t, ctx, hooks, other)
+	want := arrivalCreateWisp(t, ctx, hooks, subject).ArrivalSeq
+	if want == 0 {
+		t.Fatalf("wisp %s was created unstamped", subject)
+	}
+	steps := []struct {
+		what string
+		run  func() error
+	}{
+		{"an update", func() error { return hooks.Update(ctx, subject) }},
+		{"a comment", func() error { return hooks.Comment(ctx, subject, "a comment") }},
+		{"a dependency add", func() error { return hooks.AddDependency(ctx, subject, other) }},
+		{"a dependency remove", func() error { return hooks.RemoveDependency(ctx, subject, other) }},
+		{"a close", func() error { return hooks.Close(ctx, subject) }},
+	}
+	if hooks.Reopen != nil {
+		steps = append(steps, struct {
+			what string
+			run  func() error
+		}{"a reopen", func() error { return hooks.Reopen(ctx, subject) }})
+	}
+	for _, step := range steps {
+		if err := step.run(); err != nil {
+			t.Fatalf("%s on %s: %v", step.what, subject, err)
+		}
+		if got := arrivalGet(t, ctx, hooks, subject).ArrivalSeq; got != want {
+			t.Errorf("after %s, arrival_seq = %d, want %d: the stamp never changes while the row stays on "+
+				"the wisp plane", step.what, got, want)
+		}
+	}
+}
+
+// RunJournalArrivalOnlyWhileJournaling pins the activation rule: a workspace
+// that does not journal stamps nothing (and pays nothing), turning the
+// journal on does not backfill rows created before, and the first create after
+// it is stamped.
+func RunJournalArrivalOnlyWhileJournaling(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	journalBaseline(t, ctx, fixture)
+	before := fixture.IssuePrefix + "-active-a"
+	after := fixture.IssuePrefix + "-active-b"
+
+	fixture.SetJournalEnabled(false)
+	created := arrivalCreateWisp(t, ctx, hooks, before)
+	fixture.SetJournalEnabled(true)
+	if created.ArrivalSeq != 0 {
+		t.Errorf("a wisp created with the journal off returned arrival_seq %d, want none", created.ArrivalSeq)
+	}
+	if got := arrivalGet(t, ctx, hooks, before).ArrivalSeq; got != 0 {
+		t.Errorf("a wisp created with the journal off reads arrival_seq %d after the journal came on, want "+
+			"none: activation stamps nothing retroactively", got)
+	}
+	if got := arrivalCreateWisp(t, ctx, hooks, after).ArrivalSeq; got == 0 {
+		t.Errorf("the first wisp created after the journal came on is unstamped")
+	}
+}
+
+// RunJournalArrivalOnlyOnTheWispPlane pins the plane rule: the stamp is
+// defined on the clone-local wisp plane only, so a durable create carries
+// none, and promoting a stamped wisp onto the durable plane clears it.
+func RunJournalArrivalOnlyOnTheWispPlane(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	journalBaseline(t, ctx, fixture)
+	durable := fixture.IssuePrefix + "-plane-a"
+	if err := fixture.Mutations.Create(ctx, durable); err != nil {
+		t.Fatalf("creating durable %s: %v", durable, err)
+	}
+	if got := arrivalGet(t, ctx, hooks, durable).ArrivalSeq; got != 0 {
+		t.Errorf("durable %s carries arrival_seq %d, want none: the durable plane replicates, and a "+
+			"clone-local number means nothing on another clone", durable, got)
+	}
+	if hooks.Promote == nil {
+		return
+	}
+	promoted := fixture.IssuePrefix + "-plane-b"
+	if got := arrivalCreateWisp(t, ctx, hooks, promoted).ArrivalSeq; got == 0 {
+		t.Fatalf("wisp %s was created unstamped", promoted)
+	}
+	if err := hooks.Promote(ctx, promoted); err != nil {
+		t.Fatalf("promoting %s: %v", promoted, err)
+	}
+	if got := arrivalGet(t, ctx, hooks, promoted).ArrivalSeq; got != 0 {
+		t.Errorf("promoted %s carries arrival_seq %d, want none: leaving the wisp plane clears it", promoted, got)
+	}
+}
+
+// RunJournalArrivalRecoversCreateOrderAfterTruncation is the reason the stamp
+// exists. Five wisps are created in an order their ids sort AGAINST, the
+// journal is pruned past every one of their records — so a reader resuming
+// from before them is refused with the typed truncation — and sorting the
+// surviving rows by arrival_seq alone reproduces the order the creates
+// committed in, with each value equal to the seq its pruned record had.
+func RunJournalArrivalRecoversCreateOrderAfterTruncation(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	baseline := journalBaseline(t, ctx, fixture)
+	created := make([]string, 0, 5)
+	for _, marker := range []string{"e", "d", "c", "b", "a"} {
+		id := fixture.IssuePrefix + "-order-" + marker
+		arrivalCreateWisp(t, ctx, hooks, id)
+		created = append(created, id)
+	}
+	page := journalRead(t, ctx, fixture, baseline, 0)
+	recorded := map[string]int64{}
+	for _, id := range created {
+		recorded[id] = arrivalCreateRecord(t, page.Rows, id).Seq
+	}
+
+	journalPrune(t, ctx, fixture, page.Head+1)
+	_ = journalRequireTruncated(t, "reading from before the pruned creates", journalReadErr(ctx, fixture, baseline, 0))
+
+	rows, err := hooks.List(ctx, created, false)
+	if err != nil {
+		t.Fatalf("listing %v: %v", created, err)
+	}
+	if len(rows) != len(created) {
+		t.Fatalf("listing %v returned %d rows, want %d", created, len(rows), len(created))
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].ArrivalSeq < rows[j].ArrivalSeq })
+	for i, row := range rows {
+		if row.ID != created[i] {
+			t.Errorf("position %d by arrival_seq is %s, want %s: sorting by the stamp must reproduce the "+
+				"create order %v", i, row.ID, created[i], created)
+		}
+		if row.ArrivalSeq != recorded[row.ID] {
+			t.Errorf("%s arrival_seq = %d, want %d, the seq its now-pruned create record had", row.ID,
+				row.ArrivalSeq, recorded[row.ID])
+		}
+	}
+}
+
+// RunJournalArrivalIsNeverReused pins uniqueness across a delete: re-creating
+// a deleted id is a NEW arrival and takes a new, higher stamp, never the one
+// the deleted row carried.
+func RunJournalArrivalIsNeverReused(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	journalBaseline(t, ctx, fixture)
+	id := fixture.IssuePrefix + "-reuse-a"
+	first := arrivalCreateWisp(t, ctx, hooks, id).ArrivalSeq
+	if first == 0 {
+		t.Fatalf("wisp %s was created unstamped", id)
+	}
+	if err := fixture.Mutations.Delete(ctx, id); err != nil {
+		t.Fatalf("deleting %s: %v", id, err)
+	}
+	second := arrivalCreateWisp(t, ctx, hooks, id).ArrivalSeq
+	if second <= first {
+		t.Errorf("re-creating %s stamped %d after its deleted row carried %d: a stamp is never reused", id, second, first)
+	}
+}
+
+// RunJournalArrivalIgnoresSuppliedValues pins that only storage assigns the
+// stamp: a create or an import that claims one stores its own (or none),
+// never the claimed value.
+func RunJournalArrivalIgnoresSuppliedValues(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	if hooks.CreateWispClaiming == nil && hooks.Import == nil {
+		t.Skip("this leg supplies neither a claiming create nor an import (JournalArrivalHooks)")
+	}
+	baseline := journalBaseline(t, ctx, fixture)
+	var ids []string
+	if hooks.CreateWispClaiming != nil {
+		id := fixture.IssuePrefix + "-forged-a"
+		if err := hooks.CreateWispClaiming(ctx, id, arrivalForgedSeq); err != nil {
+			t.Fatalf("creating %s claiming arrival_seq %d: %v", id, arrivalForgedSeq, err)
+		}
+		ids = append(ids, id)
+	}
+	if hooks.Import != nil {
+		id := fixture.IssuePrefix + "-forged-b"
+		issue := &types.Issue{
+			ID: id, Title: "t-" + id, IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2,
+			Ephemeral: true, ArrivalSeq: arrivalForgedSeq + 1,
+		}
+		if err := hooks.Import(ctx, issue); err != nil {
+			t.Fatalf("importing %s claiming arrival_seq %d: %v", id, arrivalForgedSeq+1, err)
+		}
+		ids = append(ids, id)
+	}
+	page := journalRead(t, ctx, fixture, baseline, 0)
+	for _, id := range ids {
+		got := arrivalGet(t, ctx, hooks, id).ArrivalSeq
+		if got >= arrivalForgedSeq {
+			t.Errorf("%s stored arrival_seq %d, the value its request claimed: only storage assigns it", id, got)
+			continue
+		}
+		if record, ok := arrivalFindCreateRecord(page.Rows, id); ok && got != record.Seq {
+			t.Errorf("%s arrival_seq = %d, want its create record's seq %d", id, got, record.Seq)
+		}
+	}
+}
+
+// RunJournalArrivalReimportKeepsTheStamp pins that a synthetic create never
+// moves a stamp. Re-importing a row that already exists is an upsert, and the
+// journal records it as a create (the importer cannot tell a consumer the row
+// was there before); that record must not restamp the row. It carries its own,
+// higher seq, and its post-image repeats the stamp the row already had.
+func RunJournalArrivalReimportKeepsTheStamp(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	if hooks.Import == nil {
+		t.Skip("this leg supplies no import (JournalArrivalHooks.Import)")
+	}
+	journalBaseline(t, ctx, fixture)
+	id := fixture.IssuePrefix + "-reimport-a"
+	stamp := arrivalCreateWisp(t, ctx, hooks, id).ArrivalSeq
+	if stamp == 0 {
+		t.Fatalf("wisp %s was created unstamped", id)
+	}
+	again := arrivalGet(t, ctx, hooks, id)
+	again.Title = "re-imported " + id
+	before := journalHead(t, ctx, fixture)
+	if err := hooks.Import(ctx, again); err != nil {
+		t.Fatalf("re-importing stamped wisp %s: %v", id, err)
+	}
+	if got := arrivalGet(t, ctx, hooks, id).ArrivalSeq; got != stamp {
+		t.Errorf("re-importing %s moved its arrival_seq from %d to %d: a synthetic create never restamps a row",
+			id, stamp, got)
+	}
+	record := arrivalCreateRecord(t, journalRead(t, ctx, fixture, before, 0).Rows, id)
+	if record.Seq == stamp {
+		t.Errorf("the re-import's create record reused seq %d, the row's stamp", record.Seq)
+	}
+	if post := arrivalPostImage(t, record); post != stamp {
+		t.Errorf("the re-import's create record (seq %d) carries arrival_seq %d in its post-image, want the "+
+			"row's unchanged %d", record.Seq, post, stamp)
+	}
+}
+
+// RunJournalArrivalFirstCreateRecordStampsAnUnstampedRow pins the first-record
+// rule: a wisp created while the journal was off has no stamp and no create
+// record, so the first create record journaled for it — here a re-import once
+// the journal is on — is the one that stamps it, with that record's seq.
+func RunJournalArrivalFirstCreateRecordStampsAnUnstampedRow(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	if hooks.Import == nil {
+		t.Skip("this leg supplies no import (JournalArrivalHooks.Import)")
+	}
+	journalBaseline(t, ctx, fixture)
+	id := fixture.IssuePrefix + "-first-a"
+	fixture.SetJournalEnabled(false)
+	created, err := hooks.CreateWisp(ctx, id)
+	fixture.SetJournalEnabled(true)
+	if err != nil {
+		t.Fatalf("creating wisp %s with the journal off: %v", id, err)
+	}
+	if created.ArrivalSeq != 0 {
+		t.Fatalf("a wisp created with the journal off returned arrival_seq %d, want none", created.ArrivalSeq)
+	}
+	again := arrivalGet(t, ctx, hooks, id)
+	again.Title = "re-imported " + id
+	before := journalHead(t, ctx, fixture)
+	if err := hooks.Import(ctx, again); err != nil {
+		t.Fatalf("re-importing unstamped wisp %s: %v", id, err)
+	}
+	record := arrivalCreateRecord(t, journalRead(t, ctx, fixture, before, 0).Rows, id)
+	if got := arrivalGet(t, ctx, hooks, id).ArrivalSeq; got != record.Seq {
+		t.Errorf("%s arrival_seq = %d after its first create record (seq %d): the first create record "+
+			"journaled for an unstamped row stamps it", id, got, record.Seq)
+	}
+	if post := arrivalPostImage(t, record); post != record.Seq {
+		t.Errorf("the stamping record (seq %d) carries arrival_seq %d in its post-image", record.Seq, post)
+	}
+}
+
+// RunJournalArrivalRenameKeepsTheStamp pins the rename half of the synthetic
+// create rule: a rename journals delete(old) + create(new), and the create
+// must carry the row's existing stamp rather than restamp it.
+func RunJournalArrivalRenameKeepsTheStamp(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	hooks := arrivalHooks(t, fixture)
+	if hooks.Rename == nil {
+		t.Skip("this leg supplies no id rename (JournalArrivalHooks.Rename)")
+	}
+	journalBaseline(t, ctx, fixture)
+	from := fixture.IssuePrefix + "-rename-a"
+	to := fixture.IssuePrefix + "-rename-b"
+	stamp := arrivalCreateWisp(t, ctx, hooks, from).ArrivalSeq
+	if stamp == 0 {
+		t.Fatalf("wisp %s was created unstamped", from)
+	}
+	before := journalHead(t, ctx, fixture)
+	if err := hooks.Rename(ctx, from, to); err != nil {
+		t.Fatalf("renaming stamped wisp %s to %s: %v", from, to, err)
+	}
+	if got := arrivalGet(t, ctx, hooks, to).ArrivalSeq; got != stamp {
+		t.Errorf("renaming %s to %s moved its arrival_seq from %d to %d: a rename never restamps a row",
+			from, to, stamp, got)
+	}
+	record := arrivalCreateRecord(t, journalRead(t, ctx, fixture, before, 0).Rows, to)
+	if record.Seq == stamp {
+		t.Errorf("the rename's create record reused seq %d, the row's stamp", record.Seq)
+	}
+	if post := arrivalPostImage(t, record); post != stamp {
+		t.Errorf("the rename's create record (seq %d) carries arrival_seq %d in its post-image, want the "+
+			"row's unchanged %d", record.Seq, post, stamp)
+	}
+}
+
+// RunJournalEveryMutationKindRecordsItsActor pins WHO each record names:
+// every op the kit drives lands a record carrying the identity that performed
+// it (journalops.Row.Actor), read back through the role.
+//
+// It is the attribution sibling of RunJournalEveryMutationKindLandsARow and
+// drives the same kit, so the two cannot disagree about which mutations exist.
+// It is a separate case rather than more assertions inside that one because a
+// leg can carry one and not the other: the served client reads every record
+// and drops its actor (internal/httpclient/journal.go journalRow), and parking
+// the completeness case to park the attribution half would give up the only
+// proof that every op kind crosses that wire. TestEventsJournal_ActorMatrixOnEmbedded
+// pins the stored column on one engine; this pins what a READER of the role
+// gets, on every leg.
+//
+// Two rules, and the second is the one with reach. The mutation's own record
+// — its op, naming its subject — carries the kit's Actor (the empty actor for
+// a delete verb that has none, JournalMutations.ActorlessDelete). And NOTHING
+// in the window the mutation opened names anyone else: derived maintenance
+// (an is_blocked recompute journals as an unattributed update) may name no
+// one, but a record naming an identity no mutation used is a misattribution a
+// consumer reconciling writers cannot tell from a real conflicting writer.
+//
+// It is declared BEFORE RunJournalEveryMutationKindLandsARow, which stays last
+// for the reason its own doc gives; this one rebaselines like every case here
+// and needs no particular journal state.
+func RunJournalEveryMutationKindRecordsItsActor(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	journalBaseline(t, ctx, fixture)
+	actor := fixture.Mutations.Actor
+	if actor == "" {
+		t.Fatalf("JournalMutations.Actor is empty: name the identity this leg's hooks pass to their verbs, " +
+			"or this case would hold every record to nobody")
+	}
+	subject := fixture.IssuePrefix + "-actor-subject"
+	other := fixture.IssuePrefix + "-actor-other"
+
+	kit := journalMutationKit(fixture, subject, other)
+	journalRequireKitCoversTheVocabulary(t, kit)
+
+	for _, mutation := range kit {
+		want := actor
+		if mutation.op == storeops.EventDelete && fixture.Mutations.ActorlessDelete {
+			want = ""
+		}
+		before := journalHead(t, ctx, fixture)
+		if err := mutation.run(ctx); err != nil {
+			t.Fatalf("%s: %v", mutation.what, err)
+		}
+		page := journalRead(t, ctx, fixture, before, 0)
+		attributed := false
+		for _, row := range page.Rows {
+			if row.Op == string(mutation.op) && row.IssueID == mutation.subject && row.Actor == want {
+				attributed = true
+			}
+			if row.Actor != "" && row.Actor != want {
+				t.Errorf("%s: the record %s(%s) at seq %d names actor %q, want %q or none: a record naming an "+
+					"identity no mutation used reads as a conflicting writer", mutation.what, row.Op, row.IssueID,
+					row.Seq, row.Actor, want)
+			}
+		}
+		if !attributed {
+			t.Errorf("%s recorded no %q for %s naming actor %q; the journal above seq %d holds %v. The actor "+
+				"is the one member a consumer reconciling writers reads, and a reader that gets it empty reads "+
+				"system/unknown", mutation.what, mutation.op, mutation.subject, want, before,
+				journalActorsOf(page.Rows))
+		}
+	}
+}
+
+// RunJournalEveryMutationKindLandsARow pins the journal's completeness: every
+// op the engine journals is one a reader actually receives.
+//
+// The vocabulary is CLOSED and declared once — issueops.WireEventOps plus
+// issueops.EngineOnlyEventOps — and this case checks the fixture's kit against
+// it, so an op added to the engine without a hook here fails rather than
+// joining a set nothing drives. A backend that recorded five of the seven would
+// otherwise pass every other case in this file: they all read whatever records
+// exist, and a missing KIND is invisible to a reader that only counts.
+//
+// THE ENGINE-ONLY OPS ARE DEMANDED, NOT SKIPPED, and that distinction is the
+// whole reason issueops.IsWireEventOp exists. The journal records seven ops and
+// the public event vocabulary is six; a projector SKIPS the seventh rather than
+// faulting on it, and that skip is only sound while the record is there to be
+// skipped. A contract that dropped the engine-only ops because "no wire event
+// carries them" would be asserting the projector's view of the journal instead
+// of the journal's own, and the first backend to stop recording a comment would
+// pass it.
+//
+// It runs LAST, after both pruning cases, which is deliberate: a journal that
+// was emptied and then written to again is the state a long-lived workspace
+// actually spends its life in, and the mutations here have to land in it.
+//
+// MOVING IT EARLIER IS A SILENT WEAKENING, so this is stated here as well as in
+// the dispatch table and the three leg wirings — at the site somebody editing a
+// leg file would actually be looking. Every case rebaselines off the live head,
+// so a reorder still COMPILES AND STILL PASSES; what it quietly gives up is the
+// only coverage anywhere that a journal keeps recording after a full prune,
+// with nothing going red to say so. If you reorder these, say why.
+func RunJournalEveryMutationKindLandsARow(t *testing.T, ctx context.Context, fixture JournalFixture) {
+	journalBaseline(t, ctx, fixture)
+	subject := fixture.IssuePrefix + "-kind-subject"
+	other := fixture.IssuePrefix + "-kind-other"
+
+	kit := journalMutationKit(fixture, subject, other)
+	journalRequireKitCoversTheVocabulary(t, kit)
+
+	sawEngineOnly := false
+	for _, mutation := range kit {
+		before := journalHead(t, ctx, fixture)
+		if err := mutation.run(ctx); err != nil {
+			t.Fatalf("%s: %v", mutation.what, err)
+		}
+		page := journalRead(t, ctx, fixture, before, 0)
+		if !journalRecords(page.Rows, string(mutation.op), mutation.subject) {
+			t.Errorf("%s recorded no %q for %s; the journal above seq %d holds %v. A mutation kind the "+
+				"journal drops is a replay that silently diverges from the workspace it claims to mirror",
+				mutation.what, mutation.op, mutation.subject, before, journalOpsOf(page.Rows))
+			continue
+		}
+		if !storeops.IsWireEventOp(mutation.op) {
+			sawEngineOnly = true
+		}
+	}
+
+	if !sawEngineOnly {
+		t.Errorf("no engine-only op was journaled; the journal is supposed to be WIDER than the public " +
+			"event vocabulary, and a projector's skip of one is only sound while the record exists")
+	}
+}
+
+// journalMutation is one row of the mutation kit under test: the op it must
+// record, the id that record names, and how to drive it.
+type journalMutation struct {
+	op      storeops.EventOp
+	what    string
+	subject string
+	run     func(ctx context.Context) error
+}
+
+// journalMutationKit binds each hook the fixture supplies to the op it must
+// produce, in an order that leaves each mutation something to act on: the two
+// issues exist before anything edits them, the edge exists before it is
+// removed, and the delete comes last.
+func journalMutationKit(fixture JournalFixture, subject, other string) []journalMutation {
+	m := fixture.Mutations
+	return []journalMutation{
+		{op: storeops.EventCreate, what: "creating an issue", subject: subject,
+			run: func(ctx context.Context) error {
+				if err := m.Create(ctx, other); err != nil {
+					return err
+				}
+				return m.Create(ctx, subject)
+			}},
+		{op: storeops.EventUpdate, what: "updating an issue", subject: subject,
+			run: func(ctx context.Context) error { return m.Update(ctx, subject) }},
+		{op: storeops.EventCommentWrite, what: "commenting on an issue", subject: subject,
+			run: func(ctx context.Context) error {
+				return m.Comment(ctx, subject, "a comment the journal records and no wire event carries")
+			}},
+		{op: storeops.EventDepAdd, what: "adding a dependency", subject: subject,
+			run: func(ctx context.Context) error { return m.AddDependency(ctx, subject, other) }},
+		{op: storeops.EventDepRemove, what: "removing a dependency", subject: subject,
+			run: func(ctx context.Context) error { return m.RemoveDependency(ctx, subject, other) }},
+		{op: storeops.EventClose, what: "closing an issue", subject: subject,
+			run: func(ctx context.Context) error { return m.Close(ctx, subject) }},
+		{op: storeops.EventDelete, what: "deleting an issue", subject: subject,
+			run: func(ctx context.Context) error { return m.Delete(ctx, subject) }},
+	}
+}
+
+// journalRequireKitCoversTheVocabulary fails when the kit and the engine's
+// closed op vocabulary disagree in either direction.
+//
+// Both directions matter. An op the engine journals and the kit does not drive
+// is a kind nothing here proves is recorded — the gap this case was written
+// for. An op the kit drives that the engine does not declare is a case
+// asserting a vocabulary nobody publishes, which is how a contract outlives the
+// thing it describes.
+func journalRequireKitCoversTheVocabulary(t *testing.T, kit []journalMutation) {
+	t.Helper()
+	driven := map[storeops.EventOp]bool{}
+	for _, mutation := range kit {
+		driven[mutation.op] = true
+	}
+	declared := map[storeops.EventOp]bool{}
+	for _, op := range append(storeops.WireEventOps(), storeops.EngineOnlyEventOps()...) {
+		declared[op] = true
+		if !driven[op] {
+			t.Fatalf("the engine journals %q and this contract drives no mutation that produces it: add a "+
+				"hook to JournalMutations and a row to journalMutationKit, or the op joins the set nothing "+
+				"proves is recorded", op)
+		}
+	}
+	for op := range driven {
+		if !declared[op] {
+			t.Fatalf("journalMutationKit drives %q, which is in neither issueops.WireEventOps nor "+
+				"issueops.EngineOnlyEventOps: this contract is asserting a vocabulary nobody declares", op)
+		}
+	}
+}
+
+// journalBaseline activates the journal and returns the head every assertion in
+// the calling case is written relative to. See the seeding-discipline note at
+// the top of this file for why no case may assume an empty journal.
+func journalBaseline(t *testing.T, ctx context.Context, fixture JournalFixture) int64 {
+	t.Helper()
+	fixture.SetJournalEnabled(true)
+	return journalHead(t, ctx, fixture)
+}
+
+// journalHead reads the journal's head through the role itself, from a
+// checkpoint no journal will ever reach.
+//
+// A read at or above the head is CAUGHT UP — no records, no error, the head —
+// which RunJournalHeadArrivesWithItsRowsAndDetectsCaughtUp pins directly. That
+// makes this the one probe that works in every state these cases put the
+// journal in, including after a prune has taken the floor above every seq an
+// earlier case knew about.
+func journalHead(t *testing.T, ctx context.Context, fixture JournalFixture) int64 {
+	t.Helper()
+	page, err := fixture.Journal.ReadEventsJournalPage(ctx, math.MaxInt64, 0)
+	if err != nil {
+		t.Fatalf("reading the journal head: %v", err)
+	}
+	if len(page.Rows) != 0 {
+		t.Fatalf("a checkpoint above every possible seq returned %d records", len(page.Rows))
+	}
+	return page.Head
+}
+
+// journalRead is one page, with the error failing the case. Cases that expect a
+// failure use journalReadErr instead.
+func journalRead(t *testing.T, ctx context.Context, fixture JournalFixture, since int64, limit int) journalops.Page {
+	t.Helper()
+	page, err := fixture.Journal.ReadEventsJournalPage(ctx, since, limit)
+	if err != nil {
+		t.Fatalf("reading the journal from %d (limit %d): %v", since, limit, err)
+	}
+	return page
+}
+
+// journalReadErr is one page read for its error alone.
+func journalReadErr(ctx context.Context, fixture JournalFixture, since int64, limit int) error {
+	_, err := fixture.Journal.ReadEventsJournalPage(ctx, since, limit)
+	return err
+}
+
+// journalRequireTruncated asserts err is the role's typed truncation and
+// returns it.
+//
+// It matches journalops.TruncatedError, which no in-tree leg names — they all
+// return the storage alias — so the match is the alias identity holding at
+// runtime. A nil error is reported as the silent case it actually is, because
+// "no error" here means the read presented a gap as a success.
+func journalRequireTruncated(t *testing.T, what string, err error) *journalops.TruncatedError {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("%s succeeded; a checkpoint below the retained window has to fail loudly, or the "+
+			"consumer either stalls forever or skips the pruned records without knowing", what)
+	}
+	var trunc *journalops.TruncatedError
+	if !errors.As(err, &trunc) {
+		t.Fatalf("%s failed with %T (%v), want *journalops.TruncatedError: a caller dispatches on the "+
+			"TYPE and reads the window off its fields", what, err, err)
+	}
+	return trunc
+}
+
+// journalPrune removes every record below before, both retention floors
+// disabled.
+func journalPrune(t *testing.T, ctx context.Context, fixture JournalFixture, before int64) {
+	t.Helper()
+	if _, err := fixture.Prune(ctx, before, 0, 0); err != nil {
+		t.Fatalf("pruning the journal below %d: %v", before, err)
+	}
+}
+
+// journalSeedCreates creates n issues under the case's own marker and returns
+// their ids in creation order.
+func journalSeedCreates(t *testing.T, ctx context.Context, fixture JournalFixture, marker string, n int) []string {
+	t.Helper()
+	ids := make([]string, 0, n)
+	for i := range n {
+		id := fixture.IssuePrefix + "-" + marker + "-" + string(rune('a'+i))
+		if err := fixture.Mutations.Create(ctx, id); err != nil {
+			t.Fatalf("seeding %s: %v", id, err)
+		}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// journalRecords reports whether any record names op for issue.
+func journalRecords(rows []journalops.Row, op, issue string) bool {
+	for _, row := range rows {
+		if row.Op == op && row.IssueID == issue {
+			return true
+		}
+	}
+	return false
+}
+
+// journalOpsOf renders a window's ops for a failure message. The payloads are
+// deliberately left out: what a reader needs from a failure here is which kinds
+// arrived, and issue snapshots are kilobytes each.
+func journalOpsOf(rows []journalops.Row) []string {
+	ops := make([]string, 0, len(rows))
+	for _, row := range rows {
+		ops = append(ops, row.Op+"("+row.IssueID+")")
+	}
+	return ops
+}
+
+// journalActorsOf renders a window's ops with the actor each names, for the
+// attribution case's failure message.
+func journalActorsOf(rows []journalops.Row) []string {
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row.Op+"("+row.IssueID+")="+strconv.Quote(row.Actor))
+	}
+	return out
+}
+
+// journalFirstSeq is the first record's seq, or 0 for an empty page, so a
+// failure message can name what it got without an index panic.
+func journalFirstSeq(page journalops.Page) int64 {
+	if len(page.Rows) == 0 {
+		return 0
+	}
+	return page.Rows[0].Seq
+}

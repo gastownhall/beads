@@ -18,6 +18,10 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("RecordsCreatedEvent", s.issueInsertRecordsEvent)
 		s.Run("RoutesToWispsTable", s.issueInsertWispRouting)
 		s.Run("ComputesContentHashWhenMissing", s.issueInsertComputesHash)
+		s.Run("PreservesClosedBySession", s.issueInsertPreservesClosedBySession)
+		s.Run("PreservesClosedBySessionOnWisp", s.wispInsertPreservesClosedBySession)
+		s.Run("UpsertRewritesClosedBySession", s.issueUpsertRewritesClosedBySession)
+		s.Run("UpsertClearsClosedBySession", s.issueUpsertClearsClosedBySession)
 	})
 	s.Run("InsertBatch", func() {
 		s.Run("AllIssuesInserted", s.issueInsertBatchAll)
@@ -31,6 +35,8 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("NormalizesStatusType", s.issueUpdateStatusType)
 		s.Run("NormalizesTimestampToUTC", s.issueUpdateNormalizesTimestamp)
 		s.Run("MissingIDWithStatusChangeReturnsErrNoRows", s.issueUpdateMissingIDWithStatus)
+		s.Run("SameStatusInUnitOfWork", s.issueUpdateSameStatusInUnitOfWork)
+		s.Run("PreservesCallerMap", s.issueUpdatePreservesCallerMap)
 	})
 	s.Run("RowVersion", func() {
 		s.Run("NonZeroAfterCreate", s.issueRowVersionNonZeroOnCreate)
@@ -124,6 +130,91 @@ func (s *testSuite) issueInsertRoundTrip() {
 	s.Equal(types.TypeTask, out.IssueType)
 	s.Require().NotNil(out.EstimatedMinutes)
 	s.Equal(45, *out.EstimatedMinutes)
+}
+
+// issueInsertPreservesClosedBySession proves the domain/UOW writer
+// (insertIssueRow, which Insert uses without CreateOnly) stores
+// closed_by_session, so an issue it writes reads back with the same
+// closing-session provenance the classic writer preserves.
+//
+// The column defaults to the empty string in every schema and the shared
+// scanner hydrates whatever is stored, so a writer that omits it loses the
+// value silently: the insert succeeds, the read succeeds, and only the
+// provenance is gone.
+func (s *testSuite) issueInsertPreservesClosedBySession() {
+	r := s.issueRepo()
+	in := newTestIssue("bd-cbs-1", "closed elsewhere")
+	in.Status = types.StatusClosed
+	in.CloseReason = "done"
+	in.ClosedBySession = "sess-xyz"
+
+	s.Require().NoError(r.Insert(s.Ctx(), in, "tester", domain.InsertIssueOpts{}))
+
+	out, err := r.Get(s.Ctx(), "bd-cbs-1", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal("sess-xyz", out.ClosedBySession, "closed_by_session must survive a domain/UOW insert")
+	s.Equal("done", out.CloseReason)
+}
+
+// wispInsertPreservesClosedBySession is the wisp-table counterpart: promotion
+// reads a wisp and re-inserts it as an issue, so the value has to survive on
+// the wisp side too or there is nothing left to promote.
+func (s *testSuite) wispInsertPreservesClosedBySession() {
+	r := s.issueRepo()
+	wisp := newTestIssue("bd-cbs-wisp", "closed wisp")
+	wisp.Ephemeral = true
+	wisp.Status = types.StatusClosed
+	wisp.ClosedBySession = "sess-wisp"
+
+	s.Require().NoError(r.Insert(s.Ctx(), wisp, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
+
+	out, err := r.Get(s.Ctx(), "bd-cbs-wisp", domain.IssueTableOpts{UseWispsTable: true})
+	s.Require().NoError(err)
+	s.Equal("sess-wisp", out.ClosedBySession, "closed_by_session must survive a domain/UOW wisp insert")
+}
+
+// issueUpsertRewritesClosedBySession covers the ON DUPLICATE KEY UPDATE half,
+// which runs when an insert without CreateOnly lands on an ID that already
+// exists. A column listed in the INSERT but missing from the upsert
+// assignments would carry the value on first write and silently keep the
+// stale one forever after.
+func (s *testSuite) issueUpsertRewritesClosedBySession() {
+	r := s.issueRepo()
+	first := newTestIssue("bd-cbs-upsert", "first")
+	first.Status = types.StatusClosed
+	first.ClosedBySession = "sess-first"
+	s.Require().NoError(r.Insert(s.Ctx(), first, "tester", domain.InsertIssueOpts{}))
+
+	second := newTestIssue("bd-cbs-upsert", "second")
+	second.Status = types.StatusClosed
+	second.ClosedBySession = "sess-second"
+	s.Require().NoError(r.Insert(s.Ctx(), second, "tester", domain.InsertIssueOpts{}))
+
+	out, err := r.Get(s.Ctx(), "bd-cbs-upsert", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal("sess-second", out.ClosedBySession, "the upsert must rewrite closed_by_session, not keep the stale value")
+}
+
+// issueUpsertClearsClosedBySession pins that the upsert mirrors the incoming
+// row even when it carries no session: rewriting a closed row with an open one
+// clears the stored session as it resets the status, instead of leaving an
+// open row with a stale closing session.
+func (s *testSuite) issueUpsertClearsClosedBySession() {
+	r := s.issueRepo()
+	closed := newTestIssue("bd-cbs-clear", "closed")
+	closed.Status = types.StatusClosed
+	closed.ClosedBySession = "sess-first"
+	s.Require().NoError(r.Insert(s.Ctx(), closed, "tester", domain.InsertIssueOpts{}))
+	stored, err := r.Get(s.Ctx(), "bd-cbs-clear", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Require().Equal("sess-first", stored.ClosedBySession, "precondition: the first insert stores the session")
+
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-cbs-clear", "reopened"), "tester", domain.InsertIssueOpts{}))
+
+	out, err := r.Get(s.Ctx(), "bd-cbs-clear", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal(types.StatusOpen, out.Status)
+	s.Empty(out.ClosedBySession, "the upsert must clear closed_by_session when the incoming row has none")
 }
 
 func (s *testSuite) issueInsertRequiresID() {
@@ -696,8 +787,8 @@ func (s *testSuite) issueClaimConflict() {
 func (s *testSuite) issueClaimClosed() {
 	r := s.issueRepo()
 	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-claim-closed", "x"), "tester", domain.InsertIssueOpts{}))
-	s.Require().NoError(r.Update(s.Ctx(), "bd-claim-closed",
-		map[string]any{"status": string(types.StatusClosed)}, "tester", domain.IssueTableOpts{}))
+	_, err := r.Close(s.Ctx(), "bd-claim-closed", domain.CloseRowParams{}, "tester", domain.IssueTableOpts{})
+	s.Require().NoError(err)
 
 	res, err := r.Claim(s.Ctx(), "bd-claim-closed", "alice", domain.IssueTableOpts{})
 	s.Require().NoError(err)

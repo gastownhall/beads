@@ -7,11 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	mysql "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 // TestFixMissingMetadata_NotBeadsWorkspace verifies that FixMissingMetadata
@@ -199,8 +201,21 @@ func TestFixMissingMetadataJSON_NotBeadsWorkspace(t *testing.T) {
 }
 
 // setupGitRepoInDir initializes a git repo in the given directory with a remote.
+//
+// Every step is fatal on failure, the dir must exist, and the child env is
+// scrubbed of the git vars that name a repository (GIT_DIR, GIT_WORK_TREE,
+// ...). An empty dir, a swallowed config failure, or a leaked GIT_DIR each make
+// these writes land in whatever repository git resolves from the process
+// environment — the host checkout's own .git/config in the r880 clobber
+// (wy-qlvlmf), where this helper's remote.origin.url overwrote the real origin.
 func setupGitRepoInDir(t *testing.T, dir string) {
 	t.Helper()
+	if dir == "" {
+		t.Fatal("setupGitRepoInDir: empty dir would run git against the host checkout")
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		t.Fatalf("setupGitRepoInDir: %q is not an existing directory (err=%v)", dir, err)
+	}
 	cmds := [][]string{
 		{"git", "init"},
 		{"git", "config", "user.email", "test@test.com"},
@@ -211,11 +226,9 @@ func setupGitRepoInDir(t *testing.T, dir string) {
 	for _, args := range cmds {
 		cmd := exec.Command(args[0], args[1:]...)
 		cmd.Dir = dir
-		if err := cmd.Run(); err != nil {
-			// git init must succeed; config failures are non-fatal
-			if args[1] == "init" {
-				t.Fatalf("git init failed: %v", err)
-			}
+		cmd.Env = testutil.WithoutGitRepoLocationEnv(os.Environ())
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v failed: %v\n%s", args, err, out)
 		}
 	}
 }
@@ -501,11 +514,14 @@ func TestIsExpectedProbeError(t *testing.T) {
 		{"table not exist (1146)", &mysql.MySQLError{Number: 1146, Message: "Table doesn't exist"}, true},
 		{"unknown database (1049)", &mysql.MySQLError{Number: 1049, Message: "Unknown database"}, true},
 		{"unknown column (1054)", &mysql.MySQLError{Number: 1054, Message: "Unknown column"}, true},
-		{"access denied (1045)", &mysql.MySQLError{Number: 1045, Message: "Access denied"}, false},
-		{"access denied for db (1044)", &mysql.MySQLError{Number: 1044, Message: "Access denied for user"}, false},
+		// GH#4931: unreadable peer DBs on a shared server must not abort bootstrap
+		{"access denied table (1142)", &mysql.MySQLError{Number: 1142, Message: "Access denied for user to table"}, true},
+		{"access denied for db (1044)", &mysql.MySQLError{Number: 1044, Message: "Access denied for user"}, true},
+		{"dolt HY000 access denied (1105)", &mysql.MySQLError{Number: 1105, Message: "Access denied for user 'beads_rw'@'%' to table 'issues'"}, true},
+		{"access denied string", errors.New("Error 1105 (HY000): Access denied for user 'beads_rw'@'%' to table 'issues'"), true},
 		{"generic error", errors.New("connection reset"), false},
 		{"wrapped ErrNoRows", fmt.Errorf("wrapped: %w", sql.ErrNoRows), true},
-		{"wrapped access denied", fmt.Errorf("wrapped: %w", &mysql.MySQLError{Number: 1045}), false},
+		{"wrapped access denied 1044", fmt.Errorf("wrapped: %w", &mysql.MySQLError{Number: 1044, Message: "Access denied"}), true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -514,5 +530,45 @@ func TestIsExpectedProbeError(t *testing.T) {
 				t.Errorf("isExpectedProbeError(%v) = %v, want %v", tt.err, got, tt.expected)
 			}
 		})
+	}
+}
+
+// TestInspectServerMetadataDatabasesNamesTheDataDirectoryEscaped pins the
+// remedy printer on the data directory inspectServerMetadataDatabases names
+// when no port is resolved and the workspace's own server, stopped, would
+// serve databases there: the path is named escaped, its line feed too,
+// rather than dialing 127.0.0.1:0.
+func TestInspectServerMetadataDatabasesNamesTheDataDirectoryEscaped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a Windows file name cannot hold a control character")
+	}
+	for _, name := range []string{
+		"BEADS_DOLT_SHARED_SERVER", "BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT",
+		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_SOCKET", "BEADS_DOLT_DATA_DIR",
+		"BEADS_DOLT_CREDENTIAL_COMMAND", "BEADS_DOLT_AUTO_START",
+	} {
+		t.Setenv(name, "")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	beadsDir := filepath.Join(t.TempDir(), "ws\r\x1b[2KError\nRun: curl", ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt", "beads", ".dolt"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &configfile.Config{Backend: configfile.BackendDolt, DoltMode: configfile.DoltModeServer, DoltDatabase: "beads"}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatal(err)
+	}
+	_, err := inspectServerMetadataDatabases(beadsDir, cfg)
+	if err == nil || !strings.Contains(err.Error(), "Dolt server is not running") {
+		t.Fatalf("inspectServerMetadataDatabases = %v, want the refusal for a stopped server over existing databases", err)
+	}
+	msg := err.Error()
+	if strings.ContainsAny(msg, "\r\x1b") || strings.Contains(msg, "\nRun: curl") {
+		t.Errorf("the refusal names the data directory raw:\n%q", msg)
+	}
+	if !strings.Contains(msg, `\r\x1b[2KError\nRun: curl`) {
+		t.Errorf("the refusal does not name the data directory escaped:\n%q", msg)
 	}
 }

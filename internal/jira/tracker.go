@@ -7,10 +7,11 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/endpointtrust"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -24,7 +25,7 @@ func init() {
 // Tracker implements tracker.IssueTracker for Jira.
 type Tracker struct {
 	client           *Client
-	store            storage.Storage
+	store            tracker.Store
 	jiraURL          string
 	projectKeys      []string                          // one or more project keys (first is primary)
 	apiVersion       string                            // "2" or "3" (default: "3")
@@ -58,12 +59,15 @@ func (t *Tracker) Name() string         { return "jira" }
 func (t *Tracker) DisplayName() string  { return "Jira" }
 func (t *Tracker) ConfigPrefix() string { return "jira" }
 
-func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
+func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 	t.store = store
 
 	jiraURL, err := t.getConfig(ctx, "jira.url", "JIRA_URL")
 	if err != nil || jiraURL == "" {
 		return fmt.Errorf("Jira URL not configured (set jira.url or JIRA_URL)")
+	}
+	if err := endpointtrust.Check(endpointtrust.WorkspaceKey(), "jira", jiraURL, endpointtrust.PrivateMatch("jira.url", "JIRA_URL", jiraURL)); err != nil {
+		return err
 	}
 	t.jiraURL = jiraURL
 
@@ -178,6 +182,12 @@ func (t *Tracker) Validate() error {
 }
 
 func (t *Tracker) Close() error { return nil }
+
+var _ tracker.SinceGranularityProvider = (*Tracker)(nil)
+
+// SinceGranularity reports that FetchIssues matches Since to the minute: its
+// JQL compares updated with a "yyyy-MM-dd HH:mm" literal.
+func (t *Tracker) SinceGranularity() time.Duration { return time.Minute }
 
 func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([]tracker.TrackerIssue, error) {
 	// Build JQL query — use IN clause for multi-project.

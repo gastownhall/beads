@@ -5,12 +5,10 @@
 // server — and ResolveLadder walks an ordered chain, first configured hit wins,
 // failing closed when a configured source errors.
 //
-// The rungs are CommandSource (an external helper), EnvSource (a static env var),
-// and FileSource (the credentials file, keyed by [host:port]). The exec engine
-// (CommandSource) is the vendor-neutral credential-process idiom (kubectl
-// ExecCredential / AWS credential_process / git credential helper). It was ported
-// from the credential-command work on the feat/dolt-credential-command branch
-// (dolt/credcmd.go there), generalized here so every backend shares one resolver.
+// CommandSource is the built-in rung: an external helper, the vendor-neutral
+// credential-process idiom (kubectl ExecCredential / AWS credential_process / git
+// credential helper). Source is exported and ResolveLadder is variadic, so a build
+// that needs another rung supplies its own Source without changing the engine.
 package creds
 
 import (

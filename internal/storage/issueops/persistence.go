@@ -1,0 +1,337 @@
+package issueops
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
+)
+
+// PersistenceMoveResult reports the durable tables changed by a persistence move.
+type PersistenceMoveResult struct {
+	Changed       bool
+	ChangedTables map[string]bool
+	// EnteredIssuesPlane reports that the move took the row out of the wisps
+	// table into issues. A same-plane repair does not set it: that row keeps
+	// its own participation.
+	EnteredIssuesPlane bool
+	// RestoredParticipation reports that the row entered the issues plane
+	// carrying the participation a demotion recorded for it while versioned
+	// history was on (carryParticipationInTx), and that the move put it back
+	// on the new issues row: a legacy row is legacy again, a participating
+	// row has its generation again.
+	RestoredParticipation bool
+}
+
+// BeginsHistory reports whether the move's mint is create-shaped (design
+// §16.2b): the row entered the issues plane carrying no participation (it
+// began as a wisp, or became one while history was off), so its issues row
+// is new and its next version is its first. A row that arrived with its
+// participation restored keeps it, and mints update-shaped, so a legacy row
+// stays legacy (R2.3). A caller that mints for the move itself, as
+// ExecuteUpdate does, reads this to pick the entry point.
+func (r PersistenceMoveResult) BeginsHistory() bool {
+	return r.EnteredIssuesPlane && !r.RestoredParticipation
+}
+
+// MoveIssuePersistenceInTx moves a complete issue aggregate to the requested
+// persistence mode. A move that lands (or normalizes) the row on the issues
+// plane mints a version row once the target row and its auxiliary copies
+// exist; a move whose target is the wisp plane mints nothing (wisps are never
+// versioned).
+func MoveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue, mode types.PersistenceMode, actor string) (PersistenceMoveResult, error) {
+	return moveIssuePersistenceInTx(ctx, tx, current, mode, actor, true)
+}
+
+// moveIssuePersistenceInTx is the body of MoveIssuePersistenceInTx.
+// mintVersion controls whether the move mints its own version row: the
+// exported entry point always does, while ExecuteUpdate applies the
+// persistence patch last and mints once for the whole guarded update.
+func moveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue, mode types.PersistenceMode, actor string, mintVersion bool) (PersistenceMoveResult, error) {
+	if tx == nil || current == nil || current.ID == "" {
+		return PersistenceMoveResult{}, fmt.Errorf("move issue persistence: issue and transaction are required")
+	}
+	ephemeral, noHistory, storageClass, err := types.NormalizePersistenceMode(*current, mode)
+	if err != nil {
+		// The unversioned refusal is the request's: the row is sound and the
+		// move it asks for is one its class never makes. The other errors
+		// describe a row that breaks its own persistence invariants, so they
+		// stay unclassified; an invalid mode is refused before any update
+		// path gets here (ValidateUpdateRequest).
+		if errors.Is(err, types.ErrUnversionedWispMove) {
+			return PersistenceMoveResult{}, fmt.Errorf("%w: %w", storage.ErrValidation, err)
+		}
+		return PersistenceMoveResult{}, err
+	}
+	// A move re-inserts the row into the other plane, so it takes the id's
+	// create coordination cell BEFORE it reads where the row lives
+	// (CoordinateIDCreatesInTx). Against a retaining sweep of the same row:
+	// a move that comes second reads after the sweep's commit and finds no
+	// row; a move that comes first makes the sweep conflict and retry.
+	// Without the cell both could delete the source row (identical deletes
+	// merge cleanly on Dolt), the move's insert would land in the other
+	// plane, and the sweep's tombstone would sit beside a live row.
+	if err := CoordinateIDCreatesInTx(ctx, tx, []string{current.ID}); err != nil {
+		return PersistenceMoveResult{}, err
+	}
+	sourceWisp, found, err := locatePersistenceMoveRow(ctx, tx, current.ID)
+	if err != nil {
+		return PersistenceMoveResult{}, err
+	}
+	if !found {
+		return PersistenceMoveResult{}, fmt.Errorf("move issue persistence: %w: %s", storage.ErrNotFound, current.ID)
+	}
+	targetWisp := ephemeral || noHistory
+	if sourceWisp == targetWisp && current.Ephemeral == ephemeral && current.NoHistory == noHistory && current.StorageClass.Normalize() == storageClass.Normalize() {
+		return PersistenceMoveResult{}, nil
+	}
+	result := PersistenceMoveResult{Changed: true, ChangedTables: map[string]bool{}}
+	if sourceWisp == targetWisp {
+		// THE TABLE IS THE ROW'S OWN PLANE, not `wisps`. This branch runs when
+		// no move is needed but the flags still disagree with the row, and that
+		// state is reachable in the ISSUES plane: a durable row carrying
+		// ephemeral = 1 is exactly what the pre-role proxied update produced,
+		// and `bd update --persistent` is the command an operator reaches for
+		// to repair it. Hardcoding `wisps` sent that repair at the wrong table,
+		// where it matched nothing and still reported success.
+		table := persistenceIssueTable(sourceWisp)
+		//nolint:gosec // G201: table comes from persistenceIssueTable, not from input.
+		res, err := tx.ExecContext(ctx, `UPDATE `+table+` SET ephemeral = ?, no_history = ?, storage_class = ?, row_lock = ? WHERE id = ?`, ephemeral, noHistory, storageClass.Normalize(), FreshRowLock(), current.ID)
+		if err != nil {
+			return PersistenceMoveResult{}, fmt.Errorf("normalize local issue persistence: %w", err)
+		}
+		// Changed: true is a claim about the database, so check it rather than
+		// assert it. A zero-row update here means the row is not where the
+		// plane probe said it was, and reporting success would hand the caller
+		// a repair that did not happen.
+		if n, err := res.RowsAffected(); err == nil && n == 0 {
+			return PersistenceMoveResult{}, fmt.Errorf("normalize local issue persistence: %s names no row in %s", current.ID, table)
+		}
+		result.ChangedTables[table] = true
+		// The flags are part of the bead snapshot, so a normalize journals as
+		// an update. The no-change early return above emits nothing.
+		if err := RecordEventInTx(ctx, tx, EventUpdate, current.ID, actor); err != nil {
+			return PersistenceMoveResult{}, err
+		}
+		// Versioned only on the issues plane; a wisp-plane normalize keeps
+		// the wisp exclusion. Unlike a move, this mint stays update-shaped
+		// (design §16.2b): the row already lives on the issues plane and
+		// keeps its own participation_generation. A row created with the flag
+		// on proceeds; a legacy row stays legacy, since a repair is an
+		// ordinary write and must not promote it (R2.3).
+		if mintVersion && !targetWisp {
+			if err := RecordVersionInTx(ctx, tx, current.ID, actor); err != nil {
+				return PersistenceMoveResult{}, err
+			}
+		}
+		return result, nil
+	}
+	if !sourceWisp && targetWisp {
+		if err := rejectPersistenceDemotion(ctx, tx, current.ID); err != nil {
+			return PersistenceMoveResult{}, err
+		}
+	}
+	move := *current
+	move.Ephemeral, move.NoHistory, move.StorageClass, move.RowVersion = ephemeral, noHistory, storageClass, FreshRowLock()
+	if err := InsertIssueStrictInTx(ctx, tx, persistenceIssueTable(targetWisp), &move); err != nil {
+		return PersistenceMoveResult{}, fmt.Errorf("insert moved issue %s: %w", current.ID, err)
+	}
+	// Both rows exist until the source is deleted below, so this is where the
+	// row's participation crosses the planes: recorded on the wisps row by a
+	// demotion, restored onto the new issues row by the move back out.
+	restored, err := carryParticipationInTx(ctx, tx, current.ID, targetWisp)
+	if err != nil {
+		return PersistenceMoveResult{}, err
+	}
+	auxTables, err := copyPersistenceAuxiliary(ctx, tx, current.ID, sourceWisp, targetWisp)
+	if err != nil {
+		return PersistenceMoveResult{}, err
+	}
+	for table := range auxTables {
+		result.ChangedTables[table] = true
+	}
+	if targetWisp {
+		inboundTables, err := inboundPersistenceDependencyTables(ctx, tx, current.ID, "depends_on_issue_id")
+		if err != nil {
+			return PersistenceMoveResult{}, err
+		}
+		if err := RetargetInboundDependenciesToWispInTx(ctx, tx, current.ID); err != nil {
+			return PersistenceMoveResult{}, err
+		}
+		for table := range inboundTables {
+			result.ChangedTables[table] = true
+		}
+		if err := DeleteLeaseInTx(ctx, tx, current.ID); err != nil {
+			return PersistenceMoveResult{}, err
+		}
+	} else {
+		inboundTables, err := inboundPersistenceDependencyTables(ctx, tx, current.ID, "depends_on_wisp_id")
+		if err != nil {
+			return PersistenceMoveResult{}, err
+		}
+		if err := RetargetInboundDependenciesToIssueInTx(ctx, tx, current.ID); err != nil {
+			return PersistenceMoveResult{}, err
+		}
+		for table := range inboundTables {
+			result.ChangedTables[table] = true
+		}
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE id = ?`, persistenceIssueTable(sourceWisp)), current.ID); err != nil {
+		return PersistenceMoveResult{}, fmt.Errorf("delete moved issue %s: %w", current.ID, err)
+	}
+	issues, wisps, err := affectedForPersistenceMove(ctx, tx, current.ID, targetWisp)
+	if err != nil {
+		return PersistenceMoveResult{}, err
+	}
+	recompute, err := RecomputeIsBlockedInTxWithResult(ctx, tx, issues, wisps)
+	if err != nil {
+		return PersistenceMoveResult{}, fmt.Errorf("recompute blocked state: %w", err)
+	}
+	if recompute.IssueRowsChanged {
+		result.ChangedTables["issues"] = true
+	}
+	if recompute.WispRowsChanged {
+		result.ChangedTables["wisps"] = true
+	}
+	result.ChangedTables[persistenceIssueTable(sourceWisp)] = true
+	result.ChangedTables[persistenceIssueTable(targetWisp)] = true
+	// The bead keeps its ID across a plane move; only where it is stored
+	// changes. Journal one update carrying the moved snapshot, after derived
+	// blocked-state maintenance has settled. A move INTO the issues plane
+	// then mints, after its auxiliary copies and retargeted edges exist; a
+	// move into the wisp plane mints nothing. A row that carried no
+	// participation mints its first version create-shaped (design §16.2b):
+	// its issues row was inserted above without participation_generation, so
+	// the update-shaped entry would fence it as legacy. A row whose
+	// participation the move restored mints update-shaped, as any write to it
+	// on the issues plane would: a legacy row stays legacy (R2.3).
+	if err := RecordEventInTx(ctx, tx, EventUpdate, current.ID, actor); err != nil {
+		return PersistenceMoveResult{}, err
+	}
+	result.EnteredIssuesPlane = !targetWisp
+	result.RestoredParticipation = !targetWisp && restored
+	if mintVersion && !targetWisp {
+		if result.BeginsHistory() {
+			if err := RecordVersionForCreateInTx(ctx, tx, current.ID, actor); err != nil {
+				return PersistenceMoveResult{}, err
+			}
+		} else if err := RecordVersionInTx(ctx, tx, current.ID, actor); err != nil {
+			return PersistenceMoveResult{}, err
+		}
+	}
+	return result, nil
+}
+
+func persistenceIssueTable(wisp bool) string {
+	if wisp {
+		return "wisps"
+	}
+	return "issues"
+}
+
+// rejectPersistenceDemotion refuses a durable-to-wisp move of a row that has
+// retained snapshots. The refusal is the request's (ErrValidation); a failed
+// count is not.
+func rejectPersistenceDemotion(ctx context.Context, tx DBTX, id string) error {
+	for _, table := range []string{"issue_snapshots", "compaction_snapshots"} {
+		var count int
+		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE issue_id = ?`, table), id).Scan(&count); err != nil {
+			return fmt.Errorf("check retained snapshots in %s: %w", table, err)
+		}
+		if count > 0 {
+			return fmt.Errorf("%w: cannot demote issue %s with retained snapshots", storage.ErrValidation, id)
+		}
+	}
+	return nil
+}
+
+func copyPersistenceAuxiliary(ctx context.Context, tx DBTX, id string, sourceWisp, targetWisp bool) (map[string]bool, error) {
+	changed := map[string]bool{}
+	for i, from := range persistenceAuxTables(sourceWisp) {
+		to := persistenceAuxTables(targetWisp)[i]
+		columns, key, err := persistenceColumns(from)
+		if err != nil {
+			return nil, err
+		}
+		copied, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT INTO %s (%s) SELECT %s FROM %s WHERE %s = ?`, to, columns, columns, from, key), id)
+		if err != nil {
+			return nil, fmt.Errorf("copy %s: %w", from, err)
+		}
+		if rows, err := copied.RowsAffected(); err == nil && rows > 0 {
+			changed[from], changed[to] = true, true
+		}
+		deleted, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE %s = ?`, from, key), id)
+		if err != nil {
+			return nil, fmt.Errorf("delete %s: %w", from, err)
+		}
+		_ = deleted
+	}
+	return changed, nil
+}
+
+// locatePersistenceMoveRow reports which plane holds id (wisp true for the
+// wisps table) and whether any does. A row in neither is one deleted after the
+// caller read it, which a move must not re-create.
+func locatePersistenceMoveRow(ctx context.Context, tx DBTX, id string) (wisp, found bool, err error) {
+	var wispCount, issueCount int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM wisps WHERE id = ?`, id).Scan(&wispCount); err != nil {
+		return false, false, fmt.Errorf("locate issue persistence plane: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, id).Scan(&issueCount); err != nil {
+		return false, false, fmt.Errorf("locate issue persistence plane: %w", err)
+	}
+	if issueCount > 0 && wispCount > 0 {
+		return false, false, fmt.Errorf("locate issue persistence plane: ID %q exists in both issues and wisps", id)
+	}
+	return wispCount > 0, wispCount+issueCount > 0, nil
+}
+
+func persistenceAuxTables(wisp bool) []string {
+	if wisp {
+		return []string{"wisp_labels", "wisp_dependencies", "wisp_events", "wisp_comments", "wisp_child_counters"}
+	}
+	return []string{"labels", "dependencies", "events", "comments", "child_counters"}
+}
+
+func inboundPersistenceDependencyTables(ctx context.Context, tx DBTX, id, targetColumn string) (map[string]bool, error) {
+	if targetColumn != "depends_on_issue_id" && targetColumn != "depends_on_wisp_id" {
+		return nil, fmt.Errorf("unknown dependency target column %q", targetColumn)
+	}
+	changed := map[string]bool{}
+	for _, table := range []string{"dependencies", "wisp_dependencies"} {
+		var count int
+		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE %s = ?`, table, targetColumn), id).Scan(&count); err != nil {
+			return nil, fmt.Errorf("find inbound dependencies in %s: %w", table, err)
+		}
+		if count > 0 {
+			changed[table] = true
+		}
+	}
+	return changed, nil
+}
+
+func persistenceColumns(table string) (string, string, error) {
+	switch table {
+	case "labels", "wisp_labels":
+		return "issue_id, label", "issue_id", nil
+	case "dependencies", "wisp_dependencies":
+		return "id, issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata, thread_id", "issue_id", nil
+	case "events", "wisp_events":
+		return "id, issue_id, event_type, actor, old_value, new_value, comment, created_at", "issue_id", nil
+	case "comments", "wisp_comments":
+		return "id, issue_id, author, text, created_at", "issue_id", nil
+	case "child_counters", "wisp_child_counters":
+		return "parent_id, last_child", "parent_id", nil
+	default:
+		return "", "", fmt.Errorf("unknown persistence table %q", table)
+	}
+}
+
+func affectedForPersistenceMove(ctx context.Context, tx DBTX, id string, targetWisp bool) ([]string, []string, error) {
+	if targetWisp {
+		return AffectedByStatusChangeForWispInTx(ctx, tx, id)
+	}
+	return AffectedByStatusChangeInTx(ctx, tx, id)
+}

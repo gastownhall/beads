@@ -1,0 +1,11 @@
+diff -ruN a/go/BUILD.bazel b/go/BUILD.bazel
+--- a/go/BUILD.bazel	2026-09-22 00:06:47.043685364 +0000
++++ b/go/BUILD.bazel	2026-09-22 00:06:47.045883735 +0000
+@@ -18,6 +18,6 @@
+         "struct.go",
+         "table.go",
+     ],
+-    importpath = "github.com/google/flatbuffers/go",
++    importpath = "github.com/dolthub/flatbuffers/v23/go",
+     visibility = ["//visibility:public"],
+ )

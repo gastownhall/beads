@@ -7,12 +7,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -212,7 +214,7 @@ func findOutdatedBDHookVersions(
 			// No version comment found. If this is a bd hook (has shim marker,
 			// inline marker, or calls bd hooks run), treat it as outdated since
 			// all current hook templates include a version comment. (GH#1466)
-			if isBdHookContent(contentStr) {
+			if IsBdHookContent(contentStr) {
 				outdated = append(outdated, fmt.Sprintf("%s@unknown", hookName))
 				if oldest == "" {
 					oldest = "0.0.0"
@@ -230,8 +232,11 @@ func findOutdatedBDHookVersions(
 	return outdated, oldest
 }
 
-// isBdHookContent checks if hook content is a bd hook (shim, inline, section-marker, or calls bd hooks run).
-func isBdHookContent(content string) bool {
+// IsBdHookContent checks if hook content is a bd hook (shim, inline, section-marker, or calls bd hooks run).
+// It is exported because cmd/bd's getHookVersion classifies the same files for
+// bd hooks list / bd info / bd config drift; sharing one predicate is what keeps
+// those surfaces from disagreeing with bd doctor about the same hook (GH#6084).
+func IsBdHookContent(content string) bool {
 	return strings.Contains(content, bdShimMarker) ||
 		strings.Contains(content, bdInlineHookMarker) ||
 		strings.Contains(content, bdSectionMarkerPrefix) ||
@@ -445,11 +450,13 @@ func CheckGitUpstream(path string) DoctorCheck {
 	cmd.Dir = path
 	upOut, err := cmd.Output()
 	if err != nil {
+		// The branch goes into the git push command as one shell word.
+		branchArg, note := remedy.CommandArg(runtime.GOOS, branch, "<branch>")
 		return DoctorCheck{
 			Name:    "Git Upstream",
 			Status:  StatusWarning,
-			Message: fmt.Sprintf("No upstream configured for %s", branch),
-			Fix:     fmt.Sprintf("Set upstream then push: git push -u origin %s", branch),
+			Message: fmt.Sprintf("No upstream configured for %s", remedy.PrintedValue(branch)),
+			Fix:     "Set upstream then push: git push -u origin " + branchArg + note,
 		}
 	}
 	upstream := strings.TrimSpace(string(upOut))
@@ -583,9 +590,29 @@ func CheckStaleLegacyHooks() DoctorCheck {
 		Name:    "Stale Legacy Hooks",
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d stale .legacy hook(s) calling removed 'bd hook' command", len(staleFiles)),
-		Detail:  fmt.Sprintf("Files: %s", strings.Join(staleFiles, ", ")),
-		Fix:     "Remove or update these files: rm " + strings.Join(staleFilePaths(hooksDir, staleFiles), " "),
+		Detail:  fmt.Sprintf("Files: %s", remedy.PrintedList(staleFiles, ", ")),
+		Fix:     "Remove or update these files: " + staleFilesRemoveCommand(runtime.GOOS, staleFilePaths(hooksDir, staleFiles)),
 	}
+}
+
+// staleFilesRemoveCommand is the rm command for paths, each path one shell
+// word or a numbered placeholder named after the command. The hooks
+// directory can be one the repository commits (core.hooksPath), so both the
+// checkout path and the file names reach the command: bare, a space in
+// either would make rm act on other paths.
+func staleFilesRemoveCommand(goos string, paths []string) string {
+	args := make([]string, len(paths))
+	var notes strings.Builder
+	for i, path := range paths {
+		placeholder := "<file>"
+		if len(paths) > 1 {
+			placeholder = fmt.Sprintf("<file%d>", i+1)
+		}
+		arg, note := remedy.CommandArg(goos, path, placeholder)
+		args[i] = arg
+		notes.WriteString(note)
+	}
+	return "rm " + strings.Join(args, " ") + notes.String()
 }
 
 func staleFilePaths(hooksDir string, names []string) []string {
@@ -594,6 +621,184 @@ func staleFilePaths(hooksDir string, names []string) []string {
 		paths[i] = filepath.Join(hooksDir, name)
 	}
 	return paths
+}
+
+// CheckHooksPath detects a dangling core.hooksPath: a git config value that
+// still points at a hooks directory which no longer exists. This happens
+// when a user manually deletes .beads/ (e.g. `rm -rf .beads/`) without
+// running `bd hooks uninstall` first — git keeps looking for the missing
+// directory, and beads' post-checkout import can recreate a stray .beads/
+// workspace as a side effect (GH#4440).
+func CheckHooksPath() DoctorCheck {
+	const name = "Hooks Path"
+
+	repoRoot, _ := git.GetMainRepoRoot()
+	if repoRoot == "" {
+		repoRoot = git.GetRepoRoot()
+	}
+	if repoRoot == "" {
+		return DoctorCheck{
+			Name:    name,
+			Status:  StatusOK,
+			Message: "N/A (not a git repository)",
+		}
+	}
+
+	hooksPath, ok := getConfiguredHooksPath(repoRoot)
+	if !ok || hooksPath == "" {
+		return DoctorCheck{
+			Name:    name,
+			Status:  StatusOK,
+			Message: "core.hooksPath is not set",
+		}
+	}
+
+	resolved := expandHookPathTilde(hooksPath)
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Join(repoRoot, resolved)
+	}
+
+	if fileExists(resolved) {
+		return DoctorCheck{
+			Name:    name,
+			Status:  StatusOK,
+			Message: fmt.Sprintf("core.hooksPath is set to %s", hooksPath),
+		}
+	}
+
+	managed := IsBeadsManagedHooksPath(repoRoot, BeadsManagedStorageHooksDir(), hooksPath)
+	var fix string
+	if managed {
+		fix = "Run 'bd doctor --fix' to unset core.hooksPath, or: git config --unset core.hooksPath"
+	} else {
+		fix = "core.hooksPath is not beads-managed; bd will not change it. Restore the missing directory, or unset it yourself: git config --unset core.hooksPath"
+	}
+
+	return DoctorCheck{
+		Name:    name,
+		Status:  StatusWarning,
+		Message: "core.hooksPath points at a missing directory",
+		Detail:  fmt.Sprintf("core.hooksPath=%s (resolved: %s)", hooksPath, resolved),
+		Fix:     fix,
+	}
+}
+
+// FixHooksPath unsets core.hooksPath ONLY when it is beads-managed and its
+// target is missing. It re-reads the current value and re-checks both
+// conditions immediately before acting, so it never mutates a third-party
+// hooksPath (e.g. husky) even if the check that triggered the fix pass is
+// stale.
+func FixHooksPath() error {
+	repoRoot, _ := git.GetMainRepoRoot()
+	if repoRoot == "" {
+		repoRoot = git.GetRepoRoot()
+	}
+	if repoRoot == "" {
+		return nil // not in a git repo
+	}
+
+	hooksPath, ok := getConfiguredHooksPath(repoRoot)
+	if !ok || hooksPath == "" {
+		return nil // nothing set
+	}
+
+	if !IsBeadsManagedHooksPath(repoRoot, BeadsManagedStorageHooksDir(), hooksPath) {
+		return nil // never touch a third-party hooksPath
+	}
+
+	resolved := expandHookPathTilde(hooksPath)
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Join(repoRoot, resolved)
+	}
+	if fileExists(resolved) {
+		return nil // target exists — nothing dangling to fix
+	}
+
+	cmd := exec.Command("git", "config", "--unset", "core.hooksPath")
+	cmd.Dir = repoRoot
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git config --unset core.hooksPath failed: %w (output: %s)", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+// getConfiguredHooksPath reads the raw core.hooksPath value from repoRoot.
+// The bool return is false when core.hooksPath is not set at all.
+func getConfiguredHooksPath(repoRoot string) (string, bool) {
+	cmd := exec.Command("git", "config", "--get", "core.hooksPath")
+	cmd.Dir = repoRoot
+	out, err := cmd.Output()
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(out)), true
+}
+
+// IsBeadsManagedHooksPath reports whether hooksPath is one of the values bd
+// itself writes to core.hooksPath (.beads/hooks or .beads-hooks, relative or
+// absolute under repoRoot, or storageHooksDir — the <effective .beads>/hooks
+// directory that `bd hooks install --beads` configures, which BEADS_DIR or a
+// .beads/redirect can place outside repoRoot). Callers pass
+// BeadsManagedStorageHooksDir() for storageHooksDir, or "" when no storage
+// applies. It is the single matcher for that question;
+// resetHooksPathAt (cmd/bd/hooks.go) calls it too, so the two
+// paths cannot drift apart.
+//
+// Absolute values are compared after symlink resolution. repoRoot comes from
+// git.GetMainRepoRoot, which canonicalizes the path, while the configured
+// core.hooksPath is whatever string the user or an older bd wrote. A raw
+// string compare therefore misses a genuinely beads-managed path any time the
+// repo is reached through a symlink — on macOS every repo under /var (which
+// is a symlink to /private/var, including all of t.TempDir()) hits this. The
+// false negative is not cosmetic: CheckHooksPath then reports the dangling
+// path as third-party and FixHooksPath deliberately refuses to unset it.
+func IsBeadsManagedHooksPath(repoRoot, storageHooksDir, hooksPath string) bool {
+	if hooksPath == ".beads/hooks" || hooksPath == ".beads-hooks" {
+		return true
+	}
+	if !filepath.IsAbs(hooksPath) {
+		return false
+	}
+	root := resolveExistingPrefix(repoRoot)
+	candidate := resolveExistingPrefix(hooksPath)
+	if candidate == filepath.Join(root, ".beads", "hooks") ||
+		candidate == filepath.Join(root, ".beads-hooks") {
+		return true
+	}
+	// The out-of-repo storage arm is gated on a resolved storage directory, so
+	// it recognizes only the directory bd would itself configure right now —
+	// never an arbitrary absolute hooksPath that happens to be named "hooks".
+	return storageHooksDir != "" && candidate == resolveExistingPrefix(storageHooksDir)
+}
+
+// resolveExistingPrefix returns path with its longest existing ancestor
+// replaced by that ancestor's symlink-resolved form, leaving any missing
+// trailing components untouched.
+//
+// filepath.EvalSymlinks alone is not enough here: the whole point of the
+// dangling-hooksPath check is that the leaf does not exist, so EvalSymlinks
+// on the full path fails and returns nothing usable. Walking up to the
+// deepest component that does exist still canonicalizes the symlinked prefix
+// (/var -> /private/var), which is where the divergence lives.
+func resolveExistingPrefix(path string) string {
+	if path == "" || !filepath.IsAbs(path) {
+		return path
+	}
+	current := filepath.Clean(path)
+	var trailing string
+	for {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			return filepath.Join(resolved, trailing)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			// Reached the filesystem root without finding an existing
+			// component; nothing to canonicalize against.
+			return filepath.Clean(path)
+		}
+		trailing = filepath.Join(filepath.Base(current), trailing)
+		current = parent
+	}
 }
 
 // CheckGitHooksDoltCompatibility checks if installed git hooks are compatible with Dolt backend.

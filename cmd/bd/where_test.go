@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -41,8 +42,10 @@ func TestResolveWhereBeadsDir_FallsBackToFindBeadsDir(t *testing.T) {
 	if err := os.Chdir(repoDir); err != nil {
 		t.Fatalf("chdir(%q): %v", repoDir, err)
 	}
+	git.ResetCaches()
 	t.Cleanup(func() {
 		_ = os.Chdir(originalWD)
+		git.ResetCaches()
 	})
 
 	t.Setenv("BEADS_DIR", "")
@@ -79,6 +82,7 @@ func TestResolveWhereBeadsDir_ReturnsEmptyWithoutWorkspace(t *testing.T) {
 	resetCommandContext()
 
 	workspace := t.TempDir()
+	initGitRepoAt(t, workspace)
 	originalWD, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
@@ -86,8 +90,10 @@ func TestResolveWhereBeadsDir_ReturnsEmptyWithoutWorkspace(t *testing.T) {
 	if err := os.Chdir(workspace); err != nil {
 		t.Fatalf("chdir(%q): %v", workspace, err)
 	}
+	git.ResetCaches()
 	t.Cleanup(func() {
 		_ = os.Chdir(originalWD)
+		git.ResetCaches()
 	})
 
 	t.Setenv("BEADS_DIR", "")
@@ -146,8 +152,10 @@ func TestResolveWhereBeadsDir_UsesInitializedDBPath(t *testing.T) {
 	if err := os.Chdir(cwd); err != nil {
 		t.Fatalf("chdir: %v", err)
 	}
+	git.ResetCaches()
 	t.Cleanup(func() {
 		_ = os.Chdir(originalWD)
+		git.ResetCaches()
 	})
 
 	t.Setenv("BEADS_DIR", "")
@@ -475,4 +483,46 @@ func TestFindOriginalBeadsDir_BeadsDirEnvWithRedirectReturnsEnv(t *testing.T) {
 	if !strings.HasSuffix(got, filepath.Join("alt", ".beads")) {
 		t.Errorf("findOriginalBeadsDir = %q, want a path ending in alt/.beads", got)
 	}
+}
+
+func TestFindOriginalBeadsDirRespectsOSTempRootCeiling(t *testing.T) {
+	t.Run("child does not inherit redirect", func(t *testing.T) {
+		tempRoot := filepath.Join(t.TempDir(), "tmp")
+		rootBeads := filepath.Join(tempRoot, ".beads")
+		if err := os.MkdirAll(rootBeads, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(rootBeads, beads.RedirectFileName), []byte(filepath.Join(t.TempDir(), ".beads")), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		child := filepath.Join(tempRoot, "fixture")
+		if err := os.MkdirAll(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("TMPDIR", tempRoot)
+		t.Setenv("BEADS_DIR", "")
+		t.Chdir(child)
+
+		if got := findOriginalBeadsDir(); got != "" {
+			t.Fatalf("findOriginalBeadsDir() = %q, want no temp-root ancestor", got)
+		}
+	})
+
+	t.Run("temp root start remains usable", func(t *testing.T) {
+		tempRoot := filepath.Join(t.TempDir(), "tmp")
+		rootBeads := filepath.Join(tempRoot, ".beads")
+		if err := os.MkdirAll(rootBeads, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(rootBeads, beads.RedirectFileName), []byte(filepath.Join(t.TempDir(), ".beads")), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("TMPDIR", tempRoot)
+		t.Setenv("BEADS_DIR", "")
+		t.Chdir(tempRoot)
+
+		if got := findOriginalBeadsDir(); !utils.PathsEqual(got, rootBeads) {
+			t.Fatalf("findOriginalBeadsDir() = %q, want %q", got, rootBeads)
+		}
+	})
 }

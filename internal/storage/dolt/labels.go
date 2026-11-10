@@ -11,31 +11,35 @@ import (
 
 // AddLabel adds a label to an issue
 func (s *DoltStore) AddLabel(ctx context.Context, issueID, label, actor string) error {
-	isWisp := s.isActiveWisp(ctx, issueID)
-	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
-		return issueops.AddLabelInTx(ctx, tx, "", "", issueID, label, actor)
-	}); err != nil {
-		return err
-	}
-	if isWisp {
-		return nil
-	}
-	return s.doltAddAndCommit(ctx, []string{"events", "labels"}, fmt.Sprintf("bd: label add %s", issueID))
+	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		isWisp := s.isActiveWisp(ctx, issueID)
+		if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+			return issueops.AddLabelInTx(ctx, tx, "", "", issueID, label, actor)
+		}); err != nil {
+			return err
+		}
+		if isWisp {
+			return nil
+		}
+		return s.doltAddAndCommit(ctx, []string{"events", "labels"}, fmt.Sprintf("bd: label add %s", issueID))
+	})
 }
 
 // RemoveLabel removes a label from an issue.
 // Delegates SQL work to issueops.RemoveLabelInTx which handles wisp routing.
 func (s *DoltStore) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
-	isWisp := s.isActiveWisp(ctx, issueID)
-	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
-		return issueops.RemoveLabelInTx(ctx, tx, "", "", issueID, label, actor)
-	}); err != nil {
-		return err
-	}
-	if isWisp {
-		return nil
-	}
-	return s.doltAddAndCommit(ctx, []string{"events", "labels"}, fmt.Sprintf("bd: label remove %s", issueID))
+	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		isWisp := s.isActiveWisp(ctx, issueID)
+		if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+			return issueops.RemoveLabelInTx(ctx, tx, "", "", issueID, label, actor)
+		}); err != nil {
+			return err
+		}
+		if isWisp {
+			return nil
+		}
+		return s.doltAddAndCommit(ctx, []string{"events", "labels"}, fmt.Sprintf("bd: label remove %s", issueID))
+	})
 }
 
 // GetLabels retrieves all labels for an issue
@@ -73,4 +77,28 @@ func (s *DoltStore) GetIssuesByLabel(ctx context.Context, label string) ([]*type
 		return nil, err
 	}
 	return s.GetIssuesByIDs(ctx, ids)
+}
+
+// RenameLabel renames a label across every issue and wisp that carries it,
+// delegating the sweep to issueops.RenameLabelInTx and owning only the
+// dolt-specific commit step. The commit targets the fixed "events"/"labels"
+// pair, mirroring AddLabel/RemoveLabel; doltAddAndCommit's own
+// HasStagedChanges guard skips it when a wisp-only rename left those tables
+// untouched.
+func (s *DoltStore) RenameLabel(ctx context.Context, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, err error) {
+	err = s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		if txErr := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+			var innerErr error
+			renamed, merged, ids, innerErr = issueops.RenameLabelInTx(ctx, tx, oldLabel, newLabel, actor)
+			return innerErr
+		}); txErr != nil {
+			return txErr
+		}
+		if renamed == 0 {
+			return nil
+		}
+		return s.doltAddAndCommit(ctx, []string{"events", "labels"},
+			fmt.Sprintf("bd: label rename '%s' -> '%s' (%d issues)", oldLabel, newLabel, renamed))
+	})
+	return renamed, merged, ids, err
 }

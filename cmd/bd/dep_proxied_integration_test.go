@@ -224,7 +224,18 @@ func TestProxiedServerDep(t *testing.T) {
 				t.Errorf("expected 'cycle' error: %s", out)
 			}
 		})
+	})
+}
 
+// TestProxiedServerDepB holds more of TestProxiedServerDep's Add cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerDepB(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	t.Run("Add", func(t *testing.T) {
+		t.Parallel()
 		t.Run("child_parent_antipattern", func(t *testing.T) {
 			t.Parallel()
 			p := newSharedProxiedProject(t, bd, "dpa8")
@@ -378,8 +389,34 @@ func TestProxiedServerDep(t *testing.T) {
 				t.Fatalf("expected 1-edge bulk add summary or clear external-ref error: %s", out)
 			}
 		})
-	})
 
+		// GH#6556: the proxied writers resolve no IDs, so the server stores a
+		// bare cross-prefix typo as before; the notice now comes from a lookup
+		// once it is stored, naming the target and the command that removes it.
+		t.Run("unresolved_cross_prefix_warns", func(t *testing.T) {
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpa16")
+			src := bdProxiedCreate(t, bd, p.dir, "Unresolved target source", "--type", "task")
+			cmd := exec.Command(bd, "dep", "add", src.ID, "zz-404")
+			cmd.Dir = p.dir
+			cmd.Env = bdProxiedEnv(p.dir)
+			stdout, stderr, err := runCommandBuffers(t, cmd)
+			if err != nil {
+				t.Fatalf("bd dep add %s zz-404: %v\nstdout:\n%s\nstderr:\n%s", src.ID, err, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "Added dependency") {
+				t.Errorf("stdout = %q, want the usual Added dependency line", stdout.String())
+			}
+			remove := "bd dep remove " + src.ID + " zz-404"
+			if !strings.Contains(stderr.String(), "zz-404 was not found") || !strings.Contains(stderr.String(), remove) {
+				t.Fatalf("stderr = %q, want the unresolved-target warning naming zz-404 and %q", stderr.String(), remove)
+			}
+			// The printed remedy removes the stored row.
+			if out := bdProxiedDep(t, bd, p.dir, "remove", src.ID, "zz-404"); !strings.Contains(out, "Removed dependency") {
+				t.Fatalf("printed remove did not remove the edge: %s", out)
+			}
+		})
+	})
 }
 
 func TestProxiedServerDep2(t *testing.T) {
@@ -422,6 +459,24 @@ func TestProxiedServerDep2(t *testing.T) {
 			m := bdProxiedDepJSON(t, bd, p.dir, "remove", a.ID, b.ID)
 			if m["status"] != "removed" {
 				t.Errorf("expected status=removed, got %v", m["status"])
+			}
+			if m["removed"] != true {
+				t.Errorf("expected removed=true, got %v", m["removed"])
+			}
+		})
+
+		t.Run("missing_edge_reports_noop", func(t *testing.T) {
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpr4")
+			a := bdProxiedCreate(t, bd, p.dir, "Missing edge A", "--type", "task")
+			b := bdProxiedCreate(t, bd, p.dir, "Missing edge B", "--type", "task")
+			out := bdProxiedDep(t, bd, p.dir, "remove", a.ID, b.ID)
+			if !strings.Contains(out, "No dependency found") || strings.Contains(out, "✓") {
+				t.Errorf("missing edge should report a no-op, got: %s", out)
+			}
+			m := bdProxiedDepJSON(t, bd, p.dir, "remove", a.ID, b.ID)
+			if m["status"] != "not_found" || m["removed"] != false {
+				t.Errorf("missing edge JSON = %v, want status=not_found removed=false", m)
 			}
 		})
 	})
@@ -532,6 +587,15 @@ func TestProxiedServerDep2(t *testing.T) {
 			}
 		})
 	})
+}
+
+// TestProxiedServerDep2B is the next slice of TestProxiedServerDep2's cases, a
+// separate top-level test so the bd_proxied_test shard manifest can place it
+// on its own shard.
+func TestProxiedServerDep2B(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("Tree", func(t *testing.T) {
 		t.Parallel()
@@ -617,7 +681,18 @@ func TestProxiedServerDep2(t *testing.T) {
 			bdProxiedDep(t, bd, p.dir, "add", root.ID, dep.ID)
 			_ = bdProxiedDep(t, bd, p.dir, "tree", root.ID, "--status", "open")
 		})
+	})
+}
 
+// TestProxiedServerDep2C holds more of TestProxiedServerDep2's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerDep2C(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	t.Run("Tree", func(t *testing.T) {
+		t.Parallel()
 		t.Run("format_mermaid", func(t *testing.T) {
 			t.Parallel()
 			p := newSharedProxiedProject(t, bd, "dpt7")
@@ -640,6 +715,106 @@ func TestProxiedServerDep2(t *testing.T) {
 			raw, _ := json.Marshal(arr)
 			if !strings.Contains(string(raw), root.ID) {
 				t.Errorf("expected root ID in JSON tree: %s", string(raw))
+			}
+		})
+
+		// bd-lx5iu / Q11: this route resolves a PARTIAL id now. It used to hand the
+		// argument to the use case verbatim, so the same abbreviation that worked
+		// on a direct workspace failed on a team server.
+		t.Run("partial_id_resolves", func(t *testing.T) {
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpta")
+			root := bdProxiedCreate(t, bd, p.dir, "Partial root", "--type", "task")
+			dep := bdProxiedCreate(t, bd, p.dir, "Partial dep", "--type", "task")
+			bdProxiedDep(t, bd, p.dir, "add", root.ID, dep.ID)
+
+			// The bare suffix, with the workspace prefix stripped.
+			bare := root.ID[strings.Index(root.ID, "-")+1:]
+			out := bdProxiedDep(t, bd, p.dir, "tree", bare)
+			if !strings.Contains(out, root.ID) || !strings.Contains(out, dep.ID) {
+				t.Fatalf("a partial id did not resolve to the full tree: %s", out)
+			}
+		})
+
+		t.Run("absent_root_is_a_lookup_failure", func(t *testing.T) {
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dptb")
+			out := bdProxiedDepFail(t, bd, p.dir, "tree", "dptb-nosuchbead")
+			if !strings.Contains(out, "dptb-nosuchbead") {
+				t.Fatalf("the refusal does not name the id the caller gave: %s", out)
+			}
+		})
+
+		// bd-lx5iu / Q11: --max-rows is HONORED on this route now. It used to be
+		// refused outright ("not supported in proxied-server mode") because the
+		// unit-of-work path threaded no cap; the cap is on the role's request, so
+		// it threads everywhere.
+		t.Run("max_rows_is_honored", func(t *testing.T) {
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dptc")
+			root := bdProxiedCreate(t, bd, p.dir, "Cap root", "--type", "task")
+			for i := 0; i < 3; i++ {
+				child := bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Cap child %d", i), "--type", "task")
+				bdProxiedDep(t, bd, p.dir, "add", root.ID, child.ID)
+			}
+
+			out := bdProxiedDepFail(t, bd, p.dir, "tree", root.ID, "--max-rows", "2")
+			if strings.Contains(out, "not supported in proxied-server mode") {
+				t.Fatalf("the cap is still being refused rather than enforced: %s", out)
+			}
+			if !strings.Contains(out, "too many rows") {
+				t.Fatalf("stderr missing the cap message: %s", out)
+			}
+			if !strings.Contains(out, "--max-rows=2") {
+				t.Fatalf("stderr missing the source attribution: %s", out)
+			}
+
+			// And the same walk under a cap it fits inside answers normally, so the
+			// case is about the cap rather than about the tree.
+			under := bdProxiedDep(t, bd, p.dir, "tree", root.ID, "--max-rows", "4")
+			if !strings.Contains(under, root.ID) {
+				t.Fatalf("a walk under the cap did not answer: %s", under)
+			}
+		})
+
+		// --show-all-paths is a DOCUMENTED NO-OP (Q7). It is still accepted so no
+		// script breaks, and a diamond still expands the shared node once; the
+		// second parent's edge into it is a `deduped` stub either way.
+		t.Run("show_all_paths_is_an_accepted_no_op", func(t *testing.T) {
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dptd")
+			root := bdProxiedCreate(t, bd, p.dir, "Diamond root", "--type", "task")
+			left := bdProxiedCreate(t, bd, p.dir, "Diamond left", "--type", "task")
+			right := bdProxiedCreate(t, bd, p.dir, "Diamond right", "--type", "task")
+			shared := bdProxiedCreate(t, bd, p.dir, "Diamond shared", "--type", "task")
+			bdProxiedDep(t, bd, p.dir, "add", root.ID, left.ID)
+			bdProxiedDep(t, bd, p.dir, "add", root.ID, right.ID)
+			bdProxiedDep(t, bd, p.dir, "add", left.ID, shared.ID)
+			bdProxiedDep(t, bd, p.dir, "add", right.ID, shared.ID)
+
+			for _, args := range [][]string{
+				{"tree", root.ID},
+				{"tree", root.ID, "--show-all-paths"},
+			} {
+				arr := bdProxiedDepJSONArray(t, bd, p.dir, args...)
+				expanded, stubs := 0, 0
+				for _, node := range arr {
+					m, ok := node.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					if id, _ := m["id"].(string); id != shared.ID {
+						continue
+					}
+					if deduped, _ := m["deduped"].(bool); deduped {
+						stubs++
+					} else {
+						expanded++
+					}
+				}
+				if expanded != 1 || stubs != 1 {
+					t.Errorf("%v: shared node expanded %d times with %d stubs, want 1 and 1", args, expanded, stubs)
+				}
 			}
 		})
 
@@ -765,5 +940,79 @@ func TestProxiedServerDepConcurrent(t *testing.T) {
 		if r.err != nil && !strings.Contains(r.err.Error(), "one writer at a time") {
 			t.Errorf("worker %d failed: %v", r.worker, r.err)
 		}
+	}
+}
+
+// TestProxiedServerDepListSingleIDWarnsOnDroppedExternalEdge is the
+// proxied-server counterpart to TestEmbeddedDepListSingleIDWarnsOnDroppedExternalEdge
+// (dep_list_cross_db_test.go): the regression guard for bd-mtla on the
+// runDepListProxiedServer path (cmd/bd/dep_proxied_server.go), which gastown's
+// live-dolt-server deployment actually runs.
+//
+// `bd link` correctly writes an edge to an `external:` target (no row in any
+// database this session can see), but the single-id `bd dep list <id>` a
+// caller runs right after used to show nothing for it — indistinguishable
+// from no dependency existing at all. Verifies the fix: stdout/--json stay
+// exactly what they were before the fix (no schema change), stderr now names
+// the dropped edge, and batch mode (the already-correct path) is unaffected.
+func TestProxiedServerDepListSingleIDWarnsOnDroppedExternalEdge(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	p := newSharedProxiedProject(t, bd, "dlw1")
+	local := bdProxiedCreate(t, bd, p.dir, "local target", "--type", "task")
+	source := bdProxiedCreate(t, bd, p.dir, "source issue", "--type", "task")
+
+	bdProxiedDep(t, bd, p.dir, "add", source.ID, local.ID, "--type", "blocks")
+
+	linkCmd := exec.Command(bd, "link", source.ID, "external:other:capability", "--type", "related")
+	linkCmd.Dir = p.dir
+	linkCmd.Env = bdProxiedEnv(p.dir)
+	if out, err := linkCmd.CombinedOutput(); err != nil {
+		t.Fatalf("bd link (external): %v\n%s", err, out)
+	}
+
+	cmd := exec.Command(bd, "dep", "list", source.ID)
+	cmd.Dir = p.dir
+	cmd.Env = bdProxiedEnv(p.dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd dep list: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	if !strings.Contains(stdout.String(), local.ID) {
+		t.Errorf("stdout missing local dep %s:\n%s", local.ID, stdout.String())
+	}
+	if strings.Contains(stdout.String(), "external:other:capability") {
+		t.Errorf("stdout unexpectedly contains the external target (shape must stay unchanged):\n%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "external:other:capability via related") {
+		t.Errorf("stderr should warn about the dropped external target with its type, got:\n%s", stderr.String())
+	}
+
+	jsonCmd := exec.Command(bd, "dep", "list", source.ID, "--json")
+	jsonCmd.Dir = p.dir
+	jsonCmd.Env = bdProxiedEnv(p.dir)
+	jsonStdout, _, err := runCommandBuffers(t, jsonCmd)
+	if err != nil {
+		t.Fatalf("bd dep list --json: %v", err)
+	}
+	if strings.Contains(jsonStdout.String(), "external:other:capability") {
+		t.Errorf("--json output unexpectedly contains the external target:\n%s", jsonStdout.String())
+	}
+	if !strings.Contains(jsonStdout.String(), local.ID) {
+		t.Errorf("--json output missing local dep %s:\n%s", local.ID, jsonStdout.String())
+	}
+
+	batchCmd := exec.Command(bd, "dep", "list", source.ID, source.ID)
+	batchCmd.Dir = p.dir
+	batchCmd.Env = bdProxiedEnv(p.dir)
+	batchStdout, _, err := runCommandBuffers(t, batchCmd)
+	if err != nil {
+		t.Fatalf("bd dep list (batch): %v", err)
+	}
+	if !strings.Contains(batchStdout.String(), "external:other:capability") || !strings.Contains(batchStdout.String(), local.ID) {
+		t.Errorf("batch mode should show both deps, got:\n%s", batchStdout.String())
 	}
 }

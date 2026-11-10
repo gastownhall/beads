@@ -16,7 +16,24 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
+	"github.com/steveyegge/beads/memoryops"
 )
+
+func setupEndpointTrustWorkspace(t *testing.T) {
+	t.Helper()
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, ".config"))
+}
 
 func TestRegistered(t *testing.T) {
 	factory := tracker.Get("jira")
@@ -629,6 +646,104 @@ func (s *configStore) GetAllConfig(_ context.Context) (map[string]string, error)
 }
 
 // Storage interface stubs — not exercised by Init().
+func (s *configStore) IssueLifecycle() (issueops.Lifecycle, error) {
+	return nil, &storage.ErrUnsupported{Op: "IssueLifecycle", Backend: "jira-config-stub"}
+}
+func (s *configStore) IssueReader() (issueops.Reader, error) {
+	return nil, &storage.ErrUnsupported{Op: "IssueReader", Backend: "jira-config-stub"}
+}
+func (s *configStore) IssueClaimer() (issueops.Claimer, error) {
+	return nil, &storage.ErrUnsupported{Op: "IssueClaimer", Backend: "jira-config-stub"}
+}
+func (s *configStore) ReadyClaimer() (issueops.ReadyClaimer, error) {
+	return nil, &storage.ErrUnsupported{Op: "ReadyClaimer", Backend: "jira-config-stub"}
+}
+func (s *configStore) BatchCloser() (issueops.BatchCloser, error) {
+	return nil, &storage.ErrUnsupported{Op: "BatchCloser", Backend: "jira-config-stub"}
+}
+func (s *configStore) BatchCreator() (issueops.BatchCreator, error) {
+	return nil, &storage.ErrUnsupported{Op: "BatchCreator", Backend: "jira-config-stub"}
+}
+func (s *configStore) DependencyEditor() (issueops.DependencyEditor, error) {
+	return nil, &storage.ErrUnsupported{Op: "DependencyEditor", Backend: "jira-config-stub"}
+}
+func (s *configStore) Commenter() (issueops.Commenter, error) {
+	return nil, &storage.ErrUnsupported{Op: "Commenter", Backend: "jira-config-stub"}
+}
+func (s *configStore) IssueRelations() (issueops.Relations, error) {
+	return nil, &storage.ErrUnsupported{Op: "IssueRelations", Backend: "jira-config-stub"}
+}
+func (s *configStore) Counter() (issueops.Counter, error) {
+	return nil, &storage.ErrUnsupported{Op: "Counter", Backend: "jira-config-stub"}
+}
+func (s *configStore) WorkspaceConfig() (issueops.WorkspaceConfig, error) {
+	return nil, &storage.ErrUnsupported{Op: "WorkspaceConfig", Backend: "jira-config-stub"}
+}
+func (s *configStore) Memories() (memoryops.Memories, error) {
+	return nil, &storage.ErrUnsupported{Op: "Memories", Backend: "jira-config-stub"}
+}
+func (s *configStore) StatsReporter() (issueops.StatsReporter, error) {
+	return nil, &storage.ErrUnsupported{Op: "StatsReporter", Backend: "jira-config-stub"}
+}
+func (s *configStore) VersionReconciler() (issueops.VersionReconciler, error) {
+	return nil, &storage.ErrUnsupported{Op: "VersionReconciler", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) Bootstrapper() (issueops.Bootstrapper, error) {
+	return nil, &storage.ErrUnsupported{Op: "Bootstrapper", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) InitVerifier() (issueops.InitVerifier, error) {
+	return nil, &storage.ErrUnsupported{Op: "InitVerifier", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) CycleDetector() (issueops.CycleDetector, error) {
+	return nil, &storage.ErrUnsupported{Op: "CycleDetector", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) EdgeReader() (issueops.EdgeReader, error) {
+	return nil, &storage.ErrUnsupported{Op: "EdgeReader", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) BlockingAnnotator() (issueops.BlockingAnnotator, error) {
+	return nil, &storage.ErrUnsupported{Op: "BlockingAnnotator", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) TreeWalker() (issueops.TreeWalker, error) {
+	return nil, &storage.ErrUnsupported{Op: "TreeWalker", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) GraphCounter() (issueops.GraphCounter, error) {
+	return nil, &storage.ErrUnsupported{Op: "GraphCounter", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) ReadyCounter() (issueops.ReadyCounter, error) {
+	return nil, &storage.ErrUnsupported{Op: "ReadyCounter", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) Querier() (issueops.Querier, error) {
+	return nil, &storage.ErrUnsupported{Op: "Querier", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) Deleter() (issueops.Deleter, error) {
+	return nil, &storage.ErrUnsupported{Op: "Deleter", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) Sweeper() (issueops.Sweeper, error) {
+	return nil, &storage.ErrUnsupported{Op: "Sweeper", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) MetadataCAS() (issueops.MetadataCAS, error) {
+	return nil, &storage.ErrUnsupported{Op: "MetadataCAS", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) BatchApplier() (issueops.BatchApplier, error) {
+	return nil, &storage.ErrUnsupported{Op: "BatchApplier", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) Releaser() (issueops.Releaser, error) {
+	return nil, &storage.ErrUnsupported{Op: "Releaser", Backend: "jira-config-stub"}
+}
 func (s *configStore) SetConfig(_ context.Context, _, _ string) error        { return nil }
 func (s *configStore) SetLocalMetadata(_ context.Context, _, _ string) error { return nil }
 func (s *configStore) GetLocalMetadata(_ context.Context, _ string) (string, error) {
@@ -669,6 +784,9 @@ func (s *configStore) SearchIssues(_ context.Context, _ string, _ types.IssueFil
 func (s *configStore) SearchIssueIDs(_ context.Context, _ string, _ types.IssueFilter) ([]string, error) {
 	return nil, nil
 }
+func (s *configStore) SearchIssueSummaries(_ context.Context, _ string, _ types.IssueFilter) ([]*types.IssueSummary, error) {
+	return nil, nil
+}
 func (s *configStore) AddDependency(_ context.Context, _ *types.Dependency, _ string) error {
 	return nil
 }
@@ -701,6 +819,9 @@ func (s *configStore) GetLabels(_ context.Context, _ string) ([]string, error) {
 }
 func (s *configStore) GetIssuesByLabel(_ context.Context, _ string) ([]*types.Issue, error) {
 	return nil, nil
+}
+func (s *configStore) RenameLabel(_ context.Context, _, _, _ string) (int, int, []string, error) {
+	return 0, 0, nil, nil
 }
 func (s *configStore) GetReadyWork(_ context.Context, _ types.WorkFilter) ([]*types.Issue, error) {
 	return nil, nil
@@ -805,6 +926,16 @@ func (s *configStore) IterWisps(_ context.Context, _ types.WispFilter) (storage.
 
 func (s *configStore) Close() error { return nil }
 
+func (s *configStore) RecordProvenanceEvent(_ context.Context, _ types.ProvenanceEvent) (string, bool, error) {
+	return "", false, nil
+}
+func (s *configStore) GetProvenanceEvents(_ context.Context, _, _ string) ([]types.ProvenanceEvent, error) {
+	return nil, nil
+}
+func (s *configStore) GetProvenanceByRef(_ context.Context, _ string) ([]types.ProvenanceEvent, error) {
+	return nil, nil
+}
+
 func TestFetchIssuesIncludesPullJQLInQuery(t *testing.T) {
 	var capturedJQL string
 
@@ -844,6 +975,52 @@ func TestFetchIssuesIncludesPullJQLInQuery(t *testing.T) {
 
 	if !strings.Contains(capturedJQL, `labels = "agent-ready"`) {
 		t.Errorf("JQL should contain pull_jql filter, got: %s", capturedJQL)
+	}
+}
+
+// TestFetchIssuesMatchesSinceToSinceGranularity pins SinceGranularity to the
+// JQL: a fetch from Since asks for exactly what a fetch from Since truncated
+// to SinceGranularity asks for, and a fetch from just before that asks for
+// more.
+func TestFetchIssuesMatchesSinceToSinceGranularity(t *testing.T) {
+	var capturedJQL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/rest/api/3/search/jql" {
+			capturedJQL = r.URL.Query().Get("jql")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"issues":     []Issue{},
+				"total":      0,
+				"maxResults": 50,
+				"startAt":    0,
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	tr := &Tracker{
+		client:      newTestClient(srv.URL, "3"),
+		store:       &configStore{data: map[string]string{}},
+		projectKeys: []string{"TEST"},
+		apiVersion:  "3",
+	}
+	jqlFrom := func(since time.Time) string {
+		t.Helper()
+		if _, err := tr.FetchIssues(context.Background(), tracker.FetchOptions{Since: &since}); err != nil {
+			t.Fatalf("FetchIssues: %v", err)
+		}
+		return capturedJQL
+	}
+
+	since := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	floor := since.Truncate(tr.SinceGranularity())
+	if got, want := jqlFrom(since), jqlFrom(floor); got != want {
+		t.Fatalf("JQL from %s = %q, want the JQL from %s: %q", since, got, floor, want)
+	}
+	if before := jqlFrom(floor.Add(-time.Nanosecond)); before == jqlFrom(floor) {
+		t.Fatalf("JQL from just before %s = %q, the same as from it: SinceGranularity is finer than the JQL", floor, before)
 	}
 }
 
@@ -888,8 +1065,11 @@ func TestFetchIssuesWithoutPullJQLOmitsExtraFilter(t *testing.T) {
 }
 
 func TestInitLoadsCustomStatusMapFromAllConfig(t *testing.T) {
+	setupEndpointTrustWorkspace(t)
 	// jira.api_token is yaml-only (secret), so set it via env var.
 	t.Setenv("JIRA_API_TOKEN", "token123")
+	// The store-config jira.url is shared; confirm it privately via env.
+	t.Setenv("JIRA_URL", "https://example.atlassian.net")
 	store := &configStore{
 		data: map[string]string{
 			"jira.url":                    "https://example.atlassian.net",
@@ -926,8 +1106,11 @@ func TestInitLoadsCustomStatusMapFromAllConfig(t *testing.T) {
 }
 
 func TestInitLoadsCustomTypeMapFromAllConfig(t *testing.T) {
+	setupEndpointTrustWorkspace(t)
 	// jira.api_token is yaml-only (secret), so set it via env var.
 	t.Setenv("JIRA_API_TOKEN", "token123")
+	// The store-config jira.url is shared; confirm it privately via env.
+	t.Setenv("JIRA_URL", "https://example.atlassian.net")
 	store := &configStore{
 		data: map[string]string{
 			"jira.url":              "https://example.atlassian.net",
@@ -976,8 +1159,11 @@ func TestInitLoadsCustomTypeMapFromAllConfig(t *testing.T) {
 }
 
 func TestInitLoadsCustomPriorityMapFromAllConfig(t *testing.T) {
+	setupEndpointTrustWorkspace(t)
 	// jira.api_token is yaml-only (secret), so set it via env var.
 	t.Setenv("JIRA_API_TOKEN", "token123")
+	// The store-config jira.url is shared; confirm it privately via env.
+	t.Setenv("JIRA_URL", "https://example.atlassian.net")
 	store := &configStore{
 		data: map[string]string{
 			"jira.url":            "https://example.atlassian.net",
@@ -1004,8 +1190,11 @@ func TestInitLoadsCustomPriorityMapFromAllConfig(t *testing.T) {
 }
 
 func TestInitLoadsCustomFieldsFromAllConfig(t *testing.T) {
+	setupEndpointTrustWorkspace(t)
 	// jira.api_token is yaml-only (secret), so set it via env var.
 	t.Setenv("JIRA_API_TOKEN", "token123")
+	// The store-config jira.url is shared; confirm it privately via env.
+	t.Setenv("JIRA_URL", "https://example.atlassian.net")
 	store := &configStore{
 		data: map[string]string{
 			"jira.url":                                  "https://example.atlassian.net",
@@ -1085,8 +1274,11 @@ func TestInitLoadsCustomFieldsFromAllConfig(t *testing.T) {
 }
 
 func TestInitRejectsInvalidCustomFieldJSON(t *testing.T) {
+	setupEndpointTrustWorkspace(t)
 	// jira.api_token is yaml-only (secret), so set it via env var.
 	t.Setenv("JIRA_API_TOKEN", "token123")
+	// The store-config jira.url is shared; confirm it privately via env.
+	t.Setenv("JIRA_URL", "https://example.atlassian.net")
 	store := &configStore{
 		data: map[string]string{
 			"jira.url":                             "https://example.atlassian.net",

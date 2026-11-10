@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
@@ -124,7 +123,7 @@ type stubMaxRowsTracker struct{}
 func (*stubMaxRowsTracker) Name() string                                    { return "stubmr" }
 func (*stubMaxRowsTracker) DisplayName() string                             { return "StubMR" }
 func (*stubMaxRowsTracker) ConfigPrefix() string                            { return "stubmr" }
-func (*stubMaxRowsTracker) Init(_ context.Context, _ storage.Storage) error { return nil }
+func (*stubMaxRowsTracker) Init(_ context.Context, _ tracker.Store) error   { return nil }
 func (*stubMaxRowsTracker) Validate() error                                 { return nil }
 func (*stubMaxRowsTracker) Close() error                                    { return nil }
 func (*stubMaxRowsTracker) FieldMapper() tracker.FieldMapper                { return nil }

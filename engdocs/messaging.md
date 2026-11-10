@@ -74,13 +74,13 @@ Messages marked `ephemeral: true` are transient - they can be bulk-deleted after
 
 ```bash
 # Clean up closed ephemeral messages
-bd cleanup --ephemeral --force
+bd purge --force
 
 # Preview what would be deleted
-bd cleanup --ephemeral --dry-run
+bd purge --dry-run
 
 # Only delete ephemeral messages older than 7 days
-bd cleanup --ephemeral --older-than 7 --force
+bd purge --older-than 7d --force
 ```
 
 Ephemeral messages are:

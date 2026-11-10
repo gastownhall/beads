@@ -21,10 +21,10 @@ func (s *testSuite) TestIssueSQLRepositoryDelete() {
 		s.Run("EmptyInputReturnsNil", s.issuePartitionEmpty)
 		s.Run("SplitsByTable", s.issuePartitionSplits)
 	})
-	s.Run("FindAllDependents", func() {
-		s.Run("EmptyInputReturnsEmpty", s.issueFindAllDependentsEmpty)
-		s.Run("TransitiveAcrossDepTypes", s.issueFindAllDependentsTransitive)
-		s.Run("IncludesRootIDs", s.issueFindAllDependentsIncludesRoots)
+	s.Run("FindCascadeClosure", func() {
+		s.Run("EmptyInputReturnsEmpty", s.issueFindCascadeClosureEmpty)
+		s.Run("TransitiveOverParentChildOnly", s.issueFindCascadeClosureTransitive)
+		s.Run("IncludesRootIDs", s.issueFindCascadeClosureIncludesRoots)
 	})
 	s.Run("AffectedByDeletion", func() {
 		s.Run("EmptyInputReturnsEmpty", s.issueAffectedByDeletionEmpty)
@@ -77,7 +77,7 @@ func (s *testSuite) TestEventsSQLRepositoryDelete() {
 func (s *testSuite) issueDeleteRemovesRow() {
 	s.seedIssueRow("bd-del-r1")
 	r := s.issueRepo()
-	s.Require().NoError(r.Delete(s.Ctx(), "bd-del-r1", domain.IssueTableOpts{}))
+	s.Require().NoError(r.Delete(s.Ctx(), "bd-del-r1", domain.IssueTableOpts{}, "tester"))
 
 	var c int
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
@@ -87,7 +87,7 @@ func (s *testSuite) issueDeleteRemovesRow() {
 
 func (s *testSuite) issueDeleteMissing() {
 	r := s.issueRepo()
-	err := r.Delete(s.Ctx(), "bd-del-nope", domain.IssueTableOpts{})
+	err := r.Delete(s.Ctx(), "bd-del-nope", domain.IssueTableOpts{}, "tester")
 	s.Require().Error(err)
 	s.Contains(err.Error(), "not found")
 }
@@ -97,7 +97,7 @@ func (s *testSuite) issueDeleteWispRouting() {
 	s.seedIssueRow("bd-del-w1")
 
 	r := s.issueRepo()
-	s.Require().NoError(r.Delete(s.Ctx(), "bd-del-w1", domain.IssueTableOpts{UseWispsTable: true}))
+	s.Require().NoError(r.Delete(s.Ctx(), "bd-del-w1", domain.IssueTableOpts{UseWispsTable: true}, "tester"))
 
 	var wispCount, issueCount int
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
@@ -109,7 +109,7 @@ func (s *testSuite) issueDeleteWispRouting() {
 }
 
 func (s *testSuite) issueDeleteByIDsEmpty() {
-	n, err := s.issueRepo().DeleteByIDs(s.Ctx(), nil, domain.IssueTableOpts{})
+	n, err := s.issueRepo().DeleteByIDs(s.Ctx(), nil, domain.IssueTableOpts{}, "tester")
 	s.Require().NoError(err)
 	s.Equal(0, n)
 }
@@ -120,7 +120,7 @@ func (s *testSuite) issueDeleteByIDsBulk() {
 	s.seedIssueRow("bd-del-bulk-c")
 
 	n, err := s.issueRepo().DeleteByIDs(s.Ctx(),
-		[]string{"bd-del-bulk-a", "bd-del-bulk-b", "bd-del-bulk-c"}, domain.IssueTableOpts{})
+		[]string{"bd-del-bulk-a", "bd-del-bulk-b", "bd-del-bulk-c"}, domain.IssueTableOpts{}, "tester")
 	s.Require().NoError(err)
 	s.Equal(3, n)
 
@@ -136,7 +136,7 @@ func (s *testSuite) issueDeleteByIDsWispRouting() {
 	s.seedIssueRow("bd-del-bulk-w1")
 
 	n, err := s.issueRepo().DeleteByIDs(s.Ctx(),
-		[]string{"bd-del-bulk-w1", "bd-del-bulk-w2"}, domain.IssueTableOpts{UseWispsTable: true})
+		[]string{"bd-del-bulk-w1", "bd-del-bulk-w2"}, domain.IssueTableOpts{UseWispsTable: true}, "tester")
 	s.Require().NoError(err)
 	s.Equal(2, n)
 
@@ -152,7 +152,7 @@ func (s *testSuite) issueDeleteByIDsWispRouting() {
 func (s *testSuite) issueDeleteByIDsMissing() {
 	s.seedIssueRow("bd-del-mix-a")
 	n, err := s.issueRepo().DeleteByIDs(s.Ctx(),
-		[]string{"bd-del-mix-a", "bd-del-mix-missing"}, domain.IssueTableOpts{})
+		[]string{"bd-del-mix-a", "bd-del-mix-missing"}, domain.IssueTableOpts{}, "tester")
 	s.Require().NoError(err)
 	s.Equal(1, n, "only one row matched")
 }
@@ -177,37 +177,49 @@ func (s *testSuite) issuePartitionSplits() {
 		"unknown IDs partition as permanent (treated as non-wisp by helper)")
 }
 
-func (s *testSuite) issueFindAllDependentsEmpty() {
-	out, err := s.issueRepo().FindAllDependents(s.Ctx(), nil)
+func (s *testSuite) issueFindCascadeClosureEmpty() {
+	out, err := s.issueRepo().FindCascadeClosure(s.Ctx(), nil)
 	s.Require().NoError(err)
 	s.Empty(out)
 }
 
-func (s *testSuite) issueFindAllDependentsTransitive() {
+func (s *testSuite) issueFindCascadeClosureTransitive() {
 	s.seedIssueRow("bd-del-cas-root")
 	s.seedIssueRow("bd-del-cas-mid")
 	s.seedIssueRow("bd-del-cas-leaf")
 
 	r := s.depRepo()
 	s.Require().NoError(r.Insert(s.Ctx(),
-		newDep("bd-del-cas-mid", "bd-del-cas-root", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+		newDep("bd-del-cas-mid", "bd-del-cas-root", types.DepParentChild), "tester", domain.DepInsertOpts{}))
 	s.Require().NoError(r.Insert(s.Ctx(),
 		newDep("bd-del-cas-leaf", "bd-del-cas-mid", types.DepParentChild), "tester", domain.DepInsertOpts{}))
-
-	out, err := s.issueRepo().FindAllDependents(s.Ctx(), []string{"bd-del-cas-root"})
-	s.Require().NoError(err)
-	got := make(map[string]bool, len(out))
-	for _, id := range out {
-		got[id] = true
+	// Association edges into the containment tree: none of them makes its
+	// source part of the tree, so neither it nor its own child is reached.
+	for _, edge := range []struct {
+		source, target string
+		depType        types.DependencyType
+	}{
+		{"bd-del-cas-blocks", "bd-del-cas-root", types.DepBlocks},
+		{"bd-del-cas-related", "bd-del-cas-leaf", types.DepRelated},
+		{"bd-del-cas-discovered", "bd-del-cas-mid", types.DepDiscoveredFrom},
+	} {
+		s.seedIssueRow(edge.source)
+		s.Require().NoError(r.Insert(s.Ctx(),
+			newDep(edge.source, edge.target, edge.depType), "tester", domain.DepInsertOpts{}))
 	}
-	s.True(got["bd-del-cas-root"], "root included")
-	s.True(got["bd-del-cas-mid"], "direct dependent via blocks included")
-	s.True(got["bd-del-cas-leaf"], "transitive dependent via parent-child included")
+	s.seedIssueRow("bd-del-cas-blocks-child")
+	s.Require().NoError(r.Insert(s.Ctx(),
+		newDep("bd-del-cas-blocks-child", "bd-del-cas-blocks", types.DepParentChild), "tester", domain.DepInsertOpts{}))
+
+	out, err := s.issueRepo().FindCascadeClosure(s.Ctx(), []string{"bd-del-cas-root"})
+	s.Require().NoError(err)
+	s.ElementsMatch([]string{"bd-del-cas-root", "bd-del-cas-mid", "bd-del-cas-leaf"}, out,
+		"the closure is the root and its parent-child descendants; association edges add nothing")
 }
 
-func (s *testSuite) issueFindAllDependentsIncludesRoots() {
+func (s *testSuite) issueFindCascadeClosureIncludesRoots() {
 	s.seedIssueRow("bd-del-cas-solo")
-	out, err := s.issueRepo().FindAllDependents(s.Ctx(), []string{"bd-del-cas-solo"})
+	out, err := s.issueRepo().FindCascadeClosure(s.Ctx(), []string{"bd-del-cas-solo"})
 	s.Require().NoError(err)
 	s.Equal([]string{"bd-del-cas-solo"}, out)
 }
@@ -237,7 +249,7 @@ func (s *testSuite) issueAffectedByDeletionDependers() {
 }
 
 func (s *testSuite) issueRecomputeIsBlockedEmpty() {
-	s.Require().NoError(s.issueRepo().RecomputeIsBlocked(s.Ctx(), nil, nil))
+	s.Require().NoError(s.issueRepo().RecomputeIsBlockedAfterDelete(s.Ctx(), nil, nil, nil))
 }
 
 func (s *testSuite) issueRecomputeIsBlockedFlips() {
@@ -247,7 +259,7 @@ func (s *testSuite) issueRecomputeIsBlockedFlips() {
 		newDep("bd-del-rib-depender", "bd-del-rib-blocker", types.DepBlocks),
 		"tester", domain.DepInsertOpts{}))
 
-	s.Require().NoError(s.issueRepo().RecomputeIsBlocked(s.Ctx(),
+	s.Require().NoError(s.issueRepo().RecomputeIsBlockedAfterDelete(s.Ctx(), nil,
 		[]string{"bd-del-rib-depender"}, nil))
 	var blocked int
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
@@ -257,7 +269,7 @@ func (s *testSuite) issueRecomputeIsBlockedFlips() {
 	_, err := s.Runner().ExecContext(s.Ctx(),
 		"UPDATE issues SET status = 'closed' WHERE id = ?", "bd-del-rib-blocker")
 	s.Require().NoError(err)
-	s.Require().NoError(s.issueRepo().RecomputeIsBlocked(s.Ctx(),
+	s.Require().NoError(s.issueRepo().RecomputeIsBlockedAfterDelete(s.Ctx(), nil,
 		[]string{"bd-del-rib-depender"}, nil))
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT is_blocked FROM issues WHERE id = ?", "bd-del-rib-depender").Scan(&blocked))
@@ -265,7 +277,7 @@ func (s *testSuite) issueRecomputeIsBlockedFlips() {
 }
 
 func (s *testSuite) depDeleteAllEmpty() {
-	n, err := s.depRepo().DeleteAllForIDs(s.Ctx(), nil, domain.DepInsertOpts{})
+	n, err := s.depRepo().DeleteAllForIDs(s.Ctx(), nil, domain.DepInsertOpts{}, "tester")
 	s.Require().NoError(err)
 	s.Equal(0, n)
 }
@@ -282,7 +294,7 @@ func (s *testSuite) depDeleteAllRemoves() {
 	s.Require().NoError(r.Insert(s.Ctx(), newDep("bd-del-da-b", "bd-del-da-c", types.DepBlocks),
 		"tester", domain.DepInsertOpts{}))
 
-	n, err := r.DeleteAllForIDs(s.Ctx(), []string{"bd-del-da-a"}, domain.DepInsertOpts{})
+	n, err := r.DeleteAllForIDs(s.Ctx(), []string{"bd-del-da-a"}, domain.DepInsertOpts{}, "tester")
 	s.Require().NoError(err)
 	s.Equal(2, n)
 
@@ -301,7 +313,7 @@ func (s *testSuite) depDeleteAllWispRouting() {
 		domain.DepInsertOpts{UseWispsTable: true}))
 
 	n, err := r.DeleteAllForIDs(s.Ctx(), []string{"bd-del-dw-src"},
-		domain.DepInsertOpts{UseWispsTable: true})
+		domain.DepInsertOpts{UseWispsTable: true}, "tester")
 	s.Require().NoError(err)
 	s.Equal(1, n)
 

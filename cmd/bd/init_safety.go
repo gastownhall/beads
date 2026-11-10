@@ -26,15 +26,45 @@ const (
 	// `--discard-remote`. Ambiguous identity source.
 	ExitRemoteDivergenceRefused = 10
 
-	// ExitLocalExistsRefused signals `bd init` was called against a
-	// directory that already has beads data, without `--force` or
-	// `--reinit-local`. The existing local-safety refusal.
+	// ExitLocalExistsRefused signals the interactive typed-confirmation
+	// for a destructive re-init over existing local data was declined at
+	// the prompt. That TTY-only path is its sole source: the same guard's
+	// non-interactive branch returns ExitDestroyTokenMissing instead, and
+	// a plain `bd init` over an initialized workspace is refused by the
+	// local-safety guard with an ordinary error, not this code.
 	ExitLocalExistsRefused = 11
 
-	// ExitDestroyTokenMissing signals `--discard-remote` was passed in
-	// non-interactive mode without a valid `--destroy-token`. The caller
-	// must look up the token format via `bd help init-safety`.
+	// ExitDestroyTokenMissing signals a destructive re-init was refused for
+	// want of a valid `--destroy-token`. Four sources:
+	//   1. non-interactive `--discard-remote` with no token;
+	//   2. non-interactive `--reinit-local` over existing local issues;
+	//   3. `--discard-remote` with a supplied token that does not match, in
+	//      EITHER mode — a token that WAS supplied is always validated (#6480);
+	//   4. the interactive `--discard-remote` typed-token confirmation
+	//      declined at the prompt.
+	// So a 12 does not on its own prove the caller was non-interactive.
+	// Supplying the matching token is the correct remedy for sources 1-3
+	// (format via `bd help init-safety`); source 4 was a deliberate decline.
 	ExitDestroyTokenMissing = 12
+
+	// ExitHomeDirRefused signals `bd init` was run directly in the user's
+	// home directory, which is not itself a git repository, without the
+	// caller naming a BEADS_DIR. Refused because init would `git init` $HOME
+	// and install agent files into it, where most of them are user-wide
+	// agent settings (GH#4635).
+	//
+	// 15 because 13 and 14 are taken: ExitGuardMismatch (update.go, "racer
+	// won, skip gracefully") and ExitMigrationFrozen (errors.go). A wrapper
+	// that branches on bd's exit codes without regard to the subcommand must
+	// never read this refusal as a benign skip.
+	//
+	// Not part of protocol v0 §E3 (pinned in
+	// cmd/bd/protocol/exit_codes_init_test.go), which freezes 10/11/12/130
+	// and says a new stable code needs a spec revision. This constant gives
+	// the refusal the same in-repo scriptability the other three have — a
+	// stable number instead of grepping stderr — without claiming wire
+	// status the spec has not granted.
+	ExitHomeDirRefused = 15
 )
 
 // RemoteSafetyAction names what the init command should do once it has
@@ -57,9 +87,11 @@ const (
 	ActionRefuseDivergence
 
 	// ActionRequireDestroyToken — caller passed `--discard-remote` but
-	// destroy-token validation failed (non-interactive path with no token,
-	// or wrong token). Refuse with `ExitDestroyTokenMissing`. The
-	// interactive path should prompt for confirmation instead.
+	// destroy-token validation failed: either a non-interactive caller
+	// supplied no token, or a token WAS supplied — in either mode — and did
+	// not match. Refuse with `ExitDestroyTokenMissing`. An interactive
+	// caller that supplied NO token does not land here: it gets
+	// ActionProceedWithDivergence and must prompt for confirmation instead.
 	ActionRequireDestroyToken
 
 	// ActionProceedWithDivergence — caller passed `--discard-remote` and
@@ -95,10 +127,12 @@ type RemoteSafetyInput struct {
 	RemoteHasDoltData bool
 
 	// IsInteractive is true when the caller is attached to a TTY.
-	// Interactive callers can prompt for destroy-token confirmation; the
-	// decision returned for interactive callers assumes they will prompt
-	// (so ActionProceedWithDivergence can be returned without a token
-	// match — the caller must do the prompt itself).
+	// Interactive callers can prompt for destroy-token confirmation, so the
+	// decision returned for an interactive caller that supplied NO token
+	// assumes it will prompt (ActionProceedWithDivergence is returned
+	// without a token match — the caller must do the prompt itself). A
+	// token that WAS supplied is always validated regardless of this field:
+	// the caller's prompt only fires when no token was given (#6480).
 	IsInteractive bool
 }
 
@@ -148,15 +182,29 @@ func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
 		}
 	}
 
-	// User authorized. Interactive callers prompt; non-interactive must
-	// supply a matching destroy-token.
-	if !in.IsInteractive {
+	// User authorized. Non-interactive callers must supply a matching
+	// destroy-token. Interactive callers that supplied no token defer to the
+	// typed-confirmation prompt, but a token that WAS supplied is always
+	// validated: the caller's prompt only fires when no token was given, so
+	// an unvalidated wrong token would skip every confirmation (#6480).
+	if !in.IsInteractive || in.DestroyToken != "" {
 		if in.ExpectedToken == "" || in.DestroyToken != in.ExpectedToken {
+			// Carry token PRESENCE into the refusal. The two cases have
+			// different remedies and only one of them can be reached
+			// interactively, so a single conflated message necessarily
+			// misdirects one of them: telling a user who supplied a wrong
+			// token to "re-run interactively and confirm at the prompt"
+			// loops them through the identical refusal forever, because the
+			// prompt is gated on no token being supplied.
+			reason, message := "destroy-token-missing", refusalMessageTokenMissing()
+			if in.DestroyToken != "" {
+				reason, message = "destroy-token-mismatch", refusalMessageTokenMismatch()
+			}
 			return RemoteSafetyDecision{
 				Action:      ActionRequireDestroyToken,
-				Reason:      "destroy-token-missing-or-wrong",
+				Reason:      reason,
 				ExitCode:    ExitDestroyTokenMissing,
-				UserMessage: refusalMessageTokenMissing(),
+				UserMessage: message,
 			}
 		}
 	}
@@ -188,8 +236,15 @@ func refusalMessageDivergence() string {
 }
 
 // refusalMessageTokenMissing returns the What/Why/Next refusal text for
-// the `--discard-remote` + missing/wrong destroy-token case. Deliberately
-// does not echo the token value.
+// `--discard-remote` with NO destroy-token supplied. That combination is
+// reachable only from a non-interactive caller — an interactive one with no
+// token defers to the typed-confirmation prompt — so both the
+// "non-interactive mode" framing and the "re-run interactively" remedy are
+// accurate here. A supplied-but-wrong token gets
+// refusalMessageTokenMismatch() instead, where that remedy would be a dead
+// end. The text is reproduced in docs/recovery/init-safety.md under
+// `init-token-missing`; keep them in sync. Deliberately does not echo the
+// token value.
 func refusalMessageTokenMissing() string {
 	return `bd init refuses: --discard-remote requires an explicit destroy-token in non-interactive mode.
 
@@ -200,6 +255,30 @@ func refusalMessageTokenMissing() string {
   Next:
     See 'bd help init-safety' for the destroy-token format.
     Or re-run interactively (attached to a TTY) and confirm at the prompt.`
+}
+
+// refusalMessageTokenMismatch returns the What/Why/Next refusal text for
+// `--discard-remote` with a destroy-token that was supplied but does not
+// match. Unlike the missing-token case this is reachable in BOTH modes, so
+// its Next must hold on a TTY too: re-running interactively with the same
+// token repeats this refusal, because the typed-confirmation prompt fires
+// only when no token was given. Dropping the flag is the remedy that
+// actually reaches the prompt. Deliberately does not echo the token value.
+func refusalMessageTokenMismatch() string {
+	return `bd init refuses: the supplied --destroy-token does not match this project's token.
+
+  Why: Destructive cross-boundary operations cannot be authorized
+       silently, and a token that does not match is not authorization.
+       The expected token is derived from the issue prefix; this refusal
+       deliberately does not echo it.
+
+  Next:
+    See 'bd help init-safety' for the destroy-token format, then re-run
+    with the matching value.
+
+    Or drop --destroy-token entirely and re-run interactively (attached
+    to a TTY): with no token supplied, bd asks for typed confirmation at
+    the prompt instead.`
 }
 
 // FormatDestroyToken returns the destroy-token the caller should supply

@@ -26,6 +26,7 @@
       "issue_type": "feature",
       "owner": "test@protocol.test",
       "priority": 1,
+      "revision": "<REVISION>",
       "status": "open",
       "title": "Corpus root issue",
       "updated_at": "<TS>"

@@ -1,0 +1,390 @@
+package issueops
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"strings"
+
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
+)
+
+// HistoryEntry names the version-control entry a guarded mutation records: the
+// caller's own provenance label when it supplied one, otherwise the
+// implementation's default. It decides how the entry READS, never whether one
+// is recorded — that stays a question about what the mutation wrote.
+//
+// Every guarded mutation whose request carries a label calls this. Create is
+// the one that does not, and the reason is NOT that no surface names the
+// created issue — several do (internal/storage/dolt/issues.go writes
+// "bd: create <id>", reached from cmd/bd/create_atomic.go). It is that
+// CreateRequest has no Provenance field for a caller to set, so there is no
+// label for this function to prefer. That is a gap rather than a principle:
+// the proxied route's create message changed from "bd: create <id>" to
+// "create issue" for exactly this reason, and closing it means either giving
+// CreateRequest the field or having the role compose an id-bearing default the
+// way BatchCloser and ClaimNext do. Tracked as its own decision.
+func HistoryEntry(provenance, fallback string) string {
+	if provenance != "" {
+		return provenance
+	}
+	return fallback
+}
+
+// ExecuteCreate applies a guarded create in tx and reports durable tables changed.
+func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequest) (publicops.CreateResult, ChangedTables, error) {
+	attempt := CloneCreateRequest(request)
+	if err := ValidatePublicCreateRequest(attempt); err != nil {
+		return publicops.CreateResult{}, nil, err
+	}
+	batch, err := NewBatchContext(ctx, tx, storage.BatchCreateOptions{CreateOnly: true, SkipPrefixValidation: attempt.ForceIDPrefix})
+	if err != nil {
+		return publicops.CreateResult{}, nil, err
+	}
+	attempt, err = PreparePublicCreateRequest(attempt, PublicCreateContext{
+		IssuePrefix: batch.ConfigPrefix, AllowedPrefixes: batch.AllowedPrefixes,
+		CustomStatuses: batch.CustomStatuses, CustomTypes: batch.CustomTypes,
+	})
+	if err != nil {
+		return publicops.CreateResult{}, nil, err
+	}
+	issue := attempt.Issue
+	// Configured infra types live in the wisp tables, the same routing the
+	// stores' own CreateIssue applies (internal/storage/dolt/issues.go). Mark
+	// the issue before its ID is assigned so ID generation, the create-only
+	// guard, and table routing all agree on the destination. A no-history
+	// create keeps its own retention mode.
+	if !issue.Ephemeral && !issue.NoHistory && ResolveInfraTypesInTx(ctx, tx)[string(issue.IssueType)] {
+		issue.Ephemeral = true
+	}
+	// A wisp_type IS a claim of ephemerality: a typed wisp minted without the
+	// flag lands in the issues plane where no TTL, GC, or purge tier owns it
+	// (858 such rows / 7.3 MB survived every sweep in one production DB before
+	// this line). NoHistory keeps its own retention mode, same as above.
+	if !issue.Ephemeral && !issue.NoHistory && issue.WispType != "" {
+		issue.Ephemeral = true
+	}
+	if attempt.InheritLabelsFromParent && attempt.ParentID != "" {
+		labels, err := GetLabelsInTx(ctx, tx, "", attempt.ParentID)
+		if err != nil {
+			return publicops.CreateResult{}, nil, err
+		}
+		issue.Labels = append(issue.Labels, labels...)
+	}
+	childCounterChanged := false
+	if issue.ID == "" && attempt.ParentID != "" {
+		parentIsWisp := IsActiveWispInTx(ctx, tx, attempt.ParentID)
+		issue.ID, err = GetNextChildIDTx(ctx, tx, attempt.ParentID)
+		if err != nil {
+			return publicops.CreateResult{}, nil, ClassifyPublicCreateError(err)
+		}
+		childCounterChanged = !parentIsWisp
+	}
+	if err := assignCreateIssueIDInTx(ctx, tx, batch, issue, attempt.Actor, nil); err != nil {
+		return publicops.CreateResult{}, nil, ClassifyPublicCreateError(err)
+	}
+	issue.Dependencies = storage.CreatePublicCreateDependencies(issue.ID, attempt)
+	var skipped []skippedDependency
+	// Reuse the context read above: same transaction, same options, and
+	// nothing since has written config, so re-reading it (as
+	// CreateIssuesInTxWithResult would) only repeats the same reads.
+	createContext := *batch
+	createContext.Opts = storage.BatchCreateOptions{
+		CreateOnly: true, SkipPrefixValidation: attempt.ForceIDPrefix,
+		OnSkippedDependency: func(issueID, dependsOnID, reason string) {
+			skipped = append(skipped, skippedDependency{issueID: issueID, dependsOnID: dependsOnID, reason: reason})
+		},
+	}
+	created, err := CreateIssuesInTxWithContext(ctx, tx, &createContext, []*types.Issue{issue}, attempt.Actor)
+	if err != nil {
+		return publicops.CreateResult{}, nil, ClassifyPublicCreateError(err)
+	}
+	if len(skipped) > 0 {
+		return publicops.CreateResult{}, nil, publicCreateValidationError(skippedDependencyError(skipped))
+	}
+	tables := ChangedTables{}
+	tables.Merge(CreateIssuesDirtyTables(ctx, []*types.Issue{issue}, created))
+	if childCounterChanged {
+		tables.Add("child_counters")
+	}
+	hydrated, err := HydrateIssueOperationResult(ctx, tx, issue.ID, true)
+	if err != nil {
+		return publicops.CreateResult{}, nil, err
+	}
+	OverlayCreateTimestamps(hydrated, issue)
+	return publicops.CreateResult{Issue: hydrated}, tables, nil
+}
+
+// skippedDependency records an edge the batch engine declined to write.
+type skippedDependency struct{ issueID, dependsOnID, reason string }
+
+// skippedDependencyError refuses a guarded create whose requested edges were
+// not all written. The batch engine drops a dangling edge so a partial import
+// still lands, but a guarded create that reported success while silently
+// discarding a parent, waits-for, or explicit dependency is data loss: the
+// caller has no way to learn the relationship is missing. Refusing rolls the
+// whole create back with the enclosing transaction.
+func skippedDependencyError(skipped []skippedDependency) error {
+	edges := make([]string, 0, len(skipped))
+	for _, edge := range skipped {
+		edges = append(edges, fmt.Sprintf("%s -> %s (%s)", edge.issueID, edge.dependsOnID, edge.reason))
+	}
+	return fmt.Errorf("create: dependencies could not be created: %s: %w", strings.Join(edges, "; "), storage.ErrNotFound)
+}
+
+// ExecuteUpdate applies a guarded update in tx and reports durable tables changed.
+func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequest) (publicops.UpdateResult, ChangedTables, error) {
+	return executeUpdate(ctx, tx, request, true)
+}
+
+// executeUpdate is ExecuteUpdate with the template guard made optional, for the
+// one caller that is not an update of an existing row: the batch apply's
+// metadata splice, which finishes a CREATE item of the same request — a
+// template the request itself is creating is still being written, not
+// modified.
+func executeUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequest, guardTemplate bool) (publicops.UpdateResult, ChangedTables, error) {
+	attempt := CloneUpdateRequest(request)
+	if attempt.Actor == "" || attempt.IssueID == "" {
+		return publicops.UpdateResult{}, nil, fmt.Errorf("%w: update requires actor and issue ID", storage.ErrValidation)
+	}
+	if err := ValidateUpdateRequest(attempt); err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	if err := ValidateMetadataPatch(attempt.Patch.Metadata); err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	// The plane restriction is resolved HERE, inside the update's own
+	// transaction, so a caller that serves durable issues only cannot be handed
+	// a wisp by a resolve that ran earlier.
+	if attempt.IssuePlaneOnly && IsActiveWispInTx(ctx, tx, attempt.IssueID) {
+		return publicops.UpdateResult{}, nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, attempt.IssueID)
+	}
+	tables := ChangedTables{}
+	before, err := GetIssueInTx(ctx, tx, attempt.IssueID)
+	if err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	if attempt.ExpectedVersion != nil {
+		if err := CheckVersionInTx(ctx, tx, attempt.IssueID, *attempt.ExpectedVersion); err != nil {
+			return publicops.UpdateResult{}, nil, err
+		}
+	}
+	if attempt.ExpectedStatus != nil {
+		status := string(*attempt.ExpectedStatus)
+		attempt.ExpectedStatus = nil
+		if err := CheckExpectedFieldsInTx(ctx, tx, attempt.IssueID, attempt.ExpectedAssignee, &status); err != nil {
+			return publicops.UpdateResult{}, nil, err
+		}
+	} else if err := CheckExpectedFieldsInTx(ctx, tx, attempt.IssueID, attempt.ExpectedAssignee, nil); err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	if guardTemplate {
+		if err := AuthorizeTemplateUpdate(before, attempt); err != nil {
+			return publicops.UpdateResult{}, nil, err
+		}
+	}
+	if err := AuthorizeAssigneeTransfer(ctx, tx, before, attempt); err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	if err := AuthorizeNotesOverwrite(before, attempt); err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	// Every constituent below runs its no-mint variant: one guarded update is
+	// one caller-visible mutation, and its version is minted exactly once at
+	// the end, after the last patch, so durable_state carries the final row,
+	// label set and edge set rather than whichever write happened to run
+	// first.
+	changedAny := false
+	if attempt.Claim {
+		claimed, err := claimIssueInTx(ctx, tx, attempt.IssueID, attempt.Actor, false)
+		if err != nil {
+			return publicops.UpdateResult{}, nil, err
+		}
+		if claimAdvancedTheRow(claimed, attempt.Actor) {
+			changedAny = true
+			issueTable, _, eventTable, _ := WispTableRouting(claimed.IsWisp)
+			tables.Add(issueTable, eventTable)
+		}
+	}
+	current := before
+	if attempt.Claim {
+		current, err = GetIssueInTx(ctx, tx, attempt.IssueID)
+		if err != nil {
+			return publicops.UpdateResult{}, nil, err
+		}
+	}
+	updates := UpdateFields(attempt.Patch)
+	// A metadata patch rides the same row write as the field edits. Writing it
+	// separately recorded a second event for one atomic mutation, fabricating
+	// an update that never happened for every consumer of the event stream.
+	// ApplyMetadataPatch already resolved the patch against the in-transaction
+	// row, so the concrete value goes in alongside the other columns and its
+	// no-op elision is preserved by the changed flag.
+	metadata, metadataChanged, err := ApplyMetadataPatch(current.Metadata, attempt.Patch.Metadata)
+	if err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	if metadataChanged {
+		updates["metadata"] = metadata
+	}
+	// The override only means anything alongside a status change, so it is spelled
+	// only then: an update that carries it with no status would be handing the
+	// funnel a key it has no question to answer.
+	if attempt.ForceClosePolicy && attempt.Patch.Status.Set {
+		updates[OpForceClosePolicy] = true
+	}
+	if len(updates) > 0 {
+		updated, err := updateIssueInTx(ctx, tx, attempt.IssueID, updates, attempt.Actor, true, false)
+		if err != nil {
+			return publicops.UpdateResult{}, nil, err
+		}
+		if updated.Changed {
+			changedAny = true
+			issueTable, _, eventTable, _ := WispTableRouting(updated.IsWisp)
+			tables.Add(issueTable, eventTable)
+			if updated.IssueRowsChanged {
+				tables.Add("issues")
+			}
+		}
+	}
+	labelsChanged, err := applyLabelPatch(ctx, tx, current, attempt.Patch.Labels, attempt.Actor, false)
+	if err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	if labelsChanged {
+		changedAny = true
+		_, labelTable, eventTable, _ := WispTableRouting(IsActiveWispInTx(ctx, tx, attempt.IssueID))
+		tables.Add(labelTable, eventTable)
+	}
+	parentResult, err := applyParentPatch(ctx, tx, current, attempt.Patch.ParentID, attempt.Actor, false)
+	if err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	if parentResult.Changed {
+		changedAny = true
+		_, _, _, dependencyTable := WispTableRouting(IsActiveWispInTx(ctx, tx, attempt.IssueID))
+		tables.Add(dependencyTable)
+		if parentResult.IssueRowsChanged {
+			tables.Add("issues")
+		}
+	}
+	beginsHistory := false
+	if attempt.Patch.Persistence.Set {
+		current, err := GetIssueInTx(ctx, tx, attempt.IssueID)
+		if err != nil {
+			return publicops.UpdateResult{}, nil, err
+		}
+		moved, err := moveIssuePersistenceInTx(ctx, tx, current, attempt.Patch.Persistence.Value, attempt.Actor, false)
+		if err != nil {
+			return publicops.UpdateResult{}, nil, err
+		}
+		if moved.Changed {
+			changedAny = true
+			tables.Merge(moved.ChangedTables)
+		}
+		beginsHistory = moved.BeginsHistory()
+	}
+	// The one mint for this guarded update, LAST: after the claim, the row
+	// write, the label and parent patches and the persistence move. Nothing
+	// changed means nothing to version (the FR-2 no-op case), and a row that
+	// moved to the wisp plane is excluded by the seam itself. A persistence
+	// move that brought onto the issues plane a row carrying no participation
+	// makes this the record's first version, so it mints create-shaped
+	// (design §16.2b), the same as MoveIssuePersistenceInTx's own mint for
+	// that move; a row whose participation the move restored mints
+	// update-shaped, so a legacy row stays legacy (R2.3).
+	if changedAny {
+		if beginsHistory {
+			if err := RecordVersionForCreateInTx(ctx, tx, attempt.IssueID, attempt.Actor); err != nil {
+				return publicops.UpdateResult{}, nil, err
+			}
+		} else if err := RecordVersionInTx(ctx, tx, attempt.IssueID, attempt.Actor); err != nil {
+			return publicops.UpdateResult{}, nil, err
+		}
+	}
+	hydrated, err := HydrateIssueOperationResult(ctx, tx, attempt.IssueID, false)
+	if err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
+	return publicops.UpdateResult{Issue: hydrated, Changed: changedAny}, tables, nil
+}
+
+// claimAdvancedTheRow reports whether ClaimIssueInTx's CAS represents a real
+// mutation from the pre-image it read, as opposed to an idempotent re-claim
+// that matched the CAS but changed nothing worth staging. Comparing the
+// pre-image assignee to actor verbatim (ga-v2k49, steveyegge's #5479
+// re-review) mistook a holder re-claiming under a respelled identity — a
+// dotted alias vs. its sanitized form, ga-wzl83's repro shape — for a fresh
+// mutation: ClaimIssueInTx's own CAS already treats the two spellings as the
+// same holder and writes nothing, but this check disagreed and staged a
+// phantom issues+events mutation for a request that changed no bytes.
+func claimAdvancedTheRow(claimed *ClaimResult, actor string) bool {
+	return claimed.OldIssue.Status != types.StatusInProgress || !actorMatches(claimed.OldIssue.Assignee, actor)
+}
+
+// ExecuteClose applies a guarded close in tx and reports durable tables changed.
+func ExecuteClose(ctx context.Context, tx *sql.Tx, request publicops.CloseRequest) (publicops.CloseResult, ChangedTables, error) {
+	attempt := CloneCloseRequest(request)
+	if attempt.Actor == "" || attempt.IssueID == "" {
+		return publicops.CloseResult{}, nil, fmt.Errorf("%w: close requires actor and issue ID", storage.ErrValidation)
+	}
+	closed, err := CloseIssueCheckedInTx(ctx, tx, attempt.IssueID, attempt.Reason, attempt.Actor, attempt.Session, attempt.Force, attempt.ExpectedVersion)
+	if err != nil {
+		return publicops.CloseResult{}, nil, err
+	}
+	tables := ChangedTables{}
+	changed := !closed.AlreadyClosed
+	if changed {
+		issueTable, _, eventTable, _ := WispTableRouting(closed.IsWisp)
+		tables.Add(issueTable, eventTable)
+	}
+	if closed.IssueRowsChanged {
+		tables.Add("issues")
+	}
+	hydrated, err := HydrateIssueOperationResult(ctx, tx, attempt.IssueID, false)
+	if err != nil {
+		return publicops.CloseResult{}, nil, err
+	}
+	result := publicops.CloseResult{Issue: hydrated, Changed: changed, OpenChildren: closed.OpenChildren}
+	if attempt.AutoCloseMolecule {
+		auto, autoTables, err := CloseCompletedMoleculeInTx(ctx, tx, attempt.IssueID, attempt.Actor, attempt.Session)
+		if err != nil {
+			return publicops.CloseResult{}, nil, err
+		}
+		tables.Merge(autoTables)
+		result.AutoClosedMolecule, result.MoleculeAutoCloseRefusal = auto.Root, auto.Refusal
+	}
+	return result, tables, nil
+}
+
+// ExecuteReopen applies a guarded reopen in tx and reports durable tables changed.
+func ExecuteReopen(ctx context.Context, tx *sql.Tx, request publicops.ReopenRequest) (publicops.ReopenResult, ChangedTables, error) {
+	attempt := CloneReopenRequest(request)
+	if attempt.Actor == "" || attempt.IssueID == "" {
+		return publicops.ReopenResult{}, nil, fmt.Errorf("%w: reopen requires actor and issue ID", storage.ErrValidation)
+	}
+	if attempt.ExpectedVersion != nil {
+		if err := CheckVersionInTx(ctx, tx, attempt.IssueID, *attempt.ExpectedVersion); err != nil {
+			return publicops.ReopenResult{}, nil, err
+		}
+	}
+	reopened, err := ReopenIssueInTx(ctx, tx, attempt.IssueID, attempt.Reason, attempt.Actor)
+	if err != nil {
+		return publicops.ReopenResult{}, nil, err
+	}
+	tables := ChangedTables{}
+	if reopened.Changed {
+		issueTable, _, eventTable, _ := WispTableRouting(reopened.IsWisp)
+		tables.Add(issueTable, eventTable)
+	}
+	if reopened.IssueRowsChanged {
+		tables.Add("issues")
+	}
+	hydrated, err := HydrateIssueOperationResult(ctx, tx, attempt.IssueID, false)
+	if err != nil {
+		return publicops.ReopenResult{}, nil, err
+	}
+	return publicops.ReopenResult{Issue: hydrated, Changed: reopened.Changed}, tables, nil
+}

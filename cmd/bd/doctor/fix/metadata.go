@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -217,11 +219,14 @@ func FixMissingDoltDatabase(path string) error {
 		return nil
 	}
 
-	// Connect to the server and probe for the correct database
-	db, err := openDoltDB(beadsDir)
+	// Connect to the server and probe for the correct database. No
+	// verifyFixTargetIdentity guard here: cfg.DoltDatabase is empty at this
+	// point (that's the condition that got us here), so there is no target
+	// database identity to verify yet — this call establishes it by probing
+	// schema across the server, it does not delete or mutate anything.
+	db, _, err := openDoltDB(beadsDir)
 	if err != nil {
-		fmt.Printf("  dolt_database fix skipped (server not reachable: %v)\n", err)
-		return nil
+		return skipFix(err)
 	}
 	defer db.Close()
 
@@ -277,9 +282,9 @@ func probeForCorrectDoltDatabase(db *sql.DB, skipDB string) string {
 
 	for _, dbName := range candidates {
 		var count int
-		//nolint:gosec // G201: dbName from SHOW DATABASES, not user input
+		//nolint:gosec // G201: identifier quoted+escaped via doltutil.QuoteIdentifierUnvalidated
 		err := db.QueryRowContext(ctx,
-			fmt.Sprintf("SELECT COUNT(*) FROM `%s`.issues LIMIT 1", dbName)).Scan(&count)
+			fmt.Sprintf("SELECT COUNT(*) FROM %s.issues LIMIT 1", doltutil.QuoteIdentifierUnvalidated(dbName))).Scan(&count)
 		if err == nil {
 			return dbName
 		}
@@ -417,7 +422,35 @@ func reconcileAuthoritativeServerMetadata(cfg *configfile.Config, databases []se
 }
 
 func inspectServerMetadataDatabases(beadsDir string, cfg *configfile.Config) ([]serverDatabaseMetadata, error) {
-	db, err := openServerCatalogDB(beadsDir, cfg)
+	// The catalog read is of the server the store dials, so the guard below
+	// and the dial take one endpoint (doltserver.ResolveEndpoint).
+	ep := doltserver.ResolveEndpoint(beadsDir, cfg)
+	// With no address there is no server catalog to read: never dial
+	// 127.0.0.1:0. When a bd command will start the workspace's own server,
+	// its databases are the ones in the data directory that server will
+	// serve; with none there (a fresh clone of a `bd init --server` project,
+	// before its first open) there is nothing to reconcile. Otherwise the
+	// reconcile cannot run, and says why: every store open refuses too, with
+	// this advice, or the server is merely stopped over existing databases.
+	if !ep.Dialable() {
+		if !ep.BDStartsServer() {
+			return nil, ep.UnresolvedError()
+		}
+		dataDir := doltserver.ResolveDoltDir(beadsDir)
+		if !dataDirHoldsDatabase(dataDir) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("this workspace's Dolt server is not running, so the databases in %s could not be read to reconcile metadata.json; "+
+			"start the server with 'bd dolt start' (or any bd command), then re-run this command", remedy.PrintedValue(dataDir))
+	}
+	// A server only a unix socket names has no port, and the catalog read
+	// stays TCP-only (openServerCatalogDB): refuse it here, never dial
+	// 127.0.0.1:0. bd bootstrap's later steps cannot reach such a server yet
+	// either, so bootstrap stops at this reconcile and writes nothing.
+	if !ep.Resolved() {
+		return nil, errors.New("only a unix socket names this workspace's Dolt server (no port resolved), and the metadata reconcile does not read a server's catalog over a socket yet")
+	}
+	db, err := openServerCatalogDB(ep)
 	if err != nil {
 		return nil, fmt.Errorf("server metadata probe failed: %w", err)
 	}
@@ -441,21 +474,20 @@ func inspectServerMetadataDatabases(beadsDir string, cfg *configfile.Config) ([]
 		}
 		meta := serverDatabaseMetadata{Name: dbName}
 
-		// Escape backticks in database name to prevent SQL injection (` → ``)
-		safeName := strings.ReplaceAll(dbName, "`", "``")
+		quotedName := doltutil.QuoteIdentifierUnvalidated(dbName)
 
 		var count int
-		//nolint:gosec // G201: identifier-escaped, dbName from SHOW DATABASES
-		if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM `%s`.issues LIMIT 1", safeName)).Scan(&count); err == nil {
+		//nolint:gosec // G201: identifier quoted+escaped via doltutil.QuoteIdentifierUnvalidated
+		if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s.issues LIMIT 1", quotedName)).Scan(&count); err == nil {
 			meta.HasSchema = true
 		} else if !isExpectedProbeError(err) {
 			return nil, fmt.Errorf("probing database %q for schema: %w", dbName, err)
 		}
 
 		var projectID string
-		//nolint:gosec // G201: identifier-escaped, dbName from SHOW DATABASES
+		//nolint:gosec // G201: identifier quoted+escaped via doltutil.QuoteIdentifierUnvalidated
 		if err := db.QueryRowContext(ctx,
-			fmt.Sprintf("SELECT value FROM `%s`.metadata WHERE `key` = '_project_id' LIMIT 1", safeName),
+			fmt.Sprintf("SELECT value FROM %s.metadata WHERE `key` = '_project_id' LIMIT 1", quotedName),
 		).Scan(&projectID); err == nil {
 			meta.ProjectID = projectID
 		} else if !isExpectedProbeError(err) {
@@ -471,9 +503,15 @@ func inspectServerMetadataDatabases(beadsDir string, cfg *configfile.Config) ([]
 }
 
 // isExpectedProbeError returns true for errors that indicate the table/row
-// simply doesn't exist — safe to treat as "not present". Permission errors,
-// connection failures, and other unexpected errors should be propagated so
-// that reconciliation doesn't act on an incomplete inventory.
+// simply doesn't exist — or that this user cannot inspect that database —
+// safe to treat as "not present" when enumerating SHOW DATABASES.
+//
+// GH#4931: shared sql-servers often host non-beads databases the beads
+// user cannot read. Access denied on those peers must not abort bootstrap
+// / metadata reconciliation for the configured beads database.
+//
+// Hard connection failures (server down, auth to the catalog itself) still
+// surface via openServerCatalogDB / SHOW DATABASES, not this probe helper.
 func isExpectedProbeError(err error) bool {
 	if err == nil {
 		return true
@@ -490,19 +528,69 @@ func isExpectedProbeError(err error) bool {
 			return true
 		case 1054: // Unknown column
 			return true
+		case 1044: // Access denied for user to database
+			return true
+		case 1142: // Access denied for user to table
+			return true
+		case 1143: // Access denied for user to column
+			return true
+		case 1227: // Access denied (requires privilege)
+			return true
+		case 1105: // HY000 — Dolt often wraps access denied here (GH#4931)
+			if strings.Contains(strings.ToLower(mysqlErr.Message), "access denied") {
+				return true
+			}
 		}
+	}
+	// Driver / wrapper may not expose MySQLError; match the common message.
+	if strings.Contains(strings.ToLower(err.Error()), "access denied") {
+		return true
 	}
 	return false
 }
 
-func openServerCatalogDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
-	port := doltserver.DefaultConfig(beadsDir).Port
+// openServerCatalogDB opens the catalog of the server at ep, the endpoint the
+// store dials: its port (DialConfig's, the legacy BEADS_DOLT_PORT included,
+// which DefaultConfig leaves out) and the password keyed to that port. With
+// DefaultConfig's port a workspace only BEADS_DOLT_PORT names had its catalog
+// read at 127.0.0.1:0, or at a port file's server no store open dials.
+//
+// It dials TCP only; inspectServerMetadataDatabases refuses a socket-only
+// server before calling it. Like openFixDB, it does not check the server
+// against doltversion.RequiredMin: bd doctor --fix is exempt from the floor.
+func openServerCatalogDB(ep doltserver.Endpoint) (*sql.DB, error) {
+	password := ep.Password()
+	if password != "" {
+		// Refuse to send BEADS_DOLT_PASSWORD to a shared-config host the
+		// workspace never pinned, as the store's open does (GH#7886).
+		if err := ep.EnsureTrustedForCredential(nil); err != nil {
+			return nil, err
+		}
+	}
 	connStr := doltutil.ServerDSN{
-		Host:     cfg.GetDoltServerHost(),
-		Port:     port,
-		User:     cfg.GetDoltServerUser(),
-		Password: cfg.GetDoltServerPasswordForPort(port),
-		TLS:      cfg.GetDoltServerTLS(),
+		Host:     ep.Host,
+		Port:     ep.Port,
+		User:     ep.User,
+		Password: password,
+		TLS:      ep.TLS,
 	}.String()
 	return sql.Open("mysql", connStr)
+}
+
+// dataDirHoldsDatabase reports whether dir, a Dolt server's data directory,
+// holds a database: a subdirectory with a .dolt directory.
+func dataDirHoldsDatabase(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if info, err := os.Stat(filepath.Join(dir, entry.Name(), ".dolt")); err == nil && info.IsDir() {
+			return true
+		}
+	}
+	return false
 }

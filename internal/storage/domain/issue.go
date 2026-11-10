@@ -10,10 +10,19 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/validation"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 type InsertIssueOpts struct {
 	UseWispsTable bool
+	CreateOnly    bool
+	// ExplicitID reports that the caller named the id (createIDNamedByCaller)
+	// rather than a generator minting it. The upsert Insert guards only such
+	// an id against retirement: the generators already skip retired ids, so
+	// coordinating and probing a minted one is a cell write, a probe and, on
+	// a Dolt server, a commit-conflict surface for no safety.
+	ExplicitID bool
 }
 
 type IssueTableOpts struct {
@@ -36,28 +45,90 @@ type ClaimRowResult struct {
 type IssueSQLRepository interface {
 	Insert(ctx context.Context, issue *types.Issue, actor string, opts InsertIssueOpts) error
 	InsertBatch(ctx context.Context, issues []*types.Issue, actor string, opts InsertIssueOpts) error
+	MovePersistence(ctx context.Context, id string, mode types.PersistenceMode, actor string) (changed bool, err error)
+	PromoteFromEphemeral(ctx context.Context, id, actor string) error
 	Update(ctx context.Context, id string, updates map[string]any, actor string, opts IssueTableOpts) error
+	// CompareAndSetMetadataKey runs the SHARED compare-and-set body on this
+	// repository's transaction, which is how the unit-of-work provider reaches
+	// the same function the two store backends wrap. It takes no table option:
+	// the body routes both planes itself, the way the metadata merge does.
+	//
+	// The bool reports whether a row change actually LANDED, which the caller
+	// needs and the result does not carry — a swap can hold its precondition
+	// and write nothing (see issueops.MetadataCAS.CompareAndSetKey).
+	CompareAndSetMetadataKey(ctx context.Context, plan storage.CompareAndSetKeyPlan) (publicops.CompareAndSetKeyResult, bool, error)
+	// ReleaseIssue runs the SHARED claim-release body on this repository's
+	// transaction, which is how the unit-of-work provider reaches the same
+	// function the two store backends wrap. It takes no table option: the body
+	// routes both planes itself, the way the compare-and-set above does.
+	//
+	// The bool reports whether a row write actually LANDED, which the caller
+	// needs and the result does not carry in the shape it needs it: an
+	// ephemeral release writes a row and versions nothing, and a caller whose
+	// commit message is also what commits its SQL transaction must compose one
+	// either way (see issueops.Releaser.Release).
+	ReleaseIssue(ctx context.Context, req publicops.ReleaseRequest) (publicops.ReleaseResult, bool, error)
 	Claim(ctx context.Context, id, actor string, opts IssueTableOpts) (ClaimRowResult, error)
 	Get(ctx context.Context, id string, opts IssueTableOpts) (*types.Issue, error)
 	AsOf(ctx context.Context, id, ref string) (*types.Issue, error)
 	GetByIDs(ctx context.Context, ids []string, opts IssueTableOpts) ([]*types.Issue, error)
+	// GetMany runs the SHARED batch-read body (issueops.ExecuteGetMany) on this
+	// repository's transaction, which is how the unit-of-work provider reaches
+	// the same function the two store backends wrap. It takes no table option:
+	// the body routes both planes itself, the way CompareAndSetMetadataKey's
+	// does.
+	GetMany(ctx context.Context, request publicops.GetManyRequest) (publicops.GetManyResult, error)
 	Exists(ctx context.Context, id string, opts IssueTableOpts) (bool, error)
+	// Taken reports whether id is unavailable to a fresh create in either
+	// plane, whichever one it is minted for (issues and wisps share one id
+	// space): a live row of either table holds it, or a retaining retention
+	// sweep retired it (either tombstone table). One statement.
+	Taken(ctx context.Context, id string) (bool, error)
+	// Retired reports whether a retaining retention sweep retired id (either
+	// tombstone table), whatever the row tables hold.
+	Retired(ctx context.Context, id string) (bool, error)
+	// RetiredIDs returns which of ids a retaining retention sweep retired
+	// (either tombstone table), with the closed_at each tombstone recorded
+	// (issueops.RetiredIDsInTx).
+	RetiredIDs(ctx context.Context, ids []string) (map[string]time.Time, error)
+	// RetireIDs writes one permanent tombstone per id, with the closed_at it
+	// maps to, into the tombstone table of the plane opts names
+	// (issueops.RetireIDsInTx). It runs in the unit of work that deletes the
+	// rows, so a failure rolls the delete back with it.
+	RetireIDs(ctx context.Context, ids map[string]time.Time, opts IssueTableOpts) error
+	// CoordinateCreates writes the create coordination cell of every id's
+	// shard (issueops.CoordinateIDCreatesInTx): the lock that orders a create
+	// of an id against a retaining delete of it. A retaining delete takes it
+	// before it deletes anything.
+	CoordinateCreates(ctx context.Context, ids []string) error
 	CountForPrefix(ctx context.Context, prefix string, opts IssueTableOpts) (int, error)
 	NextCounterID(ctx context.Context, prefix string) (int, error)
 	SearchAcrossIssuesAndWisps(ctx context.Context, query string, filter types.IssueFilter) (SearchPage, error)
 	SearchAcrossIssuesAndWispsWithCounts(ctx context.Context, query string, filter types.IssueFilter) (SearchCountsPage, error)
 	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
+	// SearchWispsPlane searches the wisps table ALONE, whatever each row's
+	// ephemeral, no_history or wisp_type values, and never the issues table
+	// (issueops.SearchWispsPlaneInTx).
+	SearchWispsPlane(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
 	GetReadyWork(ctx context.Context, filter types.WorkFilter) (SearchPage, error)
 	GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) (SearchCountsPage, error)
 	GetDescendants(ctx context.Context, rootID string, filter types.IssueFilter) ([]*types.Issue, error)
-	Delete(ctx context.Context, id string, opts IssueTableOpts) error
-	DeleteByIDs(ctx context.Context, ids []string, opts IssueTableOpts) (int, error)
+	// Delete and DeleteByIDs take actor for the reason Close/Reopen/Claim do:
+	// the events journal records one row per removed bead and the identity that
+	// asked for the removal is only known above this seam. A caller with no
+	// request behind it passes "" (system/unknown), never a placeholder.
+	Delete(ctx context.Context, id string, opts IssueTableOpts, actor string) error
+	DeleteByIDs(ctx context.Context, ids []string, opts IssueTableOpts, actor string) (int, error)
 	PartitionWispIDs(ctx context.Context, ids []string) (wispIDs, regularIDs []string, err error)
-	FindAllDependents(ctx context.Context, ids []string) ([]string, error)
+	FindCascadeClosure(ctx context.Context, ids []string) ([]string, error)
 	FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error)
 	AffectedByDeletion(ctx context.Context, issueIDs, wispIDs []string) (affectedIssues, affectedWisps []string, err error)
-	RecomputeIsBlocked(ctx context.Context, issueIDs, wispIDs []string) error
+	// RecomputeIsBlockedAfterDelete recomputes the blocked state of the
+	// dependents a delete of deletedIDs affected, and records them for the
+	// post-commit recheck the unit of work runs (gastownhall/beads#6716).
+	RecomputeIsBlockedAfterDelete(ctx context.Context, deletedIDs, issueIDs, wispIDs []string) error
 	Close(ctx context.Context, id string, params CloseRowParams, actor string, opts IssueTableOpts) (CloseRowResult, error)
+	CloseChecked(ctx context.Context, id string, params CloseRowParams, actor string, force bool) (CloseRowResult, error)
 	Reopen(ctx context.Context, id string, params ReopenRowParams, actor string, opts IssueTableOpts) (ReopenRowResult, error)
 	GetNewlyUnblockedByClose(ctx context.Context, closedID string) ([]*types.Issue, error)
 	ClaimReadyIssue(ctx context.Context, filter types.WorkFilter, actor string) (*types.Issue, error)
@@ -71,7 +142,26 @@ type IssueSQLRepository interface {
 	GetStaleIssues(ctx context.Context, filter types.StaleFilter) ([]*types.Issue, error)
 	GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error)
 	UnclaimIssue(ctx context.Context, id, actor string, force bool) error
+	UnclaimIssueIfAssignee(ctx context.Context, id, actor, expectedAssignee string) error
+	HeartbeatIssue(ctx context.Context, id, actor string) error
 	ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error)
+	// Reclaim runs the SHARED sweep body (issueops.ExecuteReclaimInTx) on this
+	// repository's transaction, which is how the unit-of-work provider reaches
+	// the same function the two store backends wrap. It is the publicops-typed
+	// counterpart to ReclaimExpiredLeases above, the way GetMany is to GetByIDs.
+	Reclaim(ctx context.Context, request publicops.ReclaimRequest) (publicops.ReclaimResult, error)
+	// RenewLease runs the SHARED heartbeat body (issueops.ExecuteHeartbeatInTx)
+	// on this repository's transaction, which is how the unit-of-work provider
+	// reaches the same function the two store backends wrap. It is the
+	// publicops-typed counterpart to HeartbeatIssue above, the way Reclaim is
+	// to ReclaimExpiredLeases.
+	RenewLease(ctx context.Context, request publicops.HeartbeatRequest) (publicops.HeartbeatResult, error)
+	WakeExpiredDefers(ctx context.Context) (issues, wisps int, err error)
+	// ParticipatingIssueIDs runs issueops.ParticipatingIssueIDsInTx on this
+	// repository's transaction: which of ids name an issues-table row whose
+	// participation_generation is set. It is the unit-of-work route's answer to
+	// storage.HistoryParticipation, which the two store backends implement.
+	ParticipatingIssueIDs(ctx context.Context, ids []string) (map[string]struct{}, error)
 }
 
 type CloseRowParams struct {
@@ -83,6 +173,7 @@ type CloseRowResult struct {
 	Updated       bool
 	AlreadyClosed bool
 	IsWisp        bool
+	OpenChildren  int
 }
 
 type ReopenRowParams struct {
@@ -102,15 +193,28 @@ type DeleteIssuesParams struct {
 	UpdateTextReferences bool
 
 	// EnforceCascadePolicy selects embedded-parity dependent handling
-	// (issueops.DeleteIssuesInTx). When false — the legacy default used by the
-	// proxied-server delete command, which always cascades — deletion expands to
-	// all transitive dependents regardless of Cascade/Force. When true,
-	// Cascade/Force choose the behavior:
-	//   Cascade=true               → delete all transitive dependents
+	// (issueops.DeleteIssuesInTx). When false — the legacy default kept for the
+	// wisp/mol/gc/purge proxied paths and the single-ID convenience wrappers —
+	// cascade expansion follows params.Cascade alone and Force is ignored. When
+	// true, Cascade/Force choose the behavior:
+	//   Cascade=true               → delete the parent-child closure and orphan
+	//                                every other external dependent
 	//   Cascade=false, Force=false → refuse if any external dependent exists
+	//                                (*DeleteBlockedError, naming the blockers)
 	//   Cascade=false, Force=true  → orphan external dependents (delete only IDs)
+	// One deliberate divergence from embedded: a wisp NAMED in IDs counts like
+	// any other issue here and can trip the refusal, where embedded partitions
+	// wisps out before the dependent check. Strictly safer; kept on purpose.
 	EnforceCascadePolicy bool
 	Force                bool
+
+	// Retire, when non-nil, retires every id the delete removes: after the
+	// rows are gone, each deleted id gets a permanent tombstone carrying the
+	// closed_at it maps to, in the tombstone table of the plane it was stored
+	// in (issueops.SweepRequest.RetainIDs). A deleted id missing from the map
+	// is an error, so the set deleted is the set retired. A DryRun retires
+	// nothing.
+	Retire map[string]time.Time
 }
 
 type DeleteIssuesResult struct {
@@ -119,10 +223,16 @@ type DeleteIssuesResult struct {
 	LabelsCount       int
 	EventsCount       int
 	ReferencesUpdated int
-	// OrphanedIssues lists external dependents left behind by a force delete
-	// (Cascade=false, Force=true), or the blocking dependents reported with the
-	// refusal error (Cascade=false, Force=false). Empty on the cascade path.
+	// OrphanedIssues names, in ascending id order, the surviving rows that
+	// depended directly on a deleted row. A Cascade fills it (the closure is
+	// containment only, so rows joined to it by any other edge survive), and
+	// so does EnforceCascadePolicy with Force; the uncascaded legacy path
+	// leaves it empty. `bd wisp gc --json` publishes it.
 	OrphanedIssues []string
+	// DeletedIDs names, in ascending id order without duplicates, the rows
+	// DeletedCount counts (under Cascade, the whole parent-child closure). A
+	// DryRun names the rows the deletion would remove.
+	DeletedIDs []string
 }
 
 type DeletePreview struct {
@@ -152,6 +262,15 @@ type CreateIssueParams struct {
 	WaitsFor                *WaitsForSpec
 	DiscoveredFromParent    string
 	ForcePrefix             bool
+	CreateOnly              bool
+	Comments                []*types.Comment
+	// ClaimedIDs are the ids the caller's batch has spoken for: every explicit
+	// id its items name and every id it has created so far. A mint passes over
+	// them as it passes over a held id, in both modes. What it adds over the
+	// row probe is the explicit ids of LATER items, which no table holds yet;
+	// minting one would refuse that later item as occupied by its own batch.
+	// Only a mint reads it; nil claims nothing.
+	ClaimedIDs map[string]bool
 }
 
 type DependencySpec struct {
@@ -159,6 +278,7 @@ type DependencySpec struct {
 	TargetID      string
 	SwapDirection bool
 	Metadata      string
+	ThreadID      string
 }
 
 type WaitsForSpec struct {
@@ -230,12 +350,16 @@ type ClaimReadyResult struct {
 }
 
 type UpdateSpec struct {
-	Fields       map[string]any
-	Claim        bool
-	AddLabels    []string
-	RemoveLabels []string
-	SetLabels    *[]string
-	Reparent     *string
+	Fields map[string]any
+	Claim  bool
+	// ExpectedVersion requires the current row version to match before any
+	// claim or field writes.
+	ExpectedVersion *int64
+	Persistence     *types.PersistenceMode
+	AddLabels       []string
+	RemoveLabels    []string
+	SetLabels       *[]string
+	Reparent        *string
 
 	// ExpectedAssignee and ExpectedStatus are the bd-wsqvw compare-and-set
 	// guards (`bd update --if-assignee/--if-status`): when non-nil, the whole
@@ -253,10 +377,23 @@ type UpdateSpec struct {
 type IssueUseCase interface {
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)
 	GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error)
+	// RetiredIssueIDs returns which of ids a retaining retention sweep
+	// retired, with the closed_at each tombstone recorded. It does not consult
+	// the row tables (a live row wins over its tombstone; the caller combines
+	// this with its own presence read). The import dry run asks it so its
+	// preview agrees with the real import, which skips a retired row.
+	RetiredIssueIDs(ctx context.Context, ids []string) (map[string]time.Time, error)
+	// GetMany is the shape issueops.BatchGetter publishes; see
+	// IssueSQLRepository.GetMany for why it takes no table option.
+	GetMany(ctx context.Context, request publicops.GetManyRequest) (publicops.GetManyResult, error)
 	FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error)
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) (SearchPage, error)
 	SearchIssuesWithCounts(ctx context.Context, query string, filter types.IssueFilter) (SearchCountsPage, error)
 	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
+	// SearchWispsPlane searches the wisps table ALONE, whatever each row's
+	// ephemeral, no_history or wisp_type values, and never the issues table
+	// (issueops.SearchWispsPlaneInTx).
+	SearchWispsPlane(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
 	GetReadyWork(ctx context.Context, filter types.WorkFilter) (SearchPage, error)
 	GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) (SearchCountsPage, error)
 	GetDescendants(ctx context.Context, rootID string, filter types.IssueFilter) ([]*types.Issue, error)
@@ -270,11 +407,35 @@ type IssueUseCase interface {
 	GetStaleIssues(ctx context.Context, filter types.StaleFilter) ([]*types.Issue, error)
 	GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error)
 	Unclaim(ctx context.Context, id, actor string, force bool) error
+	UnclaimIfAssignee(ctx context.Context, id, actor, expectedAssignee string) error
+	Heartbeat(ctx context.Context, id, actor string) error
 	ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error)
+	// Reclaim is the shape issueops.LeaseReclaimer publishes; see
+	// IssueRepository.Reclaim for why it is a separate method from
+	// ReclaimExpiredLeases rather than a replacement for it.
+	Reclaim(ctx context.Context, request publicops.ReclaimRequest) (publicops.ReclaimResult, error)
+	// RenewLease is the shape issueops.Heartbeater publishes; see
+	// IssueSQLRepository.RenewLease for why it is a separate method from
+	// Heartbeat rather than a replacement for it. A refresh writes only the
+	// ephemeral leases table, but a re-arm (HeartbeatResult.Rearmed) writes
+	// versioned rows, so the caller commits with uow.RunTxScoped and the
+	// tables issueops.LeaseRearmVersionCommit names, as the uow Heartbeater
+	// does — never with uow.RunTxEphemeral.
+	RenewLease(ctx context.Context, request publicops.HeartbeatRequest) (publicops.HeartbeatResult, error)
+	WakeExpiredDefers(ctx context.Context) (issues, wisps int, err error)
+	// ParticipatingIssueIDs is IssueSQLRepository.ParticipatingIssueIDs: the
+	// pre-enable scan's participation read on the unit-of-work route.
+	ParticipatingIssueIDs(ctx context.Context, ids []string) (map[string]struct{}, error)
 
 	CreateIssue(ctx context.Context, params CreateIssueParams, actor string) (CreateIssueResult, error)
 	CreateIssues(ctx context.Context, params []CreateIssueParams, actor string) (CreateIssuesResult, error)
 	UpdateIssue(ctx context.Context, id string, updates map[string]any, actor string) error
+	// CompareAndSetMetadataKey is the shape issueops.MetadataCAS publishes; see
+	// IssueSQLRepository.CompareAndSetMetadataKey for what the bool carries.
+	CompareAndSetMetadataKey(ctx context.Context, plan storage.CompareAndSetKeyPlan) (publicops.CompareAndSetKeyResult, bool, error)
+	// ReleaseIssue is the shape issueops.Releaser publishes; see
+	// IssueSQLRepository.ReleaseIssue for what the bool carries.
+	ReleaseIssue(ctx context.Context, req publicops.ReleaseRequest) (publicops.ReleaseResult, bool, error)
 	ClaimIssue(ctx context.Context, id, actor string) (ClaimResult, error)
 	ClaimIssueIfOpen(ctx context.Context, id, actor string) (ClaimResult, error)
 	CloseIssue(ctx context.Context, id string, params CloseIssueParams, actor string) (CloseIssueResult, error)
@@ -306,6 +467,7 @@ type IssueUseCase interface {
 	GetNewlyUnblockedByCloseWisp(ctx context.Context, closedID string) ([]*types.Issue, error)
 	ApplyWispGraph(ctx context.Context, plan GraphPlan, actor string) (GraphApplyResult, error)
 	ClaimReadyWisp(ctx context.Context, filter types.WorkFilter, actor string) (ClaimReadyResult, error)
+	PromoteWisp(ctx context.Context, id, actor string) error
 }
 
 type CloseIssueParams struct {
@@ -314,8 +476,9 @@ type CloseIssueParams struct {
 }
 
 type CloseIssueResult struct {
-	Issue  *types.Issue
-	Closed bool
+	Issue        *types.Issue
+	Closed       bool
+	OpenChildren int
 }
 
 type ReopenIssueParams struct {
@@ -399,8 +562,30 @@ func (u *issueUseCaseImpl) GetIssuesByIDs(ctx context.Context, ids []string) ([]
 	return u.getByIDs(ctx, ids, false)
 }
 
+func (u *issueUseCaseImpl) RetiredIssueIDs(ctx context.Context, ids []string) (map[string]time.Time, error) {
+	retired, err := u.issueRepo.RetiredIDs(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("retired issue ids: %w", err)
+	}
+	return retired, nil
+}
+
+// GetMany passes straight through to the repository with no pre-check and no
+// error wrapping, CountEdges's reason: the request's whole vocabulary is
+// validated inside the shared body (issueops.ExecuteGetMany), and there is no
+// second implementation for a wrapper here to protect.
+func (u *issueUseCaseImpl) GetMany(ctx context.Context, request publicops.GetManyRequest) (publicops.GetManyResult, error) {
+	return u.issueRepo.GetMany(ctx, request)
+}
+
 func (u *issueUseCaseImpl) FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error) {
 	return u.issueRepo.FindWispDependentsRecursive(ctx, ids)
+}
+
+// ParticipatingIssueIDs passes straight through, FindWispDependentsRecursive's
+// shape: an empty request reads nothing, and there is no vocabulary to check.
+func (u *issueUseCaseImpl) ParticipatingIssueIDs(ctx context.Context, ids []string) (map[string]struct{}, error) {
+	return u.issueRepo.ParticipatingIssueIDs(ctx, ids)
 }
 
 func (u *issueUseCaseImpl) GetWispsByIDs(ctx context.Context, ids []string) ([]*types.Issue, error) {
@@ -426,6 +611,26 @@ func (u *issueUseCaseImpl) UpdateWisp(ctx context.Context, id string, updates ma
 	return u.update(ctx, id, updates, actor, true)
 }
 
+// CompareAndSetMetadataKey passes the plan straight through.
+//
+// No pre-check and no error wrapping, for the reason WalkDependencyTree gives:
+// the request's whole vocabulary was validated before the transaction opened,
+// and the refusals the body raises — storage.ErrNotFound for an id on neither
+// plane — are typed sentinels both front doors classify.
+func (u *issueUseCaseImpl) CompareAndSetMetadataKey(ctx context.Context, plan storage.CompareAndSetKeyPlan) (publicops.CompareAndSetKeyResult, bool, error) {
+	return u.issueRepo.CompareAndSetMetadataKey(ctx, plan)
+}
+
+// ReleaseIssue passes the request straight through.
+//
+// No pre-check and no error wrapping, for the reason CompareAndSetMetadataKey
+// gives: the request's whole vocabulary was validated before the transaction
+// opened, and every refusal the body raises is a typed sentinel both front
+// doors classify.
+func (u *issueUseCaseImpl) ReleaseIssue(ctx context.Context, req publicops.ReleaseRequest) (publicops.ReleaseResult, bool, error) {
+	return u.issueRepo.ReleaseIssue(ctx, req)
+}
+
 func (u *issueUseCaseImpl) update(ctx context.Context, id string, updates map[string]any, actor string, useWisp bool) error {
 	if id == "" {
 		return fmt.Errorf("update: id must not be empty")
@@ -433,18 +638,86 @@ func (u *issueUseCaseImpl) update(ctx context.Context, id string, updates map[st
 	if len(updates) == 0 {
 		return nil
 	}
-	if rawType, ok := updates["issue_type"]; ok {
-		if issueType, ok := rawType.(string); ok && issueType != "" {
-			customTypes, err := u.cfgRepo.GetCustomTypes(ctx)
-			if err != nil {
-				return fmt.Errorf("update: read custom types: %w", err)
-			}
-			if !types.IssueType(issueType).IsValidWithCustom(customTypes) {
-				return fmt.Errorf("invalid issue type: %s", issueType)
-			}
-		}
+	if err := validateCanonicalIssueUpdates(updates); err != nil {
+		return err
+	}
+	if err := u.validateIssueTypeUpdate(ctx, updates); err != nil {
+		return err
 	}
 	return u.issueRepo.Update(ctx, id, updates, actor, IssueTableOpts{UseWispsTable: useWisp})
+}
+
+// validateIssueTypeUpdate rejects an issue_type the configuration does not
+// define. It reads the configured custom types, so unlike
+// validateCanonicalIssueUpdates it needs the use case and a context.
+func (u *issueUseCaseImpl) validateIssueTypeUpdate(ctx context.Context, updates map[string]any) error {
+	rawType, ok := updates["issue_type"]
+	if !ok {
+		return nil
+	}
+	issueType, ok := rawType.(string)
+	if !ok {
+		return nil
+	}
+	customTypes, err := u.cfgRepo.GetCustomTypes(ctx)
+	if err != nil {
+		return fmt.Errorf("update: read custom types: %w", err)
+	}
+	if !types.IssueType(issueType).IsValidWithCustom(customTypes) {
+		return fmt.Errorf("%w: invalid issue type: %s", storage.ErrValidation, issueType)
+	}
+	return nil
+}
+
+// validateCanonicalIssueUpdates rejects out-of-range values for the canonical
+// scalar columns, and rejects values whose Go type the column cannot carry. An
+// unsupported type used to fall through unvalidated and reach the SQL layer,
+// which coerced it silently -- a title of 7 was stored as "7", and an int64
+// priority or estimate skipped its range check entirely.
+func validateCanonicalIssueUpdates(updates map[string]any) error {
+	if value, ok := updates["title"]; ok {
+		title, isString := value.(string)
+		if !isString {
+			return canonicalIssueUpdateTypeError("title", value, "string")
+		}
+		if err := types.ValidateIssueTitle(title); err != nil {
+			return canonicalIssueUpdateValidationError("title", err)
+		}
+	}
+	if value, ok := updates["priority"]; ok {
+		priority, isInt := value.(int)
+		if !isInt {
+			return canonicalIssueUpdateTypeError("priority", value, "int")
+		}
+		if err := types.ValidateIssuePriority(priority); err != nil {
+			return canonicalIssueUpdateValidationError("priority", err)
+		}
+	}
+	if value, ok := updates["estimated_minutes"]; ok {
+		var estimatedMinutes *int
+		switch value := value.(type) {
+		case int:
+			estimatedMinutes = &value
+		case *int:
+			estimatedMinutes = value
+		case nil:
+			// Clearing the estimate; a nil estimate validates.
+		default:
+			return canonicalIssueUpdateTypeError("estimated_minutes", value, "int or *int")
+		}
+		if err := types.ValidateIssueEstimatedMinutes(estimatedMinutes); err != nil {
+			return canonicalIssueUpdateValidationError("estimated_minutes", err)
+		}
+	}
+	return nil
+}
+
+func canonicalIssueUpdateValidationError(field string, err error) error {
+	return fmt.Errorf("%w: update field %q: %w", storage.ErrValidation, field, err)
+}
+
+func canonicalIssueUpdateTypeError(field string, value any, want string) error {
+	return fmt.Errorf("%w: update field %q: expected %s, got %T", storage.ErrValidation, field, want, value)
 }
 
 func (u *issueUseCaseImpl) ClaimIssue(ctx context.Context, id, actor string) (ClaimResult, error) {
@@ -469,28 +742,60 @@ func (u *issueUseCaseImpl) claim(ctx context.Context, id, actor string, useWisp 
 	if row.Updated {
 		return ClaimResult{}, nil
 	}
-	if row.CurrentAssignee == actor && row.CurrentStatus == types.StatusInProgress {
+	if validation.ActorMatches(row.CurrentAssignee, actor) && row.CurrentStatus == types.StatusInProgress {
 		return ClaimResult{AlreadyClaimed: true, PriorAssignee: actor}, nil
 	}
-	if row.CurrentAssignee != "" && row.CurrentAssignee != actor {
-		// A pool-assigned issue only loses the CAS for a non-assignee
-		// reason (status changed underneath us): report the status, not a
-		// misleading held-by refusal (mirrors issueops.ClaimIssueInTx).
-		if row.CurrentAssigneeIsPool {
-			return ClaimResult{}, fmt.Errorf("%w: status %s", storage.ErrNotClaimable, row.CurrentStatus)
+	// The refusal carries the assignee and status the repository read back in
+	// THIS transaction, so a caller reports who won without parsing the
+	// message. The copy lives on the typed error, shared with the twin
+	// (issueops.ClaimIssueInTx) that used to restate it — that is what bd-at6rc
+	// asked for. The sentinel stays matchable through Unwrap, which the proxied
+	// batch exit code keys on.
+	//
+	// A pool-assigned issue only loses the CAS for a non-assignee reason
+	// (status changed underneath us), so it refuses on the status rather than
+	// with a misleading held-by refusal.
+	// Composed here rather than on the typed error, for the reason
+	// issueops.ClaimIssueInTx gives: ClaimConflictError passes its wrapped
+	// refusal through unchanged, so the fragments have to be in the wrapped
+	// error or beads.ParseClaimConflict recovers nothing. This is the
+	// domain-stack twin of that producer and must answer the same three ways
+	// (bd-at6rc).
+	refusal := fmt.Errorf("%w%s%s", storage.ErrNotClaimable, storage.NotClaimableStatusFragment, row.CurrentStatus)
+	if row.CurrentAssignee != "" && !validation.ActorMatches(row.CurrentAssignee, actor) {
+		switch {
+		// Pool aliases refuse on the STATUS, checked first so a pool never
+		// reaches the holder-steering copy below.
+		case row.CurrentAssigneeIsPool:
+			// refusal already names the status.
+		case row.CurrentStatus == types.StatusOpen:
+			// Never name a release command here (wy-yuclk): copy that names
+			// one gets pattern-matched by batch agents into an unclaim+claim
+			// steamroller of live claims. bd reclaim is safe to name because
+			// it only recovers claims whose lease has already expired. The
+			// parseable " by <assignee>" tail is deliberately absent, so the
+			// holder is recovered from the typed field instead.
+			refusal = fmt.Errorf("%w: already assigned to %q — coordinate with the holder; if their claim is abandoned (crashed agent), lease expiry will surface it for bd reclaim", storage.ErrAlreadyClaimed, row.CurrentAssignee)
+		default:
+			refusal = fmt.Errorf("%w%s%s", storage.ErrAlreadyClaimed, storage.ClaimedByFragment, row.CurrentAssignee)
 		}
-		if row.CurrentStatus == types.StatusOpen {
-			// Same guidance as issueops.ClaimIssueInTx's open-but-assigned
-			// refusal (bd-at6rc): steer toward the holder, never name an
-			// eviction command. Keep the %w wrap — the proxied batch exit
-			// code keys on errors.Is(err, ErrAlreadyClaimed).
-			return ClaimResult{}, fmt.Errorf("%w: already assigned to %q — coordinate with the holder; if their claim is abandoned (crashed agent), lease expiry will surface it for bd reclaim", storage.ErrAlreadyClaimed, row.CurrentAssignee)
-		}
-		return ClaimResult{}, fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, row.CurrentAssignee)
 	}
-	return ClaimResult{}, fmt.Errorf("%w: status %s", storage.ErrNotClaimable, row.CurrentStatus)
+	return ClaimResult{}, &publicops.ClaimConflictError{
+		IssueID:  id,
+		Assignee: row.CurrentAssignee,
+		Status:   row.CurrentStatus,
+		Err:      refusal,
+	}
 }
 
+// ApplyUpdate applies spec's guarded field updates and returns the resulting
+// issue. When ExpectedAssignee is set, the guard compares under
+// validation.ActorMatches, not verbatim ==, so two spellings of the same
+// identity (ga-wzl83) don't false-mismatch — the unit-of-work twin of
+// issueops.CheckExpectedFieldsInTx's SQL-CAS guard; both paths of
+// AuthorizeAssigneeTransferWithPools already made this fix, this was the
+// third, previously-split verbatim-comparison surface (ga-5ksp5, gate review
+// on #5439).
 func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec UpdateSpec, actor string) (*types.Issue, error) {
 	if id == "" {
 		return nil, fmt.Errorf("ApplyUpdate: id must not be empty")
@@ -501,13 +806,7 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 		return nil, fmt.Errorf("ApplyUpdate %s: %w", id, err)
 	}
 
-	// bd-wsqvw field guards: refuse the whole spec atomically on a stale
-	// assignee/status. The read shares this unit of work's transaction, and
-	// every field update rewrites row_lock, so a writer that commits during
-	// the attempt collides at commit time and the caller's whole-attempt
-	// retry re-checks here on the redo — same CAS invariant as the store-level
-	// UpdateIssueChecked path.
-	if spec.ExpectedAssignee != nil || spec.ExpectedStatus != nil {
+	if spec.ExpectedVersion != nil || spec.ExpectedAssignee != nil || spec.ExpectedStatus != nil {
 		var current *types.Issue
 		if useWisp {
 			current, err = u.GetWisp(ctx, id)
@@ -520,7 +819,10 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 		if current == nil {
 			return nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
 		}
-		if spec.ExpectedAssignee != nil && current.Assignee != *spec.ExpectedAssignee {
+		if spec.ExpectedVersion != nil && current.RowVersion != *spec.ExpectedVersion {
+			return nil, &storage.VersionMismatchError{Expected: *spec.ExpectedVersion, Current: current.RowVersion}
+		}
+		if spec.ExpectedAssignee != nil && !validation.ActorMatches(current.Assignee, *spec.ExpectedAssignee) {
 			return nil, fmt.Errorf("%w: %s is held by %q, expected %q",
 				storage.ErrAssigneeMismatch, id, current.Assignee, *spec.ExpectedAssignee)
 		}
@@ -528,6 +830,17 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 			return nil, fmt.Errorf("%w: %s has status %q, expected %q",
 				storage.ErrStatusMismatch, id, current.Status, *spec.ExpectedStatus)
 		}
+	}
+
+	// Validate the requested field values before anything mutates. The claim
+	// below writes assignee and status, so a spec that pairs Claim with an
+	// invalid field used to leave the issue claimed by an update that never
+	// applied.
+	if err := validateCanonicalIssueUpdates(spec.Fields); err != nil {
+		return nil, err
+	}
+	if err := u.validateIssueTypeUpdate(ctx, spec.Fields); err != nil {
+		return nil, err
 	}
 
 	if spec.Claim {
@@ -564,27 +877,26 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 				return nil, err
 			}
 		}
-	} else {
-		if len(spec.AddLabels) > 0 {
-			if useWisp {
-				if err := u.labelUC.AddWispLabels(ctx, id, spec.AddLabels, actor); err != nil {
-					return nil, err
-				}
-			} else {
-				if err := u.labelUC.AddLabels(ctx, id, spec.AddLabels, actor); err != nil {
-					return nil, err
-				}
+	}
+	if len(spec.AddLabels) > 0 {
+		if useWisp {
+			if err := u.labelUC.AddWispLabels(ctx, id, spec.AddLabels, actor); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := u.labelUC.AddLabels(ctx, id, spec.AddLabels, actor); err != nil {
+				return nil, err
 			}
 		}
-		if len(spec.RemoveLabels) > 0 {
-			if useWisp {
-				if err := u.labelUC.RemoveWispLabels(ctx, id, spec.RemoveLabels, actor); err != nil {
-					return nil, err
-				}
-			} else {
-				if err := u.labelUC.RemoveLabels(ctx, id, spec.RemoveLabels, actor); err != nil {
-					return nil, err
-				}
+	}
+	if len(spec.RemoveLabels) > 0 {
+		if useWisp {
+			if err := u.labelUC.RemoveWispLabels(ctx, id, spec.RemoveLabels, actor); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := u.labelUC.RemoveLabels(ctx, id, spec.RemoveLabels, actor); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -598,6 +910,16 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 			if err := u.depUC.Reparent(ctx, id, *spec.Reparent, actor); err != nil {
 				return nil, err
 			}
+		}
+	}
+
+	if spec.Persistence != nil {
+		if _, err := u.issueRepo.MovePersistence(ctx, id, *spec.Persistence, actor); err != nil {
+			return nil, fmt.Errorf("ApplyUpdate: move persistence for %s: %w", id, err)
+		}
+		useWisp, err = u.isWispID(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("ApplyUpdate: re-locate %s after persistence move: %w", id, err)
 		}
 	}
 
@@ -624,10 +946,32 @@ func (u *issueUseCaseImpl) isWispID(ctx context.Context, id string) (bool, error
 	return found, nil
 }
 
+// PromoteWisp moves an active wisp to the Dolt-versioned issues plane,
+// preserving its id, wisp_type, labels, dependencies, events, and comments.
+// One-way: the promoted row is no longer ephemeral, so purge won't reclaim
+// it. The repository error passes through unwrapped. `bd promote` does not
+// call it: the proxied-server route runs issueops.Promote, whose move is
+// ApplyUpdate's persistence branch (MovePersistence), which also carries the
+// child counter.
+func (u *issueUseCaseImpl) PromoteWisp(ctx context.Context, id, actor string) error {
+	if id == "" {
+		return fmt.Errorf("promote wisp: id must not be empty")
+	}
+	return u.issueRepo.PromoteFromEphemeral(ctx, id, actor)
+}
+
 func (u *issueUseCaseImpl) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) (SearchPage, error) {
 	out, err := u.issueRepo.SearchAcrossIssuesAndWisps(ctx, query, filter)
 	if err != nil {
 		return SearchPage{}, fmt.Errorf("SearchIssues: %w", err)
+	}
+	return out, nil
+}
+
+func (u *issueUseCaseImpl) SearchWispsPlane(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
+	out, err := u.issueRepo.SearchWispsPlane(ctx, query, filter)
+	if err != nil {
+		return nil, fmt.Errorf("SearchWispsPlane: %w", err)
 	}
 	return out, nil
 }
@@ -701,6 +1045,7 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 		issue.CreatedAt = time.Now().UTC()
 	}
 
+	explicitID := createIDNamedByCaller(params)
 	switch {
 	case params.ExplicitID != "":
 		issue.ID = params.ExplicitID
@@ -711,11 +1056,25 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 		}
 		issue.ID = childID
 	case issue.ID == "":
-		minted, err := u.mintTopLevelID(ctx, issue, actor, useWisp)
+		minted, err := u.mintTopLevelID(ctx, issue, actor, useWisp, params.ClaimedIDs)
 		if err != nil {
 			return CreateIssueResult{}, fmt.Errorf("create: mint top-level ID: %w", err)
 		}
 		issue.ID = minted
+	}
+
+	if params.CreateOnly && params.ExplicitID != "" && !params.ForcePrefix {
+		configuredPrefix, err := u.cfgRepo.GetConfig(ctx, "issue_prefix")
+		if err != nil {
+			return CreateIssueResult{}, fmt.Errorf("create: read issue prefix: %w", err)
+		}
+		allowedPrefixes, err := u.cfgRepo.GetConfig(ctx, "allowed_prefixes")
+		if err != nil {
+			return CreateIssueResult{}, fmt.Errorf("create: read allowed prefixes: %w", err)
+		}
+		if err := validateExplicitIDPrefix(issue.ID, strings.TrimSuffix(configuredPrefix, "-"), allowedPrefixes); err != nil {
+			return CreateIssueResult{}, fmt.Errorf("create: explicit ID prefix: %w", err)
+		}
 	}
 
 	if params.DiscoveredFromParent != "" {
@@ -724,9 +1083,28 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 		}
 	}
 
-	insertOpts := InsertIssueOpts{UseWispsTable: useWisp}
+	insertOpts := InsertIssueOpts{UseWispsTable: useWisp, CreateOnly: params.CreateOnly, ExplicitID: explicitID}
 	if err := u.issueRepo.Insert(ctx, issue, actor, insertOpts); err != nil {
 		return CreateIssueResult{}, fmt.Errorf("create: insert: %w", err)
+	}
+
+	if len(params.Comments) > 0 {
+		issue.Comments = make([]*types.Comment, 0, len(params.Comments))
+		for _, comment := range params.Comments {
+			if comment == nil {
+				return CreateIssueResult{}, fmt.Errorf("create: comment must not be nil")
+			}
+			copy := *comment
+			copy.IssueID = issue.ID
+			if copy.Author == "" {
+				copy.Author = actor
+			}
+			inserted, err := u.commentRepo.InsertRecord(ctx, &copy, CommentOpts{UseWispsTable: useWisp})
+			if err != nil {
+				return CreateIssueResult{}, fmt.Errorf("create: insert comment: %w", err)
+			}
+			issue.Comments = append(issue.Comments, inserted)
+		}
 	}
 
 	result := CreateIssueResult{Issue: issue}
@@ -744,7 +1122,11 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 	}
 
 	if params.InheritLabelsFromParent && params.ParentID != "" {
-		parentLabels, err := u.labelRepo.List(ctx, params.ParentID, LabelOpts{UseWispsTable: useWisp})
+		parentIsWisp, err := u.isWispID(ctx, params.ParentID)
+		if err != nil {
+			return result, fmt.Errorf("create: determine parent tier for label inheritance from %s: %w", params.ParentID, err)
+		}
+		parentLabels, err := u.labelRepo.List(ctx, params.ParentID, LabelOpts{UseWispsTable: parentIsWisp})
 		switch {
 		case dberrors.IsTableNotExist(err):
 			// Older schemas may lack the wisp label table; nothing to inherit.
@@ -785,11 +1167,16 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 			DependsOnID: spec.TargetID,
 			Type:        spec.Type,
 			Metadata:    spec.Metadata,
+			ThreadID:    spec.ThreadID,
 		}
 		if spec.SwapDirection {
 			dep.IssueID, dep.DependsOnID = dep.DependsOnID, dep.IssueID
 		}
-		if err := u.depRepo.Insert(ctx, dep, actor, DepInsertOpts{UseWispsTable: useWisp}); err != nil {
+		depSourceIsWisp, err := u.isWispID(ctx, dep.IssueID)
+		if err != nil {
+			return result, fmt.Errorf("create: determine dep source tier for %s: %w", dep.IssueID, err)
+		}
+		if err := u.depRepo.Insert(ctx, dep, actor, DepInsertOpts{UseWispsTable: depSourceIsWisp}); err != nil {
 			return result, fmt.Errorf("create: add dep %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 		}
 		result.PostCreateWrites = true
@@ -808,6 +1195,19 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 	}
 
 	return result, nil
+}
+
+func validateExplicitIDPrefix(id, prefix, allowedPrefixes string) error {
+	if strings.HasPrefix(id, prefix+"-") {
+		return nil
+	}
+	for _, allowed := range strings.Split(allowedPrefixes, ",") {
+		allowed = strings.TrimSpace(allowed)
+		if allowed != "" && strings.HasPrefix(id, allowed+"-") {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: issue ID %s does not match configured prefix %s", storage.ErrPrefixMismatch, id, prefix)
 }
 
 func (u *issueUseCaseImpl) CreateIssues(ctx context.Context, params []CreateIssueParams, actor string) (CreateIssuesResult, error) {
@@ -1001,7 +1401,7 @@ func (u *issueUseCaseImpl) applyGraph(ctx context.Context, plan GraphPlan, actor
 			if err := u.depRepo.Insert(ctx, dep, actor, DepInsertOpts{UseWispsTable: useWisp}); err != nil {
 				return GraphApplyResult{}, fmt.Errorf("applyGraph: edge %d (%s -> %s): %w", i, fromID, toID, err)
 			}
-			if isSchedulingDep(depType) {
+			if types.IsSchedulingEdge(depType) {
 				newSchedulingEdges = append(newSchedulingEdges, [2]string{fromID, toID})
 			}
 		}
@@ -1020,7 +1420,7 @@ func (u *issueUseCaseImpl) applyGraph(ctx context.Context, plan GraphPlan, actor
 				if err := u.depRepo.Insert(ctx, dep, actor, DepInsertOpts{UseWispsTable: useWisp}); err != nil {
 					return GraphApplyResult{}, fmt.Errorf("applyGraph: node %q: adding dep to %q: %w", node.Key, nd.Target, err)
 				}
-				if isSchedulingDep(dep.Type) {
+				if types.IsSchedulingEdge(dep.Type) {
 					newSchedulingEdges = append(newSchedulingEdges, [2]string{dep.IssueID, dep.DependsOnID})
 				}
 			}
@@ -1326,8 +1726,9 @@ func (u *issueUseCaseImpl) resolveTopLevelPrefix(ctx context.Context, issue *typ
 // ExplicitID and no ParentID. Honors counter mode for non-wisps (config key
 // issue_id_mode=counter); otherwise uses adaptive hash-mode IDs that mirror
 // issueops.GenerateIssueIDInTable. Reads issue.CreatedAt (caller must have
-// stabilized it before this call so retries hash the same value).
-func (u *issueUseCaseImpl) mintTopLevelID(ctx context.Context, issue *types.Issue, actor string, useWisp bool) (string, error) {
+// stabilized it before this call so retries hash the same value). Both modes
+// pass over the ids claimed names (CreateIssueParams.ClaimedIDs).
+func (u *issueUseCaseImpl) mintTopLevelID(ctx context.Context, issue *types.Issue, actor string, useWisp bool, claimed map[string]bool) (string, error) {
 	prefix, err := u.resolveTopLevelPrefix(ctx, issue, useWisp)
 	if err != nil {
 		return "", err
@@ -1342,11 +1743,7 @@ func (u *issueUseCaseImpl) mintTopLevelID(ctx context.Context, issue *types.Issu
 			return "", fmt.Errorf("read issue_id_mode: %w", err)
 		}
 		if mode == "counter" {
-			n, err := u.issueRepo.NextCounterID(ctx, prefix)
-			if err != nil {
-				return "", err
-			}
-			return fmt.Sprintf("%s-%d", prefix, n), nil
+			return u.nextUnretiredCounterID(ctx, prefix, claimed)
 		}
 	}
 
@@ -1368,16 +1765,49 @@ func (u *issueUseCaseImpl) mintTopLevelID(ctx context.Context, issue *types.Issu
 	for length := baseLength; length <= cfg.MaxLength; length++ {
 		for nonce := 0; nonce < 10; nonce++ {
 			candidate := idgen.GenerateHashID(prefix, issue.Title, issue.Description, actor, issue.CreatedAt, length, nonce)
-			exists, err := u.issueRepo.Exists(ctx, candidate, tableOpts)
+			if claimed[candidate] {
+				continue
+			}
+			taken, err := u.issueRepo.Taken(ctx, candidate)
 			if err != nil {
 				return "", err
 			}
-			if !exists {
+			if !taken {
 				return candidate, nil
 			}
 		}
 	}
 	return "", fmt.Errorf("failed to generate unique ID for prefix %q after lengths %d..%d with 10 nonces each", prefix, baseLength, cfg.MaxLength)
+}
+
+// maxRetiredCounterSkips bounds how many retired counter values one
+// counter-mode mint walks past (issueops.GenerateIssueIDInTable's bound).
+const maxRetiredCounterSkips = 1000
+
+// nextUnretiredCounterID is the counter-mode mint skipping values a retaining
+// sweep retired or the caller's batch claimed, so a fresh create is never
+// handed an id it would be refused. The counter only advances, so a skipped
+// value is never offered again.
+func (u *issueUseCaseImpl) nextUnretiredCounterID(ctx context.Context, prefix string, claimed map[string]bool) (string, error) {
+	for skips := 0; ; skips++ {
+		n, err := u.issueRepo.NextCounterID(ctx, prefix)
+		if err != nil {
+			return "", err
+		}
+		candidate := fmt.Sprintf("%s-%d", prefix, n)
+		if !claimed[candidate] {
+			retired, err := u.issueRepo.Retired(ctx, candidate)
+			if err != nil {
+				return "", err
+			}
+			if !retired {
+				return candidate, nil
+			}
+		}
+		if skips >= maxRetiredCounterSkips {
+			return "", fmt.Errorf("issue counter for prefix %q walked past %d retired or claimed ids without finding a free one", prefix, maxRetiredCounterSkips)
+		}
+	}
 }
 
 func (u *issueUseCaseImpl) CloseIssue(ctx context.Context, id string, params CloseIssueParams, actor string) (CloseIssueResult, error) {
@@ -1388,82 +1818,32 @@ func (u *issueUseCaseImpl) CloseWisp(ctx context.Context, id string, params Clos
 	return u.close(ctx, id, params, actor, true)
 }
 
-// CloseIssueChecked closes an issue, refusing with storage.ErrCloseBlocked when
-// the issue has a live, open direct blocker unless force is set. The blocker
-// check (IsBlocked) and the close (CloseIssue) run through the same unit-of-work
-// transaction, so this is a single enforcement point rather than a re-check of
-// separate reads. When force is set or the guard passes it delegates to the
-// unchecked CloseIssue, preserving its CloseIssueResult semantics exactly.
+// CloseIssueChecked closes an issue through the shared guarded close path.
 func (u *issueUseCaseImpl) CloseIssueChecked(ctx context.Context, id string, params CloseIssueParams, actor string, force bool) (CloseIssueResult, error) {
 	return u.closeChecked(ctx, id, params, actor, force, false)
 }
 
-// CloseWispChecked is the wisp twin of CloseIssueChecked: it applies the same
-// live-direct-blocker guard (via IsWispBlocked) before delegating to the
-// unchecked CloseWisp.
+// CloseWispChecked is the wisp twin of CloseIssueChecked.
 func (u *issueUseCaseImpl) CloseWispChecked(ctx context.Context, id string, params CloseIssueParams, actor string, force bool) (CloseIssueResult, error) {
 	return u.closeChecked(ctx, id, params, actor, force, true)
 }
 
-// isClosed reports whether the issue (or wisp) identified by id is already in
-// the closed status, read in the same unit of work as the close so the check
-// and the close cannot straddle a concurrent state change. A missing row (or,
-// for a wisp source, a missing optional wisps table) reports not-closed so
-// closeChecked falls through to u.close, whose repo Close surfaces the not-found
-// result — mirroring issueops.isClosedInTx on the embedded checked-close path.
-func (u *issueUseCaseImpl) isClosed(ctx context.Context, id string, useWisp bool) (bool, error) {
-	issue, err := u.issueRepo.Get(ctx, id, IssueTableOpts{UseWispsTable: useWisp})
-	if err != nil {
-		if dberrors.IsNoRows(err) || dberrors.IsTableNotExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	if issue == nil {
-		return false, nil
-	}
-	return issue.Status == types.StatusClosed, nil
-}
-
 func (u *issueUseCaseImpl) closeChecked(ctx context.Context, id string, params CloseIssueParams, actor string, force, useWisp bool) (CloseIssueResult, error) {
-	if !force {
-		// The blocked guard only has meaning for an open→closed transition. An
-		// already-closed row is an idempotent no-op (Closed=false per the
-		// Storage.CloseIssueChecked contract), so detect that first: a closed row
-		// can still carry a stale is_blocked=1 (e.g. after a cross-clone Dolt
-		// merge, a state GetStatistics filters as `is_blocked = 1 AND status <>
-		// 'closed'`) whose live direct blocker would otherwise refuse the
-		// idempotent re-close with ErrCloseBlocked. This mirrors
-		// issueops.CloseIssueCheckedInTx, which runs isClosedInTx before the
-		// is_blocked guard; u.close below is the sole detector of the
-		// already-closed no-op (matching the Force path, which reaches
-		// Closed=false by skipping the guard).
-		closed, err := u.isClosed(ctx, id, useWisp)
-		if err != nil {
-			return CloseIssueResult{}, err
-		}
-		if !closed {
-			var (
-				blocked  bool
-				blockers []string
-			)
-			if useWisp {
-				blocked, blockers, err = u.depUC.IsWispBlocked(ctx, id)
-			} else {
-				blocked, blockers, err = u.depUC.IsBlocked(ctx, id)
-			}
-			if err != nil {
-				return CloseIssueResult{}, err
-			}
-			// Refuse only on a live, open direct blocker. A bare is_blocked=1 with no
-			// live direct blocker (a purely transitive block) closes — matching the
-			// historical `bd close` predicate and the embedded checked-close path.
-			if blocked && len(blockers) > 0 {
-				return CloseIssueResult{}, fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, id, blockers)
-			}
-		}
+	if id == "" {
+		return CloseIssueResult{}, fmt.Errorf("close: id must not be empty")
 	}
-	return u.close(ctx, id, params, actor, useWisp)
+	if actor == "" {
+		return CloseIssueResult{}, fmt.Errorf("close: actor must not be empty")
+	}
+	row, err := u.issueRepo.CloseChecked(ctx, id, CloseRowParams{Reason: params.Reason, Session: params.Session}, actor, force)
+	if err != nil {
+		return CloseIssueResult{}, fmt.Errorf("close %s: %w", id, err)
+	}
+	issue, err := u.issueRepo.Get(ctx, id, IssueTableOpts{UseWispsTable: row.IsWisp || useWisp})
+	if err != nil {
+		return CloseIssueResult{}, fmt.Errorf("close %s: reload: %w", id, err)
+	}
+	return CloseIssueResult{Issue: issue, Closed: !row.AlreadyClosed, OpenChildren: row.OpenChildren}, nil
 }
 
 func (u *issueUseCaseImpl) close(ctx context.Context, id string, params CloseIssueParams, actor string, useWisp bool) (CloseIssueResult, error) {
@@ -1512,7 +1892,7 @@ func (u *issueUseCaseImpl) reopen(ctx context.Context, id string, params ReopenI
 	}
 	return ReopenIssueResult{
 		Issue:    issue,
-		Reopened: !row.AlreadyOpen,
+		Reopened: row.Updated,
 	}, nil
 }
 
@@ -1673,10 +2053,87 @@ func (u *issueUseCaseImpl) Unclaim(ctx context.Context, id, actor string, force 
 	return nil
 }
 
+// UnclaimIfAssignee is the compare-and-swap release: it clears the claim only
+// while the issue is still assigned to expectedAssignee, and otherwise returns
+// storage.ErrAssigneeMismatch having written nothing. It is the conditional
+// twin of Unclaim and runs the SAME transition (assignee cleared, status
+// reopened, started_at cleared, lease dropped, row_lock rewritten, "unclaimed"
+// event recorded) because both reach the one classic implementation in
+// issueops — which is what makes `bd unclaim --if-assignee` behave identically
+// on the proxied-server and embedded backends.
+func (u *issueUseCaseImpl) UnclaimIfAssignee(ctx context.Context, id, actor, expectedAssignee string) error {
+	if id == "" {
+		return fmt.Errorf("UnclaimIfAssignee: id must not be empty")
+	}
+	if err := u.issueRepo.UnclaimIssueIfAssignee(ctx, id, actor, expectedAssignee); err != nil {
+		return fmt.Errorf("UnclaimIfAssignee: %w", err)
+	}
+	return nil
+}
+
+// Heartbeat refreshes the lease on an issue actor holds in_progress. A
+// refresh touches ONLY the ephemeral leases table (bd-lrgn1) and needs no Dolt
+// commit. A re-arm (a live claim with no lease row the caller holds) is
+// recorded as a mutation in versioned tables, and this method cannot report
+// one, so never commit it with uow.RunTxEphemeral: take RenewLease, which
+// reports the re-arm, and commit as the Heartbeater role does
+// (uow.RunTxScoped with issueops.LeaseRearmVersionCommit).
+func (u *issueUseCaseImpl) Heartbeat(ctx context.Context, id, actor string) error {
+	if id == "" {
+		return fmt.Errorf("Heartbeat: id must not be empty")
+	}
+	if err := u.issueRepo.HeartbeatIssue(ctx, id, actor); err != nil {
+		return fmt.Errorf("Heartbeat: %w", err)
+	}
+	return nil
+}
+
+// WakeExpiredDefers returns every expired DATED defer to open (see
+// issueops.WakeExpiredDefersInTx) and reports how many permanent issues and
+// wisps woke. The caller owns persistence: commit with a wake message iff
+// issues > 0, and with the ephemeral plain-COMMIT form iff only wisps woke
+// (wisp tables are dolt_ignored, so their wake needs a SQL commit but must
+// mint no version commit).
+func (u *issueUseCaseImpl) WakeExpiredDefers(ctx context.Context) (issues, wisps int, err error) {
+	issues, wisps, err = u.issueRepo.WakeExpiredDefers(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("WakeExpiredDefers: %w", err)
+	}
+	return issues, wisps, nil
+}
+
 func (u *issueUseCaseImpl) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error) {
 	out, err := u.issueRepo.ReclaimExpiredLeases(ctx, olderThan, filter, actor)
 	if err != nil {
 		return nil, fmt.Errorf("ReclaimExpiredLeases: %w", err)
 	}
 	return out, nil
+}
+
+// Reclaim passes straight through to the repository with no pre-check and no
+// error-wrapping, matching GetMany's reasoning: the request is fully
+// validated inside the shared body (issueops.ExecuteReclaimInTx), and there is
+// no use-case-level concern layered on top of it.
+func (u *issueUseCaseImpl) Reclaim(ctx context.Context, request publicops.ReclaimRequest) (publicops.ReclaimResult, error) {
+	return u.issueRepo.Reclaim(ctx, request)
+}
+
+// RenewLease passes straight through to the repository with no pre-check and
+// no error-wrapping, Reclaim's reasoning: the request is fully validated inside
+// the shared body (issueops.ExecuteHeartbeatInTx), and the role's typed
+// refusals must reach the caller as the body built them.
+func (u *issueUseCaseImpl) RenewLease(ctx context.Context, request publicops.HeartbeatRequest) (publicops.HeartbeatResult, error) {
+	return u.issueRepo.RenewLease(ctx, request)
+}
+
+// createIDNamedByCaller reports whether a create's id is the caller's rather
+// than a generator's: named by ExplicitID, or preset on the issue with no
+// parent whose child counter would replace it. It mirrors issueops'
+// prepareCreateIssueInTx, which treats an id present before assignment as
+// explicit.
+func createIDNamedByCaller(params CreateIssueParams) bool {
+	if params.ExplicitID != "" {
+		return true
+	}
+	return params.ParentID == "" && params.Issue != nil && params.Issue.ID != ""
 }

@@ -48,18 +48,59 @@ func (r *labelSQLRepositoryImpl) Insert(ctx context.Context, issueID, label, act
 	}
 	table := pickLabelTable(opts.UseWispsTable)
 	//nolint:gosec // G201: table is one of two hardcoded constants
-	if _, err := r.runner.ExecContext(ctx,
+	result, err := r.runner.ExecContext(ctx,
 		fmt.Sprintf("INSERT IGNORE INTO %s (issue_id, label) VALUES (?, ?)", table),
 		issueID, label,
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("db: LabelSQLRepository.Insert %s/%s: %w", issueID, label, err)
 	}
-	return r.events.Record(ctx, domain.Event{
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("db: LabelSQLRepository.Insert %s/%s: rows affected: %w", issueID, label, err)
+	}
+	if rows == 0 {
+		issueTable := "issues"
+		if opts.UseWispsTable {
+			issueTable = "wisps"
+		}
+		var count int
+		//nolint:gosec // G201: issueTable is one of two hardcoded constants.
+		if err := r.runner.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = ?", issueTable), issueID).Scan(&count); err != nil {
+			return fmt.Errorf("db: LabelSQLRepository.Insert %s/%s: verify issue: %w", issueID, label, err)
+		}
+		if count == 0 {
+			return fmt.Errorf("db: LabelSQLRepository.Insert %s/%s: issue does not exist", issueID, label)
+		}
+		return nil
+	}
+	if err := r.events.Record(ctx, domain.Event{
 		IssueID:  issueID,
 		Type:     types.EventLabelAdded,
 		Actor:    actor,
 		NewValue: label,
-	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable})
+	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
+		return err
+	}
+	// A label is part of the bead snapshot; the idempotent no-op path above
+	// returns without writing, journals nothing and mints nothing. An inserted
+	// row is a durable-state change and is versioned, as AddLabelInTx does.
+	if err := issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, issueID, actor); err != nil {
+		return err
+	}
+	return issueops.RecordVersionInTx(ctx, r.runner, issueID, actor)
+}
+
+// RenameLabel sweeps both label planes (labels and wisp_labels) for oldLabel,
+// reusing issueops.RenameLabelInTx rather than restating its SQL shape here:
+// r.runner satisfies issueops.DBTX structurally, so this is the exact same
+// merge logic, same-name refusal (issueops.ErrRenameLabelSameName) and
+// EventLabelRenamed emission the direct DoltStore/EmbeddedDoltStore route
+// uses. That identity, not merely a matching shape, is what keeps this route
+// and the direct one from drifting the way runLabelRenameProxiedServer's
+// hand-rolled add-then-remove fan-out used to.
+func (r *labelSQLRepositoryImpl) RenameLabel(ctx context.Context, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, err error) {
+	return issueops.RenameLabelInTx(ctx, r.runner, oldLabel, newLabel, actor)
 }
 
 func (r *labelSQLRepositoryImpl) Delete(ctx context.Context, issueID, label, actor string, opts domain.LabelOpts) error {
@@ -71,18 +112,34 @@ func (r *labelSQLRepositoryImpl) Delete(ctx context.Context, issueID, label, act
 	}
 	table := pickLabelTable(opts.UseWispsTable)
 	//nolint:gosec // G201: table is one of two hardcoded constants
-	if _, err := r.runner.ExecContext(ctx,
+	result, err := r.runner.ExecContext(ctx,
 		fmt.Sprintf("DELETE FROM %s WHERE issue_id = ? AND label = ?", table),
 		issueID, label,
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("db: LabelSQLRepository.Delete %s/%s: %w", issueID, label, err)
 	}
-	return r.events.Record(ctx, domain.Event{
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("db: LabelSQLRepository.Delete %s/%s: rows affected: %w", issueID, label, err)
+	}
+	if rows == 0 {
+		return nil
+	}
+	if err := r.events.Record(ctx, domain.Event{
 		IssueID:  issueID,
 		Type:     types.EventLabelRemoved,
 		Actor:    actor,
 		OldValue: label,
-	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable})
+	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
+		return err
+	}
+	// The rows == 0 return above keeps this actually-deleted-only, so the
+	// version row is minted for a real change, as RemoveLabelInTx does.
+	if err := issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, issueID, actor); err != nil {
+		return err
+	}
+	return issueops.RecordVersionInTx(ctx, r.runner, issueID, actor)
 }
 
 func (r *labelSQLRepositoryImpl) List(ctx context.Context, issueID string, opts domain.LabelOpts) ([]string, error) {
@@ -116,36 +173,34 @@ func (r *labelSQLRepositoryImpl) List(ctx context.Context, issueID string, opts 
 
 func (r *labelSQLRepositoryImpl) ListByIssueIDs(ctx context.Context, issueIDs []string, opts domain.LabelOpts) (map[string][]string, error) {
 	result := make(map[string][]string)
-	if len(issueIDs) == 0 {
-		return result, nil
-	}
-	placeholders := make([]string, len(issueIDs))
-	args := make([]any, len(issueIDs))
-	for i, id := range issueIDs {
-		placeholders[i] = "?"
-		args[i] = id
-	}
 	table := pickLabelTable(opts.UseWispsTable)
-	//nolint:gosec // G201: table is one of two hardcoded constants
-	q := fmt.Sprintf(
-		"SELECT issue_id, label FROM %s WHERE issue_id IN (%s) ORDER BY issue_id, label",
-		table, strings.Join(placeholders, ","),
-	)
-	rows, err := r.runner.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("db: LabelSQLRepository.ListByIssueIDs: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var issueID, label string
-		if err := rows.Scan(&issueID, &label); err != nil {
-			return nil, fmt.Errorf("db: LabelSQLRepository.ListByIssueIDs: scan: %w", err)
+	err := forEachIDBatch(issueIDs, func(batch []string) error {
+		placeholders, args := buildInPlaceholders(batch)
+		//nolint:gosec // G201: table is one of two hardcoded constants
+		q := fmt.Sprintf(
+			"SELECT issue_id, label FROM %s WHERE issue_id IN (%s) ORDER BY issue_id, label",
+			table, placeholders,
+		)
+		rows, err := r.runner.QueryContext(ctx, q, args...)
+		if err != nil {
+			return fmt.Errorf("db: LabelSQLRepository.ListByIssueIDs: %w", err)
 		}
-		result[issueID] = append(result[issueID], label)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("db: LabelSQLRepository.ListByIssueIDs: rows: %w", err)
+		defer rows.Close()
+
+		for rows.Next() {
+			var issueID, label string
+			if err := rows.Scan(&issueID, &label); err != nil {
+				return fmt.Errorf("db: LabelSQLRepository.ListByIssueIDs: scan: %w", err)
+			}
+			result[issueID] = append(result[issueID], label)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("db: LabelSQLRepository.ListByIssueIDs: rows: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return result, nil
 }

@@ -3,8 +3,11 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/spf13/viper"
 )
 
 // envSnapshot saves and clears BD_/BEADS_ environment variables.
@@ -47,6 +50,127 @@ func TestInitialize(t *testing.T) {
 	}
 }
 
+func TestIsFromProjectConfigTracksPrivateOverrides(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("BEADS_DIR", "")
+
+	work := t.TempDir()
+	beadsDir := filepath.Join(work, ".beads")
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	projectPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(projectPath, []byte("ai:\n  base_url: https://project.example\ngithub:\n  url: https://project.example\nidentity: project\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(work)
+	t.Setenv("BD_AI_BASE_URL", "")
+	t.Setenv("BEADS_IDENTITY", "")
+	ResetForTesting()
+	t.Cleanup(ResetForTesting)
+
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if !IsFromProjectConfig("AI.BASE_URL") || !IsFromProjectConfig("github.url") {
+		t.Fatal("project config keys were not classified")
+	}
+
+	// .beads/config.local.yaml lives inside the repo tree and can be committed,
+	// so it must still be classified as project-controlled rather than private.
+	// jira.url is defined only here, so a regression that drops
+	// config.local.yaml from the project paths loses this key's classification.
+	localPath := filepath.Join(beadsDir, LocalConfigFileName)
+	if err := os.WriteFile(localPath, []byte("github:\n  url: https://local.example\njira:\n  url: https://jira.local.example\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if !IsFromProjectConfig("github.url") || PrivateConfigValue("github.url") != "" {
+		t.Fatal("local config override in .beads/config.local.yaml was treated as private")
+	}
+	if !IsFromProjectConfig("jira.url") || PrivateConfigValue("jira.url") != "" {
+		t.Fatal("key defined only in .beads/config.local.yaml was not classified as project-controlled")
+	}
+
+	// User-level global config (~/.config/bd/config.yaml) is private when it
+	// confirms the effective value.
+	userConfigDir := filepath.Join(home, ".config", "bd")
+	if err := os.MkdirAll(userConfigDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userConfigDir, "config.yaml"), []byte("github:\n  url: https://local.example\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if IsFromProjectConfig("github.url") || PrivateConfigValue("github.url") != "https://local.example" {
+		t.Fatal("matching user global config override was classified as project-controlled")
+	}
+
+	// A .beads/.env variable is project-controlled, not a private environment override.
+	t.Setenv("BD_AI_BASE_URL", "https://dotenv.example")
+	MarkDotenvValue("BD_AI_BASE_URL", "https://dotenv.example")
+	if !IsFromProjectConfig("ai.base_url") || PrivateConfigValue("ai.base_url") != "" {
+		t.Fatal("dotenv BD_ variable was treated as private")
+	}
+
+	// A real caller environment variable overrides dotenv and project config.
+	t.Setenv("BD_AI_BASE_URL", "https://private.example")
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if IsFromProjectConfig("ai.base_url") || PrivateConfigValue("ai.base_url") != "https://private.example" {
+		t.Fatal("BD_ environment override was classified as project-controlled")
+	}
+
+	t.Setenv("BEADS_IDENTITY", "private")
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if IsFromProjectConfig("identity") || PrivateConfigValue("identity") != "private" {
+		t.Fatal("explicit BindEnv override was classified as project-controlled")
+	}
+}
+
+// TestIsFromProjectConfigWorkspaceDoublingAsUserConfig pins the role rule for
+// a workspace .beads directory that is itself a user config location —
+// ~/.beads/config.yaml is the legacy user path: its keys are project
+// configuration and never privately confirm themselves.
+func TestIsFromProjectConfigWorkspaceDoublingAsUserConfig(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	beadsDir := filepath.Join(home, ".beads")
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("github:\n  url: https://project.example\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	ResetForTesting()
+	t.Cleanup(ResetForTesting)
+
+	if err := Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if !IsFromProjectConfig("github.url") {
+		t.Fatal("workspace ~/.beads config.yaml key was not classified as project-controlled")
+	}
+	if got := PrivateConfigValue("github.url"); got != "" {
+		t.Fatalf("PrivateConfigValue(github.url) = %q: the workspace config confirmed itself", got)
+	}
+}
+
 func TestDefaults(t *testing.T) {
 	// Isolate from environment variables
 	restore := envSnapshot(t)
@@ -77,6 +201,75 @@ func TestDefaults(t *testing.T) {
 				t.Errorf("GetXXX(%q) = %v, want %v", tt.key, got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestResolveAIAPIKeyPrecedence(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("MINIMAX_API_KEY", "")
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+	Set("ai.api_key", "")
+
+	key, source := ResolveAIAPIKey("explicit-key")
+	if key != "explicit-key" || source != AIAPIKeySourceExplicit {
+		t.Fatalf("explicit fallback = (%q, %q), want explicit-key/%s", key, source, AIAPIKeySourceExplicit)
+	}
+
+	Set("ai.api_key", "config-key")
+	key, source = ResolveAIAPIKey("explicit-key")
+	if key != "config-key" || source != AIAPIKeySourceConfig {
+		t.Fatalf("config fallback = (%q, %q), want config-key/%s", key, source, AIAPIKeySourceConfig)
+	}
+
+	t.Setenv("MINIMAX_API_KEY", "minimax-key")
+	key, source = ResolveAIAPIKey("explicit-key")
+	if key != "minimax-key" || source != AIAPIKeySourceMiniMaxEnv {
+		t.Fatalf("MiniMax env = (%q, %q), want minimax-key/%s", key, source, AIAPIKeySourceMiniMaxEnv)
+	}
+
+	t.Setenv("ANTHROPIC_API_KEY", "anthropic-key")
+	key, source = ResolveAIAPIKey("explicit-key")
+	if key != "anthropic-key" || source != AIAPIKeySourceAnthropicEnv {
+		t.Fatalf("Anthropic env = (%q, %q), want anthropic-key/%s", key, source, AIAPIKeySourceAnthropicEnv)
+	}
+}
+
+func TestDefaultAIBaseURLPrecedence(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	t.Setenv("MINIMAX_BASE_URL", "")
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+	Set("ai.base_url", "")
+
+	if got := DefaultAIBaseURL(AIAPIKeySourceAnthropicEnv); got != "" {
+		t.Fatalf("Anthropic base URL = %q, want SDK default", got)
+	}
+	if got := DefaultAIBaseURL(AIAPIKeySourceMiniMaxEnv); got != MiniMaxDefaultBaseURL {
+		t.Fatalf("MiniMax default base URL = %q, want %q", got, MiniMaxDefaultBaseURL)
+	}
+
+	t.Setenv("MINIMAX_BASE_URL", "https://minimax.example/anthropic")
+	if got := DefaultAIBaseURL(AIAPIKeySourceMiniMaxEnv); got != "https://minimax.example/anthropic" {
+		t.Fatalf("MINIMAX_BASE_URL = %q, want custom MiniMax URL", got)
+	}
+
+	t.Setenv("BD_AI_BASE_URL", "https://proxy.example/anthropic")
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error after BD_AI_BASE_URL: %v", err)
+	}
+	if got := DefaultAIBaseURL(AIAPIKeySourceMiniMaxEnv); got != "https://proxy.example/anthropic" {
+		t.Fatalf("BD_AI_BASE_URL MiniMax override = %q, want proxy URL", got)
+	}
+	if got := DefaultAIBaseURL(AIAPIKeySourceAnthropicEnv); got != "https://proxy.example/anthropic" {
+		t.Fatalf("BD_AI_BASE_URL Anthropic override = %q, want proxy URL", got)
 	}
 }
 
@@ -207,6 +400,46 @@ func TestInitialize_IgnoresModuleRootConfigWhenRequested(t *testing.T) {
 	}
 	if got := ConfigFileUsed(); got != "" {
 		t.Fatalf("ConfigFileUsed() = %q, want empty when repo config is ignored", got)
+	}
+}
+
+// TestInitialize_StopsAtBeadsCeiling pins that BEADS_CEILING_DIRECTORIES keeps
+// the config.yaml walk from reaching a .beads at or above the ceiling — here
+// an unparseable one that would fail Initialize if it were read.
+func TestInitialize_StopsAtBeadsCeiling(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home")
+	configDir := filepath.Join(tmpDir, "xdg-config")
+	ceilingDir := filepath.Join(tmpDir, "ceiling")
+	workDir := filepath.Join(ceilingDir, "work")
+	for _, dir := range []string{homeDir, configDir, workDir, filepath.Join(tmpDir, ".beads"), filepath.Join(ceilingDir, ".beads")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, dir := range []string{tmpDir, ceilingDir} {
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("json: [unclosed\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Setenv("HOME", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "")
+	t.Setenv("BEADS_CEILING_DIRECTORIES", ceilingDir)
+	t.Chdir(workDir)
+
+	ResetForTesting()
+	defer ResetForTesting()
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() read config at or above the ceiling: %v", err)
+	}
+	if got := ConfigFileUsed(); got != "" {
+		t.Fatalf("ConfigFileUsed() = %q, want none below the ceiling", got)
 	}
 }
 
@@ -1452,6 +1685,32 @@ types:
 	}
 }
 
+// TestRetainedTypesYAMLWarning pins the warning for a types.retained key in
+// config.yaml (or BD_TYPES_RETAINED). The setting is read from the workspace
+// database only, so such a key protects nothing; the commands that honor the
+// setting say so rather than letting an operator believe a type is retained.
+func TestRetainedTypesYAMLWarning(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+	t.Chdir(t.TempDir())
+	ResetForTesting()
+	t.Cleanup(ResetForTesting)
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+
+	if msg := RetainedTypesYAMLWarning(); msg != "" {
+		t.Errorf("warning with no yaml key = %q, want none", msg)
+	}
+	Set("types.retained", "op,fact")
+	msg := RetainedTypesYAMLWarning()
+	for _, want := range []string{"config.yaml", "ignored", "bd config set types.retained op,fact"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("warning = %q, want it to contain %q", msg, want)
+		}
+	}
+}
+
 // TestGetCustomTypesFromYAML_ListForm verifies that the YAML sequence form
 // (e.g. `types: { custom: [step, wisp] }`) is honored equivalently to the
 // legacy comma-separated string form. Before the fix, viper.GetString on a
@@ -1615,6 +1874,34 @@ func TestGetStringFromDir(t *testing.T) {
 		writeConfig(t, dir, "a:\n  b:\n    c: value\n")
 		if got := GetStringFromDir(dir, "a.b.c"); got != "value" {
 			t.Errorf("got %q, want %q", got, "value")
+		}
+	})
+
+	t.Run("literal flat dotted key", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, "dolt.host: 127.0.0.1\n")
+		if got := GetStringFromDir(dir, "dolt.host"); got != "127.0.0.1" {
+			t.Errorf("got %q, want %q", got, "127.0.0.1")
+		}
+	})
+
+	t.Run("literal flat dotted key wins over nested spelling", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfig(t, dir, "dolt.host: 127.0.0.1\ndolt:\n  host: 10.0.0.1\n")
+		got := GetStringFromDir(dir, "dolt.host")
+		if got != "127.0.0.1" {
+			t.Errorf("got %q, want the literal-key value %q", got, "127.0.0.1")
+		}
+
+		savedV := v
+		v = viper.New()
+		t.Cleanup(func() { v = savedV })
+		v.SetConfigFile(filepath.Join(dir, "config.yaml"))
+		if err := v.ReadInConfig(); err != nil {
+			t.Fatalf("ReadInConfig: %v", err)
+		}
+		if viperGot := GetString("dolt.host"); viperGot != got {
+			t.Errorf("readers disagree: GetString = %q, GetStringFromDir = %q", viperGot, got)
 		}
 	})
 
@@ -1826,6 +2113,74 @@ func TestInitialize_ExternalBEADSDirDoesNotMergeCallerProjectConfig(t *testing.T
 	}
 }
 
+// TestWithBeadsDirLoadsTheBoundWorkspacesConfig covers a command about to
+// create a workspace inside another one (bd bootstrap for a fresh rig): the
+// process loaded the enclosing workspace's config.yaml, and fn must see what a
+// command bound to the new workspace loads, its own config.yaml once it has
+// one over the user config files, never the enclosing file. The loaded
+// configuration, a runtime Set included, comes back afterwards, and BEADS_DIR
+// is never touched.
+func TestWithBeadsDirLoadsTheBoundWorkspacesConfig(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+	ResetForTesting()
+	t.Cleanup(ResetForTesting)
+
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("APPDATA", filepath.Join(root, "appdata"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "xdg-config"))
+	writeConfigActor(t, filepath.Join(home, ".beads", "config.yaml"), "legacy")
+	town := filepath.Join(root, "town")
+	writeConfigActor(t, filepath.Join(town, ".beads", "config.yaml"), "town")
+	rig := filepath.Join(town, "rig")
+	if err := os.MkdirAll(rig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rigBeadsDir := filepath.Join(rig, ".beads")
+	t.Chdir(rig)
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	Set("json", true)
+	if got := GetString("actor"); got != "town" {
+		t.Fatalf("precondition: actor = %q, want the enclosing workspace's %q", got, "town")
+	}
+
+	for _, step := range []struct{ name, want string }{
+		{name: "no config.yaml of its own", want: "legacy"},
+		{name: "its own config.yaml", want: "rig"},
+	} {
+		if step.want == "rig" {
+			writeConfigActor(t, filepath.Join(rigBeadsDir, "config.yaml"), "rig")
+		}
+		var actor string
+		var jsonSet bool
+		if err := WithBeadsDir(rigBeadsDir, func() {
+			actor, jsonSet = GetString("actor"), GetBool("json")
+		}); err != nil {
+			t.Fatalf("%s: WithBeadsDir: %v", step.name, err)
+		}
+		if actor != step.want {
+			t.Errorf("%s: actor inside = %q, want %q", step.name, actor, step.want)
+		}
+		if jsonSet {
+			t.Errorf("%s: a Set on the loaded configuration leaked into fn", step.name)
+		}
+		if got := GetString("actor"); got != "town" {
+			t.Errorf("%s: actor after = %q, want the loaded %q back", step.name, got, "town")
+		}
+		if !GetBool("json") {
+			t.Errorf("%s: the loaded configuration's Set was not restored", step.name)
+		}
+		if got, ok := os.LookupEnv("BEADS_DIR"); ok {
+			t.Errorf("%s: BEADS_DIR = %q, want it left unset", step.name, got)
+		}
+	}
+}
+
 func TestViperIssuePrefixKeysAreDistinct(t *testing.T) {
 	restore := envSnapshot(t)
 	defer restore()
@@ -1853,5 +2208,310 @@ func TestViperIssuePrefixKeysAreDistinct(t *testing.T) {
 	}
 	if got := GetString("issue_prefix"); got != "legacy_underscore" {
 		t.Fatalf("GetString(issue_prefix) = %q, want %q", got, "legacy_underscore")
+	}
+}
+
+// newIgnoredRepoConfigFixture builds a fake module root (go.mod + .beads/config.yaml)
+// with HOME/XDG redirected into the same temp tree, so Initialize sees exactly one
+// candidate project config. It returns the .beads directory.
+//
+// The fixture must be self-contained: the real beads checkout carries an untracked
+// .beads/config.yaml with `issue-prefix: bd`, and a test that depended on it would
+// pass or fail based on the developer's machine.
+func newIgnoredRepoConfigFixture(t *testing.T, body string) string {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home")
+	configDir := filepath.Join(tmpDir, "xdg-config")
+	repoDir := filepath.Join(tmpDir, "repo")
+	beadsDir := filepath.Join(repoDir, ".beads")
+
+	for _, dir := range []string{homeDir, configDir, beadsDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("failed to create %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "go.mod"), []byte("module example.com/test\n\ngo 1.24.0\n"), 0o644); err != nil {
+		t.Fatalf("failed to write go.mod: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatalf("failed to write config.yaml: %v", err)
+	}
+
+	t.Setenv("HOME", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	t.Chdir(repoDir)
+
+	return beadsDir
+}
+
+// BEADS_DIR is the highest-priority config source, and it used to bypass
+// BEADS_TEST_IGNORE_REPO_CONFIG entirely. That was the leak behind ga-e6h6i:
+// in-process CLI dispatch raw-os.Setenv's BEADS_DIR at the checkout's own .beads
+// and never restores it, so every later Initialize re-imported the repo config —
+// including `issue-prefix: bd`, which broke unrelated --id tests.
+func TestInitialize_IgnoreRepoConfigAppliesToBeadsDirEnv(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	beadsDir := newIgnoredRepoConfigFixture(t, "json: true\nactor: repo-user\nissue-prefix: zzleak\n")
+
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	ResetForTesting()
+	defer ResetForTesting()
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	if got := GetBool("json"); got {
+		t.Errorf("GetBool(json) = %v, want false when repo config is ignored via BEADS_DIR", got)
+	}
+	if got := GetString("actor"); got != "" {
+		t.Errorf("GetString(actor) = %q, want empty when repo config is ignored via BEADS_DIR", got)
+	}
+	if got := GetString("issue-prefix"); got != "" {
+		t.Errorf("GetString(issue-prefix) = %q, want empty when repo config is ignored via BEADS_DIR", got)
+	}
+	// primaryConfigPath must be suppressed too: otherwise SaveConfigValue would
+	// still write into the repo config the flag exists to protect.
+	if got := ConfigFileUsed(); got != "" {
+		t.Errorf("ConfigFileUsed() = %q, want empty when repo config is ignored via BEADS_DIR", got)
+	}
+}
+
+// The two sides of the ignore-set comparison are produced by different code with
+// different opinions about symlinks, and they have to agree anyway.
+//
+// The set is keyed off os.Getwd(), which honors $PWD and so reports the name the
+// process was handed. The BEADS_DIR checked against it is written by the CLI's own
+// dispatch from beads.FindBeadsDir, which canonicalizes through
+// filepath.EvalSymlinks. Compare those as raw strings and the lookup misses for any
+// workspace reached through a symlink: the ignore silently does not apply and the
+// repo config is merged after all.
+//
+// This is not hypothetical on macOS — it is unconditional there. $TMPDIR is
+// /var/folders/... and /var is a symlink to /private/var, so every t.TempDir() has
+// two names and the two sides pick different ones. It took the Main workflow's
+// macos-latest job red on cmd/bd TestDispatchDoesNotPolluteViperIssuePrefix.
+//
+// Constructing the symlink explicitly reproduces it on every platform rather than
+// only where $TMPDIR happens to be one.
+func TestInitialize_IgnoreRepoConfigMatchesThroughASymlinkedRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevation on Windows")
+	}
+	restore := envSnapshot(t)
+	defer restore()
+
+	beadsDir := newIgnoredRepoConfigFixture(t, "json: true\nactor: repo-user\nissue-prefix: zzleak\n")
+	repoDir := filepath.Dir(beadsDir)
+
+	// An alias for the same repo root. Chdir through it so $PWD — and therefore
+	// os.Getwd, and therefore the ignore set — holds the unresolved name.
+	linkedRepo := filepath.Join(t.TempDir(), "linked-repo")
+	if err := os.Symlink(repoDir, linkedRepo); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	t.Chdir(linkedRepo)
+
+	// Stand in for FindBeadsDir, which hands dispatch a canonicalized path.
+	resolvedBeadsDir, err := filepath.EvalSymlinks(beadsDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", beadsDir, err)
+	}
+	if resolvedBeadsDir == filepath.Join(linkedRepo, ".beads") {
+		t.Fatalf("fixture did not produce two distinct names for the same .beads dir: %s", resolvedBeadsDir)
+	}
+
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	t.Setenv("BEADS_DIR", resolvedBeadsDir)
+
+	ResetForTesting()
+	defer ResetForTesting()
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	if got := GetString("issue-prefix"); got != "" {
+		t.Errorf("GetString(issue-prefix) = %q, want empty: the ignore set missed the symlink-resolved BEADS_DIR", got)
+	}
+	if got := GetString("actor"); got != "" {
+		t.Errorf("GetString(actor) = %q, want empty: the ignore set missed the symlink-resolved BEADS_DIR", got)
+	}
+	if got := GetBool("json"); got {
+		t.Errorf("GetBool(json) = %v, want false: the ignore set missed the symlink-resolved BEADS_DIR", got)
+	}
+	if got := ConfigFileUsed(); got != "" {
+		t.Errorf("ConfigFileUsed() = %q, want empty when the repo config is ignored", got)
+	}
+}
+
+// The mirror of the case above: the alias must not become a way to over-ignore.
+// A genuinely different temp workspace still loads even when it is reached
+// through a symlink, so the normalization cannot be collapsing distinct paths.
+func TestInitialize_IgnoreRepoConfigStillHonorsSymlinkedTempBeadsDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevation on Windows")
+	}
+	restore := envSnapshot(t)
+	defer restore()
+
+	newIgnoredRepoConfigFixture(t, "json: true\nactor: repo-user\n")
+
+	workspace := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("failed to create workspace: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "config.yaml"), []byte("actor: workspace-user\nissue-prefix: wksp\n"), 0o644); err != nil {
+		t.Fatalf("failed to write workspace config.yaml: %v", err)
+	}
+
+	linkedWorkspace := filepath.Join(t.TempDir(), "linked-beads")
+	if err := os.Symlink(workspace, linkedWorkspace); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	t.Setenv("BEADS_DIR", linkedWorkspace)
+
+	ResetForTesting()
+	defer ResetForTesting()
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	if got := GetString("actor"); got != "workspace-user" {
+		t.Errorf("GetString(actor) = %q, want %q from the symlinked temp workspace", got, "workspace-user")
+	}
+	if got := GetString("issue-prefix"); got != "wksp" {
+		t.Errorf("GetString(issue-prefix) = %q, want %q from the symlinked temp workspace", got, "wksp")
+	}
+	if got := GetBool("json"); got {
+		t.Errorf("GetBool(json) = %v, want false — the ignored repo config leaked underneath", got)
+	}
+}
+
+// Guard against over-ignoring: without the flag, BEADS_DIR must still load the
+// module-root config exactly as before.
+func TestInitialize_BeadsDirEnvLoadsRepoConfigWithoutFlag(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	beadsDir := newIgnoredRepoConfigFixture(t, "json: true\nactor: repo-user\nissue-prefix: zzleak\n")
+
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	ResetForTesting()
+	defer ResetForTesting()
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	if got := GetBool("json"); !got {
+		t.Errorf("GetBool(json) = %v, want true when the flag is unset", got)
+	}
+	if got := GetString("actor"); got != "repo-user" {
+		t.Errorf("GetString(actor) = %q, want %q when the flag is unset", got, "repo-user")
+	}
+	if got := GetString("issue-prefix"); got != "zzleak" {
+		t.Errorf("GetString(issue-prefix) = %q, want %q when the flag is unset", got, "zzleak")
+	}
+}
+
+// The ignore set is scoped to the repo under test. Tests that point BEADS_DIR at
+// their own temp workspace (setupServerDriftTest, config-apply, backup-status,
+// auto-export) must keep loading it even with the flag set.
+func TestInitialize_IgnoreRepoConfigStillHonorsTempBeadsDir(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	// Establish the ignored module root, then point BEADS_DIR somewhere else.
+	newIgnoredRepoConfigFixture(t, "json: true\nactor: repo-user\n")
+
+	workspace := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("failed to create workspace: %v", err)
+	}
+	workspaceConfig := filepath.Join(workspace, "config.yaml")
+	if err := os.WriteFile(workspaceConfig, []byte("actor: workspace-user\nissue-prefix: wksp\n"), 0o644); err != nil {
+		t.Fatalf("failed to write workspace config.yaml: %v", err)
+	}
+
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	t.Setenv("BEADS_DIR", workspace)
+
+	ResetForTesting()
+	defer ResetForTesting()
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	if got := GetString("actor"); got != "workspace-user" {
+		t.Errorf("GetString(actor) = %q, want %q from the temp BEADS_DIR workspace", got, "workspace-user")
+	}
+	if got := GetString("issue-prefix"); got != "wksp" {
+		t.Errorf("GetString(issue-prefix) = %q, want %q from the temp BEADS_DIR workspace", got, "wksp")
+	}
+	if got := ConfigFileUsed(); filepath.Clean(got) != filepath.Clean(workspaceConfig) {
+		t.Errorf("ConfigFileUsed() = %q, want %q", got, workspaceConfig)
+	}
+	// The ignored repo config must not have merged underneath.
+	if got := GetBool("json"); got {
+		t.Errorf("GetBool(json) = %v, want false — the ignored repo config leaked underneath", got)
+	}
+}
+
+// The same asymmetry with the sides swapped: cwd resolved, BEADS_DIR reached
+// through the alias. macOS produces the other order, so only that one is
+// load-bearing today — but a normalization applied to one side and not the
+// other would pass the test above and still leak here, and nothing in the code
+// makes the direction obvious. Pin the symmetry rather than the instance.
+func TestInitialize_IgnoreRepoConfigMatchesASymlinkedBeadsDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevation on Windows")
+	}
+	restore := envSnapshot(t)
+	defer restore()
+
+	beadsDir := newIgnoredRepoConfigFixture(t, "json: true\nactor: repo-user\nissue-prefix: zzleak\n")
+	repoDir := filepath.Dir(beadsDir)
+
+	linkedRepo := filepath.Join(t.TempDir(), "linked-repo")
+	if err := os.Symlink(repoDir, linkedRepo); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	// newIgnoredRepoConfigFixture already chdir'd into repoDir; make sure the
+	// name os.Getwd reports is the resolved one, so the alias is on the
+	// BEADS_DIR side only.
+	resolvedRepoDir, err := filepath.EvalSymlinks(repoDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", repoDir, err)
+	}
+	t.Chdir(resolvedRepoDir)
+
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	t.Setenv("BEADS_DIR", filepath.Join(linkedRepo, ".beads"))
+
+	ResetForTesting()
+	defer ResetForTesting()
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	if got := GetString("issue-prefix"); got != "" {
+		t.Errorf("GetString(issue-prefix) = %q, want empty: the ignore set missed the aliased BEADS_DIR", got)
+	}
+	if got := ConfigFileUsed(); got != "" {
+		t.Errorf("ConfigFileUsed() = %q, want empty when the repo config is ignored", got)
 	}
 }

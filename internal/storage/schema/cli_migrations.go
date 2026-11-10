@@ -1,12 +1,61 @@
 package schema
 
 // cliCompatibleMigrationSQL returns migration SQL suitable for `dolt sql -q`
-// against a fresh test database. The Dolt CLI accepts PREPARE/EXECUTE DDL but
-// does not apply some prepared ALTER TABLE statements in this path, so the
-// fresh-schema bundle uses direct DDL for prepared DDL that can change the
-// committed schema shape. The bundle's contract is to reproduce the runtime
-// committed schema for a fresh database; runtime migrations still use the source
-// files and remain the source of truth for upgrades of existing databases.
+// against a fresh test database. The Dolt CLI's batch execution path
+// (`dolt sql -q`/`-f`, which is what AllMigrationsSQL below feeds) silently
+// no-ops a PREPARE/EXECUTE statement whose prepared text is DML — UPDATE,
+// INSERT, or DELETE built into a `SET @sql = '...'` string and run via
+// PREPARE ... FROM @sql; EXECUTE stmt — while EXECUTE reports success and a
+// prepared SELECT or a direct (non-prepared) statement on the same path
+// executes correctly. This is dolthub/dolt#11345, verified on dolt 2.2.0 and
+// 2.2.2. Prepared ALTER TABLE is the same underlying limitation and one
+// instance of it, not the whole scope: the fresh-schema bundle uses direct
+// DDL below wherever a source migration guards an ALTER with PREPARE for
+// idempotent re-runs. The bundle's contract is to reproduce the runtime
+// committed schema for a fresh database; runtime migrations still use the
+// source files and remain the source of truth for upgrades of existing
+// databases, where PREPARE/EXECUTE runs over a real driver connection and
+// this limitation does not apply.
+//
+// Dolt 2.3.0 fixed #11345, and that fix MASKS a missing override here rather
+// than removing the need for one: a 2.3.0-or-newer CLI executes the prepared
+// ALTER, so a bundle that forgot the direct statement still lands the right
+// schema. Run through a 2.3.x CLI, TestCLIBundleMatchesRuntimeCommittedSchema
+// went green that way against the then-pinned 2.2.0 sql-server, and with the
+// CLI now pinned at 2.6.0 it cannot catch a dropped override on any run
+// (probed 2026-10-21: a prepared ADD COLUMN vanishes on the 2.2.0 CLI and
+// lands on 2.5.1). So every override below must be justified against the
+// pre-2.3 behavior, and the guards that still work need no Dolt binary at
+// all: the string assertions in
+// TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities and
+// TestBundleMigrationsWithPreparedALTERAreOverriddenOrJustified
+// (cli_prepared_ddl.go).
+//
+// The measurement those checks stand in for: run AllMigrationsSQL() through
+// each CLI and diff information_schema. On 2026-08-21, with 0060's and 0065's
+// overrides both in place, dolt 2.1.8, 2.2.0 (the CLI pinned then) and 2.3.1 agree
+// on all 504 snapshot lines including the wisp_ tables the parity oracle
+// excludes — so no prepared statement the bundle still carries changes its
+// committed schema. Before that, 2.3.1 landed three extra columns (0060's
+// storage_class, gastownhall/beads#5903) and one extra widening (0065's
+// wisp_comments.text). cli_prepared_ddl.go is what keeps a new migration from
+// re-opening that gap.
+//
+// Every override below is written for the fresh bundle, where the whole main
+// series has run in order. A caller replaying the substitution over a drifted
+// database — one that never synced the clone-local wisp tables, say — must
+// consult cliSubstituteAssumesWispTables first and fall back to the frozen
+// source text, whose own PREPARE guards cover the absent-table case.
+//
+// For a migration whose PREPARE'd DML matters on this path (not just DDL),
+// the fix is not a direct-SQL override here — it is to not depend on
+// PREPARE'd writes to real tables in the source migration at all. Migration
+// 0059 (gastownhall/beads#4877) is the pattern: real-table mutations are
+// direct SQL; the only PREPARE'd statements are best-effort, guarded copies
+// into throwaway stand-in tables that a direct statement then reads, so a
+// silent no-op there degrades gracefully instead of corrupting state.
+// scripts/check-migration-hygiene.sh flags new migrations that use PREPARE'd
+// DML instead of that pattern.
 func cliCompatibleMigrationSQL(name, sqlText string) string {
 	switch name {
 	case "0008_create_child_counters.up.sql":
@@ -60,8 +109,138 @@ func cliCompatibleMigrationSQL(name, sqlText string) string {
 		// schema delta: create the ephemeral leases table, drop the issues/
 		// wisps lease columns 0054 added. row_lock stays (see the migration).
 		return cliMigration0055MoveLeasesToTable
+	case "0060_add_storage_class.up.sql":
+		// Direct DDL for the same reason as 0054: the source migration's
+		// PREPARE guards make it idempotent on upgraded databases, and a
+		// fresh bundle always needs the column on both planes.
+		return cliMigration0060AddStorageClass
+	case "0065_widen_wisp_comments_text.up.sql":
+		// Direct DDL for the same reason as 0060. wisp_comments is created
+		// by main-plane 0021, so a fresh bundle always has the table and
+		// always needs the widening. Replays over a database that never
+		// synced the wisp tables must use the frozen source text instead --
+		// see cliSubstituteAssumesWispTables.
+		return cliMigration0065WidenWispCommentsText
+	case "0066_add_events_journal_actor.up.sql":
+		// Direct DDL for the same reason as 0060: the source migration's
+		// PREPARE guard (INFORMATION_SCHEMA probe) makes it idempotent on
+		// upgraded databases, and the 2.2.x CLI no-ops the prepared ALTER
+		// (measured 2026-08-20: AllMigrationsSQL() through dolt 2.2.0 lands
+		// bd_events_journal WITHOUT actor; 2.3.1 — and 2.2.3, which already
+		// carries the #11345 fix — land it; CI pinned 2.2.0 then). The table
+		// itself is always present here: 0064's prepared RENAME executes on
+		// 2.2.0 (same measurement), so a fresh bundle always needs the column.
+		return cliMigration0066AddEventsJournalActor
+	case "0067_add_versioned_beads_schema.up.sql":
+		// Direct DDL for the same reason as 0060: the source migration's
+		// PREPARE guards (INFORMATION_SCHEMA probes) are what make the raw
+		// .up.sql idempotent when replayed onto an already-migrated store,
+		// and the 2.2.x CLI no-ops a prepared ADD COLUMN. Both planes always
+		// need the column here -- a fresh bundle runs the whole main series
+		// in order, so `issues` and `wisps` both exist and neither carries
+		// current_revision yet. The CREATE TABLEs are carried over verbatim:
+		// IF NOT EXISTS is ordinary unwrapped DDL that the CLI executes.
+		// Replays over a database that never synced the wisp tables must use
+		// the frozen source text instead -- see cliSubstituteAssumesWispTables.
+		return cliMigration0067AddVersionedBeadsSchema
+	case "0068_add_attribution_status.up.sql":
+		// Direct DDL for the same reason as 0067: the source migration's
+		// PREPARE guards (INFORMATION_SCHEMA probes) are what make the raw
+		// .up.sql idempotent when replayed onto an already-migrated store,
+		// and the 2.2.x CLI no-ops a prepared ADD COLUMN and MODIFY COLUMN
+		// alike. issue_versions is always present here -- 0067 runs earlier
+		// in the same fresh-bundle series -- never carries attribution_status
+		// yet, and still has durable_state as the JSON type 0067 gave it, so
+		// both of 0068's steps always fire on a fresh bundle.
+		return cliMigration0068AddAttributionStatus
+	case "0069_widen_issue_versions_datetime_precision.up.sql":
+		// Direct DDL for the same reason as 0068: the source migration's
+		// PREPARE guards (DATETIME_PRECISION probes) are what make the raw
+		// .up.sql idempotent when replayed onto an already-widened store,
+		// and the 2.2.x CLI no-ops a prepared MODIFY COLUMN. Nothing before
+		// 0069 in the fresh-bundle series widens change_at or removed_at --
+		// 0067 creates both as plain DATETIME and 0068 retypes only
+		// durable_state -- so both of 0069's MODIFYs always fire here too.
+		return cliMigration0069WidenIssueVersionsDatetimePrecision
+	case "0070_add_participation_generation.up.sql":
+		// Direct DDL for the same reason as 0067: the source migration's
+		// PREPARE guards (INFORMATION_SCHEMA probes) are what make the raw
+		// .up.sql idempotent when replayed onto an already-migrated store,
+		// and the 2.2.x CLI no-ops a prepared ADD COLUMN. issues and wisps
+		// both exist by this point in the series (0067 creates the versioned
+		// columns on both) and neither carries participation_generation yet,
+		// so both of 0070's ALTERs always fire on a fresh bundle -- this
+		// substitute ALTERs wisps directly, the same as 0067's, so it
+		// belongs on cliSubstituteAssumesWispTables too.
+		return cliMigration0070AddParticipationGeneration
+	case "0071_add_removed_restriction.up.sql":
+		// Direct DDL for the same reason as 0067/0068: the source migration's
+		// PREPARE guard (an INFORMATION_SCHEMA probe) is what makes the raw
+		// .up.sql idempotent when replayed onto an already-migrated store,
+		// and the 2.2.x CLI no-ops a prepared ADD COLUMN. issue_versions is
+		// always present here -- 0067 runs earlier in the same fresh-bundle
+		// series -- and never carries removed_restriction yet, so the column
+		// always needs adding on a fresh bundle.
+		return cliMigration0071AddRemovedRestriction
+	case "0073_add_arrival_seq.up.sql":
+		// Direct DDL for the same reason as 0067: the source migration's
+		// PREPARE guards (INFORMATION_SCHEMA probes) are what make the raw
+		// .up.sql idempotent when replayed onto an already-migrated store,
+		// and the 2.2.x CLI no-ops a prepared ADD COLUMN. Both planes always
+		// need the column here -- a fresh bundle runs the whole main series
+		// in order, so `issues` and `wisps` both exist and neither carries
+		// arrival_seq yet, nor wisps the unique index the source's third
+		// guarded block creates. Replays over a database that never synced
+		// the wisp tables must use the frozen source text instead -- see
+		// cliSubstituteAssumesWispTables.
+		return cliMigration0073AddArrivalSeq
 	default:
 		return sqlText
+	}
+}
+
+// cliSubstituteAssumesWispTables reports whether cliCompatibleMigrationSQL's
+// substitute for name presumes the clone-local wisp_* tables already exist.
+//
+// AllMigrationsSQL() always satisfies that presumption — the main series
+// creates every wisp table on its way past — so the bundle route is
+// unaffected. A replay over a drifted database is not: #4695/#4176 is the
+// shape where the main cursor arrives at-latest with the wisp tables never
+// synced (they are dolt_ignored, so a clone can simply not have them), and
+// 0047's repair recreates only wisps and wisp_dependencies. On that database
+// the substitute's direct DDL aborts the batch with `table not found` while
+// the frozen source text's own PREPARE guards correctly no-op: an
+// INFORMATION_SCHEMA probe for a missing table yields NULL, and
+// `IF(NULL = 1, '<ddl>', 'SELECT 1')` takes the no-op branch.
+//
+// So a replay caller must use the frozen text for these, and only these.
+// The other substitutes are safe to replay because they touch main-plane
+// tables that are always present.
+func cliSubstituteAssumesWispTables(name string) bool {
+	switch name {
+	case "0053_repair_rig_wisps.up.sql":
+		// cliMigration0053RepairRigWisps drops every @has_wisp_* guard and
+		// reads all five wisp tables unconditionally.
+		return true
+	case "0065_widen_wisp_comments_text.up.sql":
+		// cliMigration0065WidenWispCommentsText is a bare MODIFY on
+		// wisp_comments.
+		return true
+	case "0067_add_versioned_beads_schema.up.sql":
+		// cliMigration0067AddVersionedBeadsSchema drops the source's
+		// @wisps_cr_needs_add table-exists guard and ALTERs wisps directly.
+		return true
+	case "0070_add_participation_generation.up.sql":
+		// cliMigration0070AddParticipationGeneration drops the source's
+		// @wisps_pg_needs_add table-exists guard and ALTERs wisps directly,
+		// the same shape 0067's override already uses for current_revision.
+		return true
+	case "0073_add_arrival_seq.up.sql":
+		// cliMigration0073AddArrivalSeq drops the source's @has_wisps
+		// table-exists guard and ALTERs and indexes wisps directly.
+		return true
+	default:
+		return false
 	}
 }
 
@@ -100,6 +279,86 @@ ALTER TABLE issues DROP COLUMN lease_expires_at;
 ALTER TABLE issues DROP COLUMN heartbeat_at;
 ALTER TABLE wisps DROP COLUMN lease_expires_at;
 ALTER TABLE wisps DROP COLUMN heartbeat_at;`
+
+const cliMigration0060AddStorageClass = `ALTER TABLE issues ADD COLUMN storage_class VARCHAR(16);
+ALTER TABLE wisps ADD COLUMN storage_class VARCHAR(16);`
+
+const cliMigration0065WidenWispCommentsText = `ALTER TABLE wisp_comments MODIFY COLUMN text LONGTEXT NOT NULL;`
+const cliMigration0066AddEventsJournalActor = `ALTER TABLE bd_events_journal ADD COLUMN actor VARCHAR(255) NOT NULL DEFAULT '';`
+
+// cliMigration0067AddVersionedBeadsSchema is 0067 with its two guarded
+// PREPARE blocks replaced by the direct ALTERs they would run on a fresh
+// database. The CREATE TABLEs are the source file's own text: CREATE TABLE
+// IF NOT EXISTS executes on the CLI batch path unchanged.
+const cliMigration0067AddVersionedBeadsSchema = `CREATE TABLE IF NOT EXISTS issue_versions (
+    issue_id VARCHAR(255) NOT NULL,
+    revision BIGINT NOT NULL,
+    epoch INT NOT NULL,
+    durable_state JSON,
+    change_actor VARCHAR(255),
+    change_agent VARCHAR(255),
+    change_message TEXT,
+    change_at DATETIME NOT NULL,
+    removed_at DATETIME,
+    removed_reason VARCHAR(255),
+    PRIMARY KEY (issue_id, revision)
+);
+CREATE TABLE IF NOT EXISTS store_epoch (
+    id TINYINT(1) NOT NULL DEFAULT 1,
+    epoch INT NOT NULL DEFAULT 1,
+    bumped_at DATETIME,
+    bumped_reason VARCHAR(255),
+    PRIMARY KEY (id),
+    CONSTRAINT ck_store_epoch_singleton CHECK (id = 1)
+);
+ALTER TABLE issues ADD COLUMN current_revision BIGINT NOT NULL DEFAULT 1;
+ALTER TABLE wisps ADD COLUMN current_revision BIGINT NOT NULL DEFAULT 1;`
+
+// cliMigration0068AddAttributionStatus is 0068 with its two guarded PREPARE
+// blocks replaced by the direct ALTERs they would run on a fresh database:
+// step 6's ADD COLUMN attribution_status, and step 7's MODIFY COLUMN
+// durable_state LONGBLOB (the byte-preserving type the review on
+// gastownhall/beads#6358 item 4 asked for -- see the migration's step 7
+// header). issue_versions is created earlier in the same series by 0067,
+// which still creates durable_state as JSON and whose override is left
+// untouched: 0068 is what retypes it. So the column always needs adding and
+// the retype always fires here; no wisps twin exists for this table.
+const cliMigration0068AddAttributionStatus = `ALTER TABLE issue_versions ADD COLUMN attribution_status VARCHAR(20) NOT NULL;
+ALTER TABLE issue_versions MODIFY COLUMN durable_state LONGBLOB;`
+
+// cliMigration0069WidenIssueVersionsDatetimePrecision is 0069 with its two
+// guarded PREPARE blocks replaced by the direct MODIFYs they would run on a
+// fresh database: change_at and removed_at from 0067's plain DATETIME to
+// DATETIME(6) (the microsecond widen be-hs42e.8 / gastownhall/beads#6132
+// asks for -- see the migration's header). Neither 0067's override nor
+// 0068's touches either column, so both retypes always fire here; no wisps
+// twin exists for this table.
+const cliMigration0069WidenIssueVersionsDatetimePrecision = `ALTER TABLE issue_versions MODIFY COLUMN change_at DATETIME(6) NOT NULL;
+ALTER TABLE issue_versions MODIFY COLUMN removed_at DATETIME(6);`
+
+// cliMigration0070AddParticipationGeneration is 0070 with its two guarded
+// PREPARE blocks replaced by the direct ALTERs they would run on a fresh
+// database: participation_generation BIGINT NULL on issues, mirrored
+// inertly on wisps (design §16.3 steps 4-5, be-dt74u amendment, be-h89oq).
+// issues and wisps both exist by this point in the series (0067 creates the
+// versioned columns on both) and neither carries participation_generation
+// yet, so both ALTERs always fire on a fresh bundle -- this substitute
+// ALTERs wisps directly, the same as 0067's, so it belongs on
+// cliSubstituteAssumesWispTables too.
+const cliMigration0070AddParticipationGeneration = `ALTER TABLE issues ADD COLUMN participation_generation BIGINT NULL;
+ALTER TABLE wisps ADD COLUMN participation_generation BIGINT NULL;`
+
+// cliMigration0071AddRemovedRestriction is 0071 with its one guarded PREPARE
+// block replaced by the direct ALTER it would run on a fresh database.
+// issue_versions is created earlier in the same series by 0067 and never
+// carries removed_restriction yet, so the column always needs adding here.
+const cliMigration0071AddRemovedRestriction = `ALTER TABLE issue_versions ADD COLUMN removed_restriction VARCHAR(30);`
+
+// cliMigration0073AddArrivalSeq is 0073 with its three guarded PREPARE blocks
+// replaced by the direct DDL they would run on a fresh database.
+const cliMigration0073AddArrivalSeq = `ALTER TABLE issues ADD COLUMN arrival_seq BIGINT;
+ALTER TABLE wisps ADD COLUMN arrival_seq BIGINT;
+CREATE UNIQUE INDEX uk_wisps_arrival_seq ON wisps (arrival_seq);`
 
 const cliMigration0041SplitDependenciesTarget = `DELETE FROM dolt_nonlocal_tables;
 CALL DOLT_COMMIT('-Am', 'disable nonlocal tables for fk migrations');

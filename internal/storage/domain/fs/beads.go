@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/gitignore"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -89,15 +90,51 @@ func (r *beadsDirFSRepositoryImpl) WriteBeadsGitignore(ctx context.Context) erro
 		return fmt.Errorf("fs: WriteBeadsGitignore: template not configured")
 	}
 	path := filepath.Join(r.beadsDir, ".gitignore")
-	body := []byte(r.templates.BeadsGitignore)
 	// #nosec G304 -- path joined under bound beadsDir
-	if existing, err := os.ReadFile(path); err == nil && bytes.Equal(existing, body) {
+	existing, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		if werr := os.WriteFile(path, []byte(r.templates.BeadsGitignore), 0600); werr != nil {
+			return fmt.Errorf("fs: WriteBeadsGitignore: %w", werr)
+		}
 		return nil
 	}
-	if err := os.WriteFile(path, body, 0600); err != nil {
+	if err != nil {
+		return fmt.Errorf("fs: WriteBeadsGitignore: read: %w", err)
+	}
+	// Existing file: append-only. A wholesale rewrite to the template
+	// destroys local rules (e.g. export negations) the user added — the
+	// gitignore is shared state, not bd-owned (bd-kaaz3).
+	missing := missingTemplatePatternLines(string(existing), r.templates.BeadsGitignore)
+	if len(missing) == 0 {
+		return nil
+	}
+	content := string(existing)
+	if len(content) > 0 && !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	content += "\n# Added by bd (missing required patterns)\n" + strings.Join(missing, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 		return fmt.Errorf("fs: WriteBeadsGitignore: %w", err)
 	}
 	return nil
+}
+
+// missingTemplatePatternLines returns the template's pattern lines (non-blank,
+// non-comment) that existing does not already contain as an exact trimmed line.
+func missingTemplatePatternLines(existing, template string) []string {
+	have := make(map[string]bool)
+	for _, line := range strings.Split(existing, "\n") {
+		have[strings.TrimSpace(line)] = true
+	}
+	var missing []string
+	for _, line := range strings.Split(template, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || have[trimmed] {
+			continue
+		}
+		missing = append(missing, trimmed)
+	}
+	return missing
 }
 
 func (r *beadsDirFSRepositoryImpl) BeadsGitignoreExists(ctx context.Context) (bool, error) {
@@ -128,23 +165,18 @@ func (r *beadsDirFSRepositoryImpl) WriteProjectGitignore(ctx context.Context) er
 		return nil
 	}
 
-	var buf bytes.Buffer
-	buf.Write(existing)
-	if len(existing) > 0 && !bytes.HasSuffix(existing, []byte("\n")) {
-		buf.WriteByte('\n')
-	}
+	var lines []string
 	if header := r.templates.ProjectGitignoreHeader; header != "" && !containsLine(existing, header) {
 		if len(existing) > 0 {
-			buf.WriteByte('\n')
+			lines = append(lines, "")
 		}
-		buf.WriteString(header + "\n")
+		lines = append(lines, header)
 	}
-	for _, pattern := range toAdd {
-		buf.WriteString(pattern + "\n")
-	}
+	lines = append(lines, toAdd...)
+	content := gitignore.AppendLines(existing, lines)
 
 	// #nosec G306 -- .gitignore must be world-readable so users can read/edit it
-	if err := os.WriteFile(path, buf.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(path, content, 0644); err != nil {
 		return fmt.Errorf("fs: WriteProjectGitignore: write: %w", err)
 	}
 	return nil

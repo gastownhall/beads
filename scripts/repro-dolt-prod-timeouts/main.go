@@ -28,6 +28,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -1014,9 +1015,7 @@ func runJob(ctx context.Context, cfg config, ws *workspace, j job) opResult {
 func runBD(ctx context.Context, cfg config, ws *workspace, j job) opResult {
 	opCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
-	cmd := exec.CommandContext(opCtx, cfg.BDPath, j.Argv...)
-	cmd.Dir = ws.Dir
-	cmd.Env = subprocessEnv(append([]string{"BD_NON_INTERACTIVE=1"}, j.Env...)...)
+	cmd := newBDCommand(opCtx, cfg, ws, j)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	start := time.Now()
@@ -1039,9 +1038,7 @@ func runBD(ctx context.Context, cfg config, ws *workspace, j job) opResult {
 func runShell(ctx context.Context, cfg config, ws *workspace, j job) opResult {
 	opCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
-	cmd := exec.CommandContext(opCtx, "sh", "-c", j.Sh)
-	cmd.Dir = ws.Dir
-	cmd.Env = subprocessEnv(append([]string{"BD_NON_INTERACTIVE=1", "BD_BIN=" + cfg.BDPath}, j.Env...)...)
+	cmd := newShellCommand(opCtx, cfg, ws, j)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	start := time.Now()
@@ -1056,6 +1053,20 @@ func runShell(ctx context.Context, cfg config, ws *workspace, j job) opResult {
 	}
 	res.StderrTail = tail(stderr.String(), 300)
 	return res
+}
+
+func newBDCommand(ctx context.Context, cfg config, ws *workspace, j job) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, cfg.BDPath, j.Argv...)
+	cmd.Dir = ws.Dir
+	cmd.Env = subprocessEnv(append([]string{"BD_NON_INTERACTIVE=1"}, j.Env...)...)
+	return cmd
+}
+
+func newShellCommand(ctx context.Context, cfg config, ws *workspace, j job) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "sh", "-c", j.Sh)
+	cmd.Dir = ws.Dir
+	cmd.Env = subprocessEnv(append([]string{"BD_NON_INTERACTIVE=1", "BD_BIN=" + cfg.BDPath}, j.Env...)...)
+	return cmd
 }
 
 func compactShell(s string) string {
@@ -1124,21 +1135,7 @@ func subprocessEnv(extra ...string) []string {
 }
 
 func cleanEnv(env []string, keys ...string) []string {
-	drop := make(map[string]struct{}, len(keys))
-	for _, key := range keys {
-		drop[key] = struct{}{}
-	}
-	out := env[:0]
-	for _, e := range env {
-		key, _, ok := strings.Cut(e, "=")
-		if ok {
-			if _, skip := drop[key]; skip {
-				continue
-			}
-		}
-		out = append(out, e)
-	}
-	return out
+	return execenv.Without(env, keys...)
 }
 
 func tail(s string, max int) string {

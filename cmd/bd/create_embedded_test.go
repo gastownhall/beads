@@ -4,16 +4,22 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -179,7 +185,12 @@ func assertDepExistsWithType(t *testing.T, beadsDir, database, issueID, dependsO
 	}
 }
 
-func TestEmbeddedCreate(t *testing.T) {
+// TestEmbeddedCreateScalarAndRelationships was split from TestEmbeddedCreate
+// (originally ~266.68s, measured under --config=embedded) into 2 top-level
+// tests over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedCreateScalarAndRelationships(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
 	}
@@ -187,725 +198,361 @@ func TestEmbeddedCreate(t *testing.T) {
 
 	bd := buildEmbeddedBD(t)
 
-	t.Run("basic", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "bc")
-		issue := bdCreate(t, bd, dir, "Basic issue")
-		if issue.ID == "" {
-			t.Fatal("expected issue ID")
-		}
-		if issue.Title != "Basic issue" {
-			t.Errorf("title: got %q, want %q", issue.Title, "Basic issue")
-		}
-		if issue.Status != types.StatusOpen {
-			t.Errorf("status: got %q, want %q", issue.Status, types.StatusOpen)
-		}
-		if issue.Priority != 2 {
-			t.Errorf("priority: got %d, want 2 (default)", issue.Priority)
-		}
-		if issue.IssueType != types.TypeTask {
-			t.Errorf("type: got %q, want %q", issue.IssueType, types.TypeTask)
-		}
-		if !strings.HasPrefix(issue.ID, "bc-") {
-			t.Errorf("ID should have prefix bc-, got %q", issue.ID)
-		}
-	})
-
-	t.Run("title_flag", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "tf")
-		issue := bdCreate(t, bd, dir, "--title", "Title via flag")
-		if issue.Title != "Title via flag" {
-			t.Errorf("title: got %q, want %q", issue.Title, "Title via flag")
-		}
-	})
-
-	t.Run("silent", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "sl")
-		id := bdCreateSilent(t, bd, dir, "Silent issue")
-		if id == "" {
-			t.Fatal("expected issue ID from --silent")
-		}
-		if !strings.HasPrefix(id, "sl-") {
-			t.Errorf("ID should have prefix sl-, got %q", id)
-		}
-	})
-
-	t.Run("priority", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "pr")
-		for _, tc := range []struct {
-			flag string
-			want int
-		}{
-			{"0", 0},
-			{"1", 1},
-			{"P3", 3},
-			{"4", 4},
-		} {
-			t.Run("P"+tc.flag, func(t *testing.T) {
-				issue := bdCreate(t, bd, dir, fmt.Sprintf("Priority %s", tc.flag), "-p", tc.flag)
-				if issue.Priority != tc.want {
-					t.Errorf("priority: got %d, want %d", issue.Priority, tc.want)
-				}
-			})
-		}
-	})
-
-	t.Run("issue_types", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "it")
-		for _, issueType := range []string{"bug", "feature", "task", "epic", "chore", "decision"} {
-			t.Run(issueType, func(t *testing.T) {
-				issue := bdCreate(t, bd, dir, fmt.Sprintf("Type %s", issueType), "-t", issueType)
-				normalized := types.IssueType(issueType).Normalize()
-				if issue.IssueType != normalized {
-					t.Errorf("type: got %q, want %q", issue.IssueType, normalized)
-				}
-			})
-		}
-	})
-
-	t.Run("description", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "ds")
-		issue := bdCreate(t, bd, dir, "Desc issue", "-d", "This is the description")
-		if issue.Description != "This is the description" {
-			t.Errorf("description: got %q, want %q", issue.Description, "This is the description")
-		}
-	})
-
-	t.Run("design_and_acceptance", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "da")
-		issue := bdCreate(t, bd, dir, "Design issue",
-			"--design", "Use MVC pattern",
-			"--acceptance", "All tests pass")
-		if issue.Design != "Use MVC pattern" {
-			t.Errorf("design: got %q, want %q", issue.Design, "Use MVC pattern")
-		}
-		if issue.AcceptanceCriteria != "All tests pass" {
-			t.Errorf("acceptance: got %q, want %q", issue.AcceptanceCriteria, "All tests pass")
-		}
-	})
-
-	t.Run("assignee", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "as")
-		issue := bdCreate(t, bd, dir, "Assigned issue", "-a", "alice")
-		if issue.Assignee != "alice" {
-			t.Errorf("assignee: got %q, want %q", issue.Assignee, "alice")
-		}
-	})
-
-	t.Run("labels", func(t *testing.T) {
-		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "lb")
-		issue := bdCreate(t, bd, dir, "Labeled issue", "-l", "bug,critical")
-
-		store := openStore(t, beadsDir, "lb")
-		labels, err := store.GetLabels(t.Context(), issue.ID)
-		if err != nil {
-			t.Fatalf("GetLabels: %v", err)
-		}
-		labelMap := make(map[string]bool)
-		for _, l := range labels {
-			labelMap[l] = true
-		}
-		if !labelMap["bug"] || !labelMap["critical"] {
-			t.Errorf("expected labels bug and critical, got %v", labels)
-		}
-	})
-
-	t.Run("explicit_id", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "ei")
-		issue := bdCreate(t, bd, dir, "Explicit ID", "--id", "ei-custom42")
-		if issue.ID != "ei-custom42" {
-			t.Errorf("ID: got %q, want %q", issue.ID, "ei-custom42")
-		}
-	})
-
-	t.Run("dependencies", func(t *testing.T) {
-		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "dp")
-		parent := bdCreate(t, bd, dir, "Parent issue")
-		child := bdCreate(t, bd, dir, "Child issue", "--deps", "blocks:"+parent.ID)
-
-		// "blocks:X" reverses direction: X depends on new issue (parent.ID -> child.ID)
-		assertDepExists(t, beadsDir, "dp", parent.ID, child.ID)
-	})
-
-	t.Run("blocked_by_alias", func(t *testing.T) {
-		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "bb")
-		blocker := bdCreate(t, bd, dir, "Blocker issue")
-		blocked := bdCreate(t, bd, dir, "Blocked issue", "--deps", "blocked-by:"+blocker.ID)
-
-		assertDepExistsWithType(t, beadsDir, "bb", blocked.ID, blocker.ID, "blocks")
-	})
-
-	t.Run("depends_on_alias", func(t *testing.T) {
-		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "do")
-		prereq := bdCreate(t, bd, dir, "Prerequisite")
-		dependent := bdCreate(t, bd, dir, "Dependent issue", "--deps", "depends-on:"+prereq.ID)
-
-		assertDepExistsWithType(t, beadsDir, "do", dependent.ID, prereq.ID, "blocks")
-	})
-
-	t.Run("unknown_dep_type_rejected", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "ud")
-		blocker := bdCreate(t, bd, dir, "Blocker")
-		out := bdCreateFail(t, bd, dir, "Bad dep type", "--deps", "bogus-type:"+blocker.ID)
-		if !strings.Contains(out, "unknown dependency type") {
-			t.Errorf("expected 'unknown dependency type' error, got:\n%s", out)
-		}
-		if !strings.Contains(out, "blocked-by") || !strings.Contains(out, "depends-on") {
-			t.Errorf("expected accepted dependency aliases in error, got:\n%s", out)
-		}
-	})
-
-	t.Run("multiple_dependencies", func(t *testing.T) {
-		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "md")
-		dep1 := bdCreate(t, bd, dir, "Dep 1")
-		dep2 := bdCreate(t, bd, dir, "Dep 2")
-		child := bdCreate(t, bd, dir, "Multi dep issue",
-			"--deps", fmt.Sprintf("blocks:%s,related:%s", dep1.ID, dep2.ID))
-
-		// blocks reverses direction; related keeps original direction
-		assertDepExists(t, beadsDir, "md", dep1.ID, child.ID)
-		assertDepExists(t, beadsDir, "md", child.ID, dep2.ID)
-	})
-
-	t.Run("parent_child", func(t *testing.T) {
-		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "pc")
-		parent := bdCreate(t, bd, dir, "Parent epic", "-t", "epic")
-		child := bdCreate(t, bd, dir, "Child task", "--parent", parent.ID)
-
-		if !strings.HasPrefix(child.ID, parent.ID+".") {
-			t.Errorf("child ID %q should start with %q.", child.ID, parent.ID)
-		}
-
-		assertDepExists(t, beadsDir, "pc", child.ID, parent.ID)
-	})
-
-	t.Run("parent_label_inheritance", func(t *testing.T) {
-		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "pi")
-		parent := bdCreate(t, bd, dir, "Parent with labels", "-t", "epic", "-l", "team-a,priority:high")
-		child := bdCreate(t, bd, dir, "Child inherits", "--parent", parent.ID)
-
-		store := openStore(t, beadsDir, "pi")
-		childLabels, err := store.GetLabels(t.Context(), child.ID)
-		if err != nil {
-			t.Fatalf("GetLabels: %v", err)
-		}
-		labelMap := make(map[string]bool)
-		for _, l := range childLabels {
-			labelMap[l] = true
-		}
-		if !labelMap["team-a"] || !labelMap["priority:high"] {
-			t.Errorf("expected inherited labels team-a and priority:high, got %v", childLabels)
-		}
-	})
-
-	t.Run("parent_no_inherit_labels", func(t *testing.T) {
-		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ni")
-		parent := bdCreate(t, bd, dir, "Parent", "-t", "epic", "-l", "inherited-label")
-		child := bdCreate(t, bd, dir, "Child no inherit", "--parent", parent.ID, "--no-inherit-labels", "-l", "own-label")
-
-		store := openStore(t, beadsDir, "ni")
-		childLabels, err := store.GetLabels(t.Context(), child.ID)
-		if err != nil {
-			t.Fatalf("GetLabels: %v", err)
-		}
-		labelMap := make(map[string]bool)
-		for _, l := range childLabels {
-			labelMap[l] = true
-		}
-		if !labelMap["own-label"] {
-			t.Error("expected own-label on child")
-		}
-		if labelMap["inherited-label"] {
-			t.Error("did not expect inherited-label on child with --no-inherit-labels")
-		}
-	})
-
-	t.Run("due_date", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "dd")
-		issue := bdCreate(t, bd, dir, "Due issue", "--due", "+24h")
-		if issue.DueAt == nil {
-			t.Fatal("expected DueAt to be set")
-		}
-		expected := time.Now().Add(24 * time.Hour)
-		diff := issue.DueAt.Sub(expected)
-		if diff < -5*time.Minute || diff > 5*time.Minute {
-			t.Errorf("DueAt off by too much: got %v, expected ~%v", issue.DueAt, expected)
-		}
-	})
-
-	t.Run("defer_until", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "df")
-		issue := bdCreate(t, bd, dir, "Deferred issue", "--defer", "+2h")
-		if issue.DeferUntil == nil {
-			t.Fatal("expected DeferUntil to be set")
-		}
-		expected := time.Now().Add(2 * time.Hour)
-		diff := issue.DeferUntil.Sub(expected)
-		if diff < -5*time.Minute || diff > 5*time.Minute {
-			t.Errorf("DeferUntil off by too much: got %v, expected ~%v", issue.DeferUntil, expected)
-		}
-	})
-
-	t.Run("initial_status_builtin", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "sb")
-		issue := bdCreate(t, bd, dir, "Blocked issue", "--status", "blocked")
-		if issue.Status != types.StatusBlocked {
-			t.Errorf("status: got %q, want %q", issue.Status, types.StatusBlocked)
-		}
-	})
-
-	t.Run("initial_status_custom", func(t *testing.T) {
+	t.Run("scalar_create_journey", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "sc")
+
+		basic := bdCreate(t, bd, dir, "Basic JSON issue")
+		if basic.ID == "" || basic.Title != "Basic JSON issue" || basic.Status != types.StatusOpen || basic.Priority != 2 || basic.IssueType != types.TypeTask {
+			t.Fatalf("default JSON create = %+v", basic)
+		}
+		if issue := bdCreate(t, bd, dir, "--title", "Title via flag"); issue.Title != "Title via flag" {
+			t.Fatalf("title flag = %q", issue.Title)
+		}
+		if id := bdCreateSilent(t, bd, dir, "Silent issue"); id == "" || strings.Contains(id, "\n") {
+			t.Fatalf("silent output = %q, want exactly one ID", id)
+		}
+
+		full := bdCreate(t, bd, dir, "Full fields",
+			"--id", "sc-full", "-p", "1", "-t", "bug", "-d", "description", "--design", "design",
+			"--acceptance", "acceptance", "-a", "worker", "-l", "portfolio-scalar-a,portfolio-scalar-b",
+			"--due", "+24h", "--defer", "+2h", "-e", "60", "--notes", "notes", "--spec-id", "sc-spec",
+			"--external-ref", "gh-123", "--metadata", `{"key":"value"}`, "--skills", "Go,SQL", "--context", "embedded create")
+		if full.ID != "sc-full" || full.Priority != 1 || full.IssueType != types.TypeBug || full.Design != "design" || full.AcceptanceCriteria != "acceptance" || full.Assignee != "worker" || full.Notes != "notes" || full.SpecID != "sc-spec" || full.ExternalRef == nil || *full.ExternalRef != "gh-123" || full.EstimatedMinutes == nil || *full.EstimatedMinutes != 60 || full.DueAt == nil || full.DeferUntil == nil {
+			t.Fatalf("full-field create lost values: %+v", full)
+		}
+		for _, want := range []string{"description", "## Required Skills\nGo,SQL", "## Context\nembedded create"} {
+			if !strings.Contains(full.Description, want) {
+				t.Fatalf("full-field description = %q, missing %q", full.Description, want)
+			}
+		}
+		if delta := full.DueAt.Sub(time.Now().Add(24 * time.Hour)); delta < -5*time.Minute || delta > 5*time.Minute {
+			t.Fatalf("full-field due date = %v, want approximately +24h", full.DueAt)
+		}
+		var metadata map[string]any
+		if err := json.Unmarshal(full.Metadata, &metadata); err != nil || metadata["key"] != "value" {
+			t.Fatalf("full-field metadata = %q, err = %v", full.Metadata, err)
+		}
+
+		if issue := bdCreate(t, bd, dir, "Built-in status", "--status", "blocked"); issue.Status != types.StatusBlocked {
+			t.Fatalf("built-in status = %q, want %q", issue.Status, types.StatusBlocked)
+		}
 		bdConfig(t, bd, dir, "set", "status.custom", "review:wip")
-		issue := bdCreate(t, bd, dir, "Review issue", "--status", "review")
-		if issue.Status != types.Status("review") {
-			t.Errorf("status: got %q, want review", issue.Status)
+		if issue := bdCreate(t, bd, dir, "Custom status", "--status", "review"); issue.Status != types.Status("review") {
+			t.Fatalf("custom status = %q, want review", issue.Status)
+		}
+		if out := bdCreateFail(t, bd, dir, "Invalid status", "--status", "not_a_status"); !strings.Contains(out, `invalid status "not_a_status"`) {
+			t.Fatalf("invalid status output = %s", out)
+		}
+		if issue := bdCreate(t, bd, dir, "Status wins", "--status", "blocked", "--defer", "+2h"); issue.Status != types.StatusBlocked || issue.DeferUntil == nil {
+			t.Fatalf("status-over-defer = %+v", issue)
+		}
+		if out := bdCreateFail(t, bd, dir); !strings.Contains(out, "title") {
+			t.Fatalf("missing title output = %s", out)
 		}
 	})
 
-	t.Run("initial_status_invalid", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "si")
-		out := bdCreateFail(t, bd, dir, "Invalid status issue", "--status", "not_a_status")
-		if !strings.Contains(out, `invalid status "not_a_status"`) {
-			t.Fatalf("expected invalid status error, got:\n%s", out)
+	// GH#6035: create stored a bare JSON string/array/number as metadata,
+	// and update rejected the same value only late, in the storage merge.
+	t.Run("metadata_must_be_object_GH6035", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "mo")
+		const want = "invalid --metadata: must be a JSON object"
+		target := bdCreate(t, bd, dir, "Metadata target", "--metadata", `{"a":1}`)
+		var metadata map[string]any
+		if err := json.Unmarshal(target.Metadata, &metadata); err != nil || metadata["a"] != float64(1) {
+			t.Fatalf("object metadata = %q, err = %v", target.Metadata, err)
 		}
-	})
-
-	t.Run("initial_status_wins_over_defer", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "sd")
-		issue := bdCreate(t, bd, dir, "Deferred but blocked issue", "--status", "blocked", "--defer", "+2h")
-		if issue.Status != types.StatusBlocked {
-			t.Errorf("status: got %q, want %q", issue.Status, types.StatusBlocked)
-		}
-		if issue.DeferUntil == nil {
-			t.Fatal("expected DeferUntil to be set")
-		}
-	})
-
-	t.Run("ephemeral", func(t *testing.T) {
-		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ep")
-		issue := bdCreate(t, bd, dir, "Ephemeral issue", "--ephemeral")
-
-		// Verify it went to wisps table
-		dataDir := filepath.Join(beadsDir, "embeddeddolt")
-		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "ep", "main")
-		if err != nil {
-			t.Fatalf("OpenSQL: %v", err)
-		}
-		defer cleanup()
-
-		var count int
-		if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM wisps WHERE id = ?", issue.ID).Scan(&count); err != nil {
-			t.Fatalf("query wisps: %v", err)
-		}
-		if count != 1 {
-			t.Errorf("expected issue in wisps table, found %d rows", count)
-		}
-	})
-
-	t.Run("no_history", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "nh")
-		issue := bdCreate(t, bd, dir, "No history issue", "--no-history")
-		if issue.ID == "" {
-			t.Fatal("expected issue ID")
-		}
-	})
-
-	t.Run("graph_ephemeral", func(t *testing.T) {
-		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ge")
-		planFile := writeGraphCreatePlan(t, dir)
-		result := bdCreateGraph(t, bd, dir, planFile, "--ephemeral")
-		rootID := result.IDs["root"]
-		childID := result.IDs["child"]
-		if rootID == "" || childID == "" {
-			t.Fatalf("expected root and child IDs, got %#v", result.IDs)
-		}
-
-		dataDir := filepath.Join(beadsDir, "embeddeddolt")
-		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "ge", "main")
-		if err != nil {
-			t.Fatalf("OpenSQL: %v", err)
-		}
-		defer cleanup()
-
-		for _, id := range []string{rootID, childID} {
-			var ephemeral, noHistory int
-			if err := db.QueryRowContext(t.Context(), "SELECT ephemeral, no_history FROM wisps WHERE id = ?", id).Scan(&ephemeral, &noHistory); err != nil {
-				t.Fatalf("query graph ephemeral bead %s: %v", id, err)
+		for _, value := range []string{`"oops"`, `[1,2]`, `42`, `true`, `null`} {
+			if out := bdCreateFail(t, bd, dir, "Bad metadata", "--metadata", value); !strings.Contains(out, want) {
+				t.Fatalf("create --metadata %s output = %s, want %q", value, out, want)
 			}
-			if ephemeral != 1 || noHistory != 0 {
-				t.Fatalf("graph ephemeral bead %s flags = ephemeral:%d no_history:%d, want 1/0", id, ephemeral, noHistory)
+			if out := bdUpdateFail(t, bd, dir, target.ID, "--metadata", value); !strings.Contains(out, want) {
+				t.Fatalf("update --metadata %s output = %s, want %q", value, out, want)
 			}
 		}
-	})
-
-	t.Run("graph_no_history", func(t *testing.T) {
-		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gn")
-		planFile := writeGraphCreatePlan(t, dir)
-		result := bdCreateGraph(t, bd, dir, planFile, "--no-history")
-		rootID := result.IDs["root"]
-		childID := result.IDs["child"]
-		if rootID == "" || childID == "" {
-			t.Fatalf("expected root and child IDs, got %#v", result.IDs)
-		}
-
-		dataDir := filepath.Join(beadsDir, "embeddeddolt")
-		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "gn", "main")
-		if err != nil {
-			t.Fatalf("OpenSQL: %v", err)
-		}
-		defer cleanup()
-
-		for _, id := range []string{rootID, childID} {
-			var ephemeral, noHistory int
-			if err := db.QueryRowContext(t.Context(), "SELECT ephemeral, no_history FROM wisps WHERE id = ?", id).Scan(&ephemeral, &noHistory); err != nil {
-				t.Fatalf("query graph no-history bead %s: %v", id, err)
-			}
-			if ephemeral != 0 || noHistory != 1 {
-				t.Fatalf("graph no-history bead %s flags = ephemeral:%d no_history:%d, want 0/1", id, ephemeral, noHistory)
-			}
+		got := bdShow(t, bd, dir, target.ID)
+		var after map[string]any
+		if err := json.Unmarshal(got.Metadata, &after); err != nil || len(after) != 1 || after["a"] != float64(1) {
+			t.Fatalf("rejected updates changed metadata to %q, err = %v", got.Metadata, err)
 		}
 	})
 
-	t.Run("graph_full_fields", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "gff")
-		plan := `{
-			"nodes": [
-				{
-					"key": "main",
-					"id": "gff-a1b2c3",
-					"title": "Full-field node",
-					"type": "task",
-					"status": "in_progress",
-					"description": "desc",
-					"design": "the design",
-					"acceptance_criteria": "the criteria",
-					"notes": "the notes",
-					"spec_id": "gff-spec1",
-					"external_ref": "gh-42",
-					"assignee": "worker",
-					"owner": "owner@example.com",
-					"priority": 1,
-					"estimated_minutes": 45,
-					"due_at": "2030-01-02T15:04:05Z",
-					"labels": ["x", "y"],
-					"metadata": {"str": "v", "num": 3},
-					"mol_type": "swarm",
-					"pinned": true
-				},
-				{
-					"key": "deferred",
-					"title": "Deferred node",
-					"defer_until": "2030-01-01T00:00:00Z"
-				},
-				{
-					"key": "done",
-					"title": "Closed node",
-					"status": "closed"
-				},
-				{
-					"key": "evt",
-					"title": "Event node",
-					"type": "event",
-					"event_kind": "agent.started",
-					"actor": "agent://a",
-					"target": "bead://b",
-					"payload": "{\"k\":1}"
-				}
-			]
-		}`
-		planFile := filepath.Join(dir, "full-fields-plan.json")
-		if err := os.WriteFile(planFile, []byte(plan), 0o600); err != nil {
-			t.Fatalf("write graph plan: %v", err)
-		}
-		result := bdCreateGraph(t, bd, dir, planFile)
+	t.Run("relationships_and_parent_journey", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "rp")
+		blocker := bdCreate(t, bd, dir, "Blocker")
+		dependent := bdCreate(t, bd, dir, "Dependent", "--deps", "blocks:"+blocker.ID)
+		assertDepExists(t, beadsDir, "rp", blocker.ID, dependent.ID)
 
-		if result.IDs["main"] != "gff-a1b2c3" {
-			t.Errorf("explicit id: got %q, want gff-a1b2c3", result.IDs["main"])
-		}
-
-		issue := bdShow(t, bd, dir, result.IDs["main"])
-		if issue.Status != types.StatusInProgress {
-			t.Errorf("status: got %q, want in_progress", issue.Status)
-		}
-		if issue.Description != "desc" || issue.Design != "the design" || issue.AcceptanceCriteria != "the criteria" || issue.Notes != "the notes" {
-			t.Errorf("content fields lost: %+v", issue)
-		}
-		if issue.SpecID != "gff-spec1" {
-			t.Errorf("spec_id: got %q", issue.SpecID)
-		}
-		if issue.ExternalRef == nil || *issue.ExternalRef != "gh-42" {
-			t.Errorf("external_ref: got %v", issue.ExternalRef)
-		}
-		if issue.Assignee != "worker" {
-			t.Errorf("assignee: got %q", issue.Assignee)
-		}
-		if issue.Owner != "owner@example.com" {
-			t.Errorf("owner: got %q", issue.Owner)
-		}
-		if issue.Priority != 1 {
-			t.Errorf("priority: got %d, want 1", issue.Priority)
-		}
-		if issue.EstimatedMinutes == nil || *issue.EstimatedMinutes != 45 {
-			t.Errorf("estimated_minutes: got %v, want 45", issue.EstimatedMinutes)
-		}
-		if issue.DueAt == nil || issue.DueAt.Format("2006-01-02") != "2030-01-02" {
-			t.Errorf("due_at: got %v", issue.DueAt)
-		}
-		if issue.MolType != types.MolType("swarm") {
-			t.Errorf("mol_type: got %q", issue.MolType)
-		}
-		if !issue.Pinned {
-			t.Errorf("pinned not set")
-		}
-		var meta map[string]any
-		if err := json.Unmarshal(issue.Metadata, &meta); err != nil {
-			t.Fatalf("metadata not valid JSON: %v", err)
-		}
-		if meta["str"] != "v" || meta["num"] != float64(3) {
-			t.Errorf("metadata round-trip wrong (non-string values must survive): %v", meta)
-		}
-
-		deferred := bdShow(t, bd, dir, result.IDs["deferred"])
-		if deferred.Status != types.StatusDeferred {
-			t.Errorf("deferred status: got %q, want deferred", deferred.Status)
-		}
-		if deferred.DeferUntil == nil {
-			t.Errorf("defer_until lost")
-		}
-
-		done := bdShow(t, bd, dir, result.IDs["done"])
-		if done.Status != types.StatusClosed {
-			t.Errorf("closed status: got %q, want closed", done.Status)
-		}
-		if done.ClosedAt == nil {
-			t.Errorf("closed node missing auto-filled closed_at")
-		}
-
-		evt := bdShow(t, bd, dir, result.IDs["evt"])
-		if evt.EventKind != "agent.started" || evt.Actor != "agent://a" || evt.Target != "bead://b" || evt.Payload != `{"k":1}` {
-			t.Errorf("event fields lost: kind=%q actor=%q target=%q payload=%q", evt.EventKind, evt.Actor, evt.Target, evt.Payload)
-		}
-	})
-
-	t.Run("graph_waits_for_gate", func(t *testing.T) {
-		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gw")
-		plan := `{
-			"nodes": [
-				{"key": "gate", "title": "Fanout gate"},
-				{"key": "spawner", "title": "Spawner step"}
-			],
-			"edges": [
-				{"from_key": "gate", "to_key": "spawner", "type": "waits-for", "gate": "any-children", "spawner_key": "spawner"}
-			]
-		}`
-		planFile := filepath.Join(dir, "gate-plan.json")
-		if err := os.WriteFile(planFile, []byte(plan), 0o600); err != nil {
-			t.Fatalf("write graph plan: %v", err)
-		}
-		result := bdCreateGraph(t, bd, dir, planFile)
-		gateID := result.IDs["gate"]
-		spawnerID := result.IDs["spawner"]
-
-		dataDir := filepath.Join(beadsDir, "embeddeddolt")
-		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "gw", "main")
-		if err != nil {
-			t.Fatalf("OpenSQL: %v", err)
-		}
-		defer cleanup()
-
-		var metadata string
-		err = db.QueryRowContext(t.Context(),
-			"SELECT COALESCE(metadata, '') FROM dependencies WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ? AND type = 'waits-for'",
-			gateID, spawnerID).Scan(&metadata)
-		if err != nil {
-			t.Fatalf("query waits-for dep: %v", err)
-		}
-		var meta types.WaitsForMeta
-		if err := json.Unmarshal([]byte(metadata), &meta); err != nil {
-			t.Fatalf("dep metadata not WaitsForMeta JSON (%q): %v", metadata, err)
-		}
-		if meta.Gate != types.WaitsForAnyChildren {
-			t.Errorf("gate: got %q, want any-children", meta.Gate)
-		}
-		if meta.SpawnerID != spawnerID {
-			t.Errorf("spawner: got %q, want resolved key %q", meta.SpawnerID, spawnerID)
-		}
-	})
-
-	t.Run("graph_per_node_storage_class", func(t *testing.T) {
-		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gs")
-		plan := `{
-			"nodes": [
-				{"key": "durable", "title": "Durable node"},
-				{"key": "wisp", "title": "Wisp node", "ephemeral": true}
-			]
-		}`
-		planFile := filepath.Join(dir, "storage-plan.json")
-		if err := os.WriteFile(planFile, []byte(plan), 0o600); err != nil {
-			t.Fatalf("write graph plan: %v", err)
-		}
-		result := bdCreateGraph(t, bd, dir, planFile)
-
-		dataDir := filepath.Join(beadsDir, "embeddeddolt")
-		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "gs", "main")
-		if err != nil {
-			t.Fatalf("OpenSQL: %v", err)
-		}
-		defer cleanup()
-
-		var count int
-		if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM issues WHERE id = ?", result.IDs["durable"]).Scan(&count); err != nil {
-			t.Fatalf("query issues: %v", err)
-		}
-		if count != 1 {
-			t.Errorf("durable node not in issues table")
-		}
-		if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM wisps WHERE id = ?", result.IDs["wisp"]).Scan(&count); err != nil {
-			t.Fatalf("query wisps: %v", err)
-		}
-		if count != 1 {
-			t.Errorf("per-node ephemeral override not routed to wisps table")
-		}
-	})
-
-	t.Run("estimate", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "es")
-		issue := bdCreate(t, bd, dir, "Estimated issue", "-e", "60")
-		if issue.EstimatedMinutes == nil || *issue.EstimatedMinutes != 60 {
-			t.Errorf("estimate: got %v, want 60", issue.EstimatedMinutes)
-		}
-	})
-
-	t.Run("notes", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "nt")
-		issue := bdCreate(t, bd, dir, "Notes issue", "--notes", "Some notes here")
-		if issue.Notes != "Some notes here" {
-			t.Errorf("notes: got %q, want %q", issue.Notes, "Some notes here")
-		}
-	})
-
-	t.Run("spec_id", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "sp")
-		issue := bdCreate(t, bd, dir, "Spec issue", "--spec-id", "sp-spec1")
-		if issue.SpecID != "sp-spec1" {
-			t.Errorf("spec_id: got %q, want %q", issue.SpecID, "sp-spec1")
-		}
-	})
-
-	t.Run("external_ref", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "er")
-		issue := bdCreate(t, bd, dir, "External ref issue", "--external-ref", "gh-123")
-		if issue.ExternalRef == nil || *issue.ExternalRef != "gh-123" {
-			t.Errorf("external_ref: got %v, want %q", issue.ExternalRef, "gh-123")
-		}
-	})
-
-	t.Run("linear_external_ref", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "ler")
-		ref := "https://linear.app/team/issue/TEAM-123/fix-login"
-		issue := bdCreate(t, bd, dir, "Pre-linked Linear issue", "--external-ref", ref)
-		if issue.ExternalRef == nil || *issue.ExternalRef != ref {
-			t.Errorf("external_ref: got %v, want %q", issue.ExternalRef, ref)
-		}
-	})
-
-	t.Run("metadata", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "mt")
-		issue := bdCreate(t, bd, dir, "Metadata issue", "--metadata", `{"key":"value"}`)
-		if issue.Metadata == nil {
-			t.Fatal("expected metadata to be set")
-		}
-		var m map[string]interface{}
-		if err := json.Unmarshal(issue.Metadata, &m); err != nil {
-			t.Fatalf("failed to parse metadata: %v", err)
-		}
-		if v, ok := m["key"]; !ok || v != "value" {
-			t.Errorf("metadata: got %v, want key=value", m)
-		}
-	})
-
-	t.Run("dry_run", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "dr")
-
-		cmd := exec.Command(bd, "create", "--dry-run", "Dry run issue", "--json")
-		cmd.Dir = dir
-		cmd.Env = bdEnv(dir)
-		stdout, stderr, err := runCommandBuffers(t, cmd)
-		if err != nil {
-			t.Fatalf("bd create --dry-run failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
-		}
-
-		// Dry run should not persist anything. Create a real issue and verify
-		// the dry-run issue doesn't exist.
-		if strings.Contains(stdout.String(), "error") {
-			t.Errorf("dry-run produced error output: %s", stdout.String())
-		}
-	})
-
-	t.Run("dry_run_parent_label_inheritance", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "dp")
-		parent := bdCreate(t, bd, dir, "Parent with labels", "-t", "epic", "-l", "team-a,shared")
-
-		cmd := exec.Command(bd, "create", "--dry-run", "Preview child", "--json",
-			"--parent", parent.ID, "-l", "child,shared")
-		cmd.Dir = dir
-		cmd.Env = bdEnv(dir)
-		stdout, stderr, err := runCommandBuffers(t, cmd)
-		if err != nil {
-			t.Fatalf("bd create --dry-run --parent failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
-		}
-
-		preview := parseIssueJSON(t, stdout.Bytes())
-		labelMap := make(map[string]bool)
-		for _, label := range preview.Labels {
-			labelMap[label] = true
-		}
-		for _, want := range []string{"team-a", "shared", "child"} {
-			if !labelMap[want] {
-				t.Fatalf("dry-run labels = %v, want %q", preview.Labels, want)
-			}
-		}
-		if len(preview.Labels) != 3 {
-			t.Fatalf("dry-run labels = %v, want 3 deduped labels", preview.Labels)
-		}
-
-		child := bdCreate(t, bd, dir, "Real child after dry-run", "--parent", parent.ID)
+		parent := bdCreate(t, bd, dir, "Parent", "-t", "epic", "-l", "portfolio-parent,portfolio-shared")
+		child := bdCreate(t, bd, dir, "Child", "--parent", parent.ID, "-l", "portfolio-child,portfolio-shared")
 		if child.ID != parent.ID+".1" {
-			t.Fatalf("child ID after dry-run = %q, want %q", child.ID, parent.ID+".1")
+			t.Fatalf("child ID = %q, want %q", child.ID, parent.ID+".1")
+		}
+		assertDepExists(t, beadsDir, "rp", child.ID, parent.ID)
+
+		noInherit := bdCreate(t, bd, dir, "No inherited labels", "--parent", parent.ID, "--no-inherit-labels", "-l", "portfolio-own")
+		grandchild := bdCreate(t, bd, dir, "Grandchild", "--parent", child.ID)
+		if grandchild.ID != child.ID+".1" {
+			t.Fatalf("hierarchical child counter = %q, want %q", grandchild.ID, child.ID+".1")
+		}
+
+		store := openStore(t, beadsDir, "rp")
+		labels, err := store.GetLabels(t.Context(), child.ID)
+		if err != nil {
+			t.Fatalf("get child labels: %v", err)
+		}
+		wantLabels := map[string]bool{"portfolio-parent": true, "portfolio-shared": true, "portfolio-child": true}
+		if len(labels) != len(wantLabels) {
+			t.Fatalf("merged labels = %v, want three deduplicated labels", labels)
+		}
+		for _, label := range labels {
+			delete(wantLabels, label)
+		}
+		if len(wantLabels) != 0 {
+			t.Fatalf("missing merged labels: %v", wantLabels)
+		}
+
+		labels, err = store.GetLabels(t.Context(), noInherit.ID)
+		if err != nil {
+			t.Fatalf("get no-inherit labels: %v", err)
+		}
+		if len(labels) != 1 || labels[0] != "portfolio-own" {
+			t.Fatalf("no-inherit labels = %v, want [portfolio-own]", labels)
+		}
+
+		sourceParent := &types.Issue{
+			Title:      "Source repository parent",
+			Priority:   1,
+			Status:     types.StatusOpen,
+			IssueType:  types.TypeTask,
+			SourceRepo: "/path/to/repo",
+		}
+		if err := store.CreateIssue(t.Context(), sourceParent, "test"); err != nil {
+			t.Fatalf("create source repository parent: %v", err)
+		}
+		if err := store.Commit(t.Context(), "create source repository parent"); err != nil {
+			t.Fatalf("commit source repository parent: %v", err)
+		}
+		store.Close()
+
+		discovered := bdCreate(t, bd, dir, "Discovered work", "--deps", "discovered-from:"+sourceParent.ID)
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), "rp", "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		defer cleanup()
+		var sourceRepo string
+		if err := db.QueryRowContext(t.Context(), "SELECT COALESCE(source_repo, '') FROM issues WHERE id = ?", discovered.ID).Scan(&sourceRepo); err != nil {
+			t.Fatalf("query discovered source_repo: %v", err)
+		}
+		if sourceRepo != sourceParent.SourceRepo {
+			t.Fatalf("discovered source_repo = %q, want %q", sourceRepo, sourceParent.SourceRepo)
 		}
 	})
 
-	t.Run("skills_and_context", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "sc")
-		issue := bdCreate(t, bd, dir, "Skills issue",
-			"--skills", "Go, SQL",
-			"--context", "Working on embedded storage")
-		if !strings.Contains(issue.Description, "Go, SQL") {
-			t.Errorf("expected skills in description, got %q", issue.Description)
+	t.Run("storage_plane_journey", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "sp")
+		ephemeral := bdCreate(t, bd, dir, "Ephemeral", "--ephemeral")
+		noHistory := bdCreate(t, bd, dir, "No history", "--no-history")
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), "sp", "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
 		}
-		if !strings.Contains(issue.Description, "Working on embedded storage") {
-			t.Errorf("expected context in description, got %q", issue.Description)
+		defer cleanup()
+		for _, check := range []struct {
+			id                   string
+			ephemeral, noHistory int
+		}{{ephemeral.ID, 1, 0}, {noHistory.ID, 0, 1}} {
+			var gotEphemeral, gotNoHistory int
+			if err := db.QueryRowContext(t.Context(), "SELECT ephemeral, no_history FROM wisps WHERE id = ?", check.id).Scan(&gotEphemeral, &gotNoHistory); err != nil {
+				t.Fatalf("query wisp %s: %v", check.id, err)
+			}
+			if gotEphemeral != check.ephemeral || gotNoHistory != check.noHistory {
+				t.Fatalf("wisp %s flags = %d/%d, want %d/%d", check.id, gotEphemeral, gotNoHistory, check.ephemeral, check.noHistory)
+			}
+		}
+	})
+}
+
+// TestEmbeddedCreateGraphAndBulk was split from TestEmbeddedCreate
+// (originally ~266.68s, measured under --config=embedded) into 2 top-level
+// tests over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedCreateGraphAndBulk(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	t.Run("graph_create_journey", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gr")
+		plan := `{
+			"nodes": [
+				{"key":"main","id":"gr-a1b2c3","title":"Full-field node","type":"task","status":"in_progress","description":"desc","design":"the design","acceptance_criteria":"the criteria","notes":"the notes","spec_id":"gr-spec1","external_ref":"gh-42","assignee":"worker","owner":"owner@example.com","priority":1,"estimated_minutes":45,"due_at":"2030-01-02T15:04:05Z","labels":["portfolio-graph-a","portfolio-graph-b"],"metadata":{"str":"v","num":3},"mol_type":"swarm","storage_class":"unversioned","pinned":true},
+				{"key":"deferred","title":"Deferred node","defer_until":"2030-01-01T00:00:00Z"},
+				{"key":"done","title":"Closed node","status":"closed"},
+				{"key":"evt","title":"Event node","type":"event","event_kind":"agent.started","actor":"agent://a","target":"bead://b","payload":"{\"k\":1}"},
+				{"key":"wisp","title":"Wisp node","ephemeral":true},
+				{"key":"gate","title":"Fanout gate"},
+				{"key":"spawner","title":"Spawner step"}
+			],
+			"edges": [{"from_key":"gate","to_key":"spawner","type":"waits-for","gate":"any-children","spawner_key":"spawner"}]
+		}`
+		planFile := filepath.Join(dir, "compound-plan.json")
+		if err := os.WriteFile(planFile, []byte(plan), 0o600); err != nil {
+			t.Fatalf("write compound graph plan: %v", err)
+		}
+		result := bdCreateGraph(t, bd, dir, planFile)
+		if result.IDs["main"] != "gr-a1b2c3" || result.IDs["deferred"] == "" || result.IDs["done"] == "" || result.IDs["evt"] == "" || result.IDs["wisp"] == "" || result.IDs["gate"] == "" || result.IDs["spawner"] == "" {
+			t.Fatalf("compound graph IDs = %#v", result.IDs)
+		}
+		issue := bdShow(t, bd, dir, result.IDs["main"])
+		if issue.Status != types.StatusInProgress || issue.Description != "desc" || issue.Design != "the design" || issue.AcceptanceCriteria != "the criteria" || issue.Notes != "the notes" || issue.SpecID != "gr-spec1" || issue.ExternalRef == nil || *issue.ExternalRef != "gh-42" || issue.Assignee != "worker" || issue.Owner != "owner@example.com" || issue.Priority != 1 || issue.EstimatedMinutes == nil || *issue.EstimatedMinutes != 45 || issue.MolType != types.MolType("swarm") || issue.StorageClass != types.StorageClassUnversioned || !issue.Pinned {
+			t.Fatalf("compound graph full-field issue = %+v", issue)
+		}
+		if issue.DueAt == nil || issue.DueAt.UTC().Format(time.RFC3339) != "2030-01-02T15:04:05Z" {
+			t.Fatalf("compound graph due_at = %v, want 2030-01-02T15:04:05Z", issue.DueAt)
+		}
+		var metadata map[string]any
+		if err := json.Unmarshal(issue.Metadata, &metadata); err != nil || metadata["str"] != "v" || metadata["num"] != float64(3) {
+			t.Fatalf("compound graph metadata = %q, err = %v", issue.Metadata, err)
+		}
+		deferred := bdShow(t, bd, dir, result.IDs["deferred"])
+		if deferred.Status != types.StatusDeferred || deferred.DeferUntil == nil || deferred.DeferUntil.UTC().Format(time.RFC3339) != "2030-01-01T00:00:00Z" {
+			t.Fatalf("compound graph deferred node = %+v", deferred)
+		}
+		done := bdShow(t, bd, dir, result.IDs["done"])
+		if done.Status != types.StatusClosed || done.ClosedAt == nil {
+			t.Fatalf("compound graph closed node = %+v", done)
+		}
+		event := bdShow(t, bd, dir, result.IDs["evt"])
+		if event.EventKind != "agent.started" || event.Actor != "agent://a" || event.Target != "bead://b" || event.Payload != `{"k":1}` {
+			t.Fatalf("compound graph event fields: kind=%q actor=%q target=%q payload=%q", event.EventKind, event.Actor, event.Target, event.Payload)
+		}
+		planWide := make([]struct {
+			ids                          []string
+			wantEphemeral, wantNoHistory int
+		}, 0, 2)
+		for _, check := range []struct {
+			args                         []string
+			wantEphemeral, wantNoHistory int
+		}{{[]string{"--ephemeral"}, 1, 0}, {[]string{"--no-history"}, 0, 1}} {
+			planFile := writeGraphCreatePlan(t, dir)
+			journey := bdCreateGraph(t, bd, dir, planFile, check.args...)
+			planWide = append(planWide, struct {
+				ids                          []string
+				wantEphemeral, wantNoHistory int
+			}{[]string{journey.IDs["root"], journey.IDs["child"]}, check.wantEphemeral, check.wantNoHistory})
+		}
+
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), "gr", "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		defer cleanup()
+		var count int
+		if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM issues WHERE id = ?", result.IDs["main"]).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("durable graph node count = %d, err = %v", count, err)
+		}
+		if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM wisps WHERE id = ?", result.IDs["wisp"]).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("wisp graph node count = %d, err = %v", count, err)
+		}
+		var depMetadata string
+		if err := db.QueryRowContext(t.Context(), "SELECT COALESCE(metadata, '') FROM dependencies WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ? AND type = 'waits-for'", result.IDs["gate"], result.IDs["spawner"]).Scan(&depMetadata); err != nil {
+			t.Fatalf("query waits-for dependency: %v", err)
+		}
+		var waitsFor types.WaitsForMeta
+		if err := json.Unmarshal([]byte(depMetadata), &waitsFor); err != nil || waitsFor.Gate != types.WaitsForAnyChildren || waitsFor.SpawnerID != result.IDs["spawner"] {
+			t.Fatalf("waits-for metadata = %+v, raw = %q, err = %v", waitsFor, depMetadata, err)
+		}
+		if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM labels AS OF 'HEAD' WHERE issue_id = ?", result.IDs["main"]).Scan(&count); err != nil || count != 2 {
+			t.Fatalf("graph label count = %d, err = %v", count, err)
+		}
+		if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?", result.IDs["main"], types.EventLabelAdded).Scan(&count); err != nil || count != 2 {
+			t.Fatalf("graph label_added event count = %d, err = %v", count, err)
+		}
+
+		for _, check := range planWide {
+			for _, id := range check.ids {
+				var gotEphemeral, gotNoHistory int
+				if err := db.QueryRowContext(t.Context(), "SELECT ephemeral, no_history FROM wisps WHERE id = ?", id).Scan(&gotEphemeral, &gotNoHistory); err != nil {
+					t.Fatalf("query plan-wide graph wisp %s: %v", id, err)
+				}
+				if gotEphemeral != check.wantEphemeral || gotNoHistory != check.wantNoHistory {
+					t.Fatalf("plan-wide graph wisp %s flags = %d/%d, want %d/%d", id, gotEphemeral, gotNoHistory, check.wantEphemeral, check.wantNoHistory)
+				}
+			}
 		}
 	})
 
-	t.Run("discovered_from_dep", func(t *testing.T) {
-		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "di")
-
-		parent := bdCreate(t, bd, dir, "Parent work")
-		child := bdCreate(t, bd, dir, "Discovered bug",
-			"--deps", "discovered-from:"+parent.ID)
-
-		if child.ID == "" {
-			t.Fatal("expected child issue ID")
+	t.Run("dry_run_journey", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "dr")
+		parent := bdCreate(t, bd, dir, "Parent", "-t", "epic", "-l", "portfolio-preview-parent,portfolio-preview-shared")
+		type dryRunSnapshot struct {
+			head                                        string
+			issues, wisps, labels, dependencies, events int
 		}
-		// Verify discovered-from dependency was created (keeps original direction)
-		assertDepExists(t, beadsDir, "di", child.ID, parent.ID)
+		readSnapshot := func() dryRunSnapshot {
+			db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), "dr", "main")
+			if err != nil {
+				t.Fatalf("OpenSQL: %v", err)
+			}
+			defer func() {
+				if err := cleanup(); err != nil {
+					t.Errorf("cleanup dry-run snapshot: %v", err)
+				}
+			}()
+			var got dryRunSnapshot
+			if err := db.QueryRowContext(t.Context(), "SELECT HASHOF('HEAD')").Scan(&got.head); err != nil {
+				t.Fatalf("read dry-run HEAD: %v", err)
+			}
+			for _, query := range []struct {
+				table string
+				count *int
+			}{
+				{"issues", &got.issues},
+				{"wisps", &got.wisps},
+				{"labels", &got.labels},
+				{"dependencies", &got.dependencies},
+				{"events", &got.events},
+			} {
+				if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM "+query.table).Scan(query.count); err != nil {
+					t.Fatalf("count dry-run %s: %v", query.table, err)
+				}
+			}
+			return got
+		}
+		before := readSnapshot()
+		cmd := exec.Command(bd, "create", "--dry-run", "Preview child", "--json", "--parent", parent.ID, "-l", "portfolio-preview-child,portfolio-preview-shared")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("dry-run create: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		preview := parseIssueJSON(t, stdout.Bytes())
+		wantLabels := map[string]bool{"portfolio-preview-parent": true, "portfolio-preview-shared": true, "portfolio-preview-child": true}
+		for _, label := range preview.Labels {
+			delete(wantLabels, label)
+		}
+		if len(preview.Labels) != 3 || len(wantLabels) != 0 {
+			t.Fatalf("dry-run labels = %v, want three deduplicated labels", preview.Labels)
+		}
+		after := readSnapshot()
+		if after != before {
+			t.Fatalf("dry-run mutated embedded state: before=%+v after=%+v", before, after)
+		}
+		child := bdCreate(t, bd, dir, "Real child", "--parent", parent.ID)
+		if child.ID != parent.ID+".1" {
+			t.Fatalf("dry-run consumed child counter: got %q, want %q", child.ID, parent.ID+".1")
+		}
 	})
 
-	t.Run("markdown_bulk_create", func(t *testing.T) {
+	t.Run("markdown_bulk_journey", func(t *testing.T) {
 		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "mk")
-
-		mdContent := `## First issue
+		markdown := `## First issue
 
 ### Priority
 1
@@ -917,7 +564,7 @@ bug
 First bug description
 
 ### Labels
-urgent, backend
+portfolio-markdown-a, portfolio-markdown-b
 
 ## Second issue
 
@@ -930,185 +577,295 @@ feature
 ### Description
 A new feature
 `
-		mdFile := filepath.Join(dir, "issues.md")
-		if err := os.WriteFile(mdFile, []byte(mdContent), 0644); err != nil {
+		path := filepath.Join(dir, "issues.md")
+		if err := os.WriteFile(path, []byte(markdown), 0o600); err != nil {
 			t.Fatal(err)
 		}
-
-		cmd := exec.Command(bd, "create", "-f", mdFile, "--json")
+		cmd := exec.Command(bd, "create", "-f", path, "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
 		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd create -f failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+			t.Fatalf("markdown bulk create: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-
-		// Verify both issues were created
 		store := openStore(t, beadsDir, "mk")
 		stats, err := store.GetStatistics(t.Context())
-		if err != nil {
-			t.Fatalf("GetStatistics: %v", err)
-		}
-		if stats.TotalIssues < 2 {
-			t.Errorf("expected at least 2 issues from markdown, got %d", stats.TotalIssues)
+		if err != nil || stats.TotalIssues < 2 {
+			t.Fatalf("markdown bulk statistics = %+v, err = %v", stats, err)
 		}
 	})
+}
 
-	t.Run("graph_initial_labels_not_duplicated", func(t *testing.T) {
-		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gl")
-		plan := `{
-  "nodes": [
-    {"key": "root", "title": "Graph root", "type": "task", "labels": ["team-a", "shared"]}
-  ]
-}`
-		planFile := filepath.Join(dir, "graph-labels.json")
-		if err := os.WriteFile(planFile, []byte(plan), 0644); err != nil {
-			t.Fatal(err)
+// embeddedStoreSnapshot is the "did anything write to this database?"
+// tripwire the preview regression tests compare across a command run.
+type embeddedStoreSnapshot struct {
+	schemaVersion int
+	head          string
+	issueCount    int
+}
+
+func readEmbeddedStoreSnapshot(t *testing.T, beadsDir, database string) embeddedStoreSnapshot {
+	t.Helper()
+	db, cleanup, err := embeddeddolt.OpenSQL(
+		t.Context(),
+		filepath.Join(beadsDir, "embeddeddolt"),
+		database,
+		"main",
+	)
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer func() {
+		if err := cleanup(); err != nil {
+			t.Errorf("cleanup OpenSQL: %v", err)
 		}
+	}()
 
-		cmd := exec.Command(bd, "create", "--graph", planFile, "--json")
-		cmd.Dir = dir
-		cmd.Env = bdEnv(dir)
-		stdout, stderr, err := runCommandBuffers(t, cmd)
+	var got embeddedStoreSnapshot
+	if err := db.QueryRowContext(t.Context(),
+		"SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&got.schemaVersion); err != nil {
+		t.Fatalf("read schema version: %v", err)
+	}
+	if err := db.QueryRowContext(t.Context(), "SELECT HASHOF('HEAD')").Scan(&got.head); err != nil {
+		t.Fatalf("read HEAD: %v", err)
+	}
+	if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM issues").Scan(&got.issueCount); err != nil {
+		t.Fatalf("read issue count: %v", err)
+	}
+	return got
+}
+
+// regressEmbeddedSchemaCursor rolls the recorded migration cursor back one
+// version WITHOUT touching the physical schema. The latest migration is
+// idempotent, so a writable open reapplies it, restores the cursor, and
+// commits a new HEAD — which is exactly what makes the cursor a usable
+// tripwire. Keeping the physical schema intact lets the preview's own reads
+// still work against the older recorded version.
+func regressEmbeddedSchemaCursor(t *testing.T, beadsDir, database string) {
+	t.Helper()
+	db, cleanup, err := embeddeddolt.OpenSQL(
+		t.Context(),
+		filepath.Join(beadsDir, "embeddeddolt"),
+		database,
+		"main",
+	)
+	if err != nil {
+		t.Fatalf("OpenSQL for regression fixture: %v", err)
+	}
+	if _, err := db.ExecContext(t.Context(),
+		"DELETE FROM schema_migrations WHERE version = ?", schema.LatestVersion()); err != nil {
+		_ = cleanup()
+		t.Fatalf("regress schema cursor: %v", err)
+	}
+	if _, err := db.ExecContext(t.Context(),
+		"CALL DOLT_COMMIT('-am', 'test: regress schema before dry-run')"); err != nil {
+		_ = cleanup()
+		t.Fatalf("commit regressed schema cursor: %v", err)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatalf("cleanup regression fixture: %v", err)
+	}
+}
+
+func TestEmbeddedCreateDryRunDoesNotMigrate(t *testing.T) {
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "dnm")
+	bdCreate(t, bd, dir, "Existing issue")
+
+	readSnapshot := func() embeddedStoreSnapshot {
+		return readEmbeddedStoreSnapshot(t, beadsDir, "dnm")
+	}
+
+	regressEmbeddedSchemaCursor(t, beadsDir, "dnm")
+
+	// Force the version-bump path that previously opened a second writable
+	// store and migrated before create.RunE reached --dry-run handling.
+	if err := os.WriteFile(filepath.Join(beadsDir, localVersionFile), []byte("0.9.0\n"), 0o600); err != nil {
+		t.Fatalf("write old local version: %v", err)
+	}
+
+	before := readSnapshot()
+	if before.schemaVersion != schema.LatestVersion()-1 {
+		t.Fatalf("fixture schema version = %d, want %d", before.schemaVersion, schema.LatestVersion()-1)
+	}
+
+	cmd := exec.Command(bd, "create", "--dry-run", "Preview only", "--json")
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd create --dry-run failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	after := readSnapshot()
+	if after.schemaVersion != before.schemaVersion {
+		t.Errorf("schema version changed during dry-run: before=%d after=%d", before.schemaVersion, after.schemaVersion)
+	}
+	if after.head != before.head {
+		t.Errorf("Dolt HEAD changed during dry-run: before=%s after=%s", before.head, after.head)
+	}
+	if after.issueCount != before.issueCount {
+		t.Errorf("issue count changed during dry-run: before=%d after=%d", before.issueCount, after.issueCount)
+	}
+}
+
+// TestEmbeddedCreateDryRunCrossRepoDoesNotMigrateTarget covers the second
+// store a dry-run can reach: `create --dry-run --parent X --repo <other>`
+// resolves the parent against the OTHER repo, and openDryRunTargetStore used
+// to open it with the writable factory. The command's own store being opened
+// read-only says nothing about that one — the mutation lands in a repository
+// the user only named as a lookup target.
+func TestEmbeddedCreateDryRunCrossRepoDoesNotMigrateTarget(t *testing.T) {
+	bd := buildEmbeddedBD(t)
+	targetDir, targetBeadsDir, _ := bdInit(t, bd, "--prefix", "xtgt")
+	parent := bdCreate(t, bd, targetDir, "Parent in the target repo")
+	if parent.ID == "" {
+		t.Fatal("parent issue has no ID")
+	}
+
+	callerDir, callerBeadsDir, _ := bdInit(t, bd, "--prefix", "xsrc")
+
+	// The tripwire goes in the TARGET repo: only a writable open of that repo
+	// restores its cursor and commits.
+	regressEmbeddedSchemaCursor(t, targetBeadsDir, "xtgt")
+
+	// Force the version-bump path in the caller repo too, so this exercises
+	// the same post-upgrade window as the single-repo test.
+	if err := os.WriteFile(filepath.Join(callerBeadsDir, localVersionFile), []byte("0.9.0\n"), 0o600); err != nil {
+		t.Fatalf("write old local version: %v", err)
+	}
+
+	before := readEmbeddedStoreSnapshot(t, targetBeadsDir, "xtgt")
+	if before.schemaVersion != schema.LatestVersion()-1 {
+		t.Fatalf("fixture schema version = %d, want %d", before.schemaVersion, schema.LatestVersion()-1)
+	}
+
+	cmd := exec.Command(bd, "create", "--dry-run",
+		"--parent", parent.ID, "--repo", targetDir, "Preview only", "--json")
+	cmd.Dir = callerDir
+	cmd.Env = bdEnv(callerDir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd create --dry-run --parent --repo failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	after := readEmbeddedStoreSnapshot(t, targetBeadsDir, "xtgt")
+	if after.schemaVersion != before.schemaVersion {
+		t.Errorf("target repo schema version changed during cross-repo dry-run: before=%d after=%d", before.schemaVersion, after.schemaVersion)
+	}
+	if after.head != before.head {
+		t.Errorf("target repo Dolt HEAD changed during cross-repo dry-run: before=%s after=%s", before.head, after.head)
+	}
+	if after.issueCount != before.issueCount {
+		t.Errorf("target repo issue count changed during cross-repo dry-run: before=%d after=%d", before.issueCount, after.issueCount)
+	}
+}
+
+// TestEmbeddedPreviewDoesNotConsumeVersionMarker is the two-invocation
+// regression for the one-shot upgrade signal: a preview run first after an
+// upgrade correctly skips the version-bump reconciliation, so it must also
+// leave .beads/.local_version alone. Burning the marker there would mean the
+// next ordinary command sees a matching version and never reconciles —
+// whichever command happened to run first would silently decide whether the
+// upgrade was finished.
+func TestEmbeddedPreviewDoesNotConsumeVersionMarker(t *testing.T) {
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "pvm")
+	bdCreate(t, bd, dir, "Existing issue")
+
+	localVersionPath := filepath.Join(beadsDir, localVersionFile)
+	if err := os.WriteFile(localVersionPath, []byte("0.9.0\n"), 0o600); err != nil {
+		t.Fatalf("write old local version: %v", err)
+	}
+
+	// Invocation 1: preview.
+	preview := exec.Command(bd, "create", "--dry-run", "Preview only", "--json")
+	preview.Dir = dir
+	preview.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, preview)
+	if err != nil {
+		t.Fatalf("bd create --dry-run failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	raw, err := os.ReadFile(localVersionPath)
+	if err != nil {
+		t.Fatalf("read local version after preview: %v", err)
+	}
+	if got := strings.TrimSpace(string(raw)); got != "0.9.0" {
+		t.Fatalf("preview consumed the version marker: .local_version = %q, want %q", got, "0.9.0")
+	}
+
+	// Invocation 2: an ordinary command, which must still see the upgrade.
+	status := exec.Command(bd, "upgrade", "status", "--json")
+	status.Dir = dir
+	status.Env = bdEnv(dir)
+	stdout, stderr, err = runCommandBuffers(t, status)
+	if err != nil {
+		t.Fatalf("bd upgrade status failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	var upgradeStatus struct {
+		Upgraded        bool   `json:"upgraded"`
+		PreviousVersion string `json:"previous_version"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &upgradeStatus); err != nil {
+		t.Fatalf("parse upgrade status: %v\nstdout:\n%s", err, stdout.String())
+	}
+	if !upgradeStatus.Upgraded || upgradeStatus.PreviousVersion != "0.9.0" {
+		t.Errorf("ordinary command after a preview no longer sees the upgrade: upgraded=%v previous=%q; stdout:\n%s",
+			upgradeStatus.Upgraded, upgradeStatus.PreviousVersion, stdout.String())
+	}
+
+	raw, err = os.ReadFile(localVersionPath)
+	if err != nil {
+		t.Fatalf("read local version after ordinary command: %v", err)
+	}
+	if got := strings.TrimSpace(string(raw)); got == "0.9.0" {
+		t.Errorf("ordinary command left .local_version at %q; the marker should have been updated", got)
+	}
+}
+
+func TestEmbeddedChangeDirOverridesInheritedBeadsDir(t *testing.T) {
+	bd := buildEmbeddedBD(t)
+	callerDir, callerBeadsDir, _ := bdInit(t, bd, "--prefix", "caller")
+	targetDir, targetBeadsDir, _ := bdInit(t, bd, "--prefix", "target")
+
+	cmd := exec.Command(bd, "-C", targetDir, "create", "Explicit target", "--json")
+	cmd.Dir = callerDir
+	cmd.Env = append(bdEnv(callerDir), "BEADS_DIR="+callerBeadsDir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd -C target create failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	countIssues := func(beadsDir, database string) int {
+		t.Helper()
+		db, cleanup, err := embeddeddolt.OpenSQL(
+			t.Context(),
+			filepath.Join(beadsDir, "embeddeddolt"),
+			database,
+			"main",
+		)
 		if err != nil {
-			t.Fatalf("bd create --graph failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+			t.Fatalf("OpenSQL %s: %v", database, err)
 		}
-
-		var result GraphApplyResult
-		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-			t.Fatalf("parse graph result: %v\nstdout:\n%s", err, stdout.String())
-		}
-		id := result.IDs["root"]
-		if id == "" {
-			t.Fatalf("graph result missing root ID: %#v", result.IDs)
-		}
-
-		dataDir := filepath.Join(beadsDir, "embeddeddolt")
-		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "gl", "main")
-		if err != nil {
-			t.Fatalf("OpenSQL: %v", err)
-		}
-		defer cleanup()
-
-		var labelCount int
-		if err := db.QueryRowContext(t.Context(),
-			"SELECT COUNT(*) FROM labels AS OF 'HEAD' WHERE issue_id = ?", id).Scan(&labelCount); err != nil {
-			t.Fatalf("count labels: %v", err)
-		}
-		if labelCount != 2 {
-			t.Fatalf("label count = %d, want 2", labelCount)
-		}
-
-		var labelEventCount int
-		if err := db.QueryRowContext(t.Context(),
-			"SELECT COUNT(*) FROM events AS OF 'HEAD' WHERE issue_id = ? AND event_type = ?",
-			id, types.EventLabelAdded).Scan(&labelEventCount); err != nil {
-			t.Fatalf("count label events: %v", err)
-		}
-		if labelEventCount != 2 {
-			t.Fatalf("label_added event count = %d, want 2", labelEventCount)
-		}
-	})
-
-	t.Run("both_due_and_defer", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "bd2")
-		issue := bdCreate(t, bd, dir, "Both due and defer", "--due", "+48h", "--defer", "+24h")
-		if issue.DueAt == nil {
-			t.Fatal("expected DueAt to be set")
-		}
-		if issue.DeferUntil == nil {
-			t.Fatal("expected DeferUntil to be set")
-		}
-	})
-
-	t.Run("parent_label_inheritance_merge", func(t *testing.T) {
-		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "pm")
-		parent := bdCreate(t, bd, dir, "Parent with a,b", "-t", "epic", "-l", "a,b")
-		// Child with explicit label "c" and "a" (overlaps parent)
-		child := bdCreate(t, bd, dir, "Child with c,a", "--parent", parent.ID, "-l", "c,a")
-
-		store := openStore(t, beadsDir, "pm")
-		childLabels, err := store.GetLabels(t.Context(), child.ID)
-		if err != nil {
-			t.Fatalf("GetLabels: %v", err)
-		}
-		labelMap := make(map[string]bool)
-		for _, l := range childLabels {
-			labelMap[l] = true
-		}
-		// Should have a, b (inherited), c (explicit) — deduped
-		for _, want := range []string{"a", "b", "c"} {
-			if !labelMap[want] {
-				t.Errorf("expected label %q, got %v", want, childLabels)
+		defer func() {
+			if err := cleanup(); err != nil {
+				t.Errorf("cleanup OpenSQL %s: %v", database, err)
 			}
+		}()
+		var count int
+		if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM issues").Scan(&count); err != nil {
+			t.Fatalf("count issues in %s: %v", database, err)
 		}
-		if len(childLabels) != 3 {
-			t.Errorf("expected 3 labels, got %d: %v", len(childLabels), childLabels)
-		}
-	})
+		return count
+	}
 
-	t.Run("parent_no_labels", func(t *testing.T) {
-		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "pn")
-		parent := bdCreate(t, bd, dir, "Labelless parent", "-t", "epic")
-		child := bdCreate(t, bd, dir, "Child of labelless", "--parent", parent.ID)
-
-		store := openStore(t, beadsDir, "pn")
-		childLabels, err := store.GetLabels(t.Context(), child.ID)
-		if err != nil {
-			t.Fatalf("GetLabels: %v", err)
-		}
-		if len(childLabels) != 0 {
-			t.Errorf("expected 0 labels, got %d: %v", len(childLabels), childLabels)
-		}
-	})
-
-	t.Run("discovered_from_inherits_source_repo", func(t *testing.T) {
-		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "sr")
-
-		// Create parent with source_repo set via store API
-		store := openStore(t, beadsDir, "sr")
-		parent := &types.Issue{
-			Title:      "Parent with source repo",
-			Priority:   1,
-			Status:     types.StatusOpen,
-			IssueType:  types.TypeTask,
-			SourceRepo: "/path/to/repo",
-		}
-		if err := store.CreateIssue(t.Context(), parent, "test"); err != nil {
-			t.Fatalf("CreateIssue: %v", err)
-		}
-		if err := store.Commit(t.Context(), "create parent"); err != nil {
-			t.Fatalf("Commit: %v", err)
-		}
-		store.Close()
-
-		child := bdCreate(t, bd, dir, "Discovered bug", "--deps", "discovered-from:"+parent.ID)
-
-		// Verify via raw SQL since the JSON output may not include source_repo
-		dataDir := filepath.Join(beadsDir, "embeddeddolt")
-		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "sr", "main")
-		if err != nil {
-			t.Fatalf("OpenSQL: %v", err)
-		}
-		defer cleanup()
-		var sourceRepo string
-		err = db.QueryRowContext(t.Context(),
-			"SELECT COALESCE(source_repo, '') FROM issues WHERE id = ?", child.ID).Scan(&sourceRepo)
-		if err != nil {
-			t.Fatalf("query source_repo: %v", err)
-		}
-		if sourceRepo != "/path/to/repo" {
-			t.Errorf("source_repo: got %q, want %q", sourceRepo, "/path/to/repo")
-		}
-	})
-
-	t.Run("no_title_fails", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "nt2")
-		out := bdCreateFail(t, bd, dir)
-		if !strings.Contains(out, "title") {
-			t.Errorf("expected title-related error, got: %s", out)
-		}
-	})
+	if got := countIssues(callerBeadsDir, "caller"); got != 0 {
+		t.Fatalf("inherited BEADS_DIR received %d issues, want 0", got)
+	}
+	if got := countIssues(targetBeadsDir, "target"); got != 1 {
+		t.Fatalf("-C target received %d issues, want 1", got)
+	}
 }
 
 // TestEmbeddedCreateCommitPending verifies that CommitPending works on EmbeddedDoltStore:
@@ -1412,6 +1169,376 @@ func TestEmbeddedCreateCrossRepoUninit(t *testing.T) {
 	}
 }
 
+// writeServerModeWorkspace gives beadsDir the server-mode workspace gc
+// provisions (TestGCProvisionedServerWorkspaceNeverOpensPhantomEmbeddedDatabase):
+// config.yaml selecting dolt.mode server, the .beads/dolt root, the port file
+// and a current-era version witness, and no metadata.json. bd run there opens
+// its server database.
+func writeServerModeWorkspace(t *testing.T, beadsDir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	port := freeLoopbackPort(t)
+	for name, content := range map[string]string{
+		"config.yaml":      fmt.Sprintf("dolt:\n  mode: server\n  port: %d\n", port),
+		"dolt-server.port": fmt.Sprintf("%d\n", port),
+		localVersionFile:   "1.3.0\n",
+	} {
+		if err := os.WriteFile(filepath.Join(beadsDir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestEmbeddedCreateRepoMetadataLessTarget verifies that a routed bd create
+// into a target whose .beads has no metadata.json initializes it from what it
+// already holds: the metadata.json the create writes decides what bd opens
+// there from then on. A sole embedded database is adopted, as bd
+// migrate-personal adopts it, with no second database created beside it: it
+// keeps what it holds, its issue_prefix (given the source's when it has none,
+// as fork setup leaves it) and its project identity. One whose working set
+// holds uncommitted changes is refused, as migrate-personal refuses it, since
+// the create's commit would publish them. A target that bd run there would
+// open some other way is refused and left as it was: one whose own
+// config.yaml selects Dolt server mode (the shape gc provisions, or a
+// non-local dolt.host with no dolt.mode), with or without an embedded database
+// beside it, one holding several databases, and a SQLite-era one that bd's own
+// admission refuses. bd create --dry-run refuses each of those as well.
+func TestEmbeddedCreateRepoMetadataLessTarget(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	// kept is the target's own issue, under its own prefix and identity.
+	kept := &types.Issue{
+		ID:        "pl-kept",
+		Title:     "Planning issue already in the target's database",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		CreatedBy: "planner",
+	}
+	const keptProjectID = "metadata-less-target-project"
+	holdKept := func(s *embeddeddolt.EmbeddedDoltStore) error {
+		if err := s.SetConfig(t.Context(), "issue_prefix", "pl"); err != nil {
+			return err
+		}
+		if err := s.SetMetadata(t.Context(), "_project_id", keptProjectID); err != nil {
+			return err
+		}
+		return s.CreateIssue(t.Context(), kept, kept.CreatedBy)
+	}
+	// requireAdopted asserts the routed issue landed in the target's own
+	// "beads" database, the only one there, which metadata.json now names
+	// under wantProjectID ("" for any), and that the target's kept issue, when
+	// it holds one, is still what bd run in the target reads.
+	requireAdopted := func(t *testing.T, targetDir string, issue *types.Issue, wantPrefix, wantProjectID string, holdsKept bool) {
+		t.Helper()
+		beadsDir := filepath.Join(targetDir, ".beads")
+		if got := embeddeddolt.Databases(beadsDir); !slices.Equal(got, []string{"beads"}) {
+			t.Errorf("target databases = %v, want only the one it held, [beads]", got)
+		}
+		cfg, err := configfile.Load(beadsDir)
+		if err != nil || cfg == nil {
+			t.Fatalf("load target metadata.json: cfg = %v, err = %v", cfg, err)
+		}
+		if cfg.DoltDatabase != "beads" || cfg.DoltMode != configfile.DoltModeEmbedded {
+			t.Errorf("target metadata.json dolt_database = %q, dolt_mode = %q, want \"beads\", %q", cfg.DoltDatabase, cfg.DoltMode, configfile.DoltModeEmbedded)
+		}
+		if wantProjectID != "" && cfg.ProjectID != wantProjectID {
+			t.Errorf("target metadata.json project_id = %q, want the database's own _project_id %q", cfg.ProjectID, wantProjectID)
+		}
+		if !strings.HasPrefix(issue.ID, wantPrefix+"-") {
+			t.Errorf("routed issue ID = %q, want prefix %q", issue.ID, wantPrefix+"-")
+		}
+		assertIssueInStore(t, beadsDir, "beads", issue.ID)
+		if holdsKept {
+			if got := bdShow(t, bd, targetDir, kept.ID); got.Title != kept.Title {
+				t.Errorf("bd show %s in the target = %q, want %q", kept.ID, got.Title, kept.Title)
+			}
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		// fill, when set, fills the database fork setup created and commits it.
+		fill          func(s *embeddeddolt.EmbeddedDoltStore) error
+		wantPrefix    string
+		wantProjectID string
+	}{
+		// As setup leaves it: its creation left nothing uncommitted for
+		// refuseUncommittedTargetChanges to refuse.
+		{name: "adopts the fork setup database on an auto-routed create", wantPrefix: "rmf"},
+		{name: "adopts the fork setup database holding an issue on an auto-routed create", fill: holdKept, wantPrefix: "pl", wantProjectID: keptProjectID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			initGitRepoAt(t, dir)
+			for _, name := range []string{"origin", "upstream"} {
+				bare := filepath.Join(t.TempDir(), name+".git")
+				if out, err := gitCommand("init", "--bare", bare).CombinedOutput(); err != nil {
+					t.Fatalf("git init --bare %s: %v\n%s", bare, err, out)
+				}
+				cmd := gitCommand("remote", "add", name, bare)
+				cmd.Dir = dir
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("git remote add %s: %v\n%s", name, err, out)
+				}
+			}
+			// Fork setup: routing.contributor is ~/.beads-planning (HOME is
+			// dir), which gets a database and no metadata.json.
+			runBDInit(t, bd, dir, "--prefix", "rmf")
+			planningDir := filepath.Join(dir, ".beads-planning")
+			planningBeadsDir := filepath.Join(planningDir, ".beads")
+			if got := embeddeddolt.Databases(planningBeadsDir); !slices.Equal(got, []string{"beads"}) {
+				t.Fatalf("fork setup planning databases = %v, want [beads]", got)
+			}
+			if tc.fill != nil {
+				createForkSetupPlanningDatabase(t, planningBeadsDir, tc.fill)
+			}
+
+			issue := bdCreate(t, bd, dir, "Routed into the fork setup planning repo")
+			requireAdopted(t, planningDir, issue, tc.wantPrefix, tc.wantProjectID, tc.fill != nil)
+		})
+	}
+
+	// A database whose working set already holds a change is refused before
+	// anything is written: the create's commit would publish that change under
+	// its own message. Once the change is committed there, as the refusal
+	// says, the create adopts the database.
+	t.Run("refuses a database with uncommitted changes", func(t *testing.T) {
+		t.Parallel()
+		dir, _, _ := bdInit(t, bd, "--prefix", "rmu")
+		targetDir := t.TempDir()
+		initGitRepoAt(t, targetDir)
+		beadsDir := filepath.Join(targetDir, ".beads")
+		createForkSetupPlanningDatabase(t, beadsDir, nil)
+		const uncommittedProjectID = "uncommitted-target-project"
+		s, err := embeddeddolt.Open(t.Context(), beadsDir, "beads", "main")
+		if err != nil {
+			t.Fatalf("open the target database: %v", err)
+		}
+		err = s.SetMetadata(t.Context(), "_project_id", uncommittedProjectID)
+		if closeErr := s.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			t.Fatalf("leave a change uncommitted in the target database: %v", err)
+		}
+		commitsBefore, dirtyBefore := planningLogCountAndDirtyTables(t, beadsDir, "beads")
+		if len(dirtyBefore) == 0 {
+			t.Fatal("the target database has no uncommitted changes to refuse")
+		}
+
+		out := bdCreateFail(t, bd, dir, "--silent", "Routed into a target with uncommitted changes", "--repo", targetDir)
+		for _, want := range []string{
+			targetDir + " has no metadata.json and its database \"beads\" has uncommitted changes (",
+			"which bd create's commit would publish; commit them there with `bd dolt commit`, then rerun; nothing was created",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("bd create --repo output does not contain %q:\n%s", want, out)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(beadsDir, "metadata.json")); !os.IsNotExist(err) {
+			t.Errorf("target metadata.json written by a refused create: stat err = %v, want not exist", err)
+		}
+		// The adoption's own write (the source's issue_prefix) would show as
+		// another uncommitted table.
+		if commits, dirty := planningLogCountAndDirtyTables(t, beadsDir, "beads"); commits != commitsBefore || !slices.Equal(dirty, dirtyBefore) {
+			t.Errorf("target database after a refused create: %d commits, uncommitted %v; want unchanged %d, %v", commits, dirty, commitsBefore, dirtyBefore)
+		}
+
+		if out, err := bdRunWithFlockRetry(t, bd, targetDir, "dolt", "commit"); err != nil {
+			t.Fatalf("bd dolt commit in the target: %v\n%s", err, out)
+		}
+		issue := bdCreate(t, bd, dir, "Routed into the target after bd dolt commit", "--repo", targetDir)
+		requireAdopted(t, targetDir, issue, "rmu", uncommittedProjectID, false)
+	})
+
+	for _, tc := range []struct {
+		name          string
+		fill          func(s *embeddeddolt.EmbeddedDoltStore) error
+		wantPrefix    string
+		wantProjectID string
+	}{
+		{name: "adopts a database without a prefix", wantPrefix: "rmt"},
+		{name: "adopts a database holding an issue", fill: holdKept, wantPrefix: "pl", wantProjectID: keptProjectID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, _, _ := bdInit(t, bd, "--prefix", "rmt")
+			targetDir := t.TempDir()
+			initGitRepoAt(t, targetDir)
+			createForkSetupPlanningDatabase(t, filepath.Join(targetDir, ".beads"), tc.fill)
+
+			issue := bdCreate(t, bd, dir, "Routed into a metadata-less target", "--repo", targetDir)
+			requireAdopted(t, targetDir, issue, tc.wantPrefix, tc.wantProjectID, tc.fill != nil)
+		})
+	}
+
+	// db.example.com is quoted for this host's shell (TestShellQuotedFor).
+	quotedHost, ok := remedy.ShellQuotedFor(runtime.GOOS, "db.example.com")
+	if !ok {
+		t.Fatalf("remedy.ShellQuotedFor(%q, db.example.com) cannot quote it", runtime.GOOS)
+	}
+	for _, tc := range []struct {
+		name string
+		// setup shapes beadsDir, which exists and is empty.
+		setup func(t *testing.T, beadsDir string)
+		want  string
+		// wantStderr, when set, is the refusal's whole stderr, which exits 1.
+		wantStderr func(targetDir string) string
+	}{
+		{name: "refuses server mode selected by its config.yaml", setup: writeServerModeWorkspace, want: "selects Dolt server mode"},
+		{name: "refuses server mode beside an embedded database", want: "selects Dolt server mode", setup: func(t *testing.T, beadsDir string) {
+			writeServerModeWorkspace(t, beadsDir)
+			createForkSetupPlanningDatabase(t, beadsDir, nil)
+		}},
+		{name: "refuses server mode selected by a remote dolt.host", want: "selects Dolt server mode (dolt.host: \"db.example.com\"); not initializing it as an embedded workspace, which would hide its server data. Run: bd init --server --server-host " + quotedHost + " --server-port 3307 --database <name> there", setup: func(t *testing.T, beadsDir string) {
+			// The port file a local server left is not the remote host's
+			// port, so the remedy names the one config.yaml does.
+			for name, content := range map[string]string{
+				"config.yaml":      "dolt:\n  host: db.example.com\n  port: 3307\n",
+				"dolt-server.port": "45678\n",
+			} {
+				if err := os.WriteFile(filepath.Join(beadsDir, name), []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}},
+		{name: "refuses several databases", want: "holds several databases (beads, other)", setup: func(t *testing.T, beadsDir string) {
+			createForkSetupPlanningDatabase(t, beadsDir, nil)
+			s, err := embeddeddolt.Open(t.Context(), beadsDir, "other", "main")
+			if err != nil {
+				t.Fatalf("create a second target database: %v", err)
+			}
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "refuses a sqlite-era repo", want: "historical SQLite workspace", setup: func(t *testing.T, beadsDir string) {
+			if err := os.WriteFile(filepath.Join(beadsDir, "config.json"), []byte(`{"database":"beads.db"}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			db := append([]byte("SQLite format 3\x00"), make([]byte, 4080)...)
+			if err := os.WriteFile(filepath.Join(beadsDir, "beads.db"), db, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, wantStderr: func(targetDir string) string {
+			// bd's own admission refusal, naming the target, with no
+			// "failed to initialize" prefix.
+			return "Error: target repo " + targetDir + ": " + legacyUpgradeRefusal("historical SQLite workspace").Error() + "\n"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, _, _ := bdInit(t, bd, "--prefix", "rms")
+			targetDir := t.TempDir()
+			initGitRepoAt(t, targetDir)
+			beadsDir := filepath.Join(targetDir, ".beads")
+			if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			tc.setup(t, beadsDir)
+			before := planningDirListing(t, beadsDir)
+
+			// The dry-run preview refuses what the create it previews refuses.
+			for _, mode := range []string{"--dry-run", "--silent"} {
+				cmd := exec.Command(bd, "create", mode, "Routed into a target it must not initialize", "--repo", targetDir)
+				cmd.Dir = dir
+				cmd.Env = bdEnv(dir)
+				stdout, stderr, err := runCommandBuffers(t, cmd)
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) {
+					t.Fatalf("bd create %s --repo %s = %v, want a refusal\nstdout:\n%s\nstderr:\n%s", mode, targetDir, err, stdout.String(), stderr.String())
+				}
+				if !strings.Contains(stderr.String(), tc.want) {
+					t.Errorf("bd create %s --repo stderr does not contain %q:\n%s", mode, tc.want, stderr.String())
+				}
+				if tc.wantStderr != nil {
+					if want := tc.wantStderr(targetDir); stderr.String() != want || exitErr.ExitCode() != 1 {
+						t.Errorf("bd create %s --repo exit %d, stderr:\n%s\nwant exit 1, stderr exactly:\n%s", mode, exitErr.ExitCode(), stderr.String(), want)
+					}
+				}
+				if after := planningDirListing(t, beadsDir); !slices.Equal(after, before) {
+					t.Errorf("target .beads after a refused create %s = %v, want unchanged %v", mode, after, before)
+				}
+			}
+		})
+	}
+}
+
+// TestEmbeddedCreateRepoRelativeUninitRefused is a regression test for
+// bd-8d3f: a bare/relative --repo value with no existing workspace resolves
+// silently against the current working directory (routing.ExpandPath has no
+// concept of an external rig/alias registry), so it must be refused instead
+// of auto-creating a disconnected database that the caller never intended
+// and nothing else will ever route to. Contrast with
+// TestEmbeddedCreateCrossRepoUninit, which uses an absolute --repo path and
+// must still succeed.
+func TestEmbeddedCreateRepoRelativeUninitRefused(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "src")
+
+	relTarget := "some-other-rig"
+	out, err := bdRunWithFlockRetry(t, bd, dir, "create", "--json", "Should not land anywhere", "--repo", relTarget)
+	if err == nil {
+		t.Fatalf("expected bd create --repo %q to fail for an uninitialized relative target, got success: %s", relTarget, out)
+	}
+	if !strings.Contains(string(out), "absolute") {
+		t.Errorf("expected error to explain the absolute/~-prefixed path requirement, got: %s", out)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(dir, relTarget, ".beads")); !os.IsNotExist(statErr) {
+		t.Errorf("expected no .beads directory to be fabricated at %s, stat err = %v", filepath.Join(dir, relTarget), statErr)
+	}
+}
+
+// TestEmbeddedCreateRepoRelativeExistingWorkspaceUnaffected verifies the
+// bd-8d3f gate only blocks *fabricating* a new workspace: a relative --repo
+// value that already has an initialized workspace at the resolved path must
+// keep working exactly as before, since ensureBeadsDirForPath's existing
+// os.Stat(metadata.json) check returns early before the new gate runs.
+func TestEmbeddedCreateRepoRelativeExistingWorkspaceUnaffected(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "src")
+
+	relTarget := "already-initialized-sibling"
+	absTarget := filepath.Join(dir, relTarget)
+	if err := os.MkdirAll(absTarget, 0750); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepoAt(t, absTarget)
+
+	// Initialize the target workspace first via an absolute --repo path
+	// (the already-covered, unambiguous case).
+	first := bdCreate(t, bd, dir, "Seed issue", "--repo", absTarget)
+	if first.ID == "" {
+		t.Fatal("expected issue ID for absolute --repo seed create")
+	}
+
+	// A relative --repo pointing at that SAME, now-initialized workspace
+	// must succeed unaffected by the bd-8d3f gate: the gate only blocks
+	// fabricating a workspace that doesn't exist yet.
+	second := bdCreate(t, bd, dir, "Should land in the pre-existing workspace", "--repo", relTarget)
+	if second.ID == "" {
+		t.Fatal("expected issue ID for relative --repo pointing at an existing workspace")
+	}
+}
+
 // TestEmbeddedCreateWithGitRemote verifies bd create works end-to-end when a
 // git remote exists (which enables auto-backup in PersistentPostRun). This
 // catches panics from unimplemented methods called after the create succeeds.
@@ -1425,7 +1552,7 @@ func TestEmbeddedCreateWithGitRemote(t *testing.T) {
 	dir, _, _ := bdInit(t, bd, "--prefix", "gr")
 
 	// Add a fake git remote so isBackupAutoEnabled returns true
-	cmd := exec.Command("git", "remote", "add", "origin", "https://example.com/fake.git")
+	cmd := gitCommand("remote", "add", "origin", "https://example.com/fake.git")
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git remote add failed: %v\n%s", err, out)
@@ -1438,8 +1565,8 @@ func TestEmbeddedCreateWithGitRemote(t *testing.T) {
 	}
 }
 
-// TestEmbeddedCreateConcurrent verifies that 20 concurrent bd create processes
-// can each create 10 issues without data loss or corruption.
+// TestEmbeddedCreateConcurrent verifies one contended create from each of six
+// CLI processes, then proves every requested issue was durably created.
 func TestEmbeddedCreateConcurrent(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
@@ -1449,81 +1576,112 @@ func TestEmbeddedCreateConcurrent(t *testing.T) {
 	bd := buildEmbeddedBD(t)
 	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "cc")
 
-	const (
-		numWorkers      = 20
-		issuesPerWorker = 10
-	)
+	// Six first attempts plus at most one serial retry per lock loser keeps the
+	// create-process budget at twelve.
+	const numWorkers = 6
 
 	type result struct {
-		worker int
-		ids    []string
-		err    error
+		title string
+		out   string
+		err   error
 	}
 
 	results := make([]result, numWorkers)
+	ready := make(chan struct{}, numWorkers)
+	start := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(numWorkers)
 
 	for w := 0; w < numWorkers; w++ {
 		go func(worker int) {
 			defer wg.Done()
-			var ids []string
-			for i := 0; i < issuesPerWorker; i++ {
-				title := fmt.Sprintf("worker-%d-issue-%d", worker, i)
-				out, err := bdRunWithFlockRetry(t, bd, dir, "create", "--silent", title)
-				if err != nil {
-					results[worker] = result{worker: worker, err: fmt.Errorf("issue %d: %v\n%s", i, err, out)}
-					return
-				}
-				id := strings.TrimSpace(string(out))
-				if id == "" {
-					results[worker] = result{worker: worker, err: fmt.Errorf("issue %d: empty ID", i)}
-					return
-				}
-				ids = append(ids, id)
-			}
-			results[worker] = result{worker: worker, ids: ids}
+			title := fmt.Sprintf("concurrent-create-%d", worker)
+			ready <- struct{}{}
+			<-start
+
+			cmd := exec.Command(bd, "create", "--silent", title)
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			out, err := cmd.CombinedOutput()
+			results[worker] = result{title: title, out: string(out), err: err}
 		}(w)
 	}
+	for range numWorkers {
+		<-ready
+	}
+	close(start)
 	wg.Wait()
 
-	// Collect all IDs and check for errors
-	allIDs := make(map[string]bool)
-	var failures int
+	expected := make(map[string]string, numWorkers)
+	lockLosers := make([]result, 0, numWorkers)
+	immediateSuccesses := 0
+	recordSuccess := func(title, out string) {
+		t.Helper()
+		id := strings.TrimSpace(out)
+		if id == "" {
+			t.Fatalf("create %q succeeded without an issue ID", title)
+		}
+		if previousTitle, exists := expected[id]; exists {
+			t.Fatalf("create %q returned duplicate ID %q already returned for %q", title, id, previousTitle)
+		}
+		expected[id] = title
+	}
+
 	for _, r := range results {
-		if r.err != nil {
-			if !strings.Contains(r.err.Error(), "one writer at a time") {
-				t.Errorf("worker %d failed: %v", r.worker, r.err)
-			}
-			failures++
+		if r.err == nil {
+			recordSuccess(r.title, r.out)
+			immediateSuccesses++
 			continue
 		}
-		for _, id := range r.ids {
-			if allIDs[id] {
-				t.Errorf("duplicate ID %q from worker %d", id, r.worker)
-			}
-			allIDs[id] = true
+		if strings.Contains(r.out, "panic") {
+			t.Fatalf("first create %q panicked:\n%s", r.title, r.out)
+		}
+		if isEmbeddedLockOutput(r.out) {
+			lockLosers = append(lockLosers, r)
+			continue
+		}
+		t.Fatalf("first create %q failed unexpectedly: %v\n%s", r.title, r.err, r.out)
+	}
+	if immediateSuccesses == 0 {
+		t.Fatal("expected at least one immediate create success")
+	}
+
+	// Retry only the lock losers, once each, after concurrent contention ends.
+	for _, r := range lockLosers {
+		cmd := exec.Command(bd, "create", "--silent", r.title)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("retry create %q failed: %v\n%s", r.title, err, out)
+		}
+		recordSuccess(r.title, string(out))
+	}
+
+	if len(expected) != numWorkers {
+		t.Fatalf("got %d unique issue IDs, want %d", len(expected), numWorkers)
+	}
+
+	// Read the durable store directly: a CLI list would duplicate a read path
+	// rather than prove an additional risk here.
+	store := openStore(t, beadsDir, "cc")
+	issues, err := store.SearchIssues(t.Context(), "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssues durable readback: %v", err)
+	}
+	got := make(map[string]string, len(issues))
+	for _, issue := range issues {
+		if previousTitle, exists := got[issue.ID]; exists {
+			t.Fatalf("durable readback contains duplicate ID %q for %q and %q", issue.ID, previousTitle, issue.Title)
+		}
+		got[issue.ID] = issue.Title
+	}
+	if len(got) != len(expected) {
+		t.Fatalf("durable issue count = %d, want exactly %d; got ID-title pairs %#v", len(got), len(expected), got)
+	}
+	for id, wantTitle := range expected {
+		if gotTitle, exists := got[id]; !exists || gotTitle != wantTitle {
+			t.Errorf("durable issue %q title = %q, want %q", id, gotTitle, wantTitle)
 		}
 	}
-
-	successes := numWorkers - failures
-	if successes < 1 {
-		t.Fatalf("expected at least 1 successful worker, got %d", successes)
-	}
-
-	if len(allIDs) < 1 {
-		t.Errorf("expected at least 1 unique ID, got %d", len(allIDs))
-	}
-
-	// Verify all successfully created issues exist in the database
-	store := openStore(t, beadsDir, "cc")
-	stats, err := store.GetStatistics(t.Context())
-	if err != nil {
-		t.Fatalf("GetStatistics: %v", err)
-	}
-	if stats.TotalIssues < len(allIDs) {
-		t.Errorf("expected at least %d issues in DB, got %d", len(allIDs), stats.TotalIssues)
-	}
-
-	t.Logf("created %d issues across %d concurrent workers (%d succeeded), %d in DB", len(allIDs), numWorkers, successes, stats.TotalIssues)
 }

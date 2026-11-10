@@ -371,7 +371,7 @@ func runCreateForm(cmd *cobra.Command) error {
 	fv := parseCreateFormInput(raw)
 	fv.ParentID = parentID
 
-	issue, err := CreateIssueFromFormValues(rootCtx, store, fv, actor)
+	issue, err := CreateIssueFromFormValues(rootCtx, store, fv, currentActor())
 	if err != nil {
 		return HandleError("%v", err)
 	}

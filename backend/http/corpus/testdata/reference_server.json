@@ -1,0 +1,595 @@
+{
+ "comment": [
+  "The reference server profile the corpus suite masks the in-process server to.",
+  "It is the wire surface of a deployed bd 1.3.0 `bd serve` that predates wire_revision:",
+  "capabilities is that server's advertised ContextResponse.capabilities (read off a live GET /v0/beads/context),",
+  "context_members is its ContextResponse property set, and operations are the method, path template,",
+  "query parameter names and top-level JSON request members of its published OpenAPI document (MIT).",
+  "Regenerate by hand when the reference deployment is upgraded; see README.md."
+ ],
+ "capabilities": [
+  "config.get",
+  "config.list",
+  "config.set",
+  "config.unset",
+  "dependencies.add",
+  "dependencies.blocking",
+  "dependencies.count",
+  "dependencies.cycles",
+  "dependencies.list",
+  "dependencies.remove",
+  "dependencies.tree",
+  "events.list",
+  "events.watch",
+  "issues.addComment",
+  "issues.batchApply",
+  "issues.batchClose",
+  "issues.batchCreate",
+  "issues.casMetadata",
+  "issues.claim",
+  "issues.claimNext",
+  "issues.close",
+  "issues.count",
+  "issues.create",
+  "issues.delete",
+  "issues.get",
+  "issues.list",
+  "issues.list.sort",
+  "issues.query",
+  "issues.related",
+  "issues.release",
+  "issues.reopen",
+  "issues.sweep",
+  "issues.update",
+  "memories.forget",
+  "memories.get",
+  "memories.list",
+  "memories.remember",
+  "policy.external_dependencies",
+  "project.enforce",
+  "ready.count",
+  "ready.list",
+  "stats.get"
+ ],
+ "context_members": [
+  "api_version",
+  "backend",
+  "bd_version",
+  "beads_dir",
+  "capabilities",
+  "database",
+  "dolt_mode",
+  "project_id",
+  "repo_root",
+  "schema_version"
+ ],
+ "operations": [
+  {
+   "method": "GET",
+   "path": "/healthz",
+   "operation_id": "health",
+   "query": [],
+   "body": []
+  },
+  {
+   "method": "GET",
+   "path": "/v0/beads/config",
+   "operation_id": "listSettings",
+   "query": [],
+   "body": []
+  },
+  {
+   "method": "DELETE",
+   "path": "/v0/beads/config/{key}",
+   "operation_id": "unsetSetting",
+   "query": [],
+   "body": []
+  },
+  {
+   "method": "GET",
+   "path": "/v0/beads/config/{key}",
+   "operation_id": "getSetting",
+   "query": [],
+   "body": []
+  },
+  {
+   "method": "PUT",
+   "path": "/v0/beads/config/{key}",
+   "operation_id": "setSetting",
+   "query": [],
+   "body": [
+    "value"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/v0/beads/context",
+   "operation_id": "getContext",
+   "query": [],
+   "body": []
+  },
+  {
+   "method": "GET",
+   "path": "/v0/beads/dependencies",
+   "operation_id": "listDependencies",
+   "query": [
+    "issue_id",
+    "type"
+   ],
+   "body": []
+  },
+  {
+   "method": "GET",
+   "path": "/v0/beads/dependencies/blocking",
+   "operation_id": "listBlockingAnnotations",
+   "query": [
+    "issue_id"
+   ],
+   "body": []
+  },
+  {
+   "method": "GET",
+   "path": "/v0/beads/dependencies/cycles",
+   "operation_id": "listDependencyCycles",
+   "query": [],
+   "body": []
+  },
+  {
+   "method": "GET",
+   "path": "/v0/beads/dependencies/tree",
+   "operation_id": "getDependencyTree",
+   "query": [
+    "direction",
+    "max_depth",
+    "root_id",
+    "status"
+   ],
+   "body": []
+  },
+  {
+   "method": "POST",
+   "path": "/v0/beads/dependencies:add",
+   "operation_id": "addDependencies",
+   "query": [],
+   "body": [
+    "actor",
+    "edges"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/v0/beads/dependencies:count",
+   "operation_id": "countDependencyEdges",
+   "query": [
+    "direction",
+    "issue_id",
+    "status",
+    "type"
+   ],
+   "body": []
+  },
+  {
+   "method": "POST",
+   "path": "/v0/beads/dependencies:remove",
+   "operation_id": "removeDependency",
+   "query": [],
+   "body": [
+    "actor",
+    "depends_on_id",
+    "issue_id"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/v0/beads/events",
+   "operation_id": "listEvents",
+   "query": [
+    "limit",
+    "since"
+   ],
+   "body": []
+  },
+  {
+   "method": "GET",
+   "path": "/v0/beads/events:watch",
+   "operation_id": "watchEvents",
+   "query": [
+    "since"
+   ],
+   "body": []
+  },
+  {
+   "method": "GET",
+   "path": "/v0/beads/issues",
+   "operation_id": "listIssues",
+   "query": [
+    "all",
+    "assignee",
+    "brief",
+    "created_after",
+    "created_before",
+    "cursor",
+    "exclude_label",
+    "has_metadata_key",
+    "include_ephemeral",
+    "include_gates",
+    "include_infra",
+    "include_templates",
+    "label",
+    "label_any",
+    "limit",
+    "metadata_field",
+    "parent",
+    "reverse",
+    "sort",
+    "status",
+    "type"
+   ],
+   "body": []
+  },
+  {
+   "method": "POST",
+   "path": "/v0/beads/issues",
+   "operation_id": "createIssue",
+   "query": [],
+   "body": [
+    "acceptance_criteria",
+    "actor",
+    "assignee",
+    "defer_until",
+    "dependencies",
+    "description",
+    "design",
+    "due_at",
+    "ephemeral",
+    "estimated_minutes",
+    "external_ref",
+    "force_id_prefix",
+    "id",
+    "inherit_labels_from_parent",
+    "issue_type",
+    "labels",
+    "metadata",
+    "no_history",
+    "notes",
+    "owner",
+    "parent_id",
+    "priority",
+    "sender",
+    "status",
+    "title",
+    "waits_for"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/v0/beads/issues/{id}",
+   "operation_id": "getIssue",
+   "query": [
+    "brief_deps",
+    "include_comments",
+    "include_dependents"
+   ],
+   "body": []
+  },
+  {
+   "method": "PATCH",
+   "path": "/v0/beads/issues/{id}",
+   "operation_id": "updateIssue",
+   "query": [],
+   "body": [
+    "actor",
+    "expected_assignee",
+    "expected_status",
+    "expected_version",
+    "force_assignee_transfer",
+    "force_close_policy",
+    "patch"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/v0/beads/issues/{id}/comments",
+   "operation_id": "addComment",
+   "query": [],
+   "body": [
+    "author",
+    "text"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/v0/beads/issues/{id}/related",
+   "operation_id": "listRelatedIssues",
+   "query": [
+    "direction",
+    "type"
+   ],
+   "body": []
+  },
+  {
+   "method": "POST",
+   "path": "/v0/beads/issues/{id}:casMetadata",
+   "operation_id": "compareAndSetMetadata",
+   "query": [],
+   "body": [
+    "actor",
+    "expected",
+    "key",
+    "value"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/v0/beads/issues/{id}:claim",
+   "operation_id": "claimIssue",
+   "query": [],
+   "body": [
+    "actor"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/v0/beads/issues/{id}:close",
+   "operation_id": "closeIssue",
+   "query": [],
+   "body": [
+    "actor",
+    "expected_version",
+    "force",
+    "reason",
+    "session"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/v0/beads/issues/{id}:release",
+   "operation_id": "releaseIssue",
+   "query": [],
+   "body": [
+    "actor",
+    "expected_assignee",
+    "force"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/v0/beads/issues/{id}:reopen",
+   "operation_id": "reopenIssue",
+   "query": [],
+   "body": [
+    "actor",
+    "expected_version",
+    "reason"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/v0/beads/issues:batchApply",
+   "operation_id": "applyBatch",
+   "query": [],
+   "body": [
+    "actor",
+    "force_id_prefix",
+    "items",
+    "provenance",
+    "skip_per_edge_cycle_check"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/v0/beads/issues:batchClose",
+   "operation_id": "batchCloseIssues",
+   "query": [],
+   "body": [
+    "actor",
+    "claim_next",
+    "force",
+    "items",
+    "session"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/v0/beads/issues:batchCreate",
+   "operation_id": "batchCreateIssues",
+   "query": [],
+   "body": [
+    "actor",
+    "items"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/v0/beads/issues:claimNext",
+   "operation_id": "claimNextIssue",
+   "query": [
+    "assignee",
+    "exclude_label",
+    "exclude_type",
+    "has_metadata_key",
+    "include_deferred",
+    "include_ephemeral",
+    "label",
+    "label_any",
+    "label_pattern",
+    "label_regex",
+    "metadata_field",
+    "parent",
+    "priority",
+    "sort",
+    "type",
+    "unassigned"
+   ],
+   "body": [
+    "actor"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/v0/beads/issues:count",
+   "operation_id": "countIssues",
+   "query": [
+    "assignee",
+    "closed_after",
+    "closed_before",
+    "created_after",
+    "created_before",
+    "desc_contains",
+    "empty_description",
+    "group_by",
+    "id",
+    "include_infra",
+    "label",
+    "label_any",
+    "metadata_field",
+    "no_assignee",
+    "no_labels",
+    "notes_contains",
+    "priority",
+    "priority_max",
+    "priority_min",
+    "status",
+    "title",
+    "title_contains",
+    "type",
+    "updated_after",
+    "updated_before"
+   ],
+   "body": []
+  },
+  {
+   "method": "POST",
+   "path": "/v0/beads/issues:delete",
+   "operation_id": "deleteIssues",
+   "query": [],
+   "body": [
+    "actor",
+    "cascade",
+    "dry_run",
+    "expected_version",
+    "force",
+    "ids"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/v0/beads/issues:query",
+   "operation_id": "queryIssues",
+   "query": [
+    "all",
+    "limit",
+    "q",
+    "reverse",
+    "sort"
+   ],
+   "body": []
+  },
+  {
+   "method": "POST",
+   "path": "/v0/beads/issues:sweep",
+   "operation_id": "sweepIssues",
+   "query": [],
+   "body": [
+    "actor",
+    "closed_before",
+    "dry_run",
+    "pattern",
+    "protect_referenced",
+    "tier"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/v0/beads/memories",
+   "operation_id": "listMemories",
+   "query": [
+    "search"
+   ],
+   "body": []
+  },
+  {
+   "method": "POST",
+   "path": "/v0/beads/memories",
+   "operation_id": "rememberMemory",
+   "query": [],
+   "body": [
+    "content",
+    "key"
+   ]
+  },
+  {
+   "method": "DELETE",
+   "path": "/v0/beads/memories/{key}",
+   "operation_id": "forgetMemory",
+   "query": [],
+   "body": []
+  },
+  {
+   "method": "GET",
+   "path": "/v0/beads/memories/{key}",
+   "operation_id": "getMemory",
+   "query": [],
+   "body": []
+  },
+  {
+   "method": "GET",
+   "path": "/v0/beads/ready",
+   "operation_id": "listReadyWork",
+   "query": [
+    "assignee",
+    "brief",
+    "exclude_label",
+    "exclude_type",
+    "has_metadata_key",
+    "include_deferred",
+    "include_ephemeral",
+    "label",
+    "label_any",
+    "label_pattern",
+    "label_regex",
+    "limit",
+    "metadata_field",
+    "parent",
+    "priority",
+    "sort",
+    "type",
+    "unassigned"
+   ],
+   "body": []
+  },
+  {
+   "method": "GET",
+   "path": "/v0/beads/ready:count",
+   "operation_id": "countReadyWork",
+   "query": [
+    "assignee",
+    "exclude_label",
+    "exclude_type",
+    "has_metadata_key",
+    "include_deferred",
+    "include_ephemeral",
+    "label",
+    "label_any",
+    "label_pattern",
+    "label_regex",
+    "metadata_field",
+    "parent",
+    "priority",
+    "type",
+    "unassigned"
+   ],
+   "body": []
+  },
+  {
+   "method": "GET",
+   "path": "/v0/beads/stats",
+   "operation_id": "getStats",
+   "query": [
+    "assignee",
+    "skip_blocked"
+   ],
+   "body": []
+  }
+ ]
+}

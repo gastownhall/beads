@@ -1,0 +1,69 @@
+diff --git a/BUILD.bazel b/BUILD.bazel
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -25,6 +25,7 @@ go_library(
+         "fse_compress.c",
+         "fse_decompress.c",
+         "gozstd.go",
++        "nocgo.go",
+         "hist.c",
+         "hist.h",
+         "huf.h",
+diff --git a/nocgo.go b/nocgo.go
+new file mode 100644
+--- /dev/null
++++ b/nocgo.go
+@@ -0,0 +1,44 @@
++//go:build !cgo
++
++// Added by beads (third_party/patches/gozstd_nocgo.patch). gozstd wraps the
++// zstd C library, so without cgo it does not compile, and rules_go compiles
++// every declared dep even when only cgo-constrained files import it. These
++// stubs let `bazel build --config=pure` compile dolt's store/nbs (a dep of
++// beads' cgo-only embedded-Dolt files); `go build` never compiles them because
++// a CGO_ENABLED=0 bd does not import nbs. The package init panics, so a pure
++// binary that links gozstd (the contamination `go build` rejects with
++// CGO_ENABLED=0) fails at startup; bazel.yml's pure lane runs every pure
++// artifact to catch it. The entry points panic as well.
++package gozstd
++
++const DefaultCompressionLevel = 3
++
++const errNoCgo = "gozstd: built without cgo"
++
++func init() { panic(errNoCgo + " (linked into a pure binary)") }
++
++type CDict struct{}
++
++type DDict struct{}
++
++func (cd *CDict) Release() {}
++
++func (dd *DDict) Release() {}
++
++func NewCDict(dict []byte) (*CDict, error) { panic(errNoCgo) }
++
++func NewCDictLevel(dict []byte, compressionLevel int) (*CDict, error) { panic(errNoCgo) }
++
++func NewDDict(dict []byte) (*DDict, error) { panic(errNoCgo) }
++
++func BuildDict(samples [][]byte, desiredDictLen int) []byte { panic(errNoCgo) }
++
++func Compress(dst, src []byte) []byte { panic(errNoCgo) }
++
++func CompressLevel(dst, src []byte, compressionLevel int) []byte { panic(errNoCgo) }
++
++func CompressDict(dst, src []byte, cd *CDict) []byte { panic(errNoCgo) }
++
++func Decompress(dst, src []byte) ([]byte, error) { panic(errNoCgo) }
++
++func DecompressDict(dst, src []byte, dd *DDict) ([]byte, error) { panic(errNoCgo) }
+diff --git a/stream.go b/stream.go
+--- a/stream.go
++++ b/stream.go
+@@ -1,3 +1,5 @@
++//go:build cgo
++
+ package gozstd
+ 
+ import (

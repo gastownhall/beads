@@ -4,9 +4,178 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/uimd"
 )
+
+// closedWithReason builds a closed issue whose remaining metadata lines — the
+// external ref and the compaction stat — are the ones a close reason rendered
+// in place would strand below the body text.
+func closedWithReason(reason string) *types.Issue {
+	return &types.Issue{
+		ID: "test-cr", Title: "t", IssueType: types.TypeTask,
+		Status: types.StatusClosed, CloseReason: reason,
+		ExternalRef:     strPtr("gh#1"),
+		CompactionLevel: 1, OriginalSize: 4096,
+	}
+}
+
+// metadataLine returns the whole output line starting with prefix, unstyled,
+// or "" when no line does. Whole-line equality is what catches a value that
+// passed the fit check trimmed but was then rendered untrimmed.
+func metadataLine(out, prefix string) string {
+	for _, line := range strings.Split(ansi.Strip(out), "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return line
+		}
+	}
+	return ""
+}
+
+// TestFormatIssueMetadata_CloseReason guards the rule that a close reason too
+// long or too structured for a metadata line is rendered as body text, the way
+// DESCRIPTION and NOTES are, instead of being dumped raw into the metadata
+// block where it wraps at the terminal edge and its continuation lines read as
+// separate metadata entries.
+func TestFormatIssueMetadata_CloseReason(t *testing.T) {
+	// Force non-agent mode so the width test is live and deterministic;
+	// in agent mode nothing wraps and WrapWidth reports 0.
+	t.Setenv("BD_AGENT_MODE", "0")
+	t.Setenv("CLAUDE_CODE", "")
+
+	// Surrounding whitespace is not structure. --reason-file and heredoc
+	// content almost always ends in a newline, so a one-liner that arrives
+	// with one has to stay inline, and has to render without it.
+	for name, reason := range map[string]string{
+		"short":            "Fixed",
+		"trailing newline": "Fixed\n",
+		"trailing CRLF":    "Fixed\r\n",
+		"padded":           "\n  Fixed  \n\n",
+	} {
+		t.Run(name+" reason stays on a metadata line", func(t *testing.T) {
+			out := formatIssueMetadata(closedWithReason(reason))
+			if got := metadataLine(out, "Close reason:"); got != "Close reason: Fixed" {
+				t.Errorf("inline reason = %q, want %q; full output:\n%s", got, "Close reason: Fixed", out)
+			}
+			if strings.Contains(out, "CLOSE REASON") {
+				t.Errorf("%s reason should not get its own section, got:\n%s", name, out)
+			}
+		})
+	}
+
+	for name, reason := range map[string]string{
+		"multi-line": "Fixed the leak.\n\n- reverted the cache\n- added a regression test",
+		"overlong":   strings.Repeat("long ", 40),
+	} {
+		t.Run(name+" reason becomes a rendered section", func(t *testing.T) {
+			out := formatIssueMetadata(closedWithReason(reason))
+			if !strings.Contains(out, "CLOSE REASON") {
+				t.Fatalf("%s reason should get its own section, got:\n%s", name, out)
+			}
+			if strings.Contains(out, "Close reason:") {
+				t.Errorf("%s reason should not also appear inline, got:\n%s", name, out)
+			}
+			// The section must come last: metadata lines emitted after the
+			// close reason would otherwise be stranded below the body text.
+			sectionAt := strings.Index(out, "CLOSE REASON")
+			for _, trailing := range []string{"External: gh#1", "reduction)"} {
+				if at := strings.Index(out, trailing); at < 0 || at > sectionAt {
+					t.Errorf("metadata line %q must precede the CLOSE REASON section, got:\n%s", trailing, out)
+				}
+			}
+			// Body text wraps; that is the whole point of promoting it.
+			for _, line := range strings.Split(out[sectionAt:], "\n") {
+				if ansi.StringWidth(line) > uimd.WrapWidth() {
+					t.Errorf("section line exceeds wrap width %d: %q", uimd.WrapWidth(), line)
+				}
+			}
+		})
+	}
+
+	// Agent mode emits body text verbatim, so promotion there is about
+	// getting the reason out of the metadata block, not about wrapping.
+	t.Run("agent mode", func(t *testing.T) {
+		t.Setenv("BD_AGENT_MODE", "1")
+		reason := "Fixed the leak.\n\n- reverted the cache\n- added a regression test"
+
+		out := formatIssueMetadata(closedWithReason(reason))
+		if !strings.Contains(out, "CLOSE REASON") {
+			t.Fatalf("multi-line reason should still get its own section, got:\n%s", out)
+		}
+		if !strings.Contains(out, reason) {
+			t.Errorf("agent mode must emit the reason verbatim, got:\n%s", out)
+		}
+
+		// Nothing wraps here, so width alone never promotes a one-liner.
+		long := strings.Repeat("long ", 40)
+		out = formatIssueMetadata(closedWithReason(long))
+		if strings.Contains(out, "CLOSE REASON") {
+			t.Errorf("an overlong one-liner should stay inline in agent mode, got:\n%s", out)
+		}
+		if got := metadataLine(out, "Close reason:"); got != "Close reason: "+strings.TrimSpace(long) {
+			t.Errorf("inline reason = %q, want the whole trimmed one-liner", got)
+		}
+	})
+}
+
+// TestFormatIssueMetadata_CreatedByLabel guards against the text view
+// mislabelling created_by as "Owner:" — a real, distinct field also named
+// Owner exists on types.Issue and holds a different value (a git author
+// email), so a rendered "Owner:" line must never carry the created_by value.
+func TestFormatIssueMetadata_CreatedByLabel(t *testing.T) {
+	t.Parallel()
+	issue := &types.Issue{
+		ID: "test-created-by", Title: "t", IssueType: types.TypeTask,
+		CreatedBy: "alice", Owner: "bob@example.com", Assignee: "carol",
+	}
+	out := formatIssueMetadata(issue)
+	if !strings.Contains(out, "Created by: alice") {
+		t.Errorf("expected %q in output, got:\n%s", "Created by: alice", out)
+	}
+	if !strings.Contains(out, "Assignee: carol") {
+		t.Errorf("expected %q in output, got:\n%s", "Assignee: carol", out)
+	}
+	if strings.Contains(out, "Owner: ") {
+		t.Errorf("label %q must not appear — created_by must not render under the Owner label, got:\n%s", "Owner: ", out)
+	}
+}
+
+// TestFormatIssueMetadata_TimestampsRenderLocal guards the rule that the
+// metadata block reports timestamps on the reader's calendar, as the Due and
+// Deferred entries on the same line already did.
+//
+// Created/Started/Updated are stored in UTC. Printing those digits as a bare
+// date put the whole day wrong if it's already tomorrow in UTC.
+//
+// The stamp is handed over in a zone twelve hours ahead of time.Local, so its
+// own digits fall on the next day on any machine, a UTC CI box included, and
+// only a conversion to local time prints the right date. time.Local is never
+// assigned: every time.Now() in the process reads it, including in goroutines
+// no test can synchronize with (a served connection winding down after its
+// test, the collector Dolt starts at package init), so a swap trips -race even
+// with this test run alone.
+func TestFormatIssueMetadata_TimestampsRenderLocal(t *testing.T) {
+	t.Parallel()
+	// 18:30 on 2026-08-23 here is 06:30 on 2026-08-24 twelve hours east — the
+	// same instant on two different calendar days, which is the whole bug.
+	local := time.Date(2026, 8, 23, 18, 30, 0, 0, time.Local)
+	_, offset := local.Zone()
+	stamp := local.In(time.FixedZone("local+12h", offset+12*60*60))
+	issue := &types.Issue{
+		ID: "test-tz", Title: "t", IssueType: types.TypeTask,
+		CreatedAt: stamp, UpdatedAt: stamp, StartedAt: &stamp,
+	}
+
+	out := ansi.Strip(formatIssueMetadata(issue))
+	for _, want := range []string{"Created: 2026-08-23", "Started: 2026-08-23", "Updated: 2026-08-23"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in output (the stamp's own digits put the date a day ahead), got:\n%s", want, out)
+		}
+	}
+}
 
 func TestFormatIssueCustomMetadata_Nil(t *testing.T) {
 	t.Parallel()

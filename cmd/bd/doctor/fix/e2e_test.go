@@ -103,6 +103,21 @@ func TestGetBdBinary_Errors(t *testing.T) {
 	})
 }
 
+// TestGetBdBinary_DetectsTestBinaryByAnyName guards against a fork bomb: a test
+// binary must never be returned as "bd", whatever it is named. Bazel names
+// test binaries <target>_test (no ".test" suffix); before the guard used
+// testing.Testing(), each fix test re-ran the whole suite recursively there.
+func TestGetBdBinary_DetectsTestBinaryByAnyName(t *testing.T) {
+	if _, err := getBdBinary(); !errors.Is(err, ErrTestBinary) {
+		t.Fatalf("getBdBinary() in a test binary: got err %v, want ErrTestBinary", err)
+	}
+	for _, name := range []string{"/x/fix.test", "/x/fix_test", "/x/bd"} {
+		if !isTestBinary(name) {
+			t.Errorf("isTestBinary(%q) = false inside a test binary", name)
+		}
+	}
+}
+
 // TestFilePermissionErrors tests handling of file permission issues
 func TestFilePermissionErrors(t *testing.T) {
 	if os.Getuid() == 0 {

@@ -8,29 +8,25 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strings"
 
 	"github.com/spf13/cobra"
 
-	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/validation"
+	"github.com/steveyegge/beads/issueops"
 )
-
-func resolveProxiedCustomTypes(dbTypes []string) []string {
-	if len(dbTypes) > 0 {
-		return dbTypes
-	}
-	return config.GetCustomTypesFromYAML()
-}
 
 func runCreateProxiedServer(cmd *cobra.Command, ctx context.Context, in createInput) error {
 	if in.repoOverrideSet {
-		return HandleError("--repo is not supported with --proxied-server")
+		// Defense in depth: validateProxyCapabilitiesBeforeProvider already
+		// refuses `create --repo` before this route is reachable. Typed anyway,
+		// so the day a command slips past the gate the refusal is still the
+		// same shape rather than silently degrading to prose.
+		return HandleProxyCapabilityError(AssertProxyCommandCapability("create", ProxyModeProxied, ProxyCapRepo))
 	}
 	switch {
 	case in.graphFile != "":
@@ -60,11 +56,10 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 		return HandleError("%v", err)
 	}
 
-	if uowProvider == nil {
-		return HandleError("proxied-server UOW provider not initialized")
-	}
-
 	if in.dryRun {
+		if uowProvider == nil {
+			return HandleError("proxied-server UOW provider not initialized")
+		}
 		previewLabels := in.labels
 		if in.parentID != "" {
 			dryUW, err := uowProvider.NewUOW(ctx)
@@ -76,7 +71,14 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 				return HandleError("parent issue %s not found: %v", in.parentID, err)
 			}
 			if !in.noInheritLabels {
-				inherited, lerr := dryUW.LabelUseCase().GetLabels(ctx, in.parentID)
+				// A READ inside the DRY-RUN unit of work, which is opened only to
+				// be discarded: this previews what --parent would inherit without
+				// creating anything. The role that answers it for real is
+				// CreateRequest.InheritLabelsFromParent, which resolves the parent's
+				// labels inside the create it is part of — and a preview has no
+				// create to be part of. A dry-run mode on the create role is the
+				// follow-up (ga-2ltro.12).
+				inherited, lerr := dryUW.LabelUseCase().GetLabels(ctx, in.parentID) //nolint:forbidigo // dry-run preview; the role resolves this only inside a real create
 				if lerr != nil {
 					dryUW.Close(ctx)
 					return HandleError("dry-run inherit labels: %v", lerr)
@@ -96,75 +98,100 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 		return nil
 	}
 
-	issue := buildCreateIssueFromInput(in)
-
-	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (*types.Issue, string, error) {
-		cctx, err := uw.ConfigUseCase().LoadCreateContext(ctx)
-		if err != nil {
-			return nil, "", fmt.Errorf("load create context: %w", err)
-		}
-
-		customTypes := resolveProxiedCustomTypes(cctx.CustomTypes)
-		if in.issueType != "" {
-			it := types.IssueType(in.issueType).Normalize()
-			if !it.IsValidWithCustom(customTypes) {
-				return nil, "", fmt.Errorf("invalid type %q (allowed: built-ins plus configured custom types)", in.issueType)
-			}
-		}
-		if in.status != "" {
-			if !types.Status(in.status).IsValidWithCustom(types.CustomStatusNames(cctx.CustomStatuses)) {
-				return nil, "", fmt.Errorf("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", in.status)
-			}
-		}
-		if in.explicitID != "" {
-			effectivePrefix := overlayYAMLPrefix(cctx.IssuePrefix)
-			if err := validation.ValidateIDPrefixAllowed(in.explicitID, effectivePrefix, cctx.AllowedPrefixes, in.force); err != nil {
-				return nil, "", err
-			}
-		}
-
-		params := domain.CreateIssueParams{
-			Issue:                   issue,
-			ExplicitID:              in.explicitID,
-			ParentID:                in.parentID,
-			Labels:                  in.labels,
-			InheritLabelsFromParent: !in.noInheritLabels && in.parentID != "",
-			Dependencies:            deps,
-			WaitsFor:                waitsFor,
-			// Reuse the already-parsed specs (not the raw --deps strings) so
-			// this can't drift from parseDepSpec's normalization rules.
-			DiscoveredFromParent: discoveredFromParentSpec(deps),
-			ForcePrefix:          in.force,
-		}
-
-		var result domain.CreateIssueResult
-		var createErr error
-		if issue.Ephemeral || issue.NoHistory {
-			result, createErr = uw.IssueUseCase().CreateWisp(ctx, params, in.createdBy)
-		} else {
-			result, createErr = uw.IssueUseCase().CreateIssue(ctx, params, in.createdBy)
-		}
-		if createErr != nil {
-			return nil, "", createErr
-		}
-
-		return result.Issue, fmt.Sprintf("bd: create %s", result.Issue.ID), nil
-	})
+	ops, err := proxiedIssueLifecycle()
 	if err != nil {
 		return HandleError("%v", err)
 	}
 
+	issue := buildCreateIssueFromInput(in)
+	if in.priorityDefault {
+		// No --priority: the role applies its default (CreateRequest.DefaultPriority).
+		issue.Priority = 0
+	}
+	// Labels ride on the issue because that is where the contract reads them:
+	// CreateRequest.Issue documents them as authoritative.
+	issue.Labels = append([]string(nil), in.labels...)
+	if err := inheritProxiedSourceRepo(ctx, issue, deps); err != nil {
+		return err
+	}
+
+	// SPEC-GAP bd-yby99.32: Lifecycle.Create promises nothing about the
+	// version-control entry a create records and CreateRequest carries no
+	// Provenance to spell one, so this route's commit message moves from
+	// "bd: create <id>" to whatever the implementation defaults to.
+	result, err := ops.Create(ctx, issueops.CreateRequest{
+		Actor:                   in.createdBy,
+		Issue:                   issue,
+		ParentID:                in.parentID,
+		InheritLabelsFromParent: !in.noInheritLabels && in.parentID != "",
+		Dependencies:            createDependencyRequests(deps),
+		WaitsFor:                waitsForRequest(waitsFor),
+		ForceIDPrefix:           in.force,
+		// The workspace's config.yaml prefix wins over the server database's,
+		// and only this side can see it. Without this the proxied route mints
+		// ids the workspace's own configuration forbids and the direct route
+		// refuses.
+		IDPrefix:        createIDPrefixOverride(),
+		DefaultPriority: in.priorityDefault,
+	})
+	if err != nil {
+		if handled, rendered := reportCreateOfRetiredID(err); handled {
+			return rendered
+		}
+		// RULING R1, reported the same way the direct route reports it: an
+		// occupied --id is a refusal, not a silent full-row upsert dressed up
+		// as success.
+		if errors.Is(err, storage.ErrAlreadyExists) && in.explicitID != "" {
+			return HandleErrorRespectJSON("%s already exists; use bd update, or bd import for upsert semantics", in.explicitID)
+		}
+		return HandleError("%v", err)
+	}
+	// Every post-write read comes from the contract's result snapshot: the
+	// local struct still has no ID for an auto-minted create. Dependencies and
+	// comments come off because `bd create` has never printed them.
+	created := result.Issue
+	created.Dependencies = nil
+	created.Comments = nil
+
 	switch {
 	case in.jsonOutput:
-		if err := outputJSON(res); err != nil {
+		if err := outputJSON(created); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		}
 	case in.silent:
-		fmt.Println(res.ID)
+		fmt.Println(created.ID)
 	default:
-		fmt.Printf("%s Created issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(res.ID, res.Title))
-		fmt.Printf("  Priority: P%d\n", res.Priority)
-		fmt.Printf("  Status: %s\n", res.Status)
+		fmt.Printf("%s Created issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(created.ID, created.Title))
+		fmt.Printf("  Priority: P%d\n", created.Priority)
+		fmt.Printf("  Status: %s\n", created.Status)
+	}
+	return nil
+}
+
+// inheritProxiedSourceRepo copies a discovered-from parent's source repo onto
+// the new issue, which is what the direct route does before it calls the role
+// (cmd/bd/create.go).
+//
+// A failed lookup is not a verdict. The direct route ignores one and creates
+// with the default source repo; a genuinely absent target is refused by the
+// create itself, with the contract's own error for a dangling edge.
+func inheritProxiedSourceRepo(ctx context.Context, issue *types.Issue, deps []domain.DependencySpec) error {
+	// Reuse the already-parsed specs (not the raw --deps strings) so this
+	// can't drift from parseDepSpec's normalization rules.
+	parentID := discoveredFromParentSpec(deps)
+	if parentID == "" {
+		return nil
+	}
+	rd, err := proxiedIssueReader()
+	if err != nil {
+		return HandleError("%v", err)
+	}
+	details, err := rd.Get(ctx, issueops.GetRequest{ID: parentID})
+	if err != nil {
+		return nil
+	}
+	if details.Issue.SourceRepo != "" {
+		issue.SourceRepo = details.Issue.SourceRepo
 	}
 	return nil
 }
@@ -203,6 +230,7 @@ func buildCreateIssueFromInput(in createInput) *types.Issue {
 		EstimatedMinutes:   in.estimatedMinutes,
 		Ephemeral:          in.ephemeral,
 		NoHistory:          in.noHistory,
+		StorageClass:       in.storageClass,
 		CreatedBy:          in.createdBy,
 		Owner:              in.owner,
 		MolType:            in.molType,
@@ -218,6 +246,8 @@ func buildCreateIssueFromInput(in createInput) *types.Issue {
 	})
 }
 
+// runCreateProxiedMarkdown creates every issue in a markdown file as ONE act,
+// through issueops.BatchCreator.
 func runCreateProxiedMarkdown(_ *cobra.Command, ctx context.Context, in createInput) error {
 	templates, err := parseMarkdownFile(in.markdownFile)
 	if err != nil {
@@ -226,143 +256,32 @@ func runCreateProxiedMarkdown(_ *cobra.Command, ctx context.Context, in createIn
 	if len(templates) == 0 {
 		return HandleError("no issues found in markdown file")
 	}
-
-	if in.validationMode == "error" || in.validationMode == "warn" {
-		for _, t := range templates {
-			lintIssue := &types.Issue{
-				IssueType:          t.IssueType,
-				Description:        t.Description,
-				AcceptanceCriteria: t.AcceptanceCriteria,
-			}
-			if err := validation.LintIssue(lintIssue); err != nil {
-				if in.validationMode == "error" {
-					return HandleError("template %q: %v", t.Title, err)
-				}
-				fmt.Fprintf(os.Stderr, "%s template %q: %v\n", ui.RenderWarn("⚠"), t.Title, err)
-			}
-		}
+	request, err := buildMarkdownBatchRequest(templates, in)
+	if err != nil {
+		return err
 	}
-
-	type templateBuild struct {
-		template *IssueTemplate
-		deps     []domain.DependencySpec
-	}
-
-	builds := make([]templateBuild, 0, len(templates))
-	for _, t := range templates {
-		deps, err := parseMarkdownDepSpecs(t.Dependencies, t.Title)
-		if err != nil {
-			return HandleError("%v", err)
-		}
-		builds = append(builds, templateBuild{template: t, deps: deps})
-	}
-
-	if uowProvider == nil {
-		return HandleError("proxied-server UOW provider not initialized")
-	}
-
-	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) ([]*types.Issue, string, error) {
-		cctx, err := uw.ConfigUseCase().LoadCreateContext(ctx)
-		if err != nil {
-			return nil, "", fmt.Errorf("load create context: %w", err)
-		}
-
-		customTypes := resolveProxiedCustomTypes(cctx.CustomTypes)
-		for _, b := range builds {
-			if b.template.IssueType == "" {
-				continue
-			}
-			if !b.template.IssueType.IsValidWithCustom(customTypes) {
-				return nil, "", fmt.Errorf("template %q: invalid type %q", b.template.Title, b.template.IssueType)
-			}
-		}
-
-		paramsList := make([]domain.CreateIssueParams, 0, len(builds))
-		for _, b := range builds {
-			t := b.template
-			paramsList = append(paramsList, domain.CreateIssueParams{
-				Issue: &types.Issue{
-					Title:              t.Title,
-					Description:        t.Description,
-					Design:             t.Design,
-					AcceptanceCriteria: t.AcceptanceCriteria,
-					Status:             types.StatusOpen,
-					Priority:           t.Priority,
-					IssueType:          t.IssueType,
-					Assignee:           t.Assignee,
-					Ephemeral:          in.ephemeral,
-					NoHistory:          in.noHistory,
-					MolType:            in.molType,
-					CreatedBy:          in.createdBy,
-					Owner:              in.owner,
-				},
-				Labels:       t.Labels,
-				Dependencies: b.deps,
-			})
-		}
-
-		var result domain.CreateIssuesResult
-		var createErr error
-		if in.ephemeral || in.noHistory {
-			result, createErr = uw.IssueUseCase().CreateWisps(ctx, paramsList, in.createdBy)
-		} else {
-			result, createErr = uw.IssueUseCase().CreateIssues(ctx, paramsList, in.createdBy)
-		}
-		if createErr != nil {
-			return nil, "", fmt.Errorf("creating issues from markdown: %w", createErr)
-		}
-
-		return result.Issues, fmt.Sprintf("bd: create %d issue(s) from %s", len(result.Issues), in.markdownFile), nil
-	})
+	creator, err := proxiedBatchCreator()
 	if err != nil {
 		return HandleError("%v", err)
 	}
-
-	if in.jsonOutput {
-		if err := outputJSON(res); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		}
-		return nil
+	result, err := creator.CreateBatch(ctx, request)
+	if err != nil {
+		return HandleError("creating issues from markdown: %v", err)
 	}
-
-	fmt.Printf("%s Created %d issues from %s:\n", ui.RenderPass("✓"), len(res), in.markdownFile)
-	for _, issue := range res {
-		fmt.Printf("  %s: %s [P%d, %s]\n", issue.ID, issue.Title, issue.Priority, issue.IssueType)
-	}
-	return nil
+	return reportMarkdownBatch(result.Issues, in)
 }
 
-func parseMarkdownDepSpecs(deps []string, templateTitle string) ([]domain.DependencySpec, error) {
-	var out []domain.DependencySpec
-	for _, raw := range deps {
-		raw = strings.TrimSpace(raw)
-		if raw == "" {
-			continue
-		}
-
-		var depType types.DependencyType
-		var target string
-		if strings.Contains(raw, ":") {
-			parts := strings.SplitN(raw, ":", 2)
-			if len(parts) != 2 {
-				return nil, fmt.Errorf("invalid dependency format %q for issue %q", raw, templateTitle)
-			}
-			depType = types.DependencyType(strings.TrimSpace(parts[0]))
-			target = strings.TrimSpace(parts[1])
-		} else {
-			depType = types.DepBlocks
-			target = raw
-		}
-
-		if !depType.IsValid() {
-			return nil, fmt.Errorf("invalid dependency type %q for issue %q", depType, templateTitle)
-		}
-		out = append(out, domain.DependencySpec{
-			Type:     depType,
-			TargetID: target,
-		})
+// proxiedBatchCreator reaches the batch-create role through the provider's own
+// capability accessor, which is where each decorator adds its layer.
+func proxiedBatchCreator() (issueops.BatchCreator, error) {
+	if uowProvider == nil {
+		return nil, errors.New("proxied-server UOW provider not initialized")
 	}
-	return out, nil
+	src, ok := uowProvider.(uow.BatchCreatorSource)
+	if !ok {
+		return nil, fmt.Errorf("proxied-server provider %T does not offer the batch-create surface", uowProvider)
+	}
+	return src.BatchCreator()
 }
 
 func runCreateProxiedGraph(_ *cobra.Command, ctx context.Context, in createInput) error {
@@ -406,47 +325,47 @@ func runCreateProxiedGraph(_ *cobra.Command, ctx context.Context, in createInput
 		return nil
 	}
 
-	domainPlan, err := buildDomainGraphPlan(plan, in)
+	// Live apply runs the same shared validation the dry-run branch above just
+	// ran, through its own short-lived unit of work (the collision preflight
+	// in this pass is therefore NOT atomic with the apply below — a real
+	// explicit-ID collision is still caught, because BatchApplier's own
+	// create item independently raises storage.ErrAlreadyExists; this preflight
+	// just gives that case a clearer "invalid graph plan" message up front).
+	// BatchApplier manages its own transaction and commit-retry budget (see
+	// internal/storage/uow/batch_applier.go), so the apply itself is NOT
+	// wrapped in uow.RunTxResult the way the old domain.GraphPlan path was.
+	validateUW, err := uowProvider.NewUOW(ctx)
 	if err != nil {
-		return err
+		return HandleError("open unit of work: %v", err)
+	}
+	cctx, err := validateUW.ConfigUseCase().LoadCreateContext(ctx)
+	if err != nil {
+		validateUW.Close(ctx)
+		return HandleError("load create context: %v", err)
+	}
+	_, err = validateProxiedGraphPlan(&plan, in, cctx, uowIssueExists(ctx, validateUW))
+	validateUW.Close(ctx)
+	if err != nil {
+		return HandleError("invalid graph plan: %v", err)
 	}
 
-	commitMsg := plan.CommitMessage
-	if commitMsg == "" {
-		commitMsg = fmt.Sprintf("bd: graph-apply %d nodes", len(plan.Nodes))
+	src, ok := uowProvider.(uow.BatchApplierSource)
+	if !ok {
+		return HandleError("proxied-server provider %T does not offer the batch-apply surface", uowProvider)
 	}
-
-	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (map[string]string, string, error) {
-		cctx, err := uw.ConfigUseCase().LoadCreateContext(ctx)
-		if err != nil {
-			return nil, "", fmt.Errorf("load create context: %w", err)
-		}
-
-		// validateProxiedGraphPlan enforces a uniform storage class, so its
-		// resolved useWisp decides which table the whole plan routes to. The
-		// collision preflight runs inside this transaction, so it cannot race
-		// a concurrent create of the same explicit ID.
-		useWisp, err := validateProxiedGraphPlan(&plan, in, cctx, uowIssueExists(ctx, uw))
-		if err != nil {
-			return nil, "", fmt.Errorf("invalid graph plan: %w", err)
-		}
-
-		var result domain.GraphApplyResult
-		var applyErr error
-		if useWisp {
-			result, applyErr = uw.IssueUseCase().ApplyWispGraph(ctx, domainPlan, in.createdBy)
-		} else {
-			result, applyErr = uw.IssueUseCase().ApplyIssueGraph(ctx, domainPlan, in.createdBy)
-		}
-		if applyErr != nil {
-			return nil, "", fmt.Errorf("graph create: %w", applyErr)
-		}
-
-		return result.IDs, commitMsg, nil
-	})
+	applier, err := src.BatchApplier()
 	if err != nil {
 		return HandleError("%v", err)
 	}
+	req, err := buildGraphApplyBatchRequest(&plan, in.graphApplyOptions(), in.createdBy, in.owner)
+	if err != nil {
+		return HandleError("%v", err)
+	}
+	result, err := applier.ApplyBatch(ctx, req)
+	if err != nil {
+		return HandleError("graph create: %v", err)
+	}
+	res := result.Keys
 
 	if in.jsonOutput {
 		if err := outputJSON(GraphApplyResult{IDs: res}); err != nil {
@@ -475,7 +394,7 @@ func runCreateProxiedGraph(_ *cobra.Command, ctx context.Context, in createInput
 // The returned useWisp is the plan-wide table routing decision.
 func validateProxiedGraphPlan(plan *GraphApplyPlan, in createInput, cctx domain.CreateContext, issueExists func(id string) (bool, error)) (useWisp bool, err error) {
 	cfg := graphPlanConfig{
-		customTypes: resolveProxiedCustomTypes(cctx.CustomTypes),
+		customTypes: cctx.CustomTypes,
 		// No YAML fallback for statuses — the server database is authoritative
 		// (that's where 'bd config set status.custom' writes) and statuses are
 		// store-only everywhere (single-issue create, list filters), unlike
@@ -509,49 +428,4 @@ func uowIssueExists(ctx context.Context, uw uow.UnitOfWork) func(id string) (boo
 		}
 		return false, nil
 	}
-}
-
-// graphApplyNodeIssue path (full issue-model parity with `bd create`).
-func buildDomainGraphPlan(plan GraphApplyPlan, in createInput) (domain.GraphPlan, error) {
-	opts := in.graphApplyOptions()
-	nodes := make([]domain.GraphNode, 0, len(plan.Nodes))
-	for _, n := range plan.Nodes {
-		issue, err := graphApplyNodeIssue(n, opts, in.createdBy, in.owner)
-		if err != nil {
-			return domain.GraphPlan{}, fmt.Errorf("invalid graph plan: %w", err)
-		}
-		deps := make([]domain.GraphNodeDep, 0, len(n.Deps))
-		for _, d := range n.Deps {
-			deps = append(deps, domain.GraphNodeDep{
-				Type:   graphApplyDependencyType(d.Type),
-				Target: d.Target,
-			})
-		}
-		nodes = append(nodes, domain.GraphNode{
-			Key:               n.Key,
-			Issue:             issue,
-			ParentKey:         n.effectiveParentKey(),
-			ParentID:          n.ParentID,
-			Assignee:          n.Assignee,
-			AssignAfterCreate: n.AssignAfterCreate,
-			MetadataRefs:      n.MetadataRefs,
-			Labels:            n.Labels,
-			Deps:              deps,
-		})
-	}
-	edges := make([]domain.GraphEdge, 0, len(plan.Edges))
-	for _, e := range plan.Edges {
-		edges = append(edges, domain.GraphEdge{
-			FromKey:    e.FromKey,
-			FromID:     e.FromID,
-			ToKey:      e.ToKey,
-			ToID:       e.ToID,
-			Type:       graphApplyDependencyType(e.Type),
-			Gate:       e.Gate,
-			SpawnerKey: e.SpawnerKey,
-			SpawnerID:  e.SpawnerID,
-			ThreadID:   e.ThreadID,
-		})
-	}
-	return domain.GraphPlan{Nodes: nodes, Edges: edges}, nil
 }

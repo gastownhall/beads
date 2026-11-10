@@ -4,16 +4,21 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var readyCmd = &cobra.Command{
@@ -47,29 +52,32 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		}()
 
 		claimReady, _ := cmd.Flags().GetBool("claim")
-		labelPattern, _ := cmd.Flags().GetString("label-pattern")
-		labelRegex, _ := cmd.Flags().GetString("label-regex")
+
+		// ABOVE THE MODE DISPATCH, and above the proxied branch, so it is the
+		// one place a --brief conflict is decided for this command on either
+		// route. The branches below return before gatherReadyInput runs, so a
+		// check written into each of them would be three untested copies; this
+		// is one call into the body the gatherer also uses.
+		if err := briefModeConflictFromFlags(cmd); err != nil {
+			return err
+		}
 
 		if usesProxiedServer() {
-			// --claim consumes exactly one row, same reasoning as the
-			// direct-path fix in issueops/claim.go: a rig-wide cap sized
-			// for bulk list/ready reads must not block a single-row claim.
-			// Only the bulk (non-claim) proxied ready listing rejects an
-			// active cap.
-			if !claimReady {
-				if err := rejectMaxRowsUnderProxiedServer(cmd); err != nil {
-					return err
-				}
-			} else {
-				// Still validate --max-rows/BEADS_MAX_ROWS here even though
-				// the resolved cap is ignored below: resolveMaxRows is also
-				// where a malformed value (e.g. --max-rows -1) is rejected
-				// with exit 1, and skipping it entirely for the claim-exempt
-				// branch would silently accept a usage error that every
-				// other command (direct or proxied) rejects.
-				if _, _, err := resolveMaxRows(cmd); err != nil {
-					return err
-				}
+			// The proxied ready role cannot enforce a row cap, including on
+			// --claim. Refuse any positive cap rather than silently dropping
+			// this safety limit; malformed values remain usage errors. The
+			// pre-provider front door refuses the same cap first, so this is
+			// its backstop — both raise proxy.max_rows.unsupported.
+			//
+			// --gated is skipped here as well as at the front door, and it has
+			// to be skipped in both places: this backstop calls
+			// AssertProxyCapability with an empty command, so it always
+			// resolves the mode-wide refusal and cannot honor the
+			// command-specific allow the front door's path-keyed assert reads.
+			// Exempting only the front door would move the split from one
+			// refusal site to the other, not close it.
+			if err := rejectReadyMaxRowsUnderProxiedServer(cmd); err != nil {
+				return err
 			}
 			return runReadyProxiedServer(cmd, rootCtx)
 		}
@@ -93,7 +101,13 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			if claimReady {
 				return HandleErrorRespectJSON("--claim cannot be combined with --mol")
 			}
-			return runMoleculeReady(cmd, molID)
+			if store == nil {
+				return HandleErrorRespectJSON("no database connection")
+			}
+			resolve := func(ctx context.Context, arg string) (string, error) {
+				return utils.ResolvePartialID(ctx, store, arg)
+			}
+			return runMoleculeReady(rootCtx, store, resolve, molID)
 		}
 
 		explain, _ := cmd.Flags().GetBool("explain")
@@ -104,118 +118,15 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			return runReadyExplain(cmd)
 		}
 
-		limit, _ := cmd.Flags().GetInt("limit")
-		assignee, _ := cmd.Flags().GetString("assignee")
-		unassigned, _ := cmd.Flags().GetBool("unassigned")
-		sortPolicy, _ := cmd.Flags().GetString("sort")
-		labels, _ := cmd.Flags().GetStringSlice("label")
-		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
-		excludeLabels, _ := cmd.Flags().GetStringSlice("exclude-label")
-		issueType, _ := cmd.Flags().GetString("type")
-		issueType = utils.NormalizeIssueType(issueType) // Expand aliases (mr→merge-request, etc.)
-		parentID, _ := cmd.Flags().GetString("parent")
-		molTypeStr, _ := cmd.Flags().GetString("mol-type")
-		prettyFormat, _ := cmd.Flags().GetBool("pretty")
-		plainFormat, _ := cmd.Flags().GetBool("plain")
-		includeDeferred, _ := cmd.Flags().GetBool("include-deferred")
-		includeEphemeral, _ := cmd.Flags().GetBool("include-ephemeral")
-		excludeTypeStrs, _ := cmd.Flags().GetStringSlice("exclude-type")
-		var molType *types.MolType
-		if molTypeStr != "" {
-			mt := types.MolType(molTypeStr)
-			if !mt.IsValid() {
-				return HandleErrorRespectJSON("invalid mol-type %q (must be %s)", molTypeStr, types.ValidMolTypeNames())
-			}
-			molType = &mt
-		}
-		if claimReady && assignee != "" {
-			return HandleErrorRespectJSON("--claim cannot be combined with --assignee")
-		}
-
-		// Normalize labels: trim, dedupe, remove empty
-		labels = utils.NormalizeLabels(labels)
-		labelsAny = utils.NormalizeLabels(labelsAny)
-		excludeLabels = utils.NormalizeLabels(excludeLabels)
-
-		// Apply directory-aware label scoping if no labels explicitly provided (GH#541)
-		if len(labels) == 0 && len(labelsAny) == 0 {
-			if dirLabels := config.GetDirectoryLabels(); len(dirLabels) > 0 {
-				labelsAny = dirLabels
-			}
-		}
-
-		// Normalize --exclude-type values.
-		var excludeTypes []types.IssueType
-		for _, raw := range excludeTypeStrs {
-			for _, t := range strings.Split(raw, ",") {
-				t = strings.TrimSpace(t)
-				if t != "" {
-					excludeTypes = append(excludeTypes, types.IssueType(utils.NormalizeIssueType(t)))
-				}
-			}
-		}
-		maxRows, maxRowsSource, err := resolveMaxRows(cmd)
+		// The row cap is meaningful on this route alone - the proxied one
+		// rejects a live cap outright - so this is the only caller that hands
+		// the gatherer a resolver for it.
+		in, err := gatherReadyInput(cmd, resolveMaxRows)
 		if err != nil {
 			return err
 		}
-		filter := types.WorkFilter{
-			Status:           "open", // Only show open issues, not in_progress (matches bd list --ready)
-			Type:             issueType,
-			Limit:            limit,
-			Unassigned:       unassigned,
-			SortPolicy:       types.SortPolicy(sortPolicy),
-			Labels:           labels,
-			LabelsAny:        labelsAny,
-			ExcludeLabels:    excludeLabels,
-			LabelPattern:     labelPattern,
-			LabelRegex:       labelRegex,
-			IncludeDeferred:  includeDeferred,  // GH#820: respect --include-deferred flag
-			IncludeEphemeral: includeEphemeral, // bd-i5k5x: allow ephemeral issues (e.g., merge-requests)
-			ExcludeTypes:     excludeTypes,
-			MaxRows:          maxRows,
-			MaxRowsSource:    maxRowsSource,
-		}
-		// Use Changed() to properly handle P0 (priority=0)
-		if cmd.Flags().Changed("priority") {
-			priority, _ := cmd.Flags().GetInt("priority")
-			filter.Priority = &priority
-		}
-		if assignee != "" && !unassigned {
-			filter.Assignee = &assignee
-		}
-		if parentID != "" {
-			filter.ParentID = &parentID
-		}
-		if molType != nil {
-			filter.MolType = molType
-		}
+		filter := in.filter
 
-		// Metadata filters (GH#1406)
-		metadataFieldFlags, _ := cmd.Flags().GetStringArray("metadata-field")
-		if len(metadataFieldFlags) > 0 {
-			filter.MetadataFields = make(map[string]string, len(metadataFieldFlags))
-			for _, mf := range metadataFieldFlags {
-				k, v, ok := strings.Cut(mf, "=")
-				if !ok || k == "" {
-					return HandleErrorRespectJSON("invalid --metadata-field: expected key=value, got %q", mf)
-				}
-				if err := storage.ValidateMetadataKey(k); err != nil {
-					return HandleErrorRespectJSON("invalid --metadata-field key: %v", err)
-				}
-				filter.MetadataFields[k] = v
-			}
-		}
-		hasMetadataKey, _ := cmd.Flags().GetString("has-metadata-key")
-		if hasMetadataKey != "" {
-			if err := storage.ValidateMetadataKey(hasMetadataKey); err != nil {
-				return HandleErrorRespectJSON("invalid --has-metadata-key: %v", err)
-			}
-			filter.HasMetadataKey = hasMetadataKey
-		}
-
-		if !filter.SortPolicy.IsValid() {
-			return HandleErrorRespectJSON("invalid sort policy '%s'. Valid values: hybrid, priority, oldest", sortPolicy)
-		}
 		ctx := rootCtx
 
 		activeStore := store
@@ -234,21 +145,31 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		}
 
 		if claimReady {
-			claimed, err := activeStore.ClaimReadyIssue(ctx, filter, actor)
+			// The claim is on the ReadyClaimer role, through the store's own
+			// accessor, so selection, the compare-and-set and the hydration
+			// that feeds --json all share one transaction. The listing below
+			// is not on a role and still builds the filter, for the reasons
+			// issueops.Reader's doc comment gives.
+			claimer, err := activeStore.ReadyClaimer()
 			if err != nil {
-				if capErr := handleMaxRowsError(err); capErr != nil {
-					return capErr
-				}
 				return HandleErrorRespectJSON("%v", err)
 			}
-			if claimed == nil {
+			res, err := claimer.ClaimNext(ctx, claimNextRequest(in))
+			if err != nil {
+				// No handleMaxRowsError here, unlike the listing below: the
+				// request carries no cap, so ErrTooManyRows cannot come back.
+				// See claimNextRequest for why the cap never applied.
+				return HandleErrorRespectJSON("%v", err)
+			}
+			if res.Claimed == nil {
 				if jsonOutput {
 					return outputJSON([]*types.IssueWithCounts{})
 				}
 				fmt.Printf("\n%s No ready work to claim\n\n", ui.RenderWarn("○"))
 				return nil
 			}
-			if err := commitPendingIfEmbedded(ctx, activeStore, actor, doltAutoCommitParams{
+			claimed := res.Claimed
+			if err := commitPendingIfEmbedded(ctx, activeStore, currentActor(), doltAutoCommitParams{
 				Command:  "ready",
 				IssueIDs: []string{claimed.ID},
 			}); err != nil {
@@ -256,14 +177,25 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			}
 			SetLastTouchedID(claimed.ID)
 			if jsonOutput {
-				return outputJSON(buildReadyIssueOutput(ctx, activeStore, []*types.Issue{claimed}))
+				return outputJSON([]*types.IssueWithCounts{claimed})
 			}
 			fmt.Printf("%s Claimed issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(claimed.ID, claimed.Title))
 			return nil
 		}
 
+		if jsonOutput && readyJSONPrintsNoTotal(activeStore) {
+			return runReadyJSONWithoutTotal(ctx, activeStore, filter)
+		}
 		if jsonOutput {
-			results, err := activeStore.GetReadyWorkWithCounts(ctx, filter)
+			// The page and the size of the whole ready set come back from ONE
+			// read transaction: the total rides the page's own ID query, so a
+			// capped listing no longer pays for a second counting pass (and a
+			// second defer-wake sweep) just to print "Showing N of M". Against
+			// a remote SQL server each of that pass's statements was a
+			// sequential round trip. The total is the same number the
+			// ReadyCounter role answers (storage.DoltStorage documents the
+			// identity), taken over the listing's own filter.
+			results, total, err := activeStore.GetReadyWorkWithCountsAndTotal(ctx, filter)
 			if err != nil {
 				if capErr := handleMaxRowsError(err); capErr != nil {
 					return capErr
@@ -272,28 +204,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			}
 			totalReady := len(results)
 			truncated := false
-			if filter.Limit > 0 && len(results) == filter.Limit {
-				// The page is full, so there may be more ready work. Size the true
-				// total N over the same ready predicate, zeroing the limit so the
-				// count is the full ready set (byte-identical to
-				// len(GetReadyWorkWithCounts(Limit=0))). Prefer the cheap COUNT(*)
-				// capability; unwrap past decorators (e.g. HookFiringStore) so the
-				// assertion reaches the concrete store. Fall back to the unbounded
-				// mega-query only when a store predates ReadyWorkCounter.
-				countFilter := filter
-				countFilter.Limit = 0
-				if counter, ok := storage.UnwrapStore(activeStore).(storage.ReadyWorkCounter); ok {
-					if n, countErr := counter.CountReadyWork(ctx, countFilter); countErr == nil && n > len(results) {
-						totalReady = n
-						truncated = true
-					}
-				} else {
-					all, countErr := activeStore.GetReadyWorkWithCounts(ctx, countFilter)
-					if countErr == nil && len(all) > len(results) {
-						totalReady = len(all)
-						truncated = true
-					}
-				}
+			if filter.Limit > 0 && len(results) == filter.Limit && total > len(results) {
+				totalReady = total
+				truncated = true
 			}
 			if results == nil {
 				results = []*types.IssueWithCounts{}
@@ -325,34 +238,26 @@ This is useful for agents executing molecules to see which steps can run next.`,
 
 		totalReady := len(issues)
 		truncated := false
-		if !jsonOutput && filter.Limit > 0 && len(issues) == filter.Limit {
-			countFilter := filter
-			countFilter.Limit = 0
-			allIssues, countErr := activeStore.GetReadyWork(ctx, countFilter)
-			if countErr == nil && len(allIssues) > len(issues) {
-				totalReady = len(allIssues)
+		if filter.Limit > 0 && len(issues) == filter.Limit {
+			// The same question the --json branch answers in-band, asked here
+			// of the ReadyCounter role, whose answer is the same identity, so
+			// the "Showing X of N" a human reads and the total a script parses
+			// are one number.
+			if n, countErr := readyTotal(ctx, activeStore, in); countErr == nil && n > len(issues) {
+				totalReady = n
 				truncated = true
 			}
 		}
 		maybeShowUpgradeNotification()
 
 		if len(issues) == 0 {
-			hasOpenIssues := false
-			if stats, statsErr := activeStore.GetStatistics(ctx); statsErr == nil {
-				hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
-			}
-			if hasOpenIssues {
-				fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
-					ui.RenderWarn("✨"))
-			} else {
-				fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
-			}
+			printReadyEmptyState(ctx, in, activeStore)
 			maybeShowTip(store)
 			return nil
 		}
 		parentEpicMap := buildParentEpicMap(ctx, activeStore, issues)
 
-		usePlain := plainFormat || !prettyFormat
+		usePlain := in.plainFormat || !in.prettyFormat
 		if usePlain {
 			fmt.Printf("\n%s Ready work (%d issues with no active blockers):\n\n", ui.RenderAccent("📋"), len(issues))
 			for i, issue := range issues {
@@ -380,6 +285,91 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		return nil
 	},
 }
+
+// readyGatedArm reports whether this `bd ready` invocation dispatches to the
+// gate-resume arm — the same scan `bd mol ready --gated` runs, and the reason
+// the row cap does not apply to it. Both proxied refusal sites call this, so
+// the exemption cannot land on one and miss the other.
+//
+// The arm lists molecules whose gate closed, never ready rows: on the direct
+// route --gated reaches runMolReadyGatedCore above any cap resolution, and on
+// the proxied route runReadyProxiedGated discards its readyInput and calls the
+// same findGateReadyMolecules as runMolReadyGatedProxiedServer. `mol ready`,
+// the documented alias, carries a notApplicable() cap row for exactly that
+// reason; keying the refusal on `bd ready` alone split one documented command
+// line across its two spellings.
+//
+// --claim is excluded deliberately. `--claim --gated` is a usage error
+// (gatherReadyInput), not a gated run, so the claim arm keeps the refusal it is
+// owed on every code path and this exemption cannot reopen it.
+func readyGatedArm(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	if gated, _ := cmd.Flags().GetBool("gated"); !gated {
+		return false
+	}
+	claim, _ := cmd.Flags().GetBool("claim")
+	return !claim
+}
+
+// rejectReadyMaxRowsUnderProxiedServer is `bd ready`'s in-RunE backstop for the
+// row cap the proxied ready role cannot enforce. It exists as a named function
+// rather than an inline `if` so the exemption is reachable from a unit test:
+// the front door's half runs against the real command tree in
+// TestProxyCapabilityFrontDoorAllowsSupportedCommands, but this half sits
+// behind usesProxiedServer() and would otherwise be pinned only by the
+// env-gated proxied e2e lane.
+//
+// Call it in place of rejectMaxRowsUnderProxiedServer on this command; every
+// other capped command wants the unconditional form.
+func rejectReadyMaxRowsUnderProxiedServer(cmd *cobra.Command) error {
+	if readyGatedArm(cmd) {
+		return nil
+	}
+	return rejectMaxRowsUnderProxiedServer(cmd)
+}
+
+// blockedRequestFromFlags builds the blocked listing's request from
+// blockedCmd's flags. Every route calls it, so the routes cannot drift as
+// filtering flags are added.
+//
+// The labels go to the role as written: the role normalizes them, as every
+// other label filter is normalized (list_input.go, search.go, orphans.go,
+// workapi/ready.go). These clauses match a label EXACTLY, so an untrimmed
+// value would silently under-report: pflag's CSV split leaves the leading
+// space in the everyday `--label 'a, b'` form, and `--label 'a,,b'` would AND
+// in an empty-label clause that matches nothing at all. Normalizing in the
+// role rather than here is what makes a served listing normalize the same way
+// for every client.
+func blockedRequestFromFlags(cmd *cobra.Command) issueops.BlockedRequest {
+	parentID, _ := cmd.Flags().GetString("parent")
+	labels, _ := cmd.Flags().GetStringSlice("label")
+	labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
+	excludeLabels, _ := cmd.Flags().GetStringSlice("exclude-label")
+	return issueops.BlockedRequest{
+		ParentID:      parentID,
+		Labels:        labels,
+		LabelsAny:     labelsAny,
+		ExcludeLabels: excludeLabels,
+	}
+}
+
+// blockedLister is the blocked-listing role for the route this invocation
+// runs: the store's own BlockedLister accessor on the direct routes (dolt,
+// embedded dolt, and a registered HTTP backend, where it dials blocked.list
+// and an older server is refused before the dial naming the token), and the
+// proxied-server provider's on the proxied one.
+func blockedLister() (issueops.BlockedLister, error) {
+	if usesProxiedServer() {
+		return proxiedBlockedLister()
+	}
+	if store == nil {
+		return nil, fmt.Errorf("no storage available")
+	}
+	return store.BlockedLister()
+}
+
 var blockedCmd = &cobra.Command{
 	Use:           "blocked",
 	Short:         "Show blocked issues",
@@ -393,21 +383,24 @@ var blockedCmd = &cobra.Command{
 			}
 		}()
 
-		if usesProxiedServer() {
-			return runBlockedProxiedServer(cmd, rootCtx)
-		}
-		// Use global jsonOutput set by PersistentPreRun (respects config.yaml + env vars)
-		// Use factory to respect backend configuration (bd-m2jr: SQLite fallback fix)
+		// One role on every route (blockedLister). Use global jsonOutput set
+		// by PersistentPreRun (respects config.yaml + env vars).
 		ctx := rootCtx
-		parentID, _ := cmd.Flags().GetString("parent")
-		var blockedFilter types.WorkFilter
-		if parentID != "" {
-			blockedFilter.ParentID = &parentID
+		if flagsMode, _ := cmd.Flags().GetBool("flags"); flagsMode {
+			return runBlockedFlags(cmd, ctx, cmd.InOrStdin())
 		}
-		blocked, err := store.GetBlockedIssues(ctx, blockedFilter)
+		if cmd.Flags().Changed("raw") {
+			return HandleErrorRespectJSON("--raw qualifies --flags (the stored blocked column per id); it has no meaning for the listing")
+		}
+		lister, err := blockedLister()
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
+		result, err := lister.ListBlocked(ctx, blockedRequestFromFlags(cmd))
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		blocked := result.Items
 		if jsonOutput {
 			if blocked == nil {
 				blocked = []*types.BlockedIssue{}
@@ -433,6 +426,90 @@ var blockedCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// readyJSONPrintsNoTotal reports whether `bd ready --json` should skip sizing
+// the whole ready set. Without BD_JSON_ENVELOPE the total only decorates the
+// stderr hint. A local store takes it in the page's own transaction, so the
+// hint keeps it there; a remote backend pays a second request
+// (countReadyWork) for it, so the hint goes without.
+func readyJSONPrintsNoTotal(activeStore storage.DoltStorage) bool {
+	return !jsonEnvelopeEnabled() && storeIsRemoteBackend(activeStore)
+}
+
+// runReadyJSONWithoutTotal lists one row past the limit, which says whether
+// the limit hid anything: all the hint needs. A cap at or below the limit
+// would count that extra row against it, so such a listing keeps the counted
+// path and its refusal exactly as before.
+func runReadyJSONWithoutTotal(ctx context.Context, activeStore storage.DoltStorage, filter types.WorkFilter) error {
+	limit := filter.Limit
+	var results []*types.IssueWithCounts
+	var total int
+	var err error
+	if limit > 0 && filter.MaxRows > 0 && filter.MaxRows <= limit {
+		results, total, err = activeStore.GetReadyWorkWithCountsAndTotal(ctx, filter)
+	} else {
+		if limit > 0 {
+			filter.Limit = limit + 1
+		}
+		results, err = activeStore.GetReadyWorkWithCounts(ctx, filter)
+		total = len(results)
+	}
+	if err != nil {
+		if capErr := handleMaxRowsError(err); capErr != nil {
+			return capErr
+		}
+		return HandleErrorRespectJSON("%v", err)
+	}
+	truncated := limit > 0 && len(results) >= limit && total > limit
+	if len(results) > limit && limit > 0 {
+		results = results[:limit]
+	}
+	if results == nil {
+		results = []*types.IssueWithCounts{}
+	}
+	if err := outputJSON(results); err != nil {
+		return err
+	}
+	if truncated {
+		fmt.Fprintf(os.Stderr, "%s Use --limit 0 for all, or --limit N to raise the cap.\n", readyHiddenHint(len(results)))
+	}
+	return nil
+}
+
+// readyHiddenHint is the truncation hint for a page whose total is unknown:
+// how many rows are shown, and that the limit hid more.
+func readyHiddenHint(shown int) string {
+	noun := "issues"
+	if shown == 1 {
+		noun = "issue"
+	}
+	return fmt.Sprintf("Showing %d ready %s; more matched but were hidden by --limit.", shown, noun)
+}
+
+// readyTotal sizes the whole ready set for the request `bd ready` just listed
+// a page of, through the store's own ReadyCounter accessor.
+//
+// THE TEXT OUTPUT CALLS IT, and only when the page came back full, which is
+// the one situation where the answer can differ from what is already on
+// screen. The --json listing does not: it takes its total in-band from
+// GetReadyWorkWithCountsAndTotal, in the page's own transaction.
+//
+// The role has no --max-rows field to honor and needs none: the cap bounds a
+// page this machine materializes, and a count materializes no rows.
+//
+// A failed count is not a failed command — the page is already correct; all
+// that is lost is the "of N" beside it.
+func readyTotal(ctx context.Context, activeStore storage.DoltStorage, in readyInput) (int, error) {
+	counter, err := activeStore.ReadyCounter()
+	if err != nil {
+		return 0, err
+	}
+	result, err := counter.CountReady(ctx, readyRoleRequest(in))
+	if err != nil {
+		return 0, err
+	}
+	return int(result.Total), nil
 }
 
 // buildParentEpicMap builds a map from child issue ID to parent epic title.
@@ -504,47 +581,23 @@ func displayReadyList(issues []*types.Issue, parentEpicMap map[string]string) {
 	fmt.Printf("Ready: %d issues with no active blockers\n", len(issues))
 	fmt.Println()
 	fmt.Println("Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
+	fmt.Println("Priority: P0–P4 (label only; not a status icon)")
 }
 
-func buildReadyIssueOutput(ctx context.Context, s storage.DoltStorage, issues []*types.Issue) []*types.IssueWithCounts {
-	if issues == nil {
-		issues = []*types.Issue{}
-	}
-	issueIDs := make([]string, len(issues))
-	for i, issue := range issues {
-		issueIDs[i] = issue.ID
-	}
-
-	depCounts, _ := s.GetDependencyCounts(ctx, issueIDs)
-	allDeps, _ := s.GetDependencyRecordsForIssues(ctx, issueIDs)
-	commentCounts, _ := s.GetCommentCounts(ctx, issueIDs)
-
-	for _, issue := range issues {
-		issue.Dependencies = allDeps[issue.ID]
-	}
-
-	issuesWithCounts := make([]*types.IssueWithCounts, len(issues))
-	for i, issue := range issues {
-		counts := depCounts[issue.ID]
-		if counts == nil {
-			counts = &types.DependencyCounts{DependencyCount: 0, DependentCount: 0}
-		}
-		var parent *string
-		for _, dep := range allDeps[issue.ID] {
-			if dep.Type == types.DepParentChild {
-				parent = &dep.DependsOnID
-				break
-			}
-		}
-		issuesWithCounts[i] = &types.IssueWithCounts{
-			Issue:           issue,
-			DependencyCount: counts.DependencyCount,
-			DependentCount:  counts.DependentCount,
-			CommentCount:    commentCounts[issue.ID],
-			Parent:          parent,
-		}
-	}
-	return issuesWithCounts
+// readyExplainFilter is the filter both --explain routes run, derived from the
+// same builder the listing uses so the set `bd ready --explain` explains cannot
+// drift from the set `bd ready` shows (bd-3fs.3).
+//
+// --explain takes no listing flags: it is a whole-graph diagnostic, and the
+// direct route reaches it before the flags are even gathered. The limit is
+// therefore pinned to unlimited rather than left to workapi.DefaultReadyLimit,
+// which would silently truncate the explanation at 100 rows.
+func readyExplainFilter() (types.WorkFilter, error) {
+	unlimited := 0
+	return workapi.BuildReadyFilter(issueops.ReadyRequest{
+		Sort:  string(types.SortPolicyPriority),
+		Limit: &unlimited,
+	})
 }
 
 func runReadyExplain(_ *cobra.Command) error {
@@ -552,9 +605,9 @@ func runReadyExplain(_ *cobra.Command) error {
 
 	activeStore := store
 
-	filter := types.WorkFilter{
-		Status:     types.StatusOpen,
-		SortPolicy: types.SortPolicyPriority,
+	filter, err := readyExplainFilter()
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
 	}
 	readyIssues, err := activeStore.GetReadyWork(ctx, filter)
 	if err != nil {
@@ -586,19 +639,16 @@ func runReadyExplain(_ *cobra.Command) error {
 		debug.Logf("warning: failed to detect cycles: %v", err)
 	}
 
-	// Collect all blocker IDs to batch-fetch blocker details
-	allBlockerIDs := make(map[string]bool)
-	for _, bi := range blockedIssues {
-		for _, blockerID := range bi.BlockedBy {
-			allBlockerIDs[blockerID] = true
-		}
-	}
-	blockerIDList := make([]string, 0, len(allBlockerIDs))
-	for id := range allBlockerIDs {
-		blockerIDList = append(blockerIDList, id)
-	}
+	// Collect all blocker IDs to batch-fetch blocker details: the blockers
+	// of blocked issues, plus the blocking-dependency targets of the ready
+	// issues, whose status decides whether --explain reports each as
+	// resolved, pinned or open.
+	blockerIDList := explainBlockerIDs(blockedIssues, readyIssues, allDeps)
 
 	// Build ready items with explanations
+	// TODO(batchgetter): unbounded id list; see issueops.BatchGetter's doc and
+	// the importIssueLookup TODO in import_shared.go for why this is not yet
+	// routed through the role.
 	blockerIssues, err := activeStore.GetIssuesByIDs(ctx, blockerIDList)
 	if err != nil {
 		debug.Logf("warning: failed to get blocker issues: %v", err)
@@ -625,9 +675,7 @@ func runReadyExplain(_ *cobra.Command) error {
 				ui.RenderPriority(item.Priority),
 				item.Title)
 			fmt.Printf("    Reason: %s\n", item.Reason)
-			if len(item.ResolvedBlockers) > 0 {
-				fmt.Printf("    Resolved blockers: %s\n", strings.Join(item.ResolvedBlockers, ", "))
-			}
+			printReadyItemDependencies(item)
 			if item.DependentCount > 0 {
 				fmt.Printf("    Unblocks: %d issue(s)\n", item.DependentCount)
 			}
@@ -674,37 +722,32 @@ func runReadyExplain(_ *cobra.Command) error {
 	return nil
 }
 
-func runMoleculeReady(_ *cobra.Command, molIDArg string) error {
-	ctx := rootCtx
-
-	if store == nil {
-		return HandleErrorRespectJSON("no database connection")
-	}
-
-	moleculeID, err := utils.ResolvePartialID(ctx, store, molIDArg)
+// runMoleculeReady is `bd ready --mol` on every route. The molecule's nodes,
+// their readiness, the ready list and parallel groups are the library's one
+// derivation (issueops.ViewMolecule, shared with `mol current`); what is here
+// is presentation.
+func runMoleculeReady(ctx context.Context, s storage.DoltStorage, resolve func(context.Context, string) (string, error), molIDArg string) error {
+	moleculeID, err := resolve(ctx, molIDArg)
 	if err != nil {
-		return HandleErrorRespectJSON("molecule '%s' not found", molIDArg)
+		return moleculeNotResolved(molIDArg, err)
 	}
-
-	subgraph, err := loadTemplateSubgraph(ctx, store, moleculeID)
+	roles, err := currentMoleculeRoles(s)
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	view, err := issueops.ViewMolecule(ctx, roles.molecule, moleculeID)
 	if err != nil {
 		return HandleErrorRespectJSON("loading molecule: %v", err)
 	}
-
-	// Get parallel analysis to find ready steps
-	analysis := analyzeMoleculeParallel(subgraph)
-
-	// Collect ready steps
+	subgraph, analysis := view.Graph, view.Analysis
 	var readySteps []*MoleculeReadyStep
-	for _, issue := range subgraph.Issues {
+	for _, issue := range view.Ready {
 		info := analysis.Steps[issue.ID]
-		if info != nil && info.IsReady {
-			readySteps = append(readySteps, &MoleculeReadyStep{
-				Issue:         issue,
-				ParallelInfo:  info,
-				ParallelGroup: info.ParallelGroup,
-			})
-		}
+		readySteps = append(readySteps, &MoleculeReadyStep{
+			Issue:         issue,
+			ParallelInfo:  info,
+			ParallelGroup: info.ParallelGroup,
+		})
 	}
 
 	if jsonOutput {
@@ -793,7 +836,7 @@ type MoleculeReadyOutput struct {
 }
 
 func init() {
-	readyCmd.Flags().IntP("limit", "n", 100, "Maximum issues to show (use 0 for unlimited)")
+	readyCmd.Flags().IntP("limit", "n", workapi.DefaultReadyLimit, "Maximum issues to show (use 0 for unlimited)")
 	readyCmd.Flags().Int("offset", 0, "Skip the first N matching results (0-based). Only supported under --proxied-server.")
 	readyCmd.Flags().IntP("priority", "p", 0, "Filter by priority")
 	readyCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
@@ -810,12 +853,21 @@ func init() {
 	readyCmd.Flags().String("mol-type", "", "Filter by molecule type: swarm, patrol, or work")
 	readyCmd.Flags().Bool("pretty", true, "Display issues in a tree format with status/priority symbols")
 	readyCmd.Flags().Bool("plain", false, "Display issues as a plain numbered list")
+	readyCmd.Flags().Bool("flat", false, "Alias for --plain, spelled the way bd list spells it")
 	readyCmd.Flags().Bool("include-deferred", false, "Include issues with future defer_until timestamps")
 	readyCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral issues (wisps) in results")
 	readyCmd.Flags().Bool("gated", false, "Find molecules ready for gate-resume dispatch")
 	readyCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")
 	readyCmd.Flags().Bool("explain", false, "Show dependency-aware reasoning for why issues are ready or blocked")
 	readyCmd.Flags().Bool("claim", false, "Atomically claim the first ready issue matching the filters")
+	// Projection toggle, the same one `bd list --brief` sets. Refused with
+	// --claim, which returns one whole row by contract; see gatherReadyInput.
+	readyCmd.Flags().Bool("brief", false,
+		"Omit the free-form text (description, design, acceptance criteria, notes, "+
+			"payload, waiters) from each row. Filters that read those fields still "+
+			"select on them. An omitted field is indistinguishable from an empty "+
+			"one; fetch a whole issue with bd show. Requires --json, and cannot be "+
+			"combined with --claim, --gated, --mol or --explain.")
 	// Metadata filtering (GH#1406)
 	readyCmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
 	readyCmd.Flags().String("has-metadata-key", "", "Filter issues that have this metadata key set")
@@ -823,5 +875,219 @@ func init() {
 	addMaxRowsFlag(readyCmd)
 	rootCmd.AddCommand(readyCmd)
 	blockedCmd.Flags().String("parent", "", "Filter to descendants of this bead/epic")
+	blockedCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
+	blockedCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
+	blockedCmd.Flags().StringSlice("exclude-label", []string{}, "Exclude issues that have ANY of these labels")
+	blockedCmd.Flags().Bool("raw", false, "With --flags: the stored blocked column itself, without the external-dependency policy (an unsatisfied external: blocker does not set it)")
+	blockedCmd.Flags().Bool("flags", false, "Print the blocked flag for each id read from stdin (one per line) instead of the listing; with --json, [{\"id\",\"is_blocked\"}]")
 	rootCmd.AddCommand(blockedCmd)
+}
+
+// explainBlockerIDs collects, once each, the ids whose status --explain
+// needs: every blocker of a blocked issue, and the target of every blocking
+// dependency (blocks, conditional-blocks, waits-for) of a ready issue. The
+// ready targets matter because the ready query admits an issue whose blocking
+// targets are closed OR pinned, and only the target's status tells the
+// explanation which of the two it saw.
+func explainBlockerIDs(blockedIssues []*types.BlockedIssue, readyIssues []*types.Issue, allDeps map[string][]*types.Dependency) []string {
+	seen := make(map[string]bool)
+	var ids []string
+	add := func(id string) {
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	for _, bi := range blockedIssues {
+		for _, blockerID := range bi.BlockedBy {
+			add(blockerID)
+		}
+	}
+	for _, issue := range readyIssues {
+		for _, dep := range allDeps[issue.ID] {
+			if dep.Type == types.DepBlocks || dep.Type == types.DepConditionalBlocks || dep.Type == types.DepWaitsFor {
+				add(dep.DependsOnID)
+			}
+		}
+	}
+	return ids
+}
+
+// printReadyItemDependencies prints the three dependency lines of a ready
+// item in --explain's text form, each only when non-empty.
+func printReadyItemDependencies(item types.ReadyItem) {
+	if len(item.ResolvedBlockers) > 0 {
+		fmt.Printf("    Resolved blockers: %s\n", strings.Join(item.ResolvedBlockers, ", "))
+	}
+	if len(item.PinnedDependencies) > 0 {
+		fmt.Printf("    Pinned dependencies (never block): %s\n", strings.Join(item.PinnedDependencies, ", "))
+	}
+	if len(item.OpenDependencies) > 0 {
+		fmt.Printf("    Open dependencies (not blocking): %s\n", strings.Join(item.OpenDependencies, ", "))
+	}
+}
+
+// readyEmptyStateReads are the two reads plain `bd ready`'s empty state makes,
+// from the route's own store: the direct route's storage.DoltStorage and the
+// proxied route's issue use case both provide them.
+type readyEmptyStateReads interface {
+	GetStatistics(ctx context.Context) (*types.Statistics, error)
+	GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error)
+}
+
+// printReadyEmptyState prints plain `bd ready`'s empty state for both
+// renderers, so the two texts cannot drift. It claims blocking dependencies
+// only when bd blocked lists an issue this listing would show but for its
+// blockers (readyEmptyStateVerdict): open issues are also missing from ready
+// when they are in progress, deferred or filtered out, or when a stale
+// is_blocked flag hides them (GH#3268). It says nothing is blocked only when
+// that listing proves it, and a read that fails proves nothing either way.
+//
+// A page that --offset starts past the last ready issue (the proxied route;
+// the direct one refuses --offset) is empty whatever the ready set holds: the
+// issues before the offset may be ready work, so it says only that and reads
+// nothing.
+func printReadyEmptyState(ctx context.Context, in readyInput, reads readyEmptyStateReads) {
+	if in.filter.Offset > 0 {
+		fmt.Printf("\n%s No ready work at offset %d\n\n", ui.RenderWarn("✨"), in.filter.Offset)
+		fmt.Println("  The offset is past the last ready issue. Run 'bd ready' without --offset")
+		fmt.Println("  to list from the start.")
+		fmt.Println()
+		return
+	}
+	if stats, err := reads.GetStatistics(ctx); err == nil && stats.OpenIssues == 0 && stats.InProgressIssues == 0 {
+		fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
+		return
+	}
+	verdict := readyEmptyUnknown
+	if blocked, err := reads.GetBlockedIssues(ctx, storageissueops.BlockedFilter(readyBlockedRequest(in))); err == nil {
+		verdict = readyEmptyStateVerdict(in.filter, blocked, time.Now())
+	}
+	switch verdict {
+	case readyEmptyBlocked:
+		fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
+			ui.RenderWarn("✨"))
+		return
+	case readyEmptyNoneBlocked:
+		fmt.Printf("\n%s No ready work found\n\n", ui.RenderWarn("✨"))
+		fmt.Println("  Nothing bd ready would list is blocked by an open dependency. Check")
+		fmt.Println("  'bd list' for in-progress, deferred or filtered-out issues, and 'bd doctor'")
+		fmt.Println("  for a stale blocked flag (repair: 'bd recompute-blocked').")
+	default:
+		fmt.Printf("\n%s No ready work found\n\n", ui.RenderWarn("✨"))
+		fmt.Println("  Check 'bd blocked' for blocked issues, 'bd list' for in-progress, deferred")
+		fmt.Println("  or filtered-out issues, and 'bd doctor' for a stale blocked flag (repair:")
+		fmt.Println("  'bd recompute-blocked').")
+	}
+	fmt.Println()
+}
+
+// readyBlockedRequest is bd blocked's request for the plain listing's scope:
+// the parent and the label sets, which are all bd blocked takes, read off the
+// request the way ReadyClaimer and ReadyCounter get them (readyRoleRequest).
+// Like every blocked request it carries no page, which matters here: a page
+// or a row cap could cut the one blocked issue the listing would show.
+func readyBlockedRequest(in readyInput) issueops.BlockedRequest {
+	req := readyRoleRequest(in)
+	return issueops.BlockedRequest{
+		ParentID:      req.ParentID,
+		Labels:        req.Labels,
+		LabelsAny:     req.LabelsAny,
+		ExcludeLabels: req.ExcludeLabels,
+	}
+}
+
+// readyEmptyVerdict is what an empty plain `bd ready` can truthfully say about
+// blocking dependencies.
+type readyEmptyVerdict int
+
+const (
+	// readyEmptyUnknown: nothing, either way.
+	readyEmptyUnknown readyEmptyVerdict = iota
+	// readyEmptyBlocked: bd blocked lists an issue the listing would show
+	// but for its blockers.
+	readyEmptyBlocked
+	// readyEmptyNoneBlocked: bd blocked lists nothing the listing could show.
+	readyEmptyNoneBlocked
+)
+
+// readyEmptyStateVerdict judges blocked, bd blocked's listing for the plain
+// listing's scope (readyBlockedRequest), against the listing's filter f. Only
+// an issue the listing would show but for its blockers counts: a blocked issue
+// that is in progress, deferred, ephemeral, of an excluded type or another
+// assignee's is no reason for this listing to be empty. bd blocked applies the
+// label sets exactly as the listing does, but its --parent is one hop plus the
+// dotted ids under the parent where ready's is transitive, so under --parent an
+// empty answer proves nothing. A blocked child of a future-deferred parent,
+// which the listing leaves out, still counts: the issue alone cannot tell.
+func readyEmptyStateVerdict(f types.WorkFilter, blocked []*types.BlockedIssue, now time.Time) readyEmptyVerdict {
+	verdict := readyEmptyNoneBlocked
+	if f.ParentID != nil {
+		verdict = readyEmptyUnknown
+	}
+	for _, b := range blocked {
+		switch {
+		case b == nil, readyListingDrops(f, &b.Issue, now):
+		case readyListingUndecided(f, &b.Issue):
+			verdict = readyEmptyUnknown
+		default:
+			return readyEmptyBlocked
+		}
+	}
+	return verdict
+}
+
+// readyListingDrops reports whether the plain listing whose filter is f leaves
+// issue out whatever its blockers, from the issue's own fields: the per-row
+// predicates sqlbuild.BuildReadyWorkWhere renders, less the blocked one. The
+// label sets and --parent are the blocked listing's own scope.
+func readyListingDrops(f types.WorkFilter, issue *types.Issue, now time.Time) bool {
+	return readyStatusDrops(f, issue.Status) || issue.Pinned ||
+		(!f.IncludeEphemeral && issue.Ephemeral) ||
+		(!f.IncludeDeferred && issue.DeferUntil != nil && issue.DeferUntil.After(now)) ||
+		readyTypeDrops(f, issue.IssueType) || readyAssigneeDrops(f, issue.Assignee) ||
+		(f.Priority != nil && issue.Priority != *f.Priority)
+}
+
+// readyStatusDrops is the listing's status predicate. The open pin also admits
+// custom statuses of the active category, which the issue does not carry, so
+// it never drops a custom status (readyListingUndecided).
+func readyStatusDrops(f types.WorkFilter, status types.Status) bool {
+	switch {
+	case f.Status == types.StatusOpen:
+		return status != types.StatusOpen && status.IsValid()
+	case f.Status != "":
+		return status != f.Status
+	case len(f.Statuses) > 0:
+		return !slices.Contains(f.Statuses, status)
+	default:
+		return status != types.StatusOpen && status != types.StatusInProgress
+	}
+}
+
+// readyTypeDrops is the listing's issue-type predicate.
+func readyTypeDrops(f types.WorkFilter, issueType types.IssueType) bool {
+	if f.Type != "" {
+		return string(issueType) != f.Type
+	}
+	return slices.Contains(sqlbuild.ReadyWorkExcludeTypes(f.ExcludeTypes), issueType)
+}
+
+// readyAssigneeDrops is the listing's assignee predicate.
+func readyAssigneeDrops(f types.WorkFilter, assignee string) bool {
+	if f.Unassigned {
+		return assignee != ""
+	}
+	return f.Assignee != nil && assignee != *f.Assignee
+}
+
+// readyListingUndecided reports whether the listing whose filter is f may leave
+// issue out for a reason its own fields do not carry: a label pattern or
+// regex, a metadata or molecule-type filter, or a custom status under the open
+// pin, whose category the issue does not carry.
+func readyListingUndecided(f types.WorkFilter, issue *types.Issue) bool {
+	return f.LabelPattern != "" || f.LabelRegex != "" || f.HasMetadataKey != "" ||
+		len(f.MetadataFields) > 0 || f.MolType != nil ||
+		(f.Status == types.StatusOpen && !issue.Status.IsValid())
 }

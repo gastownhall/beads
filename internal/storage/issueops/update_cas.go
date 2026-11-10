@@ -24,6 +24,12 @@ import (
 // retry loop replays — the replayed attempt re-reads here and refuses.
 // Together they close the read-then-write window.
 //
+// The assignee guard compares under actorMatches, not verbatim ==, so two
+// spellings of the same identity (ga-wzl83) don't false-mismatch — the same
+// fix already shipped for UnclaimIssueInTx's SQL-CAS predicate and
+// AuthorizeAssigneeTransferWithPools; this was the third, previously-split
+// verbatim-comparison surface (ga-5ksp5, gate review on #5439).
+//
 //nolint:gosec // G201: table name comes from WispTableRouting (hardcoded constants)
 func CheckExpectedFieldsInTx(ctx context.Context, tx DBTX, id string, expectedAssignee, expectedStatus *string) error {
 	if expectedAssignee == nil && expectedStatus == nil {
@@ -43,7 +49,7 @@ func CheckExpectedFieldsInTx(ctx context.Context, tx DBTX, id string, expectedAs
 	if err != nil {
 		return fmt.Errorf("failed to read assignee/status for %s: %w", id, err)
 	}
-	if expectedAssignee != nil && assignee.String != *expectedAssignee {
+	if expectedAssignee != nil && !actorMatches(assignee.String, *expectedAssignee) {
 		return fmt.Errorf("%w: %s is held by %q, expected %q", storage.ErrAssigneeMismatch, id, assignee.String, *expectedAssignee)
 	}
 	if expectedStatus != nil && status != *expectedStatus {

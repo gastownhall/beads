@@ -4,6 +4,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var pruneCmd = &cobra.Command{
@@ -32,6 +33,16 @@ retired label across the rig).
 To delete closed ephemeral beads (wisps, transient molecules) use
 ` + "`bd purge`" + ` instead.
 
+--retain-ids retires every id the sweep deletes: a permanent tombstone (the id
+and its closed_at) is written in the same transaction, and from then on a
+create naming that id is refused (code idempotency_expired) and an import
+skips it. Use it when ids are idempotency keys that must never run twice.
+Tombstones are permanent.
+
+Without --retain-ids, closed beads whose type the workspace's types.retained
+setting names are skipped and reported (retention_required under --json):
+their ids are idempotency keys, so only a retaining sweep may delete them.
+
 For full Dolt storage reclaim after deleting many rows, follow with ` + "`bd flatten`" + `
 so history can be collapsed and old chunks can be garbage-collected.
 
@@ -53,14 +64,17 @@ EXAMPLES:
 
 		ignoreRefs, _ := cmd.Flags().GetBool("ignore-references")
 		return runPurgeOrPrune(cmd, purgeScope{
-			cmdName:          "prune",
-			pastTense:        "pruned",
-			countKey:         "pruned_count",
-			dryRunCountKey:   "prune_count",
-			subjectNoun:      "closed bead",
-			ephemeralOnly:    false,
-			requireFilter:    true,
-			ignoreReferences: ignoreRefs,
+			cmdName:        "prune",
+			pastTense:      "pruned",
+			countKey:       "pruned_count",
+			dryRunCountKey: "prune_count",
+			subjectNoun:    "closed bead",
+			tier:           issueops.SweepDurable,
+			// The flag is the NEGATIVE of the request field: --ignore-references
+			// asks the role NOT to protect. The reporting is unconditional, so
+			// `--json` keeps publishing the keys with the flag set.
+			protectReferenced: !ignoreRefs,
+			reportsReferences: true,
 		})
 	},
 }
@@ -69,7 +83,8 @@ func init() {
 	pruneCmd.Flags().BoolP("force", "f", false, "Actually prune (without this, shows preview)")
 	pruneCmd.Flags().Bool("ignore-references", false, "Delete closed beads even when referenced by open beads (use with care; see --help for details)")
 	pruneCmd.Flags().Bool("dry-run", false, "Preview what would be pruned with stats")
-	pruneCmd.Flags().String("older-than", "", "Only prune beads closed more than N ago (e.g., 30d, 2w, 60)")
+	pruneCmd.Flags().String("older-than", "", "Only prune beads closed more than N ago (e.g., 30d, 2w, 60, 36h)")
 	pruneCmd.Flags().String("pattern", "", "Only prune beads matching ID glob pattern (e.g., 'gm-old-*')")
+	pruneCmd.Flags().Bool("retain-ids", false, "Retire every pruned id with a permanent tombstone so it can never be created again (see --help)")
 	rootCmd.AddCommand(pruneCmd)
 }

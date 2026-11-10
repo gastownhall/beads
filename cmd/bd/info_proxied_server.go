@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 func runInfoProxiedServer(ctx context.Context, schemaFlag bool) error {
@@ -20,6 +22,8 @@ func runInfoProxiedServer(ctx context.Context, schemaFlag bool) error {
 		"mode":          "proxied-server",
 	}
 
+	suppressHookWarning := false
+
 	page, err := uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{})
 	var issues []*types.Issue
 	if err == nil {
@@ -27,9 +31,22 @@ func runInfoProxiedServer(ctx context.Context, schemaFlag bool) error {
 		info["issue_count"] = len(issues)
 	}
 
+	// THE SAME FILTER THE SETTINGS ROLE USES. `bd info --json` serves
+	// this map whole, and the beads MCP server's get_schema_info tool
+	// runs `bd info --schema --json` and returns the parsed dict —
+	// config included — so every memory key AND VALUE landed in the
+	// transcript of any agent that asked a SCHEMA question. `bd info`
+	// is also the diagnostic people paste into bug reports.
+	//
+	// Unlike `bd config show`, which an operator asks for by name to
+	// see provenance, nothing here says "show me my memories".
 	configMap, err := uw.ConfigUseCase().GetAllConfig(ctx)
-	if err == nil && len(configMap) > 0 {
-		info["config"] = configMap
+	if err == nil {
+		if filtered := workapi.FilterSettingsEnumeration(configMap); len(filtered) > 0 {
+			info["config"] = filtered
+		}
+		// GH#6027: honor the same doctor.suppress.git-hooks bd doctor does.
+		suppressHookWarning = doctor.SuppressedChecksFromConfig(configMap)[doctor.CheckNameToSlug("Git Hooks")]
 	}
 
 	if schemaFlag {
@@ -41,5 +58,5 @@ func runInfoProxiedServer(ctx context.Context, schemaFlag bool) error {
 		info["schema"] = buildInfoSchema(schemaVersion, prefix, issues)
 	}
 
-	return renderInfo(info, schemaFlag, absDBPath)
+	return renderInfo(info, schemaFlag, absDBPath, suppressHookWarning)
 }

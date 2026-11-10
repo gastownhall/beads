@@ -16,6 +16,29 @@ import (
 
 // TestFormatDBList removed: formatDBList and dbInfo types were removed.
 
+func TestMigrateSchemaFlagBoundaries(t *testing.T) {
+	// Registration only. --json must come from the root persistent flag: a
+	// local duplicate shadows it, so PersistentPreRunE never sees the root
+	// flag as explicitly set and resets jsonOutput from config.
+	for _, name := range []string{"inspect", "dry-run"} {
+		if flag := migrateSchemaCmd.Flags().Lookup(name); flag != nil {
+			t.Errorf("migrate schema unexpectedly registers local --%s", name)
+		}
+	}
+	if f := migrateSchemaCmd.Flags().Lookup("json"); f != nil && f != rootCmd.PersistentFlags().Lookup("json") {
+		t.Error("migrate schema must not register a local --json; it inherits the root flag")
+	}
+	if flag := migrateSchemaCmd.Flags().Lookup("force"); flag == nil {
+		t.Error("migrate schema must register local --force")
+	}
+	if flag := rootCmd.PersistentFlags().Lookup("json"); flag == nil {
+		t.Error("root command must register persistent --json")
+	}
+	if flag := rootCmd.PersistentFlags().Lookup("format"); flag == nil {
+		t.Error("root command must register persistent --format")
+	}
+}
+
 func TestMigrateRespectsConfigJSON(t *testing.T) {
 	t.Skip("SQLite-specific: Dolt backend always uses 'dolt' directory, not custom database filenames")
 	// Test that migrate respects custom database name from metadata.json

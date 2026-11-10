@@ -48,10 +48,25 @@ func OpenForReadOnlyCommand(ctx context.Context, beadsDir, database, branch stri
 // is to reconcile the Dolt working set (bd dolt commit, bd vc commit) must be
 // able to open the store even when pending migrations touch dirty tables -
 // otherwise the commit that would clear the dirty state and unblock the
-// migration can never run. The returned store is otherwise a normal writable
-// store.
+// migration can never run. A schema.MigrateConsentError, which fires first on
+// a database that is also behind, is skipped the same way
+// (toleratesConsentRefusal). The returned store is otherwise a normal
+// writable store.
 func OpenForWorkingSetReconcile(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
 	return openCached(ctx, beadsDir, database, branch, openWorkingSetReconcile)
+}
+
+// OpenForRemoteSync opens like Open, except that the #6575 data-behind
+// remote-migrate gate refusal — and only that one — skips the pending
+// migrations with a stderr warning instead of failing the open: that refusal's
+// entire remedy is `bd dolt pull`, which opens the store itself and so hit the
+// refusal that prescribed it, leaving the refused clone with no in-band exit at
+// all (the same deadlock #4566 broke for `bd dolt commit`). Every other gate
+// refusal, the dirty-table guard and the dependency re-key still fail this open
+// exactly as they fail a strict one. The returned store is otherwise a normal
+// writable store.
+func OpenForRemoteSync(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
+	return openCached(ctx, beadsDir, database, branch, openRemoteSync)
 }
 
 func openCached(ctx context.Context, beadsDir, database, branch string, intent openIntent) (*EmbeddedDoltStore, error) {
@@ -65,8 +80,9 @@ func openCached(ctx context.Context, beadsDir, database, branch string, intent o
 		// Cache hit: the requested intent is ignored - the store keeps
 		// whatever intent it was opened with on the slow path below. This is
 		// safe today because intent is derived once per process from the
-		// command classification (isReadOnlyCommand / isWorkingSetReconcileCommand
-		// in cmd/bd/main.go), so a single process never opens the same data
+		// command classification (isReadOnlyCommand /
+		// isWorkingSetReconcileCommand / isRemoteSyncCommand in
+		// cmd/bd/main.go), so a single process never opens the same data
 		// directory under two different intents, and autoMigrateOnVersionBump
 		// (cmd/bd/version_tracking.go) always opens its own openStrict store
 		// and closes it before the main command's open runs, so it never

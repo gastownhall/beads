@@ -11,6 +11,9 @@
 //   - Same issue prefix (worst case for collision detection)
 //   - Concurrent writes from both projects simultaneously
 //   - Read isolation (project A never sees project B's issues)
+//   - Project-identity verification on connect (GH#4637): a CreateIfMissing:true
+//     open reconnecting to an already-existing database with a mismatched local
+//     project_id must fail, not silently share the database
 //
 // Based on tests by @PabloLION (PR #2472).
 package dolt
@@ -19,11 +22,15 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -35,9 +42,6 @@ func setupTwoProjectStores(t *testing.T, prefixA, prefixB string) (storeA, store
 	skipIfNoDolt(t)
 	acquireTestSlot()
 	t.Cleanup(releaseTestSlot)
-
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	defer cancel()
 
 	tmpDirA, err := os.MkdirTemp("", "dolt-project-a-*")
 	if err != nil {
@@ -67,21 +71,25 @@ func setupTwoProjectStores(t *testing.T, prefixA, prefixB string) (storeA, store
 		CreateIfMissing: true,
 	}
 
-	storeA, err = New(ctx, cfgA)
+	// Every call here gets its own budget. A shared context would not work even
+	// though only the opens are expensive: deadlines are absolute, so the two
+	// cold opens would drain a context created here and the cheap SetConfig
+	// calls would be the ones to report "context deadline exceeded".
+	storeA, err = openStoreWithOwnBudget(t, cfgA)
 	if err != nil {
 		os.RemoveAll(tmpDirA)
 		os.RemoveAll(tmpDirB)
 		t.Fatalf("failed to create store A: %v", err)
 	}
 
-	if err := storeA.SetConfig(ctx, "issue_prefix", prefixA); err != nil {
+	if err := setConfigWithOwnBudget(t, storeA, "issue_prefix", prefixA); err != nil {
 		storeA.Close()
 		os.RemoveAll(tmpDirA)
 		os.RemoveAll(tmpDirB)
 		t.Fatalf("failed to set prefix for project A: %v", err)
 	}
 
-	storeB, err = New(ctx, cfgB)
+	storeB, err = openStoreWithOwnBudget(t, cfgB)
 	if err != nil {
 		storeA.Close()
 		os.RemoveAll(tmpDirA)
@@ -89,7 +97,7 @@ func setupTwoProjectStores(t *testing.T, prefixA, prefixB string) (storeA, store
 		t.Fatalf("failed to create store B: %v", err)
 	}
 
-	if err := storeB.SetConfig(ctx, "issue_prefix", prefixB); err != nil {
+	if err := setConfigWithOwnBudget(t, storeB, "issue_prefix", prefixB); err != nil {
 		storeA.Close()
 		storeB.Close()
 		os.RemoveAll(tmpDirA)
@@ -234,7 +242,7 @@ func TestCrossProject_PortCollision_SameDatabase(t *testing.T) {
 		CreateIfMissing: true,
 	}
 
-	storeA, err := New(ctx, cfgA)
+	storeA, err := openStoreWithOwnBudget(t, cfgA)
 	if err != nil {
 		os.RemoveAll(tmpDirA)
 		os.RemoveAll(tmpDirB)
@@ -247,7 +255,7 @@ func TestCrossProject_PortCollision_SameDatabase(t *testing.T) {
 		t.Fatalf("set prefix A: %v", err)
 	}
 
-	storeB, err := New(ctx, cfgB)
+	storeB, err := openStoreWithOwnBudget(t, cfgB)
 	if err != nil {
 		storeA.Close()
 		os.RemoveAll(tmpDirA)
@@ -666,5 +674,434 @@ func TestCrossProject_ConcurrentReadWriteMix(t *testing.T) {
 		t.Log("Concurrent read-write isolation verified: zero cross-project leakage")
 	} else {
 		t.Errorf("TOTAL LEAKAGE EVENTS: %d", leakDetected.Load())
+	}
+}
+
+// =============================================================================
+// Test 6: Project-Identity Verification on Connect (GH#4637 Part A)
+// =============================================================================
+//
+// newServerMode's identity gate previously only ran when CreateIfMissing was
+// false. `bd init` always sets CreateIfMissing:true, so it never verified
+// identity at all — reconnecting to an already-existing database with a
+// mismatched local project_id (the shape of `bd init` accidentally targeting
+// another project's shared-server database) was silently accepted. These
+// tests cover the fixed gate and the cases that must keep working unchanged:
+// a genuinely new database, and each of verifyProjectIdentity's soft-skip
+// paths (missing local metadata.json, empty project_id on either side).
+
+// identityTestFixture holds a temp beadsDir wired up for identity-check tests:
+// a Path for the Dolt client data dir, and a BeadsDir so verifyProjectIdentity
+// can find metadata.json.
+type identityTestFixture struct {
+	tmpDir   string
+	beadsDir string
+	dbName   string
+}
+
+func newIdentityTestFixture(t *testing.T, namePrefix string) *identityTestFixture {
+	t.Helper()
+	tmpDir, err := os.MkdirTemp("", "dolt-identity-"+namePrefix+"-*")
+	if err != nil {
+		t.Fatalf("mkdir temp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir beadsDir: %v", err)
+	}
+	return &identityTestFixture{
+		tmpDir:   tmpDir,
+		beadsDir: beadsDir,
+		dbName:   uniqueTestDBName(t),
+	}
+}
+
+func (f *identityTestFixture) saveLocalProjectID(t *testing.T, projectID string) {
+	t.Helper()
+	if err := (&configfile.Config{ProjectID: projectID}).Save(f.beadsDir); err != nil {
+		t.Fatalf("save metadata.json: %v", err)
+	}
+}
+
+func (f *identityTestFixture) config() *Config {
+	return &Config{
+		Path:            filepath.Join(f.tmpDir, "dolt"),
+		BeadsDir:        f.beadsDir,
+		CommitterName:   "test",
+		CommitterEmail:  "test@test.com",
+		Database:        f.dbName,
+		CreateIfMissing: true,
+	}
+}
+
+// pathOnlyConfig is the beads.Open shape: Path under .beads and no
+// BeadsDir, so New must derive the workspace from filepath.Dir(Path).
+func (f *identityTestFixture) pathOnlyConfig() *Config {
+	return &Config{
+		Path:            filepath.Join(f.beadsDir, "dolt"),
+		CommitterName:   "test",
+		CommitterEmail:  "test@test.com",
+		Database:        f.dbName,
+		CreateIfMissing: true,
+	}
+}
+
+func TestCrossProject_IdentityCheck_ExistingDatabase_ForeignRejected(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	f := newIdentityTestFixture(t, "foreign")
+	ownerID := "11111111-1111-1111-1111-111111111111"
+	f.saveLocalProjectID(t, ownerID)
+
+	ownerStore, err := openStoreWithOwnBudget(t, f.config())
+	if err != nil {
+		t.Fatalf("create owner store: %v", err)
+	}
+	if err := ownerStore.SetMetadata(ctx, "_project_id", ownerID); err != nil {
+		ownerStore.Close()
+		t.Fatalf("seed _project_id: %v", err)
+	}
+	ownerStore.Close()
+
+	// A different project's local metadata.json (foreign project id)
+	// reconnects to the SAME already-existing database with
+	// CreateIfMissing:true — the exact shape of `bd init` against a shared
+	// server. This must fail, not silently adopt the database.
+	foreignID := "22222222-2222-2222-2222-222222222222"
+	f.saveLocalProjectID(t, foreignID)
+
+	foreignStore, err := openStoreWithOwnBudget(t, f.config())
+	if err == nil {
+		foreignStore.Close()
+		t.Fatalf("expected identity mismatch error, got nil (silently connected to foreign project's database)")
+	}
+	if !strings.Contains(err.Error(), "PROJECT IDENTITY MISMATCH") {
+		t.Fatalf("expected PROJECT IDENTITY MISMATCH error, got: %v", err)
+	}
+	// CreateIfMissing alone is not bd init: the library API, bd doctor --fix
+	// and bd bootstrap open this way too, and keep the ordinary-open advice
+	// (GH#5558). Only Config.OpenedByInit selects the init wording.
+	if strings.Contains(err.Error(), "refusing to initialize") {
+		t.Errorf("a non-init CreateIfMissing open got the bd init wording: %v", err)
+	}
+
+	initCfg := f.config()
+	initCfg.OpenedByInit = true
+	initStore, err := openStoreWithOwnBudget(t, initCfg)
+	if err == nil {
+		initStore.Close()
+		t.Fatalf("expected identity mismatch error for the bd init open, got nil")
+	}
+	if !strings.Contains(err.Error(), "refusing to initialize") || strings.Contains(err.Error(), "Do NOT run 'bd init'") {
+		t.Errorf("the bd init open did not get the init wording: %v", err)
+	}
+}
+
+// TestCrossProject_IdentityCheck_ExistingDatabase_MatchingSucceeds is the
+// positive control for the rejection test above: the same
+// already-existing-database + CreateIfMissing:true shape, but with local
+// metadata.json carrying the SAME project id the database already records.
+// This must keep succeeding — the fix must not turn ordinary reconnects
+// (e.g. a second `bd` invocation against the same project) into failures.
+func TestCrossProject_IdentityCheck_ExistingDatabase_MatchingSucceeds(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	f := newIdentityTestFixture(t, "matching")
+	projectID := "55555555-5555-5555-5555-555555555555"
+	f.saveLocalProjectID(t, projectID)
+
+	firstStore, err := openStoreWithOwnBudget(t, f.config())
+	if err != nil {
+		t.Fatalf("create first store: %v", err)
+	}
+	if err := firstStore.SetMetadata(ctx, "_project_id", projectID); err != nil {
+		firstStore.Close()
+		t.Fatalf("seed _project_id: %v", err)
+	}
+	firstStore.Close()
+
+	secondStore, err := openStoreWithOwnBudget(t, f.config())
+	if err != nil {
+		t.Fatalf("reconnect with matching project id must succeed, got: %v", err)
+	}
+	secondStore.Close()
+}
+
+func TestCrossProject_IdentityCheck_NewDatabase_Succeeds(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	f := newIdentityTestFixture(t, "new")
+	f.saveLocalProjectID(t, "33333333-3333-3333-3333-333333333333")
+
+	store, err := New(ctx, f.config())
+	if err != nil {
+		t.Fatalf("creating a brand-new database must still succeed: %v", err)
+	}
+	store.Close()
+}
+
+// TestCrossProject_IdentityCheck_SoftSkip_NoLocalMetadata covers
+// verifyProjectIdentity's soft-skip when the reopening side has no local
+// metadata.json at all (localID == ""): this must not be turned into a hard
+// failure by the CreateIfMissing:true/dbAlreadyExisted gate.
+func TestCrossProject_IdentityCheck_SoftSkip_NoLocalMetadata(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	f := newIdentityTestFixture(t, "nolocal")
+
+	ownerStore, err := openStoreWithOwnBudget(t, f.config())
+	if err != nil {
+		t.Fatalf("create owner store: %v", err)
+	}
+	if err := ownerStore.SetMetadata(ctx, "_project_id", "44444444-4444-4444-4444-444444444444"); err != nil {
+		ownerStore.Close()
+		t.Fatalf("seed _project_id: %v", err)
+	}
+	ownerStore.Close()
+
+	// No metadata.json written for this reopen — configfile.Load returns nil.
+	reopenStore, err := openStoreWithOwnBudget(t, f.config())
+	if err != nil {
+		t.Fatalf("expected soft-skip (no local metadata.json), got error: %v", err)
+	}
+	reopenStore.Close()
+}
+
+// TestCrossProject_IdentityCheck_SoftSkip_EmptyDBProjectID covers
+// verifyProjectIdentity's other soft-skip: a local project_id is set, but the
+// database itself has no _project_id recorded (an old-style database that
+// predates the identity field). This must not be turned into a hard failure
+// either — only a database that records a DIFFERENT non-empty _project_id is
+// rejected.
+func TestCrossProject_IdentityCheck_SoftSkip_EmptyDBProjectID(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+
+	f := newIdentityTestFixture(t, "emptydb")
+
+	// Create the database but never seed _project_id — simulating an
+	// old-style database from before GH#2372.
+	ownerStore, err := openStoreWithOwnBudget(t, f.config())
+	if err != nil {
+		t.Fatalf("create owner store: %v", err)
+	}
+	ownerStore.Close()
+
+	f.saveLocalProjectID(t, "66666666-6666-6666-6666-666666666666")
+	reopenStore, err := openStoreWithOwnBudget(t, f.config())
+	if err != nil {
+		t.Fatalf("expected soft-skip (database has no _project_id), got error: %v", err)
+	}
+	reopenStore.Close()
+}
+
+// TestCrossProject_IdentityCheck_Gateway_SkipsVerification covers the one
+// branch newServerMode's identity gate deliberately does NOT enforce:
+// Gateway mode. openServerConnection never probes existence for a gateway
+// database (see its Gateway branch), so it always reports dbAlreadyExisted
+// == false and the CreateIfMissing:true/dbAlreadyExisted check never fires
+// for Gateway — even though the database plainly does already exist
+// server-side. This is intentional: cmd/bd/init.go's resolveInitProjectID
+// reconciles a stale or mismatched local project_id onto the
+// server-authoritative one on every gateway init instead of failing at open.
+// A future cleanup that "closes" the Gateway exemption here would break that
+// reconciliation flow — this test exists so that change has to update this
+// assertion, not just delete a condition.
+func TestCrossProject_IdentityCheck_Gateway_SkipsVerification(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	f := newIdentityTestFixture(t, "gateway")
+	ownerID := "77777777-7777-7777-7777-777777777777"
+	f.saveLocalProjectID(t, ownerID)
+
+	// Seed schema and _project_id with a normal (non-gateway) open first.
+	ownerStore, err := openStoreWithOwnBudget(t, f.config())
+	if err != nil {
+		t.Fatalf("create owner store: %v", err)
+	}
+	if err := ownerStore.SetMetadata(ctx, "_project_id", ownerID); err != nil {
+		ownerStore.Close()
+		t.Fatalf("seed _project_id: %v", err)
+	}
+	ownerStore.Close()
+
+	// Reopen the SAME already-existing database in Gateway mode, with a
+	// mismatched local project_id. A non-gateway CreateIfMissing:true open in
+	// this shape is rejected (see the ForeignRejected test above) — Gateway
+	// must NOT be, because identity is reconciled by resolveInitProjectID,
+	// not enforced here.
+	mismatchedID := "88888888-8888-8888-8888-888888888888"
+	f.saveLocalProjectID(t, mismatchedID)
+
+	gatewayCfg := f.config()
+	gatewayCfg.Gateway = true
+	gatewayStore, err := openStoreWithOwnBudget(t, gatewayCfg)
+	if err != nil {
+		t.Fatalf("gateway open must skip identity verification (reconciled by resolveInitProjectID instead), got error: %v", err)
+	}
+	gatewayStore.Close()
+}
+
+// seedProjectID creates the fixture's database through a BeadsDir open made
+// before any metadata.json exists (so that open soft-skips) and records
+// dbID as its _project_id.
+func (f *identityTestFixture) seedProjectID(t *testing.T, ctx context.Context, dbID string) {
+	t.Helper()
+	ownerStore, err := openStoreWithOwnBudget(t, f.config())
+	if err != nil {
+		t.Fatalf("create owner store: %v", err)
+	}
+	if err := ownerStore.SetMetadata(ctx, "_project_id", dbID); err != nil {
+		ownerStore.Close()
+		t.Fatalf("seed _project_id: %v", err)
+	}
+	ownerStore.Close()
+}
+
+// TestCrossProject_IdentityCheck_PathOnly_ForeignRejected covers a Path-only
+// Config (no BeadsDir), the shape beads.Open builds (GH#5559). New resolves
+// the workspace from filepath.Dir(Path), so the identity gate must check
+// that resolved directory and refuse a foreign project's existing database,
+// whether or not CreateIfMissing is set.
+func TestCrossProject_IdentityCheck_PathOnly_ForeignRejected(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	f := newIdentityTestFixture(t, "pathonly-foreign")
+	f.seedProjectID(t, ctx, "proj-owner")
+	f.saveLocalProjectID(t, "proj-intruder")
+
+	for _, createIfMissing := range []bool{true, false} {
+		t.Run(fmt.Sprintf("CreateIfMissing=%v", createIfMissing), func(t *testing.T) {
+			cfg := f.pathOnlyConfig()
+			cfg.CreateIfMissing = createIfMissing
+			// Its own budget: ctx was built before the seed's cold open (be-gvnsq).
+			store, err := openStoreWithOwnBudget(t, cfg)
+			if err == nil {
+				store.Close()
+				t.Fatalf("Path-only open of a foreign database succeeded; want PROJECT IDENTITY MISMATCH")
+			}
+			if store != nil {
+				store.Close()
+				t.Errorf("New returned a non-nil store alongside error: %v", err)
+			}
+			if !strings.Contains(err.Error(), "PROJECT IDENTITY MISMATCH") {
+				t.Fatalf("expected PROJECT IDENTITY MISMATCH error, got: %v", err)
+			}
+			if strings.Contains(err.Error(), "refusing to initialize") {
+				t.Errorf("a non-init open got the bd init wording: %v", err)
+			}
+		})
+	}
+}
+
+// TestCrossProject_IdentityCheck_PathOnly_GlobalForeignRejected is the
+// beads_global counterpart: a Path-only open of the global database must
+// check global_project_id in filepath.Dir(Path)/metadata.json (GH#5559).
+// The database is not dropped: the suite avoids DROP DATABASE, and the owner
+// open re-seeds _project_id, so a re-run against an existing beads_global
+// stays deterministic.
+func TestCrossProject_IdentityCheck_PathOnly_GlobalForeignRejected(t *testing.T) {
+	skipIfNoDolt(t)
+	acquireTestSlot()
+	t.Cleanup(releaseTestSlot)
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	f := newIdentityTestFixture(t, "pathonly-global")
+	f.dbName = doltserver.GlobalDatabaseName
+	f.seedProjectID(t, ctx, "global-owner")
+	if err := (&configfile.Config{GlobalProjectID: "global-intruder"}).Save(f.beadsDir); err != nil {
+		t.Fatalf("save metadata.json: %v", err)
+	}
+
+	// Its own budget: ctx was built before the seed's cold open (be-gvnsq).
+	store, err := openStoreWithOwnBudget(t, f.pathOnlyConfig())
+	if err == nil {
+		store.Close()
+		t.Fatalf("Path-only open of a foreign beads_global succeeded; want GLOBAL PROJECT IDENTITY MISMATCH")
+	}
+	if store != nil {
+		store.Close()
+		t.Errorf("New returned a non-nil store alongside error: %v", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "GLOBAL PROJECT IDENTITY MISMATCH") {
+		t.Fatalf("expected GLOBAL PROJECT IDENTITY MISMATCH error, got: %v", err)
+	}
+	// Each ID on its own labeled line: metadata.json holds global-intruder,
+	// the database global-owner.
+	assertGlobalMismatchLines(t, msg, "global-intruder", "global-owner")
+}
+
+// TestCrossProject_IdentityCheck_PathOnly_SoftSkipAndMatch is the guard for
+// the Path-only fix above: resolving the workspace from filepath.Dir(Path)
+// must not turn a matching project_id, or a workspace that cannot be
+// verified, into a refused open.
+func TestCrossProject_IdentityCheck_PathOnly_SoftSkipAndMatch(t *testing.T) {
+	const dbID = "proj-owner"
+	cases := []struct {
+		name      string
+		writeMeta func(t *testing.T, f *identityTestFixture)
+	}{
+		{"MatchingProjectID", func(t *testing.T, f *identityTestFixture) { f.saveLocalProjectID(t, dbID) }},
+		{"NoLocalMetadata", func(t *testing.T, f *identityTestFixture) {}},
+		{"EmptyLocalProjectID", func(t *testing.T, f *identityTestFixture) { f.saveLocalProjectID(t, "") }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			skipIfNoDolt(t)
+			acquireTestSlot()
+			t.Cleanup(releaseTestSlot)
+
+			f := newIdentityTestFixture(t, "pathonly-skip")
+			seedCtx, seedCancel := testContext(t)
+			f.seedProjectID(t, seedCtx, dbID)
+			seedCancel()
+			tc.writeMeta(t, f)
+
+			store, err := openStoreWithOwnBudget(t, f.pathOnlyConfig())
+			if err != nil {
+				t.Fatalf("Path-only reopen must succeed, got: %v", err)
+			}
+			defer store.Close()
+			// Build the read context after the open drained any earlier
+			// deadline (see openStoreWithOwnBudget).
+			ctx, cancel := testContext(t)
+			defer cancel()
+			got, err := store.GetMetadata(ctx, "_project_id")
+			if err != nil {
+				t.Fatalf("read _project_id: %v", err)
+			}
+			if got != dbID {
+				t.Errorf("_project_id = %q, want %q", got, dbID)
+			}
+		})
 	}
 }

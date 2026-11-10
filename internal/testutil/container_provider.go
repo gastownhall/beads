@@ -18,6 +18,7 @@ import (
 // mapped host port, and Stop() to tear it down.
 type ContainerProvider struct {
 	container *dolt.DoltContainer
+	local     *localDoltServer // local backend instead of container
 	port      int
 }
 
@@ -27,12 +28,22 @@ func NewContainerProvider() (*ContainerProvider, error) {
 		return nil, fmt.Errorf("cannot create container provider: %s", state)
 	}
 
+	if useLocalDoltServer() {
+		s, err := startLocalDoltServer()
+		if err != nil {
+			return nil, fmt.Errorf("starting local Dolt server: %w", err)
+		}
+		return &ContainerProvider{local: s, port: s.Port()}, nil
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), serverStartTimeout)
 	defer cancel()
 
+	reapStaleDoltContainers()
 	ctr, err := dolt.Run(ctx, DoltDockerImage,
 		dolt.WithDatabase("beads_test"),
 		testcontainers.WithEnv(map[string]string{"DOLT_ROOT_HOST": "%"}),
+		ownerLabels(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("starting Dolt container: %w", err)
@@ -70,6 +81,11 @@ func (p *ContainerProvider) WritePortFile(serverDir string) error {
 
 // Stop terminates the container.
 func (p *ContainerProvider) Stop() error {
+	if p.local != nil {
+		p.local.terminate()
+		p.local = nil
+		return nil
+	}
 	if p.container == nil {
 		return nil
 	}

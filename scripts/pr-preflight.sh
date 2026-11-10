@@ -23,6 +23,8 @@ What this checks:
   - draft, review, mergeability, and check status
   - CI health of the base branch (red base makes "failures are pre-existing"
     reasoning unsafe; set PR_PREFLIGHT_BLOCK_RED_BASE=1 to block instead of warn)
+  - a supplemental, warn-only sample for a PR-gate workflow (e.g. pr.yml) that
+    is red for every PR while the base branch itself looks green
   - risky diff signals: .beads data, missing tests for code changes, large diffs
   - contributor-protection next steps and attribution reminders
 
@@ -290,6 +292,59 @@ elif [[ "$base_green_count" -gt 0 ]]; then
   pass "Base branch ${base_ref} CI is green (latest completed run of each of ${base_green_count} workflow(s) succeeded)."
 else
   warn "Could not determine CI health of base branch ${base_ref}; check it manually before merging."
+fi
+
+# PR-gate health sample. The base-branch check above reads runs on the base
+# branch itself, so it cannot see a job that exists only in the PR workflow
+# (pr.yml) - such a job never runs on the base branch, and one broken job
+# there is diluted to invisibility by every other green PR workflow if runs
+# are judged in aggregate. Sample recent completed pull_request-event runs
+# across PRs, group by workflow, and flag any single workflow whose decisive
+# runs are uniformly failing across several distinct branches.
+#
+# This is a supplemental, warn-only detector, deliberately never coupled to
+# PR_PREFLIGHT_BLOCK_RED_BASE: a [block] line here matches neither the
+# red-base nor the transient-block patterns pr-babysit's patrol looks for,
+# so blocking would park every merge lane and silently revoke the red-base
+# merge exception. (Wiring this signal into the patrol is a separate,
+# coordinated change.) Skip the sample entirely when the base branch is
+# already red - that already explains per-PR redness, and avoids reporting
+# "the base branch shows green" right after a red-base line above - and stay
+# silent on an empty, unreadable, or mixed-health sample.
+if [[ "$base_red_count" -eq 0 && "$base_green_count" -gt 0 ]]; then
+  # Only diagnose the PR gate against a base branch known to be green: on a red
+  # base the red-base message already explains PR redness, and on an
+  # undetermined base the "while the base branch shows green" explanation
+  # would contradict the warn printed just above.
+  pr_gate_runs=$(gh run list --repo "$repo" --event pull_request --status completed \
+    --limit 60 --json conclusion,headBranch,workflowName,workflowDatabaseId,createdAt,url 2>/dev/null) || pr_gate_runs=""
+  # gh can exit 0 with non-JSON (or empty) output; treat anything that is not
+  # a JSON array the same as an empty sample rather than let jq abort under -e.
+  jq -e 'type == "array"' >/dev/null 2>&1 <<<"${pr_gate_runs:-}" || pr_gate_runs='[]'
+  # Grouped by workflowDatabaseId (stable identity), not display name: two
+  # workflow files may share a legal name:, and org/ruleset runs can have no
+  # name at all. Known limitation, accepted for a warn-only supplemental
+  # detector: the sample is repo-wide, so runs from PRs targeting other base
+  # branches are mixed in — resolving each run's PR to filter by base would
+  # cost one API call per run.
+  pr_gate_broken=$(jq '
+    [group_by(.workflowDatabaseId)[]
+     | { workflow: (.[0].workflowName // "unknown"),
+         decisive: [.[] | select(
+           (.conclusion // "") == "success" or
+           ((.conclusion // "") | test("^(failure|timed_out|action_required|startup_failure)$"))
+         )] }
+     | select((.decisive | length) >= 5)
+     | select((.decisive | map(.headBranch) | unique | length) >= 3)
+     | select(all(.decisive[]; (.conclusion // "") | test("^(failure|timed_out|action_required|startup_failure)$")))
+    ] | .[0] // empty' <<<"$pr_gate_runs") || pr_gate_broken=""
+  if [[ -n "$pr_gate_broken" ]]; then
+    pr_gate_workflow=$(jq -r '.workflow' <<<"$pr_gate_broken")
+    pr_gate_count=$(jq -r '.decisive | length' <<<"$pr_gate_broken")
+    pr_gate_heads=$(jq -r '.decisive | map(.headBranch) | unique | length' <<<"$pr_gate_broken")
+    pr_gate_newest=$(jq -r '.decisive | sort_by(.createdAt) | last | "\(.createdAt) \(.url)"' <<<"$pr_gate_broken")
+    warn "PR gate workflow '${pr_gate_workflow}' appears broken: all ${pr_gate_count} of its recent completed pull_request runs across ${pr_gate_heads} branches failed (newest: ${pr_gate_newest}). A job that exists only in that workflow may be red for every PR while the base branch shows green. Investigate before trusting per-PR check verdicts."
+  fi
 fi
 
 # statusCheckRollup keeps every check run on the head SHA, including runs

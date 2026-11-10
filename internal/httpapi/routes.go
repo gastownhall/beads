@@ -1,0 +1,1224 @@
+package httpapi
+
+import (
+	"net/http"
+	"slices"
+	"strings"
+
+	"github.com/steveyegge/beads/internal/types"
+)
+
+const (
+	// customMethodPathValue names the ServeMux wildcard the single-resource
+	// custom methods share. The route rows build their pattern from it and
+	// customMethodTarget splits the custom method back off the segment it
+	// matched, so the two halves of the one path exception cannot drift apart.
+	customMethodPathValue = "idop"
+	// customMethodPattern is that one registration. Every row carrying a
+	// customMethod declares it, and s.handler collapses them into a single
+	// ServeMux entry.
+	customMethodPattern = "/v0/beads/issues/{" + customMethodPathValue + "}"
+	// customMethodIDValue is where the dispatcher leaves the id it split out,
+	// so a handler reads its target exactly as one on a literal `{id}` pattern
+	// does rather than re-deriving the split.
+	customMethodIDValue = "id"
+)
+
+// ProjectIDHeader names the optional per-request workspace-identity stamp. A
+// client that knows which workspace it means to address puts that workspace's
+// project id here; checkProjectStamp (server.go) refuses the request when the id
+// it names is not the one this server serves, so a misdirected read or write is
+// turned away before it can touch the wrong workspace. The header is optional and
+// absent by default: an older client that never sends it is served exactly as
+// before, which is what keeps enforcement additive rather than a new precondition.
+const ProjectIDHeader = "Bd-Project-Id"
+
+// CapProjectEnforce is the behavior capability that advertises this enforcement.
+// Unlike the per-operation tokens it names no route: it tells a client that a
+// stamped request WILL be checked here, so the client can rely on the refusal
+// instead of discovering an older server silently ignored its stamp.
+const CapProjectEnforce = "project.enforce"
+
+// CapBatchApplyLarge is the behavior capability that advertises the raised
+// issues:batchApply envelope: up to issueops.MaxApplyBatchItems (1000)
+// items, a maxApplyBatchBodyBytes (16 MiB) body, and — for a request over
+// largeApplyItemThreshold items — an EXTENDED, operator-configurable run
+// budget (Server.largeApplyCeiling, batch_apply.go / server.go) on top of
+// the ordinary requestDeadline every request already gets; see
+// Server.acquireLargeApply for how that budget is built and why it never
+// narrows a small request's deadline.
+//
+// This token names all three limits together, and
+// TestCapBatchApplyLargeTiesAllThreeLimits pins that: a build that lowers
+// one of the three without removing this token would advertise an envelope
+// it does not actually honor. Like CapProjectEnforce it names a server-wide
+// BEHAVIOR rather than a route — issues.batchApply itself is already the
+// per-operation token — so an older client that checks capabilities before
+// sending an over-100-item plan can tell whether THIS server accepts it
+// before it dials, rather than discovering a 400 only after paying for the
+// round trip an old server would refuse anyway.
+const CapBatchApplyLarge = "issues.batchApplyLarge"
+
+// CapIssuesListSort is the behavior capability that advertises GET
+// /v0/beads/issues' `sort` parameter (reads.go, spec `sort` on OpListIssues).
+// Like CapBatchApplyLarge it names a PARAMETER added to an existing operation
+// rather than a route of its own — `issues.list` is already the per-operation
+// token for the route itself — so it rides the same behaviorCapabilities list.
+//
+// The parameter shipped (#5666) with no token at all: a client already had the
+// per-parameter fallback (an old server answers `sort` with 400
+// `unknown_parameter`, which doubles as a capability probe), but that means
+// paying a round trip an old server would refuse anyway. A client that checks
+// this token at handshake time learns the same thing for free. This is also
+// the spec/lint rule in TestNewParameterOnExistingOperationHasABehaviorToken:
+// `sort` predates that rule and would have failed it, so it is the parity fix
+// — ent already advertises the equivalent token — that the rule's own
+// baseline is built from.
+const CapIssuesListSort = "issues.list.sort"
+
+// CapIssuesCountScope is the behavior capability that advertises GET
+// /v0/beads/issues:count's `parent`, `no_parent`, `exclude_type`, and
+// `exclude_status` parameters (reads.go countFilters, spec OpCountIssues).
+// Like CapIssuesListSort it names FOUR PARAMETERS added to an existing
+// operation rather than a route of its own — `issues.count` is already the
+// per-operation token for the route itself — so it rides the same
+// behaviorCapabilities list and one token covers all four (internal/beads
+// design doc "Count scope", S8): they shipped together, through the one
+// shared workapi.BuildCountFilter builder, so there is no partial-support
+// state a finer-grained token would need to distinguish.
+//
+// This is the TestNewParameterOnExistingOperationHasABehaviorToken gate
+// CapIssuesListSort's doc describes: `issues:count` is a pretoken-baseline
+// operation (internal/httpapi/testdata/pretoken_operations.json), so these
+// four NEW parameters on it must each cite a served token in their own
+// OpenAPI description, and this is that token.
+//
+// CLIENT-SKEW NOTE FOR S3/S4 (no OSS HTTP client exists yet to wire this
+// into): a server predating this token answers any of the four parameters
+// with `400 invalid_argument`/`reason: "unknown_parameter"` naming the
+// parameter — the per-parameter capability probe every behavior token on
+// this operation already relies on (see CapIssuesListSort). When the HTTP
+// client lands, it MUST check `issues.count.scope` against the cached
+// `ContextResponse.capabilities` from the handshake and refuse LOCALLY with
+// a typed `ErrUnsupported{Capability: "issues.count.scope"}` (or an
+// equivalent typed error carrying the token) before sending a request that
+// sets `ParentID`, `NoParent`, `ExcludeTypes` or `ExcludeStatus` to an older
+// server — never let the caller pay for a round trip that 400s anyway, and
+// never silently drop the fields and return a wider count than asked for.
+//
+// THE DOWNSTREAM FALLBACK THIS PROTECTS (S8 review, follow-up #6): gc's own
+// client maps that local `ErrUnsupported{Capability: "issues.count.scope"}`
+// refusal to its own `ErrCountUnsupported` and falls back to the List role for
+// the same predicate (beads-design DESIGN.txt §3.2, "gc maps this to
+// ErrCountUnsupported and falls back to List") rather than surfacing the
+// refusal to its own caller or guessing at a count. S3/S4, when they build
+// that client, MUST add a skew test that masks this token out of a handshake
+// response and asserts the fallback actually fires — not merely that the
+// local refusal is raised — because a fallback that compiles but never runs
+// in CI is indistinguishable from one that silently regressed to a wrong
+// count.
+const CapIssuesCountScope = "issues.count.scope"
+
+// CapIssuesListSearch is the behavior capability that advertises GET
+// /v0/beads/issues' `q` parameter (reads.go, spec `q` on OpListIssues):
+// `bd search`'s free text, carried as issueops.ListRequest.Query. Like
+// CapIssuesListSort it names a PARAMETER added to an existing operation, so it
+// rides behaviorCapabilities, and it is the token the parameter's OpenAPI
+// description cites for TestNewParameterOnExistingOperationHasABehaviorToken.
+//
+// The client (internal/httpclient) refuses a search locally against a server
+// that does not advertise it, with ErrUnsupported naming the token, so a
+// search is never sent to a server that would answer `unknown_parameter` and
+// is never widened into an unsearched listing.
+const CapIssuesListSearch = "issues.list.search"
+
+// CapIssuesListNoAssignee and CapIssuesListTitle are the behavior
+// capabilities that advertise GET /v0/beads/issues' `no_assignee` and `title`
+// parameters (reads.go, spec OpListIssues): `bd list --no-assignee` and
+// `--title`, carried as issueops.ListRequest's NoAssignee and TitleSearch and
+// applied by the same Reader role (workapi.BuildListFilter) the local route
+// reads through. Like CapIssuesListSearch each names a PARAMETER added to an
+// existing operation, so each rides behaviorCapabilities and is the token its
+// parameter's OpenAPI description cites for
+// TestNewParameterOnExistingOperationHasABehaviorToken.
+//
+// One token per parameter rather than one for the set: each is a separate
+// cutover dependency of a separate caller (gc's on_boot recovery, the PR-intake
+// formula; CapListIDs below is the pr-review skill's), and a client names
+// exactly the one a refused request needed.
+//
+// The client (internal/httpclient) refuses a request carrying either locally
+// against a server that does not advertise its token, with ErrUnsupported
+// naming the token: an older server answers the parameter with
+// `unknown_parameter`, and dropping it would answer a WIDER listing than asked
+// for (for gc's on_boot recovery, every in-progress bead, assigned or not).
+const (
+	CapIssuesListNoAssignee = "issues.list.noAssignee"
+	CapIssuesListTitle      = "issues.list.title"
+)
+
+// CapIssuesListFilters is the behavior capability that advertises the rest of
+// `bd list`'s filter vocabulary on GET /v0/beads/issues (reads.go
+// listFilterParams, spec OpListIssues): the updated/closed/defer/due bounds,
+// the priority range, the text and external-ref matches, the label
+// pattern/regex, the spec prefix, the empty-description, no-labels, no-parent,
+// pinned-flag, deferred and overdue predicates, the type and status exclusions
+// and the mol/wisp types. Each is carried as the issueops.ListRequest member
+// `bd list` sets and applied by the same Reader role (workapi.BuildListFilter)
+// the local route reads through; the handler builds no filter.
+//
+// ONE token for the set, unlike the per-parameter list tokens above: these
+// members land in one build and no server will ever carry a subset, so a split
+// would mint about twenty tokens with no cutover distinction between them.
+//
+// The client refuses a request carrying any of them locally against a server
+// that does not advertise this token, with ErrUnsupported naming it: an older
+// server answers the parameter with `unknown_parameter`, and dropping one would
+// answer a WIDER listing than asked for.
+const CapIssuesListFilters = "issues.list.filters"
+
+// CapListIDs is the behavior capability that advertises the repeatable `id`
+// filter on listIssues (issueops.ListRequest.IDFilter; `bd list --id`). It
+// rides beside `issues.list` for the reason CapIssuesListSort does: the
+// operation already exists, and what this announces is one more member it
+// understands. The contract — one id per value, at most maxListIDs values,
+// each matched exactly as sent — and the token's spelling are bd-enterprise's
+// (E9-S2), adopted unchanged so the two servers publish one `id`.
+const CapListIDs = "issues.list.ids"
+
+// CapDependenciesBlockingIsBlocked is the behavior capability that advertises
+// GET /v0/beads/dependencies/blocking's `is_blocked` parameter (blocking.go):
+// issueops.BlockingRequest.IncludeIsBlocked, which adds each item's stored,
+// transitive is_blocked flag to the decoration. It is the batched readiness
+// projection behind storage's IsBlockedBatch on a role-served backend
+// (issueops.BlockedFlags). The client refuses the read locally, naming this
+// token, against a server that does not advertise it.
+const CapDependenciesBlockingIsBlocked = "dependencies.blocking.isBlocked"
+
+// CapIssuesArrivalSeq is the behavior capability announcing `arrival_seq` on
+// every Issue-shaped response: the commit-ordered create sequence storage
+// stamps on a wisp-plane row (types.Issue.ArrivalSeq) — the events-journal seq
+// of the row's create record, kept on the row so a consumer can recover create
+// order after those records are pruned. It names a MEMBER added to existing
+// response schemas, so it rides behaviorCapabilities: a client that sees it
+// knows an absent member means the row carries no stamp, not that the server
+// predates the member.
+//
+// It is BUILD-LEVEL, like every other behavior token: it says this server
+// knows the member, not that rows are being stamped right now. Rows are
+// stamped only while the workspace journals. A client learns that the way it
+// learns journal activation for any purpose: events.list answers 409
+// events_journal_disabled when the journal is off.
+const CapIssuesArrivalSeq = "issues.arrivalSeq"
+
+// CapIssuesDeleteContainmentCascade is the behavior capability announcing
+// that issues:delete's `cascade` follows PARENT-CHILD edges only (GH#6301):
+// the closure is the named beads' containment tree, and a bead joined to it by
+// any other edge survives and comes back in `orphaned`. It names no new
+// request member — an older server accepts the same `cascade` and deletes
+// every transitive dependent — so the token is how a client learns which
+// meaning it will get. bd's client refuses a cascade (preview included)
+// against a server that does not advertise it (wire.CapDeleteContainmentCascade).
+const CapIssuesDeleteContainmentCascade = "issues.delete.containmentCascade"
+
+// CapIssuesSweepWispsPlane is the behavior capability that advertises the
+// `wisps-plane` value of SweepRequest.tier (sweep.go, spec SweepRequest.tier):
+// a third, wider tier that clears the whole wisps table plus any durable bead
+// with no history row, in one pass (issueops.SweepWispsPlane). An older
+// server predating this token answers the value with a `400
+// invalid_argument`/`invalid_value` naming the member, the same per-value
+// refusal CapIssuesCountScope's doc describes for a whole parameter. The
+// client MUST check this token before sending `tier: "wisps-plane"` to a
+// server that may predate it.
+const CapIssuesSweepWispsPlane = "issues.sweep.wispsPlane"
+
+// CapIssuesSweepLiveDependents is the behavior capability that advertises
+// SweepRequest.protect_live_dependents and the paired SweepSkips.live_dependent
+// response member (sweep.go): skip a closed candidate a live bead still
+// depends on, transitively, across the ephemeral/durable plane boundary
+// (issueops.SweepRequest.ProtectLiveDependents). An older server predating
+// this token answers the request member with `400
+// invalid_argument`/`unknown_parameter`. The client MUST check this token
+// before sending the member to a server that may predate it.
+const CapIssuesSweepLiveDependents = "issues.sweep.liveDependents"
+
+// CapIssuesSweepLimit is the behavior capability that advertises
+// SweepRequest.limit and the paired SweepResult.remaining response member
+// (sweep.go): cap how many beads one sweep deletes, oldest-closed-first
+// (issueops.SweepRequest.Limit / SweepResult.Remaining). An older server
+// predating this token answers the request member with `400
+// invalid_argument`/`unknown_parameter`. The client MUST check this token
+// before sending the member to a server that may predate it.
+const CapIssuesSweepLimit = "issues.sweep.limit"
+
+// CapIssuesSweepRetainIDs is the behavior capability that advertises
+// SweepRequest.retain_ids and the paired SweepResult.retain_ids echo
+// (sweep.go): a sweep that retires every id it deletes with a permanent
+// tombstone (issueops.SweepRequest.RetainIDs).
+//
+// IT PROMISES MORE THAN THE MEMBER. A server advertising it also refuses a
+// create of a retired id on every create operation — `410
+// idempotency_expired` on createIssue and on an applyBatch create item — so
+// the guarantee holds on the read side of the tombstone, not just the write
+// side. An older server answers the request member with `400
+// invalid_argument`/`unknown_parameter`; a client that needs the guarantee
+// MUST check this token and refuse to sweep without it, never fall back to a
+// sweep that leaves the ids reusable.
+const CapIssuesSweepRetainIDs = "issues.sweep.retainIds"
+
+// CapIssuesSweepRetainedTypes is the behavior capability that advertises the
+// workspace's retained-type protection on issues:sweep and the paired
+// SweepSkips.retention_required response member (sweep.go): a sweep without
+// retain_ids holds back every candidate whose issue type the workspace's
+// types.retained setting names (issueops.SettingKeyTypesRetained,
+// issueops.SweepSkips.RetentionRequired). It names no request member — the
+// protection is the server's, keyed on a stored setting — so an older server
+// answers a plain sweep without complaint and deletes the retained beads
+// without retiring their ids. The token is how a client learns which it is
+// talking to: before a plain sweep, bd's client reads it and, against a
+// server without it, reads types.retained itself and refuses the sweep before
+// the dial when the setting names a type (httpclient's
+// refuseAnUnguardedPlainSweep; wire.CapSweepRetainedTypes).
+const CapIssuesSweepRetainedTypes = "issues.sweep.retainedTypes"
+
+// CapBatchApplyDepAddLineage is the behavior capability that advertises
+// ApplyDepAddItem's `has_spawner` and `thread_id` members (batch_apply.go):
+// additive fields a `dep_add` item may carry alongside `source`, `target`,
+// `type` and `metadata`. Like CapBatchApplyLarge it names members of an
+// EXISTING operation (issues.batchApply already has its own per-operation
+// token) rather than a route of its own, so it rides the same
+// behaviorCapabilities list. An older server predating this token answers
+// either member with `400 invalid_argument`/`unknown_parameter`. The client
+// MUST check this token before sending either member to a server that may
+// predate it; it refuses locally before the dial when the token is absent.
+const CapBatchApplyDepAddLineage = "issues.batchApply.depAddLineage"
+
+// CapIssuesUpdateAllowTemplate is the behavior capability that advertises
+// two things together: updateIssue enforces the role's template read-only
+// refusal, and UpdateIssueRequest's `allow_template` member (update.go) stands
+// it down for one request (the caller edits a template deliberately). An
+// older server predating this token answers the member with
+// `400 invalid_argument`/`unknown_parameter` and applies no template guard,
+// so a client that does not see the token refuses a template update itself
+// before the dial and sends the request without the member. That fallback
+// covers updateIssue only: an applyBatch `update` item gets no client-side
+// check (its target resolves on the server), so through an older server it
+// still edits a template (bd-jkp9v3).
+const CapIssuesUpdateAllowTemplate = "issues.update.allowTemplate"
+
+// CapIssuesUpdatePersistence is the behavior capability that advertises
+// IssuePatchBody.persistence on updateIssue: the role's
+// IssuePatch.Persistence, which moves the row between the durable and the wisp
+// plane in the update's own transaction. It is what `bd promote`
+// (issueops.Promote) and `bd update --persistent/--ephemeral/--no-history`
+// send over http. An older server answers the member with `400
+// invalid_argument`/`unknown_parameter`; a client that does not see this token
+// refuses the move before the dial, naming the token, rather than sending it.
+const CapIssuesUpdatePersistence = "issues.update.persistence"
+
+// CapIssuesUpdateClaim is the behavior capability that advertises
+// UpdateIssueRequest's `claim` member (update.go, upstream #6890): updateIssue
+// claims the row in the update's own transaction, through the same
+// Lifecycle.Update the direct route's `bd update --claim` runs, and resolves
+// the id on BOTH planes, so a wisp is claimable here where claimIssue (the
+// Claimer role) answers it not-found by contract. A claim combines with a
+// patch and with `expected_version` in one write and answers the post-write
+// `revision`; a wisp claim takes no lease.
+//
+// The member shipped untokened (it is on the pretoken request-body baseline),
+// so a client could only find it by eating the skew 400. The token makes that
+// a handshake read: a client that does not see it sends a claim alone to
+// claimIssue (where a wisp refuses by name, W-ClaimRequest.Wisp) and refuses a
+// claim beside anything else before the dial, naming this token. One token
+// covers both planes: no server has served `claim` on one plane only.
+const CapIssuesUpdateClaim = "issues.update.claim"
+
+// CapIssuesCreateDefaultPriority is the behavior capability that advertises
+// that issues.create, issues.batchCreate and issues.batchApply's create items
+// store the create default priority (P2) for a request whose `priority` member
+// is ABSENT. An older server predating this token reads an absent priority as
+// 0 and stores P0 (critical), so a client that does not see the token MUST
+// send the default explicitly rather than omit the member.
+const CapIssuesCreateDefaultPriority = "issues.create.defaultPriority"
+
+// CapIssuesCreateGates is the behavior capability that advertises the four
+// gate members — await_type, await_id, timeout and waiters — on createIssue's
+// body and on issues:batchApply's create item. One token
+// covers both create shapes, CapIssuesCreateDefaultPriority's precedent. The
+// handlers only decode and project them: every bound is the create role's
+// (issueops.GateFieldError, the stored columns' widths and a timeout that is
+// not negative), answered as a 400 naming the member. An older server refuses
+// each as an unknown member; a client that does not see the token must refuse
+// a create carrying one before the dial rather than drop it.
+const CapIssuesCreateGates = "issues.create.gates"
+
+// CapIssuesUpdateGates is the behavior capability that advertises await_id and
+// waiters (a whole-value replacement; [] clears) on updateIssue's patch and on
+// issues:batchApply's update-item patch. await_type and
+// timeout are not patch members: no local update route changes them. It is a
+// token of its own rather than CapIssuesCreateGates because the callers that
+// depend on it (gate add-waiter, gate discover, update --await-id) are a
+// separate cutover dependency from gate create.
+const CapIssuesUpdateGates = "issues.update.gates"
+
+// CapExternalDependencies is the CONDITIONAL behavior capability announcing
+// that this server's ready, blocked-listing, claim, claim-next, close,
+// blocking-annotation and dependency-tree operations already apply bd's
+// external-dependency policy (an issue blocked by an unsatisfied
+// `external:<project>:<capability>` dependency is not ready, not claimable and
+// not closable without force, and the blocked listing lists it with that
+// dependency among its blockers). A
+// client that sees it must pass those operations through untouched: running
+// the policy again on the client would judge it against the CLIENT machine's
+// project configuration and would turn the server's atomic claim-next into a
+// read-then-claim loop.
+//
+// It is not in behaviorCapabilities because it is not a property of the
+// build: the policy is a decorator the serving process composes its roles or
+// provider through. Listen advertises it exactly when Config says the roles it
+// was handed were composed that way (Config.ExternalDependencyPolicy), so the
+// token is never advertised by a server that does not enforce the policy.
+const CapExternalDependencies = "policy.external_dependencies"
+
+// conditionalCapabilities are the behavior tokens a server advertises only
+// when its configuration says the behavior is in force. Capabilities() never
+// lists them; advertisedCapabilities adds each one whose condition holds.
+var conditionalCapabilities = []string{CapExternalDependencies}
+
+// CapIssuesCloseAutoCloseMolecule is the behavior capability that advertises
+// CloseIssueRequest.auto_close_molecule and BatchCloseRequest.auto_close_molecule
+// with their paired response members (auto_closed_molecule,
+// molecule_auto_close_refusal): close a completed molecule's root in the same
+// transaction as the step close (issueops.CloseRequest.AutoCloseMolecule). An
+// older server answers the request member with `400
+// invalid_argument`/`unknown_parameter`; the client checks this token before
+// sending it.
+const CapIssuesCloseAutoCloseMolecule = "issues.close.autoCloseMolecule"
+
+// customMethodTarget splits the custom method off the segment the router
+// matched, and reports the row that claims it.
+//
+// ServeMux wildcards match a whole path segment, so `{id}:claim` is not
+// expressible as a pattern: the rows register one shared wildcard and the parse
+// lands here. A segment that ends in no REGISTERED suffix is not an addressable
+// resource on this surface — POST on the issue-detail path is documented
+// nowhere — so it gets the same 404 the catch-all gives any other unrouted
+// path. That is what keeps the wide pattern a routing detail rather than
+// undocumented surface.
+//
+// The id itself is bounded HERE, once for every operation on the pattern, for
+// the same reason the actor is bounded at the edge: this is the last point
+// before a request buys a concurrency slot and two database round trips.
+// `issues.id` is VARCHAR(255) and the document calls the parameter an exact
+// canonical id, so a longer one — or one carrying a control character, which a
+// percent-escape in the path decodes to — names no row that can exist.
+func customMethodTarget(rows []route, segment string) (route, string, *Result) {
+	unrouted := func() *Result {
+		res := newResult(CodeNotFound, "no such route on this server")
+		return &res
+	}
+	for _, rt := range rows {
+		id, ok := strings.CutSuffix(segment, rt.customMethod)
+		if !ok || id == "" {
+			continue
+		}
+		if types.CheckFieldLen("id", id) != nil || strings.ContainsFunc(id, isControlChar) {
+			// The SAME 404 a real miss gets. A distinct refusal here would let
+			// a caller map the server's notion of a well-formed id, and there
+			// is nothing to learn from it: no such row exists either way.
+			res := NotFound()
+			return route{}, "", &res
+		}
+		return rt, id, nil
+	}
+	return route{}, "", unrouted()
+}
+
+// route is one row of the surface: an operation, where it lives in the
+// document, where it lives in the router, and what the request lifecycle owes
+// it. TestSpecRouteParity compares this table against the spec's paths, and
+// s.handler builds the router from it, so "the routes" and "the document" are
+// the same statement made twice.
+type route struct {
+	// op is the spec's operationId. It also names the operation in the
+	// request log line.
+	op string
+	// method and pattern are what the router registers.
+	method string
+	// pattern is the ServeMux pattern. It usually equals specPath, and must
+	// not be assumed to: see the claim row.
+	pattern string
+	// specPath is the path as the DOCUMENT spells it. Declared, never derived
+	// from pattern, because the two genuinely differ for the custom-method
+	// rows below and a derivation would have to encode that exception.
+	specPath string
+	// customMethod is the `:verb` this row answers on a SHARED wildcard
+	// pattern, or "" for a row the router can spell literally.
+	//
+	// ServeMux wildcards match a whole segment, so `{id}:close` is not
+	// expressible as a pattern — and the single-resource custom methods
+	// COLLIDE: three rows cannot each register POST /v0/beads/issues/{idop}.
+	// Rows carrying this field share one registration; the dispatcher splits
+	// the trailing suffix off the matched segment and hands the request to the
+	// row that claims it (see customMethodTarget).
+	//
+	// A row with a customMethod must declare its specPath, because the whole
+	// point is that the router cannot spell the documented path.
+	customMethod string
+	// capability is the token this operation contributes to
+	// ContextResponse.capabilities, or "" for operations outside that
+	// vocabulary. A stub contributes nothing whatever this says.
+	capability string
+	// bypassSemaphore exempts an operation from the request-wide database slot.
+	// Legitimate for handlers that touch no database — liveness and identity
+	// must stay answerable while every slot is held by a long scan — and for a
+	// streaming row, which takes a slot around each of its reads instead. It is
+	// never a way to skip the limit while touching the database.
+	bypassSemaphore bool
+	// streaming marks an operation whose response is held open indefinitely
+	// rather than written and finished. Such a row is exempt from
+	// requestDeadline, which for every other operation is the backstop that
+	// stops a request from holding resources forever and here would simply cut
+	// the stream off mid-flight; the handler bounds its own reads and exits on
+	// client disconnect or shutdown (see streamEvents).
+	//
+	// A streaming row must also set bypassSemaphore: holding one of the sixteen
+	// database slots for the life of a connection is the starvation the deadline
+	// used to prevent, so the slot moves to the individual reads.
+	// TestStreamingRowsAreTheDocumentsStreamingOps pins the pair.
+	streaming bool
+	// authExempt serves an operation with no bearer credential on a server
+	// that was configured with one. Only legitimate for liveness: the probe
+	// must answer with no credential, and it discloses nothing but that the
+	// process is up. Identity is NOT exempt — GET /v0/beads/context reveals the
+	// repo root, the beads directory and the database name.
+	//
+	// It is a column rather than a middleware rule for the same reason
+	// bypassSemaphore is: the exemption is a property of the operation, so it
+	// belongs where TestSpecSecurityMatchesRouteTable can compare it against
+	// the document's per-operation `security` declarations.
+	authExempt bool
+	// projectExempt exempts an operation from the Bd-Project-Id stamp check
+	// (checkProjectStamp). Legitimate only for liveness and the identity
+	// handshake: liveness must answer whatever workspace the caller thinks it
+	// reached, and the handshake is where a client LEARNS the project id to
+	// stamp with — gating it on a matching stamp would make the project id
+	// undiscoverable to a client that does not already have it. It is NOT
+	// coupled to bypassSemaphore: a bypassSemaphore row such as events:watch
+	// carries journal data and stays project-stamp-ENFORCED, so exactly the two
+	// reads that touch no workspace data are exempt and every other route —
+	// streaming or not — is enforced.
+	projectExempt bool
+	// wireRevisionExempt exempts an operation from the Bd-Wire-Revision floor
+	// check (checkWireRevision). Legitimate only for liveness: a kubelet probe
+	// carries no notion of a wire revision at all, and the check's refusal body
+	// is itself a `ContextResponse`-shaped disclosure the health row must never
+	// grow. It is deliberately NOT set on the identity handshake — unlike
+	// projectExempt, where the handshake is how a client LEARNS the id it must
+	// stamp with, a client that already knows the revision it was built for can
+	// and should declare it on the very first request, and the handshake is
+	// exactly where a floor violation is cheapest to catch: before the client
+	// has acted on anything shaped for a revision it cannot decode.
+	wireRevisionExempt bool
+	// implemented gates the capability list, so a release between slices never
+	// advertises an operation that does not work. Every v0 operation is
+	// implemented as of the read-endpoints slice; the flag stays because the
+	// next operation to be added will arrive stubbed, and because
+	// TestSpecStatusCodesMatchHandlerTable fails if a stub ever reappears
+	// without the 501 exemption that documents it.
+	implemented bool
+	handler     func(*Server, http.ResponseWriter, *http.Request)
+}
+
+// routeTable is the whole surface. Every operation in the spec appears here,
+// so route/spec parity is a single all-at-once check rather than a list that
+// grows a per-slice exemption each time. As of the read-endpoints slice every
+// row is implemented and none is a 501 stub.
+var routeTable = []route{
+	{
+		op:      OpHealth,
+		method:  http.MethodGet,
+		pattern: "/healthz",
+		// Liveness answers from the process and touches nothing that can
+		// fail, so it must not queue behind the database. That is exactly
+		// what makes it liveness-only: it stays green while Dolt is wedged.
+		bypassSemaphore: true,
+		// The one auth-exempt row. A kubelet probe presents no credential, and
+		// a liveness endpoint that 401s is a pod that restarts forever.
+		authExempt: true,
+		// And it answers whatever workspace the caller believed it reached: a
+		// liveness probe gated on a matching project stamp would go dark on a
+		// misconfigured client exactly when an operator needs it most.
+		projectExempt: true,
+		// Same reasoning extends to the wire-revision floor: a probe carries no
+		// `Bd-Wire-Revision` of its own, and must not be refused for a header it
+		// never had a reason to send.
+		wireRevisionExempt: true,
+		implemented:        true,
+		handler:            (*Server).handleHealth,
+	},
+	{
+		op:      OpGetContext,
+		method:  http.MethodGet,
+		pattern: "/v0/beads/context",
+		// A startup snapshot, so it touches no database either — and identity
+		// staying observable under saturation is half of how an operator
+		// tells one wedged server from another.
+		bypassSemaphore: true,
+		// It is also where a client LEARNS this server's project id, so it
+		// cannot itself require a matching stamp: the handshake that hands out
+		// the id must answer before the client has one to send.
+		projectExempt: true,
+		implemented:   true,
+		handler:       (*Server).handleContext,
+	},
+	{
+		op:          OpListReadyWork,
+		method:      http.MethodGet,
+		pattern:     "/v0/beads/ready",
+		capability:  "ready.list",
+		implemented: true,
+		handler:     (*Server).handleReady,
+	},
+	{
+		op:     OpGetStats,
+		method: http.MethodGet,
+		// `stats`, not `status`: on an HTTP surface `status` reads as the
+		// server's own condition, which is /healthz. This one answers about the
+		// workspace and takes a database slot to do it.
+		pattern:     "/v0/beads/stats",
+		capability:  "stats.get",
+		implemented: true,
+		handler:     (*Server).handleStats,
+	},
+	{
+		op:          OpListDependencyCycles,
+		method:      http.MethodGet,
+		pattern:     "/v0/beads/dependencies/cycles",
+		capability:  "dependencies.cycles",
+		implemented: true,
+		handler:     (*Server).handleDependencyCycles,
+	},
+	{
+		op:     OpCountReadyWork,
+		method: http.MethodGet,
+		// A collection-level custom method, spelled the way the claim route's
+		// is. Unlike that one it needs no specPath declaration: the segment is
+		// a LITERAL, and only a wildcard segment is inexpressible as a ServeMux
+		// pattern, so the router registers the documented path itself.
+		pattern:     "/v0/beads/ready:count",
+		capability:  "ready.count",
+		implemented: true,
+		handler:     (*Server).handleCountReady,
+	},
+	{
+		op:          OpListBlockedIssues,
+		method:      http.MethodGet,
+		pattern:     "/v0/beads/blocked",
+		capability:  "blocked.list",
+		implemented: true,
+		handler:     (*Server).handleListBlocked,
+	},
+	{
+		op:          OpListIssues,
+		method:      http.MethodGet,
+		pattern:     "/v0/beads/issues",
+		capability:  "issues.list",
+		implemented: true,
+		handler:     (*Server).handleListIssues,
+	},
+	{
+		op:     OpQueryIssues,
+		method: http.MethodGet,
+		// A collection-level custom method, spelled as ready:count is.
+		pattern:     "/v0/beads/issues:query",
+		capability:  "issues.query",
+		implemented: true,
+		handler:     (*Server).handleQueryIssues,
+	},
+	{
+		op:     OpCountIssues,
+		method: http.MethodGet,
+		// A collection-level custom method on the issue collection, spelled the
+		// way ready:count's is: both segments are LITERAL, so pattern and
+		// specPath agree and the router registers the documented path itself.
+		//
+		// It cannot collide with the claim's wide POST wildcard — that one is
+		// registered under POST and requires the separating slash this path has
+		// none of — nor with the plain collection GET, which ServeMux matches
+		// whole.
+		pattern:     "/v0/beads/issues:count",
+		capability:  "issues.count",
+		implemented: true,
+		handler:     (*Server).handleCountIssues,
+	},
+	{
+		op:          OpGetIssue,
+		method:      http.MethodGet,
+		pattern:     "/v0/beads/issues/{id}",
+		capability:  "issues.get",
+		implemented: true,
+		handler:     (*Server).handleGetIssue,
+	},
+	{
+		op:     OpUpdateIssue,
+		method: http.MethodPatch,
+		// A PLAIN METHOD on the issue-detail path, not a custom method: partial
+		// update of one named resource is what PATCH already means, exactly as
+		// one named resource with no body is what DELETE means for forgetMemory.
+		//
+		// It therefore registers directly and keeps pattern == specPath. It
+		// cannot collide with the POST dispatcher above — ServeMux registers
+		// method and pattern together — and it leaves the custom-method
+		// namespace for the operations that are not CRUD.
+		pattern:     "/v0/beads/issues/{id}",
+		capability:  "issues.update",
+		implemented: true,
+		handler:     (*Server).handleUpdate,
+	},
+	{
+		op:     OpListRelatedIssues,
+		method: http.MethodGet,
+		// A SUB-RESOURCE of the issue-detail path, and the surface's first. The
+		// segment is a LITERAL after a single-segment wildcard, so pattern and
+		// specPath agree and the router registers the documented path itself —
+		// no declaration is needed and the claim row's exception does not apply.
+		//
+		// It collides with nothing. `/v0/beads/issues/{id}` is a different whole
+		// path, which is what ServeMux matches on, and the custom-method
+		// dispatcher's `/v0/beads/issues/{idop}` is registered under POST and is
+		// one segment shorter besides.
+		pattern:     "/v0/beads/issues/{id}/related",
+		capability:  "issues.related",
+		implemented: true,
+		handler:     (*Server).handleListRelatedIssues,
+	},
+	{
+		op:     OpAddComment,
+		method: http.MethodPost,
+		// The second SUB-RESOURCE row and the first that writes, spelled the way
+		// the neighbor read above is: a LITERAL segment after a single-segment
+		// wildcard, so pattern and specPath agree, the router registers the
+		// documented path itself, and the claim row's exception does not apply.
+		//
+		// A PLAIN collection POST rather than a custom method, for the single
+		// create's reason: this creates one member of the collection the path
+		// names. It is the one place a sub-resource earns the method outright.
+		//
+		// It collides with nothing, and the POST wildcard is the collision worth
+		// checking rather than assuming: `/v0/beads/issues/{idop}` matches ONE
+		// segment after `/issues/`, and this path has two, so the dispatcher
+		// never sees a request for it. TestCustomMethodsNarrowThePOSTSurface and
+		// TestAddCommentPathReachesItsHandler pin the two halves.
+		//
+		// The collection has no GET row and must not grow one by reflex: no role
+		// answers a comment page, and the thread is read through
+		// `GET /v0/beads/issues/{id}?include_comments=true`. A GET here lands on
+		// the catch-all, which answers 404 — this surface has no 405.
+		pattern:     "/v0/beads/issues/{id}/comments",
+		capability:  "issues.addComment",
+		implemented: true,
+		handler:     (*Server).handleAddComment,
+	},
+	{
+		op:          OpListSettings,
+		method:      http.MethodGet,
+		pattern:     "/v0/beads/config",
+		capability:  "config.list",
+		implemented: true,
+		handler:     (*Server).handleListSettings,
+	},
+	{
+		op:          OpGetSetting,
+		method:      http.MethodGet,
+		pattern:     "/v0/beads/config/{key}",
+		capability:  "config.get",
+		implemented: true,
+		handler:     (*Server).handleGetSetting,
+	},
+	{
+		op:     OpSetSetting,
+		method: http.MethodPut,
+		// THE SURFACE'S FIRST PUT, and the method is what the operation means
+		// rather than a preference: the caller names the resource by path and
+		// sends the value that becomes its whole state, which is what PUT
+		// already means, and the write is idempotent in the strict sense.
+		//
+		// It shares its pattern with the read above and the delete below and
+		// differs only in method, which ServeMux registers together — the same
+		// arrangement the memory key already has, so the three rows cannot
+		// collide.
+		pattern:     "/v0/beads/config/{key}",
+		capability:  "config.set",
+		implemented: true,
+		handler:     (*Server).handleSetSetting,
+	},
+	{
+		op:     OpUnsetSetting,
+		method: http.MethodDelete,
+		// The surface's second DELETE, and forgetMemory's argument unchanged:
+		// one named resource, no body, no flags.
+		pattern:     "/v0/beads/config/{key}",
+		capability:  "config.unset",
+		implemented: true,
+		handler:     (*Server).handleUnsetSetting,
+	},
+	{
+		op:          OpListDependencies,
+		method:      http.MethodGet,
+		pattern:     "/v0/beads/dependencies",
+		capability:  "dependencies.list",
+		implemented: true,
+		handler:     (*Server).handleListDependencies,
+	},
+	{
+		op:     OpCountDependencyEdges,
+		method: http.MethodGet,
+		// A collection-level custom method on the dependency collection,
+		// spelled the way ready:count and issues:count are: both segments are
+		// LITERAL, so pattern and specPath agree and the router registers the
+		// documented path itself.
+		//
+		// It collides with nothing. The three literal paths under this
+		// collection — /cycles, /blocking, /tree — all carry a separating
+		// slash, and the plain collection GET is a different whole segment,
+		// which is what ServeMux matches on.
+		pattern:     "/v0/beads/dependencies:count",
+		capability:  "dependencies.count",
+		implemented: true,
+		handler:     (*Server).handleCountDependencyEdges,
+	},
+	{
+		op:     OpListBlockingAnnotations,
+		method: http.MethodGet,
+		// A literal path under the same collection as the stored-edge read. No
+		// wildcard is involved, so it cannot collide with /v0/beads/dependencies
+		// or /v0/beads/dependencies/cycles, both of which are literals too.
+		pattern:     "/v0/beads/dependencies/blocking",
+		capability:  "dependencies.blocking",
+		implemented: true,
+		handler:     (*Server).handleBlockingAnnotations,
+	},
+	{
+		op:     OpGetDependencyTree,
+		method: http.MethodGet,
+		// A sibling path under /dependencies rather than a mode of the row
+		// above: ServeMux matches the literal segment exactly, and the two
+		// operations answer different shapes from different roles.
+		pattern:     "/v0/beads/dependencies/tree",
+		capability:  "dependencies.tree",
+		implemented: true,
+		handler:     (*Server).handleDependencyTree,
+	},
+	{
+		op:     OpCreateIssue,
+		method: http.MethodPost,
+		// THE PLAIN COLLECTION POST, and the row the batch below deliberately
+		// left this path free for: creating one member of the collection a path
+		// names is what POST already means, so a single create needs no custom
+		// method and squatting on the path with a batch would have made this
+		// operation unnameable.
+		//
+		// It shares its pattern with no other row. The claim's wide
+		// /v0/beads/issues/{idop} wildcard requires the separating slash this
+		// path has none of, and every batch beside it is a literal `:verb`
+		// segment ServeMux matches whole.
+		pattern:     "/v0/beads/issues",
+		capability:  "issues.create",
+		implemented: true,
+		handler:     (*Server).handleCreateIssue,
+	},
+	{
+		op:     OpBatchCreateIssues,
+		method: http.MethodPost,
+		// A collection-level custom method, spelled the way ready:count's is.
+		//
+		// It does not collide with the claim row's wide POST wildcard below.
+		// That pattern is /v0/beads/issues/{idop} and requires the separating
+		// slash; this path has none, so the two never match the same request.
+		//
+		// Nor with the single create above, which took the plain collection
+		// POST this row was spelled as a custom method to leave free: ServeMux
+		// prefers the literal `:batchCreate` segment, and the two paths differ
+		// in any case.
+		pattern:     "/v0/beads/issues:batchCreate",
+		capability:  "issues.batchCreate",
+		implemented: true,
+		handler:     (*Server).handleBatchCreate,
+	},
+	{
+		op:     OpApplyBatch,
+		method: http.MethodPost,
+		// A collection-level custom method, spelled the way issues:batchCreate's
+		// is, and preferred over the claim's wildcard for the reason the sweep
+		// row below spells out: that pattern requires a separating slash, this
+		// path has none, and ServeMux prefers the literal in any case.
+		//
+		// A SIBLING of issues:batchCreate rather than a mode of it. The two
+		// answer different questions — one creates N issues, this one applies an
+		// ordered plan of four verbs whose items may reference each other — and a
+		// flag on that operation would have made one operationId carrying two
+		// contracts, two request schemas and two result shapes.
+		pattern:    "/v0/beads/issues:batchApply",
+		capability: "issues.batchApply",
+		// This row carries NO maxDeadline: route() gives every request here
+		// the same unconditional requestDeadline (60s) every other route
+		// gets, so a request at or under largeApplyItemThreshold items runs
+		// under EXACTLY the deadline it always has. A request that crosses
+		// the threshold gets a whole separate, EXTENDED budget —
+		// s.largeApplyCeiling, an operator flag defaulting to 5 minutes —
+		// built fresh the moment it acquires the one-wide large-apply slot
+		// (Server.acquireLargeApply, server.go). See issues.batchApplyLarge
+		// (CapBatchApplyLarge) below, the token that advertises this
+		// envelope exists.
+		implemented: true,
+		handler:     (*Server).handleApplyBatch,
+	},
+	{
+		op:      OpClaimIssue,
+		method:  http.MethodPost,
+		pattern: customMethodPattern,
+		// One of the rows where pattern and specPath differ. ServeMux wildcards
+		// match a whole path segment, so `{id}:claim` is not expressible as a
+		// pattern: the rows sharing this pattern register once and the
+		// dispatcher splits the custom method off the matched segment
+		// (customMethodTarget). Declaring specPath here keeps the parity test
+		// honest instead of teaching it this exception; TestSpecRouteParity
+		// bounds the exception's shape and TestClaimPathReachesItsHandler
+		// drives the documented path.
+		//
+		// The wildcard therefore matches every POST under /v0/beads/issues/,
+		// including the issue-detail path, which this document publishes under
+		// GET and PATCH and under no other method. The dispatcher answers 404 —
+		// the same answer the catch-all gives any other unrouted path — for a
+		// segment that ends in no registered suffix, so the wide pattern stays a
+		// routing detail rather than undocumented surface.
+		// TestCustomMethodsNarrowThePOSTSurface pins it.
+		//
+		// That 404 needs no credential, because the split happens before
+		// s.route: an unrouted suffix here is answered exactly as the catch-all
+		// answers any other unrouted path, while a registered one reaches its
+		// row and is refused. Paths are public spec, so the miss discloses
+		// nothing the document does not already publish;
+		// TestUnroutedPathsStayUnauthenticated pins both halves so neither gets
+		// "fixed" into the other.
+		specPath:     "/v0/beads/issues/{id}:claim",
+		customMethod: ":claim",
+		capability:   "issues.claim",
+		implemented:  true,
+		handler:      (*Server).handleClaim,
+	},
+	{
+		op:     OpReleaseIssue,
+		method: http.MethodPost,
+		// The claim's inverse, on the dispatcher the close built. A fifth row on
+		// this pattern is a row; everything the claim row says about the
+		// wildcard's width holds here unchanged.
+		pattern:      customMethodPattern,
+		specPath:     "/v0/beads/issues/{id}:release",
+		customMethod: ":release",
+		capability:   "issues.release",
+		implemented:  true,
+		handler:      (*Server).handleRelease,
+	},
+	{
+		op:     OpHeartbeatIssue,
+		method: http.MethodPost,
+		// The lease refresh, on the dispatcher the close built. Everything the
+		// claim row says about the wildcard's width holds here unchanged.
+		pattern:      customMethodPattern,
+		specPath:     "/v0/beads/issues/{id}:heartbeat",
+		customMethod: ":heartbeat",
+		capability:   "issues.heartbeat",
+		implemented:  true,
+		handler:      (*Server).handleHeartbeat,
+	},
+	{
+		op:     OpCloseIssue,
+		method: http.MethodPost,
+		// The second row on the shared wildcard, and the reason the dispatcher
+		// exists: two rows cannot each register this pattern. Everything the
+		// claim row says about the wildcard's width holds here unchanged.
+		pattern:      customMethodPattern,
+		specPath:     "/v0/beads/issues/{id}:close",
+		customMethod: ":close",
+		capability:   "issues.close",
+		implemented:  true,
+		handler:      (*Server).handleClose,
+	},
+	{
+		op:     OpCompareAndSetMetadata,
+		method: http.MethodPost,
+		// A fourth row on the shared single-resource dispatcher, spelled the way
+		// the reopen's is.
+		pattern:      customMethodPattern,
+		specPath:     "/v0/beads/issues/{id}:casMetadata",
+		customMethod: ":casMetadata",
+		capability:   "issues.casMetadata",
+		implemented:  true,
+		handler:      (*Server).handleCompareAndSetMetadata,
+	},
+	{
+		op:     OpReopenIssue,
+		method: http.MethodPost,
+		// The close's mirror, on the dispatcher the close built. Nothing new is
+		// needed here: a third row on this pattern is a row.
+		pattern:      customMethodPattern,
+		specPath:     "/v0/beads/issues/{id}:reopen",
+		customMethod: ":reopen",
+		capability:   "issues.reopen",
+		implemented:  true,
+		handler:      (*Server).handleReopen,
+	},
+	{
+		op:           OpAdvanceMolecule,
+		method:       http.MethodPost,
+		pattern:      customMethodPattern,
+		specPath:     "/v0/beads/issues/{id}:advanceMolecule",
+		customMethod: ":advanceMolecule",
+		capability:   "issues.advanceMolecule",
+		implemented:  true,
+		handler:      (*Server).handleAdvanceMolecule,
+	},
+	{
+		op:     OpBatchCloseIssues,
+		method: http.MethodPost,
+		// A collection-level custom method, spelled the way issues:batchCreate
+		// is — and this operation is that one's deliberate opposite: it is not
+		// all-or-nothing, so its 200 carries per-item refusals.
+		pattern:     "/v0/beads/issues:batchClose",
+		capability:  "issues.batchClose",
+		implemented: true,
+		handler:     (*Server).handleBatchClose,
+	},
+	{
+		op:     OpClaimNextIssue,
+		method: http.MethodPost,
+		// A collection-level custom method, spelled the way issues:sweep is,
+		// and preferred over the claim's wildcard for that row's reason: the
+		// segment is a LITERAL, so the router registers the documented path
+		// itself and ServeMux prefers it over the wildcard for this exact path.
+		//
+		// It names no id BECAUSE IT NAMES NO ROW. The caller asks a question and
+		// the role picks the answer, which is what makes this a sibling of
+		// issues/{id}:claim rather than a mode of it.
+		pattern:     "/v0/beads/issues:claimNext",
+		capability:  "issues.claimNext",
+		implemented: true,
+		handler:     (*Server).handleClaimNext,
+	},
+	{
+		op:     OpSweepIssues,
+		method: http.MethodPost,
+		// A collection-level custom method, spelled the way countReadyWork's is.
+		//
+		// It is registered AFTER the claim's `/v0/beads/issues/{idop}`, and
+		// ServeMux precedence is by specificity rather than by order, so the
+		// literal wins over the wildcard for this exact path. That is what
+		// keeps a sweep from being parsed as a claim of an issue called
+		// ":sweep"; TestSweepPathReachesItsHandler drives the documented path.
+		pattern:     "/v0/beads/issues:sweep",
+		capability:  "issues.sweep",
+		implemented: true,
+		handler:     (*Server).handleSweep,
+	},
+	{
+		op:     OpDeleteIssues,
+		method: http.MethodPost,
+		// A literal collection-level custom method, registered and preferred
+		// over the claim's wildcard for exactly the reason the sweep row above
+		// spells out; TestDeletePathReachesItsHandler drives the documented
+		// path.
+		pattern:     "/v0/beads/issues:delete",
+		capability:  "issues.delete",
+		implemented: true,
+		handler:     (*Server).handleDelete,
+	},
+	{
+		op:     OpBatchGetIssues,
+		method: http.MethodPost,
+		// A literal collection-level custom method, registered and preferred
+		// over the claim's wildcard for the sweep row's reason. POST rather
+		// than GET: the request names up to MaxGetManyIDs ids, which does not
+		// fit a query string reliably, and the delete beside it makes the same
+		// choice for the same reason.
+		pattern:     "/v0/beads/issues:batchGet",
+		capability:  "issues.batchGet",
+		implemented: true,
+		handler:     (*Server).handleBatchGetIssues,
+	},
+	{
+		op:     OpReclaimIssues,
+		method: http.MethodPost,
+		// A literal collection-level custom method, registered and preferred
+		// over the claim's wildcard for the sweep row's reason: without it,
+		// a reclaim would parse as a claim of an issue called ":reclaim".
+		pattern:     "/v0/beads/issues:reclaim",
+		capability:  "issues.reclaim",
+		implemented: true,
+		handler:     (*Server).handleReclaimIssues,
+	},
+	{
+		op:     OpAddDependencies,
+		method: http.MethodPost,
+		// A collection-level custom method beside :remove below, and a LITERAL
+		// for the same reason: pattern and specPath agree, so no declaration is
+		// needed and the router registers the documented path itself.
+		pattern:     "/v0/beads/dependencies:add",
+		capability:  "dependencies.add",
+		implemented: true,
+		handler:     (*Server).handleAddDependencies,
+	},
+	{
+		op:     OpRemoveDependency,
+		method: http.MethodPost,
+		// A collection-level custom method on the dependency collection,
+		// spelled the way ready:count's is. Both segments are LITERAL, so
+		// pattern and specPath agree and the router registers the documented
+		// path itself — no wildcard is involved and nothing here needs the
+		// claim row's declaration.
+		//
+		// It cannot collide with the three literal paths UNDER
+		// /v0/beads/dependencies (cycles, blocking, tree): ServeMux requires the
+		// separating slash, and this path has none.
+		pattern:     "/v0/beads/dependencies:remove",
+		capability:  "dependencies.remove",
+		implemented: true,
+		handler:     (*Server).handleRemoveDependency,
+	},
+	{
+		op:          OpListMemories,
+		method:      http.MethodGet,
+		pattern:     "/v0/beads/memories",
+		capability:  "memories.list",
+		implemented: true,
+		handler:     (*Server).handleListMemories,
+	},
+	{
+		op:     OpRememberMemory,
+		method: http.MethodPost,
+		// A plain collection POST, not a custom method: this creates one member
+		// of the collection the path names, which is what POST already means.
+		// The two destructive issue operations above are custom methods because
+		// they act on a SET the request describes; nothing here does.
+		pattern:     "/v0/beads/memories",
+		capability:  "memories.remember",
+		implemented: true,
+		handler:     (*Server).handleRememberMemory,
+	},
+	{
+		op:     OpGetMemory,
+		method: http.MethodGet,
+		// A single-segment wildcard, so pattern and specPath agree and no
+		// declaration is needed. It cannot collide with the collection read
+		// above: ServeMux requires the separating slash, so `/memories` and
+		// `/memories/{key}` never match the same request.
+		pattern:     "/v0/beads/memories/{key}",
+		capability:  "memories.get",
+		implemented: true,
+		handler:     (*Server).handleGetMemory,
+	},
+	{
+		op:     OpListEvents,
+		method: http.MethodGet,
+		// A plain collection read, not a custom method and not a sub-resource of
+		// issues: the journal is its own collection whose members happen to
+		// describe issue mutations. `since` and `limit` are ordinary query
+		// parameters, exactly as they are on /v0/beads/issues, so pattern and
+		// specPath agree and no declaration is needed.
+		pattern:     "/v0/beads/events",
+		capability:  "events.list",
+		implemented: true,
+		handler:     (*Server).handleListEvents,
+	},
+	{
+		op:     OpWatchEvents,
+		method: http.MethodGet,
+		// A collection-level custom method on the journal, spelled the way
+		// ready:count is: both segments are LITERAL, so pattern and specPath
+		// agree and the router registers the documented path itself.
+		//
+		// It cannot collide with the paged read above — ServeMux matches the
+		// whole path and these two differ — and it is a SIBLING of it rather
+		// than a mode of it deliberately: the two answer different media types
+		// with different lifetimes and different limits, and a `follow=true`
+		// parameter would have made one operation that is two contracts.
+		pattern:    "/v0/beads/events:watch",
+		capability: "events.watch",
+		// The stream lives until the client leaves, so the request deadline
+		// does not apply and the database slot moves to the individual reads.
+		// See the field comments above; readWatchBatch is the other half.
+		streaming:       true,
+		bypassSemaphore: true,
+		implemented:     true,
+		handler:         (*Server).handleWatchEvents,
+	},
+	{
+		op:     OpForgetMemory,
+		method: http.MethodDelete,
+		// The surface's first DELETE. It shares a pattern with the read above
+		// and differs only in method, which is the whole argument for the
+		// method: one named resource, no body, no flags. ServeMux registers
+		// method and pattern together, so the two rows cannot collide.
+		pattern:     "/v0/beads/memories/{key}",
+		capability:  "memories.forget",
+		implemented: true,
+		handler:     (*Server).handleForgetMemory,
+	},
+}
+
+// specPathOf is the document path for a route, defaulting to the router
+// pattern for the rows where they agree.
+func (r route) specPathOf() string {
+	if r.specPath != "" {
+		return r.specPath
+	}
+	return r.pattern
+}
+
+// behaviorCapabilities are advertised tokens that name a server-wide BEHAVIOR
+// rather than an operation. They ride in the same ContextResponse.capabilities
+// list as the per-operation tokens — a client checks the one list — but they are
+// not derived from the route table, because the behavior they announce is not a
+// route. project.enforce announces per-request Bd-Project-Id enforcement
+// (checkProjectStamp): a stamped client reads it to know the refusal is available
+// rather than silently dropped by an older server.
+var behaviorCapabilities = []string{
+	CapProjectEnforce, CapBatchApplyLarge, CapIssuesListSort, CapIssuesCountScope,
+	CapIssuesSweepWispsPlane, CapIssuesSweepLiveDependents, CapIssuesSweepLimit,
+	CapIssuesSweepRetainIDs, CapIssuesSweepRetainedTypes,
+	CapBatchApplyDepAddLineage, CapIssuesUpdateAllowTemplate, CapIssuesCreateDefaultPriority,
+	CapIssuesCloseAutoCloseMolecule, CapIssuesListSearch,
+	CapIssuesListNoAssignee, CapIssuesListTitle, CapListIDs, CapIssuesUpdatePersistence, CapDependenciesBlockingIsBlocked, CapIssuesUpdateClaim,
+	CapIssuesCreateGates, CapIssuesUpdateGates, CapIssuesListFilters,
+	CapIssuesArrivalSeq, CapIssuesDeleteContainmentCascade,
+}
+
+// Capabilities lists what this build advertises in ContextResponse.capabilities:
+// the operations it actually implements, gated on `implemented` so a stub can
+// never advertise itself, PLUS the behavior tokens for server-wide behaviors this
+// build enforces. A client that checks capabilities before calling gets a
+// truthful answer from every release, including one cut halfway through the
+// endpoint slices.
+func Capabilities() []string {
+	var out []string
+	for _, rt := range routeTable {
+		if rt.implemented && rt.capability != "" {
+			out = append(out, rt.capability)
+		}
+	}
+	out = append(out, behaviorCapabilities...)
+	slices.Sort(out)
+	return out
+}
+
+// advertisedCapabilities is what this server's handshake publishes: the
+// build-level Capabilities() plus each conditional token cfg puts in force.
+func advertisedCapabilities(cfg Config) []string {
+	out := Capabilities()
+	if cfg.ExternalDependencyPolicy {
+		out = append(out, CapExternalDependencies)
+		slices.Sort(out)
+	}
+	return out
+}

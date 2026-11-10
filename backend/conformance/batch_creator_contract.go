@@ -1,0 +1,870 @@
+package conformance
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"reflect"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
+)
+
+// This file holds the semantic contract every implementation of
+// publicops.BatchCreator must satisfy. Each case asserts what
+// issueops/batchcreator.go PROMISES, cited by line, rather than what any one
+// backend happens to do; a backend that disagrees is parked at its own wiring
+// site with skipKnownDivergence so the case still runs on the ones that agree.
+//
+// THERE ARE TWO BODIES BEHIND THE THREE WIRINGS, and here they are genuinely
+// far apart. dolt and embeddeddolt share issueops.ExecuteCreateBatch, which
+// hands the whole prepared slice to ONE CreateIssuesInTxWithResult — rows first,
+// edges after. The unit-of-work provider creates item by item through the domain
+// use case, writing each item's edges as it writes that item. So "all or
+// nothing" is one promise kept two ways, which is why the atomicity cases below
+// assert on the STORE afterwards rather than on the error alone.
+//
+// IT IS ALSO WHY NO CASE ASKS FOR A FORWARD REFERENCE. An item's edge may name
+// an item created EARLIER in the same batch (issueops/batchcreator.go:36-45)
+// and nothing more: the shared store body could resolve a later item too, the
+// unit-of-work body provably cannot.
+//
+// Every case names its own ids under the fixture prefix and passes
+// ForceIDPrefix, because that prefix is not the workspace's configured one.
+
+// BatchCreatorFixture supplies adapter-specific storage access for the
+// batch-create assertions. Every field is named and typed exactly like the
+// per-backend roleFixtureKit hook it is filled from.
+type BatchCreatorFixture struct {
+	// IssuePrefix namespaces the ids each assertion seeds, so several of them
+	// can share one database.
+	IssuePrefix string
+	// BatchCreator is the surface under test.
+	BatchCreator publicops.BatchCreator
+	// CreateIssue seeds a durable issue, which is how a case occupies an id
+	// before asking the role to create over it.
+	CreateIssue func(context.Context, *types.Issue, string) error
+	// QueryScalar runs a single-row query and scans it, RETURNING the error
+	// rather than failing the test.
+	QueryScalar func(context.Context, string, []any, ...any) error
+	// SetConfig writes one workspace config key, which is how a case switches
+	// the id mode. A nil hook means the cases that need it SKIP.
+	SetConfig func(context.Context, string, string) error
+	// CountHistory reports how many history entries the fixture's branch has. A
+	// nil hook means "this backend cannot observe history", and the cases that
+	// need it SKIP rather than passing quietly.
+	CountHistory func(context.Context) (int, error)
+}
+
+// RunBatchCreatorCreatesEveryItemAsOneAct pins the shape of a successful batch
+// (issueops/batchcreator.go:88-98): one entry per item, in request order, never
+// nil, each a hydrated post-create snapshot, and the generated ids readable off
+// the result.
+//
+// The labels are asserted because the front door prints the issue it got back
+// rather than re-reading it.
+func RunBatchCreatorCreatesEveryItemAsOneAct(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	request := publicops.CreateBatchRequest{
+		Actor: "batch-writer",
+		Items: []publicops.BatchCreateItem{
+			batchCreatorItem(&types.Issue{Title: "first", Priority: 1, IssueType: types.TypeTask, Labels: []string{"alpha"}}),
+			batchCreatorItem(&types.Issue{Title: "second", Priority: 2, IssueType: types.TypeBug}),
+			batchCreatorItem(&types.Issue{Title: "third", Priority: 3, IssueType: types.TypeFeature}),
+		},
+	}
+	result, err := fixture.BatchCreator.CreateBatch(ctx, request)
+	if err != nil {
+		t.Fatalf("CreateBatch(3 items): %v", err)
+	}
+	if len(result.Issues) != len(request.Items) {
+		t.Fatalf("CreateBatch returned %d issues for %d items; the result is promised one entry per item at the same index",
+			len(result.Issues), len(request.Items))
+	}
+	seen := map[string]bool{}
+	for i, issue := range result.Issues {
+		if issue == nil {
+			t.Fatalf("CreateBatch result issue %d is nil; a batch that could not create every item creates none, "+
+				"so no index has nothing to put at it", i)
+		}
+		if issue.Title != request.Items[i].Issue.Title {
+			t.Errorf("result issue %d title = %q, want %q: the result is promised in REQUEST ORDER", i, issue.Title, request.Items[i].Issue.Title)
+		}
+		if issue.ID == "" {
+			t.Fatalf("result issue %d carries no id; the generated id is the one fact the request cannot carry", i)
+		}
+		if seen[issue.ID] {
+			t.Fatalf("result issue %d repeats id %q", i, issue.ID)
+		}
+		seen[issue.ID] = true
+		assertBatchCreatorRowCount(t, ctx, fixture, "issues", issue.ID, 1)
+		// No item names a creator, so each defaults to the batch's actor.
+		var createdBy string
+		if err := fixture.QueryScalar(ctx, "SELECT COALESCE(created_by, '') FROM issues WHERE id = ?", []any{issue.ID}, &createdBy); err != nil {
+			t.Fatalf("read created_by for %s: %v", issue.ID, err)
+		}
+		if createdBy != request.Actor || issue.CreatedBy != request.Actor {
+			t.Errorf("item %d created_by = %q (result %q), want the request's actor %q", i, createdBy, issue.CreatedBy, request.Actor)
+		}
+	}
+	if labels := result.Issues[0].Labels; len(labels) != 1 || labels[0] != "alpha" {
+		t.Errorf("result issue 0 labels = %v, want [alpha]: the snapshot is promised hydrated with labels", labels)
+	}
+}
+
+// RunBatchCreatorMintsADistinctIDForEachIdenticalItem pins that a GENERATED id
+// is never refused: ErrAlreadyExists is the refusal of an occupied EXPLICIT id
+// (issueops/batchcreator.go:21-25, 156-162), and an item that named no id
+// occupied nothing. Two items alike in every input an id is derived from —
+// title, description, created_at, and the batch's one actor — both land,
+// under two ids.
+//
+// IT IS THE STORE BODY'S CASE. ExecuteCreateBatch assigns every id before it
+// writes any row, so no table holds the first item's id yet when the second
+// item's is chosen; the unit-of-work body writes each item before it mints the
+// next. A body that refuses this pair also refuses, at random, two items that
+// differ and happen to draw the same short id, which is how it was found.
+func RunBatchCreatorMintsADistinctIDForEachIdenticalItem(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	at := time.Date(2021, 5, 6, 7, 8, 9, 123456789, time.UTC)
+	twin := func() publicops.BatchCreateItem {
+		return batchCreatorItem(&types.Issue{Title: fixture.IssuePrefix + " twin", Priority: 2, IssueType: types.TypeTask, CreatedAt: at})
+	}
+	result, err := fixture.BatchCreator.CreateBatch(ctx, publicops.CreateBatchRequest{
+		Actor: "batch-writer",
+		Items: []publicops.BatchCreateItem{twin(), twin()},
+	})
+	if err != nil {
+		t.Fatalf("CreateBatch(two identical items): %v; neither item named an id, so neither can be refused as occupied", err)
+	}
+	if len(result.Issues) != 2 || result.Issues[0] == nil || result.Issues[1] == nil {
+		t.Fatalf("CreateBatch returned %v for two items", result.Issues)
+	}
+	first, second := result.Issues[0].ID, result.Issues[1].ID
+	if first == "" || first == second {
+		t.Fatalf("CreateBatch handed the two items ids %q and %q, want two distinct generated ids", first, second)
+	}
+	assertBatchCreatorRowCount(t, ctx, fixture, "issues", first, 1)
+	assertBatchCreatorRowCount(t, ctx, fixture, "issues", second, 1)
+}
+
+// RunBatchCreatorMintsPastAnIDALaterItemNames is the other half of "a
+// generated id is never refused" (issueops/batchcreator.go:21-25, 156-162): an
+// item that names no id is never handed the id a LATER item of the same
+// request names for itself. Handing it that id refuses the later item as
+// occupied by its own batch, a refusal of an id the caller chose freshly.
+//
+// COUNTER MODE MAKES THE COLLISION CERTAIN. The case mints one item to learn
+// where the counter stands, then sends [minted, explicit <prefix>-<next>]: the
+// counter's next value is exactly the id the second item names. Both bodies
+// meet it before that row exists, ExecuteCreateBatch because it assigns every
+// id before writing any row, the unit-of-work body because it creates in
+// order.
+func RunBatchCreatorMintsPastAnIDALaterItemNames(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	if fixture.SetConfig == nil {
+		t.Skip("this backend cannot switch the workspace's id mode")
+	}
+	if err := fixture.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("SetConfig(issue_id_mode=counter): %v", err)
+	}
+	t.Cleanup(func() {
+		if err := fixture.SetConfig(context.WithoutCancel(ctx), "issue_id_mode", ""); err != nil {
+			t.Errorf("restore the hash id mode: %v", err)
+		}
+	})
+	minted := func(title string) publicops.BatchCreateItem {
+		return batchCreatorItem(&types.Issue{Title: fixture.IssuePrefix + " " + title, Priority: 2, IssueType: types.TypeTask})
+	}
+
+	probe, err := fixture.BatchCreator.CreateBatch(ctx, publicops.CreateBatchRequest{
+		Actor: "batch-writer",
+		Items: []publicops.BatchCreateItem{minted("counter probe")},
+	})
+	if err != nil {
+		t.Fatalf("CreateBatch(one minted item, counter mode): %v", err)
+	}
+	if len(probe.Issues) != 1 || probe.Issues[0] == nil {
+		t.Fatalf("CreateBatch returned %v for one item", probe.Issues)
+	}
+	probeID := probe.Issues[0].ID
+	cut := strings.LastIndex(probeID, "-")
+	n, err := strconv.Atoi(probeID[cut+1:])
+	if cut < 0 || err != nil {
+		t.Skipf("this backend did not switch to counter ids (minted %q)", probeID)
+	}
+	named := fmt.Sprintf("%s-%d", probeID[:cut], n+1)
+
+	explicit := minted("named later")
+	explicit.Issue.ID = named
+	result, err := fixture.BatchCreator.CreateBatch(ctx, publicops.CreateBatchRequest{
+		Actor: "batch-writer",
+		Items: []publicops.BatchCreateItem{minted("minted first"), explicit},
+	})
+	if err != nil {
+		t.Fatalf("CreateBatch([minted, explicit %s]): %v; the minted item must pass over the id the later item names", named, err)
+	}
+	if len(result.Issues) != 2 || result.Issues[0] == nil || result.Issues[1] == nil {
+		t.Fatalf("CreateBatch returned %v for two items", result.Issues)
+	}
+	if got := result.Issues[0].ID; got == named || got == "" {
+		t.Errorf("minted item = %q, want a generated id other than the %s the later item names", got, named)
+	}
+	if got := result.Issues[1].ID; got != named {
+		t.Errorf("explicit item = %q, want %s", got, named)
+	}
+	assertBatchCreatorRowCount(t, ctx, fixture, "issues", named, 1)
+	assertBatchCreatorRowCount(t, ctx, fixture, "issues", result.Issues[0].ID, 1)
+}
+
+// RunBatchCreatorRefusesEverythingWhenOneItemRefuses is the case this role
+// exists for (issueops/batchcreator.go:106-116, 117-124): a batch is ALL OR
+// NOTHING, so an item the batch cannot create leaves the items around it
+// uncreated too.
+//
+// The refusing item is in the MIDDLE on purpose. Only an item with landed work
+// on both sides of it can tell "the batch refused" from "the batch stopped" —
+// which is why this asserts on the STORE and not on the error. The item BEFORE
+// the refusal is the whole question.
+func RunBatchCreatorRefusesEverythingWhenOneItemRefuses(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	occupied := fixture.IssuePrefix + "-bcall-occupied"
+	seedBatchCreatorIssue(t, ctx, fixture, occupied)
+
+	before := fixture.IssuePrefix + "-bcall-before"
+	after := fixture.IssuePrefix + "-bcall-after"
+	_, err := fixture.BatchCreator.CreateBatch(ctx, publicops.CreateBatchRequest{
+		Actor:         "batch-writer",
+		ForceIDPrefix: true,
+		Items: []publicops.BatchCreateItem{
+			batchCreatorItem(batchCreatorIssue(before, "lands before the refusal")),
+			batchCreatorItem(batchCreatorIssue(occupied, "collides")),
+			batchCreatorItem(batchCreatorIssue(after, "never reached")),
+		},
+	})
+	if err == nil {
+		t.Fatal("CreateBatch over an occupied id returned no error; an occupied explicit id is ErrAlreadyExists")
+	}
+	if !errors.Is(err, storage.ErrAlreadyExists) {
+		t.Errorf("CreateBatch error = %v, want ErrAlreadyExists: the batch's refusals are Lifecycle.Create's, in the same typed vocabulary", err)
+	}
+	assertBatchCreatorRowCount(t, ctx, fixture, "issues", before, 0)
+	assertBatchCreatorRowCount(t, ctx, fixture, "issues", after, 0)
+	// The seeded row is untouched: an upsert would report the same error and
+	// still have rewritten every column.
+	assertBatchCreatorScalar(t, ctx, fixture, "occupied title", occupied,
+		"SELECT title FROM issues WHERE id = ?", []any{occupied})
+}
+
+// RunBatchCreatorRejectsAnUnusableRequest pins the deterministic
+// request-validation refusals (issueops/batchcreator.go:56-67, 143-149): an
+// empty Actor, no items at all, and an item with no issue are each
+// ErrValidation and each leave persistent state unchanged.
+//
+// The empty-items clause diverges from the read batches beside this role, which
+// answer an empty request with an empty answer. Answering a WRITE batch that
+// wrote nothing with a cheerful empty success is how a front door with a
+// filtered-to-nothing list silently stops creating anything.
+func RunBatchCreatorRejectsAnUnusableRequest(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	item := batchCreatorItem(&types.Issue{Title: "unreachable", Priority: 2, IssueType: types.TypeTask})
+	for _, test := range []struct {
+		name    string
+		request publicops.CreateBatchRequest
+	}{
+		{"no actor", publicops.CreateBatchRequest{Items: []publicops.BatchCreateItem{item}}},
+		{"no items", publicops.CreateBatchRequest{Actor: "batch-writer"}},
+		{"nil issue", publicops.CreateBatchRequest{Actor: "batch-writer", Items: []publicops.BatchCreateItem{{}}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := fixture.BatchCreator.CreateBatch(ctx, test.request)
+			if !errors.Is(err, storage.ErrValidation) {
+				t.Fatalf("CreateBatch(%s) error = %v, want ErrValidation", test.name, err)
+			}
+			if len(result.Issues) != 0 {
+				t.Errorf("CreateBatch(%s) returned %d issues with an error; result values are unspecified but a refusal creates nothing",
+					test.name, len(result.Issues))
+			}
+		})
+	}
+}
+
+// RunBatchCreatorRefusesACrossPlaneInBatchEdge pins batchcreator.go's plane
+// clause: an edge BETWEEN the durable and ephemeral buckets "cannot be written
+// by the batch that creates both of its ends; a request that asks for one is
+// refused with everything else it asked for."
+//
+// No case seeded one, and the two bodies answered differently. The store
+// bodies assign every id first and hand the whole slice down as a SET, which
+// refuses. The unit-of-work body creates item by item, so by the time the
+// second item's edge is written its target is an ordinary existing row and the
+// domain layer writes the cross-plane edge — the identical request refused
+// whole by two backends and landed in full on the third.
+//
+// The all-or-nothing half is asserted too: a refusal must leave NEITHER row.
+func RunBatchCreatorRefusesACrossPlaneInBatchEdge(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	durable := fixture.IssuePrefix + "-bcplane-durable"
+	wisp := fixture.IssuePrefix + "-bcplane-wisp"
+
+	ephemeral := batchCreatorIssue(wisp, "the ephemeral end")
+	ephemeral.Ephemeral = true
+
+	_, err := fixture.BatchCreator.CreateBatch(ctx, publicops.CreateBatchRequest{
+		Actor:         "batch-writer",
+		ForceIDPrefix: true,
+		Items: []publicops.BatchCreateItem{
+			batchCreatorItem(batchCreatorIssue(durable, "the durable end")),
+			{
+				Issue:        ephemeral,
+				Dependencies: []publicops.CreateDependency{{TargetID: durable, Type: types.DepBlocks}},
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("CreateBatch accepted an edge between the durable and ephemeral planes; the contract refuses it")
+	}
+	if !errors.Is(err, publicops.ErrValidation) {
+		t.Errorf("error = %v, want ErrValidation: a refused request is the caller's fault", err)
+	}
+	assertBatchCreatorRowCount(t, ctx, fixture, "issues", durable, 0)
+	assertBatchCreatorRowCount(t, ctx, fixture, "wisps", wisp, 0)
+}
+
+// RunBatchCreatorLinksAnEarlierItemOfTheSameBatch pins the capability that
+// makes the batch more than a loop (issueops/batchcreator.go:36-45): an item's
+// edge may name an item created EARLIER in the same request, and the edge is
+// written. One call at a time this is impossible, because the target does not
+// exist when the source is created.
+func RunBatchCreatorLinksAnEarlierItemOfTheSameBatch(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	first := fixture.IssuePrefix + "-bclink-first"
+	second := fixture.IssuePrefix + "-bclink-second"
+	result, err := fixture.BatchCreator.CreateBatch(ctx, publicops.CreateBatchRequest{
+		Actor:         "batch-writer",
+		ForceIDPrefix: true,
+		Items: []publicops.BatchCreateItem{
+			batchCreatorItem(batchCreatorIssue(first, "the blocker")),
+			{
+				Issue:        batchCreatorIssue(second, "the blocked"),
+				Dependencies: []publicops.CreateDependency{{TargetID: first, Type: types.DepBlocks}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateBatch with an edge onto an earlier item: %v", err)
+	}
+	if len(result.Issues) != 2 {
+		t.Fatalf("CreateBatch returned %d issues, want 2", len(result.Issues))
+	}
+	assertBatchCreatorEdgeCount(t, ctx, fixture, second, first, 1)
+}
+
+// RunBatchCreatorLinksAnEarlierItemOnTheEphemeralPlane is the case above run
+// on the OTHER plane, and it is a separate case rather than a second arm
+// because the two bodies reach the edge by different routes and one of them
+// has already lost it.
+//
+// The store bodies write every row first and then run ONE dependency-persist
+// pass over the whole batch; the unit-of-work body writes each item's edges as
+// it writes that item. A backend that took the all-ephemeral batch down a
+// per-issue create loop runs no persist pass at all, and every inline edge
+// disappears with no error and no report — which is exactly what happened
+// (audit_molecule_wisp_batch_iter.go testAuditCreateAllWispsInlineDependencies
+// records the regression). The durable case cannot see it: the durable path
+// has never been the one that got special-cased.
+//
+// THE ASSERTION IS PER TABLE, not a sum across both. The two planes hold their
+// edges in different tables (BatchCreateItem.Issue's plane clause), and an
+// edge between two wisps that landed in `dependencies` is a durable row
+// naming ephemeral work — the sync artifact the ignored wisp tables exist to
+// prevent, and invisible to a count that adds the tables together.
+func RunBatchCreatorLinksAnEarlierItemOnTheEphemeralPlane(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	first := fixture.IssuePrefix + "-bcwlink-first"
+	second := fixture.IssuePrefix + "-bcwlink-second"
+
+	firstIssue := batchCreatorIssue(first, "the ephemeral blocker")
+	firstIssue.Ephemeral = true
+	secondIssue := batchCreatorIssue(second, "the ephemeral blocked")
+	secondIssue.Ephemeral = true
+
+	result, err := fixture.BatchCreator.CreateBatch(ctx, publicops.CreateBatchRequest{
+		Actor:         "batch-writer",
+		ForceIDPrefix: true,
+		Items: []publicops.BatchCreateItem{
+			batchCreatorItem(firstIssue),
+			{
+				Issue:        secondIssue,
+				Dependencies: []publicops.CreateDependency{{TargetID: first, Type: types.DepBlocks}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateBatch with an edge onto an earlier EPHEMERAL item: %v", err)
+	}
+	if len(result.Issues) != 2 {
+		t.Fatalf("CreateBatch returned %d issues, want 2", len(result.Issues))
+	}
+	// Both rows on the ephemeral plane, or the edge assertion below is about a
+	// batch that did something else entirely.
+	assertBatchCreatorRowCount(t, ctx, fixture, "wisps", first, 1)
+	assertBatchCreatorRowCount(t, ctx, fixture, "wisps", second, 1)
+
+	assertBatchCreatorPlaneEdgeCount(t, ctx, fixture, "wisp_dependencies", second, first, 1)
+	assertBatchCreatorPlaneEdgeCount(t, ctx, fixture, "dependencies", second, first, 0)
+}
+
+// RunBatchCreatorKeepsAnEphemeralItemsLabelsOffTheDurablePlane pins the reach
+// of the all-ephemeral clause (issueops/batchcreator.go's "an all-ephemeral
+// batch writes ONLY to the dolt-ignored wisp tables"): the ITEM's aux rows are
+// covered by it too, not just its issue row.
+//
+// A label is the aux row a create actually writes, and it has its own pair of
+// tables. A wisp's label landing in `labels` is a durable row naming ephemeral
+// work — it ships on the next push, and it survives the wisp it names, because
+// only the wisp tables are swept. RunBatchCreatorRecordsNoHistoryForAnEphemeral
+// Batch cannot see it: it seeds no labels, and its history counter answers the
+// same number whether a label row landed durably or not.
+//
+// The result's Ephemeral flag is checked in the same case because a snapshot
+// that came back durable would make every plane claim above read as luck. The
+// front door prints the issue it got back rather than re-reading it, so a
+// wisp reported as durable is what a caller sees.
+func RunBatchCreatorKeepsAnEphemeralItemsLabelsOffTheDurablePlane(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	labeled := fixture.IssuePrefix + "-bcwlabel"
+	const label = "ephemeral-label"
+
+	issue := batchCreatorIssue(labeled, "ephemeral, and labeled")
+	issue.Ephemeral = true
+	issue.Labels = []string{label}
+
+	result, err := fixture.BatchCreator.CreateBatch(ctx, publicops.CreateBatchRequest{
+		Actor:         "batch-writer",
+		ForceIDPrefix: true,
+		Items:         []publicops.BatchCreateItem{batchCreatorItem(issue)},
+	})
+	if err != nil {
+		t.Fatalf("CreateBatch(1 labeled ephemeral item): %v", err)
+	}
+	if len(result.Issues) != 1 {
+		t.Fatalf("CreateBatch returned %d issues, want 1", len(result.Issues))
+	}
+	assertBatchCreatorRowCount(t, ctx, fixture, "wisps", labeled, 1)
+	assertBatchCreatorRowCount(t, ctx, fixture, "issues", labeled, 0)
+
+	assertBatchCreatorLabelRowCount(t, ctx, fixture, "wisp_labels", labeled, 1)
+	assertBatchCreatorLabelRowCount(t, ctx, fixture, "labels", labeled, 0)
+
+	if !result.Issues[0].Ephemeral {
+		t.Errorf("result issue %s came back Ephemeral=false for an item that asked to be ephemeral; the front door prints this snapshot rather than re-reading the row",
+			labeled)
+	}
+	if labels := result.Issues[0].Labels; len(labels) != 1 || labels[0] != label {
+		t.Errorf("result issue %s labels = %v, want [%s]: the snapshot is promised hydrated with labels on either plane", labeled, labels, label)
+	}
+}
+
+// RunBatchCreatorRefusesAnAbsentEdgeTarget pins the edge clause
+// (issueops/batchcreator.go:125-131): every requested edge is written or the
+// batch refuses, with ErrValidation wrapping ErrNotFound and nothing created.
+//
+// The target here shares the SOURCE'S PREFIX, which is what makes it a miss
+// rather than a foreign reference — see the case below. The sibling item is
+// what an implementation that dropped the edge and kept the issues would leave
+// behind.
+func RunBatchCreatorRefusesAnAbsentEdgeTarget(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	sibling := fixture.IssuePrefix + "-bcmiss-sibling"
+	source := fixture.IssuePrefix + "-bcmiss-source"
+	absent := fixture.IssuePrefix + "-bcmiss-absent"
+
+	_, err := fixture.BatchCreator.CreateBatch(ctx, publicops.CreateBatchRequest{
+		Actor:         "batch-writer",
+		ForceIDPrefix: true,
+		Items: []publicops.BatchCreateItem{
+			batchCreatorItem(batchCreatorIssue(sibling, "would land")),
+			{
+				Issue:        batchCreatorIssue(source, "names something absent"),
+				Dependencies: []publicops.CreateDependency{{TargetID: absent, Type: types.DepBlocks}},
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("CreateBatch with an edge onto an absent target returned no error; " +
+			"a create that reported success having dropped an edge is data loss the caller cannot learn about")
+	}
+	if !errors.Is(err, storage.ErrValidation) || !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("CreateBatch error = %v, want ErrValidation wrapping ErrNotFound", err)
+	}
+	assertBatchCreatorRowCount(t, ctx, fixture, "issues", sibling, 0)
+	assertBatchCreatorRowCount(t, ctx, fixture, "issues", source, 0)
+}
+
+// RunBatchCreatorAcceptsAForeignEdgeTarget pins the other half of the same
+// clause (issueops/batchcreator.go:132-137): a target this database was never
+// going to hold is not a miss.
+//
+// Both shapes are asserted because they are one rule with two spellings
+// (issueops.IsExternalDepTarget). A role that refused either would make a plan
+// naming work in a sibling rig uncreatable, which is a thing `bd dep add` has
+// always allowed.
+func RunBatchCreatorAcceptsAForeignEdgeTarget(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	external := fixture.IssuePrefix + "-bcext-external"
+	foreign := fixture.IssuePrefix + "-bcext-foreign"
+	externalTarget := "external:JIRA-4471"
+	foreignTarget := "otherrig-9910"
+
+	result, err := fixture.BatchCreator.CreateBatch(ctx, publicops.CreateBatchRequest{
+		Actor:         "batch-writer",
+		ForceIDPrefix: true,
+		Items: []publicops.BatchCreateItem{
+			{
+				Issue:        batchCreatorIssue(external, "depends on something outside beads"),
+				Dependencies: []publicops.CreateDependency{{TargetID: externalTarget, Type: types.DepBlocks}},
+			},
+			{
+				Issue:        batchCreatorIssue(foreign, "depends on another rig"),
+				Dependencies: []publicops.CreateDependency{{TargetID: foreignTarget, Type: types.DepBlocks}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateBatch with foreign edge targets: %v", err)
+	}
+	if len(result.Issues) != 2 {
+		t.Fatalf("CreateBatch returned %d issues, want 2", len(result.Issues))
+	}
+	assertBatchCreatorEdgeCount(t, ctx, fixture, external, externalTarget, 1)
+	assertBatchCreatorEdgeCount(t, ctx, fixture, foreign, foreignTarget, 1)
+}
+
+// RunBatchCreatorRecordsOneHistoryEntry pins the durable half of "at most one
+// history entry" (issueops/batchcreator.go:117-124): a batch of three durable
+// items records ONE entry, not three and not none.
+//
+// The Provenance half rides along because a label changes how the entry READS
+// and never WHETHER one is recorded (issueops/batchcreator.go:68-78). The
+// entry's TEXT is deliberately not asserted: reading it back means ordering two
+// commits that can tie on date, which the fixture's own doc warns against.
+func RunBatchCreatorRecordsOneHistoryEntry(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	if fixture.CountHistory == nil {
+		t.Skip("this backend cannot observe history entries")
+	}
+	for _, test := range []struct {
+		name       string
+		provenance string
+	}{
+		{"default label", ""},
+		{"caller label", "bd: create 3 issue(s) from plan.md"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			before := batchCreatorHistoryCount(t, ctx, fixture)
+			if _, err := fixture.BatchCreator.CreateBatch(ctx, publicops.CreateBatchRequest{
+				Actor:      "batch-writer",
+				Provenance: test.provenance,
+				Items: []publicops.BatchCreateItem{
+					batchCreatorItem(&types.Issue{Title: "one", Priority: 2, IssueType: types.TypeTask}),
+					batchCreatorItem(&types.Issue{Title: "two", Priority: 2, IssueType: types.TypeTask}),
+					batchCreatorItem(&types.Issue{Title: "three", Priority: 2, IssueType: types.TypeTask}),
+				},
+			}); err != nil {
+				t.Fatalf("CreateBatch(3 durable items): %v", err)
+			}
+			if delta := batchCreatorHistoryCount(t, ctx, fixture) - before; delta != 1 {
+				t.Errorf("history entries += %d for a 3-item batch, want 1: the request is the transaction, so it records one entry", delta)
+			}
+		})
+	}
+}
+
+// RunBatchCreatorRecordsNoHistoryForAnEphemeralBatch pins the other half
+// (issueops/batchcreator.go:117-124): an all-ephemeral batch records NO durable
+// entry, because the wisp tables are dolt-ignored precisely so ephemeral work
+// never ships.
+//
+// It also asserts the wisps ARE there. The unit-of-work backend reads an empty
+// commit message as "roll this attempt back", so the obvious way to record no
+// entry — return no message — silently discards everything the batch created.
+func RunBatchCreatorRecordsNoHistoryForAnEphemeralBatch(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	if fixture.CountHistory == nil {
+		t.Skip("this backend cannot observe history entries")
+	}
+	first := fixture.IssuePrefix + "-bcwisp-first"
+	second := fixture.IssuePrefix + "-bcwisp-second"
+
+	before := batchCreatorHistoryCount(t, ctx, fixture)
+	firstIssue := batchCreatorIssue(first, "ephemeral one")
+	firstIssue.Ephemeral = true
+	secondIssue := batchCreatorIssue(second, "ephemeral two")
+	secondIssue.Ephemeral = true
+	result, err := fixture.BatchCreator.CreateBatch(ctx, publicops.CreateBatchRequest{
+		Actor:         "batch-writer",
+		ForceIDPrefix: true,
+		Items:         []publicops.BatchCreateItem{batchCreatorItem(firstIssue), batchCreatorItem(secondIssue)},
+	})
+	if err != nil {
+		t.Fatalf("CreateBatch(2 ephemeral items): %v", err)
+	}
+	if len(result.Issues) != 2 {
+		t.Fatalf("CreateBatch returned %d issues, want 2", len(result.Issues))
+	}
+	assertBatchCreatorRowCount(t, ctx, fixture, "wisps", first, 1)
+	assertBatchCreatorRowCount(t, ctx, fixture, "wisps", second, 1)
+	if delta := batchCreatorHistoryCount(t, ctx, fixture) - before; delta != 0 {
+		t.Errorf("history entries += %d for an all-ephemeral batch, want 0: a durable entry naming a wisp is the sync artifact "+
+			"the ignored wisp tables exist to prevent", delta)
+	}
+}
+
+// RunBatchCreatorDoesNotMutateTheCallerRequest pins the snapshot clause
+// (issueops/batchcreator.go:143-149). The ID is the field that matters: an
+// implementation that assigned it in place would leave the caller's next create
+// with the same struct refusing as an occupied id.
+func RunBatchCreatorDoesNotMutateTheCallerRequest(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	target := fixture.IssuePrefix + "-bcsnap-target"
+	seedBatchCreatorIssue(t, ctx, fixture, target)
+
+	request := publicops.CreateBatchRequest{
+		Actor:      "batch-writer",
+		Provenance: "bd: create 1 issue(s) from plan.md",
+		Items: []publicops.BatchCreateItem{{
+			Issue:        &types.Issue{Title: "caller owned", Priority: 2, IssueType: types.TypeTask, Labels: []string{"kept"}},
+			Dependencies: []publicops.CreateDependency{{TargetID: target, Type: types.DepBlocks}},
+		}},
+	}
+	snapshot := publicops.CreateBatchRequest{
+		Actor:      request.Actor,
+		Provenance: request.Provenance,
+		Items: []publicops.BatchCreateItem{{
+			Issue:        &types.Issue{Title: "caller owned", Priority: 2, IssueType: types.TypeTask, Labels: []string{"kept"}},
+			Dependencies: []publicops.CreateDependency{{TargetID: target, Type: types.DepBlocks}},
+		}},
+	}
+	if _, err := fixture.BatchCreator.CreateBatch(ctx, request); err != nil {
+		t.Fatalf("CreateBatch: %v", err)
+	}
+	if !reflect.DeepEqual(request, snapshot) {
+		t.Errorf("CreateBatch mutated the caller's request:\n got %+v\nwant %+v", *request.Items[0].Issue, *snapshot.Items[0].Issue)
+	}
+}
+
+// RunBatchCreatorEchoesSubSecondTimestamps is the batch half of
+// RunLifecycleCreateEchoesSubSecondTimestamps: every entry of a batch result
+// carries the timestamps its write sent, at full precision, not the whole
+// seconds the DATETIME(0) columns answer a re-read with.
+//
+// PER ITEM, because both bodies build the result one snapshot at a time and a
+// fix applied to the first item only would still pass a check on result[0].
+func RunBatchCreatorEchoesSubSecondTimestamps(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	first := time.Date(2019, 3, 4, 5, 6, 7, 123456789, time.UTC)
+	second := time.Date(2020, 4, 5, 6, 7, 8, 246813579, time.UTC)
+	request := publicops.CreateBatchRequest{
+		Actor: "batch-writer",
+		Items: []publicops.BatchCreateItem{
+			batchCreatorItem(&types.Issue{Title: "nano first", Priority: 2, IssueType: types.TypeTask, CreatedAt: first, UpdatedAt: first}),
+			batchCreatorItem(&types.Issue{Title: "nano second", Priority: 2, IssueType: types.TypeTask, CreatedAt: second, UpdatedAt: second}),
+		},
+	}
+	want := []time.Time{first, second}
+	result, err := fixture.BatchCreator.CreateBatch(ctx, request)
+	if err != nil {
+		t.Fatalf("CreateBatch with sub-second timestamps: %v", err)
+	}
+	if len(result.Issues) != len(want) {
+		t.Fatalf("CreateBatch returned %d issues for %d items", len(result.Issues), len(want))
+	}
+	for i, issue := range result.Issues {
+		if issue == nil {
+			t.Fatalf("CreateBatch result issue %d is nil", i)
+		}
+		if !issue.CreatedAt.Equal(want[i]) {
+			t.Errorf("result issue %d created_at = %v, want %v exactly — a batch echo rounded to the second cannot order same-second creates",
+				i, issue.CreatedAt.UTC(), want[i])
+		}
+		if !issue.UpdatedAt.Equal(want[i]) {
+			t.Errorf("result issue %d updated_at = %v, want %v exactly", i, issue.UpdatedAt.UTC(), want[i])
+		}
+	}
+}
+
+// batchCreatorItem is the item every case builds, so a case names only the
+// fields it is about.
+func batchCreatorItem(issue *types.Issue) publicops.BatchCreateItem {
+	return publicops.BatchCreateItem{Issue: issue}
+}
+
+// batchCreatorIssue is an issue with an EXPLICIT id, for the cases that have to
+// name their rows — the create-only guard and every edge target.
+func batchCreatorIssue(id, title string) *types.Issue {
+	return &types.Issue{ID: id, Title: title, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+}
+
+// seedBatchCreatorIssue occupies an id through the fixture's own create, which
+// is deliberately NOT the role under test.
+func seedBatchCreatorIssue(t *testing.T, ctx context.Context, fixture BatchCreatorFixture, id string) {
+	t.Helper()
+	if err := fixture.CreateIssue(ctx, batchCreatorIssue(id, id), "seeder"); err != nil {
+		t.Fatalf("seed issue %s: %v", id, err)
+	}
+}
+
+// assertBatchCreatorRowCount asserts how many rows of a plane carry an id.
+func assertBatchCreatorRowCount(t *testing.T, ctx context.Context, fixture BatchCreatorFixture, table, id string, want int) {
+	t.Helper()
+	var got int
+	query := "SELECT COUNT(*) FROM " + table + " WHERE id = ?"
+	if err := fixture.QueryScalar(ctx, query, []any{id}, &got); err != nil {
+		t.Fatalf("count %s rows for %s: %v", table, id, err)
+	}
+	if got != want {
+		t.Errorf("%s rows for %s = %d, want %d", table, id, got, want)
+	}
+}
+
+// assertBatchCreatorEdgeCount asserts how many stored edges run from source to
+// target, across BOTH dependency tables and all three target columns: which of
+// each the row landed in is a placement detail this role does not promise.
+func assertBatchCreatorEdgeCount(t *testing.T, ctx context.Context, fixture BatchCreatorFixture, source, target string, want int) {
+	t.Helper()
+	var got int
+	const query = `SELECT
+		(SELECT COUNT(*) FROM dependencies WHERE issue_id = ?
+			AND (depends_on_issue_id = ? OR depends_on_wisp_id = ? OR depends_on_external = ?)) +
+		(SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = ?
+			AND (depends_on_issue_id = ? OR depends_on_wisp_id = ? OR depends_on_external = ?))`
+	args := []any{source, target, target, target, source, target, target, target}
+	if err := fixture.QueryScalar(ctx, query, args, &got); err != nil {
+		t.Fatalf("count edges %s -> %s: %v", source, target, err)
+	}
+	if got != want {
+		t.Errorf("edges %s -> %s = %d, want %d", source, target, got, want)
+	}
+}
+
+// assertBatchCreatorPlaneEdgeCount is assertBatchCreatorEdgeCount narrowed to
+// ONE of the two dependency tables. Where the placement of a durable edge is a
+// detail this role does not promise, WHICH PLANE an edge landed on is the
+// promise itself, and a sum across both tables cannot state it.
+func assertBatchCreatorPlaneEdgeCount(t *testing.T, ctx context.Context, fixture BatchCreatorFixture, table, source, target string, want int) {
+	t.Helper()
+	var got int
+	//nolint:gosec // G201: table is one of the contract's two hardcoded names.
+	query := "SELECT COUNT(*) FROM " + table + " WHERE issue_id = ?" +
+		" AND (depends_on_issue_id = ? OR depends_on_wisp_id = ? OR depends_on_external = ?)"
+	if err := fixture.QueryScalar(ctx, query, []any{source, target, target, target}, &got); err != nil {
+		t.Fatalf("count %s rows %s -> %s: %v", table, source, target, err)
+	}
+	if got != want {
+		t.Errorf("%s rows %s -> %s = %d, want %d", table, source, target, got, want)
+	}
+}
+
+// assertBatchCreatorLabelRowCount counts one issue's rows in one plane's label
+// table. The label tables are keyed by issue_id rather than id, so they need
+// their own counter.
+func assertBatchCreatorLabelRowCount(t *testing.T, ctx context.Context, fixture BatchCreatorFixture, table, issueID string, want int) {
+	t.Helper()
+	var got int
+	//nolint:gosec // G201: table is one of the contract's two hardcoded names.
+	query := "SELECT COUNT(*) FROM " + table + " WHERE issue_id = ?"
+	if err := fixture.QueryScalar(ctx, query, []any{issueID}, &got); err != nil {
+		t.Fatalf("count %s rows for %s: %v", table, issueID, err)
+	}
+	if got != want {
+		t.Errorf("%s rows for %s = %d, want %d", table, issueID, got, want)
+	}
+}
+
+// assertBatchCreatorScalar asserts one stored column value.
+func assertBatchCreatorScalar(t *testing.T, ctx context.Context, fixture BatchCreatorFixture, what, want, query string, args []any) {
+	t.Helper()
+	var got string
+	if err := fixture.QueryScalar(ctx, query, args, &got); err != nil {
+		t.Fatalf("read %s: %v", what, err)
+	}
+	if got != want {
+		t.Errorf("%s = %q, want %q", what, got, want)
+	}
+}
+
+// batchCreatorHistoryCount reads the fixture's history counter.
+func batchCreatorHistoryCount(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) int {
+	t.Helper()
+	entries, err := fixture.CountHistory(ctx)
+	if err != nil {
+		t.Fatalf("count history entries: %v", err)
+	}
+	return entries
+}
+
+// RunBatchCreatorAppliesTheDefaultPriority pins BatchCreateItem.DefaultPriority:
+// an item that asks for the default stores publicops.DefaultCreatePriority, and
+// an item naming priority 0 stores P0 in the same batch. The default is
+// Lifecycle.Create's, applied in the shared preparation, so an HTTP
+// batchCreate without `priority` and a `bd create --file` template without one
+// land the same row. An item asking for the default while naming a priority is
+// ErrValidation and writes nothing, as it is for Lifecycle.Create.
+func RunBatchCreatorAppliesTheDefaultPriority(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	// Minted ids and an unset status, so the case asks nothing of the items
+	// but their priority — the http wire's batch item has no id or status slot.
+	unset := &types.Issue{Title: fixture.IssuePrefix + " defaulted", IssueType: types.TypeTask}
+	zero := &types.Issue{Title: fixture.IssuePrefix + " critical", IssueType: types.TypeTask}
+
+	result, err := fixture.BatchCreator.CreateBatch(ctx, publicops.CreateBatchRequest{
+		Actor: "batch-writer",
+		Items: []publicops.BatchCreateItem{
+			{Issue: unset, DefaultPriority: true},
+			{Issue: zero},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateBatch: %v", err)
+	}
+	if len(result.Issues) != 2 || result.Issues[0] == nil || result.Issues[1] == nil {
+		t.Fatalf("result = %v, want two created issues", result.Issues)
+	}
+	for i, want := range []int{publicops.DefaultCreatePriority, 0} {
+		created := result.Issues[i]
+		if created.Priority != want {
+			t.Errorf("item %d result priority = %d, want %d", i, created.Priority, want)
+		}
+		var got int
+		if err := fixture.QueryScalar(ctx, "SELECT priority FROM issues WHERE id = ?", []any{created.ID}, &got); err != nil {
+			t.Fatalf("read priority of %s: %v", created.ID, err)
+		}
+		if got != want {
+			t.Errorf("item %d stored priority = %d, want %d", i, got, want)
+		}
+	}
+
+	conflict := fixture.IssuePrefix + " conflicting"
+	_, err = fixture.BatchCreator.CreateBatch(ctx, publicops.CreateBatchRequest{
+		Actor: "batch-writer",
+		Items: []publicops.BatchCreateItem{
+			{Issue: &types.Issue{Title: conflict, Priority: 3, IssueType: types.TypeTask}, DefaultPriority: true},
+		},
+	})
+	if !errors.Is(err, storage.ErrValidation) {
+		t.Fatalf("DefaultPriority with priority 3: err = %v, want ErrValidation", err)
+	}
+	var stored int
+	if err := fixture.QueryScalar(ctx, "SELECT COUNT(*) FROM issues WHERE title = ?", []any{conflict}, &stored); err != nil {
+		t.Fatalf("count issues titled %q: %v", conflict, err)
+	}
+	if stored != 0 {
+		t.Errorf("issues titled %q after the conflicting priority batch = %d, want 0", conflict, stored)
+	}
+}

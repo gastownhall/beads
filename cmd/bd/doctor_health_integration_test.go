@@ -27,9 +27,12 @@ func TestDoctorCheckHealthReportsVersionMismatchOnRepoLocalPort(t *testing.T) {
 		t.Skip("skipping: Dolt test container not available")
 	}
 
-	env := append(os.Environ(), "BEADS_TEST_MODE=1")
+	// A repo-local server of its own (bd init --server, see
+	// repoLocalServerEnv), so bd derives the repo-local port this test is
+	// about instead of reusing the shared test server's.
+	env := repoLocalServerEnv(t, tmpDir)
 
-	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
+	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--server", "--prefix", "test", "--quiet")
 	if initErr != nil {
 		lower := strings.ToLower(initOut)
 		if strings.Contains(lower, "dolt") && (strings.Contains(lower, "not supported") || strings.Contains(lower, "not available") || strings.Contains(lower, "unknown")) {

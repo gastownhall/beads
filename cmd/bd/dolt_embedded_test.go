@@ -40,7 +40,17 @@ func bdDoltFail(t *testing.T, bd, dir string, args ...string) string {
 	return string(out)
 }
 
-func TestEmbeddedDolt(t *testing.T) {
+// TestEmbeddedDoltBlockedAndCommit was split from TestEmbeddedDolt
+// (originally ~183s, measured under --config=embedded) into 2 top-level
+// tests over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every
+// original subtest is preserved exactly once. This group keeps the
+// server-only-command-blocked, status/show, and commit subtests; the
+// remote/push/pull subtests moved to TestEmbeddedDoltRemoteAndPush below.
+// Every subtest in both groups only ever reads or mutates its own fresh
+// `dir` (or its own ppDir/pfDir/cleanDir), so neither group depends on state
+// the other group's subtests produce.
+func TestEmbeddedDoltBlockedAndCommit(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -124,6 +134,34 @@ func TestEmbeddedDolt(t *testing.T) {
 		out := bdDolt(t, bd, dir, "commit", "-m", "test commit message")
 		_ = out
 	})
+
+	t.Run("commit_clean_reports_nothing", func(t *testing.T) {
+		// bd init leaves the working set clean (bootstrap's own commit
+		// tolerates nothing-to-commit, GH#3886). A second, truly no-op
+		// "bd dolt commit" here must print "Nothing to commit.", not
+		// "Committed." — this is the case EmbeddedDoltStore.Commit's new
+		// nothing-to-commit tolerance made possible to reach with a nil
+		// error.
+		cleanDir, _, _ := bdInit(t, bd, "--prefix", "tdcln")
+		out := bdDolt(t, bd, cleanDir, "commit")
+		if !strings.Contains(out, "Nothing to commit.") {
+			t.Errorf("expected 'Nothing to commit.' on a clean working set, got: %s", out)
+		}
+	})
+}
+
+// TestEmbeddedDoltRemoteAndPush is the second half of the TestEmbeddedDolt
+// split described on TestEmbeddedDoltBlockedAndCommit above: the
+// remote-list/add/remove and push/pull subtests, none of which depend on
+// state produced by the first group's subtests.
+func TestEmbeddedDoltRemoteAndPush(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "td")
 
 	// ===== Remote management =====
 

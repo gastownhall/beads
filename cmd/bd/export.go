@@ -15,7 +15,9 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var exportCmd = &cobra.Command{
@@ -76,9 +78,6 @@ func init() {
 }
 
 func runExport(cmd *cobra.Command, args []string) error {
-	if usesProxiedServer() {
-		return HandleErrorRespectJSON("export is not supported in proxied-server mode")
-	}
 	evt := metrics.NewCommandEvent("export")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -88,6 +87,34 @@ func runExport(cmd *cobra.Command, args []string) error {
 
 	ctx := rootCtx
 
+	if usesProxiedServer() {
+		if uowProvider == nil {
+			return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
+		}
+		// Run the ENTIRE read set inside one read transaction so the exported
+		// issues, labels, dependencies, comments, and memories are a single
+		// consistent snapshot. Export is read-only: RunTxRead never commits
+		// (the attempt is always rolled back on close).
+		_, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (struct{}, error) {
+			return struct{}{}, runExportFromSource(ctx, &uowExportSource{uw: uw})
+		})
+		return err
+	}
+
+	if storeIsRemoteBackend(store) {
+		// A remote backend serves no raw search or bulk relation read; its
+		// export is composed from served role reads (issueops.ReadExport).
+		return runExportFromSource(ctx, &roleExportSource{})
+	}
+	return runExportFromSource(ctx, storeExportSource{})
+}
+
+// runExportFromSource is the whole classic export body with the storage reads
+// routed through an exportSource. Everything downstream of the reads —
+// filtering, sanitizeZeroTime, record shaping, marshal order, atomic file
+// handling, the stderr summary — is shared verbatim between the embedded and
+// proxied-server modes, which is what keeps the two outputs byte-identical.
+func runExportFromSource(ctx context.Context, src exportSource) error {
 	// Determine output destination. File output uses atomic writes
 	// (temp file + rename) so concurrent exports and crashes never
 	// leave a truncated or interleaved JSONL file.
@@ -108,51 +135,9 @@ func runExport(cmd *cobra.Command, args []string) error {
 		w = os.Stdout
 	}
 
-	// Build filter for issues table. Export all statuses by default.
-	// Opt out of BEADS_MAX_ROWS (designer §4.1) — export is a data-integrity
-	// path and must never abort partway through an export run.
-	filter := types.IssueFilter{
-		Limit:         0,
-		MaxRows:       0,
-		MaxRowsSource: "",
-	}
-
-	// Exclude infra types by default (agents, roles, messages).
-	if !exportAll && !exportIncludeInfra {
-		var infraTypes []string
-		if store != nil {
-			infraSet := store.GetInfraTypes(ctx)
-			if len(infraSet) > 0 {
-				for t := range infraSet {
-					infraTypes = append(infraTypes, t)
-				}
-			}
-		}
-		if len(infraTypes) == 0 {
-			infraTypes = domain.DefaultInfraTypes()
-		}
-		for _, t := range infraTypes {
-			filter.ExcludeTypes = append(filter.ExcludeTypes, types.IssueType(t))
-		}
-	}
-
-	// Exclude templates by default
-	if !exportAll {
-		isTemplate := false
-		filter.IsTemplate = &isTemplate
-	}
-
-	// Exclude ephemeral wisps by default — they are private/transient and
-	// must not reach git history or external integrations (GH#3649).
-	// --all overrides to include everything.
-	if !exportAll {
-		persistentOnly := false
-		filter.Ephemeral = &persistentOnly
-	}
-
-	issues, err := store.SearchIssues(ctx, "", filter)
+	issues, err := src.ExportIssues(ctx, issueops.ExportRequest{All: exportAll, IncludeInfra: exportIncludeInfra})
 	if err != nil {
-		return HandleErrorRespectJSON("failed to search issues: %v", err)
+		return HandleErrorRespectJSON("failed to read the export set: %v", err)
 	}
 
 	// Scrub test/pollution records if requested
@@ -162,7 +147,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 
 	// Owner-keyed filtering: exclude issues by created_by identity.
 	// Merges --exclude-owner flag values with export.exclude_owners config.
-	ownerExcludes := buildOwnerExcludeSet(ctx, exportExcludeOwners)
+	ownerExcludes := buildOwnerExcludeSet(ctx, src, exportExcludeOwners)
 	filteredOwnerCount := 0
 	if len(ownerExcludes) > 0 {
 		before := len(issues)
@@ -178,28 +163,43 @@ func runExport(cmd *cobra.Command, args []string) error {
 	}
 
 	// Bulk-load relational data
-	issueIDs := make([]string, len(issues))
-	for i, issue := range issues {
-		issueIDs[i] = issue.ID
+	rel, err := src.LoadExportRelations(ctx, issues)
+	if err != nil {
+		return HandleErrorRespectJSON("failed to load relational data: %v", err)
 	}
 
-	labelsMap, _ := store.GetLabelsForIssues(ctx, issueIDs)
-	allDeps, _ := store.GetDependencyRecordsForIssues(ctx, issueIDs)
-	commentsMap, _ := store.GetCommentsForIssues(ctx, issueIDs)
-	commentCounts, _ := store.GetCommentCounts(ctx, issueIDs)
-	depCounts, _ := store.GetDependencyCounts(ctx, issueIDs)
+	// Explicit plane markers (bd-r9uce): a no_history=true row is either an
+	// unpromoted no-history wisp (wisps table) or a promoted one (durable
+	// issues-table row still carrying the stray flag) — only table membership
+	// can tell them apart, and import routes by the "wisp_plane" marker
+	// stamped here. Ephemeral rows are unambiguous (ephemeral=true only ever lives in
+	// the wisps table) and are deliberately NOT stamped, keeping their export
+	// bytes unchanged.
+	var noHistoryIDs []string
+	for _, issue := range issues {
+		if issue.NoHistory && !issue.Ephemeral {
+			noHistoryIDs = append(noHistoryIDs, issue.ID)
+		}
+	}
+	wispPlane := map[string]bool{}
+	if len(noHistoryIDs) > 0 {
+		wispPlane, err = src.WispPlaneIDs(ctx, noHistoryIDs)
+		if err != nil {
+			return HandleErrorRespectJSON("failed to classify wisp-plane rows: %v", err)
+		}
+	}
 
 	// Populate relational data on each issue
 	for _, issue := range issues {
-		issue.Labels = labelsMap[issue.ID]
-		issue.Dependencies = allDeps[issue.ID]
-		issue.Comments = commentsMap[issue.ID]
+		issue.Labels = rel.labels[issue.ID]
+		issue.Dependencies = rel.deps[issue.ID]
+		issue.Comments = rel.comments[issue.ID]
 	}
 
 	// Write JSONL: one JSON object per line
 	count := 0
 	for _, issue := range issues {
-		counts := depCounts[issue.ID]
+		counts := rel.depCounts[issue.ID]
 		if counts == nil {
 			counts = &types.DependencyCounts{}
 		}
@@ -208,6 +208,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 		// NULL datetime columns scanned as time.Time{} (year 0001) cause
 		// MarshalJSON to fail with "year outside of range [0,9999]". (GH#2488)
 		sanitizeZeroTime(issue)
+		stripCloneLocalFields(issue)
 
 		record := &exportIssueRecord{
 			RecordType: "issue",
@@ -215,8 +216,9 @@ func runExport(cmd *cobra.Command, args []string) error {
 				Issue:           issue,
 				DependencyCount: counts.DependencyCount,
 				DependentCount:  counts.DependentCount,
-				CommentCount:    commentCounts[issue.ID],
+				CommentCount:    rel.commentCounts[issue.ID],
 			},
+			WispPlane: wispPlane[issue.ID],
 		}
 
 		data, err := json.Marshal(record)
@@ -236,26 +238,21 @@ func runExport(cmd *cobra.Command, args []string) error {
 	// Memories may contain sensitive agent context and are excluded by default.
 	memoryCount := 0
 	if (exportIncludeMemories || exportAll) && !exportNoMemories {
-		allConfig, err := store.GetAllConfig(ctx)
+		memories, err := src.ExportMemories(ctx)
 		if err != nil {
-			return HandleErrorRespectJSON("failed to read config for memories: %v", err)
+			return HandleErrorRespectJSON("failed to read memories: %v", err)
 		}
-		fullPrefix := kvPrefix + memoryPrefix
 		// Sort keys for deterministic output order (GH#3474).
-		var memKeys []string
-		for k := range allConfig {
-			if strings.HasPrefix(k, fullPrefix) {
-				memKeys = append(memKeys, k)
-			}
+		memKeys := make([]string, 0, len(memories))
+		for userKey := range memories {
+			memKeys = append(memKeys, userKey)
 		}
 		sort.Strings(memKeys)
-		for _, k := range memKeys {
-			v := allConfig[k]
-			userKey := strings.TrimPrefix(k, fullPrefix)
+		for _, userKey := range memKeys {
 			record := map[string]string{
 				"_type": "memory",
 				"key":   userKey,
-				"value": v,
+				"value": memories[userKey],
 			}
 			data, err := json.Marshal(record)
 			if err != nil {
@@ -293,12 +290,72 @@ func runExport(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// exportIssueFilter is the storage filter the store-shaped export sources
+// search with: every status, infra types excluded unless --all or
+// --include-infra, templates and true wisps excluded unless --all. The
+// role-backed source asks the same question through issueops.ReadExport.
+func exportIssueFilter(ctx context.Context, src exportSource, req issueops.ExportRequest) types.IssueFilter {
+	// Build filter for issues table. Export all statuses by default.
+	// Opt out of BEADS_MAX_ROWS (designer §4.1) — export is a data-integrity
+	// path and must never abort partway through an export run.
+	filter := types.IssueFilter{
+		Limit:         0,
+		MaxRows:       0,
+		MaxRowsSource: "",
+	}
+
+	// Exclude infra types by default (agents, roles, messages).
+	if !req.All && !req.IncludeInfra {
+		var infraTypes []string
+		infraSet := src.GetInfraTypes(ctx)
+		if len(infraSet) > 0 {
+			for t := range infraSet {
+				infraTypes = append(infraTypes, t)
+			}
+		}
+		if len(infraTypes) == 0 {
+			infraTypes = domain.DefaultInfraTypes()
+		}
+		for _, t := range infraTypes {
+			filter.ExcludeTypes = append(filter.ExcludeTypes, types.IssueType(t))
+		}
+	}
+
+	// Exclude templates by default
+	if !req.All {
+		isTemplate := false
+		filter.IsTemplate = &isTemplate
+	}
+
+	// Exclude ephemeral wisps by default — they are private/transient and
+	// must not reach git history or external integrations (GH#3649).
+	// --all overrides to include everything.
+	if !req.All {
+		persistentOnly := false
+		filter.Ephemeral = &persistentOnly
+	}
+
+	return filter
+}
+
 // exportIssueRecord wraps IssueWithCounts with a _type discriminator so that
 // every line in the JSONL export is self-describing. Memory lines already
 // carry "_type":"memory"; this gives issue lines "_type":"issue". (GH#3271)
 type exportIssueRecord struct {
 	RecordType string `json:"_type"`
 	*types.IssueWithCounts
+	// WispPlane is the explicit wisps-plane marker (bd-r9uce): true when the
+	// row lives in the WISPS table AND its flags alone cannot prove it (the
+	// no_history shape; ephemeral rows are self-describing and stay
+	// unstamped). Import routes by this marker — never by no_history — so a
+	// promoted no-history wisp (durable issues-table row still carrying the
+	// stray flag) round-trips to the durable plane instead of being silently
+	// re-planed. Declared after the embedded struct so it serializes last.
+	// Deliberately a FRESH key, not the legacy "wisp" alias key: pre-fix
+	// binaries' alias branch would import a marked no-history wisp as
+	// ephemeral (purge-eligible, export-excluded), so an unknown-to-them key
+	// that degrades to flag routing is the data-safe choice (lion, #5368).
+	WispPlane bool `json:"wisp_plane,omitempty"`
 }
 
 // sanitizeZeroTime replaces Go zero-value time.Time fields with Unix epoch.
@@ -312,6 +369,16 @@ func sanitizeZeroTime(issue *types.Issue) {
 	if issue.UpdatedAt.IsZero() {
 		issue.UpdatedAt = epoch
 	}
+}
+
+// stripCloneLocalFields clears the issue fields whose values are only
+// meaningful in the workspace that assigned them, so JSONL interchange never
+// carries them. arrival_seq is the events-journal seq of the row's create
+// record in THIS clone (types.Issue.ArrivalSeq): written to a git-tracked file
+// it would reach clones whose counter never produced it. Every export record
+// builder calls it beside sanitizeZeroTime.
+func stripCloneLocalFields(issue *types.Issue) {
+	issue.ArrivalSeq = 0
 }
 
 // filterOutPollution removes issues that look like test/pollution records.
@@ -328,7 +395,7 @@ func filterOutPollution(issues []*types.Issue) []*types.Issue {
 // buildOwnerExcludeSet merges --exclude-owner flag values with the
 // export.exclude_owners (and legacy export.exclude_owner) config entries.
 // Returns the combined set as a map for O(1) lookup.
-func buildOwnerExcludeSet(ctx context.Context, flagOwners []string) map[string]struct{} {
+func buildOwnerExcludeSet(ctx context.Context, src exportSource, flagOwners []string) map[string]struct{} {
 	set := make(map[string]struct{})
 	for _, o := range flagOwners {
 		if o != "" {
@@ -352,14 +419,11 @@ func buildOwnerExcludeSet(ctx context.Context, flagOwners []string) map[string]s
 	if val := config.GetYamlConfig("export.exclude_owner"); val != "" {
 		set[strings.TrimSpace(val)] = struct{}{}
 	}
-	if store == nil {
-		return set
-	}
 	// Also read from database for any value stored there directly.
-	if val, err := store.GetConfig(ctx, "export.exclude_owners"); err == nil && val != "" {
+	if val, err := src.GetConfig(ctx, "export.exclude_owners"); err == nil && val != "" {
 		addOwners(val)
 	}
-	if val, err := store.GetConfig(ctx, "export.exclude_owner"); err == nil && val != "" {
+	if val, err := src.GetConfig(ctx, "export.exclude_owner"); err == nil && val != "" {
 		set[strings.TrimSpace(val)] = struct{}{}
 	}
 	return set

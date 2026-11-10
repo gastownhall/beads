@@ -139,15 +139,21 @@ func TestBootstrapRejectsCorruptMetadataBeforeWorkspaceWrites(t *testing.T) {
 			cmd := exec.Command(bd, args...)
 			cmd.Dir = root
 			cmd.Env = bootstrapBackendGuardEnv(root, beadsDir)
-			out, err := cmd.CombinedOutput()
+			stdout, stderr, err := runCommandBuffers(t, cmd)
 			if err == nil {
-				t.Fatalf("bd %s unexpectedly ignored corrupt metadata:\n%s", strings.Join(args, " "), out)
+				t.Fatalf("bd %s unexpectedly ignored corrupt metadata:\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), stdout.String(), stderr.String())
 			}
-			message := strings.ToLower(string(out))
-			for _, want := range []string{"metadata.json", "no storage database was opened or modified"} {
-				if !strings.Contains(message, want) {
-					t.Errorf("bd %s error missing %q:\n%s", strings.Join(args, " "), want, out)
+			// Binding the workspace warns, naming the file, before bootstrap
+			// runs, so bootstrap's own refusal is checked on its Error line,
+			// not on that warning.
+			warning := firstLineWithPrefix(stderr.String(), "warning: ")
+			for _, want := range []string{"metadata.json", "parsing config:", "no storage database was opened or modified"} {
+				if !strings.Contains(warning, want) {
+					t.Errorf("bd %s corrupt-metadata warning missing %q:\n%s", strings.Join(args, " "), want, stderr.String())
 				}
+			}
+			if refusal := firstLineWithPrefix(stderr.String(), "Error: "); !strings.Contains(refusal, "parsing config:") {
+				t.Errorf("bd %s Error line does not refuse the unparsable metadata (parsing config:), got %q:\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), refusal, stdout.String(), stderr.String())
 			}
 
 			after, readErr := os.ReadFile(metadataPath)
@@ -212,10 +218,12 @@ func TestBootstrapDoesNotConvertExistingSQLiteWorkspace(t *testing.T) {
 			}
 
 			message := strings.ToLower(string(out))
-			if !strings.Contains(message, "sqlite") {
-				t.Errorf("bd %s should name the rejected backend:\n%s", strings.Join(args, " "), out)
-			}
-			for _, want := range removedBackendWantSubstrings(configfile.BackendSQLite) {
+			for _, want := range []string{
+				"historical sqlite workspace",
+				"explicit migration is required",
+				"preserve .beads unchanged",
+				"cross-era-upgrades",
+			} {
 				if !strings.Contains(message, want) {
 					t.Errorf("bd %s error missing %q:\n%s", strings.Join(args, " "), want, out)
 				}

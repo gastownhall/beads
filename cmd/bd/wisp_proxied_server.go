@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
@@ -18,6 +20,12 @@ func runWispCreateProxiedServer(ctx context.Context, in wispCreateInput) error {
 	if uowProvider == nil {
 		return HandleError("proxied-server UOW provider not initialized")
 	}
+	// Explicit commit point, like the `transact` in cloneSubgraph the direct
+	// route reaches through spawnMoleculeWithOptions (GH#4995). The wisp tables
+	// are dolt_ignored, so the commit this preserves is whatever tracked rows
+	// the spawn touches — the class membership is what matters here, not the
+	// size of the commit.
+	ctx = explicitCommitPointContext(ctx)
 
 	vars, err := parseVarFlags(in.varFlags)
 	if err != nil {
@@ -29,6 +37,13 @@ func runWispCreateProxiedServer(ctx context.Context, in wispCreateInput) error {
 	if sg, err := resolveAndCookFormulaWithVars(in.protoArg, nil, vars); err == nil {
 		formulaSubgraph = sg
 		formulaProtoID = sg.Root.ID
+	} else if errors.Is(err, formula.ErrVarValidation) || errors.Is(err, formula.ErrValidation) {
+		// in.protoArg IS a formula; either the formula itself does not
+		// validate, or the --var values it was given fail enum/pattern/
+		// required-empty constraints. Report that directly
+		// instead of falling through to the proto-ID lookup below, which
+		// would otherwise mask this as "not found as formula or proto".
+		return HandleError("%v", err)
 	}
 
 	if formulaSubgraph == nil {
@@ -65,7 +80,7 @@ func runWispCreateProxiedServer(ctx context.Context, in wispCreateInput) error {
 	vars = applyVariableDefaults(vars, subgraph)
 
 	if err := checkRequiredVars(subgraph, vars); err != nil {
-		return HandleErrorWithHint(err.Error(), fmt.Sprintf("Provide them with: --var %s=<value>", firstMissingVar(subgraph, vars)))
+		return handleVarErrorWithHint(err, firstMissingVar(subgraph, vars))
 	}
 
 	if in.dryRun {
@@ -77,7 +92,7 @@ func runWispCreateProxiedServer(ctx context.Context, in wispCreateInput) error {
 		w := newUOWMolWriter(uw)
 		spawnResult, err := cloneSubgraphInto(ctx, w, subgraph, CloneOptions{
 			Vars:      vars,
-			Actor:     actor,
+			Actor:     currentActor(),
 			Ephemeral: true,
 			Prefix:    types.IDPrefixWisp,
 			RootOnly:  in.rootOnly,
@@ -166,11 +181,16 @@ func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.
 	}
 
 	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (domain.DeleteIssuesResult, string, error) {
+		// Cascade must stay OFF: findAbandonedWisps already expanded dependents
+		// and kept only unprotected ones that meet --age; a cascade here
+		// re-expands to ALL transitive dependents, bypassing that protection
+		// (GH#4394) and sweeping fresh children past the --age filter.
+		// Mirrors runWispGC in wisp.go.
 		res, err := uw.IssueUseCase().DeleteIssues(ctx, domain.DeleteIssuesParams{
 			IDs:                  ids,
-			Cascade:              true,
+			Cascade:              false,
 			UpdateTextReferences: true,
-		}, actor)
+		}, currentActor())
 		if err != nil {
 			return domain.DeleteIssuesResult{}, "", err
 		}
@@ -293,11 +313,15 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 	}
 
 	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (domain.DeleteIssuesResult, string, error) {
+		// Cascade must stay OFF: the closed set above is already the complete
+		// purge candidate list, so cascade can only add NON-closed dependents
+		// (live molecule steps) to the batch — the patrol self-destruct bug.
+		// Mirrors runWispPurgeClosed in wisp.go.
 		res, err := uw.IssueUseCase().DeleteIssues(ctx, domain.DeleteIssuesParams{
 			IDs:                  ids,
-			Cascade:              true,
+			Cascade:              false,
 			UpdateTextReferences: true,
-		}, actor)
+		}, currentActor())
 		if err != nil {
 			return domain.DeleteIssuesResult{}, "", err
 		}

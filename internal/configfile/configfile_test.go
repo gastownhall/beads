@@ -1,6 +1,7 @@
 package configfile
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,6 +56,48 @@ func TestLoadNonexistent(t *testing.T) {
 
 	if cfg != nil {
 		t.Errorf("Load() = %v, want nil for nonexistent config", cfg)
+	}
+}
+
+// Corrupt must never be conflated with absent (bd-aj3g5): the proxied
+// provider takes the fresh-workspace defaults on (nil, nil), so a parse
+// failure that returned nil would silently reroute it to the wrong database.
+func TestLoadCorruptIsError(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(ConfigPath(tmpDir), []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("seed corrupt: %v", err)
+	}
+
+	cfg, err := Load(tmpDir)
+	if err == nil {
+		t.Fatalf("Load() of corrupt config returned nil error (cfg=%+v); corrupt must not be conflated with absent", cfg)
+	}
+}
+
+func TestLoadForDiscoveryNeverMigratesLegacyConfig(t *testing.T) {
+	beadsDir := t.TempDir()
+	legacyPath := filepath.Join(beadsDir, "config.json")
+	legacy := []byte(`{"backend":"dolt","dolt_mode":"server"}`)
+	if err := os.WriteFile(legacyPath, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadForDiscovery(beadsDir)
+	if err != nil {
+		t.Fatalf("LoadForDiscovery() failed: %v", err)
+	}
+	if cfg == nil || cfg.DoltMode != DoltModeServer {
+		t.Fatalf("LoadForDiscovery() = %#v, want legacy server config", cfg)
+	}
+	if _, err := os.Stat(ConfigPath(beadsDir)); !os.IsNotExist(err) {
+		t.Fatalf("LoadForDiscovery created metadata.json: %v", err)
+	}
+	after, err := os.ReadFile(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(legacy) {
+		t.Fatalf("LoadForDiscovery rewrote legacy config: got %q, want %q", after, legacy)
 	}
 }
 
@@ -396,6 +439,215 @@ func TestIsDoltServerModeEnvVar(t *testing.T) {
 	})
 }
 
+// TestIsDoltServerMode_HostInference_GH3545 is a regression test for
+// gastownhall/beads#3545: setting BEADS_DOLT_SERVER_HOST (or dolt.host)
+// to a non-localhost value MUST imply server mode. Before the fix, mode
+// falls through to embedded and bd silently uses local storage instead
+// of the configured external server.
+//
+// Explicit dolt_mode in metadata.json always wins over a persisted or
+// configured host — an operator's explicit statement of intent is not
+// overridden by inference.
+func TestIsDoltServerMode_HostInference_GH3545(t *testing.T) {
+	t.Run("env var BEADS_DOLT_SERVER_HOST=non-localhost infers server mode", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "192.0.2.10")
+		cfg := &Config{Backend: BackendDolt}
+		if !cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = false, want true with BEADS_DOLT_SERVER_HOST=192.0.2.10")
+		}
+	})
+
+	t.Run("env var BEADS_DOLT_SERVER_HOST=hostname infers server mode", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "dolt-primary.tailnet.example.com")
+		cfg := &Config{Backend: BackendDolt}
+		if !cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = false, want true with BEADS_DOLT_SERVER_HOST=dolt-primary.tailnet.example.com")
+		}
+	})
+
+	t.Run("env var BEADS_DOLT_SERVER_HOST=localhost does NOT infer", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "localhost")
+		cfg := &Config{Backend: BackendDolt}
+		if cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = true, want false with BEADS_DOLT_SERVER_HOST=localhost (operator wants bd-managed local)")
+		}
+	})
+
+	t.Run("env var BEADS_DOLT_SERVER_HOST=127.0.0.1 does NOT infer", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+		cfg := &Config{Backend: BackendDolt}
+		if cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = true, want false with BEADS_DOLT_SERVER_HOST=127.0.0.1")
+		}
+	})
+
+	t.Run("env var BEADS_DOLT_SERVER_HOST empty does NOT infer", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+		cfg := &Config{Backend: BackendDolt}
+		if cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = true, want false with empty BEADS_DOLT_SERVER_HOST")
+		}
+	})
+
+	t.Run("config.yaml dolt.host=non-localhost infers server mode", func(t *testing.T) {
+		// Use the in-config DoltServerHost field — this mirrors what
+		// GetDoltServerHost reads from config.yaml (post-#3471).
+		cfg := &Config{Backend: BackendDolt, DoltServerHost: "10.0.0.5"}
+		if !cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = false, want true with DoltServerHost=10.0.0.5")
+		}
+	})
+
+	t.Run("DoltServerHost=localhost does NOT infer", func(t *testing.T) {
+		cfg := &Config{Backend: BackendDolt, DoltServerHost: "localhost"}
+		if cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = true, want false with DoltServerHost=localhost")
+		}
+	})
+
+	t.Run("env wins over config.yaml: env=localhost suppresses config-host inference", func(t *testing.T) {
+		// When env is explicitly set to localhost, the operator's
+		// intent overrides config — even if config has a non-
+		// localhost host left over from a prior context.
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "localhost")
+		cfg := &Config{Backend: BackendDolt, DoltServerHost: "10.0.0.5"}
+		if cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = true, want false when env=localhost overrides config-host")
+		}
+	})
+
+	t.Run("non-dolt backend does not trigger host inference", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "192.0.2.10")
+		cfg := &Config{Backend: ""}
+		// Backend gate (GetBackend != BackendDolt → false) precedes
+		// host inference. Empty backend is normalized to dolt by
+		// GetBackend, so this test asserts that the gate still
+		// short-circuits when explicitly set to a non-dolt value
+		// (currently impossible via GetBackend, but the gate is the
+		// first check and must not be bypassed by host inference).
+		_ = cfg.IsDoltServerMode() // No assertion — empty backend
+		// resolves to dolt via GetBackend(). Documenting the gate.
+	})
+
+	t.Run("explicit metadata dolt_mode=embedded wins over struct host", func(t *testing.T) {
+		// Explicit dolt_mode in metadata.json always wins over a
+		// persisted host — the operator's explicit statement of
+		// intent is not second-guessed by host inference.
+		cfg := &Config{Backend: BackendDolt, DoltMode: DoltModeEmbedded, DoltServerHost: "10.0.0.5"}
+		if cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = true, want false: explicit dolt_mode=embedded must win over DoltServerHost=10.0.0.5")
+		}
+	})
+
+	t.Run("config.yaml dolt.mode=embedded + env host non-localhost still infers via env", func(t *testing.T) {
+		// Env-host inference happens before the dolt_mode/config.yaml
+		// checks, so it wins regardless of what config.yaml says.
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "192.0.2.10")
+
+		configDir := t.TempDir()
+		configYaml := filepath.Join(configDir, "config.yaml")
+		if err := os.WriteFile(configYaml,
+			[]byte("dolt.mode: embedded\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DIR", configDir)
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize: %v", err)
+		}
+		t.Cleanup(config.ResetForTesting)
+
+		cfg := &Config{Backend: BackendDolt}
+		if !cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = false, want true: env host non-localhost should infer server mode even with config.yaml dolt.mode: embedded")
+		}
+	})
+
+	t.Run("metadata localhost host masks config.yaml remote host", func(t *testing.T) {
+		// The inference follows the EFFECTIVE host precedence
+		// (GetDoltServerHost: env > metadata > config.yaml): when
+		// metadata supplies localhost, a lower-priority remote
+		// dolt.host that GetDoltServerHost would ignore must not
+		// drive the inference (cross-vendor review round 5).
+		configDir := t.TempDir()
+		configYaml := filepath.Join(configDir, "config.yaml")
+		if err := os.WriteFile(configYaml,
+			[]byte("dolt.host: 100.64.0.1\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DIR", configDir)
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize: %v", err)
+		}
+		t.Cleanup(config.ResetForTesting)
+
+		cfg := &Config{Backend: BackendDolt, DoltServerHost: "localhost"}
+		if cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = true, want false: metadata localhost host must mask config.yaml remote host")
+		}
+	})
+
+	t.Run("proxied-server mode is not reclassified by env host", func(t *testing.T) {
+		// IsDoltServerMode and IsDoltProxiedServerMode are mutually
+		// exclusive; a non-local env host on a proxied workspace must
+		// not flip it to plain server mode (cross-vendor review P2,
+		// 2026-08-02: the proxied-to-server migration would otherwise
+		// exit "Already in server mode").
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "192.0.2.10")
+		cfg := &Config{Backend: BackendDolt, DoltMode: DoltModeProxiedServer}
+		if cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = true, want false for proxied-server workspace with non-local env host")
+		}
+		if !cfg.IsDoltProxiedServerMode() {
+			t.Error("IsDoltProxiedServerMode() = false, want true")
+		}
+	})
+
+	t.Run("config.yaml dolt.mode=embedded wins over config.yaml dolt.host", func(t *testing.T) {
+		// Like metadata's dolt_mode, ANY explicit yaml mode wins over
+		// yaml-host inference — an explicit "embedded" must not be
+		// flipped to server by a dolt.host inherited from a
+		// lower-priority config (cross-vendor review P1, 2026-08-02).
+		configDir := t.TempDir()
+		configYaml := filepath.Join(configDir, "config.yaml")
+		if err := os.WriteFile(configYaml,
+			[]byte("dolt.mode: embedded\ndolt.host: 100.64.0.1\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DIR", configDir)
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize: %v", err)
+		}
+		t.Cleanup(config.ResetForTesting)
+
+		cfg := &Config{Backend: BackendDolt}
+		if cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = true, want false: explicit config.yaml dolt.mode: embedded must win over dolt.host inference")
+		}
+	})
+
+	t.Run("config.yaml dolt.host=non-localhost + no metadata mode infers server mode", func(t *testing.T) {
+		// Deliberately do not set BEADS_DOLT_SERVER_HOST here: a
+		// non-empty env value would decide the inference by itself,
+		// and this subtest exercises the config.yaml fallback layer.
+		configDir := t.TempDir()
+		configYaml := filepath.Join(configDir, "config.yaml")
+		if err := os.WriteFile(configYaml,
+			[]byte("dolt.host: 100.64.0.1\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DIR", configDir)
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize: %v", err)
+		}
+		t.Cleanup(config.ResetForTesting)
+
+		cfg := &Config{Backend: BackendDolt}
+		if !cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = false, want true: config.yaml dolt.host=100.64.0.1 with no metadata dolt_mode should infer server mode")
+		}
+	})
+}
+
 // TestDoltProxiedServerMode covers the IsDoltProxiedServerMode predicate and
 // the GetCapabilities branch that treats proxied-server as multi-process-safe
 // (the proxy daemon serializes writers).
@@ -584,6 +836,24 @@ func TestProxiedServerClientInfo_RoundTrip(t *testing.T) {
 		}
 	})
 
+	// The absent-vs-corrupt distinction is load-bearing for the proxied
+	// provider (bd-aj3g5): absent means (nil, nil) and the caller may take
+	// the fresh-workspace defaults; a file that EXISTS but cannot be parsed
+	// must be an error, or the caller silently forks a fresh database.
+	t.Run("corrupt sidecar is an error, not nil", func(t *testing.T) {
+		sub := t.TempDir()
+		if err := os.WriteFile(ProxiedServerClientInfoPath(sub), []byte("{not json"), 0o600); err != nil {
+			t.Fatalf("seed corrupt: %v", err)
+		}
+		got, err := LoadProxiedServerClientInfo(sub)
+		if err == nil {
+			t.Fatalf("Load of corrupt sidecar returned nil error (got=%+v); corrupt must not be conflated with absent", got)
+		}
+		if !strings.Contains(err.Error(), ProxiedServerClientInfoFileName) {
+			t.Errorf("error should name the file: %v", err)
+		}
+	})
+
 	t.Run("legacy sidecar without external section still loads", func(t *testing.T) {
 		sub := t.TempDir()
 		legacy := []byte(`{"root_path":"/var/lib/beads/proxieddb","config_path":"/etc/dolt/server.yaml","log_path":"/var/log/beads/server.log"}`)
@@ -601,6 +871,79 @@ func TestProxiedServerClientInfo_RoundTrip(t *testing.T) {
 			t.Errorf("RootPath = %q, want /var/lib/beads/proxieddb", got.RootPath)
 		}
 	})
+}
+
+func TestSaveProxiedServerClientInfo_WritesEffectiveIdleTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   time.Duration
+		want time.Duration
+	}{
+		{name: "default", in: 0, want: DefaultProxyIdleTimeout},
+		{name: "never", in: -1, want: -1},
+		{name: "positive", in: 45 * time.Second, want: 45 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			info := &ProxiedServerClientInfo{RootPath: "/var/lib/beads/proxieddb", IdleTimeout: tc.in}
+			if err := SaveProxiedServerClientInfo(dir, info); err != nil {
+				t.Fatalf("Save: %v", err)
+			}
+
+			data, err := os.ReadFile(ProxiedServerClientInfoPath(dir))
+			if err != nil {
+				t.Fatalf("ReadFile: %v", err)
+			}
+			var raw map[string]any
+			if err := json.Unmarshal(data, &raw); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			got, ok := raw["idle_timeout"]
+			if !ok {
+				t.Fatalf("idle_timeout is absent from sidecar: %s", data)
+			}
+			if got != float64(tc.want.Nanoseconds()) {
+				t.Fatalf("idle_timeout = %v, want %d: %s", got, tc.want.Nanoseconds(), data)
+			}
+			if info.IdleTimeout != tc.want {
+				t.Fatalf("caller plan IdleTimeout = %s, want effective %s", info.IdleTimeout, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoadProxiedServerClientInfo_ResolvesEffectiveIdleTimeout pins the read
+// side of the same contract (bd-mnhq6). Sidecars written before the effective
+// value was persisted omit idle_timeout, and nothing rewrites them, so Load is
+// where a pre-upgrade workspace stops reporting an absent timeout that readers
+// cannot tell apart from "unset". A negative value is the "never" sentinel and
+// must survive the load rather than be swept into the default.
+func TestLoadProxiedServerClientInfo_ResolvesEffectiveIdleTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		sidecar string
+		want    time.Duration
+	}{
+		{name: "legacy absent key", sidecar: `{"root_path":"/var/lib/beads/proxieddb"}`, want: DefaultProxyIdleTimeout},
+		{name: "explicit zero", sidecar: `{"root_path":"/var/lib/beads/proxieddb","idle_timeout":0}`, want: DefaultProxyIdleTimeout},
+		{name: "never", sidecar: `{"root_path":"/var/lib/beads/proxieddb","idle_timeout":-1}`, want: -1},
+		{name: "other negative", sidecar: `{"root_path":"/var/lib/beads/proxieddb","idle_timeout":-5000000000}`, want: -5 * time.Second},
+		{name: "positive", sidecar: `{"root_path":"/var/lib/beads/proxieddb","idle_timeout":45000000000}`, want: 45 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(ProxiedServerClientInfoPath(dir), []byte(tc.sidecar), 0o600); err != nil {
+				t.Fatalf("seed sidecar: %v", err)
+			}
+			got, err := LoadProxiedServerClientInfo(dir)
+			if err != nil || got == nil {
+				t.Fatalf("Load: %v got=%v", err, got)
+			}
+			if got.IdleTimeout != tc.want {
+				t.Errorf("IdleTimeout = %s, want %s", got.IdleTimeout, tc.want)
+			}
+		})
+	}
 }
 
 func TestProxiedServerClientInfo_ResolvedPaths(t *testing.T) {
@@ -806,6 +1149,7 @@ func TestEnvVarOverrides(t *testing.T) {
 
 	t.Run("invalid port env var falls through to config", func(t *testing.T) {
 		t.Setenv("BEADS_DOLT_SERVER_PORT", "not-a-number")
+		t.Setenv("BEADS_DOLT_PORT", "")
 		cfg := &Config{DoltServerPort: 3308}
 		if got := cfg.GetDoltServerPort(); got != 3308 {
 			t.Errorf("GetDoltServerPort() = %d, want 3308", got)
@@ -813,6 +1157,7 @@ func TestEnvVarOverrides(t *testing.T) {
 	})
 
 	t.Run("BEADS_DOLT_PORT fallback when SERVER_PORT not set", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 		t.Setenv("BEADS_DOLT_PORT", "3307")
 		cfg := &Config{}
 		if got := cfg.GetDoltServerPort(); got != 3307 {
@@ -846,6 +1191,7 @@ func TestEnvVarOverrides(t *testing.T) {
 	})
 
 	t.Run("database default", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
 		cfg := &Config{}
 		if got := cfg.GetDoltDatabase(); got != DefaultDoltDatabase {
 			t.Errorf("GetDoltDatabase() = %q, want %q", got, DefaultDoltDatabase)
@@ -853,6 +1199,7 @@ func TestEnvVarOverrides(t *testing.T) {
 	})
 
 	t.Run("database config value", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
 		cfg := &Config{DoltDatabase: "mydb"}
 		if got := cfg.GetDoltDatabase(); got != "mydb" {
 			t.Errorf("GetDoltDatabase() = %q, want mydb", got)
@@ -1026,5 +1373,54 @@ func TestGlobalDoltDatabase_OmittedFromJSON(t *testing.T) {
 
 	if strings.Contains(string(data), "global_dolt_database") {
 		t.Error("global_dolt_database should be omitted from JSON when empty")
+	}
+}
+
+// TestPortImpliesServerMode covers the predicate doltserver's check 2c
+// delegates to. The precedence it encodes -- proxied exemption first, then a
+// live env var outranking an explicit dolt_mode -- is deliberate and mirrors
+// HostImpliesServerMode, whose own env check runs before its DoltMode
+// suppression and can return first (be-yb2ai).
+func TestPortImpliesServerMode(t *testing.T) {
+	tests := []struct {
+		name       string
+		cfg        *Config
+		serverPort string
+		legacyPort string
+		want       bool
+	}{
+		{"no env, no mode", &Config{}, "", "", false},
+		{"BEADS_DOLT_SERVER_PORT set", &Config{}, "3307", "", true},
+		{"legacy BEADS_DOLT_PORT set", &Config{}, "", "3307", true},
+		{"SERVER_PORT wins over legacy", &Config{}, "3307", "9999", true},
+		{"legacy used when SERVER_PORT empty", &Config{}, "", "3307", true},
+		{"non-numeric port ignored", &Config{}, "notaport", "", false},
+		{"zero port ignored", &Config{}, "0", "", false},
+		{"negative port ignored", &Config{}, "-1", "", false},
+		{"falls back to legacy when SERVER_PORT invalid", &Config{}, "notaport", "3307", true},
+
+		// A live env var outranks an explicit dolt_mode, matching
+		// HostImpliesServerMode's env tier (GH#2949).
+		{"env beats explicit embedded", &Config{DoltMode: DoltModeEmbedded}, "3307", "", true},
+		{"env beats explicit server", &Config{DoltMode: DoltModeServer}, "3307", "", true},
+
+		// ...except for proxied-server, which is exempt outright: it reaches
+		// its server through the proxy, so an ambient port does not describe
+		// its lifecycle.
+		{"proxied-server exempt even with env port", &Config{DoltMode: DoltModeProxiedServer}, "3307", "", false},
+		{"proxied-server exempt, legacy port", &Config{DoltMode: DoltModeProxiedServer}, "", "3307", false},
+		{"proxied-server exempt, case-insensitive", &Config{DoltMode: "Proxied-Server"}, "3307", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("BEADS_DOLT_SERVER_PORT", tt.serverPort)
+			t.Setenv("BEADS_DOLT_PORT", tt.legacyPort)
+
+			if got := tt.cfg.PortImpliesServerMode(); got != tt.want {
+				t.Errorf("PortImpliesServerMode() = %v, want %v (dolt_mode=%q SERVER_PORT=%q PORT=%q)",
+					got, tt.want, tt.cfg.DoltMode, tt.serverPort, tt.legacyPort)
+			}
+		})
 	}
 }

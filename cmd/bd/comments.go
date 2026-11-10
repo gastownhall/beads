@@ -1,14 +1,18 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/uimd"
+	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // validateCommentsArgs runs as cobra's Args validation for the parent
@@ -163,8 +167,23 @@ See: bd comments --help`)
 	},
 }
 
+// validateCommentsAddArgs runs as cobra's Args validation for "comments add",
+// the plural twin of "comment"'s validateCommentArgs. It exists for the same
+// reason: an id argument that IS a reserved word (see
+// commentReservedIDWords) must never reach either dispatch branch (local or
+// proxied) or fuzzy resolution, where it could silently land on an unrelated
+// issue instead of erroring. Unlike validateCommentArgs, there is no
+// singular/plural confusion to special-case here — "comments add" is already
+// the plural form — so this only runs the word-agnostic generic check.
+func validateCommentsAddArgs(cmd *cobra.Command, args []string) error {
+	if err := cobra.MinimumNArgs(1)(cmd, args); err != nil {
+		return err
+	}
+	return checkCommentIDNotReservedWord(args[0])
+}
+
 var commentsAddCmd = &cobra.Command{
-	Use:   "add [issue-id] [text]",
+	Use:   "add [issue-id] [text...]",
 	Short: "Add a comment to an issue",
 	Long: `Add a comment to an issue.
 
@@ -174,7 +193,7 @@ Examples:
 
   # Add a comment from a file
   bd comments add bd-123 -f notes.txt`,
-	Args:          cobra.MinimumNArgs(1),
+	Args:          validateCommentsAddArgs,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -187,27 +206,12 @@ Examples:
 			}
 		}()
 
-		if usesProxiedServer() {
-			return runCommentsAddProxiedServer(cmd, rootCtx, args)
-		}
-
 		issueID := args[0]
 
-		commentText, _ := cmd.Flags().GetString("file")
-		if commentText != "" {
-			data, err := os.ReadFile(commentText) // #nosec G304 - user-provided file path is intentional
-			if err != nil {
-				return HandleErrorRespectJSON("reading file: %v", err)
-			}
-			commentText = string(data)
-		} else if len(args) < 2 {
-			return HandleErrorRespectJSON("comment text required (use -f to read from file)")
-		} else {
-			commentText = args[1]
-		}
-
-		if strings.TrimSpace(commentText) == "" {
-			return HandleErrorRespectJSON("comment text cannot be empty")
+		commentText, err := requireTextFromSources("comment text", "use positional args or -f to read from file",
+			cmdTextSources(cmd, args[1:]))
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
 		}
 
 		author, _ := cmd.Flags().GetString("author")
@@ -215,15 +219,29 @@ Examples:
 			author = getActorWithGit()
 		}
 
+		// Dispatched after the text is resolved so both backends read the
+		// same sources and report the same conflicts.
+		if usesProxiedServer() {
+			return runCommentsAddProxiedServer(rootCtx, issueID, author, commentText)
+		}
+
 		if err := ensureStoreActive(); err != nil {
 			return HandleErrorRespectJSON("adding comment: %v", err)
 		}
 		ctx := rootCtx
 
-		result, err := resolveAndGetIssueForMutation(ctx, store, issueID)
+		result, err := resolveAndGetIssueForMutationExact(ctx, store, issueID)
 		if err != nil {
 			if result != nil {
 				result.Close()
+			}
+			if errors.Is(err, utils.ErrAbbreviatedIDNotAllowed) {
+				// The issue does exist — id just isn't its full form — so
+				// "resolving %s: %v"'s generic wording (and the "no issue
+				// found matching" text underneath a plain not-found) would be
+				// false here. Say what actually happened instead, matching
+				// "bd comment"'s truthful message.
+				return HandleErrorRespectJSON("id abbreviations are not accepted on comment writes; use the full id from `bd show %s`", issueID)
 			}
 			return HandleErrorRespectJSON("resolving %s: %v", issueID, err)
 		}
@@ -236,11 +254,11 @@ Examples:
 		defer result.Close()
 		issueID = result.ResolvedID
 
-		comment, err := result.Store.AddIssueComment(ctx, issueID, author, commentText)
+		comment, err := addCommentDirect(ctx, result.Store, issueID, author, commentText)
 		if err != nil {
 			return HandleErrorRespectJSON("adding comment: %v", err)
 		}
-		if err := commitPendingIfEmbedded(ctx, result.Store, actor, doltAutoCommitParams{
+		if err := commitPendingIfEmbedded(ctx, result.Store, currentActor(), doltAutoCommitParams{
 			Command:  "comments add",
 			IssueIDs: []string{issueID},
 		}); err != nil {
@@ -254,6 +272,50 @@ Examples:
 		fmt.Printf("Comment added to %s\n", issueID)
 		return nil
 	},
+}
+
+// addCommentDirect appends one comment through the Commenter role and returns
+// the stored comment. It is the direct-route sibling of addCommentProxied and
+// builds the SAME request, so the two front doors ask the storage layer one
+// question.
+//
+// The role is reached through the STORE's own accessor, never a constructor:
+// that accessor is where the store's decorator stack — hooks, telemetry — adds
+// its layer, so a comment written here fires the same hook a comment written
+// through the provider does. The store is the caller's rather than the global
+// one, because a prefix-routed write has to reach the role through the store
+// that actually holds the issue.
+//
+// The RESOLVE stays with the caller. On this route it is fuzzy, prefix-routed
+// and cross-repo, none of which belongs on a contract an unattended client also
+// calls, and the caller has already produced the canonical id. The role runs
+// the issue-then-wisp fallback itself, so the comment lands on the plane the id
+// actually names.
+//
+// The auto-commit policy is applied HERE rather than by each caller. The role
+// creates its Dolt version commit inside the storage layer, so
+// `--dolt-auto-commit batch` can only defer it by saying so on the context —
+// the reason issueOpsContext exists — and a caller that forgets writes exactly
+// the per-write commit batch mode is there to avoid. Both comment commands come
+// through this function, so the policy is stated once.
+func addCommentDirect(ctx context.Context, st storage.DoltStorage, issueID, author, text string) (*types.Comment, error) {
+	opsCtx, err := issueOpsContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	commenter, err := st.Commenter()
+	if err != nil {
+		return nil, err
+	}
+	result, err := commenter.AddComment(opsCtx, issueops.AddCommentRequest{
+		Author:  author,
+		IssueID: issueID,
+		Text:    text,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.Comment, nil
 }
 
 func init() {

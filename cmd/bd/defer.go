@@ -14,6 +14,13 @@ import (
 	"github.com/steveyegge/beads/internal/utils"
 )
 
+// deferUntilFormatHint restates the vocabulary of
+// timeparsing.ParseCompactDuration for every flag that reaches it. The unit set
+// and its order track that parser's doc comment, so a unit added there must be
+// added here too -- TestDeferUntilFormatHintCoversCompactUnits only catches
+// units this constant already names.
+const deferUntilFormatHint = "Use a relative offset [+-]?<n><unit> with unit min=minutes, h=hours, d=days, w=weeks, m=months, y=years (+30min, +1h, +3m), natural language (tomorrow, next monday), or a date (2025-01-15)"
+
 var deferCmd = &cobra.Command{
 	Use:   "defer [id...]",
 	Short: "Defer one or more issues for later",
@@ -26,9 +33,14 @@ be revisited.
 
 Deferred issues don't show in 'bd ready' but remain visible in 'bd list'.
 
+A defer WITH a date is a snooze: once --until passes, the next ready-front
+read returns the issue to open automatically (same shape as 'bd undefer').
+A defer WITHOUT a date is the indefinite icebox: it stays deferred until
+someone runs 'bd undefer'.
+
 Examples:
-  bd defer bd-abc                  # Defer a single issue (status-based)
-  bd defer bd-abc --until=tomorrow # Defer until specific time
+  bd defer bd-abc                  # Icebox indefinitely (until bd undefer)
+  bd defer bd-abc --until=tomorrow # Snooze: auto-wakes once the date passes
   bd defer bd-abc --reason="waiting on API access"
   bd defer bd-abc bd-def           # Defer multiple issues`,
 	Args:          cobra.MinimumNArgs(1),
@@ -47,11 +59,11 @@ Examples:
 		if untilStr != "" {
 			t, err := timeparsing.ParseRelativeTime(untilStr, time.Now())
 			if err != nil {
-				return HandleError("invalid --until format %q. Examples: +1h, tomorrow, next monday, 2025-01-15", untilStr)
+				return HandleError("invalid --until format %q. %s", untilStr, deferUntilFormatHint)
 			}
 			if t.Before(time.Now()) && !jsonOutput {
 				fmt.Fprintf(os.Stderr, "%s Defer date %q is in the past. Issue will appear in bd ready immediately.\n",
-					ui.RenderWarn("!"), t.Format("2006-01-02 15:04"))
+					ui.RenderWarn("!"), t.Local().Format("2006-01-02 15:04"))
 				fmt.Fprintf(os.Stderr, "  Did you mean a future date? Use --until=+1h or --until=tomorrow\n")
 			}
 			deferUntil = &t
@@ -70,7 +82,10 @@ Examples:
 
 		ctx := rootCtx
 
-		_, err := utils.ResolvePartialIDs(ctx, store, args)
+		// Resolve every argument before any write so one bad ID aborts the
+		// command. The loop reuses these IDs: resolving again would repeat
+		// the partial-ID notice (mc-qec7j).
+		resolvedIDs, err := utils.ResolvePartialIDs(ctx, store, args)
 		if err != nil {
 			return HandleError("%v", err)
 		}
@@ -81,13 +96,7 @@ Examples:
 			return HandleErrorWithHint("database not initialized", diagHint())
 		}
 
-		for _, id := range args {
-			fullID, err := utils.ResolvePartialID(ctx, store, id)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
-				continue
-			}
-
+		for _, fullID := range resolvedIDs {
 			updates := map[string]interface{}{
 				"status": string(types.StatusDeferred),
 			}
@@ -111,7 +120,7 @@ Examples:
 				updates["notes"] = notes + reason
 			}
 
-			if err := store.UpdateIssue(ctx, fullID, updates, actor); err != nil {
+			if err := store.UpdateIssue(ctx, fullID, updates, currentActor()); err != nil {
 				fmt.Fprintf(os.Stderr, "Error deferring %s: %v\n", fullID, err)
 				continue
 			}

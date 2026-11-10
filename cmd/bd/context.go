@@ -112,17 +112,26 @@ func setStore(s storage.DoltStorage) {
 // getActor returns the current actor name for audit trail.
 func getActor() string {
 	if shouldUseGlobals() {
-		return actor
+		return currentActor()
+	}
+	// cmdCtx.Actor is a copy of the global taken by syncCommandContext or
+	// setActor. While the two agree, the global is authoritative and may
+	// still carry a deferred git fallback (see deferActorGitFallback).
+	if cmdCtx.Actor == actor {
+		return currentActor()
 	}
 	return cmdCtx.Actor
 }
 
 // setActor updates the actor name in the CommandContext.
 func setActor(a string) {
+	actorMu.Lock()
+	defer actorMu.Unlock()
 	if cmdCtx != nil {
 		cmdCtx.Actor = a
 	}
 	actor = a
+	actorGitFallbackPending = false
 }
 
 // isJSONOutput returns true if JSON output mode is enabled.

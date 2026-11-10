@@ -2,6 +2,7 @@ package formula
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,13 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
 )
+
+// ErrVarValidation wraps a variable validation failure so callers with a
+// fallback resolution path (e.g. "is this actually a proto/issue ID rather
+// than a formula name?") can distinguish "not a formula" from "is a formula,
+// but the provided variables are invalid" and surface the latter directly
+// with errors.Is, instead of silently falling through to a worse error.
+var ErrVarValidation = errors.New("variable validation failed")
 
 // Formula file extensions. TOML is preferred, JSON is legacy fallback.
 const (
@@ -63,18 +71,34 @@ func NewParser(searchPaths ...string) *Parser {
 // the command surface. If no beads project is resolved, fall back to cwd/.beads
 // so formula registries can still be used before a project is initialized.
 func DefaultSearchPaths() []string {
-	var paths []string
+	paths, _ := defaultSearchPaths()
+	return paths
+}
 
-	addPath := func(path string) {
+// OrchestratorOnlySearchPath returns $GT_ROOT/.beads/formulas when GT_ROOT is
+// set and that directory is its own entry in DefaultSearchPaths, i.e. it is not
+// also the project, checkout or user formula directory. It returns "" when
+// GT_ROOT is unset or its formula directory coincides with an earlier path.
+// Commands that write formula files use it to recognize the orchestrator-only
+// directory, which may be off limits for writes depending on where GT_ROOT
+// came from.
+func OrchestratorOnlySearchPath() string {
+	_, orchestratorDir := defaultSearchPaths()
+	return orchestratorDir
+}
+
+func defaultSearchPaths() (paths []string, orchestratorDir string) {
+	addPath := func(path string) bool {
 		if path == "" {
-			return
+			return false
 		}
 		for _, existing := range paths {
 			if existing == path {
-				return
+				return false
 			}
 		}
 		paths = append(paths, path)
+		return true
 	}
 
 	// Project-level formulas via resolved beads directory.
@@ -101,10 +125,13 @@ func DefaultSearchPaths() []string {
 
 	// Orchestrator formulas (via GT_ROOT)
 	if gtRoot := os.Getenv("GT_ROOT"); gtRoot != "" {
-		addPath(filepath.Join(gtRoot, ".beads", "formulas"))
+		dir := filepath.Join(gtRoot, ".beads", "formulas")
+		if addPath(dir) {
+			orchestratorDir = dir
+		}
 	}
 
-	return paths
+	return paths, orchestratorDir
 }
 
 // ParseFile parses a formula from a file path.
@@ -392,18 +419,30 @@ func ExtractVariables(formula *Formula) []string {
 	// Extract from formula fields
 	extract(formula.Description)
 
-	// Extract from steps
+	// Extract from steps. The fields scanned here must stay in sync with the
+	// fields substituteStepVars (cook) and cloneSubgraphInto (pour) resolve -
+	// a scanned-but-unresolved field demands a variable it then ignores, and a
+	// resolved-but-unscanned field ships a literal placeholder (GH#5110,
+	// GH#5754).
 	var extractFromStep func(*Step)
 	extractFromStep = func(step *Step) {
 		extract(step.Title)
 		extract(step.Description)
+		extract(step.Notes)
 		extract(step.Assignee)
 		extract(step.Condition)
+		for _, label := range step.Labels {
+			extract(label)
+		}
+		for _, s := range metadataStrings(step.Metadata, 0) {
+			extract(s)
+		}
 		if step.Gate != nil {
 			extract(step.Gate.Type)
 			extract(step.Gate.ID)
 			extract(step.Gate.AwaitID)
 			extract(step.Gate.Timeout)
+			extract(step.Gate.Repo)
 		}
 		for _, child := range step.Children {
 			extractFromStep(child)
@@ -415,6 +454,37 @@ func ExtractVariables(formula *Formula) []string {
 	}
 
 	return vars
+}
+
+// maxMetadataScanDepth bounds metadataStrings' recursion into decoded step
+// metadata, which is arbitrary user-supplied TOML/JSON.
+const maxMetadataScanDepth = 32
+
+// metadataStrings returns every string leaf of a decoded step metadata value,
+// at any nesting depth. Map keys are excluded: substitution does not rewrite
+// them, so scanning them would surface a variable that never resolves.
+func metadataStrings(v interface{}, depth int) []string {
+	if depth >= maxMetadataScanDepth {
+		return nil
+	}
+	switch val := v.(type) {
+	case string:
+		return []string{val}
+	case map[string]interface{}:
+		var out []string
+		for _, elem := range val {
+			out = append(out, metadataStrings(elem, depth+1)...)
+		}
+		return out
+	case []interface{}:
+		var out []string
+		for _, elem := range val {
+			out = append(out, metadataStrings(elem, depth+1)...)
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 // Substitute replaces {{variable}} placeholders with values.
@@ -443,46 +513,96 @@ func ValidateVars(formula *Formula, values map[string]string) error {
 			continue
 		}
 
-		// Use default if not provided
-		if !provided && def.Default != nil {
-			val = *def.Default
-		}
-
-		// Skip further validation if no value
-		if val == "" {
-			continue
-		}
-
-		// Check enum constraint
-		if len(def.Enum) > 0 {
-			found := false
-			for _, allowed := range def.Enum {
-				if val == allowed {
-					found = true
-					break
-				}
-			}
-			if !found {
-				errs = append(errs, fmt.Sprintf("variable %q: value %q not in allowed values %v", name, val, def.Enum))
-			}
-		}
-
-		// Check pattern constraint
-		if def.Pattern != "" {
-			re, err := regexp.Compile(def.Pattern)
-			if err != nil {
-				errs = append(errs, fmt.Sprintf("variable %q: invalid pattern %q: %v", name, def.Pattern, err))
-			} else if !re.MatchString(val) {
-				errs = append(errs, fmt.Sprintf("variable %q: value %q does not match pattern %q", name, val, def.Pattern))
-			}
-		}
+		errs = append(errs, validateVarValue(name, def, val, provided)...)
 	}
 
 	if len(errs) > 0 {
-		return fmt.Errorf("variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
+		return fmt.Errorf("%w:\n  - %s", ErrVarValidation, strings.Join(errs, "\n  - "))
 	}
 
 	return nil
+}
+
+// ValidateProvidedVars checks enum/pattern/required-empty constraints only
+// for variables that are present in values; it does not flag variables that
+// are entirely absent. Callers that already surface a more specific
+// missing-variable message (e.g. bd mol pour/wisp's hint path) should keep
+// using that path for absent vars — this exists so those same callers still
+// catch malformed *provided* values, which a presence-only check misses
+// (mybd-u2r6).
+func ValidateProvidedVars(formula *Formula, values map[string]string) error {
+	var errs []string
+
+	for name, def := range formula.Vars {
+		val, provided := values[name]
+		if !provided {
+			continue
+		}
+
+		errs = append(errs, validateVarValue(name, def, val, provided)...)
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("%w:\n  - %s", ErrVarValidation, strings.Join(errs, "\n  - "))
+	}
+
+	return nil
+}
+
+// validateVarValue applies the required-empty, enum, and pattern checks for
+// a single variable given its (possibly defaulted) value. It assumes any
+// "required and not provided at all" check has already been handled by the
+// caller, since that case is presented differently by ValidateVars vs.
+// ValidateProvidedVars.
+func validateVarValue(name string, def *VarDef, val string, provided bool) []string {
+	var errs []string
+
+	// A variable with no default is effectively required: the command paths
+	// (extractRequiredVariables) demand a value for it, so a provided-but-empty
+	// value is the same unset-shell-variable trap as for required=true.
+	if (def.Required || def.Default == nil) && provided && val == "" {
+		errs = append(errs, fmt.Sprintf("variable %q is required and cannot be empty", name))
+		return errs
+	}
+
+	// Use default if not provided
+	if !provided && def.Default != nil {
+		val = *def.Default
+	}
+
+	// Skip further validation only when the var was genuinely not
+	// provided (absent from the map). A value that was explicitly
+	// provided as "" must still be checked against enum/pattern
+	// constraints rather than silently passing.
+	if !provided && val == "" {
+		return errs
+	}
+
+	// Check enum constraint
+	if len(def.Enum) > 0 {
+		found := false
+		for _, allowed := range def.Enum {
+			if val == allowed {
+				found = true
+				break
+			}
+		}
+		if !found {
+			errs = append(errs, fmt.Sprintf("variable %q: value %q not in allowed values %v", name, val, def.Enum))
+		}
+	}
+
+	// Check pattern constraint
+	if def.Pattern != "" {
+		re, err := regexp.Compile(def.Pattern)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("variable %q: invalid pattern %q: %v", name, def.Pattern, err))
+		} else if !re.MatchString(val) {
+			errs = append(errs, fmt.Sprintf("variable %q: value %q does not match pattern %q", name, val, def.Pattern))
+		}
+	}
+
+	return errs
 }
 
 // ApplyDefaults returns a new map with default values filled in.

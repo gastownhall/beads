@@ -10,8 +10,10 @@ import (
 
 	mysql "github.com/go-sql-driver/mysql"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // Sentinel errors for the dolt storage layer.
@@ -44,12 +46,9 @@ var (
 	// environment variable.
 	ErrFSCKTimeout = errors.New("pre-push integrity check timed out")
 
-	// errCommitPhase marks an error as having occurred during tx.Commit (as
-	// opposed to BeginTx or the transaction body). A connection failure during
-	// commit is ambiguous — the commit may have landed on the server before the
-	// connection dropped — so withRetryTx must NOT blindly replay it, or it
-	// could double-apply the write. Pre-commit failures carry no such risk.
-	errCommitPhase = errors.New("write commit phase")
+	// ErrCommitIndeterminate is the storage-wide no-replay sentinel. Keep this
+	// alias for server-Dolt callers while embedded Dolt returns the same value.
+	ErrCommitIndeterminate = storage.ErrCommitIndeterminate
 )
 
 // isTableNotExistError returns true if the error indicates a MySQL/Dolt
@@ -79,6 +78,42 @@ func isSerializationError(err error) bool {
 		return false
 	}
 	return mysqlErr.Number == 1213 || mysqlErr.Number == 1205
+}
+
+// isDoltAutocommitRollbackError reports Dolt's explicit, rollback-guaranteed
+// commit conflict. A MySQL error is retried only when its decoded code and
+// server-provided semantic message identify this condition; newer Dolt builds
+// append recovery guidance after the same sentence.
+func isDoltAutocommitRollbackError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	return errors.As(err, &mysqlErr) &&
+		mysqlErr.Number == 1105 &&
+		(mysqlErr.Message == "Merge conflict detected, @autocommit transaction rolled back" ||
+			strings.HasPrefix(mysqlErr.Message, "Merge conflict detected, @autocommit transaction rolled back."))
+}
+
+// isIndeterminateCommitResponse reports whether a Commit error lacks a decoded
+// server response proving a definite rejection or rollback. Every untyped
+// protocol or transport error is conservatively indeterminate.
+func isIndeterminateCommitResponse(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrCommitIndeterminate) {
+		return true
+	}
+	var mysqlErr *mysql.MySQLError
+	return !errors.As(err, &mysqlErr)
+}
+
+func wrapSQLCommitError(op string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if isIndeterminateCommitResponse(err) {
+		return fmt.Errorf("%s: %w: %w", op, err, ErrCommitIndeterminate)
+	}
+	return fmt.Errorf("%s: %w", op, err)
 }
 
 // wrapDBError wraps a database error with operation context.
@@ -131,7 +166,7 @@ func wrapExecError(op string, err error) error {
 // for testability.
 func databaseNotFoundError(cfg *Config) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "database %q not found on Dolt server at %s:%d\n\n", cfg.Database, cfg.ServerHost, cfg.ServerPort)
+	fmt.Fprintf(&b, "database %q not found on Dolt server at %s\n\n", cfg.Database, remedy.PrintedValue(doltutil.ServerAddr(cfg.ServerHost, cfg.ServerPort)))
 
 	// Check if backup files exist — strong signal this is a branch-switch or
 	// fresh-clone scenario rather than a server misconfiguration (GH#2327).
@@ -154,11 +189,19 @@ func databaseNotFoundError(cfg *Config) error {
 	b.WriteString("  bd dolt status             # Show which data directory the server is using")
 
 	if cfg.SyncRemote != "" {
-		fmt.Fprintf(&b, "\n\nTip: sync.remote is configured (%s).\nRun bd bootstrap to recover from the remote or confirm what bootstrap will do with --dry-run.", cfg.SyncRemote)
+		fmt.Fprintf(&b, "\n\nTip: sync.remote is configured (%s).\nRun bd bootstrap to recover from the remote or confirm what bootstrap will do with --dry-run.", remedy.PrintedValue(cfg.SyncRemote))
 	} else {
-		b.WriteString("\n\nTip: If this is an existing project, fresh clone, or shared-server recovery, run bd bootstrap first.\n")
+		// be-5up5: no longer claims bootstrap is a safe first step "if this is an
+		// existing project" — bootstrap can silently create an empty database in
+		// server mode (2026-08-11 fleet-wide loss), so that framing pointed
+		// existing projects with a missing database at the same danger this guard
+		// exists to stop. Fresh-clone / shared-server-recovery guidance (the
+		// common, safe case) is unchanged.
+		b.WriteString("\n\nTip: If this is a fresh clone or shared-server recovery, run bd bootstrap first.\n")
 		b.WriteString("If bootstrap cannot find the expected remote automatically, set sync.remote\nin .beads/config.yaml and re-run bd bootstrap.\n")
 		b.WriteString("Use bd bootstrap --dry-run if you need to confirm the plan before it initializes anything.\n")
+		b.WriteString("If this is an existing project whose database went missing, run bd doctor before\n")
+		b.WriteString("bootstrap or init — neither is guaranteed to recover it safely.\n")
 		b.WriteString("Use bd init only when creating a brand-new project with no existing .beads data.")
 	}
 

@@ -272,7 +272,7 @@ func runADOPush(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initializing Azure DevOps tracker: %w", err)
 	}
 
-	engine := tracker.NewEngine(at, store, actor)
+	engine := tracker.NewEngine(at, store, currentActor())
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 
@@ -319,7 +319,7 @@ func runADOPull(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initializing Azure DevOps tracker: %w", err)
 	}
 
-	engine := tracker.NewEngine(at, store, actor)
+	engine := tracker.NewEngine(at, store, currentActor())
 	engine.PullHooks = buildADOPullHooks(ctx, at, false, false, new(int), engine.OnWarning)
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
@@ -355,23 +355,24 @@ func runJiraPush(cmd *cobra.Command, args []string) error {
 		CheckReadonly("jira push")
 	}
 
-	if err := ensureStoreActive(); err != nil {
+	trackerStore, err := trackerStoreForCommand(rootCtx)
+	if err != nil {
 		return HandleError("database not available: %v", err)
 	}
-	if err := validateJiraConfig(); err != nil {
+	if err := validateJiraConfigForStore(trackerStore); err != nil {
 		return HandleError("%v", err)
 	}
 
 	ctx := rootCtx
 	jt := &jira.Tracker{}
-	if err := jt.Init(ctx, store); err != nil {
+	if err := jt.Init(ctx, trackerStore); err != nil {
 		return HandleError("initializing Jira tracker: %v", err)
 	}
 
-	engine := tracker.NewEngine(jt, store, actor)
+	engine := tracker.NewEngine(jt, trackerStore, currentActor())
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
-	engine.PushHooks = buildJiraPushHooks(ctx)
+	engine.PushHooks = buildJiraPushHooksForStore(ctx, trackerStore)
 
 	result, err := engine.Sync(ctx, tracker.SyncOptions{
 		Push:     true,
@@ -402,20 +403,21 @@ func runJiraPull(cmd *cobra.Command, args []string) error {
 		CheckReadonly("jira pull")
 	}
 
-	if err := ensureStoreActive(); err != nil {
+	trackerStore, err := trackerStoreForCommand(rootCtx)
+	if err != nil {
 		return HandleError("database not available: %v", err)
 	}
-	if err := validateJiraConfig(); err != nil {
+	if err := validateJiraConfigForStore(trackerStore); err != nil {
 		return HandleError("%v", err)
 	}
 
 	ctx := rootCtx
 	jt := &jira.Tracker{}
-	if err := jt.Init(ctx, store); err != nil {
+	if err := jt.Init(ctx, trackerStore); err != nil {
 		return HandleError("initializing Jira tracker: %v", err)
 	}
 
-	engine := tracker.NewEngine(jt, store, actor)
+	engine := tracker.NewEngine(jt, trackerStore, currentActor())
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 
@@ -462,32 +464,33 @@ func runLinearPush(cmd *cobra.Command, args []string) error {
 		}()
 	}
 
-	if err := ensureStoreActive(); err != nil {
+	trackerStore, err := trackerStoreForCommand(rootCtx)
+	if err != nil {
 		return HandleError("database not available: %v", err)
 	}
-	if err := validateLinearConfig(nil); err != nil {
+	if err := validateLinearConfigForStore(trackerStore, nil); err != nil {
 		return HandleError("%v", err)
 	}
 
 	ctx := rootCtx
-	teamIDs := getLinearTeamIDs(ctx, nil)
+	teamIDs := getLinearTeamIDsForStore(ctx, trackerStore, nil)
 	if len(teamIDs) > 1 {
 		return HandleError("linear push does not support multiple configured teams\nUse: bd linear sync --push --team <TEAM_ID>")
 	}
 
 	lt := &linear.Tracker{}
 	lt.SetTeamIDs(teamIDs)
-	if err := lt.Init(ctx, store); err != nil {
+	if err := lt.Init(ctx, trackerStore); err != nil {
 		return HandleError("initializing Linear tracker: %v", err)
 	}
 	if err := lt.ValidatePushStateMappings(ctx); err != nil {
 		return HandleError("%v", err)
 	}
 
-	engine := tracker.NewEngine(lt, store, actor)
+	engine := tracker.NewEngine(lt, trackerStore, currentActor())
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
-	engine.PushHooks = buildLinearPushHooks(ctx, lt, len(args) > 0)
+	engine.PushHooks = buildLinearPushHooksForStore(ctx, trackerStore, lt, len(args) > 0)
 
 	result, err := engine.Sync(ctx, tracker.SyncOptions{
 		Push:             true,
@@ -532,28 +535,29 @@ func runLinearPull(cmd *cobra.Command, args []string) error {
 		}()
 	}
 
-	if err := ensureStoreActive(); err != nil {
+	trackerStore, err := trackerStoreForCommand(rootCtx)
+	if err != nil {
 		return HandleError("database not available: %v", err)
 	}
-	if err := validateLinearConfig(nil); err != nil {
+	if err := validateLinearConfigForStore(trackerStore, nil); err != nil {
 		return HandleError("%v", err)
 	}
 
 	ctx := rootCtx
-	teamIDs := getLinearTeamIDs(ctx, nil)
+	teamIDs := getLinearTeamIDsForStore(ctx, trackerStore, nil)
 
 	lt := &linear.Tracker{}
 	lt.SetTeamIDs(teamIDs)
-	if err := lt.Init(ctx, store); err != nil {
+	if err := lt.Init(ctx, trackerStore); err != nil {
 		return HandleError("initializing Linear tracker: %v", err)
 	}
 
-	engine := tracker.NewEngine(lt, store, actor)
+	engine := tracker.NewEngine(lt, trackerStore, currentActor())
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
-	engine.PullHooks = buildLinearPullHooks(ctx, linearPullHookOptions{
+	engine.PullHooks = buildLinearPullHooksForStore(ctx, trackerStore, linearPullHookOptions{
 		DryRun: dryRun,
-		Actor:  actor,
+		Actor:  currentActor(),
 	})
 
 	result, err := engine.Sync(ctx, tracker.SyncOptions{
@@ -602,19 +606,31 @@ func runGitHubPush(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initializing GitHub tracker: %w", err)
 	}
 
-	engine := tracker.NewEngine(gt, store, actor)
-	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
-	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
+	engine := newGitHubEngine(gt, os.Stdout)
 
-	result, err := engine.Sync(ctx, tracker.SyncOptions{
+	opts := tracker.SyncOptions{
 		Push:     true,
 		Pull:     false,
 		DryRun:   dryRun,
 		IssueIDs: args,
-	})
+	}
+	result, err := engine.Sync(ctx, opts)
 	if err != nil {
 		return err
 	}
+
+	// Relationship push pass, matching `bd github sync`: converge beads
+	// epic/child links and "blocks" dependencies among the requested issues
+	// into GitHub sub-issues and issue dependencies.
+	warnLink := func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
+	linksPushed := pushGitHubDependencyLinks(ctx, gt, store, opts, dryRun, os.Stdout, warnLink)
+	// Under --dry-run PushLinks counts planned links in Created, so this line
+	// would affirm writes that never happened; the `bd github sync` twin gates
+	// it the same way.
+	if linksPushed > 0 && !dryRun && !jsonOutput {
+		fmt.Printf("✓ Synced %d relationship links\n", linksPushed)
+	}
+
 	outputSyncResult(result, dryRun)
 	return nil
 }
@@ -649,10 +665,8 @@ func runGitHubPull(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initializing GitHub tracker: %w", err)
 	}
 
-	engine := tracker.NewEngine(gt, store, actor)
+	engine := newGitHubEngine(gt, os.Stdout)
 	engine.PullHooks = buildGitHubPullHooks(ctx)
-	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
-	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 
 	result, err := engine.Sync(ctx, tracker.SyncOptions{
 		Pull:     true,
@@ -700,7 +714,7 @@ func runGitLabPush(cmd *cobra.Command, args []string) error {
 	}
 
 	out := cmd.OutOrStdout()
-	engine := tracker.NewEngine(gt, store, actor)
+	engine := tracker.NewEngine(gt, store, currentActor())
 	engine.OnMessage = func(msg string) {
 		if !jsonOutput {
 			fmt.Fprintln(out, "  "+msg)
@@ -802,7 +816,7 @@ func runGitLabPull(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initializing GitLab tracker: %w", err)
 	}
 
-	engine := tracker.NewEngine(gt, store, actor)
+	engine := tracker.NewEngine(gt, store, currentActor())
 	engine.PullHooks = buildGitLabPullHooks(ctx)
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
@@ -856,7 +870,7 @@ func runNotionPush(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initializing Notion tracker: %w", err)
 	}
 
-	engine := tracker.NewEngine(nt, store, actor)
+	engine := tracker.NewEngine(nt, store, currentActor())
 	unsupportedStats := newNotionUnsupportedPushStats()
 	engine.PushHooks = buildNotionPushHooks(ctx, nt, unsupportedStats)
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
@@ -910,7 +924,7 @@ func runNotionPull(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initializing Notion tracker: %w", err)
 	}
 
-	engine := tracker.NewEngine(nt, store, actor)
+	engine := tracker.NewEngine(nt, store, currentActor())
 	engine.PullHooks = buildNotionPullHooks(ctx)
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }

@@ -3,25 +3,29 @@ package main
 import (
 	"context"
 	"fmt"
+	"runtime"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
 var molStaleCmd = &cobra.Command{
 	Use:   "stale",
-	Short: "Detect complete-but-unclosed molecules",
-	Long: `Detect molecules (epics with children) that are complete but still open.
+	Short: "Detect molecules with all children closed but root still open",
+	Long: `Detect molecules (epics with children) whose children are all closed
+with completing reasons, but the root is still open.
 
 A molecule is considered stale if:
-  1. All children are closed (Completed == Total)
+  1. Every child is closed with a completing reason (not duplicate/wontfix/superseded)
   2. Root issue is still open
   3. Not assigned to anyone (optional, use --unassigned)
   4. Is blocking other work (optional, use --blocking)
 
-By default, shows all complete-but-unclosed molecules.
+Review whether epic scope is actually finished before closing — child
+closure alone does not prove the epic's stated work is done (GH#5026).
 
 Examples:
   bd mol stale              # List all stale molecules
@@ -96,27 +100,35 @@ func renderStaleResult(result *StaleResult, blockingOnly bool) {
 	}
 
 	if blockingOnly {
-		fmt.Printf("%s Stale molecules (complete but unclosed, blocking work):\n\n",
+		fmt.Printf("%s Molecules with all children closed (review scope; blocking work):\n\n",
 			ui.RenderWarnIcon())
 	} else {
-		fmt.Printf("%s Stale molecules (complete but unclosed):\n\n",
+		fmt.Printf("%s Molecules with all children closed (review scope before closing):\n\n",
 			ui.RenderInfoIcon())
 	}
 
 	for _, mol := range result.StaleMolecules {
 		progress := fmt.Sprintf("%d/%d", mol.ClosedChildren, mol.TotalChildren)
+		// The molecule and the issues it blocks are read from the store,
+		// which holds a collaborator's issues after bd dolt pull: the
+		// molecule ID goes into the command as one shell word, or as a
+		// placeholder named escaped after it, and each ID is named beside the
+		// command by printedIssueID and the title by remedy.PrintedValue, so
+		// none can redraw it.
+		id, note := remedy.CommandArg(runtime.GOOS, mol.ID, "<molecule-id>")
+		shown, title := printedIssueID(mol.ID), remedy.PrintedValue(mol.Title)
 
 		if mol.BlockingCount > 0 {
 			fmt.Printf("  %s  %s  (%s) [blocking %d]\n",
-				ui.RenderID(mol.ID), mol.Title, progress, mol.BlockingCount)
-			fmt.Printf("       → Close with: bd close %s\n", mol.ID)
+				ui.RenderID(shown), title, progress, mol.BlockingCount)
+			fmt.Printf("       → Close with: bd close %s%s\n", id, note)
 			if mol.BlockingCount <= 3 {
-				fmt.Printf("       → Blocking: %v\n", mol.BlockingIssues)
+				fmt.Printf("       → Blocking: [%s]\n", printedIssueIDs(mol.BlockingIssues))
 			}
 		} else {
 			fmt.Printf("  %s  %s  (%s)\n",
-				ui.RenderID(mol.ID), mol.Title, progress)
-			fmt.Printf("       → Close with: bd close %s\n", mol.ID)
+				ui.RenderID(shown), title, progress)
+			fmt.Printf("       → Close with: bd close %s%s\n", id, note)
 		}
 		fmt.Println()
 	}

@@ -27,7 +27,9 @@ type fakeHookStore struct {
 	dropDependencies bool
 	// updateCheckedErr, when non-nil, is returned by UpdateIssueChecked so a test
 	// can simulate an inner refusal (e.g. ErrVersionMismatch). nil = success.
-	updateCheckedErr error
+	updateCheckedErr       error
+	transactionReopenError error
+	transactionAddLabelErr error
 }
 
 func (s fakeHookStore) CreateIssue(_ context.Context, issue *types.Issue, _ string) error {
@@ -70,13 +72,37 @@ func (s fakeHookStore) UpdateIssueChecked(_ context.Context, _ string, _ map[str
 }
 
 func (s fakeHookStore) RunInTransaction(ctx context.Context, _ string, fn func(tx Transaction) error) error {
-	return fn(fakeHookTransaction{issues: s.issues, dropDependencies: s.dropDependencies})
+	return fn(fakeHookTransaction{
+		issues:           s.issues,
+		dropDependencies: s.dropDependencies,
+		reopenError:      s.transactionReopenError,
+		addLabelError:    s.transactionAddLabelErr,
+	})
+}
+
+func (s fakeHookStore) RunInIssueLifecycleTransaction(ctx context.Context, _ string, fn func(tx IssueLifecycleTransaction) error) error {
+	return fn(fakeHookTransaction{
+		issues:           s.issues,
+		dropDependencies: s.dropDependencies,
+		reopenError:      s.transactionReopenError,
+		addLabelError:    s.transactionAddLabelErr,
+	})
 }
 
 type fakeHookTransaction struct {
 	Transaction
 	issues           map[string]*types.Issue
 	dropDependencies bool
+	reopenError      error
+	addLabelError    error
+}
+
+func (tx fakeHookTransaction) ReopenIssueWithResult(_ context.Context, _ string, _ string, _ string) (bool, error) {
+	return tx.reopenError == nil, tx.reopenError
+}
+
+func (tx fakeHookTransaction) AddLabel(_ context.Context, _ string, _ string, _ string) error {
+	return tx.addLabelError
 }
 
 func (tx fakeHookTransaction) CreateIssue(_ context.Context, issue *types.Issue, _ string) error {
@@ -281,6 +307,7 @@ func TestCloneIssueForHookCoversReferenceFields(t *testing.T) {
 		"LeaseExpiresAt":    {},
 		"HeartbeatAt":       {},
 		"ExternalRef":       {},
+		"WispPlaneOverride": {},
 		"Metadata":          {},
 		"CompactedAt":       {},
 		"CompactedAtCommit": {},
@@ -504,4 +531,142 @@ func TestHookFiringStoreUpdateIssueCheckedFiresOnSuccessOnly(t *testing.T) {
 			t.Fatalf("events = %v, want none (a refused update must not fire on_update)", runner.events)
 		}
 	})
+}
+
+func TestHookFiringStoreIssueLifecycleTransactionReopenForwardsCommitOnly(t *testing.T) {
+	t.Run("commit forwards and fires update", func(t *testing.T) {
+		runner := &recordingHookRunner{}
+		inner := fakeHookStore{issues: map[string]*types.Issue{"reopen-hook": {ID: "reopen-hook"}}}
+		store := &HookFiringStore{DoltStorage: inner, inner: inner, runner: runner}
+		if err := store.RunInIssueLifecycleTransaction(context.Background(), "reopen", func(tx IssueLifecycleTransaction) error {
+			_, err := tx.ReopenIssueWithResult(context.Background(), "reopen-hook", "", "tester")
+			return err
+		}); err != nil {
+			t.Fatalf("RunInIssueLifecycleTransaction: %v", err)
+		}
+		if !reflect.DeepEqual(runner.events, []string{hooks.EventUpdate}) {
+			t.Fatalf("events = %v, want one on_update after commit", runner.events)
+		}
+	})
+
+	t.Run("later failure fires no hook", func(t *testing.T) {
+		runner := &recordingHookRunner{}
+		labelErr := errors.New("label write failed")
+		inner := fakeHookStore{
+			issues:                 map[string]*types.Issue{"reopen-hook": {ID: "reopen-hook"}},
+			transactionAddLabelErr: labelErr,
+		}
+		store := &HookFiringStore{DoltStorage: inner, inner: inner, runner: runner}
+		err := store.RunInIssueLifecycleTransaction(context.Background(), "reopen", func(tx IssueLifecycleTransaction) error {
+			if _, err := tx.ReopenIssueWithResult(context.Background(), "reopen-hook", "", "tester"); err != nil {
+				return err
+			}
+			return tx.AddLabel(context.Background(), "reopen-hook", "remote", "tester")
+		})
+		if !errors.Is(err, labelErr) {
+			t.Fatalf("RunInIssueLifecycleTransaction error = %v, want label failure", err)
+		}
+		if len(runner.events) != 0 {
+			t.Fatalf("events = %v, want none after rollback", runner.events)
+		}
+	})
+
+	t.Run("ordinary transaction does not expose lifecycle method", func(t *testing.T) {
+		inner := fakeHookStore{issues: map[string]*types.Issue{"reopen-hook": {ID: "reopen-hook"}}}
+		store := &HookFiringStore{DoltStorage: inner, inner: inner}
+		if err := store.RunInTransaction(context.Background(), "reopen", func(tx Transaction) error {
+			if _, ok := tx.(interface {
+				ReopenIssueWithResult(context.Context, string, string, string) (bool, error)
+			}); ok {
+				t.Fatal("wrapper exposed absent reopener")
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// probingHookRunner is a recordingHookRunner that also answers the probe
+// hookConfigured asks a real hooks.Runner, and records each event it was asked
+// about.
+type probingHookRunner struct {
+	recordingHookRunner
+	exists map[string]bool
+	probed []string
+}
+
+func (r *probingHookRunner) HookExists(event string) bool {
+	r.probed = append(r.probed, event)
+	return r.exists[event]
+}
+
+// countingHookStore counts the re-reads the decorator makes to build a payload.
+type countingHookStore struct {
+	fakeHookStore
+	gets *int
+}
+
+func (s countingHookStore) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
+	*s.gets++
+	return s.fakeHookStore.GetIssue(ctx, id)
+}
+
+// The real runner answers the probe hookConfigured asks. A runner that cannot
+// is assumed to hold a hook for every event, and the decorator would re-read
+// after every write.
+var _ interface{ HookExists(string) bool } = (*hooks.Runner)(nil)
+
+// TestHookFiringStoreReReadsOnlyForAnEventWithAHook (mc-5dkzp): the by-id
+// paths re-read the issue to build a hook's payload, which over an http
+// workspace is a round trip the command pays after its write. The decorator
+// asks the runner about the event it is about to fire — that event, not
+// another — and re-reads and fires only when a hook for it exists.
+func TestHookFiringStoreReReadsOnlyForAnEventWithAHook(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		exists map[string]bool
+		fires  bool
+	}{
+		{"on_update exists", map[string]bool{hooks.EventUpdate: true}, true},
+		{"every hook but on_update", map[string]bool{hooks.EventCreate: true, hooks.EventClose: true}, false},
+		{"no hooks", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &probingHookRunner{exists: tc.exists}
+			gets := 0
+			inner := countingHookStore{
+				fakeHookStore: fakeHookStore{issues: map[string]*types.Issue{"bd-1": {ID: "bd-1", Title: "hooked"}}},
+				gets:          &gets,
+			}
+			store := &HookFiringStore{DoltStorage: inner, inner: inner, runner: runner}
+
+			store.CompleteIssueOperationComment(context.Background(), "bd-1")    // re-reads the row
+			store.CompleteIssueOperationDependency(context.Background(), "bd-1") // re-reads the row and its edges
+
+			if want := []string{hooks.EventUpdate, hooks.EventUpdate}; !reflect.DeepEqual(runner.probed, want) {
+				t.Fatalf("probed %v, want %v: the decorator must ask about the event it fires", runner.probed, want)
+			}
+			wantGets, wantEvents := 0, []string(nil)
+			if tc.fires {
+				wantGets, wantEvents = 2, []string{hooks.EventUpdate, hooks.EventUpdate}
+			}
+			if gets != wantGets || !reflect.DeepEqual(runner.events, wantEvents) {
+				t.Fatalf("re-read %d times and fired %v; want %d re-reads and %v", gets, runner.events, wantGets, wantEvents)
+			}
+		})
+	}
+
+	// The same through a real runner over a hooks directory with nothing in it.
+	gets := 0
+	inner := countingHookStore{
+		fakeHookStore: fakeHookStore{issues: map[string]*types.Issue{"bd-1": {ID: "bd-1"}}},
+		gets:          &gets,
+	}
+	store := NewHookFiringStore(inner, hooks.NewRunner(t.TempDir()))
+	store.CompleteIssueOperationComment(context.Background(), "bd-1")
+	store.CompleteIssueOperationDependency(context.Background(), "bd-1")
+	if gets != 0 {
+		t.Fatalf("with no hook installed the decorator re-read the row %d times; want none", gets)
+	}
 }

@@ -257,6 +257,9 @@ func applyHookMigrationExecution(execPlan hookMigrationExecutionPlan) (hookMigra
 	}
 
 	for _, write := range preparedWrites {
+		if err := guardHookWritePath(write.Path, false); err != nil {
+			return summary, fmt.Errorf("refusing to write migrated hook %s: %w", write.HookName, err)
+		}
 		// #nosec G306 -- git hooks must be executable for Git to run them
 		if err := os.WriteFile(write.Path, write.Content, 0755); err != nil {
 			return summary, fmt.Errorf("writing migrated hook %s: %w", write.Path, err)

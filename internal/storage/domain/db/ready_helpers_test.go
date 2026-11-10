@@ -210,8 +210,8 @@ func (s *testSuite) blockedExcludesClosed() {
 	s.Require().NoError(r.Insert(s.Ctx(), tgt, "tester", domain.InsertIssueOpts{}))
 	s.Require().NoError(dr.Insert(s.Ctx(),
 		newDep("bd-blc-src", "bd-blc-tgt", types.DepBlocks), "tester", domain.DepInsertOpts{}))
-	s.Require().NoError(r.Update(s.Ctx(), "bd-blc-src",
-		map[string]any{"status": string(types.StatusClosed)}, "tester", domain.IssueTableOpts{}))
+	_, err := r.Close(s.Ctx(), "bd-blc-src", domain.CloseRowParams{}, "tester", domain.IssueTableOpts{})
+	s.Require().NoError(err)
 
 	out, err := r.GetBlockedIssues(s.Ctx(), types.WorkFilter{})
 	s.Require().NoError(err)
@@ -230,8 +230,8 @@ func (s *testSuite) blockedUnblocksOnClose() {
 	s.Require().NoError(dr.Insert(s.Ctx(),
 		newDep("bd-bluc-src", "bd-bluc-tgt", types.DepBlocks), "tester", domain.DepInsertOpts{}))
 
-	s.Require().NoError(r.Update(s.Ctx(), "bd-bluc-tgt",
-		map[string]any{"status": string(types.StatusClosed)}, "tester", domain.IssueTableOpts{}))
+	_, err := r.Close(s.Ctx(), "bd-bluc-tgt", domain.CloseRowParams{}, "tester", domain.IssueTableOpts{})
+	s.Require().NoError(err)
 
 	out, err := r.GetBlockedIssues(s.Ctx(), types.WorkFilter{})
 	s.Require().NoError(err)

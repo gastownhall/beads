@@ -39,7 +39,12 @@ func bdRenamePrefixFail(t *testing.T, bd, dir string, args ...string) string {
 	return string(out)
 }
 
-func TestEmbeddedRenamePrefix(t *testing.T) {
+// TestEmbeddedRenamePrefixBasic was split from TestEmbeddedRenamePrefix
+// (originally ~197s, measured under --config=embedded) into 2 top-level
+// tests over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedRenamePrefixBasic(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -114,6 +119,17 @@ func TestEmbeddedRenamePrefix(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "iv")
 		bdRenamePrefixFail(t, bd, dir, "UPPER")
 	})
+}
+
+func TestEmbeddedRenamePrefixEdgeCases(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	// ===== Invalid Prefix =====
 
 	t.Run("rename_invalid_chars", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "ic")
@@ -128,6 +144,41 @@ func TestEmbeddedRenamePrefix(t *testing.T) {
 		out := bdRenamePrefix(t, bd, dir, "nw")
 		if !strings.Contains(out, "No issues") {
 			t.Errorf("expected 'No issues' message: %s", out)
+		}
+	})
+
+	// ===== Prefix Shortening (PR #5135 review blocker B1) =====
+	// Shortening a multi-part prefix to one of its own leading segments
+	// (e.g. "beads-vscode-" -> "beads-") must still rewrite every row —
+	// "beads-vscode-1" starting with "beads-" is not the same thing as it
+	// already being on the target prefix.
+
+	t.Run("rename_prefix_shortening", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "beads-vscode")
+		bdCreate(t, bd, dir, "Shortening test 1", "--type", "task")
+		bdCreate(t, bd, dir, "Shortening test 2", "--type", "task")
+
+		out := bdRenamePrefix(t, bd, dir, "beads")
+		if !strings.Contains(out, "Successfully renamed") {
+			t.Errorf("expected 'Successfully renamed' in output: %s", out)
+		}
+
+		cmd := exec.Command(bd, "list")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd list after rename failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		// bd create mints hash IDs (beads-cyc), never sequential ones, so assert the
+		// rewritten prefix rather than a number — the beads-vscode- check below is what
+		// carries the real weight. Mirrors rename_basic, which asserts "new-" for the
+		// same reason.
+		if !strings.Contains(stdout.String(), "beads-") {
+			t.Errorf("expected shortened 'beads-' prefix in list output: %s", stdout.String())
+		}
+		if strings.Contains(stdout.String(), "beads-vscode-") {
+			t.Errorf("regression: 'beads-vscode-' IDs were left unrewritten: %s", stdout.String())
 		}
 	})
 }

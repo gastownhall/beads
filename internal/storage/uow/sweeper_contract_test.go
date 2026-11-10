@@ -1,0 +1,157 @@
+package uow
+
+import (
+	"context"
+	"fmt"
+	"testing"
+
+	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/steveyegge/beads/issueops"
+)
+
+// TestSweeperContract runs the Sweeper contract against the unit-of-work
+// provider — the one implementation that does not run
+// internal/storage/issueops.SweepInTx. It is the SECOND of two votes, not the
+// third: the two store backends share the other body.
+//
+// One provider for the whole suite (each newUOWRoleFixtureProvider boots a real
+// Dolt sql-server) and NO t.Parallel: this backend has no per-test
+// copy-on-write branch, so dolt_log and the issues table are database-global
+// and a parallel subtest would delete another subtest's rows — which on this
+// role is not a flake but the operation working as documented.
+func TestSweeperContract(t *testing.T) {
+	ctx := context.Background()
+	fixture := newUOWSweeperFixture(t, ctx, "swp")
+
+	t.Run("RefusesAnUnfilteredDurableSweep", func(t *testing.T) {
+		conformance.RunSweeperRefusesAnUnfilteredDurableSweep(t, ctx, fixture)
+	})
+	t.Run("RefusesAMalformedRequest", func(t *testing.T) {
+		conformance.RunSweeperRefusesAMalformedRequest(t, ctx, fixture)
+	})
+	t.Run("ClearsOneTierAndLeavesTheOther", func(t *testing.T) {
+		conformance.RunSweeperClearsOneTierAndLeavesTheOther(t, ctx, fixture)
+	})
+	t.Run("TreatsALegacyTypedWispAsEphemeralTier", func(t *testing.T) {
+		conformance.RunSweeperTreatsALegacyTypedWispAsEphemeralTier(t, ctx, fixture)
+	})
+	t.Run("WispsPlaneClearsTheWholeWispsTable", func(t *testing.T) {
+		conformance.RunSweeperWispsPlaneClearsTheWholeWispsTable(t, ctx, fixture)
+	})
+	t.Run("WispsPlaneRequiresAFilter", func(t *testing.T) {
+		conformance.RunSweeperWispsPlaneRequiresAFilter(t, ctx, fixture)
+	})
+	t.Run("ProtectsLiveDependents", func(t *testing.T) {
+		conformance.RunSweeperProtectsLiveDependents(t, ctx, fixture)
+	})
+	t.Run("ProtectsTransitiveLiveDependents", func(t *testing.T) {
+		conformance.RunSweeperProtectsTransitiveLiveDependents(t, ctx, fixture)
+	})
+	t.Run("ProtectsLiveDependentsAcrossPlanes", func(t *testing.T) {
+		conformance.RunSweeperProtectsLiveDependentsAcrossPlanes(t, ctx, fixture)
+	})
+	t.Run("LimitTakesTheOldestClosedFirst", func(t *testing.T) {
+		conformance.RunSweeperLimitTakesTheOldestClosedFirst(t, ctx, fixture)
+	})
+	t.Run("LeavesNoHistoryBeadsToTheDurableTier", func(t *testing.T) {
+		conformance.RunSweeperLeavesNoHistoryBeadsToTheDurableTier(t, ctx, fixture)
+	})
+	t.Run("ProtectsPinnedRows", func(t *testing.T) {
+		conformance.RunSweeperProtectsPinnedRows(t, ctx, fixture)
+	})
+	t.Run("HonorsTheCutoffAndThePattern", func(t *testing.T) {
+		conformance.RunSweeperHonorsTheCutoffAndThePattern(t, ctx, fixture)
+	})
+	t.Run("DryRunChangesNothing", func(t *testing.T) {
+		conformance.RunSweeperDryRunChangesNothing(t, ctx, fixture)
+	})
+	t.Run("ProtectsRowsCitedFromAWispComment", func(t *testing.T) {
+		conformance.RunSweeperProtectsRowsCitedFromAWispComment(t, ctx, fixture)
+	})
+	t.Run("ProtectsCitedRows", func(t *testing.T) {
+		conformance.RunSweeperProtectsCitedRows(t, ctx, fixture)
+	})
+	t.Run("EmptyMatchIsZeroAndNil", func(t *testing.T) {
+		conformance.RunSweeperEmptyMatchIsZeroAndNil(t, ctx, fixture)
+	})
+	t.Run("RecordsExactlyOneHistoryEntry", func(t *testing.T) {
+		conformance.RunSweeperRecordsExactlyOneHistoryEntry(t, ctx, fixture)
+	})
+	t.Run("DoesNotMutateTheCallerRequest", func(t *testing.T) {
+		conformance.RunSweeperDoesNotMutateTheCallerRequest(t, ctx, fixture)
+	})
+}
+
+func newUOWSweeperFixture(t *testing.T, ctx context.Context, prefix string) conformance.SweeperFixture {
+	t.Helper()
+	return newUOWSweeperFixtureOnProvider(t, newUOWRoleFixtureProvider(t, ctx, prefix), prefix)
+}
+
+// newUOWSweeperFixtureOnProvider builds the Sweeper fixture over an existing
+// provider, for a contract that composes more of its roles beside the sweeper.
+func newUOWSweeperFixtureOnProvider(t *testing.T, provider UnitOfWorkProvider, prefix string) conformance.SweeperFixture {
+	t.Helper()
+	// Through the capability accessor, not NewSweeper: a provider that stopped
+	// offering the role is the regression a constructor call would hide.
+	source, ok := provider.(SweeperSource)
+	if !ok {
+		t.Fatalf("provider %T does not offer the Sweeper accessor", provider)
+	}
+	sweeper, err := source.Sweeper()
+	if err != nil {
+		t.Fatalf("Sweeper(): %v", err)
+	}
+	kit := newUOWRoleFixtureKit(provider, prefix)
+	return conformance.SweeperFixture{
+		IssuePrefix:   kit.IssuePrefix,
+		Sweeper:       sweeper,
+		CreateIssue:   kit.CreateIssue,
+		CreateWisp:    kit.CreateWisp,
+		QueryScalar:   kit.QueryScalar,
+		CountHistory:  kit.CountHistory,
+		CommitPending: uowCommitPending(provider),
+		// The write half of the same raw-SQL pass-through the cycle-detector
+		// wiring uses, inside ONE committing unit of work.
+		Exec: func(ctx context.Context, statements []conformance.SQLStatement) error {
+			return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+				for _, stmt := range statements {
+					if _, err := uw.RawSQLUseCase().Exec(ctx, stmt.Query, stmt.Args...); err != nil {
+						return "", fmt.Errorf("%s: %w", stmt.Query, err)
+					}
+				}
+				return "seed legacy sweep rows", nil
+			})
+		},
+		AddDependencies: func(ctx context.Context, req issueops.AddDependenciesRequest) error {
+			// Through the DependencyEditor ROLE, which routes each edge to its
+			// source plane's dependency table itself.
+			ds, ok := provider.(DependencyEditorSource)
+			if !ok {
+				return fmt.Errorf("provider %T does not offer the DependencyEditor accessor", provider)
+			}
+			editor, err := ds.DependencyEditor()
+			if err != nil {
+				return err
+			}
+			_, err = editor.AddDependencies(ctx, req)
+			return err
+		},
+		AddComment: func(ctx context.Context, issueID, author, text string) error {
+			// Through the Commenter ROLE, which resolves the plane itself, so
+			// the case can cite from a wisp's comment without knowing how this
+			// backend reaches wisp_comments.
+			cs, ok := provider.(CommenterSource)
+			if !ok {
+				return fmt.Errorf("provider %T does not offer the Commenter accessor", provider)
+			}
+			commenter, err := cs.Commenter()
+			if err != nil {
+				return err
+			}
+			_, err = commenter.AddComment(ctx, issueops.AddCommentRequest{
+				IssueID: issueID, Author: author, Text: text,
+			})
+			return err
+		},
+	}
+}

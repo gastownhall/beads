@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // DirtyTableTracker records which tables were modified during a transaction.
@@ -32,24 +33,120 @@ func (t *DirtyTableTracker) DirtyTables() map[string]bool {
 	return t.tables
 }
 
+// MarkVersionedHistoryDirty adds the tables the versioned-history seam writes
+// (issueops.VersionedHistoryStagedTables) when history is enabled on the store
+// that owns this transaction. Stores call it once, after the body has run and
+// before handing DirtyTables to StageAndCommit, so no individual mutator has
+// to remember that minting a version dirties three more tables.
+//
+// enabled is the store's own activation flag — the same input its
+// ScopeVersionedHistoryTransaction call takes. That is the same atomic read
+// twice, not one value threaded through: the scope call reads it when the
+// transaction opens, this one reads it again after the body has run. So the
+// staging set and the minting behavior cannot disagree only as long as
+// activation does not turn OFF mid-operation — a flip from on to off landing in
+// that window mints rows under the scope and then declines to stage them.
+// Activation can change after wiring now, but only the other way: a deferred
+// read (storage.VersionedHistoryDeferrer) answers a pending switch at a write
+// transaction's scope, before its body runs, and only ever turns it on
+// (issueops.VersionedHistorySwitch). A concurrent operation scoped off can see
+// its staging widen, which stages tables that may be clean, the free direction
+// below. SetVersionedHistoryEnabled(false) has no non-test caller; latch the
+// flag once per operation and pass the bool if that ever stops holding.
+//
+// A tracker with nothing dirty is left alone. Minting only happens alongside a
+// mutation, so an empty set means no mutation ran; adding tables there would
+// turn an operation that deliberately stages nothing into one that stages, and
+// StageAndCommit's own len(dirtyTables)==0 early return is load-bearing for
+// those callers.
+//
+// Keyed on SCOPE, not on whether a row was actually minted -- deliberately.
+// Staging a clean table costs one DOLT_ADD that stages nothing, and both
+// commit helpers already skip an empty staged set, so the false-positive side
+// is free; tracking real mints would mean threading state back out of the seam
+// for no behavioral gain. The one thing it does widen is `issues` on the
+// dependency paths, which stage it only when the edge flipped a durable
+// is_blocked (GH#6647) -- and that widening is exactly what the
+// current_revision advance requires, gated on history being on, so no
+// flag-off commit changes shape.
+func (t *DirtyTableTracker) MarkVersionedHistoryDirty(enabled bool) {
+	if !enabled || len(t.tables) == 0 {
+		return
+	}
+	for _, table := range issueops.VersionedHistoryStagedTables() {
+		t.MarkDirty(table)
+	}
+}
+
 // StageAndCommit stages only the specified dirty tables and creates a Dolt
 // version commit. conn must be a non-transactional database connection (the
 // SQL transaction should already be committed before calling this).
 //
 // If commitMsg is empty, no commit is created. "Nothing to commit" errors
 // are treated as benign (e.g., all writes were to dolt-ignored tables).
+//
+// DOLT_ADD and DOLT_COMMIT go through schema.DrainCall: callers such as
+// finishDoltTransaction and MergeWithStrategy pin conn and keep using it, or
+// hand it back to the pool, after this returns, so a CALL that fails,
+// including the tolerated "nothing to commit", must not leave its result sets
+// unread on it (GH#5556).
+//
+// An empty author omits --author entirely, leaving attribution to the connected
+// session. That is not a fallback for a missing identity but the proxied-server
+// plane's normal discipline: its every other commit (uow.Tx.Commit) is
+// unauthored, and passing an empty --author would be a malformed commit rather
+// than an unattributed one.
 func StageAndCommit(ctx context.Context, conn DBConn, dirtyTables map[string]bool, commitMsg, author string) error {
 	if commitMsg == "" || len(dirtyTables) == 0 {
 		return nil
 	}
 
+	// dirtyTables tracks tables touched by a write statement, but a statement
+	// can succeed without changing any rows (e.g. an idempotent
+	// "INSERT ... ON DUPLICATE KEY UPDATE value = VALUES(value)" re-writing the
+	// same value, an INSERT IGNORE that hit a duplicate, or an UPDATE whose WHERE
+	// matched nothing). Staging + committing in that case is a no-op that Dolt
+	// rejects with a "nothing to commit" warning logged server-side on every call
+	// — at high-frequency callers (config/metadata heartbeats, reconcile counters,
+	// idempotent label/dependency writes) this floods the Dolt log.
+	//
+	// Cheap fast-path: if NOTHING is pending in the whole working set (excluding
+	// dolt-ignored tables, which cannot be staged), skip without touching Dolt's
+	// staging machinery. Note: callers like Update/Close also write an events row,
+	// so a zero-rows main-table write can still be a real change — dolt_status
+	// captures that correctly where a rows-affected check would not.
+	pending, err := issueops.HasPendingChanges(ctx, conn)
+	if err != nil {
+		return fmt.Errorf("check pending changes before commit: %w", err)
+	}
+	if !pending {
+		return nil
+	}
+
 	for table := range dirtyTables {
-		if _, err := conn.ExecContext(ctx, "CALL DOLT_ADD(?)", table); err != nil {
+		if err := schema.DrainCall(ctx, conn, "CALL DOLT_ADD(?)", table); err != nil {
 			return fmt.Errorf("dolt add %s: %w", table, err)
 		}
 	}
 
-	_, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", commitMsg, author)
+	// Precise guard: HasPendingChanges above is global, but we only DOLT_ADD the
+	// dirty-tracked tables. When those specific tables turn out clean (idempotent
+	// no-op) while some UNRELATED table is concurrently dirty, the fast-path does
+	// not fire yet staging stages nothing — so DOLT_COMMIT('-m') would still emit
+	// the "nothing to commit" warning. Check the STAGED set (exactly what '-m'
+	// will commit) and skip the empty commit.
+	staged, err := issueops.HasStagedChanges(ctx, conn)
+	if err != nil {
+		return fmt.Errorf("check staged changes before commit: %w", err)
+	}
+	if !staged {
+		return nil
+	}
+	if author == "" {
+		err = schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-m', ?)", commitMsg)
+	} else {
+		err = schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", commitMsg, author)
+	}
 	if err != nil && !issueops.IsNothingToCommitError(err) {
 		return fmt.Errorf("dolt commit: %w", err)
 	}

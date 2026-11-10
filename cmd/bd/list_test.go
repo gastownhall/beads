@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -196,7 +197,7 @@ func TestListCommandSuite(t *testing.T) {
 			if derr != nil {
 				t.Fatalf("GetAllDependencyRecords: %v", derr)
 			}
-			err := outputDotFormat(h.issues, deps)
+			err := outputDotFormat(io.Discard, h.issues, deps)
 			if err != nil {
 				t.Errorf("outputDotFormat failed: %v", err)
 			}
@@ -204,7 +205,7 @@ func TestListCommandSuite(t *testing.T) {
 
 		t.Run("output formatted list dot", func(t *testing.T) {
 			deps, _ := h.store.GetAllDependencyRecords(h.ctx)
-			err := outputFormattedList(h.issues, deps, "dot")
+			err := outputFormattedList(io.Discard, h.issues, deps, "dot")
 			if err != nil {
 				t.Errorf("outputFormattedList with dot format failed: %v", err)
 			}
@@ -212,7 +213,7 @@ func TestListCommandSuite(t *testing.T) {
 
 		t.Run("output formatted list digraph preset", func(t *testing.T) {
 			deps, _ := h.store.GetAllDependencyRecords(h.ctx)
-			err := outputFormattedList(h.issues, deps, "digraph")
+			err := outputFormattedList(io.Discard, h.issues, deps, "digraph")
 			if err != nil {
 				t.Errorf("outputFormattedList with digraph format failed: %v", err)
 			}
@@ -220,7 +221,7 @@ func TestListCommandSuite(t *testing.T) {
 
 		t.Run("output formatted list custom template", func(t *testing.T) {
 			deps, _ := h.store.GetAllDependencyRecords(h.ctx)
-			err := outputFormattedList(h.issues, deps, "{{.ID}} {{.Title}}")
+			err := outputFormattedList(io.Discard, h.issues, deps, "{{.ID}} {{.Title}}")
 			if err != nil {
 				t.Errorf("outputFormattedList with custom template failed: %v", err)
 			}
@@ -228,7 +229,7 @@ func TestListCommandSuite(t *testing.T) {
 
 		t.Run("output formatted list invalid template", func(t *testing.T) {
 			deps, _ := h.store.GetAllDependencyRecords(h.ctx)
-			err := outputFormattedList(h.issues, deps, "{{.ID")
+			err := outputFormattedList(io.Discard, h.issues, deps, "{{.ID")
 			if err == nil {
 				t.Error("Expected error for invalid template")
 			}
@@ -880,9 +881,11 @@ func TestTreeViewUsesWispDependencyRecords(t *testing.T) {
 		t.Fatalf("AddDependency: %v", err)
 	}
 
-	allDeps, err := store.GetAllDependencyRecords(ctx)
+	// The tree's own edge read: the listed issues' records, which for a wisp
+	// live in wisp_dependencies.
+	allDeps, err := listDependencyRecords(ctx, store, []*types.Issue{parent, child})
 	if err != nil {
-		t.Fatalf("GetAllDependencyRecords: %v", err)
+		t.Fatalf("listDependencyRecords: %v", err)
 	}
 	if ds := allDeps[child.ID]; len(ds) != 1 || ds[0].DependsOnID != parent.ID {
 		t.Fatalf("wisp dependency records = %+v, want child -> parent", ds)
@@ -1044,7 +1047,7 @@ func TestFormatIssueCompact(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf strings.Builder
-			formatIssueCompact(&buf, tt.issue, tt.labels, nil, nil, "")
+			formatIssueCompact(&buf, tt.issue, tt.labels, nil, nil, "", nil)
 			result := buf.String()
 			if !strings.Contains(result, tt.want) {
 				t.Errorf("formatIssueCompact() = %q, want to contain %q", result, tt.want)
@@ -1238,7 +1241,7 @@ func TestFormatIssueCompactWithDependencies(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf strings.Builder
-			formatIssueCompact(&buf, tt.issue, nil, tt.blockedBy, tt.blocks, "")
+			formatIssueCompact(&buf, tt.issue, nil, tt.blockedBy, tt.blocks, "", nil)
 			result := buf.String()
 			if !strings.Contains(result, tt.want) {
 				t.Errorf("formatIssueCompact() = %q, want to contain %q", result, tt.want)
@@ -1261,7 +1264,7 @@ func TestFormatIssueCompactBlockedIcon(t *testing.T) {
 			Status:    types.StatusOpen,
 		}
 		var buf strings.Builder
-		formatIssueCompact(&buf, issue, nil, []string{"blocker-1"}, nil, "")
+		formatIssueCompact(&buf, issue, nil, []string{"blocker-1"}, nil, "", nil)
 		result := buf.String()
 		// Should show blocked icon ● not open icon ○
 		if strings.Contains(result, ui.StatusIconOpen) {
@@ -1281,7 +1284,7 @@ func TestFormatIssueCompactBlockedIcon(t *testing.T) {
 			Status:    types.StatusOpen,
 		}
 		var buf strings.Builder
-		formatIssueCompact(&buf, issue, nil, nil, nil, "")
+		formatIssueCompact(&buf, issue, nil, nil, nil, "", nil)
 		result := buf.String()
 		if !strings.Contains(result, ui.StatusIconOpen) {
 			t.Errorf("open issue without blockers should show open icon ○, got: %q", result)
@@ -1297,7 +1300,7 @@ func TestFormatIssueCompactBlockedIcon(t *testing.T) {
 			Status:    types.StatusInProgress,
 		}
 		var buf strings.Builder
-		formatIssueCompact(&buf, issue, nil, []string{"blocker-1"}, nil, "")
+		formatIssueCompact(&buf, issue, nil, []string{"blocker-1"}, nil, "", nil)
 		result := buf.String()
 		// Should keep in_progress icon, not override to blocked
 		if !strings.Contains(result, ui.StatusIconInProgress) {
@@ -1321,6 +1324,7 @@ func TestParseTimeFlag(t *testing.T) {
 		{"Compact days", "+1d", false},
 		{"Compact weeks", "+2w", false},
 		{"Compact negative", "-3d", false},
+		{"Compact minutes", "+30min", false},
 		// Natural language (GH#820)
 		{"Natural tomorrow", "tomorrow", false},
 		{"Natural next monday", "next monday", false},
@@ -1336,6 +1340,29 @@ func TestParseTimeFlag(t *testing.T) {
 				t.Errorf("parseTimeFlag(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestParseTimeFlag_MinutesVsMonths guards GH#6609: "min" is minutes, bare "m" stays months.
+func TestParseTimeFlag_MinutesVsMonths(t *testing.T) {
+	t.Parallel()
+	minutes, err := parseTimeFlag("+30min")
+	if err != nil {
+		t.Fatalf("parseTimeFlag(+30min) error: %v", err)
+	}
+	if d := time.Until(minutes); d < 29*time.Minute || d > 31*time.Minute {
+		t.Errorf("+30min resolved %v from now, want ~30m", d)
+	}
+	months, err := parseTimeFlag("+30m")
+	if err != nil {
+		t.Fatalf("parseTimeFlag(+30m) error: %v", err)
+	}
+	// Bound the months arm on both sides against a computed expectation: a
+	// one-sided "more than a year out" check stays green if "m" regressed to
+	// years or decades, which is the exact discrimination this test exists for.
+	wantMonths := time.Now().AddDate(0, 30, 0)
+	if d := months.Sub(wantMonths); d < -time.Minute || d > time.Minute {
+		t.Errorf("+30m resolved %v, want ~%v (30 months out)", months, wantMonths)
 	}
 }
 
@@ -1615,6 +1642,7 @@ func TestFormatDependencyInfoWithParent(t *testing.T) {
 		blockedBy []string
 		blocks    []string
 		parent    string
+		gatedBy   []string
 		want      string
 	}{
 		{
@@ -1650,11 +1678,25 @@ func TestFormatDependencyInfoWithParent(t *testing.T) {
 			blockedBy: []string{"blocker-1"},
 			want:      "(blocked by: blocker-1)",
 		},
+		{
+			// A gate is also a blocker, so it shows up twice on purpose:
+			// "blocked by" says what to wait on, "gated by" says which of
+			// those nobody can clear by doing more work (wy-j2upyy).
+			name:      "gate names itself in both clauses",
+			blockedBy: []string{"bd-gate"},
+			gatedBy:   []string{"bd-gate"},
+			want:      "(blocked by: bd-gate, gated by: bd-gate)",
+		},
+		{
+			name:    "gated by alone still renders",
+			gatedBy: []string{"bd-gate"},
+			want:    "(gated by: bd-gate)",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := formatDependencyInfo(tt.blockedBy, tt.blocks, tt.parent)
+			result := formatDependencyInfo(tt.blockedBy, tt.blocks, tt.parent, tt.gatedBy)
 			if result != tt.want {
 				t.Errorf("formatDependencyInfo() = %q, want %q", result, tt.want)
 			}
@@ -1675,7 +1717,7 @@ func TestFormatIssueCompactWithParent(t *testing.T) {
 
 	t.Run("shows parent annotation", func(t *testing.T) {
 		var buf strings.Builder
-		formatIssueCompact(&buf, issue, nil, nil, nil, "test-parent")
+		formatIssueCompact(&buf, issue, nil, nil, nil, "test-parent", nil)
 		result := buf.String()
 		if !strings.Contains(result, "(parent: test-parent)") {
 			t.Errorf("Expected '(parent: test-parent)' in output, got %q", result)
@@ -1684,7 +1726,7 @@ func TestFormatIssueCompactWithParent(t *testing.T) {
 
 	t.Run("does not show blocked by for parent", func(t *testing.T) {
 		var buf strings.Builder
-		formatIssueCompact(&buf, issue, nil, nil, nil, "test-parent")
+		formatIssueCompact(&buf, issue, nil, nil, nil, "test-parent", nil)
 		result := buf.String()
 		if strings.Contains(result, "blocked by") {
 			t.Errorf("Should not contain 'blocked by' for parent-child dep, got %q", result)
@@ -1693,7 +1735,7 @@ func TestFormatIssueCompactWithParent(t *testing.T) {
 
 	t.Run("shows parent and blocked by together", func(t *testing.T) {
 		var buf strings.Builder
-		formatIssueCompact(&buf, issue, nil, []string{"blocker-1"}, nil, "test-parent")
+		formatIssueCompact(&buf, issue, nil, []string{"blocker-1"}, nil, "test-parent", nil)
 		result := buf.String()
 		if !strings.Contains(result, "(parent: test-parent, blocked by: blocker-1)") {
 			t.Errorf("Expected '(parent: test-parent, blocked by: blocker-1)' in output, got %q", result)

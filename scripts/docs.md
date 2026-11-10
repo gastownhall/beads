@@ -49,13 +49,17 @@ make check-docs
 
 The script currently checks the reference docs named in `engdocs/DOC_INVENTORY.md`: `CONFIG.md`, `SETUP.md`, `ADO_CONFIG.md`, `JSON_SCHEMA.md`, `RECOVERY.md`, `ERROR_HANDLING.md`, `LINTING.md`, and `design/otel/otel-data-model.md`. Each doc must be listed in the inventory, include a recent `Last reviewed:` marker, include a `Freshness source:` marker, and name source paths or globs that exist in the repository.
 
-Set `DOC_FRESHNESS_MAX_AGE_DAYS` to override the default 90-day review window. Set `DOC_FRESHNESS_TODAY=YYYY-MM-DD` when testing date behaviour.
+Set `DOC_FRESHNESS_MAX_AGE_DAYS` to a nonnegative decimal integer to override
+the default 90-day review window. The policy threshold is compared as decimal
+text, so values larger than Bash's integer range remain valid and cannot become
+arithmetic expressions or overflow. Set `DOC_FRESHNESS_TODAY=YYYY-MM-DD` when
+testing date behaviour.
 Date validation uses Bash integer arithmetic over the proleptic Gregorian
-calendar, preserves the `0001-01-01` through `9999-12-31` ISO domain, and does
-not require Python or platform-specific date parsing. The native `date` command
-is used only to supply today's value when `DOC_FRESHNESS_TODAY` is unset. Pull
-requests exercise the real process boundary on Linux, macOS, and Git Bash on
-Windows.
+calendar, preserves the script's four-digit `YYYY-MM-DD` domain from
+`0001-01-01` through `9999-12-31`, and does not require Python or
+platform-specific date parsing. The native `date` command is used only to
+supply today's value when `DOC_FRESHNESS_TODAY` is unset. Pull requests exercise
+the real process boundary on Linux, macOS, and Git Bash on Windows.
 
 ### How it fits into the larger codebase
 

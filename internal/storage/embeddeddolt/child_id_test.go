@@ -108,6 +108,52 @@ func TestGetNextChildID(t *testing.T) {
 		}
 	})
 
+	// GH#4750: singular create with an explicit hierarchical ID must raise
+	// child_counters so subsequent --parent mints do not restart below it.
+	t.Run("explicit_id_create_advances_counter", func(t *testing.T) {
+		te := newTestEnv(t, "ex")
+		ctx := t.Context()
+
+		parent := &types.Issue{
+			ID:        "ex-parent",
+			Title:     "Parent",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeEpic,
+		}
+		if err := te.store.CreateIssue(ctx, parent, "tester"); err != nil {
+			t.Fatalf("CreateIssue parent: %v", err)
+		}
+
+		// Simulate `bd create --id ex-parent.8` (no prior counter activity).
+		child := &types.Issue{
+			ID:        "ex-parent.8",
+			Title:     "Explicit child 8",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		if err := te.store.CreateIssue(ctx, child, "tester"); err != nil {
+			t.Fatalf("CreateIssue explicit child: %v", err)
+		}
+
+		var lastChild int
+		te.queryScalar(t, ctx,
+			"SELECT last_child FROM child_counters WHERE parent_id = ?",
+			[]any{"ex-parent"}, &lastChild)
+		if lastChild != 8 {
+			t.Fatalf("child_counters last_child = %d, want 8 after explicit --id create", lastChild)
+		}
+
+		next, err := te.store.GetNextChildID(ctx, "ex-parent")
+		if err != nil {
+			t.Fatalf("GetNextChildID: %v", err)
+		}
+		if next != "ex-parent.9" {
+			t.Fatalf("GetNextChildID = %q, want ex-parent.9", next)
+		}
+	})
+
 	t.Run("wisp_parent_uses_wisp_counter", func(t *testing.T) {
 		te := newTestEnv(t, "wp")
 		ctx := t.Context()

@@ -16,7 +16,7 @@ import (
 
 func setupGitRepoForIntegration(t *testing.T, dir string) {
 	t.Helper()
-	cmd := exec.Command("git", "init", dir)
+	cmd := gitCommand("init", dir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init failed: %v\n%s", err, out)
 	}
@@ -24,7 +24,7 @@ func setupGitRepoForIntegration(t *testing.T, dir string) {
 		{"-C", dir, "config", "user.email", "test@example.com"},
 		{"-C", dir, "config", "user.name", "Test User"},
 	} {
-		cmd = exec.Command("git", args...)
+		cmd = gitCommand(args...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v failed: %v\n%s", args, err, out)
 		}
@@ -72,35 +72,38 @@ func runCommandInDirCombinedOutput(dir string, name string, args ...string) (str
 func findDoltRepoDir(t *testing.T, dir string) string {
 	t.Helper()
 
-	// Embedded driver may create either:
-	// - a dolt repo directly at .beads/dolt/
-	// - a dolt environment at .beads/dolt/ with a db subdir containing .dolt/
-	base := filepath.Join(dir, ".beads", "dolt")
-	candidates := []string{
-		base,
-		filepath.Join(base, "beads"),
-	}
-	for _, c := range candidates {
-		if _, err := os.Stat(filepath.Join(c, ".dolt")); err == nil {
-			return c
+	// bd init defaults to the embedded engine, whose data lives under
+	// .beads/embeddeddolt/<db>/; a server-mode workspace keeps it under
+	// .beads/dolt/ (a dolt repo there directly, or a db subdir with .dolt/).
+	var bases []string
+	for _, name := range []string{"embeddeddolt", "dolt"} {
+		base := filepath.Join(dir, ".beads", name)
+		bases = append(bases, base)
+		for _, c := range []string{base, filepath.Join(base, "beads")} {
+			if _, err := os.Stat(filepath.Join(c, ".dolt")); err == nil {
+				return c
+			}
 		}
 	}
 
 	var found string
-	_ = filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
+	for _, base := range bases {
+		_ = filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || found != "" {
+				return nil
+			}
+			if d.IsDir() && d.Name() == ".dolt" {
+				found = filepath.Dir(path)
+				return fs.SkipDir
+			}
 			return nil
+		})
+		if found != "" {
+			return found
 		}
-		if d.IsDir() && d.Name() == ".dolt" {
-			found = filepath.Dir(path)
-			return fs.SkipDir
-		}
-		return nil
-	})
-	if found == "" {
-		t.Fatalf("could not find Dolt repo dir under %s", base)
 	}
-	return found
+	t.Fatalf("could not find Dolt repo dir under %v", bases)
+	return ""
 }
 
 func doltHeadAuthor(t *testing.T, dir string) string {
@@ -218,10 +221,29 @@ func TestDoltAutoCommit_Batch_DefersCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bd create (2) failed: %v\n%s", err, out)
 	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(out[strings.Index(out, "{"):]), &created); err != nil || created.ID == "" {
+		t.Fatalf("parse create JSON id: %v\n%s", err, out)
+	}
+	secondID := created.ID
 
 	afterCreate2 := doltHeadCommit(t, tmpDir, env)
 	if afterCreate2 != before {
 		t.Fatalf("expected Dolt HEAD still unchanged; before=%s after=%s", before, afterCreate2)
+	}
+
+	// Delete rides the issueops facade, not transactHonoringAutoCommit — it
+	// must defer too (the bd-4wamg review caught it passing a bare rootCtx).
+	out, err = runBDExecAllowErrorWithEnv(t, tmpDir, env, "--dolt-auto-commit", "batch", "delete", secondID, "--force")
+	if err != nil {
+		t.Fatalf("bd delete failed: %v\n%s", err, out)
+	}
+
+	afterDelete := doltHeadCommit(t, tmpDir, env)
+	if afterDelete != before {
+		t.Fatalf("expected Dolt HEAD unchanged after batch-mode delete; before=%s after=%s", before, afterDelete)
 	}
 
 	// An explicit "bd dolt commit" should commit all accumulated changes.

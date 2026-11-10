@@ -3,7 +3,7 @@ title: JSON Output Schema Contract
 description: The stable JSON output contract for bd --json commands, covering the schema_version envelope, per-command fields, and consumer guidelines.
 ---
 
-Last reviewed: 2026-05-08
+Last reviewed: 2026-11-07
 
 Freshness source: `cmd/bd/output.go`, `cmd/bd/errors.go`, and
 `cmd/bd/protocol/json_contract_test.go`.
@@ -31,25 +31,37 @@ Every `--json` command wraps output as:
 The original payload is untouched inside `.data` — no type corruption,
 no field injection. Works identically for objects, arrays, and maps.
 
+When a `--limit`-truncated listing runs in envelope mode (currently wired
+for `bd ready`), the envelope also carries a `pagination` key:
+
+```json
+{"schema_version": 1, "data": [...], "pagination": {"returned": 10, "total": 42, "truncated": true}}
+```
+
+`total` is omitted when unknown; the whole `pagination` key is absent when
+the result was not truncated. Legacy mode keeps the stderr text hint instead.
+
 ### Updating consumers
 
 ```bash
 # Before (legacy):
 bd list --json | jq '.[0].id'
-bd show beads-abc --json | jq '.title'
+bd show beads-abc --json | jq '.[0].title'
 
 # After (envelope):
 bd list --json | jq '.data[0].id'
-bd show beads-abc --json | jq '.data.title'
+bd show beads-abc --json | jq '.data[0].title'
 
-# Version check:
-bd show beads-abc --json | jq '.schema_version'
+# Version check (object commands, e.g. create):
+bd create "Example" --json | jq '.schema_version'
 ```
 
 ### Timeline
 
 - **Current release**: Legacy format is default. Set `BD_JSON_ENVELOPE=1` to opt in.
-  A deprecation notice is printed to stderr when `--json` is used without the env var.
+  A deprecation notice is printed to stderr when `--json` is used without the env
+  var — but only when stderr is a terminal, and at most once per invocation, so
+  scripts capturing stderr will not see it.
 - **v2.0**: Envelope becomes the default. `BD_JSON_ENVELOPE=0` available as
   temporary escape hatch for one release cycle.
 
@@ -95,9 +107,9 @@ Arrays are wrapped the same way:
 
 ### Legacy mode (default, until v2.0)
 
-### Object commands (show, create, close, update, etc.)
+### Object commands (create, ping, etc.)
 
-Commands that return a single issue or result emit a JSON object with
+Commands that return a single result emit a JSON object with
 `schema_version` as a top-level field alongside the data:
 
 ```json
@@ -112,9 +124,11 @@ Commands that return a single issue or result emit a JSON object with
 }
 ```
 
-### List commands (list, ready, search, stale, etc.)
+### List commands (list, ready, search, stale, show, close, update, etc.)
 
-Commands that return multiple items emit a raw JSON array:
+Commands that return one or more issues emit a raw JSON array — including
+`show`, `close`, and `update`, which return one element per requested ID.
+Array output carries no top-level `schema_version` field:
 
 ```json
 [
@@ -123,9 +137,11 @@ Commands that return multiple items emit a raw JSON array:
 ]
 ```
 
-### Error output (stderr)
+### Error output
 
-Errors with `--json` active emit JSON to stderr:
+With `--json` active, a failing command reports its error either as JSON or
+as plain text, depending on the command and the failure. JSON errors go to
+stderr from some commands and to stdout from others, in this shape:
 
 ```json
 {
@@ -135,6 +151,45 @@ Errors with `--json` active emit JSON to stderr:
 }
 ```
 
+`code` and `hint` (a remediation suggestion) are both optional — only
+`error` and `schema_version` are always present. In envelope mode
+(`BD_JSON_ENVELOPE=1`) the error payload moves inside the envelope:
+`{"schema_version": 1, "data": {"error": ..., "code": ..., "hint": ...}}`.
+
+Many failures stay plain text on stderr even with `--json`, usually as
+`Error: <message>`. Flag-parsing errors, `--readonly` refusals and the
+migration freeze (below) are examples. A failure exits with code 1 unless its
+command documents another code; for example, `bd update` exits 13 when every
+failure is a stale `--if-assignee`/`--if-status` guard. Branch on the exit
+code, not on whether JSON appeared.
+
+A command refused by the proxied-server capability gate (for example
+`bd branch` on a proxied-server workspace) emits a typed refusal on stdout
+instead, also exiting 1, whose `{code, error, mutates}` members are a frozen
+contract:
+
+```json
+{
+  "schema_version": 1,
+  "code": "proxy.branch.unsupported",
+  "error": "...",
+  "mutates": false,
+  "reason": "design"
+}
+```
+
+`code` is stable and safe to branch on; `error` is informative prose.
+`mutates` is always `false` on a refusal. `reason` (`design` for a deliberate
+refusal, `unimplemented` for one not routed yet) is additive: every refusal
+from the capability registry carries it, as do `proxy.store.unrouted` and
+`proxy.migrate.external_endpoint`, while runtime-state refusals such as
+`proxy.migrate.invalid_state` omit it. Envelope mode moves the same members
+under `data`.
+
+A write refused because a migration freeze marker is active exits with code
+**14** and prints a plain-text refusal (naming the marker's path) to stderr,
+even with `--json`. Treat exit 14 as "retry later", not as a generic failure.
+
 ## Field Contracts by Command
 
 ### bd list --json
@@ -142,9 +197,12 @@ Errors with `--json` active emit JSON to stderr:
 Required fields per item:
 - `id` (string): Issue ID (e.g., "beads-abc")
 - `title` (string): Issue title
-- `status` (string): open, in_progress, closed, deferred
+- `status` (string): open, in_progress, blocked, deferred, closed, pinned,
+  hooked, or a configured custom status (`status.custom`)
 - `priority` (number): 0-4
-- `issue_type` (string): bug, feature, task, epic, chore
+- `issue_type` (string): bug, feature, task, epic, chore, decision, message,
+  molecule, gate, spike, story, milestone, the internal `event` type, or a
+  type configured in `types.custom`
 - `created_at` (string): RFC3339 timestamp
 
 Optional fields:
@@ -158,7 +216,8 @@ Optional fields:
 
 Same schema as `bd list --json`. Items are filtered to unblocked issues only.
 Each item includes `dependency_count`, `dependent_count`, `comment_count`,
-and optional `parent` fields.
+and optional `parent` fields. In envelope mode a `--limit`-truncated result
+adds the envelope-level `pagination` key (see the envelope section above).
 
 ### bd blocked --json
 
@@ -169,32 +228,76 @@ Each item includes all standard issue fields plus:
 
 ### bd show --json
 
-Returns a single object (not wrapped in `items`). Same required fields as list
+Returns a top-level JSON array with one element per requested ID; items do
+not carry `schema_version` (this shape is pinned by a contract test — a
+change here is a breaking wire change). Same required fields as list
 items, plus:
 - `description` (string)
 - `acceptance_criteria` (string)
+- `revision` (string): guarded-write optimistic-concurrency token, an opaque
+  decimal string compared by equality and echoed back verbatim; always present,
+  including a legacy `"0"`
 - `dependencies` (object[]): Full dependency records
 - `comments` (object[]): Comment thread — present only with `--include-comments`;
   the default response returns `comment_count` only (count-only, be-ijck6q)
 - `comments_omitted` (boolean, optional): `true` only when `comment_count` is
   nonzero and `comments` was left out of the response (no `--include-comments`).
   Absent when comments were included or when there are none to omit (ga-clgh)
+- `gated_by` (object[], optional): The gates actively blocking this issue, each
+  `{id, type, reason}` — the gate bead to resolve, its await condition (`human`,
+  `timer`, `gh:run`, `gh:pr`, `bead`, or `gate` when it carries none), and the
+  reason recorded at creation. A gate counts when it is reached over a `blocks`
+  or `conditional-blocks` edge, is itself neither closed nor pinned, and the
+  issue is neither closed nor pinned; a `waits-for` edge onto a gate does not
+  count, because that leg of the readiness rule is a fanout over the gate's
+  children rather than a status test. Absent when nothing gates the issue.
+  DERIVED, not stored: `status` is unaffected, and a nonempty list means
+  `bd ready` withholds the issue on a gate's account. The converse does not
+  hold: only the issue's own edges count, so a child of a gated parent, which
+  `bd ready` also withholds because a blocked parent blocks its children,
+  carries no `gated_by`
+
+### bd close --json
+
+Returns a top-level JSON array with one entry per closed issue, in the order
+the IDs were given; an issue that was already closed is reported too. Each
+entry is the closed issue (`status` is `closed`, with `closed_at` and
+`close_reason`) without its `dependencies`, plus two optional members present
+only when that close completed a molecule (see
+[Molecules](/workflows/molecules)):
+- `auto_closed_molecule` (object, optional): The molecule root the close also
+  closed, as an issue object whose `close_reason` is `all steps complete`
+- `molecule_auto_close_refusal` (string, optional): Why the molecule root
+  stayed open — for example an open blocker on the root, or a root assigned
+  to someone else. Human-readable prose; the step's close itself succeeded
+
+When one command closes several steps of the same molecule, only the first
+of their entries carries these members.
+
+With `--suggest-next`, `--continue`, or `--claim-next`, the output is an
+object instead: the array moves under `closed`, beside `unblocked` (issue
+array), `continue` (`closed_step`, `next_step`, `auto_advanced`,
+`molecule_complete`, `molecule_id`), or `claimed` (issue) respectively. When
+the flag has nothing to report, the plain array is returned.
 
 ### `import --json`
 
-Returns a summary object when `--json` is active:
+Returns a summary object when `--json` is active. `source`, `created` and
+`skipped` are always present; every other member is omitted when it is zero,
+empty or false:
 - `source` (string): File path or "stdin"
 - `created` (number): Issues created
-- `updated` (number): Existing issues updated
+- `updated` (number, optional): Existing issues updated
+- `unchanged` (number, optional): Rows identical to local state, untouched
 - `skipped` (number): Issues skipped (stale rows + dedup)
-- `dedup_skipped` (number): Issues skipped by `--dedup` title match
-- `memories` (number): Memory records imported
-- `ids` (string[]): IDs of created issues
-- `updated_issues` (object[]): Per-issue summary of what an update changed
-- `tie_kept_local_ids` (string[]): Equal-`updated_at` rows where local state won
-- `stale_skipped_ids` (string[]): Rows older than the local issue, skipped
-- `skipped_dependencies` (string[]): Dependency edges whose target id was absent
-- `dry_run` (boolean): Whether `--dry-run` was active
+- `dedup_skipped` (number, optional): Issues skipped by `--dedup` title match
+- `memories` (number, optional): Memory records imported
+- `ids` (string[], optional): IDs of created issues
+- `updated_issues` (object[], optional): Per-issue summary of what an update changed
+- `tie_kept_local_ids` (string[], optional): Equal-`updated_at` rows where local state won
+- `stale_skipped_ids` (string[], optional): Rows older than the local issue, skipped
+- `skipped_dependencies` (string[], optional): Dependency edges whose target id was absent
+- `dry_run` (boolean, optional): Present (`true`) only when `--dry-run` was active
 
 ### bd export --json
 
@@ -205,6 +308,18 @@ Each line is a self-contained issue or memory record, discriminated by
 not to the interchange stream. The interchange's own version marker is the
 optional `_schema` header record (`{"_schema":"beads-jsonl/1"}`), which
 readers skip.
+
+Issue records carry an optional `wisp_plane` boolean: the explicit
+wisps-plane marker. Export stamps it on rows that live in the wisps table
+when the row flags alone cannot prove the plane (a `no_history: true` record
+is otherwise ambiguous — an unpromoted no-history wisp and a promoted one
+look identical). Import routes the storage plane by this marker, never by
+`no_history`: marker absent means the durable issues table. The marker is a
+fresh key rather than a reuse of the legacy `wisp` boolean so that older
+readers, which do not know it, degrade to flag routing instead of importing
+marked rows as ephemeral (purge-eligible and export-excluded). The v0.35–
+v0.37 `wisp` key — those streams' spelling of `ephemeral` — is still honored
+as a read-side legacy alias.
 
 ## Consumer Guidelines
 

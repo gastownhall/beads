@@ -3,7 +3,6 @@
 package scripts_test
 
 import (
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/scripts/internal/testbash"
 )
 
 const (
@@ -44,7 +45,19 @@ const (
       printf '%s\n' "{\"number\":${PR_NUMBER},\"title\":\"Compatibility fixture\",\"author\":{\"login\":\"contributor\"},\"url\":\"${PR_URL}\",\"baseRefName\":\"main\",\"headRefName\":\"fix/preflight\",\"headRepositoryOwner\":{\"login\":\"contributor\"},\"isCrossRepository\":true,\"isDraft\":false,\"maintainerCanModify\":true,\"mergeStateStatus\":\"CLEAN\",\"mergeable\":\"MERGEABLE\",\"reviewDecision\":\"APPROVED\",\"changedFiles\":1,\"additions\":1,\"deletions\":0,\"files\":[{\"path\":\"README.md\"}],\"statusCheckRollup\":${PR_ROLLUP:-[]},\"latestReviews\":[]}"
       ;;
     "run list")
-      printf '[]\n'
+      is_pr_gate_call=0
+      prev=""
+      for arg in "$@"; do
+        if [ "$prev" = "--event" ] && [ "$arg" = "pull_request" ]; then
+          is_pr_gate_call=1
+        fi
+        prev="$arg"
+      done
+      if [ "$is_pr_gate_call" = 1 ]; then
+        printf '%s\n' "${PR_GATE_RUN_LIST:-[]}"
+      else
+        printf '%s\n' "${BASE_RUN_LIST:-[]}"
+      fi
       ;;
     "api graphql")
       if [ "$GRAPHQL_EXIT" != 0 ]; then
@@ -69,6 +82,9 @@ type preflightFixture struct {
 	graphQLResponse string
 	graphQLExit     string
 	rollup          string
+	baseRunList     string
+	prGateRunList   string
+	blockRedBase    string
 }
 
 type preflightRun struct {
@@ -79,6 +95,7 @@ type preflightRun struct {
 
 func TestPRPreflightSupportsGitHubCLIWithoutClosingIssuesReferences(t *testing.T) {
 	t.Run("numeric lookup uses exact canonical GraphQL coordinates", func(t *testing.T) {
+		t.Parallel()
 		run := runPRPreflightWithFakeGH(t, preflightFixture{})
 		if run.err != nil {
 			t.Fatalf("pr-preflight failed with old gh field set: %v\n%s", run.err, run.output)
@@ -121,6 +138,7 @@ func TestPRPreflightSupportsGitHubCLIWithoutClosingIssuesReferences(t *testing.T
 	})
 
 	t.Run("canonical PR URL and zero count preserve warning behavior", func(t *testing.T) {
+		t.Parallel()
 		run := runPRPreflightWithFakeGH(t, preflightFixture{
 			prArg:           "https://github.com/octo/repo/pull/7",
 			graphQLResponse: closingIssuesZero,
@@ -210,6 +228,7 @@ func TestPRPreflightSupportsGitHubCLIWithoutClosingIssuesReferences(t *testing.T
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			run := runPRPreflightWithFakeGH(t, test.fixture)
 			if exitCode(run.err) != 2 {
 				t.Fatalf("exit = %d, want 2; error=%v\n%s", exitCode(run.err), run.err, run.output)
@@ -229,6 +248,26 @@ func TestPRPreflightSupportsGitHubCLIWithoutClosingIssuesReferences(t *testing.T
 
 func TestPRPreflightFixtureIgnoresHostShellAndGitHubState(t *testing.T) {
 	hostState := t.TempDir()
+	var pathShadowMarker string
+	if runtime.GOOS == "windows" {
+		shadowDir := t.TempDir()
+		shadowBash := filepath.Join(shadowDir, "bash.cmd")
+		pathShadowMarker = filepath.Join(shadowDir, "invoked")
+		body := "@echo off\r\n> \"%~dp0invoked\" echo invoked\r\nexit /b 97\r\n"
+		if err := os.WriteFile(shadowBash, []byte(body), 0o600); err != nil {
+			t.Fatalf("write PATH-first Bash launcher: %v", err)
+		}
+		t.Setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+		t.Setenv("PATH", shadowDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		ambient, err := exec.LookPath("bash")
+		if err != nil {
+			t.Fatalf("locate PATH-first Bash launcher: %v", err)
+		}
+		if !strings.EqualFold(filepath.Clean(ambient), filepath.Clean(shadowBash)) {
+			t.Fatalf("ambient bash = %q, want PATH-first launcher %q", ambient, shadowBash)
+		}
+	}
+
 	startupMarker := filepath.Join(hostState, "startup-invoked")
 	hostStartup := filepath.Join(hostState, "host-startup.sh")
 	if err := os.WriteFile(
@@ -259,6 +298,13 @@ func TestPRPreflightFixtureIgnoresHostShellAndGitHubState(t *testing.T) {
 	if len(run.calls) == 0 {
 		t.Fatal("controlled gh function did not intercept any calls")
 	}
+	if pathShadowMarker != "" {
+		if _, err := os.Stat(pathShadowMarker); err == nil {
+			t.Fatal("preflight fixture executed the PATH-first Bash launcher")
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("inspect PATH-first Bash launcher marker: %v", err)
+		}
+	}
 }
 
 // A head SHA whose earlier check suites were cancelled or failed keeps those
@@ -275,6 +321,7 @@ func TestPRPreflightChecksUseLatestRunPerName(t *testing.T) {
 		`]`
 
 	t.Run("stale failures and cancellations are superseded by newer green runs", func(t *testing.T) {
+		t.Parallel()
 		run := runPRPreflightWithFakeGH(t, preflightFixture{rollup: staleGreenRollup})
 		if !strings.Contains(run.output, "No failed or pending status checks reported.") {
 			t.Fatalf("expected stale rollup entries to be superseded:\n%s", run.output)
@@ -285,6 +332,7 @@ func TestPRPreflightChecksUseLatestRunPerName(t *testing.T) {
 	})
 
 	t.Run("a genuinely failing latest run still blocks", func(t *testing.T) {
+		t.Parallel()
 		freshRedRollup := `[` +
 			`{"name":"CI Gate / Required","status":"COMPLETED","conclusion":"SUCCESS","completedAt":"2026-07-27T10:00:00Z"},` +
 			`{"name":"CI Gate / Required","status":"COMPLETED","conclusion":"FAILURE","completedAt":"2026-07-28T10:00:00Z"}` +
@@ -296,6 +344,7 @@ func TestPRPreflightChecksUseLatestRunPerName(t *testing.T) {
 	})
 
 	t.Run("a commit status cannot supersede a same-named check run", func(t *testing.T) {
+		t.Parallel()
 		// GitHub treats a check run and a commit status sharing a name as
 		// independent required gates; both must pass.
 		mixedRollup := `[` +
@@ -309,6 +358,7 @@ func TestPRPreflightChecksUseLatestRunPerName(t *testing.T) {
 	})
 
 	t.Run("identically named jobs in different workflows stay independent", func(t *testing.T) {
+		t.Parallel()
 		crossWorkflowRollup := `[` +
 			`{"__typename":"CheckRun","workflowName":"Main","name":"Test","status":"COMPLETED","conclusion":"FAILURE","completedAt":"2026-07-28T10:00:00Z"},` +
 			`{"__typename":"CheckRun","workflowName":"Nightly","name":"Test","status":"COMPLETED","conclusion":"SUCCESS","completedAt":"2026-07-28T11:00:00Z"}` +
@@ -320,6 +370,7 @@ func TestPRPreflightChecksUseLatestRunPerName(t *testing.T) {
 	})
 
 	t.Run("an in-progress rerun with a zero completion time supersedes an old failure as pending", func(t *testing.T) {
+		t.Parallel()
 		// gh exports absent CheckRun times as the Go zero time, not null.
 		rerunRollup := `[` +
 			`{"__typename":"CheckRun","workflowName":"Main","name":"CI","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-07-27T09:00:00Z","completedAt":"2026-07-27T10:00:00Z"},` +
@@ -332,6 +383,190 @@ func TestPRPreflightChecksUseLatestRunPerName(t *testing.T) {
 	})
 }
 
+// The base-branch health check above reads gh run list --branch <base>, which
+// only sees workflows that actually run on the base branch. A job that exists
+// only in the PR workflow (pr.yml) never runs there, and even sampling
+// pull_request-event runs in aggregate would dilute one broken workflow's
+// signal against every other green PR workflow. This supplemental, warn-only
+// detector groups the sample by workflow and flags any single workflow that
+// is uniformly failing across several distinct branches.
+func TestPRPreflightPRGateHealthSample(t *testing.T) {
+	// The detector only speaks against a base branch known to be green; every
+	// case that exercises it therefore supplies a green base sample.
+	greenBase := `[{"conclusion":"success","workflowName":"CI","createdAt":"2026-07-28T12:00:00Z","url":"https://github.com/o/r/actions/base-0"}]`
+	sixRunsThreeHeadsAllFailed := `[` +
+		`{"conclusion":"failure","headBranch":"branch-a","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T10:00:00Z","url":"https://github.com/o/r/actions/runs/1"},` +
+		`{"conclusion":"failure","headBranch":"branch-a","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T09:00:00Z","url":"https://github.com/o/r/actions/runs/2"},` +
+		`{"conclusion":"failure","headBranch":"branch-b","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T08:00:00Z","url":"https://github.com/o/r/actions/runs/3"},` +
+		`{"conclusion":"failure","headBranch":"branch-b","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T07:00:00Z","url":"https://github.com/o/r/actions/runs/4"},` +
+		`{"conclusion":"failure","headBranch":"branch-c","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T06:00:00Z","url":"https://github.com/o/r/actions/runs/5"},` +
+		`{"conclusion":"failure","headBranch":"branch-c","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T05:00:00Z","url":"https://github.com/o/r/actions/runs/6"}` +
+		`]`
+
+	t.Run("all failed across 3+ heads with 5+ decisive runs warns and names the workflow", func(t *testing.T) {
+		t.Parallel()
+		run := runPRPreflightWithFakeGH(t, preflightFixture{baseRunList: greenBase, prGateRunList: sixRunsThreeHeadsAllFailed})
+		if run.err != nil {
+			t.Fatalf("expected warn-only exit, got error: %v\n%s", run.err, run.output)
+		}
+		want := "[warn] PR gate workflow 'PR CI' appears broken: all 6 of its recent completed pull_request runs across 3 branches failed (newest: 2026-07-28T10:00:00Z https://github.com/o/r/actions/runs/1)."
+		if !strings.Contains(run.output, want) {
+			t.Fatalf("expected broken-PR-gate warning naming the workflow and newest run:\nwant substring: %s\ngot:\n%s", want, run.output)
+		}
+	})
+
+	t.Run("stays warn-only even under PR_PREFLIGHT_BLOCK_RED_BASE=1", func(t *testing.T) {
+		t.Parallel()
+		// The warn-only property is the load-bearing one: mybd's pr-babysit
+		// classifies any unrecognized [block] line as a genuine merge blocker
+		// and parks merge lanes on it, and it withholds the base-fix
+		// exception whenever a non-red-base block is present. This detector
+		// must therefore never escalate to a block, regardless of the
+		// red-base escalation env var.
+		run := runPRPreflightWithFakeGH(t, preflightFixture{baseRunList: greenBase, prGateRunList: sixRunsThreeHeadsAllFailed, blockRedBase: "1"})
+		if run.err != nil {
+			t.Fatalf("expected warn-only exit even with PR_PREFLIGHT_BLOCK_RED_BASE=1, got error: %v\n%s", run.err, run.output)
+		}
+		if !strings.Contains(run.output, "[warn] PR gate workflow 'PR CI' appears broken") {
+			t.Fatalf("expected the broken-PR-gate warn to still fire:\n%s", run.output)
+		}
+		if strings.Contains(run.output, "[block] PR gate") {
+			t.Fatalf("PR-gate detector must never emit a [block] line:\n%s", run.output)
+		}
+	})
+
+	t.Run("one success in the workflow's sample stays silent", func(t *testing.T) {
+		t.Parallel()
+		mostlyFailedOneSuccess := strings.Replace(sixRunsThreeHeadsAllFailed, `"conclusion":"failure","headBranch":"branch-c","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T05:00:00Z"`, `"conclusion":"success","headBranch":"branch-c","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T05:00:00Z"`, 1)
+		run := runPRPreflightWithFakeGH(t, preflightFixture{baseRunList: greenBase, prGateRunList: mostlyFailedOneSuccess})
+		if run.err != nil {
+			t.Fatalf("expected exit 0, got error: %v\n%s", run.err, run.output)
+		}
+		if strings.Contains(run.output, "PR gate workflow") {
+			t.Fatalf("a workflow sample with a success should stay silent:\n%s", run.output)
+		}
+	})
+
+	t.Run("all failed but only 2 distinct heads stays silent", func(t *testing.T) {
+		t.Parallel()
+		twoHeadsAllFailed := `[` +
+			`{"conclusion":"failure","headBranch":"branch-a","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T10:00:00Z","url":"https://github.com/o/r/actions/runs/1"},` +
+			`{"conclusion":"failure","headBranch":"branch-a","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T09:00:00Z","url":"https://github.com/o/r/actions/runs/2"},` +
+			`{"conclusion":"failure","headBranch":"branch-a","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T08:00:00Z","url":"https://github.com/o/r/actions/runs/3"},` +
+			`{"conclusion":"failure","headBranch":"branch-b","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T07:00:00Z","url":"https://github.com/o/r/actions/runs/4"},` +
+			`{"conclusion":"failure","headBranch":"branch-b","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T06:00:00Z","url":"https://github.com/o/r/actions/runs/5"},` +
+			`{"conclusion":"failure","headBranch":"branch-b","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T05:00:00Z","url":"https://github.com/o/r/actions/runs/6"}` +
+			`]`
+		run := runPRPreflightWithFakeGH(t, preflightFixture{baseRunList: greenBase, prGateRunList: twoHeadsAllFailed})
+		if run.err != nil {
+			t.Fatalf("expected exit 0, got error: %v\n%s", run.err, run.output)
+		}
+		if strings.Contains(run.output, "PR gate workflow") {
+			t.Fatalf("only 2 distinct heads should stay silent:\n%s", run.output)
+		}
+	})
+
+	t.Run("empty sample stays silent", func(t *testing.T) {
+		t.Parallel()
+		run := runPRPreflightWithFakeGH(t, preflightFixture{baseRunList: greenBase, prGateRunList: "[]"})
+		if run.err != nil {
+			t.Fatalf("expected exit 0, got error: %v\n%s", run.err, run.output)
+		}
+		if strings.Contains(run.output, "PR gate workflow") {
+			t.Fatalf("empty sample should stay silent:\n%s", run.output)
+		}
+	})
+
+	t.Run("mixed workflows: only the all-red workflow fires, and it is named", func(t *testing.T) {
+		t.Parallel()
+		mixedWorkflows := `[` +
+			`{"conclusion":"success","headBranch":"branch-a","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T12:00:00Z","url":"https://github.com/o/r/actions/runs/201"},` +
+			`{"conclusion":"success","headBranch":"branch-b","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T11:30:00Z","url":"https://github.com/o/r/actions/runs/202"},` +
+			`{"conclusion":"failure","headBranch":"branch-a","workflowName":"Contract corpus","workflowDatabaseId":202,"createdAt":"2026-07-28T10:00:00Z","url":"https://github.com/o/r/actions/runs/101"},` +
+			`{"conclusion":"failure","headBranch":"branch-a","workflowName":"Contract corpus","workflowDatabaseId":202,"createdAt":"2026-07-28T09:00:00Z","url":"https://github.com/o/r/actions/runs/102"},` +
+			`{"conclusion":"failure","headBranch":"branch-b","workflowName":"Contract corpus","workflowDatabaseId":202,"createdAt":"2026-07-28T08:00:00Z","url":"https://github.com/o/r/actions/runs/103"},` +
+			`{"conclusion":"failure","headBranch":"branch-b","workflowName":"Contract corpus","workflowDatabaseId":202,"createdAt":"2026-07-28T07:00:00Z","url":"https://github.com/o/r/actions/runs/104"},` +
+			`{"conclusion":"failure","headBranch":"branch-c","workflowName":"Contract corpus","workflowDatabaseId":202,"createdAt":"2026-07-28T06:00:00Z","url":"https://github.com/o/r/actions/runs/105"}` +
+			`]`
+		run := runPRPreflightWithFakeGH(t, preflightFixture{baseRunList: greenBase, prGateRunList: mixedWorkflows})
+		if run.err != nil {
+			t.Fatalf("expected exit 0, got error: %v\n%s", run.err, run.output)
+		}
+		want := "[warn] PR gate workflow 'Contract corpus' appears broken: all 5 of its recent completed pull_request runs across 3 branches failed (newest: 2026-07-28T10:00:00Z https://github.com/o/r/actions/runs/101)."
+		if !strings.Contains(run.output, want) {
+			t.Fatalf("expected the all-red workflow to be named despite a healthy sibling workflow:\nwant substring: %s\ngot:\n%s", want, run.output)
+		}
+		if strings.Contains(run.output, "'PR CI'") {
+			t.Fatalf("the healthy workflow must not be named as broken:\n%s", run.output)
+		}
+	})
+
+	t.Run("undetermined base health skips the sample", func(t *testing.T) {
+		t.Parallel()
+		// With no decisive base runs at all, preflight has just warned that it
+		// could not determine base health; diagnosing "red for every PR while
+		// the base branch shows green" would contradict that line.
+		run := runPRPreflightWithFakeGH(t, preflightFixture{baseRunList: "[]", prGateRunList: sixRunsThreeHeadsAllFailed})
+		if run.err != nil {
+			t.Fatalf("expected exit 0, got error: %v\n%s", run.err, run.output)
+		}
+		if strings.Contains(run.output, "PR gate workflow") {
+			t.Fatalf("the PR-gate sample must be skipped when base health is undetermined:\n%s", run.output)
+		}
+	})
+
+	t.Run("red base skips the sample even when a workflow would otherwise fire", func(t *testing.T) {
+		t.Parallel()
+		redBaseRunList := `[{"conclusion":"failure","workflowName":"CI","createdAt":"2026-07-28T09:00:00Z","url":"https://github.com/o/r/actions/base-1"}]`
+		run := runPRPreflightWithFakeGH(t, preflightFixture{
+			baseRunList:   redBaseRunList,
+			prGateRunList: sixRunsThreeHeadsAllFailed,
+		})
+		if run.err != nil {
+			t.Fatalf("expected exit 0 (warn-only), got error: %v\n%s", run.err, run.output)
+		}
+		if !strings.Contains(run.output, "Base branch main CI is RED") {
+			t.Fatalf("expected the existing red-base warning to still fire:\n%s", run.output)
+		}
+		if strings.Contains(run.output, "PR gate workflow") {
+			t.Fatalf("the PR-gate sample must be skipped while the base is red:\n%s", run.output)
+		}
+	})
+
+	t.Run("unreadable/non-JSON sample stays silent", func(t *testing.T) {
+		t.Parallel()
+		run := runPRPreflightWithFakeGH(t, preflightFixture{baseRunList: greenBase, prGateRunList: "gh: rate limit exceeded"})
+		if run.err != nil {
+			t.Fatalf("expected exit 0, got error: %v\n%s", run.err, run.output)
+		}
+		if strings.Contains(run.output, "PR gate workflow") {
+			t.Fatalf("an unreadable sample should stay silent, not error:\n%s", run.output)
+		}
+	})
+
+	t.Run("BASE_RUN_LIST positively drives the base-branch dispatch, not the PR-gate one", func(t *testing.T) {
+		t.Parallel()
+		greenBaseRunList := `[{"conclusion":"success","workflowName":"CI","createdAt":"2026-07-28T12:00:00Z","url":"https://github.com/o/r/actions/base-2"}]`
+		run := runPRPreflightWithFakeGH(t, preflightFixture{baseRunList: greenBaseRunList})
+		if run.err != nil {
+			t.Fatalf("expected exit 0, got error: %v\n%s", run.err, run.output)
+		}
+		if !strings.Contains(run.output, "[pass] Base branch main CI is green (latest completed run of each of 1 workflow(s) succeeded).") {
+			t.Fatalf("expected BASE_RUN_LIST to reach the base-branch call, not the PR-gate one:\n%s", run.output)
+		}
+		if strings.Contains(run.output, "PR gate workflow") {
+			t.Fatalf("default empty PR-gate sample should stay silent:\n%s", run.output)
+		}
+	})
+}
+
+// runPRPreflightWithFakeGH runs scripts/pr-preflight.sh once in its own temp
+// dir, call log and environment, so callers that do not t.Setenv may run it
+// from parallel subtests. They do: on Windows, Git Bash process creation makes
+// each run cost about 1.5s, and the ~29 runs in this file used to take 42s of
+// pr-preflight-platforms' Windows leg one after another (gastownhall/beads
+// merge group 37710264475). TestPRPreflightFixtureIgnoresHostShellAndGitHubState
+// stays serial because it rewrites the process environment.
 func runPRPreflightWithFakeGH(t *testing.T, fixture preflightFixture) preflightRun {
 	t.Helper()
 
@@ -352,6 +587,15 @@ func runPRPreflightWithFakeGH(t *testing.T, fixture preflightFixture) preflightR
 	}
 	if fixture.rollup == "" {
 		fixture.rollup = "[]"
+	}
+	if fixture.baseRunList == "" {
+		fixture.baseRunList = "[]"
+	}
+	if fixture.prGateRunList == "" {
+		fixture.prGateRunList = "[]"
+	}
+	if fixture.blockRedBase == "" {
+		fixture.blockRedBase = "0"
 	}
 
 	bash, path := prPreflightProcessTools(t)
@@ -395,6 +639,9 @@ func runPRPreflightWithFakeGH(t *testing.T, fixture preflightFixture) preflightR
 		"PR_NUMBER="+fixture.returnedNumber,
 		"PR_URL="+fixture.canonicalURL,
 		"PR_ROLLUP="+fixture.rollup,
+		"BASE_RUN_LIST="+fixture.baseRunList,
+		"PR_GATE_RUN_LIST="+fixture.prGateRunList,
+		"PR_PREFLIGHT_BLOCK_RED_BASE="+fixture.blockRedBase,
 	)
 	out, runErr := cmd.CombinedOutput()
 	logBytes, readErr := os.ReadFile(callLog)
@@ -407,7 +654,7 @@ func runPRPreflightWithFakeGH(t *testing.T, fixture preflightFixture) preflightR
 func prPreflightProcessTools(t *testing.T) (string, string) {
 	t.Helper()
 
-	bash, err := exec.LookPath("bash")
+	bash, err := testbash.Resolve()
 	if err != nil {
 		t.Fatalf("bash is required to exercise pr-preflight.sh: %v", err)
 	}
@@ -439,20 +686,17 @@ command -v jq >/dev/null
 esac
 `
 	}
-	probe := exec.Command(bash, "--noprofile", "--norc", "-c", probeScript)
-	probe.Env = append(prPreflightWindowsRuntimeEnv(),
+	probeEnvironment := append(prPreflightWindowsRuntimeEnv(),
 		"PATH="+path,
 		"HOME="+msysPath(t.TempDir()),
 		"LC_ALL=C",
 		"LANG=C",
-		"BASH_ENV=",
-		"ENV=",
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_SYSTEM=/dev/null",
 	)
-	if output, err := probe.CombinedOutput(); err != nil {
-		t.Fatalf("selected Bash cannot provide the required preflight boundary: %v\n%s", err, output)
+	if err := testbash.Probe(bash, "preflight process boundary", probeScript, probeEnvironment); err != nil {
+		t.Fatalf("selected Bash cannot provide the required preflight boundary: %v", err)
 	}
 	return bash, path
 }
@@ -545,15 +789,4 @@ func requireFlagValue(t *testing.T, args []string, flag string) string {
 	}
 	t.Fatalf("missing %s value in %q", flag, args)
 	return ""
-}
-
-func exitCode(err error) int {
-	if err == nil {
-		return 0
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return exitErr.ExitCode()
-	}
-	return -1
 }

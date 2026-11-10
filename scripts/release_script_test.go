@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/formula"
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 func TestReleaseScriptUsesVerifiedInstalledBDBeforeStaleRepoBD(t *testing.T) {
@@ -84,8 +85,7 @@ echo '{"source":"/tmp/stale.formula.toml"}'
 }
 
 func TestReleaseFormulaCleanupStaleDoltOrphansHandlesLocalModeWithoutJQ(t *testing.T) {
-	repoRoot := sourceRepoRoot(t)
-	formulaPath := filepath.Join(repoRoot, ".beads", "formulas", "beads-release.formula.toml")
+	formulaPath := releaseFormulaPath(t)
 	if _, err := formula.NewParser().ParseFile(formulaPath); err != nil {
 		t.Fatalf("beads-release formula does not parse: %v", err)
 	}
@@ -117,8 +117,7 @@ func TestReleaseFormulaCleanupStaleDoltOrphansHandlesLocalModeWithoutJQ(t *testi
 }
 
 func TestReleaseFormulaHomebrewCoreProcedureCoversTemplateAndBottles(t *testing.T) {
-	repoRoot := sourceRepoRoot(t)
-	formulaPath := filepath.Join(repoRoot, ".beads", "formulas", "beads-release.formula.toml")
+	formulaPath := releaseFormulaPath(t)
 	if _, err := formula.NewParser().ParseFile(formulaPath); err != nil {
 		t.Fatalf("beads-release formula does not parse: %v", err)
 	}
@@ -203,13 +202,20 @@ func releaseTestTempDir(t *testing.T) string {
 	return t.TempDir()
 }
 
-func sourceRepoRoot(t *testing.T) string {
+// releaseFormulaPath returns the checked-in beads-release formula. Under
+// Bazel it comes from BEADS_TEST_RELEASE_FORMULA: .beads/ also holds live bd
+// data and is in .bazelignore, so the formula is not under //:repo_files but
+// in its own local repository (@beads_formulas, MODULE.bazel).
+func releaseFormulaPath(t *testing.T) string {
 	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
+	if bazeltest.IsBazel() {
+		path, err := bazeltest.RunfileEnv("BEADS_TEST_RELEASE_FORMULA")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return path
 	}
-	return filepath.Dir(filepath.Dir(file))
+	return filepath.Join(sourceRepoRoot(t), ".beads", "formulas", "beads-release.formula.toml")
 }
 
 func runReleaseDryRun(t *testing.T, repo, bin string) (string, error) {
@@ -242,15 +248,6 @@ func runReleaseDryRunWithEnv(t *testing.T, repo, bin string, extraEnv ...string)
 	return string(out), err
 }
 
-func msysPath(path string) string {
-	path = filepath.Clean(path)
-	path = filepath.ToSlash(path)
-	if len(path) >= 3 && path[1] == ':' && path[2] == '/' {
-		return "/" + strings.ToLower(path[:1]) + path[2:]
-	}
-	return path
-}
-
 func shellPath(t *testing.T, path string) string {
 	t.Helper()
 	clean := filepath.Clean(path)
@@ -281,6 +278,70 @@ func shellPath(t *testing.T, path string) string {
 		}
 	}
 	return msysPath(path)
+}
+
+func shellPathUnderEnv(t *testing.T, bash, path string, env []string) string {
+	t.Helper()
+	clean := filepath.Clean(path)
+	dir := clean
+	base := ""
+	if info, err := os.Stat(clean); err == nil && !info.IsDir() {
+		dir = filepath.Dir(clean)
+		base = filepath.Base(clean)
+	}
+	cmd := exec.Command(bash, "--noprofile", "--norc", "-c", "pwd")
+	cmd.Dir = dir
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("resolve shell path for %s under script environment: %v\n%s", path, err, out)
+	}
+	converted := strings.TrimSpace(string(out))
+	if converted == "" {
+		t.Fatalf("resolve shell path for %s under script environment: empty output", path)
+	}
+	if base != "" {
+		return converted + "/" + filepath.ToSlash(base)
+	}
+	return converted
+}
+
+// shellPathEnv keeps minimal-environment path conversion independent of
+// inherited temporary-path mounts. Git for Windows can map /tmp differently
+// when TEMP/TMP are omitted, so helpers that replace the child environment
+// must resolve paths under that same authority.
+func shellPathEnv() []string {
+	path := os.Getenv("PATH")
+	if runtime.GOOS == "windows" {
+		path = "/usr/bin:/bin"
+	}
+	return []string{
+		"PATH=" + path,
+		"LC_ALL=C",
+		"LANG=C",
+		"BASH_ENV=",
+		"ENV=",
+	}
+}
+
+func requireShellCommandPath(t *testing.T, bash, dir string, env []string, name, want string) {
+	t.Helper()
+	cmd := exec.Command(bash, "--noprofile", "--norc", "-c", `PATH="$BEADS_TEST_COMMAND_PATH"; export PATH; printf '%s\n' "$PATH"; command -v -- "$1"`, "shim-path-check", name)
+	cmd.Dir = dir
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("resolve injected %s under script environment: %v\n%s", name, err, out)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	got := lines[len(lines)-1]
+	if got != want {
+		t.Fatalf("injected %s resolved to %q, want %q; PATH=%q", name, got, want, lines[0])
+	}
+}
+
+func bashScriptCommand(bash, script string) *exec.Cmd {
+	return exec.Command(bash, "--noprofile", "--norc", "-c", `PATH="$BEADS_TEST_COMMAND_PATH"; export PATH; exec "$BASH" --noprofile --norc "$1"`, "script-test", script)
 }
 
 // bashPathList converts a host-style PATH value (entries separated by

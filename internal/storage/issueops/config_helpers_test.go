@@ -1,10 +1,159 @@
 package issueops
 
 import (
+	"context"
+	"errors"
+	"regexp"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+func TestReopenCategoryInTx(t *testing.T) {
+	t.Run("literal closed is done without configuration", func(t *testing.T) {
+		category, err := ReopenCategoryInTx(context.Background(), nil, types.StatusClosed)
+		if err != nil {
+			t.Fatalf("ReopenCategoryInTx: %v", err)
+		}
+		if category != types.CategoryDone {
+			t.Fatalf("category = %q, want %q", category, types.CategoryDone)
+		}
+	})
+
+	t.Run("normalized custom done status", func(t *testing.T) {
+		db, mock, tx := beginMockTx(t)
+		defer db.Close()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT name, category FROM custom_statuses ORDER BY name")).
+			WillReturnRows(sqlmock.NewRows([]string{"name", "category"}).
+				AddRow("archived", string(types.CategoryDone)))
+		mock.ExpectRollback()
+
+		category, err := ReopenCategoryInTx(context.Background(), tx, "archived")
+		if err != nil {
+			t.Fatalf("ReopenCategoryInTx: %v", err)
+		}
+		if category != types.CategoryDone {
+			t.Fatalf("category = %q, want %q", category, types.CategoryDone)
+		}
+		if err := tx.Rollback(); err != nil {
+			t.Fatalf("rollback: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	t.Run("legacy config fallback", func(t *testing.T) {
+		db, mock, tx := beginMockTx(t)
+		defer db.Close()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT name, category FROM custom_statuses ORDER BY name")).
+			WillReturnError(errors.New("Error 1146 (42S02): Table 'beads.custom_statuses' doesn't exist"))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM config WHERE `key` = ?")).
+			WithArgs("status.custom").
+			WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("archived:done"))
+		mock.ExpectRollback()
+
+		category, err := ReopenCategoryInTx(context.Background(), tx, "archived")
+		if err != nil {
+			t.Fatalf("ReopenCategoryInTx: %v", err)
+		}
+		if category != types.CategoryDone {
+			t.Fatalf("category = %q, want %q", category, types.CategoryDone)
+		}
+		if err := tx.Rollback(); err != nil {
+			t.Fatalf("rollback: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	t.Run("normalized query failure does not fall back to legacy config", func(t *testing.T) {
+		db, mock, tx := beginMockTx(t)
+		defer db.Close()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT name, category FROM custom_statuses ORDER BY name")).
+			WillReturnError(errors.New("connection reset"))
+		mock.ExpectRollback()
+
+		_, err := ReopenCategoryInTx(context.Background(), tx, "archived")
+		if err == nil || !regexp.MustCompile("connection reset").MatchString(err.Error()) {
+			t.Fatalf("err = %v, want normalized query failure", err)
+		}
+		if err := tx.Rollback(); err != nil {
+			t.Fatalf("rollback: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	t.Run("normalized row scan failure does not fall back to legacy config", func(t *testing.T) {
+		db, mock, tx := beginMockTx(t)
+		defer db.Close()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT name, category FROM custom_statuses ORDER BY name")).
+			WillReturnRows(sqlmock.NewRows([]string{"name", "category"}).AddRow("archived", nil))
+		mock.ExpectRollback()
+
+		_, err := ReopenCategoryInTx(context.Background(), tx, "archived")
+		if err == nil || !regexp.MustCompile("scan custom_statuses").MatchString(err.Error()) {
+			t.Fatalf("err = %v, want normalized scan failure", err)
+		}
+		if err := tx.Rollback(); err != nil {
+			t.Fatalf("rollback: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	t.Run("malformed legacy config is unspecified", func(t *testing.T) {
+		db, mock, tx := beginMockTx(t)
+		defer db.Close()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT name, category FROM custom_statuses ORDER BY name")).
+			WillReturnRows(sqlmock.NewRows([]string{"name", "category"}))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM config WHERE `key` = ?")).
+			WithArgs("status.custom").
+			WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("archived:not-a-category"))
+		mock.ExpectRollback()
+
+		category, err := ReopenCategoryInTx(context.Background(), tx, "archived")
+		if err != nil {
+			t.Fatalf("ReopenCategoryInTx: %v", err)
+		}
+		if category != types.CategoryUnspecified {
+			t.Fatalf("category = %q, want %q", category, types.CategoryUnspecified)
+		}
+		if err := tx.Rollback(); err != nil {
+			t.Fatalf("rollback: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	t.Run("configuration query failure is returned", func(t *testing.T) {
+		db, mock, tx := beginMockTx(t)
+		defer db.Close()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT name, category FROM custom_statuses ORDER BY name")).
+			WillReturnRows(sqlmock.NewRows([]string{"name", "category"}))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM config WHERE `key` = ?")).
+			WithArgs("status.custom").
+			WillReturnError(errors.New("configuration unavailable"))
+		mock.ExpectRollback()
+
+		_, err := ReopenCategoryInTx(context.Background(), tx, "archived")
+		if err == nil || !regexp.MustCompile("configuration unavailable").MatchString(err.Error()) {
+			t.Fatalf("err = %v, want configuration query failure", err)
+		}
+		if err := tx.Rollback(); err != nil {
+			t.Fatalf("rollback: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+}
 
 func TestParseStatusFallback(t *testing.T) {
 	tests := []struct {

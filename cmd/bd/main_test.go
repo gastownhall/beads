@@ -18,8 +18,8 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// bd-206: Test updating open issue to closed preserves closed_at
-func TestImportOpenToClosedTransition(t *testing.T) {
+// TestCloseIssueSetsClosedAt verifies the dedicated close operation owns its lifecycle metadata.
+func TestCloseIssueSetsClosedAt(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	dbPath := filepath.Join(tmpDir, "test.db")
@@ -45,13 +45,9 @@ func TestImportOpenToClosedTransition(t *testing.T) {
 		t.Fatalf("Failed to create open issue: %v", err)
 	}
 
-	// Step 2: Update via UpdateIssue with closed status (closed_at managed automatically)
-	updates := map[string]interface{}{
-		"status": types.StatusClosed,
-	}
-
-	if err := testStore.UpdateIssue(ctx, "bd-transition-1", updates, "test"); err != nil {
-		t.Fatalf("Update failed: %v", err)
+	// Step 2: Lifecycle transitions use the dedicated close operation.
+	if err := testStore.CloseIssue(ctx, "bd-transition-1", "", "test", ""); err != nil {
+		t.Fatalf("CloseIssue failed: %v", err)
 	}
 
 	// Step 3: Verify the issue is now closed with correct closed_at
@@ -69,8 +65,8 @@ func TestImportOpenToClosedTransition(t *testing.T) {
 	}
 }
 
-// bd-206: Test updating closed issue to open clears closed_at
-func TestImportClosedToOpenTransition(t *testing.T) {
+// TestReopenIssueClearsClosedAt verifies the dedicated reopen operation clears lifecycle metadata.
+func TestReopenIssueClearsClosedAt(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	dbPath := filepath.Join(tmpDir, "test.db")
@@ -97,13 +93,9 @@ func TestImportClosedToOpenTransition(t *testing.T) {
 		t.Fatalf("Failed to create closed issue: %v", err)
 	}
 
-	// Step 2: Update via UpdateIssue with open status (closed_at managed automatically)
-	updates := map[string]interface{}{
-		"status": types.StatusOpen,
-	}
-
-	if err := testStore.UpdateIssue(ctx, "bd-transition-2", updates, "test"); err != nil {
-		t.Fatalf("Update failed: %v", err)
+	// Step 2: Lifecycle transitions use the dedicated reopen operation.
+	if err := testStore.ReopenIssue(ctx, "bd-transition-2", "", "test"); err != nil {
+		t.Fatalf("ReopenIssue failed: %v", err)
 	}
 
 	// Step 3: Verify the issue is now open with null closed_at

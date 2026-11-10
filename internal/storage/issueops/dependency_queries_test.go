@@ -24,6 +24,11 @@ func dependencyRecordsForIssuesQueryRegex(table string) string {
 		regexp.QuoteMeta(table) + ` WHERE issue_id IN \(\?\) ORDER BY issue_id, depends_on_id, type, id`
 }
 
+func externalBlockingDependencyRecordsQueryRegex(table string) string {
+	return `(?s)SELECT issue_id, COALESCE\(depends_on_issue_id, depends_on_wisp_id, depends_on_external\) AS depends_on_id, type, created_at, created_by, metadata, thread_id\s+FROM ` +
+		regexp.QuoteMeta(table) + `\s+WHERE depends_on_external LIKE 'external:%'\s+AND type IN \('blocks', 'conditional-blocks', 'waits-for'\)\s+ORDER BY issue_id`
+}
+
 func dependencyRows() *sqlmock.Rows {
 	return sqlmock.NewRows([]string{
 		"issue_id",
@@ -91,6 +96,35 @@ func TestGetAllDependencyRecordsInTxToleratesMissingWispDependencyTable(t *testi
 	}
 }
 
+func TestGetExternalBlockingDependencyRecordsInTxReadsPermanentAndWispEdges(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+	now := time.Now()
+	mock.ExpectQuery(externalBlockingDependencyRecordsQueryRegex("dependencies")).
+		WillReturnRows(dependencyRows().AddRow(
+			"perm-source", "external:remote:payments", types.DepBlocks, now, "tester", "{}", "",
+		))
+	mock.ExpectQuery(externalBlockingDependencyRecordsQueryRegex("wisp_dependencies")).
+		WillReturnRows(dependencyRows().AddRow(
+			"wisp-source", "external:remote:identity", types.DepWaitsFor, now, "tester", "{}", "",
+		))
+
+	got, err := GetExternalBlockingDependencyRecordsInTx(context.Background(), tx)
+	if err != nil {
+		t.Fatalf("GetExternalBlockingDependencyRecordsInTx: %v", err)
+	}
+	if dep := onlyDependency(t, got, "perm-source"); dep.DependsOnID != "external:remote:payments" {
+		t.Fatalf("permanent external target = %q", dep.DependsOnID)
+	}
+	if dep := onlyDependency(t, got, "wisp-source"); dep.DependsOnID != "external:remote:identity" {
+		t.Fatalf("wisp external target = %q", dep.DependsOnID)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
 func onlyDependency(t *testing.T, deps map[string][]*types.Dependency, issueID string) *types.Dependency {
 	t.Helper()
 
@@ -132,6 +166,29 @@ func TestGetDependencyRecordsForIssuesOrdersByDependsOnID(t *testing.T) {
 	}
 	if deps[0].DependsOnID != "a-target" || deps[1].DependsOnID != "z-target" {
 		t.Fatalf("order = [%q, %q], want [a-target, z-target]", deps[0].DependsOnID, deps[1].DependsOnID)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// bd-cif6y4 (#3445): wisp_dependencies is an optional table (dolt_ignore'd,
+// dropped when the server's working set is replaced). The dependents listing
+// behind `bd show` CHILDREN must treat it as empty like the bulk loaders do;
+// an error here makes show.go drop the whole CHILDREN section.
+func TestGetDependentsWithMetadataInTxToleratesMissingWispDependencyTable(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+	mock.ExpectQuery(`SELECT issue_id, type FROM dependencies WHERE`).
+		WithArgs("epic-1").
+		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "type"}))
+	mock.ExpectQuery(`SELECT issue_id, type FROM wisp_dependencies WHERE`).
+		WithArgs("epic-1").
+		WillReturnError(errors.New("Error 1146: Table 'db.wisp_dependencies' doesn't exist"))
+
+	if _, err := GetDependentsWithMetadataInTx(context.Background(), tx, "epic-1"); err != nil {
+		t.Fatalf("GetDependentsWithMetadataInTx with missing wisp_dependencies: %v (want the table treated as empty)", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet SQL expectations: %v", err)

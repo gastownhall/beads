@@ -16,6 +16,17 @@ var latestGitHubReleaseFetcher = fetchLatestGitHubRelease
 // CheckCLIVersion checks if the CLI version is up to date.
 // Takes cliVersion parameter since it can't access the Version variable from main package.
 func CheckCLIVersion(cliVersion string) DoctorCheck {
+	// A Homebrew --HEAD build carries no orderable version — CompareVersions
+	// would read it as 0.0.0 and warn "update available" forever, and the
+	// suggested upgrade would actually move the user off HEAD.
+	if IsBrewHeadVersion(cliVersion) {
+		return DoctorCheck{
+			Name:    "CLI Version",
+			Status:  StatusOK,
+			Message: fmt.Sprintf("%s (Homebrew --HEAD build; release comparison skipped)", cliVersion),
+		}
+	}
+
 	latestVersion, err := latestGitHubReleaseFetcher()
 	if err != nil {
 		// Network error or API issue - don't fail, just warn
@@ -151,6 +162,20 @@ func CheckMetadataVersionTracking(path string, currentVersion string) DoctorChec
 		}
 	}
 
+	trackingActive := DoctorCheck{
+		Name:    "Version Tracking",
+		Status:  StatusOK,
+		Message: fmt.Sprintf("Version tracking active (last: %s, current: %s)", lastVersion, currentVersion),
+	}
+
+	// A Homebrew --HEAD stamp carries no ordering, so the staleness heuristic
+	// below cannot apply — but it is a healthy marker, not a malformed one.
+	// Warning about it would be permanent: the offered fix rewrites the same
+	// stamp back.
+	if IsBrewHeadVersion(lastVersion) {
+		return trackingActive
+	}
+
 	// Validate that version is a valid semver-like string
 	if !IsValidSemver(lastVersion) {
 		return DoctorCheck{
@@ -171,11 +196,7 @@ func CheckMetadataVersionTracking(path string, currentVersion string) DoctorChec
 
 		// Guard against short version strings (e.g., "5" → [5] has no [1])
 		if len(currentParts) < 2 || len(lastParts) < 2 {
-			return DoctorCheck{
-				Name:    "Version Tracking",
-				Status:  StatusOK,
-				Message: fmt.Sprintf("Version tracking active (last: %s, current: %s)", lastVersion, currentVersion),
-			}
+			return trackingActive
 		}
 
 		// Simple heuristic: warn if minor version is 10+ behind or major version differs by 1+
@@ -193,11 +214,7 @@ func CheckMetadataVersionTracking(path string, currentVersion string) DoctorChec
 		}
 
 		// Version is behind but not too old - this is normal after upgrade
-		return DoctorCheck{
-			Name:    "Version Tracking",
-			Status:  StatusOK,
-			Message: fmt.Sprintf("Version tracking active (last: %s, current: %s)", lastVersion, currentVersion),
-		}
+		return trackingActive
 	}
 
 	// Version is current or ahead
@@ -253,13 +270,23 @@ func fetchLatestGitHubRelease() (string, error) {
 	return version, nil
 }
 
+// stripVersionPrefix drops the canonical "v" a Go module version carries
+// ("v1.2.3", or the pseudo-version a build stamped from `go install
+// module@version` reports). bd writes its own main.Version into
+// .local_version, so a build stamped that way used to fail its own tracking
+// check, and read as major 0 in comparisons (GH#6152). Versions without the
+// prefix are unchanged.
+func stripVersionPrefix(version string) string {
+	return strings.TrimPrefix(strings.TrimSpace(version), "v")
+}
+
 // CompareVersions compares two semantic version strings.
 // Returns: -1 if v1 < v2, 0 if v1 == v2, 1 if v1 > v2
 // Handles versions like "0.20.1", "1.2.3", etc.
 func CompareVersions(v1, v2 string) int {
 	// Split versions into parts
-	parts1 := strings.Split(v1, ".")
-	parts2 := strings.Split(v2, ".")
+	parts1 := strings.Split(stripVersionPrefix(v1), ".")
+	parts2 := strings.Split(stripVersionPrefix(v2), ".")
 
 	// Compare each part
 	maxLen := len(parts1)
@@ -289,8 +316,52 @@ func CompareVersions(v1, v2 string) int {
 	return 0
 }
 
+// IsBrewHeadVersion recognizes the version Homebrew stamps into --HEAD
+// installs of the core beads formula: HEAD-<shortsha>, a bare HEAD when the
+// head spec resolves no commit, and either shape carrying Homebrew's
+// _<revision> suffix. Such a stamp is a healthy current-era version marker,
+// not a malformed one — the binary rewrites it identically on every run, so
+// nothing the user does can "fix" it into semver.
+//
+// This is the canonical definition; every consumer of a version stamp that
+// needs to tell a --HEAD build apart from a release delegates here so the
+// ends cannot drift.
+func IsBrewHeadVersion(version string) bool {
+	rest, ok := strings.CutPrefix(version, "HEAD")
+	if !ok {
+		return false
+	}
+	// Homebrew's pkg_version appends _<revision> once the formula carries a
+	// revision, so a revision bump must not read as malformed. The revision is
+	// an unsigned decimal; a digits-only check keeps Atoi's tolerance of
+	// signed forms ("+1", "-0") from admitting shapes brew never emits.
+	if cut := strings.IndexByte(rest, '_'); cut >= 0 {
+		revision := rest[cut+1:]
+		if revision == "" || strings.Trim(revision, "0123456789") != "" {
+			return false
+		}
+		rest = rest[:cut]
+	}
+	// Homebrew leaves the version as a bare "HEAD" whenever the head spec
+	// cannot resolve a commit.
+	if rest == "" {
+		return true
+	}
+	sha, ok := strings.CutPrefix(rest, "-")
+	if !ok {
+		return false
+	}
+	// Bound the tail to a plausible git abbreviation so that arbitrary hex
+	// cannot stand in for a commit; git never abbreviates below 7 characters.
+	if len(sha) < 7 || len(sha) > 40 {
+		return false
+	}
+	return strings.Trim(sha, "0123456789abcdefABCDEF") == ""
+}
+
 // IsValidSemver checks if a version string is valid semver-like format (X.Y.Z)
 func IsValidSemver(version string) bool {
+	version = stripVersionPrefix(version)
 	if version == "" {
 		return false
 	}
@@ -321,7 +392,7 @@ func IsValidSemver(version string) bool {
 // ParseVersionParts parses version string into numeric parts
 // Returns [major, minor, patch, ...] or empty slice on error
 func ParseVersionParts(version string) []int {
-	parts := strings.Split(version, ".")
+	parts := strings.Split(stripVersionPrefix(version), ".")
 	result := make([]int, 0, len(parts))
 
 	for _, part := range parts {

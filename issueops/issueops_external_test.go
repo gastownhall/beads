@@ -1,0 +1,430 @@
+package issueops_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/issueops"
+)
+
+func TestPublicDeclarationsHaveUsefulZeroValues(t *testing.T) {
+	var _ issueops.Lifecycle = operationsProbe{}
+	var create issueops.CreateRequest
+	var update issueops.UpdateRequest
+	var closeRequest issueops.CloseRequest
+	var reopen issueops.ReopenRequest
+	if create.Issue != nil || update.ExpectedVersion != nil || closeRequest.ExpectedVersion != nil || reopen.ExpectedVersion != nil {
+		t.Fatal("zero-value request unexpectedly carries a value")
+	}
+}
+
+func TestFieldDistinguishesOmittedFromExplicitZero(t *testing.T) {
+	var omitted issueops.Field[int]
+	explicit := issueops.Field[int]{Set: true, Value: 0}
+	if omitted.Set || !explicit.Set || explicit.Value != 0 {
+		t.Fatalf("field semantics lost: %#v %#v", omitted, explicit)
+	}
+
+	clear := issueops.Field[*string]{Set: true, Value: nil}
+	if !clear.Set || clear.Value != nil {
+		t.Fatalf("explicit pointer clear lost: %#v", clear)
+	}
+}
+
+func TestPatchesRepresentExplicitEmptyReplacements(t *testing.T) {
+	labels := issueops.LabelPatch{
+		Replace: issueops.Field[[]string]{Set: true, Value: []string{}},
+	}
+	if !labels.Replace.Set || labels.Replace.Value == nil || len(labels.Replace.Value) != 0 {
+		t.Fatalf("explicit empty label replacement lost: %#v", labels.Replace)
+	}
+
+	metadata := issueops.MetadataPatch{
+		Replace: issueops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`{}`)},
+	}
+	if !metadata.Replace.Set || string(metadata.Replace.Value) != `{}` {
+		t.Fatalf("explicit empty metadata replacement lost: %#v", metadata.Replace)
+	}
+}
+
+func TestPersistencePatchHasOneTypedMode(t *testing.T) {
+	patchType := reflect.TypeFor[issueops.IssuePatch]()
+	if _, found := patchType.FieldByName("Ephemeral"); found {
+		t.Fatal("IssuePatch still exposes independent Ephemeral")
+	}
+	if _, found := patchType.FieldByName("NoHistory"); found {
+		t.Fatal("IssuePatch still exposes independent NoHistory")
+	}
+	persistence, found := patchType.FieldByName("Persistence")
+	if !found {
+		t.Fatal("IssuePatch.Persistence is missing")
+	}
+	if persistence.Type != reflect.TypeFor[issueops.Field[issueops.PersistenceMode]]() {
+		t.Fatalf("IssuePatch.Persistence type = %v, want Field[PersistenceMode]", persistence.Type)
+	}
+}
+
+func TestPublicPersistenceModeValues(t *testing.T) {
+	cases := []struct {
+		got  issueops.PersistenceMode
+		want string
+	}{
+		{issueops.PersistenceModePersistent, "persistent"},
+		{issueops.PersistenceModeEphemeral, "ephemeral"},
+		{issueops.PersistenceModeNoHistory, "no_history"},
+	}
+	for _, tc := range cases {
+		if string(tc.got) != tc.want {
+			t.Errorf("persistence mode = %q, want %q", tc.got, tc.want)
+		}
+	}
+}
+
+func TestClaimRequestSupportsPostClaimPatch(t *testing.T) {
+	version := int64(7)
+	request := issueops.UpdateRequest{
+		Actor:           "worker",
+		IssueID:         "bd-123",
+		Claim:           true,
+		ExpectedVersion: &version,
+		Patch: issueops.IssuePatch{
+			Status:   issueops.Field[issueops.Status]{Set: true, Value: issueops.StatusBlocked},
+			Assignee: issueops.Field[string]{Set: true, Value: "dispatcher"},
+		},
+	}
+	if !request.Claim || request.Patch.Status.Value != issueops.StatusBlocked || request.Patch.Assignee.Value != "dispatcher" || *request.ExpectedVersion != version {
+		t.Fatalf("claim request lost its explicit post-claim patch or version guard: %#v", request)
+	}
+}
+
+func TestForceAssigneeTransferHasSafeZeroValue(t *testing.T) {
+	var guarded issueops.UpdateRequest
+	forced := issueops.UpdateRequest{ForceAssigneeTransfer: true}
+	if guarded.ForceAssigneeTransfer || !forced.ForceAssigneeTransfer {
+		t.Fatalf("force-assignee-transfer declaration lost bool zero-value semantics: %#v %#v", guarded, forced)
+	}
+}
+
+func TestPublicConstantsKeepCanonicalValues(t *testing.T) {
+	statuses := []struct {
+		got  issueops.Status
+		want beads.Status
+	}{
+		{issueops.StatusOpen, beads.StatusOpen},
+		{issueops.StatusInProgress, beads.StatusInProgress},
+		{issueops.StatusBlocked, beads.StatusBlocked},
+		{issueops.StatusDeferred, beads.StatusDeferred},
+		{issueops.StatusClosed, beads.StatusClosed},
+	}
+	for _, check := range statuses {
+		if check.got != check.want {
+			t.Fatalf("status constant = %q, want %q", check.got, check.want)
+		}
+	}
+
+	for name, got := range map[string]string{
+		"pinned":       string(issueops.StatusPinned),
+		"hooked":       string(issueops.StatusHooked),
+		"all-children": issueops.WaitsForAllChildren,
+		"any-children": issueops.WaitsForAnyChildren,
+	} {
+		if got != name {
+			t.Errorf("public constant = %q, want %q", got, name)
+		}
+	}
+}
+
+func TestPublicErrorsKeepCanonicalIdentity(t *testing.T) {
+	checks := []struct {
+		name      string
+		got, want error
+	}{
+		{"not found", issueops.ErrNotFound, beads.ErrNotFound},
+		{"field too long", issueops.ErrFieldTooLong, beads.ErrFieldTooLong},
+		{"already claimed", issueops.ErrAlreadyClaimed, beads.ErrAlreadyClaimed},
+		{"not claimable", issueops.ErrNotClaimable, beads.ErrNotClaimable},
+		{"close blocked", issueops.ErrCloseBlocked, beads.ErrCloseBlocked},
+		{"version mismatch", issueops.ErrVersionMismatch, beads.ErrVersionMismatch},
+		{"self dependency", issueops.ErrSelfDependency, beads.ErrSelfDependency},
+		{"dependency cycle", issueops.ErrDependencyCycle, beads.ErrDependencyCycle},
+	}
+	for _, check := range checks {
+		if !errors.Is(check.got, check.want) {
+			t.Errorf("%s error identity lost: %v", check.name, check.got)
+		}
+	}
+
+	for name, err := range map[string]error{
+		"validation":        issueops.ErrValidation,
+		"not initialized":   issueops.ErrNotInitialized,
+		"prefix mismatch":   issueops.ErrPrefixMismatch,
+		"assignee mismatch": issueops.ErrAssigneeMismatch,
+		"status mismatch":   issueops.ErrStatusMismatch,
+		"already exists":    issueops.ErrAlreadyExists,
+	} {
+		if err == nil {
+			t.Errorf("%s sentinel is nil", name)
+		}
+	}
+
+	classified := errors.Join(issueops.ErrValidation, issueops.ErrPrefixMismatch)
+	if !errors.Is(classified, issueops.ErrValidation) {
+		t.Error("deterministic validation failure lost ErrValidation classification")
+	}
+	if !errors.Is(classified, issueops.ErrPrefixMismatch) {
+		t.Error("deterministic validation failure lost its specific classification")
+	}
+}
+
+func TestOpenChildrenCloseContractShape(t *testing.T) {
+	err := &issueops.CloseOpenChildrenError{
+		IssueID:      "bd-parent",
+		OpenChildren: 3,
+	}
+	if !errors.Is(err, issueops.ErrCloseOpenChildren) {
+		t.Fatalf("CloseOpenChildrenError does not match ErrCloseOpenChildren: %v", err)
+	}
+	if got := err.Error(); !strings.Contains(got, "bd-parent") || !strings.Contains(got, "3") {
+		t.Errorf("CloseOpenChildrenError = %q, want issue and count", got)
+	}
+
+	result := issueops.CloseResult{OpenChildren: 3}
+	if result.OpenChildren != 3 {
+		t.Fatalf("CloseResult.OpenChildren = %d, want 3", result.OpenChildren)
+	}
+}
+
+// TestBlockedErrorKeepsTheHistoricalSentence pins the compatibility half of the
+// typed refusal: its message is byte-identical to the fmt.Errorf every producer
+// used before it, so the direct and proxied CLI lines and `failed[].error` do
+// not move, while the list it prints is now typed.
+func TestBlockedErrorKeepsTheHistoricalSentence(t *testing.T) {
+	blockers := []string{"bd-2", "bd-3 (waits-for)", "bd-4 (conditional-blocks)", "external:remote:payments", "external:remote:pay (beta)"}
+	err := issueops.NewCloseBlockedError("bd-1", blockers)
+
+	legacy := fmt.Errorf("%w: %s is blocked by %v", issueops.ErrCloseBlocked, "bd-1", blockers)
+	if err.Error() != legacy.Error() {
+		t.Errorf("BlockedError = %q, want the historical %q", err.Error(), legacy.Error())
+	}
+	if !errors.Is(err, issueops.ErrCloseBlocked) {
+		t.Errorf("BlockedError does not match ErrCloseBlocked: %v", err)
+	}
+	var typed *issueops.BlockedError
+	if !errors.As(fmt.Errorf("close bd-1: %w", err), &typed) || typed.IssueID != "bd-1" {
+		t.Fatalf("errors.As through a wrap = %+v", typed)
+	}
+
+	want := []issueops.Blocker{
+		{ID: "bd-2", Type: "blocks"},
+		{ID: "bd-3", Type: "waits-for"},
+		{ID: "bd-4", Type: "conditional-blocks"},
+		{ID: "external:remote:payments"},
+		// A capability may end in a parenthesized suffix. The whole
+		// reference is the ID, and the external guard reports no type.
+		{ID: "external:remote:pay (beta)"},
+	}
+	// %#v, not %+v: Blocker implements String(), so the default verbs print
+	// the reassembled spelling — which round-trips even when the parse split
+	// an external reference wrongly, making got and want look identical.
+	if !reflect.DeepEqual(typed.Blockers, want) {
+		t.Errorf("Blockers = %#v, want %#v", typed.Blockers, want)
+	}
+	for i, blocker := range typed.Blockers {
+		if got := blocker.String(); got != blockers[i] {
+			t.Errorf("Blockers[%d].String() = %q, want the IsBlocked spelling %q", i, got, blockers[i])
+		}
+		if parsed := issueops.ParseBlocker(blocker.String()); parsed != blocker {
+			t.Errorf("ParseBlocker(String(%+v)) = %+v; the two must be inverses", blocker, parsed)
+		}
+		if got, wantExternal := blocker.External(), i >= 3; got != wantExternal {
+			t.Errorf("Blockers[%d].External() = %v, want %v", i, got, wantExternal)
+		}
+	}
+}
+
+func TestPublicDependencyConflictTypesRemainCanonical(t *testing.T) {
+	var typeConflict error = &issueops.DependencyTypeConflictError{}
+	var hierarchyConflict error = &issueops.DependencyHierarchyConflictError{}
+	if typeConflict == nil || hierarchyConflict == nil {
+		t.Fatal("dependency conflict aliases lost their error implementations")
+	}
+	if reflect.TypeFor[*issueops.DependencyTypeConflictError]() != reflect.TypeFor[*beads.DependencyTypeConflictError]() {
+		t.Error("DependencyTypeConflictError lost canonical type identity")
+	}
+	if reflect.TypeFor[*issueops.DependencyHierarchyConflictError]() != reflect.TypeFor[*beads.DependencyHierarchyConflictError]() {
+		t.Error("DependencyHierarchyConflictError lost canonical type identity")
+	}
+	if reflect.TypeFor[*issueops.DependencyEndpointNotFoundError]() != reflect.TypeFor[*beads.DependencyEndpointNotFoundError]() {
+		t.Error("DependencyEndpointNotFoundError lost canonical type identity")
+	}
+}
+
+// TestDependencyEndpointNotFoundCarriesTheAbsentEndpoint pins the value's own
+// promises: the sentinel a caller branches on, the edge and the endpoint it
+// names, and the message — which the two write plumbings render identically
+// only because both build it from here.
+func TestDependencyEndpointNotFoundCarriesTheAbsentEndpoint(t *testing.T) {
+	ghostSource := &issueops.DependencyEndpointNotFoundError{
+		IssueID: "bd-ghost", DependsOnID: "bd-real", MissingID: "bd-ghost",
+		Err: issueops.ErrDependencySourceNotFound,
+	}
+	if !errors.Is(ghostSource, issueops.ErrDependencySourceNotFound) {
+		t.Fatalf("ghost source does not match ErrDependencySourceNotFound: %v", ghostSource)
+	}
+	if errors.Is(ghostSource, issueops.ErrDependencyTargetNotFound) {
+		t.Error("ghost source also matches ErrDependencyTargetNotFound: the two refusals are not interchangeable")
+	}
+	if got := ghostSource.Error(); got != "issue bd-ghost not found" {
+		t.Errorf("ghost source message = %q, want the endpoint named once", got)
+	}
+
+	missingTarget := &issueops.DependencyEndpointNotFoundError{
+		IssueID: "bd-real", DependsOnID: "bd-ghost", MissingID: "bd-ghost",
+		Err: issueops.ErrDependencyTargetNotFound,
+	}
+	var recovered *issueops.DependencyEndpointNotFoundError
+	if !errors.As(fmt.Errorf("add deps[1]: %w", missingTarget), &recovered) {
+		t.Fatal("DependencyEndpointNotFoundError is not recoverable through a wrap")
+	}
+	if recovered.IssueID != "bd-real" || recovered.DependsOnID != "bd-ghost" || recovered.MissingID != "bd-ghost" {
+		t.Errorf("recovered = %+v, want the refused edge and the absent endpoint", recovered)
+	}
+}
+
+// TestClaimConflictCarriesTheStateThatBeatIt pins the whole point of the typed
+// conflict: a caller reports who won by reading FIELDS, and still classifies
+// the refusal by sentinel.
+func TestClaimConflictCarriesTheStateThatBeatIt(t *testing.T) {
+	conflict := &issueops.ClaimConflictError{
+		IssueID:  "bd-1",
+		Assignee: "bob",
+		Status:   issueops.StatusInProgress,
+		Err:      issueops.ErrAlreadyClaimed,
+	}
+	if !errors.Is(conflict, issueops.ErrAlreadyClaimed) {
+		t.Fatalf("ClaimConflictError does not match ErrAlreadyClaimed: %v", conflict)
+	}
+	var recovered *issueops.ClaimConflictError
+	if !errors.As(fmt.Errorf("claim bd-1: %w", conflict), &recovered) {
+		t.Fatal("ClaimConflictError is not recoverable through a wrap")
+	}
+	if recovered.Assignee != "bob" || recovered.Status != issueops.StatusInProgress {
+		t.Errorf("recovered = %+v, want the observed assignee and status", recovered)
+	}
+
+	// The zero observation is a documented state, not a panic: the refusal
+	// stands, it just carries nothing.
+	bare := &issueops.ClaimConflictError{IssueID: "bd-1", Err: issueops.ErrNotClaimable}
+	if !errors.Is(bare, issueops.ErrNotClaimable) || bare.Error() != issueops.ErrNotClaimable.Error() {
+		t.Errorf("unobserved conflict = %q, want the bare sentinel", bare.Error())
+	}
+}
+
+type operationsProbe struct{}
+
+func (operationsProbe) Create(context.Context, issueops.CreateRequest) (issueops.CreateResult, error) {
+	return issueops.CreateResult{}, nil
+}
+func (operationsProbe) Update(context.Context, issueops.UpdateRequest) (issueops.UpdateResult, error) {
+	return issueops.UpdateResult{}, nil
+}
+func (operationsProbe) Close(context.Context, issueops.CloseRequest) (issueops.CloseResult, error) {
+	return issueops.CloseResult{}, nil
+}
+func (operationsProbe) Reopen(context.Context, issueops.ReopenRequest) (issueops.ReopenResult, error) {
+	return issueops.ReopenResult{}, nil
+}
+
+// TestCheckDottedChildDependency pins the dotted-id hierarchy rule every
+// DependencyEditor and BatchApplier enforces. It absorbs the CLI's former
+// isChildOf / isDisallowedHierarchicalDependency tables.
+func TestCheckDottedChildDependency(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		from    string
+		to      string
+		depType issueops.DependencyType
+		want    bool
+	}{
+		{"direct child blocks on parent", "bd-abc.1", "bd-abc", issueops.DepBlocks, true},
+		{"grandchild blocks on grandparent", "bd-abc.1.2", "bd-abc", issueops.DepBlocks, true},
+		{"grandchild blocks on immediate parent", "bd-abc.1.2", "bd-abc.1", issueops.DepBlocks, true},
+		{"deeply nested child blocks on root", "bd-abc.1.2.3", "bd-abc", issueops.DepBlocks, true},
+		{"child relates to parent", "bd-abc.1", "bd-abc", issueops.DepRelated, true},
+		{"grandchild parent-child to grandparent", "bd-root.1.2", "bd-root", issueops.DepParentChild, true},
+		{"immediate parent-child allowed", "bd-root.1.2", "bd-root.1", issueops.DepParentChild, false},
+		{"same id", "bd-abc", "bd-abc", issueops.DepBlocks, false},
+		{"unrelated ids", "bd-xyz", "bd-abc", issueops.DepBlocks, false},
+		{"unrelated target from a dotted child", "bd-root.1.2", "bd-other", issueops.DepBlocks, false},
+		{"sibling", "bd-abc.2", "bd-abc.1", issueops.DepBlocks, false},
+		{"parent on its child", "bd-abc", "bd-abc.1", issueops.DepBlocks, false},
+		{"prefix but not hierarchical", "bd-abcd", "bd-abc", issueops.DepBlocks, false},
+		{"textual prefix of a dotted id is not an ancestor", "bd-abc.10", "bd-abc.1", issueops.DepBlocks, false},
+		{"external target", "bd-abc.1", "external:bd-abc", issueops.DepBlocks, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := issueops.IsDottedChildDependency(tt.from, tt.to, tt.depType); got != tt.want {
+				t.Fatalf("IsDottedChildDependency(%q, %q, %q) = %v, want %v", tt.from, tt.to, tt.depType, got, tt.want)
+			}
+			err := issueops.CheckDottedChildDependency(tt.from, tt.to, tt.depType)
+			if !tt.want {
+				if err != nil {
+					t.Fatalf("CheckDottedChildDependency = %v, want nil", err)
+				}
+				return
+			}
+			var dotted *issueops.DottedChildDependencyError
+			if !errors.As(err, &dotted) || !errors.Is(err, issueops.ErrValidation) {
+				t.Fatalf("CheckDottedChildDependency = %v, want *DottedChildDependencyError matching ErrValidation", err)
+			}
+			if dotted.IssueID != tt.from || dotted.DependsOnID != tt.to || dotted.Type != tt.depType {
+				t.Fatalf("refusal = %#v, want the edge it refused", dotted)
+			}
+			// The CLI prints this sentence verbatim, so it is behaviour.
+			want := "cannot add dependency: " + tt.from + " is already a child of " + tt.to +
+				". Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock"
+			if err.Error() != want {
+				t.Fatalf("message = %q, want %q", err.Error(), want)
+			}
+		})
+	}
+}
+
+// TestIdempotencyExpiredContractShape pins the refusal a create of a retired
+// id raises: its own sentinel, never ErrAlreadyExists or ErrValidation, a
+// message naming the id and the closed_at, and one code constant shared by the
+// wire and the CLI.
+func TestIdempotencyExpiredContractShape(t *testing.T) {
+	closedAt := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	var err error = &issueops.IdempotencyExpiredError{ID: "bd-op-1", ClosedAt: closedAt}
+	if !errors.Is(err, issueops.ErrIdempotencyExpired) {
+		t.Fatalf("IdempotencyExpiredError does not match ErrIdempotencyExpired: %v", err)
+	}
+	if errors.Is(err, issueops.ErrAlreadyExists) || errors.Is(err, issueops.ErrValidation) {
+		t.Fatalf("IdempotencyExpiredError matches ErrAlreadyExists or ErrValidation: %v", err)
+	}
+	var typed *issueops.IdempotencyExpiredError
+	if !errors.As(fmt.Errorf("create: %w", err), &typed) || typed.ID != "bd-op-1" || !typed.ClosedAt.Equal(closedAt) {
+		t.Fatalf("errors.As through a wrap = %+v, want the id and closed_at", typed)
+	}
+	if got := err.Error(); !strings.Contains(got, "bd-op-1") || !strings.Contains(got, "2026-03-01T12:00:00Z") || !strings.Contains(got, "never runs again") {
+		t.Errorf("IdempotencyExpiredError = %q, want the id, the RFC3339 closed_at and the never-again clause", got)
+	}
+	unknown := (&issueops.IdempotencyExpiredError{ID: "bd-op-2"}).Error()
+	if strings.Contains(unknown, "closed") {
+		t.Errorf("IdempotencyExpiredError without a closed_at = %q, want no closed clause", unknown)
+	}
+	if issueops.IdempotencyExpiredCode != "idempotency_expired" {
+		t.Errorf("IdempotencyExpiredCode = %q, want idempotency_expired", issueops.IdempotencyExpiredCode)
+	}
+	if beads.ErrIdempotencyExpired != issueops.ErrIdempotencyExpired {
+		t.Error("beads.ErrIdempotencyExpired is not the issueops sentinel")
+	}
+}

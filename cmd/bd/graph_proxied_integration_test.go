@@ -120,6 +120,16 @@ func TestProxiedServerGraph(t *testing.T) {
 		}
 	})
 
+	t.Run("html_output_error", func(t *testing.T) {
+		stderr, err := runWithReadOnlyStdout(t, bd, p.dir, bdProxiedEnv(p.dir), "graph", "--html", epic.ID)
+		if err == nil {
+			t.Fatalf("proxied graph --html succeeded with read-only stdout; stderr:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, "writing HTML output") {
+			t.Fatalf("proxied graph --html stderr = %q, want writer diagnostic", stderr)
+		}
+	})
+
 	t.Run("json_output_contains_root", func(t *testing.T) {
 		out, err := bdProxiedRun(t, bd, p.dir, "graph", epic.ID, "--json")
 		if err != nil {

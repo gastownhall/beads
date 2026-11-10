@@ -25,6 +25,9 @@ func NewDoltServerUOWProvider(
 	doltBinExec string,
 	proxyPort int,
 	idleTimeout time.Duration,
+	teamServer bool,
+	expectedProjectID string,
+	opts ...ProviderOption,
 ) (UnitOfWorkProvider, error) {
 	if idleTimeout == 0 {
 		idleTimeout = defaultProxyIdleTimeout
@@ -55,18 +58,21 @@ func NewDoltServerUOWProvider(
 		return nil, fmt.Errorf("uow: creating server root directory: %w", err)
 	}
 
-	ep, err := proxy.GetCreateDatabaseProxyServerEndpoint(absServerRootDir, proxy.OpenOpts{
+	resolved := applyProviderOptions(opts)
+	discover := workspaceProxyDiscovery(absServerRootDir, proxy.OpenOpts{
 		Backend:        backend,
 		ConfigFilePath: serverConfigFilePath,
 		LogFilePath:    serverLogFilePath,
+		RotateLogFile:  resolved.rotateServerLog,
 		DoltBinPath:    absDoltBinExec,
 		Database:       database,
 		IdleTimeout:    idleTimeout,
 		Port:           proxyPort,
 	})
+	ep, err := discover()
 	if err != nil {
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)
 	}
 
-	return openAndInitSchema(ctx, ep, database, rootUser, rootPassword, "")
+	return openAndInitSchema(ctx, proxy.DataNetwork, ep, "", database, rootUser, rootPassword, "", teamServer, expectedProjectID, resolved, newProxyEndpointResolver(discover))
 }

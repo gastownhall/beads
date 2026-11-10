@@ -1,0 +1,2561 @@
+[
+  {
+    "name": "defaults",
+    "args": null,
+    "params": {
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "type_plain",
+    "args": [
+      "--type",
+      "bug"
+    ],
+    "params": {
+      "IssueType": "bug",
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "bug",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "bug",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "type_alias_mr",
+    "args": [
+      "--type",
+      "mr"
+    ],
+    "params": {
+      "IssueType": "mr",
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "merge-request",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "merge-request",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "type_alias_uppercase",
+    "args": [
+      "--type",
+      "FEAT"
+    ],
+    "params": {
+      "IssueType": "FEAT",
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "feature",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "feature",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "labels_all",
+    "args": [
+      "--label",
+      "alpha",
+      "--label",
+      "beta"
+    ],
+    "params": {
+      "Labels": [
+        "alpha",
+        "beta"
+      ],
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [
+          "alpha",
+          "beta"
+        ],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [
+          "alpha",
+          "beta"
+        ],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "labels_any",
+    "args": [
+      "--label-any",
+      "alpha,beta"
+    ],
+    "params": {
+      "LabelsAny": [
+        "alpha",
+        "beta"
+      ],
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [
+          "alpha",
+          "beta"
+        ],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [
+          "alpha",
+          "beta"
+        ],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "labels_need_normalizing",
+    "args": [
+      "--label",
+      "  alpha  ",
+      "--label",
+      "alpha",
+      "--label",
+      "  "
+    ],
+    "params": {
+      "Labels": [
+        "  alpha  ",
+        "alpha",
+        "  "
+      ],
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [
+          "alpha"
+        ],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [
+          "alpha"
+        ],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "exclude_labels",
+    "args": [
+      "--exclude-label",
+      "wip",
+      "--exclude-label",
+      "wip"
+    ],
+    "params": {
+      "ExcludeLabels": [
+        "wip",
+        "wip"
+      ],
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [
+          "wip"
+        ],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [
+          "wip"
+        ],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "label_pattern_and_regex",
+    "args": [
+      "--label-pattern",
+      "tech-*",
+      "--label-regex",
+      "^tech-(debt|legacy)$"
+    ],
+    "params": {
+      "LabelPattern": "tech-*",
+      "LabelRegex": "^tech-(debt|legacy)$",
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "tech-*",
+        "LabelRegex": "^tech-(debt|legacy)$",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "tech-*",
+        "LabelRegex": "^tech-(debt|legacy)$",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "limit_zero_unlimited",
+    "args": [
+      "--limit",
+      "0"
+    ],
+    "params": {
+      "Limit": 0,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 0,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 0,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "limit_custom",
+    "args": [
+      "--limit",
+      "7"
+    ],
+    "params": {
+      "Limit": 7,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 7,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 7,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "offset_positive",
+    "args": [
+      "--offset",
+      "3"
+    ],
+    "params": {
+      "Offset": 3,
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 3,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "offset_zero_explicit",
+    "args": [
+      "--offset",
+      "0"
+    ],
+    "params": {
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "offset_negative",
+    "args": [
+      "--offset",
+      "-1"
+    ],
+    "params": {
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "error": "exit code 1",
+      "stderr": "Error: --offset must be >= 0\n"
+    }
+  },
+  {
+    "name": "assignee",
+    "args": [
+      "--assignee",
+      "alice"
+    ],
+    "params": {
+      "Assignee": "alice",
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": "alice",
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": "alice",
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "unassigned",
+    "args": [
+      "--unassigned"
+    ],
+    "params": {
+      "Unassigned": true,
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": true,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": true,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "assignee_loses_to_unassigned",
+    "args": [
+      "--assignee",
+      "alice",
+      "--unassigned"
+    ],
+    "params": {
+      "Assignee": "alice",
+      "Unassigned": true,
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": true,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": true,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "priority_zero_is_set",
+    "args": [
+      "--priority",
+      "0"
+    ],
+    "params": {
+      "Limit": 100,
+      "Sort": "priority",
+      "Priority": 0
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": 0,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": 0,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "priority_two",
+    "args": [
+      "--priority",
+      "2"
+    ],
+    "params": {
+      "Limit": 100,
+      "Sort": "priority",
+      "Priority": 2
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": 2,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": 2,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "sort_hybrid",
+    "args": [
+      "--sort",
+      "hybrid"
+    ],
+    "params": {
+      "Limit": 100,
+      "Sort": "hybrid"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "hybrid",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "hybrid",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "sort_oldest",
+    "args": [
+      "--sort",
+      "oldest"
+    ],
+    "params": {
+      "Limit": 100,
+      "Sort": "oldest"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "oldest",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "oldest",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "sort_invalid",
+    "args": [
+      "--sort",
+      "bogus"
+    ],
+    "params": {
+      "Limit": 100,
+      "Sort": "bogus"
+    },
+    "direct": {
+      "error": "exit code 1",
+      "stderr": "Error: invalid sort policy 'bogus'. Valid values: hybrid, priority, oldest\n"
+    },
+    "gather": {
+      "error": "exit code 1",
+      "stderr": "Error: invalid sort policy 'bogus'. Valid values: hybrid, priority, oldest\n"
+    }
+  },
+  {
+    "name": "parent",
+    "args": [
+      "--parent",
+      "bd-epic"
+    ],
+    "params": {
+      "ParentID": "bd-epic",
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": "bd-epic",
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": "bd-epic",
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "mol_type_swarm",
+    "args": [
+      "--mol-type",
+      "swarm"
+    ],
+    "params": {
+      "MolType": "swarm",
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": "swarm",
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": "swarm",
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "mol_type_invalid",
+    "args": [
+      "--mol-type",
+      "bogus"
+    ],
+    "params": {
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "error": "exit code 1",
+      "stderr": "Error: invalid mol-type \"bogus\" (must be swarm, patrol, or work)\n"
+    },
+    "gather": {
+      "error": "exit code 1",
+      "stderr": "Error: invalid mol-type \"bogus\" (must be swarm, patrol, or work)\n"
+    }
+  },
+  {
+    "name": "include_deferred",
+    "args": [
+      "--include-deferred"
+    ],
+    "params": {
+      "IncludeDeferred": true,
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": true,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": true,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "include_ephemeral",
+    "args": [
+      "--include-ephemeral"
+    ],
+    "params": {
+      "IncludeEphemeral": true,
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": true,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": true,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "exclude_type_csv_and_repeat",
+    "args": [
+      "--exclude-type",
+      "convoy, epic",
+      "--exclude-type",
+      "mr"
+    ],
+    "params": {
+      "Limit": 100,
+      "Sort": "priority",
+      "ExcludeTypes": [
+        "convoy",
+        " epic",
+        "mr"
+      ]
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": [
+          "convoy",
+          "epic",
+          "merge-request"
+        ],
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": [
+          "convoy",
+          "epic",
+          "merge-request"
+        ],
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "exclude_type_empty_segments",
+    "args": [
+      "--exclude-type",
+      "epic,,  ,task"
+    ],
+    "params": {
+      "Limit": 100,
+      "Sort": "priority",
+      "ExcludeTypes": [
+        "epic",
+        "",
+        "  ",
+        "task"
+      ]
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": [
+          "epic",
+          "task"
+        ],
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": [
+          "epic",
+          "task"
+        ],
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "metadata_fields",
+    "args": [
+      "--metadata-field",
+      "team=platform",
+      "--metadata-field",
+      "env=prod"
+    ],
+    "params": {
+      "MetadataFields": {
+        "env": "prod",
+        "team": "platform"
+      },
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": {
+          "env": "prod",
+          "team": "platform"
+        },
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": {
+          "env": "prod",
+          "team": "platform"
+        },
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "metadata_field_missing_equals",
+    "args": [
+      "--metadata-field",
+      "team"
+    ],
+    "params": {
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "error": "exit code 1",
+      "stderr": "Error: invalid --metadata-field: expected key=value, got \"team\"\n"
+    },
+    "gather": {
+      "error": "exit code 1",
+      "stderr": "Error: invalid --metadata-field: expected key=value, got \"team\"\n"
+    }
+  },
+  {
+    "name": "metadata_field_invalid_key",
+    "args": [
+      "--metadata-field",
+      "bad$key=x"
+    ],
+    "params": {
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "error": "exit code 1",
+      "stderr": "Error: invalid --metadata-field key: invalid metadata key \"bad$key\": must match ^[a-zA-Z_][a-zA-Z0-9_./]*$\n"
+    },
+    "gather": {
+      "error": "exit code 1",
+      "stderr": "Error: invalid --metadata-field key: invalid metadata key \"bad$key\": must match ^[a-zA-Z_][a-zA-Z0-9_./]*$\n"
+    }
+  },
+  {
+    "name": "has_metadata_key",
+    "args": [
+      "--has-metadata-key",
+      "team"
+    ],
+    "params": {
+      "HasMetadataKey": "team",
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "team",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "team",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "has_metadata_key_invalid",
+    "args": [
+      "--has-metadata-key",
+      "bad$key"
+    ],
+    "params": {
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "error": "exit code 1",
+      "stderr": "Error: invalid --has-metadata-key: invalid metadata key \"bad$key\": must match ^[a-zA-Z_][a-zA-Z0-9_./]*$\n"
+    },
+    "gather": {
+      "error": "exit code 1",
+      "stderr": "Error: invalid --has-metadata-key: invalid metadata key \"bad$key\": must match ^[a-zA-Z_][a-zA-Z0-9_./]*$\n"
+    }
+  },
+  {
+    "name": "max_rows_flag",
+    "args": [
+      "--max-rows",
+      "5"
+    ],
+    "params": {
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 5,
+        "MaxRowsSource": "--max-rows"
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "max_rows_negative",
+    "args": [
+      "--max-rows",
+      "-1"
+    ],
+    "params": {
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "error": "exit code 1",
+      "stderr": "Error: --max-rows must be non-negative; got -1\n"
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  },
+  {
+    "name": "claim_with_assignee",
+    "args": [
+      "--claim",
+      "--assignee",
+      "alice"
+    ],
+    "params": {
+      "Assignee": "alice",
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "error": "exit code 1",
+      "stderr": "Error: --claim cannot be combined with --assignee\n"
+    },
+    "gather": {
+      "error": "exit code 1",
+      "stderr": "Error: --claim cannot be combined with --assignee\n"
+    }
+  },
+  {
+    "name": "claim_with_gated",
+    "args": [
+      "--claim",
+      "--gated"
+    ],
+    "params": {
+      "Limit": 100,
+      "Sort": "priority"
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "",
+        "Priority": null,
+        "Assignee": null,
+        "Unassigned": false,
+        "Labels": [],
+        "LabelsAny": [],
+        "ExcludeLabels": [],
+        "LabelPattern": "",
+        "LabelRegex": "",
+        "Limit": 100,
+        "SortPolicy": "priority",
+        "ParentID": null,
+        "MoleculeID": "",
+        "MolType": null,
+        "WispType": null,
+        "IncludeDeferred": false,
+        "IncludeEphemeral": false,
+        "ExcludeTypes": null,
+        "MetadataFields": null,
+        "HasMetadataKey": "",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "error": "exit code 1",
+      "stderr": "Error: --claim cannot be combined with --gated\n"
+    }
+  },
+  {
+    "name": "everything_together",
+    "args": [
+      "--type",
+      "mr",
+      "--limit",
+      "5",
+      "--offset",
+      "2",
+      "--priority",
+      "1",
+      "--assignee",
+      "alice",
+      "--sort",
+      "oldest",
+      "--label",
+      "a",
+      "--label-any",
+      "b",
+      "--exclude-label",
+      "c",
+      "--label-pattern",
+      "p-*",
+      "--label-regex",
+      "^p-.*$",
+      "--parent",
+      "bd-root",
+      "--mol-type",
+      "work",
+      "--include-deferred",
+      "--include-ephemeral",
+      "--exclude-type",
+      "epic,convoy",
+      "--metadata-field",
+      "team=platform",
+      "--has-metadata-key",
+      "env"
+    ],
+    "params": {
+      "Assignee": "alice",
+      "ExcludeLabels": [
+        "c"
+      ],
+      "HasMetadataKey": "env",
+      "IncludeDeferred": true,
+      "IncludeEphemeral": true,
+      "IssueType": "mr",
+      "LabelPattern": "p-*",
+      "LabelRegex": "^p-.*$",
+      "Labels": [
+        "a"
+      ],
+      "LabelsAny": [
+        "b"
+      ],
+      "MetadataFields": {
+        "team": "platform"
+      },
+      "MolType": "work",
+      "Offset": 2,
+      "ParentID": "bd-root",
+      "Limit": 5,
+      "Sort": "oldest",
+      "ExcludeTypes": [
+        "epic",
+        "convoy"
+      ],
+      "Priority": 1
+    },
+    "direct": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "merge-request",
+        "Priority": 1,
+        "Assignee": "alice",
+        "Unassigned": false,
+        "Labels": [
+          "a"
+        ],
+        "LabelsAny": [
+          "b"
+        ],
+        "ExcludeLabels": [
+          "c"
+        ],
+        "LabelPattern": "p-*",
+        "LabelRegex": "^p-.*$",
+        "Limit": 5,
+        "SortPolicy": "oldest",
+        "ParentID": "bd-root",
+        "MoleculeID": "",
+        "MolType": "work",
+        "WispType": null,
+        "IncludeDeferred": true,
+        "IncludeEphemeral": true,
+        "ExcludeTypes": [
+          "epic",
+          "convoy"
+        ],
+        "MetadataFields": {
+          "team": "platform"
+        },
+        "HasMetadataKey": "env",
+        "Offset": 0,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    },
+    "gather": {
+      "filter": {
+        "Status": "open",
+        "Statuses": null,
+        "Type": "merge-request",
+        "Priority": 1,
+        "Assignee": "alice",
+        "Unassigned": false,
+        "Labels": [
+          "a"
+        ],
+        "LabelsAny": [
+          "b"
+        ],
+        "ExcludeLabels": [
+          "c"
+        ],
+        "LabelPattern": "p-*",
+        "LabelRegex": "^p-.*$",
+        "Limit": 5,
+        "SortPolicy": "oldest",
+        "ParentID": "bd-root",
+        "MoleculeID": "",
+        "MolType": "work",
+        "WispType": null,
+        "IncludeDeferred": true,
+        "IncludeEphemeral": true,
+        "ExcludeTypes": [
+          "epic",
+          "convoy"
+        ],
+        "MetadataFields": {
+          "team": "platform"
+        },
+        "HasMetadataKey": "env",
+        "Offset": 2,
+        "MaxRows": 0,
+        "MaxRowsSource": "",
+        "Lite": false
+      }
+    }
+  }
+]

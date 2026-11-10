@@ -19,12 +19,16 @@
 // to indistinguishable rows may permute, but the resulting id set is identical
 // and the rows are interchangeable, so the merged result converges anyway.
 //
-// The derivation is consumed by the one-time upgrade backfill
-// (rekeyAuxRowIDs in internal/storage/schema). Rows inserted after that
-// backfill keep their app-minted random ids (issueops.NewEventID / UUIDv7
-// comment ids; migration 0051 dropped the DB-side DEFAULT): a post-backfill
-// row is created on exactly one clone and reaches the others by merge, so its
-// id is random but consistent everywhere and needs no convergence.
+// The derivation is consumed in two places. The upgrade backfills
+// (rekeyAuxRowIDs in internal/storage/schema) converge rows that predate it:
+// the 0037-randomized legacy rows, and the UUIDv7 rows minted between that
+// first backfill and bd-ri8bd. And since bd-ri8bd, every insert derives the
+// id up front (issueops.InsertDerivedEvent and friends): merge-free
+// newest-wins replication (Protocol v0.1 §C) has no union pass to reconcile
+// independently-created identical rows, so convergence has to be a property
+// of the id itself, on every row, from birth. Migration 0051 dropped the
+// DB-side DEFAULT (UUID()) so an insert that forgets the id fails loudly
+// instead of minting a clone-random key.
 package rowid
 
 import (

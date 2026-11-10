@@ -21,14 +21,14 @@ Beads uses [Dolt](https://www.dolthub.com/) as its default storage backend. Dolt
 
 ### 1. Install Dolt
 
+Do not install `releases/latest` — Dolt 2.3.x has a data-operation defect
+that breaks `bd flatten` and `bd admin compact`. Use the pinned version and
+install method in
+[docs/architecture/dolt.md](../../docs/architecture/dolt.md), which carries
+the measurements and the criterion for raising the pin.
+
 ```bash
-# macOS
-brew install dolt
-
-# Linux
-curl -L https://github.com/dolthub/dolt/releases/latest/download/install.sh | bash
-
-# Verify installation
+# Verify you got the pinned version
 dolt version
 ```
 

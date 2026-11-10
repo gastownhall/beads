@@ -3,11 +3,13 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // StatusOutput represents the complete status output
@@ -76,31 +78,29 @@ Examples:
 			jsonOutput = true
 		}
 
-		if usesProxiedServer() {
-			if noBlocked {
-				fmt.Fprintln(os.Stderr, "warning: --no-blocked is not supported in proxied-server mode; running the full blocked-count query")
-			}
-			return runStatusProxiedServer(rootCtx, showAssigned, noActivity)
-		}
-
-		ctx := rootCtx
-
-		var stats *types.Statistics
-		var err error
-		if noBlocked {
-			stats, err = store.GetStatisticsNoBlocked(ctx)
-		} else {
-			stats, err = store.GetStatistics(ctx)
-		}
+		reporter, err := openStatsReporter()
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
 
+		var result issueops.StatsResult
 		if showAssigned {
-			stats = getAssignedStatistics(actor)
-			if stats == nil {
-				return HandleErrorRespectJSON("failed to get assigned statistics")
+			// --no-blocked is not consulted here, and never was: an
+			// assignee-scoped summary computes both numbers by a route that has
+			// no fast path (issueops.StatsReporter.AssigneeStats).
+			result, err = reporter.AssigneeStats(rootCtx, issueops.AssigneeStatsRequest{Assignee: currentActor()})
+		} else {
+			result, err = reporter.Stats(rootCtx, issueops.StatsRequest{SkipBlocked: noBlocked})
+			if err == nil && noBlocked && result.Summary.BlockedIssues != nil {
+				// Derived from the ANSWER rather than from the route: the two
+				// routes differ on it today (the unit-of-work seam publishes no
+				// no-blocked query), and a backend that gains one stops printing
+				// this without an edit here.
+				fmt.Fprintln(os.Stderr, "warning: this backend has no --no-blocked fast path; the full blocked-count query ran")
 			}
+		}
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
 		}
 
 		var recentActivity *RecentActivitySummary
@@ -108,8 +108,81 @@ Examples:
 			recentActivity = getGitActivity(24)
 		}
 
-		return renderStatus(stats, recentActivity)
+		return renderStatus(&result.Summary, recentActivity)
 	},
+}
+
+// openStatsReporter hands back the summary role for whichever route this
+// invocation is on, each through its own capability accessor.
+func openStatsReporter() (issueops.StatsReporter, error) {
+	if usesProxiedServer() {
+		return proxiedStatsReporter()
+	}
+	return store.StatsReporter()
+}
+
+// suppressedTypeSummary describes the counted rows that a default bd list will
+// not show, so the totals above can be reconciled against a listing instead of
+// looking like a phantom.
+//
+// THE REMEDY IT PRINTS NAMES TWO FLAGS, not one, because the default listing
+// applies its TYPE and its STATUS suppressions independently. These counts
+// come from the same scan as TotalIssues and are status-blind with it: a
+// CLOSED gate is in GateIssues. `bd list --include-gates` would still not show
+// that row, because the default ExcludeStatus of closed and pinned
+// (internal/workapi/list.go) is lifted only by --all - which "replaces the
+// status exclusions only" and lifts no type exclusion of its own, pinned as
+// that phrase in backend/conformance/reader_contract.go. So the type flag on
+// its own is a remedy that reproduces the number only in a workspace whose
+// gates and protos all happen to still be open, and gates are closed as the
+// work they guard completes. Naming both flags is what makes the printed
+// remedy actually reconcile; a hint that does not is the same silent
+// disagreement this line exists to remove, one level down.
+//
+// It names two of the three type-based suppressions a default listing applies.
+// The third - the infra types, which applyTypeSuppressions
+// (internal/workapi/list.go) adds to ExcludeTypes independently of the wisp
+// plane bit - is NOT here, and not because a durable infra row is unreachable.
+// It is reachable: the plane routing and the listing's exclusions both read the
+// WORKSPACE-CONFIGURED types.infra set, and changing that set only invalidates
+// a cache (internal/storage/dolt/config.go) - it never moves rows already
+// written. So durable rows created while a type was not infra stay in the
+// issues plane once it becomes one, and a type evicted from the set creates
+// durable rows outright (pinned by the create contract in
+// backend/conformance/issue_operations_contract.go). Counting them therefore
+// needs that configured set, which ScanIssueCountsInTx - pure portable SQL with
+// no config seam - cannot reach. Tracked separately rather than guessed at
+// here with the built-in names, which would be wrong in exactly the workspaces
+// where it matters.
+func suppressedTypeSummary(stats *types.Statistics) string {
+	var parts []string
+	if stats.GateIssues > 0 {
+		parts = append(parts, fmt.Sprintf("%s (--include-gates --all)", pluralCount(stats.GateIssues, "gate", "gates")))
+	}
+	if stats.TemplateIssues > 0 {
+		parts = append(parts, fmt.Sprintf("%s (--include-templates --all)", pluralCount(stats.TemplateIssues, "template", "templates")))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// pluralCount renders a count with the right one of two spellings. Both forms
+// are passed in rather than derived by appending "s", so a caller with an
+// irregular plural is not silently mis-served.
+//
+// It is not a fourth spelling of the three helpers already in package main:
+// pluralIssue, pluralize and plural all DERIVE the "s" and so cannot render a
+// caller-chosen pair. The tree's one two-form helper, pluralWord in
+// internal/storage/issueops/lease.go, is unexported in a storage package, and
+// exporting it so a CLI string could reach it would add exported surface to a
+// storage role for a cosmetic. That file's own doc comment records the same
+// trade from the other side - it carries whole words because the issueops
+// plural() covers only the "s" case - so one two-form helper per package is
+// the established shape here.
+func pluralCount(n int, singular, plural string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, singular)
+	}
+	return fmt.Sprintf("%d %s", n, plural)
 }
 
 func renderStatus(stats *types.Statistics, recentActivity *RecentActivitySummary) error {
@@ -145,6 +218,10 @@ func renderStatus(stats *types.Statistics, recentActivity *RecentActivitySummary
 		fmt.Printf("  Ready to Work:          %s\n", ui.MutedStyle.Render("(skipped)"))
 	} else {
 		fmt.Printf("  Ready to Work:          %s\n", ui.RenderPass(fmt.Sprintf("%d", *stats.ReadyIssues)))
+	}
+
+	if suppressed := suppressedTypeSummary(stats); suppressed != "" {
+		fmt.Printf("  Not shown by bd list:   %s\n", suppressed)
 	}
 
 	// Extended statistics (only show if non-zero)
@@ -184,55 +261,6 @@ func renderStatus(stats *types.Statistics, recentActivity *RecentActivitySummary
 // as activity tracking has moved to Dolt-native queries.
 func getGitActivity(_ int) *RecentActivitySummary {
 	return nil
-}
-
-// getAssignedStatistics returns statistics for issues assigned to a specific user
-func getAssignedStatistics(assignee string) *types.Statistics {
-	if store == nil {
-		return nil
-	}
-
-	ctx := rootCtx
-
-	assigneePtr := assignee
-	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{Assignee: &assigneePtr})
-	if err != nil {
-		return nil
-	}
-
-	readyCount := 0
-	readyIssues, err := store.GetReadyWork(ctx, types.WorkFilter{Assignee: &assigneePtr})
-	if err == nil {
-		readyCount = len(readyIssues)
-	}
-
-	return buildAssignedStats(issues, readyCount)
-}
-
-func buildAssignedStats(issues []*types.Issue, readyCount int) *types.Statistics {
-	stats := &types.Statistics{
-		TotalIssues: len(issues),
-	}
-
-	// Count by status
-	blockedCount := 0
-	for _, issue := range issues {
-		switch issue.Status {
-		case types.StatusOpen:
-			stats.OpenIssues++
-		case types.StatusInProgress:
-			stats.InProgressIssues++
-		case types.StatusBlocked:
-			blockedCount++
-		case types.StatusDeferred:
-			stats.DeferredIssues++
-		case types.StatusClosed:
-			stats.ClosedIssues++
-		}
-	}
-	stats.BlockedIssues = &blockedCount
-	stats.ReadyIssues = &readyCount
-	return stats
 }
 
 func init() {

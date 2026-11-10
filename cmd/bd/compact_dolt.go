@@ -30,12 +30,33 @@ For full history squash, use 'bd flatten'.
 
 How it works:
   1. Identifies commits older than --days threshold
-  2. Creates a squashed base commit from all old history
-  3. Cherry-picks recent commits on top
+  2. Creates a squashed base commit from all old history, dated as the
+     newest squashed commit
+  3. Cherry-picks recent commits on top, keeping their original authors,
+     committers and dates, so AS OF reads and dolt_history views at or
+     after the newest squashed commit stay valid (an earlier time resolves
+     to the initial commit)
   4. Swaps main branch to the compacted version
   5. Prunes remote-tracking refs (they would keep the old history alive;
      the next push or fetch re-creates them at the new tip)
-  6. Runs Dolt GC to reclaim space
+  6. Runs a full Dolt GC (all storage generations) to reclaim the old history
+
+Compact refuses, and changes nothing, when commit dates are out of history
+order across the cutoff: a recent commit that comes at or before an old commit
+in history is already part of the squashed base, and replaying it again could
+change data. The error names both commits; --force does not override it, and
+--dry-run reports the refusal. Before swapping main, compact also checks that
+the replayed history holds the same committed data main held when compact read
+its history, and aborts without resetting main if it does not. A write that
+reaches main while compact runs is kept, not counted as a difference:
+uncommitted changes stay pending, and a commit that lands meanwhile is kept in
+one follow-up commit.
+
+The GC pass is a full collection: Dolt storage is generational, and a default
+GC never revisits data an earlier GC moved to the old generation. On any store
+that has been GC'd before (bd gc, or a previous flatten or compact), only a
+full collection reclaims the squashed history. A full GC can take minutes on
+multi-gigabyte stores.
 
 Examples:
   bd compact --dry-run               # Preview: show commit breakdown
@@ -85,36 +106,15 @@ Examples:
 
 		cutoff := time.Now().AddDate(0, 0, -compactDoltDays)
 
-		var oldCommits int
-		var recentHashes []string
-		var initialHash, boundaryHash string
-
-		for _, entry := range logEntries {
-			if entry.Date.Before(cutoff) {
-				oldCommits++
-				boundaryHash = entry.Hash
-			} else {
-				recentHashes = append(recentHashes, entry.Hash)
-			}
-		}
-		initialHash = logEntries[totalCommits-1].Hash
-		boundaryHash = ""
-		for _, entry := range logEntries {
-			if entry.Date.Before(cutoff) {
-				boundaryHash = entry.Hash
-				break
-			}
-		}
-
-		for i, j := 0, len(recentHashes)-1; i < j; i, j = i+1, j-1 {
-			recentHashes[i], recentHashes[j] = recentHashes[j], recentHashes[i]
-		}
+		plan := planCompaction(logEntries, cutoff)
+		oldCommits, recentHashes := plan.oldCommits, plan.recentHashes
+		initialHash, boundaryHash := plan.initialHash, plan.boundaryHash
 
 		recentCommits := len(recentHashes)
 
 		if compactDoltDryRun {
 			if jsonOutput {
-				return outputJSON(map[string]interface{}{
+				result := map[string]interface{}{
 					"dry_run":        true,
 					"total_commits":  totalCommits,
 					"old_commits":    oldCommits,
@@ -123,7 +123,11 @@ Examples:
 					"cutoff_date":    cutoff.Format("2006-01-02"),
 					"initial_hash":   initialHash,
 					"boundary_hash":  boundaryHash,
-				})
+				}
+				if plan.refusal != nil {
+					result["refusal"] = plan.refusal.jsonFields()
+				}
+				return outputJSON(result)
 			}
 			fmt.Printf("DRY RUN — Compact preview\n\n")
 			fmt.Printf("  Total commits:  %d\n", totalCommits)
@@ -132,6 +136,9 @@ Examples:
 			fmt.Printf("  Cutoff date:    %s\n", cutoff.Format("2006-01-02"))
 			if oldCommits <= 1 {
 				fmt.Printf("\n  Nothing to compact (0-1 old commits).\n")
+			} else if plan.refusal != nil {
+				fmt.Printf("\n  Refused: %s\n", plan.refusal.message())
+				fmt.Printf("  Hint: %s\n", compactRefusalHint)
 			} else {
 				fmt.Printf("\n  Result: %d commits → %d commits\n", totalCommits, recentCommits+1)
 				fmt.Printf("  Run with --force to proceed.\n")
@@ -156,6 +163,11 @@ Examples:
 			return HandleError("could not find boundary commit for compaction")
 		}
 
+		// --force confirms the squash; it does not override a refusal.
+		if plan.refusal != nil {
+			return HandleErrorWithHint(plan.refusal.message(), compactRefusalHint)
+		}
+
 		if !compactDoltForce {
 			return HandleErrorWithHint(
 				fmt.Sprintf("would squash %d old commits into 1, preserving %d recent commits",
@@ -173,26 +185,22 @@ Examples:
 			return HandleError("storage backend does not support compact")
 		}
 
-		if err := compactor.Compact(ctx, initialHash, boundaryHash, oldCommits, recentHashes); err != nil {
+		if err := compactor.Compact(ctx, initialHash, boundaryHash, plan.headHash, oldCommits, recentHashes); err != nil {
 			return HandleError("compact failed: %v", err)
 		}
 
 		// Prune remote-tracking refs before GC: they still anchor the
 		// pre-compact chain, and with them in place GC reclaims nothing on any
 		// workspace that has ever pushed or fetched (bd-agctw).
-		sizeBefore := storeSizeBytes()
+		sizeBefore := storeSizeBytes(ctx)
 		pruned, tags := pruneRemoteRefsForGC(ctx)
 		if !jsonOutput {
 			printPruneReport(pruned, tags)
 		}
 
 		// Reclaim disk space from orphaned old history
-		if gc, ok := storage.UnwrapStore(store).(storage.GarbageCollector); ok {
-			if err := gc.DoltGC(ctx); err != nil {
-				WarnError("dolt gc after compact failed: %v", err)
-			}
-		}
-		sizeAfter := storeSizeBytes()
+		gcMode := runPostRewriteGC(ctx, "compact")
+		sizeAfter := storeSizeBytes(ctx)
 
 		elapsed := time.Since(start)
 		resultCommits := len(recentHashes) + 1
@@ -207,6 +215,9 @@ Examples:
 				"remote_refs_pruned": pruned,
 				"tags_anchoring":     tags,
 				"elapsed_ms":         elapsed.Milliseconds(),
+			}
+			if gcMode != "" {
+				result["gc_mode"] = gcMode
 			}
 			addGCSizeJSON(result, sizeBefore, sizeAfter)
 			return outputJSON(result)

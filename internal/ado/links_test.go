@@ -57,10 +57,11 @@ func TestPullLinks_DirectRelations(t *testing.T) {
 		return deps[i].ToExternalID < deps[j].ToExternalID
 	})
 
+	// Hierarchy-Forward: 100 is parent of 300 → swapped so the dep points
+	// child(300) -> parent(100), matching beads' child-to-parent storage.
+	assertDep(t, deps[0], testWebURL(300), testWebURL(100), "parent-child")
 	// Dependency-Forward: 100 blocks 200 (no swap)
-	assertDep(t, deps[0], testWebURL(100), testWebURL(200), "blocks")
-	// Hierarchy-Forward: 100 is parent of 300 (no swap)
-	assertDep(t, deps[1], testWebURL(100), testWebURL(300), "parent")
+	assertDep(t, deps[1], testWebURL(100), testWebURL(200), "blocks")
 	// Related: 100 related to 400
 	assertDep(t, deps[2], testWebURL(100), testWebURL(400), "related")
 }
@@ -75,7 +76,7 @@ func TestPullLinks_ReverseDirectionNormalization(t *testing.T) {
 				URL: "https://dev.azure.com/org/proj/_apis/wit/workitems/200",
 			},
 			{
-				Rel: RelParent, // Hierarchy-Reverse: target is parent of this → swap
+				Rel: RelParent, // Hierarchy-Reverse: target is parent of this item (self is the child) → no swap
 				URL: "https://dev.azure.com/org/proj/_apis/wit/workitems/300",
 			},
 		},
@@ -92,10 +93,37 @@ func TestPullLinks_ReverseDirectionNormalization(t *testing.T) {
 		return deps[i].FromExternalID < deps[j].FromExternalID
 	})
 
+	// Hierarchy-Reverse, no swap: self(100) is the child, so the dep points
+	// child(100) -> parent(300), matching beads' child-to-parent storage.
+	assertDep(t, deps[0], testWebURL(100), testWebURL(300), "parent-child")
 	// Dependency-Reverse swapped: 200 blocks 100
-	assertDep(t, deps[0], testWebURL(200), testWebURL(100), "blocks")
-	// Hierarchy-Reverse swapped: 300 is parent of 100
-	assertDep(t, deps[1], testWebURL(300), testWebURL(100), "parent")
+	assertDep(t, deps[1], testWebURL(200), testWebURL(100), "blocks")
+}
+
+// TestPullLinks_HierarchyChildDirection is a direction-pinning regression
+// test for GH#5129: a work item carrying Hierarchy-Forward (RelChild) is
+// asserting it is the parent of the target, so the resulting dep must be
+// From = the child (target), To = the source (this item) — matching beads'
+// child-to-parent storage convention.
+func TestPullLinks_HierarchyChildDirection(t *testing.T) {
+	wi := &WorkItem{
+		ID:  100,
+		URL: testAPIURL(100),
+		Relations: []WorkItemRelation{
+			{
+				Rel: RelChild,
+				URL: "https://dev.azure.com/org/proj/_apis/wit/workitems/300",
+			},
+		},
+	}
+
+	resolver := NewLinkResolver(NewClient(NewSecretString("pat"), "org", "proj"))
+	deps := resolver.PullLinks(wi)
+
+	if len(deps) != 1 {
+		t.Fatalf("got %d deps, want 1", len(deps))
+	}
+	assertDep(t, deps[0], testWebURL(300), testWebURL(100), "parent-child")
 }
 
 func TestPullLinks_DiscoveredFrom(t *testing.T) {
@@ -188,16 +216,16 @@ func TestAdoRelToBeadsDep(t *testing.T) {
 			wantSwap: true,
 		},
 		{
-			name:     "Child → parent, no swap",
+			name:     "Child → parent-child, swap (this item is target's parent; dep must point target(child) -> this(parent))",
 			rel:      RelChild,
-			wantType: "parent",
-			wantSwap: false,
+			wantType: "parent-child",
+			wantSwap: true,
 		},
 		{
-			name:     "Parent → parent, swap",
+			name:     "Parent → parent-child, no swap (this item is already the child)",
 			rel:      RelParent,
-			wantType: "parent",
-			wantSwap: true,
+			wantType: "parent-child",
+			wantSwap: false,
 		},
 		{
 			name:     "Related → related",
@@ -250,7 +278,11 @@ func TestBeadsDepToADORel(t *testing.T) {
 		wantRel string
 	}{
 		{"blocks", RelDependsOn},
-		{"parent", RelChild},
+		{"parent-child", RelParent}, // canonical beads storage type; desired set is built child -> parent (GH#4961)
+		// Legacy "parent" rows were written parent -> child by the pre-fix pull path,
+		// so mapping them to RelParent would reparent real hierarchies backwards.
+		// They must stay inert until a migration retypes and reverses them (PR #5129).
+		{"parent", RelRelated},
 		{"related", RelRelated},
 		{"discovered-from", RelRelated},
 		{"unknown", RelRelated}, // default
@@ -385,7 +417,7 @@ func TestPushLinks_AddMissing(t *testing.T) {
 
 	desired := []tracker.DependencyInfo{
 		{FromExternalID: "100", ToExternalID: "200", Type: "blocks"},
-		{FromExternalID: "100", ToExternalID: "300", Type: "parent"},
+		{FromExternalID: "100", ToExternalID: "300", Type: "parent-child"},
 	}
 
 	errs := resolver.PushLinks(context.Background(), 100, nil, desired, nil)
@@ -411,6 +443,67 @@ func TestPushLinks_AddMissing(t *testing.T) {
 		if call.ops[0].Path != "/relations/-" {
 			t.Errorf("call %d: path = %q, want %q", i, call.ops[0].Path, "/relations/-")
 		}
+	}
+}
+
+// TestPushLinks_HierarchyDirection is a direction-pinning regression test for
+// GH#5129: the desired set for a parent-child dep is built from the child's
+// own outgoing dependency row (storage direction: From = child, To =
+// parent). Pushing it must emit Hierarchy-Reverse (RelParent) — asserting
+// "the target is the parent of this item" — not Hierarchy-Forward, which
+// would reparent the target beneath the child.
+func TestPushLinks_HierarchyDirection(t *testing.T) {
+	var mu sync.Mutex
+	var patchCalls []patchCall
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var ops []PatchOperation
+		_ = json.Unmarshal(body, &ops)
+		mu.Lock()
+		patchCalls = append(patchCalls, patchCall{ops: ops})
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(ts.Close)
+
+	client, err := NewClient(NewSecretString("pat"), "org", "proj").
+		WithBaseURL(ts.URL)
+	if err != nil {
+		t.Fatalf("WithBaseURL error: %v", err)
+	}
+	client = client.WithHTTPClient(ts.Client())
+	resolver := NewLinkResolver(client)
+
+	// workItemID 100 is the child being pushed; desired points to its
+	// parent, 300 — the storage direction GetDependenciesWithMetadata
+	// produces for a "parent-child" dep.
+	desired := []tracker.DependencyInfo{
+		{FromExternalID: "100", ToExternalID: "300", Type: "parent-child"},
+	}
+
+	errs := resolver.PushLinks(context.Background(), 100, nil, desired, nil)
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(patchCalls) != 1 {
+		t.Fatalf("got %d PATCH calls, want 1", len(patchCalls))
+	}
+
+	value, ok := patchCalls[0].ops[0].Value.(map[string]interface{})
+	if !ok {
+		t.Fatalf("PATCH op value is not a map: %#v", patchCalls[0].ops[0].Value)
+	}
+	if rel, _ := value["rel"].(string); rel != RelParent {
+		t.Errorf("PATCH rel = %q, want %q (Hierarchy-Reverse)", rel, RelParent)
 	}
 }
 
@@ -448,7 +541,7 @@ func TestPushLinks_RemoveStale(t *testing.T) {
 			URL: ts.URL + "/proj/_apis/wit/workitems/200",
 		},
 		{
-			Rel: RelChild,
+			Rel: RelParent, // Hierarchy-Reverse: the type beads emits for parent-child (GH#4961)
 			URL: ts.URL + "/proj/_apis/wit/workitems/300",
 		},
 	}
@@ -482,10 +575,10 @@ func TestPushLinks_RemoveStale(t *testing.T) {
 }
 
 // TestPushLinks_PreservesUnmanagedLinks is the regression test for GH#4522:
-// a push must not delete links beads does not own. That includes
-// reverse-direction links (Dependency-Reverse predecessor/successor and
-// Hierarchy-Reverse parent), which beads represents via the forward link on
-// the other work item, and forward links pointing at items beads does not
+// a push must not delete links beads does not own. That includes links of
+// the opposite direction (Dependency-Reverse predecessor/successor and
+// Hierarchy-Forward), which beads represents via the link it owns on the
+// other work item, and forward links pointing at items beads does not
 // track (e.g. human-created Related links to work items outside the synced
 // set). None of these may be removed even though they are absent from the
 // desired set.
@@ -520,8 +613,9 @@ func TestPushLinks_PreservesUnmanagedLinks(t *testing.T) {
 	currentRelations := []WorkItemRelation{
 		// Reverse-direction predecessor/successor link to a tracked item.
 		{Rel: RelDependencyOf, URL: ts.URL + "/proj/_apis/wit/workitems/200"},
-		// Reverse-direction parent link to a tracked item.
-		{Rel: RelParent, URL: ts.URL + "/proj/_apis/wit/workitems/300"},
+		// Opposite-direction hierarchy link (Hierarchy-Forward) to a tracked
+		// item — beads owns the Hierarchy-Reverse link on the child, not this one.
+		{Rel: RelChild, URL: ts.URL + "/proj/_apis/wit/workitems/300"},
 		// Forward Related link to an UNtracked item (e.g. created by a human).
 		{Rel: RelRelated, URL: ts.URL + "/proj/_apis/wit/workitems/400"},
 	}
@@ -825,7 +919,7 @@ func TestPushLinks_RemoveFailure(t *testing.T) {
 			URL: ts.URL + "/proj/_apis/wit/workitems/200",
 		},
 		{
-			Rel: RelChild,
+			Rel: RelParent, // Hierarchy-Reverse: the type beads emits for parent-child (GH#4961)
 			URL: ts.URL + "/proj/_apis/wit/workitems/300",
 		},
 	}

@@ -1,25 +1,12 @@
 // Package storage defines the interface for issue storage backends.
 package storage
 
-// OrphanHandling specifies how to handle issues with missing parent references.
-type OrphanHandling string
-
-const (
-	// OrphanStrict fails import on missing parent (safest)
-	OrphanStrict OrphanHandling = "strict"
-	// OrphanResurrect auto-resurrects missing parents from database history
-	OrphanResurrect OrphanHandling = "resurrect"
-	// OrphanSkip skips orphaned issues with warning
-	OrphanSkip OrphanHandling = "skip"
-	// OrphanAllow imports orphans without validation (default, works around bugs)
-	OrphanAllow OrphanHandling = "allow"
-)
-
 // BatchCreateOptions contains options for batch issue creation.
 // This is a backend-agnostic type that can be used by any storage implementation.
 type BatchCreateOptions struct {
-	// OrphanHandling specifies how to handle issues with missing parent references
-	OrphanHandling OrphanHandling
+	// CreateOnly uses strict insert semantics after the caller has reserved the
+	// issue ID. It is for guarded public creates; import behavior is unchanged.
+	CreateOnly bool
 	// SkipPrefixValidation skips prefix validation for existing IDs (used during import)
 	SkipPrefixValidation bool
 	// ConflictSkip makes batch creation insert-if-new instead of UPSERT: an
@@ -43,7 +30,10 @@ type BatchCreateOptions struct {
 	// leave it false.
 	RejectStaleUpserts bool
 	// SkipDependencyValidationErrors skips dependency validation failures that
-	// legacy imports tolerated, such as cycles or self-dependencies.
+	// legacy imports tolerated: typed refusals of an edge (a cycle, a
+	// self-dependency, or a blocker in the issue's own hierarchy). An error
+	// from the validation queries themselves is still returned, never recorded
+	// as a skipped edge.
 	SkipDependencyValidationErrors bool
 	// OnSkippedDependency records dependency edges skipped during batch create.
 	OnSkippedDependency func(issueID, dependsOnID, reason string)
@@ -53,4 +43,16 @@ type BatchCreateOptions struct {
 	// them as skipped rather than created. May fire more than once per issue
 	// if the enclosing transaction retries; callers should dedup by ID.
 	OnStaleRejected func(issueID string)
+	// OnRetiredID, when set, makes an UPSERT-mode batch (CreateOnly false)
+	// skip a row whose explicit id a retaining retention sweep retired and
+	// report it here instead of refusing the batch with
+	// *issueops.IdempotencyExpiredError. The skipped row writes nothing — no
+	// row, labels, comments or edges — and an edge into it is reported
+	// through OnSkippedDependency. ConflictSkip skips such rows too, and
+	// still reports each one here when this is set, so a ConflictSkip caller
+	// that counts the rows it wrote can leave out the retired ones. It is how
+	// an import reports a swept row rather than resurrecting it. May fire more
+	// than once per issue if the enclosing transaction retries; callers
+	// should dedup by ID.
+	OnRetiredID func(issueID string)
 }

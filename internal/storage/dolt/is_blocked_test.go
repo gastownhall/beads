@@ -221,7 +221,6 @@ func TestIsBlocked_BatchedCreateWithDepsInOneTxn(t *testing.T) {
 	}
 	if err := store.CreateIssuesWithFullOptions(ctx, []*types.Issue{parent, child}, "tester",
 		storage.BatchCreateOptions{
-			OrphanHandling:       storage.OrphanAllow,
 			SkipPrefixValidation: true,
 		}); err != nil {
 		t.Fatalf("CreateIssuesWithFullOptions: %v", err)

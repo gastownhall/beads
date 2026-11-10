@@ -11,8 +11,15 @@ import (
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
+// TODO(batchgetter): GetIssuesByIDs below reads an unbounded id list;
+// issueops.BatchGetter caps a request at MaxGetManyIDs (1000) and this
+// interface's one implementation (uowMolReader) has not been audited for id
+// volume or given chunking, so it still forwards to
+// IssueUseCase().GetIssuesByIDs rather than GetMany. See
+// issueops.BatchGetter's doc.
 type molReader interface {
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)
 	GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error)
@@ -30,30 +37,26 @@ type molReader interface {
 	GetConfig(ctx context.Context, key string) (string, error)
 	IsInfraTypeCtx(ctx context.Context, t types.IssueType) bool
 	GetCustomStatusesDetailed(ctx context.Context) ([]types.CustomStatus, error)
-	GetMoleculeProgress(ctx context.Context, moleculeID string) (*types.MoleculeProgressStats, error)
 	GetMoleculeLastActivity(ctx context.Context, moleculeID string) (*types.MoleculeLastActivity, error)
 	FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error)
 }
 
 var _ molReader = storage.DoltStorage(nil)
 
-type molConfigWriter interface {
-	molReader
-	SetConfig(ctx context.Context, key, value string) error
-}
-
-var _ molConfigWriter = storage.DoltStorage(nil)
-
 type molWriter interface {
 	molReader
+	// CreateIssue carries the issue's Labels. There is deliberately no AddLabel
+	// verb beside it: a label written separately makes the plane decision a
+	// second time, and the two implementations of this interface did not make
+	// it the same way — one asked the storage layer's isActiveWisp, the other a
+	// cache filled from a wisp probe. A caller that wants an issue labeled
+	// says so on the issue it creates.
 	CreateIssue(ctx context.Context, issue *types.Issue, actor string) error
 	AddDependency(ctx context.Context, dep *types.Dependency, actor string) error
-	AddLabel(ctx context.Context, issueID, label, actor string) error
 	UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error
 	CloseIssue(ctx context.Context, id, reason, actor string) error
 	DeleteIssue(ctx context.Context, id, actor string) error
 	SetConfig(ctx context.Context, key, value string) error
-	ClaimStepIfOpen(ctx context.Context, id, actor string) error
 }
 
 type storeMolWriter struct {
@@ -67,10 +70,6 @@ func (w storeMolWriter) CreateIssue(ctx context.Context, issue *types.Issue, act
 
 func (w storeMolWriter) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
 	return w.tx.AddDependency(ctx, dep, actor)
-}
-
-func (w storeMolWriter) AddLabel(ctx context.Context, issueID, label, actor string) error {
-	return w.tx.AddLabel(ctx, issueID, label, actor)
 }
 
 func (w storeMolWriter) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
@@ -89,24 +88,17 @@ func (w storeMolWriter) SetConfig(ctx context.Context, key, value string) error 
 	return w.tx.SetConfig(ctx, key, value)
 }
 
-func (w storeMolWriter) ClaimStepIfOpen(ctx context.Context, id, actor string) error {
-	return w.DoltStorage.RunInTransaction(ctx, fmt.Sprintf("bd: advance to step %s", id), func(tx storage.Transaction) error {
-		current, err := tx.GetIssue(ctx, id)
-		if err != nil {
-			return err
-		}
-		if current == nil {
-			return fmt.Errorf("step %s not found", id)
-		}
-		if current.Status != types.StatusOpen {
-			return fmt.Errorf("step %s already claimed (status: %s)", id, current.Status)
-		}
-		return tx.UpdateIssue(ctx, id, map[string]interface{}{"status": types.StatusInProgress}, actor)
-	})
-}
-
-func newStandaloneStoreMolWriter(store storage.DoltStorage) storeMolWriter {
-	return storeMolWriter{DoltStorage: store}
+// GetConfig reads through the transaction when one is bound. Without this,
+// config readers (flattenUnregisteredIssueTypes) would go to the embedded
+// store, which opens a second pool connection — a deadlock when
+// MaxOpenConns=1 and the transaction already holds the only one. It also
+// keeps the read consistent with any config written earlier in the same
+// transaction rather than seeing the last committed value.
+func (w storeMolWriter) GetConfig(ctx context.Context, key string) (string, error) {
+	if w.tx != nil {
+		return w.tx.GetConfig(ctx, key)
+	}
+	return w.DoltStorage.GetConfig(ctx, key)
 }
 
 type uowMolReader struct {
@@ -114,16 +106,28 @@ type uowMolReader struct {
 }
 
 func (r uowMolReader) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
-	issue, isWisp := proxiedResolveIssueOrWisp(ctx, r.uw, id)
-	if issue == nil {
+	issue, isWisp, rerr := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(r.uw), id)
+	if errors.Is(rerr, storage.ErrNotFound) {
 		return nil, fmt.Errorf("issue %s not found", id)
 	}
+	if rerr != nil {
+		return nil, fmt.Errorf("resolving %s: %w", id, rerr)
+	}
+	// READS, ALL OF THEM, and they stay for the reason the writes did not.
+	// uowMolReader is a PORT: it adapts a caller's open unit of work to the
+	// molecule commands' reader interface, and every method here must answer
+	// from inside that transaction. issueops.Reader opens one of its own, so a
+	// role-routed port would show the molecule the last committed state while
+	// the command that owns the transaction is midway through changing it.
+	// A reader role bound to a caller's transaction is the follow-up
+	// (ga-2ltro.12). The wisp branch here is a read that follows the row
+	// GetIssueOrWisp already found, not a front door choosing where to write.
 	var labels []string
 	var err error
 	if isWisp {
-		labels, err = r.uw.LabelUseCase().GetWispLabels(ctx, id)
+		labels, err = r.uw.LabelUseCase().GetWispLabels(ctx, id) //nolint:forbidigo // in-transaction port read; issueops.Reader would open its own
 	} else {
-		labels, err = r.uw.LabelUseCase().GetLabels(ctx, id)
+		labels, err = r.uw.LabelUseCase().GetLabels(ctx, id) //nolint:forbidigo // in-transaction port read; issueops.Reader would open its own
 	}
 	if err == nil {
 		issue.Labels = labels
@@ -136,7 +140,7 @@ func (r uowMolReader) GetIssuesByIDs(ctx context.Context, ids []string) ([]*type
 	if err != nil {
 		return nil, err
 	}
-	if labelMap, err := r.uw.LabelUseCase().GetLabelsForIssues(ctx, ids); err == nil {
+	if labelMap, err := r.uw.LabelUseCase().GetLabelsForIssues(ctx, ids); err == nil { //nolint:forbidigo // in-transaction port read; see GetIssue above
 		for _, issue := range issues {
 			issue.Labels = labelMap[issue.ID]
 		}
@@ -147,7 +151,7 @@ func (r uowMolReader) GetIssuesByIDs(ctx context.Context, ids []string) ([]*type
 		wisps = nil //nolint:staticcheck // wisps table may not exist; issues result still valid
 	}
 	if len(wisps) > 0 {
-		if labelMap, err := r.uw.LabelUseCase().GetLabelsForWisps(ctx, ids); err == nil {
+		if labelMap, err := r.uw.LabelUseCase().GetLabelsForWisps(ctx, ids); err == nil { //nolint:forbidigo // in-transaction port read; see GetIssue above
 			for _, wisp := range wisps {
 				wisp.Labels = labelMap[wisp.ID]
 			}
@@ -224,7 +228,7 @@ func (r uowMolReader) GetEpicsEligibleForClosure(ctx context.Context) ([]*types.
 }
 
 func (r uowMolReader) GetLabels(ctx context.Context, issueID string) ([]string, error) {
-	return r.uw.LabelUseCase().GetLabels(ctx, issueID)
+	return r.uw.LabelUseCase().GetLabels(ctx, issueID) //nolint:forbidigo // in-transaction port read; see GetIssue above
 }
 
 func (r uowMolReader) GetConfig(ctx context.Context, key string) (string, error) {
@@ -238,40 +242,6 @@ func (r uowMolReader) IsInfraTypeCtx(ctx context.Context, t types.IssueType) boo
 
 func (r uowMolReader) GetCustomStatusesDetailed(ctx context.Context) ([]types.CustomStatus, error) {
 	return r.uw.ConfigUseCase().GetCustomStatuses(ctx)
-}
-
-func (r uowMolReader) GetMoleculeProgress(ctx context.Context, moleculeID string) (*types.MoleculeProgressStats, error) {
-	stats := &types.MoleculeProgressStats{MoleculeID: moleculeID}
-
-	root, err := r.GetIssue(ctx, moleculeID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get molecule: %w", err)
-	}
-	if root != nil {
-		stats.MoleculeTitle = root.Title
-	}
-
-	dependents, err := r.GetDependentsWithMetadata(ctx, moleculeID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get molecule children: %w", err)
-	}
-
-	for _, dependent := range dependents {
-		if dependent.DependencyType != types.DepParentChild {
-			continue
-		}
-		stats.Total++
-		switch dependent.Status {
-		case types.StatusClosed:
-			stats.Completed++
-		case types.StatusInProgress:
-			stats.InProgress++
-			if stats.CurrentStepID == "" {
-				stats.CurrentStepID = dependent.ID
-			}
-		}
-	}
-	return stats, nil
 }
 
 func (r uowMolReader) GetMoleculeLastActivity(ctx context.Context, moleculeID string) (*types.MoleculeLastActivity, error) {
@@ -397,17 +367,6 @@ func (w *uowMolWriter) AddDependency(ctx context.Context, dep *types.Dependency,
 	return w.uw.DependencyUseCase().AddDependency(ctx, dep, actor)
 }
 
-func (w *uowMolWriter) AddLabel(ctx context.Context, issueID, label, actor string) error {
-	isWisp, err := w.isWisp(ctx, issueID)
-	if err != nil {
-		return err
-	}
-	if isWisp {
-		return w.uw.LabelUseCase().AddWispLabel(ctx, issueID, label, actor)
-	}
-	return w.uw.LabelUseCase().AddLabel(ctx, issueID, label, actor)
-}
-
 func (w *uowMolWriter) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
 	isWisp, err := w.isWisp(ctx, id)
 	if err != nil {
@@ -443,17 +402,4 @@ func (w *uowMolWriter) DeleteIssue(ctx context.Context, id, actor string) error 
 
 func (w *uowMolWriter) SetConfig(ctx context.Context, key, value string) error {
 	return w.uw.ConfigUseCase().SetConfig(ctx, key, value)
-}
-
-func (w *uowMolWriter) ClaimStepIfOpen(ctx context.Context, id, actor string) error {
-	isWisp, err := w.isWisp(ctx, id)
-	if err != nil {
-		return err
-	}
-	if isWisp {
-		_, err := w.uw.IssueUseCase().ClaimWispIfOpen(ctx, id, actor)
-		return err
-	}
-	_, err = w.uw.IssueUseCase().ClaimIssueIfOpen(ctx, id, actor)
-	return err
 }

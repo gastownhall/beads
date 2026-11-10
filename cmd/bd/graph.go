@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
@@ -101,11 +102,12 @@ in total before any individual status trips it.`,
 			return HandleErrorWithHintRespectJSON("issue ID required", "Use --all for all open issues")
 		}
 
+		out := cmd.OutOrStdout()
 		if usesProxiedServer() {
 			if err := rejectMaxRowsUnderProxiedServer(cmd); err != nil {
 				return err
 			}
-			return runGraphProxiedServer(rootCtx, args)
+			return runGraphProxiedServer(rootCtx, out, args)
 		}
 
 		ctx := rootCtx
@@ -125,7 +127,7 @@ in total before any individual status trips it.`,
 				}
 				return HandleErrorRespectJSON("loading all issues: %v", err)
 			}
-			return renderGraphAllSubgraphs(subgraphs)
+			return renderGraphAllSubgraphs(out, subgraphs)
 		}
 
 		issueID, err := utils.ResolvePartialID(ctx, store, args[0])
@@ -157,11 +159,17 @@ in total before any individual status trips it.`,
 			}
 		}
 
-		return renderGraphSingleSubgraph(subgraph)
+		return renderGraphSingleSubgraph(out, subgraph)
 	},
 }
 
-func renderGraphAllSubgraphs(subgraphs []*TemplateSubgraph) error {
+func writeGraphLine(out io.Writer, value string) error {
+	w := &graphExportWriter{out: out}
+	w.println(value)
+	return w.wrapError("graph")
+}
+
+func renderGraphAllSubgraphs(out io.Writer, subgraphs []*TemplateSubgraph) error {
 	if graphOpen {
 		var filtered []*TemplateSubgraph
 		for _, sg := range subgraphs {
@@ -174,8 +182,7 @@ func renderGraphAllSubgraphs(subgraphs []*TemplateSubgraph) error {
 	}
 
 	if len(subgraphs) == 0 {
-		fmt.Println("No open issues found")
-		return nil
+		return writeGraphLine(out, "No open issues found")
 	}
 
 	if jsonOutput {
@@ -185,16 +192,19 @@ func renderGraphAllSubgraphs(subgraphs []*TemplateSubgraph) error {
 	if graphHTML && !graphOpen {
 		merged := mergeSubgraphsForHTML(subgraphs)
 		layout := computeLayout(merged)
-		renderGraphHTML(layout, merged)
-		return nil
+		return renderGraphHTML(out, layout, merged)
 	}
 
 	if graphOpen {
 		for i, subgraph := range subgraphs {
 			layout := computeLayout(subgraph)
-			renderGraphCompact(layout, subgraph)
+			if err := renderGraphCompact(out, layout, subgraph); err != nil {
+				return err
+			}
 			if i < len(subgraphs)-1 {
-				fmt.Println(strings.Repeat("─", 60))
+				if err := writeGraphLine(out, strings.Repeat("─", 60)); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
@@ -203,27 +213,36 @@ func renderGraphAllSubgraphs(subgraphs []*TemplateSubgraph) error {
 	for i, subgraph := range subgraphs {
 		layout := computeLayout(subgraph)
 		if graphDOT {
-			renderGraphDOT(layout, subgraph)
+			if err := renderGraphDOT(out, layout, subgraph); err != nil {
+				return err
+			}
 		} else if graphCompact {
-			renderGraphCompact(layout, subgraph)
+			if err := renderGraphCompact(out, layout, subgraph); err != nil {
+				return err
+			}
 		} else if graphBox {
-			renderGraph(layout, subgraph)
+			if err := renderGraph(out, layout, subgraph); err != nil {
+				return err
+			}
 		} else {
-			renderGraphVisual(layout, subgraph)
+			if err := renderGraphVisual(out, layout, subgraph); err != nil {
+				return err
+			}
 		}
 		if !graphDOT && i < len(subgraphs)-1 {
-			fmt.Println(strings.Repeat("─", 60))
+			if err := writeGraphLine(out, strings.Repeat("─", 60)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
-func renderGraphSingleSubgraph(subgraph *TemplateSubgraph) error {
+func renderGraphSingleSubgraph(out io.Writer, subgraph *TemplateSubgraph) error {
 	if graphOpen {
 		subgraph = filterSubgraphOpen(subgraph)
 		if subgraph == nil || len(subgraph.Issues) == 0 {
-			fmt.Println("No open issues in subgraph")
-			return nil
+			return writeGraphLine(out, "No open issues in subgraph")
 		}
 	}
 
@@ -238,22 +257,20 @@ func renderGraphSingleSubgraph(subgraph *TemplateSubgraph) error {
 	}
 
 	if graphOpen {
-		renderGraphCompact(layout, subgraph)
-		return nil
+		return renderGraphCompact(out, layout, subgraph)
 	}
 
 	if graphDOT {
-		renderGraphDOT(layout, subgraph)
+		return renderGraphDOT(out, layout, subgraph)
 	} else if graphHTML {
-		renderGraphHTML(layout, subgraph)
+		return renderGraphHTML(out, layout, subgraph)
 	} else if graphCompact {
-		renderGraphCompact(layout, subgraph)
+		return renderGraphCompact(out, layout, subgraph)
 	} else if graphBox {
-		renderGraph(layout, subgraph)
+		return renderGraph(out, layout, subgraph)
 	} else {
-		renderGraphVisual(layout, subgraph)
+		return renderGraphVisual(out, layout, subgraph)
 	}
-	return nil
 }
 
 var graphCheckCmd = &cobra.Command{
@@ -319,22 +336,22 @@ func renderGraphCheck(cycles [][]*types.Issue) error {
 	}
 
 	if result.Clean {
-		fmt.Printf("\n%s Graph integrity check passed\n\n", ui.RenderPass("✓"))
+		fmt.Printf("\n%s Graph integrity check passed\n\n", ui.RenderPass("✓")) //nolint:forbidigo // Graph check is outside the renderer contract.
 	} else {
-		fmt.Printf("\n%s Graph integrity issues found\n\n", ui.RenderFail("✗"))
+		fmt.Printf("\n%s Graph integrity issues found\n\n", ui.RenderFail("✗")) //nolint:forbidigo // Graph check is outside the renderer contract.
 	}
 
 	if len(result.Cycles) > 0 {
-		fmt.Printf("%s Cycles (%d):\n\n", ui.RenderFail("⚠"), len(result.Cycles))
+		fmt.Printf("%s Cycles (%d):\n\n", ui.RenderFail("⚠"), len(result.Cycles)) //nolint:forbidigo // Graph check is outside the renderer contract.
 		for _, cycle := range result.Cycles {
-			fmt.Printf("  %s → %s\n", strings.Join(cycle, " → "), cycle[0])
+			fmt.Printf("  %s → %s\n", strings.Join(cycle, " → "), cycle[0]) //nolint:forbidigo // Graph check is outside the renderer contract.
 		}
-		fmt.Println()
+		fmt.Println() //nolint:forbidigo // Graph check is outside the renderer contract.
 	} else {
-		fmt.Printf("  %s No dependency cycles\n", ui.RenderPass("✓"))
+		fmt.Printf("  %s No dependency cycles\n", ui.RenderPass("✓")) //nolint:forbidigo // Graph check is outside the renderer contract.
 	}
 
-	fmt.Println()
+	fmt.Println() //nolint:forbidigo // Graph check is outside the renderer contract.
 
 	if !result.Clean {
 		return SilentExit()
@@ -918,14 +935,15 @@ func computeLayout(subgraph *TemplateSubgraph) *GraphLayout {
 	return layout
 }
 
-// renderGraph renders the ASCII visualization
-func renderGraph(layout *GraphLayout, subgraph *TemplateSubgraph) {
+// renderGraph renders the ASCII visualization.
+func renderGraph(out io.Writer, layout *GraphLayout, subgraph *TemplateSubgraph) error {
+	w := &graphExportWriter{out: out}
 	if len(layout.Nodes) == 0 {
-		fmt.Println("Empty graph")
-		return
+		w.println("Empty graph")
+		return w.wrapError("graph")
 	}
 
-	fmt.Printf("\n%s Dependency graph for %s:\n\n", ui.RenderAccent("📊"), layout.RootID)
+	w.printf("\n%s Dependency graph for %s:\n\n", ui.RenderAccent("📊"), layout.RootID)
 
 	// Calculate box width based on longest title
 	maxTitleLen := 0
@@ -941,8 +959,8 @@ func renderGraph(layout *GraphLayout, subgraph *TemplateSubgraph) {
 	// For simplicity, we'll render layer by layer with arrows between them
 
 	// First, show the legend
-	fmt.Println("  Status: ○ open  ◐ in_progress  ● blocked  ✓ closed")
-	fmt.Println()
+	w.println("  Status: ○ open  ◐ in_progress  ● blocked  ✓ closed")
+	w.println()
 
 	// Build dependency counts from subgraph
 	blocksCounts, blockedByCounts := computeDependencyCounts(subgraph)
@@ -972,22 +990,22 @@ func renderGraph(layout *GraphLayout, subgraph *TemplateSubgraph) {
 	// Render horizontally (simplified - just show boxes with arrows)
 	for layerIdx, boxes := range layerBoxes {
 		// Print layer header
-		fmt.Printf("  Layer %d", layerIdx)
+		w.printf("  Layer %d", layerIdx)
 		if layerIdx == 0 {
-			fmt.Print(" (ready)")
+			w.printf(" (ready)")
 		}
-		fmt.Println()
+		w.println()
 
 		for _, box := range boxes {
-			fmt.Println(box)
+			w.println(box)
 		}
 
 		// Print arrows to next layer if not last
 		if layerIdx < len(layerBoxes)-1 {
-			fmt.Println("      │")
-			fmt.Println("      ▼")
+			w.println("      │")
+			w.println("      ▼")
 		}
-		fmt.Println()
+		w.println()
 	}
 
 	// Show dependency summary
@@ -999,28 +1017,30 @@ func renderGraph(layout *GraphLayout, subgraph *TemplateSubgraph) {
 			}
 		}
 		if blocksDeps > 0 {
-			fmt.Printf("  Dependencies: %d blocking relationships\n", blocksDeps)
+			w.printf("  Dependencies: %d blocking relationships\n", blocksDeps)
 		}
 	}
 
 	// Show summary
-	fmt.Printf("  Total: %d issues across %d layers\n\n", len(layout.Nodes), len(layout.Layers))
+	w.printf("  Total: %d issues across %d layers\n\n", len(layout.Nodes), len(layout.Layers))
+	return w.wrapError("graph")
 }
 
 // renderGraphCompact renders the graph in compact tree format
 // One line per issue, more scannable, uses tree connectors (├──, └──, │)
-func renderGraphCompact(layout *GraphLayout, subgraph *TemplateSubgraph) {
+func renderGraphCompact(out io.Writer, layout *GraphLayout, subgraph *TemplateSubgraph) error {
+	w := &graphExportWriter{out: out}
 	if len(layout.Nodes) == 0 {
-		fmt.Println("Empty graph")
-		return
+		w.println("Empty graph")
+		return w.wrapError("graph")
 	}
 
-	fmt.Printf("\n%s Dependency graph for %s (%d issues, %d layers)\n\n",
+	w.printf("\n%s Dependency graph for %s (%d issues, %d layers)\n\n",
 		ui.RenderAccent("📊"), layout.RootID, len(layout.Nodes), len(layout.Layers))
 
 	// Legend
-	fmt.Println("  Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
-	fmt.Println()
+	w.println("  Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
+	w.println()
 
 	// Build parent-child map from subgraph dependencies
 	children := make(map[string][]string) // parent -> children
@@ -1052,7 +1072,7 @@ func renderGraphCompact(layout *GraphLayout, subgraph *TemplateSubgraph) {
 		if layerIdx == 0 {
 			layerHeader += " (ready)"
 		}
-		fmt.Printf("  %s\n", ui.RenderAccent(layerHeader))
+		w.printf("  %s\n", ui.RenderAccent(layerHeader))
 
 		for i, id := range layer {
 			node := layout.Nodes[id]
@@ -1067,7 +1087,7 @@ func renderGraphCompact(layout *GraphLayout, subgraph *TemplateSubgraph) {
 				connector = "└── "
 			}
 
-			fmt.Printf("  %s%s\n", connector, line)
+			w.printf("  %s%s\n", connector, line)
 
 			// Render children (if this issue has children in the subgraph)
 			if childIDs, ok := children[id]; ok && len(childIDs) > 0 {
@@ -1075,15 +1095,16 @@ func renderGraphCompact(layout *GraphLayout, subgraph *TemplateSubgraph) {
 				if isLast {
 					childPrefix = "    "
 				}
-				renderCompactChildren(layout, childIDs, children, childPrefix, 1)
+				renderCompactChildren(w, layout, childIDs, children, childPrefix, 1)
 			}
 		}
-		fmt.Println()
+		w.println()
 	}
+	return w.wrapError("graph")
 }
 
 // renderCompactChildren recursively renders children in tree format
-func renderCompactChildren(layout *GraphLayout, childIDs []string, children map[string][]string, prefix string, depth int) {
+func renderCompactChildren(w *graphExportWriter, layout *GraphLayout, childIDs []string, children map[string][]string, prefix string, depth int) {
 	for i, childID := range childIDs {
 		node := layout.Nodes[childID]
 		if node == nil {
@@ -1097,7 +1118,7 @@ func renderCompactChildren(layout *GraphLayout, childIDs []string, children map[
 		}
 
 		line := formatCompactNode(node)
-		fmt.Printf("  %s%s%s\n", prefix, connector, line)
+		w.printf("  %s%s%s\n", prefix, connector, line)
 
 		// Recurse for nested children
 		if grandchildren, ok := children[childID]; ok && len(grandchildren) > 0 {
@@ -1107,7 +1128,7 @@ func renderCompactChildren(layout *GraphLayout, childIDs []string, children map[
 			} else {
 				childPrefix += "│   "
 			}
-			renderCompactChildren(layout, grandchildren, children, childPrefix, depth+1)
+			renderCompactChildren(w, layout, grandchildren, children, childPrefix, depth+1)
 		}
 	}
 }
@@ -1120,7 +1141,7 @@ func formatCompactNode(node *GraphNode) string {
 	// Use shared status icon with semantic color
 	statusIcon := ui.RenderStatusIcon(status)
 
-	// Priority with icon
+	// Priority with semantic color (P-label only)
 	priorityTag := ui.RenderPriority(node.Issue.Priority)
 
 	// Title - truncate if too long
@@ -1132,7 +1153,7 @@ func formatCompactNode(node *GraphNode) string {
 		return fmt.Sprintf("%s %s %s %s",
 			statusIcon,
 			style.Render(node.Issue.ID),
-			style.Render(fmt.Sprintf("● P%d", node.Issue.Priority)),
+			style.Render(fmt.Sprintf("P%d", node.Issue.Priority)),
 			style.Render(title))
 	}
 

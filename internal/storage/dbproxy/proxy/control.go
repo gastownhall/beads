@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bufio"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -77,6 +76,10 @@ func (s *controlServer) Close() error {
 // path may still be perfectly healthy, and a proxy that stops answering
 // identity probes merely degrades adoption to the caller's poll/retry path.
 func (s *controlServer) acceptLoop() {
+	s.acceptLoopWithAfter(time.After)
+}
+
+func (s *controlServer) acceptLoopWithAfter(after func(time.Duration) <-chan time.Time) {
 	defer close(s.done)
 	consecutiveErrors := 0
 	delay := controlAcceptRetryDelay
@@ -94,7 +97,7 @@ func (s *controlServer) acceptLoop() {
 			select {
 			case <-s.closing:
 				return
-			case <-time.After(delay):
+			case <-after(delay):
 			}
 			if delay *= 2; delay > controlAcceptRetryMax {
 				delay = controlAcceptRetryMax
@@ -128,7 +131,7 @@ func (s *controlServer) handle(conn net.Conn) {
 	if len(parts) != 3 || parts[0] != "IDENT" {
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(parts[1]), []byte(s.secret)) != 1 {
+	if !identity.VerifyIdentRequest(s.secret, parts[2], parts[1]) {
 		return
 	}
 	reply := s.reply()

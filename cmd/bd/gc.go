@@ -8,6 +8,7 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var (
@@ -16,6 +17,7 @@ var (
 	gcOlderThan int
 	gcSkipDecay bool
 	gcSkipDolt  bool
+	gcFull      bool
 )
 
 var gcCmd = &cobra.Command{
@@ -25,12 +27,20 @@ var gcCmd = &cobra.Command{
 	Long: `Full lifecycle garbage collection for standalone Beads databases.
 
 Runs three phases in sequence:
-  1. DECAY   — Delete closed issues older than N days (default 90)
+  1. DECAY   — Delete closed issues older than N days (default 90), except
+               those of a type the workspace's types.retained setting names
+               (only bd prune/purge --retain-ids deletes those)
   2. COMPACT — Squash old Dolt commits into fewer commits (bd compact)
   3. GC      — Run Dolt garbage collection to reclaim disk space
 
 Each phase can be skipped individually. Use --dry-run to preview all phases
 without making changes.
+
+Phase 3 runs Dolt's default, generational GC: it only examines data written
+since the last GC. Data that survived an earlier GC lives in the old generation
+and is never revisited, so on a long-lived store the space freed by decay may
+not be reclaimed. Use --full to collect all generations (slower on large
+stores).
 
 Examples:
   bd gc                              # Full GC with defaults (90 day decay)
@@ -38,10 +48,14 @@ Examples:
   bd gc --older-than 30              # Decay issues closed 30+ days ago
   bd gc --skip-decay                 # Skip issue deletion, just compact+GC
   bd gc --skip-dolt                  # Skip Dolt GC, just decay+compact
+  bd gc --full                       # Collect all storage generations
   bd gc --force                      # Skip confirmation prompt`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, _ []string) error {
+		if !gcSkipDecay {
+			warnIgnoredYAMLRetainedTypes()
+		}
 		if usesProxiedServer() {
 			return runGCProxiedServer(rootCtx)
 		}
@@ -68,6 +82,7 @@ Examples:
 			detail  string
 		}
 		var results []phaseResult
+		retentionKept := 0
 
 		if gcSkipDecay {
 			results = append(results, phaseResult{name: "Decay", skipped: true})
@@ -88,7 +103,9 @@ Examples:
 				MaxRowsSource: "",
 			}
 
-			closedIssues, err := store.SearchIssues(ctx, "", filter)
+			// The closed issues and types.retained come from one snapshot, so
+			// the hold-back below uses the setting the selection's snapshot held.
+			closedIssues, retained, err := storage.SearchIssuesWithConfig(ctx, store, "", filter, issueops.SettingKeyTypesRetained)
 			if err != nil {
 				return HandleErrorRespectJSON("searching closed issues: %v", err)
 			}
@@ -96,6 +113,11 @@ Examples:
 			var stats closedDeletionCandidateStats
 			closedIssues, stats = filterClosedDeletionCandidates(closedIssues, &cutoffTime)
 			warnClosedDeletionSafetySkips(stats)
+
+			closedIssues, retentionKept = holdBackRetainedTypes(closedIssues, retained)
+			if retentionKept > 0 && !jsonOutput {
+				fmt.Println(retainedTypesKeptLine(retentionKept, "closed issue(s)"))
+			}
 
 			if len(closedIssues) == 0 {
 				detail := fmt.Sprintf("  No closed issues older than %d days", cutoffDays)
@@ -190,7 +212,11 @@ Examples:
 				results = append(results, phaseResult{name: "Dolt GC", detail: "not supported"})
 			} else if gcDryRun {
 				if !jsonOutput {
-					fmt.Println("  Would run DOLT_GC()")
+					if gcFull {
+						fmt.Println("  Would run a full DOLT_GC() (all storage generations)")
+					} else {
+						fmt.Println("  Would run DOLT_GC()")
+					}
 				}
 				results = append(results, phaseResult{name: "Dolt GC", detail: "dry-run"})
 			} else {
@@ -198,19 +224,26 @@ Examples:
 				// refs are left alone here (they cache the remote tip for the
 				// migrate gate); flatten/compact prune them before their GC
 				// (bd-agctw). Sizes are reported so a no-op reclaim is visible.
-				sizeBefore := storeSizeBytes()
+				sizeBefore := storeSizeBytes(ctx)
 				remoteRefs, tags := listRemoteRefsAndTags(ctx)
-				if err := gc.DoltGC(ctx); err != nil {
+				if gcFull && !jsonOutput {
+					fmt.Println("  Running full Dolt GC (all generations; can take minutes on large stores)...")
+				}
+				gcMode, err := runDoltGCPass(ctx, gc, gcFull)
+				if err != nil {
 					WarnError("dolt gc failed: %v", err)
 					results = append(results, phaseResult{name: "Dolt GC", detail: "failed"})
 				} else {
-					sizeAfter := storeSizeBytes()
+					sizeAfter := storeSizeBytes(ctx)
 					detail := "complete"
 					if line := gcSizeLine(sizeBefore, sizeAfter); line != "" {
 						detail = "complete: " + line
 					}
 					if !jsonOutput {
 						fmt.Printf("  Done (%s)\n", detail)
+						if gcMode != gcModeFull && suggestFullGC(sizeBefore, sizeAfter) {
+							printFullGCHint()
+						}
 						if len(remoteRefs)+len(tags) > 0 {
 							fmt.Printf("  Note: %d remote-tracking ref(s) and %d tag(s) anchor history;\n", len(remoteRefs), len(tags))
 							fmt.Printf("  after a history squash, use bd flatten / bd compact so they are pruned first.\n")
@@ -220,6 +253,7 @@ Examples:
 					gcSizeInfo = map[string]interface{}{
 						"remote_refs": len(remoteRefs),
 						"tags":        len(tags),
+						"mode":        gcMode,
 					}
 					addGCSizeJSON(gcSizeInfo, sizeBefore, sizeAfter)
 				}
@@ -247,6 +281,9 @@ Examples:
 				phases = append(phases, p)
 			}
 			summaryMap["phases"] = phases
+			if retentionKept > 0 {
+				summaryMap["retention_required"] = retentionKept
+			}
 			if gcSizeInfo != nil {
 				summaryMap["dolt_gc"] = gcSizeInfo
 			}
@@ -275,6 +312,7 @@ func init() {
 	gcCmd.Flags().IntVar(&gcOlderThan, "older-than", 90, "Delete closed issues older than N days")
 	gcCmd.Flags().BoolVar(&gcSkipDecay, "skip-decay", false, "Skip issue deletion phase")
 	gcCmd.Flags().BoolVar(&gcSkipDolt, "skip-dolt", false, "Skip Dolt garbage collection phase")
+	gcCmd.Flags().BoolVar(&gcFull, "full", false, "Run a full Dolt GC (all generations; slower, reclaims space default passes cannot)")
 
 	rootCmd.AddCommand(gcCmd)
 }

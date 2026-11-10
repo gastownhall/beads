@@ -65,6 +65,14 @@ func seedAuxRekeyFixture(ctx context.Context, t *testing.T, db *sql.DB, clonePre
 		t.Fatalf("regress main cursor: %v", err)
 	}
 
+	// A real pre-rekey lineage predates the 0062 events flip, so its events
+	// rows are committed. The shared test database carries the post-flip
+	// dolt_ignore pattern (with events deliberately materialized at HEAD for
+	// branch inheritance), so '-Am' would silently skip events and leave the
+	// seed dirty — stage it explicitly with '-f' to match the simulated state.
+	if _, err := db.ExecContext(ctx, "CALL DOLT_ADD('-f', 'events')"); err != nil {
+		t.Fatalf("stage events seed: %v", err)
+	}
 	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'seed pre-rekey rows')"); err != nil {
 		t.Fatalf("commit seed: %v", err)
 	}

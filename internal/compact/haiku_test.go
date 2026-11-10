@@ -4,11 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -18,8 +23,20 @@ func (timeoutErr) Error() string   { return "timeout" }
 func (timeoutErr) Timeout() bool   { return true }
 func (timeoutErr) Temporary() bool { return true }
 
+// isolateEndpointPins keeps trusted-endpoints.json writes inside the test's
+// temp dirs: newHaikuClient pins the AI endpoint for the workspace before the
+// key is sent, and without an isolated user config dir that pin file lands in
+// the developer's real ~/.config/beads.
+func isolateEndpointPins(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+}
+
 func TestNewHaikuClient_RequiresAPIKey(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("MINIMAX_API_KEY", "")
 
 	_, err := newHaikuClient("")
 	if err == nil {
@@ -34,6 +51,7 @@ func TestNewHaikuClient_RequiresAPIKey(t *testing.T) {
 }
 
 func TestNewHaikuClient_EnvVarUsedWhenNoExplicitKey(t *testing.T) {
+	isolateEndpointPins(t)
 	t.Setenv("ANTHROPIC_API_KEY", "test-key-from-env")
 
 	client, err := newHaikuClient("")
@@ -46,6 +64,7 @@ func TestNewHaikuClient_EnvVarUsedWhenNoExplicitKey(t *testing.T) {
 }
 
 func TestNewHaikuClient_EnvVarOverridesExplicitKey(t *testing.T) {
+	isolateEndpointPins(t)
 	t.Setenv("ANTHROPIC_API_KEY", "test-key-from-env")
 
 	client, err := newHaikuClient("test-key-explicit")
@@ -57,7 +76,198 @@ func TestNewHaikuClient_EnvVarOverridesExplicitKey(t *testing.T) {
 	}
 }
 
+func TestNewHaikuClient_MiniMaxKeyUsesMiniMaxBaseURL(t *testing.T) {
+	isolateEndpointPins(t)
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("MINIMAX_API_KEY", "test-minimax-key")
+	t.Setenv("MINIMAX_BASE_URL", "")
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config initialize: %v", err)
+	}
+	config.Set("ai.api_key", "")
+	config.Set("ai.base_url", "")
+
+	client, err := newHaikuClient("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if client.apiKeySource != config.AIAPIKeySourceMiniMaxEnv {
+		t.Fatalf("apiKeySource = %q, want %q", client.apiKeySource, config.AIAPIKeySourceMiniMaxEnv)
+	}
+	if client.baseURL != config.MiniMaxDefaultBaseURL {
+		t.Fatalf("baseURL = %q, want %q", client.baseURL, config.MiniMaxDefaultBaseURL)
+	}
+}
+
+func TestNewHaikuClient_AnthropicKeyOverridesMiniMaxKey(t *testing.T) {
+	isolateEndpointPins(t)
+	t.Setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+	t.Setenv("MINIMAX_API_KEY", "test-minimax-key")
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config initialize: %v", err)
+	}
+	config.Set("ai.base_url", "")
+
+	client, err := newHaikuClient("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if client.apiKeySource != config.AIAPIKeySourceAnthropicEnv {
+		t.Fatalf("apiKeySource = %q, want %q", client.apiKeySource, config.AIAPIKeySourceAnthropicEnv)
+	}
+	if client.baseURL != "" {
+		t.Fatalf("baseURL = %q, want SDK default", client.baseURL)
+	}
+}
+
+func TestNewHaikuClient_ConfigBaseURLOverridesMiniMaxDefault(t *testing.T) {
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, ".config"))
+	t.Cleanup(func() { config.Set("ai.base_url", "") })
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("MINIMAX_API_KEY", "test-minimax-key")
+	t.Setenv("MINIMAX_BASE_URL", "https://minimax.example/anthropic")
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config initialize: %v", err)
+	}
+	config.Set("ai.api_key", "")
+	config.Set("ai.base_url", "https://proxy.example/anthropic")
+
+	client, err := newHaikuClient("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if client.baseURL != "https://proxy.example/anthropic" {
+		t.Fatalf("baseURL = %q, want config proxy URL", client.baseURL)
+	}
+}
+
+func TestNewAIClientOptionsPinsBeforeSendingKey(t *testing.T) {
+	t.Cleanup(func() { config.Set("ai.base_url", "") })
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, ".config"))
+	t.Setenv("BD_AI_BASE_URL", "")
+	t.Setenv("ANTHROPIC_API_KEY", "test-api-key")
+	t.Setenv("MINIMAX_API_KEY", "")
+
+	requestsA := 0
+	serverA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestsA++
+		if got := r.Header.Get("x-api-key"); got != "test-api-key" {
+			t.Errorf("server A x-api-key = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"msg_1","type":"message","role":"assistant","model":"claude-3-haiku-20240307","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer serverA.Close()
+	requestsB := 0
+	serverB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestsB++
+		if got := r.Header.Get("x-api-key"); got != "test-api-key" {
+			t.Errorf("server B x-api-key = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"msg_2","type":"message","role":"assistant","model":"claude-3-haiku-20240307","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer serverB.Close()
+
+	writeAIEndpoint := func(endpoint string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("ai:\n  base_url: "+endpoint+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeAIEndpoint(serverA.URL)
+	// The committed-config endpoint is shared; confirm it privately via env.
+	t.Setenv("BD_AI_BASE_URL", serverA.URL)
+	if err := config.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	options, _, _, err := NewAIClientOptions("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := anthropic.NewClient(options...)
+	_, err = client.Messages.New(context.Background(), anthropic.MessageNewParams{
+		Model:     anthropic.Model("claude-3-haiku-20240307"),
+		MaxTokens: 8,
+		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("test"))},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requestsA != 1 {
+		t.Fatalf("server A requests = %d, want 1", requestsA)
+	}
+
+	writeAIEndpoint(serverB.URL)
+	// Drop the env confirmation so the file-config change reaches the gate.
+	t.Setenv("BD_AI_BASE_URL", "")
+	if err := config.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := NewAIClientOptions(""); err == nil || !strings.Contains(err.Error(), "credential was not sent") {
+		t.Fatalf("changed endpoint error = %v", err)
+	}
+	if requestsB != 0 {
+		t.Fatalf("server B received %d requests before confirmation", requestsB)
+	}
+
+	t.Setenv("BD_AI_BASE_URL", serverB.URL)
+	options, _, _, err = NewAIClientOptions("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client = anthropic.NewClient(options...)
+	if _, err := client.Messages.New(context.Background(), anthropic.MessageNewParams{
+		Model:     anthropic.Model("claude-3-haiku-20240307"),
+		MaxTokens: 8,
+		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("test"))},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if requestsB != 1 {
+		t.Fatalf("server B requests after confirmation = %d, want 1", requestsB)
+	}
+}
+
+func TestNewAIClientOptionsIgnoresUnusedMiniMaxEndpoint(t *testing.T) {
+	isolateEndpointPins(t)
+	t.Cleanup(func() { config.Set("ai.base_url", "") })
+	config.Set("ai.base_url", "")
+	t.Setenv("ANTHROPIC_API_KEY", "a")
+	t.Setenv("MINIMAX_API_KEY", "m")
+	t.Setenv("MINIMAX_BASE_URL", "::bad")
+
+	_, source, baseURL, err := NewAIClientOptions("")
+	if err != nil {
+		t.Fatalf("unused MiniMax endpoint caused an error: %v", err)
+	}
+	if source != config.AIAPIKeySourceAnthropicEnv {
+		t.Fatalf("key source = %q, want Anthropic environment", source)
+	}
+	if baseURL != "" {
+		t.Fatalf("base URL = %q, want SDK default", baseURL)
+	}
+}
+
 func TestRenderTier1Prompt(t *testing.T) {
+	isolateEndpointPins(t)
 	client, err := newHaikuClient("test-key")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -99,6 +309,7 @@ func TestRenderTier1Prompt(t *testing.T) {
 }
 
 func TestRenderTier1Prompt_HandlesEmptyFields(t *testing.T) {
+	isolateEndpointPins(t)
 	client, err := newHaikuClient("test-key")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -125,6 +336,7 @@ func TestRenderTier1Prompt_HandlesEmptyFields(t *testing.T) {
 }
 
 func TestRenderTier1Prompt_UTF8(t *testing.T) {
+	isolateEndpointPins(t)
 	client, err := newHaikuClient("test-key")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -157,6 +369,7 @@ func TestRenderTier1Prompt_UTF8(t *testing.T) {
 }
 
 func TestCallWithRetry_ContextCancellation(t *testing.T) {
+	isolateEndpointPins(t)
 	client, err := newHaikuClient("test-key")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -204,7 +417,9 @@ func TestIsRetryable(t *testing.T) {
 }
 
 func TestSummarizeTier1_CancelledContext(t *testing.T) {
+	isolateEndpointPins(t)
 	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("MINIMAX_API_KEY", "")
 	client, err := newHaikuClient("test-key-fake")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -226,7 +441,9 @@ func TestSummarizeTier1_CancelledContext(t *testing.T) {
 }
 
 func TestSummarizeTier1_WithAuditEnabled(t *testing.T) {
+	isolateEndpointPins(t)
 	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("MINIMAX_API_KEY", "")
 	client, err := newHaikuClient("test-key-fake")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -250,7 +467,9 @@ func TestSummarizeTier1_WithAuditEnabled(t *testing.T) {
 }
 
 func TestCallWithRetry_ImmediateContextCancel(t *testing.T) {
+	isolateEndpointPins(t)
 	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("MINIMAX_API_KEY", "")
 	client, err := newHaikuClient("test-key-fake")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

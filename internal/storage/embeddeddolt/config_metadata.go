@@ -5,7 +5,6 @@ package embeddeddolt
 import (
 	"context"
 	"database/sql"
-	"fmt"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -19,17 +18,8 @@ func (s *EmbeddedDoltStore) SetConfig(ctx context.Context, key, value string) er
 			return err
 		}
 		// Sync normalized tables when config keys change
-		switch key {
-		case "status.custom":
-			if err := issueops.SyncCustomStatusesTable(ctx, tx, value); err != nil {
-				return fmt.Errorf("syncing custom_statuses table: %w", err)
-			}
-		case "types.custom":
-			if err := issueops.SyncCustomTypesTable(ctx, tx, value); err != nil {
-				return fmt.Errorf("syncing custom_types table: %w", err)
-			}
-		}
-		return nil
+		_, err := issueops.SyncConfigTables(ctx, tx, key, value)
+		return err
 	})
 }
 
@@ -48,6 +38,23 @@ func (s *EmbeddedDoltStore) GetAllConfig(ctx context.Context) (map[string]string
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
 		result, err = issueops.GetAllConfigInTx(ctx, tx)
+		return err
+	})
+	return result, err
+}
+
+// Callers discover the capability below by type assertion, which degrades
+// silently to a full scan when the method set drifts. This pin turns that
+// drift into a compile error instead.
+var _ domain.ConfigPrefixReader = (*EmbeddedDoltStore)(nil)
+
+// GetConfigByPrefix retrieves the configuration values whose key starts with
+// prefix, filtered in SQL (the domain.ConfigPrefixReader optional fast path).
+func (s *EmbeddedDoltStore) GetConfigByPrefix(ctx context.Context, prefix string) (map[string]string, error) {
+	var result map[string]string
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetConfigByPrefixInTx(ctx, tx, prefix)
 		return err
 	})
 	return result, err

@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func runLinkProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
@@ -18,34 +19,36 @@ func runLinkProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 	depType, _ := cmd.Flags().GetString("type")
 
 	dt := types.DependencyType(depType)
-	if isDisallowedHierarchicalDependency(id1, id2, dt) {
-		return HandleErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", id1, id2)
+	if err := issueops.CheckDottedChildDependency(id1, id2, dt); err != nil {
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	if !dt.IsValid() {
-		return HandleErrorRespectJSON("invalid dependency type %q: must be non-empty and at most 50 characters", depType)
+		return HandleErrorRespectJSON("invalid dependency type %q: must be non-empty and at most %d characters", depType, types.MaxDependencyTypeLen)
 	}
 
 	if uowProvider == nil {
 		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
 	}
 
-	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (depAddResult, string, error) {
+	if err := uow.RunTx(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
 		dep := &types.Dependency{IssueID: id1, DependsOnID: id2, Type: dt}
-		if _, err := uw.DependencyUseCase().AddDependencies(ctx, []*types.Dependency{dep}, actor, domain.BulkAddDepsOpts{}); err != nil {
-			return depAddResult{}, "", err
+		// Source-routed, like the direct twin's store.AddDependencyWithOptions:
+		// `bd link` takes whatever id the caller names, and a wisp source has no
+		// row in the issues plane for the edge to hang off.
+		if _, err := uw.DependencyUseCase().AddDependencies(ctx, []*types.Dependency{dep}, currentActor(), domain.BulkAddDepsOpts{}); err != nil {
+			return "", err
 		}
-		cycles, cycleErr := uw.DependencyUseCase().DetectCycles(ctx)
-		return depAddResult{
-			fromTitle: proxiedLookupTitle(ctx, uw, id1),
-			toTitle:   proxiedLookupTitle(ctx, uw, id2),
-			cycles:    cycles,
-			cycleErr:  cycleErr,
-		}, fmt.Sprintf("bd: link %s %s", id1, id2), nil
-	})
-	if err != nil {
+		return fmt.Sprintf("bd: link %s %s", id1, id2), nil
+	}); err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
+
+	// The sweep and the titles come AFTER the write commits, for the reason
+	// depEdgeFeedback gives: a cycle warning computed inside a transaction that
+	// has not committed describes a graph nobody else can see. This route used
+	// to run both inside the write.
+	res := depEdgeFeedback(ctx, id1, id2, true)
 
 	printCycleDetectionError(res.cycleErr)
 	printCycleWarnings(res.cycles)

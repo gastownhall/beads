@@ -1,0 +1,900 @@
+package storage
+
+import (
+	"fmt"
+	"go/ast"
+	"go/build/constraint"
+	"go/parser"
+	"go/token"
+	"io/fs"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
+)
+
+// conformancePackage is the import path whose Run entrypoints each leg wires.
+const conformancePackage = "github.com/steveyegge/beads/backend/conformance"
+
+// neverSatisfiedTags are build tags nothing ever sets. A file behind one is in
+// no build, so what it names is not wiring.
+var neverSatisfiedTags = map[string]bool{"ignore": true, "never": true}
+
+// importerOneAccessorWaiverReason records why the Importer contract runs on one
+// leg. publicops.Importer has exactly one accessor anywhere — uow.ImporterSource
+// — and it is the only capability source in internal/storage/uow with no
+// storage.DoltStorage counterpart: on both store legs `bd import` still runs the
+// raw CreateIssuesWithFullOptions seam. Wiring the other two is a new interface
+// method plus a new body at each backend, not a test change. The waiver stops
+// the moment either leg grows the accessor.
+const importerOneAccessorWaiverReason = "Importer has one accessor (uow.ImporterSource); " +
+	"the store legs run bd import through the raw seam and implement no Importer role"
+
+// asOfReadNoHTTPWireWaiverReason covers the five R7.1 as-of read contracts
+// (backend/conformance/versioned_read_contract.go). Unlike the
+// participation-generation cases, which run on this leg because their subject
+// is a create or an update the client can send
+// (internal/httpclient/served_participation_generation_test.go), the subject
+// here is the read itself, AsOfReadFixture.Resolve, and it has no form on the
+// wire:
+//   - R7.1's read is issueops.AsOfReadInTx. No publicops role reaches it and no
+//     wire operation serves it, so there is nothing for the client to call.
+//   - The wire carries neither selector (an instant, or a previously served
+//     version address) nor the gone/unknown refusal the read answers with.
+//   - The client's only point-in-time read, storage.DoltStorage.AsOf, is a
+//     Dolt commit-ref read, not R7.1, and it is on the client's unsupported
+//     allowlist (D8: v0 publishes no history surface).
+//
+// Binding Resolve to the reference store behind the served env would run the
+// cases green, but as a property of that store, never of the client; the store
+// legs already pin it. The waiver stands until the wire publishes an as-of
+// read.
+const asOfReadNoHTTPWireWaiverReason = "the read under test has no form on the http wire: R7.1's as-of read " +
+	"(issueops.AsOfReadInTx) is reached by no publicops role and no wire operation, the wire carries neither an " +
+	"instant/version-address selector nor a gone/unknown refusal, and the client's only point-in-time read, " +
+	"DoltStorage.AsOf, is a Dolt commit-ref read on its unsupported allowlist (D8)"
+
+// idRetentionNoTransactionWaiverReason is why the in-transaction retired-id
+// case stops short of the http leg: it drives storage.Transaction.CreateIssue,
+// and the http client serves no transaction surface (RunInTransaction cannot
+// span requests; internal/httpclient/completeness_test.go). The refusal it
+// asserts is the shared create guard's, which runs on every store leg, and the
+// wire's own create doors refuse a retired id on this leg's createIssue and
+// applyBatch cases.
+const idRetentionNoTransactionWaiverReason = "IDRetentionFixture.TxCreate is storage.Transaction.CreateIssue, and the " +
+	"http client has no transaction surface: RunInTransaction cannot span requests. The retired-id guard it would " +
+	"exercise is the shared create body's and runs on every store leg; this leg's wire create doors run their own cases"
+
+// idRetentionNoUpsertDoorWaiverReason is why the two retired-id cases that
+// drive IDRetentionFixture.UpsertCreate stop short of the http leg: the wire
+// serves no upsert-shaped single create. createIssue is create-only (a live id
+// is a 409), so there is no overwrite-or-insert door on this leg to guard. The
+// guard both cases pin is the shared create body's and runs on every store leg.
+const idRetentionNoUpsertDoorWaiverReason = "IDRetentionFixture.UpsertCreate is a store's overwrite-or-insert " +
+	"CreateIssue, and the wire serves no such door: createIssue is create-only. The guard both cases pin is the " +
+	"shared create body's and runs on every store leg"
+
+// idRetentionNoImportDoorWaiverReason is why the two retired-id cases that
+// drive IDRetentionFixture.Importer stop short of the http leg: the wire
+// publishes no import operation, so the client hands out no Importer and this
+// leg has no import door to skip a retired row. Both cases run on every store
+// leg, through the seam `bd import` writes through there.
+const idRetentionNoImportDoorWaiverReason = "IDRetentionFixture.Importer is the Importer role, and the http client " +
+	"hands out none: the wire publishes no import operation. Both import cases run on every store leg"
+
+// idRetentionNoRenameDoorWaiverReason is why the rename-onto-a-retired-id case
+// stops short of the uow and http legs: it drives the storage-level identity
+// change (storage.Storage.UpdateIssueID), and neither leg serves one. The unit
+// of work has no rename use case, and the http client answers UpdateIssueID
+// with its typed unsupported error (unsupported_gen.go). The guard it asserts lives in the
+// shared rename body, issueops.UpdateIssueIDInTx, which the store legs run.
+const idRetentionNoRenameDoorWaiverReason = "IDRetentionFixture.Rename is storage.Storage.UpdateIssueID, and this " +
+	"leg serves no identity change: the unit of work has no rename use case and the http client refuses it as " +
+	"unsupported. The guard is the shared rename body's (issueops.UpdateIssueIDInTx) and runs on every store leg"
+
+// The waivers of the three legs registered here. Each is registered beside its
+// leg rather than written into one literal, so a leg registered elsewhere
+// brings its waivers the same way; see unwiredContractEntrypoints.
+func init() {
+	registerContractLegWaivers("dolt", map[string]string{
+		"RunImporterRejectsAStaleRowAndNamesIt":           importerOneAccessorWaiverReason,
+		"RunImporterReportsTheAbsentTargetItDroppedOnce":  importerOneAccessorWaiverReason,
+		"RunImporterWiresTheCrossPlaneEdgeBetweenItsRows": importerOneAccessorWaiverReason,
+		"RunImporterReportsTheCycleEdgeItDropped":         importerOneAccessorWaiverReason,
+		"RunBootstrapperRecordsExactlyOneHistoryEntry":    bootstrapSplitWaiverReason,
+	})
+	registerContractLegWaivers("embeddeddolt", map[string]string{
+		"RunImporterRejectsAStaleRowAndNamesIt":           importerOneAccessorWaiverReason,
+		"RunImporterReportsTheAbsentTargetItDroppedOnce":  importerOneAccessorWaiverReason,
+		"RunImporterWiresTheCrossPlaneEdgeBetweenItsRows": importerOneAccessorWaiverReason,
+		"RunImporterReportsTheCycleEdgeItDropped":         importerOneAccessorWaiverReason,
+		"RunBootstrapperRecordsExactlyOneHistoryEntry":    bootstrapSplitWaiverReason,
+	})
+	registerContractLegWaivers("uow", map[string]string{
+		"RunBootstrapperRecordsNoHistoryEntryOfItsOwn":                   bootstrapSplitWaiverReason,
+		"RunIssueOperationsCreateReverseNonBlockingStagesConcreteTables": stagingWaiverReason,
+		"RunIssueOperationsCreateParentChildRecomputesWaitsForClosure":   stagingWaiverReason,
+		"RunIDRetentionRefusesARenameOntoARetiredID":                     idRetentionNoRenameDoorWaiverReason,
+	})
+	registerContractLegWaivers("http", map[string]string{
+		"RunAsOfReadIsCompleteOnlyForTheAnsweringStoresHoldings":              asOfReadNoHTTPWireWaiverReason,
+		"RunAsOfReadRefusesAsGoneOrUnknownNeverSubstitutingAnotherVersion":    asOfReadNoHTTPWireWaiverReason,
+		"RunAsOfReadReportsTheAddressItServed":                                asOfReadNoHTTPWireWaiverReason,
+		"RunAsOfReadReturnsTheLatestVersionAtOrBeforeTStrictlyExcludingLater": asOfReadNoHTTPWireWaiverReason,
+		"RunAsOfReadSelectorAcceptsEitherAnInstantOrAVersionAddress":          asOfReadNoHTTPWireWaiverReason,
+
+		"RunIDRetentionRefusesInsideATransaction":        idRetentionNoTransactionWaiverReason,
+		"RunIDRetentionRefusesThroughTheStorageSeam":     idRetentionNoUpsertDoorWaiverReason,
+		"RunIDRetentionARacingUpsertNeverResurrects":     idRetentionNoUpsertDoorWaiverReason,
+		"RunIDRetentionImportSkipsAndReportsARetiredRow": idRetentionNoImportDoorWaiverReason,
+		"RunIDRetentionARacingImportNeverResurrects":     idRetentionNoImportDoorWaiverReason,
+		"RunIDRetentionRefusesARenameOntoARetiredID":     idRetentionNoRenameDoorWaiverReason,
+
+		"RunCycleDetectorIncludeTracksFindsTheMoleculeRootShape":         cycleTracksWireGapWaiverReason,
+		"RunCycleDetectorIncludeTracksIgnoresAPureTracksLoop":            cycleTracksWireGapWaiverReason,
+		"RunCycleDetectorIncludeTracksWalksEachEdgeInItsStoredDirection": cycleTracksWireGapWaiverReason,
+
+		"RunBootstrapperIdentifiesAFreshSubstrate":                       bootstrapperPermanentlyUnservableWaiverReason,
+		"RunBootstrapperLeavesTheSubstrateUntouchedWhenItCannotComplete": bootstrapperPermanentlyUnservableWaiverReason,
+		"RunBootstrapperRecordsExactlyOneHistoryEntry":                   bootstrapperPermanentlyUnservableWaiverReason,
+		"RunBootstrapperRecordsNoHistoryEntryOfItsOwn":                   bootstrapperPermanentlyUnservableWaiverReason,
+		"RunBootstrapperRefusesASubstrateCarryingOnlyAPrefix":            bootstrapperPermanentlyUnservableWaiverReason,
+		"RunBootstrapperRefusesASubstrateCarryingOnlyAProjectID":         bootstrapperPermanentlyUnservableWaiverReason,
+		"RunBootstrapperRefusesAnIdentifiedSubstrate":                    bootstrapperPermanentlyUnservableWaiverReason,
+		"RunBootstrapperRefusesAnInvalidRequestWithoutWriting":           bootstrapperPermanentlyUnservableWaiverReason,
+		"RunBootstrapperStoresThePrefixWithoutItsTrailingHyphen":         bootstrapperPermanentlyUnservableWaiverReason,
+
+		"RunImporterRejectsAStaleRowAndNamesIt":           importerOneAccessorWaiverReason,
+		"RunImporterReportsTheAbsentTargetItDroppedOnce":  importerOneAccessorWaiverReason,
+		"RunImporterWiresTheCrossPlaneEdgeBetweenItsRows": importerOneAccessorWaiverReason,
+		"RunImporterReportsTheCycleEdgeItDropped":         importerOneAccessorWaiverReason,
+
+		"RunACarriedAddressKeepsResolvingAcrossLaterBumps":             retentionEpochNoRoleWaiverReason,
+		"RunADestructiveOperationEnumeratesAffectedAddressesFirst":     retentionEpochNoRoleWaiverReason,
+		"RunAHoldPreventsRemovalAndReportsInRetainedBounds":            retentionEpochNoRoleWaiverReason,
+		"RunALostAddressStaysGoneAcrossASchemeChange":                  retentionEpochNoRoleWaiverReason,
+		"RunAStoreThatRemovesStateStillAnswersGoneDurably":             retentionEpochNoRoleWaiverReason,
+		"RunAStoreWithNoLineageKnowledgeAnswersUnknownNotGone":         retentionEpochNoRoleWaiverReason,
+		"RunAnAddressNeverResolvesToADifferentState":                   retentionEpochNoRoleWaiverReason,
+		"RunAnEpochBumpIsTriggeredOnlyByRestoreReinitOrSchemeChange":   retentionEpochNoRoleWaiverReason,
+		"RunEpochBumpVoidsOnlyAddressesOfVersionsNoLongerServed":       retentionEpochNoRoleWaiverReason,
+		"RunErasureMintsACorrectedVersionRatherThanEditingInPlace":     retentionEpochNoRoleWaiverReason,
+		"RunEveryRetentionAnswerNamesItsProducingStore":                retentionEpochNoRoleWaiverReason,
+		"RunForcingAHeldRemovalRecordsWhoWhenWhy":                      retentionEpochNoRoleWaiverReason,
+		"RunGoneIsDistinguishableFromUnknown":                          retentionEpochNoRoleWaiverReason,
+		"RunRemovalLeavesTheAddressAbleToAnswer":                       retentionEpochNoRoleWaiverReason,
+		"RunRemovalNeverReassignsASurvivingAddress":                    retentionEpochNoRoleWaiverReason,
+		"RunRemovalReasonIsRetentionErasureOrReorganizationDistinctly": retentionEpochNoRoleWaiverReason,
+		"RunRemovalReportsTheSurvivingRetainedWindow":                  retentionEpochNoRoleWaiverReason,
+		"RunTokenSchemeChangeCarriesLiveAddressesAndOnlyThose":         retentionEpochNoRoleWaiverReason,
+
+		"RunAdvisoryLeaseAloneDoesNotPreventTheInvariantViolation":    crossRecordInvariantNoRoleWaiverReason,
+		"RunCrossRecordInvariantSurvivesTwoPassingPerRecordGuards":    crossRecordInvariantNoRoleWaiverReason,
+		"RunInvariantRefusalNamesTheViolatedInvariant":                crossRecordInvariantNoRoleWaiverReason,
+		"RunLeaseAcquisitionRecordsNoHistoryEntry":                    crossRecordInvariantNoRoleWaiverReason,
+		"RunMaximumEndpointMultiplicityIsAStoreInvariantNotACAS":      crossRecordInvariantNoRoleWaiverReason,
+		"RunMemoryKeyAliasUniquenessIsAStoreInvariantNotACAS":         crossRecordInvariantNoRoleWaiverReason,
+		"RunStoreInvariantTransactionScopesExactlyTheSpanningRecords": crossRecordInvariantNoRoleWaiverReason,
+
+		"RunVersionReconcilerAdvancesBothMarkersOnAnUpgrade":               versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunVersionReconcilerCatchesUpToTheHighWaterMark":                  versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunVersionReconcilerLeavesTheMarkersStandingWhenItCannotComplete": versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunVersionReconcilerRecordsAWorkspaceWithNoMarkers":               versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunVersionReconcilerRecordsNoHistory":                             versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunVersionReconcilerRefusesADowngradeWithoutAnError":              versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunVersionReconcilerRefusesAVersionBelowTheHighWaterMark":         versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunVersionReconcilerRefusesAnEmptyVersion":                        versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunVersionReconcilerTreatsTheSameVersionAsANoOp":                  versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunInitVerifierAnswersEmptyForAnUnidentifiedSubstrate":            versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunInitVerifierReportsAFailedReadAsAnError":                       versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunInitVerifierReportsAPartialIdentityAsItStands":                 versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+		"RunInitVerifierWritesNothing":                                     versionReconcilerInitVerifierPermanentlyUnservableWaiverReason,
+
+		"RunIssueOperationsUpdateClosedFieldsMatchClose":                  issueOperationsUpdateRawSeamWaiverReason,
+		"RunIssueOperationsUpdateRawMetadataTakesTheFunnelsValueShapes":   issueOperationsUpdateRawSeamWaiverReason,
+		"RunIssueOperationsUpdateStampsStartedAtOnceOnTheFirstInProgress": issueOperationsUpdateRawSeamWaiverReason,
+
+		"RunLifecycleUpdateExpectedVersionSingleWinnerWithDisjointColumnsUnderConcurrency":  issuePatchFieldsNotOnUpdateWireWaiverReason,
+		"RunLifecycleUpdateExpectedVersionSingleWinnerAcrossUpdateAndCloseUnderConcurrency": issuePatchFieldsNotOnUpdateWireWaiverReason,
+
+		"RunParticipationGenerationNoHistoryIssueCreateDeclaresParticipation": participationGenerationWireGapWaiverReason,
+		"RunParticipationGenerationUnflaggedWispCreateMintsNothing":           participationGenerationWireGapWaiverReason,
+		"RunParticipationGenerationWispFlagClearMintsNothing":                 participationGenerationWireGapWaiverReason,
+		"RunParticipationGenerationWispRootSquashMintsNothing":                participationGenerationWireGapWaiverReason,
+		"RunParticipationGenerationReadReportsExactlyTheParticipatingRows":    participationReadNoHTTPWireWaiverReason,
+	})
+}
+
+// cycleTracksWireGapWaiverReason covers the one CycleDetector widening option
+// the HTTP wire does not carry at all.
+//
+// issueops.DetectCyclesRequest.IncludeTracks is a WIDENING field consumed
+// today only by `bd dep cycles` in-process. internal/httpapi/cycles.go calls
+// DetectCycles with a bare issueops.DetectCyclesRequest{} — it decodes no
+// query parameter for it — and internal/httpclient's httpCycleDetector reads
+// the field and, finding no wire parameter to carry it, REFUSES the request
+// with a typed, ledger-cited error (encode.RefusedError via refuse(), citing
+// "L-cycles-tracks") rather than silently answering the narrower default
+// walk. Neither side of the wire has any plumbing for this field, so the
+// three IncludeTracks cases cannot be satisfied over HTTP — the client fails
+// loudly instead of wiring a narrower answer, which is why these three remain
+// unwired rather than run-and-skipped.
+//
+// No shipped slice adds a query parameter, spec capability token, or
+// handshake entry for this option — see "L-cycles-tracks" in the in-repo
+// divergence ledger, engdocs/design/http-divergence-ledger.md, which records
+// it as a refuse row rather than a wired one. Closing this gap is a new
+// slice — a query parameter plus spec/capability plumbing on both ends — not
+// a missing test line, so the waiver stays until that slice exists.
+const cycleTracksWireGapWaiverReason = "issueops.DetectCyclesRequest.IncludeTracks has no wire plumbing on " +
+	"either side of internal/httpapi or internal/httpclient today (cycles.go always calls DetectCycles with a " +
+	"zero-value request; the client's DetectCycles refuses the request via a typed, ledger-cited error — see " +
+	"\"L-cycles-tracks\" — rather than silently answering the narrower walk); no slice through S13 adds a wire " +
+	"parameter for it, so closing this is a new, not-yet-numbered slice rather than a missing test line"
+
+// retentionEpochNoRoleWaiverReason covers the eighteen RetentionFixture and
+// EpochFixture cases (backend/conformance/retention_epoch_contract.go).
+// All but four of the participation-generation cases run on this leg because
+// their subject is a create or an update the client can send
+// (internal/httpclient/served_participation_generation_test.go; those four
+// stay waived under participationGenerationWireGapWaiverReason). These
+// cases are different: every hook of these two fixtures IS the operation
+// under test, and none has a form on the wire:
+//   - EpochFixture's hooks (CurrentEpoch, BumpEpoch, MintUnderEpoch,
+//     StillServes, Resolve, CurrentAddressFor, LoseVersion) are the R20 epoch
+//     operations themselves: methods on the concrete *DoltStore and
+//     *EmbeddedDoltStore over issueops' *InTx bodies, on no storage
+//     interface, no publicops role and no wire operation. Every call path
+//     into them starts in a test: the methods are called only from each
+//     store leg's own _test.go files (its EpochFixture, which the
+//     backend/conformance contracts drive, and its epoch tests), and the
+//     *InTx bodies only from those methods, from each other and from tests
+//     (the uow leg's fixture, through a test-only type assertion, and
+//     issueops' and the dolt leg's own tests). No command, role or server
+//     handler reaches them, so no client mutation touches epoch state either.
+//   - RetentionFixture's hooks (Resolve, Remove, Hold, ForceRemove, Erase,
+//     Mint) are retention operations no backend implements yet: every
+//     store leg wires them nil and its cases skip, and the wire has no
+//     removal, hold, erasure or gone/unknown resolve to bind them to.
+//
+// Binding the hooks to the reference store behind the served env would run
+// the epoch cases green, but as a property of that store, never of the
+// client; the store legs already pin it. The waiver stands until retention or
+// epoch state gets a publicops role and a wire operation of its own, which
+// would be a new role, not a missing test line.
+const retentionEpochNoRoleWaiverReason = "every RetentionFixture/EpochFixture hook is the operation under test and " +
+	"none has a form on the http wire: the R20 epoch operations (CurrentEpoch, BumpEpoch, MintUnderEpoch, " +
+	"StillServes, Resolve, CurrentAddressFor, LoseVersion) are concrete-store methods on no storage interface, " +
+	"publicops role or wire operation, reached only from tests (each store leg's fixture and epoch tests call the " +
+	"methods, the uow fixture calls the issueops bodies through a test-only type assertion), and the retention " +
+	"hooks (Resolve, Remove, Hold, ForceRemove, Erase, Mint) are implemented by no backend and have no wire " +
+	"removal, hold, erasure or resolve; binding them to the served env's reference store would test that store, " +
+	"not the client"
+
+// crossRecordInvariantNoRoleWaiverReason covers the seven CrossRecordInvariantFixture
+// cases, for the same shape of reason as retentionEpochNoRoleWaiverReason.
+//
+// CrossRecordInvariantFixture (backend/conformance/cross_record_invariant_contract.go)
+// is likewise raw hooks with no publicops field — GuardedWrite,
+// EnforceCrossRecordInvariant, AcquireAdvisoryLease,
+// CountHistoryForSubject, MemoryKeyAliasWrite, GraphEdgeWrite — that assert a
+// store's OWN invariant enforcement spanning more than one record at once,
+// the kind of guarantee a storage engine's own transaction boundary gives,
+// not a wire operation it exposes. dolt, embeddeddolt and uow wire it as the
+// engines that hold that boundary; the http leg has none of its own to test.
+const crossRecordInvariantNoRoleWaiverReason = "CrossRecordInvariantFixture carries raw per-record/cross-record " +
+	"storage hooks (GuardedWrite, EnforceCrossRecordInvariant, AcquireAdvisoryLease, CountHistoryForSubject, " +
+	"MemoryKeyAliasWrite, GraphEdgeWrite) with no publicops role behind them, asserting a storage engine's own " +
+	"transaction boundary rather than something exposed over a wire; the http leg has no transaction boundary " +
+	"of its own for this to test"
+
+// bootstrapSplitWaiverReason covers the one pair of entrypoints that is a
+// RATIFIED PER-LEG SPLIT rather than a gap.
+//
+// The bootstrap history contracts come in two halves that contradict each other
+// on purpose: the store legs assert the role records NO entry, because `bd
+// init`'s own commit records it and an in-role commit would double it, and the
+// unit-of-work leg asserts EXACTLY ONE, because the proxied init route has no
+// other commit point and a zero there would leave the identity unversioned.
+// Each leg wires the half that is true of the front door it stands behind, and
+// wiring the other half would assert a number that leg is right not to produce.
+//
+// This is the shape a lock like this has to be able to express. Every other
+// entry here says "this leg cannot run that contract"; this one says "that
+// contract is another leg's promise". Both stay checked: the pair is exhaustive
+// across the three legs, and if either half stopped being wired anywhere the
+// leg that owns it fails.
+const bootstrapSplitWaiverReason = "the bootstrap history contracts are a ratified per-leg split — the store " +
+	"legs pin zero because `bd init` commits the identity itself, the unit-of-work leg pins one because the " +
+	"proxied route has no other commit point; each leg wires its own half and the other half is not its promise"
+
+// bootstrapperPermanentlyUnservableWaiverReason covers the nine Bootstrapper
+// contracts: PERMANENTLY unservable over http, not merely unwired yet.
+//
+// internal/httpclient/accessors.go names Bootstrapper (alongside VersionReconciler
+// and InitVerifier) as one of the THREE accessors still on the generated
+// refusing shell for one reason: "PERMANENTLY UNSERVABLE — no wire operation
+// and none coming." `bd init` runs its substrate-identification walk entirely
+// client-side before any server exists to dial, so there is no v0 operation for
+// an http accessor to bind to and none is coming — closing this gap is not a
+// missing line, it is a wire operation nobody has designed. This waiver covers
+// Bootstrapper only; VersionReconciler and InitVerifier share the same fate in
+// the same comment but are out of scope for the change that added this waiver
+// and remain counted against the ceiling until their own reviewed change
+// names them too.
+const bootstrapperPermanentlyUnservableWaiverReason = "internal/httpclient/accessors.go names Bootstrapper " +
+	"PERMANENTLY UNSERVABLE over http — no wire operation and none coming — because `bd init` resolves the " +
+	"substrate identity entirely client-side, before any server exists to dial"
+
+// stagingWaiverReason is why the two staging contracts stop at the two
+// store-backed legs.
+//
+// Both assert what a create COMMITS: seed rows, commit them, dirty an unrelated
+// durable row in the working set, create, then read `AS OF 'HEAD'` to prove the
+// create staged its own tables without sweeping the dirty row in. That needs a
+// caller-held working set and a Commit hook to close it, and the unit-of-work
+// provider has neither by design — every unit of work commits itself, with its
+// own message, so there is no uncommitted state for a caller to leave lying
+// around and no separate commit for one to be swept into. Its fixture supplies
+// neither Commit nor Exec (see uow/role_fixture_kit_test.go), and the two cases
+// dereference Commit unguarded rather than skipping loudly.
+//
+// Wiring them would mean inventing a commit boundary this backend does not
+// have, to assert a property it cannot violate. That is a change to the
+// backend's test surface, not a missing line, so it belongs in a change of its
+// own rather than arriving behind a wiring lock.
+const stagingWaiverReason = "the unit-of-work provider commits every unit of work itself, so it has no " +
+	"caller-held working set to stage into and no Commit hook to close one; these two cases assert what a " +
+	"create sweeps into a commit the caller opened"
+
+// versionReconcilerInitVerifierPermanentlyUnservableWaiverReason covers the
+// thirteen VersionReconciler and InitVerifier contracts: PERMANENTLY
+// unservable over http, not merely unwired yet.
+//
+// internal/httpclient/accessors.go names VersionReconciler and InitVerifier,
+// alongside Bootstrapper, as the three accessors still on the generated
+// refusing shell for one reason: "PERMANENTLY UNSERVABLE — no wire operation
+// and none coming." Both share Bootstrapper's own fate and (InitVerifier
+// shares BootstrapperFixture outright) the same cause: `bd init`'s substrate
+// identification and the schema-version reconciliation it drives both run
+// entirely client-side, against the on-disk substrate a server-mediated
+// caller never touches directly, before or instead of any server existing to
+// dial. There is no v0 operation for an http accessor to bind to and none is
+// coming. This waiver was left out of the change that added
+// bootstrapperPermanentlyUnservableWaiverReason (that change's own comment
+// says so) and is added by this one.
+const versionReconcilerInitVerifierPermanentlyUnservableWaiverReason = "internal/httpclient/accessors.go names " +
+	"VersionReconciler and InitVerifier PERMANENTLY UNSERVABLE over http, the same fate as Bootstrapper — no " +
+	"wire operation and none coming — because both run entirely client-side against the on-disk substrate " +
+	"(schema-version reconciliation and `bd init`'s own identity read) before or instead of any server existing " +
+	"to dial"
+
+// issueOperationsUpdateRawSeamWaiverReason covers the three
+// IssueOperationsStagingFixture cases whose SUBJECT is the untyped UpdateRaw
+// funnel itself, not merely a fixture that seeds through it.
+//
+// storage.UpdateIssue is on this client's unsupported allowlist by design
+// (D8: re-routing a raw front door would put a second spelling of the edit
+// beside the role's), so served_issue_operations_test.go binds UpdateRaw only
+// to the REFERENCE store's own untyped funnel (env.reference.UpdateIssue),
+// never to the client — see that file's own doc comment. That binding is
+// sound for every case actually wired there because none of them takes the
+// funnel AS ITS SUBJECT; these three do (RunIssueOperationsUpdateClosedFieldsMatchClose
+// drives a reopen/reclose through it, RunIssueOperationsUpdateStampsStartedAtOnceOnTheFirstInProgress
+// and RunIssueOperationsUpdateRawMetadataTakesTheFunnelsValueShapes assert
+// what it writes). Wiring them against the reference store's funnel would
+// assert a property of the store the server happens to share a process with,
+// never of the client under test — the same kind of empty assertion binding
+// UpdateRaw to the client would be in the other direction. There is no
+// client-side UpdateRaw to bind instead: that is D8's allowlist decision, not
+// a gap.
+const issueOperationsUpdateRawSeamWaiverReason = "these three cases take the untyped UpdateRaw funnel itself as " +
+	"their subject; storage.UpdateIssue is on this client's unsupported allowlist by design (D8), so there is no " +
+	"client-side UpdateRaw to bind, and binding the reference store's own funnel instead (as this leg's other " +
+	"IssueOperationsStagingFixture cases do, to SEED preconditions) would assert a property of the store the " +
+	"server happens to share a process with, never of the client under test"
+
+// issuePatchFieldsNotOnUpdateWireWaiverReason covers the two
+// LifecycleUpdateFixture concurrency cases whose racers patch
+// IssuePatch.SpecID, .AwaitID, and/or .Owner against updateIssue.
+//
+// THIS IS PENDING, NOT PERMANENT: it is unbuilt work waiting on a wire
+// change, not a boundary this leg can never cross. S4 wired the other two
+// ExpectedVersion concurrency races (the plain Update race over
+// Priority/Notes, and the Close race) against the real served HTTP harness,
+// and both pass: precondition_failed decodes to storage.ErrVersionMismatch
+// exactly as the local legs report it. These two cases cannot follow
+// because SOME of their racers patch fields updateIssue refuses outright
+// rather than ever sending — not a race outcome, a refusal before any
+// request leaves the client. internal/httpclient/encode/ledger.go already
+// names this gap per field (W-IssuePatch.SpecID, W-IssuePatch.Owner, D8
+// refuse-not-drop): neither IssuePatchBody nor
+// ApplyPatchBody publishes spec_id at all, and Owner is excluded
+// from IssuePatchBody specifically (ApplyPatchBody — issues:batchApply's body
+// — does carry it, which is a different operation from updateIssue). Closing
+// this gap means publishing those fields on IssuePatchBody, a wire change to
+// the write role itself, not a client-side wiring exercise — tracked as a
+// follow-up slice, S4b: publish owner/spec_id/await_id on the wire. await_id
+// is published on both patch bodies behind issues.update.gates and sent by
+// this client (W-IssuePatch.AwaitID retired), so only
+// spec_id and owner remain S4b's. Until they land, these two contracts stay
+// off this leg rather than asserting a race outcome against a request some of
+// its racers never send.
+const issuePatchFieldsNotOnUpdateWireWaiverReason = "PENDING, not permanent (tracked as S4b: publish " +
+	"owner/spec_id/await_id on the wire): two of the four ExpectedVersion concurrency contracts race " +
+	"IssuePatch.SpecID/.AwaitID/.Owner edits against updateIssue, and SpecID and Owner are refused outright by " +
+	"this client (W-IssuePatch.SpecID, W-IssuePatch.Owner in " +
+	"internal/httpclient/encode/ledger.go, D8 refuse-not-drop) rather than ever reaching the server, so the race " +
+	"never happens over this wire; await_id is sent behind issues.update.gates, and " +
+	"closing the rest of the gap means publishing spec_id and owner on IssuePatchBody, which is a wire change " +
+	"to the write role (S4b), not something this leg's test wiring can bind around today"
+
+// participationReadNoHTTPWireWaiverReason covers the participation read's case
+// (RunParticipationGenerationReadReportsExactlyTheParticipatingRows), for the
+// reason the as-of read's cases are waived: the subject is the read itself, and
+// it has no form on the wire. issueops.ParticipatingIssueIDsInTx is reached by
+// storage.HistoryParticipation on the store legs and by the unit of work's
+// IssueUseCase on uow, by no publicops role, and no wire operation serves it, so
+// the client has nothing to call. Binding the closure to the reference store
+// behind the served env would run the case green as a property of that store,
+// never of the client. (The pre-enable scan does not reach it over HTTP either:
+// its listing is refused first, ListRequest.IncludeAllTypes having no form on the
+// v0 wire.)
+const participationReadNoHTTPWireWaiverReason = "the read under test has no form on the http wire: " +
+	"issueops.ParticipatingIssueIDsInTx is reached by storage.HistoryParticipation on the store legs and the " +
+	"unit of work's IssueUseCase on uow, by no publicops role and no wire operation, so the client has nothing " +
+	"to call"
+
+// participationGenerationWireGapWaiverReason covers the four
+// ParticipationGenerationFixture cases whose mutation has no form on this
+// wire. The other cases run on the http leg
+// (internal/httpclient/served_participation_generation_test.go): the client
+// creates and updates, and the fixture flips the reference store's flag and
+// reads its raw columns, as served_dualwrite_history_test.go does.
+//
+// Each waived case needs a mutation the client cannot send:
+//   - WispFlagClearMintsNothing clears a wisp's flag IN PLACE with the untyped
+//     UpdateIssue map {"wisp": false}. storage.UpdateIssue is on this client's
+//     unsupported allowlist (D8), and IssuePatch has no in-place flag member:
+//     its Persistence member moves the row between tables, which the
+//     wisp-arrival cases already run here.
+//   - WispRootSquashMintsNothing runs the close and that flag clear in ONE
+//     transaction. RunInTransaction is on the unsupported allowlist too, and
+//     the wire publishes no squash operation.
+//   - UnflaggedWispCreateMintsNothing creates an unflagged row in the wisps
+//     table through import's WispPlaneOverride = &true. The wire drops that
+//     member (roleIgnoredCreateIssueMembers in batchcreator.go), so an
+//     unflagged create lands in the issues table.
+//   - NoHistoryIssueCreateDeclaresParticipation has a no-history ISSUES-table
+//     create as its subject (WispPlaneOverride = &false). With that member
+//     dropped, a client create carrying no_history routes to the wisps table
+//     (TableRouting). Seeding the row through the reference store instead
+//     would make the create under test the store's own, a property of the
+//     store the server happens to share a process with, never of the client.
+const participationGenerationWireGapWaiverReason = "PENDING, not permanent (no slice tracks it yet; each case runs " +
+	"on this leg once the wire publishes its mutation: an in-place wisp flag clear, a squash operation, or a create " +
+	"that names its table plane the way import's WispPlaneOverride does): " +
+	"the mutation this case needs has no form on the http wire: " +
+	"an in-place wisp flag clear is an untyped UpdateIssue map and the squash a RunInTransaction, both on this " +
+	"client's unsupported allowlist (D8), and IssuePatch.Persistence moves the row rather than clearing the flag in " +
+	"place; an unflagged wisps-table create and a no-history issues-table create both need WispPlaneOverride, " +
+	"which the wire drops (roleIgnoredCreateIssueMembers), so the first lands in issues and the second in wisps"
+
+// TestEveryLegWiresEveryRoleContract fails when a backend leg skips a role
+// contract the conformance package exports.
+//
+// The contracts are shared source: writing one is worth nothing until every leg
+// runs it, and nothing about adding a Run entrypoint reminds an author to wire
+// it into three test files. A leg missing one is invisible — its own suite
+// still passes, and the entrypoint still has two other backends behind it, so
+// the silence looks exactly like coverage.
+//
+// It reads source rather than running anything, so it holds for the legs whose
+// suites need infrastructure this test does not have: the server-backed store
+// needs a live sql-server and the embedded store needs cgo, and their wiring is
+// checked here either way.
+func TestEveryLegWiresEveryRoleContract(t *testing.T) {
+	root := repositoryRoot(t)
+	entrypoints := roleContractEntrypoints(t, filepath.Join(root, "backend", "conformance"))
+	if len(entrypoints) == 0 {
+		t.Fatal("the conformance package exports no role contract entrypoints; this test would pass vacuously")
+	}
+	legs := registeredContractLegs(t)
+	known := map[string]bool{}
+	for _, name := range entrypoints {
+		known[name] = true
+	}
+	registered := map[string]bool{}
+
+	for _, leg := range legs {
+		registered[leg.name] = true
+		t.Run(leg.name, func(t *testing.T) {
+			waived := unwiredContractEntrypoints[leg.name]
+			wiring := inspectLegWiring(t, legWiringDir(root, leg), entrypoints, waived)
+
+			// A leg that names nothing is the one way the lock can pass while
+			// checking nothing: full waiver or ceiling coverage over a wiring
+			// root that resolves nowhere leaves no missing contract to report
+			// and no false waiver to catch. Nothing cross-checks the path — for
+			// a leg outside internal/storage, not even the tripwire — so the
+			// count has to be asked about directly.
+			if wiring.named == 0 {
+				t.Errorf("leg %s names no contract entrypoint at all under %s; check the wiring root.",
+					leg.name, leg.wiringRoot)
+			}
+			for _, name := range wiring.falselyWaived {
+				t.Errorf("%s is waived as unwired for %s but the leg runs it: "+
+					"delete its entry from unwiredContractEntrypoints", name, leg.name)
+			}
+			if fault := adoptionFault(leg, wiring, len(entrypoints)); fault != "" {
+				t.Error(fault)
+			}
+
+			for _, name := range sortedNames(waived) {
+				if !known[name] {
+					t.Errorf("unwiredContractEntrypoints waives %q for %s, which is no contract entrypoint", name, leg.name)
+					continue
+				}
+				if strings.TrimSpace(waived[name]) == "" {
+					t.Errorf("unwiredContractEntrypoints waives %s for %s with no reason", name, leg.name)
+				}
+			}
+		})
+	}
+
+	for _, leg := range sortedNames(unwiredContractEntrypoints) {
+		if !registered[leg] {
+			t.Errorf("unwiredContractEntrypoints waives entrypoints for %q, which is no registered leg", leg)
+		}
+	}
+	for _, duplicate := range duplicateContractLegWaivers {
+		t.Errorf("%s was waived twice; the second registration was dropped rather than merged, so one of "+
+			"the two reasons is not being checked", duplicate)
+	}
+}
+
+// adoptionFault reports why a leg's count of skipped contracts disagrees with
+// what it promised, or "" when they agree.
+//
+// The comparison is EXACT against the leg's adoption ceiling, which is what
+// makes the ceiling a ratchet: skipping more than it allows fails, and so does
+// skipping fewer, so a tranche of wiring cannot land without lowering the
+// number in the same change. A leg with no ceiling — the three here — is the
+// same rule at zero: every gap has to be a named, reasoned waiver.
+//
+// It returns the message rather than failing so both arms can be proved against
+// a fabricated leg, where the arms are reachable; against this repository only
+// the agreeing case ever runs.
+func adoptionFault(leg contractLeg, wiring legWiring, tier int) string {
+	skipped := len(wiring.missing)
+	if skipped == leg.adoptionCeiling {
+		return ""
+	}
+	detail := fmt.Sprintf(" (%d waived)", wiring.waived)
+	if len(wiring.excluded) > 0 {
+		detail += fmt.Sprintf(" (ignoring %d file(s) no build includes: %s)",
+			len(wiring.excluded), strings.Join(wiring.excluded, ", "))
+	}
+	if skipped < leg.adoptionCeiling {
+		return fmt.Sprintf("%s skips %d of the %d role contract entrypoints%s but its adoption ceiling is "+
+			"%d: lower the ceiling to %d. The ceiling is a ratchet — it has to fall as wiring lands, or it "+
+			"stops measuring how far adoption got and starts being a budget nobody reviewed",
+			leg.name, skipped, tier, detail, leg.adoptionCeiling, skipped)
+	}
+	if leg.adoptionCeiling == 0 {
+		return fmt.Sprintf("%s names %d of the %d role contract entrypoints%s; it never names: %s",
+			leg.name, wiring.named, tier, detail, summarizeNames(wiring.missing))
+	}
+	return fmt.Sprintf("%s skips %d of the %d role contract entrypoints%s, %d past its adoption ceiling of "+
+		"%d (%s). The ceiling is a ratchet, not an exemption: wire the rest, or raise it in a reviewed "+
+		"change that says why the leg still cannot. It never names: %s",
+		leg.name, skipped, tier, detail, skipped-leg.adoptionCeiling, leg.adoptionCeiling, leg.adopting,
+		summarizeNames(wiring.missing))
+}
+
+// summarizeNames joins names, stopping short of printing a whole tier. A leg
+// part-way through adoption skips hundreds of contracts, and a failure that
+// prints all of them buries the count that is the actionable part.
+func summarizeNames(names []string) string {
+	const most = 10
+	if len(names) <= most {
+		return strings.Join(names, ", ")
+	}
+	return fmt.Sprintf("%s and %d more", strings.Join(names[:most], ", "), len(names)-most)
+}
+
+// legWiring is what one leg's test sources say about the role contract tier,
+// with that leg's waivers already spent.
+type legWiring struct {
+	// named is how many contract entrypoints the leg's sources name.
+	named int
+	// missing are the entrypoints the leg neither names nor is waived for.
+	missing []string
+	// falselyWaived are entrypoints waived as unwired that the leg does run.
+	falselyWaived []string
+	// excluded are the files no build includes, which were not read.
+	excluded []string
+	// waived is how many per-entrypoint waivers the leg carries.
+	waived int
+}
+
+// inspectLegWiring diffs what the leg rooted at dir names against the contract
+// tier.
+//
+// It reports rather than fails so the mechanism can be proved against a
+// fabricated leg — see TestARegisteredLegOutsideTheStorageTreeIsLockedToo,
+// which is the only place a leg's wiring root outside internal/storage is
+// exercised until a distribution registers one.
+func inspectLegWiring(t *testing.T, dir string, entrypoints []string, waived map[string]string) legWiring {
+	t.Helper()
+	wired, excluded := conformanceEntrypointsWiredBy(t, dir)
+	wiring := legWiring{excluded: excluded, waived: len(waived)}
+	for _, name := range entrypoints {
+		_, isWaived := waived[name]
+		if wired[name] {
+			wiring.named++
+		}
+		switch {
+		case wired[name] && isWaived:
+			wiring.falselyWaived = append(wiring.falselyWaived, name)
+		case !wired[name] && !isWaived:
+			wiring.missing = append(wiring.missing, name)
+		}
+	}
+	return wiring
+}
+
+// repositoryRoot locates the module root from this file's own path.
+func repositoryRoot(t *testing.T) string {
+	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		return root
+	}
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	return filepath.Join(filepath.Dir(thisFile), "..", "..")
+}
+
+// roleContractEntrypoints reports the role tier: every exported Run function
+// the conformance package declares whose final parameter is one of its own
+// Fixture types.
+//
+// The SHAPE is what makes an entrypoint role tier, not the file it sits in. An
+// earlier version of this test read the *_contract.go filenames and missed the
+// two staging cases in issue_operations_staging.go — which two of the three
+// legs wire and one does not, exactly the drift this test is for. A fixture
+// parameter is the tier's defining shape: RunAll and the audit suites take a
+// Factory and are wired once per leg rather than case by case.
+func roleContractEntrypoints(t *testing.T, dir string) []string {
+	t.Helper()
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, dir, func(fi fs.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, 0)
+	if err != nil {
+		t.Fatalf("parsing %s: %v", dir, err)
+	}
+	var names []string
+	for _, pkg := range pkgs {
+		fixtures := fixtureTypeNames(pkg)
+		for _, file := range pkg.Files {
+			for _, decl := range file.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok || fn.Recv != nil || !strings.HasPrefix(fn.Name.Name, "Run") || !ast.IsExported(fn.Name.Name) {
+					continue
+				}
+				if fixtures[finalParamTypeName(fn)] {
+					names = append(names, fn.Name.Name)
+				}
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// fixtureTypeNames reports the package's own Fixture types.
+func fixtureTypeNames(pkg *ast.Package) map[string]bool {
+	names := map[string]bool{}
+	for _, file := range pkg.Files {
+		for _, decl := range file.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				ts, ok := spec.(*ast.TypeSpec)
+				if !ok || !strings.HasSuffix(ts.Name.Name, "Fixture") {
+					continue
+				}
+				names[ts.Name.Name] = true
+			}
+		}
+	}
+	return names
+}
+
+// finalParamTypeName reports the package-local type name of a function's last
+// parameter, or "" when it has none or names a type from elsewhere.
+func finalParamTypeName(fn *ast.FuncDecl) string {
+	params := fn.Type.Params
+	if params == nil || len(params.List) == 0 {
+		return ""
+	}
+	last := params.List[len(params.List)-1].Type
+	if star, ok := last.(*ast.StarExpr); ok {
+		last = star.X
+	}
+	if ident, ok := last.(*ast.Ident); ok {
+		return ident.Name
+	}
+	return ""
+}
+
+// conformanceEntrypointsWiredBy reports the conformance entrypoints a leg's
+// test sources name, resolved through each file's own import of the conformance
+// package so a renamed import still counts. It also reports the files it
+// refused to read.
+//
+// It counts every reference rather than only calls, because a leg is free to
+// wire an entrypoint as a value: the unit-of-work leg drives five of its roles
+// from a table whose rows hold `run: conformance.RunX` and call it later
+// through the field. Counting calls alone read those ninety-one contracts as
+// unwired.
+//
+// A file behind a build tag nothing sets is REFUSED: `//go:build ignore` over a
+// file naming every entrypoint would otherwise satisfy this lock with source no
+// build compiles. Ordinary constraints — cgo, integration — are counted,
+// because a contract wired behind one is still wired.
+//
+// A REFERENCE IS NOT A PASS, and that gap is deliberate rather than a hole in
+// this check. Several contracts (RetentionFixture, EpochFixture, BootstrapperFixture,
+// VersionReconcilerFixture, ...) are written so a nil hook makes the case
+// t.Skip loudly, naming the hook, rather than asserting nothing silently —
+// see each fixture's own doc comment. That lets a leg wire the ENTRYPOINT
+// (call conformance.RunX, satisfying this static check) while leaving some
+// or all of its hooks nil, which runs for real as a skip, not a pass. This
+// check cannot see past the call to know which hooks a wiring supplies, so
+// it counts the reference as wired either way — a leg that did this would
+// read as adopted here while its own `go test -v` output says SKIP. That
+// divergence is this package's to prevent by review, the same way
+// divergence_citation_gate_test.go (internal/httpclient) already holds the
+// served tier's own skipKnownDivergence call sites to a named, ledger-cited
+// reason instead of a bare t.Skip: a reviewer reading a wiring diff that adds
+// a conformance.RunX reference should expect it to pass for real, or to carry
+// a waiver in unwiredContractEntrypoints instead — not to compile a skip and
+// call it adopted. Legs do this today. For example, the dolt, embeddeddolt
+// and uow legs wire the expected-revision, cross-record-invariant and
+// retention contracts (and the http leg the expected-revision contract) with
+// hooks such as CompareAndSetVersion, Remove and AcquireAdvisoryLease left
+// nil; the http leg's counter (List) and journal-arrival
+// (JournalArrivalHooks.*) contracts and the uow leg's journal contract
+// (JournalArrivalHooks.Rename) do the same. Those cases run as skips this
+// check counts as wired. What this check cannot see,
+// the runtime skip census does: tools/bazel/skip_census.txt lists each such
+// case per leg target as a `nil-hook <Hook>` line, and the Dolt-tier lanes'
+// check_testcases.py --skip-census fails on a skip the census does not list
+// and on a listed case that runs again, so supplying a hook deletes its lines.
+func conformanceEntrypointsWiredBy(t *testing.T, dir string) (map[string]bool, []string) {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(dir, "*_test.go"))
+	if err != nil {
+		t.Fatalf("globbing %s: %v", dir, err)
+	}
+	wired := map[string]bool{}
+	var excluded []string
+	for _, path := range files {
+		parsed, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ParseComments)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", path, err)
+		}
+		if namesNeverSatisfiedTag(parsed) {
+			excluded = append(excluded, filepath.Base(path))
+			continue
+		}
+		local := conformanceImportName(parsed)
+		if local == "" {
+			continue
+		}
+		ast.Inspect(parsed, func(n ast.Node) bool {
+			selector, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if pkgName, ok := selector.X.(*ast.Ident); ok && pkgName.Name == local {
+				wired[selector.Sel.Name] = true
+			}
+			return true
+		})
+	}
+	sort.Strings(excluded)
+	return wired, excluded
+}
+
+// namesNeverSatisfiedTag reports whether a file's build constraint can be
+// satisfied by no build at all.
+func namesNeverSatisfiedTag(file *ast.File) bool {
+	for _, group := range file.Comments {
+		for _, comment := range group.List {
+			if !constraint.IsGoBuild(comment.Text) {
+				continue
+			}
+			expr, err := constraint.Parse(comment.Text)
+			if err != nil {
+				continue
+			}
+			if !satisfiable(expr) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// satisfiable reports whether some build sets tags that make expr true, taking
+// the never-set tags as the only ones that cannot be turned on.
+//
+// It asks about satisfiability rather than evaluating with every tag set true,
+// which is what an earlier draft did and got wrong: under that oracle
+// `integration && !windows` reads as false, and five real integration files
+// were dropped from the wiring count for having a negation in them.
+func satisfiable(expr constraint.Expr) bool {
+	switch e := expr.(type) {
+	case *constraint.TagExpr:
+		return !neverSatisfiedTags[e.Tag]
+	case *constraint.NotExpr:
+		return falsifiable(e.X)
+	case *constraint.AndExpr:
+		return satisfiable(e.X) && satisfiable(e.Y)
+	case *constraint.OrExpr:
+		return satisfiable(e.X) || satisfiable(e.Y)
+	}
+	return true
+}
+
+// falsifiable reports whether some build leaves expr false. Any tag can be left
+// unset, so a bare tag always can be.
+func falsifiable(expr constraint.Expr) bool {
+	switch e := expr.(type) {
+	case *constraint.TagExpr:
+		return true
+	case *constraint.NotExpr:
+		return satisfiable(e.X)
+	case *constraint.AndExpr:
+		return falsifiable(e.X) || falsifiable(e.Y)
+	case *constraint.OrExpr:
+		return falsifiable(e.X) && falsifiable(e.Y)
+	}
+	return true
+}
+
+// conformanceImportName reports the name a file refers to the conformance
+// package by, or "" when it does not import it.
+func conformanceImportName(file *ast.File) string {
+	for _, spec := range file.Imports {
+		path := strings.Trim(spec.Path.Value, `"`)
+		if path != conformancePackage {
+			continue
+		}
+		if spec.Name != nil {
+			return spec.Name.Name
+		}
+		return path[strings.LastIndexByte(path, '/')+1:]
+	}
+	return ""
+}
+
+// sortedNames returns a map's keys in a deterministic order.
+func sortedNames[V any](m map[string]V) []string {
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}

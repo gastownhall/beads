@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"net"
-	"os"
 	"sync"
 	"text/template"
 	"time"
@@ -16,6 +15,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/endpointtrust"
 	"github.com/steveyegge/beads/internal/telemetry"
 	"github.com/steveyegge/beads/internal/types"
 	"go.opentelemetry.io/otel/attribute"
@@ -35,6 +35,8 @@ var errAPIKeyRequired = errors.New("API key required")
 type haikuClient struct {
 	client         anthropic.Client
 	model          anthropic.Model
+	apiKeySource   config.AIAPIKeySource
+	baseURL        string
 	tier1Template  *template.Template
 	maxRetries     int
 	initialBackoff time.Duration
@@ -43,19 +45,13 @@ type haikuClient struct {
 }
 
 // newHaikuClient creates a new Haiku API client.
-// API key resolution order: ANTHROPIC_API_KEY env var > ai.api_key config > explicit apiKey parameter.
+// API key resolution order: ANTHROPIC_API_KEY env var > MINIMAX_API_KEY env var > ai.api_key config > explicit apiKey parameter.
 func newHaikuClient(apiKey string) (*haikuClient, error) {
-	envKey := os.Getenv("ANTHROPIC_API_KEY")
-	if envKey != "" {
-		apiKey = envKey
-	} else if configKey := config.GetString("ai.api_key"); configKey != "" {
-		apiKey = configKey
+	clientOptions, keySource, baseURL, err := NewAIClientOptions(apiKey)
+	if err != nil {
+		return nil, err
 	}
-	if apiKey == "" {
-		return nil, fmt.Errorf("%w: set ANTHROPIC_API_KEY environment variable or ai.api_key in config", errAPIKeyRequired)
-	}
-
-	client := anthropic.NewClient(option.WithAPIKey(apiKey))
+	client := anthropic.NewClient(clientOptions...)
 
 	tier1Tmpl, err := template.New("tier1").Parse(tier1PromptTemplate)
 	if err != nil {
@@ -66,11 +62,47 @@ func newHaikuClient(apiKey string) (*haikuClient, error) {
 
 	return &haikuClient{
 		client:         client,
-		model:          config.DefaultAIModel(),
+		model:          config.DefaultAIModelFor(keySource),
+		apiKeySource:   keySource,
+		baseURL:        baseURL,
 		tier1Template:  tier1Tmpl,
 		maxRetries:     maxRetries,
 		initialBackoff: initialBackoff,
 	}, nil
+}
+
+// NewAIClientOptions resolves the API key and validates its endpoint before returning SDK options.
+func NewAIClientOptions(explicitKey string) ([]option.RequestOption, config.AIAPIKeySource, string, error) {
+	apiKey, keySource := config.ResolveAIAPIKey(explicitKey)
+	if apiKey == "" {
+		return nil, keySource, "", fmt.Errorf("%w: set ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key in config", errAPIKeyRequired)
+	}
+	baseURL := config.DefaultAIBaseURL(keySource)
+	configuredBaseURL := config.GetString("ai.base_url")
+	var trustErr error
+	switch {
+	case configuredBaseURL != "":
+		// IsFromProjectConfig counts .beads/config.yaml, .beads/config.local.yaml
+		// and a .beads/.env BD_AI_BASE_URL as shared, not private.
+		trustErr = endpointtrust.Check(endpointtrust.WorkspaceKey(), "ai", configuredBaseURL, !config.IsFromProjectConfig("ai.base_url"))
+	case baseURL == "":
+		// The SDK default: pin it so a later shared ai.base_url is a change.
+		trustErr = endpointtrust.Check(endpointtrust.WorkspaceKey(), "ai", "", false)
+	case baseURL != config.MiniMaxDefaultBaseURL:
+		// MINIMAX_BASE_URL is private only when it is not from .beads/.env.
+		trustErr = endpointtrust.Check(endpointtrust.WorkspaceKey(), "ai", baseURL, !config.IsDotenvKey("MINIMAX_BASE_URL"))
+	default:
+		trustErr = endpointtrust.Check(endpointtrust.WorkspaceKey(), "ai", baseURL, true)
+	}
+	if trustErr != nil {
+		return nil, config.AIAPIKeySourceNone, "", trustErr
+	}
+
+	clientOptions := []option.RequestOption{option.WithAPIKey(apiKey)}
+	if baseURL != "" {
+		clientOptions = append(clientOptions, option.WithBaseURL(baseURL))
+	}
+	return clientOptions, keySource, baseURL, nil
 }
 
 // SummarizeTier1 creates a structured summary of an issue (Summary, Key Decisions, Resolution).
@@ -154,7 +186,7 @@ func (h *haikuClient) callWithRetry(ctx context.Context, prompt string) (string,
 
 		t0 := time.Now()
 		message, err := h.client.Messages.New(ctx, params)
-		ms := float64(time.Since(t0).Milliseconds())
+		ms := telemetry.Milliseconds(time.Since(t0))
 
 		if err == nil {
 			// Record token usage and latency.

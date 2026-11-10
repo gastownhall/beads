@@ -11,7 +11,9 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 // configEntry represents a single configuration key with its effective value and source.
@@ -178,7 +180,7 @@ func collectViperEntries() []configEntry {
 			if value == "" {
 				continue // unset in user-global; runtime uses the built-in default
 			}
-			sourceLabel = config.UserConfigYamlPath()
+			sourceLabel = config.UserConfigYamlDisplayPath()
 		}
 
 		// Skip empty defaults — they add noise without information
@@ -294,8 +296,33 @@ func collectDatabaseEntries() []configEntry {
 		return nil
 	}
 
+	return databaseConfigEntries(dbConfig)
+}
+
+// databaseConfigEntries turns the config table into the entries `config show`
+// prints under source=database, MINUS the KV plane.
+//
+// The store's GetAllConfig hands back one table holding two planes, and this
+// command prints values in FULL — it is the operator's provenance view, so
+// redaction would defeat it. Every `bd remember` memory therefore went into
+// every terminal, transcript and pasted bug report that ran `bd config show`,
+// which is the same disclosure the settings enumeration was closed for
+// (issueops/workspaceconfig.go, "KEYS THIS PLANE DOES NOT OWN"). This route
+// reads the store raw rather than through issueops.WorkspaceConfig, so it
+// inherited neither filter and had to be told.
+//
+// The rule is workapi's, not a second `kv.` prefix check: a local one would be
+// the fourth copy of the plane boundary and the first to drift.
+//
+// NOTHING REPLACES THE VIEW. An operator who wants those rows asks the surfaces
+// that own them — `bd kv list`, `bd memories` — which is where they were always
+// meant to be read.
+func databaseConfigEntries(dbConfig map[string]string) []configEntry {
 	var entries []configEntry
 	for key, value := range dbConfig {
+		if workapi.KeyIsOnTheKVPlane(key) {
+			continue
+		}
 		entries = append(entries, configEntry{Key: key, Value: value, Source: "database"})
 	}
 
@@ -308,6 +335,7 @@ func collectGitConfigEntries() []configEntry {
 
 	// beads.role is the only git config key currently
 	cmd := exec.Command("git", "config", "--get", "beads.role")
+	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
 	output, err := cmd.Output()
 	if err == nil {
 		value := strings.TrimSpace(string(output))

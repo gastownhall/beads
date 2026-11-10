@@ -18,7 +18,17 @@ var sendMetricsCmd = &cobra.Command{
 		// send-metrics. MaybeSpawnFlusher also refuses to spawn when EnvIsFlusher
 		// is set on this process, so the no-recursion guarantee is structural and
 		// not solely dependent on this exit.
-		os.Exit(metrics.RunSendMetrics())
+		//
+		// That same early exit means this Run returns before Cobra ever reaches
+		// PersistentPostRunE in main.go, so --mem-profile/BEADS_MEM_PROFILE/
+		// BEADS_MEM_STATS are silently inert for this subcommand unless honored
+		// here directly (be-wwy2.2). --mem-profile is registered on
+		// rootCmd.PersistentFlags(), so this hidden command inherits it and
+		// prints it in --help; pass memProfilePath exactly as PersistentPostRunE
+		// does, or the advertised flag would be parsed and then discarded.
+		code := metrics.RunSendMetrics()
+		writeMemDiagnostics(memProfilePath)
+		os.Exit(code)
 	},
 }
 

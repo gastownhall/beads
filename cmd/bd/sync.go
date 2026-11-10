@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -63,6 +64,7 @@ const (
 const (
 	syncTransientPushRace   = "push-race"
 	syncTransientDirtyGraph = "dirty-graph"
+	syncTransientPullBehind = "pull-behind"
 )
 
 // syncOutcome is one run of the sync loop.
@@ -293,11 +295,27 @@ func runSyncLoop(ctx context.Context, ops syncOps, maxAttempts int) (*syncOutcom
 			// shared sql-server — and returning nil below would silently
 			// drop it. Surface it instead of discarding it.
 			if pullErr != nil && len(merged) == 0 {
-				out.DiscardedPullError = pullErr.Error()
+				out.DiscardedPullError = syncFailureText(pullErr)
 			}
 			return out, nil
 		}
 		if pullErr != nil {
+			// A pull that merged nothing only because the branch is a strict
+			// ancestor of a remote tip that moved after our fetch is the pull-side
+			// twin of a push race: a peer advanced the remote, and the next pull
+			// fast-forwards it. Re-enter the loop instead of hard-failing the tick;
+			// if the budget runs out, the retries-exhausted exit tells the timer to
+			// try again next tick (same as a push race or a dirty working set). It
+			// is classified from the typed sentinel, never the message, so a
+			// genuine divergence — which verifyPullLanded leaves unwrapped — falls
+			// through to the hard error below.
+			if isPullBehindFastForwardableErr(pullErr) {
+				out.Transients = append(out.Transients, syncTransient{
+					Attempt: attempt, Kind: syncTransientPullBehind, Error: pullErr.Error(),
+				})
+				ops.report("pull behind a fast-forwardable remote tip (peer pushed after our fetch) — re-pulling and retrying")
+				continue
+			}
 			return out, fmt.Errorf("pull: %w", pullErr)
 		}
 		if conflictErr != nil {
@@ -499,6 +517,21 @@ func isRecomputeDirtyGraphErr(err error) bool {
 	return err != nil && errors.Is(err, issueops.ErrBlockedRecomputeDirtyGraph)
 }
 
+// isPullBehindFastForwardableErr reports whether a pull's post-condition refused
+// to call the pull a success only because the branch this database reads is a
+// strict ancestor of a remote tip that moved after this pull's fetch — the
+// benign race a plain re-pull fast-forwards, and the one merged-nothing failure
+// retrying can fix.
+//
+// Classified from the typed sentinel, never the message
+// (versioncontrolops.ErrPullBehindFastForwardable), for the same reason
+// isRecomputeDirtyGraphErr is: a reworded diagnostic must not silently demote a
+// genuine divergence into this retryable class. Only verifyPullLanded's
+// merge-base test wraps the sentinel, and only for the ancestor case.
+func isPullBehindFastForwardableErr(err error) bool {
+	return err != nil && errors.Is(err, versioncontrolops.ErrPullBehindFastForwardable)
+}
+
 // graphConstraintViolations reports the constraint violations, if any,
 // outstanding on the graph tables (issues, dependencies) — the same table set
 // isRecomputeDirtyGraphErr just found dirty. It is what lets the loop tell a
@@ -683,6 +716,8 @@ Examples:
 func init() {
 	syncCmd.Flags().String("remote", "", "Sync with a specific named remote instead of the default")
 	syncCmd.Flags().Int("attempts", defaultSyncAttempts, "Maximum pull/push attempts before reporting a transient retry exhaustion (exit 3)")
+	syncCmd.Flags().BoolP("yes", "y", false, "Consent to adopting a Dolt remote derived from git origin when none is configured")
+	syncCmd.Flags().Bool("no-adopt", false, "Never derive a Dolt remote from git origin (also BD_NO_REMOTE_ADOPT=1)")
 	rootCmd.AddCommand(syncCmd)
 }
 
@@ -693,7 +728,7 @@ func init() {
 // real thing in dolt_test.go; letting it run for real from a runSyncCommand
 // unit test would mutate whatever repo the tests happen to be run from. The
 // production binding is pinned by TestSyncAdoptGitOriginIsWiredToAdoption.
-var syncAdoptGitOrigin = adoptGitOriginRemoteForPush
+var syncAdoptGitOrigin func(context.Context, storage.DoltStorage, adoptPolicy, adoptOptIn) (bool, error) = adoptGitOriginRemoteForPush
 
 func runSyncCommand(cmd *cobra.Command, _ []string) error {
 	if usesProxiedServer() {
@@ -753,7 +788,16 @@ func runSyncCommand(cmd *cobra.Command, _ []string) error {
 	// or persisted on disk — adoption is a hasConfiguredRemote no-op, so the
 	// steady-state cost is the one listing the error path already paid.
 	if remote == "" {
-		adopted, adoptErr := syncAdoptGitOrigin(rootCtx, st)
+		// Same consent gate as `bd dolt push` (#5068): sync publishes the same
+		// history to the same derived remote, so it cannot be the soft way in.
+		syncYes, _ := cmd.Flags().GetBool("yes")
+		syncNoAdopt, _ := cmd.Flags().GetBool("no-adopt")
+		adopted, adoptErr := syncAdoptGitOrigin(rootCtx, st, currentAdoptPolicy(syncYes, syncNoAdopt, stdinIsTerminal(), jsonOutput), syncAdoptOptIn)
+		var leftover *remoteOnlyInLeftoverDatabaseError
+		if errors.As(adoptErr, &leftover) {
+			// Refused before any adoption: the remote is set up, but not on the server.
+			return HandleErrorRespectJSON("sync failed: %v", adoptErr)
+		}
 		if adoptErr != nil {
 			return HandleErrorRespectJSON("sync failed: adopting git origin as Dolt remote: %v", adoptErr)
 		}
@@ -832,9 +876,9 @@ func runSyncCommand(cmd *cobra.Command, _ []string) error {
 			}
 			return nil
 		}
-		exitErr := HandleErrorRespectJSON("sync failed: %v", err)
+		exitErr := HandleErrorRespectJSON("sync failed: %s", syncFailureText(err))
 		if !jsonOutput {
-			printSyncErrorGuidance(remote, err)
+			printSyncErrorGuidance(rootCtx, st, remote, err)
 		}
 		return exitErr
 	}
@@ -861,6 +905,41 @@ func runSyncCommand(cmd *cobra.Command, _ []string) error {
 	default:
 		return nil
 	}
+}
+
+// sshDialTimeoutLine is deliberately narrower than a generic timeout: Dolt's
+// git auth wrapper appends credential hints to all git failures, including a
+// transport-level SSH dial timeout. Only that positively identified stderr
+// line warrants replacing the inherited, misleading auth advice. Match the
+// stderr line rather than importing Dolt's error type across the storage
+// boundary; sync only has the wrapped error by the time it renders the result.
+var sshDialTimeoutLine = regexp.MustCompile(`(?i)ssh: connect to host [^\r\n]+ port [0-9]+: (?:Operation timed out|Connection timed out)`)
+
+func syncFailureText(err error) string {
+	if err == nil {
+		return ""
+	}
+	if line := sshDialTimeoutLine.FindString(err.Error()); line != "" {
+		return syncFailureStep(err, line) + "SSH remote could not be reached (dial timed out): " + scrubURLCredentials(strings.TrimSpace(line))
+	}
+	return err.Error()
+}
+
+// syncFailureStep returns err's outermost wrap segment for the dial-timeout
+// rewrite to keep: runSyncLoop's "pull: " or "push: " step, which is how an
+// operator tells whether local work already reached the remote. A segment
+// that contains the dial line is git output folded into the wrap
+// (cliTransferError), auth hints and all, so it yields "" instead.
+func syncFailureStep(err error, line string) string {
+	inner := errors.Unwrap(err)
+	if inner == nil {
+		return ""
+	}
+	prefix, ok := strings.CutSuffix(err.Error(), inner.Error())
+	if !ok || strings.Contains(prefix, line) {
+		return ""
+	}
+	return scrubURLCredentials(prefix)
 }
 
 // mergeBlockersOp builds the loop's positive constraint-violation hook, or nil
@@ -897,12 +976,14 @@ func dirtyGraphFingerprintOp(st storage.DoltStorage) func(context.Context) (stri
 // print, so a failed sync is as actionable as the hand-rolled loop it replaces.
 // The classifiers match on the message, so they still fire through the step
 // wrapping runSyncLoop adds.
-func printSyncErrorGuidance(remote string, err error) {
+func printSyncErrorGuidance(ctx context.Context, st storage.DoltStorage, remote string, err error) {
 	switch {
 	case isAncestorPKMismatchErr(err):
 		printAncestorPKMismatchGuidance(err)
 	case isDivergedHistoryErr(err):
 		printDivergedHistoryGuidance("sync")
+	case isRemoteDanglingReferenceErr(err):
+		printRemoteDanglingReferenceGuidance(ctx, st, remote)
 	case remote != "" && isRemoteNotFoundErr(err):
 		fmt.Fprintf(os.Stderr, "\nRemote %q is not configured.\n", remote)
 		fmt.Fprintln(os.Stderr, "Use 'bd dolt remote add <name> <url>' to add it.")

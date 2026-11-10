@@ -228,16 +228,43 @@ func TestProxiedServerList(t *testing.T) {
 	})
 
 	t.Run("ready_parent_tree_excludes_blocked_descendants", func(t *testing.T) {
-		// TODO: re-enable once `bd dep add` is ported to proxied mode.
-		// Currently bd dep add fails with "storage is nil" under proxied
-		// since the dep subcommand has no usesProxiedServer() dispatch.
-		t.Skip("requires bd dep add proxied support")
+		parent := bdProxiedCreate(t, bd, p.dir, "Ready parent tree", "--type", "epic")
+		readyChild := bdProxiedCreate(t, bd, p.dir, "Ready child in tree", "--type", "task", "--parent", parent.ID)
+		blockedChild := bdProxiedCreate(t, bd, p.dir, "Blocked child in tree", "--type", "task", "--parent", parent.ID)
+		blocker := bdProxiedCreate(t, bd, p.dir, "Tree child blocker", "--type", "task")
+		bdProxiedDep(t, bd, p.dir, "add", blockedChild.ID, blocker.ID)
+
+		out := bdProxiedList(t, bd, p, "--ready", "--parent", parent.ID, "--no-pager")
+		if !strings.Contains(out, readyChild.ID) {
+			t.Errorf("ready child %s should appear in ready parent tree:\n%s", readyChild.ID, out)
+		}
+		if strings.Contains(out, blockedChild.ID) {
+			t.Errorf("blocked child %s should not appear in ready parent tree:\n%s", blockedChild.ID, out)
+		}
 	})
 
 	// Regression for gastownhall/beads#3936: relates-to between two epics
-	// must not nest them, and bidirectional relates-to must not drop them.
+	// must not nest them in `bd list` tree mode, and a bidirectional
+	// relates-to must not silently drop both epics from the output.
 	t.Run("tree_relates_to_does_not_nest_or_drop_epics", func(t *testing.T) {
-		t.Skip("requires bd dep add proxied support")
+		epicA := bdProxiedCreate(t, bd, p.dir, "Relates Epic A", "--type", "epic", "--priority", "2")
+		epicB := bdProxiedCreate(t, bd, p.dir, "Relates Epic B", "--type", "epic", "--priority", "2")
+
+		bdProxiedDep(t, bd, p.dir, "add", epicA.ID, epicB.ID, "--type", "relates-to")
+		out := bdProxiedList(t, bd, p, "--no-pager", "--type", "epic")
+		if !strings.Contains(out, epicA.ID) || !strings.Contains(out, epicB.ID) {
+			t.Fatalf("one-direction relates-to should keep both epics visible:\n%s", out)
+		}
+		if strings.Contains(out, "└── "+epicA.ID) || strings.Contains(out, "└── "+epicB.ID) ||
+			strings.Contains(out, "├── "+epicA.ID) || strings.Contains(out, "├── "+epicB.ID) {
+			t.Fatalf("relates-to must not nest epics under each other:\n%s", out)
+		}
+
+		bdProxiedDep(t, bd, p.dir, "add", epicB.ID, epicA.ID, "--type", "relates-to")
+		out = bdProxiedList(t, bd, p, "--no-pager", "--type", "epic")
+		if !strings.Contains(out, epicA.ID) || !strings.Contains(out, epicB.ID) {
+			t.Fatalf("bidirectional relates-to must not drop epics from tree output:\n%s", out)
+		}
 	})
 
 	t.Run("ready_parent_filter_includes_grandchildren", func(t *testing.T) {
@@ -467,6 +494,17 @@ func TestProxiedServerList(t *testing.T) {
 		out := bdProxiedList(t, bd, p, "--format", "dot", "--flat", "--all", "--no-pager")
 		if !strings.Contains(out, "digraph") {
 			t.Errorf("dot output should contain 'digraph' header, got: %s", out)
+		}
+		assertDotCanonicalOrder(t, out)
+	})
+
+	t.Run("format_digraph_output_error", func(t *testing.T) {
+		stderr, err := runWithReadOnlyStdout(t, bd, p.dir, bdProxiedEnv(p.dir), "list", "--format", "digraph", "--all", "--no-pager")
+		if err == nil {
+			t.Fatalf("proxied list --format digraph succeeded with read-only stdout; stderr:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, "writing formatted list output") {
+			t.Fatalf("proxied list --format digraph stderr = %q, want writer diagnostic", stderr)
 		}
 	})
 
@@ -709,7 +747,7 @@ func TestProxiedServerList(t *testing.T) {
 
 	t.Run("reject_format_with_watch", func(t *testing.T) {
 		out := bdProxiedListFail(t, bd, p, "--watch", "--format", "dot")
-		if !strings.Contains(out, "--format under --proxied-server --watch is not supported") {
+		if !strings.Contains(out, "--format cannot be combined with --watch") {
 			t.Errorf("expected --format+--watch rejection message, got: %s", out)
 		}
 	})
@@ -728,26 +766,34 @@ func TestProxiedServerList(t *testing.T) {
 		}
 	})
 
-	// The proxied repository path (internal/storage/domain/db) doesn't
-	// thread MaxRows through the UOW pipeline, so an explicit cap must be
-	// rejected rather than silently going unenforced (be-x42v.4 follow-up).
-	t.Run("reject_max_rows_flag", func(t *testing.T) {
+	// The cap is HONORED on this route now. It used to be rejected outright,
+	// because the proxied repository path (internal/storage/domain/db) read no
+	// MaxRows at all and honoring it would have meant silence (be-x42v.4). The
+	// answer is the cap firing, with the same text and the same exit code the
+	// direct route prints.
+	t.Run("max_rows_flag_fires", func(t *testing.T) {
 		out := bdProxiedListFail(t, bd, p, "--max-rows", "1")
-		if !strings.Contains(out, "not supported in proxied-server mode") {
-			t.Errorf("expected --max-rows proxied-server rejection, got: %s", out)
+		if strings.Contains(out, "not supported in proxied-server mode") {
+			t.Fatalf("--max-rows is refused under --proxied-server; the cap threads this route now: %s", out)
+		}
+		if !strings.Contains(out, "too many rows") || !strings.Contains(out, "--max-rows=1") {
+			t.Errorf("expected the cap to fire naming its source, got: %s", out)
 		}
 	})
 
-	t.Run("reject_max_rows_env", func(t *testing.T) {
+	t.Run("max_rows_env_fires", func(t *testing.T) {
 		fullArgs := []string{"list"}
 		stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir,
 			[]string{"BEADS_MAX_ROWS=1"}, fullArgs...)
 		if err == nil {
-			t.Fatalf("expected BEADS_MAX_ROWS under proxied-server to fail, but it succeeded:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+			t.Fatalf("expected BEADS_MAX_ROWS under proxied-server to trip the cap, but it succeeded:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
 		}
 		out := stdout + stderr
-		if !strings.Contains(out, "not supported in proxied-server mode") {
-			t.Errorf("expected BEADS_MAX_ROWS proxied-server rejection, got: %s", out)
+		if strings.Contains(out, "not supported in proxied-server mode") {
+			t.Fatalf("BEADS_MAX_ROWS is refused under --proxied-server; the cap threads this route now: %s", out)
+		}
+		if !strings.Contains(out, "too many rows") || !strings.Contains(out, "BEADS_MAX_ROWS=1") {
+			t.Errorf("expected the cap to fire naming its source, got: %s", out)
 		}
 	})
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -10,22 +11,42 @@ import (
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/ui"
 	"golang.org/x/term"
 )
 
-// previewFixes shows what would be fixed without applying changes
-func previewFixes(result doctorResult) {
-	// Collect all fixable issues
-	var fixableIssues []doctorCheck
+// collectFixableIssues returns actionable fixes split by whether applying them
+// can touch the database schema (GH#4993). A schema gate should withhold schema
+// writes, not refuse to repair a file mode.
+func collectFixableIssues(result doctorResult) (dbFixes, fsFixes []doctorCheck) {
 	for _, check := range result.Checks {
-		if (check.Status == statusWarning || check.Status == statusError) && check.Fix != "" {
-			fixableIssues = append(fixableIssues, check)
+		if check.Status != statusWarning && check.Status != statusError {
+			continue
+		}
+		if check.Fix == "" {
+			continue
+		}
+		if doctor.IsFilesystemOnlyFix(check.Name) {
+			fsFixes = append(fsFixes, check)
+		} else {
+			dbFixes = append(dbFixes, check)
 		}
 	}
+	return dbFixes, fsFixes
+}
 
-	if len(fixableIssues) == 0 {
+// previewFixes shows what would be fixed without applying changes. A dry run
+// writes nothing, so it is never refused on schema grounds; the gate decides
+// how each fix is labeled, not whether the preview runs.
+func previewFixes(result doctorResult, gate doctor.FixGate) {
+	if gate.Reason != "" {
+		fmt.Printf("\n%s Schema gate: %s\n", ui.RenderWarn("⚠"), gate.Reason)
+	}
+
+	dbFixes, fsFixes := collectFixableIssues(result)
+	if len(dbFixes)+len(fsFixes) == 0 {
 		fmt.Println("\n✓ No fixable issues found (dry-run)")
 		return
 	}
@@ -33,9 +54,11 @@ func previewFixes(result doctorResult) {
 	fmt.Println("\n[DRY-RUN] The following issues would be fixed with --fix:")
 	fmt.Println()
 
-	for i, issue := range fixableIssues {
-		// Show the issue details
-		fmt.Printf("  %d. %s\n", i+1, issue.Name)
+	n := 0
+	printIssue := func(issue doctorCheck, blocked bool) {
+		issue = issue.printed()
+		n++
+		fmt.Printf("  %d. %s\n", n, issue.Name)
 		if issue.Status == statusError {
 			fmt.Printf("     Status: %s\n", ui.RenderFail("ERROR"))
 		} else {
@@ -46,19 +69,75 @@ func previewFixes(result doctorResult) {
 			fmt.Printf("     Detail: %s\n", issue.Detail)
 		}
 		fmt.Printf("     Fix:    %s\n", issue.Fix)
+		if blocked {
+			fmt.Printf("     %s\n", ui.RenderWarn("Blocked by the schema gate — would be skipped"))
+		}
 		fmt.Println()
 	}
 
-	fmt.Printf("[DRY-RUN] Would attempt to fix %d issue(s)\n", len(fixableIssues))
-	fmt.Println("Run 'bd doctor --fix' to apply these fixes")
+	// GH#4993: admission is FixGate.AllowsFix alone. Reason is advisory text,
+	// not a safety signal — an unreachable/undetermined gate leaves Reason at
+	// its zero value ("") while still needing schema-writing fixes withheld,
+	// so admitting on gate.Reason == "" reopened the bypass this gate closes.
+	blocked := 0
+	for _, issue := range append(append([]doctorCheck{}, fsFixes...), dbFixes...) {
+		withheld := !gate.AllowsFix(issue.Name)
+		if withheld {
+			blocked++
+		}
+		printIssue(issue, withheld)
+	}
+	total := len(fsFixes) + len(dbFixes)
+
+	switch {
+	case blocked > 0 && blocked < total:
+		fmt.Printf("[DRY-RUN] Would apply %d fix(es); %d fix(es) are blocked by the schema gate\n",
+			total-blocked, blocked)
+		fmt.Println("Run 'bd doctor --fix' to apply the permitted fixes; resolve the schema state to apply the rest")
+	case blocked > 0:
+		fmt.Printf("[DRY-RUN] All %d fix(es) are blocked by the schema gate\n", total)
+		fmt.Println("Resolve the schema state shown above before running 'bd doctor --fix'")
+	default:
+		fmt.Printf("[DRY-RUN] Would attempt to fix %d issue(s)\n", total)
+		fmt.Println("Run 'bd doctor --fix' to apply these fixes")
+	}
 }
 
-func applyFixes(result doctorResult) {
-	// Collect all fixable issues
-	var fixableIssues []doctorCheck
-	for _, check := range result.Checks {
-		if (check.Status == statusWarning || check.Status == statusError) && check.Fix != "" {
-			fixableIssues = append(fixableIssues, check)
+func applyFixes(result doctorResult, gate doctor.FixGate) {
+	if gate.Reason != "" {
+		fmt.Printf("\n%s Schema gate: %s\n", ui.RenderWarn("⚠"), gate.Reason)
+	}
+
+	dbFixes, fsFixes := collectFixableIssues(result)
+
+	// GH#4993: withhold only what the gate is about. Filesystem-only fixes
+	// are never schema writes, and recovery fixers stay available when the
+	// database is unreachable (FixGate.AllowsFix); everything else is withheld
+	// whenever the gate blocks. Admission is AllowsFix alone, never
+	// gate.Reason == "".
+	// Everything AllowsFix rejects is reported. Qualifying this with
+	// !IsFilesystemOnlyFix would drop a withheld filesystem-only fix from both
+	// lists, silently no-opping it: unreachable while every constructed gate sets
+	// AllowFSFix, but a future gate shape that does not would fix nothing and say
+	// nothing. The label stays generic for the same reason — the withheld set is
+	// whatever the gate blocked, not necessarily database work.
+	var fixableIssues, withheld []doctorCheck
+	for _, issue := range append(append([]doctorCheck{}, fsFixes...), dbFixes...) {
+		if gate.AllowsFix(issue.Name) {
+			fixableIssues = append(fixableIssues, issue)
+		} else {
+			withheld = append(withheld, issue)
+		}
+	}
+	if len(withheld) > 0 {
+		reason := gate.Reason
+		if reason == "" {
+			reason = "database schema state could not be assessed"
+		}
+		fmt.Printf("\n%s Skipping %d gated fix(es) — %s\n",
+			ui.RenderFail("✗"), len(withheld), reason)
+		for _, issue := range withheld {
+			fmt.Printf("    · %s\n", issue.printed().Name)
 		}
 	}
 
@@ -70,7 +149,8 @@ func applyFixes(result doctorResult) {
 	// Show what will be fixed
 	fmt.Println("\nFixable issues:")
 	for i, issue := range fixableIssues {
-		fmt.Printf("  %d. %s: %s\n", i+1, issue.Name, issue.Message)
+		shown := issue.printed()
+		fmt.Printf("  %d. %s: %s\n", i+1, shown.Name, shown.Message)
 	}
 
 	// Interactive mode - confirm each fix individually
@@ -133,17 +213,18 @@ func applyFixesInteractive(path string, issues []doctorCheck) {
 
 	for i, issue := range issues {
 		// Show issue details
-		fmt.Printf("(%d/%d) %s\n", i+1, len(issues), issue.Name)
+		shown := issue.printed()
+		fmt.Printf("(%d/%d) %s\n", i+1, len(issues), shown.Name)
 		if issue.Status == statusError {
 			fmt.Printf("  Status: %s\n", ui.RenderFail("ERROR"))
 		} else {
 			fmt.Printf("  Status: %s\n", ui.RenderWarn("WARNING"))
 		}
-		fmt.Printf("  Issue:  %s\n", issue.Message)
-		if issue.Detail != "" {
-			fmt.Printf("  Detail: %s\n", issue.Detail)
+		fmt.Printf("  Issue:  %s\n", shown.Message)
+		if shown.Detail != "" {
+			fmt.Printf("  Detail: %s\n", shown.Detail)
 		}
-		fmt.Printf("  Fix:    %s\n", issue.Fix)
+		fmt.Printf("  Fix:    %s\n", shown.Fix)
 
 		// Check if we should apply all remaining
 		if applyAll {
@@ -260,10 +341,14 @@ func applyFixList(path string, fixes []doctorCheck) {
 	orderDoctorFixes(fixes)
 
 	fixedCount := 0
+	skippedCount := 0
 	errorCount := 0
 
 	for _, check := range fixes {
-		fmt.Printf("\nFixing %s...\n", check.Name)
+		// shown is the check as the text printers show it; the switch below
+		// still dispatches on the check's own name.
+		shown := check.printed()
+		fmt.Printf("\nFixing %s...\n", shown.Name)
 
 		var err error
 		switch check.Name {
@@ -276,9 +361,27 @@ func applyFixList(path string, fixes []doctorCheck) {
 			// .git/info/exclude instead (matches bd init --stealth) and strip any beads section a
 			// previous run leaked into the tracked .gitignore so stealth leaves no trace.
 			if isStealthRepo(path) {
-				if err = addProjectPatternsToGitExclude(path, doctor.ProjectGitignorePatterns, false); err == nil {
-					_, err = removeBeadsProjectGitignoreSection(path)
+				// The two halves are independent: removing the leaked section needs only the
+				// tracked .gitignore, so it must still run when the exclude write fails (an
+				// unreadable .git/info/exclude would otherwise leave Dolt and credential
+				// patterns committed). bd init --stealth already runs both unconditionally
+				// (init.go), so join the errors instead of gating one on the other.
+				excludeErr := addProjectPatternsToGitExclude(path, doctor.ProjectGitignorePatterns, false)
+				removed, removeErr := removeBeadsProjectGitignoreSection(path)
+				if removed {
+					// The confirmation bd init --stealth prints for the same event (init.go).
+					// Without it a privacy repair that succeeded alongside a failed exclude
+					// write is invisible: the check reports only the exclude error.
+					fmt.Printf("  %s Removed leaked beads section from tracked .gitignore\n", ui.RenderPass("✓"))
 				}
+				if excludeErr != nil && removeErr == nil {
+					// Neither plane covers the patterns now: addExcludePatterns fails before (or
+					// on) its write, and the tracked section is confirmed gone. checkProjectExcludeStealth
+					// reports only the unreadable exclude, so name the lost coverage here, where it is lost.
+					fmt.Printf("  %s %s are ignored by neither .git/info/exclude nor the tracked .gitignore\n",
+						ui.RenderWarn("⚠"), strings.Join(doctor.ProjectGitignorePatterns, ", "))
+				}
+				err = errors.Join(excludeErr, removeErr)
 			} else {
 				err = doctor.FixProjectGitignore(path)
 			}
@@ -290,6 +393,8 @@ func applyFixList(path string, fixes []doctorCheck) {
 			err = doctor.FixTrackedRuntimeFiles(path)
 		case "Git Hooks":
 			err = fix.GitHooks(path)
+		case "Hooks Path":
+			err = doctor.FixHooksPath()
 		case "Sync Divergence":
 			fmt.Printf("  ⚠ Sync divergence fix removed (Dolt-native sync)\n")
 			continue
@@ -324,6 +429,8 @@ func applyFixList(path string, fixes []doctorCheck) {
 			err = fix.CrossTableDuplicates(path, doctorVerbose)
 		case "Orphaned Dependencies":
 			err = fix.OrphanedDependencies(path, doctorVerbose)
+		case "Clone-Local FKs":
+			err = fix.CloneLocalFKEnforcement(path, doctorVerbose)
 		case "Dependency Keys":
 			err = fix.DependencyKeys(path, doctorVerbose)
 		case "Blocked State":
@@ -359,7 +466,7 @@ func applyFixList(path string, fixes []doctorCheck) {
 			continue
 		case "Large Database":
 			// No auto-fix: pruning deletes data, must be user-controlled
-			fmt.Printf("  ⚠ Run 'bd cleanup --older-than 90' to prune old closed issues\n")
+			fmt.Printf("  ⚠ Run 'bd prune --older-than 90d' to preview prunable closed issues (add --force to delete)\n")
 			continue
 		case "Legacy MQ Files":
 			err = doctor.FixStaleMQFiles(path)
@@ -371,13 +478,13 @@ func applyFixList(path string, fixes []doctorCheck) {
 			dolt.CleanStaleCircuitBreakerFiles()
 			fmt.Printf("  %s Cleared stale circuit breaker files\n", ui.RenderPass("✓"))
 		case "Fresh Clone":
-			err = fix.FreshCloneImport(path, Version)
+			err = freshCloneImport(path, check)
 		case "Pending Migrations":
 			err = fixPendingMigrations(path)
 		case "Config Values":
 			err = fix.ConfigValues(path)
 		case "Classic Artifacts":
-			err = fix.ClassicArtifacts(path)
+			err = fix.ClassicArtifacts(path, os.Stdout)
 		case "Btrfs NoCOW (dolt)":
 			// Applies FS_NOCOW_FL to .beads/ and any existing dolt data
 			// subdirs. Prints the returned message (which includes the
@@ -405,29 +512,53 @@ func applyFixList(path string, fixes []doctorCheck) {
 			var backups []string
 			backups, err = doltserver.RecoverCorruptManifest(doctor.ResolveBeadsDirForRepo(path))
 			for _, b := range backups {
-				fmt.Printf("  Backed up corrupt dolt database to %s and reinitialized\n", b)
+				fmt.Printf("  Backed up corrupt dolt database to %s and reinitialized\n", remedy.PrintedValue(b))
 			}
 		default:
-			fmt.Printf("  ⚠ No automatic fix available for %s\n", check.Name)
-			fmt.Printf("  Manual fix: %s\n", check.Fix)
+			fmt.Printf("  ⚠ No automatic fix available for %s\n", shown.Name)
+			fmt.Printf("  Manual fix: %s\n", shown.Fix)
 			continue
 		}
 
-		if err != nil {
+		// A fix that did not run (fix.ErrSkipped: its server could not be
+		// opened, only a unix socket names it, or its project identity
+		// could not be verified) is reported as skipped, neither fixed nor
+		// an error.
+		var skip *fix.SkipError
+		switch {
+		case errors.As(err, &skip):
+			skippedCount++
+			fmt.Printf("  %s Skipped: %s\n", ui.RenderWarn("⚠"), remedy.PrintedMessage(skip.Reason))
+			fmt.Printf("  Manual fix: %s\n", shown.Fix)
+		case err != nil:
 			errorCount++
-			fmt.Printf("  %s Error: %v\n", ui.RenderFail("✗"), err)
-			fmt.Printf("  Manual fix: %s\n", check.Fix)
-		} else {
+			fmt.Printf("  %s Error: %s\n", ui.RenderFail("✗"), remedy.PrintedMessage(err))
+			fmt.Printf("  Manual fix: %s\n", shown.Fix)
+		default:
 			fixedCount++
 			fmt.Printf("  %s Fixed\n", ui.RenderPass("✓"))
 		}
 	}
 
 	// Summary
-	fmt.Printf("\nFix summary: %d fixed, %d errors\n", fixedCount, errorCount)
+	fmt.Printf("\nFix summary: %d fixed, %d skipped, %d errors\n", fixedCount, skippedCount, errorCount)
 	if errorCount > 0 {
 		fmt.Println("\nSome fixes failed. Please review the errors above and apply manual fixes as needed.")
 	}
+}
+
+// freshCloneImport is bd doctor --fix's Fresh Clone repair: it imports
+// issues.jsonl (fix.FreshCloneImport) only for a check that found the
+// database missing (doctor.FreshCloneDetected), and otherwise reports the
+// repair skipped. The check also warns when it could not log in to the
+// server, and says that is not a fresh clone; the import ran there all the
+// same, so any server or identity the repair could reach and the check could
+// not had its live rows overwritten with the tracked copy (#7874 review).
+func freshCloneImport(path string, check doctorCheck) error {
+	if !doctor.FreshCloneDetected(check.Message) {
+		return &fix.SkipError{Reason: errors.New("the Fresh Clone check did not find the database missing, so issues.jsonl is not imported over it")}
+	}
+	return fix.FreshCloneImport(path, Version)
 }
 
 func fixPendingMigrations(path string) error {

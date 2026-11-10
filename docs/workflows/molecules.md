@@ -53,6 +53,8 @@ bd dep add <implement-id> <design-id>   # implement needs design
 bd dep add <test-id> <implement-id>     # test needs implement
 ```
 
+If the epic carries a size/effort label, see [Labels](/core-concepts/labels) for keeping it off the steps.
+
 If an ad-hoc epic turns out to be worth repeating, extract a reusable formula
 from it with `bd mol distill <epic-id> <formula-name>`.
 
@@ -71,6 +73,11 @@ bd mol show <molecule-id>             # Structure and variables
 bd mol show <molecule-id> --parallel  # Highlight steps that can run concurrently
 bd dep tree <molecule-id>             # Shows full hierarchy
 ```
+
+A molecule's steps are the issues linked to its root by a `parent-child`
+dependency (what `--parent` and `bd mol pour` create). An ID that only looks
+hierarchical, such as `bd-xyz.4` with no such dependency, does not make an
+issue a step.
 
 ## Working with Molecules
 
@@ -144,7 +151,16 @@ bd close bd-xyz.1 --reason "Done"
 
 # Check what's ready next
 bd ready --mol bd-xyz
+
+# Or complete a step and claim the next ready one in one command
+bd close bd-xyz.1 --continue
 ```
+
+`--continue` claims the next ready step for you (it becomes `in_progress` and
+yours), skipping any step someone else already holds; add `--no-auto` to see
+the next step without claiming it. Against a `bd serve` that cannot advance a
+molecule, `bd close --continue` refuses before closing anything, so a step is
+never left closed with the next one unclaimed.
 
 ### Viewing Progress
 
@@ -173,9 +189,46 @@ Completed Molecule
 Closed / Squashed / Burned
 ```
 
-Closing the last child does not close the molecule root — epics stay open as
-close-eligible work until closed explicitly (`bd epic close-eligible` sweeps
-them). For cleanup of the beads themselves:
+### When the Last Step Closes
+
+Closing a molecule's last open step closes its root in the same command, with
+the reason `all steps complete`:
+
+```bash
+bd close bd-xyz.3
+# ✓ Auto-closed completed molecule bd-xyz — Release 1.0.0
+# ✓ Closed bd-xyz.3 — Verify: Closed
+```
+
+Not every root closes this way:
+
+| Root | After its last step closes |
+|------|----------------------------|
+| Poured molecule (`bd mol pour`) or wisp (`bd mol wisp`) | Closes |
+| Epic with the `template` label | Closes |
+| Any other epic | Stays open as close-eligible work: close it yourself, or sweep with `bd epic close-eligible` |
+
+A root that `bd close` would refuse on its own stays open too — for example,
+it has an open blocker, it is pinned, or it is assigned to someone else. The
+step still closes, and a warning names the root and the reason:
+
+```bash
+bd close bd-abc.2
+# Warning: could not auto-close completed molecule: cannot close bd-abc: assignee is "bob", actor is "alice"; reclaim or use --force to override
+# ✓ Closed bd-abc.2 — Check: Closed
+```
+
+Once the obstacle is gone, `bd close <root-id>` closes the root, and so does
+closing the last step again.
+
+A `bd serve` that does not close molecule roots for its clients (an older
+server, or one whose orchestrator manages molecules) leaves the root open:
+`bd close` prints a note naming it, and `bd close <root-id>` closes it.
+
+With `--json`, the step's entry reports the closed root, or why it stayed
+open — see the [JSON Output Schema Contract](/reference/json-schema).
+
+For cleanup of the beads themselves:
 
 - `bd mol squash <id>` condenses a molecule's ephemeral children into a
   permanent digest issue.

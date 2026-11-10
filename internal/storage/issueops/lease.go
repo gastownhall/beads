@@ -3,9 +3,12 @@ package issueops
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -59,14 +62,40 @@ func leaseTTL(ctx context.Context) time.Duration {
 // INVARIANT: any path that mutates status, assignee, or started_at on an
 // in_progress issue MUST rewrite row_lock — that is the set the reclaim/close
 // races care about (claim, close, updateIssueInTx, reclaim, unclaim all do).
-// Paths that touch only orthogonal cells (is_blocked, compaction_level,
-// dependency metadata, rename, or reopen — which acts on closed rows) are safe
-// to merge with a reclaim and intentionally do NOT rewrite it. Heartbeats no
-// longer touch the issues row at all (bd-lrgn1): the lease lives in the
+// Reopen rewrites it too (reopen.go): it acts on a closed row, so no reclaim
+// races it, but it is a status change, and a caller holding the closed row's
+// RowVersion must see its guard go stale. Paths that touch only orthogonal
+// cells (is_blocked, compaction_level, dependency metadata, labels, rename)
+// are safe to merge with a reclaim and intentionally do NOT rewrite it;
+// backend/conformance/row_version_contract.go pins each kind's answer on every
+// backend. A heartbeat
+// REFRESH does not touch the issues row (bd-lrgn1): the lease lives in the
 // ephemeral leases table, where a racing heartbeat and reclaim contend on the
-// SAME lease row and conflict without any help. Adding a new path that sets
+// SAME lease row and conflict without any help. A heartbeat RE-ARM (a lease
+// granted to a live claim that has none) is the one deliberate remint that
+// changes no lifecycle field, and it is load-bearing: its lease INSERT shares
+// no row with a concurrent release or close, so the remint is what makes the
+// two collide (see RenewLeaseInTx). Adding a new path that sets
 // status/assignee outside updateIssueInTx without rewriting row_lock would
 // silently reintroduce the zombie-merge bug.
+//
+// The exemptions are load-bearing in the OTHER direction too (analysis
+// absorbed from gastownhall/beads#4682, Julian Knutsen): row_lock doubles as
+// the RowVersion optimistic-concurrency token (types.Issue.RowVersion), so a
+// path that reminted it WITHOUT changing the content a CAS holder cares about
+// would spuriously fail honest ExpectedVersion checks. The is_blocked
+// recompute is the canonical case: it is a denormalized aux-marker refresh
+// that already goes out of its way to preserve updated_at
+// (blocked_state.go), and bumping the token there would clobber a concurrent
+// whole-row CAS over a cell derived from OTHER rows. (The PR's second
+// exemption of this kind, the lease heartbeat, no longer arises here: since
+// bd-lrgn1 a refresh never touches the issues row, and a re-arm remints on
+// purpose, accepting that a guarded write composed before it fails once and
+// re-reads.) So the invariant cuts both ways: status/ownership writes MUST
+// remint, aux-marker writes MUST NOT. The remint direction is enforced at build time by
+// TestAllIssueRowWritesStampRowLock (row_lock_guard_test.go), whose exemption
+// markers are the machine-readable form of this list — widen the stamping
+// policy there first, not by ad-hoc stamps.
 func freshRowLock() int64 {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -242,6 +271,16 @@ func RestoreLeaseOnImportInTx(ctx context.Context, tx DBTX, issue *types.Issue, 
 	// An upsert over an existing row may have ended or transferred the claim
 	// (e.g. a newer snapshot closed the issue): drop a lease row that no
 	// longer matches a live claim by its holder.
+	//
+	// This join is a SQL equality (i.assignee = leases.holder), not
+	// actorMatches — a query predicate can't canonicalize across a join the
+	// way Go code can, so a lease granted under one spelling of an identity
+	// can be dropped here if the issue's stored assignee is later written
+	// under a different, equivalent spelling (ga-v2k49). Bounded and
+	// self-healing: HeartbeatIssueInTx's disambiguation fallback re-arms the
+	// lease under the caller's current spelling on the next beat, so the gap
+	// is one issue briefly in_progress with no lease row (visible to
+	// stale/reclaim reads), never a stuck state.
 	if !isNew {
 		_, err := tx.ExecContext(ctx, `
 			DELETE FROM leases WHERE issue_id = ?
@@ -265,14 +304,115 @@ func RestoreLeaseOnImportInTx(ctx context.Context, tx DBTX, issue *types.Issue, 
 // storage.ErrNotClaimable / ErrAlreadyClaimed so the caller learns its lease
 // is gone.
 //
-// The write touches ONLY the leases table (ephemeral, dolt_ignored): a
+// A refresh touches ONLY the leases table (ephemeral, dolt_ignored): a
 // heartbeat mints no Dolt commit and no history, and deliberately does NOT
 // stamp issues.updated_at — updated_at keeps its merge/LWW meaning and bd
 // stale consults leases.heartbeat_at for in_progress rows instead (bd-lrgn1).
 //
-//nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
+// A RE-ARM (a live claim with no lease row the caller holds, which the
+// heartbeat grants) is the exception: it is recorded as a mutation (row_lock,
+// updated_at, event, journal, version); see RenewLeaseInTx. A caller that runs
+// this in a transaction must make the version-control commit
+// LeaseRearmVersionCommit names when it re-arms.
+//
+// It is RenewLeaseInTx with the renewal's report dropped: the legacy
+// HeartbeatIssue legs answer only whether the lease was refreshed.
 func HeartbeatIssueInTx(ctx context.Context, tx DBTX, id, actor string) error {
+	_, err := RenewLeaseInTx(ctx, tx, id, actor)
+	return err
+}
+
+// LeaseRenewal reports one lease RenewLeaseInTx refreshed or re-armed. Both
+// times are computed in Go from the same clock reading and TTL the statement
+// binds, rounded to whole seconds as the lease columns round them on store,
+// so they are what the lease row now holds.
+type LeaseRenewal struct {
+	HeartbeatAt time.Time
+	ExpiresAt   time.Time
+	// Rearmed is true only when the slow path CREATED the caller's lease row:
+	// the caller held a live claim with no lease row for it (a hand-doled
+	// claim), or the issue's lease row named a holder that is not the caller.
+	// A refresh of the caller's own row is never a re-arm, even when it
+	// changed no value (two heartbeats in one second).
+	Rearmed bool
+}
+
+// LeaseRearmVersionCommit is the version-control commit a leg makes after a
+// heartbeat: none for a refresh or a refusal (the leases table is
+// dolt_ignored), and the release's staged set, issues and events, for a
+// re-arm, which is recorded as a mutation. One helper for every leg so the
+// message cannot drift.
+func LeaseRearmVersionCommit(id string, rearmed bool) (ChangedTables, string) {
+	if !rearmed {
+		return nil, ""
+	}
+	tables := ChangedTables{}
+	tables.Add("issues", "events")
+	return tables, fmt.Sprintf("bd: re-arm lease %s", id)
+}
+
+// LeaseRenewalRefusal is the refusal RenewLeaseInTx answers when no lease row
+// matched the caller and the slow path could not re-arm one. It carries the
+// issue row the slow path read so a typed front door (ExecuteHeartbeatInTx)
+// can classify the refusal without a second read, and it reads and unwraps as
+// Err — the exact error HeartbeatIssueInTx has always returned — so the
+// legacy legs' text and errors.Is behavior are unchanged.
+type LeaseRenewalRefusal struct {
+	IssueID string
+	// Found is false when the issue row could not be read.
+	Found bool
+	// ReadErr is the error the issue-row read failed with when Found is false.
+	ReadErr  error
+	Wisp     bool
+	Assignee string
+	Status   string
+	// Err is the wrapped refusal: storage.ErrAlreadyClaimed or
+	// storage.ErrNotClaimable.
+	Err error
+	// OrphanDeleted is true when the refusal deleted a lease row the caller
+	// held on an issue it no longer holds a live claim on (see
+	// RenewLeaseInTx). The deletion is part of the refusing transaction: a
+	// caller that wants it kept must COMMIT that transaction and report the
+	// refusal afterwards (HeartbeatRefusalCommits).
+	OrphanDeleted bool
+}
+
+func (e *LeaseRenewalRefusal) Error() string { return e.Err.Error() }
+
+// Unwrap makes LeaseRenewalRefusal match the refusal it carries.
+func (e *LeaseRenewalRefusal) Unwrap() error { return e.Err }
+
+// LeaseRenewalRefusalCommits reports whether err is a RenewLeaseInTx refusal
+// whose transaction a legacy HeartbeatIssue leg must COMMIT rather than roll
+// back: one that read the issue row (Found), the only refusal that can carry a
+// write, the orphaned lease row it deletes. A refusal whose issue read failed
+// deletes nothing, and may follow a fast-path UPDATE that already extended an
+// orphan row's expiry, so its transaction rolls back — the rule the role's
+// HeartbeatRefusalCommits applies to the same refusal.
+func LeaseRenewalRefusalCommits(err error) bool {
+	var refused *LeaseRenewalRefusal
+	return errors.As(err, &refused) && refused.Found
+}
+
+// RenewLeaseInTx is the body of HeartbeatIssueInTx, reporting the renewal:
+// see that function for what it writes and, above all, what it must never
+// write. Its SQL text is the heartbeat's own and must stay so: the Postgres
+// dialect rewrites the one IF() in it keyed on its `update leases set`
+// prefix.
+//
+//nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
+func RenewLeaseInTx(ctx context.Context, tx DBTX, id, actor string) (LeaseRenewal, error) {
+	// THE BOUND CLOCK IS UNROUNDED; THE REPORTED ONE IS ROUNDED. The lease
+	// columns are DATETIME (whole seconds), which round a sub-second value on
+	// store, so the result reports now rounded to the second: exactly what
+	// the row now holds. The binds stay unrounded on purpose: Dolt counts a
+	// value-identical UPDATE as 0 rows affected even under CLIENT_FOUND_ROWS,
+	// and binding the rounded value would make every same-second refresh look
+	// like a miss and take the slow path (several extra reads on the hottest
+	// write in the fleet).
 	now := time.Now().UTC()
+	reported := now.Round(time.Second)
+	ttl := leaseTTL(ctx)
 	// granted_node is backfilled, never overwritten: a lease row whose
 	// provenance is unknown (granted before ignored migration 0016, or before
 	// this replica was named) is being kept alive through THIS node's store,
@@ -281,17 +421,100 @@ func HeartbeatIssueInTx(ctx context.Context, tx DBTX, id, actor string) error {
 	// lease moved. NodeID is "" unless an operator configured it, so on an
 	// unnamed deployment this backfill writes '' over '' and changes nothing:
 	// the fail-open default cannot be silently converted to fail-closed.
+	//
+	// THE TRAP THIS INVARIANT COSTS (wy-sp2l4 F4), reviewed and KEPT. A
+	// heartbeat that affects 1 row is proof the holder is alive on THIS store,
+	// yet a row positively naming another node keeps that name forever, so the
+	// replica guard in ReclaimExpiredLeasesInTx declines it and only
+	// `bd reclaim --any-replica` can ever recover it. Two states reach that:
+	//
+	//   (a) a replica RENAMED (node_id mini -> mini2) keeps heartbeating its
+	//       own leases, which now read foreign forever;
+	//   (b) a foreign lease materialized by RestoreLeaseOnImportInTx whose
+	//       holder name also exists locally is kept alive here but stays
+	//       labeled with the remote node.
+	//
+	// Re-homing on heartbeat would clear both — and the branch below already
+	// says "heartbeat => this node grants it" (a heartbeat that matches no
+	// lease row calls UpsertLeaseInTx, which stamps the local node). It is NOT
+	// done on THIS path because the two are not the same claim: UpsertLeaseInTx
+	// is MINTING a lease row through this store, while this UPDATE is refreshing
+	// one whose provenance is already recorded. Re-homing here would mean a
+	// heartbeat arriving at this store — including one whose only path here is
+	// the JSONL import that materialized case (b) — silently reassigns
+	// enforcement of a lease another replica granted, which is precisely the
+	// robbery the guard exists to prevent (a remote view is stale by up to one
+	// sync interval). Keeping it makes the failure mode LOUD and recoverable
+	// (reportForeignSkips summarizes it every run; --any-replica reverts it)
+	// rather than silent. The escape hatches are documented in
+	// `bd reclaim --help` and docs/multi-agent/federation.md; the fix for (a)
+	// is to reap on the old name, or `bd reclaim --any-replica --id <id>` /
+	// `bd unclaim --force <id>` for a single stranded unit once that replica is
+	// gone for good.
+	//
+	// SCOPE, precisely: the no-re-home invariant holds on every REFRESH — this
+	// fast path and the slow path's in-place refresh of a row the caller
+	// already holds (same second, or the same identity spelled differently,
+	// ga-v2k49/ga-wzl83), which keeps granted_at and granted_node. Only a
+	// RE-ARM re-homes: when the caller holds a live claim and no lease row the
+	// caller holds exists, UpsertLeaseInTx mints one and stamps the LOCAL node.
+	// RestoreLeaseOnImportInTx can relabel in the other direction (it takes
+	// granted_node from the snapshot when the local row is expired); that is a
+	// pre-existing path with its own rationale.
+	//
+	// THE LIVE-CLAIM PREDICATE. The fast path refreshes the caller's row only
+	// while the issue is still in_progress under the caller (verbatim, the
+	// holder predicate's own rule). "A lease row exists only while its claim
+	// is live" is an invariant every claim-ending path maintains by deleting
+	// the row, and the slow path's re-arm keeps it against a concurrent ender
+	// by reminting row_lock (see below). The predicate is the second line: a
+	// lease row orphaned any other way (a binary without that remint, a
+	// hand-edited table) fails the fast path, and the slow path refuses AND
+	// deletes it, instead of every later heartbeat refreshing it and answering
+	// success for a claim that no longer exists. The `update leases set`
+	// prefix and the one IF() the Postgres dialect rewrites are unchanged.
+	//
+	// THE COMPARISON IS VERBATIM (assignee = the holder as sent), deliberately,
+	// as the holder predicate is: a holder whose lease row and assignee are
+	// spelled differently (ga-v2k49's separator case) misses here on every
+	// beat and takes the slow path, which judges under actorMatches and
+	// refreshes the row in place. Correct, a few reads slower, and only for
+	// that spelling mismatch; the common case pays one indexed count read.
+	//
+	// FOR A POSTGRES PORT: the refresh now READS the issues row. Under
+	// SERIALIZABLE that is a read-write dependency on every concurrent write
+	// to the same issue (the holder's own edits racing its heartbeat), so
+	// expect more serialization failures on this statement, and keep it inside
+	// the retrying write transaction.
 	result, err := tx.ExecContext(ctx, `
 		UPDATE leases SET lease_expires_at = ?, heartbeat_at = ?,
 			granted_node = IF(COALESCE(granted_node, '') = '', ?, granted_node)
 		WHERE issue_id = ? AND holder = ?
-	`, now.Add(leaseTTL(ctx)), now, NodeID(ctx), id, actor)
+	`, now.Add(ttl), now, NodeID(ctx), id, actor)
 	if err != nil {
-		return fmt.Errorf("failed to heartbeat issue: %w", err)
+		return LeaseRenewal{}, fmt.Errorf("failed to heartbeat issue: %w", err)
 	}
 	rows, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
+		return LeaseRenewal{}, fmt.Errorf("failed to get rows affected: %w", err)
+	}
+	if rows > 0 {
+		// The live-claim check, in the same transaction as the UPDATE (so on
+		// the same snapshot, and atomically with it: a refusal below commits
+		// nothing the caller keeps but the orphan delete). It is a separate
+		// read rather than an EXISTS in the UPDATE because Dolt reports a
+		// value-identical UPDATE that carries a subquery as 0 rows affected
+		// even under CLIENT_FOUND_ROWS, which would send every same-second
+		// refresh down the slow path.
+		var live int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM issues WHERE id = ? AND status = 'in_progress' AND assignee = ?`, id, actor,
+		).Scan(&live); err != nil {
+			return LeaseRenewal{}, fmt.Errorf("failed to heartbeat issue: %w", err)
+		}
+		if live == 0 {
+			rows = 0 // an orphan or a spelling mismatch: the slow path decides
+		}
 	}
 	if rows == 0 {
 		// No lease row. Disambiguate from the issue row: gone
@@ -304,21 +527,151 @@ func HeartbeatIssueInTx(ctx context.Context, tx DBTX, id, actor string) error {
 			fmt.Sprintf("SELECT COALESCE(assignee, ''), status FROM %s WHERE id = ?", issueTable), id,
 		).Scan(&assignee, &status)
 		if qerr != nil {
-			return fmt.Errorf("%w: %s", storage.ErrNotClaimable, id)
+			return LeaseRenewal{}, &LeaseRenewalRefusal{
+				IssueID: id, ReadErr: qerr, Wisp: isWisp,
+				Err: fmt.Errorf("%w: %s", storage.ErrNotClaimable, id),
+			}
 		}
-		if assignee != "" && assignee != actor {
-			return fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, assignee)
+		// A refusal deletes the caller's own lease row, if one survives on an
+		// issue the caller no longer holds a live claim on: that row is an
+		// orphan (the re-arm race above), and leaving it would keep a stale
+		// lease on an issue that is open, closed or someone else's. The holder
+		// fence keeps it to the caller's own row; a live holder's lease is
+		// never touched. The fence is judged under actorMatches, as the
+		// in-place refresh below judges it: a row held under another spelling
+		// of the caller (ga-v2k49) is the caller's orphan too, so its holder
+		// is read and bound back, the refresh's own lookup, on this cold path
+		// only. The delete is judged in this transaction's snapshot, which is
+		// the snapshot that just found no live claim for the caller.
+		refused := func(err error) error {
+			refusal := &LeaseRenewalRefusal{
+				IssueID: id, Found: true, Wisp: isWisp, Assignee: assignee, Status: status, Err: err,
+			}
+			if isWisp {
+				return refusal
+			}
+			var leaseHolder string
+			lerr := tx.QueryRowContext(ctx, `SELECT holder FROM leases WHERE issue_id = ?`, id).Scan(&leaseHolder)
+			switch {
+			case errors.Is(lerr, sql.ErrNoRows):
+				return refusal
+			case lerr != nil:
+				return fmt.Errorf("read lease for %s: %w", id, lerr)
+			case !actorMatches(leaseHolder, actor):
+				return refusal
+			}
+			res, derr := tx.ExecContext(ctx, `DELETE FROM leases WHERE issue_id = ? AND holder = ?`, id, leaseHolder)
+			if derr != nil {
+				return fmt.Errorf("delete orphaned lease for %s: %w", id, derr)
+			}
+			if n, nerr := res.RowsAffected(); nerr == nil && n > 0 {
+				refusal.OrphanDeleted = true
+			}
+			return refusal
 		}
-		if !isWisp && assignee == actor && status == string(types.StatusInProgress) {
+		// Judged under actorMatches, not verbatim (ga-v2k49): the primary
+		// UPDATE's own `holder = ?` predicate above stays a verbatim SQL
+		// comparison deliberately — fixing it would mean pre-reading the
+		// lease row on every heartbeat (the hottest write in the fleet, see
+		// above) just to bind back its own holder value. A spelling
+		// difference across layers (ga-wzl83) already makes that predicate
+		// affect 0 rows and fall here; fixing the disambiguation instead
+		// means the caller still self-heals correctly (its row is refreshed in
+		// place below, under its current spelling) at the cost of the slow
+		// path on a spelling mismatch, never on the byte-identical common case.
+		if assignee != "" && !actorMatches(assignee, actor) {
+			return LeaseRenewal{}, refused(fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, assignee))
+		}
+		if !isWisp && actorMatches(assignee, actor) && status == string(types.StatusInProgress) {
 			// The caller genuinely holds the claim but has no lease row — e.g.
 			// the claim was hand-doled through a generic update (which never
-			// arms a lease, bd-9hpgf) and the worker is now opting into lease
-			// semantics. A real worker's heartbeat re-arms recovery.
-			return UpsertLeaseInTx(ctx, tx, id, actor, now, leaseTTL(ctx))
+			// arms a lease, bd-9hpgf), the worker is now opting into lease
+			// semantics, or (ga-v2k49) the existing lease row's holder is a
+			// different spelling of the same identity (ga-wzl83) and the
+			// primary UPDATE's verbatim predicate above missed it. A real
+			// worker's heartbeat recovers under actor's current spelling: a
+			// lease row the caller already holds is refreshed in place (its
+			// holder rewritten to that spelling, which the next heartbeat's
+			// UPDATE matches), and a missing one is re-armed. An ASSIGNEE
+			// spelled differently from actor still fails the verbatim
+			// live-claim check, so that holder takes this path on every beat.
+			//
+			// FIRST, is there a lease row for this issue the caller already
+			// holds? Then this is a refresh the fast path missed without
+			// anything being wrong: on embedded Dolt an UPDATE that changes no
+			// value (a second heartbeat in the same second) reports 0 rows, and
+			// a holder spelled differently from the assignee misses the
+			// verbatim live-claim predicate. Refresh that row in place, keeping
+			// its granted_at and granted_node (the fast path's no-re-home rule,
+			// with the same backfill), and report no re-arm.
+			var leaseHolder string
+			lerr := tx.QueryRowContext(ctx, `SELECT holder FROM leases WHERE issue_id = ?`, id).Scan(&leaseHolder)
+			switch {
+			case lerr == nil && actorMatches(leaseHolder, actor):
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE leases SET lease_expires_at = ?, heartbeat_at = ?, holder = ?,
+						granted_node = IF(COALESCE(granted_node, '') = '', ?, granted_node)
+					WHERE issue_id = ? AND holder = ?
+				`, now.Add(ttl), now, actor, NodeID(ctx), id, leaseHolder); err != nil {
+					return LeaseRenewal{}, fmt.Errorf("failed to heartbeat issue: %w", err)
+				}
+				return LeaseRenewal{HeartbeatAt: reported, ExpiresAt: reported.Add(ttl)}, nil
+			case lerr != nil && !errors.Is(lerr, sql.ErrNoRows):
+				return LeaseRenewal{}, fmt.Errorf("read lease for %s: %w", id, lerr)
+			}
+			// No lease row the caller holds: grant one. THIS IS A MUTATION,
+			// recorded as every bead mutator records one: row_lock reminted,
+			// updated_at stamped, a lease_rearmed event, a journal entry and a
+			// version row (the legs then make the version-control commit and
+			// fire the update hook, keyed on LeaseRenewal.Rearmed). Why the
+			// remint is load-bearing: The live claim this branch acts on was read in
+			// THIS transaction's snapshot, but a snapshot cannot see a release
+			// or close committing concurrently, and a lease INSERT shares no
+			// row with such an ender (its DELETE FROM leases matched nothing in
+			// its own snapshot): Dolt would commit both and leave an orphaned
+			// lease on an open or closed issue. Every claim-ending path
+			// rewrites row_lock (the freshRowLock invariant), so reminting it
+			// here makes the grant COLLIDE with any concurrent ender, and the
+			// loser is replayed against the winner's state: either the ender
+			// sees and deletes this lease, or this heartbeat sees the ended
+			// claim and is refused. Concurrent re-arms collide with each other
+			// the same way, so exactly one reports Rearmed.
+			//
+			// THE COST, accepted: a re-arm (a hand-doled claim's first
+			// heartbeat, once) remints the holder's revision token, so a
+			// guarded write composed before it fails once and re-reads. A
+			// REFRESH never touches the issue row and records nothing.
+			if _, err := tx.ExecContext(ctx, `UPDATE issues SET row_lock = ?, updated_at = ? WHERE id = ?`,
+				freshRowLock(), now, id); err != nil {
+				return LeaseRenewal{}, fmt.Errorf("remint row_lock for %s: %w", id, err)
+			}
+			if err := UpsertLeaseInTx(ctx, tx, id, actor, now, ttl); err != nil {
+				return LeaseRenewal{}, err
+			}
+			if err := RecordFullEventInTable(ctx, tx, "events", id, types.EventLeaseRearmed, actor, "", actor); err != nil {
+				return LeaseRenewal{}, fmt.Errorf("record lease re-arm event for %s: %w", id, err)
+			}
+			if err := RecordEventInTx(ctx, tx, EventUpdate, id, actor); err != nil {
+				return LeaseRenewal{}, err
+			}
+			if err := RecordVersionInTx(ctx, tx, id, actor); err != nil {
+				return LeaseRenewal{}, err
+			}
+			return LeaseRenewal{HeartbeatAt: reported, ExpiresAt: reported.Add(ttl), Rearmed: true}, nil
 		}
-		return fmt.Errorf("%w: %s status %s", storage.ErrNotClaimable, id, status)
+		return LeaseRenewal{}, refused(fmt.Errorf("%w: %s status %s", storage.ErrNotClaimable, id, status))
 	}
-	return nil
+	// A REFRESH IS DELIBERATELY NOT JOURNALED — do not add an emit here (the
+	// re-arm above is the one heartbeat path recorded as a mutation). A heartbeat is a
+	// high-frequency lease keepalive: it writes only the clone-local `leases`
+	// table (lease-liveness state), never a durable bead field. Journaling it
+	// would put a full-snapshot write plus the shared seq-counter serialization
+	// on the hottest write in the fleet, and a replay consumer gains nothing —
+	// lease state lives on the working-set plane and expires on its own. Lease
+	// RECLAIM is the opposite case and does journal: it clears assignee and
+	// reverts status, which is durable bead state. The decision is pinned by
+	// mutationEntryPoints' heartbeat note in journal_completeness_test.go.
+	return LeaseRenewal{HeartbeatAt: reported, ExpiresAt: reported.Add(ttl)}, nil
 }
 
 // warnReplica writes a replica-guard audit line to STDERR (never stdout —
@@ -331,33 +684,176 @@ func warnReplica(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format, args...)
 }
 
-// reportForeignSkips names the stale leases the replica guard declined.
+// Output bounds for the foreign-skip audit (wy-sp2l4). A foreign stale lease is
+// by construction NEVER reclaimed, so this report is not a one-off: it repeats
+// identically on every reclaim run, forever. The original shape — one stderr
+// line per foreign ROW — meant a supervisor on a 1-minute timer against a
+// federated store with N stranded remote leases printed N lines/minute
+// indefinitely. So the default is ONE summary line per run, and the per-issue
+// naming moved behind verbose (`bd -v` / BD_DEBUG), itself capped.
+const (
+	// foreignSkipNamedNodes is how many granting replicas the summary line
+	// names before collapsing the rest into a count.
+	foreignSkipNamedNodes = 3
+	// foreignSkipDetailRows caps the verbose per-issue expansion; the tail is
+	// collapsed into a count rather than printed.
+	foreignSkipDetailRows = 20
+)
+
+// foreignSkipGroup is the stale-lease count the replica guard declined for one
+// granting replica.
+type foreignSkipGroup struct {
+	node  string
+	count int
+}
+
+// reportForeignSkips audits the stale leases the replica guard declined.
 // Best-effort and never fatal: this is an audit courtesy on the reclaim path,
 // not a correctness step, so a failed query is swallowed rather than allowed
 // to abort a reclaim that is otherwise fine.
+//
+// Emits ONE summary line (see the bounds above); `bd -v` / BD_DEBUG=1 adds the
+// per-issue detail. Under --quiet it does no work at all — warnReplica would
+// discard every line it produced, so the queries are skipped too.
 func reportForeignSkips(ctx context.Context, tx DBTX, cutoff time.Time, filter types.ReclaimFilter, localNode string) {
+	if debug.IsQuiet() {
+		return
+	}
+	groups, total := foreignSkipGroups(ctx, tx, cutoff, filter, localNode)
+	if total == 0 {
+		return
+	}
+	warnReplica("%s", formatForeignSkipSummary(groups, total, localNode))
+	if !debug.Enabled() {
+		return
+	}
+	reportForeignSkipDetail(ctx, tx, cutoff, filter, localNode, total)
+}
+
+// foreignSkipGroups counts the declined stale leases per granting replica,
+// most-affected first, and returns their total.
+//
+// One row per granting REPLICA, not per stale lease: the row count is bounded
+// by the deployment's topology (peers whose leases ever landed in this store
+// via RestoreLeaseOnImportInTx), not by the amount of stranded work — which is
+// exactly the unboundedness this replaced. A query error yields no groups and
+// a zero total, so the caller stays silent.
+func foreignSkipGroups(ctx context.Context, tx DBTX, cutoff time.Time, filter types.ReclaimFilter, localNode string) ([]foreignSkipGroup, int) {
 	scopeSQL, scopeArgs := sqlbuild.ReclaimScopeSQL(filter, sqlbuild.IssuesFilterTables, "i")
 	args := append([]any{cutoff, localNode}, scopeArgs...)
+	rows, err := tx.QueryContext(ctx, `
+		SELECT COALESCE(l.granted_node, ''), COUNT(*) FROM leases l
+		JOIN issues i ON i.id = l.issue_id
+		WHERE i.status = 'in_progress'
+		  AND l.lease_expires_at < ?
+		  AND COALESCE(l.granted_node, '') NOT IN ('', ?)
+	`+scopeSQL+`
+		GROUP BY COALESCE(l.granted_node, '')
+		ORDER BY COUNT(*) DESC, COALESCE(l.granted_node, '')
+	`, args...)
+	if err != nil {
+		return nil, 0
+	}
+	defer func() { _ = rows.Close() }()
+	var groups []foreignSkipGroup
+	total := 0
+	for rows.Next() {
+		var g foreignSkipGroup
+		if err := rows.Scan(&g.node, &g.count); err != nil {
+			return nil, 0
+		}
+		groups = append(groups, g)
+		total += g.count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0
+	}
+	return groups, total
+}
+
+// formatForeignSkipSummary renders the one-line audit. Pure so its bounds are
+// testable without a store: the named-replica list is capped at
+// foreignSkipNamedNodes and the tail collapsed, so the line's length is set by
+// the constant and not by the deployment.
+func formatForeignSkipSummary(groups []foreignSkipGroup, total int, localNode string) string {
+	named := groups
+	rest := 0
+	restCount := 0
+	if len(named) > foreignSkipNamedNodes {
+		named = groups[:foreignSkipNamedNodes]
+		for _, g := range groups[foreignSkipNamedNodes:] {
+			rest++
+			restCount += g.count
+		}
+	}
+	var b strings.Builder
+	for i, g := range named {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "%q (%d)", g.node, g.count)
+	}
+	if rest > 0 {
+		fmt.Fprintf(&b, ", and %d more %s (%d)", rest, pluralWord(rest, "replica", "replicas"), restCount)
+	}
+	// --any-replica is named with --id: the bare form reverts EVERY foreign
+	// stale lease, live peers included, which is the wrong lever for the
+	// one-stranded-unit case an operator reading this line usually has.
+	return fmt.Sprintf("reclaim: skipped %d stale %s granted by %s — %s, not this node (%q). "+
+		"Reap %s on the granting replica, or pass --any-replica --id <id> if that replica is gone. "+
+		"(bd -v lists up to %d of them.)\n",
+		total, pluralWord(total, "lease", "leases"),
+		pluralWord(len(groups), "another replica", "other replicas"), b.String(), localNode,
+		pluralWord(total, "it", "them"), foreignSkipDetailRows)
+}
+
+// reportForeignSkipDetail names the declined leases one per line, capped at
+// foreignSkipDetailRows with the tail collapsed into a count. total is the
+// figure foreignSkipGroups already computed, so the tail is exact without a
+// second counting pass.
+func reportForeignSkipDetail(ctx context.Context, tx DBTX, cutoff time.Time, filter types.ReclaimFilter, localNode string, total int) {
+	scopeSQL, scopeArgs := sqlbuild.ReclaimScopeSQL(filter, sqlbuild.IssuesFilterTables, "i")
+	args := append([]any{cutoff, localNode}, scopeArgs...)
+	args = append(args, foreignSkipDetailRows)
 	rows, err := tx.QueryContext(ctx, `
 		SELECT l.issue_id, COALESCE(l.granted_node, ''), COALESCE(i.assignee, '') FROM leases l
 		JOIN issues i ON i.id = l.issue_id
 		WHERE i.status = 'in_progress'
 		  AND l.lease_expires_at < ?
 		  AND COALESCE(l.granted_node, '') NOT IN ('', ?)
-	`+scopeSQL, args...)
+	`+scopeSQL+`
+		ORDER BY l.issue_id
+		LIMIT ?
+	`, args...)
 	if err != nil {
 		return
 	}
 	defer func() { _ = rows.Close() }()
+	shown := 0
 	for rows.Next() {
 		var id, grantedNode, holder string
 		if err := rows.Scan(&id, &grantedNode, &holder); err != nil {
 			return
 		}
-		warnReplica("reclaim: skipping %s (held by %s) — lease granted by replica %q, not this node (%q). "+
-			"Reap it on that replica, or pass --any-replica if that replica is gone.\n",
+		shown++
+		warnReplica("reclaim:   %s (held by %s) — lease granted by replica %q, not this node (%q).\n",
 			id, holder, grantedNode, localNode)
 	}
+	if err := rows.Err(); err != nil {
+		return
+	}
+	if remaining := total - shown; remaining > 0 {
+		warnReplica("reclaim:   ... and %d more.\n", remaining)
+	}
+}
+
+// pluralWord picks between two spellings by count. (issueops already has a
+// plural() for the "s"/"" case; this one carries whole words.)
+func pluralWord(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // reclaimReplicaSQL returns the granting-replica predicate for the reclaim
@@ -430,6 +926,11 @@ func reclaimReplicaSQL(filter types.ReclaimFilter, localNode string) (string, []
 // are never leased work. Returns the issues it reverted (id + the owner it took
 // the lease from) so the caller can log/emit recovery events. The caller owns
 // Dolt versioning.
+//
+// This is the one place a reclaimed row's revision token is minted: the row's
+// freshRowLock() value is captured off the revert UPDATE and published on
+// each types.ReclaimedLease as types.RevisionToken(newLock), the same
+// encoding IssueDetails.Revision uses.
 //
 // filter narrows which stale leases are eligible (see types.ReclaimFilter); the
 // zero filter keeps the historical global behavior. Scoping is applied to the
@@ -518,12 +1019,13 @@ func ReclaimExpiredLeasesInTx(ctx context.Context, tx DBTX, cutoff time.Time, fi
 		// being in_progress under us (closed) is left alone; row_lock makes a
 		// concurrent close/update conflict at commit time rather than
 		// cell-merge with this write.
+		newLock := freshRowLock()
 		res, err = tx.ExecContext(ctx, `
 			UPDATE issues
 			SET status = 'open', assignee = NULL, started_at = NULL,
 			    updated_at = ?, row_lock = ?
 			WHERE id = ? AND status = 'in_progress'
-		`, time.Now().UTC(), freshRowLock(), r.ID)
+		`, time.Now().UTC(), newLock, r.ID)
 		if err != nil {
 			return nil, fmt.Errorf("reclaim %s: %w", r.ID, err)
 		}
@@ -534,9 +1036,22 @@ func ReclaimExpiredLeasesInTx(ctx context.Context, tx DBTX, cutoff time.Time, fi
 		if n == 0 {
 			continue // no longer in_progress — its lease row was stale anyway
 		}
+		r.Revision = types.RevisionToken(newLock)
 		if err := RecordFullEventInTable(ctx, tx, "events", r.ID, types.EventLeaseReclaimed, actor,
 			r.PreviousOwner, ""); err != nil {
 			return nil, fmt.Errorf("record reclaim event for %s: %w", r.ID, err)
+		}
+		// Journal the lease reclaim as an update (assignee cleared, status
+		// reverted to open) so a replayer sees the claim released. Emitted past
+		// both re-checks, so only reverts that actually happened are recorded.
+		if err := RecordEventInTx(ctx, tx, EventUpdate, r.ID, actor); err != nil {
+			return nil, err
+		}
+		// The revert rewrote assignee, status and started_at — durable state —
+		// so the reclaimed issue gets a version row beside its journal entry,
+		// past the same two re-checks.
+		if err := RecordVersionInTx(ctx, tx, r.ID, actor); err != nil {
+			return nil, err
 		}
 		// Logged HERE, past both re-checks, so the audit trail records reverts
 		// that actually happened: a heartbeat landing after the snapshot makes

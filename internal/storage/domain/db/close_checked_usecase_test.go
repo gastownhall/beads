@@ -6,6 +6,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 func (s *testSuite) TestIssueUseCase_CloseIssueChecked() {
@@ -17,6 +18,56 @@ func (s *testSuite) TestIssueUseCase_CloseIssueChecked() {
 	s.Run("UnblockedClosesAndReturnsIssue", s.uccCloseCheckedUnblockedCloses)
 	s.Run("WispDirectBlockerRefuses", s.uccCloseWispCheckedDirectBlockerRefuses)
 	s.Run("WispForceClosesDespiteDirectBlocker", s.uccCloseWispCheckedForceCloses)
+	s.Run("OpenChildrenRefuseAndForceReportsCount", s.uccCloseCheckedOpenChildren)
+}
+
+func (s *testSuite) uccCloseCheckedOpenChildren() {
+	parent := "bd-ucc-clc-parent"
+	permanentChild := "bd-ucc-clc-child"
+	wispChild := "bd-ucc-clc-wisp-child"
+	s.seedIssueRow(parent)
+	s.seedIssueRow(permanentChild)
+	s.seedWispRow(wispChild)
+	for _, child := range []struct {
+		id   string
+		wisp bool
+	}{{permanentChild, false}, {wispChild, true}} {
+		s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+			newDep(child.id, parent, types.DepParentChild), "tester", domain.DepInsertOpts{UseWispsTable: child.wisp}))
+	}
+
+	res, err := s.issueUseCase().CloseIssueChecked(s.Ctx(), parent,
+		domain.CloseIssueParams{Reason: "done"}, "tester", false)
+	s.Require().Error(err)
+	s.True(errors.Is(err, storage.ErrCloseOpenChildren))
+	var childErr *storage.CloseOpenChildrenError
+	s.True(errors.As(err, &childErr))
+	s.Equal(parent, childErr.IssueID)
+	s.Equal(2, childErr.OpenChildren)
+	s.False(res.Closed)
+	s.Equal(0, res.OpenChildren)
+
+	res, err = s.issueUseCase().CloseIssueChecked(s.Ctx(), parent,
+		domain.CloseIssueParams{Reason: "override"}, "tester", true)
+	s.Require().NoError(err)
+	s.True(res.Closed)
+	s.Equal(2, res.OpenChildren)
+
+	wispParent := "bd-ucc-clc-wisp-parent"
+	childOfWispParent := "bd-ucc-clc-wisp-parent-child"
+	s.seedWispRow(wispParent)
+	s.seedIssueRow(childOfWispParent)
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep(childOfWispParent, wispParent, types.DepParentChild), "tester", domain.DepInsertOpts{}))
+	res, err = s.issueUseCase().CloseWispChecked(s.Ctx(), wispParent,
+		domain.CloseIssueParams{Reason: "done"}, "tester", false)
+	s.Require().Error(err)
+	s.True(errors.Is(err, storage.ErrCloseOpenChildren))
+	res, err = s.issueUseCase().CloseWispChecked(s.Ctx(), wispParent,
+		domain.CloseIssueParams{Reason: "override"}, "tester", true)
+	s.Require().NoError(err)
+	s.True(res.Closed)
+	s.Equal(1, res.OpenChildren)
 }
 
 func (s *testSuite) uccCloseCheckedDirectBlockerRefuses() {
@@ -32,6 +83,13 @@ func (s *testSuite) uccCloseCheckedDirectBlockerRefuses() {
 	s.True(errors.Is(err, storage.ErrCloseBlocked), "refusal must carry the shared sentinel")
 	s.ErrorContains(err, "is blocked by")
 	s.ErrorContains(err, "bd-ucc-clc-tgt", "message must name the live blocker")
+	// The list is typed as well as printed, so the HTTP surface can publish it
+	// without parsing the sentence, and the sentence is unchanged.
+	var blocked *publicops.BlockedError
+	s.Require().True(errors.As(err, &blocked), "refusal must carry *BlockedError: %v", err)
+	s.Equal("bd-ucc-clc-src", blocked.IssueID)
+	s.Equal([]publicops.Blocker{{ID: "bd-ucc-clc-tgt", Type: types.DepBlocks}}, blocked.Blockers)
+	s.Equal("cannot close blocked issue: bd-ucc-clc-src is blocked by [bd-ucc-clc-tgt]", blocked.Error())
 	s.False(res.Closed)
 
 	// The refused issue stays open.

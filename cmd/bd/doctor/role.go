@@ -3,9 +3,11 @@ package doctor
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -18,6 +20,7 @@ import (
 func CheckBeadsRole(path string) DoctorCheck {
 	// Read beads.role from git config (canonical location)
 	cmd := exec.Command("git", "config", "--get", "beads.role")
+	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
 	if path != "" {
 		cmd.Dir = path
 	}
@@ -42,6 +45,7 @@ func CheckBeadsRole(path string) DoctorCheck {
 func CheckBeadsRoleWithStore(path string, ss *SharedStore) DoctorCheck {
 	// Read beads.role from git config (canonical location)
 	cmd := exec.Command("git", "config", "--get", "beads.role")
+	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
 	if path != "" {
 		cmd.Dir = path
 	}
@@ -85,8 +89,15 @@ func checkBeadsRoleNotInGit(path string) DoctorCheck {
 }
 
 // isGitRepo checks whether the given path is inside a git repository.
+//
+// Shares the boundary of the two role reads above, which is what this probe
+// gates: rev-parse is config-sensitive through safe.directory, so retaining
+// suppression here could answer false for a repository that is only reachable
+// via a global safe.directory entry and silently downgrade the "beads.role not
+// configured" warning to "N/A (not a git repository)".
 func isGitRepo(path string) bool {
 	cmd := exec.Command("git", "rev-parse", "--git-dir")
+	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
 	if path != "" {
 		cmd.Dir = path
 	}

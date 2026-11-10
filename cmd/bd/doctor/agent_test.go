@@ -37,3 +37,29 @@ func TestEnrichFreshClone_WithSyncRemoteMentionsBootstrapAndFallback(t *testing.
 		t.Fatalf("expected sync.remote fallback command, got %#v", enrichment.commands)
 	}
 }
+
+// TestPruneEnrichmentsRecommendRealCommand pins the agent-facing pruning
+// advice to a command that exists: these enrichments used to suggest
+// 'bd cleanup', which is not a root-level command in this build (cleanup
+// lives under 'bd admin cleanup'). 'bd prune --older-than 90d' previews by
+// default, matching the "optional and destructive" framing.
+func TestPruneEnrichmentsRecommendRealCommand(t *testing.T) {
+	enrichments := map[string]agentEnrichment{
+		"Large Database":      enrichLargeDatabase(DoctorCheck{Message: "6000 closed issues (threshold: 5000)"}),
+		"Stale Closed Issues": enrichStaleClosedIssues(DoctorCheck{Message: "5000 stale closed issues"}),
+	}
+	for name, enrichment := range enrichments {
+		if len(enrichment.commands) == 0 {
+			t.Errorf("%s enrichment has no commands", name)
+			continue
+		}
+		for _, cmd := range enrichment.commands {
+			if strings.Contains(cmd, "bd cleanup") {
+				t.Errorf("%s enrichment recommends nonexistent 'bd cleanup': %q", name, cmd)
+			}
+		}
+		if !strings.HasPrefix(enrichment.commands[0], "bd prune") {
+			t.Errorf("%s enrichment should recommend 'bd prune', got %#v", name, enrichment.commands)
+		}
+	}
+}

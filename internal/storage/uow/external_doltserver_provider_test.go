@@ -13,6 +13,7 @@ import (
 	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testutil"
@@ -50,6 +51,8 @@ func TestNewExternalDoltServerUOWProvider_ValidationErrors(t *testing.T) {
 				"",
 				0,
 				0,
+				false,
+				"",
 			)
 			assert.Nil(t, p)
 			require.Error(t, err)
@@ -72,11 +75,7 @@ func TestNewExternalDoltServerUOWProvider_EndToEnd(t *testing.T) {
 
 	storeRootDir := t.TempDir()
 	shutdownOnInterrupt(t, storeRootDir)
-	t.Cleanup(func() {
-		if err := proxy.Shutdown(storeRootDir); err != nil {
-			t.Logf("proxy.Shutdown(%s): %v", storeRootDir, err)
-		}
-	})
+	verifiedShutdownCleanup(t, storeRootDir)
 	logPath := filepath.Join(t.TempDir(), "server.log")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -92,6 +91,8 @@ func TestNewExternalDoltServerUOWProvider_EndToEnd(t *testing.T) {
 		"",
 		0,
 		0,
+		false,
+		"",
 	)
 	require.NoError(t, err)
 	require.NotNil(t, provider)
@@ -136,11 +137,7 @@ func TestNewExternalDoltServerUOWProvider_ConcurrentInstantiation(t *testing.T) 
 
 	storeRootDir := t.TempDir()
 	shutdownOnInterrupt(t, storeRootDir)
-	t.Cleanup(func() {
-		if err := proxy.Shutdown(storeRootDir); err != nil {
-			t.Logf("proxy.Shutdown(%s): %v", storeRootDir, err)
-		}
-	})
+	verifiedShutdownCleanup(t, storeRootDir)
 	logPath := filepath.Join(t.TempDir(), "server.log")
 	external := configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: portInt}
 
@@ -167,6 +164,8 @@ func TestNewExternalDoltServerUOWProvider_ConcurrentInstantiation(t *testing.T) 
 				"",
 				0,
 				0,
+				false,
+				"",
 			)
 			results[i] = result{provider: p, err: err}
 		}()
@@ -222,11 +221,7 @@ func TestNewExternalDoltServerUOWProvider_FreshInitSelfHealsAfterMidPassFailure(
 
 	storeRootDir := t.TempDir()
 	shutdownOnInterrupt(t, storeRootDir)
-	t.Cleanup(func() {
-		if err := proxy.Shutdown(storeRootDir); err != nil {
-			t.Logf("proxy.Shutdown(%s): %v", storeRootDir, err)
-		}
-	})
+	verifiedShutdownCleanup(t, storeRootDir)
 	logPath := filepath.Join(t.TempDir(), "server.log")
 
 	// Fire exactly once, right after migration step 1 (create issues) has
@@ -260,6 +255,8 @@ func TestNewExternalDoltServerUOWProvider_FreshInitSelfHealsAfterMidPassFailure(
 		"",
 		0,
 		0,
+		false,
+		"",
 	)
 	require.NoError(t, err, "fresh init must converge after a mid-pass transient failure, not trip the #4566 guard on its own bootstrap debris")
 	require.NotNil(t, provider)
@@ -311,11 +308,7 @@ func TestNewExternalDoltServerUOWProvider_PreexistingDirtyDatabaseIsNotHealed(t 
 
 	storeRootDir := t.TempDir()
 	shutdownOnInterrupt(t, storeRootDir)
-	t.Cleanup(func() {
-		if err := proxy.Shutdown(storeRootDir); err != nil {
-			t.Logf("proxy.Shutdown(%s): %v", storeRootDir, err)
-		}
-	})
+	verifiedShutdownCleanup(t, storeRootDir)
 	logPath := filepath.Join(t.TempDir(), "server.log")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -342,6 +335,8 @@ func TestNewExternalDoltServerUOWProvider_PreexistingDirtyDatabaseIsNotHealed(t 
 		"",
 		0,
 		0,
+		false,
+		"",
 	)
 	if provider != nil {
 		t.Cleanup(func() { _ = provider.Close(context.Background()) })
@@ -354,4 +349,72 @@ func TestNewExternalDoltServerUOWProvider_PreexistingDirtyDatabaseIsNotHealed(t 
 	require.NoError(t, admin.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM beads_loser.dolt_status WHERE table_name = 'issues'").Scan(&count))
 	require.Equal(t, 1, count, "issues working-set dirt was discarded by a non-creator init")
+}
+
+// TestExternalProviderRediscoversAfterProxyRetirement pins #7295 for the
+// external-server constructor: its upstream is external, but the proxy in front
+// of it is local and retires on idle. The next physical connection must reach a
+// rediscovered proxy and, through it, the same upstream, database, credentials
+// and ClientFoundRows semantics.
+func TestExternalProviderRediscoversAfterProxyRetirement(t *testing.T) {
+	upstreamPort, err := strconv.Atoi(testutil.StartIsolatedDoltContainer(t))
+	require.NoError(t, err)
+
+	bdBin := buildBDBinary(t)
+	prev := proxy.ResolveExecutable
+	proxy.ResolveExecutable = func() (string, error) { return bdBin, nil }
+	t.Cleanup(func() { proxy.ResolveExecutable = prev })
+	t.Setenv("HOME", t.TempDir())
+
+	storeRootDir := t.TempDir()
+	shutdownOnInterrupt(t, storeRootDir)
+	verifiedShutdownCleanup(t, storeRootDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	const database = "external_rediscovery"
+	provider, err := NewExternalDoltServerUOWProvider(ctx, storeRootDir, database,
+		filepath.Join(t.TempDir(), "server.log"),
+		configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: upstreamPort},
+		"root", "", 0, retirementIdleTimeout, false, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = provider.Close(context.Background()) })
+	p, ok := provider.(*doltSQLProvider)
+	require.True(t, ok, "NewExternalDoltServerUOWProvider returned %T, want *doltSQLProvider", provider)
+
+	commitProbeRow(ctx, t, p, "rediscovery_probe", "persisted before idle")
+	p.SetPoolLimits(PoolLimits{MaxIdleConns: -1})
+
+	old := waitForProxyRetirement(t, storeRootDir)
+	stale := listenOnRetiredPort(t, old.Port)
+
+	request, done := context.WithTimeout(ctx, 30*time.Second)
+	defer done()
+	tx, err := p.BeginTx(request)
+	require.NoError(t, err, "unit of work after the local proxy retired on idle")
+	defer func() { _ = tx.Rollback(request) }()
+	conn := tx.(*doltServerTx).conn
+
+	var gotDatabase, user, value string
+	var serverPort int
+	require.NoError(t, conn.QueryRowContext(request,
+		"SELECT DATABASE(), CURRENT_USER(), @@port, value FROM rediscovery_probe WHERE id = 1",
+	).Scan(&gotDatabase, &user, &serverPort, &value))
+	assert.Equal(t, database, gotDatabase)
+	assert.Equal(t, "persisted before idle", value)
+	assert.Contains(t, user, "root@", "credentials")
+	assert.Equal(t, upstreamPort, serverPort, "the rediscovered proxy must front the original external upstream")
+	// A no-op UPDATE reports its matched row only under ClientFoundRows, which
+	// the provider's writes rely on.
+	res, err := conn.ExecContext(request, "UPDATE rediscovery_probe SET value = value WHERE id = 1")
+	require.NoError(t, err)
+	affected, err := res.RowsAffected()
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), affected, "ClientFoundRows must survive rediscovery")
+	assert.Zero(t, stale.accepts.Load(), "the provider dialed the retired proxy's port")
+
+	fresh, err := pidfile.Read(storeRootDir, proxy.PIDFileName)
+	require.NoError(t, err)
+	require.NotNil(t, fresh)
+	assert.NotEqual(t, old.Port, fresh.Port, "replacement proxy port")
 }

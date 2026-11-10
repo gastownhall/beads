@@ -1,23 +1,25 @@
+# Keep repository text deterministic on every host. The global rule makes future
+# text formats opt in automatically and protects LF-sensitive hook templates,
+# embedded Markdown bytes, migration content hashes, and generated-doc byte
+# comparisons without requiring workstation Git configuration.
+* text=auto eol=lf
 
-# Shell scripts must always use LF line endings (especially git hook templates)
-*.sh text eol=lf
-cmd/bd/templates/hooks/* text eol=lf
+# Tracked binary assets must never pass through text conversion or text diffs.
+*.jpg binary
 
-# Embedded markdown templates are shipped data, not user-edited text. Pin LF so
-# Windows checkouts (default core.autocrlf=true) don't bake CRLF into //go:embed
-# bytes, which breaks LF-only marker stripping in templateBody() and produces
-# doubled BEGIN/END BEADS INTEGRATION markers in installed AGENTS.md (#3552).
-internal/templates/agents/defaults/*.md text eol=lf
-
-# Migration SQL is embedded into the binary and content-hashed after apply
-# (schema_migrations.content_hash, PR 4270). Pin LF so from-source builds on
-# Windows checkouts (core.autocrlf=true) hash identically to release builds
-# instead of reporting false migration-content skew.
-internal/storage/schema/migrations/**/*.sql text eol=lf
-
-# CLI docs freshness compares committed artifacts byte-for-byte with an LF-only
-# scratch tree. Pin every generated surface so core.autocrlf cannot create false
-# drift on Windows.
-docs/CLI_REFERENCE.md text eol=lf
-docs/cli-reference/*.md text eol=lf
-docs/docs.json text eol=lf
+# CHANGELOG.md takes an entry from almost every PR at the same spot, so two
+# queued PRs conflict as soon as one lands. The changelog merge driver
+# (scripts/changelog-merge-driver.sh) resolves a merge, rebase, cherry-pick or
+# revert of the file only when every conflict is two insertions at the same
+# place and keeping both leaves every line under the headings it had; a
+# conflict that rewords or removes a line, or would move an entry into another
+# section, merges as text, with the usual markers. Git runs the driver only
+# where a clone configures it:
+#   git config merge.changelog.driver 'sh scripts/changelog-merge-driver.sh %O %A %B %L'
+# That command runs the copy in the work tree, so a rebase of a branch that
+# changes the script runs the branch's version of it: to rebase branches you do
+# not trust, point the driver at a copy outside the work tree. Everywhere else
+# CHANGELOG.md merges as text, including GitHub's mergeability check, Update
+# branch and merge queue. git merge reads this rule from the checked-out
+# branch, so a branch cut before it merges as text until it has it.
+CHANGELOG.md merge=changelog

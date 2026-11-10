@@ -6,10 +6,41 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/steveyegge/beads/internal/beads"
 )
 
 const lastTouchedFile = "last-touched"
+
+// lastTouchedFallbackEnv overrides the no-ID "last touched issue" fallback
+// on mutating commands: 1/true always allows it, 0/false always denies it.
+const lastTouchedFallbackEnv = "BD_LAST_TOUCHED_FALLBACK"
+
+// AllowLastTouchedFallback reports whether a mutating command (update,
+// close) may substitute the last-touched issue when no ID was given.
+//
+// The fallback is convenient at an interactive prompt but dangerous in
+// scripts: `bd update "$ID" ...` with an accidentally empty $ID silently
+// mutates whatever issue happened to be touched last (bd-m00pb; a real
+// agent session corrupted an unrelated closed issue this way). Read-only
+// consumers like `bd show --current` are unaffected.
+//
+// Precedence mirrors isNonInteractiveBootstrap:
+// BD_LAST_TOUCHED_FALLBACK (any explicit value wins, only 1/true enables) >
+// BD_NON_INTERACTIVE / CI (deny) > stdin terminal detection.
+func AllowLastTouchedFallback() bool {
+	if v := os.Getenv(lastTouchedFallbackEnv); v != "" {
+		return v == "1" || v == "true"
+	}
+	if v := os.Getenv("BD_NON_INTERACTIVE"); v == "1" || v == "true" {
+		return false
+	}
+	if v := os.Getenv("CI"); v == "1" || v == "true" {
+		return false
+	}
+	return term.IsTerminal(int(os.Stdin.Fd()))
+}
 
 // GetLastTouchedID returns the ID of the last touched issue.
 // Returns empty string if no last touched issue exists or the file is unreadable.
@@ -31,7 +62,11 @@ func GetLastTouchedID() string {
 // SetLastTouchedID saves the ID of the last touched issue.
 // Silently ignores errors (best-effort tracking).
 func SetLastTouchedID(issueID string) {
-	if issueID == "" {
+	// Strict readonly (--readonly, or readonly in config) promises not to
+	// mutate workspace-local state. Keep ordinary read commands writable here:
+	// `bd show` records last-touched by design even though its database store
+	// is opened read-only.
+	if issueID == "" || isReadonlyMode() {
 		return
 	}
 
@@ -55,6 +90,14 @@ func SetLastTouchedID(issueID string) {
 // ClearLastTouched removes the last touched file.
 // Silently ignores errors.
 func ClearLastTouched() {
+	// Same invariant as SetLastTouchedID: removing the marker is also a
+	// mutation of workspace-local state, so strict readonly must not do it.
+	// No production caller reaches here today, but guarding the sibling keeps
+	// the file's promise true if one is wired up later.
+	if isReadonlyMode() {
+		return
+	}
+
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
 		return

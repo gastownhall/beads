@@ -82,12 +82,15 @@ func DependencyKeys(path string, verbose bool) error {
 		return err
 	}
 
-	db, err := openDoltDB(beadsDir)
+	db, cfg, err := openDoltDB(beadsDir)
 	if err != nil {
-		fmt.Printf("  Dependency key fix skipped (%v)\n", err)
-		return nil
+		return skipFix(err)
 	}
 	defer db.Close()
+
+	if skip, err := guardFixTarget("Dependency key fix", db, beadsDir, cfg); skip {
+		return err
+	}
 
 	return repairDependencyKeys(context.Background(), db, verbose)
 }

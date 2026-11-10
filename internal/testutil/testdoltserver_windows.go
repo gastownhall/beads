@@ -3,6 +3,7 @@
 package testutil
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"testing"
@@ -15,10 +16,30 @@ func StartIsolatedDoltContainer(t *testing.T) string {
 	return ""
 }
 
-// EnsureDoltContainerForTestMain is not supported on Windows CI.
+// EnsureDoltContainerForTestMain is not supported on Windows CI. It clears the
+// ambient Dolt connection ports before returning, for the same reason the
+// !windows implementation does on its failure paths (gm-2g3g5r): callers warn
+// and run the suite anyway, so leaving an inherited BEADS_DOLT_SERVER_PORT in
+// force would let a test-mode store resolve onto whatever server the
+// environment names. Here the fail-open was unconditional rather than merely
+// likely -- this stub never succeeds.
+//
+// The clear is unconditional here, without the !windows implementation's
+// harness-provisioned exception (BEADS_TEST_SHARED_DOLT_SERVER): the only
+// writer of that marker is scripts/test.sh, a bash harness the Windows lane
+// does not run. Should that change, this stub needs the same exception; the
+// stricter behavior is the safe direction to be wrong in.
 func EnsureDoltContainerForTestMain() error {
+	neutralizeAmbientDoltPort()
 	fmt.Fprintln(os.Stderr, "WARN: Docker not available on Windows CI, skipping test server")
 	return fmt.Errorf("Docker not available on Windows CI")
+}
+
+// neutralizeAmbientDoltPort clears the inherited connection-port variables.
+// See the !windows implementation in testdoltserver.go for the full rationale.
+func neutralizeAmbientDoltPort() {
+	_ = os.Unsetenv("BEADS_DOLT_SERVER_PORT")
+	_ = os.Unsetenv("BEADS_DOLT_PORT")
 }
 
 // RequireDoltContainer is not supported on Windows CI.
@@ -39,8 +60,35 @@ func DoltContainerPortInt() int { return 0 }
 // TerminateDoltContainer is a no-op on Windows.
 func TerminateDoltContainer() {}
 
+// RestartSharedDoltContainer is not supported on Windows CI.
+func RestartSharedDoltContainer() (int, error) {
+	return 0, fmt.Errorf("Docker not available on Windows CI")
+}
+
+// ServerUnreachable is always false on Windows (no shared container).
+func ServerUnreachable(err error) bool { return false }
+
 // DoltContainerCrashed always returns false on Windows (no container to monitor).
 func DoltContainerCrashed() bool { return false }
 
 // DoltContainerCrashError always returns nil on Windows (no container to monitor).
 func DoltContainerCrashError() error { return nil }
+
+// IsolatedDoltContainer is the Windows stand-in for the per-test Dolt
+// container handle; no container is ever started on this platform.
+type IsolatedDoltContainer struct {
+	// Port is always empty on Windows.
+	Port string
+}
+
+// Exec is not supported on Windows (no container to exec into).
+func (c *IsolatedDoltContainer) Exec(_ context.Context, _ []string) (int, string, error) {
+	return 0, "", fmt.Errorf("no Dolt container running")
+}
+
+// StartIsolatedDoltContainerHandle is not supported on Windows CI.
+func StartIsolatedDoltContainerHandle(t *testing.T) *IsolatedDoltContainer {
+	t.Helper()
+	t.Skip("Docker not available on Windows CI")
+	return nil
+}

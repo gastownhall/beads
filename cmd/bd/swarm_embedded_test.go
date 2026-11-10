@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -70,26 +71,55 @@ func bdSwarmJSON(t *testing.T, bd, dir string, args ...string) map[string]interf
 // createSwarmableEpic creates an epic with 3 children forming a DAG suitable for swarming.
 func createSwarmableEpic(t *testing.T, bd, dir, prefix string) (epicID string, childIDs []string) {
 	t.Helper()
-	epic := bdCreate(t, bd, dir, prefix+" epic", "--type", "epic")
-	c1 := bdCreate(t, bd, dir, prefix+" child 1", "--type", "task")
-	c2 := bdCreate(t, bd, dir, prefix+" child 2", "--type", "task")
-	c3 := bdCreate(t, bd, dir, prefix+" child 3", "--type", "task")
-	bdDep(t, bd, dir, "add", c1.ID, epic.ID, "--type", "parent-child")
-	bdDep(t, bd, dir, "add", c2.ID, epic.ID, "--type", "parent-child")
-	bdDep(t, bd, dir, "add", c3.ID, epic.ID, "--type", "parent-child")
-	// c3 depends on c1 (serial constraint)
-	bdDep(t, bd, dir, "add", c3.ID, c1.ID)
-	return epic.ID, []string{c1.ID, c2.ID, c3.ID}
+	plan := fmt.Sprintf(`{
+		"nodes": [
+			{"key": "epic", "title": %q, "type": "epic"},
+			{"key": "child1", "title": %q, "type": "task", "parent_key": "epic"},
+			{"key": "child2", "title": %q, "type": "task", "parent_key": "epic"},
+			{"key": "child3", "title": %q, "type": "task", "parent_key": "epic"}
+		],
+		"edges": [
+			{"from_key": "child3", "to_key": "child1", "type": "blocks"}
+		]
+	}`, prefix+" epic", prefix+" child 1", prefix+" child 2", prefix+" child 3")
+	planFile := filepath.Join(dir, "swarm-graph-plan.json")
+	if err := os.WriteFile(planFile, []byte(plan), 0o600); err != nil {
+		t.Fatalf("write swarm graph plan: %v", err)
+	}
+
+	result := bdCreateGraph(t, bd, dir, planFile)
+	epicID = result.IDs["epic"]
+	childIDs = []string{result.IDs["child1"], result.IDs["child2"], result.IDs["child3"]}
+	allIDs := append([]string{epicID}, childIDs...)
+	for i, id := range allIDs {
+		if id == "" {
+			t.Fatalf("graph create returned an empty ID at index %d: %#v", i, result.IDs)
+		}
+		for j := 0; j < i; j++ {
+			if id == allIDs[j] {
+				t.Fatalf("graph create returned duplicate IDs at indexes %d and %d: %#v", j, i, result.IDs)
+			}
+		}
+	}
+	return epicID, childIDs
 }
 
-func TestEmbeddedSwarm(t *testing.T) {
+// setupEmbeddedSwarm is the TestEmbeddedSwarm* tests' workspace (prefix sw).
+func setupEmbeddedSwarm(t *testing.T) (string, string) {
+	t.Helper()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "sw")
+	return bd, dir
+}
+
+func TestEmbeddedSwarmValidate(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
 	t.Parallel()
 
-	bd := buildEmbeddedBD(t)
-	dir, _, _ := bdInit(t, bd, "--prefix", "sw")
+	bd, dir := setupEmbeddedSwarm(t)
 
 	epicID, _ := createSwarmableEpic(t, bd, dir, "Swarm")
 
@@ -127,6 +157,15 @@ func TestEmbeddedSwarm(t *testing.T) {
 			t.Errorf("expected warning about no children: %s", out)
 		}
 	})
+}
+
+func TestEmbeddedSwarmCreate(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir := setupEmbeddedSwarm(t)
 
 	// ===== swarm create =====
 
@@ -154,6 +193,15 @@ func TestEmbeddedSwarm(t *testing.T) {
 			t.Errorf("expected coordinator=alice, got %v", m["coordinator"])
 		}
 	})
+}
+
+func TestEmbeddedSwarmCreateForceAndErrors(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir := setupEmbeddedSwarm(t)
 
 	t.Run("create_force", func(t *testing.T) {
 		eID, _ := createSwarmableEpic(t, bd, dir, "Force")
@@ -180,6 +228,15 @@ func TestEmbeddedSwarm(t *testing.T) {
 		bdSwarm(t, bd, dir, "create", eID)
 		bdSwarmFail(t, bd, dir, "create", eID)
 	})
+}
+
+func TestEmbeddedSwarmStatusList(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd, dir := setupEmbeddedSwarm(t)
 
 	// ===== swarm status =====
 

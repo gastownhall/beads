@@ -27,6 +27,29 @@ import (
 // a change here then breaks the guard.
 const KeysetCreatedAtIDPredicate = "(created_at <= ? AND ((created_at < ?) OR (id > ?)))"
 
+// KeysetPriorityCreatedAtIDPredicate is the SARGABLE (priority ASC,
+// created_at DESC, id ASC) keyset predicate emitted when the position carries a
+// priority (IssueFilter.AfterPriority set alongside AfterCreatedAt/AfterID).
+// Its five ? placeholders bind, in order: priority (the sargable lower bound),
+// priority (strict), created_at (the sargable upper bound), created_at
+// (strict), id (the tie-break).
+//
+// IT NESTS THE CREATED PREDICATE RATHER THAN RESTATING IT, which is both a
+// single-sourcing choice and the correctness argument. The created/id
+// comparison is only reachable for rows at the cursor's OWN priority, so it has
+// to sit inside the priority-equal arm. Flattening it the way the created
+// predicate's own leading-bound trick invites —
+// `(priority >= ? AND ((priority > ?) OR (created_at < ?) OR (id > ?)))` —
+// looks equivalent and is not: at the cursor's priority it admits a row created
+// AFTER the cursor whenever that row's id sorts later, and that row was already
+// delivered on an earlier page.
+//
+// The leading `priority >= ?` bound is redundant in the same way and for the
+// same reason as the created predicate's: it prunes only priority < P, which
+// the OR already excludes, and it gives the planner an index range to seek
+// instead of a full scan.
+const KeysetPriorityCreatedAtIDPredicate = "(priority >= ? AND ((priority > ?) OR " + KeysetCreatedAtIDPredicate + "))"
+
 // BuildIssueFilterClauses builds WHERE clause fragments and args from a query
 // string and IssueFilter. The tables parameter controls which table names are
 // referenced in subqueries (issues vs wisps).
@@ -218,6 +241,15 @@ func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables Filt
 			whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")
 		}
 	}
+	if filter.EphemeralTier != nil {
+		// The tier discriminator, not the raw flag: typed wisps minted without
+		// the ephemeral flag are still ephemeral-tier (types.IssueFilter).
+		if *filter.EphemeralTier {
+			whereClauses = append(whereClauses, "(ephemeral = 1 OR (wisp_type IS NOT NULL AND wisp_type <> ''))")
+		} else {
+			whereClauses = append(whereClauses, "((ephemeral = 0 OR ephemeral IS NULL) AND (wisp_type = '' OR wisp_type IS NULL))")
+		}
+	}
 	if filter.IsTemplate != nil {
 		if *filter.IsTemplate {
 			whereClauses = append(whereClauses, "is_template = 1")
@@ -264,21 +296,40 @@ func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables Filt
 		{"due_at", "<", filter.DueBefore},
 	} {
 		if tc.v != nil {
+			// The UTC spelling of the instant, at whole seconds. The columns
+			// hold UTC wall clock; an engine whose column carries no zone
+			// (a SQL `timestamp` WITHOUT time zone) drops a literal's offset,
+			// so a bound spelled `+02:00` would compare as that wall clock.
+			// Spelled in UTC, every engine compares the instant. Dolt already
+			// honors the offset, so this changes nothing there.
 			whereClauses = append(whereClauses, fmt.Sprintf("%s %s ?", tc.col, tc.op))
-			args = append(args, tc.v.Format(time.RFC3339))
+			args = append(args, tc.v.UTC().Format(time.RFC3339))
 		}
 	}
 
 	if filter.AfterCreatedAt != nil {
-		// Bind the cursor time as time.Time, not a formatted string: the issues/
-		// wisps created_at columns are DATETIME (NUMERIC affinity), so an RFC3339
-		// string parameter mis-compares on the SQLite backend, while a time.Time
-		// value compares correctly on every backend — the same binding EventsSince
-		// uses. Bound twice (the sargable upper bound and the strict bound), then
-		// the id tie-break.
-		ac := *filter.AfterCreatedAt
-		whereClauses = append(whereClauses, KeysetCreatedAtIDPredicate)
-		args = append(args, ac, ac, filter.AfterID)
+		// Bind the cursor time as time.Time, not a formatted string — the same
+		// binding EventsSince uses — but in UTC. A driver can send a time.Time
+		// as its wall clock with no zone (embedded Dolt's does), and the
+		// columns hold UTC wall clock, so a cursor in another zone would page
+		// from the wrong position there. It is bound twice under either order
+		// (the sargable upper bound and the strict bound), followed by the id
+		// tie-break.
+		ac := filter.AfterCreatedAt.UTC()
+		// AfterCreatedAt alone decides that a position was supplied; AfterPriority
+		// decides which ORDER it is a position in. The two predicates are
+		// ALTERNATIVES, never conjuncts: ANDing them would keep the created
+		// predicate's `created_at <= ?` bound in force across every priority,
+		// which excludes exactly the rows a priority walk exists to reach —
+		// everything of a higher-numbered priority created after the cursor.
+		if filter.AfterPriority != nil {
+			ap := *filter.AfterPriority
+			whereClauses = append(whereClauses, KeysetPriorityCreatedAtIDPredicate)
+			args = append(args, ap, ap, ac, ac, filter.AfterID)
+		} else {
+			whereClauses = append(whereClauses, KeysetCreatedAtIDPredicate)
+			args = append(args, ac, ac, filter.AfterID)
+		}
 	}
 
 	if filter.Deferred {

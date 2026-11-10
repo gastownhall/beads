@@ -25,9 +25,29 @@ import (
 // testTimeout bounds each test's context. It must cover a cold store setup —
 // container-assisted connect plus the FULL migration chain (every versioned +
 // ignored migration, each Dolt-committed), which grows as migrations
-// accumulate — with headroom for a loaded machine; some tests set up two
-// stores under one context.
-const testTimeout = 45 * time.Second
+// accumulate — with headroom for a loaded machine. Opens routed through
+// openStoreWithOwnBudget each start from a full budget; a test that still
+// calls New(ctx, ...) directly shares whatever deadline its caller built.
+//
+// Was 45s; raised to 90s for be-696w. At 45s, migrating-open tests
+// (cross_project_test.go's TestCrossProject_*, TestMigratingOpen_FirstReadSucceeds)
+// intermittently failed with "failed to initialize schema: context deadline
+// exceeded" at exactly the old bound under real host contention (15+
+// concurrent agent sessions) — see TestSchemaInitTimeoutHasLoadHeadroom for
+// the regression guard.
+//
+// This is not a two-test change. testTimeout backs testContext, which is
+// called throughout this package, and it is multiplied at the `5*testTimeout`
+// dropCtx database-drop cleanups — reproduce the current blast radius with
+// `git grep -n '5\*testTimeout' internal/storage/dolt/`, where every hit
+// outside this comment is one of those cleanups. Raising 45s to 90s therefore
+// takes those bounds from 225s to 450s: a genuinely hung drop now needs 7.5
+// minutes to report instead of 3.75. That is the cost being accepted here —
+// a slower failure signal across the package in exchange for not failing
+// honest work under host contention. If that trade stops being worth it, the
+// fix is to give the schema-init path its own bound rather than to lower this
+// one back.
+const testTimeout = 90 * time.Second
 
 // testSem limits concurrent database-touching tests to avoid overwhelming the
 // shared Dolt testcontainer. Without this, 200+ parallel tests cause a
@@ -62,6 +82,47 @@ func testContext(t *testing.T) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), testTimeout)
 }
 
+// openStoreWithOwnBudget opens a store under its own testTimeout budget and
+// releases that budget as soon as the open returns.
+//
+// Use it anywhere a test opens two stores in sequence. Sharing one context
+// across both opens is the bug it exists to prevent: a cold open runs the full
+// migration chain, so under host load the first open can consume most of a
+// shared deadline and leave the second only the remainder, which then fails
+// with "context deadline exceeded" (be-gvnsq, ~39% of runs under load). Each
+// open starting from a full budget removes the coupling between the opens.
+//
+// It does not by itself decouple the rest of the caller. Deadlines are
+// absolute, so a context built BEFORE the opens is drained by them anyway, and
+// the next call on that context fails under the same condition — just at a
+// cheaper, more misleading call site. Build the caller's context after the last
+// open (see setupTestStore's note below), or give each intervening call its own
+// budget with setConfigWithOwnBudget.
+//
+// Cancelling at return is safe: the context bounds the open itself, not the
+// returned store. Store operations take the caller's own context afterwards.
+func openStoreWithOwnBudget(t *testing.T, cfg *Config) (*DoltStore, error) {
+	t.Helper()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	return New(ctx, cfg)
+}
+
+// setConfigWithOwnBudget writes one config key under its own testTimeout budget
+// and releases that budget as soon as the write returns.
+//
+// Use it for the cheap calls a setup helper makes between cold opens. Sharing a
+// context with those opens is the bug it exists to prevent: the opens drain a
+// context built before them, so this write — a warm round-trip costing
+// milliseconds — is what reports "context deadline exceeded", which reads as a
+// config bug rather than the slow open it actually is (be-gvnsq).
+func setConfigWithOwnBudget(t *testing.T, store *DoltStore, key, value string) error {
+	t.Helper()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	return store.SetConfig(ctx, key, value)
+}
+
 // skipIfNoDolt skips the test if Dolt is not installed or the test server
 // is not running. This prevents tests from accidentally hitting a production
 // Dolt server — tests MUST run against the isolated test server started by
@@ -86,12 +147,60 @@ func uniqueTestDBName(t *testing.T) string {
 	return "testdb_" + hex.EncodeToString(buf)
 }
 
+// doltCommitCount reports how many commits the test branch has. Tests that
+// care whether an operation recorded history take it before and after rather
+// than reading the top of dolt_log, because two commits made inside one second
+// tie on date and the ordering between them is not something to rely on.
+func doltCommitCount(ctx context.Context, t *testing.T, store *DoltStore) int {
+	t.Helper()
+	var n int
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_log").Scan(&n); err != nil {
+		t.Fatalf("count dolt_log: %v", err)
+	}
+	return n
+}
+
+// doltHasCommitMessage reports whether the test branch has a commit with
+// exactly this message.
+func doltHasCommitMessage(ctx context.Context, t *testing.T, store *DoltStore, message string) bool {
+	t.Helper()
+	var n int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_log WHERE message = ?", message).Scan(&n); err != nil {
+		t.Fatalf("query dolt_log for %q: %v", message, err)
+	}
+	return n > 0
+}
+
+// requireCleanTables fails when any named table is still dirty in the working
+// set. It is how a test says "the operation staged and committed what it
+// wrote", which is the half of the staging contract a data read cannot see.
+func requireCleanTables(ctx context.Context, t *testing.T, store *DoltStore, tables ...string) {
+	t.Helper()
+	for _, table := range tables {
+		var dirty int
+		if err := store.db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM dolt_status WHERE table_name = ?", table).Scan(&dirty); err != nil {
+			t.Fatalf("query dolt_status for %s: %v", table, err)
+		}
+		if dirty != 0 {
+			t.Fatalf("%s is still dirty in the working set after the operation committed", table)
+		}
+	}
+}
+
 // setupTestStore creates a test store on the shared database with branch isolation.
 // Each test gets its own branch (COW snapshot), preventing cross-test data leakage
 // without the overhead of CREATE/DROP DATABASE per test.
 //
 // Automatically marks the test as safe for parallel execution since each test
 // gets its own Dolt connection checked out to a unique branch.
+//
+// This call blocks twice — once in t.Parallel() until the sequential phase
+// ends, then again on testSem, which admits two tests at a time. In a shard of
+// 60+ tests that wait is minutes, so build the test's context AFTER this
+// returns. A context created before it spends its whole budget in the queue
+// and is already expired by the time the test body runs.
 func setupTestStore(t *testing.T) (*DoltStore, func()) {
 	t.Helper()
 	skipIfNoDolt(t)
@@ -130,7 +239,22 @@ func setupTestStore(t *testing.T) (*DoltStore, func()) {
 
 	// Create an isolated branch for this test
 	_, branchCleanup := testutil.StartTestBranch(t, store.db, testSharedDB)
-	if _, err := initSchemaOnDB(ctx, store.db); err != nil {
+	// This second, branch-local schema init contends with every other
+	// parallel subtest's own branch-local init for the SAME GET_LOCK name:
+	// MigrateUpWithLock's named lock is scoped to the database
+	// (schema.MigrationLockName(databaseName)), not to the branch, and all of
+	// setupTestStore's callers share one database (testSharedDB). That
+	// collision is exactly what production handles by retrying a contended
+	// migration-lock wait instead of failing the one unlucky caller (see
+	// initSchemaOnDBWithRetry and isRetryableError's schema.IsMigrationLockError
+	// case) — New() above already goes through that retrying path for the
+	// store's initial schema init. Calling the bare, non-retrying
+	// initSchemaOnDB here for the branch-local pass skipped that resilience
+	// and let transient GET_LOCK timeouts (5s budget, see
+	// migrationLockAcquireTimeoutSeconds) fail the test outright under
+	// parallel load. Use the same retrying helper production uses so a
+	// contended lock wait is retried (30s budget) instead of failing fast.
+	if _, err := initSchemaOnDBWithRetry(ctx, store.db); err != nil {
 		branchCleanup()
 		store.Close()
 		os.RemoveAll(tmpDir)
@@ -144,6 +268,20 @@ func setupTestStore(t *testing.T) (*DoltStore, func()) {
 	}
 
 	return store, cleanup
+}
+
+// rerunSchemaInitOnTestStore re-runs schema initialization on a
+// setupTestStore store, for tests that set up a schema state and then assert
+// what one more migration pass does to it. Every setupTestStore caller shares
+// testSharedDB, so this pass's GET_LOCK contends with every parallel test's
+// own setup-time init for the same database-scoped lock name, exactly like the
+// branch-local init in setupTestStore. The bare initSchemaOnDB gives up after
+// one 5s wait (migrationLockAcquireTimeoutSeconds) and failed such tests with
+// "schema migration lock unavailable: timeout" on loaded CI runners; the
+// retrying helper retries only a contended lock or a transient connection
+// error, never a migration result, so the outcome under test is unchanged.
+func rerunSchemaInitOnTestStore(ctx context.Context, store *DoltStore) (int, error) {
+	return initSchemaOnDBWithRetry(ctx, store.db)
 }
 
 // setupConcurrentTestStore creates a test store with its own database for
@@ -1143,7 +1281,7 @@ func TestDeleteIssuesBatchPerformance(t *testing.T) {
 			dep := &types.Dependency{
 				IssueID:     fmt.Sprintf("batch-del-%d", i),
 				DependsOnID: fmt.Sprintf("batch-del-%d", i-1),
-				Type:        types.DepBlocks,
+				Type:        types.DepParentChild,
 			}
 			if err := store.AddDependency(ctx, dep, "tester"); err != nil {
 				t.Fatalf("failed to add dependency %d: %v", i, err)
@@ -1263,7 +1401,7 @@ func TestDeleteIssuesDryRun(t *testing.T) {
 	ctx, cancel := testContext(t)
 	defer cancel()
 
-	// Create 3 issues with chain deps and a label
+	// Create 3 issues with parent-child chain deps and a label
 	for i := 1; i <= 3; i++ {
 		iss := &types.Issue{
 			ID: fmt.Sprintf("dry-%d", i), Title: fmt.Sprintf("Dry %d", i),
@@ -1275,7 +1413,7 @@ func TestDeleteIssuesDryRun(t *testing.T) {
 		if i > 1 {
 			dep := &types.Dependency{
 				IssueID: fmt.Sprintf("dry-%d", i), DependsOnID: fmt.Sprintf("dry-%d", i-1),
-				Type: types.DepBlocks,
+				Type: types.DepParentChild,
 			}
 			if err := store.AddDependency(ctx, dep, "tester"); err != nil {
 				t.Fatalf("failed to add dep: %v", err)
@@ -1401,7 +1539,7 @@ func TestDeleteIssuesBatchBoundary(t *testing.T) {
 				}
 				if i > 0 {
 					dep := &types.Dependency{
-						IssueID: id, DependsOnID: ids[i-1], Type: types.DepBlocks,
+						IssueID: id, DependsOnID: ids[i-1], Type: types.DepParentChild,
 					}
 					if err := store.AddDependency(ctx, dep, "tester"); err != nil {
 						t.Fatalf("failed to add dep: %v", err)
@@ -1457,7 +1595,7 @@ func TestDeleteIssuesCircularDeps(t *testing.T) {
 		{"circ-c", "circ-b"},
 	} {
 		dep := &types.Dependency{
-			IssueID: d.from, DependsOnID: d.to, Type: types.DepBlocks,
+			IssueID: d.from, DependsOnID: d.to, Type: types.DepParentChild,
 		}
 		if err := store.AddDependency(ctx, dep, "tester"); err != nil {
 			t.Fatalf("failed to add dep %s->%s: %v", d.from, d.to, err)
@@ -1468,7 +1606,7 @@ func TestDeleteIssuesCircularDeps(t *testing.T) {
 	// ability to handle cycles that may exist in the database, not AddDependency.
 	if _, err := store.execContext(ctx, `
 		INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by, metadata)
-		VALUES (UUID(), ?, ?, 'blocks', NOW(), 'tester', '{}')
+		VALUES (UUID(), ?, ?, 'parent-child', NOW(), 'tester', '{}')
 	`, "circ-a", "circ-c"); err != nil {
 		t.Fatalf("failed to insert cycle-completing dep circ-a->circ-c: %v", err)
 	}
@@ -1518,7 +1656,7 @@ func TestDeleteIssuesDiamondDeps(t *testing.T) {
 	}
 	for _, d := range deps {
 		dep := &types.Dependency{
-			IssueID: d.from, DependsOnID: d.to, Type: types.DepBlocks,
+			IssueID: d.from, DependsOnID: d.to, Type: types.DepParentChild,
 		}
 		if err := store.AddDependency(ctx, dep, "tester"); err != nil {
 			t.Fatalf("failed to add dep: %v", err)

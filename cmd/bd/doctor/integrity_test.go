@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/beads"
 )
 
 // TestIntegrityChecks_NoBeadsDir verifies all integrity check functions handle
@@ -64,7 +66,10 @@ func TestIntegrityChecks_EmptyBeadsDir(t *testing.T) {
 // TestCheckDeletionsManifest_LegacyFile tests the specific case where a legacy
 // deletions.jsonl file exists and should trigger a warning.
 func TestCheckDeletionsManifest_LegacyFile(t *testing.T) {
-	tmpDir := t.TempDir()
+	// The check only warns inside a git repository, and it asks git about the
+	// working directory, so the fixture is a repository and the check runs in
+	// it (not in whatever checkout the test binary happens to start in).
+	tmpDir := newGitRepo(t)
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.Mkdir(beadsDir, 0755); err != nil {
 		t.Fatal(err)
@@ -76,7 +81,8 @@ func TestCheckDeletionsManifest_LegacyFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	check := CheckDeletionsManifest(tmpDir)
+	var check DoctorCheck
+	runInDir(t, tmpDir, func() { check = CheckDeletionsManifest(tmpDir) })
 
 	// Should warn about legacy deletions file
 	if check.Status != StatusWarning {
@@ -195,4 +201,41 @@ func TestCheckDependencyCycles_NoDatabase(t *testing.T) {
 	if check.Status != StatusOK {
 		t.Errorf("Status = %q, want %q", check.Status, StatusOK)
 	}
+}
+
+// bd-46vla: a fingerprint mismatch where the current id is a path-fallback
+// hash (no origin remote on this host) is the synced-clone signature — the
+// stored id is the canonical shared value, and stamping the local one via
+// 'bd migrate --update-repo-id' would propagate it to every clone. That case
+// must warn-and-advise-leaving-it, not present as "wrong database".
+func TestClassifyRepoFingerprint(t *testing.T) {
+	t.Run("match is OK regardless of source", func(t *testing.T) {
+		check := classifyRepoFingerprint("aaaa1111bbbb2222", "aaaa1111bbbb2222", beads.RepoIDSourcePath)
+		if check.Status != StatusOK {
+			t.Fatalf("Status = %q, want %q (message=%q)", check.Status, StatusOK, check.Message)
+		}
+	})
+
+	t.Run("mismatch with remote-derived current id is an error", func(t *testing.T) {
+		check := classifyRepoFingerprint("aaaa1111bbbb2222", "cccc3333dddd4444", beads.RepoIDSourceRemote)
+		if check.Status != StatusError {
+			t.Fatalf("Status = %q, want %q (message=%q)", check.Status, StatusError, check.Message)
+		}
+		if !strings.Contains(check.Fix, "bd migrate --update-repo-id") {
+			t.Fatalf("Fix = %q, want the update-repo-id repair offered", check.Fix)
+		}
+	})
+
+	t.Run("mismatch with path-fallback current id warns and advises leaving it", func(t *testing.T) {
+		check := classifyRepoFingerprint("aaaa1111bbbb2222", "cccc3333dddd4444", beads.RepoIDSourcePath)
+		if check.Status != StatusWarning {
+			t.Fatalf("Status = %q, want %q (message=%q)", check.Status, StatusWarning, check.Message)
+		}
+		if !strings.Contains(check.Message, "no origin remote") {
+			t.Fatalf("Message = %q, want the no-origin-remote framing", check.Message)
+		}
+		if !strings.Contains(check.Fix, "propagates to every clone") {
+			t.Fatalf("Fix = %q, want the propagation named", check.Fix)
+		}
+	})
 }

@@ -3,6 +3,7 @@ package gitlab
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -113,10 +114,30 @@ func typeFromLabels(labels []string, config *MappingConfig) string {
 	return "task" // Default to task
 }
 
+// sourceSystemPattern matches a source_system written by gitLabSourceSystem
+// for an issue with a known project, capturing the project ID and the IID.
+var sourceSystemPattern = regexp.MustCompile(`^gitlab:([1-9]\d*):([1-9]\d*)$`)
+
+// gitLabSourceSystem returns the source_system GitLabIssueToBeads records:
+// "gitlab:{project_id}:{iid}".
+func gitLabSourceSystem(projectID, iid int) string {
+	return fmt.Sprintf("gitlab:%d:%d", projectID, iid)
+}
+
+// gitLabIdentityKey returns the identity key (tracker.IdentityKeyer) of issue
+// iid of projectID, the source_system a pull records for it, or "" when
+// GitLab sent no project ID.
+func gitLabIdentityKey(projectID, iid int) string {
+	if projectID <= 0 || iid <= 0 {
+		return ""
+	}
+	return gitLabSourceSystem(projectID, iid)
+}
+
 // GitLabIssueToBeads converts a GitLab Issue to a beads Issue.
 func GitLabIssueToBeads(gl *Issue, config *MappingConfig) *IssueConversion {
 	webURL := gl.WebURL
-	sourceSystem := fmt.Sprintf("gitlab:%d:%d", gl.ProjectID, gl.IID)
+	sourceSystem := gitLabSourceSystem(gl.ProjectID, gl.IID)
 
 	issue := &types.Issue{
 		Title:        gl.Title,
@@ -149,7 +170,7 @@ func GitLabIssueToBeads(gl *Issue, config *MappingConfig) *IssueConversion {
 	}
 
 	// Convert issue links to dependencies if available.
-	deps := issueLinksToDependencies(gl.IID, gl.IssueLinksData, config)
+	deps := issueLinksToDependencies(gl, gl.IssueLinksData, config)
 
 	return &IssueConversion{
 		Issue:        issue,

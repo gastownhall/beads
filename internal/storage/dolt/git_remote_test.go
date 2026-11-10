@@ -5,21 +5,26 @@ package dolt
 import (
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -37,7 +42,8 @@ import (
 //     so we avoid it entirely and verify via `dolt sql -q ... -r csv`.
 //
 // Prerequisites:
-//   - dolt >= 2.2.0
+//   - dolt >= 2.6.0 (doltversion.RequiredMin, the oldest dolt bd runs against
+//     outside embedded mode)
 //   - git CLI available
 //
 // Run:
@@ -45,10 +51,69 @@ import (
 
 // gitRemoteSetup holds resources for a git-remote test scenario.
 type gitRemoteSetup struct {
-	baseDir   string // root temp dir
-	remoteDir string // bare git repo path
-	remoteURL string // file:// URL for the bare repo
-	sourceDir string // dolt source repo directory
+	baseDir    string // root temp dir
+	remoteDir  string // bare git repo path
+	remoteURL  string // file:// URL for the bare repo
+	sourceDir  string // dolt source repo directory
+	serverPort int    // local dolt sql-server port (0 for CLI-only setups)
+}
+
+// startLocalDoltServer starts a `dolt sql-server` rooted at dataDir and
+// returns its port and an idempotent stop function.
+//
+// The suite's shared Dolt server (testmain_test.go) runs inside a Docker
+// container: its only mount is the image's own /var/lib/dolt volume, so it
+// can reach neither a host file:// git remote nor the store's own Path.
+// Tests that push to a local bare git repo, or that inspect the engine's
+// on-disk state, need a server that shares this process's filesystem.
+// TestGitRemoteExternalServerRouting, TestSQLRemotePersistsAcrossExternalServerRestart
+// and TestCredentialCLIRoutingE2E use the same arrangement.
+//
+// The server is spawned with doltserver.ServerSpawnEnv(), the same environment
+// bd gives the sql-server it starts. That is load-bearing, not cosmetic: a
+// `dolt` CLI command run against a directory a sql-server is already serving
+// is proxied to that server, so the git subprocess is spawned by the server,
+// not by the CLI — env guards applied to the CLI process (git tracing,
+// core.hooksPath) only take effect if the server carries them too.
+func startLocalDoltServer(t *testing.T, dataDir string) (int, func()) {
+	t.Helper()
+	return startLocalDoltServerAt(t, dataDir, "127.0.0.1")
+}
+
+// startLocalDoltServerAt is startLocalDoltServer listening on host, such as
+// 127.0.0.2 for a server at a host bd does not run its own server at.
+func startLocalDoltServerAt(t *testing.T, dataDir, host string) (int, func()) {
+	t.Helper()
+	port, err := testutil.FindFreePort()
+	if err != nil {
+		t.Fatalf("failed to find free port: %v", err)
+	}
+	cmd := exec.Command("dolt", "sql-server", "-H", host, "-P", strconv.Itoa(port))
+	cmd.Dir = dataDir
+	cmd.Env = doltserver.ServerSpawnEnv()
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("failed to start dolt sql-server in %s: %v", dataDir, err)
+	}
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		})
+	}
+	t.Cleanup(stop)
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(200 * time.Millisecond) {
+		// #nosec G704 -- a loopback address this test chose, with a free local port.
+		if conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond); err == nil {
+			_ = conn.Close()
+			return port, stop
+		}
+		if time.Now().After(deadline) {
+			stop()
+			t.Fatalf("dolt sql-server in %s did not become ready on %s within timeout", dataDir, addr)
+		}
+	}
 }
 
 // setupGitRemote creates a bare git repo (seeded with an initial commit)
@@ -141,15 +206,10 @@ func runCmd(t *testing.T, dir string, name string, args ...string) {
 	}
 }
 
-// runDoltSQL executes SQL via `dolt sql` CLI in the given directory.
-func runDoltSQL(t *testing.T, dir, query string) {
-	t.Helper()
-	cmd := exec.Command("dolt", "sql", "-q", query)
-	cmd.Dir = dir
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("dolt sql failed in %s: %v\nQuery: %.200s...\nOutput: %s", dir, err, query, output)
-	}
-}
+// runDoltSQL lives in dolt_sql_large_script_test.go (untagged, so it's
+// always in scope here too) rather than in this integration-tagged file,
+// since TestRunDoltSQLHandlesLargeScript there needs it without the
+// integration tag.
 
 // skipIfNoGit skips if git is not available.
 func skipIfNoGit(t *testing.T) {
@@ -184,6 +244,40 @@ func sourceCommitAndPush(t *testing.T, dir, msg string) {
 	t.Helper()
 	runDoltSQL(t, dir, fmt.Sprintf("CALL DOLT_ADD('.'); CALL DOLT_COMMIT('-Am', '%s')", escapeSQL(msg)))
 	doltPush(t, dir)
+}
+
+// doltGitRemoteReadCacheTTL mirrors dolt's own defaultSyncForReadTTL
+// (store/blobstore/git_blobstore.go). Dolt resolves a file:// URL that points
+// at a git repo to a git+file:// remote served by GitBlobstore, and
+// GitBlobstore.syncForRead skips the underlying `git fetch` entirely when it
+// last synced less than this long ago:
+//
+//	if ttl := gbs.syncForReadTTL; ttl > 0 { if sinceLast < ttl { return nil } }
+//
+// The blobstore is cached for the life of the sql-server process
+// (dbfactory.gitRemoteCache), so the window is per-server, not per-connection.
+const doltGitRemoteReadCacheTTL = 1 * time.Second
+
+// waitOutGitRemoteReadCache blocks until a push made by a *different* process
+// is guaranteed visible to the next remote read performed by a sql-server this
+// test already used to touch the same remote.
+//
+// Without it these tests race a silent upstream staleness window: a pull
+// issued inside doltGitRemoteReadCacheTTL of the server's previous remote sync
+// reads the cached view, finds the peer's commit absent, and reports
+// "Everything up-to-date" with fast_forward=0 — so store.Pull() returns nil
+// having merged nothing and the peer's rows never arrive. Verified against
+// dolt 2.3.1: with the peer's push and the pull 0.74s apart the pull reports
+// success and delivers nothing; at 1.18s apart the same sequence reports
+// "merge successful" and the row arrives. That is why these tests failed only
+// on CI, whose runners complete the intervening clone/insert/push faster than
+// a loaded developer machine.
+//
+// This sleep removes an unintended dependency on an upstream cache; it does
+// not weaken any assertion below it. If bd's push/pull were actually broken,
+// every assertion still fails exactly as before.
+func waitOutGitRemoteReadCache() {
+	time.Sleep(doltGitRemoteReadCacheTTL + 500*time.Millisecond)
 }
 
 // --- Clone verification helpers (all CLI-based) ---
@@ -593,18 +687,23 @@ func TestGitRemoteSpecialCharacters(t *testing.T) {
 	}
 }
 
-// --- Embedded driver git remote tests ---
+// --- SQL-driver git remote tests ---
 //
 // These tests verify that Dolt's git remote support works through the
 // SQL driver, not just the CLI. This is the critical question for the
 // Dolt-in-Git spike: can we use store.Push() and store.Pull() with a
 // bare git repo as the remote?
+//
+// CALL DOLT_PUSH runs inside the sql-server process, so the server must be
+// able to see the bare repo and the store's own data directory. These tests
+// therefore run against their own local sql-server (startLocalDoltServer),
+// not the suite's containerized shared server.
 
 // setupEmbeddedGitRemote creates a bare git repo and returns a DoltStore
 // connected with the bare repo configured as "origin".
 func setupEmbeddedGitRemote(t *testing.T) (*DoltStore, *gitRemoteSetup, func()) {
 	t.Helper()
-	skipIfNoDolt(t)
+	testutil.RequireDoltBinary(t)
 	skipIfNoGit(t)
 	acquireTestSlot()
 	t.Cleanup(releaseTestSlot)
@@ -630,47 +729,89 @@ func setupEmbeddedGitRemote(t *testing.T) (*DoltStore, *gitRemoteSetup, func()) 
 
 	remoteURL := "file://" + remoteDir
 
-	// Create embedded DoltStore
+	// Serve the store's own data directory from a local sql-server so the
+	// engine, the bare git repo and this test process all share one
+	// filesystem.
 	doltDir := filepath.Join(baseDir, "embedded-dolt")
+	if err := os.MkdirAll(doltDir, 0o755); err != nil {
+		os.RemoveAll(baseDir)
+		t.Fatalf("failed to create dolt dir: %v", err)
+	}
+	serverPort, stopServer := startLocalDoltServer(t, doltDir)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	dbName := uniqueTestDBName(t)
 	store, err := New(ctx, &Config{
 		Path:            doltDir,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      serverPort,
+		ServerUser:      "root",
+		AutoStart:       false,
 		CommitterName:   "test",
 		CommitterEmail:  "test@example.com",
 		Database:        dbName,
 		CreateIfMissing: true, // test creates a fresh database
 	})
 	if err != nil {
+		stopServer()
 		os.RemoveAll(baseDir)
-		t.Fatalf("failed to create embedded DoltStore: %v", err)
+		t.Fatalf("failed to create DoltStore: %v", err)
+	}
+
+	// The whole point of the local server: the database it just created must
+	// be on this process's filesystem, under the store's own Path. Tests here
+	// push to a host bare repo and read the engine's git-remote cache mirror,
+	// and both silently stop being meaningful if the store ever drifts back
+	// onto a containerized server.
+	if _, statErr := os.Stat(filepath.Join(doltDir, dbName, ".dolt")); statErr != nil {
+		store.Close()
+		stopServer()
+		os.RemoveAll(baseDir)
+		t.Fatalf("store did not materialize %s/.dolt on this filesystem — the engine is not local to the test: %v", filepath.Join(doltDir, dbName), statErr)
 	}
 
 	// Set issue prefix (required for CreateIssue)
 	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
 		store.Close()
+		stopServer()
 		os.RemoveAll(baseDir)
 		t.Fatalf("failed to set prefix: %v", err)
 	}
 
-	// Add git remote via embedded SQL
+	// Add git remote via SQL
 	if err := store.AddRemote(ctx, "origin", remoteURL); err != nil {
 		store.Close()
+		stopServer()
 		os.RemoveAll(baseDir)
 		t.Fatalf("failed to add remote: %v", err)
 	}
 
+	// Genesis commit, sweeping config too — the CLI sibling setupGitRemote
+	// does the same with DOLT_COMMIT('-Am', 'Genesis: schema and config').
+	// Commit() deliberately skips config (GH#2455), so without this
+	// issue_prefix stays dirty forever: Pull() then refuses to auto-commit a
+	// dirty internal config key, and a peer cloning this database gets no
+	// prefix at all.
+	if _, err := store.CommitAll(ctx, "Genesis: schema and config"); err != nil {
+		store.Close()
+		stopServer()
+		os.RemoveAll(baseDir)
+		t.Fatalf("failed to commit genesis config: %v", err)
+	}
+
 	setup := &gitRemoteSetup{
-		baseDir:   baseDir,
-		remoteDir: remoteDir,
-		remoteURL: remoteURL,
-		sourceDir: doltDir,
+		baseDir:    baseDir,
+		remoteDir:  remoteDir,
+		remoteURL:  remoteURL,
+		sourceDir:  doltDir,
+		serverPort: serverPort,
 	}
 
 	cleanup := func() {
 		store.Close()
+		stopServer()
 		os.RemoveAll(baseDir)
 	}
 
@@ -721,6 +862,10 @@ func TestGitRemoteEmbeddedPushPull(t *testing.T) {
 	// Now test Pull: add data in the clone, push via CLI, pull into embedded store
 	sourceInsertIssue(t, cloneDir, "emb-git-002", "Added in clone")
 	sourceCommitAndPush(t, cloneDir, "Add emb-git-002 from clone")
+
+	// The clone pushed from its own process; this store's sql-server last read
+	// the remote during store.Push() above and caches that view briefly.
+	waitOutGitRemoteReadCache()
 
 	// Pull via embedded driver
 	if err := store.Pull(ctx); err != nil {
@@ -945,8 +1090,15 @@ func TestGitRemoteSyncRoundTrip(t *testing.T) {
 		t.Fatal("expected bootstrap to occur (no existing dolt dir)")
 	}
 
+	// The clone is a second peer with its own data directory, so it needs its
+	// own local server for the same reason the source does.
+	clonePort, _ := startLocalDoltServer(t, cloneDoltDir)
 	cloneStore, err := New(ctx, &Config{
 		Path:            cloneDoltDir,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      clonePort,
+		ServerUser:      "root",
+		AutoStart:       false,
 		CommitterName:   "clone-user",
 		CommitterEmail:  "clone@example.com",
 		Database:        cloneDBName,
@@ -994,9 +1146,17 @@ func TestGitRemoteSyncRoundTrip(t *testing.T) {
 	// Close clone store before re-opening source
 	cloneStore.Close()
 
+	// The clone pushed from its own sql-server; the source's server last read
+	// the remote during step 1's push and caches that view briefly.
+	waitOutGitRemoteReadCache()
+
 	// Step 4: Re-open source and pull — verify bidirectional sync
 	sourceStore2, err := New(ctx, &Config{
 		Path:            filepath.Join(setup.baseDir, "embedded-dolt"),
+		ServerHost:      "127.0.0.1",
+		ServerPort:      setup.serverPort,
+		ServerUser:      "root",
+		AutoStart:       false,
 		CommitterName:   "test",
 		CommitterEmail:  "test@example.com",
 		Database:        findClonedDBName(t, filepath.Join(setup.baseDir, "embedded-dolt")),
@@ -1060,15 +1220,24 @@ func TestCreateIssueAfterPull(t *testing.T) {
 		t.Fatalf("source Push failed: %v", err)
 	}
 
-	// Simulate a second peer via CLI: clone, add data with UUID
-	// rows (issue + event), commit, and push back to the shared remote.
+	// Simulate a second peer via CLI: clone, add an issue row, commit, and
+	// push back to the shared remote. events is dolt_ignored since 0062
+	// (bd-red8u): the table is not part of committed history, so a fresh
+	// clone arrives without it and audit rows never cross a remote — the
+	// peer's contribution is the issue row alone.
 	cloneDir := filepath.Join(setup.baseDir, "clone-ai")
 	doltClone(t, setup.remoteURL, cloneDir)
+	eventsProbe := exec.Command("dolt", "sql", "-q", "SELECT COUNT(*) FROM events")
+	eventsProbe.Dir = cloneDir
+	if out, err := eventsProbe.CombinedOutput(); err == nil {
+		t.Fatalf("fresh clone materialized the events table from the remote; want it absent (dolt_ignored, 0062)\noutput: %s", out)
+	}
 	sourceInsertIssue(t, cloneDir, "ai-clone-001", "Clone issue generating events")
-	runDoltSQL(t, cloneDir,
-		`INSERT INTO events (id, issue_id, event_type, actor, created_at) `+
-			`VALUES (UUID(), 'ai-clone-001', 'created', 'clone-user', NOW())`)
-	sourceCommitAndPush(t, cloneDir, "Add ai-clone-001 with event")
+	sourceCommitAndPush(t, cloneDir, "Add ai-clone-001")
+
+	// The peer pushed from its own process; this store's sql-server last read
+	// the remote during store.Push() above and caches that view briefly.
+	waitOutGitRemoteReadCache()
 
 	// Pull into the source store — this is the code path under test.
 	// With UUID primary keys, there are no counter collisions after pull.
@@ -1076,6 +1245,14 @@ func TestCreateIssueAfterPull(t *testing.T) {
 	// rows created by a different clone.
 	if err := store.Pull(ctx); err != nil {
 		t.Fatalf("Pull failed: %v", err)
+	}
+
+	// Pin what the pull itself delivered, before any further write. Pull()
+	// reporting success while the peer's row never arrived, and Pull()
+	// delivering the row only for a later write to drop it, are different
+	// bugs; asserting only at the end of the test cannot tell them apart.
+	if pulled, pulledErr := store.GetIssue(ctx, "ai-clone-001"); pulledErr != nil || pulled == nil {
+		t.Fatalf("Pull reported success but the peer's ai-clone-001 is not in the source store (err=%v)", pulledErr)
 	}
 
 	postPullIssue := &types.Issue{
@@ -1094,10 +1271,11 @@ func TestCreateIssueAfterPull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to count events: %v", err)
 	}
-	// At least 3 events: source created (ai-src-001), clone created (ai-clone-001),
-	// post-pull created (ai-src-002)
-	if eventCount < 3 {
-		t.Errorf("expected at least 3 events, got %d", eventCount)
+	// At least 2 node-local events: source created (ai-src-001) and post-pull
+	// created (ai-src-002). The clone's own audit trail is node-local and
+	// never arrives via pull.
+	if eventCount < 2 {
+		t.Errorf("expected at least 2 events, got %d", eventCount)
 	}
 
 	for _, id := range []string{"ai-src-001", "ai-clone-001", "ai-src-002"} {
@@ -1132,9 +1310,13 @@ func findClonedDBName(t *testing.T, doltDir string) string {
 	return ""
 }
 
-// TestGitRemoteExternalServerRouting verifies that SQL-visible git-protocol
-// remotes on an external server materialize the local CLI remote needed for
-// subprocess routing.
+// TestGitRemoteExternalServerRouting pins the CLI routes for a plain dolt
+// sql-server on 127.0.0.1 that bd does not run, on a pinned port with no port
+// variable set. A Dolt database in the client's own data directory is a copy
+// no server holds: the dolt CLI would push or pull its files directly, so the
+// SQL-visible git-protocol remote takes the SQL route and no CLI remote is
+// materialized there. A store whose data directory is the one that server
+// serves (its sql-server.info names the dialed port) keeps the CLI routes.
 func TestGitRemoteExternalServerRouting(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 	skipIfNoGit(t)
@@ -1158,9 +1340,9 @@ func TestGitRemoteExternalServerRouting(t *testing.T) {
 	runCmd(t, testdbDir, "dolt", "init", "--name", "test", "--email", "test@test.com")
 	runCmd(t, testdbDir, "dolt", "remote", "add", "origin", "git+https://example.com/test.git")
 
-	initSchemaSQL := schema.AllMigrationsSQL() + "\nCALL DOLT_ADD('.');\nCALL DOLT_COMMIT('-Am', 'Genesis: schema and config');"
-	runDoltSQL(t, testdbDir, initSchemaSQL)
-
+	// Start the server before opening the store so New() initializes schema via
+	// the normal migration path. A single dolt sql -q script over all migrations
+	// can leave Dolt's analyzer unaware of columns added earlier in the script.
 	port, err := testutil.FindFreePort()
 	if err != nil {
 		t.Fatalf("failed to find free port: %v", err)
@@ -1220,15 +1402,35 @@ func TestGitRemoteExternalServerRouting(t *testing.T) {
 	t.Cleanup(func() { store.Close() })
 
 	require.Equal(t, "", doltutil.FindCLIRemote(clientTestdbDir, store.remote), "precondition: client CLI remote should be absent")
-	require.True(t, store.isGitProtocolRemote(ctx, store.remote), "SQL-visible git remote should materialize CLI routing")
-	require.True(t,
-		doltutil.RemoteURLsMatch(doltutil.FindCLIRemote(clientTestdbDir, store.remote), "git+https://example.com/test.git"),
-		"git-protocol routing should create a matching client CLI remote",
-	)
-	require.True(t, store.shouldUseCLIForCredentials(ctx, store.remote, store.mainRemoteCredentials()), "credential route should reuse matching CLI remote")
+	require.False(t, store.isGitProtocolRemote(ctx, store.remote), "a copy no server serves must not take the CLI route")
+	require.Equal(t, "", doltutil.FindCLIRemote(clientTestdbDir, store.remote), "the SQL route must not materialize a CLI remote in the copy")
+	require.False(t, store.shouldUseCLIForCredentials(ctx, store.remote, store.mainRemoteCredentials()), "credential route must not run the dolt CLI in the copy")
 	useLocalCLI, err := store.shouldUseCLIForLocalRemoteWithError(ctx, store.remote)
 	require.NoError(t, err)
-	require.True(t, useLocalCLI, "local remote guard should pass after materialization")
+	require.False(t, useLocalCLI, "local remote route must not run the dolt CLI in the copy")
+
+	served, err := New(ctx, &Config{
+		Path:            serverDataDir,
+		Database:        "testdb",
+		ServerHost:      "127.0.0.1",
+		ServerPort:      port,
+		ServerUser:      "root",
+		CommitterName:   "test",
+		CommitterEmail:  "test@test.com",
+		AutoStart:       false,
+		CreateIfMissing: false,
+		Remote:          "origin",
+		RemoteUser:      "testuser",
+	})
+	if err != nil {
+		t.Fatalf("failed to create DoltStore over the served data directory: %v", err)
+	}
+	t.Cleanup(func() { served.Close() })
+	require.True(t, served.isGitProtocolRemote(ctx, served.remote), "the served directory keeps the CLI route")
+	require.True(t, served.shouldUseCLIForCredentials(ctx, served.remote, served.mainRemoteCredentials()), "credential route keeps the CLI in the served directory")
+	useLocalCLI, err = served.shouldUseCLIForLocalRemoteWithError(ctx, served.remote)
+	require.NoError(t, err)
+	require.True(t, useLocalCLI, "local remote route keeps the CLI in the served directory")
 }
 
 func TestSQLRemotePersistsAcrossExternalServerRestart(t *testing.T) {
@@ -1257,9 +1459,9 @@ func TestSQLRemotePersistsAcrossExternalServerRestart(t *testing.T) {
 	}
 	runCmd(t, testdbDir, "dolt", "init", "--name", "test", "--email", "test@test.com")
 
-	initSchemaSQL := schema.AllMigrationsSQL() + "\nCALL DOLT_ADD('.');\nCALL DOLT_COMMIT('-Am', 'Genesis: schema and config');"
-	runDoltSQL(t, testdbDir, initSchemaSQL)
-
+	// Start the server before opening the store so New() initializes schema via
+	// the normal migration path. A single dolt sql -q script over all migrations
+	// can leave Dolt's analyzer unaware of columns added earlier in the script.
 	port, err := testutil.FindFreePort()
 	if err != nil {
 		t.Fatalf("failed to find free port: %v", err)
@@ -1379,7 +1581,10 @@ func TestSQLRemotePersistsAcrossExternalServerRestart(t *testing.T) {
 // The test proves routing works end-to-end: if shouldUseCLIForCredentials
 // routes to doltCLIPush, the CLI uses the file:// remote and push succeeds.
 // If the guard fails and falls through to SQL withEnvCredentials, the external
-// server process cannot see the env vars and push fails (SC-001).
+// server process cannot see the env vars and push fails (SC-001). That route
+// is taken only for the database the server serves: a store over a client
+// data directory the server does not serve takes SQL, since the dolt CLI
+// would push that copy's files instead of the server's.
 func TestCredentialCLIRoutingE2E(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 
@@ -1407,10 +1612,10 @@ func TestCredentialCLIRoutingE2E(t *testing.T) {
 		t.Fatalf("failed to create testdb dir: %v", err)
 	}
 	runCmd(t, testdbDir, "dolt", "init", "--name", "test", "--email", "test@test.com")
-	initSchemaSQL := schema.AllMigrationsSQL() + "\nCALL DOLT_ADD('.');\nCALL DOLT_COMMIT('-Am', 'Genesis: schema and config');"
-	runDoltSQL(t, testdbDir, initSchemaSQL)
 
-	// 3. Start dolt sql-server from server root
+	// Start the server before opening the store so New() initializes schema via
+	// the normal migration path. A single dolt sql -q script over all migrations
+	// can leave Dolt's analyzer unaware of columns added earlier in the script.
 	port, err := testutil.FindFreePort()
 	if err != nil {
 		t.Fatalf("failed to find free port: %v", err)
@@ -1480,24 +1685,428 @@ func TestCredentialCLIRoutingE2E(t *testing.T) {
 	}
 	require.Equal(t, "", doltutil.FindCLIRemote(clientTestdbDir, store.remote), "precondition: bd setup path should not manually seed CLI remote")
 
-	// Verify preconditions: not a git-protocol remote, but credentials trigger CLI routing
+	// The client's own testdb is a copy no server serves (the server on that
+	// port serves server-data): the dolt CLI would push its files, not the
+	// server's, so credentials must not route through the CLI there, and no
+	// CLI remote is materialized in it.
 	require.False(t, store.isGitProtocolRemote(ctx, store.remote), "file:// is not git-protocol")
-	if !store.shouldUseCLIForCredentials(ctx, store.remote, store.mainRemoteCredentials()) {
-		remotes, listErr := store.ListRemotes(ctx)
-		ensureErr := doltutil.EnsureCLIRemote(clientTestdbDir, store.remote, remoteURL)
-		t.Fatalf("should route through CLI for credentials; serverMode=%v remotes=%v listErr=%v cliRemote=%q ensureErr=%v",
-			store.serverMode, remotes, listErr, doltutil.FindCLIRemote(clientTestdbDir, store.remote), ensureErr)
+	require.False(t, store.shouldUseCLIForCredentials(ctx, store.remote, store.mainRemoteCredentials()), "a copy no server serves must not take the credential CLI route")
+	require.Equal(t, "", doltutil.FindCLIRemote(clientTestdbDir, store.remote), "the copy must not get a CLI remote")
+
+	// A store over the directory the server does serve keeps the CLI route,
+	// whose dolt child gets the client's credentials.
+	served, err := New(ctx, &Config{
+		Path:            serverDataDir,
+		Database:        "testdb",
+		ServerHost:      "127.0.0.1",
+		ServerPort:      port,
+		ServerUser:      "root",
+		CommitterName:   "test",
+		CommitterEmail:  "test@test.com",
+		AutoStart:       false,
+		CreateIfMissing: false,
+		Remote:          "origin",
+		RemoteUser:      "testuser",     // triggers credential CLI routing
+		RemotePassword:  "testpassword", // passed via applyToCmd to subprocess env
+	})
+	if err != nil {
+		t.Fatalf("failed to create DoltStore over the served data directory: %v", err)
+	}
+	t.Cleanup(func() { served.Close() })
+	if !served.shouldUseCLIForCredentials(ctx, served.remote, served.mainRemoteCredentials()) {
+		remotes, listErr := served.ListRemotes(ctx)
+		t.Fatalf("should route through CLI for credentials; serverMode=%v remotes=%v listErr=%v cliRemote=%q",
+			served.serverMode, remotes, listErr, doltutil.FindCLIRemote(testdbDir, served.remote))
 	}
 	require.True(t,
-		doltutil.RemoteURLsMatch(doltutil.FindCLIRemote(clientTestdbDir, store.remote), remoteURL),
-		"credential routing should materialize a matching client CLI remote",
+		doltutil.RemoteURLsMatch(doltutil.FindCLIRemote(testdbDir, served.remote), remoteURL),
+		"credential routing should find a matching CLI remote in the served database",
 	)
-	require.True(t, store.serverMode, "store should be in server mode")
+	require.True(t, served.serverMode, "store should be in server mode")
 
 	// 7. Push should succeed via CLI credential routing
 	// If the guard works: doltCLIPush uses CLI dir's file:// remote → success
 	// If guard fails: withEnvCredentials + SQL CALL DOLT_PUSH('--user',...) → fails
 	// (external server can't see env vars set on bd client process)
-	err = store.Push(ctx)
+	err = served.Push(ctx)
 	require.NoError(t, err, "Push should succeed via CLI credential routing (SC-001)")
+}
+
+// TestPullReportsSuccessOnlyWhenTheMergeLanded is the regression test for
+// ga-ivaps: Pull() returning nil having merged nothing.
+//
+// A sync that lies is worse than a sync that fails. Pull() collapses three
+// different outcomes into the single value nil — "I merged the peer's commits",
+// "there was nothing to merge", and "I reported success but the branch you read
+// did not receive anything" — and no caller can tell them apart. The third is
+// silent divergence: bd sync reports success while the local database quietly
+// falls behind the remote.
+//
+// THE DIVERGENCE IS CONSTRUCTED, NOT WAITED FOR. The CI symptom is intermittent
+// and nobody has reproduced it on demand, so this test does not chase the race.
+// It builds the *observable end state* that any such pull leaves behind — the
+// remote-tracking ref for (remote, branch) advanced past the branch the store
+// reads — and pins that Pull() refuses to call it success. Whatever made the
+// transport miss (a route that no-ops, a merge landing on another branch, a CLI
+// subprocess operating on a database the SQL session does not serve), it ends
+// here, and this is the assertion that catches it.
+//
+// The store is moved onto a branch the CLI directory is not checked out to,
+// which makes `dolt pull <remote> <branch>` merge into the CLI directory's
+// branch and leave the store's own branch untouched. That is a real route
+// through pullTransport, not a stub.
+//
+// Two controls, both required:
+//
+//   - A pull with real work to do must succeed AND deliver the peer's row. A
+//     post-condition that rejected everything would satisfy the subject
+//     assertion while breaking every pull in the product.
+//   - A pull with genuinely nothing to merge must still succeed QUIETLY. This is
+//     the control that keeps the fix from turning every no-op pull into an
+//     error, which is the obvious wrong way to make a lying pull loud.
+func TestPullReportsSuccessOnlyWhenTheMergeLanded(t *testing.T) {
+	store, setup, cleanup := setupEmbeddedGitRemote(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	seed := &types.Issue{
+		ID:        "pl-src-001",
+		Title:     "Source issue before push",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  2,
+	}
+	if err := store.CreateIssue(ctx, seed, "tester"); err != nil {
+		t.Fatalf("CreateIssue failed: %v", err)
+	}
+	if err := store.Commit(ctx, "Add pl-src-001"); err != nil {
+		t.Fatalf("Commit failed: %v", err)
+	}
+	if err := store.Push(ctx); err != nil {
+		t.Fatalf("Push failed: %v", err)
+	}
+
+	// Control 1: a pull with real work to do succeeds and delivers the row.
+	cloneDir := filepath.Join(setup.baseDir, "clone-pl")
+	doltClone(t, setup.remoteURL, cloneDir)
+	sourceInsertIssue(t, cloneDir, "pl-clone-001", "Clone issue")
+	sourceCommitAndPush(t, cloneDir, "Add pl-clone-001")
+
+	// The peer pushed from its own process; this store's sql-server last read
+	// the remote during store.Push() above and caches that view briefly.
+	waitOutGitRemoteReadCache()
+
+	if err := store.Pull(ctx); err != nil {
+		t.Fatalf("control broken: a pull with real work to do failed: %v", err)
+	}
+	if got, err := store.GetIssue(ctx, "pl-clone-001"); err != nil || got == nil {
+		t.Fatalf("control broken: Pull reported success but the peer's pl-clone-001 is absent (err=%v)", err)
+	}
+
+	// Control 2: the repeated pull has nothing to merge. It must still succeed,
+	// and say nothing about it. Waiting the cache out again is what makes this
+	// a genuine no-op rather than a cached one: inside the TTL the fetch is
+	// skipped, so the pull would report "nothing to merge" without ever asking
+	// the remote, and the control would hold even if a real no-op pull errored.
+	waitOutGitRemoteReadCache()
+
+	if err := store.Pull(ctx); err != nil {
+		t.Fatalf("control broken: a pull with genuinely nothing to merge must succeed quietly, got: %v", err)
+	}
+
+	// Subject: move the store onto a branch the CLI directory is not checked
+	// out to, so the pull's merge cannot land where the store reads.
+	if err := store.Branch(ctx, "feature"); err != nil {
+		t.Fatalf("Branch(feature) failed: %v", err)
+	}
+	if err := store.Checkout(ctx, "feature"); err != nil {
+		t.Fatalf("Checkout(feature) failed: %v", err)
+	}
+	if err := store.Push(ctx); err != nil {
+		t.Fatalf("pushing the feature branch failed: %v", err)
+	}
+
+	runCmd(t, cloneDir, "dolt", "fetch", "origin")
+	runCmd(t, cloneDir, "dolt", "checkout", "feature")
+	sourceInsertIssue(t, cloneDir, "pl-clone-002", "Clone issue on feature")
+	// Pushed to origin/feature explicitly: the sourceCommitAndPush helper
+	// pushes origin main, which from a feature checkout would push an
+	// unchanged main and leave the peer's commit nowhere. A fixture that never
+	// publishes the row makes Pull correct to merge nothing, and the case would
+	// be asserting on its own bug instead of the product's.
+	runDoltSQL(t, cloneDir, "CALL DOLT_ADD('.'); CALL DOLT_COMMIT('-Am', 'Add pl-clone-002 on feature')")
+	runCmd(t, cloneDir, "dolt", "push", "origin", "feature")
+
+	// Same cache, and the subject needs it out of the way even more than the
+	// controls do: inside the TTL the pull's fetch is skipped, so
+	// remotes/origin/feature never moves, the post-condition sees a local
+	// branch that trivially contains it, and the divergence this case exists
+	// to build is never constructed.
+	waitOutGitRemoteReadCache()
+
+	pullErr := store.Pull(ctx)
+	landed, getErr := store.GetIssue(ctx, "pl-clone-002")
+	delivered := getErr == nil && landed != nil
+
+	switch {
+	case pullErr == nil && delivered:
+		// The merge landed on the branch the store reads, so this run built no
+		// divergence and has nothing to say about detecting one. Not a pass.
+		t.Skip("the pull delivered pl-clone-002 onto the store's branch: no divergence was constructed")
+	case pullErr == nil && !delivered:
+		t.Fatalf("Pull reported success (nil) but pl-clone-002 never arrived on %q, the branch this store "+
+			"reads: a pull that merged nothing must not report success", "feature")
+	case delivered:
+		t.Fatalf("Pull failed with %v even though pl-clone-002 did arrive: the post-condition rejected a "+
+			"pull that landed", pullErr)
+	}
+
+	// The refusal has to be THIS refusal. A transport that failed for an
+	// unrelated reason would also make pullErr non-nil and would otherwise let
+	// the case pass without the post-condition existing at all.
+	if msg := pullErr.Error(); !strings.Contains(msg, "merged nothing") || !strings.Contains(msg, "remotes/origin/feature") {
+		t.Fatalf("Pull failed, but not with the merged-nothing post-condition: %v", pullErr)
+	}
+	t.Logf("Pull correctly refused to call this success: %v", pullErr)
+}
+
+// TestPullVerifyUsesBranchQualifiedPreHead pins ga-ivaps Finding 1 (attempt 2):
+// verifyPullLanded's cheap fast path skips the containment check when the branch
+// head MOVED across the pull — a head that moved is proof the transport landed.
+// That inference is only sound when the pre-pull head was read from the SAME
+// branch the post-pull comparison reads (s.branch). Pull now captures it via
+// branchHash(s.branch); a regression to GetCurrentCommit (session HEAD) would,
+// on a pooled connection sitting on the database's default branch, hand back a
+// different branch's head, so a merge that never reached s.branch would look
+// like it had — the fast path would fire and wave a lying pull through.
+//
+// It exercises that fast path directly and DETERMINISTICALLY by calling
+// verifyPullLanded with the two candidate pre-pull heads rather than trying to
+// force a pooled connection onto the wrong branch (which an effectively
+// single-connection server-mode store makes unreachable in-process — the very
+// reason TestPullReportsSuccessOnlyWhenTheMergeLanded has to t.Skip). The
+// wrong-branch head (main's tip, what the bug reads) must skip the check; the
+// branch-qualified head (feature's tip, what the fix reads) must run it and
+// catch the divergence. This is the non-environment-dependent coverage the
+// attempt-2 scorecard asked for.
+func TestPullVerifyUsesBranchQualifiedPreHead(t *testing.T) {
+	store, setup, cleanup := setupEmbeddedGitRemote(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	// A committed, pushed main so branchHash(main) is a real, distinct hash to
+	// stand in for "the branch a stray pooled connection is parked on".
+	seed := &types.Issue{
+		ID:        "bq-main-001",
+		Title:     "Main seed",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  2,
+	}
+	if err := store.CreateIssue(ctx, seed, "tester"); err != nil {
+		t.Fatalf("CreateIssue(main seed) failed: %v", err)
+	}
+	if err := store.Commit(ctx, "Add bq-main-001"); err != nil {
+		t.Fatalf("Commit(main seed) failed: %v", err)
+	}
+	if err := store.Push(ctx); err != nil {
+		t.Fatalf("Push(main) failed: %v", err)
+	}
+
+	// The store operates on feature; publish it so a peer can clone and advance it.
+	if err := store.Branch(ctx, "feature"); err != nil {
+		t.Fatalf("Branch(feature) failed: %v", err)
+	}
+	if err := store.Checkout(ctx, "feature"); err != nil {
+		t.Fatalf("Checkout(feature) failed: %v", err)
+	}
+	if err := store.Push(ctx); err != nil {
+		t.Fatalf("pushing the feature branch failed: %v", err)
+	}
+
+	// feature gets a LOCAL-ONLY commit — the reviewer's exact scenario. It moves
+	// feature's tip off both main and the pushed feature tip, and makes the
+	// divergence a genuine one: the peer's branch below shares only the pushed
+	// feature tip as an ancestor, so neither head is the other's. An --allow-empty
+	// commit is the minimal way to advance the tip: what this test needs from the
+	// commit is the new hash on feature, nothing in its tree. Going through
+	// CreateIssue would drag in the write path's cross-table ID-collision probe —
+	// unrelated to verifyPullLanded — and couple the fixture to that schema. The
+	// store session is on feature (Checkout set s.branch above), so DOLT_COMMIT
+	// lands here.
+	if _, err := store.db.ExecContext(ctx,
+		"CALL DOLT_COMMIT('--allow-empty', '-m', 'feature local-only commit')"); err != nil {
+		t.Fatalf("local-only feature commit failed: %v", err)
+	}
+
+	// A peer advances origin/feature from its own process, diverging it from the
+	// local feature branch.
+	cloneDir := filepath.Join(setup.baseDir, "clone-bq")
+	doltClone(t, setup.remoteURL, cloneDir)
+	runCmd(t, cloneDir, "dolt", "fetch", "origin")
+	runCmd(t, cloneDir, "dolt", "checkout", "feature")
+	sourceInsertIssue(t, cloneDir, "bq-clone-001", "Clone issue on feature")
+	runDoltSQL(t, cloneDir, "CALL DOLT_ADD('.'); CALL DOLT_COMMIT('-Am', 'Add bq-clone-001 on feature')")
+	runCmd(t, cloneDir, "dolt", "push", "origin", "feature")
+
+	// The sql-server caches its last read of the remote, and the verify's own
+	// refresh fetch is served from that cache inside the TTL. Wait it out so the
+	// refresh actually sees the peer's commit and the divergence is real.
+	waitOutGitRemoteReadCache()
+
+	featureTip, err := store.branchHash(ctx, "feature")
+	if err != nil || featureTip == "" {
+		t.Fatalf("branchHash(feature) failed: hash=%q err=%v", featureTip, err)
+	}
+	mainTip, err := store.branchHash(ctx, "main")
+	if err != nil || mainTip == "" {
+		t.Fatalf("branchHash(main) failed: hash=%q err=%v", mainTip, err)
+	}
+	if featureTip == mainTip {
+		t.Fatalf("scenario broken: feature and main share tip %q, so a wrong-branch preHead would not differ from the branch-qualified one", featureTip)
+	}
+
+	// The bug's input: preHead read from the wrong branch (main). localHash is
+	// feature's tip, so localHash != preHead trips the fast path and the check is
+	// skipped — the lying pull is (wrongly) called a success. This is the fast
+	// path's load-bearing contract: it is only ever safe when preHead is s.branch.
+	if err := store.verifyPullLanded(ctx, "origin", mainTip); err != nil {
+		t.Fatalf("fast-path contract broken: a wrong-branch preHead must skip the check (return nil), got: %v", err)
+	}
+
+	// The fix's input: preHead read from s.branch (feature). localHash == preHead,
+	// so the fast path does not fire, the containment check runs, and it catches
+	// the divergence the merge left on the wrong branch.
+	got := store.verifyPullLanded(ctx, "origin", featureTip)
+	if got == nil {
+		t.Fatalf("branch-qualified preHead must run the containment check and catch the divergence, got nil")
+	}
+	if msg := got.Error(); !strings.Contains(msg, "merged nothing") || !strings.Contains(msg, "remotes/origin/feature") {
+		t.Fatalf("caught an error, but not the merged-nothing post-condition: %v", got)
+	}
+	// The divergence is genuine — sibling histories whose common ancestor is
+	// neither tip — so it must stay a HARD error, not the fast-forwardable
+	// retryable class bd sync would loop on.
+	if errors.Is(got, versioncontrolops.ErrPullBehindFastForwardable) {
+		t.Fatalf("a genuine divergence must not be classified fast-forwardable-retryable: %v", got)
+	}
+	t.Logf("branch-qualified preHead correctly caught the divergence: %v", got)
+}
+
+// TestPushPullAtAHostBdDoesNotRunMoveTheServersData is the end-to-end case
+// for the CLI routes' host gate (cliDirServesServer). The workspace's Dolt
+// server listens on 127.0.0.2, an address bd's own server never binds, and
+// keeps its data in its own directory. The workspace's .beads/dolt/<db> holds
+// a clone of the git-protocol remote, as bd init leaves there for a gateway
+// at such a host. A push must deliver the server's commits to the remote,
+// and a pull must merge the remote's commits into the server: through that
+// clone, the push reported success with neither, and the pull landed in the
+// clone.
+func TestPushPullAtAHostBdDoesNotRunMoveTheServersData(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+	skipIfNoGit(t)
+	probe, err := net.Listen("tcp", "127.0.0.2:0")
+	if err != nil {
+		t.Skipf("127.0.0.2 is not bindable here: %v", err)
+	}
+	_ = probe.Close()
+	for _, env := range []string{"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT", "BEADS_TEST_MODE", "BEADS_DOLT_SHARED_SERVER"} {
+		t.Setenv(env, "")
+	}
+
+	baseDir := t.TempDir()
+	remoteDir := filepath.Join(baseDir, "remote.git")
+	runCmd(t, baseDir, "git", "init", "--bare", "-b", "main", remoteDir)
+	seedDir := filepath.Join(baseDir, "seed")
+	if err := os.MkdirAll(seedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runCmd(t, seedDir, "git", "init", "-b", "main")
+	runCmd(t, seedDir, "git", "commit", "--allow-empty", "-m", "init")
+	runCmd(t, seedDir, "git", "push", remoteDir, "main")
+	remoteURL := "git+file://" + remoteDir
+
+	serverDir := filepath.Join(baseDir, "server")
+	if err := os.MkdirAll(serverDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	port, _ := startLocalDoltServerAt(t, serverDir, "127.0.0.2")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	beadsDir := filepath.Join(baseDir, "workspace", ".beads")
+	doltDir := filepath.Join(beadsDir, "dolt")
+	dbName := uniqueTestDBName(t)
+	store, err := New(ctx, &Config{
+		Path:            doltDir,
+		BeadsDir:        beadsDir,
+		Database:        dbName,
+		ServerHost:      "127.0.0.2",
+		ServerPort:      port,
+		ServerUser:      "root",
+		CommitterName:   "test",
+		CommitterEmail:  "test@example.com",
+		AutoStart:       false,
+		CreateIfMissing: true,
+		Remote:          "origin",
+	})
+	if err != nil {
+		t.Fatalf("New at 127.0.0.2: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.SetConfig(ctx, "issue_prefix", "lo"); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	if err := store.AddRemote(ctx, "origin", remoteURL); err != nil {
+		t.Fatalf("AddRemote: %v", err)
+	}
+	if _, err := store.CommitAll(ctx, "genesis"); err != nil {
+		t.Fatalf("CommitAll: %v", err)
+	}
+	create := func(id, title string) {
+		t.Helper()
+		issue := &types.Issue{ID: id, Title: title, IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2}
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", id, err)
+		}
+		if err := store.Commit(ctx, "add "+id); err != nil {
+			t.Fatalf("Commit %s: %v", id, err)
+		}
+	}
+	create("lo-first", "first, pushed before the clone")
+	if err := store.Push(ctx); err != nil {
+		t.Fatalf("first Push: %v", err)
+	}
+
+	// The clone of the remote in .beads/dolt/<db>, not served by the server.
+	if err := os.MkdirAll(doltDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runCmd(t, doltDir, "dolt", "clone", remoteURL, dbName)
+
+	create("lo-second", "second, only on the server")
+	if err := store.Push(ctx); err != nil {
+		t.Fatalf("Push with the clone present: %v", err)
+	}
+	pushed := filepath.Join(baseDir, "after-push")
+	doltClone(t, remoteURL, pushed)
+	if rows := queryCSV(t, pushed, "SELECT id FROM issues WHERE id = 'lo-second'"); len(rows) != 1 {
+		// Errorf, not Fatalf: the pull below is checked on its own.
+		t.Errorf("remote lacks the server's commit lo-second after Push reported success; the push moved the clone in %s instead of the server's data", filepath.Join(doltDir, dbName))
+	}
+
+	// Another client pushes to the remote; a pull must merge it into the server.
+	sourceInsertIssue(t, pushed, "lo-third", "third, from another client")
+	sourceCommitAndPush(t, pushed, "add lo-third")
+	waitOutGitRemoteReadCache()
+	if err := store.Pull(ctx); err != nil {
+		t.Fatalf("Pull with the clone present: %v", err)
+	}
+	if _, err := store.GetIssue(ctx, "lo-third"); err != nil {
+		t.Fatalf("the server lacks the remote's lo-third after Pull: %v", err)
+	}
 }

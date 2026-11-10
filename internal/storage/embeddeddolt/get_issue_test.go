@@ -105,6 +105,52 @@ func TestGetIssue(t *testing.T) {
 		}
 	})
 
+	// The hydration FROM clause joins the leases table, so a database missing it
+	// must fail loudly: reporting the row absent is a wrong answer no client can
+	// tell apart from a deletion. assertRowExists is the control — the row is
+	// demonstrably present while GetIssue is being asked about it.
+	t.Run("missing_leases_table_is_an_error_not_absent", func(t *testing.T) {
+		te := newTestEnv(t, "lg")
+		ctx := t.Context()
+
+		issue := &types.Issue{
+			ID:        "lg-live",
+			Title:     "Live issue on a database missing leases",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		if err := te.store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue: %v", err)
+		}
+		te.exec(t, ctx, "RENAME TABLE leases TO leases_renamed_away")
+		te.assertRowExists(t, ctx, "issues", "lg-live")
+
+		_, err := te.store.GetIssue(ctx, "lg-live")
+		if err == nil {
+			t.Fatal("GetIssue succeeded with no leases table")
+		}
+		if errors.Is(err, storage.ErrNotFound) {
+			t.Fatalf("GetIssue reported a present row absent: %v", err)
+		}
+		if !strings.Contains(err.Error(), "leases") {
+			t.Fatalf("expected the error to name leases, got: %v", err)
+		}
+
+		// The mutation path reads the pre-update row through the same query, so
+		// it inherited the same wrong answer: "no such issue" for a live write.
+		updErr := te.store.UpdateIssue(ctx, "lg-live", map[string]interface{}{"title": "renamed"}, "tester")
+		if updErr == nil {
+			t.Fatal("UpdateIssue succeeded with no leases table")
+		}
+		if errors.Is(updErr, storage.ErrNotFound) {
+			t.Fatalf("UpdateIssue reported a present row absent: %v", updErr)
+		}
+		if !strings.Contains(updErr.Error(), "leases") {
+			t.Fatalf("expected the update error to name leases, got: %v", updErr)
+		}
+	})
+
 	t.Run("wisp_label_table_error_propagates", func(t *testing.T) {
 		te := newTestEnv(t, "wl")
 		ctx := t.Context()

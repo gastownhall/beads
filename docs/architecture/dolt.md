@@ -21,16 +21,234 @@ Embedded mode includes everything in the `bd` binary; no separate Dolt install
 is needed. Install the standalone `dolt` CLI only when you want to run server
 mode or work directly with the database via `dolt sql`.
 
+Install a specific version. Do not install `releases/latest` — see
+[Which Dolt version to install](#which-dolt-version-to-install) for the
+version to use and why the pin exists.
+
 ```bash
-# macOS
-brew install dolt
+DOLT_VERSION=2.6.0   # see "Which Dolt version to install" below
 
-# Linux
-curl -L https://github.com/dolthub/dolt/releases/latest/download/install.sh | bash
+os=$(uname -s | tr '[:upper:]' '[:lower:]')
+arch=$(uname -m | sed -e 's/^x86_64$/amd64/' -e 's/^aarch64$/arm64/')
+curl -fsSL "https://github.com/dolthub/dolt/releases/download/v${DOLT_VERSION}/dolt-${os}-${arch}.tar.gz" \
+  | tar -xz -C /tmp
+sudo install -m 0755 "/tmp/dolt-${os}-${arch}/bin/dolt" /usr/local/bin/dolt
 
-# Verify installation
+# Verify you got the version you asked for
 dolt version
 ```
+
+`brew install dolt` installs whatever version the Homebrew formula currently
+points at, which is not pinned. If you install that way, check `dolt version`
+against the pin below.
+
+### Which Dolt version to install
+
+Beads pins Dolt to **2.6.0**. CI installs that same pin with
+`scripts/ci/install-dolt.sh`, which records the per-version measurements and
+the criterion for raising it; raise the pin here and in that script together.
+
+This pin is about the standalone `dolt` CLI, which only server and
+proxied-server mode use. Embedded mode is unaffected either way: it links the
+Dolt 2.6.0 engine into `bd` (`dolthub/driver` v2.4.1 with
+`github.com/dolthub/dolt/go` at the v2.6.0 release, in `go.mod`), no matter
+which `dolt` CLI is on your PATH. The CLI pin tracks that engine, so every mode
+runs the same Dolt.
+
+**`bd` requires Dolt 2.6.0 or newer** outside embedded mode, and refuses to
+run against anything older:
+
+- `bd dolt start`, and the auto-start behind server mode, refuse to launch a
+  `dolt` binary older than 2.6.0.
+- Managed proxied-server mode (`bd init --proxied-server`, and every command
+  after it) refuses a `dolt` binary older than 2.6.0 before it launches it.
+- Every server-mode and proxied-server store open asks the server it
+  reached for `SELECT dolt_version()` and refuses a server older than 2.6.0,
+  whoever started it, before it reads or writes through that open. That
+  includes an external server and a shared one.
+- `bd bootstrap` and `bd init --remote` check the server, or the `dolt`
+  CLI, before they clone; `bd init` checks a shared server before it
+  creates `beads_global` on it; and `bd dolt clean-databases` refuses an
+  older server before it drops anything.
+- A `bd dolt push`, `pull` or fetch (federation sync included) that runs
+  through the `dolt` binary on your `PATH` (git-protocol, credentialed,
+  cloud-auth and local remotes) refuses that binary when it is older than
+  2.6.0, like every other `dolt` `bd` runs. When `bd`'s own server holds the
+  database, dolt hands the transfer to that server; otherwise the binary's
+  own engine runs it. The check comes as soon as `bd` chooses the CLI route,
+  before it runs anything through the binary.
+- The remote-repo cache (`bd create --repo <url>`, `bd repo sync` for a
+  remote-URL repo) refuses the `dolt` on your `PATH` when it is older than
+  2.6.0, before it clones, pulls or pushes. No server holds the cache, so
+  that binary's own engine would run the transfer.
+- `bd doctor --server` reports a server older than 2.6.0 as an error.
+- `bd doctor`, `bd doctor --fix` included, is exempt, so you can still
+  diagnose and repair a workspace on an older server: its own checks and
+  repairs connect without the floor. Its checks that open the workspace's
+  store fail: the ✖ Database and Permissions errors only point at
+  `bd dolt status`, and the refusal itself is printed by the ⚠ checks
+  further down (Peer Connectivity, Sync Staleness, Federation Conflicts,
+  Dolt Mode). Run `bd doctor --server` to see the version.
+- `bd admin compact --dolt` is exempt: its `dolt gc` runs in an owned or
+  shared server's database, which the store open has already checked, and
+  dolt hands the GC to that running server. Read-only probes
+  (`bd dolt status`, `bd init`'s existing-database check) and the
+  working-set commit `bd dolt stop` makes before it stops a server `bd` runs
+  are not checked either.
+- Federation peers are not checked: `bd` checks only its own server and its
+  own `dolt` binary, so a peer on an older engine can still merge the same
+  criss-cross history differently (see below).
+
+The error names what was checked (the binary's path or the server's
+address), the version it reported, the 2.6.0 minimum, and where to get Dolt.
+To fix it, install 2.6.0 with the steps above (or `brew upgrade dolt`, then
+check `dolt version`) and restart any `dolt sql-server` on the new binary:
+for a server `bd` manages, `bd dolt stop` and `bd dolt start`; in a managed
+proxied-server workspace, `bd dolt stop` alone, since the proxy starts its
+server again on the next command and refuses `bd dolt start`. There is no
+override. A version `bd` cannot determine is not refused: a `dolt` binary
+whose `dolt version` output does not parse runs with a warning (proxied-server
+mode) and a server that does not answer `dolt_version()` with a version is
+used without the check (logged under `BD_DEBUG`). The
+[Dolt 2.6.0 release notes](https://github.com/dolthub/dolt/releases/tag/v2.6.0)
+list what changed. Two changes matter to `bd` users moving a server up to
+2.6.0:
+
+- When two histories have more than one merge base (criss-cross merges,
+  e.g. federation peers that pull from each other, or branches merged into
+  each other), Dolt 2.6.0 merges against a virtual base like git's ORT
+  strategy (new in 2.6.0, dolthub/dolt#12125). Some merges that 2.5.x
+  completed silently now conflict, and some spurious conflicts no longer
+  occur. Pull/push through a single remote is unaffected.
+- Dolt reports MySQL 8.0's strict default `sql_mode`, which includes
+  `NO_ZERO_IN_DATE`, `NO_ZERO_DATE` and `ERROR_FOR_DIVISION_BY_ZERO`, so
+  anything that reads `@@sql_mode` sees it. Dolt has done so since 2.3.3,
+  so this is new only to a server coming from a release before 2.3.3.
+
+Dolt 2.3.3 is the first release that stores a descending index column as
+descending (dolthub/dolt#11746), and older releases cannot read a table that
+holds one: even a plain `INSERT` fails with `table has unknown fields`, and an
+`UPDATE` or `DELETE` on `issues` fails with `cannot add or update a child row:
+a foreign key constraint fails` on `fk_comp_snap_issue`. Migration 0010
+declares `compaction_snapshots.idx_comp_snap_issue` with `created_at DESC`. So
+every database `bd` creates in embedded mode from this release on, and every
+database whose schema a `dolt sql-server` 2.3.3 or newer created, holds one.
+**This is one-way: `bd` does not convert the index back**, so such a database
+needs Dolt 2.3.3 or newer, and a `bd` built on Dolt 2.3.3 or newer, for good.
+Other databases keep an ascending index and stay readable and writable by
+older Dolt even after this release migrates and writes to them (measured
+2026-10-21 with Dolt 2.2.0 and 2.3.2).
+
+Dolt 2.3.0 (released 2026-08-13) regressed `CALL DOLT_RESET('--hard')`. A few
+percent of freshly created databases come up with that procedure unusable —
+every call answers `Error 1105 (HY000): context canceled`, from any session
+and any new connection, for the life of that server process. Nothing else
+about the database looks wrong: `SELECT 1`, `CALL DOLT_CLEAN()`,
+`CALL DOLT_CHECKOUT('.')`, `CALL DOLT_COMMIT()` and soft resets all work
+normally, so the damage is invisible until something needs a hard reset.
+
+The table records, per release, whether it opens a database `bd` creates,
+whether its engine answers an ungrouped `MAX` or `MIN` over an unmatched
+primary-key prefix correctly (the shape of dolthub/dolt#12093), and the
+`DOLT_RESET('--hard')` regression, measured by creating fresh databases and
+immediately calling the procedure:
+
+| Dolt | Opens a database `bd` creates | Ungrouped `MAX`/`MIN` over an unmatched primary-key prefix | Fresh databases with `DOLT_RESET('--hard')` broken |
+|---|---|---|---|
+| 2.1.8 | no | correct | 0 / 40 |
+| 2.2.0 | no | correct | 0 / 60 |
+| 2.3.0 | no | correct | 3 / 60 |
+| 2.3.1 | no | correct | 3 / 100 (2026-08-20); 8 / 150 (2026-10-10); 4 / 300 (2026-10-21) |
+| 2.3.2 | no | correct | not measured (carries the fix, dolthub/dolt#11652) |
+| 2.3.3 – 2.3.5 | **yes (the floor)** | correct | not measured |
+| 2.4.0 | yes | **no row** (dolthub/dolt#12093) | not measured |
+| 2.4.1 | yes | **no row** | 0 / 250 |
+| 2.4.2 | yes | **no row** | 0 / 250 |
+| **2.5.0** | yes | correct | 0 / 500 |
+| **2.5.1** | yes | correct | 0 / 500 |
+| **2.6.0** (pinned) | yes | correct | 0 / 500; 0 / 1000 across fresh servers (2026-10-24) |
+
+"Opens a database `bd` creates" means `information_schema` reads and writes
+don't fail with `table has unknown fields`. Every row of that column is
+measured (2026-10-23, on a database `bd` created in embedded mode); plain
+reads of `issues` still succeed on the releases marked "no".
+
+- The embedded engine measured 0 / 100 on 2.5.1 and 0 / 100 on 2.4.1
+  (2026-10-21), and 0 / 60 on 2.4.1 (2026-10-10). The 2026-10-10 and
+  2026-10-21 runs re-measured 2.3.1 as a positive control, confirming the
+  method still reproduces the regression.
+- 2.6.0 (2026-10-24): 0 / 500 on one server, and 0 / 1000 across 50 fresh
+  servers of 20 databases each; the embedded engine (`go.mod`'s
+  `dolthub/dolt/go` at the v2.6.0 release) 0 / 100 on one open and 0 / 400
+  across 20 fresh opens. The regression hits databases created soon after a
+  server starts, so one long-running server under-reports it: that day 2.3.1,
+  the positive control, measured 0 / 300 on one server but 31 / 600 across 30
+  fresh servers of 20 databases each. Measure across fresh servers.
+- 2.6.0: when two histories have more than one merge base (criss-cross
+  merges, e.g. federation peers that pull from each other, or branches merged
+  into each other), it merges against a virtual base like git's ORT strategy
+  (dolthub/dolt#12125). Some merges that 2.5.x completed silently now
+  conflict, and some spurious conflicts no longer occur. Pull/push through a
+  single remote is unaffected.
+- The `MAX`/`MIN` column is bee-ghosttrack's reproduction from
+  [#7646](https://github.com/gastownhall/beads/pull/7646), reproduced on
+  linux/amd64 and darwin/arm64. `bd`'s one query of that shape, the
+  versioned-history revision read, no longer depends on it.
+- 2.4.0 through 2.4.2 also panic on an ungrouped `MAX` of a non-key column under
+  a fully bound primary key (dolthub/go-mysql-server#4037).
+- "Correct" is for the shape the column names. Every release before 2.5.0,
+  2.2.0 included, returns no row for an ungrouped `MAX` over the whole primary
+  key of an empty table (`SELECT COALESCE(MAX(pk), 0) FROM t`); 2.5.0 and
+  later return one row. `bd`'s production queries of that shape accept either
+  answer.
+- Releases before 2.4.0 drop a join condition when an `ON` clause has an `OR`
+  over indexed columns (dolthub/dolt#11886).
+
+Raise the pin only once a newer release is confirmed clean by that same
+measurement — not because it is newer.
+
+Pin rather than track `latest` for a second, independent reason: the upstream
+`releases/latest` URL resolves to the most recently *created* release, not the
+highest version, so it can move backwards — v1.88.2 was created on
+2026-08-17, after both v2.2.4 and v2.3.0.
+
+#### If you are already running 2.3.x
+
+Whether a database is affected is decided per database, when it is created —
+two databases on the same server can differ — so check each one you care
+about, against the server that is actually serving it:
+
+```bash
+# 1. The working set must be clean first: on a dirty working set a hard
+#    reset discards uncommitted changes. If this returns any rows, commit
+#    or clean up before step 3.
+dolt sql -q "SELECT * FROM dolt_status"
+
+# 2. Control — this must succeed. If it does not, you have a different
+#    problem and step 3 proves nothing.
+dolt sql -q "SELECT 1"
+
+# 3. On a clean working set this is a no-op on a healthy database.
+dolt sql -q "CALL DOLT_RESET('--hard')"
+```
+
+Step 2 succeeding while step 3 answers `Error 1105 (HY000): context canceled`
+is the discriminating result — that database is affected. Both succeeding
+means it is not.
+
+The breakage lives in the running server process, not on disk, so restarting
+`dolt sql-server` clears it — verified by re-running the check on an affected
+database after a restart, with a healthy database on the same server as the
+control. A restart re-rolls the dice for every database, though, so the
+durable fix is to move to the pinned version.
+
+This matters because `bd flatten` finishes by hard-resetting `main` onto a
+temporary branch, and the merge-settle path behind `bd dolt pull` / `bd sync`
+falls back to a hard reset when it has to abandon a merge. The Dolt-history
+compaction, `bd compact`, also hard-resets `main` in v1.3.2 and earlier;
+builds with the fix listed in the CHANGELOG move `main` with a soft reset,
+which this breakage does not affect. See
+[Maintenance](#maintenance--bd-prune-and-bd-purge).
 
 ### New Project
 
@@ -82,6 +300,16 @@ standalone Beads users. The `bd` binary includes everything; just `bd init` and 
 - Push to GitHub with `bd dolt push` — code and issues in one repo
 - Zero ops: no server, no ports, no PID files
 
+Each `bd` command starts the embedded engine, so a script or agent loop that
+calls `bd` hundreds of times pays that startup every time. bd batch runs a
+limited set of write commands (`close`, `update`, `create`, `dep add`,
+`dep remove`; see `bd batch --help`) in one transaction and one process. For
+sustained concurrent agents, use server or proxied-server mode, where one Dolt
+server keeps the engine running (see
+[Migrating Between Backends](#migrating-between-backends)). Neither repairs a
+damaged journal; for that, see
+[Engine won't open](/recovery/database-corruption#engine-wont-open).
+
 ### Server Mode (Multi-Writer / Orchestrator)
 
 Connects to a running `dolt sql-server` for multi-client access.
@@ -121,12 +349,35 @@ Configure the connection with flags or environment variables:
 | `--server-user` | `BEADS_DOLT_SERVER_USER` | `root` |
 | | `BEADS_DOLT_PASSWORD` | (none) |
 
+**`BEADS_DOLT_SERVER_PORT` also declares the server externally managed.**
+Setting it — or the legacy `BEADS_DOLT_PORT` — makes `ResolveServerMode`
+classify the workspace as an externally-managed server, so bd will not
+auto-start a server for it: if nothing is listening on that port you get
+`BEADS_DOLT_SERVER_PORT declares the Dolt server at 127.0.0.1:<port>
+externally managed, so bd did not start one` rather than a server started on
+it. Use these vars to point bd at a server you already run; they are not a way
+to choose the port of a bd-owned server. A
+`dolt_mode: proxied-server` workspace is exempt — it reaches its server
+through the proxy, so an ambient port does not describe its lifecycle — and
+a shared-server workspace is already classified external on its own.
+
 **Unix domain sockets:** Use `--server-socket` to connect via a Unix socket
 instead of TCP. This avoids port conflicts between concurrent projects and is
 useful in sandboxed environments (e.g., Claude Code) where file-level access
 control is simpler than network allowlists. The Dolt server must be started
 with `dolt sql-server --socket <path>`. Auto-start is not supported in socket
 mode.
+
+`bd init --server-socket` records the path as `dolt_server_socket` in
+`.beads/metadata.json`. `BEADS_DOLT_SERVER_SOCKET` wins over it. The socket is
+a preference, not a requirement: if it does not answer but the TCP host and
+port do, bd connects over TCP. If neither answers, the error names the socket.
+In releases after v1.3.2, opens that read metadata.json (`beads.OpenFromConfig`
+and the other config-based library opens, `bd doctor` and its repairs, and
+routed stores) take the socket the same way, after a socket the library
+caller passes directly. Earlier releases read only `BEADS_DOLT_SERVER_SOCKET`
+on those opens and dialed TCP beside a metadata.json socket. `beads.Open`
+does not read metadata.json.
 
 Switch to server mode when you need:
 - Multiple agents writing simultaneously
@@ -159,6 +410,51 @@ bd prune --older-than 90d --ignore-references --force
 `bd purge` is unaffected — ephemeral beads' references are themselves
 transient. For full Dolt storage reclaim after deleting many rows, follow
 with `bd flatten`.
+
+**On Dolt 2.3.x, storage-reclaim operations can fail partway.** `bd flatten`
+builds a temporary branch and then hard-resets `main` onto it, as does the
+Dolt-history compaction, `bd compact`, in v1.3.2 and earlier, and the
+merge-settle path behind `bd dolt pull` / `bd sync` falls back to a hard reset
+when it abandons a merge. On an affected database that hard reset returns
+`Error 1105 (HY000): context canceled`: `bd flatten` and those `bd compact`
+releases stop at that step, and an abandoned merge is left without its
+rollback. See [Which Dolt version to install](#which-dolt-version-to-install)
+for the check and the fix.
+
+**Writes that reach `main` while `bd compact` runs.** In v1.3.2 and earlier,
+`bd compact`'s hard reset discards them: changes in `main`'s working set that
+no Dolt commit holds yet (a batch under batched or disabled auto-commit), and
+a commit that lands on `main` while the history is being rebuilt. Builds with
+the fix listed in the CHANGELOG move `main` with a soft reset and keep both.
+The check that the rebuilt history reproduces `main`'s data compares it with
+`main` as `bd compact` read it, so such a write is not mistaken for a divergent
+replay. Working-set changes stay pending, as they were. A commit that landed during
+the rebuild is kept in one follow-up commit,
+`compact: commit changes that reached main during compaction`, so it does not
+keep its own hash, message or author on `main`; changes that were already
+staged when `bd compact` started go into that commit too. If that follow-up
+commit fails, `bd compact` stops after `main` has moved and before garbage
+collection, says so, and leaves the changes staged: commit them with
+`bd dolt commit` when you are ready.
+
+### Why a garbage collection can reclaim nothing
+
+Dolt's garbage collector is **generational**. Every pass moves the data
+reachable at that moment into an *old generation*, and a default pass only
+examines the *new generation* — data written since the last collection. So the
+second collection on a store never revisits what the first one kept, however
+much of it has since become unreachable. Squashing history and then running a
+default `dolt gc` is the case where this bites: the orphaned commit chain
+usually sits in the old generation, and the pass frees almost nothing.
+
+`dolt gc --full` collects both generations. It frees everything a default pass
+frees, plus the old generation, so it is never worth running a default pass
+first to save time. If a full collection frees nothing, the remaining bytes are
+still referenced — by a branch, a tag, or a cached remote-tracking ref — and
+the fix is to remove the reference, not to collect again. The
+[History Bloat runbook](/recovery/history-squash) walks through that diagnosis;
+[`bd flatten`](/cli-reference/flatten), [`bd compact`](/cli-reference/compact),
+and [`bd gc`](/cli-reference/gc) document the collection each one runs.
 
 ## Migrating Between Backends
 
@@ -375,27 +671,25 @@ bd list                    # Re-triggers bootstrap
 
 ### Database Corruption
 
-**Symptom:** Queries fail, inconsistent data.
+**Symptom:** Queries fail, inconsistent data, or every `bd` command fails while
+opening the database.
 
-**Diagnosis:**
+**Diagnosis and logical repair (server mode):**
 ```bash
 bd doctor                  # Basic checks
 bd doctor --deep           # Full validation
-bd doctor --server         # Server mode checks (if applicable)
+bd doctor --server         # Server mode checks
+bd doctor --fix            # Repair logical inconsistencies
 ```
 
-**Recovery options:**
+Embedded mode runs only `bd doctor --check=artifacts`, `--check=conventions`
+and `--check=pollution`.
 
-1. **Repair what's fixable:**
-   ```bash
-   bd doctor --fix
-   ```
-
-2. **Rebuild from remote:**
-   ```bash
-   rm -rf .beads/dolt
-   bd list                  # Re-triggers bootstrap
-   ```
+**Recovery:** `bd doctor --fix` does not rebuild a damaged store, and deleting
+the data directory destroys any work your remote or backups lack. Follow
+[Engine won't open](/recovery/database-corruption#engine-wont-open): preserve
+the damaged store and its configuration first, then recover into a fresh store
+from a Dolt remote, a Dolt-native backup, or a JSONL export.
 
 ### Already Committed `.beads/dolt/` to Git
 
@@ -452,6 +746,11 @@ dolt:
 | `DOLT_REMOTE_USER` | Clone/push/pull auth user |
 | `DOLT_REMOTE_PASSWORD` | Clone/push/pull auth password |
 | `BD_DOLT_AUTO_COMMIT` | Override auto-commit setting |
+
+**Note:** `BEADS_DOLT_SERVER_PORT` (and the legacy `BEADS_DOLT_PORT`) do more
+than name a port — setting either also marks the workspace as an
+externally-managed server and suppresses auto-start. See **Server Mode**
+above.
 
 ### Credentials File
 
@@ -625,6 +924,56 @@ bd dolt status
 bd dolt show
 ```
 
+#### Durability and Dolt history
+
+Saving a write and recording it in Dolt history are separate steps:
+
+- **SQL commit (saved).** When a `bd` write succeeds, its SQL transaction has
+  committed and Dolt has synced it to the shared server's local data
+  directory through its chunk journal. With supported journal-backed Dolt and
+  the journal left at its default (enabled), the write survives the server
+  being killed (SIGKILL, out-of-memory, an ungraceful logout) and is there
+  after the next start. Surviving power loss also depends on the filesystem
+  and device honoring sync. A write still in an open transaction when the
+  server dies is lost, as in any database.
+- **Dolt commit (history).** A Dolt commit records saved changes in version
+  history: what `bd history` shows and what `bd dolt push` sends. With
+  `dolt.auto-commit` set to `batch` or `off`, saved changes wait in the working
+  set (`bd doctor` reports them under "Dolt Status") until you record them
+  yourself:
+
+  ```bash
+  bd dolt commit -m "record pending changes"
+  ```
+
+  A graceful `bd dolt stop` also records them, best-effort. A crash does not
+  discard them: they are still pending after the restart.
+
+A local commit of either kind is not a backup. To keep a copy off the
+machine, push history to a remote, or point `bd backup` at a separate or
+off-machine destination: run `bd backup init <path-or-url>` once, then
+`bd backup sync`. Only `bd backup sync` writes to that destination, so run it
+again to bring the copy up to date.
+
+bd does not turn on Dolt's `behavior.dolt_transaction_commit`, and saving
+writes does not need it. It would turn every SQL transaction into its own Dolt
+commit: history grows faster, Dolt's generic transaction commits take the
+place of bd's per-command messages and authors, and `batch` and `off` modes
+stop batching.
+
+**Server config file.** For a server bd launches with its default
+configuration, bd writes the shared server's config to
+`~/.beads/shared-server/dolt-server-config.yaml` and passes it with
+`--config`. bd rewrites it on every start, so edits to it do not last. With a
+Dolt too old for that config, bd passes command-line flags instead, and Dolt
+then writes a template to `~/.beads/shared-server/dolt/config.yaml` that
+records those flag values and leaves its other settings commented out. The
+bd-launched server does not read that template, so its server settings have no
+effect. bd itself still reads the template's `listener.port` when it resolves
+the shared server's port: after `BEADS_DOLT_SERVER_PORT` and bd's port file,
+ahead of `dolt.port` in config.yaml. Servers you configure and run yourself
+(external or proxied) use whatever config you give them.
+
 ### Data Location (Orchestrator)
 
 ```
@@ -651,10 +1000,13 @@ explicitly with `--config <file>`.
 
 #### Setup with a Custom LaunchAgent
 
-Install Dolt and initialize its data directory:
+Install Dolt and initialize its data directory. Check the installed version
+against [the pin](#which-dolt-version-to-install) — Homebrew's formula is not
+pinned:
 
 ```bash
 brew install dolt
+dolt version
 cd /opt/homebrew/var/dolt && dolt init
 ```
 

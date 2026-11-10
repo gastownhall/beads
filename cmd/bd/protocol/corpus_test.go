@@ -19,15 +19,21 @@ var updateCorpus = flag.Bool("corpus.update", false, "regenerate the committed g
 
 const corpusGeneratedBy = "cmd/bd/protocol TestCorpusGolden"
 
-// generateCorpus runs the PLAN in a FRESH workspace for one envelope mode and
-// returns name -> canonicalized blob bytes. Each mode (and each call) gets its
-// own isolated store because the create/dep steps are stateful and cannot
-// repeat in a single database.
-func generateCorpus(t *testing.T, envelope bool) map[string][]byte {
+type captureResult struct {
+	stdout   []byte
+	exitCode int
+	execErr  error
+}
+
+type captureRunner func(envelope bool, capture Capture) captureResult
+
+// newLiveCaptureRunner adapts one fresh subprocess workspace to captureRunner.
+// The corpus PLAN is stateful, so a runner owns exactly one workspace and a
+// separate runner is required for every independent corpus generation.
+func newLiveCaptureRunner(t *testing.T) captureRunner {
 	t.Helper()
 	w := newWorkspace(t)
-	out := make(map[string][]byte)
-	for _, c := range CorpusPlan() {
+	return func(envelope bool, c Capture) captureResult {
 		env := w.env()
 		if envelope {
 			env = append(env, "BD_JSON_ENVELOPE=1")
@@ -37,30 +43,41 @@ func generateCorpus(t *testing.T, envelope bool) map[string][]byte {
 		cmd.Env = env
 		var stdout bytes.Buffer
 		cmd.Stdout = &stdout // stdout only: bd writes human error banners to stderr
-		runErr := cmd.Run()  // keep the exit status: it is itself part of the pinned contract
+		runErr := cmd.Run()
+		result := captureResult{stdout: stdout.Bytes()}
+		if runErr == nil {
+			return result
+		}
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			result.exitCode = exitErr.ExitCode()
+			return result
+		}
+		result.execErr = runErr
+		return result
+	}
+}
 
-		// Validate the exit status BEFORE canonicalizing: every capture but the
-		// error capture must succeed, and the error capture must fail with bd's
-		// not-found exit code. Discarding this let a "successful" command exit
-		// non-zero (or the error capture stop failing) slip through, leaving the
-		// exit-codes-and-errors contract the error blob claims (CATALOG.md)
-		// unpinned even though its stdout still looked right.
-		if err := checkCaptureExit(c.Name, runErr); err != nil {
-			t.Fatalf("capture %q (envelope=%v): %v", c.Name, envelope, err)
+// generateCorpus runs the exact corpus PLAN through runner for one envelope
+// mode and returns name -> canonicalized blob bytes.
+func generateCorpus(envelope bool, runner captureRunner) (map[string][]byte, error) {
+	out := make(map[string][]byte)
+	for _, c := range CorpusPlan() {
+		result := runner(envelope, c)
+		if err := checkCaptureExit(c.Name, result); err != nil {
+			return nil, fmt.Errorf("capture %q (envelope=%v): %w", c.Name, envelope, err)
 		}
 
-		canon, err := CanonicalizeJSON(stdout.Bytes())
+		canon, err := CanonicalizeJSON(result.stdout)
 		if err != nil {
-			t.Fatalf("canonicalize %s (envelope=%v): %v\nraw stdout:\n%s", c.Name, envelope, err, stdout.Bytes())
+			return nil, fmt.Errorf("canonicalize %s (envelope=%v): %w\nraw stdout:\n%s", c.Name, envelope, err, result.stdout)
 		}
-		// Guard against silently baking a failure into the corpus: only the
-		// dedicated error capture may be an error envelope.
 		if c.Name != errorCaptureName && isErrorEnvelope(canon, envelope) {
-			t.Fatalf("capture %q (envelope=%v) produced an error envelope, not real output:\n%s\n(check the bd command in CorpusPlan)", c.Name, envelope, canon)
+			return nil, fmt.Errorf("capture %q (envelope=%v) produced an error envelope, not real output:\n%s\n(check the bd command in CorpusPlan)", c.Name, envelope, canon)
 		}
 		out[c.Name] = canon
 	}
-	return out
+	return out, nil
 }
 
 // isErrorEnvelope reports whether a canonicalized blob is bd's {error, ...}
@@ -94,70 +111,51 @@ func isErrorEnvelope(blob []byte, envelope bool) bool {
 // a downstream consumer's error classifier keys off of.
 const errorCaptureExitCode = 1
 
-// checkCaptureExit validates a capture's subprocess exit status against the
+// checkCaptureExit validates a capture result's exit status against the
 // corpus contract, so the exit-codes-and-errors coverage CATALOG.md claims is
-// actually enforced instead of silently discarded. runErr is cmd.Run()'s
-// result. Every capture except errorCaptureName must exit 0 (success); the error
-// capture must exit non-zero with errorCaptureExitCode (bd's not-found path). It
-// returns a descriptive error instead of failing the test directly, so the rule
-// is unit-testable without a live bd (TestCheckCaptureExit) and lives in one
-// place the generation loop runs for every capture — a new capture cannot bypass
-// exit-status validation.
-func checkCaptureExit(name string, runErr error) error {
+// actually enforced instead of silently discarded. Every capture except
+// errorCaptureName must exit 0; the error capture must exit with
+// errorCaptureExitCode. It returns a descriptive error instead of failing the
+// test directly, so the rule is unit-testable without a live bd and every PLAN
+// capture passes through the same validation.
+func checkCaptureExit(name string, result captureResult) error {
+	if result.execErr != nil {
+		return fmt.Errorf("capture execution failed: %w", result.execErr)
+	}
 	if name == errorCaptureName {
-		var exitErr *exec.ExitError
-		if !errors.As(runErr, &exitErr) {
-			return fmt.Errorf("error capture must exit non-zero via *exec.ExitError, got %T: %v", runErr, runErr)
-		}
-		if got := exitErr.ExitCode(); got != errorCaptureExitCode {
+		if got := result.exitCode; got != errorCaptureExitCode {
 			return fmt.Errorf("error capture exit code = %d, want %d (bd not-found contract)", got, errorCaptureExitCode)
 		}
 		return nil
 	}
-	if runErr != nil {
-		return fmt.Errorf("capture must exit 0 (success), but the command failed: %v", runErr)
+	if result.exitCode != 0 {
+		return fmt.Errorf("capture exit code = %d, want 0 (success)", result.exitCode)
 	}
 	return nil
 }
 
 func TestCheckCaptureExit(t *testing.T) {
-	// Genuine *exec.ExitError values can only come from a real process (their
-	// fields are unexported). CI is ubuntu-latest and the protocol harness already
-	// shells out to git/go, so a POSIX shell is present; skip if it somehow is not
-	// rather than fail spuriously.
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skipf("sh not available: %v", err)
-	}
-	exitErr := func(code int) error {
-		err := exec.Command("sh", "-c", fmt.Sprintf("exit %d", code)).Run()
-		var ee *exec.ExitError
-		if !errors.As(err, &ee) {
-			t.Fatalf("sh -c 'exit %d': want *exec.ExitError, got %T: %v", code, err, err)
-		}
-		return err
-	}
-
 	tests := []struct {
 		desc    string
 		capture string
-		runErr  error
+		result  captureResult
 		wantErr bool
 	}{
-		{"success capture, exit 0", "show", nil, false},
-		{"success capture, non-zero exit", "show", exitErr(1), true},
-		{"error capture, expected exit code", errorCaptureName, exitErr(errorCaptureExitCode), false},
-		{"error capture, exit 0", errorCaptureName, nil, true},
-		{"error capture, wrong non-zero code", errorCaptureName, exitErr(errorCaptureExitCode + 1), true},
-		{"error capture, never started (not an ExitError)", errorCaptureName, errors.New("exec: not started"), true},
+		{"success capture, exit 0", "show", captureResult{}, false},
+		{"success capture, non-zero exit", "show", captureResult{exitCode: 1}, true},
+		{"error capture, expected exit code", errorCaptureName, captureResult{exitCode: errorCaptureExitCode}, false},
+		{"error capture, exit 0", errorCaptureName, captureResult{}, true},
+		{"error capture, wrong non-zero code", errorCaptureName, captureResult{exitCode: errorCaptureExitCode + 1}, true},
+		{"execution failed", "show", captureResult{execErr: errors.New("exec: not started")}, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			err := checkCaptureExit(tc.capture, tc.runErr)
+			err := checkCaptureExit(tc.capture, tc.result)
 			if tc.wantErr && err == nil {
-				t.Fatalf("checkCaptureExit(%q, %v) = nil, want error", tc.capture, tc.runErr)
+				t.Fatalf("checkCaptureExit(%q, %#v) = nil, want error", tc.capture, tc.result)
 			}
 			if !tc.wantErr && err != nil {
-				t.Fatalf("checkCaptureExit(%q, %v) = %v, want nil", tc.capture, tc.runErr, err)
+				t.Fatalf("checkCaptureExit(%q, %#v) = %v, want nil", tc.capture, tc.result, err)
 			}
 		})
 	}
@@ -176,7 +174,12 @@ func TestCorpusGolden(t *testing.T) {
 
 	blobs := make(map[string]map[string][]byte, len(modes))
 	for _, m := range modes {
-		blobs[m.name] = generateCorpus(t, m.envelope)
+		runner := newLiveCaptureRunner(t)
+		generated, err := generateCorpus(m.envelope, runner)
+		if err != nil {
+			t.Fatalf("generate %s corpus: %v", m.name, err)
+		}
+		blobs[m.name] = generated
 	}
 
 	dir := filepath.Join("testdata", "corpus")

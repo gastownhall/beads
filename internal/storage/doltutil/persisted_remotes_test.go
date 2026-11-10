@@ -3,7 +3,11 @@ package doltutil
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // PersistedRemotes must distinguish three states (bd-6dnrw.33): definitely no
@@ -54,10 +58,82 @@ func TestPersistedRemotes(t *testing.T) {
 		}
 	})
 
+	t.Run("git_ref parameter is surfaced as Ref", func(t *testing.T) {
+		dir := writeState(t, `{"remotes":{
+			"branch":{"name":"branch","url":"git+https://example.com/repo.git","fetch_specs":["refs/heads/*:refs/remotes/branch/*"],"params":{"git_ref":"refs/heads/issue-data"}},
+			"plain":{"name":"plain","url":"file:///tmp/p","fetch_specs":["refs/heads/*:refs/remotes/plain/*"],"params":{}},
+			"unit":{"name":"unit","url":"git+file:///srv/ledgers","fetch_specs":["refs/heads/*:refs/remotes/unit/*"],"params":{"git_ref":"refs/dolt/units/team-12542"}}
+		}}`)
+		remotes, err := PersistedRemotes(dir)
+		if err != nil {
+			t.Fatalf("PersistedRemotes: %v", err)
+		}
+		want := map[string]string{"branch": "refs/heads/issue-data", "plain": "", "unit": "refs/dolt/units/team-12542"}
+		if len(remotes) != len(want) {
+			t.Fatalf("PersistedRemotes = %+v, want %d remotes", remotes, len(want))
+		}
+		for _, r := range remotes {
+			if r.Ref != want[r.Name] {
+				t.Errorf("remote %s: Ref = %q, want %q", r.Name, r.Ref, want[r.Name])
+			}
+		}
+		if got, _ := FindCLIRemoteRef(dir, "unit"); got != "refs/dolt/units/team-12542" {
+			t.Errorf("FindCLIRemoteRef(unit) = %q", got)
+		}
+		if got, _ := FindCLIRemoteRef(dir, "plain"); got != "" {
+			t.Errorf("FindCLIRemoteRef(plain) = %q, want empty", got)
+		}
+		if got, _ := FindCLIRemoteRef(dir, "absent"); got != "" {
+			t.Errorf("FindCLIRemoteRef(absent) = %q, want empty", got)
+		}
+	})
+
+	// The dolt CLI records its aws-* and oss-* options beside git_ref, and an
+	// add over SQL cannot set them: they are named apart from the ref, so a
+	// re-registration can tell it would erase them.
+	t.Run("parameters other than git_ref are named as CLIOnlyParams", func(t *testing.T) {
+		dir := writeState(t, `{"remotes":{
+			"awsr":{"name":"awsr","url":"aws://[tbl:bucket]/db","fetch_specs":[],"params":{"aws-region":"us-west-2","aws-creds-type":"file","aws-creds-file":"/x/creds"}},
+			"branch":{"name":"branch","url":"git+https://example.com/repo.git","fetch_specs":[],"params":{"git_ref":"refs/heads/issue-data"}},
+			"plain":{"name":"plain","url":"file:///tmp/p","fetch_specs":[],"params":{}}
+		}}`)
+		remotes, err := PersistedRemotes(dir)
+		if err != nil {
+			t.Fatalf("PersistedRemotes: %v", err)
+		}
+		want := []storage.RemoteInfo{
+			{Name: "awsr", URL: "aws://[tbl:bucket]/db", CLIOnlyParams: []string{"aws-creds-file", "aws-creds-type", "aws-region"}},
+			{Name: "branch", URL: "git+https://example.com/repo.git", Ref: "refs/heads/issue-data"},
+			{Name: "plain", URL: "file:///tmp/p"},
+		}
+		if !reflect.DeepEqual(remotes, want) {
+			t.Fatalf("PersistedRemotes = %+v, want %+v", remotes, want)
+		}
+	})
+
 	t.Run("corrupt state file is an error, not silently none", func(t *testing.T) {
 		dir := writeState(t, `{"remotes": not-json`)
 		if _, err := PersistedRemotes(dir); err == nil {
 			t.Fatal("PersistedRemotes on corrupt repo_state.json = nil error, want error")
+		}
+	})
+
+	// A git_ref of the wrong JSON type is "could not tell" too, not "no ref":
+	// silently reading it as the default is what would re-add a remote that is
+	// pinned to a custom ref onto refs/dolt/data.
+	t.Run("a git_ref that is not a string is an error", func(t *testing.T) {
+		dir := writeState(t, `{"remotes":{
+			"unit":{"name":"unit","url":"git+file:///srv/ledgers","fetch_specs":[],"params":{"git_ref":["refs/dolt/units/team-12542"]}}
+		}}`)
+		remotes, err := PersistedRemotes(dir)
+		if err == nil {
+			t.Fatalf("PersistedRemotes with a non-string git_ref = %+v, nil; want an error", remotes)
+		}
+		if !strings.Contains(err.Error(), "unit") {
+			t.Errorf("error %q does not name the remote", err)
+		}
+		if _, err := FindCLIRemoteRef(dir, "unit"); err == nil {
+			t.Error("FindCLIRemoteRef with a non-string git_ref = nil error, want the read error")
 		}
 	})
 }

@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -17,6 +18,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/steveyegge/beads/internal/execenv"
+	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -255,14 +258,38 @@ func (s *DoltStore) decryptPassword(encrypted []byte) (string, error) {
 	key := s.credentialKey
 	s.mu.RUnlock()
 	if key == nil {
+		// Deliberately not a key mismatch: the key was never initialized on
+		// this store, so the fix is init or file permissions, not re-adding
+		// the peer. Labeling it a mismatch would prescribe the wrong action.
 		return "", fmt.Errorf("credential encryption key not initialized")
 	}
-	return decryptWithKey(encrypted, key)
+	plaintext, err := decryptWithKey(encrypted, key)
+	if err != nil {
+		// federation_peers rows travel with the database, the key file does
+		// not, so a database opened on a second machine reaches here with a
+		// key that cannot read the stored password. Enrich at this single
+		// decrypt funnel, as embeddeddolt does, so every reader reports the
+		// credential problem rather than a bare cipher error. decryptWithKey
+		// stays unwrapped for the key-rotation path, which reads old keys on
+		// purpose and must not report a rotation miss as a mismatch. Name the
+		// resolved path rather than the bare filename: initCredentialKey looks
+		// this same basename up under both beadsDir and the legacy dbPath, so
+		// during the migration window two files carrying different keys can
+		// share the name and the bare one does not say which is meant.
+		return "", storage.CredentialKeyMismatchError(filepath.Join(s.beadsDir, credentialKeyFile), err)
+	}
+	return plaintext, nil
 }
 
 // AddFederationPeer adds or updates a federation peer with credentials.
 // This stores credentials in the database and also adds the Dolt remote.
 func (s *DoltStore) AddFederationPeer(ctx context.Context, peer *storage.FederationPeer) error {
+	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		return s.addFederationPeer(ctx, peer)
+	})
+}
+
+func (s *DoltStore) addFederationPeer(ctx context.Context, peer *storage.FederationPeer) error {
 	// Validate peer name
 	if err := validatePeerName(peer.Name); err != nil {
 		return fmt.Errorf("invalid peer name: %w", err)
@@ -346,7 +373,9 @@ func (s *DoltStore) GetFederationPeer(ctx context.Context, name string) (*storag
 		}
 		peer.Password, err = s.decryptPassword(encryptedPwd)
 		if err != nil {
-			return nil, fmt.Errorf("failed to decrypt password: %w", err)
+			// decryptPassword already classifies the local-key case; name the
+			// peer and preserve the sentinel for errors.Is/As.
+			return nil, fmt.Errorf("failed to decrypt password for peer %s: %w", name, err)
 		}
 	}
 
@@ -389,7 +418,9 @@ func (s *DoltStore) ListFederationPeers(ctx context.Context) ([]*storage.Federat
 			}
 			peer.Password, err = s.decryptPassword(encryptedPwd)
 			if err != nil {
-				return nil, fmt.Errorf("failed to decrypt password: %w", err)
+				// Same as GetFederationPeer: the funnel classified it, the
+				// caller only names which peer failed.
+				return nil, fmt.Errorf("failed to decrypt password for peer %s: %w", peer.Name, err)
 			}
 		}
 
@@ -444,36 +475,29 @@ func (c *remoteCredentials) applyToCmd(cmd *exec.Cmd) {
 	if c.empty() {
 		return
 	}
-	// Start with current process env, filtering out any existing credential vars
+	cmd.Env = c.childEnv(os.Environ())
+}
+
+func (c *remoteCredentials) childEnv(base []string) []string {
+	// Start with the base environment, filtering out any existing credential vars
 	// to prevent stale values from leaking into the subprocess.
-	env := make([]string, 0, len(os.Environ())+2)
-	for _, e := range os.Environ() {
-		if !strings.HasPrefix(e, "DOLT_REMOTE_USER=") && !strings.HasPrefix(e, "DOLT_REMOTE_PASSWORD=") {
-			env = append(env, e)
-		}
-	}
+	env := execenv.Without(base, "DOLT_REMOTE_USER", "DOLT_REMOTE_PASSWORD")
 	if c.username != "" {
 		env = append(env, "DOLT_REMOTE_USER="+c.username)
 	}
 	if c.password != "" {
 		env = append(env, "DOLT_REMOTE_PASSWORD="+c.password)
 	}
-	cmd.Env = env
+	return env
 }
 
 func setCmdEnv(cmd *exec.Cmd, key, value string) {
-	prefix := key + "="
 	base := cmd.Env
 	if base == nil {
 		base = os.Environ()
 	}
-	env := make([]string, 0, len(base)+1)
-	for _, e := range base {
-		if !strings.HasPrefix(e, prefix) {
-			env = append(env, e)
-		}
-	}
-	cmd.Env = append(env, prefix+value)
+	env := execenv.Without(base, key)
+	cmd.Env = append(env, key+"="+value)
 }
 
 func applyS3ChecksumEnvToCmd(cmd *exec.Cmd) {
@@ -498,15 +522,42 @@ func applyS3ChecksumEnvToCmd(cmd *exec.Cmd) {
 // skip them. Same intent as the `--no-verify` fix on the commit side
 // (GH#3340 / GH#3598 / PR #3626), applied at the push site (GH#3724).
 func applyNoGitHooksToCmd(cmd *exec.Cmd) {
-	setCmdEnv(cmd, "GIT_CONFIG_PARAMETERS", "'core.hooksPath=/dev/null'")
+	base := cmd.Env
+	if base == nil {
+		base = os.Environ()
+	}
+	// Append rather than replace: a caller that set its own
+	// GIT_CONFIG_PARAMETERS (a test harness pinning user.email, say) would
+	// otherwise have it silently dropped by this call.
+	cmd.Env = githooksenv.DisabledEnv(base)
+}
+
+// saveEnv captures the current state of key and returns a function that puts
+// it back: a value that was set is restored, one that was unset is unset
+// again. Callers mutate key between the capture and the restore, so the pair
+// must bracket a single operation.
+func saveEnv(key string) func() {
+	prev, had := os.LookupEnv(key)
+	return func() {
+		if had {
+			_ = os.Setenv(key, prev) // Best effort: Setenv failure is extremely rare in practice
+		} else {
+			_ = os.Unsetenv(key)
+		}
+	}
 }
 
 // setFederationCredentials sets DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD env vars.
-// Returns a cleanup function that must be called (typically via defer) to unset them.
+// Returns a cleanup function that must be called (typically via defer) to put the
+// prior environment back. Unsetting unconditionally would destroy an ambient
+// credential pair the caller never owned, so the prior state is captured first
+// and restored in reverse order; nothing the operation set survives cleanup.
 // The caller must hold federationEnvMutex.
 // Only used for SQL-path operations where the in-process Dolt server reads from
 // the process environment. CLI operations should use remoteCredentials.applyToCmd instead.
 func setFederationCredentials(username, password string) func() {
+	restoreUser := saveEnv("DOLT_REMOTE_USER")
+	restorePassword := saveEnv("DOLT_REMOTE_PASSWORD")
 	if username != "" {
 		_ = os.Setenv("DOLT_REMOTE_USER", username) // Best effort: Setenv failure is extremely rare in practice
 	}
@@ -514,27 +565,23 @@ func setFederationCredentials(username, password string) func() {
 		_ = os.Setenv("DOLT_REMOTE_PASSWORD", password) // Best effort: Setenv failure is extremely rare in practice
 	}
 	return func() {
-		_ = os.Unsetenv("DOLT_REMOTE_USER")     // Best effort cleanup of auth env vars
-		_ = os.Unsetenv("DOLT_REMOTE_PASSWORD") // Best effort cleanup of auth env vars
+		restorePassword()
+		restoreUser()
 	}
 }
 
 func setS3ChecksumEnv() func() {
-	prev, hadPrev := os.LookupEnv(awsResponseChecksumValidationEnv)
+	restore := saveEnv(awsResponseChecksumValidationEnv)
 	_ = os.Setenv(awsResponseChecksumValidationEnv, "when_required")
-	return func() {
-		if hadPrev {
-			_ = os.Setenv(awsResponseChecksumValidationEnv, prev)
-		} else {
-			_ = os.Unsetenv(awsResponseChecksumValidationEnv)
-		}
-	}
+	return restore
 }
 
 func withRemoteOperationEnv(creds *remoteCredentials, s3Checksum bool, fn func() error) error {
 	if creds.empty() && !s3Checksum {
 		return fn()
 	}
+	// The cleanup defer below must stay registered after this Unlock defer, so
+	// the env restores run before the mutex is released.
 	federationEnvMutex.Lock()
 	defer federationEnvMutex.Unlock()
 
@@ -545,6 +592,11 @@ func withRemoteOperationEnv(creds *remoteCredentials, s3Checksum bool, fn func()
 	if s3Checksum {
 		cleanups = append(cleanups, setS3ChecksumEnv())
 	}
+	// Registered after the Unlock defer, so the restores complete before the
+	// mutex is released and no other operation that takes federationEnvMutex
+	// observes a half-restored env. Ambient readers that take no lock (the
+	// config load in store.go, bootstrap.go, internal/remotecache) are outside
+	// that guarantee.
 	defer func() {
 		for i := len(cleanups) - 1; i >= 0; i-- {
 			cleanups[i]()
@@ -563,14 +615,36 @@ func withEnvCredentials(creds *remoteCredentials, fn func() error) error {
 	return withRemoteOperationEnv(creds, false, fn)
 }
 
+// isMissingFederationPeer reports whether err means no federation_peers row
+// exists for the name (credential-free remote). Other errors remain fatal.
+func isMissingFederationPeer(err error) bool {
+	return err != nil && errors.Is(err, storage.ErrNotFound)
+}
+
 // withPeerCredentials looks up credentials for a federation peer and passes
 // them to fn. The callback receives the credentials and is responsible for
 // applying them appropriately: CLI operations use creds.applyToCmd for
 // subprocess isolation; SQL operations use withEnvCredentials for mutex-protected
 // process env access.
+//
+// A missing federation_peers row (storage.ErrNotFound) is treated as empty
+// credentials, not a hard failure. Credential-free Dolt remotes (add-peer
+// without --user, or bootstrap via sync.remote) never create a peer row, but
+// still need status/fetch/pull/push via normal Dolt credential discovery
+// (GH#4837). Malformed, decryption, and database errors remain fatal.
+//
+// An unknown peer name (a mistyped --peer) is therefore passed through too:
+// without a row it looks the same as a credential-free remote, so Dolt rejects
+// it with its own remote error. A name check added in front of this must
+// consult PersistedRemoteInfos as well as ListRemotes, or it rejects a remote
+// persisted on disk that a cold sql-server does not list yet (GH#2118).
 func (s *DoltStore) withPeerCredentials(ctx context.Context, peerName string, fn func(creds *remoteCredentials) error) error {
 	peer, err := s.GetFederationPeer(ctx, peerName)
 	if err != nil {
+		if isMissingFederationPeer(err) {
+			// No peer-specific SQL credentials stored — proceed without them.
+			return fn(nil)
+		}
 		return fmt.Errorf("failed to get peer credentials: %w", err)
 	}
 
@@ -608,7 +682,7 @@ func (s *DoltStore) prepareCLIRouteForPeerCredentials(ctx context.Context, peer 
 	}
 	for _, r := range remotes {
 		if r.Name == peer {
-			if err := s.ensureMatchingCLIRemote(peer, r.URL); err != nil {
+			if err := s.ensureMatchingCLIRemote(peer, r.URL, r.Ref); err != nil {
 				return false, fmt.Errorf("peer remote %q has credentials and requires CLI routing: %w", peer, err)
 			}
 			return true, nil
@@ -658,7 +732,7 @@ func (s *DoltStore) prepareCLIRouteForCredentials(ctx context.Context, remote st
 	}
 	for _, r := range remotes {
 		if r.Name == remote {
-			if err := s.ensureMatchingCLIRemote(remote, r.URL); err != nil {
+			if err := s.ensureMatchingCLIRemote(remote, r.URL, r.Ref); err != nil {
 				return false, fmt.Errorf("remote %q has credentials and requires CLI routing: %w", remote, err)
 			}
 			return true, nil
@@ -684,7 +758,7 @@ func (s *DoltStore) shouldUseCLIForLocalRemoteWithError(ctx context.Context, rem
 	}
 	for _, r := range sqlRemotes {
 		if r.Name == remote {
-			return s.hasMatchingCLIRemote(remote, r.URL), nil
+			return s.hasMatchingCLIRemote(remote, r.URL, r.Ref), nil
 		}
 	}
 	return false, nil
@@ -777,10 +851,11 @@ func (s *DoltStore) prepareCLIRouteForCloudAuth(ctx context.Context, remote stri
 	if err != nil {
 		return false, fmt.Errorf("list Dolt remotes before cloud-auth routing for remote %q: %w", remote, err)
 	}
-	var remoteURL string
+	var remoteURL, remoteRef string
 	for _, r := range remotes {
 		if r.Name == remote {
 			remoteURL = r.URL
+			remoteRef = r.Ref
 			break
 		}
 	}
@@ -791,19 +866,52 @@ func (s *DoltStore) prepareCLIRouteForCloudAuth(ctx context.Context, remote stri
 	if len(prefixes) == 0 {
 		return false, nil // unknown scheme — not a cloud remote
 	}
-	for _, e := range os.Environ() {
-		for _, prefix := range prefixes {
-			if strings.HasPrefix(e, prefix) {
-				if err := s.ensureMatchingCLIRemote(remote, remoteURL); err != nil {
-					return false, fmt.Errorf("remote %q has cloud credentials and requires CLI routing: %w", remote, err)
-				}
-				return true, nil
-			}
+	if execenv.ContainsKeyWithPrefix(os.Environ(), prefixes...) {
+		if err := s.ensureMatchingCLIRemote(remote, remoteURL, remoteRef); err != nil {
+			return false, fmt.Errorf("remote %q has cloud credentials and requires CLI routing: %w", remote, err)
 		}
+		return true, nil
 	}
 	return false, nil
 }
 
 func (s *DoltStore) shouldUseCLIForCloudAuthWithError(ctx context.Context, remote string) (bool, error) {
 	return s.prepareCLIRouteForCloudAuth(ctx, remote)
+}
+
+// serverEnvCredentialsNote completes the error of a push that failed on the
+// SQL route when this bd holds the remote's credentials. In server mode CALL
+// DOLT_PUSH runs in the Dolt server's process, which takes DOLT_REMOTE_PASSWORD
+// (for the remote user bd passes) and the cloud-storage variables of the
+// remote URL's scheme (cloudAuthSchemeMap) from its own environment: bd sets
+// them only in its own process (withRemoteOperationEnv), which a server bd
+// does not run never sees. The note names the ones bd holds, so a push that a
+// server without them refuses says where they must be set. It is empty when
+// bd holds none, and in embedded mode, where the push runs in this process.
+func (s *DoltStore) serverEnvCredentialsNote(ctx context.Context, remote string, creds *remoteCredentials) string {
+	if !s.serverMode {
+		return ""
+	}
+	var held []string
+	if creds != nil && creds.username != "" && creds.password != "" {
+		held = append(held, "DOLT_REMOTE_PASSWORD")
+	}
+	if remotes, err := s.ListRemotes(ctx); err == nil {
+		for _, r := range remotes {
+			if r.Name != remote {
+				continue
+			}
+			for _, prefix := range envPrefixesForRemoteURL(r.URL) {
+				// DOLT_REMOTE_ is the credential pair itself, named above
+				// when the push passes its user.
+				if prefix != "DOLT_REMOTE_" && execenv.ContainsKeyWithPrefix(os.Environ(), prefix) {
+					held = append(held, prefix+"*")
+				}
+			}
+		}
+	}
+	if len(held) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("; CALL DOLT_PUSH runs in the Dolt server's process, which takes %s from its own environment, not from bd's", strings.Join(held, " and "))
 }

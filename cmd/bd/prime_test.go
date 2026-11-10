@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,12 @@ import (
 // containing "git pull" fails the stealth-mode rejectText assertions. CI never
 // sees the leak because its checkouts have no ancestor database.
 //
+// The stub reports ErrNoBeadsDatabase, i.e. "there is no workspace here" — the
+// one memory-read failure prime still passes over in silence. Any other error
+// would (correctly, since gh#5877) render the storage-unavailable banner into
+// every one of these tests' output, and whether it did would depend on the
+// runner's ancestor directories.
+//
 // Returns a function to restore the original store wiring.
 // Usage:
 //
@@ -33,7 +40,7 @@ func stubPrimeStoreUnavailable() func() {
 	store = nil
 	storeActive = false
 	ensureStoreActiveForPrime = func(context.Context) error {
-		return errors.New("prime store stubbed out in test")
+		return fmt.Errorf("prime store stubbed out in test: %w", ErrNoBeadsDatabase)
 	}
 	return func() {
 		store = origStore
@@ -390,6 +397,44 @@ func TestPrimeClaimGuidanceUsesAtomicClaim(t *testing.T) {
 	}
 }
 
+// TestPrimeMemoryGuidanceDoesNotProhibitHarnessMemory guards GH#6111: both
+// renderings used to emit "Do NOT use MEMORY.md files", which contradicts
+// harnesses that ship a first-party memory whose index file has exactly that
+// name. The guidance now names the store each content class belongs in, so
+// neither rendering may name the file again. The assertion is negative on the
+// old prohibition rather than positive on the new prose, so it survives any
+// future rewording; the bd remember check keeps it from passing vacuously if
+// the memory bullet is dropped altogether.
+func TestPrimeMemoryGuidanceDoesNotProhibitHarnessMemory(t *testing.T) {
+	defer stubPrimeStoreUnavailable()()
+	defer stubIsEphemeralBranch(false)()
+	defer stubPrimeHasGitRemote(true)()
+	defer stubPrimeAgentProfile(config.ProfileConservative)()
+
+	for _, tc := range []struct {
+		name    string
+		mcpMode bool
+	}{
+		{name: "CLI", mcpMode: false},
+		{name: "MCP", mcpMode: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := outputPrimeContext(&buf, tc.mcpMode, false); err != nil {
+				t.Fatalf("outputPrimeContext failed: %v", err)
+			}
+
+			output := buf.String()
+			if !strings.Contains(output, "bd remember") {
+				t.Fatalf("prime output should still teach bd remember; output:\n%s", output)
+			}
+			if strings.Contains(output, "MEMORY.md") {
+				t.Errorf("prime output should not name MEMORY.md; output:\n%s", output)
+			}
+		})
+	}
+}
+
 func TestPrimeStartsWithTruncationDirective(t *testing.T) {
 	defer stubPrimeStoreUnavailable()()
 	defer stubIsEphemeralBranch(false)()
@@ -445,6 +490,179 @@ func TestFormatMemoriesForPrimeTimesOutOpeningStore(t *testing.T) {
 	}
 	if !strings.Contains(out, "stale storage lock") {
 		t.Fatalf("expected stale-lock guidance in prime memory output, got %q", out)
+	}
+}
+
+// TestFormatMemoriesForPrimeTimesOutOpeningRegisteredBackend is the unstubbed
+// twin of TestFormatMemoriesForPrimeTimesOutOpeningStore, which replaces
+// ensureStoreActiveForPrime and so cannot see how the real open frames its
+// error. Here the real open dials a registered remote backend that outlives
+// BEADS_PRIME_TIMEOUT, and the timeout banner must still win over the generic
+// "storage unavailable" one.
+func TestFormatMemoriesForPrimeTimesOutOpeningRegisteredBackend(t *testing.T) {
+	const backend = "contract-prime-open-timeout"
+	registerContractBlockingBackend(t, backend, true)
+	t.Setenv("BEADS_DIR", writeContractBackendConfig(t, backend))
+	t.Setenv(primeStoreTimeoutEnv, "50ms")
+	oldStore := store
+	oldStoreActive := storeActive
+	oldEnsure := ensureStoreActiveForPrime
+	oldProxied := proxiedServerMode
+	store = nil
+	storeActive = false
+	ensureStoreActiveForPrime = ensureStoreActiveWithContext
+	proxiedServerMode = false
+	t.Cleanup(func() {
+		store = oldStore
+		storeActive = oldStoreActive
+		ensureStoreActiveForPrime = oldEnsure
+		proxiedServerMode = oldProxied
+	})
+
+	out := formatMemoriesForPrime(false)
+	if !strings.Contains(out, "timed out after 50ms") {
+		t.Fatalf("expected the store-open timeout banner in prime memory output, got %q", out)
+	}
+}
+
+// stubPrimeStoreOpen points prime's lazy store open at the given error and
+// clears the ambient store, so a test drives formatMemoriesForPrime through a
+// chosen failure edge. proxiedServerMode is forced off so the classic route is
+// the one under test regardless of ambient wiring.
+func stubPrimeStoreOpen(t *testing.T, err error) {
+	t.Helper()
+	oldStore := store
+	oldStoreActive := storeActive
+	oldEnsure := ensureStoreActiveForPrime
+	oldProxied := proxiedServerMode
+	store = nil
+	storeActive = false
+	proxiedServerMode = false
+	ensureStoreActiveForPrime = func(context.Context) error { return err }
+	t.Cleanup(func() {
+		store = oldStore
+		storeActive = oldStoreActive
+		ensureStoreActiveForPrime = oldEnsure
+		proxiedServerMode = oldProxied
+	})
+}
+
+// TestFormatMemoriesForPrimeReportsUnavailableStore is the gh#5877 regression:
+// a broken or unreachable store used to make prime omit the memory section
+// entirely, so "no memories" and "memory plane down" produced identical output
+// and an identical exit 0. The failure must now announce itself.
+func TestFormatMemoriesForPrimeReportsUnavailableStore(t *testing.T) {
+	openErr := fmt.Errorf("failed to open database: dial tcp 127.0.0.1:3308: connect: connection refused\nHint: run bd doctor")
+
+	tests := []struct {
+		name    string
+		compact bool
+		header  string
+	}{
+		{name: "full", compact: false, header: "## Persistent Memories\n\nSkipped: beads storage unavailable ("},
+		{name: "compact", compact: true, header: "## Memories\n- Skipped: beads storage unavailable ("},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stubPrimeStoreOpen(t, openErr)
+
+			out := formatMemoriesForPrime(tt.compact)
+			for _, want := range []string{tt.header, "connection refused", "were NOT injected this session", "bd doctor"} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("prime memory output missing %q, got %q", want, out)
+				}
+			}
+			if strings.Contains(out, "Hint: run bd doctor") {
+				t.Fatalf("multi-line store error leaked past the first line into prime output: %q", out)
+			}
+		})
+	}
+}
+
+// A workspace-less directory is the one failure prime still swallows: there is
+// nothing to inject and nothing is wrong, so a fresh checkout gets no banner.
+func TestFormatMemoriesForPrimeStaysSilentWithoutWorkspace(t *testing.T) {
+	stubPrimeStoreOpen(t, fmt.Errorf("%w.\nHint: run 'bd init'", ErrNoBeadsDatabase))
+
+	for _, compact := range []bool{false, true} {
+		if out := formatMemoriesForPrime(compact); out != "" {
+			t.Fatalf("formatMemoriesForPrime(compact=%v) = %q, want silence when no workspace is resolved", compact, out)
+		}
+	}
+}
+
+func TestFormatPrimeMemoryUnavailable(t *testing.T) {
+	tests := []struct {
+		name    string
+		compact bool
+		err     error
+		want    []string
+		reject  []string
+	}{
+		{
+			name:    "full shape",
+			compact: false,
+			err:     errors.New("connection refused"),
+			want: []string{
+				"\n## Persistent Memories\n\nSkipped: beads storage unavailable (connection refused) — persistent memories were NOT injected this session.",
+				"if the store is a Dolt server, check it is running and reachable.",
+			},
+		},
+		{
+			name:    "compact shape",
+			compact: true,
+			err:     errors.New("connection refused"),
+			want:    []string{"\n## Memories\n- Skipped: beads storage unavailable (connection refused) — persistent memories were NOT injected this session."},
+			reject:  []string{"## Persistent Memories"},
+		},
+		{
+			name:    "nil error still says injection did not run",
+			compact: false,
+			err:     nil,
+			want:    []string{"(unknown error)", "NOT injected"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := formatPrimeMemoryUnavailable(tt.compact, tt.err)
+			for _, want := range tt.want {
+				if !strings.Contains(out, want) {
+					t.Fatalf("banner missing %q, got %q", want, out)
+				}
+			}
+			for _, reject := range tt.reject {
+				if strings.Contains(out, reject) {
+					t.Fatalf("banner unexpectedly contains %q, got %q", reject, out)
+				}
+			}
+			if !strings.HasSuffix(out, "\n") {
+				t.Fatalf("banner must end in a newline so the next section starts cleanly, got %q", out)
+			}
+		})
+	}
+}
+
+func TestPrimeErrorSummary(t *testing.T) {
+	long := strings.Repeat("é", primeMemoryErrorMaxLen*2)
+
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "nil", err: nil, want: "unknown error"},
+		{name: "blank", err: errors.New("  \n  "), want: "unknown error"},
+		{name: "single line", err: errors.New("connection refused"), want: "connection refused"},
+		{name: "first line only", err: errors.New("open failed: boom\nHint: run bd doctor\nmore detail"), want: "open failed: boom"},
+		{name: "whitespace collapsed", err: errors.New("open   failed:\tboom"), want: "open failed: boom"},
+		{name: "capped", err: errors.New(long), want: strings.Repeat("é", primeMemoryErrorMaxLen) + "…"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := primeErrorSummary(tt.err); got != tt.want {
+				t.Fatalf("primeErrorSummary() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -662,5 +880,50 @@ func TestPrime_RawMarkdown_NotJSON_WithoutFlag(t *testing.T) {
 	var envelope map[string]interface{}
 	if err := json.Unmarshal([]byte(output), &envelope); err == nil {
 		t.Fatal("prime output without --hook-json should not be valid JSON (regression guard)")
+	}
+}
+
+// GH#6095: bd prime --help must document all three PRIME.md resolution
+// tiers (current-directory, resolved workspace .beads, global config) in
+// their actual lookup order, not just the first tier.
+func TestPrimeHelpMentionsAllFallbackTiers(t *testing.T) {
+	// Each needle carries its (N) label so that swapping only the labels,
+	// not the descriptions, is caught by the presence check below: the swap
+	// drives every strings.Index to -1, which the ordering loop explicitly
+	// skips.
+	needles := []string{
+		"(1) .beads/PRIME.md relative to the current directory",
+		"(2) PRIME.md in the .beads directory bd resolves for this workspace",
+		"(3) the global PRIME.md in bd's user config dir",
+	}
+	positions := make([]int, len(needles))
+	for i, needle := range needles {
+		pos := strings.Index(primeCmd.Long, needle)
+		if pos == -1 {
+			t.Errorf("prime help missing %q", needle)
+		}
+		positions[i] = pos
+	}
+	for i := 1; i < len(positions); i++ {
+		if positions[i-1] == -1 || positions[i] == -1 {
+			continue
+		}
+		if positions[i] <= positions[i-1] {
+			t.Errorf("prime help documents fallback tiers out of order: %q at %d should come before %q at %d", needles[i-1], positions[i-1], needles[i], positions[i])
+		}
+	}
+
+	// Tier (3) resolves via os.UserConfigDir(), whose location differs per
+	// platform. The help text is static, so it must spell out every OS's
+	// path rather than pinning one platform's spelling as if it were
+	// universal.
+	for _, configDirPath := range []string{
+		"~/.config/beads/",
+		"~/Library/Application Support/beads/",
+		`%AppData%\beads\`,
+	} {
+		if !strings.Contains(primeCmd.Long, configDirPath) {
+			t.Errorf("prime help tier (3) missing user config dir path %q", configDirPath)
+		}
 	}
 }

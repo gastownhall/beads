@@ -1,9 +1,151 @@
 package db
 
 import (
+	"strings"
+	"testing"
+
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// TestBuildDescendantsCTEResolvesEveryDepTargetColumn binds the walk's edge
+// members to sqlbuild.DepTargetExpr, the single source of truth for how a
+// dependency row's parent is resolved across the three typed target columns.
+//
+// The two expressions drifted before be-qfm: the edge members named only
+// depends_on_issue_id and depends_on_wisp_id, so a parent recorded in
+// depends_on_external (a cross-prefix or foreign-repo parent) coalesced to NULL
+// and GetDescendants could never match the edge — while the classic ParentID
+// filter this walk mirrors (sqlbuild/filter.go:176, built on DepTargetExpr) did
+// match it. Deriving the expected column set from DepTargetExpr rather than
+// restating it is what makes this test fail if a fourth target column is ever
+// added there without being threaded through here. No database required: the
+// builder is a pure function of its arguments.
+func TestBuildDescendantsCTEResolvesEveryDepTargetColumn(t *testing.T) {
+	t.Parallel()
+
+	cols := depTargetColumns(t)
+	// Both dependency-table aliases the walk joins its edge members through.
+	// Each contributes one anchor member and one recursive member.
+	const membersPerAlias = 2
+
+	for _, walkWisps := range []bool{false, true} {
+		aliases := []string{"d"}
+		if walkWisps {
+			aliases = append(aliases, "wd")
+		}
+
+		cte, _ := buildDescendantsCTE("root-1", walkWisps, predBundle{}, predBundle{})
+
+		wantTotal := 0
+		for _, alias := range aliases {
+			qualified := make([]string, 0, len(cols))
+			for _, col := range cols {
+				qualified = append(qualified, alias+"."+col)
+			}
+			want := "COALESCE(" + strings.Join(qualified, ", ") + ")"
+			if got := strings.Count(cte, want); got != membersPerAlias {
+				t.Errorf("walkWisps=%v: %q on %d edge members, want %d — the %s members do not resolve the parent the way sqlbuild.DepTargetExpr does:\n%s",
+					walkWisps, want, got, membersPerAlias, alias, cte)
+			}
+			wantTotal += membersPerAlias
+		}
+
+		// Every COALESCE in the CTE must be one of the fully-qualified forms
+		// asserted above; a surviving 2-of-3 form would otherwise pass the
+		// counts by sitting on a member the loop never names.
+		if got := strings.Count(cte, "COALESCE("); got != wantTotal {
+			t.Errorf("walkWisps=%v: %d COALESCE expressions, want %d — one resolves a different column set:\n%s",
+				walkWisps, got, wantTotal, cte)
+		}
+	}
+}
+
+// depTargetColumns is the column list inside sqlbuild.DepTargetExpr, in its
+// precedence order. Read from the exported origin rather than this package's
+// depTargetExpr alias so the assertion names the source of truth it binds to.
+func depTargetColumns(t *testing.T) []string {
+	t.Helper()
+
+	expr := sqlbuild.DepTargetExpr
+	inner, ok := strings.CutPrefix(expr, "COALESCE(")
+	if !ok {
+		t.Fatalf("DepTargetExpr is no longer a COALESCE expression: %q", expr)
+	}
+	inner, ok = strings.CutSuffix(inner, ")")
+	if !ok {
+		t.Fatalf("DepTargetExpr is not parenthesised: %q", expr)
+	}
+	cols := strings.Split(inner, ", ")
+	if len(cols) < 2 {
+		t.Fatalf("DepTargetExpr resolves %d column(s), expected the typed target set: %q", len(cols), expr)
+	}
+	return cols
+}
+
+// TestGetDescendantsCrossPrefixParent is the behavioural half of
+// TestBuildDescendantsCTEResolvesEveryDepTargetColumn: that test pins the
+// walk's query text, this one pins that the widened COALESCE matches real rows.
+// The write path classifies a target by prefix alone (issueops.IsExternalDepTarget),
+// so a parent-child edge between two prefixes lands in depends_on_external even
+// when both ends are local. Before be-qfm the walk coalesced only the issue and
+// wisp columns, so each child below — and its subtree — was missing from the
+// proxied `bd list --parent` tree. Each one is reached through a different edge
+// member (issues and wisps, anchor and recursive), so dropping the column from
+// any one member loses a different child.
+func (s *testSuite) TestGetDescendantsCrossPrefixParent() {
+	r := s.issueRepo()
+	deps := s.depRepo()
+
+	const (
+		root   = "zz-xp-root"
+		child  = "bd-xp-a" // issue under root: issues anchor member
+		wisp   = "bd-xp-w" // wisp under root: wisps anchor member
+		grand  = "zz-xp-b" // issue under child: issues recursive member
+		grandW = "zz-xp-v" // wisp under child: wisps recursive member
+	)
+	for _, id := range []string{root, child, grand} {
+		s.Require().NoError(r.Insert(s.Ctx(), newTestIssue(id, "xp "+id), "tester", domain.InsertIssueOpts{}))
+	}
+	for _, id := range []string{wisp, grandW} {
+		s.Require().NoError(r.Insert(s.Ctx(), newTestIssue(id, "xp "+id), "tester",
+			domain.InsertIssueOpts{UseWispsTable: true}))
+	}
+	for _, e := range []struct {
+		child, parent string
+		wisps         bool
+	}{
+		{child, root, false},
+		{wisp, root, true},
+		{grand, child, false},
+		{grandW, child, true},
+	} {
+		s.Require().NoError(deps.Insert(s.Ctx(),
+			&types.Dependency{IssueID: e.child, DependsOnID: e.parent, Type: types.DepParentChild},
+			"tester", domain.DepInsertOpts{UseWispsTable: e.wisps}))
+	}
+
+	// Were the classifier ever to route one of these edges to another column,
+	// the two-column walk would find that child too and the case would pin nothing.
+	for _, table := range []string{"dependencies", "wisp_dependencies"} {
+		rows := s.loadDepRows(table, "%-xp-%")
+		s.Require().Len(rows, 2, table)
+		for _, d := range rows {
+			s.Equal("depends_on_external", d.targetColumn(), "%s: %s -> %s", table, d.issueID, d.dependsOnID)
+		}
+	}
+
+	got, err := r.GetDescendants(s.Ctx(), root, types.IssueFilter{})
+	s.Require().NoError(err)
+
+	ids := make([]string, len(got))
+	for i, issue := range got {
+		ids[i] = issue.ID
+	}
+	s.ElementsMatch([]string{child, wisp, grand, grandW}, ids,
+		"every edge member must resolve a parent recorded in depends_on_external")
+}
 
 // bd-6dnrw.44 item 11: the descendants CTE walked only parent-child edges,
 // so children that exist purely by dotted-ID convention (classic ParentID

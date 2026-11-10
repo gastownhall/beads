@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -29,6 +30,12 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 // Delegates SQL work to issueops.AddDependencyInTx; handles Dolt versioning
 // and cache invalidation. EmitEvent records a dependency_added history event.
 func (s *DoltStore) AddDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, addOpts storage.DependencyAddOptions) error {
+	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		return s.addDependencyWithOptions(ctx, dep, actor, addOpts)
+	})
+}
+
+func (s *DoltStore) addDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, addOpts storage.DependencyAddOptions) error {
 	isCrossPrefix := isCrossPrefixDep(dep.IssueID, dep.DependsOnID)
 
 	// Route to wisp_dependencies if the source is an active wisp.
@@ -48,7 +55,7 @@ func (s *DoltStore) AddDependencyWithOptions(ctx context.Context, dep *types.Dep
 		}
 	}
 
-	var eventWritten bool
+	var written issueops.DependencyWriteResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		opts := issueops.AddDependencyOpts{
 			SourceTable:   "issues",
@@ -58,8 +65,10 @@ func (s *DoltStore) AddDependencyWithOptions(ctx context.Context, dep *types.Dep
 			TargetKind:    &kind,
 			EmitEvent:     addOpts.EmitEvent,
 		}
+		// Assigned, never merged: a retried attempt's verdict replaces the
+		// rolled-back one's.
 		var e error
-		eventWritten, e = issueops.AddDependencyInTx(ctx, tx, dep, actor, opts)
+		written, e = issueops.AddDependencyInTxWithResult(ctx, tx, dep, actor, opts)
 		return e
 	}); err != nil {
 		return err
@@ -68,10 +77,15 @@ func (s *DoltStore) AddDependencyWithOptions(ctx context.Context, dep *types.Dep
 	// Stage events only when AddDependencyInTx actually recorded a
 	// dependency_added event (explicit verb + genuine new edge). A structural or
 	// idempotent add writes no event, so staging events would sweep unrelated
-	// pending event rows into this dependency commit.
+	// pending event rows into this dependency commit. Stage issues only when
+	// the add flipped a durable is_blocked, so the flag rides the edge's
+	// commit (GH#6647) and a non-flipping add sweeps no pending issues edit.
 	tables := []string{"dependencies"}
-	if eventWritten {
+	if written.EventWritten {
 		tables = append(tables, "events")
+	}
+	if written.Blocked.IssueRowsChanged {
+		tables = append(tables, "issues")
 	}
 	return s.doltAddAndCommit(ctx, tables, "dependency: add "+string(dep.Type)+" "+dep.IssueID+" -> "+dep.DependsOnID)
 }
@@ -88,46 +102,84 @@ func (s *DoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID s
 // Delegates SQL work to issueops.RemoveDependencyInTx which handles wisp routing.
 // EmitEvent records a dependency_removed history event for the explicit dep verb.
 func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, dependsOnID string, actor string, rmOpts storage.DependencyRemoveOptions) error {
-	// Wisps live in dolt_ignored tables — skip Dolt versioning entirely.
-	if s.isActiveWisp(ctx, issueID) {
+	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		// Wisps live in dolt_ignored tables — skip Dolt versioning entirely.
+		if s.isActiveWisp(ctx, issueID) {
+			tx, err := s.db.BeginTx(ctx, nil)
+			if err != nil {
+				return fmt.Errorf("failed to begin transaction: %w", err)
+			}
+			defer func() { _ = tx.Rollback() }()
+			clearJournalScope := s.scopeEventsJournalTransaction(tx)
+			defer clearJournalScope()
+			// Scoped even though RecordVersionInTx returns early on IsWisp and
+			// can mint nothing here: the two arms below share one mutator, and
+			// a scope that is present on one arm only is the asymmetry this
+			// method's own history is made of. Uniform beats clever.
+			clearVersionScope, err := s.scopeVersionedHistoryTransaction(ctx, tx)
+			if err != nil {
+				return err
+			}
+			defer clearVersionScope()
+			clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+			defer clearRecheckScope()
+			written, err := issueops.RemoveDependencyInTxWithResult(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
+			if err != nil {
+				return err
+			}
+			return s.commitWispTxAndRecheck(ctx, "commit remove wisp dependency", tx,
+				wispDurable{issues: written.Blocked.IssueRowsChanged}, "dependency: remove "+issueID+" -> "+dependsOnID)
+		}
+
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("failed to begin transaction: %w", err)
 		}
 		defer func() { _ = tx.Rollback() }()
-		if _, err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent); err != nil {
+
+		clearJournalScope := s.scopeEventsJournalTransaction(tx)
+		defer clearJournalScope()
+		// The non-wisp arm: this removal mutates the issues plane, so the
+		// referencing issue must be versioned with it. RemoveDependencyInTx
+		// calls RecordVersionInTx on the row delete, and that seam no-ops
+		// unless activation is bound to THIS transaction.
+		clearVersionScope, err := s.scopeVersionedHistoryTransaction(ctx, tx)
+		if err != nil {
 			return err
 		}
-		return wrapTransactionError("commit remove wisp dependency", tx.Commit())
-	}
+		defer clearVersionScope()
+		clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
+		defer clearRecheckScope()
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
+		written, err := issueops.RemoveDependencyInTxWithResult(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
+		if err != nil {
+			return err
+		}
 
-	eventWritten, err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
-	if err != nil {
-		return err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("sql commit: %w", err)
-	}
-	// GH#2455: Use explicit DOLT_ADD to avoid sweeping up stale config changes.
-	// Stage events only when RemoveDependencyInTx actually recorded a
-	// dependency_removed event (explicit verb + genuine edge removal). A
-	// structural or missing-edge remove writes no event, so staging events would
-	// sweep unrelated pending event rows into this dependency commit.
-	tables := []string{"dependencies"}
-	if eventWritten {
-		tables = append(tables, "events")
-	}
-	if err := s.doltAddAndCommit(ctx, tables, "dependency: remove "+issueID+" -> "+dependsOnID); err != nil {
-		return err
-	}
-	return nil
+		if err := s.commitSQLTx(ctx, "sql commit", tx); err != nil {
+			return err
+		}
+		// The removal is durable; its dependents are settled after this
+		// removal's own Dolt commit so the recheck's commit follows it.
+		pending := issueops.TakeBlockedRecheck(tx)
+		defer s.settleBlockedRecheck(ctx, pending)
+		// GH#2455: Use explicit DOLT_ADD to avoid sweeping up stale config changes.
+		// Stage events only when RemoveDependencyInTx actually recorded a
+		// dependency_removed event (explicit verb + genuine edge removal). A
+		// structural or missing-edge remove writes no event, so staging events would
+		// sweep unrelated pending event rows into this dependency commit.
+		// Issues is staged when the removal's recompute changed a durable
+		// is_blocked, so the unblock rides this commit (GH#6647); the recheck
+		// below only settles concurrent-unblock races.
+		tables := []string{"dependencies"}
+		if written.EventWritten {
+			tables = append(tables, "events")
+		}
+		if written.Blocked.IssueRowsChanged {
+			tables = append(tables, "issues")
+		}
+		return s.doltAddAndCommit(ctx, tables, "dependency: remove "+issueID+" -> "+dependsOnID)
+	})
 }
 
 // GetDependencies retrieves issues that this issue depends on
@@ -303,6 +355,18 @@ func (s *DoltStore) GetAllDependencyRecords(ctx context.Context) (map[string][]*
 	return result, err
 }
 
+// GetExternalBlockingDependencyRecords returns explicit external blockers
+// without scanning unrelated graph edges.
+func (s *DoltStore) GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
+	var result map[string][]*types.Dependency
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetExternalBlockingDependencyRecordsInTx(ctx, tx)
+		return err
+	})
+	return result, err
+}
+
 // GetDependencyRecordsForIssues returns dependency records for specific issues.
 // Delegates to issueops.GetDependencyRecordsForIssuesInTx for shared query logic.
 func (s *DoltStore) GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error) {
@@ -379,6 +443,21 @@ func (s *DoltStore) IsBlocked(ctx context.Context, issueID string) (bool, []stri
 		return false, nil, fmt.Errorf("failed to check blockers: %w", err)
 	}
 	return blocked, blockers, nil
+}
+
+// IsBlockedWithBlockersBatch answers IsBlocked for every id in one read
+// transaction (storage.BlockersBatchStore).
+func (s *DoltStore) IsBlockedWithBlockersBatch(ctx context.Context, ids []string) (map[string][]string, error) {
+	var result map[string][]string
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.IsBlockedWithBlockersBatchInTx(ctx, tx, ids)
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to batch-check blockers: %w", err)
+	}
+	return result, nil
 }
 
 // IsBlockedBatch returns the denormalized transitive is_blocked flag for each id
@@ -504,4 +583,18 @@ func scanDependencyRow(rows *sql.Rows) (*types.Dependency, error) {
 	}
 
 	return &dep, nil
+}
+
+// RetiredIssueIDs returns which of ids a retaining retention sweep retired,
+// with the closed_at each tombstone recorded (issueops.RetiredIDsInTx). The
+// import dry run reads it so its preview skips a retired row as the real
+// import does.
+func (s *DoltStore) RetiredIssueIDs(ctx context.Context, ids []string) (map[string]time.Time, error) {
+	var retired map[string]time.Time
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		retired, err = issueops.RetiredIDsInTx(ctx, tx, ids)
+		return err
+	})
+	return retired, err
 }

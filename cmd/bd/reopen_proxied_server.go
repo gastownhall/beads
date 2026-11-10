@@ -4,163 +4,166 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/audit"
-	"github.com/steveyegge/beads/internal/hooks"
-	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/steveyegge/beads/issueops"
 )
 
-type reopenProxiedOutcome struct {
-	id          string
-	before      *types.Issue
-	after       *types.Issue
-	reopened    bool
-	auditOld    string
-	auditReason string
+// reopenProxiedTarget is one id that resolved, carrying the status it sat at
+// before the reopens ran.
+type reopenProxiedTarget struct {
+	id string
+	// status is the prior status, and it feeds the audit sidecar's old_value and
+	// nothing else. The role's result is a post-state snapshot with no prior
+	// status, and a constant "closed" is now wrong: a configured done status
+	// reopens here too.
+	status types.Status
 }
 
-type reopenProxiedTxResult struct {
-	outcomes []reopenProxiedOutcome
-	hasError bool
-	errors   []string
-}
-
-func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
+// runReopenProxiedServer reopens each id through issueops.Lifecycle — the same
+// role, reached through the same kind of accessor, that the direct route calls.
+// Nothing here decides what a reopen means.
+//
+// A CONFIGURED DONE STATUS NOW REOPENS. This route used to compare the current
+// status against literal StatusClosed and report "already <status>" for
+// anything else, so an issue parked on a custom done status could not be
+// reopened on a team server while the same command worked locally. The role
+// speaks in terms of the configured done CATEGORY
+// (issueops/issueops.go:417-420).
+//
+// ONE CALL PER ID, so one transaction and one history entry per id, where this
+// route used to run every id in one unit of work under a hand-composed
+// "bd: reopen a, b" message.
+func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []string, ifRevision *int64) error {
 	if len(args) == 0 {
 		return HandleErrorRespectJSON("no issue ID provided")
 	}
 	reason, _ := cmd.Flags().GetString("reason")
 	jsonOut, _ := cmd.Flags().GetBool("json")
 
-	if uowProvider == nil {
-		return HandleError("proxied-server UOW provider not initialized")
+	targets, hasError, err := reopenProxiedResolve(ctx, args, ifRevision)
+	if err != nil {
+		if isReportedExit(err) {
+			// The --if-revision guard outcome reopenProxiedResolve has
+			// already reported; re-wrapping would print a second Error line.
+			return err
+		}
+		return HandleErrorRespectJSON("%v", err)
+	}
+	if len(targets) == 0 {
+		if hasError {
+			return SilentExit()
+		}
+		return nil
 	}
 
-	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (reopenProxiedTxResult, string, error) {
-		var result reopenProxiedTxResult
-
-		for _, id := range args {
-			outcome, ok := reopenProxiedOne(ctx, uw, id, reason, &result.errors)
-			if !ok {
-				result.hasError = true
-				continue
-			}
-			if outcome.reopened {
-				result.outcomes = append(result.outcomes, outcome)
-			}
-		}
-
-		if len(result.outcomes) == 0 {
-			return result, "", nil
-		}
-
-		return result, reopenProxiedCommitMessage(result.outcomes), nil
-	})
+	lifecycle, err := proxiedIssueLifecycle()
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
 
-	for _, e := range res.errors {
-		fmt.Fprintln(os.Stderr, e)
-	}
-
-	for _, o := range res.outcomes {
-		if o.reopened {
-			audit.LogFieldChange(o.id, "status", o.auditOld, string(types.StatusOpen), actor, o.auditReason)
-		}
-		if err := fireProxiedReopenHooks(ctx, o.after); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: %s: %v\n", o.id, err)
-		}
-		if !jsonOut {
-			suffix := ""
-			if reason != "" {
-				suffix = ": " + reason
+	reopenedIssues := []*types.Issue{}
+	for _, target := range targets {
+		result, err := lifecycle.Reopen(ctx, issueops.ReopenRequest{
+			Actor:           currentActor(),
+			IssueID:         target.id,
+			Reason:          reason,
+			ExpectedVersion: ifRevision,
+			// The label the direct route spells, so one reopen reads the same
+			// in `bd dolt log` whichever route served it.
+			Provenance: "bd: reopen " + target.id,
+		})
+		if err != nil {
+			// Guarded only, as on the direct route: an unguarded reopen that
+			// loses a race with a delete is a lookup failure, not a refusal.
+			if ifRevision != nil {
+				if reported, ok := reportIfRevisionFailure("reopening", target.id, err, ifRevision); ok {
+					return reported
+				}
 			}
-			fmt.Printf("%s Reopened %s%s\n", ui.RenderAccent("↻"), o.id, suffix)
+			reportIssueLookupFailure("reopening", target.id, err)
+			hasError = true
+			continue
 		}
+		if !result.Changed {
+			// Read off the result rather than off the pre-read: the status the
+			// reopen left in place is the one the operation saw inside its own
+			// transaction.
+			fmt.Fprintln(os.Stderr, reopenNoOpMessage(target.id, reopenStatusOf(result.Issue, nil)))
+			continue
+		}
+
+		audit.LogFieldChange(target.id, "status", string(target.status), string(types.StatusOpen), currentActor(), reason)
+		if jsonOut {
+			if issue := result.Issue; issue != nil {
+				// `bd reopen` has never printed dependency records, on either
+				// route.
+				issue.Dependencies = nil
+				reopenedIssues = append(reopenedIssues, issue)
+			}
+			continue
+		}
+		suffix := ""
+		if reason != "" {
+			suffix = ": " + reason
+		}
+		fmt.Printf("%s Reopened %s%s\n", ui.RenderAccent("↻"), target.id, suffix)
 	}
 
-	if jsonOut && len(res.outcomes) > 0 {
-		reopenedIssues := make([]*types.Issue, len(res.outcomes))
-		for i, o := range res.outcomes {
-			reopenedIssues[i] = o.after
-		}
+	if jsonOut && len(reopenedIssues) > 0 {
 		_ = outputJSON(reopenedIssues)
 	}
 
-	if res.hasError {
+	if hasError {
 		return SilentExit()
 	}
 	return nil
 }
 
-func reopenProxiedOne(ctx context.Context, uw uow.UnitOfWork, id, reason string, errors *[]string) (reopenProxiedOutcome, bool) {
-	current, isWisp := proxiedResolveIssueOrWisp(ctx, uw, id)
-	if current == nil {
-		*errors = append(*errors, fmt.Sprintf("Issue %s not found", id))
-		return reopenProxiedOutcome{}, false
-	}
-	if current.Status != types.StatusClosed {
-		*errors = append(*errors, fmt.Sprintf("%s is already %s", id, current.Status))
-		return reopenProxiedOutcome{id: id, before: current, after: current, reopened: false}, true
-	}
-
-	params := domain.ReopenIssueParams{Reason: reason}
-	var (
-		res domain.ReopenIssueResult
-		err error
-	)
-	if isWisp {
-		res, err = uw.IssueUseCase().ReopenWisp(ctx, id, params, actor)
-	} else {
-		res, err = uw.IssueUseCase().ReopenIssue(ctx, id, params, actor)
-	}
-	if err != nil {
-		*errors = append(*errors, fmt.Sprintf("Error reopening %s: %v", id, err))
-		return reopenProxiedOutcome{}, false
-	}
-
-	oldStatus := string(current.Status)
-	if oldStatus == "" {
-		oldStatus = "closed"
-	}
-	return reopenProxiedOutcome{
-		id:          id,
-		before:      current,
-		after:       res.Issue,
-		reopened:    res.Reopened,
-		auditOld:    oldStatus,
-		auditReason: reason,
-	}, true
-}
-
-func reopenProxiedCommitMessage(outcomes []reopenProxiedOutcome) string {
-	ids := make([]string, 0, len(outcomes))
-	for _, o := range outcomes {
-		ids = append(ids, o.id)
-	}
-	return "bd: reopen " + strings.Join(ids, ", ")
-}
-
-func fireProxiedReopenHooks(ctx context.Context, after *types.Issue) error {
-	if after == nil {
-		return nil
-	}
-	runner, err := proxiedHookRunner(ctx)
-	if err != nil {
-		return fmt.Errorf("hook runner: %w", err)
-	}
-	if runner == nil {
-		return nil
-	}
-	if err := runner.RunSync(hooks.EventUpdate, after); err != nil {
-		return fmt.Errorf("on_update hook: %w", err)
-	}
-	return nil
+// reopenProxiedResolve resolves every id in ONE read-only unit of work and
+// reports the ones that did not resolve, returning the survivors with the
+// status each sat at.
+//
+// It exists for the two things the role's result cannot supply: the audit
+// sidecar's old_value, and the difference between an absent id and a backend
+// that failed to answer.
+//
+// It decides NOTHING about the reopen. A resolved id goes to the role whatever
+// status it is at, including a status this route used to refuse; every guard
+// that matters is inside the role's own transaction. The one outcome it reports
+// on the role's behalf is a guarded id that is already gone: that is the lost
+// delete race the role would otherwise classify, so the error is then the
+// --if-revision guard outcome it has already reported, which the caller
+// returns as the command's exit error.
+func reopenProxiedResolve(ctx context.Context, ids []string, ifRevision *int64) ([]reopenProxiedTarget, bool, error) {
+	var targets []reopenProxiedTarget
+	failed := false
+	_, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (struct{}, error) {
+		source := workapi.NewUOWDetailSource(uw)
+		for _, id := range ids {
+			issue, _, err := workapi.GetIssueOrWisp(ctx, source, id)
+			if err != nil {
+				// A guarded reopen that lost to a concurrent `bd delete`
+				// committing before this read is the same lost race as one
+				// committing inside lifecycle.Reopen: report it through the
+				// guard envelope. requireSingleIfRevisionID guarantees this
+				// is the only id, so nothing is pending.
+				if reported, ok := reportIfRevisionTargetGone("reopening", id, err, ifRevision); ok {
+					return struct{}{}, reported
+				}
+				reportIssueLookupFailure("resolving", id, err)
+				failed = true
+				continue
+			}
+			targets = append(targets, reopenProxiedTarget{id: id, status: issue.Status})
+		}
+		return struct{}{}, nil
+	})
+	return targets, failed, err
 }

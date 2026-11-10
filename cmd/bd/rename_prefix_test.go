@@ -4,11 +4,9 @@ package main
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -44,11 +42,7 @@ func TestRenamePrefixCommand(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
 
-	testStore, err := dolt.New(context.Background(), &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	defer testStore.Close()
+	testStore := newTestStore(t, dbPath)
 
 	ctx := context.Background()
 
@@ -172,14 +166,7 @@ func TestRenamePrefixInDB(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
 
-	testStore, err := dolt.New(context.Background(), &dolt.Config{Path: dbPath})
-	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
-	}
-	t.Cleanup(func() {
-		testStore.Close()
-		os.Remove(dbPath)
-	})
+	testStore := newTestStore(t, dbPath)
 
 	ctx := context.Background()
 	store = testStore
@@ -203,7 +190,7 @@ func TestRenamePrefixInDB(t *testing.T) {
 	}
 
 	issues := []*types.Issue{issue1}
-	err = renamePrefixInDB(ctx, "old", "new", issues)
+	err := renamePrefixInDB(ctx, "old", "new", issues)
 	if err != nil {
 		t.Fatalf("renamePrefixInDB failed: %v", err)
 	}
@@ -219,5 +206,62 @@ func TestRenamePrefixInDB(t *testing.T) {
 	}
 	if newIssue.ID != "new-1" {
 		t.Errorf("Expected ID 'new-1', got %q", newIssue.ID)
+	}
+}
+
+// TestRenamePrefixInDB_HalfMigratedConfigNotDoubled pins the actual GH#4827
+// recovery path at the DB layer: config says "global" but the row is
+// already "atlas-1" (a half-migrated database). renamePrefixInDB must leave
+// the row alone — not produce "atlas-atlas-1" — while still repairing the
+// config cell. See PR #5135 review (maphew, 2026-07-29).
+func TestRenamePrefixInDB_HalfMigratedConfigNotDoubled(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+
+	testStore := newTestStore(t, dbPath)
+
+	ctx := context.Background()
+	store = testStore
+	actor = "test-actor"
+
+	if err := testStore.SetConfig(ctx, "issue_prefix", "global"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	issue1 := &types.Issue{
+		ID:          "atlas-1",
+		Title:       "Already migrated",
+		Description: "Row is on the target prefix; config cell is stale",
+		Status:      types.StatusOpen,
+		Priority:    1,
+		IssueType:   types.TypeTask,
+	}
+	if err := testStore.CreateIssue(ctx, issue1, "test"); err != nil {
+		t.Fatalf("Failed to create issue: %v", err)
+	}
+
+	issues := []*types.Issue{issue1}
+	if err := renamePrefixInDB(ctx, "global", "atlas", issues); err != nil {
+		t.Fatalf("renamePrefixInDB failed: %v", err)
+	}
+
+	newPrefix, err := testStore.GetConfig(ctx, "issue_prefix")
+	if err != nil {
+		t.Fatalf("Failed to get new prefix: %v", err)
+	}
+	if newPrefix != "atlas" {
+		t.Errorf("Expected config prefix 'atlas', got %q", newPrefix)
+	}
+
+	survivingIssue, err := testStore.GetIssue(ctx, "atlas-1")
+	if err != nil {
+		t.Fatalf("Expected atlas-1 to survive unchanged, got error: %v", err)
+	}
+	if survivingIssue.ID != "atlas-1" {
+		t.Errorf("Expected surviving ID 'atlas-1', got %q", survivingIssue.ID)
+	}
+
+	if doubled, err := testStore.GetIssue(ctx, "atlas-atlas-1"); err == nil && doubled != nil {
+		t.Errorf("regression: found doubled ID 'atlas-atlas-1': %+v", doubled)
 	}
 }

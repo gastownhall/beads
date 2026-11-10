@@ -3,19 +3,30 @@ package main
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"fmt"
 	"math/rand"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/cmd/bd/setup"
 )
+
+type tipMetadataReader interface {
+	GetLocalMetadata(context.Context, string) (string, error)
+}
+
+type tipMetadataWriter interface {
+	SetLocalMetadata(context.Context, string, string) error
+}
+
+type tipMetadataStore interface {
+	tipMetadataReader
+	tipMetadataWriter
+}
 
 // Tip represents a contextual hint that can be shown to users after successful commands
 type Tip struct {
@@ -60,7 +71,7 @@ func initTipRand() {
 
 // maybeShowTip selects and displays an eligible tip based on priority and probability
 // Respects --json and --quiet flags
-func maybeShowTip(store storage.DoltStorage) {
+func maybeShowTip(store tipMetadataStore) {
 	// Skip tips in JSON output mode or quiet mode
 	if jsonOutput || quietFlag {
 		return
@@ -84,7 +95,7 @@ func maybeShowTip(store storage.DoltStorage) {
 
 // selectNextTip finds the next tip to show based on conditions, frequency, priority, and probability
 // Returns nil if no tip should be shown
-func selectNextTip(store storage.DoltStorage) *Tip {
+func selectNextTip(store tipMetadataReader) *Tip {
 	if store == nil {
 		return nil
 	}
@@ -134,7 +145,7 @@ func selectNextTip(store storage.DoltStorage) *Tip {
 
 // getLastShown retrieves the timestamp when a tip was last shown
 // Returns zero time if never shown
-func getLastShown(store storage.DoltStorage, tipID string) time.Time {
+func getLastShown(store tipMetadataReader, tipID string) time.Time {
 	key := fmt.Sprintf("tip_%s_last_shown", tipID)
 	value, err := store.GetLocalMetadata(context.Background(), key)
 	if err != nil || value == "" {
@@ -151,8 +162,16 @@ func getLastShown(store storage.DoltStorage, tipID string) time.Time {
 }
 
 // recordTipShown records the timestamp when a tip was shown
-func recordTipShown(store storage.DoltStorage, tipID string) {
+func recordTipShown(store tipMetadataWriter, tipID string) {
 	if store == nil || tipID == "" {
+		return
+	}
+
+	// dc-6jaq: with dolt auto-commit off this writes to the store immediately
+	// rather than deferring to PersistentPostRunE, so the freeze guard there
+	// does not cover it. Showing a tip is never worth a write into a workspace
+	// someone is migrating, and the tip itself still prints.
+	if commandFreeze.Frozen() {
 		return
 	}
 
@@ -271,96 +290,11 @@ func isClaudeDetected() bool {
 	return false
 }
 
-// isClaudeSetupComplete checks if the beads Claude integration is properly configured.
-// Returns true if the beads plugin is installed (provides hooks via plugin.json),
-// or if hooks were manually installed via 'bd setup claude'.
+// isClaudeSetupComplete reports whether a Claude Code session started in the
+// current directory runs bd prime, from the beads plugin or a hook, as
+// bd setup claude --check reports it there (setup.ClaudeHooksInstalled).
 func isClaudeSetupComplete() bool {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return false
-	}
-
-	// Check if beads plugin is installed - plugin now provides hooks automatically
-	settingsPath := filepath.Join(home, ".claude", "settings.json")
-	// #nosec G304 - path is constructed from user home directory
-	if data, err := os.ReadFile(settingsPath); err == nil {
-		var settings map[string]interface{}
-		if err := json.Unmarshal(data, &settings); err == nil {
-			if enabledPlugins, ok := settings["enabledPlugins"].(map[string]interface{}); ok {
-				for key, value := range enabledPlugins {
-					if strings.Contains(strings.ToLower(key), "beads") {
-						if enabled, ok := value.(bool); ok && enabled {
-							return true // Plugin installed - provides hooks
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Check for manual hooks installation via 'bd setup claude'
-	// Global hooks in settings.json
-	if hasBeadsPrimeHooks(settingsPath) {
-		return true
-	}
-
-	// Project-level hooks in .claude/settings.local.json
-	localSettingsPath := filepath.Join(home, ".claude", "settings.local.json")
-	if hasBeadsPrimeHooks(localSettingsPath) {
-		return true
-	}
-
-	return false
-}
-
-// hasBeadsPrimeHooks checks if a settings file has bd prime hooks configured
-func hasBeadsPrimeHooks(settingsPath string) bool {
-	// #nosec G304 - path is constructed from user home directory
-	data, err := os.ReadFile(settingsPath)
-	if err != nil {
-		return false
-	}
-
-	var settings map[string]interface{}
-	if err := json.Unmarshal(data, &settings); err != nil {
-		return false
-	}
-
-	hooks, ok := settings["hooks"].(map[string]interface{})
-	if !ok {
-		return false
-	}
-
-	// Check SessionStart and PreCompact for "bd prime"
-	for _, event := range []string{"SessionStart", "PreCompact"} {
-		eventHooks, ok := hooks[event].([]interface{})
-		if !ok {
-			continue
-		}
-
-		for _, hook := range eventHooks {
-			hookMap, ok := hook.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			commands, ok := hookMap["hooks"].([]interface{})
-			if !ok {
-				continue
-			}
-			for _, cmd := range commands {
-				cmdMap, ok := cmd.(map[string]interface{})
-				if !ok {
-					continue
-				}
-				cmdStr, _ := cmdMap["command"].(string)
-				if cmdStr == "bd prime" || cmdStr == "bd prime --stealth" {
-					return true
-				}
-			}
-		}
-	}
-
-	return false
+	return setup.ClaudeHooksInstalled(".")
 }
 
 // initDefaultTips registers the built-in tips.
