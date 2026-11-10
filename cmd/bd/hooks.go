@@ -1980,7 +1980,9 @@ func exportJSONLForCommit() {
 	// Run from the project root, not .beads/. Embedded Dolt discovery starts
 	// from cwd, so cwd=.beads/ can make the export subprocess look for a
 	// nested .beads/.beads workspace and warn on every commit (GH#3454).
-	cmd := exec.Command("bd", "export", "-o", fullPath)
+	// The child is this bd, not PATH's: an older bd earlier on git's PATH
+	// cannot open the database this one wrote (GH#5922).
+	cmd := exec.Command(hookSubprocessBinary(), "export", "-o", fullPath)
 	cmd.Dir = exportSubprocessDir(beadsDir)
 	cmd.Env = hookSubprocessEnv(os.Environ())
 	cmd.Stderr = os.Stderr
