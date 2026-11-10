@@ -77,6 +77,7 @@ var uncoveredRequestFields = map[string]string{
 	"issueops.ReadyRequest.Unassigned":            waiveReadyFilter,
 	"issueops.UpdateItem.ForceAssigneeTransfer":   waiveBatchItem,
 	"issueops.UpdateItem.ForceNotesOverwrite":     waiveBatchItem,
+	"issueops.UpdateRequest.ForceClaimBlocked":    "the --force claim override and its contract case land with bd-ltvqa9 AC-3",
 	"issueops.WaitsFor.Gate":                      waiveCreateEdge,
 }
 

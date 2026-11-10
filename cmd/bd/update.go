@@ -607,6 +607,9 @@ pointless).`,
 				if refusal, ok := templateReadOnlyRefusal(id, updateErr); ok {
 					failureText = refusal.Error()
 					fmt.Fprintf(os.Stderr, "%s\n", refusal)
+				} else if refusal, ok := claimBlockedRefusal(updateErr); ok {
+					failureText = refusal.Error()
+					fmt.Fprintf(os.Stderr, "%s\n", refusal)
 				} else if errors.Is(updateErr, issueops.ErrNotesOverwrite) {
 					// The contract's AuthorizeNotesOverwrite fence refused
 					// inside the mutation transaction. Print the advice, not
@@ -885,6 +888,25 @@ func replacesExistingNotes(existing string, fields map[string]any) bool {
 // sentinel into this advice.
 func errNotesOverwriteRefusal(id string) error {
 	return fmt.Errorf("%s: --notes would replace existing notes; use --force to overwrite (or --append-notes to preserve history)", id)
+}
+
+// claimBlockedRefusal is the user-facing refusal both `bd update` routes print
+// when the lifecycle refuses a claim because the issue still has a live local
+// blocker (issueops.ErrClaimBlocked): the engine's own "<sentinel>: <id> is
+// blocked by [<blockers>]" plus the --force hint, which that refusal honors.
+// The external-dependency guard's claim refusal wraps ErrCloseBlocked instead
+// and is not matched here: --force cannot waive it, so it gets no hint.
+func claimBlockedRefusal(err error) (error, bool) {
+	if !errors.Is(err, issueops.ErrClaimBlocked) {
+		return nil, false
+	}
+	// Print the typed refusal itself when it is there, so a route that wrapped
+	// it with context still reads the same as one that did not.
+	var blocked *issueops.BlockedError
+	if errors.As(err, &blocked) {
+		err = blocked
+	}
+	return fmt.Errorf("%w (use --force to override)", err), true
 }
 
 // warnNotesReplacement fires only after a successful overwrite, which since
