@@ -566,6 +566,7 @@
 40 32 TestEventsJournal_EmbeddedConcurrentGaplessNoDup
 40 32 TestGetNextChildID
 40 32 TestRemoteVerbPlainRemoteKeepsAmbientEnv
+40 32 TestRowVersionContract
 40 32 TestWithPeerAuth_MissingRemoteFailsClosed
 
 40 33 TestEmbeddedBatchCloserDuplicateItemRecloseAtItsOwnIndex

@@ -138,7 +138,10 @@ func RepoFingerprint(path string, autoYes bool) error {
 		if cfgErr != nil || cfg == nil {
 			cfg = configfile.DefaultConfig()
 		}
-		dbPath := cfg.DatabasePath(beadsDir)
+		dbPath, err := confinedDatabasePath(beadsDir, cfg.DatabasePath(beadsDir))
+		if err != nil {
+			return err
+		}
 		isDolt := cfg.GetBackend() == configfile.BackendDolt
 
 		// Confirm before destructive action

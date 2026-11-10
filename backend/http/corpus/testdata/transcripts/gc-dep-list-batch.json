@@ -1,0 +1,9 @@
+{
+  "shape": "gc-dep-list-batch",
+  "requests": [
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-blk","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-mol.2","status":200},
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"listDependencies","path":"/v0/beads/dependencies","query":["issue_id"],"status":200}
+  ]
+}
