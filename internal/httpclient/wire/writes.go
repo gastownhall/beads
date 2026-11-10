@@ -464,6 +464,13 @@ type ApplyUpdateItem struct {
 	// force_notes_overwrite exactly as it publishes the other two, and it is
 	// sent only when true, the same as them.
 	ForceNotesOverwrite *bool `json:"force_notes_overwrite,omitempty"`
+	// AllowTemplate is the template stand-down, the per-item spelling of
+	// updateIssue's own member (GH#5637): `bd set-state` composes its label
+	// swap, event and edge as one all-or-nothing request, so the waiver a
+	// template subject needs rides the update item. Sent only when true, and
+	// only to a server advertising CapBatchApplyUpdateAllowTemplate —
+	// batchapplier.go refuses the waiver before the dial otherwise.
+	AllowTemplate *bool `json:"allow_template,omitempty"`
 }
 
 // ApplyItem is one item of a plan: a `kind` and exactly one payload naming it.

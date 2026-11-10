@@ -9179,6 +9179,11 @@ components:
             `PATCH /v0/beads/issues/{id}` accepts `allow_template` (see
             `UpdateIssueRequest`) rather than a `400` naming the member
             unknown, and
+            `issues.batchApply.updateAllowTemplate`, which announces that an
+            `update` item on `POST /v0/beads/issues:batchApply` accepts
+            `allow_template` (see `ApplyUpdateItem`), the per-item spelling of
+            the member above, rather than a `400` naming the member
+            unknown, and
             `issues.update.persistence`, which announces that
             `PATCH /v0/beads/issues/{id}` accepts a `persistence` member in
             its `patch` (see `IssuePatchBody`), the plane move behind
@@ -11612,6 +11617,21 @@ components:
             exemption: there is no compare-and-set that authorizes a notes
             overwrite, so combining the two is legal and each answers its own
             question.
+        allow_template:
+          type: boolean
+          default: false
+          description: >-
+            The caller edits a template deliberately, so the template read-only
+            refusal (`409 template_read_only`) stands down for THIS item — the
+            per-item spelling of `updateIssue`'s `allow_template`, which `bd
+            set-state` rides to swap a template's labels as one all-or-nothing
+            request with the event it creates and the edge that links them
+            (GH#5637). It bypasses nothing else, has no effect on an issue that
+            is not a template, and a false or absent value is the guard's
+            default. Advertised by the `issues.batchApply.updateAllowTemplate`
+            capability token; a server that predates the member refuses it as an
+            unknown parameter, and a client that does not see the token must
+            refuse the waiver before the dial rather than send the member.
 
     ApplyPatchBody:
       type: object

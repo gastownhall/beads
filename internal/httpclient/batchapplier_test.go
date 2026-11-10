@@ -1093,3 +1093,86 @@ func TestApplyBatchRefusesUnservedDepAddLineageBeforeDialing(t *testing.T) {
 		}
 	})
 }
+
+// TestApplyBatchRefusesUnservedUpdateAllowTemplateBeforeDialing is the
+// issues.batchApply.updateAllowTemplate gate (GH#5637): an update item's
+// AllowTemplate is the batch's spelling of updateIssue's template stand-down,
+// so a plan carrying it must never reach a server that has not advertised the
+// token — an older server would refuse the member as an unknown parameter
+// AFTER the client had already lost the chance to say so locally, and (worse,
+// once a server knows the member but this gate were skipped) the waiver could
+// silently do less than the caller asked. The gate scopes the WAIVER, not the
+// operation: a plan whose update items carry no waiver dials a token-less
+// server unchanged, and false is the default said twice — omitted, never sent.
+func TestApplyBatchRefusesUnservedUpdateAllowTemplateBeforeDialing(t *testing.T) {
+	updatePlan := func(allow bool) issueops.ApplyBatchRequest {
+		return issueops.ApplyBatchRequest{
+			Actor: "planner",
+			Items: []issueops.ApplyItem{{Kind: issueops.ItemUpdate, Update: &issueops.UpdateItem{
+				Target:        issueops.Ref{ID: "bd-1"},
+				Patch:         issueops.IssuePatch{Title: issueops.Field[string]{Set: true, Value: "edited"}},
+				AllowTemplate: allow,
+			}}},
+		}
+	}
+
+	t.Run("the waiver against a token-less server refuses before the dial", func(t *testing.T) {
+		masked := &apigen.ContextResponse{BdVersion: "1.2.3"} // no CapBatchApplyUpdateAllowTemplate
+		w := &stubWire{}
+		_, err := applyRoleWithSnapshot(t, w, masked).ApplyBatch(t.Context(), updatePlan(true))
+		if err == nil {
+			t.Fatal("ApplyBatch returned no error, want a pre-dial capability refusal")
+		}
+		var unsup *storage.ErrUnsupported
+		if !errors.As(err, &unsup) {
+			t.Fatalf("errors.As to *storage.ErrUnsupported failed for %v", err)
+		}
+		if unsup.Capability != wire.CapBatchApplyUpdateAllowTemplate {
+			t.Errorf("Capability = %q, want %q", unsup.Capability, wire.CapBatchApplyUpdateAllowTemplate)
+		}
+		if len(w.calls) != 0 {
+			t.Errorf("dialed %d times, want 0: a pre-dial refusal must never reach the wire", len(w.calls))
+		}
+	})
+
+	t.Run("the token carries the waiver to the wire", func(t *testing.T) {
+		serving := &apigen.ContextResponse{
+			BdVersion:    "1.2.3",
+			Capabilities: []string{wire.CapBatchApplyUpdateAllowTemplate},
+		}
+		w := &stubWire{}
+		if _, err := applyRoleWithSnapshot(t, w, serving).ApplyBatch(t.Context(), updatePlan(true)); err != nil {
+			t.Fatalf("ApplyBatch with the token advertised: %v", err)
+		}
+		got := w.lastApply.Items[0].Update
+		if got == nil || got.AllowTemplate == nil || !*got.AllowTemplate {
+			t.Errorf("the encoded update item = %+v, want allow_template: true sent to the serving server", got)
+		}
+	})
+
+	t.Run("false is the default said twice and is omitted", func(t *testing.T) {
+		serving := &apigen.ContextResponse{
+			BdVersion:    "1.2.3",
+			Capabilities: []string{wire.CapBatchApplyUpdateAllowTemplate},
+		}
+		w := &stubWire{}
+		if _, err := applyRoleWithSnapshot(t, w, serving).ApplyBatch(t.Context(), updatePlan(false)); err != nil {
+			t.Fatalf("ApplyBatch without the waiver: %v", err)
+		}
+		got := w.lastApply.Items[0].Update
+		if got == nil || got.AllowTemplate != nil {
+			t.Errorf("the encoded update item = %+v, want allow_template omitted when the waiver is not asked for", got)
+		}
+	})
+
+	t.Run("a plan without the waiver still dials the token-less server", func(t *testing.T) {
+		masked := &apigen.ContextResponse{BdVersion: "1.2.3"} // no CapBatchApplyUpdateAllowTemplate
+		w := &stubWire{}
+		if _, err := applyRoleWithSnapshot(t, w, masked).ApplyBatch(t.Context(), updatePlan(false)); err != nil {
+			t.Fatalf("ApplyBatch without the waiver against a token-less server: %v", err)
+		}
+		if len(w.calls) == 0 {
+			t.Error("the plan never reached the wire, want a dial: the gate scopes the waiver, not the operation")
+		}
+	})
+}

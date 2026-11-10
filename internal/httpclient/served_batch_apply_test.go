@@ -253,6 +253,16 @@ func TestServedBatchApplyUpdateItemsRefuseATemplate(t *testing.T) {
 	conformance.RunBatchApplyUpdateItemsRefuseATemplate(t, t.Context(), newServedBatchApplyFixture(t, "hbatu"))
 }
 
+// The waiver half of the case above, over the wire: the update item's
+// AllowTemplate travels as `allow_template` (behind
+// issues.batchApply.updateAllowTemplate, checked before the dial), so the
+// served leg proves the member survives encode, decode and the template guard
+// — and that a false/absent member still refuses, exactly as the in-tree legs
+// pin.
+func TestServedBatchApplyAllowTemplateWaivesTheTemplateGuardOnTheUpdateItem(t *testing.T) {
+	conformance.RunBatchApplyAllowTemplateWaivesTheTemplateGuardOnTheUpdateItem(t, t.Context(), newServedBatchApplyFixture(t, "hbauw"))
+}
+
 // TestServedBatchApplySplicesTheMetadataOfATemplateItCreates is PARKED: a create
 // item cannot make a template over the v0 wire (ApplyCreateItem publishes no
 // is_template member), so the client refuses the plan before the splice could

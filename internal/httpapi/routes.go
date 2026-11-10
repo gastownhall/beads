@@ -300,11 +300,25 @@ const CapBatchApplyDepAddLineage = "issues.batchApply.depAddLineage"
 // older server predating this token answers the member with
 // `400 invalid_argument`/`unknown_parameter` and applies no template guard,
 // so a client that does not see the token refuses a template update itself
-// before the dial and sends the request without the member. That fallback
-// covers updateIssue only: an applyBatch `update` item gets no client-side
-// check (its target resolves on the server), so through an older server it
-// still edits a template (bd-jkp9v3).
+// before the dial and sends the request without the member. The batch's
+// per-item spelling is gated separately, by CapBatchApplyUpdateAllowTemplate,
+// because ApplyUpdateItem grew its own member (GH#5637) — that token now ends
+// the older-server gap this comment used to carry (bd-jkp9v3): a client
+// refuses an applyBatch `update` item's waiver before the dial too.
 const CapIssuesUpdateAllowTemplate = "issues.update.allowTemplate"
+
+// CapBatchApplyUpdateAllowTemplate is the behavior capability that advertises
+// ApplyUpdateItem's `allow_template` member (batch_apply.go): the per-item
+// template stand-down `bd set-state` composes into its all-or-nothing request,
+// so a plan can swap a template's labels together with the event it creates
+// and the edge that links them (GH#5637). It is a separate token from
+// issues.update.allowTemplate because the member rides a different request
+// body, and the two can age independently. An older server predating this
+// token answers the member with `400 invalid_argument`/`unknown_parameter`; the
+// client checks this token before the dial and refuses the waiver locally,
+// naming this token, rather than sending a member that server cannot read
+// (batchapplier.go).
+const CapBatchApplyUpdateAllowTemplate = "issues.batchApply.updateAllowTemplate"
 
 // CapIssuesUpdatePersistence is the behavior capability that advertises
 // IssuePatchBody.persistence on updateIssue: the role's
@@ -1187,7 +1201,7 @@ var behaviorCapabilities = []string{
 	CapProjectEnforce, CapBatchApplyLarge, CapIssuesListSort, CapIssuesCountScope,
 	CapIssuesSweepWispsPlane, CapIssuesSweepLiveDependents, CapIssuesSweepLimit,
 	CapIssuesSweepRetainIDs, CapIssuesSweepRetainedTypes,
-	CapBatchApplyDepAddLineage, CapIssuesUpdateAllowTemplate, CapIssuesCreateDefaultPriority,
+	CapBatchApplyDepAddLineage, CapIssuesUpdateAllowTemplate, CapBatchApplyUpdateAllowTemplate, CapIssuesCreateDefaultPriority,
 	CapIssuesCloseAutoCloseMolecule, CapIssuesListSearch,
 	CapIssuesListNoAssignee, CapIssuesListTitle, CapListIDs, CapIssuesUpdatePersistence, CapDependenciesBlockingIsBlocked, CapIssuesUpdateClaim,
 	CapIssuesCreateGates, CapIssuesUpdateGates, CapIssuesListFilters,

@@ -313,11 +313,20 @@ const CapBatchApplyDepAddLineage = "issues.batchApply.depAddLineage"
 // the same name. Lifecycle.Update reads it from the cached handshake before
 // the dial (applyTemplateGuardForServer): against a server without it, which
 // predates the guard, the client refuses a template update itself on a
-// pre-read and never sends `allow_template`. BatchApplier does not read it:
-// an applyBatch `update` item gets no client-side check (its target resolves
-// on the server), so through an older server it still edits a template
-// (bd-jkp9v3).
+// pre-read and never sends `allow_template`. BatchApplier reads its own token
+// below for the per-item waiver, which ends the older-server gap this comment
+// used to carry (bd-jkp9v3).
 const CapIssuesUpdateAllowTemplate = "issues.update.allowTemplate"
+
+// CapBatchApplyUpdateAllowTemplate is the behavior capability announcing that
+// issues.batchApply's update items accept `allow_template` — the per-item
+// template stand-down the atomic `bd set-state` shape rides (GH#5637) —
+// spelled exactly as httpapi's constant of the same name (held to it by
+// TestCapabilityTableMatchesTheServerRouteTable). batchapplier.go reads this
+// token before the dial when any update item carries the waiver, refusing
+// locally with a typed capability error rather than silently dropping a
+// stand-down a caller asked for against an older server.
+const CapBatchApplyUpdateAllowTemplate = "issues.batchApply.updateAllowTemplate"
 
 // CapIssuesUpdatePersistence is the behavior capability announcing that
 // updateIssue accepts `patch.persistence` (issueops.IssuePatch.Persistence,
@@ -507,7 +516,7 @@ func (e *WireRevisionSkewError) Unwrap() error { return ErrWireRevisionSkew }
 var behaviorCapabilities = []string{
 	CapProjectEnforce, CapBatchApplyLarge, CapListSort, CapCountScope,
 	CapSweepWispsPlane, CapSweepLiveDependents, CapSweepLimit, CapSweepRetainIDs, CapSweepRetainedTypes,
-	CapBatchApplyDepAddLineage, CapIssuesUpdateAllowTemplate, CapIssuesCreateDefaultPriority,
+	CapBatchApplyDepAddLineage, CapIssuesUpdateAllowTemplate, CapBatchApplyUpdateAllowTemplate, CapIssuesCreateDefaultPriority,
 	CapCloseAutoCloseMolecule, CapListSearch,
 	CapListNoAssignee, CapListTitle, CapListIDs, CapIssuesUpdatePersistence, CapBlockingIsBlocked, CapIssuesUpdateClaim,
 	CapIssuesCreateGates, CapIssuesUpdateGates, CapListFilters,

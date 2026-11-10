@@ -90,7 +90,7 @@ var (
 		"notes", "owner", "priority", "sender", "status", "timeout", "title", "waiters",
 	}
 	applyUpdateItemMembers = []string{
-		"expected_assignee", "expected_status", "expected_version",
+		"allow_template", "expected_assignee", "expected_status", "expected_version",
 		"force_assignee_transfer", "force_close_policy", "force_notes_overwrite", "patch", "target",
 	}
 	applyPatchMembers = []string{
@@ -518,6 +518,13 @@ func applyUpdateItem(prefix string, encoded json.RawMessage, raw map[string]json
 	}
 	if wire.ForceNotesOverwrite != nil {
 		item.ForceNotesOverwrite = *wire.ForceNotesOverwrite
+	}
+	// The template stand-down, the per-item spelling of updateIssue's
+	// allow_template (GH#5637): the update item's own UpdateItem.AllowTemplate,
+	// which the atomic `bd set-state` shape rides so a template's label swap
+	// lands with the event and edge beside it. Absent is the guard's default.
+	if wire.AllowTemplate != nil {
+		item.AllowTemplate = *wire.AllowTemplate
 	}
 	return item, nil
 }

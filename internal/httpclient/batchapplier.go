@@ -88,6 +88,9 @@ func (b *httpBatchApplier) ApplyBatch(ctx context.Context, req issueops.ApplyBat
 	if err := b.refuseUnservedDepAddLineage(ctx, req); err != nil {
 		return issueops.ApplyBatchResult{}, err
 	}
+	if err := b.refuseUnservedUpdateAllowTemplate(ctx, req); err != nil {
+		return issueops.ApplyBatchResult{}, err
+	}
 
 	body, err := applyBatchBody(req)
 	if err != nil {
@@ -145,6 +148,27 @@ func (b *httpBatchApplier) refuseUnservedDepAddLineage(ctx context.Context, req 
 		return nil
 	}
 	return b.store.unsupportedCapability("BatchApplier.ApplyBatch", wire.CapBatchApplyDepAddLineage)
+}
+
+// refuseUnservedUpdateAllowTemplate gates the update item's template waiver
+// (GH#5637): ApplyUpdateItem's `allow_template` is served only by a server
+// advertising wire.CapBatchApplyUpdateAllowTemplate, and an older one would
+// answer the member with its generic unknown-parameter 400 after the client
+// had already lost the chance to say so locally — or, once a server DOES know
+// the member but this gate were skipped, silently honor a stand-down the
+// caller never meant to send past an unupgraded fleet. The scan is whole-plan
+// before the dial, exactly like refuseUnservedDepAddLineage above, and the
+// plan is all or nothing so the check is too: no item carrying the waiver is
+// ever sent without it, and no partial plan is sent around one. The gate
+// scopes the WAIVER, not the operation — an update item without it dials a
+// token-less server unchanged, exactly as it always has.
+func (b *httpBatchApplier) refuseUnservedUpdateAllowTemplate(ctx context.Context, req issueops.ApplyBatchRequest) error {
+	for _, item := range req.Items {
+		if item.Kind == issueops.ItemUpdate && item.Update != nil && item.Update.AllowTemplate {
+			return b.store.requireCapabilityBeforeDial(ctx, wire.OpApplyBatch, wire.CapBatchApplyUpdateAllowTemplate)
+		}
+	}
+	return nil
 }
 
 // requireGateTokens scans the whole plan once, before the dial, for a create
@@ -406,6 +430,10 @@ func applyUpdateItemBody(item *issueops.UpdateItem) (*wire.ApplyUpdateItem, erro
 	setItemBool(&out.ForceClosePolicy, item.ForceClosePolicy)
 	setItemBool(&out.ForceAssigneeTransfer, item.ForceAssigneeTransfer)
 	setItemBool(&out.ForceNotesOverwrite, item.ForceNotesOverwrite)
+	// The template stand-down, same convention (GH#5637): sent only when true,
+	// and only to a server advertising the token — ApplyBatch has already
+	// refused the plan before the dial otherwise.
+	setItemBool(&out.AllowTemplate, item.AllowTemplate)
 	return out, nil
 }
 

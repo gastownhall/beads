@@ -578,6 +578,10 @@ func writeShapes() []writeShape {
 				// 2026-10 — batchapplier.go now sends it
 				// exactly as it sends the other two).
 				"ForceNotesOverwrite": member("force_notes_overwrite"),
+				// The template stand-down, per item (GH#5637): gated by
+				// issues.batchApply.updateAllowTemplate client-side, exactly
+				// as the gate members are gated by their own tokens.
+				"AllowTemplate": member("allow_template"),
 			},
 		},
 		{
