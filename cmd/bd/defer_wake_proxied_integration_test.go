@@ -37,11 +37,12 @@ func TestProxiedServerDeferAutoWake(t *testing.T) {
 		return status, arr[0]["defer_until"]
 	}
 
-	readySetEnv := func(t *testing.T, extraEnv []string) map[string]bool {
+	// idSetEnv runs a --json listing and returns the ids it printed.
+	idSetEnv := func(t *testing.T, extraEnv []string, args ...string) map[string]bool {
 		t.Helper()
-		out, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, extraEnv, "ready", "--json", "--limit", "0")
+		out, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, extraEnv, args...)
 		if err != nil {
-			t.Fatalf("ready: %v\n%s%s", err, out, stderr)
+			t.Fatalf("%s: %v\n%s%s", strings.Join(args, " "), err, out, stderr)
 		}
 		s := strings.TrimSpace(out)
 		start := strings.Index(s, "[")
@@ -50,7 +51,7 @@ func TestProxiedServerDeferAutoWake(t *testing.T) {
 		}
 		var arr []map[string]interface{}
 		if err := json.Unmarshal([]byte(s[start:]), &arr); err != nil {
-			t.Fatalf("parse ready JSON: %v\n%s", err, s)
+			t.Fatalf("parse %s JSON: %v\n%s", args[0], err, s)
 		}
 		ids := map[string]bool{}
 		for _, row := range arr {
@@ -59,6 +60,10 @@ func TestProxiedServerDeferAutoWake(t *testing.T) {
 			}
 		}
 		return ids
+	}
+	readySetEnv := func(t *testing.T, extraEnv []string) map[string]bool {
+		t.Helper()
+		return idSetEnv(t, extraEnv, "ready", "--json", "--limit", "0")
 	}
 	readySet := func(t *testing.T) map[string]bool {
 		t.Helper()
@@ -155,6 +160,46 @@ func TestProxiedServerDeferAutoWake(t *testing.T) {
 		}
 		if n := proxiedDoltCommitCountSince(t, db, before); n != 1 {
 			t.Errorf("thawed bd ready made %d commits since the frozen read, want exactly one defer-wake commit", n)
+		}
+	})
+
+	// bd list --ready reaches the sweep through the reader role rather than
+	// bd ready's own call, and the freeze holds it off there too: the
+	// provider is opened without the sweep, not one call site (#7634).
+	t.Run("frozen_list_ready_leaves_expired_defer_asleep_until_thaw", func(t *testing.T) {
+		db := openProxiedDB(t, p)
+		plain := bdProxiedCreate(t, bd, p.dir, "Ordinary list-ready work proxied", "--type", "task")
+		a := bdProxiedCreate(t, bd, p.dir, "Frozen list-ready snooze proxied", "--type", "task")
+		if out, err := bdProxiedRun(t, bd, p.dir, "defer", a.ID, "--until", "2020-01-01"); err != nil {
+			t.Fatalf("defer: %v\n%s", err, out)
+		}
+		before := proxiedDoltHead(t, db)
+
+		ids := idSetEnv(t, deferWakeFreezeEnv(t, markerDir, true), "list", "--ready", "--json", "--limit", "0")
+		if !ids[plain.ID] {
+			t.Errorf("frozen bd list --ready dropped ordinary open issue %s", plain.ID)
+		}
+		if ids[a.ID] {
+			t.Errorf("frozen bd list --ready listed %s: the sweep woke it during a freeze", a.ID)
+		}
+		if after := proxiedDoltHead(t, db); after != before {
+			t.Errorf("frozen bd list --ready moved HEAD %s -> %s", before, after)
+		}
+		status, deferUntil := showState(t, a.ID)
+		if status != string(types.StatusDeferred) || deferUntil == nil {
+			t.Fatalf("frozen bd list --ready changed %s to status=%s defer_until=%v, want deferred with its date", a.ID, status, deferUntil)
+		}
+
+		ids = idSetEnv(t, deferWakeFreezeEnv(t, markerDir, false), "list", "--ready", "--json", "--limit", "0")
+		if !ids[a.ID] {
+			t.Errorf("expected %s in bd list --ready after the thaw", a.ID)
+		}
+		status, deferUntil = showState(t, a.ID)
+		if status != string(types.StatusOpen) || deferUntil != nil {
+			t.Errorf("thawed bd list --ready left %s at status=%s defer_until=%v, want open with no date", a.ID, status, deferUntil)
+		}
+		if n := proxiedDoltCommitCountSince(t, db, before); n != 1 {
+			t.Errorf("thawed bd list --ready made %d commits since the frozen read, want exactly one defer-wake commit", n)
 		}
 	})
 

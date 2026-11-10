@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	doltembed "github.com/dolthub/driver/v2"
+
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
@@ -51,5 +53,19 @@ func TestBuildDSN_WithDatabase(t *testing.T) {
 	dsn := buildDSN("/tmp/test", "mydb", versioncontrolops.Committer{})
 	if !strings.Contains(dsn, "database=mydb") {
 		t.Errorf("DSN should contain database=mydb; got %q", dsn)
+	}
+}
+
+// TestBuildDSN_CarriesTheCommitter pins the identity the DSN hands the
+// embedded engine, which Dolt uses for the commits the engine makes itself
+// (#7628): the driver's own DSN parser must read back the committer.
+func TestBuildDSN_CarriesTheCommitter(t *testing.T) {
+	committer := versioncontrolops.Committer{Name: "Jane Doe", Email: "jane@example.com"}
+	cfg, err := doltembed.ParseDSN(buildDSN(t.TempDir(), "mydb", committer))
+	if err != nil {
+		t.Fatalf("ParseDSN: %v", err)
+	}
+	if cfg.CommitName != committer.Name || cfg.CommitEmail != committer.Email {
+		t.Errorf("DSN committer = %q / %q, want %q / %q", cfg.CommitName, cfg.CommitEmail, committer.Name, committer.Email)
 	}
 }

@@ -87,6 +87,26 @@ func TestApplyProviderOptions(t *testing.T) {
 	if got := applyProviderOptions([]ProviderOption{WithServerLogRotation()}); got != (providerOptions{rotateServerLog: true}) {
 		t.Fatalf("applyProviderOptions(WithServerLogRotation()) = %+v, want only rotateServerLog set", got)
 	}
+	// The sweep switch changes no posture of the open, and is off unless asked.
+	if applyProviderOptions(nil).noDeferWakeSweep {
+		t.Fatal("applyProviderOptions(nil).noDeferWakeSweep = true, want false")
+	}
+	if got := applyProviderOptions([]ProviderOption{WithoutDeferWakeSweep()}); got != (providerOptions{noDeferWakeSweep: true}) {
+		t.Fatalf("applyProviderOptions(WithoutDeferWakeSweep()) = %+v, want only noDeferWakeSweep set", got)
+	}
+}
+
+// TestDeferWakeSweepSwitchReadsThroughDecorators pins the provider's half of
+// WithoutDeferWakeSweep: the sweep gate finds the switch on the
+// doltSQLProvider beneath the hook decorator the CLI wraps it in.
+// TestWithoutDeferWakeSweepHoldsEveryReadyRouteOff pins what the gate holds.
+func TestDeferWakeSweepSwitchReadsThroughDecorators(t *testing.T) {
+	for _, off := range []bool{true, false} {
+		provider := NewNotifyingProvider(&doltSQLProvider{noDeferWakeSweep: off}, Sinks{Hook: &notifyRunner{}})
+		if got := deferWakeSweepOff(provider); got != off {
+			t.Errorf("deferWakeSweepOff(provider with noDeferWakeSweep=%t) = %t, want %t", off, got, off)
+		}
+	}
 }
 
 // TestOpensForBeadWrites pins which postures events-journal activation treats

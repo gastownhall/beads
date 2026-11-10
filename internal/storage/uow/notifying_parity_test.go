@@ -285,6 +285,9 @@ func TestNotifyingProviderAnswersTheWholeProviderSurface(t *testing.T) {
 		"initSchemaAttempt":      initBranch,
 		"verifyTeamServerSchema": initBranch,
 		"attachPreviewDatabase":  initBranch,
+		"deferWakeSweepDisabled": "the WithoutDeferWakeSweep switch, which the sweep gate (deferWakeSweepOff) " +
+			"reads on the provider beneath every decorator through UnwrapProvider, never with a type " +
+			"assertion on the wrapper; and a decorator outside this package could not declare it anyway",
 	})
 }
 

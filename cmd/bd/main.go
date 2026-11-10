@@ -2265,7 +2265,7 @@ var rootCmd = &cobra.Command{
 		// mode is where that is least visible, not where it is acceptable.
 		if proxiedServerMode {
 			p, err := newProxiedServerUOWProvider(rootCtx, beadsDir, databaseOverride,
-				rootProviderOptions(previewMode, useReadOnly, isWorkingSetReconcileCommand(cmd))...)
+				rootProviderOptions(previewMode, useReadOnly, isWorkingSetReconcileCommand(cmd), commandFreeze.Frozen())...)
 			if err != nil {
 				// Same typed rendering the store path gets below: a schema
 				// skew or a migration-gate refusal here carries a whole

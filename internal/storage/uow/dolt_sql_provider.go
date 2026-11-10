@@ -66,6 +66,9 @@ type doltSQLProvider struct {
 	// proxied-server mode, so the commands the proxied front door refuses are
 	// off the table for its operator; see providerOptions.proxiedServerMode.
 	proxiedServerMode bool
+	// noDeferWakeSweep: the open asked for no lazy defer-wake sweep; see
+	// providerOptions.noDeferWakeSweep.
+	noDeferWakeSweep bool
 	// eventsJournalEnabled activates the durable events journal for THIS
 	// provider instance only. See SetEventsJournalEnabled.
 	eventsJournalEnabled atomic.Bool
@@ -223,6 +226,12 @@ type providerOptions struct {
 	// that file: bd sets it for its default server.log, never for a log path
 	// the operator chose.
 	rotateServerLog bool
+	// noDeferWakeSweep turns the lazy defer-wake sweep (WakeExpiredDefers)
+	// off for every route through this provider: Reader.Ready, Reader.List
+	// with --ready, the ready claimer and bd ready's own call. The CLI sets
+	// it while a MIGRATION-FREEZE holds, which must not see the sweep's write
+	// (#7634). It changes nothing about the open itself.
+	noDeferWakeSweep bool
 }
 
 // WithPreview opens the provider for a non-mutating preview command.
@@ -261,6 +270,12 @@ func WithProxiedServerMode() ProviderOption {
 // See providerOptions.rotateServerLog: pass it only for a log bd owns.
 func WithServerLogRotation() ProviderOption {
 	return func(o *providerOptions) { o.rotateServerLog = true }
+}
+
+// WithoutDeferWakeSweep opens the provider with the lazy defer-wake sweep
+// off. See providerOptions.noDeferWakeSweep.
+func WithoutDeferWakeSweep() ProviderOption {
+	return func(o *providerOptions) { o.noDeferWakeSweep = true }
 }
 
 func applyProviderOptions(opts []ProviderOption) providerOptions {
@@ -1059,6 +1074,7 @@ func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, b
 			preview:           opts.preview,
 			readOnly:          opts.readOnly,
 			proxiedServerMode: opts.proxiedServerMode,
+			noDeferWakeSweep:  opts.noDeferWakeSweep,
 		}
 	}
 	// handOut gives the provider its resolver and arms it. It runs only once

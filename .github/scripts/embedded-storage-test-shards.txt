@@ -342,6 +342,7 @@
 
 40 17 TestAddDependency
 40 17 TestEmbeddedBatchCloserWispItemClosesAndEarnsTheClaim
+40 17 TestEmbeddedCommitAuthorSkipsAnUnparseableGitAuthor
 40 17 TestEmbeddedDependencyEditorSameTypeReAddWithChangedThreadMintsOneVersion
 40 17 TestEmbeddedIgnoredMigration0031OpensAShallowClone
 40 17 TestEmbeddedIssueOperationsUpdateIssuePlaneOnlyRefusesWisps
@@ -530,6 +531,7 @@
 40 29 TestLeaseReclaimerContract
 40 29 TestLifecycleCreateContract
 
+40 30 TestBuildDSN_CarriesTheCommitter
 40 30 TestCounterContract
 40 30 TestCycleDetectorContract
 40 30 TestEmbeddedClaimerTakesAnOpenIssueTheActorAlreadyHolds
