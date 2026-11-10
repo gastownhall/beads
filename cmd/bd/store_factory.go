@@ -214,6 +214,11 @@ func openDoltStoreFromConfig(ctx context.Context, beadsDir string, requireExisti
 		// metadata.json (cfg == nil, err == nil) keeps the embedded default.
 		return nil, fmt.Errorf("load %s: %w (refusing to fall back to the embedded store)", remedy.PrintedValue(configfile.ConfigPath(beadsDir)), remedy.PrintedError(err))
 	}
+	// Metadata absence must be captured before normalizeLoadedConfig
+	// substitutes the default config for it: the embedded arm below
+	// re-resolves the database for a metadata-less workspace (GH#4135)
+	// instead of opening the default beside the real one.
+	metadataAbsent := cfg == nil
 	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 		return nil, err
 	}
@@ -232,9 +237,17 @@ func openDoltStoreFromConfig(ctx context.Context, beadsDir string, requireExisti
 	if requireExisting && !embeddeddolt.HasRepository(beadsDir) {
 		return nil, errNoRoutedEmbeddedDatabase(beadsDir)
 	}
-	database := configfile.DefaultDoltDatabase
-	if cfg != nil {
-		database = cfg.GetDoltDatabase()
+	// A metadata-less workspace resolves its database the same way the
+	// command path does (GH#4135): adopting the sole existing database here
+	// too keeps the identity preview, a routed write and a foreign read on
+	// the same database the command's open uses.
+	database := cfg.GetDoltDatabase()
+	if metadataAbsent {
+		selection, selErr := resolveMetadatalessEmbeddedDatabase(beadsDir)
+		if selErr != nil {
+			return nil, selErr
+		}
+		database = selection.database
 	}
 	if sanitized := sanitizeDBName(database); sanitized != database {
 		if err := migrateHyphenatedDB(beadsDir, cfg, database, sanitized); err != nil {
@@ -353,6 +366,10 @@ func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, previe
 	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 		return nil, err
 	}
+	// Captured before normalizeLoadedConfig, as in openDoltStoreFromConfig:
+	// the embedded arm below re-resolves the database for a metadata-less
+	// workspace (GH#4135).
+	metadataAbsent := cfg == nil
 	cfg = normalizeLoadedConfig(cfg)
 	if backend, ok := backends.Lookup(cfg.GetBackend()); ok {
 		return backend.OpenReadOnly(ctx, beadsDir)
@@ -365,9 +382,16 @@ func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, previe
 		// open; a preview tolerates a behind schema, as on the embedded arms.
 		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true, RequireReadableSchema: !preview})
 	}
-	database := configfile.DefaultDoltDatabase
-	if cfg != nil {
-		database = cfg.GetDoltDatabase()
+	// Same metadata-less selection as the command path (GH#4135); see the
+	// embedded arm of openDoltStoreFromConfig. A refusal here is what fails
+	// the identity preview's open before the real one runs.
+	database := cfg.GetDoltDatabase()
+	if metadataAbsent {
+		selection, selErr := resolveMetadatalessEmbeddedDatabase(beadsDir)
+		if selErr != nil {
+			return nil, selErr
+		}
+		database = selection.database
 	}
 	if sanitized := sanitizeDBName(database); sanitized != database {
 		database = sanitized

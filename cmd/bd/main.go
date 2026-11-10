@@ -2194,14 +2194,15 @@ var rootCmd = &cobra.Command{
 			}
 		} else if cfgErr == nil {
 			logConfigDiscovery(beadsDir, "config discovery")
-			// Load returned (nil, nil) — no config file found.
-			// Fall back to the canonical default database name; matches the
-			// behavior of newDoltStoreFromConfig / newReadOnlyStoreFromConfig
-			// (see store_factory.go). Without this, embeddeddolt.New rejects
-			// the empty database name with "database name must not be empty
-			// (caller should default to \"beads\")".
-			fmt.Fprintf(os.Stderr, "warning: no beads configuration found in %s; using default database name %q\n", beadsDir, configfile.DefaultDoltDatabase)
-			doltCfg.Database = configfile.DefaultDoltDatabase
+			// Load returned (nil, nil) — no config file found. The embedded
+			// database is selected below, after the shared-server override
+			// that follows this branch, so the selection sees the effective
+			// mode: a metadata-less server/shared-server workspace must keep
+			// reaching for its server rather than silently becoming an
+			// embedded one (GH#3817). Only the embedded arm adopts an
+			// existing database (GH#4135): defaulting the name here is what
+			// opened — and thereby created — a second, empty database next
+			// to the real one and answered reads out of it.
 		}
 		// Honor shared-server mode even when no project config was found
 		// (cfg == nil) or the parse failed. The override inside the
@@ -2221,6 +2222,20 @@ var rootCmd = &cobra.Command{
 		// default it even on paths that never set one.
 		if doltCfg.Database == "" {
 			doltCfg.Database = configfile.DefaultDoltDatabase
+		}
+		// A metadata-less embedded workspace selects its database here
+		// (GH#4135): after the effective-mode resolution above and before the
+		// identity preview and the real open, so all three name the same
+		// database. A workspace holding one database adopts it instead of
+		// opening the default beside it; the missing-config warning names
+		// what was selected, where it used to print only the default.
+		if cfg == nil && !doltCfg.ServerMode && !doltCfg.ProxiedServer && !globalFlag {
+			selection, selErr := resolveMetadatalessEmbeddedDatabase(beadsDir)
+			if selErr != nil {
+				return HandleErrorRespectJSON("%v", selErr)
+			}
+			doltCfg.Database = selection.database
+			fmt.Fprintf(os.Stderr, "warning: no beads configuration found in %s; using %s\n", beadsDir, selection.summary())
 		}
 		doltCfg.SyncRemote = resolveSyncRemote()
 
