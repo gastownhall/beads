@@ -216,3 +216,71 @@ func reviseJSONLTitle(t *testing.T, jsonl, id, title string) {
 		t.Fatal(err)
 	}
 }
+
+// TestEmbeddedInitWarnsWhenPATHSelectsAnotherBD runs the real, non-quiet
+// `bd init` by absolute path with a decoy bd first on PATH: init still
+// succeeds and installs the hooks, stderr carries one diagnostic naming both
+// bds, and the decoy never runs. A --quiet init says nothing (GH#5922).
+func TestEmbeddedInitWarnsWhenPATHSelectsAnotherBD(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script decoy bd is POSIX-only")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	if !filepath.IsAbs(bd) {
+		t.Fatalf("bd must be started by absolute path, got %q", bd)
+	}
+	self, err := filepath.EvalSymlinks(bd)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, quiet := range []bool{false, true} {
+		name := "non-quiet"
+		if quiet {
+			name = "quiet"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			initGitRepoAt(t, dir)
+			marker, env := decoyBDEnv(t, dir)
+			args := []string{"init", "--prefix", "hx", "--non-interactive"}
+			if quiet {
+				args = append(args, "--quiet")
+			}
+			cmd := exec.Command(bd, args...)
+			cmd.Dir = dir
+			cmd.Env = envWithout(env, "BD_GIT_HOOK")
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("bd %s: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+			}
+			if _, err := os.Stat(filepath.Join(dir, ".beads", "hooks", "pre-commit")); err != nil {
+				t.Errorf("pre-commit hook not installed: %v\nstdout:\n%s", err, stdout.String())
+			}
+			assertDecoyNeverRan(t, marker)
+
+			got := stderr.String()
+			if quiet {
+				if strings.Contains(got, "Git hooks run") {
+					t.Errorf("--quiet init printed the PATH diagnostic:\n%s", got)
+				}
+				return
+			}
+			if n := strings.Count(got, "Git hooks run"); n != 1 {
+				t.Errorf("stderr has %d PATH diagnostics, want 1:\n%s", n, got)
+			}
+			for _, want := range []string{filepath.Join(filepath.Dir(marker), "bd"), self} {
+				if !strings.Contains(got, want) {
+					t.Errorf("stderr lacks %q:\n%s", want, got)
+				}
+			}
+		})
+	}
+}
