@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/migration"
 )
 
 // doltReadonlyGateWorkspace is an initialized embedded workspace with a
@@ -111,4 +113,54 @@ func TestDoltPushReadonly(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCleanDatabasesReadonly pins AC-3: `bd dolt clean-databases` refuses
+// under strict read-only before its body loads the backend config or opens a
+// server connection, for a preview and for the irreversible purge alike. The
+// workspace is embedded, so a body that ran would report "not supported in
+// embedded mode" instead of the standard refusal.
+func TestCleanDatabasesReadonly(t *testing.T) {
+	w := newDoltReadonlyGateWorkspace(t)
+	beadsBefore := snapshotReadonlyTree(t, filepath.Join(w.dir, ".beads"))
+
+	rows := []struct {
+		name string
+		args []string
+	}{
+		{name: "bare", args: []string{"dolt", "clean-databases"}},
+		{name: "dry-run", args: []string{"dolt", "clean-databases", "--dry-run"}},
+		{name: "purge-dropped", args: []string{"dolt", "clean-databases", "--purge-dropped"}},
+	}
+	for _, spelling := range readonlyGateSpellings {
+		t.Run(spelling.name, func(t *testing.T) {
+			for _, row := range rows {
+				t.Run(row.name, func(t *testing.T) {
+					args := append(append([]string{}, row.args...), spelling.flags...)
+					stdout, stderr, code := w.run(t, spelling.env, args...)
+					assertStandardReadonlyRefusal(t, "dolt clean-databases", stdout, stderr, code)
+					if strings.Contains(stderr, "embedded mode") {
+						t.Errorf("the command body ran before the read-only gate:\n%s", stderr)
+					}
+					if diff := readonlyTreeDiff(beadsBefore, snapshotReadonlyTree(t, filepath.Join(w.dir, ".beads"))); len(diff) > 0 {
+						t.Errorf("a refused clean-databases changed .beads:\n  %s", strings.Join(diff, "\n  "))
+					}
+				})
+			}
+		})
+	}
+
+	// CheckReadonly also carries the migration-freeze refusal; the new gate
+	// must keep that behavior for a writable invocation.
+	t.Run("migration-freeze", func(t *testing.T) {
+		writeFreezeMarker(t, w.dir, "migrator", "dolt v2 migration")
+		t.Cleanup(func() { _ = os.Remove(filepath.Join(w.dir, migration.FileName)) })
+		stdout, stderr, code := runBDFrozen(t, w.bd, w.dir, "dolt", "clean-databases", "--dry-run")
+		if code != ExitMigrationFrozen {
+			t.Fatalf("exit code = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, ExitMigrationFrozen, stdout, stderr)
+		}
+		if !strings.Contains(stderr, "workspace is frozen for migration") {
+			t.Errorf("stderr missing the freeze refusal:\n%s", stderr)
+		}
+	})
 }
