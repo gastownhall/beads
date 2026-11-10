@@ -236,4 +236,26 @@ func TestEmbeddedClaimPathsJournalSidecar(t *testing.T) {
 		}
 		requireClaimed(t, rows[1], "alice", res.Claimed)
 	})
+
+	t.Run("close_without_claim_next", func(t *testing.T) {
+		t.Parallel()
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "co")
+		p := bdCreate(t, bd, dir, "Closed alone")
+		other := bdCreate(t, bd, dir, "Ready issue left alone")
+
+		// A close that claims nothing journals only its own close record:
+		// no claimed row, and nothing for the untouched ready issue.
+		bdAuditRun(t, bd, dir, "close", p.ID)
+		rows := readSidecarEntries(t, beadsDir)
+		if len(rows) != 1 {
+			t.Fatalf("plain bd close journaled %d rows, want only %s's close: %+v", len(rows), p.ID, rows)
+		}
+		if rows[0].IssueID != p.ID || rows[0].Kind != "field_change" || rows[0].Extra["field"] != "status" ||
+			rows[0].Extra["old_value"] != "open" || rows[0].Extra["new_value"] != "closed" {
+			t.Fatalf("row %+v: want %s's open -> closed field_change", rows[0], p.ID)
+		}
+		if got := sidecarEntriesFor(rows, other.ID); len(got) != 0 {
+			t.Fatalf("plain bd close journaled rows for untouched %s: %+v", other.ID, got)
+		}
+	})
 }
