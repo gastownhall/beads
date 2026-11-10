@@ -102,16 +102,40 @@ func (e *SchemaEncodingDriftError) Hint() string {
 // isMigrationEncodingDriftErr reports whether err carries one of the
 // migrationDriftSignatures, case-insensitively.
 func isMigrationEncodingDriftErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	for _, sig := range migrationDriftSignatures {
-		if strings.Contains(msg, sig) {
-			return true
+	return err != nil && indexDriftSignature(err.Error()) >= 0
+}
+
+// indexDriftSignature returns the byte offset in s of the earliest
+// migrationDriftSignatures match, or -1. The signatures are lowercase ASCII,
+// so the match folds ASCII case byte by byte on s itself: the offset is valid
+// in s even when Unicode lowercasing would change its byte length.
+func indexDriftSignature(s string) int {
+	for i := 0; i < len(s); i++ {
+		for _, sig := range migrationDriftSignatures {
+			if hasASCIIFoldPrefix(s[i:], sig) {
+				return i
+			}
 		}
 	}
-	return false
+	return -1
+}
+
+// hasASCIIFoldPrefix reports whether s starts with the lowercase ASCII prefix,
+// ignoring ASCII case.
+func hasASCIIFoldPrefix(s, prefix string) bool {
+	if len(s) < len(prefix) {
+		return false
+	}
+	for j := 0; j < len(prefix); j++ {
+		c := s[j]
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != prefix[j] {
+			return false
+		}
+	}
+	return true
 }
 
 // classifyMigrationDrift turns err, returned from the numbered migration mf of
@@ -129,26 +153,20 @@ func classifyMigrationDrift(err error, src migrationSource, mf migrationFile) er
 }
 
 // driftSymptom extracts the matched signature from msg, through the end of its
-// line, with control characters dropped and the length capped.
+// line, with control characters dropped and the length capped. The line is
+// chosen in the original text before anything is removed or cut, so an
+// earlier wrapper line or a long prefix cannot push the signature out.
 func driftSymptom(msg string) string {
-	lower := strings.ToLower(msg)
-	start := -1
-	for _, sig := range migrationDriftSignatures {
-		if i := strings.Index(lower, sig); i >= 0 && (start < 0 || i < start) {
-			start = i
+	lines := strings.FieldsFunc(msg, func(r rune) bool { return r == '\r' || r == '\n' })
+	line := ""
+	if len(lines) > 0 {
+		line = lines[0]
+	}
+	for _, l := range lines {
+		if i := indexDriftSignature(l); i >= 0 {
+			line = l[i:]
+			break
 		}
-	}
-	if start < 0 {
-		start = 0
-	}
-	// ToLower can change byte lengths only outside ASCII; the signatures are
-	// ASCII, so fall back to the whole message if the offsets disagree.
-	if len(lower) != len(msg) {
-		start = 0
-	}
-	line := msg[start:]
-	if i := strings.IndexAny(line, "\r\n"); i >= 0 {
-		line = line[:i]
 	}
 	var b strings.Builder
 	n := 0
