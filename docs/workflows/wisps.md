@@ -52,9 +52,55 @@ bd mol burn <wisp-id>
 
 ```bash
 bd mol wisp list      # list all wisps in the current context
-bd mol wisp gc        # garbage collect old/abandoned wisps
+bd mol wisp gc        # preview what a wisp garbage collection would clean
+bd mol wisp gc --force  # actually delete what the preview showed
 bd purge --force      # delete all closed ephemeral beads
 ```
+
+### Garbage collecting with `bd mol wisp gc`
+
+<Note>
+This section describes `bd mol wisp gc` in the first release after v1.3.4.
+In v1.3.4 and earlier, the age-based forms delete without `--force`, and
+`--closed --force` also deletes a closed molecule root whose steps are
+still open.
+</Note>
+
+- **Preview first.** Every form, bare `bd mol wisp gc` included, lists the
+  wisps it would delete (ID, title, type; `dry_run: true` under `--json`)
+  and exits 0. Add `--force` to delete, keeping the same selection flags;
+  `--dry-run` wins over `--force`. A script that runs `bd mol wisp gc` to
+  clean up must add `--force`, or it stops deleting anything.
+- **By age** (the default, `--age 1h`): open wisps not updated within the
+  threshold, never live work (in progress, blocked, hooked, deferred,
+  pinned). `--all` adds closed wisps past the threshold.
+- **`--closed`**: closed wisps regardless of age, except a closed wisp that
+  a live issue or wisp depends on through `parent-child` or `tracks`, and
+  the closed ancestors of such a wisp. A closed molecule root therefore
+  never strands its open steps: it is held back, counted in
+  `live_dependent_skipped`, and collected by a later run once they close.
+  `blocks` edges hold nothing back, since a closed blocker blocks nothing.
+  The protection reaches only through closed wisps that are themselves
+  candidates: past a pinned, excluded or infrastructure-typed intermediate,
+  a live row loses its edge to a deleted wisp as it would under
+  `bd delete`.
+
+**What gc protects.** It selects ephemeral issues of every type, not only
+molecule steps. Pinned wisps and the infrastructure types in `types.infra`
+(default `agent`, `role`, `message`) are never collected. Setting
+`types.infra` replaces that list, so keep the defaults when you extend it.
+Labels protect nothing: mail typed `message` is protected by default, mail
+typed `task` is not, whatever its labels. `--exclude-type` protects more
+types for one run (excluding `task` also excludes task-typed steps).
+`types.retained` does not apply to wisp gc (see below).
+
+**Closing a molecule root.** `bd close` refuses to close an issue with open
+children unless you pass `--force`, and then warns that they are still
+active. Closing a molecule's last open step can close its root (upward);
+closing a root never closes its steps (downward). A root force-closed over
+open steps stays until `bd mol wisp gc --closed --force` runs after those
+steps close. Plain `bd delete` keeps its own semantics and is no safer
+escape hatch for attribution.
 
 ### Retiring ids with `--retain-ids`
 
@@ -190,4 +236,5 @@ bd mol bond mol-critical-bug wisp-patrol --pour   # persist a bug found during a
    not wisped.
 3. **Squash before you delete** — if a wisp surfaced something durable,
    `bd mol squash` promotes it; burning is irreversible.
-4. **Garbage collect regularly** — `bd mol wisp gc` or `bd purge --force`.
+4. **Garbage collect regularly** — `bd mol wisp gc --force` (preview first
+   by leaving `--force` off) or `bd purge --force`.

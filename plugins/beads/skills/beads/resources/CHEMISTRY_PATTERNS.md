@@ -163,9 +163,10 @@ bd mol burn <wisp-id>              # Deletes with no record
 # List wisps
 bd wisp list
 
-# Garbage collect orphaned wisps
+# Garbage collect orphaned wisps (preview by default; --force deletes)
 bd wisp gc
-bd wisp gc --closed --force          # Purge all closed wisps
+bd wisp gc --force                   # Delete abandoned wisps past the age threshold
+bd wisp gc --closed --force          # Purge closed wisps (live-dependent roots held back)
 
 # View proto/mol structure
 bd mol show <id>
