@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"sort"
 	"strings"
@@ -3739,6 +3740,76 @@ func TestBondProtoMolSecondRefArmWaitsOnSameTerminalsNotEarlierArm(t *testing.T)
 	for arm, armID := range map[string]string{"first": armOne, "second": armTwo} {
 		if got := blocksTargetsOf(t, ctx, s, armID); !slices.Equal(got, want) {
 			t.Fatalf("after a later parent step was added, the %s arm %s blocks on %v, want the bond-time terminals %v unchanged", arm, armID, got, want)
+		}
+	}
+}
+
+// failingTerminalAttachWriter fails the AddDependency that attaches the arm
+// onto one chosen terminal step, after the edges before it have written.
+type failingTerminalAttachWriter struct {
+	storeMolWriter
+	failTarget string
+	failed     bool
+}
+
+func (w *failingTerminalAttachWriter) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
+	if dep.Type == types.DepBlocks && dep.DependsOnID == w.failTarget {
+		w.failed = true
+		return fmt.Errorf("injected attach failure onto %s", w.failTarget)
+	}
+	return w.storeMolWriter.AddDependency(ctx, dep, actor)
+}
+
+// AC-5: a failure while the ordering edges are being written rolls the whole
+// bond back - no arm issues, no partial ordering, no edges at all.
+func TestBondProtoMolRefArmAttachFailureLeavesNoArm(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+	proto, mol, s1, s2, s3, _ := bondRefArmSteps(t, ctx, s)
+
+	subgraph, err := loadTemplateSubgraph(ctx, s, proto.ID)
+	if err != nil {
+		t.Fatalf("loadTemplateSubgraph: %v", err)
+	}
+
+	// Fail the edge onto s3, so the edge onto s2 has already written when
+	// the clone dies.
+	txErr := s.RunInTransaction(ctx, "test: arm attach failure rolls back", func(tx storage.Transaction) error {
+		w := &failingTerminalAttachWriter{storeMolWriter: storeMolWriter{DoltStorage: s, tx: tx}, failTarget: s3.ID}
+		opts, err := buildAttachCloneOpts(subgraph, mol, types.BondTypeSequential, map[string]string{"name": "ace"}, "arm-{{name}}", []string{s2.ID, s3.ID}, "test", false, false)
+		if err != nil {
+			return fmt.Errorf("buildAttachCloneOpts: %w", err)
+		}
+		_, err = cloneSubgraphInto(ctx, w, subgraph, opts)
+		if err == nil {
+			return fmt.Errorf("cloneSubgraphInto succeeded, want the injected attach failure")
+		}
+		if !w.failed {
+			return fmt.Errorf("cloneSubgraphInto failed before the injected failure: %w", err)
+		}
+		if !strings.Contains(err.Error(), s3.ID) {
+			return fmt.Errorf("cloneSubgraphInto error = %q, want it to name the terminal step the attach failed on", err)
+		}
+		return err
+	})
+	if txErr == nil {
+		t.Fatal("RunInTransaction succeeded, want the rolled-back attach failure")
+	}
+
+	// The rollback left nothing: no arm issues, no edges touching them.
+	armID := mol.ID + ".arm-ace"
+	if _, gerr := s.GetIssue(ctx, armID); gerr == nil {
+		t.Errorf("arm root %s exists after the failed bond", armID)
+	}
+	for _, id := range []string{mol.ID, s1.ID, s2.ID, s3.ID} {
+		deps, derr := s.GetDependencyRecords(ctx, id)
+		if derr != nil {
+			t.Fatalf("GetDependencyRecords(%s): %v", id, derr)
+		}
+		for _, dep := range deps {
+			if strings.HasPrefix(dep.IssueID, armID) || strings.HasPrefix(dep.DependsOnID, armID) {
+				t.Errorf("edge %+v touches the rolled-back arm %s", dep, armID)
+			}
 		}
 	}
 }

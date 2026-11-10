@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/formula"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func twoStepFormula(name, stepTitle string) *formula.Formula {
@@ -172,6 +173,57 @@ func TestProxiedServerMolBond(t *testing.T) {
 		}
 		if !substituted {
 			t.Errorf("expected a spawned step title to contain 'ace' after {{worker_name}} substitution, id_mapping: %+v", got.IDMapping)
+		}
+	})
+
+	t.Run("sequential_ref_arm_waits_for_terminal_steps", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "mbref2")
+		writeFormulaFixture(t, p, twoStepFormula("terminal-arm", "Capture {{worker_name}}"))
+		patrol := bdProxiedCreate(t, bd, p.dir, "Patrol", "--type", "epic")
+		s1 := bdProxiedCreate(t, bd, p.dir, "Patrol step one", "--type", "task")
+		s2 := bdProxiedCreate(t, bd, p.dir, "Patrol step two", "--type", "task")
+		s3 := bdProxiedCreate(t, bd, p.dir, "Patrol step three", "--type", "task")
+		for _, step := range []*types.Issue{s1, s2, s3} {
+			if out, err := bdProxiedRun(t, bd, p.dir, "dep", "add", step.ID, patrol.ID, "--type", "parent-child"); err != nil {
+				t.Fatalf("bd dep add %s parent-child: %v\n%s", step.ID, err, out)
+			}
+		}
+		// Step two blocks on step one, so only steps two and three are
+		// terminal: nothing in the patrol must finish after them.
+		if out, err := bdProxiedRun(t, bd, p.dir, "dep", "add", s2.ID, s1.ID, "-t", "blocks"); err != nil {
+			t.Fatalf("bd dep add %s blocks on %s: %v\n%s", s2.ID, s1.ID, err, out)
+		}
+
+		out, err := bdProxiedRun(t, bd, p.dir, "mol", "bond", "terminal-arm", patrol.ID,
+			"--ref", "arm-{{worker_name}}", "--var", "worker_name=ace", "--json")
+		if err != nil {
+			t.Fatalf("bd mol bond --ref --json: %v\n%s", err, out)
+		}
+		var got struct {
+			ResultType string `json:"result_type"`
+		}
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("unmarshal: %v\n%s", err, out)
+		}
+		if got.ResultType != "compound_molecule" {
+			t.Fatalf("result_type = %s, want compound_molecule", got.ResultType)
+		}
+		armID := patrol.ID + ".arm-ace"
+
+		db := openProxiedDB(t, p)
+		assertProxiedDepExistsWithType(t, db, armID, s2.ID, "blocks")
+		assertProxiedDepExistsWithType(t, db, armID, s3.ID, "blocks")
+		for _, wrong := range []string{s1.ID, patrol.ID} {
+			var count int
+			if err := db.QueryRow(
+				"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ? AND type = 'blocks'",
+				armID, wrong).Scan(&count); err != nil {
+				t.Fatalf("query arm %s blocks on %s: %v", armID, wrong, err)
+			}
+			if count != 0 {
+				t.Errorf("arm %s carries %d blocks edges onto %s; it must wait on the terminal steps only", armID, count, wrong)
+			}
 		}
 	})
 
