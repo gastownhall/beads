@@ -13,6 +13,7 @@ This section provides step-by-step recovery procedures for common Beads issues. 
 | Going Back from v65 | A database bd 1.2.x migrated to v65 has to work with bd 1.1.2 again, rebuilt from a full export | [Un-migrate from Schema v65](/recovery/unmigrate-schema-v65) |
 | Init Safety Refusals | `bd init` or `bd dolt` refuses with a pattern code like `pk-fork-refused` | [Recovery Playbooks](/recovery/init-safety) |
 | Database Corruption | `database is locked` after an interrupted command, or a database that will not open (`corrupted journal`) | [Database Corruption](/recovery/database-corruption) |
+| Schema Encoding Drift | A migration stops with the schema-encoding-drift refusal (`invalid hash length`, dolthub/dolt#11131) | [Schema Encoding Drift](/recovery/schema-encoding-drift) |
 | Merge Conflicts | Dolt conflicts during sync | [Merge Conflicts](/recovery/merge-conflicts) |
 | Circular Dependencies | Cycle detection errors | [Circular Dependencies](/recovery/circular-dependencies) |
 | Sync Failures | `bd dolt push`/`bd dolt pull` errors | [Sync Failures](/recovery/sync-failures) |

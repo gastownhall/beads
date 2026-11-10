@@ -8,6 +8,7 @@ go_test(
         "docsync_test.go",
         "doltpin_test.go",
         "init_safety_recovery_test.go",
+        "schema_encoding_drift_recovery_test.go",
     ],
     # Every Markdown file (the docs trees, the root docs, every AGENTS.md),
     # every Go test file (the guard-test names the agent instructions cite),
@@ -33,7 +34,10 @@ go_test(
         "//scripts:generate-cli-docs.sh",
         "//scripts:test.sh",
     ],
-    deps = ["//internal/testutil/bazeltest"],
+    deps = [
+        "//internal/storage/schema",
+        "//internal/testutil/bazeltest",
+    ],
 )
 
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

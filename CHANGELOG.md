@@ -1226,6 +1226,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Migration 0059 stops with an actionable refusal on Dolt schema-encoding
+  drift** instead of the raw engine error (#5699). A database whose schema
+  cursor predates 0059 can hit dolthub/dolt#11131 — a TEXT column's on-disk
+  storage encoding re-derived without rewriting its rows — when 0059's
+  recompute reads the drifted values, and the failure surfaced as a plain
+  migration error (`Error 1105: panic recovered: invalid hash length`, or
+  `malformed out-of-band adaptive value` on the embedded engine) with no
+  recovery guidance. The failure is now classified and rendered on every
+  store-open and migrate path as a refusal naming the stopped migration, the
+  engine symptom, and the operator-supervised recovery runbook
+  (docs/recovery/schema-encoding-drift); `--json` carries a
+  `schema_encoding_drift` object. Raw engine panics in embedded mode remain
+  unconverted — a residual driver limitation tracked in the issue.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

@@ -200,6 +200,15 @@ and picks up where it left off.
 Those lines go to stderr, and only when stderr is a terminal, so a piped or CI
 upgrade prints nothing at all. Silence there is not a stall either.
 
+#### If the migration stops on schema encoding drift
+
+A database whose schema cursor predates migration 0059 can stop mid-upgrade
+with the schema-encoding-drift refusal: the Dolt engine can no longer read
+some stored values ([dolthub/dolt#11131](https://github.com/dolthub/dolt/issues/11131)),
+and `bd` refuses rather than migrate past unreadable data. Do not retry the
+migration or delete rows to get past it — follow the
+[schema encoding drift runbook](/recovery/schema-encoding-drift).
+
 #### Repair blocked flags after migrating
 
 Migration 0059 can mark issues as blocked when they are not, which drops them
