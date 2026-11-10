@@ -516,6 +516,74 @@ func TestInitializeIgnoresNativeUserConfigWhenDocumentedExists(t *testing.T) {
 	}
 }
 
+// GH#8113: with the documented user config absent, the native location stays
+// the fallback: native values remain effective and private above legacy and
+// below project and BEADS_DIR overrides, and UserConfigYamlPath selects the
+// native file.
+func TestInitializeFallsBackToNativeUserConfigWhenDocumentedMissing(t *testing.T) {
+	candidates := isolateUserConfigCandidates(t)
+	writeUserYamlConfig(t, candidates.legacy, "actor: legacy\njira:\n  url: https://legacy.example\n")
+	writeUserYamlConfig(t, candidates.native, "actor: native\ngithub:\n  url: https://native.example\nnode_id: native-node\n")
+
+	ResetForTesting()
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	if got := GetString("actor"); got != "native" {
+		t.Errorf("actor = %q, want %q (native over legacy)", got, "native")
+	}
+	if got := GetString("github.url"); got != "https://native.example" {
+		t.Errorf("github.url = %q, want native endpoint", got)
+	}
+	if got := NodeID(); got != "native-node" {
+		t.Errorf("NodeID() = %q, want %q", got, "native-node")
+	}
+	if got := GetString("jira.url"); got != "https://legacy.example" {
+		t.Errorf("jira.url = %q, want legacy value (native does not define it)", got)
+	}
+	if got := PrivateConfigValue("github.url"); got != "https://native.example" {
+		t.Errorf("private github.url = %q, want native endpoint", got)
+	}
+	if path, err := UserConfigYamlPath(); err != nil || path != candidates.native {
+		t.Errorf("UserConfigYamlPath() = %q, %v; want native %q", path, err, candidates.native)
+	}
+
+	// A project config overrides the actor while native-only settings keep
+	// merging beneath it.
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	writeUserYamlConfig(t, filepath.Join(projectRoot, ".beads", "config.yaml"), "actor: project\n")
+	t.Chdir(projectRoot)
+	ResetForTesting()
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	if got := GetString("actor"); got != "project" {
+		t.Errorf("actor = %q, want %q (project over native)", got, "project")
+	}
+	if got := NodeID(); got != "native-node" {
+		t.Errorf("NodeID() = %q, want native node_id beneath project overrides", got)
+	}
+	if got := PrivateConfigValue("github.url"); got != "https://native.example" {
+		t.Errorf("private github.url = %q, want native endpoint beneath project overrides", got)
+	}
+
+	// An explicit BEADS_DIR workspace outranks both; native-only settings
+	// still apply beneath it.
+	beadsConfig := filepath.Join(t.TempDir(), "explicit", ".beads", "config.yaml")
+	writeUserYamlConfig(t, beadsConfig, "actor: beads-dir\n")
+	t.Setenv("BEADS_DIR", filepath.Dir(beadsConfig))
+	ResetForTesting()
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+	if got := GetString("actor"); got != "beads-dir" {
+		t.Errorf("actor = %q, want %q (BEADS_DIR over project)", got, "beads-dir")
+	}
+	if got := NodeID(); got != "native-node" {
+		t.Errorf("NodeID() = %q, want native node_id beneath BEADS_DIR overrides", got)
+	}
+}
+
 // GH#8113: when the documented <home>/.config/bd/config.yaml exists, Initialize
 // must not consult the native os.UserConfigDir()/bd/config.yaml at all (on
 // macOS touching that directory raises a permission prompt on every launch).
