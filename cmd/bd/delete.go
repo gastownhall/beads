@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	storeissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
@@ -369,6 +370,33 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 // deleteBatchReporting is deleteBatch for a bulk command that reports on its
 // own selection: report's members (`bd admin cleanup`'s retention_required) are added to the --json preview and result. A nil report
 // adds nothing, which is deleteBatch.
+// refuseMixedDeleteDestinations refuses a delete batch whose ids, resolved
+// in order, are held by more than one workspace (destinations[i] is
+// resolvedIDs[i]'s, "" for this one), naming each workspace's ids.
+func refuseMixedDeleteDestinations(resolvedIDs, destinations []string) error {
+	var order []string
+	byDest := map[string][]string{}
+	for i, id := range resolvedIDs {
+		dest := destinations[i]
+		if _, seen := byDest[dest]; !seen {
+			order = append(order, dest)
+		}
+		byDest[dest] = append(byDest[dest], id)
+	}
+	if len(order) < 2 {
+		return nil
+	}
+	parts := make([]string, 0, len(order))
+	for _, dest := range order {
+		where := "this workspace"
+		if dest != "" {
+			where = remedy.PrintedValue(dest)
+		}
+		parts = append(parts, fmt.Sprintf("%s in %s", strings.Join(byDest[dest], " "), where))
+	}
+	return fmt.Errorf("these issues are in different workspaces (%s); nothing was deleted, submit a separate bd delete for each workspace", strings.Join(parts, "; "))
+}
+
 func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput bool, ifRevision *int64, report map[string]interface{}) error {
 	if store == nil {
 		if err := ensureStoreActive(); err != nil {
@@ -383,6 +411,9 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 	// The ids that resolved to the repository a local copy came from, whose
 	// copies the deletion leaves here (printRetainedCopyNote).
 	var retainedCopies []*RoutedResult
+	// destinations[i] is the workspace resolvedIDs[i] resolved in
+	// (RoutedResult.destination).
+	var destinations []string
 	for _, id := range issueIDs {
 		result, err := resolveAndGetIssueForMutationExact(ctx, store, id)
 		if err != nil {
@@ -396,6 +427,7 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 		} else {
 			issues[result.ResolvedID] = result.Issue
 			resolvedIDs = append(resolvedIDs, result.ResolvedID)
+			destinations = append(destinations, result.destination())
 			if result.copyOwner != "" {
 				retainedCopies = append(retainedCopies, result)
 			}
@@ -408,6 +440,12 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 	}
 	if routedStore != nil {
 		defer func() { _ = routedStore.Close() }()
+	}
+	// The batch runs on one store, so every id must resolve in one
+	// workspace: run on the first routed store, an id another workspace holds
+	// would delete whatever that store has under it.
+	if err := refuseMixedDeleteDestinations(resolvedIDs, destinations); err != nil {
+		return err
 	}
 	if len(notFound) > 0 {
 		// The role's own existence probe reports a missing id with this same

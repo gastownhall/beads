@@ -441,7 +441,9 @@ func TestLocalRowsFailingCopyIdentityStayLocal(t *testing.T) {
 		{
 			name:     "source repo names another repository",
 			planning: []string{"pl-a"},
-			edit:     func(f *copyFixture, c *types.Issue) { c.SourceRepo = filepath.Join(filepath.Dir(f.planningDir), "elsewhere") },
+			edit: func(f *copyFixture, c *types.Issue) {
+				c.SourceRepo = filepath.Join(filepath.Dir(f.planningDir), "elsewhere")
+			},
 		},
 		{
 			name:     "no source repo",
@@ -567,5 +569,44 @@ func TestWritesToLocalCopyOfUnreadableOwnerFail(t *testing.T) {
 	res := runCopyCmd(t, showCmd, nil, "pl-u")
 	if res.exitCode != 0 || !strings.Contains(res.stdout, `"pl-u"`) {
 		t.Errorf("bd show pl-u of a copy whose target cannot be opened: exit %d, stdout %q, stderr %q; want the copy", res.exitCode, res.stdout, res.stderr)
+	}
+}
+
+// TestDeleteBatchAcrossWorkspacesRefused pins that a bd delete batch whose ids
+// resolve in different workspaces fails before deleting anything, while a
+// batch resolving in one workspace deletes as before.
+func TestDeleteBatchAcrossWorkspacesRefused(t *testing.T) {
+	// pl-n is a native project row whose id the planning workspace also
+	// holds for a different issue: it resolves locally.
+	f := newCopyFixture(t, []string{"pl-x", "pl-y", "pl-z", "pl-n"}, []string{"pl-x", "pl-y", "pl-z"}, []string{"pl-n"})
+
+	res := runCopyCmd(t, deleteCmd, map[string]string{"force": "true"}, "pl-x", "pl-n")
+	if res.exitCode == 0 {
+		t.Errorf("bd delete --force pl-x pl-n across two workspaces exited 0, want a refusal")
+	}
+	reported := res.stderr
+	if res.err != nil {
+		reported += res.err.Error()
+	}
+	if !strings.Contains(reported, "separate") {
+		t.Errorf("the refusal does not say to submit separate commands:\n%s", reported)
+	}
+	for _, id := range []string{"pl-x", "pl-n"} {
+		if f.planningIssue(t, id) == nil {
+			t.Errorf("the refused batch deleted planning %s", id)
+		}
+		if f.projectIssue(t, id) == nil {
+			t.Errorf("the refused batch deleted project %s", id)
+		}
+	}
+
+	res = runCopyCmd(t, deleteCmd, map[string]string{"force": "true"}, "pl-y", "pl-z")
+	if res.exitCode != 0 {
+		t.Fatalf("bd delete --force pl-y pl-z in one workspace: exit %d, err %v\nstderr: %s", res.exitCode, res.err, res.stderr)
+	}
+	for _, id := range []string{"pl-y", "pl-z"} {
+		if f.planningIssue(t, id) != nil {
+			t.Errorf("planning %s survived bd delete --force", id)
+		}
 	}
 }

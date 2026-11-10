@@ -57,6 +57,20 @@ type RoutedResult struct {
 	// workspace holds a bd repo sync copy of it (redirectLocalCopyToOwner),
 	// and "" otherwise.
 	copyOwner string
+	// beadsDir is the .beads directory of the workspace a routed result was
+	// resolved in.
+	beadsDir string
+}
+
+// destination identifies the workspace holding r's issue: the canonical
+// .beads directory it was routed to, or "" for the command's own workspace.
+// Results with equal destinations write to the same database, whichever
+// handles they hold.
+func (r *RoutedResult) destination() string {
+	if !r.Routed || r.beadsDir == "" || isCommandWorkspace(r.beadsDir) {
+		return ""
+	}
+	return utils.CanonicalizePath(r.beadsDir)
 }
 
 // Close closes any routed storage. Safe to call if Routed is false.
@@ -256,6 +270,7 @@ func redirectLocalCopy(ctx context.Context, localStore storage.DoltStorage, loca
 		ResolvedID: local.ResolvedID,
 		closeFn:    release,
 		copyOwner:  target.repoPath,
+		beadsDir:   target.beadsDir,
 	}, nil
 }
 
@@ -426,12 +441,13 @@ func resolveAndGetIssueForMutationExact(ctx context.Context, localStore storage.
 // tolerant resolver for the auto-routed store lookup, mirroring the local-store
 // distinction in resolveAndGetFromStore vs resolveAndGetFromStoreExact.
 func resolveViaAutoRoutingWithAccess(ctx context.Context, localStore storage.DoltStorage, id string, writable bool, exact bool) (*RoutedResult, error) {
-	routedStore, routed, _, err := openAutoRoutedStore(ctx, localStore, writable)
+	target, ok := activeAutoRouteTarget(ctx, localStore)
+	if !ok {
+		return nil, fmt.Errorf("%w: no auto-routed store available", errRoutingUnavailable)
+	}
+	routedStore, err := openAutoRouteTarget(ctx, target, writable)
 	if err != nil {
 		return nil, err
-	}
-	if !routed {
-		return nil, fmt.Errorf("%w: no auto-routed store available", errRoutingUnavailable)
 	}
 
 	var result *RoutedResult
@@ -445,6 +461,7 @@ func resolveViaAutoRoutingWithAccess(ctx context.Context, localStore storage.Dol
 		return nil, err
 	}
 	result.closeFn = func() { _ = routedStore.Close() }
+	result.beadsDir = target.beadsDir
 	return result, nil
 }
 
@@ -516,6 +533,7 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 		return nil, err
 	}
 	result.closeFn = func() { _ = targetStore.Close() }
+	result.beadsDir = targetBeadsDir
 
 	if os.Getenv("BD_DEBUG_ROUTING") != "" {
 		fmt.Fprintf(os.Stderr, "[routing] Resolved %s via prefix route to %s (database: %s)\n", id, remedy.PrintedValue(matchedRoute.Path), remedy.PrintedValue(targetDB))
