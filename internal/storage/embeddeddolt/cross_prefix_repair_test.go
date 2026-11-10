@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -339,4 +340,87 @@ func TestEmbeddedCrossPrefixRepairRefusesDirtyTable(t *testing.T) {
 			requireRepairConverged(t, ctx, conn)
 		})
 	}
+}
+
+// graphSnapshot is everything a no-op pass must leave alone: HEAD, the
+// working set, every edge row, and every issue's blocked flag and stamp.
+func graphSnapshot(t *testing.T, ctx context.Context, conn *sql.Conn) string {
+	t.Helper()
+	var head string
+	if err := conn.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&head); err != nil {
+		t.Fatalf("HASHOF(HEAD): %v", err)
+	}
+	dirty, err := statusTables(ctx, conn)
+	if err != nil {
+		t.Fatalf("dolt_status: %v", err)
+	}
+	return fmt.Sprintf("head=%s\ndirty=%v\n%s%s", head, dirty,
+		dumpRows(t, ctx, conn, "SELECT id, issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type,"+
+			" CAST(metadata AS CHAR), thread_id FROM dependencies ORDER BY id"),
+		dumpRows(t, ctx, conn, "SELECT id, is_blocked, CAST(updated_at AS CHAR) FROM issues ORDER BY id"))
+}
+
+// dumpRows renders every row query returns, one line per row.
+func dumpRows(t *testing.T, ctx context.Context, conn *sql.Conn, query string) string {
+	t.Helper()
+	rows, err := conn.QueryContext(ctx, query)
+	if err != nil {
+		t.Fatalf("%s: %v", query, err)
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		t.Fatalf("columns: %v", err)
+	}
+	var b strings.Builder
+	for rows.Next() {
+		vals := make([]sql.NullString, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		fmt.Fprintln(&b, vals)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	return b.String()
+}
+
+// TestEmbeddedCrossPrefixRepairReopenIsNoop is AC-7: once the repair has
+// converged, reopening the store, and even a forced re-run of the repair
+// pass, plans nothing and leaves HEAD, the working set and every row alone.
+func TestEmbeddedCrossPrefixRepairReopenIsNoop(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	conn, dataDir, closeConn := newCrossPrefixRepairDB(t, ctx)
+	seedRefusalFixture(t, ctx, conn)
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		closeConn()
+		t.Fatalf("repair MigrateUp: %v", err)
+	}
+	requireRepairConverged(t, ctx, conn)
+	converged := graphSnapshot(t, ctx, conn)
+	closeConn()
+
+	conn, closeConn = openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("reopen MigrateUp: %v", err)
+	}
+	if got := graphSnapshot(t, ctx, conn); got != converged {
+		t.Errorf("reopen changed the converged store:\n got: %s\nwant: %s", got, converged)
+	}
+
+	execFrozenGuard(t, ctx, conn, "DELETE FROM ignored_schema_migrations WHERE version = 32")
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("forced re-run MigrateUp: %v", err)
+	}
+	if got := graphSnapshot(t, ctx, conn); got != converged {
+		t.Errorf("forced re-run changed the converged store:\n got: %s\nwant: %s", got, converged)
+	}
+	requireIgnoredCursorAtLatest(t, ctx, conn)
 }
