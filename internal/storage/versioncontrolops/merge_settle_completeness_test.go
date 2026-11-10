@@ -15,9 +15,11 @@ import (
 // unstaged — a staging that silently missed, a write that landed after the
 // stage — fails the conclusion naming the table instead of letting
 // DOLT_COMMIT record HEAD's copy of the survivor (the exact revert GH#7811's
-// staging exists to prevent). Source, query and staging failures fail the
-// same way: error out, commit nothing; the caller then aborts the merge
-// (embedded) or rolls back its transaction (server mode).
+// staging exists to prevent). A survivor an ignored = 1 dolt_ignore pattern
+// matches is exempt: DOLT_ADD skips the tables Dolt ignores. Source, query
+// and staging failures fail the same way: error out, commit nothing; the
+// caller then aborts the merge (embedded) or rolls back its transaction
+// (server mode).
 
 // expectUnstagedTables answers one unstagedMergeTables read with tables.
 func expectUnstagedTables(mock sqlmock.Sqlmock, tables ...string) {
@@ -26,6 +28,16 @@ func expectUnstagedTables(mock sqlmock.Sqlmock, tables ...string) {
 		rows.AddRow(table)
 	}
 	mock.ExpectQuery(regexp.QuoteMeta(mergedTablesQueryPrefix)).WillReturnRows(rows)
+}
+
+// expectIgnorePatterns answers withoutIgnoreMatches' read of the ignored = 1
+// dolt_ignore patterns.
+func expectIgnorePatterns(mock sqlmock.Sqlmock, patterns ...string) {
+	rows := sqlmock.NewRows([]string{"pattern"})
+	for _, pattern := range patterns {
+		rows.AddRow(pattern)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT pattern FROM dolt_ignore WHERE ignored = 1")).WillReturnRows(rows)
 }
 
 // expectIncompleteMergeConclusion answers stageMergeResult's reads as far as
@@ -42,10 +54,10 @@ func expectIncompleteMergeConclusion(mock sqlmock.Sqlmock, tables ...string) {
 // TestConcludeMergeRefusesIncompleteMergeResult pins the pre-commit failure
 // paths of the staging pass (AC-5): the merge source read, a missing or
 // uninlinable source commit, the merged-but-unstaged tables read, a staging
-// call, the completeness re-read, and a merge-touched table the re-read
-// still finds unstaged each fail the conclusion with a contextual error and
-// without any commit, so no incomplete merge commit exists for a later push
-// to publish.
+// call, the completeness re-read, its dolt_ignore read, and a merge-touched
+// table the re-read still finds unstaged that no ignored = 1 pattern matches
+// each fail the conclusion with a contextual error and without any commit,
+// so no incomplete merge commit exists for a later push to publish.
 func TestConcludeMergeRefusesIncompleteMergeResult(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -114,14 +126,34 @@ func TestConcludeMergeRefusesIncompleteMergeResult(t *testing.T) {
 			wantErr: "re-check merged-but-unstaged tables",
 		},
 		{
+			name: "dolt_ignore read failure",
+			setup: func(mock sqlmock.Sqlmock) {
+				expectIncompleteMergeConclusion(mock, "comments")
+				expectUnstagedTables(mock, "comments")
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT pattern FROM dolt_ignore WHERE ignored = 1")).
+					WillReturnError(errors.New("dolt_ignore unavailable"))
+			},
+			wantErr: "re-check merged-but-unstaged tables",
+		},
+		{
 			name: "table still unstaged after staging",
 			setup: func(mock sqlmock.Sqlmock) {
 				expectIncompleteMergeConclusion(mock, "comments", "labels")
 				// The re-read still names comments: a write landed after the
 				// stage, or the stage did not take.
 				expectUnstagedTables(mock, "comments")
+				expectIgnorePatterns(mock, "__temp__%", "wisp_%")
 			},
 			wantErr: "comments",
+		},
+		{
+			name: "only the survivors no ignored = 1 pattern matches refuse",
+			setup: func(mock sqlmock.Sqlmock) {
+				expectIncompleteMergeConclusion(mock, "__temp__probe", "labels")
+				expectUnstagedTables(mock, "__temp__probe", "labels")
+				expectIgnorePatterns(mock, "__temp__%")
+			},
+			wantErr: "merge-touched table(s) labels remain unstaged",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -161,6 +193,7 @@ func TestMergeAndSettleAbortsWhenConclusionIsIncomplete(t *testing.T) {
 		expectNoViolations(mock)
 		expectIncompleteMergeConclusion(mock, "labels")
 		expectUnstagedTables(mock, "labels")
+		expectIgnorePatterns(mock)
 		expectDrainedCall(mock, "CALL DOLT_MERGE('--abort')")
 
 		err := MergeAndSettleWithStrategy(t.Context(), rec, "origin/main", "")
@@ -184,6 +217,7 @@ func TestMergeAndSettleAbortsWhenConclusionIsIncomplete(t *testing.T) {
 		expectNoViolations(mock)
 		expectIncompleteMergeConclusion(mock, "comments")
 		expectUnstagedTables(mock, "comments")
+		expectIgnorePatterns(mock)
 		expectDrainedCall(mock, "CALL DOLT_MERGE('--abort')")
 
 		err := SettleMerge(t.Context(), rec, nil, false, "")
@@ -195,4 +229,54 @@ func TestMergeAndSettleAbortsWhenConclusionIsIncomplete(t *testing.T) {
 		}
 		rec.assertDrained(t, mock)
 	})
+}
+
+// TestConcludeMergeExemptsIgnoredSurvivors pins the exemption: survivors that
+// ignored = 1 patterns match, by Dolt's matching rules ('*' is a wildcard),
+// are tables DOLT_ADD skips by design, so the conclusion commits rather than
+// refusing a merge that every retry would refuse again.
+func TestConcludeMergeExemptsIgnoredSurvivors(t *testing.T) {
+	rec, mock := newDrainMock(t)
+	expectIncompleteMergeConclusion(mock, "__temp__probe", "scratch_notes", "labels")
+	expectUnstagedTables(mock, "__temp__probe", "scratch_notes")
+	expectIgnorePatterns(mock, "__temp__%", "scratch*")
+	expectDrainedCall(mock, "CALL DOLT_COMMIT('-m', ?)", "conclude")
+
+	if err := concludeMerge(t.Context(), rec, "conclude", ""); err != nil {
+		t.Fatalf("concludeMerge() error = %v, want the ignored survivors exempt", err)
+	}
+	rec.assertDrained(t, mock)
+}
+
+// TestDoltIgnorePatternREFollowsDoltMatching pins dolt_ignore pattern
+// matching to Dolt's rules (doltdb's compilePattern), not LIKE's: '%' and '*'
+// match any run of characters, '?' exactly one, and '_' and regexp
+// metacharacters only themselves, case-sensitively.
+func TestDoltIgnorePatternREFollowsDoltMatching(t *testing.T) {
+	for _, tc := range []struct {
+		pattern, table string
+		want           bool
+	}{
+		{"__temp__%", "__temp__probe", true},
+		{"__temp__%", "xxtempxxprobe", false}, // '_' is literal, not LIKE's wildcard
+		{"comm%", "comments", true},
+		{"scratch*", "scratch_notes", true}, // '*' is a wildcard, unlike in LIKE
+		{"scratch*", "scratch", true},
+		{"wisp?", "wisps", true},
+		{"wisp?", "wisp", false},
+		{"wisp?", "wisp_x", false},
+		{"comments", "comments", true},
+		{"comments", "Comments", false},
+		{"a.c", "abc", false}, // regexp metacharacters are literal
+		{"a+", "aa", false},
+		{`a\?`, `a\x`, true}, // a backslash is literal and '?' still a wildcard
+	} {
+		re, err := doltIgnorePatternRE(tc.pattern)
+		if err != nil {
+			t.Fatalf("doltIgnorePatternRE(%q): %v", tc.pattern, err)
+		}
+		if got := re.MatchString(tc.table); got != tc.want {
+			t.Errorf("pattern %q matches %q = %v, want %v", tc.pattern, tc.table, got, tc.want)
+		}
+	}
 }
