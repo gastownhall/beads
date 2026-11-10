@@ -561,6 +561,24 @@ for every SSH connection reset. Tracked in beads
 [dolthub/dolt#11742](https://github.com/dolthub/dolt/pull/11742) and
 [dolthub/dolt#11745](https://github.com/dolthub/dolt/pull/11745).
 
+**Fix:** upgrade the Dolt engine that runs the push. Both fixes shipped in
+Dolt 2.3.3. Which engine that is depends on how `bd` runs Dolt:
+
+- **Embedded mode**: the push runs on the Dolt engine linked into `bd`
+  itself, so only a `bd` build linking a fixed engine fixes it. The engine in
+  beads v1.3.4 predates the fix and is affected; beads `main` already links
+  Dolt 2.6.0, which carries it. Upgrading a standalone `dolt` binary does not
+  replace the embedded engine.
+- **Server mode or an external Dolt**: git-protocol pushes and pulls run
+  through the `dolt` CLI and the `dolt sql-server`, not the engine inside
+  `bd`. Install the supported version from
+  [Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install)
+  for both, then restart the server on the new binary. A `dolt` already at
+  2.3.3 or newer is not affected, whatever the `bd` version. The 2.6.0
+  minimum in the `"bd requires dolt 2.6.0 or newer"` entry above does not
+  catch a `dolt` whose version `bd` cannot determine, so check
+  `dolt version` yourself.
+
 ## Git Hook Issues
 
 ### Hooks not running
