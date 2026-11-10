@@ -359,29 +359,29 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		return err
 	}
 
-	if statusChanging {
-		newStatus := coerceStatus(updates["status"])
-		oldActive := oldIssue.Status != types.StatusClosed && oldIssue.Status != types.StatusPinned
-		newActive := newStatus != types.StatusClosed && newStatus != types.StatusPinned
-		if oldActive != newActive {
-			var (
-				affectedIssues, affectedWisps []string
-				aerr                          error
-			)
-			if opts.UseWispsTable {
-				affectedIssues, affectedWisps, aerr = issueops.AffectedByStatusChangeForWispInTx(ctx, r.runner, id)
-			} else {
-				affectedIssues, affectedWisps, aerr = issueops.AffectedByStatusChangeInTx(ctx, r.runner, id)
-			}
-			if aerr != nil {
-				return fmt.Errorf("db: Update %s: affected by status change: %w", id, aerr)
-			}
-			if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps); err != nil {
-				return fmt.Errorf("db: Update %s: recompute is_blocked: %w", id, err)
-			}
-			if !newActive {
-				issueops.NoteStatusChangeBlockedRecheck(r.runner, id, string(newStatus), affectedIssues, affectedWisps)
-			}
+	// Recompute the dependents whenever the row's hold on a blocks or
+	// conditional-blocks edge flips, exactly as issueops.updateIssueInTx does:
+	// a reason-only edit on a closed conditional target counts.
+	if transition := issueops.BlockingHoldTransitionFor(oldIssue, updates); transition.Changed {
+		newStatus := transition.NewStatus
+		newActive := transition.NewActive
+		var (
+			affectedIssues, affectedWisps []string
+			aerr                          error
+		)
+		if opts.UseWispsTable {
+			affectedIssues, affectedWisps, aerr = issueops.AffectedByStatusChangeForWispInTx(ctx, r.runner, id)
+		} else {
+			affectedIssues, affectedWisps, aerr = issueops.AffectedByStatusChangeInTx(ctx, r.runner, id)
+		}
+		if aerr != nil {
+			return fmt.Errorf("db: Update %s: affected by status change: %w", id, aerr)
+		}
+		if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps); err != nil {
+			return fmt.Errorf("db: Update %s: recompute is_blocked: %w", id, err)
+		}
+		if !newActive {
+			issueops.NoteStatusChangeBlockedRecheck(r.runner, id, string(newStatus), affectedIssues, affectedWisps)
 		}
 	}
 	// Snapshot only after all derived blocked-state maintenance has completed.
@@ -438,17 +438,6 @@ func cloneUpdateFields(updates map[string]any) map[string]any {
 		cloned[key] = value
 	}
 	return cloned
-}
-
-func coerceStatus(v any) types.Status {
-	switch s := v.(type) {
-	case string:
-		return types.Status(s)
-	case types.Status:
-		return s
-	default:
-		return ""
-	}
 }
 
 func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, opts domain.IssueTableOpts) (domain.ClaimRowResult, error) {
