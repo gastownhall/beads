@@ -52,9 +52,45 @@ bd mol burn <wisp-id>
 
 ```bash
 bd mol wisp list      # list all wisps in the current context
-bd mol wisp gc        # garbage collect old/abandoned wisps
+bd mol wisp gc        # preview what a wisp garbage collection would clean
+bd mol wisp gc --force  # actually delete what the preview showed
 bd purge --force      # delete all closed ephemeral beads
 ```
+
+### Wisp GC is a preview by default
+
+`bd mol wisp gc` (bare, with `--age`, with `--all`, or with `--closed`)
+deletes nothing without `--force`: it lists the wisps it would clean —
+candidate ids and count in `--json`, with `dry_run` true — and exits 0.
+Add `--force` to an intentional cleanup to delete; an explicit `--dry-run`
+still previews and wins over `--force`. Scripts and patrol automation that
+relied on bare `gc` deleting must add `--force`.
+
+The age mode's scope is every ephemeral issue, not only molecule steps:
+operational mail and any other ephemeral bead are eligible once they age
+out. Protection comes from issue types, not labels. The `types.infra`
+setting names the types GC never reclaims — `agent`, `role` and `message`
+by default, so message-typed mail is protected while task-typed mail is
+not, whatever its labels. Extending `types.infra` replaces the defaults:
+name the defaults too, or they stop being protected. `--exclude-type`
+protects further types for one run only. The `types.retained` setting
+does not apply to `bd mol wisp gc` (see "Keeping key-bearing types out of
+plain sweeps" below).
+
+`gc --closed` holds back a closed wisp that a live row still depends on
+through a parent-child or tracks edge, so its dependents keep their
+attribution edges; the held-back count is reported in text and as
+`live_dependent_skipped` in every `--json` shape. Blocks-linked live
+dependents do not hold their step back (a closed step that live work only
+blocks on is still reclaimable), and once the dependents close too, the
+next run reclaims what was held back.
+
+Closing a root does not cascade to its children, while closing all
+children conditionally auto-closes the root: roots routinely close over
+live children. `bd close` refuses to close a root over open children
+unless forced, and that refusal plus the GC's live-dependent protection
+above is what keeps those children attributable. Plain `bd delete` keeps
+its own semantics and is no safer escape hatch for attribution.
 
 ### Retiring ids with `--retain-ids`
 
@@ -190,4 +226,5 @@ bd mol bond mol-critical-bug wisp-patrol --pour   # persist a bug found during a
    not wisped.
 3. **Squash before you delete** — if a wisp surfaced something durable,
    `bd mol squash` promotes it; burning is irreversible.
-4. **Garbage collect regularly** — `bd mol wisp gc` or `bd purge --force`.
+4. **Garbage collect regularly** — `bd mol wisp gc --force` (preview first
+   by leaving `--force` off) or `bd purge --force`.

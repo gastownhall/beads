@@ -703,6 +703,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd mol wisp gc` previews by default and deletes only with `--force`, in
+  every mode (bare, `--age`, `--all`, `--closed`).** The `--force` help always
+  promised "Actually delete (default: preview only)", but the age mode
+  deleted without it. Preview output names the candidate ids and their types
+  (candidate count and `dry_run: true` under `--json`); an explicit `--dry-run`
+  still previews and wins over `--force`. **This is a deliberate breaking
+  change**: scripts and patrol automation that relied on bare `gc` deleting
+  will now succeed while reclaiming nothing, and must add `--force` to
+  intentional cleanups — the safety of an unrun preview is the point
+  (#5152).
+
+- **`bd mol wisp gc --closed` no longer deletes closed roots that live rows
+  still depend on.** A closed wisp some live row depends on through a
+  parent-child or tracks edge is held back with its attribution edges intact
+  (reported in text and as `live_dependent_skipped` in every `--json`
+  shape); once the dependents close too, the next run reclaims what was
+  held back. Closed steps whose live dependents arrive only through `blocks`
+  remain reclaimable, and fully closed molecules are still purged whole. A
+  failed dependency, custom-status or source-status read now aborts the
+  selection before anything is deleted (#5152).
+
+- **`bd close` hints at separate arguments when an unresolved argument
+  contains whitespace.** An unquoted zsh `$LIST` arrives as one argv token;
+  the not-found error keeps its identity and adds "pass each ID as its own
+  argument; in zsh use an array or ${=IDS}". A single unknown id keeps
+  today's error (#5152).
+
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add

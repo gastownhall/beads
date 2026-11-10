@@ -197,10 +197,13 @@ Use burn for routine work with no archival value.
 
 ### Garbage Collection
 
+Wisp GC previews by default in both modes; add `--force` to delete.
+
 ```bash
-bd mol wisp gc                       # Clean up orphaned wisps
+bd mol wisp gc                       # Preview abandoned-wisp cleanup
+bd mol wisp gc --force               # Delete abandoned wisps past the age threshold
 bd mol wisp gc --closed              # Preview closed wisp deletion
-bd mol wisp gc --closed --force      # Purge all closed wisps
+bd mol wisp gc --closed --force      # Purge closed wisps (roots with live children held back)
 ```
 
 ---
@@ -332,7 +335,7 @@ bd mol distill bd-release-epic --as "Release Process" --var version=X.Y.Z
 | `bd mol pour <proto>` | Shortcut for `spawn --pour` |
 | `bd mol wisp <proto>` | Create ephemeral wisp |
 | `bd mol wisp list` | List all wisps |
-| `bd mol wisp gc` | Garbage collect orphaned wisps |
+| `bd mol wisp gc` | Preview wisp cleanup (add `--force` to delete) |
 | `bd mol wisp gc --closed` | Purge all closed wisps (preview; use --force to delete) |
 | `bd ship <capability>` | Publish capability for cross-project deps |
 

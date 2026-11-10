@@ -612,6 +612,11 @@ var wispGCCmd = &cobra.Command{
 	Short: "Garbage collect old/abandoned wisps",
 	Long: `Garbage collect old or abandoned wisps from the database.
 
+PREVIEW BY DEFAULT in both modes: without --force the GC only lists what it
+would clean (candidate ids and count in --json, with dry_run true) and
+deletes nothing. Add --force to an intentional cleanup to delete; --dry-run
+still previews and wins over --force.
+
 A wisp is considered abandoned if:
   - It hasn't been updated in --age duration and is not closed
   - AND it is not live work: blocked steps (waiting on a dependency), pinned
@@ -622,31 +627,56 @@ A wisp is considered abandoned if:
     are age-reclaimable. If the blocked set or the custom-status list cannot be
     read, the GC aborts rather than risk reclaiming live steps.
 
+The age mode's scope is every ephemeral issue, not only molecule steps:
+operational mail and any other ephemeral bead are eligible once they age out.
+Protection comes from issue TYPES, not labels: the types.infra setting names
+the types GC never reclaims (agent, role and message by default — so
+message-typed mail is protected, task-typed mail is not, whatever its labels).
+Extending types.infra REPLACES the defaults: name the defaults too or they
+stop being protected. --exclude-type protects further types for this run
+only. The types.retained setting does NOT apply to wisp GC (see
+docs/workflows/wisps.md).
+
 Wisps that depend on an abandoned wisp are deleted with it, closed ones
 included even without --all, but only if they too haven't been updated in
 --age duration and are not live work. A dependent that is too young is
 spared and loses its edge to the deleted wisp: an open one is collected once
 it ages out, a closed one only by --all, --closed or 'bd purge'.
 
-Abandoned wisps are deleted without creating a digest. Use 'bd mol squash'
-if you want to preserve a summary before garbage collection.
+Use --closed to purge closed wisps (regardless of age). Preview and --force
+work the same as in age mode, and the selection holds back a closed wisp
+that a live row still depends on through a parent-child or tracks edge, so
+its dependents keep their attribution edges. Blocks-linked live dependents
+do NOT hold their step back (a closed step blocked-on by live work is still
+reclaimable), and a fully closed molecule is purged whole: once the
+dependents close too, the next run reclaims what was held back. How many
+candidates live dependents held back is reported in text and as
+live_dependent_skipped in every --json shape.
 
-Use --closed to purge ALL closed wisps (regardless of age). This is the
-fastest way to reclaim space from accumulated wisp bloat. Safe by default:
-requires --force to actually delete.
+Closing a root does not cascade to its children (closing all children
+auto-closes the root, conditionally — see 'bd close --help'), so roots
+routinely close over live children; 'bd close' refuses that unless forced,
+and this GC's protection is what keeps those children attributable.
+
+Abandoned wisps are deleted without creating a digest. Use 'bd mol squash'
+if you want to preserve a summary before garbage collection. Plain
+'bd delete' keeps its own semantics and is no safer escape hatch for
+attribution.
 
 Note: This uses time-based cleanup, appropriate for ephemeral wisps.
 For graph-pressure staleness detection (blocking other work), see 'bd mol stale'.
 
 Examples:
-  bd mol wisp gc                                    # Clean abandoned wisps (default: 1h threshold)
-  bd mol wisp gc --dry-run                          # Preview what would be cleaned
-  bd mol wisp gc --age 24h                          # Custom age threshold
-  bd mol wisp gc --all                              # Also clean closed wisps older than threshold
+  bd mol wisp gc                                    # Preview what would be cleaned (default: 1h threshold)
+  bd mol wisp gc --force                            # Delete abandoned wisps older than the threshold
+  bd mol wisp gc --dry-run                          # Preview what would be cleaned (same as no --force)
+  bd mol wisp gc --age 24h                          # Preview with a custom age threshold
+  bd mol wisp gc --age 24h --force                  # Delete with a custom age threshold
+  bd mol wisp gc --all                              # Also preview closed wisps older than threshold
   bd mol wisp gc --closed                           # Preview closed wisp deletion
-  bd mol wisp gc --closed --force                   # Delete all closed wisps
+  bd mol wisp gc --closed --force                   # Delete closed wisps (live-dependent roots held back)
   bd mol wisp gc --closed --dry-run                 # Explicit dry-run (same as no --force)
-  bd mol wisp gc --exclude-type agent,rig           # Protect agent and rig wisps from GC
+  bd mol wisp gc --age 1h --force --exclude-type agent,rig # Delete except agent and rig wisps
   bd mol wisp gc --closed --force --exclude-type mol # Delete closed wisps except mol type`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
