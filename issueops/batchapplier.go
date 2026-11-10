@@ -367,8 +367,10 @@ type ItemResult struct {
 	// role is written against result snapshots — the completion hooks hand a
 	// script the row it is being told about, and a wrapper that had to re-read
 	// each one would be N reads outside the transaction that wrote them. An
-	// HTTP client gets ids and a revision and reads what it wants back, and
-	// hooks never fire on that surface at all.
+	// HTTP client gets ids and a revision and reads what it wants back. The
+	// server fires no hooks (bd serve peels the hook layer); a connected
+	// workspace runs its hooks client-side, over that client, and pays those
+	// reads: a landed row with no snapshot fires from the row read back by id.
 	Issue *Issue
 }
 

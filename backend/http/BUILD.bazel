@@ -49,6 +49,7 @@ go_test(
         "e2e_remote_roles_test.go",
         "e2e_request_budget_test.go",
         "e2e_search_test.go",
+        "e2e_set_state_hooks_test.go",
         "e2e_show_current_test.go",
         "e2e_show_single_fetch_test.go",
         "open_test.go",

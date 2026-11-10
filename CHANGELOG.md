@@ -1240,15 +1240,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   child id, so a state change does not consume a child number of the
   subject); a template subject stays settable with the pre-read carrying
   the template waiver, while a subject that became a template after the
-  read refuses whole; hooks see `create` for the event and `update` for the
-  subject on success and nothing on refusal; and over HTTP the waiver
-  rides the batch update item's `allow_template` behind the new
-  `issues.batchApply.updateAllowTemplate` capability, reported before the
-  dial against a server that lacks it. A subject that moves between the
+  read refuses whole; on success hooks see `create` for the event, `update`
+  for the event carrying its parent edge to the subject, and `update` for
+  the subject, the same on every route, and nothing on refusal; and over
+  HTTP the waiver rides the batch update item's `allow_template` behind the
+  new `issues.batchApply.updateAllowTemplate` capability, reported before
+  the dial against a server that lacks it. A subject that moves between the
   durable and wisp planes between the command's read and its write can
   still gain a cross-plane parent edge (the batch's ordinary edge policy);
   see the compatibility notes in
-  [labels.md](docs/core-concepts/labels.md#compatibility-notes). (GH#5637)
+  [labels.md](docs/core-concepts/labels.md#compatibility-notes). The batch
+  write behind it now fires `update` on the direct route for an issue the
+  batch created that one of its edges leaves, as the proxied-server route
+  already did. On a `bd connect` workspace, whose hooks run client-side, it
+  now also fires each written row's `create`, `update` or `close` hook,
+  which it skipped there because the server's batch answer carries no rows:
+  when such a hook exists, it reads the row back from the server after the
+  commit and hands the script that. This also gives `bd create --graph`
+  over `bd connect` its `on_create` firings. (GH#5637)
 
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
