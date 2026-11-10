@@ -460,7 +460,9 @@ func batchDepAddEdge(args []string) (*types.Dependency, error) {
 	if len(args) >= 3 {
 		depType = args[2]
 	}
-	dt := types.DependencyType(depType)
+	// A line stores `bd dep add --type`'s aliases as the canonical blocks
+	// type that ready/blocked gating matches (GH#5585).
+	dt := canonicalDependencyType(types.DependencyType(depType))
 	if !dt.IsValid() {
 		return nil, fmt.Errorf("dep add: invalid dependency type %q", depType)
 	}

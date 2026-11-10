@@ -16,6 +16,8 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -156,5 +158,39 @@ func TestCLI_Link_CustomTypeKeptAndDoesNotGate(t *testing.T) {
 	textTo := createDepsExtractID(t, runCreateDepsBD(t, bd, dir, "create", "Custom Text To", "-p", "1", "--json"))
 	if text := runCreateDepsBD(t, bd, dir, "link", textFrom, textTo, "--type", "owned-by"); !strings.Contains(text, "(owned-by)") {
 		t.Errorf("bd link --type owned-by output = %q, want the stored (owned-by) type", text)
+	}
+}
+
+// TestCLI_Batch_DepAdd_TypeBlockedByAliasGates is the `bd batch` dep.add
+// counterpart: the op built a types.DependencyType directly from the raw arg
+// and only checked IsValid(), so "blocked-by" was stored verbatim instead of
+// normalizing to "blocks".
+func TestCLI_Batch_DepAdd_TypeBlockedByAliasGates(t *testing.T) {
+	bd, dir := linkBatchInit(t)
+
+	for _, alias := range []string{"blocked-by", "depends-on"} {
+		blocker := createDepsExtractID(t, runCreateDepsBD(t, bd, dir, "create", "Batch Blocker "+alias, "-p", "1", "--json"))
+		blocked := createDepsExtractID(t, runCreateDepsBD(t, bd, dir, "create", "Batch Blocked "+alias, "-p", "1", "--json"))
+
+		script := "dep add " + blocked + " " + blocker + " " + alias + "\n"
+		scriptFile := filepath.Join(dir, "batch-"+alias+".txt")
+		if err := os.WriteFile(scriptFile, []byte(script), 0o600); err != nil {
+			t.Fatalf("write batch script: %v", err)
+		}
+
+		out := runCreateDepsBD(t, bd, dir, "batch", "-f", scriptFile)
+		if strings.Contains(strings.ToLower(out), "error") {
+			t.Fatalf("bd batch dep.add %s reported an error: %s", alias, out)
+		}
+
+		if gotType := linkBatchDepType(t, bd, dir, blocked, blocker); gotType != "blocks" {
+			t.Errorf("bd batch dep.add %s stored type %q, want canonical \"blocks\"", alias, gotType)
+		}
+		if linkBatchIDSet(t, bd, dir, "ready", "--limit", "0", "--json")[blocked] {
+			t.Errorf("%s is ready after batch dep.add %s while %s is open", blocked, alias, blocker)
+		}
+		if !linkBatchIDSet(t, bd, dir, "blocked", "--json")[blocked] {
+			t.Errorf("%s is not blocked after batch dep.add %s while %s is open", blocked, alias, blocker)
+		}
 	}
 }
