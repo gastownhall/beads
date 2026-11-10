@@ -2195,3 +2195,67 @@ func TestConditionalBlocksSuccessCloseNamesBlockerAndClosesUnguarded(t *testing.
 		t.Errorf("expected the guarded close of the fallback to succeed without force after its conditional target closed with a success reason, got: %v", err)
 	}
 }
+
+// TestConditionalBlocksConsistencyDetectsStaleReleasedFallback pins the
+// GH#5577 half of the consistency sweep. A fallback released the way the OLD
+// union released everything on close — its conditional-blocks target closed
+// with a success reason — is a stale is_blocked row: the detector must count
+// it and the full repair must restore it, because both derive their membership
+// test from the same union the write path recomputes from.
+func TestConditionalBlocksConsistencyDetectsStaleReleasedFallback(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issueA := &types.Issue{ID: "cb-cons-a", Title: "Precondition", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	issueB := &types.Issue{ID: "cb-cons-b", Title: "Fallback", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	for _, issue := range []*types.Issue{issueA, issueB} {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("failed to create issue: %v", err)
+		}
+	}
+
+	dep := &types.Dependency{IssueID: issueB.ID, DependsOnID: issueA.ID, Type: types.DepConditionalBlocks}
+	if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+		t.Fatalf("failed to add dependency: %v", err)
+	}
+	if err := store.CloseIssue(ctx, issueA.ID, "completed successfully", "tester", ""); err != nil {
+		t.Fatalf("failed to close issue A: %v", err)
+	}
+	assertIsBlocked(t, ctx, store, "issues", issueB.ID, true)
+
+	// Corrupt: the stale released-fallback row the pre-GH#5577 recompute
+	// wrote — the flag says released while the edge still holds.
+	if _, err := store.db.ExecContext(ctx, "UPDATE issues SET is_blocked = 0 WHERE id = ?", issueB.ID); err != nil {
+		t.Fatalf("clear the fallback's stored flag: %v", err)
+	}
+
+	if n, err := issueops.CountIsBlockedInconsistenciesInTx(ctx, store.db); err != nil {
+		t.Fatalf("count stale is_blocked rows: %v", err)
+	} else if n == 0 {
+		t.Fatal("expected the stale released fallback to be counted as an inconsistency")
+	}
+
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	changed, err := issueops.RecomputeAllIsBlockedInTx(ctx, tx)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("RecomputeAllIsBlockedInTx: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if changed == 0 {
+		t.Fatal("repair reported 0 corrections over the stale released fallback")
+	}
+	assertIsBlocked(t, ctx, store, "issues", issueB.ID, true)
+
+	if n, err := issueops.CountIsBlockedInconsistenciesInTx(ctx, store.db); err != nil || n != 0 {
+		t.Fatalf("post-repair count: want 0/nil, got %d/%v", n, err)
+	}
+}
