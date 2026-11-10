@@ -82,6 +82,14 @@ The control files in that root, as enumerated by `proxy.ControlFilePaths`:
 | `proxy-child.lock` | the proxy | held while the backend runs |
 | `<name>.stale-<unix>` | either | quarantined records, swept after 30 days |
 
+`proxy.PurgeControlFiles` (reverse migration's retirement step) removes
+every file above except the two locks, `proxy.PurgeableControlFilePaths`.
+The migration holds both locks while it retires the rest, so they stay
+behind as unlocked markers: Windows cannot delete a file its holder
+has open, and a POSIX unlink would let a new proxy lock a fresh file at the
+same path while the migration still held the old one. A completed
+migration accepts the markers and refuses one that is held.
+
 Two topologies share this machinery: **managed-local**, where bd spawns the
 `dolt sql-server` itself, and **external**, where the proxy fronts a
 `dolt sql-server` somebody else runs. They differ in several of the surfaces
