@@ -38,6 +38,7 @@ go_library(
         "//internal/debug",
         "//internal/doltversion",
         "//internal/endpointtrust",
+        "//internal/execwin",
         "//internal/fdhygiene",
         "//internal/githooksenv",
         "//internal/gittraceenv",
@@ -51,7 +52,6 @@ go_library(
         "@in_gopkg_yaml_v3//:yaml_v3",
     ] + select({
         "@rules_go//go/platform:windows": [
-            "//internal/execwin",
             "@org_golang_x_sys//windows",
         ],
         "//conditions:default": [],

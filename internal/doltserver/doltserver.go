@@ -37,6 +37,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltversion"
+	"github.com/steveyegge/beads/internal/execwin"
 	"github.com/steveyegge/beads/internal/fdhygiene"
 	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/gittraceenv"
@@ -2638,7 +2639,7 @@ func waitForRemotesAPI(port int, timeout time.Duration) error {
 // ensureDoltIdentity sets dolt global user identity from git config if not already set.
 func ensureDoltIdentity() error {
 	// Check if dolt identity is already configured
-	nameCmd := exec.Command("dolt", "config", "--global", "--get", "user.name")
+	nameCmd := execwin.Hide(exec.Command("dolt", "config", "--global", "--get", "user.name"))
 	if out, err := nameCmd.Output(); err == nil && strings.TrimSpace(string(out)) != "" {
 		return nil // Already configured
 	}
@@ -2647,21 +2648,21 @@ func ensureDoltIdentity() error {
 	gitName := "beads"
 	gitEmail := "beads@localhost"
 
-	if out, err := exec.Command("git", "config", "user.name").Output(); err == nil {
+	if out, err := execwin.Hide(exec.Command("git", "config", "user.name")).Output(); err == nil {
 		if name := strings.TrimSpace(string(out)); name != "" {
 			gitName = name
 		}
 	}
-	if out, err := exec.Command("git", "config", "user.email").Output(); err == nil {
+	if out, err := execwin.Hide(exec.Command("git", "config", "user.email")).Output(); err == nil {
 		if email := strings.TrimSpace(string(out)); email != "" {
 			gitEmail = email
 		}
 	}
 
-	if out, err := exec.Command("dolt", "config", "--global", "--add", "user.name", gitName).CombinedOutput(); err != nil {
+	if out, err := execwin.Hide(exec.Command("dolt", "config", "--global", "--add", "user.name", gitName)).CombinedOutput(); err != nil {
 		return fmt.Errorf("setting dolt user.name: %w\n%s", err, out)
 	}
-	if out, err := exec.Command("dolt", "config", "--global", "--add", "user.email", gitEmail).CombinedOutput(); err != nil {
+	if out, err := execwin.Hide(exec.Command("dolt", "config", "--global", "--add", "user.email", gitEmail)).CombinedOutput(); err != nil {
 		return fmt.Errorf("setting dolt user.email: %w\n%s", err, out)
 	}
 
@@ -2748,7 +2749,7 @@ func ensureDoltInit(doltDir string) error {
 		return nil // Already initialized
 	}
 
-	cmd := exec.Command("dolt", "init")
+	cmd := execwin.Hide(exec.Command("dolt", "init"))
 	cmd.Dir = doltDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("dolt init: %w\n%s", err, out)

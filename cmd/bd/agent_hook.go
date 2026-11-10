@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/execwin"
 )
 
 // Shared helpers for the agent lifecycle hook commands (codex-hook, cursor-hook).
@@ -111,7 +113,7 @@ func primeCommand(ctx context.Context, args ...string) (*exec.Cmd, error) {
 	// "prime" subcommand plus allowlisted internal flags, never
 	// attacker-controlled input. Documentation only: .golangci.yml excludes
 	// G204 repo-wide, so this annotation is not what keeps lint green.
-	return exec.CommandContext(ctx, exe, cmdArgs...), nil
+	return execwin.Hide(exec.CommandContext(ctx, exe, cmdArgs...)), nil
 }
 
 // runBdPrime shells out to `bd prime [args...]` and returns its combined output.

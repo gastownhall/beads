@@ -31,6 +31,7 @@ package scripts_test
 import (
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/token"
 	"os"
@@ -161,6 +162,7 @@ func findFuncDecl(file *ast.File, name string) *ast.FuncDecl {
 // pinCheck is the outcome of checking one pin against its construction file.
 type pinCheck struct {
 	construction token.Pos // the exec.Command call pinned, if found
+	assign       token.Pos // the cmd.SysProcAttr = helper() statement, if found
 	problems     []string
 }
 
@@ -259,6 +261,7 @@ func checkConsoleSpawnPin(fset *token.FileSet, file *ast.File, pin consoleSpawnP
 		}
 		return res
 	}
+	res.assign = pinAssign.Pos()
 
 	// The first use that can start the command: a method call on it (Start,
 	// Run, Output, ...) or passing it to another function (launchServer).
@@ -400,8 +403,8 @@ func TestConsoleSpawnPinScan(t *testing.T) {
 			wantErr: "only after cmd is first started",
 		},
 		{
-			name: "only one of two commands is pinned: the other cannot share the pin",
-			body: "func start() {\n\tcmd := exec.Command(\"dolt\", \"sql-server\")\n\tcmd.SysProcAttr = procAttrDetached()\n\tcmd = exec.Command(\"dolt\", \"sql-server\")\n\t_ = cmd.Start()\n}\n",
+			name:    "only one of two commands is pinned: the other cannot share the pin",
+			body:    "func start() {\n\tcmd := exec.Command(\"dolt\", \"sql-server\")\n\tcmd.SysProcAttr = procAttrDetached()\n\tcmd = exec.Command(\"dolt\", \"sql-server\")\n\t_ = cmd.Start()\n}\n",
 			wantErr: "2 constructions assigned to cmd",
 		},
 		{
@@ -477,5 +480,791 @@ func TestConsoleSpawnPinScan(t *testing.T) {
 				t.Fatalf("problems = %q, wantErr %v", problems, tc.wantErr)
 			}
 		})
+	}
+}
+
+// consoleSpawnScopes are where bd starts commands from a context that may
+// have no console: a directory (trailing slash; every file below it, nested
+// packages included) or a single file, whose sibling files stay out of scope.
+// This list IS the policy's scope: see the package comment.
+var consoleSpawnScopes = []string{
+	"internal/beads/",
+	"internal/doltserver/",
+	"internal/doltversion/",
+	"internal/git/",
+	"internal/remotecache/",
+	"internal/storage/dbproxy/",
+	"internal/storage/dolt/",
+	"internal/storage/doltutil/",
+
+	"cmd/bd/agent_hook.go",
+	"cmd/bd/compact.go",
+	"cmd/bd/export_auto.go",
+	"cmd/bd/gate.go",
+	"cmd/bd/hooks.go",
+	"cmd/bd/main.go",
+	"cmd/bd/prime.go",
+	"cmd/bd/proxied_server.go",
+	"internal/hooks/hooks_windows.go",
+	"internal/metrics/spawn.go",
+}
+
+// windowsBuildContext decides which files could be built for Windows. A file
+// it does not match has no console window to suppress.
+var windowsBuildContext = build.Context{GOOS: "windows", GOARCH: "amd64"}
+
+// consoleSpawnScopeOf returns the consoleSpawnScopes entry covering rel
+// (repo-relative, slash-separated), if rel is a non-test Go source file in
+// scope. Whether it builds for Windows is a separate question, answered by
+// windowsBuildContext.
+func consoleSpawnScopeOf(rel string) (string, bool) {
+	if !strings.HasSuffix(rel, ".go") || strings.HasSuffix(rel, "_test.go") {
+		return "", false
+	}
+	if strings.Contains("/"+rel, "/testdata/") {
+		return "", false
+	}
+	for _, scope := range consoleSpawnScopes {
+		if strings.HasSuffix(scope, "/") {
+			if strings.HasPrefix(rel, scope) {
+				return scope, true
+			}
+		} else if rel == scope {
+			return scope, true
+		}
+	}
+	return "", false
+}
+
+// consoleSpawnKind classifies one finding of the scan.
+type consoleSpawnKind string
+
+const (
+	// Accepted.
+	spawnHidden consoleSpawnKind = "hidden" // exec.Command(...) directly inside execwin.Hide(...)
+	spawnPinned consoleSpawnKind = "pinned" // one of consoleSpawnPins' constructions
+
+	// Rejected unless allowlisted.
+	spawnUnwrapped    consoleSpawnKind = "construction not wrapped in execwin.Hide"
+	spawnFuncValue    consoleSpawnKind = "os/exec constructor used as a function value"
+	spawnCmdLiteral   consoleSpawnKind = "exec.Cmd literal"
+	spawnStartProcess consoleSpawnKind = "direct process start"
+	spawnAttrWrite    consoleSpawnKind = "SysProcAttr write outside a pin"
+	spawnConsoleFlag  consoleSpawnKind = "console-creation flag"
+	spawnDotImport    consoleSpawnKind = "dot import of os/exec"
+)
+
+func (k consoleSpawnKind) accepted() bool { return k == spawnHidden || k == spawnPinned }
+
+// consoleSpawnHit is one finding of the scan.
+type consoleSpawnHit struct {
+	line     int
+	kind     consoleSpawnKind
+	call     string // e.g. "exec.Command", "os.StartProcess", "cmd.SysProcAttr"
+	tool     string // the command-name argument when it is a string literal, else "<dynamic>"
+	funcName string // enclosing top-level func's name, or "" (func literal/none)
+	snippet  string // trimmed source text of the hit's line, for allowlist matching
+}
+
+// consoleSpawnPinSet holds the positions checkConsoleSpawnPin accepted in one
+// file: the pinned constructions and their SysProcAttr assignments.
+type consoleSpawnPinSet struct {
+	constructions map[token.Pos]bool
+	assigns       map[token.Pos]bool
+}
+
+// funcBody is one function or func-literal body, for naming the function a
+// hit is in.
+type funcBody struct {
+	start, end token.Pos
+	name       string
+}
+
+// collectFuncBodies returns every function and func-literal body in file.
+// smallestEnclosingBody picks the innermost one, so a spawn inside a closure
+// is attributed to the closure, not the outer function.
+func collectFuncBodies(file *ast.File) []funcBody {
+	var bodies []funcBody
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.FuncDecl:
+			if node.Body != nil {
+				bodies = append(bodies, funcBody{node.Body.Pos(), node.Body.End(), node.Name.Name})
+			}
+		case *ast.FuncLit:
+			if node.Body != nil {
+				bodies = append(bodies, funcBody{node.Body.Pos(), node.Body.End(), ""})
+			}
+		}
+		return true
+	})
+	return bodies
+}
+
+// smallestEnclosingBody returns the tightest body containing pos.
+func smallestEnclosingBody(bodies []funcBody, pos token.Pos) (funcBody, bool) {
+	best := funcBody{}
+	found := false
+	for _, b := range bodies {
+		if pos < b.start || pos >= b.end {
+			continue
+		}
+		if !found || (b.end-b.start) < (best.end-best.start) {
+			best, found = b, true
+		}
+	}
+	return best, found
+}
+
+// findConsoleSpawns classifies every way file can construct or start a
+// process, or set a command's console flags. It resolves the file's own names
+// for os/exec and internal/execwin, so an aliased import is still seen and a
+// different package that happens to be called execwin is not trusted.
+//
+// It reuses literalArg and snippetAt from host_tool_exec_policy_test.go; both
+// files belong to the same //scripts:go_sources_test target.
+func findConsoleSpawns(fset *token.FileSet, file *ast.File, lines []string, pins consoleSpawnPinSet) []consoleSpawnHit {
+	execName := importName(file, osExecImportPath)
+	execwinName := importName(file, execwinImportPath)
+	osName := importName(file, "os")
+	syscallName := importName(file, "syscall")
+	bodies := collectFuncBodies(file)
+
+	var hits []consoleSpawnHit
+	add := func(pos token.Pos, kind consoleSpawnKind, call, tool string) {
+		body, _ := smallestEnclosingBody(bodies, pos)
+		line := fset.Position(pos).Line
+		hits = append(hits, consoleSpawnHit{
+			line:     line,
+			kind:     kind,
+			call:     call,
+			tool:     tool,
+			funcName: body.name,
+			snippet:  snippetAt(lines, line),
+		})
+	}
+
+	if execName == "." {
+		for _, imp := range file.Imports {
+			if p, _ := strconv.Unquote(imp.Path.Value); p == osExecImportPath {
+				add(imp.Pos(), spawnDotImport, "import", "")
+			}
+		}
+	}
+
+	// Calls that execwin.Hide wraps directly, and every selector used as a
+	// call's function (anything else naming exec.Command is a function value).
+	hiddenCalls := map[*ast.CallExpr]bool{}
+	calledFuns := map[*ast.SelectorExpr]bool{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+			calledFuns[sel] = true
+		}
+		if isPkgCall(call, execwinName, "Hide") && len(call.Args) == 1 {
+			if inner, ok := ast.Unparen(call.Args[0]).(*ast.CallExpr); ok {
+				hiddenCalls[inner] = true
+			}
+		}
+		return true
+	})
+
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.CallExpr:
+			switch {
+			case isExecConstruction(node, execName):
+				sel := node.Fun.(*ast.SelectorExpr)
+				argIdx := 0
+				if sel.Sel.Name == "CommandContext" {
+					argIdx = 1
+				}
+				tool := "<dynamic>"
+				if len(node.Args) > argIdx {
+					if name, ok := literalArg(node.Args[argIdx]); ok {
+						tool = name
+					}
+				}
+				kind := spawnUnwrapped
+				switch {
+				case hiddenCalls[node]:
+					kind = spawnHidden
+				case pins.constructions[node.Pos()]:
+					kind = spawnPinned
+				}
+				add(node.Pos(), kind, "exec."+sel.Sel.Name, tool)
+			case isPkgCall(node, osName, "StartProcess"):
+				add(node.Pos(), spawnStartProcess, "os.StartProcess", "")
+			case isPkgCall(node, syscallName, "StartProcess", "ForkExec"):
+				add(node.Pos(), spawnStartProcess, "syscall."+node.Fun.(*ast.SelectorExpr).Sel.Name, "")
+			}
+		case *ast.SelectorExpr:
+			if id, ok := node.X.(*ast.Ident); ok && execName != "" && id.Name == execName &&
+				(node.Sel.Name == "Command" || node.Sel.Name == "CommandContext") && !calledFuns[node] {
+				add(node.Pos(), spawnFuncValue, "exec."+node.Sel.Name, "")
+			}
+			if node.Sel.Name == "DETACHED_PROCESS" || node.Sel.Name == "CREATE_NEW_CONSOLE" {
+				add(node.Pos(), spawnConsoleFlag, node.Sel.Name, "")
+			}
+		case *ast.CompositeLit:
+			if sel, ok := node.Type.(*ast.SelectorExpr); ok && sel.Sel.Name == "Cmd" {
+				if id, ok := sel.X.(*ast.Ident); ok && execName != "" && id.Name == execName {
+					add(node.Pos(), spawnCmdLiteral, "exec.Cmd{}", "")
+				}
+			}
+		case *ast.AssignStmt:
+			for _, lhs := range node.Lhs {
+				v, ok := sysProcAttrTarget(lhs)
+				if !ok || pins.assigns[node.Pos()] {
+					continue
+				}
+				add(node.Pos(), spawnAttrWrite, v+".SysProcAttr", "")
+			}
+		}
+		return true
+	})
+	return hits
+}
+
+// consoleSpawnAllowlistEntry is one justified exception: the enclosing
+// function name (empty for a call at package scope or inside a func literal
+// this policy cannot name) and the exact trimmed source line, rather than a
+// line number, so an entry survives the file shifting lines around it.
+type consoleSpawnAllowlistEntry struct {
+	fn      string
+	snippet string
+	why     string
+}
+
+// consoleSpawnAllowlist is file (repo-relative, slash-separated) -> the entries
+// justifying a rejected finding there. It is empty on purpose: every command
+// in scope today is wrapped or pinned, and an entry here is a claim that one
+// is not and is nonetheless safe. An entry that stops matching fails the test.
+var consoleSpawnAllowlist = map[string][]consoleSpawnAllowlistEntry{}
+
+// matchConsoleAllowlist finds the allowlist entry (if any) matching hit by
+// enclosing function name and exact source-line snippet, returning its index
+// for usage tracking.
+func matchConsoleAllowlist(entries []consoleSpawnAllowlistEntry, hit consoleSpawnHit) (int, bool) {
+	for i, e := range entries {
+		if e.fn == hit.funcName && e.snippet == hit.snippet {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// consoleSpawnFileResult is the policy's verdict on one file.
+type consoleSpawnFileResult struct {
+	problems []string // each names file:line and what is wrong there
+	accepted int      // wrapped or pinned commands recognised
+	stale    []consoleSpawnAllowlistEntry
+}
+
+// checkConsoleSpawnFile applies the whole policy to one parsed file: each of
+// pins (all naming rel) must hold, and every finding must be accepted or
+// matched by an entry of allow, each of which must match something. The
+// repo-wide test and the fixture tests share it, so the fixtures exercise the
+// exact decision the real tree gets.
+func checkConsoleSpawnFile(fset *token.FileSet, file *ast.File, src []byte, rel string,
+	pins []consoleSpawnPin, allow []consoleSpawnAllowlistEntry) consoleSpawnFileResult {
+	var res consoleSpawnFileResult
+	set := consoleSpawnPinSet{constructions: map[token.Pos]bool{}, assigns: map[token.Pos]bool{}}
+	for _, pin := range pins {
+		pc := checkConsoleSpawnPin(fset, file, pin)
+		res.problems = append(res.problems, pc.problems...)
+		if pc.construction.IsValid() {
+			set.constructions[pc.construction] = true
+		}
+		if pc.assign.IsValid() {
+			set.assigns[pc.assign] = true
+		}
+	}
+	matched := map[int]bool{}
+	for _, hit := range findConsoleSpawns(fset, file, strings.Split(string(src), "\n"), set) {
+		if hit.kind.accepted() {
+			res.accepted++
+			continue
+		}
+		if idx, ok := matchConsoleAllowlist(allow, hit); ok {
+			matched[idx] = true
+			continue
+		}
+		res.problems = append(res.problems, fmt.Sprintf("%s:%d: %s: %s(%q): on Windows a console-subsystem "+
+			"child of a console-less bd gets a brand-new console, which Windows Terminal shows as a "+
+			"window that takes focus and which can fail a short-lived child with 0x800700E8 "+
+			"(gastownhall/beads#6076); construct it as execwin.Hide(exec.Command(...)), or add a "+
+			"justified consoleSpawnAllowlist entry", rel, hit.line, hit.kind, hit.call, hit.tool))
+	}
+	for idx, entry := range allow {
+		if !matched[idx] {
+			res.stale = append(res.stale, entry)
+		}
+	}
+	return res
+}
+
+// TestNoUnsuppressedConsoleSpawns is the policy itself: in every in-scope file
+// that builds for Windows, each ordinary command is constructed directly
+// inside execwin.Hide, the three long-lived ones are pinned exactly, and
+// nothing else starts a process or touches a command's console flags.
+func TestNoUnsuppressedConsoleSpawns(t *testing.T) {
+	root := sourceRepoRoot(t)
+	relFiles := repoFiles(t, root, 1000)
+
+	scannedPerScope := map[string]int{}
+	commandsPerScope := map[string]int{}
+	pinsSeen := map[int]bool{}
+	allowScanned := map[string]bool{}
+	for _, rel := range relFiles {
+		scope, ok := consoleSpawnScopeOf(rel)
+		if !ok {
+			continue
+		}
+		dir, name := filepath.Split(rel)
+		buildsForWindows, err := windowsBuildContext.MatchFile(filepath.Join(root, filepath.FromSlash(dir)), name)
+		if err != nil {
+			t.Fatalf("evaluate build constraints for %s: %v", rel, err)
+		}
+		if !buildsForWindows {
+			continue // cannot build for Windows: no console window to suppress
+		}
+		fset, f, data := parseRepoGoFile(t, root, rel)
+		scannedPerScope[scope]++
+
+		var pins []consoleSpawnPin
+		for i, pin := range consoleSpawnPins {
+			if pin.file != rel {
+				continue
+			}
+			pinsSeen[i] = true
+			pins = append(pins, pin)
+			hfset, hf, _ := parseRepoGoFile(t, root, pin.helperFile)
+			for _, p := range checkBackgroundHelper(hfset, hf, pin) {
+				t.Error(p)
+			}
+		}
+
+		allowScanned[rel] = true
+		res := checkConsoleSpawnFile(fset, f, data, rel, pins, consoleSpawnAllowlist[rel])
+		commandsPerScope[scope] += res.accepted
+		for _, p := range res.problems {
+			t.Error(p)
+		}
+		for _, entry := range res.stale {
+			t.Errorf("consoleSpawnAllowlist entry %s (func %q, snippet %q) no longer matches a "+
+				"rejected finding; remove it", rel, entry.fn, entry.snippet)
+		}
+	}
+
+	for i, pin := range consoleSpawnPins {
+		if !pinsSeen[i] {
+			t.Errorf("consoleSpawnPins entry %s (func %s) names a file that was not scanned: out of scope, "+
+				"not built for Windows, or renamed", pin.file, pin.fn)
+		}
+	}
+	for rel := range consoleSpawnAllowlist {
+		if !allowScanned[rel] {
+			t.Errorf("consoleSpawnAllowlist names %s, which was not scanned; remove its entries", rel)
+		}
+	}
+	// An empty or mis-filtered walk, or a scan that quietly stopped
+	// recognising commands (an aliased import, a helper hiding the call),
+	// would pass everything above while checking nothing. Every scope entry
+	// constructs commands today, so none at all is a broken scope or scan.
+	for _, scope := range consoleSpawnScopes {
+		if scannedPerScope[scope] == 0 {
+			t.Errorf("no Windows-buildable file was scanned for scope entry %s: the entry is stale "+
+				"(renamed or deleted), or the Windows build filter is broken", scope)
+			continue
+		}
+		if commandsPerScope[scope] == 0 {
+			t.Errorf("the scan recognised no wrapped or pinned command under %s although it has "+
+				"Windows-buildable files: the scan is broken or the entry is stale (this check exists "+
+				"so the policy cannot be disarmed silently)", scope)
+		}
+	}
+}
+
+// TestConsoleSpawnScope pins which files the policy reads: directory entries
+// cover their descendants, file entries cover only that file and never its
+// siblings, test files and testdata are out, and Windows-only files are in
+// while files that cannot build for Windows are not scanned.
+func TestConsoleSpawnScope(t *testing.T) {
+	root := sourceRepoRoot(t)
+
+	inScope := []struct{ rel, scope string }{
+		{"internal/doltserver/doltserver.go", "internal/doltserver/"},
+		{"internal/doltserver/doltserver_windows.go", "internal/doltserver/"},
+		{"internal/doltversion/probe.go", "internal/doltversion/"},
+		{"internal/storage/dbproxy/server/doltserver.go", "internal/storage/dbproxy/"},
+		{"internal/storage/dbproxy/proxy/endpoint.go", "internal/storage/dbproxy/"},
+		{"internal/storage/dolt/store.go", "internal/storage/dolt/"},
+		{"internal/beads/context.go", "internal/beads/"},
+		{"internal/git/gitdir.go", "internal/git/"},
+		{"cmd/bd/main.go", "cmd/bd/main.go"},
+		{"cmd/bd/compact.go", "cmd/bd/compact.go"},
+		{"cmd/bd/proxied_server.go", "cmd/bd/proxied_server.go"},
+		{"cmd/bd/hooks.go", "cmd/bd/hooks.go"},
+		{"cmd/bd/export_auto.go", "cmd/bd/export_auto.go"},
+		{"cmd/bd/gate.go", "cmd/bd/gate.go"},
+		{"internal/hooks/hooks_windows.go", "internal/hooks/hooks_windows.go"},
+		{"internal/metrics/spawn.go", "internal/metrics/spawn.go"},
+	}
+	for _, tc := range inScope {
+		if got, ok := consoleSpawnScopeOf(tc.rel); !ok || got != tc.scope {
+			t.Errorf("consoleSpawnScopeOf(%s) = %q, %v; want %q, true", tc.rel, got, ok, tc.scope)
+		}
+	}
+
+	for _, rel := range []string{
+		// Siblings of file entries, the four reviewed ones included.
+		"cmd/bd/dolt.go",
+		"cmd/bd/hook.go",
+		"cmd/bd/hooks_extra.go",
+		"cmd/bd/proxied_server_unix.go",
+		"cmd/bd/export.go",
+		"cmd/bd/gate_check.go",
+		"cmd/bd/prime_stealth.go",
+		"internal/hooks/hooks.go",
+		"internal/hooks/hooks_unix.go",
+		"internal/metrics/metrics.go",
+		// A directory entry is not a name prefix.
+		"internal/doltfake/fake.go",
+		"internal/gitfoo/x.go",
+		"internal/storage/doltutilx/x.go",
+		"internal/storage/dbproxyx/x.go",
+		// Tests, testdata and non-Go files.
+		"internal/doltserver/doltserver_test.go",
+		"cmd/bd/hooks_test.go",
+		"internal/git/testdata/fixture.go",
+		"internal/storage/dbproxy/server/testdata/x/y.go",
+		"internal/git/README.md",
+	} {
+		if got, ok := consoleSpawnScopeOf(rel); ok {
+			t.Errorf("consoleSpawnScopeOf(%s) = %q, true; want out of scope", rel, got)
+		}
+	}
+
+	// Windows inclusion is decided by the build constraints of real files.
+	for _, tc := range []struct {
+		rel  string
+		want bool
+	}{
+		{"internal/doltserver/doltserver.go", true},
+		{"internal/doltserver/doltserver_windows.go", true},
+		{"internal/hooks/hooks_windows.go", true},
+		{"internal/storage/dbproxy/server/procattr_windows.go", true},
+		{"internal/doltserver/doltserver_unix.go", false},
+		{"internal/storage/dbproxy/proxy/endpoint_unix.go", false},
+		{"internal/storage/dbproxy/server/procattr_other.go", false},
+	} {
+		if _, ok := consoleSpawnScopeOf(tc.rel); !ok {
+			t.Errorf("%s: out of scope, want in scope", tc.rel)
+			continue
+		}
+		dir, name := filepath.Split(tc.rel)
+		got, err := windowsBuildContext.MatchFile(filepath.Join(root, filepath.FromSlash(dir)), name)
+		if err != nil {
+			t.Fatalf("evaluate build constraints for %s: %v", tc.rel, err)
+		}
+		if got != tc.want {
+			t.Errorf("%s: builds for windows = %v, want %v", tc.rel, got, tc.want)
+		}
+	}
+}
+
+// fixturePin pins the construction in a fixture's start function.
+var fixturePin = consoleSpawnPin{file: "fixture.go", fn: "start", cmdVar: "cmd", helper: "procAttrDetached", helperFile: "fixture_windows.go"}
+
+// scanConsoleFixture parses src as fixture.go and returns the policy's
+// verdict on it plus the kind of every finding, in source order.
+func scanConsoleFixture(t *testing.T, src string, pins []consoleSpawnPin) (consoleSpawnFileResult, []consoleSpawnKind) {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "fixture.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse fixture: %v", err)
+	}
+	res := checkConsoleSpawnFile(fset, f, []byte(src), "fixture.go", pins, nil)
+	set := consoleSpawnPinSet{constructions: map[token.Pos]bool{}, assigns: map[token.Pos]bool{}}
+	for _, pin := range pins {
+		pc := checkConsoleSpawnPin(fset, f, pin)
+		set.constructions[pc.construction] = true
+		set.assigns[pc.assign] = true
+	}
+	var kinds []consoleSpawnKind
+	for _, hit := range findConsoleSpawns(fset, f, strings.Split(src, "\n"), set) {
+		kinds = append(kinds, hit.kind)
+	}
+	return res, kinds
+}
+
+// TestConsoleSpawnPolicyScan pins the scan's accept/reject decisions on
+// in-memory fixtures, so a regression in the analysis is caught without
+// touching the real tree. The first seven cases are #7572's, adapted: an
+// assignment to SysProcAttr no longer excuses a construction, only an exact
+// consoleSpawnPins entry does.
+func TestConsoleSpawnPolicyScan(t *testing.T) {
+	const (
+		execImport    = "import \"os/exec\"\n\n"
+		execwinImport = "import (\n\t\"os/exec\"\n\n\t\"github.com/steveyegge/beads/internal/execwin\"\n)\n\n"
+	)
+	cases := []struct {
+		name      string
+		src       string // after "package p\n\n"
+		pins      []consoleSpawnPin
+		want      []consoleSpawnKind // every finding, in source order
+		wantProbs int                // problems: rejected findings plus pin failures
+		wantInPin string             // a pin problem containing this, if any
+	}{
+		{
+			name:      "bare spawn with neither wrapper nor SysProcAttr is reported",
+			src:       execImport + "func probe() {\n\tout, _ := exec.Command(\"dolt\", \"version\").Output()\n\t_ = out\n}\n",
+			want:      []consoleSpawnKind{spawnUnwrapped},
+			wantProbs: 1,
+		},
+		{
+			name: "execwin.Hide wrapper is accepted",
+			src:  execwinImport + "func probe() {\n\tout, _ := execwin.Hide(exec.Command(\"dolt\", \"version\")).Output()\n\t_ = out\n}\n",
+			want: []consoleSpawnKind{spawnHidden},
+		},
+		{
+			name: "CommandContext wrapped in Hide is accepted, and the tool name is the one after ctx",
+			src: "import (\n\t\"context\"\n\t\"os/exec\"\n\n\t\"github.com/steveyegge/beads/internal/execwin\"\n)\n\n" +
+				"func probe(ctx context.Context, path string) {\n\tcmd := execwin.Hide(exec.CommandContext(ctx, path, \"version\"))\n\t_ = cmd.Run()\n}\n",
+			want: []consoleSpawnKind{spawnHidden},
+		},
+		{
+			name: "explicit SysProcAttr assignment in the enclosing function no longer excuses the spawn",
+			src:  execImport + "func start() {\n\tcmd := exec.Command(\"dolt\", \"sql-server\")\n\tcmd.SysProcAttr = procAttrDetached()\n\t_ = cmd.Start()\n}\n",
+			// Not a consoleSpawnPins entry: both the bare construction and
+			// the attribute write are rejected.
+			want:      []consoleSpawnKind{spawnUnwrapped, spawnAttrWrite},
+			wantProbs: 2,
+		},
+		{
+			name:      "a non-literal tool name earns no exemption",
+			src:       execImport + "func locate(bin string) {\n\tout, _ := exec.Command(bin, \"version\").Output()\n\t_ = out\n}\n",
+			want:      []consoleSpawnKind{spawnUnwrapped},
+			wantProbs: 1,
+		},
+		{
+			name: "SysProcAttr in a DIFFERENT function does not excuse the spawn",
+			src: execImport + "func configure(cmd *exec.Cmd) {\n\tcmd.SysProcAttr = procAttrHidden()\n}\n\n" +
+				"func probe() {\n\tout, _ := exec.Command(\"dolt\", \"version\").Output()\n\t_ = out\n}\n",
+			want:      []consoleSpawnKind{spawnAttrWrite, spawnUnwrapped},
+			wantProbs: 2,
+		},
+		{
+			name: "a spawn inside a closure is judged on its own",
+			src: execImport + "func start() {\n\tcmd := exec.Command(\"dolt\", \"sql-server\")\n\tcmd.SysProcAttr = procAttrDetached()\n" +
+				"\tgo func() {\n\t\t_ = exec.Command(\"git\", \"config\", \"user.name\").Run()\n\t}()\n\t_ = cmd.Start()\n}\n",
+			pins:      []consoleSpawnPin{fixturePin},
+			want:      []consoleSpawnKind{spawnPinned, spawnUnwrapped},
+			wantProbs: 1,
+		},
+
+		{
+			name: "the exact pinned construction is accepted",
+			src:  execImport + "func start() {\n\tcmd := exec.Command(\"dolt\", \"sql-server\")\n\tcmd.SysProcAttr = procAttrDetached()\n\t_ = cmd.Start()\n}\n",
+			pins: []consoleSpawnPin{fixturePin},
+			want: []consoleSpawnKind{spawnPinned},
+		},
+		{
+			name: "one of two commands pinned: the other is still rejected",
+			src: execImport + "func start() {\n\tcmd := exec.Command(\"dolt\", \"sql-server\")\n\tcmd.SysProcAttr = procAttrDetached()\n" +
+				"\tprobe := exec.Command(\"dolt\", \"version\")\n\t_ = probe.Run()\n\t_ = cmd.Start()\n}\n",
+			pins:      []consoleSpawnPin{fixturePin},
+			want:      []consoleSpawnKind{spawnPinned, spawnUnwrapped},
+			wantProbs: 1,
+		},
+		{
+			name: "a late clobber of a pin fails at the clobber",
+			src: "import (\n\t\"os/exec\"\n\t\"syscall\"\n)\n\n" +
+				"func start() {\n\tcmd := exec.Command(\"dolt\", \"sql-server\")\n\tcmd.SysProcAttr = procAttrDetached()\n" +
+				"\tcmd.SysProcAttr = &syscall.SysProcAttr{}\n\t_ = cmd.Start()\n}\n",
+			pins:      []consoleSpawnPin{fixturePin},
+			want:      []consoleSpawnKind{spawnPinned, spawnAttrWrite},
+			wantProbs: 2,
+			wantInPin: "fixture.go:11: start: cmd.SysProcAttr is assigned something other than procAttrDetached()",
+		},
+		{
+			name:      "a pin with the wrong helper fails",
+			src:       "import (\n\t\"os/exec\"\n\t\"syscall\"\n)\n\nfunc start() {\n\tcmd := exec.Command(\"dolt\", \"sql-server\")\n\tcmd.SysProcAttr = &syscall.SysProcAttr{}\n\t_ = cmd.Start()\n}\n",
+			pins:      []consoleSpawnPin{fixturePin},
+			want:      []consoleSpawnKind{spawnPinned, spawnAttrWrite},
+			wantProbs: 2,
+			wantInPin: "something other than procAttrDetached()",
+		},
+		{
+			name: "an unrelated attribute write on a hidden command is rejected",
+			src: "import (\n\t\"os/exec\"\n\t\"syscall\"\n\n\t\"github.com/steveyegge/beads/internal/execwin\"\n)\n\n" +
+				"func probe() {\n\tcmd := execwin.Hide(exec.Command(\"git\", \"status\"))\n\tcmd.SysProcAttr = &syscall.SysProcAttr{}\n\t_ = cmd.Run()\n}\n",
+			want:      []consoleSpawnKind{spawnHidden, spawnAttrWrite},
+			wantProbs: 1,
+		},
+		{
+			name: "aliased os/exec and execwin imports are resolved",
+			src: "import (\n\tosexec \"os/exec\"\n\n\tew \"github.com/steveyegge/beads/internal/execwin\"\n)\n\n" +
+				"func probe() {\n\t_ = ew.Hide(osexec.Command(\"git\", \"status\")).Run()\n\t_ = osexec.Command(\"git\", \"log\").Run()\n}\n",
+			want:      []consoleSpawnKind{spawnHidden, spawnUnwrapped},
+			wantProbs: 1,
+		},
+		{
+			name: "a Hide from another package earns nothing",
+			src: "import (\n\t\"os/exec\"\n\n\texecwin \"example.com/other\"\n)\n\n" +
+				"func probe() {\n\t_ = execwin.Hide(exec.Command(\"git\", \"status\")).Run()\n}\n",
+			want:      []consoleSpawnKind{spawnUnwrapped},
+			wantProbs: 1,
+		},
+		{
+			name: "Hide must wrap the construction directly",
+			src: execwinImport + "func probe() {\n\tcmd := exec.Command(\"git\", \"status\")\n\t_ = execwin.Hide(cmd).Run()\n" +
+				"\t_ = execwin.Hide(prepare(exec.Command(\"git\", \"log\"))).Run()\n}\n",
+			want:      []consoleSpawnKind{spawnUnwrapped, spawnUnwrapped},
+			wantProbs: 2,
+		},
+		{
+			name:      "a constructor used as a function value is rejected",
+			src:       execImport + "var newCmd = exec.Command\n\nfunc probe() {\n\t_ = newCmd(\"git\", \"status\").Run()\n}\n",
+			want:      []consoleSpawnKind{spawnFuncValue},
+			wantProbs: 1,
+		},
+		{
+			name:      "an exec.Cmd literal is rejected",
+			src:       execImport + "func probe() {\n\t_ = (&exec.Cmd{Path: \"git\", Args: []string{\"git\", \"status\"}}).Run()\n}\n",
+			want:      []consoleSpawnKind{spawnCmdLiteral},
+			wantProbs: 1,
+		},
+		{
+			name: "direct process starts are rejected",
+			src: "import (\n\t\"os\"\n\t\"syscall\"\n)\n\n" +
+				"func probe() {\n\t_, _ = os.StartProcess(\"git\", nil, &os.ProcAttr{})\n\t_, _, _ = syscall.StartProcess(\"git\", nil, nil)\n}\n",
+			want:      []consoleSpawnKind{spawnStartProcess, spawnStartProcess},
+			wantProbs: 2,
+		},
+		{
+			name: "a console-creation flag is rejected even on a hidden command",
+			src: "import (\n\t\"os/exec\"\n\t\"syscall\"\n\n\t\"github.com/steveyegge/beads/internal/execwin\"\n\t\"golang.org/x/sys/windows\"\n)\n\n" +
+				"func probe() {\n\tcmd := execwin.Hide(exec.Command(\"git\", \"status\"))\n" +
+				"\tcmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.DETACHED_PROCESS}\n\t_ = cmd.Run()\n}\n",
+			want:      []consoleSpawnKind{spawnHidden, spawnAttrWrite, spawnConsoleFlag},
+			wantProbs: 2,
+		},
+		{
+			name:      "a dot import of os/exec is rejected",
+			src:       "import . \"os/exec\"\n\nfunc probe() {\n\t_ = Command(\"git\", \"status\").Run()\n}\n",
+			want:      []consoleSpawnKind{spawnDotImport},
+			wantProbs: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, kinds := scanConsoleFixture(t, "package p\n\n"+tc.src, tc.pins)
+			if fmt.Sprint(kinds) != fmt.Sprint(tc.want) {
+				t.Errorf("findings = %v, want %v", kinds, tc.want)
+			}
+			if len(res.problems) != tc.wantProbs {
+				t.Errorf("problems = %d, want %d:\n%s", len(res.problems), tc.wantProbs, strings.Join(res.problems, "\n"))
+			}
+			if tc.wantInPin != "" && !strings.Contains(strings.Join(res.problems, "\n"), tc.wantInPin) {
+				t.Errorf("problems = %q, want one containing %q", res.problems, tc.wantInPin)
+			}
+		})
+	}
+
+	// Removing one real wrapper from each of the four files the review
+	// added to scope must fail the policy at that line.
+	root := sourceRepoRoot(t)
+	for _, rel := range []string{"cmd/bd/proxied_server.go", "cmd/bd/hooks.go", "cmd/bd/export_auto.go", "cmd/bd/gate.go"} {
+		t.Run("unwrapping the first Hide in "+rel+" fails", func(t *testing.T) {
+			fset, f, data := parseRepoGoFile(t, root, rel)
+			if res := checkConsoleSpawnFile(fset, f, data, rel, nil, nil); len(res.problems) != 0 || res.accepted == 0 {
+				t.Fatalf("unmodified %s: accepted %d, problems %q; want some accepted and none rejected", rel, res.accepted, res.problems)
+			}
+			execwinName := importName(f, execwinImportPath)
+			var hide *ast.CallExpr
+			ast.Inspect(f, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok && hide == nil && isPkgCall(call, execwinName, "Hide") {
+					hide = call
+				}
+				return hide == nil
+			})
+			if hide == nil {
+				t.Fatalf("%s has no execwin.Hide call", rel)
+			}
+			off := func(p token.Pos) int { return fset.Position(p).Offset }
+			inner := hide.Args[0]
+			spliced := string(data[:off(hide.Pos())]) + string(data[off(inner.Pos()):off(inner.End())]) + string(data[off(hide.End()):])
+			wantLine := fset.Position(hide.Pos()).Line
+
+			sfset := token.NewFileSet()
+			sf, err := parser.ParseFile(sfset, rel, spliced, 0)
+			if err != nil {
+				t.Fatalf("parse spliced %s: %v", rel, err)
+			}
+			res := checkConsoleSpawnFile(sfset, sf, []byte(spliced), rel, nil, nil)
+			want := fmt.Sprintf("%s:%d: %s", rel, wantLine, spawnUnwrapped)
+			if len(res.problems) != 1 || !strings.HasPrefix(res.problems[0], want) {
+				t.Fatalf("problems = %q, want exactly one starting %q", res.problems, want)
+			}
+		})
+	}
+}
+
+// TestConsoleSpawnAllowlistMatching pins that an entry matches by enclosing
+// function plus exact source line, excuses only that finding, and is reported
+// stale once nothing matches it -- the repo-wide test fails on one.
+func TestConsoleSpawnAllowlistMatching(t *testing.T) {
+	src := "package p\n\nimport \"os/exec\"\n\n" +
+		"func probe() {\n\tout, _ := exec.Command(\"dolt\", \"version\").Output()\n\t_ = out\n}\n"
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "fixture.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse fixture: %v", err)
+	}
+	hits := findConsoleSpawns(fset, f, strings.Split(src, "\n"), consoleSpawnPinSet{})
+	if len(hits) != 1 {
+		t.Fatalf("got %d hits, want 1", len(hits))
+	}
+	hit := hits[0]
+	if hit.funcName != "probe" {
+		t.Errorf("funcName = %q, want %q", hit.funcName, "probe")
+	}
+	if hit.tool != "dolt" {
+		t.Errorf("tool = %q, want %q", hit.tool, "dolt")
+	}
+
+	entry := consoleSpawnAllowlistEntry{fn: "probe", snippet: hit.snippet, why: "fixture"}
+	entries := []consoleSpawnAllowlistEntry{entry}
+	if _, ok := matchConsoleAllowlist(entries, hit); !ok {
+		t.Errorf("entry keyed by func %q and snippet %q did not match", hit.funcName, hit.snippet)
+	}
+	if _, ok := matchConsoleAllowlist(entries, consoleSpawnHit{funcName: "other", snippet: hit.snippet}); ok {
+		t.Errorf("entry matched a hit in a different function")
+	}
+	if _, ok := matchConsoleAllowlist(entries, consoleSpawnHit{funcName: hit.funcName, snippet: "something else"}); ok {
+		t.Errorf("entry matched a hit with a different source line")
+	}
+
+	if res := checkConsoleSpawnFile(fset, f, []byte(src), "fixture.go", nil, entries); len(res.problems) != 0 || len(res.stale) != 0 {
+		t.Errorf("matching entry: problems %q, stale %v; want neither", res.problems, res.stale)
+	}
+	// The same entry after the line is fixed: nothing left to excuse, so it
+	// is stale.
+	fixed := strings.Replace(src, "exec.Command(\"dolt\", \"version\")", "execwin.Hide(exec.Command(\"dolt\", \"version\"))", 1)
+	fixed = strings.Replace(fixed, "import \"os/exec\"", "import (\n\t\"os/exec\"\n\n\t\"github.com/steveyegge/beads/internal/execwin\"\n)", 1)
+	ffset := token.NewFileSet()
+	ff, err := parser.ParseFile(ffset, "fixture.go", fixed, 0)
+	if err != nil {
+		t.Fatalf("parse fixed fixture: %v", err)
+	}
+	res := checkConsoleSpawnFile(ffset, ff, []byte(fixed), "fixture.go", nil, entries)
+	if len(res.problems) != 0 || len(res.stale) != 1 || res.stale[0] != entry {
+		t.Errorf("fixed line: problems %q, stale %v; want no problems and the entry stale", res.problems, res.stale)
 	}
 }

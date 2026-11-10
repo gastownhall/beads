@@ -12,6 +12,7 @@ go_library(
     deps = [
         "//internal/ceiling",
         "//internal/configfile",
+        "//internal/execwin",
         "//internal/git",
         "//internal/gitenv",
         "//internal/storage",

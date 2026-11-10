@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/execwin"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 )
 
@@ -547,12 +548,12 @@ func cutManagedPortRecord(rest []byte) (port int, yamlBody []byte, ok bool) {
 //	}
 func proxiedServerCommitter() (string, string) {
 	name, email := "beads", "beads@localhost"
-	if out, err := exec.Command("git", "config", "user.name").Output(); err == nil {
+	if out, err := execwin.Hide(exec.Command("git", "config", "user.name")).Output(); err == nil {
 		if v := strings.TrimSpace(string(out)); v != "" {
 			name = v
 		}
 	}
-	if out, err := exec.Command("git", "config", "user.email").Output(); err == nil {
+	if out, err := execwin.Hide(exec.Command("git", "config", "user.email")).Output(); err == nil {
 		if v := strings.TrimSpace(string(out)); v != "" {
 			email = v
 		}

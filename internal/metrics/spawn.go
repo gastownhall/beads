@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/execenv"
+	"github.com/steveyegge/beads/internal/execwin"
 )
 
 const SendMetricsSubcommand = "send-metrics"
@@ -179,7 +180,7 @@ func MaybeSpawnFlusher() {
 	if err != nil {
 		return
 	}
-	cmd := exec.Command(self, SendMetricsSubcommand)
+	cmd := execwin.Hide(exec.Command(self, SendMetricsSubcommand))
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil
