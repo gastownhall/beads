@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -204,6 +205,25 @@ func TestLinkDependencyType(t *testing.T) {
 		}
 		if err != nil || got != tt.want {
 			t.Errorf("linkDependencyType(%q) = %q, %v; want %q", tt.in, got, err, tt.want)
+		}
+	}
+}
+
+// TestLinkTypeFlagUsage pins bd link's rendered --type help (GH#5585): it
+// lists the built-ins and both aliases from the list validateDependencyType
+// checks, so it cannot drift from the code, and states the custom-type
+// allowance, its length limit and that a custom type never gates ready work.
+func TestLinkTypeFlagUsage(t *testing.T) {
+	usage := linkCmd.Flags().FlagUsages()
+	for _, want := range []string{
+		createDepsAcceptedTypeList(),
+		"blocked-by and depends-on are stored as blocks",
+		"non-empty custom type",
+		fmt.Sprintf("at most %d characters", types.MaxDependencyTypeLen),
+		"does not gate ready work",
+	} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("bd link --help --type usage does not contain %q:\n%s", want, usage)
 		}
 	}
 }

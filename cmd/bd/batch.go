@@ -55,7 +55,9 @@ Grammar (one command per line):
   #comment  (blank lines and '# ...' comments are ignored)
 
 Supported 'update' keys: status, priority, title, assignee, force
-Supported dependency types: see 'bd dep add --help' (default: blocks)
+Supported dependency types: the built-ins 'bd dep add --type' accepts (see
+'bd dep add --help'; default: blocks). The blocked-by and depends-on aliases
+are stored as blocks; any other type is refused and rolls the batch back.
 
 'force' is not a field. An update whose status moves the issue into closed
 (or a configured done status) is refused when it still has open children or

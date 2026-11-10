@@ -398,3 +398,20 @@ func TestBatchDepAddEdgeCanonicalizesAliases(t *testing.T) {
 		}
 	}
 }
+
+// TestBatchHelpDescribesDepAddTypes pins bd batch's help on the dep add type
+// contract (GH#5585): the built-in vocabulary, the canonical aliases, and that
+// any other type is refused and rolls the batch back.
+func TestBatchHelpDescribesDepAddTypes(t *testing.T) {
+	long := strings.Join(strings.Fields(batchCmd.Long), " ")
+	for _, want := range []string{
+		"the built-ins 'bd dep add --type' accepts",
+		"default: blocks",
+		"The blocked-by and depends-on aliases are stored as blocks",
+		"any other type is refused and rolls the batch back",
+	} {
+		if !strings.Contains(long, want) {
+			t.Errorf("bd batch --help does not contain %q:\n%s", want, batchCmd.Long)
+		}
+	}
+}
