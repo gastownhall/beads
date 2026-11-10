@@ -280,3 +280,127 @@ func TestInitAdoptionConsentSatisfied(t *testing.T) {
 		t.Error("no consent anywhere must not authorize adoption")
 	}
 }
+
+// TestInitAdoptionConsentAcrossBothCheckpoints pins the #6099 consent gate as
+// the two checkpoints of a single `bd init` actually compose it: the early
+// checkpoint may prompt, the late one may not, and the only things that carry
+// from one to the other are the consent state's assumeYes flag and the
+// URL-bound consent granted at the early prompt. Simulates both checkpoints
+// exactly as init.go invokes CheckRemoteSafety and handleRemoteSafetyDecision
+// in sequence. Every refusal here is the LATE shape: it must not prompt and
+// must carry the after-scaffolding note, and a bootstrap answer means no
+// clone was attempted (the handler returns bootstrap=false on refusal).
+func TestInitAdoptionConsentAcrossBothCheckpoints(t *testing.T) {
+	const (
+		earlyURL = "file:///tmp/upstream.git"
+		lateURL  = "file:///tmp/upstream.git" // same origin, same URL
+		otherURL = "file:///tmp/unrelated.git"
+	)
+
+	runCheckpoints := func(t *testing.T, consent *adoptionConsentState, earlyData, lateData, lateUnknown bool, lateSyncURL string, promptGrant bool) (earlyBoot, lateBoot bool, lateErr error, promptCalls int) {
+		t.Helper()
+		// Early checkpoint: derived remote, data found, no override flags —
+		// the consent gate's own decision.
+		earlyDecision := CheckRemoteSafety(RemoteSafetyInput{
+			RemoteHasDoltData:          earlyData,
+			RemoteDerivedFromGitOrigin: true,
+			AssumeYes:                  initAdoptionConsentSatisfied(consent.assumeYes, consent.consentedURL, earlyURL),
+			IsInteractive:              consent.interactive,
+		})
+		promptCalls = 0
+		orig := promptInitRemoteAdoptionFn
+		promptInitRemoteAdoptionFn = func(ctx context.Context, remoteURL string, reader *bufio.Reader) (bool, error) {
+			promptCalls++
+			return promptGrant, nil
+		}
+		defer func() { promptInitRemoteAdoptionFn = orig }()
+		earlyBoot, err := handleRemoteSafetyDecision(earlyDecision, "bd", earlyURL, "", nil, true, new(bool), consent, true)
+		if err != nil {
+			t.Fatalf("early checkpoint errored: %v", err)
+		}
+
+		// Late checkpoint: the same run, after workspace scaffolding. It may
+		// never prompt (allowConsentPrompt=false), and it recomputes consent
+		// from the shared state — an early grant binds to the URL it named.
+		lateDecision := CheckRemoteSafety(RemoteSafetyInput{
+			RemoteHasDoltData:          lateData,
+			RemoteDerivedFromGitOrigin: true,
+			RemoteProbeUnknown:         lateUnknown,
+			AssumeYes:                  initAdoptionConsentSatisfied(consent.assumeYes, consent.consentedURL, lateSyncURL),
+			IsInteractive:              consent.interactive,
+		})
+		lateBoot, lateErr = handleRemoteSafetyDecision(lateDecision, "bd", lateSyncURL, "", nil, true, new(bool), consent, false)
+		return earlyBoot, lateBoot, lateErr, promptCalls
+	}
+
+	t.Run("early grant covers the late checkpoint for the same URL", func(t *testing.T) {
+		consent := &adoptionConsentState{interactive: true}
+		earlyBoot, lateBoot, lateErr, promptCalls := runCheckpoints(t, consent, true, true, false, lateURL, true)
+		if !earlyBoot || !lateBoot {
+			t.Errorf("bootstrap early=%v late=%v, want both true (one prompt covers the whole run)", earlyBoot, lateBoot)
+		}
+		if lateErr != nil {
+			t.Errorf("late checkpoint errored: %v", lateErr)
+		}
+		if promptCalls != 1 {
+			t.Errorf("prompt fired %d times, want 1 (the early prompt must be the only one)", promptCalls)
+		}
+		if consent.consentedURL != earlyURL {
+			t.Errorf("consent latched to %q, want %q", consent.consentedURL, earlyURL)
+		}
+	})
+
+	t.Run("late probe newly finding data with no consent refuses before cloning", func(t *testing.T) {
+		// The early checkpoint found nothing (no data → ActionNoRemoteData,
+		// no prompt, no consent); the late probe now finds derived history.
+		// Refusing here — rather than cloning — is the whole point of the
+		// second checkpoint.
+		consent := &adoptionConsentState{interactive: true}
+		earlyBoot, lateBoot, lateErr, promptCalls := runCheckpoints(t, consent, false, true, false, lateURL, true)
+		_ = earlyBoot
+		if lateBoot {
+			t.Error("late checkpoint bootstrapped without consent")
+		}
+		code, ok := exitCodeFromError(lateErr)
+		if !ok || code != 1 {
+			t.Fatalf("late refusal err = %v, want exit 1", lateErr)
+		}
+		if promptCalls != 0 {
+			t.Errorf("prompt fired %d times, want 0 (early checkpoint had no data to ask about; the late one may not ask)", promptCalls)
+		}
+	})
+
+	t.Run("unrelated early consent is not reused for a different URL", func(t *testing.T) {
+		// Consent granted at the early prompt for one URL must not adopt a
+		// DIFFERENT URL the late checkpoint derives (#6099 item 6): consent
+		// binds to what was asked, not to "a remote".
+		consent := &adoptionConsentState{interactive: true, consentedURL: otherURL}
+		_, lateBoot, lateErr, promptCalls := runCheckpoints(t, consent, false, true, false, lateURL, true)
+		if lateBoot {
+			t.Error("late checkpoint bootstrapped on consent granted for a different URL")
+		}
+		code, ok := exitCodeFromError(lateErr)
+		if !ok || code != 1 {
+			t.Fatalf("late refusal err = %v, want exit 1", lateErr)
+		}
+		if promptCalls != 0 {
+			t.Errorf("prompt fired %d times, want 0 (the late checkpoint must not re-ask)", promptCalls)
+		}
+	})
+
+	t.Run("--yes permits the late checkpoint for any derived URL", func(t *testing.T) {
+		// --yes consents ahead of time to adopting whatever derived origin
+		// the run finds, at either checkpoint, without a prompt.
+		consent := &adoptionConsentState{assumeYes: true, interactive: true}
+		earlyBoot, lateBoot, lateErr, promptCalls := runCheckpoints(t, consent, true, true, false, otherURL, true)
+		if !earlyBoot || !lateBoot {
+			t.Errorf("bootstrap early=%v late=%v, want both true under --yes", earlyBoot, lateBoot)
+		}
+		if promptCalls != 0 {
+			t.Errorf("prompt fired %d times, want 0 under --yes", promptCalls)
+		}
+		if lateErr != nil {
+			t.Errorf("late checkpoint errored under --yes: %v", lateErr)
+		}
+	})
+}
