@@ -748,6 +748,48 @@ func TestEmbeddedUpdateLifecycleClaimParentCommit(t *testing.T) {
 		}
 	})
 
+	// A claim of an issue or wisp with an open local blocker is refused the way
+	// `bd close` refuses it: exit 1, the refusal names both ids and the --force
+	// override, and nothing commits — not the claim, not a patch riding it.
+	t.Run("claim_blocked_delegated_guard", func(t *testing.T) {
+		blocker := bdCreate(t, bd, dir, "Claim blocker", "--type", "task")
+		blocked := bdCreate(t, bd, dir, "Blocked claim", "--type", "task")
+		blockedWisp := bdCreate(t, bd, dir, "Blocked wisp claim", "--type", "task", "--ephemeral")
+		bdDepAdd(t, bd, dir, blocked.ID, blocker.ID)
+		bdDepAdd(t, bd, dir, blockedWisp.ID, blocker.ID)
+
+		for _, tc := range []struct {
+			name string
+			id   string
+			args []string
+		}{
+			{name: "bare claim", id: blocked.ID},
+			{name: "claim with a patch", id: blocked.ID, args: []string{"--title", "Patched by a refused claim", "--notes", "refused notes"}},
+			{name: "wisp claim", id: blockedWisp.ID},
+		} {
+			before := bdShow(t, bd, dir, tc.id)
+			revision := bdShowRevision(t, bd, dir, tc.id)
+			args := append([]string{tc.id, "--claim", "--actor", "blocked-worker"}, tc.args...)
+			out, code := bdUpdateFailCode(t, bd, dir, args...)
+			if code != 1 {
+				t.Errorf("%s: exit code = %d, want 1\n%s", tc.name, code, out)
+			}
+			for _, want := range []string{"cannot claim blocked issue", tc.id, blocker.ID, "use --force to override"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("%s: refusal missing %q:\n%s", tc.name, want, out)
+				}
+			}
+			got := bdShow(t, bd, dir, tc.id)
+			if got.Status != types.StatusOpen || got.Assignee != "" || got.Title != before.Title || got.Notes != before.Notes {
+				t.Errorf("%s: refused claim changed %s: status=%q assignee=%q title=%q notes=%q",
+					tc.name, tc.id, got.Status, got.Assignee, got.Title, got.Notes)
+			}
+			if after := bdShowRevision(t, bd, dir, tc.id); after != revision {
+				t.Errorf("%s: refused claim moved %s's revision %d -> %d", tc.name, tc.id, revision, after)
+			}
+		}
+	})
+
 	// A batch where one claim is lost and another is won must exit non-zero, so
 	// the lost claim is not hidden from exit-code automation (beads audit
 	// finding #10). The winner is still committed.
@@ -1030,4 +1072,31 @@ func TestEmbeddedUpdateConcurrent(t *testing.T) {
 
 	t.Logf("created and updated %d issues across %d/%d successful workers, %d in DB",
 		len(allIDs), successes, numWorkers, stats.TotalIssues)
+}
+
+// bd-ltvqa9: `bd update --claim` must refuse an issue with an open blocker,
+// the way `bd close` does, and leave it open and unassigned.
+func TestEmbeddedUpdateClaimRefusesBlockedIssue(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "cb")
+
+	blocker := bdCreate(t, bd, dir, "blocker", "--type", "task")
+	blocked := bdCreate(t, bd, dir, "blocked", "--type", "task")
+	bdRunOK(t, bd, dir, "dep", "add", blocked.ID, blocker.ID)
+
+	out, err := bdRunWithFlockRetry(t, bd, dir, "update", blocked.ID, "--claim", "--actor", "w1")
+	if err == nil {
+		t.Errorf("claim of blocked issue %s succeeded, want refusal naming blocker %s\n%s", blocked.ID, blocker.ID, out)
+	} else if !strings.Contains(string(out), blocker.ID) {
+		t.Errorf("refusal should name blocker %s, got: %s", blocker.ID, out)
+	}
+	got := bdShow(t, bd, dir, blocked.ID)
+	if got.Status != types.StatusOpen || got.Assignee != "" {
+		t.Errorf("blocked issue after refused claim: status=%s assignee=%q, want open and unassigned", got.Status, got.Assignee)
+	}
 }
