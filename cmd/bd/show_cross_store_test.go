@@ -349,3 +349,52 @@ func TestShowAutoRoute_RefusalThenAutoSuccess(t *testing.T) {
 		t.Errorf("bd show %s printed a miss diagnostic where the auto route succeeded;\nstderr: %s", want, stderr)
 	}
 }
+
+// TestShowPrefixRoute_RigSeatReachesTownStore pins the routes.jsonl recipe
+// GH#5259's design documents: a rig workspace reaches the town store beside
+// it with {"prefix":"hq-","path":".."} in its own routes.jsonl, and bd show
+// resolves the town's issue read-only from the rig seat. The route already
+// works at the base of this change; this test guards it while the miss hint
+// is added around it (AC-4).
+func TestShowPrefixRoute_RigSeatReachesTownStore(t *testing.T) {
+	ensureCleanGlobalState(t)
+	saveAndRestoreGlobals(t)
+	t.Setenv("BEADS_DIR", t.TempDir())
+
+	ctx := context.Background()
+	_, townBeadsDir, rigDir, rigBeadsDir := showCrossStoreTown(t, "openclaw")
+
+	const townID = "hq-gea4h"
+	townStore := newTestStoreIsolatedDB(t, filepath.Join(townBeadsDir, "dolt"), "hq")
+	if err := townStore.CreateIssue(ctx, &types.Issue{
+		ID: townID, Title: "Incident record", Status: types.StatusOpen,
+		Priority: 0, IssueType: types.TypeBug,
+	}, "test"); err != nil {
+		t.Fatalf("create town issue: %v", err)
+	}
+	if err := townStore.Close(); err != nil {
+		t.Fatalf("close town store: %v", err)
+	}
+
+	rigDBPath := filepath.Join(rigBeadsDir, "dolt")
+	rigStore := newTestStoreIsolatedDB(t, rigDBPath, "op")
+
+	rigRoutes := `{"prefix":"hq-","path":".."}` + "\n"
+	if err := os.WriteFile(filepath.Join(rigBeadsDir, "routes.jsonl"), []byte(rigRoutes), 0o644); err != nil {
+		t.Fatalf("write rig routes.jsonl: %v", err)
+	}
+
+	seatShowAt(t, rigDir, rigDBPath, rigStore)
+	stdout, stderr, runErr := captureShowRun(t, func() error {
+		return showCmd.RunE(showCmd, []string{townID})
+	})
+	if runErr != nil {
+		t.Fatalf("bd show %s from the rig seat: %v\nstdout: %s\nstderr: %s", townID, runErr, stdout, stderr)
+	}
+	if !strings.Contains(stdout, townID) || !strings.Contains(stdout, "Incident record") {
+		t.Errorf("bd show %s from the rig seat did not render the town issue;\nstdout: %s", townID, stdout)
+	}
+	if strings.Contains(stderr, "not found") || strings.Contains(stderr, "Hint:") {
+		t.Errorf("bd show %s from the rig seat printed a miss diagnostic on a routed success;\nstderr: %s", townID, stderr)
+	}
+}

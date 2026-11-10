@@ -1226,6 +1226,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd show` no longer explains a cross-store miss as maybe-deleted.** When
+  an ID's prefix is not one this workspace's store issues
+  (`issue_prefix`/`allowed_prefixes`) and no `routes.jsonl` route names it,
+  the lookup never reached the store that issues the prefix, yet the miss
+  was explained with the same may-have-never-existed hint as a local ID —
+  asserting, from a rig seat, that a town store's incident record "may have
+  never existed" although it was never searched (GH#5259). Such a miss now
+  says the limited search scope instead — name the requested and configured
+  prefixes, state that no route sent the lookup to another store, and point
+  at the two remedies: a workspace attached to the issuing store, or a
+  matching prefix route in `routes.jsonl`. The leading `Issue <id> not
+  found` line, the exit status, `--json` output and every error identity
+  are unchanged; an unreadable `allowed_prefixes` or `routes.jsonl` fails
+  safe to the old hint, and a miss a routed tier did reach (auto-routing
+  engaged, a route matched, a routed refusal) keeps the old hint too. The
+  prefix-route mechanism and its `routes.jsonl` recipe are now documented
+  in [Multi-agent routing](docs/multi-agent/routing.md). Builds on
+  @kyoto-bonsai's work in #8144.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

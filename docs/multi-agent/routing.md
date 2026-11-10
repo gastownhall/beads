@@ -59,6 +59,46 @@ in yet, opens the one embedded database it holds, or its default database when
 it holds none or several; a prefix route in an orchestrator's `routes.jsonl`
 always needs the target's `dolt_database`, for reads as well as writes.
 
+## Prefix routes (routes.jsonl)
+
+Role routing decides where *new* beads land. Prefix routes connect
+workspaces that already exist side by side — a rig checked out beside the
+town repository, a planning repo next to the project — by telling ID lookups
+which workspace issues which prefix.
+
+The file is `routes.jsonl` in the `.beads/` directory of the workspace you
+run `bd` in — the *resolved* workspace, that is; nothing walks parent
+directories looking for one. Each line is one route:
+
+```jsonl
+# a rig seat beside the town repository reaches the town's hq- beads
+{"prefix":"hq-", "path":".."}
+{"prefix":"ga-", "path":"../../ga-town"}
+```
+
+- **`prefix` carries the trailing hyphen** and must lead the ID
+  (`hq-gea4h` matches `hq-`). An entry without the trailing hyphen matches
+  nothing. When several routes match, the longest prefix wins.
+- **`path` is relative to the workspace root** — the directory containing
+  `.beads/` — so `".."` is a sibling workspace and `"."` is this workspace
+  itself. A `"."` route is the same as no route: the local store was
+  already searched. Blank lines and `#` comments are skipped; a line missing
+  `prefix` or `path` is ignored.
+- **The target must be bootstrapped with a named `dolt_database`** in its
+  `.beads/metadata.json` — for reads as well as writes, unlike role-routed
+  planning repos, which can open their only embedded database.
+
+Every ID-resolving command follows these routes: `bd show` opens the target
+read-only, and commands that change a bead (`bd update`, `bd close`,
+`bd comment`, ...) open it for writing — without ever creating the target's
+database, so an unbootstrapped target is left as it was.
+
+When no route matches, the miss stays a local miss. `bd show` is upfront
+about what that means: an ID whose prefix this store doesn't issue, and that
+no route named, was never looked up in the store that issues it, so the
+miss does not say the ID never existed anywhere — run from a workspace
+attached to that store, or add a route for its prefix.
+
 ## Role detection
 
 The role that drives auto mode comes from git config — `beads.role` is the
