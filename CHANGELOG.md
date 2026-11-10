@@ -1226,6 +1226,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd setup` and the integrations `bd init` installs no longer replace an
+  instruction file you made read-only. The setup writer writes a new file and
+  renames it over the old one, which needs only a writable directory, so a
+  0444 `AGENTS.md` or `CLAUDE.md` was rewritten and given the 0444 mode back
+  (#7975). An existing file the process cannot open for writing is now left
+  unchanged and reported (`refusing to replace a file you cannot write:
+  <path>`): `bd setup <recipe>` fails with it, while `bd init` and the
+  instructions step of `bd setup claude` warn and continue.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
