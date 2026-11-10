@@ -606,6 +606,7 @@ go_test(
         "children_embedded_test.go",
         "children_test.go",
         "claim_audit_embedded_test.go",
+        "claim_audit_proxied_test.go",
         "claim_pools_embedded_test.go",
         "cli_fast_test.go",
         "close_embedded_test.go",
