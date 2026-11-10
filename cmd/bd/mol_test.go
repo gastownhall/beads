@@ -3585,6 +3585,50 @@ func TestBondProtoMolRefArmStepWaitsForEveryTerminalStep(t *testing.T) {
 	}
 }
 
+// TestBondProtoMolRefArmsShareTerminalsAndKeepTheirEdges pins AC-4: a second
+// sequential --ref arm waits on the same terminals as the first, not on the
+// first arm (a sequential arm is not a member of its container), and a step
+// added to the parent later retargets neither arm.
+func TestBondProtoMolRefArmsShareTerminalsAndKeepTheirEdges(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+	f := seedRefArmFixture(t, ctx, s, false)
+
+	bond := func(name string) string {
+		t.Helper()
+		result, err := bondProtoMol(ctx, s, f.proto, f.mol, types.BondTypeSequential, map[string]string{"name": name}, "arm-{{name}}", "test", false, false)
+		if err != nil {
+			t.Fatalf("bondProtoMol(%s): %v", name, err)
+		}
+		return result.IDMapping[f.proto.ID]
+	}
+	first := bond("ace")
+	second := bond("bee")
+
+	want := wantDeps("blocks:"+f.s2.ID, "blocks:"+f.s3.ID)
+	for _, arm := range []string{first, second} {
+		if got := outgoingDeps(t, ctx, s, arm); !slices.Equal(got, want) {
+			t.Fatalf("arm %s deps = %v, want %v", arm, got, want)
+		}
+	}
+
+	later := &types.Issue{Title: "S4", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2}
+	if err := s.CreateIssue(ctx, later, "test"); err != nil {
+		t.Fatalf("create S4: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{IssueID: later.ID, DependsOnID: f.mol.ID, Type: types.DepParentChild}, "test"); err != nil {
+		t.Fatalf("link S4: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{IssueID: later.ID, DependsOnID: f.s3.ID, Type: types.DepBlocks}, "test"); err != nil {
+		t.Fatalf("order S4 after S3: %v", err)
+	}
+	for _, arm := range []string{first, second} {
+		if got := outgoingDeps(t, ctx, s, arm); !slices.Equal(got, want) {
+			t.Fatalf("after adding S4, arm %s deps = %v, want unchanged %v", arm, got, want)
+		}
+	}
+}
+
 // TestBondProtoMolRefArmWithNothingToWaitFor pins AC-3: a parent with no
 // active direct steps (root only, or every step closed or pinned) still takes
 // a sequential --ref arm, with no ordering edges, and the arm's first step is
