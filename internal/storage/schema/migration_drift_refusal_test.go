@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
@@ -183,6 +185,59 @@ func assertDriftRefusal(t *testing.T, err, cause error, migration string, versio
 	if msg := refusal.UserMessage(); !strings.Contains(msg, driftRecoveryURL) || !strings.Contains(msg, migration) {
 		t.Errorf("UserMessage lacks the migration or recovery URL:\n%s", msg)
 	}
+}
+
+// TestSchemaEncodingDriftSymptom: the quoted symptom is chosen on the
+// original text before anything is stripped or cut, so the signature survives
+// a non-ASCII wrapper line ahead of it (Unicode lowercasing changes the Kelvin
+// sign's byte length) and a long prefix on its own line, while C0/C1 controls
+// and the appended stack never reach the output and its length stays bounded.
+func TestSchemaEncodingDriftSymptom(t *testing.T) {
+	for _, tc := range []struct {
+		name, msg, want string
+	}{
+		{"kelvin sign on an earlier line",
+			"wrapping store open at 300\u212A: retry\nError 1105 (HY000): panic recovered: Invalid Hash Length: 19\ngoroutine 81 [running]:",
+			"Invalid Hash Length: 19"},
+		{"long wrapper prefix",
+			"migration 0059: " + strings.Repeat("opening table issues; ", 20) + "malformed out-of-band adaptive value: invalid address length 3",
+			"malformed out-of-band adaptive value: invalid address length 3"},
+		{"C1 controls",
+			"Error 1105 (HY000): panic recovered: invalid hash length:\u0085 1\u009b\u0080\x1b\x07",
+			"invalid hash length: 1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cause := errors.New(tc.msg)
+			if !isMigrationEncodingDriftErr(cause) {
+				t.Fatalf("signature not recognized in %q", tc.msg)
+			}
+			refusal := &SchemaEncodingDriftError{Migration: migration0059, Version: 59, CursorTable: "schema_migrations", Cause: cause}
+			if got := refusal.Symptom(); got != tc.want {
+				t.Errorf("Symptom() = %q, want %q", got, tc.want)
+			}
+			for _, s := range []string{refusal.Error(), refusal.UserMessage()} {
+				for _, r := range s {
+					if r != '\n' && unicode.IsControl(r) {
+						t.Errorf("refusal carries control character %U: %q", r, s)
+					}
+				}
+				if strings.Contains(s, "goroutine") {
+					t.Errorf("refusal carries the engine stack: %q", s)
+				}
+			}
+		})
+	}
+
+	t.Run("bounded", func(t *testing.T) {
+		refusal := &SchemaEncodingDriftError{Cause: errors.New("invalid hash length: 19 " + strings.Repeat("ž", 1000))}
+		got := refusal.Symptom()
+		if !strings.HasPrefix(got, "invalid hash length: 19") {
+			t.Errorf("Symptom() lost the signature: %q", got)
+		}
+		if n := utf8.RuneCountInString(got); n > maxDriftSymptomRunes+1 {
+			t.Errorf("Symptom() is %d runes, want at most %d", n, maxDriftSymptomRunes+1)
+		}
+	})
 }
 
 // TestRunMigrationsEncodingDriftStepPhases: the selected step's other exits
