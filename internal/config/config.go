@@ -132,8 +132,8 @@ func initialize(beadsDirSetting string) error {
 	//
 	// Precedence (highest to lowest):
 	//   BEADS_DIR/config.yaml > project .beads/config.yaml > documented
-	//   <home>/.config/bd/config.yaml > native os.UserConfigDir()/bd/config.yaml
-	//   > legacy <home>/.beads/config.yaml
+	//   <home>/.config/bd/config.yaml, or native os.UserConfigDir()/bd/config.yaml
+	//   only when the documented file is absent > legacy <home>/.beads/config.yaml
 	//
 	// Previously, only ONE config file was loaded (the highest-priority match),
 	// which meant user-level config was silently ignored when project-level
@@ -147,8 +147,8 @@ func initialize(beadsDirSetting string) error {
 	// here because Initialize is an implicit read path: absent user config is a
 	// supported state, while a relative root must never reach os.Stat.
 	userConfigPaths := currentUserConfigYamlCandidates()
-	appendExistingUserConfig := func(path string, exists bool) {
-		if !exists {
+	appendExistingUserConfig := func(path string) {
+		if !userConfigPathExists(path) {
 			return
 		}
 		for _, existing := range configPaths {
@@ -159,23 +159,16 @@ func initialize(beadsDirSetting string) error {
 		configPaths = append(configPaths, path)
 	}
 
-	// Lowest to highest user-level precedence: legacy, native, documented.
-	// The native os.UserConfigDir()/bd/config.yaml location is not one of the
-	// documented config locations (docs/reference/configuration.md) — it only
-	// exists as a fallback for users who never migrated to the documented
-	// <home>/.config/bd path. Stat it only when the documented path is absent:
-	// probing it unconditionally stats a directory outside bd's own config
-	// tree on every launch, which macOS 26 flags with an "access data from
-	// other apps" prompt even when the native file is never read
-	// (gastownhall/beads#8113). selectUserConfigYamlPath already makes this
-	// same documented-first, native-as-fallback choice for the single-file
-	// read/write path; this keeps the merge path consistent with it.
-	documentedExists := userConfigPathExists(userConfigPaths.documented)
-	appendExistingUserConfig(userConfigPaths.legacy, userConfigPathExists(userConfigPaths.legacy))
-	if !documentedExists {
-		appendExistingUserConfig(userConfigPaths.native, userConfigPathExists(userConfigPaths.native))
+	// Lowest to highest user-level precedence: legacy, then documented or,
+	// only when the documented file is absent, native. Native is never even
+	// probed while documented exists: on macOS touching os.UserConfigDir()
+	// raises a privacy prompt on every launch (GH#8113).
+	appendExistingUserConfig(userConfigPaths.legacy)
+	if userConfigPaths.native != userConfigPaths.documented &&
+		!userConfigPathExists(userConfigPaths.documented) {
+		appendExistingUserConfig(userConfigPaths.native)
 	}
-	appendExistingUserConfig(userConfigPaths.documented, documentedExists)
+	appendExistingUserConfig(userConfigPaths.documented)
 	userConfigPathCount := len(configPaths)
 
 	// 1. Project: walk up from CWD to find .beads/config.yaml
