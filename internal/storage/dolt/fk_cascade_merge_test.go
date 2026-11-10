@@ -411,7 +411,8 @@ func TestFKCascadeRepairKeepsCleanMergedTables(t *testing.T) {
 			}{
 				{"CALL DOLT_CHECKOUT(?)", []any{peerBranch}},
 				{"INSERT INTO config (`key`, value) VALUES ('kv.fk_ride_along', 'peer')", nil},
-				{"CALL DOLT_COMMIT('-Am', 'peer config ride-along')", nil},
+				{"INSERT INTO comments (id, issue_id, author, text, created_at) VALUES ('fkride-comment', 'fkc-w-labels', 'peer', 'comment on unaffected issue', NOW())", nil},
+				{"CALL DOLT_COMMIT('-Am', 'peer config + comment ride-along')", nil},
 				{"CALL DOLT_CHECKOUT(?)", []any{currentBranch}},
 			} {
 				if _, err := db.ExecContext(ctx, step.query, step.args...); err != nil {
@@ -459,6 +460,13 @@ func TestFKCascadeRepairKeepsCleanMergedTables(t *testing.T) {
 			}
 			if value != "peer" {
 				t.Errorf("HEAD config kv.fk_ride_along = %q, want %q", value, "peer")
+			}
+			var comment string
+			if err := db.QueryRowContext(ctx,
+				"SELECT text FROM comments AS OF 'HEAD' WHERE id = 'fkride-comment'").Scan(&comment); err != nil {
+				t.Errorf("the peer's comment on the unaffected issue is missing from the merge commit (read AS OF 'HEAD': %v)", err)
+			} else if comment != "comment on unaffected issue" {
+				t.Errorf("HEAD comment text = %q, want %q", comment, "comment on unaffected issue")
 			}
 			var dirty int
 			if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_status").Scan(&dirty); err != nil {
