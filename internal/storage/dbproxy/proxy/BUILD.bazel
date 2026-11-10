@@ -76,6 +76,7 @@ go_test(
         "server_epoch_internal_test.go",
         "server_test.go",
         "upstream_error_test.go",
+        "waitforserver_ready_probe_internal_test.go",
     ],
     embed = [":proxy"],
     deps = [
