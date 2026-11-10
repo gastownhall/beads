@@ -205,3 +205,47 @@ func TestEmbeddedStrategyMergeCommitsPeerCleanTables(t *testing.T) {
 		}
 	}
 }
+
+// TestEmbeddedFKRepairCommitsPeerComment (GH#7757, AC-3): a merge whose only
+// artifact is a repairable FK cascade violation, with the peer also
+// commenting on an unaffected issue, is concluded by the settle pass itself:
+// the repair and the valid comment are both in the two-parent merge commit.
+func TestEmbeddedFKRepairCommitsPeerComment(t *testing.T) {
+	te := newTestEnv(t, "gh7757fk")
+	ctx := t.Context()
+	conn := openSettleConn(t, ctx, te)
+
+	tc := embeddedFKCascadeCases[1] // labels
+	peerBranch := seedEmbeddedFKCascadeDivergence(t, ctx, conn, tc)
+	survivor := "fkc-w-" + tc.name
+	for _, step := range []struct {
+		query string
+		args  []any
+	}{
+		{"CALL DOLT_CHECKOUT(?)", []any{peerBranch}},
+		{"INSERT INTO comments (id, issue_id, author, text, created_at) VALUES (UUID(), ?, 'b', 'comment from B', NOW())", []any{survivor}},
+		{"CALL DOLT_COMMIT('-Am', 'peer comments on the surviving issue')", nil},
+		{"CALL DOLT_CHECKOUT('main')", nil},
+	} {
+		if _, err := conn.ExecContext(ctx, step.query, step.args...); err != nil {
+			t.Fatalf("%s: %v", step.query, err)
+		}
+	}
+
+	if err := versioncontrolops.MergeAndSettle(ctx, conn, peerBranch); err != nil {
+		t.Fatalf("settling FK-violating merge: %v", err)
+	}
+
+	if got, want := headComments(t, ctx, conn, survivor), []string{"comment from B"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("HEAD comments on %s = %v, want %v: the repair-only merge commit dropped the peer's comment", survivor, got, want)
+	}
+	var orphans int
+	if err := conn.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM labels AS OF 'HEAD' WHERE issue_id = 'fkc-x-labels'").Scan(&orphans); err != nil {
+		t.Fatalf("count dangling HEAD labels: %v", err)
+	}
+	if orphans != 0 {
+		t.Errorf("merge commit holds %d dangling label row(s): the repair is not committed", orphans)
+	}
+	assertMergeConcluded(t, ctx, conn)
+}
