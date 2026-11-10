@@ -1,12 +1,15 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/git"
 )
 
@@ -1543,4 +1546,221 @@ func TestCheckGitHooks_BeadsHookIsInstalled(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestHooksList_StrandedHooksPathNamesTheConfig reproduces GH#5853 (bd-m9es2y).
+// The .beads/hooks files are present and current, but core.hooksPath still
+// names the absolute path of the repo's old location, so git runs no hooks.
+// bd hooks list must name the stranded core.hooksPath instead of reporting every
+// hook as "not installed", which sends the user to reinstall.
+func TestHooksList_StrandedHooksPathNamesTheConfig(t *testing.T) {
+	tmpDir := newGitRepo(t)
+	runInDir(t, tmpDir, func() {
+		beadsHooks := filepath.Join(tmpDir, ".beads", "hooks")
+		if err := os.MkdirAll(beadsHooks, 0750); err != nil {
+			t.Fatalf("mkdir .beads/hooks: %v", err)
+		}
+		for _, name := range managedHookNames {
+			body := "#!/bin/sh\n" + shimVersionPrefix + Version + "\nexec bd hooks run " + name + " \"$@\"\n"
+			if err := os.WriteFile(filepath.Join(beadsHooks, name), []byte(body), 0755); err != nil {
+				t.Fatalf("write hook %s: %v", name, err)
+			}
+		}
+
+		stale := filepath.Join(t.TempDir(), "moved-away", ".beads", "hooks")
+		if out, err := exec.Command("git", "config", "core.hooksPath", stale).CombinedOutput(); err != nil {
+			t.Fatalf("git config core.hooksPath: %v: %s", err, out)
+		}
+		resetRepoCaches()
+
+		out := captureStdout(t, func() error {
+			return hooksListCmd.RunE(hooksListCmd, nil)
+		})
+
+		if !strings.Contains(out, stale) {
+			t.Errorf("bd hooks list does not name the stranded core.hooksPath %q (GH#5853); output:\n%s", stale, out)
+		}
+		if strings.Count(out, "not installed") == len(managedHookNames) {
+			t.Errorf("bd hooks list reports every hook \"not installed\" although .beads/hooks holds all of them and the fault is core.hooksPath (GH#5853); output:\n%s", out)
+		}
+	})
+}
+
+// TestHooksList_RelocatedHooksPath covers the full GH#5853 diagnosis on
+// `bd hooks list`: text names the stale path, explains that git runs no
+// hooks, names the current target and the explicit repair; JSON keeps the
+// hooks array and adds the hooks_path diagnostics; ineligible paths get the
+// fault named without claiming hooks exist elsewhere.
+func TestHooksList_RelocatedHooksPath(t *testing.T) {
+	t.Run("eligible relocation, text", func(t *testing.T) {
+		tmpDir, stale := strandedHooksRepo(t)
+		runInDir(t, tmpDir, func() {
+			out := captureStdout(t, func() error {
+				return hooksListCmd.RunE(hooksListCmd, nil)
+			})
+			current := filepath.Join(tmpDir, ".beads", "hooks")
+			for _, want := range []string{stale, current, "runs no hooks", "bd doctor --fix"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("bd hooks list output missing %q (GH#5853); output:\n%s", want, out)
+				}
+			}
+		})
+	})
+
+	t.Run("eligible relocation, json", func(t *testing.T) {
+		tmpDir, stale := strandedHooksRepo(t)
+		runInDir(t, tmpDir, func() {
+			jsonOutput = true
+			t.Cleanup(func() { jsonOutput = false })
+			out := captureStdout(t, func() error {
+				return hooksListCmd.RunE(hooksListCmd, nil)
+			})
+			var payload struct {
+				Hooks     []HookStatus `json:"hooks"`
+				HooksPath *struct {
+					Configured  string `json:"configured"`
+					Resolved    string `json:"resolved"`
+					Exists      bool   `json:"exists"`
+					RelocatedTo string `json:"relocated_to"`
+				} `json:"hooks_path"`
+			}
+			if err := json.Unmarshal([]byte(out), &payload); err != nil {
+				t.Fatalf("hooks list --json output is not valid JSON: %v\n%s", err, out)
+			}
+			if len(payload.Hooks) != len(managedHookNames) {
+				t.Errorf("hooks array lost its semantics: got %d hooks, want %d; output:\n%s", len(payload.Hooks), len(managedHookNames), out)
+			}
+			if payload.HooksPath == nil {
+				t.Fatalf("hooks_path diagnostics missing from JSON output:\n%s", out)
+			}
+			if payload.HooksPath.Configured != stale || payload.HooksPath.Exists {
+				t.Errorf("hooks_path = %+v, want configured=%q exists=false", payload.HooksPath, stale)
+			}
+			if want := filepath.Join(tmpDir, ".beads", "hooks"); payload.HooksPath.RelocatedTo != want {
+				t.Errorf("hooks_path.relocated_to = %q, want %q", payload.HooksPath.RelocatedTo, want)
+			}
+		})
+	})
+
+	t.Run("ineligible third-party path, text", func(t *testing.T) {
+		tmpDir := newGitRepo(t)
+		stale := filepath.Join(t.TempDir(), "team-hooks")
+		runInDir(t, tmpDir, func() {
+			if out, err := exec.Command("git", "config", "core.hooksPath", stale).CombinedOutput(); err != nil {
+				t.Fatalf("git config core.hooksPath: %v: %s", err, out)
+			}
+			resetRepoCaches()
+			out := captureStdout(t, func() error {
+				return hooksListCmd.RunE(hooksListCmd, nil)
+			})
+			if !strings.Contains(out, stale) {
+				t.Errorf("output must name the missing configured path %q (GH#5853); output:\n%s", stale, out)
+			}
+			if strings.Contains(out, "repoint") {
+				t.Errorf("no automatic relocation must be offered for a path bd does not own; output:\n%s", out)
+			}
+		})
+	})
+}
+
+// strandedHooksRepo builds the GH#5853 fixture: a repository whose
+// .beads/hooks holds recognizable bd hooks while a repository-local
+// core.hooksPath still points at the absolute .beads/hooks of a former
+// location that no longer exists. It returns the repo root and the stale
+// path.
+func strandedHooksRepo(t *testing.T) (repoDir, stale string) {
+	t.Helper()
+	tmpDir := newGitRepo(t)
+	beadsHooks := filepath.Join(tmpDir, ".beads", "hooks")
+	if err := os.MkdirAll(beadsHooks, 0750); err != nil {
+		t.Fatalf("mkdir .beads/hooks: %v", err)
+	}
+	for _, name := range managedHookNames {
+		body := "#!/bin/sh\n" + shimVersionPrefix + Version + "\nexec bd hooks run " + name + " \"$@\"\n"
+		if err := os.WriteFile(filepath.Join(beadsHooks, name), []byte(body), 0755); err != nil {
+			t.Fatalf("write hook %s: %v", name, err)
+		}
+	}
+	// The old location: the same layout under a directory that no longer
+	// exists anywhere on disk.
+	stale = filepath.Join(t.TempDir(), "moved-away", ".beads", "hooks")
+	cmd := exec.Command("git", "config", "core.hooksPath", stale)
+	cmd.Dir = tmpDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config core.hooksPath: %v: %s", err, out)
+	}
+	resetRepoCachesForTest(t)
+	return tmpDir, stale
+}
+
+// TestInspectHooksPath_Classification pins the shared read-only inspection
+// behind the GH#5853 diagnostics: the states it must distinguish and the
+// fail-closed eligibility rules.
+func TestInspectHooksPath_Classification(t *testing.T) {
+	t.Run("unset", func(t *testing.T) {
+		tmpDir := newGitRepo(t)
+		runInDir(t, tmpDir, func() {
+			// newGitRepo pins core.hooksPath=.git/hooks for test isolation;
+			// unset it to exercise the genuinely-unset case.
+			if out, err := exec.Command("git", "config", "--unset", "core.hooksPath").CombinedOutput(); err != nil {
+				t.Fatalf("git config --unset: %v: %s", err, out)
+			}
+			resetRepoCaches()
+			if st := doctor.InspectHooksPath(); st.State != doctor.HooksPathUnset {
+				t.Errorf("State = %v, want HooksPathUnset; status: %+v", st.State, st)
+			}
+		})
+	})
+
+	t.Run("existing configured path", func(t *testing.T) {
+		tmpDir := newGitRepo(t)
+		runInDir(t, tmpDir, func() {
+			hooks := filepath.Join(tmpDir, ".git", "hooks")
+			cmd := exec.Command("git", "config", "core.hooksPath", hooks)
+			cmd.Dir = tmpDir
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git config: %v: %s", err, out)
+			}
+			resetRepoCaches()
+			if st := doctor.InspectHooksPath(); st.State != doctor.HooksPathExists {
+				t.Errorf("State = %v, want HooksPathExists; status: %+v", st.State, st)
+			}
+		})
+	})
+
+	t.Run("eligible relocated path", func(t *testing.T) {
+		tmpDir, stale := strandedHooksRepo(t)
+		runInDir(t, tmpDir, func() {
+			st := doctor.InspectHooksPath()
+			if st.State != doctor.HooksPathRelocated {
+				t.Fatalf("State = %v, want HooksPathRelocated; status: %+v", st.State, st)
+			}
+			if want := filepath.Join(tmpDir, ".beads", "hooks"); st.Target != want {
+				t.Errorf("Target = %q, want %q", st.Target, want)
+			}
+			if st.Configured != stale {
+				t.Errorf("Configured = %q, want %q", st.Configured, stale)
+			}
+		})
+	})
+
+	t.Run("third-party missing path", func(t *testing.T) {
+		tmpDir := newGitRepo(t)
+		stale := filepath.Join(t.TempDir(), "team-hooks")
+		runInDir(t, tmpDir, func() {
+			cmd := exec.Command("git", "config", "core.hooksPath", stale)
+			cmd.Dir = tmpDir
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git config: %v: %s", err, out)
+			}
+			resetRepoCaches()
+			st := doctor.InspectHooksPath()
+			if st.State != doctor.HooksPathMissing {
+				t.Fatalf("State = %v, want HooksPathMissing; status: %+v", st.State, st)
+			}
+			if !strings.Contains(st.Reason, "does not infer ownership") {
+				t.Errorf("Reason should name the unrecognized layout, got: %s", st.Reason)
+			}
+		})
+	})
 }

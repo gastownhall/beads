@@ -864,16 +864,49 @@ var hooksListCmd = &cobra.Command{
 
 		statuses := CheckGitHooks()
 
+		// GH#5853: a configured core.hooksPath that names a missing directory
+		// (a moved repository strands the absolute value bd writes) means git
+		// runs no hooks at all while the hook files may still exist elsewhere.
+		// Diagnose the configuration before the per-hook statuses, which
+		// would otherwise read "not installed" and send the user to
+		// reinstalling instead of to the config.
+		pathStatus := doctor.InspectHooksPath()
+		pathMissing := false
+		if git.GetRepoRoot() != "" {
+			switch pathStatus.State {
+			case doctor.HooksPathManagedMissing, doctor.HooksPathRelocated, doctor.HooksPathMissing:
+				pathMissing = true
+			}
+		}
+
 		if jsonOutput {
 			output := map[string]interface{}{
 				"hooks": statuses,
+			}
+			if pathMissing {
+				hooksPath := map[string]interface{}{
+					"configured": pathStatus.Configured,
+					"resolved":   pathStatus.Resolved,
+					"exists":     false,
+				}
+				if pathStatus.State == doctor.HooksPathRelocated {
+					hooksPath["relocated_to"] = pathStatus.Target
+				}
+				output["hooks_path"] = hooksPath
 			}
 			jsonBytes, _ := json.MarshalIndent(output, "", "  ")
 			fmt.Println(string(jsonBytes))
 		} else {
 			fmt.Println("Git hooks status:")
+			if pathMissing {
+				printHooksPathDiagnosis(pathStatus)
+			}
 			for _, status := range statuses {
 				if !status.Installed {
+					if pathMissing {
+						fmt.Printf("  ✗ %s: unreachable (the configured hooks directory is missing)\n", status.Name)
+						continue
+					}
 					fmt.Printf("  ✗ %s: not installed\n", status.Name)
 				} else if status.IsShim {
 					// An external manager's integration (GH#946) carries no bd
@@ -896,6 +929,24 @@ var hooksListCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// printHooksPathDiagnosis reports a core.hooksPath whose target is missing
+// ahead of the per-hook statuses (GH#5853). The hooks may exist and be
+// current at another directory, so the fault is the configuration, and the
+// repair suggestion is offered only where an explicit one exists.
+func printHooksPathDiagnosis(st doctor.HooksPathStatus) {
+	fmt.Printf("  ⚠ core.hooksPath points at a missing directory: %s\n", st.Configured)
+	fmt.Println("    git runs no hooks from it.")
+	switch st.State {
+	case doctor.HooksPathRelocated:
+		fmt.Printf("    The beads hooks are at: %s\n", st.Target)
+		fmt.Println("    Repair: run 'bd doctor --fix' or 'bd hooks install' to repoint core.hooksPath")
+	case doctor.HooksPathManagedMissing:
+		fmt.Println("    Repair: run 'bd doctor --fix' to unset core.hooksPath, or 'bd hooks install' to recreate the directory")
+	default:
+		fmt.Println("    Restore the directory or correct core.hooksPath manually; bd will not change a path it does not own.")
+	}
 }
 
 // refuseSymlinkedHooksDir refuses a hooks directory that is itself a symlink,
