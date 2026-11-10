@@ -242,3 +242,51 @@ func TestShowAutoRoute_OwnerSearchedKeepsHint(t *testing.T) {
 		})
 	}
 }
+
+// TestShowPrefixRoute_RigSeatReachesTownStore pins AC-4, the recipe
+// docs/multi-agent/routing.md gives for GH#5259: a rig seat whose own
+// routes.jsonl sends hq- to the town (`{"prefix":"hq-","path":".."}`)
+// resolves a town ID read-only through the existing prefix route. Without the
+// route, the same seat misses with the foreign-prefix hint, which names the
+// rig's routes.jsonl as the place to add it.
+func TestShowPrefixRoute_RigSeatReachesTownStore(t *testing.T) {
+	const townID = "hq-gea4h"
+
+	t.Run("without the route", func(t *testing.T) {
+		rigDir, rigDBPath, rigStore := rigSeatTown(t, "", townID)
+		useShowSeat(t, rigDir, rigDBPath, rigStore)
+
+		stderr, err := runShowDirect(t, townID)
+		if err == nil {
+			t.Errorf("bd show %s: want the not-found exit, got nil", townID)
+		}
+		routesPath := filepath.Join(rigDir, ".beads", "routes.jsonl")
+		for _, want := range []string{"Issue " + townID + " not found", foreignPrefixHintMarker, `prefix "hq"`, "issue prefix is op", routesPath} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("bd show %s stderr = %q, want %q", townID, stderr, want)
+			}
+		}
+	})
+
+	t.Run("with the route", func(t *testing.T) {
+		rigDir, rigDBPath, rigStore := rigSeatTown(t, `{"prefix":"hq-","path":".."}`, townID)
+		useShowSeat(t, rigDir, rigDBPath, rigStore)
+
+		result, searched, err := resolveAndGetIssueWithRoutingSearchScope(rootCtx, rigStore, townID)
+		if err != nil {
+			t.Fatalf("resolve %s from the rig seat: %v", townID, err)
+		}
+		if result.Issue == nil || result.ResolvedID != townID || !result.Routed || !searched {
+			t.Errorf("resolve %s = (resolved %q, routed %v, searched %v), want the routed town issue", townID, result.ResolvedID, result.Routed, searched)
+		}
+		if !routedStoreIsReadOnly(t, result.Store) {
+			t.Errorf("the town store a read routed to was opened writable")
+		}
+		result.Close()
+
+		stderr, err := runShowDirect(t, townID)
+		if err != nil || strings.Contains(stderr, "not found") {
+			t.Errorf("bd show %s from the rig seat = (%v, stderr %q), want it found", townID, err, stderr)
+		}
+	})
+}
