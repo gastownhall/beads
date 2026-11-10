@@ -171,16 +171,18 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 	// (GH#5896).
 	var provenDeleted []string
 	if !allowEmptyOverwrite {
+		// GH#6163: a precheck that cannot READ the existing JSONL or QUERY
+		// the store is an operational failure and returns an error (the
+		// caller prints it once); only the two refusals below stay
+		// warning-only skips, since they are deliberate safety guards.
 		rec, err := reconcileAutoExportJSONL(ctx, fullPath, state.LastDiffAnchor)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to compare existing JSONL against local store: %v\n", err)
-			return nil
+			return fmt.Errorf("auto-export: failed to compare existing JSONL %s against the local store: %w", fullPath, err)
 		}
 		provenDeleted = rec.provenDeleted
 
 		if skip, existingCount, err := shouldSkipEmptyAutoExport(ctx, rec); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to check existing JSONL: %v\n", err)
-			return nil
+			return fmt.Errorf("auto-export: failed to check existing JSONL %s: %w", fullPath, err)
 		} else if skip {
 			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: current database would export 0 issues, but %s already contains %d issue(s); refusing to overwrite. Run `bd init --from-jsonl` to import the JSONL file, or move it aside and retry.\n", fullPath, existingCount)
 			return nil
