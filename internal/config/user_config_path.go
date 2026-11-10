@@ -123,10 +123,14 @@ func userConfigYamlDisplayPath(candidates userConfigYamlCandidates) string {
 	return userConfigYamlDisplayFallback
 }
 
+// statUserConfigPath is the only existence probe for user config candidates,
+// so tests can count which user config paths a read touches.
+var statUserConfigPath = os.Stat
+
 func userConfigPathExists(path string) bool {
 	if path == "" {
 		return false
 	}
-	_, err := os.Stat(path)
+	_, err := statUserConfigPath(path)
 	return err == nil
 }

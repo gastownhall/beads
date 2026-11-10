@@ -274,6 +274,111 @@ func TestInitializeUserConfigPrecedence(t *testing.T) {
 	assertInitializedActor(t, "legacy")
 }
 
+// newDistinctUserConfigFixture isolates HOME, the native user config root and
+// the working directory, and returns user config candidates whose native and
+// documented paths differ.
+func newDistinctUserConfigFixture(t *testing.T) (userConfigYamlCandidates, string) {
+	t.Helper()
+	ResetForTesting()
+	t.Cleanup(ResetForTesting)
+	restore := envSnapshot(t)
+	t.Cleanup(restore)
+
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	nativeRoot := filepath.Join(root, "native-config")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("APPDATA", nativeRoot)
+	t.Setenv("XDG_CONFIG_HOME", nativeRoot)
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "")
+	work := filepath.Join(root, "work")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(work)
+
+	candidates := currentUserConfigYamlCandidates()
+	if candidates.legacy == "" || candidates.native == "" || candidates.documented == "" {
+		t.Fatalf("test environment did not resolve all user config candidates: %#v", candidates)
+	}
+	if candidates.native == candidates.documented {
+		t.Fatalf("test requires distinct native and documented paths, both were %q", candidates.native)
+	}
+	return candidates, root
+}
+
+// recordUserConfigStats counts every user config existence probe by path while
+// still answering from the real filesystem.
+func recordUserConfigStats(t *testing.T) map[string]int {
+	t.Helper()
+	counts := map[string]int{}
+	saved := statUserConfigPath
+	statUserConfigPath = func(path string) (os.FileInfo, error) {
+		counts[filepath.Clean(path)]++
+		return os.Stat(path)
+	}
+	t.Cleanup(func() { statUserConfigPath = saved })
+	return counts
+}
+
+func writeConfigYAML(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// GH#8113: on macOS touching os.UserConfigDir() raises a privacy prompt, so no
+// user config read may probe the native file while the documented one exists.
+func TestUserConfigReadsNeverProbeNativeWhenDocumentedExists(t *testing.T) {
+	candidates, _ := newDistinctUserConfigFixture(t)
+	writeConfigYAML(t, candidates.native, "actor: native\nmail:\n  delegate: native-delegate\n")
+	writeConfigYAML(t, candidates.documented, "actor: documented\nmail:\n  delegate: documented-delegate\n")
+	counts := recordUserConfigStats(t)
+
+	reads := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{"Initialize", func(t *testing.T) {
+			if err := Initialize(); err != nil {
+				t.Fatalf("Initialize: %v", err)
+			}
+			if got := GetString("actor"); got != "documented" {
+				t.Fatalf("actor = %q, want documented", got)
+			}
+		}},
+		{"UserConfigYamlPath", func(t *testing.T) {
+			got, err := UserConfigYamlPath()
+			if err != nil || got != candidates.documented {
+				t.Fatalf("UserConfigYamlPath() = %q, %v; want %q", got, err, candidates.documented)
+			}
+		}},
+		{"GetUserYamlConfig", func(t *testing.T) {
+			if got := GetUserYamlConfig("mail.delegate"); got != "documented-delegate" {
+				t.Fatalf("GetUserYamlConfig(mail.delegate) = %q, want documented-delegate", got)
+			}
+		}},
+	}
+	for _, read := range reads {
+		t.Run(read.name, func(t *testing.T) {
+			clear(counts)
+			read.run(t)
+			if counts[candidates.documented] == 0 {
+				t.Errorf("documented %s was never probed: %v", candidates.documented, counts)
+			}
+			if n := counts[candidates.native]; n != 0 {
+				t.Errorf("native %s probed %d time(s) although documented exists", candidates.native, n)
+			}
+		})
+	}
+}
+
 func userConfigTestRoots(t *testing.T) (string, string) {
 	t.Helper()
 	base := t.TempDir()
