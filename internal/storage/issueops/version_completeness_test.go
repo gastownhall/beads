@@ -464,6 +464,10 @@ var versionExemptions = map[string]string{
 	"UpdateWispIDInDependenciesInTx":  "rename: dep-row rekey, out of contract by design",
 	"UpdateIssueIDInDependenciesInTx": "rename: dep-row rekey, out of contract by design",
 
+	// upgrade repair — the migration moves legacy dep rows' target column in
+	// place; no caller-visible mutation.
+	"ApplyLocalExternalDepRepairInTx": "upgrade migration: dep-row target-column repair, out of contract by design",
+
 	// compaction bookkeeping and restore — outside the op vocabulary; the
 	// content rewrite that precedes compaction versions through UpdateIssue.
 	"ApplyCompactionInTx":     "compaction bookkeeping columns, out of contract by design",

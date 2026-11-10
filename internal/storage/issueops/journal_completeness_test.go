@@ -188,6 +188,7 @@ var beadDMLExemptions = map[string]string{
 	"RetargetInboundDependenciesToIssueInTx": "rewrites dep rows during promote; PromoteFromEphemeralInTx journals it",
 	"DeleteWispFromDependenciesInTx":         "cleans up dep rows during a delete that journals the delete",
 	"DeleteWispsFromDependenciesInTx":        "cleans up dep rows during a delete that journals the delete",
+	"ApplyLocalExternalDepRepairInTx":        "one-time upgrade repair run by the migration: moves a dep row's target column in place (same id and payload)",
 	"DeleteWispAuxRowsInTx":                  "cleans up wisp label/event/comment/counter rows during a delete that journals the delete",
 
 	// (4) compaction maintenance — a lossy content rewrite outside the
