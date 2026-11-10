@@ -1,9 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
@@ -40,12 +43,27 @@ func resolveMetadatalessEmbeddedDatabase(beadsDir string) (metadatalessDatabaseS
 // selectMetadatalessEmbeddedDatabase is resolveMetadatalessEmbeddedDatabase
 // over the databases the workspace holds (existing, as embeddeddolt.Databases
 // names them) and the BEADS_DOLT_SERVER_DATABASE value (override).
-func selectMetadatalessEmbeddedDatabase(_ string, existing []string, override string) (metadatalessDatabaseSelection, error) {
+//
+// Several databases and no override name nothing safe to open, not even when
+// one of them is the default: it is refused, before any database opens.
+func selectMetadatalessEmbeddedDatabase(beadsDir string, existing []string, override string) (metadatalessDatabaseSelection, error) {
 	if override != "" {
 		return metadatalessDatabaseSelection{Database: override, Source: metadatalessDatabaseFromEnv}, nil
 	}
-	if len(existing) == 1 {
+	switch len(existing) {
+	case 0:
+		return metadatalessDatabaseSelection{Database: configfile.DefaultDoltDatabase, Source: metadatalessDatabaseFromDefault}, nil
+	case 1:
 		return metadatalessDatabaseSelection{Database: existing[0], Source: metadatalessDatabaseFromSole}, nil
 	}
-	return metadatalessDatabaseSelection{Database: configfile.DefaultDoltDatabase, Source: metadatalessDatabaseFromDefault}, nil
+	return metadatalessDatabaseSelection{}, fmt.Errorf("%s has no %s and its embedded store holds several databases (%s); refusing to pick one.\n%s",
+		remedy.PrintedValue(beadsDir), configfile.ConfigFileName, remedy.PrintedList(existing, ", "), metadatalessSelectionRemedy(beadsDir))
+}
+
+// metadatalessSelectionRemedy is the advice a refused metadata-less selection
+// gives: restore the workspace's metadata, or name the database to use.
+func metadatalessSelectionRemedy(beadsDir string) string {
+	return fmt.Sprintf("  - Restore %s from a backup or from version control, if you keep it there\n"+
+		"  - Or select an existing database for this command: BEADS_DOLT_SERVER_DATABASE=<name> bd ...",
+		remedy.PrintedValue(filepath.Join(beadsDir, configfile.ConfigFileName)))
 }

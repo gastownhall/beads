@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // metadatalessRun is one bd invocation in a metadata-less workspace.
@@ -139,4 +140,86 @@ func TestEmbeddedMetadatalessWorkspaceAdoptsSoleDatabase(t *testing.T) {
 		}
 		assertEmbeddedDatabases(t, beadsDir, "gh4135")
 	})
+}
+
+// severalDatabasesFixture builds an embedded workspace whose own database,
+// gh4135, holds one open issue, adds a second database named second (copied
+// out of a separate workspace, with an open issue of its own), and removes
+// metadata.json. It returns the workspace, its .beads directory, the removed
+// metadata, and the issue in each database.
+func severalDatabasesFixture(t *testing.T, bd, second string) (dir, beadsDir string, saved []byte, ownID, secondID string) {
+	t.Helper()
+	dir, beadsDir, _ = bdInit(t, bd, "--prefix", "gh4135")
+	ownID = bdCreate(t, bd, dir, "In the workspace's own database").ID
+	otherDir, otherBeadsDir, _ := bdInit(t, bd, "--prefix", second)
+	secondID = bdCreate(t, bd, otherDir, "In the second database").ID
+	if err := copyTree(filepath.Join(otherBeadsDir, "embeddeddolt", second), filepath.Join(beadsDir, "embeddeddolt", second)); err != nil {
+		t.Fatal(err)
+	}
+	saved = removeMetadata(t, beadsDir)
+	want := []string{"gh4135", second}
+	slices.Sort(want)
+	assertEmbeddedDatabases(t, beadsDir, want...)
+	return dir, beadsDir, saved, ownID, secondID
+}
+
+// assertIssueStatusIn reads id's status out of the named database of the
+// workspace in dir, which has its metadata.json.
+func assertIssueStatusIn(t *testing.T, bd, dir, database, id, want string) {
+	t.Helper()
+	run := runBDMetadataless(t, bd, dir, []string{"BEADS_DOLT_SERVER_DATABASE=" + database}, "show", id, "--json")
+	if run.err != nil {
+		t.Fatalf("bd show %s in %s failed: %v\nstdout:\n%s\nstderr:\n%s", id, database, run.err, run.stdout, run.stderr)
+	}
+	if got := parseIssueJSON(t, []byte(run.stdout)); got.Status != types.Status(want) {
+		t.Fatalf("%s status in %s = %q, want %q", id, database, got.Status, want)
+	}
+}
+
+// TestEmbeddedMetadatalessWorkspaceRefusesSeveralDatabases: a workspace that
+// lost metadata.json and holds several databases names no database a command
+// could safely pick, the default "beads" included, so reads and writes refuse
+// before opening one and say how to select it.
+func TestEmbeddedMetadatalessWorkspaceRefusesSeveralDatabases(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	bd := buildEmbeddedBD(t)
+
+	for _, second := range []string{"second", "beads"} {
+		for _, tc := range []struct {
+			name string
+			args func(ownID string) []string
+		}{
+			{name: "list", args: func(string) []string { return []string{"list", "--json"} }},
+			{name: "readonly list", args: func(string) []string { return []string{"list", "--json", "--readonly"} }},
+			{name: "close", args: func(ownID string) []string { return []string{"close", ownID, "--json"} }},
+		} {
+			t.Run(second+"/"+tc.name, func(t *testing.T) {
+				dir, beadsDir, saved, ownID, secondID := severalDatabasesFixture(t, bd, second)
+				args := tc.args(ownID)
+
+				run := runBDMetadataless(t, bd, dir, nil, args...)
+				if run.err == nil {
+					t.Fatalf("bd %s succeeded in a metadata-less workspace holding several databases:\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), run.stdout, run.stderr)
+				}
+				if strings.TrimSpace(run.stdout) != "" {
+					t.Fatalf("refused bd %s printed a payload:\n%s", strings.Join(args, " "), run.stdout)
+				}
+				for _, want := range []string{"gh4135", second, "metadata.json", "BEADS_DOLT_SERVER_DATABASE"} {
+					if !strings.Contains(run.stderr, want) {
+						t.Fatalf("refusal does not mention %q:\n%s", want, run.stderr)
+					}
+				}
+				want := []string{"gh4135", second}
+				slices.Sort(want)
+				assertEmbeddedDatabases(t, beadsDir, want...)
+				assertMetadataAbsent(t, beadsDir)
+
+				restoreMetadata(t, beadsDir, saved)
+				assertIssueStatusIn(t, bd, dir, "gh4135", ownID, "open")
+				assertIssueStatusIn(t, bd, dir, second, secondID, "open")
+			})
+		}
+	}
 }

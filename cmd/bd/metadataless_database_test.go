@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -27,12 +28,15 @@ func TestResolveMetadatalessEmbeddedDatabase(t *testing.T) {
 		layout     func(t *testing.T, beadsDir string)
 		want       string
 		wantSource string
+		wantErr    []string
 	}{
 		{name: "no database keeps the default", want: "beads", wantSource: metadatalessDatabaseFromDefault},
 		{name: "no database with override", override: "chosen", want: "chosen", wantSource: metadatalessDatabaseFromEnv},
 		{name: "sole database adopted", databases: []string{"gh4135"}, want: "gh4135", wantSource: metadatalessDatabaseFromSole},
 		{name: "sole legacy name adopted as it is on disk", databases: []string{"my-proj"}, want: "my-proj", wantSource: metadatalessDatabaseFromSole},
 		{name: "sole database named by override", databases: []string{"gh4135"}, override: "gh4135", want: "gh4135", wantSource: metadatalessDatabaseFromEnv},
+		{name: "several databases refuse", databases: []string{"gh4135", "second"}, wantErr: []string{"gh4135, second", "BEADS_DOLT_SERVER_DATABASE", "metadata.json"}},
+		{name: "several databases refuse even with beads among them", databases: []string{"beads", "gh4135"}, wantErr: []string{"beads, gh4135", "BEADS_DOLT_SERVER_DATABASE"}},
 		{
 			name: "empty marker is not a database",
 			layout: func(t *testing.T, beadsDir string) {
@@ -67,6 +71,17 @@ func TestResolveMetadatalessEmbeddedDatabase(t *testing.T) {
 			}
 			t.Setenv("BEADS_DOLT_SERVER_DATABASE", tc.override)
 			got, err := resolveMetadatalessEmbeddedDatabase(beadsDir)
+			if tc.wantErr != nil {
+				if err == nil {
+					t.Fatalf("selected %q (%s), want a refusal", got.Database, got.Source)
+				}
+				for _, want := range tc.wantErr {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("refusal does not mention %q: %v", want, err)
+					}
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("resolveMetadatalessEmbeddedDatabase: %v", err)
 			}
