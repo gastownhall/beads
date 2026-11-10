@@ -51,6 +51,7 @@ go_library(
         "@in_gopkg_yaml_v3//:yaml_v3",
     ] + select({
         "@rules_go//go/platform:windows": [
+            "//internal/execwin",
             "@org_golang_x_sys//windows",
         ],
         "//conditions:default": [],
@@ -82,6 +83,7 @@ go_test(
         "portsources_test.go",
         "probe_test.go",
         "procattr_linux_test.go",
+        "procattr_windows_test.go",
         "socket_integration_test.go",
         "startowned_test.go",
         "startupwatch_test.go",
