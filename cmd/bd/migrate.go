@@ -902,7 +902,10 @@ Example:
 			// provider open IS the migration, and by the time RunE runs it has
 			// already happened — with this verb's consent, which the root
 			// pre-run set before the open (schema.SetSharedMigrateConsent).
-			// So report, rather than refuse a verb that just did its job.
+			// Only a --force invocation gets this far: without it the
+			// capability registry refuses the path before the provider is
+			// built (gastownhall/beads#6656). So report, rather than refuse a
+			// verb that just did its job.
 			return reportProxiedSchemaMigrate()
 		}
 		CheckReadonly("migrate schema")

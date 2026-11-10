@@ -153,6 +153,16 @@ func (r capabilityRow) withMessage(message string) capabilityRow {
 	return r
 }
 
+// forceableWith lets a refusal be overridden by the command's own bool flag:
+// the gate refuses unless that flag is set to true. It does not change the
+// rule's outcome — the row still says Refused, with the same code and reason,
+// because that is what the gate does with the path as typed — so a consumer
+// reading the table sees the refusal and, beside it, the one way past it.
+func (r capabilityRow) forceableWith(flag string) capabilityRow {
+	r.Rule.ForceFlag = flag
+	return r
+}
+
 // refusedPath builds a typed front-door refusal for a bare command path.
 func refusedPath(path, code string, reason ProxyRefusalReason, tracking string) capabilityRow {
 	return refusedArgs(path, "", code, reason, tracking)
@@ -352,8 +362,7 @@ var proxyCapabilityRegistry = []capabilityRow{
 
 	// --- migration and workspace surgery ------------------------------------
 	// Storage-format and workspace surgery against a store other clients may be
-	// holding open. `migrate schema` is the exception and is already routed:
-	// the provider open runs it under the migration gate.
+	// holding open.
 	//
 	// S7 MUST RE-EXAMINE THE ROWS BELOW PER TOPOLOGY. "A store other clients may
 	// be holding open" describes external and team-server workspaces; it does
@@ -384,6 +393,21 @@ var proxyCapabilityRegistry = []capabilityRow{
 	refusedPath("migrate issues", "proxy.migrate.unsupported", ProxyReasonDesign, ""),
 	refusedPath("migrate-issues", "proxy.migrate.unsupported", ProxyReasonDesign, ""),
 	refusedPath("migrate-personal", "proxy.migrate.unsupported", ProxyReasonDesign, ""),
+	// `migrate schema` has a proxied route — the provider open applies the
+	// migration under this verb's consent, before RunE — and that route is the
+	// danger (gastownhall/beads#6656). It promotes the schema of the backend
+	// the proxy serves, underneath every library client connected to it, and
+	// the proxy is a byte pump that does not know who they are. bd cannot ask
+	// them to stand down, so the operator has to: the refusal names that route
+	// and --force is the operator saying they took it. It is refused on every
+	// proxied shape, team-server included, where the open only verifies: the
+	// command policy is the same wherever the store is shared.
+	refusedPath("migrate schema", "proxy.migrate.unsupported", ProxyReasonDesign, "").
+		withMessage("migrate schema is not supported in proxied-server mode without --force: " +
+			"it promotes the schema underneath every library client connected to this proxy's backend, " +
+			"and the proxy does not track them. Stop those clients, run `bd migrate schema --force`, " +
+			"then restart them").
+		forceableWith("force"),
 
 	// --- destructive admin --------------------------------------------------
 	// Same topology-blind rationale as the migrate block above, and the same
@@ -534,7 +558,7 @@ var proxyPermittedPaths = []string{
 	"dolt start", "dolt stop", "dolt test",
 	"migrate from-proxied-server-to-server", "migrate from-proxied-server-to-shared-server",
 	"migrate from-server-to-proxied-server", "migrate from-shared-server-to-proxied-server",
-	"migrate legacy-sqlite", "migrate schema",
+	"migrate legacy-sqlite",
 
 	// formulas (parser-only), agent memory, swarm reads
 	"formula convert", "formula list", "formula schema", "formula show",
@@ -669,7 +693,22 @@ func validateProxyRegistryBeforeProvider(cmd *cobra.Command, topology ProxyTopol
 	if rule.Outcome != ProxyOutcomeRefused {
 		return nil
 	}
+	if forcedPastRefusal(cmd, rule) {
+		return nil
+	}
 	return HandleProxyCapabilityError(proxyCapabilityErrorFor(rule))
+}
+
+// forcedPastRefusal reports whether the invocation set the rule's ForceFlag to
+// true. Only a successful bool read of true counts: a false value, a flag the
+// command does not register, or one that is not a bool all keep the refusal,
+// so a rule that names the wrong flag fails closed.
+func forcedPastRefusal(cmd *cobra.Command, rule proxyCapabilityRule) bool {
+	if rule.ForceFlag == "" {
+		return false
+	}
+	forced, err := cmd.Flags().GetBool(rule.ForceFlag)
+	return err == nil && forced
 }
 
 func proxyCapabilityErrorFor(rule proxyCapabilityRule) *ProxyCapabilityError {

@@ -55,3 +55,28 @@ func TestIsForcedMigrate(t *testing.T) {
 		t.Errorf("migrate schema has no preview flags: want \"\", got %q", got)
 	}
 }
+
+// TestMigrateSchemaRefusedOnProxiedServerWithoutForce pins bd-n5e58c (GH#6656):
+// on a proxied-server workspace the schema is promoted during provider open,
+// underneath library clients the proxy cannot see, so `bd migrate schema`
+// without --force must be refused, typed, by the pre-provider gate.
+func TestMigrateSchemaRefusedOnProxiedServerWithoutForce(t *testing.T) {
+	t.Cleanup(func() {
+		_ = migrateSchemaCmd.Flags().Set("force", "false")
+		migrateSchemaCmd.Flags().Lookup("force").Changed = false
+	})
+	_ = migrateSchemaCmd.Flags().Set("force", "false")
+	for _, topo := range []ProxyTopology{
+		ProxyTopologyManagedLocal, ProxyTopologyExternalTCP, ProxyTopologyExternalUnix,
+		ProxyTopologyTeamServer, ProxyTopologyUnknown,
+	} {
+		err := validateProxyRegistryBeforeProvider(migrateSchemaCmd, topo)
+		if err == nil {
+			t.Errorf("%s: migrate schema without --force was permitted before provider open; want a typed refusal", topo)
+			continue
+		}
+		if code, ok := exitCodeFromError(err); !ok || code == 0 {
+			t.Errorf("%s: refusal = %#v; want a typed non-zero exit", topo, err)
+		}
+	}
+}
