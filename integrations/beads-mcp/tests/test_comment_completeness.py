@@ -44,6 +44,10 @@ TWO_COMMENTS: list[dict[str, Any]] = [
     },
 ]
 
+# bd before v1.0 sent integer comment ids, and bd before v1.0.5 streams the
+# bodies on every show.
+PRE_1_0_COMMENTS: list[dict[str, Any]] = [{**c, "id": n} for n, c in enumerate(TWO_COMMENTS, start=7)]
+
 
 def _issue(**extra: Any) -> dict[str, Any]:
     return {**BASE_ISSUE, **extra}
@@ -114,6 +118,7 @@ async def test_mcp_default_show_returns_count_only_metadata() -> None:
     [
         pytest.param({}, None, None, id="no-information"),
         pytest.param({"comments": TWO_COMMENTS}, 2, False, id="bodies-without-count"),
+        pytest.param({"comments": PRE_1_0_COMMENTS}, 2, False, id="bodies-without-count-integer-ids"),
         pytest.param({"comments": []}, 0, False, id="empty-array"),
         pytest.param({"comment_count": 0}, 0, False, id="zero-count"),
         pytest.param({"comment_count": 3}, 3, True, id="ready-style-count-without-marker"),
@@ -147,6 +152,19 @@ def test_model_derives_comment_completeness(
     assert again == issue
     assert server._truncate_description(issue, 2).comment_count == count
     assert server._truncate_description(issue, 2).comments_omitted is omitted
+
+
+@pytest.mark.asyncio
+async def test_default_show_accepts_pre_1_0_integer_comment_ids() -> None:
+    rec = _Recorder([_issue(comments=PRE_1_0_COMMENTS)])
+
+    with rec.patched(), rec.tools_patched():
+        issue = await server.show_issue(issue_id="bd-1")
+
+    assert [(c.id, c.text) for c in issue.comments] == [("7", "first comment"), ("8", "second comment")]
+    assert issue.comment_count == 2
+    assert issue.comments_omitted is False
+    assert "--include-comments" not in rec.calls[0]
 
 
 @pytest.mark.asyncio
@@ -294,6 +312,60 @@ async def test_mcp_show_comments_field_hydrates_projection() -> None:
     assert set(result) == {"comments", "comments_omitted"}
     assert [c["text"] for c in result["comments"]] == ["first comment", "second comment"]
     assert result["comments_omitted"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kwargs", "omitted"),
+    [
+        pytest.param(
+            {"include_comments": True, "fields": ["id", "comment_count", "comments_omitted"]},
+            True,
+            id="bodies-projected-away",
+        ),
+        pytest.param({"fields": ["comments", "comments_omitted"]}, False, id="bodies-kept"),
+    ],
+)
+async def test_show_projection_marker_describes_its_own_bodies(kwargs: dict[str, Any], omitted: bool) -> None:
+    rec = _Recorder([HYDRATED])
+
+    with rec.patched(), rec.tools_patched():
+        result = await server.show_issue(issue_id="bd-1", **kwargs)
+
+    _assert_one_hydrating_show(rec)
+    assert result["comments_omitted"] is omitted
+    assert ("comments" in result) is not omitted
+
+
+# bd drops an empty comments list from its JSON, so only a hydrated read can
+# tell an issue with no comments from one whose bodies were not fetched.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("include_comments", "bodies"),
+    [pytest.param(True, [], id="hydrated"), pytest.param(False, None, id="count-only")],
+)
+async def test_client_show_zero_comments(include_comments: bool, bodies: list[Any] | None) -> None:
+    rec = _Recorder([_issue(comment_count=0)])
+
+    with rec.patched():
+        issue = await rec.client.show(ShowIssueParams(issue_id="bd-1", include_comments=include_comments))
+
+    assert issue.comments == bodies
+    assert issue.comment_count == 0
+    assert issue.comments_omitted is False
+
+
+@pytest.mark.asyncio
+async def test_mcp_show_comments_field_zero_comments() -> None:
+    rec = _Recorder([_issue(comment_count=0)])
+
+    with rec.patched(), rec.tools_patched():
+        result = await server.show_issue(issue_id="bd-1", fields=["comments"])
+
+    _assert_one_hydrating_show(rec)
+    assert result == {"comments": [], "comments_omitted": False}
 
 
 @pytest.mark.asyncio

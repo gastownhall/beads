@@ -524,6 +524,10 @@ class BdCliClient(BdClientBase):
         if not isinstance(data, dict):
             raise BdCommandError(f"Invalid response for show {params.issue_id}")
 
+        # With --include-comments bd streams every body or fails, and its JSON
+        # leaves out an empty list, so no bodies here means the issue has none.
+        if params.include_comments and data.get("comments") is None:
+            data["comments"] = []
         return Issue.model_validate(data)
 
     async def create(self, params: CreateIssueParams) -> Issue:

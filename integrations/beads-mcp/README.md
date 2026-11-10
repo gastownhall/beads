@@ -214,7 +214,7 @@ await beads_ready_work(workspace_root="/Users/you/project-a")
 - `create` - Create new issue (bug, feature, task, epic, chore, decision)
 - `list` - List issues with filters (status, priority, type, assignee)
 - `ready` - Find tasks with no blockers ready to work on
-- `show` - Show detailed issue info including dependencies. Comments are count-only by default (`comment_count`, plus `comments_omitted: true` when the bodies are left out); pass `include_comments=True` or `fields=["comments"]` to get the bodies. `null` means unknown, not "no comments"
+- `show` - Show detailed issue info including dependencies. Comments are count-only by default (`comment_count`, plus `comments_omitted: true` when the bodies are left out); pass `include_comments=True` or `fields=["comments"]` to get the bodies (bd 1.0.5 or later). `null` means unknown, not "no comments"
 - `update` - Update issue (status, priority, design, notes, etc). Note: `status="closed"` routes to the `close` tool to respect approval workflows. `status="open"` reopens a closed issue through `bd reopen` (`notes` become the reason) and still applies the other fields of the same call; on an open, deferred or blocked issue it is an ordinary update that also clears `defer_until`, so a dated defer shows in `ready` again. Either way it returns one issue
 - `close` - Close completed issue
 - `dep` - Add dependency (blocks, related, parent-child, discovered-from)

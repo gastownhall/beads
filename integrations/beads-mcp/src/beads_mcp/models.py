@@ -164,7 +164,8 @@ class LinkedIssue(IssueBase):
 class Comment(BaseModel):
     """A comment on an issue (matches `bd comments <id> --json`)."""
 
-    id: str
+    # bd before v1.0 sent integer ids; Go's Comment.UnmarshalJSON still reads both.
+    id: str = Field(coerce_numbers_to_str=True)
     issue_id: str
     author: str | None = None
     text: str

@@ -449,14 +449,14 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
                 "brief_deps": "bool (default false) - Full issue with compact dependencies",
                 "fields": (
                     "list[str] (optional) - Custom field projection; fields=['comments'] also fetches "
-                    "the comment bodies and adds comments_omitted"
+                    "the comment bodies (bd 1.0.5 or later) and adds comments_omitted"
                 ),
                 "max_description_length": "int (optional) - Truncate description",
                 "workspace_root": "str (optional)",
                 "include_comments": (
-                    "bool (default false) - Also return the comment bodies in CLI order. By default "
-                    "show is count-only: comment_count plus comments_omitted, with comments null. "
-                    "Ignored with brief=True"
+                    "bool (default false) - Also return the comment bodies in CLI order (needs bd "
+                    "1.0.5 or later). By default show is count-only: comment_count plus "
+                    "comments_omitted, with comments null. Ignored with brief=True"
                 ),
             },
             "returns": (
@@ -786,14 +786,14 @@ def _context_show() -> str:
 
 
 def _minimal_comments_omitted(issue: Issue) -> bool | None:
-    """The comments_omitted a minimal row must report about itself.
+    """The comments_omitted a row without bodies must report about itself.
 
-    A minimal row never carries bodies, so it must say whether it dropped
-    any: an explicit true stays true, positive evidence (a count above zero
-    or bodies the projection is removing) means true, a known zero without
-    positive evidence means false, and anything else keeps whatever the
-    source said — including unknown. This adjusts the projection only; the
-    source Issue is never rewritten.
+    A minimal row, or a field projection without comments, never carries
+    bodies, so it must say whether it dropped any: an explicit true stays
+    true, positive evidence (a count above zero or bodies the projection is
+    removing) means true, a known zero without positive evidence means false,
+    and anything else keeps whatever the source said — including unknown.
+    This adjusts the projection only; the source Issue is never rewritten.
     """
     if issue.comments_omitted is True:
         return True
@@ -896,6 +896,10 @@ def _filter_fields(obj: Issue, fields: list[str]) -> dict[str, Any]:
     # selection also says whether they were left out.
     if "comments" in requested and "comments_omitted" not in requested:
         result["comments_omitted"] = obj.comments_omitted
+    # Without comments the projection drops any fetched bodies, so its marker
+    # describes the projection, as a minimal row's does.
+    if "comments_omitted" in requested and "comments" not in requested:
+        result["comments_omitted"] = _minimal_comments_omitted(obj)
     return result
 
 
@@ -1082,7 +1086,8 @@ async def list_issues(
         "Show detailed information about a specific issue including dependencies and dependents. "
         "Comments are count-only by default: comment_count says how many exist and comments_omitted "
         "is true when their bodies are not in the response. Pass include_comments=True (or "
-        "fields=['comments']) to also get the bodies; brief=True never includes them."
+        "fields=['comments']) to also get the bodies (needs bd 1.0.5 or later); brief=True never "
+        "includes them."
     ),
 )
 @with_workspace

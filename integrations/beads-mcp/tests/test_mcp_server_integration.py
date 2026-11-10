@@ -1330,6 +1330,24 @@ async def test_show_comment_completeness_real_cli(mcp_client):
 
 
 @pytest.mark.asyncio
+async def test_show_include_comments_without_comments_real_cli(mcp_client):
+    """A body request on an issue with no comments answers [], not null (unknown) (bd-kwe4ze)."""
+    import json
+
+    create_result = await mcp_client.call_tool(
+        "create", {"title": "Quiet issue", "priority": 2, "issue_type": "task", "brief": False}
+    )
+    issue_id = json.loads(create_result.content[0].text)["id"]
+
+    full = json.loads(
+        (await mcp_client.call_tool("show", {"issue_id": issue_id, "include_comments": True})).content[0].text
+    )
+    assert full["comments"] == []
+    assert full["comment_count"] == 0
+    assert full["comments_omitted"] is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("tool", ["list", "ready"])
 async def test_collection_comment_completeness_real_cli(mcp_client, tool):
     """list/ready minimal rows say their comments were omitted (bd-kwe4ze)."""
