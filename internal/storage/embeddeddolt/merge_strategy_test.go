@@ -441,6 +441,93 @@ func TestMergeAndSettleWithStrategy_KeepsCleanMergedTables(t *testing.T) {
 	}
 }
 
+// TestStrategySettlementCommitsPeerComments (GH#7757) extends the strategy
+// coverage with the issue's own payload class: a comment and a user-kv
+// (config kv.*) row the peer inserts beside the declined retitle conflict.
+// Whichever route resolves the conflict — the pull settle escape hatch
+// (SettleMerge's strategy branch) or `bd vc merge --strategy`
+// (MergeWithStrategy) — the conclusion must carry those cleanly merged rows
+// into the two-parent merge commit, not just the working set.
+func TestStrategySettlementCommitsPeerComments(t *testing.T) {
+	seed := func(t *testing.T, ctx context.Context, conn *sql.Conn, issueID string) (peerBranch string) {
+		t.Helper()
+		exec := func(q string, args ...any) {
+			t.Helper()
+			if _, err := conn.ExecContext(ctx, q, args...); err != nil {
+				t.Fatalf("%s: %v", q, err)
+			}
+		}
+		exec("INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES (?, 'base', '', '', '', '', 'open', 2, 'task')", issueID)
+		exec("CALL DOLT_COMMIT('-Am', 'seed issue')")
+		peerBranch = issueID + "-peer"
+		exec("CALL DOLT_BRANCH(?, 'HEAD')", peerBranch)
+		// Equal updated_at on both sides: the LWW resolver declines the
+		// retitle, so the strategy is what settles it.
+		exec("UPDATE issues SET title = 'ours', updated_at = '2026-01-01 00:00:00' WHERE id = ?", issueID)
+		exec("CALL DOLT_COMMIT('-Am', 'retitle ours')")
+		exec("CALL DOLT_CHECKOUT(?)", peerBranch)
+		exec("UPDATE issues SET title = 'theirs', updated_at = '2026-01-01 00:00:00' WHERE id = ?", issueID)
+		exec("INSERT INTO comments (id, issue_id, author, text, created_at) VALUES (?, ?, 'peer', 'comment from peer', NOW())", issueID+"-comment", issueID)
+		exec("INSERT INTO config (`key`, value) VALUES ('kv."+issueID+"', 'peer-value')")
+		exec("CALL DOLT_COMMIT('-Am', 'peer retitle + comment + kv')")
+		exec("CALL DOLT_CHECKOUT('main')")
+		return peerBranch
+	}
+	assertPeerRows := func(t *testing.T, ctx context.Context, conn *sql.Conn, strategy string, issueID string) {
+		t.Helper()
+		var text string
+		if err := conn.QueryRowContext(ctx,
+			"SELECT text FROM comments AS OF 'HEAD' WHERE id = ?", issueID+"-comment").Scan(&text); err != nil {
+			t.Errorf("the peer's comment is missing from the merge commit (read AS OF 'HEAD': %v)", err)
+		} else if text != "comment from peer" {
+			t.Errorf("HEAD comment text = %q, want %q", text, "comment from peer")
+		}
+		var value string
+		if err := conn.QueryRowContext(ctx,
+			"SELECT value FROM config AS OF 'HEAD' WHERE `key` = ?", "kv."+issueID).Scan(&value); err != nil {
+			t.Errorf("the peer's kv row is missing from the merge commit (read AS OF 'HEAD': %v)", err)
+		} else if value != "peer-value" {
+			t.Errorf("HEAD config kv.%s = %q, want %q", issueID, value, "peer-value")
+		}
+		var title string
+		if err := conn.QueryRowContext(ctx,
+			"SELECT title FROM issues AS OF 'HEAD' WHERE id = ?", issueID).Scan(&title); err != nil {
+			t.Fatalf("read HEAD title: %v", err)
+		} else if title != strategy {
+			t.Errorf("HEAD title = %q after --strategy %s, want %q", title, strategy, strategy)
+		}
+		assertMergeConcluded(t, ctx, conn)
+	}
+	for _, strategy := range []string{"ours", "theirs"} {
+		t.Run("settle_"+strategy, func(t *testing.T) {
+			te := newTestEnv(t, "stratcm"+strategy)
+			ctx := t.Context()
+			conn := openSettleConn(t, ctx, te)
+
+			peerBranch := seed(t, ctx, conn, "sc-1")
+			if err := versioncontrolops.MergeAndSettleWithStrategy(ctx, conn, peerBranch, strategy); err != nil {
+				t.Fatalf("MergeAndSettleWithStrategy(%s): %v", strategy, err)
+			}
+			assertPeerRows(t, ctx, conn, strategy, "sc-1")
+		})
+		t.Run("vc_merge_"+strategy, func(t *testing.T) {
+			te := newTestEnv(t, "stratvc"+strategy)
+			ctx := t.Context()
+			conn := openSettleConn(t, ctx, te)
+
+			peerBranch := seed(t, ctx, conn, "sv-1")
+			conflicts, err := versioncontrolops.MergeWithStrategy(ctx, conn, peerBranch, "test <test@example.com>", strategy)
+			if err != nil {
+				t.Fatalf("MergeWithStrategy(%s): %v", strategy, err)
+			}
+			if len(conflicts) == 0 {
+				t.Fatal("expected the declined retitle to produce conflicts")
+			}
+			assertPeerRows(t, ctx, conn, strategy, "sv-1")
+		})
+	}
+}
+
 // TestMergeWithStrategy_LeavesPreMergePendingChanges guards the exact-set
 // property the GH#7811 fix depends on: the merge conclusion stages the
 // merge's own output (unstaged tables that differ between HEAD and the merge
