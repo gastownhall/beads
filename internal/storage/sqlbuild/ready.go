@@ -116,6 +116,49 @@ func StaleBlockedIDsSQL(tables FilterTables) string {
 		tables.Main, OwnReadyAffectingEdgeSQL(tables, "t"))
 }
 
+// deferredParentLegs renders the two tests a deferred parent passes one of,
+// for a row aliased alias (empty alias: bare columns): the icebox status
+// plain `bd defer` writes, and a defer_until still in the future. Shared by
+// DeferredParentPredicate and AnyDeferredParentSQL so the two renderings
+// express exactly the same rule.
+func deferredParentLegs(alias string) (statusLeg, dateLeg string) {
+	qual := func(col string) string {
+		if alias != "" {
+			return alias + "." + col
+		}
+		return col
+	}
+	statusLeg = fmt.Sprintf("%s = '%s'", qual("status"), types.StatusDeferred)
+	dateLeg = fmt.Sprintf("%s IS NOT NULL AND %s > UTC_TIMESTAMP()", qual("defer_until"), qual("defer_until"))
+	return statusLeg, dateLeg
+}
+
+// DeferredParentPredicate is the deferred-parent test for one joined parent
+// row aliased alias (empty alias: bare columns). Plain `bd defer` writes
+// status='deferred' with no date — the indefinite icebox — and a dated defer
+// whose date has passed keeps that status until the wake sweep flips it, so
+// the status leg, not the date leg alone, is what makes a parent deferred
+// (GH#7300). A row with a future defer_until stays deferred whatever its
+// status. alias is an internal table alias, never user input.
+func DeferredParentPredicate(alias string) string {
+	statusLeg, dateLeg := deferredParentLegs(alias)
+	return fmt.Sprintf("(%s OR (%s))", statusLeg, dateLeg)
+}
+
+// AnyDeferredParentSQL renders a parameterless boolean asking whether table
+// holds any deferred parent, for the scalar-boolean probes both ready stacks
+// issue (issueops' combined probe and per-table fallback, domain/db's
+// anyDeferredParent). Two EXISTS legs rather than one WHERE with OR: each leg
+// is a single-column test an existing index answers (idx_*_status,
+// idx_*_defer_until), while an OR over both columns in one scan would need an
+// index merge to stay off a full table scan. table is an internal table name,
+// never user input.
+func AnyDeferredParentSQL(table string) string {
+	statusLeg, dateLeg := deferredParentLegs("")
+	return fmt.Sprintf("(EXISTS (SELECT 1 FROM %s WHERE %s) OR EXISTS (SELECT 1 FROM %s WHERE %s))",
+		table, statusLeg, table, dateLeg)
+}
+
 // readyBlockedClause renders the ready-work blocked exclusion: the indexed
 // is_blocked projection decides, except for the rows whose flag is stale
 // (StaleBlockedIDsSQL), which it lists by id.
@@ -148,8 +191,9 @@ func idBatchClauses(format string, ids []string) ([]string, []any) {
 // clause folds in. Computing them takes queries, which is execution-context
 // work each stack does its own way.
 type ReadyWorkWhereInputs struct {
-	// DeferredChildIDs are children of future-deferred parents; consulted
-	// only when !filter.IncludeDeferred.
+	// DeferredChildIDs are children of deferred parents (sqlbuild.
+	// DeferredParentPredicate: icebox status or future defer_until);
+	// consulted only when !filter.IncludeDeferred.
 	DeferredChildIDs []string
 	// ParentDescendantIDs are the transitive descendants of *filter.ParentID;
 	// consulted only when filter.ParentID != nil.

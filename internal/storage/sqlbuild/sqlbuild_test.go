@@ -242,6 +242,58 @@ func TestBuildReadyWorkOrderPriorityFIFO(t *testing.T) {
 	}
 }
 
+// TestDeferredParentPredicate pins the row form of the deferred-parent rule
+// for joined parent rows: icebox status OR future defer_until, both branches
+// rendered for a qualified alias and for bare columns.
+func TestDeferredParentPredicate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct{ name, alias, want string }{
+		{
+			"qualified",
+			"parent",
+			"(parent.status = 'deferred' OR (parent.defer_until IS NOT NULL AND parent.defer_until > UTC_TIMESTAMP()))",
+		},
+		{
+			"bare",
+			"",
+			"(status = 'deferred' OR (defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP()))",
+		},
+	}
+	for _, tc := range tests {
+		if got := DeferredParentPredicate(tc.alias); got != tc.want {
+			t.Errorf("DeferredParentPredicate(%q) = %q, want %q", tc.alias, got, tc.want)
+		}
+	}
+	if !strings.Contains(DeferredParentPredicate("p"), string(types.StatusDeferred)) {
+		t.Errorf("DeferredParentPredicate must render the %s literal from types.StatusDeferred", types.StatusDeferred)
+	}
+}
+
+// TestAnyDeferredParentSQL pins the existence form of the deferred-parent
+// rule for table probes: two separate EXISTS legs (one per branch) rather
+// than one OR inside a single WHERE, so each leg stays an indexable
+// single-column test.
+func TestAnyDeferredParentSQL(t *testing.T) {
+	t.Parallel()
+
+	for _, table := range []string{"issues", "wisps"} {
+		want := fmt.Sprintf(
+			"(EXISTS (SELECT 1 FROM %s WHERE status = 'deferred') OR EXISTS (SELECT 1 FROM %s WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP()))",
+			table, table)
+		if got := AnyDeferredParentSQL(table); got != want {
+			t.Errorf("AnyDeferredParentSQL(%q) = %q, want %q", table, got, want)
+		}
+	}
+	// The two renderings must express the same rule: each EXISTS leg's
+	// predicate is the bare row predicate's corresponding branch.
+	statusLeg, dateLeg := deferredParentLegs("")
+	probe := AnyDeferredParentSQL("issues")
+	if !strings.Contains(probe, statusLeg) || !strings.Contains(probe, dateLeg) {
+		t.Errorf("AnyDeferredParentSQL legs %q / %q must each appear in it: %s", statusLeg, dateLeg, probe)
+	}
+}
+
 func TestReadyWorkExcludeTypes(t *testing.T) {
 	t.Parallel()
 

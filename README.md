@@ -78,6 +78,12 @@ This project uses bd (beads) for issue tracking.
 | `bd prime` | Print agent workflow context and persistent memories. |
 | `bd remember "insight"` | Store project memory that `bd prime` injects later. |
 
+`bd ready` also leaves out the direct children of a deferred parent,
+including a parent deferred indefinitely with plain `bd defer` (no `--until`
+date). `bd ready --include-deferred` lifts this child exclusion but not the
+ready status filter: a parent whose status is `deferred` still stays off the
+list. |
+
 ## 🔗 Hierarchy & Workflow
 
 Beads supports hierarchical IDs for epics:

@@ -21,6 +21,7 @@ func (s *testSuite) TestIssueGetReadyWork() {
 	s.Run("FilterByAssignee", s.readyFilterByAssignee)
 	s.Run("FilterByType", s.readyFilterByType)
 	s.Run("FilterByParent", s.readyFilterByParent)
+	s.Run("HidesChildrenOfUndatedDeferredParent", s.readyHidesChildrenOfUndatedDeferredParent)
 	s.Run("FilterByMetadataEquality", s.readyFilterByMetadataEquality)
 	s.Run("FilterByMetadataKeyPresence", s.readyFilterByMetadataKeyPresence)
 	s.Run("ExcludesRequestedTypes", s.readyExcludesRequestedTypes)
@@ -204,6 +205,35 @@ func (s *testSuite) readyFilterByParent() {
 	got := issueIDsFrom(out)
 	s.Contains(got, child.ID)
 	s.NotContains(got, outside.ID)
+}
+
+// readyHidesChildrenOfUndatedDeferredParent is GH#7300's domain/db leg: a
+// parent deferred with plain `bd defer` (status deferred, no defer_until)
+// hides its children from ready work just as a future-dated parent does
+// (the issueops-backed stack pins the same scenario end-to-end in
+// embeddeddolt/ready_undated_deferred_parent_test.go).
+func (s *testSuite) readyHidesChildrenOfUndatedDeferredParent() {
+	r := s.issueRepo()
+	parent := newTestIssue("bd-rdy-udp-parent", "undated deferred parent")
+	parent.IssueType = types.TypeEpic
+	s.Require().NoError(r.Insert(s.Ctx(), parent, "tester", domain.InsertIssueOpts{}))
+	child := newTestIssue("bd-rdy-udp-child", "child")
+	s.Require().NoError(r.Insert(s.Ctx(), child, "tester", domain.InsertIssueOpts{}))
+	control := newTestIssue("bd-rdy-udp-free", "free")
+	s.Require().NoError(r.Insert(s.Ctx(), control, "tester", domain.InsertIssueOpts{}))
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep(child.ID, parent.ID, types.DepParentChild), "tester", domain.DepInsertOpts{}))
+	// Plain `bd defer`: status only, no defer_until date.
+	_, err := s.Runner().ExecContext(s.Ctx(),
+		"UPDATE issues SET status = 'deferred' WHERE id = ?", parent.ID)
+	s.Require().NoError(err)
+
+	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{})
+	s.Require().NoError(err)
+	got := issueIDsFrom(out)
+	s.Contains(got, control.ID)
+	s.NotContains(got, child.ID, "a child of an undated deferred parent must stay off the ready front")
+	s.NotContains(got, parent.ID)
 }
 
 func (s *testSuite) readyFilterByMetadataEquality() {

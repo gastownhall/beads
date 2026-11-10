@@ -12,8 +12,12 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// deferredParentProbeRegex matches the per-table deferred-parent probe: the
+// two-EXISTS boolean sqlbuild.AnyDeferredParentSQL renders for one table,
+// both branches (icebox status, future defer_until) required.
 func deferredParentProbeRegex(issueTable string) string {
-	return `SELECT 1 FROM ` + issueTable + `\s+WHERE defer_until IS NOT NULL\s+AND defer_until > UTC_TIMESTAMP\(\)\s+LIMIT 1`
+	return `^SELECT \(EXISTS \(SELECT 1 FROM ` + issueTable + ` WHERE status = 'deferred'\) ` +
+		`OR EXISTS \(SELECT 1 FROM ` + issueTable + ` WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP\(\)\)\)`
 }
 
 // staleBlockedQueryRegex matches sqlbuild.StaleBlockedIDsSQL for one table
@@ -22,12 +26,15 @@ func staleBlockedQueryRegex(table string) string {
 	return `^SELECT t\.id FROM ` + table + ` t WHERE t\.is_blocked = 1 AND NOT EXISTS`
 }
 
+// deferredChildrenQueryRegex matches deferredChildrenQuery, whose parent join
+// carries both branches of sqlbuild.DeferredParentPredicate.
 func deferredChildrenQueryRegex(depTable, issueTable string) string {
 	targetCol := "depends_on_issue_id"
 	if issueTable == "wisps" {
 		targetCol = "depends_on_wisp_id"
 	}
-	return `SELECT dep\.issue_id\s+FROM ` + depTable + ` dep\s+JOIN ` + issueTable + ` parent ON parent\.id = dep\.` + targetCol + `\s+WHERE dep\.type = 'parent-child'\s+AND parent\.defer_until IS NOT NULL\s+AND parent\.defer_until > UTC_TIMESTAMP\(\)`
+	return `SELECT dep\.issue_id\s+FROM ` + depTable + ` dep\s+JOIN ` + issueTable + ` parent ON parent\.id = dep\.` + targetCol +
+		`\s+WHERE dep\.type = 'parent-child'\s+AND \(parent\.status = 'deferred' OR \(parent\.defer_until IS NOT NULL AND parent\.defer_until > UTC_TIMESTAMP\(\)\)\)`
 }
 
 func beginMockTx(t *testing.T) (*sql.DB, sqlmock.Sqlmock, *sql.Tx) {
@@ -243,6 +250,66 @@ func TestGetChildrenOfDeferredParentsInTx_IgnoresMissingWispDependenciesTable(t 
 	}
 	want := []string{"child-from-dependencies-issues", "child-from-dependencies-wisps"}
 	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("children = %v, want %v", got, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestGetChildrenOfDeferredParentsInTx_FalseProbeAnswersNoChildren pins the
+// scalar-boolean probe contract: a successful FALSE row (not sql.ErrNoRows —
+// a scalar SELECT always answers) ends the walk without a child scan. Only
+// the no-match mocks above, which answer sql.ErrNoRows, cannot tell this
+// apart from an unanswered probe.
+func TestGetChildrenOfDeferredParentsInTx_FalseProbeAnswersNoChildren(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+	mock.ExpectQuery(deferredParentProbeRegex("issues")).
+		WillReturnRows(sqlmock.NewRows([]string{"has"}).AddRow(false))
+	mock.ExpectQuery(deferredParentProbeRegex("wisps")).
+		WillReturnRows(sqlmock.NewRows([]string{"has"}).AddRow(false))
+
+	got, err := getChildrenOfDeferredParentsInTx(context.Background(), tx)
+	if err != nil {
+		t.Fatalf("getChildrenOfDeferredParentsInTx: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("children = %v, want empty after two false probes", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestGetChildrenOfDeferredParentsInTx_FalseIssuesTrueWispsScans is the other
+// half of the false-row contract: a false issues answer alone must continue
+// to the wisps probe — a probe that stopped at the first table's false answer
+// would miss deferred wisp parents — and only a true answer short-circuits
+// into the child scan.
+func TestGetChildrenOfDeferredParentsInTx_FalseIssuesTrueWispsScans(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+	mock.ExpectQuery(deferredParentProbeRegex("issues")).
+		WillReturnRows(sqlmock.NewRows([]string{"has"}).AddRow(false))
+	mock.ExpectQuery(deferredParentProbeRegex("wisps")).
+		WillReturnRows(sqlmock.NewRows([]string{"has"}).AddRow(true))
+	mock.ExpectQuery(deferredChildrenQueryRegex("dependencies", "issues")).
+		WillReturnRows(noChildren())
+	mock.ExpectQuery(deferredChildrenQueryRegex("dependencies", "wisps")).
+		WillReturnRows(childRows("child-of-wisp-parent"))
+	mock.ExpectQuery(deferredChildrenQueryRegex("wisp_dependencies", "issues")).
+		WillReturnRows(noChildren())
+	mock.ExpectQuery(deferredChildrenQueryRegex("wisp_dependencies", "wisps")).
+		WillReturnRows(noChildren())
+
+	got, err := getChildrenOfDeferredParentsInTx(context.Background(), tx)
+	if err != nil {
+		t.Fatalf("getChildrenOfDeferredParentsInTx: %v", err)
+	}
+	if want := []string{"child-of-wisp-parent"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("children = %v, want %v", got, want)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

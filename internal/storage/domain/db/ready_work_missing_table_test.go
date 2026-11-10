@@ -8,10 +8,15 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 )
 
+// deferredParentProbeRegex matches anyDeferredParent's scalar-boolean probe:
+// the two-EXISTS form sqlbuild.AnyDeferredParentSQL renders, both branches
+// (icebox status, future defer_until) required.
 func deferredParentProbeRegex(issueTable string) string {
-	return `SELECT 1 FROM ` + issueTable + ` WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP\(\) LIMIT 1`
+	return `^SELECT \(EXISTS \(SELECT 1 FROM ` + issueTable + ` WHERE status = 'deferred'\) ` +
+		`OR EXISTS \(SELECT 1 FROM ` + issueTable + ` WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP\(\)\)\)`
 }
 
+// deferredEdgeRegex matches childrenOfDeferredParents's per-edge join prefix.
 func deferredEdgeRegex(e deferredParentEdge) string {
 	return `SELECT dep\.issue_id\s+FROM ` + e.depTable + ` dep\s+JOIN ` + e.issueTable +
 		` parent ON parent\.id = dep\.` + e.targetCol
@@ -119,4 +124,53 @@ func TestDeferredParentEdgesUnrelatedErrorPropagates(t *testing.T) {
 	if _, err := repo.getChildrenOfDeferredParents(t.Context()); !errors.Is(err, boom) {
 		t.Fatalf("a failed deferred-parent edge did not propagate: %v", err)
 	}
+}
+
+// TestDeferredParentProbeFalseAnswerHasNoChildren pins the scalar-boolean
+// probe's false answer: a successful FALSE row (the answer SELECT EXISTS
+// always gives, unlike the old LIMIT 1 probe's sql.ErrNoRows) ends the walk
+// with no child scan, and a false issues answer alone continues to the wisps
+// probe rather than stopping at the first table.
+func TestDeferredParentProbeFalseAnswerHasNoChildren(t *testing.T) {
+	t.Run("both_tables_false", func(t *testing.T) {
+		mock, repo := newMockRepo(t)
+		mock.ExpectQuery(deferredParentProbeRegex("issues")).
+			WillReturnRows(sqlmock.NewRows([]string{"has"}).AddRow(false))
+		mock.ExpectQuery(deferredParentProbeRegex("wisps")).
+			WillReturnRows(sqlmock.NewRows([]string{"has"}).AddRow(false))
+
+		got, err := repo.getChildrenOfDeferredParents(t.Context())
+		if err != nil {
+			t.Fatalf("getChildrenOfDeferredParents on a database with no deferred parent: %v", err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("children = %v, want empty after two false probes", got)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sql expectations: %v", err)
+		}
+	})
+
+	t.Run("issues_false_wisps_true_scans", func(t *testing.T) {
+		mock, repo := newMockRepo(t)
+		mock.ExpectQuery(deferredParentProbeRegex("issues")).
+			WillReturnRows(sqlmock.NewRows([]string{"has"}).AddRow(false))
+		mock.ExpectQuery(deferredParentProbeRegex("wisps")).
+			WillReturnRows(sqlmock.NewRows([]string{"has"}).AddRow(true))
+		for _, e := range deferredParentEdges {
+			mock.ExpectQuery(deferredEdgeRegex(e)).
+				WillReturnRows(sqlmock.NewRows([]string{"issue_id"}).AddRow(e.depTable + "/" + e.issueTable))
+		}
+
+		got, err := repo.getChildrenOfDeferredParents(t.Context())
+		if err != nil {
+			t.Fatalf("getChildrenOfDeferredParents after a false issues probe: %v", err)
+		}
+		if len(got) != len(deferredParentEdges) {
+			t.Fatalf("children = %v, want one from every edge after the wisps probe answered true", got)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sql expectations: %v", err)
+		}
+	})
 }
