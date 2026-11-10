@@ -1909,6 +1909,10 @@ clean-databases runs even if this run finds no stale databases to drop.
 Only pass it when nothing else on the server may be relying on DOLT_UNDROP
 recovery.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Drops databases, and --purge-dropped is server-global and
+		// irreversible; refuse before any backend/config/connection work,
+		// including for --dry-run (GH#7876).
+		CheckReadonly("dolt clean-databases")
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
 			return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())

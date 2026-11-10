@@ -108,3 +108,39 @@ func TestDoltPushReadonlyGateLetsControlRun(t *testing.T) {
 		t.Logf("control run: exit %d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 }
+
+// TestCleanDatabasesBlockedInReadonlyMode is the readonly gate for
+// `bd dolt clean-databases` (GH#7876 item 2): the command drops databases
+// (and --purge-dropped permanently deletes every dropped database on the
+// server), so it must refuse even for --dry-run, before its backend
+// connection or cleanup work.
+func TestCleanDatabasesBlockedInReadonlyMode(t *testing.T) {
+	bd, dir := setupMigrationFreezeWorkspace(t)
+
+	for _, tt := range []struct {
+		name string
+		args []string
+	}{
+		{name: "bare", args: []string{"dolt", "clean-databases"}},
+		{name: "dry_run", args: []string{"dolt", "clean-databases", "--dry-run"}},
+		{name: "purge_dropped", args: []string{"dolt", "clean-databases", "--purge-dropped"}},
+		{name: "dry_run_and_purge", args: []string{"dolt", "clean-databases", "--dry-run", "--purge-dropped"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			args := append(append([]string{}, tt.args...), "--readonly")
+			stdout, stderr, code := runBDMigrationFreeze(t, bd, dir, args...)
+			assertReadonlyRefusal(t, stdout, stderr, code, "dolt clean-databases")
+		})
+	}
+
+	t.Run("control_without_readonly", func(t *testing.T) {
+		stdout, stderr, code := runBDMigrationFreeze(t, bd, dir, "dolt", "clean-databases")
+		if strings.Contains(stderr, "not allowed in read-only mode") {
+			t.Fatalf("bd dolt clean-databases without --readonly was refused by the readonly gate:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		// The sqlite workspace has no Dolt server, so the control fails on
+		// its own unsupported-backend refusal — exit 1 is fine as long as it
+		// is not the readonly one.
+		t.Logf("control run: exit %d stderr=%q", code, stderr)
+	})
+}
