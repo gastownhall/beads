@@ -389,6 +389,10 @@ func TestMigrateToServer_FlipsModeAndRemovesSidecar(t *testing.T) {
 
 	for _, n := range proxiedAssetNames() {
 		_, err := os.Stat(filepath.Join(rootDir, n))
+		if n == proxy.LockFileName || n == server.LockFileName {
+			assert.NoError(t, err, "lifecycle lock marker %s must be kept", n)
+			continue
+		}
 		assert.True(t, os.IsNotExist(err), "proxied asset %s must be removed", n)
 	}
 

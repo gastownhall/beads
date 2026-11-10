@@ -822,6 +822,10 @@ func TestControlFilePathsIncludesSecretAndQuarantines(t *testing.T) {
 	assert.Contains(t, paths, proxyStale)
 	assert.Contains(t, paths, backendStale)
 	assert.Contains(t, paths, rotatedLog)
+	// Completed-migration checks inspect the lifecycle locks through this
+	// inventory even though the purge keeps them.
+	assert.Contains(t, paths, filepath.Join(root, LockFileName))
+	assert.Contains(t, paths, filepath.Join(root, server.LockFileName))
 
 	assert.Empty(t, PurgeControlFiles(root))
 	assert.NoFileExists(t, filepath.Join(root, identity.SecretFileName))
