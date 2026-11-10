@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -396,5 +397,105 @@ func TestShowPrefixRoute_RigSeatReachesTownStore(t *testing.T) {
 	}
 	if strings.Contains(stderr, "not found") || strings.Contains(stderr, "Hint:") {
 		t.Errorf("bd show %s from the rig seat printed a miss diagnostic on a routed success;\nstderr: %s", townID, stderr)
+	}
+}
+
+// TestShowForeignPrefixMiss_JSONCompatibility pins AC-6: in --json mode the
+// miss hint goes to stderr only, and every mode's stdout payload (the error
+// envelope for an all-missing direct batch, the details array for a mixed
+// batch, the refs/children maps) and exit behavior stay what they were.
+func TestShowForeignPrefixMiss_JSONCompatibility(t *testing.T) {
+	ensureCleanGlobalState(t)
+	saveAndRestoreGlobals(t)
+	t.Setenv("BEADS_DIR", t.TempDir())
+	oldCtx, oldJSON, oldProxied := rootCtx, jsonOutput, proxiedServerMode
+	t.Cleanup(func() { rootCtx, jsonOutput, proxiedServerMode = oldCtx, oldJSON, oldProxied })
+
+	ctx := context.Background()
+	_, townBeadsDir, rigDir, _ := showCrossStoreTown(t, "openclaw")
+
+	townDBPath := filepath.Join(townBeadsDir, "dolt")
+	townStore := newTestStoreIsolatedDB(t, townDBPath, "op")
+	const localID = "op-zz95"
+	if err := townStore.CreateIssue(ctx, &types.Issue{
+		ID: localID, Title: "Local sibling", Status: types.StatusOpen,
+		Priority: 0, IssueType: types.TypeTask,
+	}, "test"); err != nil {
+		t.Fatalf("create local issue: %v", err)
+	}
+
+	seatShowAt(t, rigDir, townDBPath, townStore)
+	jsonOutput = true
+
+	const foreign = "hq-gea4h"
+
+	// Direct mode, every id missing: the stdout envelope stays exactly the
+	// existing one; the limited-search hint lands on stderr only.
+	stdout, stderr, runErr := captureShowRun(t, func() error {
+		return showCmd.RunE(showCmd, []string{foreign})
+	})
+	if runErr == nil {
+		t.Fatalf("bd show --json %s: want the not-found exit, got nil", foreign)
+	}
+	var envelope map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &envelope); err != nil {
+		t.Fatalf("bd show --json %s: stdout = %q, want the existing JSON error envelope: %v", foreign, stdout, err)
+	}
+	if msg, _ := envelope["error"].(string); msg != "no issues found matching the provided IDs" {
+		t.Errorf("bd show --json %s: envelope error = %q, want the existing message untouched", foreign, msg)
+	}
+	if hint, _ := envelope["hint"].(string); !strings.Contains(hint, "deleted") {
+		t.Errorf("bd show --json %s: envelope hint = %q, want the existing deletion/history hint untouched", foreign, hint)
+	}
+	if strings.Contains(stdout, "is not among this store's configured prefixes") {
+		t.Errorf("bd show --json %s: the limited-search hint leaked into the stdout envelope;\nstdout: %s", foreign, stdout)
+	}
+	if !strings.Contains(stderr, "Issue "+foreign+" not found") || !strings.Contains(stderr, "is not among this store's configured prefixes") {
+		t.Errorf("bd show --json %s: stderr = %q, want the not-found line and the limited-search hint", foreign, stderr)
+	}
+
+	// Direct mode, mixed batch: stdout is the details array of what was
+	// found; the miss is explained on stderr.
+	stdout, stderr, runErr = captureShowRun(t, func() error {
+		return showCmd.RunE(showCmd, []string{localID, foreign})
+	})
+	if runErr != nil {
+		t.Fatalf("bd show --json %s %s: %v\nstdout: %s\nstderr: %s", localID, foreign, runErr, stdout, stderr)
+	}
+	var details []map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &details); err != nil {
+		t.Fatalf("bd show --json %s %s: stdout = %q, want the found issue's details array: %v", localID, foreign, stdout, err)
+	}
+	if len(details) != 1 || details[0]["id"] != localID {
+		t.Errorf("bd show --json %s %s: stdout payload = %s, want exactly %s's details", localID, foreign, stdout, localID)
+	}
+	if !strings.Contains(stderr, "Issue "+foreign+" not found") || !strings.Contains(stderr, "is not among this store's configured prefixes") {
+		t.Errorf("bd show --json %s %s: stderr = %q, want the miss explained on stderr", localID, foreign, stderr)
+	}
+
+	// Refs and children: the stdout maps and the success exit stay what they
+	// were; only qualifying miss diagnostics on stderr gain the hint.
+	for _, run := range []struct {
+		name string
+		fn   func() error
+	}{
+		{"refs", func() error { return showIssueRefs(ctx, []string{foreign}, true) }},
+		{"children", func() error { return showIssueChildren(ctx, []string{foreign}, true, false) }},
+	} {
+		stdout, stderr, runErr = captureShowRun(t, run.fn)
+		if runErr != nil {
+			t.Errorf("bd show --%s --json %s: %v, want the existing success exit for an all-missing batch", run.name, foreign, runErr)
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+			t.Errorf("bd show --%s --json %s: stdout = %q, want the existing JSON map: %v", run.name, foreign, stdout, err)
+			continue
+		}
+		if len(payload) != 1 || payload["schema_version"] != float64(JSONSchemaVersion) {
+			t.Errorf("bd show --%s --json %s: stdout payload = %s, want the existing schema_version-only map untouched", run.name, foreign, stdout)
+		}
+		if !strings.Contains(stderr, "Error resolving "+foreign) || !strings.Contains(stderr, "is not among this store's configured prefixes") {
+			t.Errorf("bd show --%s --json %s: stderr = %q, want the existing resolve error plus the limited-search hint", run.name, foreign, stderr)
+		}
 	}
 }
