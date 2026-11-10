@@ -3,6 +3,7 @@ package setup
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -749,4 +750,28 @@ func TestRemoveCodexRemovesSkillDirsThroughEnv(t *testing.T) {
 		t.Fatalf("removeCodex err = %v, want the injected removal error for %s", err, agents)
 	}
 	requireDirKept(t, agents)
+}
+
+// bd init calls the Codex installer with quiet progress and treats its error
+// as a warning. A read-only AGENTS.md that needs the Codex section must come
+// back as an error naming the file, not be replaced behind init's back after
+// init's own guidance write left it alone (#7975).
+func TestInstallCodexProjectRefusesAReadOnlyAgentsFile(t *testing.T) {
+	env, _, _ := newCodexTestEnv(t)
+	orig := codexEnvProvider
+	codexEnvProvider = func() (codexEnv, error) { return env, nil }
+	t.Cleanup(func() { codexEnvProvider = orig })
+	path := codexInstructionsPath(env, false)
+	content := "# My Project\n\nUser text.\n"
+	seed := seedReadOnlyFile(t, path, content)
+
+	var stderr bytes.Buffer
+	err := InstallCodexProjectTo(ProjectInstallOutput{Stdout: io.Discard, Stderr: &stderr})
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("InstallCodexProjectTo error = %v, want a permission error", err)
+	}
+	if !strings.Contains(stderr.String(), "Error: write "+path) {
+		t.Errorf("stderr does not name %s: %q", path, stderr.String())
+	}
+	assertReadOnlyFileUntouched(t, path, content, seed)
 }
