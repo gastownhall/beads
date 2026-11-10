@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/steveyegge/beads/internal/execwin"
 	"golang.org/x/sys/windows"
 )
 
@@ -22,10 +23,15 @@ const portConflictHint = "netstat -aon | findstr :%d"
 // Used in error messages when too many dolt servers are running.
 const processListHint = `tasklist /FI "IMAGENAME eq dolt.exe"`
 
-// procAttrDetached returns SysProcAttr to detach a child process so it survives
-// parent exit. On Windows, CREATE_NEW_PROCESS_GROUP is the analog of Unix Setpgid.
+// procAttrDetached returns SysProcAttr for the long-lived shared sql-server:
+// a hidden console of its own, so nothing is ever displayed but dolt's uname
+// probes still find one, in its own process group, so it survives its parent
+// exiting. Deliberately no DETACHED_PROCESS: a console-less child makes every
+// console program it spawns allocate a visible window (GH#6076).
 func procAttrDetached() *syscall.SysProcAttr {
-	return &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP}
+	// Exactly what execwin.BackgroundSysProcAttr() pins: CREATE_NO_WINDOW |
+	// CREATE_NEW_PROCESS_GROUP (the analog of Unix Setpgid).
+	return execwin.BackgroundSysProcAttr()
 }
 
 // findPIDOnPort returns the PID of the process listening on a TCP port.

@@ -56,6 +56,7 @@ go_library(
             "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:windows": [
+            "//internal/execwin",
             "@org_golang_x_sys//windows",
         ],
         "//conditions:default": [],

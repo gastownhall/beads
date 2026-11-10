@@ -537,6 +537,12 @@ func (s *DoltServer) startAttempt(ctx context.Context, prepare bool, lock *util.
 	// doltserver.ServerSpawnEnv for the guards it needs (GH#4272).
 	cmd.Env = doltserver.ServerSpawnEnv()
 
+	// A hidden console of the server's own: CREATE_NO_WINDOW in its own
+	// process group on Windows (never DETACHED_PROCESS, which left it
+	// console-less and made dolt's uname probes open visible windows,
+	// GH#6076); nil, so this spawn site is unchanged, everywhere else.
+	cmd.SysProcAttr = managedServerSysProcAttr()
+
 	if err := cmd.Start(); err != nil {
 		s.eg, s.egCtx, s.cancel = nil, nil, nil
 		cancel()
