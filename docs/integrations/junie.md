@@ -42,12 +42,10 @@ Contains workflow instructions that Junie reads automatically:
 
 ### MCP Config (`.junie/mcp/mcp.json`)
 
-<Warning>
-`bd setup junie` currently writes an MCP config that invokes `bd mcp`, a
-command that does not exist in current bd builds — that config will not
-start a server. Until the recipe is fixed, point Junie at the standalone
-`beads-mcp` server instead:
-</Warning>
+`bd setup junie` points Junie at the standalone `beads-mcp` server, launched
+with `uvx` from [uv](https://docs.astral.sh/uv/). Install uv first: `uvx`
+must be on the `PATH` Junie starts the server with, which can differ from
+your shell's `PATH`.
 
 ```json
 {
@@ -60,8 +58,12 @@ start a server. Until the recipe is fixed, point Junie at the standalone
 }
 ```
 
-See [MCP Server](/integrations/mcp-server) for the server's tool catalog
-and other install options (pip/pipx).
+If you installed `beads-mcp` yourself instead (see
+[MCP Server](/integrations/mcp-server) for pip and other install options),
+set `command` to `beads-mcp` and remove `args`. Re-running `bd setup junie`
+writes the `uvx` config again and replaces that edit.
+
+See [MCP Server](/integrations/mcp-server) for the server's tool catalog.
 
 ## CLI Commands
 
@@ -169,8 +171,11 @@ bd setup junie
 # Verify MCP config exists and points at the beads-mcp server
 cat .junie/mcp/mcp.json
 
-# Verify the server package is installed
-pip show beads-mcp
+# Verify the default launcher is installed (it must also be on Junie's PATH)
+uvx --version
+
+# If you set command to beads-mcp instead, verify that install
+command -v beads-mcp
 ```
 
 ### Changes not syncing

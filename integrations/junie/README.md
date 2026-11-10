@@ -34,18 +34,27 @@ Junie automatically reads this file on session start. It contains:
 
 ### MCP Config (`.junie/mcp/mcp.json`)
 
-Configures the beads MCP server so Junie can use beads tools directly:
+Configures the beads MCP server (the standalone `beads-mcp` package) so Junie
+can use beads tools directly. It is launched with `uvx` from
+[uv](https://docs.astral.sh/uv/), so install uv first: `uvx` must be on the
+`PATH` Junie starts the server with, which can differ from your shell's
+`PATH`.
 
 ```json
 {
   "mcpServers": {
     "beads": {
-      "command": "bd",
-      "args": ["mcp"]
+      "command": "uvx",
+      "args": ["beads-mcp"]
     }
   }
 }
 ```
+
+If you installed `beads-mcp` yourself instead (see
+[the beads-mcp README](../beads-mcp/README.md)), set `command` to `beads-mcp`
+and remove `args`. Re-running `bd setup junie` writes the `uvx` config again
+and replaces that edit.
 
 ## Usage
 
