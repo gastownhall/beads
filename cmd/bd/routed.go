@@ -103,10 +103,35 @@ func resolveAndGetIssueForMutation(ctx context.Context, localStore storage.DoltS
 }
 
 func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage.DoltStorage, id string, writable bool) (*RoutedResult, error) {
+	result, _, err := resolveAndGetIssueWithRoutingAccessScope(ctx, localStore, id, writable)
+	return result, err
+}
+
+// resolveAndGetIssueWithRoutingSearchScope resolves like
+// resolveAndGetIssueWithRouting — the same cascade, routed targets opened
+// read-only — and additionally reports whether a routed tier reached (or may
+// have reached) an issue lookup, so a miss can be explained without claiming
+// a store that was searched was not (GH#5259). Callers that do not explain
+// misses keep resolveAndGetIssueWithRouting.
+func resolveAndGetIssueWithRoutingSearchScope(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, bool, error) {
+	return resolveAndGetIssueWithRoutingAccessScope(ctx, localStore, id, false)
+}
+
+// resolveAndGetIssueWithRoutingAccessScope is the cascade both resolvers
+// share: the local store, then configured prefix routing via routes.jsonl,
+// then auto-routing (routing.mode=auto), with a routing failure returned as
+// itself rather than as the local not-found. routedLookup reports whether
+// any routed tier engaged another workspace's store — matched a route and
+// searched it, refused the id there, or failed before the lookup could be
+// proven unreached. Only errRoutingUnavailable (no route to follow in
+// either tier) leaves it false. It says nothing about which store owns the
+// id; it says only that a miss after it cannot be presented as a miss
+// nothing else was asked about.
+func resolveAndGetIssueWithRoutingAccessScope(ctx context.Context, localStore storage.DoltStorage, id string, writable bool) (*RoutedResult, bool, error) {
 	// Try local store first.
 	result, err := resolveAndGetFromStore(ctx, localStore, id, false)
 	if err == nil {
-		return result, nil
+		return result, false, nil
 	}
 
 	// The first routed tier that refuses the id answers instead of the local
@@ -115,32 +140,43 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 	// gets its chance.
 	var refusal error
 
+	routedLookup := false
+
 	// If not found locally, try prefix-based routing via routes.jsonl.
 	// This handles cross-rig lookups where the ID's prefix maps to a different
 	// database (e.g., hr-8wn.1 routes to the herald rig's database).
 	if isNotFoundErr(err) {
 		if prefixResult, prefixErr := resolveViaPrefixRoutingWithAccess(ctx, id, writable, false); prefixErr == nil {
-			return prefixResult, nil
-		} else if isRoutedResolutionRefusal(prefixErr) {
-			refusal = prefixErr
-		} else if isRoutingFailure(prefixErr) {
-			return nil, prefixErr
+			return prefixResult, true, nil
+		} else if !errors.Is(prefixErr, errRoutingUnavailable) {
+			routedLookup = true
+			if isRoutedResolutionRefusal(prefixErr) {
+				refusal = prefixErr
+			} else if isRoutingFailure(prefixErr) {
+				return nil, routedLookup, prefixErr
+			}
 		}
 	}
 
 	// If not found via prefix routing, try auto-routing as fallback (GH#2345).
 	// The target reopens writable when the caller has write intent.
 	if isNotFoundErr(err) {
-		if autoResult, autoErr := resolveViaAutoRoutingWithAccess(ctx, localStore, id, writable, false); autoErr == nil {
-			return autoResult, nil
-		} else if refusal != nil {
-			return nil, refusal
-		} else if isRoutingFailure(autoErr) {
-			return nil, autoErr
+		autoResult, autoErr := resolveViaAutoRoutingWithAccess(ctx, localStore, id, writable, false)
+		if autoErr == nil {
+			return autoResult, true, nil
+		}
+		if !errors.Is(autoErr, errRoutingUnavailable) {
+			routedLookup = true
+		}
+		if refusal != nil {
+			return nil, routedLookup, refusal
+		}
+		if isRoutingFailure(autoErr) {
+			return nil, routedLookup, autoErr
 		}
 	}
 
-	return nil, err
+	return nil, routedLookup, err
 }
 
 // isRoutedResolutionRefusal reports whether a routed tier's resolution error

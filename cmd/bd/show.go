@@ -43,9 +43,12 @@ type prefixConfigReader interface {
 // routes.jsonl route in beadsDir names it, no route sent the lookup to the
 // store that issues that prefix, so the miss says nothing about whether the
 // issue exists — the hint says so instead of suggesting the id never
-// existed (GH#5259). Any other miss gets showNotFoundHint.
-func showNotFoundHintIn(ctx context.Context, s prefixConfigReader, beadsDir, id string) string {
-	if storePrefix, idPrefix, ok := unroutedForeignPrefix(ctx, s, beadsDir, id); ok {
+// existed (GH#5259). routedLookup marks a miss a routed tier did reach (or
+// may have reached) another store's lookup; when it is set the miss cannot
+// claim nothing else was searched, so the ordinary deletion/history hint
+// answers instead.
+func showNotFoundHintIn(ctx context.Context, s prefixConfigReader, beadsDir, id string, routedLookup bool) string {
+	if storePrefix, idPrefix, ok := unroutedForeignPrefix(ctx, s, beadsDir, id, routedLookup); ok {
 		return foreignPrefixMissHint(storePrefix, idPrefix, beadsDir)
 	}
 	return showNotFoundHint(id)
@@ -54,10 +57,11 @@ func showNotFoundHintIn(ctx context.Context, s prefixConfigReader, beadsDir, id 
 // unroutedForeignPrefix reports the store's issue_prefix and the id's prefix
 // when id carries a prefix the store does not issue and no route names it. It
 // answers false whenever it cannot tell: no store, no configured
-// issue_prefix, no prefix in id, or a routes.jsonl it cannot read — a miss
-// under any of those stays showNotFoundHint's to explain.
-func unroutedForeignPrefix(ctx context.Context, s prefixConfigReader, beadsDir, id string) (storePrefix, idPrefix string, ok bool) {
-	if s == nil {
+// issue_prefix, no prefix in id, a routes.jsonl it cannot read — or a routed
+// tier having reached another store's lookup — a miss under any of those
+// stays showNotFoundHint's to explain.
+func unroutedForeignPrefix(ctx context.Context, s prefixConfigReader, beadsDir, id string, routedLookup bool) (storePrefix, idPrefix string, ok bool) {
+	if s == nil || routedLookup {
 		return "", "", false
 	}
 	// The display prefix comes from the heuristic; the allow check below
@@ -215,15 +219,19 @@ var showCmd = &cobra.Command{
 		allDetails := []interface{}{}
 		foundCount := 0
 		for idx, id := range args {
-			// Resolve and get issue with routing (e.g., gt-xyz routes to another rig)
-			result, err := resolveAndGetIssueWithRouting(ctx, store, id)
+			// Resolve and get issue with routing (e.g., gt-xyz routes to another
+			// rig). The scoped variant also reports whether a routed tier
+			// reached (or may have reached) another store's lookup, so the miss
+			// hint below cannot claim a store that was searched was not
+			// (GH#5259).
+			result, routedLookup, err := resolveAndGetIssueWithRoutingSearchScope(ctx, store, id)
 			if err != nil {
 				if result != nil {
 					result.Close()
 				}
 				if isNotFoundErr(err) {
 					fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-					fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHintIn(ctx, store, resolveCommandBeadsDir(dbPath), id))
+					fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHintIn(ctx, store, resolveCommandBeadsDir(dbPath), id, routedLookup))
 				} else {
 					fmt.Fprintf(os.Stderr, "Error fetching %s: %s\n", id, remedy.PrintedMessage(err))
 				}
@@ -234,7 +242,7 @@ var showCmd = &cobra.Command{
 					result.Close()
 				}
 				fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-				fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHintIn(ctx, store, resolveCommandBeadsDir(dbPath), id))
+				fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHintIn(ctx, store, resolveCommandBeadsDir(dbPath), id, routedLookup))
 				continue
 			}
 			issue := result.Issue

@@ -137,7 +137,7 @@ func TestShowNotFoundHintIn_ForeignPrefixIsNotCalledAbsent(t *testing.T) {
 	ctx := context.Background()
 	rig := prefixConfigStub{"issue_prefix": "openclaw"}
 
-	foreign := showNotFoundHintIn(ctx, rig, foreignPrefixTown(t, ""), "herald-x7k")
+	foreign := showNotFoundHintIn(ctx, rig, foreignPrefixTown(t, ""), "herald-x7k", false)
 	for _, want := range []string{`prefix "herald"`, "openclaw", "does not mean the issue is absent", `issues "herald" IDs`} {
 		if !strings.Contains(foreign, want) {
 			t.Errorf("foreign-prefix hint missing %q: %q", want, foreign)
@@ -153,11 +153,13 @@ func TestShowNotFoundHintIn_ForeignPrefixIsNotCalledAbsent(t *testing.T) {
 		routes   string
 		id       string
 		beadsDir bool
+		searched bool
 	}{
 		{name: "own prefix", store: rig, id: "openclaw-zz9", beadsDir: true},
 		{name: "own prefix with trailing hyphen in config", store: prefixConfigStub{"issue_prefix": "openclaw-"}, id: "openclaw-zz9", beadsDir: true},
 		{name: "allowed prefix", store: prefixConfigStub{"issue_prefix": "openclaw", "allowed_prefixes": "op, herald-"}, id: "herald-x7k", beadsDir: true},
 		{name: "routed prefix", store: rig, routes: `{"prefix":"herald-","path":"herald"}`, id: "herald-x7k", beadsDir: true},
+		{name: "routed tier searched another store", store: rig, id: "herald-x7k", beadsDir: true, searched: true},
 		{name: "no issue_prefix configured", store: prefixConfigStub{}, id: "herald-x7k", beadsDir: true},
 		{name: "bare hash", store: rig, id: "gea4h", beadsDir: true},
 	} {
@@ -166,13 +168,13 @@ func TestShowNotFoundHintIn_ForeignPrefixIsNotCalledAbsent(t *testing.T) {
 			if tc.beadsDir {
 				dir = foreignPrefixTown(t, tc.routes)
 			}
-			if got, want := showNotFoundHintIn(ctx, tc.store, dir, tc.id), showNotFoundHint(tc.id); got != want {
+			if got, want := showNotFoundHintIn(ctx, tc.store, dir, tc.id, tc.searched), showNotFoundHint(tc.id); got != want {
 				t.Errorf("hint = %q, want showNotFoundHint's %q", got, want)
 			}
 		})
 	}
 
-	if got, want := showNotFoundHintIn(ctx, nil, "", "herald-x7k"), showNotFoundHint("herald-x7k"); got != want {
+	if got, want := showNotFoundHintIn(ctx, nil, "", "herald-x7k", false), showNotFoundHint("herald-x7k"); got != want {
 		t.Errorf("no store: hint = %q, want %q", got, want)
 	}
 }
@@ -274,7 +276,7 @@ func TestShowDirectRoute_MissIdentityInvariant(t *testing.T) {
 
 	for _, id := range []string{"herald-x7k", "openclaw-zz9"} {
 		var calls []string
-		showNotFoundHintIn(context.Background(), lookupRecordingStore{id: id, calls: &calls}, beadsDir, id)
+		showNotFoundHintIn(context.Background(), lookupRecordingStore{id: id, calls: &calls}, beadsDir, id, false)
 		for _, c := range calls {
 			if !strings.HasPrefix(c, "GetConfig(") {
 				t.Errorf("choosing the hint for %s made store read %s, want config reads only", id, c)
