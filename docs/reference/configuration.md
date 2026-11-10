@@ -174,15 +174,19 @@ bd config set export.git-add true
 Use `bd dolt push` / `bd dolt pull` for sync and `bd backup` for restorable
 database backups.
 
-With `export.auto` on, a failed export makes the command exit 1, even though
-its own change may already be saved in the database. This covers a state hash
-that cannot be read, a pre-export check that cannot run (an unreadable or
-invalid existing JSONL, a failing store query), and the export itself failing.
-The change is not rolled back and the automatic post-run push is skipped, so
-look at the result before you retry a command that is not idempotent. A failed
-export does not reset the `export.interval` clock, so the next eligible write
-retries it. With `export.git-add` on, a failure to stage the file happens after
-it was written, so the JSONL on disk may already be the fresh export.
+With `export.auto` on, a failed export makes a command that changed the
+database exit 1, even though that change is already saved. This covers a
+pre-export check that cannot run (an unreadable or invalid existing JSONL, a
+failing store query) and the export itself failing. A state hash that cannot
+be read exits 1 whatever the command did, since bd then cannot tell whether it
+changed anything. The change is not rolled back and the automatic post-run
+push is skipped, so look at the result before you retry a command that is not
+idempotent. A command that changed nothing gets a warning instead, and
+previews (`--dry-run`, `--inspect`) and `bd config set export.auto false` do
+not run the export at all. A failed export does not reset the
+`export.interval` clock, so the next eligible command retries it. With
+`export.git-add` on, a failure to stage the file happens after it was written,
+so the JSONL on disk may already be the fresh export.
 Deliberate refusals stay warnings with exit 0: an export that would empty a
 populated JSONL, JSONL records the database cannot account for, records
 outside auto-export scope, and a backend that cannot report a state hash.

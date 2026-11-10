@@ -192,10 +192,10 @@ func TestScrubGitHookEnv(t *testing.T) {
 }
 
 func TestShouldRunPostCommandAutoExportSkipsReadOnlyCommands(t *testing.T) {
-	if shouldRunPostCommandAutoExport(&cobra.Command{Use: "search"}) {
+	if shouldRunPostCommandAutoExport(&cobra.Command{Use: "search"}, nil) {
 		t.Fatal("search is read-only and must not trigger post-command auto-export")
 	}
-	if !shouldRunPostCommandAutoExport(&cobra.Command{Use: "create"}) {
+	if !shouldRunPostCommandAutoExport(&cobra.Command{Use: "create"}, nil) {
 		t.Fatal("write commands should still trigger post-command auto-export")
 	}
 }

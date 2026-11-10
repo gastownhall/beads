@@ -364,50 +364,74 @@ func (f *closeCountingStateHashStore) Close() error {
 	return nil
 }
 
-// GH#6163, end to end through PersistentPostRunE: a mutating command whose
-// real auto-export fails exits 1, reports the failure exactly once, and
-// still runs its deferred cleanup (context cancelled and cleared, store
-// closed).
-func TestPersistentPostRunE_ReportsAutoExportFailureOnce(t *testing.T) {
-	initConfigForTest(t)
-	config.Set("export.auto", true)
-	saveAndRestoreGlobals(t)
+// preparePostRunE lets rootCmd.PersistentPostRunE run its maintenance block
+// under a fresh root context, restoring both when the test ends.
+func preparePostRunE(t *testing.T) context.Context {
+	t.Helper()
 	snapshotRootContext(t)
-	t.Setenv("BD_GIT_HOOK", "")
 	testModeUseGlobals = true
 	readonlyMode = false // let the maintenance block run
+	ctx, cancel := context.WithCancel(context.Background())
+	setRootContext(ctx, cancel)
+	return ctx
+}
 
+// stubPostRunMaintenance stubs PersistentPostRunE's maintenance until the test
+// ends: auto-commit and backup do nothing, auto-export runs export, and
+// auto-push only counts its runs, which it returns.
+func stubPostRunMaintenance(t *testing.T, export func(context.Context, bool) error) *int {
+	t.Helper()
 	oldCommit, oldBackup, oldExport, oldPush := runPostRunAutoCommit, runPostRunAutoBackup, runPostRunAutoExport, runPostRunAutoPush
 	t.Cleanup(func() {
 		runPostRunAutoCommit, runPostRunAutoBackup, runPostRunAutoExport, runPostRunAutoPush = oldCommit, oldBackup, oldExport, oldPush
 	})
 	runPostRunAutoCommit = func(context.Context, doltAutoCommitParams) error { return nil }
 	runPostRunAutoBackup = func(context.Context) {}
-	runPostRunAutoExport = maybeAutoExport
+	runPostRunAutoExport = export
 	pushCalls := 0
 	runPostRunAutoPush = func(context.Context) { pushCalls++ }
+	return &pushCalls
+}
+
+// GH#6163, end to end through PersistentPostRunE: a mutating command whose
+// real auto-export fails exits 1 and reports the failure exactly once, with a
+// hint that the command's change is saved. Cobra is silenced, so a command
+// that does not silence itself gets no second "Error:" line or usage text.
+// Its deferred cleanup still runs (context cancelled and cleared, store
+// closed).
+func TestPersistentPostRunE_ReportsAutoExportFailureOnce(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+	saveAndRestoreGlobals(t)
+	t.Setenv("BD_GIT_HOOK", "")
+	ctx := preparePostRunE(t)
+	pushCalls := stubPostRunMaintenance(t, maybeAutoExport)
 
 	sentinel := errors.New("injected state hash failure")
 	fake := &closeCountingStateHashStore{failingStateHashStore: failingStateHashStore{err: sentinel}}
 	store = fake
 	beadsDir, jsonl, stateBytes := seedAutoExportFailureFixture(t, exportRelationSeed, &exportAutoState{LastDoltCommit: "hash-before-write"})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	setRootContext(ctx, cancel)
-
+	cmd := &cobra.Command{Use: "create"}
 	var err error
-	stderr := captureStderr(t, func() { err = rootCmd.PersistentPostRunE(&cobra.Command{Use: "create"}, nil) })
+	stderr := captureStderr(t, func() { err = rootCmd.PersistentPostRunE(cmd, nil) })
 	if code, ok := exitCodeFromError(err); !ok || code != 1 {
 		t.Fatalf("PersistentPostRunE err = %v (exit code %d, reported %v), want exit 1", err, code, ok)
 	}
 	if strings.Count(stderr, "Error: ") != 1 || strings.Count(stderr, sentinel.Error()) != 1 || !strings.Contains(stderr, jsonl) {
 		t.Fatalf("stderr = %q, want one Error line naming %q and %q", stderr, sentinel, jsonl)
 	}
+	if strings.Count(stderr, "Hint: ") != 1 || !strings.Contains(stderr, "any change this command made is saved") {
+		t.Fatalf("stderr = %q, want one hint saying the command's change is saved", stderr)
+	}
+	if !cmd.SilenceErrors || !cmd.SilenceUsage {
+		t.Errorf("SilenceErrors = %v, SilenceUsage = %v, want both set so cobra prints neither the error nor the usage again", cmd.SilenceErrors, cmd.SilenceUsage)
+	}
 	if strings.Contains(stderr, "Warning: auto-export") {
 		t.Fatalf("stderr = %q, want no auto-export warning beside the error", stderr)
 	}
-	if pushCalls != 0 {
-		t.Errorf("auto-push ran %d time(s) after the failed export, want 0", pushCalls)
+	if *pushCalls != 0 {
+		t.Errorf("auto-push ran %d time(s) after the failed export, want 0", *pushCalls)
 	}
 	if err := ctx.Err(); !errors.Is(err, context.Canceled) {
 		t.Errorf("post-run must cancel the context on the error path, got %v", err)
@@ -419,4 +443,323 @@ func TestPersistentPostRunE_ReportsAutoExportFailureOnce(t *testing.T) {
 		t.Errorf("store close calls = %d, store = %v, want closed once and cleared", fake.closeCalls, store)
 	}
 	assertAutoExportUntouched(t, beadsDir, jsonl, exportRelationSeed, stateBytes)
+}
+
+// conflictedJSONL is an issues.jsonl left with git merge conflict markers,
+// which the pre-export reconciliation cannot parse.
+const conflictedJSONL = "<<<<<<< HEAD\n{\"id\":\"bd-main\"}\n=======\n{\"id\":\"bd-branch\"}\n>>>>>>> branch\n"
+
+// setAutoExportBaselineForTest sets commandAutoExportBaseline, as the end of
+// PersistentPreRunE would, until the test ends.
+func setAutoExportBaselineForTest(t *testing.T, hash string) {
+	t.Helper()
+	old := commandAutoExportBaseline
+	t.Cleanup(func() { commandAutoExportBaseline = old })
+	commandAutoExportBaseline = hash
+}
+
+// newDryRunCommand returns a command invoked with --dry-run.
+func newDryRunCommand(t *testing.T) *cobra.Command {
+	t.Helper()
+	cmd := &cobra.Command{Use: "create"}
+	cmd.Flags().Bool("dry-run", false, "")
+	if err := cmd.Flags().Set("dry-run", "true"); err != nil {
+		t.Fatal(err)
+	}
+	return cmd
+}
+
+// GH#6163: when the state hash still matches the baseline read before
+// the command ran, the command changed nothing the JSONL tracks. The export
+// was failing already and none of the command's changes are missing from the
+// JSONL, so each failure that follows the state hash read stays a warning
+// with exit 0, and leaves the JSONL and export state for the next command to
+// retry. A changed or unknown baseline still fails.
+func TestMaybeAutoExportFailureOfUnchangedStoreWarns(t *testing.T) {
+	issue := &types.Issue{ID: "bd-export1", Title: "export me", Status: types.StatusOpen, IssueType: types.TypeTask}
+	cases := []struct {
+		name     string
+		store    func() storage.DoltStorage
+		seed     string
+		wantText string
+	}{
+		{
+			name:     "pre-export check",
+			store:    func() storage.DoltStorage { return &fakeStateHashStore{stateHash: "hash-after-write"} },
+			seed:     conflictedJSONL,
+			wantText: "compare existing JSONL against local store",
+		},
+		{
+			name: "empty check query",
+			store: func() storage.DoltStorage {
+				return &queryFailingStore{
+					fakeStateHashStore: fakeStateHashStore{stateHash: "hash-after-write", issues: []*types.Issue{issue}},
+					failOn:             2,
+					err:                errors.New("injected search failure"),
+				}
+			},
+			seed:     exportRelationSeed,
+			wantText: "check for an empty export over existing JSONL",
+		},
+		{
+			// Its GetCurrentCommit, "hash-after-write", is its state hash.
+			name:     "export itself",
+			store:    func() storage.DoltStorage { return &failingExportRelationStore{fail: "labels"} },
+			seed:     exportRelationSeed,
+			wantText: "load labels",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			initConfigForTest(t)
+			config.Set("export.auto", true)
+			saveAndRestoreGlobals(t)
+			t.Setenv("BD_GIT_HOOK", "")
+			beadsDir, jsonl, stateBytes := seedAutoExportFailureFixture(t, tc.seed, &exportAutoState{LastDoltCommit: "hash-before-write"})
+
+			store = tc.store()
+			setAutoExportBaselineForTest(t, "hash-after-write")
+			var err error
+			stderr := captureStderr(t, func() { err = maybeAutoExport(context.Background(), false) })
+			if err != nil {
+				t.Fatalf("unchanged store: maybeAutoExport err = %v, want nil", err)
+			}
+			if want := "Warning: auto-export to " + jsonl + ": " + tc.wantText; strings.Count(stderr, want) != 1 || strings.Count(stderr, "Warning: ") != 1 {
+				t.Fatalf("unchanged store: stderr = %q, want exactly one %q warning", stderr, want)
+			}
+			assertAutoExportUntouched(t, beadsDir, jsonl, tc.seed, stateBytes)
+
+			for _, baseline := range []string{"hash-before-write", ""} {
+				store = tc.store()
+				commandAutoExportBaseline = baseline
+				stderr = captureStderr(t, func() { err = maybeAutoExport(context.Background(), false) })
+				if err == nil || !strings.Contains(err.Error(), tc.wantText) {
+					t.Fatalf("baseline %q: maybeAutoExport err = %v, want the %q failure", baseline, err, tc.wantText)
+				}
+				if stderr != "" {
+					t.Fatalf("baseline %q: stderr = %q, want nothing: the caller reports the failure once", baseline, stderr)
+				}
+				assertAutoExportUntouched(t, beadsDir, jsonl, tc.seed, stateBytes)
+			}
+		})
+	}
+}
+
+// GH#6163: a state hash that cannot be read cannot show that the
+// command changed nothing, so that failure fails even with a baseline.
+func TestMaybeAutoExportStateHashFailureFailsDespiteBaseline(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+	saveAndRestoreGlobals(t)
+	t.Setenv("BD_GIT_HOOK", "")
+	sentinel := errors.New("injected state hash failure")
+	store = &failingStateHashStore{err: sentinel}
+	setAutoExportBaselineForTest(t, "hash-before-write")
+	beadsDir, jsonl, stateBytes := seedAutoExportFailureFixture(t, exportRelationSeed, &exportAutoState{LastDoltCommit: "hash-before-write"})
+
+	var err error
+	stderr := captureStderr(t, func() { err = maybeAutoExport(context.Background(), false) })
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("maybeAutoExport err = %v, want errors.Is %v", err, sentinel)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want nothing: the caller reports the failure once", stderr)
+	}
+	assertAutoExportUntouched(t, beadsDir, jsonl, exportRelationSeed, stateBytes)
+}
+
+// captureAutoExportBaseline reads the state hash only for an invocation whose
+// post-run auto-export may run. An unreadable hash leaves the baseline
+// unknown, so a later export failure fails as it would after a change.
+func TestCaptureAutoExportBaseline(t *testing.T) {
+	create := &cobra.Command{Use: "create"}
+	cases := []struct {
+		name       string
+		exportAuto bool
+		noStore    bool
+		cmd        *cobra.Command
+		hashErr    error
+		want       string
+		wantReads  int
+	}{
+		{name: "write command", exportAuto: true, cmd: create, want: "hash-before-write", wantReads: 1},
+		{name: "unreadable state hash", exportAuto: true, cmd: create, hashErr: errors.New("injected state hash failure"), wantReads: 1},
+		{name: "export.auto off", cmd: create},
+		{name: "no store", exportAuto: true, noStore: true, cmd: create},
+		{name: "read-only command", exportAuto: true, cmd: &cobra.Command{Use: "list"}},
+		{name: "preview", exportAuto: true, cmd: newDryRunCommand(t)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			initConfigForTest(t)
+			config.Set("export.auto", tc.exportAuto)
+			saveAndRestoreGlobals(t)
+			setAutoExportBaselineForTest(t, "")
+			hashes := &fakeStateHashStore{stateHash: "hash-before-write"}
+			reads := &hashes.stateHashCalls
+			store = hashes
+			if tc.hashErr != nil {
+				failing := &failingStateHashStore{err: tc.hashErr}
+				store, reads = failing, &failing.stateHashCalls
+			}
+			if tc.noStore {
+				store = nil
+			}
+
+			captureAutoExportBaseline(context.Background(), tc.cmd, nil)
+			if commandAutoExportBaseline != tc.want || *reads != tc.wantReads {
+				t.Fatalf("baseline = %q after %d state hash read(s), want %q after %d", commandAutoExportBaseline, *reads, tc.want, tc.wantReads)
+			}
+		})
+	}
+}
+
+// closableStateHashStore is a fakeStateHashStore that PostRunE can close.
+type closableStateHashStore struct {
+	fakeStateHashStore
+	closeCalls int
+}
+
+func (f *closableStateHashStore) Close() error {
+	f.closeCalls++
+	return nil
+}
+
+// GH#6163, end to end from the baseline PersistentPreRunE records to
+// PersistentPostRunE: a failed export after a command that changed nothing
+// (a read outside the read-only list) warns, exits 0 and lets the rest of
+// post-run, auto-push included, run. The same failure after the command's
+// own write exits 1.
+func TestPersistentPostRunE_AutoExportFailureFollowsTheCommandsChange(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cmd   string
+		wrote bool
+	}{
+		{name: "read changed nothing", cmd: "memories"},
+		{name: "write", cmd: "create", wrote: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			initConfigForTest(t)
+			config.Set("export.auto", true)
+			saveAndRestoreGlobals(t)
+			setAutoExportBaselineForTest(t, "")
+			t.Setenv("BD_GIT_HOOK", "")
+			ctx := preparePostRunE(t)
+			pushCalls := stubPostRunMaintenance(t, maybeAutoExport)
+			fake := &closableStateHashStore{fakeStateHashStore: fakeStateHashStore{stateHash: "hash-before-command"}}
+			store = fake
+			beadsDir, jsonl, stateBytes := seedAutoExportFailureFixture(t, conflictedJSONL, &exportAutoState{LastDoltCommit: "hash-of-last-export"})
+
+			cmd := &cobra.Command{Use: tc.cmd}
+			captureAutoExportBaseline(ctx, cmd, nil)
+			if tc.wrote {
+				fake.stateHash = "hash-after-command"
+			}
+			var err error
+			stderr := captureStderr(t, func() { err = rootCmd.PersistentPostRunE(cmd, nil) })
+
+			if tc.wrote {
+				if code, ok := exitCodeFromError(err); !ok || code != 1 {
+					t.Fatalf("PersistentPostRunE err = %v (exit code %d, reported %v), want exit 1", err, code, ok)
+				}
+				if strings.Count(stderr, "Error: auto-export to "+jsonl) != 1 || strings.Contains(stderr, "Warning: ") {
+					t.Fatalf("stderr = %q, want one auto-export Error and no warning", stderr)
+				}
+				if *pushCalls != 0 {
+					t.Errorf("auto-push ran %d time(s) after the failed export, want 0", *pushCalls)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("PersistentPostRunE err = %v, want nil: the command changed nothing", err)
+				}
+				if strings.Count(stderr, "Warning: auto-export to "+jsonl+": compare existing JSONL") != 1 || strings.Contains(stderr, "Error: ") {
+					t.Fatalf("stderr = %q, want one auto-export warning and no error", stderr)
+				}
+				if *pushCalls != 1 {
+					t.Errorf("auto-push ran %d time(s), want 1: the rest of post-run still runs", *pushCalls)
+				}
+			}
+			if fake.closeCalls != 1 || store != nil {
+				t.Errorf("store close calls = %d, store = %v, want closed once and cleared", fake.closeCalls, store)
+			}
+			assertAutoExportUntouched(t, beadsDir, jsonl, conflictedJSONL, stateBytes)
+		})
+	}
+}
+
+// GH#6163: the post-run auto-export gate also skips a preview, which
+// promised not to mutate, and the export.auto off switch, whose config.yaml
+// write this process does not read back before post-run.
+func TestShouldRunPostCommandAutoExportSkipsPreviewsAndTheOffSwitch(t *testing.T) {
+	inspect := &cobra.Command{Use: "update"}
+	inspect.Flags().Bool("inspect", false, "")
+	if err := inspect.Flags().Set("inspect", "true"); err != nil {
+		t.Fatal(err)
+	}
+	dryRunOff := &cobra.Command{Use: "create"}
+	dryRunOff.Flags().Bool("dry-run", false, "")
+	configCmd := &cobra.Command{Use: "config"}
+	setCmd := &cobra.Command{Use: "set"}
+	setManyCmd := &cobra.Command{Use: "set-many"}
+	configCmd.AddCommand(setCmd, setManyCmd)
+
+	tests := []struct {
+		name string
+		cmd  *cobra.Command
+		args []string
+		want bool
+	}{
+		{name: "dry-run preview", cmd: newDryRunCommand(t), want: false},
+		{name: "inspect preview", cmd: inspect, want: false},
+		{name: "dry-run flag not given", cmd: dryRunOff, want: true},
+		{name: "config set export.auto false", cmd: setCmd, args: []string{"export.auto", "false"}, want: false},
+		{name: "config set-many export.auto=0", cmd: setManyCmd, args: []string{"export.interval=1m", "export.auto=0"}, want: false},
+		{name: "config set export.auto true", cmd: setCmd, args: []string{"export.auto", "true"}, want: true},
+		{name: "config set import.auto false", cmd: setCmd, args: []string{"import.auto", "false"}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldRunPostCommandAutoExport(tt.cmd, tt.args); got != tt.want {
+				t.Fatalf("shouldRunPostCommandAutoExport(%q, %v) = %v, want %v", tt.cmd.CommandPath(), tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+// GH#6163: PersistentPostRunE hands its args to that gate, so a
+// preview and the off switch run no export at all, and so cannot fail one.
+func TestPersistentPostRunE_SkipsAutoExportForPreviewsAndTheOffSwitch(t *testing.T) {
+	configCmd := &cobra.Command{Use: "config"}
+	setCmd := &cobra.Command{Use: "set"}
+	configCmd.AddCommand(setCmd)
+
+	for _, tc := range []struct {
+		name string
+		cmd  *cobra.Command
+		args []string
+		want int
+	}{
+		{name: "dry-run preview", cmd: newDryRunCommand(t)},
+		{name: "config set export.auto false", cmd: setCmd, args: []string{"export.auto", "false"}},
+		{name: "config set export.auto true", cmd: setCmd, args: []string{"export.auto", "true"}, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			initConfigForTest(t)
+			saveAndRestoreGlobals(t)
+			store = nil
+			preparePostRunE(t)
+			exports := 0
+			stubPostRunMaintenance(t, func(context.Context, bool) error {
+				exports++
+				return errors.New("injected auto-export failure")
+			})
+
+			var err error
+			_ = captureStderr(t, func() { err = rootCmd.PersistentPostRunE(tc.cmd, tc.args) })
+			if exports != tc.want || (err != nil) != (tc.want > 0) {
+				t.Fatalf("auto-export ran %d time(s), PersistentPostRunE err = %v; want %d run(s), failing only if it ran", exports, err, tc.want)
+			}
+		})
+	}
 }
