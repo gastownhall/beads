@@ -599,6 +599,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		initRemote, _ := cmd.Flags().GetString("remote")
 		initRemoteChanged := cmd.Flags().Changed("remote")
 		assumeYes, _ := cmd.Flags().GetBool("yes")
+		noAdopt, _ := cmd.Flags().GetBool("no-adopt")
+		// The opt-out wins over --yes: never probe, clone or wire a remote
+		// derived from git origin (GH#6099).
+		skipDerivedRemote := initSkipsDerivedRemote(noAdopt)
 		// Dolt server connection flags
 		backendFlag, _ := cmd.Flags().GetString("backend")
 		initServerMode, _ := cmd.Flags().GetBool("server")
@@ -904,6 +908,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				teamServer:             initTeamServer,
 				fromJSONL:              fromJSONL,
 				nonInteractive:         nonInteractive,
+				noAdopt:                noAdopt,
 			}); err != nil {
 				// runInitProxiedServer runs the same checkExistingBeadsData
 				// the route below does, but it runs it inside itself — so
@@ -1141,7 +1146,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				// --reinit-local / local init.
 				hasData, err := gitRemoteHasDoltDataRefStatus(earlySyncURL)
 				earlyRemoteHasDoltData, earlyProbeNote = resolveRemoteHasDoltDataProbe(earlySyncURL, hasData, err)
-			} else if earlyRemoteSource == initSyncRemoteNone && !stealth && !keepHomeClean && isGitRepo() && !isBareGitRepo() {
+			} else if earlyRemoteSource == initSyncRemoteNone && !skipDerivedRemote && !stealth && !keepHomeClean && isGitRepo() && !isBareGitRepo() {
 				// Not under keepHomeClean: a repository git finds from the
 				// home is not the project's, so its origin is not this
 				// workspace's remote (see guardInitInHomeDir).
@@ -1554,7 +1559,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					fmt.Printf("  %s Remote has no Dolt data yet; initialized a fresh local database\n", ui.RenderWarn("!"))
 				}
 			}
-		} else if syncRemoteSource == initSyncRemoteNone && !stealth && !keepHomeClean && isGitRepo() && !isBareGitRepo() {
+		} else if syncRemoteSource == initSyncRemoteNone && !skipDerivedRemote && !stealth && !keepHomeClean && isGitRepo() && !isBareGitRepo() {
 			// keepHomeClean: as in the early remote check above.
 			if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
 				syncURL = normalizeRemoteURL(originURL)

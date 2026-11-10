@@ -373,6 +373,41 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 			RemoteSafetyInput{RemoteHasDoltData: true, DerivedFromGitOrigin: true, DiscardRemote: true, AdoptionConsented: true, ExpectedToken: "DESTROY-bd"},
 			ActionRequireDestroyToken, ExitDestroyTokenMissing,
 		},
+		{
+			// The early checkpoint of an interactive, non-JSON init asks.
+			"derived/remote/no-consent/can-ask",
+			RemoteSafetyInput{RemoteHasDoltData: true, DerivedFromGitOrigin: true, AdoptionInteractive: true},
+			ActionAskAdoption, 0,
+		},
+		// The opt-out (--no-adopt / BD_NO_REMOTE_ADOPT) skips a derived
+		// remote and beats consent: the safer of two contradictory
+		// instructions wins, before even the no-data branch. It never
+		// touches a remote the caller named or configured.
+		{
+			"derived/no-adopt",
+			RemoteSafetyInput{RemoteHasDoltData: true, DerivedFromGitOrigin: true, AdoptionDisabled: true},
+			ActionSkipDerivedRemote, 0,
+		},
+		{
+			"derived/no-adopt+yes",
+			RemoteSafetyInput{RemoteHasDoltData: true, DerivedFromGitOrigin: true, AdoptionDisabled: true, AdoptionConsented: true},
+			ActionSkipDerivedRemote, 0,
+		},
+		{
+			"derived/no-adopt/no-data",
+			RemoteSafetyInput{DerivedFromGitOrigin: true, AdoptionDisabled: true},
+			ActionSkipDerivedRemote, 0,
+		},
+		{
+			"explicit/no-adopt",
+			RemoteSafetyInput{RemoteHasDoltData: true, AdoptionDisabled: true},
+			ActionBootstrap, 0,
+		},
+		{
+			"explicit/yes+no-adopt",
+			RemoteSafetyInput{RemoteHasDoltData: true, AdoptionConsented: true, AdoptionDisabled: true},
+			ActionBootstrap, 0,
+		},
 	}
 
 	for _, tc := range cases {
@@ -1255,5 +1290,76 @@ func TestInitDerivedOriginAdoptionPromptCanceled(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(workDir, ".beads")); !os.IsNotExist(err) {
 		t.Errorf("canceled prompt created .beads (stat err=%v)", err)
+	}
+}
+
+// TestInitDerivedOriginOptOut is AC-4 of GH#6099: --no-adopt or a truthy
+// BD_NO_REMOTE_ADOPT skips the derived origin entirely (no probe, no clone,
+// no remote wiring, no persisted sync.remote) and creates a local database,
+// even when --yes is also supplied: the safer instruction wins.
+func TestInitDerivedOriginOptOut(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		args        []string
+		env         []string
+		unreachable bool
+	}{
+		{name: "flag", args: []string{"--no-adopt"}},
+		{name: "env", env: []string{"BD_NO_REMOTE_ADOPT=1"}},
+		{name: "env-true", env: []string{"BD_NO_REMOTE_ADOPT=true"}},
+		{name: "flag-beats-yes", args: []string{"--no-adopt", "--yes"}},
+		// An origin whose probe would fail prints a "could not verify" note
+		// when probed; its absence shows no probe ran.
+		{name: "no-probe", args: []string{"--no-adopt"}, unreachable: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var workDir, remoteDir string
+			if tc.unreachable {
+				workDir = t.TempDir()
+				runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+				runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+				remoteDir = filepath.Join(t.TempDir(), "does-not-exist.git")
+				runGitForBootstrapTest(t, workDir, "remote", "add", "origin", remoteDir)
+			} else {
+				workDir, remoteDir = derivedOriginWithDoltDataFixture(t)
+			}
+			args := append([]string{"--prefix", "mine", "--non-interactive", "--skip-hooks", "--skip-agents"}, tc.args...)
+			// GIT_TRACE logs every git command bd (and Dolt's git remote
+			// factory) runs, so the absence of the probe and the clone is
+			// asserted directly, not inferred from missing wording.
+			gitTrace := filepath.Join(t.TempDir(), "git-trace.log")
+			out, code := runInitForAdoptionTest(t, workDir, "", append([]string{"GIT_TRACE=" + gitTrace}, tc.env...), args...)
+			if code != 0 {
+				t.Fatalf("opted-out init exit code = %d, want 0\noutput:\n%s", code, out)
+			}
+			trace, err := os.ReadFile(gitTrace)
+			if err != nil || !strings.Contains(string(trace), "trace: ") {
+				t.Fatalf("GIT_TRACE recorded no git command (err=%v); the no-probe check would be vacuous", err)
+			}
+			if strings.Contains(string(trace), "ls-remote") || strings.Contains(string(trace), remoteDir) {
+				t.Errorf("opted-out init ran git against the derived origin:\n%s", trace)
+			}
+			for _, unwanted := range []string{"could not verify", "failed to clone", "Bootstrapped from remote", "Adopting Dolt issue history"} {
+				if strings.Contains(out, unwanted) {
+					t.Errorf("opted-out init output contains %q (probe/clone ran):\n%s", unwanted, out)
+				}
+			}
+			cfg, err := os.ReadFile(filepath.Join(workDir, ".beads", "config.yaml"))
+			if err != nil {
+				t.Fatalf("opted-out init created no local workspace: %v\n%s", err, out)
+			}
+			if strings.Contains(string(cfg), remoteDir) {
+				t.Errorf("opted-out init persisted the derived origin:\n%s", cfg)
+			}
+
+			bdBin := buildBDForInitTests(t)
+			remotes := exec.Command(bdBin, "dolt", "remote", "list")
+			remotes.Dir = workDir
+			remotes.Env = hermeticInitEnv(t.TempDir())
+			remotesOut, _ := remotes.CombinedOutput()
+			if strings.Contains(string(remotesOut), remoteDir) {
+				t.Errorf("opted-out init wired the derived origin as a Dolt remote:\n%s", remotesOut)
+			}
+		})
 	}
 }
