@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
@@ -731,7 +733,7 @@ func setupAutoRouteWithHydratedCopy(t *testing.T, role, routingKey string, extra
 
 	// Read the planning rows through the same foreign read a routed open
 	// uses, so the copies' provenance is exactly what a real import recorded.
-	planningStore, err := openForeignStore(ctx, filepath.Join(planningDir, ".beads"), foreignRead)
+	planningStore, err := openForeignStore(ctx, filepath.Join(planningDir, ".beads"), foreignRead, "test fixture open")
 	if err != nil {
 		t.Fatalf("open the planning store for the import: %v", err)
 	}
@@ -764,7 +766,7 @@ func setupAutoRouteWithHydratedCopy(t *testing.T, role, routingKey string, extra
 // handle rather than the one the test just mutated through.
 func reopenAutoRouteTarget(t *testing.T, planningDir string) storage.DoltStorage {
 	t.Helper()
-	s, err := openForeignStore(context.Background(), filepath.Join(planningDir, ".beads"), foreignRead)
+	s, err := openForeignStore(context.Background(), filepath.Join(planningDir, ".beads"), foreignRead, "test fixture open")
 	if err != nil {
 		t.Fatalf("reopen the planning store: %v", err)
 	}
@@ -906,7 +908,7 @@ func TestAutoRouteResolvesPlanningRepoMirrorToOwner(t *testing.T) {
 		// Diverge the owner from the copy, the way any planning-side change
 		// does: bd show of the copy must answer with the owner's current
 		// state, not the stale mirror.
-		planningStore, err := openForeignStore(ctx, filepath.Join(planningDir, ".beads"), foreignWrite)
+		planningStore, err := openForeignStore(ctx, filepath.Join(planningDir, ".beads"), foreignWrite, "test fixture open")
 		if err != nil {
 			t.Fatalf("open the planning store for the diverging update: %v", err)
 		}
@@ -943,7 +945,7 @@ func TestAutoRouteResolvesPlanningRepoMirrorToOwner(t *testing.T) {
 func importPlanningCopy(t *testing.T, primaryStore storage.DoltStorage, planningDir, marker string, createdAt func(owner time.Time) time.Time) {
 	t.Helper()
 	ctx := context.Background()
-	planningStore, err := openForeignStore(ctx, filepath.Join(planningDir, ".beads"), foreignRead)
+	planningStore, err := openForeignStore(ctx, filepath.Join(planningDir, ".beads"), foreignRead, "test fixture open")
 	if err != nil {
 		t.Fatalf("open the planning store for the import: %v", err)
 	}
@@ -1429,6 +1431,78 @@ func TestDeleteBatchRejectsMixedStores(t *testing.T) {
 		}
 		if _, err := reopenAutoRouteTarget(t, rigDir).GetIssue(ctx, "gt-rig-1"); err != nil {
 			t.Fatalf("rig row gt-rig-1 after the refusal: %v", err)
+		}
+	})
+}
+
+// TestVerboseLogsStoreSelection pins the store-selection diagnostics GH#6058
+// needs: under --verbose (or BD_DEBUG=1, the same channel), resolving through
+// a route logs, on stderr, which workspace was opened, the access intent,
+// and the selection that reached for it — the split-brain workflow (bd list
+// reads one store while bd close writes another) is otherwise undiagnosable
+// from the CLI alone. The lines never touch stdout, so --json and every
+// machine reader stay unaffected.
+func TestVerboseLogsStoreSelection(t *testing.T) {
+	t.Run("auto-route open, write intent", func(t *testing.T) {
+		primaryStore, _, planningDir := setupAutoRoute(t, "maintainer", "routing.maintainer")
+		ctx := context.Background()
+
+		var result *RoutedResult
+		stderr := captureStderr(t, func() {
+			debug.SetVerbose(true)
+			defer debug.SetVerbose(false)
+			var err error
+			result, err = resolveAndGetIssueForMutation(ctx, primaryStore, "shared-hub")
+			if err != nil {
+				t.Fatalf("resolveAndGetIssueForMutation: %v", err)
+			}
+		})
+		defer result.Close()
+		want := fmt.Sprintf("store: %s write (auto-route)\n", filepath.Join(planningDir, ".beads"))
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("verbose stderr does not carry %q:\n%s", want, stderr)
+		}
+	})
+
+	t.Run("copy owner redirect, write intent", func(t *testing.T) {
+		primaryStore, _, planningDir := setupAutoRouteWithHydratedCopy(t, "maintainer", "routing.maintainer")
+		ctx := context.Background()
+
+		var result *RoutedResult
+		stderr := captureStderr(t, func() {
+			debug.SetVerbose(true)
+			defer debug.SetVerbose(false)
+			var err error
+			result, err = resolveAndGetIssueForMutationExact(ctx, primaryStore, "shared-hub")
+			if err != nil {
+				t.Fatalf("resolveAndGetIssueForMutationExact: %v", err)
+			}
+		})
+		defer result.Close()
+		want := fmt.Sprintf("store: %s write (copy owner)\n", filepath.Join(planningDir, ".beads"))
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("verbose stderr does not carry %q:\n%s", want, stderr)
+		}
+	})
+
+	t.Run("copy owner redirect, read intent", func(t *testing.T) {
+		primaryStore, _, planningDir := setupAutoRouteWithHydratedCopy(t, "maintainer", "routing.maintainer")
+		ctx := context.Background()
+
+		var result *RoutedResult
+		stderr := captureStderr(t, func() {
+			debug.SetVerbose(true)
+			defer debug.SetVerbose(false)
+			var err error
+			result, err = resolveAndGetIssueWithRouting(ctx, primaryStore, "shared-hub")
+			if err != nil {
+				t.Fatalf("resolveAndGetIssueWithRouting: %v", err)
+			}
+		})
+		defer result.Close()
+		want := fmt.Sprintf("store: %s read (copy owner)\n", filepath.Join(planningDir, ".beads"))
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("verbose stderr does not carry %q:\n%s", want, stderr)
 		}
 	})
 }

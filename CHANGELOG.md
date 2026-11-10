@@ -100,6 +100,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Commands that address a hydrated copy now follow the active route to its
+  owner, and can say which store they used.** With auto-routing active and
+  `bd repo sync` having hydrated a planning repo's rows into the project
+  (each stamped with its `source_repo` and creation time), `bd close`,
+  `bd update`, `bd comment`, `bd delete` and `bd show` on such a copy resolve
+  to the auto-routed owner's row and commit or read there, so a change no
+  longer lands on a stale local mirror while the routed `bd list` keeps
+  showing the owner untouched (GH#6058). The copy is identified by its source
+  marker naming the active route's target and a creation time matching the
+  owner's; a row that fails either check keeps local resolution, and so does
+  every row when no route is active. A redirected delete removes the owner's
+  row and prints one stderr note that the project's copy remains, with the
+  command that deletes the copy locally. When the owner cannot be opened,
+  mutations refuse naming the target instead of reporting success, and reads
+  fall back to the copy. A `bd delete` batch whose ids resolve to different
+  stores is refused before anything is deleted, naming each destination and
+  its ids; split it into one `bd delete` per store. Under `--verbose` or
+  `BD_DEBUG=1`, every store a command opens logs one stderr line —
+  `store: <workspace> <read|write> (<selection>)` — naming the resolved
+  workspace, the access intent, and the selection that reached for it
+  (`project`, `auto-route`, `prefix route <prefix>`, `copy owner`, or
+  `external dependency lookup`), so which store a command used is diagnosable
+  from the CLI; stdout and `--json` output are unchanged.
+
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same

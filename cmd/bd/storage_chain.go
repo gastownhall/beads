@@ -69,7 +69,7 @@ func wireExternalDependencyPolicy(store storage.DoltStorage) storage.DoltStorage
 			return path, path != ""
 		},
 		func(ctx context.Context, projectRoot string) (storage.DoltStorage, error) {
-			return openForeignStore(ctx, filepath.Join(projectRoot, ".beads"), foreignRead)
+			return openForeignStore(ctx, filepath.Join(projectRoot, ".beads"), foreignRead, "external dependency lookup")
 		},
 	)
 }
@@ -113,7 +113,7 @@ func wireExternalDependencyUOWProvider(provider uow.UnitOfWorkProvider) uow.Unit
 			return path, path != ""
 		},
 		func(ctx context.Context, projectRoot string) (storage.DoltStorage, error) {
-			return openForeignStore(ctx, filepath.Join(projectRoot, ".beads"), foreignRead)
+			return openForeignStore(ctx, filepath.Join(projectRoot, ".beads"), foreignRead, "external dependency lookup")
 		},
 	)
 }

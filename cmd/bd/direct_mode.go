@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/debug"
 )
 
 // ErrNoBeadsDatabase reports that no beads workspace could be resolved at all,
@@ -43,6 +44,12 @@ func ensureStoreActiveWithContext(ctx context.Context) error {
 		return fmt.Errorf("%w.\n"+
 			"Hint: run 'bd init' to create a database in the current directory", ErrNoBeadsDatabase)
 	}
+
+	// The store-selection diagnostic GH#6058 asks for, on the project's own
+	// open: which workspace, which intent, why. debug.Logf stays on stderr and
+	// prints only under --verbose or BD_DEBUG=1, so stdout and --json never
+	// carry it (see openForeignStore for the routed twin of this line).
+	debug.Logf("store: %s write (project)\n", beadsDir)
 
 	// Use the factory to create the appropriate backend
 	// based on metadata.json configuration and build tags

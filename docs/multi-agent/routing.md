@@ -69,6 +69,11 @@ bd config set beads.role contributor   # stored in git config, not the database
 bd config get beads.role
 ```
 
+The key lives in git config, so `git config beads.role maintainer` sets it
+too — the right fix on a fork you own outright, where the fork heuristic (or
+an earlier contributor setup) routes planning away from the repository you
+actually push to.
+
 When `beads.role` is unset, `bd` prints a warning and falls back to a
 deprecated remote-URL heuristic:
 
@@ -195,11 +200,29 @@ skipping repos whose export hasn't changed. `bd init --contributor` wires
 hydration up automatically; `bd doctor` warns when routing targets are
 missing from `repos.additional`.
 
-Once hydrated, beads from other repos are ordinary rows in your database —
-filter by provenance or link them with normal dependencies:
+Once hydrated, beads from other repos are rows in your database — but while
+their owner stays the active route, they are mirrors of that owner, not
+independent rows. `bd repo sync` stamps each import with its `source_repo`
+and creation time; commands that address a hydrated row follow the route to
+the owner instead of the local copy:
+
+- `bd show` answers with the owner's current row, not the stale copy
+- `bd close`, `bd update`, `bd comment` and the like commit in the owner's
+  repository and leave the local copy untouched
+- `bd delete` removes the owner's row and prints a note that the project's
+  copy remains; the copy itself is deleted by running the same command again
+
+The route is followed only when the row is identifiable — its source marker
+names the active route's target and its creation time matches the owner's
+row. When the routed store cannot be opened, reads fall back to the local
+copy while mutations refuse, naming the target, instead of reporting success
+for a write that landed nowhere. And `bd delete` refuses a batch whose ids
+resolve to different stores before deleting anything; run one `bd delete`
+per store.
+
+Hydrated rows still link with normal dependencies:
 
 ```bash
-bd list --json | jq '.[] | select(.source_repo == "~/.beads-planning")'
 bd dep add impl-42 plan-10 --type blocks
 ```
 
@@ -235,6 +258,28 @@ named after their issue prefixes. See [MCP Server](/integrations/mcp-server)
 for installation and client configuration.
 
 ## Troubleshooting
+
+### Not sure which store bd used
+
+With routing and hydration active, one command can read one store while
+another writes a second. Run either with diagnostics on:
+
+```bash
+bd list --verbose        # or: BD_DEBUG=1 bd list
+```
+
+Every store the command opens logs one line to stderr:
+
+```
+store: /home/you/my-fork/.beads write (project)
+store: /home/you/.beads-planning/.beads write (copy owner)
+```
+
+each naming the resolved workspace, the access intent (`read` or `write`),
+and the selection that reached for it: `project`, `auto-route`,
+`prefix route <prefix>`, `copy owner` (a hydrated mirror's owner), or
+`external dependency lookup`. The lines go to stderr only, so `--json` and
+other machine readers of stdout never see them.
 
 ### Beads land in the wrong repository
 

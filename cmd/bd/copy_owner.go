@@ -105,7 +105,7 @@ func resolveCopyOfActiveAutoRouteTarget(ctx context.Context, localStore storage.
 	if !ok {
 		return local, nil
 	}
-	ownerStore, err := openAutoRoutedTargetAt(ctx, target, writable)
+	ownerStore, err := openAutoRoutedTargetAt(ctx, target, writable, "copy owner")
 	if err != nil {
 		if !writable {
 			debug.Logf("[routing] %s resolved from the project copy: opening the routed store at %s failed: %v\n",

@@ -194,7 +194,7 @@ func openAutoRoutedStore(ctx context.Context, store storage.DoltStorage, writabl
 	if repoPath == "" || repoPath == "." {
 		return nil, false, routing.RuleNone, nil
 	}
-	targetStore, err := openAutoRoutedTargetAt(ctx, routing.ExpandPath(repoPath), writable)
+	targetStore, err := openAutoRoutedTargetAt(ctx, routing.ExpandPath(repoPath), writable, "auto-route")
 	if err != nil {
 		return nil, false, rule, err
 	}
@@ -207,8 +207,10 @@ func openAutoRoutedStore(ctx context.Context, store storage.DoltStorage, writabl
 // whose selection (determineAutoRoutedRepoPath) already happened. The
 // owner-redirection decision (resolveCopyOfActiveAutoRouteTarget) reuses it
 // so a copy's owner opens through exactly the same checks as any other
-// auto-routed target, without repeating role detection.
-func openAutoRoutedTargetAt(ctx context.Context, targetRepoPath string, writable bool) (storage.DoltStorage, error) {
+// auto-routed target, without repeating role detection. reason names the
+// selection for the store diagnostics (openForeignStore): the auto-route
+// itself, or the hydrated-copy owner redirect.
+func openAutoRoutedTargetAt(ctx context.Context, targetRepoPath string, writable bool, reason string) (storage.DoltStorage, error) {
 	targetBeadsDir := filepath.Join(targetRepoPath, ".beads")
 	// Refuse what admission refuses from the target's own contents first, as
 	// the open below would: a write's dolt_database lookup would otherwise
@@ -221,7 +223,7 @@ func openAutoRoutedTargetAt(ctx context.Context, targetRepoPath string, writable
 	if err != nil {
 		return nil, fmt.Errorf("failed to open routed store at %s: target has no dolt_database configured: %w", remedy.PrintedValue(targetRepoPath), err)
 	}
-	targetStore, err := openRoutedTargetStore(ctx, targetBeadsDir, database, writable)
+	targetStore, err := openRoutedTargetStore(ctx, targetBeadsDir, database, writable, reason)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open routed store at %s: %w", remedy.PrintedValue(targetRepoPath), err)
 	}

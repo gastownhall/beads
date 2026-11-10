@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 )
@@ -202,12 +203,29 @@ const (
 	foreignCreate
 )
 
+// intentWord names the access intent for the store-selection diagnostics
+// (openForeignStore): every foreign open is a read or a write, whichever
+// flavor of either.
+func (a foreignAccess) intentWord() string {
+	if a == foreignWrite || a == foreignCreate {
+		return "write"
+	}
+	return "read"
+}
+
 // openForeignStore is the one way a command opens a foreign workspace's
 // store through the metadata store factories (the three direct opens are
 // listed at the top of this file): it refuses what admitForeignWorkspace
 // refuses before the factory runs, so the factory writes nothing into a
 // workspace admitForeignWorkspace refuses.
-func openForeignStore(ctx context.Context, beadsDir string, access foreignAccess) (storage.DoltStorage, error) {
+//
+// reason names the selection that reached for this workspace ("prefix route
+// hq-", "auto-route", "copy owner", ...) and lands on stderr with the
+// workspace and access intent under --verbose or BD_DEBUG=1, so a command
+// that hit a different store than its output suggests can be diagnosed from
+// the CLI alone (GH#6058). stdout and --json never carry it.
+func openForeignStore(ctx context.Context, beadsDir string, access foreignAccess, reason string) (storage.DoltStorage, error) {
+	debug.Logf("store: %s %s (%s)\n", beadsDir, access.intentWord(), reason)
 	if _, err := admitForeignWorkspace(beadsDir); err != nil {
 		return nil, err
 	}
