@@ -357,3 +357,49 @@ func TestParseDoltProcessPIDsStateCodes(t *testing.T) {
 		t.Errorf("zombie/dead states: parseDoltProcessPIDs() = %v, want none", got)
 	}
 }
+
+// TestParseDoltProcessPIDsWholeWordCommand covers the command shapes that must
+// be recognized whether the state column is present, omitted, or an unfamiliar
+// token: a word equal to dolt or ending in /dolt, then a sql-server word.
+func TestParseDoltProcessPIDsWholeWordCommand(t *testing.T) {
+	tests := []struct {
+		name     string
+		snapshot string
+		want     []int
+	}{
+		{
+			name:     "bare dolt with and without state",
+			snapshot: "501 dolt sql-server\n502 S dolt sql-server\n",
+			want:     []int{501, 502},
+		},
+		{
+			name: "global flags before sql-server with and without state",
+			snapshot: "503      /usr/local/bin/dolt --prof cpu --prof-path /tmp/pprof sql-server\n" +
+				"504 Sl   /usr/local/bin/dolt --prof cpu --prof-path /tmp/pprof sql-server\n" +
+				"505 dolt --data-dir /srv/dolt sql-server --port 3307\n",
+			want: []int{503, 504, 505},
+		},
+		{
+			name:     "executable path containing a space",
+			snapshot: "506      /Users/Jane Doe/bin/dolt sql-server\n507 S /Users/Jane Doe/bin/dolt sql-server\n",
+			want:     []int{506, 507},
+		},
+		{
+			name:     "shell stand-in running a dolt-named script",
+			snapshot: "508 /bin/sh /tmp/x/dolt sql-server\n509 Ss /bin/sh /tmp/x/dolt sql-server\n",
+			want:     []int{508, 509},
+		},
+		{
+			name:     "unfamiliar state token stays in the word stream",
+			snapshot: "510 Sp /usr/local/bin/dolt sql-server\n",
+			want:     []int{510},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseDoltProcessPIDs([]byte(tt.snapshot)); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("parseDoltProcessPIDs() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
