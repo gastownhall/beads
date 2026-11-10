@@ -57,29 +57,40 @@ type prefixConfigReader interface {
 
 // unroutedForeignPrefix reports the store's issue_prefix and the id's prefix
 // when id carries a prefix the store does not issue and no route names it. It
-// answers false whenever it cannot tell: no store, no configured issue_prefix,
-// no prefix in id, or a routes.jsonl it cannot read.
+// answers false whenever it cannot tell: no store, an issue_prefix or
+// allowed_prefixes it cannot read, no configured issue_prefix, no prefix in
+// id, or a routes.jsonl it cannot read. It reads config and routes.jsonl and
+// nothing else: it never looks the id up or opens a store.
+//
+// Both config keys are read before anything is matched, so an own-prefix and
+// a foreign-prefix miss make the same store reads. Known prefixes are matched
+// as a leading "<prefix>-" before the id's prefix is extracted for display, so
+// a multi-hyphen allowed prefix ("claude-os" for "claude-os-abcd") is never
+// mistaken for a foreign one.
 func unroutedForeignPrefix(ctx context.Context, s prefixConfigReader, beadsDir, id string) (storePrefix, idPrefix string, ok bool) {
 	if s == nil {
 		return "", "", false
 	}
-	idPrefix = utils.ExtractIssuePrefix(id)
-	if idPrefix == "" {
-		return "", "", false
-	}
 	issuePrefix, err := s.GetConfig(ctx, "issue_prefix")
-	storePrefix = strings.TrimSuffix(strings.TrimSpace(issuePrefix), "-")
-	if err != nil || storePrefix == "" {
+	if err != nil {
 		return "", "", false
 	}
-	known := []string{storePrefix}
-	if allowed, err := s.GetConfig(ctx, "allowed_prefixes"); err == nil {
-		known = append(known, strings.Split(allowed, ",")...)
+	allowed, err := s.GetConfig(ctx, "allowed_prefixes")
+	if err != nil {
+		return "", "", false
 	}
-	for _, p := range known {
+	storePrefix = strings.TrimSuffix(strings.TrimSpace(issuePrefix), "-")
+	if storePrefix == "" {
+		return "", "", false
+	}
+	for _, p := range append([]string{storePrefix}, strings.Split(allowed, ",")...) {
 		if p = strings.TrimSuffix(strings.TrimSpace(p), "-"); p != "" && strings.HasPrefix(id, p+"-") {
 			return "", "", false
 		}
+	}
+	idPrefix = utils.ExtractIssuePrefix(id)
+	if idPrefix == "" {
+		return "", "", false
 	}
 	if beadsDir != "" {
 		routes, err := loadPrefixRoutes(beadsDir)
