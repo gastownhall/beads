@@ -1449,6 +1449,18 @@ func RetainedTypesYAMLWarning() string {
 	return fmt.Sprintf("types.retained in config.yaml (%s) is ignored: it is read from the workspace database only; set it with `bd config set types.retained %s`", list, list)
 }
 
+// NoDBObsoleteWarning is the warning for an effective no-db=true (config.yaml
+// or BD_NO_DB), or "" when it is off. The JSONL-only mode the key selected is
+// gone and nothing reads it any more, so every command still opens the Dolt
+// database; the warning says so instead of letting the key look like it took
+// effect (GH#7387).
+func NoDBObsoleteWarning() string {
+	if !GetBool("no-db") {
+		return ""
+	}
+	return "no-db is obsolete and ignored: issues live in the Dolt database and .beads/issues.jsonl is only an export; remove it with `bd config unset no-db` (or unset BD_NO_DB)"
+}
+
 // GetCustomStatusesFromYAML retrieves custom statuses from config.yaml.
 // This is used as a fallback when the database doesn't have status.custom set yet
 // or when the database connection is temporarily unavailable.
