@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -717,6 +719,13 @@ func validateProxyRegistryBeforeProvider(cmd *cobra.Command, topology ProxyTopol
 	// per-invocation client-stop declaration the bypass is.
 	if rule.ForceFlag != "" {
 		if force, err := cmd.Flags().GetBool(rule.ForceFlag); err == nil && force {
+			// The lift is not silent (GH#6656): warn on stderr before any
+			// provider work. Stderr, not the JSON stream, so machine callers
+			// keep a clean stdout; once, because the warning is a property of
+			// this invocation and not of the schema work it permits.
+			if rule.ForceWarning != "" {
+				fmt.Fprintf(os.Stderr, "%s\n", rule.ForceWarning)
+			}
 			return nil
 		}
 	}
