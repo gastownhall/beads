@@ -1226,6 +1226,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The native `os.UserConfigDir()/bd/config.yaml` location (macOS
+  `~/Library/Application Support`, Windows `%APPDATA%`, `$XDG_CONFIG_HOME`
+  where it differs from `~/.config`) is now a fallback consulted only when
+  `~/.config/bd/config.yaml` is absent, instead of a lower-priority layer
+  merged beneath it. `initialize()` probed the native location on every launch
+  even when the documented config existed, which on macOS can raise a
+  per-launch "access data from other apps" permission prompt.
+  **Breaking for dual-file setups:** a key defined only in the native file no
+  longer applies once the documented file exists — the two files are not
+  merged. That includes `node_id`: when it lives only in the native file, it
+  reads as unset and replica-aware behavior is disabled. Copy the settings you
+  want to keep into the documented file (explicit documented values win on
+  conflicts), e.g. `bd config set node_id <name>`; the native file itself can
+  stay in place.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

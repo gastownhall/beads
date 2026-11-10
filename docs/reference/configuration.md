@@ -5,7 +5,7 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-10-26
+Last reviewed: 2026-11-10
 
 Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, `internal/config/`, `internal/configfile/`, and `internal/endpointtrust/`.
 
@@ -28,6 +28,35 @@ Dolt is the only storage backend. Embedded mode (the default) stores data at `.b
 4. `$BEADS_DIR/config.yaml` (highest priority, when `BEADS_DIR` points at a different workspace)
 
 A `config.local.yaml` next to the project `config.yaml` is also merged in last for machine-specific overrides that should not be committed.
+
+### The user-level config: documented and native locations
+
+`~/.config/bd/config.yaml` means that literal path under your home directory —
+it is not relocated by `XDG_CONFIG_HOME`.
+
+Every platform also has a native user-config directory (`os.UserConfigDir()`):
+`~/Library/Application Support` on macOS, `%APPDATA%` on Windows, and
+`$XDG_CONFIG_HOME` on Linux and the BSDs. bd looks for
+`<native>/bd/config.yaml` **only when the documented file is absent**. The two
+user-level files are not merged: when both exist, the documented file wins
+outright. (Previously the native file was merged as a lower-priority layer,
+which required probing the native location on every launch; on macOS that
+probe can raise a per-launch "access data from other apps" permission prompt.)
+
+If you had settings only in the native file, they stop applying once the
+documented file exists. Copy the ones you want to keep into the documented
+file — on conflicts the documented value wins — for example:
+
+```bash
+bd config set node_id <name>
+```
+
+`node_id` is affected like any other key: when it is defined only in the
+native file and the documented file exists, it reads as unset, which disables
+replica-aware behavior. You do not need to delete the native file. Note that
+bd may still touch the native directory for other purposes; this removes the
+config-load probe, not every access. `~/.beads/config.yaml` (legacy) still
+merges beneath whichever user-level file was selected.
 
 ## Precedence
 
