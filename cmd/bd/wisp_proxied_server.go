@@ -195,8 +195,16 @@ func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.
 }
 
 func renderWispGCDeleteResult(ids []string, res domain.DeleteIssuesResult) error {
+	return renderWispGCDeleteResultReporting(ids, res, nil)
+}
+
+// renderWispGCDeleteResultReporting is renderWispGCDeleteResult with report's
+// members added to the --json result — the closed-mode purge's
+// live_dependent_skipped (GH#5152), the way deleteBatchReporting merges a
+// selection's own report into its JSON shapes.
+func renderWispGCDeleteResultReporting(ids []string, res domain.DeleteIssuesResult, report map[string]interface{}) error {
 	if jsonOutput {
-		return outputJSON(map[string]interface{}{
+		answer := map[string]interface{}{
 			"deleted":              ids,
 			"deleted_count":        res.DeletedCount,
 			"dependencies_removed": res.DependenciesCount,
@@ -204,7 +212,11 @@ func renderWispGCDeleteResult(ids []string, res domain.DeleteIssuesResult) error
 			"events_removed":       res.EventsCount,
 			"references_updated":   res.ReferencesUpdated,
 			"orphaned_issues":      res.OrphanedIssues,
-		})
+		}
+		for key, value := range report {
+			answer[key] = value
+		}
+		return outputJSON(answer)
 	}
 	fmt.Printf("%s Deleted %d issue(s)\n", ui.RenderPass("✓"), res.DeletedCount)
 	fmt.Printf("  Removed %d dependency link(s)\n", res.DependenciesCount)
@@ -223,104 +235,54 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 	if err != nil {
 		return err
 	}
-	r := uowMolReader{uw: uw}
-
-	statusClosed := types.StatusClosed
-	ephemeralTrue := true
-	filter := types.IssueFilter{
-		Status:       &statusClosed,
-		Ephemeral:    &ephemeralTrue,
-		ExcludeTypes: excludeTypes,
-		Limit:        5000,
-	}
-	closedIssues, err := r.SearchIssues(ctx, "", filter)
-	if err != nil {
-		uw.Close(ctx)
-		return HandleError("listing closed wisps: %v", err)
-	}
-
-	pinnedCount := 0
-	infraCount := 0
-	filtered := make([]*types.Issue, 0, len(closedIssues))
-	for _, issue := range closedIssues {
-		if issue.Pinned {
-			pinnedCount++
-			continue
-		}
-		if r.IsInfraTypeCtx(ctx, issue.IssueType) {
-			infraCount++
-			continue
-		}
-		filtered = append(filtered, issue)
-	}
-	closedIssues = filtered
+	// The selection reads inside this UOW; the delete below opens its own
+	// transaction, exactly as before. Selection and deletion stay separate
+	// (see runWispPurgeClosed in wisp.go) — this is protection for the
+	// selection snapshot, not a new concurrency guarantee.
+	sel, selErr := selectClosedWispsForPurge(ctx, uowMolReader{uw: uw}, excludeTypes)
 	uw.Close(ctx)
-
-	if pinnedCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", pinnedCount)
-	}
-	if infraCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", infraCount)
+	if selErr != nil {
+		return HandleError("%v", selErr)
 	}
 
-	if len(closedIssues) == 0 {
-		if jsonOutput {
-			return outputJSON(map[string]interface{}{
-				"deleted_count": 0,
-				"message":       "No closed wisps to delete",
-			})
+	if err := runWispPurgeClosedSelection(sel, dryRun, force, func(ids []string) error {
+		if dryRun {
+			if jsonOutput {
+				return outputJSON(map[string]interface{}{
+					"candidates":             len(ids),
+					"dry_run":                true,
+					"live_dependent_skipped": sel.LiveDependentSkipped,
+				})
+			}
+			fmt.Printf("Found %d closed wisp(s)\n", len(ids))
+			fmt.Println("DRY RUN - no changes will be made")
+			return nil
 		}
-		fmt.Println("No closed wisps to delete")
-		return nil
-	}
 
-	ids := make([]string, len(closedIssues))
-	for i, issue := range closedIssues {
-		ids[i] = issue.ID
-	}
-
-	if !force && !dryRun {
-		if jsonOutput {
-			return outputJSON(map[string]interface{}{
-				"candidates": len(ids),
-				"dry_run":    true,
-			})
-		}
-		fmt.Printf("Found %d closed wisp(s) to delete\n", len(ids))
-		fmt.Printf("\nUse --force to proceed, or --dry-run for detailed preview.\n")
-		return nil
-	}
-
-	if dryRun {
-		if jsonOutput {
-			return outputJSON(map[string]interface{}{
-				"candidates": len(ids),
-				"dry_run":    true,
-			})
-		}
-		fmt.Printf("Found %d closed wisp(s)\n", len(ids))
-		fmt.Println("DRY RUN - no changes will be made")
-		return nil
-	}
-
-	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (domain.DeleteIssuesResult, string, error) {
-		// Cascade must stay OFF: the closed set above is already the complete
-		// purge candidate list, so cascade can only add NON-closed dependents
-		// (live molecule steps) to the batch — the patrol self-destruct bug.
-		// Mirrors runWispPurgeClosed in wisp.go.
-		res, err := uw.IssueUseCase().DeleteIssues(ctx, domain.DeleteIssuesParams{
-			IDs:                  ids,
-			Cascade:              false,
-			UpdateTextReferences: true,
-		}, currentActor())
+		res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (domain.DeleteIssuesResult, string, error) {
+			// Cascade must stay OFF: the selected set is already the complete
+			// purge candidate list, so cascade can only add NON-closed
+			// dependents (live molecule steps) to the batch — the patrol
+			// self-destruct bug. Mirrors runWispPurgeClosed in wisp.go.
+			res, err := uw.IssueUseCase().DeleteIssues(ctx, domain.DeleteIssuesParams{
+				IDs:                  ids,
+				Cascade:              false,
+				UpdateTextReferences: true,
+			}, currentActor())
+			if err != nil {
+				return domain.DeleteIssuesResult{}, "", err
+			}
+			return res, fmt.Sprintf("bd: wisp gc --closed %d", res.DeletedCount), nil
+		})
 		if err != nil {
-			return domain.DeleteIssuesResult{}, "", err
+			return err
 		}
-		return res, fmt.Sprintf("bd: wisp gc --closed %d", res.DeletedCount), nil
-	})
-	if err != nil {
+
+		return renderWispGCDeleteResultReporting(ids, res, map[string]interface{}{
+			"live_dependent_skipped": sel.LiveDependentSkipped,
+		})
+	}); err != nil {
 		return HandleError("%v", err)
 	}
-
-	return renderWispGCDeleteResult(ids, res)
+	return nil
 }

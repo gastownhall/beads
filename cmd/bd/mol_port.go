@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
@@ -28,6 +29,13 @@ type molReader interface {
 	GetDependentsWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error)
 	GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error)
 	GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error)
+	// GetDependentRecordsForIssues is the target-keyed mirror of
+	// GetDependencyRecordsForIssues: the inbound edges of every id in
+	// targetIDs, keyed by target, across the durable and wisp planes, all
+	// edge types (the caller filters). Wisp GC's live-dependent protection
+	// reads it to learn which closed candidates still carry attribution a
+	// live dependent needs (GH#5152).
+	GetDependentRecordsForIssues(ctx context.Context, targetIDs []string) (map[string][]*types.Dependency, error)
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
 	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
 	GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error)
@@ -197,6 +205,37 @@ func (r uowMolReader) GetDependencyRecords(ctx context.Context, issueID string) 
 
 func (r uowMolReader) GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error) {
 	return r.uw.DependencyUseCase().GetForIssueIDs(ctx, issueIDs)
+}
+
+// GetDependentRecordsForIssues answers the target-keyed mirror of
+// GetDependencyRecordsForIssues from inside the caller's unit of work, the
+// same legs uow's own live-dependent sweeper reads
+// (internal/storage/uow/sweeper.go): incoming durable edges plus incoming
+// wisp edges, merged by target. The filter carries NO Types set — the caller
+// decides which edge types protect, and wisp GC's protecting set deliberately
+// differs from issueops.SweepLiveDependentEdgeTypes (GH#5152). The wisp
+// table is optional: its absence yields an empty leg, not an error.
+func (r uowMolReader) GetDependentRecordsForIssues(ctx context.Context, targetIDs []string) (map[string][]*types.Dependency, error) {
+	if len(targetIDs) == 0 {
+		return map[string][]*types.Dependency{}, nil
+	}
+	edges := domain.DepListFilter{Direction: domain.DepDirectionIn}
+	durable, err := r.uw.DependencyUseCase().ListByIssueIDs(ctx, targetIDs, edges)
+	if err != nil {
+		return nil, fmt.Errorf("reading dependents: %w", err)
+	}
+	wisp, err := r.uw.DependencyUseCase().ListByWispIDs(ctx, targetIDs, edges)
+	if err != nil && !dberrors.IsTableNotExist(err) {
+		return nil, fmt.Errorf("reading wisp dependents: %w", err)
+	}
+	incoming := make(map[string][]*types.Dependency, len(durable.Incoming)+len(wisp.Incoming))
+	for target, deps := range durable.Incoming {
+		incoming[target] = append(incoming[target], deps...)
+	}
+	for target, deps := range wisp.Incoming {
+		incoming[target] = append(incoming[target], deps...)
+	}
+	return incoming, nil
 }
 
 func (r uowMolReader) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {

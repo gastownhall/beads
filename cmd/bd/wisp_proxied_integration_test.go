@@ -444,6 +444,95 @@ func TestProxiedServerWispGC(t *testing.T) {
 		}
 	})
 
+	t.Run("closed_force_holds_back_live_children", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "wgcl2")
+		root := bdProxiedCreate(t, bd, p.dir, "Closed root wisp", "--ephemeral")
+		child := bdProxiedCreate(t, bd, p.dir, "Live child wisp", "--ephemeral")
+		unrelated := bdProxiedCreate(t, bd, p.dir, "Unrelated wisp", "--ephemeral")
+
+		db := openProxiedDB(t, p)
+		if _, err := db.Exec(
+			"INSERT INTO wisp_dependencies (id, issue_id, depends_on_wisp_id, type, created_at, created_by) VALUES (UUID(), ?, ?, ?, NOW(), 'test')",
+			child.ID, root.ID, "parent-child"); err != nil {
+			t.Fatalf("plant child->parent edge: %v", err)
+		}
+
+		// Closing the root over its open child needs --force (upward refusal).
+		if out, err := bdProxiedRun(t, bd, p.dir, "close", root.ID, "--force"); err != nil {
+			t.Fatalf("bd close root --force: %v\n%s", err, out)
+		}
+		if out, err := bdProxiedRun(t, bd, p.dir, "close", unrelated.ID); err != nil {
+			t.Fatalf("bd close unrelated: %v\n%s", err, out)
+		}
+
+		// The forced purge must hold the closed root back (live child), and
+		// still delete the unrelated wisp. GH#5152 proxied-route coverage.
+		out, err := bdProxiedRun(t, bd, p.dir, "mol", "wisp", "gc", "--closed", "--force", "--json")
+		if err != nil {
+			t.Fatalf("bd mol wisp gc --closed --force --json: %v\n%s", err, out)
+		}
+		var got struct {
+			Deleted              []string `json:"deleted"`
+			DeletedCount         int      `json:"deleted_count"`
+			LiveDependentSkipped int      `json:"live_dependent_skipped"`
+		}
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("unmarshal: %v\n%s", err, out)
+		}
+		if got.DeletedCount != 1 || len(got.Deleted) != 1 || got.Deleted[0] != unrelated.ID {
+			t.Fatalf("expected only %s deleted, got %+v", unrelated.ID, got)
+		}
+		if got.LiveDependentSkipped != 1 {
+			t.Errorf("live_dependent_skipped = %d, want 1\n%s", got.LiveDependentSkipped, out)
+		}
+		for _, id := range []string{root.ID, child.ID} {
+			var count int
+			if err := db.QueryRow("SELECT COUNT(*) FROM wisps WHERE id = ?", id).Scan(&count); err != nil {
+				t.Fatalf("query wisps: %v", err)
+			}
+			if count != 1 {
+				t.Errorf("wisp %s must survive the purge", id)
+			}
+		}
+		var edges int
+		if err := db.QueryRow(
+			"SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = ? AND depends_on_wisp_id = ?",
+			child.ID, root.ID).Scan(&edges); err != nil {
+			t.Fatalf("query wisp edge: %v", err)
+		}
+		if edges != 1 {
+			t.Errorf("child->parent attribution edge must survive; found %d rows", edges)
+		}
+
+		// Convergence: with the child closed too, the next run reclaims both.
+		if out, err := bdProxiedRun(t, bd, p.dir, "close", child.ID); err != nil {
+			t.Fatalf("bd close child: %v\n%s", err, out)
+		}
+		out, err = bdProxiedRun(t, bd, p.dir, "mol", "wisp", "gc", "--closed", "--force", "--json")
+		if err != nil {
+			t.Fatalf("bd mol wisp gc --closed --force --json (converged): %v\n%s", err, out)
+		}
+		var final struct {
+			DeletedCount int `json:"deleted_count"`
+		}
+		if err := json.Unmarshal(out, &final); err != nil {
+			t.Fatalf("unmarshal: %v\n%s", err, out)
+		}
+		if final.DeletedCount != 2 {
+			t.Errorf("expected root and child reclaimed after both closed, deleted_count = %d\n%s", final.DeletedCount, out)
+		}
+		for _, id := range []string{root.ID, child.ID} {
+			var count int
+			if err := db.QueryRow("SELECT COUNT(*) FROM wisps WHERE id = ?", id).Scan(&count); err != nil {
+				t.Fatalf("query wisps: %v", err)
+			}
+			if count != 0 {
+				t.Errorf("expected wisp %s purged after convergence", id)
+			}
+		}
+	})
+
 	t.Run("closed_force_purges_regardless_of_age", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "wgcl")

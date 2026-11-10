@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 // Wisp commands - manage ephemeral molecules
@@ -971,7 +972,84 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 	return abandoned, cascadeErr
 }
 
-func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTypes []types.IssueType) error {
+// closedWispPurgeSelection is what a closed-mode wisp GC run acts on: the
+// deletable closed wisps, plus how many candidates each protection held back.
+type closedWispPurgeSelection struct {
+	Deletable            []*types.Issue
+	PinnedSkipped        int
+	InfraSkipped         int
+	LiveDependentSkipped int
+}
+
+// IDs lists the deletable candidates' ids, in candidate order.
+func (s *closedWispPurgeSelection) IDs() []string {
+	ids := make([]string, len(s.Deletable))
+	for i, issue := range s.Deletable {
+		ids[i] = issue.ID
+	}
+	return ids
+}
+
+// wispGCProtectingEdge reports whether an incoming edge type holds a closed
+// wisp back from `wisp gc --closed`: parent-child and tracks carry the
+// attribution a surviving live dependent still needs (GH#5152). Deliberately
+// NOT the shared issueops.SweepLiveDependentEdgeTypes, which also protects
+// `blocks`: the #5735 regression requires closed steps whose live dependents
+// arrive only through blocks to stay reclaimable.
+func wispGCProtectingEdge(t types.DependencyType) bool {
+	return t == types.DepParentChild || t == types.DepTracks
+}
+
+// wispGCIncomingDependents reads the incoming edges of the candidate ids,
+// narrowed to the protecting types. The batched target-keyed read is primary;
+// a backend that does not implement it (storage.ErrUnsupported) falls back to
+// the per-target metadata read the port has always had, preserving source,
+// target and edge type. Any other read failure aborts the selection.
+func wispGCIncomingDependents(ctx context.Context, r molReader, targetIDs []string) (map[string][]*types.Dependency, error) {
+	if len(targetIDs) == 0 {
+		return map[string][]*types.Dependency{}, nil
+	}
+	incoming, err := r.GetDependentRecordsForIssues(ctx, targetIDs)
+	if err != nil {
+		var unsupported *storage.ErrUnsupported
+		if !errors.As(err, &unsupported) {
+			return nil, fmt.Errorf("reading dependents for live-dependent protection: %w", err)
+		}
+		incoming = make(map[string][]*types.Dependency, len(targetIDs))
+		for _, id := range targetIDs {
+			withMeta, err := r.GetDependentsWithMetadata(ctx, id)
+			if err != nil {
+				return nil, fmt.Errorf("reading dependents of %s for live-dependent protection: %w", id, err)
+			}
+			for _, m := range withMeta {
+				incoming[id] = append(incoming[id], &types.Dependency{
+					IssueID:     m.ID,
+					DependsOnID: id,
+					Type:        m.DependencyType,
+				})
+			}
+		}
+	}
+	protected := make(map[string][]*types.Dependency, len(incoming))
+	for target, deps := range incoming {
+		for _, dep := range deps {
+			if dep != nil && wispGCProtectingEdge(dep.Type) {
+				protected[target] = append(protected[target], dep)
+			}
+		}
+	}
+	return protected, nil
+}
+
+// selectClosedWispsForPurge picks what `wisp gc --closed` may delete. It keeps
+// today's closed/ephemeral/exclude-type search and the pinned and infra
+// protections, then adds the live-dependent protection (GH#5152): a closed
+// wisp some live row depends on through a parent-child or tracks edge is held
+// back, its attribution edges intact, until the dependent closes too and a
+// later run reclaims both. The workapi closure propagates protection through
+// candidate ancestors, so an open child holds back its closed parent and a
+// closed grandparent that is also a candidate, and terminates on cycles.
+func selectClosedWispsForPurge(ctx context.Context, r molReader, excludeTypes []types.IssueType) (*closedWispPurgeSelection, error) {
 	statusClosed := types.StatusClosed
 	ephemeralTrue := true
 	filter := types.IssueFilter{
@@ -980,57 +1058,116 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 		ExcludeTypes: excludeTypes,
 		Limit:        5000,
 	}
-
-	closedIssues, err := store.SearchIssues(ctx, "", filter)
+	candidates, err := r.SearchIssues(ctx, "", filter)
 	if err != nil {
-		return HandleError("listing closed wisps: %v", err)
+		return nil, fmt.Errorf("listing closed wisps: %w", err)
 	}
 
-	// Filter out pinned and infra issues (protected from cleanup)
-	pinnedCount := 0
-	infraCount := 0
-	filtered := make([]*types.Issue, 0, len(closedIssues))
-	for _, issue := range closedIssues {
+	sel := &closedWispPurgeSelection{}
+	eligible := make([]*types.Issue, 0, len(candidates))
+	for _, issue := range candidates {
+		if issue == nil {
+			continue
+		}
 		if issue.Pinned {
-			pinnedCount++
+			sel.PinnedSkipped++
 			continue
 		}
-		if store.IsInfraTypeCtx(ctx, issue.IssueType) {
-			infraCount++
+		if r.IsInfraTypeCtx(ctx, issue.IssueType) {
+			sel.InfraSkipped++
 			continue
 		}
-		filtered = append(filtered, issue)
+		eligible = append(eligible, issue)
 	}
-	closedIssues = filtered
-
-	if pinnedCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", pinnedCount)
-	}
-	if infraCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", infraCount)
+	if len(eligible) == 0 {
+		return sel, nil
 	}
 
-	if len(closedIssues) == 0 {
+	ids := make([]string, len(eligible))
+	for i, issue := range eligible {
+		ids[i] = issue.ID
+	}
+	incoming, err := wispGCIncomingDependents(ctx, r, ids)
+	if err != nil {
+		return nil, err
+	}
+	sources := workapi.SweepLiveDependentSources(incoming)
+	if len(sources) == 0 {
+		sel.Deletable = eligible
+		return sel, nil
+	}
+
+	// "Live" is the not-done status vocabulary, custom statuses included. The
+	// custom-status read is required, not best-effort: a scan that missed a
+	// custom active status would under-protect and delete a bead a live bead
+	// still attributes to.
+	custom, err := r.GetCustomStatusesDetailed(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reading custom statuses for live-dependent protection: %w", err)
+	}
+	// No Limit on the source scan: the filter names the exact sources, and an
+	// explicit id list must come back complete or the protection is not
+	// protection.
+	live, err := r.SearchIssues(ctx, "", workapi.BuildSweepLiveDependentScanFilter(sources, custom))
+	if err != nil {
+		return nil, fmt.Errorf("reading dependent statuses for live-dependent protection: %w", err)
+	}
+	liveSet := make(map[string]bool, len(live))
+	for _, issue := range live {
+		if issue != nil {
+			liveSet[issue.ID] = true
+		}
+	}
+	protected := workapi.SweepLiveDependentTargets(incoming, liveSet)
+	sel.Deletable, sel.LiveDependentSkipped = workapi.PartitionSweepLiveDependents(eligible, protected)
+	return sel, nil
+}
+
+// reportClosedWispPurgeSkips prints the per-protection skip counts in text
+// mode; JSON callers get them in the result shapes instead.
+func reportClosedWispPurgeSkips(sel *closedWispPurgeSelection) {
+	if jsonOutput {
+		return
+	}
+	if sel.PinnedSkipped > 0 {
+		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", sel.PinnedSkipped)
+	}
+	if sel.InfraSkipped > 0 {
+		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", sel.InfraSkipped)
+	}
+	if sel.LiveDependentSkipped > 0 {
+		fmt.Printf("Skipping %d closed wisp(s) with live dependents (protected from cleanup)\n", sel.LiveDependentSkipped)
+	}
+}
+
+// runWispPurgeClosedSelection renders the empty and preview shapes every
+// closed-mode route shares and hands deletion to deleteFn. A batch with
+// skipped candidates still exits 0 and deletes the eligible unrelated ones;
+// the protected rows simply become eligible on a subsequent run once their
+// dependents close. A selection error never reaches here (the caller aborts
+// before deleteFn), so a failed read cannot become a write (GH#5152 AC-4).
+func runWispPurgeClosedSelection(sel *closedWispPurgeSelection, dryRun, force bool, deleteFn func(ids []string) error) error {
+	reportClosedWispPurgeSkips(sel)
+
+	ids := sel.IDs()
+	if len(ids) == 0 {
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
-				"deleted_count": 0,
-				"message":       "No closed wisps to delete",
+				"deleted_count":          0,
+				"live_dependent_skipped": sel.LiveDependentSkipped,
+				"message":                "No closed wisps to delete",
 			})
 		}
 		fmt.Println("No closed wisps to delete")
 		return nil
 	}
 
-	ids := make([]string, len(closedIssues))
-	for i, issue := range closedIssues {
-		ids[i] = issue.ID
-	}
-
 	if !force && !dryRun {
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
-				"candidates": len(ids),
-				"dry_run":    true,
+				"candidates":             len(ids),
+				"dry_run":                true,
+				"live_dependent_skipped": sel.LiveDependentSkipped,
 			})
 		}
 		fmt.Printf("Found %d closed wisp(s) to delete\n", len(ids))
@@ -1038,29 +1175,56 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 		return nil
 	}
 
-	if !jsonOutput {
-		fmt.Printf("Found %d closed wisp(s)\n", len(ids))
-		if dryRun {
-			fmt.Println(ui.RenderWarn("DRY RUN - no changes will be made"))
+	return deleteFn(ids)
+}
+
+// runWispPurgeClosedWithReader is the direct route's whole closed-mode body:
+// select, then preview/dry-run/delete through deleteFn. A selection error
+// returns before deleteFn runs, so a failed read can never become a write
+// (GH#5152 AC-4) — that ordering is what the deletion-spy unit test drives.
+// The proxied route selects on its own UOW (it must close it before the
+// delete) and shares only runWispPurgeClosedSelection.
+func runWispPurgeClosedWithReader(ctx context.Context, r molReader, dryRun, force bool, excludeTypes []types.IssueType, deleteFn func(sel *closedWispPurgeSelection, ids []string) error) error {
+	sel, err := selectClosedWispsForPurge(ctx, r, excludeTypes)
+	if err != nil {
+		return err
+	}
+	return runWispPurgeClosedSelection(sel, dryRun, force, func(ids []string) error {
+		return deleteFn(sel, ids)
+	})
+}
+
+func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTypes []types.IssueType) error {
+	if err := runWispPurgeClosedWithReader(ctx, store, dryRun, force, excludeTypes, func(sel *closedWispPurgeSelection, ids []string) error {
+		if !jsonOutput {
+			fmt.Printf("Found %d closed wisp(s)\n", len(ids))
+			if dryRun {
+				fmt.Println(ui.RenderWarn("DRY RUN - no changes will be made"))
+			}
+			fmt.Println()
 		}
-		fmt.Println()
-	}
 
-	// Cascade must stay OFF here. The closed set above is already the complete
-	// purge candidate list, so cascade can only ever add NON-closed dependents
-	// to the batch. In a linear molecule DAG a closed step's transitive
-	// dependents are every other (live) step — cascading swept whole active
-	// molecules into deletion, steps, dependency links and events all at once
-	// (wisp gc --closed --force self-destructed the deacon patrol).
-	// Without cascade, closed wisps are deleted and live dependents are
-	// orphaned (edges dropped, is_blocked recomputed) — the same semantics as
-	// a plain `bd delete`.
-	if err := deleteBatch(nil, ids, force, dryRun, false, jsonOutput, false, nil, "wisp gc --closed"); err != nil {
+		// Cascade must stay OFF here. The selected set is already the complete
+		// purge candidate list, so cascade can only ever add NON-closed
+		// dependents to the batch. In a linear molecule DAG a closed step's
+		// transitive dependents are every other (live) step — cascading swept
+		// whole active molecules into deletion, steps, dependency links and
+		// events all at once (wisp gc --closed --force self-destructed the
+		// deacon patrol). Without cascade, closed wisps whose live dependents
+		// arrive only through blocks are still reclaimed (#5735), and the
+		// live-dependent selection above now holds back the ones whose edges
+		// would strand a live child's attribution (GH#5152).
+		if err := deleteBatchReporting(ids, force, dryRun, false, jsonOutput, nil,
+			map[string]interface{}{"live_dependent_skipped": sel.LiveDependentSkipped}); err != nil {
+			return err
+		}
+
+		if !dryRun && force && !jsonOutput {
+			fmt.Printf("\nHint: Run 'bd compact --dolt' to reclaim disk space\n")
+		}
+		return nil
+	}); err != nil {
 		return HandleError("%v", err)
-	}
-
-	if !dryRun && force && !jsonOutput {
-		fmt.Printf("\nHint: Run 'bd compact --dolt' to reclaim disk space\n")
 	}
 	return nil
 }
