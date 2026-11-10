@@ -1118,8 +1118,8 @@ func (t *doltTransaction) readDepTargetForPrecheck(ctx context.Context, sourceID
 	var p issueops.DepTargetPrecheck
 	//nolint:gosec // G201: targetTable is "issues" or "wisps"
 	err := t.txFor(targetTable).QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT issue_type, status FROM %s WHERE id = ?`, targetTable), id,
-	).Scan(&p.IssueType, &p.Status)
+		fmt.Sprintf(`SELECT issue_type, status, COALESCE(close_reason, '') FROM %s WHERE id = ?`, targetTable), id,
+	).Scan(&p.IssueType, &p.Status, &p.CloseReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, issueops.MissingDependencyTarget(sourceID, id)
 	}

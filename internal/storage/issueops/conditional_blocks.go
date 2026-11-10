@@ -42,3 +42,15 @@ func BlockingTargetHoldsSQL(depTypeExpr, statusExpr, reasonExpr string) string {
 	return "(" + statusExpr + " <> 'pinned' AND (" + statusExpr + " <> 'closed' OR (" +
 		depTypeExpr + " = 'conditional-blocks' AND NOT " + FailureCloseReasonSQL(reasonExpr) + ")))"
 }
+
+// DepTypeLiteralSQL renders a blocking dependency type as the SQL string
+// literal BlockingTargetHoldsSQL compares against, for a writer that knows the
+// edge's type in Go rather than reading it from a row (the two direct-insert
+// writers). Only the two blocking types reach it; anything else renders as
+// 'blocks'.
+func DepTypeLiteralSQL(depType types.DependencyType) string {
+	if depType == types.DepConditionalBlocks {
+		return "'conditional-blocks'"
+	}
+	return "'blocks'"
+}
