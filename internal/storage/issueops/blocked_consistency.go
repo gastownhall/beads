@@ -973,8 +973,9 @@ func shouldBeBlockedIDsUnionPrecomputedSQL(depTable string, explained subtreeExp
 
 // shouldBeBlockedIDsUnionScopedPrecomputedSQL selects, UNCORRELATED with any
 // outer row, every depTable issue_id that currently has a reason to be
-// blocked: one UNION leg per reason — an open blocks/conditional-blocks target
-// (issue or wisp), an EXOGENOUSLY blocked parent-child parent (issue or wisp;
+// blocked: one UNION leg per reason — a holding blocks/conditional-blocks
+// target (issue or wisp; open, or a conditional target closed without a
+// failure reason), an EXOGENOUSLY blocked parent-child parent (issue or wisp;
 // see parentsExplainedBySubtreeSQL), a blocking waits-for gate.
 // Semantically, `<alias>.id IN (this select)` ≡ the disjunction of those
 // reasons correlated on d.issue_id = <alias>.id, which is what the batched
@@ -1035,11 +1036,14 @@ func shouldBeBlockedIDsUnionScopedPrecomputedSQL(
 		notInPlaceholders(len(explained.wispParents)))
 }
 
-// shouldBeBlockedIDsUnionCoreSQL is the five legs themselves. A parent-child
+// shouldBeBlockedIDsUnionCoreSQL is the five legs themselves. Legs 1-2 hold
+// while the target is neither closed nor pinned, and a conditional-blocks edge
+// also while its target is closed with a non-failure reason (B runs only if A
+// fails; BlockingTargetHoldsSQL, types.BlockingEdgeHolds). A parent-child
 // leg reads the parent's stored bit only while the parent is neither closed
-// nor pinned, the same status test legs 1-2 apply to their targets: such a row
-// is never blocked, but BlockedStateInvariant's merge clause admits a stale 1
-// on it, and its children must not inherit that (gastownhall/beads#7626).
+// nor pinned: such a row is never blocked, but BlockedStateInvariant's merge
+// clause admits a stale 1 on it, and its children must not inherit that
+// (gastownhall/beads#7626).
 //
 // The two parent-child legs take their exogeneity condition as text: both
 // callers pass an already-read IN-list rendered to placeholders
@@ -1047,7 +1051,7 @@ func shouldBeBlockedIDsUnionScopedPrecomputedSQL(
 // subtree", and the empty string says "no parent is", which is what an empty
 // set means.
 //
-//nolint:gosec // G201: depTable and scope are constants; the conditions come from the two callers above.
+//nolint:gosec // G201: depTable and scope are constants; the conditions come from the two callers above; the target predicate is generated from constants.
 func shouldBeBlockedIDsUnionCoreSQL(depTable, scope, issueParentCond, wispParentCond string) string {
 	targetHint, parentHint := "", ""
 	if scope != "" {
@@ -1059,13 +1063,13 @@ func shouldBeBlockedIDsUnionCoreSQL(depTable, scope, issueParentCond, wispParent
 		JOIN issues t ON t.id = d.depends_on_issue_id
 		WHERE d.issue_id IS NOT NULL %[3]s
 		  AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
-		  AND t.status <> 'closed' AND t.status <> 'pinned'
+		  AND %[8]s
 		UNION
 		SELECT %[6]sd.issue_id FROM %[1]s d
 		JOIN wisps t ON t.id = d.depends_on_wisp_id
 		WHERE d.issue_id IS NOT NULL %[3]s
 		  AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
-		  AND t.status <> 'closed' AND t.status <> 'pinned'
+		  AND %[8]s
 		UNION
 		SELECT %[7]sd.issue_id FROM %[1]s d
 		JOIN issues p ON p.id = d.depends_on_issue_id
@@ -1090,7 +1094,8 @@ func shouldBeBlockedIDsUnionCoreSQL(depTable, scope, issueParentCond, wispParent
 		    AND d.type = 'waits-for'
 		) d
 		WHERE (%[2]s)
-	`, depTable, waitsForGateBlockedSQL, scope, issueParentCond, wispParentCond, targetHint, parentHint)
+	`, depTable, waitsForGateBlockedSQL, scope, issueParentCond, wispParentCond, targetHint, parentHint,
+		BlockingTargetHoldsSQL("d.type", "t.status", "t.close_reason"))
 }
 
 // subtreeWalkDepth is how far parentsExplainedBySubtreeSQL walks up from a
@@ -1302,7 +1307,7 @@ func parentsExplainedBySubtreeCoreSQL(parentTable, parentDepTable, cand string) 
 
 // blockingReasonSQL is the row-level spelling of "this dependency row is,
 // right now, a reason for its own issue to be blocked" — union legs 1 and 2
-// (an open blocks/conditional-blocks target, issue or wisp) and leg 5 (a
+// (a holding blocks/conditional-blocks target, issue or wisp) and leg 5 (a
 // blocking waits-for gate), for a dependency row aliased rowAlias.
 //
 // It is a per-ROW predicate, but both callers evaluate it in a set, over a
@@ -1318,12 +1323,13 @@ func blockingReasonSQL(rowAlias string) string {
 		        ( ( (%[1]s.type = 'blocks' OR %[1]s.type = 'conditional-blocks')
 		            AND ( EXISTS (SELECT 1 FROM issues bt
 		                          WHERE bt.id = %[1]s.depends_on_issue_id
-		                            AND bt.status <> 'closed' AND bt.status <> 'pinned')
+		                            AND %[3]s)
 		               OR EXISTS (SELECT 1 FROM wisps bt
 		                          WHERE bt.id = %[1]s.depends_on_wisp_id
-		                            AND bt.status <> 'closed' AND bt.status <> 'pinned') ) )
+		                            AND %[3]s) ) )
 		          OR ( %[1]s.type = 'waits-for' AND (%[2]s) ) )
-	`, rowAlias, waitsForGateBlockedSQLFor(rowAlias))
+	`, rowAlias, waitsForGateBlockedSQLFor(rowAlias),
+		BlockingTargetHoldsSQL(rowAlias+".type", "bt.status", "bt.close_reason"))
 }
 
 // CountIsBlockedInconsistenciesInTx reports how many issue and wisp rows carry a

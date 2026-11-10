@@ -1737,6 +1737,46 @@ func TestGetReadyWork_WithConditionalBlocks(t *testing.T) {
 	}
 }
 
+// TestGetReadyWork_ConditionalBlocksStaysBlockedOnSuccessClose pins the
+// documented conditional-blocks semantics (B runs only if A fails): a
+// successful close of the precondition must leave the fallback blocked.
+func TestGetReadyWork_ConditionalBlocksStaysBlockedOnSuccessClose(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issueA := &types.Issue{ID: "cb-succ-a", Title: "Precondition", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	issueB := &types.Issue{ID: "cb-succ-b", Title: "Fallback", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	for _, issue := range []*types.Issue{issueA, issueB} {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("failed to create issue: %v", err)
+		}
+	}
+	dep := &types.Dependency{IssueID: issueB.ID, DependsOnID: issueA.ID, Type: types.DepConditionalBlocks}
+	if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+		t.Fatalf("failed to add dependency: %v", err)
+	}
+
+	if types.IsFailureClose("completed successfully") {
+		t.Fatal("fixture: close reason must not be a failure close")
+	}
+	if err := store.CloseIssue(ctx, issueA.ID, "completed successfully", "tester", ""); err != nil {
+		t.Fatalf("CloseIssue failed: %v", err)
+	}
+
+	readyIssues, err := store.GetReadyWork(ctx, types.WorkFilter{Status: types.StatusOpen})
+	if err != nil {
+		t.Fatalf("GetReadyWork failed: %v", err)
+	}
+	for _, issue := range readyIssues {
+		if issue.ID == issueB.ID {
+			t.Errorf("fallback %s is ready after precondition %s closed successfully; conditional-blocks must unblock only on a failure close", issueB.ID, issueA.ID)
+		}
+	}
+}
+
 func TestGetBlockedIssues_WithBlockerDetails(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
