@@ -1142,3 +1142,50 @@ func TestEmbeddedUpdateClaimForceOverridesBlocked(t *testing.T) {
 		t.Errorf("forced claim cleared the is_blocked flag, want the block left standing")
 	}
 }
+
+// bd-ltvqa9 AC-4: a claim that would advance nothing is not the guard's to
+// judge. An issue already in_progress and held by w that later gains a live
+// blocker stays re-claimable by w — the idempotent same-actor branch answers
+// before the claim-blocked guard runs — and the bare re-claim records no
+// second claim event.
+func TestEmbeddedUpdateClaimIdempotentAfterGainingBlocker(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "cb")
+
+	blocker := bdCreate(t, bd, dir, "blocker", "--type", "task")
+	blocked := bdCreate(t, bd, dir, "blocked", "--type", "task")
+	bdRunOK(t, bd, dir, "update", blocked.ID, "--claim", "--actor", "w1")
+	// The claim is live; the blocker arrives after it.
+	bdRunOK(t, bd, dir, "dep", "add", blocked.ID, blocker.ID)
+
+	out, err := bdRunWithFlockRetry(t, bd, dir, "update", blocked.ID, "--claim", "--actor", "w1")
+	if err != nil {
+		t.Fatalf("bare re-claim of %s by its holder refused: %v\n%s", blocked.ID, err, out)
+	}
+	got := bdShow(t, bd, dir, blocked.ID)
+	if got.Status != types.StatusInProgress || got.Assignee != "w1" {
+		t.Errorf("re-claim changed the claim: status=%s assignee=%q", got.Status, got.Assignee)
+	}
+	// OpenSQL holds the embedded database's lock, so it is LAST: the claim
+	// event count is what says the re-claim wrote no claim bookkeeping.
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), "cb", "main")
+	if err != nil {
+		t.Fatalf("open embedded SQL: %v", err)
+	}
+	defer func() { _ = cleanup() }()
+	var claimedEvents int
+	if err := db.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = 'claimed'", blocked.ID).
+		Scan(&claimedEvents); err != nil {
+		t.Fatalf("count claimed events for %s: %v", blocked.ID, err)
+	}
+	if claimedEvents != 1 {
+		t.Errorf("bare re-claim wrote claim bookkeeping: %d claimed events, want 1 (the original claim)",
+			claimedEvents)
+	}
+}
