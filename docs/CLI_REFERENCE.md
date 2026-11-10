@@ -1860,7 +1860,7 @@ bd update [id...] [flags]
   -a, --assignee string              Assignee
       --await-id string              Set gate await_id (e.g., GitHub run ID for gh:run gates)
       --body-file string             Read description from file (use - for stdin)
-      --claim                        Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you; issues assigned to a pool alias listed in the claim.pools config are claimable too)
+      --claim                        Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you; issues assigned to a pool alias listed in the claim.pools config are claimable too; refused while the issue has an open local blocker unless --force)
       --defer string                 Defer until date (empty to clear). Issue hidden from bd ready until then, then auto-wakes to open
   -d, --description string           Issue description
       --design string                Design notes
