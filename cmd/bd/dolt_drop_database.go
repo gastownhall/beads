@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"os"
@@ -23,11 +24,15 @@ type dropDatabaseResult struct {
 	RecoverableViaUndrop bool   `json:"recoverable_via_undrop"`
 }
 
-// dropDatabaseRequest is one named drop. confirm is nil when the caller
-// cannot prompt; assumeYes is --yes.
+// dropDatabaseRequest is one named drop. configured is the workspace's own
+// database, selected the database this invocation selects with --database,
+// and globals the shared-server global databases, which are never dropped by
+// name. confirm is nil when the caller cannot prompt; assumeYes is --yes.
 type dropDatabaseRequest struct {
 	name       string
 	configured string
+	selected   string
+	globals    []string
 	assumeYes  bool
 	confirm    func(name string) (bool, error)
 }
@@ -44,6 +49,12 @@ func (r *dropDatabaseRefusal) Error() string { return r.message }
 // purges: Dolt keeps the dropped database recoverable with DOLT_UNDROP until
 // something runs DOLT_PURGE_DROPPED_DATABASES, which is server-global.
 func dropNamedDatabase(ctx context.Context, conn versioncontrolops.DBConn, req dropDatabaseRequest) (dropDatabaseResult, error) {
+	if strings.TrimSpace(req.name) == "" {
+		return dropDatabaseResult{}, &dropDatabaseRefusal{
+			message: "no database name given",
+			hint:    "Usage: bd dolt drop-database <name>. Run 'bd dolt status' or SHOW DATABASES to see the databases this server holds.",
+		}
+	}
 	existing, err := listServerDatabases(ctx, conn)
 	if err != nil {
 		return dropDatabaseResult{}, fmt.Errorf("listing databases: %w", err)
@@ -59,6 +70,20 @@ func dropNamedDatabase(ctx context.Context, conn versioncontrolops.DBConn, req d
 		return dropDatabaseResult{}, &dropDatabaseRefusal{
 			message: fmt.Sprintf("database %s does not exist on this Dolt server", remedy.PrintedValue(req.name)),
 			hint:    "Run 'bd dolt status' or SHOW DATABASES to see the databases this server holds.",
+		}
+	}
+
+	if refusal := checkDropDatabaseTarget(name, req); refusal != nil {
+		return dropDatabaseResult{}, refusal
+	}
+	var current sql.NullString
+	if err := conn.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&current); err != nil {
+		return dropDatabaseResult{}, fmt.Errorf("reading the current database: %w", err)
+	}
+	if current.Valid && strings.EqualFold(current.String, name) {
+		return dropDatabaseResult{}, &dropDatabaseRefusal{
+			message: fmt.Sprintf("refusing to drop %s: it is the connection's current database", remedy.PrintedValue(name)),
+			hint:    "Drop it from a workspace that uses a different database.",
 		}
 	}
 
@@ -84,6 +109,54 @@ func dropNamedDatabase(ctx context.Context, conn versioncontrolops.DBConn, req d
 		return dropDatabaseResult{}, fmt.Errorf("dropping database %s: %w", remedy.PrintedValue(name), err)
 	}
 	return dropDatabaseResult{Dropped: name, RecoverableViaUndrop: true}, nil
+}
+
+// dropDatabaseProtected are the server's own databases.
+var dropDatabaseProtected = []string{"information_schema", "mysql", "performance_schema", "sys"}
+
+// checkDropDatabaseTarget refuses the names drop-database never drops.
+func checkDropDatabaseTarget(name string, req dropDatabaseRequest) *dropDatabaseRefusal {
+	printed := remedy.PrintedValue(name)
+	for _, p := range dropDatabaseProtected {
+		if strings.EqualFold(name, p) {
+			return &dropDatabaseRefusal{
+				message: fmt.Sprintf("refusing to drop %s: it is a system database", printed),
+				hint:    "bd never drops the server's own databases.",
+			}
+		}
+	}
+	for _, g := range append([]string{doltserver.GlobalDatabaseName}, req.globals...) {
+		if g != "" && strings.EqualFold(name, g) {
+			return &dropDatabaseRefusal{
+				message: fmt.Sprintf("refusing to drop %s: it is the shared-server global database", printed),
+				hint:    "Every workspace on a shared server reads it; it is not one project's data.",
+			}
+		}
+	}
+	if req.configured != "" && strings.EqualFold(name, req.configured) {
+		return &dropDatabaseRefusal{
+			message: fmt.Sprintf("refusing to drop %s: it is this workspace's database", printed),
+			hint:    "Run drop-database from another workspace on the same server, or name a different database.",
+		}
+	}
+	// A maintenance connection need not have a current database (SELECT
+	// DATABASE() is NULL there), so the one --database selects is refused by
+	// name, not only through the connection.
+	if req.selected != "" && strings.EqualFold(name, req.selected) {
+		return &dropDatabaseRefusal{
+			message: fmt.Sprintf("refusing to drop %s: it is the database this invocation selects with --database", printed),
+			hint:    "Run without --database, or drop it from a workspace that uses a different database.",
+		}
+	}
+	for _, prefix := range staleDatabasePrefixes {
+		if strings.HasPrefix(strings.ToLower(name), prefix) {
+			return &dropDatabaseRefusal{
+				message: fmt.Sprintf("refusing to drop %s: it is a test database", printed),
+				hint:    "Test databases are cleaned with 'bd dolt clean-databases' (add --purge-dropped to reclaim disk).",
+			}
+		}
+	}
+	return nil
 }
 
 func listServerDatabases(ctx context.Context, conn versioncontrolops.DBConn) ([]string, error) {
@@ -184,8 +257,18 @@ Examples:
 		if err != nil {
 			return HandleError("%v", err)
 		}
+		if !usesSQLServer() {
+			return HandleErrorWithHintRespectJSON("'bd dolt drop-database' is not supported in embedded mode (no Dolt server)",
+				"An embedded workspace's database lives in its .beads directory; there is no server database to drop.")
+		}
 		yes, _ := cmd.Flags().GetBool("yes")
-		req := dropDatabaseRequest{name: args[0], configured: cfg.GetDoltDatabase(), assumeYes: yes}
+		req := dropDatabaseRequest{
+			name:       args[0],
+			configured: cfg.GetDoltDatabase(),
+			selected:   databaseFlag,
+			globals:    []string{cfg.GetGlobalDoltDatabase()},
+			assumeYes:  yes,
+		}
 		if !jsonOutput && !isNonInteractiveInit(false) {
 			endpoint := dropDatabaseEndpoint(beadsDir, cfg)
 			req.confirm = func(name string) (bool, error) {

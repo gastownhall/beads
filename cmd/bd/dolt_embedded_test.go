@@ -74,6 +74,7 @@ func TestEmbeddedDoltBlockedAndCommit(t *testing.T) {
 		{"set", []string{"set", "host", "127.0.0.1"}},
 		{"killall", []string{"killall"}},
 		{"clean-databases", []string{"clean-databases"}},
+		{"drop-database", []string{"drop-database", "old_proj", "--yes"}},
 	}
 
 	for _, tc := range serverOnlyCmds {
