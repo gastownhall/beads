@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -284,7 +285,11 @@ func TestProxyCapabilityRegistryReasonsAreAssignedIndividually(t *testing.T) {
 		// it unimplemented with a tracking item, not design.
 		"migrate": true, "migrate sync": true, "migrate issues": true,
 		"migrate-issues": true, "migrate-personal": true,
-		"admin cleanup": true, "admin reset": true,
+		// `migrate schema` is design with a way past it: the danger is the
+		// clients sharing the backend, which the operator can stop and bd
+		// cannot see, so --force carries it through (gastownhall/beads#6656).
+		"migrate schema": true,
+		"admin cleanup":  true, "admin reset": true,
 		// The backup family's DEFAULT rule is the design refusal; managed-local
 		// overrides it to honored (TestProxiedBackupHonoredOnlyOnManagedLocal).
 		// It is design because a backup remote is registered on the SERVER,
@@ -420,4 +425,133 @@ func TestProxiedStoreUnroutedIsTyped(t *testing.T) {
 	if typed.Reason != ProxyReasonUnimplemented {
 		t.Fatalf("store backstop reason = %q, want unimplemented", typed.Reason)
 	}
+}
+
+// setMigrateSchemaForce puts `bd migrate schema --force` into the state one
+// command line would leave it in: value "" is the flag omitted (unchanged,
+// false), anything else is `--force=<value>`. The shared command is restored to
+// omitted when the test ends, Changed bit included, so a later test does not
+// inherit a forced migrate.
+func setMigrateSchemaForce(t *testing.T, value string) {
+	t.Helper()
+	flag := migrateSchemaCmd.Flags().Lookup("force")
+	if flag == nil {
+		t.Fatal("bd migrate schema no longer registers --force")
+	}
+	reset := func() {
+		_ = flag.Value.Set("false")
+		flag.Changed = false
+	}
+	t.Cleanup(reset)
+	reset()
+	if value == "" {
+		return
+	}
+	if err := migrateSchemaCmd.Flags().Set("force", value); err != nil {
+		t.Fatalf("set migrate schema --force=%s: %v", value, err)
+	}
+}
+
+// runProxyRegistryGate runs the path-keyed front door under --json and returns
+// what it wrote to each stream. Holding stdioMutex keeps it off any other
+// test's redirected stdio.
+func runProxyRegistryGate(t *testing.T, cmd *cobra.Command, topology ProxyTopology) (stdout, stderr string, err error) {
+	t.Helper()
+	t.Setenv("BD_JSON_ENVELOPE", "")
+	oldJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = oldJSON })
+
+	stdioMutex.Lock()
+	defer stdioMutex.Unlock()
+	stdout, stderr = captureStdio(t, func() {
+		err = validateProxyRegistryBeforeProvider(cmd, topology)
+	})
+	return stdout, stderr, err
+}
+
+// allProxiedTopologies is every shape the gate can be asked about, unknown
+// included: a refusal that holds on every proxied workspace has to hold on one
+// bd cannot classify too.
+var allProxiedTopologies = []ProxyTopology{
+	ProxyTopologyManagedLocal, ProxyTopologyExternalTCP, ProxyTopologyExternalUnix,
+	ProxyTopologyTeamServer, ProxyTopologyUnknown,
+}
+
+// TestProxyMigrateSchemaRefusedUnlessForced pins gastownhall/beads#6656 at the
+// front door. On a proxied-server workspace the provider open is the
+// migration, and it promotes the schema underneath every library client of the
+// proxy's backend, none of which the proxy tracks. So the bare verb is refused,
+// typed, before the provider is built — and the refusal is not a dead end: it
+// names the route (stop the clients, force, restart), and only a true --force
+// is let through to take it.
+func TestProxyMigrateSchemaRefusedUnlessForced(t *testing.T) {
+	refusedCases := []struct {
+		name   string
+		force  []string // the --force values set in order; empty = omitted
+		envVar bool     // BD_ALLOW_REMOTE_MIGRATE=1 in the environment
+	}{
+		{name: "force omitted"},
+		{name: "force=false", force: []string{"false"}},
+		{name: "force=true then force=false", force: []string{"true", "false"}},
+		// The env hatch is standing configuration, not this invocation's
+		// consent; it unlocks the gate below, never this one.
+		{name: "env consent without force", envVar: true},
+	}
+	for _, topology := range allProxiedTopologies {
+		for _, tc := range refusedCases {
+			t.Run(string(topology)+"/"+tc.name, func(t *testing.T) {
+				if tc.envVar {
+					t.Setenv("BD_ALLOW_REMOTE_MIGRATE", "1")
+				}
+				setMigrateSchemaForce(t, "")
+				for _, v := range tc.force {
+					setMigrateSchemaForce(t, v)
+				}
+
+				stdout, _, err := runProxyRegistryGate(t, migrateSchemaCmd, topology)
+				code, ok := exitCodeFromError(err)
+				if !ok || code != 1 {
+					t.Fatalf("gate returned %#v; want a rendered refusal exiting 1 before the provider opens", err)
+				}
+				var got refusalJSONForTest
+				if decodeErr := json.Unmarshal([]byte(stdout), &got); decodeErr != nil {
+					t.Fatalf("refusal is not one JSON object on stdout: %v\n%s", decodeErr, stdout)
+				}
+				if got.Code != "proxy.migrate.unsupported" || got.Mutates || got.Reason != string(ProxyReasonDesign) {
+					t.Fatalf("refusal = %+v; want code proxy.migrate.unsupported, mutates false, reason design", got)
+				}
+				for _, want := range []string{
+					"migrate schema is not supported in proxied-server mode without --force",
+					"Stop those clients",
+					"bd migrate schema --force",
+					"restart them",
+				} {
+					if !strings.Contains(got.Error, want) {
+						t.Errorf("refusal message %q lacks %q", got.Error, want)
+					}
+				}
+			})
+		}
+
+		t.Run(string(topology)+"/force=true", func(t *testing.T) {
+			setMigrateSchemaForce(t, "true")
+			stdout, _, err := runProxyRegistryGate(t, migrateSchemaCmd, topology)
+			if err != nil {
+				t.Fatalf("forced migrate schema was refused before the provider: %v\n%s", err, stdout)
+			}
+			if stdout != "" {
+				t.Fatalf("the forced pass wrote to stdout, where the command's single JSON report goes:\n%s", stdout)
+			}
+		})
+	}
+}
+
+// refusalJSONForTest is the frozen {code, error, mutates} refusal contract
+// plus its additive reason.
+type refusalJSONForTest struct {
+	Code    string `json:"code"`
+	Error   string `json:"error"`
+	Mutates bool   `json:"mutates"`
+	Reason  string `json:"reason"`
 }

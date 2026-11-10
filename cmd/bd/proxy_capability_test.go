@@ -22,11 +22,16 @@ import (
 // guidance names (`bd dolt push`, `bd conflicts`) are.
 //
 // The capability registry keys on the full command path. It refuses the bare
-// `migrate` verb and `migrate hooks` / `migrate issues` / `migrate sync`, but
-// permits `migrate schema` — so that path passes
+// `migrate` verb and `migrate hooks` / `migrate issues` / `migrate sync`
+// outright, and refuses `migrate schema` unless --force is set to true
+// (gastownhall/beads#6656) — so the prescribed forced verb passes
 // validateProxyRegistryBeforeProvider and reaches `bd migrate schema`'s own
 // proxied arm, which reports the migration the provider open already applied
 // under this verb's consent.
+//
+// That is why the prescribed command is PARSED onto the real command here, not
+// only resolved: rootCmd.Find drops the flags, and the gate now reads --force,
+// so a test that only resolved the path would be asking about the bare verb.
 //
 // An earlier revision of that guidance asserted the opposite on three runtime
 // surfaces and nothing failed, because no test called the front door with this
@@ -43,13 +48,22 @@ func TestProxyMaintenanceAllowsTheSharedConsentVerb(t *testing.T) {
 	t.Cleanup(func() { jsonOutput = oldJSON })
 
 	args := strings.Fields(strings.TrimPrefix(schema.SharedConsentCommandForced, "bd "))
-	target, _, err := rootCmd.Find(args)
+	target, flagArgs, err := rootCmd.Find(args)
 	if err != nil || target == rootCmd {
 		t.Fatalf("the gate prescribes %q, which does not resolve to a subcommand: %v",
 			schema.SharedConsentCommandForced, err)
 	}
 	if path := commandRegistryPath(target); path != "migrate schema" {
 		t.Fatalf("prescribed consent command resolves to path %q, want %q", path, "migrate schema")
+	}
+	setMigrateSchemaForce(t, "")
+	if err := target.ParseFlags(flagArgs); err != nil {
+		t.Fatalf("the gate prescribes %q, whose flags bd migrate schema does not accept: %v",
+			schema.SharedConsentCommandForced, err)
+	}
+	if forced, _ := target.Flags().GetBool("force"); !forced {
+		t.Fatalf("the gate prescribes %q, which does not set --force (args after the path: %q)",
+			schema.SharedConsentCommandForced, flagArgs)
 	}
 
 	find := func(t *testing.T, args ...string) *cobra.Command {
