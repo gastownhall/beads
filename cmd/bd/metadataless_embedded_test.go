@@ -308,3 +308,63 @@ func TestEmbeddedMetadatalessWorkspaceRefusesSeveralDatabases(t *testing.T) {
 		t.Fatalf("issue %s status = %q in gh4135b after refused commands, want open", id, status)
 	}
 }
+
+// TestEmbeddedMetadatalessWorkspaceEnvVarSelectsDatabase pins GH#4135 AC-4:
+// on a metadata-less embedded workspace, BEADS_DOLT_SERVER_DATABASE decides
+// the database for the identity preview, classified reads (including strict
+// --readonly) and writes alike, and its writes persist in the selected
+// database; a selection naming none of the existing databases refuses the
+// open instead of creating one.
+func TestEmbeddedMetadatalessWorkspaceEnvVarSelectsDatabase(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir := metadatalessInit(t, bd, "gh4135")
+	id := metadatalessCreate(t, bd, dir, "override selection issue")
+	metadatalessCopyDatabase(t, beadsDir, "gh4135", "gh4135b")
+	override := []string{"BEADS_DOLT_SERVER_DATABASE=gh4135b"}
+	saved := metadatalessRemoveMetadata(t, beadsDir)
+	metadatalessRequireDatabases(t, beadsDir, "gh4135", "gh4135b")
+
+	// A matching override is used by classified reads and strict --readonly
+	// alike, and names the selection on stderr.
+	stdout, stderr, err := metadatalessRun(t, bd, dir, override, "list", "--json")
+	if err != nil {
+		t.Fatalf("bd list --json with a matching override failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	ids := metadatalessListIDs(t, stdout, stderr)
+	if len(ids) != 1 || ids[0] != id {
+		t.Fatalf("bd list --json with a matching override reported %v, want the selected database's issue %s", ids, id)
+	}
+	if !strings.Contains(stderr, "gh4135b") || !strings.Contains(stderr, "BEADS_DOLT_SERVER_DATABASE") {
+		t.Errorf("bd list --json did not name the override-selected database on stderr:\n%s", stderr)
+	}
+	if status := metadatalessShowStatus(t, bd, dir, append([]string{}, override...), "--readonly", id, "--json"); status != "open" {
+		t.Fatalf("issue %s status = %q on a strict --readonly read with a matching override, want open", id, status)
+	}
+
+	// A write through the override persists in the selected database, not in
+	// the workspace's original one: restored metadata names gh4135, so the
+	// fresh read that follows shows it still open, while the override read
+	// shows the close.
+	if stdout, stderr, err = metadatalessRun(t, bd, dir, override, "close", id, "-r", "override close"); err != nil {
+		t.Fatalf("bd close with a matching override failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	metadatalessRestoreMetadata(t, beadsDir, saved)
+	if status := metadatalessShowStatus(t, bd, dir, nil, id, "--json"); status != "open" {
+		t.Fatalf("issue %s status = %q in gh4135 after the override-selected close, want open (the write leaked into a database the override did not name)", id, status)
+	}
+	if status := metadatalessShowStatus(t, bd, dir, override, id, "--json"); status != "closed" {
+		t.Fatalf("issue %s status = %q in gh4135b after the override-selected close, want closed (the write did not persist in the selected database)", id, status)
+	}
+
+	// A nonmatching override refuses the open rather than creating the named
+	// database beside the existing ones.
+	metadatalessRemoveMetadata(t, beadsDir)
+	missing := []string{"BEADS_DOLT_SERVER_DATABASE=missing"}
+	stdout, stderr, err = metadatalessRun(t, bd, dir, missing, "list", "--json")
+	metadatalessRequireRefusal(t, "bd list --json with a nonmatching override", stdout, stderr, err,
+		"missing", "gh4135", "gh4135b", "BEADS_DOLT_SERVER_DATABASE", "metadata.json")
+	metadatalessRequireDatabases(t, beadsDir, "gh4135", "gh4135b")
+}
