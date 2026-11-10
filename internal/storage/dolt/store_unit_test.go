@@ -485,6 +485,37 @@ func TestApplyConfigDefaults_SocketExplicitOverridesEnv(t *testing.T) {
 	}
 }
 
+// TestApplyConfigDefaults_CommitterFromGitAuthor pins server mode's commit
+// identity to versioncontrolops.ResolveCommitter (#7628): GIT_AUTHOR_* is used
+// when Dolt's --author parser can carry it, and a GIT_AUTHOR_NAME it rejects,
+// such as "Jane Doe (CI)", falls back to "beads" instead of failing every
+// commit.
+func TestApplyConfigDefaults_CommitterFromGitAuthor(t *testing.T) {
+	tests := []struct {
+		name                          string
+		gitAuthorName, gitAuthorEmail string
+		wantAuthor                    string
+	}{
+		{"usable identity is used", "Jane Doe", "jane@example.com", "Jane Doe <jane@example.com>"},
+		{"unparseable name falls back", "Jane Doe (CI)", "jane@example.com", "beads <jane@example.com>"},
+		{"unset falls back to the default", "", "", "beads <beads@local>"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GIT_AUTHOR_NAME", tt.gitAuthorName)
+			t.Setenv("GIT_AUTHOR_EMAIL", tt.gitAuthorEmail)
+
+			cfg := &Config{}
+			applyConfigDefaults(cfg)
+
+			store := &DoltStore{committerName: cfg.CommitterName, committerEmail: cfg.CommitterEmail}
+			if got := store.commitAuthorString(); got != tt.wantAuthor {
+				t.Errorf("commit author = %q, want %q", got, tt.wantAuthor)
+			}
+		})
+	}
+}
+
 // TestBuildServerDSN_WithSocket verifies that buildServerDSN produces a unix
 // DSN when ServerSocket is configured.
 func TestBuildServerDSN_WithSocket(t *testing.T) {

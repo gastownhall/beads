@@ -14,10 +14,10 @@ import (
 type commitAuthor struct{ name, email string }
 
 // storeCommitAuthors builds a fresh embedded store under the current
-// environment, then has it write two commits: CommitPending over a pending
-// tracked change (the session committer), and a non-fast-forward Merge of a
-// divergent, non-conflicting branch (an explicit --author). It returns the
-// author of each (#7628).
+// environment, then has it write two commits, each passing the store's
+// identity as --author: CommitPending over a pending tracked change, and a
+// non-fast-forward Merge of a divergent, non-conflicting branch. It returns
+// the author of each (#7628).
 func storeCommitAuthors(t *testing.T, prefix string) (pending, merge commitAuthor) {
 	t.Helper()
 	te := newTestEnv(t, prefix)
@@ -106,6 +106,33 @@ func TestEmbeddedCommitAuthorDefaultsWithoutGitAuthor(t *testing.T) {
 		t.Errorf("CreateIssue authored %+v, want %+v", got, want)
 	}
 	pending, merge := storeCommitAuthors(t, "cad")
+	if pending != want {
+		t.Errorf("CommitPending authored %+v, want %+v", pending, want)
+	}
+	if merge != want {
+		t.Errorf("Merge authored %+v, want %+v", merge, want)
+	}
+}
+
+// TestEmbeddedCommitAuthorSkipsAnUnparseableGitAuthor pins the fallback for an
+// identity Dolt's --author parser cannot carry. Dolt refuses a name ending in
+// ')' outright, which failed every commit, the fixture's own "bd init" commit
+// first; now the name falls back to beads while the usable GIT_AUTHOR_EMAIL is
+// kept, on issue transaction, pending-changes and merge commits alike.
+func TestEmbeddedCommitAuthorSkipsAnUnparseableGitAuthor(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
+	}
+	t.Setenv("GIT_AUTHOR_NAME", "Store Author (CI)")
+	t.Setenv("GIT_AUTHOR_EMAIL", "store@example.com")
+
+	want := commitAuthor{"beads", "store@example.com"}
+	te := newTestEnv(t, "cau")
+	te.commitIdentityProbe(t, "unparseable identity probe")
+	if got := te.commitIdentity(t, "bd: create unparseable identity probe"); got != want {
+		t.Errorf("CreateIssue authored %+v, want %+v", got, want)
+	}
+	pending, merge := storeCommitAuthors(t, "cau2")
 	if pending != want {
 		t.Errorf("CommitPending authored %+v, want %+v", pending, want)
 	}
