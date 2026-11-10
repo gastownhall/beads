@@ -3905,8 +3905,9 @@ func (s *DoltStore) Path() string {
 
 // IsReadOnly reports whether the store was opened in read-only mode. It is a
 // test-facing accessor: production read-only enforcement comes from the
-// read-only open mode itself (the readOnly field guards every write path), not
-// from callers consulting this method. Tests such as
+// read-only open mode itself and from explicit guards on paths that open mode
+// does not cover, such as refuseStrictReadOnlyPublish on the publish paths,
+// not from callers consulting this method. Tests such as
 // TestDepRoutedTargetOpensReadOnly use it to assert that routed
 // dependency/link target resolution opens a by-ID target read-only, so
 // resolving it never opens a foreign project writable or runs open-time
@@ -5398,9 +5399,26 @@ func logRouteDecision(op, remote string, cli bool) {
 	debug.Logf("dolt %s route: %s (remote=%q)\n", op, route, remote)
 }
 
+// refuseStrictReadOnlyPublish refuses a publish (push, peer push, sync) on a
+// strict-read-only store: strict --readonly, preview and foreign-project
+// opens. A classified-read open (GH#804) is readOnly by command
+// classification but writable underneath, so it may still publish
+// (deferWakeSweepEligible draws the same line). Publishing writes the remote,
+// not this database, so the read-only SQL session alone does not stop it
+// (GH#7876).
+func (s *DoltStore) refuseStrictReadOnlyPublish(op string) error {
+	if s.readOnly && !s.classifiedRead {
+		return fmt.Errorf("%s refused: store is opened read-only", op)
+	}
+	return nil
+}
+
 // pushToRemote is the internal implementation for all push operations.
 // It routes through CLI or SQL based on the remote's protocol and credentials.
 func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool) (retErr error) {
+	if err := s.refuseStrictReadOnlyPublish("dolt push"); err != nil {
+		return err
+	}
 	spanName := "dolt.push"
 	if force {
 		spanName = "dolt.force_push"

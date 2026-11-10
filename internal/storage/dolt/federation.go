@@ -40,6 +40,9 @@ func (s *DoltStore) PushTo(ctx context.Context, peer string) error {
 // pushRefToPeer pushes a specific refspec to a peer remote. The refspec can be
 // a simple branch name ("main") or a mapping ("staging:main").
 func (s *DoltStore) pushRefToPeer(ctx context.Context, peer string, refspec string) error {
+	if err := s.refuseStrictReadOnlyPublish("federation push"); err != nil {
+		return err
+	}
 	if useCLI, err := s.prepareCLIRouteForPeerGitProtocol(ctx, peer); err != nil {
 		return err
 	} else if useCLI {
@@ -395,6 +398,15 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 	result := &SyncResult{
 		Peer:      peer,
 		StartTime: time.Now(),
+	}
+
+	// Sync ends in a push, so a strict-read-only store refuses it here,
+	// before the pre-merge commit, fetch, merge and staging work; refusing
+	// only at the final push would leave those local changes behind and
+	// report a nonfatal PushError (GH#7876).
+	if err := s.refuseStrictReadOnlyPublish("federation sync"); err != nil {
+		result.Error = err
+		return result, result.Error
 	}
 
 	// GH#2474: match PullFrom — commit pending changes before the merge,
