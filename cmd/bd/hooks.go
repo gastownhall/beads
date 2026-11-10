@@ -863,9 +863,13 @@ var hooksListCmd = &cobra.Command{
 		}()
 
 		statuses := CheckGitHooks()
+		// Only an absolute value is checked here: git resolves a relative one
+		// in this worktree, which is where statuses already looked.
 		var hooksPath doctor.HooksPathState
 		if q, ok := doctor.CurrentHooksPathQuery(); ok {
-			hooksPath = doctor.InspectHooksPath(q)
+			if s := doctor.InspectHooksPath(q); !s.Relative {
+				hooksPath = s
+			}
 		}
 
 		if jsonOutput {
@@ -1212,6 +1216,53 @@ func plainHooksPathQuery(selected *initHooksContext) (doctor.HooksPathQuery, boo
 	}, true
 }
 
+// hooksPathRelocation is a plain install moved out of a missing core.hooksPath
+// into the moved repository's validated beads hooks directory (GH#5853).
+type hooksPathRelocation struct {
+	query doctor.HooksPathQuery
+	state doctor.HooksPathState
+}
+
+// plainInstallRelocation decides, before an install creates or writes any
+// file, whether a plain install must leave the directory core.hooksPath names.
+// A plain install writes there, and when that directory is missing git runs
+// no hooks from it, so creating it would only entrench the stale value: the
+// install moves to the moved repository's validated beads hooks directory, or
+// is refused (GH#5853). nil means install as usual: --beads and --shared pick
+// their own directory, and the value is unset, exists or cannot be inspected,
+// is a current beads location deleted in place (GH#4440), or is relative,
+// which git resolves in the worktree the install already writes to.
+func plainInstallRelocation(selected *initHooksContext, beadsHooks, shared bool) (*hooksPathRelocation, error) {
+	if beadsHooks || shared {
+		return nil, nil
+	}
+	q, ok := plainHooksPathQuery(selected)
+	if !ok {
+		return nil, nil
+	}
+	s := doctor.InspectHooksPath(q)
+	if !s.Missing() || s.Managed || s.Relative {
+		return nil, nil
+	}
+	if s.RelocatedTo == "" {
+		return nil, fmt.Errorf("core.hooksPath points at %s, which does not exist, so git runs no hooks; "+
+			"bd will not create it: %s\nRestore that directory, or correct core.hooksPath where it is set "+
+			"(git config --show-scope --get core.hooksPath)", remedy.PrintedValue(s.Configured), s.Refusal)
+	}
+	return &hooksPathRelocation{query: q, state: s}, nil
+}
+
+// repoint points core.hooksPath at the relocated directory once the hooks
+// there are written.
+func (r *hooksPathRelocation) repoint() error {
+	if _, err := doctor.RepointRelocatedHooksPath(r.query, r.state.Configured, r.state.RelocatedTo); err != nil {
+		return fmt.Errorf("hooks refreshed in %s, but failed to repoint core.hooksPath: %w", remedy.PrintedValue(r.state.RelocatedTo), err)
+	}
+	fmt.Fprintf(os.Stderr, "Repointed core.hooksPath from missing %s to %s\n",
+		remedy.PrintedValue(r.state.Configured), remedy.PrintedValue(r.state.RelocatedTo))
+	return nil
+}
+
 //nolint:unparam // force and chain remain accepted compatibility no-ops
 func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, selected *initHooksContext) error {
 	var hooksDir string
@@ -1248,25 +1299,15 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		}
 	}
 
-	// A plain install writes wherever core.hooksPath points. When that
-	// directory is missing, git runs no hooks from it, and creating it would
-	// only entrench the stale value: install into the moved repository's
-	// validated beads hooks directory and repoint the value there, or refuse
-	// (GH#5853). Decided before anything below creates or writes a file.
-	var relocation *doctor.HooksPathState
-	var relocationQuery doctor.HooksPathQuery
-	if !beadsHooks && !shared {
-		if q, ok := plainHooksPathQuery(selected); ok {
-			if s := doctor.InspectHooksPath(q); s.Missing() && !s.Managed {
-				if s.RelocatedTo == "" {
-					return fmt.Errorf("core.hooksPath points at %s, which does not exist, so git runs no hooks; "+
-						"bd will not create it: %s\nRestore that directory, or correct core.hooksPath where it is set "+
-						"(git config --show-scope --get core.hooksPath)", remedy.PrintedValue(s.Configured), s.Refusal)
-				}
-				hooksDir = s.RelocatedTo
-				relocation, relocationQuery = &s, q
-			}
-		}
+	// A plain install against a missing core.hooksPath moves to the moved
+	// repository's beads hooks, or is refused, before anything below creates
+	// or writes a file (GH#5853).
+	relocation, err := plainInstallRelocation(selected, beadsHooks, shared)
+	if err != nil {
+		return err
+	}
+	if relocation != nil {
+		hooksDir = relocation.state.RelocatedTo
 	}
 
 	// Check the destination itself before creating, preserving into, or
@@ -1372,11 +1413,9 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 
 	// Configure git to use the hooks directory after writing, as in ordinary installs.
 	if relocation != nil {
-		if _, err := doctor.RepointRelocatedHooksPath(relocationQuery, relocation.Configured, relocation.RelocatedTo); err != nil {
-			return fmt.Errorf("hooks refreshed in %s, but failed to repoint core.hooksPath: %w", remedy.PrintedValue(hooksDir), err)
+		if err := relocation.repoint(); err != nil {
+			return err
 		}
-		fmt.Fprintf(os.Stderr, "Repointed core.hooksPath from missing %s to %s\n",
-			remedy.PrintedValue(relocation.Configured), remedy.PrintedValue(relocation.RelocatedTo))
 	} else if selected != nil && (beadsHooks || shared) {
 		if err := selected.configureHooksPath(hooksDir); err != nil {
 			return fmt.Errorf("failed to configure git hooks path: %w", err)

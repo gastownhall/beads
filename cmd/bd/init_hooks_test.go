@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -1919,6 +1920,18 @@ func TestInstallHooks_MissingHooksPathRefusal(t *testing.T) {
 			},
 			want: "command config",
 		},
+		{
+			name: "included config file",
+			arrange: func(t *testing.T, repo string) string {
+				stale, _ := strandRepoHooksPath(t, repo)
+				gitConfigIn(t, repo, "--unset", "core.hooksPath")
+				included := filepath.Join(t.TempDir(), "included.gitconfig")
+				gitConfigIn(t, repo, "--file", included, "core.hooksPath", stale)
+				gitConfigIn(t, repo, "include.path", included)
+				return stale
+			},
+			want: "a file this repository's config includes",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1942,6 +1955,85 @@ func TestInstallHooks_MissingHooksPathRefusal(t *testing.T) {
 			}
 			assertStaleNotCreated(t, missing)
 		})
+	}
+}
+
+// TestHooksPath_RelativeValueInLinkedWorktree: git resolves a relative
+// core.hooksPath against the root of the worktree it runs in, so a linked
+// worktree uses its own directory even when the main worktree has none. From
+// that worktree bd hooks list and the doctor Git Hooks check report no missing
+// directory, and a plain install writes there as it did before GH#5853,
+// creating nothing in the main worktree and leaving core.hooksPath alone.
+func TestHooksPath_RelativeValueInLinkedWorktree(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hook fixture")
+	}
+	t.Setenv("BEADS_DIR", "")
+	repo := newGitRepo(t)
+	gitIn := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-c", "commit.gpgsign=false"}, args...)...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, strings.TrimSpace(string(out)))
+		}
+	}
+	// Set first, so no global or template hook runs in the fixture commands.
+	gitConfigIn(t, repo, "core.hooksPath", "custom-hooks")
+	gitIn(repo, "commit", "-q", "--allow-empty", "-m", "init")
+	wt := filepath.Join(t.TempDir(), "wt")
+	gitIn(repo, "worktree", "add", "-q", "-b", "relative-hooks", wt)
+	wtHooks, mainHooks := filepath.Join(wt, "custom-hooks"), filepath.Join(repo, "custom-hooks")
+	if err := os.MkdirAll(wtHooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtHooks, "pre-commit"), []byte("#!/bin/sh\nprintf ran > hook-ran\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A real commit, not hook presence: git runs the linked worktree's hook.
+	gitIn(wt, "commit", "-q", "--allow-empty", "-m", "hook proof")
+	if _, err := os.Stat(filepath.Join(wt, "hook-ran")); err != nil {
+		t.Fatalf("precondition: git did not run %s: %v", filepath.Join(wtHooks, "pre-commit"), err)
+	}
+
+	runInDir(t, wt, func() {
+		out := captureStdout(t, func() error { return hooksListCmd.RunE(hooksListCmd, nil) })
+		for _, wrong := range []string{"does not exist", "Git runs no hooks", "directory is missing"} {
+			if strings.Contains(out, wrong) {
+				t.Errorf("bd hooks list reports a missing core.hooksPath git just used (%q):\n%s", wrong, out)
+			}
+		}
+		raw := func() string {
+			old := jsonOutput
+			jsonOutput = true
+			defer func() { jsonOutput = old }()
+			return captureStdout(t, func() error { return hooksListCmd.RunE(hooksListCmd, nil) })
+		}()
+		if strings.Contains(raw, `"hooks_path"`) {
+			t.Errorf("bd hooks list --json reports a hooks_path fault for a directory git uses:\n%s", raw)
+		}
+		if check := doctor.CheckGitHooks(Version); strings.Contains(check.Message, "Git runs no hooks") {
+			t.Errorf("Git Hooks check = %q / %q, but git runs this worktree's hooks", check.Message, check.Detail)
+		}
+		if err := installStandaloneHooks(managedHookNames, false, false, false, false); err != nil {
+			t.Fatalf("plain install refused the directory git just ran a hook from: %v", err)
+		}
+	})
+
+	content, err := os.ReadFile(filepath.Join(wtHooks, "pre-commit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := string(content); !strings.Contains(text, hookSectionBeginLine()) || !strings.Contains(text, "printf ran") {
+		t.Errorf("the install did not refresh the worktree's pre-commit around the user's hook:\n%s", text)
+	}
+	if _, err := os.Lstat(mainHooks); !os.IsNotExist(err) {
+		t.Errorf("the install created %s in the main worktree (err=%v)", mainHooks, err)
+	}
+	local := exec.Command("git", "config", "--local", "--get", "core.hooksPath")
+	local.Dir = repo
+	if out, err := local.Output(); err != nil || strings.TrimSpace(string(out)) != "custom-hooks" {
+		t.Errorf("core.hooksPath = %q (%v), want the relative value left alone", out, err)
 	}
 }
 

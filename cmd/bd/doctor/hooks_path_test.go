@@ -409,6 +409,20 @@ func writeRelocatedHook(t *testing.T, dir, body string) {
 	}
 }
 
+// includeHooksPath writes value as core.hooksPath to a new config file and
+// includes that file from dir's repository config under key (include.path,
+// or an includeIf condition's path), after the entries already there.
+func includeHooksPath(t *testing.T, dir, key, value string) {
+	t.Helper()
+	included := filepath.Join(t.TempDir(), "included.gitconfig")
+	cmd := gitCommand("config", "--file", included, "core.hooksPath", value)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config --file %s: %v (%s)", included, err, strings.TrimSpace(string(out)))
+	}
+	setGitConfig(t, dir, key, included)
+}
+
 // strandedHooksPath returns the absolute hooks path a repository that used to
 // live under a different directory would still carry (GH#5853). Neither it nor
 // its parent exists.
@@ -765,6 +779,34 @@ func TestFixHooksPath_RelocatedBeadsPath_Ineligible(t *testing.T) {
 			wantInDetail: "command config",
 		},
 		{
+			// git reports an included value's scope as local, but a local
+			// write would not replace it.
+			name: "included config file",
+			arrange: func(t *testing.T, dir, stale string) string {
+				writeRelocatedHook(t, filepath.Join(dir, ".beads", "hooks"), relocatedHookBody)
+				unsetGitConfig(t, dir, "core.hooksPath")
+				includeHooksPath(t, dir, "include.path", stale)
+				return stale
+			},
+			wantInDetail: "a file this repository's config includes",
+		},
+		{
+			// The included value comes after the repository's own value, so
+			// it wins over the one a local write would replace.
+			name: "conditional include over a local value",
+			arrange: func(t *testing.T, dir, stale string) string {
+				writeRelocatedHook(t, filepath.Join(dir, ".beads", "hooks"), relocatedHookBody)
+				setGitConfig(t, dir, "core.hooksPath", strandedHooksPath(t, filepath.Join(".beads", "hooks")))
+				real, err := filepath.EvalSymlinks(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				includeHooksPath(t, dir, "includeIf.gitdir/i:"+filepath.ToSlash(real)+"/.path", stale)
+				return stale
+			},
+			wantInDetail: "a file this repository's config includes",
+		},
+		{
 			name: "former directory still exists",
 			arrange: func(t *testing.T, dir, stale string) string {
 				writeRelocatedHook(t, filepath.Join(dir, ".beads", "hooks"), relocatedHookBody)
@@ -841,6 +883,35 @@ func TestFixHooksPath_RelocatedBeadsPath_ChangedBeforeRepair(t *testing.T) {
 
 	if got := getGitConfig(t, dir, "core.hooksPath"); got != husky {
 		t.Errorf("core.hooksPath = %q, want the changed third-party value %q left alone", got, husky)
+	}
+	assertNotCreated(t, stale)
+}
+
+// TestFixHooksPath_RelocatedBeadsPath_OverriddenWrite: the repair reads the
+// value back after writing it, so a write that a later include still
+// overrides is reported as an error, not as a repaired path (GH#5853).
+func TestFixHooksPath_RelocatedBeadsPath_OverriddenWrite(t *testing.T) {
+	t.Setenv("BEADS_DIR", "")
+	dir := t.TempDir()
+	setupGitRepoInDir(t, dir)
+	writeRelocatedHook(t, filepath.Join(dir, ".beads", "hooks"), relocatedHookBody)
+	stale := strandedHooksPath(t, filepath.Join(".beads", "hooks"))
+	setGitConfig(t, dir, "core.hooksPath", stale)
+	// The same value again from a file included after it: the include wins,
+	// while the repository's own config still holds the effective value.
+	includeHooksPath(t, dir, "include.path", stale)
+
+	runInDir(t, dir, func() {
+		if check := CheckHooksPath(); !strings.Contains(check.Message, "moved repository") {
+			t.Fatalf("precondition: expected a relocated path, got %q: %s", check.Message, check.Detail)
+		}
+		if err := FixHooksPath(); err == nil || !strings.Contains(err.Error(), "still overrides it with "+stale) {
+			t.Fatalf("FixHooksPath = %v, want an error naming the overriding %s", err, stale)
+		}
+	})
+
+	if got := getGitConfig(t, dir, "core.hooksPath"); got != stale {
+		t.Errorf("effective core.hooksPath = %q, want the included %q", got, stale)
 	}
 	assertNotCreated(t, stale)
 }
