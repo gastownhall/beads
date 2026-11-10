@@ -424,12 +424,12 @@ func TestCleanStaleCircuitBreakerFiles(t *testing.T) {
 // TestCleanStaleCircuitBreakerFilesIn_AgesOutClosed verifies that closed
 // breaker files ARE swept, but only past the closedSweepTTL mtime threshold.
 // Every directory the sweep visits has live writers — the live one by
-// definition, and the legacy "/tmp/beads-circuit" location (GH#4636) wherever
-// TMPDIR-less processes (launchd, cron, bare ssh) resolve os.TempDir() to /tmp
-// — and an unconditional remove churned against them forever: recreate,
-// delete, log, on every TMPDIR-set invocation (bd-uann8). A fresh closed file
-// is a live writer's state and must survive; an aged one is the GH#4636
-// ephemeral-port accumulation and must go.
+// definition, and the legacy shared ones wherever older bd binaries still
+// keep their state there (their TMPDIR-less processes — launchd, cron, bare
+// ssh — in "/tmp/beads-circuit", GH#4636) — and an unconditional remove
+// churned against them forever: recreate, delete, log, on every run
+// (bd-uann8). A fresh closed file is a live writer's state and must survive;
+// an aged one is the GH#4636 ephemeral-port accumulation and must go.
 func TestCleanStaleCircuitBreakerFilesIn_AgesOutClosed(t *testing.T) {
 	dir := t.TempDir()
 

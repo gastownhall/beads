@@ -356,14 +356,10 @@ tracking the same work twice.
 persisting across repeated invocations.
 
 **Cause:** The circuit breaker tripped after repeated connection failures.
-Its state lives in a file under `${TMPDIR:-/tmp}/beads-circuit-$(id -u)/` on
-Linux and macOS, or `%TEMP%\beads-circuit\` on Windows (named
-`beads-dolt-circuit-<host>-<port>[-<db>].json`, keyed on host:port and
-database). The directory is private to your user (mode 0700), so it is
-shared by all of your `bd` processes that use the same temp directory, but
-not with other users on the host: each user's breaker trips on its own
-failures. Once tripped, that user's commands to that host:port are rejected
-until a successful probe resets it.
+Its state lives in a file under `/tmp/beads-circuit/` (named
+`beads-dolt-circuit-<host>-<port>[-<db>].json`, keyed on host:port) and is
+shared across all `bd` processes. Once tripped, all commands to that host:port
+are rejected until a successful probe resets it.
 
 For beads-managed local servers, `bd dolt status` reports from the server's
 PID file — a "running" status does not guarantee the server is actually
@@ -373,7 +369,7 @@ accepting connections on the expected port.
 
 ```bash
 # Check circuit breaker state
-cat "${TMPDIR:-/tmp}/beads-circuit-$(id -u)"/beads-dolt-circuit-*.json
+cat /tmp/beads-circuit/beads-dolt-circuit-*.json
 
 # Check if the Dolt server is actually listening
 lsof -i :<port>
@@ -385,7 +381,7 @@ cat .beads/metadata.json | grep port
 **Fix:**
 
 ```bash
-rm -f "${TMPDIR:-/tmp}/beads-circuit-$(id -u)"/beads-dolt-circuit-*.json
+rm /tmp/beads-circuit/beads-dolt-circuit-*.json
 bd dolt stop
 bd dolt start
 bd list
@@ -393,18 +389,6 @@ bd list
 
 On macOS, `/tmp` is a symlink to `/private/tmp`, which is not always cleared
 on restart — the state file can persist across reboots.
-
-If `bd` logs `[circuit-breaker] disabled: <dir> ...`, the breaker directory
-already exists but is unsafe to use: it is a symlink or not a directory, or
-on Linux and macOS it belongs to another user or is writable by group or
-others. `bd` does not repair it; it runs without a breaker (every command
-dials the server) and warns once per process. Have the directory's owner
-remove it, or set `TMPDIR` to a directory only you can write.
-
-Older `bd` versions kept this state in the shared `${TMPDIR:-/tmp}/beads-circuit/`
-(and earlier in `/tmp/beads-circuit/`). Current versions no longer read it,
-but still age out stale files there, by the same rules as above, wherever
-the directory exists and is not a symlink.
 
 ## Dolt Server Issues
 

@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // privateCircuitTempRoot points os.TempDir() at a fresh test-owned directory
@@ -477,6 +479,74 @@ func TestSweepCircuitBreakerDirs_LiveAndLegacy(t *testing.T) {
 		if _, err := os.Lstat(path); err != nil {
 			t.Errorf("sweep traversed the symlinked legacy directory and removed %s: %v", path, err)
 		}
+	}
+}
+
+// A legacy directory is swept only when it passes the live directory's rule.
+// One that another user owns or can write is skipped without reading an
+// entry: their FIFO there would block the sweep, which runs ahead of the dial
+// when a process sets up its first server-mode breaker (GH#4223). Each row
+// holds a stale entry the sweep removes from a safe directory, and a FIFO it
+// would block on. The foreign-owner row stands in for another user through
+// circuitDirOwnerUID, so it runs without root.
+func TestSweepCircuitBreakerDirs_SkipsUnsafeLegacyDirs(t *testing.T) {
+	captureCircuitLog(t)
+	staleOpen := circuitJSON(t, circuitState{State: circuitOpen, TrippedAt: time.Now().Add(-circuitStaleTTL - time.Hour)})
+	selfUID := os.Geteuid()
+	tests := []struct {
+		name     string
+		mode     os.FileMode
+		ownerUID int
+	}{
+		{"foreign-owned 0755", 0o755, selfUID + 1},
+		{"group-writable 0770", 0o770, selfUID},
+		{"world-writable 0777", 0o777, selfUID},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orig := circuitDirOwnerUID
+			t.Cleanup(func() { circuitDirOwnerUID = orig })
+			circuitDirOwnerUID = func() int { return tt.ownerUID }
+
+			legacy := filepath.Join(t.TempDir(), "beads-circuit")
+			mkdirMode(tt.mode)(t, legacy)
+			stale := writeCircuitFile(t, legacy, "beads-dolt-circuit-127-0-0-1-5001.json", staleOpen, 0o600, time.Now())
+			fifo := filepath.Join(legacy, "beads-dolt-circuit-127-0-0-1-5002.json")
+			if err := unix.Mkfifo(fifo, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			returnsUnblocked(t, fifo, func() {
+				sweepCircuitBreakerDirs(filepath.Join(t.TempDir(), "live"), []string{legacy})
+			})
+
+			for _, path := range []string{stale, fifo} {
+				if _, err := os.Lstat(path); err != nil {
+					t.Errorf("sweep removed %s from an unsafe legacy directory: %v", path, err)
+				}
+			}
+		})
+	}
+}
+
+// returnsUnblocked runs fn and fails the test unless it returns promptly, as
+// it cannot while blocked opening fifo for reading. A blocked fn is released
+// by opening the FIFO for writing, so it never outlives the test.
+func returnsUnblocked(t *testing.T, fifo string, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		if w, err := os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			_ = w.Close()
+		}
+		<-done
+		t.Fatalf("blocked opening the FIFO %s", fifo)
 	}
 }
 

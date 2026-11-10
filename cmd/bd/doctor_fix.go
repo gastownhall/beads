@@ -475,8 +475,7 @@ func applyFixList(path string, fixes []doctorCheck) {
 		case "Lock Files":
 			err = fix.StaleLockFiles(path)
 		case "Circuit Breaker":
-			dolt.CleanStaleCircuitBreakerFiles()
-			fmt.Printf("  %s Cleared stale circuit breaker files\n", ui.RenderPass("✓"))
+			err = clearStaleCircuitBreakerFiles()
 		case "Fresh Clone":
 			err = freshCloneImport(path, check)
 		case "Pending Migrations":
@@ -559,6 +558,19 @@ func freshCloneImport(path string, check doctorCheck) error {
 		return &fix.SkipError{Reason: errors.New("the Fresh Clone check did not find the database missing, so issues.jsonl is not imported over it")}
 	}
 	return fix.FreshCloneImport(path, Version)
+}
+
+// clearStaleCircuitBreakerFiles is bd doctor --fix's Circuit Breaker repair.
+// The sweep never reads a state directory the breaker refuses (GH#4223), so
+// over one there is nothing it could clear: the repair reports itself skipped,
+// with the check's manual remedy, instead of claiming files were cleared.
+func clearStaleCircuitBreakerFiles() error {
+	if dir, problem := dolt.CircuitBreakerStateDirProblem(); problem != "" {
+		return &fix.SkipError{Reason: fmt.Errorf("the circuit breaker directory %s %s, so it is never swept", dir, problem)}
+	}
+	dolt.CleanStaleCircuitBreakerFiles()
+	fmt.Printf("  %s Cleared stale circuit breaker files\n", ui.RenderPass("✓"))
+	return nil
 }
 
 func fixPendingMigrations(path string) error {

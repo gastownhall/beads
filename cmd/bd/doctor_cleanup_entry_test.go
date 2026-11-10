@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestDoctorCleanupEntryPointsDeleteOnlyWhatTheyOwn drives each Classic
@@ -327,4 +328,74 @@ func TestDoctorArtifactsCleanJSONPrintsOnlyJSON(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDoctorFixCircuitBreakerSkipsUnsafeStateDir drives --fix's Circuit
+// Breaker repair. Over a state directory the breaker refuses (a symlink, as
+// another local user could plant at the predictable path, GH#4223) it removes
+// nothing through it and reports itself skipped with the manual remedy,
+// never "Cleared". Over a private directory it still clears stale state.
+func TestDoctorFixCircuitBreakerSkipsUnsafeStateDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	stale, err := json.Marshal(map[string]string{
+		"state":      "open",
+		"tripped_at": time.Now().Add(-10 * time.Minute).UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const stateName = "beads-dolt-circuit-127-0-0-1-3307-fix.json"
+	check := doctorCheck{Name: "Circuit Breaker", Status: statusWarning, Message: "m", Fix: "Have the directory's owner remove it"}
+	writeStale := func(t *testing.T, dir string) string {
+		t.Helper()
+		path := filepath.Join(dir, stateName)
+		if err := os.WriteFile(path, stale, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	t.Run("symlinked state directory", func(t *testing.T) {
+		target := t.TempDir()
+		staleFile := writeStale(t, target)
+		linked := filepath.Join(t.TempDir(), "linked")
+		if err := os.Symlink(target, linked); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_TEST_CIRCUIT_DIR", linked)
+
+		stdout, _ := captureStdio(t, func() { applyFixList(t.TempDir(), []doctorCheck{check}) })
+		if _, err := os.Stat(staleFile); err != nil {
+			t.Errorf("the repair removed state through a symlinked directory: %v", err)
+		}
+		for _, want := range []string{"Skipped: ", "is a symlink", "Manual fix: " + check.Fix, "0 fixed, 1 skipped"} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("stdout lacks %q:\n%s", want, stdout)
+			}
+		}
+		if strings.Contains(stdout, "Cleared") {
+			t.Errorf("the repair claimed to clear a directory it never swept:\n%s", stdout)
+		}
+	})
+
+	t.Run("private state directory", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "circuit")
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		staleFile := writeStale(t, dir)
+		t.Setenv("BEADS_TEST_CIRCUIT_DIR", dir)
+
+		stdout, _ := captureStdio(t, func() { applyFixList(t.TempDir(), []doctorCheck{check}) })
+		if _, err := os.Stat(staleFile); !os.IsNotExist(err) {
+			t.Errorf("stale state survived the repair (stat err %v)", err)
+		}
+		for _, want := range []string{"Cleared stale circuit breaker files", "1 fixed, 0 skipped"} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("stdout lacks %q:\n%s", want, stdout)
+			}
+		}
+	})
 }

@@ -11,13 +11,26 @@ import (
 )
 
 // CheckCircuitBreaker checks for stale circuit breaker state files that may
-// block all bd operations. Returns a fixable DoctorCheck if stale files exist.
+// block all bd operations. Returns a fixable DoctorCheck if stale files exist,
+// and a warning if the breaker runs disabled over an unsafe state directory.
 func CheckCircuitBreaker() DoctorCheck {
 	// The storage layer's own resolver, so diagnosis follows the location it
 	// writes: per-user under the temp root on Unix (GH#4223), honoring the
 	// test override. Hardcoding "/tmp/beads-circuit" checked the wrong place
 	// on Windows, where files land under %TEMP% not C:\tmp (GH#4636).
-	dir := dolt.CircuitBreakerStateDir()
+	dir, problem := dolt.CircuitBreakerStateDirProblem()
+	if problem != "" {
+		// The breaker keeps no state here and the sweep never clears it, and
+		// its entries may be another user's plant: report the disabled
+		// breaker without reading any of them.
+		return DoctorCheck{
+			Name:     "Circuit Breaker",
+			Status:   StatusWarning,
+			Message:  fmt.Sprintf("Circuit breaker disabled: %s %s", dir, problem),
+			Fix:      "Have the directory's owner remove it, or point TMPDIR at a directory only you can write",
+			Category: CategoryRuntime,
+		}
+	}
 	pattern := filepath.Join(dir, "beads-dolt-circuit-*.json")
 	matches, err := filepath.Glob(pattern)
 	if err != nil || len(matches) == 0 {
