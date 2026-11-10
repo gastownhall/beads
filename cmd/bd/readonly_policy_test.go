@@ -69,6 +69,32 @@ func TestEffectiveRootStorePolicy(t *testing.T) {
 	}
 }
 
+// TestClassifiedReadOpen pins which root opens may run the lazy defer-wake
+// sweep: only a classified read that is not strict --readonly, not a preview
+// and not under a MIGRATION-FREEZE (#7634).
+func TestClassifiedReadOpen(t *testing.T) {
+	tests := []struct {
+		name                                    string
+		policyReadOnly, strict, preview, frozen bool
+		want                                    bool
+	}{
+		{name: "classified read", policyReadOnly: true, want: true},
+		{name: "write command", policyReadOnly: false},
+		{name: "strict readonly", policyReadOnly: true, strict: true},
+		{name: "preview", policyReadOnly: true, preview: true},
+		{name: "frozen classified read", policyReadOnly: true, frozen: true},
+		{name: "frozen write command", frozen: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifiedReadOpen(tc.policyReadOnly, tc.strict, tc.preview, tc.frozen); got != tc.want {
+				t.Fatalf("classifiedReadOpen(%v, %v, %v, %v) = %v, want %v",
+					tc.policyReadOnly, tc.strict, tc.preview, tc.frozen, got, tc.want)
+			}
+		})
+	}
+}
+
 type strictReadonlyPostRunStore struct {
 	storage.DoltStorage
 	metadataWrites int

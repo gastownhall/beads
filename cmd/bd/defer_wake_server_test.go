@@ -3,6 +3,8 @@
 package main
 
 import (
+	"database/sql"
+	"fmt"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -20,11 +22,12 @@ import (
 // before this fix, from a strict --readonly or foreign-project open that must
 // never sweep.
 func TestServerModeDeferAutoWake(t *testing.T) {
-	requireSharedProxiedServer(t)
+	port := requireSharedProxiedServer(t)
 	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
 	p := newServerModeProject(t, bd, "dws")
+	markerDir := t.TempDir()
 
 	t.Run("expired_dated_defer_wakes_on_ready", func(t *testing.T) {
 		issue := bdCreate(t, bd, p.dir, "Expired snooze (server mode)", "--type", "task")
@@ -67,6 +70,42 @@ func TestServerModeDeferAutoWake(t *testing.T) {
 		}
 		if found.DeferUntil != nil {
 			t.Errorf("expected defer_until cleared after wake, got %v", found.DeferUntil)
+		}
+	})
+
+	// A MIGRATION-FREEZE holds the sweep off on a direct server too: the
+	// classified read is no longer one that may write (#7634). The first
+	// ready read after the thaw wakes what the frozen one left asleep.
+	t.Run("frozen_ready_leaves_expired_defer_asleep_until_thaw", func(t *testing.T) {
+		db, err := sql.Open("mysql", fmt.Sprintf("root:@tcp(127.0.0.1:%d)/%s?parseTime=true", port, p.database))
+		if err != nil {
+			t.Fatalf("open server db: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+
+		issue := bdCreate(t, bd, p.dir, "Frozen snooze (server mode)", "--type", "task")
+		bdDefer(t, bd, p.dir, issue.ID, "--until", "2020-01-01")
+		before := proxiedDoltHead(t, db)
+
+		ids := bdReadIDsWithEnv(t, bd, p.dir, deferWakeFreezeEnv(t, markerDir, true), "ready", "--json")
+		if ids[issue.ID] {
+			t.Errorf("frozen bd ready listed %s: the sweep woke it during a freeze (server mode)", issue.ID)
+		}
+		if after := proxiedDoltHead(t, db); after != before {
+			t.Errorf("frozen bd ready moved HEAD %s -> %s (server mode)", before, after)
+		}
+		status, deferUntil := showDeferState(t, bd, p.dir, issue.ID)
+		if status != "deferred" || deferUntil == nil {
+			t.Fatalf("frozen bd ready changed %s to status=%q defer_until=%v, want deferred with its date", issue.ID, status, deferUntil)
+		}
+
+		ids = bdReadIDsWithEnv(t, bd, p.dir, deferWakeFreezeEnv(t, markerDir, false), "ready", "--json")
+		if !ids[issue.ID] {
+			t.Errorf("expected %s in bd ready after the thaw (server mode)", issue.ID)
+		}
+		status, deferUntil = showDeferState(t, bd, p.dir, issue.ID)
+		if status != "open" || deferUntil != nil {
+			t.Errorf("thawed bd ready left %s at status=%q defer_until=%v, want open with no date", issue.ID, status, deferUntil)
 		}
 	})
 
