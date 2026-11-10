@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -21,7 +22,8 @@ var (
 // An optional permissions argument sets the file mode. Without one, a file that
 // already exists keeps its permission bits and a new file gets 0644.
 // An existing regular file this process cannot open for writing is refused
-// and left as it is: the rename would otherwise replace it.
+// and left as it is (the rename would otherwise replace it), unless it already
+// holds data, with the requested mode: then there is nothing to write.
 //
 //nolint:unparam // perm is intentionally variadic for callers that need non-default permissions
 func atomicWriteFile(path string, data []byte, perm ...os.FileMode) error {
@@ -50,8 +52,13 @@ func atomicWriteFileFollowingSymlink(path string, data []byte, perm ...os.FileMo
 	}
 	exists := err == nil
 	if exists && info.Mode().IsRegular() {
-		if exists, err = checkWritable(targetPath); err != nil {
+		var current bool
+		exists, current, err = checkReplaceable(targetPath, data, info.Mode().Perm(), perm...)
+		if err != nil {
 			return err
+		}
+		if current {
+			return nil
 		}
 	}
 	if len(perm) > 0 {
@@ -100,28 +107,36 @@ func atomicWriteFileFollowingSymlink(path string, data []byte, perm ...os.FileMo
 	return nil
 }
 
-// checkWritable refuses an existing file this process may not write. The
+// checkReplaceable refuses an existing file this process may not write. The
 // rename that replaces it needs only a writable directory, so without this a
 // read-only AGENTS.md would be replaced, its 0444 mode copied onto the new
 // file. The probe opens the file for writing without truncating it; it is
 // best effort, as is the config.yaml writer's, and not proof against a chmod
-// that lands after it. exists is false when the file went away since the
-// caller saw it: the rename then creates it, as for any missing file.
-func checkWritable(path string) (exists bool, err error) {
+// that lands after it.
+//
+// A file it may not write that already holds data, with the mode perm asks
+// for if any, is current: there is nothing to replace. exists is false when
+// the file went away since the caller saw it: the rename then creates it, as
+// for any missing file.
+func checkReplaceable(path string, data []byte, existingMode os.FileMode, perm ...os.FileMode) (exists, current bool, err error) {
 	f, err := os.OpenFile(path, os.O_WRONLY, 0) // #nosec G304 -- the caller's own integration file
 	switch {
 	case err == nil:
 		if err := f.Close(); err != nil {
-			return true, fmt.Errorf("close write probe: %w", err)
+			return true, false, fmt.Errorf("close write probe: %w", err)
 		}
-		return true, nil
+		return true, false, nil
 	case os.IsNotExist(err):
-		return false, nil
-	case os.IsPermission(err):
-		return true, fmt.Errorf("%w: %s (left unchanged; make it writable and rerun): %w", errRefuseReadOnlyWrite, path, err)
-	default:
-		return true, fmt.Errorf("probe write access: %w", err)
+		return false, false, nil
+	case !os.IsPermission(err):
+		return true, false, fmt.Errorf("probe write access: %w", err)
 	}
+	if len(perm) == 0 || perm[0] == existingMode {
+		if existing, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(existing, data) { // #nosec G304 -- as above
+			return true, true, nil
+		}
+	}
+	return true, false, fmt.Errorf("%w: %s (left unchanged; make it writable and rerun): %w", errRefuseReadOnlyWrite, path, err)
 }
 
 // DirExists checks if a directory exists
