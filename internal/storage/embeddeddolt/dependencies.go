@@ -25,8 +25,7 @@ func (s *EmbeddedDoltStore) AddDependencyWithOptions(ctx context.Context, dep *t
 		// Embedded commits the whole working set on the connection, so the
 		// event-written flag is not needed for selective staging (unlike DoltStore).
 		_, err := issueops.AddDependencyInTx(ctx, tx, dep, actor, issueops.AddDependencyOpts{
-			IsCrossPrefix: types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID),
-			EmitEvent:     addOpts.EmitEvent,
+			EmitEvent: addOpts.EmitEvent,
 		})
 		return err
 	})

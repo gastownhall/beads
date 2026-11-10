@@ -19,6 +19,7 @@ func (s *testSuite) TestDependencySQLRepository() {
 		s.Run("DifferentTypeIsRejected", s.depInsertConflictingType)
 		s.Run("MissingTargetIssueFailsFK", s.depInsertFKViolation)
 		s.Run("ForeignRepoTargetGoesToExternalColumn", s.depInsertForeignRepoTarget)
+		s.Run("CrossPrefixLocalTargetGoesToItsTypedColumn", s.depInsertCrossPrefixLocalTarget)
 		s.Run("ThreadIDPersists", s.depInsertThreadID)
 		s.Run("EmitsDependencyAddedEventWhenEmitEventSet", s.depInsertEmitsAddedEvent)
 		s.Run("RecordsNoEventWithoutEmitEvent", s.depInsertWithoutEmitEventRecordsNoEvent)
@@ -222,6 +223,35 @@ func (s *testSuite) depInsertForeignRepoTarget() {
 	s.Equal(target, external.String, "foreign-repo target belongs in depends_on_external")
 	s.Empty(issueTarget.String, "foreign-repo target must not be written to depends_on_issue_id")
 	s.Empty(wispTarget.String)
+}
+
+// depInsertCrossPrefixLocalTarget is GH#8299 on the domain repository: a
+// target with another prefix that this database holds is a local row, so it
+// goes to its typed column (and the issue one keeps its foreign key) rather
+// than to depends_on_external, where readiness never sees it.
+func (s *testSuite) depInsertCrossPrefixLocalTarget() {
+	const (
+		src        = "bd-dep-xp-src"
+		issueTgt   = "otherrig-xp-issue"
+		wispTarget = "otherrig-xp-wisp"
+	)
+	s.seedIssueRow(src)
+	s.seedIssueRow(issueTgt)
+	s.seedWispRow(wispTarget)
+	for _, want := range []struct{ target, column string }{
+		{issueTgt, "depends_on_issue_id"},
+		{wispTarget, "depends_on_wisp_id"},
+	} {
+		s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+			newDep(src, want.target, types.DepBlocks), "tester", domain.DepInsertOpts{}))
+		var external, issueTarget, wispTgt sql.NullString
+		s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+			"SELECT depends_on_external, depends_on_issue_id, depends_on_wisp_id FROM dependencies WHERE issue_id = ? AND id = ?",
+			src, depid.New(src, want.target)).Scan(&external, &issueTarget, &wispTgt))
+		s.False(external.Valid, "%s is held locally; depends_on_external must be NULL, got %q", want.target, external.String)
+		got := map[string]string{"depends_on_issue_id": issueTarget.String, "depends_on_wisp_id": wispTgt.String}
+		s.Equal(want.target, got[want.column], "%s belongs in %s", want.target, want.column)
+	}
 }
 
 func (s *testSuite) depInsertThreadID() {
