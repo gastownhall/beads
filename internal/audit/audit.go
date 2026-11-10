@@ -192,8 +192,13 @@ func LogFieldChange(issueID, field, oldValue, newValue, actor, reason string) {
 // "claimed" entry whose extra carries the claimed issue's post-claim status
 // and assignee. Those claim paths return no pre-image, so unlike
 // LogFieldChange there are no old values: the entry records the outcome the
-// command reported, not a transition. Best-effort: errors are silently
-// ignored so sidecar logging never blocks operations.
+// command reported, not a transition. The record says a claim was returned,
+// not that this invocation mutated the row: on a legacy HTTP composition
+// ClaimNext can return an idempotent claim (the row was already this
+// actor's) without exposing a Changed bit. The claim's transactional
+// pre-image lives in the database events tables (bd history <id> --events).
+// Best-effort: errors are silently ignored so sidecar logging never blocks
+// operations.
 func LogClaimed(issueID, actor, status, assignee string) {
 	_, _ = AppendIfEnabled(&Entry{
 		Kind:    "claimed",
