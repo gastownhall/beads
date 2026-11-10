@@ -391,13 +391,17 @@ func abortMerge(ctx context.Context, db DBConn, preMergeClean bool) {
 var doltCommitHashRE = regexp.MustCompile(`^[0-9a-v]{32}$`)
 
 // stageMergeResult stages the tables a conflicted DOLT_MERGE merged cleanly
-// but left unstaged. A conflicted merge parks its whole merged root in the
-// working set and leaves the staged root at HEAD, so a conclusion that stages
-// only the tables it resolved (DOLT_ADD per resolved table before
-// DOLT_COMMIT) records HEAD's copy of every cleanly merged sibling table: the
-// merge commit — what `bd dolt push` sends — reverts the peer's change on
-// that table while this clone's working set keeps reading the merged value
-// forever, because later pulls see nothing new to merge (GH#7811).
+// but left unstaged, and refuses to leave any of them unstaged. A conflicted
+// merge parks its whole merged root in the working set and leaves the staged
+// root at HEAD, so a conclusion that stages only the tables it resolved
+// (DOLT_ADD per resolved table before DOLT_COMMIT) records HEAD's copy of
+// every cleanly merged sibling table: the merge commit — what `bd dolt push`
+// sends — reverts the peer's change on that table while this clone's working
+// set keeps reading the merged value forever, because later pulls see nothing
+// new to merge (GH#7811). After staging, dolt_status is re-read: a
+// merge-touched table still unstaged means the commit would record a known
+// incomplete result, so the conclusion fails naming the table (GH#7757)
+// rather than publish it.
 //
 // The staged set is exact by construction: unstaged tables (dolt_status
 // staged = 0) that also differ between HEAD and the merge source (the
@@ -414,9 +418,10 @@ var doltCommitHashRE = regexp.MustCompile(`^[0-9a-v]{32}$`)
 // unstaged diff-vs-HEAD table while a merge is open is merge output, never
 // pre-existing pending work — and that pending work stays pending in tables
 // the merge did not change (server mode deliberately leaves some config
-// uncommitted, GH#2455). DOLT_ADD without --force applies dolt_ignore
-// patterns, so ignored tables (wisps, ...) that dolt_status hides cannot
-// sneak in.
+// uncommitted, GH#2455). Tables dolt_ignore covers are skipped explicitly
+// (the anti-join commitWorkingSet uses): DOLT_ADD without --force never
+// stages them, so listing one would fail the completeness re-read on every
+// merge, and ignored tables (wisps, ...) cannot sneak into the merge commit.
 func stageMergeResult(ctx context.Context, db DBConn) error {
 	var sourceCommit sql.NullString
 	if err := db.QueryRowContext(ctx,
@@ -431,37 +436,65 @@ func stageMergeResult(ctx context.Context, db DBConn) error {
 		// below, and concluding without staging would record a revert.
 		return fmt.Errorf("merge source commit %q is not a valid commit hash; refusing to stage the merge result", sourceCommit.String)
 	}
-	//nolint:gosec // G201: sourceCommit is validated against doltCommitHashRE above; the diff table functions require literal arguments.
-	rows, err := db.QueryContext(ctx, fmt.Sprintf(
-		"SELECT DISTINCT CASE WHEN s.table_name = CONCAT(d.from_table_name, ' -> ', d.to_table_name) "+
-			"THEN d.to_table_name ELSE s.table_name END FROM dolt_status s "+
-			"JOIN (SELECT from_table_name, to_table_name FROM dolt_diff_summary('HEAD', '%[1]s') "+
-			"UNION SELECT from_table_name, to_table_name FROM dolt_schema_diff('HEAD', '%[1]s')) d "+
-			"ON s.table_name IN (d.from_table_name, d.to_table_name, CONCAT(d.from_table_name, ' -> ', d.to_table_name)) "+
-			"WHERE s.staged = 0", sourceCommit.String))
+	tables, err := unstagedMergeTables(ctx, db, sourceCommit.String)
 	if err != nil {
-		return fmt.Errorf("query merged-but-unstaged tables: %w", err)
-	}
-	var tables []string
-	for rows.Next() {
-		var table string
-		if err := rows.Scan(&table); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("scan merged-but-unstaged table: %w", err)
-		}
-		tables = append(tables, table)
-	}
-	// Drain and close before the next statement: db is a single session and
-	// the DOLT_ADD calls below must not race the open cursor.
-	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
-		return fmt.Errorf("list merged-but-unstaged tables: %w", err)
+		return err
 	}
 	for _, table := range tables {
 		if err := schema.DrainCall(ctx, db, "CALL DOLT_ADD(?)", table); err != nil {
 			return fmt.Errorf("stage merged %s: %w", table, err)
 		}
 	}
+	// Re-read status before the caller commits (GH#7757), even when the first
+	// read found nothing: if staging did not clear every merge-touched table,
+	// the commit would record HEAD's copy of the survivor — the very revert
+	// this staging exists to prevent — so refuse it. This is a completeness
+	// check within the settlement session, not a guarantee against a writer
+	// that dirties the table after it runs.
+	remaining, err := unstagedMergeTables(ctx, db, sourceCommit.String)
+	if err != nil {
+		return fmt.Errorf("re-check merged-but-unstaged tables: %w", err)
+	}
+	if len(remaining) > 0 {
+		return fmt.Errorf("merge-touched table(s) %s remain unstaged after staging; refusing to commit an incomplete merge result", strings.Join(remaining, ", "))
+	}
 	return nil
+}
+
+// unstagedMergeTables lists the tables that differ between HEAD and the
+// merge source commit and are still unstaged in dolt_status, skipping tables
+// dolt_ignore covers and mapping a rename's "<from> -> <to>" dolt_status
+// display name to the new name DOLT_ADD stages. sourceCommit must already be
+// validated against doltCommitHashRE: the diff table functions take literal
+// arguments only.
+func unstagedMergeTables(ctx context.Context, db DBConn, sourceCommit string) ([]string, error) {
+	//nolint:gosec // G201: sourceCommit is validated by the caller against doltCommitHashRE; the diff table functions require literal arguments.
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(
+		"SELECT DISTINCT CASE WHEN s.table_name = CONCAT(d.from_table_name, ' -> ', d.to_table_name) "+
+			"THEN d.to_table_name ELSE s.table_name END FROM dolt_status s "+
+			"JOIN (SELECT from_table_name, to_table_name FROM dolt_diff_summary('HEAD', '%[1]s') "+
+			"UNION SELECT from_table_name, to_table_name FROM dolt_schema_diff('HEAD', '%[1]s')) d "+
+			"ON s.table_name IN (d.from_table_name, d.to_table_name, CONCAT(d.from_table_name, ' -> ', d.to_table_name)) "+
+			"WHERE s.staged = 0 AND NOT EXISTS (SELECT 1 FROM dolt_ignore di WHERE di.ignored = 1 AND s.table_name LIKE di.pattern)",
+		sourceCommit))
+	if err != nil {
+		return nil, fmt.Errorf("query merged-but-unstaged tables: %w", err)
+	}
+	var tables []string
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("scan merged-but-unstaged table: %w", err)
+		}
+		tables = append(tables, table)
+	}
+	// Drain and close before the next statement: db is a single session and
+	// the caller's DOLT_ADD calls must not race the open cursor.
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, fmt.Errorf("list merged-but-unstaged tables: %w", err)
+	}
+	return tables, nil
 }
 
 // concludeMerge commits the resolved, repaired working set as the merge's
