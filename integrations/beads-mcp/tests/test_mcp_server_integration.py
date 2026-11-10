@@ -1310,3 +1310,18 @@ async def test_show_comment_completeness_real_cli(mcp_client):
     )
     assert [c["text"] for c in selected["comments"]] == ["first comment", "second comment"]
     assert selected["comments_omitted"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["list", "ready"])
+async def test_collection_comment_completeness_real_cli(mcp_client, tool):
+    """list/ready minimal rows say their comments were omitted (bd-kwe4ze)."""
+    import json
+
+    issue_id = await _issue_with_two_comments(mcp_client)
+
+    rows = json.loads((await mcp_client.call_tool(tool, {})).content[0].text)
+    row = next(r for r in rows if r["id"] == issue_id)
+    assert row["comment_count"] == 2
+    assert row["comments_omitted"] is True
+    assert "comments" not in row

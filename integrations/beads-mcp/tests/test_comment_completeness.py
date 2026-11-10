@@ -389,3 +389,77 @@ async def test_brief_mutation_result_shape_unchanged() -> None:
         result = await server.claim_issue(issue_id="bd-1")
 
     assert _keys(result) == {"id", "action", "message"}
+
+
+# AC-4: minimal list/ready rows and compacted previews keep count + omission.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["list", "ready"])
+async def test_minimal_rows_carry_comment_completeness(tool: str) -> None:
+    rec = _Recorder(
+        [
+            _issue(id="bd-1", comment_count=2, comments_omitted=True),
+            _issue(id="bd-2", comment_count=3),  # ready rows: count without the marker
+        ]
+    )
+
+    rows = await _collection(tool, rec)
+
+    assert [(r.id, r.comment_count, r.comments_omitted) for r in rows] == [("bd-1", 2, True), ("bd-2", 3, True)]
+    for row in rows:
+        dumped = row.model_dump()
+        assert "comments" not in dumped
+        assert "description" not in dumped
+    assert len(rec.calls) == 1
+    assert "--include-comments" not in rec.calls[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["list", "ready"])
+async def test_compacted_preview_carries_comment_completeness(tool: str) -> None:
+    from beads_mcp.models import CompactedResult
+
+    rows = [_issue(id=f"bd-{i}", comment_count=i + 1) for i in range(server.COMPACTION_THRESHOLD + 5)]
+    rec = _Recorder(rows)
+
+    result = await _collection(tool, rec, limit=100)
+
+    assert isinstance(result, CompactedResult)
+    assert result.total_count == len(rows)
+    assert [(p.comment_count, p.comments_omitted) for p in result.preview] == [
+        (i + 1, True) for i in range(server.PREVIEW_COUNT)
+    ]
+    assert "comments" not in result.preview[0].model_dump()
+    assert len(rec.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("extra", "count", "omitted"),
+    [
+        pytest.param(
+            {"comments": TWO_COMMENTS, "comments_omitted": False}, 2, True, id="removed-bodies-turn-false-true"
+        ),
+        pytest.param({"comments": TWO_COMMENTS}, 2, True, id="removed-derived-bodies"),
+        pytest.param({"comment_count": 2, "comments_omitted": True}, 2, True, id="explicit-true"),
+        pytest.param({"comments": [], "comments_omitted": True}, 0, True, id="explicit-true-over-zero"),
+        pytest.param({"comments": []}, 0, False, id="known-zero"),
+        pytest.param({}, None, None, id="unknown"),
+        pytest.param({"comments_omitted": False}, None, False, id="source-false-without-count"),
+    ],
+)
+def test_to_minimal_describes_its_own_omission(
+    extra: dict[str, Any], count: int | None, omitted: bool | None
+) -> None:
+    from beads_mcp.models import Issue
+
+    issue = Issue.model_validate(_issue(**extra))
+    before = issue.model_dump()
+
+    minimal = server._to_minimal(issue)
+
+    assert minimal.comment_count == count
+    assert minimal.comments_omitted is omitted
+    assert "comments" not in minimal.model_dump()
+    # The projection adjusts only its own row, never the source Issue.
+    assert issue.model_dump() == before
