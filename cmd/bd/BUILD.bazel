@@ -1349,6 +1349,7 @@ go_test(
         "update_audit_changes_test.go",
         "update_claim_audit_embedded_test.go",
         "update_claim_proxied_test.go",
+        "update_claim_status_audit_embedded_test.go",
         "update_close_policy_proxied_integration_test.go",
         "update_close_policy_test.go",
         "update_conditional_embedded_test.go",
