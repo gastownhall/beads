@@ -32,13 +32,20 @@ import "os/exec"
 // platform-neutral policy below compiles, and is tested, on every platform;
 // execwin_windows_test.go pins them to golang.org/x/sys/windows.
 const (
-	createNoWindow uint32 = 0x08000000
+	createNewProcessGroup uint32 = 0x00000200
+	createNoWindow        uint32 = 0x08000000
 )
 
 // Hide keeps cmd from allocating a visible console window on Windows and
 // returns cmd, so it wraps an exec.Command call inline:
 //
 //	out, err := execwin.Hide(exec.Command("git", "config", "user.name")).Output()
+//
+// Only a bd with no console of its own needs this, so Hide probes that per
+// call: when bd has a console the command is left exactly as it was and
+// inherits it (foreground prompts and Ctrl+C behave as before), and only a
+// console-less bd gives the command CREATE_NO_WINDOW, a console of its own
+// that is never displayed. Off Windows Hide changes nothing.
 //
 // A nil cmd is returned unchanged.
 func Hide(cmd *exec.Cmd) *exec.Cmd {
@@ -54,6 +61,12 @@ func Hide(cmd *exec.Cmd) *exec.Cmd {
 // carries (zero for a nil SysProcAttr) and attached reports whether bd itself
 // has a console. It returns the flags to start cmd with, and whether they
 // differ from flags at all.
-func hiddenCreationFlags(flags uint32, _ bool) (uint32, bool) {
+//
+// An attached bd changes nothing: its console children inherit that console
+// as before, so prompts, terminal output and Ctrl+C keep reaching them.
+func hiddenCreationFlags(flags uint32, attached bool) (uint32, bool) {
+	if attached {
+		return flags, false
+	}
 	return flags | createNoWindow, true
 }

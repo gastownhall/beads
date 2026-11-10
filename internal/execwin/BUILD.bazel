@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_test(
     name = "execwin_test",
     srcs = [
+        "execwin_other_test.go",
         "execwin_test.go",
         "execwin_windows_test.go",
     ],
