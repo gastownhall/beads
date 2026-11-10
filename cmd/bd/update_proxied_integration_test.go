@@ -183,6 +183,44 @@ func TestProxiedServerUpdate(t *testing.T) {
 		}
 	})
 
+	// A claim of a locally blocked issue is a per-id failure on the proxied
+	// route too: the blocked id names its blocker and the --force override and
+	// stays untouched, the unblocked id in the same batch is still claimed, and
+	// the batch exits 1.
+	t.Run("claim_blocked_delegated_guard", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ucbg")
+		blocker := bdProxiedCreate(t, bd, p.dir, "Claim blocker", "--type", "task")
+		blocked := bdProxiedCreate(t, bd, p.dir, "Blocked claim", "--type", "task")
+		free := bdProxiedCreate(t, bd, p.dir, "Unblocked claim", "--type", "task")
+		bdProxiedDep(t, bd, p.dir, "add", blocked.ID, blocker.ID)
+		revision := bdProxiedShowRevision(t, bd, p.dir, blocked.ID)
+
+		out, code := bdProxiedUpdateFailCode(t, bd, p.dir, blocked.ID, free.ID, "--claim", "--actor", "blocked-worker")
+		if code != 1 {
+			t.Errorf("exit code = %d, want 1\n%s", code, out)
+		}
+		want := "cannot claim blocked issue: " + blocked.ID + " is blocked by [" + blocker.ID + "] (use --force to override)"
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q, got: %s", want, out)
+		}
+		if strings.Contains(out, free.ID+" is blocked") {
+			t.Errorf("unblocked %s reported blocked: %s", free.ID, out)
+		}
+
+		got := bdProxiedShow(t, bd, p.dir, blocked.ID)
+		if got.Status != types.StatusOpen || got.Assignee != "" {
+			t.Errorf("refused claim changed issue: status=%q assignee=%q", got.Status, got.Assignee)
+		}
+		if after := bdProxiedShowRevision(t, bd, p.dir, blocked.ID); after != revision {
+			t.Errorf("refused claim moved %s's revision %d -> %d", blocked.ID, revision, after)
+		}
+		gotFree := bdProxiedShow(t, bd, p.dir, free.ID)
+		if gotFree.Status != types.StatusInProgress || gotFree.Assignee != "blocked-worker" {
+			t.Errorf("unblocked claim in the same batch did not land: status=%q assignee=%q", gotFree.Status, gotFree.Assignee)
+		}
+	})
+
 	// Parity with the non-proxied update_claim_batch_partial_loss_exits_nonzero:
 	// a batch where one claim is lost and another is won must exit non-zero so
 	// the lost claim is not hidden from exit-code automation (beads audit
