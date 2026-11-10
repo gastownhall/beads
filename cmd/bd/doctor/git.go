@@ -56,15 +56,14 @@ func CheckGitHooks(cliVersion string) DoctorCheck {
 	// A configured hooks directory that does not exist is a configuration
 	// fault, not missing hook files: git runs no hooks at all, and the Hooks
 	// Path check owns the repair. A generic install would only recreate the
-	// stale directory (GH#5853).
+	// stale directory (GH#5853), so this finding carries no Fix of its own.
 	if q, ok := CurrentHooksPathQuery(); ok {
 		if s := InspectHooksPath(q); s.Missing() {
 			return DoctorCheck{
 				Name:    "Git Hooks",
 				Status:  StatusWarning,
 				Message: "Git runs no hooks: core.hooksPath points at a missing directory",
-				Detail:  fmt.Sprintf("core.hooksPath=%s does not exist (see Hooks Path)", s.Configured),
-				Fix:     HooksPathFix(s),
+				Detail:  fmt.Sprintf("core.hooksPath=%s does not exist; the Hooks Path check names the repair", s.Configured),
 			}
 		}
 	}

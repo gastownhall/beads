@@ -442,3 +442,28 @@ func TestPermissionsWithWrongPermissions_E2E(t *testing.T) {
 }
 
 // Note: Helper functions setupTestGitRepo and runGit are defined in fix_test.go
+
+// TestGitHooks_SkipsWhenConfiguredHooksPathMissing pins AC-8 of the GH#5853
+// design: the Git Hooks fixer re-inspects the configured core.hooksPath before
+// acting and skips rather than force-installing against a stale destination —
+// the Hooks Path repair owns that configuration.
+func TestGitHooks_SkipsWhenConfiguredHooksPathMissing(t *testing.T) {
+	dir := setupTestGitRepo(t)
+	stale := filepath.Join(t.TempDir(), "moved-away", ".beads", "hooks")
+	cmd := gitCommand("config", "core.hooksPath", stale)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config core.hooksPath failed: %v (%s)", err, out)
+	}
+
+	err := GitHooks(dir)
+	if !errors.Is(err, ErrSkipped) {
+		t.Fatalf("GitHooks returned %v, want a skip naming the configuration fault", err)
+	}
+	if !strings.Contains(err.Error(), "core.hooksPath") {
+		t.Errorf("the skip reason must name core.hooksPath, got: %v", err)
+	}
+	if _, statErr := os.Stat(stale); !os.IsNotExist(statErr) {
+		t.Errorf("the stale directory %s must not be created (stat err=%v)", stale, statErr)
+	}
+}
