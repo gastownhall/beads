@@ -424,3 +424,61 @@ func TestEmbeddedCrossPrefixRepairReopenIsNoop(t *testing.T) {
 	}
 	requireIgnoredCursorAtLatest(t, ctx, conn)
 }
+
+// TestEmbeddedCrossPrefixRepairClonesConverge is AC-8: two clones with the
+// same versioned history but different clone-local wisps repair the synced
+// dependencies table identically, because a versioned row binds only to the
+// versioned issues table, while each clone's own wisp edges resolve against
+// its own wisps.
+func TestEmbeddedCrossPrefixRepairClonesConverge(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	seedVersioned := func(conn *sql.Conn) {
+		seedLegacyIssue(t, ctx, conn, "issues", "rb-open", "open", 1)
+		seedLegacyIssue(t, ctx, conn, "issues", "ra-a", "open", 2)
+		seedLegacyIssue(t, ctx, conn, "issues", "ra-b", "open", 3)
+		seedDep(t, ctx, conn, "dependencies", "ra-a", "rw-1", "depends_on_external", "blocks")
+		seedDep(t, ctx, conn, "dependencies", "ra-b", "rb-open", "depends_on_external", "blocks")
+	}
+
+	connA, _, closeA := newCrossPrefixRepairDB(t, ctx)
+	defer closeA()
+	seedVersioned(connA)
+	seedLegacyIssue(t, ctx, connA, "wisps", "rw-1", "open", 10)
+	seedLegacyIssue(t, ctx, connA, "wisps", "ra-w1", "open", 11)
+	seedDep(t, ctx, connA, "wisp_dependencies", "ra-w1", "rw-1", "depends_on_external", "blocks")
+	seedDep(t, ctx, connA, "wisp_dependencies", "ra-w1", "rb-open", "depends_on_external", "related")
+	commitLegacyStateAndUnmarkRepair(t, ctx, connA)
+
+	connB, _, closeB := newCrossPrefixRepairDB(t, ctx)
+	defer closeB()
+	seedVersioned(connB)
+	seedLegacyIssue(t, ctx, connB, "wisps", "ra-w2", "open", 12)
+	seedDep(t, ctx, connB, "wisp_dependencies", "ra-w2", "rw-1", "depends_on_external", "blocks")
+	commitLegacyStateAndUnmarkRepair(t, ctx, connB)
+
+	for name, conn := range map[string]*sql.Conn{"A": connA, "B": connB} {
+		if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("clone %s repair MigrateUp: %v", name, err)
+		}
+		requireDepColumn(t, ctx, conn, "dependencies", "ra-a", "rw-1", "depends_on_external")
+		requireDepColumn(t, ctx, conn, "dependencies", "ra-b", "rb-open", "depends_on_issue_id")
+		requireBlockedStateConsistent(t, ctx, conn)
+		if !ignoredMarkerRecorded(t, ctx, conn, 32) {
+			t.Errorf("clone %s: ignored marker 0032 not recorded", name)
+		}
+	}
+	requireDepColumn(t, ctx, connA, "wisp_dependencies", "ra-w1", "rw-1", "depends_on_wisp_id")
+	requireDepColumn(t, ctx, connA, "wisp_dependencies", "ra-w1", "rb-open", "depends_on_issue_id")
+	if blocked, _ := readBlocked(t, ctx, connA, "wisps", "ra-w1"); !blocked {
+		t.Error("clone A: ra-w1 is_blocked = false, want true (blocks -> open local wisp rw-1)")
+	}
+	requireDepColumn(t, ctx, connB, "wisp_dependencies", "ra-w2", "rw-1", "depends_on_external")
+
+	versioned := "SELECT id, issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_by," +
+		" CAST(created_at AS CHAR), CAST(metadata AS CHAR), thread_id FROM dependencies ORDER BY id"
+	if a, b := dumpRows(t, ctx, connA, versioned), dumpRows(t, ctx, connB, versioned); a != b {
+		t.Errorf("clones repaired the synced dependencies table differently:\nA: %s\nB: %s", a, b)
+	}
+}
