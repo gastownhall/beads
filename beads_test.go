@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -60,7 +61,10 @@ func skipIfNoDoltServer(t *testing.T) {
 	if err != nil {
 		t.Skipf("Dolt server not running on %s, skipping test", addr)
 	}
-	_ = conn.Close()
+	// The shared test server writes its MySQL greeting on the accepted
+	// connection; drain it so the probe's close is a FIN, not the RST that
+	// aborts the handshake (#4132/#5589).
+	doltutil.DrainAndCloseProbe(conn)
 }
 
 func TestOpen(t *testing.T) {

@@ -106,7 +106,10 @@ func startLocalDoltServerAt(t *testing.T, dataDir, host string) (int, func()) {
 	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(200 * time.Millisecond) {
 		// #nosec G704 -- a loopback address this test chose, with a free local port.
 		if conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond); err == nil {
-			_ = conn.Close()
+			// The sql-server writes its MySQL greeting the moment the dial
+			// is accepted; drain it so the probe's close is a FIN and not
+			// the RST that aborts the handshake (#4132/#5589).
+			doltserver.DrainAndCloseProbe(conn)
 			return port, stop
 		}
 		if time.Now().After(deadline) {
