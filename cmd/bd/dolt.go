@@ -1908,6 +1908,9 @@ clean-databases runs even if this run finds no stale databases to drop.
 Only pass it when nothing else on the server may be relying on DOLT_UNDROP
 recovery.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// DROP DATABASE runs on a raw server connection no store guard sees, so
+		// strict read-only must refuse here, previews included (GH#7876).
+		CheckReadonly("dolt clean-databases")
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
 			return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
