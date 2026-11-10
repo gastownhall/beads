@@ -379,6 +379,63 @@ func TestUserConfigReadsNeverProbeNativeWhenDocumentedExists(t *testing.T) {
 	}
 }
 
+// Native is a fallback, not a layer: while the documented file exists, keys
+// only the native file defines stop applying, effective or private, while the
+// legacy file still merges beneath documented.
+func TestInitializeIgnoresNativeUserConfigWhenDocumentedExists(t *testing.T) {
+	candidates, _ := newDistinctUserConfigFixture(t)
+	writeConfigYAML(t, candidates.legacy, "actor: legacy\n")
+	writeConfigYAML(t, candidates.native,
+		"actor: native\ngithub:\n  url: https://native.example\nnode_id: native-node\n")
+	writeConfigYAML(t, candidates.documented, "jira:\n  url: https://documented.example\n")
+
+	initialize := func() {
+		t.Helper()
+		ResetForTesting()
+		if err := Initialize(); err != nil {
+			t.Fatalf("Initialize: %v", err)
+		}
+	}
+	assertNativeIgnored := func(wantActor string) {
+		t.Helper()
+		if got := GetString("actor"); got != wantActor {
+			t.Errorf("actor = %q, want %q", got, wantActor)
+		}
+		if got := PrivateConfigValue("actor"); got != wantActor {
+			t.Errorf("private actor = %q, want %q", got, wantActor)
+		}
+		for _, key := range []string{"github.url", "node_id"} {
+			if got := GetString(key); got != "" {
+				t.Errorf("native-only %s = %q, want unset", key, got)
+			}
+			if got := PrivateConfigValue(key); got != "" {
+				t.Errorf("private native-only %s = %q, want unset", key, got)
+			}
+		}
+		if got := NodeID(); got != "" {
+			t.Errorf("NodeID() = %q, want unset", got)
+		}
+	}
+
+	initialize()
+	assertNativeIgnored("legacy")
+	if got := GetString("jira.url"); got != "https://documented.example" {
+		t.Errorf("jira.url = %q, want the documented value", got)
+	}
+	if got := PrivateConfigValue("jira.url"); got != "https://documented.example" {
+		t.Errorf("private jira.url = %q, want the documented value", got)
+	}
+
+	writeConfigYAML(t, candidates.documented, "actor: documented\n")
+	initialize()
+	assertNativeIgnored("documented")
+
+	// An empty documented file still exists, so it still shadows native.
+	writeConfigYAML(t, candidates.documented, "")
+	initialize()
+	assertNativeIgnored("legacy")
+}
+
 func userConfigTestRoots(t *testing.T) (string, string) {
 	t.Helper()
 	base := t.TempDir()
