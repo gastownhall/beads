@@ -1222,6 +1222,77 @@ func TestSameOwnerCreationIdentifiesOnlyRealMatches(t *testing.T) {
 	}
 }
 
+// TestMutationOfHydratedCopyRefusesUnreachableOwner pins the failure mode the
+// owner redirect must have (GH#6058): when the copy's source marker names the
+// active target but that target cannot be opened, every mutation resolver
+// refuses — reporting success for a write that never reached the owner is the
+// silent no-op this change exists to end — naming the target and leaving the
+// project row untouched. A read still answers from the copy: a busy or broken
+// planning store must not break bd show.
+func TestMutationOfHydratedCopyRefusesUnreachableOwner(t *testing.T) {
+	primaryStore, _, planningDir := setupAutoRouteWithHydratedCopy(t, "maintainer", "routing.maintainer")
+	ctx := context.Background()
+	// Corrupted after the copy is imported, so the marker matches and the
+	// owner's open fails exactly where the redirect needs it.
+	if err := os.WriteFile(filepath.Join(planningDir, ".beads", "metadata.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("corrupt planning metadata.json: %v", err)
+	}
+
+	for _, resolve := range []struct {
+		name string
+		call func() (*RoutedResult, error)
+	}{
+		{"exact mutation (bd delete, bd comment)", func() (*RoutedResult, error) {
+			return resolveAndGetIssueForMutationExact(ctx, primaryStore, "shared-hub")
+		}},
+		{"ordinary mutation (bd update)", func() (*RoutedResult, error) {
+			return resolveAndGetIssueForMutation(ctx, primaryStore, "shared-hub")
+		}},
+		{"close (resolveCloseTargets)", func() (*RoutedResult, error) {
+			results, cleanup, err := resolveCloseTargets(ctx, primaryStore, []string{"shared-hub"})
+			if err == nil {
+				cleanup()
+				if len(results) != 1 {
+					t.Fatalf("resolveCloseTargets returned %d results, want 1", len(results))
+				}
+				return results[0], nil
+			}
+			return nil, err
+		}},
+	} {
+		result, err := resolve.call()
+		if err == nil {
+			if result != nil {
+				result.Close()
+			}
+			t.Fatalf("%s of the copy succeeded while the planning store cannot open; want a refusal naming %s", resolve.name, planningDir)
+		}
+		if !strings.Contains(err.Error(), planningDir) || !strings.Contains(err.Error(), "failed to open routed store") {
+			t.Fatalf("%s error = %v; want it to name the planning store and its open failure", resolve.name, err)
+		}
+		// The refusal leaves the project row unchanged.
+		copyRow, err := primaryStore.GetIssue(ctx, "shared-hub")
+		if err != nil {
+			t.Fatalf("reread the project copy after the refusal: %v", err)
+		}
+		if copyRow.Status != types.StatusOpen {
+			t.Fatalf("project copy status = %s after %s's refusal, want it left %s", copyRow.Status, resolve.name, types.StatusOpen)
+		}
+	}
+
+	read, err := resolveAndGetIssueWithRouting(ctx, primaryStore, "shared-hub")
+	if err != nil {
+		t.Fatalf("read of the copy while the planning store cannot open: %v", err)
+	}
+	defer read.Close()
+	if read.Routed {
+		t.Fatalf("read routed to the unreachable planning store (%v)", read.RedirectedCopyOwner)
+	}
+	if read.Issue.ID != "shared-hub" || read.Issue.Status != types.StatusOpen {
+		t.Fatalf("read returned %+v; want the local copy's own row", read.Issue)
+	}
+}
+
 // committedIssue returns id as the HEAD commit of beadsDir's database holds
 // it, without what the working set holds uncommitted.
 func committedIssue(t *testing.T, beadsDir, database, id string) *types.Issue {
