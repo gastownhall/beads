@@ -526,6 +526,7 @@ var roleContractCases = []roleContract{
 		RunLifecycleUpdateForceClaimBlockedClaimsPastALiveBlocker,
 		RunLifecycleUpdateReclaimByTheHolderIgnoresANewBlocker,
 		RunLifecycleUpdateClaimIgnoresAnInheritedBlockedFlag,
+		RunLifecycleUpdateForceClaimBlockedRequiresAClaim,
 		RunLifecycleUpdatePersistsThePatchAndHydratesTheResult,
 		RunLifecycleUpdatePreservesTheCreationStamp,
 		RunLifecycleUpdateReportsNoChangeForASameValuePatch,
