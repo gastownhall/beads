@@ -37,6 +37,7 @@ go_library(
 go_test(
     name = "versioncontrolops_test",
     srcs = [
+        "abortmerge_test.go",
         "automerge_test.go",
         "backup_test.go",
         "clone_test.go",
