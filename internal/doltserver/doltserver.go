@@ -2246,10 +2246,13 @@ func EnsureGlobalDatabase(host string, port int, user, password string) error {
 	return nil
 }
 
-// FlushWorkingSet connects to the running Dolt server and commits any uncommitted
-// working set changes across all databases. This prevents data loss when the server
-// is about to be stopped or restarted. Returns nil if there's nothing to flush or
-// if the server is not reachable (best-effort).
+// FlushWorkingSet connects to the running Dolt server and records any pending
+// working set changes across all databases as Dolt history commits. It is a
+// best-effort recording, not a persistence step: with Dolt's default chunk
+// journal, SQL-committed changes are already durable on disk, so this flush
+// decides whether they also land in history before a stop or restart
+// (TestLifecycle_SharedServerSQLCommitSurvivesKill). Returns nil if there's
+// nothing to flush or if the server is not reachable (best-effort).
 func FlushWorkingSet(host string, port int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -2438,8 +2441,10 @@ func stopLocked(beadsDir string) error {
 		return errors.Join(ErrServerNotRunning, cleanupStateFiles(beadsDir))
 	}
 
-	// Flush uncommitted working set changes before stopping the server.
-	// This prevents data loss when changes have been written but not yet committed.
+	// Record pending working set changes in Dolt history before stopping the
+	// server, best-effort. With Dolt's default chunk journal, SQL-committed
+	// changes are already durable; this flush preserves them in history, it
+	// does not save them from loss.
 	cfg := DefaultConfig(beadsDir)
 	if flushErr := FlushWorkingSet(cfg.Host, state.Port); flushErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not flush working set before stop: %v\n", flushErr)

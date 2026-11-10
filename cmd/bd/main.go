@@ -1728,9 +1728,6 @@ var rootCmd = &cobra.Command{
 				}
 			}
 			if err := guardLegacyNoStoreCommand(cmd, beadsDir); err != nil {
-				if isUnsupportedWorkspaceFormat(err) {
-					return handleWorkspaceGuardError(err)
-				}
 				isMigrationCommand := false
 				for current := cmd; current != nil; current = current.Parent() {
 					if current.Name() == "migrate" {

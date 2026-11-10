@@ -64,6 +64,17 @@ general bd doctor checks are not supported in embedded mode (only
 run there). Recovery means building a new database from a copy of your data
 that still opens, while keeping the damaged store intact.
 
+In releases after v1.3.2, `bd doctor --fix` backs up or deletes a database
+only inside the workspace's `.beads` directory (a symlinked `.beads` counts),
+or at the location `BEADS_DOLT_DATA_DIR` selects. Automatic integrity recovery
+and the repo fingerprint fix's "Reinitialize database" choice refuse a
+`dolt_data_dir` or `database` path that points outside `.beads`, at `.beads`
+itself, or through a symlink, and leave it untouched; recover such a store by
+hand with the steps below. If `bd init` fails during automatic recovery and
+the database location changed meanwhile, bd leaves the backup where it is and
+prints the path it wrote the backup to; if a directory above the database was
+replaced, the backup moved with that directory.
+
 ### 1. Stop everything that uses the store
 
 Stop every bd process, agent and script that works in this workspace. In
