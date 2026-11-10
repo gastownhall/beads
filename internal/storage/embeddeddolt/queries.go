@@ -23,6 +23,15 @@ var _ storage.ExpiredDeferWaker = (*EmbeddedDoltStore)(nil)
 var _ storage.DescendantSearcher = (*EmbeddedDoltStore)(nil)
 var _ storage.IssuesWithConfigSearcher = (*EmbeddedDoltStore)(nil)
 
+// SetDeferWakeSweepEnabled switches the lazy defer-wake sweep on or off for
+// this store instance. A ready read on a store opened for a read-only command
+// sweeps only when the caller classified it as a plain read over a writable
+// store; a MIGRATION-FREEZE turns it off, so the sweep's write waits for the
+// first invocation after the thaw (#7634). Stores start with the sweep on.
+func (s *EmbeddedDoltStore) SetDeferWakeSweepEnabled(enabled bool) {
+	s.deferWakeDisabled.Store(!enabled)
+}
+
 // wakeExpiredDefers runs the lazy defer-wake sweep (issueops.WakeExpiredDefersInTx)
 // in its own write transaction before a ready-work read. Advisory by contract:
 // a ready listing must never fail because the sweep could not run — strict
@@ -31,6 +40,9 @@ var _ storage.IssuesWithConfigSearcher = (*EmbeddedDoltStore)(nil)
 // OUTSIDE the read connections below because withConn(ctx, false, …) always
 // rolls back.
 func (s *EmbeddedDoltStore) wakeExpiredDefers(ctx context.Context) {
+	if s.deferWakeDisabled.Load() {
+		return
+	}
 	err := s.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (issueops.ChangedTables, string, error) {
 		woke, err := issueops.WakeExpiredDefersInTx(ctx, tx)
 		if err != nil {

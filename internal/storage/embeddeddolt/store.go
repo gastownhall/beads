@@ -86,6 +86,9 @@ type EmbeddedDoltStore struct {
 	// (e.g. the post-command autocommit net, or the commit itself) - only the
 	// migration step is skipped.
 	intent openIntent
+	// deferWakeDisabled turns the lazy defer-wake sweep off for THIS store
+	// instance only (SetDeferWakeSweepEnabled); never process-global.
+	deferWakeDisabled atomic.Bool
 }
 
 // lenientSharedGateGuidance is the blunt migrate-or-adopt block shared by the

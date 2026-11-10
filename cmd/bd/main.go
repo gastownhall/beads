@@ -262,6 +262,18 @@ func effectiveRootStorePolicy(cmdName string, strictReadonly bool) rootStorePoli
 	}
 }
 
+// classifiedReadOpen reports whether the root store open is a classification-
+// only read (GH#804) that may still run the lazy defer-wake sweep: a command
+// classified read-only, opened over a store that is genuinely writable
+// underneath. Strict --readonly and a preview are not — they must not write at
+// all — and neither is any read made while a MIGRATION-FREEZE is in force
+// (frozen is the invocation's single commandFreeze answer, a failed lookup
+// included): the freeze makes the workspace read-only for the migration, so
+// the sweep waits for the first invocation after the thaw (#7634).
+func classifiedReadOpen(policyReadOnly, strictReadonly, preview, frozen bool) bool {
+	return policyReadOnly && !strictReadonly && !preview && !frozen
+}
+
 // runsPostCommandMaintenance reports whether PersistentPostRunE should run the
 // post-command maintenance net — Dolt auto-commit, the tip-metadata commit,
 // auto-backup, auto-export and auto-push.
@@ -2120,10 +2132,11 @@ var rootCmd = &cobra.Command{
 			// Bulk loads outlive the pool's 10s fast-fail on every server
 			// pause (wy-sbgucn); explicit env/config settings still win.
 			PoolReadTimeoutFallback: bulkLoadPoolReadTimeout(cmd),
-			// Classification-only read (GH#804), never strict --readonly or a
-			// preview: the store is genuinely writable underneath, so the
-			// lazy defer-wake sweep may still run (be-vbhpf).
-			ClassifiedRead: policy.readOnly && !readonlyMode && !previewMode,
+			// Classification-only read (GH#804), never strict --readonly, a
+			// preview or a frozen workspace: the store is genuinely writable
+			// underneath, so the lazy defer-wake sweep may still run
+			// (be-vbhpf) unless a MIGRATION-FREEZE holds it off (#7634).
+			ClassifiedRead: classifiedReadOpen(policy.readOnly, readonlyMode, previewMode, commandFreeze.Frozen()),
 			// A read-only or gateway open does not migrate, so a schema too
 			// old for this binary's issue reads is refused at open instead of
 			// failing each read on an unknown column. Not for a preview,
