@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/beads"
@@ -223,6 +224,31 @@ func redirectLocalCopy(ctx context.Context, localStore storage.DoltStorage, loca
 	}, nil
 }
 
+// redirectLocalCopyToOwner is redirectLocalCopy through an owner store of the
+// result's own, opened with the caller's write intent.
+func redirectLocalCopyToOwner(ctx context.Context, localStore storage.DoltStorage, local *RoutedResult, writable bool) (*RoutedResult, error) {
+	return redirectLocalCopy(ctx, localStore, local, func(target autoRouteTarget) (storage.DoltStorage, func(), error) {
+		ownerStore, err := openAutoRouteTarget(ctx, target, writable)
+		if err != nil {
+			return nil, nil, err
+		}
+		return ownerStore, func() { _ = ownerStore.Close() }, nil
+	})
+}
+
+// printRetainedCopyNote tells the user, after result's issue was deleted from
+// the repository a local copy was imported from, that the copy is still here
+// and how to remove it. Quiet mode suppresses it.
+func printRetainedCopyNote(result *RoutedResult) {
+	if result.copyOwner == "" || isQuiet() {
+		return
+	}
+	owner := remedy.PrintedValue(result.copyOwner)
+	idArg, idNote := remedy.CommandArg(runtime.GOOS, result.ResolvedID, "<id>")
+	fmt.Fprintf(os.Stderr, "note: deleted %s from %s; this project still holds the copy bd repo sync imported.\n", remedy.PrintedWord(result.ResolvedID), owner)
+	fmt.Fprintf(os.Stderr, "  While %s no longer holds it, bd delete %s --force removes the local copy.%s\n", owner, idArg, idNote)
+}
+
 // isRoutedResolutionRefusal reports whether a routed tier's resolution error
 // answers in place of the local store's not-found. Both sentinels mean the
 // routed store holds what the id names but will not pick it: the id names
@@ -313,7 +339,7 @@ func resolveAndGetFromStoreExact(ctx context.Context, s storage.DoltStorage, id 
 func resolveAndGetIssueForMutationExact(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
 	result, err := resolveAndGetFromStoreExact(ctx, localStore, id, false)
 	if err == nil {
-		return result, nil
+		return redirectLocalCopyToOwner(ctx, localStore, result, true)
 	}
 	if !isNotFoundErr(err) {
 		return nil, err

@@ -3,12 +3,14 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
@@ -158,6 +160,100 @@ func TestEmbeddedContributorRoutedWritesCommitInPlanning(t *testing.T) {
 		t.Errorf("the comment did not land in the planning store: %+v", comments)
 	}
 	assertIssueNotInStore(t, filepath.Join(dir, ".beads"), "cw", issue.ID)
+}
+
+// TestEmbeddedContributorDeleteOfHydratedCopyLandsInPlanning runs the GH#6058
+// two-store fix end to end through the bd binary: after `bd repo sync` hydrates
+// planning issues into the project store as copies, `bd delete` of a copy
+// deletes the planning owner's row (and the routed `bd list` no longer shows
+// it), leaves the project copy behind, and prints one retained-copy note on
+// stderr — unless --quiet suppresses it. A second, local delete then removes
+// the copy, as the note says it now can.
+func TestEmbeddedContributorDeleteOfHydratedCopyLandsInPlanning(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt contributor tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, planningDir := initContributor(t, bd, "hc")
+	projectBeadsDir := filepath.Join(dir, ".beads")
+	planningBeadsDir := filepath.Join(planningDir, ".beads")
+
+	deleted := bdCreate(t, bd, dir, "Delete through the hydrated copy")
+	quiet := bdCreate(t, bd, dir, "Delete quietly through the copy")
+
+	// Hydrate the project store with copies of the planning rows, the way a
+	// contributor checkout does. The wizard already added the planning repo to
+	// repos.additional, so the sync needs only a fresh issues.jsonl to read.
+	bdCommand(t, bd, planningDir, "export", "-o", filepath.Join(planningBeadsDir, "issues.jsonl"))
+	bdCommand(t, bd, dir, "repo", "sync")
+	for _, id := range []string{deleted.ID, quiet.ID} {
+		assertIssueInStore(t, projectBeadsDir, "hc", id)
+	}
+
+	// The delete of a copy is redirected to the planning owner...
+	_, stderr := bdRunCapture(t, bd, dir, "delete", deleted.ID, "--force")
+	if n := strings.Count(stderr, "note: deleted"); n != 1 {
+		t.Errorf("delete %s: stderr carries %d retained-copy notes, want exactly 1\nstderr:\n%s", deleted.ID, n, stderr)
+	} else {
+		for _, want := range []string{deleted.ID, planningDir} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("retained-copy note does not mention %s\nstderr:\n%s", want, stderr)
+			}
+		}
+	}
+
+	// ...and --quiet suppresses the note while deleting just the same.
+	_, stderr = bdRunCapture(t, bd, dir, "delete", quiet.ID, "--force", "--quiet")
+	if strings.Contains(stderr, "note:") {
+		t.Errorf("quiet delete of %s still printed a stderr note:\n%s", quiet.ID, stderr)
+	}
+
+	// Both deletes removed the planning owner's rows; the project copies
+	// remain, and the routed list reads planning, so it shows neither id.
+	for _, id := range []string{deleted.ID, quiet.ID} {
+		assertIssueNotInStore(t, planningBeadsDir, "hc", id)
+		assertIssueInStore(t, projectBeadsDir, "hc", id)
+	}
+	listOut := bdCommand(t, bd, dir, "list")
+	for _, id := range []string{deleted.ID, quiet.ID} {
+		if strings.Contains(listOut, id) {
+			t.Errorf("routed bd list still shows deleted %s", id)
+		}
+	}
+
+	// The note's remedy works: with the owner no longer holding the row, the
+	// same delete command removes the local copy.
+	bdCommand(t, bd, dir, "delete", deleted.ID, "--force")
+	assertIssueNotInStore(t, projectBeadsDir, "hc", deleted.ID)
+}
+
+// bdRunCapture runs a bd command with stdout and stderr captured separately,
+// retrying on embedded flock contention like bdRunWithFlockRetry. Fatals on
+// any other failure.
+func bdRunCapture(t *testing.T, bd, dir string, args ...string) (stdout, stderr string) {
+	t.Helper()
+	var out, errBuf bytes.Buffer
+	for attempt := 0; ; attempt++ {
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out.Reset()
+		errBuf.Reset()
+		cmd.Stdout = &out
+		cmd.Stderr = &errBuf
+		err := cmd.Run()
+		if err == nil || !isEmbeddedLockOutput(out.String()+errBuf.String()) || attempt >= 9 {
+			if err != nil {
+				t.Fatalf("bd %s failed: %v\nstdout:\n%s\nstderr:\n%s",
+					strings.Join(args, " "), err, out.String(), errBuf.String())
+			}
+			return out.String(), errBuf.String()
+		}
+		t.Logf("bd %s: flock contention (attempt %d/10), retrying...", args[0], attempt+1)
+		time.Sleep(time.Duration(500*(1<<min(attempt, 4))) * time.Millisecond)
+	}
 }
 
 // initContributor sets up a project with contributor mode enabled and returns
