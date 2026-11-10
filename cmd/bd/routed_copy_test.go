@@ -16,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
@@ -959,6 +960,133 @@ func TestResolveDeleteBatchReleasesWhatItKeeps(t *testing.T) {
 		}
 		if closes["pl-a"] != 1 || closes["pl-b"] != 1 {
 			t.Errorf("pl-c failing (%v) left closes %v, want pl-a and pl-b closed once each", failure, closes)
+		}
+	}
+}
+
+// TestStoreOpensLoggedUnderVerbose pins that --verbose logs each store a
+// command opens, with its access and the reason, on stderr, and leaves the
+// command's stdout as it was.
+func TestStoreOpensLoggedUnderVerbose(t *testing.T) {
+	f := newCopyFixture(t, []string{"pl-v"}, []string{"pl-v"}, nil)
+	jsonOutput = true
+
+	quiet := runCopyCmd(t, showCmd, nil, "pl-v")
+	if quiet.exitCode != 0 {
+		t.Fatalf("bd show pl-v: exit %d, err %v\nstderr: %s", quiet.exitCode, quiet.err, quiet.stderr)
+	}
+	if strings.Contains(quiet.stderr, "store: ") {
+		t.Errorf("bd show without --verbose logged store opens:\n%s", quiet.stderr)
+	}
+
+	debug.SetVerbose(true)
+	t.Cleanup(func() { debug.SetVerbose(false) })
+	verbose := runCopyCmd(t, showCmd, nil, "pl-v")
+	if verbose.exitCode != 0 {
+		t.Fatalf("bd show pl-v --verbose: exit %d, err %v\nstderr: %s", verbose.exitCode, verbose.err, verbose.stderr)
+	}
+	if verbose.stdout != quiet.stdout {
+		t.Errorf("--verbose changed stdout:\nwithout: %s\nwith:    %s", quiet.stdout, verbose.stdout)
+	}
+	want := "store: " + f.planningBeadsDir + " read (auto-route: maintainer)\n"
+	if !strings.Contains(verbose.stderr, want) {
+		t.Errorf("bd show pl-v --verbose stderr lacks %q:\n%s", want, verbose.stderr)
+	}
+}
+
+// TestStoreOpenLogNamesRuleAndAccess pins the reason and access of an
+// auto-routed store's log line: the rule that selected the target, read for
+// a read and write for a mutation, logged once.
+func TestStoreOpenLogNamesRuleAndAccess(t *testing.T) {
+	for _, rule := range []string{"maintainer", "default"} {
+		t.Run(rule, func(t *testing.T) {
+			f := newCopyFixture(t, []string{"pl-v"}, []string{"pl-v"}, nil)
+			if rule == "default" {
+				for key, value := range map[string]string{"routing.maintainer": "", "routing.default": f.planningDir} {
+					if err := f.project.SetConfig(t.Context(), key, value); err != nil {
+						t.Fatalf("set %s: %v", key, err)
+					}
+				}
+			}
+			debug.SetVerbose(true)
+			t.Cleanup(func() { debug.SetVerbose(false) })
+
+			read := runCopyCmd(t, showCmd, nil, "pl-v")
+			if read.exitCode != 0 {
+				t.Fatalf("bd show pl-v: exit %d, err %v\nstderr: %s", read.exitCode, read.err, read.stderr)
+			}
+			if want := "store: " + f.planningBeadsDir + " read (auto-route: " + rule + ")\n"; !strings.Contains(read.stderr, want) {
+				t.Errorf("bd show pl-v stderr lacks %q:\n%s", want, read.stderr)
+			}
+			write := runCopyCmd(t, updateCmd, map[string]string{"priority": "0"}, "pl-v")
+			if write.exitCode != 0 {
+				t.Fatalf("bd update pl-v: exit %d, err %v\nstderr: %s", write.exitCode, write.err, write.stderr)
+			}
+			if want := "store: " + f.planningBeadsDir + " write (auto-route: " + rule + ")\n"; strings.Count(write.stderr, want) != 1 {
+				t.Errorf("bd update pl-v stderr does not log %q once:\n%s", want, write.stderr)
+			}
+		})
+	}
+}
+
+// TestProjectStoreLazyOpenLoggedOnlyOnSuccess pins the project store's log
+// line when a command opens it lazily (ensureStoreActive), and that an open
+// that fails logs no line.
+func TestProjectStoreLazyOpenLoggedOnlyOnSuccess(t *testing.T) {
+	f := newCopyFixture(t, nil, nil, nil)
+	if err := f.project.Close(); err != nil {
+		t.Fatalf("close the fixture's project store: %v", err)
+	}
+	storeMutex.Lock()
+	store, storeActive = nil, false
+	storeMutex.Unlock()
+	debug.SetVerbose(true)
+	t.Cleanup(func() { debug.SetVerbose(false) })
+
+	var err error
+	stderr := captureStderr(t, func() { err = ensureStoreActiveWithContext(t.Context()) })
+	if err != nil {
+		t.Fatalf("ensureStoreActiveWithContext: %v", err)
+	}
+	t.Cleanup(func() { _ = getStore().Close() })
+	if want := "store: " + f.projectBeadsDir + " write (project)\n"; strings.Count(stderr, want) != 1 {
+		t.Errorf("the lazy project open does not log %q once:\n%s", want, stderr)
+	}
+	stderr = captureStderr(t, func() { err = ensureStoreActiveWithContext(t.Context()) })
+	if err != nil || strings.Contains(stderr, "store: ") {
+		t.Errorf("ensureStoreActive with the store already open: err %v, stderr:\n%s", err, stderr)
+	}
+
+	missing := filepath.Join(t.TempDir(), ".beads")
+	writeEmbeddedMetadata(t, missing, "missing")
+	stderr = captureStderr(t, func() {
+		var s storage.DoltStorage
+		s, err = openForeignStore(t.Context(), missing, foreignRead, "test")
+		if err == nil {
+			_ = s.Close()
+		}
+	})
+	if err == nil {
+		t.Fatalf("opening %s, which holds no database, succeeded", missing)
+	}
+	if strings.Contains(stderr, "store: ") {
+		t.Errorf("a failed open logged a store line:\n%s", stderr)
+	}
+}
+
+// TestStoreOpenLogSpellsValuesAsPrinted pins that the store-open log spells
+// the directory and the reason by remedy.PrintedValue, so a control
+// character in either cannot redraw the terminal or split the line.
+func TestStoreOpenLogSpellsValuesAsPrinted(t *testing.T) {
+	debug.SetVerbose(true)
+	t.Cleanup(func() { debug.SetVerbose(false) })
+	stderr := captureStderr(t, func() { logStoreOpen("/tmp/a\x1b[2Jb/.beads", false, "prefix route: x\ny") })
+	if strings.ContainsRune(stderr, '\x1b') || strings.Count(stderr, "\n") != 1 || !strings.HasSuffix(stderr, "\n") {
+		t.Fatalf("the log line carries a raw control character: %q", stderr)
+	}
+	for _, want := range []string{`\x1b[2Jb/.beads"`, `"prefix route: x\ny"`} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("the log line %q lacks %q", stderr, want)
 		}
 	}
 }

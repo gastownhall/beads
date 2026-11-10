@@ -547,7 +547,7 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 
 	debug.Logf("[routing] Prefix %q matched route to %s (database: %s)\n", matchedRoute.Prefix, matchedRoute.Path, targetDB)
 
-	targetStore, err := openRoutedTargetStore(ctx, targetBeadsDir, targetDB, writable)
+	targetStore, err := openRoutedTargetStore(ctx, targetBeadsDir, targetDB, writable, "prefix route: "+matchedRoute.Prefix)
 	if err != nil {
 		return nil, fmt.Errorf("opening routed store for %s: %w", matchedRoute.Path, err)
 	}
@@ -644,7 +644,7 @@ func lookupPrefixRoute(id string) (*prefixRoute, string, error) {
 // open-time schema migrations on such a miss, as any bd command run in that
 // repository would; they bring it to the schema this bd writes, not to
 // anything the missed id asked for.
-func openRoutedTargetStore(ctx context.Context, beadsDir, database string, writable bool) (storage.DoltStorage, error) {
+func openRoutedTargetStore(ctx context.Context, beadsDir, database string, writable bool, reason string) (storage.DoltStorage, error) {
 	if database != "" {
 		origDB := os.Getenv("BEADS_DOLT_SERVER_DATABASE")
 		_ = os.Setenv("BEADS_DOLT_SERVER_DATABASE", database)
@@ -658,9 +658,9 @@ func openRoutedTargetStore(ctx context.Context, beadsDir, database string, writa
 		}()
 	}
 	if writable {
-		return openForeignStore(ctx, beadsDir, foreignWrite)
+		return openForeignStore(ctx, beadsDir, foreignWrite, reason)
 	}
-	return openForeignStore(ctx, beadsDir, foreignRead)
+	return openForeignStore(ctx, beadsDir, foreignRead, reason)
 }
 
 // matchPrefixRoute returns the route whose prefix is the longest leading match
