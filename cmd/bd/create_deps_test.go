@@ -173,6 +173,41 @@ func TestCanonicalDependencyType(t *testing.T) {
 	}
 }
 
+// TestLinkDependencyType pins the type bd link stores on every route
+// (GH#5585): the two documented aliases become the gating "blocks", any
+// other type a workspace spells is kept exactly as given, and only a
+// structurally invalid type is refused.
+func TestLinkDependencyType(t *testing.T) {
+	atLimit := strings.Repeat("x", types.MaxDependencyTypeLen)
+	tests := []struct {
+		in      string
+		want    types.DependencyType
+		wantErr bool
+	}{
+		{in: "blocked-by", want: types.DepBlocks},
+		{in: "depends-on", want: types.DepBlocks},
+		{in: "blocks", want: types.DepBlocks},
+		{in: "related", want: types.DepRelated},
+		{in: "owned-by", want: "owned-by"},
+		{in: "Blocked-By", want: "Blocked-By"},
+		{in: atLimit, want: types.DependencyType(atLimit)},
+		{in: atLimit + "x", wantErr: true},
+		{in: "", wantErr: true},
+	}
+	for _, tt := range tests {
+		got, err := linkDependencyType(tt.in)
+		if tt.wantErr {
+			if err == nil || !strings.Contains(err.Error(), "invalid dependency type") {
+				t.Errorf("linkDependencyType(%q) = %q, %v; want the invalid-type refusal", tt.in, got, err)
+			}
+			continue
+		}
+		if err != nil || got != tt.want {
+			t.Errorf("linkDependencyType(%q) = %q, %v; want %q", tt.in, got, err, tt.want)
+		}
+	}
+}
+
 // TestValidateDependencyType covers the shared validity/well-known-ness gate
 // used by both `bd create --deps` and `bd dep add --type`. Per the intent
 // documented on types.WellKnownDependencyTypes, both commands reject
