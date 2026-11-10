@@ -361,6 +361,26 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 			want:     []int{409},
 		},
 		{
+			name: "substring mentions in file paths are rejected",
+			snapshot: "501 S /usr/bin/cat /etc/dolt/sql-server.yaml\n" +
+				"502 /usr/bin/cat /etc/dolt/sql-server.yaml\n",
+		},
+		{
+			name: "dolt-helper executable is rejected",
+			snapshot: "503 S /opt/dolt-tools/bin/dolt-helper sql-server\n" +
+				"504 /opt/dolt-tools/bin/dolt-helper sql-server\n",
+		},
+		{
+			name: "container image mention is rejected",
+			snapshot: "505 S docker run dolthub/dolt-sql-server\n" +
+				"506 docker run dolthub/dolt-sql-server\n",
+		},
+		{
+			name: "log file mention is rejected",
+			snapshot: "507 S vim /Users/u/.beads/dolt/sql-server.log\n" +
+				"508 vim /Users/u/.beads/dolt/sql-server.log\n",
+		},
+		{
 			name: "malformed and invalid rows are rejected",
 			snapshot: "\n" +
 				"not-a-pid S dolt sql-server\n" +
