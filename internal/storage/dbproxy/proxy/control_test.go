@@ -7,17 +7,126 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestPurgeControlFilesWithHeldLocks mirrors reverse migration, which holds
+// proxy.lock and proxy-child.lock through ordinary util.TryLock while
+// retiring the other controls (GH#6884). The purge must succeed while both
+// locks are held, remove every non-lock control, and preserve the original
+// lock files: a holder's removal fails on Windows without delete sharing, and
+// a POSIX unlink would detach the held file from the pathname competing
+// starters acquire. Contentions must stay observable on every platform.
+func TestPurgeControlFilesWithHeldLocks(t *testing.T) {
+	root := t.TempDir()
+
+	// Seed every removable non-lock control explicitly: both pidfiles, both
+	// log generations, the secret, the spawn marker, the stop epoch, and a
+	// stale-pidfile quarantine per record.
+	nonLockNames := []string{
+		PIDFileName,
+		LogFileName,
+		LogFileName + ".1",
+		spawnMarkerFileName,
+		stopEpochFileName,
+		server.PIDFileName,
+		PIDFileName + ".stale-100",
+		server.PIDFileName + ".stale-200",
+	}
+	for _, name := range nonLockNames {
+		require.NoError(t, os.WriteFile(filepath.Join(root, name), []byte(name), 0o600))
+	}
+	_, err := identity.WriteSecret(root)
+	require.NoError(t, err)
+
+	var holders []*util.Lock
+	released := false
+	t.Cleanup(func() {
+		if released {
+			return
+		}
+		for _, lock := range holders {
+			lock.Unlock()
+		}
+	})
+	for _, name := range []string{LockFileName, server.LockFileName} {
+		lock, lockErr := util.TryLock(filepath.Join(root, name))
+		require.NoError(t, lockErr)
+		holders = append(holders, lock)
+	}
+	before := map[string]os.FileInfo{}
+	for _, lock := range holders {
+		info, statErr := os.Stat(lock.File().Name())
+		require.NoError(t, statErr)
+		before[lock.File().Name()] = info
+	}
+
+	require.Empty(t, PurgeControlFiles(root), "retiring controls while their lifecycle locks are held")
+
+	for _, name := range nonLockNames {
+		assert.NoFileExists(t, filepath.Join(root, name), "non-lock control %s must be removed", name)
+	}
+	assert.NoFileExists(t, filepath.Join(root, identity.SecretFileName))
+	for _, lock := range holders {
+		info, statErr := os.Stat(lock.File().Name())
+		require.NoError(t, statErr, "lifecycle marker must survive the purge")
+		assert.True(t, os.SameFile(before[lock.File().Name()], info), "%s must keep its file identity", info.Name())
+
+		// A competing acquisition must still see the holder alive.
+		contender, contenderErr := util.TryLock(lock.File().Name())
+		if contender != nil {
+			contender.Unlock()
+		}
+		require.Error(t, contenderErr, "competing acquisition of %s must fail while it is held", info.Name())
+		require.True(t, lockfile.IsLocked(contenderErr), "contention on %s must classify as a held lock, got %v", info.Name(), contenderErr)
+	}
+
+	for _, lock := range holders {
+		lock.Unlock()
+	}
+	released = true
+	for name, seeded := range before {
+		lock, lockErr := util.TryLock(name)
+		require.NoError(t, lockErr, "released marker must be re-lockable")
+		info, statErr := os.Stat(name)
+		require.NoError(t, statErr)
+		assert.True(t, os.SameFile(seeded, info), "%s must keep its file identity after release", info.Name())
+		lock.Unlock()
+	}
+}
+
+// TestPurgeControlFilesReportsRemovalError carries the removal-error guard from
+// PR #6888: a nonempty directory at the proxy log path deterministically fails
+// the purge even when tests run as root, and the failure is reported rather
+// than swallowed.
+func TestPurgeControlFilesReportsRemovalError(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, LogFileName)
+	require.NoError(t, os.Mkdir(path, 0o700))
+	child := filepath.Join(path, "retain")
+	require.NoError(t, os.WriteFile(child, []byte("retain"), 0o600))
+
+	errs := PurgeControlFiles(root)
+	require.Len(t, errs, 1)
+	var pathErr *os.PathError
+	require.ErrorAs(t, errs[0], &pathErr)
+	assert.Equal(t, path, pathErr.Path)
+	assert.FileExists(t, child)
+}
 
 func newControlServer(t *testing.T) (*controlServer, string, identity.IdentReply) {
 	t.Helper()

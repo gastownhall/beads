@@ -158,9 +158,42 @@ func ControlFilePaths(rootDir string) []string {
 	return paths
 }
 
+// isLifecycleLockName reports whether name is one of the two proxy control
+// files that double as advisory lifecycle locks.
+func isLifecycleLockName(name string) bool {
+	return name == LockFileName || name == server.LockFileName
+}
+
+// PurgeableControlFilePaths lists the proxy control files a purge may remove:
+// the full ControlFilePaths inventory minus the two lifecycle lock markers,
+// proxy.lock and proxy-child.lock.
+//
+// The locks stay on disk because removing a lock file while somebody holds it
+// is unsafe on both platforms: a Windows open without delete sharing fails the
+// removal outright, and a POSIX unlink detaches the holder's open file from
+// the pathname every competing starter acquires, so a new lock object can
+// exist at the same path while the old one is still held (GH#6884). Retaining
+// the files keeps the lock a stable, reusable marker: the completed-state
+// validators already accept an empty unlocked marker and refuse a held one,
+// so inventory stays complete in ControlFilePaths while removability is
+// enumerated separately.
+func PurgeableControlFilePaths(rootDir string) []string {
+	var paths []string
+	for _, path := range ControlFilePaths(rootDir) {
+		if !isLifecycleLockName(filepath.Base(path)) {
+			paths = append(paths, path)
+		}
+	}
+	return paths
+}
+
+// PurgeControlFiles removes the proxy control files under rootDir, reporting
+// every removal that fails for a reason other than the file already being
+// absent. It preserves the two lifecycle lock markers: see
+// PurgeableControlFilePaths for why a held lock file must not be removed.
 func PurgeControlFiles(rootDir string) []error {
 	var errs []error
-	for _, path := range ControlFilePaths(rootDir) {
+	for _, path := range PurgeableControlFilePaths(rootDir) {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			errs = append(errs, err)
 		}

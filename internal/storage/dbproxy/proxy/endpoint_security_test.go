@@ -822,6 +822,16 @@ func TestControlFilePathsIncludesSecretAndQuarantines(t *testing.T) {
 	assert.Contains(t, paths, proxyStale)
 	assert.Contains(t, paths, backendStale)
 	assert.Contains(t, paths, rotatedLog)
+	// The full inventory still names the lifecycle locks even though a purge
+	// preserves them: inspection and ownership checks must see the markers.
+	assert.Contains(t, paths, filepath.Join(root, LockFileName))
+	assert.Contains(t, paths, filepath.Join(root, server.LockFileName))
+
+	// The purgeable list is the inventory minus exactly those two locks.
+	purgeable := PurgeableControlFilePaths(root)
+	assert.NotContains(t, purgeable, filepath.Join(root, LockFileName))
+	assert.NotContains(t, purgeable, filepath.Join(root, server.LockFileName))
+	assert.Equal(t, len(paths)-2, len(purgeable), "only the lifecycle lock markers are excluded")
 
 	assert.Empty(t, PurgeControlFiles(root))
 	assert.NoFileExists(t, filepath.Join(root, identity.SecretFileName))
