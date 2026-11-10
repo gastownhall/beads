@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
@@ -175,6 +176,11 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			}); err != nil {
 				return HandleErrorRespectJSON("failed to commit: %v", err)
 			}
+			// The claim landed; journal the returned post-state to the
+			// optional sidecar (GH#6146). Post-state only — no claim path
+			// returns a pre-image, and the transactional one lives in the
+			// database events tables.
+			audit.LogClaimed(claimed.ID, currentActor(), string(claimed.Status), claimed.Assignee)
 			SetLastTouchedID(claimed.ID)
 			if jsonOutput {
 				return outputJSON([]*types.IssueWithCounts{claimed})

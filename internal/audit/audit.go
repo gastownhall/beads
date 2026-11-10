@@ -187,6 +187,37 @@ func LogFieldChange(issueID, field, oldValue, newValue, actor, reason string) {
 	})
 }
 
+// LogClaimed logs a successful claim's returned post-state to the optional
+// JSONL sidecar when it is enabled — the "actor X picked up issue Y" record
+// `bd ready --claim` and `bd close --claim-next` leave behind (GH#6146).
+// Post-state only: the entry carries no prior values, because no claim path
+// returns a pre-image and a ready claim can win a row in any claimable
+// status, so an assumed prior would be fabricated. The claim's transactional
+// pre-image lives in the database events tables (bd history <id> --events),
+// not here.
+//
+// Like LogFieldChange this is best-effort: errors are silently ignored so
+// sidecar logging never blocks operations, and an empty issue ID appends
+// nothing. Consumers that only understand field_change can skip the claimed
+// kind, but they will not see claims without learning it — and on a legacy
+// HTTP composition ClaimNext can return an idempotent claim (the row was
+// already this actor's) with no Changed bit exposed, so this record says a
+// claim was returned, not that this invocation mutated the row.
+func LogClaimed(issueID, actor, status, assignee string) {
+	if issueID == "" {
+		return
+	}
+	_, _ = AppendIfEnabled(&Entry{
+		Kind:    "claimed",
+		IssueID: issueID,
+		Actor:   actor,
+		Extra: map[string]any{
+			"status":   status,
+			"assignee": assignee,
+		},
+	})
+}
+
 func newID() (string, error) {
 	// 16 bytes (128-bit) of entropy — birthday probability for 8000 IDs is ~9e-32.
 	var b [16]byte

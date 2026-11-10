@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
@@ -196,6 +197,10 @@ func runReadyProxiedClaim(ctx context.Context, in readyInput) error {
 		}
 		return nil
 	}
+
+	// The claim landed; journal the returned post-state to the optional
+	// sidecar (GH#6146), matching the direct route.
+	audit.LogClaimed(res.Claimed.ID, currentActor(), string(res.Claimed.Status), res.Claimed.Assignee)
 
 	SetLastTouchedID(res.Claimed.ID)
 
