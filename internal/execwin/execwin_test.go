@@ -43,6 +43,23 @@ func TestHidePolicy(t *testing.T) {
 			wantFlags: createNoWindow,
 			wantApply: true,
 		},
+		{
+			// An attached console is inherited, and so is foreground
+			// behavior: prompts, the terminal, and Ctrl+C reaching the
+			// child. Nothing to suppress, nothing to change.
+			name:      "attached parent, nil attributes: unchanged",
+			flags:     0,
+			attached:  true,
+			wantFlags: 0,
+			wantApply: false,
+		},
+		{
+			name:      "attached parent, caller flags: unchanged",
+			flags:     createNewProcessGroup,
+			attached:  true,
+			wantFlags: createNewProcessGroup,
+			wantApply: false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
