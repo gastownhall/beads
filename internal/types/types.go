@@ -1816,6 +1816,39 @@ func IsFailureClose(closeReason string) bool {
 	return false
 }
 
+// BlockingEdgeHolds reports whether a dependency of type depType whose target
+// has the given status (and close reason, for a closed target) still holds its
+// dependent back. It is the Go form of the edge clause the is_blocked recompute
+// applies to its two status-tested legs ('blocks' and 'conditional-blocks':
+// see IsGateEdge), and every surface that classifies such an edge in Go must
+// ask it here so no surface can disagree with `bd ready`:
+//
+//   - an ordinary 'blocks' edge holds unless the target is closed or pinned;
+//   - a 'conditional-blocks' edge (B runs only if A fails) releases a pinned
+//     target and holds an open one, but a CLOSED target holds exactly when its
+//     close reason is not a failure (GH#5577: a success close is not the
+//     condition B waits for; only a failure close releases the fallback).
+//
+// Any other dependency type is not status-decided and reports false; callers
+// that model waits-for must not route it through this predicate.
+func BlockingEdgeHolds(depType DependencyType, status Status, closeReason string) bool {
+	switch depType {
+	case DepBlocks:
+		return status != StatusClosed && status != StatusPinned
+	case DepConditionalBlocks:
+		switch status {
+		case StatusPinned:
+			return false
+		case StatusClosed:
+			return !IsFailureClose(closeReason)
+		default:
+			return true
+		}
+	default:
+		return false
+	}
+}
+
 // Label represents a tag on an issue
 type Label struct {
 	IssueID string `json:"issue_id"`

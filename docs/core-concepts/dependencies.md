@@ -59,7 +59,7 @@ Dependencies have a type that determines whether they block work.
 |------|---------|---------|
 | `blocks` (default) | B cannot start until A closes | Task ordering |
 | `parent-child` | Children blocked when parent blocked | Epic hierarchies |
-| `conditional-blocks` | B runs only if A fails | Error handling paths |
+| `conditional-blocks` | B runs only if A fails: B is released only when A closes with a failure reason (e.g. `failed`, `rejected`, `wontfix`); a success close keeps B blocked | Error handling paths |
 | `waits-for` | B waits for all of A's children | Fanout aggregation |
 
 **Non-blocking types** (graph annotations only):

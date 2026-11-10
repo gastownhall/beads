@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // blockedRecomputeGraphTables are the version-controlled tables a full
@@ -1035,6 +1037,50 @@ func shouldBeBlockedIDsUnionScopedPrecomputedSQL(
 		notInPlaceholders(len(explained.wispParents)))
 }
 
+// FailureClosePredicateSQL renders the SQL form of types.IsFailureClose over
+// the given close-reason expression (a column reference such as
+// "t.close_reason"). It is exported because two stacks must ask the identical
+// question: the classic is_blocked recompute here, and the domain/db
+// direct-insertion mark writer, both of which must agree with `bd ready` about
+// which close of a conditional-blocks target releases its fallback.
+//
+// The rendering is one INSTR per types.FailureCloseKeywords entry, ORed, each
+// keyword single-quote-doubled. Empty and NULL reasons match nothing, exactly
+// as IsFailureClose("") is false; the engine-executed parity is pinned by the
+// dolt-lane tests (TestFailureClosePredicateSQLParity) — raise the expression's
+// fidelity there if the test ever disproves it, never in a caller.
+//
+// BATCHED-TEMPLATE BUDGET: the rendered text may contain no percent sign and
+// no question mark of its own — expandBatchTemplate counts both textually
+// (blocked_state.go), and this predicate is spliced into the union legs those
+// templates carry. The budget tests in blocked_state_template_test.go pin it.
+func FailureClosePredicateSQL(closeExpr string) string {
+	preds := make([]string, 0, len(types.FailureCloseKeywords))
+	for _, keyword := range types.FailureCloseKeywords {
+		preds = append(preds, fmt.Sprintf(
+			"INSTR(LOWER(COALESCE(%s, '')), '%s') > 0", closeExpr, strings.ReplaceAll(keyword, "'", "''")))
+	}
+	return "(" + strings.Join(preds, " OR ") + ")"
+}
+
+// edgeTargetHoldsSQL is the target-status test the union's blocks and
+// conditional-blocks legs apply: the edge holds unless its target is pinned,
+// and a closed target still holds a conditional-blocks edge whose close reason
+// is NOT a failure (GH#5577: "B runs only if A fails" means a success close of
+// A keeps B blocked). This is the SQL form of types.BlockingEdgeHolds for the
+// two status-tested leg types; keep the two in step.
+//
+// Like FailureClosePredicateSQL it carries no percent sign and no question
+// mark: the batched templates count both textually.
+//
+//nolint:gosec // G201: depAlias and targetAlias are constants from the callers below.
+func edgeTargetHoldsSQL(depAlias, targetAlias string) string {
+	return fmt.Sprintf(`%[1]s.status <> 'pinned'
+			  AND (%[1]s.status <> 'closed'
+			       OR (%[2]s.type = 'conditional-blocks' AND NOT %[3]s))`,
+		targetAlias, depAlias, FailureClosePredicateSQL(targetAlias+".close_reason"))
+}
+
 // shouldBeBlockedIDsUnionCoreSQL is the five legs themselves. A parent-child
 // leg reads the parent's stored bit only while the parent is neither closed
 // nor pinned, the same status test legs 1-2 apply to their targets: such a row
@@ -1059,13 +1105,13 @@ func shouldBeBlockedIDsUnionCoreSQL(depTable, scope, issueParentCond, wispParent
 		JOIN issues t ON t.id = d.depends_on_issue_id
 		WHERE d.issue_id IS NOT NULL %[3]s
 		  AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
-		  AND t.status <> 'closed' AND t.status <> 'pinned'
+		  AND %[8]s
 		UNION
 		SELECT %[6]sd.issue_id FROM %[1]s d
 		JOIN wisps t ON t.id = d.depends_on_wisp_id
 		WHERE d.issue_id IS NOT NULL %[3]s
 		  AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
-		  AND t.status <> 'closed' AND t.status <> 'pinned'
+		  AND %[8]s
 		UNION
 		SELECT %[7]sd.issue_id FROM %[1]s d
 		JOIN issues p ON p.id = d.depends_on_issue_id
@@ -1090,7 +1136,8 @@ func shouldBeBlockedIDsUnionCoreSQL(depTable, scope, issueParentCond, wispParent
 		    AND d.type = 'waits-for'
 		) d
 		WHERE (%[2]s)
-	`, depTable, waitsForGateBlockedSQL, scope, issueParentCond, wispParentCond, targetHint, parentHint)
+	`, depTable, waitsForGateBlockedSQL, scope, issueParentCond, wispParentCond, targetHint, parentHint,
+		edgeTargetHoldsSQL("d", "t"))
 }
 
 // subtreeWalkDepth is how far parentsExplainedBySubtreeSQL walks up from a
@@ -1302,8 +1349,9 @@ func parentsExplainedBySubtreeCoreSQL(parentTable, parentDepTable, cand string) 
 
 // blockingReasonSQL is the row-level spelling of "this dependency row is,
 // right now, a reason for its own issue to be blocked" — union legs 1 and 2
-// (an open blocks/conditional-blocks target, issue or wisp) and leg 5 (a
-// blocking waits-for gate), for a dependency row aliased rowAlias.
+// (a holding blocks/conditional-blocks target, issue or wisp; a closed
+// conditional-blocks target holds unless its close reason is a failure) and
+// leg 5 (a blocking waits-for gate), for a dependency row aliased rowAlias.
 //
 // It is a per-ROW predicate, but both callers evaluate it in a set, over a
 // bounded list of parents' rows: parentsExplainedBySubtreeSQL's aggregate,
@@ -1315,15 +1363,15 @@ func parentsExplainedBySubtreeCoreSQL(parentTable, parentDepTable, cand string) 
 //nolint:gosec // G201: rowAlias is a constant; waitsForGateBlockedSQLFor rewrites a constant template.
 func blockingReasonSQL(rowAlias string) string {
 	return fmt.Sprintf(`
-		        ( ( (%[1]s.type = 'blocks' OR %[1]s.type = 'conditional-blocks')
-		            AND ( EXISTS (SELECT 1 FROM issues bt
-		                          WHERE bt.id = %[1]s.depends_on_issue_id
-		                            AND bt.status <> 'closed' AND bt.status <> 'pinned')
-		               OR EXISTS (SELECT 1 FROM wisps bt
-		                          WHERE bt.id = %[1]s.depends_on_wisp_id
-		                            AND bt.status <> 'closed' AND bt.status <> 'pinned') ) )
-		          OR ( %[1]s.type = 'waits-for' AND (%[2]s) ) )
-	`, rowAlias, waitsForGateBlockedSQLFor(rowAlias))
+	        ( ( (%[1]s.type = 'blocks' OR %[1]s.type = 'conditional-blocks')
+	            AND ( EXISTS (SELECT 1 FROM issues bt
+	                          WHERE bt.id = %[1]s.depends_on_issue_id
+	                            AND %[3]s)
+	               OR EXISTS (SELECT 1 FROM wisps bt
+	                          WHERE bt.id = %[1]s.depends_on_wisp_id
+	                            AND %[3]s) ) )
+	          OR ( %[1]s.type = 'waits-for' AND (%[2]s) ) )
+	`, rowAlias, waitsForGateBlockedSQLFor(rowAlias), edgeTargetHoldsSQL(rowAlias, "bt"))
 }
 
 // CountIsBlockedInconsistenciesInTx reports how many issue and wisp rows carry a
