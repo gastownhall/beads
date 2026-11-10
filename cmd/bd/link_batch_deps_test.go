@@ -16,6 +16,8 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -79,5 +81,45 @@ func TestCLI_Link_TypeBlockedByAliasGates(t *testing.T) {
 	readyOut := runCreateDepsBD(t, bd, dir, "ready")
 	if strings.Contains(readyOut, "Link Blocked") {
 		t.Errorf("expected \"Link Blocked\" excluded from `bd ready` after link --type blocked-by, got: %s", readyOut)
+	}
+}
+
+// TestCLI_Batch_DepAdd_TypeBlockedByAliasGates is the `bd batch` dep.add
+// counterpart: the op built a types.DependencyType directly from the raw arg
+// and only checked IsValid(), so "blocked-by" was stored verbatim instead of
+// normalizing to "blocks".
+func TestCLI_Batch_DepAdd_TypeBlockedByAliasGates(t *testing.T) {
+	bd := buildBDForInitTests(t)
+	dir := t.TempDir()
+	runCreateDepsBD(t, bd, dir, "init", "--backend", "dolt", "--prefix", "test",
+		"--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+
+	blocker := createDepsExtractID(t, runCreateDepsBD(t, bd, dir, "create", "Batch Blocker", "-p", "1", "--json"))
+	blocked := createDepsExtractID(t, runCreateDepsBD(t, bd, dir, "create", "Batch Blocked", "-p", "1", "--json"))
+
+	script := "dep add " + blocked + " " + blocker + " blocked-by\n"
+	scriptFile := filepath.Join(dir, "batch-alias.txt")
+	if err := os.WriteFile(scriptFile, []byte(script), 0o600); err != nil {
+		t.Fatalf("write batch script: %v", err)
+	}
+
+	out := runCreateDepsBD(t, bd, dir, "batch", "-f", scriptFile)
+	if strings.Contains(strings.ToLower(out), "error") {
+		t.Fatalf("bd batch dep.add blocked-by reported an error: %s", out)
+	}
+
+	gotType := linkBatchDepType(t, bd, dir, blocked, blocker)
+	if gotType != "blocks" {
+		t.Errorf("bd batch dep.add blocked-by stored type %q, want canonical \"blocks\"", gotType)
+	}
+
+	blockedOut := runCreateDepsBD(t, bd, dir, "blocked")
+	if !strings.Contains(blockedOut, "Batch Blocked") {
+		t.Errorf("expected \"Batch Blocked\" in `bd blocked` output after batch dep.add blocked-by, got: %s", blockedOut)
+	}
+
+	readyOut := runCreateDepsBD(t, bd, dir, "ready")
+	if strings.Contains(readyOut, "Batch Blocked") {
+		t.Errorf("expected \"Batch Blocked\" excluded from `bd ready` after batch dep.add blocked-by, got: %s", readyOut)
 	}
 }
