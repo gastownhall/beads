@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -154,12 +156,14 @@ func (r capabilityRow) withMessage(message string) capabilityRow {
 }
 
 // forceableWith lets a refusal be overridden by the command's own bool flag:
-// the gate refuses unless that flag is set to true. It does not change the
-// rule's outcome — the row still says Refused, with the same code and reason,
-// because that is what the gate does with the path as typed — so a consumer
-// reading the table sees the refusal and, beside it, the one way past it.
-func (r capabilityRow) forceableWith(flag string) capabilityRow {
+// the gate refuses unless that flag is set to true, and then prints warning to
+// stderr before anything else runs. It does not change the rule's outcome — the
+// row still says Refused, with the same code and reason, because that is what
+// the gate does with the path as typed — so a consumer reading the table sees
+// the refusal and, beside it, the one way past it.
+func (r capabilityRow) forceableWith(flag, warning string) capabilityRow {
 	r.Rule.ForceFlag = flag
+	r.Rule.ForceWarning = warning
 	return r
 }
 
@@ -403,11 +407,11 @@ var proxyCapabilityRegistry = []capabilityRow{
 	// proxied shape, team-server included, where the open only verifies: the
 	// command policy is the same wherever the store is shared.
 	refusedPath("migrate schema", "proxy.migrate.unsupported", ProxyReasonDesign, "").
-		withMessage("migrate schema is not supported in proxied-server mode without --force: " +
-			"it promotes the schema underneath every library client connected to this proxy's backend, " +
-			"and the proxy does not track them. Stop those clients, run `bd migrate schema --force`, " +
+		withMessage("migrate schema is not supported in proxied-server mode without --force: "+
+			"it promotes the schema underneath every library client connected to this proxy's backend, "+
+			"and the proxy does not track them. Stop those clients, run `bd migrate schema --force`, "+
 			"then restart them").
-		forceableWith("force"),
+		forceableWith("force", migrateSchemaForceWarning),
 
 	// --- destructive admin --------------------------------------------------
 	// Same topology-blind rationale as the migrate block above, and the same
@@ -694,10 +698,20 @@ func validateProxyRegistryBeforeProvider(cmd *cobra.Command, topology ProxyTopol
 		return nil
 	}
 	if forcedPastRefusal(cmd, rule) {
+		// stderr, so a --json caller's stdout still carries exactly the
+		// command's own report.
+		fmt.Fprintln(os.Stderr, rule.ForceWarning)
 		return nil
 	}
 	return HandleProxyCapabilityError(proxyCapabilityErrorFor(rule))
 }
+
+// migrateSchemaForceWarning is what `bd migrate schema --force` prints on a
+// proxied workspace before the provider open applies the migration. It names
+// no clients because bd knows none: the proxy is a byte pump and does not
+// track who is connected, and adding that tracking to say so is not worth it.
+const migrateSchemaForceWarning = "Warning: before forcing schema migration, close co-resident library clients; " +
+	"restart them after this command completes."
 
 // forcedPastRefusal reports whether the invocation set the rule's ForceFlag to
 // true. Only a successful bool read of true counts: a false value, a flag the
