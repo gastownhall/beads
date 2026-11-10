@@ -530,3 +530,163 @@ func TestFixHooksPath_RelocatedBeadsPath(t *testing.T) {
 		}
 	})
 }
+
+// TestFixHooksPath_RefusesIneligibleRelocation pins AC-5 of the GH#5853
+// design: an ineligible missing path — no validated replacement, hooks bd
+// does not recognize, a non-repository-local value, a differing effective
+// override, or an unsafe destination — is never repointed by the repair.
+func TestFixHooksPath_RefusesIneligibleRelocation(t *testing.T) {
+	// strandedHooksRepoFixture returns a repo whose core.hooksPath names the
+	// given stale value, with the given current target directory state.
+	setup := func(t *testing.T) (repoDir, stale, current string) {
+		repoDir = t.TempDir()
+		setupGitRepoInDir(t, repoDir)
+		current = filepath.Join(repoDir, ".beads", "hooks")
+		stale = filepath.Join(t.TempDir(), "moved-away", ".beads", "hooks")
+		setGitConfig(t, repoDir, "core.hooksPath", stale)
+		return repoDir, stale, current
+	}
+
+	t.Run("no replacement resolves", func(t *testing.T) {
+		repoDir, stale, _ := setup(t)
+		runInDir(t, repoDir, func() {
+			if err := FixHooksPath(); err != nil {
+				t.Fatalf("FixHooksPath failed: %v", err)
+			}
+		})
+		if got := getGitConfig(t, repoDir, "core.hooksPath"); got != stale {
+			t.Errorf("core.hooksPath = %q, want unchanged %q: no validated replacement means no repair", got, stale)
+		}
+	})
+
+	t.Run("replacement holds no recognizable hooks", func(t *testing.T) {
+		repoDir, stale, current := setup(t)
+		if err := os.MkdirAll(current, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(current, "pre-commit"), []byte("#!/bin/sh\necho not bd\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		runInDir(t, repoDir, func() {
+			if err := FixHooksPath(); err != nil {
+				t.Fatalf("FixHooksPath failed: %v", err)
+			}
+		})
+		if got := getGitConfig(t, repoDir, "core.hooksPath"); got != stale {
+			t.Errorf("core.hooksPath = %q, want unchanged %q: arbitrary content is not evidence of relocation", got, stale)
+		}
+	})
+
+	t.Run("global-only value", func(t *testing.T) {
+		repoDir, stale, current := setup(t)
+		writeRecognizedHooks(t, current)
+		globalConfig := filepath.Join(t.TempDir(), "gitconfig")
+		t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+		unsetGitConfig(t, repoDir, "core.hooksPath")
+		gc := gitCommand("config", "--global", "core.hooksPath", stale)
+		gc.Dir = repoDir
+		if out, err := gc.CombinedOutput(); err != nil {
+			t.Fatalf("git config --global failed: %v (%s)", err, out)
+		}
+		runInDir(t, repoDir, func() {
+			st := InspectHooksPath()
+			if st.State != HooksPathMissing {
+				t.Fatalf("precondition: a global-only value must classify as Missing, got %+v", st)
+			}
+			if err := FixHooksPath(); err != nil {
+				t.Fatalf("FixHooksPath failed: %v", err)
+			}
+		})
+		got := getGitConfig(t, repoDir, "core.hooksPath")
+		if got != stale {
+			t.Errorf("global core.hooksPath = %q, want unchanged %q: bd never rewrites global config", got, stale)
+		}
+	})
+
+	t.Run("differing command override", func(t *testing.T) {
+		repoDir, stale, current := setup(t)
+		writeRecognizedHooks(t, current)
+		otherStale := filepath.Join(t.TempDir(), "other-location", ".beads", "hooks")
+		t.Setenv("GIT_CONFIG_COUNT", "1")
+		t.Setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+		t.Setenv("GIT_CONFIG_VALUE_0", otherStale)
+		runInDir(t, repoDir, func() {
+			st := InspectHooksPath()
+			if st.State != HooksPathMissing {
+				t.Fatalf("precondition: an effective command override must classify as Missing, got %+v", st)
+			}
+			if err := FixHooksPath(); err != nil {
+				t.Fatalf("FixHooksPath failed: %v", err)
+			}
+		})
+		if got := getLocalGitConfig(t, repoDir, "core.hooksPath"); got != stale {
+			t.Errorf("local core.hooksPath = %q, want unchanged %q: bd never rewrites through a command override", got, stale)
+		}
+	})
+
+	t.Run("changed config between inspection and repair", func(t *testing.T) {
+		repoDir, _, current := setup(t)
+		writeRecognizedHooks(t, current)
+		runInDir(t, repoDir, func() {
+			check := CheckHooksPath()
+			if check.Status != StatusWarning {
+				t.Fatalf("precondition: expected the relocated warning, got %+v", check)
+			}
+			// The user repairs the configuration before the fix pass runs.
+			setGitConfig(t, repoDir, "core.hooksPath", current)
+			if err := FixHooksPath(); err != nil {
+				t.Fatalf("FixHooksPath failed: %v", err)
+			}
+		})
+		if got := getGitConfig(t, repoDir, "core.hooksPath"); got != current {
+			t.Errorf("core.hooksPath = %q, want %q: the repair must re-read and respect the changed configuration", got, current)
+		}
+	})
+
+	t.Run("stale path exists after all", func(t *testing.T) {
+		repoDir, stale, current := setup(t)
+		writeRecognizedHooks(t, current)
+		writeRecognizedHooks(t, stale) // the "former" location still exists
+		runInDir(t, repoDir, func() {
+			if err := FixHooksPath(); err != nil {
+				t.Fatalf("FixHooksPath failed: %v", err)
+			}
+		})
+		if got := getGitConfig(t, repoDir, "core.hooksPath"); got != stale {
+			t.Errorf("core.hooksPath = %q, want unchanged %q: an existing destination is not a relocation", got, stale)
+		}
+	})
+
+	t.Run("replacement is a symlink", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("creating symlinks requires elevated privileges on Windows")
+		}
+		repoDir, stale, current := setup(t)
+		realHooks := filepath.Join(t.TempDir(), "real-hooks")
+		writeRecognizedHooks(t, realHooks)
+		if err := os.Symlink(realHooks, current); err != nil {
+			t.Fatalf("symlink %s -> %s: %v", current, realHooks, err)
+		}
+		runInDir(t, repoDir, func() {
+			if err := FixHooksPath(); err != nil {
+				t.Fatalf("FixHooksPath failed: %v", err)
+			}
+		})
+		if got := getGitConfig(t, repoDir, "core.hooksPath"); got != stale {
+			t.Errorf("core.hooksPath = %q, want unchanged %q: a symlinked destination is never a repair target", got, stale)
+		}
+	})
+}
+
+// getLocalGitConfig reads a repository-local git config value from dir.
+// Returns "" when the key is absent locally.
+func getLocalGitConfig(t *testing.T, dir, key string) string {
+	t.Helper()
+	cmd := gitCommand("config", "--local", "--get", key)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}

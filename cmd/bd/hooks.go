@@ -1385,7 +1385,7 @@ func plainHooksInstallDestination(st doctor.HooksPathStatus, hooksDir string) (s
 	case doctor.HooksPathRelocated:
 		return st.Target, true, nil
 	case doctor.HooksPathMissing:
-		return "", false, fmt.Errorf("core.hooksPath points at %s, which does not exist, so git runs no hooks; bd will not recreate that directory (%s). Restore the directory or correct core.hooksPath manually", st.Resolved, st.Reason)
+		return "", false, fmt.Errorf("core.hooksPath points at %s, which does not exist, so git runs no hooks; bd will not recreate that directory (%s). Restore the directory, correct core.hooksPath manually, or run 'bd hooks install --beads' to install into this repository's beads hooks directory", st.Resolved, st.Reason)
 	}
 	return hooksDir, false, nil
 }

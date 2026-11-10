@@ -1843,3 +1843,88 @@ func execGitConfig(dir, key string) (string, error) {
 	}
 	return strings.TrimSpace(string(out)), nil
 }
+
+// TestInstallHooks_RefusesIneligibleDestination pins AC-5 of the GH#5853
+// design: a plain hook installation against an ineligible missing configured
+// destination explains why it cannot proceed, never repoints the value, and
+// never creates the stale directory.
+func TestInstallHooks_RefusesIneligibleDestination(t *testing.T) {
+	t.Run("third-party path", func(t *testing.T) {
+		tmpDir := newGitRepo(t)
+		stale := filepath.Join(t.TempDir(), "team-hooks")
+		runInDir(t, tmpDir, func() {
+			if out, err := exec.Command("git", "config", "core.hooksPath", stale).CombinedOutput(); err != nil {
+				t.Fatalf("git config core.hooksPath: %v: %s", err, out)
+			}
+			resetRepoCaches()
+			err := installHooksWithOptions(managedHookNames, false, false, false, false)
+			if err == nil {
+				t.Fatal("installHooksWithOptions must refuse a missing third-party hooks path")
+			}
+			if !strings.Contains(err.Error(), "core.hooksPath") {
+				t.Errorf("refusal must name core.hooksPath, got: %v", err)
+			}
+		})
+		if _, statErr := os.Stat(stale); !os.IsNotExist(statErr) {
+			t.Errorf("the stale directory %s must not be created (stat err=%v)", stale, statErr)
+		}
+		if got, err := execGitConfig(tmpDir, "core.hooksPath"); err != nil || got != stale {
+			t.Errorf("core.hooksPath = %q (err=%v), want unchanged %q", got, err, stale)
+		}
+	})
+
+	t.Run("beads layout without a validated replacement", func(t *testing.T) {
+		tmpDir := newGitRepo(t)
+		// The repository has no .beads/hooks at all: nothing validates the
+		// replacement, so the stale destination must not be recreated.
+		stale := filepath.Join(t.TempDir(), "moved-away", ".beads", "hooks")
+		runInDir(t, tmpDir, func() {
+			if out, err := exec.Command("git", "config", "core.hooksPath", stale).CombinedOutput(); err != nil {
+				t.Fatalf("git config core.hooksPath: %v: %s", err, out)
+			}
+			resetRepoCaches()
+			err := installHooksWithOptions(managedHookNames, false, false, false, false)
+			if err == nil {
+				t.Fatal("installHooksWithOptions must refuse when no replacement target validates")
+			}
+			if !strings.Contains(err.Error(), "bd hooks install --beads") {
+				t.Errorf("refusal must offer the actionable alternative, got: %v", err)
+			}
+		})
+		if _, statErr := os.Stat(stale); !os.IsNotExist(statErr) {
+			t.Errorf("the stale directory %s must not be created (stat err=%v)", stale, statErr)
+		}
+	})
+
+	t.Run("global-only value", func(t *testing.T) {
+		tmpDir := newGitRepo(t)
+		stale := filepath.Join(t.TempDir(), "moved-away", ".beads", "hooks")
+		globalConfig := filepath.Join(t.TempDir(), "gitconfig")
+		t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+		gc := exec.Command("git", "config", "--global", "core.hooksPath", stale)
+		gc.Dir = tmpDir
+		if out, err := gc.CombinedOutput(); err != nil {
+			t.Fatalf("git config --global: %v: %s", err, out)
+		}
+		uc := exec.Command("git", "config", "--unset", "core.hooksPath")
+		uc.Dir = tmpDir
+		_ = uc.Run()
+		runInDir(t, tmpDir, func() {
+			resetRepoCaches()
+			err := installHooksWithOptions(managedHookNames, false, false, false, false)
+			if err == nil {
+				t.Fatal("installHooksWithOptions must refuse a global-only missing hooks path")
+			}
+			if !strings.Contains(err.Error(), "global") {
+				t.Errorf("refusal must name the non-local scope, got: %v", err)
+			}
+		})
+		if _, statErr := os.Stat(stale); !os.IsNotExist(statErr) {
+			t.Errorf("the stale directory %s must not be created (stat err=%v)", stale, statErr)
+		}
+		globalGot, gerr := exec.Command("git", "-C", tmpDir, "config", "--global", "--get", "core.hooksPath").Output()
+		if gerr != nil || strings.TrimSpace(string(globalGot)) != stale {
+			t.Errorf("global core.hooksPath = %q (err=%v), want unchanged %q", strings.TrimSpace(string(globalGot)), gerr, stale)
+		}
+	})
+}
