@@ -1226,6 +1226,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Claim paths, proxied updates and closes journal to the interactions
+  sidecar.** With `audit.enabled` on, `bd update --claim` moved an issue to
+  in_progress and set its assignee without appending any
+  `interactions.jsonl` row, so a journal replay saw issues leave states they
+  were never recorded entering (60% of the status rows on the reporting
+  instance, [#6146](https://github.com/gastownhall/beads/issues/6146)).
+  A plain claim now appends the same `field_change` rows as the equivalent
+  `--status`/`--assignee` pair, from the command's pre-write read (advisory
+  under concurrency) and the returned post-state; an explicit `--status`
+  beside `--claim` journals once, without an intermediate in_progress row.
+  `bd ready --claim` and `bd close --claim-next` append a new post-state-only
+  `claimed` kind (extra: `status`, `assignee`, no invented prior values), and
+  the proxied-server routes of `bd update` gained sidecar parity — they
+  previously wrote nothing at all, not even for ordinary field changes. The
+  sidecar stays optional and best-effort, `bd create` and `bd comment` write
+  no entries, and a `field_change`-only consumer must learn the `claimed`
+  kind to see claims; the complete transactional replay trail is the events
+  journal (`bd config set events-journal true`, `bd events tail`, per-issue
+  `bd history <id> --events`).
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

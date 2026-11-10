@@ -304,6 +304,26 @@ bd audit
     | - dataset generation (SFT/RL fine-tuning)
     |
     | Entries are append-only. Labeling creates a new "label" entry that references a parent entry.
+    |
+    | When enabled, bd also appends two automatic entry kinds for its own writes,
+    | both best-effort: a sidecar error never blocks an operation, and the sidecar
+    | is neither complete nor transactional.
+    |
+    | - "field_change" (extra: field, old_value, new_value) — a status, assignee
+    |   or priority change, from bd update (including the implied status/assignee
+    |   move of a claim) and bd close. old_value is the row as the command read it
+    |   before the write, which is advisory under concurrency: it is not the
+    |   mutation's transactional pre-image.
+    | - "claimed" (extra: status, assignee) — the post-state a claim returned, for
+    |   bd ready --claim and bd close --claim-next. It carries no prior values,
+    |   because no claim path returns a pre-image.
+    |
+    | bd create and bd comment write no sidecar entries. A consumer that only
+    | understands field_change can skip unknown kinds, but will not see claims
+    | without handling the claimed kind. For a complete, transactional replay
+    | trail enable the events journal instead: bd config set events-journal true,
+    | then bd events tail; per-issue history stays available with
+    | bd history <id> --events.
 
 bd audit label
   use: "label <entry-id>"
