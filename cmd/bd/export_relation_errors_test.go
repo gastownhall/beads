@@ -119,6 +119,20 @@ func assertRelationLoaderErr(t *testing.T, path string, err, sentinel error, wan
 	}
 }
 
+// assertRelationLoaderErrInContext is assertRelationLoaderErr for errors
+// maybeAutoExport returns (GH#6163): they carry destination context in front
+// of the loader's uow-aligned prefix, so the prefix is located rather than
+// required at the front.
+func assertRelationLoaderErrInContext(t *testing.T, path string, err, sentinel error, wantPrefix string) {
+	t.Helper()
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("%s: err = %v, want errors.Is %v", path, err, sentinel)
+	}
+	if !strings.Contains(err.Error(), wantPrefix+": ") {
+		t.Fatalf("%s: err = %q, want it to name the failed operation %q", path, err.Error(), wantPrefix+": ")
+	}
+}
+
 // TestClassicExportPathsRejectRelationLoaderFailures pins GH#6870 on every
 // classic export path: a failing bulk relation loader must fail the export
 // instead of publishing records with that relation silently empty.
@@ -267,9 +281,13 @@ func (s *failingDiffExportRelationStore) GetIssuesByIDs(ctx context.Context, _ [
 }
 
 // TestMaybeAutoExportKeepsJSONLWhenRelationLoaderFails pins GH#6870 on
-// auto-export: a failing relation loader leaves the triggering command
-// successful, warns, keeps the previous JSONL byte for byte, and does not
-// advance export-state.json, so the next write command retries.
+// auto-export, under the GH#6163 failure policy: a failing relation loader
+// on the final export fails the triggering command (non-zero exit) with the
+// wrapped loader error, keeps the previous JSONL byte for byte, and does
+// not advance export-state.json, so the next write command retries. The
+// fixtures are the original warn-and-nil test's; only the policy inverted —
+// maybeAutoExport prints nothing itself, the caller's HandleError is the
+// single print.
 func TestMaybeAutoExportKeepsJSONLWhenRelationLoaderFails(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -311,19 +329,38 @@ func TestMaybeAutoExportKeepsJSONLWhenRelationLoaderFails(t *testing.T) {
 				t.Fatal(err)
 			}
 			saveExportAutoState(beadsDir, &exportAutoState{LastDoltCommit: "hash-before-write", LastDiffAnchor: tc.diffAnchor})
-
-			var err error
-			stderr := captureStderr(t, func() { err = maybeAutoExport(t.Context(), false) })
+			statePath := filepath.Join(beadsDir, exportAutoStateFile)
+			stateBytes, err := os.ReadFile(statePath)
 			if err != nil {
-				t.Fatalf("maybeAutoExport err = %v, want nil (the triggering command must still succeed)", err)
+				t.Fatal(err)
 			}
-			if n := strings.Count(stderr, "Warning: auto-export failed: load labels: "); n != 1 {
-				t.Fatalf("stderr = %q, want exactly one auto-export failure warning naming load labels", stderr)
+
+			var labels struct {
+				sentinel   error
+				wantPrefix string
+			}
+			for _, l := range exportRelationLoaders {
+				if l.name == "labels" {
+					labels.sentinel, labels.wantPrefix = l.sentinel, l.wantPrefix
+				}
+			}
+			if labels.sentinel == nil {
+				t.Fatal("labels loader not found in exportRelationLoaders")
+			}
+
+			var got error
+			stderr := captureStderr(t, func() { got = maybeAutoExport(t.Context(), false) })
+			assertRelationLoaderErrInContext(t, "maybeAutoExport", got, labels.sentinel, labels.wantPrefix)
+			if !strings.Contains(got.Error(), jsonl) {
+				t.Fatalf("maybeAutoExport err = %q, want it to name the export destination %q", got.Error(), jsonl)
+			}
+			if strings.Contains(stderr, "Warning") {
+				t.Fatalf("maybeAutoExport printed %q; the error path must leave the single print to the caller", stderr)
 			}
 			assertFileUnchanged(t, jsonl, exportRelationSeed)
-			if got := loadExportAutoState(beadsDir); got.LastDoltCommit != "hash-before-write" || got.LastDiffAnchor != tc.diffAnchor {
-				t.Fatalf("export state advanced to commit %q anchor %q, want %q / %q", got.LastDoltCommit, got.LastDiffAnchor, "hash-before-write", tc.diffAnchor)
-			}
+			// Complete state preservation, timestamp included: a failure
+			// before a successful export must not advance any of it.
+			assertFileUnchanged(t, statePath, string(stateBytes))
 		})
 	}
 }

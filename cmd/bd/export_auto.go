@@ -229,8 +229,14 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 	if !didIncremental {
 		issueCount, memoryCount, err = exportToFile(ctx, fullPath, false)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: auto-export failed: %v\n", err)
-			return nil
+			// GH#6163: a failed final export fails the invocation — the JSONL
+			// would otherwise silently drift from the store while bd exits 0.
+			// exportToFile aborts its atomic temp file, so the previous export
+			// survives byte for byte and the state below is never reached.
+			// Single-print rule: no warning here; the caller prints the
+			// failure once. The shrink guard's deliberate refusal is the one
+			// carve-out from this rule; see errShrinkGuardRefusal.
+			return fmt.Errorf("auto-export: export to %s failed: %w", fullPath, err)
 		}
 		dirtyIDs = nil
 	}
