@@ -963,6 +963,7 @@ go_test(
         "init_server_flags_test.go",
         "init_stealth_test.go",
         "init_team_server_test.go",
+        "init_templates_test.go",
         "init_test.go",
         "init_transaction_commit_server_test.go",
         "init_worktree_test.go",

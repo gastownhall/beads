@@ -424,7 +424,7 @@ func TestInitPersistingSyncRemoteKeepsTheConfigTemplate(t *testing.T) {
 	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := createConfigYaml(beadsDir, false, ""); err != nil {
+	if err := createConfigYaml(beadsDir); err != nil {
 		t.Fatalf("createConfigYaml: %v", err)
 	}
 	template, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
