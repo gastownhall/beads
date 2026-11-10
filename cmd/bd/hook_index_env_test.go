@@ -707,6 +707,7 @@ func TestGitAddFile_StagesRealIndexFirst(t *testing.T) {
 // the export lane on, and returns the bd invocations the stub recorded.
 func commitConfigThroughHook(t *testing.T, r commitIndexRepo, bd string) string {
 	t.Helper()
+	bd = hookBDWithStubbableChildren(t, bd)
 	hooksDir := filepath.Join(r.main, ".git", "hooks")
 	mkdirs(t, hooksDir)
 	hook := "#!/usr/bin/env sh\n" + generateHookSection("pre-commit")
@@ -719,6 +720,28 @@ func commitConfigThroughHook(t *testing.T, r commitIndexRepo, bd string) string 
 	r.git(t, []string{"BD_EXPORT_AUTO=true", "BD_EXPORT_GIT_ADD=true"},
 		"commit", "-q", "-m", "pathspec", "--", ".beads/config.yaml")
 	return readFileForWorktreeTest(t, sentinel)
+}
+
+// hookBDWithStubbableChildren returns bd under the name bd.test: a hard link,
+// or a copy when bd is on another filesystem. A bd runs its hook children as
+// itself (GH#5922), which here, with no database, would make the real
+// `bd export` fail; under a Go test binary's name it runs them as `bd` from
+// PATH (pickHookSubprocessBinary), so the stub still stands in for the export
+// while the real bd runs the hook and stages the result.
+func hookBDWithStubbableChildren(t *testing.T, bd string) string {
+	t.Helper()
+	alias := filepath.Join(t.TempDir(), "bd.test")
+	if err := os.Link(bd, alias); err == nil {
+		return alias
+	}
+	data, err := os.ReadFile(bd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(alias, data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return alias
 }
 
 // TestPreCommitHook_PathspecCommitLeavesIndexClean runs a real
