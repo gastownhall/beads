@@ -394,3 +394,74 @@ func TestIsBeadsManagedHooksPath_LeavesThirdPartyAlone(t *testing.T) {
 		})
 	}
 }
+
+// writeRecognizedHooks writes a pre-commit hook bd recognizes as
+// beads-managed content into dir, the minimum evidence the GH#5853
+// relocation validation accepts for a replacement target.
+func writeRecognizedHooks(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("failed to create hooks dir %s: %v", dir, err)
+	}
+	body := "#!/bin/sh\n# bd-shim 1.0.0\nexec bd hooks run pre-commit \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "pre-commit"), []byte(body), 0o755); err != nil {
+		t.Fatalf("failed to write recognized hook: %v", err)
+	}
+}
+
+// strandedHooksRepo builds the GH#5853 fixture in the doctor package: a
+// repository whose current hooks directory holds recognizable bd hooks while
+// repository-local core.hooksPath still names the absolute hooks directory of
+// a former location that no longer exists. It returns the repo root, the
+// stale configured value, and the current target.
+func strandedHooksRepo(t *testing.T, layout string) (repoDir, stale, current string) {
+	t.Helper()
+	repoDir = t.TempDir()
+	setupGitRepoInDir(t, repoDir)
+	switch layout {
+	case ".beads-hooks":
+		current = filepath.Join(repoDir, ".beads-hooks")
+	default:
+		current = filepath.Join(repoDir, ".beads", "hooks")
+	}
+	writeRecognizedHooks(t, current)
+	stale = filepath.Join(t.TempDir(), "moved-away", layout)
+	setGitConfig(t, repoDir, "core.hooksPath", stale)
+	return repoDir, stale, current
+}
+
+// TestCheckHooksPath_RelocatedBeadsPath pins AC-2 of the GH#5853 design: the
+// doctor Hooks Path check must recognize a stranded former beads hooks
+// directory, name the configured and current paths, and recommend the
+// explicit repairs — without touching the configuration itself.
+func TestCheckHooksPath_RelocatedBeadsPath(t *testing.T) {
+	for _, layout := range []string{".beads/hooks", ".beads-hooks"} {
+		t.Run(layout, func(t *testing.T) {
+			repoDir, stale, current := strandedHooksRepo(t, layout)
+			runInDir(t, repoDir, func() {
+				check := CheckHooksPath()
+				if check.Status != StatusWarning {
+					t.Fatalf("expected StatusWarning, got %q: %s", check.Status, check.Message)
+				}
+				if !strings.Contains(check.Message, "relocated") {
+					t.Errorf("expected the warning to identify a relocated beads path, got %q", check.Message)
+				}
+				for _, want := range []string{stale, current} {
+					if !strings.Contains(check.Detail, want) {
+						t.Errorf("detail must name %q, got: %s", want, check.Detail)
+					}
+				}
+				for _, want := range []string{"bd doctor --fix", "bd hooks install"} {
+					if !strings.Contains(check.Fix, want) {
+						t.Errorf("fix must recommend %q, got: %s", want, check.Fix)
+					}
+				}
+			})
+			// The check is diagnostic only: the configuration must be
+			// byte-identical after running it.
+			if got := getGitConfig(t, repoDir, "core.hooksPath"); got != stale {
+				t.Errorf("core.hooksPath = %q after CheckHooksPath, want unchanged %q", got, stale)
+			}
+		})
+	}
+}

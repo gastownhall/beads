@@ -831,41 +831,59 @@ func CheckHooksPath() DoctorCheck {
 		}
 	}
 
-	hooksPath, ok := getConfiguredHooksPath(repoRoot)
-	if !ok || hooksPath == "" {
+	st := InspectHooksPathAt("", repoRoot, BeadsManagedStorageHooksDir(), nil)
+
+	switch st.State {
+	case HooksPathUnset:
 		return DoctorCheck{
 			Name:    name,
 			Status:  StatusOK,
 			Message: "core.hooksPath is not set",
 		}
-	}
-
-	resolved := expandHookPathTilde(hooksPath)
-	if !filepath.IsAbs(resolved) {
-		resolved = filepath.Join(repoRoot, resolved)
-	}
-
-	if fileExists(resolved) {
+	case HooksPathExists:
 		return DoctorCheck{
 			Name:    name,
 			Status:  StatusOK,
-			Message: fmt.Sprintf("core.hooksPath is set to %s", hooksPath),
+			Message: fmt.Sprintf("core.hooksPath is set to %s", st.Configured),
+		}
+	case HooksPathRelocated:
+		// GH#5853: the configured path is a stranded former beads hooks
+		// directory and a validated current target exists. Name both and
+		// recommend the explicit repairs; the check itself never mutates
+		// configuration.
+		return DoctorCheck{
+			Name:    name,
+			Status:  StatusWarning,
+			Message: "core.hooksPath points at a relocated beads hooks directory",
+			Detail:  fmt.Sprintf("core.hooksPath=%s (resolved: %s); the current hooks directory is %s — git runs no hooks from the configured path", st.Configured, st.Resolved, st.Target),
+			Fix:     fmt.Sprintf("Run 'bd doctor --fix' to repoint core.hooksPath to %s, or run 'bd hooks install'", st.Target),
+		}
+	case HooksPathManagedMissing:
+		// GH#4440: the current beads-managed directory was deleted in place.
+		return DoctorCheck{
+			Name:    name,
+			Status:  StatusWarning,
+			Message: "core.hooksPath points at a missing directory",
+			Detail:  fmt.Sprintf("core.hooksPath=%s (resolved: %s)", st.Configured, st.Resolved),
+			Fix:     "Run 'bd doctor --fix' to unset core.hooksPath, or: git config --unset core.hooksPath",
 		}
 	}
 
-	managed := IsBeadsManagedHooksPath(repoRoot, BeadsManagedStorageHooksDir(), hooksPath)
+	// HooksPathMissing: a missing path bd does not own or cannot safely
+	// replace. Distinguish a non-repository-local value (global, worktree,
+	// command scope) from an unrecognized one, but offer no automatic repair
+	// in either case.
 	var fix string
-	if managed {
-		fix = "Run 'bd doctor --fix' to unset core.hooksPath, or: git config --unset core.hooksPath"
+	if st.Scope != "" && st.Scope != "local" {
+		fix = fmt.Sprintf("core.hooksPath is set at %s scope, not in this repository's local config; bd will not change it. Restore the missing directory, or unset the value where it is set", st.Scope)
 	} else {
 		fix = "core.hooksPath is not beads-managed; bd will not change it. Restore the missing directory, or unset it yourself: git config --unset core.hooksPath"
 	}
-
 	return DoctorCheck{
 		Name:    name,
 		Status:  StatusWarning,
 		Message: "core.hooksPath points at a missing directory",
-		Detail:  fmt.Sprintf("core.hooksPath=%s (resolved: %s)", hooksPath, resolved),
+		Detail:  fmt.Sprintf("core.hooksPath=%s (resolved: %s); %s", st.Configured, st.Resolved, st.Reason),
 		Fix:     fix,
 	}
 }
