@@ -239,9 +239,9 @@ func TestProxiedServerWispGC(t *testing.T) {
 			t.Fatalf("backdate wisp: %v", err)
 		}
 
-		out, err := bdProxiedRun(t, bd, p.dir, "mol", "wisp", "gc", "--age", "1h", "--json")
+		out, err := bdProxiedRun(t, bd, p.dir, "mol", "wisp", "gc", "--age", "1h", "--force", "--json")
 		if err != nil {
-			t.Fatalf("bd mol wisp gc --age 1h --json: %v\n%s", err, out)
+			t.Fatalf("bd mol wisp gc --age 1h --force --json: %v\n%s", err, out)
 		}
 		var got struct {
 			Deleted      []string `json:"deleted"`
@@ -260,6 +260,50 @@ func TestProxiedServerWispGC(t *testing.T) {
 		}
 		if count != 1 {
 			t.Errorf("expected fresh wisp %s to survive gc", fresh.ID)
+		}
+	})
+
+	t.Run("age_without_force_previews_and_deletes_nothing", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "wgp")
+		fresh := bdProxiedCreate(t, bd, p.dir, "Fresh wisp", "--ephemeral")
+		abandoned := bdProxiedCreate(t, bd, p.dir, "Abandoned wisp", "--ephemeral")
+
+		db := openProxiedDB(t, p)
+		if _, err := db.Exec("UPDATE wisps SET updated_at = ? WHERE id = ?",
+			time.Now().UTC().Add(-2*time.Hour), abandoned.ID); err != nil {
+			t.Fatalf("backdate wisp: %v", err)
+		}
+
+		// GH#5152: without --force the run must only preview, never delete.
+		out, err := bdProxiedRun(t, bd, p.dir, "mol", "wisp", "gc", "--age", "1h", "--json")
+		if err != nil {
+			t.Fatalf("bd mol wisp gc --age 1h --json: %v\n%s", err, out)
+		}
+		var got struct {
+			CleanedIDs   []string `json:"cleaned_ids"`
+			CleanedCount int      `json:"cleaned_count"`
+			Candidates   int      `json:"candidates"`
+			DryRun       bool     `json:"dry_run"`
+		}
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("unmarshal: %v\n%s", err, out)
+		}
+		if !got.DryRun || got.CleanedCount != 0 || got.Candidates != 1 {
+			t.Fatalf("expected preview (dry_run=true, cleaned_count=0, candidates=1), got %+v\n%s", got, out)
+		}
+		if len(got.CleanedIDs) != 1 || got.CleanedIDs[0] != abandoned.ID {
+			t.Fatalf("expected preview to list only %s, got %v", abandoned.ID, got.CleanedIDs)
+		}
+
+		for _, id := range []string{fresh.ID, abandoned.ID} {
+			var count int
+			if err := db.QueryRow("SELECT COUNT(*) FROM wisps WHERE id = ?", id).Scan(&count); err != nil {
+				t.Fatalf("query wisp %s: %v", id, err)
+			}
+			if count != 1 {
+				t.Errorf("expected wisp %s to survive a preview-only gc", id)
+			}
 		}
 	})
 
@@ -288,9 +332,9 @@ func TestProxiedServerWispGC(t *testing.T) {
 			t.Fatalf("backdate parent and stale child wisps: %v", err)
 		}
 
-		out, err := bdProxiedRun(t, bd, p.dir, "mol", "wisp", "gc", "--age", "1h", "--json")
+		out, err := bdProxiedRun(t, bd, p.dir, "mol", "wisp", "gc", "--age", "1h", "--force", "--json")
 		if err != nil {
-			t.Fatalf("bd mol wisp gc --age 1h --json: %v\n%s", err, out)
+			t.Fatalf("bd mol wisp gc --age 1h --force --json: %v\n%s", err, out)
 		}
 		var got struct {
 			Deleted []string `json:"deleted"`
@@ -336,7 +380,7 @@ func TestProxiedServerWispGC(t *testing.T) {
 			t.Fatalf("backdate wisps: %v", err)
 		}
 
-		out, err := bdProxiedRun(t, bd, p.dir, "mol", "wisp", "gc", "--age", "1h", "--exclude-type", "agent", "--json")
+		out, err := bdProxiedRun(t, bd, p.dir, "mol", "wisp", "gc", "--age", "1h", "--force", "--exclude-type", "agent", "--json")
 		if err != nil {
 			t.Fatalf("bd mol wisp gc --exclude-type agent --json: %v\n%s", err, out)
 		}

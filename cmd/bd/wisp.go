@@ -724,6 +724,45 @@ func isProtectedWisp(issue *types.Issue, blockedSet map[string]bool, protectedSt
 	return protectedStatuses[issue.Status]
 }
 
+// ageGCPreview reports whether this age-mode GC run must preview rather than
+// delete. --force is the confirmation the --force help text promises ("Actually
+// delete (default: preview only)"), so a run without it previews no matter
+// what; an explicit --dry-run wins over --force, the same precedence the
+// closed-purge branch below has always had.
+func ageGCPreview(dryRun, force bool) bool {
+	return dryRun || !force
+}
+
+// renderWispGCAgePreview renders the age-mode wisp GC preview shared by the
+// direct and proxied routes: candidate IDs and their types in text, the same
+// IDs with dry_run true in JSON, and a footer that names the flag that
+// deletes. The footer deliberately does not reconstruct the command: a
+// rebuilt one could drop --exclude-type selections or need shell escaping.
+func renderWispGCAgePreview(abandoned []*types.Issue) error {
+	if jsonOutput {
+		ids := make([]string, len(abandoned))
+		for i, o := range abandoned {
+			ids[i] = o.ID
+		}
+		return outputJSON(WispGCResult{
+			CleanedIDs:   ids,
+			Candidates:   len(abandoned),
+			CleanedCount: 0,
+			DryRun:       true,
+		})
+	}
+	fmt.Printf("Dry run: would clean %d abandoned wisp(s):\n\n", len(abandoned))
+	for _, issue := range abandoned {
+		age := formatTimeAgo(issue.UpdatedAt)
+		// The type rides along so the preview shows the command's real scope:
+		// age GC reaches every unprotected ephemeral issue, not only molecule
+		// steps (GH#5152).
+		fmt.Printf("  %s (%s): %s (last updated: %s)\n", issue.ID, issue.IssueType, issue.Title, age)
+	}
+	fmt.Printf("\nRe-run with --force to delete, keeping the same selection flags; remove --dry-run if present.\n")
+	return nil
+}
+
 func runWispGC(cmd *cobra.Command, args []string) error {
 	CheckReadonly("wisp gc")
 
@@ -769,6 +808,11 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 		return runWispPurgeClosed(ctx, dryRun, force, excludeTypes)
 	}
 
+	// Without --force this run only previews (GH#5152): --force is the
+	// confirmation its own help text promises, matching the --closed branch's
+	// contract below.
+	preview := ageGCPreview(dryRun, force)
+
 	abandoned, err := findAbandonedWisps(ctx, store, cleanAll, ageThreshold, excludeTypes)
 	if err != nil && abandoned == nil {
 		return HandleError("%v", err)
@@ -782,33 +826,15 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 			return outputJSON(WispGCResult{
 				CleanedIDs:   []string{},
 				CleanedCount: 0,
-				DryRun:       dryRun,
+				DryRun:       preview,
 			})
 		}
 		fmt.Println("No abandoned wisps found")
 		return nil
 	}
 
-	if dryRun {
-		if jsonOutput {
-			ids := make([]string, len(abandoned))
-			for i, o := range abandoned {
-				ids[i] = o.ID
-			}
-			return outputJSON(WispGCResult{
-				CleanedIDs:   ids,
-				Candidates:   len(abandoned),
-				CleanedCount: 0,
-				DryRun:       true,
-			})
-		}
-		fmt.Printf("Dry run: would clean %d abandoned wisp(s):\n\n", len(abandoned))
-		for _, issue := range abandoned {
-			age := formatTimeAgo(issue.UpdatedAt)
-			fmt.Printf("  %s: %s (last updated: %s)\n", issue.ID, issue.Title, age)
-		}
-		fmt.Printf("\nRun without --dry-run to delete these wisps.\n")
-		return nil
+	if preview {
+		return renderWispGCAgePreview(abandoned)
 	}
 
 	ids := make([]string, len(abandoned))

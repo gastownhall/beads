@@ -1383,6 +1383,8 @@ go_test(
         "where_test.go",
         "wisp_abandoned_test.go",
         "wisp_gc_active_embedded_test.go",
+        "wisp_gc_age_requires_force_embedded_test.go",
+        "wisp_gc_age_preview_contract_embedded_test.go",
         "wisp_gc_cascade_age_test.go",
         "wisp_gc_purge_closed_embedded_test.go",
         "wisp_proxied_integration_test.go",
