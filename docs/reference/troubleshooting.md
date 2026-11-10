@@ -573,6 +573,17 @@ an upgrade, and which upgrade depends on how it runs:
   — including the `dolt` CLI used for git-protocol transfers, and restart
   the server on the new binary.
 
+Until the upgrade lands, the SSH server can be tuned to survive the burst:
+an administrator of that server raises `MaxStartups` in its `sshd_config`
+and reloads the server so the setting takes effect. One affected
+installation raised it to `MaxStartups 100:30:200` and confirmed compaction
+completing again — that is a reported example, not a setting that is
+universally sufficient: a large enough burst of concurrent connections can
+still exceed it, and an endpoint you do not administer, such as a hosted
+Git service, cannot be tuned this way at all. Treat the tuning as
+temporary mitigation; upgrading the Dolt engine remains the permanent
+remedy.
+
 ## Git Hook Issues
 
 ### Hooks not running
