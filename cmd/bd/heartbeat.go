@@ -63,7 +63,9 @@ Examples:
 			return runHeartbeatProxied(ctx, id)
 		}
 
-		result, err := resolveAndGetIssueForMutation(ctx, store, id)
+		// A bd repo sync copy resolves to its original, where bd update
+		// --claim and bd ready --claim put the lease.
+		result, err := resolveAndGetOriginalForMutation(ctx, store, id)
 		if err != nil {
 			if result != nil {
 				result.Close()

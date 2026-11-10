@@ -132,16 +132,20 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		activeStore := store
 		if claimReady {
 			CheckReadonly("ready --claim")
-		} else {
-			routedStore, routed, routingRule, err := openRoutedReadStore(ctx, activeStore)
-			if err != nil {
-				return HandleErrorRespectJSON("%v", err)
-			}
-			if routed {
-				defer func() { _ = routedStore.Close() }()
-				printContributorRoutingNotice(ctx, activeStore, routingRule)
-				activeStore = routedStore
-			}
+		}
+		// Under an active auto-route bd ready lists the routing target's
+		// store, so --claim claims there, opened writable: the claim takes
+		// work the listing offers (issueops.ClaimNextRequest), never a bd
+		// repo sync copy here, whose original bd show, bd heartbeat, bd
+		// unclaim and bd close would act on instead.
+		routedStore, routed, routingRule, err := openAutoRoutedStore(ctx, activeStore, claimReady)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		if routed {
+			defer func() { _ = routedStore.Close() }()
+			printContributorRoutingNotice(ctx, activeStore, routingRule)
+			activeStore = routedStore
 		}
 
 		if claimReady {

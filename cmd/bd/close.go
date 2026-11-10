@@ -179,6 +179,21 @@ in the molecule for you; add --no-auto to only show it.`,
 			}
 		}
 
+		// --claim-next claims inside the batch's transaction, in the first
+		// id's store. When that id is this project's own under an active
+		// auto-route, that store is this one, while bd ready lists the routing
+		// target: the claim would take work bd ready does not offer, a bd repo
+		// sync copy included, whose original bd show, bd heartbeat and bd
+		// unclaim act on instead. Claiming in the target once the close
+		// commits would split one transaction in two, which is why the HTTP
+		// route refuses --claim-next too (http-divergence-ledger.md, F-close),
+		// so refuse here, before anything closes.
+		if claimNext && !continueFlag && len(results) > 0 && !results[0].Routed {
+			if target, ok := activeAutoRouteTarget(ctx, store); ok && !isCommandWorkspace(target.beadsDir) {
+				return HandleErrorRespectJSON("--claim-next would claim from this project instead of %s, the auto-route target bd ready lists; nothing was closed (close without --claim-next, then run bd ready --claim)", remedy.PrintedValue(target.repoPath))
+			}
+		}
+
 		// THE BATCH. The CLI's own close policy runs first and read-only, then
 		// every id it passed goes to the BatchCloser role as one request per
 		// store: one transaction, one Dolt commit over N ids, and an id the
@@ -908,9 +923,10 @@ func resolveReasonFile(cmd *cobra.Command, hasExistingReason bool) (string, bool
 // resolveCloseTargets resolves a batch of partial issue IDs for `bd close`,
 // preserving input order. For each ID it tries the local store first, then
 // explicit prefix routing via routes.jsonl, then a shared auto-routed store.
-// This matches resolveAndGetIssueForMutation's routing precedence and write
-// intent, and like it returns a routing failure (an unreadable routes.jsonl, a
-// routed store that fails to open) as itself rather than as a not-found.
+// This matches resolveAndGetOriginalForMutation's routing precedence, write
+// intent and bd repo sync copy handling, and like it returns a routing
+// failure (an unreadable routes.jsonl, a routed store that fails to open) as
+// itself rather than as a not-found.
 //
 // The auto-routed handle is shared across the batch so bulk close does
 // not repeatedly open the same planning store and every result has a clear store

@@ -151,7 +151,7 @@ To list comments on an issue, use the plural form: bd comments <id>`,
 
 		ctx := rootCtx
 
-		result, err := resolveAndGetIssueForMutationExact(ctx, store, id)
+		result, err := resolveAndGetOriginalForMutationExact(ctx, store, id)
 		if err != nil {
 			if result != nil {
 				result.Close()

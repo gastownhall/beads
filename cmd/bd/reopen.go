@@ -68,7 +68,7 @@ another actor won the race, so retrying the same guard is pointless).`,
 		}
 		for _, id := range args {
 			// Resolve with prefix routing (supports cross-rig reopens like `bd reopen xe-5ls`)
-			result, err := resolveAndGetIssueForMutation(ctx, store, id)
+			result, err := resolveAndGetOriginalForMutation(ctx, store, id)
 			if err != nil {
 				// A concurrent `bd delete` that commits before this
 				// resolution is the same lost race as one that commits

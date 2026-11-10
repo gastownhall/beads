@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
@@ -225,10 +226,17 @@ func headIssueOrNil(t *testing.T, beadsDir, database, id string) *types.Issue {
 }
 
 // runCopyCmd runs cmd in-process with flags set for this run only, and
-// returns its streams and exit status.
+// returns its streams and exit status. The reset after the run leaves the
+// root's persistent flags as they were: once a test has merged them into
+// cmd's flag set (`bd __complete show` does, through rootCmd), resetting
+// cmd's flags would also clear the fixture's --actor, --db and --json.
 func runCopyCmd(t *testing.T, cmd *cobra.Command, flags map[string]string, args ...string) runResult {
 	t.Helper()
-	defer resetCommandFlagsToDefaults(cmd)
+	restorePersistent := saveRootPersistentFlags()
+	defer func() {
+		resetCommandFlagsToDefaults(cmd)
+		restorePersistent()
+	}()
 	for name, value := range flags {
 		if err := cmd.Flags().Set(name, value); err != nil {
 			t.Fatalf("set --%s=%q: %v", name, value, err)
@@ -237,6 +245,25 @@ func runCopyCmd(t *testing.T, cmd *cobra.Command, flags map[string]string, args 
 	var err error
 	stdout, stderr := captureStdio(t, func() { err = cmd.RunE(cmd, args) })
 	return runResult{stdout: stdout, stderr: stderr, exitCode: parityExitCode(err), err: err}
+}
+
+// saveRootPersistentFlags records the value and Changed state of each of the
+// root's persistent flags, and returns what puts them back.
+func saveRootPersistentFlags() func() {
+	type state struct {
+		value   string
+		changed bool
+	}
+	saved := map[*pflag.Flag]state{}
+	rootCmd.PersistentFlags().VisitAll(func(f *pflag.Flag) {
+		saved[f] = state{value: f.Value.String(), changed: f.Changed}
+	})
+	return func() {
+		for f, s := range saved {
+			_ = f.Value.Set(s.value)
+			f.Changed = s.changed
+		}
+	}
 }
 
 // TestCloseOfLocalCopyClosesAutoRouteOwner pins that bd close of an issue the
@@ -449,6 +476,37 @@ func (f *copyFixture) updatePlanning(t *testing.T, id string, updates map[string
 	if err := s.Commit(t.Context(), "planning work"); err != nil {
 		t.Fatalf("commit planning work: %v", err)
 	}
+}
+
+// onPlanning runs fn on the planning workspace's store, open for this call
+// alone, and commits whatever fn wrote there.
+func (f *copyFixture) onPlanning(t *testing.T, fn func(ctx context.Context, s storage.DoltStorage) error) {
+	t.Helper()
+	s, err := embeddeddolt.Open(t.Context(), f.planningBeadsDir, copyFixturePlanningDB, "main")
+	if err != nil {
+		t.Fatalf("open planning: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := fn(t.Context(), s); err != nil {
+		t.Fatalf("planning: %v", err)
+	}
+	if err := s.Commit(t.Context(), "planning work"); err != nil {
+		t.Fatalf("commit planning work: %v", err)
+	}
+}
+
+// dependsOn returns the ids id depends on in s, in the order s lists them.
+func dependsOn(t *testing.T, s storage.DoltStorage, id string) []string {
+	t.Helper()
+	records, err := s.GetDependencyRecords(t.Context(), id)
+	if err != nil {
+		t.Fatalf("read the dependencies of %s: %v", id, err)
+	}
+	var ids []string
+	for _, r := range records {
+		ids = append(ids, r.DependsOnID)
+	}
+	return ids
 }
 
 // TestShowOfLocalCopyReadsAutoRouteOwner pins that bd show of an issue the
@@ -664,8 +722,8 @@ func TestCopyIdentityEdgeCases(t *testing.T) {
 			what string
 			call func() (*RoutedResult, error)
 		}{
-			{"read", func() (*RoutedResult, error) { return resolveAndGetIssueWithRouting(t.Context(), f.project, "pl-c") }},
-			{"mutation", func() (*RoutedResult, error) { return resolveAndGetIssueForMutation(t.Context(), f.project, "pl-c") }},
+			{"read", func() (*RoutedResult, error) { return resolveAndGetOriginalWithRouting(t.Context(), f.project, "pl-c") }},
+			{"mutation", func() (*RoutedResult, error) { return resolveAndGetOriginalForMutation(t.Context(), f.project, "pl-c") }},
 		} {
 			result, err := resolve.call()
 			if err != nil {
@@ -703,7 +761,7 @@ func TestCopyIdentityEdgeCases(t *testing.T) {
 		}
 		f.requireCopyUnchanged(t, "pl-abc")
 
-		if _, err := resolveAndGetIssueForMutationExact(t.Context(), f.project, "pl-ab"); !errors.Is(err, utils.ErrAbbreviatedIDNotAllowed) {
+		if _, err := resolveAndGetOriginalForMutationExact(t.Context(), f.project, "pl-ab"); !errors.Is(err, utils.ErrAbbreviatedIDNotAllowed) {
 			t.Fatalf("exact resolution of pl-ab: err %v, want utils.ErrAbbreviatedIDNotAllowed", err)
 		}
 	})
@@ -778,6 +836,436 @@ func TestWritesToLocalCopyOfUnreadableOwnerFail(t *testing.T) {
 	res := runCopyCmd(t, showCmd, nil, "pl-u")
 	if res.exitCode != 0 || !strings.Contains(res.stdout, `"pl-u"`) {
 		t.Errorf("bd show pl-u of a copy whose target cannot be opened: exit %d, stdout %q, stderr %q; want the copy", res.exitCode, res.stdout, res.stderr)
+	}
+}
+
+// TestUndoWritesAndCommentsOfLocalCopyActOnAutoRouteOwner pins the forms of
+// the commands that follow a copy which TestWritesToLocalCopyLandInAutoRouteOwner
+// leaves out: bd reopen and bd unclaim, which undo a close or a claim made
+// through the copy, a guarded bd close --if-revision, and bd comments add and
+// bd comments, which write and list the comments bd comment adds. Each acts
+// on the auto-route target's issue, durably, and leaves the copy as it is.
+func TestUndoWritesAndCommentsOfLocalCopyActOnAutoRouteOwner(t *testing.T) {
+	ids := []string{"pl-r", "pl-k", "pl-g", "pl-m"}
+	f := newCopyFixture(t, ids, ids, nil)
+	var guard string
+	f.onPlanning(t, func(ctx context.Context, s storage.DoltStorage) error {
+		if err := s.CloseIssue(ctx, "pl-r", "done", "bob", ""); err != nil {
+			return err
+		}
+		if err := s.UpdateIssue(ctx, "pl-k", map[string]interface{}{"assignee": "alice", "status": string(types.StatusInProgress)}, "bob"); err != nil {
+			return err
+		}
+		g, err := s.GetIssue(ctx, "pl-g")
+		if err != nil {
+			return err
+		}
+		guard = types.RevisionToken(g.RowVersion)
+		return nil
+	})
+
+	for _, step := range []struct {
+		cmd   *cobra.Command
+		flags map[string]string
+		args  []string
+	}{
+		{reopenCmd, nil, []string{"pl-r"}},
+		{unclaimCmd, nil, []string{"pl-k"}},
+		{closeCmd, map[string]string{"reason": "done", "if-revision": guard}, []string{"pl-g"}},
+		{commentsAddCmd, nil, []string{"pl-m", "routed comments add"}},
+	} {
+		res := runCopyCmd(t, step.cmd, step.flags, step.args...)
+		if res.exitCode != 0 {
+			t.Errorf("bd %s %v: exit %d, err %v\nstderr: %s", step.cmd.Name(), step.args, res.exitCode, res.err, res.stderr)
+		}
+	}
+
+	if got := f.planningIssue(t, "pl-r"); got == nil || got.Status != types.StatusOpen {
+		t.Errorf("planning pl-r after bd reopen = %s, want it open at HEAD", issueStatusOrNil(got))
+	}
+	if got := f.planningIssue(t, "pl-k"); got == nil || got.Status != types.StatusOpen || got.Assignee != "" {
+		t.Errorf("planning pl-k after bd unclaim = %s, want it open and unassigned at HEAD", issueClaimOrNil(got))
+	}
+	if got := f.planningIssue(t, "pl-g"); got == nil || got.Status != types.StatusClosed {
+		t.Errorf("planning pl-g after bd close --if-revision = %s, want it closed at HEAD", issueStatusOrNil(got))
+	}
+	if !planningHeadHasComment(t, f, "pl-m", "routed comments add") {
+		t.Errorf("the comment bd comments add put on pl-m did not land in the planning workspace's HEAD")
+	}
+	for _, id := range ids {
+		f.requireCopyUnchanged(t, id)
+	}
+
+	jsonOutput = true
+	res := runCopyCmd(t, commentsCmd, nil, "pl-m")
+	jsonOutput = false
+	if res.exitCode != 0 || !strings.Contains(res.stdout, "routed comments add") {
+		t.Errorf("bd comments pl-m --json: exit %d, stdout %q, stderr %q; want the comment the original holds", res.exitCode, res.stdout, res.stderr)
+	}
+}
+
+// issueClaimOrNil describes issue by its status and assignee, for a failure
+// message.
+func issueClaimOrNil(issue *types.Issue) string {
+	if issue == nil {
+		return "absent"
+	}
+	return fmt.Sprintf("%s, assignee %q", issue.Status, issue.Assignee)
+}
+
+// TestClaimLeaseOfLocalCopyLivesOnAutoRouteOwner pins that bd update --claim,
+// bd heartbeat and bd unclaim of an issue the project holds only as a bd repo
+// sync copy act on one row, the original in the auto-route target: the
+// heartbeat refreshes the lease the claim took there and the unclaim releases
+// the claim. A heartbeat that resolved the copy found no lease on it and told
+// the worker to stop ("lease not held") while its claim stood.
+func TestClaimLeaseOfLocalCopyLivesOnAutoRouteOwner(t *testing.T) {
+	f := newCopyFixture(t, []string{"pl-h"}, []string{"pl-h"}, nil)
+
+	for _, step := range []struct {
+		cmd   *cobra.Command
+		flags map[string]string
+	}{
+		{updateCmd, map[string]string{"claim": "true"}},
+		{heartbeatCmd, nil},
+	} {
+		res := runCopyCmd(t, step.cmd, step.flags, "pl-h")
+		if res.exitCode != 0 {
+			t.Fatalf("bd %s pl-h: exit %d, err %v\nstderr: %s", step.cmd.Name(), res.exitCode, res.err, res.stderr)
+		}
+	}
+	if got := f.planningIssue(t, "pl-h"); got == nil || got.Status != types.StatusInProgress || got.Assignee != "alice" {
+		t.Errorf("planning pl-h after bd update --claim and bd heartbeat = %s, want it claimed by alice at HEAD", issueClaimOrNil(got))
+	}
+	f.requireCopyUnchanged(t, "pl-h")
+
+	res := runCopyCmd(t, unclaimCmd, nil, "pl-h")
+	if res.exitCode != 0 {
+		t.Fatalf("bd unclaim pl-h: exit %d, err %v\nstderr: %s", res.exitCode, res.err, res.stderr)
+	}
+	if got := f.planningIssue(t, "pl-h"); got == nil || got.Status != types.StatusOpen || got.Assignee != "" {
+		t.Errorf("planning pl-h after bd unclaim = %s, want it open and unassigned at HEAD", issueClaimOrNil(got))
+	}
+	f.requireCopyUnchanged(t, "pl-h")
+}
+
+// TestReadyClaimUnderAutoRouteClaimsInTheTarget pins that bd ready --claim
+// under an active auto-route claims from the routing target, the store bd
+// ready lists, so bd show, bd heartbeat, bd unclaim and bd close of the
+// issue it claimed reach that claim through the project's bd repo sync copy.
+// Neither the copy nor the project's own pr-n is ever claimed: a claim of the
+// copy was one those commands, acting on the original, could neither see nor
+// release.
+func TestReadyClaimUnderAutoRouteClaimsInTheTarget(t *testing.T) {
+	f := newCopyFixture(t, []string{"pl-r"}, []string{"pl-r"}, []string{"pr-n"})
+	readyClaim := func() runResult {
+		t.Helper()
+		jsonOutput = true
+		defer func() { jsonOutput = false }()
+		return runCopyCmd(t, readyCmd, map[string]string{"claim": "true"})
+	}
+
+	if res := readyClaim(); res.exitCode != 0 || !strings.Contains(res.stdout, `"pl-r"`) {
+		t.Fatalf("bd ready --claim --json: exit %d, stdout %q, stderr %q; want pl-r claimed", res.exitCode, res.stdout, res.stderr)
+	}
+	if got := f.planningIssue(t, "pl-r"); got == nil || got.Status != types.StatusInProgress || got.Assignee != "alice" {
+		t.Fatalf("planning pl-r after bd ready --claim = %s, want it claimed by alice at HEAD", issueClaimOrNil(got))
+	}
+	f.requireCopyUnchanged(t, "pl-r")
+
+	jsonOutput = true
+	shown := runCopyCmd(t, showCmd, nil, "pl-r")
+	jsonOutput = false
+	if shown.exitCode != 0 || !strings.Contains(shown.stdout, `"in_progress"`) || !strings.Contains(shown.stdout, `"alice"`) {
+		t.Errorf("bd show pl-r --json after bd ready --claim: exit %d, stdout %s; want the claim alice holds", shown.exitCode, shown.stdout)
+	}
+	for _, cmd := range []*cobra.Command{heartbeatCmd, unclaimCmd} {
+		if res := runCopyCmd(t, cmd, nil, "pl-r"); res.exitCode != 0 {
+			t.Fatalf("bd %s pl-r after bd ready --claim: exit %d, err %v\nstderr: %s", cmd.Name(), res.exitCode, res.err, res.stderr)
+		}
+	}
+	if got := f.planningIssue(t, "pl-r"); got == nil || got.Status != types.StatusOpen || got.Assignee != "" {
+		t.Errorf("planning pl-r after bd unclaim = %s, want it open and unassigned at HEAD", issueClaimOrNil(got))
+	}
+
+	if res := readyClaim(); res.exitCode != 0 || !strings.Contains(res.stdout, `"pl-r"`) {
+		t.Fatalf("bd ready --claim --json after bd unclaim: exit %d, stdout %q, stderr %q; want pl-r claimed again", res.exitCode, res.stdout, res.stderr)
+	}
+	if res := runCopyCmd(t, closeCmd, map[string]string{"reason": "done"}, "pl-r"); res.exitCode != 0 {
+		t.Fatalf("bd close pl-r: exit %d, err %v\nstderr: %s", res.exitCode, res.err, res.stderr)
+	}
+	if got := f.planningIssue(t, "pl-r"); got == nil || got.Status != types.StatusClosed {
+		t.Errorf("planning pl-r after bd close = %s, want it closed at HEAD", issueStatusOrNil(got))
+	}
+
+	// The target holds no ready work now, while the copy and pr-n are still
+	// open here.
+	if res := readyClaim(); res.exitCode != 0 || strings.TrimSpace(res.stdout) != "[]" {
+		t.Errorf("bd ready --claim --json with no ready work in the target: exit %d, stdout %q; want []", res.exitCode, res.stdout)
+	}
+	f.requireCopyUnchanged(t, "pl-r")
+	if got := f.projectIssue(t, "pr-n"); got == nil || got.Status != types.StatusOpen || got.Assignee != "" {
+		t.Errorf("project pr-n after bd ready --claim = %s, want it open and unassigned", issueClaimOrNil(got))
+	}
+}
+
+// TestCloseClaimNextUnderAutoRouteClaimsOnlyInTheTarget pins where bd close
+// --claim-next claims under an active auto-route. After closing a bd repo
+// sync copy's original in the routing target, it claims there, inside the
+// close's transaction, so bd heartbeat and bd unclaim of the issue it claimed
+// reach that claim through the project's copy. After one of the project's
+// own issues it would claim in the project's store, which took the copy, and
+// the heartbeat, acting on the unclaimed original, told the worker to stop
+// ("lease not held"). So that close is refused before anything closes,
+// pointing at bd ready --claim, unless the route leads back to the project.
+func TestCloseClaimNextUnderAutoRouteClaimsOnlyInTheTarget(t *testing.T) {
+	f := newCopyFixture(t, []string{"pl-x", "pl-r"}, []string{"pl-x", "pl-r"}, []string{"pr-n"})
+	t.Setenv("BD_JSON_ENVELOPE", "")
+	closeClaimNext := func(id string) runResult {
+		t.Helper()
+		jsonOutput = true
+		defer func() { jsonOutput = false }()
+		return runCopyCmd(t, closeCmd, map[string]string{"reason": "done", "claim-next": "true"}, id)
+	}
+	var out struct {
+		Claimed *struct {
+			ID string `json:"id"`
+		} `json:"claimed"`
+	}
+
+	res := closeClaimNext("pr-n")
+	reported := res.stdout + res.stderr
+	if res.exitCode == 0 || !strings.Contains(reported, f.planningDir) || !strings.Contains(reported, "bd ready --claim") {
+		t.Errorf("bd close pr-n --claim-next: exit %d, output %q; want a refusal naming %s and bd ready --claim", res.exitCode, reported, f.planningDir)
+	}
+	if got := f.projectIssue(t, "pr-n"); got == nil || got.Status != types.StatusOpen {
+		t.Errorf("project pr-n after the refused bd close --claim-next = %s, want it still open", issueStatusOrNil(got))
+	}
+	for _, id := range []string{"pl-x", "pl-r"} {
+		f.requireCopyUnchanged(t, id)
+		if got := f.planningIssue(t, id); got == nil || got.Status != types.StatusOpen || got.Assignee != "" {
+			t.Errorf("planning %s after the refused bd close --claim-next = %s, want it open and unassigned at HEAD", id, issueClaimOrNil(got))
+		}
+	}
+
+	res = closeClaimNext("pl-x")
+	if err := json.Unmarshal([]byte(res.stdout), &out); res.exitCode != 0 || err != nil || out.Claimed == nil || out.Claimed.ID != "pl-r" {
+		t.Fatalf("bd close pl-x --claim-next --json: exit %d, stdout %q, stderr %q; want pl-r claimed", res.exitCode, res.stdout, res.stderr)
+	}
+	if got := f.planningIssue(t, "pl-x"); got == nil || got.Status != types.StatusClosed {
+		t.Errorf("planning pl-x after bd close pl-x --claim-next = %s, want it closed at HEAD", issueStatusOrNil(got))
+	}
+	if got := f.planningIssue(t, "pl-r"); got == nil || got.Status != types.StatusInProgress || got.Assignee != "alice" {
+		t.Fatalf("planning pl-r after bd close pl-x --claim-next = %s, want it claimed by alice at HEAD", issueClaimOrNil(got))
+	}
+	for _, cmd := range []*cobra.Command{heartbeatCmd, unclaimCmd} {
+		if res := runCopyCmd(t, cmd, nil, "pl-r"); res.exitCode != 0 {
+			t.Fatalf("bd %s pl-r after bd close --claim-next: exit %d, err %v\nstderr: %s", cmd.Name(), res.exitCode, res.err, res.stderr)
+		}
+	}
+	if got := f.planningIssue(t, "pl-r"); got == nil || got.Status != types.StatusOpen || got.Assignee != "" {
+		t.Errorf("planning pl-r after bd unclaim = %s, want it open and unassigned at HEAD", issueClaimOrNil(got))
+	}
+	for _, id := range []string{"pl-x", "pl-r"} {
+		f.requireCopyUnchanged(t, id)
+	}
+
+	// A route back to this project lists the project itself, so the claim
+	// there stands.
+	if err := f.project.SetConfig(t.Context(), "routing.maintainer", f.repoDir); err != nil {
+		t.Fatalf("route the project to itself: %v", err)
+	}
+	res = closeClaimNext("pr-n")
+	out.Claimed = nil
+	if err := json.Unmarshal([]byte(res.stdout), &out); res.exitCode != 0 || err != nil || out.Claimed == nil {
+		t.Fatalf("bd close pr-n --claim-next under a route to the project itself: exit %d, stdout %q, stderr %q; want a claim", res.exitCode, res.stdout, res.stderr)
+	}
+	if got := f.projectIssue(t, "pr-n"); got == nil || got.Status != types.StatusClosed {
+		t.Errorf("project pr-n after bd close --claim-next under a route to the project itself = %s, want it closed", issueStatusOrNil(got))
+	}
+}
+
+// TestAssignOfLocalCopyAssignsAutoRouteOwner pins that bd assign, shorthand
+// for bd update --assignee, follows a bd repo sync copy to its original in
+// the auto-route target, so the revision bd show --json reports for the id
+// guards it. Staying on the copy, a guarded assign compared the copy's
+// revision with the original's and failed every time.
+func TestAssignOfLocalCopyAssignsAutoRouteOwner(t *testing.T) {
+	f := newCopyFixture(t, []string{"pl-a"}, []string{"pl-a"}, nil)
+	t.Setenv("BD_JSON_ENVELOPE", "")
+
+	jsonOutput = true
+	shown := runCopyCmd(t, showCmd, nil, "pl-a")
+	jsonOutput = false
+	var details []struct {
+		Revision string `json:"revision"`
+	}
+	if err := json.Unmarshal([]byte(shown.stdout), &details); shown.exitCode != 0 || err != nil || len(details) != 1 {
+		t.Fatalf("bd show pl-a --json: exit %d, stdout %q (%v); want one issue", shown.exitCode, shown.stdout, err)
+	}
+
+	res := runCopyCmd(t, assignCmd, map[string]string{"if-revision": details[0].Revision}, "pl-a", "bob")
+	if res.exitCode != 0 {
+		t.Fatalf("bd assign pl-a bob --if-revision %s: exit %d, err %v\nstderr: %s", details[0].Revision, res.exitCode, res.err, res.stderr)
+	}
+	if got := f.planningIssue(t, "pl-a"); got == nil || got.Assignee != "bob" {
+		t.Errorf("planning pl-a after bd assign = %s, want it assigned to bob at HEAD", issueClaimOrNil(got))
+	}
+	f.requireCopyUnchanged(t, "pl-a")
+}
+
+// TestSharedResolversKeepALocalCopyLocal pins what every command other than
+// the ones that follow a copy gets for a bd repo sync copy: the shared
+// resolvers answer with the row this store holds, so a command that selected
+// the id here, or that works on the links this store keeps, stays on it. The
+// resolveAndGetOriginal resolvers, the controls, follow the same copy to the
+// auto-route target.
+func TestSharedResolversKeepALocalCopyLocal(t *testing.T) {
+	f := newCopyFixture(t, []string{"pl-x"}, []string{"pl-x"}, nil)
+	for _, tc := range []struct {
+		name      string
+		resolve   func(context.Context, storage.DoltStorage, string) (*RoutedResult, error)
+		wantOwner bool
+	}{
+		{"resolveAndGetIssueWithRouting", resolveAndGetIssueWithRouting, false},
+		{"resolveAndGetIssueForMutation", resolveAndGetIssueForMutation, false},
+		{"resolveAndGetIssueForMutationExact", resolveAndGetIssueForMutationExact, false},
+		{"resolveAndGetOriginalWithRouting (control)", resolveAndGetOriginalWithRouting, true},
+		{"resolveAndGetOriginalForMutation (control)", resolveAndGetOriginalForMutation, true},
+		{"resolveAndGetOriginalForMutationExact (control)", resolveAndGetOriginalForMutationExact, true},
+	} {
+		result, err := tc.resolve(t.Context(), f.project, "pl-x")
+		if err != nil {
+			t.Fatalf("%s(pl-x): %v", tc.name, err)
+		}
+		result.Close()
+		owner := result.Routed && result.copyOwner != ""
+		local := !result.Routed && result.Store == f.project && result.copyOwner == ""
+		if (tc.wantOwner && !owner) || (!tc.wantOwner && !local) {
+			t.Errorf("%s(pl-x) = routed %v, copy owner %q; want the original in planning: %v", tc.name, result.Routed, result.copyOwner, tc.wantOwner)
+		}
+	}
+}
+
+// TestAdminCleanupDeletesTheCopiesItSelected pins that bd admin cleanup
+// deletes the closed rows it selected from this store: a closed bd repo sync
+// copy is deleted here, and its original in the auto-route target, open
+// there, is kept. A later selection holding such a copy and a native row
+// deletes both here instead of refusing them as two workspaces.
+func TestAdminCleanupDeletesTheCopiesItSelected(t *testing.T) {
+	f := newCopyFixture(t, []string{"pl-x", "pl-z"}, []string{"pl-x", "pl-z"}, []string{"pr-n"}, func(_ *copyFixture, c *types.Issue) {
+		if c.ID == "pl-x" {
+			closed := time.Now().UTC().Add(-48 * time.Hour)
+			c.Status, c.ClosedAt = types.StatusClosed, &closed
+		}
+	})
+	// bd admin cleanup refuses embedded mode up front; past that gate it
+	// selects and deletes through the command's store, here the fixture's
+	// embedded project.
+	serverMode = true
+	cleanup := func(selected ...string) {
+		t.Helper()
+		res := runCopyCmd(t, cleanupCmd, map[string]string{"force": "true"})
+		if res.exitCode != 0 {
+			t.Fatalf("bd admin cleanup --force of %v: exit %d, err %v\nstdout: %s\nstderr: %s", selected, res.exitCode, res.err, res.stdout, res.stderr)
+		}
+		for _, id := range selected {
+			if f.projectIssue(t, id) != nil {
+				t.Errorf("project %s survived bd admin cleanup --force", id)
+			}
+			if owner := f.planningIssue(t, id); strings.HasPrefix(id, "pl-") && (owner == nil || owner.Status != types.StatusOpen) {
+				t.Errorf("planning %s after bd admin cleanup = %s, want its open original kept", id, issueStatusOrNil(owner))
+			}
+		}
+		if strings.Contains(res.stderr, "still holds the copy") {
+			t.Errorf("bd admin cleanup printed the retained-copy note:\n%s", res.stderr)
+		}
+	}
+
+	cleanup("pl-x")
+	for _, id := range []string{"pl-z", "pr-n"} {
+		if err := f.project.CloseIssue(t.Context(), id, "done", "test", ""); err != nil {
+			t.Fatalf("close project %s: %v", id, err)
+		}
+	}
+	cleanup("pl-z", "pr-n")
+}
+
+// TestDeleteBatchOfSelectedIDsDeletesTheCopy pins deleteBatch, the delete
+// path of bd wisp gc and bd mol burn, which delete ids they selected from
+// this store: a bd repo sync copy among them is deleted here beside a native
+// row, and its original in the auto-route target is kept.
+func TestDeleteBatchOfSelectedIDsDeletesTheCopy(t *testing.T) {
+	f := newCopyFixture(t, []string{"pl-x"}, []string{"pl-x"}, []string{"pr-n"})
+	var err error
+	captureStdio(t, func() {
+		err = deleteBatch(nil, []string{"pl-x", "pr-n"}, true, false, false, false, false, nil, "wisp gc")
+	})
+	if err != nil {
+		t.Fatalf("deleteBatch(pl-x pr-n): %v", err)
+	}
+	if f.planningIssue(t, "pl-x") == nil {
+		t.Error("deleteBatch deleted planning's pl-x; the ids were selected from the project")
+	}
+	for _, id := range []string{"pl-x", "pr-n"} {
+		if f.projectIssue(t, id) != nil {
+			t.Errorf("project %s survived deleteBatch", id)
+		}
+	}
+}
+
+// TestDepOfLocalCopyKeepsTheProjectsLinks pins that bd dep works on the links
+// this project holds for a bd repo sync copy, the ones bd dep add made here,
+// not on its original's in the auto-route target: dep list --direction=up
+// lists the project's dependents, dep remove removes the project's edge and
+// dep add stores it here, leaving the target's links as they are. bd show
+// --refs, which reads the original, lists the target's dependents instead.
+func TestDepOfLocalCopyKeepsTheProjectsLinks(t *testing.T) {
+	f := newCopyFixture(t, []string{"pl-x", "pl-y"}, []string{"pl-x"}, []string{"pr-n", "pr-m"})
+	f.onPlanning(t, func(ctx context.Context, s storage.DoltStorage) error {
+		return s.AddDependency(ctx, &types.Dependency{IssueID: "pl-y", DependsOnID: "pl-x", Type: types.DepBlocks}, "bob")
+	})
+	for _, dep := range []*types.Dependency{
+		{IssueID: "pr-n", DependsOnID: "pl-x", Type: types.DepBlocks},
+		{IssueID: "pl-x", DependsOnID: "pr-m", Type: types.DepBlocks},
+	} {
+		if err := f.project.AddDependency(t.Context(), dep, "test"); err != nil {
+			t.Fatalf("add project edge %s -> %s: %v", dep.IssueID, dep.DependsOnID, err)
+		}
+	}
+
+	jsonOutput = true
+	up := runCopyCmd(t, depListCmd, map[string]string{"direction": "up"}, "pl-x")
+	refs := runCopyCmd(t, showCmd, map[string]string{"refs": "true"}, "pl-x")
+	jsonOutput = false
+	if up.exitCode != 0 || !strings.Contains(up.stdout, `"pr-n"`) || strings.Contains(up.stdout, `"pl-y"`) {
+		t.Errorf("bd dep list pl-x --direction=up --json: exit %d, stdout %s; want the project's dependent pr-n alone", up.exitCode, up.stdout)
+	}
+	if refs.exitCode != 0 || !strings.Contains(refs.stdout, `"pl-y"`) || strings.Contains(refs.stdout, `"pr-n"`) {
+		t.Errorf("bd show pl-x --refs --json: exit %d, stdout %s; want the target's dependent pl-y alone", refs.exitCode, refs.stdout)
+	}
+
+	res := runCopyCmd(t, depRemoveCmd, nil, "pl-x", "pr-m")
+	if res.exitCode != 0 {
+		t.Fatalf("bd dep remove pl-x pr-m: exit %d, err %v\nstderr: %s", res.exitCode, res.err, res.stderr)
+	}
+	if got := dependsOn(t, f.project, "pl-x"); len(got) != 0 {
+		t.Errorf("the project's copy pl-x still depends on %v after bd dep remove pl-x pr-m", got)
+	}
+	res = runCopyCmd(t, depAddCmd, nil, "pl-x", "pr-m")
+	if res.exitCode != 0 {
+		t.Fatalf("bd dep add pl-x pr-m: exit %d, err %v\nstderr: %s", res.exitCode, res.err, res.stderr)
+	}
+	if got := dependsOn(t, f.project, "pl-x"); !slices.Equal(got, []string{"pr-m"}) {
+		t.Errorf("the project's copy pl-x depends on %v after bd dep add pl-x pr-m, want [pr-m]", got)
+	}
+	var planningDeps []string
+	f.onPlanning(t, func(_ context.Context, s storage.DoltStorage) error {
+		planningDeps = dependsOn(t, s, "pl-x")
+		return nil
+	})
+	if len(planningDeps) != 0 {
+		t.Errorf("bd dep on the copy changed planning's pl-x, which now depends on %v", planningDeps)
 	}
 }
 

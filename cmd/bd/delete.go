@@ -106,7 +106,7 @@ Force: Delete and orphan dependents
 		}
 
 		if len(issueIDs) > 1 || cascade {
-			if err := deleteBatch(cmd, issueIDs, force, dryRun, cascade, jsonOutput, false, ifRevision); err != nil {
+			if err := deleteBatchReporting(issueIDs, force, dryRun, cascade, jsonOutput, ifRevision, nil, resolveAndGetOriginalForMutationExact); err != nil {
 				if ifRevision != nil {
 					if reported, ok := reportIfRevisionFailure("deleting", issueIDs[0], err, ifRevision); ok {
 						return reported
@@ -131,7 +131,7 @@ Force: Delete and orphan dependents
 		// gone (already deleted, a re-run script) would otherwise resolve to
 		// whichever surviving issue's id it begins, and the preview would
 		// print `bd delete <that issue> --force` as the next step.
-		routedResult, err := resolveAndGetIssueForMutationExact(ctx, store, issueID)
+		routedResult, err := resolveAndGetOriginalForMutationExact(ctx, store, issueID)
 		if err != nil {
 			// mc-zndi7.81: this pre-flight existence check runs before
 			// deleter.Delete() and the per-id lock fence #7244 added, so a
@@ -348,22 +348,17 @@ func deleteIssue(ctx context.Context, issueID string) error {
 	return store.DeleteIssue(ctx, issueID)
 }
 
-// deleteBatch is the multi-id and cascade path, shared by `bd delete`,
-// `bd cleanup`, `bd wisp gc` and `bd mol burn`.
-//
-// It resolves the ids in the front door - exact-id matching and
-// cross-repository routing, which issueops.DeleteRequest deliberately does not
-// do - and hands the RESOLVED ids to the role. Never a leading-prefix
-// abbreviation: a re-run of a finished --from-file list would otherwise
-// delete every surviving issue whose id one of its ids begins.
-//
-// ifRevision is non-nil only via `bd delete`'s own --if-revision (beads#4682);
-// its other three callers always pass nil, and requireSingleIfRevisionID has
-// already refused this path if it were asked to guard more than one id.
+// deleteBatch is the multi-id and cascade path of `bd wisp gc` and `bd mol
+// burn`, which delete ids they selected from this workspace's store:
+// deleteBatchReporting with no report, each id resolved here first
+// (resolveAndGetIssueForMutationExact), so a bd repo sync copy among them is
+// the row deleted, not its original in another repository. Its callers pass a
+// nil ifRevision; `bd delete --if-revision` reaches deleteBatchReporting
+// itself.
 //
 //nolint:unparam // cmd parameter required for potential future use
 func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, cascade bool, jsonOutput bool, _ bool, ifRevision *int64, _ ...string) error {
-	return deleteBatchReporting(issueIDs, force, dryRun, cascade, jsonOutput, ifRevision, nil)
+	return deleteBatchReporting(issueIDs, force, dryRun, cascade, jsonOutput, ifRevision, nil, resolveAndGetIssueForMutationExact)
 }
 
 // deleteBatchResolution is what a delete batch's ids resolved to.
@@ -444,10 +439,26 @@ func refuseMixedDeleteDestinations(resolvedIDs []string, destinations []deleteDe
 	return fmt.Errorf("these issues are in different workspaces (%s); nothing was deleted, submit a separate bd delete for each workspace", strings.Join(parts, "; "))
 }
 
-// deleteBatchReporting is deleteBatch for a bulk command that reports on its
-// own selection: report's members (`bd admin cleanup`'s retention_required) are added to the --json preview and result. A nil report
-// adds nothing, which is deleteBatch.
-func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput bool, ifRevision *int64, report map[string]interface{}) error {
+// deleteBatchReporting is the multi-id and cascade path of `bd delete`, `bd
+// admin cleanup` and deleteBatch.
+//
+// It resolves the ids in the front door through resolve - exact-id matching
+// and cross-repository routing, which issueops.DeleteRequest deliberately does
+// not do - and hands the RESOLVED ids to the role. Never a leading-prefix
+// abbreviation: a re-run of a finished --from-file list would otherwise
+// delete every surviving issue whose id one of its ids begins. `bd delete`
+// resolves the ids the user named through
+// resolveAndGetOriginalForMutationExact, so an id naming a bd repo sync copy
+// deletes its original, as a one-id delete does. A command that selected its
+// ids from this workspace's store resolves them through
+// resolveAndGetIssueForMutationExact and deletes the rows it selected.
+//
+// report's members (`bd admin cleanup`'s retention_required) are added to the
+// --json preview and result; a nil report adds nothing. ifRevision is non-nil
+// only via `bd delete`'s own --if-revision (beads#4682), and
+// requireSingleIfRevisionID has already refused this path if it were asked to
+// guard more than one id.
+func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput bool, ifRevision *int64, report map[string]interface{}, resolve func(context.Context, storage.DoltStorage, string) (*RoutedResult, error)) error {
 	if store == nil {
 		if err := ensureStoreActive(); err != nil {
 			return err
@@ -455,7 +466,7 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 	}
 	ctx := rootCtx
 	batch, err := resolveDeleteBatch(issueIDs, func(id string) (*RoutedResult, error) {
-		return resolveAndGetIssueForMutationExact(ctx, store, id)
+		return resolve(ctx, store, id)
 	})
 	if err != nil {
 		return err

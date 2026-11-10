@@ -1226,17 +1226,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Commands on a `bd repo sync` copy act on the original.** With
-  `routing.mode=auto`, an issue this project holds only as a copy hydrated
-  from its routing target (its `source_repo` names that target and the two
-  share their `created_at`) was changed, closed or deleted here, so the
-  original stayed open and `bd show` reported the copy's stale state. `bd
-  show`, `bd update` (including `--claim`), `bd comment`, `bd close` and `bd
-  delete` now act on the original in the target and leave the copy as it is;
-  `bd delete` notes the copy it leaves behind. A write fails, naming the
+- **Commands on a `bd repo sync` copy act on the original.** With an active
+  route (`routing.mode=auto`, or `routing.default` naming another
+  repository), an issue this project holds only as a copy hydrated from its
+  routing target (its `source_repo` names that target and the two share
+  their `created_at`) was changed, closed or deleted here, so the original
+  stayed open and `bd show` reported the copy's stale state. `bd show` (also
+  `--refs`, `--children` and `--watch`), `bd comments`, `bd update`
+  (including `--claim` and `--parent`), `bd assign`, `bd heartbeat`, `bd
+  unclaim`, `bd close`, `bd reopen`, `bd comment`, `bd comments add` and `bd
+  delete` now act on the original in the target and leave the copy as it
+  is; `bd delete` notes the copy it leaves behind. A write fails, naming the
   target, when the target cannot be opened, rather than changing the copy.
-  Any other row, including one whose `source_repo` names another repository,
-  is still resolved here.
+  Every other command still acts on the copy: `bd dep` reads and changes
+  this project's links to it, `bd admin cleanup`, `bd mol burn` and `bd wisp
+  gc` delete the rows they selected here, and field commands such as `bd
+  priority` or `bd label` change the copy. Any other row, including one
+  whose `source_repo` names another repository, is still resolved here.
+- With an active route (`routing.mode=auto`, or `routing.default` naming
+  another repository), `bd ready --claim` claims from the routing target,
+  the store `bd ready` lists. It claimed from this project, a `bd repo sync`
+  copy included, so the claim never showed in `bd list` or `bd ready`. To
+  claim one of this project's own issues, use `bd update <id> --claim`. `bd
+  close <id> --claim-next` of one of this project's own issues, whose claim
+  would come from this project, now fails before closing anything; close it
+  without `--claim-next`, then run `bd ready --claim`.
 - `bd delete` refuses a batch whose ids are in different workspaces, before
   deleting anything, and asks for a separate `bd delete` per workspace. A
   batch ran on the first routed store, so an id another workspace held was
@@ -1244,11 +1258,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - With `BD_DEBUG=1`, bd logs each store a command opens to stderr as
   `store: <.beads dir> <read|write> (<reason>)`, for example
   `(auto-route: contributor)`, so a routed command shows where it read and
-  wrote. `--verbose` does the same except on `bd export`, `bd doctor` and
-  `bd repo sync`, whose own `--verbose` means something else. Stdout and
-  `--json` output are unchanged. `docs/multi-agent/routing.md` now also
-  describes which store `bd list` and `bd ready` read under a route, and how
-  `bd repo sync` refreshes, keeps and re-imports copies.
+  wrote. `--verbose` does the same except on `bd export`, `bd doctor`, `bd
+  repo sync` and `bd swarm validate`, whose own `--verbose` means something
+  else. Stdout and `--json` output are unchanged.
+  `docs/multi-agent/routing.md` now also describes which store `bd list` and
+  `bd ready` read under a route, and how `bd repo sync` refreshes, keeps and
+  re-imports copies.
 
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools

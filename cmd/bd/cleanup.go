@@ -184,7 +184,10 @@ SEE ALSO:
 			fmt.Println()
 		}
 
-		if err := deleteBatchReporting(issueIDs, force, dryRun, cascade, jsonOutput, nil, retentionReport(selection.RetentionRequired)); err != nil {
+		// The ids were selected from this store, so they resolve here first:
+		// a closed bd repo sync copy is deleted here, never the original it was
+		// imported from, which may be open again in its own repository.
+		if err := deleteBatchReporting(issueIDs, force, dryRun, cascade, jsonOutput, nil, retentionReport(selection.RetentionRequired), resolveAndGetIssueForMutationExact); err != nil {
 			return HandleError("%v", err)
 		}
 		return nil

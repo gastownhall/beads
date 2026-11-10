@@ -182,10 +182,11 @@ func openRoutedReadStore(ctx context.Context, store storage.DoltStorage) (storag
 // openAutoRoutedStore opens the target selected by auto-routing. Every rule,
 // maintainer, contributor and default alike, opens writable when writable is
 // set, for write-intent callers (resolveAndGetIssueForMutation and its exact
-// twin, bd close target resolution) that commit the change where the issue
-// lives. A contributor's target is their own planning repository, the one bd
-// create already writes to, so a planning issue is claimed, commented on and
-// closed there (GH#2345, beads-0km). Reads stay read-only.
+// twin, bd close target resolution, bd ready --claim) that commit the change
+// where the issue lives. A contributor's target is their own planning
+// repository, the one bd create already writes to, so a planning issue is
+// claimed, commented on and closed there (GH#2345, beads-0km). Reads stay
+// read-only.
 //
 // The target opens its own dolt_database, as a prefix route does
 // (openRoutedTargetStore, autoRouteTargetDatabase).

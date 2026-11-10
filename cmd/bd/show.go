@@ -135,7 +135,7 @@ var showCmd = &cobra.Command{
 		foundCount := 0
 		for idx, id := range args {
 			// Resolve and get issue with routing (e.g., gt-xyz routes to another rig)
-			result, err := resolveAndGetIssueWithRouting(ctx, store, id)
+			result, err := resolveAndGetOriginalWithRouting(ctx, store, id)
 			if err != nil {
 				if result != nil {
 					result.Close()

@@ -58,7 +58,9 @@ Examples:
 
 		ctx := rootCtx
 
-		result, err := resolveAndGetIssueForMutation(ctx, store, id)
+		// A bd repo sync copy resolves to its original, as it does for bd
+		// update --assignee, so the revision bd show reports guards it.
+		result, err := resolveAndGetOriginalForMutation(ctx, store, id)
 		if err != nil {
 			if result != nil {
 				result.Close()

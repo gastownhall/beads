@@ -122,9 +122,9 @@ func commitRoutedWrite(ctx context.Context, result *RoutedResult, command string
 // Tries the local store first, then prefix-based routing via routes.jsonl,
 // then falls back to auto-routing (routing.mode=auto). A routing failure, such
 // as an unreadable routes.jsonl or a routed store that fails to open, is
-// returned as itself rather than as the local not-found. A local hit that is
-// a bd repo sync copy of an issue in the auto-route target resolves to that
-// issue in the target instead (redirectLocalCopyToOwner).
+// returned as itself rather than as the local not-found. A local hit is the
+// local row, a bd repo sync copy included; resolveAndGetOriginalWithRouting
+// follows a copy to its original.
 //
 // Returns a RoutedResult containing the issue, resolved ID, and the store to use.
 // The caller MUST call result.Close() when done to release any routed storage.
@@ -150,7 +150,7 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 	// Try local store first.
 	result, err := resolveAndGetFromStore(ctx, localStore, id, false)
 	if err == nil {
-		return redirectLocalCopyToOwner(ctx, localStore, result, writable)
+		return result, nil
 	}
 
 	// The first routed tier that refuses the id answers instead of the local
@@ -315,6 +315,47 @@ func redirectLocalCopyToOwner(ctx context.Context, localStore storage.DoltStorag
 	return result, err
 }
 
+// resolveAndGetOriginalWithRouting is resolveAndGetIssueWithRouting for a
+// command that acts on the issue a bd repo sync copy was imported from rather
+// than on the copy (followLocalCopy): bd show and bd comments read it there.
+func resolveAndGetOriginalWithRouting(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
+	result, err := resolveAndGetIssueWithRouting(ctx, localStore, id)
+	return followLocalCopy(ctx, localStore, result, err, false)
+}
+
+// resolveAndGetOriginalForMutation is resolveAndGetIssueForMutation for such a
+// command: bd update, bd heartbeat, bd unclaim, bd reopen and bd close
+// --if-revision change the original.
+func resolveAndGetOriginalForMutation(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
+	result, err := resolveAndGetIssueForMutation(ctx, localStore, id)
+	return followLocalCopy(ctx, localStore, result, err, true)
+}
+
+// resolveAndGetOriginalForMutationExact is resolveAndGetIssueForMutationExact
+// for such a command: bd comment, bd comments add and bd delete change the
+// original.
+func resolveAndGetOriginalForMutationExact(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
+	result, err := resolveAndGetIssueForMutationExact(ctx, localStore, id)
+	return followLocalCopy(ctx, localStore, result, err, true)
+}
+
+// followLocalCopy hands back, when result is a local hit that is a bd repo
+// sync copy of an issue in the auto-route target, that issue
+// (redirectLocalCopyToOwner); any other result, or an error, passes through.
+// Only the commands docs/multi-agent/routing.md lists follow a copy, through
+// the resolveAndGetOriginal resolvers or, for bd close, resolveCloseTarget.
+// Every other command resolves the row this store holds: one that selected
+// its ids here (bd admin cleanup, bd mol burn, bd wisp gc) must delete what it
+// selected, not a row in another repository, and one that reads or writes
+// links (bd dep, bd link, bd mol bond) must find the edge where this store
+// keeps it.
+func followLocalCopy(ctx context.Context, localStore storage.DoltStorage, result *RoutedResult, err error, writable bool) (*RoutedResult, error) {
+	if err != nil || result.Routed {
+		return result, err
+	}
+	return redirectLocalCopyToOwner(ctx, localStore, result, writable)
+}
+
 // printRetainedCopyNote tells the user, after result's issue was deleted from
 // the repository a local copy was imported from, that the copy is still here
 // and how to remove it. Quiet mode suppresses it.
@@ -418,7 +459,7 @@ func resolveAndGetFromStoreExact(ctx context.Context, s storage.DoltStorage, id 
 func resolveAndGetIssueForMutationExact(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
 	result, err := resolveAndGetFromStoreExact(ctx, localStore, id, false)
 	if err == nil {
-		return redirectLocalCopyToOwner(ctx, localStore, result, true)
+		return result, nil
 	}
 	if !isNotFoundErr(err) {
 		return nil, err

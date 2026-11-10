@@ -214,25 +214,45 @@ see [`bd dep`](/cli-reference/dep).
 
 A hydrated bead is a copy. When the routing target is the repository the copy
 came from (the copy's `source_repo` names it and the two share their
-`created_at`), commands act on the original there:
+`created_at`), these commands act on the original there and leave the copy as
+it is:
 
-- `bd show` reads the original, so it reports the current state.
-- `bd update` (including `--claim`), `bd comment`, `bd close` and `bd delete`
-  change the original and leave the copy as it is. `bd delete` notes the copy
-  it leaves behind; once the target no longer holds the bead,
-  `bd delete <id> --force` removes the copy.
-- If the target can't be opened, those writes fail and name it rather than
-  change the copy. `bd show` falls back to the copy.
-- A `bd delete` whose ids are in different repositories fails before deleting
-  anything; run one `bd delete` per repository.
+| Command | On such a copy |
+|---|---|
+| `bd show` (also `--refs`, `--children` and `--watch`), `bd comments` | read the original, so they report its current state, comments and links |
+| `bd update` (including `--claim`), `bd assign`, `bd heartbeat`, `bd unclaim`, `bd close`, `bd reopen`, `bd comment`, `bd comments add` | change the original |
+| `bd delete` | deletes the original and notes the copy it leaves behind; once the target no longer holds the bead, `bd delete <id> --force` removes the copy |
+
+So `bd update --parent` reparents the original in the target, and the new
+parent must be a bead the target holds. To put the copy under one of this
+project's beads, link it here with
+`bd dep add <copy> <parent> --type parent-child`.
+
+If the target can't be opened, those writes fail and name it rather than
+change the copy, and the reads fall back to the copy. A `bd delete` whose ids
+are in different repositories fails before deleting anything; run one
+`bd delete` per repository.
+
+Every other command acts on the copy here. `bd dep` lists, adds and removes
+the links this project holds, so `bd dep list plan-10 --direction=up` lists
+the project's beads that depend on `plan-10`, while `bd show plan-10` lists
+the original's links in the target. `bd admin cleanup`, `bd mol burn` and
+`bd wisp gc` delete the rows they selected here, never the original. Field
+commands such as `bd priority` and `bd label` change the copy; use
+`bd update` (`--priority`, `--add-label`) to change the original.
 
 Any other row, such as a bead hydrated from a repository that isn't the
 routing target or one created here, is changed here. So is a copy whose
 original the target no longer holds.
 
-While a route is active, `bd list` and `bd ready` (without `--claim`) read
-the routing target's store alone, not the project's, so they show the
-originals and none of the project's own rows or copies.
+While a route is active, `bd list` and `bd ready` read the routing target's
+store alone, not the project's, so they show the originals and none of the
+project's own rows or copies. `bd ready --claim` claims from that store too,
+so `bd show`, `bd heartbeat`, `bd unclaim` and `bd close` find the claim on
+the original. So does `bd close --claim-next` after closing a bead the target
+holds. After one of the project's own beads it closes nothing and fails;
+close the bead without `--claim-next`, then run `bd ready --claim`. To claim
+one of the project's own beads, use `bd update <id> --claim`.
 
 A copy changes only when `bd repo sync` imports it again, and sync reads the
 target's `.beads/issues.jsonl`, which the target writes only when exported.
@@ -245,9 +265,9 @@ imports the copy again.
 To see which stores a command opened, set `BD_DEBUG=1`: each opening logs
 `store: <.beads dir> <read|write> (<reason>)` to stderr, with reasons such as
 `project`, `auto-route: maintainer` or `prefix route: gt-`. `--verbose` does
-the same for most commands, but `bd export`, `bd doctor` and `bd repo sync`
-have a `--verbose` of their own, so `BD_DEBUG=1` is the switch that works
-for every command. Stdout, `--json` output and the usual routing notices are
+the same for most commands, but `bd export`, `bd doctor`, `bd repo sync` and
+`bd swarm validate` have a `--verbose` of their own, so `BD_DEBUG=1` is the
+switch that works for every command. Stdout, `--json` output and the usual routing notices are
 unchanged.
 
 ## One agent, many projects

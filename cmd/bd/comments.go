@@ -98,7 +98,7 @@ Examples:
 		}
 		ctx := rootCtx
 
-		result, err := resolveAndGetIssueWithRouting(ctx, store, issueID)
+		result, err := resolveAndGetOriginalWithRouting(ctx, store, issueID)
 		if err != nil {
 			if result != nil {
 				result.Close()
@@ -230,7 +230,7 @@ Examples:
 		}
 		ctx := rootCtx
 
-		result, err := resolveAndGetIssueForMutationExact(ctx, store, issueID)
+		result, err := resolveAndGetOriginalForMutationExact(ctx, store, issueID)
 		if err != nil {
 			if result != nil {
 				result.Close()

@@ -483,7 +483,7 @@ pointless).`,
 		}
 		for _, id := range args {
 			// Resolve and get issue with routing (e.g., gt-xyz routes to another rig)
-			result, err := resolveAndGetIssueForMutation(ctx, store, id)
+			result, err := resolveAndGetOriginalForMutation(ctx, store, id)
 			if err != nil {
 				if result != nil {
 					result.Close()
