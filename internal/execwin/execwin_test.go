@@ -62,6 +62,24 @@ func TestHideOffWindowsIsIdentity(t *testing.T) {
 	}
 }
 
+func TestHideMergesCallerFlagsWithoutExplicitConsoleChoice(t *testing.T) {
+	// An unattached parent with caller-owned flags and no explicit console
+	// choice: every caller bit is preserved and CREATE_NO_WINDOW is added.
+	merged, changed := hideCreationFlags(false, flagCreateNewProcessGroup)
+	if !changed {
+		t.Fatal("hideCreationFlags(false, CREATE_NEW_PROCESS_GROUP) changed = false, want the caller's flags merged with CREATE_NO_WINDOW")
+	}
+	if merged != flagCreateNoWindow|flagCreateNewProcessGroup {
+		t.Fatalf("hideCreationFlags(false, CREATE_NEW_PROCESS_GROUP) = %#x, want %#x (every caller bit preserved plus CREATE_NO_WINDOW)", merged, flagCreateNoWindow|flagCreateNewProcessGroup)
+	}
+	// An explicit console choice is the caller's decision, not Hide's.
+	for _, explicit := range []uint32{flagDetachedProcess, flagCreateNewConsole, flagCreateNoWindow} {
+		if merged, changed := hideCreationFlags(false, explicit); changed || merged != explicit {
+			t.Errorf("hideCreationFlags(false, %#x) = (%#x, %v); an explicit console choice must be left alone", explicit, merged, changed)
+		}
+	}
+}
+
 func TestBackgroundSysProcAttrCreationFlags(t *testing.T) {
 	flags := backgroundCreationFlags()
 	if flags != flagCreateNoWindow|flagCreateNewProcessGroup {

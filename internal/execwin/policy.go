@@ -35,12 +35,13 @@ func hideCreationFlags(attached bool, flags uint32) (uint32, bool) {
 	if attached {
 		return flags, false
 	}
-	if flags != 0 {
-		// Caller-owned attributes: AC-3 of bd-l5o8ld merges them into a
-		// copy. Until then Hide leaves any explicit attributes alone.
+	if flags&(flagDetachedProcess|flagCreateNewConsole|flagCreateNoWindow) != 0 {
+		// An explicit console choice is the caller's decision, not
+		// Hide's: leave DETACHED_PROCESS, CREATE_NEW_CONSOLE and an
+		// already-hidden child alone.
 		return flags, false
 	}
-	return flagCreateNoWindow, true
+	return flags | flagCreateNoWindow, true
 }
 
 // backgroundCreationFlags is BackgroundSysProcAttr's Windows policy: a

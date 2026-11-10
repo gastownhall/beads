@@ -27,14 +27,20 @@ func Hide(cmd *exec.Cmd) *exec.Cmd {
 	if cmd == nil || attachedToConsole() {
 		return cmd
 	}
-	if cmd.SysProcAttr != nil {
+	attr := cmd.SysProcAttr
+	if attr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: flagCreateNoWindow}
 		return cmd
 	}
-	flags, changed := hideCreationFlags(false, 0)
+	flags, changed := hideCreationFlags(false, attr.CreationFlags)
 	if !changed {
 		return cmd
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: flags}
+	// Work on a copy: the caller's struct — possibly shared with other
+	// commands — keeps every field and flag it had.
+	merged := *attr
+	merged.CreationFlags = flags
+	cmd.SysProcAttr = &merged
 	return cmd
 }
 
