@@ -3590,6 +3590,48 @@ func TestBondProtoMolRefArmStepWaitsForEveryTerminalStep(t *testing.T) {
 	}
 }
 
+// TestBondProtoMolRefArmWaitsForTerminalStepsAcrossPlanes repeats AC-1 and
+// AC-2 on the wisp plane, where a patrol's per-worker arms live, and across
+// planes: whichever side is ephemeral, the arm gets the same blocks edges
+// onto S2 and S3, and its step stays out of ready work until both close.
+func TestBondProtoMolRefArmWaitsForTerminalStepsAcrossPlanes(t *testing.T) {
+	for _, tc := range []struct {
+		name                          string
+		ephemeralMol, ephemeral, pour bool
+	}{
+		{name: "wisp molecule, wisp arm", ephemeralMol: true},
+		{name: "durable molecule, --ephemeral arm", ephemeral: true},
+		{name: "wisp molecule, --pour arm", ephemeralMol: true, pour: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+			f := seedRefArmFixture(t, ctx, s, tc.ephemeralMol)
+
+			result, err := bondProtoMol(ctx, s, f.proto, f.mol, types.BondTypeSequential, map[string]string{"name": "ace"}, "arm-{{name}}", "test", tc.ephemeral, tc.pour)
+			if err != nil {
+				t.Fatalf("bondProtoMol: %v", err)
+			}
+			armID := result.IDMapping[f.proto.ID]
+			if got, want := outgoingDeps(t, ctx, s, armID), wantDeps("blocks:"+f.s2.ID, "blocks:"+f.s3.ID); !slices.Equal(got, want) {
+				t.Fatalf("arm %s deps = %v, want %v", armID, got, want)
+			}
+			armStep := result.IDMapping[f.protoStep.ID]
+			if isReadyWork(t, ctx, s, armStep) {
+				t.Fatalf("arm step %s is ready before any parent step closed", armStep)
+			}
+			closeForTest(t, ctx, s, f.s1.ID, f.s2.ID)
+			if isReadyWork(t, ctx, s, armStep) {
+				t.Fatalf("arm step %s is ready while terminal step S3 %s is still open", armStep, f.s3.ID)
+			}
+			closeForTest(t, ctx, s, f.s3.ID)
+			if !isReadyWork(t, ctx, s, armStep) {
+				t.Fatalf("arm step %s is not ready after every parent step closed", armStep)
+			}
+		})
+	}
+}
+
 // TestBondProtoMolRefArmsShareTerminalsAndKeepTheirEdges pins AC-4: a second
 // sequential --ref arm waits on the same terminals as the first, not on the
 // first arm (a sequential arm is not a member of its container), and a step

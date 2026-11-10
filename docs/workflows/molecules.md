@@ -286,9 +286,10 @@ gets one `blocks` edge onto each and becomes ready when **all** of them close.
   step, so a later arm does not wait on it.
 - A molecule with no open steps (a bare root, or every step closed or
   pinned) still takes the arm, with no ordering edges: it is ready at once.
-- `--type parallel --ref` keeps its parent-child edge and no ordering.
-  `--type conditional --ref` is refused; omit `--ref` to bond a conditional
-  arm as a sibling.
+- `--type parallel --ref` keeps its parent-child edge and no ordering. Use it
+  for an arm that must run while its molecule is still running, such as a
+  per-worker arm its patrol waits on. `--type conditional --ref` is refused;
+  omit `--ref` to bond a conditional arm as a sibling.
 
 Inspect an arm's edges with `bd dep list bd-patrol.arm-ace`.
 

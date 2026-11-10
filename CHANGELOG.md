@@ -1227,14 +1227,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - A sequential `bd mol bond <proto> <mol> --ref <ref>` arm runs after the
-  molecule's steps again (GH#6210). The nested arm cannot wait on the molecule
-  it is nested in, so bd used to drop its ordering edge and the arm was ready
-  as soon as it was spawned. It now waits, with one `blocks` edge each, on the
-  molecule's terminal steps: every direct step that is neither closed nor
-  pinned and that no other such step waits on. The set is read at bond time;
-  a molecule with no open steps still takes an arm that is ready at once. The
-  arm is still not a member of the molecule, and `--ref` with
-  `--type conditional` is still refused.
+  molecule's steps without deadlocking the molecule (GH#6210). Through 1.3.4,
+  bd blocked the nested arm on the molecule itself, which cannot close while
+  it holds an open arm, so neither could finish. The arm now waits, with one
+  `blocks` edge each, on the molecule's terminal steps: every direct step that
+  is neither closed nor pinned and that no other such step waits on. The set
+  is read at bond time; a molecule with no open steps takes an arm that is
+  ready at once. The arm is not a member of the molecule. An arm that must run
+  while its molecule is still running, such as a per-worker arm its patrol
+  waits on, needs `--type parallel`, which adds no ordering.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
@@ -5081,10 +5082,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   target was unsatisfiable in both directions: the arm waited for the molecule
   to close, and the molecule could not close while it held an open arm. `bd
   ready` went empty with nothing to point at. For a sequential bond (the
-  default) that edge is now dropped, so the arm carries **no ordering** and is
-  ready as soon as it is spawned - containment is a nested arm's only
-  satisfiable relationship to its container. A conditional edge has no such
-  degradation: it means "run only if the target fails", so dropping it would
+  default) that edge is now replaced by `blocks` edges onto the molecule's
+  terminal steps, so the arm runs after the molecule's steps without the
+  deadlock (see the GH#6210 entry under Fixed). A conditional edge has no such
+  substitute: it means "run only if the target fails", and dropping it would
   run the arm unconditionally, turning a deadlock into a silent false dispatch.
   `--ref` with `--type conditional` is therefore refused outright (including
   under `--dry-run` and on the proxied route); omit `--ref` to bond a

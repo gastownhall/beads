@@ -4937,6 +4937,9 @@ bd mol bond
     |   ready at once. The arm is not made a member of the molecule (no
     |   parent-child edge). --ref is refused with --type conditional, which has no
     |   safe degradation - omit --ref to bond a conditional arm as a sibling.
+    |   An arm that must run while its molecule is still running, such as a
+    |   per-worker arm its patrol waits on, needs --type parallel, which keeps the
+    |   parent-child edge and adds no ordering.
     |
     | Phase control:
     |   By default, spawned protos follow the target's phase:
@@ -4958,7 +4961,8 @@ bd mol bond
     | Use cases:
     |   - Found important bug during patrol? Use --pour to persist it
     |   - Need ephemeral diagnostic on persistent feature? Use --ephemeral
-    |   - Spawning per-worker arms on a patrol? Use --ref for readable IDs
+    |   - Spawning per-worker arms on a patrol? Use --ref for readable IDs, plus
+    |     --type parallel when the arms must run while the patrol does
     |
     | Examples:
     |   bd mol bond mol-feature mol-deploy                    # Compound proto

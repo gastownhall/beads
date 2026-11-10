@@ -218,6 +218,7 @@ func TestMolBondHelpDocumentsRefArmTerminalOrdering(t *testing.T) {
 		"The set is read once, at bond time: steps added later do not retarget the arm",
 		"a molecule with no open steps takes an arm that is ready at once",
 		"The arm is not made a member of the molecule",
+		"An arm that must run while its molecule is still running, such as a per-worker arm its patrol waits on, needs --type parallel",
 	} {
 		if !strings.Contains(long, want) {
 			t.Errorf("mol bond --help does not say %q", want)
