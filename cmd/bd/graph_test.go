@@ -5,8 +5,10 @@ import (
 	"errors"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -213,9 +215,18 @@ func TestLoadGraphSubgraphUsesTheComponentRead(t *testing.T) {
 
 func TestLoadGraphSubgraphWalksPerIssueWhenTheComponentReadFails(t *testing.T) {
 	f := &graphComponentFake{graphReadFake: graphWalkFixture(), err: errGraphReadRefused}
-	sub, err := loadGraphSubgraph(context.Background(), f, "r")
+	debug.SetVerbose(true)
+	defer debug.SetVerbose(false)
+	var sub *TemplateSubgraph
+	var err error
+	stderr := captureStderr(t, func() {
+		sub, err = loadGraphSubgraph(context.Background(), f, "r")
+	})
 	if err != nil {
 		t.Fatalf("loadGraphSubgraph: %v", err)
+	}
+	if want := "graph: component read failed, reading issue by issue: read refused"; !strings.Contains(stderr, want) {
+		t.Errorf("debug output = %q, want it to contain %q", stderr, want)
 	}
 	if f.calls != 1 {
 		t.Errorf("component reads = %d, want 1", f.calls)
@@ -276,9 +287,18 @@ func TestLoadAllGraphSubgraphsReadsDependenciesInOneBatch(t *testing.T) {
 func TestLoadAllGraphSubgraphsFallsBackToPerIssueReads(t *testing.T) {
 	f := graphWalkFixture()
 	f.refuse = true
-	subs, err := loadAllGraphSubgraphs(context.Background(), f, 0, "")
+	debug.SetVerbose(true)
+	defer debug.SetVerbose(false)
+	var subs []*TemplateSubgraph
+	var err error
+	stderr := captureStderr(t, func() {
+		subs, err = loadAllGraphSubgraphs(context.Background(), f, 0, "")
+	})
 	if err != nil {
 		t.Fatalf("loadAllGraphSubgraphs: %v", err)
+	}
+	if want := "graph: batched dependency read failed, reading issue by issue: read refused"; !strings.Contains(stderr, want) {
+		t.Errorf("debug output = %q, want it to contain %q", stderr, want)
 	}
 	if f.perIssueRecords != len(f.issues) {
 		t.Errorf("per-issue reads = %d, want %d", f.perIssueRecords, len(f.issues))

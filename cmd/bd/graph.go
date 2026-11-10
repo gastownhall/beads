@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -397,8 +398,13 @@ func loadGraphSubgraph(ctx context.Context, s storage.DoltStorage, issueID strin
 
 	// A failed component read is not the command's failure: the per-issue walk
 	// below is best-effort, and it produces the same graph when its reads work.
+	// The debug line says why bd graph then costs a read per issue.
 	var outgoing map[string][]*types.Dependency
-	if component, ok, err := storage.ReadComponent(ctx, s, root); ok && err == nil {
+	component, batched, err := storage.ReadComponent(ctx, s, root)
+	if err != nil {
+		debug.Logf("graph: component read failed, reading issue by issue: %v\n", err)
+	}
+	if batched && err == nil {
 		subgraph.Issues = component.Issues
 		for _, issue := range component.Issues {
 			subgraph.IssueMap[issue.ID] = issue
@@ -510,6 +516,7 @@ func graphDependencyRecords(ctx context.Context, s storage.DoltStorage, ids []st
 	if err == nil {
 		return records
 	}
+	debug.Logf("graph: batched dependency read failed, reading issue by issue: %v\n", err)
 	records = make(map[string][]*types.Dependency, len(ids))
 	for _, id := range ids {
 		deps, err := s.GetDependencyRecords(ctx, id)
