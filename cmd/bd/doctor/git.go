@@ -637,6 +637,9 @@ type HooksPathQuery struct {
 	StorageHooksDir string
 	// Env is the git subprocess environment; nil inherits the process's.
 	Env []string
+	// InheritedEnv, when Env is a scrubbed copy, is the environment the
+	// caller inherited: a value it overrides is never repointed.
+	InheritedEnv []string
 }
 
 // HooksPathState is a read-only view of core.hooksPath. Git runs no hooks at
@@ -693,8 +696,9 @@ func CurrentHooksPathQuery() (HooksPathQuery, bool) {
 //   - it is absolute and positively absent, and not a current beads location
 //     (those are Managed);
 //   - it names a .beads/hooks or .beads-hooks directory, the layouts bd writes;
-//   - its effective value comes from the repository-local config, so no
-//     global, worktree or command-line setting is rewritten or shadowed;
+//   - its effective value comes from the repository-local config, also under
+//     InheritedEnv, so no global, worktree or command-line setting is
+//     rewritten or shadowed;
 //   - the matching current directory (the effective storage hooks directory,
 //     else <repo>/.beads/hooks, or <repo>/.beads-hooks) is a real directory,
 //     not a symlink, holding at least one recognizable beads hook.
@@ -772,6 +776,11 @@ func relocatedHooksTarget(q HooksPathQuery, s HooksPathState) (target, refusal s
 			scope = "an unknown"
 		}
 		return "", fmt.Sprintf("it is set in %s config, not this repository's local config", scope)
+	}
+	if q.InheritedEnv != nil {
+		if value, scope := readEffectiveHooksPath(q.WorkDir, q.InheritedEnv); value != s.Configured || scope != s.Scope {
+			return "", fmt.Sprintf("this process's environment overrides it with %s config", scope)
+		}
 	}
 	if target == "" || !filepath.IsAbs(target) {
 		return "", "no current beads hooks directory resolves"
