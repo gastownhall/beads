@@ -173,6 +173,7 @@
 100 40 TestEmbeddedIfRevisionOutranksReassignFenceCLI
 100 40 TestEmbeddedNewDoltStoreFromConfig_HyphenatedDBName
 100 40 TestEmbeddedUpdateLifecycleClaimParentCommit
+100 40 TestEmbeddedWispGCPurgeClosedReclaimsBlocksLinkedAndFullyClosed
 
 100 41 TestEmbeddedCompactAbortsDivergentReplay
 100 41 TestEmbeddedDuplicateConcurrent
