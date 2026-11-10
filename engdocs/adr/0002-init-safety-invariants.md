@@ -90,7 +90,14 @@ not a user-facing ceremony.
 ### Flag surface after this ADR
 
 ```
-bd init                         mint, or auto-bootstrap if origin has refs/dolt/data
+bd init                         mint; bootstrap from --remote or sync.remote
+                                if it has refs/dolt/data; for git origin with
+                                refs/dolt/data, ask once (interactive) or refuse
+bd init --yes                   consent to adopting git origin's refs/dolt/data
+                                (--non-interactive and --json are not consent)
+bd init --no-adopt              never derive a remote from git origin (no probe,
+                                clone or wiring); also BD_NO_REMOTE_ADOPT=1;
+                                wins over --yes
 bd init --reinit-local          local reinit; refuses remote divergence
 bd init --reinit-local \        local reinit, overwrite remote on next push
     --discard-remote            (interactive confirm or --destroy-token required)
