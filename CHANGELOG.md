@@ -1226,6 +1226,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Auto-export (`export.auto`) now reports operational state-hash,
+  pre-export check, and final export failures with exit 1, even when the
+  triggering mutation has already succeeded. Safety refusals (the
+  overwrite-shrink guard) and stores that cannot report a state hash remain
+  warning-only skips. Failed exports leave the previous JSONL and export
+  state untouched, so the next eligible command retries
+  ([#6163](https://github.com/gastownhall/beads/issues/6163),
+  [#6016](https://github.com/gastownhall/beads/pull/6016); thanks
+  @sergeiwallace).
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
