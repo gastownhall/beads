@@ -357,3 +357,108 @@ async def test_compacted_preview_rows_carry_metadata(monkeypatch):
     assert len(result.preview) == server.PREVIEW_COUNT
     assert all(r.comment_count is not None for r in result.preview)
     assert all(r.comments_omitted is True for r in result.preview)
+
+
+# =============================================================================
+# AC-5: comment fields are projectable; comments comes with its omission
+# =============================================================================
+
+
+def test_filter_fields_accepts_all_three_comment_names():
+    """comment_count, comments_omitted and comments are valid projections."""
+    issue = Issue.model_validate(_issue(comment_count=2, comments_omitted=True))
+    for field in ("comment_count", "comments_omitted", "comments"):
+        projected = server._filter_fields(issue, [field])
+        assert field in projected
+
+
+def test_filter_fields_comments_carries_omission_companion():
+    """A comments selection never leaves null bodies reading as 'no discussion':
+    the projection adds comments_omitted even when it was not requested."""
+    hydrated = Issue.model_validate(
+        _issue(comment_count=2, comments_omitted=False, comments=[_body(1), _body(2)])
+    )
+    projected = server._filter_fields(hydrated, ["comments"])
+    assert [c["text"] for c in projected["comments"]] == ["comment 1", "comment 2"]
+    assert projected["comments_omitted"] is False
+    assert set(projected) == {"comments", "comments_omitted"}
+
+    count_only = Issue.model_validate(_issue(comment_count=2, comments_omitted=True))
+    projected = server._filter_fields(count_only, ["comments"])
+    assert projected["comments"] is None
+    assert projected["comments_omitted"] is True
+
+
+def test_filter_fields_explicit_omission_selection_not_duplicated():
+    """Selecting both names keeps exactly the requested keys."""
+    issue = Issue.model_validate(_issue(comment_count=1, comments_omitted=True))
+    projected = server._filter_fields(issue, ["comments", "comments_omitted"])
+    assert set(projected) == {"comments", "comments_omitted"}
+
+
+def test_filter_fields_unknown_collection_metadata_passes_through():
+    """A surface with no comment metadata projects the unknown as null."""
+    issue = Issue.model_validate(_issue())
+    projected = server._filter_fields(issue, ["comment_count", "comments_omitted"])
+    assert projected["comment_count"] is None
+    assert projected["comments_omitted"] is None
+
+
+def test_filter_fields_invalid_rejection_unchanged():
+    """Unknown fields still raise with the valid list (now including comments)."""
+    issue = Issue.model_validate(_issue())
+    with pytest.raises(ValueError, match="Invalid field"):
+        server._filter_fields(issue, ["comment_count", "bogus_field"])
+
+
+def test_filter_fields_non_comment_projection_unchanged():
+    """Projections that name no comment fields keep exactly their keys."""
+    issue = Issue.model_validate(_issue(comment_count=2, comments_omitted=True))
+    projected = server._filter_fields(issue, ["id", "title"])
+    assert set(projected) == {"id", "title"}
+
+
+@pytest.mark.asyncio
+async def test_list_fields_projection_uses_single_cli_read(monkeypatch):
+    """Collection field projections use only the original CLI response: one
+    read, no per-row hydration, whatever metadata the rows already had."""
+    issues = [Issue.model_validate(_list_row(i)) for i in range(3)]
+    mock_list = AsyncMock(return_value=issues)
+    monkeypatch.setattr(server, "beads_list_issues", mock_list)
+
+    rows = await server.list_issues(fields=["comment_count", "comments_omitted"])
+
+    mock_list.assert_called_once()
+    assert [r["comment_count"] for r in rows] == [1, 2, 3]
+    assert all(r["comments_omitted"] is True for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_ready_fields_projection_uses_single_cli_read(monkeypatch):
+    """Ready rows (marker never set by the CLI) project their count as-is."""
+    issues = [Issue.model_validate(_list_row(i, with_marker=False)) for i in range(3)]
+    mock_ready = AsyncMock(return_value=issues)
+    monkeypatch.setattr(server, "beads_ready_work", mock_ready)
+
+    rows = await server.ready_work(fields=["comment_count"])
+
+    mock_ready.assert_called_once()
+    assert [r["comment_count"] for r in rows] == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_show_fields_projection_hydrated_comments(monkeypatch):
+    """show with fields=['comments'] returns the bodies (AC-2 hydrates) and
+    the real projection adds the omission companion."""
+    mock_show = AsyncMock(
+        return_value=Issue.model_validate(
+            _issue(comment_count=2, comments_omitted=False, comments=[_body(1), _body(2)])
+        )
+    )
+    monkeypatch.setattr(server, "beads_show_issue", mock_show)
+
+    result = await server.show_issue(issue_id="bd-1", fields=["comments"])
+
+    mock_show.assert_called_once_with(issue_id="bd-1", include_comments=True)
+    assert [c["text"] for c in result["comments"]] == ["comment 1", "comment 2"]
+    assert result["comments_omitted"] is False

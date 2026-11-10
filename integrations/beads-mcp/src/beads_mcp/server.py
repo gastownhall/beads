@@ -848,6 +848,9 @@ VALID_ISSUE_FIELDS: set[str] = {
     "dependent_count",
     "dependencies",
     "dependents",
+    "comment_count",
+    "comments_omitted",
+    "comments",
 }
 
 
@@ -873,6 +876,11 @@ def _filter_fields(obj: Issue, fields: list[str]) -> dict[str, Any]:
             result[field] = [item.model_dump() for item in value]
         else:
             result[field] = value
+    # A comments selection says the caller wants the discussion, so it must
+    # not read null bodies as "no discussion": the companion omission marker
+    # rides along unless it was selected on its own.
+    if "comments" in fields and "comments_omitted" not in result:
+        result["comments_omitted"] = obj.comments_omitted
     return result
 
 
