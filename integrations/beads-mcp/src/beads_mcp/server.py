@@ -447,12 +447,24 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
                 "issue_id": "str (required) - e.g., 'bd-a1b2'",
                 "brief": "bool (default false) - Return only {id, title, status, priority}",
                 "brief_deps": "bool (default false) - Full issue with compact dependencies",
-                "fields": "list[str] (optional) - Custom field projection",
+                "fields": (
+                    "list[str] (optional) - Custom field projection; fields=['comments'] also fetches "
+                    "the comment bodies and adds comments_omitted"
+                ),
                 "max_description_length": "int (optional) - Truncate description",
                 "workspace_root": "str (optional)",
+                "include_comments": (
+                    "bool (default false) - Also return the comment bodies in CLI order. By default "
+                    "show is count-only: comment_count plus comments_omitted, with comments null. "
+                    "Ignored with brief=True"
+                ),
             },
-            "returns": "Full Issue object (or BriefIssue/dict based on params)",
-            "example": "show(issue_id='bd-a1b2', brief_deps=True)",
+            "returns": (
+                "Full Issue object (or BriefIssue/dict based on params). Comments are count-only "
+                "(comment_count, comments_omitted) unless include_comments=True or fields=['comments']; "
+                "null means unknown"
+            ),
+            "example": "show(issue_id='bd-a1b2', include_comments=True)",
         },
         "create": {
             "name": "create",
@@ -547,7 +559,11 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
         },
         "comments": {
             "name": "comments",
-            "description": "List all comments on an issue (show reports comment_count but not the bodies)",
+            "description": (
+                "List all comments on an issue (show is count-only by default: it reports "
+                "comment_count/comments_omitted; pass show(include_comments=True) or use this "
+                "tool to read the bodies)"
+            ),
             "parameters": {
                 "issue_id": "str (required)",
                 "workspace_root": "str (optional)",
@@ -1062,7 +1078,12 @@ async def list_issues(
 
 @mcp.tool(
     name="show",
-    description="Show detailed information about a specific issue including dependencies and dependents.",
+    description=(
+        "Show detailed information about a specific issue including dependencies and dependents. "
+        "Comments are count-only by default: comment_count says how many exist and comments_omitted "
+        "is true when their bodies are not in the response. Pass include_comments=True (or "
+        "fields=['comments']) to also get the bodies; brief=True never includes them."
+    ),
 )
 @with_workspace
 async def show_issue(
@@ -1330,7 +1351,10 @@ async def comment(
 
 @mcp.tool(
     name="comments",
-    description="List all comments on an issue (show reports comment_count but not the comment bodies).",
+    description=(
+        "List all comments on an issue in chronological order. show reports comment_count and "
+        "comments_omitted by default; show(include_comments=True) returns the bodies inline."
+    ),
 )
 @with_workspace
 async def comments(

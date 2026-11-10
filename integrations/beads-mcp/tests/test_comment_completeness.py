@@ -463,3 +463,42 @@ def test_to_minimal_describes_its_own_omission(
     assert "comments" not in minimal.model_dump()
     # The projection adjusts only its own row, never the source Issue.
     assert issue.model_dump() == before
+
+
+# AC-7: the public show schema and tool catalog expose include_comments.
+
+
+@pytest.mark.asyncio
+async def test_show_schema_exposes_include_comments() -> None:
+    from fastmcp.client import Client
+
+    async with Client(server.mcp) as client:
+        tools = {tool.name: tool for tool in await client.list_tools()}
+
+    show = tools["show"]
+    prop = show.input_schema["properties"]["include_comments"]
+    assert prop["type"] == "boolean"
+    assert prop["default"] is False
+    assert "include_comments" not in show.input_schema.get("required", [])
+    for phrase in ("comment_count", "comments_omitted", "include_comments"):
+        assert phrase in show.description
+
+
+@pytest.mark.asyncio
+async def test_tool_info_documents_include_comments() -> None:
+    info = await server.get_tool_info("show")
+
+    param = info["parameters"]["include_comments"]
+    assert param.startswith("bool (default false)")
+    text = json.dumps(info)
+    for phrase in ("comment_count", "comments_omitted", "fields=['comments']"):
+        assert phrase in text
+
+
+@pytest.mark.asyncio
+async def test_get_tool_info_comments_reader_mentions_opt_in() -> None:
+    """The comment-reader entry points at the opt-in and stays the body reader."""
+    info = await server.get_tool_info("comments")
+    blob = " ".join(str(v) for v in info.values()).lower()
+    assert "include_comments" in blob or "count-only" in blob
+    assert "but not the bodies" not in blob

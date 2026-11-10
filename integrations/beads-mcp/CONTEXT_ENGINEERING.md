@@ -48,7 +48,9 @@ List operations now return `IssueMinimal` instead of full `Issue`:
   "assignee": "alice",
   "labels": ["backend"],
   "dependency_count": 2,
-  "dependent_count": 0
+  "dependent_count": 0,
+  "comment_count": 3,
+  "comments_omitted": true
 }
 
 # vs Full Issue (~400 bytes per issue)
@@ -74,6 +76,11 @@ List operations now return `IssueMinimal` instead of full `Issue`:
 ```
 
 **Savings:** ~80% reduction per issue in list views
+
+Minimal rows never carry comment bodies. `comment_count` and `comments_omitted`
+say whether the row left comments out, so a scan for text that lives in a
+comment knows to look further; `null` means the CLI did not report it (for
+example on `blocked`), not that the issue has no comments.
 
 ### 3. Result Compaction
 
@@ -186,7 +193,9 @@ When you get a compacted response, you have several options:
 ```python
 # Get full details for a specific issue
 full_issue = show(issue_id="bd-a1b2")
-# Returns complete Issue model with dependencies, description, etc.
+# Returns the Issue model with dependencies, description, etc. Comments are
+# count-only (comment_count, comments_omitted); add the bodies on request:
+full_issue = show(issue_id="bd-a1b2", include_comments=True)
 ```
 
 #### Option 2: Narrow Your Query
@@ -392,7 +401,7 @@ PREVIEW_COUNT = 5          # Show first 5 issues in preview
 | Tool schemas (all) | ~15,000 bytes | ~500 bytes | 97% |
 | List 50 issues | ~20,000 bytes | ~4,000 bytes | 80% |
 | Ready work (10) | ~4,000 bytes | ~800 bytes | 80% |
-| Single show() | ~400 bytes | ~400 bytes | 0% (full details) |
+| Single show() | ~400 bytes | ~400 bytes | 0% (full details; comment bodies only with `include_comments=True`) |
 
 ## Design Principles
 
