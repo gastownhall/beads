@@ -1,7 +1,10 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -154,5 +157,41 @@ func TestUpdateAuditChanges(t *testing.T) {
 				t.Fatalf("updateAuditChanges = %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestLogUpdateAuditChangesSuppressesEqualValues writes an explicit status
+// patch that matches the pre-read through the real sidecar: the row
+// updateAuditChanges selects is dropped by audit.LogFieldChange, and only a
+// later real change reaches the enabled sidecar.
+func TestLogUpdateAuditChangesSuppressesEqualValues(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// beads.FindBeadsDir() validates that the directory holds project
+	// files; metadata.json satisfies it, as internal/audit's own tests do.
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt"}`), 0644); err != nil {
+		t.Fatalf("write metadata.json: %v", err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("BD_AUDIT_ENABLED", "1")
+
+	before := &types.Issue{ID: "bd-1", Status: types.StatusOpen, Priority: 2}
+	var patch issueops.IssuePatch
+	patch.Status = setField(types.StatusOpen)
+	logUpdateAuditChanges("bd-1", "alice", updateAuditChanges(patch, false, false, before, nil))
+	// A real change afterwards proves the sidecar is live, so the single
+	// row below is not an artifact of a disabled journal.
+	patch.Status = setField(types.StatusBlocked)
+	logUpdateAuditChanges("bd-1", "alice", updateAuditChanges(patch, false, false, before, nil))
+
+	data, err := os.ReadFile(filepath.Join(beadsDir, "interactions.jsonl"))
+	if err != nil {
+		t.Fatalf("read interactions.jsonl: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 1 || !strings.Contains(lines[0], `"old_value":"open"`) || !strings.Contains(lines[0], `"new_value":"blocked"`) {
+		t.Fatalf("sidecar rows = %q, want only the open->blocked row", lines)
 	}
 }
