@@ -562,15 +562,18 @@ func TestEmbeddedMergeAndSettleFKRepairKeepsCleanMergedTables(t *testing.T) {
 
 	tc := embeddedFKCascadeCases[1] // labels — any synced child table works
 	peerBranch := seedEmbeddedFKCascadeDivergence(t, ctx, conn, tc)
-	// The peer's ride-along: a metadata row the merge integrates cleanly
-	// beside the violating label.
+	// The peer's ride-alongs: a metadata row and a comment on the
+	// UNAFFECTED issue (fkc-w-<name>, whose parent survives the merge) that
+	// the merge integrates cleanly beside the violating label (GH#7757:
+	// the repair-only conclusion must carry a valid peer comment too).
 	for _, step := range []struct {
 		query string
 		args  []any
 	}{
 		{"CALL DOLT_CHECKOUT(?)", []any{peerBranch}},
 		{"INSERT INTO metadata (`key`, value) VALUES ('fk_ride_along', 'peer')", nil},
-		{"CALL DOLT_COMMIT('-Am', 'peer metadata ride-along')", nil},
+		{"INSERT INTO comments (id, issue_id, author, text, created_at) VALUES ('fkride-comment', 'fkc-w-" + tc.name + "', 'peer', 'comment on unaffected issue', NOW())", nil},
+		{"CALL DOLT_COMMIT('-Am', 'peer metadata + comment ride-along')", nil},
 		{"CALL DOLT_CHECKOUT('main')", nil},
 	} {
 		if _, err := conn.ExecContext(ctx, step.query, step.args...); err != nil {
@@ -590,12 +593,28 @@ func TestEmbeddedMergeAndSettleFKRepairKeepsCleanMergedTables(t *testing.T) {
 	if value != "peer" {
 		t.Errorf("HEAD metadata fk_ride_along = %q, want %q", value, "peer")
 	}
+	var comment string
+	if err := conn.QueryRowContext(ctx,
+		"SELECT text FROM comments AS OF 'HEAD' WHERE id = 'fkride-comment'").Scan(&comment); err != nil {
+		t.Errorf("the peer's comment on the unaffected issue is missing from the merge commit (read AS OF 'HEAD': %v)", err)
+	} else if comment != "comment on unaffected issue" {
+		t.Errorf("HEAD comment text = %q, want %q", comment, "comment on unaffected issue")
+	}
 	var orphans int
 	if err := conn.QueryRowContext(ctx, fmt.Sprintf(tc.orphanQuery, tc.name)).Scan(&orphans); err != nil {
 		t.Fatalf("count dangling rows: %v", err)
 	}
 	if orphans != 0 {
 		t.Errorf("repair left %d dangling %s row(s) referencing the deleted issue", orphans, tc.name)
+	}
+	// The repair itself must be in the merge commit, not only the working set.
+	var headOrphans int
+	if err := conn.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM labels AS OF 'HEAD' WHERE issue_id = 'fkc-x-labels'").Scan(&headOrphans); err != nil {
+		t.Fatalf("count dangling HEAD labels: %v", err)
+	}
+	if headOrphans != 0 {
+		t.Errorf("merge commit holds %d dangling label row(s): the repair is not committed", headOrphans)
 	}
 	assertMergeConcluded(t, ctx, conn)
 }
