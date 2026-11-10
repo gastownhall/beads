@@ -6311,7 +6311,9 @@ func (s *DoltStore) finishCLIPull(ctx context.Context, pullErr error) error {
 // says no merge was open before the pull (GH#7839): left open, it blocked
 // every later write and pull. See abortDeclinedCLIPull for what is reported.
 // An ordinary resolver error — including a failed or ambiguous commit, which
-// may have landed — is never followed by an abort.
+// may have landed — is never followed by an abort; a commit whose outcome is
+// indeterminate keeps ErrCommitIndeterminate in the returned chain even when
+// the pull itself also failed.
 func (s *DoltStore) settleCLIPull(ctx context.Context, prior cliPullMergeState, pullErr error) error {
 	if s.readOnly {
 		// A read-only store cannot resolve or commit; surface the pull result as-is.
@@ -6323,10 +6325,13 @@ func (s *DoltStore) settleCLIPull(ctx context.Context, prior cliPullMergeState, 
 		return s.abortDeclinedCLIPull(ctx, prior, declined, pullErr)
 	}
 	if resolveErr != nil {
-		if pullErr != nil {
-			return pullErr
+		if pullErr == nil {
+			return resolveErr
 		}
-		return resolveErr
+		if errors.Is(resolveErr, ErrCommitIndeterminate) {
+			return fmt.Errorf("%w (pull reported: %w)", resolveErr, pullErr)
+		}
+		return pullErr
 	}
 	if pullErr != nil && !resolved {
 		// Pull failed for a non-conflict reason: nothing was left to resolve.
