@@ -229,3 +229,131 @@ def test_blocked_issue_derives_from_bodies_like_issue():
     )
     assert blocked.comment_count == 1
     assert blocked.comments_omitted is False
+
+
+# =============================================================================
+# AC-4: minimal projections carry completeness; a row that drops bodies says so
+# =============================================================================
+
+
+def _list_row(i: int, with_marker: bool = True) -> dict:
+    """A current count-only list/ready row (types.IssueWithCounts)."""
+    row = {
+        "id": f"bd-{i:04d}",
+        "title": f"Issue {i}",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "dependency_count": 0,
+        "dependent_count": 0,
+        "comment_count": (i % 3) + 1,  # every row has a positive count here
+    }
+    if with_marker:
+        row["comments_omitted"] = True
+    return row
+
+
+def test_to_minimal_passes_through_count_only_row():
+    """List-row metadata survives the minimal projection untouched."""
+    issue = Issue.model_validate(_list_row(1))
+    minimal = server._to_minimal(issue)
+    assert minimal.comment_count == 2
+    assert minimal.comments_omitted is True
+
+
+def test_to_minimal_ready_row_unspecified_marker_is_true():
+    """Ready rows never carry the marker (be-ozp): a positive count alone
+    still means the row withheld comment content."""
+    issue = Issue.model_validate(_list_row(2, with_marker=False))
+    minimal = server._to_minimal(issue)
+    assert minimal.comment_count == 3
+    assert minimal.comments_omitted is True
+
+
+def test_to_minimal_known_zero_is_not_omitted():
+    """A zero count with no bodies is a true empty, not a withheld one."""
+    issue = Issue.model_validate({**_list_row(0), "comment_count": 0, "comments_omitted": False})
+    minimal = server._to_minimal(issue)
+    assert minimal.comment_count == 0
+    assert minimal.comments_omitted is False
+
+
+def test_to_minimal_unknown_stays_unknown():
+    """No count, no bodies, no marker: the minimal row keeps the unknown."""
+    issue = Issue.model_validate(_issue())
+    minimal = server._to_minimal(issue)
+    assert minimal.comment_count is None
+    assert minimal.comments_omitted is None
+
+
+def test_to_minimal_hydrated_source_marks_its_own_omission():
+    """Invariant: a minimal row that removes supplied bodies must say so.
+
+    Only show hydrates today, so a hydrated source reaching _to_minimal is a
+    forward-looking path — but the projection must still describe itself.
+    """
+    issue = Issue.model_validate(
+        _issue(comment_count=2, comments_omitted=False, comments=[_body(1), _body(2)])
+    )
+    minimal = server._to_minimal(issue)
+    assert minimal.comment_count == 2
+    assert minimal.comments_omitted is True
+    # The projection does not rewrite its source.
+    assert issue.comments_omitted is False
+    assert issue.comments is not None and len(issue.comments) == 2
+
+
+def test_to_minimal_hydrated_unknown_count_still_marks_omission():
+    """Bodies present but no count: removing them is still an omission."""
+    issue = Issue.model_validate(_issue(comments=[_body(1)]))
+    minimal = server._to_minimal(issue)
+    assert minimal.comment_count == 1  # derived by the model validator
+    assert minimal.comments_omitted is True
+
+
+@pytest.mark.asyncio
+async def test_list_handler_rows_carry_metadata(monkeypatch):
+    """Default list output: every minimal row keeps count and omission."""
+    issues = [Issue.model_validate(_list_row(i)) for i in range(3)]
+    mock_list = AsyncMock(return_value=issues)
+    monkeypatch.setattr(server, "beads_list_issues", mock_list)
+
+    rows = await server.list_issues()
+
+    mock_list.assert_called_once()  # one CLI read; no per-row hydration
+    assert all(r.comment_count == (i % 3) + 1 for i, r in enumerate(rows))
+    assert all(r.comments_omitted is True for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_ready_handler_rows_carry_metadata(monkeypatch):
+    """Ready rows (marker never set by the CLI) still describe omission."""
+    issues = [Issue.model_validate(_list_row(i, with_marker=False)) for i in range(3)]
+    mock_ready = AsyncMock(return_value=issues)
+    monkeypatch.setattr(server, "beads_ready_work", mock_ready)
+
+    rows = await server.ready_work()
+
+    mock_ready.assert_called_once()  # one CLI read; no per-row hydration
+    assert all(r.comment_count == (i % 3) + 1 for i, r in enumerate(rows))
+    assert all(r.comments_omitted is True for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_compacted_preview_rows_carry_metadata(monkeypatch):
+    """Over-threshold results compact; the preview rows keep completeness."""
+    issues = [Issue.model_validate(_list_row(i)) for i in range(25)]
+    mock_list = AsyncMock(return_value=issues)
+    monkeypatch.setattr(server, "beads_list_issues", mock_list)
+
+    result = await server.list_issues()
+
+    assert isinstance(result, server.CompactedResult)
+    mock_list.assert_called_once()
+    assert result.total_count == 25
+    assert result.preview_count == server.PREVIEW_COUNT
+    assert len(result.preview) == server.PREVIEW_COUNT
+    assert all(r.comment_count is not None for r in result.preview)
+    assert all(r.comments_omitted is True for r in result.preview)

@@ -55,6 +55,11 @@ class IssueMinimal(BaseModel):
     labels: list[str] = Field(default_factory=list)
     dependency_count: int = 0
     dependent_count: int = 0
+    # Comment completeness, passed through from the CLI row. Never the
+    # bodies: a minimal row is count-only, and comments_omitted=true is how
+    # it says so. None is unknown (the CLI said nothing), never zero/false.
+    comment_count: int | None = None
+    comments_omitted: bool | None = None
 
     @field_validator("priority")
     @classmethod
