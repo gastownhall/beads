@@ -1700,6 +1700,138 @@ func TestGitignore_ContainsHTTPTarget(t *testing.T) {
 	}
 }
 
+// TestGitignore_ContainsBackupAndAutoImportFiles verifies that dolt-backup.json,
+// dolt-backup-state.json, dolt-config.log and .auto-import-issues.jsonl are
+// ignored in .beads/.gitignore (GH#8318). dolt-backup.json and
+// dolt-backup-state.json are written by `bd backup init`/`bd backup sync` and
+// carry an absolute local backup path; dolt-config.log is written in server
+// `dolt set` mode; .auto-import-issues.jsonl is written by the JSONL
+// auto-import path. All four must be in requiredPatterns too, so bd doctor
+// --fix can heal an existing .beads/.gitignore that predates this fix.
+func TestGitignore_ContainsBackupAndAutoImportFiles(t *testing.T) {
+	patterns := []string{
+		"dolt-backup.json",
+		"dolt-backup-state.json",
+		"dolt-config.log",
+		".auto-import-issues.jsonl",
+	}
+
+	for _, pattern := range patterns {
+		if !containsGitignorePattern(GitignoreTemplate, pattern) {
+			t.Errorf("GitignoreTemplate should contain %q", pattern)
+		}
+
+		found := false
+		for _, p := range requiredPatterns {
+			if p == pattern {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("requiredPatterns should include %q", pattern)
+		}
+	}
+
+	if missing := missingGitignorePatterns(GitignoreTemplate); len(missing) != 0 {
+		t.Errorf("GitignoreTemplate is missing required patterns %v", missing)
+	}
+}
+
+// TestCheckGitignore_FlagsPreBackupFilesTemplateAsOutdated verifies that a
+// project whose .beads/.gitignore predates GH#8318 (missing the four backup
+// and auto-import state patterns) is flagged by CheckGitignore as outdated,
+// and that the current GitignoreTemplate — which includes them — passes
+// cleanly.
+func TestCheckGitignore_FlagsPreBackupFilesTemplateAsOutdated(t *testing.T) {
+	// Simulate the pre-#8318 template: the current template with the new
+	// section (and nothing after it, since it's the last pattern block before
+	// the per-project env file comment) stripped out.
+	oldTemplate := strings.Replace(GitignoreTemplate,
+		"\n# Backup and auto-import state (per-machine; dolt-backup.json and\n"+
+			"# dolt-backup-state.json carry absolute local paths, GH#8318)\n"+
+			"dolt-backup.json\n"+
+			"dolt-backup-state.json\n"+
+			"dolt-config.log\n"+
+			".auto-import-issues.jsonl\n",
+		"\n", 1)
+	if oldTemplate == GitignoreTemplate {
+		t.Fatal("test setup error: oldTemplate was not actually stripped of the new section")
+	}
+	for _, pattern := range []string{"dolt-backup.json", "dolt-backup-state.json", "dolt-config.log", ".auto-import-issues.jsonl"} {
+		if containsGitignorePattern(oldTemplate, pattern) {
+			t.Fatalf("test setup error: oldTemplate still contains %q", pattern)
+		}
+	}
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+
+	// Old (pre-fix) template: must be flagged as outdated.
+	if err := os.WriteFile(gitignorePath, []byte(oldTemplate), 0600); err != nil {
+		t.Fatal(err)
+	}
+	check := CheckGitignore(tmpDir)
+	if check.Status != StatusWarning {
+		t.Errorf("old template: expected status %s, got %s", StatusWarning, check.Status)
+	}
+	for _, pattern := range []string{"dolt-backup.json", "dolt-backup-state.json", "dolt-config.log", ".auto-import-issues.jsonl"} {
+		if !strings.Contains(check.Detail, pattern) {
+			t.Errorf("old template: expected missing-pattern detail to mention %q, got: %s", pattern, check.Detail)
+		}
+	}
+
+	// Current (fixed) template: must pass cleanly.
+	if err := os.WriteFile(gitignorePath, []byte(GitignoreTemplate), 0600); err != nil {
+		t.Fatal(err)
+	}
+	check = CheckGitignore(tmpDir)
+	if check.Status != StatusOK {
+		t.Errorf("current template: expected status %s, got %s (detail: %s)", StatusOK, check.Status, check.Detail)
+	}
+}
+
+// TestGitignoreTemplate_ActuallyIgnoresBackupAndAutoImportFiles verifies, via
+// real git matching, that a .beads/.gitignore written from the current
+// GitignoreTemplate actually ignores the four backup/auto-import files
+// (GH#8318) — not just that the literal pattern strings are present.
+func TestGitignoreTemplate_ActuallyIgnoresBackupAndAutoImportFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping git-based test on Windows")
+	}
+
+	tmpDir := t.TempDir()
+	runInDir(t, tmpDir, func() {
+		initGitTemplate()
+		if gitTemplateErr != nil {
+			t.Fatalf("git template init failed: %v", gitTemplateErr)
+		}
+		if err := copyGitDir(gitTemplateDir, tmpDir); err != nil {
+			t.Fatalf("failed to copy git template: %v", err)
+		}
+
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		if err := os.Mkdir(beadsDir, 0750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, ".gitignore"), []byte(GitignoreTemplate), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		for _, name := range []string{"dolt-backup.json", "dolt-backup-state.json", "dolt-config.log", ".auto-import-issues.jsonl"} {
+			candidate := filepath.Join(beadsDir, name)
+			cmd := gitCommand("check-ignore", "-q", candidate)
+			if err := cmd.Run(); err != nil {
+				t.Errorf("expected %q to be git-ignored, but git check-ignore reported it is not (err: %v)", filepath.Join(".beads", name), err)
+			}
+		}
+	})
+}
+
 // TestCheckLastTouchedNotTracked_NoFile verifies that check passes when no last-touched file exists
 func TestCheckLastTouchedNotTracked_NoFile(t *testing.T) {
 	tmpDir := t.TempDir()

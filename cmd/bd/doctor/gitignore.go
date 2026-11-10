@@ -88,6 +88,13 @@ dolt-pprof/
 # Backup data (auto-exported JSONL, local-only)
 backup/
 
+# Backup and auto-import state (per-machine; dolt-backup.json and
+# dolt-backup-state.json carry absolute local paths, GH#8318)
+dolt-backup.json
+dolt-backup-state.json
+dolt-config.log
+.auto-import-issues.jsonl
+
 # Per-project environment file (Dolt connection config, GH#2520)
 .env
 
@@ -143,6 +150,10 @@ var requiredPatterns = []string{
 	"dolt-server.port",
 	"dolt-server.activity",
 	"dolt-server-config.yaml",
+	"dolt-backup.json",
+	"dolt-backup-state.json",
+	"dolt-config.log",
+	".auto-import-issues.jsonl",
 	"daemon.*",
 	"*.lock",
 	"*.corrupt.backup/",
