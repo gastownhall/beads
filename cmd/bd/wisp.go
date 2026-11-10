@@ -1147,6 +1147,12 @@ func runWispPurgeChunks(ctx context.Context, ids []string, deleteChunk func(cont
 		out.referencesUpdated += res.referencesUpdated
 		out.orphaned = append(out.orphaned, res.orphaned...)
 	}
+	// The role names one request's deletions in ascending id order without
+	// duplicates, and so does the whole run, whatever order its chunks went
+	// in: the selection is not id order, and a forced run's deleted_ids must
+	// still equal the dry run's would_delete_ids for the same rows (GH#6301).
+	slices.Sort(out.deletedIDs)
+	out.deletedIDs = slices.Compact(out.deletedIDs)
 	out.orphaned = survivingOrphans(out.orphaned, out.confirmed, out.deletedIDs)
 	return out
 }

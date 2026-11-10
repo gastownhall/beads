@@ -1226,6 +1226,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd mol wisp gc --closed --force` deletes closed wisps 200 per transaction
+  instead of all of them (up to 5000) in one, on the direct and the
+  proxied-server route alike. Before, a run cut short by a caller's timeout
+  rolled back to nothing, so on a large store every retry started over and
+  none finished. Now the batches it committed stay deleted. A run that stops
+  reports what they deleted, says how many selected wisps were not confirmed
+  deleted and that running the command again deletes the rest, and exits 1;
+  under `--json` that is one object with `remaining_count`, `error` and
+  `hint` beside the usual keys. The direct route no longer looks each
+  selected wisp up again before deleting it, and a forced run whose
+  5000-wisp scan comes back full says more closed wisps may remain
+  (`candidates_capped` in `--json`) (#4684, first fixed by kyoto-bonsai in
+  #8103).
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

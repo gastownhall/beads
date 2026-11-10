@@ -346,6 +346,37 @@ func TestWispPurgeClosedSubmitsBoundedChunks(t *testing.T) {
 	assertExportBookkeeping(t, s.closed, nil)
 }
 
+// TestWispPurgeClosedReportsDeletedIDsAscending pins deleted_ids to ascending
+// id order without duplicates, the order the deletion role names one
+// request's deletions in, when the chunks go out in a selection order that is
+// not id order (the scan sorts newest first). Each chunk alone comes back
+// sorted, so joining them as they arrive broke the order, and with it the
+// equality with the dry run's would_delete_ids for the same rows (GH#6301).
+func TestWispPurgeClosedReportsDeletedIDsAscending(t *testing.T) {
+	s := useWispPurgeStub(t, 450)
+	slices.Reverse(s.closed)
+	jsonOutput = true
+
+	stdout, stderr, err := captureWispGC(t, func() error {
+		return runWispPurgeClosed(context.Background(), false, true, nil)
+	})
+	if err != nil {
+		t.Fatalf("runWispPurgeClosed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if got, want := requestSizes(s.deleter.requests), []int{200, 200, 50}; !slices.Equal(got, want) {
+		t.Fatalf("request sizes = %v, want %v", got, want)
+	}
+	raw, _ := decodeSingleJSONObject(t, stdout)["deleted_ids"].([]interface{})
+	got := make([]string, 0, len(raw))
+	for _, v := range raw {
+		id, _ := v.(string)
+		got = append(got, id)
+	}
+	if want := wispPurgeIDs(450); !slices.Equal(got, want) {
+		t.Errorf("deleted_ids holds %d ids, starting %q; want all 450, once each, in ascending id order", len(got), got[:min(3, len(got))])
+	}
+}
+
 // TestWispPurgeClosedSkipsPerIDResolution pins that the forced purge does not
 // resolve each selected id again through the front door: the ids came from
 // this store's own scan a moment earlier, and resolving 5000 of them one at a
