@@ -11,7 +11,6 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/dolt"
-	"gopkg.in/yaml.v3"
 )
 
 // EngineWontOpenRecoveryURL is the preservation-first runbook for a database
@@ -22,13 +21,6 @@ const EngineWontOpenRecoveryURL = "https://github.com/gastownhall/beads/blob/mai
 // open. A failed open is often configuration, not corruption, and doctor
 // cannot rebuild a journal the engine refuses to open, so it names both.
 const unopenableDatabaseFix = "Check 'bd dolt status' for server configuration issues. If the store itself will not open, preserve it before any recovery: " + EngineWontOpenRecoveryURL
-
-// localConfig represents the config.yaml structure for no-db and prefer-dolt detection
-type localConfig struct {
-	SyncBranch string `yaml:"sync-branch"`
-	NoDb       bool   `yaml:"no-db"`
-	PreferDolt bool   `yaml:"prefer-dolt"`
-}
 
 // CheckDoltFormat detects old dolt databases created by pre-0.56 bd versions
 // (GH#2137). Those databases used embedded Dolt mode and may be incompatible
@@ -492,23 +484,6 @@ func getDatabasePath(beadsDir string) string {
 		return filepath.Join(beadsDir, "dolt") // fallback to default
 	}
 	return cfg.DatabasePath(beadsDir)
-}
-
-// isNoDbModeConfigured checks if no-db: true is set in config.yaml
-// Uses proper YAML parsing to avoid false matches in comments or nested keys
-func isNoDbModeConfigured(beadsDir string) bool {
-	configPath := filepath.Join(beadsDir, "config.yaml")
-	data, err := os.ReadFile(configPath) // #nosec G304 - config file path from beadsDir
-	if err != nil {
-		return false
-	}
-
-	var cfg localConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return false
-	}
-
-	return cfg.NoDb
 }
 
 // CheckDatabaseSize warns when the database has accumulated many closed issues.

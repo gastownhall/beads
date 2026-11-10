@@ -228,3 +228,63 @@ func TestEmbeddedConfigSetNoDBRefused(t *testing.T) {
 		}
 	}
 }
+
+// TestEmbeddedNoDBTrueIgnoredWithWarning pins GH#4135 AC-7: a workspace
+// whose configuration still says no-db runs store-opening commands with the
+// normal Dolt selection — the setting never selected a backend — warned
+// exactly once on stderr, with the --json stdout intact. The warning fires
+// for the YAML spelling and the BD_NO_DB environment spelling alike, and
+// stays silent when the setting is false or absent.
+func TestEmbeddedNoDBTrueIgnoredWithWarning(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ndw")
+	id := metadatalessCreate(t, bd, dir, "no-db workspace issue")
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	originalConfig, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", configPath, err)
+	}
+
+	// no-db: true in config.yaml: the command still opens the workspace's
+	// database, warns exactly once, and keeps stdout parseable.
+	if writeErr := os.WriteFile(configPath, append(originalConfig, []byte("no-db: true\n")...), 0o600); writeErr != nil {
+		t.Fatalf("seed no-db entry in %s: %v", configPath, writeErr)
+	}
+	stdout, stderr, err := metadatalessRun(t, bd, dir, nil, "list", "--json")
+	if err != nil {
+		t.Fatalf("bd list --json with no-db: true failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	ids := metadatalessListIDs(t, stdout, stderr)
+	if len(ids) != 1 || ids[0] != id {
+		t.Fatalf("bd list --json with no-db: true reported %v, want the workspace's issue %s (normal Dolt selection)", ids, id)
+	}
+	if got := strings.Count(stderr, "obsolete"); got != 1 {
+		t.Fatalf("no-db warning appeared %d times on stderr, want exactly 1:\n%s", got, stderr)
+	}
+
+	// BD_NO_DB=true warns the same way; the warning must not double up.
+	stdout, stderr, err = metadatalessRun(t, bd, dir, []string{"BD_NO_DB=true"}, "list", "--json")
+	if err != nil {
+		t.Fatalf("bd list --json with BD_NO_DB=true failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if strings.Count(stderr, "obsolete") != 1 {
+		t.Fatalf("BD_NO_DB=true warning appeared more than once or not at all on stderr:\n%s", stderr)
+	}
+
+	// False or absent stays silent: no warning for a workspace that does not
+	// carry the setting.
+	if writeErr := os.WriteFile(configPath, originalConfig, 0o600); writeErr != nil {
+		t.Fatalf("restore %s: %v", configPath, writeErr)
+	}
+	stdout, stderr, err = metadatalessRun(t, bd, dir, nil, "list", "--json")
+	if err != nil {
+		t.Fatalf("bd list --json without no-db failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if strings.Contains(stderr, "obsolete") {
+		t.Fatalf("bd list --json warned about no-db without the setting:\n%s", stderr)
+	}
+}

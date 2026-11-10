@@ -2336,6 +2336,14 @@ var rootCmd = &cobra.Command{
 
 		doltCfg.Path = doltPath
 
+		// An old workspace may still carry an effective no-db setting
+		// (config.yaml or BD_NO_DB): it is obsolete — it never selected a
+		// storage backend — so the store opens with the normal Dolt selection
+		// and the operator is told, once per store-opening command (GH#4135).
+		if msg := config.NoDBObsoleteSettingWarning(); msg != "" {
+			fmt.Fprintln(os.Stderr, "warning: "+msg)
+		}
+
 		// Validate workspace identity for write commands (GH#2438, GH#2372)
 		// BEFORE the real store opens below. Skip for read-only commands
 		// since they can't corrupt data. Skip for --global: the global
