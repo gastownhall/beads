@@ -821,3 +821,70 @@ func TestFixHooksPath_ManagedDeletedInPlaceStillUnsets(t *testing.T) {
 		})
 	}
 }
+
+// TestFixHooksPath_RelocatedLinkedWorktree: after a moved main repository's
+// linked-worktree metadata is repaired, running the fix from the linked
+// worktree repoints the shared value to the main repository's hooks, and git
+// runs them from both worktrees (GH#5853).
+func TestFixHooksPath_RelocatedLinkedWorktree(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hook fixture")
+	}
+	t.Setenv("BEADS_DIR", "")
+	root := t.TempDir()
+	git := func(dir string, args ...string) {
+		t.Helper()
+		cmd := gitCommand(append([]string{"-c", "user.name=t", "-c", "user.email=t@example.com"}, args...)...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, strings.TrimSpace(string(out)))
+		}
+	}
+	before := filepath.Join(root, "a")
+	mainRepo := filepath.Join(before, "main")
+	if err := os.MkdirAll(mainRepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(mainRepo, "init", "-q")
+	git(mainRepo, "commit", "-q", "--allow-empty", "-m", "init")
+	git(mainRepo, "worktree", "add", "-q", filepath.Join(before, "wt"))
+
+	sentinel := filepath.Join(root, "ran")
+	hook := "#!/bin/sh\n" + bdSectionMarkerPrefix + " v1.0.0 ---\necho ran >> '" + sentinel + "'\n# --- END BEADS INTEGRATION v1.0.0 ---\n"
+	writeRelocatedHook(t, filepath.Join(mainRepo, ".beads", "hooks"), hook)
+	git(mainRepo, "config", "core.hooksPath", filepath.Join(mainRepo, ".beads", "hooks"))
+
+	after := filepath.Join(root, "b")
+	if err := os.Rename(before, after); err != nil {
+		t.Fatal(err)
+	}
+	movedMain, movedWT := filepath.Join(after, "main"), filepath.Join(after, "wt")
+	git(movedMain, "worktree", "repair", movedWT)
+	stale := filepath.Join(mainRepo, ".beads", "hooks")
+
+	runInDir(t, movedWT, func() {
+		if check := CheckHooksPath(); !strings.Contains(check.Message, "moved repository") {
+			t.Fatalf("expected a relocated path from the linked worktree, got %q: %s", check.Message, check.Detail)
+		}
+		if err := FixHooksPath(); err != nil {
+			t.Fatalf("FixHooksPath failed: %v", err)
+		}
+	})
+
+	want := filepath.Join(movedMain, ".beads", "hooks")
+	if got := getGitConfig(t, movedWT, "core.hooksPath"); !sameDir(got, want) {
+		t.Fatalf("core.hooksPath = %q, want %q", got, want)
+	}
+	if _, err := os.Lstat(stale); !os.IsNotExist(err) {
+		t.Errorf("the former location %s was created (err=%v)", stale, err)
+	}
+	git(movedMain, "hook", "run", "pre-commit")
+	git(movedWT, "hook", "run", "pre-commit")
+	data, err := os.ReadFile(sentinel)
+	if err != nil {
+		t.Fatalf("hooks did not run: %v", err)
+	}
+	if n := strings.Count(string(data), "ran"); n != 2 {
+		t.Errorf("hook ran %d times, want once from each worktree", n)
+	}
+}
