@@ -122,6 +122,16 @@ class OperationResult(BaseModel):
 # =============================================================================
 
 
+class Comment(BaseModel):
+    """A comment on an issue (matches `bd comments <id> --json`)."""
+
+    id: str
+    issue_id: str
+    author: str | None = None
+    text: str
+    created_at: datetime
+
+
 class IssueBase(BaseModel):
     """Base issue model with shared fields."""
 
@@ -163,6 +173,16 @@ class Issue(IssueBase):
 
     dependencies: list[LinkedIssue] = Field(default_factory=list)
     dependents: list[LinkedIssue] = Field(default_factory=list)
+
+    # Comment completeness, the CLI's own contract (ga-clgh): every --json
+    # surface states whether comment content was withheld, so a reader can
+    # tell "no comments" (count 0) from "comments exist but were not fetched"
+    # (positive count, comments_omitted=true, comments null). None means the
+    # CLI said nothing (older binary or a surface without the fields), which
+    # is unknown — never silently zero/false.
+    comment_count: int | None = None
+    comments_omitted: bool | None = None
+    comments: list[Comment] | None = None
 
 
 class Dependency(BaseModel):
@@ -332,16 +352,6 @@ class InitResult(BaseModel):
 # =============================================================================
 # COMMENTS & NOTES
 # =============================================================================
-
-
-class Comment(BaseModel):
-    """A comment on an issue (matches `bd comments <id> --json`)."""
-
-    id: str
-    issue_id: str
-    author: str | None = None
-    text: str
-    created_at: datetime
 
 
 class AddCommentParams(BaseModel):
