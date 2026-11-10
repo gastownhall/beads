@@ -5154,7 +5154,7 @@ func (s *DoltStore) credentialsForRemote(remote string) *remoteCredentials {
 //   - parent context deadline exceeded: ErrFSCKTimeout (caller timeout) — push aborted.
 //   - fsck own timeout: ErrFSCKTimeout (raise BEADS_FSCK_TIMEOUT) — push aborted.
 //   - cancellation phrasing in output, no context error: cancellation error — push aborted.
-//   - anything else: ErrFSCKFailed — push aborted, store not implicated.
+//   - anything else: ErrFSCKFailed naming dir — push aborted, no verdict on the store.
 func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 	dir := s.CLIDir()
 	if dir == "" {
@@ -5170,7 +5170,7 @@ func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		output := strings.TrimSpace(string(out))
-		if classified := classifyFSCKFailure(ctx.Err(), fsckCtx.Err(), err, output); classified != nil {
+		if classified := classifyFSCKFailure(ctx.Err(), fsckCtx.Err(), err, dir, output); classified != nil {
 			return classified
 		}
 		log.Printf("pre-push fsck could not run, skipping integrity check: %s", output)
@@ -5180,8 +5180,8 @@ func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 }
 
 // classifyFSCKFailure maps a failed dolt fsck exit (runErr is the execution
-// error, output its trimmed combined output) into one of these outcomes,
-// evaluated in priority order:
+// error, dir the database directory fsck ran in, output its trimmed combined
+// output) into one of these outcomes, evaluated in priority order:
 //
 //	(0) Output carries a recognized integrity finding (fsckReportedFinding)
 //	    → ErrDanglingReference abort quoting the output. The finding wins over
@@ -5215,14 +5215,16 @@ func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 //	    dolt prints config warnings and errors before fsck runs, and a process
 //	    that failed to start or was killed prints nothing. Neither is the
 //	    absence of a finding evidence of health (fsck's unexpected-error path
-//	    exits without a report), so the push is still refused.
+//	    exits without a report), so the push is still refused, and the message
+//	    names dir for a manual fsck and warns against bypassing the check if
+//	    that keeps failing without a report.
 //
 // Returning nil for the could-not-open case (branch a) distinguishes "fsck
 // couldn't run at all" from "fsck ran and found a problem". Wrapping an
 // open-failure as ErrDanglingReference misleads users (dolthub/dolt#10915);
 // so does wrapping an interrupt's "context canceled" noise (bd-f2b15), a
 // startup warning or a silent failure as corruption (GH#4258).
-func classifyFSCKFailure(parentErr, fsckErr, runErr error, output string) error {
+func classifyFSCKFailure(parentErr, fsckErr, runErr error, dir, output string) error {
 	// (0) A recognized integrity finding refuses the push whatever else
 	// happened.
 	if fsckReportedFinding(output) {
@@ -5270,9 +5272,11 @@ func classifyFSCKFailure(parentErr, fsckErr, runErr error, output string) error 
 	}
 	return fmt.Errorf("%w: %s; the push was aborted because the integrity check did not complete "+
 		"successfully (the store is not necessarily corrupt); to see the full report, run "+
-		"`dolt fsck` in this database's directory (the database's subdirectory of the data "+
-		"directory `bd dolt status` shows); fsck output: %s",
-		ErrFSCKFailed, reason, output)
+		"`dolt fsck` in the database directory %s; if it keeps failing there without a report, "+
+		"do not bypass the check with a direct `dolt push`: see "+
+		"https://beads.gascity.com/recovery/sync-failures#push-refused-by-the-pre-push-integrity-check; "+
+		"fsck output: %s",
+		ErrFSCKFailed, reason, remedy.PrintedValue(dir), output)
 }
 
 // fsckReportedFinding reports whether dolt fsck output carries an integrity

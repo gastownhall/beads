@@ -18,6 +18,10 @@ import (
 const fsckUnknownConfigWarning = "Warning: Unknown global config option 'sqlserver.foo'. " +
 	"Use `dolt config --global --unset sqlserver.foo` to remove."
 
+// fsckTestDBDir is the database directory the classifier tests pass, which an
+// ErrFSCKFailed message names for a manual fsck.
+const fsckTestDBDir = "/home/u/proj/.beads/dolt/proj"
+
 // Finding fixtures in the shape dolt fsck prints them (cmd/dolt/commands/
 // fsck.go: FsckReport.Print colors the report headers red; the corrupted
 // journal warning is printed before any scan). Each one is an integrity
@@ -29,8 +33,8 @@ const (
 		"Files with corruption:\n" +
 		"  oldgen/2ah8d4kqmt3hbk3m7aep4t46r6ojv2j9: 1 chunk(s) with checksum errors"
 	fsckCommitErrorsReport = "\x1b[31m============ Commit Errors ============\x1b[0m\n" +
-		"error validating commit 9ujq4v7a6m1d2t0kh5u0jv0cb1d5s4mp: root tree " +
-		"q1o0b6vn5hr7s2c4t8m3l9k0j1h2g3f4: chunk not found\n" +
+		"::commit:9ujq4v7a6m1d2t0kh5u0jv0cb1d5s4mp: references missing parent " +
+		"q1o0b6vn5hr7s2c4t8m3l9k0j1h2g3f4\n" +
 		"============ Summary ============\n" +
 		"Commit objects found: 12 (12 reachable from branches/tags/stashes, 0 unreachable)"
 	fsckCorruptJournalWarning = "WARNING: Chunk journal is corrupted and some data may be lost.\n" +
@@ -184,7 +188,7 @@ func TestPrePushFSCK_KilledWithoutOutputIsNotCorruption(t *testing.T) {
 	if !errors.Is(err, ErrFSCKFailed) {
 		t.Fatalf("errors.Is(err, ErrFSCKFailed) = false; err = %v", err)
 	}
-	for _, want := range []string{"signal: killed", "(no output)", "not necessarily corrupt", "dolt fsck"} {
+	for _, want := range []string{"signal: killed", "(no output)", "not necessarily corrupt", "run `dolt fsck` in the database directory " + s.CLIDir()} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not contain %q", err, want)
 		}
@@ -242,7 +246,8 @@ func TestClassifyFSCKFailure(t *testing.T) {
 		name         string
 		parentErr    error
 		fsckErr      error
-		runErr       error // the fsck execution error
+		runErr       error  // the fsck execution error
+		dir          string // the database directory; fsckTestDBDir when empty
 		output       string
 		wantNil      bool    // true → expect nil (could-not-open skip path)
 		wantIs       error   // positive errors.Is assertion
@@ -448,12 +453,43 @@ func TestClassifyFSCKFailure(t *testing.T) {
 			wantIsNot:    []error{ErrDanglingReference, ErrFSCKTimeout},
 			wantContains: "Unknown global config option",
 		},
+		{
+			name:         "generic failure names the database directory to run fsck in",
+			runErr:       errors.New("exit status 1"),
+			output:       fsckUnknownConfigWarning,
+			wantIs:       ErrFSCKFailed,
+			wantContains: "run `dolt fsck` in the database directory " + fsckTestDBDir + ";",
+		},
+		{
+			name:         "database directory with a terminal escape is named escaped",
+			runErr:       errors.New("exit status 1"),
+			dir:          "/srv/x\x1b[2Ky/mydb",
+			output:       "",
+			wantIs:       ErrFSCKFailed,
+			wantContains: `in the database directory "/srv/x\x1b[2Ky/mydb";`,
+			wantAbsent:   "\x1b",
+		},
+		// fsck's unexpected-error path prints no report even for some real
+		// damage (cmd/dolt/commands/fsck.go: commit DAG walking failed), so the
+		// refusal warns against pushing around a manual fsck that fails so too.
+		{
+			name:         "unexpected-error output → ErrFSCKFailed warning against a direct dolt push",
+			runErr:       errors.New("exit status 1"),
+			output:       "commit DAG walking failed: store root chunk is empty",
+			wantIs:       ErrFSCKFailed,
+			wantIsNot:    []error{ErrDanglingReference, ErrFSCKTimeout},
+			wantContains: "if it keeps failing there without a report, do not bypass the check with a direct `dolt push`",
+		},
 	}
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := classifyFSCKFailure(tc.parentErr, tc.fsckErr, tc.runErr, tc.output)
+			dir := tc.dir
+			if dir == "" {
+				dir = fsckTestDBDir
+			}
+			err := classifyFSCKFailure(tc.parentErr, tc.fsckErr, tc.runErr, dir, tc.output)
 
 			if tc.wantNil {
 				if err != nil {
@@ -514,7 +550,7 @@ func TestClassifyFSCKFailure_FindingWins(t *testing.T) {
 				if c.extra != "" {
 					output = c.extra + "\n" + output
 				}
-				err := classifyFSCKFailure(c.parentErr, c.fsckErr, nil, output)
+				err := classifyFSCKFailure(c.parentErr, c.fsckErr, nil, fsckTestDBDir, output)
 				if !errors.Is(err, ErrDanglingReference) {
 					t.Fatalf("errors.Is(err, ErrDanglingReference) = false; err = %v", err)
 				}
@@ -568,7 +604,7 @@ func TestClassifyFSCKFailure_NonFindingKeepsKind(t *testing.T) {
 			}
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
-				err := classifyFSCKFailure(tc.parentErr, tc.fsckErr, nil, output)
+				err := classifyFSCKFailure(tc.parentErr, tc.fsckErr, nil, fsckTestDBDir, output)
 				if tc.wantNil {
 					if err != nil {
 						t.Fatalf("want nil (skip), got %v", err)
@@ -683,8 +719,8 @@ func TestFsckOutputInterrupted(t *testing.T) {
 func TestClassifyFSCKFailure_CallerVsOwnTimeout(t *testing.T) {
 	t.Parallel()
 
-	callerErr := classifyFSCKFailure(context.DeadlineExceeded, context.DeadlineExceeded, nil, "")
-	ownErr := classifyFSCKFailure(nil, context.DeadlineExceeded, nil, "")
+	callerErr := classifyFSCKFailure(context.DeadlineExceeded, context.DeadlineExceeded, nil, fsckTestDBDir, "")
+	ownErr := classifyFSCKFailure(nil, context.DeadlineExceeded, nil, fsckTestDBDir, "")
 
 	if callerErr == nil || ownErr == nil {
 		t.Fatal("both cases must return non-nil errors")
