@@ -208,6 +208,13 @@ filegroup(
     visibility = ["//internal/storage:__subpackages__"],
 )
 
+# The drift refusal's recovery URL, pinned against the published runbook by
+# //test/docsync.
+exports_files(
+    ["encoding_drift.go"],
+    visibility = ["//test/docsync:__pkg__"],
+)
+
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(

@@ -219,6 +219,14 @@ database, and `"rows_corrected"` greater than zero means the database was hit.
 It works in embedded, server and proxied-server mode, so run it even where
 `bd doctor` cannot check blocked state.
 
+#### If a migration stops on a value it cannot read
+
+A database written under an older Dolt can hold values the new engine cannot
+decode. A migration that hits one stops and bd refuses with `stopped: a stored
+value could not be read`, naming the migration and the engine symptom. Make no
+further writes, preserve a full copy of the store, and follow
+[Schema-Encoding Drift](/recovery/schema-encoding-drift).
+
 #### Upgrade every client that shares a store, together
 
 A bd binary refuses a database migrated past the schema it knows, rather than
