@@ -2073,7 +2073,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			bootstrapProjectID = cfg.ProjectID
 
 			// Create config.yaml template (prefix is stored in DB, not config.yaml)
-			if err := createConfigYaml(beadsDir, false, ""); err != nil {
+			if err := createConfigYaml(beadsDir); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to create config.yaml: %v\n", err)
 				// Non-fatal - continue anyway
 			}

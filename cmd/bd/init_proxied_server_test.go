@@ -485,7 +485,7 @@ func TestComposeProxiedServerMetadataJSON_KeepsExistingMetadata(t *testing.T) {
 // where there is none, as createConfigYaml does on the direct route.
 func TestProxiedInitConfigYAMLBody(t *testing.T) {
 	beadsDir := t.TempDir()
-	assert.Equal(t, renderInitConfigYAML("", false), proxiedInitConfigYAMLBody(beadsDir))
+	assert.Equal(t, renderInitConfigYAML(), proxiedInitConfigYAMLBody(beadsDir))
 
 	require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("output:\n  title-length: 40\n"), 0o644))
 	assert.Nil(t, proxiedInitConfigYAMLBody(beadsDir), "an existing config.yaml must not be overwritten")
