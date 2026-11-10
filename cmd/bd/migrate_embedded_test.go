@@ -312,6 +312,46 @@ func TestEmbeddedMigrate(t *testing.T) {
 		}
 	})
 
+	// #7283: the migrating verb grants consent before the main store opens,
+	// so the open applies the pending migration and the command's own
+	// ApplySchemaMigrations pass counts zero. The run that migrated used to
+	// report current/0; it must report applied/1, and a second invocation on
+	// the now-current database goes back to current/0.
+	t.Run("migrate_schema_reports_migrations_applied_by_open", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "mo")
+		setMigrateJSONConfigFalse(t, beadsDir)
+		regressEmbeddedSchemaCursor(t, beadsDir, "mo")
+		run := func() map[string]interface{} {
+			t.Helper()
+			out := bdMigrateJSON(t, bd, dir, "schema")
+			var result map[string]interface{}
+			if err := json.Unmarshal([]byte(out), &result); err != nil {
+				t.Fatalf("bd --format=json migrate schema returned invalid JSON: %v\n%s", err, out)
+			}
+			for _, key := range []string{"status", "applied", "latest_version"} {
+				if _, ok := result[key]; !ok {
+					t.Errorf("migrate schema JSON missing %q: %v", key, result)
+				}
+			}
+			return result
+		}
+
+		first := run()
+		if got, ok := first["status"].(string); !ok || got != "applied" {
+			t.Errorf("first migrate schema status = %#v, want applied (gastownhall/beads#7283)", first["status"])
+		}
+		if got, ok := first["applied"].(float64); !ok || got != 1 {
+			t.Errorf("first migrate schema applied = %#v, want 1 (gastownhall/beads#7283)", first["applied"])
+		}
+		second := run()
+		if got, ok := second["status"].(string); !ok || got != "current" {
+			t.Errorf("second migrate schema status = %#v, want current", second["status"])
+		}
+		if got, ok := second["applied"].(float64); !ok || got != 0 {
+			t.Errorf("second migrate schema applied = %#v, want 0", second["applied"])
+		}
+	})
+
 	t.Run("migrate_sync_persists_and_noops", func(t *testing.T) {
 		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ms")
 		setMigrateJSONConfigFalse(t, beadsDir)
