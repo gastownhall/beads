@@ -162,3 +162,45 @@ func TestCommitAllReportsTrackedTableSkippedByIgnorePattern(t *testing.T) {
 	}
 	assertIssuesLeftInWorkingSet(t, ctx, te, id)
 }
+
+// TestCommitAllReportsPartialCommit covers the partial case: Dolt commits the
+// stageable config change and skips the ignored issues change. CommitAll must
+// report both the commit and the residue, not either alone.
+func TestCommitAllReportsPartialCommit(t *testing.T) {
+	ctx := t.Context()
+	te := newTestEnv(t, "pc")
+	id := seedIgnoredIssue(t, ctx, te)
+	te.exec(t, ctx, "INSERT INTO config (`key`, value) VALUES ('test.partial-commit', 'v1')")
+	headBefore, err := te.store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit: %v", err)
+	}
+
+	committed, err := te.store.CommitAll(ctx, "test: partial commit")
+	if !committed {
+		t.Fatalf("CommitAll committed = false, want true: config was committable (err=%v)", err)
+	}
+	requireUncommittedChanges(t, err, "issues", true)
+	if !strings.Contains(err.Error(), "a commit was created") {
+		t.Errorf("CommitAll error = %q, want it to say a commit was created", err)
+	}
+
+	headAfter, err := te.store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit: %v", err)
+	}
+	if headAfter == headBefore {
+		t.Fatal("HEAD did not move although the config change was committable")
+	}
+	var headValue string
+	te.queryScalar(t, ctx, "SELECT value FROM config AS OF 'HEAD' WHERE `key` = 'test.partial-commit'", nil, &headValue)
+	if headValue != "v1" {
+		t.Fatalf("config at HEAD = %q, want v1", headValue)
+	}
+	var configDirty int
+	te.queryScalar(t, ctx, "SELECT COUNT(*) FROM dolt_status WHERE table_name = 'config'", nil, &configDirty)
+	if configDirty != 0 {
+		t.Fatalf("config still dirty after the partial commit (%d dolt_status rows)", configDirty)
+	}
+	assertIssuesLeftInWorkingSet(t, ctx, te, id)
+}
