@@ -1670,27 +1670,41 @@ func TestHooksList_RelocatedHooksPath(t *testing.T) {
 // path.
 func strandedHooksRepo(t *testing.T) (repoDir, stale string) {
 	t.Helper()
+	repoDir, stale, _ = strandedHooksRepoLayout(t, ".beads/hooks")
+	return repoDir, stale
+}
+
+// strandedHooksRepoLayout is strandedHooksRepo for either beads layout
+// (".beads/hooks" or ".beads-hooks"). It returns the repo root, the stale
+// configured value, and the current hooks directory.
+func strandedHooksRepoLayout(t *testing.T, layout string) (repoDir, stale, current string) {
+	t.Helper()
 	tmpDir := newGitRepo(t)
-	beadsHooks := filepath.Join(tmpDir, ".beads", "hooks")
-	if err := os.MkdirAll(beadsHooks, 0750); err != nil {
-		t.Fatalf("mkdir .beads/hooks: %v", err)
+	switch layout {
+	case ".beads-hooks":
+		current = filepath.Join(tmpDir, ".beads-hooks")
+	default:
+		current = filepath.Join(tmpDir, ".beads", "hooks")
+	}
+	if err := os.MkdirAll(current, 0750); err != nil {
+		t.Fatalf("mkdir %s: %v", current, err)
 	}
 	for _, name := range managedHookNames {
 		body := "#!/bin/sh\n" + shimVersionPrefix + Version + "\nexec bd hooks run " + name + " \"$@\"\n"
-		if err := os.WriteFile(filepath.Join(beadsHooks, name), []byte(body), 0755); err != nil {
+		if err := os.WriteFile(filepath.Join(current, name), []byte(body), 0755); err != nil {
 			t.Fatalf("write hook %s: %v", name, err)
 		}
 	}
 	// The old location: the same layout under a directory that no longer
 	// exists anywhere on disk.
-	stale = filepath.Join(t.TempDir(), "moved-away", ".beads", "hooks")
+	stale = filepath.Join(t.TempDir(), "moved-away", layout)
 	cmd := exec.Command("git", "config", "core.hooksPath", stale)
 	cmd.Dir = tmpDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git config core.hooksPath: %v: %s", err, out)
 	}
 	resetRepoCachesForTest(t)
-	return tmpDir, stale
+	return tmpDir, stale, current
 }
 
 // TestInspectHooksPath_Classification pins the shared read-only inspection
@@ -1763,4 +1777,69 @@ func TestInspectHooksPath_Classification(t *testing.T) {
 			}
 		})
 	})
+}
+
+// TestInstallHooks_RelocatedHooksPath pins AC-4 of the GH#5853 design: a
+// plain hook installation (and the plain reinstall bd config apply uses)
+// against an eligible stranded core.hooksPath refreshes hooks at the
+// validated current target and repoints the configuration — without
+// recreating the stale directory and without discarding user content outside
+// the beads-managed section.
+func TestInstallHooks_RelocatedHooksPath(t *testing.T) {
+	t.Run("plain installer preserves user content and repoints", func(t *testing.T) {
+		tmpDir, stale, current := strandedHooksRepoLayout(t, ".beads/hooks")
+		// User-owned content in the hook at the current target, outside any
+		// beads section: the install must preserve it byte-for-byte while
+		// injecting the managed section.
+		userContent := "#!/bin/sh\necho user pre-commit content\nexec ./pre-commit-framework\n"
+		if err := os.WriteFile(filepath.Join(current, "pre-commit"), []byte(userContent), 0755); err != nil {
+			t.Fatalf("write user pre-commit: %v", err)
+		}
+		runInDir(t, tmpDir, func() {
+			if err := installHooksWithOptions(managedHookNames, false, false, false, false); err != nil {
+				t.Fatalf("installHooksWithOptions failed: %v", err)
+			}
+		})
+		if got, err := execGitConfig(tmpDir, "core.hooksPath"); err != nil || got != current {
+			t.Errorf("core.hooksPath = %q (err=%v) after install, want repointed to %q", got, err, current)
+		}
+		if _, err := os.Stat(stale); !os.IsNotExist(err) {
+			t.Errorf("the stale directory %s must not be recreated (stat err=%v)", stale, err)
+		}
+		body, err := os.ReadFile(filepath.Join(current, "pre-commit"))
+		if err != nil {
+			t.Fatalf("read pre-commit: %v", err)
+		}
+		if !strings.Contains(string(body), "user pre-commit content") {
+			t.Errorf("user content outside the beads section was discarded; pre-commit:\n%s", body)
+		}
+		if !strings.Contains(string(body), hookSectionBeginPrefix) {
+			t.Errorf("beads section missing from pre-commit:\n%s", body)
+		}
+	})
+
+	t.Run("bd config apply reinstall path", func(t *testing.T) {
+		tmpDir, stale, current := strandedHooksRepoLayout(t, ".beads/hooks")
+		runInDir(t, tmpDir, func() {
+			result := applyHooks(true, false)
+			if result.Status != applyStatusApplied {
+				t.Fatalf("applyHooks status = %q (%s), want %q", result.Status, result.Message, applyStatusApplied)
+			}
+		})
+		if got, err := execGitConfig(tmpDir, "core.hooksPath"); err != nil || got != current {
+			t.Errorf("core.hooksPath = %q (err=%v) after config apply, want %q", got, err, current)
+		}
+		if _, err := os.Stat(stale); !os.IsNotExist(err) {
+			t.Errorf("the stale directory %s must not be recreated (stat err=%v)", stale, err)
+		}
+	})
+}
+
+// execGitConfig reads a git config value for the repository at dir.
+func execGitConfig(dir, key string) (string, error) {
+	out, err := exec.Command("git", "-C", dir, "config", "--get", key).Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }

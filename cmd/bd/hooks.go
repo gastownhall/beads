@@ -1184,6 +1184,11 @@ func installHooksWithContext(hookNames []string, force, shared, chain, beadsHook
 //nolint:unparam // force and chain remain accepted compatibility no-ops
 func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, selected *initHooksContext) error {
 	var hooksDir string
+	// relocate marks a plain installation redirected from an eligible
+	// stranded core.hooksPath (GH#5853): the configuration is repointed to the
+	// validated current target through the guarded repair after the hooks are
+	// installed there.
+	var relocate bool
 	if selected != nil {
 		hooksDir = selected.paths.HooksDir
 		if beadsHooks {
@@ -1193,6 +1198,14 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 			hooksDir = filepath.Join(selected.beadsDir, "hooks")
 		} else if shared {
 			hooksDir = filepath.Join(selected.paths.MainRepoRoot, ".beads-hooks")
+		} else {
+			var err error
+			hooksDir, relocate, err = plainHooksInstallDestination(
+				doctor.InspectHooksPathAt(selected.paths.RepoRoot, selected.paths.MainRepoRoot,
+					selectedStorageHooksDir(selected), selected.env), hooksDir)
+			if err != nil {
+				return err
+			}
 		}
 	} else if beadsHooks {
 		// Use .beads/hooks/ directory (preferred for Dolt backend)
@@ -1212,6 +1225,10 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		// Use common git directory for hooks (shared across worktrees)
 		var err error
 		hooksDir, err = git.GetGitHooksDir()
+		if err != nil {
+			return err
+		}
+		hooksDir, relocate, err = plainHooksInstallDestination(doctor.InspectHooksPath(), hooksDir)
 		if err != nil {
 			return err
 		}
@@ -1333,7 +1350,54 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		}
 	}
 
+	// GH#5853: a plain installation redirected from an eligible stranded
+	// core.hooksPath repoints the configuration to where the hooks were just
+	// installed, through the guarded repair that re-reads and revalidates
+	// before writing.
+	if relocate {
+		if selected != nil {
+			if _, err := doctor.FixRelocatedHooksPathAt(selected.paths.RepoRoot, selected.paths.MainRepoRoot,
+				selectedStorageHooksDir(selected), selected.env); err != nil {
+				return fmt.Errorf("failed to repoint core.hooksPath: %w", err)
+			}
+		} else {
+			if err := doctor.FixHooksPath(); err != nil {
+				return fmt.Errorf("failed to repoint core.hooksPath: %w", err)
+			}
+		}
+	}
+
 	return nil
+}
+
+// plainHooksInstallDestination applies the GH#5853 relocation decision for a
+// plain hook installation whose configured core.hooksPath may name a
+// directory that no longer exists. The decision must run before the
+// destination is created, preserved into, or written: an eligible stranded
+// path redirects the installation to the validated current target (the
+// configuration is repointed after the hooks are installed), and an
+// ineligible missing destination refuses with an actionable diagnostic
+// instead of recreating the stale directory. The current beads-managed
+// location (GH#4440's deleted-in-place case) keeps today's recreate behavior:
+// recreating it is the intended repair there.
+func plainHooksInstallDestination(st doctor.HooksPathStatus, hooksDir string) (string, bool, error) {
+	switch st.State {
+	case doctor.HooksPathRelocated:
+		return st.Target, true, nil
+	case doctor.HooksPathMissing:
+		return "", false, fmt.Errorf("core.hooksPath points at %s, which does not exist, so git runs no hooks; bd will not recreate that directory (%s). Restore the directory or correct core.hooksPath manually", st.Resolved, st.Reason)
+	}
+	return hooksDir, false, nil
+}
+
+// selectedStorageHooksDir is the effective storage hooks directory for an
+// explicitly selected install context: the selected workspace's storage when
+// it has one, and otherwise the ambient resolution the guarded repairs use.
+func selectedStorageHooksDir(selected *initHooksContext) string {
+	if selected.beadsDir != "" {
+		return filepath.Join(selected.beadsDir, "hooks")
+	}
+	return doctor.BeadsManagedStorageHooksDir()
 }
 
 // preservePreexistingHooks copies non-beads hooks from the currently effective
