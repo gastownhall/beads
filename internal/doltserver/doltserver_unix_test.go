@@ -297,6 +297,35 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 			want:     []int{114},
 		},
 		{
+			// State letters across Linux, macOS and the BSDs, plus the
+			// empty-state macOS form, all leave a live row eligible.
+			name: "live state codes are accepted across platforms",
+			snapshot: "301 S /usr/local/bin/dolt sql-server\n" +
+				"302 Ss /usr/local/bin/dolt sql-server\n" +
+				"303 Sl /usr/local/bin/dolt sql-server\n" +
+				"304 R+ /usr/local/bin/dolt sql-server\n" +
+				"305 D /usr/local/bin/dolt sql-server\n" +
+				"306 I /usr/local/bin/dolt sql-server\n" +
+				"307 U /usr/local/bin/dolt sql-server\n" +
+				"308 t /usr/local/bin/dolt sql-server\n" +
+				"309 L /usr/local/bin/dolt sql-server\n" +
+				"310 W /usr/local/bin/dolt sql-server\n" +
+				"311 SC /usr/local/bin/dolt sql-server\n" +
+				"312 SJ /usr/local/bin/dolt sql-server\n" +
+				"313 SX /usr/local/bin/dolt sql-server\n" +
+				"314 SsJ /usr/local/bin/dolt sql-server\n" +
+				"315 /usr/local/bin/dolt sql-server\n",
+			want: []int{301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 311, 312, 313, 314, 315},
+		},
+		{
+			// The zombie/dead exclusion reads the first field after the PID
+			// before the optional state is consumed, so an unrecognized
+			// modifier such as a synthetic Zp cannot turn a dead row into a
+			// match.
+			name:     "dead-state modifiers are excluded, recognized or not",
+			snapshot: "316 Zs dolt sql-server\n317 Zp dolt sql-server\n318 Xp dolt sql-server\n",
+		},
+		{
 			name: "malformed and invalid rows are rejected",
 			snapshot: "\n" +
 				"not-a-pid S dolt sql-server\n" +
