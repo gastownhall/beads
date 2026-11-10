@@ -351,3 +351,80 @@ func TestShowDirectRoute_MissIdentityInvariant(t *testing.T) {
 		}
 	}
 }
+
+// refsErrStore is showMissStubStore whose lookups fail with a plain error
+// instead of not-found: --refs/--children print that resolve error and must
+// never decorate it with a miss hint.
+type refsErrStore struct {
+	showMissStubStore
+}
+
+func (refsErrStore) SearchIssueIDs(context.Context, string, types.IssueFilter) ([]string, error) {
+	return nil, errors.New("store exploded")
+}
+
+// TestShowRefsChildren_ForeignPrefixMissHint pins GH#5259 on show's
+// --refs/--children routes. They resolve through the same cascade and print
+// their own "Error resolving <id>" line for a miss, which reads as "the
+// issue does not exist" — the same wrong claim the direct route made. A
+// foreign-prefix miss no route named must gain the limited-search hint after
+// that line, while an own-prefix miss and a non-not-found resolve error stay
+// exactly as they were (no hint): the deletion/history hint is the direct
+// route's fallback and does not belong here.
+func TestShowRefsChildren_ForeignPrefixMissHint(t *testing.T) {
+	ensureCleanGlobalState(t)
+	saveAndRestoreGlobals(t)
+	t.Setenv("BEADS_DIR", t.TempDir())
+	oldCtx, oldJSON, oldProxied := rootCtx, jsonOutput, proxiedServerMode
+	t.Cleanup(func() { rootCtx, jsonOutput, proxiedServerMode = oldCtx, oldJSON, oldProxied })
+	ctx := context.Background()
+	store, rootCtx, jsonOutput, proxiedServerMode = showMissStubStore{}, ctx, false, false
+	dbPath = filepath.Join(foreignPrefixTown(t, ""), "dolt")
+
+	run := func(t *testing.T, fn func([]string) error, id string) string {
+		t.Helper()
+		var err error
+		stderr := captureStderr(t, func() { err = fn([]string{id}) })
+		if err != nil {
+			t.Fatalf("--refs/--children %s: %v, want the collect-nothing success exit a miss batch already returns", id, err)
+		}
+		if !strings.Contains(stderr, "Error resolving "+id) {
+			t.Fatalf("--refs/--children %s: stderr = %q, want the existing Error resolving line", id, stderr)
+		}
+		return stderr
+	}
+
+	for _, route := range []struct {
+		name string
+		fn   func([]string) error
+	}{
+		{"refs", func(ids []string) error { return showIssueRefs(ctx, ids, false) }},
+		{"children", func(ids []string) error { return showIssueChildren(ctx, ids, false, false) }},
+	} {
+		t.Run(route.name+" foreign prefix", func(t *testing.T) {
+			stderr := run(t, route.fn, "herald-x7k")
+			for _, want := range []string{`prefix "herald"`, "does not mean the issue is absent"} {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("--%s herald-x7k: stderr missing %q; the miss reads as absence although no other store was searched\nstderr: %s", route.name, want, stderr)
+				}
+			}
+		})
+		t.Run(route.name+" own prefix stays unhinted", func(t *testing.T) {
+			stderr := run(t, route.fn, "openclaw-zz9")
+			if strings.Contains(stderr, "Hint:") {
+				t.Errorf("--%s openclaw-zz9: stderr gained a hint; own-prefix misses keep the bare Error resolving line\nstderr: %s", route.name, stderr)
+			}
+		})
+	}
+
+	t.Run("non-not-found resolve error stays unhinted", func(t *testing.T) {
+		store = refsErrStore{}
+		stderr := run(t, func(ids []string) error { return showIssueRefs(ctx, ids, false) }, "openclaw-zz9")
+		if !strings.Contains(stderr, "store exploded") {
+			t.Fatalf("refs on a failing store: stderr = %q, want the store error in the resolve line", stderr)
+		}
+		if strings.Contains(stderr, "Hint:") {
+			t.Errorf("refs on a failing store: stderr gained a hint; only a not-found miss is a miss hint's to explain\nstderr: %s", stderr)
+		}
+	})
+}

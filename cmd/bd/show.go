@@ -54,6 +54,20 @@ func showNotFoundHintIn(ctx context.Context, s prefixConfigReader, beadsDir, id 
 	return showNotFoundHint(id)
 }
 
+// showForeignPrefixHint prints the limited-search hint only when the miss
+// classifier qualifies the id — a foreign prefix no route named, with no
+// routed tier reached — and prints nothing otherwise. show's --refs and
+// --children routes lead their misses with their own "Error resolving <id>"
+// line rather than show's "Issue <id> not found", so they call this instead
+// of showNotFoundHintIn: the deletion/history hint is the direct route's
+// fallback for its unclassified misses, not something to append to a
+// resolve error (GH#5259).
+func showForeignPrefixHint(ctx context.Context, s prefixConfigReader, beadsDir, id string, routedLookup bool) {
+	if storePrefix, idPrefix, ok := unroutedForeignPrefix(ctx, s, beadsDir, id, routedLookup); ok {
+		fmt.Fprintf(os.Stderr, "Hint: %s\n", foreignPrefixMissHint(storePrefix, idPrefix, beadsDir))
+	}
+}
+
 // unroutedForeignPrefix reports the store's issue_prefix and the id's prefix
 // when id carries a prefix the store does not issue and no route names it. It
 // answers false whenever it cannot tell: no store, no configured

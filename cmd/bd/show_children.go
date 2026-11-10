@@ -39,11 +39,17 @@ func showIssueChildren(ctx context.Context, args []string, jsonOut bool, shortMo
 		return nil
 	}
 
-	// Process each arg via routing-aware resolution
+	// Process each arg via routing-aware resolution. The scoped variant also
+	// reports whether a routed tier reached (or may have reached) another
+	// store's lookup, so the miss hint below cannot claim a store that was
+	// searched was not (GH#5259).
 	for _, id := range args {
-		result, err := resolveAndGetIssueWithRouting(ctx, store, id)
+		result, routedLookup, err := resolveAndGetIssueWithRoutingSearchScope(ctx, store, id)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error resolving %s: %s\n", id, remedy.PrintedMessage(err))
+			if isNotFoundErr(err) {
+				showForeignPrefixHint(ctx, store, resolveCommandBeadsDir(dbPath), id, routedLookup)
+			}
 			continue
 		}
 		if result == nil || result.Issue == nil {
@@ -51,6 +57,7 @@ func showIssueChildren(ctx context.Context, args []string, jsonOut bool, shortMo
 				result.Close()
 			}
 			fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+			showForeignPrefixHint(ctx, store, resolveCommandBeadsDir(dbPath), id, routedLookup)
 			continue
 		}
 		if err := processIssue(result.ResolvedID, result.Store); err != nil {
