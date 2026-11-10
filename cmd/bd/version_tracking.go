@@ -201,35 +201,41 @@ func maybeShowUpgradeNotification() {
 // IMPORTANT: This must be called BEFORE opening the database to avoid opening DB twice.
 //
 // beadsDir is the path to the .beads directory.
-func autoMigrateOnVersionBump(beadsDir string) {
+//
+// It returns how many schema migrations its writable open applied, which
+// happens only when the command carries migration consent (`bd migrate
+// schema`); that command reports them as its own (gastownhall/beads#7283).
+// The count stands once the open has succeeded, even when the version
+// markers then cannot be reconciled: the migrations have already run.
+func autoMigrateOnVersionBump(beadsDir string) int {
 	// Only migrate if version upgrade was detected
 	if !versionUpgradeDetected {
-		return
+		return 0
 	}
 
 	// Validate beadsDir
 	if beadsDir == "" {
 		debug.Logf("auto-migrate: skipping migration, no beads directory")
-		return
+		return 0
 	}
 
 	// Load config to determine the correct database path for this backend
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		debug.Logf("auto-migrate: failed to load config: %v", err)
-		return
+		return 0
 	}
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
 	}
 	if cfg.GetBackend() != configfile.BackendDolt {
 		debug.Logf("auto-migrate: skipping Dolt migration for backend %q", cfg.GetBackend())
-		return
+		return 0
 	}
 
 	if cfg.IsDoltProxiedServerMode() {
 		debug.Logf("auto-migrate: skipping embedded migration, proxied-server handled after UOW provider init")
-		return
+		return 0
 	}
 
 	// Check if database exists at the backend-appropriate path
@@ -237,7 +243,7 @@ func autoMigrateOnVersionBump(beadsDir string) {
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		// No database - nothing to migrate
 		debug.Logf("auto-migrate: skipping migration, database does not exist: %s", dbPath)
-		return
+		return 0
 	}
 
 	recoverPreV56IfNeeded(previousVersion, dbPath)
@@ -264,7 +270,7 @@ func autoMigrateOnVersionBump(beadsDir string) {
 		_ = roStore.Close()
 		if probeErr == nil && recorded == Version {
 			debug.Logf("auto-migrate: database already at version %s (ro probe)", Version)
-			return
+			return 0
 		}
 	}
 
@@ -273,8 +279,9 @@ func autoMigrateOnVersionBump(beadsDir string) {
 		// Failed to open database - skip migration
 		debug.Logf("auto-migrate: failed to open database: %v", err)
 		noticeSharedMigrateRefusal(err)
-		return
+		return 0
 	}
+	applied := store.MigrationsAppliedAtOpen()
 	defer func() {
 		if err := store.Close(); err != nil {
 			debug.Logf("auto-migrate: warning: failed to close database: %v", err)
@@ -290,12 +297,12 @@ func autoMigrateOnVersionBump(beadsDir string) {
 	reconciler, err := store.VersionReconciler()
 	if err != nil {
 		debug.Logf("auto-migrate: version markers unavailable: %v", err)
-		return
+		return applied
 	}
 	result, err := reconciler.ReconcileVersion(ctx, issueops.VersionReconcileRequest{CLIVersion: Version})
 	if err != nil {
 		debug.Logf("auto-migrate: failed to reconcile database version: %v", err)
-		return
+		return applied
 	}
 
 	switch {
@@ -306,6 +313,7 @@ func autoMigrateOnVersionBump(beadsDir string) {
 	default:
 		debug.Logf("auto-migrate: database already at version %s", Version)
 	}
+	return applied
 }
 
 // recoverPreV56IfNeeded rebuilds a Dolt database left behind by the pre-0.56

@@ -653,8 +653,10 @@ func handleSchemaMigrate() error {
 	}
 	// This verb opens with migration consent, so on a shared server the
 	// store open applies the pending migrations and the pass above finds
-	// nothing left (gastownhall/beads#7283). Report the run's whole work.
-	applied += migrator.MigrationsAppliedAtOpen()
+	// nothing left (gastownhall/beads#7283). The version-bump
+	// reconciliation's own open, which the root pre-run closes before the
+	// main one, can get there first. Report the run's whole work.
+	applied += migrator.MigrationsAppliedAtOpen() + versionBumpMigrationsApplied
 
 	latest := schema.LatestVersion()
 	// Stamp the version markers the refused version-bump reconciliation

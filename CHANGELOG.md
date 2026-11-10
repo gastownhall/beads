@@ -1226,6 +1226,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd migrate schema` reports the migrations it applies. Its consent lets
+  the store open (or the version-bump check before it) apply the pending
+  migrations, so on a shared server and in embedded mode the run that
+  migrated printed `✓ Schema already at v<N>` (`"status": "current"`,
+  `"applied": 0` with `--json`). It also skipped recording the workspace
+  version, so `bd doctor` and the git-hook health check kept reporting a
+  version mismatch. The run now prints `✓ Applied <n> schema migration(s)`
+  and records the version on every successful run; a run that only records
+  the version does not commit other pending changes (#7283, reported by
+  @csells).
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
